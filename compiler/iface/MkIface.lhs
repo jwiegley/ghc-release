@@ -109,8 +109,8 @@ import Data.List
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.IORef
+import System.Directory
 import System.FilePath
-import System.Directory (getModificationTime)
 \end{code}
 
 
@@ -133,32 +133,35 @@ mkIface :: HscEnv
                                 --          to write it
 
 mkIface hsc_env maybe_old_fingerprint mod_details
-         ModGuts{     mg_module     = this_mod,
-                      mg_boot       = is_boot,
-                      mg_used_names = used_names,
-                      mg_used_th    = used_th,
-                      mg_deps       = deps,
-                      mg_dir_imps   = dir_imp_mods,
-                      mg_rdr_env    = rdr_env,
-                      mg_fix_env    = fix_env,
-                      mg_warns      = warns,
-                      mg_hpc_info   = hpc_info,
-                      mg_trust_pkg  = self_trust,
+         ModGuts{     mg_module       = this_mod,
+                      mg_boot         = is_boot,
+                      mg_used_names   = used_names,
+                      mg_used_th      = used_th,
+                      mg_deps         = deps,
+                      mg_dir_imps     = dir_imp_mods,
+                      mg_rdr_env      = rdr_env,
+                      mg_fix_env      = fix_env,
+                      mg_warns        = warns,
+                      mg_hpc_info     = hpc_info,
+                      mg_safe_haskell = safe_mode,
+                      mg_trust_pkg    = self_trust,
                       mg_dependent_files = dependent_files
                     }
         = mkIface_ hsc_env maybe_old_fingerprint
                    this_mod is_boot used_names used_th deps rdr_env fix_env
-                   warns hpc_info dir_imp_mods self_trust dependent_files mod_details
+                   warns hpc_info dir_imp_mods self_trust dependent_files
+                   safe_mode mod_details
 
 -- | make an interface from the results of typechecking only.  Useful
 -- for non-optimising compilation, or where we aren't generating any
 -- object code at all ('HscNothing').
 mkIfaceTc :: HscEnv
           -> Maybe Fingerprint  -- The old fingerprint, if we have it
+          -> SafeHaskellMode    -- The safe haskell mode
           -> ModDetails         -- gotten from mkBootModDetails, probably
           -> TcGblEnv           -- Usages, deprecations, etc
           -> IO (Messages, Maybe (ModIface, Bool))
-mkIfaceTc hsc_env maybe_old_fingerprint mod_details
+mkIfaceTc hsc_env maybe_old_fingerprint safe_mode mod_details
   tc_result@TcGblEnv{ tcg_mod = this_mod,
                       tcg_src = hsc_src,
                       tcg_imports = imports,
@@ -178,7 +181,7 @@ mkIfaceTc hsc_env maybe_old_fingerprint mod_details
           mkIface_ hsc_env maybe_old_fingerprint
                    this_mod (isHsBoot hsc_src) used_names used_th deps rdr_env
                    fix_env warns hpc_info (imp_mods imports)
-                   (imp_trust_own_pkg imports) dep_files mod_details
+                   (imp_trust_own_pkg imports) dep_files safe_mode mod_details
         
 
 mkUsedNames :: TcGblEnv -> NameSet
@@ -224,11 +227,12 @@ mkIface_ :: HscEnv -> Maybe Fingerprint -> Module -> IsBootInterface
          -> NameEnv FixItem -> Warnings -> HpcInfo
          -> ImportedMods -> Bool
          -> [FilePath]
+         -> SafeHaskellMode
          -> ModDetails
          -> IO (Messages, Maybe (ModIface, Bool))
 mkIface_ hsc_env maybe_old_fingerprint 
          this_mod is_boot used_names used_th deps rdr_env fix_env src_warns
-         hpc_info dir_imp_mods pkg_trust_req dependent_files
+         hpc_info dir_imp_mods pkg_trust_req dependent_files safe_mode
          ModDetails{  md_insts     = insts, 
                       md_fam_insts = fam_insts,
                       md_rules     = rules,
@@ -242,7 +246,6 @@ mkIface_ hsc_env maybe_old_fingerprint
 --      to expose in the interface
 
   = do  { usages  <- mkUsageInfo hsc_env this_mod dir_imp_mods used_names dependent_files
-        ; safeInf <- hscGetSafeInf hsc_env
 
         ; let   { entities = typeEnvElts type_env ;
                   decls  = [ tyThingToIfaceDecl entity
@@ -261,12 +264,7 @@ mkIface_ hsc_env maybe_old_fingerprint
                 ; iface_insts = map instanceToIfaceInst insts
                 ; iface_fam_insts = map famInstToIfaceFamInst fam_insts
                 ; iface_vect_info = flattenVectInfo vect_info
-                -- Check if we are in Safe Inference mode but we failed to pass
-                -- the muster
-                ; safeMode    = if safeInferOn dflags && not safeInf
-                                    then Sf_None
-                                    else safeHaskell dflags
-                ; trust_info  = setSafeMode safeMode
+                ; trust_info  = setSafeMode safe_mode
 
                 ; intermediate_iface = ModIface { 
                         mi_module      = this_mod,
@@ -286,7 +284,7 @@ mkIface_ hsc_env maybe_old_fingerprint
                         mi_fixities    = fixities,
                         mi_warns       = warns,
                         mi_anns        = mkIfaceAnnotations anns,
-                        mi_globals     = Just rdr_env,
+                        mi_globals     = maybeGlobalRdrEnv rdr_env,
 
                         -- Left out deliberately: filled in by addFingerprints
                         mi_iface_hash  = fingerprint0,
@@ -343,7 +341,7 @@ mkIface_ hsc_env maybe_old_fingerprint
                 -- correctly.  This stems from the fact that the interface had
                 -- not changed, so addFingerprints returns the old ModIface
                 -- with the old GlobalRdrEnv (mi_globals).
-        ; let final_iface = new_iface{ mi_globals = Just rdr_env }
+        ; let final_iface = new_iface{ mi_globals = maybeGlobalRdrEnv rdr_env }
 
         ; return (errs_and_warns, Just (final_iface, no_change_at_all)) }}
   where
@@ -357,6 +355,17 @@ mkIface_ hsc_env maybe_old_fingerprint
      le_occ n1 n2 = nameOccName n1 <= nameOccName n2
 
      dflags = hsc_dflags hsc_env
+
+     -- We only fill in mi_globals if the module was compiled to byte
+     -- code.  Otherwise, the compiler may not have retained all the
+     -- top-level bindings and they won't be in the TypeEnv (see
+     -- Desugar.addExportFlagsAndRules).  The mi_globals field is used
+     -- by GHCi to decide whether the module has its full top-level
+     -- scope available.
+     maybeGlobalRdrEnv :: GlobalRdrEnv -> Maybe GlobalRdrEnv
+     maybeGlobalRdrEnv rdr_env
+         | targetRetainsAllBindings (hscTarget dflags) = Just rdr_env
+         | otherwise                                   = Nothing
 
      deliberatelyOmitted :: String -> a
      deliberatelyOmitted x = panic ("Deliberately omitted: " ++ x)
@@ -379,7 +388,7 @@ mkIface_ hsc_env maybe_old_fingerprint
 -----------------------------
 writeIfaceFile :: DynFlags -> ModLocation -> ModIface -> IO ()
 writeIfaceFile dflags location new_iface
-    = do createDirectoryHierarchy (takeDirectory hi_file_path)
+    = do createDirectoryIfMissing True (takeDirectory hi_file_path)
          writeBinIface dflags hi_file_path new_iface
     where hi_file_path = ml_hi_file location
 
@@ -583,7 +592,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
    --   - (some of) dflags
    -- it returns two hashes, one that shouldn't change
    -- the abi hash and one that should
-   flag_hash <- fingerprintDynFlags dflags putNameLiterally
+   flag_hash <- fingerprintDynFlags dflags this_mod putNameLiterally
 
    -- the ABI hash depends on:
    --   - decls
@@ -1208,7 +1217,9 @@ checkVersions hsc_env mod_summary iface
 checkFlagHash :: HscEnv -> ModIface -> IfG RecompileRequired
 checkFlagHash hsc_env iface = do
     let old_hash = mi_flag_hash iface
-    new_hash <- liftIO $ fingerprintDynFlags (hsc_dflags hsc_env) putNameLiterally
+    new_hash <- liftIO $ fingerprintDynFlags (hsc_dflags hsc_env)
+                                             (mi_module iface)
+                                             putNameLiterally
     case old_hash == new_hash of
         True  -> up_to_date (ptext $ sLit "Module flags unchanged")
         False -> out_of_date_hash (ptext $ sLit "  Module flags have changed")

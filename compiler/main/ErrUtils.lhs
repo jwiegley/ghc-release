@@ -7,6 +7,7 @@
 
 module ErrUtils (
         Message, mkLocMessage, printError, pprMessageBag, pprErrMsgBag,
+        pprErrMsgBagWithLoc,
         Severity(..),
 
         ErrMsg, WarnMsg,
@@ -40,6 +41,7 @@ import SrcLoc
 import DynFlags
 import StaticFlags      ( opt_ErrorSpans )
 
+import System.Directory
 import System.Exit      ( ExitCode(..), exitWith )
 import System.FilePath
 import Data.List
@@ -152,6 +154,15 @@ pprErrMsgBag bag
                errMsgExtraInfo = e,
                errMsgContext   = unqual } <- sortMsgBag bag ]
 
+pprErrMsgBagWithLoc :: Bag ErrMsg -> [SDoc]
+pprErrMsgBagWithLoc bag
+  = [ let style = mkErrStyle unqual
+      in withPprStyle style (mkLocMessage s (d $$ e))
+    | ErrMsg { errMsgSpans     = s:_,
+               errMsgShortDoc  = d,
+               errMsgExtraInfo = e,
+               errMsgContext   = unqual } <- sortMsgBag bag ]
+
 printMsgBag :: DynFlags -> Bag ErrMsg -> Severity -> IO ()
 printMsgBag dflags bag sev
   = sequence_ [ let style = mkErrStyle unqual
@@ -234,7 +245,7 @@ dumpSDoc dflags dflag hdr doc
                             mode = if append then AppendMode else WriteMode
                         when (not append) $
                             writeIORef gdref (Set.insert fileName gd)
-                        createDirectoryHierarchy (takeDirectory fileName)
+                        createDirectoryIfMissing True (takeDirectory fileName)
                         handle <- openFile fileName mode
                         hPrintDump handle doc
                         hClose handle

@@ -31,6 +31,7 @@ module DynFlags (
         DynFlags(..),
         RtsOptsEnabled(..),
         HscTarget(..), isObjectTarget, defaultObjectTarget,
+        targetRetainsAllBindings,
         GhcMode(..), isOneShot,
         GhcLink(..), isNoLink,
         PackageFlag(..),
@@ -44,6 +45,7 @@ module DynFlags (
         safeHaskellOn, safeImportsOn, safeLanguageOn, safeInferOn,
         packageTrustOn,
         safeDirectImpsReq, safeImplicitImpsReq,
+        unsafeFlags,
 
         -- ** System tool settings and locations
         Settings(..),
@@ -739,6 +741,17 @@ isObjectTarget HscAsm   = True
 isObjectTarget HscLlvm  = True
 isObjectTarget _        = False
 
+-- | Does this target retain *all* top-level bindings for a module,
+-- rather than just the exported bindings, in the TypeEnv and compiled
+-- code (if any)?  In interpreted mode we do this, so that GHCi can
+-- call functions inside a module.  In HscNothing mode we also do it,
+-- so that Haddock can get access to the GlobalRdrEnv for a module
+-- after typechecking it.
+targetRetainsAllBindings :: HscTarget -> Bool
+targetRetainsAllBindings HscInterpreted = True
+targetRetainsAllBindings HscNothing     = True
+targetRetainsAllBindings _              = False
+
 -- | The 'GhcMode' tells us whether we're doing multi-module
 -- compilation (controlled via the "GHC" API) or one-shot
 -- (single-module) compilation.  This makes a difference primarily to
@@ -1101,6 +1114,19 @@ combineSafeFlags a b | a == Sf_SafeInfered = return b
     where errm = "Incompatible Safe Haskell flags! ("
                     ++ showPpr a ++ ", " ++ showPpr b ++ ")"
 
+-- | A list of unsafe flags under Safe Haskell. Tuple elements are:
+--     * name of the flag
+--     * function to get srcspan that enabled the flag
+--     * function to test if the flag is on
+--     * function to turn the flag off
+unsafeFlags :: [(String, DynFlags -> SrcSpan, DynFlags -> Bool, DynFlags -> DynFlags)]
+unsafeFlags = [("-XGeneralizedNewtypeDeriving", newDerivOnLoc,
+                   xopt Opt_GeneralizedNewtypeDeriving,
+                   flip xopt_unset Opt_GeneralizedNewtypeDeriving),
+               ("-XTemplateHaskell", thOnLoc,
+                   xopt Opt_TemplateHaskell,
+                   flip xopt_unset Opt_TemplateHaskell)]
+
 -- | Retrieve the options corresponding to a particular @opt_*@ field in the correct order
 getOpts :: DynFlags             -- ^ 'DynFlags' to retrieve the options from
         -> (DynFlags -> [a])    -- ^ Relevant record accessor: one of the @opt_*@ accessors
@@ -1337,24 +1363,16 @@ safeFlagCheck cmdl dflags =
         -- TODO: Can we do better than this for inference?
         safeInfOk = not $ xopt Opt_OverlappingInstances dflags
 
-        (dflags', warns) = foldl check_method (dflags, []) bad_flags
+        (dflags', warns) = foldl check_method (dflags, []) unsafeFlags
 
         check_method (df, warns) (str,loc,test,fix)
-            | test df   = (apFix fix df, warns ++ safeFailure loc str)
+            | test df   = (apFix fix df, warns ++ safeFailure (loc dflags) str)
             | otherwise = (df, warns)
 
         apFix f = if safeInferOn dflags then id else f
 
         safeFailure loc str = [L loc $ "Warning: " ++ str ++ " is not allowed in"
                                       ++ " Safe Haskell; ignoring " ++ str]
-
-        bad_flags = [("-XGeneralizedNewtypeDeriving", newDerivOnLoc dflags,
-                         xopt Opt_GeneralizedNewtypeDeriving,
-                         flip xopt_unset Opt_GeneralizedNewtypeDeriving),
-                     ("-XTemplateHaskell", thOnLoc dflags,
-                         xopt Opt_TemplateHaskell,
-                         flip xopt_unset Opt_TemplateHaskell)]
-
 
 {- **********************************************************************
 %*                                                                      *

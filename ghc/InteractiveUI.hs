@@ -130,7 +130,7 @@ builtin_commands = [
   ("def",       keepGoing (defineMacro False),  completeExpression),
   ("def!",      keepGoing (defineMacro True),   completeExpression),
   ("delete",    keepGoing deleteCmd,            noCompletion),
-  ("edit",      keepGoing editFile,             completeFilename),
+  ("edit",      keepGoing' editFile,            completeFilename),
   ("etags",     keepGoing createETagsFileCmd,   completeFilename),
   ("force",     keepGoing forceCmd,             completeExpression),
   ("forward",   keepGoing forwardCmd,           noCompletion),
@@ -1030,15 +1030,16 @@ trySuccess act =
 -----------------------------------------------------------------------------
 -- :edit
 
-editFile :: String -> GHCi ()
+editFile :: String -> InputT GHCi ()
 editFile str =
-  do file <- if null str then chooseEditFile else return str
-     st <- getGHCiState
+  do file <- if null str then lift chooseEditFile else return str
+     st <- lift getGHCiState
      let cmd = editor st
      when (null cmd) 
        $ ghcError (CmdLineError "editor not set, use :set editor")
-     _ <- liftIO $ system (cmd ++ ' ':file)
-     return ()
+     code <- liftIO $ system (cmd ++ ' ':file)
+     when (code == ExitSuccess)
+       $ reloadModule ""
 
 -- The user didn't specify a file so we pick one for them.
 -- Our strategy is to pick the first module that failed to load,
@@ -1289,7 +1290,7 @@ setContextKeepingPackageModules keep_ctx transient_ctx = do
   new_rem_ctx <- if keep_ctx then return rem_ctx
                              else keepPackageImports rem_ctx
   setGHCiState st{ remembered_ctx = new_rem_ctx,
-                   transient_ctx  = transient_ctx }
+                   transient_ctx  = filterSubsumed new_rem_ctx transient_ctx }
   setGHCContextFromGHCiState
 
 
@@ -1599,7 +1600,7 @@ moduleCmd str
     starred m       = Right m
 
 addModulesToContext :: [String] -> [String] -> GHCi ()
-addModulesToContext as bs = do
+addModulesToContext as bs = restoreContextOnFailure $ do
    mapM_ (add True)  as
    mapM_ (add False) bs
    setGHCContextFromGHCiState
@@ -1612,6 +1613,9 @@ addModulesToContext as bs = do
 
 remModulesFromContext :: [String] -> [String] -> GHCi ()
 remModulesFromContext as bs = do
+   -- we do *not* call restoreContextOnFailure here.  If the user
+   -- is trying to fix up a context that contains errors by removing
+   -- modules, we don't want GHC to silently put them back in again.
    mapM_ rem (as ++ bs)
    setGHCContextFromGHCiState
  where
@@ -1624,14 +1628,18 @@ remModulesFromContext as bs = do
            , transient_ctx  = filt (transient_ctx st) }
 
 addImportToContext :: String -> GHCi ()
-addImportToContext str = do
+addImportToContext str = restoreContextOnFailure $ do
   idecl <- GHC.parseImportDecl str
+  _ <- GHC.lookupModule (unLoc (ideclName idecl)) (ideclPkgQual idecl)  -- #5836
   modifyGHCiState $ \st ->
-     st { remembered_ctx = addNotSubsumed (IIDecl idecl) (remembered_ctx st) }
+     st { remembered_ctx = addNotSubsumed (IIDecl idecl) (remembered_ctx st)
+        , transient_ctx = filter (not . ((IIDecl idecl) `iiSubsumes`))
+                                 (transient_ctx st)
+        }
   setGHCContextFromGHCiState
 
 setContext :: [String] -> [String] -> GHCi ()
-setContext starred not_starred = do
+setContext starred not_starred = restoreContextOnFailure $ do
   is1 <- mapM (checkAdd True)  starred
   is2 <- mapM (checkAdd False) not_starred
   let iss = foldr addNotSubsumed [] (is1++is2)
@@ -1667,6 +1675,25 @@ setGHCContextFromGHCiState = do
   iidecls <- filterM (tryBool . ok) (transient_ctx st ++ remembered_ctx st)
   setGHCContext iidecls
 
+-- Sometimes we can't tell whether an import is valid or not until
+-- we finally call 'GHC.setContext'.  e.g.
+--
+--   import System.IO (foo)
+--
+-- will fail because System.IO does not export foo.  In this case we
+-- don't want to store the import in the context permanently, so we
+-- catch the failure from 'setGHCContextFromGHCiState' and set the
+-- context back to what it was.
+--
+-- See #6007
+--
+restoreContextOnFailure :: GHCi a -> GHCi a
+restoreContextOnFailure do_this = do
+  st <- getGHCiState
+  let rc = remembered_ctx st; tc = transient_ctx st
+  do_this `gonException` (modifyGHCiState $ \st' ->
+     st' { remembered_ctx = rc, transient_ctx = tc })
+
 
 -- | Sets the GHC contexts to the given set of imports, adding a Prelude
 -- import if there isn't an explicit one already.
@@ -1682,10 +1709,16 @@ setGHCContext iidecls = GHC.setContext (iidecls ++ prel)
 
 -- | Returns True if the left import subsumes the right one.  Doesn't
 -- need to be 100% accurate, conservatively returning False is fine.
+-- (EXCEPT: (IIModule m) *must* subsume itself, otherwise a panic in
+-- plusProv will ensue (#5904))
 --
 -- Note that an IIModule does not necessarily subsume an IIDecl,
 -- because e.g. a module might export a name that is only available
 -- qualified within the module itself.
+--
+-- Note that 'import M' does not necessarily subsume 'import M(foo)',
+-- because M might not export foo and we want an error to be produced
+-- in that case.
 --
 iiSubsumes :: InteractiveImport -> InteractiveImport -> Bool
 iiSubsumes (IIModule m1) (IIModule m2) = m1==m2
@@ -1693,7 +1726,11 @@ iiSubsumes (IIDecl d1) (IIDecl d2)      -- A bit crude
   =  unLoc (ideclName d1) == unLoc (ideclName d2)
      && ideclAs d1 == ideclAs d2
      && (not (ideclQualified d1) || ideclQualified d2)
-     && (isNothing (ideclHiding d1) || ideclHiding d1 == ideclHiding d2)
+     && (ideclHiding d1 `hidingSubsumes` ideclHiding d2)
+  where
+     _                `hidingSubsumes` Just (False,[]) = True
+     Just (False, xs) `hidingSubsumes` Just (False,ys) = all (`elem` xs) ys
+     h1               `hidingSubsumes` h2              = h1 == h2
 iiSubsumes _ _ = False
 
 iiModules :: [InteractiveImport] -> [Module]
@@ -1718,6 +1755,12 @@ addNotSubsumed :: InteractiveImport
 addNotSubsumed i is
   | any (`iiSubsumes` i) is = is
   | otherwise               = i : filter (not . (i `iiSubsumes`)) is
+
+-- | @filterSubsumed is js@ returns the elements of @js@ not subsumed
+-- by any of @is@.
+filterSubsumed :: [InteractiveImport] -> [InteractiveImport]
+               -> [InteractiveImport]
+filterSubsumed is js = filter (\j -> not (any (`iiSubsumes` j) is)) js
 
 ----------------------------------------------------------------------------
 -- :set

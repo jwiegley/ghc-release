@@ -27,6 +27,7 @@ import Data.Char
 import Data.Word (Word8)
 import Numeric
 import System.IO.Unsafe
+import Debug.Trace
 
 #if __GLASGOW_HASKELL__ >= 603
 #include "ghcconfig.h"
@@ -59,7 +60,7 @@ alex_deflt :: AlexAddr
 alex_deflt = AlexA# "\xff\xff\x1b\x00\x41\x00\xff\xff\x22\x00\x24\x00\xff\xff\xff\xff\x41\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x1b\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x22\x00\xff\xff\x24\x00\xff\xff\xff\xff\xff\xff\x29\x00\x29\x00\x2c\x00\xff\xff\x2c\x00\xff\xff\x2f\x00\x2f\x00\xff\xff\x32\x00\x32\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x37\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x41\x00\xff\xff\xff\xff"#
 
 alex_accept = listArray (0::Int,67) [[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_12))],[],[(AlexAcc (alex_action_15))],[],[],[(AlexAcc (alex_action_11))],[(AlexAcc (alex_action_7))],[],[(AlexAccSkip)],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_1))],[(AlexAcc (alex_action_2))],[],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_4))],[(AlexAcc (alex_action_5))],[],[],[(AlexAcc (alex_action_6))],[],[(AlexAcc (alex_action_8))],[],[(AlexAcc (alex_action_9))],[],[(AlexAcc (alex_action_10))],[(AlexAcc (alex_action_12))],[(AlexAcc (alex_action_12))],[(AlexAcc (alex_action_13))],[],[(AlexAcc (alex_action_14))],[],[],[(AlexAcc (alex_action_16))],[],[(AlexAcc (alex_action_17))],[],[(AlexAcc (alex_action_18))],[(AlexAcc (alex_action_19))],[(AlexAcc (alex_action_20))],[],[],[(AlexAcc (alex_action_27))],[(AlexAcc (alex_action_20))],[],[(AlexAcc (alex_action_21))],[(AlexAcc (alex_action_27))],[],[(AlexAcc (alex_action_22))],[(AlexAcc (alex_action_27))],[],[(AlexAcc (alex_action_23))],[(AlexAcc (alex_action_23))],[],[(AlexAcc (alex_action_27))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_27))],[(AlexAcc (alex_action_25))],[],[],[(AlexAcc (alex_action_27))],[(AlexAcc (alex_action_26))],[],[],[(AlexAcc (alex_action_28))],[(AlexAcc (alex_action_29))],[(AlexAcc (alex_action_30))],[(AlexAcc (alex_action_31))]]
-{-# LINE 113 "utils/haddock/src/Haddock/Lex.x" #-}
+{-# LINE 114 "utils/haddock/src/Haddock/Lex.x" #-}
 
 -- | A located token
 type LToken = (Token, AlexPosn)
@@ -131,7 +132,7 @@ tokenise dflags str (line, col) = let toks = go (posn, '\n', eofHack str) para i
     go inp@(pos, _, str) sc =
 	  case alexScan inp sc of
 		AlexEOF -> []
-		AlexError _ -> error "lexical error"
+		AlexError _ -> []
 		AlexSkip  inp' _       -> go inp' sc
 		AlexToken inp'@(pos',_,_) len act -> act pos (take len str) sc (\sc -> go inp' sc) dflags
 
