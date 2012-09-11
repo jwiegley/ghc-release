@@ -501,23 +501,6 @@ exactLog2 x_
 
 
 -- -----------------------------------------------------------------------------
--- widening / narrowing
-
-narrowU :: MachRep -> Integer -> Integer
-narrowU I8  x = fromIntegral (fromIntegral x :: Word8)
-narrowU I16 x = fromIntegral (fromIntegral x :: Word16)
-narrowU I32 x = fromIntegral (fromIntegral x :: Word32)
-narrowU I64 x = fromIntegral (fromIntegral x :: Word64)
-narrowU _ _ = panic "narrowTo"
-
-narrowS :: MachRep -> Integer -> Integer
-narrowS I8  x = fromIntegral (fromIntegral x :: Int8)
-narrowS I16 x = fromIntegral (fromIntegral x :: Int16)
-narrowS I32 x = fromIntegral (fromIntegral x :: Int32)
-narrowS I64 x = fromIntegral (fromIntegral x :: Int64)
-narrowS _ _ = panic "narrowTo"
-
--- -----------------------------------------------------------------------------
 -- Loopify for C
 
 {-

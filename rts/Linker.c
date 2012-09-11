@@ -28,6 +28,7 @@
 #include "Sparks.h"
 #include "RtsTypeable.h"
 #include "Timer.h"
+#include "Trace.h"
 
 #ifdef HAVE_SYS_TYPES_H
 #include <sys/types.h>
@@ -115,6 +116,8 @@ static int ocAllocateSymbolExtras_ELF ( ObjectCode* oc );
 static int ocVerifyImage_PEi386 ( ObjectCode* oc );
 static int ocGetNames_PEi386    ( ObjectCode* oc );
 static int ocResolve_PEi386     ( ObjectCode* oc );
+static void *lookupSymbolInDLLs ( unsigned char *lbl );
+static void zapTrailingAtSign   ( unsigned char *sym );
 #elif defined(OBJFORMAT_MACHO)
 static int ocVerifyImage_MachO    ( ObjectCode* oc );
 static int ocGetNames_MachO       ( ObjectCode* oc );
@@ -154,6 +157,50 @@ static void machoInitSymbolsWithoutUnderscore( void );
  */
 #define X86_64_ELF_NONPIC_HACK 1
 
+/* Link objects into the lower 2Gb on x86_64.  GHC assumes the
+ * small memory model on this architecture (see gcc docs,
+ * -mcmodel=small).
+ *
+ * MAP_32BIT not available on OpenBSD/amd64
+ */
+#if defined(x86_64_HOST_ARCH) && defined(MAP_32BIT)
+#define TRY_MAP_32BIT MAP_32BIT
+#else
+#define TRY_MAP_32BIT 0
+#endif
+
+/*
+ * Due to the small memory model (see above), on x86_64 we have to map
+ * all our non-PIC object files into the low 2Gb of the address space
+ * (why 2Gb and not 4Gb?  Because all addresses must be reachable
+ * using a 32-bit signed PC-relative offset). On Linux we can do this
+ * using the MAP_32BIT flag to mmap(), however on other OSs
+ * (e.g. *BSD, see #2063, and also on Linux inside Xen, see #2512), we
+ * can't do this.  So on these systems, we have to pick a base address
+ * in the low 2Gb of the address space and try to allocate memory from
+ * there.
+ *
+ * We pick a default address based on the OS, but also make this
+ * configurable via an RTS flag (+RTS -xm)
+ */
+#if defined(x86_64_HOST_ARCH)
+
+#if defined(MAP_32BIT)
+// Try to use MAP_32BIT
+#define MMAP_32BIT_BASE_DEFAULT 0
+#else
+// A guess: 1Gb.
+#define MMAP_32BIT_BASE_DEFAULT 0x40000000
+#endif
+
+static void *mmap_32bit_base = MMAP_32BIT_BASE_DEFAULT;
+#endif
+
+/* MAP_ANONYMOUS is MAP_ANON on some systems, e.g. OpenBSD */
+#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+
 /* -----------------------------------------------------------------------------
  * Built-in symbols from the RTS
  */
@@ -166,6 +213,7 @@ typedef struct _RtsSymbolVal {
 
 #if !defined(PAR)
 #define Maybe_Stable_Names      SymX(mkWeakzh_fast)			\
+      				SymX(mkWeakForeignEnvzh_fast)   \
       				SymX(makeStableNamezh_fast)		\
       				SymX(finalizzeWeakzh_fast)
 #else
@@ -434,7 +482,9 @@ typedef struct _RtsSymbolVal {
 
 #if !defined(mingw32_HOST_OS)
 #define RTS_USER_SIGNALS_SYMBOLS \
-   SymX(setIOManagerPipe)
+   SymX(setIOManagerPipe) \
+   Sym(blockUserSignals) \
+   Sym(unblockUserSignals)
 #else
 #define RTS_USER_SIGNALS_SYMBOLS \
    SymX(sendIOManagerEvent) \
@@ -630,6 +680,7 @@ typedef struct _RtsSymbolVal {
       SymX(noDuplicatezh_fast)			\
       SymX(atomicModifyMutVarzh_fast)		\
       SymX(newPinnedByteArrayzh_fast)		\
+      SymX(newAlignedPinnedByteArrayzh_fast)		\
       SymX(newSpark)				\
       SymX(orIntegerzh_fast)			\
       SymX(performGC)				\
@@ -974,6 +1025,13 @@ initLinker( void )
     dl_prog_handle = dlopen(NULL, RTLD_LAZY);
 #   endif /* RTLD_DEFAULT */
 #   endif
+
+#if defined(x86_64_HOST_ARCH)
+    if (RtsFlags.MiscFlags.linkerMemBase != 0) {
+        // User-override for mmap_32bit_base
+        mmap_32bit_base = (void*)RtsFlags.MiscFlags.linkerMemBase;
+    }
+#endif
 }
 
 /* -----------------------------------------------------------------------------
@@ -1159,29 +1217,18 @@ lookupSymbol( char *lbl )
 	}
 #       endif /* HAVE_DLFCN_H */
 #       elif defined(OBJFORMAT_PEi386)
-        OpenedDLL* o_dll;
         void* sym;
-        for (o_dll = opened_dlls; o_dll != NULL; o_dll = o_dll->next) {
-	  /* debugBelch("look in %s for %s\n", o_dll->name, lbl); */
-           if (lbl[0] == '_') {
-              /* HACK: if the name has an initial underscore, try stripping
-                 it off & look that up first. I've yet to verify whether there's
-                 a Rule that governs whether an initial '_' *should always* be
-                 stripped off when mapping from import lib name to the DLL name.
-              */
-              sym = GetProcAddress(o_dll->instance, (lbl+1));
-              if (sym != NULL) {
-		/*debugBelch("found %s in %s\n", lbl+1,o_dll->name);*/
-		return sym;
-	      }
-           }
-           sym = GetProcAddress(o_dll->instance, lbl);
-           if (sym != NULL) {
-	     /*debugBelch("found %s in %s\n", lbl,o_dll->name);*/
-	     return sym;
-	   }
-        }
+
+        sym = lookupSymbolInDLLs(lbl);
+        if (sym != NULL) { return sym; };
+
+        // Also try looking up the symbol without the @N suffix.  Some
+        // DLLs have the suffixes on their symbols, some don't.
+        zapTrailingAtSign ( lbl );
+        sym = lookupSymbolInDLLs(lbl);
+        if (sym != NULL) { return sym; };
         return NULL;
+
 #       else
         ASSERT(2+2 == 5);
         return NULL;
@@ -1231,6 +1278,79 @@ void ghci_enquire ( char* addr )
 static unsigned int PLTSize(void);
 #endif
 
+#ifdef USE_MMAP
+#define ROUND_UP(x,size) ((x + size - 1) & ~(size - 1))
+
+static void *
+mmapForLinker (size_t bytes, nat flags, int fd)
+{
+   void *map_addr = NULL;
+   void *result;
+   int pagesize, size;
+   static nat fixed = 0;
+
+   pagesize = getpagesize();
+   size = ROUND_UP(bytes, pagesize);
+
+#if defined(x86_64_HOST_ARCH)
+mmap_again:
+
+   if (mmap_32bit_base != 0) {
+       map_addr = mmap_32bit_base;
+   }
+#endif
+
+   result = mmap(map_addr, size, PROT_EXEC|PROT_READ|PROT_WRITE,
+		    MAP_PRIVATE|TRY_MAP_32BIT|fixed|flags, fd, 0);
+
+   if (result == MAP_FAILED) {
+       sysErrorBelch("mmap %lu bytes at %p",(lnat)size,map_addr);
+       errorBelch("Try specifying an address with +RTS -xm<addr> -RTS");
+       stg_exit(EXIT_FAILURE);
+   }
+   
+#if defined(x86_64_HOST_ARCH)
+   if (mmap_32bit_base != 0) {
+       if (result == map_addr) {
+           mmap_32bit_base = map_addr + size;
+       } else {
+           if ((W_)result > 0x80000000) {
+               // oops, we were given memory over 2Gb
+#if defined(freebsd_HOST_OS)
+               // Some platforms require MAP_FIXED.  This is normally
+               // a bad idea, because MAP_FIXED will overwrite
+               // existing mappings.
+               munmap(result,size);
+               fixed = MAP_FIXED;
+               goto mmap_again;
+#else
+               barf("loadObj: failed to mmap() memory below 2Gb; asked for %lu bytes at %p.  Try specifying an address with +RTS -xm<addr> -RTS", size, map_addr, result);
+#endif
+           } else {
+               // hmm, we were given memory somewhere else, but it's
+               // still under 2Gb so we can use it.  Next time, ask
+               // for memory right after the place we just got some
+               mmap_32bit_base = (void*)result + size;
+           }
+       }
+   } else {
+       if ((W_)result > 0x80000000) {
+           // oops, we were given memory over 2Gb
+           // ... try allocating memory somewhere else?;
+           debugTrace(DEBUG_linker,"MAP_32BIT didn't work; gave us %lu bytes at 0x%p", bytes, result);
+           munmap(result, size);
+           
+           // Set a base address and try again... (guess: 1Gb)
+           mmap_32bit_base = (void*)0x40000000;
+           goto mmap_again;
+       }
+   }
+#endif
+
+   return result;
+}
+#endif // USE_MMAP
+
 /* -----------------------------------------------------------------------------
  * Load an obj (populate the global symbol table, but don't resolve yet)
  *
@@ -1241,10 +1361,9 @@ loadObj( char *path )
 {
    ObjectCode* oc;
    struct stat st;
-   int r, n;
+   int r;
 #ifdef USE_MMAP
-   int fd, pagesize;
-   void *map_addr = NULL;
+   int fd;
 #else
    FILE *f;
 #endif
@@ -1304,8 +1423,6 @@ loadObj( char *path )
    objects               = oc;
 
 #ifdef USE_MMAP
-#define ROUND_UP(x,size) ((x + size - 1) & ~(size - 1))
-
    /* On many architectures malloc'd memory isn't executable, so we need to use mmap. */
 
 #if defined(openbsd_HOST_OS)
@@ -1316,10 +1433,12 @@ loadObj( char *path )
    if (fd == -1)
       barf("loadObj: can't open `%s'", path);
 
-   pagesize = getpagesize();
-
 #ifdef ia64_HOST_ARCH
    /* The PLT needs to be right before the object */
+   {
+   int pagesize, n;
+   void *map_addr;
+   pagesize = getpagesize();
    n = ROUND_UP(PLTSize(), pagesize);
    oc->plt = mmap(NULL, n, PROT_EXEC|PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
    if (oc->plt == MAP_FAILED)
@@ -1327,36 +1446,20 @@ loadObj( char *path )
 
    oc->pltIndex = 0;
    map_addr = oc->plt + n;
-#endif
 
    n = ROUND_UP(oc->fileSize, pagesize);
-
-   /* Link objects into the lower 2Gb on x86_64.  GHC assumes the
-    * small memory model on this architecture (see gcc docs,
-    * -mcmodel=small).
-    *
-    * MAP_32BIT not available on OpenBSD/amd64
-    */
-#if defined(x86_64_HOST_ARCH) && defined(MAP_32BIT)
-#define EXTRA_MAP_FLAGS MAP_32BIT
-#else
-#define EXTRA_MAP_FLAGS 0
-#endif
-
-   /* MAP_ANONYMOUS is MAP_ANON on some systems, e.g. OpenBSD */
-#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
-#define MAP_ANONYMOUS MAP_ANON
-#endif
-
    oc->image = mmap(map_addr, n, PROT_EXEC|PROT_READ|PROT_WRITE,
-		    MAP_PRIVATE|EXTRA_MAP_FLAGS, fd, 0);
+		    MAP_PRIVATE|TRY_MAP_32BIT, fd, 0);
    if (oc->image == MAP_FAILED)
       barf("loadObj: can't map `%s'", path);
+   }
+#else
+   oc->image = mmapForLinker(oc->fileSize, 0, fd);
+#endif
 
    close(fd);
 
 #else /* !USE_MMAP */
-
    /* load the image into memory */
    f = fopen(path, "rb");
    if (!f)
@@ -1384,10 +1487,12 @@ loadObj( char *path )
    oc->image = stgMallocBytes(oc->fileSize, "loadObj(image)");
 #  endif
 
-   n = fread ( oc->image, 1, oc->fileSize, f );
-   if (n != oc->fileSize)
-      barf("loadObj: error whilst reading `%s'", path);
-
+   {
+       int n;
+       n = fread ( oc->image, 1, oc->fileSize, f );
+       if (n != oc->fileSize)
+           barf("loadObj: error whilst reading `%s'", path);
+   }
    fclose(f);
 #endif /* USE_MMAP */
 
@@ -1623,21 +1728,8 @@ static int ocAllocateSymbolExtras( ObjectCode* oc, int count, int first )
      */
     if( m > n ) // we need to allocate more pages
     {
-        oc->symbol_extras = mmap (NULL, sizeof(SymbolExtra) * count,
-                                  PROT_EXEC|PROT_READ|PROT_WRITE,
-                                  MAP_PRIVATE|MAP_ANONYMOUS|EXTRA_MAP_FLAGS,
-                                  0, 0);
-        if (oc->symbol_extras == MAP_FAILED)
-        {
-            errorBelch( "Unable to mmap() for jump islands\n" );
-            return 0;
-        }
-#ifdef x86_64_HOST_ARCH
-        if ((StgWord)oc->symbol_extras > 0x80000000)
-        {
-            barf("mmap() returned memory outside 2Gb");
-        }
-#endif
+        oc->symbol_extras = mmapForLinker(sizeof(SymbolExtra) * count, 
+                                          MAP_ANONYMOUS, -1);
     }
     else
     {
@@ -1992,6 +2084,36 @@ zapTrailingAtSign ( UChar* sym )
    while (j > 0 && my_isdigit(sym[j])) j--;
    if (j > 0 && sym[j] == '@' && j != i) sym[j] = 0;
 #  undef my_isdigit
+}
+
+static void *
+lookupSymbolInDLLs ( UChar *lbl )
+{
+    OpenedDLL* o_dll;
+    void *sym;
+
+    for (o_dll = opened_dlls; o_dll != NULL; o_dll = o_dll->next) {
+        /* debugBelch("look in %s for %s\n", o_dll->name, lbl); */
+
+        if (lbl[0] == '_') {
+            /* HACK: if the name has an initial underscore, try stripping
+               it off & look that up first. I've yet to verify whether there's
+               a Rule that governs whether an initial '_' *should always* be
+               stripped off when mapping from import lib name to the DLL name.
+            */
+            sym = GetProcAddress(o_dll->instance, (lbl+1));
+            if (sym != NULL) {
+		/*debugBelch("found %s in %s\n", lbl+1,o_dll->name);*/
+		return sym;
+            }
+        }
+        sym = GetProcAddress(o_dll->instance, lbl);
+        if (sym != NULL) {
+            /*debugBelch("found %s in %s\n", lbl,o_dll->name);*/
+            return sym;
+	   }
+    }
+    return NULL;
 }
 
 
@@ -2514,11 +2636,7 @@ ocResolve_PEi386 ( ObjectCode* oc )
             copyName ( sym->Name, strtab, symbol, 1000-1 );
             S = (UInt32) lookupSymbol( symbol );
             if ((void*)S != NULL) goto foundit;
-            zapTrailingAtSign ( symbol );
-            S = (UInt32) lookupSymbol( symbol );
-            if ((void*)S != NULL) goto foundit;
-	    /* Newline first because the interactive linker has printed "linking..." */
-            errorBelch("\n%s: unknown symbol `%s'", oc->fileName, symbol);
+            errorBelch("%s: unknown symbol `%s'", oc->fileName, symbol);
             return 0;
            foundit:;
          }

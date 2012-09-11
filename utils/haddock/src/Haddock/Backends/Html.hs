@@ -27,14 +27,16 @@ import Haddock.GHC.Utils
 import qualified Haddock.Utils.Html as Html
 
 import Control.Exception     ( bracket )
-import Control.Monad         ( when, unless )
+import Control.Monad         ( when, unless, join )
 import Data.Char             ( isUpper, toUpper )
-import Data.List             ( sortBy )
+import Data.List             ( sortBy, groupBy )
 import Data.Maybe
 import Foreign.Marshal.Alloc ( allocaBytes )
 import System.IO             ( IOMode(..), hClose, hGetBuf, hPutBuf, openFile )
 import Data.Map              ( Map )
 import qualified Data.Map as Map hiding ( Map )
+import Data.Function
+import Data.Ord              ( comparing )
 
 #if __GLASGOW_HASKELL__ >= 609
 import GHC hiding ( NoLink, moduleInfo )
@@ -76,7 +78,6 @@ ppHtml doctitle maybe_package ifaces odir prologue maybe_html_help_format
   let
 	visible_ifaces = filter visible ifaces
 	visible i = OptHide `notElem` ifaceOptions i
-
   when (not (isJust maybe_contents_url)) $ 
     ppHtmlContents odir doctitle maybe_package
         maybe_html_help_format maybe_index_url maybe_source_url maybe_wiki_url
@@ -146,7 +147,7 @@ copyHtmlBits odir libdir maybe_css = do
 	copyLibFile f = do
 	   copyFile (pathJoin [libhtmldir, f]) (pathJoin [odir, f])
   copyFile css_file css_destination
-  mapM_ copyLibFile [ iconFile, plusFile, minusFile, jsFile ]
+  mapM_ copyLibFile [ iconFile, plusFile, minusFile, jsFile, framesFile ]
 
 footer :: HtmlTable
 footer = 
@@ -331,6 +332,9 @@ ppHtmlContents odir doctitle
 	    footer
 	  )
   writeFile (pathJoin [odir, contentsHtmlFile]) (renderHtml html)
+
+  -- XXX: think of a better place for this?
+  ppHtmlContentsFrame odir doctitle ifaces
   
   -- Generate contents page for Html Help if requested
   case maybe_html_help_format of
@@ -410,8 +414,39 @@ mkNode ss (Node s leaf pkg short ts) depth id = htmlNode
         (u,id') = mkNode (s:ss) x (depth+1) id
 
 -- The URL for source and wiki links, and the current module
-type LinksInfo = (SourceURLs, WikiURLs, Interface)
+type LinksInfo = (SourceURLs, WikiURLs)
 
+-- | Turn a module tree into a flat list of full module names.  E.g.,
+-- @
+--  A
+--  +-B
+--  +-C
+-- @
+-- becomes
+-- @["A", "A.B", "A.B.C"]@
+flatModuleTree :: [InstalledInterface] -> [Html]
+flatModuleTree ifaces =
+    map (uncurry ppModule' . head)
+            . groupBy ((==) `on` fst)
+            . sortBy (comparing fst)
+            $ mods
+  where
+    mods = [ (moduleString mod, mod) | mod <- map instMod ifaces ]
+    ppModule' txt mod =
+      anchor ! [href ((moduleHtmlFile mod)), target mainFrameName]
+        << toHtml txt
+
+ppHtmlContentsFrame odir doctitle ifaces = do
+  let mods = flatModuleTree ifaces
+      html =
+        header
+            (documentCharacterEncoding +++
+	     thetitle (toHtml doctitle) +++
+	     styleSheet +++
+	     (script ! [src jsFile, thetype "text/javascript"] $ noHtml)) +++
+        body << vanillaTable << p << (
+            foldr (+++) noHtml (map (+++br) mods))
+  writeFile (pathJoin [odir, frameIndexHtmlFile]) (renderHtml html)
 
 -- ---------------------------------------------------------------------------
 -- Generate the index
@@ -534,7 +569,12 @@ ppHtmlModule odir doctitle
 	header (documentCharacterEncoding +++
 		thetitle (toHtml mdl) +++
 		styleSheet +++
-		(script ! [src jsFile, thetype "text/javascript"] $ noHtml)) +++
+		(script ! [src jsFile, thetype "text/javascript"] $ noHtml) +++
+                (script ! [thetype "text/javascript"]
+                     -- XXX: quoting errors possible?
+                     << Html [HtmlString ("window.onload = function () {setSynopsis(\"mini_" 
+                                ++ moduleHtmlFile mod ++ "\")};")])
+               ) +++
         body << vanillaTable << (
 	    pageHeader mdl iface doctitle
 		maybe_source_url maybe_wiki_url
@@ -543,7 +583,22 @@ ppHtmlModule odir doctitle
 	    footer
          )
   writeFile (pathJoin [odir, moduleHtmlFile mod]) (renderHtml html)
+  ppHtmlModuleMiniSynopsis odir doctitle iface
 
+ppHtmlModuleMiniSynopsis :: FilePath -> String -> Interface -> IO ()
+ppHtmlModuleMiniSynopsis odir _doctitle iface = do
+  let mod = ifaceMod iface
+      html =
+        header
+          (documentCharacterEncoding +++
+	   thetitle (toHtml $ moduleString mod) +++
+	   styleSheet +++
+	   (script ! [src jsFile, thetype "text/javascript"] $ noHtml)) +++
+        body << thediv ! [ theclass "outer" ] << (
+           (thediv ! [theclass "mini-topbar"]
+             << toHtml (moduleString mod)) +++
+           miniSynopsis mod iface)
+  writeFile (pathJoin [odir, "mini_" ++ moduleHtmlFile mod]) (renderHtml html)
 
 ifaceToHtml :: SourceURLs -> WikiURLs -> Interface -> HtmlTable
 ifaceToHtml maybe_source_url maybe_wiki_url iface
@@ -553,8 +608,8 @@ ifaceToHtml maybe_source_url maybe_wiki_url iface
  
     exports = numberSectionHeadings (ifaceRnExportItems iface)
 
-    has_doc (ExportDecl _ doc _) = isJust doc
-    has_doc (ExportNoDecl _ _ _) = False
+    has_doc (ExportDecl _ doc _ _) = isJust doc
+    has_doc (ExportNoDecl _ _) = False
     has_doc (ExportModule _) = False
     has_doc _ = True
 
@@ -590,8 +645,54 @@ ifaceToHtml maybe_source_url maybe_wiki_url iface
           _ -> tda [ theclass "section1" ] << toHtml "Documentation"
 
     bdy  = map (processExport False linksInfo docMap) exports
-    linksInfo = (maybe_source_url, maybe_wiki_url, iface)
+    linksInfo = (maybe_source_url, maybe_wiki_url)
 
+miniSynopsis :: Module -> Interface -> Html
+miniSynopsis mod iface =
+    thediv ! [ theclass "mini-synopsis" ]
+      << hsep (map (processForMiniSynopsis mod) $ exports)
+
+  where
+    exports = numberSectionHeadings (ifaceRnExportItems iface)
+
+processForMiniSynopsis :: Module -> ExportItem DocName -> Html
+processForMiniSynopsis mod (ExportDecl (L _loc decl0) _doc _ _insts) =
+  thediv ! [theclass "decl" ] <<
+  case decl0 of
+    TyClD d@(TyFamily{}) -> ppTyFamHeader True False d
+    TyClD d@(TyData{tcdTyPats = ps})
+      | Nothing <- ps    -> keyword "data" <++> ppTyClBinderWithVarsMini mod d
+      | Just _ <- ps     -> keyword "data" <++> keyword "instance"
+                                           <++> ppTyClBinderWithVarsMini mod d
+    TyClD d@(TySynonym{tcdTyPats = ps})
+      | Nothing <- ps    -> keyword "type" <++> ppTyClBinderWithVarsMini mod d
+      | Just _ <- ps     -> keyword "type" <++> keyword "instance"
+                                           <++> ppTyClBinderWithVarsMini mod d
+    TyClD d@(ClassDecl {}) ->
+                            keyword "class" <++> ppTyClBinderWithVarsMini mod d
+    SigD (TypeSig (L _ n) (L _ t)) ->
+        let nm = docNameOcc n
+        in ppNameMini mod nm
+    _ -> noHtml
+processForMiniSynopsis mod (ExportGroup lvl _id txt) =
+  let heading | lvl == 1 = h1
+              | lvl == 2 = h2
+              | lvl >= 3 = h3
+  in heading << docToHtml txt
+processForMiniSynopsis _ _ = noHtml
+
+ppNameMini :: Module -> OccName -> Html
+ppNameMini mod nm =
+    anchor ! [ href ( moduleHtmlFile mod ++ "#"
+                      ++ (escapeStr (anchorNameStr nm)))
+             , target mainFrameName ]
+      << ppBinder' nm
+
+ppTyClBinderWithVarsMini :: Module -> TyClDecl DocName -> Html
+ppTyClBinderWithVarsMini mod decl =
+  let n = unLoc $ tcdLName decl
+      ns = tyvarNames $ tcdTyVars decl
+  in ppTypeApp n ns (ppNameMini mod . docNameOcc) ppTyName
 
 ppModuleContents :: [ExportItem DocName] -> Maybe HtmlTable
 ppModuleContents exports
@@ -630,11 +731,11 @@ numberSectionHeadings exports = go 1 exports
 processExport :: Bool -> LinksInfo -> DocMap -> (ExportItem DocName) -> HtmlTable
 processExport _ _ _ (ExportGroup lev id0 doc)
   = ppDocGroup lev (namedAnchor id0 << docToHtml doc)
-processExport summary links docMap (ExportDecl decl doc insts)
-  = ppDecl summary links decl doc insts docMap
-processExport summmary _ _ (ExportNoDecl _ y [])
+processExport summary links docMap (ExportDecl decl doc subdocs insts)
+  = ppDecl summary links decl doc insts docMap subdocs
+processExport summmary _ _ (ExportNoDecl y [])
   = declBox (ppDocName y)
-processExport summmary _ _ (ExportNoDecl _ y subs)
+processExport summmary _ _ (ExportNoDecl y subs)
   = declBox (ppDocName y <+> parenList (map ppDocName subs))
 processExport _ _ _ (ExportDoc doc)
   = docBox (docToHtml doc)
@@ -653,16 +754,17 @@ ppDocGroup lev doc
   | lev == 3  = tda [ theclass "section3" ] << doc
   | otherwise = tda [ theclass "section4" ] << doc
 
-declWithDoc :: Bool -> LinksInfo -> SrcSpan -> Name -> Maybe (HsDoc DocName) -> Html -> HtmlTable
+declWithDoc :: Bool -> LinksInfo -> SrcSpan -> DocName -> Maybe (HsDoc DocName) -> Html -> HtmlTable
 declWithDoc True  _     _   _  _          html_decl = declBox html_decl
 declWithDoc False links loc nm Nothing    html_decl = topDeclBox links loc nm html_decl
 declWithDoc False links loc nm (Just doc) html_decl = 
 		topDeclBox links loc nm html_decl </> docBox (docToHtml doc)
 
 
+-- TODO: use DeclInfo DocName or something
 ppDecl :: Bool -> LinksInfo -> LHsDecl DocName -> 
-          Maybe (HsDoc DocName) -> [InstHead DocName] -> DocMap -> HtmlTable
-ppDecl summ links (L loc decl) mbDoc instances docMap = case decl of
+          Maybe (HsDoc DocName) -> [InstHead DocName] -> DocMap -> [(DocName, Maybe (HsDoc DocName))] -> HtmlTable
+ppDecl summ links (L loc decl) mbDoc instances docMap subdocs = case decl of
   TyClD d@(TyFamily {})          -> ppTyFam summ False links loc mbDoc d
   TyClD d@(TyData {})
     | Nothing <- tcdTyPats d     -> ppDataDecl summ links instances loc mbDoc d
@@ -670,24 +772,24 @@ ppDecl summ links (L loc decl) mbDoc instances docMap = case decl of
   TyClD d@(TySynonym {})
     | Nothing <- tcdTyPats d     -> ppTySyn summ links loc mbDoc d
     | Just _  <- tcdTyPats d     -> ppTyInst summ False links loc mbDoc d
-  TyClD d@(ClassDecl {})         -> ppClassDecl summ links instances loc mbDoc docMap d
-  SigD (TypeSig (L _ n) (L _ t)) -> ppFunSig summ links loc mbDoc (docNameOrig n) t
+  TyClD d@(ClassDecl {})         -> ppClassDecl summ links instances loc mbDoc docMap subdocs d
+  SigD (TypeSig (L _ n) (L _ t)) -> ppFunSig summ links loc mbDoc n t
   ForD d                         -> ppFor summ links loc mbDoc d
   InstD d                        -> Html.emptyTable
 
 ppFunSig :: Bool -> LinksInfo -> SrcSpan -> Maybe (HsDoc DocName) ->
-            Name -> HsType DocName -> HtmlTable
-ppFunSig summary links loc mbDoc name typ =
-  ppTypeOrFunSig summary links loc name typ mbDoc 
-    (ppTypeSig summary (nameOccName name) typ, 
-     ppBinder False (nameOccName name), dcolon)
+            DocName -> HsType DocName -> HtmlTable
+ppFunSig summary links loc mbDoc docname typ =
+  ppTypeOrFunSig summary links loc docname typ mbDoc 
+    (ppTypeSig summary occname typ, ppBinder False occname, dcolon)
+  where
+    occname = nameOccName . docNameOrig $ docname
 
-
-ppTypeOrFunSig :: Bool -> LinksInfo -> SrcSpan -> Name -> HsType DocName ->
+ppTypeOrFunSig :: Bool -> LinksInfo -> SrcSpan -> DocName -> HsType DocName ->
                   Maybe (HsDoc DocName) -> (Html, Html, Html) -> HtmlTable
-ppTypeOrFunSig summary links loc name typ doc (pref1, pref2, sep)
-  | summary || noArgDocs typ = declWithDoc summary links loc name doc pref1
-  | otherwise = topDeclBox links loc name pref2 </>
+ppTypeOrFunSig summary links loc docname typ doc (pref1, pref2, sep)
+  | summary || noArgDocs typ = declWithDoc summary links loc docname doc pref1
+  | otherwise = topDeclBox links loc docname pref2 </>
     (tda [theclass "body"] << vanillaTable <<  (
       do_args sep typ </>
         (case doc of
@@ -732,17 +834,16 @@ tyvarNames = map f
   where f x = docNameOrig . hsTyVarName . unLoc $ x
   
 ppFor summary links loc mbDoc (ForeignImport (L _ name) (L _ typ) _)
-  = ppFunSig summary links loc mbDoc (docNameOrig name) typ
+  = ppFunSig summary links loc mbDoc name typ
 ppFor _ _ _ _ _ = error "ppFor"
 
 -- we skip type patterns for now
 ppTySyn summary links loc mbDoc (TySynonym (L _ name) ltyvars _ ltype) 
-  = ppTypeOrFunSig summary links loc n (unLoc ltype) mbDoc 
+  = ppTypeOrFunSig summary links loc name (unLoc ltype) mbDoc 
                    (full, hdr, spaceHtml +++ equals)
   where
     hdr  = hsep ([keyword "type", ppBinder summary occ] ++ ppTyVars ltyvars)
     full = hdr <+> equals <+> ppLType ltype
-    n    = docNameOrig name
     occ  = docNameOcc name
 
 
@@ -786,7 +887,7 @@ ppTyFam :: Bool -> Bool -> LinksInfo -> SrcSpan -> Maybe (HsDoc DocName) ->
               TyClDecl DocName -> HtmlTable
 ppTyFam summary associated links loc mbDoc decl
   
-  | summary = declWithDoc summary links loc name mbDoc 
+  | summary = declWithDoc summary links loc docname mbDoc 
               (ppTyFamHeader True associated decl)
   
   | associated, isJust mbDoc         = header </> bodyBox << doc 
@@ -797,13 +898,13 @@ ppTyFam summary associated links loc mbDoc decl
   | otherwise                        = header </> bodyBox << instancesBit
 
   where
-    name = docNameOrig . tcdName $ decl
+    docname = tcdName decl
 
-    header = topDeclBox links loc name (ppTyFamHeader summary associated decl)
+    header = topDeclBox links loc docname (ppTyFamHeader summary associated decl)
 
     doc = ndocBox . docToHtml . fromJust $ mbDoc 
 
-    instId = collapseId name
+    instId = collapseId (docNameOrig docname)
 
     instancesBit = instHdr instId </>
   	  tda [theclass "body"] << 
@@ -842,16 +943,16 @@ ppTyInst :: Bool -> Bool -> LinksInfo -> SrcSpan -> Maybe (HsDoc DocName) ->
             TyClDecl DocName -> HtmlTable
 ppTyInst summary associated links loc mbDoc decl
   
-  | summary = declWithDoc summary links loc name mbDoc
+  | summary = declWithDoc summary links loc docname mbDoc
               (ppTyInstHeader True associated decl)
   
   | isJust mbDoc = header </> bodyBox << doc 
   | otherwise    = header
 
   where
-    name = docNameOrig . tcdName $ decl
+    docname = tcdName decl
 
-    header = topDeclBox links loc name (ppTyInstHeader summary associated decl)
+    header = topDeclBox links loc docname (ppTyInstHeader summary associated decl)
 
     doc = case mbDoc of
       Just d -> ndocBox (docToHtml d)
@@ -873,13 +974,11 @@ ppTyInstHeader summary associated decl =
 --------------------------------------------------------------------------------
     
 
-ppAssocType :: Bool -> LinksInfo -> DocMap -> LTyClDecl DocName -> HtmlTable
-ppAssocType summ links docMap (L loc decl) = 
+ppAssocType :: Bool -> LinksInfo -> Maybe (HsDoc DocName) -> LTyClDecl DocName -> HtmlTable
+ppAssocType summ links doc (L loc decl) = 
   case decl of
     TyFamily  {} -> ppTyFam summ True links loc doc decl
     TySynonym {} -> ppTySyn summ links loc doc decl
-  where
-    doc = Map.lookup (docNameOrig $ tcdName decl) docMap
 
 
 --------------------------------------------------------------------------------
@@ -971,8 +1070,8 @@ ppFds fds =
 	fundep (vars1,vars2) = hsep (map ppDocName vars1) <+> toHtml "->" <+>
 			       hsep (map ppDocName vars2)
 
-ppShortClassDecl :: Bool -> LinksInfo -> TyClDecl DocName -> SrcSpan -> DocMap -> HtmlTable
-ppShortClassDecl summary links (ClassDecl lctxt lname tvs fds sigs _ ats _) loc docMap = 
+ppShortClassDecl :: Bool -> LinksInfo -> TyClDecl DocName -> SrcSpan -> [(DocName, Maybe (HsDoc DocName))] -> HtmlTable
+ppShortClassDecl summary links (ClassDecl lctxt lname tvs fds sigs _ ats _) loc subdocs = 
   if null sigs && null ats
     then (if summary then declBox else topDeclBox links loc nm) hdr
     else (if summary then declBox else topDeclBox links loc nm) (hdr <+> keyword "where")
@@ -981,33 +1080,33 @@ ppShortClassDecl summary links (ClassDecl lctxt lname tvs fds sigs _ ats _) loc 
 				bodyBox <<
 					aboves
 					(
-						map (ppAssocType summary links docMap) ats ++
+						[ ppAssocType summary links doc at | at <- ats
+                                                , let doc = join $ lookup (tcdName $ unL at) subdocs ]  ++
 
-						[ ppFunSig summary links loc mbDoc n typ
-						| L _ (TypeSig (L _ fname) (L _ typ)) <- sigs
-						, let n = docNameOrig fname, let mbDoc = Map.lookup n docMap ] 
-
+						[ ppFunSig summary links loc doc n typ
+						| L _ (TypeSig (L _ n) (L _ typ)) <- sigs
+						, let doc = join $ lookup n subdocs ] 
 					)
 				)
   where
     hdr = ppClassHdr summary lctxt (unLoc lname) tvs fds
-    nm  = docNameOrig . unLoc $ lname
+    nm  = unLoc lname
     
 
 
 ppClassDecl :: Bool -> LinksInfo -> [InstHead DocName] -> SrcSpan ->
-               Maybe (HsDoc DocName) -> DocMap -> TyClDecl DocName -> 
+               Maybe (HsDoc DocName) -> DocMap -> [(DocName, Maybe (HsDoc DocName))] -> TyClDecl DocName -> 
                HtmlTable
-ppClassDecl summary links instances loc mbDoc docMap
+ppClassDecl summary links instances loc mbDoc docMap subdocs
 	decl@(ClassDecl lctxt lname ltyvars lfds lsigs _ ats _)
-  | summary = ppShortClassDecl summary links decl loc docMap
+  | summary = ppShortClassDecl summary links decl loc subdocs
   | otherwise = classheader </> bodyBox << (classdoc </> body </> instancesBit)
   where 
     classheader
       | null lsigs = topDeclBox links loc nm hdr
       | otherwise  = topDeclBox links loc nm (hdr <+> keyword "where")
 
-    nm   = docNameOrig . unLoc $ tcdLName decl
+    nm   = unLoc $ tcdLName decl
     ctxt = unLoc lctxt
 
     hdr = ppClassHdr summary lctxt (unLoc lname) ltyvars lfds
@@ -1023,13 +1122,14 @@ ppClassDecl summary links instances loc mbDoc docMap
                     s8 </> methHdr </> bodyBox << methodTable 
  
     methodTable =
-      abovesSep s8 [ ppFunSig summary links loc doc (docNameOrig n) typ
+      abovesSep s8 [ ppFunSig summary links loc doc n typ
                    | L _ (TypeSig (L _ n) (L _ typ)) <- lsigs
-                   , let doc = Map.lookup (docNameOrig n) docMap ]
+                   , let doc = join $ lookup n subdocs ]
 
-    atTable = abovesSep s8 $ map (ppAssocType summary links docMap) ats
+    atTable = abovesSep s8 $ [ ppAssocType summary links doc at | at <- ats
+                             , let doc = join $ lookup (tcdName $ unL at) subdocs ]
 
-    instId = collapseId nm
+    instId = collapseId (docNameOrig nm)
     instancesBit
       | null instances = Html.emptyTable
       | otherwise 
@@ -1074,14 +1174,14 @@ ppShortDataDecl summary links loc mbDoc dataDecl
   
   where
     dataHeader = 
-      (if summary then declBox else topDeclBox links loc name)
+      (if summary then declBox else topDeclBox links loc docname)
       ((ppDataHeader summary dataDecl) <+> 
       case resTy of ResTyGADT _ -> keyword "where"; _ -> empty)
 
     doConstr c con = declBox (toHtml [c] <+> ppShortConstr summary (unLoc con))
     doGADTConstr con = declBox (ppShortConstr summary (unLoc con))
 
-    name      = docNameOrig . unLoc . tcdLName $ dataDecl
+    docname   = unLoc . tcdLName $ dataDecl
     context   = unLoc (tcdCtxt dataDecl)
     newOrData = tcdND dataDecl
     tyVars    = tyvarNames (tcdTyVars dataDecl)
@@ -1093,7 +1193,7 @@ ppDataDecl :: Bool -> LinksInfo -> [InstHead DocName] ->
               SrcSpan -> Maybe (HsDoc DocName) -> TyClDecl DocName -> HtmlTable
 ppDataDecl summary links instances loc mbDoc dataDecl
   
-  | summary = declWithDoc summary links loc name mbDoc 
+  | summary = declWithDoc summary links loc docname mbDoc 
               (ppShortDataDecl summary links loc mbDoc dataDecl)
   
   | otherwise
@@ -1106,7 +1206,7 @@ ppDataDecl summary links instances loc mbDoc dataDecl
 
 
   where
-    name      = docNameOrig . unLoc . tcdLName $ dataDecl
+    docname   = unLoc . tcdLName $ dataDecl
     context   = unLoc (tcdCtxt dataDecl)
     newOrData = tcdND dataDecl
     tyVars    = tyvarNames (tcdTyVars dataDecl)
@@ -1114,7 +1214,7 @@ ppDataDecl summary links instances loc mbDoc dataDecl
     cons      = tcdCons dataDecl
     resTy     = (con_res . unLoc . head) cons 
       
-    header = topDeclBox links loc name (ppDataHeader summary dataDecl
+    header = topDeclBox links loc docname (ppDataHeader summary dataDecl
              <+> whereBit)
 
     whereBit 
@@ -1138,7 +1238,7 @@ ppDataDecl summary links instances loc mbDoc dataDecl
 	  aboves (map ppSideBySideConstr cons)
         )
 
-    instId = collapseId name
+    instId = collapseId (docNameOrig docname)
 
     instancesBit
       | null instances = Html.emptyTable
@@ -1315,7 +1415,8 @@ ppForAll Explicit ltvs lctxt =
 -}
 
 ppBang HsStrict = toHtml "!"
-ppBang HsUnbox  = toHtml "!!"
+ppBang HsUnbox  = toHtml "!" -- unboxed args is an implementation detail,
+                             -- so we just show the strictness annotation
 
 tupleParens Boxed   = parenList
 tupleParens Unboxed = ubxParenList 
@@ -1485,29 +1586,41 @@ ppModule mod ref = anchor ! [href ((moduleHtmlFile mod) ++ ref)]
 -- -----------------------------------------------------------------------------
 -- * Doc Markup
 
-parHtmlMarkup :: (a -> Html) -> DocMarkup a Html
-parHtmlMarkup ppId = Markup {
+parHtmlMarkup :: (a -> Html) -> (a -> Bool) -> DocMarkup a Html
+parHtmlMarkup ppId isTyCon = Markup {
   markupParagraph     = paragraph,
   markupEmpty	      = toHtml "",
   markupString        = toHtml,
   markupAppend        = (+++),
-  markupIdentifier    = tt . ppId . head,
-  markupModule        = \m -> ppModule (mkModuleNoPackage m) "",
+  markupIdentifier    = tt . ppId . choose,
+  markupModule        = \m -> let (mod,ref) = break (=='#') m in ppModule (mkModuleNoPackage mod) ref,
   markupEmphasis      = emphasize . toHtml,
   markupMonospaced    = tt . toHtml,
   markupUnorderedList = ulist . concatHtml . map (li <<),
+  markupPic           = \path -> image ! [src path],
   markupOrderedList   = olist . concatHtml . map (li <<),
   markupDefList       = dlist . concatHtml . map markupDef,
   markupCodeBlock     = pre,
   markupURL	      = \url -> anchor ! [href url] << toHtml url,
   markupAName	      = \aname -> namedAnchor aname << toHtml ""
   }
+  where
+    -- If an id can refer to multiple things, we give precedence to type
+    -- constructors.  This should ideally be done during renaming from RdrName
+    -- to Name, but since we will move this process from GHC into Haddock in
+    -- the future, we fix it here in the meantime.
+    -- TODO: mention this rule in the documentation.
+    choose [x] = x
+    choose (x:y:_)
+      | isTyCon x = x
+      | otherwise = y
+
 
 markupDef (a,b) = dterm << a +++ ddef << b
 
-htmlMarkup = parHtmlMarkup ppDocName
-htmlOrigMarkup = parHtmlMarkup ppName
-htmlRdrMarkup = parHtmlMarkup ppRdrName
+htmlMarkup = parHtmlMarkup ppDocName (isTyConName . getName)
+htmlOrigMarkup = parHtmlMarkup ppName isTyConName
+htmlRdrMarkup = parHtmlMarkup ppRdrName isRdrTc
 
 -- If the doc is a single paragraph, don't surround it with <P> (this causes
 -- ugly extra whitespace with some browsers).
@@ -1542,9 +1655,12 @@ hsep :: [Html] -> Html
 hsep [] = noHtml
 hsep htmls = foldr1 (\a b -> a+++" "+++b) htmls
 
-infixr 8 <+>
+infixr 8 <+>, <++>
 (<+>) :: Html -> Html -> Html
 a <+> b = Html (getHtmlElements (toHtml a) ++ HtmlString " ": getHtmlElements (toHtml b))
+
+(<++>) :: Html -> Html -> Html
+a <++> b = a +++ spaceHtml +++ b
 
 keyword :: String -> Html
 keyword s = thespan ! [theclass "keyword"] << toHtml s
@@ -1604,9 +1720,9 @@ declBox html = tda [theclass "decl"] << html
 
 -- a box for top level documented names
 -- it adds a source and wiki link at the right hand side of the box
-topDeclBox :: LinksInfo -> SrcSpan -> Name -> Html -> HtmlTable
-topDeclBox ((_,_,Nothing), (_,_,Nothing), _) _ _ html = declBox html
-topDeclBox ((_,_,maybe_source_url), (_,_,maybe_wiki_url), iface)
+topDeclBox :: LinksInfo -> SrcSpan -> DocName -> Html -> HtmlTable
+topDeclBox ((_,_,Nothing), (_,_,Nothing)) _ _ html = declBox html
+topDeclBox ((_,_,maybe_source_url), (_,_,maybe_wiki_url))
            loc name html =
   tda [theclass "topdecl"] <<
   (        table ! [theclass "declbar"] <<
@@ -1619,26 +1735,26 @@ topDeclBox ((_,_,maybe_source_url), (_,_,maybe_wiki_url), iface)
             Nothing  -> Html.emptyTable
             Just url -> tda [theclass "declbut"] <<
                           let url' = spliceURL (Just fname) (Just origMod)
-                                               (Just name) (Just loc) url
+                                               (Just n) (Just loc) url
                            in anchor ! [href url'] << toHtml "Source"
-
-        -- for source links, we want to point to the original module,
-        -- because only that will have the source.
-        origMod = case Map.lookup (nameOccName name) (ifaceEnv iface) of
-          Just n -> case nameModule_maybe n of
-            Just m -> m
-            Nothing -> mod
-          _ -> error "This shouldn't happen (topDeclBox)"
 
         wikiLink =
           case maybe_wiki_url of
             Nothing  -> Html.emptyTable
             Just url -> tda [theclass "declbut"] <<
                           let url' = spliceURL (Just fname) (Just mod)
-                                               (Just name) (Just loc) url
+                                               (Just n) (Just loc) url
                            in anchor ! [href url'] << toHtml "Comments"
   
-        mod = ifaceMod iface
+        -- For source links, we want to point to the original module,
+        -- because only that will have the source.  
+        -- TODO: do something about type instances. They will point to
+        -- the module defining the type family, which is wrong.
+        origMod = nameModule n
+
+        -- Name must be documented, otherwise we wouldn't get here
+        Documented n mod = name
+
         fname = unpackFS (srcSpanFile loc)
 
 
@@ -1702,8 +1818,16 @@ s8, s15 :: HtmlTable
 s8  = tda [ theclass "s8" ]  << noHtml
 s15 = tda [ theclass "s15" ] << noHtml
 
+
+-- | Generate a named anchor
+--
+-- This actually generates two anchor tags, one with the name unescaped, and one
+-- with the name URI-escaped. This is needed because Opera 9.52 (and later
+-- versions) needs the name to be unescaped, while IE 7 needs it to be escaped.
+--
 namedAnchor :: String -> Html -> Html
-namedAnchor n = anchor ! [name (escapeStr n)]
+namedAnchor n = (anchor ! [name n]) . (anchor ! [name (escapeStr n)])
+
 
 --
 -- A section of HTML which is collapsible via a +/- button.

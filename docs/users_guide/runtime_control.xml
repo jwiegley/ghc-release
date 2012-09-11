@@ -130,6 +130,35 @@
          own signal handlers.</para>
        </listitem>
      </varlistentry>
+
+     <varlistentry>
+       <term><option>-xm<replaceable>address</replaceable></option>
+       <indexterm><primary><option>-xm</option></primary><secondary>RTS
+       option</secondary></indexterm></term>
+       <listitem>
+         <para>
+           WARNING: this option is for working around memory
+           allocation problems only.  Do not use unless GHCi fails
+           with a message like &ldquo;<literal>failed to mmap() memory below 2Gb</literal>&rdquo;.  If you need to use this option to get GHCi working
+           on your machine, please file a bug.
+         </para>
+         
+         <para>
+           On 64-bit machines, the RTS needs to allocate memory in the
+           low 2Gb of the address space.  Support for this across
+           different operating systems is patchy, and sometimes fails.
+           This option is there to give the RTS a hint about where it
+           should be able to allocate memory in the low 2Gb of the
+           address space.  For example, <literal>+RTS -xm20000000
+           -RTS</literal> would hint that the RTS should allocate
+           starting at the 0.5Gb mark.  The default is to use the OS's
+           built-in support for allocating memory in the low 2Gb if
+           available (e.g. <literal>mmap</literal>
+           with <literal>MAP_32BIT</literal> on Linux), or
+           otherwise <literal>-xm40000000</literal>.
+         </para>
+       </listitem>
+     </varlistentry>
     </variablelist>
   </sect2>
 
@@ -448,6 +477,10 @@
           <option>-S</option><optional><replaceable>file</replaceable></optional>
           <indexterm><primary><option>-S</option></primary><secondary>RTS option</secondary></indexterm>
         </term>
+	<term>
+          <option>--machine-readable</option>
+          <indexterm><primary><option>--machine-readable</option></primary><secondary>RTS option</secondary></indexterm>
+        </term>
 	<listitem>
 	  <para>These options produce runtime-system statistics, such
 	  as the amount of time spent executing the program and in the
@@ -512,6 +545,27 @@
         </para>
       </listitem>
     </itemizedlist>
+
+    <para>
+        You can also get this in a more future-proof, machine readable
+        format, with <literal>-t --machine-readable</literal>:
+    </para>
+
+<programlisting>
+ [("bytes allocated", "36169392")
+ ,("num_GCs", "69")
+ ,("average_bytes_used", "603392")
+ ,("max_bytes_used", "1065272")
+ ,("num_byte_usage_samples", "2")
+ ,("peak_megabytes_allocated", "3")
+ ,("init_cpu_seconds", "0.00")
+ ,("init_wall_seconds", "0.00")
+ ,("mutator_cpu_seconds", "0.02")
+ ,("mutator_wall_seconds", "0.02")
+ ,("GC_cpu_seconds", "0.07")
+ ,("GC_wall_seconds", "0.07")
+ ]
+</programlisting>
 
     <para>
         If you use the <literal>-s</literal> flag then, when your
@@ -939,18 +993,137 @@ char *ghc_rts_opts = "-H128m -K1m";
     itself. To do this, use the <option>--info</option> flag, e.g.</para>
 <screen>
 $ ./a.out +RTS --info
- [("GHC RTS", "Yes")
+ [("GHC RTS", "YES")
  ,("GHC version", "6.7")
  ,("RTS way", "rts_p")
  ,("Host platform", "x86_64-unknown-linux")
+ ,("Host architecture", "x86_64")
+ ,("Host OS", "linux")
+ ,("Host vendor", "unknown")
  ,("Build platform", "x86_64-unknown-linux")
+ ,("Build architecture", "x86_64")
+ ,("Build OS", "linux")
+ ,("Build vendor", "unknown")
  ,("Target platform", "x86_64-unknown-linux")
+ ,("Target architecture", "x86_64")
+ ,("Target OS", "linux")
+ ,("Target vendor", "unknown")
+ ,("Word size", "64")
  ,("Compiler unregisterised", "NO")
  ,("Tables next to code", "YES")
  ]
 </screen>
     <para>The information is formatted such that it can be read as a
-    of type <literal>[(String, String)]</literal>.</para>
+    of type <literal>[(String, String)]</literal>. Currently the following
+    fields are present:</para>
+
+    <variablelist>
+
+      <varlistentry>
+        <term><literal>GHC RTS</literal></term>
+        <listitem>
+          <para>Is this program linked against the GHC RTS? (always
+          "YES").</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><literal>GHC version</literal></term>
+        <listitem>
+          <para>The version of GHC used to compile this program.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><literal>RTS way</literal></term>
+        <listitem>
+          <para>The variant (&ldquo;way&rdquo;) of the runtime. The
+          most common values are <literal>rts</literal> (vanilla),
+          <literal>rts_thr</literal> (threaded runtime, i.e. linked using the
+          <literal>-threaded</literal> option) and <literal>rts_p</literal>
+          (profiling runtime, i.e. linked using the <literal>-prof</literal>
+          option). Other variants include <literal>debug</literal>
+          (linked using <literal>-debug</literal>),
+          <literal>t</literal> (ticky-ticky profiling) and
+          <literal>dyn</literal> (the RTS is
+          linked in dynamically, i.e. a shared library, rather than statically
+          linked into the executable itself). These can be combined,
+          e.g. you might have <literal>rts_thr_debug_p</literal>.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term>
+            <literal>Target platform</literal>,
+            <literal>Target architecture</literal>,
+            <literal>Target OS</literal>,
+            <literal>Target vendor</literal>
+        </term>
+        <listitem>
+          <para>These are the platform the program is compiled to run on.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term>
+            <literal>Build platform</literal>,
+            <literal>Build architecture</literal>,
+            <literal>Build OS</literal>,
+            <literal>Build vendor</literal>
+        </term>
+        <listitem>
+          <para>These are the platform where the program was built
+          on. (That is, the target platform of GHC itself.) Ordinarily
+          this is identical to the target platform. (It could potentially
+          be different if cross-compiling.)</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term>
+            <literal>Host platform</literal>,
+            <literal>Host architecture</literal>
+            <literal>Host OS</literal>
+            <literal>Host vendor</literal>
+        </term>
+        <listitem>
+          <para>These are the platform where GHC itself was compiled.
+          Again, this would normally be identical to the build and
+          target platforms.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><literal>Word size</literal></term>
+        <listitem>
+          <para>Either <literal>"32"</literal> or <literal>"64"</literal>,
+          reflecting the word size of the target platform.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><literal>Compiler unregistered</literal></term>
+        <listitem>
+          <para>Was this program compiled with an &ldquo;unregistered&rdquo;
+          version of GHC? (I.e., a version of GHC that has no platform-specific
+          optimisations compiled in, usually because this is a currently
+          unsupported platform.) This value will usually be no, unless you're
+          using an experimental build of GHC.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><literal>Tables next to code</literal></term>
+        <listitem>
+          <para>Putting info tables directly next to entry code is a useful
+          performance optimisation that is not available on all platforms.
+          This field tells you whether the program has been compiled with
+          this optimisation. (Usually yes, except on unusual platforms.)</para>
+        </listitem>
+      </varlistentry>
+
+    </variablelist>
+
   </sect2>
 </sect1>
 

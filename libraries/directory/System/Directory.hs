@@ -72,6 +72,7 @@ module System.Directory
 import Prelude hiding ( catch )
 import qualified Prelude
 
+import Control.Monad (guard)
 import System.Environment      ( getEnv )
 import System.FilePath
 import System.IO
@@ -304,14 +305,40 @@ copyPermissions fromFPath toFPath
 createDirectoryIfMissing :: Bool     -- ^ Create its parents too?
 		         -> FilePath -- ^ The path to the directory you want to make
 		         -> IO ()
-createDirectoryIfMissing parents file = do
-  b <- doesDirectoryExist file
-  case (b,parents, file) of
-    (_,     _, "") -> return ()
-    (True,  _,  _) -> return ()
-    (_,  True,  _) -> mapM_ (createDirectoryIfMissing False) $ mkParents file
-    (_, False,  _) -> createDirectory file
- where mkParents = scanl1 (</>) . splitDirectories . normalise
+createDirectoryIfMissing create_parents path0
+  | create_parents = createDirs (parents path0)
+  | otherwise      = createDirs (take 1 (parents path0))
+  where
+    parents = reverse . scanl1 (</>) . splitDirectories . normalise
+
+    createDirs []         = return ()
+    createDirs (dir:[])   = createDir dir throw
+    createDirs (dir:dirs) =
+      createDir dir $ \_ -> do
+        createDirs dirs
+        createDir dir throw
+
+    createDir :: FilePath -> (IOException -> IO ()) -> IO ()
+    createDir dir notExistHandler = do
+      r <- try $ createDirectory dir
+      case (r :: Either IOException ()) of
+        Right ()                   -> return ()
+        Left  e
+          | isDoesNotExistError  e -> notExistHandler e
+          -- createDirectory (and indeed POSIX mkdir) does not distinguish
+          -- between a dir already existing and a file already existing. So we
+          -- check for it here. Unfortunately there is a slight race condition
+          -- here, but we think it is benign. It could report an exeption in
+          -- the case that the dir did exist but another process deletes the
+          -- directory and creates a file in its place before we can check
+          -- that the directory did indeed exist.
+          | isAlreadyExistsError e ->
+              (withFileStatus "createDirectoryIfMissing" dir $ \st -> do
+                 isDir <- isDirectory st
+                 if isDir then return ()
+                          else throw e
+              ) `catch` ((\_ -> return ()) :: IOException -> IO ())
+          | otherwise              -> throw e
 
 #if __GLASGOW_HASKELL__
 {- | @'removeDirectory' dir@ removes an existing directory /dir/.  The
@@ -769,28 +796,13 @@ The operating system has no notion of current directory.
 getCurrentDirectory :: IO FilePath
 getCurrentDirectory = do
 #ifdef mingw32_HOST_OS
-  -- XXX: should use something from Win32
-  p <- mallocBytes long_path_size
-  go p long_path_size
-  where go p bytes = do
-    	  p' <- c_getcwd p (fromIntegral bytes)
-	  if p' /= nullPtr 
-	     then do s <- peekCString p'
-		     free p'
-		     return s
-	     else do errno <- getErrno
-		     if errno == eRANGE
-		        then do let bytes' = bytes * 2
-			        p'' <- reallocBytes p bytes'
-			        go p'' bytes'
-		        else throwErrno "getCurrentDirectory"
+  System.Win32.try "GetCurrentDirectory" (flip c_getCurrentDirectory) 512
+
+foreign import stdcall unsafe "GetCurrentDirectoryW"
+  c_getCurrentDirectory :: System.Win32.DWORD -> System.Win32.LPTSTR
+                        -> IO System.Win32.UINT
 #else
   System.Posix.getWorkingDirectory
-#endif
-
-#ifdef mingw32_HOST_OS
-foreign import ccall unsafe "getcwd"
-   c_getcwd   :: Ptr CChar -> CSize -> IO (Ptr CChar)
 #endif
 
 {- |If the operating system has a notion of current directories,
@@ -1056,9 +1068,11 @@ The function doesn\'t verify whether the path exists.
 getTemporaryDirectory :: IO FilePath
 getTemporaryDirectory = do
 #if defined(mingw32_HOST_OS)
-  allocaBytes long_path_size $ \pPath -> do
-     _r <- c_GetTempPath (fromIntegral long_path_size) pPath
-     peekCString pPath
+  System.Win32.try "GetTempPath" (flip c_getTempPath) 512
+
+foreign import stdcall unsafe "GetTempPathW"
+  c_getTempPath :: System.Win32.DWORD -> System.Win32.LPTSTR
+                -> IO System.Win32.UINT
 #else
   getEnv "TMPDIR"
 #if !__NHC__
@@ -1081,8 +1095,6 @@ foreign import ccall unsafe "__hscore_CSIDL_PROFILE"  csidl_PROFILE  :: CInt
 foreign import ccall unsafe "__hscore_CSIDL_APPDATA"  csidl_APPDATA  :: CInt
 foreign import ccall unsafe "__hscore_CSIDL_WINDOWS"  csidl_WINDOWS  :: CInt
 foreign import ccall unsafe "__hscore_CSIDL_PERSONAL" csidl_PERSONAL :: CInt
-
-foreign import stdcall unsafe "GetTempPathA" c_GetTempPath :: CInt -> CString -> IO CInt
 
 raiseUnsupported :: String -> IO ()
 raiseUnsupported loc = 

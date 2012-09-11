@@ -1,5 +1,5 @@
 name:           base
-version:        3.0.3.0
+version:        3.0.3.1
 license:        BSD3
 license-file:   LICENSE
 maintainer:     libraries@haskell.org
@@ -13,7 +13,7 @@ cabal-version:  >=1.2
 build-type: Simple
 
 Library {
-    build-depends: base       >= 4.0 && < 4.1,
+    build-depends: base       >= 4.0 && < 4.2,
                    syb        >= 0.1 && < 0.2
     extensions: PackageImports
 

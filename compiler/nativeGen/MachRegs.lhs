@@ -137,7 +137,7 @@ data Imm
 strImmLit s = ImmLit (text s)
 
 litToImm :: CmmLit -> Imm
-litToImm (CmmInt i _)        = ImmInteger i
+litToImm (CmmInt i w)        = ImmInteger (narrowS w i)
 litToImm (CmmFloat f F32)    = ImmFloat f
 litToImm (CmmFloat f F64)    = ImmDouble f
 litToImm (CmmLabel l)        = ImmCLbl l

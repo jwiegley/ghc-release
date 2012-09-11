@@ -285,13 +285,16 @@ checkFields pkg =
   , check (null (category pkg)) $
       PackageDistSuspicious "No 'category' field."
 
-  , check (null (description pkg)) $
-      PackageDistSuspicious "No 'description' field."
-
   , check (null (maintainer pkg)) $
       PackageDistSuspicious "No 'maintainer' field."
 
-  , check (null (synopsis pkg)) $
+  , check (null (synopsis pkg) && null (description pkg)) $
+      PackageDistInexcusable $ "No 'synopsis' or 'description' field."
+
+  , check (null (description pkg) && not (null (synopsis pkg))) $
+      PackageDistSuspicious "No 'description' field."
+
+  , check (null (synopsis pkg) && not (null (description pkg))) $
       PackageDistSuspicious "No 'synopsis' field."
 
   , check (length (synopsis pkg) >= 80) $
@@ -414,12 +417,16 @@ checkGhcOptions pkg =
       PackageDistInexcusable $
            "'ghc-options: -hide-package' is never needed. Cabal hides all packages."
 
+  , checkFlags ["--make"] $
+      PackageDistInexcusable $
+        "'ghc-options: --make' is never needed. Cabal uses this automatically."
+
   , checkFlags ["-main-is"] $
       PackageDistSuspicious $
            "'ghc-options: -main-is' is not portable."
 
   , checkFlags ["-O0", "-Onot"] $
-      PackageDistInexcusable $
+      PackageDistSuspicious $
         "'ghc-options: -O0' is not needed. Use the --disable-optimization configure flag."
 
   , checkFlags [ "-O", "-O1"] $
@@ -447,6 +454,11 @@ checkGhcOptions pkg =
   , checkFlags ["-fglasgow-exts"] $
       PackageDistSuspicious $
         "Instead of 'ghc-options: -fglasgow-exts' it is preferable to use the 'extensions' field."
+
+  , check ("-threaded" `elem` lib_ghc_options) $
+      PackageDistSuspicious $
+           "'ghc-options: -threaded' has no effect for libraries. It should "
+        ++ "only be used for executables."
 
   , checkAlternatives "ghc-options" "extensions"
       [ (flag, display extension) | flag <- all_ghc_options
@@ -484,6 +496,7 @@ checkGhcOptions pkg =
     ghc_options = [ strs | bi <- allBuildInfo pkg
                          , (GHC, strs) <- options bi ]
     all_ghc_options = concat ghc_options
+    lib_ghc_options = maybe [] (hcOptions GHC . libBuildInfo) (library pkg)
 
     checkFlags :: [String] -> PackageCheck -> Maybe PackageCheck
     checkFlags flags = check (any (`elem` flags) all_ghc_options)

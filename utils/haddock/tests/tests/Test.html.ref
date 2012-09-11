@@ -8,6 +8,8 @@
 ><LINK HREF="haddock.css" REL="stylesheet" TYPE="text/css"
 ><SCRIPT SRC="haddock-util.js" TYPE="text/javascript"
 ></SCRIPT
+><SCRIPT TYPE="text/javascript"
+>window.onload = function () {setSynopsis("mini_Test.html")};</SCRIPT
 ></HEAD
 ><BODY
 ><TABLE CLASS="vanilla" CELLSPACING="0" CELLPADDING="0"
@@ -667,44 +669,6 @@
 ></TR
 ><TR
 ><TD CLASS="decl"
-><A HREF="#v%3Ap"
->p</A
-> :: <A HREF="Test.html#t%3AR"
->R</A
-> -&gt; Int</TD
-></TR
-><TR
-><TD CLASS="s8"
-></TD
-></TR
-><TR
-><TD CLASS="decl"
-><A HREF="#v%3Aq"
->q</A
-> :: <A HREF="Test.html#t%3AR"
->R</A
-> -&gt; <SPAN CLASS="keyword"
->forall</SPAN
-> a.  a -&gt; a</TD
-></TR
-><TR
-><TD CLASS="s8"
-></TD
-></TR
-><TR
-><TD CLASS="decl"
-><A HREF="#v%3Au"
->u</A
-> :: <A HREF="Test.html#t%3AR"
->R</A
-> -&gt; Int</TD
-></TR
-><TR
-><TD CLASS="s8"
-></TD
-></TR
-><TR
-><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >class</SPAN
 > <A HREF="Test.html#t%3AD"
@@ -804,18 +768,6 @@
 ></TR
 ></TABLE
 ></TD
-></TR
-><TR
-><TD CLASS="s8"
-></TD
-></TR
-><TR
-><TD CLASS="decl"
-><A HREF="#v%3Aa"
->a</A
-> :: <A HREF="Test.html#t%3AC"
->C</A
-> a =&gt; IO a</TD
 ></TR
 ><TR
 ><TD CLASS="s8"
@@ -997,8 +949,10 @@
 ><TR
 ><TD CLASS="section1"
 ><A NAME="1"
+><A NAME="1"
 >Type declarations
 </A
+></A
 ></TD
 ></TR
 ><TR
@@ -1008,8 +962,10 @@
 ><TR
 ><TD CLASS="section2"
 ><A NAME="2"
+><A NAME="2"
 >Data types
 </A
+></A
 ></TD
 ></TR
 ><TR
@@ -1020,7 +976,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  <A NAME="t%3AT"
+>  <A NAME="t:T"
+><A NAME="t%3AT"
+></A
 ></A
 ><B
 >T</B
@@ -1046,7 +1004,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:A"
 ><A NAME="v%3AA"
+></A
 ></A
 ><B
 >A</B
@@ -1061,7 +1021,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:B"
 ><A NAME="v%3AB"
+></A
 ></A
 ><B
 >B</B
@@ -1092,7 +1054,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  <A NAME="t%3AT2"
+>  <A NAME="t:T2"
+><A NAME="t%3AT2"
+></A
 ></A
 ><B
 >T2</B
@@ -1117,7 +1081,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  <A NAME="t%3AT3"
+>  <A NAME="t:T3"
+><A NAME="t%3AT3"
+></A
 ></A
 ><B
 >T3</B
@@ -1140,7 +1106,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:A1"
 ><A NAME="v%3AA1"
+></A
 ></A
 ><B
 >A1</B
@@ -1150,7 +1118,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:B1"
 ><A NAME="v%3AB1"
+></A
 ></A
 ><B
 >B1</B
@@ -1172,7 +1142,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  <A NAME="t%3AT4"
+>  <A NAME="t:T4"
+><A NAME="t%3AT4"
+></A
 ></A
 ><B
 >T4</B
@@ -1190,7 +1162,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:A2"
 ><A NAME="v%3AA2"
+></A
 ></A
 ><B
 >A2</B
@@ -1200,7 +1174,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:B2"
 ><A NAME="v%3AB2"
+></A
 ></A
 ><B
 >B2</B
@@ -1222,7 +1198,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  <A NAME="t%3AT5"
+>  <A NAME="t:T5"
+><A NAME="t%3AT5"
+></A
 ></A
 ><B
 >T5</B
@@ -1240,7 +1218,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:A3"
 ><A NAME="v%3AA3"
+></A
 ></A
 ><B
 >A3</B
@@ -1255,7 +1235,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:B3"
 ><A NAME="v%3AB3"
+></A
 ></A
 ><B
 >B3</B
@@ -1282,7 +1264,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  <A NAME="t%3AT6"
+>  <A NAME="t:T6"
+><A NAME="t%3AT6"
+></A
 ></A
 ><B
 >T6</B
@@ -1305,7 +1289,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:A4"
 ><A NAME="v%3AA4"
+></A
 ></A
 ><B
 >A4</B
@@ -1320,7 +1306,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:B4"
 ><A NAME="v%3AB4"
+></A
 ></A
 ><B
 >B4</B
@@ -1335,7 +1323,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:C4"
 ><A NAME="v%3AC4"
+></A
 ></A
 ><B
 >C4</B
@@ -1362,7 +1352,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >newtype</SPAN
->  <A NAME="t%3AN1"
+>  <A NAME="t:N1"
+><A NAME="t%3AN1"
+></A
 ></A
 ><B
 >N1</B
@@ -1385,7 +1377,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:N1"
 ><A NAME="v%3AN1"
+></A
 ></A
 ><B
 >N1</B
@@ -1407,7 +1401,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >newtype</SPAN
->  <A NAME="t%3AN2"
+>  <A NAME="t:N2"
+><A NAME="t%3AN2"
+></A
 ></A
 ><B
 >N2</B
@@ -1430,7 +1426,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="5" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:N2"
 ><A NAME="v%3AN2"
+></A
 ></A
 ><B
 >N2</B
@@ -1443,7 +1441,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:n"
 ><A NAME="v%3An"
+></A
 ></A
 ><B
 >n</B
@@ -1468,7 +1468,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >newtype</SPAN
->  <A NAME="t%3AN3"
+>  <A NAME="t:N3"
+><A NAME="t%3AN3"
+></A
 ></A
 ><B
 >N3</B
@@ -1491,7 +1493,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="5" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:N3"
 ><A NAME="v%3AN3"
+></A
 ></A
 ><B
 >N3</B
@@ -1504,7 +1508,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:n3"
 ><A NAME="v%3An3"
+></A
 ></A
 ><B
 >n3</B
@@ -1534,7 +1540,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  <A NAME="t%3AN4"
+>  <A NAME="t:N4"
+><A NAME="t%3AN4"
+></A
 ></A
 ><B
 >N4</B
@@ -1560,7 +1568,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >newtype</SPAN
->  <A NAME="t%3AN5"
+>  <A NAME="t:N5"
+><A NAME="t%3AN5"
+></A
 ></A
 ><B
 >N5</B
@@ -1578,7 +1588,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="5" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:N5"
 ><A NAME="v%3AN5"
+></A
 ></A
 ><B
 >N5</B
@@ -1591,7 +1603,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:n5"
 ><A NAME="v%3An5"
+></A
 ></A
 ><B
 >n5</B
@@ -1617,7 +1631,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >newtype</SPAN
->  <A NAME="t%3AN6"
+>  <A NAME="t:N6"
+><A NAME="t%3AN6"
+></A
 ></A
 ><B
 >N6</B
@@ -1635,7 +1651,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="5" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:N6"
 ><A NAME="v%3AN6"
+></A
 ></A
 ><B
 >N6</B
@@ -1649,7 +1667,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:n6"
 ><A NAME="v%3An6"
+></A
 ></A
 ><B
 >n6</B
@@ -1674,7 +1694,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >newtype</SPAN
->  <A NAME="t%3AN7"
+>  <A NAME="t:N7"
+><A NAME="t%3AN7"
+></A
 ></A
 ><B
 >N7</B
@@ -1697,7 +1719,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="5" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:N7"
 ><A NAME="v%3AN7"
+></A
 ></A
 ><B
 >N7</B
@@ -1715,7 +1739,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:n7"
 ><A NAME="v%3An7"
+></A
 ></A
 ><B
 >n7</B
@@ -1739,8 +1765,10 @@
 ><TR
 ><TD CLASS="section2"
 ><A NAME="3"
+><A NAME="3"
 >Records
 </A
+></A
 ></TD
 ></TR
 ><TR
@@ -1751,7 +1779,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  <A NAME="t%3AR"
+>  <A NAME="t:R"
+><A NAME="t%3AR"
+></A
 ></A
 ><B
 >R</B
@@ -1795,7 +1825,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="5" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:C1"
 ><A NAME="v%3AC1"
+></A
 ></A
 ><B
 >C1</B
@@ -1813,7 +1845,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:p"
 ><A NAME="v%3Ap"
+></A
 ></A
 ><B
 >p</B
@@ -1828,7 +1862,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:q"
 ><A NAME="v%3Aq"
+></A
 ></A
 ><B
 >q</B
@@ -1845,7 +1881,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:r"
 ><A NAME="v%3Ar"
+></A
 ></A
 ><B
 >r</B
@@ -1864,7 +1902,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:s"
 ><A NAME="v%3As"
+></A
 ></A
 ><B
 >s</B
@@ -1886,7 +1926,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:C2"
 ><A NAME="v%3AC2"
+></A
 ></A
 ><B
 >C2</B
@@ -1904,7 +1946,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:t"
 ><A NAME="v%3At"
+></A
 ></A
 ><B
 >t</B
@@ -1922,7 +1966,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:u"
 ><A NAME="v%3Au"
+></A
 ></A
 ><B
 >u</B
@@ -1932,7 +1978,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:v"
 ><A NAME="v%3Av"
+></A
 ></A
 ><B
 >v</B
@@ -1957,7 +2005,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  <A NAME="t%3AR1"
+>  <A NAME="t:R1"
+><A NAME="t%3AR1"
+></A
 ></A
 ><B
 >R1</B
@@ -1980,7 +2030,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="5" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:C3"
 ><A NAME="v%3AC3"
+></A
 ></A
 ><B
 >C3</B
@@ -1998,7 +2050,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:s1"
 ><A NAME="v%3As1"
+></A
 ></A
 ><B
 >s1</B
@@ -2013,7 +2067,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:s2"
 ><A NAME="v%3As2"
+></A
 ></A
 ><B
 >s2</B
@@ -2028,7 +2084,9 @@
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:s3"
 ><A NAME="v%3As3"
+></A
 ></A
 ><B
 >s3</B
@@ -2064,72 +2122,12 @@
 ></TD
 ></TR
 ><TR
-><TD CLASS="decl"
-><A NAME="v%3Ap"
-></A
-><B
->p</B
-> :: <A HREF="Test.html#t%3AR"
->R</A
-> -&gt; Int</TD
-></TR
-><TR
-><TD CLASS="doc"
->This comment applies to the <TT
-><A HREF="Test.html#v%3Ap"
->p</A
-></TT
-> field
-</TD
-></TR
-><TR
-><TD CLASS="s15"
-></TD
-></TR
-><TR
-><TD CLASS="decl"
-><A NAME="v%3Aq"
-></A
-><B
->q</B
-> :: <A HREF="Test.html#t%3AR"
->R</A
-> -&gt; <SPAN CLASS="keyword"
->forall</SPAN
-> a.  a -&gt; a</TD
-></TR
-><TR
-><TD CLASS="doc"
->This comment applies to the <TT
-><A HREF="Test.html#v%3Aq"
->q</A
-></TT
-> field
-</TD
-></TR
-><TR
-><TD CLASS="s15"
-></TD
-></TR
-><TR
-><TD CLASS="decl"
-><A NAME="v%3Au"
-></A
-><B
->u</B
-> :: <A HREF="Test.html#t%3AR"
->R</A
-> -&gt; Int</TD
-></TR
-><TR
-><TD CLASS="s15"
-></TD
-></TR
-><TR
 ><TD CLASS="section1"
+><A NAME="4"
 ><A NAME="4"
 >Class declarations
 </A
+></A
 ></TD
 ></TR
 ><TR
@@ -2142,7 +2140,9 @@
 >class</SPAN
 > <A HREF="Test.html#t%3AD"
 >D</A
-> a =&gt; <A NAME="t%3AC"
+> a =&gt; <A NAME="t:C"
+><A NAME="t%3AC"
+></A
 ></A
 ><B
 >C</B
@@ -2177,7 +2177,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="0" CELLPADDING="0"
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:a"
 ><A NAME="v%3Aa"
+></A
 ></A
 ><B
 >a</B
@@ -2198,7 +2200,9 @@
 ></TR
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:b"
 ><A NAME="v%3Ab"
+></A
 ></A
 ><B
 >b</B
@@ -2227,7 +2231,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >class</SPAN
->  <A NAME="t%3AD"
+>  <A NAME="t:D"
+><A NAME="t%3AD"
+></A
 ></A
 ><B
 >D</B
@@ -2256,7 +2262,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="0" CELLPADDING="0"
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:d"
 ><A NAME="v%3Ad"
+></A
 ></A
 ><B
 >d</B
@@ -2270,7 +2278,9 @@
 ></TR
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:e"
 ><A NAME="v%3Ae"
+></A
 ></A
 ><B
 >e</B
@@ -2319,7 +2329,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >class</SPAN
->  <A NAME="t%3AE"
+>  <A NAME="t:E"
+><A NAME="t%3AE"
+></A
 ></A
 ><B
 >E</B
@@ -2344,7 +2356,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >class</SPAN
->  <A NAME="t%3AF"
+>  <A NAME="t:F"
+><A NAME="t%3AF"
+></A
 ></A
 ><B
 >F</B
@@ -2368,7 +2382,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="0" CELLPADDING="0"
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:ff"
 ><A NAME="v%3Aff"
+></A
 ></A
 ><B
 >ff</B
@@ -2394,33 +2410,12 @@
 ></TD
 ></TR
 ><TR
-><TD CLASS="decl"
-><A NAME="v%3Aa"
-></A
-><B
->a</B
-> :: <A HREF="Test.html#t%3AC"
->C</A
-> a =&gt; IO a</TD
-></TR
-><TR
-><TD CLASS="doc"
->this is a description of the <TT
-><A HREF="Test.html#v%3Aa"
->a</A
-></TT
-> method
-</TD
-></TR
-><TR
-><TD CLASS="s15"
-></TD
-></TR
-><TR
 ><TD CLASS="section1"
+><A NAME="5"
 ><A NAME="5"
 >Function types
 </A
+></A
 ></TD
 ></TR
 ><TR
@@ -2429,7 +2424,9 @@
 ></TR
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:f"
 ><A NAME="v%3Af"
+></A
 ></A
 ><B
 >f</B
@@ -2495,7 +2492,9 @@ using double quotes: <A HREF="Foo.html"
 ></TR
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:g"
 ><A NAME="v%3Ag"
+></A
 ></A
 ><B
 >g</B
@@ -2513,8 +2512,10 @@ using double quotes: <A HREF="Foo.html"
 ><TR
 ><TD CLASS="section1"
 ><A NAME="6"
+><A NAME="6"
 >Auxiliary stuff
 </A
+></A
 ></TD
 ></TR
 ><TR
@@ -2709,8 +2710,10 @@ test2
 ><TR
 ><TD CLASS="section1"
 ><A NAME="7"
+><A NAME="7"
 >A hidden module
 </A
+></A
 ></TD
 ></TR
 ><TR
@@ -2719,7 +2722,9 @@ test2
 ></TR
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:hidden"
 ><A NAME="v%3Ahidden"
+></A
 ></A
 ><B
 >hidden</B
@@ -2732,8 +2737,10 @@ test2
 ><TR
 ><TD CLASS="section1"
 ><A NAME="8"
+><A NAME="8"
 >A visible module
 </A
+></A
 ></TD
 ></TR
 ><TR
@@ -2762,8 +2769,10 @@ test2
 ><TR
 ><TD CLASS="section1"
 ><A NAME="9"
+><A NAME="9"
 >Existential / Universal types
 </A
+></A
 ></TD
 ></TR
 ><TR
@@ -2774,7 +2783,9 @@ test2
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  <A NAME="t%3AEx"
+>  <A NAME="t:Ex"
+><A NAME="t%3AEx"
+></A
 ></A
 ><B
 >Ex</B
@@ -2801,7 +2812,9 @@ test2
 >forall</SPAN
 > b . <A HREF="Test.html#t%3AC"
 >C</A
-> b =&gt; <A NAME="v%3AEx1"
+> b =&gt; <A NAME="v:Ex1"
+><A NAME="v%3AEx1"
+></A
 ></A
 ><B
 >Ex1</B
@@ -2813,7 +2826,9 @@ test2
 ><TD CLASS="arg"
 ><SPAN CLASS="keyword"
 >forall</SPAN
-> b . <A NAME="v%3AEx2"
+> b . <A NAME="v:Ex2"
+><A NAME="v%3AEx2"
+></A
 ></A
 ><B
 >Ex2</B
@@ -2827,7 +2842,9 @@ test2
 >forall</SPAN
 > b . <A HREF="Test.html#t%3AC"
 >C</A
-> a =&gt; <A NAME="v%3AEx3"
+> a =&gt; <A NAME="v:Ex3"
+><A NAME="v%3AEx3"
+></A
 ></A
 ><B
 >Ex3</B
@@ -2837,7 +2854,9 @@ test2
 ></TR
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:Ex4"
 ><A NAME="v%3AEx4"
+></A
 ></A
 ><B
 >Ex4</B
@@ -2860,8 +2879,10 @@ test2
 ><TR
 ><TD CLASS="section1"
 ><A NAME="10"
+><A NAME="10"
 >Type signatures with argument docs
 </A
+></A
 ></TD
 ></TR
 ><TR
@@ -2870,7 +2891,9 @@ test2
 ></TR
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:k"
 ><A NAME="v%3Ak"
+></A
 ></A
 ><B
 >k</B
@@ -2946,7 +2969,9 @@ test2
 ></TR
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:l"
 ><A NAME="v%3Al"
+></A
 ></A
 ><B
 >l</B
@@ -2980,7 +3005,9 @@ test2
 ></TR
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:m"
 ><A NAME="v%3Am"
+></A
 ></A
 ><B
 >m</B
@@ -3027,7 +3054,9 @@ test2
 ></TR
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:o"
 ><A NAME="v%3Ao"
+></A
 ></A
 ><B
 >o</B
@@ -3065,8 +3094,10 @@ test2
 ><TR
 ><TD CLASS="section1"
 ><A NAME="11"
+><A NAME="11"
 >A section
 </A
+></A
 ></TD
 ></TR
 ><TR
@@ -3076,8 +3107,10 @@ test2
 ><TR
 ><TD CLASS="section2"
 ><A NAME="12"
+><A NAME="12"
 >A subsection 
 </A
+></A
 ></TD
 ></TR
 ><TR
@@ -3102,7 +3135,9 @@ test2
 ></TR
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:f'"
 ><A NAME="v%3Af%27"
+></A
 ></A
 ><B
 >f'</B
@@ -3126,7 +3161,7 @@ test2
 ><TD CLASS="botbar"
 >Produced by <A HREF="http://www.haskell.org/haddock/"
 >Haddock</A
-> version 2.2.2</TD
+> version 2.4.2</TD
 ></TR
 ></TABLE
 ></BODY

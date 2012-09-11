@@ -5,7 +5,7 @@
 -- Module      :  Control.Exception
 -- Copyright   :  (c) The University of Glasgow 2001
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  experimental
 -- Portability :  non-portable (extended exceptions)
@@ -24,6 +24,9 @@
 --
 --  * /Asynchronous exceptions in Haskell/, by Simon Marlow, Simon Peyton
 --    Jones, Andy Moran and John Reppy, in /PLDI'01/.
+--
+--  * /An Extensible Dynamically-Typed Hierarchy of Exceptions/,
+--    by Simon Marlow, in /Haskell '06/.
 --
 -----------------------------------------------------------------------------
 
@@ -47,7 +50,7 @@ module Control.Exception (
         NestedAtomically(..),
 #endif
 #ifdef __NHC__
-        System.ExitCode(),	-- instance Exception
+        System.ExitCode(), -- instance Exception
 #endif
 
         BlockedOnDeadMVar(..),
@@ -61,38 +64,39 @@ module Control.Exception (
         ErrorCall(..),
 
         -- * Throwing exceptions
-        throwIO,        -- :: Exception -> IO a
-        throw,          -- :: Exception -> a
-        ioError,        -- :: IOError -> IO a
+        throw,
+        throwIO,
+        ioError,
 #ifdef __GLASGOW_HASKELL__
-        throwTo,        -- :: ThreadId -> Exception -> a
+        throwTo,
 #endif
 
         -- * Catching Exceptions
 
-        -- |There are several functions for catching and examining
-        -- exceptions; all of them may only be used from within the
-        -- 'IO' monad.
+        -- $catching
+
+        -- ** Catching all exceptions
+
+        -- $catchall
 
         -- ** The @catch@ functions
-        catch,     -- :: IO a -> (Exception -> IO a) -> IO a
+        catch,
         catches, Handler(..),
-        catchJust, -- :: (Exception -> Maybe b) -> IO a -> (b -> IO a) -> IO a
+        catchJust,
 
         -- ** The @handle@ functions
-        handle,    -- :: (Exception -> IO a) -> IO a -> IO a
-        handleJust,-- :: (Exception -> Maybe b) -> (b -> IO a) -> IO a -> IO a
+        handle,
+        handleJust,
 
         -- ** The @try@ functions
-        try,       -- :: IO a -> IO (Either Exception a)
-        tryJust,   -- :: (Exception -> Maybe b) -> a    -> IO (Either b a)
-        onException,
+        try,
+        tryJust,
 
         -- ** The @evaluate@ function
-        evaluate,  -- :: a -> IO a
+        evaluate,
 
         -- ** The @mapException@ function
-        mapException,           -- :: (Exception -> Exception) -> a -> a
+        mapException,
 
         -- * Asynchronous Exceptions
 
@@ -103,9 +107,9 @@ module Control.Exception (
         -- |The following two functions allow a thread to control delivery of
         -- asynchronous exceptions during a critical region.
 
-        block,          -- :: IO a -> IO a
-        unblock,        -- :: IO a -> IO a
-        blocked,        -- :: IO Bool
+        block,
+        unblock,
+        blocked,
 
         -- *** Applying @block@ to an exception handler
 
@@ -117,15 +121,17 @@ module Control.Exception (
 
         -- * Assertions
 
-        assert,         -- :: Bool -> a -> a
+        assert,
 
         -- * Utilities
 
-        bracket,        -- :: IO a -> (a -> IO b) -> (a -> IO c) -> IO ()
-        bracket_,       -- :: IO a -> IO b -> IO c -> IO ()
+        bracket,
+        bracket_,
         bracketOnError,
 
-        finally,        -- :: IO a -> IO b -> IO a
+        finally,
+        onException,
+
   ) where
 
 import Control.Exception.Base
@@ -142,8 +148,27 @@ import Prelude hiding (catch)
 import System (ExitCode())
 #endif
 
+-- | You need this when using 'catches'.
 data Handler a = forall e . Exception e => Handler (e -> IO a)
 
+{- |
+Sometimes you want to catch two different sorts of exception. You could
+do something like
+
+> f = expr `catch` \ (ex :: ArithException) -> handleArith ex
+>          `catch` \ (ex :: IOException)    -> handleIO    ex
+
+However, there are a couple of problems with this approach. The first is
+that having two exception handlers is inefficient. However, the more
+serious issue is that the second exception handler will catch exceptions
+in the first, e.g. in the example above, if @handleArith@ throws an
+@IOException@ then the second exception handler will catch it.
+
+Instead, we provide a function 'catches', which would be used thus:
+
+> f = expr `catches` [Handler (\ (ex :: ArithException) -> handleArith ex),
+>                     Handler (\ (ex :: IOException)    -> handleIO    ex)]
+-}
 catches :: IO a -> [Handler a] -> IO a
 catches io handlers = io `catch` catchesHandler handlers
 
@@ -153,6 +178,45 @@ catchesHandler handlers e = foldr tryHandler (throw e) handlers
               = case fromException e of
                 Just e' -> handler e'
                 Nothing -> res
+
+-- -----------------------------------------------------------------------------
+-- Catching exceptions
+
+{- $catching
+
+There are several functions for catching and examining
+exceptions; all of them may only be used from within the
+'IO' monad.
+
+Here's a rule of thumb for deciding which catch-style function to
+use:
+
+ * If you want to do some cleanup in the event that an exception
+   is raised, use 'finally', 'bracket' or 'onException'.
+
+ * To recover after an exception and do something else, the best
+   choice is to use one of the 'try' family.
+
+ * ... unless you are recovering from an asynchronous exception, in which
+   case use 'catch' or 'catchJust'.
+
+The difference between using 'try' and 'catch' for recovery is that in
+'catch' the handler is inside an implicit 'block' (see \"Asynchronous
+Exceptions\") which is important when catching asynchronous
+exceptions, but when catching other kinds of exception it is
+unnecessary.  Furthermore it is possible to accidentally stay inside
+the implicit 'block' by tail-calling rather than returning from the
+handler, which is why we recommend using 'try' rather than 'catch' for
+ordinary exception recovery.
+
+A typical use of 'tryJust' for recovery looks like this:
+
+>  do r <- tryJust (guard . isDoesNotExistError) $ getEnv "HOME"
+>     case r of
+>       Left  e    -> ...
+>       Right home -> ...
+
+-}
 
 -- -----------------------------------------------------------------------------
 -- Asynchronous exceptions
@@ -198,9 +262,8 @@ If you need to unblock asynchronous exceptions again in the exception
 handler, just use 'unblock' as normal.
 
 Note that 'try' and friends /do not/ have a similar default, because
-there is no exception handler in this case.  If you want to use 'try'
-in an asynchronous-exception-safe way, you will need to use
-'block'.
+there is no exception handler in this case.  Don't use 'try' for
+recovering from an asynchronous exception.
 -}
 
 {- $interruptible
@@ -230,3 +293,47 @@ until the point when the 'Control.Concurrent.MVar.takeMVar' succeeds.
 Similar arguments apply for other interruptible operations like
 'System.IO.openFile'.
 -}
+
+{- $catchall
+
+It is possible to catch all exceptions, by using the type 'SomeException':
+
+> catch f (\e -> ... (e :: SomeException) ...)
+
+HOWEVER, this is normally not what you want to do!
+
+For example, suppose you want to read a file, but if it doesn't exist
+then continue as if it contained \"\".  You might be tempted to just
+catch all exceptions and return \"\" in the handler. However, this has
+all sorts of undesirable consequences.  For example, if the user
+presses control-C at just the right moment then the 'UserInterrupt'
+exception will be caught, and the program will continue running under
+the belief that the file contains \"\".  Similarly, if another thread
+tries to kill the thread reading the file then the 'ThreadKilled'
+exception will be ignored.
+
+Instead, you should only catch exactly the exceptions that you really
+want. In this case, this would likely be more specific than even
+\"any IO exception\"; a permissions error would likely also want to be
+handled differently. Instead, you would probably want something like:
+
+> e <- tryJust (guard . isDoesNotExistError) (readFile f)
+> let str = either (const "") id e
+
+There are occassions when you really do need to catch any sort of
+exception. However, in most cases this is just so you can do some
+cleaning up; you aren't actually interested in the exception itself.
+For example, if you open a file then you want to close it again,
+whether processing the file executes normally or throws an exception.
+However, in these cases you can use functions like 'bracket', 'finally'
+and 'onException', which never actually pass you the exception, but
+just call the cleanup functions at the appropriate points.
+
+But sometimes you really do need to catch any exception, and actually
+see what the exception is. One example is at the very top-level of a
+program, you may wish to catch any exception, print it to a logfile or
+the screen, and then exit gracefully. For these cases, you can use
+'catch' (or one of the other exception-catching functions) with the
+'SomeException' type.
+-}
+

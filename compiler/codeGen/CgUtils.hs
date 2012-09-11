@@ -111,7 +111,7 @@ mkSimpleLit (MachWord i)      = CmmInt i wordRep
 mkSimpleLit (MachWord64 i)    = CmmInt i I64
 mkSimpleLit (MachFloat r)     = CmmFloat r F32
 mkSimpleLit (MachDouble r)    = CmmFloat r F64
-mkSimpleLit (MachLabel fs ms) = CmmLabel (mkForeignLabel fs ms is_dyn)
+mkSimpleLit (MachLabel fs ms fod) = CmmLabel (mkForeignLabel fs ms is_dyn fod)
 			      where
 				is_dyn = False	-- ToDo: fix me
 	

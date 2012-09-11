@@ -1,4 +1,5 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE ForeignFunctionInterface, PatternSignatures #-}
+
 --
 -- Haddock - A Haskell Documentation Tool
 --
@@ -159,26 +160,29 @@ main = handleTopExceptions $ do
 #endif
 
 #if __GLASGOW_HASKELL__ >= 609
+      -- We have one global error handler for all GHC source errors.  Other kinds
+      -- of exceptions will be propagated to the top-level error handler. 
+      let handleSrcErrors action = flip handleSourceError action $ \err -> do
+            printExceptionAndWarnings err
+            liftIO exitFailure
+
       -- initialize GHC
-      startGhc libDir (ghcFlags flags) $ \dynflags -> do
+      startGhc libDir (ghcFlags flags) $ \dynflags -> handleSrcErrors $ do
 
         -- get packages supplied with --read-interface
         packages <- readInterfaceFiles nameCacheFromGhc (ifacePairs flags)
 
-        -- combine the link envs of the external packages into one
-        let extLinks = Map.unions (map (ifLinkEnv . fst) packages)
 
         -- create the interfaces -- this is the core part of Haddock
-        (interfaces, homeLinks) <- createInterfaces fileArgs extLinks flags
+        (interfaces, homeLinks) <- createInterfaces fileArgs flags
+                                                    (map fst packages)
 
-        let visibleIfaces = [ i | i <- interfaces, OptHide `notElem` ifaceOptions i ]
- 
         liftIO $ do
           -- render the interfaces
-          renderStep packages visibleIfaces
+          renderStep packages interfaces
  
           -- last but not least, dump the interface file
-          dumpInterfaceFile (map toInstalledIface visibleIfaces) homeLinks flags
+          dumpInterfaceFile (map toInstalledIface interfaces) homeLinks flags
 #else
       -- initialize GHC
       (session, dynflags) <- startGhc libDir (ghcFlags flags)
@@ -186,19 +190,15 @@ main = handleTopExceptions $ do
       -- get packages supplied with --read-interface
       packages <- readInterfaceFiles (nameCacheFromGhc session) (ifacePairs flags)
 
-      -- combine the link envs of the external packages into one
-      let extLinks = Map.unions (map (ifLinkEnv . fst) packages)
-
       -- create the interfaces -- this is the core part of Haddock
-      (interfaces, homeLinks) <- createInterfaces session fileArgs extLinks flags
-
-      let visibleIfaces = [ i | i <- interfaces, OptHide `notElem` ifaceOptions i ]
+      (interfaces, homeLinks) <- createInterfaces session fileArgs flags
+                                                  (map fst packages)
 
       -- render the interfaces
-      renderStep packages visibleIfaces
+      renderStep packages interfaces
  
       -- last but not least, dump the interface file
-      dumpInterfaceFile (map toInstalledIface visibleIfaces) homeLinks flags
+      dumpInterfaceFile (map toInstalledIface interfaces) homeLinks flags
 #endif
     else do
       -- get packages supplied with --read-interface
@@ -215,7 +215,7 @@ main = handleTopExceptions $ do
 
 -- | Render the interfaces with whatever backend is specified in the flags 
 render :: [Flag] -> [Interface] -> [InstalledInterface] -> IO ()
-render flags visibleIfaces installedIfaces = do
+render flags ifaces installedIfaces = do
   let
     title = case [str | Flag_Heading str <- flags] of
 		[] -> ""
@@ -270,11 +270,13 @@ render flags visibleIfaces installedIfaces = do
   prologue <- getPrologue flags
 
   let 
+    visibleIfaces    = [ i | i <- ifaces, OptHide `notElem` ifaceOptions i ]
+
     -- *all* visible interfaces including external package modules
-    allVisibleIfaces = map toInstalledIface visibleIfaces
-                       ++ installedIfaces
-    
-    packageMod       = ifaceMod (head visibleIfaces)
+    allIfaces        = map toInstalledIface ifaces ++ installedIfaces
+    allVisibleIfaces = [ i | i <- allIfaces, OptHide `notElem` instOptions i ]
+
+    packageMod       = ifaceMod (head ifaces)
     packageStr       = Just (modulePackageString packageMod)
     (pkgName,pkgVer) = modulePackageInfo packageMod
 
@@ -302,7 +304,9 @@ render flags visibleIfaces installedIfaces = do
     copyHtmlBits odir libdir css_file
 
   when (Flag_Hoogle `elem` flags) $ do
-    ppHoogle pkgName pkgVer title prologue visibleIfaces odir
+    let pkgName2 = if pkgName == "main" && title /= [] then title else pkgName
+    ppHoogle pkgName2 pkgVer title prologue visibleIfaces odir
+
 
 -------------------------------------------------------------------------------
 -- Reading and dumping interface files

@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [6.10.1], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [6.10.2], [glasgow-haskell-bugs@haskell.org], [ghc])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=YES}
@@ -682,6 +682,22 @@ fi
 # Check whether this GHC has editline installed
 FP_GHC_HAS_EDITLINE
 
+# Dummy arguments to print help for --with-editline-* arguments.
+# Those are actually passed to the editline package's configure script
+# via the CONFIGURE_ARGS variable in mk/config.mk
+AC_ARG_WITH(dummy-editline-includes,
+  [AC_HELP_STRING([--with-editline-includes],
+    [directory containing editline/editline.h or editline/readline.h])],
+    [],
+    [])
+
+AC_ARG_WITH(dummy-editline-libraries,
+  [AC_HELP_STRING([--with-editline-libraries],
+    [directory containing the editline library])],
+    [],
+    [])
+
+
 AC_PATH_PROGS(NHC,nhc nhc98)
 AC_PATH_PROG(HBC,hbc)
 
@@ -727,8 +743,9 @@ dnl ** Build shared and/or static libs?
 dnl --------------------------------------------------------------
 AC_ARG_ENABLE(shared,
 [AC_HELP_STRING([--enable-shared],
-[Build shared libraries, if available. [default=no]])],
+[Build shared libraries, if available (EXPERIMENTAL, non-working). [default=no]])],
 [ if test x"$enableval" = x"yes"; then
+        AC_MSG_WARN([--enable-shared is experimental and not fully supported at this time])
         BuildSharedLibs=YES
   else
         BuildSharedLibs=NO
@@ -1104,6 +1121,19 @@ fi
 dnl ** check for more functions
 dnl ** The following have been verified to be used in ghc/, but might be used somewhere else, too.
 AC_CHECK_FUNCS([getclock getrusage gettimeofday setitimer siginterrupt sysconf times ctime_r])
+
+AC_TRY_RUN([
+#include <sys/types.h>
+#include <sys/time.h>
+int main(void) {
+  struct itimerval tval;
+  tval.it_value.tv_sec = 1;
+  tval.it_value.tv_usec = 0;
+  tval.it_interval = tval.it_value;
+  return setitimer(ITIMER_VIRTUAL, &tval, (void*)0) != 0;
+}
+],[AC_DEFINE([HAVE_SETITIMER_VIRTUAL], [1], [Define to 1 if setitimer accepts ITIMER_VIRTUAL, 0 else.])])
+
 dnl ** On OS X 10.4 (at least), time.h doesn't declare ctime_r if
 dnl ** _POSIX_C_SOURCE is defined
 AC_CHECK_DECLS([ctime_r], , ,
@@ -1273,6 +1303,26 @@ else
 fi
 AC_SUBST(HavePapi)
 
-AC_CONFIG_FILES([mk/config.mk compiler/ghc.cabal ghc/ghc-bin.cabal ghc.spec extra-gcc-opts docs/users_guide/ug-book.xml])
+AC_CONFIG_FILES([mk/config.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal ghc.spec extra-gcc-opts docs/users_guide/ug-book.xml])
 AC_CONFIG_COMMANDS([mk/stamp-h],[echo timestamp > mk/stamp-h])
 AC_OUTPUT
+
+# We get caught by
+#     http://savannah.gnu.org/bugs/index.php?1516
+#     $(eval ...) inside conditionals causes errors
+# with make 3.80, so warn the user if it looks like they're about to
+# try to use it.
+# We would use "grep -q" here, but Solaris's grep doesn't support it.
+checkMake380() {
+    if $1 --version 2>&1 | head -1 | grep 'GNU Make 3\.80' > /dev/null
+    then
+        echo
+        echo "WARNING: It looks like \"$1\" is GNU make 3.80."
+        echo "This version cannot be used to build GHC."
+        echo "Please use GNU make >= 3.81."
+    fi
+}
+
+checkMake380 make
+checkMake380 gmake
+

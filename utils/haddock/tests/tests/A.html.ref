@@ -8,6 +8,8 @@
 ><LINK HREF="haddock.css" REL="stylesheet" TYPE="text/css"
 ><SCRIPT SRC="haddock-util.js" TYPE="text/javascript"
 ></SCRIPT
+><SCRIPT TYPE="text/javascript"
+>window.onload = function () {setSynopsis("mini_A.html")};</SCRIPT
 ></HEAD
 ><BODY
 ><TABLE CLASS="vanilla" CELLSPACING="0" CELLPADDING="0"
@@ -68,7 +70,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  <A NAME="t%3AA"
+>  <A NAME="t:A"
+><A NAME="t%3AA"
+></A
 ></A
 ><B
 >A</B
@@ -86,7 +90,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:A"
 ><A NAME="v%3AA"
+></A
 ></A
 ><B
 >A</B
@@ -108,7 +114,7 @@
 ><TD CLASS="botbar"
 >Produced by <A HREF="http://www.haskell.org/haddock/"
 >Haddock</A
-> version 2.2.2</TD
+> version 2.4.2</TD
 ></TR
 ></TABLE
 ></BODY

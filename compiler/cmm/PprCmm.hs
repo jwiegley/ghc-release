@@ -42,6 +42,7 @@ import Cmm
 import CmmUtils
 import MachOp
 import CLabel
+import BasicTypes
 
 import ForeignCall
 import Unique
@@ -263,7 +264,7 @@ pprStmt stmt = case stmt of
         pprStmt (CmmCall (CmmCallee (CmmLit lbl) CCallConv)
                         results args safety ret)
         where
-          lbl = CmmLabel (mkForeignLabel (mkFastString (show op)) Nothing False)
+          lbl = CmmLabel (mkForeignLabel (mkFastString (show op)) Nothing False IsFunction)
 
     CmmBranch ident          -> genBranch ident
     CmmCondBranch expr ident -> genCondBranch expr ident

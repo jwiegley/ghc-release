@@ -23,7 +23,13 @@ import Name
 import SrcLoc
 import InstEnv
 import Class
+
+#if __GLASGOW_HASKELL__ >= 610 && __GHC_PATCHLEVEL__ >= 2
+import TypeRep hiding (funTyConName)
+#else
 import TypeRep
+#endif
+
 import Var hiding (varName)
 import TyCon
 import PrelNames
@@ -43,9 +49,9 @@ attachInstances modules filterNames = map attach modules
       where
         newItems = map attachExport (ifaceExportItems mod)
 
-        attachExport (ExportDecl decl@(L _ (TyClD d)) doc _)
+        attachExport (ExportDecl decl@(L _ (TyClD d)) doc subs _)
           | isClassDecl d || isDataDecl d || isFamilyDecl d =
-             ExportDecl decl doc (case Map.lookup (tcdName d) instMap of
+             ExportDecl decl doc subs (case Map.lookup (tcdName d) instMap of
                                     Nothing -> []
                                     Just instheads -> instheads)
         attachExport export = export

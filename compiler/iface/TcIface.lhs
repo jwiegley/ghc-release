@@ -363,36 +363,27 @@ tcIfaceDecl _ (IfaceData {ifName = occ_name,
 			  ifRec = is_rec, 
 			  ifGeneric = want_generic,
 			  ifFamInst = mb_family })
-  = do	{ tc_name <- lookupIfaceTop occ_name
-	; bindIfaceTyVars tv_bndrs $ \ tyvars -> do
-
-	{ tycon <- fixM ( \ tycon -> do
+  = bindIfaceTyVars_AT tv_bndrs $ \ tyvars -> do
+    { tc_name <- lookupIfaceTop occ_name
+    ; tycon <- fixM ( \ tycon -> do
 	    { stupid_theta <- tcIfaceCtxt ctxt
-	    ; famInst <- 
-	        case mb_family of
-		  Nothing         -> return Nothing
-		  Just (fam, tys) -> 
-		    do { famTyCon <- tcIfaceTyCon fam
-		       ; insttys <- mapM tcIfaceType tys
-		       ; return $ Just (famTyCon, insttys)
-		       }
+	    ; mb_fam_inst  <- tcFamInst mb_family
 	    ; cons <- tcIfaceDataCons tc_name tycon tyvars rdr_cons
 	    ; buildAlgTyCon tc_name tyvars stupid_theta
-			    cons is_rec want_generic gadt_syn famInst
+			    cons is_rec want_generic gadt_syn mb_fam_inst
 	    })
-        ; traceIf (text "tcIfaceDecl4" <+> ppr tycon)
-	; return (ATyCon tycon)
-    }}
+    ; traceIf (text "tcIfaceDecl4" <+> ppr tycon)
+    ; return (ATyCon tycon) }
 
 tcIfaceDecl _ (IfaceSyn {ifName = occ_name, ifTyVars = tv_bndrs, 
 		         ifSynRhs = mb_rhs_ty,
 		         ifSynKind = kind, ifFamInst = mb_family})
-   = bindIfaceTyVars tv_bndrs $ \ tyvars -> do
+   = bindIfaceTyVars_AT tv_bndrs $ \ tyvars -> do
      { tc_name <- lookupIfaceTop occ_name
      ; rhs_kind <- tcIfaceType kind	-- Note [Synonym kind loop]
      ; ~(rhs, fam) <- forkM (mk_doc tc_name) $ 
        	      	      do { rhs <- tc_syn_rhs rhs_kind mb_rhs_ty
-			 ; fam <- tc_syn_fam mb_family
+			 ; fam <- tcFamInst mb_family
 			 ; return (rhs, fam) }
      ; tycon <- buildSynTyCon tc_name tyvars rhs rhs_kind fam
      ; return $ ATyCon tycon
@@ -402,12 +393,6 @@ tcIfaceDecl _ (IfaceSyn {ifName = occ_name, ifTyVars = tv_bndrs,
      tc_syn_rhs kind Nothing   = return (OpenSynTyCon kind Nothing)
      tc_syn_rhs _    (Just ty) = do { rhs_ty <- tcIfaceType ty
 		   		    ; return (SynonymTyCon rhs_ty) }
-     tc_syn_fam Nothing 
-       = return Nothing
-     tc_syn_fam (Just (fam, tys)) 
-       = do { famTyCon <- tcIfaceTyCon fam
-      	    ; insttys <- mapM tcIfaceType tys
-       	    ; return $ Just (famTyCon, insttys) }
 
 tcIfaceDecl ignore_prags
 	    (IfaceClass {ifCtxt = rdr_ctxt, ifName = occ_name, 
@@ -422,7 +407,7 @@ tcIfaceDecl ignore_prags
     ; sigs <- mapM tc_sig rdr_sigs
     ; fds  <- mapM tc_fd rdr_fds
     ; ats' <- mapM (tcIfaceDecl ignore_prags) rdr_ats
-    ; let ats = zipWith setTyThingPoss ats' (map ifTyVars rdr_ats)
+    ; let ats = map (setAssocFamilyPermutation tyvars) ats'
     ; cls  <- buildClass ignore_prags cls_name tyvars ctxt fds ats sigs tc_isrec
     ; return (AClass cls) }
   where
@@ -440,23 +425,16 @@ tcIfaceDecl ignore_prags
 			   ; tvs2' <- mapM tcIfaceTyVar tvs2
 			   ; return (tvs1', tvs2') }
 
-   -- For each AT argument compute the position of the corresponding class
-   -- parameter in the class head.  This will later serve as a permutation
-   -- vector when checking the validity of instance declarations.
-   setTyThingPoss (ATyCon tycon) atTyVars = 
-     let classTyVars = map fst tv_bndrs
-	 poss        =   catMaybes 
-		       . map ((`elemIndex` classTyVars) . fst) 
-		       $ atTyVars
-		    -- There will be no Nothing, as we already passed renaming
-     in 
-     ATyCon (setTyConArgPoss tycon poss)
-   setTyThingPoss _		  _ = panic "TcIface.setTyThingPoss"
-
 tcIfaceDecl _ (IfaceForeign {ifName = rdr_name, ifExtName = ext_name})
   = do	{ name <- lookupIfaceTop rdr_name
 	; return (ATyCon (mkForeignTyCon name ext_name 
 					 liftedTypeKind 0)) }
+
+tcFamInst :: Maybe (IfaceTyCon, [IfaceType]) -> IfL (Maybe (TyCon, [Type]))
+tcFamInst Nothing           = return Nothing
+tcFamInst (Just (fam, tys)) = do { famTyCon <- tcIfaceTyCon fam
+      	    			 ; insttys <- mapM tcIfaceType tys
+       	    			 ; return $ Just (famTyCon, insttys) }
 
 tcIfaceDataCons :: Name -> TyCon -> [TyVar] -> IfaceConDecls -> IfL AlgTyConRhs
 tcIfaceDataCons tycon_name tycon _ if_cons
@@ -1119,6 +1097,7 @@ bindIfaceBndrs (b:bs) thing_inside
     bindIfaceBndrs bs	$ \ bs' ->
     thing_inside (b':bs')
 
+
 -----------------------
 tcIfaceLetBndr :: IfaceLetBndr -> IfL Id
 tcIfaceLetBndr (IfLetBndr fs ty info)
@@ -1166,5 +1145,20 @@ mk_iface_tyvar name ifKind
 		return (Var.mkCoVar name kind)
 	  else
 		return (Var.mkTyVar name kind) }
-\end{code}
+
+bindIfaceTyVars_AT :: [IfaceTvBndr] -> ([TyVar] -> IfL a) -> IfL a
+-- Used for type variable in nested associated data/type declarations
+-- where some of the type variables are already in scope
+--    class C a where { data T a b }
+-- Here 'a' is in scope when we look at the 'data T'
+bindIfaceTyVars_AT [] thing_inside
+  = thing_inside []
+bindIfaceTyVars_AT (b@(tv_occ,_) : bs) thing_inside 
+  = bindIfaceTyVars_AT bs $ \ bs' ->
+    do { mb_tv <- lookupIfaceTyVar tv_occ
+       ; case mb_tv of
+      	   Just b' -> thing_inside (b':bs')
+	   Nothing -> bindIfaceTyVar b $ \ b' -> 
+	   	      thing_inside (b':bs') }
+\end{code} 
 

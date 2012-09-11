@@ -72,6 +72,7 @@ import Outputable
 import FastString
 import MonadUtils
 
+import System.Directory
 import Data.Dynamic
 import Data.List (find)
 import Control.Monad
@@ -213,6 +214,7 @@ runStmt expr step =
         clearWarnings
 
         status <-
+          withVirtualCWD $
             withBreakAction (isStep step) dflags' breakMVar statusMVar $ do
                 let thing_to_run = unsafeCoerce# hval :: IO [HValue]
                 liftIO $ sandboxIO dflags' statusMVar thing_to_run
@@ -227,6 +229,28 @@ runStmt expr step =
           _other ->
               handleRunStatus expr bindings ids
                                breakMVar statusMVar status emptyHistory
+
+withVirtualCWD :: GhcMonad m => m a -> m a
+withVirtualCWD m = do
+  hsc_env <- getSession
+  let ic = hsc_IC hsc_env
+
+  let set_cwd = do
+        dir <- liftIO $ getCurrentDirectory
+        case ic_cwd ic of 
+           Just dir -> liftIO $ setCurrentDirectory dir
+           Nothing  -> return ()
+        return dir
+
+      reset_cwd orig_dir = do
+        virt_dir <- liftIO $ getCurrentDirectory
+        hsc_env <- getSession
+        let old_IC = hsc_IC hsc_env
+        setSession hsc_env{  hsc_IC = old_IC{ ic_cwd = Just virt_dir } }
+        liftIO $ setCurrentDirectory orig_dir
+
+  gbracket set_cwd reset_cwd $ \_ -> m
+
 
 emptyHistory :: BoundedList History
 emptyHistory = nilBL 50 -- keep a log of length 50
@@ -408,8 +432,8 @@ noBreakAction :: Bool -> BreakInfo -> HValue -> IO ()
 noBreakAction False _ _ = putStrLn "*** Ignoring breakpoint"
 noBreakAction True  _ _ = return () -- exception: just continue
 
-resume :: GhcMonad m => SingleStep -> m RunResult
-resume step
+resume :: GhcMonad m => (SrcSpan->Bool) -> SingleStep -> m RunResult
+resume canLogSpan step
  = do
    hsc_env <- getSession
    let ic = hsc_IC hsc_env
@@ -436,7 +460,8 @@ resume step
         when (isStep step) $ liftIO setStepFlag
         case r of 
           Resume expr tid breakMVar statusMVar bindings 
-              final_ids apStack info _ hist _ -> do
+              final_ids apStack info span hist _ -> do
+               withVirtualCWD $ do
                 withBreakAction (isStep step) (hsc_dflags hsc_env) 
                                         breakMVar statusMVar $ do
                 status <- liftIO $ withInterruptsSentTo tid $ do
@@ -444,10 +469,12 @@ resume step
                                       -- this awakens the stopped thread...
                              takeMVar statusMVar
                                       -- and wait for the result 
-                let hist' = 
-                     case info of 
-                       Nothing -> fromListBL 50 hist
-                       Just i -> mkHistory hsc_env apStack i `consBL` 
+                let prevHistoryLst = fromListBL 50 hist
+                    hist' = case info of
+                       Nothing -> prevHistoryLst
+                       Just i
+                         | not $canLogSpan span -> prevHistoryLst
+                         | otherwise -> mkHistory hsc_env apStack i `consBL`
                                                         fromListBL 50 hist
                 case step of
                   RunAndLogSteps -> 

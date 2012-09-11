@@ -54,6 +54,32 @@ ppModule iface = "" : doc (ifaceDoc iface) ++
 ---------------------------------------------------------------------
 -- Utility functions
 
+dropHsDocTy :: HsType a -> HsType a
+dropHsDocTy = f
+    where
+        g (L src x) = L src (f x)
+        f (HsForAllTy a b c d) = HsForAllTy a b c (g d)
+        f (HsBangTy a b) = HsBangTy a (g b)
+        f (HsAppTy a b) = HsAppTy (g a) (g b)
+        f (HsFunTy a b) = HsFunTy (g a) (g b)
+        f (HsListTy a) = HsListTy (g a)
+        f (HsPArrTy a) = HsPArrTy (g a)
+        f (HsTupleTy a b) = HsTupleTy a (map g b)
+        f (HsOpTy a b c) = HsOpTy (g a) b (g c)
+        f (HsParTy a) = HsParTy (g a)
+        f (HsKindSig a b) = HsKindSig (g a) b
+        f (HsDocTy a b) = f $ unL a
+        f x = x
+
+outHsType :: OutputableBndr a => HsType a -> String
+outHsType = out . dropHsDocTy
+
+
+makeExplicit (HsForAllTy _ a b c) = HsForAllTy Explicit a b c
+makeExplicit x = x
+
+makeExplicitL (L src x) = L src (makeExplicit x)
+
 
 dropComment (' ':'-':'-':' ':_) = []
 dropComment (x:xs) = x : dropComment xs
@@ -68,12 +94,8 @@ out = f . unwords . map (dropWhile isSpace) . lines . showSDocUnqual . ppr
         f [] = []
 
 
-typeSig :: String -> [String] -> String
-typeSig name flds = operator name ++ " :: " ++ concat (intersperse " -> " flds)
-
-
 operator :: String -> String
-operator (x:xs) | not (isAlphaNum x) && x `notElem` " ([{" = "(" ++ x:xs ++ ")"
+operator (x:xs) | not (isAlphaNum x) && x `notElem` "_' ([{" = "(" ++ x:xs ++ ")"
 operator x = x
 
 
@@ -81,7 +103,7 @@ operator x = x
 -- How to print each export
 
 ppExport :: ExportItem Name -> [String]
-ppExport (ExportDecl decl dc _) = doc dc ++ f (unL decl)
+ppExport (ExportDecl decl dc _ _) = doc dc ++ f (unL decl)
     where
         f (TyClD d@TyData{}) = ppData d
         f (TyClD d@ClassDecl{}) = ppClass d
@@ -94,7 +116,7 @@ ppExport _ = []
 
 
 ppSig :: Sig Name -> [String]
-ppSig (TypeSig name sig) = [operator (out name) ++ " :: " ++ out typ]
+ppSig (TypeSig name sig) = [operator (out name) ++ " :: " ++ outHsType typ]
     where
         typ = case unL sig of
                    HsForAllTy Explicit a b c -> HsForAllTy Implicit a b c
@@ -142,18 +164,22 @@ ppData x = showData x{tcdCons=[],tcdDerivs=Nothing} :
 ppCtor :: TyClDecl Name -> ConDecl Name -> [String]
 ppCtor dat con = ldoc (con_doc con) ++ f (con_details con)
     where
-        f (PrefixCon args) = [typeSig name $ map out args ++ [resType]]
+        f (PrefixCon args) = [typeSig name $ args ++ [resType]]
         f (InfixCon a1 a2) = f $ PrefixCon [a1,a2]
         f (RecCon recs) = f (PrefixCon $ map cd_fld_type recs) ++ concat
                           [ldoc (cd_fld_doc r) ++
-                           [out (unL $ cd_fld_name r) `typeSig` [resType, out $ cd_fld_type r]]
+                           [out (unL $ cd_fld_name r) `typeSig` [resType, cd_fld_type r]]
                           | r <- recs]
 
+        funs = foldr1 (\x y -> reL $ HsFunTy (makeExplicitL x) (makeExplicitL y))
+        apps = foldl1 (\x y -> reL $ HsAppTy x y)
+
+        typeSig name flds = operator name ++ " :: " ++ outHsType (makeExplicit $ unL $ funs flds)
         name = out $ unL $ con_name con
 
         resType = case con_res con of
-            ResTyH98 -> unwords $ operator (out (tcdLName dat)) : map out (tcdTyVars dat)
-            ResTyGADT x -> out $ unL x
+            ResTyH98 -> apps $ map (reL . HsTyVar) $ unL (tcdLName dat) : [x | UserTyVar x <- map unL $ tcdTyVars dat]
+            ResTyGADT x -> x
 
 
 ---------------------------------------------------------------------
@@ -198,6 +224,7 @@ markupTag = Markup {
   markupModule        = box (TagInline "a") . str,
   markupEmphasis      = box (TagInline "i"),
   markupMonospaced    = box (TagInline "tt"),
+  markupPic           = const $ str " ",
   markupUnorderedList = box (TagL 'u'),
   markupOrderedList   = box (TagL 'o'),
   markupDefList       = box (TagL 'u') . map (\(a,b) -> TagInline "i" a : Str " " : b),

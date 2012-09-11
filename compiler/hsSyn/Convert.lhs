@@ -388,9 +388,11 @@ cvtl e = wrapL (cvt e)
 					  ; e' <- returnL $ OpApp x' s' undefined y'
 					  ; return $ HsPar e' }
     cvt (InfixE Nothing  s (Just y)) = do { s' <- cvtl s; y' <- cvtl y
-					  ; return $ SectionR s' y' }
+					  ; sec <- returnL $ SectionR s' y'
+					  ; return $ HsPar sec }
     cvt (InfixE (Just x) s Nothing ) = do { x' <- cvtl x; s' <- cvtl s
-					  ; return $ SectionL x' s' }
+					  ; sec <- returnL $ SectionL x' s'
+					  ; return $ HsPar sec }
     cvt (InfixE Nothing  s Nothing ) = cvt s	-- Can I indicate this is an infix thing?
 
     cvt (SigE e t)	 = do { e' <- cvtl e; t' <- cvtType t
@@ -532,7 +534,9 @@ cvtType ty = do { (head_ty, tys') <- split_ty_app ty
 		             | n == 1    -> failWith (ptext (sLit "Illegal 1-tuple type constructor"))
 		             | otherwise -> mk_apps (HsTyVar (getRdrName (tupleTyCon Boxed n))) tys'
 		    ArrowT | [x',y'] <- tys' -> returnL (HsFunTy x' y')
+		    	   | otherwise       -> mk_apps (HsTyVar (getRdrName funTyCon)) tys'
 		    ListT  | [x']    <- tys' -> returnL (HsListTy x')
+		    	   | otherwise       -> mk_apps (HsTyVar (getRdrName listTyCon)) tys'
 		    VarT nm -> do { nm' <- tName nm;    mk_apps (HsTyVar nm') tys' }
 		    ConT nm -> do { nm' <- tconName nm; mk_apps (HsTyVar nm') tys' }
 

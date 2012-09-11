@@ -77,6 +77,9 @@ module GHC (
 	lookupGlobalName,
         mkPrintUnqualifiedForModule,
 
+        -- * Querying the environment
+        packageDbModules,
+
 	-- * Printing
 	PrintUnqualified, alwaysQualify,
 
@@ -281,8 +284,7 @@ import SysTools     ( initSysTools, cleanTempFiles, cleanTempFilesExcept,
                       cleanTempDirs )
 import Module
 import LazyUniqFM
-import UniqSet
-import Unique
+import qualified UniqFM as UFM
 import FiniteMap
 import Panic
 import Digraph
@@ -363,7 +365,7 @@ defaultCleanupHandler :: (ExceptionMonad m, MonadIO m) =>
                          DynFlags -> m a -> m a
 defaultCleanupHandler dflags inner =
     -- make sure we clean up after ourselves
-    inner `gonException`
+    inner `gfinally`
           (liftIO $ do
               cleanTempFiles dflags
               cleanTempDirs dflags
@@ -651,6 +653,10 @@ data LoadHowMuch
 
 -- | Try to load the program.  Calls 'loadWithLogger' with the default
 -- compiler that just immediately logs all warnings and errors.
+--
+-- This function may throw a 'SourceError' if errors are encountered before
+-- the actual compilation starts (e.g., during dependency analysis).
+--
 load :: GhcMonad m => LoadHowMuch -> m SuccessFlag
 load how_much =
     loadWithLogger defaultWarnErrLogger how_much
@@ -668,7 +674,11 @@ defaultWarnErrLogger (Just e) = printExceptionAndWarnings e
 --
 -- The first argument is a function that is called after compiling each
 -- module to print wanrings and errors.
-
+--
+-- While compiling a module, all 'SourceError's are caught and passed to the
+-- logger, however, this function may still throw a 'SourceError' if
+-- dependency analysis failed (e.g., due to a parse error).
+--
 loadWithLogger :: GhcMonad m => WarnErrLogger -> LoadHowMuch -> m SuccessFlag
 loadWithLogger logger how_much = do
     -- Dependency analysis first.  Note that this fixes the module graph:
@@ -1078,16 +1088,25 @@ loadModule :: (TypecheckedMod mod, GhcMonad m) => mod -> m mod
 loadModule tcm = do
    let ms = modSummary tcm
    let mod = ms_mod_name ms
-   hsc_env0 <- getSession
-   let hsc_env = hsc_env0 { hsc_dflags = ms_hspp_opts ms }
-   let (tcg, details) = tm_internals tcm
-   (iface,_) <- liftIO $ makeSimpleIface hsc_env Nothing tcg details
-   let mod_info = HomeModInfo {
-                    hm_iface = iface,
-                    hm_details = details,
-                    hm_linkable = Nothing }
-   let hpt_new = addToUFM (hsc_HPT hsc_env) mod mod_info
-   modifySession $ \_ -> hsc_env0{ hsc_HPT = hpt_new }
+   let (tcg, _details) = tm_internals tcm
+
+   let withTempSession f m = do
+         saved_session <- getSession
+         (modifySession f >> m) `gfinally` setSession saved_session
+
+   let (nothingBackend, interactiveBackend, batchBackend) = backendCompilers tcg
+
+   hpt_new <-
+       withTempSession (\e -> e { hsc_dflags = ms_hspp_opts ms }) $ do
+         hsc_env <- getSession
+         mod_info
+             <- compile' (nothingBackend
+                         ,interactiveBackend
+                         ,batchBackend)
+                         hsc_env ms 1 1 Nothing Nothing
+         -- compile' shouldn't change the environment
+         return $ addToUFM (hsc_HPT hsc_env) mod mod_info
+   modifySession $ \e -> e{ hsc_HPT = hpt_new }
    return tcm
 
 -- | This is the way to get access to the Core bindings corresponding
@@ -1558,66 +1577,91 @@ upsweep_mod hsc_env old_hpt (stable_obj, stable_bco) summary mod_index nmods
             compile_it_discard_iface 
                         = compile hsc_env summary' mod_index nmods Nothing
 
-        in
-	case target of
+            -- With the HscNothing target we create empty linkables to avoid
+            -- recompilation.  We have to detect these to recompile anyway if
+            -- the target changed since the last compile.
+            is_fake_linkable
+               | Just hmi <- old_hmi, Just l <- hm_linkable hmi =
+                  null (linkableUnlinked l)
+               | otherwise =
+                   -- we have no linkable, so it cannot be fake
+                   False
 
-            _any
+            implies False _ = True
+            implies True x  = x
+
+        in
+        case () of
+         _
                 -- Regardless of whether we're generating object code or
                 -- byte code, we can always use an existing object file
                 -- if it is *stable* (see checkStability).
-		| is_stable_obj, isJust old_hmi ->
-                        let Just hmi = old_hmi in
-		        return hmi
-			-- object is stable, and we have an entry in the
-			-- old HPT: nothing to do
+          | is_stable_obj, Just hmi <- old_hmi -> do
+                liftIO $ debugTraceMsg (hsc_dflags hsc_env) 5
+                           (text "skipping stable obj mod:" <+> ppr this_mod_name)
+                return hmi
+                -- object is stable, and we have an entry in the
+                -- old HPT: nothing to do
 
-		| is_stable_obj, isNothing old_hmi -> do
-		        linkable <- liftIO $ findObjectLinkable this_mod obj_fn
-					(expectJust "upsweep1" mb_obj_date)
-		        compile_it (Just linkable)
-			-- object is stable, but we need to load the interface
-			-- off disk to make a HMI.
+          | is_stable_obj, isNothing old_hmi -> do
+                liftIO $ debugTraceMsg (hsc_dflags hsc_env) 5
+                           (text "compiling stable on-disk mod:" <+> ppr this_mod_name)
+                linkable <- liftIO $ findObjectLinkable this_mod obj_fn
+                              (expectJust "upsweep1" mb_obj_date)
+                compile_it (Just linkable)
+                -- object is stable, but we need to load the interface
+                -- off disk to make a HMI.
 
-            HscInterpreted
-		| is_stable_bco -> 
-		        ASSERT(isJust old_hmi) -- must be in the old_hpt
-                        let Just hmi = old_hmi in
-			return hmi
-			-- BCO is stable: nothing to do
+          | not (isObjectTarget target), is_stable_bco,
+            (target /= HscNothing) `implies` not is_fake_linkable ->
+                ASSERT(isJust old_hmi) -- must be in the old_hpt
+                let Just hmi = old_hmi in do
+                liftIO $ debugTraceMsg (hsc_dflags hsc_env) 5
+                           (text "skipping stable BCO mod:" <+> ppr this_mod_name)
+                return hmi
+                -- BCO is stable: nothing to do
 
-		| Just hmi <- old_hmi,
-		  Just l <- hm_linkable hmi, not (isObjectLinkable l),
-		  linkableTime l >= ms_hs_date summary ->
-			compile_it (Just l)
-			-- we have an old BCO that is up to date with respect
-			-- to the source: do a recompilation check as normal.
+          | not (isObjectTarget target),
+            Just hmi <- old_hmi,
+            Just l <- hm_linkable hmi,
+            not (isObjectLinkable l),
+            (target /= HscNothing) `implies` not is_fake_linkable,
+            linkableTime l >= ms_hs_date summary -> do
+                liftIO $ debugTraceMsg (hsc_dflags hsc_env) 5
+                           (text "compiling non-stable BCO mod:" <+> ppr this_mod_name)
+                compile_it (Just l)
+                -- we have an old BCO that is up to date with respect
+                -- to the source: do a recompilation check as normal.
 
-		| otherwise -> 
-                        compile_it Nothing
-			-- no existing code at all: we must recompile.
-
-              -- When generating object code, if there's an up-to-date
-              -- object file on the disk, then we can use it.
-              -- However, if the object file is new (compared to any
-              -- linkable we had from a previous compilation), then we
-              -- must discard any in-memory interface, because this
-              -- means the user has compiled the source file
-              -- separately and generated a new interface, that we must
-              -- read from the disk.
-              --
-            obj | isObjectTarget obj,
-		  Just obj_date <- mb_obj_date, obj_date >= hs_date -> do
-                     case old_hmi of
-                        Just hmi 
-                          | Just l <- hm_linkable hmi,
-                            isObjectLinkable l && linkableTime l == obj_date
-                            -> compile_it (Just l)
-                        _otherwise -> do
-		          linkable <- liftIO $ findObjectLinkable this_mod obj_fn obj_date
+          -- When generating object code, if there's an up-to-date
+          -- object file on the disk, then we can use it.
+          -- However, if the object file is new (compared to any
+          -- linkable we had from a previous compilation), then we
+          -- must discard any in-memory interface, because this
+          -- means the user has compiled the source file
+          -- separately and generated a new interface, that we must
+          -- read from the disk.
+          --
+          | isObjectTarget target,
+            Just obj_date <- mb_obj_date,
+            obj_date >= hs_date -> do
+                case old_hmi of
+                  Just hmi
+                    | Just l <- hm_linkable hmi,
+                      isObjectLinkable l && linkableTime l == obj_date -> do
+                          liftIO $ debugTraceMsg (hsc_dflags hsc_env) 5
+                                     (text "compiling mod with new on-disk obj:" <+> ppr this_mod_name)
+                          compile_it (Just l)
+                  _otherwise -> do
+                          liftIO $ debugTraceMsg (hsc_dflags hsc_env) 5
+                                     (text "compiling mod with new on-disk obj2:" <+> ppr this_mod_name)
+                          linkable <- liftIO $ findObjectLinkable this_mod obj_fn obj_date
                           compile_it_discard_iface (Just linkable)
 
-	    _otherwise ->
-		  compile_it Nothing
+         _otherwise -> do
+                liftIO $ debugTraceMsg (hsc_dflags hsc_env) 5
+                           (text "compiling mod:" <+> ppr this_mod_name)
+                compile_it Nothing
 
 
 
@@ -2272,14 +2316,10 @@ getBindings = withSession $ \hsc_env ->
    -- we have to implement the shadowing behaviour of ic_tmp_ids here
    -- (see InteractiveContext) and the quickest way is to use an OccEnv.
    let 
-       tmp_ids = ic_tmp_ids (hsc_IC hsc_env)
-       filtered = foldr f (const []) tmp_ids emptyUniqSet
-       f id rest set 
-           | uniq `elementOfUniqSet` set = rest set
-           | otherwise  = AnId id : rest (addOneToUniqSet set uniq)
-           where uniq = getUnique (nameOccName (idName id))
+       occ_env = mkOccEnv [ (nameOccName (idName id), AnId id) 
+                          | id <- ic_tmp_ids (hsc_IC hsc_env) ]
    in
-   return filtered
+   return (occEnvElts occ_env)
 
 getPrintUnqual :: GhcMonad m => m PrintUnqualified
 getPrintUnqual = withSession $ \hsc_env ->
@@ -2417,6 +2457,23 @@ lookupGlobalName name = withSession $ \hsc_env -> do
 getGRE :: GhcMonad m => m GlobalRdrEnv
 getGRE = withSession $ \hsc_env-> return $ ic_rn_gbl_env (hsc_IC hsc_env)
 #endif
+
+-- -----------------------------------------------------------------------------
+
+-- | Return all /external/ modules available in the package database.
+-- Modules from the current session (i.e., from the 'HomePackageTable') are
+-- not included.
+packageDbModules :: GhcMonad m =>
+                    Bool  -- ^ Only consider exposed packages.
+                 -> m [Module]
+packageDbModules only_exposed = do
+   dflags <- getSessionDynFlags
+   let pkgs = UFM.eltsUFM (pkgIdMap (pkgState dflags))
+   return $
+     [ mkModule pid modname | p <- pkgs
+                            , not only_exposed || exposed p
+                            , pid <- [mkPackageId (package p)]
+                            , modname <- exposedModules p ]
 
 -- -----------------------------------------------------------------------------
 -- Misc exported utils

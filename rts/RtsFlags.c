@@ -208,6 +208,8 @@ void initRtsFlagsDefaults(void)
     RtsFlags.ConcFlags.ctxtSwitchTime	= 20;  /* In milliseconds */
 
     RtsFlags.MiscFlags.install_signal_handlers = rtsTrue;
+    RtsFlags.MiscFlags.machineReadable = rtsFalse;
+    RtsFlags.MiscFlags.linkerMemBase    = 0;
 
 #ifdef THREADED_RTS
     RtsFlags.ParFlags.nNodes	        = 1;
@@ -476,6 +478,10 @@ usage_text[] = {
 #if defined(GRAN)  /* ToDo: fill in decent Docu here */
 "  -b...     All GranSim options start with -b; see GranSim User's Guide for details",
 #endif
+#if defined(x86_64_HOST_ARCH)
+"  -xm       Base address to mmap memory in the GHCi linker",
+"            (hex; must be <80000000)",
+#endif
 #if defined(USE_PAPI)
 "  -aX       CPU performance counter measurements using PAPI",
 "            (use with the -s<file> option).  X is one of:",
@@ -688,6 +694,10 @@ error = rtsTrue;
                   else if (strequal("install-signal-handlers=no",
                                &rts_argv[arg][2])) {
                       RtsFlags.MiscFlags.install_signal_handlers = rtsFalse;
+                  }
+                  else if (strequal("machine-readable",
+                               &rts_argv[arg][2])) {
+                      RtsFlags.MiscFlags.machineReadable = rtsTrue;
                   }
                   else if (strequal("info",
                                &rts_argv[arg][2])) {
@@ -1259,7 +1269,22 @@ error = rtsTrue;
                     }
                     break;
 
-                  case 'c': /* Debugging tool: show current cost centre on an exception */
+#if defined(x86_64_HOST_ARCH)
+                case 'm': /* linkerMemBase */
+                    if (rts_argv[arg][3] != '\0') {
+                        RtsFlags.MiscFlags.linkerMemBase
+                            = strtol(rts_argv[arg]+3, (char **) NULL, 16);
+                        if (RtsFlags.MiscFlags.linkerMemBase > 0x80000000) {
+                            errorBelch("-xm: value must be <80000000");
+                            error = rtsTrue;
+                        }
+                    } else {
+                        RtsFlags.MiscFlags.linkerMemBase = 0;
+                    }
+                    break;
+#endif
+
+                case 'c': /* Debugging tool: show current cost centre on an exception */
                     PROFILING_BUILD_ONLY(
 			RtsFlags.ProfFlags.showCCSOnException = rtsTrue;
 			);

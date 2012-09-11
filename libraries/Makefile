@@ -256,7 +256,7 @@ doc: $(foreach SUBDIR,$(DOC_SUBDIRS),doc.library.$(SUBDIR))
 	sh gen_contents_index --inplace
 
 # Making hyperlinked source only works if we have hscolour
-ifneq "$(HSCOLOUR)" ""
+ifeq "$(HSCOLOUR_SRCS)" "YES"
 CABAL_HADDOCK_FLAGS += --hyperlink-source
 endif
 CABAL_HADDOCK_FLAGS += --with-haddock=$(FPTOOLS_TOP_ABS)/utils/haddock/install-inplace/bin/haddock

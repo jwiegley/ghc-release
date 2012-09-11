@@ -11,6 +11,10 @@
 
 #include "Capability.h"
 
+extern rtsBool running_finalizers;
+
+void runCFinalizer(StgVoid *fn, StgVoid *ptr, StgVoid *env, StgWord flag);
+void runAllCFinalizers(StgWeak *w);
 void scheduleFinalizers(Capability *cap, StgWeak *w);
 void markWeakList(void);
 

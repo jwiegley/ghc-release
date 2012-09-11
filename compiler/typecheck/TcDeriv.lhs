@@ -30,6 +30,7 @@ import HscTypes
 
 import Class
 import Type
+import Coercion
 import ErrUtils
 import MkId
 import DataCon
@@ -75,6 +76,7 @@ data DerivSpec  = DS { ds_loc     :: SrcSpan
 		     , ds_cls     :: Class
 		     , ds_tys     :: [Type]
 		     , ds_tc      :: TyCon
+		     , ds_tc_args :: [Type]
 		     , ds_newtype :: Bool }
 	-- This spec implies a dfun declaration of the form
 	--	 df :: forall tvs. theta => C tys
@@ -82,7 +84,7 @@ data DerivSpec  = DS { ds_loc     :: SrcSpan
 	-- The tyvars bind all the variables in the theta
 	-- For family indexes, the tycon in 
 	--	 in ds_tys is the *family* tycon
-	--	 in ds_tc  is the *representation* tycon
+	--	 in ds_tc, ds_tc_args is the *representation* tycon
 	-- For non-family tycons, both are the same
 
 	-- ds_newtype = True  <=> Newtype deriving
@@ -339,8 +341,8 @@ renameDeriv is_boot gen_binds insts
     		       | otherwise	      = rm_dups (b:acc) bs
 
 
-    rn_inst_info (InstInfo { iSpec = inst, iBinds = NewTypeDerived })
-	= return (InstInfo { iSpec = inst, iBinds = NewTypeDerived })
+    rn_inst_info (InstInfo { iSpec = inst, iBinds = NewTypeDerived co })
+	= return (InstInfo { iSpec = inst, iBinds = NewTypeDerived co })
 
     rn_inst_info (InstInfo { iSpec = inst, iBinds = VanillaInst binds sigs })
 	= 	-- Bring the right type variables into 
@@ -674,14 +676,15 @@ mk_data_eqn orig tvs cls tycon tc_args rep_tc rep_tc_args mtheta
 
 	      spec = DS { ds_loc = loc, ds_orig = orig
 			, ds_name = dfun_name, ds_tvs = tvs 
-			, ds_cls = cls, ds_tys = inst_tys, ds_tc = rep_tc
+			, ds_cls = cls, ds_tys = inst_tys
+			, ds_tc = rep_tc, ds_tc_args = rep_tc_args
 			, ds_theta =  mtheta `orElse` all_constraints
 			, ds_newtype = False }
 
   	; return (if isJust mtheta then Right spec	-- Specified context
 				   else Left spec) }	-- Infer context
 
-mk_typeable_eqn orig tvs cls tycon tc_args rep_tc _rep_tc_args mtheta
+mk_typeable_eqn orig tvs cls tycon tc_args rep_tc rep_tc_args mtheta
 	-- The Typeable class is special in several ways
 	-- 	  data T a b = ... deriving( Typeable )
 	-- gives
@@ -705,7 +708,8 @@ mk_typeable_eqn orig tvs cls tycon tc_args rep_tc _rep_tc_args mtheta
   	; loc <- getSrcSpanM
 	; return (Right $
 		  DS { ds_loc = loc, ds_orig = orig, ds_name = dfun_name, ds_tvs = []
-		     , ds_cls = cls, ds_tys = [mkTyConApp tycon []], ds_tc = rep_tc
+		     , ds_cls = cls, ds_tys = [mkTyConApp tycon []]
+		     , ds_tc = rep_tc, ds_tc_args = rep_tc_args
 		     , ds_theta = mtheta `orElse` [], ds_newtype = False })  }
 
 ------------------------------------------------------------------
@@ -771,15 +775,21 @@ andCond c1 c2 tc = case c1 tc of
 
 cond_std :: Condition
 cond_std (_, rep_tc)
-  | any (not . isVanillaDataCon) data_cons = Just existential_why     
-  | null data_cons		    	   = Just no_cons_why
-  | otherwise      			   = Nothing
+  | null data_cons      = Just no_cons_why
+  | not (null con_whys) = Just (vcat con_whys)
+  | otherwise           = Nothing
   where
     data_cons       = tyConDataCons rep_tc
     no_cons_why	    = quotes (pprSourceTyCon rep_tc) <+> 
 		      ptext (sLit "has no data constructors")
-    existential_why = quotes (pprSourceTyCon rep_tc) <+> 
-		      ptext (sLit "has non-Haskell-98 constructor(s)")
+    
+    con_whys = mapCatMaybes check_con data_cons
+
+    check_con :: DataCon -> Maybe SDoc
+    check_con con
+      | isVanillaDataCon con
+      , all isTauTy (dataConOrigArgTys con) = Nothing
+      | otherwise = Just (badCon con (ptext (sLit "does not have a Haskell-98 type")))
   
 cond_enumOrProduct :: Condition
 cond_enumOrProduct = cond_isEnumeration `orCond` 
@@ -794,8 +804,7 @@ cond_noUnliftedArgs (_, tc)
   where
     bad_cons = [ con | con <- tyConDataCons tc
 		     , any isUnLiftedType (dataConOrigArgTys con) ]
-    why = ptext (sLit "Constructor") <+> quotes (ppr (head bad_cons))
-	  <+> ptext (sLit "has arguments of unlifted type")
+    why = badCon (head bad_cons) (ptext (sLit "has arguments of unlifted type"))
 
 cond_isEnumeration :: Condition
 cond_isEnumeration (_, rep_tc)
@@ -852,6 +861,9 @@ new_dfun_name clas tycon 	-- Just a simple wrapper
 	; newDFunName clas [mkTyConApp tycon []] loc }
 	-- The type passed to newDFunName is only used to generate
 	-- a suitable string; hence the empty type arg list
+
+badCon :: DataCon -> SDoc -> SDoc
+badCon con msg = ptext (sLit "Constructor") <+> quotes (ppr con) <+> msg
 \end{code}
 
 Note [Superclasses of derived instance] 
@@ -899,7 +911,8 @@ mkNewTypeEqn orig mayDeriveDataTypeable newtype_deriving tvs
   	; loc <- getSrcSpanM
 	; let spec = DS { ds_loc = loc, ds_orig = orig
 			, ds_name = dfun_name, ds_tvs = varSetElems dfun_tvs 
-			, ds_cls = cls, ds_tys = inst_tys, ds_tc = rep_tycon
+			, ds_cls = cls, ds_tys = inst_tys
+			, ds_tc = rep_tycon, ds_tc_args = rep_tc_args
 			, ds_theta =  mtheta `orElse` all_preds
 			, ds_newtype = True }
 	; return (if isJust mtheta then Right spec
@@ -952,7 +965,7 @@ mkNewTypeEqn orig mayDeriveDataTypeable newtype_deriving tvs
 
 	nt_eta_arity = length (fst (newTyConEtadRhs rep_tycon))
 		-- For newtype T a b = MkT (S a a b), the TyCon machinery already
-		-- eta-reduces the represenation type, so we know that
+		-- eta-reduces the representation type, so we know that
 		-- 	T a ~ S a a
 		-- That's convenient here, because we may have to apply
 		-- it to fewer than its original complement of arguments
@@ -995,29 +1008,20 @@ mkNewTypeEqn orig mayDeriveDataTypeable newtype_deriving tvs
 	-------------------------------------------------------------------
 	--  Figuring out whether we can only do this newtype-deriving thing
 
-	right_arity = length cls_tys + 1 == classArity cls
-
-		-- Never derive Read,Show,Typeable,Data this way 
-	non_iso_class cls = className cls `elem` ([readClassName, showClassName, dataClassName] ++
-					  	  typeableClassNames)
 	can_derive_via_isomorphism
 	   =  not (non_iso_class cls)
-	   && right_arity 			-- Well kinded;
-						-- eg not: newtype T ... deriving( ST )
-						--	because ST needs *2* type params
-	   && eta_ok				-- Eta reduction works
-	   && not (isRecursiveTyCon tycon)	-- Does not work for recursive tycons:
-						--	newtype A = MkA [A]
-						-- Don't want
-						--	instance Eq [A] => Eq A !!
-			-- Here's a recursive newtype that's actually OK
-			--	newtype S1 = S1 [T1 ()]
-			--	newtype T1 a = T1 (StateT S1 IO a ) deriving( Monad )
-			-- It's currently rejected.  Oh well.
-			-- In fact we generate an instance decl that has method of form
-			--	meth @ instTy = meth @ repTy
-			-- (no coerce's).  We'd need a coerce if we wanted to handle
-			-- recursive newtypes too
+	   && arity_ok
+	   && eta_ok
+	   && ats_ok
+--	   && not (isRecursiveTyCon tycon)	-- Note [Recursive newtypes]
+
+		-- Never derive Read,Show,Typeable,Data by isomorphism
+	non_iso_class cls = className cls `elem` ([readClassName, showClassName, dataClassName] ++
+					  	  typeableClassNames)
+
+	arity_ok = length cls_tys + 1 == classArity cls
+ 		-- Well kinded; eg not: newtype T ... deriving( ST )
+		--			because ST needs *2* type params
 
 	-- Check that eta reduction is OK
 	eta_ok = nt_eta_arity <= length rep_tc_args
@@ -1028,18 +1032,35 @@ mkNewTypeEqn orig mayDeriveDataTypeable newtype_deriving tvs
 		--     And the [a] must not mention 'b'.  That's all handled
 		--     by nt_eta_rity.
 
-	cant_derive_err = vcat [ptext (sLit "even with cunning newtype deriving:"),
-				if isRecursiveTyCon tycon then
-				  ptext (sLit "the newtype may be recursive")
-				else empty,
-				if not right_arity then 
-				  quotes (ppr (mkClassPred cls cls_tys)) <+> ptext (sLit "does not have arity 1")
-				else empty,
-				if not eta_ok then 
-				  ptext (sLit "cannot eta-reduce the representation type enough")
-				else empty
-				]
+	ats_ok = null (classATs cls)	
+	       -- No associated types for the class, because we don't 
+	       -- currently generate type 'instance' decls; and cannot do
+	       -- so for 'data' instance decls
+					 
+	cant_derive_err
+	   = vcat [ ptext (sLit "even with cunning newtype deriving:")
+		  , if arity_ok then empty else arity_msg
+		  , if eta_ok then empty else eta_msg
+		  , if ats_ok then empty else ats_msg ]
+        arity_msg = quotes (ppr (mkClassPred cls cls_tys)) <+> ptext (sLit "does not have arity 1")
+	eta_msg   = ptext (sLit "cannot eta-reduce the representation type enough")
+	ats_msg   = ptext (sLit "the class has associated types")
 \end{code}
+
+Note [Recursive newtypes]
+~~~~~~~~~~~~~~~~~~~~~~~~~
+Newtype deriving works fine, even if the newtype is recursive.
+e.g. 	newtype S1 = S1 [T1 ()]
+	newtype T1 a = T1 (StateT S1 IO a ) deriving( Monad )
+Remember, too, that type families are curretly (conservatively) given
+a recursive flag, so this also allows newtype deriving to work
+for type famillies.
+
+We used to exclude recursive types, because we had a rather simple
+minded way of generating the instance decl:
+   newtype A = MkA [A]
+   instance Eq [A] => Eq A	-- Makes typechecker loop!
+But now we require a simple context, so it's ok.
 
 
 %************************************************************************
@@ -1093,7 +1114,7 @@ inferInstanceContexts oflag infer_specs
       | otherwise
       =	do { 	  -- Extend the inst info from the explicit instance decls
 		  -- with the current set of solutions, and simplify each RHS
-	     let inst_specs = zipWithEqual "add_solns" (mkInstance2 oflag)
+	     let inst_specs = zipWithEqual "add_solns" (mkInstance oflag)
 					   current_solns infer_specs
 	   ; new_solns <- checkNoErrs $
 	     		  extendLocalInstEnv inst_specs $
@@ -1131,11 +1152,8 @@ inferInstanceContexts oflag infer_specs
 	   ; return (sortLe (<=) theta) }	-- Canonicalise before returning the solution
 
 ------------------------------------------------------------------
-mkInstance1 :: OverlapFlag -> DerivSpec -> Instance
-mkInstance1 overlap_flag spec = mkInstance2 overlap_flag (ds_theta spec) spec
-
-mkInstance2 :: OverlapFlag -> ThetaType -> DerivSpec -> Instance
-mkInstance2 overlap_flag theta
+mkInstance :: OverlapFlag -> ThetaType -> DerivSpec -> Instance
+mkInstance overlap_flag theta
 	    (DS { ds_name = dfun_name
 		, ds_tvs = tyvars, ds_cls = clas, ds_tys = tys })
   = mkLocalInstance dfun overlap_flag
@@ -1227,14 +1245,13 @@ the renamer.  What a great hack!
 genInst :: OverlapFlag -> DerivSpec -> TcM (InstInfo RdrName, DerivAuxBinds)
 genInst oflag spec
   | ds_newtype spec
-  = return (InstInfo { iSpec  = mkInstance1 oflag spec 
-		     , iBinds = NewTypeDerived }, [])
+  = return (InstInfo { iSpec  = mkInstance oflag (ds_theta spec) spec
+		     , iBinds = NewTypeDerived co }, [])
 
   | otherwise
   = do	{ let loc	 = getSrcSpan (ds_name spec)
-	      inst	 = mkInstance1 oflag spec
+	      inst	 = mkInstance oflag (ds_theta spec) spec
    	      clas       = ds_cls spec
-	      rep_tycon	 = ds_tc spec
 
           -- In case of a family instance, we need to use the representation
           -- tycon (after all, it has the data constructors)
@@ -1246,6 +1263,23 @@ genInst oflag spec
 		  	     iBinds = VanillaInst meth_binds [] },
 		  aux_binds)
         }
+  where
+    rep_tycon   = ds_tc spec
+    rep_tc_args = ds_tc_args spec
+    co1 = case tyConFamilyCoercion_maybe rep_tycon of
+    	      Nothing     -> IdCo
+	      Just co_con -> ACo (mkTyConApp co_con rep_tc_args)
+    co2 = case newTyConCo_maybe rep_tycon of
+              Nothing     -> IdCo	-- The newtype is transparent; no need for a cast
+	      Just co_con -> ACo (mkTyConApp co_con rep_tc_args)
+    co = co1 `mkTransCoI` co2
+
+-- Example: newtype instance N [a] = N1 (Tree a) 
+--          deriving instance Eq b => Eq (N [(b,b)])
+-- From the instance, we get an implicit newtype R1:N a = N1 (Tree a)
+-- When dealing with the deriving clause
+--    co1 : N [(b,b)] ~ R1:N (b,b)
+--    co2 : R1:N (b,b) ~ Tree (b,b)
 
 genDerivBinds :: SrcSpan -> FixityEnv -> Class -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
 genDerivBinds loc fix_env clas tycon

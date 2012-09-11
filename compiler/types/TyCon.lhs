@@ -13,6 +13,7 @@ module TyCon(
 	AlgTyConRhs(..), visibleDataCons, 
         TyConParent(..), 
 	SynTyConRhs(..),
+	AssocFamilyPermutation,
 
         -- ** Constructing TyCons
 	mkAlgTyCon,
@@ -92,6 +93,7 @@ import Maybes
 import Outputable
 import FastString
 import Constants
+import Data.List( elemIndex )
 \end{code}
 
 %************************************************************************
@@ -112,7 +114,7 @@ import Constants
 -- 4) Class declarations: @class Foo where@ creates the @Foo@ type constructor of kind @*@
 --
 -- 5) Type coercions! This is because we represent a coercion from @t1@ to @t2@ as a 'Type', where
---    that type has kind @t1 :=: t2@. See "Coercion" for more on this
+--    that type has kind @t1 ~ t2@. See "Coercion" for more on this
 --
 -- This data type also encodes a number of primitive, built in type constructors such as those
 -- for function and tuple types.
@@ -211,7 +213,7 @@ data TyCon
 	tyConExtName :: Maybe FastString	-- ^ @Just e@ for foreign-imported types, holds the name of the imported thing
     }
 
-  -- | Type coercions, such as @(:=:)@, @sym@, @trans@, @left@ and @right@.
+  -- | Type coercions, such as @(~)@, @sym@, @trans@, @left@ and @right@.
   -- INVARIANT: coercions are always fully applied
   | CoercionTyCon {	
 	tyConUnique :: Unique,
@@ -260,17 +262,7 @@ data AlgTyConRhs
   -- >   data T b :: *
 
   | OpenTyCon {
-
-      otArgPoss   :: Maybe [Int]
-	-- ^ @Nothing@ iff this is a top-level indexed type family.
-	-- @Just ns@ iff this is an associated (not top-level) family
-	--
-	-- In the latter case, for each 'TyVar' in the associated type declaration, 
-	-- @ns@ gives the position of that tyvar in the class argument list (starting 
-	-- from 0).
-	--
-	-- NB: The length of this list is less than the accompanying 'tyConArity' iff 
-	-- we have a higher kind signature.
+      otArgPoss :: AssocFamilyPermutation
     }
 
   -- | Information about those 'TyCon's derived from a @data@ declaration. This includes 
@@ -315,6 +307,18 @@ data AlgTyConRhs
 				-- Watch out!  If any newtypes become transparent
 				-- again check Trac #1072.
     }
+
+type AssocFamilyPermutation
+  = Maybe [Int]  -- Nothing for *top-level* type families
+                 -- For *associated* type families, gives the position
+	         -- of that 'TyVar' in the class argument list (0-indexed)
+		 -- e.g.  class C a b c where { type F c a :: *->* }
+                 --       Then we get Just [2,0]
+	 -- For *synonyms*, the length of the list is identical to
+	 -- 		    the TyCon's arity
+	 -- For *data types*, the length may be smaller than the
+	 -- 	TyCon's arity; e.g. class C a where { data D a :: *->* }
+	 -- 		       here D gets arity 2
 
 -- | Extract those 'DataCon's that we are able to learn about. Note that visibility in this sense does not
 -- correspond to visibility in the context of any particular user program!
@@ -369,16 +373,10 @@ okParent _       (FamilyTyCon fam_tc tys _co_tc) = tyConArity fam_tc == length t
 
 -- | Information pertaining to the expansion of a type synonym (@type@)
 data SynTyConRhs
-  = OpenSynTyCon Kind	        
-		 (Maybe [Int])  -- ^ A Type family synonym. The /result/ 'Kind' is
-		                -- given for associated families, and in this case the
-		                -- list of @Int@s is not empty, and for each 'TyVar' in
-				-- the associated type declaration, it gives the position
-				-- of that 'TyVar' in the class argument list (starting
-				-- from 0). 
-				--
-				-- NB: The length of this list will be less than 'tyConArity' iff
-				-- the family has a higher kind signature.
+  = OpenSynTyCon      -- e.g. type family F x y :: * -> *
+       Kind	      -- Kind of the "rhs"; ie *excluding type indices*
+       		      --     In the example, the kind is (*->*)
+       AssocFamilyPermutation
 
   | SynonymTyCon Type   -- ^ The synonym mentions head type variables. It acts as a
 			-- template for the expansion when the 'TyCon' is applied to some
@@ -393,7 +391,7 @@ newtype, to the newtype itself. For example,
 
    newtype T a = MkT (a -> a)
 
-the NewTyCon for T will contain nt_co = CoT where CoT t : T t :=: t ->
+the NewTyCon for T will contain nt_co = CoT where CoT t : T t ~ t ->
 t.  This TyCon is a CoercionTyCon, so it does not have a kind on its
 own; it basically has its own typing rule for the fully-applied
 version.  If the newtype T has k type variables then CoT has arity at
@@ -403,11 +401,11 @@ ending with the same type variables as the left hand side, we
 
    newtype S a = MkT [a]
 
-then we would generate the arity 0 coercion CoS : S :=: [].  The
+then we would generate the arity 0 coercion CoS : S ~ [].  The
 primary reason we do this is to make newtype deriving cleaner.
 
 In the paper we'd write
-	axiom CoT : (forall t. T t) :=: (forall t. [t])
+	axiom CoT : (forall t. T t) ~ (forall t. [t])
 and then when we used CoT at a particular type, s, we'd say
 	CoT @ s
 which encodes as (TyConApp instCoercionTyCon [TyConApp CoT [], s])
@@ -418,7 +416,7 @@ be saturated, but which encodes as
 	TyConApp CoT [s]
 In the vocabulary of the paper it's as if we had axiom declarations
 like
-	axiom CoT t :  T t :=: [t]
+	axiom CoT t :  T t ~ [t]
 
 Note [Newtype eta]
 ~~~~~~~~~~~~~~~~~~
@@ -836,14 +834,22 @@ assocTyConArgPoss_maybe _ = Nothing
 isTyConAssoc :: TyCon -> Bool
 isTyConAssoc = isJust . assocTyConArgPoss_maybe
 
--- | Sets up a 'TyVar' to family argument-list mapping in the given 'TyCon' if it is
--- an open 'TyCon'. Panics otherwise
-setTyConArgPoss :: TyCon -> [Int] -> TyCon
-setTyConArgPoss tc@(AlgTyCon { algTcRhs = rhs })               poss = 
-  tc { algTcRhs = rhs {otArgPoss = Just poss} }
-setTyConArgPoss tc@(SynTyCon { synTcRhs = OpenSynTyCon ki _ }) poss = 
-  tc { synTcRhs = OpenSynTyCon ki (Just poss) }
-setTyConArgPoss tc _ = pprPanic "setTyConArgPoss" (ppr tc)
+-- | Set the AssocFamilyPermutation structure in an 
+-- associated data or type synonym.  The [TyVar] are the
+-- class type variables.  Remember, the tyvars of an associated
+-- data/type are a subset of the class tyvars; except that an
+-- associated data type can have extra type variables at the
+-- end (see Note [Avoid name clashes for associated data types] in TcHsType)
+setTyConArgPoss :: [TyVar] -> TyCon -> TyCon
+setTyConArgPoss clas_tvs tc
+  = case tc of
+      AlgTyCon { algTcRhs = rhs }               -> tc { algTcRhs = rhs {otArgPoss = Just ps} }
+      SynTyCon { synTcRhs = OpenSynTyCon ki _ } -> tc { synTcRhs = OpenSynTyCon ki (Just ps) }
+      _                                         -> pprPanic "setTyConArgPoss" (ppr tc)
+  where
+    ps = catMaybes [tv `elemIndex` clas_tvs | tv <- tyConTyVars tc]
+       -- We will get Nothings for the "extra" type variables in an
+       -- associated data type
 
 -- The unit tycon didn't used to be classed as a tuple tycon
 -- but I thought that was silly so I've undone it

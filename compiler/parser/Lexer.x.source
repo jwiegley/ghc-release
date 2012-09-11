@@ -70,7 +70,7 @@ import Util		( maybePrefixMatch, readRational )
 
 import Control.Monad
 import Data.Bits
-import Data.Char 	( chr, ord, isSpace )
+import Data.Char
 import Data.Ratio
 import Debug.Trace
 
@@ -264,7 +264,7 @@ $tab+         { warn Opt_WarnTabs (text "Tab character") }
 
   -- We ignore all these pragmas, but don't generate a warning for them
   -- CFILES is a hugs-only thing.
-  "{-#" $whitechar* (OPTIONS_HUGS|options_hugs|OPTIONS_NHC98|options_nhc98|OPTIONS_JHC|options_jhc|CFILES|cfiles)
+  "{-#" $whitechar* (OPTIONS_(HUGS|hugs|NHC98|nhc98|JHC|jhc|YHC|yhc|CATCH|catch|DERIVE|derive)|CFILES|cfiles)
                     { nested_comment lexToken }
 
   -- ToDo: should only be valid inside a pragma:
@@ -272,7 +272,8 @@ $tab+         { warn Opt_WarnTabs (text "Tab character") }
 }
 
 <option_prags> {
-  "{-#"  $whitechar* (OPTIONS|options)   { lex_string_prag IToptions_prag }
+  "{-#"  $whitechar* (OPTIONS|options) / { notFollowedByPragmaChar }
+                                        { lex_string_prag IToptions_prag }
   "{-#"  $whitechar* (OPTIONS_GHC|options_ghc)
                                         { lex_string_prag IToptions_prag }
   "{-#"  $whitechar* (OPTIONS_HADDOCK|options_haddock)
@@ -284,7 +285,7 @@ $tab+         { warn Opt_WarnTabs (text "Tab character") }
 
 <0> {
   -- In the "0" mode we ignore these pragmas
-  "{-#"  $whitechar* (OPTIONS|options|OPTIONS_GHC|options_ghc|OPTIONS_HADDOCK|options_haddock|LANGUAGE|language|INCLUDE|include)
+  "{-#"  $whitechar* (OPTIONS|options|OPTIONS_GHC|options_ghc|OPTIONS_HADDOCK|options_haddock|LANGUAGE|language|INCLUDE|include) / { notFollowedByPragmaChar }
                      { nested_comment lexToken }
 }
 
@@ -769,6 +770,9 @@ notFollowedBy char _ _ _ (AI _ _ buf)
 notFollowedBySymbol _ _ _ (AI _ _ buf)
   = nextCharIs buf (`notElem` "!#$%&*+./<=>?@\\^|-~")
 
+notFollowedByPragmaChar _ _ _ (AI _ _ buf)
+  = nextCharIs buf (\c -> not (isAlphaNum c || c == '_'))
+
 -- We must reject doc comments as being ordinary comments everywhere.
 -- In some cases the doc comment will be selected as the lexeme due to
 -- maximal munch, but not always, because the nested comment rule is
@@ -1230,11 +1234,11 @@ lex_char_tok span _buf _len = do	-- We've seen '
 		-- We've seen 'x, where x is a valid character
 		--  (i.e. not newline etc) but not a quote or backslash
 	   case alexGetChar' i2 of	-- Look ahead one more character
-		Nothing -> lit_error
 		Just ('\'', i3) -> do 	-- We've seen 'x'
 			setInput i3 
 			finish_char_tok loc c
 		_other -> do 		-- We've seen 'x not followed by quote
+		       	  		-- (including the possibility of EOF)
 					-- If TH is on, just parse the quote only
 			th_exts <- extension thEnabled	
 			let (AI end _ _) = i1

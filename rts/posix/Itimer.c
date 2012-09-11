@@ -80,9 +80,10 @@
 
 #elif defined(HAVE_SETITIMER)
 
-#  ifdef THREADED_RTS
+#  if defined(THREADED_RTS) || !defined(HAVE_SETITIMER_VIRTUAL)
 //   Oh dear, we have to use SIGALRM if there's no timer_create and
 //   we're using the THREADED_RTS.  This leads to problems, see bug #850.
+//   We also use it if we don't have a virtual timer (trac #2883).
 #    define ITIMER_SIGNAL  SIGALRM
 #    define ITIMER_FLAVOUR ITIMER_REAL
 #  else
@@ -264,7 +265,8 @@ getourtimeofday(void)
   interval = RtsFlags.MiscFlags.tickInterval;
   if (interval == 0) { interval = 50; }
   gettimeofday(&tv, (struct timezone *) NULL);
-  	// cast to lnat because nat may be 64 bit when int is only 32 bit
-  return ((lnat)tv.tv_sec * 1000 / interval +
-	  (lnat)tv.tv_usec / (interval * 1000));
+
+  // Avoid overflow when we multiply seconds by 1000.  See #2848
+  return (lnat)((StgWord64)tv.tv_sec * 1000 / interval +
+                (StgWord64)tv.tv_usec / (interval * 1000));
 }

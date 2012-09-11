@@ -137,3 +137,4 @@ foldlM = foldM
 foldrM        :: (Monad m) => (b -> a -> m a) -> a -> [b] -> m a
 foldrM _ z []     = return z
 foldrM k z (x:xs) = do { r <- foldrM k z xs; k x r }
+

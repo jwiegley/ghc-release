@@ -684,14 +684,12 @@ data FindResult
 	-- ^ The requested package was not found
   | FoundMultiple [PackageId]
 	-- ^ _Error_: both in multiple packages
-  | PackageHidden PackageId
-	-- ^ For an explicit source import, the package containing the module is
-	-- not exposed.
-  | ModuleHidden  PackageId
-	-- ^ For an explicit source import, the package containing the module is
-	-- exposed, but the module itself is hidden.
-  | NotFound [FilePath] (Maybe PackageId)
-	-- ^ The module was not found, the specified places were searched
+  | NotFound [FilePath] (Maybe PackageId) [PackageId] [PackageId]
+	-- ^ The module was not found, including either
+        --    * the specified places were searched
+        --    * the package that this module should have been in
+        --    * list of packages in which the module was hidden,
+        --    * list of hidden packages containing this module
   | NotFoundInPackage PackageId
 	-- ^ The module was not found in this package
 
@@ -728,11 +726,10 @@ data ModIface
 	mi_boot	    :: !IsBootInterface,    -- ^ Read from an hi-boot file?
 
 	mi_deps	    :: Dependencies,
-	        -- ^ The dependencies of the module, consulted for directly
-	        -- imported modules only
-	
-		-- This is consulted for directly-imported modules,
-		-- but not for anything else (hence lazy)
+	        -- ^ The dependencies of the module.  This is
+		-- consulted for directly-imported modules, but not
+		-- for anything else (hence lazy)
+
         mi_usages   :: [Usage],
                 -- ^ Usages; kept sorted so that it's easy to decide
 		-- whether to write a new iface file (changing usages
@@ -1023,6 +1020,8 @@ data InteractiveContext
 #ifdef GHCI
         , ic_resume :: [Resume]         -- ^ The stack of breakpoint contexts
 #endif
+
+        , ic_cwd :: Maybe FilePath      -- virtual CWD of the program
     }
 
 
@@ -1036,6 +1035,7 @@ emptyInteractiveContext
 #ifdef GHCI
                          , ic_resume = []
 #endif
+                         , ic_cwd = Nothing
                        }
 
 icPrintUnqual :: DynFlags -> InteractiveContext -> PrintUnqualified
@@ -1912,8 +1912,14 @@ data Linkable = LM {
 					-- (i.e. when the bytecodes were produced,
 					--	 or the mod date on the files)
   linkableModule   :: Module,           -- ^ The linkable module itself
-  linkableUnlinked :: [Unlinked]        -- ^ Those files and chunks of code we have
-                                        -- yet to link
+  linkableUnlinked :: [Unlinked]
+    -- ^ Those files and chunks of code we have yet to link.
+    --
+    -- INVARIANT: A valid linkable always has at least one 'Unlinked' item.
+    -- If this list is empty, the Linkable represents a fake linkable, which
+    -- is generated in HscNothing mode to avoid recompiling modules.
+    --
+    -- XXX: Do items get removed from this list when they get linked?
  }
 
 isObjectLinkable :: Linkable -> Bool

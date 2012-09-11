@@ -222,10 +222,10 @@ test('tc207', normal, compile, [''])
 test('tc208', normal, compile, [''])
 test('tc209', normal, compile, [''])
 test('tc210', normal, compile, [''])
-test('tc211', normal, compile, [''])
+test('tc211', if_compiler_lt('ghc', '6.11', expect_fail), compile, [''])
 test('tc212', normal, compile, [''])
 test('tc213', normal, compile, [''])
-test('tc214', normal, compile, [''])
+test('tc214', if_compiler_lt('ghc', '6.11', expect_fail), compile, [''])
 test('tc215', expect_broken(366), compile, [''])
 test('tc216', normal, compile, [''])
 test('tc217', reqlib('mtl'), compile, [''])
@@ -259,6 +259,12 @@ test('tc241', normal, compile, [''])
 test('tc242', normal, compile, [''])
 test('tc243', normal, compile, [''])
 test('tc244', if_compiler_lt('ghc', '6.11', expect_fail), compile, [''])
+test('tc245',
+     [extra_clean(['Tc245_A.hi', 'Tc245_A.o', 'tc245.hi', 'tc245.o']),
+      if_compiler_lt('ghc', '6.11', expect_fail)],
+     run_command,
+     ['$MAKE -s --no-print-directory tc245'])
+test('tc246', normal, compile, [''])
 
 test('FD1', normal, compile_fail, [''])
 test('FD2', normal, compile_fail, [''])
@@ -287,6 +293,8 @@ test('LoopOfTheDay3', normal, compile, [''])
 test('T1470', normal, compile, [''])
 test('T2572', normal, compile, [''])
 test('T2573', normal, compile, [''])
+test('T2735', normal, compile, [''])
+test('T2799', normal, compile, [''])
 
 test('T2412',
      extra_clean(['T2412.hi-boot', 'T2412.o-boot',

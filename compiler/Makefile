@@ -212,6 +212,7 @@ build.stage.%:
 
 doc.stage.%:
 	$(CABAL) haddock --distpref dist-stage$* \
+					 --html-location='../$$pkg' \
 	                 --haddock-option=--optghc=-DSTAGE=$* \
 	                 --with-haddock=$(FPTOOLS_TOP_ABS)/utils/haddock/install-inplace/bin/haddock
 
@@ -243,7 +244,7 @@ $(CONFIG_HS) : $(FPTOOLS_TOP)/mk/config.mk
 	@echo "cHscIfaceFileVersion  :: String" >> $(CONFIG_HS)
 	@echo "cHscIfaceFileVersion  = \"$(HscIfaceFileVersion)\"" >> $(CONFIG_HS)
 	@echo "cSplitObjs            :: String" >> $(CONFIG_HS)
-	@echo "cSplitObjs            = \"$(SplitObjs)\"" >> $(CONFIG_HS)
+	@echo "cSplitObjs            = \"$(SupportsSplitObjs)\"" >> $(CONFIG_HS)
 	@echo "cGhcWithInterpreter   :: String" >> $(CONFIG_HS)
 	@echo "cGhcWithInterpreter   = \"$(GhcWithInterpreter)\"" >> $(CONFIG_HS)
 	@echo "cGhcWithNativeCodeGen :: String" >> $(CONFIG_HS)

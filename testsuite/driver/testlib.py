@@ -216,6 +216,16 @@ def _extra_clean( opts, v ):
 
 # -----
 
+def space( field, min, max ):
+    return lambda opts, f=field, n=min, x=max: _space(opts, f, n, x);
+
+def _space( opts, f, n, x ):
+    opts.space_field = f
+    opts.space_min = n
+    opts.space_max = x
+
+# -----
+
 def skip_if_no_ghci(opts):
   if not ('ghci' in config.run_ways):
       opts.skip = 1
@@ -319,6 +329,12 @@ def _cmd_prefix( opts, prefix ):
 
 def normalise_slashes( opts ):
     opts.extra_normaliser = normalise_slashes_
+
+def normalise_fun( fun ):
+    return lambda opts, f=fun: _normalise_fun(opts, f)
+
+def _normalise_fun( opts, f ):
+    opts.extra_normaliser = f
 
 # ----
 # Function for composing two opt-fns together
@@ -439,7 +455,7 @@ def test_common_work (name, opts, func, args):
             skiptest (name,way)
 
     clean(map (lambda suff: name + suff,
-              ['', '.exe', '.genscript',
+              ['', '.exe', '.exe.manifest', '.genscript',
                '.stderr.normalised',        '.stdout.normalised',
                '.run.stderr',               '.run.stdout',
                '.run.stderr.normalised',    '.run.stdout.normalised',
@@ -447,8 +463,9 @@ def test_common_work (name, opts, func, args):
                '.comp.stderr.normalised',   '.comp.stdout.normalised',
                '.interp.stderr',            '.interp.stdout',
                '.interp.stderr.normalised', '.interp.stdout.normalised',
+               '.stats',
                '.hi', '.o', '.prof', '.exe.prof', '.hc', '_stub.h', '_stub.c',
-               '_stub.o', '.hp', '.exe.hp', '.ps', '.aux', '.hcr']))
+               '_stub.o', '.hp', '.exe.hp', '.ps', '.aux', '.hcr', '.eventlog']))
 
     clean(getTestOpts().clean_files)
 
@@ -654,6 +671,37 @@ def compile_and_run__( name, way, extra_hc_opts, top_mod ):
 def compile_and_run( name, way, extra_hc_opts ):
     return compile_and_run__( name, way, extra_hc_opts, '')
 
+def compile_and_run_space( name, way, extra_hc_opts ):
+    stats_file = name + '.stats'
+    opts = getTestOpts()
+    opts.extra_run_opts += ' +RTS -t' + stats_file + " --machine-readable -RTS"
+    setLocalTestOpts(opts)
+
+    result = compile_and_run__( name, way, extra_hc_opts, '')
+    if result != 'pass':
+        return 'fail'
+
+    f = open(in_testdir(stats_file))
+    contents = f.read()
+    f.close()
+
+    m = re.search('\("' + opts.space_field + '", "([0-9]+)"\)', contents)
+    if m == None:
+        print "Failed to find space field: ", opts.space_field
+        return 'fail'
+    val = int(m.group(1))
+
+    if val < opts.space_min:
+        print 'Space usage ', val, \
+              ' less than minimum allowed ', opts.space_min
+        return 'fail'
+    if val > opts.space_max:
+        print 'Space usage ', val, \
+              ' more than maximum allowed ', opts.space_max
+        return 'fail'
+    else:
+        return 'pass';
+
 def multimod_compile_and_run( name, way, top_mod, extra_hc_opts ):
     return compile_and_run__( name, way, extra_hc_opts, top_mod)
 
@@ -726,6 +774,7 @@ def simple_run( name, way, prog, args ):
    rm_no_fail(qualify(name,'run.stderr'))
    rm_no_fail(qualify(name, 'hp'))
    rm_no_fail(qualify(name,'ps'))
+   rm_no_fail(qualify(name, 'prof'))
    
    my_rts_flags = rts_flags(way)
 
@@ -754,10 +803,13 @@ def simple_run( name, way, prog, args ):
        return 'fail'
 
    check_hp = my_rts_flags.find("-h") != -1
+   check_prof = my_rts_flags.find("-p") != -1
 
-   if getTestOpts().ignore_output or (check_stderr_ok(name) and
-                                      check_stdout_ok(name) and
-                                      (not check_hp or exit_code > 127 or check_hp_ok(name))):
+   if getTestOpts().ignore_output or \
+      (check_stderr_ok(name) and
+       check_stdout_ok(name) and
+       (not check_hp or (exit_code > 127 and exit_code != 251) or check_hp_ok(name)) and
+       (not check_prof or check_prof_ok(name))):
        # exit_code > 127 probably indicates a crash, so don't try to run hp2ps.
        return 'pass'
    else:
@@ -1057,6 +1109,20 @@ def check_hp_ok(name):
         print "hp2ps error when processing heap profile for " + name
         return(False)
 
+def check_prof_ok(name):
+
+    prof_file = qualify(name,'prof')
+
+    if not os.path.exists(prof_file):
+        print prof_file + " does not exist"
+        return(False)
+
+    if os.path.getsize(qualify(name,'prof')) == 0:
+        print prof_file + " is empty"
+        return(False)
+
+    return(True)
+
 # Compare expected output to actual output, and optionally accept the
 # new output. Returns true if output matched or was accepted, false
 # otherwise.
@@ -1084,8 +1150,16 @@ def compare_outputs( kind, normaliser, extra_normaliser,
         actual_normalised_file = actual_file + ".normalised"
         write_file(actual_normalised_file, actual_str)
 
-        os.system( 'diff -u ' + expected_normalised_file + \
-                          ' ' + actual_normalised_file )
+        # Ignore whitespace when diffing. We should only get to this
+        # point if there are non-whitespace differences
+        r = os.system( 'diff -uw ' + expected_normalised_file + \
+                               ' ' + actual_normalised_file )
+
+        # If for some reason there were no non-whitespace differences,
+        # then do a full diff
+        if r == 0:
+            r = os.system( 'diff -u ' + expected_normalised_file + \
+                                  ' ' + actual_normalised_file )
 
         if config.accept:
             if expected_file == '':
@@ -1113,6 +1187,9 @@ def normalise_errmsg( str ):
     #    hacky solution is used in place of more sophisticated filename
     #    mangling
     str = re.sub('([^\\s])\\.exe', '\\1', str)
+    # The inplace ghc's are called ghc-bin-stage[123] to avoid filename
+    # collisions, so we need to normalise that to just "ghc"
+    str = re.sub('ghc-bin-stage[123]', 'ghc', str)
     return str
 
 def normalise_slashes_( str ):

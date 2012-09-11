@@ -42,6 +42,11 @@ test('driver018',
                   'obj018']),
      run_command,
      ['$MAKE -s --no-print-directory test018'])
+test('driver018a',
+     extra_clean(['F018a.hi', 'F018a_stub.c', 'F018a_stub.h',
+                  'TestStub018a.obj.018', 'obj018a/TestStub018a_stub.obj.018']),
+     run_command,
+     ['$MAKE -s --no-print-directory test018a'])
 test('driver019',
      extra_clean(['out019/TestStub.hi','out019/TestStub.o','out019/TestStub_stub.c','out019/TestStub_stub.h','out019/TestStub_stub.o']),
      run_command,
@@ -192,7 +197,9 @@ test('driver200', normal, run_command,
      ['$MAKE -s --no-print-directory test200'])
 cleanall()
 
-test('2566', normal, run_command,
+test('2566',
+     normalise_fun(normalise_errmsg),
+     run_command,
      ['$MAKE -s --no-print-directory 2566'])
 cleanall()
 
@@ -204,3 +211,12 @@ test('2499', normal, compile_fail, [''])
 test('mode001', normal, run_command,
      ['$MAKE -s --no-print-directory mode001'])
 
+if config.platform == 'i386-unknown-mingw32':
+     only_windows = normal
+else:
+     only_windows = skip
+
+test('shared001', [ only_windows,
+                    extra_clean(['Shared001.hi', 'Shared001.o', 'HSdll.dll.a', 'HSdll.dll', 'Shared001_stub.c', 'Shared001_stub.h', 'Shared001_stub.o'])
+                 ], run_command,
+     ['$MAKE -s --no-print-directory shared001'])

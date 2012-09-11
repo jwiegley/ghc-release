@@ -26,7 +26,7 @@ static void raiseAsync (Capability *cap,
 			StgTSO *tso,
 			StgClosure *exception, 
 			rtsBool stop_at_atomically,
-			StgPtr stop_here);
+			StgUpdateFrame *stop_here);
 
 static void removeFromQueues(Capability *cap, StgTSO *tso);
 
@@ -55,12 +55,12 @@ static void performBlockedException (Capability *cap,
 void
 throwToSingleThreaded(Capability *cap, StgTSO *tso, StgClosure *exception)
 {
-    throwToSingleThreaded_(cap, tso, exception, rtsFalse, NULL);
+    throwToSingleThreaded_(cap, tso, exception, rtsFalse);
 }
 
 void
 throwToSingleThreaded_(Capability *cap, StgTSO *tso, StgClosure *exception, 
-		       rtsBool stop_at_atomically, StgPtr stop_here)
+		       rtsBool stop_at_atomically)
 {
     // Thread already dead?
     if (tso->what_next == ThreadComplete || tso->what_next == ThreadKilled) {
@@ -70,11 +70,11 @@ throwToSingleThreaded_(Capability *cap, StgTSO *tso, StgClosure *exception,
     // Remove it from any blocking queues
     removeFromQueues(cap,tso);
 
-    raiseAsync(cap, tso, exception, stop_at_atomically, stop_here);
+    raiseAsync(cap, tso, exception, stop_at_atomically, NULL);
 }
 
 void
-suspendComputation(Capability *cap, StgTSO *tso, StgPtr stop_here)
+suspendComputation(Capability *cap, StgTSO *tso, StgUpdateFrame *stop_here)
 {
     // Thread already dead?
     if (tso->what_next == ThreadComplete || tso->what_next == ThreadKilled) {
@@ -264,6 +264,15 @@ check_target:
 		target = target->_link;
 		goto retry;
 	    }
+            // check again for ThreadComplete and ThreadKilled.  This
+            // cooperates with scheduleHandleThreadFinished to ensure
+            // that we never miss any threads that are throwing an
+            // exception to a thread in the process of terminating.
+            if (target->what_next == ThreadComplete
+                || target->what_next == ThreadKilled) {
+		unlockTSO(target);
+                return THROWTO_SUCCESS;
+            }
 	    blockedThrowTo(cap,source,target);
 	    *out = target;
 	    return THROWTO_BLOCKED;
@@ -415,6 +424,7 @@ check_target:
 	// Unblocking BlockedOnSTM threads requires the TSO to be
 	// locked; see STM.c:unpark_tso().
 	if (target->why_blocked != BlockedOnSTM) {
+	    unlockTSO(target);
 	    goto retry;
 	}
 	if ((target->flags & TSO_BLOCKEX) &&
@@ -436,6 +446,11 @@ check_target:
 	// thread is blocking exceptions, and block on its
 	// blocked_exception queue.
 	lockTSO(target);
+	if (target->why_blocked != BlockedOnCCall &&
+ 	    target->why_blocked != BlockedOnCCall_NoUnblockExc) {
+	    unlockTSO(target);
+            goto retry;
+	}
 	blockedThrowTo(cap,source,target);
 	*out = target;
 	return THROWTO_BLOCKED;
@@ -512,6 +527,15 @@ maybePerformBlockedException (Capability *cap, StgTSO *tso)
 {
     StgTSO *source;
     
+    if (tso->what_next == ThreadComplete || tso->what_next == ThreadFinished) {
+        if (tso->blocked_exceptions != END_TSO_QUEUE) {
+            awakenBlockedExceptionQueue(cap,tso);
+            return 1;
+        } else {
+            return 0;
+        }
+    }
+
     if (tso->blocked_exceptions != END_TSO_QUEUE && 
         (tso->flags & TSO_BLOCKEX) != 0) {
         debugTrace(DEBUG_sched, "throwTo: thread %lu has blocked exceptions but is inside block", (unsigned long)tso->id);
@@ -543,15 +567,16 @@ maybePerformBlockedException (Capability *cap, StgTSO *tso)
     return 0;
 }
 
+// awakenBlockedExceptionQueue(): Just wake up the whole queue of
+// blocked exceptions and let them try again.
+
 void
 awakenBlockedExceptionQueue (Capability *cap, StgTSO *tso)
 {
-    if (tso->blocked_exceptions != END_TSO_QUEUE) {
-	lockTSO(tso);
-	awakenBlockedQueue(cap, tso->blocked_exceptions);
-	tso->blocked_exceptions = END_TSO_QUEUE;
-	unlockTSO(tso);
-    }
+    lockTSO(tso);
+    awakenBlockedQueue(cap, tso->blocked_exceptions);
+    tso->blocked_exceptions = END_TSO_QUEUE;
+    unlockTSO(tso);
 }    
 
 static void
@@ -851,10 +876,11 @@ removeFromQueues(Capability *cap, StgTSO *tso)
 
 static void
 raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception, 
-	   rtsBool stop_at_atomically, StgPtr stop_here)
+	   rtsBool stop_at_atomically, StgUpdateFrame *stop_here)
 {
     StgRetInfoTable *info;
     StgPtr sp, frame;
+    StgClosure *updatee;
     nat i;
 
     debugTrace(DEBUG_sched,
@@ -881,6 +907,12 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
     // layers should deal with that.
     ASSERT(tso->what_next != ThreadComplete && tso->what_next != ThreadKilled);
 
+    if (stop_here != NULL) {
+        updatee = stop_here->updatee;
+    } else {
+        updatee = NULL;
+    }
+
     // The stack freezing code assumes there's a closure pointer on
     // the top of the stack, so we have to arrange that this is the case...
     //
@@ -892,7 +924,7 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
     }
 
     frame = sp + 1;
-    while (stop_here == NULL || frame < stop_here) {
+    while (stop_here == NULL || frame < (StgPtr)stop_here) {
 
 	// 1. Let the top of the stack be the "current closure"
 	//
@@ -946,11 +978,20 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
 	    //	     printObj((StgClosure *)ap);
 	    //	);
 
-            // Perform the update
-            // TODO: this may waste some work, if the thunk has
-            // already been updated by another thread.
-            UPD_IND_NOLOCK(((StgUpdateFrame *)frame)->updatee,
-                           (StgClosure *)ap);
+            if (((StgUpdateFrame *)frame)->updatee == updatee) {
+                // If this update frame points to the same closure as
+                // the update frame further down the stack
+                // (stop_here), then don't perform the update.  We
+                // want to keep the blackhole in this case, so we can
+                // detect and report the loop (#2783).
+                ap = (StgAP_STACK*)updatee;
+            } else {
+                // Perform the update
+                // TODO: this may waste some work, if the thunk has
+                // already been updated by another thread.
+                UPD_IND_NOLOCK(((StgUpdateFrame *)frame)->updatee,
+                               (StgClosure *)ap);
+            }
 
 	    sp += sizeofW(StgUpdateFrame) - 1;
 	    sp[0] = (W_)ap; // push onto stack

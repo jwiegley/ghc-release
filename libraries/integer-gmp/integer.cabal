@@ -1,5 +1,5 @@
 name:           integer
-version:        0.1.0.0
+version:        0.1.0.1
 license:        BSD3
 license-file:   LICENSE
 maintainer:     libraries@haskell.org
@@ -17,5 +17,5 @@ Library {
                 ForeignFunctionInterface, UnliftedFFITypes
     -- We need to set the package name to integer (without a version number)
     -- as it's magic.
-    ghc-options: -package-name integer -Wall -Werror
+    ghc-options: -package-name integer
 }

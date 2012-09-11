@@ -103,8 +103,11 @@ andBegin act new_sc = \str _ cont -> act str new_sc cont
 token :: Token -> Action
 token t = \_ sc cont -> t : cont sc
 
-strtoken :: (String -> Token) -> Action
+strtoken, strtokenNL :: (String -> Token) -> Action
 strtoken t = \str sc cont -> t str : cont sc
+strtokenNL t = \str sc cont -> t (filter (/= '\r') str) : cont sc
+-- ^ We only want LF line endings in our internal doc string format, so we
+-- filter out all CRs.
 
 begin :: StartCode -> Action
 begin sc = \_ _ cont -> cont sc
@@ -143,7 +146,7 @@ alex_action_5 = begin string
 alex_action_6 = begin birdtrack 
 alex_action_7 = token TokPara `andBegin` para 
 alex_action_8 = begin string 
-alex_action_9 = strtoken TokBirdTrack `andBegin` line 
+alex_action_9 = strtokenNL TokBirdTrack `andBegin` line 
 alex_action_10 = strtoken $ \s -> TokSpecial (head s) 
 alex_action_11 = strtoken $ \s -> TokPic (init $ init $ tail $ tail s) 
 alex_action_12 = strtoken $ \s -> TokURL (init (tail s)) 
@@ -154,7 +157,7 @@ alex_action_16 = strtoken (TokString . tail)
 alex_action_17 = strtoken $ \s -> TokString [chr (read (init (drop 2 s)))] 
 alex_action_18 = strtoken $ \s -> case readHex (init (drop 3 s)) of [(n,_)] -> TokString [chr n] 
 alex_action_19 = strtoken TokString 
-alex_action_20 = strtoken TokString `andBegin` line 
+alex_action_20 = strtokenNL TokString `andBegin` line 
 alex_action_21 = strtoken TokString 
 alex_action_22 = token TokDefEnd `andBegin` string 
 alex_action_23 = strtoken TokString 

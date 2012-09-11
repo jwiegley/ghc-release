@@ -34,6 +34,7 @@ import OccName
 import TcType
 import DataCon
 import TyCon
+import Class
 import Module
 import HscTypes
 import Maybes
@@ -302,10 +303,12 @@ tidyProgram hsc_env  (ModGuts { mg_module = mod, mg_exports = exports,
 		-- and indeed it does, but if omit_prags is on, ext_rules is
 		-- empty
 
+          ; implicit_binds = getImplicitBinds type_env
+          ; all_tidy_binds = implicit_binds ++ tidy_binds
 	      ; alg_tycons = filter isAlgTyCon (typeEnvTyCons type_env)
 	      }
 
-   	; endPass dflags "Tidy Core" Opt_D_dump_simpl tidy_binds
+   	; endPass dflags "Tidy Core" Opt_D_dump_simpl all_tidy_binds
 	; dumpIfSet_core dflags Opt_D_dump_simpl
 		"Tidy Core Rules"
 		(pprRules tidy_rules)
@@ -314,7 +317,7 @@ tidyProgram hsc_env  (ModGuts { mg_module = mod, mg_exports = exports,
 
 	; return (CgGuts { cg_module   = mod, 
 			   cg_tycons   = alg_tycons,
-			   cg_binds    = tidy_binds,
+			   cg_binds    = all_tidy_binds,
 			   cg_dir_imps = dir_imp_mods,
 			   cg_foreign  = foreign_stubs,
 			   cg_dep_pkgs = dep_pkgs deps,
@@ -433,6 +436,31 @@ tidyInstances tidy_dfun ispecs
   where
     tidy ispec = setInstanceDFunId ispec $
 		 tidy_dfun (instanceDFunId ispec)
+
+getImplicitBinds :: TypeEnv -> [CoreBind]
+getImplicitBinds type_env
+  = map get_defn (concatMap implicit_con_ids (typeEnvTyCons type_env)
+                 ++ concatMap other_implicit_ids (typeEnvElts type_env))
+       -- Put the constructor wrappers first, because
+       -- other implicit bindings (notably the fromT functions arising
+       -- from generics) use the constructor wrappers.  At least that's
+       -- what External Core likes
+  where
+    implicit_con_ids tc = mapCatMaybes dataConWrapId_maybe (tyConDataCons tc)
+
+    other_implicit_ids (ATyCon tc) = filter (not . isNaughtyRecordSelector) (tyConSelIds tc)
+       -- The "naughty" ones are not real functions at all
+       -- They are there just so we can get decent error messages
+       -- See Note  [Naughty record selectors] in MkId.lhs
+    other_implicit_ids (AClass cl) = classSelIds cl
+    other_implicit_ids _other      = []
+
+    get_defn :: Id -> CoreBind
+    get_defn id = NonRec id (tidyExpr emptyTidyEnv rhs)
+       where
+         rhs = unfoldingTemplate (idUnfolding id)
+       -- Don't forget to tidy the body !  Otherwise you get silly things like
+       --      \ tpl -> case tpl of tpl -> (tpl,tpl) -> tpl
 \end{code}
 
 
@@ -727,13 +755,12 @@ tidyTopPair :: VarEnv Bool
 	-- in the IdInfo of one early in the group
 
 tidyTopPair ext_ids rhs_tidy_env caf_info name' (bndr, rhs)
+  | isGlobalId bndr            -- Injected binding for record selector, etc
+  = (bndr, tidyExpr rhs_tidy_env rhs)
+  | otherwise
   = (bndr', rhs')
   where
-    bndr' = mkGlobalId details name' ty' idinfo'
-	-- Preserve the GlobalIdDetails of existing global-ids
-    details = case globalIdDetails bndr of	
-		NotGlobalId -> VanillaGlobal
-		old_details -> old_details
+    bndr' = mkVanillaGlobalWithInfo name' ty' idinfo'
     ty'	    = tidyTopType (idType bndr)
     rhs'    = tidyExpr rhs_tidy_env rhs
     idinfo  = idInfo bndr

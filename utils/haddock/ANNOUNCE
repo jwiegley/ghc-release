@@ -1,0 +1,97 @@
+--------------------------------------------
+-- Haddock 2.4.2
+--------------------------------------------
+
+A new version of Haddock, the Haskell documentation tool, is out!
+
+This is a bug fix release only, and it's the same version that will ship with
+GHC 6.10.2, unless any important problems are discovered before the GHC
+release.
+
+Because the .haddock file format has changed, links to previously installed
+documentation will not work when generating documentation using this version.
+
+Please use the bug tracker to submit bug reports or feature requests.
+
+--------------------------------------------
+-- Changes in version 2.4.2
+--------------------------------------------
+
+  * Support GHC 6.10.2
+
+  * Haddock no longer crashes on Template Haskell modules (#68)
+    (only with GHC 6.10.2 or above)
+
+  * Fix problem with Template Haskell-generated declarations disappearing (#59)
+
+  * Generate two anchors for each link for compatibility between IE and Opera
+    (#45)
+
+  * Improved error messages
+
+  * Show re-exports from external packages again (GHC ticket #2746)
+
+  * Store hidden modules in .haddock files again (needed by the haddock
+    library)
+
+  * Avoid processing boot modules
+
+  * Pragmas may exist between document comments and declarations
+
+  * Do not indicate that a constructor argument is unboxed
+
+  * Fix problem with with non-working links to ghc-prim
+
+  * Allow referring to a specific section within a module in a module link
+    (#65)
+
+  * Fixes to the Hoogle backend
+  
+  * Improvements to the haddock library
+
+  * Many other fixes (including #67, #69, #58, #57)
+
+--------------------------------------------
+-- Links
+--------------------------------------------
+
+Homepage:
+ http://www.haskell.org/haddock
+
+Hackage page:
+ http://hackage.haskell.org/cgi-bin/hackage-scripts/package/haddock-2.4.2
+
+Bugtracker and wiki:
+ http://trac.haskell.org/haddock
+
+Mailing list:
+ haddock@projects.haskell.org
+
+Code repository:
+ http://code.haskell.org/haddock
+
+--------------------------------------------
+-- Contributors
+--------------------------------------------
+
+The following people contributed patches to this release:
+
+ Joachim Breitner
+ Roman Cheplyaka
+ Ian Lynagh
+ Neil Mitchell
+ Simon Peyton-Jones
+ Thomas Schilling
+ David Waern
+
+--------------------------------------------
+-- Get Involved
+--------------------------------------------
+
+We welcome new contributors. To get involved, start by grabbing the code:
+
+ http://code.haskell.org/haddock
+
+Then take a look at the bug and feature tracker for things to work on:
+
+ http://trac.haskell.org/haddock

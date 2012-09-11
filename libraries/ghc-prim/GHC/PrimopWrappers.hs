@@ -421,6 +421,9 @@ newByteArray# a1 a2 = (GHC.Prim.newByteArray#) a1 a2
 {-# NOINLINE newPinnedByteArray# #-}
 newPinnedByteArray# :: Int# -> State# s -> (# State# s,MutableByteArray# s #)
 newPinnedByteArray# a1 a2 = (GHC.Prim.newPinnedByteArray#) a1 a2
+{-# NOINLINE newAlignedPinnedByteArray# #-}
+newAlignedPinnedByteArray# :: Int# -> Int# -> State# s -> (# State# s,MutableByteArray# s #)
+newAlignedPinnedByteArray# a1 a2 a3 = (GHC.Prim.newAlignedPinnedByteArray#) a1 a2 a3
 {-# NOINLINE byteArrayContents# #-}
 byteArrayContents# :: ByteArray# -> Addr#
 byteArrayContents# a1 = (GHC.Prim.byteArrayContents#) a1
@@ -877,6 +880,9 @@ threadStatus# a1 a2 = (GHC.Prim.threadStatus#) a1 a2
 {-# NOINLINE mkWeak# #-}
 mkWeak# :: o -> b -> c -> State# (RealWorld) -> (# State# (RealWorld),Weak# b #)
 mkWeak# a1 a2 a3 a4 = (GHC.Prim.mkWeak#) a1 a2 a3 a4
+{-# NOINLINE mkWeakForeignEnv# #-}
+mkWeakForeignEnv# :: o -> b -> Addr# -> Addr# -> Int# -> Addr# -> State# (RealWorld) -> (# State# (RealWorld),Weak# b #)
+mkWeakForeignEnv# a1 a2 a3 a4 a5 a6 a7 = (GHC.Prim.mkWeakForeignEnv#) a1 a2 a3 a4 a5 a6 a7
 {-# NOINLINE deRefWeak# #-}
 deRefWeak# :: Weak# a -> State# (RealWorld) -> (# State# (RealWorld),Int#,a #)
 deRefWeak# a1 a2 = (GHC.Prim.deRefWeak#) a1 a2

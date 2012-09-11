@@ -74,7 +74,7 @@ endif
 
 SUBDIRS = gmp libffi includes utils docs rts compiler ghc driver libraries libraries/Cabal/doc
 
-check-all: check-packages
+check-all: check-packages check-tools
 
 # Sanity check that all the boot libraries are in the tree, to catch
 # failure to run darcs-all.
@@ -92,6 +92,21 @@ check-packages :
 	    echo "Did you run 'sh boot' at the top level?"; \
 	    exit 1; \
 	fi
+
+HAVE_EVAL := NO
+$(eval HAVE_EVAL := YES)
+
+check-tools:
+ifeq "$(HSCOLOUR_SRCS) $(HSCOLOUR)" "YES "
+	@echo "HsColour needed but wasn't found."
+	@echo "Set HSCOLOUR_SRCS=NO if you don't want to use it"
+	exit 1
+endif
+ifeq "$(HAVE_EVAL)" "NO"
+	@echo "Your make doesn't support eval. You need GNU make >= 3.80"
+	exit 1
+endif
+	@:
 
 ifeq "$(TARGETPLATFORM)" "i386-unknown-mingw32"
 ifneq "$(WhatGccIsCalled)" ""
@@ -194,6 +209,8 @@ install-strip:
 
 # Same as default rule, but we pass $(INSTALL_STAGE) to $(MAKE) too
 install :: check-packages
+	$(MKDIRHIER) $(DESTDIR)$(datadir)
+	echo "[]" > $(DESTDIR)$(datadir)/package.conf
 	@case '${MFLAGS}' in *-[ik]*) x_on_err=0;; *-r*[ik]*) x_on_err=0;; *) x_on_err=1;; esac; \
 	for i in $(SUBDIRS); do \
 	  echo "------------------------------------------------------------------------"; \
@@ -296,8 +313,8 @@ binary-dist :: tar-binary-dist
 
 .PHONY: tar-binary-dist
 tar-binary-dist:
-	( cd $(BIN_DIST_TOPDIR_ABS); $(TAR) cf - $(BIN_DIST_NAME) | bzip2 > $(BIN_DIST_TAR_BZ2) )
-	( cd $(BIN_DIST_TOPDIR_ABS); bunzip2 -c $(BIN_DIST_TAR_BZ2) | $(TAR) tf - | sed "s/^ghc-$(ProjectVersion)/fptools/" | sort >$(FPTOOLS_TOP_ABS)/bin-manifest-$(ProjectVersion) )
+	( cd $(BIN_DIST_TOPDIR_ABS); $(TAR) cf - $(BIN_DIST_NAME) | bzip2 > $(FPTOOLS_TOP_ABS)/$(BIN_DIST_TAR_BZ2) )
+	( cd $(BIN_DIST_TOPDIR_ABS); bunzip2 -c $(FPTOOLS_TOP_ABS)/$(BIN_DIST_TAR_BZ2) | $(TAR) tf - | sed "s/^ghc-$(ProjectVersion)/fptools/" | sort >$(FPTOOLS_TOP_ABS)/bin-manifest-$(ProjectVersion) )
 
 else
 
@@ -394,7 +411,7 @@ endif
 # h means "follow symlinks", e.g. if aclocal.m4 is a symlink to a source
 # tree then we want to include the real file, not a symlink to it
 	$(TAR) hcf $(BIN_DIST_TAR) -T $(BIN_DIST_LIST)
-	cd $(BIN_DIST_PREP_DIR) && $(TAR) rf $(BIN_DIST_TAR) $(BIN_DIST_NAME)
+	cd $(BIN_DIST_PREP_DIR) && $(TAR) rf ../$(BIN_DIST_TAR) $(BIN_DIST_NAME)
 	bzip2 < $(BIN_DIST_TAR) > $(BIN_DIST_TAR_BZ2)
 	$(TAR) tf $(BIN_DIST_TAR) | sort > bin-manifest-$(ProjectVersion)
 endif

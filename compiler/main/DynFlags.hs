@@ -402,7 +402,6 @@ data DynFlags = DynFlags {
   depIncludePkgDeps     :: Bool,
   depExcludeMods        :: [ModuleName],
   depSuffixes           :: [String],
-  depWarnings           :: Bool,
 
   --  Package flags
   extraPkgConfs         :: [FilePath],
@@ -429,6 +428,19 @@ data DynFlags = DynFlags {
   haddockOptions :: Maybe String
  }
 
+-- | The target code type of the compilation (if any).
+--
+-- 'HscNothing' can be used to avoid generating any output, however, note
+-- that:
+--
+--  * This will not run the desugaring step, thus no warnings generated in
+--    this step will be output.  In particular, this includes warnings
+--    related to pattern matching.
+--
+--  * At the moment switching from 'HscNothing' to 'HscInterpreted' without
+--    unloading first is not safe.  To unload use
+--    @GHC.setTargets [] >> GHC.load LoadAllTargets@.
+--
 data HscTarget
   = HscC
   | HscAsm
@@ -605,7 +617,6 @@ defaultDynFlags =
         depIncludePkgDeps = False,
         depExcludeMods    = [],
         depSuffixes       = [],
-        depWarnings       = True,
         -- end of ghc -M values
         haddockOptions = Nothing,
         flags = [
@@ -750,9 +761,6 @@ addDepExcludeMod m d
 
 addDepSuffix :: FilePath -> DynFlags -> DynFlags
 addDepSuffix s d = d { depSuffixes = deOptDep s : depSuffixes d }
-
-setDepWarnings :: Bool -> DynFlags -> DynFlags
-setDepWarnings b d = d { depWarnings = b }
 
 -- XXX Legacy code:
 -- We used to use "-optdep-flag -optdeparg", so for legacy applications
@@ -1159,7 +1167,7 @@ dynamic_flags = [
   , Flag "dep-makefile"             (HasArg (upd . setDepMakefile)) Supported
   , Flag "optdep-f"                 (HasArg (upd . setDepMakefile))
          (Deprecated "Use -dep-makefile instead")
-  , Flag "optdep-w"                 (NoArg  (upd (setDepWarnings False)))
+  , Flag "optdep-w"                 (NoArg  (return ()))
          (Deprecated "-optdep-w doesn't do anything")
   , Flag "include-pkg-deps" (NoArg  (upd (setDepIncludePkgDeps True))) Supported
   , Flag "optdep--include-prelude"  (NoArg  (upd (setDepIncludePkgDeps True)))
@@ -1679,6 +1687,8 @@ impliedFlags :: [(DynFlag, DynFlag)]
 impliedFlags
   = [ (Opt_GADTs,               Opt_RelaxedPolyRec)  -- We want type-sig variables to
                                                      --      be completely rigid for GADTs
+
+    , (Opt_TypeFamilies,        Opt_RelaxedPolyRec)  -- Trac #2944 gives a nice example
 
     , (Opt_ScopedTypeVariables, Opt_RelaxedPolyRec)  -- Ditto for scoped type variables; see
                                                      --      Note [Scoped tyvars] in TcBinds

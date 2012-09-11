@@ -20,6 +20,7 @@ module DriverPipeline (
 	-- Interfaces for the compilation manager (interpreted/batch-mode)
    preprocess, 
    compile,
+   compile', -- internal
    link, 
 
   ) where
@@ -103,7 +104,22 @@ compile :: GhcMonad m =>
         -> Maybe Linkable  -- ^ old linkable, if we have one
         -> m HomeModInfo   -- ^ the complete HomeModInfo, if successful
 
-compile hsc_env0 summary mod_index nmods mb_old_iface maybe_old_linkable
+compile = compile' (hscCompileNothing, hscCompileInteractive, hscCompileBatch)
+
+compile' :: 
+     GhcMonad m =>
+     (Compiler' m (HscStatus, ModIface, ModDetails),
+      Compiler' m (InteractiveStatus, ModIface, ModDetails),
+      Compiler' m (HscStatus, ModIface, ModDetails))
+  -> HscEnv
+  -> ModSummary      -- ^ summary for module being compiled
+  -> Int             -- ^ module N ...
+  -> Int             -- ^ ... of M
+  -> Maybe ModIface  -- ^ old interface, if we have one
+  -> Maybe Linkable  -- ^ old linkable, if we have one
+  -> m HomeModInfo   -- ^ the complete HomeModInfo, if successful
+compile' (nothingCompiler, interactiveCompiler, batchCompiler)
+         hsc_env0 summary mod_index nmods mb_old_iface maybe_old_linkable
  = do
    let dflags0     = ms_hspp_opts summary
        this_mod    = ms_mod summary
@@ -210,13 +226,13 @@ compile hsc_env0 summary mod_index nmods mb_old_iface maybe_old_linkable
    case hsc_lang of
       HscInterpreted
         | isHsBoot src_flavour -> 
-                runCompiler hscCompileNothing handleBatch
+                runCompiler nothingCompiler handleBatch
         | otherwise -> 
-                runCompiler hscCompileInteractive handleInterpreted
+                runCompiler interactiveCompiler handleInterpreted
       HscNothing -> 
-                runCompiler hscCompileNothing handleBatch
+                runCompiler nothingCompiler handleBatch
       _other -> 
-                runCompiler hscCompileBatch handleBatch
+                runCompiler batchCompiler handleBatch
 
 -----------------------------------------------------------------------------
 -- stub .h and .c files (for foreign export support)
@@ -240,11 +256,10 @@ compile hsc_env0 summary mod_index nmods mb_old_iface maybe_old_linkable
 compileStub :: GhcMonad m => HscEnv -> Module -> ModLocation
             -> m FilePath
 compileStub hsc_env mod location = do
-	let (o_base, o_ext) = splitExtension (ml_obj_file location)
-	    stub_o = (o_base ++ "_stub") <.> o_ext
-
 	-- compile the _stub.c file w/ gcc
-	let (stub_c,_,_) = mkStubPaths (hsc_dflags hsc_env) (moduleName mod) location
+	let (stub_c,_,stub_o) = mkStubPaths (hsc_dflags hsc_env) 
+                                   (moduleName mod) location
+
 	runPipeline StopLn hsc_env (stub_c,Nothing)  Nothing
 		(SpecificFile stub_o) Nothing{-no ModLocation-}
 
@@ -973,6 +988,13 @@ runPhase cc_phase _stop hsc_env _basename _suff input_fn get_output_fn maybe_loc
         -- This is a temporary hack.
                        ++ ["-mcpu=v9"]
 #endif
+#if defined(darwin_TARGET_OS) && defined(i386_TARGET_ARCH)
+                          -- By default, gcc on OS X will generate SSE
+                          -- instructions, which need things 16-byte aligned,
+                          -- but we don't 16-byte align things. Thus drop
+                          -- back to generic i686 compatibility. Trac #2983.
+                       ++ ["-march=i686"]
+#endif
 		       ++ (if hcc && mangle
 		  	     then md_regd_c_flags
 		  	     else [])
@@ -1121,6 +1143,16 @@ runPhase SplitAs _stop hsc_env _basename _suff _input_fn get_output_fn maybe_loc
         let assemble_file n
               = SysTools.runAs dflags
                          (map SysTools.Option as_opts ++
+#ifdef sparc_TARGET_ARCH
+        -- We only support SparcV9 and better because V8 lacks an atomic CAS
+        -- instruction so we have to make sure that the assembler accepts the
+        -- instruction set. Note that the user can still override this
+        -- (e.g., -mcpu=ultrasparc). GCC picks the "best" -mcpu flag
+        -- regardless of the ordering.
+        --
+        -- This is a temporary hack.
+                          [ SysTools.Option "-mcpu=v9" ] ++
+#endif
                           [ SysTools.Option "-c"
                           , SysTools.Option "-o"
                           , SysTools.FileOption "" (split_obj n)
@@ -1481,6 +1513,8 @@ maybeCreateManifest dflags exe_filename = do
         -- no FileOptions here: windres doesn't like seeing
         -- backslashes, apparently
 
+  removeFile manifest_filename
+
   return [rc_obj_filename]
 #endif
 
@@ -1494,8 +1528,14 @@ linkDynLib dflags o_files dep_packages = do
     -- because the RTS lib comes in several flavours and we want to be
     -- able to pick the flavour when a binary is linked.
     pkgs <- getPreloadPackagesAnd dflags dep_packages
-    let pkgs_no_rts = filter ((/= rtsPackageId) . packageConfigId) pkgs
 
+    -- On Windows we need to link the RTS import lib as Windows does
+    -- not allow undefined symbols.
+#if !defined(mingw32_HOST_OS)
+    let pkgs_no_rts = filter ((/= rtsPackageId) . packageConfigId) pkgs
+#else
+    let pkgs_no_rts = pkgs
+#endif
     let pkg_lib_paths = collectLibraryPaths pkgs_no_rts
     let pkg_lib_path_opts = map ("-L"++) pkg_lib_paths
 

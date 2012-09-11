@@ -10,6 +10,14 @@ include $(TOP)/mk/boilerplate.mk
 
 PLATFORM := $(shell echo $(HOSTPLATFORM) | sed 's/i[567]86/i486/g')
 
+# 2009-03-30
+# The "set -o igncr" hack appears to now break with libffi 3.0.8, resulting in
+#
+# gawk: ./confqYaQS8/subs.awk:1: BEGIN {\r
+# gawk: ./confqYaQS8/subs.awk:1:        ^ backslash not last character on line
+#
+# So set -o igncr now removed.
+#
 # 2007-09-26
 #     set -o igncr 
 # is not a valid command on non-Cygwin-systems.
@@ -73,7 +81,6 @@ stamp.ffi:
 	$(TAR) -zxf $(LIBFFI_TARBALL)
 	mv $(LIBFFI_DIR) build
 	chmod +x ln
-	(set -o igncr 2>/dev/null) && set -o igncr; export SHELLOPTS; \
 	    PATH=`pwd`:$$PATH; \
 	    export PATH; \
 	    cd build && \

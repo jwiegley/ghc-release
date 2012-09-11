@@ -126,6 +126,8 @@ import System.FilePath          ( (</>), (<.>), takeExtension,
 import System.IO (openFile, IOMode(WriteMode), hClose, hPutStrLn)
 import Distribution.Compat.Exception (catchExit, catchIO)
 import Distribution.Compat.Permissions (copyPermissions)
+import Distribution.Compat.CopyFile
+         ( copyExecutableFile )
 
 -- -----------------------------------------------------------------------------
 -- Configuring
@@ -154,20 +156,7 @@ configure verbosity hcPath hcPkgPath conf = do
     ++ programPath ghcProg ++ " is version " ++ display ghcVersion ++ " "
     ++ programPath ghcPkgProg ++ " is version " ++ display ghcPkgVersion
 
-  languageExtensions <-
-    if ghcVersion >= Version [6,7] []
-      then do exts <- rawSystemStdout verbosity (programPath ghcProg)
-                        ["--supported-languages"]
-              -- GHC has the annoying habit of inverting some of the extensions
-              -- so we have to try parsing ("No" ++ ghcExtensionName) first
-              let readExtension str = do
-                    ext <- simpleParse ("No" ++ str)
-                    case ext of
-                      UnknownExtension _ -> simpleParse str
-                      _                  -> return ext
-              return [ (ext, "-X" ++ display ext)
-                     | Just ext <- map readExtension (lines exts) ]
-      else return oldLanguageExtensions
+  languageExtensions <- getLanguageExtensions verbosity ghcProg
 
   let comp = Compiler {
         compilerId             = CompilerId GHC ghcVersion,
@@ -267,6 +256,36 @@ configureToolchain ghcProg =
       if ldx
         then return ["-x"]
         else return []
+
+getLanguageExtensions :: Verbosity -> ConfiguredProgram -> IO [(Extension, Flag)]
+getLanguageExtensions verbosity ghcProg
+  | ghcVersion >= Version [6,7] [] = do
+
+    exts <- rawSystemStdout verbosity (programPath ghcProg)
+              ["--supported-languages"]
+    -- GHC has the annoying habit of inverting some of the extensions
+    -- so we have to try parsing ("No" ++ ghcExtensionName) first
+    let readExtension str = do
+          ext <- simpleParse ("No" ++ str)
+          case ext of
+            UnknownExtension _ -> simpleParse str
+            _                  -> return ext
+    return $ extensionHacks
+          ++ [ (ext, "-X" ++ display ext)
+             | Just ext <- map readExtension (lines exts) ]
+
+  | otherwise = return oldLanguageExtensions
+
+  where
+    Just ghcVersion = programVersion ghcProg
+
+    -- ghc-6.8 intorduced RecordPuns however it should have been
+    -- NamedFieldPuns. We now encourage packages to use NamedFieldPuns so for
+    -- compatability we fake support for it in ghc-6.8 by making it an alias
+    -- for the old RecordPuns extension.
+    extensionHacks = [ (NamedFieldPuns, "-XRecordPuns")
+                     | ghcVersion >= Version [6,8]  []
+                    && ghcVersion <  Version [6,10] [] ]
 
 -- | For GHC 6.6.x and earlier, the mapping from supported extensions to flags
 oldLanguageExtensions :: [(Extension, Flag)]
@@ -447,13 +466,16 @@ build pkg_descr lbi verbosity = do
       ifVanillaLib forceVanilla = when (forceVanilla || withVanillaLib lbi)
       ifProfLib = when (withProfLib lbi)
       ifSharedLib = when (withSharedLib lbi)
-      ifGHCiLib = when (withGHCiLib lbi)
+      ifGHCiLib = when (withGHCiLib lbi && withVanillaLib lbi)
 
   -- Build lib
   withLib pkg_descr () $ \lib -> do
       info verbosity "Building library..."
-      let libBi = libBuildInfo lib
-          libTargetDir = pref
+
+      libBi <- hackThreadedFlag verbosity
+                 (compiler lbi) (withProfLib lbi) (libBuildInfo lib)
+
+      let libTargetDir = pref
           forceVanillaLib = TemplateHaskell `elem` extensions libBi
           -- TH always needs vanilla libs, even when building for profiling
 
@@ -602,9 +624,11 @@ build pkg_descr lbi verbosity = do
         ifSharedLib $ runGhcProg ghcSharedLinkArgs
 
   -- build any executables
-  withExe pkg_descr $ \Executable { exeName = exeName', modulePath = modPath,
-                                    buildInfo = exeBi } -> do
+  withExe pkg_descr $ \exe@Executable { exeName = exeName', modulePath = modPath } -> do
                  info verbosity $ "Building executable: " ++ exeName' ++ "..."
+
+                 exeBi <- hackThreadedFlag verbosity
+                            (compiler lbi) (withProfExe lbi) (buildInfo exe)
 
                  -- exeNameReal, the name that GHC really uses (with .exe on Windows)
                  let exeNameReal = exeName' <.>
@@ -636,7 +660,7 @@ build pkg_descr lbi verbosity = do
                          ++ constructGHCCmdLine lbi exeBi exeDir verbosity
                          ++ [exeDir </> x | x <- cObjs]
                          ++ [srcMainFile]
-                         ++ PD.ldOptions exeBi
+                         ++ ["-optl" ++ opt | opt <- PD.ldOptions exeBi]
                          ++ ["-l"++lib | lib <- extraLibs exeBi]
                          ++ ["-L"++libDir | libDir <- extraLibDirs exeBi]
                          ++ concat [["-framework", f] | f <- PD.frameworks exeBi]
@@ -657,6 +681,21 @@ build pkg_descr lbi verbosity = do
 
                  runGhcProg (binArgs True (withProfExe lbi))
 
+-- | Filter the "-threaded" flag when profiling as it does not
+--   work with ghc-6.8 and older.
+hackThreadedFlag :: Verbosity -> Compiler -> Bool -> BuildInfo -> IO BuildInfo
+hackThreadedFlag verbosity comp prof bi
+  | not mustFilterThreaded = return bi
+  | otherwise              = do
+    warn verbosity $ "The ghc flag '-threaded' is not compatible with "
+                  ++ "profiling in ghc-6.8 and older. It will be disabled."
+    return bi { options = filterHcOptions (/= "-threaded") (options bi) }
+  where
+    mustFilterThreaded = prof && compilerVersion comp < Version [6, 10] []
+                      && "-threaded" `elem` hcOptions GHC bi
+    filterHcOptions p hcoptss =
+      [ (hc, if hc == GHC then filter p opts else opts)
+      | (hc, opts) <- hcoptss ]
 
 -- when using -split-objs, we need to search for object files in the
 -- Module_split directory for each module.
@@ -897,7 +936,7 @@ installExe flags lbi installDirs pretendInstallDirs buildPref (progprefix, progs
 		 exeDynFileName = e <.> "dyn" <.> exeExtension
                  fixedExeBaseName = progprefix ++ e ++ progsuffix
                  installBinary dest = do
-                     copyFileVerbose verbosity
+                     copyExe verbosity
                                      (buildPref </> e </> exeFileName) (dest <.> exeExtension)
 		     exists <- doesFileExist (buildPref </> e </> exeDynFileName)
 		     if exists then
@@ -934,6 +973,11 @@ installExe flags lbi installDirs pretendInstallDirs buildPref (progprefix, progs
                  else do
                      installBinary (binDir </> fixedExeBaseName)
 
+copyExe :: Verbosity -> FilePath -> FilePath -> IO ()
+copyExe verbosity src dest = do
+  info verbosity ("copy " ++ src ++ " to " ++ dest)
+  copyExecutableFile src dest
+
 stripExe :: Verbosity -> LocalBuildInfo -> FilePath -> FilePath -> IO ()
 stripExe verbosity lbi name path = when (stripExes lbi) $
   case lookupProgram stripProgram (withPrograms lbi) of
@@ -963,7 +1007,9 @@ installLib flags lbi targetDir dynlibTargetDir builtDir
     unless (fromFlag $ copyInPlace flags) $ do
         -- copy .hi files over:
         let verbosity = fromFlag (copyVerbosity flags)
-            copy src dst n = copyFileVerbose verbosity (src </> n) (dst </> n)
+            copy src dst n = do
+              createDirectoryIfMissingVerbose verbosity True dst
+              copyFileVerbose verbosity (src </> n) (dst </> n)
             copyModuleFiles ext =
                 smartCopySources verbosity [builtDir] targetDir
                                  (libModules pkg) [ext]

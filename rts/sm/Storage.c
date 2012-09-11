@@ -613,11 +613,19 @@ allocateInGen (generation *g, lnat n)
         if (RtsFlags.GcFlags.maxHeapSize > 0 && 
             req_blocks >= RtsFlags.GcFlags.maxHeapSize) {
             heapOverflow();
+            // heapOverflow() doesn't exit (see #2592), but we aren't
+            // in a position to do a clean shutdown here: we
+            // either have to allocate the memory or exit now.
+            // Allocating the memory would be bad, because the user
+            // has requested that we not exceed maxHeapSize, so we
+            // just exit.
+           stg_exit(EXIT_HEAPOVERFLOW);
         }
 
 	bd = allocGroup(req_blocks);
 	dbl_link_onto(bd, &stp->large_objects);
 	stp->n_large_blocks += bd->blocks; // might be larger than req_blocks
+	alloc_blocks += bd->blocks;
 	bd->gen_no  = g->no;
 	bd->step = stp;
 	bd->flags = BF_LARGE;
@@ -744,7 +752,9 @@ allocateLocal (Capability *cap, lnat n)
             bd->flags = 0;
             // NO: alloc_blocks++;
             // calcAllocated() uses the size of the nursery, and we've
-            // already bumpted nursery->n_blocks above.
+            // already bumpted nursery->n_blocks above.  We'll GC
+            // pretty quickly now anyway, because MAYBE_GC() will
+            // notice that CurrentNursery->link is NULL.
         } else {
             // we have a block in the nursery: take it and put
             // it at the *front* of the nursery list, and use it
@@ -795,20 +805,15 @@ allocatePinned( lnat n )
     // If the request is for a large object, then allocate()
     // will give us a pinned object anyway.
     if (n >= LARGE_OBJECT_THRESHOLD/sizeof(W_)) {
-	return allocate(n);
+        p = allocate(n);
+        Bdescr(p)->flags |= BF_PINNED;
+        return p;
     }
 
     ACQUIRE_SM_LOCK;
     
     TICK_ALLOC_HEAP_NOCTR(n);
     CCS_ALLOC(CCCS,n);
-
-    // we always return 8-byte aligned memory.  bd->free must be
-    // 8-byte aligned to begin with, so we just round up n to
-    // the nearest multiple of 8 bytes.
-    if (sizeof(StgWord) == 4) {
-	n = (n+1) & ~1;
-    }
 
     // If we don't have a block of pinned objects yet, or the current
     // one isn't large enough to hold the new object, allocate a new one.
@@ -1458,7 +1463,7 @@ checkSanity( void )
 
     if (RtsFlags.GcFlags.generations == 1) {
 	checkHeap(g0s0->blocks);
-	checkChain(g0s0->large_objects);
+	checkLargeObjects(g0s0->large_objects);
     } else {
 	
 	for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
@@ -1469,10 +1474,7 @@ checkSanity( void )
 		ASSERT(countBlocks(generations[g].steps[s].large_objects)
 		       == generations[g].steps[s].n_large_blocks);
 		checkHeap(generations[g].steps[s].blocks);
-		checkChain(generations[g].steps[s].large_objects);
-		if (g > 0) {
-		    checkMutableList(generations[g].mut_list, g);
-		}
+		checkLargeObjects(generations[g].steps[s].large_objects);
 	    }
 	}
 
@@ -1489,9 +1491,9 @@ checkSanity( void )
 #if defined(THREADED_RTS)
     // check the stacks too in threaded mode, because we don't do a
     // full heap sanity check in this case (see checkHeap())
-    checkGlobalTSOList(rtsTrue);
+    checkMutableLists(rtsTrue);
 #else
-    checkGlobalTSOList(rtsFalse);
+    checkMutableLists(rtsFalse);
 #endif
 }
 

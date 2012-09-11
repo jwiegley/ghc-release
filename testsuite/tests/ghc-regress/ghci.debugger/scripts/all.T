@@ -31,7 +31,10 @@ test('print029', normal, ghci_script, ['print029.script'])
 test('print030', normal, ghci_script, ['print030.script'])
 test('print031', normal, ghci_script, ['print031.script'])
 test('print032', expect_broken(1995), ghci_script, ['print032.script'])
-test('print033', normal, ghci_script, ['print033.script'])
+test('print033',
+     if_compiler_lt('ghc', '6.11', expect_fail),
+     ghci_script,
+     ['print033.script'])
 test('print034', normal, ghci_script, ['print034.script'])
 
 test('break001', normal, ghci_script, ['break001.script'])
@@ -47,7 +50,7 @@ test('break011', normal, ghci_script, ['break011.script'])
 test('break012', normal, ghci_script, ['break012.script'])
 test('break013', normal, ghci_script, ['break013.script'])
 test('break014', normal, ghci_script, ['break014.script'])
-test('break015', expect_broken(1457), ghci_script, ['break015.script'])
+test('break015', expect_broken(1532), ghci_script, ['break015.script'])
 test('break016', normal, ghci_script, ['break016.script'])
 test('break017', normal, ghci_script, ['break017.script'])
 test('break018', normal, ghci_script, ['break018.script'])
@@ -58,19 +61,22 @@ test('break024', normal, ghci_script, ['break024.script'])
 test('break025', normal, ghci_script, ['break025.script'])
 test('break026', normal, ghci_script, ['break026.script'])
 test('break027', normal, ghci_script, ['break027.script'])
+test('break028', normal, ghci_script, ['break028.script'])
 
 test('dynbrk001', normal, ghci_script, ['dynbrk001.script'])
 test('dynbrk002', normal, ghci_script, ['dynbrk002.script'])
 test('dynbrk003', normal, ghci_script, ['dynbrk003.script'])
 test('dynbrk004', normal, ghci_script, ['dynbrk004.script'])
-test('dynbrk005', expect_broken(1457), ghci_script, ['dynbrk005.script'])
+test('dynbrk005', expect_broken(1530), ghci_script, ['dynbrk005.script'])
 test('dynbrk007', normal, ghci_script, ['dynbrk007.script'])
 test('dynbrk008', normal, ghci_script, ['dynbrk008.script'])
 test('dynbrk009', normal, ghci_script, ['dynbrk009.script'])
 
-test('result001', expect_broken(1457), ghci_script, ['result001.script'])
+test('result001', expect_broken(1531), ghci_script, ['result001.script'])
 
 test('list001', normal, ghci_script, ['list001.script'])
 test('list002', normal, ghci_script, ['list002.script'])
 
 test('hist001', normal, ghci_script, ['hist001.script'])
+
+test('2740', normal, ghci_script, ['2740.script'])

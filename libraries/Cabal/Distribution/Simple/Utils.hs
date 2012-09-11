@@ -127,7 +127,8 @@ import Data.Bits
     ( Bits((.|.), (.&.), shiftL, shiftR) )
 
 import System.Directory
-    ( getDirectoryContents, doesDirectoryExist, doesFileExist, removeFile )
+    ( getDirectoryContents, doesDirectoryExist, doesFileExist, removeFile
+    , copyFile )
 import System.Environment
     ( getProgName )
 import System.Cmd
@@ -138,7 +139,7 @@ import System.FilePath
     ( normalise, (</>), (<.>), takeDirectory, splitFileName
     , splitExtension, splitExtensions )
 import System.Directory
-    ( copyFile, createDirectoryIfMissing, renameFile, removeDirectoryRecursive )
+    ( createDirectoryIfMissing, renameFile, removeDirectoryRecursive )
 import System.IO
     ( Handle, openFile, openBinaryFile, IOMode(ReadMode), hSetBinaryMode
     , hGetContents, stderr, stdout, hPutStr, hFlush, hClose )
@@ -165,6 +166,8 @@ import System.Cmd (system)
 import System.Directory (getTemporaryDirectory)
 #endif
 
+import Distribution.Compat.CopyFile
+         ( copyOrdinaryFile )
 import Distribution.Compat.TempFile (openTempFile,
                                      openNewBinaryFile)
 import Distribution.Compat.Exception (catchIO, onException)
@@ -452,7 +455,7 @@ matchFileGlob = matchDirFileGlob "."
 
 matchDirFileGlob :: FilePath -> FilePath -> IO [FilePath]
 matchDirFileGlob dir filepath = case parseFileGlob filepath of
-  Nothing -> die $ "invalid filepath '" ++ filepath
+  Nothing -> die $ "invalid file glob '" ++ filepath
                 ++ "'. Wildcards '*' are only allowed in place of the file"
                 ++ " name, not in the directory name or file extension."
                 ++ " If a wildcard is used it must be with an file extension."
@@ -496,7 +499,7 @@ createDirectoryIfMissingVerbose verbosity parentsToo dir = do
 copyFileVerbose :: Verbosity -> FilePath -> FilePath -> IO ()
 copyFileVerbose verbosity src dest = do
   info verbosity ("copy " ++ src ++ " to " ++ dest)
-  copyFile src dest
+  copyOrdinaryFile src dest
 
 -- | Copies a bunch of files to a target directory, preserving the directory
 -- structure in the target location. The target directories are created if they
@@ -529,7 +532,8 @@ copyFiles verbosity targetDir srcFiles = do
   -- Copy all the files
   sequence_ [ let src  = srcBase   </> srcFile
                   dest = targetDir </> srcFile
-               in copyFileVerbose verbosity src dest
+               in info verbosity ("copy " ++ src ++ " to " ++ dest)
+               >> copyFile src dest
             | (srcBase, srcFile) <- srcFiles ]
 
 -- adaptation of removeDirectoryRecursive

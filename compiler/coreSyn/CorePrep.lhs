@@ -61,8 +61,9 @@ The goal of this pass is to prepare for code generation.
     [I'm experimenting with leaving 'ok-for-speculation' 
      rhss in let-form right up to this point.]
 
-4.  Ensure that lambdas only occur as the RHS of a binding
+4.  Ensure that *value* lambdas only occur as the RHS of a binding
     (The code generator can't deal with anything else.)
+    Type lambdas are ok, however, because the code gen discards them.
 
 5.  [Not any more; nuked Jun 2002] Do the seq/par munging.
 
@@ -159,6 +160,7 @@ mkDataConWorkers data_tycons
 
 data FloatingBind = FloatLet CoreBind
 		  | FloatCase Id CoreExpr Bool
+                        -- Invariant: the expression is not a lambda
 			-- The bool indicates "ok-for-speculation"
 
 data Floats = Floats OkToSpec (OrdList FloatingBind)
@@ -178,7 +180,7 @@ addFloat :: Floats -> FloatingBind -> Floats
 addFloat (Floats ok_to_spec floats) new_float
   = Floats (combine ok_to_spec (check new_float)) (floats `snocOL` new_float)
   where
-    check (FloatLet _)  	      = OkToSpec
+    check (FloatLet _) = OkToSpec
     check (FloatCase _ _ ok_for_spec) 
 	| ok_for_spec  =  IfUnboxedOk
 	| otherwise    =  NotOkToSpec
@@ -324,7 +326,8 @@ corePrepArg :: CorePrepEnv -> CoreArg -> RhsDemand
 	   -> UniqSM (Floats, CoreArg)
 corePrepArg env arg dem = do
     (floats, arg') <- corePrepExprFloat env arg
-    if exprIsTrivial arg'
+    if exprIsTrivial arg' && allLazy NotTopLevel NonRecursive floats
+       -- Note [Floating unlifted arguments]
      then return (floats, arg')
      else do v <- newVar (exprType arg')
              (floats', v') <- mkLocalNonRec v dem floats arg'
@@ -341,7 +344,23 @@ exprIsTrivial (Note _ e)               = exprIsTrivial e
 exprIsTrivial (Cast e _)               = exprIsTrivial e
 exprIsTrivial (Lam b body) | isTyVar b = exprIsTrivial body
 exprIsTrivial _                        = False
+\end{code}
 
+Note [Floating unlifted arguments]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider    C (let v* = expensive in v)
+
+where the "*" indicates "will be demanded".  Usually v will have been
+inlined by now, but let's suppose it hasn't (see Trac #2756).  Then we
+do *not* want to get
+
+     let v* = expensive in C v
+
+because that has different strictness.  Hence the use of 'allLazy'.
+(NB: the let v* turns into a FloatCase, in mkLocalNonRec.)
+
+
+\begin{code}
 -- ---------------------------------------------------------------------------
 -- Dealing with expressions
 -- ---------------------------------------------------------------------------
@@ -383,12 +402,6 @@ corePrepExprFloat env (Note n@(SCC _) expr) = do
     (floats, expr2) <- deLamFloat expr1
     return (floats, Note n expr2)
 
-corePrepExprFloat env (Case (Var id) bndr ty [(DEFAULT,[],expr)])
-  | Just (TickBox {}) <- isTickBoxOp_maybe id = do
-    expr1 <- corePrepAnExpr env expr
-    (floats, expr2) <- deLamFloat expr1
-    return (floats, Case (Var id) bndr ty [(DEFAULT,[],expr2)])
-
 corePrepExprFloat env (Note other_note expr) = do
     (floats, expr') <- corePrepExprFloat env expr
     return (floats, Note other_note expr')
@@ -403,6 +416,12 @@ corePrepExprFloat env expr@(Lam _ _) = do
     return (emptyFloats, mkLams bndrs' body')
   where
     (bndrs,body) = collectBinders expr
+
+corePrepExprFloat env (Case (Var id) bndr ty [(DEFAULT,[],expr)])
+  | Just (TickBox {}) <- isTickBoxOp_maybe id = do
+    expr1 <- corePrepAnExpr env expr
+    (floats, expr2) <- deLamFloat expr1
+    return (floats, Case (Var id) bndr ty [(DEFAULT,[],expr2)])
 
 corePrepExprFloat env (Case scrut bndr ty alts) = do
     (floats1, scrut1) <- corePrepExprFloat env scrut
@@ -603,11 +622,11 @@ mkLocalNonRec bndr dem floats rhs
 
   | isStrict dem 
 	-- It's a strict let so we definitely float all the bindings
- = let		-- Don't make a case for a value binding,
+  = let		-- Don't make a case for a value binding,
 		-- even if it's strict.  Otherwise we get
 		-- 	case (\x -> e) of ...!
 	float | exprIsHNF rhs = FloatLet (NonRec bndr rhs)
-	      | otherwise	= FloatCase bndr rhs (exprOkForSpeculation rhs)
+	      | otherwise     = FloatCase bndr rhs (exprOkForSpeculation rhs)
     in
     return (addFloat floats float, evald_bndr)
 
@@ -622,15 +641,20 @@ mkLocalNonRec bndr dem floats rhs
 
 
 mkBinds :: Floats -> CoreExpr -> UniqSM CoreExpr
+-- Lambdas are not allowed as the body of a 'let'
 mkBinds (Floats _ binds) body 
   | isNilOL binds = return body
-  | otherwise	  = do body' <- deLam body
-                        -- Lambdas are not allowed as the body of a 'let'
-                       return (foldrOL mk_bind body' binds)
+  | otherwise	  = do { body' <- deLam body
+                       ; return (wrapBinds binds body') }
+
+wrapBinds :: OrdList FloatingBind -> CoreExpr -> CoreExpr
+wrapBinds binds body
+  = foldrOL mk_bind body binds
   where
     mk_bind (FloatCase bndr rhs _) body = Case rhs bndr (exprType body) [(DEFAULT, [], body)]
     mk_bind (FloatLet bind)        body = Let bind body
 
+---------------------
 etaExpandRhs :: CoreBndr -> CoreExpr -> UniqSM CoreExpr
 etaExpandRhs bndr rhs = do
    	-- Eta expand to match the arity claimed by the binder
@@ -686,8 +710,8 @@ deLam :: CoreExpr -> UniqSM CoreExpr
 -- and returns one that definitely isn't:
 --	(\x.e) ==>  let f = \x.e in f
 deLam expr = do
-    (floats, expr) <- deLamFloat expr
-    mkBinds floats expr
+    (Floats _ binds, expr) <- deLamFloat expr
+    return (wrapBinds binds expr)
 
 
 deLamFloat :: CoreExpr -> UniqSM (Floats, CoreExpr)

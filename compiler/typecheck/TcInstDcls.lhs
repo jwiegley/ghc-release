@@ -21,7 +21,7 @@ import FamInst
 import FamInstEnv
 import TcDeriv
 import TcEnv
-import RnEnv	( lookupImportedName )
+import RnEnv	( lookupGlobalOccRn )
 import TcHsType
 import TcUnify
 import TcSimplify
@@ -461,11 +461,11 @@ tcLocalInstDecl1 (L loc (InstDecl poly_ty binds uprags ats))
            ; mapM_ (checkIndexes clas inst_tys) ats
            }
 
-    checkIndexes clas inst_tys (hsAT, ATyCon tycon) =
+    checkIndexes clas inst_tys (hsAT, ATyCon tycon)
 -- !!!TODO: check that this does the Right Thing for indexed synonyms, too!
-      checkIndexes' clas inst_tys hsAT
-                    (tyConTyVars tycon,
-                     snd . fromJust . tyConFamInst_maybe $ tycon)
+      = checkIndexes' clas inst_tys hsAT
+                      (tyConTyVars tycon,
+                       snd . fromJust . tyConFamInst_maybe $ tycon)
     checkIndexes _ _ _ = panic "checkIndexes"
 
     checkIndexes' clas (instTvs, instTys) hsAT (atTvs, atTys)
@@ -475,8 +475,8 @@ tcLocalInstDecl1 (L loc (InstDecl poly_ty binds uprags ats))
         addErrCtxt (atInstCtxt atName) $
         case find ((atName ==) . tyConName) (classATs clas) of
           Nothing     -> addErrTc $ badATErr clas atName  -- not in this class
-          Just atDecl ->
-            case assocTyConArgPoss_maybe atDecl of
+          Just atycon ->
+            case assocTyConArgPoss_maybe atycon of
               Nothing   -> panic "checkIndexes': AT has no args poss?!?"
               Just poss ->
 
@@ -487,6 +487,13 @@ tcLocalInstDecl1 (L loc (InstDecl poly_ty binds uprags ats))
                 -- which must be type variables; and (3) variables in AT and
                 -- instance head will be different `Name's even if their
                 -- source lexemes are identical.
+		--
+		-- e.g.    class C a b c where 
+		-- 	     data D b a :: * -> *           -- NB (1) b a, omits c
+		-- 	   instance C [x] Bool Char where 
+		--	     data D Bool [x] v = MkD x [v]  -- NB (2) v
+		--	     	  -- NB (3) the x in 'instance C...' have differnt
+		--		  --        Names to x's in 'data D...'
                 --
                 -- Re (1), `poss' contains a permutation vector to extract the
                 -- class parameters in the right order.
@@ -557,11 +564,21 @@ tcInstDecls2 tycl_decls inst_decls
                       unionManyBags inst_binds_s
         ; tcl_env <- getLclEnv -- Default method Ids in here
         ; return (binds, tcl_env) }
+
+tcInstDecl2 :: InstInfo Name -> TcM (LHsBinds Id)
+tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = ibinds })
+  = recoverM (return emptyLHsBinds)             $
+    setSrcSpan loc                              $
+    addErrCtxt (instDeclCtxt2 (idType dfun_id)) $
+    tc_inst_decl2 dfun_id ibinds
+ where
+        dfun_id    = instanceDFunId ispec
+        loc        = getSrcSpan dfun_id
 \end{code}
 
 
 \begin{code}
-tcInstDecl2 :: InstInfo Name -> TcM (LHsBinds Id)
+tc_inst_decl2 :: Id -> InstBindings Name -> TcM (LHsBinds Id)
 -- Returns a binding for the dfun
 
 ------------------------
@@ -571,7 +588,7 @@ tcInstDecl2 :: InstInfo Name -> TcM (LHsBinds Id)
 --      newtype N a = MkN (Tree [a]) deriving( Foo Int )
 --
 -- The newtype gives an FC axiom looking like
---      axiom CoN a ::  N a :=: Tree [a]
+--      axiom CoN a ::  N a ~ Tree [a]
 --   (see Note [Newtype coercions] in TyCon for this unusual form of axiom)
 --
 -- So all need is to generate a binding looking like:
@@ -583,9 +600,8 @@ tcInstDecl2 :: InstInfo Name -> TcM (LHsBinds Id)
 -- If there are no superclasses, matters are simpler, because we don't need the case
 -- see Note [Newtype deriving superclasses] in TcDeriv.lhs
 
-tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = NewTypeDerived })
-  = do  { let dfun_id      = instanceDFunId ispec
-              rigid_info   = InstSkol
+tc_inst_decl2 dfun_id (NewTypeDerived coi)
+  = do  { let rigid_info   = InstSkol
               origin       = SigOrigin rigid_info
               inst_ty      = idType dfun_id
         ; (inst_tvs', theta, inst_head_ty) <- tcSkolSigType rigid_info inst_ty
@@ -595,15 +611,28 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = NewTypeDerived })
               (class_tyvars, sc_theta, _, _) = classBigSig cls
               cls_tycon = classTyCon cls
               sc_theta' = substTheta (zipOpenTvSubst class_tyvars cls_inst_tys) sc_theta
-
               Just (initial_cls_inst_tys, last_ty) = snocView cls_inst_tys
-              (nt_tycon, tc_args) = tcSplitTyConApp last_ty     -- Can't fail
-              rep_ty              = newTyConInstRhs nt_tycon tc_args
 
-              rep_pred     = mkClassPred cls (initial_cls_inst_tys ++ [rep_ty])
-                                -- In our example, rep_pred is (Foo Int (Tree [a]))
-              the_coercion = make_coercion cls_tycon initial_cls_inst_tys nt_tycon tc_args
-                                -- Coercion of kind (Foo Int (Tree [a]) ~ Foo Int (N a)
+              (rep_ty, wrapper) 
+	         = case coi of
+	      	     IdCo   -> (last_ty, idHsWrapper)
+		     ACo co -> (snd (coercionKind co), WpCast (mk_full_coercion co))
+
+		 -----------------------
+		 --        mk_full_coercion
+		 -- The inst_head looks like (C s1 .. sm (T a1 .. ak))
+		 -- But we want the coercion (C s1 .. sm (sym (CoT a1 .. ak)))
+		 --        with kind (C s1 .. sm (T a1 .. ak)  ~  C s1 .. sm <rep_ty>)
+		 --        where rep_ty is the (eta-reduced) type rep of T
+		 -- So we just replace T with CoT, and insert a 'sym'
+		 -- NB: we know that k will be >= arity of CoT, because the latter fully eta-reduced
+
+	      mk_full_coercion co = mkTyConApp cls_tycon 
+	      		       	         (initial_cls_inst_tys ++ [mkSymCoercion co])
+                 -- Full coercion : (Foo Int (Tree [a]) ~ Foo Int (N a)
+
+              rep_pred = mkClassPred cls (initial_cls_inst_tys ++ [rep_ty])
+                 -- In our example, rep_pred is (Foo Int (Tree [a]))
 
         ; sc_loc     <- getInstLoc InstScOrigin
         ; sc_dicts   <- newDictBndrs sc_loc sc_theta'
@@ -623,7 +652,7 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = NewTypeDerived })
 	-- in the envt with one of the clas_tyvars
 	; checkSigTyVars inst_tvs'
 
-        ; let coerced_rep_dict = wrapId the_coercion (instToId rep_dict)
+        ; let coerced_rep_dict = wrapId wrapper (instToId rep_dict)
 
         ; body <- make_body cls_tycon cls_inst_tys sc_dicts coerced_rep_dict
         ; let dict_bind = noLoc $ VarBind (instToId this_dict) (noLoc body)
@@ -633,22 +662,6 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = NewTypeDerived })
                             [(inst_tvs', dfun_id, instToId this_dict, [])]
                             (dict_bind `consBag` sc_binds)) }
   where
-      -----------------------
-      --        make_coercion
-      -- The inst_head looks like (C s1 .. sm (T a1 .. ak))
-      -- But we want the coercion (C s1 .. sm (sym (CoT a1 .. ak)))
-      --        with kind (C s1 .. sm (T a1 .. ak)  :=:  C s1 .. sm <rep_ty>)
-      --        where rep_ty is the (eta-reduced) type rep of T
-      -- So we just replace T with CoT, and insert a 'sym'
-      -- NB: we know that k will be >= arity of CoT, because the latter fully eta-reduced
-
-    make_coercion cls_tycon initial_cls_inst_tys nt_tycon tc_args
-        | Just co_con <- newTyConCo_maybe nt_tycon
-        , let co = mkSymCoercion (mkTyConApp co_con tc_args)
-        = WpCast (mkTyConApp cls_tycon (initial_cls_inst_tys ++ [co]))
-        | otherwise     -- The newtype is transparent; no need for a cast
-        = idHsWrapper
-
       -----------------------
       --     (make_body C tys scs coreced_rep_dict)
       --                returns
@@ -686,24 +699,16 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = NewTypeDerived })
 ------------------------
 -- Ordinary instances
 
-tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = VanillaInst monobinds uprags })
-  = let
-        dfun_id    = instanceDFunId ispec
-        rigid_info = InstSkol
-        inst_ty    = idType dfun_id
-        loc        = getSrcSpan dfun_id
-    in
-         -- Prime error recovery
-    recoverM (return emptyLHsBinds)             $
-    setSrcSpan loc                              $
-    addErrCtxt (instDeclCtxt2 (idType dfun_id)) $ do
+tc_inst_decl2 dfun_id (VanillaInst monobinds uprags)
+  = do { let rigid_info = InstSkol
+             inst_ty    = idType dfun_id
 
         -- Instantiate the instance decl with skolem constants
-    (inst_tyvars', dfun_theta', inst_head') <- tcSkolSigType rigid_info inst_ty
+    ; (inst_tyvars', dfun_theta', inst_head') <- tcSkolSigType rigid_info inst_ty
                 -- These inst_tyvars' scope over the 'where' part
                 -- Those tyvars are inside the dfun_id's type, which is a bit
                 -- bizarre, but OK so long as you realise it!
-    let
+    ; let
         (clas, inst_tys') = tcSplitDFunHead inst_head'
         (class_tyvars, sc_theta, _, op_items) = classBigSig clas
 
@@ -712,42 +717,43 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = VanillaInst monobinds uprags })
         origin    = SigOrigin rigid_info
 
          -- Create dictionary Ids from the specified instance contexts.
-    sc_loc      <- getInstLoc InstScOrigin
-    sc_dicts    <- newDictOccs sc_loc sc_theta'		-- These are wanted
-    inst_loc    <- getInstLoc origin
-    dfun_dicts  <- newDictBndrs inst_loc dfun_theta'	-- Includes equalities
-    this_dict   <- newDictBndr inst_loc (mkClassPred clas inst_tys')
+  ; sc_loc      <- getInstLoc InstScOrigin
+  ; sc_dicts    <- newDictOccs sc_loc sc_theta'		-- These are wanted
+  ; inst_loc    <- getInstLoc origin
+  ; dfun_dicts  <- newDictBndrs inst_loc dfun_theta'	-- Includes equalities
+  ; this_dict   <- newDictBndr inst_loc (mkClassPred clas inst_tys')
                 -- Default-method Ids may be mentioned in synthesised RHSs,
                 -- but they'll already be in the environment.
 
         -- Typecheck the methods
-    let this_dict_id  	= instToId this_dict
+  ; let this_dict_id  	= instToId this_dict
 	dfun_lam_vars   = map instToVar dfun_dicts	-- Includes equalities
 	prag_fn	= mkPragFun uprags 
+	loc        = getSrcSpan dfun_id
 	tc_meth = tcInstanceMethod loc clas inst_tyvars'
 			  	   dfun_dicts
                    	  	   dfun_theta' inst_tys'
 				   this_dict dfun_id
                         	   prag_fn monobinds
-    (meth_exprs, meth_binds) <- tcExtendTyVarEnv inst_tyvars'  $
+  ; (meth_exprs, meth_binds) <- tcExtendTyVarEnv inst_tyvars'  $
 				mapAndUnzipM tc_meth op_items 
 
     -- Figure out bindings for the superclass context
     -- Don't include this_dict in the 'givens', else
     -- sc_dicts get bound by just selecting  from this_dict!!
-    sc_binds <- addErrCtxt superClassCtxt $
+  ; sc_binds <- addErrCtxt superClassCtxt $
                 tcSimplifySuperClasses inst_loc this_dict dfun_dicts sc_dicts
 		-- Note [Recursive superclasses]
 
 	-- It's possible that the superclass stuff might unified something
 	-- in the envt with one of the inst_tyvars'
-    checkSigTyVars inst_tyvars'
+  ; checkSigTyVars inst_tyvars'
 
     -- Deal with 'SPECIALISE instance' pragmas
-    prags <- tcPrags dfun_id (filter isSpecInstLSig uprags)
+  ; prags <- tcPrags dfun_id (filter isSpecInstLSig uprags)
 
     -- Create the result bindings
-    let
+  ; let
         dict_constr   = classDataCon clas
         inline_prag | null dfun_dicts  = []
                     | otherwise        = [L loc (InlinePrag (Inline AlwaysActive True))]
@@ -781,8 +787,9 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = VanillaInst monobinds uprags })
                             [(inst_tyvars', dfun_id, this_dict_id, inline_prag ++ prags)]
                             (dict_bind `consBag` sc_binds)
 
-    showLIE (text "instance")
-    return (main_bind `consBag` unionManyBags meth_binds)
+  ; showLIE (text "instance")
+  ; return (main_bind `consBag` unionManyBags meth_binds)
+  }
 \end{code}
 
 Note [Recursive superclasses]
@@ -863,7 +870,7 @@ tcInstanceMethod loc clas tyvars dfun_dicts theta inst_tys
 			{   -- Build the typechecked version directly, 
 			    -- without calling typecheck_method; 
 			    -- see Note [Default methods in instances]
-			  dm_name <- lookupImportedName (mkDefMethRdrName sel_name)
+			  dm_name <- lookupGlobalOccRn (mkDefMethRdrName sel_name)
 					-- Might not be imported, but will be an OrigName
 			; dm_id   <- tcLookupId dm_name
 			; return (wrapId dm_wrapper dm_id, emptyBag) } }
@@ -963,7 +970,7 @@ mustBeVarArgErr ty =
 wrongATArgErr :: Type -> Type -> SDoc
 wrongATArgErr ty instTy =
   sep [ ptext (sLit "Type indexes must match class instance head")
-      , ptext (sLit "Found") <+> ppr ty <+> ptext (sLit "but expected") <+>
-         ppr instTy
+      , ptext (sLit "Found") <+> quotes (ppr ty)
+        <+> ptext (sLit "but expected") <+> quotes (ppr instTy)
       ]
 \end{code}

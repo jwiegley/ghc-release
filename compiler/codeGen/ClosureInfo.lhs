@@ -594,6 +594,10 @@ getCallMethod name (LFReEntrant _ arity _ _) n_args
   | otherwise      = DirectEntry (enterIdLabel name) arity
 
 getCallMethod name (LFCon con) n_args
+  | opt_SccProfilingOn     -- when profiling, we must always enter
+  = EnterIt                -- a closure when we use it, so that the closure
+                           -- can be recorded as used for LDV profiling.
+  | otherwise
   = ASSERT( n_args == 0 )
     ReturnCon con
 

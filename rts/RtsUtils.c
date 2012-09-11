@@ -13,6 +13,7 @@
 #include "RtsFlags.h"
 #include "RtsUtils.h"
 #include "Ticky.h"
+#include "Schedule.h"
 
 #ifdef HAVE_TIME_H
 #include <time.h>
@@ -272,15 +273,14 @@ stackOverflow(void)
 void
 heapOverflow(void)
 {
-  /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
-  OutOfHeapHook(0/*unknown request size*/, 
-		RtsFlags.GcFlags.maxHeapSize * BLOCK_SIZE);
-  
-#if defined(TICKY_TICKY)
-  if (RtsFlags.TickyFlags.showTickyStats) PrintTickyInfo();
-#endif
+    if (!heap_overflow)
+    {
+        /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
+        OutOfHeapHook(0/*unknown request size*/,
+                      RtsFlags.GcFlags.maxHeapSize * BLOCK_SIZE);
 
-  stg_exit(EXIT_HEAPOVERFLOW);
+        heap_overflow = rtsTrue;
+    }
 }
 
 /* -----------------------------------------------------------------------------
@@ -473,15 +473,30 @@ static void mkRtsInfoPair(char *key, char *val) {
     printf(" ,(\"%s\", \"%s\")\n", key, val);
 }
 
+/* This little bit of magic allows us to say TOSTRING(SYM) and get
+ * "5" if SYM is 5 */
+#define TOSTRING2(x) #x
+#define TOSTRING(x)  TOSTRING2(x)
+
 void printRtsInfo(void) {
     /* The first entry is just a hack to make it easy to get the
      * commas right */
-    printf(" [(\"GHC RTS\", \"Yes\")\n");
+    printf(" [(\"GHC RTS\", \"YES\")\n");
     mkRtsInfoPair("GHC version",             ProjectVersion);
     mkRtsInfoPair("RTS way",                 RtsWay);
     mkRtsInfoPair("Host platform",           HostPlatform);
+    mkRtsInfoPair("Host architecture",       HostArch);
+    mkRtsInfoPair("Host OS",                 HostOS);
+    mkRtsInfoPair("Host vendor",             HostVendor);
     mkRtsInfoPair("Build platform",          BuildPlatform);
+    mkRtsInfoPair("Build architecture",      BuildArch);
+    mkRtsInfoPair("Build OS",                BuildOS);
+    mkRtsInfoPair("Build vendor",            BuildVendor);
     mkRtsInfoPair("Target platform",         TargetPlatform);
+    mkRtsInfoPair("Target architecture",     TargetArch);
+    mkRtsInfoPair("Target OS",               TargetOS);
+    mkRtsInfoPair("Target vendor",           TargetVendor);
+    mkRtsInfoPair("Word size",               TOSTRING(WORD_SIZE_IN_BITS));
     mkRtsInfoPair("Compiler unregisterised", GhcUnregisterised);
     mkRtsInfoPair("Tables next to code",     GhcEnableTablesNextToCode);
     printf(" ]\n");

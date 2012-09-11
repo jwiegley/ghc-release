@@ -7,10 +7,13 @@
 
 module Distribution.Haddock (
   readInterfaceFile,
+  nameCacheFromGhc,
+  freshNameCache,
+  NameCacheAccessor,
   InterfaceFile(..),
   LinkEnv,
   InstalledInterface(..),
-  DocName(..)
+  module Haddock.DocName
 ) where
 
 

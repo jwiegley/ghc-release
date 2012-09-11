@@ -30,6 +30,10 @@ disableItimers()
 
 static long max_fd = 0;
 
+// Rts internal API, not exposed in a public header file:
+extern void blockUserSignals(void);
+extern void unblockUserSignals(void);
+
 ProcHandle
 runInteractiveProcess (char *const args[], 
 		       char *workingDirectory, char **environment,
@@ -53,9 +57,17 @@ runInteractiveProcess (char *const args[],
         pipe(fdStdError);
     }
 
+    // Block signals with Haskell handlers.  The danger here is that
+    // with the threaded RTS, a signal arrives in the child process,
+    // the RTS writes the signal information into the pipe (which is
+    // shared between parent and child), and the parent behaves as if
+    // the signal had been raised.
+    blockUserSignals();
+
     switch(pid = fork())
     {
     case -1:
+        unblockUserSignals();
         if (fdStdIn == -1) {
             close(fdStdInput[0]);
             close(fdStdInput[1]);
@@ -72,8 +84,9 @@ runInteractiveProcess (char *const args[],
 	
     case 0:
     {
-        disableItimers();
-	
+        // WARNING!  we are now in the child of vfork(), so any memory
+        // we modify below will also be seen in the parent process.
+
 	if (workingDirectory) {
 	    if (chdir (workingDirectory) < 0) {
                 // See #1593.  The convention for the exit code when
@@ -171,6 +184,7 @@ runInteractiveProcess (char *const args[],
         }
 	break;
     }
+    unblockUserSignals();
     
     return pid;
 }

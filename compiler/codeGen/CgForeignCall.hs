@@ -42,6 +42,7 @@ import Constants
 import StaticFlags
 import Outputable
 import FastString
+import BasicTypes
 
 import Control.Monad
 
@@ -85,7 +86,7 @@ emitForeignCall results (CCall (CCallSpec target cconv safety)) args live
       (call_args, cmm_target)
 	= case target of
 	   StaticTarget lbl -> (args, CmmLit (CmmLabel 
-					(mkForeignLabel lbl call_size False)))
+					(mkForeignLabel lbl call_size False IsFunction)))
 	   DynamicTarget    ->  case args of (CmmKinded fn _):rest -> (rest, fn)
 
 	-- in the stdcall calling convention, the symbol needs @size appended

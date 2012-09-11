@@ -173,7 +173,8 @@ class  (Real a, Fractional a) => RealFrac a  where
     properFraction      :: (Integral b) => a -> (b,a)
     -- | @'truncate' x@ returns the integer nearest @x@ between zero and @x@
     truncate            :: (Integral b) => a -> b
-    -- | @'round' x@ returns the nearest integer to @x@
+    -- | @'round' x@ returns the nearest integer to @x@;
+    --   the even integer if @x@ is equidistant between two integers
     round               :: (Integral b) => a -> b
     -- | @'ceiling' x@ returns the least integer not less than @x@
     ceiling             :: (Integral b) => a -> b
@@ -449,16 +450,16 @@ lcm x y         =  abs ((x `quot` (gcd x y)) * y)
 
 {-# RULES
 "gcd/Int->Int->Int"             gcd = gcdInt
+"gcd/Integer->Integer->Integer" gcd = gcdInteger'
+"lcm/Integer->Integer->Integer" lcm = lcmInteger
  #-}
 
--- XXX these optimisation rules are disabled for now to make it easier
---     to experiment with other Integer implementations
--- "gcd/Integer->Integer->Integer" gcd = gcdInteger'
--- "lcm/Integer->Integer->Integer" lcm = lcmInteger
+-- XXX to use another Integer implementation, you might need to disable
+-- the gcd/Integer and lcm/Integer RULES above
 --
--- gcdInteger' :: Integer -> Integer -> Integer
--- gcdInteger' 0 0 = error "GHC.Real.gcdInteger': gcd 0 0 is undefined"
--- gcdInteger' a b = gcdInteger a b
+gcdInteger' :: Integer -> Integer -> Integer
+gcdInteger' 0 0 = error "GHC.Real.gcdInteger': gcd 0 0 is undefined"
+gcdInteger' a b = gcdInteger a b
 
 integralEnumFrom :: (Integral a, Bounded a) => a -> [a]
 integralEnumFrom n = map fromInteger [toInteger n .. toInteger (maxBound `asTypeOf` n)]

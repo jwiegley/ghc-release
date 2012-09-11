@@ -38,7 +38,7 @@ renameInterface renamingEnv warnings mod =
   let localEnv = foldl fn renamingEnv (ifaceVisibleExports mod)
         where fn env name = Map.insert name (ifaceMod mod) env
       
-      docMap = Map.map (\(_, doc) -> doc) $ ifaceDeclMap mod
+      docMap = Map.map (\(_,x,_) -> x) (ifaceDeclMap mod)
       docs   = [ (n, doc) | (n, Just doc) <- Map.toList docMap ]
       renameMapElem (k,d) = do d' <- renameDoc d; return (k, d') 
 
@@ -68,7 +68,7 @@ renameInterface renamingEnv warnings mod =
     -- report things that we couldn't link to. Only do this for non-hidden
     -- modules.
     unless (OptHide `elem` ifaceOptions mod || null strings || not warnings) $
-      tell ["Warning: " ++ show (ppr (ifaceMod mod) defaultUserStyle) ++
+      tell ["Warning: " ++ moduleString (ifaceMod mod) ++
             ": could not find link destinations for:\n"++
             "   " ++ concat (map (' ':) strings) ]
 
@@ -130,10 +130,6 @@ runRnFM env rn = unRn rn lkp
 --------------------------------------------------------------------------------
 
 
-keep n = Undocumented n
-keepL (L loc n) = L loc (Undocumented n)
-
-
 rename = lookupRn id 
 renameL (L loc name) = return . L loc =<< rename name
 
@@ -188,6 +184,7 @@ renameDoc doc = case doc of
     doc' <- renameDoc doc
     return (DocCodeBlock doc')
   DocURL str -> return (DocURL str) 
+  DocPic str -> return (DocPic str)
   DocAName str -> return (DocAName str)
 
 
@@ -340,12 +337,13 @@ renameTyClD d = case d of
   where
     renameLCon (L loc con) = return . L loc =<< renameCon con
     renameCon (ConDecl lname expl ltyvars lcontext details restype mbldoc) = do
+      lname'    <- renameL lname
       ltyvars'  <- mapM renameLTyVarBndr ltyvars
       lcontext' <- renameLContext lcontext
       details'  <- renameDetails details
       restype'  <- renameResType restype
       mbldoc'   <- mapM renameLDoc mbldoc
-      return (ConDecl (keepL lname) expl ltyvars' lcontext' details' restype' mbldoc') 
+      return (ConDecl lname' expl ltyvars' lcontext' details' restype' mbldoc') 
 
     renameDetails (RecCon fields) = return . RecCon =<< mapM renameField fields
     renameDetails (PrefixCon ps) = return . PrefixCon =<< mapM renameLType ps
@@ -355,31 +353,38 @@ renameTyClD d = case d of
       return (InfixCon a' b')
 
     renameField (ConDeclField name t doc) = do
+      name' <- renameL name
       t'   <- renameLType t
       doc' <- mapM renameLDoc doc
-      return (ConDeclField (keepL name) t' doc')
+      return (ConDeclField name' t' doc')
 
     renameResType (ResTyH98) = return ResTyH98
     renameResType (ResTyGADT t) = return . ResTyGADT =<< renameLType t
 
-    renameLFunDep (L loc (xs, ys)) = return (L loc (map keep xs, map keep ys))
+    renameLFunDep (L loc (xs, ys)) = do
+      xs' <- mapM rename xs
+      ys' <- mapM rename ys
+      return (L loc (xs', ys'))
    
     renameLSig (L loc sig) = return . L loc =<< renameSig sig
 
       
 renameSig sig = case sig of 
-  TypeSig (L loc name) ltype -> do 
+  TypeSig lname ltype -> do 
+    lname' <- renameL lname
     ltype' <- renameLType ltype
-    return (TypeSig (L loc (keep name)) ltype')
+    return (TypeSig lname' ltype')
   -- we have filtered out all other kinds of signatures in Interface.Create
 
 
 renameForD (ForeignImport lname ltype x) = do
+  lname' <- renameL lname
   ltype' <- renameLType ltype
-  return (ForeignImport (keepL lname) ltype' x)
+  return (ForeignImport lname' ltype' x)
 renameForD (ForeignExport lname ltype x) = do
+  lname' <- renameL lname
   ltype' <- renameLType ltype
-  return (ForeignExport (keepL lname) ltype' x)
+  return (ForeignExport lname' ltype' x)
 
 
 renameInstD (InstDecl ltype _ _ lATs) = do
@@ -394,15 +399,22 @@ renameExportItem item = case item of
   ExportGroup lev id doc -> do
     doc' <- renameDoc doc
     return (ExportGroup lev id doc')
-  ExportDecl decl doc instances -> do
+  ExportDecl decl doc subs instances -> do
     decl' <- renameLDecl decl
     doc'  <- mapM renameDoc doc
+    subs' <- mapM renameSub subs
     instances' <- mapM renameInstHead instances
-    return (ExportDecl decl' doc' instances')
-  ExportNoDecl x y subs -> do
-    y'    <- lookupRn id y
+    return (ExportDecl decl' doc' subs' instances')
+  ExportNoDecl x subs -> do
+    x'    <- lookupRn id x
     subs' <- mapM (lookupRn id) subs
-    return (ExportNoDecl x y' subs')
+    return (ExportNoDecl x' subs')
   ExportDoc doc -> do
     doc' <- renameDoc doc
     return (ExportDoc doc')
+
+
+renameSub (n,doc) = do
+  n' <- rename n
+  doc' <- mapM renameDoc doc
+  return (n', doc')

@@ -86,10 +86,13 @@ module GHC.Conc
 #endif
 
 #ifndef mingw32_HOST_OS
-        , signalHandlerLock
+        , Signal, HandlerFun, setHandler, runHandlers
 #endif
 
         , ensureIOManagerIsRunning
+#ifndef mingw32_HOST_OS
+        , syncIOManager
+#endif
 
 #ifdef mingw32_HOST_OS
         , ConsoleEvent(..)
@@ -109,6 +112,10 @@ import System.Posix.Internals
 import Foreign
 import Foreign.C
 
+#ifndef mingw32_HOST_OS
+import Data.Dynamic
+import Control.Monad
+#endif
 import Data.Maybe
 
 import GHC.Base
@@ -116,6 +123,9 @@ import {-# SOURCE #-} GHC.Handle
 import GHC.IOBase
 import GHC.Num          ( Num(..) )
 import GHC.Real         ( fromIntegral )
+#ifndef mingw32_HOST_OS
+import GHC.Arr          ( inRange )
+#endif
 #ifdef mingw32_HOST_OS
 import GHC.Real         ( div )
 import GHC.Ptr          ( plusPtr, FunPtr(..) )
@@ -296,12 +306,12 @@ the paper \"Asynchronous exceptions in Haskell\"
 (<http://research.microsoft.com/~simonpj/Papers/asynch-exns.htm>).
 In the paper, 'throwTo' is non-blocking; but the library implementation adopts
 a more synchronous design in which 'throwTo' does not return until the exception
-is received by the target thread.  The trade-off is discussed in Section 8 of the paper.
-Like any blocking operation, 'throwTo' is therefore interruptible (see Section 4.3 of
+is received by the target thread.  The trade-off is discussed in Section 9 of the paper.
+Like any blocking operation, 'throwTo' is therefore interruptible (see Section 5.3 of
 the paper).
 
 There is currently no guarantee that the exception delivered by 'throwTo' will be
-delivered at the first possible opportunity.  In particular, if a thread may 
+delivered at the first possible opportunity.  In particular, a thread may 
 unblock and then re-block exceptions (using 'unblock' and 'block') without receiving
 a pending 'throwTo'.  This is arguably undesirable behaviour.
 
@@ -669,15 +679,6 @@ isEmptyMVar (MVar mv#) = IO $ \ s# ->
 addMVarFinalizer :: MVar a -> IO () -> IO ()
 addMVarFinalizer (MVar m) finalizer = 
   IO $ \s -> case mkWeak# m () finalizer s of { (# s1, _ #) -> (# s1, () #) }
-
-withMVar :: MVar a -> (a -> IO b) -> IO b
-withMVar m io = 
-  block $ do
-    a <- takeMVar m
-    b <- catchAny (unblock (io a))
-            (\e -> do putMVar m a; throw e)
-    putMVar m a
-    return b
 \end{code}
 
 
@@ -932,7 +933,8 @@ service_loop wakeup old_delays = do
 
 service_cont :: HANDLE -> [DelayReq] -> IO ()
 service_cont wakeup delays = do
-  atomicModifyIORef prodding (\_ -> (False,False))
+  r <- atomicModifyIORef prodding (\_ -> (False,False))
+  r `seq` return () -- avoid space leak
   service_loop wakeup delays
 
 -- must agree with rts/win32/ThrIOManager.c
@@ -1033,6 +1035,10 @@ startIOManagerThread = do
         throwErrnoIfMinus1 "startIOManagerThread" (c_pipe fds)
         rd_end <- peekElemOff fds 0
         wr_end <- peekElemOff fds 1
+        setNonBlockingFD wr_end -- writes happen in a signal handler, we
+                                -- don't want them to block.
+        setCloseOnExec rd_end
+        setCloseOnExec wr_end
         writeIORef stick (fromIntegral wr_end)
         c_setIOManagerPipe wr_end
         forkIO $ do
@@ -1100,17 +1106,24 @@ service_loop wakeup readfds writefds ptimeval old_reqs old_delays = do
         if b == 0 
           then return False
           else alloca $ \p -> do 
-                 c_read (fromIntegral wakeup) p 1; return ()
+                 c_read (fromIntegral wakeup) p 1
                  s <- peek p            
                  case s of
                   _ | s == io_MANAGER_WAKEUP -> return False
                   _ | s == io_MANAGER_DIE    -> return True
-                  _ -> withMVar signalHandlerLock $ \_ -> do
-                          handler_tbl <- peek handlers
-                          sp <- peekElemOff handler_tbl (fromIntegral s)
-                          io <- deRefStablePtr sp
-                          forkIO io
-                          return False
+                  _ | s == io_MANAGER_SYNC   -> do
+                       mvars <- readIORef sync
+                       mapM_ (flip putMVar ()) mvars
+                       return False
+                  _ -> do
+                       fp <- mallocForeignPtrBytes (fromIntegral sizeof_siginfo_t)
+                       withForeignPtr fp $ \p_siginfo -> do
+                         r <- c_read (fromIntegral wakeup) (castPtr p_siginfo)
+                                 sizeof_siginfo_t
+                         when (r /= fromIntegral sizeof_siginfo_t) $
+                            error "failed to read siginfo_t"
+                       runHandlers' fp (fromIntegral s)
+                       return False
 
   if exit then return () else do
 
@@ -1121,13 +1134,29 @@ service_loop wakeup readfds writefds ptimeval old_reqs old_delays = do
 
   service_loop wakeup readfds writefds ptimeval reqs' delays'
 
-io_MANAGER_WAKEUP, io_MANAGER_DIE :: CChar
+io_MANAGER_WAKEUP, io_MANAGER_DIE, io_MANAGER_SYNC :: CChar
 io_MANAGER_WAKEUP = 0xff
 io_MANAGER_DIE    = 0xfe
+io_MANAGER_SYNC   = 0xfd
 
+-- | the stick is for poking the IO manager with
 stick :: IORef Fd
 {-# NOINLINE stick #-}
 stick = unsafePerformIO (newIORef 0)
+
+{-# NOINLINE sync #-}
+sync :: IORef [MVar ()]
+sync = unsafePerformIO (newIORef [])
+
+-- waits for the IO manager to drain the pipe
+syncIOManager :: IO ()
+syncIOManager = do
+  m <- newEmptyMVar
+  atomicModifyIORef sync (\old -> (m:old,()))
+  fd <- readIORef stick
+  with io_MANAGER_SYNC $ \pbuf -> do 
+    c_write (fromIntegral fd) pbuf 1; return ()
+  takeMVar m
 
 wakeupIOManager :: IO ()
 wakeupIOManager = do
@@ -1135,16 +1164,56 @@ wakeupIOManager = do
   with io_MANAGER_WAKEUP $ \pbuf -> do 
     c_write (fromIntegral fd) pbuf 1; return ()
 
--- Lock used to protect concurrent access to signal_handlers.  Symptom of
--- this race condition is #1922, although that bug was on Windows a similar
--- bug also exists on Unix.
-signalHandlerLock :: MVar ()
-signalHandlerLock = unsafePerformIO (newMVar ())
+-- For the non-threaded RTS
+runHandlers :: Ptr Word8 -> Int -> IO ()
+runHandlers p_info sig = do
+  fp <- mallocForeignPtrBytes (fromIntegral sizeof_siginfo_t)
+  withForeignPtr fp $ \p -> do
+    copyBytes p p_info (fromIntegral sizeof_siginfo_t)
+    free p_info
+  runHandlers' fp (fromIntegral sig)
 
-foreign import ccall "&signal_handlers" handlers :: Ptr (Ptr (StablePtr (IO ())))
+runHandlers' :: ForeignPtr Word8 -> Signal -> IO ()
+runHandlers' p_info sig = do
+  let int = fromIntegral sig
+  withMVar signal_handlers $ \arr ->
+      if not (inRange (boundsIOArray arr) int)
+         then return ()
+         else do handler <- unsafeReadIOArray arr int
+                 case handler of
+                    Nothing -> return ()
+                    Just (f,_)  -> do forkIO (f p_info); return ()
 
 foreign import ccall "setIOManagerPipe"
   c_setIOManagerPipe :: CInt -> IO ()
+
+foreign import ccall "__hscore_sizeof_siginfo_t"
+  sizeof_siginfo_t :: CSize
+
+type Signal = CInt
+
+maxSig = 64 :: Int
+
+type HandlerFun = ForeignPtr Word8 -> IO ()
+
+-- Lock used to protect concurrent access to signal_handlers.  Symptom of
+-- this race condition is #1922, although that bug was on Windows a similar
+-- bug also exists on Unix.
+{-# NOINLINE signal_handlers #-}
+signal_handlers :: MVar (IOArray Int (Maybe (HandlerFun,Dynamic)))
+signal_handlers = unsafePerformIO $ do
+   arr <- newIOArray (0,maxSig) Nothing
+   newMVar arr
+
+setHandler :: Signal -> Maybe (HandlerFun,Dynamic) -> IO (Maybe (HandlerFun,Dynamic))
+setHandler sig handler = do
+  let int = fromIntegral sig
+  withMVar signal_handlers $ \arr -> 
+     if not (inRange (boundsIOArray arr) int)
+        then error "GHC.Conc.setHandler: signal out of range"
+        else do old <- unsafeReadIOArray arr int
+                unsafeWriteIOArray arr int handler
+                return old
 
 -- -----------------------------------------------------------------------------
 -- IO requests
@@ -1306,4 +1375,14 @@ setUncaughtExceptionHandler = writeIORef uncaughtExceptionHandler
 
 getUncaughtExceptionHandler :: IO (SomeException -> IO ())
 getUncaughtExceptionHandler = readIORef uncaughtExceptionHandler
+
+
+withMVar :: MVar a -> (a -> IO b) -> IO b
+withMVar m io = 
+  block $ do
+    a <- takeMVar m
+    b <- catchAny (unblock (io a))
+            (\e -> do putMVar m a; throw e)
+    putMVar m a
+    return b
 \end{code}

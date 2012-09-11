@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSignatures #-}
+
 --
 -- Haddock - A Haskell Documentation Tool
 --
@@ -15,9 +17,12 @@ module Haddock.Utils (
   -- * Filename utilities
   basename, dirname, splitFilename3, 
   moduleHtmlFile, nameHtmlRef,
-  contentsHtmlFile, indexHtmlFile, subIndexHtmlFile, pathJoin,
+  contentsHtmlFile, indexHtmlFile,
+  frameIndexHtmlFile,
+  moduleIndexFrameName, mainFrameName, synopsisFrameName,
+  subIndexHtmlFile, pathJoin,
   anchorNameStr,
-  cssFile, iconFile, jsFile, plusFile, minusFile,
+  cssFile, iconFile, jsFile, plusFile, minusFile, framesFile,
 
   -- * Miscellaneous utilities
   getProgramName, bye, die, dieMsg, noDieMsg, mapSnd, mapMaybeM, escapeStr,
@@ -48,16 +53,15 @@ import Name
 import OccName
 import Binary
 import Module
-import PackageConfig
 
-import Control.Monad ( liftM, MonadPlus(..) )
-import Data.Char ( isAlpha, isSpace, toUpper, ord, chr )
+import Control.Monad ( liftM )
+import Data.Char ( isAlpha, ord, chr )
 import Numeric ( showIntAtBase )
 import Data.Map ( Map )
 import qualified Data.Map as Map hiding ( Map )
 import Data.IORef ( IORef, newIORef, readIORef )
-import Data.List ( intersect, isSuffixOf, intersperse )
-import Data.Maybe ( maybeToList, fromMaybe, isJust, fromJust )
+import Data.List ( isSuffixOf )
+import Data.Maybe ( fromJust )
 import Data.Word ( Word8 )
 import Data.Bits ( testBit )
 import System.Environment ( getProgName )
@@ -97,6 +101,7 @@ restrictTo names (L loc decl) = L loc $ case decl of
     case restrictCons names (tcdCons d) of
       []    -> TyClD (d { tcdND = DataType, tcdCons = [] }) 
       [con] -> TyClD (d { tcdCons = [con] })
+      _ -> error "Should not happen"
   TyClD d | isClassDecl d -> 
     TyClD (d { tcdSigs = restrictDecls names (tcdSigs d),
                tcdATs = restrictATs names (tcdATs d) })
@@ -120,7 +125,7 @@ restrictCons names decls = [ L p d | L p (Just d) <- map (fmap keep) decls ]
         field_avail (ConDeclField n _ _) = (unLoc n) `elem` names
         field_types flds = [ t | ConDeclField _ t _ <- flds ] 
       
-    keep d | otherwise = Nothing
+    keep _ | otherwise = Nothing
 
 restrictDecls :: [Name] -> [LSig Name] -> [LSig Name]
 restrictDecls names decls = filter keep decls
@@ -193,6 +198,17 @@ contentsHtmlFile, indexHtmlFile :: String
 contentsHtmlFile = "index.html"
 indexHtmlFile = "doc-index.html"
 
+-- | The name of the module index file to be displayed inside a frame.
+-- Modules are display in full, but without indentation.  Clicking opens in
+-- the main window.
+frameIndexHtmlFile :: String
+frameIndexHtmlFile = "index-frames.html"
+
+moduleIndexFrameName, mainFrameName, synopsisFrameName :: String
+moduleIndexFrameName = "modules"
+mainFrameName = "main"
+synopsisFrameName = "synopsis"
+
 subIndexHtmlFile :: Char -> String
 subIndexHtmlFile a = "doc-index-" ++ b ++ ".html"
    where b | isAlpha a = [a]
@@ -214,12 +230,13 @@ pathJoin = foldr join []
 -- -----------------------------------------------------------------------------
 -- Files we need to copy from our $libdir
 
-cssFile, iconFile, jsFile, plusFile,minusFile :: String
+cssFile, iconFile, jsFile, plusFile, minusFile, framesFile :: String
 cssFile   = "haddock.css"
 iconFile  = "haskell_icon.gif"
 jsFile    = "haddock-util.js"
 plusFile  = "plus.gif"
 minusFile = "minus.gif"
+framesFile = "frames.html"
 
 -----------------------------------------------------------------------------
 -- misc.
@@ -266,7 +283,7 @@ escapeURIChar p c
         myShowHex :: Int -> ShowS
         myShowHex n r =  case showIntAtBase 16 (toChrHex) n r of
             []  -> "00"
-            [c] -> ['0',c]
+            [a] -> ['0',a]
             cs  -> cs
         toChrHex d
             | d < 10    = chr (ord '0' + fromIntegral d)
@@ -278,6 +295,8 @@ escapeURIString p s = concatMap (escapeURIChar p) s
 isUnreserved :: Char -> Bool
 isUnreserved c = isAlphaNumChar c || (c `elem` "-_.~")
 
+
+isAlphaChar, isDigitChar, isAlphaNumChar :: Char -> Bool
 isAlphaChar c    = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 isDigitChar c    = (c >= '0' && c <= '9')
 isAlphaNumChar c = isAlphaChar c || isDigitChar c
@@ -307,6 +326,7 @@ html_xrefs = unsafePerformIO (readIORef html_xrefs_ref)
 -----------------------------------------------------------------------------
 
 
+replace :: Eq a => a -> a -> [a] -> [a]
 replace a b xs = map (\x -> if x == a then b else x) xs 
 
 
@@ -328,6 +348,7 @@ markup m (DocDefList ds)       = markupDefList m (map (markupPair m) ds)
 markup m (DocCodeBlock d)      = markupCodeBlock m (markup m d)
 markup m (DocURL url)          = markupURL m url
 markup m (DocAName ref)        = markupAName m ref
+markup m (DocPic img)          = markupPic m img
 
 markupPair :: DocMarkup id a -> (HsDoc id, HsDoc id) -> (a, a)
 markupPair m (a,b) = (markup m a, markup m b)
@@ -347,15 +368,11 @@ idMarkup = Markup {
   markupOrderedList   = DocOrderedList,
   markupDefList       = DocDefList,
   markupCodeBlock     = DocCodeBlock,
-  markupURL	      = DocURL,
-  markupAName	      = DocAName
+  markupURL           = DocURL,
+  markupAName         = DocAName,
+  markupPic           = DocPic
   }
 
--- | Since marking up is just a matter of mapping 'Doc' into some
--- other type, we can \'rename\' documentation by marking up 'Doc' into
--- the same thing, modifying only the identifiers embedded in it.
-
-mapIdent f = idMarkup { markupIdentifier = f }
 
 -----------------------------------------------------------------------------
 -- put here temporarily

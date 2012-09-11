@@ -13,7 +13,7 @@ module TcRnTypes(
 	IfGblEnv(..), IfLclEnv(..), 
 
 	-- Ranamer types
-	ErrCtxt, RecFieldEnv,
+	ErrCtxt, RecFieldEnv(..),
 	ImportAvails(..), emptyImportAvails, plusImportAvails, 
 	WhereFrom(..), mkModDeps,
 
@@ -29,7 +29,7 @@ module TcRnTypes(
 
 	-- Insts
 	Inst(..), EqInstCo, InstOrigin(..), InstLoc(..), 
-	pprInstLoc, pprInstArising, instLocSpan, instLocOrigin,
+	pprInstLoc, pprInstArising, instLocSpan, instLocOrigin, setInstLoc,
 	LIE, emptyLIE, unitLIE, plusLIE, consLIE, instLoc, instSpan,
 	plusLIEs, mkLIE, isEmptyLIE, lieToList, listToLIE,
 
@@ -230,11 +230,16 @@ data TcGblEnv
         tcg_hpc :: AnyHpcUsage -- True if any part of the prog uses hpc instrumentation.
     }
 
-type RecFieldEnv = NameEnv [Name]	-- Maps a constructor name *in this module*
-					-- to the fields for that constructor
+data RecFieldEnv 
+  = RecFields (NameEnv [Name])	-- Maps a constructor name *in this module*
+				-- to the fields for that constructor
+	      NameSet		-- Set of all fields declared *in this module*;
+				-- used to suppress name-shadowing complaints
+				-- when using record wild cards
+				-- E.g.  let fld = e in C {..}
 	-- This is used when dealing with ".." notation in record 
 	-- construction and pattern matching.
-	-- The FieldEnv deals *only* with constructors defined in *thie*
+	-- The FieldEnv deals *only* with constructors defined in *this*
 	-- module.  For imported modules, we get the same info from the
 	-- TypeEnv
 \end{code}
@@ -838,6 +843,9 @@ data InstLoc = InstLoc InstOrigin SrcSpan ErrCtxt
 instLoc :: Inst -> InstLoc
 instLoc inst = tci_loc inst
 
+setInstLoc :: Inst -> InstLoc -> Inst
+setInstLoc inst new_loc = inst { tci_loc = new_loc }
+
 instSpan :: Inst -> SrcSpan
 instSpan wanted = instLocSpan (instLoc wanted)
 
@@ -882,7 +890,13 @@ data InstOrigin
   | ExprSigOrigin	-- e :: ty
   | RecordUpdOrigin
   | ViewPatOrigin
+
   | InstScOrigin	-- Typechecking superclasses of an instance declaration
+
+  | NoScOrigin          -- A very special hack; see TcSimplify,
+			--   Note [Recursive instances and superclases]
+			   
+
   | DerivOrigin		-- Typechecking deriving
   | StandAloneDerivOrigin -- Typechecking stand-alone deriving
   | DefaultOrigin	-- Typechecking a default decl
@@ -905,6 +919,7 @@ instance Outputable InstOrigin where
     ppr TupleOrigin	      = ptext (sLit "a tuple")
     ppr NegateOrigin	      = ptext (sLit "a use of syntactic negation")
     ppr InstScOrigin	      = ptext (sLit "the superclasses of an instance declaration")
+    ppr NoScOrigin            = ptext (sLit "an instance declaration")
     ppr DerivOrigin	      = ptext (sLit "the 'deriving' clause of a data type declaration")
     ppr StandAloneDerivOrigin = ptext (sLit "a 'deriving' declaration")
     ppr DefaultOrigin	      = ptext (sLit "a 'default' declaration")

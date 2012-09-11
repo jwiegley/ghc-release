@@ -28,3 +28,4 @@ import Prelude hiding ((.))
 --     Yes, this is a bit grotesque, but heck it works and the whole
 --     arrows stuff needs reworking anyway!
 f >>> g = g . f
+

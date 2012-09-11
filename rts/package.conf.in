@@ -22,7 +22,7 @@ library-dirs:		LIB_DIR GMP_LIB_DIRS PAPI_LIB_DIR
 # endif
 #else /* !INSTALLING */
 library-dirs:		FPTOOLS_TOP_ABS"/rts" GMP_LIB_DIRS PAPI_LIB_DIR
-# if !defined(HAVE_LIBGMP) && !defined(HAVE_FRAMEWORK_GMP)
+# if !defined(HAVE_LIB_GMP) && !defined(HAVE_FRAMEWORK_GMP)
 			, FPTOOLS_TOP_ABS"/gmp"
 # endif
                         , FPTOOLS_TOP_ABS"/libffi"
@@ -64,7 +64,9 @@ include-dirs:		INCLUDE_DIR GMP_INCLUDE_DIRS PAPI_INCLUDE_DIR
 #else /* !INSTALLING */
 include-dirs:		FPTOOLS_TOP_ABS"/includes"
              		FPTOOLS_TOP_ABS"/rts"
+# if !defined(HAVE_LIB_GMP) && !defined(HAVE_FRAMEWORK_GMP)
              		FPTOOLS_TOP_ABS"/gmp/gmpbuild"
+# endif
              		GMP_INCLUDE_DIRS
 #endif
 
@@ -109,6 +111,7 @@ ld-options:
          , "-u", "_base_GHCziWeak_runFinalizzerBatch_closure"
          , "-u", "_base_GHCziTopHandler_runIO_closure"
          , "-u", "_base_GHCziTopHandler_runNonIO_closure"
+         , "-u", "_base_GHCziConc_runHandlers_closure"
 #else
            "-u", "ghczmprim_GHCziTypes_Izh_static_info"
          , "-u", "ghczmprim_GHCziTypes_Czh_static_info"
@@ -144,6 +147,7 @@ ld-options:
          , "-u", "base_GHCziWeak_runFinalizzerBatch_closure"
          , "-u", "base_GHCziTopHandler_runIO_closure"
          , "-u", "base_GHCziTopHandler_runNonIO_closure"
+         , "-u", "base_GHCziConc_runHandlers_closure"
 #endif
 
 #ifdef LEADING_UNDERSCORE
@@ -158,6 +162,10 @@ ld-options:
  */
 #ifdef darwin_BUILD_OS
 	 , "-Wl,-search_paths_first"
+#endif
+
+#ifdef darwin_HOST_OS
+         , "-read_only_relocs", "warning"
 #endif
 
 framework-dirs:

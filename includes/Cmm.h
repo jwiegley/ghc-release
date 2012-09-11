@@ -251,13 +251,34 @@
    Indirections can contain tagged pointers, so their tag is checked.
    -------------------------------------------------------------------------- */
 
+#ifdef PROFILING
+
+// When profiling, we cannot shortcut ENTER() by checking the tag,
+// because LDV profiling relies on entering closures to mark them as
+// "used".
+
+#define LOAD_INFO \
+    info = %INFO_PTR(UNTAG(R1));
+
+#define UNTAG_R1 \
+    R1 = UNTAG(R1);
+
+#else
+
+#define LOAD_INFO                               \
+  if (GETTAG(R1) != 0) {                        \
+      jump %ENTRY_CODE(Sp(0));                  \
+  }                                             \
+  info = %INFO_PTR(R1);
+
+#define UNTAG_R1 /* nothing */
+
+#endif
+
 #define ENTER()						\
  again:							\
   W_ info;						\
-  if (GETTAG(R1) != 0) {                                \
-      jump %ENTRY_CODE(Sp(0));				\
-  }                                                     \
-  info = %INFO_PTR(R1);					\
+  LOAD_INFO                                             \
   switch [INVALID_OBJECT .. N_CLOSURE_TYPES]		\
          (TO_W_( %INFO_TYPE(%STD_INFO(info)) )) {	\
   case							\
@@ -276,6 +297,7 @@
     FUN_0_1,						\
     FUN_2_0,						\
     FUN_1_1,						\
+    FUN_0_2,						\
     FUN_STATIC,                                         \
     BCO,						\
     PAP:						\
@@ -284,6 +306,7 @@
    }							\
   default:						\
    {							\
+      UNTAG_R1               				\
       jump %ENTRY_CODE(info);				\
    }							\
   }

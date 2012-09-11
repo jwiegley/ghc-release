@@ -1,5 +1,5 @@
 
-VERSION=1.6.0.1
+VERSION=1.6.0.3
 
 #KIND=devel
 KIND=rc
@@ -13,7 +13,7 @@ all: build
 
 # build the library itself
 
-SOURCES=Distribution/*.hs Distribution/Simple/*.hs Distribution/PackageDescription/*.hs Distribution/Simple/GHC/*.hs Distribution/Simple/Build/*.hs
+SOURCES=Distribution/*.hs Distribution/Simple/*.hs Distribution/PackageDescription/*.hs Distribution/Simple/GHC/*.hs Distribution/Simple/Build/*.hs Distribution/Compat/*.hs
 CONFIG_STAMP=dist/setup-config
 BUILD_STAMP=dist/build/libHSCabal-$(VERSION).a
 HADDOCK_STAMP=dist/doc/html/Cabal/index.html
@@ -61,6 +61,9 @@ haddock: $(HADDOCK_STAMP)
 $(HADDOCK_STAMP) : $(CONFIG_STAMP) $(BUILD_STAMP)
 	./setup haddock
 
+XMLLINT=xmllint
+XMLLINT_OPTIONS=--nonet --noout --valid
+
 XSLTPROC=xsltproc
 XSLTPROC_HTML_OUTDIR=dist/doc/users-guide/
 XSLTPROC_HTML_CSS=Cabal.css
@@ -69,11 +72,13 @@ XSLTPROC_HTML_PARAMS=\
 	--param toc.section.depth 3 \
 	--stringparam base.dir $(XSLTPROC_HTML_OUTDIR) \
 	--stringparam html.stylesheet $(XSLTPROC_HTML_CSS)
-XSLTPROC_HTML_STYLESHEET=/usr/share/sgml/docbook/xsl-stylesheets/xhtml/chunk.xsl
+XSLTPROC_HTML_STYLESHEET=http://docbook.sourceforge.net/release/xsl/current/html/chunk.xsl
+XSLTPROC_OPTIONS=--nonet $(XSLTPROC_HTML_PARAMS) $(XSLTPROC_HTML_STYLESHEET)
 
 users-guide: $(USERGUIDE_STAMP)
 $(USERGUIDE_STAMP) : doc/Cabal.xml
-	$(XSLTPROC) $(XSLTPROC_HTML_PARAMS) $(XSLTPROC_HTML_STYLESHEET) $<
+	$(XMLLINT) $(XMLLINT_OPTIONS) $<
+	$(XSLTPROC) $(XSLTPROC_OPTIONS) $<
 	cp doc/$(XSLTPROC_HTML_CSS) $(XSLTPROC_HTML_OUTDIR)
 
 docs: haddock users-guide

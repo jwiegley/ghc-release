@@ -277,6 +277,7 @@ module GHC.Prim (
 	MutableByteArray#,
 	newByteArray#,
 	newPinnedByteArray#,
+	newAlignedPinnedByteArray#,
 	byteArrayContents#,
 	sameMutableByteArray#,
 	unsafeFreezeByteArray#,
@@ -478,6 +479,7 @@ module GHC.Prim (
 
 	Weak#,
 	mkWeak#,
+	mkWeakForeignEnv#,
 	deRefWeak#,
 	finalizeWeak#,
 	touch#,
@@ -1103,6 +1105,11 @@ newByteArray# = let x = x in x
 newPinnedByteArray# :: Int# -> State# s -> (# State# s,MutableByteArray# s #)
 newPinnedByteArray# = let x = x in x
 
+-- |Create a mutable byte array, aligned by the specified amount, that the GC guarantees not to move.
+
+newAlignedPinnedByteArray# :: Int# -> Int# -> State# s -> (# State# s,MutableByteArray# s #)
+newAlignedPinnedByteArray# = let x = x in x
+
 -- |Intended for use with pinned arrays; otherwise very unsafe!
 
 byteArrayContents# :: ByteArray# -> Addr#
@@ -1670,6 +1677,9 @@ data Weak# b
 
 mkWeak# :: o -> b -> c -> State# (RealWorld) -> (# State# (RealWorld),Weak# b #)
 mkWeak# = let x = x in x
+
+mkWeakForeignEnv# :: o -> b -> Addr# -> Addr# -> Int# -> Addr# -> State# (RealWorld) -> (# State# (RealWorld),Weak# b #)
+mkWeakForeignEnv# = let x = x in x
 
 deRefWeak# :: Weak# a -> State# (RealWorld) -> (# State# (RealWorld),Int#,a #)
 deRefWeak# = let x = x in x

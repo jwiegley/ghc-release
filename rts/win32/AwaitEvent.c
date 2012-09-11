@@ -18,6 +18,7 @@
 #include "AwaitEvent.h"
 #include <windows.h>
 #include "win32/AsyncIO.h"
+#include "win32/ConsoleHandler.h"
 
 // Used to avoid calling abandonRequestWait() if we don't need to.
 // Protected by sched_mutex.
@@ -34,14 +35,21 @@ awaitEvent(rtsBool wait)
     workerWaitingForRequests = 1;
     ret = awaitRequests(wait);
     workerWaitingForRequests = 0;
-    if (!ret) { 
-      return; /* still hold the lock */
+
+    // If a signal was raised, we need to service it
+    // XXX the scheduler loop really should be calling
+    // startSignalHandlers(), but this is the way that posix/Select.c
+    // does it and I'm feeling too paranoid to refactor it today --SDM
+    if (stg_pending_events != 0) {
+        startSignalHandlers(&MainCapability);
+        return;
     }
 
-    // Return to the scheduler if:
+    // The return value from awaitRequests() is a red herring: ignore
+    // it.  Return to the scheduler if !wait, or
     //
     //  - we were interrupted
-    //  - new threads have arrived
+    //  - the run-queue is now non- empty
 
   } while (wait
 	   && sched_state == SCHED_RUNNING

@@ -35,6 +35,7 @@ import ZipCfg
 import MkZipCfg
 import Util
 
+import BasicTypes
 import Maybes
 import Monad
 import Outputable
@@ -318,7 +319,7 @@ pprMiddle stmt = pp_stmt <+> pp_debug
     MidUnsafeCall (CmmPrim op) results args ->
         pprMiddle (MidUnsafeCall (CmmCallee (CmmLit lbl) CCallConv) results args)
         where
-          lbl = CmmLabel (mkForeignLabel (mkFastString (show op)) Nothing False)
+          lbl = CmmLabel (mkForeignLabel (mkFastString (show op)) Nothing False IsFunction)
 
     MidAddToContext ra args ->
         hcat [ ptext (sLit "return via ")

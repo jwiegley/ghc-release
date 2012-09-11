@@ -9,20 +9,28 @@ include $(TOP)/mk/boilerplate.mk
 # ghci script
 
 ifeq "$(TARGETPLATFORM)" "i386-unknown-mingw32"
-C_PROG = ghci
+C_PROG = ghci$(exeext)
+C_PROG_VERSIONED = ghci-$(ProjectVersion)$(exeext)
 C_OBJS += ghci.res
+
+all :: $(C_PROG_VERSIONED)
+$(C_PROG_VERSIONED) : $(C_PROG)
+	cp $< $@
 else
 C_SRCS=
 endif
 
 ifeq "$(TARGETPLATFORM)" "i386-unknown-mingw32"
-INSTALL_PROGS    += $(C_PROG)
+INSTALL_PROGS    += $(C_PROG) $(C_PROG_VERSIONED)
 GHCII_SCRIPT=$(DESTDIR)$(bindir)/ghcii.sh
+GHCII_SCRIPT_VERSIONED = $(DESTDIR)$(bindir)/ghcii-$(ProjectVersion).sh
 install::
 	$(RM) -f $(GHCII_SCRIPT)
 	echo "#!$(SHELL)"                                  >> $(GHCII_SCRIPT)
 	echo 'exec "$$0"/../ghc --interactive $${1+"$$@"}' >> $(GHCII_SCRIPT)
 	chmod +x $(GHCII_SCRIPT)
+	cp $(GHCII_SCRIPT) $(GHCII_SCRIPT_VERSIONED)
+	chmod +x $(GHCII_SCRIPT_VERSIONED)
 else
 LINK = ghci
 LINK_TARGET = $(LINK)-$(ProjectVersion)

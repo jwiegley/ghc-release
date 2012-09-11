@@ -24,6 +24,7 @@ import Haddock.GHC.Utils
 import Haddock.GHC.Typecheck
 import Haddock.Exception
 import Haddock.Utils
+import Haddock.InterfaceFile
 
 import qualified Data.Map as Map
 import Data.Map (Map)
@@ -37,24 +38,34 @@ import HscTypes ( msHsFilePath )
 import Digraph
 import BasicTypes
 import SrcLoc
+import HscTypes
 
 
 -- | Turn a topologically sorted list of module names/filenames into interfaces. Also
--- return the home link environment created in the process, and any error messages.
+-- return the home link environment created in the process.
 #if __GLASGOW_HASKELL__ >= 609
-createInterfaces :: [String] -> LinkEnv -> [Flag] -> Ghc ([Interface], LinkEnv)
-createInterfaces modules externalLinks flags = do
+createInterfaces :: [String] -> [Flag] -> [InterfaceFile]
+                 -> Ghc ([Interface], LinkEnv)
+createInterfaces modules flags extIfaces = do
   -- part 1, create interfaces
-  interfaces <- createInterfaces' modules flags
+  let instIfaceMap =  Map.fromList [ (instMod iface, iface) | ext <- extIfaces
+                                   , iface <- ifInstalledIfaces ext ]
+  interfaces <- createInterfaces' modules flags instIfaceMap
 #else
-createInterfaces :: Session -> [String] -> LinkEnv -> [Flag] -> IO ([Interface], LinkEnv)
-createInterfaces session modules externalLinks flags = do
+createInterfaces :: Session -> [String] -> [Flag]
+                 -> [InterfaceFile] -> IO ([Interface], LinkEnv)
+createInterfaces session modules flags extIfaces = do
   -- part 1, create interfaces
-  interfaces <- createInterfaces' session modules flags
+  let instIfaceMap =  Map.fromList [ (instMod iface, iface) | ext <- extIfaces
+                                   , iface <- ifInstalledIfaces ext ]
+  interfaces <- createInterfaces' session modules flags instIfaceMap
 #endif
   -- part 2, build link environment
-  let homeLinks = buildHomeLinks interfaces
-      links     = homeLinks `Map.union` externalLinks
+      -- combine the link envs of the external packages into one
+  let extLinks  = Map.unions (map ifLinkEnv extIfaces)
+      homeLinks = buildHomeLinks interfaces -- build the environment for the home
+                                            -- package
+      links     = homeLinks `Map.union` extLinks
       allNames  = Map.keys links
 
   -- part 3, attach instances
@@ -70,28 +81,51 @@ createInterfaces session modules externalLinks flags = do
 
 
 #if __GLASGOW_HASKELL__ >= 609
-createInterfaces' :: [String] -> [Flag] -> Ghc [Interface]
-createInterfaces' modules flags = do
+createInterfaces' :: [String] -> [Flag] -> InstIfaceMap -> Ghc [Interface]
+createInterfaces' modules flags instIfaceMap = do
   targets <- mapM (\f -> guessTarget f Nothing) modules
   setTargets targets
   modgraph <- depanal [] False
-  let orderedMods = flattenSCCs $ topSortModuleGraph False modgraph Nothing
-  (ifaces, _) <- foldM (\(ifaces, modMap) modsum -> do
-    interface <- processModule modsum flags modMap
+
+#if (__GLASGOW_HASKELL__ == 610 && __GHC_PATCHLEVEL__ >= 2) || __GLASGOW_HASKELL__ >= 611
+  -- If template haskell is used by the package, we can not use
+  -- HscNothing as target since we might need to run code generated from
+  -- one or more of the modules during typechecking.
+#if __GLASGOW_HASKELL__ < 611
+  let needsTemplateHaskell = any (dopt Opt_TemplateHaskell . ms_hspp_opts)
+#endif
+  modgraph' <- if needsTemplateHaskell modgraph
+       then do
+         dflags <- getSessionDynFlags
+         setSessionDynFlags dflags { hscTarget = HscC } 
+         -- we need to set HscC on all the ModSummaries as well
+         let addHscC m = m { ms_hspp_opts = (ms_hspp_opts m) { hscTarget = HscC } }  
+         return (map addHscC modgraph)
+       else return modgraph
 #else
-createInterfaces' :: Session -> [String] -> [Flag] -> IO [Interface]
-createInterfaces' session modules flags = do
+  let modgraph' = modgraph
+#endif
+
+  let orderedMods = flattenSCCs $ topSortModuleGraph False modgraph' Nothing
+  (ifaces, _) <- foldM (\(ifaces, modMap) modsum -> do
+    x <- processModule modsum flags modMap instIfaceMap
+#else
+createInterfaces' :: Session -> [String] -> [Flag] -> InstIfaceMap -> IO [Interface]
+createInterfaces' session modules flags instIfaceMap = do
   targets <- mapM (\f -> guessTarget f Nothing) modules
   setTargets session targets
   mbGraph <- depanal session [] False
   modgraph <- case mbGraph of
     Just graph -> return graph
-    Nothing -> throwE "Failed to create dependecy graph"
+    Nothing -> throwE "Failed to create dependency graph"
   let orderedMods = flattenSCCs $ topSortModuleGraph False modgraph Nothing
   (ifaces, _) <- foldM (\(ifaces, modMap) modsum -> do
-    interface <- processModule session modsum flags modMap
+    x <- processModule session modsum flags modMap instIfaceMap
 #endif
-    return $ (interface : ifaces , Map.insert (ifaceMod interface) interface modMap)
+    case x of
+      Just interface ->
+        return $ (interface : ifaces , Map.insert (ifaceMod interface) interface modMap)
+      Nothing -> return (ifaces, modMap)
     ) ([], Map.empty) orderedMods
   return (reverse ifaces)
 
@@ -128,41 +162,43 @@ ppModInfo (HaddockModInfo a b c d) = show (fmap pretty a) ++ show b ++ show c ++
 -}
 
 #if __GLASGOW_HASKELL__ >= 609
-processModule :: ModSummary -> [Flag] -> ModuleMap -> Ghc Interface
-processModule modsum flags modMap = 
-
-  let handleSrcErrors action = flip handleSourceError action $ \err -> do 
-        printExceptionAndWarnings err
-        throwE ("Failed to check module: " ++ moduleString (ms_mod modsum))
-
-  in handleSrcErrors $ do
-       let filename = msHsFilePath modsum
-       let dynflags = ms_hspp_opts modsum
-       tc_mod <- loadModule =<< typecheckModule =<< parseModule modsum
-       let Just renamed_src = renamedSource tc_mod
-       let ghcMod = mkGhcModule (ms_mod modsum,
-                             filename,
-                             (parsedSource tc_mod,
-                              renamed_src,
-                              typecheckedSource tc_mod,
-                              moduleInfo tc_mod))
-                             dynflags
-       let (interface, msg) = runWriter $ createInterface ghcMod flags modMap
-       liftIO $ mapM_ putStrLn msg
-       liftIO $ evaluate interface
-       return interface
+processModule :: ModSummary -> [Flag] -> ModuleMap -> InstIfaceMap -> Ghc (Maybe Interface)
+processModule modsum flags modMap instIfaceMap = do
+  tc_mod <- loadModule =<< typecheckModule =<< parseModule modsum
+  if not $ isBootSummary modsum
+    then do
+      let filename = msHsFilePath modsum
+      let dynflags = ms_hspp_opts modsum
+      let Just renamed_src = renamedSource tc_mod
+      let ghcMod = mkGhcModule (ms_mod modsum,
+                            filename,
+                            (parsedSource tc_mod,
+                             renamed_src,
+                             typecheckedSource tc_mod,
+                             moduleInfo tc_mod))
+                            dynflags
+      let (interface, msg) = runWriter $ createInterface ghcMod flags modMap instIfaceMap
+      liftIO $ mapM_ putStrLn msg
+      liftIO $ evaluate interface
+      return (Just interface)
+    else
+      return Nothing
 #else
-processModule :: Session -> ModSummary -> [Flag] -> ModuleMap -> IO Interface
-processModule session modsum flags modMap = do
+processModule :: Session -> ModSummary -> [Flag] -> ModuleMap -> InstIfaceMap -> IO (Maybe Interface)
+processModule session modsum flags modMap instIfaceMap = do
   let filename = msHsFilePath modsum
   mbMod <- checkAndLoadModule session modsum False
-  ghcMod <- case mbMod of
-    Just (CheckedModule a (Just b) (Just c) (Just d) _)
-      -> return $ mkGhcModule (ms_mod modsum, filename, (a,b,c,d)) (ms_hspp_opts modsum)
-    _ -> throwE ("Failed to check module: " ++ (moduleString $ ms_mod modsum))
-  let (interface, msg) = runWriter $ createInterface ghcMod flags modMap
-  mapM_ putStrLn msg
-  return interface
+  if not $ isBootSummary modsum
+    then do
+      ghcMod <- case mbMod of
+        Just (CheckedModule a (Just b) (Just c) (Just d) _)
+          -> return $ mkGhcModule (ms_mod modsum, filename, (a,b,c,d)) (ms_hspp_opts modsum)
+        _ -> throwE ("Failed to check module: " ++ (moduleString $ ms_mod modsum))
+      let (interface, msg) = runWriter $ createInterface ghcMod flags modMap instIfaceMap
+      mapM_ putStrLn msg
+      return (Just interface)
+    else
+      return Nothing
 #endif
 
 -- | Build a mapping which for each original name, points to the "best"

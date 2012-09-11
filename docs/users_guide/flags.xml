@@ -659,11 +659,11 @@
 	      <entry><option>-XNoArrows</option></entry>
 	    </row>
 	    <row>
-	      <entry><option>-fdisambiguate-record-fields</option></entry>
+	      <entry><option>-XDisambiguateRecordFields</option></entry>
 	      <entry>Enable <link linkend="disambiguate-fields">record 
 	      field disambiguation</link></entry>
 	      <entry>dynamic</entry>
-	      <entry><option>-fno-disambiguate-record-fields</option></entry>
+	      <entry><option>-XNoDisambiguateRecordFields</option></entry>
 	    </row>
 	    <row>
 	      <entry><option>-XForeignFunctionInterface</option></entry>
@@ -1022,6 +1022,13 @@
 	    <entry>make warnings non-fatal</entry>
 	    <entry>dynamic</entry>
 	    <entry>-Werror</entry>
+	  </row>
+
+	  <row>
+	    <entry><option>-fwarn-unrecognised-pragmas</option></entry>
+	    <entry>warn about uses of pragmas that GHC doesn't recognise</entry>
+	    <entry>dynamic</entry>
+	    <entry><option>-fno-warn-unrecognised-pragmas</option></entry>
 	  </row>
 
 	  <row>
@@ -1950,12 +1957,6 @@
 	    <row>
 	      <entry><option>-optdll</option> <replaceable>option</replaceable></entry>
 	      <entry>pass <replaceable>option</replaceable> to the DLL generator</entry>
-	      <entry>dynamic</entry>
-	      <entry>-</entry>
-	    </row>
-	    <row>
-	      <entry><option>-optdep</option> <replaceable>option</replaceable></entry>
-	      <entry>pass <replaceable>option</replaceable> to the dependency generator</entry>
 	      <entry>dynamic</entry>
 	      <entry>-</entry>
 	    </row>

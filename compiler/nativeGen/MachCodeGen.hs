@@ -40,6 +40,7 @@ import CLabel
 import ClosureInfo	( C_SRT(..) )
 
 -- The rest:
+import BasicTypes
 import StaticFlags	( opt_PIC )
 import ForeignCall	( CCallConv(..) )
 import OrdList
@@ -3223,7 +3224,7 @@ outOfLineFloatOp mop res args
           code2 <- stmtToInstrs (CmmAssign (CmmLocal res) (CmmReg (CmmLocal tmp)))
           return (code1 `appOL` code2)
   where
-	lbl = mkForeignLabel fn Nothing False
+	lbl = mkForeignLabel fn Nothing False IsFunction
 
 	fn = case mop of
 	      MO_F32_Sqrt  -> fsLit "sqrtf"
@@ -3418,7 +3419,7 @@ genCCall target dest_regs args = do
 	 (arg_op, arg_code) <- getOperand arg
          delta <- getDeltaNat
          setDeltaNat (delta-arg_size)
-	 let code' = code `appOL` toOL [PUSH I64 arg_op, 
+	 let code' = code `appOL` arg_code `appOL` toOL [PUSH I64 arg_op, 
 	 			        DELTA (delta-arg_size)]
 	 push_args rest code'
 	where
@@ -3567,7 +3568,7 @@ outOfLineFloatOp mop =
     do
       dflags <- getDynFlagsNat
       mopExpr <- cmmMakeDynamicReference dflags addImportNat CallReference $
-		  mkForeignLabel functionName Nothing True
+		  mkForeignLabel functionName Nothing True IsFunction
       let mopLabelOrExpr = case mopExpr of
 			CmmLit (CmmLabel lbl) -> Left lbl
                         _ -> Right mopExpr
@@ -3823,7 +3824,7 @@ genCCall target dest_regs argsAndHints
             do
                 dflags <- getDynFlagsNat
                 mopExpr <- cmmMakeDynamicReference dflags addImportNat CallReference $
-                              mkForeignLabel functionName Nothing True
+                              mkForeignLabel functionName Nothing True IsFunction
                 let mopLabelOrExpr = case mopExpr of
                         CmmLit (CmmLabel lbl) -> Left lbl
                         _ -> Right mopExpr

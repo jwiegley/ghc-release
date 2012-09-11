@@ -628,6 +628,13 @@ INLINE int __hscore_sig_setmask( void )
 #endif
 }
 
+#ifndef __MINGW32__
+INLINE size_t __hscore_sizeof_siginfo_t (void)
+{
+    return sizeof(siginfo_t);
+}
+#endif
+
 INLINE int
 __hscore_f_getfl( void )
 {
@@ -643,6 +650,26 @@ __hscore_f_setfl( void )
 {
 #ifdef F_SETFL
   return F_SETFL;
+#else
+  return 0;
+#endif
+}
+
+INLINE int
+__hscore_f_setfd( void )
+{
+#ifdef F_SETFD
+  return F_SETFD;
+#else
+  return 0;
+#endif
+}
+
+INLINE long
+__hscore_fd_cloexec( void )
+{
+#ifdef FD_CLOEXEC
+  return FD_CLOEXEC;
 #else
   return 0;
 #endif

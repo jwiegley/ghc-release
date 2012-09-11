@@ -861,7 +861,7 @@ Note [NO TYVARS]
 
 The excitement comes when simplifying the bindings for h.  Initially
 try to simplify {y @ [[t1]] t2, 0 @ t1}, with initial qtvs = {t2}.
-From this we get t1:=:t2, but also various bindings.  We can't forget
+From this we get t1~t2, but also various bindings.  We can't forget
 the bindings (because of [LOOP]), but in fact t1 is what g is
 polymorphic in.  
 
@@ -1262,9 +1262,23 @@ the givens, as you can see from the derivation described above.
 
 Conclusion: in the very special case of tcSimplifySuperClasses
 we have one 'given' (namely the "this" dictionary) whose superclasses
-must not be added to 'givens' by addGiven.  That is the *whole* reason
-for the red_given_scs field in RedEnv, and the function argument to
-addGiven.
+must not be added to 'givens' by addGiven.  
+
+There is a complication though.  Suppose there are equalities
+      instance (Eq a, a~b) => Num (a,b)
+Then we normalise the 'givens' wrt the equalities, so the original
+given "this" dictionary is cast to one of a different type.  So it's a
+bit trickier than before to identify the "special" dictionary whose
+superclasses must not be added. See test
+   indexed-types/should_run/EqInInstance
+
+We need a persistent property of the dictionary to record this
+special-ness.  Current I'm using the InstLocOrigin (a bit of a hack,
+but cool), which is maintained by dictionary normalisation.
+Specifically, the InstLocOrigin is
+	     NoScOrigin
+then the no-superclass thing kicks in.  WATCH OUT if you fiddle
+with InstLocOrigin!
 
 \begin{code}
 tcSimplifySuperClasses
@@ -1276,20 +1290,23 @@ tcSimplifySuperClasses
 	-> TcM TcDictBinds
 tcSimplifySuperClasses loc this givens sc_wanteds
   = do	{ traceTc (text "tcSimplifySuperClasses")
+
+	      -- Note [Recursive instances and superclases]
+        ; no_sc_loc <- getInstLoc NoScOrigin
+	; let no_sc_this = setInstLoc this no_sc_loc
+
+	; let env =  RedEnv { red_doc = pprInstLoc loc, 
+	     		      red_try_me = try_me,
+	     	     	      red_givens = no_sc_this : givens, 
+	     	     	      red_stack = (0,[]),
+	     	     	      red_improve = False }  -- No unification vars
+
+
 	; (irreds,binds1) <- checkLoop env sc_wanteds
 	; let (tidy_env, tidy_irreds) = tidyInsts irreds
-	; reportNoInstances tidy_env (Just (loc, givens)) tidy_irreds
+	; reportNoInstances tidy_env (Just (loc, givens)) [] tidy_irreds
 	; return binds1 }
   where
-    env =  RedEnv { red_doc = pprInstLoc loc, 
-		    red_try_me = try_me,
-	     	    red_givens = this:givens, 
-	     	    red_given_scs = add_scs,
-	     	    red_stack = (0,[]),
-	     	    red_improve = False }  -- No unification vars
-    add_scs g | g==this   = NoSCs
-	      | otherwise = AddSCs
-
     try_me _ = ReduceMe  -- Try hard, so we completely solve the superclass 
     	       		 -- constraints right here. See Note [SUPERCLASS-LOOP 1]
 \end{code}
@@ -1758,8 +1775,6 @@ data RedEnv
 						-- Always dicts & equalities
 						-- but see Note [Rigidity]
  
- 	   , red_given_scs :: Inst -> WantSCs	-- See Note [Recursive instances and superclases]
- 
 	   , red_stack  :: (Int, [Inst])	-- Recursion stack (for err msg)
 						-- See Note [RedStack]
   }
@@ -1782,7 +1797,6 @@ mkRedEnv :: SDoc -> (Inst -> WhatToDo) -> [Inst] -> RedEnv
 mkRedEnv doc try_me givens
   = RedEnv { red_doc = doc, red_try_me = try_me,
 	     red_givens = givens, 
-	     red_given_scs = const AddSCs,
 	     red_stack = (0,[]),
 	     red_improve = True }	
 
@@ -1791,7 +1805,6 @@ mkInferRedEnv :: SDoc -> (Inst -> WhatToDo) -> RedEnv
 mkInferRedEnv doc try_me
   = RedEnv { red_doc = doc, red_try_me = try_me,
 	     red_givens = [], 
-	     red_given_scs = const AddSCs,
 	     red_stack = (0,[]),
 	     red_improve = True }	
 
@@ -1800,7 +1813,6 @@ mkNoImproveRedEnv :: SDoc -> (Inst -> WhatToDo) -> RedEnv
 mkNoImproveRedEnv doc try_me
   = RedEnv { red_doc = doc, red_try_me = try_me,
 	     red_givens = [], 
-	     red_given_scs = const AddSCs,
 	     red_stack = (0,[]),
 	     red_improve = True }	
 
@@ -1884,8 +1896,7 @@ reduceContext env wanteds0
 
           -- Build the Avail mapping from "given_dicts"
 	; (init_state, _) <- getLIE $ do 
-		{ init_state <- foldlM (addGiven (red_given_scs env)) 
-		  	     	       emptyAvails givens'
+		{ init_state <- foldlM addGiven emptyAvails givens'
 		; return init_state
                 }
 
@@ -2597,14 +2608,19 @@ addWanted want_scs avails wanted rhs_expr wanteds
   where
     avail = Rhs rhs_expr wanteds
 
-addGiven :: (Inst -> WantSCs) -> Avails -> Inst -> TcM Avails
-addGiven want_scs avails given = addAvailAndSCs (want_scs given) avails given (Given given)
-	-- Conditionally add superclasses for 'givens'
+addGiven :: Avails -> Inst -> TcM Avails
+addGiven avails given 
+  = addAvailAndSCs want_scs avails given (Given given)
+  where
+    want_scs = case instLocOrigin (instLoc given) of
+    	         NoScOrigin -> NoSCs
+		 _other	    -> AddSCs
+	-- Conditionally add superclasses for 'given'
 	-- See Note [Recursive instances and superclases]
-	--
-	-- No ASSERT( not (given `elemAvails` avails) ) because in an instance
-	-- decl for Ord t we can add both Ord t and Eq t as 'givens', 
-	-- so the assert isn't true
+
+  -- No ASSERT( not (given `elemAvails` avails) ) because in an
+  -- instance decl for Ord t we can add both Ord t and Eq t as
+  -- 'givens', so the assert isn't true
 \end{code}
 
 \begin{code}
@@ -2975,7 +2991,8 @@ tcSimplifyDeriv orig tyvars theta
 	; (irreds, _) <- tryHardCheckLoop doc wanteds
 
 	; let (tv_dicts, others) = partition ok irreds
-	; addNoInstanceErrs others
+              (tidy_env, tidy_insts) = tidyInsts others
+        ; reportNoInstances tidy_env Nothing [alt_fix] tidy_insts
 	-- See Note [Exotic derived instance contexts] in TcMType
 
 	; let rev_env = zipTopTvSubst tvs (mkTyVarTys tyvars)
@@ -2989,6 +3006,8 @@ tcSimplifyDeriv orig tyvars theta
 
     ok dict | isDict dict = validDerivPred (dictPred dict)
 	    | otherwise	  = False
+    alt_fix = vcat [ptext (sLit "use a standalone 'deriving instance' declaration instead,"),
+                    ptext (sLit "so you can specify the instance context yourself")]
 \end{code}
 
 
@@ -3003,7 +3022,7 @@ tcSimplifyDefault :: ThetaType	-- Wanted; has no type variables in it
 tcSimplifyDefault theta = do
     wanteds <- newDictBndrsO DefaultOrigin theta
     (irreds, _) <- tryHardCheckLoop doc wanteds
-    addNoInstanceErrs  irreds
+    addNoInstanceErrs irreds
     if null irreds then
 	return ()
      else
@@ -3079,7 +3098,7 @@ addNoInstanceErrs :: [Inst]	-- Wanted (can include implications)
 		  -> TcM ()	
 addNoInstanceErrs insts
   = do	{ let (tidy_env, tidy_insts) = tidyInsts insts
-	; reportNoInstances tidy_env Nothing tidy_insts }
+	; reportNoInstances tidy_env Nothing [] tidy_insts }
 
 reportNoInstances 
 	:: TidyEnv
@@ -3087,14 +3106,15 @@ reportNoInstances
 			-- Nothing => top level
 			-- Just (d,g) => d describes the construct
 			--		 with givens g
+        -> [SDoc]      -- Alternative fix for no-such-instance
 	-> [Inst]	-- What is wanted (can include implications)
 	-> TcM ()	
 
-reportNoInstances tidy_env mb_what insts 
-  = groupErrs (report_no_instances tidy_env mb_what) insts
+reportNoInstances tidy_env mb_what alt_fix insts 
+  = groupErrs (report_no_instances tidy_env mb_what alt_fix) insts
 
-report_no_instances :: TidyEnv -> Maybe (InstLoc, [Inst]) -> [Inst] -> TcM ()
-report_no_instances tidy_env mb_what insts
+report_no_instances :: TidyEnv -> Maybe (InstLoc, [Inst]) -> [SDoc] -> [Inst] -> TcM ()
+report_no_instances tidy_env mb_what alt_fixes insts
   = do { inst_envs <- tcGetInstEnvs
        ; let (implics, insts1)  = partition isImplicInst insts
 	     (insts2, overlaps) = partitionWith (check_overlap inst_envs) insts1
@@ -3112,7 +3132,7 @@ report_no_instances tidy_env mb_what insts
     complain_implic inst	-- Recurse!
       = reportNoInstances tidy_env 
 			  (Just (tci_loc inst, tci_given inst)) 
-			  (tci_wanted inst)
+			  alt_fixes (tci_wanted inst)
 
     check_overlap :: (InstEnv,InstEnv) -> Inst -> Either Inst SDoc
 	-- Right msg  => overlap message
@@ -3160,13 +3180,13 @@ report_no_instances tidy_env mb_what insts
       = vcat [ addInstLoc insts $
 	       sep [ ptext (sLit "Could not deduce") <+> pprDictsTheta insts
 	           , nest 2 $ ptext (sLit "from the context") <+> pprDictsTheta givens]
-	     , show_fixes (fix1 loc : fixes2) ]
+	     , show_fixes (fix1 loc : fixes2 ++ alt_fixes) ]
 
       | otherwise	-- Top level 
       = vcat [ addInstLoc insts $
 	       ptext (sLit "No instance") <> plural insts
 		    <+> ptext (sLit "for") <+> pprDictsTheta insts
-	     , show_fixes fixes2 ]
+	     , show_fixes (fixes2 ++ alt_fixes) ]
 
       where
     	fix1 loc = sep [ ptext (sLit "add") <+> pprDictsTheta insts

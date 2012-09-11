@@ -17,7 +17,44 @@
 #include "RtsAPI.h"
 #include "Trace.h"
 
+// ForeignPtrs with C finalizers rely on weak pointers inside weak_ptr_list
+// to always be in the same order.
+
 StgWeak *weak_ptr_list;
+
+// So that we can detect when a finalizer illegally calls back into Haskell
+rtsBool running_finalizers = rtsFalse;
+
+void
+runCFinalizer(StgVoid *fn, StgVoid *ptr, StgVoid *env, StgWord flag)
+{
+    if (flag)
+       ((void (*)(void *, void *))fn)(env, ptr);
+    else
+       ((void (*)(void *))fn)(ptr);
+}
+
+void
+runAllCFinalizers(StgWeak *list)
+{
+    StgWeak *w;
+
+    running_finalizers = rtsTrue;
+
+    for (w = list; w; w = w->link) {
+       StgArrWords *farr;
+
+       farr = (StgArrWords *)UNTAG_CLOSURE(w->cfinalizer);
+
+       if ((StgClosure *)farr != &stg_NO_FINALIZER_closure)
+           runCFinalizer((StgVoid *)farr->payload[0],
+                         (StgVoid *)farr->payload[1],
+                         (StgVoid *)farr->payload[2],
+                         farr->payload[3]);
+    }
+
+    running_finalizers = rtsFalse;
+}
 
 /*
  * scheduleFinalizers() is called on the list of weak pointers found
@@ -42,9 +79,12 @@ scheduleFinalizers(Capability *cap, StgWeak *list)
     StgMutArrPtrs *arr;
     nat n;
 
+    running_finalizers = rtsTrue;
+
     // count number of finalizers, and kill all the weak pointers first...
     n = 0;
     for (w = list; w; w = w->link) { 
+        StgArrWords *farr;
 
 	// Better not be a DEAD_WEAK at this stage; the garbage
 	// collector removes DEAD_WEAKs from the weak pointer list.
@@ -53,6 +93,14 @@ scheduleFinalizers(Capability *cap, StgWeak *list)
 	if (w->finalizer != &stg_NO_FINALIZER_closure) {
 	    n++;
 	}
+
+        farr = (StgArrWords *)UNTAG_CLOSURE(w->cfinalizer);
+
+        if ((StgClosure *)farr != &stg_NO_FINALIZER_closure)
+            runCFinalizer((StgVoid *)farr->payload[0],
+                          (StgVoid *)farr->payload[1],
+                          (StgVoid *)farr->payload[2],
+                          farr->payload[3]);
 
 #ifdef PROFILING
         // A weak pointer is inherently used, so we do not need to call
@@ -65,7 +113,9 @@ scheduleFinalizers(Capability *cap, StgWeak *list)
 #endif
 	SET_HDR(w, &stg_DEAD_WEAK_info, w->header.prof.ccs);
     }
-	
+
+    running_finalizers = rtsFalse;
+
     // No finalizers to run?
     if (n == 0) return;
 

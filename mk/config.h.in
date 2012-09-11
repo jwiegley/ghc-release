@@ -164,6 +164,9 @@
 /* Define to 1 if you have the `setitimer' function. */
 #undef HAVE_SETITIMER
 
+/* Define to 1 if setitimer accepts ITIMER_VIRTUAL, 0 else. */
+#undef HAVE_SETITIMER_VIRTUAL
+
 /* Define to 1 if you have the `siginterrupt' function. */
 #undef HAVE_SIGINTERRUPT
 

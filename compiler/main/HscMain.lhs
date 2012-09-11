@@ -30,6 +30,10 @@ module HscMain
     , deSugarModule
     , makeSimpleIface
     , makeSimpleDetails
+
+    -- Only used by GHC.loadModule
+    , Compiler'
+    , backendCompilers
     ) where
 
 #ifdef GHCI
@@ -1051,3 +1055,67 @@ showModuleIndex (Just (i,n)) = "[" ++ padded ++ " of " ++ n_str ++ "] "
         padded = replicate (length n_str - length i_str) ' ' ++ i_str
 \end{code}
 
+\begin{code}
+type Compiler' m result =
+         HscEnv
+      -> ModSummary
+      -> Bool                -- True <=> source unchanged
+      -> Maybe ModIface      -- Old interface, if available
+      -> Maybe (Int,Int)     -- Just (i,n) <=> module i of n (for msgs)
+      -> m result
+
+backendCompilers :: GhcMonad m =>
+                    TcGblEnv 
+                 -> (Compiler' m (HscStatus, ModIface, ModDetails),
+                     Compiler' m (InteractiveStatus, ModIface, ModDetails),
+                     Compiler' m (HscStatus, ModIface, ModDetails))
+backendCompilers tcg =
+    ( \env ms0 _ _mb_old_iface _ -> 
+          withTempSession (\_ -> env) $ nothingBackend tcg ms0
+    , \env ms0 _ _mb_old_iface _ ->
+          withTempSession (\_ -> env) $ interpBackend tcg ms0
+    ,  \env ms0 _ _mb_old_iface _ ->
+          withTempSession (\_ -> env) $ batchBackend tcg ms0)
+  where
+    withTempSession f m = do
+      saved_session <- getSession
+      (modifySession f >> m) `gfinally` setSession saved_session
+    myRunComp :: GhcMonad m => ModSummary -> Comp (Maybe a) -> m a
+    myRunComp ms m = do
+      env <- getSession 
+      ioMsgMaybe $ flip evalComp (CompState env ms Nothing) $ m
+
+    genericBackend :: GhcMonad m => 
+                     (TcGblEnv -> Comp (Maybe a))
+                  -> (ModGuts -> Comp (Maybe a))
+                  -> TcGblEnv -> ModSummary
+                  -> m a
+    genericBackend gen_boot_output gen_output tc_result mod_summary
+      | HsBootFile <- ms_hsc_src mod_summary =
+         myRunComp mod_summary $ gen_boot_output tc_result -- interpGenBootOutput tc_result
+      | otherwise = do
+         env <- getSession
+         guts <- deSugarModule env mod_summary tc_result
+         myRunComp mod_summary $ gen_output guts -- interpGenOutput guts
+
+    interpBackend = genericBackend interpGenBootOutput interpGenOutput
+
+    interpGenBootOutput tc_result = do
+      (iface, _changed, details, _tcg') <- hscSimpleIface tc_result
+      return (Just (InteractiveNoRecomp, iface, details))
+
+    interpGenOutput guts = do
+      hscSimplify guts >>= hscNormalIface >>= hscIgnoreIface >>= hscInteractive
+
+    nothingBackend tc_result mod_summary = 
+       myRunComp mod_summary $
+         hscSimpleIface tc_result >>= hscIgnoreIface >>= hscNothing
+
+    batchBackend = genericBackend batchGenBootOutput batchGenOutput
+
+    batchGenBootOutput tc_result = do
+       hscSimpleIface tc_result >>= hscWriteIface >>= hscNothing
+
+    batchGenOutput guts = do
+       hscSimplify guts >>= hscNormalIface >>= hscWriteIface >>= hscBatch
+\end{code}

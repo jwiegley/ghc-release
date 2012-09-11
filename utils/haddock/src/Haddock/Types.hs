@@ -1,3 +1,5 @@
+{-# OPTIONS_HADDOCK hide #-}
+
 --
 -- Haddock - A Haskell Documentation Tool
 --
@@ -5,19 +7,24 @@
 --
 
 
-{-# OPTIONS_HADDOCK hide #-}
-
-
 module Haddock.Types where
 
 
 import Haddock.DocName
-
 import Data.Map (Map)
 import qualified Data.Map as Map
-
 import GHC hiding (NoLink)
 import Name
+
+
+-- convenient short-hands
+type Decl = LHsDecl Name
+type Doc  = HsDoc Name
+
+
+-- | A declaration that may have documentation, including its subordinates,
+-- which may also have documentation
+type DeclInfo = (Decl, Maybe Doc, [(Name, Maybe Doc)])
 
 
 {-! for DocOption derive: Binary !-}
@@ -40,17 +47,16 @@ data ExportItem name
       -- | Maybe a doc comment
       expItemMbDoc :: Maybe (HsDoc name),
 
+      -- | Subordinate names, possibly with documentation
+      expItemSubDocs :: [(name, Maybe (HsDoc name))],
+
       -- | Instances relevant to this declaration
       expItemInstances :: [InstHead name]
 	
 	  }	-- ^ An exported declaration 
 		    
   | ExportNoDecl {
-	  -- | The original name
-      expItemName :: Name,
-
-      -- | Where to link to
-      expItemLinkTarget :: name,
+      expItemName :: name,
 
       -- | Subordinate names
       expItemSubs :: [name]
@@ -79,6 +85,7 @@ data ExportItem name
 
 type InstHead name = ([HsPred name], name, [HsType name])
 type ModuleMap     = Map Module Interface
+type InstIfaceMap  = Map Module InstalledInterface
 type DocMap        = Map Name (HsDoc DocName)
 type LinkEnv       = Map Name Module
 
@@ -124,14 +131,12 @@ data Interface = Interface {
   -- | The Haddock options for this module (prune, ignore-exports, etc)
   ifaceOptions         :: ![DocOption],
 
-  ifaceDeclMap         :: Map Name (LHsDecl Name, Maybe (HsDoc Name)),
+  ifaceDeclMap         :: Map Name DeclInfo,
   ifaceRnDocMap        :: Map Name (HsDoc DocName),
+  ifaceSubMap          :: Map Name [Name],
 
   ifaceExportItems     :: ![ExportItem Name],
   ifaceRnExportItems   :: [ExportItem DocName],
-
-  -- | Environment mapping exported names to *original* names
-	ifaceEnv             :: Map OccName Name,
 
   -- | All the names that are defined in this module
   ifaceLocals          :: ![Name],
@@ -148,8 +153,6 @@ data Interface = Interface {
   -- for this module.
   ifaceVisibleExports  :: ![Name],
 
-  ifaceSubMap          :: !(Map Name [Name]),
-
   -- | The instances exported by this module
   ifaceInstances       :: ![Instance]
 }
@@ -162,7 +165,9 @@ data InstalledInterface = InstalledInterface {
   instInfo           :: HaddockModInfo Name,
   instDocMap         :: Map Name (HsDoc DocName),
   instExports        :: [Name],
-  instVisibleExports :: [Name]
+  instVisibleExports :: [Name],
+  instOptions        :: [DocOption],
+  instSubMap         :: Map Name [Name]
 }
 
 
@@ -173,7 +178,9 @@ toInstalledIface interface = InstalledInterface {
   instInfo           = ifaceInfo           interface,
   instDocMap         = ifaceRnDocMap       interface,
   instExports        = ifaceExports        interface,
-  instVisibleExports = ifaceVisibleExports interface
+  instVisibleExports = ifaceVisibleExports interface,
+  instOptions        = ifaceOptions        interface,
+  instSubMap         = ifaceSubMap         interface
 }
 
 
@@ -191,7 +198,8 @@ data DocMarkup id a = Markup {
   markupDefList       :: [(a,a)] -> a,
   markupCodeBlock     :: a -> a,
   markupURL           :: String -> a,
-  markupAName         :: String -> a
+  markupAName         :: String -> a,
+  markupPic           :: String -> a
 }
 
 

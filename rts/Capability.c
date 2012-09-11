@@ -736,7 +736,6 @@ shutdownCapability (Capability *cap, Task *task, rtsBool safe)
         }
             
 	debugTrace(DEBUG_sched, "capability %d is stopped.", cap->no);
-        freeCapability(cap);
 	RELEASE_LOCK(&cap->lock);
 	break;
     }
@@ -774,11 +773,25 @@ tryGrabCapability (Capability *cap, Task *task)
 
 #endif /* THREADED_RTS */
 
-void
-freeCapability (Capability *cap) {
+static void
+freeCapability (Capability *cap)
+{
     stgFree(cap->mut_lists);
 #if defined(THREADED_RTS) || defined(PARALLEL_HASKELL)
     freeSparkPool(&cap->r.rSparks);
+#endif
+}
+
+void
+freeCapabilities (void)
+{
+#if defined(THREADED_RTS)
+    nat i;
+    for (i=0; i < n_capabilities; i++) {
+        freeCapability(&capabilities[i]);
+    }
+#else
+    freeCapability(&MainCapability);
 #endif
 }
 

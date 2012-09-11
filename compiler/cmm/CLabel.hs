@@ -115,6 +115,8 @@ module CLabel (
 #include "HsVersions.h"
 
 import StaticFlags
+import BasicTypes
+import Literal
 import Packages
 import DataCon
 import PackageConfig
@@ -185,11 +187,12 @@ data CLabel
 
   | RtsLabel RtsLabelInfo
 
-  | ForeignLabel FastString	-- a 'C' (or otherwise foreign) label
-	(Maybe Int) 		-- possible '@n' suffix for stdcall functions
-		-- When generating C, the '@n' suffix is omitted, but when
-		-- generating assembler we must add it to the label.
-	Bool			-- True <=> is dynamic
+  | ForeignLabel FastString     -- a 'C' (or otherwise foreign) label
+        (Maybe Int)             -- possible '@n' suffix for stdcall functions
+                -- When generating C, the '@n' suffix is omitted, but when
+                -- generating assembler we must add it to the label.
+        Bool                    -- True <=> is dynamic
+        FunctionOrData
 
   | CC_Label  CostCentre
   | CCS_Label CostCentreStack
@@ -364,17 +367,18 @@ mkApEntryLabel upd off		= RtsLabel (RtsApEntry   upd off)
 
 	-- Foreign labels
 
-mkForeignLabel :: FastString -> Maybe Int -> Bool -> CLabel
-mkForeignLabel str mb_sz  is_dynamic = ForeignLabel str mb_sz is_dynamic
+mkForeignLabel :: FastString -> Maybe Int -> Bool -> FunctionOrData -> CLabel
+mkForeignLabel str mb_sz is_dynamic fod
+    = ForeignLabel str mb_sz is_dynamic fod
 
 addLabelSize :: CLabel -> Int -> CLabel
-addLabelSize (ForeignLabel str _ is_dynamic) sz
-  = ForeignLabel str (Just sz) is_dynamic
+addLabelSize (ForeignLabel str _ is_dynamic fod) sz
+  = ForeignLabel str (Just sz) is_dynamic fod
 addLabelSize label _
   = label
 
 foreignLabelStdcallInfo :: CLabel -> Maybe Int
-foreignLabelStdcallInfo (ForeignLabel _ info _) = info
+foreignLabelStdcallInfo (ForeignLabel _ info _ _) = info
 foreignLabelStdcallInfo _lbl = Nothing
 
 	-- Cost centres etc.
@@ -469,7 +473,7 @@ needsCDecl ModuleRegdLabel		= False
 needsCDecl (StringLitLabel _)		= False
 needsCDecl (AsmTempLabel _)		= False
 needsCDecl (RtsLabel _)			= False
-needsCDecl l@(ForeignLabel _ _ _)	= not (isMathFun l)
+needsCDecl l@(ForeignLabel _ _ _ _)	= not (isMathFun l)
 needsCDecl (CC_Label _)			= True
 needsCDecl (CCS_Label _)		= True
 needsCDecl (HpcTicksLabel _)            = True
@@ -489,26 +493,86 @@ maybeAsmTemp _ 	    	       = Nothing
 -- they are builtin to the C compiler.  For these labels we avoid
 -- generating our own C prototypes.
 isMathFun :: CLabel -> Bool
-isMathFun (ForeignLabel fs _ _) = fs `elem` math_funs
+isMathFun (ForeignLabel fs _ _ _) = fs `elem` math_funs
   where
   math_funs = [
-        (fsLit "pow"),    (fsLit "sin"),   (fsLit "cos"),
-        (fsLit "tan"),    (fsLit "sinh"),  (fsLit "cosh"),
-        (fsLit "tanh"),   (fsLit "asin"),  (fsLit "acos"),
-        (fsLit "atan"),   (fsLit "log"),   (fsLit "exp"),
-        (fsLit "sqrt"),   (fsLit "powf"),  (fsLit "sinf"),
-        (fsLit "cosf"),   (fsLit "tanf"),  (fsLit "sinhf"),
-        (fsLit "coshf"),  (fsLit "tanhf"), (fsLit "asinf"),
-        (fsLit "acosf"),  (fsLit "atanf"), (fsLit "logf"),
-        (fsLit "expf"),   (fsLit "sqrtf"), (fsLit "frexp"),
-        (fsLit "modf"),   (fsLit "ilogb"), (fsLit "copysign"),
-        (fsLit "remainder"), (fsLit "nextafter"), (fsLit "logb"),
-        (fsLit "cbrt"),   (fsLit "atanh"), (fsLit "asinh"),
-        (fsLit "acosh"),  (fsLit "lgamma"),(fsLit "hypot"),
-        (fsLit "erfc"),   (fsLit "erf"),   (fsLit "trunc"),
-        (fsLit "round"),  (fsLit "fmod"),  (fsLit "floor"),
-        (fsLit "fabs"),   (fsLit "ceil"),  (fsLit "log10"),
-        (fsLit "ldexp"),  (fsLit "atan2"), (fsLit "rint")
+        -- _ISOC99_SOURCE
+        (fsLit "acos"),         (fsLit "acosf"),        (fsLit "acosh"),
+        (fsLit "acoshf"),       (fsLit "acoshl"),       (fsLit "acosl"),
+        (fsLit "asin"),         (fsLit "asinf"),        (fsLit "asinl"),
+        (fsLit "asinh"),        (fsLit "asinhf"),       (fsLit "asinhl"),
+        (fsLit "atan"),         (fsLit "atanf"),        (fsLit "atanl"),
+        (fsLit "atan2"),        (fsLit "atan2f"),       (fsLit "atan2l"),
+        (fsLit "atanh"),        (fsLit "atanhf"),       (fsLit "atanhl"),
+        (fsLit "cbrt"),         (fsLit "cbrtf"),        (fsLit "cbrtl"),
+        (fsLit "ceil"),         (fsLit "ceilf"),        (fsLit "ceill"),
+        (fsLit "copysign"),     (fsLit "copysignf"),    (fsLit "copysignl"),
+        (fsLit "cos"),          (fsLit "cosf"),         (fsLit "cosl"),
+        (fsLit "cosh"),         (fsLit "coshf"),        (fsLit "coshl"),
+        (fsLit "erf"),          (fsLit "erff"),         (fsLit "erfl"),
+        (fsLit "erfc"),         (fsLit "erfcf"),        (fsLit "erfcl"),
+        (fsLit "exp"),          (fsLit "expf"),         (fsLit "expl"),
+        (fsLit "exp2"),         (fsLit "exp2f"),        (fsLit "exp2l"),
+        (fsLit "expm1"),        (fsLit "expm1f"),       (fsLit "expm1l"),
+        (fsLit "fabs"),         (fsLit "fabsf"),        (fsLit "fabsl"),
+        (fsLit "fdim"),         (fsLit "fdimf"),        (fsLit "fdiml"),
+        (fsLit "floor"),        (fsLit "floorf"),       (fsLit "floorl"),
+        (fsLit "fma"),          (fsLit "fmaf"),         (fsLit "fmal"),
+        (fsLit "fmax"),         (fsLit "fmaxf"),        (fsLit "fmaxl"),
+        (fsLit "fmin"),         (fsLit "fminf"),        (fsLit "fminl"),
+        (fsLit "fmod"),         (fsLit "fmodf"),        (fsLit "fmodl"),
+        (fsLit "frexp"),        (fsLit "frexpf"),       (fsLit "frexpl"),
+        (fsLit "hypot"),        (fsLit "hypotf"),       (fsLit "hypotl"),
+        (fsLit "ilogb"),        (fsLit "ilogbf"),       (fsLit "ilogbl"),
+        (fsLit "ldexp"),        (fsLit "ldexpf"),       (fsLit "ldexpl"),
+        (fsLit "lgamma"),       (fsLit "lgammaf"),      (fsLit "lgammal"),
+        (fsLit "llrint"),       (fsLit "llrintf"),      (fsLit "llrintl"),
+        (fsLit "llround"),      (fsLit "llroundf"),     (fsLit "llroundl"),
+        (fsLit "log"),          (fsLit "logf"),         (fsLit "logl"),
+        (fsLit "log10l"),       (fsLit "log10"),        (fsLit "log10f"),
+        (fsLit "log1pl"),       (fsLit "log1p"),        (fsLit "log1pf"),
+        (fsLit "log2"),         (fsLit "log2f"),        (fsLit "log2l"),
+        (fsLit "logb"),         (fsLit "logbf"),        (fsLit "logbl"),
+        (fsLit "lrint"),        (fsLit "lrintf"),       (fsLit "lrintl"),
+        (fsLit "lround"),       (fsLit "lroundf"),      (fsLit "lroundl"),
+        (fsLit "modf"),         (fsLit "modff"),        (fsLit "modfl"),
+        (fsLit "nan"),          (fsLit "nanf"),         (fsLit "nanl"),
+        (fsLit "nearbyint"),    (fsLit "nearbyintf"),   (fsLit "nearbyintl"),
+        (fsLit "nextafter"),    (fsLit "nextafterf"),   (fsLit "nextafterl"),
+        (fsLit "nexttoward"),   (fsLit "nexttowardf"),  (fsLit "nexttowardl"),
+        (fsLit "pow"),          (fsLit "powf"),         (fsLit "powl"),
+        (fsLit "remainder"),    (fsLit "remainderf"),   (fsLit "remainderl"),
+        (fsLit "remquo"),       (fsLit "remquof"),      (fsLit "remquol"),
+        (fsLit "rint"),         (fsLit "rintf"),        (fsLit "rintl"),
+        (fsLit "round"),        (fsLit "roundf"),       (fsLit "roundl"),
+        (fsLit "scalbln"),      (fsLit "scalblnf"),     (fsLit "scalblnl"),
+        (fsLit "scalbn"),       (fsLit "scalbnf"),      (fsLit "scalbnl"),
+        (fsLit "sin"),          (fsLit "sinf"),         (fsLit "sinl"),
+        (fsLit "sinh"),         (fsLit "sinhf"),        (fsLit "sinhl"),
+        (fsLit "sqrt"),         (fsLit "sqrtf"),        (fsLit "sqrtl"),
+        (fsLit "tan"),          (fsLit "tanf"),         (fsLit "tanl"),
+        (fsLit "tanh"),         (fsLit "tanhf"),        (fsLit "tanhl"),
+        (fsLit "tgamma"),       (fsLit "tgammaf"),      (fsLit "tgammal"),
+        (fsLit "trunc"),        (fsLit "truncf"),       (fsLit "truncl"),
+        -- ISO C 99 also defines these function-like macros in math.h:
+        -- fpclassify, isfinite, isinf, isnormal, signbit, isgreater,
+        -- isgreaterequal, isless, islessequal, islessgreater, isunordered
+
+        -- additional symbols from _BSD_SOURCE
+        (fsLit "drem"),         (fsLit "dremf"),        (fsLit "dreml"),
+        (fsLit "finite"),       (fsLit "finitef"),      (fsLit "finitel"),
+        (fsLit "gamma"),        (fsLit "gammaf"),       (fsLit "gammal"),
+        (fsLit "isinf"),        (fsLit "isinff"),       (fsLit "isinfl"),
+        (fsLit "isnan"),        (fsLit "isnanf"),       (fsLit "isnanl"),
+        (fsLit "j0"),           (fsLit "j0f"),          (fsLit "j0l"),
+        (fsLit "j1"),           (fsLit "j1f"),          (fsLit "j1l"),
+        (fsLit "jn"),           (fsLit "jnf"),          (fsLit "jnl"),
+        (fsLit "lgamma_r"),     (fsLit "lgammaf_r"),    (fsLit "lgammal_r"),
+        (fsLit "scalb"),        (fsLit "scalbf"),       (fsLit "scalbl"),
+        (fsLit "significand"),  (fsLit "significandf"), (fsLit "significandl"),
+        (fsLit "y0"),           (fsLit "y0f"),          (fsLit "y0l"),
+        (fsLit "y1"),           (fsLit "y1f"),          (fsLit "y1l"),
+        (fsLit "yn"),           (fsLit "ynf"),          (fsLit "ynl")
     ]
 isMathFun _ = False
 
@@ -527,7 +591,7 @@ externallyVisibleCLabel (ModuleInitLabel _ _) = True
 externallyVisibleCLabel (PlainModuleInitLabel _)= True
 externallyVisibleCLabel ModuleRegdLabel    = False
 externallyVisibleCLabel (RtsLabel _)	   = True
-externallyVisibleCLabel (ForeignLabel _ _ _) = True
+externallyVisibleCLabel (ForeignLabel _ _ _ _) = True
 externallyVisibleCLabel (IdLabel name SRT)   = False
                          -- SRTs don't need to be external
 externallyVisibleCLabel (IdLabel name _)     = isExternalName name
@@ -572,6 +636,7 @@ labelType (LargeSRTLabel _)                   = DataLabel
 labelType (LargeBitmapLabel _)                = DataLabel
 
 labelType (IdLabel _ info) = idInfoLabelType info
+labelType (ForeignLabel _ _ _ IsFunction) = CodeLabel
 labelType _        = DataLabel
 
 idInfoLabelType info =
@@ -600,11 +665,11 @@ labelDynamic this_pkg lbl =
    RtsLabel _  	     -> not opt_Static && (this_pkg /= rtsPackageId) -- i.e., is the RTS in a DLL or not?
    IdLabel n k       -> isDllName this_pkg n
 #if mingw32_TARGET_OS
-   ForeignLabel _ _ d  -> d
+   ForeignLabel _ _ d _ -> d
 #else
    -- On Mac OS X and on ELF platforms, false positives are OK,
    -- so we claim that all foreign imports come from dynamic libraries
-   ForeignLabel _ _ _ -> True
+   ForeignLabel _ _ _ _ -> True
 #endif
    ModuleInitLabel m _    -> not opt_Static && this_pkg /= (modulePackageId m)
    PlainModuleInitLabel m -> not opt_Static && this_pkg /= (modulePackageId m)
@@ -698,7 +763,7 @@ maybe_underscore doc
 #ifdef mingw32_TARGET_OS
 -- In asm mode, we need to put the suffix on a stdcall ForeignLabel.
 -- (The C compiler does this itself).
-pprAsmCLbl (ForeignLabel fs (Just sz) _)
+pprAsmCLbl (ForeignLabel fs (Just sz) _ _)
    = ftext fs <> char '@' <> int sz
 #endif
 pprAsmCLbl lbl
@@ -791,7 +856,7 @@ pprCLbl (RtsLabel (RtsSlowTickyCtr pat))
 pprCLbl ModuleRegdLabel
   = ptext (sLit "_module_registered")
 
-pprCLbl (ForeignLabel str _ _)
+pprCLbl (ForeignLabel str _ _ _)
   = ftext str
 
 pprCLbl (IdLabel name  flavor) = ppr name <> ppIdFlavor flavor

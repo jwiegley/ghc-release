@@ -8,6 +8,8 @@
 ><LINK HREF="haddock.css" REL="stylesheet" TYPE="text/css"
 ><SCRIPT SRC="haddock-util.js" TYPE="text/javascript"
 ></SCRIPT
+><SCRIPT TYPE="text/javascript"
+>window.onload = function () {setSynopsis("mini_TypeOperators.html")};</SCRIPT
 ></HEAD
 ><BODY
 ><TABLE CLASS="vanilla" CELLSPACING="0" CELLPADDING="0"
@@ -192,8 +194,10 @@
 ><TR
 ><TD CLASS="section1"
 ><A NAME="1"
+><A NAME="1"
 >stuff
 </A
+></A
 ></TD
 ></TR
 ><TR
@@ -204,7 +208,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  a <A NAME="t%3A%3A-%3A"
+>  a <A NAME="t::-:"
+><A NAME="t%3A%3A-%3A"
+></A
 ></A
 ><B
 >:-:</B
@@ -218,7 +224,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  (a <A NAME="t%3A%3A%2B%3A"
+>  (a <A NAME="t::+:"
+><A NAME="t%3A%3A%2B%3A"
+></A
 ></A
 ><B
 >:+:</B
@@ -232,7 +240,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >data</SPAN
->  <A NAME="t%3AOp"
+>  <A NAME="t:Op"
+><A NAME="t%3AOp"
+></A
 ></A
 ><B
 >Op</B
@@ -246,7 +256,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >newtype</SPAN
->  <A NAME="t%3AO"
+>  <A NAME="t:O"
+><A NAME="t%3AO"
+></A
 ></A
 ><B
 >O</B
@@ -264,7 +276,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="5" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:O"
 ><A NAME="v%3AO"
+></A
 ></A
 ><B
 >O</B
@@ -277,7 +291,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:unO"
 ><A NAME="v%3AunO"
+></A
 ></A
 ><B
 >unO</B
@@ -300,7 +316,9 @@
 ></TR
 ><TR
 ><TD CLASS="decl"
+><A NAME="v:biO"
 ><A NAME="v%3AbiO"
+></A
 ></A
 ><B
 >biO</B
@@ -316,7 +334,9 @@
 ><TD CLASS="decl"
 ><SPAN CLASS="keyword"
 >newtype</SPAN
->  <A NAME="t%3AFlip"
+>  <A NAME="t:Flip"
+><A NAME="t%3AFlip"
+></A
 ></A
 ><B
 >Flip</B
@@ -334,7 +354,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="5" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:Flip"
 ><A NAME="v%3AFlip"
+></A
 ></A
 ><B
 >Flip</B
@@ -347,7 +369,9 @@
 ><TABLE CLASS="vanilla" CELLSPACING="1" CELLPADDING="0"
 ><TR
 ><TD CLASS="arg"
+><A NAME="v:unFlip"
 ><A NAME="v%3AunFlip"
+></A
 ></A
 ><B
 >unFlip</B
@@ -372,7 +396,7 @@
 ><TD CLASS="botbar"
 >Produced by <A HREF="http://www.haskell.org/haddock/"
 >Haddock</A
-> version 2.2.2</TD
+> version 2.4.2</TD
 ></TR
 ></TABLE
 ></BODY

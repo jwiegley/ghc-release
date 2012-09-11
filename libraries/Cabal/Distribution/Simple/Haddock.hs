@@ -94,8 +94,9 @@ import Distribution.Verbosity
 import Language.Haskell.Extension
 -- Base
 import System.Directory(removeFile, doesFileExist,
-                        removeDirectoryRecursive, copyFile)
-
+                        removeDirectoryRecursive)
+import Distribution.Compat.CopyFile
+         ( copyFile )
 import Control.Monad ( when, unless )
 import Data.Maybe    ( isJust, fromJust, listToMaybe )
 import Data.Char     (isSpace)
@@ -115,8 +116,7 @@ haddock pkg_descr _ _ haddockFlags
     && not (fromFlag $ haddockExecutables haddockFlags) =
       warn (fromFlag $ haddockVerbosity haddockFlags) $
            "No documentation was generated as this package does not contain "
-        ++ "a library. Perhaps you want to use the haddock command with the "
-        ++ "--executables."
+        ++ "a library. Perhaps you want to use the --executables flag."
 
 haddock pkg_descr lbi suffixes flags = do
     let distPref = fromFlag (haddockDistPref flags)
@@ -135,7 +135,7 @@ haddock pkg_descr lbi suffixes flags = do
     createDirectoryIfMissingVerbose verbosity True tmpDir
     createDirectoryIfMissingVerbose verbosity True $
         haddockPref distPref pkg_descr
-    preprocessSources pkg_descr lbi False verbosity suffixes
+    initialBuildSteps distPref pkg_descr lbi verbosity suffixes
 
     setupMessage verbosity "Running Haddock for" (packageId pkg_descr)
 
@@ -195,9 +195,6 @@ haddock pkg_descr lbi suffixes flags = do
     let haddock2options bi preprocessDir = if isVersion2
           then ("-B" ++ ghcLibDir) : map ("--optghc=" ++) (ghcSimpleOptions lbi bi preprocessDir)
           else []
-
-    when isVersion2 $
-        initialBuildSteps distPref pkg_descr lbi verbosity suffixes
 
     withLib pkg_descr () $ \lib -> do
         let bi = libBuildInfo lib
@@ -419,7 +416,7 @@ hscolour pkg_descr lbi suffixes flags = do
 
 getLibSourceFiles :: LocalBuildInfo -> Library -> IO [FilePath]
 getLibSourceFiles lbi lib = sequence
-  [ findFileWithExtension ["hs", "lhs"] (preprocessDir : hsSourceDirs bi)
+  [ findFileWithExtension ["hs", "lhs"] (autogenModulesDir lbi: preprocessDir : hsSourceDirs bi)
       (ModuleName.toFilePath module_) >>= maybe (notFound module_) (return . normalise)
   | module_ <- modules ]
   where
@@ -432,7 +429,7 @@ getExeSourceFiles :: LocalBuildInfo -> Executable -> IO [FilePath]
 getExeSourceFiles lbi exe = do
   srcMainPath <- findFile (hsSourceDirs bi) (modulePath exe)
   moduleFiles <- sequence
-    [ findFileWithExtension ["hs", "lhs"] (preprocessDir : hsSourceDirs bi)
+    [ findFileWithExtension ["hs", "lhs"] (autogenModulesDir lbi : preprocessDir : hsSourceDirs bi)
         (ModuleName.toFilePath module_) >>= maybe (notFound module_) (return . normalise)
     | module_ <- modules ]
   return (srcMainPath : moduleFiles)

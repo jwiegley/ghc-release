@@ -25,6 +25,8 @@ test('TH_spliceE5',
      multimod_compile_and_run,
      ['TH_spliceE5.hs', '-v0'])
 
+test('TH_spliceE6', normal, compile, ['-v0'])
+
 # Testing profiling with TH is a bit tricky; we've already disabled
 # the prof way above, and also we want to add options specifically for
 # profiling (-osuf p_o) because this is necessary when mixing
@@ -88,7 +90,8 @@ test('TH_bracket3', normal, compile, [''])
 test('TH_class1', normal, compile, ['-v0'])
 test('TH_tuple1', normal, compile, ['-v0'])
 test('TH_genEx',
-     extra_clean(['TH_genExLib.hi', 'TH_genExLib.o']),
+     [extra_clean(['TH_genExLib.hi', 'TH_genExLib.o']),
+      if_compiler_lt('ghc', '6.11', expect_fail)],
      multimod_compile,
      ['TH_genEx', '-v0'])
 
@@ -116,12 +119,27 @@ test('TH_ghci1', normal, ghci_script, ['TH_ghci1.script'])
 test('TH_scope', normal, compile, [''])
 test('T2632', normal, compile, [''])
 test('T2700', normal, compile, ['-v0'])
+test('T2817', normal, compile, ['-v0'])
 test('T2713', normal, compile_fail, ['-v0'])
 test('T2674', normal, compile_fail, ['-v0'])
+test('T2931', normal, compile, ['-v0'])
 test('TH_emptycase', normal, compile_fail, ['-v0'])
 
 test('T2386', extra_clean(['T2386_Lib.hi', 'T2386_Lib.o']),
 	      run_command,
 	      ['$MAKE -s --no-print-directory T2386'] )
 
-test('T2685', normal, multimod_compile, ['T2685','-v0'])
+test('T2685', extra_clean(['T2685a.hi','T2685a.o']), 
+              multimod_compile, ['T2685','-v0'])
+
+test('TH_sections', normal, compile, ['-v0'])
+
+test('TH_tf1', if_compiler_lt('ghc', '6.11', expect_fail), compile, ['-v0'])
+test('TH_tf2', if_compiler_lt('ghc', '6.11', expect_fail), compile, ['-v0'])
+test('TH_tf3', if_compiler_lt('ghc', '6.11', expect_fail), compile, ['-v0'])
+
+test('TH_pragma',
+     if_compiler_lt('ghc', '6.11', expect_fail),
+     compile,
+     ['-v0 -ddump-splices -dsuppress-uniques -S'])
+

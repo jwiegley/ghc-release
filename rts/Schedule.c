@@ -31,6 +31,7 @@
 #include "Updates.h"
 #include "Proftimer.h"
 #include "ProfHeap.h"
+#include "Weak.h"
 
 /* PARALLEL_HASKELL includes go here */
 
@@ -89,16 +90,24 @@ StgTSO *blackhole_queue = NULL;
  */
 rtsBool blackholes_need_checking = rtsFalse;
 
+/* Set to true when the latest garbage collection failed to reclaim
+ * enough space, and the runtime should proceed to shut itself down in
+ * an orderly fashion (emitting profiling info etc.)
+ */
+rtsBool heap_overflow = rtsFalse;
+
 /* flag that tracks whether we have done any execution in this time slice.
  * LOCK: currently none, perhaps we should lock (but needs to be
  * updated in the fast path of the scheduler).
+ *
+ * NB. must be StgWord, we do xchg() on it.
  */
-nat recent_activity = ACTIVITY_YES;
+volatile StgWord recent_activity = ACTIVITY_YES;
 
 /* if this flag is set as well, give up execution
- * LOCK: none (changes once, from false->true)
+ * LOCK: none (changes monotonically)
  */
-rtsBool sched_state = SCHED_RUNNING;
+volatile StgWord sched_state = SCHED_RUNNING;
 
 /*  This is used in `TSO.h' and gcc 2.96 insists that this variable actually 
  *  exists - earlier gccs apparently didn't.
@@ -268,6 +277,12 @@ schedule (Capability *initialCapability, Task *task)
 	      "### NEW SCHEDULER LOOP (task: %p, cap: %p)",
 	      task, initialCapability);
 
+  if (running_finalizers) {
+      errorBelch("error: a C finalizer called back into Haskell.\n"
+                 "   use Foreign.Concurrent.newForeignPtr for Haskell finalizers.");
+      stg_exit(EXIT_FAILURE);
+  }
+
   schedulePreLoop();
 
   // -----------------------------------------------------------
@@ -351,7 +366,14 @@ schedule (Capability *initialCapability, Task *task)
 #endif
 	/* scheduleDoGC() deletes all the threads */
 	cap = scheduleDoGC(cap,task,rtsFalse);
-	break;
+
+        // after scheduleDoGC(), we must be shutting down.  Either some
+        // other Capability did the final GC, or we did it above,
+        // either way we can fall through to the SCHED_SHUTTING_DOWN
+        // case now.
+        ASSERT(sched_state == SCHED_SHUTTING_DOWN);
+        // fall through
+
     case SCHED_SHUTTING_DOWN:
 	debugTrace(DEBUG_sched, "SCHED_SHUTTING_DOWN");
 	// If we are a worker, just exit.  If we're a bound thread
@@ -492,6 +514,15 @@ schedule (Capability *initialCapability, Task *task)
 	}
     }
 #endif
+
+    // If we're shutting down, and this thread has not yet been
+    // killed, kill it now.  This sometimes happens when a finalizer
+    // thread is created by the final GC, or a thread previously
+    // in a foreign call returns.
+    if (sched_state >= SCHED_INTERRUPTING &&
+        !(t->what_next == ThreadComplete || t->what_next == ThreadKilled)) {
+        deleteThread(cap,t);
+    }
 
     /* context switches are initiated by the timer signal, unless
      * the user specified "context switch as often as possible", with
@@ -692,9 +723,11 @@ schedulePushWork(Capability *cap USED_IF_THREADS,
 
     // Check whether we have more threads on our run queue, or sparks
     // in our pool, that we could hand to another Capability.
-    if ((emptyRunQueue(cap) || cap->run_queue_hd->_link == END_TSO_QUEUE)
-	&& sparkPoolSizeCap(cap) < 2) {
-	return;
+    if (cap->run_queue_hd == END_TSO_QUEUE) {
+        if (sparkPoolSizeCap(cap) < 2) return;
+    } else {
+        if (cap->run_queue_hd->_link == END_TSO_QUEUE && 
+            sparkPoolSizeCap(cap) < 1) return;
     }
 
     // First grab as many free Capabilities as we can.
@@ -862,8 +895,13 @@ scheduleCheckBlackHoles (Capability *cap)
     {
 	ACQUIRE_LOCK(&sched_mutex);
 	if ( blackholes_need_checking ) {
-	    checkBlackHoles(cap);
 	    blackholes_need_checking = rtsFalse;
+            // important that we reset the flag *before* checking the
+            // blackhole queue, otherwise we could get deadlock.  This
+            // happens as follows: we wake up a thread that
+            // immediately runs on another Capability, blocks on a
+            // blackhole, and then we reset the blackholes_need_checking flag.
+	    checkBlackHoles(cap);
 	}
 	RELEASE_LOCK(&sched_mutex);
     }
@@ -907,12 +945,11 @@ scheduleDetectDeadlock (Capability *cap, Task *task)
 	// they are unreachable and will therefore be sent an
 	// exception.  Any threads thus released will be immediately
 	// runnable.
-	cap = scheduleDoGC (cap, task, rtsTrue/*force  major GC*/);
+        cap = scheduleDoGC (cap, task, rtsTrue/*force major GC*/);
+        // when force_major == rtsTrue. scheduleDoGC sets
+        // recent_activity to ACTIVITY_DONE_GC and turns off the timer
+        // signal.
 
-	recent_activity = ACTIVITY_DONE_GC;
-        // disable timer signals (see #1623)
-        stopTimer();
-	
 	if ( !emptyRunQueue(cap) ) return;
 
 #if defined(RTS_USER_SIGNALS) && !defined(THREADED_RTS)
@@ -1085,7 +1122,7 @@ schedulePostRunThread (Capability *cap, StgTSO *t)
             // ATOMICALLY_FRAME, aborting the (nested)
             // transaction, and saving the stack of any
             // partially-evaluated thunks on the heap.
-            throwToSingleThreaded_(cap, t, NULL, rtsTrue, NULL);
+            throwToSingleThreaded_(cap, t, NULL, rtsTrue);
             
             ASSERT(get_itbl((StgClosure *)t->sp)->type == ATOMICALLY_FRAME);
         }
@@ -1315,6 +1352,12 @@ scheduleHandleThreadFinished (Capability *cap STG_UNUSED, Task *task, StgTSO *t)
     debugTrace(DEBUG_sched, "--++ thread %lu (%s) finished", 
 	       (unsigned long)t->id, whatNext_strs[t->what_next]);
 
+    // blocked exceptions can now complete, even if the thread was in
+    // blocked mode (see #2910).  This unconditionally calls
+    // lockTSO(), which ensures that we don't miss any threads that
+    // are engaged in throwTo() with this thread as a target.
+    awakenBlockedExceptionQueue (cap, t);
+
       //
       // Check whether the thread that just completed was a bound
       // thread, and if so return with the result.  
@@ -1357,7 +1400,11 @@ scheduleHandleThreadFinished (Capability *cap STG_UNUSED, Task *task, StgTSO *t)
 		  *(task->ret) = NULL;
 	      }
 	      if (sched_state >= SCHED_INTERRUPTING) {
-		  task->stat = Interrupted;
+                  if (heap_overflow) {
+                      task->stat = HeapExhausted;
+                  } else {
+                      task->stat = Interrupted;
+                  }
 	      } else {
 		  task->stat = Killed;
 	      }
@@ -1403,6 +1450,13 @@ scheduleDoGC (Capability *cap, Task *task USED_IF_THREADS, rtsBool force_major)
     rtsBool was_waiting;
     nat i;
 #endif
+
+    if (sched_state == SCHED_SHUTTING_DOWN) {
+        // The final GC has already been done, and the system is
+        // shutting down.  We'll probably deadlock if we try to GC
+        // now.
+        return cap;
+    }
 
 #ifdef THREADED_RTS
     // In order to GC, there must be no threads running Haskell code.
@@ -1455,6 +1509,7 @@ scheduleDoGC (Capability *cap, Task *task USED_IF_THREADS, rtsBool force_major)
     
     IF_DEBUG(scheduler, printAllThreads());
 
+delete_threads_and_gc:
     /*
      * We now have all the capabilities; if we're in an interrupting
      * state, then we should take the opportunity to delete all the
@@ -1466,6 +1521,21 @@ scheduleDoGC (Capability *cap, Task *task USED_IF_THREADS, rtsBool force_major)
     }
     
     heap_census = scheduleNeedHeapProfile(rtsTrue);
+
+    if (recent_activity == ACTIVITY_INACTIVE && force_major)
+    {
+        // We are doing a GC because the system has been idle for a
+        // timeslice and we need to check for deadlock.  Record the
+        // fact that we've done a GC and turn off the timer signal;
+        // it will get re-enabled if we run any threads after the GC.
+        //
+        // Note: this is done before GC, because after GC there might
+        // be threads already running (GarbageCollect() releases the
+        // GC threads when it completes), so we risk turning off the
+        // timer signal when it should really be on.
+        recent_activity = ACTIVITY_DONE_GC;
+        stopTimer();
+    }
 
     /* everybody back, start the GC.
      * Could do it in this thread, or signal a condition var
@@ -1481,6 +1551,23 @@ scheduleDoGC (Capability *cap, Task *task USED_IF_THREADS, rtsBool force_major)
         debugTrace(DEBUG_sched, "performing heap census");
         heapCensus();
 	performHeapProfile = rtsFalse;
+    }
+
+    if (heap_overflow && sched_state < SCHED_INTERRUPTING) {
+        // GC set the heap_overflow flag, so we should proceed with
+        // an orderly shutdown now.  Ultimately we want the main
+        // thread to return to its caller with HeapExhausted, at which
+        // point the caller should call hs_exit().  The first step is
+        // to delete all the threads.
+        //
+        // Another way to do this would be to raise an exception in
+        // the main thread, which we really should do because it gives
+        // the program a chance to clean up.  But how do we find the
+        // main thread?  It should presumably be the same one that
+        // gets ^C exceptions, but that's all done on the Haskell side
+        // (GHC.TopHandler).
+       sched_state = SCHED_INTERRUPTING;
+        goto delete_threads_and_gc;
     }
 
 #if defined(THREADED_RTS)
@@ -1814,7 +1901,10 @@ resumeThread (void *task_)
     debugTrace(DEBUG_sched, "thread %lu: re-entering RTS", (unsigned long)tso->id);
     
     if (tso->why_blocked == BlockedOnCCall) {
-	awakenBlockedExceptionQueue(cap,tso);
+        // avoid locking the TSO if we don't have to
+        if (tso->blocked_exceptions != END_TSO_QUEUE) {
+            awakenBlockedExceptionQueue(cap,tso);
+        }
 	tso->flags &= ~(TSO_BLOCKEX | TSO_INTERRUPTIBLE);
     }
     
@@ -1922,9 +2012,22 @@ workerStart(Task *task)
     // schedule() runs without a lock.
     cap = schedule(cap,task);
 
-    // On exit from schedule(), we have a Capability.
-    releaseCapability(cap);
+    // On exit from schedule(), we have a Capability, but possibly not
+    // the same one we started with.
+
+    // During shutdown, the requirement is that after all the
+    // Capabilities are shut down, all workers that are shutting down
+    // have finished workerTaskStop().  This is why we hold on to
+    // cap->lock until we've finished workerTaskStop() below.
+    //
+    // There may be workers still involved in foreign calls; those
+    // will just block in waitForReturnCapability() because the
+    // Capability has been shut down.
+    //
+    ACQUIRE_LOCK(&cap->lock);
+    releaseCapability_(cap);
     workerTaskStop(task);
+    RELEASE_LOCK(&cap->lock);
 }
 #endif
 
@@ -2006,16 +2109,16 @@ exitScheduler(
 {
     Task *task = NULL;
 
-#if defined(THREADED_RTS)
     ACQUIRE_LOCK(&sched_mutex);
     task = newBoundTask();
     RELEASE_LOCK(&sched_mutex);
-#endif
 
     // If we haven't killed all the threads yet, do it now.
     if (sched_state < SCHED_SHUTTING_DOWN) {
 	sched_state = SCHED_INTERRUPTING;
-	scheduleDoGC(NULL,task,rtsFalse);    
+        waitForReturnCapability(&task->cap,task);
+	scheduleDoGC(task->cap,task,rtsFalse);    
+        releaseCapability(task->cap);
     }
     sched_state = SCHED_SHUTTING_DOWN;
 
@@ -2027,20 +2130,30 @@ exitScheduler(
 	    shutdownCapability(&capabilities[i], task, wait_foreign);
 	}
 	boundTaskExiting(task);
-	stopTaskManager();
     }
-#else
-    freeCapability(&MainCapability);
 #endif
 }
 
 void
 freeScheduler( void )
 {
-    freeTaskManager();
-    if (n_capabilities != 1) {
-        stgFree(capabilities);
+    nat still_running;
+
+    ACQUIRE_LOCK(&sched_mutex);
+    still_running = freeTaskManager();
+    // We can only free the Capabilities if there are no Tasks still
+    // running.  We might have a Task about to return from a foreign
+    // call into waitForReturnCapability(), for example (actually,
+    // this should be the *only* thing that a still-running Task can
+    // do at this point, and it will block waiting for the
+    // Capability).
+    if (still_running == 0) {
+        freeCapabilities();
+        if (n_capabilities != 1) {
+            stgFree(capabilities);
+        }
     }
+    RELEASE_LOCK(&sched_mutex);
 #if defined(THREADED_RTS)
     closeMutex(&sched_mutex);
 #endif
@@ -2306,6 +2419,10 @@ checkBlackHoles (Capability *cap)
     prev = &blackhole_queue;
     t = blackhole_queue;
     while (t != END_TSO_QUEUE) {
+        if (t->what_next == ThreadRelocated) {
+            t = t->_link;
+            continue;
+        }
 	ASSERT(t->why_blocked == BlockedOnBlackHole);
 	type = get_itbl(UNTAG_CLOSURE(t->block_info.closure))->type;
 	if (type != BLACKHOLE && type != CAF_BLACKHOLE) {

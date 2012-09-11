@@ -546,6 +546,7 @@ RTS_FUN(word64ToIntegerzh_fast);
 RTS_FUN(unsafeThawArrayzh_fast);
 RTS_FUN(newByteArrayzh_fast);
 RTS_FUN(newPinnedByteArrayzh_fast);
+RTS_FUN(newAlignedPinnedByteArrayzh_fast);
 RTS_FUN(newArrayzh_fast);
 
 RTS_FUN(newMutVarzh_fast);
@@ -588,6 +589,8 @@ RTS_FUN(isCurrentThreadBoundzh_fast);
 RTS_FUN(threadStatuszh_fast);
 
 RTS_FUN(mkWeakzh_fast);
+RTS_FUN(mkWeakForeignzh_fast);
+RTS_FUN(mkWeakForeignEnvzh_fast);
 RTS_FUN(finalizzeWeakzh_fast);
 RTS_FUN(deRefWeakzh_fast);
 

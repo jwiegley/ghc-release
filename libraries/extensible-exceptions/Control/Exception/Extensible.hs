@@ -83,26 +83,31 @@ throwTo tid e = E.throwTo tid (mkOldException e)
 
 -- XXX Dyn
 catch :: Exception e => IO a -> (e -> IO a) -> IO a
-catch io handler = io `E.catch` handler'
-    where handler' e = case fromException (toException e) of
-                       Just e' ->
-                           -- Handle the case where e == E.Exception,
-                           -- or one of the types that make up E.Exception
-                           handler e'
-                       Nothing ->
-                           case e of
+catch io poly_handler = io `E.catch` handler'
+    where 
+          -- First look for "new style" exceptions, which are thrown
+          -- as E.DynException (SomeException e)
+
+          -- needs scoped TVs: handler' :: E.Exception -> IO a          
+          handler' e = case e of
                            E.DynException dyn ->
                                case fromDynamic dyn of
-                               Just (SomeException exc) ->
-                                   case cast exc of
-                                   Just e' ->
-                                       -- Handle the case where we have
-                                       -- a new exception type encoded
-                                       -- as a Dynamic
-                                       handler e'
-                                   Nothing -> E.throw e
-                               Nothing -> E.throw e
-                           _ -> E.throw e
+                               Just se@(SomeException _) ->
+                                   case fromException se of
+                                     Just e' -> poly_handler e'
+                                     Nothing -> E.throw e
+                               Nothing -> try_old e
+                           _ -> try_old e
+
+          -- If it's a legacy exception (E.Exception or one of the
+          -- types that make up E.Exception), check for a handler than
+          -- can handle them:
+
+          -- needs scoped TVs: try_old :: E.Exception -> IO a
+          try_old e = case fromException (toException e) of
+                       Just e' -> poly_handler e'
+                       Nothing -> E.throw e
+
 
 bracket
         :: IO a         -- ^ computation to run first (\"acquire resource\")

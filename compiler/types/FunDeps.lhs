@@ -203,7 +203,7 @@ type Equation = (TyVarSet, [(Type, Type)])
 pprEquation :: Equation -> SDoc
 pprEquation (qtvs, pairs) 
   = vcat [ptext (sLit "forall") <+> braces (pprWithCommas ppr (varSetElems qtvs)),
-	  nest 2 (vcat [ ppr t1 <+> ptext (sLit ":=:") <+> ppr t2 | (t1,t2) <- pairs])]
+	  nest 2 (vcat [ ppr t1 <+> ptext (sLit "~") <+> ppr t2 | (t1,t2) <- pairs])]
 \end{code}
 
 Given a bunch of predicates that must hold, such as
@@ -294,8 +294,9 @@ improveOne inst_env pred@(ClassP cls tys, _) preds
 	, not (instanceCantMatch inst_tcs trimmed_tcs)
 	, eqn <- checkClsFD qtvs fd cls_tvs tys_inst tys
 	, let p_inst = (mkClassPred cls tys_inst, 
-		        ptext (sLit "arising from the instance declaration at")
-			<+> ppr (getSrcLoc ispec))
+		        sep [ ptext (sLit "arising from the dependency") <+> quotes (pprFunDep fd)
+			    , ptext (sLit "in the instance declaration at") 
+			          <+> ppr (getSrcLoc ispec)])
 	]
 
 improveOne _ _ _
@@ -320,7 +321,7 @@ checkClsFD qtvs fd clas_tvs tys1 tys2
 --		    tys2 = [Maybe t1, t2]
 --
 -- We can instantiate x to t1, and then we want to force
--- 	(Tree x) [t1/x]  :=:   t2
+-- 	(Tree x) [t1/x]  ~   t2
 --
 -- This function is also used when matching two Insts (rather than an Inst
 -- against an instance decl. In that case, qtvs is empty, and we are doing

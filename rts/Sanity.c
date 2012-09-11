@@ -637,10 +637,12 @@ checkHeapChunk(StgPtr start, StgPtr end)
 #endif
 
 void
-checkChain(bdescr *bd)
+checkLargeObjects(bdescr *bd)
 {
   while (bd != NULL) {
-    checkClosure((StgClosure *)bd->start);
+    if (!(bd->flags & BF_PINNED)) {
+      checkClosure((StgClosure *)bd->start);
+    }
     bd = bd->link;
   }
 }
@@ -798,7 +800,7 @@ checkGlobalTSOList (rtsBool checkTSOs)
           // be on the mutable list.
           if (tso->what_next == ThreadRelocated) continue;
           if (tso->flags & (TSO_DIRTY|TSO_LINK_DIRTY)) {
-              ASSERT(Bdescr((P_)tso)->gen_no == 0 || tso->flags & TSO_MARKED);
+              ASSERT(Bdescr((P_)tso)->gen_no == 0 || (tso->flags & TSO_MARKED));
               tso->flags &= ~TSO_MARKED;
           }
       }
@@ -828,7 +830,7 @@ checkMutableList( bdescr *mut_bd, nat gen )
 }
 
 void
-checkMutableLists (void)
+checkMutableLists (rtsBool checkTSOs)
 {
     nat g, i;
 
@@ -838,7 +840,7 @@ checkMutableLists (void)
             checkMutableList(capabilities[i].mut_lists[g], g);
         }
     }
-    checkGlobalTSOList(rtsTrue);
+    checkGlobalTSOList(checkTSOs);
 }
 
 /*

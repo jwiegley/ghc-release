@@ -47,17 +47,18 @@ startGhc libDir flags = do
 #endif
     let dynflags' = dopt_set dynflags Opt_Haddock
     let dynflags'' = dynflags' {
-        hscTarget = HscAsm,
+        hscTarget = HscNothing,
         ghcMode   = CompManager,
         ghcLink   = NoLink
       }
     dynflags''' <- parseGhcFlags dynflags'' restFlags flags
-#if __GLASGOW_HASKELL__ >= 609 
-    setSessionDynFlags dynflags'''
-    ghcActs dynflags'''
+    defaultCleanupHandler dynflags''' $ do
+#if __GLASGOW_HASKELL__ >= 609
+        setSessionDynFlags dynflags'''
+        ghcActs dynflags'''
 #else
-    setSessionDynFlags session dynflags'''
-    return (session, dynflags''')
+        setSessionDynFlags session dynflags'''
+        return (session, dynflags''')
 #endif
 
 

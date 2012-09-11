@@ -1,11 +1,25 @@
+
 TOP = .
+
+# If we're cleaning then we don't want to do all the GHC detection hardwork,
+# and we certainly don't want to fail if GHC etc can't be found!
+# However, we can't just put this conditional in boilerplate.mk, as
+# some of the tests have a "clean" makefile target that relies on GHC_PKG
+# being defined.
+ifneq "$(MAKECMDGOALS)" "clean"
+ifneq "$(MAKECMDGOALS)" "distclean"
+
 include $(TOP)/mk/boilerplate.mk
 
-SUBDIRS = timeout utils
+boot:
+	$(MAKE) -C $(TOP)/timeout all
 
-CLEAN_FILES += mk/wordsize.mk
+all:
+	$(MAKE) -C $(TOP)/tests/ghc-regress all
 
-all ::
-	cd tests/ghc-regress && $(MAKE) $(MFLAGS)
+endif
+endif
 
-include $(TOP)/mk/target.mk
+clean distclean:
+	$(MAKE) -C $(TOP)/timeout $@
+

@@ -965,10 +965,13 @@ isSigmaTy (FunTy a _)    = isPredTy a
 isSigmaTy _              = False
 
 isOverloadedTy :: Type -> Bool
+-- Yes for a type of a function that might require evidence-passing
+-- Used only by bindInstsOfLocalFuns/Pats
+-- NB: be sure to check for type with an equality predicate; hence isCoVar
 isOverloadedTy ty | Just ty' <- tcView ty = isOverloadedTy ty'
-isOverloadedTy (ForAllTy _ ty) = isOverloadedTy ty
-isOverloadedTy (FunTy a _)     = isPredTy a
-isOverloadedTy _               = False
+isOverloadedTy (ForAllTy tv ty) = isCoVar tv || isOverloadedTy ty
+isOverloadedTy (FunTy a _)      = isPredTy a
+isOverloadedTy _                = False
 
 isPredTy :: Type -> Bool	-- Belongs in TcType because it does 
 				-- not look through newtypes, or predtypes (of course)
@@ -1259,14 +1262,19 @@ toDNType ty
 		 ]
 
 checkRepTyCon :: (TyCon -> Bool) -> Type -> Bool
-	-- Look through newtypes
-	-- Non-recursive ones are transparent to splitTyConApp,
-	-- but recursive ones aren't.  Manuel had:
-	--	newtype T = MkT (Ptr T)
-	-- and wanted it to work...
-checkRepTyCon check_tc ty 
-  | Just (tc,_) <- splitTyConApp_maybe (repType ty) = check_tc tc
-  | otherwise				  	    = False
+-- Look through newtypes, but *not* foralls
+-- Should work even for recursive newtypes
+-- eg Manuel had:	newtype T = MkT (Ptr T)
+checkRepTyCon check_tc ty
+  = go [] ty
+  where
+    go rec_nts ty
+      | Just (tc,tys) <- splitTyConApp_maybe ty
+      = case carefullySplitNewType_maybe rec_nts tc tys of
+      	   Just (rec_nts', ty') -> go rec_nts' ty'
+	   Nothing	   	-> check_tc tc
+      | otherwise
+      = False
 
 checkRepTyConKey :: [Unique] -> Type -> Bool
 -- Like checkRepTyCon, but just looks at the TyCon key

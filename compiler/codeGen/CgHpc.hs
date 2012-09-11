@@ -29,7 +29,8 @@ import FastString
 import HscTypes
 import Char
 import StaticFlags
-import PackageConfig 
+import BasicTypes
+import PackageConfig
 
 import Data.Word
 
@@ -75,7 +76,7 @@ initHpc this_mod (HpcInfo tickCount hashNo)
                PlayRisky
                [CmmKinded id NoHint]
                (CmmCallee
-                 (CmmLit $ CmmLabel $ mkForeignLabel mod_alloc Nothing False)
+                 (CmmLit $ CmmLabel $ mkForeignLabel mod_alloc Nothing False IsFunction)
                   CCallConv
                )
                [ CmmKinded (mkLblExpr mkHpcModuleNameLabel) PtrHint

@@ -20,7 +20,7 @@
 /* debugging routines */
 extern void checkHeap      ( bdescr *bd );
 extern void checkHeapChunk ( StgPtr start, StgPtr end );
-extern void checkChain     ( bdescr *bd );
+extern void checkLargeObjects ( bdescr *bd );
 extern void checkTSO       ( StgTSO* tso );
 extern void checkGlobalTSOList ( rtsBool checkTSOs );
 extern void checkStaticObjects ( StgClosure* static_objects );
@@ -29,7 +29,7 @@ extern StgOffset checkStackFrame ( StgPtr sp );
 extern StgOffset checkClosure  ( StgClosure* p );
 
 extern void checkMutableList   ( bdescr *bd, nat gen );
-extern void checkMutableLists (void);
+extern void checkMutableLists ( rtsBool checkTSOs );
 
 #if defined(GRAN)
 extern void checkTSOsSanity(void);

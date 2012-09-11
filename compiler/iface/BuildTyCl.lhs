@@ -8,7 +8,7 @@ module BuildTyCl (
 	buildSynTyCon, buildAlgTyCon, buildDataCon,
 	buildClass,
 	mkAbstractTyConRhs, mkOpenDataTyConRhs, 
-	mkNewTyConRhs, mkDataTyConRhs 
+	mkNewTyConRhs, mkDataTyConRhs, setAssocFamilyPermutation
     ) where
 
 #include "HsVersions.h"
@@ -93,7 +93,7 @@ buildAlgTyCon tc_name tvs stupid_theta rhs is_rec want_generics gadt_syn
 --
 -- (1) create a coercion that identifies the family instance type and the
 --     representation type from Step (1); ie, it is of the form 
---	   `Co tvs :: F ts :=: R tvs', where `Co' is the name of the coercion,
+--	   `Co tvs :: F ts ~ R tvs', where `Co' is the name of the coercion,
 --	   `F' the family tycon and `R' the (derived) representation tycon,
 --	   and
 -- (2) produce a `TyConParent' value containing the parent and coercion
@@ -174,6 +174,13 @@ mkNewTyConRhs tycon_name tycon con
 			 = eta_reduce as fun
     eta_reduce tvs ty = (reverse tvs, ty)
 				
+
+setAssocFamilyPermutation :: [TyVar] -> TyThing -> TyThing
+setAssocFamilyPermutation clas_tvs (ATyCon tc) 
+  = ATyCon (setTyConArgPoss clas_tvs tc)
+setAssocFamilyPermutation _clas_tvs other
+  = pprPanic "setAssocFamilyPermutation" (ppr other)
+
 
 ------------------------------------------------------
 buildDataCon :: Name -> Bool

@@ -1,4 +1,4 @@
-\%
+%
 % (c) The GRASP/AQUA Project, Glasgow University, 1992-2006
 %
 \section[RnEnv]{Environment manipulation for the renamer monad}
@@ -8,12 +8,12 @@ module RnEnv (
 	newTopSrcBinder, lookupFamInstDeclBndr,
 	lookupLocatedTopBndrRn, lookupTopBndrRn,
 	lookupLocatedOccRn, lookupOccRn, 
-	lookupLocatedGlobalOccRn, lookupGlobalOccRn,
-	lookupLocalDataTcNames, lookupSrcOcc_maybe,
-	lookupSigOccRn,
+	lookupLocatedGlobalOccRn, 
+	lookupGlobalOccRn, lookupGlobalOccRn_maybe,
+	lookupLocalDataTcNames, lookupSigOccRn,
 	lookupFixityRn, lookupTyFixityRn, 
 	lookupInstDeclBndr, lookupRecordBndr, lookupConstructorFields,
-	lookupSyntaxName, lookupSyntaxTable, lookupImportedName,
+	lookupSyntaxName, lookupSyntaxTable, 
 	lookupGreRn, lookupGreLocalRn, lookupGreRn_maybe,
 	getLookupOccRn,
 
@@ -41,8 +41,9 @@ import HsSyn
 import RdrHsSyn		( extractHsTyRdrTyVars )
 import RdrName
 import HscTypes		( availNames, ModIface(..), FixItem(..), lookupFixity)
-import TcEnv		( tcLookupDataCon, isBrackStage )
+import TcEnv		( tcLookupDataCon, tcLookupField, isBrackStage )
 import TcRnMonad
+import Id		( isRecordSelector )
 import Name		( Name, nameIsLocalOrFrom, mkInternalName, isWiredInName,
 			  nameSrcLoc, nameSrcSpan, nameOccName, nameModule, isExternalName )
 import NameSet
@@ -230,9 +231,16 @@ lookupInstDeclBndr cls rdr = lookup_located_sub_bndr is_op doc rdr
 -----------------------------------------------
 lookupRecordBndr :: Maybe (Located Name) -> Located RdrName -> RnM (Located Name)
 -- Used for record construction and pattern matching
--- When the -fdisambiguate-record-fields flag is on, take account of the
+-- When the -XDisambiguateRecordFields flag is on, take account of the
 -- constructor name to disambiguate which field to use; it's just the
 -- same as for instance decls
+-- 
+-- NB: Consider this:
+--	module Foo where { data R = R { fld :: Int } }
+--	module Odd where { import Foo; fld x = x { fld = 3 } }
+-- Arguably this should work, because the reference to 'fld' is
+-- unambiguous because there is only one field id 'fld' in scope.
+-- But currently it's rejected.
 lookupRecordBndr Nothing rdr_name
   = lookupLocatedGlobalOccRn rdr_name
 lookupRecordBndr (Just (L _ data_con)) rdr_name
@@ -261,7 +269,7 @@ lookupConstructorFields :: Name -> RnM [Name]
 lookupConstructorFields con_name
   = do	{ this_mod <- getModule
 	; if nameIsLocalOrFrom this_mod con_name then
-	  do { field_env <- getRecFieldEnv
+	  do { RecFields field_env _ <- getRecFieldEnv
 	     ; return (lookupNameEnv field_env con_name `orElse` []) }
 	  else 
 	  do { con <- tcLookupDataCon con_name
@@ -292,10 +300,9 @@ lookup_sub_bndr is_good doc rdr_name
 	}
 
   | otherwise	-- Occurs in derived instances, where we just
-		-- refer directly to the right method
-  = ASSERT2( not (isQual rdr_name), ppr rdr_name )
-	  -- NB: qualified names are rejected by the parser
-    lookupImportedName rdr_name
+		-- refer directly to the right method with an Orig
+		-- And record fields can be Quals: C { F.f = x }
+  = lookupGlobalOccRn rdr_name
 
 newIPNameRn :: IPName RdrName -> TcRnIf m n (IPName Name)
 newIPNameRn ip_rdr = newIPName (mapIPName rdrNameOcc ip_rdr)
@@ -342,53 +349,43 @@ lookupLocatedGlobalOccRn = wrapLocM lookupGlobalOccRn
 
 lookupGlobalOccRn :: RdrName -> RnM Name
 -- lookupGlobalOccRn is like lookupOccRn, except that it looks in the global 
--- environment.  It's used only for
---	record field names
---	class op names in class and instance decls
+-- environment.  Adds an error message if the RdrName is not in scope.
+-- Also has a special case for GHCi.
 
 lookupGlobalOccRn rdr_name
-  | not (isSrcRdrName rdr_name)
-  = lookupImportedName rdr_name	
+  = do { -- First look up the name in the normal environment.
+         mb_name <- lookupGlobalOccRn_maybe rdr_name
+       ; case mb_name of {
+		Just n  -> return n ;
+		Nothing -> do
 
-  | otherwise
-  = do
-  	-- First look up the name in the normal environment.
-   mb_gre <- lookupGreRn_maybe rdr_name
-   case mb_gre of {
-	Just gre -> returnM (gre_name gre) ;
-	Nothing   -> do
-
-	-- We allow qualified names on the command line to refer to 
-	--  *any* name exported by any module in scope, just as if 
-	-- there was an "import qualified M" declaration for every 
-	-- module.
-   allow_qual <- doptM Opt_ImplicitImportQualified
-   mod <- getModule
+       { -- We allow qualified names on the command line to refer to 
+	 --  *any* name exported by any module in scope, just as if there
+	 -- was an "import qualified M" declaration for every module.
+	 allow_qual <- doptM Opt_ImplicitImportQualified
+       ; mod <- getModule
                -- This test is not expensive,
                -- and only happens for failed lookups
-   if isQual rdr_name && allow_qual && mod == iNTERACTIVE
-      then lookupQualifiedName rdr_name
-      else unboundName rdr_name
-  }
+       ; if isQual rdr_name && allow_qual && mod == iNTERACTIVE
+         then lookupQualifiedName rdr_name
+         else unboundName rdr_name } } }
 
-lookupImportedName :: RdrName -> TcRnIf m n Name
--- Lookup the occurrence of an imported name
--- The RdrName is *always* qualified or Exact
--- Treat it as an original name, and conjure up the Name
--- Usually it's Exact or Orig, but it can be Qual if it
---	comes from an hi-boot file.  (This minor infelicity is 
---	just to reduce duplication in the parser.)
-lookupImportedName rdr_name
-  | Just n <- isExact_maybe rdr_name 
-	-- This happens in derived code
-  = returnM n
+lookupGlobalOccRn_maybe :: RdrName -> RnM (Maybe Name)
+-- No filter function; does not report an error on failure
 
-	-- Always Orig, even when reading a .hi-boot file
+lookupGlobalOccRn_maybe rdr_name
+  | Just n <- isExact_maybe rdr_name   -- This happens in derived code
+  = return (Just n)
+
   | Just (rdr_mod, rdr_occ) <- isOrig_maybe rdr_name
-  = lookupOrig rdr_mod rdr_occ
+  = do { n <- lookupOrig rdr_mod rdr_occ; return (Just n) }
 
   | otherwise
-  = pprPanic "RnEnv.lookupImportedName" (ppr rdr_name)
+  = do	{ mb_gre <- lookupGreRn_maybe rdr_name
+	; case mb_gre of
+		Nothing  -> return Nothing
+		Just gre -> return (Just (gre_name gre)) }
+
 
 unboundName :: RdrName -> RnM Name
 unboundName rdr_name 
@@ -403,15 +400,6 @@ unboundName rdr_name
 --	Lookup in the Global RdrEnv of the module
 --------------------------------------------------
 
-lookupSrcOcc_maybe :: RdrName -> RnM (Maybe Name)
--- No filter function; does not report an error on failure
-lookupSrcOcc_maybe rdr_name
-  = do	{ mb_gre <- lookupGreRn_maybe rdr_name
-	; case mb_gre of
-		Nothing  -> returnM Nothing
-		Just gre -> returnM (Just (gre_name gre)) }
-	
--------------------------
 lookupGreRn_maybe :: RdrName -> RnM (Maybe GlobalRdrElt)
 -- Just look up the RdrName in the GlobalRdrEnv
 lookupGreRn_maybe rdr_name 
@@ -913,14 +901,31 @@ checkShadowedNames doc_str (global_env,local_env) loc_rdr_names
   where
     check_shadow (loc, occ)
 	| Just n <- mb_local = complain [ptext (sLit "bound at") <+> ppr (nameSrcLoc n)]
-	| not (null gres)    = complain (map pprNameProvenance gres)
-	| otherwise	     = return ()
+	| otherwise = do { gres' <- filterM is_shadowed_gre gres
+			 ; complain (map pprNameProvenance gres') }
 	where
+	  complain []      = return ()
 	  complain pp_locs = addWarnAt loc (shadowedNameWarn doc_str occ pp_locs)
 	  mb_local = lookupLocalRdrOcc local_env occ
           gres     = lookupGRE_RdrName (mkRdrUnqual occ) global_env
 		-- Make an Unqualified RdrName and look that up, so that
 		-- we don't find any GREs that are in scope qualified-only
+
+    is_shadowed_gre :: GlobalRdrElt -> RnM Bool	
+	-- Returns False for record selectors that are shadowed, when
+	-- punning or wild-cards are on (cf Trac #2723)
+    is_shadowed_gre gre@(GRE { gre_par = ParentIs _ })
+	= do { dflags <- getDOpts
+	     ; if (dopt Opt_RecordPuns dflags || dopt Opt_RecordWildCards dflags) 
+	       then do { is_fld <- is_rec_fld gre; return (not is_fld) }
+	       else return True }
+    is_shadowed_gre _other = return True
+
+    is_rec_fld gre	-- Return True for record selector ids
+	| isLocalGRE gre = do { RecFields _ fld_set <- getRecFieldEnv
+			      ; return (gre_name gre `elemNameSet` fld_set) }
+	| otherwise	 = do { sel_id <- tcLookupField (gre_name gre)
+			      ; return (isRecordSelector sel_id) }
 \end{code}
 
 
@@ -1004,7 +1009,7 @@ warnUnusedBinds names  = mappM_ warnUnusedName (filter reportable names)
 
 warnUnusedName :: (Name, Provenance) -> RnM ()
 warnUnusedName (name, LocalDef)
-  = addUnusedWarning name (srcLocSpan (nameSrcLoc name)) 
+  = addUnusedWarning name (nameSrcSpan name)
 		     (ptext (sLit "Defined but not used"))
 
 warnUnusedName (name, Imported is)

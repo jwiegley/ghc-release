@@ -3,3 +3,5 @@
 // at some call site:
 #define KEEP_INLINES
 #include "Rts.h"
+#include "Capability.h"
+#include "Sparks.h"

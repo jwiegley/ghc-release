@@ -1,5 +1,5 @@
 name:		unix
-version:	2.3.1.0
+version:	2.3.2.0
 license:	BSD3
 license-file:	LICENSE
 maintainer:	libraries@haskell.org
@@ -36,6 +36,7 @@ exposed-modules:
                 System.Posix.Semaphore
                 System.Posix.SharedMem
 extra-source-files:
+        config.guess config.sub install-sh
 		configure.ac configure
 		unix.buildinfo.in include/HsUnixConfig.h.in
 		include/HsUnix.h
@@ -43,7 +44,7 @@ extra-tmp-files:
 		config.log config.status autom4te.cache
 		unix.buildinfo include/HsUnixConfig.h
 build-depends:	base
-extensions:	CPP, ForeignFunctionInterface
+extensions:	CPP, ForeignFunctionInterface, EmptyDataDecls
 include-dirs: 	include
 includes:       HsUnix.h execvpe.h
 install-includes:

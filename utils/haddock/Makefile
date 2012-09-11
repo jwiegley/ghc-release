@@ -33,7 +33,7 @@ SRC_HC_OPTS += -w
 
 .PHONY: install-inplace
 
-INPLACE_PKG_CONF = $(FPTOOLS_TOP_ABS)/ghc/inplace-datadir/package.conf
+INPLACE_PKG_CONF = $(INPLACE_DATA_DIR)/package.conf
 
 ifneq "$(HOSTPLATFORM)" "i386-unknown-mingw32"
 INSTALL_INPLACE_FLAGS += --enable-shell-wrappers
@@ -43,6 +43,11 @@ ifeq "$(HOSTPLATFORM)" "i386-unknown-mingw32"
 INPLACE_DATADIR = '$$prefix'
 else
 INPLACE_DATADIR = '$$prefix/share'
+endif
+
+
+ifeq "$(BuildSharedLibs)" "YES"
+DYN_FLAGS = --ghc-option=-dynamic
 endif
 
 install-inplace:
@@ -59,4 +64,6 @@ install-inplace:
 	    '$$prefix/haddock'                                 \
 	    --distpref dist-install                            \
 	    $(INSTALL_INPLACE_FLAGS)
-
+ifeq "$(BuildSharedLibs)" "YES"
+	    mv dist-install/build/haddock/haddock.dyn dist-install/build/haddock/haddock # remove the wrapper
+endif

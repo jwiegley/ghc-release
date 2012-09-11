@@ -1,5 +1,25 @@
 -*-change-log-*-
 
+1.6.0.3 Ian Lynagh <igloo@earth.li> March 2009
+	* Avoid coping N executables N times (Ticket #525)
+
+1.6.0.2 Duncan Coutts <duncan@haskell.org> February 2009
+	* New configure-time check for C headers and libraries
+	* Added language extensions present in ghc-6.10
+	* Added support for NamedFieldPuns extension in ghc-6.8
+	* Fix in configure step for ghc-6.6 on Windows
+	* Fix warnings in Path_pkgname.hs module on Windows
+	* Fix for exotic flags in ld-options field
+	* Fix for using pkg-config in a package with a lib and an executable
+	* Fix for building haddock docs for exes that use the Paths module
+	* Fix for installing header files in subdirectories
+	* Fix for the case of building profiling libs but not ordinary libs
+	* Fix read-only attribute of installed files on Windows
+	* Ignore ghc -threaded flag when profiling in ghc-6.8 and older
+
+1.6.0.1 Duncan Coutts <duncan@haskell.org> October 2008
+	* Export a compat function to help alex and happy
+
 1.6.0.0 Duncan Coutts <duncan@haskell.org> October 2008
 	* Support for ghc-6.10
 	* Source control repositories can now be specified in .cabal files

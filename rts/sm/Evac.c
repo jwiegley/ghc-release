@@ -29,6 +29,7 @@ StgWord64 whitehole_spin = 0;
 
 #if defined(THREADED_RTS) && !defined(PARALLEL_GC)
 #define evacuate(p) evacuate1(p)
+#define HEAP_ALLOCED_GC(p) HEAP_ALLOCED(p)
 #endif
 
 #if !defined(PARALLEL_GC)
@@ -212,7 +213,7 @@ spin:
     SET_EVACUAEE_FOR_LDV(from, size_to_reserve);
     // fill the slop
     if (size_to_reserve - size_to_copy > 0)
-	LDV_FILL_SLOP(to + size_to_copy, (int)(size_to_reserve - size_to_copy));
+	LDV_FILL_SLOP(to + size_to_reserve, (int)(size_to_reserve - size_to_copy));
 #endif
 
     return rtsTrue;
@@ -247,10 +248,6 @@ evacuate_large(StgPtr p)
     
   stp = bd->step;
   ACQUIRE_SPIN_LOCK(&stp->sync_large_objects);
-
-  // object must be at the beginning of the block (or be a ByteArray)
-  ASSERT(get_itbl((StgClosure *)p)->type == ARR_WORDS ||
-	 (((W_)p & BLOCK_MASK) == 0));
 
   // already evacuated? 
   if (bd->flags & BF_EVACUATED) { 
@@ -287,11 +284,25 @@ evacuate_large(StgPtr p)
   }
 
   ws = &gct->steps[new_stp->abs_no];
+
   bd->flags |= BF_EVACUATED;
   bd->step = new_stp;
   bd->gen_no = new_stp->gen_no;
-  bd->link = ws->todo_large_objects;
-  ws->todo_large_objects = bd;
+
+  // If this is a block of pinned objects, we don't have to scan
+  // these objects, because they aren't allowed to contain any
+  // pointers.  For these blocks, we skip the scavenge stage and put
+  // them straight on the scavenged_large_objects list.
+  if (bd->flags & BF_PINNED) {
+      ASSERT(get_itbl((StgClosure *)p)->type == ARR_WORDS);
+      if (new_stp != stp) { ACQUIRE_SPIN_LOCK(&new_stp->sync_large_objects); }
+      dbl_link_onto(bd, &new_stp->scavenged_large_objects);
+      new_stp->n_scavenged_large_blocks += bd->blocks;
+      if (new_stp != stp) { RELEASE_SPIN_LOCK(&new_stp->sync_large_objects); }
+  } else {
+      bd->link = ws->todo_large_objects;
+      ws->todo_large_objects = bd;
+  }
 
   RELEASE_SPIN_LOCK(&stp->sync_large_objects);
 }
@@ -356,7 +367,7 @@ loop:
 
   ASSERT(LOOKS_LIKE_CLOSURE_PTR(q));
 
-  if (!HEAP_ALLOCED(q)) {
+  if (!HEAP_ALLOCED_GC(q)) {
 
       if (!major_gc) return;
 
@@ -774,7 +785,7 @@ unchain_thunk_selectors(StgSelector *p, StgClosure *val)
         // invoke eval_thunk_selector(), the recursive calls will not 
         // evacuate the value (because we want to select on the value,
         // not evacuate it), so in this case val is in from-space.
-        // ASSERT(!HEAP_ALLOCED(val) || Bdescr((P_)val)->gen_no > N || (Bdescr((P_)val)->flags & BF_EVACUATED));
+        // ASSERT(!HEAP_ALLOCED_GC(val) || Bdescr((P_)val)->gen_no > N || (Bdescr((P_)val)->flags & BF_EVACUATED));
 
         prev = (StgSelector*)((StgClosure *)p)->payload[0];
 
@@ -828,7 +839,7 @@ eval_thunk_selector (StgClosure **q, StgSelector * p, rtsBool evac)
 selector_chain:
 
     bd = Bdescr((StgPtr)p);
-    if (HEAP_ALLOCED(p)) {
+    if (HEAP_ALLOCED_GC(p)) {
         // If the THUNK_SELECTOR is in to-space or in a generation that we
         // are not collecting, then bale out early.  We won't be able to
         // save any space in any case, and updating with an indirection is

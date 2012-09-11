@@ -7,7 +7,7 @@ GHC_PKG_INSTALL_PROG = $(FPTOOLS_TOP_ABS)/utils/ghc-pkg/dist-install/build/ghc-p
 
 LIBRARIES_ABS = $(FPTOOLS_TOP_ABS)/libraries
 UTILS_ABS     = $(FPTOOLS_TOP_ABS)/utils
-CABAL = $(LIBRARIES_ABS)/cabal-bin $(GHC) $(LIBRARIES_ABS)/bootstrapping.conf
+CABAL = $(LIBRARIES_ABS)/cabal-bin $(GHC) $(LIBRARIES_ABS)/bootstrapping.conf $(CABAL_DOTTED_VERSION)
 INSTALL_PACKAGE = \
     $(UTILS_ABS)/installPackage/install-inplace/bin/installPackage
 STAGE3_PACKAGE_CONF = $(FPTOOLS_TOP_ABS)/stage3.package.conf
@@ -29,20 +29,20 @@ COMMON_CONFIGURE_FLAGS =          \
     --with-ld=$(LD)               \
     $(addprefix --hsc2hs-option=,$(SRC_HSC2HS_OPTS))
 
-ifneq "$(HSCOLOUR)" ""
-COMMON_CONFIGURE_FLAGS += --with-hscolour=$(HSCOLOUR)
+ifeq "$(HSCOLOUR_SRCS)" "YES"
+CONFIGURE_OPTS += --with-hscolour="$(HSCOLOUR)"
 endif
 
 ifneq "$(ALEX)" ""
-COMMON_CONFIGURE_FLAGS += --with-alex=$(ALEX)
+COMMON_CONFIGURE_FLAGS += --with-alex="$(ALEX)"
 endif
 
 ifneq "$(HAPPY)" ""
-COMMON_CONFIGURE_FLAGS += --with-happy=$(HAPPY)
+COMMON_CONFIGURE_FLAGS += --with-happy="$(HAPPY)"
 endif
 
 COMMON_CONFIGURE_FLAGS += $(FLAGGED_CONFIGURE_ARGS) \
-                          --configure-option=--with-cc=$(CC)
+                          --configure-option=--with-cc="$(CC)"
 
 COMMON_CONFIGURE_FLAGS += $(shell [ -f $(HSC2HS_INPLACE) ] && \
                                   echo --with-hsc2hs=$(HSC2HS_INPLACE) )

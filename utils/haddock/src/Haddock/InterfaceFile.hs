@@ -1,4 +1,5 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+
 --
 -- Haddock - A Haskell Documentation Tool
 --
@@ -36,9 +37,10 @@ import Module
 import HscTypes
 import FastMutInt
 import HsDoc
+#if __GLASGOW_HASKELL__ >= 609 
 import FastString
 import Unique
-
+#endif
 
 data InterfaceFile = InterfaceFile {
   ifLinkEnv         :: LinkEnv,
@@ -54,17 +56,23 @@ binaryInterfaceMagic = 0xD0Cface
 -- and because we store GHC datatypes in our interface files,
 -- we need to make sure we version our interface files accordingly.
 --
--- Instead of adding one, we add three to all version numbers
+-- Instead of adding one, we add five to all version numbers
 -- when one of our own (stored) datatypes is changed. 
 binaryInterfaceVersion :: Word16
 #if __GLASGOW_HASKELL__ == 608 && __GHC_PATCHLEVEL__ == 2
-binaryInterfaceVersion = 2
+binaryInterfaceVersion = 9
 #endif         
 #if __GLASGOW_HASKELL__ == 608 && __GHC_PATCHLEVEL__ == 3
-binaryInterfaceVersion = 3
+binaryInterfaceVersion = 10
 #endif           
-#if __GLASGOW_HASKELL__ >= 609
-binaryInterfaceVersion = 4
+#if __GLASGOW_HASKELL__ == 610 && __GHC_PATCHLEVEL__ == 1
+binaryInterfaceVersion = 11
+#endif
+#if __GLASGOW_HASKELL__ == 610 && __GHC_PATCHLEVEL__ == 2
+binaryInterfaceVersion = 12
+#endif
+#if __GLASGOW_HASKELL__ == 611
+binaryInterfaceVersion = 13
 #endif
 
 
@@ -109,7 +117,7 @@ writeInterfaceFile filename iface = do
   bh <- return $ setUserData bh0 ud
   put_ bh iface
 
-  -- write the symtab pointer at the fornt of the file
+  -- write the symtab pointer at the front of the file
   symtab_p <- tellBin bh
   putAt bh symtab_p_p symtab_p
   seekBin bh symtab_p		
@@ -351,12 +359,14 @@ instance Binary InterfaceFile where
 
 
 instance Binary InstalledInterface where
-  put_ bh (InstalledInterface modu info docMap exps visExps) = do
+  put_ bh (InstalledInterface modu info docMap exps visExps opts subMap) = do
     put_ bh modu
     put_ bh info
     put_ bh (Map.toList docMap)
     put_ bh exps
     put_ bh visExps
+    put_ bh opts
+    put_ bh (Map.toList subMap)
 
   get bh = do
     modu    <- get bh
@@ -364,7 +374,11 @@ instance Binary InstalledInterface where
     docMap  <- get bh
     exps    <- get bh
     visExps <- get bh
-    return (InstalledInterface modu info (Map.fromList docMap) exps visExps)
+    opts    <- get bh
+    subMap  <- get bh
+    
+    return (InstalledInterface modu info (Map.fromList docMap)
+            exps visExps opts (Map.fromList subMap))
 
 
 instance Binary DocOption where

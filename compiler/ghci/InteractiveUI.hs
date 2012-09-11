@@ -96,10 +96,6 @@ import GHC.TopHandler
 
 import Data.IORef	( IORef, readIORef, writeIORef )
 
-#ifdef USE_EDITLINE
-import System.Posix.Internals ( setNonBlockingFD )
-#endif
-
 -----------------------------------------------------------------------------
 
 ghciWelcomeMsg :: String
@@ -255,7 +251,7 @@ helpText =
  "   :set prog <progname>        set the value returned by System.getProgName\n" ++
  "   :set prompt <prompt>        set the prompt used in GHCi\n" ++
  "   :set editor <cmd>           set the command used for :edit\n" ++
- "   :set stop <cmd>             set the command to run when a breakpoint is hit\n" ++
+ "   :set stop [<n>] <cmd>       set the command to run when a breakpoint is hit\n" ++
  "   :unset <option> ...         unset options\n" ++
  "\n" ++
  "  Options for ':set' and ':unset':\n" ++
@@ -344,8 +340,6 @@ interactiveUI srcs maybe_exprs = withTerminalReset $ do
 
    default_editor <- liftIO $ findEditor
 
-   cwd <- liftIO $ getCurrentDirectory
-
    startGHCi (runGHCi srcs maybe_exprs)
         GHCiState{ progname = "<interactive>",
                    args = [],
@@ -361,7 +355,6 @@ interactiveUI srcs maybe_exprs = withTerminalReset $ do
                    last_command = Nothing,
                    cmdqueue = [],
                    remembered_ctx = [],
-                   virtual_path   = cwd,
                    ghc_e = isJust maybe_exprs
                  }
 
@@ -641,11 +634,8 @@ readlineLoop = do
                    return (Just str)
 
 withReadline :: IO a -> IO a
-withReadline = bracket_ stopTimer (do startTimer; setNonBlockingFD 0)
-     -- Two problems are being worked around here:
-     -- 1. readline sometimes puts stdin into blocking mode,
-     --    so we need to put it back for the IO library
-     -- 2. editline doesn't handle some of its system calls returning
+withReadline = bracket_ stopTimer startTimer
+     --    editline doesn't handle some of its system calls returning
      --    EINTR, so our timer signal confuses it, hence we turn off
      --    the timer signal when making calls to editline. (#2277)
      --    If editline is ever fixed, we can remove this.
@@ -740,23 +730,19 @@ afterRunStmt step_here run_result = do
      GHC.RunOk names -> do
         show_types <- isOptionSet ShowType
         when show_types $ printTypeOfNames names
-     GHC.RunBreak _ names mb_info 
-         | isNothing  mb_info || 
+     GHC.RunBreak _ names mb_info
+         | isNothing  mb_info ||
            step_here (GHC.resumeSpan $ head resumes) -> do
-               printForUser $ ptext (sLit "Stopped at") <+> 
-                       ppr (GHC.resumeSpan $ head resumes)
---               printTypeOfNames session names
-               let namesSorted = sortBy compareNames names
-               tythings <- catMaybes `liftM` 
-                              mapM GHC.lookupName namesSorted
-               docs <- pprTypeAndContents [id | AnId id <- tythings]
-               printForUserPartWay docs
-               maybe (return ()) runBreakCmd mb_info
+               mb_id_loc <- toBreakIdAndLocation mb_info
+               let breakCmd = maybe "" ( \(_,l) -> onBreakCmd l ) mb_id_loc
+               if (null breakCmd)
+                 then printStoppedAtBreakInfo (head resumes) names
+                 else enqueueCommands [breakCmd]
                -- run the command set with ":set stop <cmd>"
                st <- getGHCiState
                enqueueCommands [stop st]
                return ()
-         | otherwise -> resume GHC.SingleStep >>=
+         | otherwise -> resume step_here GHC.SingleStep >>=
                         afterRunStmt step_here >> return ()
      _ -> return ()
 
@@ -767,17 +753,26 @@ afterRunStmt step_here run_result = do
 
   return (case run_result of GHC.RunOk _ -> True; _ -> False)
 
-runBreakCmd :: GHC.BreakInfo -> GHCi ()
-runBreakCmd info = do
+toBreakIdAndLocation ::
+  Maybe GHC.BreakInfo -> GHCi (Maybe (Int, BreakLocation))
+toBreakIdAndLocation Nothing = return Nothing
+toBreakIdAndLocation (Just info) = do
   let mod = GHC.breakInfo_module info
       nm  = GHC.breakInfo_number info
   st <- getGHCiState
-  case  [ loc | (_,loc) <- breaks st,
-                breakModule loc == mod, breakTick loc == nm ] of
-        []  -> return ()
-        loc:_ | null cmd  -> return ()
-              | otherwise -> do enqueueCommands [cmd]; return ()
-              where cmd = onBreakCmd loc
+  return $ listToMaybe [ id_loc | id_loc@(_,loc) <- breaks st,
+                                  breakModule loc == mod,
+                                  breakTick loc == nm ]
+
+printStoppedAtBreakInfo :: Resume -> [Name] -> GHCi ()
+printStoppedAtBreakInfo resume names = do
+  printForUser $ ptext (sLit "Stopped at") <+>
+    ppr (GHC.resumeSpan resume)
+  --  printTypeOfNames session names
+  let namesSorted = sortBy compareNames names
+  tythings <- catMaybes `liftM` mapM GHC.lookupName namesSorted
+  docs <- pprTypeAndContents [id | AnId id <- tythings]
+  printForUserPartWay docs
 
 printTypeOfNames :: [Name] -> GHCi ()
 printTypeOfNames names
@@ -1040,6 +1035,9 @@ defineMacro overwrite s = do
 runMacro :: GHC.HValue{-String -> IO String-} -> String -> GHCi Bool
 runMacro fun s = do
   str <- io ((unsafeCoerce# fun :: String -> IO String) s)
+  -- make sure we force any exceptions in the result, while we are still
+  -- inside the exception handler for commands:
+  seqList str (return ())
   enqueueCommands (lines str)
   return False
 
@@ -1216,15 +1214,20 @@ typeOfExpr str
        ty <- GHC.exprType str
        dflags <- getDynFlags
        let pefas = dopt Opt_PrintExplicitForalls dflags
-       printForUser $ text str <+> dcolon
-       		<+> pprTypeForUser pefas ty
+       printForUser $ sep [utext str, nest 2 (dcolon <+> pprTypeForUser pefas ty)]
 
 kindOfType :: String -> GHCi ()
 kindOfType str 
   = handleSourceError (\e -> GHC.printExceptionAndWarnings e) $ do
        ty <- GHC.typeKind str
-       printForUser $ text str <+> dcolon <+> ppr ty
+       printForUser $ utext str <+> dcolon <+> ppr ty
           
+-- HACK for printing unicode text.  We assume the output device
+-- understands UTF-8, and go via FastString which converts to UTF-8.
+-- ToDo: fix properly when we have encoding support in Handles.
+utext :: String -> SDoc
+utext str = ftext (mkFastString str)
+
 quit :: String -> GHCi Bool
 quit _ = return True
 
@@ -1968,7 +1971,7 @@ continueCmd = noArgs $ doContinue (const True) GHC.RunToCompletion
 -- doContinue :: SingleStep -> GHCi ()
 doContinue :: (SrcSpan -> Bool) -> SingleStep -> GHCi ()
 doContinue pred step = do 
-  runResult <- resume step
+  runResult <- resume pred step
   afterRunStmt pred runResult
   return ()
 

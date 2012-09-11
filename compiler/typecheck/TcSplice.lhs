@@ -737,11 +737,7 @@ lookupThName th_name@(TH.Name occ flavour)
 	     ; rdr_env <- getLocalRdrEnv
   	     ; case lookupLocalRdrEnv rdr_env rdr_name of
 		 Just name -> return (Just name)
-	         Nothing | not (isSrcRdrName rdr_name)	-- Exact, Orig
-		         -> do { name <- lookupImportedName rdr_name
-			       ; return (Just name) }
-		    	 | otherwise			-- Unqual, Qual
-		    	 -> lookupSrcOcc_maybe rdr_name }
+	         Nothing   -> lookupGlobalOccRn_maybe rdr_name }
 
 	-- guessed_ns are the name spaces guessed from looking at the TH name
     guessed_nss | isLexCon (mkFastString occ_str) = [OccName.tcName,  OccName.dataName]

@@ -62,6 +62,7 @@ module Distribution.Simple.Configure (configure,
                                       configCompiler, configCompilerAux,
                                       ccLdOptionsBuildInfo,
                                       tryGetConfigStateFile,
+                                      checkForeignDeps,
                                      )
     where
 
@@ -73,8 +74,8 @@ import Distribution.Package
     , packageVersion, Package(..), Dependency(Dependency) )
 import Distribution.InstalledPackageInfo
     ( InstalledPackageInfo, emptyInstalledPackageInfo )
-import qualified Distribution.InstalledPackageInfo as InstalledPackageInfo
-    ( InstalledPackageInfo_(package,depends) )
+import qualified Distribution.InstalledPackageInfo as Installed
+    ( InstalledPackageInfo_(..) )
 import qualified Distribution.Simple.PackageIndex as PackageIndex
 import Distribution.Simple.PackageIndex (PackageIndex)
 import Distribution.PackageDescription as PD
@@ -90,9 +91,9 @@ import Distribution.PackageDescription.Check
 import Distribution.Simple.Program
     ( Program(..), ProgramLocation(..), ConfiguredProgram(..)
     , ProgramConfiguration, defaultProgramConfiguration
-    , configureAllKnownPrograms, knownPrograms
+    , configureAllKnownPrograms, knownPrograms, lookupKnownProgram
     , userSpecifyArgss, userSpecifyPaths
-    , lookupKnownProgram, requireProgram, pkgConfigProgram
+    , lookupProgram, requireProgram, pkgConfigProgram, gccProgram
     , rawSystemProgramStdoutConf )
 import Distribution.Simple.Setup
     ( ConfigFlags(..), CopyDest(..), fromFlag, fromFlagOrDefault, flagToMaybe )
@@ -104,7 +105,8 @@ import Distribution.Simple.LocalBuildInfo
 import Distribution.Simple.Utils
     ( die, warn, info, setupMessage, createDirectoryIfMissingVerbose
     , intercalate, comparing, cabalVersion, cabalBootstrapping
-    , withFileContents, writeFileAtomic )
+    , withFileContents, writeFileAtomic 
+    , withTempFile )
 import Distribution.Simple.Register
     ( removeInstalledConfig )
 import Distribution.System
@@ -120,15 +122,15 @@ import qualified Distribution.Simple.NHC  as NHC
 import qualified Distribution.Simple.Hugs as Hugs
 
 import Control.Monad
-    ( when, unless, foldM )
+    ( when, unless, foldM, filterM )
 import Data.List
-    ( nub, partition, isPrefixOf, maximumBy )
+    ( nub, partition, isPrefixOf, maximumBy, inits )
 import Data.Maybe
     ( fromMaybe, isNothing )
 import Data.Monoid
     ( Monoid(..) )
 import System.Directory
-    ( doesFileExist, getModificationTime, createDirectoryIfMissing )
+    ( doesFileExist, getModificationTime, createDirectoryIfMissing, getTemporaryDirectory )
 import System.Exit
     ( ExitCode(..), exitWith )
 import System.FilePath
@@ -136,7 +138,7 @@ import System.FilePath
 import qualified System.Info
     ( compilerName, compilerVersion )
 import System.IO
-    ( hPutStrLn, stderr )
+    ( hPutStrLn, stderr, hClose )
 import Distribution.Text
     ( Text(disp), display, simpleParse )
 import Text.PrettyPrint.HughesPJ
@@ -333,7 +335,7 @@ configure (pkg_descr0, pbi) cfg
             bogusDependencies = map inventBogusPackageId (buildDepends pkg_descr)
             bogusPackageSet = PackageIndex.fromList
               [ emptyInstalledPackageInfo {
-                  InstalledPackageInfo.package = bogusPackageId
+                  Installed.package = bogusPackageId
                   -- note that these bogus packages have no other dependencies
                 }
               | bogusPackageId <- bogusDependencies ]
@@ -356,8 +358,8 @@ configure (pkg_descr0, pbi) cfg
                             | (pkg, deps) <- broken ]
 
         let pseudoTopPkg = emptyInstalledPackageInfo {
-                InstalledPackageInfo.package = packageId pkg_descr,
-                InstalledPackageInfo.depends = dep_pkgs
+                Installed.package = packageId pkg_descr,
+                Installed.depends = dep_pkgs
               }
         case PackageIndex.dependencyInconsistencies
            . PackageIndex.insert pseudoTopPkg
@@ -583,6 +585,7 @@ configurePkgconfigPackages verbosity pkg_descr conf
       return exe { buildInfo = buildInfo exe `mappend` bi }
 
     pkgconfigBuildInfo :: [Dependency] -> IO BuildInfo
+    pkgconfigBuildInfo []      = return mempty
     pkgconfigBuildInfo pkgdeps = do
       let pkgs = nub [ display pkg | Dependency pkg _ <- pkgdeps ]
       ccflags <- pkgconfig ("--cflags" : pkgs)
@@ -619,8 +622,12 @@ configCompilerAux :: ConfigFlags -> IO (Compiler, ProgramConfiguration)
 configCompilerAux cfg = configCompiler (flagToMaybe $ configHcFlavor cfg)
                                        (flagToMaybe $ configHcPath cfg)
                                        (flagToMaybe $ configHcPkg cfg)
-                                       defaultProgramConfiguration
+                                       programsConfig
                                        (fromFlag (configVerbosity cfg))
+  where
+    programsConfig = userSpecifyArgss (configProgramArgs cfg)
+                   . userSpecifyPaths (configProgramPaths cfg)
+                   $ defaultProgramConfiguration
 
 configCompiler :: Maybe CompilerFlavor -> Maybe FilePath -> Maybe FilePath
                -> ProgramConfiguration -> Verbosity
@@ -634,6 +641,140 @@ configCompiler (Just hcFlavor) hcPath hcPkg conf verbosity = do
       NHC  -> NHC.configure  verbosity hcPath hcPkg conf
       _    -> die "Unknown compiler"
 
+
+checkForeignDeps :: PackageDescription -> LocalBuildInfo -> Verbosity -> IO ()
+checkForeignDeps pkg lbi verbosity = do
+  ifBuildsWith allHeaders (commonCcArgs ++ makeLdArgs allLibs) -- I'm feeling lucky
+           (return ())
+           (do missingLibs <- findMissingLibs
+               missingHdr  <- findOffendingHdr
+               explainErrors missingHdr missingLibs)
+      where
+        allHeaders = collectField PD.includes
+        allLibs    = collectField PD.extraLibs
+
+        ifBuildsWith headers args success failure = do
+            ok <- builds (makeProgram headers) args
+            if ok then success else failure
+
+        -- NOTE: if some package-local header has errors,
+        -- we will report that this header is missing.
+        -- Maybe additional tests for local headers are needed
+        -- for better diagnostics
+        findOffendingHdr =
+            ifBuildsWith allHeaders cppArgs
+                         (return Nothing)
+                         (go . tail . inits $ allHeaders)
+            where
+              go [] = return Nothing       -- cannot happen
+              go (hdrs:hdrsInits) = do
+                    ifBuildsWith hdrs cppArgs
+                                 (go hdrsInits)
+                                 (return . Just . last $ hdrs)
+
+              cppArgs = "-c":commonCcArgs -- don't try to link
+
+        findMissingLibs = ifBuildsWith [] (makeLdArgs allLibs)
+                                       (return [])
+                                       (filterM (fmap not . libExists) allLibs)
+
+        libExists lib = builds (makeProgram []) (makeLdArgs [lib])
+
+        commonCcArgs  = programArgs gccProg
+                     ++ hcDefines (compiler lbi)
+                     ++ [ "-I" ++ dir | dir <- collectField PD.includeDirs ]
+                     ++ ["-I."]
+                     ++ collectField PD.cppOptions
+                     ++ collectField PD.ccOptions
+                     ++ [ "-I" ++ dir
+                        | dep <- deps
+                        , dir <- Installed.includeDirs dep ]
+                     ++ [ opt
+                        | dep <- deps
+                        , opt <- Installed.ccOptions dep ]
+
+        commonLdArgs  = [ "-L" ++ dir | dir <- collectField PD.extraLibDirs ]
+                     ++ collectField PD.ldOptions
+                     --TODO: do we also need dependent packages' ld options?
+        makeLdArgs libs = [ "-l"++lib | lib <- libs ] ++ commonLdArgs
+
+        makeProgram hdrs = unlines $
+                           [ "#include \""  ++ hdr ++ "\"" | hdr <- hdrs ] ++
+                           ["int main(int argc, char** argv) { return 0; }"]
+
+        collectField f = concatMap f allBi
+        allBi = allBuildInfo pkg
+        Just gccProg = lookupProgram  gccProgram (withPrograms lbi)
+        deps = PackageIndex.topologicalOrder (installedPkgs lbi)
+
+        builds program args = do
+            tempDir <- getTemporaryDirectory
+            withTempFile tempDir ".c" $ \cName cHnd ->
+              withTempFile tempDir "" $ \oNname oHnd -> do
+                hPutStrLn cHnd program
+                hClose cHnd
+                hClose oHnd
+                rawSystemProgramStdoutConf verbosity
+                  gccProgram (withPrograms lbi) (cName:"-o":oNname:args)
+                return True
+           `catchIO`   (\_ -> return False)
+           `catchExit` (\_ -> return False)
+
+        explainErrors Nothing [] = return ()
+        explainErrors hdr libs   = die $ unlines $
+             (if plural then "Missing dependencies on foreign libraries:"
+                        else "Missing dependency on a foreign library:")
+           : case hdr of
+               Nothing -> []
+               Just h  -> ["* Missing header file: " ++ h ]
+          ++ case libs of
+               []    -> []
+               [lib] -> ["* Missing C library: " ++ lib]
+               _     -> ["* Missing C libraries: " ++ intercalate ", " libs]
+          ++ [if plural then messagePlural else messageSingular]
+          where
+            plural = length libs >= 2
+            messageSingular =
+                 "This problem can usually be solved by installing the system "
+              ++ "package that provides this library (you may need the "
+              ++ "\"-dev\" version). If the library is already installed "
+              ++ "but in a non-standard location then you can use the flags "
+              ++ "--extra-include-dirs= and --extra-lib-dirs= to specify "
+              ++ "where it is."
+            messagePlural =
+                 "This problem can usually be solved by installing the system "
+              ++ "packages that provide these libraries (you may need the "
+              ++ "\"-dev\" versions). If the libraries are already installed "
+              ++ "but in a non-standard location then you can use the flags "
+              ++ "--extra-include-dirs= and --extra-lib-dirs= to specify "
+              ++ "where they are."
+
+        --FIXME: share this with the PreProcessor module
+        hcDefines :: Compiler -> [String]
+        hcDefines comp =
+          case compilerFlavor comp of
+            GHC  -> ["-D__GLASGOW_HASKELL__=" ++ versionInt version]
+            JHC  -> ["-D__JHC__=" ++ versionInt version]
+            NHC  -> ["-D__NHC__=" ++ versionInt version]
+            Hugs -> ["-D__HUGS__"]
+            _    -> []
+          where
+            version = compilerVersion comp
+                      -- TODO: move this into the compiler abstraction
+            -- FIXME: this forces GHC's crazy 4.8.2 -> 408 convention on all
+            -- the other compilers. Check if that's really what they want.
+            versionInt :: Version -> String
+            versionInt (Version { versionBranch = [] }) = "1"
+            versionInt (Version { versionBranch = [n] }) = show n
+            versionInt (Version { versionBranch = n1:n2:_ })
+              = -- 6.8.x -> 608
+                -- 6.10.x -> 610
+                let s1 = show n1
+                    s2 = show n2
+                    middle = case s2 of
+                             _ : _ : _ -> ""
+                             _         -> "0"
+                in s1 ++ middle ++ s2
 
 -- | Output package check warnings and errors. Exit if any errors.
 checkPackageProblems :: Verbosity

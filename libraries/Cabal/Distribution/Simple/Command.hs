@@ -487,8 +487,11 @@ commandsRun globalCommand commands args =
     commandNames   = [ name | Command name _ _ <- commands' ]
     globalCommand' = globalCommand {
       commandUsage = \pname ->
-           "Usage: " ++ pname ++ " [GLOBAL FLAGS]\n"
-        ++ "   or: " ++ pname ++ " COMMAND [FLAGS]\n\n"
+           (case commandUsage globalCommand pname of
+             ""       -> ""
+             original -> original ++ "\n")
+        ++ "Usage: " ++ pname ++ " COMMAND [FLAGS]\n"
+        ++ "   or: " ++ pname ++ " [GLOBAL FLAGS]\n\n"
         ++ "Global flags:",
       commandDescription = Just $ \pname ->
            "Commands:\n"

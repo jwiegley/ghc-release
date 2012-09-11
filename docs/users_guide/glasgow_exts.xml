@@ -390,7 +390,7 @@ Indeed, the bindings can even be recursive.
         the syntax by eliminating odd cases
         like <literal>Prelude..</literal>.  For example,
         when <literal>NewQualifiedOperators</literal> is on, it is possible to
-        write the enerated sequence <literal>[Monday..]</literal>
+        write the enumerated sequence <literal>[Monday..]</literal>
         without spaces, whereas in Haskell 98 this would be a
         reference to the operator &lsquo;<literal>.</literal>&lsquo;
         from module <literal>Monday</literal>.</para>
@@ -1232,7 +1232,7 @@ it is not clear which of the two types is intended.
 </para>
 <para>
 Haskell 98 regards all four as ambiguous, but with the
-<option>-fdisambiguate-record-fields</option> flag, GHC will accept
+<option>-XDisambiguateRecordFields</option> flag, GHC will accept
 the former two.  The rules are precisely the same as those for instance
 declarations in Haskell 98, where the method names on the left-hand side 
 of the method bindings in an instance declaration refer unambiguously
@@ -5942,7 +5942,7 @@ main = do { print $ eval [$expr|1 + 2|]
 module Expr where
 
 import qualified Language.Haskell.TH as TH
-import Language.Haskell.TH.Quasi
+import Language.Haskell.TH.Quote
 
 data Expr  =  IntExpr Integer
            |  AntiIntExpr String
@@ -6526,11 +6526,22 @@ Because the preprocessor targets Haskell (rather than Core),
 <indexterm><primary>Bang patterns</primary></indexterm>
 </title>
 <para>GHC supports an extension of pattern matching called <emphasis>bang
-patterns</emphasis>.   Bang patterns are under consideration for Haskell Prime.
+patterns</emphasis>, written <literal>!<replaceable>pat</replaceable></literal>.   
+Bang patterns are under consideration for Haskell Prime.
 The <ulink
 url="http://hackage.haskell.org/trac/haskell-prime/wiki/BangPatterns">Haskell
 prime feature description</ulink> contains more discussion and examples
 than the material below.
+</para>
+<para>
+The key change is the addition of a new rule to the 
+<ulink url="http://haskell.org/onlinereport/exps.html#sect3.17.2">semantics of pattern matching in the Haskell 98 report</ulink>.
+Add new bullet 10, saying: Matching the pattern <literal>!</literal><replaceable>pat</replaceable> 
+against a value <replaceable>v</replaceable> behaves as follows:
+<itemizedlist>
+<listitem><para>if <replaceable>v</replaceable> is bottom, the match diverges</para></listitem>
+<listitem><para>otherwise, <replaceable>pat</replaceable> is matched against <replaceable>v</replaceable>  </para></listitem>
+</itemizedlist>
 </para>
 <para>
 Bang patterns are enabled by the flag <option>-XBangPatterns</option>.
@@ -6563,9 +6574,40 @@ A bang only really has an effect if it precedes a variable or wild-card pattern:
 f3 !(x,y) = [x,y]
 f4 (x,y)  = [x,y]
 </programlisting>
-Here, <literal>f3</literal> and <literal>f4</literal> are identical; putting a bang before a pattern that
+Here, <literal>f3</literal> and <literal>f4</literal> are identical; 
+putting a bang before a pattern that
 forces evaluation anyway does nothing.
-</para><para>
+</para>
+<para>
+There is one (apparent) exception to this general rule that a bang only
+makes a difference when it precedes a variable or wild-card: a bang at the
+top level of a <literal>let</literal> or <literal>where</literal>
+binding makes the binding strict, regardless of the pattern. For example:
+<programlisting>
+let ![x,y] = e in b
+</programlisting>
+is a strict binding: operationally, it evaluates <literal>e</literal>, matches
+it against the pattern <literal>[x,y]</literal>, and then evaluates <literal>b</literal>.
+(We say "apparent" exception because the Right Way to think of it is that the bang
+at the top of a binding is not part of the <emphasis>pattern</emphasis>; rather it
+is part of the syntax of the <emphasis>binding</emphasis>.)
+Nested bangs in a pattern binding behave uniformly with all other forms of 
+pattern matching.  For example
+<programlisting>
+let (!x,[y]) = e in b
+</programlisting>
+is equivalent to this:
+<programlisting>
+let { t = case e of (x,[y]) -> x `seq` (x,y)
+      x = fst t
+      y = snd t }
+in b
+</programlisting>
+The binding is lazy, but when either <literal>x</literal> or <literal>y</literal> is
+evaluated by <literal>b</literal> the entire pattern is matched, including forcing the
+evaluation of <literal>x</literal>.
+</para>
+<para>
 Bang patterns work in <literal>case</literal> expressions too, of course:
 <programlisting>
 g5 x = let y = f x in body
@@ -6575,18 +6617,6 @@ g7 x = case f x of { !y -&gt; body }
 The functions <literal>g5</literal> and <literal>g6</literal> mean exactly the same thing.  
 But <literal>g7</literal> evaluates <literal>(f x)</literal>, binds <literal>y</literal> to the
 result, and then evaluates <literal>body</literal>.
-</para><para>
-Bang patterns work in <literal>let</literal> and <literal>where</literal>
-definitions too. For example:
-<programlisting>
-let ![x,y] = e in b
-</programlisting>
-is a strict pattern: operationally, it evaluates <literal>e</literal>, matches
-it against the pattern <literal>[x,y]</literal>, and then evaluates <literal>b</literal>
-The "<literal>!</literal>" should not be regarded as part of the pattern; after all,
-in a function argument <literal>![x,y]</literal> means the 
-same as <literal>[x,y]</literal>.  Rather, the "<literal>!</literal>" 
-is part of the syntax of <literal>let</literal> bindings.
 </para>
 </sect2>
 
@@ -6772,7 +6802,7 @@ Assertion failures can be caught, see the documentation for the
     <replaceable>word</replaceable>.  The various values for
     <replaceable>word</replaceable> that GHC understands are described
     in the following sections; any pragma encountered with an
-    unrecognised <replaceable>word</replaceable> is (silently)
+    unrecognised <replaceable>word</replaceable> is
     ignored. The layout rule applies in pragmas, so the closing <literal>#-}</literal>
     should start in a column to the right of the opening <literal>{-#</literal>. </para> 
 
@@ -7991,7 +8021,7 @@ r) ->
 <title>Special built-in functions</title>
 <para>GHC has a few built-in functions with special behaviour.  These
 are now described in the module <ulink
-url="../libraries/base/GHC-Prim.html"><literal>GHC.Prim</literal></ulink>
+url="../libraries/ghc-prim/GHC-Prim.html"><literal>GHC.Prim</literal></ulink>
 in the library documentation.</para>
 </sect1>
 
