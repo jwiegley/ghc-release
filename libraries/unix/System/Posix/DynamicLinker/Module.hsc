@@ -1,4 +1,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Trustworthy #-}
+#endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Posix.DynamicLinker.Module
@@ -57,7 +60,8 @@ where
 #include "HsUnix.h"
 
 import System.Posix.DynamicLinker
-import Foreign.Ptr	( Ptr, nullPtr, FunPtr )
+import System.Posix.DynamicLinker.Common
+import Foreign.Ptr      ( Ptr, nullPtr, FunPtr )
 #if __GLASGOW_HASKELL__ > 611
 import System.Posix.Internals ( withFilePath )
 #else
@@ -66,10 +70,6 @@ import Foreign.C.String	( withCString )
 withFilePath :: FilePath -> (CString -> IO a) -> IO a
 withFilePath = withCString
 #endif
-
--- abstract handle for dynamically loaded module (EXPORTED)
---
-newtype Module = Module (Ptr ())
 
 unModule              :: Module -> (Ptr ())
 unModule (Module adr)  = adr

@@ -6,29 +6,41 @@
 --
 -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module OldCmm (
-        Cmm, RawCmm, CmmTop, RawCmmTop,
+        CmmGroup, GenCmmGroup, RawCmmGroup, CmmDecl, RawCmmDecl,
         ListGraph(..),
-        CmmInfo(..), UpdateFrame(..),
+        CmmInfo(..), UpdateFrame(..), CmmInfoTable(..), ClosureTypeInfo(..),
+        CmmStatic(..), CmmStatics(..), CmmFormal, CmmActual,
         cmmMapGraph, cmmTopMapGraph,
-        cmmMapGraphM, cmmTopMapGraphM,
         GenBasicBlock(..), CmmBasicBlock, blockId, blockStmts, mapBlockStmts,
         CmmStmt(..), CmmReturnInfo(..), CmmHinted(..),
         HintedCmmFormal, HintedCmmActual,
         CmmSafety(..), CmmCallTarget(..),
-        module CmmDecl,
+        New.GenCmmDecl(..),
+        New.ForeignHint(..),
         module CmmExpr,
+        Section(..),
+        ProfilingInfo(..), C_SRT(..)
   ) where
 
 #include "HsVersions.h"
 
+import qualified Cmm as New
+import Cmm           ( CmmInfoTable(..), GenCmmGroup, CmmStatics(..), GenCmmDecl(..),
+                       CmmFormal, CmmActual, Section(..), CmmStatic(..),
+                       ProfilingInfo(..), ClosureTypeInfo(..) )
+
 import BlockId
-import CmmDecl
 import CmmExpr
 import ForeignCall
-
 import ClosureInfo
-import Outputable
 import FastString
 
 
@@ -56,7 +68,7 @@ data UpdateFrame =
       [CmmExpr]  -- Frame remainder.  Behaves like the arguments of a 'jump'.
 
 -----------------------------------------------------------------------------
---  Cmm, CmmTop, CmmBasicBlock
+--  Cmm, CmmDecl, CmmBasicBlock
 -----------------------------------------------------------------------------
 
 -- A file is a list of top-level chunks.  These may be arbitrarily
@@ -73,15 +85,15 @@ newtype ListGraph i = ListGraph [GenBasicBlock i]
    -- across a whole compilation unit.
 
 -- | Cmm with the info table as a data type
-type Cmm    = GenCmm    CmmStatics CmmInfo (ListGraph CmmStmt)
-type CmmTop = GenCmmTop CmmStatics CmmInfo (ListGraph CmmStmt)
+type CmmGroup = GenCmmGroup CmmStatics CmmInfo (ListGraph CmmStmt)
+type CmmDecl = GenCmmDecl CmmStatics CmmInfo (ListGraph CmmStmt)
 
 -- | Cmm with the info tables converted to a list of 'CmmStatic' along with the info
 -- table label. If we are building without tables-next-to-code there will be no statics
 --
 -- INVARIANT: if there is an info table, it has at least one CmmStatic
-type RawCmm    = GenCmm    CmmStatics (Maybe CmmStatics) (ListGraph CmmStmt)
-type RawCmmTop = GenCmmTop CmmStatics (Maybe CmmStatics) (ListGraph CmmStmt)
+type RawCmmGroup = GenCmmGroup CmmStatics (Maybe CmmStatics) (ListGraph CmmStmt)
+type RawCmmDecl = GenCmmDecl CmmStatics (Maybe CmmStatics) (ListGraph CmmStmt)
 
 
 -- A basic block containing a single label, at the beginning.
@@ -111,21 +123,12 @@ mapBlockStmts f (BasicBlock id bs) = BasicBlock id (map f bs)
 --   graph maps
 ----------------------------------------------------------------
 
-cmmMapGraph    :: (g -> g') -> GenCmm    d h g -> GenCmm    d h g'
-cmmTopMapGraph :: (g -> g') -> GenCmmTop d h g -> GenCmmTop d h g'
+cmmMapGraph    :: (g -> g') -> GenCmmGroup d h g -> GenCmmGroup d h g'
+cmmTopMapGraph :: (g -> g') -> GenCmmDecl d h g -> GenCmmDecl d h g'
 
-cmmMapGraphM    :: Monad m => (String -> g -> m g') -> GenCmm    d h g -> m (GenCmm    d h g')
-cmmTopMapGraphM :: Monad m => (String -> g -> m g') -> GenCmmTop d h g -> m (GenCmmTop d h g')
-
-cmmMapGraph f (Cmm tops) = Cmm $ map (cmmTopMapGraph f) tops
+cmmMapGraph f tops = map (cmmTopMapGraph f) tops
 cmmTopMapGraph f (CmmProc h l g) = CmmProc h l (f g)
 cmmTopMapGraph _ (CmmData s ds)  = CmmData s ds
-
-cmmMapGraphM f (Cmm tops) = mapM (cmmTopMapGraphM f) tops >>= return . Cmm
-cmmTopMapGraphM f (CmmProc h l g) =
-  f (showSDoc $ ppr l) g >>= return . CmmProc h l
-cmmTopMapGraphM _ (CmmData s ds)  = return $ CmmData s ds
-
 
 data CmmReturnInfo = CmmMayReturn
                    | CmmNeverReturns
@@ -151,7 +154,6 @@ data CmmStmt	-- Old-style
      CmmCallTarget
      [HintedCmmFormal]		 -- zero or more results
      [HintedCmmActual]		 -- zero or more arguments
-     CmmSafety			 -- whether to build a continuation
      CmmReturnInfo
   -- Some care is necessary when handling the arguments of these, see
   -- [Register parameter passing] and the hack in cmm/CmmOpt.hs
@@ -172,7 +174,7 @@ data CmmStmt	-- Old-style
   | CmmReturn            -- Return from a native C-- function,
       [HintedCmmActual]        -- with these return values. (parameters never used)
 
-data CmmHinted a = CmmHinted { hintlessCmm :: a, cmmHint :: ForeignHint }
+data CmmHinted a = CmmHinted { hintlessCmm :: a, cmmHint :: New.ForeignHint }
 	   	 deriving( Eq )
 
 type HintedCmmFormal  = CmmHinted CmmFormal
@@ -189,7 +191,7 @@ instance UserOfLocalRegs CmmStmt where
       stmt (CmmComment {})           = id
       stmt (CmmAssign _ e)           = gen e
       stmt (CmmStore e1 e2)          = gen e1 . gen e2
-      stmt (CmmCall target _ es _ _) = gen target . gen es
+      stmt (CmmCall target _ es _)   = gen target . gen es
       stmt (CmmBranch _)             = id
       stmt (CmmCondBranch e _)       = gen e
       stmt (CmmSwitch e _)           = gen e

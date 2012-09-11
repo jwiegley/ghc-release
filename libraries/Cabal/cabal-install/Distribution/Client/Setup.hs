@@ -26,6 +26,7 @@ module Distribution.Client.Setup
     , reportCommand, ReportFlags(..)
     , unpackCommand, UnpackFlags(..)
     , initCommand, IT.InitFlags(..)
+    , sdistCommand, SDistFlags(..), SDistExFlags(..), ArchiveFormat(..)
 
     , parsePackageArgs
     --TODO: stop exporting these:
@@ -37,6 +38,8 @@ import Distribution.Client.Types
          ( Username(..), Password(..), Repo(..), RemoteRepo(..), LocalRepo(..) )
 import Distribution.Client.BuildReports.Types
          ( ReportLevel(..) )
+import Distribution.Client.Dependency.Types
+         ( Solver(..) )
 import qualified Distribution.Client.Init.Types as IT
          ( InitFlags(..), PackageType(..) )
 import Distribution.Client.Targets
@@ -45,14 +48,13 @@ import Distribution.Client.Targets
 import Distribution.Simple.Program
          ( defaultProgramConfiguration )
 import Distribution.Simple.Command hiding (boolOpt)
-import qualified Distribution.Simple.Command as Command
 import qualified Distribution.Simple.Setup as Cabal
-         ( configureCommand )
+         ( configureCommand, sdistCommand, haddockCommand )
 import Distribution.Simple.Setup
-         ( ConfigFlags(..) )
+         ( ConfigFlags(..), SDistFlags(..), HaddockFlags(..) )
 import Distribution.Simple.Setup
-         ( Flag(..), toFlag, fromFlag, flagToList, flagToMaybe
-         , optionVerbosity, trueArg, falseArg )
+         ( Flag(..), toFlag, fromFlag, flagToList
+         , optionVerbosity, boolOpt, trueArg, falseArg )
 import Distribution.Simple.InstallDirs
          ( PathTemplate, toPathTemplate, fromPathTemplate )
 import Distribution.Version
@@ -64,7 +66,7 @@ import Distribution.Text
 import Distribution.ReadE
          ( ReadE(..), readP_to_E, succeedReadE )
 import qualified Distribution.Compat.ReadP as Parse
-         ( ReadP, readP_to_S, char, munch1, pfail, (+++) )
+         ( ReadP, readP_to_S, readS_to_P, char, munch1, pfail, (+++) )
 import Distribution.Verbosity
          ( Verbosity, normal )
 import Distribution.Simple.Utils
@@ -72,6 +74,8 @@ import Distribution.Simple.Utils
 
 import Data.Char
          ( isSpace, isAlphaNum )
+import Data.List
+         ( intercalate )
 import Data.Maybe
          ( listToMaybe, maybeToList, fromMaybe )
 import Data.Monoid
@@ -224,7 +228,6 @@ filterConfigureFlags flags cabalLibVersion
     -- older Cabal does not grok the constraints flag:
   | otherwise = flags { configConstraints = [] }
 
-
 -- ------------------------------------------------------------
 -- * Config extra flags
 -- ------------------------------------------------------------
@@ -234,11 +237,12 @@ filterConfigureFlags flags cabalLibVersion
 data ConfigExFlags = ConfigExFlags {
     configCabalVersion :: Flag Version,
     configExConstraints:: [UserConstraint],
-    configPreferences  :: [Dependency]
+    configPreferences  :: [Dependency],
+    configSolver       :: Flag Solver
   }
 
 defaultConfigExFlags :: ConfigExFlags
-defaultConfigExFlags = mempty
+defaultConfigExFlags = mempty { configSolver = Flag defaultSolver }
 
 configureExCommand :: CommandUI (ConfigFlags, ConfigExFlags)
 configureExCommand = configureCommand {
@@ -275,18 +279,22 @@ configureExOptions _showOrParseArgs =
               (readP_to_E (const "dependency expected")
                           (fmap (\x -> [x]) parse))
               (map display))
+
+  , optionSolver configSolver (\v flags -> flags { configSolver = v })
   ]
 
 instance Monoid ConfigExFlags where
   mempty = ConfigExFlags {
     configCabalVersion = mempty,
     configExConstraints= mempty,
-    configPreferences  = mempty
+    configPreferences  = mempty,
+    configSolver       = mempty
   }
   mappend a b = ConfigExFlags {
     configCabalVersion = combine configCabalVersion,
     configExConstraints= combine configExConstraints,
-    configPreferences  = combine configPreferences
+    configPreferences  = combine configPreferences,
+    configSolver       = combine configSolver
   }
     where combine field = field a `mappend` field b
 
@@ -298,6 +306,10 @@ data FetchFlags = FetchFlags {
 --    fetchOutput    :: Flag FilePath,
       fetchDeps      :: Flag Bool,
       fetchDryRun    :: Flag Bool,
+      fetchSolver           :: Flag Solver,
+      fetchMaxBackjumps     :: Flag Int,
+      fetchReorderGoals     :: Flag Bool,
+      fetchIndependentGoals :: Flag Bool,
       fetchVerbosity :: Flag Verbosity
     }
 
@@ -306,6 +318,10 @@ defaultFetchFlags = FetchFlags {
 --  fetchOutput    = mempty,
     fetchDeps      = toFlag True,
     fetchDryRun    = toFlag False,
+    fetchSolver           = Flag defaultSolver,
+    fetchMaxBackjumps     = Flag defaultMaxBackjumps,
+    fetchReorderGoals     = Flag False,
+    fetchIndependentGoals = Flag False,
     fetchVerbosity = toFlag normal
    }
 
@@ -338,7 +354,14 @@ fetchCommand = CommandUI {
            "Do not install anything, only print what would be installed."
            fetchDryRun (\v flags -> flags { fetchDryRun = v })
            trueArg
-       ]
+
+       ] ++
+
+       optionSolver      fetchSolver           (\v flags -> flags { fetchSolver           = v }) :
+       optionSolverFlags fetchMaxBackjumps     (\v flags -> flags { fetchMaxBackjumps     = v })
+                         fetchReorderGoals     (\v flags -> flags { fetchReorderGoals     = v })
+                         fetchIndependentGoals (\v flags -> flags { fetchIndependentGoals = v })
+
   }
 
 -- ------------------------------------------------------------
@@ -355,13 +378,13 @@ updateCommand = CommandUI {
     commandOptions      = \_ -> [optionVerbosity id const]
   }
 
-upgradeCommand  :: CommandUI (ConfigFlags, ConfigExFlags, InstallFlags)
+upgradeCommand  :: CommandUI (ConfigFlags, ConfigExFlags, InstallFlags, HaddockFlags)
 upgradeCommand = configureCommand {
     commandName         = "upgrade",
     commandSynopsis     = "(command disabled, use install instead)",
     commandDescription  = Nothing,
     commandUsage        = usagePackages "upgrade",
-    commandDefaultFlags = (mempty, mempty, mempty),
+    commandDefaultFlags = (mempty, mempty, mempty, mempty),
     commandOptions      = commandOptions installCommand
   }
 
@@ -570,41 +593,60 @@ instance Monoid InfoFlags where
 -- | Install takes the same flags as configure along with a few extras.
 --
 data InstallFlags = InstallFlags {
-    installDocumentation:: Flag Bool,
-    installHaddockIndex :: Flag PathTemplate,
-    installDryRun       :: Flag Bool,
-    installReinstall    :: Flag Bool,
-    installUpgradeDeps  :: Flag Bool,
-    installOnly         :: Flag Bool,
-    installOnlyDeps     :: Flag Bool,
-    installRootCmd      :: Flag String,
-    installSummaryFile  :: [PathTemplate],
-    installLogFile      :: Flag PathTemplate,
-    installBuildReports :: Flag ReportLevel,
-    installSymlinkBinDir:: Flag FilePath,
-    installOneShot      :: Flag Bool
+    installDocumentation    :: Flag Bool,
+    installHaddockIndex     :: Flag PathTemplate,
+    installDryRun           :: Flag Bool,
+    installMaxBackjumps     :: Flag Int,
+    installReorderGoals     :: Flag Bool,
+    installIndependentGoals :: Flag Bool,
+    installReinstall        :: Flag Bool,
+    installAvoidReinstalls  :: Flag Bool,
+    installOverrideReinstall :: Flag Bool,
+    installUpgradeDeps      :: Flag Bool,
+    installOnly             :: Flag Bool,
+    installOnlyDeps         :: Flag Bool,
+    installRootCmd          :: Flag String,
+    installSummaryFile      :: [PathTemplate],
+    installLogFile          :: Flag PathTemplate,
+    installBuildReports     :: Flag ReportLevel,
+    installSymlinkBinDir    :: Flag FilePath,
+    installOneShot          :: Flag Bool
   }
 
 defaultInstallFlags :: InstallFlags
 defaultInstallFlags = InstallFlags {
-    installDocumentation= Flag False,
-    installHaddockIndex = Flag docIndexFile,
-    installDryRun       = Flag False,
-    installReinstall    = Flag False,
-    installUpgradeDeps  = Flag False,
-    installOnly         = Flag False,
-    installOnlyDeps     = Flag False,
-    installRootCmd      = mempty,
-    installSummaryFile  = mempty,
-    installLogFile      = mempty,
-    installBuildReports = Flag NoReports,
-    installSymlinkBinDir= mempty,
-    installOneShot      = Flag False
+    installDocumentation   = Flag False,
+    installHaddockIndex    = Flag docIndexFile,
+    installDryRun          = Flag False,
+    installMaxBackjumps    = Flag defaultMaxBackjumps,
+    installReorderGoals    = Flag False,
+    installIndependentGoals= Flag False,
+    installReinstall       = Flag False,
+    installAvoidReinstalls = Flag False,
+    installOverrideReinstall = Flag False,
+    installUpgradeDeps     = Flag False,
+    installOnly            = Flag False,
+    installOnlyDeps        = Flag False,
+    installRootCmd         = mempty,
+    installSummaryFile     = mempty,
+    installLogFile         = mempty,
+    installBuildReports    = Flag NoReports,
+    installSymlinkBinDir   = mempty,
+    installOneShot         = Flag False
   }
   where
     docIndexFile = toPathTemplate ("$datadir" </> "doc" </> "index.html")
 
-installCommand :: CommandUI (ConfigFlags, ConfigExFlags, InstallFlags)
+defaultMaxBackjumps :: Int
+defaultMaxBackjumps = 200
+
+defaultSolver :: Solver
+defaultSolver = TopDown
+
+allSolvers :: String
+allSolvers = intercalate ", " (map display ([minBound .. maxBound] :: [Solver]))
+
+installCommand :: CommandUI (ConfigFlags, ConfigExFlags, InstallFlags, HaddockFlags)
 installCommand = CommandUI {
   commandName         = "install",
   commandSynopsis     = "Installs a list of packages.",
@@ -623,17 +665,37 @@ installCommand = CommandUI {
      ++ "    Specific version of a package\n"
      ++ "  " ++ pname ++ " install 'foo < 2'       "
      ++ "    Constrained package version\n",
-  commandDefaultFlags = (mempty, mempty, mempty),
+  commandDefaultFlags = (mempty, mempty, mempty, mempty),
   commandOptions      = \showOrParseArgs ->
        liftOptions get1 set1 (filter ((/="constraint") . optionName) $
                               configureOptions   showOrParseArgs)
     ++ liftOptions get2 set2 (configureExOptions showOrParseArgs)
     ++ liftOptions get3 set3 (installOptions     showOrParseArgs)
+    ++ liftOptions get4 set4 (haddockOptions     showOrParseArgs)
   }
   where
-    get1 (a,_,_) = a; set1 a (_,b,c) = (a,b,c)
-    get2 (_,b,_) = b; set2 b (a,_,c) = (a,b,c)
-    get3 (_,_,c) = c; set3 c (a,b,_) = (a,b,c)
+    get1 (a,_,_,_) = a; set1 a (_,b,c,d) = (a,b,c,d)
+    get2 (_,b,_,_) = b; set2 b (a,_,c,d) = (a,b,c,d)
+    get3 (_,_,c,_) = c; set3 c (a,b,_,d) = (a,b,c,d)
+    get4 (_,_,_,d) = d; set4 d (a,b,c,_) = (a,b,c,d)
+
+    haddockOptions showOrParseArgs
+      = [ opt { optionName = "haddock-" ++ name,
+                optionDescr = [ fmapOptFlags (\(_, lflags) -> ([], map ("haddock-" ++) lflags)) descr
+                              | descr <- optionDescr opt] }
+        | opt <- commandOptions Cabal.haddockCommand showOrParseArgs
+        , let name = optionName opt
+        , name `elem` ["hoogle", "html", "html-location",
+                       "executables", "internal", "css",
+                       "hyperlink-source", "hscolour-css",
+                       "contents-location"]
+        ]
+
+    fmapOptFlags :: (OptFlags -> OptFlags) -> OptDescr a -> OptDescr a
+    fmapOptFlags modify (ReqArg d f p r w)    = ReqArg d (modify f) p r w
+    fmapOptFlags modify (OptArg d f p r i w)  = OptArg d (modify f) p r i w
+    fmapOptFlags modify (ChoiceOpt xs)        = ChoiceOpt [(d, modify f, i, w) | (d, f, i, w) <- xs]
+    fmapOptFlags modify (BoolOpt d f1 f2 r w) = BoolOpt d (modify f1) (modify f2) r w
 
 installOptions ::  ShowOrParseArgs -> [OptionField InstallFlags]
 installOptions showOrParseArgs =
@@ -652,17 +714,31 @@ installOptions showOrParseArgs =
           "Do not install anything, only print what would be installed."
           installDryRun (\v flags -> flags { installDryRun = v })
           trueArg
+      ] ++
 
-      , option [] ["reinstall"]
+      optionSolverFlags installMaxBackjumps     (\v flags -> flags { installMaxBackjumps     = v })
+                        installReorderGoals     (\v flags -> flags { installReorderGoals     = v })
+                        installIndependentGoals (\v flags -> flags { installIndependentGoals = v }) ++
+
+      [ option [] ["reinstall"]
           "Install even if it means installing the same version again."
           installReinstall (\v flags -> flags { installReinstall = v })
+          trueArg
+
+      , option [] ["avoid-reinstalls"]
+          "Do not select versions that would destructively overwrite installed packages."
+          installAvoidReinstalls (\v flags -> flags { installAvoidReinstalls = v })
+          trueArg
+
+      , option [] ["force-reinstalls"]
+          "Use to override the check that prevents reinstalling already installed versions of package dependencies."
+          installOverrideReinstall (\v flags -> flags { installOverrideReinstall = v })
           trueArg
 
       , option [] ["upgrade-dependencies"]
           "Pick the latest version for all dependencies, rather than trying to pick an installed version."
           installUpgradeDeps (\v flags -> flags { installUpgradeDeps = v })
           trueArg
-
 
       , option [] ["only-dependencies"]
           "Install only the dependencies necessary to build the given packages"
@@ -714,34 +790,44 @@ installOptions showOrParseArgs =
 
 instance Monoid InstallFlags where
   mempty = InstallFlags {
-    installDocumentation= mempty,
-    installHaddockIndex = mempty,
-    installDryRun       = mempty,
-    installReinstall    = mempty,
-    installUpgradeDeps  = mempty,
-    installOnly         = mempty,
-    installOnlyDeps     = mempty,
-    installRootCmd      = mempty,
-    installSummaryFile  = mempty,
-    installLogFile      = mempty,
-    installBuildReports = mempty,
-    installSymlinkBinDir= mempty,
-    installOneShot      = mempty
+    installDocumentation   = mempty,
+    installHaddockIndex    = mempty,
+    installDryRun          = mempty,
+    installReinstall       = mempty,
+    installAvoidReinstalls = mempty,
+    installOverrideReinstall = mempty,
+    installMaxBackjumps    = mempty,
+    installUpgradeDeps     = mempty,
+    installReorderGoals    = mempty,
+    installIndependentGoals= mempty,
+    installOnly            = mempty,
+    installOnlyDeps        = mempty,
+    installRootCmd         = mempty,
+    installSummaryFile     = mempty,
+    installLogFile         = mempty,
+    installBuildReports    = mempty,
+    installSymlinkBinDir   = mempty,
+    installOneShot         = mempty
   }
   mappend a b = InstallFlags {
-    installDocumentation= combine installDocumentation,
-    installHaddockIndex = combine installHaddockIndex,
-    installDryRun       = combine installDryRun,
-    installReinstall    = combine installReinstall,
-    installUpgradeDeps  = combine installUpgradeDeps,
-    installOnly         = combine installOnly,
-    installOnlyDeps     = combine installOnlyDeps,
-    installRootCmd      = combine installRootCmd,
-    installSummaryFile  = combine installSummaryFile,
-    installLogFile      = combine installLogFile,
-    installBuildReports = combine installBuildReports,
-    installSymlinkBinDir= combine installSymlinkBinDir,
-    installOneShot      = combine installOneShot
+    installDocumentation   = combine installDocumentation,
+    installHaddockIndex    = combine installHaddockIndex,
+    installDryRun          = combine installDryRun,
+    installReinstall       = combine installReinstall,
+    installAvoidReinstalls = combine installAvoidReinstalls,
+    installOverrideReinstall = combine installOverrideReinstall,
+    installMaxBackjumps    = combine installMaxBackjumps,
+    installUpgradeDeps     = combine installUpgradeDeps,
+    installReorderGoals    = combine installReorderGoals,
+    installIndependentGoals= combine installIndependentGoals,
+    installOnly            = combine installOnly,
+    installOnlyDeps        = combine installOnlyDeps,
+    installRootCmd         = combine installRootCmd,
+    installSummaryFile     = combine installSummaryFile,
+    installLogFile         = combine installLogFile,
+    installBuildReports    = combine installBuildReports,
+    installSymlinkBinDir   = combine installSymlinkBinDir,
+    installOneShot         = combine installOneShot
   }
     where combine field = field a `mappend` field b
 
@@ -960,11 +1046,59 @@ initCommand = CommandUI {
                         _         -> Nothing
 
 -- ------------------------------------------------------------
--- * GetOpt Utils
+-- * SDist flags
 -- ------------------------------------------------------------
 
-boolOpt :: SFlags -> SFlags -> MkOptDescr (a -> Flag Bool) (Flag Bool -> a -> a) a
-boolOpt  = Command.boolOpt  flagToMaybe Flag
+-- | Extra flags to @sdist@ beyond runghc Setup sdist
+--
+data SDistExFlags = SDistExFlags {
+    sDistFormat    :: Flag ArchiveFormat
+  }
+  deriving Show
+
+data ArchiveFormat = TargzFormat | ZipFormat -- | ...
+  deriving (Show, Eq)
+
+defaultSDistExFlags :: SDistExFlags
+defaultSDistExFlags = SDistExFlags {
+    sDistFormat  = Flag TargzFormat
+  }
+
+sdistCommand :: CommandUI (SDistFlags, SDistExFlags)
+sdistCommand = Cabal.sdistCommand {
+    commandDefaultFlags = (commandDefaultFlags Cabal.sdistCommand, defaultSDistExFlags),
+    commandOptions      = \showOrParseArgs ->
+         liftOptions fst setFst (commandOptions Cabal.sdistCommand showOrParseArgs)
+      ++ liftOptions snd setSnd sdistExOptions
+  }
+  where
+    setFst a (_,b) = (a,b)
+    setSnd b (a,_) = (a,b)
+
+    sdistExOptions =
+      [option [] ["archive-format"] "archive-format"
+         sDistFormat (\v flags -> flags { sDistFormat = v })
+         (choiceOpt
+            [ (Flag TargzFormat, ([], ["targz"]),
+                 "Produce a '.tar.gz' format archive (default and required for uploading to hackage)")
+            , (Flag ZipFormat,   ([], ["zip"]),
+                 "Produce a '.zip' format archive")
+            ])
+      ]
+
+instance Monoid SDistExFlags where
+  mempty = SDistExFlags {
+    sDistFormat  = mempty
+  }
+  mappend a b = SDistExFlags {
+    sDistFormat  = combine sDistFormat
+  }
+    where
+      combine field = field a `mappend` field b
+
+-- ------------------------------------------------------------
+-- * GetOpt Utils
+-- ------------------------------------------------------------
 
 reqArgFlag :: ArgPlaceHolder -> SFlags -> LFlags -> Description ->
               (b -> Flag String) -> (Flag String -> b -> b) -> OptDescr b
@@ -973,6 +1107,40 @@ reqArgFlag ad = reqArg ad (succeedReadE Flag) flagToList
 liftOptions :: (b -> a) -> (a -> b -> b)
             -> [OptionField a] -> [OptionField b]
 liftOptions get set = map (liftOption get set)
+
+optionSolver :: (flags -> Flag Solver)
+             -> (Flag Solver -> flags -> flags)
+             -> OptionField flags
+optionSolver get set =
+  option [] ["solver"]
+    ("Select dependency solver to use (default: " ++ display defaultSolver ++ "). Choices: " ++ allSolvers ++ ".")
+    get set
+    (reqArg "SOLVER" (readP_to_E (const $ "solver must be one of: " ++ allSolvers)
+                                 (toFlag `fmap` parse))
+                     (flagToList . fmap display))
+
+optionSolverFlags :: (flags -> Flag Int   ) -> (Flag Int    -> flags -> flags)
+                  -> (flags -> Flag Bool  ) -> (Flag Bool   -> flags -> flags)
+                  -> (flags -> Flag Bool  ) -> (Flag Bool   -> flags -> flags)
+                  -> [OptionField flags]
+optionSolverFlags getmbj setmbj getrg setrg getig setig =
+  [ option [] ["max-backjumps"]
+      ("Maximum number of backjumps allowed while solving (default: " ++ show defaultMaxBackjumps ++ "). Use a negative number to enable unlimited backtracking. Use 0 to disable backtracking completely.")
+      getmbj setmbj
+      (reqArg "NUM" (readP_to_E ("Cannot parse number: "++)
+                                (fmap toFlag (Parse.readS_to_P reads)))
+                    (map show . flagToList))
+  , option [] ["reorder-goals"]
+      "Try to reorder goals according to certain heuristics. Slows things down on average, but may make backtracking faster for some packages."
+      getrg setrg
+      trueArg
+
+  , option [] ["independent-goals"]
+      "Treat several goals on the command line as independent. If several goals depend on the same package, different versions can be chosen."
+      getig setig
+      trueArg
+  ]
+
 
 usagePackages :: String -> String -> String
 usagePackages name pname =

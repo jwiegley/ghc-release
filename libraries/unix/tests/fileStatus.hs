@@ -14,9 +14,14 @@ main = do
   testSymlink fs ds
   cleanup
 
+regular      = "regular"
+dir          = "dir"
+link_regular = "link-regular"
+link_dir     = "link-dir"
+
 testRegular = do
-  createFile "regular" ownerReadMode
-  (fs, _) <- getStatus "regular"
+  createFile regular ownerReadMode
+  (fs, _) <- getStatus regular
   let expected = (False,False,False,True,False,False,False)
       actual   = snd (statusElements fs)
   when (actual /= expected) $
@@ -24,8 +29,8 @@ testRegular = do
   return fs
 
 testDir = do
-  createDirectory "dir" ownerReadMode
-  (ds, _) <- getStatus "dir"
+  createDirectory dir ownerReadMode
+  (ds, _) <- getStatus dir
   let expected = (False,False,False,False,True,False,False)
       actual   = snd (statusElements ds)
   when (actual /= expected) $
@@ -33,10 +38,10 @@ testDir = do
   return ds
 
 testSymlink fs ds = do
-  createSymbolicLink "regular" "link-regular"
-  createSymbolicLink "dir"     "link-dir"
-  (fs', ls)  <- getStatus "link-regular"
-  (ds', lds) <- getStatus "link-dir"
+  createSymbolicLink regular link_regular
+  createSymbolicLink dir     link_dir
+  (fs', ls)  <- getStatus link_regular
+  (ds', lds) <- getStatus link_dir
 
   let expected = (False,False,False,False,False,True,False)
       actualF  = snd (statusElements ls)
@@ -55,9 +60,9 @@ testSymlink fs ds = do
     fail "status for a directory does not match when it's accessed via a symlink"
 
 cleanup = do
-  ignoreIOExceptions $ removeDirectory "dir"
+  ignoreIOExceptions $ removeDirectory dir
   mapM_ (ignoreIOExceptions . removeLink)
-        ["regular", "link-regular", "link-dir"]
+        [regular, link_regular, link_dir]
 
 ignoreIOExceptions io = io `E.catch`
                         ((\_ -> return ()) :: IOException -> IO ())

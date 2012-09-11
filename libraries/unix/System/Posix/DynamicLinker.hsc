@@ -1,3 +1,6 @@
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Trustworthy #-}
+#endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Posix.DynamicLinker
@@ -45,13 +48,14 @@ module System.Posix.DynamicLinker (
 
 where
 
+import System.Posix.DynamicLinker.Common
+import System.Posix.DynamicLinker.Prim
+
 #include "HsUnix.h"
 
-import System.Posix.DynamicLinker.Prim
-import Control.Exception	( bracket )
+import Control.Exception        ( bracket )
 import Control.Monad	( liftM )
-import Foreign.Ptr	( Ptr, nullPtr, FunPtr, nullFunPtr )
-import Foreign.C.String
+import Foreign
 #if __GLASGOW_HASKELL__ > 611
 import System.Posix.Internals ( withFilePath )
 #else
@@ -64,39 +68,8 @@ dlopen path flags = do
   withFilePath path $ \ p -> do
     liftM DLHandle $ throwDLErrorIf "dlopen" (== nullPtr) $ c_dlopen p (packRTLDFlags flags)
 
-dlclose :: DL -> IO ()
-dlclose (DLHandle h) = throwDLErrorIf_ "dlclose" (/= 0) $ c_dlclose h
-dlclose h = error $ "dlclose: invalid argument" ++ (show h)
-
-dlerror :: IO String
-dlerror = c_dlerror >>= peekCString 
-
--- |'dlsym' returns the address binding of the symbol described in @symbol@,
--- as it occurs in the shared object identified by @source@.
-
-dlsym :: DL -> String -> IO (FunPtr a)
-dlsym source symbol = do
-  withCAString symbol $ \ s -> do
-    throwDLErrorIf "dlsym" (== nullFunPtr) $ c_dlsym (packDL source) s
-
 withDL :: String -> [RTLDFlags] -> (DL -> IO a) -> IO a
 withDL file flags f = bracket (dlopen file flags) (dlclose) f
 
 withDL_ :: String -> [RTLDFlags] -> (DL -> IO a) -> IO ()
 withDL_ file flags f = withDL file flags f >> return ()
-
--- |'undl' obtains the raw handle. You mustn't do something like
--- @withDL mod flags $ liftM undl >>= \ p -> use p@
-
-undl :: DL -> Ptr ()
-undl = packDL
-
-throwDLErrorIf :: String -> (a -> Bool) -> IO a -> IO a
-throwDLErrorIf s p f = do
-  r <- f
-  if (p r)
-    then dlerror >>= \ err -> ioError (userError ( s ++ ": " ++ err))
-    else return r
-
-throwDLErrorIf_ :: String -> (a -> Bool) -> IO a -> IO ()
-throwDLErrorIf_ s p f = throwDLErrorIf s p f >> return ()

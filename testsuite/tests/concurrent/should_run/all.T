@@ -19,6 +19,7 @@ test('conc070', only_threaded_ways, compile_and_run, [''])
 
 test('conc071', omit_ways(['threaded2']), compile_and_run, [''])
 test('conc072', only_ways(['threaded2']), compile_and_run, [''])
+test('conc073', normal, compile_and_run, [''])
 
 test('1980', normal, compile_and_run, [''])
 test('2910', normal, compile_and_run, [''])
@@ -26,7 +27,7 @@ test('2910a', normal, compile_and_run, [''])
 test('3279', normal, compile_and_run, [''])
 
 # This test takes a long time with the default context switch interval
-test('3429', extra_run_opts('+RTS -i0.001 -RTS'), compile_and_run, [''])
+test('3429', extra_run_opts('+RTS -C0.001 -RTS'), compile_and_run, [''])
 
 # without -O, goes into an infinite loop
 # GHCi cannot deterct the infinite loop, because the thread is always reachable
@@ -36,7 +37,7 @@ test('4030', omit_ways('ghci'), compile_and_run, ['-O'])
 # each of these runs for about a second
 test('throwto001', [reqlib('random'), extra_run_opts('1000 2000')],
                    compile_and_run, [''])
-test('throwto002', [reqlib('random'), ignore_output], compile_and_run, [''])
+test('throwto002', [reqlib('random')], compile_and_run, [''])
 test('throwto003', normal, compile_and_run, [''])
 
 test('mask001', normal, compile_and_run, [''])
@@ -57,6 +58,16 @@ test('4813', normal, compile_and_run, [''])
 test('4811', normal, compile_and_run, [''])
 
 test('allowinterrupt001', normal, compile_and_run, [''])
+
+# try hard to provoke the error by running the test 100 times
+test('5558',
+     [ only_ways(['threaded2']),
+       cmd_wrapper(lambda c: 'for i in `seq 1 100`; do ' + c + ' || break; done') ],
+     compile_and_run, [''])
+
+test('5421', normal, compile_and_run, [''])
+test('5611', normal, compile_and_run, [''])
+test('5238', normal, compile_and_run, [''])
 
 # -----------------------------------------------------------------------------
 # These tests we only do for a full run
@@ -114,6 +125,7 @@ else:
 
 test('conc023', composes([skip_if_fast,
                           only_compiler_types(['ghc']),
+                          reqlib('random'),
                           conc023_ways]), compile_and_run, [''])
 
 test('conc024', only_compiler_types(['ghc']), compile_and_run, [''])
@@ -140,18 +152,29 @@ test('conc034', compose(only_compiler_types(['ghc']),
 
 test('conc035', only_compiler_types(['ghc']), compile_and_run, [''])
 
-# Omit for GHCi: firstly GHCi doesn't have unsafe FFI calls, and secondly
-# the main thread cannot receive the deadlock exception because it can be
-# woken up by ^C.
-# Omit for threaded2: this test is really bogus and fails to do anything
-# sensible for more than one CPU.
-test('conc036', compose(skip_if_fast,
-		  compose(omit_ways(['ghci','threaded2']),
-		    only_compiler_types(['ghc']))), compile_and_run, [''])
+# conc036: now skipped entirely.  This test attempts to check that
+# unsafe foreign calls block other threads, but doing that reliably is
+# probably impossible.  The last straw was when it started failing on
+# Windows around 7.4.x.
+#
+# OLD comments about hacks we tried to make it work:
+#   Omit for GHCi: firstly GHCi doesn't have unsafe FFI calls, and secondly
+#   the main thread cannot receive the deadlock exception because it can be
+#   woken up by ^C.
+#   Omit for threaded2: this test is really bogus and fails to do anything
+#   sensible for more than one CPU.
+#
+test('conc036', skip, compile_and_run, [''])
+
+
 # Interrupting foreign calls only makes sense if we are threaded
-test('foreignInterruptible', composes([skip_if_fast,
-			               only_threaded_ways,
-				       only_compiler_types(['ghc'])]), compile_and_run, [''])
+test('foreignInterruptible', [skip_if_fast,
+                              if_os('mingw32',expect_fail),
+                              # I don't think we support interrupting Sleep()
+                              # on Windows.  --SDM
+                              only_threaded_ways,
+                              only_compiler_types(['ghc'])],
+      compile_and_run, [''])
 
 test('conc037', only_ways(['threaded1','threaded2']), compile_and_run, [''])
 test('conc038', only_ways(['threaded1','threaded2']), compile_and_run, [''])

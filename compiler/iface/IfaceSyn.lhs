@@ -4,15 +4,23 @@
 %
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module IfaceSyn (
         module IfaceType,
 
-        IfaceDecl(..), IfaceClassOp(..), IfaceConDecl(..), IfaceConDecls(..),
-        IfaceExpr(..), IfaceAlt, IfaceNote(..), IfaceLetBndr(..),
+        IfaceDecl(..), IfaceClassOp(..), IfaceAT(..), IfaceATDefault(..),
+        IfaceConDecl(..), IfaceConDecls(..),
+        IfaceExpr(..), IfaceAlt, IfaceLetBndr(..),
         IfaceBinding(..), IfaceConAlt(..),
         IfaceIdInfo(..), IfaceIdDetails(..), IfaceUnfolding(..),
         IfaceInfoItem(..), IfaceRule(..), IfaceAnnotation(..), IfaceAnnTarget,
-        IfaceInst(..), IfaceFamInst(..),
+        IfaceInst(..), IfaceFamInst(..), IfaceTickish(..),
 
         -- Misc
         ifaceDeclSubBndrs, visibleIfConDecls,
@@ -40,6 +48,7 @@ import BasicTypes
 import Outputable
 import FastString
 import Module
+import TysWiredIn ( eqTyConName )
 
 infixl 3 &&&
 \end{code}
@@ -84,10 +93,10 @@ data IfaceDecl
     }
 
   | IfaceClass { ifCtxt    :: IfaceContext,     -- Context...
-                 ifName    :: OccName,          -- Name of the class
+                 ifName    :: OccName,          -- Name of the class TyCon
                  ifTyVars  :: [IfaceTvBndr],    -- Type variables
                  ifFDs     :: [FunDep FastString], -- Functional dependencies
-                 ifATs     :: [IfaceDecl],      -- Associated type families
+                 ifATs     :: [IfaceAT],      -- Associated type families
                  ifSigs    :: [IfaceClassOp],   -- Method signatures
                  ifRec     :: RecFlag           -- Is newtype/datatype associated
                                                 --   with the class recursive?
@@ -102,17 +111,27 @@ data IfaceClassOp = IfaceClassOp OccName DefMethSpec IfaceType
         -- Just False => ordinary polymorphic default method
         -- Just True  => generic default method
 
+data IfaceAT = IfaceAT IfaceDecl [IfaceATDefault]
+        -- Nothing => no default associated type instance
+        -- Just ds => default associated type instance from these templates
+
+data IfaceATDefault = IfaceATD [IfaceTvBndr] [IfaceType] IfaceType
+        -- Each associated type default template is a triple of:
+        --   1. TyVars of the RHS and family arguments (including the class TVs)
+        --   3. The instantiated family arguments
+        --   2. The RHS of the synonym
+
 data IfaceConDecls
-  = IfAbstractTyCon             -- No info
+  = IfAbstractTyCon Bool        -- c.f TyCon.AbstractTyCon
   | IfOpenDataTyCon             -- Open data family
   | IfDataTyCon [IfaceConDecl]  -- data type decls
   | IfNewTyCon  IfaceConDecl    -- newtype decls
 
 visibleIfConDecls :: IfaceConDecls -> [IfaceConDecl]
-visibleIfConDecls IfAbstractTyCon  = []
-visibleIfConDecls IfOpenDataTyCon  = []
-visibleIfConDecls (IfDataTyCon cs) = cs
-visibleIfConDecls (IfNewTyCon c)   = [c]
+visibleIfConDecls (IfAbstractTyCon {}) = []
+visibleIfConDecls IfOpenDataTyCon      = []
+visibleIfConDecls (IfDataTyCon cs)     = cs
+visibleIfConDecls (IfNewTyCon c)       = [c]
 
 data IfaceConDecl
   = IfCon {
@@ -226,19 +245,20 @@ data IfaceExpr
   | IfaceExt    IfExtName
   | IfaceType   IfaceType
   | IfaceCo     IfaceType		-- We re-use IfaceType for coercions
-  | IfaceTuple 	Boxity [IfaceExpr]	-- Saturated; type arguments omitted
+  | IfaceTuple 	TupleSort [IfaceExpr]	-- Saturated; type arguments omitted
   | IfaceLam 	IfaceBndr IfaceExpr
   | IfaceApp 	IfaceExpr IfaceExpr
   | IfaceCase	IfaceExpr IfLclName [IfaceAlt]
   | IfaceLet	IfaceBinding  IfaceExpr
-  | IfaceNote	IfaceNote IfaceExpr
   | IfaceCast   IfaceExpr IfaceCoercion
   | IfaceLit    Literal
   | IfaceFCall  ForeignCall IfaceType
-  | IfaceTick   Module Int
+  | IfaceTick   IfaceTickish IfaceExpr    -- from Tick tickish E
 
-data IfaceNote = IfaceSCC CostCentre
-               | IfaceCoreNote String
+data IfaceTickish
+  = IfaceHpcTick Module Int                -- from HpcTick x
+  | IfaceSCC     CostCentre Bool Bool      -- from ProfNote
+  -- no breakpoints: we never export these into interface files
 
 type IfaceAlt = (IfaceConAlt, [IfLclName], IfaceExpr)
         -- Note: IfLclName, not IfaceBndr (and same with the case binder)
@@ -247,7 +267,6 @@ type IfaceAlt = (IfaceConAlt, [IfLclName], IfaceExpr)
 
 data IfaceConAlt = IfaceDefault
                  | IfaceDataAlt IfExtName
-                 | IfaceTupleAlt Boxity
                  | IfaceLitAlt Literal
 
 data IfaceBinding
@@ -338,7 +357,7 @@ ifaceDeclSubBndrs :: IfaceDecl -> [OccName]
 -- TyThing.getOccName should define a bijection between the two lists.
 -- This invariant is used in LoadIface.loadDecl (see note [Tricky iface loop])
 -- The order of the list does not matter.
-ifaceDeclSubBndrs IfaceData {ifCons = IfAbstractTyCon}  = []
+ifaceDeclSubBndrs IfaceData {ifCons = IfAbstractTyCon {}}  = []
 
 -- Newtype
 ifaceDeclSubBndrs (IfaceData {ifName = tc_occ,
@@ -371,31 +390,27 @@ ifaceDeclSubBndrs (IfaceData {ifName = tc_occ,
           has_wrapper = ifConWrapper con_decl     -- This is the reason for
                                                   -- having the ifConWrapper field!
 
-ifaceDeclSubBndrs (IfaceClass {ifCtxt = sc_ctxt, ifName = cls_occ,
+ifaceDeclSubBndrs (IfaceClass {ifCtxt = sc_ctxt, ifName = cls_tc_occ,
                                ifSigs = sigs, ifATs = ats })
-  = -- dictionary datatype:
-    --   type constructor
-    tc_occ :
-    --   (possibly) newtype coercion
+  = --   (possibly) newtype coercion
     co_occs ++
     --    data constructor (DataCon namespace)
     --    data worker (Id namespace)
     --    no wrapper (class dictionaries never have a wrapper)
     [dc_occ, dcww_occ] ++
     -- associated types
-    [ifName at | at <- ats ] ++
+    [ifName at | IfaceAT at _ <- ats ] ++
     -- superclass selectors
-    [mkSuperDictSelOcc n cls_occ | n <- [1..n_ctxt]] ++
+    [mkSuperDictSelOcc n cls_tc_occ | n <- [1..n_ctxt]] ++
     -- operation selectors
     [op | IfaceClassOp op  _ _ <- sigs]
   where
     n_ctxt = length sc_ctxt
     n_sigs = length sigs
-    tc_occ  = mkClassTyConOcc cls_occ
-    dc_occ  = mkClassDataConOcc cls_occ
-    co_occs | is_newtype = [mkNewTyCoOcc tc_occ]
+    co_occs | is_newtype = [mkNewTyCoOcc cls_tc_occ]
             | otherwise  = []
     dcww_occ = mkDataConWorkerOcc dc_occ
+    dc_occ = mkClassDataConOcc cls_tc_occ
     is_newtype = n_sigs + n_ctxt == 1 -- Sigh
 
 ifaceDeclSubBndrs (IfaceSyn {ifName = tc_occ,
@@ -443,10 +458,10 @@ pprIfaceDecl (IfaceData {ifName = tycon, ifCtxt = context,
                 pprFamily mbFamInst])
   where
     pp_nd = case condecls of
-                IfAbstractTyCon -> ptext (sLit "data")
-                IfOpenDataTyCon -> ptext (sLit "data family")
-                IfDataTyCon _   -> ptext (sLit "data")
-                IfNewTyCon _    -> ptext (sLit "newtype")
+                IfAbstractTyCon dis -> ptext (sLit "abstract") <> parens (ppr dis)
+                IfOpenDataTyCon     -> ptext (sLit "data family")
+                IfDataTyCon _       -> ptext (sLit "data")
+                IfNewTyCon _        -> ptext (sLit "newtype")
 
 pprIfaceDecl (IfaceClass {ifCtxt = context, ifName = clas, ifTyVars = tyvars,
                           ifFDs = fds, ifATs = ats, ifSigs = sigs,
@@ -466,17 +481,27 @@ pprFamily (Just famInst) = ptext (sLit "FamilyInstance:") <+> ppr famInst
 instance Outputable IfaceClassOp where
    ppr (IfaceClassOp n dm ty) = ppr n <+> ppr dm <+> dcolon <+> ppr ty
 
+instance Outputable IfaceAT where
+   ppr (IfaceAT d defs) = hang (ppr d) 2 (vcat (map ppr defs))
+
+instance Outputable IfaceATDefault where
+   ppr (IfaceATD tvs pat_tys ty) = ppr tvs <+> hsep (map ppr pat_tys) <+> char '=' <+> ppr ty
+
 pprIfaceDeclHead :: IfaceContext -> OccName -> [IfaceTvBndr] -> SDoc
 pprIfaceDeclHead context thing tyvars
   = hsep [pprIfaceContext context, parenSymOcc thing (ppr thing),
           pprIfaceTvBndrs tyvars]
 
 pp_condecls :: OccName -> IfaceConDecls -> SDoc
-pp_condecls _  IfAbstractTyCon  = ptext (sLit "{- abstract -}")
+pp_condecls _  (IfAbstractTyCon {}) = empty
+pp_condecls _  IfOpenDataTyCon      = empty
 pp_condecls tc (IfNewTyCon c)   = equals <+> pprIfaceConDecl tc c
-pp_condecls _  IfOpenDataTyCon  = empty
 pp_condecls tc (IfDataTyCon cs) = equals <+> sep (punctuate (ptext (sLit " |"))
                                                             (map (pprIfaceConDecl tc) cs))
+
+mkIfaceEqPred :: IfaceType -> IfaceType -> IfacePredType
+-- IA0_NOTE: This is wrong, but only used for pretty-printing.
+mkIfaceEqPred ty1 ty2 = IfaceTyConApp (IfaceTc eqTyConName) [ty1, ty2]
 
 pprIfaceConDecl :: OccName -> IfaceConDecl -> SDoc
 pprIfaceConDecl tc
@@ -498,7 +523,7 @@ pprIfaceConDecl tc
     main_payload = ppr name <+> dcolon <+>
                    pprIfaceForAllPart (univ_tvs ++ ex_tvs) (eq_ctxt ++ ctxt) pp_tau
 
-    eq_ctxt = [(IfaceEqPred (IfaceTyVar (occNameFS tv)) ty)
+    eq_ctxt = [(mkIfaceEqPred (IfaceTyVar (occNameFS tv)) ty)
               | (tv,ty) <- eq_spec]
 
         -- A bit gruesome this, but we can't form the full con_tau, and ppr it,
@@ -557,7 +582,6 @@ pprIfaceExpr _       (IfaceLcl v)       = ppr v
 pprIfaceExpr _       (IfaceExt v)       = ppr v
 pprIfaceExpr _       (IfaceLit l)       = ppr l
 pprIfaceExpr _       (IfaceFCall cc ty) = braces (ppr cc <+> ppr ty)
-pprIfaceExpr _       (IfaceTick m ix)   = braces (text "tick" <+> ppr m <+> ppr ix)
 pprIfaceExpr _       (IfaceType ty)     = char '@' <+> pprParendIfaceType ty
 pprIfaceExpr _       (IfaceCo co)       = text "@~" <+> pprParendIfaceType co
 
@@ -601,21 +625,27 @@ pprIfaceExpr add_par (IfaceLet (IfaceRec pairs) body)
                   ptext (sLit "} in"),
                   pprIfaceExpr noParens body])
 
-pprIfaceExpr add_par (IfaceNote note body) = add_par $ ppr note
-                                                <+> pprParendIfaceExpr body
+pprIfaceExpr add_par (IfaceTick tickish e)
+  = add_par (pprIfaceTickish tickish <+> pprIfaceExpr noParens e)
 
 ppr_alt :: (IfaceConAlt, [IfLclName], IfaceExpr) -> SDoc
 ppr_alt (con, bs, rhs) = sep [ppr_con_bs con bs,
                          arrow <+> pprIfaceExpr noParens rhs]
 
 ppr_con_bs :: IfaceConAlt -> [IfLclName] -> SDoc
-ppr_con_bs (IfaceTupleAlt tup_con) bs = tupleParens tup_con (interpp'SP bs)
-ppr_con_bs con bs                     = ppr con <+> hsep (map ppr bs)
+ppr_con_bs con bs = ppr con <+> hsep (map ppr bs)
 
 ppr_bind :: (IfaceLetBndr, IfaceExpr) -> SDoc
 ppr_bind (IfLetBndr b ty info, rhs)
   = sep [hang (ppr b <+> dcolon <+> ppr ty) 2 (ppr info),
          equals <+> pprIfaceExpr noParens rhs]
+
+------------------
+pprIfaceTickish :: IfaceTickish -> SDoc
+pprIfaceTickish (IfaceHpcTick m ix)
+  = braces (text "tick" <+> ppr m <+> ppr ix)
+pprIfaceTickish (IfaceSCC cc tick scope)
+  = braces (pprCostCentreCore cc <+> ppr tick <+> ppr scope)
 
 ------------------
 pprIfaceApp :: IfaceExpr -> [SDoc] -> SDoc
@@ -624,18 +654,10 @@ pprIfaceApp (IfaceApp fun arg) args = pprIfaceApp fun $
 pprIfaceApp fun                args = sep (pprParendIfaceExpr fun : args)
 
 ------------------
-instance Outputable IfaceNote where
-    ppr (IfaceSCC cc)     = pprCostCentreCore cc
-    ppr (IfaceCoreNote s) = ptext (sLit "__core_note")
-                            <+> pprHsString (mkFastString s)
-
-
 instance Outputable IfaceConAlt where
     ppr IfaceDefault      = text "DEFAULT"
     ppr (IfaceLitAlt l)   = ppr l
     ppr (IfaceDataAlt d)  = ppr d
-    ppr (IfaceTupleAlt _) = panic "ppr IfaceConAlt"
-    -- IfaceTupleAlt is handled by the case-alternative printer
 
 ------------------
 instance Outputable IfaceIdDetails where
@@ -697,11 +719,13 @@ freeNamesIfDecl d@IfaceData{} =
 freeNamesIfDecl d@IfaceSyn{} =
   freeNamesIfTvBndrs (ifTyVars d) &&&
   freeNamesIfSynRhs (ifSynRhs d) &&&
-  freeNamesIfTcFam (ifFamInst d)
+  freeNamesIfTcFam (ifFamInst d) &&&
+  freeNamesIfKind (ifSynKind d) -- IA0_NOTE: because of promotion, we
+                                -- return names in the kind signature
 freeNamesIfDecl d@IfaceClass{} =
   freeNamesIfTvBndrs (ifTyVars d) &&&
   freeNamesIfContext (ifCtxt d) &&&
-  freeNamesIfDecls   (ifATs d) &&&
+  fnList freeNamesIfAT     (ifATs d) &&&
   fnList freeNamesIfClsSig (ifSigs d)
 
 freeNamesIfIdDetails :: IfaceIdDetails -> NameSet
@@ -720,10 +744,17 @@ freeNamesIfTcFam Nothing =
   emptyNameSet
 
 freeNamesIfContext :: IfaceContext -> NameSet
-freeNamesIfContext = fnList freeNamesIfPredType
+freeNamesIfContext = fnList freeNamesIfType
 
-freeNamesIfDecls :: [IfaceDecl] -> NameSet
-freeNamesIfDecls = fnList freeNamesIfDecl
+freeNamesIfAT :: IfaceAT -> NameSet
+freeNamesIfAT (IfaceAT decl defs)
+  = freeNamesIfDecl decl &&&
+    fnList fn_at_def defs
+  where
+    fn_at_def (IfaceATD tvs pat_tys ty)
+      = freeNamesIfTvBndrs tvs &&&
+        fnList freeNamesIfType pat_tys &&&
+        freeNamesIfType ty
 
 freeNamesIfClsSig :: IfaceClassOp -> NameSet
 freeNamesIfClsSig (IfaceClassOp _n _dm ty) = freeNamesIfType ty
@@ -741,18 +772,12 @@ freeNamesIfConDecl c =
   fnList freeNamesIfType (ifConArgTys c) &&&
   fnList freeNamesIfType (map snd (ifConEqSpec c)) -- equality constraints
 
-freeNamesIfPredType :: IfacePredType -> NameSet
-freeNamesIfPredType (IfaceClassP cl tys) =
-   unitNameSet cl &&& fnList freeNamesIfType tys
-freeNamesIfPredType (IfaceIParam _n ty) =
-   freeNamesIfType ty
-freeNamesIfPredType (IfaceEqPred ty1 ty2) =
-   freeNamesIfType ty1 &&& freeNamesIfType ty2
+freeNamesIfKind :: IfaceType -> NameSet
+freeNamesIfKind = freeNamesIfType
 
 freeNamesIfType :: IfaceType -> NameSet
 freeNamesIfType (IfaceTyVar _)        = emptyNameSet
 freeNamesIfType (IfaceAppTy s t)      = freeNamesIfType s &&& freeNamesIfType t
-freeNamesIfType (IfacePredTy st)      = freeNamesIfPredType st
 freeNamesIfType (IfaceTyConApp tc ts) =
    freeNamesIfTc tc &&& fnList freeNamesIfType ts
 freeNamesIfType (IfaceForAllTy tv t)  =
@@ -776,8 +801,8 @@ freeNamesIfLetBndr (IfLetBndr _name ty info) = freeNamesIfType ty
                                              &&& freeNamesIfIdInfo info
 
 freeNamesIfTvBndr :: IfaceTvBndr -> NameSet
-freeNamesIfTvBndr (_fs,k) = freeNamesIfType k
-    -- kinds can have Names inside, when the Kind is an equality predicate
+freeNamesIfTvBndr (_fs,k) = freeNamesIfKind k
+    -- kinds can have Names inside, because of promotion
 
 freeNamesIfIdBndr :: IfaceIdBndr -> NameSet
 freeNamesIfIdBndr = freeNamesIfTvBndr
@@ -807,7 +832,7 @@ freeNamesIfExpr (IfaceTuple _ as) = fnList freeNamesIfExpr as
 freeNamesIfExpr (IfaceLam b body) = freeNamesIfBndr b &&& freeNamesIfExpr body
 freeNamesIfExpr (IfaceApp f a)    = freeNamesIfExpr f &&& freeNamesIfExpr a
 freeNamesIfExpr (IfaceCast e co)  = freeNamesIfExpr e &&& freeNamesIfType co
-freeNamesIfExpr (IfaceNote _n r)  = freeNamesIfExpr r
+freeNamesIfExpr (IfaceTick _ e)   = freeNamesIfExpr e
 
 freeNamesIfExpr (IfaceCase s _ alts)
   = freeNamesIfExpr s 
@@ -839,6 +864,7 @@ freeNamesIfTc _ = emptyNameSet
 
 freeNamesIfCo :: IfaceCoCon -> NameSet
 freeNamesIfCo (IfaceCoAx tc) = unitNameSet tc
+-- ToDo: include IfaceIPCoAx? Probably not necessary.
 freeNamesIfCo _ = emptyNameSet
 
 freeNamesIfRule :: IfaceRule -> NameSet

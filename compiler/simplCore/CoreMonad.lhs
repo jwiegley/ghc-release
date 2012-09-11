@@ -4,6 +4,13 @@
 \section[CoreMonad]{The core pipeline monad}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 {-# LANGUAGE UndecidableInstances #-}
 
 module CoreMonad (
@@ -13,15 +20,14 @@ module CoreMonad (
     FloatOutSwitches(..),
     dumpSimplPhase, pprPassDetails, 
 
-    defaultGentleSimplToDo,
-    
     -- * Plugins
     PluginPass, Plugin(..), CommandLineOption, 
     defaultPlugin, bindsOnlyPass,
 
     -- * Counting
     SimplCount, doSimplTick, doFreeSimplTick, simplCountN,
-    pprSimplCount, plusSimplCount, zeroSimplCount, isZeroSimplCount, Tick(..),
+    pprSimplCount, plusSimplCount, zeroSimplCount, 
+    isZeroSimplCount, hasDetailedCounts, Tick(..),
 
     -- * The monad
     CoreM, runCoreM,
@@ -89,7 +95,8 @@ import UniqSupply
 import UniqFM       ( UniqFM, mapUFM, filterUFM )
 import MonadUtils
 
-import Util		( split )
+import Util		( split, sortLe )
+import ListSetOps	( runs )
 import Data.List	( intersperse )
 import Data.Dynamic
 import Data.IORef
@@ -128,7 +135,7 @@ stuff before and after core passes, and do Core Lint when necessary.
 showPass :: DynFlags -> CoreToDo -> IO ()
 showPass dflags pass = Err.showPass dflags (showSDoc (ppr pass))
 
-endPass :: DynFlags -> CoreToDo -> [CoreBind] -> [CoreRule] -> IO ()
+endPass :: DynFlags -> CoreToDo -> CoreProgram -> [CoreRule] -> IO ()
 endPass dflags pass binds rules
   = do { dumpPassResult dflags mb_flag (ppr pass) empty binds rules
        ; lintPassResult dflags pass binds }      
@@ -147,7 +154,7 @@ dumpPassResult :: DynFlags
 	       	  			--            name is specified by df
                -> SDoc 			-- Header
                -> SDoc 			-- Extra info to appear after header
-               -> [CoreBind] -> [CoreRule] 
+               -> CoreProgram -> [CoreRule] 
                -> IO ()
 dumpPassResult dflags mb_flag hdr extra_info binds rules
   | Just dflag <- mb_flag
@@ -169,7 +176,7 @@ dumpPassResult dflags mb_flag hdr extra_info binds rules
                     , ptext (sLit "------ Local rules for imported ids --------")
                     , pprRules rules ]
 
-lintPassResult :: DynFlags -> CoreToDo -> [CoreBind] -> IO ()
+lintPassResult :: DynFlags -> CoreToDo -> CoreProgram -> IO ()
 lintPassResult dflags pass binds
   = when (dopt Opt_DoCoreLinting dflags) $
     do { let (warns, errs) = lintCoreBindings binds
@@ -177,7 +184,7 @@ lintPassResult dflags pass binds
        ; displayLintResults dflags pass warns errs binds  }
 
 displayLintResults :: DynFlags -> CoreToDo
-                   -> Bag Err.Message -> Bag Err.Message -> [CoreBind]
+                   -> Bag Err.Message -> Bag Err.Message -> CoreProgram
                    -> IO ()
 displayLintResults dflags pass warns errs binds
   | not (isEmptyBag errs)
@@ -237,7 +244,6 @@ data CoreToDo           -- These are diff core-to-core passes,
   | CoreDoWorkerWrapper
   | CoreDoSpecialising
   | CoreDoSpecConstr
-  | CoreDoGlomBinds
   | CoreCSE
   | CoreDoRuleCheck CompilerPhase String   -- Check for non-application of rules
                                            -- matching this string
@@ -245,8 +251,9 @@ data CoreToDo           -- These are diff core-to-core passes,
   | CoreDoNothing                -- Useful when building up
   | CoreDoPasses [CoreToDo]      -- lists of these things
 
-  | CoreDesugar	 -- Not strictly a core-to-core pass, but produces
-                 -- Core output, and hence useful to pass to endPass
+  | CoreDesugar    -- Right after desugaring, no simple optimisation yet!
+  | CoreDesugarOpt -- CoreDesugarXXX: Not strictly a core-to-core pass, but produces
+                       --                 Core output, and hence useful to pass to endPass
 
   | CoreTidy
   | CorePrep
@@ -268,13 +275,13 @@ coreDumpFlag CoreDoSpecConstr         = Just Opt_D_dump_spec
 coreDumpFlag CoreCSE                  = Just Opt_D_dump_cse 
 coreDumpFlag CoreDoVectorisation      = Just Opt_D_dump_vect
 coreDumpFlag CoreDesugar              = Just Opt_D_dump_ds 
+coreDumpFlag CoreDesugarOpt           = Just Opt_D_dump_ds 
 coreDumpFlag CoreTidy                 = Just Opt_D_dump_simpl
 coreDumpFlag CorePrep                 = Just Opt_D_dump_prep
 
 coreDumpFlag CoreDoPrintCore         = Nothing
 coreDumpFlag (CoreDoRuleCheck {})    = Nothing
 coreDumpFlag CoreDoNothing           = Nothing
-coreDumpFlag CoreDoGlomBinds         = Nothing
 coreDumpFlag (CoreDoPasses {})       = Nothing
 
 instance Outputable CoreToDo where
@@ -290,12 +297,12 @@ instance Outputable CoreToDo where
   ppr CoreDoSpecConstr         = ptext (sLit "SpecConstr")
   ppr CoreCSE                  = ptext (sLit "Common sub-expression")
   ppr CoreDoVectorisation      = ptext (sLit "Vectorisation")
-  ppr CoreDesugar              = ptext (sLit "Desugar")
+  ppr CoreDesugar              = ptext (sLit "Desugar (before optimization)")
+  ppr CoreDesugarOpt           = ptext (sLit "Desugar (after optimization)")
   ppr CoreTidy                 = ptext (sLit "Tidy Core")
   ppr CorePrep 		       = ptext (sLit "CorePrep")
   ppr CoreDoPrintCore          = ptext (sLit "Print core")
   ppr (CoreDoRuleCheck {})     = ptext (sLit "Rule check")
-  ppr CoreDoGlomBinds          = ptext (sLit "Glom binds")
   ppr CoreDoNothing            = ptext (sLit "CoreDoNothing")
   ppr (CoreDoPasses {})        = ptext (sLit "CoreDoPasses")
 
@@ -356,17 +363,6 @@ pprFloatOutSwitches sw
      [ ptext (sLit "Lam =")    <+> ppr (floatOutLambdas sw)
      , ptext (sLit "Consts =") <+> ppr (floatOutConstants sw)
      , ptext (sLit "PAPs =")   <+> ppr (floatOutPartialApplications sw) ])
-
--- | A reasonably gentle simplification pass for doing "obvious" simplifications
-defaultGentleSimplToDo :: CoreToDo
-defaultGentleSimplToDo = CoreDoSimplify 4 -- 4 is the default maxSimpleIterations
-                       (SimplMode { sm_phase = InitialPhase
-                                  , sm_names = ["Gentle"]
-                                  , sm_rules = True     -- Note [RULEs enabled in SimplGently]
-                                  , sm_inline = False
-                                  , sm_eta_expand = False
-                                  , sm_case_case = False 
-                                  })
 
 -- The core-to-core pass ordering is derived from the DynFlags:
 runWhen :: Bool -> CoreToDo -> CoreToDo
@@ -458,7 +454,7 @@ defaultPlugin = Plugin {
 -- | A description of the plugin pass itself
 type PluginPass = ModGuts -> CoreM ModGuts
 
-bindsOnlyPass :: ([CoreBind] -> CoreM [CoreBind]) -> ModGuts -> CoreM ModGuts
+bindsOnlyPass :: (CoreProgram -> CoreM CoreProgram) -> ModGuts -> CoreM ModGuts
 bindsOnlyPass pass guts
   = do { binds' <- pass (mg_binds guts)
        ; return (guts { mg_binds = binds' }) }
@@ -477,6 +473,7 @@ verboseSimplStats = opt_PprStyle_Debug		-- For now, anyway
 
 zeroSimplCount	   :: DynFlags -> SimplCount
 isZeroSimplCount   :: SimplCount -> Bool
+hasDetailedCounts  :: SimplCount -> Bool
 pprSimplCount	   :: SimplCount -> SDoc
 doSimplTick, doFreeSimplTick :: Tick -> SimplCount -> SimplCount
 plusSimplCount     :: SimplCount -> SimplCount -> SimplCount
@@ -515,6 +512,9 @@ zeroSimplCount dflags
 
 isZeroSimplCount (VerySimplCount n)    	    = n==0
 isZeroSimplCount (SimplCount { ticks = n }) = n==0
+
+hasDetailedCounts (VerySimplCount {}) = False
+hasDetailedCounts (SimplCount {})     = True
 
 doFreeSimplTick tick sc@SimplCount { details = dts } 
   = sc { details = dts `addTick` tick }
@@ -556,7 +556,7 @@ pprSimplCount (VerySimplCount n) = ptext (sLit "Total ticks:") <+> int n
 pprSimplCount (SimplCount { ticks = tks, details = dts, log1 = l1, log2 = l2 })
   = vcat [ptext (sLit "Total ticks:    ") <+> int tks,
 	  blankLine,
-	  pprTickCounts (Map.toList dts),
+	  pprTickCounts dts,
 	  if verboseSimplStats then
 		vcat [blankLine,
 		      ptext (sLit "Log (most recent first)"),
@@ -564,23 +564,23 @@ pprSimplCount (SimplCount { ticks = tks, details = dts, log1 = l1, log2 = l2 })
 	  else empty
     ]
 
-pprTickCounts :: [(Tick,Int)] -> SDoc
-pprTickCounts [] = empty
-pprTickCounts ((tick1,n1):ticks)
-  = vcat [int tot_n <+> text (tickString tick1),
-	  pprTCDetails real_these,
-	  pprTickCounts others
-    ]
+pprTickCounts :: Map Tick Int -> SDoc
+pprTickCounts counts
+  = vcat (map pprTickGroup groups)
   where
-    tick1_tag		= tickToTag tick1
-    (these, others)	= span same_tick ticks
-    real_these		= (tick1,n1):these
-    same_tick (tick2,_) = tickToTag tick2 == tick1_tag
-    tot_n		= sum [n | (_,n) <- real_these]
+    groups :: [[(Tick,Int)]]	-- Each group shares a comon tag
+    	      			-- toList returns common tags adjacent
+    groups = runs same_tag (Map.toList counts)
+    same_tag (tick1,_) (tick2,_) = tickToTag tick1 == tickToTag tick2
 
-pprTCDetails :: [(Tick, Int)] -> SDoc
-pprTCDetails ticks
-  = nest 4 (vcat [int n <+> pprTickCts tick | (tick,n) <- ticks])
+pprTickGroup :: [(Tick, Int)] -> SDoc
+pprTickGroup group@((tick1,_):_)
+  = hang (int (sum [n | (_,n) <- group]) <+> text (tickString tick1))
+       2 (vcat [ int n <+> pprTickCts tick  
+               | (tick,n) <- sortLe le group])
+  where
+    le (_,n1) (_,n2) = n2 <= n1   -- We want largest first
+pprTickGroup [] = panic "pprTickGroup"
 \end{code}
 
 

@@ -1,8 +1,12 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# OPTIONS_GHC -fno-warn-unused-imports #-}
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Trustworthy #-}
+#endif
+
 -----------------------------------------------------------------------------
 -- |
--- Module      :  System.Posix.Files
+-- Module      :  System.Posix.Directory
 -- Copyright   :  (c) The University of Glasgow 2002
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
 -- 
@@ -10,7 +14,7 @@
 -- Stability   :  provisional
 -- Portability :  non-portable (requires POSIX)
 --
--- POSIX directory support
+-- String-based POSIX directory support
 --
 -----------------------------------------------------------------------------
 
@@ -39,6 +43,9 @@ import System.Posix.Error
 import System.Posix.Types
 import Foreign
 import Foreign.C
+
+import System.Posix.Directory.Common
+
 #if __GLASGOW_HASKELL__ > 700
 import System.Posix.Internals (withFilePath, peekFilePath)
 #elif __GLASGOW_HASKELL__ > 611
@@ -66,8 +73,6 @@ createDirectory name mode =
 
 foreign import ccall unsafe "mkdir"
   c_mkdir :: CString -> CMode -> IO CInt
-
-newtype DirStream = DirStream (Ptr CDir)
 
 -- | @openDirStream dir@ calls @opendir@ to obtain a
 --   directory stream for @dir@.
@@ -106,9 +111,6 @@ readDirStream (DirStream dirp) =
 		    then return []
 		    else throwErrno "readDirStream"
 
-type CDir       = ()
-type CDirent    = ()
-
 -- traversing directories
 foreign import ccall unsafe "__hscore_readdir"
   c_readdir  :: Ptr CDir -> Ptr (Ptr CDirent) -> IO CInt
@@ -119,45 +121,6 @@ foreign import ccall unsafe "__hscore_free_dirent"
 foreign import ccall unsafe "__hscore_d_name"
   d_name :: Ptr CDirent -> IO CString
 
--- | @rewindDirStream dp@ calls @rewinddir@ to reposition
---   the directory stream @dp@ at the beginning of the directory.
-rewindDirStream :: DirStream -> IO ()
-rewindDirStream (DirStream dirp) = c_rewinddir dirp
-
-foreign import ccall unsafe "rewinddir"
-   c_rewinddir :: Ptr CDir -> IO ()
-
--- | @closeDirStream dp@ calls @closedir@ to close
---   the directory stream @dp@.
-closeDirStream :: DirStream -> IO ()
-closeDirStream (DirStream dirp) = do
-  throwErrnoIfMinus1Retry_ "closeDirStream" (c_closedir dirp)
-
-foreign import ccall unsafe "closedir"
-   c_closedir :: Ptr CDir -> IO CInt
-
-newtype DirStreamOffset = DirStreamOffset COff
-
-seekDirStream :: DirStream -> DirStreamOffset -> IO ()
-seekDirStream (DirStream dirp) (DirStreamOffset off) =
-  c_seekdir dirp off
-
-foreign import ccall unsafe "seekdir"
-  c_seekdir :: Ptr CDir -> COff -> IO ()
-
-tellDirStream :: DirStream -> IO DirStreamOffset
-tellDirStream (DirStream dirp) = do
-  off <- c_telldir dirp
-  return (DirStreamOffset off)
-
-foreign import ccall unsafe "telldir"
-  c_telldir :: Ptr CDir -> IO COff
-
-{-
- Renamings of functionality provided via Directory interface,
- kept around for b.wards compatibility and for having more POSIXy
- names
--}
 
 -- | @getWorkingDirectory@ calls @getcwd@ to obtain the name
 --   of the current working directory.
@@ -203,10 +166,3 @@ removeDirectory path =
 
 foreign import ccall unsafe "rmdir"
    c_rmdir :: CString -> IO CInt
-
-changeWorkingDirectoryFd :: Fd -> IO ()
-changeWorkingDirectoryFd (Fd fd) = 
-  throwErrnoIfMinus1Retry_ "changeWorkingDirectoryFd" (c_fchdir fd)
-
-foreign import ccall unsafe "fchdir"
-  c_fchdir :: CInt -> IO CInt

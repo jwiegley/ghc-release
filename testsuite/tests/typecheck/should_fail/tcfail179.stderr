@@ -1,5 +1,5 @@
 
-tcfail179.hs:14:41:
+tcfail179.hs:14:39:
     Couldn't match type `x' with `s'
       `x' is a rigid type variable bound by
           a pattern with constructor
@@ -8,7 +8,6 @@ tcfail179.hs:14:41:
           at tcfail179.hs:14:14
       `s' is a rigid type variable bound by
           the type signature for run :: T s -> Int at tcfail179.hs:13:1
-    Expected type: x -> s
-      Actual type: x -> x
-    In the second argument of `g', namely `id'
+    In the first argument of `g', namely `x'
     In the expression: g x id
+    In a pattern binding: (x, _, b) = g x id

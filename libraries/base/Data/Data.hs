@@ -23,7 +23,6 @@
 -- For more information, please visit the new
 -- SYB wiki: <http://www.cs.uu.nl/wiki/bin/view/GenericProgramming/SYB>.
 --
---
 -----------------------------------------------------------------------------
 
 module Data.Data (
@@ -767,7 +766,7 @@ mkPrimCon dt str cr = Constr
 mkIntConstr :: DataType -> Integer -> Constr
 mkIntConstr = mkIntegralConstr
 
-mkIntegralConstr :: (Integral a) => DataType -> a -> Constr
+mkIntegralConstr :: (Integral a, Show a) => DataType -> a -> Constr
 mkIntegralConstr dt i = case datarep dt of
                   IntRep -> mkPrimCon dt (show i) (IntConstr (toInteger  i))
                   _ -> error "Data.Data.mkIntegralConstr"
@@ -777,7 +776,7 @@ mkIntegralConstr dt i = case datarep dt of
 mkFloatConstr :: DataType -> Double -> Constr
 mkFloatConstr dt = mkRealConstr dt . toRational
 
-mkRealConstr :: (Real a) => DataType -> a -> Constr
+mkRealConstr :: (Real a, Show a) => DataType -> a -> Constr
 mkRealConstr dt f = case datarep dt of
                     FloatRep -> mkPrimCon dt (show f) (FloatConstr (toRational f))
                     _ -> error "Data.Data.mkRealConstr"

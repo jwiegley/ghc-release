@@ -34,7 +34,8 @@ import Distribution.Package
          , packageVersion, Dependency(..) )
 import Distribution.PackageDescription
          ( GenericPackageDescription(packageDescription)
-         , PackageDescription(..), specVersion, BuildType(..) )
+         , PackageDescription(..), specVersion
+         , BuildType(..), knownBuildTypes )
 import Distribution.PackageDescription.Parse
          ( readPackageDescription )
 import Distribution.Simple.Configure
@@ -50,13 +51,13 @@ import Distribution.Simple.Command
          ( CommandUI(..), commandShowOptions )
 import Distribution.Simple.GHC
          ( ghcVerbosityOptions )
-import qualified Distribution.Client.PackageIndex as PackageIndex
-import Distribution.Client.PackageIndex (PackageIndex)
+import qualified Distribution.Simple.PackageIndex as PackageIndex
+import Distribution.Simple.PackageIndex (PackageIndex)
 import Distribution.Client.IndexUtils
          ( getInstalledPackages )
 import Distribution.Simple.Utils
          ( die, debug, info, cabalVersion, findPackageDesc, comparing
-         , createDirectoryIfMissingVerbose, rewriteFile )
+         , createDirectoryIfMissingVerbose, rewriteFile, intercalate )
 import Distribution.Client.Utils
          ( moreRecentFile, inDir )
 import Distribution.Text
@@ -78,7 +79,7 @@ data SetupScriptOptions = SetupScriptOptions {
     useCabalVersion  :: VersionRange,
     useCompiler      :: Maybe Compiler,
     usePackageDB     :: PackageDBStack,
-    usePackageIndex  :: Maybe (PackageIndex InstalledPackage),
+    usePackageIndex  :: Maybe PackageIndex,
     useProgramConfig :: ProgramConfiguration,
     useDistPref      :: FilePath,
     useLoggingHandle :: Maybe Handle,
@@ -116,11 +117,17 @@ setupWrapper verbosity options mpkg cmd flags extraArgs = do
       mkArgs cabalLibVersion = commandName cmd
                              : commandShowOptions cmd (flags cabalLibVersion)
                             ++ extraArgs
+  checkBuildType buildType'
   setupMethod verbosity options' (packageId pkg) buildType' mkArgs
   where
     getPkg = findPackageDesc (fromMaybe "." (useWorkingDir options))
          >>= readPackageDescription verbosity
          >>= return . packageDescription
+
+    checkBuildType (UnknownBuildType name) =
+      die $ "The build-type '" ++ name ++ "' is not known. Use one of: "
+         ++ intercalate ", " (map display knownBuildTypes) ++ "."
+    checkBuildType _ = return ()
 
 -- | Decide if we're going to be able to do a direct internal call to the
 -- entry point in the Cabal library or if we're going to have to compile
@@ -215,7 +222,7 @@ externalSetupMethod verbosity options pkg bt mkargs = do
       []   -> die $ "The package requires Cabal library version "
                  ++ display (useCabalVersion options)
                  ++ " but no suitable version is installed."
-      pkgs -> return $ bestVersion (map packageVersion pkgs)
+      pkgs -> return $ bestVersion (map fst pkgs)
     where
       bestVersion          = maximumBy (comparing preference)
       preference version   = (sameVersion, sameMajorVersion

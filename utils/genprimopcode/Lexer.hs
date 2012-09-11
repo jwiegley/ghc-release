@@ -15,7 +15,7 @@ import ParserM (ParserM (..), mkT, mkTv, Token(..), St, start_code,
                 set_start_code,
                 inc_brace_depth, dec_brace_depth,
                 show_pos, position, input,
-                AlexInput, alexGetChar, alexInputPrevChar)
+                AlexInput, alexGetChar, alexGetByte, alexInputPrevChar)
 
 #if __GLASGOW_HASKELL__ >= 603
 #include "ghcconfig.h"

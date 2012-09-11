@@ -1,11 +1,22 @@
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module TcUnify where
-import TcType	( TcTauType )
-import TcRnTypes( TcM )
-import Coercion (Coercion)
+import TcType     ( TcTauType, TcKind, Type, Kind )
+import VarEnv     ( TidyEnv )
+import TcRnTypes  ( TcM )
+import TcEvidence ( TcCoercion )
+import Outputable ( SDoc )
 
 -- This boot file exists only to tie the knot between
---		TcUnify and TcSimplify
+--              TcUnify and Inst
 
-unifyType :: TcTauType -> TcTauType -> TcM Coercion
+unifyType :: TcTauType -> TcTauType -> TcM TcCoercion
+unifyKindEq :: TcKind -> TcKind -> TcM ()
+mkKindErrorCtxt :: Type -> Type -> Kind -> Kind -> TidyEnv -> TcM (TidyEnv, SDoc)
 \end{code}

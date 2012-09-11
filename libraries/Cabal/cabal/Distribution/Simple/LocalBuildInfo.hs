@@ -75,7 +75,7 @@ import Distribution.Simple.Program (ProgramConfiguration)
 import Distribution.PackageDescription
          ( PackageDescription(..), withLib, Library(libBuildInfo), withExe
          , Executable(exeName, buildInfo), withTest, TestSuite(..)
-         , BuildInfo(buildable) )
+         , BuildInfo(buildable), Benchmark(..) )
 import Distribution.Package
          ( PackageId, Package(..), InstalledPackageId(..) )
 import Distribution.Simple.Compiler
@@ -117,6 +117,7 @@ data LocalBuildInfo = LocalBuildInfo {
                 -- ^ All the components to build, ordered by topological sort
                 -- over the intrapackage dependency graph
         testSuiteConfigs    :: [(String, ComponentLocalBuildInfo)],
+        benchmarkConfigs    :: [(String, ComponentLocalBuildInfo)],
         installedPkgs :: PackageIndex,
                 -- ^ All the info about the installed packages that the
                 -- current package depends on (directly or indirectly).
@@ -140,13 +141,17 @@ data LocalBuildInfo = LocalBuildInfo {
         progSuffix    :: PathTemplate -- ^Suffix to be appended to installed executables
   } deriving (Read, Show)
 
--- | External package dependencies for the package as a whole, the union of the
--- individual 'targetPackageDeps'.
+-- | External package dependencies for the package as a whole. This is the
+-- union of the individual 'componentPackageDeps', less any internal deps.
 externalPackageDeps :: LocalBuildInfo -> [(InstalledPackageId, PackageId)]
-externalPackageDeps lbi = nub $
+externalPackageDeps lbi = filter (not . internal . snd) $ nub $
   -- TODO:  what about non-buildable components?
-     maybe [] componentPackageDeps (libraryConfig lbi)
-  ++ concatMap (componentPackageDeps . snd) (executableConfigs lbi)
+       maybe [] componentPackageDeps (libraryConfig lbi)
+    ++ concatMap (componentPackageDeps . snd) (executableConfigs lbi)
+  where
+    -- True if this dependency is an internal one (depends on the library
+    -- defined in the same package).
+    internal pkgid = pkgid == packageId (localPkgDescr lbi)
 
 -- | The installed package Id we use for local packages registered in the local
 -- package db. This is what is used for intra-package deps between components.
@@ -157,14 +162,16 @@ inplacePackageId pkgid = InstalledPackageId (display pkgid ++ "-inplace")
 -- -----------------------------------------------------------------------------
 -- Buildable components
 
-data Component = CLib  Library
-               | CExe  Executable
-               | CTest TestSuite
+data Component = CLib   Library
+               | CExe   Executable
+               | CTest  TestSuite
+               | CBench Benchmark
                deriving (Show, Eq, Read)
 
-data ComponentName = CLibName  -- currently only a single lib
-                   | CExeName  String
-                   | CTestName String
+data ComponentName = CLibName   -- currently only a single lib
+                   | CExeName   String
+                   | CTestName  String
+                   | CBenchName String
                    deriving (Show, Eq, Read)
 
 data ComponentLocalBuildInfo = ComponentLocalBuildInfo {
@@ -179,11 +186,13 @@ data ComponentLocalBuildInfo = ComponentLocalBuildInfo {
 foldComponent :: (Library -> a)
               -> (Executable -> a)
               -> (TestSuite -> a)
+              -> (Benchmark -> a)
               -> Component
               -> a
-foldComponent f _ _ (CLib  lib) = f lib
-foldComponent _ f _ (CExe  exe) = f exe
-foldComponent _ _ f (CTest tst) = f tst
+foldComponent f _ _ _ (CLib   lib) = f lib
+foldComponent _ f _ _ (CExe   exe) = f exe
+foldComponent _ _ f _ (CTest  tst) = f tst
+foldComponent _ _ _ f (CBench bch) = f bch
 
 -- | Obtains all components (libs, exes, or test suites), transformed by the
 -- given function.  Useful for gathering dependencies with component context.
@@ -198,6 +207,9 @@ allComponentsBy pkg_descr f =
  ++ [ f (CTest tst) | tst <- testSuites pkg_descr
                     , buildable (testBuildInfo tst)
                     , testEnabled tst ]
+ ++ [ f (CBench bm) | bm <- benchmarks pkg_descr
+                    , buildable (benchmarkBuildInfo bm)
+                    , benchmarkEnabled bm ]
 
 -- |If the package description has a library section, call the given
 --  function with the library build info as argument.  Extended version of
@@ -264,14 +276,26 @@ withComponentsLBI pkg_descr lbi f = mapM_ compF (compBuildOrder lbi)
         missingtest = "internal error: component list includes a test suite "
                    ++ name ++ " but the package contains no such test suite."
 
+    compF (CBenchName name) =
+        case find (\bch -> benchmarkName bch == name) (benchmarks pkg_descr) of
+          Nothing  -> die missingbench
+          Just bch -> case lookup name (benchmarkConfigs lbi) of
+                        Nothing   -> die (missingBenchConf name)
+                        Just clbi -> f (CBench bch) clbi
+      where
+        missingbench = "internal error: component list includes a benchmark "
+                       ++ name ++ " but the package contains no such benchmark."
+
 missingLibConf :: String
-missingExeConf, missingTestConf :: String -> String
+missingExeConf, missingTestConf, missingBenchConf :: String -> String
 
 missingLibConf       = "internal error: the package contains a library "
                     ++ "but there is no corresponding configuration data"
 missingExeConf  name = "internal error: the package contains an executable "
                     ++ name ++ " but there is no corresponding configuration data"
 missingTestConf name = "internal error: the package contains a test suite "
+                    ++ name ++ " but there is no corresponding configuration data"
+missingBenchConf name = "internal error: the package contains a benchmark "
                     ++ name ++ " but there is no corresponding configuration data"
 
 

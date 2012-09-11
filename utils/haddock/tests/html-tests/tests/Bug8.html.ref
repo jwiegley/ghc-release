@@ -17,10 +17,12 @@ window.onload = function () {pageLoad();setSynopsis("mini_Bug8.html");};
   ><div id="package-header"
     ><ul class="links" id="page-menu"
       ><li
-	><A HREF="">Contents</a
+	><a href=""
+	  >Contents</a
 	  ></li
 	><li
-	><A HREF="">Index</a
+	><a href=""
+	  >Index</a
 	  ></li
 	></ul
       ><p class="caption" class="empty"
@@ -28,7 +30,15 @@ window.onload = function () {pageLoad();setSynopsis("mini_Bug8.html");};
       ></div
     ><div id="content"
     ><div id="module-header"
-      ><p class="caption"
+      ><table class="info"
+	><tr
+	  ><th
+	    >Safe Haskell</th
+	    ><td
+	    >None</td
+	    ></tr
+	  ></table
+	><p class="caption"
 	>Bug8</p
 	></div
       ><div id="interface"
@@ -49,8 +59,10 @@ window.onload = function () {pageLoad();setSynopsis("mini_Bug8.html");};
 	      ><td class="src"
 		><a name="v:Type" class="def"
 		  >Type</a
-		  > (<A HREF="">String</a
-		  >, [<A HREF="">Typ</a
+		  > (<a href=""
+		  >String</a
+		  >, [<a href=""
+		  >Typ</a
 		  >])</td
 		><td class="doc empty"
 		>&nbsp;</td
@@ -59,8 +71,10 @@ window.onload = function () {pageLoad();setSynopsis("mini_Bug8.html");};
 	      ><td class="src"
 		><a name="v:TFree" class="def"
 		  >TFree</a
-		  > (<A HREF="">String</a
-		  >, [<A HREF="">String</a
+		  > (<a href=""
+		  >String</a
+		  >, [<a href=""
+		  >String</a
 		  >])</td
 		><td class="doc empty"
 		>&nbsp;</td
@@ -68,12 +82,49 @@ window.onload = function () {pageLoad();setSynopsis("mini_Bug8.html");};
 	      ></table
 	    ></div
 	  ></div
+	><div class="top"
+	><p class="src"
+	  ><a name="v:-45--45--62-" class="def"
+	    >(--&gt;)</a
+	    > ::  t -&gt; t1 -&gt; <a href=""
+	    >Typ</a
+	    ></p
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><a name="v:-45--45--45--62-" class="def"
+	    >(---&gt;)</a
+	    > ::  [a] -&gt; <a href=""
+	    >Typ</a
+	    > -&gt; <a href=""
+	    >Typ</a
+	    ></p
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><a name="v:s" class="def"
+	    >s</a
+	    > ::  a</p
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><a name="v:t" class="def"
+	    >t</a
+	    > ::  a</p
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><a name="v:main" class="def"
+	    >main</a
+	    > ::  a</p
+	  ></div
 	></div
       ></div
     ><div id="footer"
     ><p
-      >Produced by <A HREF="">Haddock</a
-	> version 2.9.2</p
+      >Produced by <a href=""
+	>Haddock</a
+	> version 2.10.0</p
       ></div
     ></body
   ></html

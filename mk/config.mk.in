@@ -114,11 +114,13 @@ GhcDynamic=NO
 GhcProfiled=NO
 
 # Do we support shared libs?
-SharedLibsPlatformList = i386-unknown-linux x86_64-unknown-linux \
-	i386-unknown-freebsd x86_64-unknown-freebsd \
-	i386-unknown-openbsd x86_64-unknown-openbsd \
-	i386-unknown-mingw32 \
-	i386-apple-darwin powerpc-apple-darwin
+SharedLibsPlatformList =                        \
+    i386-unknown-linux   x86_64-unknown-linux   \
+    i386-unknown-freebsd x86_64-unknown-freebsd \
+    i386-unknown-openbsd x86_64-unknown-openbsd \
+    i386-unknown-netbsd  x86_64-unknown-netbsd  \
+    i386-unknown-mingw32                        \
+    i386-apple-darwin    x86_64-apple-darwin    powerpc-apple-darwin
 
 ifeq "$(SOLARIS_BROKEN_SHLD)" "NO"
 SharedLibsPlatformList += i386-unknown-solaris2
@@ -133,18 +135,14 @@ PlatformSupportsSharedLibs = $(if $(filter $(TARGETPLATFORM),\
 # register assignment or tail-calls, and is therefore a good way to get
 # started when porting GHC to new architectures.
 #
-# If this is set to NO, you can still use the unregisterised way
-# (way 'u') to get unregisterised code, but the default way will be
-# registerised.
-#
 # NOTE: the stage1 compiler will be a registerised binary (assuming
 # the compiler you build with is generating registerised binaries), but
 # the stage2 compiler will be an unregisterised binary.
 #
-ifneq "$(findstring $(HostArch_CPP), alpha hppa)" ""
-GhcUnregisterised=YES
-else
+ifneq "$(findstring $(HostArch_CPP), i386 x86_64 powerpc arm)" ""
 GhcUnregisterised=NO
+else
+GhcUnregisterised=YES
 endif
 
 # Build a compiler with a native code generator backend
@@ -165,7 +163,7 @@ HaveLibDL = @HaveLibDL@
 
 # ArchSupportsSMP should be set iff there is support for that arch in
 # includes/stg/SMP.h
-ArchSupportsSMP=$(strip $(patsubst $(HostArch_CPP), YES, $(findstring $(HostArch_CPP), i386 x86_64 sparc powerpc)))
+ArchSupportsSMP=$(strip $(patsubst $(HostArch_CPP), YES, $(findstring $(HostArch_CPP), i386 x86_64 sparc powerpc arm)))
 
 # lazy test, because $(GhcUnregisterised) might be set in build.mk later.
 GhcWithSMP=$(strip $(if $(filter YESNO, $(ArchSupportsSMP)$(GhcUnregisterised)),YES,NO))
@@ -173,7 +171,7 @@ GhcWithSMP=$(strip $(if $(filter YESNO, $(ArchSupportsSMP)$(GhcUnregisterised)),
 # Whether to include GHCi in the compiler.  Depends on whether the RTS linker
 # has support for this OS/ARCH combination.
 
-OsSupportsGHCi=$(strip $(patsubst $(HostOS_CPP), YES, $(findstring $(HostOS_CPP), mingw32 cygwin32 linux solaris2 freebsd dragonfly netbsd openbsd darwin)))
+OsSupportsGHCi=$(strip $(patsubst $(HostOS_CPP), YES, $(findstring $(HostOS_CPP), mingw32 cygwin32 linux solaris2 freebsd dragonfly netbsd openbsd darwin kfreebsdgnu)))
 ArchSupportsGHCi=$(strip $(patsubst $(HostArch_CPP), YES, $(findstring $(HostArch_CPP), i386 x86_64 powerpc sparc sparc64)))
 
 ifeq "$(OsSupportsGHCi)$(ArchSupportsGHCi)" "YESYES"
@@ -330,6 +328,23 @@ InstallExtraPackages = NO
 
 # Run "ghc-pkg check" on each package
 CHECK_PACKAGES = NO
+
+# ----------------------------------------------------------------------------
+
+# There are a number of things which technically depend on GHC (e.g. if
+# ghc changes then Haskell files may be compiled differently, or Cabal
+# packages may be configured differently). By default we therefore
+# have dependencies on the compiler executable.
+
+# However, in practice, having a dependency on GHC is just a pain: We
+# normally don't want to spend time recompiling other things while
+# we're working on the compiler, and even if we did, GHC will normally
+# decide compilation isn't needed anyway. So by setting LAX_DEPENDENCIES
+# to YES you can turn these dependencies into order-only dependencies,
+# i.e. GHC must exist, but if it's newer than other targets then
+# rebuilding is not necessary.
+
+LAX_DEPENDENCIES = NO
 
 # ----------------------------------------------------------------------------
 # Options for GHC's RTS
@@ -525,6 +540,16 @@ else
 GhcCanonVersion = $(GhcMajVersion)$(GhcMinVersion)
 endif
 
+# Work around #5453, which causes the stage1 compiler to segfault when
+# built with 7.2.1.
+ifeq "$(GhcVersion)" "7.2.1"
+CONF_HC_OPTS_STAGE0 += -fno-full-laziness
+compiler/cmm/Bitmap_HC_OPTS += -ffull-laziness
+# urgh.  Compiling cmm/Bitmap.hs with -fno-full-laziness results in 
+#   "gmp: overflow in mpz type"
+# for some unknown reason, so turn full-laziness back on for this module.
+endif
+
 #-----------------------------------------------------------------------------
 # C compiler
 #
@@ -670,6 +695,10 @@ LdIsGNULd		= @LdIsGNULd@
 # disable it with --build-id=none.
 LdHasBuildId	        = @LdHasBuildId@
 
+# Set to YES if ld has the --no_compact_unwind flag. See #5019
+# and compiler/main/DriverPipeline.hs.
+LdHasNoCompactUnwind	= @LdHasNoCompactUnwind@
+
 # On MSYS, building with SplitObjs=YES fails with 
 #   ar: Bad file number
 # see #3201.  We need to specify a smaller max command-line size
@@ -710,6 +739,14 @@ PATCH_CMD      = @PatchCmd@
 TAR_CMD        = @TarCmd@
 BZIP2_CMD      = bzip2
 GZIP_CMD       = gzip
+
+ifeq "$(Windows)" "YES"
+TOUCH_CMD      = $(utils/touchy_dist_INPLACE)
+TOUCH_DEP      = $(TOUCH_CMD)
+else
+TOUCH_CMD      = touch
+TOUCH_DEP      =
+endif
 
 HSCOLOUR_CMD   = @HSCOLOUR@
 
@@ -760,10 +797,17 @@ SRC_HAPPY_OPTS		= -agc --strict
 #
 ALEX			= @AlexCmd@
 ALEX_VERSION		= @AlexVersion@		
+Alex3			= @Alex3@
 #
 # Options to pass to Happy when we're going to compile the output with GHC
 #
+ifeq "$(Alex3)" "YES"
+# We aren't using the Unicode support in Alex 3.0 yet, in fact we do our own
+# Unicode handling, so diable Alex's.
+SRC_ALEX_OPTS		= -g --latin1
+else
 SRC_ALEX_OPTS		= -g
+endif
 
 # Should we build haddock docs?
 HADDOCK_DOCS = YES

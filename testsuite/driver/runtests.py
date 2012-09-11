@@ -2,10 +2,6 @@
 # (c) Simon Marlow 2002
 #
 
-# ToDo:
-#   GHCi tests
-#   expect failure for some ways only
-
 import sys
 import os
 import string
@@ -41,6 +37,7 @@ long_options = [
   "way=",		# just this way
   "skipway=",		# skip this way
   "threads=",           # threads to run simultaneously
+  "check-files-written", # check files aren't written by multiple tests
   ]
 
 opts, args = getopt.getopt(sys.argv[1:], "e:", long_options)
@@ -85,6 +82,9 @@ for opt,arg in opts:
     if opt == '--threads':
         config.threads = int(arg)
         config.use_threads = 1
+
+    if opt == '--check-files-written':
+        config.check_files_written = True
 
 if config.use_threads == 1:
     # Trac #1558 says threads don't work in python 2.4.4, but do
@@ -166,7 +166,7 @@ from testlib import *
 # in order for the dynamic library tests to work.
 if windows or darwin:
     pkginfo = getStdout([config.ghc_pkg, 'dump'])
-    topdir = re.sub('\\\\','/',getStdout([config.compiler, '--print-libdir'])).rstrip()
+    topdir = config.libdir
     for line in pkginfo.split('\n'):
         if line.startswith('library-dirs:'):
             path = line.rstrip()
@@ -196,6 +196,7 @@ thisdir_testopts = getThisDirTestOpts()
 if config.use_threads:
     t.lock = threading.Lock()
     t.thread_pool = threading.Condition(t.lock)
+    t.lockFilesWritten = threading.Lock()
     t.running_threads = 0
 
 # if timeout == -1 then we try to calculate a sensible value

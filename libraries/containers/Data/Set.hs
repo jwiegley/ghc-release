@@ -1,4 +1,6 @@
-{-# LANGUAGE CPP #-}
+#if !defined(TESTING) && __GLASGOW_HASKELL__ >= 703
+{-# LANGUAGE Safe #-}
+#endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.Set
@@ -90,7 +92,13 @@ module Data.Set (
             , map
             , mapMonotonic
 
-            -- * Fold
+            -- * Folds
+            , foldr
+            , foldl
+            -- ** Strict folds
+            , foldr'
+            , foldl'
+            -- ** Legacy folds
             , fold
 
             -- * Min\/Max
@@ -129,11 +137,12 @@ module Data.Set (
 #endif
             ) where
 
-import Prelude hiding (filter,foldr,null,map)
+import Prelude hiding (filter,foldl,foldr,null,map)
 import qualified Data.List as List
 import Data.Monoid (Monoid(..))
-import Data.Foldable (Foldable(foldMap))
+import qualified Data.Foldable as Foldable
 import Data.Typeable
+import Control.DeepSeq (NFData(rnf))
 
 {-
 -- just for testing
@@ -179,9 +188,13 @@ instance Ord a => Monoid (Set a) where
     mappend = union
     mconcat = unions
 
-instance Foldable Set where
+instance Foldable.Foldable Set where
+    fold Tip = mempty
+    fold (Bin _ k l r) = Foldable.fold l `mappend` k `mappend` Foldable.fold r
+    foldr = foldr
+    foldl = foldl
     foldMap _ Tip = mempty
-    foldMap f (Bin _s k l r) = foldMap f l `mappend` f k `mappend` foldMap f r
+    foldMap f (Bin _ k l r) = Foldable.foldMap f l `mappend` f k `mappend` Foldable.foldMap f r
 
 #if __GLASGOW_HASKELL__
 
@@ -541,18 +554,62 @@ mapMonotonic f (Bin sz x l r) = Bin sz (f x) (mapMonotonic f l) (mapMonotonic f 
 {--------------------------------------------------------------------
   Fold
 --------------------------------------------------------------------}
--- | /O(n)/. Fold over the elements of a set in an unspecified order.
+-- | /O(n)/. Fold the elements in the set using the given right-associative
+-- binary operator. This function is an equivalent of 'foldr' and is present
+-- for compatibility only.
+--
+-- /Please note that fold will be deprecated in the future and removed./
 fold :: (a -> b -> b) -> b -> Set a -> b
 fold = foldr
 {-# INLINE fold #-}
 
--- | /O(n)/. Post-order fold.
+-- | /O(n)/. Fold the elements in the set using the given right-associative
+-- binary operator, such that @'foldr' f z == 'Prelude.foldr' f z . 'toAscList'@.
+--
+-- For example,
+--
+-- > toAscList set = foldr (:) [] set
 foldr :: (a -> b -> b) -> b -> Set a -> b
 foldr f = go
   where
     go z Tip           = z
     go z (Bin _ x l r) = go (f x (go z r)) l
 {-# INLINE foldr #-}
+
+-- | /O(n)/. A strict version of 'foldr'. Each application of the operator is
+-- evaluated before using the result in the next application. This
+-- function is strict in the starting value.
+foldr' :: (a -> b -> b) -> b -> Set a -> b
+foldr' f = go
+  where
+    STRICT_1_OF_2(go)
+    go z Tip           = z
+    go z (Bin _ x l r) = go (f x (go z r)) l
+{-# INLINE foldr' #-}
+
+-- | /O(n)/. Fold the elements in the set using the given left-associative
+-- binary operator, such that @'foldl' f z == 'Prelude.foldl' f z . 'toAscList'@.
+--
+-- For example,
+--
+-- > toDescList set = foldl (flip (:)) [] set
+foldl :: (a -> b -> a) -> a -> Set b -> a
+foldl f = go
+  where
+    go z Tip           = z
+    go z (Bin _ x l r) = go (f (go z l) x) r
+{-# INLINE foldl #-}
+
+-- | /O(n)/. A strict version of 'foldl'. Each application of the operator is
+-- evaluated before using the result in the next application. This
+-- function is strict in the starting value.
+foldl' :: (a -> b -> a) -> a -> Set b -> a
+foldl' f = go
+  where
+    STRICT_1_OF_2(go)
+    go z Tip           = z
+    go z (Bin _ x l r) = go (f (go z l) x) r
+{-# INLINE foldl' #-}
 
 {--------------------------------------------------------------------
   List variations 
@@ -689,6 +746,14 @@ instance (Read a, Ord a) => Read (Set a) where
 
 #include "Typeable.h"
 INSTANCE_TYPEABLE1(Set,setTc,"Set")
+
+{--------------------------------------------------------------------
+  NFData
+--------------------------------------------------------------------}
+
+instance NFData a => NFData (Set a) where
+    rnf Tip           = ()
+    rnf (Bin _ y l r) = rnf y `seq` rnf l `seq` rnf r
 
 {--------------------------------------------------------------------
   Utility functions that return sub-ranges of the original

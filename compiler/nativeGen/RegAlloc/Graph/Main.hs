@@ -4,6 +4,13 @@
 -- TODO: The colors in graphviz graphs for x86_64 and ppc could be nicer.
 --
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module RegAlloc.Graph.Main ( 
 	regAlloc
 ) 
@@ -45,12 +52,12 @@ maxSpinCount	= 10
 
 -- | The top level of the graph coloring register allocator.
 regAlloc
-	:: (Outputable statics, PlatformOutputable instr, Instruction instr)
+	:: (PlatformOutputable statics, PlatformOutputable instr, Instruction instr)
 	=> DynFlags
 	-> UniqFM (UniqSet RealReg)	-- ^ the registers we can use for allocation
 	-> UniqSet Int			-- ^ the set of available spill slots.
-	-> [LiveCmmTop statics instr]	-- ^ code annotated with liveness information.
-	-> UniqSM ( [NatCmmTop statics instr], [RegAllocStats statics instr] )
+	-> [LiveCmmDecl statics instr]	-- ^ code annotated with liveness information.
+	-> UniqSM ( [NatCmmDecl statics instr], [RegAllocStats statics instr] )
            -- ^ code with registers allocated and stats for each stage of
            -- allocation
 		
@@ -72,14 +79,20 @@ regAlloc dflags regsFree slotsFree code
 	return	( code_final
 		, reverse debug_codeGraphs )
 
-regAlloc_spin 
-	dflags 
-	spinCount 
-	(triv 		:: Color.Triv VirtualReg RegClass RealReg)
-	(regsFree 	:: UniqFM (UniqSet RealReg))
-	slotsFree 
-	debug_codeGraphs 
-	code
+regAlloc_spin :: (Instruction instr,
+                  PlatformOutputable instr,
+                  PlatformOutputable statics)
+              => DynFlags
+              -> Int
+              -> Color.Triv VirtualReg RegClass RealReg
+              -> UniqFM (UniqSet RealReg)
+              -> UniqSet Int
+              -> [RegAllocStats statics instr]
+              -> [LiveCmmDecl statics instr]
+              -> UniqSM ([NatCmmDecl statics instr],
+                         [RegAllocStats statics instr],
+                         Color.Graph VirtualReg RegClass RealReg)
+regAlloc_spin dflags spinCount triv regsFree slotsFree debug_codeGraphs code
  = do
         let platform = targetPlatform dflags
  	-- if any of these dump flags are turned on we want to hang on to
@@ -242,7 +255,7 @@ regAlloc_spin
 -- | Build a graph from the liveness and coalesce information in this code.
 buildGraph 
 	:: Instruction instr
-	=> [LiveCmmTop statics instr]
+	=> [LiveCmmDecl statics instr]
 	-> UniqSM (Color.Graph VirtualReg RegClass RealReg)
 	
 buildGraph code
@@ -323,9 +336,9 @@ graphAddCoalesce _ _
 
 -- | Patch registers in code using the reg -> reg mapping in this graph.
 patchRegsFromGraph 
-	:: (Outputable statics, PlatformOutputable instr, Instruction instr)
+	:: (PlatformOutputable statics, PlatformOutputable instr, Instruction instr)
 	=> Platform -> Color.Graph VirtualReg RegClass RealReg
-	-> LiveCmmTop statics instr -> LiveCmmTop statics instr
+	-> LiveCmmDecl statics instr -> LiveCmmDecl statics instr
 
 patchRegsFromGraph platform graph code
  = let

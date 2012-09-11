@@ -10,6 +10,13 @@ general, all of these functions return a renamed thing, and a set of
 free variables.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module RnExpr (
 	rnLExpr, rnExpr, rnStmts
    ) where
@@ -27,7 +34,7 @@ import HsSyn
 import TcRnMonad
 import TcEnv		( thRnBrack )
 import RnEnv
-import RnTypes		( rnHsTypeFVs, rnSplice, checkTH,
+import RnTypes		( rnHsTypeFVs, rnSplice, rnIPName, checkTH,
 			  mkOpFormRn, mkOpAppRn, mkNegAppRn, checkSectionPrec)
 import RnPat
 import DynFlags
@@ -105,8 +112,8 @@ rnExpr (HsVar v)
        finishHsVar name
 
 rnExpr (HsIPVar v)
-  = newIPNameRn v		`thenM` \ name ->
-    return (HsIPVar name, emptyFVs)
+  = do v' <- rnIPName v
+       return (HsIPVar v', emptyFVs)
 
 rnExpr (HsLit lit@(HsString s))
   = do {
@@ -147,7 +154,7 @@ rnExpr (OpApp e1 (L op_loc (HsVar op_rdr)) _ e2)
 	; final_e <- mkOpAppRn e1' (L op_loc op') fixity e2'
 	; return (final_e, fv_e1 `plusFV` fv_op `plusFV` fv_e2) }
 rnExpr (OpApp _ other_op _ _)
-  = failWith (vcat [ hang (ptext (sLit "Operator application with a non-variable operator:"))
+  = failWith (vcat [ hang (ptext (sLit "Infix application with a non-variable operator:"))
                         2 (ppr other_op)
                    , ptext (sLit "(Probably resulting from a Template Haskell splice)") ])
 
@@ -162,8 +169,13 @@ rnExpr (NegApp e _)
 -- Don't ifdef-GHCI them because we want to fail gracefully
 -- (not with an rnExpr crash) in a stage-1 compiler.
 rnExpr e@(HsBracket br_body)
-  = checkTH e "bracket"		`thenM_`
-    rnBracket br_body		`thenM` \ (body', fvs_e) ->
+  = do
+    thEnabled <- xoptM Opt_TemplateHaskell
+    unless thEnabled $
+      failWith ( vcat [ ptext (sLit "Syntax error on") <+> ppr e
+                      , ptext (sLit "Perhaps you intended to use -XTemplateHaskell") ] )
+    checkTH e "bracket"
+    (body', fvs_e) <- rnBracket br_body
     return (HsBracket body', fvs_e)
 
 rnExpr (HsSpliceE splice)
@@ -258,12 +270,10 @@ rnExpr (RecordUpd expr rbinds _ _ _)
 		  fvExpr `plusFV` fvRbinds) }
 
 rnExpr (ExprWithTySig expr pty)
-  = do	{ (pty', fvTy) <- rnHsTypeFVs doc pty
+  = do	{ (pty', fvTy) <- rnHsTypeFVs ExprWithTySigCtx pty
 	; (expr', fvExpr) <- bindSigTyVarsFV (hsExplicitTvs pty') $
 		  	     rnLExpr expr
 	; return (ExprWithTySig expr' pty', fvExpr `plusFV` fvTy) }
-  where 
-    doc = text "In an expression type signature"
 
 rnExpr (HsIf _ p b1 b2)
   = do { (p', fvP) <- rnLExpr p
@@ -273,10 +283,8 @@ rnExpr (HsIf _ p b1 b2)
        ; return (HsIf mb_ite p' b1' b2', plusFVs [fvITE, fvP, fvB1, fvB2]) }
 
 rnExpr (HsType a)
-  = rnHsTypeFVs doc a	`thenM` \ (t, fvT) -> 
+  = rnHsTypeFVs HsTypeCtx a	`thenM` \ (t, fvT) -> 
     return (HsType t, fvT)
-  where 
-    doc = text "In a type argument"
 
 rnExpr (ArithSeq _ seq)
   = rnArithSeq seq	 `thenM` \ (new_seq, fvs) ->
@@ -583,14 +591,14 @@ rnArithSeq (FromThenTo expr1 expr2 expr3)
 
 \begin{code}
 rnBracket :: HsBracket RdrName -> RnM (HsBracket Name, FreeVars)
-rnBracket (VarBr n) 
+rnBracket (VarBr flg n) 
   = do { name <- lookupOccRn n
        ; this_mod <- getModule
        ; unless (nameIsLocalOrFrom this_mod name) $  -- Reason: deprecation checking assumes
          do { _ <- loadInterfaceForName msg name     -- the home interface is loaded, and
             ; return () }			     -- this is the only way that is going
 	      	     				     -- to happen
-       ; return (VarBr name, unitFV name) }
+       ; return (VarBr flg name, unitFV name) }
   where
     msg = ptext (sLit "Need interface for Template Haskell quoted Name")
 
@@ -599,10 +607,8 @@ rnBracket (ExpBr e) = do { (e', fvs) <- rnLExpr e
 
 rnBracket (PatBr p) = rnPat ThPatQuote p $ \ p' -> return (PatBr p', emptyFVs)
 
-rnBracket (TypBr t) = do { (t', fvs) <- rnHsTypeFVs doc t
+rnBracket (TypBr t) = do { (t', fvs) <- rnHsTypeFVs TypBrCtx t
 			 ; return (TypBr t', fvs) }
-		    where
-		      doc = ptext (sLit "In a Template-Haskell quoted type")
 
 rnBracket (DecBrL decls) 
   = do { (group, mb_splice) <- findSplice decls
@@ -619,7 +625,9 @@ rnBracket (DecBrL decls)
                           -- group alone in the call to rnSrcDecls below
        ; (tcg_env, group') <- setGblEnv new_gbl_env $ 
        	 	   	      setStage thRnBrack $
-			      rnSrcDecls group      
+			      rnSrcDecls [] group
+   -- The empty list is for extra dependencies coming from .hs-boot files
+   -- See Note [Extra dependencies from .hs-boot files] in RnSource
 
 	      -- Discard the tcg_env; it contains only extra info about fixity
         ; traceRn (text "rnBracket dec" <+> (ppr (tcg_dus tcg_env) $$ 
@@ -771,13 +779,10 @@ rnStmt ctxt (L loc (ParStmt segs _ _ _)) thing_inside
 rnStmt ctxt (L loc (TransStmt { trS_stmts = stmts, trS_by = by, trS_form = form
                               , trS_using = using })) thing_inside
   = do { -- Rename the 'using' expression in the context before the transform is begun
-         (using', fvs1) <- case form of
-                             GroupFormB -> do { (e,fvs) <- lookupStmtName ctxt groupMName
-                                              ; return (noLoc e, fvs) }
-			     _          -> rnLExpr using
+         (using', fvs1) <- rnLExpr using
 
          -- Rename the stmts and the 'by' expression
-	 -- Keep track of the variables mentioned in the 'by' expression
+         -- Keep track of the variables mentioned in the 'by' expression
        ; ((stmts', (by', used_bndrs, thing)), fvs2) 
              <- rnStmts (TransStmtCtxt ctxt) stmts $ \ bndrs ->
                 do { (by',   fvs_by) <- mapMaybeFvRn rnLExpr by

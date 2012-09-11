@@ -20,8 +20,7 @@ rts_dist_HC = $(GHC_STAGE1)
 rts_WAYS = $(GhcLibWays) $(filter-out $(GhcLibWays),$(GhcRTSWays))
 rts_dist_WAYS = $(rts_WAYS)
 
-ALL_RTS_LIBS = rts/dist/build/libHSrtsmain.a \
-	       $(foreach way,$(rts_WAYS),rts/dist/build/libHSrts$($(way)_libsuf))
+ALL_RTS_LIBS = $(foreach way,$(rts_WAYS),rts/dist/build/libHSrts$($(way)_libsuf))
 all_rts : $(ALL_RTS_LIBS)
 
 # -----------------------------------------------------------------------------
@@ -36,7 +35,6 @@ ALL_DIRS += posix
 endif
 
 EXCLUDED_SRCS :=
-EXCLUDED_SRCS += rts/Main.c
 EXCLUDED_SRCS += rts/parallel/SysMan.c
 EXCLUDED_SRCS += $(wildcard rts/Vis*.c)
 
@@ -83,21 +81,20 @@ rts/libs.depend : $(GHC_PKG_INPLACE)
 # 	These are made from rts/win32/libHS*.def which contain lists of
 # 	all the symbols in those libraries used by the RTS.
 #
-ifneq "$$(findstring dyn, $1)" ""
 ifeq  "$(HOSTPLATFORM)" "i386-unknown-mingw32" 
 
 ALL_RTS_DEF_LIBNAMES 	= base ghc-prim
 ALL_RTS_DEF_LIBS	= \
 	rts/dist/build/win32/libHSbase.dll.a \
 	rts/dist/build/win32/libHSghc-prim.dll.a \
-	rts/dist/build/win32/libHSffi.dll.a 
+	libffi/build/inst/lib/libffi.dll.a
 
 # -- import libs for the regular Haskell libraries
 define make-importlib-def # args $1 = lib name
 rts/dist/build/win32/libHS$1.def : rts/win32/libHS$1.def
 	cat rts/win32/libHS$1.def \
 		| sed "s/@LibVersion@/$$(libraries/$1_dist-install_VERSION)/" \
-		| sed "s/@ProjectVersion@/$(ProjectVersion)/" \
+		| sed "s/@ProjectVersion@/$$(ProjectVersion)/" \
 		> rts/dist/build/win32/libHS$1.def
 
 rts/dist/build/win32/libHS$1.dll.a : rts/dist/build/win32/libHS$1.def
@@ -105,20 +102,23 @@ rts/dist/build/win32/libHS$1.dll.a : rts/dist/build/win32/libHS$1.def
 			-l rts/dist/build/win32/libHS$1.dll.a
 endef
 $(foreach lib,$(ALL_RTS_DEF_LIBNAMES),$(eval $(call make-importlib-def,$(lib))))
-
-
-# -- import libs for libffi
-rts/dist/build/win32/libHSffi.def : rts/win32/libHSffi.def
-	cat rts/win32/libHSffi.def \
-		| sed "s/@ProjectVersion@/$(ProjectVersion)/" \
-		> rts/dist/build/win32/libHSffi.def
-
-rts/dist/build/win32/libHSffi.dll.a : rts/dist/build/win32/libHSffi.def
-	"$(DLLTOOL)" 	-d rts/dist/build/win32/libHSffi.def \
-			-l rts/dist/build/win32/libHSffi.dll.a
-endif
 endif
 
+ifneq "$(BINDIST)" "YES"
+rts_ffi_objs_stamp = rts/dist/ffi/stamp
+rts_ffi_objs       = rts/dist/ffi/*.o
+$(rts_ffi_objs_stamp): $(libffi_STATIC_LIB) $(TOUCH_DEP) | $$(dir $$@)/.
+	cd rts/dist/ffi && $(AR) x ../../../$(libffi_STATIC_LIB)
+	"$(TOUCH_CMD)" $@
+
+# This is a little hacky. We don't know the SO version, so we only
+# depend on libffi.so, but copy libffi.so*
+rts/dist/build/libffi$(soext): libffi/build/inst/lib/libffi$(soext)
+	cp libffi/build/inst/lib/libffi$(soext)* rts/dist/build
+
+rts/dist/build/libffi-5.dll: libffi/build/inst/bin/libffi-5.dll
+	cp $< $@
+endif
 
 #-----------------------------------------------------------------------------
 # Building one way
@@ -172,25 +172,25 @@ rts_dist_$1_CC_OPTS += -DRtsWay=\"rts_$1\"
 # Making a shared library for the RTS.
 ifneq "$$(findstring dyn, $1)" ""
 ifeq "$$(HOSTPLATFORM)" "i386-unknown-mingw32"
-$$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) rts/libs.depend
+$$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) rts/libs.depend rts/dist/build/libffi-5.dll
 	"$$(RM)" $$(RM_OPTS) $$@
 	"$$(rts_dist_HC)" -package-name rts -shared -dynamic -dynload deploy \
-	  -no-auto-link-packages `cat rts/libs.depend` $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) -o $$@
+	  -no-auto-link-packages -Lrts/dist/build -lffi-5 `cat rts/libs.depend` $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) -o $$@
 else
-$$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) rts/libs.depend
+$$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) rts/libs.depend rts/dist/build/libffi$$(soext)
 	"$$(RM)" $$(RM_OPTS) $$@
 	"$$(rts_dist_HC)" -package-name rts -shared -dynamic -dynload deploy \
-	  -no-auto-link-packages `cat rts/libs.depend` $$(rts_$1_OBJS) \
+	  -no-auto-link-packages -Lrts/dist/build -lffi `cat rts/libs.depend` $$(rts_$1_OBJS) \
 	  $$(rts_$1_DTRACE_OBJS) -o $$@
 ifeq "$$(darwin_HOST_OS)" "1"
 	# Ensure library's install name is correct before anyone links with it.
-	install_name_tool -id $(ghclibdir)/$$(rts_$1_LIB_NAME) $$@
+	install_name_tool -id $$(ghclibdir)/$$(rts_$1_LIB_NAME) $$@
 endif
 endif
 else
-$$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS)
+$$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) $$(rts_ffi_objs_stamp)
 	"$$(RM)" $$(RM_OPTS) $$@
-	echo $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) | "$$(XARGS)" $$(XARGS_OPTS) "$$(AR_STAGE1)" \
+	echo $$(rts_ffi_objs) $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) | "$$(XARGS)" $$(XARGS_OPTS) "$$(AR_STAGE1)" \
 		$$(AR_OPTS_STAGE1) $$(EXTRA_AR_ARGS_STAGE1) $$@
 endif
 
@@ -236,7 +236,7 @@ WARNING_OPTS += -Wredundant-decls
 # support for registerised builds on this arch. -- BL 2010/02/03
 # WARNING_OPTS += -Wcast-align
 
-STANDARD_OPTS += -Iincludes -Irts
+STANDARD_OPTS += -Iincludes -Irts -Irts/dist/build
 # COMPILING_RTS is only used when building Win32 DLL support.
 STANDARD_OPTS += -DCOMPILING_RTS
 
@@ -455,15 +455,7 @@ endif
 
 $(eval $(call dependencies,rts,dist,1))
 
-$(rts_dist_depfile_c_asm) : libffi/dist-install/build/ffi.h $(DTRACEPROBES_H)
-
-#-----------------------------------------------------------------------------
-# libffi stuff
-
-rts_CC_OPTS     += -Ilibffi/build/include
-rts_HC_OPTS     += -Ilibffi/build/include
-rts_HSC2HS_OPTS += -Ilibffi/build/include
-rts_LD_OPTS     += -Llibffi/build/include
+$(rts_dist_depfile_c_asm) : $(libffi_HEADERS) $(DTRACEPROBES_H)
 
 # -----------------------------------------------------------------------------
 # compile dtrace probes if dtrace is supported
@@ -491,15 +483,6 @@ $(DTRACEPROBES_H): $(DTRACEPROBES_SRC) includes/ghcplatform.h | $$(dir $$@)/.
 endif
 
 # -----------------------------------------------------------------------------
-# build the static lib containing the C main symbol
-
-ifneq "$(BINDIST)" "YES"
-rts/dist/build/libHSrtsmain.a : rts/dist/build/Main.o
-	"$(RM)" $(RM_OPTS) $@
-	"$(AR_STAGE1)" $(AR_OPTS_STAGE1) $(EXTRA_AR_ARGS_STAGE1) $@ $<
-endif
-
-# -----------------------------------------------------------------------------
 # The RTS package config
 
 # If -DDEBUG is in effect, adjust package conf accordingly..
@@ -521,6 +504,15 @@ endif
 # installing
 
 INSTALL_LIBS += $(ALL_RTS_LIBS)
+INSTALL_LIBS += $(wildcard rts/dist/build/libffi$(soext)*)
+INSTALL_LIBS += $(wildcard rts/dist/build/libffi-5.dll)
+
+install: install_libffi_headers
+
+.PHONY: install_libffi_headers
+install_libffi_headers :
+	$(call INSTALL_DIR,"$(DESTDIR)$(ghcheaderdir)")
+	$(call INSTALL_HEADER,$(INSTALL_OPTS),$(libffi_HEADERS),"$(DESTDIR)$(ghcheaderdir)/")
 
 # -----------------------------------------------------------------------------
 # cleaning

@@ -1,4 +1,11 @@
 {-# OPTIONS -cpp #-}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 ------------------------------------------------------------------
 -- A primop-table mangling program                              --
 ------------------------------------------------------------------
@@ -490,7 +497,7 @@ gen_wrappers (Info _ entries)
      ++ "module GHC.PrimopWrappers where\n" 
      ++ "import qualified GHC.Prim\n" 
      ++ "import GHC.Types (Bool)\n"
-     ++ "import GHC.Unit ()\n"
+     ++ "import GHC.Tuple ()\n"
      ++ "import GHC.Prim (" ++ types ++ ")\n"
      ++ unlines (concatMap f specs)
      where
@@ -621,6 +628,7 @@ ppTyVar "o" = "openAlphaTyVar"
 ppTyVar _   = error "Unknown type var"
 
 ppType :: Ty -> String
+ppType (TyApp "Any"         []) = "anyTy"
 ppType (TyApp "Bool"        []) = "boolTy"
 
 ppType (TyApp "Int#"        []) = "intPrimTy"
@@ -640,21 +648,22 @@ ppType (TyApp "ForeignObj#" []) = "foreignObjPrimTy"
 ppType (TyApp "BCO#"        []) = "bcoPrimTy"
 ppType (TyApp "()"          []) = "unitTy" 	-- unitTy is TysWiredIn's name for ()
 
-ppType (TyVar "a")               = "alphaTy"
-ppType (TyVar "b")               = "betaTy"
-ppType (TyVar "c")               = "gammaTy"
-ppType (TyVar "s")               = "deltaTy"
-ppType (TyVar "o")               = "openAlphaTy"
-ppType (TyApp "State#" [x])      = "mkStatePrimTy " ++ ppType x
-ppType (TyApp "MutVar#" [x,y])   = "mkMutVarPrimTy " ++ ppType x 
-                                   ++ " " ++ ppType y
-ppType (TyApp "MutableArray#" [x,y]) = "mkMutableArrayPrimTy " ++ ppType x
-                                    ++ " " ++ ppType y
+ppType (TyVar "a")                      = "alphaTy"
+ppType (TyVar "b")                      = "betaTy"
+ppType (TyVar "c")                      = "gammaTy"
+ppType (TyVar "s")                      = "deltaTy"
+ppType (TyVar "o")                      = "openAlphaTy"
 
-ppType (TyApp "MutableByteArray#" [x]) = "mkMutableByteArrayPrimTy " 
-                                   ++ ppType x
-
-ppType (TyApp "Array#" [x])      = "mkArrayPrimTy " ++ ppType x
+ppType (TyApp "State#" [x])             = "mkStatePrimTy " ++ ppType x
+ppType (TyApp "MutVar#" [x,y])          = "mkMutVarPrimTy " ++ ppType x 
+                                          ++ " " ++ ppType y
+ppType (TyApp "MutableArray#" [x,y])    = "mkMutableArrayPrimTy " ++ ppType x
+                                           ++ " " ++ ppType y
+ppType (TyApp "MutableArrayArray#" [x]) = "mkMutableArrayArrayPrimTy " ++ ppType x
+ppType (TyApp "MutableByteArray#" [x])  = "mkMutableByteArrayPrimTy " 
+                                          ++ ppType x
+ppType (TyApp "Array#" [x])             = "mkArrayPrimTy " ++ ppType x
+ppType (TyApp "ArrayArray#" [])         = "mkArrayArrayPrimTy"
 
 
 ppType (TyApp "Weak#"  [x])      = "mkWeakPrimTy " ++ ppType x
@@ -665,7 +674,7 @@ ppType (TyApp "MVar#" [x,y])     = "mkMVarPrimTy " ++ ppType x
                                    ++ " " ++ ppType y
 ppType (TyApp "TVar#" [x,y])     = "mkTVarPrimTy " ++ ppType x 
                                    ++ " " ++ ppType y
-ppType (TyUTup ts)               = "(mkTupleTy Unboxed " 
+ppType (TyUTup ts)               = "(mkTupleTy UnboxedTuple " 
                                    ++ listify (map ppType ts) ++ ")"
 
 ppType (TyF s d) = "(mkFunTy (" ++ ppType s ++ ") (" ++ ppType d ++ "))"

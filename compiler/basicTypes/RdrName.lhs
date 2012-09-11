@@ -22,6 +22,14 @@
 -- * 'Id.Id': see "Id#name_types"
 --
 -- * 'Var.Var': see "Var#name_types"
+
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module RdrName (
         -- * The main type
 	RdrName(..),	-- Constructors exported only to BinIface
@@ -32,7 +40,7 @@ module RdrName (
 	nameRdrName, getRdrName, 
 
 	-- ** Destruction
-	rdrNameOcc, rdrNameSpace, setRdrNameSpace,
+	rdrNameOcc, rdrNameSpace, setRdrNameSpace, demoteRdrName,
 	isRdrDataCon, isRdrTyVar, isRdrTc, isQual, isQual_maybe, isUnqual, 
 	isOrig, isOrig_maybe, isExact, isExact_maybe, isSrcRdrName,
 
@@ -66,7 +74,9 @@ import Maybes
 import SrcLoc
 import FastString
 import Outputable
+import Unique
 import Util
+import StaticFlags( opt_PprStyle_Debug )
 
 import Data.Data
 \end{code}
@@ -149,6 +159,14 @@ setRdrNameSpace (Orig m occ) ns = Orig m (setOccNameSpace ns occ)
 setRdrNameSpace (Exact n)    ns = ASSERT( isExternalName n ) 
 		       	          Orig (nameModule n)
 				       (setOccNameSpace ns (nameOccName n))
+
+-- demoteRdrName lowers the NameSpace of RdrName.
+-- see Note [Demotion] in OccName
+demoteRdrName :: RdrName -> Maybe RdrName
+demoteRdrName (Unqual occ) = fmap Unqual (demoteOccName occ)
+demoteRdrName (Qual m occ) = fmap (Qual m) (demoteOccName occ)
+demoteRdrName (Orig _ _) = panic "demoteRdrName"
+demoteRdrName (Exact _) = panic "demoteRdrName"
 \end{code}
 
 \begin{code}
@@ -246,12 +264,17 @@ instance Outputable RdrName where
     ppr (Exact name)   = ppr name
     ppr (Unqual occ)   = ppr occ
     ppr (Qual mod occ) = ppr mod <> dot <> ppr occ
-    ppr (Orig mod occ) = getPprStyle (\sty -> pprModulePrefix sty mod occ <> ppr occ)
+    ppr (Orig mod occ) = getPprStyle (\sty -> pprModulePrefix sty mod name <> ppr occ)
+       where name = mkExternalName (mkUniqueGrimily 0) mod occ noSrcSpan
+         -- Note [Outputable Orig RdrName] in HscTypes
 
 instance OutputableBndr RdrName where
     pprBndr _ n 
 	| isTvOcc (rdrNameOcc n) = char '@' <+> ppr n
 	| otherwise		 = ppr n
+
+    pprInfixOcc  rdr = pprInfixVar  (isSymOcc (rdrNameOcc rdr)) (ppr rdr)
+    pprPrefixOcc rdr = pprPrefixVar (isSymOcc (rdrNameOcc rdr)) (ppr rdr)
 
 showRdrName :: RdrName -> String
 showRdrName r = showSDoc (ppr r)
@@ -366,13 +389,50 @@ data GlobalRdrElt
     }
 
 -- | The children of a Name are the things that are abbreviated by the ".."
---   notation in export lists.  Specifically:
---	TyCon	Children are * data constructors
---			     * record field ids
---	Class	Children are * class operations
--- Each child has the parent thing as its Parent
+--   notation in export lists.  See Note [Parents]
 data Parent = NoParent | ParentIs Name
 	      deriving (Eq)
+
+{- Note [Parents]
+~~~~~~~~~~~~~~~~~
+  Parent           Children
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  data T           Data constructors
+		   Record-field ids
+
+  data family T    Data constructors and record-field ids
+                   of all visible data instances of T
+
+  class	C          Class operations
+		   Associated type constructors
+
+Note [Combining parents]
+~~~~~~~~~~~~~~~~~~~~~~~~
+With an associated type we might have
+   module M where
+     class C a where
+       data T a
+       op :: T a -> a
+     instance C Int where
+       data T Int = TInt
+     instance C Bool where
+       data T Bool = TBool
+
+Then:   C is the parent of T
+	T is the parent of TInt and TBool
+So: in an export list
+    C(..) is short for C( op, T )
+    T(..) is short for T( TInt, TBool )
+
+Module M exports everything, so its exports will be
+   AvailTC C [C,T,op]
+   AvailTC T [T,TInt,TBool]
+On import we convert to GlobalRdrElt and the combine
+those.  For T that will mean we have 
+  one GRE with Parent C
+  one GRE with NoParent
+That's why plusParent picks the "best" case.
+-} 
 
 instance Outputable Parent where
    ppr NoParent     = empty
@@ -380,8 +440,17 @@ instance Outputable Parent where
    
 
 plusParent :: Parent -> Parent -> Parent
-plusParent p1 p2 = ASSERT2( p1 == p2, parens (ppr p1) <+> parens (ppr p2) )
-                   p1
+-- See Note [Combining parents]
+plusParent (ParentIs n) p2 = hasParent n p2
+plusParent p1 (ParentIs n) = hasParent n p1
+plusParent _ _ = NoParent
+
+hasParent :: Name -> Parent -> Parent
+#ifdef DEBUG
+hasParent n (ParentIs n') 
+  | n /= n' = pprPanic "hasParent" (ppr n <+> ppr n')  -- Parents should agree
+#endif
+hasParent n _  = ParentIs n
 
 emptyGlobalRdrEnv :: GlobalRdrEnv
 emptyGlobalRdrEnv = emptyOccEnv
@@ -390,18 +459,15 @@ globalRdrEnvElts :: GlobalRdrEnv -> [GlobalRdrElt]
 globalRdrEnvElts env = foldOccEnv (++) [] env
 
 instance Outputable GlobalRdrElt where
-  ppr gre = hang (ppr name)
-               2 (parens (ppr (gre_par gre) <+> pprNameProvenance gre))
-	  where
-	    name = gre_name gre
+  ppr gre = hang (ppr (gre_name gre) <+> ppr (gre_par gre))
+               2 (pprNameProvenance gre)
 
 pprGlobalRdrEnv :: GlobalRdrEnv -> SDoc
 pprGlobalRdrEnv env
   = vcat (map pp (occEnvElts env))
   where
     pp gres = ppr (nameOccName (gre_name (head gres))) <> colon <+> 
-	      vcat [ ppr (gre_name gre) <+> pprNameProvenance gre
-		   | gre <- gres]
+	      vcat (map ppr gres)
 \end{code}
 
 \begin{code}
@@ -429,8 +495,9 @@ lookupGRE_Name env name
 getGRE_NameQualifier_maybes :: GlobalRdrEnv -> Name -> [Maybe [ModuleName]]
 -- Returns all the qualifiers by which 'x' is in scope
 -- Nothing means "the unqualified version is in scope"
+-- [] means the thing is not in scope at all
 getGRE_NameQualifier_maybes env
-  = map qualifier_maybe . map gre_prov . lookupGRE_Name env
+  = map (qualifier_maybe . gre_prov) . lookupGRE_Name env
   where
     qualifier_maybe LocalDef       = Nothing
     qualifier_maybe (Imported iss) = Just $ map (is_as . is_decl) iss
@@ -671,22 +738,39 @@ pprNameProvenance (GRE {gre_name = name, gre_prov = LocalDef})
   = ptext (sLit "defined at") <+> ppr (nameSrcLoc name)
 pprNameProvenance (GRE {gre_name = name, gre_prov = Imported whys})
   = case whys of
-	(why:_) -> sep [ppr why, nest 2 (ppr_defn (nameSrcLoc name))]
+	(why:_) | opt_PprStyle_Debug -> vcat (map pp_why whys)
+                | otherwise          -> pp_why why
 	[] -> panic "pprNameProvenance"
+  where
+    pp_why why = sep [ppr why, ppr_defn_site why name]
 
 -- If we know the exact definition point (which we may do with GHCi)
 -- then show that too.  But not if it's just "imported from X".
-ppr_defn :: SrcLoc -> SDoc
-ppr_defn (RealSrcLoc loc) = parens (ptext (sLit "defined at") <+> ppr loc)
-ppr_defn (UnhelpfulLoc _) = empty
+ppr_defn_site :: ImportSpec -> Name -> SDoc
+ppr_defn_site imp_spec name 
+  | same_module && not (isGoodSrcSpan loc)
+  = empty	       -- Nothing interesting to say
+  | otherwise
+  = parens $ hang (ptext (sLit "and originally defined") <+> pp_mod)
+                2 (pprLoc loc)
+  where
+    loc = nameSrcSpan name
+    defining_mod = nameModule name
+    same_module = importSpecModule imp_spec == moduleName defining_mod
+    pp_mod | same_module = empty
+           | otherwise   = ptext (sLit "in") <+> quotes (ppr defining_mod)
+
 
 instance Outputable ImportSpec where
    ppr imp_spec
-     = ptext (sLit "imported from") <+> ppr (importSpecModule imp_spec) 
-	<+> pprLoc
+     = ptext (sLit "imported") <+> qual 
+        <+> ptext (sLit "from") <+> quotes (ppr (importSpecModule imp_spec))
+	<+> pprLoc (importSpecLoc imp_spec)
      where
-       loc = importSpecLoc imp_spec
-       pprLoc = case loc of
-                RealSrcSpan s -> ptext (sLit "at") <+> ppr s
-                UnhelpfulSpan _ -> empty
+       qual | is_qual (is_decl imp_spec) = ptext (sLit "qualified")
+            | otherwise                  = empty
+
+pprLoc :: SrcSpan -> SDoc
+pprLoc (RealSrcSpan s)    = ptext (sLit "at") <+> ppr s
+pprLoc (UnhelpfulSpan {}) = empty
 \end{code}

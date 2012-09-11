@@ -189,7 +189,7 @@ GarbageCollect (rtsBool force_major_gc,
 #endif
 
 #ifdef PROFILING
-  CostCentreStack *prev_CCS;
+  CostCentreStack *save_CCS[n_capabilities];
 #endif
 
   ACQUIRE_SM_LOCK;
@@ -221,8 +221,10 @@ GarbageCollect (rtsBool force_major_gc,
 
   // attribute any costs to CCS_GC 
 #ifdef PROFILING
-  prev_CCS = CCCS;
-  CCCS = CCS_GC;
+  for (n = 0; n < n_capabilities; n++) {
+      save_CCS[n] = capabilities[n].r.rCCCS;
+      capabilities[n].r.rCCCS = CCS_GC;
+  }
 #endif
 
   /* Approximate how much we allocated.  
@@ -257,8 +259,8 @@ GarbageCollect (rtsBool force_major_gc,
    * We don't try to parallelise minor GCs (unless the user asks for
    * it with +RTS -gn0), or mark/compact/sweep GC.
    */
-  if (gc_type == PENDING_GC_PAR) {
-      n_gc_threads = RtsFlags.ParFlags.nNodes;
+  if (gc_type == SYNC_GC_PAR) {
+      n_gc_threads = n_capabilities;
   } else {
       n_gc_threads = 1;
   }
@@ -407,8 +409,11 @@ GarbageCollect (rtsBool force_major_gc,
   // We call processHeapClosureForDead() on every closure destroyed during
   // the current garbage collection, so we invoke LdvCensusForDead().
   if (RtsFlags.ProfFlags.doHeapProfile == HEAP_BY_LDV
-      || RtsFlags.ProfFlags.bioSelector != NULL)
-    LdvCensusForDead(N);
+      || RtsFlags.ProfFlags.bioSelector != NULL) {
+      RELEASE_SM_LOCK; // LdvCensusForDead may need to take the lock
+      LdvCensusForDead(N);
+      ACQUIRE_SM_LOCK;
+  }
 #endif
 
   // NO MORE EVACUATION AFTER THIS POINT!
@@ -623,10 +628,8 @@ GarbageCollect (rtsBool force_major_gc,
 #ifdef PROFILING
   // resetStaticObjectForRetainerProfiling() must be called before
   // zeroing below.
-  if (n_gc_threads > 1) {
-      barf("profiling is currently broken with multi-threaded GC");
-      // ToDo: fix the gct->scavenged_static_objects below
-  }
+
+  // ToDo: fix the gct->scavenged_static_objects below
   resetStaticObjectForRetainerProfiling(gct->scavenged_static_objects);
 #endif
 
@@ -701,7 +704,9 @@ GarbageCollect (rtsBool force_major_gc,
 
   // restore enclosing cost centre 
 #ifdef PROFILING
-  CCCS = prev_CCS;
+  for (n = 0; n < n_capabilities; n++) {
+      capabilities[n].r.rCCCS = save_CCS[n];
+  }
 #endif
 
 #ifdef DEBUG
@@ -849,29 +854,39 @@ new_gc_thread (nat n, gc_thread *t)
 
 
 void
-initGcThreads (void)
+initGcThreads (nat from USED_IF_THREADS, nat to USED_IF_THREADS)
 {
-    if (gc_threads == NULL) {
 #if defined(THREADED_RTS)
-        nat i;
-	gc_threads = stgMallocBytes (RtsFlags.ParFlags.nNodes * 
-				     sizeof(gc_thread*), 
-				     "alloc_gc_threads");
+    nat i;
 
-	for (i = 0; i < RtsFlags.ParFlags.nNodes; i++) {
-            gc_threads[i] = 
-                stgMallocBytes(sizeof(gc_thread) + 
-                               RtsFlags.GcFlags.generations * sizeof(gen_workspace),
-                               "alloc_gc_threads");
-
-            new_gc_thread(i, gc_threads[i]);
-	}
-#else
-        gc_threads = stgMallocBytes (sizeof(gc_thread*),"alloc_gc_threads");
-	gc_threads[0] = gct;
-        new_gc_thread(0,gc_threads[0]);
-#endif
+    if (from > 0) {
+        gc_threads = stgReallocBytes (gc_threads, to * sizeof(gc_thread*),
+                                      "initGcThreads");
+    } else {
+        gc_threads = stgMallocBytes (to * sizeof(gc_thread*),
+                                     "initGcThreads");
     }
+
+    // We have to update the gct->cap pointers to point to the new
+    // Capability array now.
+    for (i = 0; i < from; i++) {
+        gc_threads[i]->cap = &capabilities[gc_threads[i]->cap->no];
+    }
+
+    for (i = from; i < to; i++) {
+        gc_threads[i] =
+            stgMallocBytes(sizeof(gc_thread) +
+                           RtsFlags.GcFlags.generations * sizeof(gen_workspace),
+                           "alloc_gc_threads");
+
+        new_gc_thread(i, gc_threads[i]);
+    }
+#else
+    ASSERT(from == 0 && to == 1);
+    gc_threads = stgMallocBytes (sizeof(gc_thread*),"alloc_gc_threads");
+    gc_threads[0] = gct;
+    new_gc_thread(0,gc_threads[0]);
+#endif
 }
 
 void
@@ -1026,7 +1041,7 @@ gcWorkerThread (Capability *cap)
     // necessary if we stole a callee-saves register for gct:
     saved_gct = gct;
 
-    gct = gc_threads[cap->no];
+    SET_GCT(gc_threads[cap->no]);
     gct->id = osThreadId();
 
     stat_gcWorkerThreadStart(gct);
@@ -1092,7 +1107,7 @@ gcWorkerThread (Capability *cap)
 void
 waitForGcThreads (Capability *cap USED_IF_THREADS)
 {
-    const nat n_threads = RtsFlags.ParFlags.nNodes;
+    const nat n_threads = n_capabilities;
     const nat me = cap->no;
     nat i, j;
     rtsBool retry = rtsTrue;
@@ -1109,7 +1124,7 @@ waitForGcThreads (Capability *cap USED_IF_THREADS)
             for (i=0; i < n_threads; i++) {
                 if (i == me) continue;
                 write_barrier();
-                setContextSwitches();
+                interruptAllCapabilities();
                 if (gc_threads[i]->wakeup != GC_THREAD_STANDING_BY) {
                     retry = rtsTrue;
                 }
@@ -1173,7 +1188,7 @@ shutdown_gc_threads (nat me USED_IF_THREADS)
 void
 releaseGCThreads (Capability *cap USED_IF_THREADS)
 {
-    const nat n_threads = RtsFlags.ParFlags.nNodes;
+    const nat n_threads = n_capabilities;
     const nat me = cap->no;
     nat i;
     for (i=0; i < n_threads; i++) {

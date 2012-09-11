@@ -9,9 +9,16 @@ This stuff is only used for source-code decls; it's recorded in interface
 files for imported data types.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module TcTyDecls(
         calcRecFlags,
-        calcClassCycles, calcSynCycles
+        calcSynCycles, calcClassCycles
     ) where
 
 #include "HsVersions.h"
@@ -19,17 +26,19 @@ module TcTyDecls(
 import TypeRep
 import HsSyn
 import RnHsSyn
+import Class
 import Type
 import HscTypes
 import TyCon
-import Class
 import DataCon
 import Name
 import NameEnv
 import NameSet
+import Avail
 import Digraph
 import BasicTypes
 import SrcLoc
+import UniqSet
 import Maybes( mapCatMaybes )
 import Util ( isSingleton )
 import Data.List
@@ -92,8 +101,6 @@ synTyConsOfType ty
      go (TyConApp tc tys)         = go_tc tc tys
      go (AppTy a b)               = go a `plusNameEnv` go b
      go (FunTy a b)               = go a `plusNameEnv` go b
-     go (PredTy (IParam _ ty))    = go ty
-     go (PredTy (ClassP cls tys)) = go_s tys    -- Ignore class
      go (ForAllTy _ ty)           = go ty
 
      go_tc tc tys | isSynTyCon tc = extendNameEnv (go_s tys) (tyConName tc) tc
@@ -102,27 +109,144 @@ synTyConsOfType ty
 ---------------------------------------- END NOTE ]
 
 \begin{code}
-calcSynCycles :: [LTyClDecl Name] -> [SCC (LTyClDecl Name)]
-calcSynCycles decls
-  = stronglyConnCompFromEdgedVertices syn_edges
+mkSynEdges :: [LTyClDecl Name] -> [(LTyClDecl Name, Name, [Name])]
+mkSynEdges syn_decls = [ (ldecl, unLoc (tcdLName decl),
+                                 mk_syn_edges (tcdSynRhs decl))
+                       | ldecl@(L _ decl) <- syn_decls ]
   where
-    syn_edges = [ (ldecl, unLoc (tcdLName decl),
-                          mk_syn_edges (tcdSynRhs decl))
-                | ldecl@(L _ decl) <- decls ]
-
     mk_syn_edges rhs = [ tc | tc <- nameSetToList (extractHsTyNames rhs),
                               not (isTyVarName tc) ]
 
+calcSynCycles :: [LTyClDecl Name] -> [SCC (LTyClDecl Name)]
+calcSynCycles = stronglyConnCompFromEdgedVertices . mkSynEdges
+\end{code}
 
-calcClassCycles :: [LTyClDecl Name] -> [[LTyClDecl Name]]
-calcClassCycles decls
-  = [decls | CyclicSCC decls <- stronglyConnCompFromEdgedVertices cls_edges]
+Note [Superclass cycle check]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We can't allow cycles via superclasses because it would result in the
+type checker looping when it canonicalises a class constraint (superclasses
+are added during canonicalisation).  More precisely, given a constraint
+    C ty1 .. tyn
+we want to instantiate all of C's superclasses, transitively, and
+that set must be finite.  So if
+     class (D b, E b a) => C a b
+then when we encounter the constraint
+     C ty1 ty2
+we'll instantiate the superclasses
+     (D ty2, E ty2 ty1)
+and then *their* superclasses, and so on.  This set must be finite!
+
+It is OK for superclasses to be type synonyms for other classes, so
+must "look through" type synonyms. Eg
+     type X a = C [a]
+     class X a => C a	-- No!  Recursive superclass!
+
+We want definitions such as:
+
+  class C cls a where cls a => a -> a
+  class C D a => D a where
+
+to be accepted, even though a naive acyclicity check would reject the
+program as having a cycle between D and its superclass.  Why? Because
+when we instantiate 
+     D ty1
+we get the superclas
+     C D ty1
+and C has no superclasses, so we have terminated with a finite set.
+
+More precisely, the rule is this: the superclasses sup_C of a class C
+are rejected iff:
+
+  C \elem expand(sup_C)
+
+Where expand is defined as follows:
+
+(1)  expand(a ty1 ... tyN) = expand(ty1) \union ... \union expand(tyN)
+
+(2)  expand(D ty1 ... tyN) = {D} 
+                             \union sup_D[ty1/x1, ..., tyP/xP] 
+                             \union expand(ty(P+1)) ... \union expand(tyN)
+           where (D x1 ... xM) is a class, P = min(M,N)
+
+(3)  expand(T ty1 ... tyN) = expand(ty1) \union ... \union expand(tyN)
+        where T is not a class
+
+Eqn (1) is conservative; when there's a type variable at the head,
+look in all the argument types.  Eqn (2) expands superclasses; the
+third component of the union is like Eqn (1).  Eqn (3) happens mainly
+when the context is a (constraint) tuple, such as (Eq a, Show a).
+
+Furthermore, expand always looks through type synonyms.
+
+\begin{code}
+calcClassCycles :: Class -> [[TyCon]]
+calcClassCycles cls 
+  = nubBy eqAsCycle $ 
+    expandTheta (unitUniqSet cls) [classTyCon cls] (classSCTheta cls) []
   where
-    cls_edges = [ (ldecl, unLoc (tcdLName decl),
-                          mk_cls_edges (unLoc (tcdCtxt decl)))
-                | ldecl@(L _ decl) <- decls, isClassDecl decl ]
+    -- The last TyCon in the cycle is always the same as the first
+    eqAsCycle xs ys = any (xs ==) (cycles (tail ys))
+    cycles xs = take n . map (take n) . tails . cycle $ xs
+      where n = length xs
 
-    mk_cls_edges ctxt = [ cls | L _ (HsClassP cls _) <- ctxt ]
+    -- No more superclasses to expand ==> no problems with cycles
+    -- See Note [Superclass cycle check]
+    expandTheta :: UniqSet Class -- Path of Classes to here in set form
+                -> [TyCon]       -- Path to here
+                -> ThetaType     -- Superclass work list
+                -> [[TyCon]]     -- Input error paths
+                -> [[TyCon]]     -- Final error paths
+    expandTheta _    _    []           = id
+    expandTheta seen path (pred:theta) = expandType seen path pred . expandTheta seen path theta
+
+    {-
+    expandTree seen path (ClassPred cls tys)
+      | cls `elemUniqSet` seen = 
+      | otherwise              = expandTheta (addOneToUniqSet cls seen) (classTyCon cls:path) 
+                                             (substTysWith (classTyVars cls) tys (classSCTheta cls))
+    expandTree seen path (TuplePred ts)      = flip (foldr (expandTree seen path)) ts
+    expandTree _    _    (EqPred _ _)        = id
+    expandTree _    _    (IPPred _ _)        = id
+    expandTree seen path (IrredPred pred)    = expandType seen path pred
+    -}
+
+    expandType seen path (TyConApp tc tys)
+      -- Expand unsaturated classes to their superclass theta if they are yet unseen.
+      -- If they have already been seen then we have detected an error!
+      | Just cls <- tyConClass_maybe tc
+      , let (env, remainder) = papp (classTyVars cls) tys
+            rest_tys = either (const []) id remainder
+      = if cls `elementOfUniqSet` seen
+         then (reverse (classTyCon cls:path):) 
+              . flip (foldr (expandType seen path)) tys
+         else expandTheta (addOneToUniqSet seen cls) (tc:path) 
+                          (substTys (mkTopTvSubst env) (classSCTheta cls))
+              . flip (foldr (expandType seen path)) rest_tys
+
+      -- For synonyms, try to expand them: some arguments might be
+      -- phantoms, after all. We can expand with impunity because at
+      -- this point the type synonym cycle check has already happened.
+      | isSynTyCon tc
+      , SynonymTyCon rhs <- synTyConRhs tc
+      , let (env, remainder) = papp (tyConTyVars tc) tys
+            rest_tys = either (const []) id remainder
+      = expandType seen (tc:path) (substTy (mkTopTvSubst env) rhs) 
+        . flip (foldr (expandType seen path)) rest_tys
+
+      -- For non-class, non-synonyms, just check the arguments
+      | otherwise
+      = flip (foldr (expandType seen path)) tys
+
+    expandType _    _    (TyVarTy _)      = id
+    expandType seen path (AppTy t1 t2)    = expandType seen path t1 . expandType seen path t2
+    expandType seen path (FunTy t1 t2)    = expandType seen path t1 . expandType seen path t2
+    expandType seen path (ForAllTy _tv t) = expandType seen path t
+
+    papp :: [TyVar] -> [Type] -> ([(TyVar, Type)], Either [TyVar] [Type])
+    papp []       tys      = ([], Right tys)
+    papp tvs      []       = ([], Left tvs)
+    papp (tv:tvs) (ty:tys) = ((tv, ty):env, remainder)
+      where (env, remainder) = papp tvs tys
 \end{code}
 
 
@@ -217,7 +341,7 @@ back to it.  (This is an error too.)
 Hi-boot types
 ~~~~~~~~~~~~~
 A data type read from an hi-boot file will have an AbstractTyCon as its AlgTyConRhs
-and will respond True to isHiBootTyCon. The idea is that we treat these as if one
+and will respond True to isAbstractTyCon. The idea is that we treat these as if one
 could get from these types to anywhere.  So when we see
 
         module Baz where
@@ -322,7 +446,6 @@ new_tc_rhs tc = snd (newTyConRhs tc)    -- Ignore the type variables
 
 getTyCon :: TyThing -> Maybe TyCon
 getTyCon (ATyCon tc) = Just tc
-getTyCon (AClass cl) = Just (classTyCon cl)
 getTyCon _           = Nothing
 
 findLoopBreakers :: [(TyCon, [TyCon])] -> [Name]
@@ -353,9 +476,6 @@ tcTyConsOfType ty
      go (TyConApp tc tys)          = go_tc tc tys
      go (AppTy a b)                = go a `plusNameEnv` go b
      go (FunTy a b)                = go a `plusNameEnv` go b
-     go (PredTy (IParam _ ty))     = go ty
-     go (PredTy (ClassP cls tys))  = go_tc (classTyCon cls) tys
-     go (PredTy (EqPred ty1 ty2))  = go ty1 `plusNameEnv` go ty2
      go (ForAllTy _ ty)            = go ty
 
      go_tc tc tys = extendNameEnv (go_s tys) (tyConName tc) tc

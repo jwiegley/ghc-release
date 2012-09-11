@@ -1,5 +1,5 @@
 name:           base
-version:        4.4.1.0
+version:        4.5.0.0
 license:        BSD3
 license-file:   LICENSE
 maintainer:     libraries@haskell.org
@@ -38,7 +38,6 @@ Library {
             Foreign.Concurrent,
             GHC.Arr,
             GHC.Base,
-            GHC.Classes,
             GHC.Conc,
             GHC.Conc.IO,
             GHC.Conc.Signal,
@@ -93,6 +92,8 @@ Library {
             GHC.Read,
             GHC.Real,
             GHC.ST,
+            GHC.Stack,
+            GHC.Stats,
             GHC.Show,
             GHC.Stable,
             GHC.Storable,
@@ -130,7 +131,6 @@ Library {
         Control.Monad.ST.Lazy.Safe,
         Control.Monad.ST.Lazy.Unsafe,
         Control.Monad.ST.Strict,
-        Control.Monad.Group
         Control.Monad.Zip
         Data.Bits,
         Data.Bool,

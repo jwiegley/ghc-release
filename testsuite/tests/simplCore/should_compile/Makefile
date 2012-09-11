@@ -7,6 +7,11 @@ T3055:
 	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c T3055.hs -ddump-simpl > T3055.simpl
 	grep 'I# (-28)' T3055.simpl | sed 's/.*\(I# (-28)\).*/\1/'
 
+T5658b:
+	$(RM) -f T5658b.o T5658b.hi 
+	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c T5658b.hs -ddump-simpl | grep --count indexIntArray
+# Trac 5658 meant that there were three calls to indexIntArray instead of two
+
 T3772:
 	$(RM) -f T3772*.hi T3772*.o
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T3772_A.hs 
@@ -35,7 +40,7 @@ T4918:
 	'$(TEST_HC)' $(TEST_HC_OPTS) --show-iface T4918.hi | grep 'C#'
 
 EvalTest:
-	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O EvalTest.hs -ddump-simpl -dsuppress-uniques | grep 'rght.*Dmd'
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O EvalTest.hs -ddump-simpl -dsuppress-uniques | grep 'rght.*Dmd' | sed 's/^ *//'
 
 T5168:
 	-('$(TEST_HC)' $(TEST_HC_OPTS) -c -O T5168.hs -ddump-simpl -dsuppress-uniques | grep 'patError')
@@ -49,3 +54,15 @@ T4945:
 # When this one works there are no 'lets' at all
 T4957:
 	-('$(TEST_HC)' $(TEST_HC_OPTS) -c -O T4957.hs -ddump-simpl -dsuppress-uniques | grep 'let')
+
+.PHONY: simpl021
+simpl021:
+	$(RM) -f Simpl021A.hi Simpl021A.o Simpl021B.hi Simpl021B.o
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c Simpl021A.hs -O
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c Simpl021B.hs -O
+
+.PHONY: T5327
+T5327:
+	$(RM) -f T5327.hi T5327.o
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T5327.hs -O -ddump-simpl | grep -c "GHC.Prim.># 34 "
+

@@ -1,6 +1,14 @@
 {-# LANGUAGE GADTs #-}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
+-- ToDo: remove -fno-warn-warnings-deprecations
 {-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
--- ToDo: remove
+-- ToDo: remove -fno-warn-incomplete-patterns
 {-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
 
 -- Module for building CmmAGraphs.
@@ -22,17 +30,11 @@ module MkGraph
          , mkReturn, mkReturnSimple, mkComment, mkCallEntry
          , mkBranch, mkCmmIfThenElse, mkCmmIfThen, mkCmmWhileDo
          , copyInOflow, copyInSlot, copyOutOflow, copyOutSlot
-  -- Reexport of needed Cmm stuff
-  , Convention(..), ForeignConvention(..), ForeignTarget(..)
-  , CmmStackInfo(..), CmmTopInfo(..), CmmGraph, GenCmmGraph(..)
-  , Cmm, CmmTop
   )
 where
 
 import BlockId
 import Cmm
-import CmmDecl
-import CmmExpr
 import CmmCallConv (assignArgumentsPos, ParamLocation(..))
 
 import Compiler.Hoopl hiding (Unique, (<*>), mkFirst, mkMiddle, mkLast, mkLabel, mkBranch, Shape(..))

@@ -25,7 +25,9 @@ import Control.Arrow
 import Data.Typeable
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Monoid
 import GHC hiding (NoLink)
+import OccName
 
 
 -----------------------------------------------------------------------------
@@ -34,10 +36,12 @@ import GHC hiding (NoLink)
 
 
 type IfaceMap      = Map Module Interface
-type InstIfaceMap  = Map Module InstalledInterface
-type DocMap        = Map Name (Doc DocName)
+type InstIfaceMap  = Map Module InstalledInterface  -- TODO: rename
+type DocMap a      = Map Name (Doc a)
+type ArgMap a      = Map Name (Map Int (Doc a))
+type SubMap        = Map Name [Name]
+type DeclMap       = Map Name [LHsDecl Name]
 type SrcMap        = Map PackageId FilePath
-type Decl          = LHsDecl Name
 type GhcDocHdr     = Maybe LHsDocString
 type DocPaths      = (FilePath, Maybe FilePath) -- paths to HTML and sources
 
@@ -75,11 +79,17 @@ data Interface = Interface
     -- | Declarations originating from the module. Excludes declarations without
     -- names (instances and stand-alone documentation comments). Includes
     -- names of subordinate declarations mapped to their parent declarations.
-  , ifaceDeclMap         :: Map Name DeclInfo
+  , ifaceDeclMap         :: Map Name [LHsDecl Name]
 
     -- | Documentation of declarations originating from the module (including
     -- subordinates).
-  , ifaceRnDocMap        :: Map Name (DocForDecl DocName)
+  , ifaceDocMap          :: DocMap Name
+  , ifaceArgMap          :: ArgMap Name
+
+    -- | Documentation of declarations originating from the module (including
+    -- subordinates).
+  , ifaceRnDocMap        :: DocMap DocName
+  , ifaceRnArgMap        :: ArgMap DocName
 
   , ifaceSubMap          :: Map Name [Name]
 
@@ -96,9 +106,6 @@ data Interface = Interface
 
     -- | Instances exported by the module.
   , ifaceInstances       :: ![Instance]
-
-    -- | Documentation of instances defined in the module.
-  , ifaceInstanceDocMap  :: Map Name (Doc Name)
 
     -- | The number of haddockable and haddocked items in the module, as a
     -- tuple. Haddockable items are the exports and the module itself.
@@ -118,7 +125,9 @@ data InstalledInterface = InstalledInterface
 
     -- | Documentation of declarations originating from the module (including
     -- subordinates).
-  , instDocMap         :: Map Name (DocForDecl Name)
+  , instDocMap         :: DocMap Name
+
+  , instArgMap         :: ArgMap Name
 
     -- | All names exported by this module.
   , instExports        :: [Name]
@@ -140,7 +149,8 @@ toInstalledIface :: Interface -> InstalledInterface
 toInstalledIface interface = InstalledInterface
   { instMod            = ifaceMod            interface
   , instInfo           = ifaceInfo           interface
-  , instDocMap         = fmap unrenameDocForDecl $ ifaceRnDocMap interface
+  , instDocMap         = ifaceDocMap         interface
+  , instArgMap         = ifaceArgMap         interface
   , instExports        = ifaceExports        interface
   , instVisibleExports = ifaceVisibleExports interface
   , instOptions        = ifaceOptions        interface
@@ -202,11 +212,6 @@ data ExportItem name
   | ExportModule Module
 
 
--- | A declaration that may have documentation, including its subordinates,
--- which may also have documentation.
-type DeclInfo = (Decl, DocForDecl Name, [(Name, DocForDecl Name)])
-
-
 -- | Arguments and result are indexed by Int, zero-based from the left,
 -- because that's the easiest to use when recursing over types.
 type FnArgsDoc name = Map Int (Doc name)
@@ -259,7 +264,7 @@ type DocInstance name = (InstHead name, Maybe (Doc name))
 
 -- | The head of an instance. Consists of a context, a class name and a list
 -- of instance types.
-type InstHead name = ([HsPred name], name, [HsType name])
+type InstHead name = ([HsType name], name, [HsType name])
 
 
 -----------------------------------------------------------------------------
@@ -275,7 +280,8 @@ data Doc id
   | DocAppend (Doc id) (Doc id)
   | DocString String
   | DocParagraph (Doc id)
-  | DocIdentifier [id]
+  | DocIdentifier id
+  | DocIdentifierUnchecked (ModuleName, OccName)
   | DocModule String
   | DocEmphasis (Doc id)
   | DocMonospaced (Doc id)
@@ -287,7 +293,12 @@ data Doc id
   | DocPic String
   | DocAName String
   | DocExamples [Example]
-  deriving (Eq, Show, Functor)
+  deriving (Functor)
+
+
+instance Monoid (Doc id) where
+  mempty  = DocEmpty
+  mappend = DocAppend
 
 
 unrenameDoc :: Doc DocName -> Doc Name
@@ -306,22 +317,23 @@ exampleToString (Example expression result) =
 
 
 data DocMarkup id a = Markup
-  { markupEmpty         :: a
-  , markupString        :: String -> a
-  , markupParagraph     :: a -> a
-  , markupAppend        :: a -> a -> a
-  , markupIdentifier    :: [id] -> a
-  , markupModule        :: String -> a
-  , markupEmphasis      :: a -> a
-  , markupMonospaced    :: a -> a
-  , markupUnorderedList :: [a] -> a
-  , markupOrderedList   :: [a] -> a
-  , markupDefList       :: [(a,a)] -> a
-  , markupCodeBlock     :: a -> a
-  , markupURL           :: String -> a
-  , markupAName         :: String -> a
-  , markupPic           :: String -> a
-  , markupExample       :: [Example] -> a
+  { markupEmpty                :: a
+  , markupString               :: String -> a
+  , markupParagraph            :: a -> a
+  , markupAppend               :: a -> a -> a
+  , markupIdentifier           :: id -> a
+  , markupIdentifierUnchecked  :: (ModuleName, OccName) -> a
+  , markupModule               :: String -> a
+  , markupEmphasis             :: a -> a
+  , markupMonospaced           :: a -> a
+  , markupUnorderedList        :: [a] -> a
+  , markupOrderedList          :: [a] -> a
+  , markupDefList              :: [(a,a)] -> a
+  , markupCodeBlock            :: a -> a
+  , markupURL                  :: String -> a
+  , markupAName                :: String -> a
+  , markupPic                  :: String -> a
+  , markupExample              :: [Example] -> a
   }
 
 
@@ -330,6 +342,7 @@ data HaddockModInfo name = HaddockModInfo
   , hmi_portability :: Maybe String
   , hmi_stability   :: Maybe String
   , hmi_maintainer  :: Maybe String
+  , hmi_safety      :: Maybe String
   }
 
 
@@ -339,6 +352,7 @@ emptyHaddockModInfo = HaddockModInfo
   , hmi_portability = Nothing
   , hmi_stability   = Nothing
   , hmi_maintainer  = Nothing
+  , hmi_safety      = Nothing
   }
 
 

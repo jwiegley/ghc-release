@@ -13,8 +13,7 @@ import Prelude hiding (last, unzip, succ, zip)
 import BlockId
 import CLabel
 import Cmm
-import CmmDecl
-import CmmExpr
+import CmmUtils
 import CmmContFlowOpt
 import CmmInfo
 import CmmLive
@@ -283,19 +282,8 @@ addProcPointProtocols callPPs procPoints g =
               let block = mapLookup id (toBlockMap g) `orElse`
                                     panic "branch out of graph"
               in case blockToNodeList block of
--- MS: There is an ugly bug in ghc-6.10, which rejects following valid code.
--- After trying several tricks, the NOINLINE on getItOut worked. Uffff.
-#if __GLASGOW_HASKELL__ >= 612
                    (_, [], JustC (CmmBranch pee)) | setMember pee procPoints -> Just pee
                    _                                                         -> Nothing
-#else
-                   (_, [], exit) | CmmBranch pee <- getItOut exit
-                                 , setMember pee procPoints      -> Just pee
-                   _                                             -> Nothing
-              where {-# NOINLINE getItOut #-}
-                    getItOut :: MaybeC C a -> a
-                    getItOut (JustC a) = a
-#endif
 
 -- | For now, following a suggestion by Ben Lippmeier, we pass all
 -- live variables as arguments, hoping that a clever register
@@ -382,7 +370,7 @@ add_CopyOuts protos procPoints g = foldGraphBlocks mb_copy_out (return mapEmpty)
 -- ToDo: use the _ret naming convention that the old code generator
 -- used. -- EZY
 splitAtProcPoints :: CLabel -> ProcPointSet-> ProcPointSet -> BlockEnv Status ->
-                     CmmTop -> FuelUniqSM [CmmTop]
+                     CmmDecl -> FuelUniqSM [CmmDecl]
 splitAtProcPoints entry_label callPPs procPoints procMap
                   (CmmProc (TopInfo {info_tbl=info_tbl,
                                      stack_info=stack_info})
@@ -408,10 +396,9 @@ splitAtProcPoints entry_label callPPs procPoints procMap
      -- Due to common blockification, we may overestimate the set of procpoints.
      let add_label map pp = Map.insert pp lbls map
            where lbls | pp == entry = (entry_label, Just entry_info_lbl)
-                      | otherwise   = (blockLbl pp, guard (setMember pp callPPs) >> Just (infoTblLbl pp))
-                 entry_info_lbl = case info_tbl of
-                     CmmInfoTable entry_info_label _ _ _ _ -> entry_info_label
-                     CmmNonInfoTable -> pprPanic "splitAtProcPoints: looked at info label for entry without info table" (ppr pp)
+                      | otherwise   = (blockLbl pp, guard (setMember pp callPPs) >> 
+                                                    Just (infoTblLbl pp))
+                 entry_info_lbl = cit_lbl info_tbl
          procLabels = foldl add_label Map.empty
                             (filter (flip mapMember (toBlockMap g)) (setElems procPoints))
      -- For each procpoint, we need to know the SP offset on entry.

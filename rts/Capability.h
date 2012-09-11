@@ -72,9 +72,19 @@ struct Capability_ {
     // block for allocating pinned objects into
     bdescr *pinned_object_block;
 
-    // Context switch flag. We used to have one global flag, now one 
-    // per capability. Locks required  : none (conflicts are harmless)
+    // Context switch flag.  When non-zero, this means: stop running
+    // Haskell code, and switch threads.
     int context_switch;
+
+    // Interrupt flag.  Like the context_switch flag, this also
+    // indicates that we should stop running Haskell code, but we do
+    // *not* switch threads.  This is used to stop a Capability in
+    // order to do GC, for example.
+    //
+    // The interrupt flag is always reset before we start running
+    // Haskell code, unlike the context_switch flag which is only
+    // reset after we have executed the context switch.
+    int interrupt;
 
 #if defined(THREADED_RTS)
     // Worker Tasks waiting in the wings.  Singly-linked.
@@ -98,11 +108,7 @@ struct Capability_ {
     SparkPool *sparks;
 
     // Stats on spark creation/conversion
-    nat sparks_created;
-    nat sparks_dud;
-    nat sparks_converted;
-    nat sparks_gcd;
-    nat sparks_fizzled;
+    SparkCounters spark_stats;
 #endif
 
     // Per-capability STM-related data
@@ -143,6 +149,10 @@ struct Capability_ {
   ASSERT(myTask() == task);				\
   ASSERT_TASK_ID(task);
 
+#if defined(THREADED_RTS)
+rtsBool checkSparkCountInvariant (void);
+#endif
+
 // Converts a *StgRegTable into a *Capability.
 //
 INLINE_HEADER Capability *
@@ -154,6 +164,10 @@ regTableToCapability (StgRegTable *reg)
 // Initialise the available capabilities.
 //
 void initCapabilities (void);
+
+// Add and initialise more Capabilities
+//
+Capability * moreCapabilities (nat from, nat to);
 
 // Release a capability.  This is called by a Task that is exiting
 // Haskell to make a foreign call, or in various other cases when we
@@ -189,10 +203,15 @@ extern Capability *capabilities;
 //
 extern Capability *last_free_capability;
 
-// GC indicator, in scope for the scheduler
-#define PENDING_GC_SEQ 1
-#define PENDING_GC_PAR 2
-extern volatile StgWord waiting_for_gc;
+//
+// Indicates that the RTS wants to synchronise all the Capabilities
+// for some reason.  All Capabilities should stop and return to the
+// scheduler.
+//
+#define SYNC_GC_SEQ 1
+#define SYNC_GC_PAR 2
+#define SYNC_OTHER  3
+extern volatile StgWord pending_sync;
 
 // Acquires a capability at a return point.  If *cap is non-NULL, then
 // this is taken as a preference for the Capability we wish to
@@ -275,8 +294,13 @@ void shutdownCapability (Capability *cap, Task *task, rtsBool wait_foreign);
 void shutdownCapabilities(Task *task, rtsBool wait_foreign);
 
 // cause all capabilities to context switch as soon as possible.
-void setContextSwitches(void);
+void contextSwitchAllCapabilities(void);
 INLINE_HEADER void contextSwitchCapability(Capability *cap);
+
+// cause all capabilities to stop running Haskell code and return to
+// the scheduler as soon as possible.
+void interruptAllCapabilities(void);
+INLINE_HEADER void interruptCapability(Capability *cap);
 
 // Free all capabilities
 void freeCapabilities (void);
@@ -342,18 +366,31 @@ sparkPoolSizeCap (Capability *cap)
 
 INLINE_HEADER void
 discardSparksCap (Capability *cap) 
-{ return discardSparks(cap->sparks); }
+{ discardSparks(cap->sparks); }
 #endif
+
+INLINE_HEADER void
+stopCapability (Capability *cap)
+{
+    // setting HpLim to NULL tries to make the next heap check will
+    // fail, which will cause the thread to return to the scheduler.
+    // It may not work - the thread might be updating HpLim itself
+    // at the same time - so we also have the context_switch/interrupted
+    // flags as a sticky way to tell the thread to stop.
+    cap->r.rHpLim = NULL;
+}
+
+INLINE_HEADER void
+interruptCapability (Capability *cap)
+{
+    stopCapability(cap);
+    cap->interrupt = 1;
+}
 
 INLINE_HEADER void
 contextSwitchCapability (Capability *cap)
 {
-    // setting HpLim to NULL ensures that the next heap check will
-    // fail, and the thread will return to the scheduler.
-    cap->r.rHpLim = NULL;
-    // But just in case it didn't work (the target thread might be
-    // modifying HpLim at the same time), we set the end-of-block
-    // context-switch flag too:
+    stopCapability(cap);
     cap->context_switch = 1;
 }
 

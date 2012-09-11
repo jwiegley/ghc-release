@@ -5,6 +5,13 @@
 \section[DataCon]{@DataCon@: Data Constructors}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module DataCon (
         -- * Main data types
 	DataCon, DataConIds(..),
@@ -47,11 +54,11 @@ import TyCon
 import Class
 import Name
 import Var
-import BasicTypes
 import Outputable
 import Unique
 import ListSetOps
 import Util
+import BasicTypes
 import FastString
 import Module
 
@@ -535,8 +542,8 @@ mkDataCon name declared_infix
 	-- source-language arguments.  We add extra ones for the
 	-- dictionary arguments right here.
     full_theta   = eqSpecPreds eq_spec ++ theta
-    real_arg_tys = mkPredTys full_theta               ++ orig_arg_tys
-    real_stricts = map mk_dict_strict_mark full_theta ++ arg_stricts
+    real_arg_tys = full_theta                         ++ orig_arg_tys
+    real_stricts = map mk_pred_strict_mark full_theta ++ arg_stricts
 
 	-- Representation arguments and demands
 	-- To do: eliminate duplication with MkId
@@ -550,10 +557,20 @@ mkDataCon name declared_infix
 eqSpecPreds :: [(TyVar,Type)] -> ThetaType
 eqSpecPreds spec = [ mkEqPred (mkTyVarTy tv, ty) | (tv,ty) <- spec ]
 
-mk_dict_strict_mark :: PredType -> HsBang
-mk_dict_strict_mark pred | isStrictPred pred = HsStrict
-		         | otherwise	     = HsNoBang
+mk_pred_strict_mark :: PredType -> HsBang
+mk_pred_strict_mark pred 
+  | isEqPred pred = HsUnpack	-- Note [Unpack equality predicates]
+  | otherwise     = HsNoBang
 \end{code}
+
+Note [Unpack equality predicates]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If we have a GADT with a contructor C :: (a~[b]) => b -> T a
+we definitely want that equality predicate *unboxed* so that it
+takes no space at all.  This is easily done: just give it
+an UNPACK pragma. The rest of the unpack/repack code does the
+heavy lifting.  This one line makes every GADT take a word less
+space for each equality predicate, so it's pretty important!
 
 \begin{code}
 -- | The 'Name' of the 'DataCon', giving it a unique, rooted identification
@@ -658,7 +675,7 @@ dataConStrictMarks = dcStrictMarks
 -- | Strictness of evidence arguments to the wrapper function
 dataConExStricts :: DataCon -> [HsBang]
 -- Usually empty, so we don't bother to cache this
-dataConExStricts dc = map mk_dict_strict_mark $ (dataConTheta dc)
+dataConExStricts dc = map mk_pred_strict_mark (dataConTheta dc)
 
 -- | Source-level arity of the data constructor
 dataConSourceArity :: DataCon -> Arity
@@ -746,7 +763,7 @@ dataConUserType  (MkData { dcUnivTyVars = univ_tvs,
 			   dcOtherTheta = theta, dcOrigArgTys = arg_tys,
 			   dcOrigResTy = res_ty })
   = mkForAllTys ((univ_tvs `minusList` map fst eq_spec) ++ ex_tvs) $
-    mkFunTys (mkPredTys theta) $
+    mkFunTys theta $
     mkFunTys arg_tys $
     res_ty
 
@@ -841,11 +858,17 @@ dataConCannotMatch tys con
   | all isTyVarTy tys = False	-- Also common
   | otherwise
   = typesCantMatch [(Type.substTy subst ty1, Type.substTy subst ty2)
-                   | EqPred ty1 ty2 <- theta ]
+                   | (ty1, ty2) <- concatMap predEqs theta ]
   where
     dc_tvs  = dataConUnivTyVars con
     theta   = dataConTheta con
     subst   = zipTopTvSubst dc_tvs tys
+
+    -- TODO: could gather equalities from superclasses too
+    predEqs pred = case classifyPredType pred of
+                     EqPred ty1 ty2 -> [(ty1, ty2)]
+                     TuplePred ts   -> concatMap predEqs ts
+                     _              -> []
 \end{code}
 
 %************************************************************************
@@ -930,6 +953,7 @@ computeRep stricts tys
   where
     unbox HsNoBang       ty = [(NotMarkedStrict, ty)]
     unbox HsStrict       ty = [(MarkedStrict,    ty)]
+    unbox HsNoUnpack     ty = [(MarkedStrict,    ty)]
     unbox HsUnpackFailed ty = [(MarkedStrict,    ty)]
     unbox HsUnpack ty = zipEqual "computeRep" (dataConRepStrictness arg_dc) arg_tys
                       where

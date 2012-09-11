@@ -20,6 +20,13 @@ and ``addToUFM\_C'' and ``Data.IntMap.insertWith'' differ in the order
 of arguments of combining function.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs -XGeneralizedNewtypeDeriving #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 {-# OPTIONS -Wall #-}
 module UniqFM (
 	-- * Unique-keyed mappings
@@ -36,7 +43,7 @@ module UniqFM (
 	addListToUFM,addListToUFM_C,
 	addToUFM_Directly,
 	addListToUFM_Directly,
-	adjustUFM,
+	adjustUFM, alterUFM,
 	adjustUFM_Directly,
 	delFromUFM,
 	delFromUFM_Directly,
@@ -67,6 +74,7 @@ import Compiler.Hoopl   hiding (Unique)
 import Data.Function (on)
 import qualified Data.IntMap as M
 import qualified Data.Foldable as Foldable
+import qualified Data.Traversable as Traversable
 import Data.Typeable
 import Data.Data
 \end{code}
@@ -107,6 +115,12 @@ addToUFM_Acc	:: Uniquable key =>
 			   -> UniqFM elts 		-- old
 			   -> key -> elt 		-- new
 			   -> UniqFM elts		-- result
+
+alterUFM        :: Uniquable key => 
+                              (Maybe elt -> Maybe elt)  -- How to adjust
+			   -> UniqFM elt 		-- old
+			   -> key        		-- new
+			   -> UniqFM elt		-- result
 
 addListToUFM_C	:: Uniquable key => (elt -> elt -> elt)
 			   -> UniqFM elt -> [(key,elt)]
@@ -166,10 +180,18 @@ ufmToList	:: UniqFM elt -> [(Unique, elt)]
 
 \begin{code}
 newtype UniqFM ele = UFM { unUFM :: M.IntMap ele }
-  deriving (Typeable,Data)
+  deriving (Typeable,Data, Traversable.Traversable, Functor)
 
 instance Eq ele => Eq (UniqFM ele) where
     (==) = (==) `on` unUFM
+
+{-
+instance Functor UniqFM where
+   fmap f = fmap f . unUFM
+
+instance Traversable.Traversable UniqFM where 
+    traverse f = Traversable.traverse f . unUFM
+-}
 
 instance Foldable.Foldable UniqFM where
     foldMap f = Foldable.foldMap f . unUFM
@@ -182,7 +204,8 @@ listToUFM = foldl (\m (k, v) -> addToUFM m k v) emptyUFM
 listToUFM_Directly = foldl (\m (u, v) -> addToUFM_Directly m u v) emptyUFM
 listToUFM_C f = foldl (\m (k, v) -> addToUFM_C f m k v) emptyUFM
 
-addToUFM (UFM m) k v = UFM (M.insert (getKey $ getUnique k) v m)
+alterUFM f (UFM m) k = UFM (M.alter f (getKey $ getUnique k) m)
+addToUFM (UFM m) k v   = UFM (M.insert (getKey $ getUnique k) v m)
 addListToUFM = foldl (\m (k, v) -> addToUFM m k v)
 addListToUFM_Directly = foldl (\m (k, v) -> addToUFM_Directly m k v)
 addToUFM_Directly (UFM m) u v = UFM (M.insert (getKey u) v m)

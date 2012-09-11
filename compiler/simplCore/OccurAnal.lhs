@@ -1,3 +1,4 @@
+
 %
 % (c) The GRASP/AQUA Project, Glasgow University, 1992-1998
 %
@@ -11,6 +12,14 @@ The occurrence analyser re-typechecks a core expression, returning a new
 core expression with (hopefully) improved usage information.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
+{-# LANGUAGE BangPatterns #-}
 module OccurAnal (
         occurAnalysePgm, occurAnalyseExpr
     ) where
@@ -19,7 +28,7 @@ module OccurAnal (
 
 import CoreSyn
 import CoreFVs
-import CoreUtils        ( exprIsTrivial, isDefaultAlt, isExpandableApp, mkCoerce )
+import CoreUtils        ( exprIsTrivial, isDefaultAlt, isExpandableApp, mkCast )
 import Id
 import Name( localiseName )
 import BasicTypes
@@ -55,7 +64,7 @@ Here's the externally-callable interface:
 occurAnalysePgm :: Module	-- Used only in debug output
                 -> (Activation -> Bool) 
                 -> [CoreRule] -> [CoreVect]
-                -> [CoreBind] -> [CoreBind]
+                -> CoreProgram -> CoreProgram
 occurAnalysePgm this_mod active_rule imp_rules vects binds
   | isEmptyVarEnv final_usage
   = binds'
@@ -827,7 +836,7 @@ reOrderNodes depth bndr_set weak_fvs (node : nodes) binds
     is_con_app (Var v)    = isConLikeId v
     is_con_app (App f _)  = is_con_app f
     is_con_app (Lam _ e)  = is_con_app e
-    is_con_app (Note _ e) = is_con_app e
+    is_con_app (Tick _ e) = is_con_app e
     is_con_app _          = False
 \end{code}
 
@@ -1052,7 +1061,7 @@ occAnal :: OccEnv
             CoreExpr)
 
 occAnal _   expr@(Type _) = (emptyDetails, 	   expr)
-occAnal _   expr@(Lit _)  = (emptyDetails, 	   expr)   
+occAnal _   expr@(Lit _)  = (emptyDetails, 	   expr)
 occAnal env expr@(Var v)  = (mkOneOcc env v False, expr)
     -- At one stage, I gathered the idRuleVars for v here too,
     -- which in a way is the right thing to do.
@@ -1072,18 +1081,19 @@ We need to gather info about what coercion variables appear, so that
 we can sort them into the right place when doing dependency analysis.
 
 \begin{code}
-\end{code}
+occAnal env (Tick tickish body)
+  | Breakpoint _ ids <- tickish
+  = (mapVarEnv markInsideSCC usage
+         +++ mkVarEnv (zip ids (repeat NoOccInfo)), Tick tickish body')
+    -- never substitute for any of the Ids in a Breakpoint
 
-\begin{code}
-occAnal env (Note note@(SCC _) body)
-  = case occAnal env body of { (usage, body') ->
-    (mapVarEnv markInsideSCC usage, Note note body')
-    }
+  | tickishScoped tickish
+  = (mapVarEnv markInsideSCC usage, Tick tickish body')
 
-occAnal env (Note note body)
-  = case occAnal env body of { (usage, body') ->
-    (usage, Note note body')
-    }
+  | otherwise
+  = (usage, Tick tickish body')
+  where
+    !(usage,body') = occAnal env body
 
 occAnal env (Cast expr co)
   = case occAnal env expr of { (usage, expr') ->
@@ -1335,7 +1345,7 @@ wrapProxy (bndr, rhs_var, co) (body_usg, body)
   where
     (body_usg', tagged_bndr) = tagBinder body_usg bndr
     rhs_usg = unitVarEnv rhs_var NoOccInfo	-- We don't need exact info
-    rhs = mkCoerce co (Var (zapIdOccInfo rhs_var)) -- See Note [Zap case binders in proxy bindings]
+    rhs = mkCast (Var (zapIdOccInfo rhs_var)) co -- See Note [Zap case binders in proxy bindings]
 \end{code}
 
 
@@ -1896,7 +1906,8 @@ markMany, markInsideLam, markInsideSCC :: OccInfo -> OccInfo
 
 markMany _  = NoOccInfo
 
-markInsideSCC occ = markMany occ
+markInsideSCC occ = markInsideLam occ
+  -- inside an SCC, we can inline lambdas only.
 
 markInsideLam (OneOcc _ one_br int_cxt) = OneOcc True one_br int_cxt
 markInsideLam occ                       = occ

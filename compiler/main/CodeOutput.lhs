@@ -4,6 +4,13 @@
 \section{Code output phase}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module CodeOutput( codeOutput, outputForeignStubs ) where
 
 #include "HsVersions.h"
@@ -18,7 +25,7 @@ import PprC		( writeCs )
 import CmmLint		( cmmLint )
 import Packages
 import Util
-import OldCmm		( RawCmm )
+import OldCmm           ( RawCmmGroup )
 import HscTypes
 import DynFlags
 import Config
@@ -48,7 +55,7 @@ codeOutput :: DynFlags
 	   -> ModLocation
 	   -> ForeignStubs
 	   -> [PackageId]
-	   -> [RawCmm]			-- Compiled C--
+           -> [RawCmmGroup]                       -- Compiled C--
            -> IO (Bool{-stub_h_exists-}, Maybe FilePath{-stub_c_exists-})
 
 codeOutput dflags this_mod location foreign_stubs pkg_deps flat_abstractC
@@ -96,7 +103,7 @@ doOutput filenm io_action = bracket (openFile filenm WriteMode) hClose io_action
 \begin{code}
 outputC :: DynFlags
         -> FilePath
-        -> [RawCmm]
+        -> [RawCmmGroup]
         -> [PackageId]
         -> IO ()
 
@@ -134,7 +141,7 @@ outputC dflags filenm flat_absC packages
 %************************************************************************
 
 \begin{code}
-outputAsm :: DynFlags -> FilePath -> [RawCmm] -> IO ()
+outputAsm :: DynFlags -> FilePath -> [RawCmmGroup] -> IO ()
 outputAsm dflags filenm flat_absC
  | cGhcWithNativeCodeGen == "YES"
   = do ncg_uniqs <- mkSplitUniqSupply 'n'
@@ -155,10 +162,12 @@ outputAsm dflags filenm flat_absC
 %************************************************************************
 
 \begin{code}
-outputLlvm :: DynFlags -> FilePath -> [RawCmm] -> IO ()
+outputLlvm :: DynFlags -> FilePath -> [RawCmmGroup] -> IO ()
 outputLlvm dflags filenm flat_absC
   = do ncg_uniqs <- mkSplitUniqSupply 'n'
-       doOutput filenm $ \f -> llvmCodeGen dflags f ncg_uniqs flat_absC
+       {-# SCC "llvm_output" #-} doOutput filenm $
+           \f -> {-# SCC "llvm_CodeGen" #-}
+                 llvmCodeGen dflags f ncg_uniqs flat_absC
 \end{code}
 
 

@@ -3,17 +3,17 @@ include $(TOP)/mk/boilerplate.mk
 include $(TOP)/mk/test.mk
 
 outofmem-prep::
-	'$(TEST_HC)' $(TEST_HC_OPTS) --make -fforce-recomp outofmem.hs -o outofmem
+	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 --make -fforce-recomp outofmem.hs -o outofmem
 
 outofmem::
-	@$(MAKE) outofmem-prep >prep.out 2>prep.out
+	@$(MAKE) outofmem-prep
 	@ulimit -v 10000000 2>/dev/null; ./outofmem || echo "exit($$?)"
 
 outofmem2-prep::
-	'$(TEST_HC)' $(TEST_HC_OPTS) -rtsopts --make -fforce-recomp outofmem2.hs -o outofmem2
+	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 -rtsopts --make -fforce-recomp outofmem2.hs -o outofmem2
 
 outofmem2::
-	@$(MAKE) outofmem2-prep >prep.out 2>prep.out
+	@$(MAKE) outofmem2-prep
 	@ulimit -v 1000000 2>/dev/null; ./outofmem2 +RTS -M5m -RTS || echo "exit($$?)"
 
 T2615-prep:
@@ -23,9 +23,9 @@ T2615-prep:
 
 .PHONY: T4059
 T4059:
-	$(RM) 4059_c.o 4059.o 4059.hi
-	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 --make 4059 4059_c.c
-	./4059
+	$(RM) T4059_c.o T4059.o T4059.hi
+	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 --make T4059 T4059_c.c
+	./T4059
 
 exec_signals-prep:
 	$(CC) -o exec_signals_child exec_signals_child.c
@@ -36,3 +36,12 @@ exec_signals-prep:
 	$(RM) 4850.o 4850.hi 4850$(exeext)
 	"$(TEST_HC)" $(TEST_HC_OPTS) -v0 -rtsopts -debug -threaded --make 4850
 	./4850 +RTS -s 2>&1 | grep Task | wc -l | tr -d ' '
+
+.PHONY: T5423
+T5423:
+	$(RM) T5423_cmm.o T5423.o T5423.hi T5423$(exeext)
+	"$(TEST_HC)" $(TEST_HC_OPTS) -v0 -c T5423_cmm.cmm
+	"$(TEST_HC)" $(TEST_HC_OPTS) -v0 -c T5423.hs
+	"$(TEST_HC)" $(TEST_HC_OPTS) -v0 T5423.o T5423_cmm.o -o T5423$(exeext)
+	./T5423
+

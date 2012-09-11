@@ -1,4 +1,11 @@
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 -- | Handy functions for creating much Core syntax
 module MkCore (
         -- * Constructing normal syntax
@@ -13,6 +20,15 @@ module MkCore (
         mkIntegerExpr,
         mkFloatExpr, mkDoubleExpr,
         mkCharExpr, mkStringExpr, mkStringExprFS,
+
+        -- * Floats
+        FloatBind(..), wrapFloat,
+
+        -- * Constructing/deconstructing implicit parameter boxes
+        mkIPUnbox, mkIPBox,
+
+        -- * Constructing/deconstructing equality evidence boxes
+        mkEqBox,
         
         -- * Constructing general big tuples
         -- $big_tuples
@@ -45,7 +61,7 @@ module MkCore (
 #include "HsVersions.h"
 
 import Id
-import Var      ( EvVar, setTyVarUnique )
+import Var      ( IpId, EvVar, setTyVarUnique )
 
 import CoreSyn
 import CoreUtils        ( exprType, needsCaseBinding, bindNonRec )
@@ -55,19 +71,21 @@ import HscTypes
 import TysWiredIn
 import PrelNames
 
-import TcType		( mkSigmaTy )
+import IParam           ( ipCoAxiom )
+import TcType		( mkSigmaTy, evVarPred )
 import Type
 import Coercion
 import TysPrim
 import DataCon          ( DataCon, dataConWorkId )
 import IdInfo		( vanillaIdInfo, setStrictnessInfo, setArityInfo )
 import Demand
-import Name
+import Name      hiding ( varName )
 import Outputable
 import FastString
 import UniqSupply
 import BasicTypes
 import Util             ( notNull, zipEqual )
+import Pair
 import Constants
 
 import Data.Char        ( ord )
@@ -151,7 +169,7 @@ mk_val_app fun arg arg_ty res_ty
 	-- fragmet of it as the fun part of a 'mk_val_app'.
 
 mkWildEvBinder :: PredType -> EvVar
-mkWildEvBinder pred = mkWildValBinder (mkPredTy pred)
+mkWildEvBinder pred = mkWildValBinder pred
 
 -- | Make a /wildcard binder/. This is typically used when you need a binder 
 -- that you expect to use only at a *binding* site.  Do not use it at
@@ -210,40 +228,9 @@ mkWordExprWord :: Word       -> CoreExpr
 mkWordExprWord w = mkConApp wordDataCon [mkWordLitWord w]
 
 -- | Create a 'CoreExpr' which will evaluate to the given @Integer@
-mkIntegerExpr  :: MonadThings m => Integer    -> m CoreExpr  -- Result :: Integer
-mkIntegerExpr i
-  | inIntRange i        -- Small enough, so start from an Int
-    = do integer_id <- lookupId smallIntegerName
-         return (mkSmallIntegerLit integer_id i)
-
--- Special case for integral literals with a large magnitude:
--- They are transformed into an expression involving only smaller
--- integral literals. This improves constant folding.
-
-  | otherwise = do       -- Big, so start from a string
-      plus_id <- lookupId plusIntegerName
-      times_id <- lookupId timesIntegerName
-      integer_id <- lookupId smallIntegerName
-      let
-           lit i = mkSmallIntegerLit integer_id i
-           plus a b  = Var plus_id  `App` a `App` b
-           times a b = Var times_id `App` a `App` b
-
-           -- Transform i into (x1 + (x2 + (x3 + (...) * b) * b) * b) with abs xi <= b
-           horner :: Integer -> Integer -> CoreExpr
-           horner b i | abs q <= 1 = if r == 0 || r == i 
-                                     then lit i 
-                                     else lit r `plus` lit (i-r)
-                      | r == 0     =               horner b q `times` lit b
-                      | otherwise  = lit r `plus` (horner b q `times` lit b)
-                      where
-                        (q,r) = i `quotRem` b
-
-      return (horner tARGET_MAX_INT i)
-  where
-    mkSmallIntegerLit :: Id -> Integer -> CoreExpr
-    mkSmallIntegerLit small_integer i = mkApps (Var small_integer) [mkIntLit i]
-
+mkIntegerExpr  :: MonadThings m => Integer -> m CoreExpr  -- Result :: Integer
+mkIntegerExpr i = do mkIntegerId <- lookupId mkIntegerName
+                     return (Lit (mkLitInteger i mkIntegerId))
 
 -- | Create a 'CoreExpr' which will evaluate to the given @Float@
 mkFloatExpr :: Float -> CoreExpr
@@ -284,6 +271,31 @@ mkStringExprFS str
   where
     chars = unpackFS str
     safeChar c = ord c >= 1 && ord c <= 0x7F
+\end{code}
+
+\begin{code}
+
+mkIPBox :: IPName IpId -> CoreExpr -> CoreExpr
+mkIPBox ipx e = e `Cast` mkSymCo (mkAxInstCo (ipCoAxiom ip) [ty])
+  where x = ipNameName ipx
+        Just (ip, ty) = getIPPredTy_maybe (evVarPred x)
+        -- NB: don't use the DataCon work id because we don't generate code for it
+
+mkIPUnbox :: IPName IpId -> CoreExpr
+mkIPUnbox ipx = Var x `Cast` mkAxInstCo (ipCoAxiom ip) [ty]
+  where x = ipNameName ipx
+        Just (ip, ty) = getIPPredTy_maybe (evVarPred x)
+
+\end{code}
+
+\begin{code}
+
+mkEqBox :: Coercion -> CoreExpr
+mkEqBox co = ASSERT( typeKind ty2 `eqKind` k )
+             Var (dataConWorkId eqBoxDataCon) `mkTyApps` [k, ty1, ty2] `App` Coercion co
+  where Pair ty1 ty2 = coercionKind co
+        k = typeKind ty1
+
 \end{code}
 
 %************************************************************************
@@ -360,7 +372,7 @@ mkCoreVarTupTy ids = mkBoxedTupleTy (map idType ids)
 mkCoreTup :: [CoreExpr] -> CoreExpr
 mkCoreTup []  = Var unitDataConId
 mkCoreTup [c] = c
-mkCoreTup cs  = mkConApp (tupleCon Boxed (length cs))
+mkCoreTup cs  = mkConApp (tupleCon BoxedTuple (length cs))
                          (map (Type . exprType) cs ++ cs)
 
 -- | Build a big tuple holding the specified variables
@@ -378,6 +390,25 @@ mkBigCoreTup = mkChunkified mkCoreTup
 -- | Build the type of a big tuple that holds the specified type of thing
 mkBigCoreTupTy :: [Type] -> Type
 mkBigCoreTupTy = mkChunkified mkBoxedTupleTy
+\end{code}
+
+
+%************************************************************************
+%*                                                                      *
+                Floats
+%*                                                                      *
+%************************************************************************
+
+\begin{code}
+data FloatBind 
+  = FloatLet  CoreBind
+  | FloatCase CoreExpr Id AltCon [Var]       
+      -- case e of y { C ys -> ... }
+      -- See Note [Floating cases] in SetLevels
+
+wrapFloat :: FloatBind -> CoreExpr -> CoreExpr
+wrapFloat (FloatLet defns)       body = Let defns body
+wrapFloat (FloatCase e b con bs) body = Case e b (exprType body) [(con, bs, body)]
 \end{code}
 
 %************************************************************************
@@ -444,7 +475,7 @@ mkSmallTupleSelector [var] should_be_the_same_var _ scrut
 mkSmallTupleSelector vars the_var scrut_var scrut
   = ASSERT( notNull vars )
     Case scrut scrut_var (idType the_var)
-         [(DataAlt (tupleCon Boxed (length vars)), vars, Var the_var)]
+         [(DataAlt (tupleCon BoxedTuple (length vars)), vars, Var the_var)]
 \end{code}
 
 \begin{code}
@@ -501,7 +532,7 @@ mkSmallTupleCase [var] body _scrut_var scrut
   = bindNonRec var scrut body
 mkSmallTupleCase vars body scrut_var scrut
 -- One branch no refinement?
-  = Case scrut scrut_var (exprType body) [(DataAlt (tupleCon Boxed (length vars)), vars, body)]
+  = Case scrut scrut_var (exprType body) [(DataAlt (tupleCon BoxedTuple (length vars)), vars, body)]
 \end{code}
 
 %************************************************************************

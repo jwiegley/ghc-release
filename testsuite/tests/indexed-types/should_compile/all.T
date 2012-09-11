@@ -21,7 +21,7 @@ test('Simple16', normal, compile, [''])
 test('Simple17', normal, compile, [''])
 test('Simple18', normal, compile, [''])
 test('Simple19', normal, compile, [''])
-test('Simple20', expect_broken(4296), compile, [''])
+test('Simple20', expect_broken(4296), compile, ['-fcontext-stack=50'])
 test('Simple21', normal, compile, [''])
 test('Simple22', normal, compile, [''])
 test('Simple23', normal, compile, [''])
@@ -146,7 +146,7 @@ test('IndTypesPerf',
      run_command,
      ['$MAKE -s --no-print-directory IndTypesPerf'])
 
-test('T4120', normal, compile_fail, [''])
+test('T4120', normal, compile, [''])
 test('T3787', reqlib('mtl'), compile, [''])
 test('T3826', normal, compile, [''])
 test('T4200', normal, compile, [''])

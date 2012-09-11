@@ -43,7 +43,7 @@ test('ghci024',
 test('ghci025', normal, ghci_script, ['ghci025.script'])
 test('ghci026', normal, ghci_script, ['ghci026.script'])
 
-test('ghci027', normal, ghci_script, ['ghci027.script'])
+test('ghci027', extra_clean(['ghci027.hs']), ghci_script, ['ghci027.script'])
 test('ghci028', normal, ghci_script, ['ghci028.script'])
 test('ghci029', normal, ghci_script, ['ghci029.script'])
 test('ghci030', normal, ghci_script, ['ghci030.script'])
@@ -54,6 +54,33 @@ test('ghci034', normal, ghci_script, ['ghci034.script'])
 test('ghci035', normal, ghci_script, ['ghci035.script'])
 test('ghci036', normal, ghci_script, ['ghci036.script'])
 test('ghci037', req_interp, run_command, ['$MAKE -s --no-print-directory ghci037'])
+test('ghci038', normal, ghci_script, ['ghci038.script'])
+test('ghci039', normal, ghci_script, ['ghci039.script'])
+test('ghci040', normal, ghci_script, ['ghci040.script'])
+test('ghci041', normal, ghci_script, ['ghci041.script'])
+test('ghci042', normal, ghci_script, ['ghci042.script'])
+test('ghci043', normal, ghci_script, ['ghci043.script'])
+test('ghci044', normal, ghci_script, ['ghci044.script'])
+test('ghci045', normal, ghci_script, ['ghci045.script'])
+test('ghci046', normal, ghci_script, ['ghci046.script'])
+test('ghci047', normal, ghci_script, ['ghci047.script'])
+test('ghci048', normal, ghci_script, ['ghci048.script'])
+test('ghci049', normal, ghci_script, ['ghci049.script'])
+test('ghci050', normal, ghci_script, ['ghci050.script'])
+test('ghci051', normal, ghci_script, ['ghci051.script'])
+test('ghci052', normal, ghci_script, ['ghci052.script'])
+test('ghci053', normal, ghci_script, ['ghci053.script'])
+test('ghci054', normal, ghci_script, ['ghci054.script'])
+test('ghci055', normal, ghci_script, ['ghci055.script'])
+
+test('ghci056',
+     [
+       cmd_prefix('$MAKE --no-print-directory ghci056_setup && '),
+       extra_run_opts('ghci056_c.o'),
+       extra_clean('ghci056_c.o')
+     ],
+     ghci_script, ['ghci056.script'])
+
 test('2452', normal, ghci_script, ['2452.script'])
 test('T2766', normal, ghci_script, ['T2766.script'])
 
@@ -75,3 +102,9 @@ test('T4316', reqlib('mtl'), ghci_script, ['T4316.script'])
 test('T4832', normal, ghci_script, ['T4832.script'])
 test('T5045', normal, ghci_script, ['T5045.script'])
 test('T5130', normal, ghci_script, ['T5130.script'])
+test('T5417', normal, ghci_script, ['T5417.script'])
+test('T5545', normal, ghci_script, ['T5545.script'])
+test('T5557', normal, ghci_script, ['T5557.script'])
+test('T5566', normal, ghci_script, ['T5566.script'])
+test('GhciKinds', normal, ghci_script, ['GhciKinds.script'])
+test('T5564', normal, ghci_script, ['T5564.script'])

@@ -10,6 +10,13 @@ general, all of these functions return a renamed thing, and a set of
 free variables.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 {-# LANGUAGE ScopedTypeVariables #-}
 module RnPat (-- main entry points
               rnPat, rnPats, rnBindPat,
@@ -155,15 +162,15 @@ matchNameMaker ctxt = LamMk report_unused
                       StmtCtxt GhciStmt -> False
                       _                 -> True
 
-newName :: NameMaker -> Located RdrName -> CpsRn Name
-newName (LamMk report_unused) rdr_name
+newPatName :: NameMaker -> Located RdrName -> CpsRn Name
+newPatName (LamMk report_unused) rdr_name
   = CpsRn (\ thing_inside -> 
 	do { name <- newLocalBndrRn rdr_name
 	   ; (res, fvs) <- bindLocalName name (thing_inside name)
 	   ; when report_unused $ warnUnusedMatches [name] fvs
 	   ; return (res, name `delFV` fvs) })
 
-newName (LetMk is_top fix_env) rdr_name
+newPatName (LetMk is_top fix_env) rdr_name
   = CpsRn (\ thing_inside -> 
         do { name <- case is_top of
                        NotTopLevel -> newLocalBndrRn rdr_name
@@ -253,7 +260,7 @@ rnPat ctxt pat thing_inside
   = rnPats ctxt [pat] (\pats' -> let [pat'] = pats' in thing_inside pat')
 
 applyNameMaker :: NameMaker -> Located RdrName -> RnM Name
-applyNameMaker mk rdr = do { (n, _fvs) <- runCps (newName mk rdr); return n }
+applyNameMaker mk rdr = do { (n, _fvs) <- runCps (newPatName mk rdr); return n }
 
 -- ----------- Entry point 2: rnBindPat -------------------
 -- Binds local names; in a recursive scope that involves other bound vars
@@ -298,7 +305,7 @@ rnPatAndThen mk (ParPat pat)  = do { pat' <- rnLPatAndThen mk pat; return (ParPa
 rnPatAndThen mk (LazyPat pat) = do { pat' <- rnLPatAndThen mk pat; return (LazyPat pat') }
 rnPatAndThen mk (BangPat pat) = do { pat' <- rnLPatAndThen mk pat; return (BangPat pat') }
 rnPatAndThen mk (VarPat rdr)  = do { loc <- liftCps getSrcSpanM
-                                   ; name <- newName mk (L loc rdr)
+                                   ; name <- newPatName mk (L loc rdr)
                                    ; return (VarPat name) }
      -- we need to bind pattern variables for view pattern expressions
      -- (e.g. in the pattern (x, x -> y) x needs to be bound in the rhs of the tuple)
@@ -307,12 +314,11 @@ rnPatAndThen mk (SigPatIn pat ty)
   = do { patsigs <- liftCps (xoptM Opt_ScopedTypeVariables)
        ; if patsigs
          then do { pat' <- rnLPatAndThen mk pat
-                 ; ty' <- liftCpsFV (rnHsTypeFVs tvdoc ty)
+                 ; ty' <- liftCpsFV (rnHsTypeFVs PatCtx ty)
 		 ; return (SigPatIn pat' ty') }
          else do { liftCps (addErr (patSigErr ty))
                  ; rnPatAndThen mk (unLoc pat) } }
-  where
-    tvdoc = text "In a pattern type-signature"
+
        
 rnPatAndThen mk (LitPat lit)
   | HsString s <- lit
@@ -334,7 +340,7 @@ rnPatAndThen _ (NPat lit mb_neg _eq)
        ; return (NPat lit' mb_neg' eq') }
 
 rnPatAndThen mk (NPlusKPat rdr lit _ _)
-  = do { new_name <- newName mk rdr
+  = do { new_name <- newPatName mk rdr
        ; lit'  <- liftCpsFV $ rnOverLit lit
        ; minus <- liftCpsFV $ lookupSyntaxName minusName
        ; ge    <- liftCpsFV $ lookupSyntaxName geName
@@ -342,7 +348,7 @@ rnPatAndThen mk (NPlusKPat rdr lit _ _)
 	   	-- The Report says that n+k patterns must be in Integral
 
 rnPatAndThen mk (AsPat rdr pat)
-  = do { new_name <- newName mk rdr
+  = do { new_name <- newPatName mk rdr
        ; pat' <- rnLPatAndThen mk pat
        ; return (AsPat (L (nameSrcSpan new_name) new_name) pat') }
 
@@ -481,7 +487,7 @@ rnHsRecFields1 ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot }
     rn_fld pun_ok parent (HsRecField { hsRecFieldId = fld
                        	      	     , hsRecFieldArg = arg
                        	      	     , hsRecPun = pun })
-      = do { fld'@(L loc fld_nm) <- wrapLocM (lookupSubBndr parent doc) fld
+      = do { fld'@(L loc fld_nm) <- wrapLocM (lookupSubBndrOcc parent doc) fld
            ; arg' <- if pun 
                      then do { checkErr pun_ok (badPun fld)
                              ; return (L loc (mk_arg (mkRdrUnqual (nameOccName fld_nm)))) }
@@ -509,31 +515,37 @@ rnHsRecFields1 ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot }
            ; let present_flds = getFieldIds flds
                  parent_tc = find_tycon rdr_env con
 
-                   -- Only fill in fields whose selectors are in scope (somehow)
-	         fld_in_scope fld = not (null (lookupGRE_Name rdr_env fld))
-
-                   -- For constructor uses, the arg should be in scope (unqualified)
+                   -- For constructor uses (but not patterns)
+                   -- the arg should be in scope (unqualified)
 		   -- ignoring the record field itself
 		   -- Eg.  data R = R { x,y :: Int }
                    --      f x = R { .. }   -- Should expand to R {x=x}, not R{x=x,y=y}
-		 arg_in_scope rdr = rdr `elemLocalRdrEnv` lcl_env
-                                 || notNull [ gre | gre <- lookupGRE_RdrName rdr rdr_env
-                                                  , case gre_par gre of
-                                                      ParentIs p -> p /= parent_tc
-                                                      _          -> True ]
+		 arg_in_scope fld 
+                   = rdr `elemLocalRdrEnv` lcl_env
+                   || notNull [ gre | gre <- lookupGRE_RdrName rdr rdr_env
+                                    , case gre_par gre of
+                                        ParentIs p -> p /= parent_tc
+                                        _          -> True ]
+                   where
+                     rdr = mkRdrUnqual (nameOccName fld)
 
+                 dot_dot_gres = [ gre 
+                                | fld <- con_fields
+                                , not (fld `elem` present_flds)
+                                , let gres@(gre:_) = lookupGRE_Name rdr_env fld
+                                , not (null gres)
+                                , case ctxt of
+                                    HsRecFieldCon {} -> arg_in_scope fld
+                                    _other           -> True ] 
+
+           ; addUsedRdrNames (map greRdrName dot_dot_gres)
            ; return [ HsRecField
-                              { hsRecFieldId = loc_f
-                              , hsRecFieldArg = L loc (mk_arg arg_rdr)
-                              , hsRecPun = False }
-                    | f <- con_fields
-		    , let loc_f = L loc f 
-		          arg_rdr = mkRdrUnqual (nameOccName f)
-		    , not (f `elem` present_flds)
-		    , fld_in_scope f
-                    , case ctxt of
-                        HsRecFieldCon {} -> arg_in_scope arg_rdr
-                        _other           -> True ] }
+                        { hsRecFieldId  = L loc fld
+                        , hsRecFieldArg = L loc (mk_arg arg_rdr)
+                        , hsRecPun      = False }
+                    | gre <- dot_dot_gres
+		    , let fld     = gre_name gre
+		          arg_rdr = mkRdrUnqual (nameOccName fld) ] }
 
     check_disambiguation :: Bool -> Maybe Name -> RnM Parent
     -- When disambiguation is on, 

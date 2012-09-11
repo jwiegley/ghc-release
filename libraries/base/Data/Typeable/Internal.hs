@@ -1,3 +1,5 @@
+{-# LANGUAGE Unsafe #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.Typeable.Internal
@@ -184,6 +186,7 @@ typeRepArgs :: TypeRep -> [TypeRep]
 typeRepArgs (TypeRep _ _ args) = args
 
 -- | Observe string encoding of a type representation
+{-# DEPRECATED tyConString "renamed to tyConName; tyConModule and tyConPackage are also available." #-}
 tyConString :: TyCon   -> String
 tyConString = tyConName
 

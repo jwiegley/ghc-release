@@ -41,7 +41,10 @@ ifeq "$(GhcEnableTablesNextToCode) $(GhcUnregisterised)" "YES NO"
 includes_CC_OPTS += -DTABLES_NEXT_TO_CODE
 endif
 
-includes_CC_OPTS += -Iincludes -Irts
+includes_CC_OPTS += -Iincludes
+includes_CC_OPTS += -Iincludes/dist-derivedconstants/header
+includes_CC_OPTS += -Iincludes/dist-ghcconstants/header
+includes_CC_OPTS += -Irts
 
 ifneq "$(GhcWithSMP)" "YES"
 includes_CC_OPTS += -DNOSMP
@@ -74,7 +77,7 @@ $(includes_H_CONFIG) : mk/config.h mk/config.mk includes/ghc.mk
 endif
 
 $(includes_H_PLATFORM) : includes/Makefile
-	"$(RM)" $(RM_OPTS) $@
+	$(call removeFiles,$@)
 	@echo "Creating $@..."
 	@echo "#ifndef __GHCPLATFORM_H__"  >$@
 	@echo "#define __GHCPLATFORM_H__" >>$@
@@ -104,6 +107,10 @@ endif
 	@echo "#define $(TargetVendor_CPP)_HOST_VENDOR  1" >> $@
 	@echo "#define BUILD_VENDOR  \"$(HostVendor_CPP)\"" >> $@
 	@echo "#define HOST_VENDOR  \"$(TargetVendor_CPP)\"" >> $@
+ifeq "$(CC_LLVM_BACKEND)" "1"
+	@echo >> $@
+	@echo "#define llvm_CC_FLAVOR 1" >> $@
+endif
 	@echo >> $@
 	@echo "/* These TARGET macros are for backwards compatibily... DO NOT USE! */" >> $@
 	@echo "#define TargetPlatform_TYPE $(TargetPlatform_CPP)" >> $@
@@ -122,7 +129,7 @@ endif
 # ---------------------------------------------------------------------------
 # Make DerivedConstants.h for the compiler
 
-includes_DERIVEDCONSTANTS = includes/DerivedConstants.h
+includes_DERIVEDCONSTANTS = includes/dist-derivedconstants/header/DerivedConstants.h
 
 ifeq "$(PORTING_HOST)" "YES"
 
@@ -141,7 +148,7 @@ $(includes_dist-derivedconstants_depfile_c_asm) : $(includes_H_CONFIG) $(include
 includes/dist-derivedconstants/build/mkDerivedConstants.o : $(includes_H_CONFIG) $(includes_H_PLATFORM)
 
 ifneq "$(BINDIST)" "YES"
-$(includes_DERIVEDCONSTANTS) : $(INPLACE_BIN)/mkDerivedConstants$(exeext)
+$(includes_DERIVEDCONSTANTS) : $(INPLACE_BIN)/mkDerivedConstants$(exeext) | $$(dir $$@)/.
 	./$< >$@
 endif
 
@@ -150,7 +157,7 @@ endif
 # -----------------------------------------------------------------------------
 #
 
-includes_GHCCONSTANTS = includes/GHCConstants.h
+includes_GHCCONSTANTS = includes/dist-ghcconstants/header/GHCConstants.h
 
 ifeq "$(PORTING_HOST)" "YES"
 
@@ -171,7 +178,7 @@ $(includes_dist-ghcconstants_depfile_c_asm) : $(includes_H_CONFIG) $(includes_H_
 
 includes/dist-ghcconstants/build/mkDerivedConstants.o : $(includes_H_CONFIG) $(includes_H_PLATFORM)
 
-$(includes_GHCCONSTANTS) : $(INPLACE_BIN)/mkGHCConstants$(exeext)
+$(includes_GHCCONSTANTS) : $(INPLACE_BIN)/mkGHCConstants$(exeext) | $$(dir $$@)/.
 	./$< >$@
 endif
 
@@ -197,5 +204,5 @@ install_includes :
 	    $(call INSTALL_DIR,"$(DESTDIR)$(ghcheaderdir)/$d") && \
 	    $(call INSTALL_HEADER,$(INSTALL_OPTS),includes/$d/*.h,"$(DESTDIR)$(ghcheaderdir)/$d/") && \
 	) true
-	$(call INSTALL_HEADER,$(INSTALL_OPTS),$(includes_H_CONFIG) $(includes_H_PLATFORM),"$(DESTDIR)$(ghcheaderdir)/")
+	$(call INSTALL_HEADER,$(INSTALL_OPTS),$(includes_H_CONFIG) $(includes_H_PLATFORM) $(includes_GHCCONSTANTS) $(includes_DERIVEDCONSTANTS),"$(DESTDIR)$(ghcheaderdir)/")
 

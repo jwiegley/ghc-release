@@ -4,11 +4,19 @@
 \section[RnHsSyn]{Specialisations of the @HsSyn@ syntax for the renamer}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module RnHsSyn(
         -- Names
         charTyCon_name, listTyCon_name, parrTyCon_name, tupleTyCon_name,
         extractHsTyVars, extractHsTyNames, extractHsTyNames_s,
-        extractFunDepNames, extractHsCtxtTyNames, extractHsPredTyNames,
+        extractFunDepNames, extractHsCtxtTyNames,
+        extractHsTyVarBndrNames, extractHsTyVarBndrNames_s,
 
         -- Free variables
         hsSigsFVs, hsSigFVs, conDeclFVs, bangTyFVs
@@ -21,8 +29,9 @@ import Class            ( FunDep )
 import TysWiredIn       ( tupleTyCon, listTyCon, parrTyCon, charTyCon )
 import Name             ( Name, getName, isTyVarName )
 import NameSet
-import BasicTypes       ( Boxity )
+import BasicTypes       ( TupleSort )
 import SrcLoc
+import Panic            ( panic )
 \end{code}
 
 %************************************************************************
@@ -39,8 +48,8 @@ charTyCon_name    = getName charTyCon
 listTyCon_name    = getName listTyCon
 parrTyCon_name    = getName parrTyCon
 
-tupleTyCon_name :: Boxity -> Int -> Name
-tupleTyCon_name boxity n = getName (tupleTyCon boxity n)
+tupleTyCon_name :: TupleSort -> Int -> Name
+tupleTyCon_name sort n = getName (tupleTyCon sort n)
 
 extractHsTyVars :: LHsType Name -> NameSet
 extractHsTyVars x = filterNameSet isTyVarName (extractHsTyNames x)
@@ -49,6 +58,7 @@ extractFunDepNames :: FunDep Name -> NameSet
 extractFunDepNames (ns1, ns2) = mkNameSet ns1 `unionNameSets` mkNameSet ns2
 
 extractHsTyNames   :: LHsType Name -> NameSet
+-- Also extract names in kinds.
 extractHsTyNames ty
   = getl ty
   where
@@ -59,40 +69,45 @@ extractHsTyNames ty
     get (HsPArrTy ty)          = unitNameSet parrTyCon_name `unionNameSets` getl ty
     get (HsTupleTy _ tys)      = extractHsTyNames_s tys
     get (HsFunTy ty1 ty2)      = getl ty1 `unionNameSets` getl ty2
-    get (HsPredTy p)           = extractHsPredTyNames p
-    get (HsOpTy ty1 op ty2)    = getl ty1 `unionNameSets` getl ty2 `unionNameSets` unitNameSet (unLoc op)
+    get (HsIParamTy _ ty)      = getl ty
+    get (HsEqTy ty1 ty2)       = getl ty1 `unionNameSets` getl ty2
+    get (HsOpTy ty1 (_, op) ty2) = getl ty1 `unionNameSets` getl ty2 `unionNameSets` unitNameSet (unLoc op)
     get (HsParTy ty)           = getl ty
     get (HsBangTy _ ty)        = getl ty
     get (HsRecTy flds)         = extractHsTyNames_s (map cd_fld_type flds)
     get (HsTyVar tv)           = unitNameSet tv
     get (HsSpliceTy _ fvs _)   = fvs
     get (HsQuasiQuoteTy {})    = emptyNameSet
-    get (HsKindSig ty _)       = getl ty
+    get (HsKindSig ty ki)      = getl ty `unionNameSets` getl ki
     get (HsForAllTy _ tvs
-                    ctxt ty)   = (extractHsCtxtTyNames ctxt
-                                         `unionNameSets` getl ty)
-                                            `minusNameSet`
-                                  mkNameSet (hsLTyVarNames tvs)
+                    ctxt ty)   = extractHsTyVarBndrNames_s tvs
+                                 (extractHsCtxtTyNames ctxt
+                                  `unionNameSets` getl ty)
     get (HsDocTy ty _)         = getl ty
     get (HsCoreTy {})          = emptyNameSet	-- This probably isn't quite right
     		  	       	 		-- but I don't think it matters
+    get (HsExplicitListTy _ tys) = extractHsTyNames_s tys
+    get (HsExplicitTupleTy _ tys) = extractHsTyNames_s tys
+    get (HsWrapTy {})          = panic "extractHsTyNames"
 
 extractHsTyNames_s  :: [LHsType Name] -> NameSet
 extractHsTyNames_s tys = foldr (unionNameSets . extractHsTyNames) emptyNameSet tys
 
 extractHsCtxtTyNames :: LHsContext Name -> NameSet
 extractHsCtxtTyNames (L _ ctxt)
-  = foldr (unionNameSets . extractHsPredTyNames . unLoc) emptyNameSet ctxt
+  = foldr (unionNameSets . extractHsTyNames) emptyNameSet ctxt
 
--- You don't import or export implicit parameters,
--- so don't mention the IP names
-extractHsPredTyNames :: HsPred Name -> NameSet
-extractHsPredTyNames (HsClassP cls tys)
-  = unitNameSet cls `unionNameSets` extractHsTyNames_s tys
-extractHsPredTyNames (HsEqualP ty1 ty2)
-  = extractHsTyNames ty1 `unionNameSets` extractHsTyNames ty2
-extractHsPredTyNames (HsIParam _ ty)
-  = extractHsTyNames ty
+extractHsTyVarBndrNames :: LHsTyVarBndr Name -> NameSet
+extractHsTyVarBndrNames (L _ (UserTyVar _ _)) = emptyNameSet
+extractHsTyVarBndrNames (L _ (KindedTyVar _ ki _)) = extractHsTyNames ki
+
+extractHsTyVarBndrNames_s :: [LHsTyVarBndr Name] -> NameSet -> NameSet
+-- Update the name set 'body' by adding the names in the binders
+-- kinds and handling scoping.
+extractHsTyVarBndrNames_s [] body = body
+extractHsTyVarBndrNames_s (b:bs) body =
+  (extractHsTyVarBndrNames_s bs body `delFromNameSet` hsTyVarName (unLoc b))
+  `unionNameSets` extractHsTyVarBndrNames b
 \end{code}
 
 
@@ -127,7 +142,7 @@ hsSigFVs _                 = emptyFVs
 conDeclFVs :: LConDecl Name -> FreeVars
 conDeclFVs (L _ (ConDecl { con_qvars = tyvars, con_cxt = context,
                            con_details = details, con_res = res_ty}))
-  = delFVs (map hsLTyVarName tyvars) $
+  = extractHsTyVarBndrNames_s tyvars $
     extractHsCtxtTyNames context  `plusFV`
     conDetailsFVs details         `plusFV`
     conResTyFVs res_ty

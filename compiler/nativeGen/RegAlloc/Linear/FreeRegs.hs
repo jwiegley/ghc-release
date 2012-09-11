@@ -1,4 +1,11 @@
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module RegAlloc.Linear.FreeRegs (
     FR(..),
     maxSpillSlots
@@ -61,11 +68,11 @@ instance FR SPARC.FreeRegs where
 maxSpillSlots :: Platform -> Int
 maxSpillSlots platform
               = case platformArch platform of
-                ArchX86     -> X86.Instr.maxSpillSlots
-                ArchX86_64  -> X86.Instr.maxSpillSlots
+                ArchX86     -> X86.Instr.maxSpillSlots True  -- 32bit
+                ArchX86_64  -> X86.Instr.maxSpillSlots False -- not 32bit
                 ArchPPC     -> PPC.Instr.maxSpillSlots
                 ArchSPARC   -> SPARC.Instr.maxSpillSlots
-                ArchARM     -> panic "maxSpillSlots ArchARM"
+                ArchARM _ _ -> panic "maxSpillSlots ArchARM"
                 ArchPPC_64  -> panic "maxSpillSlots ArchPPC_64"
                 ArchUnknown -> panic "maxSpillSlots ArchUnknown"
 

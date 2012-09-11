@@ -1,6 +1,10 @@
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Trustworthy #-}
+#endif
+
 module Locale (
-    TimeLocale(..), defaultTimeLocale
-  ) where
+        TimeLocale(..), defaultTimeLocale
+    ) where
 
 import System.Locale ( 
 	-- just the bits that are specified by Haskell 98

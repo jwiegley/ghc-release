@@ -49,6 +49,13 @@ essential to make this work well!
 
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 
 module SAT ( doStaticArgs ) where
 
@@ -75,7 +82,7 @@ import FastString
 \end{code}
 
 \begin{code}
-doStaticArgs :: UniqSupply -> [CoreBind] -> [CoreBind]
+doStaticArgs :: UniqSupply -> CoreProgram -> CoreProgram
 doStaticArgs us binds = snd $ mapAccumL sat_bind_threaded_us us binds
   where
     sat_bind_threaded_us us bind =
@@ -227,9 +234,9 @@ satExpr (Let bind body) interesting_ids = do
     (bind', sat_info_bind) <- satBind bind interesting_ids
     return (Let bind' body', mergeIdSATInfo sat_info_body sat_info_bind, body_app)
 
-satExpr (Note note expr) interesting_ids = do
+satExpr (Tick tickish expr) interesting_ids = do
     (expr', sat_info_expr, expr_app) <- satExpr expr interesting_ids
-    return (Note note expr', sat_info_expr, expr_app)
+    return (Tick tickish expr', sat_info_expr, expr_app)
 
 satExpr ty@(Type _) _ = do
     return (ty, emptyIdSATInfo, Nothing)

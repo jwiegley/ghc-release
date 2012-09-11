@@ -7,22 +7,15 @@ each let-binding.  At the same time, we figure out which top-level
 bindings have no CAF references, and record the fact in their IdInfo.
 
 \begin{code}
-{-# OPTIONS -fno-warn-incomplete-patterns #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module SRT( computeSRTs ) where
 
 #include "HsVersions.h"
 
 import StgSyn
-import Id        	( Id )
+import Id               ( Id )
 import VarSet
 import VarEnv
-import Maybes		( orElse, expectJust )
+import Maybes           ( orElse, expectJust )
 import Bitmap
 
 import Outputable
@@ -43,13 +36,13 @@ computeSRTs binds = srtTopBinds emptyVarEnv binds
 srtTopBinds :: IdEnv Id -> [StgBinding] -> [(StgBinding, [(Id,[Id])])]
 
 srtTopBinds _   [] = []
-srtTopBinds env (StgNonRec b rhs : binds) = 
+srtTopBinds env (StgNonRec b rhs : binds) =
   (StgNonRec b rhs', [(b,srt')]) : srtTopBinds env' binds
   where
     (rhs', srt) = srtTopRhs b rhs
     env' = maybeExtendEnv env b rhs
     srt' = applyEnvList env srt
-srtTopBinds env (StgRec bs : binds) = 
+srtTopBinds env (StgRec bs : binds) =
   (StgRec (zip bndrs rhss), zip bndrs srts') : srtTopBinds env binds
   where
     (rhss, srts) = unzip [ srtTopRhs b r | (b,r) <- bs ]
@@ -87,8 +80,10 @@ srtTopRhs _ rhs@(StgRhsCon _ _ _) = (rhs, [])
 srtTopRhs _ rhs@(StgRhsClosure _ _ _ _  (SRTEntries cafs) _ _)
   = (srtRhs table rhs, elems)
   where
-	elems = varSetElems cafs
+        elems = varSetElems cafs
         table = mkVarEnv (zip elems [0..])
+srtTopRhs _ (StgRhsClosure _ _ _ _  NoSRT _ _) = panic "srtTopRhs NoSRT"
+srtTopRhs _ (StgRhsClosure _ _ _ _  (SRT _ _ _) _ _) = panic "srtTopRhs SRT"
 
 -- ---- Binds:
 
@@ -103,8 +98,8 @@ srtRhs :: IdEnv Int -> StgRhs -> StgRhs
 
 srtRhs _     e@(StgRhsCon _ _ _) = e
 srtRhs table (StgRhsClosure cc bi free_vars u srt args body)
-  = StgRhsClosure cc bi free_vars u (constructSRT table srt) args 
-	$! (srtExpr table body)
+  = StgRhsClosure cc bi free_vars u (constructSRT table srt) args
+        $! (srtExpr table body)
 
 -- ---------------------------------------------------------------------------
 -- Expressions
@@ -116,7 +111,7 @@ srtExpr _ e@(StgLit _)         = e
 srtExpr _ e@(StgConApp _ _)    = e
 srtExpr _ e@(StgOpApp _ _ _)   = e
 
-srtExpr table (StgSCC cc expr) = StgSCC cc $! srtExpr table expr
+srtExpr table (StgSCC cc tick push expr) = StgSCC cc tick push $! srtExpr table expr
 
 srtExpr table (StgTick m n expr) = StgTick m n $! srtExpr table expr
 
@@ -129,12 +124,12 @@ srtExpr table (StgCase scrut live1 live2 uniq srt alt_type alts)
 
 srtExpr table (StgLet bind body)
   = srtBind table bind =: \ bind' ->
-    srtExpr table body		   =: \ body' ->
+    srtExpr table body             =: \ body' ->
     StgLet bind' body'
-     
+
 srtExpr table (StgLetNoEscape live1 live2 bind body)
   = srtBind table bind =: \ bind' ->
-    srtExpr table body		   =: \ body' ->
+    srtExpr table body             =: \ body' ->
     StgLetNoEscape live1 live2 bind' body'
 
 srtExpr _table expr = pprPanic "srtExpr" (ppr expr)
@@ -151,13 +146,15 @@ constructSRT table (SRTEntries entries)
  | isEmptyVarSet entries = NoSRT
  | otherwise  = seqBitmap bitmap $ SRT offset len bitmap
   where
-    ints = map (expectJust "constructSRT" . lookupVarEnv table) 
-		(varSetElems entries)
+    ints = map (expectJust "constructSRT" . lookupVarEnv table)
+                (varSetElems entries)
     sorted_ints = sortLe (<=) ints
     offset = head sorted_ints
     bitmap_entries = map (subtract offset) sorted_ints
     len = last bitmap_entries + 1
     bitmap = intsToBitmap len bitmap_entries
+constructSRT _ NoSRT = panic "constructSRT NoSRT"
+constructSRT _ (SRT {}) = panic "constructSRT SRT"
 
 -- ---------------------------------------------------------------------------
 -- Misc stuff

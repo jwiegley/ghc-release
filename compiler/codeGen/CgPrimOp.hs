@@ -6,6 +6,13 @@
 --
 -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module CgPrimOp (
    cgPrimOp
  ) where
@@ -31,6 +38,7 @@ import Module
 import Constants
 import Outputable
 import FastString
+import StaticFlags
 
 -- ---------------------------------------------------------------------------
 -- Code generation for PrimOps
@@ -137,7 +145,9 @@ emitPrimOp [res] SparkOp [arg] live = do
     stmtC (CmmAssign (CmmLocal tmp) arg)
 
     vols <- getVolatileRegs live
-    emitForeignCall' PlayRisky []
+    res' <- newTemp bWord
+    emitForeignCall' PlayRisky
+        [CmmHinted res' NoHint]
     	(CmmCallee newspark CCallConv) 
 	[   (CmmHinted (CmmReg (CmmGlobal BaseReg)) AddrHint)
           , (CmmHinted arg AddrHint)  ] 
@@ -148,6 +158,14 @@ emitPrimOp [res] SparkOp [arg] live = do
   where
 	newspark = CmmLit (CmmLabel (mkCmmCodeLabel rtsPackageId (fsLit "newSpark")))
 
+emitPrimOp [res] GetCCSOfOp [arg] _live
+  = stmtC (CmmAssign (CmmLocal res) val)
+  where
+    val | opt_SccProfilingOn = costCentreFrom (cmmUntag arg)
+        | otherwise          = CmmLit zeroCLit
+
+emitPrimOp [res] GetCurrentCCSOp [_dummy_arg] _live
+   = stmtC (CmmAssign (CmmLocal res) curCCS)
 
 emitPrimOp [res] ReadMutVarOp [mutv] _
    = stmtC (CmmAssign (CmmLocal res) (cmmLoadIndexW mutv fixedHdrSize gcWord))
@@ -203,7 +221,7 @@ emitPrimOp [res] ReallyUnsafePtrEqualityOp [arg1,arg2] _
    = stmtC (CmmAssign (CmmLocal res) (CmmMachOp mo_wordEq [arg1,arg2]))
 
 --  #define addrToHValuezh(r,a) r=(P_)a
-emitPrimOp [res] AddrToHValueOp [arg] _
+emitPrimOp [res] AddrToAnyOp [arg] _
    = stmtC (CmmAssign (CmmLocal res) arg)
 
 --  #define dataToTagzh(r,a)  r=(GET_TAG(((StgClosure *)a)->header.info))
@@ -223,7 +241,10 @@ emitPrimOp [res] DataToTagOp [arg] _
 --	}
 emitPrimOp [res] UnsafeFreezeArrayOp [arg] _
    = stmtsC [ setInfo arg (CmmLit (CmmLabel mkMAP_FROZEN_infoLabel)),
-	     CmmAssign (CmmLocal res) arg ]
+       CmmAssign (CmmLocal res) arg ]
+emitPrimOp [res] UnsafeFreezeArrayArrayOp [arg] _
+   = stmtsC [ setInfo arg (CmmLit (CmmLabel mkMAP_FROZEN_infoLabel)),
+       CmmAssign (CmmLocal res) arg ]
 
 --  #define unsafeFreezzeByteArrayzh(r,a)	r=(a)
 emitPrimOp [res] UnsafeFreezeByteArrayOp [arg] _
@@ -242,15 +263,36 @@ emitPrimOp [res] FreezeArrayOp [src,src_off,n] live =
 emitPrimOp [res] ThawArrayOp [src,src_off,n] live =
     emitCloneArray mkMAP_DIRTY_infoLabel res src src_off n live
 
+emitPrimOp [] CopyArrayArrayOp [src,src_off,dst,dst_off,n] live =
+    doCopyArrayOp src src_off dst dst_off n live
+emitPrimOp [] CopyMutableArrayArrayOp [src,src_off,dst,dst_off,n] live =
+    doCopyMutableArrayOp src src_off dst dst_off n live
+
 -- Reading/writing pointer arrays
 
 emitPrimOp [r] ReadArrayOp  [obj,ix]   _  = doReadPtrArrayOp r obj ix
 emitPrimOp [r] IndexArrayOp [obj,ix]   _  = doReadPtrArrayOp r obj ix
 emitPrimOp []  WriteArrayOp [obj,ix,v] _  = doWritePtrArrayOp obj ix v
 
+emitPrimOp [r] IndexArrayArrayOp_ByteArray         [obj,ix]   _  = doReadPtrArrayOp r obj ix
+emitPrimOp [r] IndexArrayArrayOp_ArrayArray        [obj,ix]   _  = doReadPtrArrayOp r obj ix
+emitPrimOp [r] ReadArrayArrayOp_ByteArray          [obj,ix]   _  = doReadPtrArrayOp r obj ix
+emitPrimOp [r] ReadArrayArrayOp_MutableByteArray   [obj,ix]   _  = doReadPtrArrayOp r obj ix
+emitPrimOp [r] ReadArrayArrayOp_ArrayArray         [obj,ix]   _  = doReadPtrArrayOp r obj ix
+emitPrimOp [r] ReadArrayArrayOp_MutableArrayArray  [obj,ix]   _  = doReadPtrArrayOp r obj ix
+emitPrimOp []  WriteArrayArrayOp_ByteArray         [obj,ix,v] _  = doWritePtrArrayOp obj ix v
+emitPrimOp []  WriteArrayArrayOp_MutableByteArray  [obj,ix,v] _  = doWritePtrArrayOp obj ix v
+emitPrimOp []  WriteArrayArrayOp_ArrayArray        [obj,ix,v] _  = doWritePtrArrayOp obj ix v
+emitPrimOp []  WriteArrayArrayOp_MutableArrayArray [obj,ix,v] _  = doWritePtrArrayOp obj ix v
+
 emitPrimOp [res] SizeofArrayOp [arg] _
-   = stmtC $ CmmAssign (CmmLocal res) (cmmLoadIndexW arg (fixedHdrSize + oFFSET_StgMutArrPtrs_ptrs) bWord)
+   = stmtC $ 
+       CmmAssign (CmmLocal res) (cmmLoadIndexW arg (fixedHdrSize + oFFSET_StgMutArrPtrs_ptrs) bWord)
 emitPrimOp [res] SizeofMutableArrayOp [arg] live
+   = emitPrimOp [res] SizeofArrayOp [arg] live
+emitPrimOp [res] SizeofArrayArrayOp [arg] live
+   = emitPrimOp [res] SizeofArrayOp [arg] live
+emitPrimOp [res] SizeofMutableArrayArrayOp [arg] live
    = emitPrimOp [res] SizeofArrayOp [arg] live
 
 -- IndexXXXoffAddr
@@ -374,6 +416,12 @@ emitPrimOp [] CopyByteArrayOp [src,src_off,dst,dst_off,n] live =
 emitPrimOp [] CopyMutableByteArrayOp [src,src_off,dst,dst_off,n] live =
     doCopyMutableByteArrayOp src src_off dst dst_off n live
 
+-- Population count
+emitPrimOp [res] PopCnt8Op [w] live = emitPopCntCall res w W8 live
+emitPrimOp [res] PopCnt16Op [w] live = emitPopCntCall res w W16 live
+emitPrimOp [res] PopCnt32Op [w] live = emitPopCntCall res w W32 live
+emitPrimOp [res] PopCnt64Op [w] live = emitPopCntCall res w W64 live
+emitPrimOp [res] PopCntOp [w] live = emitPopCntCall res w wordWidth live
 
 -- The rest just translate straightforwardly
 emitPrimOp [res] op [arg] _
@@ -541,6 +589,7 @@ translateOp SameMutVarOp           = Just mo_wordEq
 translateOp SameMVarOp             = Just mo_wordEq
 translateOp SameMutableArrayOp     = Just mo_wordEq
 translateOp SameMutableByteArrayOp = Just mo_wordEq
+translateOp SameMutableArrayArrayOp= Just mo_wordEq
 translateOp SameTVarOp             = Just mo_wordEq
 translateOp EqStablePtrOp          = Just mo_wordEq
 
@@ -798,7 +847,7 @@ emitCloneArray info_p res_r src0 src_off0 n0 live = do
         (CmmLit $ mkIntCLit 0)
 
     let arr = CmmReg (CmmLocal arr_r)
-    emitSetDynHdr arr (CmmLit (CmmLabel info_p)) curCCSAddr
+    emitSetDynHdr arr (CmmLit (CmmLabel info_p)) curCCS
     stmtC $ CmmStore (cmmOffsetB arr (fixedHdrSize * wORD_SIZE +
                                       oFFSET_StgMutArrPtrs_ptrs)) n
     stmtC $ CmmStore (cmmOffsetB arr (fixedHdrSize * wORD_SIZE +
@@ -908,3 +957,14 @@ emitAllocateCall res cap n live = do
   where
     allocate = CmmLit (CmmLabel (mkForeignLabel (fsLit "allocate") Nothing
                                  ForeignLabelInExternalPackage IsFunction))
+
+emitPopCntCall :: LocalReg -> CmmExpr -> Width -> StgLiveVars -> Code
+emitPopCntCall res x width live = do
+    vols <- getVolatileRegs live
+    emitForeignCall' PlayRisky
+        [CmmHinted res NoHint]
+        (CmmPrim (MO_PopCnt width))
+        [(CmmHinted x NoHint)]
+        (Just vols)
+        NoC_SRT -- No SRT b/c we do PlayRisky
+        CmmMayReturn

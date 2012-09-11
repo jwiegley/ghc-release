@@ -50,7 +50,7 @@ import Data.Int
 #ifdef IN_GHC_TREE
 import System.FilePath
 #else
-import GHC.Paths
+import qualified GHC.Paths as GhcPaths
 import Paths_haddock
 #endif
 
@@ -59,6 +59,8 @@ import Config
 import DynFlags hiding (flags, verbosity)
 import Panic (panic, handleGhcException)
 import Module
+
+import Control.Monad.Fix (MonadFix)
 
 
 --------------------------------------------------------------------------------
@@ -153,7 +155,7 @@ main = handleTopExceptions $ do
 readPackagesAndProcessModules :: [Flag] -> [String]
                               -> IO ([(DocPaths, InterfaceFile)], [Interface], LinkEnv)
 readPackagesAndProcessModules flags files = do
-  libDir <- getGhcLibDir flags
+  libDir <- fmap snd (getGhcDirs flags)
 
   -- Catches all GHC source errors, then prints and re-throws them.
   let handleSrcErrors action' = flip handleSourceError action' $ \err -> do
@@ -226,7 +228,7 @@ render flags ifaces installedIfaces srcMap = do
   when (Flag_GenContents `elem` flags) $ do
     ppHtmlContents odir title pkgStr
                    themes opt_index_url sourceUrls' opt_wiki_urls
-                   allVisibleIfaces True prologue pretty
+                   allVisibleIfaces True prologue pretty opt_qualification
     copyHtmlBits odir libDir themes
 
   when (Flag_Html `elem` flags) $ do
@@ -251,7 +253,7 @@ render flags ifaces installedIfaces srcMap = do
 -------------------------------------------------------------------------------
 
 
-readInterfaceFiles :: MonadIO m =>
+readInterfaceFiles :: (MonadFix m, MonadIO m) =>
                       NameCacheAccessor m
                    -> [(DocPaths, FilePath)] ->
                       m [(DocPaths, InterfaceFile)]
@@ -327,35 +329,47 @@ getHaddockLibDir flags =
   case [str | Flag_Lib str <- flags] of
     [] ->
 #ifdef IN_GHC_TREE
-      getInTreeLibDir
+      getInTreeDir
 #else
       getDataDir -- provided by Cabal
 #endif
     fs -> return (last fs)
 
 
-getGhcLibDir :: [Flag] -> IO String
-getGhcLibDir flags =
+getGhcDirs :: [Flag] -> IO (String, String)
+getGhcDirs flags = do
   case [ dir | Flag_GhcLibDir dir <- flags ] of
-    [] ->
+    [] -> do
 #ifdef IN_GHC_TREE
-      getInTreeLibDir
+      libDir <- getInTreeDir
+      return (ghcPath, libDir)
 #else
-      return libdir -- from GHC.Paths
+      return (ghcPath, GhcPaths.libdir)
 #endif
-    xs -> return $ last xs
+    xs -> return (ghcPath, last xs)
+  where
+#ifdef IN_GHC_TREE
+    ghcPath = "not available"
+#else
+    ghcPath = GhcPaths.ghc
+#endif
 
 
 shortcutFlags :: [Flag] -> IO ()
 shortcutFlags flags = do
   usage <- getUsage
 
-  when (Flag_Help           `elem` flags) (bye usage)
-  when (Flag_Version        `elem` flags) byeVersion
-  when (Flag_GhcVersion     `elem` flags) byeGhcVersion
+  when (Flag_Help             `elem` flags) (bye usage)
+  when (Flag_Version          `elem` flags) byeVersion
+  when (Flag_InterfaceVersion `elem` flags) (bye (show binaryInterfaceVersion ++ "\n"))
+  when (Flag_GhcVersion       `elem` flags) (bye (cProjectVersion ++ "\n"))
+
+  when (Flag_PrintGhcPath `elem` flags) $ do
+    dir <- fmap fst (getGhcDirs flags)
+    bye $ dir ++ "\n"
 
   when (Flag_PrintGhcLibDir `elem` flags) $ do
-    dir <- getGhcLibDir flags
+    dir <- fmap snd (getGhcDirs flags)
     bye $ dir ++ "\n"
 
   when (Flag_UseUnicode `elem` flags && Flag_Html `notElem` flags) $
@@ -377,14 +391,15 @@ shortcutFlags flags = do
       "Haddock version " ++ projectVersion ++ ", (c) Simon Marlow 2006\n"
       ++ "Ported to use the GHC API by David Waern 2006-2008\n"
 
-    byeGhcVersion = bye (cProjectVersion ++ "\n")
-
 
 updateHTMLXRefs :: [(DocPaths, InterfaceFile)] -> IO ()
-updateHTMLXRefs packages = writeIORef html_xrefs_ref (Map.fromList mapping)
+updateHTMLXRefs packages = do
+  writeIORef html_xrefs_ref (Map.fromList mapping)
+  writeIORef html_xrefs_ref' (Map.fromList mapping')
   where
     mapping = [ (instMod iface, html) | ((html, _), ifaces) <- packages
               , iface <- ifInstalledIfaces ifaces ]
+    mapping' = [ (moduleName m, html) | (m, html) <- mapping ]
 
 
 getPrologue :: [Flag] -> IO (Maybe (Doc RdrName))
@@ -402,16 +417,12 @@ getPrologue flags =
 
 #ifdef IN_GHC_TREE
 
-getInTreeLibDir :: IO String
-getInTreeLibDir = do
+getInTreeDir :: IO String
+getInTreeDir = do
   m <- getExecDir
   case m of
-    Nothing -> error "No GhcLibDir found"
-#ifdef NEW_GHC_LAYOUT
+    Nothing -> error "No GhcDir found"
     Just d -> return (d </> ".." </> "lib")
-#else
-    Just d -> return (d </> "..")
-#endif
 
 
 getExecDir :: IO (Maybe String)

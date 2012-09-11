@@ -191,7 +191,7 @@ cmmdata :: { ExtCode }
 	: 'section' STRING '{' data_label statics '}' 
 		{ do lbl <- $4;
 		     ss <- sequence $5;
-		     code (emitData (section $2) (Statics lbl $ concat ss)) }
+		     code (emitDecl (CmmData (section $2) (Statics lbl $ concat ss))) }
 
 data_label :: { ExtFCode CLabel }
     : NAME ':'	
@@ -264,78 +264,89 @@ info	:: { ExtFCode (CLabel, CmmInfoTable, [Maybe LocalReg]) }
 	: 'INFO_TABLE' '(' NAME ',' INT ',' INT ',' INT ',' STRING ',' STRING ')'
 		-- ptrs, nptrs, closure type, description, type
 		{% withThisPackage $ \pkg ->
-		   do prof <- profilingInfo $11 $13
-		      return (mkCmmEntryLabel pkg $3,
-			CmmInfoTable (mkCmmInfoLabel pkg $3) False prof (fromIntegral $9)
-				     (ThunkInfo (fromIntegral $5, fromIntegral $7) NoC_SRT),
-			[]) }
+		   do let prof = profilingInfo $11 $13
+                          rep  = mkRTSRep (fromIntegral $9) $
+                                   mkHeapRep False (fromIntegral $5)
+                                                   (fromIntegral $7) Thunk
+                              -- not really Thunk, but that makes the info table
+                              -- we want.
+                      return (mkCmmEntryLabel pkg $3,
+			      CmmInfoTable { cit_lbl = mkCmmInfoLabel pkg $3
+				           , cit_rep = rep
+               				   , cit_prof = prof, cit_srt = NoC_SRT },
+			      []) }
 	
 	| 'INFO_TABLE_FUN' '(' NAME ',' INT ',' INT ',' INT ',' STRING ',' STRING ',' INT ')'
 		-- ptrs, nptrs, closure type, description, type, fun type
 		{% withThisPackage $ \pkg -> 
-		   do prof <- profilingInfo $11 $13
-		      return (mkCmmEntryLabel pkg $3,
-			CmmInfoTable (mkCmmInfoLabel pkg $3) False prof (fromIntegral $9)
-				     (FunInfo (fromIntegral $5, fromIntegral $7) NoC_SRT
-				      0  -- Arity zero
-				      (ArgSpec (fromIntegral $15))
-				      zeroCLit),
-			[]) }
+		   do let prof = profilingInfo $11 $13
+                          ty   = Fun 0 (ArgSpec (fromIntegral $15))
+                                -- Arity zero, arg_type $15
+                          rep = mkRTSRep (fromIntegral $9) $
+                                    mkHeapRep False (fromIntegral $5)
+                                                    (fromIntegral $7) ty
+                      return (mkCmmEntryLabel pkg $3,
+			      CmmInfoTable { cit_lbl = mkCmmInfoLabel pkg $3
+				           , cit_rep = rep
+               				   , cit_prof = prof, cit_srt = NoC_SRT },
+			      []) }
 		-- we leave most of the fields zero here.  This is only used
 		-- to generate the BCO info table in the RTS at the moment.
 
-	-- A variant with a non-zero arity (needed to write Main_main in Cmm)
-	| 'INFO_TABLE_FUN' '(' NAME ',' INT ',' INT ',' INT ',' STRING ',' STRING ',' INT ',' INT ')'
-		-- ptrs, nptrs, closure type, description, type, fun type, arity
-		{% withThisPackage $ \pkg ->
-		   do prof <- profilingInfo $11 $13
-		      return (mkCmmEntryLabel pkg $3,
-			CmmInfoTable (mkCmmInfoLabel pkg $3) False prof (fromIntegral $9)
-				     (FunInfo (fromIntegral $5, fromIntegral $7) NoC_SRT (fromIntegral $17)
-				      (ArgSpec (fromIntegral $15))
-				      zeroCLit),
-			[]) }
-		-- we leave most of the fields zero here.  This is only used
-		-- to generate the BCO info table in the RTS at the moment.
-	
-	| 'INFO_TABLE_CONSTR' '(' NAME ',' INT ',' INT ',' INT ',' INT ',' STRING ',' STRING ')'
+        | 'INFO_TABLE_CONSTR' '(' NAME ',' INT ',' INT ',' INT ',' INT ',' STRING ',' STRING ')'
 		-- ptrs, nptrs, tag, closure type, description, type
 		{% withThisPackage $ \pkg ->
-		   do prof <- profilingInfo $13 $15
+		   do let prof = profilingInfo $13 $15
+                          ty  = Constr (fromIntegral $9)  -- Tag
+	                           	(stringToWord8s $13)
+                          rep = mkRTSRep (fromIntegral $11) $
+                                  mkHeapRep False (fromIntegral $5)
+                                                  (fromIntegral $7) ty
+                      return (mkCmmEntryLabel pkg $3,
+			      CmmInfoTable { cit_lbl = mkCmmInfoLabel pkg $3
+				           , cit_rep = rep
+               				   , cit_prof = prof, cit_srt = NoC_SRT },
+			      []) }
+
 		     -- If profiling is on, this string gets duplicated,
 		     -- but that's the way the old code did it we can fix it some other time.
-		      desc_lit <- code $ mkStringCLit $13
-		      return (mkCmmEntryLabel pkg $3,
-			CmmInfoTable (mkCmmInfoLabel pkg $3) False prof (fromIntegral $11)
-				     (ConstrInfo (fromIntegral $5, fromIntegral $7) (fromIntegral $9) desc_lit),
-			[]) }
 	
 	| 'INFO_TABLE_SELECTOR' '(' NAME ',' INT ',' INT ',' STRING ',' STRING ')'
 		-- selector, closure type, description, type
 		{% withThisPackage $ \pkg ->
-		   do prof <- profilingInfo $9 $11
-		      return (mkCmmEntryLabel pkg $3,
-			CmmInfoTable (mkCmmInfoLabel pkg $3) False prof (fromIntegral $7)
-				     (ThunkSelectorInfo (fromIntegral $5) NoC_SRT),
-			[]) }
+		   do let prof = profilingInfo $9 $11
+                          ty  = ThunkSelector (fromIntegral $5)
+                          rep = mkRTSRep (fromIntegral $7) $
+                                   mkHeapRep False 0 0 ty
+                      return (mkCmmEntryLabel pkg $3,
+			      CmmInfoTable { cit_lbl = mkCmmInfoLabel pkg $3
+				           , cit_rep = rep
+               				   , cit_prof = prof, cit_srt = NoC_SRT },
+			      []) }
 
 	| 'INFO_TABLE_RET' '(' NAME ',' INT ')'
 		-- closure type (no live regs)
 		{% withThisPackage $ \pkg ->
-		   do let infoLabel = mkCmmInfoLabel pkg $3
-		      return (mkCmmRetLabel pkg $3,
-			CmmInfoTable (mkCmmInfoLabel pkg $3) False (ProfilingInfo zeroCLit zeroCLit) (fromIntegral $5)
-				     (ContInfo [] NoC_SRT),
-			[]) }
+		   do let prof = NoProfilingInfo
+                          rep  = mkRTSRep (fromIntegral $5) $ mkStackRep []
+                      return (mkCmmRetLabel pkg $3,
+			      CmmInfoTable { cit_lbl = mkCmmInfoLabel pkg $3
+				           , cit_rep = rep
+               				   , cit_prof = prof, cit_srt = NoC_SRT },
+			      []) }
 
 	| 'INFO_TABLE_RET' '(' NAME ',' INT ',' formals_without_hints0 ')'
 		-- closure type, live regs
 		{% withThisPackage $ \pkg ->
 		   do live <- sequence (map (liftM Just) $7)
-		      return (mkCmmRetLabel pkg $3,
-			CmmInfoTable (mkCmmInfoLabel pkg $3) False (ProfilingInfo zeroCLit zeroCLit) (fromIntegral $5)
-			             (ContInfo live NoC_SRT),
-			live) }
+		      let prof = NoProfilingInfo
+                          bitmap = mkLiveness live
+                          rep  = mkRTSRep (fromIntegral $5) $ mkStackRep bitmap
+                      return (mkCmmRetLabel pkg $3,
+			      CmmInfoTable { cit_lbl = mkCmmInfoLabel pkg $3
+				           , cit_rep = rep
+               				   , cit_prof = prof, cit_srt = NoC_SRT },
+			      []) }
 
 body	:: { ExtCode }
 	: {- empty -}			{ return () }
@@ -499,7 +510,7 @@ expr	:: { ExtFCode CmmExpr }
 expr0	:: { ExtFCode CmmExpr }
 	: INT   maybe_ty	 { return (CmmLit (CmmInt $1 (typeWidth $2))) }
 	| FLOAT maybe_ty	 { return (CmmLit (CmmFloat $1 (typeWidth $2))) }
-	| STRING		 { do s <- code (mkStringCLit $1); 
+	| STRING		 { do s <- code (newStringCLit $1); 
 				      return (CmmLit s) }
 	| reg			 { $1 }
 	| type '[' expr ']'	 { do e <- $3; return (CmmLoad e $1) }
@@ -764,8 +775,9 @@ isPtrGlobalReg Sp		     = True
 isPtrGlobalReg SpLim		     = True
 isPtrGlobalReg Hp		     = True
 isPtrGlobalReg HpLim		     = True
-isPtrGlobalReg CurrentTSO	     = True
-isPtrGlobalReg CurrentNursery	     = True
+isPtrGlobalReg CCCS                  = True
+isPtrGlobalReg CurrentTSO            = True
+isPtrGlobalReg CurrentNursery        = True
 isPtrGlobalReg (VanillaReg _ VGcPtr) = True
 isPtrGlobalReg _		     = False
 
@@ -787,7 +799,6 @@ stmtMacros :: UniqFM ([CmmExpr] -> Code)
 stmtMacros = listToUFM [
   ( fsLit "CCS_ALLOC",		   \[words,ccs]  -> profAlloc words ccs ),
   ( fsLit "CLOSE_NURSERY",	   \[]  -> emitCloseNursery ),
-  ( fsLit "ENTER_CCS_PAP_CL",     \[e] -> enterCostCentrePAP e ),
   ( fsLit "ENTER_CCS_THUNK",      \[e] -> enterCostCentreThunk e ),
   ( fsLit "HP_CHK_GEN",           \[words,liveness,reentry] -> 
                                       hpChkGen words liveness reentry ),
@@ -828,16 +839,10 @@ stmtMacros = listToUFM [
  ]
 
 
-
-profilingInfo desc_str ty_str = do
-  lit1 <- if opt_SccProfilingOn 
-		   then code $ mkStringCLit desc_str
-		   else return (mkIntCLit 0)
-  lit2 <- if opt_SccProfilingOn 
-		   then code $ mkStringCLit ty_str
-		   else return (mkIntCLit 0)
-  return (ProfilingInfo lit1 lit2)
-
+profilingInfo desc_str ty_str 
+  | not opt_SccProfilingOn = NoProfilingInfo
+  | otherwise              = ProfilingInfo (stringToWord8s desc_str)
+                                           (stringToWord8s ty_str)
 
 staticClosure :: PackageId -> FastString -> FastString -> [CmmLit] -> ExtCode
 staticClosure pkg cl_label info payload
@@ -863,10 +868,9 @@ foreignCall conv_string results_code expr_code args_code vols safety ret
 	  results <- sequence results_code
 	  expr <- expr_code
 	  args <- sequence args_code
-	  --code (stmtC (CmmCall (CmmCallee expr convention) results args safety))
           case convention of
             -- Temporary hack so at least some functions are CmmSafe
-            CmmCallConv -> code (stmtC (CmmCall (CmmCallee expr convention) results args safety ret))
+            CmmCallConv -> code (stmtC (CmmCall (CmmCallee expr convention) results args ret))
             _ ->
               let expr' = adjCallTarget convention expr args in
               case safety of
@@ -1051,12 +1055,12 @@ doSwitch mb_range scrut arms deflt
 initEnv :: Env
 initEnv = listToUFM [
   ( fsLit "SIZEOF_StgHeader", 
-    Var (CmmLit (CmmInt (fromIntegral (fixedHdrSize * wORD_SIZE)) wordWidth) )),
+    VarN (CmmLit (CmmInt (fromIntegral (fixedHdrSize * wORD_SIZE)) wordWidth) )),
   ( fsLit "SIZEOF_StgInfoTable",
-    Var (CmmLit (CmmInt (fromIntegral stdInfoTableSizeB) wordWidth) ))
+    VarN (CmmLit (CmmInt (fromIntegral stdInfoTableSizeB) wordWidth) ))
   ]
 
-parseCmmFile :: DynFlags -> FilePath -> IO (Messages, Maybe Cmm)
+parseCmmFile :: DynFlags -> FilePath -> IO (Messages, Maybe CmmGroup)
 parseCmmFile dflags filename = do
   showPass dflags "ParseCmm"
   buf <- hGetStringBuffer filename

@@ -9,10 +9,11 @@ ToDo [Nov 2010]
 \section[SpecConstr]{Specialise over constructors}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
 -- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module SpecConstr(
@@ -30,6 +31,7 @@ import CoreUtils
 import CoreUnfold	( couldBeSmallEnoughToInline )
 import CoreFVs 		( exprsFreeVars )
 import CoreMonad
+import Literal		( litIsLifted )
 import HscTypes         ( ModGuts(..) )
 import WwLib		( mkWorkerArgs )
 import DataCon
@@ -809,9 +811,9 @@ forceSpecBndr _ _ = False
 ignoreDataCon env dc = ignoreTyCon env (dataConTyCon dc)
 
 ignoreType env ty
-  = case splitTyConApp_maybe ty of
-      Just (tycon, _) -> ignoreTyCon env tycon
-      _               -> False
+  = case tyConAppTyCon_maybe ty of
+      Just tycon -> ignoreTyCon env tycon
+      _          -> False
 
 ignoreTyCon :: ScEnv -> TyCon -> Bool
 ignoreTyCon env tycon
@@ -970,8 +972,8 @@ combineOccs xs ys = zipWithEqual "combineOccs" combineOcc xs ys
 setScrutOcc :: ScEnv -> ScUsage -> OutExpr -> ArgOcc -> ScUsage
 -- _Overwrite_ the occurrence info for the scrutinee, if the scrutinee
 -- is a variable, and an interesting variable
-setScrutOcc env usg (Cast e _) occ = setScrutOcc env usg e occ
-setScrutOcc env usg (Note _ e) occ = setScrutOcc env usg e occ
+setScrutOcc env usg (Cast e _) occ   = setScrutOcc env usg e occ
+setScrutOcc env usg (Tick _ e) occ = setScrutOcc env usg e occ
 setScrutOcc env usg (Var v)    occ
   | Just RecArg <- lookupHowBound env v = usg { scu_occs = extendVarEnv (scu_occs usg) v occ }
   | otherwise				= usg
@@ -1003,8 +1005,8 @@ scExpr' env (Var v)     = case scSubstId env v of
 scExpr' env (Type t)    = return (nullUsage, Type (scSubstTy env t))
 scExpr' env (Coercion c) = return (nullUsage, Coercion (scSubstCo env c))
 scExpr' _   e@(Lit {})  = return (nullUsage, e)
-scExpr' env (Note n e)  = do (usg,e') <- scExpr env e
-                             return (usg, Note n e')
+scExpr' env (Tick t e)  = do (usg,e') <- scExpr env e
+                             return (usg, Tick t e')
 scExpr' env (Cast e co) = do (usg, e') <- scExpr env e
                              return (usg, Cast e' (scSubstCo env co))
 scExpr' env e@(App _ _) = scApp env (collectArgs e)
@@ -1489,6 +1491,20 @@ The function calcSpecStrictness performs the calculation.
 This code deals with analysing call-site arguments to see whether
 they are constructor applications.
 
+Note [Free type variables of the qvar types]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In a call (f @a x True), that we want to specialise, what variables should
+we quantify over.  Clearly over 'a' and 'x', but what about any type variables
+free in x's type?  In fact we don't need to worry about them because (f @a)
+can only be a well-typed application if its type is compatible with x, so any
+variables free in x's type must be free in (f @a), and hence either be gathered
+via 'a' itself, or be in scope at f's defn.  Hence we just take 
+  (exprsFreeVars pats).
+
+BUT phantom type synonyms can mess this reasoning up, 
+  eg   x::T b   with  type T b = Int
+So we apply expandTypeSynonyms to the bound Ids.  
+See Trac # 5458.  Yuk.
 
 \begin{code}
 type CallPat = ([Var], [CoreExpr])	-- Quantified variables and arguments
@@ -1520,15 +1536,20 @@ callToPats env bndr_occs (con_env, args)
   = do	{ let in_scope = substInScope (sc_subst env)
 	; (interesting, pats) <- argsToPats env in_scope con_env args bndr_occs
 	; let pat_fvs = varSetElems (exprsFreeVars pats)
-	      qvars   = filterOut (`elemInScopeSet` in_scope) pat_fvs
+	      in_scope_vars = getInScopeVars in_scope
+	      qvars   = filterOut (`elemVarSet` in_scope_vars) pat_fvs
 		-- Quantify over variables that are not in sccpe
 		-- at the call site
+		-- See Note [Free type variables of the qvar types]
 		-- See Note [Shadowing] at the top
 		
 	      (tvs, ids) = partition isTyVar qvars
-	      qvars'     = tvs ++ ids
+	      qvars'     = tvs ++ map sanitise ids
 		-- Put the type variables first; the type of a term
 		-- variable may mention a type variable
+
+	      sanitise id = id `setIdType` expandTypeSynonyms (idType id)
+	        -- See Note [Free type variables of the qvar types]
 
 	; -- pprTrace "callToPats"  (ppr args $$ ppr prs $$ ppr bndr_occs) $
 	  if interesting
@@ -1564,7 +1585,7 @@ argToPat _env _in_scope _val_env arg@(Type {}) _arg_occ
 argToPat _env _in_scope _val_env arg@(Coercion {}) _arg_occ
   = return (False, arg)
 
-argToPat env in_scope val_env (Note _ arg) arg_occ
+argToPat env in_scope val_env (Tick _ arg) arg_occ
   = argToPat env in_scope val_env arg arg_occ
 	-- Note [Notes in call patterns]
 	-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1599,7 +1620,7 @@ argToPat env in_scope val_env (Cast arg co) arg_occ
 	{ -- Make a wild-card pattern for the coercion
 	  uniq <- getUniqueUs
 	; let co_name = mkSysTvName uniq (fsLit "sg")
-	      co_var = mkCoVar co_name (mkCoType ty1 ty2)
+	      co_var = mkCoVar co_name (mkCoercionType ty1 ty2)
 	; return (interesting, Cast arg' (mkCoVarCo co_var)) } }
   where
     Pair ty1 ty2 = coercionKind co
@@ -1694,7 +1715,8 @@ argsToPats env in_scope val_env args occs
 \begin{code}
 isValue :: ValueEnv -> CoreExpr -> Maybe Value
 isValue _env (Lit lit)
-  = Just (ConVal (LitAlt lit) [])
+  | litIsLifted lit = Nothing
+  | otherwise       = Just (ConVal (LitAlt lit) [])
 
 isValue env (Var v)
   | Just stuff <- lookupVarEnv env v
@@ -1746,9 +1768,9 @@ samePat (vs1, as1) (vs2, as2)
 
     same (Type {}) (Type {}) = True	-- Note [Ignore type differences]
     same (Coercion {}) (Coercion {}) = True
-    same (Note _ e1) e2	= same e1 e2	-- Ignore casts and notes
+    same (Tick _ e1) e2 = same e1 e2  -- Ignore casts and notes
     same (Cast e1 _) e2	= same e1 e2
-    same e1 (Note _ e2) = same e1 e2
+    same e1 (Tick _ e2) = same e1 e2
     same e1 (Cast e2 _) = same e1 e2
 
     same e1 e2 = WARN( bad e1 || bad e2, ppr e1 $$ ppr e2) 

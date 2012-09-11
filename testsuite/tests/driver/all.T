@@ -6,12 +6,12 @@ test('driver011',
      ['$MAKE -s --no-print-directory test011'])
 
 test('driver012',
-     extra_clean(['A012.hi', 'A012.o']),
+     extra_clean(['A012.hi', 'A012.ooo']),
      run_command,
      ['$MAKE -s --no-print-directory test012'])
 
 test('driver013',
-     extra_clean(['A013.hi', 'A013.o']),
+     extra_clean(['A013.xhi', 'A013.o']),
      run_command,
      ['$MAKE -s --no-print-directory test013'])
 
@@ -31,7 +31,8 @@ test('driver016',
      ['$MAKE -s --no-print-directory test016'])
 
 test('driver017',
-     extra_clean(['F017.hi', 'F017.o', 'F017_stub.h']),
+     extra_clean(['F017.hi', 'F017.o',
+                  'stub017/TestStub017_stub.h', 'stub017/']),
      run_command,
      ['$MAKE -s --no-print-directory test017'])
 
@@ -44,16 +45,15 @@ test('driver018',
 
 test('driver018a',
      extra_clean(['F018a.hi', 'F018a_stub.h',
-                  'TestStub018a.obj.018',
-                  'obj018a/TestStub018a_stub.obj.018']),
+                  'F018a.obj.018']),
      run_command,
      ['$MAKE -s --no-print-directory test018a'])
 
 test('driver019',
-     extra_clean(['out019/TestStub.hi',
-                  'out019/TestStub.o',
-                  'out019/TestStub_stub.h',
-                  'out019/TestStub_stub.o']),
+     extra_clean(['out019/TestStub019.hi',
+                  'out019/TestStub019.o',
+                  'out019/TestStub019_stub.h',
+                  'out019/TestStub019_stub.o']),
      run_command,
      ['$MAKE -s --no-print-directory test019'])
 
@@ -63,12 +63,12 @@ test('driver021',
      ['$MAKE -s --no-print-directory test021'])
 
 test('driver022',
-     extra_clean(['B022/C.hi', 'B022/C.o']),
+     extra_clean(['B022/C.hi', 'B022/C.ooo']),
      run_command,
      ['$MAKE -s --no-print-directory test022'])
 
 test('driver023',
-     extra_clean(['B023/C.hi', 'B023/C.o']),
+     extra_clean(['B023/C.xhi', 'B023/C.o']),
      run_command,
      ['$MAKE -s --no-print-directory test023'])
 
@@ -78,7 +78,8 @@ test('driver024',
      ['$MAKE -s --no-print-directory test024'])
 
 test('driver024a',
-     extra_clean(['obj024a/B024a/stub.o', 'obj024a/B024a', 'obj024a']),
+     extra_clean(['obj024a/B024a/stub.o', 'obj024a/B024a', 'obj024a',
+                  'B024a/stub.c', 'B024a/']),
      run_command,
      ['$MAKE -s --no-print-directory test024a'])
 
@@ -101,7 +102,7 @@ test('driver027',
 
 test('driver028',
      extra_clean(['B028/F.hi', 'B028/F.o',
-                  'B028/F_stub.h', 'B028/F_stub.o']),
+                  'stub028/B028/F_stub.h', 'stub028/B028/', 'stub028/']),
      run_command,
      ['$MAKE -s --no-print-directory test028'])
 
@@ -111,7 +112,7 @@ test('driver031',
      ['$MAKE -s --no-print-directory test031'])
 
 test('driver032',
-     extra_clean(['A032.hi', 'A032.o']),
+     extra_clean(['A032.hi', 'obj032/A032.o', 'obj032/']),
      run_command,
      ['$MAKE -s --no-print-directory test032'])
 
@@ -127,7 +128,7 @@ test('driver034',
 
 test('driver035',
      extra_clean(['F035.hi', 'F035.o',
-                  'stub035/F035_stub.h']),
+                  'stub035/TestStub035_stub.h', 'stub035/']),
      run_command,
      ['$MAKE -s --no-print-directory test035'])
 
@@ -137,7 +138,7 @@ test('driver041',
      ['$MAKE -s --no-print-directory test041'])
 
 test('driver042',
-     extra_clean(['B042/C.hi', 'B042/C.o']),
+     extra_clean(['B042/C.hi', 'obj042/B042/C.o', 'obj042/B042/', 'obj042/']),
      run_command,
      ['$MAKE -s --no-print-directory test042'])
 
@@ -155,7 +156,7 @@ test('driver044',
 
 test('driver045',
      extra_clean(['B045/F.hi', 'B045/F.o',
-                  'B045/F_stub.h', 'B045/F_stub.o']),
+                  'stub045/B045/F_stub.h', 'stub045/B045/', 'stub045/']),
      run_command,
      ['$MAKE -s --no-print-directory test045'])
 
@@ -195,23 +196,30 @@ test('driver061b',
 
 
 test('driver062a',
-     extra_clean(['Hello062a.hs']),
+     extra_clean(['Hello062a.hs', 'Hello062a.hi', 'Hello062a.o',
+                  'hello062a', 'hello062a.exe']),
      run_command,
      ['$MAKE -s --no-print-directory test062a'])
 test('driver062b',
-     extra_clean(['Hello062b.hs']),
+     extra_clean(['Hello062b.hs', 'Hello062b.hi', 'Hello062b.o',
+                  'hello062b', 'hello062b.exe']),
      run_command,
      ['$MAKE -s --no-print-directory test062b'])
 test('driver062c',
-     extra_clean(['Hello062c.hs']),
+     extra_clean(['Hello062c.hs', 'Hello062c.hi', 'Hello062c.o',
+                  'hello062c', 'hello062c.exe']),
      run_command,
      ['$MAKE -s --no-print-directory test062c'])
 test('driver062d',
-     extra_clean(['B062d/Hello062d.hs']),
+     extra_clean(['B062d/Hello062d.hi', 'B062d/Hello062d.o',
+                  'B062d/Hello062d.hs', 'B062d/',
+                  'hello062d', 'hello062d.exe']),
      run_command,
      ['$MAKE -s --no-print-directory test062d'])
 test('driver062e',
-     extra_clean(['B062e/Hello062e.hs']),
+     extra_clean(['B062e/Hello062e.hi', 'B062e/Hello062e.o',
+                  'B062e/Hello062e.hs', 'B062e/',
+                  'hello062e', 'hello062e.exe']),
      run_command,
      ['$MAKE -s --no-print-directory test062e'])
 
@@ -252,12 +260,14 @@ test('driver071',
      ['$MAKE -s --no-print-directory test071'])
 
 test('driver081a',
-     normal,
+     extra_clean(['Test_081a.hs', 'Test_081a.hi', 'Test_081a.o',
+                  'Test_081a', 'Test_081a.exe']),
      run_command,
      ['$MAKE -s --no-print-directory test081a'])
 
 test('driver081b',
-     normal,
+     extra_clean(['Test.081b.hs', 'Test.081b.hi', 'Test.081b.o',
+                  'Test.081b', 'Test.081b.exe']),
      run_command,
      ['$MAKE -s --no-print-directory test081b'])
 
@@ -268,7 +278,7 @@ test('driver100',
      ['$MAKE -s --no-print-directory test100'])
 
 test('driver200',
-     extra_clean(['depend200']),
+     extra_clean(['depend200', 'depend200.bak']),
      run_command,
      ['$MAKE -s --no-print-directory test200'])
 
@@ -301,20 +311,19 @@ test('dynHelloWorld',
      compile_and_run,
      [''])
 
-# simple test that we can load and use the GHC package in all ways
-# (in #5313 it was failing the dyn way)
-p = subprocess.Popen([config.compiler, "--print-libdir"], stdout=subprocess.PIPE)
-libdir = chop(p.stdout.read())
-p.stdout.close
-
-test('5313', extra_run_opts('"' + libdir + '"'), compile_and_run, ['-package ghc'])
+test('5313', extra_run_opts('"' + config.libdir + '"'), compile_and_run, ['-package ghc'])
 
 test('2464', normal, compile, [''])
-test('3674', ignore_output, run_command, 
-             ['$MAKE -s --no-print-directory 3674'])
+test('3674',
+     [ignore_output,
+      extra_clean(['3674_pre.hi', '3674_pre.o', '3674_pre', '3674_pre.exe'])],
+     run_command, 
+     ['$MAKE -s --no-print-directory 3674'])
 
-test('rtsopts001', normal, run_command,
-                ['$MAKE -s --no-print-directory rtsopts001'])
+test('rtsopts001',
+     extra_clean(['rtsOpts.hi', 'rtsOpts.o', 'rtsOpts', 'rtsOpts.exe']),
+     run_command,
+     ['$MAKE -s --no-print-directory rtsopts001'])
 test('rtsopts002', normal, run_command,
                 ['$MAKE -s --no-print-directory rtsopts002'])
 
@@ -330,4 +339,18 @@ test('T4437', only_ways(['normal']), compile_and_run, ['-package ghc'])
 
 test('werror', normal, compile_fail, [''])
 
-test('T706', req_interp, run_command, ['$MAKE -s --no-print-directory T706'])
+test('T706',
+     [req_interp,
+      extra_clean(['T706.hs'])],
+     run_command,
+     ['$MAKE -s --no-print-directory T706'])
+test('spacesInArgs',
+     extra_run_opts('"a   b"   "c   d"'),
+     compile_and_run,
+     [''])
+
+test('T5584', normal, run_command,
+        ['$MAKE -s --no-print-directory T5584'])
+test('T5198', extra_clean(['T5198dump/T5198.dump-simpl', 'T5198dump']),
+     run_command,
+     ['$MAKE -s --no-print-directory T5198'])

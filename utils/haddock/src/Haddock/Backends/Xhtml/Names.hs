@@ -11,7 +11,7 @@
 -- Portability :  portable
 -----------------------------------------------------------------------------
 module Haddock.Backends.Xhtml.Names (
-  ppName, ppDocName, ppLDocName, ppRdrName,
+  ppName, ppDocName, ppLDocName, ppRdrName, ppUncheckedLink,
   ppBinder, ppBinder',
   ppModule, ppModuleRef,
   linkId
@@ -37,6 +37,10 @@ ppOccName = toHtml . occNameString
 
 ppRdrName :: RdrName -> Html
 ppRdrName = ppOccName . rdrNameOcc
+
+
+ppUncheckedLink :: Qualification -> (ModuleName, OccName) -> Html
+ppUncheckedLink _ (mdl, occ) = linkIdOcc' mdl (Just occ) << ppOccName occ -- TODO: apply ppQualifyName
 
 
 ppLDocName :: Qualification -> Located DocName -> Html
@@ -110,14 +114,22 @@ linkIdOcc mdl mbName = anchor ! [href url]
       Just name -> moduleNameUrl mdl name
 
 
+linkIdOcc' :: ModuleName -> Maybe OccName -> Html -> Html
+linkIdOcc' mdl mbName = anchor ! [href url]
+  where
+    url = case mbName of
+      Nothing   -> moduleHtmlFile' mdl
+      Just name -> moduleNameUrl' mdl name
+
+
 ppModule :: Module -> Html
 ppModule mdl = anchor ! [href (moduleUrl mdl)]
                << toHtml (moduleString mdl)
 
 
-ppModuleRef :: Module -> String -> Html
-ppModuleRef mdl ref = anchor ! [href (moduleUrl mdl ++ ref)]
-                      << toHtml (moduleString mdl)
+ppModuleRef :: ModuleName -> String -> Html
+ppModuleRef mdl ref = anchor ! [href (moduleHtmlFile' mdl ++ ref)]
+                      << toHtml (moduleNameString mdl)
     -- NB: The ref parameter already includes the '#'.
     -- This function is only called from markupModule expanding a
     -- DocModule, which doesn't seem to be ever be used.

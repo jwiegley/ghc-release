@@ -18,6 +18,7 @@ module Binary
   ( {-type-}  Bin,
     {-class-} Binary(..),
     {-type-}  BinHandle,
+    SymbolTable, Dictionary,
 
    openBinIO, openBinIO_,
    openBinMem,
@@ -249,8 +250,7 @@ computeFingerprint :: Binary a
 
 computeFingerprint put_name a = do
   bh <- openBinMem (3*1024) -- just less than a block
-  ud <- newWriteState put_name putFS
-  bh <- return $ setUserData bh ud
+  bh <- return $ setUserData bh $ newWriteState put_name putFS
   put_ bh a
   fingerprintBinMem bh
 
@@ -447,20 +447,30 @@ instance (Binary a, Binary b, Binary c) => Binary (a,b,c) where
 
 instance (Binary a, Binary b, Binary c, Binary d) => Binary (a,b,c,d) where
     put_ bh (a,b,c,d) = do put_ bh a; put_ bh b; put_ bh c; put_ bh d
-    get bh          = do a <- get bh
-                         b <- get bh
-                         c <- get bh
-                         d <- get bh
-                         return (a,b,c,d)
+    get bh            = do a <- get bh
+                           b <- get bh
+                           c <- get bh
+                           d <- get bh
+                           return (a,b,c,d)
 
 instance (Binary a, Binary b, Binary c, Binary d, Binary e) => Binary (a,b,c,d, e) where
     put_ bh (a,b,c,d, e) = do put_ bh a; put_ bh b; put_ bh c; put_ bh d; put_ bh e;
-    get bh          = do a <- get bh
-                         b <- get bh
-                         c <- get bh
-                         d <- get bh
-                         e <- get bh
-                         return (a,b,c,d,e)
+    get bh               = do a <- get bh
+                              b <- get bh
+                              c <- get bh
+                              d <- get bh
+                              e <- get bh
+                              return (a,b,c,d,e)
+
+instance (Binary a, Binary b, Binary c, Binary d, Binary e, Binary f) => Binary (a,b,c,d, e, f) where
+    put_ bh (a,b,c,d, e, f) = do put_ bh a; put_ bh b; put_ bh c; put_ bh d; put_ bh e; put_ bh f;
+    get bh                  = do a <- get bh
+                                 b <- get bh
+                                 c <- get bh
+                                 d <- get bh
+                                 e <- get bh
+                                 f <- get bh
+                                 return (a,b,c,d,e,f)
 
 instance Binary a => Binary (Maybe a) where
     put_ bh Nothing  = putByte bh 0
@@ -634,31 +644,33 @@ lazyGet bh = do
 data UserData =
    UserData {
         -- for *deserialising* only:
-        ud_dict   :: Dictionary,
-        ud_symtab :: SymbolTable,
+        ud_get_name :: BinHandle -> IO Name,
+        ud_get_fs   :: BinHandle -> IO FastString,
 
         -- for *serialising* only:
         ud_put_name :: BinHandle -> Name       -> IO (),
         ud_put_fs   :: BinHandle -> FastString -> IO ()
    }
 
-newReadState :: Dictionary -> IO UserData
-newReadState dict = do
-  return UserData { ud_dict     = dict,
-                    ud_symtab   = undef "symtab",
-                    ud_put_name = undef "put_name",
-                    ud_put_fs   = undef "put_fs"
-                   }
-
+newReadState :: (BinHandle -> IO Name)
+             -> (BinHandle -> IO FastString)
+             -> UserData
+newReadState get_name get_fs
+  = UserData { ud_get_name = get_name,
+               ud_get_fs   = get_fs,
+               ud_put_name = undef "put_name",
+               ud_put_fs   = undef "put_fs"
+             }
+   
 newWriteState :: (BinHandle -> Name       -> IO ()) 
               -> (BinHandle -> FastString -> IO ())
-              -> IO UserData
-newWriteState put_name put_fs = do
-  return UserData { ud_dict     = undef "dict",
-                    ud_symtab   = undef "symtab",
-                    ud_put_name = put_name,
-                    ud_put_fs   = put_fs
-                   }
+              -> UserData
+newWriteState put_name put_fs
+  = UserData { ud_get_name = undef "get_name",
+               ud_get_fs   = undef "get_fs",
+               ud_put_name = put_name,
+               ud_put_fs   = put_fs
+             }
 
 noUserData :: a
 noUserData = undef "UserData"
@@ -736,9 +748,9 @@ instance Binary FastString where
     case getUserData bh of
         UserData { ud_put_fs = put_fs } -> put_fs bh f
 
-  get bh = do
-        j <- get bh
-        return $! (ud_dict (getUserData bh) ! (fromIntegral (j :: Word32)))
+  get bh =
+    case getUserData bh of
+        UserData { ud_get_fs = get_fs } -> get_fs bh
 
 -- Here to avoid loop
 

@@ -11,80 +11,83 @@
 -- module, except that it exports a number of additional functions that are rarely used,
 -- and works over the 'SDoc' type.
 module Outputable (
-	-- * Type classes
-	Outputable(..), OutputableBndr(..),
-	PlatformOutputable(..),
+        -- * Type classes
+        Outputable(..), OutputableBndr(..),
+        PlatformOutputable(..),
 
         -- * Pretty printing combinators
-	SDoc, runSDoc, initSDocContext,
-	docToSDoc,
-	interppSP, interpp'SP, pprQuotedList, pprWithCommas, quotedListWithOr,
-	empty, nest,
-	char,
-	text, ftext, ptext,
-	int, integer, float, double, rational,
-	parens, cparen, brackets, braces, quotes, doubleQuotes, angleBrackets,
-	semi, comma, colon, dcolon, space, equals, dot, arrow, darrow,
-	lparen, rparen, lbrack, rbrack, lbrace, rbrace, underscore,
-	blankLine,
-	(<>), (<+>), hcat, hsep, 
-	($$), ($+$), vcat,
-	sep, cat, 
-	fsep, fcat, 
-	hang, punctuate, ppWhen, ppUnless,
-	speakNth, speakNTimes, speakN, speakNOf, plural,
+        SDoc, runSDoc, initSDocContext,
+        docToSDoc,
+        interppSP, interpp'SP, pprQuotedList, pprWithCommas, quotedListWithOr,
+        empty, nest,
+        char,
+        text, ftext, ptext,
+        int, integer, float, double, rational,
+        parens, cparen, brackets, braces, quotes, quote, doubleQuotes, angleBrackets,
+        semi, comma, colon, dcolon, space, equals, dot, arrow, darrow,
+        lparen, rparen, lbrack, rbrack, lbrace, rbrace, underscore,
+        blankLine,
+        (<>), (<+>), hcat, hsep,
+        ($$), ($+$), vcat,
+        sep, cat,
+        fsep, fcat,
+        hang, punctuate, ppWhen, ppUnless,
+        speakNth, speakNTimes, speakN, speakNOf, plural,
 
         coloured, PprColour, colType, colCoerc, colDataCon,
         colBinder, bold, keyword,
 
         -- * Converting 'SDoc' into strings and outputing it
-	printSDoc, printErrs, printOutput, hPrintDump, printDump,
-	printForC, printForAsm, printForUser, printForUserPartWay,
-	pprCode, mkCodeStyle,
-	showSDoc, showSDocOneLine,
+        printSDoc, printErrs, printOutput, hPrintDump, printDump,
+        printForC, printForAsm, printForUser, printForUserPartWay,
+        pprCode, mkCodeStyle,
+        showSDoc, showSDocOneLine,
         showSDocForUser, showSDocDebug, showSDocDump, showSDocDumpOneLine,
         showPpr,
-	showSDocUnqual, showsPrecSDoc,
+        showSDocUnqual, showsPrecSDoc,
         renderWithStyle,
 
-	pprInfixVar, pprPrefixVar,
-	pprHsChar, pprHsString, pprHsInfix, pprHsVar,
+        pprInfixVar, pprPrefixVar,
+        pprHsChar, pprHsString, 
         pprFastFilePath,
 
         -- * Controlling the style in which output is printed
-	BindingSite(..),
+        BindingSite(..),
 
-	PprStyle, CodeStyle(..), PrintUnqualified, alwaysQualify, neverQualify,
+        PprStyle, CodeStyle(..), PrintUnqualified, alwaysQualify, neverQualify,
         QualifyName(..),
-	getPprStyle, withPprStyle, withPprStyleDoc, 
-	pprDeeper, pprDeeperList, pprSetDepth,
-	codeStyle, userStyle, debugStyle, dumpStyle, asmStyle,
-	ifPprDebug, qualName, qualModule,
-	mkErrStyle, defaultErrStyle, defaultDumpStyle, defaultUserStyle,
+        getPprStyle, withPprStyle, withPprStyleDoc,
+        pprDeeper, pprDeeperList, pprSetDepth,
+        codeStyle, userStyle, debugStyle, dumpStyle, asmStyle,
+        ifPprDebug, qualName, qualModule,
+        mkErrStyle, defaultErrStyle, defaultDumpStyle, defaultUserStyle,
         mkUserStyle, cmdlineParserStyle, Depth(..),
-	
-	-- * Error handling and debugging utilities
-	pprPanic, pprSorry, assertPprPanic, pprPanicFastInt, pprPgmError, 
-	pprTrace, pprDefiniteTrace, warnPprTrace,
-	trace, pgmError, panic, sorry, panicFastInt, assertPanic
+
+        -- * Error handling and debugging utilities
+        pprPanic, pprSorry, assertPprPanic, pprPanicFastInt, pprPgmError,
+        pprTrace, pprDefiniteTrace, warnPprTrace,
+        trace, pgmError, panic, sorry, panicFastInt, assertPanic
     ) where
 
-import {-# SOURCE #-} 	Module( Module, ModuleName, moduleName )
-import {-# SOURCE #-} 	OccName( OccName )
+import {-# SOURCE #-}   Module( Module, ModuleName, moduleName )
+import {-# SOURCE #-}   Name( Name, nameModule )
 
 import StaticFlags
-import FastString 
+import FastString
 import FastTypes
 import Platform
 import qualified Pretty
-import Pretty		( Doc, Mode(..) )
+import Util             ( snocView )
+import Pretty           ( Doc, Mode(..) )
 import Panic
 
 import Data.Char
 import qualified Data.Map as M
 import qualified Data.IntMap as IM
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Word
-import System.IO	( Handle, stderr, stdout, hFlush )
+import System.IO        ( Handle, stderr, stdout, hFlush )
 import System.FilePath
 
 
@@ -100,35 +103,35 @@ showMultiLineString s = [ showList s "" ]
 
 
 %************************************************************************
-%*									*
+%*                                                                      *
 \subsection{The @PprStyle@ data type}
-%*									*
+%*                                                                      *
 %************************************************************************
 
 \begin{code}
 
 data PprStyle
   = PprUser PrintUnqualified Depth
-		-- Pretty-print in a way that will make sense to the
-		-- ordinary user; must be very close to Haskell
-		-- syntax, etc.
-		-- Assumes printing tidied code: non-system names are
-		-- printed without uniques.
+                -- Pretty-print in a way that will make sense to the
+                -- ordinary user; must be very close to Haskell
+                -- syntax, etc.
+                -- Assumes printing tidied code: non-system names are
+                -- printed without uniques.
 
   | PprCode CodeStyle
-		-- Print code; either C or assembler
+                -- Print code; either C or assembler
 
-  | PprDump	-- For -ddump-foo; less verbose than PprDebug.
-		-- Does not assume tidied code: non-external names
-		-- are printed with uniques.
+  | PprDump     -- For -ddump-foo; less verbose than PprDebug.
+                -- Does not assume tidied code: non-external names
+                -- are printed with uniques.
 
-  | PprDebug	-- Full debugging output
+  | PprDebug    -- Full debugging output
 
-data CodeStyle = CStyle		-- The format of labels differs for C and assembler
-	       | AsmStyle
+data CodeStyle = CStyle         -- The format of labels differs for C and assembler
+               | AsmStyle
 
 data Depth = AllTheWay
-           | PartWay Int	-- 0 => stop
+           | PartWay Int        -- 0 => stop
 
 
 -- -----------------------------------------------------------------------------
@@ -145,13 +148,13 @@ data Depth = AllTheWay
 -- as @Exception.catch@, this fuction will return @Just "Exception"@.
 -- Note that the return value is a ModuleName, not a Module, because
 -- in source code, names are qualified by ModuleNames.
-type QueryQualifyName = Module -> OccName -> QualifyName
+type QueryQualifyName = Name -> QualifyName
 
 -- See Note [Printing original names] in HscTypes
 data QualifyName                        -- given P:M.T
         = NameUnqual                    -- refer to it as "T"
         | NameQual ModuleName           -- refer to it as "X.T" for the supplied X
-        | NameNotInScope1               
+        | NameNotInScope1
                 -- it is not in scope at all, but M.T is not bound in the current
                 -- scope, so we can refer to it as "M.T"
         | NameNotInScope2
@@ -166,10 +169,10 @@ type QueryQualifyModule = Module -> Bool
 type PrintUnqualified = (QueryQualifyName, QueryQualifyModule)
 
 alwaysQualifyNames :: QueryQualifyName
-alwaysQualifyNames m _ = NameQual (moduleName m)
+alwaysQualifyNames n = NameQual (moduleName (nameModule n))
 
 neverQualifyNames :: QueryQualifyName
-neverQualifyNames _ _ = NameUnqual
+neverQualifyNames _ = NameUnqual
 
 alwaysQualifyModules :: QueryQualifyModule
 alwaysQualifyModules _ = True
@@ -186,7 +189,7 @@ defaultUserStyle, defaultDumpStyle :: PprStyle
 defaultUserStyle = mkUserStyle alwaysQualify AllTheWay
 
 defaultDumpStyle |  opt_PprStyle_Debug = PprDebug
-		 |  otherwise          = PprDump
+                 |  otherwise          = PprDump
 
 -- | Style for printing error messages
 mkErrStyle :: PrintUnqualified -> PprStyle
@@ -196,7 +199,7 @@ defaultErrStyle :: PprStyle
 -- Default style for error messages
 -- It's a bit of a hack because it doesn't take into account what's in scope
 -- Only used for desugarer warnings, and typechecker errors in interface sigs
-defaultErrStyle 
+defaultErrStyle
   | opt_PprStyle_Debug   = mkUserStyle alwaysQualify AllTheWay
   | otherwise            = mkUserStyle alwaysQualify (PartWay opt_PprUserLength)
 
@@ -218,9 +221,9 @@ The following test decides whether or not we are actually generating
 code (either C or assembly), or generating interface files.
 
 %************************************************************************
-%*									*
+%*                                                                      *
 \subsection{The @SDoc@ data type}
-%*									*
+%*                                                                      *
 %************************************************************************
 
 \begin{code}
@@ -266,11 +269,12 @@ pprDeeperList f ds = SDoc work
   work other_ctx = runSDoc (f ds) other_ctx
 
 pprSetDepth :: Depth -> SDoc -> SDoc
-pprSetDepth depth doc = SDoc $ \ctx -> case ctx of
-  SDC{sdocStyle=PprUser q _} ->
-    runSDoc doc ctx{sdocStyle = PprUser q depth}
-  _ ->
-    runSDoc doc ctx
+pprSetDepth depth doc = SDoc $ \ctx ->
+    case ctx of
+        SDC{sdocStyle=PprUser q _} ->
+            runSDoc doc ctx{sdocStyle = PprUser q depth}
+        _ ->
+            runSDoc doc ctx
 
 getPprStyle :: (PprStyle -> SDoc) -> SDoc
 getPprStyle df = SDoc $ \ctx -> runSDoc (df (sdocStyle ctx)) ctx
@@ -278,16 +282,16 @@ getPprStyle df = SDoc $ \ctx -> runSDoc (df (sdocStyle ctx)) ctx
 
 \begin{code}
 qualName :: PprStyle -> QueryQualifyName
-qualName (PprUser (qual_name,_) _) m  n = qual_name m n
-qualName _other		           m _n = NameQual (moduleName m)
+qualName (PprUser (qual_name,_) _)  n = qual_name n
+qualName _other                     n = NameQual (moduleName (nameModule n))
 
 qualModule :: PprStyle -> QueryQualifyModule
 qualModule (PprUser (_,qual_mod) _)  m = qual_mod m
 qualModule _other                   _m = True
 
 codeStyle :: PprStyle -> Bool
-codeStyle (PprCode _)	  = True
-codeStyle _		  = False
+codeStyle (PprCode _)     = True
+codeStyle _               = False
 
 asmStyle :: PprStyle -> Bool
 asmStyle (PprCode AsmStyle)  = True
@@ -298,17 +302,18 @@ dumpStyle PprDump = True
 dumpStyle _other  = False
 
 debugStyle :: PprStyle -> Bool
-debugStyle PprDebug	  = True
-debugStyle _other	  = False
+debugStyle PprDebug = True
+debugStyle _other   = False
 
 userStyle ::  PprStyle -> Bool
 userStyle (PprUser _ _) = True
 userStyle _other        = False
 
-ifPprDebug :: SDoc -> SDoc	  -- Empty for non-debug style
-ifPprDebug d = SDoc $ \ctx -> case ctx of
-  SDC{sdocStyle=PprDebug} -> runSDoc d ctx
-  _                       -> Pretty.empty
+ifPprDebug :: SDoc -> SDoc        -- Empty for non-debug style
+ifPprDebug d = SDoc $ \ctx ->
+    case ctx of
+        SDC{sdocStyle=PprDebug} -> runSDoc d ctx
+        _                       -> Pretty.empty
 \end{code}
 
 \begin{code}
@@ -340,7 +345,7 @@ hPrintDump h doc = do
    better_doc = doc $$ blankLine
 
 printForUser :: Handle -> PrintUnqualified -> SDoc -> IO ()
-printForUser handle unqual doc 
+printForUser handle unqual doc
   = Pretty.printDoc PageMode handle
       (runSDoc doc (initSDocContext (mkUserStyle unqual AllTheWay)))
 
@@ -439,11 +444,12 @@ float n     = docToSDoc $ Pretty.float n
 double n    = docToSDoc $ Pretty.double n
 rational n  = docToSDoc $ Pretty.rational n
 
-parens, braces, brackets, quotes, doubleQuotes, angleBrackets :: SDoc -> SDoc
+parens, braces, brackets, quotes, quote, doubleQuotes, angleBrackets :: SDoc -> SDoc
 
 parens d       = SDoc $ Pretty.parens . runSDoc d
 braces d       = SDoc $ Pretty.braces . runSDoc d
 brackets d     = SDoc $ Pretty.brackets . runSDoc d
+quote d        = SDoc $ Pretty.quote . runSDoc d
 doubleQuotes d = SDoc $ Pretty.doubleQuotes . runSDoc d
 angleBrackets d = char '<' <> d <> char '>'
 
@@ -451,14 +457,14 @@ cparen :: Bool -> SDoc -> SDoc
 
 cparen b d     = SDoc $ Pretty.cparen b . runSDoc d
 
--- quotes encloses something in single quotes...
+-- 'quotes' encloses something in single quotes...
 -- but it omits them if the thing ends in a single quote
 -- so that we don't get `foo''.  Instead we just have foo'.
-quotes d = SDoc $ \sty -> 
+quotes d = SDoc $ \sty ->
            let pp_d = runSDoc d sty in
-           case show pp_d of
-             ('\'' : _) -> pp_d
-             _other     -> Pretty.quotes pp_d
+           case snocView (show pp_d) of
+             Just (_, '\'') -> pp_d
+             _other         -> Pretty.quotes pp_d
 
 semi, comma, colon, equals, space, dcolon, arrow, underscore, dot :: SDoc
 darrow, lparen, rparen, lbrack, rbrack, lbrace, rbrace, blankLine :: SDoc
@@ -488,7 +494,7 @@ nest :: Int -> SDoc -> SDoc
 (<+>) :: SDoc -> SDoc -> SDoc
 -- ^ Join two 'SDoc' together horizontally with a gap between them
 ($$) :: SDoc -> SDoc -> SDoc
--- ^ Join two 'SDoc' together vertically; if there is 
+-- ^ Join two 'SDoc' together vertically; if there is
 -- no vertical overlap it "dovetails" the two onto one line
 ($+$) :: SDoc -> SDoc -> SDoc
 -- ^ Join two 'SDoc' together vertically
@@ -535,9 +541,9 @@ punctuate :: SDoc   -- ^ The punctuation
           -> [SDoc] -- ^ Punctuated list
 punctuate _ []     = []
 punctuate p (d:ds) = go d ds
-		   where
-		     go d [] = [d]
-		     go d (e:es) = (d <> p) : go e es
+                   where
+                     go d [] = [d]
+                     go d (e:es) = (d <> p) : go e es
 
 ppWhen, ppUnless :: Bool -> SDoc -> SDoc
 ppWhen True  doc = doc
@@ -589,26 +595,29 @@ keyword = bold
 
 
 %************************************************************************
-%*									*
+%*                                                                      *
 \subsection[Outputable-class]{The @Outputable@ class}
-%*									*
+%*                                                                      *
 %************************************************************************
 
 \begin{code}
 -- | Class designating that some type has an 'SDoc' representation
 class Outputable a where
-	ppr :: a -> SDoc
-	pprPrec :: Rational -> a -> SDoc
-	
-	ppr = pprPrec 0
-	pprPrec _ = ppr
+        ppr :: a -> SDoc
+        pprPrec :: Rational -> a -> SDoc
+                -- 0 binds least tightly
+                -- We use Rational because there is always a
+                -- Rational between any other two Rationals
+
+        ppr = pprPrec 0
+        pprPrec _ = ppr
 
 class PlatformOutputable a where
-	pprPlatform :: Platform -> a -> SDoc
-	pprPlatformPrec :: Platform -> Rational -> a -> SDoc
-	
-	pprPlatform platform = pprPlatformPrec platform 0
-	pprPlatformPrec platform _ = pprPlatform platform
+        pprPlatform :: Platform -> a -> SDoc
+        pprPlatformPrec :: Platform -> Rational -> a -> SDoc
+
+        pprPlatform platform = pprPlatformPrec platform 0
+        pprPlatformPrec platform _ = pprPlatform platform
 \end{code}
 
 \begin{code}
@@ -618,6 +627,8 @@ instance Outputable Bool where
 
 instance Outputable Int where
    ppr n = int n
+instance PlatformOutputable Int where
+   pprPlatform _ = ppr
 
 instance Outputable Word16 where
    ppr n = integer $ fromIntegral n
@@ -638,6 +649,9 @@ instance (Outputable a) => Outputable [a] where
 instance (PlatformOutputable a) => PlatformOutputable [a] where
     pprPlatform platform xs = brackets (fsep (punctuate comma (map (pprPlatform platform) xs)))
 
+instance (Outputable a) => Outputable (Set a) where
+    ppr s = braces (fsep (punctuate comma (map ppr (Set.toList s))))
+
 instance (Outputable a, Outputable b) => Outputable (a, b) where
     ppr (x,y) = parens (sep [ppr x <> comma, ppr y])
 instance (PlatformOutputable a, PlatformOutputable b) => PlatformOutputable (a, b) where
@@ -647,6 +661,9 @@ instance (PlatformOutputable a, PlatformOutputable b) => PlatformOutputable (a, 
 instance Outputable a => Outputable (Maybe a) where
   ppr Nothing = ptext (sLit "Nothing")
   ppr (Just x) = ptext (sLit "Just") <+> ppr x
+instance PlatformOutputable a => PlatformOutputable (Maybe a) where
+  pprPlatform _        Nothing  = ptext (sLit "Nothing")
+  pprPlatform platform (Just x) = ptext (sLit "Just") <+> pprPlatform platform x
 
 instance (Outputable a, Outputable b) => Outputable (Either a b) where
   ppr (Left x)  = ptext (sLit "Left")  <+> ppr x
@@ -656,50 +673,50 @@ instance (Outputable a, Outputable b) => Outputable (Either a b) where
 instance (Outputable a, Outputable b, Outputable c) => Outputable (a, b, c) where
     ppr (x,y,z) =
       parens (sep [ppr x <> comma,
-		   ppr y <> comma,
-		   ppr z ])
+                   ppr y <> comma,
+                   ppr z ])
 
 instance (Outputable a, Outputable b, Outputable c, Outputable d) =>
-	 Outputable (a, b, c, d) where
+         Outputable (a, b, c, d) where
     ppr (a,b,c,d) =
       parens (sep [ppr a <> comma,
-		   ppr b <> comma,
-		   ppr c <> comma,
-		   ppr d])
+                   ppr b <> comma,
+                   ppr c <> comma,
+                   ppr d])
 
 instance (Outputable a, Outputable b, Outputable c, Outputable d, Outputable e) =>
-	 Outputable (a, b, c, d, e) where
+         Outputable (a, b, c, d, e) where
     ppr (a,b,c,d,e) =
       parens (sep [ppr a <> comma,
-		   ppr b <> comma,
-		   ppr c <> comma,
-		   ppr d <> comma,
-		   ppr e])
+                   ppr b <> comma,
+                   ppr c <> comma,
+                   ppr d <> comma,
+                   ppr e])
 
 instance (Outputable a, Outputable b, Outputable c, Outputable d, Outputable e, Outputable f) =>
-	 Outputable (a, b, c, d, e, f) where
+         Outputable (a, b, c, d, e, f) where
     ppr (a,b,c,d,e,f) =
       parens (sep [ppr a <> comma,
-		   ppr b <> comma,
-		   ppr c <> comma,
-		   ppr d <> comma,
-		   ppr e <> comma,
-		   ppr f])
+                   ppr b <> comma,
+                   ppr c <> comma,
+                   ppr d <> comma,
+                   ppr e <> comma,
+                   ppr f])
 
 instance (Outputable a, Outputable b, Outputable c, Outputable d, Outputable e, Outputable f, Outputable g) =>
-	 Outputable (a, b, c, d, e, f, g) where
+         Outputable (a, b, c, d, e, f, g) where
     ppr (a,b,c,d,e,f,g) =
       parens (sep [ppr a <> comma,
-		   ppr b <> comma,
-		   ppr c <> comma,
-		   ppr d <> comma,
-		   ppr e <> comma,
-		   ppr f <> comma,
-		   ppr g])
+                   ppr b <> comma,
+                   ppr c <> comma,
+                   ppr d <> comma,
+                   ppr e <> comma,
+                   ppr f <> comma,
+                   ppr g])
 
 instance Outputable FastString where
-    ppr fs = ftext fs		-- Prints an unadorned string,
-				-- no double quotes or anything
+    ppr fs = ftext fs           -- Prints an unadorned string,
+                                -- no double quotes or anything
 
 instance (Outputable key, Outputable elt) => Outputable (M.Map key elt) where
     ppr m = ppr (M.toList m)
@@ -710,9 +727,9 @@ instance (Outputable elt) => Outputable (IM.IntMap elt) where
 \end{code}
 
 %************************************************************************
-%*									*
+%*                                                                      *
 \subsection{The @OutputableBndr@ class}
-%*									*
+%*                                                                      *
 %************************************************************************
 
 \begin{code}
@@ -726,12 +743,17 @@ data BindingSite = LambdaBind | CaseBind | LetBind
 class Outputable a => OutputableBndr a where
    pprBndr :: BindingSite -> a -> SDoc
    pprBndr _b x = ppr x
+
+   pprPrefixOcc, pprInfixOcc :: a -> SDoc
+      -- Print an occurrence of the name, suitable either in the 
+      -- prefix position of an application, thus   (f a b) or  ((+) x)
+      -- or infix position,                 thus   (a `f` b) or  (x + y)
 \end{code}
 
 %************************************************************************
-%*									*
+%*                                                                      *
 \subsection{Random printing helpers}
-%*									*
+%*                                                                      *
 %************************************************************************
 
 \begin{code}
@@ -751,44 +773,23 @@ pprHsString fs = vcat (map text (showMultiLineString (unpackFS fs)))
 pprPrefixVar :: Bool -> SDoc -> SDoc
 pprPrefixVar is_operator pp_v
   | is_operator = parens pp_v
-  | otherwise	= pp_v
+  | otherwise   = pp_v
 
 -- Put a name in backquotes if it's not an operator
 pprInfixVar :: Bool -> SDoc -> SDoc
-pprInfixVar is_operator pp_v 
+pprInfixVar is_operator pp_v
   | is_operator = pp_v
   | otherwise   = char '`' <> pp_v <> char '`'
 
 ---------------------
--- pprHsVar and pprHsInfix use the gruesome isOperator, which
--- in turn uses (showSDoc (ppr v)), rather than isSymOcc (getOccName v).
--- Reason: it means that pprHsVar doesn't need a NamedThing context,
---         which none of the HsSyn printing functions do
-pprHsVar, pprHsInfix :: Outputable name => name -> SDoc
-pprHsVar   v = pprPrefixVar (isOperator pp_v) pp_v  
-	     where pp_v = ppr v
-pprHsInfix v = pprInfixVar  (isOperator pp_v) pp_v
-	     where pp_v = ppr v
-
-isOperator :: SDoc -> Bool
-isOperator ppr_v 
-  = case showSDocUnqual ppr_v of
-        ('(':_)   -> False              -- (), (,) etc
-        ('[':_)   -> False              -- []
-        ('$':c:_) -> not (isAlpha c)    -- Don't treat $d as an operator
-        (':':c:_) -> not (isAlpha c)    -- Don't treat :T as an operator
-        ('_':_)   -> False              -- Not an operator
-        (c:_)     -> not (isAlpha c)    -- Starts with non-alpha
-        _         -> False
-
 pprFastFilePath :: FastString -> SDoc
 pprFastFilePath path = text $ normalise $ unpackFS path
 \end{code}
 
 %************************************************************************
-%*									*
+%*                                                                      *
 \subsection{Other helper functions}
-%*									*
+%*                                                                      *
 %************************************************************************
 
 \begin{code}
@@ -823,9 +824,9 @@ quotedListWithOr xs = quotedList xs
 
 
 %************************************************************************
-%*									*
+%*                                                                      *
 \subsection{Printing numbers verbally}
-%*									*
+%*                                                                      *
 %************************************************************************
 
 \begin{code}
@@ -843,22 +844,22 @@ speakNth 5 = ptext (sLit "fifth")
 speakNth 6 = ptext (sLit "sixth")
 speakNth n = hcat [ int n, text suffix ]
   where
-    suffix | n <= 20       = "th"	-- 11,12,13 are non-std
-	   | last_dig == 1 = "st"
-	   | last_dig == 2 = "nd"
-	   | last_dig == 3 = "rd"
-	   | otherwise     = "th"
+    suffix | n <= 20       = "th"       -- 11,12,13 are non-std
+           | last_dig == 1 = "st"
+           | last_dig == 2 = "nd"
+           | last_dig == 3 = "rd"
+           | otherwise     = "th"
 
     last_dig = n `rem` 10
 
 -- | Converts an integer to a verbal multiplicity:
--- 
+--
 -- > speakN 0 = text "none"
 -- > speakN 5 = text "five"
 -- > speakN 10 = text "10"
 speakN :: Int -> SDoc
-speakN 0 = ptext (sLit "none")	-- E.g.  "he has none"
-speakN 1 = ptext (sLit "one")	-- E.g.  "he has one"
+speakN 0 = ptext (sLit "none")  -- E.g.  "he has none"
+speakN 1 = ptext (sLit "one")   -- E.g.  "he has one"
 speakN 2 = ptext (sLit "two")
 speakN 3 = ptext (sLit "three")
 speakN 4 = ptext (sLit "four")
@@ -874,8 +875,8 @@ speakN n = int n
 -- > speakNOf 3 (text "melon") = text "three melons"
 speakNOf :: Int -> SDoc -> SDoc
 speakNOf 0 d = ptext (sLit "no") <+> d <> char 's'
-speakNOf 1 d = ptext (sLit "one") <+> d			-- E.g. "one argument"
-speakNOf n d = speakN n <+> d <> char 's'		-- E.g. "three arguments"
+speakNOf 1 d = ptext (sLit "one") <+> d                 -- E.g. "one argument"
+speakNOf n d = speakN n <+> d <> char 's'               -- E.g. "three arguments"
 
 -- | Converts a strictly positive integer into a number of times:
 --
@@ -883,8 +884,8 @@ speakNOf n d = speakN n <+> d <> char 's'		-- E.g. "three arguments"
 -- > speakNTimes 2 = text "twice"
 -- > speakNTimes 4 = text "4 times"
 speakNTimes :: Int {- >=1 -} -> SDoc
-speakNTimes t | t == 1 	   = ptext (sLit "once")
-              | t == 2 	   = ptext (sLit "twice")
+speakNTimes t | t == 1     = ptext (sLit "once")
+              | t == 2     = ptext (sLit "twice")
               | otherwise  = speakN t <+> ptext (sLit "times")
 
 -- | Determines the pluralisation suffix appropriate for the length of a list:
@@ -899,9 +900,9 @@ plural _   = char 's'
 
 
 %************************************************************************
-%*									*
+%*                                                                      *
 \subsection{Error handling}
-%*									*
+%*                                                                      *
 %************************************************************************
 
 \begin{code}
@@ -911,7 +912,7 @@ pprPanic :: String -> SDoc -> a
 pprPanic    = pprAndThen panic
 
 pprSorry :: String -> SDoc -> a
--- ^ Throw an exceptio saying "this isn't finished yet"
+-- ^ Throw an exception saying "this isn't finished yet"
 pprSorry    = pprAndThen sorry
 
 
@@ -950,10 +951,10 @@ assertPprPanic :: String -> Int -> SDoc -> a
 assertPprPanic file line msg
   = panic (show (runSDoc doc (initSDocContext PprDebug)))
   where
-    doc = sep [hsep[text "ASSERT failed! file", 
-		 	   text file, 
-			   text "line", int line], 
-		    msg]
+    doc = sep [hsep[text "ASSERT failed! file",
+                           text file,
+                           text "line", int line],
+                    msg]
 
 warnPprTrace :: Bool -> String -> Int -> SDoc -> a -> a
 -- ^ Just warn about an assertion failure, recording the given file and line number.
@@ -964,5 +965,6 @@ warnPprTrace True   file  line  msg x
   = trace (show (runSDoc doc (initSDocContext defaultDumpStyle))) x
   where
     doc = sep [hsep [text "WARNING: file", text file, text "line", int line],
-	       msg]
+               msg]
 \end{code}
+

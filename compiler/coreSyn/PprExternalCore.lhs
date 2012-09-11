@@ -3,6 +3,13 @@
 %
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module PprExternalCore () where
 
 import Encoding
@@ -85,8 +92,6 @@ pakind (Kopen) = char '?'
 pakind k = parens (pkind k)
 
 pkind (Karrow k1 k2) = parens (pakind k1 <> text "->" <> pkind k2)
-pkind (Keq t1 t2) = parens (parens (pty t1) <+> text ":=:" <+> 
-                            parens (pty t2))
 pkind k = pakind k
 
 paty, pbty, pty :: Ty -> Doc
@@ -163,7 +168,7 @@ pexp (Case e vb ty alts) = sep [text "%case" <+> paty ty <+> paexp e,
 			     text "%of" <+> pvbind vb]
 			$$ (indent (braces (vcat (punctuate (char ';') (map palt alts)))))
 pexp (Cast e co) = (text "%cast" <+> parens (pexp e)) $$ paty co
-pexp (Note s e) = (text "%note" <+> pstring s) $$ pexp e
+pexp (Tick s e) = (text "%source" <+> pstring s) $$ pexp e
 pexp (External n cc t) = (text "%external" <+> text cc <+> pstring n) $$ paty t
 pexp (DynExternal cc t) = (text "%dynexternal" <+> text cc) $$ paty t
 pexp (Label n) = (text "%label" <+> pstring n)

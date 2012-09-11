@@ -5,6 +5,13 @@
 \section[HsLit]{Abstract syntax: source-language literals}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 {-# LANGUAGE DeriveDataTypeable #-}
 
 module HsLit where
@@ -13,14 +20,33 @@ module HsLit where
 
 import {-# SOURCE #-} HsExpr( SyntaxExpr, pprExpr )
 import BasicTypes ( FractionalLit(..) )
-import HsTypes  ( PostTcType )
-import Type	( Type )
+import Type	( Type, Kind )
 import Outputable
 import FastString
 
 import Data.Data
 \end{code}
 
+
+%************************************************************************
+%*									*
+\subsection{Annotating the syntax}
+%*									*
+%************************************************************************
+
+\begin{code}
+type PostTcKind = Kind
+type PostTcType = Type		-- Used for slots in the abstract syntax
+				-- where we want to keep slot for a type
+				-- to be added by the type checker...but
+				-- before typechecking it's just bogus
+
+placeHolderType :: PostTcType	-- Used before typechecking
+placeHolderType  = panic "Evaluated the place holder for a PostTcType"
+
+placeHolderKind :: PostTcKind	-- Used before typechecking
+placeHolderKind  = panic "Evaluated the place holder for a PostTcKind"
+\end{code}
 
 %************************************************************************
 %*									*

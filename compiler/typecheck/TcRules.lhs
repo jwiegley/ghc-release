@@ -6,6 +6,13 @@
 TcRules: Typechecking transformation rules
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module TcRules ( tcRules ) where
 
 import HsSyn
@@ -18,7 +25,6 @@ import TcExpr
 import TcEnv
 import Id
 import Name
-import VarSet
 import SrcLoc
 import Outputable
 import FastString
@@ -53,7 +59,7 @@ tcRule (HsRule name act hs_bndrs lhs fv_lhs rhs fv_rhs)
     	-- Note [Typechecking rules]
        ; vars <- tcRuleBndrs hs_bndrs
        ; let (id_bndrs, tv_bndrs) = partition isId vars
-       ; (lhs', lhs_lie, rhs', rhs_lie, rule_ty)
+       ; (lhs', lhs_lie, rhs', rhs_lie, _rule_ty)
             <- tcExtendTyVarEnv tv_bndrs $
                tcExtendIdEnv id_bndrs $
                do { ((lhs', rule_ty), lhs_lie) <- captureConstraints (tcInferRho lhs)
@@ -84,6 +90,7 @@ tcRule (HsRule name act hs_bndrs lhs fv_lhs rhs fv_rhs)
 	-- during zonking (see TcHsSyn.zonkRule)
 
        ; let tpl_ids    = lhs_dicts ++ id_bndrs
+{-
              forall_tvs = tyVarsOfTypes (rule_ty : map idType tpl_ids)
 
 	     -- Now figure out what to quantify over
@@ -94,10 +101,13 @@ tcRule (HsRule name act hs_bndrs lhs fv_lhs rhs fv_rhs)
        	     		       `minusVarSet` gbl_tvs
        	     		       `delVarSetList` tv_bndrs
        ; qtvs <- zonkQuantifiedTyVars (varSetElems extra_bound_tvs)
+       ; let all_tvs = tv_bndrs ++ qtvs
+       ; (kvs, _kinds) <- kindGeneralizeKinds $ map tyVarKind all_tvs
+-}
 
        	      -- The tv_bndrs are already skolems, so no need to zonk them
        ; return (HsRule name act
-		    (map (RuleBndr . noLoc) (tv_bndrs ++ qtvs ++ tpl_ids))	-- yuk
+		    (map (RuleBndr . noLoc) (tv_bndrs ++ tpl_ids))
 		    (mkHsDictLet lhs_ev_binds lhs') fv_lhs
 		    (mkHsDictLet rhs_ev_binds rhs') fv_rhs) }
 
@@ -127,7 +137,3 @@ ruleCtxt :: FastString -> SDoc
 ruleCtxt name = ptext (sLit "When checking the transformation rule") <+> 
 		doubleQuotes (ftext name)
 \end{code}
-
-
-
-

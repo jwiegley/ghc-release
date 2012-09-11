@@ -16,7 +16,7 @@ module Main (main) where
 import Distribution.Client.Setup
          ( GlobalFlags(..), globalCommand, globalRepos
          , ConfigFlags(..)
-         , ConfigExFlags(..), configureExCommand
+         , ConfigExFlags(..), defaultConfigExFlags, configureExCommand
          , InstallFlags(..), defaultInstallFlags
          , installCommand, upgradeCommand
          , FetchFlags(..), fetchCommand
@@ -27,6 +27,7 @@ import Distribution.Client.Setup
          , UploadFlags(..), uploadCommand
          , ReportFlags(..), reportCommand
          , InitFlags, initCommand
+         , SDistFlags(..), SDistExFlags(..), sdistCommand
          , reportCommand
          , unpackCommand, UnpackFlags(..) )
 import Distribution.Simple.Setup
@@ -36,8 +37,8 @@ import Distribution.Simple.Setup
          , CopyFlags(..), copyCommand
          , RegisterFlags(..), registerCommand
          , CleanFlags(..), cleanCommand
-         , SDistFlags(..), sdistCommand
          , TestFlags(..), testCommand
+         , BenchmarkFlags(..), benchmarkCommand
          , Flag(..), fromFlag, fromFlagOrDefault, flagToMaybe )
 
 import Distribution.Client.SetupWrapper
@@ -150,6 +151,8 @@ mainWorker args = topHandler $
                      regVerbosity      regDistPref
       ,wrapperAction testCommand
                      testVerbosity     testDistPref
+      ,wrapperAction benchmarkCommand
+                     benchmarkVerbosity     benchmarkDistPref
       ,upgradeCommand         `commandAddAction` upgradeAction
       ]
 
@@ -184,29 +187,30 @@ configureAction (configFlags, configExFlags) extraArgs globalFlags = do
             (configPackageDB' configFlags') (globalRepos globalFlags')
             comp conf configFlags' configExFlags' extraArgs
 
-installAction :: (ConfigFlags, ConfigExFlags, InstallFlags)
+installAction :: (ConfigFlags, ConfigExFlags, InstallFlags, HaddockFlags)
               -> [String] -> GlobalFlags -> IO ()
-installAction (configFlags, _, installFlags) _ _globalFlags
+installAction (configFlags, _, installFlags, _) _ _globalFlags
   | fromFlagOrDefault False (installOnly installFlags)
   = let verbosity = fromFlagOrDefault normal (configVerbosity configFlags)
     in setupWrapper verbosity defaultSetupScriptOptions Nothing
          installCommand (const mempty) []
 
-installAction (configFlags, configExFlags, installFlags)
+installAction (configFlags, configExFlags, installFlags, haddockFlags)
               extraArgs globalFlags = do
   let verbosity = fromFlagOrDefault normal (configVerbosity configFlags)
   targets <- readUserTargets verbosity extraArgs
   config <- loadConfig verbosity (globalConfigFile globalFlags)
                                  (configUserInstall configFlags)
   let configFlags'   = savedConfigureFlags   config `mappend` configFlags
-      configExFlags' = savedConfigureExFlags config `mappend` configExFlags
+      configExFlags' = defaultConfigExFlags         `mappend`
+                       savedConfigureExFlags config `mappend` configExFlags
       installFlags'  = defaultInstallFlags          `mappend`
                        savedInstallFlags     config `mappend` installFlags
       globalFlags'   = savedGlobalFlags      config `mappend` globalFlags
   (comp, conf) <- configCompilerAux' configFlags'
   install verbosity
           (configPackageDB' configFlags') (globalRepos globalFlags')
-          comp conf globalFlags' configFlags' configExFlags' installFlags'
+          comp conf globalFlags' configFlags' configExFlags' installFlags' haddockFlags
           targets
 
 listAction :: ListFlags -> [String] -> GlobalFlags -> IO ()
@@ -250,9 +254,9 @@ updateAction verbosityFlag extraArgs globalFlags = do
   let globalFlags' = savedGlobalFlags config `mappend` globalFlags
   update verbosity (globalRepos globalFlags')
 
-upgradeAction :: (ConfigFlags, ConfigExFlags, InstallFlags)
+upgradeAction :: (ConfigFlags, ConfigExFlags, InstallFlags, HaddockFlags)
               -> [String] -> GlobalFlags -> IO ()
-upgradeAction (configFlags, configExFlags, installFlags)
+upgradeAction (configFlags, configExFlags, installFlags, haddockFlags)
               extraArgs globalFlags = do
   let verbosity = fromFlagOrDefault normal (configVerbosity configFlags)
   targets <- readUserTargets verbosity extraArgs
@@ -266,7 +270,7 @@ upgradeAction (configFlags, configExFlags, installFlags)
   (comp, conf) <- configCompilerAux' configFlags'
   upgrade verbosity
           (configPackageDB' configFlags') (globalRepos globalFlags')
-          comp conf globalFlags' configFlags' configExFlags' installFlags'
+          comp conf globalFlags' configFlags' configExFlags' installFlags' haddockFlags
           targets
 
 fetchAction :: FetchFlags -> [String] -> GlobalFlags -> IO ()
@@ -322,11 +326,11 @@ checkAction verbosityFlag extraArgs _globalFlags = do
   unless allOk exitFailure
 
 
-sdistAction :: SDistFlags -> [String] -> GlobalFlags -> IO ()
-sdistAction sflags extraArgs _globalFlags = do
+sdistAction :: (SDistFlags, SDistExFlags) -> [String] -> GlobalFlags -> IO ()
+sdistAction (sdistFlags, sdistExFlags) extraArgs _globalFlags = do
   unless (null extraArgs) $ do
     die $ "'sdist' doesn't take any extra arguments: " ++ unwords extraArgs
-  sdist sflags
+  sdist sdistFlags sdistExFlags
 
 reportAction :: ReportFlags -> [String] -> GlobalFlags -> IO ()
 reportAction reportFlags extraArgs globalFlags = do

@@ -6,6 +6,13 @@
 --
 -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module SPARC.CodeGen ( 
 	cmmTopCodeGen, 
 	generateJumpTableForInstr,
@@ -51,8 +58,8 @@ import Unique
 import Control.Monad	( mapAndUnzipM )
 
 -- | Top level code generation
-cmmTopCodeGen :: RawCmmTop
-              -> NatM [NatCmmTop CmmStatics Instr]
+cmmTopCodeGen :: RawCmmDecl
+              -> NatM [NatCmmDecl CmmStatics Instr]
 
 cmmTopCodeGen (CmmProc info lab (ListGraph blocks))
  = do
@@ -77,7 +84,7 @@ cmmTopCodeGen (CmmData sec dat) = do
 basicBlockCodeGen :: Platform
                   -> CmmBasicBlock
                   -> NatM ( [NatBasicBlock Instr]
-                          , [NatCmmTop CmmStatics Instr])
+                          , [NatCmmDecl CmmStatics Instr])
 
 basicBlockCodeGen platform cmm@(BasicBlock id stmts) = do
   instrs <- stmtsToInstrs stmts
@@ -128,7 +135,7 @@ stmtToInstrs stmt = case stmt of
 	where ty = cmmExprType src
 	      size = cmmTypeSize ty
 
-    CmmCall target result_regs args _ _
+    CmmCall target result_regs args _
        -> genCCall target result_regs args
 
     CmmBranch	id		-> genBranch id
@@ -315,7 +322,7 @@ genSwitch expr ids
 			, JMP_TBL (AddrRegImm dst (ImmInt 0)) ids label
 			, NOP ]
 
-generateJumpTableForInstr :: Instr -> Maybe (NatCmmTop CmmStatics Instr)
+generateJumpTableForInstr :: Instr -> Maybe (NatCmmDecl CmmStatics Instr)
 generateJumpTableForInstr (JMP_TBL _ ids label) =
 	let jumpTable = map jumpTableEntry ids
 	in Just (CmmData ReadOnlyData (Statics label jumpTable))

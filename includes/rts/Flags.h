@@ -52,7 +52,7 @@ struct GC_FLAGS {
     rtsBool ringBell;
     rtsBool frontpanel;
 
-    int idleGCDelayTime;	/* in milliseconds */
+    Time    idleGCDelayTime;    /* units: TIME_RESOLUTION */
 
     StgWord heapBase;           /* address to ask the OS for memory */
 };
@@ -99,8 +99,8 @@ struct PROFILING_FLAGS {
 
 # define HEAP_BY_CLOSURE_TYPE   8
 
-    nat                 profileInterval;      /* delta between samples (in ms) */
-    nat                 profileIntervalTicks; /* delta between samples (in 'ticks') */
+    Time                heapProfileInterval; /* time between samples */
+    nat                 heapProfileIntervalTicks; /* ticks between samples (derived) */
     rtsBool             includeTSOs;
 
 
@@ -127,17 +127,29 @@ struct PROFILING_FLAGS {
 struct TRACE_FLAGS {
     int tracing;
     rtsBool timestamp;      /* show timestamp in stderr output */
-
     rtsBool scheduler;      /* trace scheduler events */
+    rtsBool gc;             /* trace GC events */
+    rtsBool sparks_sampled; /* trace spark events by a sampled method */
+    rtsBool sparks_full;    /* trace spark events 100% accurately */
+    rtsBool user;           /* trace user events (emitted from Haskell code) */
 };
 
 struct CONCURRENT_FLAGS {
-    int ctxtSwitchTime;		/* in milliseconds */
-    int ctxtSwitchTicks;	/* derived */
+    Time ctxtSwitchTime;         /* units: TIME_RESOLUTION */
+    int ctxtSwitchTicks;         /* derived */
 };
 
+/*
+ * The tickInterval is the time interval between "ticks", ie.
+ * timer signals (see Timer.{c,h}).  It is the frequency at
+ * which we sample CCCS for profiling.
+ *
+ * It is changed by the +RTS -V<secs> flag.
+ */
+#define DEFAULT_TICK_INTERVAL USToTime(10000)
+
 struct MISC_FLAGS {
-    int tickInterval;     /* in milliseconds */
+    Time    tickInterval;        /* units: TIME_RESOLUTION */
     rtsBool install_signal_handlers;
     rtsBool machineReadable;
     StgWord linkerMemBase;       /* address to ask the OS for memory

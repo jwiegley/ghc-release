@@ -13,6 +13,13 @@
 -- a Royal Pain (triggers other recompilation).
 -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module DsMeta( dsBracket, 
 	       templateHaskellNames, qTyConName, nameTyConName,
 	       liftName, liftStringName, expQTyConName, patQTyConName, 
@@ -46,6 +53,7 @@ import NameEnv
 import TcType
 import TyCon
 import TysWiredIn
+import TysPrim ( liftedTypeKindTyConName )
 import CoreSyn
 import MkCore
 import CoreUtils
@@ -74,7 +82,7 @@ dsBracket brack splices
   where
     new_bit = mkNameEnv [(n, Splice (unLoc e)) | (n,e) <- splices]
 
-    do_brack (VarBr n)   = do { MkC e1  <- lookupOcc n ; return e1 }
+    do_brack (VarBr _ n) = do { MkC e1  <- lookupOcc n ; return e1 }
     do_brack (ExpBr e)   = do { MkC e1  <- repLE e     ; return e1 }
     do_brack (PatBr p)   = do { MkC p1  <- repTopP p   ; return p1 }
     do_brack (TypBr t)   = do { MkC t1  <- repLTy t    ; return t1 }
@@ -214,7 +222,7 @@ repTyClD (L loc (TySynonym { tcdLName = tc, tcdTyVars = tvs, tcdTyPats = opt_tys
 repTyClD (L loc (ClassDecl { tcdCtxt = cxt, tcdLName = cls, 
 		             tcdTyVars = tvs, tcdFDs = fds,
 		             tcdSigs = sigs, tcdMeths = meth_binds, 
-                             tcdATs = ats }))
+                             tcdATs = ats, tcdATDefs = [] }))
   = do { cls1 <- lookupLOcc cls 	-- See note [Binders and occurrences] 
        ; dec  <- addTyVarBinds tvs $ \bndrs -> 
            do { cxt1   <- repLContext cxt
@@ -312,17 +320,19 @@ repInstD' (L loc (InstDecl ty binds _ ats))	-- Ignore user pragmas for now
 	    -- the selector Ids, not to fresh names (Trac #5410)
 	    --
             do { cxt1 <- repContext cxt
-               ; inst_ty1 <- repPredTy (HsClassP cls tys)
+               ; cls_tcon <- repTy (HsTyVar cls)
+               ; cls_tys <- repLTys tys
+               ; inst_ty1 <- repTapps cls_tcon cls_tys
                ; binds1 <- rep_binds binds
                ; ats1 <- repLAssocFamInst ats
                ; decls <- coreList decQTyConName (ats1 ++ binds1)
                ; repInst cxt1 inst_ty1 decls }
        ; return (loc, dec) }
  where
-   (tvs, cxt, cls, tys) = splitHsInstDeclTy (unLoc ty)
+   Just (tvs, cxt, cls, tys) = splitHsInstDeclTy_maybe (unLoc ty)
 
 repForD :: Located (ForeignDecl Name) -> DsM (SrcSpan, Core TH.DecQ)
-repForD (L loc (ForeignImport name typ (CImport cc s ch cis)))
+repForD (L loc (ForeignImport name typ _ (CImport cc s ch cis)))
  = do MkC name' <- lookupLOcc name
       MkC typ' <- repLTy typ
       MkC cc' <- repCCallConv cc
@@ -420,7 +430,7 @@ mkGadtCtxt data_tvs (ResTyGADT res_ty)
        = go (eq_pred : cxt) subst rest
        where
          loc = getLoc ty
-         eq_pred = L loc (HsEqualP (L loc (HsTyVar data_tv)) ty)
+         eq_pred = L loc (HsEqTy (L loc (HsTyVar data_tv)) ty)
 
     is_hs_tyvar (L _ (HsTyVar n))  = Just n   -- Type variables *and* tycons
     is_hs_tyvar (L _ (HsParTy ty)) = is_hs_tyvar ty
@@ -434,8 +444,9 @@ repBangTy ty= do
   rep2 strictTypeName [s, t]
   where 
     (str, ty') = case ty of
-		   L _ (HsBangTy _ ty) -> (isStrictName,  ty)
-		   _                   -> (notStrictName, ty)
+		   L _ (HsBangTy HsUnpack ty) -> (unpackedName,  ty)
+		   L _ (HsBangTy _ ty)        -> (isStrictName,  ty)
+		   _                          -> (notStrictName, ty)
 
 -------------------------------------------------------
 -- 			Deriving clause
@@ -449,8 +460,11 @@ repDerivs (Just ctxt)
   where
     rep_deriv :: LHsType Name -> DsM (Core TH.Name)
 	-- Deriving clauses must have the simple H98 form
-    rep_deriv (L _ (HsPredTy (HsClassP cls []))) = lookupOcc cls
-    rep_deriv other = notHandled "Non-H98 deriving clause" (ppr other)
+    rep_deriv ty
+      | Just (cls, []) <- splitHsClassTy_maybe (unLoc ty)
+      = lookupOcc cls
+      | otherwise
+      = notHandled "Non-H98 deriving clause" (ppr ty)
 
 
 -------------------------------------------------------
@@ -585,7 +599,7 @@ repTyVarBndrWithKind :: LHsTyVarBndr Name
                      -> Core TH.Name -> DsM (Core TH.TyVarBndr)
 repTyVarBndrWithKind (L _ (UserTyVar {})) nm
   = repPlainTV nm
-repTyVarBndrWithKind (L _ (KindedTyVar _ ki)) nm
+repTyVarBndrWithKind (L _ (KindedTyVar _ ki _)) nm
   = repKind ki >>= repKindedTV nm
 
 -- represent a type context
@@ -601,30 +615,24 @@ repContext ctxt = do
 
 -- represent a type predicate
 --
-repLPred :: LHsPred Name -> DsM (Core TH.PredQ)
+repLPred :: LHsType Name -> DsM (Core TH.PredQ)
 repLPred (L _ p) = repPred p
 
-repPred :: HsPred Name -> DsM (Core TH.PredQ)
-repPred (HsClassP cls tys) 
+repPred :: HsType Name -> DsM (Core TH.PredQ)
+repPred ty
+  | Just (cls, tys) <- splitHsClassTy_maybe ty
   = do
       cls1 <- lookupOcc cls
       tys1 <- repLTys tys
       tys2 <- coreList typeQTyConName tys1
       repClassP cls1 tys2
-repPred (HsEqualP tyleft tyright) 
+repPred (HsEqTy tyleft tyright) 
   = do
       tyleft1  <- repLTy tyleft
       tyright1 <- repLTy tyright
       repEqualP tyleft1 tyright1
-repPred p@(HsIParam _ _) = notHandled "Implicit parameter constraint" (ppr p)
-
-repPredTy :: HsPred Name -> DsM (Core TH.TypeQ)
-repPredTy (HsClassP cls tys) 
-  = do
-      tcon <- repTy (HsTyVar cls)
-      tys1 <- repLTys tys
-      repTapps tcon tys1
-repPredTy _ = panic "DsMeta.repPredTy: unexpected equality: internal error"
+repPred ty
+  = notHandled "Exotic predicate type" (ppr ty)
 
 -- yield the representation of a list of types
 --
@@ -668,18 +676,16 @@ repTy (HsPArrTy t)          = do
 			        t1   <- repLTy t
 			        tcon <- repTy (HsTyVar (tyConName parrTyCon))
 			        repTapp tcon t1
-repTy (HsTupleTy Boxed tys)	    = do
-			        tys1 <- repLTys tys 
-			        tcon <- repTupleTyCon (length tys)
-			        repTapps tcon tys1
-repTy (HsTupleTy Unboxed tys)	    = do
+repTy (HsTupleTy HsUnboxedTuple tys) = do
 			        tys1 <- repLTys tys
 			        tcon <- repUnboxedTupleTyCon (length tys)
 			        repTapps tcon tys1
-repTy (HsOpTy ty1 n ty2)    = repLTy ((nlHsTyVar (unLoc n) `nlHsAppTy` ty1) 
+repTy (HsTupleTy _ tys)     = do tys1 <- repLTys tys 
+                                 tcon <- repTupleTyCon (length tys)
+                                 repTapps tcon tys1
+repTy (HsOpTy ty1 (_, n) ty2) = repLTy ((nlHsTyVar (unLoc n) `nlHsAppTy` ty1)
 			    	   `nlHsAppTy` ty2)
 repTy (HsParTy t)  	    = repLTy t
-repTy (HsPredTy pred)       = repPredTy pred
 repTy (HsKindSig t k)       = do
                                 t1 <- repLTy t
                                 k1 <- repKind k
@@ -689,17 +695,16 @@ repTy ty		      = notHandled "Exotic form of type" (ppr ty)
 
 -- represent a kind
 --
-repKind :: Kind -> DsM (Core TH.Kind)
+repKind :: LHsKind Name -> DsM (Core TH.Kind)
 repKind ki
-  = do { let (kis, ki') = splitKindFunTys ki
+  = do { let (kis, ki') = splitHsFunType ki
        ; kis_rep <- mapM repKind kis
        ; ki'_rep <- repNonArrowKind ki'
        ; foldrM repArrowK ki'_rep kis_rep
        }
   where
-    repNonArrowKind k | isLiftedTypeKind k = repStarK
-                      | otherwise          = notHandled "Exotic form of kind" 
-                                                        (ppr k)
+    repNonArrowKind (L _ (HsTyVar name)) | name == liftedTypeKindTyConName = repStarK
+    repNonArrowKind k = notHandled "Exotic form of kind" (ppr k)
 
 -----------------------------------------------------------------------------
 -- 		Splices
@@ -1760,7 +1765,7 @@ templateHaskellNames = [
     -- Pred
     classPName, equalPName,
     -- Strict
-    isStrictName, notStrictName,
+    isStrictName, notStrictName, unpackedName,
     -- Con
     normalCName, recCName, infixCName, forallCName,
     -- StrictType
@@ -1979,9 +1984,10 @@ classPName = libFun (fsLit "classP") classPIdKey
 equalPName = libFun (fsLit "equalP") equalPIdKey
 
 -- data Strict = ...
-isStrictName, notStrictName :: Name
+isStrictName, notStrictName, unpackedName :: Name
 isStrictName      = libFun  (fsLit "isStrict")      isStrictKey
 notStrictName     = libFun  (fsLit "notStrict")     notStrictKey
+unpackedName      = libFun  (fsLit "unpacked")      unpackedKey
 
 -- data Con = ...
 normalCName, recCName, infixCName, forallCName :: Name
@@ -2260,9 +2266,10 @@ classPIdKey         = mkPreludeMiscIdUnique 361
 equalPIdKey         = mkPreludeMiscIdUnique 362
 
 -- data Strict = ...
-isStrictKey, notStrictKey :: Unique
+isStrictKey, notStrictKey, unpackedKey :: Unique
 isStrictKey         = mkPreludeMiscIdUnique 363
 notStrictKey        = mkPreludeMiscIdUnique 364
+unpackedKey         = mkPreludeMiscIdUnique 365
 
 -- data Con = ...
 normalCIdKey, recCIdKey, infixCIdKey, forallCIdKey :: Unique

@@ -64,12 +64,13 @@ import qualified Distribution.Simple.Build.PathsModule as Build.PathsModule
 
 import Distribution.Package
          ( Package(..), PackageName(..), PackageIdentifier(..)
-         , thisPackageVersion )
+         , Dependency(..), thisPackageVersion )
 import Distribution.Simple.Compiler
          ( CompilerFlavor(..), compilerFlavor, PackageDB(..) )
 import Distribution.PackageDescription
          ( PackageDescription(..), BuildInfo(..), Library(..), Executable(..)
-         , TestSuite(..), TestSuiteInterface(..) )
+         , TestSuite(..), TestSuiteInterface(..), Benchmark(..)
+         , BenchmarkInterface(..) )
 import qualified Distribution.InstalledPackageInfo as IPI
 import qualified Distribution.ModuleName as ModuleName
 
@@ -78,11 +79,13 @@ import Distribution.Simple.Setup
 import Distribution.Simple.PreProcess
          ( preprocessComponent, PPSuffixHandler )
 import Distribution.Simple.LocalBuildInfo
-         ( LocalBuildInfo(compiler, buildDir, withPackageDB)
+         ( LocalBuildInfo(compiler, buildDir, withPackageDB, withPrograms)
          , Component(..), ComponentLocalBuildInfo(..), withComponentsLBI
          , inplacePackageId )
+import Distribution.Simple.Program.Types
+import Distribution.Simple.Program.Db
 import Distribution.Simple.BuildPaths
-         ( autogenModulesDir, autogenModuleName, cppHeaderName )
+         ( autogenModulesDir, autogenModuleName, cppHeaderName, exeExtension )
 import Distribution.Simple.Register
          ( registerPackage, inplaceInstalledPackageInfo )
 import Distribution.Simple.Test ( stubFilePath, stubName )
@@ -97,6 +100,8 @@ import Distribution.Text
 
 import Data.Maybe
          ( maybeToList )
+import Data.List
+         ( intersect )
 import Control.Monad
          ( unless )
 import System.FilePath
@@ -120,15 +125,16 @@ build pkg_descr lbi flags suffixes = do
 
   internalPackageDB <- createInternalPackageDB distPref
 
-  let pre c = preprocessComponent pkg_descr c lbi False verbosity suffixes
-      lbi'  = lbi {withPackageDB = withPackageDB lbi ++ [internalPackageDB]}
-              -- Use the internal package DB for the exes.
-  withComponentsLBI pkg_descr lbi $ \comp clbi -> do
-    pre comp
+  let pre c lbi' = preprocessComponent pkg_descr c lbi' False verbosity suffixes
+  withComponentsLBI pkg_descr lbi $ \comp clbi ->
     case comp of
       CLib lib -> do
+        let bi     = libBuildInfo lib
+            progs' = addInternalBuildTools pkg_descr lbi bi (withPrograms lbi)
+            lbi'   = lbi { withPrograms = progs' }
+        pre comp lbi'
         info verbosity "Building library..."
-        buildLib verbosity pkg_descr lbi lib clbi
+        buildLib verbosity pkg_descr lbi' lib clbi
 
         -- Register the library in-place, so exes can depend
         -- on internally defined libraries.
@@ -144,25 +150,40 @@ build pkg_descr lbi flags suffixes = do
           (withPackageDB lbi ++ [internalPackageDB])
 
       CExe exe -> do
+        let bi     = buildInfo exe
+            progs' = addInternalBuildTools pkg_descr lbi bi (withPrograms lbi)
+            lbi'   = lbi {
+                       withPrograms  = progs',
+                       withPackageDB = withPackageDB lbi ++ [internalPackageDB]
+                     }
+        pre comp lbi'
         info verbosity $ "Building executable " ++ exeName exe ++ "..."
         buildExe verbosity pkg_descr lbi' exe clbi
 
       CTest test -> do
         case testInterface test of
             TestSuiteExeV10 _ f -> do
-                let exe = Executable
+                let bi  = testBuildInfo test
+                    exe = Executable
                         { exeName = testName test
                         , modulePath = f
-                        , buildInfo = testBuildInfo test
+                        , buildInfo  = bi
                         }
+                    progs' = addInternalBuildTools pkg_descr lbi bi (withPrograms lbi)
+                    lbi'   = lbi {
+                               withPrograms  = progs',
+                               withPackageDB = withPackageDB lbi ++ [internalPackageDB]
+                             }
+                pre comp lbi'
                 info verbosity $ "Building test suite " ++ testName test ++ "..."
                 buildExe verbosity pkg_descr lbi' exe clbi
             TestSuiteLibV09 _ m -> do
                 pwd <- getCurrentDirectory
-                let lib = Library
+                let bi  = testBuildInfo test
+                    lib = Library
                         { exposedModules = [ m ]
                         , libExposed = True
-                        , libBuildInfo = testBuildInfo test
+                        , libBuildInfo = bi
                         }
                     pkg = pkg_descr
                         { package = (package pkg_descr)
@@ -197,11 +218,38 @@ build pkg_descr lbi flags suffixes = do
                             : (filter (\(_, x) -> let PackageName name = pkgName x in name == "Cabal" || name == "base")
                                 $ componentPackageDeps clbi)
                         }
+                    progs' = addInternalBuildTools pkg_descr lbi bi (withPrograms lbi)
+                    lbi'   = lbi {
+                               withPrograms  = progs',
+                               withPackageDB = withPackageDB lbi ++ [internalPackageDB]
+                             }
+
+                pre comp lbi'
                 info verbosity $ "Building test suite " ++ testName test ++ "..."
                 buildLib verbosity pkg lbi' lib clbi
                 registerPackage verbosity ipi pkg lbi' True $ withPackageDB lbi'
                 buildExe verbosity pkg_descr lbi' exe exeClbi
             TestSuiteUnsupported tt -> die $ "No support for building test suite "
+                                          ++ "type " ++ display tt
+
+      CBench bm -> do
+        case benchmarkInterface bm of
+            BenchmarkExeV10 _ f -> do
+                let bi  = benchmarkBuildInfo bm
+                    exe = Executable
+                        { exeName = benchmarkName bm
+                        , modulePath = f
+                        , buildInfo  = bi
+                        }
+                    progs' = addInternalBuildTools pkg_descr lbi bi (withPrograms lbi)
+                    lbi'   = lbi {
+                               withPrograms  = progs',
+                               withPackageDB = withPackageDB lbi ++ [internalPackageDB]
+                             }
+                pre comp lbi'
+                info verbosity $ "Building benchmark " ++ benchmarkName bm ++ "..."
+                buildExe verbosity pkg_descr lbi' exe clbi
+            BenchmarkUnsupported tt -> die $ "No support for building benchmark "
                                           ++ "type " ++ display tt
 
 -- | Initialize a new package db file for libraries defined
@@ -212,6 +260,22 @@ createInternalPackageDB distPref = do
         packageDB = SpecificPackageDB dbFile
     writeFile dbFile "[]"
     return packageDB
+
+addInternalBuildTools :: PackageDescription -> LocalBuildInfo -> BuildInfo
+                      -> ProgramDb -> ProgramDb
+addInternalBuildTools pkg lbi bi progs =
+    foldr updateProgram progs internalBuildTools
+  where
+    internalBuildTools =
+      [ simpleConfiguredProgram toolName (FoundOnSystem toolLocation)
+      | toolName <- toolNames
+      , let toolLocation = buildDir lbi </> toolName </> toolName <.> exeExtension ]
+    toolNames = intersect buildToolNames internalExeNames
+    internalExeNames = map exeName (executables pkg)
+    buildToolNames   = map buildToolName (buildTools bi)
+      where
+        buildToolName (Dependency (PackageName name) _ ) = name
+
 
 -- TODO: build separate libs in separate dirs so that we can build
 -- multiple libs, e.g. for 'LibTest' library-style testsuites

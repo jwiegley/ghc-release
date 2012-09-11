@@ -19,15 +19,19 @@ SRC_HC_OPTS     += -Wall $(WERROR) -H64m -O0
 # Safe by default
 #SRC_HC_OPTS += -Dsh_SAFE_DEFAULT
 
-GhcStage1HcOpts += -O
+GhcStage1HcOpts += -O -fwarn-tabs
 
-GhcStage2HcOpts += -O
+GhcStage2HcOpts += -O -fwarn-tabs -dcore-lint
 # Using -O (rather than -O0) here bringes my validate down from 22mins to 16 mins.
 # Compiling stage2 takes longer, but we gain a faster haddock, faster
 # running of the tests, and faster building of the utils to be installed
 
 GhcLibHcOpts    += -O -dcore-lint
+ifeq "$(ValidateSpeed)" "FAST"
+GhcLibWays     := v
+else
 GhcLibWays     := $(filter v dyn,$(GhcLibWays))
+endif
 SplitObjs       = NO
 NoFibWays       =
 STRIP_CMD       = :
@@ -47,7 +51,7 @@ BUILD_DOCBOOK_PDF = NO
 ifeq "$(ValidateHpc)" "YES"
 GhcStage2HcOpts += -fhpc -hpcdir $(TOP)/testsuite/hpc_output/
 endif
-ifeq "$(ValidateSlow)" "YES"
+ifeq "$(ValidateSpeed)" "SLOW"
 GhcStage2HcOpts += -DDEBUG
 endif
 
@@ -56,8 +60,8 @@ endif
 
 # Cabal doesn't promise to be warning-free
 utils/ghc-cabal_dist_EXTRA_HC_OPTS += -w
-libraries/Cabal/cabal_dist-boot_EXTRA_HC_OPTS += -w
-libraries/Cabal/cabal_dist-install_EXTRA_HC_OPTS += -w
+libraries/Cabal/Cabal_dist-boot_EXTRA_HC_OPTS += -w
+libraries/Cabal/Cabal_dist-install_EXTRA_HC_OPTS += -w
 
 # Temporarily turn off incomplete-pattern warnings for containers
 libraries/containers_dist-install_EXTRA_HC_OPTS += -fno-warn-incomplete-patterns
@@ -99,12 +103,13 @@ libraries/dph/dph-base_dist-install_EXTRA_HC_OPTS += -Wwarn
 libraries/dph/dph-prim-interface_dist-install_EXTRA_HC_OPTS += -Wwarn
 libraries/dph/dph-prim-seq_dist-install_EXTRA_HC_OPTS += -Wwarn
 libraries/dph/dph-prim-par_dist-install_EXTRA_HC_OPTS += -Wwarn
-libraries/dph/dph-seq_dist-install_EXTRA_HC_OPTS += -Wwarn
-libraries/dph/dph-par_dist-install_EXTRA_HC_OPTS += -Wwarn
+libraries/dph/dph-lifted-common-install_EXTRA_HC_OPTS += -Wwarn
 
 # We need to turn of deprecated warnings for SafeHaskell transition
 libraries/array_dist-install_EXTRA_HC_OPTS += -fno-warn-warnings-deprecations
 libraries/binary_dist-install_EXTRA_HC_OPTS += -fno-warn-warnings-deprecations
+libraries/binary/src/Data/Binary/Builder/Base_HC_OPTS += -fno-warn-warnings-deprecations
+libraries/binary/src/Data/Binary/Get_HC_OPTS += -fno-warn-warnings-deprecations
 
 # We need -fno-warn-deprecated-flags to avoid failure with -Werror
 GhcLibHcOpts += -fno-warn-deprecated-flags

@@ -6,6 +6,13 @@
 --
 -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module StgCmmEnv (
 	CgIdInfo,
 
@@ -44,6 +51,7 @@ import VarEnv
 import Control.Monad
 import Name
 import StgSyn
+import DynFlags
 import Outputable
 
 -------------------------------------
@@ -70,22 +78,26 @@ nonVoidIds ids = [NonVoid id | id <- ids, not (isVoidRep (idPrimRep id))]
 
 mkCgIdInfo :: Id -> LambdaFormInfo -> CmmExpr -> CgIdInfo
 mkCgIdInfo id lf expr
-  = CgIdInfo { cg_id = id, cg_loc = CmmLoc expr, 
-	       cg_lf = lf, cg_rep = idPrimRep id, 
+  = CgIdInfo { cg_id = id, cg_lf = lf
+             , cg_loc = CmmLoc expr, 
 	       cg_tag = lfDynTag lf }
+
+litIdInfo :: Id -> LambdaFormInfo -> CmmLit -> CgIdInfo
+litIdInfo id lf lit
+  = CgIdInfo { cg_id = id, cg_lf = lf
+             , cg_loc = CmmLoc (addDynTag (CmmLit lit) tag) 
+	     , cg_tag = tag }
+  where
+    tag = lfDynTag lf
 
 lneIdInfo :: Id -> [LocalReg] -> CgIdInfo
 lneIdInfo id regs 
-  = CgIdInfo { cg_id = id, cg_loc = LneLoc blk_id regs,
-	       cg_lf = lf, cg_rep = idPrimRep id, 
-	       cg_tag = lfDynTag lf }
+  = CgIdInfo { cg_id = id, cg_lf = lf
+             , cg_loc = LneLoc blk_id regs
+	     , cg_tag = lfDynTag lf }
   where
     lf     = mkLFLetNoEscape
     blk_id = mkBlockId (idUnique id)
-
-litIdInfo :: Id -> LambdaFormInfo -> CmmLit -> CgIdInfo
-litIdInfo id lf_info lit = --mkCgIdInfo id lf_info (CmmLit lit)
-  mkCgIdInfo id lf_info (addDynTag (CmmLit lit) (lfDynTag lf_info))
 
 -- Because the register may be spilled to the stack in untagged form, we
 -- modify the initialization code 'init' to immediately tag the
@@ -93,10 +105,12 @@ litIdInfo id lf_info lit = --mkCgIdInfo id lf_info (CmmLit lit)
 -- a new register in order to keep single-assignment and help out the
 -- inliner. -- EZY
 regIdInfo :: Id -> LambdaFormInfo -> LocalReg -> CmmAGraph -> FCode (CgIdInfo, CmmAGraph)
-regIdInfo id lf_info reg init = do
-  reg' <- newTemp (localRegType reg)
-  let init' = init <*> mkAssign (CmmLocal reg') (addDynTag (CmmReg (CmmLocal reg)) (lfDynTag lf_info))
-  return (mkCgIdInfo id lf_info (CmmReg (CmmLocal reg')), init')
+regIdInfo id lf_info reg init 
+  = do { reg' <- newTemp (localRegType reg)
+       ; let init' = init <*> mkAssign (CmmLocal reg') 
+                                       (addDynTag (CmmReg (CmmLocal reg)) 
+                                                  (lfDynTag lf_info))
+       ; return (mkCgIdInfo id lf_info (CmmReg (CmmLocal reg')), init') }
 
 idInfoToAmode :: CgIdInfo -> CmmExpr
 -- Returns a CmmExpr for the *tagged* pointer
@@ -168,7 +182,8 @@ getCgIdInfo id
     
 cgLookupPanic :: Id -> FCode a
 cgLookupPanic id
-  = do	static_binds <- getStaticBinds
+  = do	dflags <- getDynFlags
+      	static_binds <- getStaticBinds
 	local_binds <- getBinds
 	srt <- getSRTLabel
 	pprPanic "StgCmmEnv: variable not found"
@@ -177,7 +192,7 @@ cgLookupPanic id
 		vcat [ ppr (cg_id info) | info <- varEnvElts static_binds ],
 		ptext (sLit "local binds for:"),
 		vcat [ ppr (cg_id info) | info <- varEnvElts local_binds ],
-	        ptext (sLit "SRT label") <+> pprCLabel srt
+	        ptext (sLit "SRT label") <+> pprCLabel (targetPlatform dflags) srt
 	      ])
 
 

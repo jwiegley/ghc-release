@@ -6,7 +6,13 @@
 TcMatches: Typecheck some @Matches@
 
 \begin{code}
-{-# OPTIONS_GHC -w #-}   -- debugging
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module TcMatches ( tcMatchesFun, tcGRHSsPat, tcMatchesCase, tcMatchLambda,
 		   TcMatchCtxt(..), TcStmtChecker,
 		   tcStmts, tcStmtsAndThen, tcDoStmts, tcBody,
@@ -30,7 +36,7 @@ import TysWiredIn
 import Id
 import TyCon
 import TysPrim
-import Coercion         ( isReflCo, mkSymCo )
+import TcEvidence
 import Outputable
 import Util
 import SrcLoc
@@ -145,9 +151,9 @@ matchFunTys
 -- could probably be un-CPSd, like matchExpectedTyConApp
 
 matchFunTys herald arity res_ty thing_inside
-  = do	{ (coi, pat_tys, res_ty) <- matchExpectedFunTys herald arity res_ty
+  = do	{ (co, pat_tys, res_ty) <- matchExpectedFunTys herald arity res_ty
 	; res <- thing_inside pat_tys res_ty
-        ; return (coToHsWrapper (mkSymCo coi), res) }
+        ; return (coToHsWrapper (mkTcSymCo co), res) }
 \end{code}
 
 %************************************************************************
@@ -245,16 +251,16 @@ tcDoStmts :: HsStmtContext Name
 	  -> TcRhoType
 	  -> TcM (HsExpr TcId)		-- Returns a HsDo
 tcDoStmts ListComp stmts res_ty
-  = do	{ (coi, elt_ty) <- matchExpectedListTy res_ty
+  = do	{ (co, elt_ty) <- matchExpectedListTy res_ty
         ; let list_ty = mkListTy elt_ty
 	; stmts' <- tcStmts ListComp (tcLcStmt listTyCon) stmts elt_ty
-	; return $ mkHsWrapCo coi (HsDo ListComp stmts' list_ty) }
+	; return $ mkHsWrapCo co (HsDo ListComp stmts' list_ty) }
 
 tcDoStmts PArrComp stmts res_ty
-  = do	{ (coi, elt_ty) <- matchExpectedPArrTy res_ty
+  = do	{ (co, elt_ty) <- matchExpectedPArrTy res_ty
         ; let parr_ty = mkPArrTy elt_ty
 	; stmts' <- tcStmts PArrComp (tcLcStmt parrTyCon) stmts elt_ty
-	; return $ mkHsWrapCo coi (HsDo PArrComp stmts' parr_ty) }
+	; return $ mkHsWrapCo co (HsDo PArrComp stmts' parr_ty) }
 
 tcDoStmts DoExpr stmts res_ty
   = do	{ stmts' <- tcStmts DoExpr tcDoStmt stmts res_ty
@@ -534,8 +540,6 @@ tcMcStmt _ (ExprStmt rhs then_op guard_op _) res_ty thing_inside
 
 -- Grouping statements
 --
---   [ body | stmts, then group by e ]
---     ->  e :: t
 --   [ body | stmts, then group by e using f ]
 --     ->  e :: t
 --         f :: forall a. (a -> t) -> m a -> m (m a)
@@ -729,8 +733,8 @@ tcMcStmt ctxt (ParStmt bndr_stmts_s mzip_op bind_op return_op) res_ty thing_insi
 	-- but we don't have any good way to incorporate the coercion
 	-- so for now we just check that it's the identity
     check_same actual expected
-      = do { coi <- unifyType actual expected
-	   ; unless (isReflCo coi) $
+      = do { co <- unifyType actual expected
+	   ; unless (isTcReflCo co) $
              failWithMisMatch [UnifyOrigin { uo_expected = expected
                                            , uo_actual = actual }] }
 
@@ -799,7 +803,7 @@ tcDoStmt ctxt (RecStmt { recS_stmts = stmts, recS_later_ids = later_names
   = do  { let tup_names = rec_names ++ filterOut (`elem` rec_names) later_names
         ; tup_elt_tys <- newFlexiTyVarTys (length tup_names) liftedTypeKind
         ; let tup_ids = zipWith mkLocalId tup_names tup_elt_tys
-	      tup_ty  = mkBoxedTupleTy tup_elt_tys
+	      tup_ty  = mkBigCoreTupTy tup_elt_tys
 
         ; tcExtendIdEnv tup_ids $ do
         { stmts_ty <- newFlexiTyVarTy liftedTypeKind
@@ -828,7 +832,8 @@ tcDoStmt ctxt (RecStmt { recS_stmts = stmts, recS_later_ids = later_names
         ; return (RecStmt { recS_stmts = stmts', recS_later_ids = later_ids
                           , recS_rec_ids = rec_ids, recS_ret_fn = ret_op' 
                           , recS_mfix_fn = mfix_op', recS_bind_fn = bind_op'
-                          , recS_rec_rets = tup_rets, recS_ret_ty = stmts_ty }, thing)
+                          , recS_later_rets = [], recS_rec_rets = tup_rets
+                          , recS_ret_ty = stmts_ty }, thing)
         }}
 
 tcDoStmt _ stmt _ _

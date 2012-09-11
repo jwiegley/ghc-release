@@ -1,3 +1,7 @@
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Safe #-}
+#endif
+
 {- |
 The module "Foreign.Marshal.Alloc" provides operations to allocate and
 deallocate blocks of raw memory (i.e., unstructured chunks of memory

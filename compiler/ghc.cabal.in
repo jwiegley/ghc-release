@@ -65,11 +65,11 @@ Library
         Build-Depends: directory  >= 1   && < 1.2,
                        process    >= 1   && < 1.2,
                        bytestring >= 0.9 && < 0.10,
-                       old-time   >= 1   && < 1.1,
+                       old-time   >= 1   && < 1.2,
                        containers >= 0.1 && < 0.5,
-                       array      >= 0.1 && < 0.4
+                       array      >= 0.1 && < 0.5
 
-    Build-Depends: filepath >= 1 && < 1.3
+    Build-Depends: filepath >= 1 && < 1.4
     Build-Depends: Cabal, hpc
     if os(windows)
         Build-Depends: Win32
@@ -81,7 +81,7 @@ Library
     if flag(ghci)
         Build-Depends: template-haskell
         CPP-Options: -DGHCI
-        Include-Dirs: ../libffi/build/include
+        Include-Dirs: ../rts/dist/build
 
     Build-Depends: bin-package-db
     Build-Depends: hoopl
@@ -94,7 +94,7 @@ Library
                 ForeignFunctionInterface, EmptyDataDecls,
                 TypeSynonymInstances, MultiParamTypeClasses,
                 FlexibleInstances, Rank2Types, ScopedTypeVariables,
-                DeriveDataTypeable
+                DeriveDataTypeable, BangPatterns
     if impl(ghc >= 7.1)
         Extensions: NondecreasingIndentation
 
@@ -146,6 +146,7 @@ Library
         vectorise
 
     Exposed-Modules:
+        Avail
         BasicTypes
         DataCon
         Demand
@@ -187,7 +188,6 @@ Library
         CmmCommonBlockElim
         CmmContFlowOpt
         CmmCvt
-        CmmDecl
         CmmExpr
         CmmInfo
         CmmLex
@@ -259,6 +259,7 @@ Library
         CorePrep
         CoreSubst
         CoreSyn
+        TrieMap
         CoreTidy
         CoreUnfold
         CoreUtils
@@ -300,6 +301,7 @@ Library
         LoadIface
         MkIface
         TcIface
+        FlagChecker
         Annotations
         BreakArray
         CmdLineParser
@@ -393,6 +395,7 @@ Library
         TcExpr
         TcForeign
         TcGenDeriv
+        TcGenGenerics
         TcHsSyn
         TcHsType
         TcInstDcls
@@ -408,15 +411,16 @@ Library
         TcTyClsDecls
         TcTyDecls
         TcType
+        TcEvidence
         TcUnify
         TcInteract
         TcCanonical
         TcSMonad
         Class
+        IParam
         Coercion
         FamInstEnv
         FunDeps
-        Generics
         InstEnv
         TyCon
         Kind
@@ -457,7 +461,6 @@ Library
         Util
         Vectorise.Builtins.Base
         Vectorise.Builtins.Initialise
-        Vectorise.Builtins.Modules
         Vectorise.Builtins
         Vectorise.Monad.Base
         Vectorise.Monad.Naming
@@ -471,11 +474,11 @@ Library
         Vectorise.Utils.PADict
         Vectorise.Utils.Poly
         Vectorise.Utils
+        Vectorise.Generic.Description
+        Vectorise.Generic.PAMethods
+        Vectorise.Generic.PADict
+        Vectorise.Generic.PData
         Vectorise.Type.Env
-        Vectorise.Type.Repr
-        Vectorise.Type.PData
-        Vectorise.Type.PRepr
-        Vectorise.Type.PADict
         Vectorise.Type.Type
         Vectorise.Type.TyConDecl
         Vectorise.Type.Classify
@@ -496,6 +499,7 @@ Library
             RegClass
             PIC
             Platform
+            CPrim
             X86.Regs
             X86.RegInfo
             X86.Instr
@@ -563,4 +567,4 @@ Library
             Linker
             ObjLink
             RtClosureInspect
-
+            DebuggerUtils

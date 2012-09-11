@@ -45,3 +45,11 @@ test('T3972', extra_clean(['T3972A.hi', 'T3972A.o']),
               compile_and_run,
               [''])
 test('T5315', normal, compile_and_run, [''])
+test('T5453', normal, compile_and_run, [''])
+test('T5441', extra_clean(['T5441a.o','T5441a.hi']), 
+              multimod_compile_and_run, ['T5441',''])
+test('T5603', normal, compile_and_run, [''])
+
+# Run this test *without* optimisation too
+test('T5625', [ only_ways(['normal','optasm']), exit_code(1) ], compile_and_run, [''])
+test('T5587', [ only_ways(['normal','optasm']), exit_code(1) ], compile_and_run, [''])

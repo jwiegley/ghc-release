@@ -96,7 +96,6 @@ ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
 ifneq "$$($1_$2_INSTALL_INPLACE)" "NO"
 $$($1_$2_INPLACE) : $1/$2/build/tmp/$$($1_$2_PROG) | $$$$(dir $$$$@)/.
 	"$$(CP)" -p $$< $$@
-	touch $$@
 endif
 endif
 
@@ -117,7 +116,11 @@ ifeq "$3" "0"
 # worry about where the RTS header files are
 $(call c-suffix-rules,$1,$2,v,YES)
 else
+ifeq "$$($1_$2_UseGhcForCC)" "YES"
+$(call c-suffix-rules,$1,$2,v,YES)
+else
 $(call c-suffix-rules,$1,$2,v,NO)
+endif
 endif
 
 $(call hs-suffix-rules,$1,$2,v)

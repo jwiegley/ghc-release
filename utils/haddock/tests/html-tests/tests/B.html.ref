@@ -17,10 +17,12 @@ window.onload = function () {pageLoad();setSynopsis("mini_B.html");};
   ><div id="package-header"
     ><ul class="links" id="page-menu"
       ><li
-	><A HREF="">Contents</a
+	><a href=""
+	  >Contents</a
 	  ></li
 	><li
-	><A HREF="">Index</a
+	><a href=""
+	  >Index</a
 	  ></li
 	></ul
       ><p class="caption" class="empty"
@@ -28,23 +30,145 @@ window.onload = function () {pageLoad();setSynopsis("mini_B.html");};
       ></div
     ><div id="content"
     ><div id="module-header"
-      ><p class="caption"
+      ><table class="info"
+	><tr
+	  ><th
+	    >Safe Haskell</th
+	    ><td
+	    >None</td
+	    ></tr
+	  ></table
+	><p class="caption"
 	>B</p
+	></div
+      ><div id="synopsis"
+      ><p id="control.syn" class="caption expander" onclick="toggleSection('syn')"
+	>Synopsis</p
+	><ul id="section.syn" class="hide" onclick="toggleSection('syn')"
+	><li class="src short"
+	  >module <a href=""
+	    >A</a
+	    ></li
+	  ><li class="src short"
+	  ><a href=""
+	    >test</a
+	    > :: <a href=""
+	    >Int</a
+	    ></li
+	  ><li class="src short"
+	  ><a href=""
+	    >reExport</a
+	    > :: <a href=""
+	    >Int</a
+	    ></li
+	  ><li class="src short"
+	  ><span class="keyword"
+	    >data</span
+	    >  <a href=""
+	    >X</a
+	    >  = <a href=""
+	    >X</a
+	    ></li
+	  ></ul
 	></div
       ><div id="interface"
       ><h1
 	>Documentation</h1
 	><div class="top"
 	><p class="src"
-	  >module <A HREF="">A</a
+	  >module <a href=""
+	    >A</a
 	    ></p
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><a name="v:test" class="def"
+	    >test</a
+	    > :: <a href=""
+	    >Int</a
+	    ></p
+	  ><div class="doc"
+	  ><p
+	    >This link shouldn't work: <code
+	      >other</code
+	      >.
+   These links should work: <code
+	      ><a href=""
+		>other</a
+		></code
+	      >, <code
+	      ><a href=""
+		>sortBy</a
+		></code
+	      >, <code
+	      ><a href=""
+		>test2</a
+		></code
+	      >, <code
+	      ><a href=""
+		>test2</a
+		></code
+	      >, <code
+	      ><a href=""
+		>fromMaybe</a
+		></code
+	      >.
+   Module link: <a href=""
+	      >Prelude</a
+	      >.
+</p
+	    ></div
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><a name="v:reExport" class="def"
+	    >reExport</a
+	    > :: <a href=""
+	    >Int</a
+	    ></p
+	  ><div class="doc"
+	  ><p
+	    >Should show up on the page for both modules A and B
+</p
+	    ></div
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><span class="keyword"
+	    >data</span
+	    >  <a name="t:X" class="def"
+	    >X</a
+	    >  </p
+	  ><div class="doc"
+	  ><p
+	    >Should show up on the page for both modules A and B
+</p
+	    ></div
+	  ><div class="subs constructors"
+	  ><p class="caption"
+	    >Constructors</p
+	    ><table
+	    ><tr
+	      ><td class="src"
+		><a name="v:X" class="def"
+		  >X</a
+		  ></td
+		><td class="doc"
+		><p
+		  >Doc for consructor
+</p
+		  ></td
+		></tr
+	      ></table
+	    ></div
 	  ></div
 	></div
       ></div
     ><div id="footer"
     ><p
-      >Produced by <A HREF="">Haddock</a
-	> version 2.9.2</p
+      >Produced by <a href=""
+	>Haddock</a
+	> version 2.10.0</p
       ></div
     ></body
   ></html

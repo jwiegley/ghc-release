@@ -4,6 +4,13 @@
 %
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module CgCase (	cgCase, saveVolatileVarsAndRegs, 
 		restoreCurrentCostCentre
 	) where
@@ -26,7 +33,6 @@ import CgProf
 import CgInfoTbls
 
 import ClosureInfo
-import SMRep
 import OldCmmUtils
 import OldCmm
 
@@ -41,6 +47,7 @@ import Type
 import TyCon
 import Util
 import Outputable
+import FastString
 
 import Control.Monad (when)
 \end{code}
@@ -121,6 +128,13 @@ allocating more heap than strictly necessary, but it will sometimes
 eliminate a heap check altogether.
 
 \begin{code}
+cgCase (StgApp _v []) _live_in_whole_case _live_in_alts bndr
+       (PrimAlt _) [(DEFAULT,bndrs,_,rhs)]
+  | isVoidArg (idCgRep bndr)
+  = ASSERT( null bndrs )
+    WARN( True, ptext (sLit "Case of void constant; missing optimisation somewhere") <+> ppr bndr)
+    cgExpr rhs
+
 cgCase (StgApp v []) _live_in_whole_case _live_in_alts bndr
        alt_type@(PrimAlt _) alts
   -- Note [ticket #3132]: we might be looking at a case of a lifted Id
@@ -141,17 +155,18 @@ cgCase (StgApp v []) _live_in_whole_case _live_in_alts bndr
   -- the HValue really is a MutVar#.  The types are compatible though,
   -- so we can just generate an assignment.
   || reps_compatible
-  =
-     do	{ -- Careful! we can't just bind the default binder to the same thing
+  =  do { when (not reps_compatible) $
+            panic "cgCase: reps do not match, perhaps a dodgy unsafeCoerce?"
+
+          -- Careful! we can't just bind the default binder to the same thing
 	  -- as the scrutinee, since it might be a stack location, and having
 	  -- two bindings pointing at the same stack locn doesn't work (it
 	  -- confuses nukeDeadBindings).  Hence, use a new temp.
-          when (not reps_compatible) $
-            panic "cgCase: reps do not match, perhaps a dodgy unsafeCoerce?"
 	; v_info <- getCgIdInfo v
 	; amode <- idInfoToAmode v_info
 	; tmp_reg <- bindNewToTemp bndr
 	; stmtC (CmmAssign (CmmLocal tmp_reg) amode)
+
 	; cgPrimAlts NoGC alt_type (CmmLocal tmp_reg) alts }
   where
     reps_compatible = idCgRep v == idCgRep bndr
@@ -321,6 +336,7 @@ cgInlinePrimOp primop args bndr (PrimAlt _) live_in_alts alts
   = ASSERT( con == DEFAULT && isSingleton alts && null bs )
     do	{ 	-- VOID RESULT; just sequencing, 
 		-- so get in there and do it
+		-- The bndr should not occur, so no need to bind it
 	  cgPrimOp [] primop args live_in_alts
 	; cgExpr rhs }
   where
@@ -654,6 +670,6 @@ restoreCurrentCostCentre Nothing     _freeit = nopC
 restoreCurrentCostCentre (Just slot) freeit
  = do 	{ sp_rel <- getSpRelOffset slot
 	; whenC freeit (freeStackSlots [slot])
-	; stmtC (CmmStore curCCSAddr (CmmLoad sp_rel bWord)) }
+        ; stmtC (storeCurCCS (CmmLoad sp_rel bWord)) }
 \end{code}
 

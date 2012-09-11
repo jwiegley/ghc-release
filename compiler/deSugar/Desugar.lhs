@@ -6,6 +6,13 @@
 The Desugarer: turning HsSyn into Core.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module Desugar ( deSugar, deSugarExpr ) where
 
 import DynFlags
@@ -16,6 +23,10 @@ import TcRnTypes
 import MkIface
 import Id
 import Name
+import Type
+import InstEnv
+import Class
+import Avail
 import CoreSyn
 import CoreSubst
 import PprCore
@@ -56,34 +67,36 @@ deSugar :: HscEnv -> ModLocation -> TcGblEnv -> IO (Messages, Maybe ModGuts)
 deSugar hsc_env 
         mod_loc
         tcg_env@(TcGblEnv { tcg_mod          = mod,
-			    tcg_src	     = hsc_src,
-		    	    tcg_type_env     = type_env,
-		    	    tcg_imports      = imports,
-		    	    tcg_exports      = exports,
-			    tcg_keep	     = keep_var,
+                            tcg_src          = hsc_src,
+                            tcg_type_env     = type_env,
+                            tcg_imports      = imports,
+                            tcg_exports      = exports,
+                            tcg_keep	     = keep_var,
                             tcg_th_splice_used = tc_splice_used,
                             tcg_rdr_env      = rdr_env,
-		    	    tcg_fix_env      = fix_env,
-		    	    tcg_inst_env     = inst_env,
-		    	    tcg_fam_inst_env = fam_inst_env,
-	    	    	    tcg_warns        = warns,
-	    	    	    tcg_anns         = anns,
-			    tcg_binds        = binds,
-		    	    tcg_imp_specs    = imp_specs,
+                            tcg_fix_env      = fix_env,
+                            tcg_inst_env     = inst_env,
+                            tcg_fam_inst_env = fam_inst_env,
+                            tcg_warns        = warns,
+                            tcg_anns         = anns,
+                            tcg_binds        = binds,
+                            tcg_imp_specs    = imp_specs,
+                            tcg_dependent_files = dependent_files,
                             tcg_ev_binds     = ev_binds,
                             tcg_fords        = fords,
                             tcg_rules        = rules,
                             tcg_vects        = vects,
+                            tcg_tcs          = tcs,
                             tcg_insts        = insts,
                             tcg_fam_insts    = fam_insts,
                             tcg_hpc          = other_hpc_info })
 
-  = do	{ let dflags = hsc_dflags hsc_env
+  = do { let dflags = hsc_dflags hsc_env
+             platform = targetPlatform dflags
         ; showPass dflags "Desugar"
 
 	-- Desugar the program
         ; let export_set = availsToNameSet exports
-	; let auto_scc = mkAutoScc dflags mod export_set
         ; let target = hscTarget dflags
         ; let hpcInfo = emptyHpcInfo other_hpc_info
 	; (msgs, mb_res)
@@ -92,22 +105,29 @@ deSugar hsc_env
                        return (emptyMessages,
                                Just ([], nilOL, [], [], NoStubs, hpcInfo, emptyModBreaks))
                    _        -> do
+
+                     let want_ticks = opt_Hpc
+                                   || target == HscInterpreted
+                                   || (opt_SccProfilingOn
+                                       && case profAuto dflags of
+                                            NoProfAuto -> False
+                                            _          -> True)
+
                      (binds_cvr,ds_hpc_info, modBreaks)
-			 <- if (opt_Hpc
-				  || target == HscInterpreted)
-			       && (not (isHsBoot hsc_src))
-                              then addCoverageTicksToBinds dflags mod mod_loc
-                                                           (typeEnvTyCons type_env) binds 
+                         <- if want_ticks && not (isHsBoot hsc_src)
+                              then addTicksToBinds dflags mod mod_loc export_set
+                                          (typeEnvTyCons type_env) binds
                               else return (binds, hpcInfo, emptyModBreaks)
+
                      initDs hsc_env mod rdr_env type_env $ do
-                       do { ds_ev_binds <- dsEvBinds ev_binds
-                          ; core_prs <- dsTopLHsBinds auto_scc binds_cvr
+                       do { let ds_ev_binds = dsEvBinds ev_binds
+                          ; core_prs <- dsTopLHsBinds binds_cvr
                           ; (spec_prs, spec_rules) <- dsImpSpecs imp_specs
                           ; (ds_fords, foreign_prs) <- dsForeigns fords
                           ; ds_rules <- mapMaybeM dsRule rules
                           ; ds_vects <- mapM dsVect vects
                           ; let hpc_init
-                                  | opt_Hpc   = hpcInitCode mod ds_hpc_info
+                                  | opt_Hpc   = hpcInitCode platform mod ds_hpc_info
                                   | otherwise = empty
                           ; return ( ds_ev_binds
                                    , foreign_prs `appOL` core_prs `appOL` spec_prs
@@ -133,48 +153,49 @@ deSugar hsc_env
         -- You might think it doesn't matter, but the simplifier brings all top-level
         -- things into the in-scope set before simplifying; so we get no unfolding for F#!
 
-        -- Lint result if necessary, and print
-        ; dumpIfSet_dyn dflags Opt_D_dump_ds "Desugared, before opt" $
-               (vcat [ pprCoreBindings final_pgm
-                     , pprRules rules_for_imps ])
-
+#ifdef DEBUG
+          -- Debug only as pre-simple-optimisation program may be really big
+        ; endPass dflags CoreDesugar final_pgm rules_for_imps 
+#endif
         ; (ds_binds, ds_rules_for_imps, ds_vects) 
             <- simpleOptPgm dflags mod final_pgm rules_for_imps vects0
                          -- The simpleOptPgm gets rid of type 
                          -- bindings plus any stupid dead code
 
-        ; endPass dflags CoreDesugar ds_binds ds_rules_for_imps
+        ; endPass dflags CoreDesugarOpt ds_binds ds_rules_for_imps
 
         ; let used_names = mkUsedNames tcg_env
         ; deps <- mkDependencies tcg_env
 
         ; used_th <- readIORef tc_splice_used
+        ; dep_files <- readIORef dependent_files
 
         ; let mod_guts = ModGuts {
-		mg_module    	= mod,
-		mg_boot	     	= isHsBoot hsc_src,
-		mg_exports   	= exports,
-		mg_deps	     	= deps,
-		mg_used_names   = used_names,
+                mg_module       = mod,
+                mg_boot	        = isHsBoot hsc_src,
+                mg_exports      = exports,
+                mg_deps	        = deps,
+                mg_used_names   = used_names,
                 mg_used_th      = used_th,
                 mg_dir_imps     = imp_mods imports,
-	        mg_rdr_env   	= rdr_env,
-		mg_fix_env   	= fix_env,
-		mg_warns   	= warns,
-		mg_anns      	= anns,
-		mg_types     	= type_env,
-		mg_insts     	= insts,
-		mg_fam_insts 	= fam_insts,
-		mg_inst_env     = inst_env,
-		mg_fam_inst_env = fam_inst_env,
-	        mg_rules     	= ds_rules_for_imps,
-		mg_binds     	= ds_binds,
-		mg_foreign   	= ds_fords,
-		mg_hpc_info  	= ds_hpc_info,
+                mg_rdr_env      = rdr_env,
+                mg_fix_env      = fix_env,
+                mg_warns        = warns,
+                mg_anns         = anns,
+                mg_tcs          = tcs,
+                mg_insts        = insts,
+                mg_fam_insts    = fam_insts,
+                mg_inst_env     = inst_env,
+                mg_fam_inst_env = fam_inst_env,
+                mg_rules        = ds_rules_for_imps,
+                mg_binds        = ds_binds,
+                mg_foreign      = ds_fords,
+                mg_hpc_info     = ds_hpc_info,
                 mg_modBreaks    = modBreaks,
                 mg_vect_decls   = ds_vects,
                 mg_vect_info    = noVectInfo,
-                mg_trust_pkg    = imp_trust_own_pkg imports
+                mg_trust_pkg    = imp_trust_own_pkg imports,
+                mg_dependent_files = dep_files
               }
         ; return (msgs, Just mod_guts)
 	}}}
@@ -185,18 +206,16 @@ dsImpSpecs imp_specs
       ; let (spec_binds, spec_rules) = unzip spec_prs
       ; return (concatOL spec_binds, spec_rules) }
 
-combineEvBinds :: [DsEvBind] -> [(Id,CoreExpr)] -> [CoreBind]
+combineEvBinds :: [CoreBind] -> [(Id,CoreExpr)] -> [CoreBind]
 -- Top-level bindings can include coercion bindings, but not via superclasses
 -- See Note [Top-level evidence]
 combineEvBinds [] val_prs 
   = [Rec val_prs]
-combineEvBinds (LetEvBind (NonRec b r) : bs) val_prs
+combineEvBinds (NonRec b r : bs) val_prs
   | isId b    = combineEvBinds bs ((b,r):val_prs)
   | otherwise = NonRec b r : combineEvBinds bs val_prs
-combineEvBinds (LetEvBind (Rec prs) : bs) val_prs 
+combineEvBinds (Rec prs : bs) val_prs 
   = combineEvBinds bs (prs ++ val_prs)
-combineEvBinds (CaseEvBind x _ _ : _) _
-  = pprPanic "topEvBindPairs" (ppr x)
 \end{code}
 
 Note [Top-level evidence]
@@ -211,22 +230,6 @@ and Rec the rest.
 
 
 \begin{code}
-mkAutoScc :: DynFlags -> Module -> NameSet -> AutoScc
-mkAutoScc dflags mod exports
-  | not opt_SccProfilingOn 	-- No profiling
-  = NoSccs		
-    -- Add auto-scc on all top-level things
-  | dopt Opt_AutoSccsOnAllToplevs dflags
-  = AddSccs mod (\id -> not $ isDerivedOccName $ getOccName id)
-    -- See #1641.  This is pretty yucky, but I can't see a better way
-    -- to identify compiler-generated Ids, and at least this should
-    -- catch them all.
-    -- Only on exported things
-  | dopt Opt_AutoSccsOnExportedToplevs dflags
-  = AddSccs mod (\id -> idName id `elemNameSet` exports)
-  | otherwise
-  = NoSccs
-
 deSugarExpr :: HscEnv
 	    -> Module -> GlobalRdrEnv -> TypeEnv 
  	    -> LHsExpr Id
@@ -403,7 +406,23 @@ dsVect (L loc (HsVect (L _ v) rhs))
   = putSrcSpanDs loc $ 
     do { rhs' <- fmapMaybeM dsLExpr rhs
        ; return $ Vect v rhs'
-  	   }
+       }
 dsVect (L _loc (HsNoVect (L _ v)))
   = return $ NoVect v
+dsVect (L _loc (HsVectTypeOut isScalar tycon rhs_tycon))
+  = return $ VectType isScalar tycon' rhs_tycon
+  where
+    tycon' | Just ty <- coreView $ mkTyConTy tycon
+           , (tycon', []) <- splitTyConApp ty      = tycon'
+           | otherwise                             = tycon
+dsVect vd@(L _ (HsVectTypeIn _ _ _))
+  = pprPanic "Desugar.dsVect: unexpected 'HsVectTypeIn'" (ppr vd)
+dsVect (L _loc (HsVectClassOut cls))
+  = return $ VectClass (classTyCon cls)
+dsVect vc@(L _ (HsVectClassIn _))
+  = pprPanic "Desugar.dsVect: unexpected 'HsVectClassIn'" (ppr vc)
+dsVect (L _loc (HsVectInstOut inst))
+  = return $ VectInst (instanceDFunId inst)
+dsVect vi@(L _ (HsVectInstIn _))
+  = pprPanic "Desugar.dsVect: unexpected 'HsVectInstIn'" (ppr vi)
 \end{code}

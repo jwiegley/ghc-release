@@ -82,7 +82,7 @@ import Distribution.PackageDescription as PD
     ( PackageDescription(..), specVersion, GenericPackageDescription(..)
     , Library(..), hasLibs, Executable(..), BuildInfo(..), allExtensions
     , HookedBuildInfo, updatePackageDescription, allBuildInfo
-    , FlagName(..), TestSuite(..) )
+    , FlagName(..), TestSuite(..), Benchmark(..) )
 import Distribution.PackageDescription.Configuration
     ( finalizePackageDescription, mapTreeData )
 import Distribution.PackageDescription.Check
@@ -91,7 +91,7 @@ import Distribution.Simple.Hpc ( enableCoverage )
 import Distribution.Simple.Program
     ( Program(..), ProgramLocation(..), ConfiguredProgram(..)
     , ProgramConfiguration, defaultProgramConfiguration
-    , configureAllKnownPrograms, knownPrograms, lookupKnownProgram, addKnownProgram
+    , configureAllKnownPrograms, knownPrograms, lookupKnownProgram
     , userSpecifyArgss, userSpecifyPaths
     , requireProgram, requireProgramVersion
     , pkgConfigProgram, gccProgram, rawSystemProgramStdoutConf )
@@ -146,7 +146,7 @@ import System.IO
     ( hPutStrLn, stderr, hClose )
 import Distribution.Text
     ( Text(disp), display, simpleParse )
-import Text.PrettyPrint.HughesPJ
+import Text.PrettyPrint
     ( comma, punctuate, render, nest, sep )
 import Distribution.Compat.Exception ( catchExit, catchIO )
 
@@ -326,7 +326,11 @@ configure (pkg_descr0, pbi) cfg
             enableTest t = t { testEnabled = fromFlag (configTests cfg) }
             flaggedTests = map (\(n, t) -> (n, mapTreeData enableTest t))
                                (condTestSuites pkg_descr0)
-            pkg_descr0'' = pkg_descr0 { condTestSuites = flaggedTests }
+            enableBenchmark bm = bm { benchmarkEnabled = fromFlag (configBenchmarks cfg) }
+            flaggedBenchmarks = map (\(n, bm) -> (n, mapTreeData enableBenchmark bm))
+                               (condBenchmarks pkg_descr0)
+            pkg_descr0'' = pkg_descr0 { condTestSuites = flaggedTests
+                                      , condBenchmarks = flaggedBenchmarks }
 
         (pkg_descr0', flags) <-
                 case finalizePackageDescription
@@ -429,21 +433,26 @@ configure (pkg_descr0, pbi) cfg
              ++ "supported by " ++ display (compilerId comp) ++ ": "
              ++ intercalate ", " (map display exts)
 
-        -- configured known/required programs & build tools
-        let requiredBuildTools = concatMap buildTools (allBuildInfo pkg_descr)
+        -- configured known/required programs & external build tools
+        -- exclude build-tool deps on "internal" exes in the same package
+        let requiredBuildTools =
+              [ buildTool
+              | let exeNames = map exeName (executables pkg_descr)
+              , bi <- allBuildInfo pkg_descr
+              , buildTool@(Dependency (PackageName toolName) reqVer) <- buildTools bi
+              , let isInternal =
+                        toolName `elem` exeNames
+                        -- we assume all internal build-tools are
+                        -- versioned with the package:
+                     && packageVersion pkg_descr `withinRange` reqVer
+              , not isInternal ]
 
-        -- add all exes built by this package ("internal exes") to the program
-        -- conf; this makes the namespace of build-tools include intrapackage
-        -- references to executables
-        let programsConfig'' = foldr (addInternalExe buildDir') programsConfig'
-                                 (executables pkg_descr)
-
-        programsConfig''' <-
-              configureAllKnownPrograms (lessVerbose verbosity) programsConfig''
+        programsConfig'' <-
+              configureAllKnownPrograms (lessVerbose verbosity) programsConfig'
           >>= configureRequiredPrograms verbosity requiredBuildTools
 
-        (pkg_descr', programsConfig'''') <-
-          configurePkgconfigPackages verbosity pkg_descr programsConfig'''
+        (pkg_descr', programsConfig''') <-
+          configurePkgconfigPackages verbosity pkg_descr programsConfig''
 
         split_objs <-
            if not (fromFlag $ configSplitObjs cfg)
@@ -464,6 +473,8 @@ configure (pkg_descr0, pbi) cfg
             configExe exe = (exeName exe, configComponent (buildInfo exe))
             configTest test = (testName test,
                     configComponent(testBuildInfo test))
+            configBenchmark bm = (benchmarkName bm,
+                    configComponent(benchmarkBuildInfo bm))
             configComponent bi = ComponentLocalBuildInfo {
               componentPackageDeps =
                 if newPackageDepsBehaviour pkg_descr'
@@ -485,7 +496,8 @@ configure (pkg_descr0, pbi) cfg
                  mapMaybe exeDepToComp (buildTools bi)
               ++ mapMaybe libDepToComp (targetBuildDepends bi)
               where
-                bi = foldComponent libBuildInfo buildInfo testBuildInfo component
+                bi = foldComponent libBuildInfo buildInfo testBuildInfo
+                     benchmarkBuildInfo component
                 exeDepToComp (Dependency (PackageName name) _) =
                   CExe `fmap` find ((==) name . exeName)
                                 (executables pkg_descr')
@@ -498,13 +510,15 @@ configure (pkg_descr0, pbi) cfg
               where (g, lkup, _) = graphFromEdges
                                  $ allComponentsBy pkg_descr'
                                  $ \c -> (c, key c, map key (ipDeps c))
-                    key          = foldComponent (const "library") exeName testName
+                    key          = foldComponent (const "library") exeName
+                                   testName benchmarkName
 
         -- check for cycles in the dependency graph
         buildOrder <- forM sccs $ \scc -> case scc of
           AcyclicSCC (c,_,_) -> return (foldComponent (const CLibName)
                                                       (CExeName . exeName)
                                                       (CTestName . testName)
+                                                      (CBenchName . benchmarkName)
                                                       c)
           CyclicSCC vs ->
             die $ "Found cycle in intrapackage dependency graph:\n  "
@@ -525,11 +539,12 @@ configure (pkg_descr0, pbi) cfg
                     libraryConfig       = configLib `fmap` library pkg_descr',
                     executableConfigs   = configExe `fmap` executables pkg_descr',
                     testSuiteConfigs    = configTest `fmap` testSuites pkg_descr',
+                    benchmarkConfigs    = configBenchmark `fmap` benchmarks pkg_descr',
                     compBuildOrder      = buildOrder,
                     installedPkgs       = packageDependsIndex,
                     pkgDescrFile        = Nothing,
                     localPkgDescr       = pkg_descr',
-                    withPrograms        = programsConfig'''',
+                    withPrograms        = programsConfig''',
                     withVanillaLib      = fromFlag $ configVanillaLib cfg,
                     withProfLib         = fromFlag $ configProfLib cfg,
                     withSharedLib       = fromFlag $ configSharedLib cfg,
@@ -570,20 +585,11 @@ configure (pkg_descr0, pbi) cfg
         dirinfo "Documentation"    (docdir dirs)     (docdir relative)
 
         sequence_ [ reportProgram verbosity prog configuredProg
-                  | (prog, configuredProg) <- knownPrograms programsConfig'''' ]
+                  | (prog, configuredProg) <- knownPrograms programsConfig''' ]
 
         return lbi
 
     where
-      addInternalExe bd exe =
-        let nm = exeName exe in
-        addKnownProgram Program {
-          programName         = nm,
-          programFindLocation = \_ -> return $ Just $ bd </> nm </> nm,
-          programFindVersion  = \_ _ -> return Nothing,
-          programPostConf     = \_ _ -> return []
-        }
-
       addExtraIncludeLibDirs pkg_descr =
           let extraBi = mempty { extraLibDirs = configExtraLibDirs cfg
                                , PD.includeDirs = configExtraIncludeDirs cfg}

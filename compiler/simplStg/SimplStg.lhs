@@ -4,6 +4,13 @@
 \section[SimplStg]{Driver for simplifying @STG@ programs}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module SimplStg ( stg2stg ) where
 
 #include "HsVersions.h"
@@ -72,8 +79,7 @@ stg2stg dflags module_name binds
 	     {-# SCC "ProfMassage" #-}
 	     let
 		 (collected_CCs, binds3)
-		   = stgMassageForProfiling dflags this_pkg module_name us1 binds
-		 this_pkg = thisPackage dflags
+		   = stgMassageForProfiling dflags module_name us1 binds
 	     in
 	     end_pass us2 "ProfMassage" collected_CCs binds3
 

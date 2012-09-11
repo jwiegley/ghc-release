@@ -11,6 +11,13 @@ This module says how things get going at the top level.
 functions drive the mangling of top-level bindings.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module CodeGen ( codeGen ) where
 
 #include "HsVersions.h"
@@ -53,7 +60,7 @@ codeGen :: DynFlags
         -> CollectedCCs         -- (Local/global) cost-centres needing declaring/registering.
 	-> [(StgBinding,[(Id,[Id])])]	-- Bindings to convert, with SRTs
 	-> HpcInfo
-	-> IO [Cmm]		-- Output
+        -> IO [CmmGroup]          -- Output
 
                 -- N.B. returning '[Cmm]' and not 'Cmm' here makes it
                 -- possible for object splitting to split up the
@@ -71,7 +78,7 @@ codeGen dflags this_mod data_tycons cost_centre_info stg_binds hpc_info
 		; cmm_tycons <- mapM cgTyCon data_tycons
 		; cmm_init   <- getCmm (mkModuleInit dflags cost_centre_info 
                                              this_mod hpc_info)
-                ; return (cmm_init : cmm_binds ++ concat cmm_tycons)
+                ; return (cmm_init : cmm_binds ++ cmm_tycons)
 		}
 		-- Put datatype_stuff after code_stuff, because the
 		-- datatype closure table (for enumeration types) to
@@ -105,7 +112,7 @@ mkModuleInit dflags cost_centre_info this_mod hpc_info
 
             -- For backwards compatibility: user code may refer to this
             -- label for calling hs_add_root().
-        ; emitData Data $ Statics (mkPlainModuleInitLabel this_mod) []
+        ; emitDecl (CmmData Data (Statics (mkPlainModuleInitLabel this_mod) []))
 
         ; whenC (this_mod == mainModIs dflags) $
              emitSimpleProc (mkPlainModuleInitLabel rOOT_MAIN) $ return ()

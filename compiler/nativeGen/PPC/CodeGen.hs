@@ -28,6 +28,7 @@ where
 import PPC.Instr
 import PPC.Cond
 import PPC.Regs
+import CPrim
 import NCGMonad
 import Instruction
 import PIC
@@ -66,8 +67,8 @@ import FastString
 -- order.
 
 cmmTopCodeGen
-        :: RawCmmTop
-        -> NatM [NatCmmTop CmmStatics Instr]
+        :: RawCmmDecl
+        -> NatM [NatCmmDecl CmmStatics Instr]
 
 cmmTopCodeGen (CmmProc info lab (ListGraph blocks)) = do
   (nat_blocks,statics) <- mapAndUnzipM basicBlockCodeGen blocks
@@ -86,7 +87,7 @@ cmmTopCodeGen (CmmData sec dat) = do
 basicBlockCodeGen
         :: CmmBasicBlock
         -> NatM ( [NatBasicBlock Instr]
-                , [NatCmmTop CmmStatics Instr])
+                , [NatCmmDecl CmmStatics Instr])
 
 basicBlockCodeGen (BasicBlock id stmts) = do
   instrs <- stmtsToInstrs stmts
@@ -134,7 +135,7 @@ stmtToInstrs stmt = do
         where ty = cmmExprType src
               size = cmmTypeSize ty
 
-    CmmCall target result_regs args _ _
+    CmmCall target result_regs args _
        -> genCCall target result_regs args
 
     CmmBranch id          -> genBranch id
@@ -356,7 +357,8 @@ iselExpr64 (CmmMachOp (MO_UU_Conv W32 W64) [expr]) = do
     return $ ChildCode64 (expr_code `snocOL` mov_lo `snocOL` mov_hi)
                          rlo
 iselExpr64 expr
-   = pprPanic "iselExpr64(powerpc)" (ppr expr)
+   = do dflags <- getDynFlagsNat
+        pprPanic "iselExpr64(powerpc)" (pprPlatform (targetPlatform dflags) expr)
 
 
 
@@ -572,7 +574,7 @@ getRegister' _ (CmmLit lit)
           ]
     in return (Any (cmmTypeSize rep) code)
 
-getRegister' _ other = pprPanic "getRegister(ppc)" (pprExpr other)
+getRegister' dflags other = pprPanic "getRegister(ppc)" (pprExpr (targetPlatform dflags) other)
 
     -- extend?Rep: wrap integer expression of type rep
     -- in a conversion to II32
@@ -847,11 +849,7 @@ genCCall target dest_regs argsAndHints
       case platformOS (targetPlatform dflags) of
           OSLinux    -> genCCall' GCPLinux  target dest_regs argsAndHints
           OSDarwin   -> genCCall' GCPDarwin target dest_regs argsAndHints
-          OSSolaris2 -> panic "PPC.CodeGen.genCCall: not defined for this os"
-          OSMinGW32  -> panic "PPC.CodeGen.genCCall: not defined for this os"
-          OSFreeBSD  -> panic "PPC.CodeGen.genCCall: not defined for this os"
-          OSOpenBSD  -> panic "PPC.CodeGen.genCCall: not defined for this os"
-          OSUnknown  -> panic "PPC.CodeGen.genCCall: not defined for this os"
+          _ -> panic "PPC.CodeGen.genCCall: not defined for this os"
 
 data GenCCallPlatform = GCPLinux | GCPDarwin
 
@@ -1142,9 +1140,12 @@ genCCall' gcp target dest_regs argsAndHints
                     MO_Memset    -> (fsLit "memset", False)
                     MO_Memmove   -> (fsLit "memmove", False)
 
-                    other -> pprPanic "genCCall(ppc): unknown callish op"
-                                    (pprCallishMachOp other)
+                    MO_PopCnt w  -> (fsLit $ popCntLabel w, False)
 
+                    MO_WriteBarrier ->
+                        panic $ "outOfLineCmmOp: MO_WriteBarrier not supported"
+                    MO_Touch ->
+                        panic $ "outOfLineCmmOp: MO_Touch not supported"
 
 -- -----------------------------------------------------------------------------
 -- Generating a table-branch
@@ -1181,7 +1182,7 @@ genSwitch expr ids
                     ]
         return code
 
-generateJumpTableForInstr :: Instr -> Maybe (NatCmmTop CmmStatics Instr)
+generateJumpTableForInstr :: Instr -> Maybe (NatCmmDecl CmmStatics Instr)
 generateJumpTableForInstr (BCTR ids (Just lbl)) =
     let jumpTable
             | opt_PIC   = map jumpTableEntryRel ids

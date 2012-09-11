@@ -4,6 +4,13 @@
 \section[WorkWrap]{Worker/wrapper-generating back-end of strictness analyser}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module WorkWrap ( wwTopBinds, mkWrapper ) where
 
 import CoreSyn
@@ -54,7 +61,7 @@ info for exported values).
 \end{enumerate}
 
 \begin{code}
-wwTopBinds :: UniqSupply -> [CoreBind] -> [CoreBind]
+wwTopBinds :: UniqSupply -> CoreProgram -> CoreProgram
 
 wwTopBinds us top_binds
   = initUs_ us $ do
@@ -110,8 +117,8 @@ wwExpr (Lam binder expr)
 wwExpr (App f a)
   = App <$> wwExpr f <*> wwExpr a
 
-wwExpr (Note note expr)
-  = Note note <$> wwExpr expr
+wwExpr (Tick note expr)
+  = Tick note <$> wwExpr expr
 
 wwExpr (Cast expr co) = do
     new_expr <- wwExpr expr
@@ -289,8 +296,8 @@ checkSize :: Id -> CoreExpr
 checkSize fn_id rhs thing_inside
   | isStableUnfolding (realIdUnfolding fn_id)
   = return [ (fn_id, rhs) ]
-      -- See Note [Don't w/w INLINABLE things]
-      -- and Note [Don't w/w INLINABLABLE things]
+      -- See Note [Don't w/w INLINE things]
+      -- and Note [Don't w/w INLINABLE things]
       -- NB: use realIdUnfolding because we want to see the unfolding
       --     even if it's a loop breaker!
 
@@ -379,7 +386,7 @@ get_one_shots :: Expr Var -> [Bool]
 get_one_shots (Lam b e)
   | isId b    = isOneShotLambda b : get_one_shots e
   | otherwise = get_one_shots e
-get_one_shots (Note _ e) = get_one_shots e
+get_one_shots (Tick _ e) = get_one_shots e
 get_one_shots _    	 = noOneShotInfo
 \end{code}
 

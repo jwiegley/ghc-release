@@ -1,5 +1,8 @@
-{-# LANGUAGE DeriveDataTypeable,PatternGuards #-}
+{-# LANGUAGE DeriveDataTypeable, PatternGuards, CApiFFI #-}
 {-# OPTIONS_GHC -fno-cse #-} -- global variables
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Trustworthy #-}
+#endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Posix.Signals
@@ -296,7 +299,7 @@ foreign import ccall unsafe "killpg"
 raiseSignal :: Signal -> IO ()
 raiseSignal sig = throwErrnoIfMinus1_ "raiseSignal" (c_raise sig)
 
-#if defined(__GLASGOW_HASKELL__) && (defined(openbsd_HOST_OS) || defined(freebsd_HOST_OS) || defined(dragonfly_HOST_OS))
+#if defined(__GLASGOW_HASKELL__) && (defined(openbsd_HOST_OS) || defined(freebsd_HOST_OS) || defined(dragonfly_HOST_OS)) || defined(netbsd_HOST_OS)
 foreign import ccall unsafe "genericRaise"
   c_raise :: CInt -> IO CInt
 #else
@@ -594,7 +597,7 @@ awaitSignal maybe_sigset = do
   -- (-1) with errno set to EINTR.
   -- XXX My manpage says it can also return EFAULT. And why is ignoring
   -- EINTR the right thing to do?
- 
+
 foreign import ccall unsafe "sigsuspend"
   c_sigsuspend :: Ptr CSigset -> IO CInt
 #endif

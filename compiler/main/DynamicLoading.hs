@@ -16,21 +16,20 @@ module DynamicLoading (
     ) where
 
 #ifdef GHCI
-import Linker           ( linkModule, getHValue, lessUnsafeCoerce )
-import OccName          ( occNameSpace )
-import Name             ( nameOccName )
+import Linker           ( linkModule, getHValue )
 import SrcLoc           ( noSrcSpan )
 import Finder           ( findImportedModule, cannotFindModule )
 import DriverPhases     ( HscSource(HsSrcFile) )
-import TcRnDriver       ( getModuleExports )
+import TcRnDriver       ( getModuleInterface )
 import TcRnMonad        ( initTc, initIfaceTcRn )
 import LoadIface        ( loadUserInterface )
-import RdrName          ( RdrName, Provenance(..), ImportSpec(..), ImpDeclSpec(..), ImpItemSpec(..), 
-                          mkGlobalRdrEnv, lookupGRE_RdrName, gre_name, rdrNameSpace )
+import RdrName          ( RdrName, Provenance(..), ImportSpec(..), ImpDeclSpec(..)
+                        , ImpItemSpec(..), mkGlobalRdrEnv, lookupGRE_RdrName, gre_name )
 import RnNames          ( gresFromAvails )
 import PrelNames        ( iNTERACTIVE )
+import DynFlags
 
-import HscTypes         ( HscEnv(..), FindResult(..), lookupTypeHscEnv )
+import HscTypes         ( HscEnv(..), FindResult(..), ModIface(..), lookupTypeHscEnv )
 import TypeRep          ( TyThing(..), pprTyThingCategory )
 import Type             ( Type, eqType )
 import TyCon            ( TyCon )
@@ -39,9 +38,12 @@ import Id               ( idType )
 import Module           ( Module, ModuleName )
 import Panic            ( GhcException(..), throwGhcException )
 import FastString
+import ErrUtils
 import Outputable
+import Exception
 
 import Data.Maybe        ( mapMaybe )
+import GHC.Exts          ( unsafeCoerce# )
 
 
 -- | Force the interfaces for the given modules to be loaded. The 'SDoc' parameter is used
@@ -107,6 +109,21 @@ getValueSafely hsc_env val_name expected_type = do
              else return Nothing
         Just val_thing -> throwCmdLineErrorS $ wrongTyThingError val_name val_thing
 
+
+-- | Coerce a value as usual, but:
+--
+-- 1) Evaluate it immediately to get a segfault early if the coercion was wrong
+--
+-- 2) Wrap it in some debug messages at verbosity 3 or higher so we can see what happened
+--    if it /does/ segfault
+lessUnsafeCoerce :: DynFlags -> String -> a -> IO b
+lessUnsafeCoerce dflags context what = do
+    debugTraceMsg dflags 3 $ (ptext $ sLit "Coercing a value in") <+> (text context) <> (ptext $ sLit "...")
+    output <- evaluate (unsafeCoerce# what)
+    debugTraceMsg dflags 3 $ ptext $ sLit "Successfully evaluated coercion"
+    return output
+
+
 -- | Finds the 'Name' corresponding to the given 'RdrName' in the context of the 'ModuleName'. Returns @Nothing@ if no
 -- such 'Name' could be found. Any other condition results in an exception:
 --
@@ -119,17 +136,19 @@ lookupRdrNameInModule hsc_env mod_name rdr_name = do
     case found_module of
         Found _ mod -> do
             -- Find the exports of the module
-            (_, mb_avail_info) <- getModuleExports hsc_env mod
-            case mb_avail_info of
-                Just avail_info -> do
+            (_, mb_iface) <- getModuleInterface hsc_env mod
+            case mb_iface of
+                Just iface -> do
                     -- Try and find the required name in the exports
-                    let decl_spec = ImpDeclSpec { is_mod = mod_name, is_as = mod_name, is_qual = False, is_dloc = noSrcSpan }
+                    let decl_spec = ImpDeclSpec { is_mod = mod_name, is_as = mod_name
+                                                , is_qual = False, is_dloc = noSrcSpan }
                         provenance = Imported [ImpSpec decl_spec ImpAll]
-                        env = mkGlobalRdrEnv (gresFromAvails provenance avail_info)
-                    case [name | gre <- lookupGRE_RdrName rdr_name env, let name = gre_name gre, rdrNameSpace rdr_name == occNameSpace (nameOccName name)] of
-                        [name] -> return (Just name)
-                        []     -> return Nothing
-                        _      -> panic "lookupRdrNameInModule"
+                        env = mkGlobalRdrEnv (gresFromAvails provenance (mi_exports iface))
+                    case lookupGRE_RdrName rdr_name env of
+                        [gre] -> return (Just (gre_name gre))
+                        []    -> return Nothing
+                        _     -> panic "lookupRdrNameInModule"
+
                 Nothing -> throwCmdLineErrorS $ hsep [ptext (sLit "Could not determine the exports of the module"), ppr mod_name]
         err -> throwCmdLineErrorS $ cannotFindModule dflags mod_name err
   where

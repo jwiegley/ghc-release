@@ -1,3 +1,6 @@
+#if __GLASGOW_HASKELL__ >= 703
+{-# LANGUAGE Safe #-}
+#endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.Tree
@@ -32,6 +35,7 @@ import Data.Sequence (Seq, empty, singleton, (<|), (|>), fromList,
 import Data.Foldable (Foldable(foldMap), toList)
 import Data.Traversable (Traversable(traverse))
 import Data.Typeable
+import Control.DeepSeq (NFData(rnf))
 
 #ifdef __GLASGOW_HASKELL__
 import Data.Data (Data)
@@ -70,6 +74,9 @@ instance Traversable Tree where
 
 instance Foldable Tree where
     foldMap f (Node x ts) = f x `mappend` foldMap (foldMap f) ts
+
+instance NFData a => NFData (Tree a) where
+    rnf (Node x ts) = rnf x `seq` rnf ts
 
 -- | Neat 2-dimensional drawing of a tree.
 drawTree :: Tree String -> String

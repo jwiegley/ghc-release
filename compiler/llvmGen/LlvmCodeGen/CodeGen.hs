@@ -22,12 +22,12 @@ import FastString
 import ForeignCall
 import Outputable hiding ( panic, pprPanic )
 import qualified Outputable
+import Platform
 import UniqSupply
 import Unique
 import Util
 
 import Data.List ( partition )
-import Control.Monad ( liftM )
 
 
 type LlvmStatements = OrdList LlvmStatement
@@ -35,7 +35,7 @@ type LlvmStatements = OrdList LlvmStatement
 -- -----------------------------------------------------------------------------
 -- | Top-level of the LLVM proc Code generator
 --
-genLlvmProc :: LlvmEnv -> RawCmmTop -> UniqSM (LlvmEnv, [LlvmCmmTop])
+genLlvmProc :: LlvmEnv -> RawCmmDecl -> UniqSM (LlvmEnv, [LlvmCmmDecl])
 genLlvmProc env (CmmProc info lbl (ListGraph blocks)) = do
     (env', lmblocks, lmdata) <- basicBlocksCodeGen env blocks ([], [])
     let proc = CmmProc info lbl (ListGraph lmblocks)
@@ -50,14 +50,13 @@ genLlvmProc _ _ = panic "genLlvmProc: case that shouldn't reach here!"
 -- | Generate code for a list of blocks that make up a complete procedure.
 basicBlocksCodeGen :: LlvmEnv
                    -> [CmmBasicBlock]
-                   -> ( [LlvmBasicBlock] , [LlvmCmmTop] )
-                   -> UniqSM (LlvmEnv, [LlvmBasicBlock] , [LlvmCmmTop] )
+                   -> ( [LlvmBasicBlock] , [LlvmCmmDecl] )
+                   -> UniqSM (LlvmEnv, [LlvmBasicBlock] , [LlvmCmmDecl] )
 basicBlocksCodeGen env ([]) (blocks, tops)
   = do let (blocks', allocs) = mapAndUnzip dominateAllocs blocks
        let allocs' = concat allocs
        let ((BasicBlock id fstmts):rblks) = blocks'
-       fplog <- funPrologue
-       let fblocks = (BasicBlock id (fplog ++  allocs' ++ fstmts)):rblks
+       let fblocks = (BasicBlock id $ funPrologue ++  allocs' ++ fstmts):rblks
        return (env, fblocks, tops)
 
 basicBlocksCodeGen env (block:blocks) (lblocks', ltops')
@@ -80,7 +79,7 @@ dominateAllocs (BasicBlock id stmts)
 -- | Generate code for one block
 basicBlockCodeGen ::  LlvmEnv
                   -> CmmBasicBlock
-                  -> UniqSM ( LlvmEnv, [LlvmBasicBlock], [LlvmCmmTop] )
+                  -> UniqSM ( LlvmEnv, [LlvmBasicBlock], [LlvmCmmDecl] )
 basicBlockCodeGen env (BasicBlock id stmts)
   = do (env', instrs, top) <- stmtsToInstrs env stmts (nilOL, [])
        return (env', [BasicBlock id (fromOL instrs)], top)
@@ -93,12 +92,12 @@ basicBlockCodeGen env (BasicBlock id stmts)
 -- A statement conversion return data.
 --   * LlvmEnv: The new environment
 --   * LlvmStatements: The compiled LLVM statements.
---   * LlvmCmmTop: Any global data needed.
-type StmtData = (LlvmEnv, LlvmStatements, [LlvmCmmTop])
+--   * LlvmCmmDecl: Any global data needed.
+type StmtData = (LlvmEnv, LlvmStatements, [LlvmCmmDecl])
 
 
 -- | Convert a list of CmmStmt's to LlvmStatement's
-stmtsToInstrs :: LlvmEnv -> [CmmStmt] -> (LlvmStatements, [LlvmCmmTop])
+stmtsToInstrs :: LlvmEnv -> [CmmStmt] -> (LlvmStatements, [LlvmCmmDecl])
               -> UniqSM StmtData
 stmtsToInstrs env [] (llvm, top)
   = return (env, llvm, top)
@@ -124,7 +123,7 @@ stmtToInstrs env stmt = case stmt of
     CmmSwitch arg ids    -> genSwitch env arg ids
 
     -- Foreign Call
-    CmmCall target res args _ ret
+    CmmCall target res args ret
         -> genCall env target res args ret
 
     -- Tail call
@@ -143,11 +142,10 @@ genCall :: LlvmEnv -> CmmCallTarget -> [HintedCmmFormal] -> [HintedCmmActual]
 
 -- Write barrier needs to be handled specially as it is implemented as an LLVM
 -- intrinsic function.
-#if i386_TARGET_ARCH || x86_64_TARGET_ARCH || sparc_TARGET_ARCH
-genCall env (CmmPrim MO_WriteBarrier) _ _ _ = return (env, nilOL, [])
-
-#else
-genCall env (CmmPrim MO_WriteBarrier) _ _ _ = do
+genCall env (CmmPrim MO_WriteBarrier) _ _ _
+ | platformArch (getLlvmPlatform env) `elem` [ArchX86, ArchX86_64, ArchSPARC]
+    = return (env, nilOL, [])
+ | otherwise = do
     let fname = fsLit "llvm.memory.barrier"
     let funSig = LlvmFunctionDecl fname ExternallyVisible CC_Ccc LMVoid
                     FixedArgs (tysToParams [i1, i1, i1, i1, i1]) llvmFunAlign
@@ -167,7 +165,28 @@ genCall env (CmmPrim MO_WriteBarrier) _ _ _ = do
     where
         lmTrue :: LlvmVar
         lmTrue  = mkIntLit i1 (-1)
-#endif
+
+-- Handle popcnt function specifically since GHC only really has i32 and i64
+-- types and things like Word8 are backed by an i32 and just present a logical
+-- i8 range. So we must handle conversions from i32 to i8 explicitly as LLVM
+-- is strict about types.
+genCall env t@(CmmPrim (MO_PopCnt w)) [CmmHinted dst _] args _ = do
+    let width = widthToLlvmInt w
+        dstTy = cmmToLlvmType $ localRegType dst
+        funTy = \n -> LMFunction $ LlvmFunctionDecl n ExternallyVisible
+                          CC_Ccc width FixedArgs (tysToParams [width]) Nothing
+        (env1, dstV, stmts1, top1) = getCmmReg env (CmmLocal dst)
+
+    (env2, argsV, stmts2, top2) <- arg_vars env1 args ([], nilOL, [])
+    (env3, fptr, stmts3, top3)  <- getFunPtr env2 funTy t
+    (argsV', stmts4)            <- castVars $ zip argsV [width]
+    (retV, s1)                  <- doExpr width $ Call StdCall fptr argsV' []
+    ([retV'], stmts5)           <- castVars [(retV,dstTy)]
+    let s2                       = Store retV' dstV
+
+    let stmts = stmts1 `appOL` stmts2 `appOL` stmts3 `appOL` stmts4 `snocOL`
+                s1 `appOL` stmts5 `snocOL` s2
+    return (env3, stmts, top1 ++ top2 ++ top3)
 
 -- Handle memcpy function specifically since llvm's intrinsic version takes
 -- some extra parameters.
@@ -213,12 +232,12 @@ genCall env target res args ret = do
 
     -- translate to LLVM call convention
     let lmconv = case cconv of
-#if i386_TARGET_ARCH || x86_64_TARGET_ARCH
-            StdCallConv  -> CC_X86_Stdcc
-#else
-            StdCallConv  -> CC_Ccc
-#endif
+            StdCallConv  -> case platformArch (getLlvmPlatform env) of
+                            ArchX86    -> CC_X86_Stdcc
+                            ArchX86_64 -> CC_X86_Stdcc
+                            _          -> CC_Ccc
             CCallConv    -> CC_Ccc
+            CApiConv     -> CC_Ccc
             PrimCallConv -> CC_Ccc
             CmmCallConv  -> panic "CmmCallConv not supported here!"
 
@@ -291,7 +310,7 @@ genCall env target res args ret = do
 getFunPtr :: LlvmEnv -> (LMString -> LlvmType) -> CmmCallTarget
           -> UniqSM ExprData
 getFunPtr env funTy targ = case targ of
-    CmmCallee (CmmLit (CmmLabel lbl)) _ -> litCase $ strCLabel_llvm lbl
+    CmmCallee (CmmLit (CmmLabel lbl)) _ -> litCase $ strCLabel_llvm env lbl
 
     CmmCallee expr _ -> do
         (env', v1, stmts, top) <- exprToVar env expr
@@ -339,8 +358,8 @@ getFunPtr env funTy targ = case targ of
 -- | Conversion of call arguments.
 arg_vars :: LlvmEnv
          -> [HintedCmmActual]
-         -> ([LlvmVar], LlvmStatements, [LlvmCmmTop])
-         -> UniqSM (LlvmEnv, [LlvmVar], LlvmStatements, [LlvmCmmTop])
+         -> ([LlvmVar], LlvmStatements, [LlvmCmmDecl])
+         -> UniqSM (LlvmEnv, [LlvmVar], LlvmStatements, [LlvmCmmDecl])
 
 arg_vars env [] (vars, stmts, tops)
   = return (env, vars, stmts, tops)
@@ -436,7 +455,12 @@ cmmPrimOpFunctions env mop
     MO_Memmove    -> fsLit $ "llvm.memmove." ++ intrinTy1
     MO_Memset     -> fsLit $ "llvm.memset."  ++ intrinTy2
 
-    a -> panic $ "cmmPrimOpFunctions: Unknown callish op! (" ++ show a ++ ")"
+    (MO_PopCnt w) -> fsLit $ "llvm.ctpop."  ++ show (widthToLlvmInt w)
+
+    MO_WriteBarrier ->
+        panic $ "cmmPrimOpFunctions: MO_WriteBarrier not supported here"
+    MO_Touch ->
+        panic $ "cmmPrimOpFunctions: MO_Touch not supported here"
 
     where
         intrinTy1 = (if getLlvmVer env >= 28
@@ -590,7 +614,7 @@ genStore_slow env addr val = do
 
         other ->
             pprPanic "genStore: ptr not right type!"
-                    (PprCmm.pprExpr addr <+> text (
+                    (PprCmm.pprExpr (getLlvmPlatform env) addr <+> text (
                         "Size of Ptr: " ++ show llvmPtrBits ++
                         ", Size of var: " ++ show (llvmWidthInBits other) ++
                         ", Var: " ++ show vaddr))
@@ -645,8 +669,8 @@ genSwitch env cond maybe_ids = do
 --   * LlvmEnv: The new enviornment
 --   * LlvmVar: The var holding the result of the expression
 --   * LlvmStatements: Any statements needed to evaluate the expression
---   * LlvmCmmTop: Any global data needed for this expression
-type ExprData = (LlvmEnv, LlvmVar, LlvmStatements, [LlvmCmmTop])
+--   * LlvmCmmDecl: Any global data needed for this expression
+type ExprData = (LlvmEnv, LlvmVar, LlvmStatements, [LlvmCmmDecl])
 
 -- | Values which can be passed to 'exprToVar' to configure its
 -- behaviour in certain circumstances.
@@ -732,7 +756,46 @@ genMachOp env _ op [x] = case op of
     MO_FF_Conv from to
         -> sameConv from (widthToLlvmFloat to) LM_Fptrunc LM_Fpext
 
-    a -> panic $ "genMachOp: unmatched unary CmmMachOp! (" ++ show a ++ ")"
+    -- Handle unsupported cases explicitly so we get a warning
+    -- of missing case when new MachOps added
+    MO_Add _          -> panicOp
+    MO_Mul _          -> panicOp
+    MO_Sub _          -> panicOp
+    MO_S_MulMayOflo _ -> panicOp
+    MO_S_Quot _       -> panicOp
+    MO_S_Rem _        -> panicOp
+    MO_U_MulMayOflo _ -> panicOp
+    MO_U_Quot _       -> panicOp
+    MO_U_Rem _        -> panicOp
+
+    MO_Eq  _          -> panicOp
+    MO_Ne  _          -> panicOp
+    MO_S_Ge _         -> panicOp
+    MO_S_Gt _         -> panicOp
+    MO_S_Le _         -> panicOp
+    MO_S_Lt _         -> panicOp
+    MO_U_Ge _         -> panicOp
+    MO_U_Gt _         -> panicOp
+    MO_U_Le _         -> panicOp
+    MO_U_Lt _         -> panicOp
+
+    MO_F_Add        _ -> panicOp
+    MO_F_Sub        _ -> panicOp
+    MO_F_Mul        _ -> panicOp
+    MO_F_Quot       _ -> panicOp
+    MO_F_Eq         _ -> panicOp
+    MO_F_Ne         _ -> panicOp
+    MO_F_Ge         _ -> panicOp
+    MO_F_Gt         _ -> panicOp
+    MO_F_Le         _ -> panicOp
+    MO_F_Lt         _ -> panicOp
+
+    MO_And          _ -> panicOp
+    MO_Or           _ -> panicOp
+    MO_Xor          _ -> panicOp
+    MO_Shl          _ -> panicOp
+    MO_U_Shr        _ -> panicOp
+    MO_S_Shr        _ -> panicOp
 
     where
         negate ty v2 negOp = do
@@ -757,6 +820,9 @@ genMachOp env _ op [x] = case op of
                  w | w < toWidth -> sameConv' expand
                  w | w > toWidth -> sameConv' reduce
                  _w              -> return x'
+        
+        panicOp = panic $ "LLVM.CodeGen.genMachOp: non unary op encourntered"
+                       ++ "with one argument! (" ++ show op ++ ")"
 
 -- Handle GlobalRegs pointers
 genMachOp env opt o@(MO_Add _) e@[(CmmReg (CmmGlobal r)), (CmmLit (CmmInt n _))]
@@ -841,7 +907,15 @@ genMachOp_slow env opt op [x, y] = case op of
     MO_U_Shr _ -> genBinMach LM_MO_LShr
     MO_S_Shr _ -> genBinMach LM_MO_AShr
 
-    a -> panic $ "genMachOp: unmatched binary CmmMachOp! (" ++ show a ++ ")"
+    MO_Not _       -> panicOp
+    MO_S_Neg _     -> panicOp
+    MO_F_Neg _     -> panicOp
+
+    MO_SF_Conv _ _ -> panicOp
+    MO_FS_Conv _ _ -> panicOp
+    MO_SS_Conv _ _ -> panicOp
+    MO_UU_Conv _ _ -> panicOp
+    MO_FF_Conv _ _ -> panicOp
 
     where
         binLlvmOp ty binOp = do
@@ -854,24 +928,14 @@ genMachOp_slow env opt op [x, y] = case op of
                             top1 ++ top2)
 
                 else do
-                    -- XXX: Error. Continue anyway so we can debug the generated
-                    -- ll file.
-                    let cmmToStr = (lines . show . llvmSDoc . PprCmm.pprExpr)
+                    -- Error. Continue anyway so we can debug the generated ll file.
+                    let cmmToStr = (lines . show . llvmSDoc . PprCmm.pprExpr (getLlvmPlatform env))
                     let dx = Comment $ map fsLit $ cmmToStr x
                     let dy = Comment $ map fsLit $ cmmToStr y
                     (v1, s1) <- doExpr (ty vx) $ binOp vx vy
                     let allStmts = stmts1 `appOL` stmts2 `snocOL` dx
                                     `snocOL` dy `snocOL` s1
                     return (env2, v1, allStmts, top1 ++ top2)
-
-                    -- let o = case binOp vx vy of
-                    --         Compare op _ _ -> show op
-                    --         LlvmOp  op _ _ -> show op
-                    --         _              -> "unknown"
-                    -- panic $ "genMachOp: comparison between different types ("
-                    --         ++ o ++ " "++ show vx ++ ", " ++ show vy ++ ")"
-                    --         ++ "\ne1: " ++ (show.llvmSDoc.PprCmm.pprExpr $ x)
-                    --         ++ "\ne2: " ++ (show.llvmSDoc.PprCmm.pprExpr $ y)
 
         -- | Need to use EOption here as Cmm expects word size results from
         -- comparisons while LLVM return i1. Need to extend to llvmWord type
@@ -933,6 +997,9 @@ genMachOp_slow env opt op [x, y] = case op of
 
                 else
                     panic $ "isSMulOK: Not bit type! (" ++ show word ++ ")"
+
+        panicOp = panic $ "LLVM.CodeGen.genMachOp_slow: unary op encourntered"
+                       ++ "with two arguments! (" ++ show op ++ ")"
 
 -- More then two expression, invalid!
 genMachOp_slow _ _ _ _ = panic "genMachOp: More then 2 expressions in MachOp!"
@@ -1018,7 +1085,7 @@ genLoad_slow env e ty = do
                     return (env', dvar, stmts `snocOL` cast `snocOL` load, tops)
 
          other -> pprPanic "exprToVar: CmmLoad expression is not right type!"
-                        (PprCmm.pprExpr e <+> text (
+                        (PprCmm.pprExpr (getLlvmPlatform env) e <+> text (
                             "Size of Ptr: " ++ show llvmPtrBits ++
                             ", Size of var: " ++ show (llvmWidthInBits other) ++
                             ", Var: " ++ show iptr))
@@ -1064,7 +1131,7 @@ genLit env (CmmFloat r w)
               nilOL, [])
 
 genLit env cmm@(CmmLabel l)
-  = let label = strCLabel_llvm l
+  = let label = strCLabel_llvm env l
         ty = funLookup label env
         lmty = cmmToLlvmType $ cmmLitType cmm
     in case ty of
@@ -1120,13 +1187,13 @@ genLit _ CmmHighStackMark
 --
 
 -- | Function prologue. Load STG arguments into variables for function.
-funPrologue :: UniqSM [LlvmStatement]
-funPrologue = liftM concat $ mapM getReg activeStgRegs
+funPrologue :: [LlvmStatement]
+funPrologue = concat $ map getReg activeStgRegs
     where getReg rr =
-            let reg = lmGlobalRegVar rr
-                arg = lmGlobalRegArg rr
+            let reg   = lmGlobalRegVar rr
+                arg   = lmGlobalRegArg rr
                 alloc = Assignment reg $ Alloca (pLower $ getVarType reg) 1
-            in return [alloc, Store arg reg]
+            in [alloc, Store arg reg]
 
 
 -- | Function epilogue. Load STG variables to use as argument for call.
@@ -1169,7 +1236,7 @@ trashStmts = concatOL $ map trashReg activeStgRegs
 -- with foreign functions.
 getHsFunc :: LlvmEnv -> CLabel -> UniqSM ExprData
 getHsFunc env lbl
-  = let fn = strCLabel_llvm lbl
+  = let fn = strCLabel_llvm env lbl
         ty    = funLookup fn env
     in case ty of
         -- Function in module in right form
@@ -1187,7 +1254,7 @@ getHsFunc env lbl
 
         -- label not in module, create external reference
         Nothing  -> do
-            let ty' = LMFunction $ llvmFunSig lbl ExternallyVisible
+            let ty' = LMFunction $ llvmFunSig env lbl ExternallyVisible
             let fun = LMGlobalVar fn ty' ExternallyVisible Nothing Nothing False
             let top = CmmData Data [([],[ty'])]
             let env' = funInsert fn ty' env

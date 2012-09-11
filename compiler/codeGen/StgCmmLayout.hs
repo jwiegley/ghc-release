@@ -6,6 +6,13 @@
 --
 -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module StgCmmLayout (
 	mkArgDescr, 
 	emitCall, emitReturn,
@@ -15,7 +22,7 @@ module StgCmmLayout (
 
 	slowCall, directCall, 
 
-	mkVirtHeapOffsets, getHpRelOffset, hpRel,
+	mkVirtHeapOffsets, mkVirtConstrOffsets, getHpRelOffset, hpRel,
 
 	stdInfoTableSizeB,
 	entryCode, closureInfoPtr,
@@ -23,7 +30,7 @@ module StgCmmLayout (
         cmmGetClosureType,
 	infoTable, infoTableClosureType,
 	infoTablePtrs, infoTableNonPtrs,
-	funInfoTable, makeRelativeRefTo
+	funInfoTable
   ) where
 
 
@@ -32,26 +39,20 @@ module StgCmmLayout (
 import StgCmmClosure
 import StgCmmEnv
 import StgCmmTicky
-import StgCmmUtils
 import StgCmmMonad
+import StgCmmUtils
 
 import MkGraph
 import SMRep
-import CmmDecl
-import CmmExpr
-import CmmUtils
+import Cmm
 import CLabel
 import StgSyn
-import DataCon
 import Id
 import Name
 import TyCon		( PrimRep(..) )
-import Unique
 import BasicTypes	( Arity )
+import DynFlags
 import StaticFlags
-
-import Bitmap
-import Data.Bits
 
 import Constants
 import Util
@@ -134,24 +135,27 @@ directCall :: CLabel -> Arity -> [StgArg] -> FCode ()
 -- Both arity and args include void args
 directCall lbl arity stg_args 
   = do	{ cmm_args <- getNonVoidArgAmodes stg_args
-	; direct_call "directCall" lbl arity cmm_args (argsLReps stg_args) }
+	; direct_call "directCall" lbl arity cmm_args (argsReps stg_args) }
 
 slowCall :: CmmExpr -> [StgArg] -> FCode ()
 -- (slowCall fun args) applies fun to args, returning the results to Sequel
 slowCall fun stg_args 
   = do	{ cmm_args <- getNonVoidArgAmodes stg_args
-	; slow_call fun cmm_args (argsLReps stg_args) }
+	; slow_call fun cmm_args (argsReps stg_args) }
 
 --------------
-direct_call :: String -> CLabel -> Arity -> [CmmExpr] -> [LRep] -> FCode ()
+direct_call :: String -> CLabel -> Arity -> [CmmExpr] -> [ArgRep] -> FCode ()
 -- NB1: (length args) may be less than (length reps), because
 --     the args exclude the void ones
 -- NB2: 'arity' refers to the *reps* 
 direct_call caller lbl arity args reps
   | debugIsOn && arity > length reps	-- Too few args
-  =  	    -- Caller should ensure that there enough args!  
-    pprPanic "direct_call" (text caller <+> ppr arity <+> ppr lbl <+> ppr (length reps)
-	     	  	    <+> ppr args <+> ppr reps )
+  = do -- Caller should ensure that there enough args!
+       dflags <- getDynFlags
+       let platform = targetPlatform dflags
+       pprPanic "direct_call" (text caller <+> ppr arity
+                           <+> pprPlatform platform lbl <+> ppr (length reps)
+                           <+> pprPlatform platform args <+> ppr reps )
 
   | null rest_reps     -- Precisely the right number of arguments
   = emitCall (NativeDirectCall, NativeReturn) target args
@@ -170,17 +174,19 @@ direct_call caller lbl arity args reps
     (fast_args, rest_args) = splitAt arg_arity args
 
 --------------
-slow_call :: CmmExpr -> [CmmExpr] -> [LRep] -> FCode ()
+slow_call :: CmmExpr -> [CmmExpr] -> [ArgRep] -> FCode ()
 slow_call fun args reps
-  = do call <- getCode $ direct_call "slow_call" (mkRtsApFastLabel rts_fun) arity args reps
-       emit $ mkComment $ mkFastString ("slow_call for " ++ showSDoc (ppr fun) ++
+  = do dflags <- getDynFlags
+       let platform = targetPlatform dflags
+       call <- getCode $ direct_call "slow_call" (mkRtsApFastLabel rts_fun) arity args reps
+       emit $ mkComment $ mkFastString ("slow_call for " ++ showSDoc (pprPlatform platform fun) ++
                                         " with pat " ++ showSDoc (ftext rts_fun))
        emit (mkAssign nodeReg fun <*> call)
   where
     (rts_fun, arity) = slowCallPattern reps
 
 -- These cases were found to cover about 99% of all slow calls:
-slowCallPattern :: [LRep] -> (FastString, Arity)
+slowCallPattern :: [ArgRep] -> (FastString, Arity)
 -- Returns the generic apply function and arity
 slowCallPattern (P: P: P: P: P: P: _) = (fsLit "stg_ap_pppppp", 6)
 slowCallPattern (P: P: P: P: P: _)    = (fsLit "stg_ap_ppppp", 5)
@@ -200,19 +206,19 @@ slowCallPattern []		      = (fsLit "stg_ap_0", 0)
 
 
 -------------------------------------------------------------------------
---	Classifying arguments: LRep
+--	Classifying arguments: ArgRep
 -------------------------------------------------------------------------
 
--- LRep is not exported (even abstractly)
+-- ArgRep is not exported (even abstractly)
 -- It's a local helper type for classification
 
-data LRep = P 	-- GC Ptr
+data ArgRep = P 	-- GC Ptr
 	  | N   -- One-word non-ptr
 	  | L	-- Two-word non-ptr (long)
 	  | V	-- Void
 	  | F	-- Float
 	  | D	-- Double
-instance Outputable LRep where
+instance Outputable ArgRep where
   ppr P = text "P"
   ppr N = text "N"
   ppr L = text "L"
@@ -220,31 +226,34 @@ instance Outputable LRep where
   ppr F = text "F"
   ppr D = text "D"
 
-toLRep :: PrimRep -> LRep
-toLRep VoidRep 	 = V
-toLRep PtrRep  	 = P
-toLRep IntRep  	 = N
-toLRep WordRep 	 = N
-toLRep AddrRep 	 = N
-toLRep Int64Rep  = L
-toLRep Word64Rep = L
-toLRep FloatRep  = F
-toLRep DoubleRep = D
+toArgRep :: PrimRep -> ArgRep
+toArgRep VoidRep   = V
+toArgRep PtrRep    = P
+toArgRep IntRep    = N
+toArgRep WordRep   = N
+toArgRep AddrRep   = N
+toArgRep Int64Rep  = L
+toArgRep Word64Rep = L
+toArgRep FloatRep  = F
+toArgRep DoubleRep = D
 
-isNonV :: LRep -> Bool
+isNonV :: ArgRep -> Bool
 isNonV V = False
 isNonV _ = True
 
-argsLReps :: [StgArg] -> [LRep]
-argsLReps = map (toLRep . argPrimRep)
+argsReps :: [StgArg] -> [ArgRep]
+argsReps = map (toArgRep . argPrimRep)
 
-lRepSizeW :: LRep -> WordOff		-- Size in words
-lRepSizeW N = 1
-lRepSizeW P = 1
-lRepSizeW F = 1
-lRepSizeW L = wORD64_SIZE `quot` wORD_SIZE
-lRepSizeW D = dOUBLE_SIZE `quot` wORD_SIZE
-lRepSizeW V = 0
+argRepSizeW :: ArgRep -> WordOff		-- Size in words
+argRepSizeW N = 1
+argRepSizeW P = 1
+argRepSizeW F = 1
+argRepSizeW L = wORD64_SIZE `quot` wORD_SIZE
+argRepSizeW D = dOUBLE_SIZE `quot` wORD_SIZE
+argRepSizeW V = 0
+
+idArgRep :: Id -> ArgRep
+idArgRep = toArgRep . idPrimRep
 
 -------------------------------------------------------------------------
 ----	Laying out objects on the heap and stack
@@ -290,8 +299,12 @@ mkVirtHeapOffsets is_thunk things
 		| otherwise  = fixedHdrSize
 
     computeOffset wds_so_far (rep, thing)
-      = (wds_so_far + lRepSizeW (toLRep rep), 
+      = (wds_so_far + argRepSizeW (toArgRep rep), 
 	 (NonVoid thing, hdr_size + wds_so_far))
+
+mkVirtConstrOffsets :: [(PrimRep,a)] -> (WordOff, WordOff, [(NonVoid a, VirtualHpOffset)])
+-- Just like mkVirtHeapOffsets, but for constructors
+mkVirtConstrOffsets = mkVirtHeapOffsets False
 
 
 -------------------------------------------------------------------------
@@ -309,36 +322,23 @@ mkVirtHeapOffsets is_thunk things
 -- bring in ARG_P, ARG_N, etc.
 #include "../includes/rts/storage/FunTypes.h"
 
--------------------------
--- argDescrType :: ArgDescr -> StgHalfWord
--- -- The "argument type" RTS field type
--- argDescrType (ArgSpec n) = n
--- argDescrType (ArgGen liveness)
---   | isBigLiveness liveness = ARG_GEN_BIG
---   | otherwise		   = ARG_GEN
-
-
 mkArgDescr :: Name -> [Id] -> FCode ArgDescr
-mkArgDescr nm args 
+mkArgDescr _nm args 
   = case stdPattern arg_reps of
 	Just spec_id -> return (ArgSpec spec_id)
-	Nothing      -> do { liveness <- mkLiveness nm size bitmap
-			   ; return (ArgGen liveness) }
+	Nothing      -> return (ArgGen arg_bits)
   where
-    arg_reps = filter isNonV (map (toLRep . idPrimRep) args)
+    arg_bits = argBits arg_reps
+    arg_reps = filter isNonV (map idArgRep args)
 	-- Getting rid of voids eases matching of standard patterns
 
-    bitmap   = mkBitmap arg_bits
-    arg_bits = argBits arg_reps
-    size     = length arg_bits
-
-argBits :: [LRep] -> [Bool]	-- True for non-ptr, False for ptr
+argBits :: [ArgRep] -> [Bool]	-- True for non-ptr, False for ptr
 argBits [] 		= []
 argBits (P   : args) = False : argBits args
-argBits (arg : args) = take (lRepSizeW arg) (repeat True) ++ argBits args
+argBits (arg : args) = take (argRepSizeW arg) (repeat True) ++ argBits args
 
 ----------------------
-stdPattern :: [LRep] -> Maybe StgHalfWord
+stdPattern :: [ArgRep] -> Maybe StgHalfWord
 stdPattern reps 
   = case reps of
 	[]  -> Just ARG_NONE	-- just void args, probably
@@ -370,78 +370,6 @@ stdPattern reps
 
 -------------------------------------------------------------------------
 --
---	Liveness info
---
--------------------------------------------------------------------------
-
--- TODO: This along with 'mkArgDescr' should be unified
--- with 'CmmInfo.mkLiveness'.  However that would require
--- potentially invasive changes to the 'ClosureInfo' type.
--- For now, 'CmmInfo.mkLiveness' handles only continuations and
--- this one handles liveness everything else.  Another distinction
--- between these two is that 'CmmInfo.mkLiveness' information
--- about the stack layout, and this one is information about
--- the heap layout of PAPs.
-mkLiveness :: Name -> Int -> Bitmap -> FCode Liveness
-mkLiveness name size bits
-  | size > mAX_SMALL_BITMAP_SIZE		-- Bitmap does not fit in one word
-  = do	{ let lbl = mkBitmapLabel (getUnique name)
-	; emitRODataLits lbl ( mkWordCLit (fromIntegral size)
-		             : map mkWordCLit bits)
-	; return (BigLiveness lbl) }
-  
-  | otherwise		-- Bitmap fits in one word
-  = let
-        small_bits = case bits of 
-			[]  -> 0
-                        [b] -> b
-			_   -> panic "livenessToAddrMode"
-    in
-    return (smallLiveness size small_bits)
-
-smallLiveness :: Int -> StgWord -> Liveness
-smallLiveness size small_bits = SmallLiveness bits
-  where bits = fromIntegral size .|. (small_bits `shiftL` bITMAP_BITS_SHIFT)
-
--------------------
--- isBigLiveness :: Liveness -> Bool
--- isBigLiveness (BigLiveness _)   = True
--- isBigLiveness (SmallLiveness _) = False
-
--------------------
--- mkLivenessCLit :: Liveness -> CmmLit
--- mkLivenessCLit (BigLiveness lbl)    = CmmLabel lbl
--- mkLivenessCLit (SmallLiveness bits) = mkWordCLit bits
-
-
--------------------------------------------------------------------------
---
---		Bitmap describing register liveness
---		across GC when doing a "generic" heap check
---		(a RET_DYN stack frame).
---
--- NB. Must agree with these macros (currently in StgMacros.h): 
--- GET_NON_PTRS(), GET_PTRS(), GET_LIVENESS().
--------------------------------------------------------------------------
-
-{- 	Not used in new code gen
-mkRegLiveness :: [(Id, GlobalReg)] -> Int -> Int -> StgWord
-mkRegLiveness regs ptrs nptrs
-  = (fromIntegral nptrs `shiftL` 16) .|. 
-    (fromIntegral ptrs  `shiftL` 24) .|.
-    all_non_ptrs `xor` reg_bits regs
-  where
-    all_non_ptrs = 0xff
-
-    reg_bits [] = 0
-    reg_bits ((id, VanillaReg i) : regs) | isGcPtrRep (idPrimRep id)
-  	= (1 `shiftL` (i - 1)) .|. reg_bits regs
-    reg_bits (_ : regs)
-	= reg_bits regs
--}
- 
--------------------------------------------------------------------------
---
 --	Generating the info table and code for a closure
 --
 -------------------------------------------------------------------------
@@ -454,12 +382,13 @@ mkRegLiveness regs ptrs nptrs
 
 emitClosureProcAndInfoTable :: Bool                    -- top-level? 
                             -> Id                      -- name of the closure
-                            -> ClosureInfo             -- lots of info abt the closure
+                            -> LambdaFormInfo
+                            -> CmmInfoTable
                             -> [NonVoid Id]            -- incoming arguments
                             -> ((Int, LocalReg, [LocalReg]) -> FCode ()) -- function body
                             -> FCode ()
-emitClosureProcAndInfoTable top_lvl bndr cl_info args body
- = do	{ let lf_info = closureLFInfo cl_info
+emitClosureProcAndInfoTable top_lvl bndr lf_info info_tbl args body
+ = do   {
         -- Bind the binder itself, but only if it's not a top-level
         -- binding. We need non-top let-bindings to refer to the
         -- top-level binding, which this binding would incorrectly shadow.
@@ -471,35 +400,19 @@ emitClosureProcAndInfoTable top_lvl bndr cl_info args body
               conv  = if nodeMustPointToIt lf_info then NativeNodeCall
                                                    else NativeDirectCall
               (offset, _) = mkCallEntry conv args'
-        ; emitClosureAndInfoTable cl_info conv args' $ body (offset, node, arg_regs)
+        ; emitClosureAndInfoTable info_tbl conv args' $ body (offset, node, arg_regs)
         }
 
 -- Data constructors need closures, but not with all the argument handling
 -- needed for functions. The shared part goes here.
 emitClosureAndInfoTable ::
-  ClosureInfo -> Convention -> [LocalReg] -> FCode () -> FCode ()
-emitClosureAndInfoTable cl_info conv args body
-  = do { info <- mkCmmInfo cl_info
+  CmmInfoTable -> Convention -> [LocalReg] -> FCode () -> FCode ()
+emitClosureAndInfoTable info_tbl conv args body
+  = do { dflags <- getDynFlags
        ; blks <- getCode body
-       ; emitProcWithConvention conv info (entryLabelFromCI cl_info) args blks
+       ; let entry_lbl = toEntryLbl (targetPlatform dflags) (cit_lbl info_tbl)
+       ; emitProcWithConvention conv info_tbl entry_lbl args blks
        }
-
--- Convert from 'ClosureInfo' to 'CmmInfoTable'.
--- Not used for return points.  (The 'smRepClosureTypeInt' call would panic.)
-mkCmmInfo :: ClosureInfo -> FCode CmmInfoTable
-mkCmmInfo cl_info
-  = do	{ info <- closureTypeInfo cl_info k_with_con_name return 
-        ; prof <- if opt_SccProfilingOn then
-                    do fd_lit <- mkStringCLit (closureTypeDescr cl_info)
-	               ad_lit <- mkStringCLit (closureValDescr  cl_info)
-	               return $ ProfilingInfo fd_lit ad_lit
-                  else return $ ProfilingInfo (mkIntCLit 0) (mkIntCLit 0)
-	; return (CmmInfoTable (infoTableLabelFromCI cl_info) (isStaticClosure cl_info) prof cl_type info) }
-  where
-    k_with_con_name con_info con info_lbl =
-      do cstr <- mkByteStringCLit $ dataConIdentity con
-         return $ con_info $ makeRelativeRefTo info_lbl cstr
-    cl_type  = smRepClosureTypeInt (closureSMRep cl_info)
 
 -----------------------------------------------------------------------------
 --
@@ -612,37 +525,3 @@ funInfoTable info_ptr
   = cmmOffsetW info_ptr (1 + stdInfoTableSizeW)
 				-- Past the entry code pointer
 
--------------------------------------------------------------------------
---
---	Static reference tables
---
--------------------------------------------------------------------------
-
--- srtLabelAndLength :: C_SRT -> CLabel -> (CmmLit, StgHalfWord)
--- srtLabelAndLength NoC_SRT _		
---   = (zeroCLit, 0)
--- srtLabelAndLength (C_SRT lbl off bitmap) info_lbl
---   = (makeRelativeRefTo info_lbl $ cmmLabelOffW lbl off, bitmap)
-
--------------------------------------------------------------------------
---
---	Position independent code
---
--------------------------------------------------------------------------
--- In order to support position independent code, we mustn't put absolute
--- references into read-only space. Info tables in the tablesNextToCode
--- case must be in .text, which is read-only, so we doctor the CmmLits
--- to use relative offsets instead.
-
--- Note that this is done even when the -fPIC flag is not specified,
--- as we want to keep binary compatibility between PIC and non-PIC.
-
-makeRelativeRefTo :: CLabel -> CmmLit -> CmmLit
-        
-makeRelativeRefTo info_lbl (CmmLabel lbl)
-  | tablesNextToCode
-  = CmmLabelDiffOff lbl info_lbl 0
-makeRelativeRefTo info_lbl (CmmLabelOff lbl off)
-  | tablesNextToCode
-  = CmmLabelDiffOff lbl info_lbl off
-makeRelativeRefTo _ lit = lit

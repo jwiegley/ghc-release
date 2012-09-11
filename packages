@@ -38,6 +38,10 @@
 #     both give this property
 #
 # Lines that start with a '#' are comments.
+#
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#    localpath                tag           remotepath                          VCS
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .                               -           ghc.git                             git
 ghc-tarballs                    -           ghc-tarballs.git                    git
 utils/hsc2hs                    -           hsc2hs.git                          git
@@ -46,8 +50,9 @@ libraries/array                 -           packages/array.git                  
 libraries/base                  -           packages/base.git                   git
 libraries/binary                -           packages/binary.git                 git
 libraries/bytestring            -           packages/bytestring.git             git
-libraries/Cabal                 -           packages/cabal-1.12.git             git
+libraries/Cabal                 -           packages/cabal-1.14.git             git
 libraries/containers            -           packages/containers.git             git
+libraries/deepseq               -           packages/deepseq.git                git
 libraries/directory             -           packages/directory.git              git
 libraries/extensible-exceptions -           packages/extensible-exceptions.git  git
 libraries/filepath              -           packages/filepath.git               git
@@ -72,7 +77,6 @@ libraries/Win32                 -           packages/Win32.git                  
 libraries/xhtml                 -           packages/xhtml.git                  git
 testsuite                       testsuite   testsuite.git                       git
 nofib                           nofib       nofib.git                           git
-libraries/deepseq               extra       packages/deepseq.git                git
 libraries/parallel              extra       packages/parallel.git               git
 libraries/stm                   extra       packages/stm.git                    git
 libraries/random                dph         packages/random.git                 git

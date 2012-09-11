@@ -6,6 +6,13 @@
 TcPat: Typechecking patterns
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module TcPat ( tcLetPat, TcSigFun, TcSigInfo(..), TcPragFun 
              , LetBndrSpec(..), addInlinePrags, warnPrags
              , tcPat, tcPats, newNoSigLetBndr, newSigLetBndr
@@ -28,7 +35,7 @@ import TcType
 import TcUnify
 import TcHsType
 import TysWiredIn
-import Coercion
+import TcEvidence
 import StaticFlags
 import TyCon
 import DataCon
@@ -192,23 +199,23 @@ res_ty free vars.
 %************************************************************************
 
 \begin{code}
-tcPatBndr :: PatEnv -> Name -> TcSigmaType -> TcM (Coercion, TcId)
+tcPatBndr :: PatEnv -> Name -> TcSigmaType -> TcM (TcCoercion, TcId)
 -- (coi, xp) = tcPatBndr penv x pat_ty
 -- Then coi : pat_ty ~ typeof(xp)
 --
 tcPatBndr (PE { pe_ctxt = LetPat lookup_sig no_gen}) bndr_name pat_ty
   | Just sig <- lookup_sig bndr_name
   = do { bndr_id <- newSigLetBndr no_gen bndr_name sig
-       ; coi <- unifyPatType (idType bndr_id) pat_ty
-       ; return (coi, bndr_id) }
+       ; co <- unifyPatType (idType bndr_id) pat_ty
+       ; return (co, bndr_id) }
       
   | otherwise
   = do { bndr_id <- newNoSigLetBndr no_gen bndr_name pat_ty
-       ; return (mkReflCo pat_ty, bndr_id) }
+       ; return (mkTcReflCo pat_ty, bndr_id) }
 
 tcPatBndr (PE { pe_ctxt = _lam_or_proc }) bndr_name pat_ty
   = do { bndr <- mkLocalBinder bndr_name pat_ty
-       ; return (mkReflCo pat_ty, bndr) }
+       ; return (mkTcReflCo pat_ty, bndr) }
 
 ------------
 newSigLetBndr :: LetBndrSpec -> Name -> TcSigInfo -> TcM TcId
@@ -370,9 +377,9 @@ tc_pat	:: PatEnv
                 a)		-- Result of thing inside
 
 tc_pat penv (VarPat name) pat_ty thing_inside
-  = do	{ (coi, id) <- tcPatBndr penv name pat_ty
-    	; res <- tcExtendIdEnv1 name id thing_inside
-        ; return (mkHsWrapPatCo coi (VarPat id) pat_ty, res) }
+  = do	{ (co, id) <- tcPatBndr penv name pat_ty
+        ; res <- tcExtendIdEnv1 name id thing_inside
+        ; return (mkHsWrapPatCo co (VarPat id) pat_ty, res) }
 
 tc_pat penv (ParPat pat) pat_ty thing_inside
   = do	{ (pat', res) <- tc_lpat pat pat_ty penv thing_inside
@@ -412,8 +419,8 @@ tc_pat _ (WildPat _) pat_ty thing_inside
 	; return (WildPat pat_ty, res) }
 
 tc_pat penv (AsPat (L nm_loc name) pat) pat_ty thing_inside
-  = do	{ (coi, bndr_id) <- setSrcSpan nm_loc (tcPatBndr penv name pat_ty)
-	; (pat', res) <- tcExtendIdEnv1 name bndr_id $
+  = do	{ (co, bndr_id) <- setSrcSpan nm_loc (tcPatBndr penv name pat_ty)
+        ; (pat', res) <- tcExtendIdEnv1 name bndr_id $
 			 tc_lpat pat (idType bndr_id) penv thing_inside
 	    -- NB: if we do inference on:
 	    --		\ (y@(x::forall a. a->a)) = e
@@ -422,7 +429,7 @@ tc_pat penv (AsPat (L nm_loc name) pat) pat_ty thing_inside
 	    -- perhaps be fixed, but only with a bit more work.
 	    --
 	    -- If you fix it, don't forget the bindInstsOfPatIds!
-	; return (mkHsWrapPatCo coi (AsPat (L nm_loc bndr_id) pat') pat_ty, res) }
+	; return (mkHsWrapPatCo co (AsPat (L nm_loc bndr_id) pat') pat_ty, res) }
 
 tc_pat penv vpat@(ViewPat expr pat _) overall_pat_ty thing_inside 
   = do	{ checkUnboxedTuple overall_pat_ty $
@@ -441,13 +448,13 @@ tc_pat penv vpat@(ViewPat expr pat _) overall_pat_ty thing_inside
          -- (view -> f)    where view :: _ -> forall b. b
          -- we will only be able to use view at one instantation in the
          -- rest of the view
-	; (expr_coi, pat_ty) <- tcInfer $ \ pat_ty -> 
-		unifyPatType expr'_inferred (mkFunTy overall_pat_ty pat_ty)
-
+	; (expr_co, pat_ty) <- tcInfer $ \ pat_ty -> 
+		unifyType expr'_inferred (mkFunTy overall_pat_ty pat_ty)
+        
          -- pattern must have pat_ty
         ; (pat', res) <- tc_lpat pat pat_ty penv thing_inside
 
-	; return (ViewPat (mkLHsWrapCo expr_coi expr') pat' overall_pat_ty, res) }
+	; return (ViewPat (mkLHsWrapCo expr_co expr') pat' overall_pat_ty, res) }
 
 -- Type signatures in patterns
 -- See Note [Pattern coercions] below
@@ -475,7 +482,7 @@ tc_pat penv (PArrPat pats _) pat_ty thing_inside
         }
 
 tc_pat penv (TuplePat pats boxity _) pat_ty thing_inside
-  = do	{ let tc = tupleTyCon boxity (length pats)
+  = do	{ let tc = tupleTyCon (boxityNormalTupleSort boxity) (length pats)
         ; (coi, arg_tys) <- matchExpectedPatTy (matchExpectedTyConApp tc) pat_ty
 	; (pats', res) <- tc_lpats penv pats arg_tys thing_inside
 
@@ -504,10 +511,10 @@ tc_pat penv (ConPatIn con arg_pats) pat_ty thing_inside
 -- Literal patterns
 tc_pat _ (LitPat simple_lit) pat_ty thing_inside
   = do	{ let lit_ty = hsLitType simple_lit
-	; coi <- unifyPatType lit_ty pat_ty
+	; co <- unifyPatType lit_ty pat_ty
 		-- coi is of kind: pat_ty ~ lit_ty
 	; res <- thing_inside 
-	; return ( mkHsWrapPatCo coi (LitPat simple_lit) pat_ty 
+	; return ( mkHsWrapPatCo co (LitPat simple_lit) pat_ty 
                  , res) }
 
 ------------------------
@@ -526,8 +533,8 @@ tc_pat _ (NPat over_lit mb_neg eq) pat_ty thing_inside
 	; return (NPat lit' mb_neg' eq', res) }
 
 tc_pat penv (NPlusKPat (L nm_loc name) lit ge minus) pat_ty thing_inside
-  = do	{ (coi, bndr_id) <- setSrcSpan nm_loc (tcPatBndr penv name pat_ty)
- 	; let pat_ty' = idType bndr_id
+  = do	{ (co, bndr_id) <- setSrcSpan nm_loc (tcPatBndr penv name pat_ty)
+        ; let pat_ty' = idType bndr_id
 	      orig    = LiteralOrigin lit
 	; lit' <- newOverloadedLit orig lit pat_ty'
 
@@ -542,19 +549,19 @@ tc_pat penv (NPlusKPat (L nm_loc name) lit ge minus) pat_ty thing_inside
 	; instStupidTheta orig [mkClassPred icls [pat_ty']]	
     
 	; res <- tcExtendIdEnv1 name bndr_id thing_inside
-	; return (mkHsWrapPatCo coi pat' pat_ty, res) }
+	; return (mkHsWrapPatCo co pat' pat_ty, res) }
 
 tc_pat _ _other_pat _ _ = panic "tc_pat" 	-- ConPatOut, SigPatOut
 
 ----------------
-unifyPatType :: TcType -> TcType -> TcM Coercion
+unifyPatType :: TcType -> TcType -> TcM TcCoercion
 -- In patterns we want a coercion from the
 -- context type (expected) to the actual pattern type
 -- But we don't want to reverse the args to unifyType because
 -- that controls the actual/expected stuff in error messages
 unifyPatType actual_ty expected_ty
   = do { coi <- unifyType actual_ty expected_ty
-       ; return (mkSymCo coi) }
+       ; return (mkTcSymCo coi) }
 \end{code}
 
 Note [Hopping the LIE in lazy patterns]
@@ -665,15 +672,14 @@ tcConPat penv (L con_span con_name) pat_ty arg_pats thing_inside
 	; setSrcSpan con_span $ addDataConStupidTheta data_con ctxt_res_tys
 
 	; checkExistentials ex_tvs penv 
-        ; ex_tvs' <- tcInstSuperSkolTyVars ex_tvs
+        ; (tenv, ex_tvs') <- tcInstSuperSkolTyVarsX
+                               (zipTopTvSubst univ_tvs ctxt_res_tys) ex_tvs
                      -- Get location from monad, not from ex_tvs
 
         ; let pat_ty' = mkTyConApp tycon ctxt_res_tys
 	      -- pat_ty' is type of the actual constructor application
               -- pat_ty' /= pat_ty iff coi /= IdCo
               
-	      tenv     = zipTopTvSubst (univ_tvs     ++ ex_tvs)
-				       (ctxt_res_tys ++ mkTyVarTys ex_tvs')
 	      arg_tys' = substTys tenv arg_tys
 
 	; if null ex_tvs && null eq_spec && null theta
@@ -720,14 +726,14 @@ tcConPat penv (L con_span con_name) pat_ty arg_pats thing_inside
 	} }
 
 ----------------------------
-matchExpectedPatTy :: (TcRhoType -> TcM (Coercion, a))
+matchExpectedPatTy :: (TcRhoType -> TcM (TcCoercion, a))
                     -> TcRhoType -> TcM (HsWrapper, a) 
 -- See Note [Matching polytyped patterns]
 -- Returns a wrapper : pat_ty ~ inner_ty
 matchExpectedPatTy inner_match pat_ty
   | null tvs && null theta
-  = do { (coi, res) <- inner_match pat_ty
-       ; return (coToHsWrapper (mkSymCo coi), res) }
+  = do { (co, res) <- inner_match pat_ty
+       ; return (coToHsWrapper (mkTcSymCo co), res) }
        	 -- The Sym is because the inner_match returns a coercion
 	 -- that is the other way round to matchExpectedPatTy
 
@@ -743,7 +749,7 @@ matchExpectedPatTy inner_match pat_ty
 matchExpectedConTy :: TyCon  	 -- The TyCon that this data 
 		    		 -- constructor actually returns
 		   -> TcRhoType  -- The type of the pattern
-		   -> TcM (Coercion, [TcSigmaType])
+		   -> TcM (TcCoercion, [TcSigmaType])
 -- See Note [Matching constructor patterns]
 -- Returns a coercion : T ty1 ... tyn ~ pat_ty
 -- This is the same way round as matchExpectedListTy etc
@@ -755,13 +761,13 @@ matchExpectedConTy data_tc pat_ty
   = do { (_, tys, subst) <- tcInstTyVars (tyConTyVars data_tc)
        	     -- tys = [ty1,ty2]
 
-       ; coi1 <- unifyType (mkTyConApp fam_tc (substTys subst fam_args)) pat_ty
-       	     -- coi1 : T (ty1,ty2) ~ pat_ty
+       ; co1 <- unifyType (mkTyConApp fam_tc (substTys subst fam_args)) pat_ty
+       	     -- co1 : T (ty1,ty2) ~ pat_ty
 
-       ; let coi2 = mkAxInstCo co_tc tys
-       	     -- coi2 : T (ty1,ty2) ~ T7 ty1 ty2
+       ; let co2 = mkTcAxInstCo co_tc tys
+       	     -- co2 : T (ty1,ty2) ~ T7 ty1 ty2
 
-       ; return (mkTransCo (mkSymCo coi2) coi1, tys) }
+       ; return (mkTcSymCo co2 `mkTcTransCo` co1, tys) }
 
   | otherwise
   = matchExpectedTyConApp data_tc pat_ty

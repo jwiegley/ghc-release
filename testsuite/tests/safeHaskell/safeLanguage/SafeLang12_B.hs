@@ -1,6 +1,6 @@
 {-# LANGUAGE Safe #-}
 {-# LANGUAGE TemplateHaskell #-}
-module SafeLang11_B ( Class(..), mkSimpleClass ) where
+module SafeLang12_B ( Class(..), mkSimpleClass ) where
 
 import Language.Haskell.TH
 
@@ -14,5 +14,4 @@ mkSimpleClass name = do
 	ClassI (ClassD [] cname [_] [] [SigD mname _]) _ <- reify ''Class
 	return [InstanceD [] (AppT (ConT cname) (ConT dname)) [FunD mname
             [Clause [] (NormalB (ConE conname)) []]]]
-
 

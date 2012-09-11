@@ -1,4 +1,5 @@
 \begin{code}
+{-# LANGUAGE Unsafe #-}
 {-# LANGUAGE CPP
            , NoImplicitPrelude
            , BangPatterns
@@ -48,6 +49,8 @@ module GHC.Conc.Sync
         , forkOnWithUnmask
         , numCapabilities -- :: Int
         , getNumCapabilities -- :: IO Int
+        , setNumCapabilities -- :: Int -> IO ()
+        , getNumProcessors   -- :: IO Int
         , numSparks      -- :: IO Int
         , childHandler  -- :: Exception -> IO ()
         , myThreadId    -- :: IO ThreadId
@@ -186,13 +189,13 @@ thread.
 The new thread will be a lightweight thread; if you want to use a foreign
 library that uses thread-local storage, use 'Control.Concurrent.forkOS' instead.
 
-GHC note: the new thread inherits the /masked/ state of the parent 
+GHC note: the new thread inherits the /masked/ state of the parent
 (see 'Control.Exception.mask').
 
 The newly created thread has an exception handler that discards the
 exceptions 'BlockedIndefinitelyOnMVar', 'BlockedIndefinitelyOnSTM', and
 'ThreadKilled', and passes all other exceptions to the uncaught
-exception handler (see 'setUncaughtExceptionHandler').
+exception handler.
 -}
 forkIO :: IO () -> IO ThreadId
 forkIO action = IO $ \ s ->
@@ -269,7 +272,7 @@ forkOnWithUnmask cpu io = forkOn cpu (io unsafeUnmask)
 -- Haskell threads that can run truly simultaneously at any given
 -- time, and is typically set to the number of physical processor cores on
 -- the machine.
--- 
+--
 -- Strictly speaking it is better to use 'getNumCapabilities', because
 -- the number of capabilities might vary at runtime.
 --
@@ -298,6 +301,27 @@ getNumCapabilities :: IO Int
 getNumCapabilities = do
    n <- peek n_capabilities
    return (fromIntegral n)
+
+{- |
+Set the number of Haskell threads that can run truly simultaneously
+(on separate physical processors) at any given time.
+
+GHC notes: in the current implementation, the value may only be
+/increased/, not decreased, by calling 'setNumCapabilities'.  The
+initial value is given by the @+RTS -N@ flag, and the current value
+may be obtained using 'getNumCapabilities'.
+-}
+setNumCapabilities :: Int -> IO ()
+setNumCapabilities i = c_setNumCapabilities (fromIntegral i)
+
+foreign import ccall safe "setNumCapabilities"
+  c_setNumCapabilities :: CUInt -> IO ()
+
+getNumProcessors :: IO Int
+getNumProcessors = fmap fromIntegral c_getNumberOfProcessors
+
+foreign import ccall unsafe "getNumberOfProcessors"
+  c_getNumberOfProcessors :: IO CUInt
 
 -- | Returns the number of sparks currently in the local spark pool
 numSparks :: IO Int
@@ -654,7 +678,7 @@ alwaysSucceeds i = do ( i >> retry ) `orElse` ( return () )
 -- False or raising an exception are both treated as invariant failures.
 always :: STM Bool -> STM ()
 always i = alwaysSucceeds ( do v <- i
-                               if (v) then return () else ( error "Transacional invariant violation" ) )
+                               if (v) then return () else ( error "Transactional invariant violation" ) )
 
 -- |Shared memory locations that support atomic memory transactions.
 data TVar a = TVar (TVar# RealWorld a)

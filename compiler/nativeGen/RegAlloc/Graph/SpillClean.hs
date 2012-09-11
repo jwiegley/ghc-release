@@ -23,6 +23,13 @@
 --	This also works if the reloads in B1\/B2 were spills instead, because
 --	spilling %r1 to a slot makes that slot have the same value as %r1.
 --
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module RegAlloc.Graph.SpillClean (
 	cleanSpills
 )
@@ -55,7 +62,7 @@ type Slot = Int
 -- | Clean out unneeded spill\/reloads from this top level thing.
 cleanSpills
     :: Instruction instr
-    => Platform -> LiveCmmTop statics instr -> LiveCmmTop statics instr
+    => Platform -> LiveCmmDecl statics instr -> LiveCmmDecl statics instr
 
 cleanSpills platform cmm
     = evalState (cleanSpin platform 0 cmm) initCleanS
@@ -65,8 +72,8 @@ cleanSpin
     :: Instruction instr
     => Platform
     -> Int
-    -> LiveCmmTop statics instr
-    -> CleanM (LiveCmmTop statics instr)
+    -> LiveCmmDecl statics instr
+    -> CleanM (LiveCmmDecl statics instr)
 
 {-
 cleanSpin _ spinCount code
@@ -287,8 +294,8 @@ cleanReload _ _ _ _
 -- 
 cleanTopBackward
 	:: Instruction instr
-	=> LiveCmmTop statics instr
-	-> CleanM (LiveCmmTop statics instr)
+	=> LiveCmmDecl statics instr
+	-> CleanM (LiveCmmDecl statics instr)
 
 cleanTopBackward cmm
  = case cmm of

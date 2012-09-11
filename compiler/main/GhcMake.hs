@@ -9,6 +9,13 @@
 --
 -- -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module GhcMake( 
   depanal, 
   load, LoadHowMuch(..),
@@ -31,7 +38,7 @@ import Module
 import HscTypes
 import ErrUtils
 import DynFlags
-import HsSyn hiding ((<.>))
+import HsSyn
 import Finder
 import HeaderInfo
 import TcIface		( typecheckIface )
@@ -583,6 +590,9 @@ checkStability hpt sccs all_home_mods = foldl checkSCC ([],[]) sccs
 		-- especially if the source was automatically generated
 		-- and compiled.  Using >= is slightly unsafe, but it matches
 		-- make's behaviour.
+                --
+                -- But see #5527, where someone ran into this and it caused
+                -- a problem.
 
 	bco_ok ms
 	  = case lookupUFM hpt (ms_mod_name ms) of

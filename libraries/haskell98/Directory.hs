@@ -1,12 +1,16 @@
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Trustworthy #-}
+#endif
+
 module Directory (
-    Permissions( Permissions, readable, writable, executable, searchable ), 
-    createDirectory, removeDirectory, removeFile, 
-    renameDirectory, renameFile, getDirectoryContents,
-    getCurrentDirectory, setCurrentDirectory,
-    doesFileExist, doesDirectoryExist,
-    getPermissions, setPermissions,
-    getModificationTime 
-  ) where
+        Permissions( Permissions, readable, writable, executable, searchable ), 
+        createDirectory, removeDirectory, removeFile, 
+        renameDirectory, renameFile, getDirectoryContents,
+        getCurrentDirectory, setCurrentDirectory,
+        doesFileExist, doesDirectoryExist,
+        getPermissions, setPermissions,
+        getModificationTime 
+    ) where
 
 import System.Directory hiding (Permissions,
                                 readable, writable, executable, searchable,

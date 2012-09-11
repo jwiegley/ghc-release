@@ -60,7 +60,7 @@ nursery *nurseries = NULL;     /* array of nurseries, size == n_capabilities */
 Mutex sm_mutex;
 #endif
 
-static void allocNurseries ( void );
+static void allocNurseries (nat from, nat to);
 
 static void
 initGeneration (generation *gen, int g)
@@ -94,7 +94,7 @@ initGeneration (generation *gen, int g)
 void
 initStorage( void )
 {
-    nat g, n;
+  nat g;
 
   if (generations != NULL) {
       // multi-init protection
@@ -146,9 +146,6 @@ initStorage( void )
   g0 = &generations[0];
   oldest_gen = &generations[RtsFlags.GcFlags.generations-1];
 
-  nurseries = stgMallocBytes(n_capabilities * sizeof(struct nursery_),
-                             "initStorage: nurseries");
-  
   /* Set up the destination pointers in each younger gen. step */
   for (g = 0; g < RtsFlags.GcFlags.generations-1; g++) {
       generations[g].to = &generations[g+1];
@@ -168,14 +165,6 @@ initStorage( void )
 
   generations[0].max_blocks = 0;
 
-  /* The allocation area.  Policy: keep the allocation area
-   * small to begin with, even if we have a large suggested heap
-   * size.  Reason: we're going to do a major collection first, and we
-   * don't want it to be a big one.  This vague idea is borne out by 
-   * rigorous experimental evidence.
-   */
-  allocNurseries();
-
   weak_ptr_list = NULL;
   caf_list = END_OF_STATIC_LIST;
   revertible_caf_list = END_OF_STATIC_LIST;
@@ -192,19 +181,49 @@ initStorage( void )
 
   N = 0;
 
-  // allocate a block for each mut list
-  for (n = 0; n < n_capabilities; n++) {
-      for (g = 1; g < RtsFlags.GcFlags.generations; g++) {
-          capabilities[n].mut_lists[g] = allocBlock();
-      }
-  }
-
-  initGcThreads();
+  storageAddCapabilities(0, n_capabilities);
 
   IF_DEBUG(gc, statDescribeGens());
 
   RELEASE_SM_LOCK;
 }
+
+void storageAddCapabilities (nat from, nat to)
+{
+    nat n, g, i;
+
+    if (from > 0) {
+        nurseries = stgReallocBytes(nurseries, to * sizeof(struct nursery_),
+                                    "storageAddCapabilities");
+    } else {
+        nurseries = stgMallocBytes(to * sizeof(struct nursery_),
+                                    "storageAddCapabilities");
+    }
+
+    // we've moved the nurseries, so we have to update the rNursery
+    // pointers from the Capabilities.
+    for (i = 0; i < to; i++) {
+        capabilities[i].r.rNursery = &nurseries[i];
+    }
+
+    /* The allocation area.  Policy: keep the allocation area
+     * small to begin with, even if we have a large suggested heap
+     * size.  Reason: we're going to do a major collection first, and we
+     * don't want it to be a big one.  This vague idea is borne out by
+     * rigorous experimental evidence.
+     */
+    allocNurseries(from, to);
+
+    // allocate a block for each mut list
+    for (n = from; n < to; n++) {
+        for (g = 1; g < RtsFlags.GcFlags.generations; g++) {
+            capabilities[n].mut_lists[g] = allocBlock();
+        }
+    }
+
+    initGcThreads(from, to);
+}
+
 
 void
 exitStorage (void)
@@ -229,20 +248,46 @@ freeStorage (rtsBool free_heap)
 
    The entry code for every CAF does the following:
      
-      - builds a BLACKHOLE in the heap
-      - pushes an update frame pointing to the BLACKHOLE
-      - calls newCaf, below
-      - updates the CAF with a static indirection to the BLACKHOLE
-      
+      - builds a CAF_BLACKHOLE in the heap
+
+      - calls newCaf, which atomically updates the CAF with
+        IND_STATIC pointing to the CAF_BLACKHOLE
+
+      - if newCaf returns zero, it re-enters the CAF (see Note [atomic
+        CAF entry])
+
+      - pushes an update frame pointing to the CAF_BLACKHOLE
+
    Why do we build an BLACKHOLE in the heap rather than just updating
    the thunk directly?  It's so that we only need one kind of update
-   frame - otherwise we'd need a static version of the update frame too.
+   frame - otherwise we'd need a static version of the update frame
+   too, and various other parts of the RTS that deal with update
+   frames would also need special cases for static update frames.
 
    newCaf() does the following:
        
+      - it updates the CAF with an IND_STATIC pointing to the
+        CAF_BLACKHOLE, atomically.
+
       - it puts the CAF on the oldest generation's mutable list.
         This is so that we treat the CAF as a root when collecting
 	younger generations.
+
+   ------------------
+   Note [atomic CAF entry]
+
+   With THREADED_RTS, newCaf() is required to be atomic (see
+   #5558). This is because if two threads happened to enter the same
+   CAF simultaneously, they would create two distinct CAF_BLACKHOLEs,
+   and so the normal threadPaused() machinery for detecting duplicate
+   evaluation will not detect this.  Hence in lockCAF() below, we
+   atomically lock the CAF with WHITEHOLE before updating it with
+   IND_STATIC, and return zero if another thread locked the CAF first.
+   In the event that we lost the race, CAF entry code will re-enter
+   the CAF and block on the other thread's CAF_BLACKHOLE.
+
+   ------------------
+   Note [GHCi CAFs]
 
    For GHCI, we have additional requirements when dealing with CAFs:
 
@@ -264,36 +309,76 @@ freeStorage (rtsBool free_heap)
 
    -------------------------------------------------------------------------- */
 
-void
-newCAF(StgRegTable *reg, StgClosure* caf)
+STATIC_INLINE StgWord lockCAF (StgClosure *caf, StgClosure *bh)
 {
-  if(keepCAFs)
-  {
-    // HACK:
-    // If we are in GHCi _and_ we are using dynamic libraries,
-    // then we can't redirect newCAF calls to newDynCAF (see below),
-    // so we make newCAF behave almost like newDynCAF.
-    // The dynamic libraries might be used by both the interpreted
-    // program and GHCi itself, so they must not be reverted.
-    // This also means that in GHCi with dynamic libraries, CAFs are not
-    // garbage collected. If this turns out to be a problem, we could
-    // do another hack here and do an address range test on caf to figure
-    // out whether it is from a dynamic library.
-    ((StgIndStatic *)caf)->saved_info  = (StgInfoTable *)caf->header.info;
+    const StgInfoTable *orig_info;
 
-    ACQUIRE_SM_LOCK; // caf_list is global, locked by sm_mutex
-    ((StgIndStatic *)caf)->static_link = caf_list;
-    caf_list = caf;
-    RELEASE_SM_LOCK;
-  }
-  else
-  {
-    // Put this CAF on the mutable list for the old generation.
-    ((StgIndStatic *)caf)->saved_info = NULL;
-    if (oldest_gen->no != 0) {
-        recordMutableCap(caf, regTableToCapability(reg), oldest_gen->no);
+    orig_info = caf->header.info;
+
+#ifdef THREADED_RTS
+    const StgInfoTable *cur_info;
+
+    if (orig_info == &stg_IND_STATIC_info ||
+        orig_info == &stg_WHITEHOLE_info) {
+        // already claimed by another thread; re-enter the CAF
+        return 0;
     }
-  }
+
+    cur_info = (const StgInfoTable *)
+        cas((StgVolatilePtr)&caf->header.info,
+            (StgWord)orig_info,
+            (StgWord)&stg_WHITEHOLE_info);
+
+    if (cur_info != orig_info) {
+        // already claimed by another thread; re-enter the CAF
+        return 0;
+    }
+
+    // successfully claimed by us; overwrite with IND_STATIC
+#endif
+
+    // For the benefit of revertCAFs(), save the original info pointer
+    ((StgIndStatic *)caf)->saved_info  = orig_info;
+
+    ((StgIndStatic*)caf)->indirectee = bh;
+    write_barrier();
+    SET_INFO(caf,&stg_IND_STATIC_info);
+
+    return 1;
+}
+
+StgWord
+newCAF(StgRegTable *reg, StgClosure *caf, StgClosure *bh)
+{
+    if (lockCAF(caf,bh) == 0) return 0;
+
+    if(keepCAFs)
+    {
+        // HACK:
+        // If we are in GHCi _and_ we are using dynamic libraries,
+        // then we can't redirect newCAF calls to newDynCAF (see below),
+        // so we make newCAF behave almost like newDynCAF.
+        // The dynamic libraries might be used by both the interpreted
+        // program and GHCi itself, so they must not be reverted.
+        // This also means that in GHCi with dynamic libraries, CAFs are not
+        // garbage collected. If this turns out to be a problem, we could
+        // do another hack here and do an address range test on caf to figure
+        // out whether it is from a dynamic library.
+
+        ACQUIRE_SM_LOCK; // caf_list is global, locked by sm_mutex
+        ((StgIndStatic *)caf)->static_link = caf_list;
+        caf_list = caf;
+        RELEASE_SM_LOCK;
+    }
+    else
+    {
+        // Put this CAF on the mutable list for the old generation.
+        ((StgIndStatic *)caf)->saved_info = NULL;
+        if (oldest_gen->no != 0) {
+            recordMutableCap(caf, regTableToCapability(reg), oldest_gen->no);
+        }
+    }
+    return 1;
 }
 
 // External API for setting the keepCAFs flag. see #3900.
@@ -312,16 +397,19 @@ setKeepCAFs (void)
 //
 // The linker hackily arranges that references to newCaf from dynamic
 // code end up pointing to newDynCAF.
-void
-newDynCAF (StgRegTable *reg STG_UNUSED, StgClosure *caf)
+StgWord
+newDynCAF (StgRegTable *reg STG_UNUSED, StgClosure *caf, StgClosure *bh)
 {
+    if (lockCAF(caf,bh) == 0) return 0;
+
     ACQUIRE_SM_LOCK;
 
-    ((StgIndStatic *)caf)->saved_info  = (StgInfoTable *)caf->header.info;
     ((StgIndStatic *)caf)->static_link = revertible_caf_list;
     revertible_caf_list = caf;
 
     RELEASE_SM_LOCK;
+
+    return 1;
 }
 
 /* -----------------------------------------------------------------------------
@@ -376,29 +464,28 @@ allocNursery (bdescr *tail, nat blocks)
 }
 
 static void
-assignNurseriesToCapabilities (void)
+assignNurseriesToCapabilities (nat from, nat to)
 {
     nat i;
 
-    for (i = 0; i < n_capabilities; i++) {
-	capabilities[i].r.rNursery        = &nurseries[i];
-	capabilities[i].r.rCurrentNursery = nurseries[i].blocks;
+    for (i = from; i < to; i++) {
+        capabilities[i].r.rCurrentNursery = nurseries[i].blocks;
 	capabilities[i].r.rCurrentAlloc   = NULL;
     }
 }
 
 static void
-allocNurseries( void )
+allocNurseries (nat from, nat to)
 { 
     nat i;
 
-    for (i = 0; i < n_capabilities; i++) {
-	nurseries[i].blocks = 
+    for (i = from; i < to; i++) {
+        nurseries[i].blocks =
             allocNursery(NULL, RtsFlags.GcFlags.minAllocAreaSize);
 	nurseries[i].n_blocks =
             RtsFlags.GcFlags.minAllocAreaSize;
     }
-    assignNurseriesToCapabilities();
+    assignNurseriesToCapabilities(from, to);
 }
       
 lnat // words allocated
@@ -424,8 +511,7 @@ clearNurseries (void)
 void
 resetNurseries (void)
 {
-    assignNurseriesToCapabilities();
-
+    assignNurseriesToCapabilities(0, n_capabilities);
 }
 
 lnat
@@ -538,6 +624,9 @@ allocate (Capability *cap, lnat n)
     bdescr *bd;
     StgPtr p;
 
+    TICK_ALLOC_HEAP_NOCTR(n);
+    CCS_ALLOC(cap->r.rCCCS,n);
+    
     if (n >= LARGE_OBJECT_THRESHOLD/sizeof(W_)) {
 	lnat req_blocks =  (lnat)BLOCK_ROUND_UP(n*sizeof(W_)) / BLOCK_SIZE;
 
@@ -569,9 +658,6 @@ allocate (Capability *cap, lnat n)
 
     /* small allocation (<LARGE_OBJECT_THRESHOLD) */
 
-    TICK_ALLOC_HEAP_NOCTR(n);
-    CCS_ALLOC(CCCS,n);
-    
     bd = cap->r.rCurrentAlloc;
     if (bd == NULL || bd->free + n > bd->start + BLOCK_SIZE_W) {
         
@@ -650,7 +736,7 @@ allocatePinned (Capability *cap, lnat n)
     }
 
     TICK_ALLOC_HEAP_NOCTR(n);
-    CCS_ALLOC(CCCS,n);
+    CCS_ALLOC(cap->r.rCCCS,n);
 
     bd = cap->pinned_object_block;
     

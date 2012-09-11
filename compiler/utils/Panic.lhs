@@ -8,6 +8,13 @@ It's hard to put these functions anywhere else without causing
 some unnecessary loops in the module dependency graph.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module Panic (
      GhcException(..), showGhcException, throwGhcException, handleGhcException,
      ghcError, progName,
@@ -28,7 +35,7 @@ import Control.Concurrent ( MVar, ThreadId, withMVar, newMVar, modifyMVar_,
                             myThreadId )
 import Data.Dynamic
 import Debug.Trace	  ( trace )
-import System.IO.Unsafe	  ( unsafePerformIO )
+import System.IO.Unsafe
 import System.Exit
 import System.Environment
 
@@ -40,6 +47,9 @@ import System.Posix.Signals
 import GHC.ConsoleHandler
 #endif
 
+#if __GLASGOW_HASKELL__ >= 703
+import GHC.Stack
+#endif
 
 -- | GHC's own exception type 
 --   error messages all take the form:
@@ -153,7 +163,16 @@ handleGhcException = ghandle
 
 -- | Panics and asserts.
 panic, sorry, pgmError :: String -> a
+#if __GLASGOW_HASKELL__ >= 703
+panic    x = unsafeDupablePerformIO $ do
+   stack <- ccsToStrings =<< getCurrentCCS x
+   if null stack
+      then throwGhcException (Panic x)
+      else throwGhcException (Panic (x ++ '\n' : renderStack stack))
+#else
 panic    x = throwGhcException (Panic x)
+#endif
+
 sorry    x = throwGhcException (Sorry x)
 pgmError x = throwGhcException (ProgramError x)
 

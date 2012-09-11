@@ -101,14 +101,14 @@ waitCondition ( Condition* pCond, Mutex* pMut )
 }
 
 void
-yieldThread()
+yieldThread(void)
 {
   sched_yield();
   return;
 }
 
 void
-shutdownThread()
+shutdownThread(void)
 {
   pthread_exit(NULL);
 }
@@ -123,7 +123,7 @@ createOSThread (OSThreadId* pId, OSThreadProc *startProc, void *param)
 }
 
 OSThreadId
-osThreadId()
+osThreadId(void)
 {
   return pthread_self();
 }
@@ -197,7 +197,7 @@ forkOS_createThreadWrapper ( void * entry )
 {
     Capability *cap;
     cap = rts_lock();
-    cap = rts_evalStableIO(cap, (HsStablePtr) entry, NULL);
+    rts_evalStableIO(&cap, (HsStablePtr) entry, NULL);
     taskTimeStamp(myTask());
     rts_unlock(cap);
     return NULL;
@@ -308,4 +308,9 @@ forkOS_createThread ( HsStablePtr entry STG_UNUSED )
     return -1;
 }
 
-#endif /* !defined(THREADED_RTS) */
+nat getNumberOfProcessors (void)
+{
+    return 1;
+}
+
+#endif

@@ -6,17 +6,23 @@
 ``Long-distance'' floating of bindings towards the top level.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module FloatOut ( floatOutwards ) where
 
 import CoreSyn
 import CoreUtils
+import MkCore
 import CoreArity	( etaExpand )
 import CoreMonad	( FloatOutSwitches(..) )
 
 import DynFlags		( DynFlags, DynFlag(..) )
 import ErrUtils		( dumpIfSet_dyn )
-import CostCentre	( dupifyCC, CostCentre )
-import DataCon		( DataCon )
 import Id		( Id, idArity, isBottomingId )
 import Var		( Var )
 import SetLevels
@@ -114,7 +120,7 @@ Well, maybe.  We don't do this at the moment.
 floatOutwards :: FloatOutSwitches
 	      -> DynFlags
 	      -> UniqSupply 
-	      -> [CoreBind] -> IO [CoreBind]
+	      -> CoreProgram -> IO CoreProgram
 
 floatOutwards float_sws dflags us pgm
   = do {
@@ -195,7 +201,6 @@ installUnderLambdas floats e
   | otherwise         = go e
   where
     go (Lam b e)                 = Lam b (go e)
-    go (Note n e) | notSccNote n = Note n (go e)
     go e                         = install floats e
 
 ---------------
@@ -278,18 +283,19 @@ floatExpr lam@(Lam (TB _ lam_spec) _)
     case (floatBody bndr_lvl body) of { (fs, floats, body') ->
     (add_to_stats fs floats, floats, mkLams bndrs body') }
 
-floatExpr (Note note@(SCC cc) expr)
+floatExpr (Tick tickish expr)
+  | tickishScoped tickish
   = case (floatExpr expr)    of { (fs, floating_defns, expr') ->
     let
 	-- Annotate bindings floated outwards past an scc expression
 	-- with the cc.  We mark that cc as "duplicated", though.
-	annotated_defns = wrapCostCentre (dupifyCC cc) floating_defns
+        annotated_defns = wrapTick (mkNoTick tickish) floating_defns
     in
-    (fs, annotated_defns, Note note expr') }
+    (fs, annotated_defns, Tick tickish expr') }
 
-floatExpr (Note note expr)	-- Other than SCCs
+  | otherwise  -- not scoped, can just float
   = case (floatExpr expr)    of { (fs, floating_defns, expr') ->
-    (fs, floating_defns, Note note expr') }
+    (fs, floating_defns, Tick tickish expr') }
 
 floatExpr (Cast expr co)
   = case (floatExpr expr) of { (fs, floating_defns, expr') ->
@@ -320,7 +326,7 @@ floatExpr (Let bind body)
 floatExpr (Case scrut (TB case_bndr case_spec) ty alts)
   = case case_spec of
       FloatMe dest_lvl  -- Case expression moves  
-        | [(DataAlt con, bndrs, rhs)] <- alts
+        | [(con@(DataAlt {}), bndrs, rhs)] <- alts
         -> case floatExpr scrut of { (fse, fde, scrut') ->
     	   case floatExpr rhs   of { (fsb, fdb, rhs') ->
     	   let 
@@ -438,12 +444,6 @@ partitionByMajorLevel.
 
 
 \begin{code}
-data FloatBind 
-  = FloatLet FloatLet  
-  | FloatCase CoreExpr Id DataCon [Var]
-      -- case e of y { C ys -> ... }
-      -- See Note [Floating cases] in SetLevels
-
 type FloatLet = CoreBind	-- INVARIANT: a FloatLet is always lifted
 type MajorEnv = M.IntMap MinorEnv	  -- Keyed by major level
 type MinorEnv = M.IntMap (Bag FloatBind)  -- Keyed by minor level
@@ -484,7 +484,7 @@ flattenMinor = M.fold unionBags emptyBag
 emptyFloats :: FloatBinds
 emptyFloats = FB emptyBag M.empty
 
-unitCaseFloat :: Level -> CoreExpr -> Id -> DataCon -> [Var] -> FloatBinds
+unitCaseFloat :: Level -> CoreExpr -> Id -> AltCon -> [Var] -> FloatBinds
 unitCaseFloat (Level major minor) e b con bs 
   = FB emptyBag (M.singleton major (M.singleton minor (unitBag (FloatCase e b con bs))))
 
@@ -507,12 +507,7 @@ plusMinor = M.unionWith unionBags
 
 install :: Bag FloatBind -> CoreExpr -> CoreExpr
 install defn_groups expr
-  = foldrBag install_group expr defn_groups
-  where
-    install_group (FloatLet defns) body 
-       = Let defns body
-    install_group (FloatCase e b con bs) body 
-       = Case e b (exprType body) [(DataAlt con, bs, body)]
+  = foldrBag wrapFloat expr defn_groups
 
 partitionByLevel
 	:: Level		-- Partitioning level
@@ -554,15 +549,23 @@ partitionByLevel (Level major minor) (FB tops defns)
                                             Just min_defns -> M.splitLookup minor min_defns
     here_min = mb_here_min `orElse` emptyBag
 
-wrapCostCentre :: CostCentre -> FloatBinds -> FloatBinds
-wrapCostCentre cc (FB tops defns)
+wrapTick :: Tickish Id -> FloatBinds -> FloatBinds
+wrapTick t (FB tops defns)
   = FB (mapBag wrap_bind tops) (M.map (M.map wrap_defns) defns)
   where
     wrap_defns = mapBag wrap_one 
 
-    wrap_bind (NonRec binder rhs) = NonRec binder (mkSCC cc rhs)
-    wrap_bind (Rec pairs)         = Rec (mapSnd (mkSCC cc) pairs)
+    wrap_bind (NonRec binder rhs) = NonRec binder (maybe_tick rhs)
+    wrap_bind (Rec pairs)         = Rec (mapSnd maybe_tick pairs)
 
     wrap_one (FloatLet bind)      = FloatLet (wrap_bind bind)
-    wrap_one (FloatCase e b c bs) = FloatCase (mkSCC cc e) b c bs
+    wrap_one (FloatCase e b c bs) = FloatCase (maybe_tick e) b c bs
+
+    maybe_tick e | exprIsHNF e = e
+                 | otherwise   = mkTick t e
+      -- we don't need to wrap a tick around an HNF when we float it
+      -- outside a tick: that is an invariant of the tick semantics
+      -- Conversely, inlining of HNFs inside an SCC is allowed, and
+      -- indeed the HNF we're floating here might well be inlined back
+      -- again, and we don't want to end up with duplicate ticks.
 \end{code}

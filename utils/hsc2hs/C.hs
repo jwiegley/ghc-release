@@ -38,29 +38,21 @@ outHeaderCProg (pos, key, arg) = case key of
             (name, args) ->
                 outCLine pos++
                 "#define hsc_"++name++"("++dropWhile isSpace args++") " ++
-                "printf ("++joinLines body++");\n"
+                "hsc_printf ("++joinLines body++");\n"
     _ -> ""
    where
     joinLines = concat . intersperse " \\\n" . lines
 
 outHeaderHs :: [Flag] -> Maybe String -> [(SourcePos, String, String)] -> String
 outHeaderHs flags inH toks =
-    "#if " ++
-    "__GLASGOW_HASKELL__ && __GLASGOW_HASKELL__ < 409\n" ++
-    "    printf (\"{-# OPTIONS -optc-D" ++
-    "__GLASGOW_HASKELL__=%d #-}\\n\", " ++
-    "__GLASGOW_HASKELL__);\n" ++
-    "#endif\n"++
     case inH of
         Nothing -> concatMap outFlag flags++concatMap outSpecial toks
-        Just f  -> outInclude ("\""++f++"\"")
+        Just _  -> ""
     where
-    outFlag (Include f)          = outInclude f
     outFlag (Define  n Nothing)  = outOption ("-optc-D"++n)
     outFlag (Define  n (Just v)) = outOption ("-optc-D"++n++"="++v)
     outFlag _                    = ""
     outSpecial (pos, key, arg) = case key of
-        "include"                  -> outInclude arg
         "define" | goodForOptD arg -> outOption ("-optc-D"++toOptD arg)
                  | otherwise       -> ""
         _ | conditional key        -> outCLine pos++"#"++key++" "++arg++"\n"
@@ -74,21 +66,8 @@ outHeaderHs flags inH toks =
         (name, "")      -> name
         (name, _:value) -> name++'=':dropWhile isSpace value
     outOption s =
-	"#if __GLASGOW_HASKELL__ && __GLASGOW_HASKELL__ < 603\n" ++
-	"    printf (\"{-# OPTIONS %s #-}\\n\", \""++
-                  showCString s++"\");\n"++
-	"#else\n"++
-	"    printf (\"{-# OPTIONS_GHC %s #-}\\n\", \""++
-                  showCString s++"\");\n"++
-	"#endif\n"
-    outInclude s =
-	"#if __GLASGOW_HASKELL__ && __GLASGOW_HASKELL__ < 603\n" ++
-	"    printf (\"{-# OPTIONS -#include %s #-}\\n\", \""++
-                  showCString s++"\");\n"++
-	"#elif __GLASGOW_HASKELL__ < 610\n"++
-	"    printf (\"{-# INCLUDE %s #-}\\n\", \""++
-                  showCString s++"\");\n"++
-	"#endif\n"
+        "    hsc_printf (\"{-# OPTIONS_GHC %s #-}\\n\", \""++
+                  showCString s++"\");\n"
 
 outTokenHs :: Token -> String
 outTokenHs (Text pos txt) =
@@ -99,7 +78,7 @@ outTokenHs (Text pos txt) =
             outHsLine pos++
             outText rest
     where
-    outText s = "    fputs (\""++showCString s++"\", stdout);\n"
+    outText s = "    hsc_fputs (\""++showCString s++"\", hsc_stdout());\n"
 outTokenHs (Special pos key arg) =
     case key of
         "include"           -> ""
@@ -138,7 +117,7 @@ outEnum arg = case parseEnum arg of
                     cName++");\n"
                Just hsName ->
                     "    hsc_enum ("++t++", "++f++", " ++
-                    "printf (\"%s\", \""++hsName++"\"), "++
+                    "hsc_printf (\"%s\", \""++hsName++"\"), "++
                     cName++");\n"
 
 outFlagH :: Flag -> String

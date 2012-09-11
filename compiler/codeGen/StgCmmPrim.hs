@@ -6,6 +6,13 @@
 --
 -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module StgCmmPrim (
    cgOpApp
  ) where
@@ -24,8 +31,7 @@ import StgCmmProf
 import BasicTypes
 import MkGraph
 import StgSyn
-import CmmDecl
-import CmmExpr
+import Cmm
 import Type	( Type, tyConAppTyCon )
 import TyCon
 import CLabel
@@ -36,6 +42,7 @@ import Constants
 import Module
 import FastString
 import Outputable
+import StaticFlags
 
 ------------------------------------------------------------------------
 --	Primitive operations and foreign calls
@@ -216,11 +223,21 @@ emitPrimOp [res] SparkOp [arg]
         -- refer to arg twice (once to pass to newSpark(), and once to
         -- assign to res), so put it in a temporary.
         tmp <- assignTemp arg
+        tmp2 <- newTemp bWord
         emitCCall
-            []
+            [(tmp2,NoHint)]
             (CmmLit (CmmLabel (mkCmmCodeLabel rtsPackageId (fsLit "newSpark"))))
             [(CmmReg (CmmGlobal BaseReg), AddrHint), ((CmmReg (CmmLocal tmp)), AddrHint)]
         emit (mkAssign (CmmLocal res) (CmmReg (CmmLocal tmp)))
+
+emitPrimOp [res] GetCCSOfOp [arg]
+  = emit (mkAssign (CmmLocal res) val)
+  where
+    val | opt_SccProfilingOn = costCentreFrom (cmmUntag arg)
+        | otherwise          = CmmLit zeroCLit
+
+emitPrimOp [res] GetCurrentCCSOp [_dummy_arg]
+   = emit (mkAssign (CmmLocal res) curCCS)
 
 emitPrimOp [res] ReadMutVarOp [mutv]
    = emit (mkAssign (CmmLocal res) (cmmLoadIndexW mutv fixedHdrSize gcWord))
@@ -270,7 +287,7 @@ emitPrimOp [res] ReallyUnsafePtrEqualityOp [arg1,arg2]
    = emit (mkAssign (CmmLocal res) (CmmMachOp mo_wordEq [arg1,arg2]))
 
 --  #define addrToHValuezh(r,a) r=(P_)a
-emitPrimOp [res] AddrToHValueOp [arg]
+emitPrimOp [res] AddrToAnyOp [arg]
    = emit (mkAssign (CmmLocal res) arg)
 
 --  #define dataToTagzh(r,a)  r=(GET_TAG(((StgClosure *)a)->header.info))
@@ -290,8 +307,12 @@ emitPrimOp [res] DataToTagOp [arg]
 --	}
 emitPrimOp [res] UnsafeFreezeArrayOp [arg]
    = emit $ catAGraphs
-	 [ setInfo arg (CmmLit (CmmLabel mkMAP_FROZEN_infoLabel)),
-	   mkAssign (CmmLocal res) arg ]
+   [ setInfo arg (CmmLit (CmmLabel mkMAP_FROZEN_infoLabel)),
+     mkAssign (CmmLocal res) arg ]
+emitPrimOp [res] UnsafeFreezeArrayArrayOp [arg]
+   = emit $ catAGraphs
+   [ setInfo arg (CmmLit (CmmLabel mkMAP_FROZEN_infoLabel)),
+     mkAssign (CmmLocal res) arg ]
 
 --  #define unsafeFreezzeByteArrayzh(r,a)	r=(a)
 emitPrimOp [res] UnsafeFreezeByteArrayOp [arg]
@@ -442,6 +463,13 @@ emitPrimOp [] CopyByteArrayOp [src,src_off,dst,dst_off,n] =
     doCopyByteArrayOp src src_off dst dst_off n
 emitPrimOp [] CopyMutableByteArrayOp [src,src_off,dst,dst_off,n] =
     doCopyMutableByteArrayOp src src_off dst dst_off n
+
+-- Population count
+emitPrimOp [res] PopCnt8Op [w] = emitPopCntCall res w W8
+emitPrimOp [res] PopCnt16Op [w] = emitPopCntCall res w W16
+emitPrimOp [res] PopCnt32Op [w] = emitPopCntCall res w W32
+emitPrimOp [res] PopCnt64Op [w] = emitPopCntCall res w W64
+emitPrimOp [res] PopCntOp [w] = emitPopCntCall res w wordWidth
 
 -- The rest just translate straightforwardly
 emitPrimOp [res] op [arg]
@@ -602,6 +630,7 @@ translateOp SameMutVarOp           = Just mo_wordEq
 translateOp SameMVarOp             = Just mo_wordEq
 translateOp SameMutableArrayOp     = Just mo_wordEq
 translateOp SameMutableByteArrayOp = Just mo_wordEq
+translateOp SameMutableArrayArrayOp= Just mo_wordEq
 translateOp SameTVarOp             = Just mo_wordEq
 translateOp EqStablePtrOp          = Just mo_wordEq
 
@@ -864,7 +893,7 @@ emitCloneArray info_p res_r src0 src_off0 n0 = do
         (CmmLit $ mkIntCLit 0)
 
     let arr = CmmReg (CmmLocal arr_r)
-    emitSetDynHdr arr (CmmLit (CmmLabel info_p)) curCCSAddr
+    emitSetDynHdr arr (CmmLit (CmmLabel info_p)) curCCS
     emit $ mkStore (cmmOffsetB arr (fixedHdrSize * wORD_SIZE +
                                     oFFSET_StgMutArrPtrs_ptrs)) n
     emit $ mkStore (cmmOffsetB arr (fixedHdrSize * wORD_SIZE +
@@ -940,3 +969,10 @@ emitAllocateCall res cap n = do
   where
     allocate = CmmLit (CmmLabel (mkForeignLabel (fsLit "allocate") Nothing
                                  ForeignLabelInExternalPackage IsFunction))
+
+emitPopCntCall :: LocalReg -> CmmExpr -> Width -> FCode ()
+emitPopCntCall res x width = do
+    emitPrimCall
+        [ res ]
+        (MO_PopCnt width)
+        [ x ]

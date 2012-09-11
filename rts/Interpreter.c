@@ -67,7 +67,7 @@
 #else
 #error Cannot cope with WORD_SIZE_IN_BITS being nether 32 nor 64
 #endif
-#define BCO_GET_LARGE_ARG ((bci & bci_FLAG_LARGE_ARGS) ? BCO_NEXT_WORD : BCO_NEXT)
+#define BCO_GET_LARGE_ARG ((bci & bci_FLAG_LARGE_ARGS) ? BCO_READ_NEXT_WORD : BCO_NEXT)
 
 #define BCO_PTR(n)    (W_)ptrs[n]
 #define BCO_LIT(n)    literals[n]
@@ -614,7 +614,7 @@ do_apply:
 		// build a new PAP and return it.
 		StgPAP *new_pap;
 		new_pap = (StgPAP *)allocate(cap, PAP_sizeW(pap->n_args + m));
-		SET_HDR(new_pap,&stg_PAP_info,CCCS);
+                SET_HDR(new_pap,&stg_PAP_info,cap->r.rCCCS);
 		new_pap->arity = pap->arity - n;
 		new_pap->n_args = pap->n_args + m;
 		new_pap->fun = pap->fun;
@@ -659,7 +659,7 @@ do_apply:
 		StgPAP *pap;
 		nat i;
 		pap = (StgPAP *)allocate(cap, PAP_sizeW(m));
-		SET_HDR(pap, &stg_PAP_info,CCCS);
+                SET_HDR(pap, &stg_PAP_info,cap->r.rCCCS);
 		pap->arity = arity - n;
 		pap->fun = obj;
 		pap->n_args = m;
@@ -804,7 +804,7 @@ run_BCO:
 		 //printStack(Sp,cap->r.rCurrentTSO->stack+cap->r.rCurrentTSO->stack_size,iSu);
 		 //debugBelch("-- END stack\n\n");
 		 //}
-		 debugBelch("Sp = %p   pc = %d      ", Sp, bciPtr);
+                 debugBelch("Sp = %p   pc = %-4d ", Sp, bciPtr);
 		 disInstr(bco,bciPtr);
 		 if (0) { int i;
 		 debugBelch("\n");

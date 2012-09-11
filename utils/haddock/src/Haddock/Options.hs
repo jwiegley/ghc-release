@@ -62,6 +62,7 @@ data Flag
   | Flag_Help
   | Flag_Verbosity String
   | Flag_Version
+  | Flag_InterfaceVersion
   | Flag_UseContents String
   | Flag_GenContents
   | Flag_UseIndex String
@@ -71,6 +72,7 @@ data Flag
   | Flag_OptGhc String
   | Flag_GhcLibDir String
   | Flag_GhcVersion
+  | Flag_PrintGhcPath
   | Flag_PrintGhcLibDir
   | Flag_NoWarnings
   | Flag_UseUnicode
@@ -129,6 +131,8 @@ options backwardsCompat =
       "display this help and exit",
     Option ['V']  ["version"]  (NoArg Flag_Version)
       "output version information and exit",
+    Option []  ["interface-version"]  (NoArg Flag_InterfaceVersion)
+      "output interface file version and exit",
     Option ['v']  ["verbosity"]  (ReqArg Flag_Verbosity "VERBOSITY")
       "set verbosity level",
     Option [] ["use-contents"] (ReqArg Flag_UseContents "URL")
@@ -147,6 +151,8 @@ options backwardsCompat =
       "option to be forwarded to GHC",
     Option []  ["ghc-version"]  (NoArg Flag_GhcVersion)
       "output GHC version in numeric format",
+    Option []  ["print-ghc-path"]  (NoArg Flag_PrintGhcPath)
+      "output path to GHC binary",
     Option []  ["print-ghc-libdir"]  (NoArg Flag_PrintGhcLibDir)
       "output GHC lib dir",
     Option ['w'] ["no-warnings"] (NoArg Flag_NoWarnings) "turn off all warnings",

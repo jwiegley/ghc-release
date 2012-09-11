@@ -65,6 +65,39 @@ static StgInt nHandlers = 0;    /* Size of handlers array */
 
 static nat n_haskell_handlers = 0;
 
+static sigset_t userSignals;
+static sigset_t savedSignals;
+
+#ifdef THREADED_RTS
+static Mutex sig_mutex; // protects signal_handlers, nHandlers
+#endif
+
+/* -----------------------------------------------------------------------------
+ * Initialisation / deinitialisation
+ * -------------------------------------------------------------------------- */
+
+void
+initUserSignals(void)
+{
+    sigemptyset(&userSignals);
+#ifdef THREADED_RTS
+    initMutex(&sig_mutex);
+#endif
+}
+
+void
+freeSignalHandlers(void) {
+    if (signal_handlers != NULL) {
+        stgFree(signal_handlers);
+        signal_handlers = NULL;
+        nHandlers = 0;
+        n_haskell_handlers = 0;
+    }
+#ifdef THREADED_RTS
+    closeMutex(&sig_mutex);
+#endif
+}
+
 /* -----------------------------------------------------------------------------
  * Allocate/resize the table of signal handlers.
  * -------------------------------------------------------------------------- */
@@ -145,11 +178,10 @@ ioManagerDie (void)
     }
 }
 
-Capability *
-ioManagerStartCap (Capability *cap)
+void
+ioManagerStartCap (Capability **cap)
 {
-    return rts_evalIO(
-        cap,&base_GHCziConcziIO_ensureIOManagerIsRunning_closure,NULL);
+    rts_evalIO(cap,&base_GHCziConcziIO_ensureIOManagerIsRunning_closure,NULL);
 }
 
 void
@@ -159,7 +191,7 @@ ioManagerStart (void)
     Capability *cap;
     if (io_manager_control_fd < 0 || io_manager_wakeup_fd < 0) {
 	cap = rts_lock();
-	cap = ioManagerStartCap(cap);
+        ioManagerStartCap(&cap);
 	rts_unlock(cap);
     }
 }
@@ -261,19 +293,6 @@ generic_handler(int sig USED_IF_THREADS,
  * Blocking/Unblocking of the user signals
  * -------------------------------------------------------------------------- */
 
-static sigset_t userSignals;
-static sigset_t savedSignals;
-
-void
-initUserSignals(void)
-{
-    sigemptyset(&userSignals);
-#ifndef THREADED_RTS
-    getStablePtr((StgPtr)&base_GHCziConcziSignal_runHandlers_closure);
-    // needed to keep runHandler alive
-#endif
-}
-
 void
 blockUserSignals(void)
 {
@@ -317,11 +336,14 @@ stg_sig_install(int sig, int spi, void *mask)
     struct sigaction action;
     StgInt previous_spi;
 
+    ACQUIRE_LOCK(&sig_mutex);
+
     // Block the signal until we figure out what to do
     // Count on this to fail if the signal number is invalid
     if (sig < 0 || sigemptyset(&signals) ||
 	sigaddset(&signals, sig) || sigprocmask(SIG_BLOCK, &signals, &osignals)) {
-	return STG_SIG_ERR;
+        RELEASE_LOCK(&sig_mutex);
+        return STG_SIG_ERR;
     }
     
     more_handlers(sig);
@@ -361,7 +383,8 @@ stg_sig_install(int sig, int spi, void *mask)
     if (sigaction(sig, &action, NULL))
     {
         errorBelch("sigaction");
-	return STG_SIG_ERR;
+        RELEASE_LOCK(&sig_mutex);
+        return STG_SIG_ERR;
     }
 
     signal_handlers[sig] = spi;
@@ -386,9 +409,11 @@ stg_sig_install(int sig, int spi, void *mask)
     if (sigprocmask(SIG_SETMASK, &osignals, NULL))
     {
         errorBelch("sigprocmask");
-	return STG_SIG_ERR;
+        RELEASE_LOCK(&sig_mutex);
+        return STG_SIG_ERR;
     }
 
+    RELEASE_LOCK(&sig_mutex);
     return previous_spi;
 }
 
@@ -639,13 +664,6 @@ resetDefaultHandlers(void)
     }
 
     set_sigtstp_action(rtsFalse);
-}
-
-void
-freeSignalHandlers(void) {
-    if (signal_handlers != NULL) {
-        stgFree(signal_handlers);
-    }
 }
 
 #endif /* RTS_USER_SIGNALS */

@@ -29,8 +29,8 @@ $(eval $(call clean-target,gmp,,\
 clean : clean_gmp
 .PHONY: clean_gmp
 clean_gmp:
-	"$(RM)" $(RM_OPTS_REC) libraries/integer-gmp/gmp/objs
-	"$(RM)" $(RM_OPTS_REC) libraries/integer-gmp/gmp/gmpbuild
+	$(call removeTrees,libraries/integer-gmp/gmp/objs)
+	$(call removeTrees,libraries/integer-gmp/gmp/gmpbuild)
 endif
 
 ifeq "$(phase)" "final"
@@ -152,7 +152,7 @@ libraries/integer-gmp/gmp/libgmp.a libraries/integer-gmp/gmp/gmp.h:
 #	    CC=$(CC_STAGE1) $(SHELL) configure \
 #	          --enable-shared=yes --disable-static \
 #	          --host=$(HOSTPLATFORM) --build=$(BUILDPLATFORM)
-#	touch $@
+#	"$(TOUCH_CMD)" $@
 #
 #gmp.h: stamp.gmp.static
 #	$(CP) gmpbuild/gmp.h .

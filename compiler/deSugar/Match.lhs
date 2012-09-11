@@ -6,6 +6,13 @@
 The @match@ function
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module Match ( match, matchEquations, matchWrapper, matchSimply, matchSinglePat ) where
 
 #include "HsVersions.h"
@@ -15,6 +22,7 @@ import {-#SOURCE#-} DsExpr (dsLExpr)
 import DynFlags
 import HsSyn		
 import TcHsSyn
+import TcEvidence
 import Check
 import CoreSyn
 import Literal
@@ -29,7 +37,6 @@ import DataCon
 import MatchCon
 import MatchLit
 import Type
-import Coercion
 import TysWiredIn
 import ListSetOps
 import SrcLoc
@@ -37,6 +44,7 @@ import Maybes
 import Util
 import Name
 import Outputable
+import BasicTypes ( boxityNormalTupleSort )
 import FastString
 
 import Control.Monad( when )
@@ -348,8 +356,7 @@ matchCoercion (var:vars) ty (eqns@(eqn1:_))
 	; var' <- newUniqueId var (hsPatType pat)
 	; match_result <- match (var':vars) ty $
                           map (decomposeFirstPat getCoPat) eqns
-	; co' <- dsHsWrapper co
-        ; let rhs' = co' (Var var)
+        ; let rhs' = dsHsWrapper co (Var var)
 	; return (mkCoLetMatchResult (NonRec var' rhs') match_result) }
 matchCoercion _ _ _ = panic "matchCoercion"
 
@@ -491,7 +498,7 @@ tidy1 v (AsPat (L _ var) pat)
 -}
 
 tidy1 v (LazyPat pat)
-  = do	{ sel_prs <- mkSelectorBinds pat (Var v)
+  = do  { sel_prs <- mkSelectorBinds [] pat (Var v)
 	; let sel_binds =  [NonRec b rhs | (b,rhs) <- sel_prs]
 	; return (mkCoreLets sel_binds, WildPat (idType v)) }
 
@@ -515,7 +522,7 @@ tidy1 _ (TuplePat pats boxity ty)
   = return (idDsWrapper, unLoc tuple_ConPat)
   where
     arity = length pats
-    tuple_ConPat = mkPrefixConPat (tupleCon boxity arity) pats ty
+    tuple_ConPat = mkPrefixConPat (tupleCon (boxityNormalTupleSort boxity) arity) pats ty
 
 -- LitPats: we *might* be able to replace these w/ a simpler form
 tidy1 _ (LitPat lit)
@@ -911,9 +918,9 @@ viewLExprEq (e1,_) (e2,_) = lexp e1 e2
     --        equating different ways of writing a coercion)
     wrap WpHole WpHole = True
     wrap (WpCompose w1 w2) (WpCompose w1' w2') = wrap w1 w1' && wrap w2 w2'
-    wrap (WpCast c)  (WpCast c')     = coreEqCoercion c c'
-    wrap (WpEvApp et1) (WpEvApp et2) = ev_term et1 et2
-    wrap (WpTyApp t) (WpTyApp t')    = eqType t t'
+    wrap (WpCast co)       (WpCast co')        = co `eq_co` co'
+    wrap (WpEvApp et1)     (WpEvApp et2)       = et1 `ev_term` et2
+    wrap (WpTyApp t)       (WpTyApp t')        = eqType t t'
     -- Enhancement: could implement equality for more wrappers
     --   if it seems useful (lams and lets)
     wrap _ _ = False
@@ -921,7 +928,7 @@ viewLExprEq (e1,_) (e2,_) = lexp e1 e2
     ---------
     ev_term :: EvTerm -> EvTerm -> Bool
     ev_term (EvId a)       (EvId b)       = a==b
-    ev_term (EvCoercion a) (EvCoercion b) = coreEqCoercion a b
+    ev_term (EvCoercion a) (EvCoercion b) = a `eq_co` b
     ev_term _ _ = False	
 
     ---------
@@ -930,6 +937,15 @@ viewLExprEq (e1,_) (e2,_) = lexp e1 e2
     eq_list _  []     (_:_)  = False
     eq_list _  (_:_)  []     = False
     eq_list eq (x:xs) (y:ys) = eq x y && eq_list eq xs ys
+
+    ---------
+    eq_co :: TcCoercion -> TcCoercion -> Bool 
+    -- Just some simple cases
+    eq_co (TcRefl t1)             (TcRefl t2)             = eqType t1 t2
+    eq_co (TcCoVarCo v1) 	  (TcCoVarCo v2)          = v1==v2
+    eq_co (TcSymCo co1)    	  (TcSymCo co2)           = co1 `eq_co` co2
+    eq_co (TcTyConAppCo tc1 cos1) (TcTyConAppCo tc2 cos2) = tc1==tc2 && eq_list eq_co cos1 cos2
+    eq_co _ _ = False
 
 patGroup :: Pat Id -> PatGroup
 patGroup (WildPat {})       	      = PgAny

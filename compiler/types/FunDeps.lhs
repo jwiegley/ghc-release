@@ -8,6 +8,13 @@ FunDeps - functional dependencies
 It's better to read it as: "if we know these, then we're going to know these"
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module FunDeps (
         FDEq (..),
  	Equation(..), pprEquation,
@@ -21,7 +28,7 @@ module FunDeps (
 import Name
 import Var
 import Class
-import TcType
+import Type
 import Unify
 import InstEnv
 import VarSet
@@ -126,11 +133,18 @@ oclose preds fixed_tvs
 	-- In our example, tv_fds will be [ ({x,y}, {z}), ({x,p},{q}) ]
 	-- Meaning "knowing x,y fixes z, knowing x,p fixes q"
     tv_fds  = [ (tyVarsOfTypes xs, tyVarsOfTypes ys)
-	      | ClassP cls tys <- preds,		-- Ignore implicit params
+	      | (cls, tys) <- concatMap classesOfPredTy preds,  -- Ignore implicit params
 		let (cls_tvs, cls_fds) = classTvsFds cls,
 		fd <- cls_fds,
 		let (xs,ys) = instFD fd cls_tvs tys
 	      ]
+     
+    classesOfPredTy :: PredType -> [(Class, [Type])]
+    classesOfPredTy pred
+       = case classifyPredType pred of
+            ClassPred cls tys -> [(cls, tys)]
+            TuplePred ts      -> concatMap classesOfPredTy ts
+            _                 -> []
 \end{code}
 
     
@@ -264,8 +278,10 @@ improveFromAnother :: Pred_Loc -- Template item (usually given, or inert)
                    -> [Equation]
 -- Post: FDEqs always oriented from the other to the workitem 
 --       Equations have empty quantified variables 
-improveFromAnother pred1@(ClassP cls1 tys1, _) pred2@(ClassP cls2 tys2, _)
-  | tys1 `lengthAtLeast` 2 && cls1 == cls2
+improveFromAnother pred1@(ty1, _) pred2@(ty2, _)
+  | Just (cls1, tys1) <- getClassPredTys_maybe ty1
+  , Just (cls2, tys2) <- getClassPredTys_maybe ty2
+  , tys1 `lengthAtLeast` 2 && cls1 == cls2
   = [ FDEqn { fd_qtvs = emptyVarSet, fd_eqs = eqs, fd_pred1 = pred1, fd_pred2 = pred2 }
     | let (cls_tvs, cls_fds) = classTvsFds cls1
     , fd <- cls_fds
@@ -294,8 +310,12 @@ improveFromInstEnv :: (InstEnv,InstEnv)
 improveFromInstEnv _inst_env (pred,_loc)
   | not (isClassPred pred)
   = panic "improveFromInstEnv: not a class predicate"
-improveFromInstEnv inst_env pred@(ClassP cls tys, _)
-  | tys `lengthAtLeast` 2
+improveFromInstEnv inst_env pred@(ty, _)
+  | Just (cls, tys) <- getClassPredTys_maybe ty
+  , tys `lengthAtLeast` 2
+  , let (cls_tvs, cls_fds) = classTvsFds cls
+        instances          = classInstances inst_env cls
+        rough_tcs          = roughMatchTcs tys
   = [ FDEqn { fd_qtvs = qtvs, fd_eqs = eqs, fd_pred1 = p_inst, fd_pred2=pred }
     | fd <- cls_fds		-- Iterate through the fundeps first,
 				-- because there often are none!
@@ -309,15 +329,11 @@ improveFromInstEnv inst_env pred@(ClassP cls tys, _)
     , not (instanceCantMatch inst_tcs trimmed_tcs)
     , let p_inst = (mkClassPred cls tys_inst,
 		    sep [ ptext (sLit "arising from the dependency") <+> quotes (pprFunDep fd)	
-		        , ptext (sLit "in the instance declaration at")
-			            <+> ppr (getSrcLoc ispec)])
+		        , ptext (sLit "in the instance declaration")
+			  <+> pprNameDefnLoc (getName ispec)])
     , (qtvs, eqs) <- checkClsFD qtvs fd cls_tvs tys_inst tys -- NB: orientation
     , not (null eqs)
     ]
-  where 
-     (cls_tvs, cls_fds) = classTvsFds cls
-     instances          = classInstances inst_env cls
-     rough_tcs          = roughMatchTcs tys
 improveFromInstEnv _ _ = []
 
 

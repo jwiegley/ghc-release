@@ -6,6 +6,13 @@
 --
 -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module RtClosureInspect(
      cvObtainTerm,      -- :: HscEnv -> Int -> Bool -> Maybe Type -> HValue -> IO Term
      cvReconstructType,
@@ -25,6 +32,7 @@ module RtClosureInspect(
 
 #include "HsVersions.h"
 
+import DebuggerUtils
 import ByteCodeItbls    ( StgInfoTable )
 import qualified ByteCodeItbls as BCI( StgInfoTable(..) )
 import HscTypes
@@ -33,11 +41,11 @@ import Linker
 import DataCon
 import Type
 import qualified Unify as U
-import TypeRep         -- I know I know, this is cheating
 import Var
 import TcRnMonad
 import TcType
 import TcMType
+import TcHsSyn ( mkZonkTcTyVar )
 import TcUnify
 import TcEnv
 
@@ -64,7 +72,7 @@ import Data.Array.Base
 import Data.Ix
 import Data.List
 import qualified Data.Sequence as Seq
-import Data.Monoid
+import Data.Monoid (mappend)
 import Data.Sequence (viewl, ViewL(..))
 import Foreign.Safe
 import System.IO.Unsafe
@@ -336,7 +344,8 @@ pprTermM y p t = pprDeeper `liftM` ppr_termM y p t
 
 ppr_termM y p Term{dc=Left dc_tag, subTerms=tt} = do
   tt_docs <- mapM (y app_prec) tt
-  return$ cparen (not(null tt) && p >= app_prec) (text dc_tag <+> pprDeeperList fsep tt_docs)
+  return $ cparen (not (null tt) && p >= app_prec)
+                  (text dc_tag <+> pprDeeperList fsep tt_docs)
   
 ppr_termM y p Term{dc=Right dc, subTerms=tt} 
 {-  | dataConIsInfix dc, (t1:t2:tt') <- tt  --TODO fixity
@@ -1122,7 +1131,7 @@ zonkTerm = foldTermM (TermFoldM
 zonkRttiType :: TcType -> TcM Type
 -- Zonk the type, replacing any unbound Meta tyvars
 -- by skolems, safely out of Meta-tyvar-land
-zonkRttiType = zonkType (mkZonkTcTyVar zonk_unbound_meta) 
+zonkRttiType = zonkType (mkZonkTcTyVar zonk_unbound_meta mkTyVarTy)
   where
     zonk_unbound_meta tv 
       = ASSERT( isTcTyVar tv )
@@ -1136,14 +1145,6 @@ zonkRttiType = zonkType (mkZonkTcTyVar zonk_unbound_meta)
 --------------------------------------------------------------------------------
 -- Restore Class predicates out of a representation type
 dictsView :: Type -> Type
--- dictsView ty = ty
-dictsView (FunTy (TyConApp tc_dict args) ty)
-  | Just c <- tyConClass_maybe tc_dict
-  = FunTy (PredTy (ClassP c args)) (dictsView ty)
-dictsView ty
-  | Just (tc_fun, [TyConApp tc_dict args, ty2]) <- tcSplitTyConApp_maybe ty
-  , Just c <- tyConClass_maybe tc_dict
-  = mkTyConApp tc_fun [PredTy (ClassP c args), dictsView ty2]
 dictsView ty = ty
 
 

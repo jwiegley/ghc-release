@@ -2,6 +2,9 @@
 # (c) Simon Marlow 2002
 #
 
+# This allows us to use the "with X:" syntax with python 2.5:
+from __future__ import with_statement
+
 import sys
 import os
 import errno
@@ -114,6 +117,10 @@ def req_profiling( opts ):
     if not config.have_profiling:
         opts.expect = 'fail'
 
+def req_shared_libs( opts ):
+    if not config.have_shared_libs:
+        opts.expect = 'fail'
+
 def req_interp( opts ):
     if not config.have_interp:
         opts.expect = 'fail'
@@ -224,13 +231,17 @@ def stats_num_field( field, min, max ):
     return lambda opts, f=field, x=min, y=max: _stats_num_field(opts, f, x, y);
 
 def _stats_num_field( opts, f, x, y ):
-    opts.stats_num_fields = opts.stats_num_fields + [(f, x, y)]
+    # copy the dictionary, as the config gets shared between all tests
+    opts.stats_num_fields = opts.stats_num_fields.copy()
+    opts.stats_num_fields[f] = (x, y)
 
 def compiler_stats_num_field( field, min, max ):
     return lambda opts, f=field, x=min, y=max: _compiler_stats_num_field(opts, f, x, y);
 
 def _compiler_stats_num_field( opts, f, x, y ):
-    opts.compiler_stats_num_fields = opts.compiler_stats_num_fields + [(f, x, y)]
+    # copy the dictionary, as the config gets shared between all tests
+    opts.compiler_stats_num_fields = opts.compiler_stats_num_fields.copy()
+    opts.compiler_stats_num_fields[f] = (x, y)
 
 # -----
 
@@ -376,7 +387,7 @@ def unless_tag( tag, f ):
 
 # ---
 def alone(opts):
-    opts.alone = 1
+    opts.alone = True
 
 # ---
 def literate( opts ):
@@ -387,6 +398,9 @@ def c_src( opts ):
 
 def objc_src( opts ):
     opts.objc_src = 1;
+
+def objcpp_src( opts ):
+    opts.objcpp_src = 1;
 
 # ----
 
@@ -410,7 +424,15 @@ def cmd_prefix( prefix ):
     return lambda opts, p=prefix: _cmd_prefix(opts, prefix)
 
 def _cmd_prefix( opts, prefix ):
-    opts.cmd_prefix = prefix
+    opts.cmd_wrapper = lambda cmd, p=prefix: p + ' ' + cmd;
+
+# ----
+
+def cmd_wrapper( fun ):
+    return lambda opts, f=fun: _cmd_wrapper(opts, fun)
+
+def _cmd_wrapper( opts, fun ):
+    opts.cmd_wrapper = fun
 
 # ----
 
@@ -425,11 +447,23 @@ def _compile_cmd_prefix( opts, prefix ):
 def normalise_slashes( opts ):
     opts.extra_normaliser = normalise_slashes_
 
+def normalise_exe( opts ):
+    opts.extra_normaliser = normalise_exe_
+
 def normalise_fun( fun ):
     return lambda opts, f=fun: _normalise_fun(opts, f)
 
 def _normalise_fun( opts, f ):
     opts.extra_normaliser = f
+
+def normalise_errmsg_fun( fun ):
+    return lambda opts, f=fun: _normalise_errmsg_fun(opts, f)
+
+def _normalise_errmsg_fun( opts, f ):
+    opts.extra_errmsg_normaliser = f
+
+def two_normalisers(f, g):
+    return lambda x, f=f, g=g: f(g(x))
 
 # ----
 # Function for composing two opt-fns together
@@ -521,88 +555,109 @@ def get_package_cache_timestamp():
 
 
 def test_common_work (name, opts, func, args):
-    t.total_tests = t.total_tests+1
-    setLocalTestOpts(opts)
+    try:
+        t.total_tests = t.total_tests+1
+        setLocalTestOpts(opts)
 
-    package_conf_cache_file_start_timestamp = get_package_cache_timestamp()
+        package_conf_cache_file_start_timestamp = get_package_cache_timestamp()
 
-    # All the ways we might run this test
-    if func == compile or func == multimod_compile:
-        all_ways = config.compile_ways
-    elif func == compile_and_run or func == multimod_compile_and_run or func == multisrc_compile_and_run:
-        all_ways = config.run_ways
-    elif func == ghci_script:
-        if 'ghci' in config.run_ways:
-            all_ways = ['ghci']
+        # All the ways we might run this test
+        if func == compile or func == multimod_compile:
+            all_ways = config.compile_ways
+        elif func == compile_and_run or func == multimod_compile_and_run:
+            all_ways = config.run_ways
+        elif func == ghci_script:
+            if 'ghci' in config.run_ways:
+                all_ways = ['ghci']
+            else:
+                all_ways = []
         else:
-            all_ways = []
-    else:
-        all_ways = ['normal']
+            all_ways = ['normal']
 
-    # A test itself can request extra ways by setting opts.extra_ways
-    all_ways = all_ways + filter(lambda way: way not in all_ways,
-                                 opts.extra_ways)
+        # A test itself can request extra ways by setting opts.extra_ways
+        all_ways = all_ways + filter(lambda way: way not in all_ways,
+                                     opts.extra_ways)
 
-    t.total_test_cases = t.total_test_cases + len(all_ways)
+        t.total_test_cases = t.total_test_cases + len(all_ways)
 
-    ok_way = lambda way: \
-        not getTestOpts().skip \
-        and (config.only == [] or name in config.only) \
-        and (getTestOpts().only_ways == [] or way in getTestOpts().only_ways) \
-        and (config.cmdline_ways == [] or way in config.cmdline_ways) \
-        and way not in getTestOpts().omit_ways
+        ok_way = lambda way: \
+            not getTestOpts().skip \
+            and (config.only == [] or name in config.only) \
+            and (getTestOpts().only_ways == None or way in getTestOpts().only_ways) \
+            and (config.cmdline_ways == [] or way in config.cmdline_ways) \
+            and way not in getTestOpts().omit_ways
 
-    # Which ways we are asked to skip
-    do_ways = filter (ok_way,all_ways)
+        # Which ways we are asked to skip
+        do_ways = filter (ok_way,all_ways)
 
-    # In fast mode, we skip all but one way
-    if config.fast and len(do_ways) > 0:
-        do_ways = [do_ways[0]]
+        # In fast mode, we skip all but one way
+        if config.fast and len(do_ways) > 0:
+            do_ways = [do_ways[0]]
 
-    # Run the required tests...
-    for way in do_ways:
-        do_test (name, way, func, args)
+        if not config.clean_only:
+            # Run the required tests...
+            for way in do_ways:
+                do_test (name, way, func, args)
 
-    for way in all_ways:
-        if way not in do_ways:
-            skiptest (name,way)
+            for way in all_ways:
+                if way not in do_ways:
+                    skiptest (name,way)
 
-    if getTestOpts().cleanup != '':
-        clean(map (lambda suff: name + suff,
-                  ['', '.exe', '.exe.manifest', '.genscript',
-                   '.stderr.normalised',        '.stdout.normalised',
-                   '.run.stderr',               '.run.stdout',
-                   '.run.stderr.normalised',    '.run.stdout.normalised',
-                   '.comp.stderr',              '.comp.stdout',
-                   '.comp.stderr.normalised',   '.comp.stdout.normalised',
-                   '.interp.stderr',            '.interp.stdout',
-                   '.interp.stderr.normalised', '.interp.stdout.normalised',
-                   '.stats', '.comp.stats',
-                   '.hi', '.o', '.prof', '.exe.prof', '.hc',
-                   '_stub.h', '_stub.c', '_stub.o',
-                   '.hp', '.exe.hp', '.ps', '.aux', '.hcr', '.eventlog']))
+        if getTestOpts().cleanup != '' and (config.clean_only or do_ways != []):
+            clean(map (lambda suff: name + suff,
+                      ['', '.exe', '.exe.manifest', '.genscript',
+                       '.stderr.normalised',        '.stdout.normalised',
+                       '.run.stderr',               '.run.stdout',
+                       '.run.stderr.normalised',    '.run.stdout.normalised',
+                       '.comp.stderr',              '.comp.stdout',
+                       '.comp.stderr.normalised',   '.comp.stdout.normalised',
+                       '.interp.stderr',            '.interp.stdout',
+                       '.interp.stderr.normalised', '.interp.stdout.normalised',
+                       '.stats', '.comp.stats',
+                       '.hi', '.o', '.prof', '.exe.prof', '.hc',
+                       '_stub.h', '_stub.c', '_stub.o',
+                       '.hp', '.exe.hp', '.ps', '.aux', '.hcr', '.eventlog']))
 
-        clean(getTestOpts().clean_files)
+            if func == multi_compile or func == multi_compile_fail:
+                    extra_mods = args[1]
+                    clean(map (lambda (f,x): replace_suffix(f, 'o'), extra_mods))
+                    clean(map (lambda (f,x): replace_suffix(f, 'hi'), extra_mods))
+
+            clean(getTestOpts().clean_files)
+
+            try:
+                cleanCmd = getTestOpts().clean_cmd
+                if cleanCmd != None:
+                    result = runCmdFor(name, 'cd ' + getTestOpts().testdir + ' && ' + cleanCmd)
+                    if result != 0:
+                        framework_fail(name, 'cleaning', 'clean-command failed: ' + str(result))
+            except e:
+                framework_fail(name, 'cleaning', 'clean-command exception')
+
+        package_conf_cache_file_end_timestamp = get_package_cache_timestamp();
+
+        if package_conf_cache_file_start_timestamp != package_conf_cache_file_end_timestamp:
+            framework_fail(name, 'whole-test', 'Package cache timestamps do not match: ' + str(package_conf_cache_file_start_timestamp) + ' ' + str(package_conf_cache_file_end_timestamp))
 
         try:
-            cleanCmd = getTestOpts().clean_cmd
-            if cleanCmd != None:
-                result = runCmd('cd ' + getTestOpts().testdir + ' && ' + cleanCmd)
-                if result != 0:
-                    framework_fail(name, 'cleaning', 'clean-command failed: ' + str(result))
-        except e:
-            framework_fail(name, 'cleaning', 'clean-command exception')
+            for f in files_written[name]:
+                if os.path.exists(f):
+                    try:
+                        if not f in files_written_not_removed[name]:
+                            files_written_not_removed[name].append(f)
+                    except:
+                        files_written_not_removed[name] = [f]
+        except:
+            pass
+    except Exception, e:
+        framework_fail(name, 'runTest', 'Unhandled exception: ' + str(e))
 
-    package_conf_cache_file_end_timestamp = get_package_cache_timestamp();
+def clean(strs):
+    for str in strs:
+        for name in glob.glob(in_testdir(str)):
+            clean_full_path(name)
 
-    if package_conf_cache_file_start_timestamp != package_conf_cache_file_end_timestamp:
-        framework_fail(name, 'whole-test', 'Package cache timestamps do not match: ' + str(package_conf_cache_file_start_timestamp) + ' ' + str(package_conf_cache_file_end_timestamp))
-
-def clean(names):
-    clean_full_paths(map (lambda name: in_testdir(name), names))
-
-def clean_full_paths(names):
-    for name in names:
+def clean_full_path(name):
         try:
             # Remove files...
             os.remove(name)
@@ -635,7 +690,7 @@ def do_test(name, way, func, args):
         try:
             preCmd = getTestOpts().pre_cmd
             if preCmd != None:
-                result = runCmd('cd ' + getTestOpts().testdir + ' && ' + preCmd)
+                result = runCmdFor(name, 'cd ' + getTestOpts().testdir + ' && ' + preCmd)
                 if result != 0:
                     framework_fail(name, way, 'pre-command failed: ' + str(result))
         except e:
@@ -791,14 +846,6 @@ def multimod_compile( name, way, top_mod, extra_hc_opts ):
 def multimod_compile_fail( name, way, top_mod, extra_hc_opts ):
     return do_compile( name, way, 1, top_mod, [], extra_hc_opts )
 
-def multisrc_compile( name, way, top_mod, extra_mods, extra_hc_opts ):
-    extra_mods = map ((lambda y : (y, '')), extra_mods)
-    return do_compile( name, way, 0, top_mod, extra_mods, extra_hc_opts)
-
-def multisrc_compile_fail( name, way, top_mod, extra_mods, extra_hc_opts ):
-    extra_mods = map ((lambda y : (y, '')), extra_mods)
-    return do_compile( name, way, 1, top_mod, extra_mods, extra_hc_opts)
-
 def multi_compile( name, way, top_mod, extra_mods, extra_hc_opts ):
     return do_compile( name, way, 0, top_mod, extra_mods, extra_hc_opts)
 
@@ -834,7 +881,8 @@ def do_compile( name, way, should_fail, top_mod, extra_mods, extra_hc_opts ):
     (platform_specific, expected_stderr_file) = platform_wordsize_qualify(namebase, 'stderr')
     actual_stderr_file = qualify(name, 'comp.stderr')
 
-    if not compare_outputs('stderr', normalise_errmsg, normalise_whitespace, \
+    if not compare_outputs('stderr', \
+                           two_normalisers(two_normalisers(getTestOpts().extra_errmsg_normaliser, normalise_errmsg), normalise_whitespace), \
                            expected_stderr_file, actual_stderr_file):
         return failBecause('stderr mismatch')
 
@@ -867,8 +915,6 @@ def compile_and_run__( name, way, top_mod, extra_mods, extra_hc_opts ):
             return result
 
         cmd = './' + name;
-        if getTestOpts().cmd_prefix != '':
-            cmd = getTestOpts().cmd_prefix + ' ' + cmd;
 
         # we don't check the compiler's stderr for a compile-and-run test
         return simple_run( name, way, cmd, getTestOpts().extra_run_opts )
@@ -879,10 +925,6 @@ def compile_and_run( name, way, extra_hc_opts ):
 def multimod_compile_and_run( name, way, top_mod, extra_hc_opts ):
     return compile_and_run__( name, way, top_mod, [], extra_hc_opts)
 
-def multisrc_compile_and_run( name, way, top_mod, extra_mods, extra_hc_opts ):
-    extra_mods = map ((lambda y : (y, '')), extra_mods)
-    return compile_and_run__( name, way, top_mod, extra_mods, extra_hc_opts)
-
 def multi_compile_and_run( name, way, top_mod, extra_mods, extra_hc_opts ):
     return compile_and_run__( name, way, top_mod, extra_mods, extra_hc_opts)
 
@@ -891,12 +933,12 @@ def multi_compile_and_run( name, way, top_mod, extra_mods, extra_hc_opts ):
 
 def checkStats(stats_file, num_fields):
     result = passed()
-    if num_fields != []:
+    if len(num_fields) > 0:
         f = open(in_testdir(stats_file))
         contents = f.read()
         f.close()
 
-        for (field, min, max) in num_fields:
+        for (field, (min, max)) in num_fields.items():
             m = re.search('\("' + field + '", "([0-9]+)"\)', contents)
             if m == None:
                 print 'Failed to find field: ', field
@@ -920,9 +962,9 @@ def checkStats(stats_file, num_fields):
 def extras_build( way, extra_mods, extra_hc_opts ):
     for modopts in extra_mods:
         mod, opts = modopts
-        result = simple_build( mod, way, opts + extra_hc_opts, 0, '', 0, 0, 0)
-        if not (mod.endswith(".hs") or mod.endswith(".lhs")):
-            extra_hc_opts += " " + replace_suffix(mod, 'o')
+        result = simple_build( mod, way, opts + ' ' + extra_hc_opts, 0, '', 0, 0, 0)
+        if not (mod.endswith('.hs') or mod.endswith('.lhs')):
+            extra_hc_opts += ' ' + replace_suffix(mod, 'o')
         if badResult(result):
             return result
 
@@ -962,8 +1004,14 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link, addsuf, 
         to_do = '-c' # just compile
 
     stats_file = name + '.comp.stats'
-    if opts.compiler_stats_num_fields != []:
+    if len(opts.compiler_stats_num_fields) > 0:
         extra_hc_opts += ' +RTS -V0 -t' + stats_file + ' --machine-readable -RTS'
+
+    # Required by GHC 7.3+, harmless for earlier versions:
+    if (getTestOpts().c_src or
+        getTestOpts().objc_src or
+        getTestOpts().objcpp_src):
+        extra_hc_opts += ' -no-hs-main '
 
     if getTestOpts().compile_cmd_prefix == '':
         cmd_prefix = ''
@@ -983,7 +1031,7 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link, addsuf, 
           + opts.extra_hc_opts + ' ' \
           + '>' + errname + ' 2>&1'
 
-    result = runCmd(cmd)
+    result = runCmdFor(name, cmd)
 
     if result != 0 and not should_fail:
         actual_stderr = qualify(name, 'comp.stderr')
@@ -1038,22 +1086,26 @@ def simple_run( name, way, prog, args ):
     my_rts_flags = rts_flags(way)
 
     stats_file = name + '.stats'
-    if opts.stats_num_fields != []:
+    if len(opts.stats_num_fields) > 0:
         args += ' +RTS -V0 -t' + stats_file + ' --machine-readable -RTS'
 
     if opts.no_stdin:
         stdin_comes_from = ''
     else:
         stdin_comes_from = ' <' + use_stdin
-    cmd = 'cd ' + getTestOpts().testdir + ' && ' \
-       + prog + ' ' + args + ' '  \
+    cmd = prog + ' ' + args + ' '  \
         + my_rts_flags + ' '       \
         + stdin_comes_from         \
         + ' >' + run_stdout        \
         + ' 2>' + run_stderr
 
+    if getTestOpts().cmd_wrapper != None:
+        cmd = getTestOpts().cmd_wrapper(cmd);
+
+    cmd = 'cd ' + getTestOpts().testdir + ' && ' + cmd
+
     # run the command
-    result = runCmd(cmd)
+    result = runCmdFor(name, cmd)
 
     exit_code = result >> 8
     signal    = result & 0xff
@@ -1102,11 +1154,6 @@ def interpreter_run( name, way, extra_hc_opts, compile_only, top_mod ):
     rm_no_fail(errname)
     rm_no_fail(name)
 
-    if getTestOpts().cmd_prefix == '':
-        cmd_prefix = ''
-    else:
-        cmd_prefix = getTestOpts().cmd_prefix + ' '
-
     if (top_mod == ''):
         srcname = add_hs_lhs_suffix(name)
     else:
@@ -1147,8 +1194,7 @@ def interpreter_run( name, way, extra_hc_opts, compile_only, top_mod ):
 
     script.close()
 
-    cmd = 'cd ' + getTestOpts().testdir + " && " + cmd_prefix + "'" \
-          + config.compiler + "' " \
+    cmd = "'" + config.compiler + "' " \
           + join(config.compiler_always_flags,' ') + ' ' \
           + srcname + ' ' \
           + join(config.way_flags[way],' ') + ' ' \
@@ -1156,7 +1202,12 @@ def interpreter_run( name, way, extra_hc_opts, compile_only, top_mod ):
           + getTestOpts().extra_hc_opts + ' ' \
           + '<' + scriptname +  ' 1>' + outname + ' 2>' + errname
 
-    result = runCmd(cmd)
+    if getTestOpts().cmd_wrapper != None:
+        cmd = getTestOpts().cmd_wrapper(cmd);
+
+    cmd = 'cd ' + getTestOpts().testdir + " && " + cmd
+
+    result = runCmdFor(name, cmd)
 
     exit_code = result >> 8
     signal    = result & 0xff
@@ -1244,7 +1295,7 @@ def extcore_run( name, way, extra_hc_opts, compile_only, top_mod ):
           + getTestOpts().extra_hc_opts \
           + to_do \
           + '>' + errname + ' 2>&1'
-    result = runCmd(cmd)
+    result = runCmdFor(name, cmd)
 
     exit_code = result >> 8
 
@@ -1258,7 +1309,7 @@ def extcore_run( name, way, extra_hc_opts, compile_only, top_mod ):
     if (top_mod == ''):
         to_compile = corefilename
     else:
-        result = runCmd('grep Compiling ' + qerrname + ' |  awk \'{print $4}\' > ' + depsfilename)
+        result = runCmdFor(name, 'grep Compiling ' + qerrname + ' |  awk \'{print $4}\' > ' + depsfilename)
         deps = open(depsfilename).read()
         deplist = string.replace(deps, '\n',' ');
         deplist2 = string.replace(deplist,'.lhs,', '.hcr');
@@ -1276,7 +1327,7 @@ def extcore_run( name, way, extra_hc_opts, compile_only, top_mod ):
           + ' -fglasgow-exts -o ' + name \
           + '>' + errname + ' 2>&1'
 
-    result = runCmd(cmd)
+    result = runCmdFor(name, cmd)
     exit_code = result >> 8
 
     if exit_code != 0:
@@ -1310,11 +1361,12 @@ def check_stdout_ok( name ):
       else:
          return normalise_output(str)
 
-   return compare_outputs('stdout', norm, getTestOpts().extra_normaliser, \
+   return compare_outputs('stdout', \
+                          two_normalisers(norm, getTestOpts().extra_normaliser), \
                           expected_stdout_file, actual_stdout_file)
 
 def dump_stdout( name ):
-   print "Stdout:"
+   print 'Stdout:'
    print read_no_crs(qualify(name, 'run.stdout'))
 
 def check_stderr_ok( name ):
@@ -1332,7 +1384,8 @@ def check_stderr_ok( name ):
       else:
          return normalise_output(str)
 
-   return compare_outputs('stderr', norm, getTestOpts().extra_normaliser, \
+   return compare_outputs('stderr', \
+                          two_normalisers(norm, getTestOpts().extra_normaliser), \
                           expected_stderr_file, actual_stderr_file)
 
 def dump_stderr( name ):
@@ -1387,32 +1440,49 @@ def check_prof_ok(name):
         print prof_file + " is empty"
         return(False)
 
-    return(True)
+    if getTestOpts().with_namebase == None:
+        namebase = name
+    else:
+        namebase = getTestOpts().with_namebase
+
+    (platform_specific, expected_prof_file) = \
+        platform_wordsize_qualify(namebase, 'prof.sample')
+
+    # sample prof file is not required
+    if not os.path.exists(expected_prof_file):
+        return True
+    else:
+        return compare_outputs('prof', \
+                               two_normalisers(normalise_whitespace,normalise_prof), \
+                               expected_prof_file, prof_file)
 
 # Compare expected output to actual output, and optionally accept the
 # new output. Returns true if output matched or was accepted, false
 # otherwise.
-def compare_outputs( kind, normaliser, extra_normaliser,
-                     expected_file, actual_file ):
+def compare_outputs( kind, normaliser, expected_file, actual_file ):
     if os.path.exists(expected_file):
         expected_raw = read_no_crs(expected_file)
-        expected_str = extra_normaliser(normaliser(expected_raw))
+        # print "norm:", normaliser(expected_raw)
+        expected_str = normaliser(expected_raw)
+        expected_file_for_diff = expected_file
     else:
         expected_str = ''
-        expected_file = '/dev/null'
+        expected_file_for_diff = '/dev/null'
 
     actual_raw = read_no_crs(actual_file)
-    actual_str = extra_normaliser(normaliser(actual_raw))
+    actual_str = normaliser(actual_raw)
 
-    if expected_str != actual_str:
+    if expected_str == actual_str:
+        return 1
+    else:
         print 'Actual ' + kind + ' output differs from expected:'
 
-        if expected_file == '/dev/null':
+        if expected_file_for_diff == '/dev/null':
             expected_normalised_file = '/dev/null'
-
         else:
             expected_normalised_file = expected_file + ".normalised"
             write_file(expected_normalised_file, expected_str)
+
         actual_normalised_file = actual_file + ".normalised"
         write_file(actual_normalised_file, actual_str)
 
@@ -1424,26 +1494,22 @@ def compare_outputs( kind, normaliser, extra_normaliser,
         # (including newlines) so the diff would be hard to read.
         # This does mean that the diff might contain changes that
         # would be normalised away.
-        r = os.system( 'diff -uw ' + expected_file + \
+        r = os.system( 'diff -uw ' + expected_file_for_diff + \
                                ' ' + actual_file )
 
         # If for some reason there were no non-whitespace differences,
         # then do a full diff
         if r == 0:
-            r = os.system( 'diff -u ' + expected_file + \
+            r = os.system( 'diff -u ' + expected_file_for_diff + \
                                   ' ' + actual_file )
 
         if config.accept:
-            if expected_file == '':
-                print '*** cannot accept new output: ' + kind + \
-                      ' file does not exist.'
-                return 0
-            else:
-                print 'Accepting new output.'
-                write_file(expected_file, actual_raw)
-                return 1
-        return 0
-    return 1
+            print 'Accepting new output.'
+            write_file(expected_file, actual_raw)
+            return 1
+        else:
+            return 0
+
 
 def normalise_whitespace( str ):
     # Merge contiguous whitespace characters into a single space.
@@ -1456,6 +1522,8 @@ def normalise_errmsg( str ):
     #    hacky solution is used in place of more sophisticated filename
     #    mangling
     str = re.sub('([^\\s])\\.exe', '\\1', str)
+    # normalise slashes, minimise Windows/Unix filename differences
+    str = re.sub('\\\\', '/', str)
     # The inplace ghc's are called ghc-bin-stage[123] to avoid filename
     # collisions, so we need to normalise that to just "ghc"
     # (this is for the old build system, I think, so should be removable)
@@ -1469,8 +1537,44 @@ def normalise_errmsg( str ):
     str = re.sub('integer-[a-z]+', 'integer-impl', str)
     return str
 
+# normalise a .prof file, so that we can reasonably compare it against
+# a sample.  This doesn't compare any of the actual profiling data,
+# only the shape of the profile and the number of entries.
+def normalise_prof (str):
+    # strip everything up to the line beginning "COST CENTRE"
+    str = re.sub('^(.*\n)*COST CENTRE[^\n]*\n','',str)
+
+    # strip results for CAFs, these tend to change unpredictably
+    str = re.sub('[ \t]*(CAF|IDLE).*\n','',str)
+
+    # XXX Ignore Main.main.  Sometimes this appears under CAF, and
+    # sometimes under MAIN.
+    str = re.sub('[ \t]*main[ \t]+Main.*\n','',str)
+
+    # We have somthing like this:
+
+    # MAIN      MAIN                 101      0    0.0    0.0   100.0  100.0
+    # k         Main                 204      1    0.0    0.0     0.0    0.0
+    #  foo      Main                 205      1    0.0    0.0     0.0    0.0
+    #   foo.bar Main                 207      1    0.0    0.0     0.0    0.0
+
+    # then we remove all the specific profiling data, leaving only the
+    # cost centre name, module, and entries, to end up with this:
+
+    # MAIN                MAIN            0
+    #   k                 Main            1
+    #    foo              Main            1
+    #     foo.bar         Main            1
+
+    str = re.sub('\n([ \t]*[^ \t]+)([ \t]+[^ \t]+)([ \t]+\\d+)([ \t]+\\d+)[ \t]+([\\d\\.]+)[ \t]+([\\d\\.]+)[ \t]+([\\d\\.]+)[ \t]+([\\d\\.]+)','\n\\1 \\2 \\4',str)
+    return str
+
 def normalise_slashes_( str ):
     str = re.sub('\\\\', '/', str)
+    return str
+
+def normalise_exe_( str ):
+    str = re.sub('\.exe', '', str)
     return str
 
 def normalise_output( str ):
@@ -1537,9 +1641,201 @@ def runCmd( cmd ):
         r = os.system(cmd)
     return r << 8
 
+def runCmdFor( name, cmd ):
+    if_verbose( 1, cmd )
+    r = 0
+    if config.platform == 'i386-unknown-mingw32':
+   # On MinGW, we will always have timeout
+        assert config.timeout_prog!=''
+
+    if config.timeout_prog != '':
+        if config.check_files_written:
+            fn = name + ".strace"
+            r = rawSystem(["strace", "-o", fn, "-fF", "-e", "creat,open,chdir,clone,vfork",
+                           config.timeout_prog, str(config.timeout),
+                           cmd])
+            addTestFilesWritten(name, fn)
+            rm_no_fail(fn)
+        else:
+            r = rawSystem([config.timeout_prog, str(config.timeout), cmd])
+    else:
+        r = os.system(cmd)
+    return r << 8
+
 def runCmdExitCode( cmd ):
     return (runCmd(cmd) >> 8);
 
+
+# -----------------------------------------------------------------------------
+# checking for files being written to by multiple tests
+
+re_strace_call_end = '(\) += ([0-9]+|-1 E.*)| <unfinished ...>)$'
+re_strace_unavailable       = re.compile('^\) += \? <unavailable>$')
+re_strace_pid               = re.compile('^([0-9]+) +(.*)')
+re_strace_clone             = re.compile('^(clone\(|<... clone resumed> ).*\) = ([0-9]+)$')
+re_strace_clone_unfinished  = re.compile('^clone\( <unfinished \.\.\.>$')
+re_strace_vfork             = re.compile('^(vfork\(\)|<\.\.\. vfork resumed> \)) += ([0-9]+)$')
+re_strace_vfork_unfinished  = re.compile('^vfork\( <unfinished \.\.\.>$')
+re_strace_chdir             = re.compile('^chdir\("([^"]*)"(\) += 0| <unfinished ...>)$')
+re_strace_chdir_resumed     = re.compile('^<\.\.\. chdir resumed> \) += 0$')
+re_strace_open              = re.compile('^open\("([^"]*)", ([A-Z_|]*)(, [0-9]+)?' + re_strace_call_end)
+re_strace_open_resumed      = re.compile('^<... open resumed> '                    + re_strace_call_end)
+re_strace_ignore_sigchild   = re.compile('^--- SIGCHLD \(Child exited\) @ 0 \(0\) ---$')
+re_strace_ignore_sigvtalarm = re.compile('^--- SIGVTALRM \(Virtual timer expired\) @ 0 \(0\) ---$')
+re_strace_ignore_sigint     = re.compile('^--- SIGINT \(Interrupt\) @ 0 \(0\) ---$')
+re_strace_ignore_sigfpe     = re.compile('^--- SIGFPE \(Floating point exception\) @ 0 \(0\) ---$')
+re_strace_ignore_sigsegv    = re.compile('^--- SIGSEGV \(Segmentation fault\) @ 0 \(0\) ---$')
+re_strace_ignore_sigpipe    = re.compile('^--- SIGPIPE \(Broken pipe\) @ 0 \(0\) ---$')
+
+# Files that are read or written but shouldn't be:
+# * ghci_history shouldn't be read or written by tests
+# * things under package.conf.d shouldn't be written by tests
+bad_file_usages = {}
+
+# Mapping from tests to the list of files that they write
+files_written = {}
+
+# Mapping from tests to the list of files that they write but don't clean
+files_written_not_removed = {}
+
+def add_bad_file_usage(name, file):
+    try:
+        if not file in bad_file_usages[name]:
+            bad_file_usages[name].append(file)
+    except:
+        bad_file_usages[name] = [file]
+
+def mkPath(curdir, path):
+    # Given the current full directory is 'curdir', what is the full
+    # path to 'path'?
+    return os.path.realpath(os.path.join(curdir, path))
+
+def addTestFilesWritten(name, fn):
+    if config.use_threads:
+        with t.lockFilesWritten:
+            addTestFilesWrittenHelper(name, fn)
+    else:
+        addTestFilesWrittenHelper(name, fn)
+
+def addTestFilesWrittenHelper(name, fn):
+    started = False
+    working_directories = {}
+
+    with open(fn, 'r') as f:
+        for line in f:
+            m_pid = re_strace_pid.match(line)
+            if m_pid:
+                pid = m_pid.group(1)
+                content = m_pid.group(2)
+            elif re_strace_unavailable.match(line):
+                next
+            else:
+                framework_fail(name, 'strace', "Can't find pid in strace line: " + line)
+
+            m_open = re_strace_open.match(content)
+            m_chdir = re_strace_chdir.match(content)
+            m_clone = re_strace_clone.match(content)
+            m_vfork = re_strace_vfork.match(content)
+
+            if not started:
+                working_directories[pid] = os.getcwd()
+                started = True
+
+            if m_open:
+                file = m_open.group(1)
+                file = mkPath(working_directories[pid], file)
+                if file.endswith("ghci_history"):
+                    add_bad_file_usage(name, file)
+                elif not file in ['/dev/tty', '/dev/null'] and not file.startswith("/tmp/ghc"):
+                    flags = m_open.group(2).split('|')
+                    if 'O_WRONLY' in flags or 'O_RDWR' in flags:
+                        if re.match('package\.conf\.d', file):
+                            add_bad_file_usage(name, file)
+                        else:
+                            try:
+                                if not file in files_written[name]:
+                                    files_written[name].append(file)
+                            except:
+                                files_written[name] = [file]
+                    elif 'O_RDONLY' in flags:
+                        pass
+                    else:
+                        framework_fail(name, 'strace', "Can't understand flags in open strace line: " + line)
+            elif m_chdir:
+                # We optimistically assume that unfinished chdir's are going to succeed
+                dir = m_chdir.group(1)
+                working_directories[pid] = mkPath(working_directories[pid], dir)
+            elif m_clone:
+                working_directories[m_clone.group(2)] = working_directories[pid]
+            elif m_vfork:
+                working_directories[m_vfork.group(2)] = working_directories[pid]
+            elif re_strace_open_resumed.match(content):
+                pass
+            elif re_strace_chdir_resumed.match(content):
+                pass
+            elif re_strace_vfork_unfinished.match(content):
+                pass
+            elif re_strace_clone_unfinished.match(content):
+                pass
+            elif re_strace_ignore_sigchild.match(content):
+                pass
+            elif re_strace_ignore_sigvtalarm.match(content):
+                pass
+            elif re_strace_ignore_sigint.match(content):
+                pass
+            elif re_strace_ignore_sigfpe.match(content):
+                pass
+            elif re_strace_ignore_sigsegv.match(content):
+                pass
+            elif re_strace_ignore_sigpipe.match(content):
+                pass
+            else:
+                framework_fail(name, 'strace', "Can't understand strace line: " + line)
+ 
+def checkForFilesWrittenProblems(file):
+    foundProblem = False
+
+    files_written_inverted = {}
+    for t in files_written.keys():
+        for f in files_written[t]:
+            try:
+                files_written_inverted[f].append(t)
+            except:
+                files_written_inverted[f] = [t]
+
+    for f in files_written_inverted.keys():
+        if len(files_written_inverted[f]) > 1:
+            if not foundProblem:
+                foundProblem = True
+                file.write("\n")
+                file.write("\nSome files are written by multiple tests:\n")
+            file.write("    " + f + " (" + str(files_written_inverted[f]) + ")\n")
+    if foundProblem:
+        file.write("\n")
+
+    # -----
+
+    if len(files_written_not_removed) > 0:
+        file.write("\n")
+        file.write("\nSome files written but not removed:\n")
+        tests = files_written_not_removed.keys()
+        tests.sort()
+        for t in tests:
+            for f in files_written_not_removed[t]:
+                file.write("    " + t + ": " + f + "\n")
+        file.write("\n")
+
+    # -----
+
+    if len(bad_file_usages) > 0:
+        file.write("\n")
+        file.write("\nSome bad file usages:\n")
+        tests = bad_file_usages.keys()
+        tests.sort()
+        for t in tests:
+            for f in bad_file_usages[t]:
+                file.write("    " + t + ": " + f + "\n")
+        file.write("\n")
 
 # -----------------------------------------------------------------------------
 # checking if ghostscript is available for checking the output of hp2ps
@@ -1585,6 +1881,8 @@ def add_hs_lhs_suffix(name):
         return add_suffix(name, 'c')
     elif getTestOpts().objc_src:
         return add_suffix(name, 'm')
+    elif getTestOpts().objcpp_src:
+        return add_suffix(name, 'mm')
     elif getTestOpts().literate:
         return add_suffix(name, 'lhs')
     else:
@@ -1698,6 +1996,9 @@ def summary(t, file):
     if t.n_unexpected_failures > 0:
         file.write('Unexpected failures:\n')
         printFailingTestInfosSummary(file, t.unexpected_failures)
+
+    if config.check_files_written:
+        checkForFilesWrittenProblems(file)
 
 def printPassingTestInfosSummary(file, testInfos):
     directories = testInfos.keys()

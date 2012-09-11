@@ -1,6 +1,6 @@
 
 import WordsVect
-import Data.Array.Parallel.Prelude
+import Data.Array.Parallel
 import qualified Data.Array.Parallel.Prelude.Word8	as W
 import qualified Data.Array.Parallel.PArray 		as P
 import qualified Data.Array.Parallel.Unlifted		as U
@@ -13,7 +13,7 @@ main
 
 	-- convert string to a PArray
 	let paStr   :: PArray W.Word8
-	    paStr = fromUArrPA' $ U.map W.fromInt $ U.fromList $ map ord str
+	    paStr = P.fromUArray $ U.map W.fromInt $ U.fromList $ map ord str
 	
 	
 	-- break the string into words then flatten it back		

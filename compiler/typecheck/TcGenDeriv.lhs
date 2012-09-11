@@ -11,8 +11,15 @@ This module is nominally ``subordinate'' to @TcDeriv@, which is the
 This is where we do all the grimy bindings' generation.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module TcGenDeriv (
-	DerivAuxBinds, isDupAux,
+	BagDerivStuff, DerivStuff(..),
 
 	gen_Bounded_binds,
 	gen_Enum_binds,
@@ -28,7 +35,8 @@ module TcGenDeriv (
 	deepSubtypesContaining, foldDataConArgs,
 	gen_Foldable_binds,
 	gen_Traversable_binds,
-	genAuxBind
+	genAuxBinds,
+        ordOpTbl, boxConTbl
     ) where
 
 #include "HsVersions.h"
@@ -61,32 +69,32 @@ import FastString
 import Bag
 import Fingerprint
 import Constants
+import TcEnv (InstInfo)
 
 import Data.List        ( partition, intersperse )
 \end{code}
 
 \begin{code}
-type DerivAuxBinds = [DerivAuxBind]
+type BagDerivStuff = Bag DerivStuff
 
-data DerivAuxBind		-- Please add these auxiliary top-level bindings
-  = GenCon2Tag TyCon		-- The con2Tag for given TyCon
-  | GenTag2Con TyCon		-- ...ditto tag2Con
-  | GenMaxTag  TyCon		-- ...and maxTag
-	-- All these generate ZERO-BASED tag operations
-	-- I.e first constructor has tag 0
+data AuxBindSpec
+  = DerivCon2Tag TyCon  -- The con2Tag for given TyCon
+  | DerivTag2Con TyCon  -- ...ditto tag2Con
+  | DerivMaxTag  TyCon  -- ...and maxTag
+  deriving( Eq )
+  -- All these generate ZERO-BASED tag operations
+  -- I.e first constructor has tag 0
 
-	-- Scrap your boilerplate
-  | MkDataCon DataCon		-- For constructor C we get $cC :: Constr
-  | MkTyCon   TyCon		-- For tycon T we get       $tT :: DataType
+data DerivStuff     -- Please add this auxiliary stuff
+  = DerivAuxBind AuxBindSpec
 
+  -- Generics
+  | DerivTyCon TyCon      -- New data types
+  | DerivFamInst TyCon    -- New type family instances
 
-isDupAux :: DerivAuxBind -> DerivAuxBind -> Bool
-isDupAux (GenCon2Tag tc1) (GenCon2Tag tc2) = tc1 == tc2
-isDupAux (GenTag2Con tc1) (GenTag2Con tc2) = tc1 == tc2
-isDupAux (GenMaxTag tc1)  (GenMaxTag tc2)  = tc1 == tc2
-isDupAux (MkDataCon dc1)  (MkDataCon dc2)  = dc1 == dc2
-isDupAux (MkTyCon tc1)    (MkTyCon tc2)    = tc1 == tc2
-isDupAux _                _                = False
+  -- New top-level auxiliary bindings 
+  | DerivHsBind (LHsBind RdrName, LSig RdrName) -- Also used for SYB
+  | DerivInst (InstInfo RdrName)                -- New, auxiliary instances
 \end{code}
 
 
@@ -165,31 +173,36 @@ instance ... Eq (Foo ...) where
 
 
 \begin{code}
-gen_Eq_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
+gen_Eq_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, BagDerivStuff)
 gen_Eq_binds loc tycon
   = (method_binds, aux_binds)
   where
-    (nullary_cons, nonnullary_cons)
+    (nullary_cons, non_nullary_cons)
        | isNewTyCon tycon = ([], tyConDataCons tycon)
        | otherwise        = partition isNullarySrcDataCon (tyConDataCons tycon)
 
     no_nullary_cons = null nullary_cons
 
-    rest | no_nullary_cons
-	 = case tyConSingleDataCon_maybe tycon of
-	    	  Just _ -> []
-	    	  Nothing -> -- if cons don't match, then False
-	    	     [([nlWildPat, nlWildPat], false_Expr)]
-	 | otherwise -- calc. and compare the tags
-	 = [([a_Pat, b_Pat],
-    	    untag_Expr tycon [(a_RDR,ah_RDR), (b_RDR,bh_RDR)]
-    	               (genOpApp (nlHsVar ah_RDR) eqInt_RDR (nlHsVar bh_RDR)))]
+    fall_through_eqn
+      | no_nullary_cons   -- All constructors have arguments
+      = case non_nullary_cons of
+          []  -> []   -- No constructors; no fall-though case
+          [_] -> []   -- One constructor; no fall-though case
+          _   ->      -- Two or more constructors; add fall-through of
+	   	      --       (==) _ _ = False
+	    	 [([nlWildPat, nlWildPat], false_Expr)]
 
-    aux_binds | no_nullary_cons = []
-	      | otherwise       = [GenCon2Tag tycon]
+      | otherwise -- One or more nullary cons; add fall-through of
+                  -- extract tags compare for equality
+      = [([a_Pat, b_Pat],
+    	 untag_Expr tycon [(a_RDR,ah_RDR), (b_RDR,bh_RDR)]
+    	            (genOpApp (nlHsVar ah_RDR) eqInt_RDR (nlHsVar bh_RDR)))]
+
+    aux_binds | no_nullary_cons = emptyBag
+	      | otherwise       = unitBag $ DerivAuxBind $ DerivCon2Tag tycon
 
     method_binds = listToBag [eq_bind, ne_bind]
-    eq_bind = mk_FunBind loc eq_RDR (map pats_etc nonnullary_cons ++ rest)
+    eq_bind = mk_FunBind loc eq_RDR (map pats_etc non_nullary_cons ++ fall_through_eqn)
     ne_bind = mk_easy_FunBind loc ne_RDR [a_Pat, b_Pat] (
 			nlHsApp (nlHsVar not_RDR) (nlHsPar (nlHsVarApps eq_RDR [a_RDR, b_RDR])))
 
@@ -323,15 +336,15 @@ gtResult OrdGE      = true_Expr
 gtResult OrdGT      = true_Expr
 
 ------------
-gen_Ord_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
+gen_Ord_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, BagDerivStuff)
 gen_Ord_binds loc tycon
   | null tycon_data_cons	-- No data-cons => invoke bale-out case
-  = (unitBag $ mk_FunBind loc compare_RDR [], [])
+  = (unitBag $ mk_FunBind loc compare_RDR [], emptyBag)
   | otherwise
   = (unitBag (mkOrdOp OrdCompare) `unionBags` other_ops, aux_binds)
   where
-    aux_binds | single_con_type = []
-              | otherwise       = [GenCon2Tag tycon]
+    aux_binds | single_con_type = emptyBag
+              | otherwise       = unitBag $ DerivAuxBind $ DerivCon2Tag tycon
 
 	-- Note [Do not rely on compare]
     other_ops | (last_tag - first_tag) <= 2 	-- 1-3 constructors
@@ -546,7 +559,7 @@ instance ... Enum (Foo ...) where
 For @enumFromTo@ and @enumFromThenTo@, we use the default methods.
 
 \begin{code}
-gen_Enum_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
+gen_Enum_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, BagDerivStuff)
 gen_Enum_binds loc tycon
   = (method_binds, aux_binds)
   where
@@ -558,7 +571,8 @@ gen_Enum_binds loc tycon
 			enum_from_then,
 			from_enum
 		    ]
-    aux_binds = [GenCon2Tag tycon, GenTag2Con tycon, GenMaxTag tycon]
+    aux_binds = listToBag $ map DerivAuxBind
+                  [DerivCon2Tag tycon, DerivTag2Con tycon, DerivMaxTag tycon]
 
     occ_nm = getOccString tycon
 
@@ -625,13 +639,13 @@ gen_Enum_binds loc tycon
 %************************************************************************
 
 \begin{code}
-gen_Bounded_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
+gen_Bounded_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, BagDerivStuff)
 gen_Bounded_binds loc tycon
   | isEnumerationTyCon tycon
-  = (listToBag [ min_bound_enum, max_bound_enum ], [])
+  = (listToBag [ min_bound_enum, max_bound_enum ], emptyBag)
   | otherwise
   = ASSERT(isSingleton data_cons)
-    (listToBag [ min_bound_1con, max_bound_1con ], [])
+    (listToBag [ min_bound_1con, max_bound_1con ], emptyBag)
   where
     data_cons = tyConDataCons tycon
 
@@ -712,13 +726,15 @@ we follow the scheme given in Figure~19 of the Haskell~1.2 report
 (p.~147).
 
 \begin{code}
-gen_Ix_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
+gen_Ix_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, BagDerivStuff)
 
 gen_Ix_binds loc tycon
   | isEnumerationTyCon tycon
-  = (enum_ixes, [GenCon2Tag tycon, GenTag2Con tycon, GenMaxTag tycon])
+  = ( enum_ixes
+    , listToBag $ map DerivAuxBind
+                   [DerivCon2Tag tycon, DerivTag2Con tycon, DerivMaxTag tycon])
   | otherwise
-  = (single_con_ixes, [GenCon2Tag tycon])
+  = (single_con_ixes, unitBag (DerivAuxBind (DerivCon2Tag tycon)))
   where
     --------------------------------------------------------------
     enum_ixes = listToBag [ enum_range, enum_index, enum_inRange ]
@@ -871,10 +887,10 @@ instance Read T where
 
 
 \begin{code}
-gen_Read_binds :: FixityEnv -> SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
+gen_Read_binds :: FixityEnv -> SrcSpan -> TyCon -> (LHsBinds RdrName, BagDerivStuff)
 
 gen_Read_binds get_fixity loc tycon
-  = (listToBag [read_prec, default_readlist, default_readlistprec], [])
+  = (listToBag [read_prec, default_readlist, default_readlistprec], emptyBag)
   where
     -----------------------------------------------------------------------
     default_readlist 
@@ -1040,10 +1056,10 @@ Example
 		    -- the most tightly-binding operator
 
 \begin{code}
-gen_Show_binds :: FixityEnv -> SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
+gen_Show_binds :: FixityEnv -> SrcSpan -> TyCon -> (LHsBinds RdrName, BagDerivStuff)
 
 gen_Show_binds get_fixity loc tycon
-  = (listToBag [shows_prec, show_list], [])
+  = (listToBag [shows_prec, show_list], emptyBag)
   where
     -----------------------------------------------------------------------
     show_list = mkHsVarBind loc showList_RDR
@@ -1253,16 +1269,52 @@ we generate
 gen_Data_binds :: SrcSpan
 	       -> TyCon 
 	       -> (LHsBinds RdrName,	-- The method bindings
-		   DerivAuxBinds)	-- Auxiliary bindings
+		   BagDerivStuff)	-- Auxiliary bindings
 gen_Data_binds loc tycon
   = (listToBag [gfoldl_bind, gunfold_bind, toCon_bind, dataTypeOf_bind]
      `unionBags` gcast_binds,
 		-- Auxiliary definitions: the data type and constructors
-     MkTyCon tycon : map MkDataCon data_cons)
+     listToBag ( DerivHsBind (genDataTyCon)
+               : map (DerivHsBind . genDataDataCon) data_cons))
   where
     data_cons  = tyConDataCons tycon
     n_cons     = length data_cons
     one_constr = n_cons == 1
+
+    genDataTyCon :: (LHsBind RdrName, LSig RdrName)
+    genDataTyCon        --  $dT
+      = (mkHsVarBind loc rdr_name rhs,
+         L loc (TypeSig [L loc rdr_name] sig_ty))
+      where
+        rdr_name = mk_data_type_name tycon
+        sig_ty   = nlHsTyVar dataType_RDR
+        constrs  = [nlHsVar (mk_constr_name con) | con <- tyConDataCons tycon]
+        rhs = nlHsVar mkDataType_RDR 
+              `nlHsApp` nlHsLit (mkHsString (showSDocOneLine (ppr tycon)))
+              `nlHsApp` nlList constrs
+
+    genDataDataCon :: DataCon -> (LHsBind RdrName, LSig RdrName)
+    genDataDataCon dc       --  $cT1 etc
+      = (mkHsVarBind loc rdr_name rhs,
+         L loc (TypeSig [L loc rdr_name] sig_ty))
+      where
+        rdr_name = mk_constr_name dc
+        sig_ty   = nlHsTyVar constr_RDR
+        rhs      = nlHsApps mkConstr_RDR constr_args
+    
+        constr_args 
+           = [ -- nlHsIntLit (toInteger (dataConTag dc)),	  -- Tag
+    	   nlHsVar (mk_data_type_name (dataConTyCon dc)), -- DataType
+    	   nlHsLit (mkHsString (occNameString dc_occ)),	  -- String name
+               nlList  labels,				  -- Field labels
+    	   nlHsVar fixity]				  -- Fixity
+    
+        labels   = map (nlHsLit . mkHsString . getOccString)
+                       (dataConFieldLabels dc)
+        dc_occ   = getOccName dc
+        is_infix = isDataSymOcc dc_occ
+        fixity | is_infix  = infix_RDR
+    	   | otherwise = prefix_RDR
 
 	------------ gfoldl
     gfoldl_bind = mk_FunBind loc gfoldl_RDR (map gfoldl_eqn data_cons)
@@ -1415,9 +1467,9 @@ This is pretty much the same as $fmap, only without the $(cofmap 'a 'a) case:
   $(cofmap 'a '(b -> c))  x  =  \b -> $(cofmap 'a' 'c) (x ($(fmap 'a 'c) b))
 
 \begin{code}
-gen_Functor_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
+gen_Functor_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, BagDerivStuff)
 gen_Functor_binds loc tycon
-  = (unitBag fmap_bind, [])
+  = (unitBag fmap_bind, emptyBag)
   where
     data_cons = tyConDataCons tycon
     fmap_bind = L loc $ mkRdrFunBind (L loc fmap_RDR) eqns
@@ -1460,7 +1512,7 @@ data FFoldType a      -- Describes how to fold over a Type in a functor like way
 	, ft_var     :: a 	    	    -- The variable itself			       
 	, ft_co_var  :: a	    	    -- The variable itself, contravariantly	       
 	, ft_fun     :: a -> a -> a  	    -- Function type
-	, ft_tup     :: Boxity -> [a] -> a  -- Tuple type 
+	, ft_tup     :: TupleSort -> [a] -> a  -- Tuple type 
 	, ft_ty_app  :: Type -> a -> a      -- Type app, variable only in last argument	       
 	, ft_bad_app :: a                   -- Type app, variable other than in last argument  
 	, ft_forall  :: TcTyVar -> a -> a   -- Forall type                                     
@@ -1479,8 +1531,8 @@ functorLikeTraverse var (FT { ft_triv = caseTrivial,     ft_var = caseVar
   where -- go returns (result of type a, does type contain var)
         go co ty | Just ty' <- coreView ty = go co ty'
         go co (TyVarTy    v) | v == var = (if co then caseCoVar else caseVar,True)
-        go co (FunTy (PredTy _) b)      = go co b
-        go co (FunTy x y)    | xc || yc = (caseFun xr yr,True)
+        go co (FunTy x y)  | isPredTy x = go co y
+                           | xc || yc   = (caseFun xr yr,True)
             where (xr,xc) = go (not co) x
                   (yr,yc) = go co       y
         go co (AppTy    x y) | xc = (caseWrongArg,   True)
@@ -1491,7 +1543,7 @@ functorLikeTraverse var (FT { ft_triv = caseTrivial,     ft_var = caseVar
                | not (or xcs)     = (caseTrivial, False)   -- Variable does not occur
                -- At this point we know that xrs, xcs is not empty,
                -- and at least one xr is True
-               | isTupleTyCon con = (caseTuple (tupleTyConBoxity con) xrs, True)
+               | isTupleTyCon con = (caseTuple (tupleTyConSort con) xrs, True)
                | or (init xcs)    = (caseWrongArg, True)   -- T (..var..)    ty
                | otherwise        =                        -- T (..no var..) ty
                                     (caseTyApp (fst (splitAppTy ty)) (last xrs), True)
@@ -1551,9 +1603,9 @@ mkSimpleConMatch fold extra_pats con insides = do
 
 -- "case x of (a1,a2,a3) -> fold [x1 a1, x2 a2, x3 a3]"
 mkSimpleTupleCase :: Monad m => ([LPat RdrName] -> DataCon -> [LHsExpr RdrName -> a] -> m (LMatch RdrName))
-                  -> Boxity -> [LHsExpr RdrName -> a] -> LHsExpr RdrName -> m (LHsExpr RdrName)
-mkSimpleTupleCase match_for_con boxity insides x = do
-    let con = tupleCon boxity (length insides)
+                  -> TupleSort -> [LHsExpr RdrName -> a] -> LHsExpr RdrName -> m (LHsExpr RdrName)
+mkSimpleTupleCase match_for_con sort insides x = do
+    let con = tupleCon sort (length insides)
     match <- match_for_con [] con insides
     return $ nlHsCase x [match]
 \end{code}
@@ -1586,9 +1638,9 @@ Note that the arguments to the real foldr function are the wrong way around,
 since (f :: a -> b -> b), while (foldr f :: b -> t a -> b).
 
 \begin{code}
-gen_Foldable_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
+gen_Foldable_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, BagDerivStuff)
 gen_Foldable_binds loc tycon
-  = (unitBag foldr_bind, [])
+  = (unitBag foldr_bind, emptyBag)
   where
     data_cons = tyConDataCons tycon
 
@@ -1638,9 +1690,9 @@ gives the function: traverse f (T x y) = T <$> pure x <*> f y
 instead of:         traverse f (T x y) = T x <$> f y
 
 \begin{code}
-gen_Traversable_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
+gen_Traversable_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, BagDerivStuff)
 gen_Traversable_binds loc tycon
-  = (unitBag traverse_bind, [])
+  = (unitBag traverse_bind, emptyBag)
   where
     data_cons = tyConDataCons tycon
 
@@ -1693,8 +1745,8 @@ The `tags' here start at zero, hence the @fIRST_TAG@ (currently one)
 fiddling around.
 
 \begin{code}
-genAuxBind :: SrcSpan -> DerivAuxBind -> (LHsBind RdrName, LSig RdrName)
-genAuxBind loc (GenCon2Tag tycon)
+genAuxBindSpec :: SrcSpan -> AuxBindSpec -> (LHsBind RdrName, LSig RdrName)
+genAuxBindSpec loc (DerivCon2Tag tycon)
   = (mk_FunBind loc rdr_name eqns, 
      L loc (TypeSig [L loc rdr_name] (L loc sig_ty)))
   where
@@ -1717,7 +1769,7 @@ genAuxBind loc (GenCon2Tag tycon)
     mk_eqn con = ([nlWildConPat con], 
 		  nlHsLit (HsIntPrim (toInteger ((dataConTag con) - fIRST_TAG))))
 
-genAuxBind loc (GenTag2Con tycon)
+genAuxBindSpec loc (DerivTag2Con tycon)
   = (mk_FunBind loc rdr_name 
 	[([nlConVarPat intDataCon_RDR [a_RDR]], 
 	   nlHsApp (nlHsVar tagToEnum_RDR) a_Expr)],
@@ -1728,7 +1780,7 @@ genAuxBind loc (GenTag2Con tycon)
 
     rdr_name = tag2con_RDR tycon
 
-genAuxBind loc (GenMaxTag tycon)
+genAuxBindSpec loc (DerivMaxTag tycon)
   = (mkHsVarBind loc rdr_name rhs,
      L loc (TypeSig [L loc rdr_name] (L loc sig_ty)))
   where
@@ -1738,38 +1790,36 @@ genAuxBind loc (GenMaxTag tycon)
     max_tag =  case (tyConDataCons tycon) of
 		 data_cons -> toInteger ((length data_cons) - fIRST_TAG)
 
-genAuxBind loc (MkTyCon tycon)	--  $dT
-  = (mkHsVarBind loc rdr_name rhs,
-     L loc (TypeSig [L loc rdr_name] sig_ty))
-  where
-    rdr_name = mk_data_type_name tycon
-    sig_ty   = nlHsTyVar dataType_RDR
-    constrs  = [nlHsVar (mk_constr_name con) | con <- tyConDataCons tycon]
-    rhs = nlHsVar mkDataType_RDR 
-          `nlHsApp` nlHsLit (mkHsString (showSDocOneLine (ppr tycon)))
-          `nlHsApp` nlList constrs
+type SeparateBagsDerivStuff = -- AuxBinds and SYB bindings
+                              ( Bag (LHsBind RdrName, LSig RdrName)
+                                -- Extra bindings (used by Generic only)
+                              , Bag TyCon -- Extra top-level datatypes
+                              , Bag TyCon -- Extra family instances
+                              , Bag (InstInfo RdrName)) -- Extra instances
 
-genAuxBind loc (MkDataCon dc)	--  $cT1 etc
-  = (mkHsVarBind loc rdr_name rhs,
-     L loc (TypeSig [L loc rdr_name] sig_ty))
-  where
-    rdr_name = mk_constr_name dc
-    sig_ty   = nlHsTyVar constr_RDR
-    rhs      = nlHsApps mkConstr_RDR constr_args
+genAuxBinds :: SrcSpan -> BagDerivStuff -> SeparateBagsDerivStuff
+genAuxBinds loc b = genAuxBinds' b2 where
+  (b1,b2) = partitionBagWith splitDerivAuxBind b
+  splitDerivAuxBind (DerivAuxBind x) = Left x
+  splitDerivAuxBind  x               = Right x
 
-    constr_args 
-       = [ -- nlHsIntLit (toInteger (dataConTag dc)),	  -- Tag
-	   nlHsVar (mk_data_type_name (dataConTyCon dc)), -- DataType
-	   nlHsLit (mkHsString (occNameString dc_occ)),	  -- String name
-           nlList  labels,				  -- Field labels
-	   nlHsVar fixity]				  -- Fixity
+  rm_dups = foldrBag dup_check emptyBag
+  dup_check a b = if anyBag (== a) b then b else consBag a b
+  
+  genAuxBinds' :: BagDerivStuff -> SeparateBagsDerivStuff
+  genAuxBinds' = foldrBag f ( mapBag (genAuxBindSpec loc) (rm_dups b1)
+                            , emptyBag, emptyBag, emptyBag)
+  f :: DerivStuff -> SeparateBagsDerivStuff -> SeparateBagsDerivStuff
+  f (DerivAuxBind _) = panic "genAuxBinds'" -- We have removed these before
+  f (DerivHsBind  b) = add1 b
+  f (DerivTyCon   t) = add2 t
+  f (DerivFamInst t) = add3 t
+  f (DerivInst    i) = add4 i
 
-    labels   = map (nlHsLit . mkHsString . getOccString)
-                   (dataConFieldLabels dc)
-    dc_occ   = getOccName dc
-    is_infix = isDataSymOcc dc_occ
-    fixity | is_infix  = infix_RDR
-	   | otherwise = prefix_RDR
+  add1 x (a,b,c,d) = (x `consBag` a,b,c,d)
+  add2 x (a,b,c,d) = (a,x `consBag` b,c,d)
+  add3 x (a,b,c,d) = (a,b,x `consBag` c,d)
+  add4 x (a,b,c,d) = (a,b,c,x `consBag` d)
 
 mk_data_type_name :: TyCon -> RdrName 	-- "$tT"
 mk_data_type_name tycon = mkAuxBinderName (tyConName tycon) mkDataTOcc
@@ -1821,21 +1871,23 @@ box_if_necy :: String		-- The class involved
 	    -> LHsExpr RdrName	-- The argument
 	    -> Type		-- The argument type
 	    -> LHsExpr RdrName	-- Boxed version of the arg
+-- See Note [Deriving and unboxed types]
 box_if_necy cls_str tycon arg arg_ty
   | isUnLiftedType arg_ty = nlHsApp (nlHsVar box_con) arg
   | otherwise		  = arg
   where
-    box_con = assoc_ty_id cls_str tycon box_con_tbl arg_ty
+    box_con = assoc_ty_id cls_str tycon boxConTbl arg_ty
 
 ---------------------
 primOrdOps :: String	-- The class involved
 	   -> TyCon	-- The tycon involved
 	   -> Type	-- The type
 	   -> (PrimOp, PrimOp, PrimOp, PrimOp, PrimOp)	-- (lt,le,eq,ge,gt)
-primOrdOps str tycon ty = assoc_ty_id str tycon ord_op_tbl ty
+-- See Note [Deriving and unboxed types]
+primOrdOps str tycon ty = assoc_ty_id str tycon ordOpTbl ty
 
-ord_op_tbl :: [(Type, (PrimOp, PrimOp, PrimOp, PrimOp, PrimOp))]
-ord_op_tbl
+ordOpTbl :: [(Type, (PrimOp, PrimOp, PrimOp, PrimOp, PrimOp))]
+ordOpTbl
  =  [(charPrimTy,	(CharLtOp,   CharLeOp,   CharEqOp,   CharGeOp,	 CharGtOp))
     ,(intPrimTy,	(IntLtOp,    IntLeOp,    IntEqOp,    IntGeOp,	 IntGtOp))
     ,(wordPrimTy,	(WordLtOp,   WordLeOp,   WordEqOp,   WordGeOp,	 WordGtOp))
@@ -1843,9 +1895,9 @@ ord_op_tbl
     ,(floatPrimTy,	(FloatLtOp,  FloatLeOp,  FloatEqOp,  FloatGeOp,  FloatGtOp))
     ,(doublePrimTy,	(DoubleLtOp, DoubleLeOp, DoubleEqOp, DoubleGeOp, DoubleGtOp)) ]
 
-box_con_tbl :: [(Type, RdrName)]
-box_con_tbl =
-    [(charPrimTy,	getRdrName charDataCon)
+boxConTbl :: [(Type, RdrName)]
+boxConTbl
+  = [(charPrimTy,	getRdrName charDataCon)
     ,(intPrimTy,	getRdrName intDataCon)
     ,(wordPrimTy,	wordDataCon_RDR)
     ,(floatPrimTy,	getRdrName floatDataCon)

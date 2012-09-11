@@ -1,31 +1,30 @@
 
 -- | A description of the platform we're compiling for.
---      In the future, this module should be the only one that references
---      the evil #defines for each TARGET_ARCH and TARGET_OS
 --
 module Platform (
         Platform(..),
         Arch(..),
         OS(..),
+        ArmISA(..),
+        ArmISAExt(..),
 
-        defaultTargetPlatform,
         target32Bit,
         osElfTarget
 )
 
 where
 
-import Panic
-
-#include "HsVersions.h"
-
-
 -- | Contains enough information for the native code generator to emit
 --      code for this platform.
 data Platform
-        = Platform
-        { platformArch  :: Arch
-        , platformOS    :: OS }
+        = Platform {
+              platformArch                     :: Arch,
+              platformOS                       :: OS,
+              platformWordSize                 :: {-# UNPACK #-} !Int,
+              platformHasGnuNonexecStack       :: Bool,
+              platformHasSubsectionsViaSymbols :: Bool
+          }
+        deriving (Read, Show, Eq)
 
 
 -- | Architectures that the native code generator knows about.
@@ -40,7 +39,9 @@ data Arch
         | ArchPPC_64
         | ArchSPARC
         | ArchARM
-        deriving (Show, Eq)
+          { armISA    :: ArmISA
+          , armISAExt :: [ArmISAExt] }
+        deriving (Read, Show, Eq)
 
 
 -- | Operating systems that the native code generator knows about.
@@ -53,74 +54,42 @@ data OS
         | OSMinGW32
         | OSFreeBSD
         | OSOpenBSD
-        deriving (Show, Eq)
+        | OSNetBSD
+        | OSKFreeBSD
+        deriving (Read, Show, Eq)
+
+-- | ARM Instruction Set Architecture and Extensions
+--
+data ArmISA
+    = ARMv5
+    | ARMv6
+    | ARMv7
+    deriving (Read, Show, Eq)
+
+data ArmISAExt
+    = VFPv2
+    | VFPv3
+    | VFPv3D16
+    | NEON
+    | IWMMX2
+    deriving (Read, Show, Eq)
 
 
 target32Bit :: Platform -> Bool
-target32Bit p = case platformArch p of
-                ArchUnknown -> panic "Don't know if ArchUnknown is 32bit"
-                ArchX86     -> True
-                ArchX86_64  -> False
-                ArchPPC     -> True
-                ArchPPC_64  -> False
-                ArchSPARC   -> True
-                ArchARM     -> True
-
+target32Bit p = platformWordSize p == 4
 
 -- | This predicates tells us whether the OS supports ELF-like shared libraries.
 osElfTarget :: OS -> Bool
 osElfTarget OSLinux    = True
 osElfTarget OSFreeBSD  = True
 osElfTarget OSOpenBSD  = True
+osElfTarget OSNetBSD   = True
 osElfTarget OSSolaris2 = True
 osElfTarget OSDarwin   = False
 osElfTarget OSMinGW32  = False
-osElfTarget OSUnknown  = panic "Don't know if OSUnknown is elf"
-
-
--- | This is the target platform as far as the #ifdefs are concerned.
---      These are set in includes/ghcplatform.h by the autoconf scripts
-defaultTargetPlatform :: Platform
-defaultTargetPlatform
-        = Platform defaultTargetArch defaultTargetOS
-
-
--- | Move the evil TARGET_ARCH #ifdefs into Haskell land.
-defaultTargetArch :: Arch
-#if i386_TARGET_ARCH
-defaultTargetArch       = ArchX86
-#elif x86_64_TARGET_ARCH
-defaultTargetArch       = ArchX86_64
-#elif powerpc_TARGET_ARCH
-defaultTargetArch       = ArchPPC
-#elif powerpc64_TARGET_ARCH
-defaultTargetArch       = ArchPPC_64
-#elif sparc_TARGET_ARCH
-defaultTargetArch       = ArchSPARC
-#elif arm_TARGET_ARCH
-defaultTargetArch       = ArchARM
-#else
-defaultTargetArch       = ArchUnknown
-#endif
-
-
--- | Move the evil TARGET_OS #ifdefs into Haskell land.
-defaultTargetOS :: OS
-#if   linux_TARGET_OS
-defaultTargetOS = OSLinux
-#elif darwin_TARGET_OS
-defaultTargetOS = OSDarwin
-#elif solaris2_TARGET_OS
-defaultTargetOS = OSSolaris2
-#elif mingw32_TARGET_OS
-defaultTargetOS = OSMinGW32
-#elif freebsd_TARGET_OS
-defaultTargetOS = OSFreeBSD
-#elif kfreebsdgnu_TARGET_OS
-defaultTargetOS = OSFreeBSD
-#elif openbsd_TARGET_OS
-defaultTargetOS = OSOpenBSD
-#else
-defaultTargetOS = OSUnknown
-#endif
-
+osElfTarget OSKFreeBSD = True
+osElfTarget OSUnknown  = False
+ -- Defaulting to False is safe; it means don't rely on any
+ -- ELF-specific functionality.  It is important to have a default for
+ -- portability, otherwise we have to answer this question for every
+ -- new platform we compile on (even unreg).

@@ -1,3 +1,7 @@
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Safe #-}
+#endif
+
 {- |
 The module "Foreign.Marshal.Array" provides operations for marshalling Haskell
 lists into monolithic arrays and vice versa.  Most functions come in two
@@ -61,7 +65,11 @@ module Foreign.Marshal.Array (
   ) where
 import qualified "base" Foreign.Marshal.Array as Base
 import "base" Foreign.Marshal.Array hiding (peekArray)
+#if __GLASGOW_HASKELL__ >= 701
+import "base" Foreign.Safe hiding (peekArray)
+#else
 import "base" Foreign hiding (peekArray)
+#endif
 
 -- |Convert an array of given length into a Haskell list.
 --

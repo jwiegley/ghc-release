@@ -17,6 +17,14 @@ Haskell).
 
 \begin{code}
 {-# LANGUAGE BangPatterns #-}
+
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module Unique (
         -- * Main data types
 	Unique, Uniquable(..), 
@@ -27,16 +35,15 @@ module Unique (
 	pprUnique, 
 
 	mkUniqueGrimily,		-- Used in UniqSupply only!
-	getKey, getKeyFastInt,		-- Used in Var, UniqFM, Name only!
+        getKey, getKeyFastInt,		-- Used in Var, UniqFM, Name only!
+        mkUnique, unpkUnique,           -- Used in BinIface only
 
 	incrUnique,			-- Used for renumbering
 	deriveUnique,			-- Ditto
 	newTagUnique,			-- Used in CgCase
 	initTyVarUnique,
 
-	isTupleKey, 
-
-        -- ** Making built-in uniques
+	-- ** Making built-in uniques
 
 	-- now all the built-in Uniques (and functions to make them)
 	-- [the Oh-So-Wonderful Haskell module system wins again...]
@@ -47,12 +54,12 @@ module Unique (
 	mkPreludeTyConUnique, mkPreludeClassUnique,
 	mkPArrDataConUnique,
 
-        mkVarOccUnique, mkDataOccUnique, mkTvOccUnique, mkTcOccUnique,
+    mkVarOccUnique, mkDataOccUnique, mkTvOccUnique, mkTcOccUnique,
         mkRegSingleUnique, mkRegPairUnique, mkRegClassUnique, mkRegSubUnique,
+        mkCostCentreUnique,
 
 	mkBuiltinUnique,
-	mkPseudoUniqueC,
-	mkPseudoUniqueD,
+        mkPseudoUniqueD,
 	mkPseudoUniqueE,
 	mkPseudoUniqueH
     ) where
@@ -105,8 +112,6 @@ getKeyFastInt	:: Unique -> FastInt		-- for Var
 incrUnique	:: Unique -> Unique
 deriveUnique	:: Unique -> Int -> Unique
 newTagUnique	:: Unique -> Char -> Unique
-
-isTupleKey	:: Unique -> Bool
 \end{code}
 
 
@@ -173,6 +178,9 @@ instance Uniquable FastString where
 
 instance Uniquable Int where
  getUnique i = mkUniqueGrimily i
+
+instance Uniquable n => Uniquable (IPName n) where
+  getUnique (IPName n) = getUnique n
 \end{code}
 
 
@@ -308,9 +316,9 @@ Allocation of unique supply characters:
 mkAlphaTyVarUnique     :: Int -> Unique
 mkPreludeClassUnique   :: Int -> Unique
 mkPreludeTyConUnique   :: Int -> Unique
-mkTupleTyConUnique     :: Boxity -> Int -> Unique
+mkTupleTyConUnique     :: TupleSort -> Int -> Unique
 mkPreludeDataConUnique :: Int -> Unique
-mkTupleDataConUnique   :: Boxity -> Int -> Unique
+mkTupleDataConUnique   :: TupleSort -> Int -> Unique
 mkPrimOpIdUnique       :: Int -> Unique
 mkPreludeMiscIdUnique  :: Int -> Unique
 mkPArrDataConUnique    :: Int -> Unique
@@ -324,8 +332,9 @@ mkPreludeClassUnique i          = mkUnique '2' i
 -- are for the generic to/from Ids.  See TysWiredIn.mk_tc_gen_info.
 
 mkPreludeTyConUnique i		= mkUnique '3' (3*i)
-mkTupleTyConUnique Boxed   a	= mkUnique '4' (3*a)
-mkTupleTyConUnique Unboxed a	= mkUnique '5' (3*a)
+mkTupleTyConUnique BoxedTuple   a	= mkUnique '4' (3*a)
+mkTupleTyConUnique UnboxedTuple a	= mkUnique '5' (3*a)
+mkTupleTyConUnique ConstraintTuple a	= mkUnique 'k' (3*a)
 
 -- Data constructor keys occupy *two* slots.  The first is used for the
 -- data constructor itself and its wrapper function (the function that
@@ -334,13 +343,9 @@ mkTupleTyConUnique Unboxed a	= mkUnique '5' (3*a)
 -- representation).
 
 mkPreludeDataConUnique i	= mkUnique '6' (2*i)	-- Must be alphabetic
-mkTupleDataConUnique Boxed a	= mkUnique '7' (2*a)	-- ditto (*may* be used in C labels)
-mkTupleDataConUnique Unboxed a	= mkUnique '8' (2*a)
-
--- This one is used for a tiresome reason
--- to improve a consistency-checking error check in the renamer
-isTupleKey u = case unpkUnique u of
-		(tag,_) -> tag == '4' || tag == '5' || tag == '7' || tag == '8'
+mkTupleDataConUnique BoxedTuple   a = mkUnique '7' (2*a)	-- ditto (*may* be used in C labels)
+mkTupleDataConUnique UnboxedTuple    a = mkUnique '8' (2*a)
+mkTupleDataConUnique ConstraintTuple a = mkUnique 'h' (2*a)
 
 mkPrimOpIdUnique op         = mkUnique '9' op
 mkPreludeMiscIdUnique  i    = mkUnique '0' i
@@ -354,11 +359,10 @@ mkPArrDataConUnique a	        = mkUnique ':' (2*a)
 initTyVarUnique :: Unique
 initTyVarUnique = mkUnique 't' 0
 
-mkPseudoUniqueC, mkPseudoUniqueD, mkPseudoUniqueE, mkPseudoUniqueH,
+mkPseudoUniqueD, mkPseudoUniqueE, mkPseudoUniqueH,
    mkBuiltinUnique :: Int -> Unique
 
 mkBuiltinUnique i = mkUnique 'B' i
-mkPseudoUniqueC i = mkUnique 'C' i -- used for getUnique on Regs
 mkPseudoUniqueD i = mkUnique 'D' i -- used in NCG for getUnique on RealRegs
 mkPseudoUniqueE i = mkUnique 'E' i -- used in NCG spiller to create spill VirtualRegs
 mkPseudoUniqueH i = mkUnique 'H' i -- used in NCG spiller to create spill VirtualRegs
@@ -368,6 +372,9 @@ mkRegSingleUnique = mkUnique 'R'
 mkRegSubUnique    = mkUnique 'S'
 mkRegPairUnique   = mkUnique 'P'
 mkRegClassUnique  = mkUnique 'L'
+
+mkCostCentreUnique :: Int -> Unique
+mkCostCentreUnique = mkUnique 'C'
 
 mkVarOccUnique, mkDataOccUnique, mkTvOccUnique, mkTcOccUnique :: FastString -> Unique
 -- See Note [The Unique of an OccName] in OccName

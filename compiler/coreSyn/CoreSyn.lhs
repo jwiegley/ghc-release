@@ -6,12 +6,19 @@
 \begin{code}
 {-# LANGUAGE DeriveDataTypeable, DeriveFunctor #-}
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 -- | CoreSyn holds all the main data types for use by for the Glasgow Haskell Compiler midsection
 module CoreSyn (
 	-- * Main data types
-	Expr(..), Alt, Bind(..), AltCon(..), Arg, Note(..),
-	CoreExpr, CoreAlt, CoreBind, CoreArg, CoreBndr,
-	TaggedExpr, TaggedAlt, TaggedBind, TaggedArg, TaggedBndr(..),
+        Expr(..), Alt, Bind(..), AltCon(..), Arg, Tickish(..),
+        CoreProgram, CoreExpr, CoreAlt, CoreBind, CoreArg, CoreBndr,
+        TaggedExpr, TaggedAlt, TaggedBind, TaggedArg, TaggedBndr(..),
 
         -- ** 'Expr' construction
 	mkLets, mkLams,
@@ -19,6 +26,7 @@ module CoreSyn (
 	
 	mkIntLit, mkIntLitInt,
 	mkWordLit, mkWordLitWord,
+	mkWord64LitWord64, mkInt64LitInt64,
 	mkCharLit, mkStringLit,
 	mkFloatLit, mkFloatLitFloat,
 	mkDoubleLit, mkDoubleLitDouble,
@@ -31,13 +39,15 @@ module CoreSyn (
 	-- ** Simple 'Expr' access functions and predicates
 	bindersOf, bindersOfBinds, rhssOfBind, rhssOfAlts, 
 	collectBinders, collectTyBinders, collectValBinders, collectTyAndValBinders,
-	collectArgs, coreExprCc, flattenBinds, 
+        collectArgs, flattenBinds,
 
         isValArg, isTypeArg, isTyCoArg, valArgCount, valBndrCount,
         isRuntimeArg, isRuntimeVar,
-        notSccNote,
 
-	-- * Unfolding data types
+        tickishCounts, tickishScoped, tickishIsCode, mkNoTick, mkNoScope,
+        tickishCanSplit,
+
+        -- * Unfolding data types
         Unfolding(..),  UnfoldingGuidance(..), UnfoldingSource(..),
 
 	-- ** Constructing 'Unfolding's
@@ -87,12 +97,15 @@ import Coercion
 import Name
 import Literal
 import DataCon
+import Module
+import TyCon
 import BasicTypes
 import FastString
 import Outputable
 import Util
 
-import Data.Data
+import Data.Data hiding (TyCon)
+import Data.Int
 import Data.Word
 
 infixl 4 `mkApps`, `mkTyApps`, `mkVarApps`, `App`, `mkCoApps`
@@ -141,106 +154,120 @@ These data types are the heart of the compiler
 --    optimization, analysis and code generation on.
 --
 -- The type parameter @b@ is for the type of binders in the expression tree.
+--
+-- The language consists of the following elements:
+--
+-- *  Variables
+--
+-- *  Primitive literals
+--
+-- *  Applications: note that the argument may be a 'Type'.
+--
+--    See "CoreSyn#let_app_invariant" for another invariant
+--
+-- *  Lambda abstraction
+--
+-- *  Recursive and non recursive @let@s. Operationally
+--    this corresponds to allocating a thunk for the things
+--    bound and then executing the sub-expression.
+--    
+--    #top_level_invariant#
+--    #letrec_invariant#
+--    
+--    The right hand sides of all top-level and recursive @let@s
+--    /must/ be of lifted type (see "Type#type_classification" for
+--    the meaning of /lifted/ vs. /unlifted/).
+--    
+--    #let_app_invariant#
+--    The right hand side of of a non-recursive 'Let' 
+--    _and_ the argument of an 'App',
+--    /may/ be of unlifted type, but only if the expression 
+--    is ok-for-speculation.  This means that the let can be floated 
+--    around without difficulty. For example, this is OK:
+--    
+--    > y::Int# = x +# 1#
+--    
+--    But this is not, as it may affect termination if the 
+--    expression is floated out:
+--    
+--    > y::Int# = fac 4#
+--    
+--    In this situation you should use @case@ rather than a @let@. The function
+--    'CoreUtils.needsCaseBinding' can help you determine which to generate, or
+--    alternatively use 'MkCore.mkCoreLet' rather than this constructor directly,
+--    which will generate a @case@ if necessary
+--    
+--    #type_let#
+--    We allow a /non-recursive/ let to bind a type variable, thus:
+--    
+--    > Let (NonRec tv (Type ty)) body
+--    
+--    This can be very convenient for postponing type substitutions until
+--    the next run of the simplifier.
+--    
+--    At the moment, the rest of the compiler only deals with type-let
+--    in a Let expression, rather than at top level.  We may want to revist
+--    this choice.
+--
+-- *  Case split. Operationally this corresponds to evaluating
+--    the scrutinee (expression examined) to weak head normal form
+--    and then examining at most one level of resulting constructor (i.e. you
+--    cannot do nested pattern matching directly with this).
+--    
+--    The binder gets bound to the value of the scrutinee,
+--    and the 'Type' must be that of all the case alternatives
+--    
+--    #case_invariants#
+--    This is one of the more complicated elements of the Core language, 
+--    and comes with a number of restrictions:
+--    
+--    1. The list of alternatives is non-empty
+--
+--    2. The 'DEFAULT' case alternative must be first in the list, 
+--       if it occurs at all.
+--    
+--    3. The remaining cases are in order of increasing 
+--         tag	(for 'DataAlts') or
+--         lit	(for 'LitAlts').
+--       This makes finding the relevant constructor easy, 
+--       and makes comparison easier too.
+--    
+--    4. The list of alternatives must be exhaustive. An /exhaustive/ case 
+--       does not necessarily mention all constructors:
+--    
+--    	 @
+--    	      data Foo = Red | Green | Blue
+--    	 ... case x of 
+--    	      Red   -> True
+--    	      other -> f (case x of 
+--    	                      Green -> ...
+--    	                      Blue  -> ... ) ...
+--    	 @
+--    
+--    	 The inner case does not need a @Red@ alternative, because @x@ 
+--    	 can't be @Red@ at that program point.
+--
+-- *  Cast an expression to a particular type. 
+--    This is used to implement @newtype@s (a @newtype@ constructor or 
+--    destructor just becomes a 'Cast' in Core) and GADTs.
+--
+-- *  Notes. These allow general information to be added to expressions
+--    in the syntax tree
+--
+-- *  A type: this should only show up at the top level of an Arg
+--
+-- *  A coercion
 data Expr b
-  = Var	  Id                            -- ^ Variables
-
-  | Lit   Literal                       -- ^ Primitive literals
-
-  | App   (Expr b) (Arg b)		-- ^ Applications: note that the argument may be a 'Type'.
-                                        --
-                                        -- See "CoreSyn#let_app_invariant" for another invariant
-
-  | Lam   b (Expr b)                    -- ^ Lambda abstraction
-
-  | Let   (Bind b) (Expr b)		-- ^ Recursive and non recursive @let@s. Operationally
-                                        -- this corresponds to allocating a thunk for the things
-                                        -- bound and then executing the sub-expression.
-                                        -- 
-                                        -- #top_level_invariant#
-                                        -- #letrec_invariant#
-                                        --
-                                        -- The right hand sides of all top-level and recursive @let@s
-                                        -- /must/ be of lifted type (see "Type#type_classification" for
-                                        -- the meaning of /lifted/ vs. /unlifted/).
-                                        --
-                                        -- #let_app_invariant#
-                                        -- The right hand side of of a non-recursive 'Let' 
-                                        -- _and_ the argument of an 'App',
-                                        -- /may/ be of unlifted type, but only if the expression 
-                                        -- is ok-for-speculation.  This means that the let can be floated 
-                                        -- around without difficulty. For example, this is OK:
-                                        --
-	                                -- > y::Int# = x +# 1#
-	                                --
-	                                -- But this is not, as it may affect termination if the 
-                                        -- expression is floated out:
-	                                --
-	                                -- > y::Int# = fac 4#
-	                                --
-	                                -- In this situation you should use @case@ rather than a @let@. The function
-	                                -- 'CoreUtils.needsCaseBinding' can help you determine which to generate, or
-	                                -- alternatively use 'MkCore.mkCoreLet' rather than this constructor directly,
-	                                -- which will generate a @case@ if necessary
-	                                --
-	                                -- #type_let#
-	                                -- We allow a /non-recursive/ let to bind a type variable, thus:
-	                                --
-	                                -- > Let (NonRec tv (Type ty)) body
-	                                --
-	                                -- This can be very convenient for postponing type substitutions until
-                                        -- the next run of the simplifier.
-                                        --
-                                        -- At the moment, the rest of the compiler only deals with type-let
-                                        -- in a Let expression, rather than at top level.  We may want to revist
-                                        -- this choice.
-
-  | Case  (Expr b) b Type [Alt b]  	-- ^ Case split. Operationally this corresponds to evaluating
-                                        -- the scrutinee (expression examined) to weak head normal form
-                                        -- and then examining at most one level of resulting constructor (i.e. you
-                                        -- cannot do nested pattern matching directly with this).
-                                        --
-                                        -- The binder gets bound to the value of the scrutinee,
-                                        -- and the 'Type' must be that of all the case alternatives
-					--
-					-- #case_invariants#
-					-- This is one of the more complicated elements of the Core language, 
-					-- and comes with a number of restrictions:
-					--
-					-- The 'DEFAULT' case alternative must be first in the list, 
-                                        -- if it occurs at all.
-					--
-					-- The remaining cases are in order of increasing 
-		                        --      tag	(for 'DataAlts') or
-		                        --      lit	(for 'LitAlts').
-	                                -- This makes finding the relevant constructor easy, 
-                                        -- and makes comparison easier too.
-					--
-					-- The list of alternatives must be exhaustive. An /exhaustive/ case 
-					-- does not necessarily mention all constructors:
-					--
-					-- @
-                                        --      data Foo = Red | Green | Blue
-                                        -- ... case x of 
-                                        --      Red   -> True
-                                        --      other -> f (case x of 
-                                        --                      Green -> ...
-                                        --                      Blue  -> ... ) ...
-                                        -- @
-                                        --
-                                        -- The inner case does not need a @Red@ alternative, because @x@ 
-                                        -- can't be @Red@ at that program point.
-
-  | Cast  (Expr b) Coercion             -- ^ Cast an expression to a particular type. 
-                                        -- This is used to implement @newtype@s (a @newtype@ constructor or 
-                                        -- destructor just becomes a 'Cast' in Core) and GADTs.
-
-  | Note  Note (Expr b)                 -- ^ Notes. These allow general information to be
-                                        -- added to expressions in the syntax tree
-
-  | Type  Type			        -- ^ A type: this should only show up at the top
-                                        -- level of an Arg
-    
-  | Coercion Coercion                   -- ^ A coercion
+  = Var	  Id
+  | Lit   Literal
+  | App   (Expr b) (Arg b)
+  | Lam   b (Expr b)
+  | Let   (Bind b) (Expr b)
+  | Case  (Expr b) b Type [Alt b]	-- See #case_invariant#
+  | Cast  (Expr b) Coercion
+  | Tick  (Tickish Id) (Expr b)
+  | Type  Type
+  | Coercion Coercion
   deriving (Data, Typeable)
 
 -- | Type synonym for expressions that occur in function argument positions.
@@ -253,17 +280,37 @@ type Arg b = Expr b
 type Alt b = (AltCon, [b], Expr b)
 
 -- | A case alternative constructor (i.e. pattern match)
-data AltCon = DataAlt DataCon	-- ^ A plain data constructor: @case e of { Foo x -> ... }@.
-                                -- Invariant: the 'DataCon' is always from a @data@ type, and never from a @newtype@
-	    | LitAlt  Literal   -- ^ A literal: @case e of { 1 -> ... }@
-	    | DEFAULT           -- ^ Trivial alternative: @case e of { _ -> ... }@
-	 deriving (Eq, Ord, Data, Typeable)
+data AltCon 
+  = DataAlt DataCon   --  ^ A plain data constructor: @case e of { Foo x -> ... }@.
+                      -- Invariant: the 'DataCon' is always from a @data@ type, and never from a @newtype@
+
+  | LitAlt  Literal   -- ^ A literal: @case e of { 1 -> ... }@
+                      -- Invariant: always an *unlifted* literal
+		      -- See Note [Literal alternatives]
+	      	      
+  | DEFAULT           -- ^ Trivial alternative: @case e of { _ -> ... }@
+   deriving (Eq, Ord, Data, Typeable)
 
 -- | Binding, used for top level bindings in a module and local bindings in a @let@.
 data Bind b = NonRec b (Expr b)
 	    | Rec [(b, (Expr b))]
   deriving (Data, Typeable)
 \end{code}
+
+Note [Literal alternatives]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Literal alternatives (LitAlt lit) are always for *un-lifted* literals.
+We have one literal, a literal Integer, that is lifted, and we don't
+allow in a LitAlt, because LitAlt cases don't do any evaluation. Also
+(see Trac #5603) if you say
+    case 3 of
+      S# x -> ...
+      J# _ _ -> ...
+(where S#, J# are the constructors for Integer) we don't want the
+simplifier calling findAlt with argument (LitAlt 3).  No no.  Integer
+literals are an opaque encoding of an algebraic data type, not of
+an unlifted literal, like all the others.
+
 
 -------------------------- CoreSyn INVARIANTS ---------------------------
 
@@ -297,12 +344,85 @@ Note [Type let]
 See #type_let#
 
 \begin{code}
+-- | Allows attaching extra information to points in expressions
+data Tickish id =
+    -- | An @{-# SCC #-}@ profiling annotation, either automatically
+    -- added by the desugarer as a result of -auto-all, or added by
+    -- the user.
+    ProfNote {
+      profNoteCC    :: CostCentre, -- ^ the cost centre
+      profNoteCount :: !Bool,      -- ^ bump the entry count?
+      profNoteScope :: !Bool       -- ^ scopes over the enclosed expression
+                                   -- (i.e. not just a tick)
+    }
 
--- | Allows attaching extra information to points in expressions rather than e.g. identifiers.
-data Note
-  = SCC CostCentre      -- ^ A cost centre annotation for profiling
-  | CoreNote String     -- ^ A generic core annotation, propagated but not used by GHC
-  deriving (Data, Typeable)
+  -- | A "tick" used by HPC to track the execution of each
+  -- subexpression in the original source code.
+  | HpcTick {
+      tickModule :: Module,
+      tickId     :: !Int
+    }
+
+  -- | A breakpoint for the GHCi debugger.  This behaves like an HPC
+  -- tick, but has a list of free variables which will be available
+  -- for inspection in GHCi when the program stops at the breakpoint.
+  --
+  -- NB. we must take account of these Ids when (a) counting free variables,
+  -- and (b) substituting (don't substitute for them)
+  | Breakpoint
+    { breakpointId     :: !Int
+    , breakpointFVs    :: [id]  -- ^ the order of this list is important:
+                                -- it matches the order of the lists in the
+                                -- appropriate entry in HscTypes.ModBreaks.
+                                --
+                                -- Careful about substitution!  See
+                                -- Note [substTickish] in CoreSubst.
+    }
+
+  deriving (Eq, Ord, Data, Typeable)
+
+
+-- | A "tick" note is one that counts evaluations in some way.  We
+-- cannot discard a tick, and the compiler should preserve the number
+-- of ticks as far as possible.
+--
+-- Hwever, we stil allow the simplifier to increase or decrease
+-- sharing, so in practice the actual number of ticks may vary, except
+-- that we never change the value from zero to non-zero or vice versa.
+--
+tickishCounts :: Tickish id -> Bool
+tickishCounts n@ProfNote{} = profNoteCount n
+tickishCounts HpcTick{}    = True
+tickishCounts Breakpoint{} = True
+
+tickishScoped :: Tickish id -> Bool
+tickishScoped n@ProfNote{} = profNoteScope n
+tickishScoped HpcTick{}    = False
+tickishScoped Breakpoint{} = True
+   -- Breakpoints are scoped: eventually we're going to do call
+   -- stacks, but also this helps prevent the simplifier from moving
+   -- breakpoints around and changing their result type (see #1531).
+
+mkNoTick :: Tickish id -> Tickish id
+mkNoTick n@ProfNote{} = n {profNoteCount = False}
+mkNoTick Breakpoint{} = panic "mkNoTick: Breakpoint" -- cannot split a BP
+mkNoTick t = t
+
+mkNoScope :: Tickish id -> Tickish id
+mkNoScope n@ProfNote{} = n {profNoteScope = False}
+mkNoScope Breakpoint{} = panic "mkNoScope: Breakpoint" -- cannot split a BP
+mkNoScope t = t
+
+-- | Return True if this source annotation compiles to some code, or will
+-- disappear before the backend.
+tickishIsCode :: Tickish id -> Bool
+tickishIsCode _tickish = True  -- all of them for now
+
+-- | Return True if this Tick can be split into (tick,scope) parts with
+-- 'mkNoScope' and 'mkNoTick' respectively.
+tickishCanSplit :: Tickish Id -> Bool
+tickishCanSplit Breakpoint{} = False
+tickishCanSplit _ = True
 \end{code}
 
 
@@ -416,9 +536,11 @@ Representation of desugared vectorisation declarations that are fed to the vecto
 'ModGuts').
 
 \begin{code}
-data CoreVect = Vect   Id (Maybe CoreExpr)
-              | NoVect Id
-
+data CoreVect = Vect      Id   (Maybe CoreExpr)
+              | NoVect    Id
+              | VectType  Bool TyCon (Maybe TyCon)
+              | VectClass TyCon                     -- class tycon
+              | VectInst  Id                        -- instance dfun (always SCALAR)
 \end{code}
 
 
@@ -816,7 +938,29 @@ cmpAltCon con1 con2 = WARN( True, text "Comparing incomparable AltCons" <+>
 %*									*
 %************************************************************************
 
+Note [CoreProgram]
+~~~~~~~~~~~~~~~~~~
+The top level bindings of a program, a CoreProgram, are represented as
+a list of CoreBind
+
+ * Later bindings in the list can refer to earlier ones, but not vice
+   versa.  So this is OK
+      NonRec { x = 4 }
+      Rec { p = ...q...x...
+          ; q = ...p...x }
+      Rec { f = ...p..x..f.. }
+      NonRec { g = ..f..q...x.. }
+   But it would NOT be ok for 'f' to refer to 'g'.
+
+ * The occurrence analyser does strongly-connected component analysis
+   on each Rec binding, and splits it into a sequence of smaller
+   bindings where possible.  So the program typically starts life as a
+   single giant Rec, which is then dependency-analysed into smaller
+   chunks.  
+
 \begin{code}
+type CoreProgram = [CoreBind]	-- See Note [CoreProgram]
+
 -- | The common case for the type of binders and variables when
 -- we are manipulating the Core language within GHC
 type CoreBndr = Var
@@ -850,6 +994,8 @@ instance Outputable b => Outputable (TaggedBndr b) where
 
 instance Outputable b => OutputableBndr (TaggedBndr b) where
   pprBndr _ b = ppr b	-- Simple
+  pprInfixOcc  b = ppr b
+  pprPrefixOcc b = ppr b
 \end{code}
 
 
@@ -861,7 +1007,7 @@ instance Outputable b => OutputableBndr (TaggedBndr b) where
 
 \begin{code}
 -- | Apply a list of argument expressions to a function expression in a nested fashion. Prefer to
--- use 'CoreUtils.mkCoreApps' if possible
+-- use 'MkCore.mkCoreApps' if possible
 mkApps    :: Expr b -> [Arg b]  -> Expr b
 -- | Apply a list of type argument expressions to a function expression in a nested fashion
 mkTyApps  :: Expr b -> [Type]   -> Expr b
@@ -900,6 +1046,12 @@ mkWordLitWord :: Word -> Expr b
 mkWordLit     w = Lit (mkMachWord w)
 mkWordLitWord w = Lit (mkMachWord (toInteger w))
 
+mkWord64LitWord64 :: Word64 -> Expr b
+mkWord64LitWord64 w = Lit (mkMachWord64 (toInteger w))
+
+mkInt64LitInt64 :: Int64 -> Expr b
+mkInt64LitInt64 w = Lit (mkMachInt64 (toInteger w))
+
 -- | Create a machine character literal expression of type @Char#@.
 -- If you want an expression of type @Char@ use 'MkCore.mkCharExpr'
 mkCharLit :: Char -> Expr b
@@ -931,10 +1083,10 @@ mkDoubleLit       d = Lit (mkMachDouble d)
 mkDoubleLitDouble d = Lit (mkMachDouble (toRational d))
 
 -- | Bind all supplied binding groups over an expression in a nested let expression. Prefer to
--- use 'CoreUtils.mkCoreLets' if possible
+-- use 'MkCore.mkCoreLets' if possible
 mkLets	      :: [Bind b] -> Expr b -> Expr b
 -- | Bind all supplied binders over an expression in a nested lambda expression. Prefer to
--- use 'CoreUtils.mkCoreLams' if possible
+-- use 'MkCore.mkCoreLams' if possible
 mkLams	      :: [b] -> Expr b -> Expr b
 
 mkLams binders body = foldr Lam body binders
@@ -1042,16 +1194,6 @@ collectArgs expr
     go e 	 as = (e, as)
 \end{code}
 
-\begin{code}
--- | Gets the cost centre enclosing an expression, if any.
--- It looks inside lambdas because @(scc \"foo\" \\x.e) = \\x. scc \"foo\" e@
-coreExprCc :: Expr b -> CostCentre
-coreExprCc (Note (SCC cc) _)   = cc
-coreExprCc (Note _ e)          = coreExprCc e
-coreExprCc (Lam _ e)           = coreExprCc e
-coreExprCc _                   = noCostCentre
-\end{code}
-
 %************************************************************************
 %*									*
 \subsection{Predicates}
@@ -1097,10 +1239,6 @@ valBndrCount = count isId
 -- | The number of argument expressions that are values rather than types at their top level
 valArgCount :: [Arg b] -> Int
 valArgCount = count isValArg
-
-notSccNote :: Note -> Bool
-notSccNote (SCC {}) = False
-notSccNote _        = True
 \end{code}
 
 
@@ -1119,7 +1257,7 @@ seqExpr (Lam b e)       = seqBndr b `seq` seqExpr e
 seqExpr (Let b e)       = seqBind b `seq` seqExpr e
 seqExpr (Case e b t as) = seqExpr e `seq` seqBndr b `seq` seqType t `seq` seqAlts as
 seqExpr (Cast e co)     = seqExpr e `seq` seqCo co
-seqExpr (Note n e)      = seqNote n `seq` seqExpr e
+seqExpr (Tick n e)    = seqTickish n `seq` seqExpr e
 seqExpr (Type t)       = seqType t
 seqExpr (Coercion co)   = seqCo co
 
@@ -1127,9 +1265,10 @@ seqExprs :: [CoreExpr] -> ()
 seqExprs [] = ()
 seqExprs (e:es) = seqExpr e `seq` seqExprs es
 
-seqNote :: Note -> ()
-seqNote (CoreNote s)   = s `seq` ()
-seqNote _              = ()
+seqTickish :: Tickish Id -> ()
+seqTickish ProfNote{ profNoteCC = cc } = cc `seq` ()
+seqTickish HpcTick{} = ()
+seqTickish Breakpoint{ breakpointFVs = ids } = seqBndrs ids
 
 seqBndr :: CoreBndr -> ()
 seqBndr b = b `seq` ()
@@ -1177,7 +1316,7 @@ data AnnExpr' bndr annot
   | AnnLet	(AnnBind bndr annot) (AnnExpr bndr annot)
   | AnnCast     (AnnExpr bndr annot) (annot, Coercion)
     		   -- Put an annotation on the (root of) the coercion
-  | AnnNote	Note (AnnExpr bndr annot)
+  | AnnTick     (Tickish Id) (AnnExpr bndr annot)
   | AnnType	Type
   | AnnCoercion Coercion
 
@@ -1206,14 +1345,14 @@ deAnnotate :: AnnExpr bndr annot -> Expr bndr
 deAnnotate (_, e) = deAnnotate' e
 
 deAnnotate' :: AnnExpr' bndr annot -> Expr bndr
-deAnnotate' (AnnType t)          = Type t
+deAnnotate' (AnnType t)           = Type t
 deAnnotate' (AnnCoercion co)      = Coercion co
 deAnnotate' (AnnVar  v)           = Var v
 deAnnotate' (AnnLit  lit)         = Lit lit
 deAnnotate' (AnnLam  binder body) = Lam binder (deAnnotate body)
 deAnnotate' (AnnApp  fun arg)     = App (deAnnotate fun) (deAnnotate arg)
 deAnnotate' (AnnCast e (_,co))    = Cast (deAnnotate e) co
-deAnnotate' (AnnNote note body)   = Note note (deAnnotate body)
+deAnnotate' (AnnTick tick body)   = Tick tick (deAnnotate body)
 
 deAnnotate' (AnnLet bind body)
   = Let (deAnnBind bind) (deAnnotate body)

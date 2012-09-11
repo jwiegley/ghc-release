@@ -1,3 +1,6 @@
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Trustworthy #-}
+#endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Win32.Types
@@ -94,7 +97,7 @@ ptrToMaybe p = if p == nullPtr then Nothing else Just p
 maybeNum :: Num a => Maybe a -> a
 maybeNum = fromMaybe 0
 
-numToMaybe :: Num a => a -> Maybe a
+numToMaybe :: (Eq a, Num a) => a -> Maybe a
 numToMaybe n = if n == 0 then Nothing else Just n
 
 type MbLPVOID      = Maybe LPVOID
@@ -180,7 +183,7 @@ failIf_ p wh act = do
 failIfNull :: String -> IO (Ptr a) -> IO (Ptr a)
 failIfNull = failIf (== nullPtr)
 
-failIfZero :: Num a => String -> IO a -> IO a
+failIfZero :: (Eq a, Num a) => String -> IO a -> IO a
 failIfZero = failIf (== 0)
 
 failIfFalse_ :: String -> IO Bool -> IO ()

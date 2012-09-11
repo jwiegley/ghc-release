@@ -1,4 +1,11 @@
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module CmmExpr
     ( CmmExpr(..), cmmExprType, cmmExprWidth, maybeInvertCmmExpr
     , CmmReg(..), cmmRegType
@@ -336,7 +343,8 @@ data GlobalReg
   | SpLim		-- Stack limit
   | Hp			-- Heap ptr; points to last occupied heap location.
   | HpLim		-- Heap limit register
-  | CurrentTSO		-- pointer to current thread's TSO
+  | CCCS                -- Current cost-centre stack
+  | CurrentTSO          -- pointer to current thread's TSO
   | CurrentNursery	-- pointer to allocation area
   | HpAlloc		-- allocation count for heap check failure
 
@@ -388,6 +396,7 @@ instance Ord GlobalReg where
    compare SpLim SpLim = EQ
    compare Hp Hp = EQ
    compare HpLim HpLim = EQ
+   compare CCCS CCCS = EQ
    compare CurrentTSO CurrentTSO = EQ
    compare CurrentNursery CurrentNursery = EQ
    compare HpAlloc HpAlloc = EQ
@@ -412,6 +421,8 @@ instance Ord GlobalReg where
    compare _ Hp = GT
    compare HpLim _ = LT
    compare _ HpLim = GT
+   compare CCCS _ = LT
+   compare _ CCCS = GT
    compare CurrentTSO _ = LT
    compare _ CurrentTSO = GT
    compare CurrentNursery _ = LT

@@ -6,6 +6,13 @@
 Handles @deriving@ clauses on @data@ declarations.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module TcDeriv ( tcDeriving ) where
 
 #include "HsVersions.h"
@@ -13,24 +20,27 @@ module TcDeriv ( tcDeriving ) where
 import HsSyn
 import DynFlags
 
-import Generics
 import TcRnMonad
+import FamInst
 import TcEnv
 import TcClassDcl( tcAddDeclCtxt )	-- Small helper
 import TcGenDeriv			-- Deriv stuff
+import TcGenGenerics
 import InstEnv
 import Inst
+import FamInstEnv
 import TcHsType
 import TcMType
 import TcSimplify
+import TcEvidence
 
 import RnBinds
-import RnEnv
+import RnEnv  
+import RnSource   ( addTcgDUs )
 import HscTypes
 
 import Class
 import Type
-import Coercion
 import ErrUtils
 import MkId
 import DataCon
@@ -40,13 +50,10 @@ import Name
 import NameSet
 import TyCon
 import TcType
-import BuildTyCl
-import BasicTypes
 import Var
 import VarSet
 import PrelNames
 import SrcLoc
-import UniqSupply
 import Util
 import ListSetOps
 import Outputable
@@ -64,7 +71,7 @@ import Control.Monad
 
 Overall plan
 ~~~~~~~~~~~~
-1.  Convert the decls (i.e. data/newtype deriving clauses, 
+1.  Convert the decls (i.e. data/newtype deriving clauses,
     plus standalone deriving) to [EarlyDerivSpec]
 
 2.  Infer the missing contexts for the Left DerivSpecs
@@ -74,10 +81,10 @@ Overall plan
 
 \begin{code}
 -- DerivSpec is purely  local to this module
-data DerivSpec  = DS { ds_loc     :: SrcSpan 
-		     , ds_orig    :: CtOrigin 
+data DerivSpec  = DS { ds_loc     :: SrcSpan
+		     , ds_orig    :: CtOrigin
 		     , ds_name    :: Name
-		     , ds_tvs     :: [TyVar] 
+		     , ds_tvs     :: [TyVar]
 		     , ds_theta   :: ThetaType
 		     , ds_cls     :: Class
 		     , ds_tys     :: [Type]
@@ -88,7 +95,7 @@ data DerivSpec  = DS { ds_loc     :: SrcSpan
 	--	 df :: forall tvs. theta => C tys
 	-- The Name is the name for the DFun we'll build
 	-- The tyvars bind all the variables in the theta
-	-- For type families, the tycon in 
+	-- For type families, the tycon in
 	--	 in ds_tys is the *family* tycon
 	--	 in ds_tc, ds_tc_args is the *representation* tycon
 	-- For non-family tycons, both are the same
@@ -100,7 +107,7 @@ data DerivSpec  = DS { ds_loc     :: SrcSpan
 Example:
 
      newtype instance T [a] = MkT (Tree a) deriving( C s )
-==>  
+==>
      axiom T [a] = :RTList a
      axiom :RTList a = Tree a
 
@@ -115,16 +122,16 @@ type DerivContext = Maybe ThetaType
 
 type EarlyDerivSpec = Either DerivSpec DerivSpec
 	-- Left  ds => the context for the instance should be inferred
-	--	       In this case ds_theta is the list of all the 
+	--	       In this case ds_theta is the list of all the
 	--		  constraints needed, such as (Eq [a], Eq a)
-	--		  The inference process is to reduce this to a 
+	--		  The inference process is to reduce this to a
 	--		  simpler form (e.g. Eq a)
-	-- 
-	-- Right ds => the exact context for the instance is supplied 
+	--
+	-- Right ds => the exact context for the instance is supplied
 	--	       by the programmer; it is ds_theta
 
 pprDerivSpec :: DerivSpec -> SDoc
-pprDerivSpec (DS { ds_loc = l, ds_name = n, ds_tvs = tvs, 
+pprDerivSpec (DS { ds_loc = l, ds_name = n, ds_tvs = tvs,
 		   ds_cls = c, ds_tys = tys, ds_theta = rhs })
   = parens (hsep [ppr l, ppr n, ppr tvs, ppr c, ppr tys]
 	    <+> equals <+> ppr rhs)
@@ -134,7 +141,7 @@ instance Outputable DerivSpec where
 \end{code}
 
 
-Inferring missing contexts 
+Inferring missing contexts
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 Consider
 
@@ -143,7 +150,7 @@ Consider
 		   | C3 (T a a)
 		   deriving (Eq)
 
-[NOTE: See end of these comments for what to do with 
+[NOTE: See end of these comments for what to do with
 	data (C a, D b) => T a b = ...
 ]
 
@@ -228,7 +235,7 @@ We will need an instance decl like:
 
 The RealFloat in the context is because the read method for Complex is bound
 to construct a Complex, and doing that requires that the argument type is
-in RealFloat. 
+in RealFloat.
 
 But this ain't true for Show, Eq, Ord, etc, since they don't construct
 a Complex; they only take them apart.
@@ -250,13 +257,13 @@ Consider this:
     instance C [a] Char
     newtype T = T Char deriving( C [a] )
 
-Notice the free 'a' in the deriving.  We have to fill this out to 
+Notice the free 'a' in the deriving.  We have to fill this out to
     newtype T = T Char deriving( forall a. C [a] )
 
 And then translate it to:
     instance C [a] Char => C [a] T where ...
-    
-	
+
+
 Note [Newtype deriving superclasses]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 (See also Trac #1220 for an interesting exchange on newtype
@@ -298,110 +305,90 @@ both of them.  So we gather defs/uses from deriving just like anything else.
 tcDeriving  :: [LTyClDecl Name]  -- All type constructors
             -> [LInstDecl Name]  -- All instance declarations
             -> [LDerivDecl Name] -- All stand-alone deriving declarations
-            -> TcM ([InstInfo Name] -- The generated "instance decls"
-                   ,HsValBinds Name -- Extra generated top-level bindings
-                   ,DefUses
-                   ,[TyCon]         -- Extra generated top-level types
-                   ,[TyCon])        -- Extra generated type family instances
-
+            -> TcM (TcGblEnv, Bag (InstInfo Name), HsValBinds Name)
 tcDeriving tycl_decls inst_decls deriv_decls
-  = recoverM (return ([], emptyValBindsOut, emptyDUs, [], [])) $
+  = recoverM (do { g <- getGblEnv
+                 ; return (g, emptyBag, emptyValBindsOut)}) $
     do	{   	-- Fish the "deriving"-related information out of the TcEnv
 		-- And make the necessary "equations".
 	  is_boot <- tcIsHsBoot
 	; traceTc "tcDeriving" (ppr is_boot)
-	; (early_specs, genericsExtras) 
-                <- makeDerivSpecs is_boot tycl_decls inst_decls deriv_decls
-        ; let (repMetaTys, repTyCons, metaInsts) = unzip3 genericsExtras
+	; early_specs <- makeDerivSpecs is_boot tycl_decls inst_decls deriv_decls
 
 	; overlap_flag <- getOverlapFlag
 	; let (infer_specs, given_specs) = splitEithers early_specs
 	; insts1 <- mapM (genInst True overlap_flag) given_specs
 
 	; final_specs <- extendLocalInstEnv (map (iSpec . fst) insts1) $
-			 inferInstanceContexts overlap_flag infer_specs
+                           inferInstanceContexts overlap_flag infer_specs
 
 	; insts2 <- mapM (genInst False overlap_flag) final_specs
 
-	-- We no longer generate the old generic to/from functions
-        -- from each type declaration, so this is emptyBag
-	; gen_binds <- return emptyBag -- mkGenericBinds is_boot tycl_decls
-	
-	; (inst_info, rn_binds, rn_dus)
-                <- renameDeriv is_boot gen_binds (insts1 ++ insts2 ++ concat metaInsts)
+        ; let (inst_infos, deriv_stuff) = unzip (insts1 ++ insts2)
+        ; loc <- getSrcSpanM
+        ; let (binds, newTyCons, famInsts, extraInstances) = 
+                genAuxBinds loc (unionManyBags deriv_stuff)
+        ; (inst_info, rn_binds, rn_dus) <-
+            renameDeriv is_boot (inst_infos ++ (bagToList extraInstances)) binds
 
 	; dflags <- getDOpts
 	; liftIO (dumpIfSet_dyn dflags Opt_D_dump_deriv "Derived instances"
-	         (ddump_deriving inst_info rn_binds repMetaTys repTyCons metaInsts))
-{-
-        ; when (not (null inst_info)) $
-          dumpDerivingInfo (ddump_deriving inst_info rn_binds)
--}
-	; return ( inst_info, rn_binds, rn_dus
-                 , concat (map metaTyCons2TyCons repMetaTys), repTyCons) }
+	         (ddump_deriving inst_info rn_binds newTyCons famInsts))
+
+  ; let all_tycons = map ATyCon (bagToList newTyCons)
+  ; gbl_env <- tcExtendGlobalEnv all_tycons $
+               tcExtendGlobalEnvImplicit (concatMap implicitTyThings all_tycons) $
+               tcExtendLocalFamInstEnv (map mkLocalFamInst (bagToList famInsts)) $
+               tcExtendLocalInstEnv (map iSpec (bagToList inst_info)) getGblEnv
+
+  ; return (addTcgDUs gbl_env rn_dus, inst_info, rn_binds) }
   where
-    ddump_deriving :: [InstInfo Name] -> HsValBinds Name 
-                   -> [MetaTyCons] -- ^ Empty data constructors
-                   -> [TyCon]      -- ^ Rep type family instances
-                   -> [[(InstInfo RdrName, DerivAuxBinds)]] 
-                      -- ^ Instances for the repMetaTys
+    ddump_deriving :: Bag (InstInfo Name) -> HsValBinds Name 
+                   -> Bag TyCon  -- ^ Empty data constructors
+                   -> Bag TyCon  -- ^ Rep type family instances
                    -> SDoc
-    ddump_deriving inst_infos extra_binds repMetaTys repTyCons metaInsts
-      =    hang (ptext (sLit "Derived instances"))
-              2 (vcat (map (\i -> pprInstInfoDetails i $$ text "") inst_infos)
+    ddump_deriving inst_infos extra_binds repMetaTys repTyCons
+      =    hang (ptext (sLit "Derived instances:"))
+              2 (vcat (map (\i -> pprInstInfoDetails i $$ text "") (bagToList inst_infos))
                  $$ ppr extra_binds)
-        $$ hangP "Generic representation" (
-              hangP "Generated datatypes for meta-information"
-               (vcat (map ppr repMetaTys))
-           -- The Outputable instance for TyCon unfortunately only prints the name...
-           $$ hangP "Representation types" 
-                (vcat (map ppr  repTyCons))
-           $$ hangP "Meta-information instances"
-                (vcat (map (pprInstInfoDetails . fst) (concat metaInsts))))
+        $$ hangP "Generic representation:" (
+              hangP "Generated datatypes for meta-information:"
+               (vcat (map ppr (bagToList repMetaTys)))
+           $$ hangP "Representation types:"
+                (vcat (map pprTyFamInst (bagToList repTyCons))))
     
+    pprTyFamInst t = ppr t <+> text "=" <+> ppr (synTyConType t)
     hangP s x = text "" $$ hang (ptext (sLit s)) 2 x
 
 
-renameDeriv :: Bool -> LHsBinds RdrName
-	    -> [(InstInfo RdrName, DerivAuxBinds)]
- 	    -> TcM ([InstInfo Name], HsValBinds Name, DefUses)
-renameDeriv is_boot gen_binds insts
+renameDeriv :: Bool
+	    -> [InstInfo RdrName]
+	    -> Bag (LHsBind RdrName, LSig RdrName)
+ 	    -> TcM (Bag (InstInfo Name), HsValBinds Name, DefUses)
+renameDeriv is_boot inst_infos bagBinds
   | is_boot	-- If we are compiling a hs-boot file, don't generate any derived bindings
 		-- The inst-info bindings will all be empty, but it's easier to
 		-- just use rn_inst_info to change the type appropriately
-  = do	{ (rn_inst_infos, fvs) <- mapAndUnzipM rn_inst_info inst_infos	
-	; return (rn_inst_infos, emptyValBindsOut, usesOnly (plusFVs fvs)) }
+  = do	{ (rn_inst_infos, fvs) <- mapAndUnzipM rn_inst_info inst_infos
+	; return ( listToBag rn_inst_infos
+                 , emptyValBindsOut, usesOnly (plusFVs fvs)) }
 
   | otherwise
   = discardWarnings $ 	 -- Discard warnings about unused bindings etc
-    do	{ (rn_gen, dus_gen) <- setXOptM Opt_ScopedTypeVariables $  -- Type signatures in patterns 
-								  -- are used in the generic binds
-			       rnTopBinds (ValBindsIn gen_binds [])
-	; keepAliveSetTc (duDefs dus_gen)	-- Mark these guys to be kept alive
-
-		-- Generate and rename any extra not-one-inst-decl-specific binds, 
-		-- notably "con2tag" and/or "tag2con" functions.  
-		-- Bring those names into scope before renaming the instances themselves
-	; loc <- getSrcSpanM	-- Generic loc for shared bindings
-	; let (aux_binds, aux_sigs) = unzip $ map (genAuxBind loc) $ 
-	                              rm_dups [] $ concat deriv_aux_binds
-              aux_val_binds = ValBindsIn (listToBag aux_binds) aux_sigs
+    do	{
+        -- Bring the extra deriving stuff into scope
+        -- before renaming the instances themselves
+	; (aux_binds, aux_sigs) <- mapAndUnzipBagM return bagBinds
+	; let aux_val_binds = ValBindsIn aux_binds (bagToList aux_sigs)
 	; rn_aux_lhs <- rnTopBindsLHS emptyFsEnv aux_val_binds
-	; bindLocalNames (collectHsValBinders rn_aux_lhs) $ 
-    do	{ (rn_aux, dus_aux) <- rnTopBindsRHS rn_aux_lhs
+        ; let bndrs = collectHsValBinders rn_aux_lhs
+	; bindLocalNames bndrs $ 
+    do	{ (rn_aux, dus_aux) <- rnValBindsRHS (LocalBindCtxt (mkNameSet bndrs)) rn_aux_lhs
 	; (rn_inst_infos, fvs_insts) <- mapAndUnzipM rn_inst_info inst_infos
-	; return (rn_inst_infos, rn_aux `plusHsValBinds` rn_gen,
-                  dus_gen `plusDU` dus_aux `plusDU` usesOnly (plusFVs fvs_insts)) } }
+	; return (listToBag rn_inst_infos, rn_aux,
+                  dus_aux `plusDU` usesOnly (plusFVs fvs_insts)) } }
 
   where
-    (inst_infos, deriv_aux_binds) = unzip insts
-    
-	-- Remove duplicate requests for auxilliary bindings
-    rm_dups acc [] = acc
-    rm_dups acc (b:bs) | any (isDupAux b) acc = rm_dups acc bs
-    		       | otherwise	      = rm_dups (b:acc) bs
-
-
     rn_inst_info :: InstInfo RdrName -> TcM (InstInfo Name, FreeVars)
     rn_inst_info info@(InstInfo { iBinds = NewTypeDerived coi tc })
 	= return ( info { iBinds = NewTypeDerived coi tc }
@@ -409,7 +396,7 @@ renameDeriv is_boot gen_binds insts
 	  -- See Note [Newtype deriving and unused constructors]
 
     rn_inst_info inst_info@(InstInfo { iSpec = inst, iBinds = VanillaInst binds sigs standalone_deriv })
-	= 	-- Bring the right type variables into 
+	= 	-- Bring the right type variables into
 		-- scope (yuk), and rename the method binds
 	   ASSERT( null sigs )
 	   bindLocalNames (map Var.varName tyvars) $
@@ -450,80 +437,20 @@ stored in NewTypeDerived.
 @makeDerivSpecs@ fishes around to find the info about needed derived instances.
 
 \begin{code}
--- Make the "extras" for the generic representation
-mkGenDerivExtras :: TyCon 
-                 -> TcRn (MetaTyCons, TyCon, [(InstInfo RdrName, DerivAuxBinds)])
-mkGenDerivExtras tc = do
-        { (metaTyCons, rep0TyInst) <- genGenericRepExtras tc
-        ; metaInsts                <- genDtMeta (tc, metaTyCons)
-        ; return (metaTyCons, rep0TyInst, metaInsts) }
-
 makeDerivSpecs :: Bool 
 	       -> [LTyClDecl Name] 
 	       -> [LInstDecl Name]
 	       -> [LDerivDecl Name] 
-	       -> TcM ( [EarlyDerivSpec]
-                      , [(MetaTyCons, TyCon, [(InstInfo RdrName, DerivAuxBinds)])])
+	       -> TcM [EarlyDerivSpec]
 makeDerivSpecs is_boot tycl_decls inst_decls deriv_decls
   | is_boot     -- No 'deriving' at all in hs-boot files
   = do  { mapM_ add_deriv_err deriv_locs 
-        ; return ([],[]) }
+        ; return [] }
   | otherwise
   = do  { eqns1 <- mapAndRecoverM deriveTyData all_tydata
         ; eqns2 <- mapAndRecoverM deriveStandalone deriv_decls
-
-        -- Generic representation stuff: we might need to add some "extras"
-        -- to the instances
-        ; xDerRep <- getDOpts >>= return . xopt Opt_DeriveGeneric
-        ; generic_extras_deriv <- if not xDerRep
-                                   -- No extras if the flag is off
-                                   then (return [])
-                                    else do {
-          let allTyNames = [ tcdName d | L _ d <- tycl_decls, isDataDecl d ]
-        -- Select only those types that derive Generic
-        ; let sel_tydata = [ tcdName t | (L _ c, L _ t) <- all_tydata
-                                       , getClassName c == Just genClassName ]
-        ; let sel_deriv_decls = catMaybes [ getTypeName t
-                                  | L _ (DerivDecl (L _ t)) <- deriv_decls
-                                  , getClassName t == Just genClassName ] 
-        ; derTyDecls <- mapM tcLookupTyCon $ 
-                         filter (needsExtras xDerRep
-                                  (sel_tydata ++ sel_deriv_decls)) allTyNames
-        -- We need to generate the extras to add to what has
-        -- already been derived
-        ; {- pprTrace "sel_tydata" (ppr sel_tydata) $
-          pprTrace "sel_deriv_decls" (ppr sel_deriv_decls) $
-          pprTrace "derTyDecls" (ppr derTyDecls) $
-          pprTrace "deriv_decls" (ppr deriv_decls) $ -}
-          mapM mkGenDerivExtras derTyDecls }
-
-        -- Merge and return
-        ; return ( eqns1 ++ eqns2, generic_extras_deriv) }
+        ; return (eqns1 ++ eqns2) }
   where
-      -- We need extras if the flag DeriveGeneric is on and this type is 
-      -- deriving Generic
-    needsExtras xDerRep tydata tc_name = xDerRep && tc_name `elem` tydata
-
-    -- Extracts the name of the class in the deriving
-    getClassName :: HsType Name -> Maybe Name
-    getClassName (HsForAllTy _ _ _ (L _ n)) = getClassName n
-    getClassName (HsPredTy (HsClassP n _))  = Just n
-    getClassName _                          = Nothing
-
-    -- Extracts the name of the type in the deriving
-    -- This function (and also getClassName above) is not really nice, and I
-    -- might not have covered all possible cases. I wonder if there is no easier
-    -- way to extract class and type name from a LDerivDecl...
-    getTypeName :: HsType Name -> Maybe Name
-    getTypeName (HsForAllTy _ _ _ (L _ n))      = getTypeName n
-    getTypeName (HsTyVar n)                     = Just n
-    getTypeName (HsOpTy _ (L _ n) _)            = Just n
-    getTypeName (HsPredTy (HsClassP _ [L _ n])) = getTypeName n
-    getTypeName (HsAppTy (L _ n) _)             = getTypeName n
-    getTypeName (HsParTy (L _ n))               = getTypeName n
-    getTypeName (HsKindSig (L _ n) _)           = getTypeName n
-    getTypeName _                               = Nothing
-
     extractTyDataPreds decls
       = [(p, d) | d@(L _ (TyData {tcdDerivs = Just preds})) <- decls, p <- preds]
 
@@ -547,13 +474,12 @@ deriveStandalone (L loc (DerivDecl deriv_ty))
   = setSrcSpan loc                   $
     addErrCtxt (standaloneCtxt deriv_ty)  $
     do { traceTc "Standalone deriving decl for" (ppr deriv_ty)
-       ; (tvs, theta, cls, inst_tys) <- tcHsInstHead deriv_ty
+       ; (tvs, theta, cls, inst_tys) <- tcHsInstHead TcType.InstDeclCtxt deriv_ty
        ; traceTc "Standalone deriving;" $ vcat
               [ text "tvs:" <+> ppr tvs
               , text "theta:" <+> ppr theta
               , text "cls:" <+> ppr cls
               , text "tys:" <+> ppr inst_tys ]
-       ; checkValidInstance deriv_ty tvs theta cls inst_tys
 		-- C.f. TcInstDcls.tcLocalInstDecl1
 
        ; let cls_tys = take (length inst_tys - 1) inst_tys
@@ -567,8 +493,9 @@ deriveStandalone (L loc (DerivDecl deriv_ty))
 
 ------------------------------------------------------------------
 deriveTyData :: (LHsType Name, LTyClDecl Name) -> TcM EarlyDerivSpec
-deriveTyData (L loc deriv_pred, L _ decl@(TyData { tcdLName = L _ tycon_name, 
-					           tcdTyVars = tv_names, 
+-- The deriving clause of a data or newtype declaration
+deriveTyData (L loc deriv_pred, L _ decl@(TyData { tcdLName = L _ tycon_name,
+					           tcdTyVars = tv_names,
 				    	           tcdTyPats = ty_pats }))
   = setSrcSpan loc     $	-- Use the location of the 'deriving' item
     tcAddDeclCtxt decl $
@@ -585,7 +512,7 @@ deriveTyData (L loc deriv_pred, L _ decl@(TyData { tcdLName = L _ tycon_name,
 	; let cls_tyvars = classTyVars cls
 	      kind = tyVarKind (last cls_tyvars)
 	      (arg_kinds, _) = splitKindFunTys kind
-	      n_args_to_drop = length arg_kinds	
+	      n_args_to_drop = length arg_kinds
 	      n_args_to_keep = tyConArity tc - n_args_to_drop
 	      args_to_drop   = drop n_args_to_keep tc_args
 	      inst_ty        = mkTyConApp tc (take n_args_to_keep tc_args)
@@ -593,7 +520,7 @@ deriveTyData (L loc deriv_pred, L _ decl@(TyData { tcdLName = L _ tycon_name,
 	      dropped_tvs    = mkVarSet (mapCatMaybes getTyVar_maybe args_to_drop)
 	      univ_tvs       = (mkVarSet tvs `extendVarSetList` deriv_tvs)
 					`minusVarSet` dropped_tvs
- 
+
 	-- Check that the result really is well-kinded
 	; checkTc (n_args_to_keep >= 0 && (inst_ty_kind `eqKind` kind))
 		  (derivingKindErr tc cls cls_tys kind)
@@ -601,11 +528,11 @@ deriveTyData (L loc deriv_pred, L _ decl@(TyData { tcdLName = L _ tycon_name,
 	; checkTc (sizeVarSet dropped_tvs == n_args_to_drop && 		 -- (a)
 	           tyVarsOfTypes (inst_ty:cls_tys) `subVarSet` univ_tvs) -- (b)
 		  (derivingEtaErr cls cls_tys inst_ty)
-		-- Check that 
+		-- Check that
 		--  (a) The data type can be eta-reduced; eg reject:
 		--		data instance T a a = ... deriving( Monad )
 		--  (b) The type class args do not mention any of the dropped type
-		--      variables 
+		--      variables
 		--		newtype T a s = ... deriving( ST s )
 
 	-- Type families can't be partially applied
@@ -614,7 +541,7 @@ deriveTyData (L loc deriv_pred, L _ decl@(TyData { tcdLName = L _ tycon_name,
 	; checkTc (not (isFamilyTyCon tc) || n_args_to_drop == 0)
 		  (typeFamilyPapErr tc cls cls_tys inst_ty)
 
-	; mkEqnHelp DerivOrigin (varSetElems univ_tvs) cls cls_tys inst_ty Nothing } }
+	; mkEqnHelp DerivOrigin (varSetElemsKvsFirst univ_tvs) cls cls_tys inst_ty Nothing } }
   where
 	-- Tiresomely we must figure out the "lhs", which is awkward for type families
 	-- E.g.   data T a b = .. deriving( Eq )
@@ -626,6 +553,7 @@ deriveTyData (L loc deriv_pred, L _ decl@(TyData { tcdLName = L _ tycon_name,
     get_lhs Nothing     = do { tc <- tcLookupTyCon tycon_name
 			     ; let tvs = tyConTyVars tc
 			     ; return (tvs, tc, mkTyVarTys tvs) }
+    -- JPM: to fix
     get_lhs (Just pats) = do { let hs_app = nlHsTyConApp tycon_name pats
 			     ; (tvs, tc_app) <- tcHsQuantifiedType tv_names hs_app
 			     ; let (tc, tc_args) = tcSplitTyConApp tc_app
@@ -643,7 +571,7 @@ When there are no type families, it's quite easy:
     -- :CoS :: S  ~ []	-- Eta-reduced
 
     instance Eq [a] => Eq (S a) 	-- by coercion sym (Eq (:CoS a)) : Eq [a] ~ Eq (S a)
-    instance Monad [] => Monad S	-- by coercion sym (Monad :CoS)  : Monad [] ~ Monad S 
+    instance Monad [] => Monad S	-- by coercion sym (Monad :CoS)  : Monad [] ~ Monad S
 
 When type familes are involved it's trickier:
 
@@ -661,7 +589,7 @@ Henc the current typeFamilyPapErr, even though the instance makes sense.
 After all, we can write it out
     instance Monad [] => Monad (T Int)	-- only if we can eta reduce???
       return x = MkT [x]
-      ... etc ...	
+      ... etc ...
 
 \begin{code}
 mkEqnHelp :: CtOrigin -> [TyVar] -> Class -> [Type] -> Type
@@ -697,14 +625,15 @@ mkEqnHelp orig tvs cls cls_tys tc_app mtheta
 
       | otherwise
       = do { (rep_tc, rep_tc_args) <- tcLookupDataFamInst tycon tc_args
-      	          -- Be careful to test rep_tc here: in the case of families, 
+      	          -- Be careful to test rep_tc here: in the case of families,
       	          -- we want to check the instance tycon, not the family tycon
 
-      	   -- For standalone deriving (mtheta /= Nothing), 
+      	   -- For standalone deriving (mtheta /= Nothing),
       	   -- check that all the data constructors are in scope.
       	   ; rdr_env <- getGlobalRdrEnv
-      	   ; let hidden_data_cons = isAbstractTyCon rep_tc || 
-                                    any not_in_scope (tyConDataCons rep_tc)
+      	   ; let hidden_data_cons = not (isWiredInName (tyConName rep_tc)) &&
+                                    (isAbstractTyCon rep_tc || 
+                                     any not_in_scope (tyConDataCons rep_tc))
       	         not_in_scope dc  = null (lookupGRE_Name rdr_env (dataConName dc))
       	   ; unless (isNothing mtheta || not hidden_data_cons)
       	   	    (bale_out (derivingHiddenErr tycon))
@@ -714,7 +643,7 @@ mkEqnHelp orig tvs cls cls_tys tc_app mtheta
       	   	mkDataTypeEqn orig dflags tvs cls cls_tys
       	   		      tycon tc_args rep_tc rep_tc_args mtheta
       	     else
-      	   	mkNewTypeEqn orig dflags tvs cls cls_tys 
+      	   	mkNewTypeEqn orig dflags tvs cls cls_tys
       	   		     tycon tc_args rep_tc rep_tc_args mtheta }
 \end{code}
 
@@ -731,7 +660,7 @@ mkDataTypeEqn :: CtOrigin
               -> [Var]                  -- Universally quantified type variables in the instance
               -> Class                  -- Class for which we need to derive an instance
               -> [Type]                 -- Other parameters to the class except the last
-              -> TyCon                  -- Type constructor for which the instance is requested 
+              -> TyCon                  -- Type constructor for which the instance is requested
 					--    (last parameter to the type class)
               -> [Type]                 -- Parameters to the type constructor
               -> TyCon                  -- rep of the above (for type families)
@@ -750,7 +679,7 @@ mkDataTypeEqn orig dflags tvs cls cls_tys
     go_for_it    = mk_data_eqn orig tvs cls tycon tc_args rep_tc rep_tc_args mtheta
     bale_out msg = failWithTc (derivingThingErr False cls cls_tys (mkTyConApp tycon tc_args) msg)
 
-mk_data_eqn :: CtOrigin -> [TyVar] -> Class 
+mk_data_eqn :: CtOrigin -> [TyVar] -> Class
    	    -> TyCon -> [TcType] -> TyCon -> [TcType] -> DerivContext
    	    -> TcM EarlyDerivSpec
 mk_data_eqn orig tvs cls tycon tc_args rep_tc rep_tc_args mtheta
@@ -759,7 +688,7 @@ mk_data_eqn orig tvs cls tycon tc_args rep_tc rep_tc_args mtheta
 	; let inst_tys = [mkTyConApp tycon tc_args]
 	      inferred_constraints = inferConstraints tvs cls inst_tys rep_tc rep_tc_args
 	      spec = DS { ds_loc = loc, ds_orig = orig
-			, ds_name = dfun_name, ds_tvs = tvs 
+			, ds_name = dfun_name, ds_tvs = tvs
 			, ds_cls = cls, ds_tys = inst_tys
 			, ds_tc = rep_tc, ds_tc_args = rep_tc_args
 			, ds_theta =  mtheta `orElse` inferred_constraints
@@ -769,7 +698,7 @@ mk_data_eqn orig tvs cls tycon tc_args rep_tc rep_tc_args mtheta
 				   else Left spec) }	-- Infer context
 
 ----------------------
-mk_typeable_eqn :: CtOrigin -> [TyVar] -> Class 
+mk_typeable_eqn :: CtOrigin -> [TyVar] -> Class
    	    	-> TyCon -> [TcType] -> DerivContext
    	    	-> TcM EarlyDerivSpec
 mk_typeable_eqn orig tvs cls tycon tc_args mtheta
@@ -790,7 +719,7 @@ mk_typeable_eqn orig tvs cls tycon tc_args mtheta
 
   | otherwise		-- standaone deriving
   = do	{ checkTc (null tc_args)
-		  (ptext (sLit "Derived typeable instance must be of form (Typeable") 
+		  (ptext (sLit "Derived typeable instance must be of form (Typeable")
 			<> int (tyConArity tycon) <+> ppr tycon <> rparen)
 	; dfun_name <- new_dfun_name cls tycon
   	; loc <- getSrcSpanM
@@ -817,14 +746,14 @@ inferConstraints _ cls inst_tys rep_tc rep_tc_args
   where
        -- Constraints arising from the arguments of each constructor
     con_arg_constraints
-      = [ mkClassPred cls [arg_ty] 
+      = [ mkClassPred cls [arg_ty]
         | data_con <- tyConDataCons rep_tc,
           arg_ty   <- ASSERT( isVanillaDataCon data_con )
     			get_constrained_tys $
     		 	dataConInstOrigArgTys data_con all_rep_tc_args,
           not (isUnLiftedType arg_ty) ]
     		-- No constraints for unlifted types
-    		-- Where they are legal we generate specilised function calls
+    		-- See Note [Deriving and unboxed types]
 
     		-- For functor-like classes, two things are different
     		-- (a) We recurse over argument types to generate constraints
@@ -833,7 +762,7 @@ inferConstraints _ cls inst_tys rep_tc rep_tc_args
     is_functor_like = getUnique cls `elem` functorLikeClassKeys
 
     get_constrained_tys :: [Type] -> [Type]
-    get_constrained_tys tys 
+    get_constrained_tys tys
         | is_functor_like = concatMap (deepSubtypesContaining last_tv) tys
     	| otherwise	  = tys
 
@@ -850,22 +779,39 @@ inferConstraints _ cls inst_tys rep_tc rep_tc_args
     	-- Stupid constraints
     stupid_constraints = substTheta subst (tyConStupidTheta rep_tc)
     subst = zipTopTvSubst rep_tc_tvs all_rep_tc_args
-	      
+
 	-- Extra Data constraints
-	-- The Data class (only) requires that for 
-	--    instance (...) => Data (T t1 t2) 
+	-- The Data class (only) requires that for
+	--    instance (...) => Data (T t1 t2)
 	-- IF   t1:*, t2:*
 	-- THEN (Data t1, Data t2) are among the (...) constraints
 	-- Reason: when the IF holds, we generate a method
 	-- 	       dataCast2 f = gcast2 f
 	--         and we need the Data constraints to typecheck the method
-    extra_constraints 
+    extra_constraints
       | cls `hasKey` dataClassKey
-      , all (isLiftedTypeKind . typeKind) rep_tc_args 
+      , all (isLiftedTypeKind . typeKind) rep_tc_args
       = [mkClassPred cls [ty] | ty <- rep_tc_args]
-      | otherwise 
+      | otherwise
       = []
+\end{code}
 
+Note [Deriving and unboxed types]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We have some special hacks to support things like
+   data T = MkT Int# deriving( Ord, Show )
+
+Specifically
+  * For Show we use TcGenDeriv.box_if_necy to box the Int# into an Int
+    (which we know how to show)
+
+  * For Eq, Ord, we ust TcGenDeriv.primOrdOps to give Ord operations
+    on some primitive types
+
+It's all a bit ad hoc.
+
+
+\begin{code}
 ------------------------------------------------------------------
 -- Check side conditions that dis-allow derivability for particular classes
 -- This is *apart* from the newtype-deriving mechanism
@@ -884,7 +830,7 @@ checkSideConditions dflags mtheta cls cls_tys rep_tc
   = case (cond (dflags, rep_tc)) of
 	Just err -> DerivableClassError err	-- Class-specific error
 	Nothing  | null cls_tys -> CanDerive	-- All derivable classes are unary, so
-						-- cls_tys (the type args other than last) 
+						-- cls_tys (the type args other than last)
 						-- should be null
 		 | otherwise    -> DerivableClassError ty_args_why	-- e.g. deriving( Eq s )
   | otherwise = NonDerivableClass	-- Not a standard class
@@ -899,15 +845,15 @@ nonStdErr cls = quotes (ppr cls) <+> ptext (sLit "is not a derivable class")
 
 sideConditions :: DerivContext -> Class -> Maybe Condition
 sideConditions mtheta cls
-  | cls_key == eqClassKey      	   = Just cond_std
-  | cls_key == ordClassKey     	   = Just cond_std
-  | cls_key == showClassKey    	   = Just cond_std
-  | cls_key == readClassKey    	   = Just (cond_std `andCond` cond_noUnliftedArgs)
+  | cls_key == eqClassKey      	   = Just (cond_std `andCond` cond_args cls)
+  | cls_key == ordClassKey     	   = Just (cond_std `andCond` cond_args cls)
+  | cls_key == showClassKey    	   = Just (cond_std `andCond` cond_args cls)
+  | cls_key == readClassKey    	   = Just (cond_std `andCond` cond_args cls)
   | cls_key == enumClassKey    	   = Just (cond_std `andCond` cond_isEnumeration)
-  | cls_key == ixClassKey      	   = Just (cond_std `andCond` cond_enumOrProduct)
-  | cls_key == boundedClassKey 	   = Just (cond_std `andCond` cond_enumOrProduct)
-  | cls_key == dataClassKey    	   = Just (checkFlag Opt_DeriveDataTypeable `andCond` 
-                                           cond_std `andCond` cond_noUnliftedArgs)
+  | cls_key == ixClassKey      	   = Just (cond_std `andCond` cond_enumOrProduct cls)
+  | cls_key == boundedClassKey 	   = Just (cond_std `andCond` cond_enumOrProduct cls)
+  | cls_key == dataClassKey    	   = Just (checkFlag Opt_DeriveDataTypeable `andCond`
+                                           cond_std `andCond` cond_args cls)
   | cls_key == functorClassKey 	   = Just (checkFlag Opt_DeriveFunctor `andCond`
     	                                   cond_functorOK True)	 -- NB: no cond_std!
   | cls_key == foldableClassKey	   = Just (checkFlag Opt_DeriveFoldable `andCond`
@@ -924,12 +870,12 @@ sideConditions mtheta cls
 type Condition = (DynFlags, TyCon) -> Maybe SDoc
 	-- first Bool is whether or not we are allowed to derive Data and Typeable
 	-- second Bool is whether or not we are allowed to derive Functor
-	-- TyCon is the *representation* tycon if the 
+	-- TyCon is the *representation* tycon if the
 	--	data type is an indexed one
 	-- Nothing => OK
 
 orCond :: Condition -> Condition -> Condition
-orCond c1 c2 tc 
+orCond c1 c2 tc
   = case c1 tc of
 	Nothing -> Nothing	    -- c1 succeeds
 	Just x  -> case c2 tc of    -- c1 fails
@@ -957,39 +903,53 @@ cond_stdOK Nothing (_, rep_tc)
     con_whys = mapCatMaybes check_con data_cons
 
     check_con :: DataCon -> Maybe SDoc
-    check_con con 
+    check_con con
       | isVanillaDataCon con
       , all isTauTy (dataConOrigArgTys con) = Nothing
       | otherwise = Just (badCon con (ptext (sLit "must have a Haskell-98 type")))
-  
+
 no_cons_why :: TyCon -> SDoc
-no_cons_why rep_tc = quotes (pprSourceTyCon rep_tc) <+> 
+no_cons_why rep_tc = quotes (pprSourceTyCon rep_tc) <+>
 		     ptext (sLit "must have at least one data constructor")
 
 cond_RepresentableOk :: Condition
 cond_RepresentableOk (_,t) = canDoGenerics t
 
-cond_enumOrProduct :: Condition
-cond_enumOrProduct = cond_isEnumeration `orCond` 
-		       (cond_isProduct `andCond` cond_noUnliftedArgs)
+cond_enumOrProduct :: Class -> Condition
+cond_enumOrProduct cls = cond_isEnumeration `orCond`
+		         (cond_isProduct `andCond` cond_args cls)
 
-cond_noUnliftedArgs :: Condition
+cond_args :: Class -> Condition
 -- For some classes (eg Eq, Ord) we allow unlifted arg types
 -- by generating specilaised code.  For others (eg Data) we don't.
-cond_noUnliftedArgs (_, tc)
-  | null bad_cons = Nothing
-  | otherwise     = Just why
+cond_args cls (_, tc)
+  = case bad_args of
+      []      -> Nothing
+      (ty:_) -> Just (hang (ptext (sLit "Don't know how to derive") <+> quotes (ppr cls))
+                         2 (ptext (sLit "for type") <+> quotes (ppr ty)))
   where
-    bad_cons = [ con | con <- tyConDataCons tc
-		     , any isUnLiftedType (dataConOrigArgTys con) ]
-    why = badCon (head bad_cons) (ptext (sLit "must have only arguments of lifted type"))
+    bad_args = [ arg_ty | con <- tyConDataCons tc
+		        , arg_ty <- dataConOrigArgTys con
+			, isUnLiftedType arg_ty
+                     	, not (ok_ty arg_ty) ]
+
+    cls_key = classKey cls
+    ok_ty arg_ty
+     | cls_key == eqClassKey   = check_in arg_ty ordOpTbl
+     | cls_key == ordClassKey  = check_in arg_ty ordOpTbl
+     | cls_key == showClassKey = check_in arg_ty boxConTbl
+     | otherwise               = False    -- Read, Ix etc
+
+    check_in :: Type -> [(Type,a)] -> Bool
+    check_in arg_ty tbl = any (eqType arg_ty . fst) tbl
+
 
 cond_isEnumeration :: Condition
 cond_isEnumeration (_, rep_tc)
   | isEnumerationTyCon rep_tc   = Nothing
   | otherwise		        = Just why
   where
-    why = sep [ quotes (pprSourceTyCon rep_tc) <+> 
+    why = sep [ quotes (pprSourceTyCon rep_tc) <+>
 	          ptext (sLit "must be an enumeration type")
               , ptext (sLit "(an enumeration consists of one or more nullary, non-GADT constructors)") ]
 		  -- See Note [Enumeration types] in TyCon
@@ -999,7 +959,7 @@ cond_isProduct (_, rep_tc)
   | isProductTyCon rep_tc = Nothing
   | otherwise	          = Just why
   where
-    why = quotes (pprSourceTyCon rep_tc) <+> 
+    why = quotes (pprSourceTyCon rep_tc) <+>
 	  ptext (sLit "must have precisely one constructor")
 
 cond_typeableOK :: Condition
@@ -1008,13 +968,13 @@ cond_typeableOK :: Condition
 --	      (b) 7 or fewer args
 cond_typeableOK (_, tc)
   | tyConArity tc > 7 = Just too_many
-  | not (all (isSubArgTypeKind . tyVarKind) (tyConTyVars tc)) 
+  | not (all (isSubArgTypeKind . tyVarKind) (tyConTyVars tc))
                       = Just bad_kind
   | otherwise	      = Nothing
   where
-    too_many = quotes (pprSourceTyCon tc) <+> 
+    too_many = quotes (pprSourceTyCon tc) <+>
 	       ptext (sLit "must have 7 or fewer arguments")
-    bad_kind = quotes (pprSourceTyCon tc) <+> 
+    bad_kind = quotes (pprSourceTyCon tc) <+>
 	       ptext (sLit "must only have arguments of kind `*'")
 
 functorLikeClassKeys :: [Unique]
@@ -1029,11 +989,11 @@ cond_functorOK :: Bool -> Condition
 --            (e) no "stupid context" on data type
 cond_functorOK allowFunctions (_, rep_tc)
   | null tc_tvs
-  = Just (ptext (sLit "Data type") <+> quotes (ppr rep_tc) 
+  = Just (ptext (sLit "Data type") <+> quotes (ppr rep_tc)
           <+> ptext (sLit "must have some type parameters"))
 
   | not (null bad_stupid_theta)
-  = Just (ptext (sLit "Data type") <+> quotes (ppr rep_tc) 
+  = Just (ptext (sLit "Data type") <+> quotes (ppr rep_tc)
           <+> ptext (sLit "must not have a class context") <+> pprTheta bad_stupid_theta)
 
   | otherwise
@@ -1042,7 +1002,7 @@ cond_functorOK allowFunctions (_, rep_tc)
     tc_tvs            = tyConTyVars rep_tc
     Just (_, last_tv) = snocView tc_tvs
     bad_stupid_theta  = filter is_bad (tyConStupidTheta rep_tc)
-    is_bad pred       = last_tv `elemVarSet` tyVarsOfPred pred
+    is_bad pred       = last_tv `elemVarSet` tyVarsOfType pred
 
     data_cons = tyConDataCons rep_tc
     check_con con = msum (check_vanilla con : foldDataConArgs (ft_check con) con)
@@ -1054,13 +1014,13 @@ cond_functorOK allowFunctions (_, rep_tc)
     ft_check :: DataCon -> FFoldType (Maybe SDoc)
     ft_check con = FT { ft_triv = Nothing, ft_var = Nothing
                       , ft_co_var = Just (badCon con covariant)
-	      	      , ft_fun = \x y -> if allowFunctions then x `mplus` y 
+	      	      , ft_fun = \x y -> if allowFunctions then x `mplus` y
                                                            else Just (badCon con functions)
                       , ft_tup = \_ xs  -> msum xs
                       , ft_ty_app = \_ x   -> x
                       , ft_bad_app = Just (badCon con wrong_arg)
                       , ft_forall = \_ x   -> x }
-                    
+
     existential = ptext (sLit "must not have existential arguments")
     covariant 	= ptext (sLit "must not use the type variable in a function argument")
     functions 	= ptext (sLit "must not contain function types")
@@ -1071,9 +1031,9 @@ checkFlag flag (dflags, _)
   | xopt flag dflags = Nothing
   | otherwise        = Just why
   where
-    why = ptext (sLit "You need -X") <> text flag_str 
+    why = ptext (sLit "You need -X") <> text flag_str
           <+> ptext (sLit "to derive an instance for this class")
-    flag_str = case [ s | (s, _, f, _) <- xFlags, f==flag ] of
+    flag_str = case [ s | (s, f, _) <- xFlags, f==flag ] of
                  [s]   -> s
                  other -> pprPanic "checkFlag" (ppr other)
 
@@ -1081,7 +1041,7 @@ std_class_via_iso :: Class -> Bool
 -- These standard classes can be derived for a newtype
 -- using the isomorphism trick *even if no -XGeneralizedNewtypeDeriving
 -- because giving so gives the same results as generating the boilerplate
-std_class_via_iso clas	
+std_class_via_iso clas
   = classKey clas `elem` [eqClassKey, ordClassKey, ixClassKey, boundedClassKey]
 	-- Not Read/Show because they respect the type
 	-- Not Enum, because newtypes are never in Enum
@@ -1090,7 +1050,7 @@ std_class_via_iso clas
 non_iso_class :: Class -> Bool
 -- *Never* derive Read, Show, Typeable, Data, Generic by isomorphism,
 -- even with -XGeneralizedNewtypeDeriving
-non_iso_class cls 
+non_iso_class cls
   = classKey cls `elem` ([ readClassKey, showClassKey, dataClassKey
                          , genClassKey] ++ typeableClassKeys)
 
@@ -1108,14 +1068,14 @@ badCon :: DataCon -> SDoc -> SDoc
 badCon con msg = ptext (sLit "Constructor") <+> quotes (ppr con) <+> msg
 \end{code}
 
-Note [Superclasses of derived instance] 
+Note [Superclasses of derived instance]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In general, a derived instance decl needs the superclasses of the derived
 class too.  So if we have
 	data T a = ...deriving( Ord )
-then the initial context for Ord (T a) should include Eq (T a).  Often this is 
+then the initial context for Ord (T a) should include Eq (T a).  Often this is
 redundant; we'll also generate an Ord constraint for each constructor argument,
-and that will probably generate enough constraints to make the Eq (T a) constraint 
+and that will probably generate enough constraints to make the Eq (T a) constraint
 be satisfied too.  But not always; consider:
 
  data S a = S
@@ -1152,7 +1112,7 @@ mkNewTypeEqn orig dflags tvs
 	; dfun_name <- new_dfun_name cls tycon
   	; loc <- getSrcSpanM
 	; let spec = DS { ds_loc = loc, ds_orig = orig
-			, ds_name = dfun_name, ds_tvs = varSetElems dfun_tvs 
+			, ds_name = dfun_name, ds_tvs = varSetElemsKvsFirst dfun_tvs
 			, ds_cls = cls, ds_tys = inst_tys
 			, ds_tc = rep_tycon, ds_tc_args = rep_tc_args
 			, ds_theta =  mtheta `orElse` all_preds
@@ -1183,7 +1143,7 @@ mkNewTypeEqn orig dflags tvs
 	-- where t is a type,
 	-- 	 ak+1...an is a suffix of a1..an, and are all tyars
 	--	 ak+1...an do not occur free in t, nor in the s1..sm
-	-- 	 (C s1 ... sm) is a  *partial applications* of class C 
+	-- 	 (C s1 ... sm) is a  *partial applications* of class C
 	--			with the last parameter missing
 	--	 (T a1 .. ak) matches the kind of C's last argument
 	--		(and hence so does t)
@@ -1193,7 +1153,7 @@ mkNewTypeEqn orig dflags tvs
 	-- We generate the instance
 	--	 instance forall ({a1..ak} u fvs(s1..sm)).
 	--		  C s1 .. sm t => C s1 .. sm (T a1...ak)
-	-- where T a1...ap is the partial application of 
+	-- where T a1...ap is the partial application of
 	-- 	 the LHS of the correct kind and p >= k
 	--
 	--	NB: the variables below are:
@@ -1206,7 +1166,7 @@ mkNewTypeEqn orig dflags tvs
 	--
 	-- Running example: newtype T s a = MkT (ST s a) deriving( Monad )
 	-- We generate the instance
-	--	instance Monad (ST s) => Monad (T s) where 
+	--	instance Monad (ST s) => Monad (T s) where
 
 	nt_eta_arity = length (fst (newTyConEtadRhs rep_tycon))
 		-- For newtype T a b = MkT (S a a b), the TyCon machinery already
@@ -1217,7 +1177,7 @@ mkNewTypeEqn orig dflags tvs
 
 	-- Note [Newtype representation]
 	-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-	-- Need newTyConRhs (*not* a recursive representation finder) 
+	-- Need newTyConRhs (*not* a recursive representation finder)
 	-- to get the representation type. For example
 	--	newtype B = MkB Int
 	--	newtype A = MkA B deriving( Num )
@@ -1228,7 +1188,7 @@ mkNewTypeEqn orig dflags tvs
 	rep_pred    = mkClassPred cls rep_tys
 		-- rep_pred is the representation dictionary, from where
 		-- we are gong to get all the methods for the newtype
-		-- dictionary 
+		-- dictionary
 
 
     -- Next we figure out what superclass dictionaries to use
@@ -1273,11 +1233,11 @@ mkNewTypeEqn orig dflags tvs
 		--     And the [a] must not mention 'b'.  That's all handled
 		--     by nt_eta_rity.
 
-	ats_ok = null (classATs cls)	
-	       -- No associated types for the class, because we don't 
+	ats_ok = null (classATs cls)
+	       -- No associated types for the class, because we don't
 	       -- currently generate type 'instance' decls; and cannot do
 	       -- so for 'data' instance decls
-					 
+
 	cant_derive_err
 	   = vcat [ ppUnless arity_ok arity_msg
 		  , ppUnless eta_ok eta_msg
@@ -1349,7 +1309,7 @@ inferInstanceContexts oflag infer_specs
       | n > 20 	-- Looks as if we are in an infinite loop
 		-- This can happen if we have -XUndecidableInstances
 		-- (See TcSimplify.tcSimplifyDeriv.)
-      = pprPanic "solveDerivEqns: probable loop" 
+      = pprPanic "solveDerivEqns: probable loop"
 		 (vcat (map pprDerivSpec infer_specs) $$ ppr current_solns)
       | otherwise
       =	do { 	  -- Extend the inst info from the explicit instance decls
@@ -1360,42 +1320,31 @@ inferInstanceContexts oflag infer_specs
 	     		  extendLocalInstEnv inst_specs $
 	     		  mapM gen_soln infer_specs
 
-	   ; if (current_solns == new_solns) then
-		return [ spec { ds_theta = soln } 
+           ; let eqList :: (a -> b -> Bool) -> [a] -> [b] -> Bool
+                 eqList f xs ys = length xs == length ys && and (zipWith f xs ys)
+
+	   ; if (eqList (eqList eqType) current_solns new_solns) then
+		return [ spec { ds_theta = soln }
                        | (spec, soln) <- zip infer_specs current_solns ]
 	     else
 		iterate_deriv (n+1) new_solns }
 
     ------------------------------------------------------------------
     gen_soln :: DerivSpec  -> TcM [PredType]
-    gen_soln (DS { ds_loc = loc, ds_orig = orig, ds_tvs = tyvars 
+    gen_soln (DS { ds_loc = loc, ds_orig = orig, ds_tvs = tyvars
 		 , ds_cls = clas, ds_tys = inst_tys, ds_theta = deriv_rhs })
       = setSrcSpan loc	$
-	addErrCtxt (derivInstCtxt the_pred) $ 
-	do {      -- Check for a bizarre corner case, when the derived instance decl should
-		  -- have form 	instance C a b => D (T a) where ...
-		  -- Note that 'b' isn't a parameter of T.  This gives rise to all sorts
-		  -- of problems; in particular, it's hard to compare solutions for
-		  -- equality when finding the fixpoint.  Moreover, simplifyDeriv
-		  -- has an assert failure because it finds a TyVar when it expects
-		  -- only TcTyVars.  So I just rule it out for now.  I'm not 
-		  -- even sure how it can arise.
-		  
- 	   ; let tv_set = mkVarSet tyvars
-	         weird_preds = [pred | pred <- deriv_rhs
-                                     , not (tyVarsOfPred pred `subVarSet` tv_set)]
-	   ; mapM_ (addErrTc . badDerivedPred) weird_preds	
-
-           ; theta <- simplifyDeriv orig the_pred tyvars deriv_rhs
+	addErrCtxt (derivInstCtxt the_pred) $
+	do { theta <- simplifyDeriv orig the_pred tyvars deriv_rhs
 	   	-- checkValidInstance tyvars theta clas inst_tys
 		-- Not necessary; see Note [Exotic derived instance contexts]
 		-- 		  in TcSimplify
-		
+
            ; traceTc "TcDeriv" (ppr deriv_rhs $$ ppr theta)
 		-- Claim: the result instance declaration is guaranteed valid
 		-- Hence no need to call:
 		--   checkValidInstance tyvars theta clas inst_tys
-	   ; return (sortLe (<=) theta) }	-- Canonicalise before returning the solution
+	   ; return (sortLe (\p1 p2 -> cmpType p1 p2 /= GT) theta) }	-- Canonicalise before returning the solution
       where
         the_pred = mkClassPred clas inst_tys
 
@@ -1414,7 +1363,7 @@ extendLocalInstEnv :: [Instance] -> TcM a -> TcM a
 -- for functional dependency errors -- that'll happen in TcInstDcls
 extendLocalInstEnv dfuns thing_inside
  = do { env <- getGblEnv
-      ; let  inst_env' = extendInstEnvList (tcg_inst_env env) dfuns 
+      ; let  inst_env' = extendInstEnvList (tcg_inst_env env) dfuns
 	     env'      = env { tcg_inst_env = inst_env' }
       ; setGblEnv env' thing_inside }
 \end{code}
@@ -1492,36 +1441,35 @@ the renamer.  What a great hack!
 --
 genInst :: Bool             -- True <=> standalone deriving
         -> OverlapFlag
-        -> DerivSpec -> TcM (InstInfo RdrName, DerivAuxBinds)
+        -> DerivSpec -> TcM (InstInfo RdrName, BagDerivStuff)
 genInst standalone_deriv oflag
-        spec@(DS { ds_tc = rep_tycon, ds_tc_args = rep_tc_args
+        spec@(DS { ds_tvs = tvs, ds_tc = rep_tycon, ds_tc_args = rep_tc_args
                  , ds_theta = theta, ds_newtype = is_newtype
                  , ds_name = name, ds_cls = clas })
   | is_newtype
   = return (InstInfo { iSpec   = inst_spec
-                     , iBinds  = NewTypeDerived co rep_tycon }, [])
+                     , iBinds  = NewTypeDerived co rep_tycon }, emptyBag)
 
   | otherwise
-  = do  { fix_env <- getFixityEnv
-        ; let loc   = getSrcSpan name
-              (meth_binds, aux_binds) = genDerivBinds loc fix_env clas rep_tycon
-                   -- In case of a family instance, we need to use the representation
-                   -- tycon (after all, it has the data constructors)
-
-        ; return (InstInfo { iSpec   = inst_spec
-                           , iBinds  = VanillaInst meth_binds [] standalone_deriv }
-                 , aux_binds) }
+  = do { fix_env <- getFixityEnv
+       ; (meth_binds, deriv_stuff) <- genDerivStuff (getSrcSpan name) 
+                                        fix_env clas name rep_tycon
+       ; let inst_info = InstInfo { iSpec   = inst_spec
+                                  , iBinds  = VanillaInst meth_binds []
+                                                standalone_deriv }
+       ; return ( inst_info, deriv_stuff) }
   where
+
     inst_spec = mkInstance oflag theta spec
     co1 = case tyConFamilyCoercion_maybe rep_tycon of
-              Just co_con -> mkAxInstCo co_con rep_tc_args
-    	      Nothing     -> id_co
-	      -- Not a family => rep_tycon = main tycon
-    co2 = mkAxInstCo (newTyConCo rep_tycon) rep_tc_args
-    co  = co1 `mkTransCo` co2
-    id_co = mkReflCo (mkTyConApp rep_tycon rep_tc_args)
+              Just co_con -> mkTcAxInstCo co_con rep_tc_args
+              Nothing     -> id_co
+              -- Not a family => rep_tycon = main tycon
+    co2 = mkTcAxInstCo (newTyConCo rep_tycon) rep_tc_args
+    co  = mkTcForAllCos tvs (co1 `mkTcTransCo` co2)
+    id_co = mkTcReflCo (mkTyConApp rep_tycon rep_tc_args)
 
--- Example: newtype instance N [a] = N1 (Tree a) 
+-- Example: newtype instance N [a] = N1 (Tree a)
 --          deriving instance Eq b => Eq (N [(b,b)])
 -- From the instance, we get an implicit newtype R1:N a = N1 (Tree a)
 -- When dealing with the deriving clause
@@ -1529,173 +1477,34 @@ genInst standalone_deriv oflag
 --    co2 : R1:N (b,b) ~ Tree (b,b)
 --    co  : N [(b,b)] ~ Tree (b,b)
 
-genDerivBinds :: SrcSpan -> FixityEnv -> Class -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
-genDerivBinds loc fix_env clas tycon
+genDerivStuff :: SrcSpan -> FixityEnv -> Class -> Name -> TyCon
+              -> TcM (LHsBinds RdrName, BagDerivStuff)
+genDerivStuff loc fix_env clas name tycon
   | className clas `elem` typeableClassNames
-  = (gen_Typeable_binds loc tycon, [])
+  = return (gen_Typeable_binds loc tycon, emptyBag)
 
-  | otherwise
+  | classKey clas == genClassKey   -- Special case because monadic
+  = gen_Generic_binds tycon (nameModule name)
+
+  | otherwise	                   -- Non-monadic generators
   = case assocMaybe gen_list (getUnique clas) of
-	Just gen_fn -> gen_fn loc tycon
-	Nothing	    -> pprPanic "genDerivBinds: bad derived class" (ppr clas)
+        Just gen_fn -> return (gen_fn loc tycon)
+        Nothing	    -> pprPanic "genDerivStuff: bad derived class" (ppr clas)
   where
-    gen_list :: [(Unique, SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds))]
+    gen_list :: [(Unique, SrcSpan -> TyCon -> (LHsBinds RdrName, BagDerivStuff))]
     gen_list = [(eqClassKey,            gen_Eq_binds)
- 	       ,(ordClassKey,           gen_Ord_binds)
- 	       ,(enumClassKey,          gen_Enum_binds)
- 	       ,(boundedClassKey,       gen_Bounded_binds)
- 	       ,(ixClassKey,            gen_Ix_binds)
- 	       ,(showClassKey,          gen_Show_binds fix_env)
- 	       ,(readClassKey,          gen_Read_binds fix_env)
-	       ,(dataClassKey,          gen_Data_binds)
-	       ,(functorClassKey,       gen_Functor_binds)
-	       ,(foldableClassKey,      gen_Foldable_binds)
-	       ,(traversableClassKey,   gen_Traversable_binds)
-	       ,(genClassKey,           genGenericBinds)
- 	       ]
+               ,(ordClassKey,           gen_Ord_binds)
+               ,(enumClassKey,          gen_Enum_binds)
+               ,(boundedClassKey,       gen_Bounded_binds)
+               ,(ixClassKey,            gen_Ix_binds)
+               ,(showClassKey,          gen_Show_binds fix_env)
+               ,(readClassKey,          gen_Read_binds fix_env)
+               ,(dataClassKey,          gen_Data_binds)
+               ,(functorClassKey,       gen_Functor_binds)
+               ,(foldableClassKey,      gen_Foldable_binds)
+               ,(traversableClassKey,   gen_Traversable_binds)
+               ]
 \end{code}
-
-%************************************************************************
-%*									*
-\subsection[TcDeriv-generic-binds]{Bindings for the new generic deriving mechanism}
-%*									*
-%************************************************************************
-
-For the generic representation we need to generate:
-\begin{itemize}
-\item A Generic instance
-\item A Rep type instance 
-\item Many auxiliary datatypes and instances for them (for the meta-information)
-\end{itemize}
-
-@genGenericBinds@ does (1)
-@genGenericRepExtras@ does (2) and (3)
-@genGenericAll@ does all of them
-
-\begin{code}
-genGenericBinds :: SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
-genGenericBinds _ tc = (mkBindsRep tc, [ {- No DerivAuxBinds -} ])
-
-genGenericRepExtras :: TyCon -> TcM (MetaTyCons, TyCon)
-genGenericRepExtras tc =
-  do  uniqS <- newUniqueSupply
-      let
-        -- Uniques for everyone
-        (uniqD:uniqs) = uniqsFromSupply uniqS
-        (uniqsC,us) = splitAt (length tc_cons) uniqs
-        uniqsS :: [[Unique]] -- Unique supply for the S datatypes
-        uniqsS = mkUniqsS tc_arits us
-        mkUniqsS []    _  = []
-        mkUniqsS (n:t) us = case splitAt n us of
-                              (us1,us2) -> us1 : mkUniqsS t us2
-
-        tc_name   = tyConName tc
-        tc_cons   = tyConDataCons tc
-        tc_arits  = map dataConSourceArity tc_cons
-        
-        tc_occ    = nameOccName tc_name
-        d_occ     = mkGenD tc_occ
-        c_occ m   = mkGenC tc_occ m
-        s_occ m n = mkGenS tc_occ m n
-        mod_name  = nameModule (tyConName tc)
-        d_name    = mkExternalName uniqD mod_name d_occ wiredInSrcSpan
-        c_names   = [ mkExternalName u mod_name (c_occ m) wiredInSrcSpan
-                      | (u,m) <- zip uniqsC [0..] ]
-        s_names   = [ [ mkExternalName u mod_name (s_occ m n) wiredInSrcSpan 
-                        | (u,n) <- zip us [0..] ] | (us,m) <- zip uniqsS [0..] ]
-        
-        mkTyCon name = ASSERT( isExternalName name )
-                         buildAlgTyCon name [] [] mkAbstractTyConRhs
-                           NonRecursive False NoParentTyCon Nothing
-
-      metaDTyCon  <- mkTyCon d_name
-      metaCTyCons <- sequence [ mkTyCon c_name | c_name <- c_names ]
-      metaSTyCons <- mapM sequence 
-                       [ [ mkTyCon s_name 
-                         | s_name <- s_namesC ] | s_namesC <- s_names ]
-
-      let metaDts = MetaTyCons metaDTyCon metaCTyCons metaSTyCons
-  
-      rep0_tycon <- tc_mkRepTyCon tc metaDts
-      
-      -- pprTrace "rep0" (ppr rep0_tycon) $
-      return (metaDts, rep0_tycon)
-{-
-genGenericAll :: TyCon
-                  -> TcM ((InstInfo RdrName, DerivAuxBinds), MetaTyCons, TyCon)
-genGenericAll tc =
-  do  (metaDts, rep0_tycon)     <- genGenericRepExtras tc
-      clas                      <- tcLookupClass genClassName
-      dfun_name                 <- new_dfun_name clas tc
-      let
-        mkInstRep = (InstInfo { iSpec = inst, iBinds = binds }
-                               , [ {- No DerivAuxBinds -} ])
-        inst  = mkLocalInstance dfun NoOverlap
-        binds = VanillaInst (mkBindsRep tc) [] False
-
-        tvs   = tyConTyVars tc
-        tc_ty = mkTyConApp tc (mkTyVarTys tvs)
-        
-        dfun  = mkDictFunId dfun_name (tyConTyVars tc) [] clas [tc_ty]
-      return (mkInstRep, metaDts, rep0_tycon)
--}
-genDtMeta :: (TyCon, MetaTyCons) -> TcM [(InstInfo RdrName, DerivAuxBinds)]
-genDtMeta (tc,metaDts) =
-  do  dflags <- getDOpts
-      dClas <- tcLookupClass datatypeClassName
-      d_dfun_name <- new_dfun_name dClas tc
-      cClas <- tcLookupClass constructorClassName
-      c_dfun_names <- sequence [ new_dfun_name cClas tc | _ <- metaC metaDts ]
-      sClas <- tcLookupClass selectorClassName
-      s_dfun_names <- sequence (map sequence [ [ new_dfun_name sClas tc 
-                                               | _ <- x ] 
-                                             | x <- metaS metaDts ])
-      fix_env <- getFixityEnv
-
-      let
-        safeOverlap = safeLanguageOn dflags
-        (dBinds,cBinds,sBinds) = mkBindsMetaD fix_env tc
-        
-        -- Datatype
-        d_metaTycon = metaD metaDts
-        d_inst = mkLocalInstance d_dfun $ NoOverlap safeOverlap
-        d_binds = VanillaInst dBinds [] False
-        d_dfun  = mkDictFunId d_dfun_name (tyConTyVars tc) [] dClas 
-                    [ mkTyConTy d_metaTycon ]
-        d_mkInst = (InstInfo { iSpec = d_inst, iBinds = d_binds }, [])
-        
-        -- Constructor
-        c_metaTycons = metaC metaDts
-        c_insts = [ mkLocalInstance (c_dfun c ds) $ NoOverlap safeOverlap
-                  | (c, ds) <- myZip1 c_metaTycons c_dfun_names ]
-        c_binds = [ VanillaInst c [] False | c <- cBinds ]
-        c_dfun c dfun_name = mkDictFunId dfun_name (tyConTyVars tc) [] cClas 
-                               [ mkTyConTy c ]
-        c_mkInst = [ (InstInfo { iSpec = is, iBinds = bs }, []) 
-                   | (is,bs) <- myZip1 c_insts c_binds ]
-        
-        -- Selector
-        s_metaTycons = metaS metaDts
-        s_insts = map (map (\(s,ds) -> mkLocalInstance (s_dfun s ds) $
-                                                  NoOverlap safeOverlap))
-                    (myZip2 s_metaTycons s_dfun_names)
-        s_binds = [ [ VanillaInst s [] False | s <- ss ] | ss <- sBinds ]
-        s_dfun s dfun_name = mkDictFunId dfun_name (tyConTyVars tc) [] sClas
-                               [ mkTyConTy s ]
-        s_mkInst = map (map (\(is,bs) -> (InstInfo {iSpec=is, iBinds=bs}, [])))
-                     (myZip2 s_insts s_binds)
-       
-        myZip1 :: [a] -> [b] -> [(a,b)]
-        myZip1 l1 l2 = ASSERT (length l1 == length l2) zip l1 l2
-        
-        myZip2 :: [[a]] -> [[b]] -> [[(a,b)]]
-        myZip2 l1 l2 =
-          ASSERT (and (zipWith (>=) (map length l1) (map length l2)))
-            [ zip x1 x2 | (x1,x2) <- zip l1 l2 ]
-        
-      return (d_mkInst : c_mkInst ++ concat s_mkInst)
-\end{code}
-
 
 %************************************************************************
 %*									*
@@ -1720,12 +1529,12 @@ derivingEtaErr cls cls_tys inst_ty
 typeFamilyPapErr :: TyCon -> Class -> [Type] -> Type -> Message
 typeFamilyPapErr tc cls cls_tys inst_ty
   = hang (ptext (sLit "Derived instance") <+> quotes (pprClassPred cls (cls_tys ++ [inst_ty])))
-       2 (ptext (sLit "requires illegal partial application of data type family") <+> ppr tc) 
+       2 (ptext (sLit "requires illegal partial application of data type family") <+> ppr tc)
 
 derivingThingErr :: Bool -> Class -> [Type] -> Type -> Message -> Message
 derivingThingErr newtype_deriving clas tys ty why
   = sep [(hang (ptext (sLit "Can't make a derived instance of"))
-	     2 (quotes (ppr pred)) 
+	     2 (quotes (ppr pred))
           $$ nest 2 extra) <> colon,
 	 nest 2 why]
   where
@@ -1739,16 +1548,10 @@ derivingHiddenErr tc
        2 (ptext (sLit "so you cannot derive an instance for it"))
 
 standaloneCtxt :: LHsType Name -> SDoc
-standaloneCtxt ty = hang (ptext (sLit "In the stand-alone deriving instance for")) 
+standaloneCtxt ty = hang (ptext (sLit "In the stand-alone deriving instance for"))
 		       2 (quotes (ppr ty))
 
 derivInstCtxt :: PredType -> Message
 derivInstCtxt pred
   = ptext (sLit "When deriving the instance for") <+> parens (ppr pred)
-
-badDerivedPred :: PredType -> Message
-badDerivedPred pred
-  = vcat [ptext (sLit "Can't derive instances where the instance context mentions"),
-	  ptext (sLit "type variables that are not data type parameters"),
-	  nest 2 (ptext (sLit "Offending constraint:") <+> ppr pred)]
 \end{code}

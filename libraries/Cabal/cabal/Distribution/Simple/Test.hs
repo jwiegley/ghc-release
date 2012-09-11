@@ -63,7 +63,8 @@ import qualified Distribution.PackageDescription as PD
 import Distribution.Simple.Build.PathsModule ( pkgPathEnvVar )
 import Distribution.Simple.BuildPaths ( exeExtension )
 import Distribution.Simple.Compiler ( Compiler(..), CompilerId )
-import Distribution.Simple.Hpc ( doHpcMarkup, findTixFiles, tixDir )
+import Distribution.Simple.Hpc
+    ( markupPackage, markupTest, tixDir, tixFilePath )
 import Distribution.Simple.InstallDirs
     ( fromPathTemplate, initialPathTemplateEnv, PathTemplateVariable(..)
     , substPathTemplate , toPathTemplate, PathTemplate )
@@ -82,8 +83,9 @@ import Control.Monad ( when, liftM, unless, filterM )
 import Data.Char ( toUpper )
 import Data.Monoid ( mempty )
 import System.Directory
-    ( createDirectoryIfMissing, doesFileExist, getCurrentDirectory
-    , removeFile, getDirectoryContents )
+    ( createDirectoryIfMissing, doesDirectoryExist, doesFileExist
+    , getCurrentDirectory, getDirectoryContents, removeDirectoryRecursive
+    , removeFile )
 import System.Environment ( getEnvironment )
 import System.Exit ( ExitCode(..), exitFailure, exitWith )
 import System.FilePath ( (</>), (<.>) )
@@ -168,30 +170,35 @@ testController flags pkg_descr lbi suite preTest cmd postTest logNamer = do
     let distPref = fromFlag $ testDistPref flags
         verbosity = fromFlag $ testVerbosity flags
         testLogDir = distPref </> "test"
-        optionTemplates = fromFlag $ testOptions flags
-        options = map (testOption pkg_descr lbi suite) optionTemplates
+        options = map (testOption pkg_descr lbi suite) $ testOptions flags
 
     pwd <- getCurrentDirectory
     existingEnv <- getEnvironment
     let dataDirPath = pwd </> PD.dataDir pkg_descr
         shellEnv = Just $ (pkgPathEnvVar pkg_descr "datadir", dataDirPath)
-                        : ("HPCTIXDIR", pwd </> tixDir distPref suite)
+                        : ("HPCTIXFILE", (</>) pwd
+                            $ tixFilePath distPref $ PD.testName suite)
                         : existingEnv
 
     bracket (openCabalTemp testLogDir) deleteIfExists $ \tempLog ->
         bracket (openCabalTemp testLogDir) deleteIfExists $ \tempInput -> do
 
-            -- Create directory for HPC files.
-            createDirectoryIfMissing True $ tixDir distPref suite
+            -- Check that the test executable exists.
+            exists <- doesFileExist cmd
+            unless exists $ die $ "Error: Could not find test program \"" ++ cmd
+                                  ++ "\". Did you build the package first?"
 
             -- Remove old .tix files if appropriate.
-            tixFiles <- findTixFiles distPref suite
-            unless (fromFlag $ testKeepTix flags)
-                $ mapM_ deleteIfExists tixFiles
+            unless (fromFlag $ testKeepTix flags) $ do
+                let tDir = tixDir distPref $ PD.testName suite
+                exists <- doesDirectoryExist tDir
+                when exists $ removeDirectoryRecursive tDir
+
+            -- Create directory for HPC files.
+            createDirectoryIfMissing True $ tixDir distPref $ PD.testName suite
 
             -- Write summary notices indicating start of test suite
             notice verbosity $ summarizeSuiteStart $ PD.testName suite
-            appendFile tempLog $ summarizeSuiteStart $ PD.testName suite
 
             -- Prepare standard input for test executable
             appendFile tempInput $ preTest tempInput
@@ -207,18 +214,21 @@ testController flags pkg_descr lbi suite preTest cmd postTest logNamer = do
 
             -- Generate TestSuiteLog from executable exit code and a machine-
             -- readable test log
-            suiteLog <- readFile tempInput >>= return . postTest exit
+            suiteLog <- fmap (postTest exit $!) $ readFile tempInput
 
             -- Generate final log file name
             let finalLogName = testLogDir </> logNamer suiteLog
                 suiteLog' = suiteLog { logFile = finalLogName }
 
-            -- Write summary notice to log file indicating end of test suite
-            appendFile tempLog $ summarizeSuiteFinish suiteLog'
+            -- Write summary notice to log file indicating start of test suite
+            appendFile (logFile suiteLog') $ summarizeSuiteStart $ PD.testName suite
 
             -- Append contents of temporary log file to the final human-
             -- readable log file
             readFile tempLog >>= appendFile (logFile suiteLog')
+
+            -- Write end-of-suite summary notice to log file
+            appendFile (logFile suiteLog') $ summarizeSuiteFinish suiteLog'
 
             -- Show the contents of the human-readable log file on the terminal
             -- if there is a failure and/or detailed output is requested
@@ -226,13 +236,14 @@ testController flags pkg_descr lbi suite preTest cmd postTest logNamer = do
                 whenPrinting = when $ (details > Never)
                     && (not (suitePassed suiteLog) || details == Always)
                     && verbosity >= normal
-            whenPrinting $ readFile (logFile suiteLog') >>=
-                putStr . unlines . map (">>> " ++) . lines
+            whenPrinting $ readFile tempLog >>=
+                putStr . unlines . lines
 
             -- Write summary notice to terminal indicating end of test suite
             notice verbosity $ summarizeSuiteFinish suiteLog'
 
-            doHpcMarkup verbosity distPref (display $ PD.package pkg_descr) suite
+            markupTest verbosity lbi distPref
+                (display $ PD.package pkg_descr) suite
 
             return suiteLog'
     where
@@ -343,6 +354,10 @@ test pkg_descr lbi flags = do
             $ packageLogPath machineTemplate pkg_descr lbi
     allOk <- summarizePackage verbosity packageLog
     writeFile packageLogFile $ show packageLog
+
+    markupPackage verbosity lbi distPref (display $ PD.package pkg_descr)
+        $ map fst testsToRun
+
     unless allOk exitFailure
 
 -- | Print a summary to the console after all test suites have been run

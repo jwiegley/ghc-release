@@ -31,12 +31,14 @@
       the PIC base register when needed.
     - MachCodeGen calls cmmMakeDynamicReference whenever it uses a CLabel
       that wasn't in the original Cmm code (e.g. floating point literals).
-  + The Mangler
-    - The mangler converts absolure refs to relative refs in info tables
-    - Symbol pointers, stub code and PIC calculations that are generated
-      by GCC are left intact by the mangler (so far only on ppc-darwin
-      and ppc-linux).
 -}
+
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
 
 module PIC (
         cmmMakeDynamicReference,
@@ -225,7 +227,7 @@ howToAccessLabel dflags _ OSMinGW32 _ lbl
 	
 	-- If the target symbol is in another PE we need to access it via the
 	--	appropriate __imp_SYMBOL pointer.
-	| labelDynamic (thisPackage dflags) lbl	
+	| labelDynamic dflags (thisPackage dflags) lbl	
 	= AccessViaSymbolPtr
 
 	-- Target symbol is in the same PE as the caller, so just access it directly.
@@ -243,7 +245,7 @@ howToAccessLabel dflags _ OSMinGW32 _ lbl
 --
 howToAccessLabel dflags arch OSDarwin DataReference lbl
 	-- data access to a dynamic library goes via a symbol pointer
-	| labelDynamic (thisPackage dflags) lbl 
+	| labelDynamic dflags (thisPackage dflags) lbl 
 	= AccessViaSymbolPtr
 
 	-- when generating PIC code, all cross-module data references must
@@ -267,7 +269,7 @@ howToAccessLabel dflags arch OSDarwin JumpReference lbl
 	-- stack alignment is only right for regular calls.
 	-- Therefore, we have to go via a symbol pointer:
 	| arch == ArchX86 || arch == ArchX86_64
-	, labelDynamic (thisPackage dflags) lbl
+	, labelDynamic dflags (thisPackage dflags) lbl
 	= AccessViaSymbolPtr
 	    
 
@@ -276,7 +278,7 @@ howToAccessLabel dflags arch OSDarwin _ lbl
 	-- not needed on x86_64 because Apple's new linker, ld64, generates
 	-- them automatically.
 	| arch /= ArchX86_64
-	, labelDynamic (thisPackage dflags) lbl
+	, labelDynamic dflags (thisPackage dflags) lbl
 	= AccessViaStub
 
 	| otherwise
@@ -313,7 +315,7 @@ howToAccessLabel dflags arch os DataReference lbl
 	| osElfTarget os
 	= case () of
 	    -- A dynamic label needs to be accessed via a symbol pointer.
-          _ | labelDynamic (thisPackage dflags) lbl 
+          _ | labelDynamic dflags (thisPackage dflags) lbl 
 	    -> AccessViaSymbolPtr
 
  	    -- For PowerPC32 -fPIC, we have to access even static data
@@ -341,17 +343,17 @@ howToAccessLabel dflags arch os DataReference lbl
 
 howToAccessLabel dflags arch os CallReference lbl
 	| osElfTarget os
-	, labelDynamic (thisPackage dflags) lbl && not opt_PIC
+	, labelDynamic dflags (thisPackage dflags) lbl && not opt_PIC
 	= AccessDirectly
 
 	| osElfTarget os
 	, arch /= ArchX86
-	, labelDynamic (thisPackage dflags) lbl && opt_PIC
+	, labelDynamic dflags (thisPackage dflags) lbl && opt_PIC
 	= AccessViaStub
 
 howToAccessLabel dflags _ os _ lbl
 	| osElfTarget os
-	= if labelDynamic (thisPackage dflags) lbl 
+	= if labelDynamic dflags (thisPackage dflags) lbl 
 	    then AccessViaSymbolPtr
 	    else AccessDirectly
 
@@ -373,7 +375,7 @@ picRelative :: Arch -> OS -> CLabel -> CmmLit
 
 -- Darwin, but not x86_64:
 -- The PIC base register points to the PIC base label at the beginning
--- of the current CmmTop. We just have to use a label difference to
+-- of the current CmmDecl. We just have to use a label difference to
 -- get the offset.
 -- We have already made sure that all labels that are not from the current
 -- module are accessed indirectly ('as' can't calculate differences between
@@ -427,9 +429,9 @@ asmSDoc d
 	= Outputable.withPprStyleDoc 
 		(Outputable.mkCodeStyle Outputable.AsmStyle) d
 
-pprCLabel_asm :: CLabel -> Doc
-pprCLabel_asm l 
-	= asmSDoc (pprCLabel l)
+pprCLabel_asm :: Platform -> CLabel -> Doc
+pprCLabel_asm platform l
+	= asmSDoc (pprCLabel platform l)
 
 
 needImportedSymbols :: Arch -> OS -> Bool
@@ -509,21 +511,21 @@ pprGotDeclaration _ _
 -- Whenever you change something in this assembler output, make sure
 -- the splitter in driver/split/ghc-split.lprl recognizes the new output
 
-pprImportedSymbol :: Arch -> OS -> CLabel -> Doc
-pprImportedSymbol ArchPPC OSDarwin importedLbl
+pprImportedSymbol :: Platform -> CLabel -> Doc
+pprImportedSymbol platform@(Platform { platformArch = ArchPPC, platformOS = OSDarwin }) importedLbl
 	| Just (CodeStub, lbl) <- dynamicLinkerLabelInfo importedLbl
 	= case opt_PIC of
            False ->
             vcat [
                 ptext (sLit ".symbol_stub"),
-                ptext (sLit "L") <> pprCLabel_asm lbl <> ptext (sLit "$stub:"),
-                    ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm lbl,
-                    ptext (sLit "\tlis r11,ha16(L") <> pprCLabel_asm lbl
+                ptext (sLit "L") <> pprCLabel_asm platform lbl <> ptext (sLit "$stub:"),
+                    ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm platform lbl,
+                    ptext (sLit "\tlis r11,ha16(L") <> pprCLabel_asm platform lbl
                         <> ptext (sLit "$lazy_ptr)"),
-                    ptext (sLit "\tlwz r12,lo16(L") <> pprCLabel_asm lbl
+                    ptext (sLit "\tlwz r12,lo16(L") <> pprCLabel_asm platform lbl
                         <> ptext (sLit "$lazy_ptr)(r11)"),
                     ptext (sLit "\tmtctr r12"),
-                    ptext (sLit "\taddi r11,r11,lo16(L") <> pprCLabel_asm lbl
+                    ptext (sLit "\taddi r11,r11,lo16(L") <> pprCLabel_asm platform lbl
                         <> ptext (sLit "$lazy_ptr)"),
                     ptext (sLit "\tbctr")
             ]
@@ -532,51 +534,51 @@ pprImportedSymbol ArchPPC OSDarwin importedLbl
                 ptext (sLit ".section __TEXT,__picsymbolstub1,")
                   <> ptext (sLit "symbol_stubs,pure_instructions,32"),
                 ptext (sLit "\t.align 2"),
-                ptext (sLit "L") <> pprCLabel_asm lbl <> ptext (sLit "$stub:"),
-                    ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm lbl,
+                ptext (sLit "L") <> pprCLabel_asm platform lbl <> ptext (sLit "$stub:"),
+                    ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm platform lbl,
                     ptext (sLit "\tmflr r0"),
-                    ptext (sLit "\tbcl 20,31,L0$") <> pprCLabel_asm lbl,
-                ptext (sLit "L0$") <> pprCLabel_asm lbl <> char ':',
+                    ptext (sLit "\tbcl 20,31,L0$") <> pprCLabel_asm platform lbl,
+                ptext (sLit "L0$") <> pprCLabel_asm platform lbl <> char ':',
                     ptext (sLit "\tmflr r11"),
-                    ptext (sLit "\taddis r11,r11,ha16(L") <> pprCLabel_asm lbl
-                        <> ptext (sLit "$lazy_ptr-L0$") <> pprCLabel_asm lbl <> char ')',
+                    ptext (sLit "\taddis r11,r11,ha16(L") <> pprCLabel_asm platform lbl
+                        <> ptext (sLit "$lazy_ptr-L0$") <> pprCLabel_asm platform lbl <> char ')',
                     ptext (sLit "\tmtlr r0"),
-                    ptext (sLit "\tlwzu r12,lo16(L") <> pprCLabel_asm lbl
-                        <> ptext (sLit "$lazy_ptr-L0$") <> pprCLabel_asm lbl
+                    ptext (sLit "\tlwzu r12,lo16(L") <> pprCLabel_asm platform lbl
+                        <> ptext (sLit "$lazy_ptr-L0$") <> pprCLabel_asm platform lbl
                         <> ptext (sLit ")(r11)"),
                     ptext (sLit "\tmtctr r12"),
                     ptext (sLit "\tbctr")
             ]
 	  $+$ vcat [
          	ptext (sLit ".lazy_symbol_pointer"),
-	        ptext (sLit "L") <> pprCLabel_asm lbl <> ptext (sLit "$lazy_ptr:"),
-		ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm lbl,
+	        ptext (sLit "L") <> pprCLabel_asm platform lbl <> ptext (sLit "$lazy_ptr:"),
+		ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm platform lbl,
 	        ptext (sLit "\t.long dyld_stub_binding_helper")]
 
 	| Just (SymbolPtr, lbl) <- dynamicLinkerLabelInfo importedLbl
 	= vcat [
 	        ptext (sLit ".non_lazy_symbol_pointer"),
-	        char 'L' <> pprCLabel_asm lbl <> ptext (sLit "$non_lazy_ptr:"),
-		ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm lbl,
+	        char 'L' <> pprCLabel_asm platform lbl <> ptext (sLit "$non_lazy_ptr:"),
+		ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm platform lbl,
 		ptext (sLit "\t.long\t0")]
 
 	| otherwise 
 	= empty
 
 		
-pprImportedSymbol ArchX86 OSDarwin importedLbl
+pprImportedSymbol platform@(Platform { platformArch = ArchX86, platformOS = OSDarwin }) importedLbl
 	| Just (CodeStub, lbl) <- dynamicLinkerLabelInfo importedLbl
 	= case opt_PIC of
            False ->
             vcat [
                 ptext (sLit ".symbol_stub"),
-                ptext (sLit "L") <> pprCLabel_asm lbl <> ptext (sLit "$stub:"),
-                    ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm lbl,
-                    ptext (sLit "\tjmp *L") <> pprCLabel_asm lbl
+                ptext (sLit "L") <> pprCLabel_asm platform lbl <> ptext (sLit "$stub:"),
+                    ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm platform lbl,
+                    ptext (sLit "\tjmp *L") <> pprCLabel_asm platform lbl
                         <> ptext (sLit "$lazy_ptr"),
-                ptext (sLit "L") <> pprCLabel_asm lbl
+                ptext (sLit "L") <> pprCLabel_asm platform lbl
                     <> ptext (sLit "$stub_binder:"),
-                    ptext (sLit "\tpushl $L") <> pprCLabel_asm lbl
+                    ptext (sLit "\tpushl $L") <> pprCLabel_asm platform lbl
                         <> ptext (sLit "$lazy_ptr"),
                     ptext (sLit "\tjmp dyld_stub_binding_helper")
             ]
@@ -584,16 +586,16 @@ pprImportedSymbol ArchX86 OSDarwin importedLbl
             vcat [
                 ptext (sLit ".section __TEXT,__picsymbolstub2,")
                     <> ptext (sLit "symbol_stubs,pure_instructions,25"),
-                ptext (sLit "L") <> pprCLabel_asm lbl <> ptext (sLit "$stub:"),
-                    ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm lbl,
+                ptext (sLit "L") <> pprCLabel_asm platform lbl <> ptext (sLit "$stub:"),
+                    ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm platform lbl,
                     ptext (sLit "\tcall ___i686.get_pc_thunk.ax"),
                 ptext (sLit "1:"),
-                    ptext (sLit "\tmovl L") <> pprCLabel_asm lbl
+                    ptext (sLit "\tmovl L") <> pprCLabel_asm platform lbl
                         <> ptext (sLit "$lazy_ptr-1b(%eax),%edx"),
                     ptext (sLit "\tjmp *%edx"),
-                ptext (sLit "L") <> pprCLabel_asm lbl
+                ptext (sLit "L") <> pprCLabel_asm platform lbl
                     <> ptext (sLit "$stub_binder:"),
-                    ptext (sLit "\tlea L") <> pprCLabel_asm lbl
+                    ptext (sLit "\tlea L") <> pprCLabel_asm platform lbl
                         <> ptext (sLit "$lazy_ptr-1b(%eax),%eax"),
                     ptext (sLit "\tpushl %eax"),
                     ptext (sLit "\tjmp dyld_stub_binding_helper")
@@ -601,23 +603,23 @@ pprImportedSymbol ArchX86 OSDarwin importedLbl
 	  $+$ vcat [        ptext (sLit ".section __DATA, __la_sym_ptr")
                     <> (if opt_PIC then int 2 else int 3)
                     <> ptext (sLit ",lazy_symbol_pointers"),
-	        ptext (sLit "L") <> pprCLabel_asm lbl <> ptext (sLit "$lazy_ptr:"),
-	            ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm lbl,
-	            ptext (sLit "\t.long L") <> pprCLabel_asm lbl
+	        ptext (sLit "L") <> pprCLabel_asm platform lbl <> ptext (sLit "$lazy_ptr:"),
+	            ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm platform lbl,
+	            ptext (sLit "\t.long L") <> pprCLabel_asm platform lbl
                     <> ptext (sLit "$stub_binder")]
 
 	| Just (SymbolPtr, lbl) <- dynamicLinkerLabelInfo importedLbl
 	= vcat [
 	        ptext (sLit ".non_lazy_symbol_pointer"),
-	        char 'L' <> pprCLabel_asm lbl <> ptext (sLit "$non_lazy_ptr:"),
-		ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm lbl,
+	        char 'L' <> pprCLabel_asm platform lbl <> ptext (sLit "$non_lazy_ptr:"),
+		ptext (sLit "\t.indirect_symbol") <+> pprCLabel_asm platform lbl,
 		ptext (sLit "\t.long\t0")]
 
 	| otherwise 
 	= empty
 
 
-pprImportedSymbol _ OSDarwin _
+pprImportedSymbol (Platform { platformOS = OSDarwin }) _
 	= empty
 	
 
@@ -650,12 +652,12 @@ pprImportedSymbol _ OSDarwin _
 -- the NCG will keep track of all DynamicLinkerLabels it uses
 -- and output each of them using pprImportedSymbol.
 
-pprImportedSymbol ArchPPC_64 os _
-	| osElfTarget os
+pprImportedSymbol platform@(Platform { platformArch = ArchPPC_64 }) _
+	| osElfTarget (platformOS platform)
 	= empty
 
-pprImportedSymbol _ os importedLbl
-	| osElfTarget os
+pprImportedSymbol platform importedLbl
+	| osElfTarget (platformOS platform)
 	= case dynamicLinkerLabelInfo importedLbl of
 	    Just (SymbolPtr, lbl)
 	      -> let symbolSize = case wordWidth of
@@ -665,13 +667,13 @@ pprImportedSymbol _ os importedLbl
 
 	         in vcat [
 	              ptext (sLit ".section \".got2\", \"aw\""),
-	              ptext (sLit ".LC_") <> pprCLabel_asm lbl <> char ':',
-	              ptext symbolSize <+> pprCLabel_asm lbl ]
+	              ptext (sLit ".LC_") <> pprCLabel_asm platform lbl <> char ':',
+	              ptext symbolSize <+> pprCLabel_asm platform lbl ]
 
 	    -- PLT code stubs are generated automatically by the dynamic linker.
 	    _ -> empty
 
-pprImportedSymbol _ _ _
+pprImportedSymbol _ _
 	= panic "PIC.pprImportedSymbol: no match"
 
 --------------------------------------------------------------------------------
@@ -681,7 +683,7 @@ pprImportedSymbol _ _ _
 -- PIC base register. It adds the appropriate instructions to the
 -- top of the CmmProc.
 
--- It is assumed that the first NatCmmTop in the input list is a Proc
+-- It is assumed that the first NatCmmDecl in the input list is a Proc
 -- and the rest are CmmDatas.
 
 -- Darwin is simple: just fetch the address of a local label.
@@ -709,8 +711,8 @@ pprImportedSymbol _ _ _
 
 initializePicBase_ppc 
 	:: Arch -> OS -> Reg 
-	-> [NatCmmTop CmmStatics PPC.Instr] 
-	-> NatM [NatCmmTop CmmStatics PPC.Instr]
+	-> [NatCmmDecl CmmStatics PPC.Instr] 
+	-> NatM [NatCmmDecl CmmStatics PPC.Instr]
 
 initializePicBase_ppc ArchPPC os picReg
     (CmmProc info lab (ListGraph blocks) : statics)
@@ -761,8 +763,8 @@ initializePicBase_ppc _ _ _ _
 
 initializePicBase_x86
 	:: Arch -> OS -> Reg 
-	-> [NatCmmTop (Alignment, CmmStatics) X86.Instr] 
-	-> NatM [NatCmmTop (Alignment, CmmStatics) X86.Instr]
+	-> [NatCmmDecl (Alignment, CmmStatics) X86.Instr] 
+	-> NatM [NatCmmDecl (Alignment, CmmStatics) X86.Instr]
 
 initializePicBase_x86 ArchX86 os picReg 
 	(CmmProc info lab (ListGraph blocks) : statics)

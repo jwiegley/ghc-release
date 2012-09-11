@@ -1,3 +1,6 @@
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Safe #-}
+#endif
 -- |
 -- Maintainer  : judah.jacobson@gmail.com
 -- Stability   : experimental
@@ -33,6 +36,8 @@ termColors = tiGetNum "colors"
 
 data Color = Black | Red | Green | Yellow | Blue | Magenta | Cyan
             | White | ColorNumber Int
+        deriving (Show,Eq,Ord)
+
 
 
 colorIntA, colorInt :: Color -> Int

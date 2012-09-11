@@ -1,4 +1,11 @@
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 -- | Expand out synthetic instructions into single machine instrs.
 module SPARC.CodeGen.Expand (
 	expandTop
@@ -21,7 +28,7 @@ import Outputable
 import OrdList
 
 -- | Expand out synthetic instructions in this top level thing
-expandTop :: NatCmmTop CmmStatics Instr -> NatCmmTop CmmStatics Instr
+expandTop :: NatCmmDecl CmmStatics Instr -> NatCmmDecl CmmStatics Instr
 expandTop top@(CmmData{})
 	= top
 

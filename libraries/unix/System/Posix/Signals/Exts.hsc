@@ -1,4 +1,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Trustworthy #-}
+#endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Posix.Signals.Exts
@@ -27,7 +30,7 @@ module System.Posix.Signals.Exts (
 
   ) where
 
-import Foreign.C ( CInt )
+import Foreign.C
 import System.Posix.Signals
 
 #ifdef __HUGS__

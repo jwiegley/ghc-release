@@ -12,29 +12,35 @@ Much of the rationale for these things is in the ``details'' part of
 the STG paper.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module ClosureInfo (
 	ClosureInfo(..), LambdaFormInfo(..),	-- would be abstract but
 	StandardFormInfo(..),			-- mkCmmInfo looks inside
         SMRep,
 
-	ArgDescr(..), Liveness(..), 
+	ArgDescr(..), Liveness, 
 	C_SRT(..), needsSRT,
 
 	mkLFThunk, mkLFReEntrant, mkConLFInfo, mkSelectorLFInfo,
 	mkApLFInfo, mkLFImported, mkLFArgument, mkLFLetNoEscape,
 
 	mkClosureInfo, mkConInfo, maybeIsLFCon,
+        closureSize,
 
-	closureSize, closureNonHdrSize,
-	closureGoodStuffSize, closurePtrsSize,
-	slopSize, 
+	ConTagZ, dataConTagZ,
 
 	infoTableLabelFromCI, entryLabelFromCI,
 	closureLabelFromCI,
 	isLFThunk, closureUpdReqd,
 	closureNeedsUpdSpace, closureIsThunk,
 	closureSingleEntry, closureReEntrant, isConstrClosure_maybe,
-	closureFunInfo,	isStandardFormThunk, isKnownFun,
+        closureFunInfo, isKnownFun,
         funTag, funTagLFInfo, tagForArity, clHasCafRefs,
 
 	enterIdLabel, enterLocalIdLabel, enterReturnPtLabel,
@@ -45,7 +51,6 @@ module ClosureInfo (
 	blackHoleOnEntry,
 
 	staticClosureRequired,
-	getClosureType,
 
 	isToplevClosure,
 	closureValDescr, closureTypeDescr,	-- profiling
@@ -54,6 +59,17 @@ module ClosureInfo (
 	cafBlackHoleClosureInfo,
 
 	staticClosureNeedsLink,
+
+	-- CgRep and its functions
+	CgRep(..), nonVoidArg,
+	argMachRep, primRepToCgRep, 
+	isFollowableArg, isVoidArg, 
+	isFloatingArg, is64BitArg,
+	separateByPtrFollowness,
+	cgRepSizeW, cgRepSizeB,
+	retAddrSizeW,
+	typeCgRep, idCgRep, tyConCgRep, 
+
     ) where
 
 #include "../includes/MachDeps.h"
@@ -63,7 +79,7 @@ import StgSyn
 import SMRep
 
 import CLabel
-
+import Cmm
 import Unique
 import StaticFlags
 import Var
@@ -76,8 +92,8 @@ import TypeRep
 import TcType
 import TyCon
 import BasicTypes
-import FastString
 import Outputable
+import FastString
 import Constants
 import DynFlags
 \end{code}
@@ -109,7 +125,7 @@ data ClosureInfo
 	closureLFInfo :: !LambdaFormInfo, -- NOTE: not an LFCon (see below)
 	closureSMRep  :: !SMRep,	  -- representation used by storage mgr
 	closureSRT    :: !C_SRT,	  -- What SRT applies to this closure
-	closureType   :: !Type,		  -- Type of closure (ToDo: remove)
+        closureType   :: !Type,           -- Type of closure (ToDo: remove)
 	closureDescr  :: !String,	  -- closure description (for profiling)
 	closureInfLcl :: Bool             -- can the info pointer be a local symbol?
     }
@@ -120,21 +136,6 @@ data ClosureInfo
 	closureCon       :: !DataCon,
 	closureSMRep     :: !SMRep
     }
-
--- C_SRT is what StgSyn.SRT gets translated to... 
--- we add a label for the table, and expect only the 'offset/length' form
-
-data C_SRT = NoC_SRT
-	   | C_SRT !CLabel !WordOff !StgHalfWord {-bitmap or escape-}
-           deriving (Eq)
-
-needsSRT :: C_SRT -> Bool
-needsSRT NoC_SRT       = False
-needsSRT (C_SRT _ _ _) = True
-
-instance Outputable C_SRT where
-  ppr (NoC_SRT) = ptext (sLit "_no_srt_")
-  ppr (C_SRT label off bitmap) = parens (ppr label <> comma <> ppr off <> comma <> text (show bitmap))
 \end{code}
 
 %************************************************************************
@@ -186,33 +187,6 @@ data LambdaFormInfo
 			-- be in the heap, so we make a black hole to hold it.
 
 
--------------------------
--- An ArgDsecr describes the argument pattern of a function
-
-data ArgDescr
-  = ArgSpec		-- Fits one of the standard patterns
-	!StgHalfWord	-- RTS type identifier ARG_P, ARG_N, ...
-
-  | ArgGen	 	-- General case
-	Liveness	-- Details about the arguments
-
-
--------------------------
--- We represent liveness bitmaps as a Bitmap (whose internal
--- representation really is a bitmap).  These are pinned onto case return
--- vectors to indicate the state of the stack for the garbage collector.
--- 
--- In the compiled program, liveness bitmaps that fit inside a single
--- word (StgWord) are stored as a single word, while larger bitmaps are
--- stored as a pointer to an array of words. 
-
-data Liveness
-  = SmallLiveness	-- Liveness info that fits in one word
-	StgWord		-- Here's the bitmap
-
-  | BigLiveness		-- Liveness info witha a multi-word bitmap
-	CLabel		-- Label for the bitmap
-
 
 -------------------------
 -- StandardFormInfo tells whether this thunk has one of 
@@ -238,6 +212,148 @@ data StandardFormInfo
 	-- There are a few of these (for 1 <= n <= MAX_SPEC_AP_SIZE) pre-compiled
 	-- in the RTS to save space.
 	Int		-- Arity, n
+\end{code}
+
+
+%************************************************************************
+%*									*
+			CgRep
+%*									*
+%************************************************************************
+
+An CgRep is an abstraction of a Type which tells the code generator
+all it needs to know about the calling convention for arguments (and
+results) of that type.  In particular, the ArgReps of a function's
+arguments are used to decide which of the RTS's generic apply
+functions to call when applying an unknown function.
+
+It contains more information than the back-end data type MachRep,
+so one can easily convert from CgRep -> MachRep.  (Except that
+there's no MachRep for a VoidRep.)
+
+It distinguishes 
+	pointers from non-pointers (we sort the pointers together
+	when building closures)
+
+	void from other types: a void argument is different from no argument
+
+All 64-bit types map to the same CgRep, because they're passed in the
+same register, but a PtrArg is still different from an NonPtrArg
+because the function's entry convention has to take into account the
+pointer-hood of arguments for the purposes of describing the stack on
+entry to the garbage collector.
+
+\begin{code}
+data CgRep 
+  = VoidArg 	-- Void
+  | PtrArg 	-- Word-sized heap pointer, followed
+		-- by the garbage collector
+  | NonPtrArg 	-- Word-sized non-pointer
+		-- (including addresses not followed by GC)
+  | LongArg	-- 64-bit non-pointer
+  | FloatArg 	-- 32-bit float
+  | DoubleArg 	-- 64-bit float
+  deriving Eq
+
+instance Outputable CgRep where
+    ppr VoidArg   = ptext (sLit "V_")
+    ppr PtrArg    = ptext (sLit "P_")
+    ppr NonPtrArg = ptext (sLit "I_")
+    ppr LongArg   = ptext (sLit "L_")
+    ppr FloatArg  = ptext (sLit "F_")
+    ppr DoubleArg = ptext (sLit "D_")
+
+argMachRep :: CgRep -> CmmType
+argMachRep PtrArg    = gcWord
+argMachRep NonPtrArg = bWord
+argMachRep LongArg   = b64
+argMachRep FloatArg  = f32
+argMachRep DoubleArg = f64
+argMachRep VoidArg   = panic "argMachRep:VoidRep"
+
+primRepToCgRep :: PrimRep -> CgRep
+primRepToCgRep VoidRep    = VoidArg
+primRepToCgRep PtrRep     = PtrArg
+primRepToCgRep IntRep	  = NonPtrArg
+primRepToCgRep WordRep	  = NonPtrArg
+primRepToCgRep Int64Rep   = LongArg
+primRepToCgRep Word64Rep  = LongArg
+primRepToCgRep AddrRep    = NonPtrArg
+primRepToCgRep FloatRep   = FloatArg
+primRepToCgRep DoubleRep  = DoubleArg
+
+idCgRep :: Id -> CgRep
+idCgRep x = typeCgRep . idType $ x
+
+tyConCgRep :: TyCon -> CgRep
+tyConCgRep = primRepToCgRep . tyConPrimRep
+
+typeCgRep :: Type -> CgRep
+typeCgRep = primRepToCgRep . typePrimRep 
+\end{code}
+
+Whether or not the thing is a pointer that the garbage-collector
+should follow. Or, to put it another (less confusing) way, whether
+the object in question is a heap object. 
+
+Depending on the outcome, this predicate determines what stack
+the pointer/object possibly will have to be saved onto, and the
+computation of GC liveness info.
+
+\begin{code}
+isFollowableArg :: CgRep -> Bool  -- True <=> points to a heap object
+isFollowableArg PtrArg  = True
+isFollowableArg _       = False
+
+isVoidArg :: CgRep -> Bool
+isVoidArg VoidArg = True
+isVoidArg _       = False
+
+nonVoidArg :: CgRep -> Bool
+nonVoidArg VoidArg = False
+nonVoidArg _       = True
+
+-- isFloatingArg is used to distinguish @Double@ and @Float@ which
+-- cause inadvertent numeric conversions if you aren't jolly careful.
+-- See codeGen/CgCon:cgTopRhsCon.
+
+isFloatingArg :: CgRep -> Bool
+isFloatingArg DoubleArg = True
+isFloatingArg FloatArg  = True
+isFloatingArg _         = False
+
+is64BitArg :: CgRep -> Bool
+is64BitArg LongArg = True
+is64BitArg _       = False
+\end{code}
+
+\begin{code}
+separateByPtrFollowness :: [(CgRep,a)] -> ([(CgRep,a)], [(CgRep,a)])
+-- Returns (ptrs, non-ptrs)
+separateByPtrFollowness things
+  = sep_things things [] []
+    -- accumulating params for follow-able and don't-follow things...
+  where
+    sep_things []    	       bs us = (reverse bs, reverse us)
+    sep_things ((PtrArg,a):ts) bs us = sep_things ts ((PtrArg,a):bs) us
+    sep_things (t         :ts) bs us = sep_things ts bs		     (t:us)
+\end{code}
+
+\begin{code}
+cgRepSizeB :: CgRep -> ByteOff
+cgRepSizeB DoubleArg = dOUBLE_SIZE
+cgRepSizeB LongArg   = wORD64_SIZE
+cgRepSizeB VoidArg   = 0
+cgRepSizeB _         = wORD_SIZE
+
+cgRepSizeW :: CgRep -> ByteOff
+cgRepSizeW DoubleArg = dOUBLE_SIZE `quot` wORD_SIZE
+cgRepSizeW LongArg   = wORD64_SIZE `quot` wORD_SIZE
+cgRepSizeW VoidArg   = 0
+cgRepSizeW _         = 1
+
+retAddrSizeW :: WordOff
+retAddrSizeW = 1	-- One word
 \end{code}
 
 %************************************************************************
@@ -268,9 +384,9 @@ might_be_a_function :: Type -> Bool
 -- Return False only if we are *sure* it's a data type
 -- Look through newtypes etc as much as poss
 might_be_a_function ty
-  = case splitTyConApp_maybe (repType ty) of
-	Just (tc, _) -> not (isDataTyCon tc)
-	Nothing	     -> True
+  = case tyConAppTyCon_maybe (repType ty) of
+	Just tc -> not (isDataTyCon tc)
+	Nothing -> True
 \end{code}
 
 @mkConLFInfo@ is similar, for constructors.
@@ -320,6 +436,16 @@ isLFThunk LFBlackHole          = True
 isLFThunk _ = False
 \end{code}
 
+\begin{code}
+-- We keep the *zero-indexed* tag in the srt_len field of the info
+-- table of a data constructor.
+type ConTagZ = Int	-- A *zero-indexed* contructor tag
+
+dataConTagZ :: DataCon -> ConTagZ
+dataConTagZ con = dataConTag con - fIRST_TAG
+\end{code}
+
+
 %************************************************************************
 %*									*
 	Building ClosureInfos
@@ -348,7 +474,8 @@ mkClosureInfo is_static id lf_info tot_wds ptr_wds srt_info descr
 		    -- anything else gets eta expanded.
   where
     name   = idName id
-    sm_rep = chooseSMRep is_static lf_info tot_wds ptr_wds
+    sm_rep = mkHeapRep is_static ptr_wds nonptr_wds (lfClosureType lf_info)
+    nonptr_wds = tot_wds - ptr_wds
 
 mkConInfo :: Bool	-- Is static
 	  -> DataCon	
@@ -358,7 +485,9 @@ mkConInfo is_static data_con tot_wds ptr_wds
    = ConInfo {	closureSMRep = sm_rep,
 		closureCon = data_con }
   where
-    sm_rep = chooseSMRep is_static (mkConLFInfo data_con) tot_wds ptr_wds
+    sm_rep  = mkHeapRep is_static ptr_wds nonptr_wds (lfClosureType lf_info)
+    lf_info = mkConLFInfo data_con
+    nonptr_wds = tot_wds - ptr_wds
 \end{code}
 
 %************************************************************************
@@ -369,56 +498,10 @@ mkConInfo is_static data_con tot_wds ptr_wds
 
 \begin{code}
 closureSize :: ClosureInfo -> WordOff
-closureSize cl_info = hdr_size + closureNonHdrSize cl_info
-  where hdr_size  | closureIsThunk cl_info = thunkHdrSize
-  		  | otherwise      	   = fixedHdrSize
-	-- All thunks use thunkHdrSize, even if they are non-updatable.
-	-- this is because we don't have separate closure types for
-	-- updatable vs. non-updatable thunks, so the GC can't tell the
-	-- difference.  If we ever have significant numbers of non-
-	-- updatable thunks, it might be worth fixing this.
-
-closureNonHdrSize :: ClosureInfo -> WordOff
-closureNonHdrSize cl_info
-  = tot_wds + computeSlopSize tot_wds cl_info
-  where
-    tot_wds = closureGoodStuffSize cl_info
-
-closureGoodStuffSize :: ClosureInfo -> WordOff
-closureGoodStuffSize cl_info
-  = let (ptrs, nonptrs) = sizes_from_SMRep (closureSMRep cl_info)
-    in	ptrs + nonptrs
-
-closurePtrsSize :: ClosureInfo -> WordOff
-closurePtrsSize cl_info
-  = let (ptrs, _) = sizes_from_SMRep (closureSMRep cl_info)
-    in	ptrs
-
--- not exported:
-sizes_from_SMRep :: SMRep -> (WordOff,WordOff)
-sizes_from_SMRep (GenericRep _ ptrs nonptrs _)   = (ptrs, nonptrs)
-sizes_from_SMRep BlackHoleRep			 = (0, 0)
+closureSize cl_info = heapClosureSize (closureSMRep cl_info)
 \end{code}
 
-Computing slop size.  WARNING: this looks dodgy --- it has deep
-knowledge of what the storage manager does with the various
-representations...
-
-Slop Requirements: every thunk gets an extra padding word in the
-header, which takes the the updated value.
-
 \begin{code}
-slopSize :: ClosureInfo -> WordOff
-slopSize cl_info = computeSlopSize payload_size cl_info
-  where payload_size = closureGoodStuffSize cl_info
-
-computeSlopSize :: WordOff -> ClosureInfo -> WordOff
-computeSlopSize payload_size cl_info
-  = max 0 (minPayloadSize smrep updatable - payload_size)
-  where
-	smrep        = closureSMRep cl_info
-	updatable    = closureNeedsUpdSpace cl_info
-
 -- we leave space for an update if either (a) the closure is updatable
 -- or (b) it is a static thunk.  This is because a static thunk needs
 -- a static link field in a predictable place (after the slop), regardless
@@ -427,21 +510,6 @@ closureNeedsUpdSpace :: ClosureInfo -> Bool
 closureNeedsUpdSpace (ClosureInfo { closureLFInfo = 
 					LFThunk TopLevel _ _ _ _ }) = True
 closureNeedsUpdSpace cl_info = closureUpdReqd cl_info
-
-minPayloadSize :: SMRep -> Bool -> WordOff
-minPayloadSize smrep updatable
-  = case smrep of
-	BlackHoleRep		 		-> min_upd_size
-	GenericRep _ _ _ _      | updatable     -> min_upd_size
-	GenericRep True _ _ _                   -> 0 -- static
-	GenericRep False _ _ _                  -> mIN_PAYLOAD_SIZE
-          --       ^^^^^___ dynamic
-  where
-   min_upd_size =
-	ASSERT(mIN_PAYLOAD_SIZE <= sIZEOF_StgSMPThunkHeader)
-	0 	-- check that we already have enough
-		-- room for mIN_SIZE_NonUpdHeapObject,
-		-- due to the extra header word in SMP
 \end{code}
 
 %************************************************************************
@@ -451,33 +519,21 @@ minPayloadSize smrep updatable
 %************************************************************************
 
 \begin{code}
-chooseSMRep
-	:: Bool			-- True <=> static closure
-	-> LambdaFormInfo
-	-> WordOff -> WordOff	-- Tot wds, ptr wds
-	-> SMRep
+lfClosureType :: LambdaFormInfo -> ClosureTypeInfo
+lfClosureType (LFReEntrant _ arity _ argd) = Fun (fromIntegral arity) argd
+lfClosureType (LFCon con)                  = Constr (fromIntegral (dataConTagZ con))
+                                                    (dataConIdentity con)
+lfClosureType (LFThunk _ _ _ is_sel _) 	   = thunkClosureType is_sel
+lfClosureType _                 	   = panic "lfClosureType"
 
-chooseSMRep is_static lf_info tot_wds ptr_wds
-  = let
-	 nonptr_wds   = tot_wds - ptr_wds
-	 closure_type = getClosureType is_static ptr_wds lf_info
-    in
-    GenericRep is_static ptr_wds nonptr_wds closure_type	
+thunkClosureType :: StandardFormInfo -> ClosureTypeInfo
+thunkClosureType (SelectorThunk off) = ThunkSelector (fromIntegral off)
+thunkClosureType _                   = Thunk
 
 -- We *do* get non-updatable top-level thunks sometimes.  eg. f = g
 -- gets compiled to a jump to g (if g has non-zero arity), instead of
 -- messing around with update frames and PAPs.  We set the closure type
 -- to FUN_STATIC in this case.
-
-getClosureType :: Bool -> WordOff -> LambdaFormInfo -> ClosureType
-getClosureType is_static ptr_wds lf_info
-  = case lf_info of
-	LFCon _ | is_static && ptr_wds == 0	-> ConstrNoCaf
-		  | otherwise			-> Constr
-  	LFReEntrant _ _ _ _ 			-> Fun
-	LFThunk _ _ _ (SelectorThunk _) _ 	-> ThunkSelector
-	LFThunk _ _ _ _ _ 			-> Thunk
-	_ -> panic "getClosureType"
 \end{code}
 
 %************************************************************************
@@ -658,35 +714,19 @@ getCallMethod _ name _ (LFLetNoEscape arity) n_args
   | n_args == arity = DirectEntry (enterReturnPtLabel (nameUnique name)) arity
   | otherwise = pprPanic "let-no-escape: " (ppr name <+> ppr arity)
 
-blackHoleOnEntry :: DynFlags -> ClosureInfo -> Bool
--- Static closures are never themselves black-holed.
--- Updatable ones will be overwritten with a CAFList cell, which points to a 
--- black hole;
--- Single-entry ones have no fvs to plug, and we trust they don't form part 
--- of a loop.
 
-blackHoleOnEntry _ ConInfo{} = False
-blackHoleOnEntry dflags (ClosureInfo { closureLFInfo = lf_info, closureSMRep = rep })
-  | isStaticRep rep
+blackHoleOnEntry :: ClosureInfo -> Bool
+blackHoleOnEntry ConInfo{} = False
+blackHoleOnEntry cl_info
+  | isStaticRep (closureSMRep cl_info)
   = False	-- Never black-hole a static closure
 
   | otherwise
-  = case lf_info of
+  = case closureLFInfo cl_info of
 	LFReEntrant _ _ _ _	  -> False
-	LFLetNoEscape _		  -> False
-	LFThunk _ no_fvs updatable _ _
-	  -> if updatable
-	     then not opt_OmitBlackHoling
-	     else doingTickyProfiling dflags || not no_fvs
-                  -- the former to catch double entry,
-                  -- and the latter to plug space-leaks.  KSW/SDM 1999-04.
-
-	_ -> panic "blackHoleOnEntry"	-- Should never happen
-
-isStandardFormThunk :: LambdaFormInfo -> Bool
-isStandardFormThunk (LFThunk _ _ _ (SelectorThunk _) _) = True
-isStandardFormThunk (LFThunk _ _ _ (ApThunk _) _)	= True
-isStandardFormThunk _ 			= False
+        LFLetNoEscape _           -> False
+        LFThunk _ no_fvs _updatable _ _ -> not no_fvs -- to plug space-leaks.
+        _other -> panic "blackHoleOnEntry"      -- Should never happen
 
 isKnownFun :: LambdaFormInfo -> Bool
 isKnownFun (LFReEntrant _ _ _ _) = True
@@ -730,13 +770,8 @@ staticClosureNeedsLink :: ClosureInfo -> Bool
 -- of the SRT.
 staticClosureNeedsLink (ClosureInfo { closureSRT = srt })
   = needsSRT srt
-staticClosureNeedsLink (ConInfo { closureSMRep = sm_rep, closureCon = con })
-  = not (isNullaryRepDataCon con) && not_nocaf_constr
-  where
-    not_nocaf_constr = 
-	case sm_rep of 
-	   GenericRep _ _ _ ConstrNoCaf -> False
-	   _other			-> True
+staticClosureNeedsLink (ConInfo { closureSMRep = rep })
+  = not (isStaticNoCafCon rep)
 \end{code}
 
 Note [Entering error thunks]
@@ -928,7 +963,10 @@ infoTableLabelFromCI :: ClosureInfo -> CLabel
 infoTableLabelFromCI = fst . labelsFromCI
 
 entryLabelFromCI :: ClosureInfo -> CLabel
-entryLabelFromCI = snd . labelsFromCI
+entryLabelFromCI ci
+  | tablesNextToCode = info_lbl
+  | otherwise        = entry_lbl
+  where (info_lbl, entry_lbl) = labelsFromCI ci
 
 labelsFromCI :: ClosureInfo -> (CLabel, CLabel) -- (Info, Entry)
 labelsFromCI cl@(ClosureInfo { closureName = name,
@@ -1020,7 +1058,7 @@ cafBlackHoleClosureInfo (ClosureInfo { closureName = nm,
 				       closureType = ty })
   = ClosureInfo { closureName   = nm,
 		  closureLFInfo = LFBlackHole,
-		  closureSMRep  = BlackHoleRep,
+		  closureSMRep  = blackHoleRep,
 		  closureSRT    = NoC_SRT,
 		  closureType   = ty,
 		  closureDescr  = "",
@@ -1063,15 +1101,9 @@ getTyDescription ty
       AppTy fun _      	     -> getTyDescription fun
       FunTy _ res      	     -> '-' : '>' : fun_result res
       TyConApp tycon _ 	     -> getOccString tycon
-      PredTy sty	     -> getPredTyDescription sty
       ForAllTy _ ty          -> getTyDescription ty
     }
   where
     fun_result (FunTy _ res) = '>' : fun_result res
     fun_result other	     = getTyDescription other
-
-getPredTyDescription :: PredType -> String
-getPredTyDescription (ClassP cl _) = getOccString cl
-getPredTyDescription (IParam ip _) = getOccString (ipNameName ip)
-getPredTyDescription (EqPred _ _)  = "Type equality"
 \end{code}

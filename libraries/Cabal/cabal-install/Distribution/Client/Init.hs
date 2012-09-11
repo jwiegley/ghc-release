@@ -41,7 +41,7 @@ import Control.Monad
   ( (>=>), join )
 #endif
 
-import Text.PrettyPrint.HughesPJ hiding (mode, cat)
+import Text.PrettyPrint hiding (mode, cat)
 
 import Data.Version
   ( Version(..) )
@@ -125,11 +125,11 @@ getPackageName flags = do
 
   return $ flags { packageName = maybeToFlag pkgName' }
 
--- | Package version: use 0.1 as a last resort, but try prompting the user if
---   possible.
+-- | Package version: use 0.1.0.0 as a last resort, but try prompting the user
+--  if possible.
 getVersion :: InitFlags -> IO InitFlags
 getVersion flags = do
-  let v = Just $ Version { versionBranch = [0,1], versionTags = [] }
+  let v = Just $ Version { versionBranch = [0,1,0,0], versionTags = [] }
   v' <-     return (flagToMaybe $ version flags)
         ?>> maybePrompt flags (prompt "Package version" v)
         ?>> return v

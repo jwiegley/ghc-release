@@ -11,8 +11,8 @@ module DriverPhases (
    HscSource(..), isHsBoot, hscSourceString,
    Phase(..),
    happensBefore, eqPhase, anyHsc, isStopLn,
-   startPhase,          -- :: String -> Phase
-   phaseInputExt,       -- :: Phase -> String
+   startPhase,
+   phaseInputExt,
 
    isHaskellishSuffix,
    isHaskellSrcSuffix,
@@ -30,7 +30,7 @@ module DriverPhases (
    isExtCoreFilename,
    isDynLibFilename,
    isHaskellUserSrcFilename,
-   isSourceFilename         -- :: FilePath -> Bool
+   isSourceFilename
  ) where
 
 #include "HsVersions.h"
@@ -76,10 +76,11 @@ data Phase
         | Ccpp
         | Cc
         | Cobjc
+        | Cobjcpp
         | HCc           -- Haskellised C (as opposed to vanilla C) compilation
-        | SplitMangle   -- after mangler if splitting
-        | SplitAs
-        | As
+        | Splitter      -- Assembly file splitter (part of '-split-objs')
+        | SplitAs       -- Assembler for split assembly files (part of '-split-objs')
+        | As            -- Assembler for regular assembly files
         | LlvmOpt       -- Run LLVM opt tool over llvm assembly
         | LlvmLlc       -- LLVM bitcode to native assembly
         | LlvmMangle    -- Fix up TNTC by processing assembly produced by LLVM
@@ -105,25 +106,26 @@ isStopLn _      = False
 eqPhase :: Phase -> Phase -> Bool
 -- Equality of constructors, ignoring the HscSource field
 -- NB: the HscSource field can be 'bot'; see anyHsc above
-eqPhase (Unlit _)   (Unlit _)   = True
-eqPhase (Cpp   _)   (Cpp   _)   = True
-eqPhase (HsPp  _)   (HsPp  _)   = True
-eqPhase (Hsc   _)   (Hsc   _)   = True
-eqPhase Ccpp        Ccpp        = True
-eqPhase Cc          Cc          = True
-eqPhase Cobjc       Cobjc       = True
-eqPhase HCc         HCc         = True
-eqPhase SplitMangle SplitMangle = True
-eqPhase SplitAs     SplitAs     = True
-eqPhase As          As          = True
-eqPhase LlvmOpt	    LlvmOpt 	= True
-eqPhase LlvmLlc	    LlvmLlc 	= True
-eqPhase LlvmMangle  LlvmMangle 	= True
-eqPhase CmmCpp      CmmCpp      = True
-eqPhase Cmm         Cmm         = True
-eqPhase MergeStub   MergeStub   = True
-eqPhase StopLn      StopLn      = True
-eqPhase _           _           = False
+eqPhase (Unlit _)   (Unlit _)  = True
+eqPhase (Cpp   _)   (Cpp   _)  = True
+eqPhase (HsPp  _)   (HsPp  _)  = True
+eqPhase (Hsc   _)   (Hsc   _)  = True
+eqPhase Ccpp        Ccpp       = True
+eqPhase Cc          Cc         = True
+eqPhase Cobjc       Cobjc      = True
+eqPhase Cobjcpp     Cobjcpp    = True
+eqPhase HCc         HCc        = True
+eqPhase Splitter    Splitter   = True
+eqPhase SplitAs     SplitAs    = True
+eqPhase As          As         = True
+eqPhase LlvmOpt     LlvmOpt    = True
+eqPhase LlvmLlc     LlvmLlc    = True
+eqPhase LlvmMangle  LlvmMangle = True
+eqPhase CmmCpp      CmmCpp     = True
+eqPhase Cmm         Cmm        = True
+eqPhase MergeStub   MergeStub  = True
+eqPhase StopLn      StopLn     = True
+eqPhase _           _          = False
 
 -- Partial ordering on phases: we want to know which phases will occur before
 -- which others.  This is used for sanity checking, to ensure that the
@@ -136,24 +138,25 @@ x      `happensBefore` y = after_x `eqPhase` y || after_x `happensBefore` y
 
 nextPhase :: Phase -> Phase
 -- A conservative approximation to the next phase, used in happensBefore
-nextPhase (Unlit sf)    = Cpp  sf
-nextPhase (Cpp   sf)    = HsPp sf
-nextPhase (HsPp  sf)    = Hsc  sf
-nextPhase (Hsc   _)     = HCc
-nextPhase SplitMangle   = As
-nextPhase As            = SplitAs
-nextPhase LlvmOpt       = LlvmLlc
-nextPhase LlvmLlc       = LlvmMangle
-nextPhase LlvmMangle    = As
-nextPhase SplitAs       = MergeStub
-nextPhase Ccpp          = As
-nextPhase Cc            = As
-nextPhase Cobjc         = As
-nextPhase CmmCpp        = Cmm
-nextPhase Cmm           = HCc
-nextPhase HCc           = As
-nextPhase MergeStub     = StopLn
-nextPhase StopLn        = panic "nextPhase: nothing after StopLn"
+nextPhase (Unlit sf) = Cpp  sf
+nextPhase (Cpp   sf) = HsPp sf
+nextPhase (HsPp  sf) = Hsc  sf
+nextPhase (Hsc   _)  = HCc
+nextPhase Splitter   = SplitAs
+nextPhase LlvmOpt    = LlvmLlc
+nextPhase LlvmLlc    = LlvmMangle
+nextPhase LlvmMangle = As
+nextPhase SplitAs    = MergeStub
+nextPhase As         = MergeStub
+nextPhase Ccpp       = As
+nextPhase Cc         = As
+nextPhase Cobjc      = As
+nextPhase Cobjcpp    = As
+nextPhase CmmCpp     = Cmm
+nextPhase Cmm        = HCc
+nextPhase HCc        = As
+nextPhase MergeStub  = StopLn
+nextPhase StopLn     = panic "nextPhase: nothing after StopLn"
 
 -- the first compilation phase for a given file is determined
 -- by its suffix.
@@ -170,9 +173,11 @@ startPhase "c"        = Cc
 startPhase "cpp"      = Ccpp
 startPhase "C"        = Cc
 startPhase "m"        = Cobjc
+startPhase "M"        = Cobjcpp
+startPhase "mm"       = Cobjcpp
 startPhase "cc"       = Ccpp
 startPhase "cxx"      = Ccpp
-startPhase "split_s"  = SplitMangle
+startPhase "split_s"  = Splitter
 startPhase "s"        = As
 startPhase "S"        = As
 startPhase "ll"       = LlvmOpt
@@ -199,13 +204,14 @@ phaseInputExt (Hsc   _)           = "hspp"      -- intermediate only
 phaseInputExt HCc                 = "hc"
 phaseInputExt Ccpp                = "cpp"
 phaseInputExt Cobjc               = "m"
+phaseInputExt Cobjcpp             = "mm"
 phaseInputExt Cc                  = "c"
-phaseInputExt SplitMangle         = "split_s"   -- not really generated
+phaseInputExt Splitter            = "split_s"
 phaseInputExt As                  = "s"
 phaseInputExt LlvmOpt             = "ll"
 phaseInputExt LlvmLlc             = "bc"
 phaseInputExt LlvmMangle          = "lm_s"
-phaseInputExt SplitAs             = "split_s"   -- not really generated
+phaseInputExt SplitAs             = "split_s"
 phaseInputExt CmmCpp              = "cmm"
 phaseInputExt Cmm                 = "cmmcpp"
 phaseInputExt MergeStub           = "o"
@@ -217,7 +223,7 @@ haskellish_src_suffixes, haskellish_suffixes, cish_suffixes,
 haskellish_src_suffixes      = haskellish_user_src_suffixes ++
                                [ "hspp", "hscpp", "hcr", "cmm", "cmmcpp" ]
 haskellish_suffixes          = haskellish_src_suffixes ++ ["hc", "raw_s"]
-cish_suffixes                = [ "c", "cpp", "C", "cc", "cxx", "s", "S", "ll", "bc", "m" ]
+cish_suffixes                = [ "c", "cpp", "C", "cc", "cxx", "s", "S", "ll", "bc", "lm_s", "m", "M", "mm" ]
 extcoreish_suffixes          = [ "hcr" ]
 -- Will not be deleted as temp files:
 haskellish_user_src_suffixes = [ "hs", "lhs", "hs-boot", "lhs-boot" ]
@@ -267,5 +273,4 @@ isObjectFilename         f = isObjectSuffix         (drop 1 $ takeExtension f)
 isHaskellUserSrcFilename f = isHaskellUserSrcSuffix (drop 1 $ takeExtension f)
 isDynLibFilename         f = isDynLibSuffix         (drop 1 $ takeExtension f)
 isSourceFilename         f = isSourceSuffix         (drop 1 $ takeExtension f)
-
 

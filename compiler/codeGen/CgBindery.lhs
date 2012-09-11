@@ -5,6 +5,13 @@
 \section[CgBindery]{Utility functions related to doing @CgBindings@}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module CgBindery (
 	CgBindings, CgIdInfo,
 	StableLoc, VolatileLoc,
@@ -148,9 +155,10 @@ data StableLoc
 \end{code}
 
 \begin{code}
-instance Outputable CgIdInfo where
-  ppr (CgIdInfo id _ vol stb _ _) -- TODO, pretty pring the tag info
-    = ppr id <+> ptext (sLit "-->") <+> vcat [ppr vol, ppr stb]
+instance PlatformOutputable CgIdInfo where
+  pprPlatform platform (CgIdInfo id _ vol stb _ _)
+    -- TODO, pretty pring the tag info
+    = ppr id <+> ptext (sLit "-->") <+> vcat [ppr vol, pprPlatform platform stb]
 
 instance Outputable VolatileLoc where
   ppr NoVolatileLoc = empty
@@ -158,12 +166,12 @@ instance Outputable VolatileLoc where
   ppr (VirHpLoc v)   = ptext (sLit "vh")  <+> ppr v
   ppr (VirNodeLoc v) = ptext (sLit "vn")  <+> ppr v
 
-instance Outputable StableLoc where
-  ppr NoStableLoc   = empty
-  ppr VoidLoc       = ptext (sLit "void")
-  ppr (VirStkLoc v) = ptext (sLit "vs")    <+> ppr v
-  ppr (VirStkLNE v) = ptext (sLit "lne")    <+> ppr v
-  ppr (StableLoc a) = ptext (sLit "amode") <+> ppr a
+instance PlatformOutputable StableLoc where
+  pprPlatform _        NoStableLoc   = empty
+  pprPlatform _        VoidLoc       = ptext (sLit "void")
+  pprPlatform _        (VirStkLoc v) = ptext (sLit "vs")    <+> ppr v
+  pprPlatform _        (VirStkLNE v) = ptext (sLit "lne")   <+> ppr v
+  pprPlatform platform (StableLoc a) = ptext (sLit "amode") <+> pprPlatform platform a
 \end{code}
 
 %************************************************************************

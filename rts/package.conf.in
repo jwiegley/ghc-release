@@ -51,11 +51,10 @@ extra-libraries:
 #ifdef INSTALLING
 include-dirs:		INCLUDE_DIR PAPI_INCLUDE_DIR
 #else /* !INSTALLING */
-include-dirs:		TOP"/includes"
+include-dirs:		TOP"/rts/dist/build" TOP"/includes" TOP"/includes/dist-ghcconstants/header" TOP"/includes/dist-derivedconstants/header"
 #endif
 
 includes:		Stg.h
-depends:	 	builtin_ffi
 hugs-options:
 cc-options:
 
@@ -93,6 +92,7 @@ ld-options:
          , "-u", "_base_GHCziIOziException_blockedIndefinitelyOnSTM_closure"
          , "-u", "_base_ControlziExceptionziBase_nestedAtomically_closure"
          , "-u", "_base_GHCziWeak_runFinalizzerBatch_closure"
+         , "-u", "_base_GHCziTopHandler_flushStdHandles_closure"
          , "-u", "_base_GHCziTopHandler_runIO_closure"
          , "-u", "_base_GHCziTopHandler_runNonIO_closure"
 	 , "-u", "_base_GHCziConcziIO_ensureIOManagerIsRunning_closure"
@@ -131,6 +131,7 @@ ld-options:
          , "-u", "base_GHCziIOziException_blockedIndefinitelyOnSTM_closure"
          , "-u", "base_ControlziExceptionziBase_nestedAtomically_closure"
          , "-u", "base_GHCziWeak_runFinalizzerBatch_closure"
+         , "-u", "base_GHCziTopHandler_flushStdHandles_closure"
          , "-u", "base_GHCziTopHandler_runIO_closure"
          , "-u", "base_GHCziTopHandler_runNonIO_closure"
 	 , "-u", "base_GHCziConcziIO_ensureIOManagerIsRunning_closure"

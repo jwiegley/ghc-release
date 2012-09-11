@@ -6,27 +6,38 @@
 \section[TysPrim]{Wired-in knowledge about primitive types}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 -- | This module defines TyCons that can't be expressed in Haskell. 
 --   They are all, therefore, wired-in TyCons.  C.f module TysWiredIn
 module TysPrim(
-	alphaTyVars, betaTyVars, alphaTyVar, betaTyVar, gammaTyVar, deltaTyVar,
+	mkPrimTyConName, -- For implicit parameters in TysWiredIn only
+
+        tyVarList, alphaTyVars, betaTyVars, alphaTyVar, betaTyVar, gammaTyVar, deltaTyVar,
 	alphaTy, betaTy, gammaTy, deltaTy,
 	openAlphaTy, openBetaTy, openAlphaTyVar, openBetaTyVar, openAlphaTyVars,
-        argAlphaTy, argAlphaTyVar, argBetaTy, argBetaTyVar,
+        argAlphaTy, argAlphaTyVar, argAlphaTyVars, argBetaTy, argBetaTyVar,
+        kKiVar,
 
         -- Kind constructors...
-        tySuperKindTyCon, tySuperKind,
+        tySuperKindTyCon, tySuperKind, anyKindTyCon,
         liftedTypeKindTyCon, openTypeKindTyCon, unliftedTypeKindTyCon,
-        argTypeKindTyCon, ubxTupleKindTyCon,
+        argTypeKindTyCon, ubxTupleKindTyCon, constraintKindTyCon,
 
-        tySuperKindTyConName, liftedTypeKindTyConName,
+        tySuperKindTyConName, anyKindTyConName, liftedTypeKindTyConName,
         openTypeKindTyConName, unliftedTypeKindTyConName,
         ubxTupleKindTyConName, argTypeKindTyConName,
+        constraintKindTyConName,
 
         -- Kinds
-	liftedTypeKind, unliftedTypeKind, openTypeKind,
-        argTypeKind, ubxTupleKind,
-        mkArrowKind, mkArrowKinds, isCoercionKind,
+	anyKind, liftedTypeKind, unliftedTypeKind, openTypeKind,
+        argTypeKind, ubxTupleKind, constraintKind,
+        mkArrowKind, mkArrowKinds,
 
         funTyCon, funTyConName,
         primTyCons,
@@ -41,11 +52,13 @@ module TysPrim(
 	statePrimTyCon,		mkStatePrimTy,
 	realWorldTyCon,		realWorldTy, realWorldStatePrimTy,
 
-	arrayPrimTyCon,			mkArrayPrimTy, 
-	byteArrayPrimTyCon,		byteArrayPrimTy,
-	mutableArrayPrimTyCon,		mkMutableArrayPrimTy,
-	mutableByteArrayPrimTyCon,	mkMutableByteArrayPrimTy,
-	mutVarPrimTyCon,		mkMutVarPrimTy,
+	arrayPrimTyCon,	mkArrayPrimTy, 
+	byteArrayPrimTyCon,	byteArrayPrimTy,
+	arrayArrayPrimTyCon, mkArrayArrayPrimTy, 
+	mutableArrayPrimTyCon, mkMutableArrayPrimTy,
+	mutableByteArrayPrimTyCon, mkMutableByteArrayPrimTy,
+	mutableArrayArrayPrimTyCon, mkMutableArrayArrayPrimTy,
+	mutVarPrimTyCon, mkMutVarPrimTy,
 
 	mVarPrimTyCon,			mkMVarPrimTy,	
         tVarPrimTyCon,                  mkTVarPrimTy,
@@ -61,24 +74,23 @@ module TysPrim(
 	int64PrimTyCon,		int64PrimTy,
         word64PrimTyCon,        word64PrimTy,
 
-        eqPredPrimTyCon,            -- ty1 ~ ty2
+        eqPrimTyCon,            -- ty1 ~# ty2
 
 	-- * Any
-	anyTyCon, anyTyConOfKind, anyTypeOfKind
+	anyTy, anyTyCon, anyTypeOfKind
   ) where
 
 #include "HsVersions.h"
 
-import Var		( TyVar, mkTyVar )
+import Var		( TyVar, KindVar, mkTyVar )
 import Name		( Name, BuiltInSyntax(..), mkInternalName, mkWiredInName )
-import OccName          ( mkTcOcc,mkTyVarOccFS, mkTcOccFS )
+import OccName          ( mkTyVarOccFS, mkTcOccFS )
 import TyCon
 import TypeRep
 import SrcLoc
 import Unique		( mkAlphaTyVarUnique )
 import PrelNames
 import FastString
-import Outputable
 
 import Data.Char
 \end{code}
@@ -95,6 +107,7 @@ primTyCons
   = [ addrPrimTyCon
     , arrayPrimTyCon
     , byteArrayPrimTyCon
+    , arrayArrayPrimTyCon
     , charPrimTyCon
     , doublePrimTyCon
     , floatPrimTyCon
@@ -105,6 +118,7 @@ primTyCons
     , weakPrimTyCon
     , mutableArrayPrimTyCon
     , mutableByteArrayPrimTyCon
+    , mutableArrayArrayPrimTyCon
     , mVarPrimTyCon
     , tVarPrimTyCon
     , mutVarPrimTyCon
@@ -117,7 +131,15 @@ primTyCons
     , word32PrimTyCon
     , word64PrimTyCon
     , anyTyCon
-    , eqPredPrimTyCon
+    , anyKindTyCon
+    , eqPrimTyCon
+
+    , liftedTypeKindTyCon
+    , unliftedTypeKindTyCon
+    , openTypeKindTyCon
+    , argTypeKindTyCon
+    , ubxTupleKindTyCon
+    , constraintKindTyCon
     ]
 
 mkPrimTc :: FastString -> Unique -> TyCon -> Name
@@ -127,7 +149,7 @@ mkPrimTc fs unique tycon
 		  (ATyCon tycon)	-- Relevant TyCon
 		  UserSyntax		-- None are built-in syntax
 
-charPrimTyConName, intPrimTyConName, int32PrimTyConName, int64PrimTyConName, wordPrimTyConName, word32PrimTyConName, word64PrimTyConName, addrPrimTyConName, floatPrimTyConName, doublePrimTyConName, statePrimTyConName, realWorldTyConName, arrayPrimTyConName, byteArrayPrimTyConName, mutableArrayPrimTyConName, mutableByteArrayPrimTyConName, mutVarPrimTyConName, mVarPrimTyConName, tVarPrimTyConName, stablePtrPrimTyConName, stableNamePrimTyConName, bcoPrimTyConName, weakPrimTyConName, threadIdPrimTyConName, eqPredPrimTyConName :: Name
+charPrimTyConName, intPrimTyConName, int32PrimTyConName, int64PrimTyConName, wordPrimTyConName, word32PrimTyConName, word64PrimTyConName, addrPrimTyConName, floatPrimTyConName, doublePrimTyConName, statePrimTyConName, realWorldTyConName, arrayPrimTyConName, arrayArrayPrimTyConName, byteArrayPrimTyConName, mutableArrayPrimTyConName, mutableByteArrayPrimTyConName, mutableArrayArrayPrimTyConName, mutVarPrimTyConName, mVarPrimTyConName, tVarPrimTyConName, stablePtrPrimTyConName, stableNamePrimTyConName, bcoPrimTyConName, weakPrimTyConName, threadIdPrimTyConName, eqPrimTyConName :: Name
 charPrimTyConName    	      = mkPrimTc (fsLit "Char#") charPrimTyConKey charPrimTyCon
 intPrimTyConName     	      = mkPrimTc (fsLit "Int#") intPrimTyConKey  intPrimTyCon
 int32PrimTyConName	      = mkPrimTc (fsLit "Int32#") int32PrimTyConKey int32PrimTyCon
@@ -139,12 +161,14 @@ addrPrimTyConName    	      = mkPrimTc (fsLit "Addr#") addrPrimTyConKey addrPrim
 floatPrimTyConName   	      = mkPrimTc (fsLit "Float#") floatPrimTyConKey floatPrimTyCon
 doublePrimTyConName  	      = mkPrimTc (fsLit "Double#") doublePrimTyConKey doublePrimTyCon
 statePrimTyConName            = mkPrimTc (fsLit "State#") statePrimTyConKey statePrimTyCon
-eqPredPrimTyConName           = mkPrimTc (fsLit "~") eqPredPrimTyConKey eqPredPrimTyCon
+eqPrimTyConName               = mkPrimTc (fsLit "~#") eqPrimTyConKey eqPrimTyCon
 realWorldTyConName            = mkPrimTc (fsLit "RealWorld") realWorldTyConKey realWorldTyCon
 arrayPrimTyConName   	      = mkPrimTc (fsLit "Array#") arrayPrimTyConKey arrayPrimTyCon
 byteArrayPrimTyConName	      = mkPrimTc (fsLit "ByteArray#") byteArrayPrimTyConKey byteArrayPrimTyCon
+arrayArrayPrimTyConName   	  = mkPrimTc (fsLit "ArrayArray#") arrayArrayPrimTyConKey arrayArrayPrimTyCon
 mutableArrayPrimTyConName     = mkPrimTc (fsLit "MutableArray#") mutableArrayPrimTyConKey mutableArrayPrimTyCon
 mutableByteArrayPrimTyConName = mkPrimTc (fsLit "MutableByteArray#") mutableByteArrayPrimTyConKey mutableByteArrayPrimTyCon
+mutableArrayArrayPrimTyConName= mkPrimTc (fsLit "MutableArrayArray#") mutableArrayArrayPrimTyConKey mutableArrayArrayPrimTyCon
 mutVarPrimTyConName	      = mkPrimTc (fsLit "MutVar#") mutVarPrimTyConKey mutVarPrimTyCon
 mVarPrimTyConName	      = mkPrimTc (fsLit "MVar#") mVarPrimTyConKey mVarPrimTyCon
 tVarPrimTyConName	      = mkPrimTc (fsLit "TVar#") tVarPrimTyConKey tVarPrimTyCon
@@ -200,11 +224,16 @@ openAlphaTy, openBetaTy :: Type
 openAlphaTy = mkTyVarTy openAlphaTyVar
 openBetaTy  = mkTyVarTy openBetaTyVar
 
+argAlphaTyVars :: [TyVar]
 argAlphaTyVar, argBetaTyVar :: TyVar
-(argAlphaTyVar : argBetaTyVar : _) = tyVarList argTypeKind
+argAlphaTyVars@(argAlphaTyVar : argBetaTyVar : _) = tyVarList argTypeKind
 argAlphaTy, argBetaTy :: Type
 argAlphaTy = mkTyVarTy argAlphaTyVar
 argBetaTy  = mkTyVarTy argBetaTyVar
+
+kKiVar :: KindVar
+kKiVar = (tyVarList tySuperKind) !! 10
+
 \end{code}
 
 
@@ -219,7 +248,8 @@ funTyConName :: Name
 funTyConName = mkPrimTyConName (fsLit "(->)") funTyConKey funTyCon
 
 funTyCon :: TyCon
-funTyCon = mkFunTyCon funTyConName (mkArrowKinds [argTypeKind, openTypeKind] liftedTypeKind)
+funTyCon = mkFunTyCon funTyConName $ 
+           mkArrowKinds [liftedTypeKind, liftedTypeKind] liftedTypeKind
         -- You might think that (->) should have type (?? -> ? -> *), and you'd be right
 	-- But if we do that we get kind errors when saying
 	--	instance Control.Arrow (->)
@@ -228,6 +258,20 @@ funTyCon = mkFunTyCon funTyConName (mkArrowKinds [argTypeKind, openTypeKind] lif
 	-- the kind sub-typing does.  Sigh.  It really only matters if you use (->) in
 	-- a prefix way, thus:  (->) Int# Int#.  And this is unusual.
         -- because they are never in scope in the source
+
+-- One step to remove subkinding.
+-- (->) :: * -> * -> *
+-- but we should have (and want) the following typing rule for fully applied arrows
+--      Gamma |- tau   :: k1    k1 in {*, #}
+--      Gamma |- sigma :: k2    k2 in {*, #, (#)}
+--      -----------------------------------------
+--      Gamma |- tau -> sigma :: *
+-- Currently we have the following rule which achieves more or less the same effect
+--      Gamma |- tau   :: ??
+--      Gamma |- sigma :: ?
+--      --------------------------
+--      Gamma |- tau -> sigma :: *
+-- In the end we don't want subkinding at all.
 \end{code}
 
 
@@ -239,31 +283,37 @@ funTyCon = mkFunTyCon funTyConName (mkArrowKinds [argTypeKind, openTypeKind] lif
 
 \begin{code}
 -- | See "Type#kind_subtyping" for details of the distinction between the 'Kind' 'TyCon's
-tySuperKindTyCon, liftedTypeKindTyCon,
+tySuperKindTyCon, anyKindTyCon, liftedTypeKindTyCon,
       openTypeKindTyCon, unliftedTypeKindTyCon,
-      ubxTupleKindTyCon, argTypeKindTyCon
+      ubxTupleKindTyCon, argTypeKindTyCon,
+      constraintKindTyCon
    :: TyCon
-tySuperKindTyConName, liftedTypeKindTyConName,
+tySuperKindTyConName, anyKindTyConName, liftedTypeKindTyConName,
       openTypeKindTyConName, unliftedTypeKindTyConName,
-      ubxTupleKindTyConName, argTypeKindTyConName
+      ubxTupleKindTyConName, argTypeKindTyConName,
+      constraintKindTyConName
    :: Name
 
 tySuperKindTyCon      = mkSuperKindTyCon tySuperKindTyConName
+anyKindTyCon          = mkKindTyCon anyKindTyConName          tySuperKind
 liftedTypeKindTyCon   = mkKindTyCon liftedTypeKindTyConName   tySuperKind
 openTypeKindTyCon     = mkKindTyCon openTypeKindTyConName     tySuperKind
 unliftedTypeKindTyCon = mkKindTyCon unliftedTypeKindTyConName tySuperKind
 ubxTupleKindTyCon     = mkKindTyCon ubxTupleKindTyConName     tySuperKind
 argTypeKindTyCon      = mkKindTyCon argTypeKindTyConName      tySuperKind
+constraintKindTyCon   = mkKindTyCon constraintKindTyConName   tySuperKind
 
 --------------------------
 -- ... and now their names
 
 tySuperKindTyConName      = mkPrimTyConName (fsLit "BOX") tySuperKindTyConKey tySuperKindTyCon
+anyKindTyConName      = mkPrimTyConName (fsLit "AnyK") anyKindTyConKey anyKindTyCon
 liftedTypeKindTyConName   = mkPrimTyConName (fsLit "*") liftedTypeKindTyConKey liftedTypeKindTyCon
-openTypeKindTyConName     = mkPrimTyConName (fsLit "?") openTypeKindTyConKey openTypeKindTyCon
+openTypeKindTyConName     = mkPrimTyConName (fsLit "OpenKind") openTypeKindTyConKey openTypeKindTyCon
 unliftedTypeKindTyConName = mkPrimTyConName (fsLit "#") unliftedTypeKindTyConKey unliftedTypeKindTyCon
 ubxTupleKindTyConName     = mkPrimTyConName (fsLit "(#)") ubxTupleKindTyConKey ubxTupleKindTyCon
-argTypeKindTyConName      = mkPrimTyConName (fsLit "??") argTypeKindTyConKey argTypeKindTyCon
+argTypeKindTyConName      = mkPrimTyConName (fsLit "ArgKind") argTypeKindTyConKey argTypeKindTyCon
+constraintKindTyConName   = mkPrimTyConName (fsLit "Constraint") constraintKindTyConKey constraintKindTyCon
 
 mkPrimTyConName :: FastString -> Unique -> TyCon -> Name
 mkPrimTyConName occ key tycon = mkWiredInName gHC_PRIM (mkTcOccFS occ) 
@@ -280,13 +330,16 @@ kindTyConType :: TyCon -> Type
 kindTyConType kind = TyConApp kind []
 
 -- | See "Type#kind_subtyping" for details of the distinction between these 'Kind's
-liftedTypeKind, unliftedTypeKind, openTypeKind, argTypeKind, ubxTupleKind :: Kind
+anyKind, liftedTypeKind, unliftedTypeKind, openTypeKind, argTypeKind, ubxTupleKind, constraintKind :: Kind
 
+-- See Note [Any kinds]
+anyKind          = kindTyConType anyKindTyCon
 liftedTypeKind   = kindTyConType liftedTypeKindTyCon
 unliftedTypeKind = kindTyConType unliftedTypeKindTyCon
 openTypeKind     = kindTyConType openTypeKindTyCon
 argTypeKind      = kindTyConType argTypeKindTyCon
-ubxTupleKind	 = kindTyConType ubxTupleKindTyCon
+ubxTupleKind     = kindTyConType ubxTupleKindTyCon
+constraintKind   = kindTyConType constraintKindTyCon
 
 -- | Given two kinds @k1@ and @k2@, creates the 'Kind' @k1 -> k2@
 mkArrowKind :: Kind -> Kind -> Kind
@@ -379,19 +432,17 @@ doublePrimTyCon	= pcPrimTyCon0 doublePrimTyConName DoubleRep
 %*									*
 %************************************************************************
 
-Note [The (~) TyCon)
+Note [The ~# TyCon)
 ~~~~~~~~~~~~~~~~~~~~
-There is a perfectly ordinary type constructor (~) that represents the type
+There is a perfectly ordinary type constructor ~# that represents the type
 of coercions (which, remember, are values).  For example
-   Refl Int :: Int ~ Int
+   Refl Int :: ~# * Int Int
 
-Atcually it is not quite "perfectly ordinary" because it is kind-polymorphic:
-   Refl Maybe :: Maybe ~ Maybe
+It is a kind-polymorphic type constructor like Any:
+   Refl Maybe :: ~# (* -> *) Maybe Maybe
 
-So the true kind of (~) :: forall k. k -> k -> #.  But we don't have
-polymorphic kinds (yet). However, (~) really only appears saturated in
-which case there is no problem in finding the kind of (ty1 ~ ty2). So
-we check that in CoreLint (and, in an assertion, in Kind.typeKind).
+(~) only appears saturated. So we check that in CoreLint (and, in an
+assertion, in Kind.typeKind).
 
 Note [The State# TyCon]
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -411,9 +462,12 @@ mkStatePrimTy ty = mkTyConApp statePrimTyCon [ty]
 statePrimTyCon :: TyCon   -- See Note [The State# TyCon]
 statePrimTyCon	 = pcPrimTyCon statePrimTyConName 1 VoidRep
 
-eqPredPrimTyCon :: TyCon  -- The representation type for equality predicates
-		   	  -- See Note [The (~) TyCon]
-eqPredPrimTyCon  = pcPrimTyCon eqPredPrimTyConName 2 VoidRep
+eqPrimTyCon :: TyCon  -- The representation type for equality predicates
+		      -- See Note [The ~# TyCon]
+eqPrimTyCon  = mkPrimTyCon eqPrimTyConName kind 3 VoidRep
+  where kind = ForAllTy kv $ mkArrowKinds [k, k] unliftedTypeKind
+        kv = kKiVar
+        k = mkTyVarTy kv
 \end{code}
 
 RealWorld is deeply magical.  It is *primitive*, but it is not
@@ -440,20 +494,26 @@ defined in \tr{TysWiredIn.lhs}, not here.
 
 \begin{code}
 arrayPrimTyCon, mutableArrayPrimTyCon, mutableByteArrayPrimTyCon,
-    byteArrayPrimTyCon :: TyCon
-arrayPrimTyCon		  = pcPrimTyCon  arrayPrimTyConName	       1 PtrRep
-mutableArrayPrimTyCon	  = pcPrimTyCon  mutableArrayPrimTyConName     2 PtrRep
-mutableByteArrayPrimTyCon = pcPrimTyCon  mutableByteArrayPrimTyConName 1 PtrRep
-byteArrayPrimTyCon	  = pcPrimTyCon0 byteArrayPrimTyConName	         PtrRep
+    byteArrayPrimTyCon, arrayArrayPrimTyCon, mutableArrayArrayPrimTyCon :: TyCon
+arrayPrimTyCon             = pcPrimTyCon  arrayPrimTyConName             1 PtrRep
+mutableArrayPrimTyCon      = pcPrimTyCon  mutableArrayPrimTyConName      2 PtrRep
+mutableByteArrayPrimTyCon  = pcPrimTyCon  mutableByteArrayPrimTyConName  1 PtrRep
+byteArrayPrimTyCon         = pcPrimTyCon0 byteArrayPrimTyConName           PtrRep
+arrayArrayPrimTyCon        = pcPrimTyCon0 arrayArrayPrimTyConName          PtrRep
+mutableArrayArrayPrimTyCon = pcPrimTyCon  mutableArrayArrayPrimTyConName 1 PtrRep
 
 mkArrayPrimTy :: Type -> Type
 mkArrayPrimTy elt    	    = mkTyConApp arrayPrimTyCon [elt]
 byteArrayPrimTy :: Type
 byteArrayPrimTy	    	    = mkTyConTy byteArrayPrimTyCon
+mkArrayArrayPrimTy :: Type
+mkArrayArrayPrimTy = mkTyConTy arrayArrayPrimTyCon
 mkMutableArrayPrimTy :: Type -> Type -> Type
 mkMutableArrayPrimTy s elt  = mkTyConApp mutableArrayPrimTyCon [s, elt]
 mkMutableByteArrayPrimTy :: Type -> Type
 mkMutableByteArrayPrimTy s  = mkTyConApp mutableByteArrayPrimTyCon [s]
+mkMutableArrayArrayPrimTy :: Type -> Type
+mkMutableArrayArrayPrimTy s = mkTyConApp mutableArrayArrayPrimTyCon [s]
 \end{code}
 
 %************************************************************************
@@ -575,8 +635,6 @@ threadIdPrimTyCon :: TyCon
 threadIdPrimTyCon = pcPrimTyCon0 threadIdPrimTyConName PtrRep
 \end{code}
 
-
-
 %************************************************************************
 %*									*
 		Any
@@ -585,7 +643,7 @@ threadIdPrimTyCon = pcPrimTyCon0 threadIdPrimTyConName PtrRep
 
 Note [Any types]
 ~~~~~~~~~~~~~~~~
-The type constructor Any::* has these properties
+The type constructor Any of kind forall k. k -> k has these properties:
 
   * It is defined in module GHC.Prim, and exported so that it is 
     available to users.  For this reason it's treated like any other 
@@ -598,41 +656,28 @@ The type constructor Any::* has these properties
 
   * It is inhabited by at least one value, namely bottom
 
-  * You can unsafely coerce any lifted type to Ayny, and back.
+  * You can unsafely coerce any lifted type to Any, and back.
 
   * It does not claim to be a *data* type, and that's important for
     the code generator, because the code gen may *enter* a data value
     but never enters a function value. 
 
-  * It is used to instantiate otherwise un-constrained type variables of kind *
+  * It is used to instantiate otherwise un-constrained type variables
     For example   	length Any []
     See Note [Strangely-kinded void TyCons]
 
-In addition, we have a potentially-infinite family of types, one for
-each kind /other than/ *, needed to instantiate otherwise
-un-constrained type variables of kinds other than *.  This is a bit
-like tuples; there is a potentially-infinite family.  They have slightly
-different characteristics to Any::*:
-  
-  * They are built with TyCon.AnyTyCon
-  * They have non-user-writable names like "Any(*->*)" 
-  * They are not exported by GHC.Prim
-  * They are uninhabited (of course; not kind *)
-  * They have a unique derived from their OccName (see Note [Uniques of Any])
-  * Their Names do not live in the global name cache
+Note [Any kinds]
+~~~~~~~~~~~~~~~~
 
-Note [Uniques of Any]
-~~~~~~~~~~~~~~~~~~~~~
-Although Any(*->*), say, doesn't have a binding site, it still needs
-to have a Unique.  Unlike tuples (which are also an infinite family)
-there is no convenient way to index them, so we use the Unique from
-their OccName instead.  That should be unique, 
-  - both wrt each other, because their strings differ
+The type constructor AnyK (of sort BOX) is used internally only to zonk kind
+variables with no constraints on them. It appears in similar circumstances to
+Any, but at the kind level. For example:
 
-  - and wrt any other Name, because Names get uniques with 
-    various 'char' tags, but the OccName of Any will 
-    get a Unique built with mkTcOccUnique, which has a particular 'char' 
-    tag; see Unique.mkTcOccUnique!
+  type family Length (l :: [k]) :: Nat
+  type instance Length [] = Zero
+
+Length is kind-polymorphic, and when applied to the empty (promoted) list it
+will have the kind Length AnyK [].
 
 Note [Strangely-kinded void TyCons]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -658,26 +703,13 @@ This commit uses
 anyTyConName :: Name
 anyTyConName = mkPrimTc (fsLit "Any") anyTyConKey anyTyCon
 
+anyTy :: Type
+anyTy = mkTyConTy anyTyCon
+
 anyTyCon :: TyCon
-anyTyCon = mkLiftedPrimTyCon anyTyConName liftedTypeKind 0 PtrRep
+anyTyCon = mkLiftedPrimTyCon anyTyConName kind 1 PtrRep
+  where kind = ForAllTy kKiVar (mkTyVarTy kKiVar)
 
 anyTypeOfKind :: Kind -> Type
-anyTypeOfKind kind = mkTyConApp (anyTyConOfKind kind) []
-
-anyTyConOfKind :: Kind -> TyCon
--- Map all superkinds of liftedTypeKind to liftedTypeKind
-anyTyConOfKind kind 
-  | isLiftedTypeKind kind = anyTyCon
-  | otherwise             = tycon
-  where
-	  -- Derive the name from the kind, thus:
-	  --     Any(*->*), Any(*->*->*)
-	  -- These are names that can't be written by the user,
-	  -- and are not allocated in the global name cache
-    str = "Any" ++ showSDoc (pprParendKind kind)
-
-    occ   = mkTcOcc str
-    uniq  = getUnique occ  -- See Note [Uniques of Any]
-    name  = mkWiredInName gHC_PRIM occ uniq (ATyCon tycon) UserSyntax
-    tycon = mkAnyTyCon name kind 
+anyTypeOfKind kind = mkTyConApp anyTyCon [kind]
 \end{code}

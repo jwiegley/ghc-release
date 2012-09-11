@@ -2,6 +2,13 @@
 % (c) The University of Glasgow 2001-2006
 %
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module ExternalCore where
 
 data Module 
@@ -33,7 +40,7 @@ data Exp
   | Let Vdefg Exp
   | Case Exp Vbind Ty [Alt] {- non-empty list -}
   | Cast Exp Ty
-  | Note String Exp
+  | Tick String Exp {- XXX probably wrong -}
   | External String String Ty {- target name, convention, and type -} 
   | DynExternal String Ty {- convention and type (incl. Addr# of target as first arg) -} 
   | Label String
@@ -72,8 +79,7 @@ data Kind
   | Kunboxed
   | Kopen
   | Karrow Kind Kind
-  | Keq Ty Ty
-
+  
 data Lit 
   = Lint Integer Ty
   | Lrational Rational Ty

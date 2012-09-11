@@ -1,22 +1,27 @@
 -- CmmNode type for representation using Hoopl graphs.
 {-# LANGUAGE GADTs #-}
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 {-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
-#if __GLASGOW_HASKELL__ >= 701
+#if __GLASGOW_HASKELL__ >= 703
 -- GHC 7.0.1 improved incomplete pattern warnings with GADTs
 {-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
 #endif
 
-module CmmNode
-  ( CmmNode(..)
-  , UpdFrameOffset, Convention(..), ForeignConvention(..), ForeignTarget(..)
-  , mapExp, mapExpDeep, wrapRecExp, foldExp, foldExpDeep, wrapRecExpf
-  , mapExpM, mapExpDeepM, wrapRecExpM
-  )
-where
+module CmmNode (
+     CmmNode(..), ForeignHint(..), CmmFormal, CmmActual,
+     UpdFrameOffset, Convention(..), ForeignConvention(..), ForeignTarget(..),
+     mapExp, mapExpDeep, wrapRecExp, foldExp, foldExpDeep, wrapRecExpf,
+     mapExpM, mapExpDeepM, wrapRecExpM
+  ) where
 
 import CmmExpr
-import CmmDecl
 import FastString
 import ForeignCall
 import SMRep
@@ -200,6 +205,9 @@ instance HooplNode CmmNode where
 --------------------------------------------------
 -- Various helper types
 
+type CmmActual = CmmExpr
+type CmmFormal = LocalReg
+
 type UpdFrameOffset = ByteOff
 
 data Convention
@@ -234,6 +242,12 @@ data ForeignTarget        -- The target of a foreign call
   | PrimTarget            -- A possibly-side-effecting machine operation
         CallishMachOp            -- Which one
   deriving Eq
+
+data ForeignHint
+  = NoHint | AddrHint | SignedHint
+  deriving( Eq )
+        -- Used to give extra per-argument or per-result
+        -- information needed by foreign calling conventions
 
 --------------------------------------------------
 -- Instances of register and slot users / definers

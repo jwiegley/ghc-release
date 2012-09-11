@@ -8,10 +8,10 @@
 --
 -- This defines the data structure for the @.cabal@ file format. There are
 -- several parts to this structure. It has top level info and then 'Library',
--- 'Executable', and 'TestSuite' sections each of which have associated
--- 'BuildInfo' data that's used to build the library, exe, or test. To further
--- complicate things there is both a 'PackageDescription' and a
--- 'GenericPackageDescription'. This distinction relates to cabal
+-- 'Executable', 'TestSuite', and 'Benchmark' sections each of which have
+-- associated 'BuildInfo' data that's used to build the library, exe, test, or
+-- benchmark.  To further complicate things there is both a 'PackageDescription'
+-- and a 'GenericPackageDescription'. This distinction relates to cabal
 -- configurations. When we initially read a @.cabal@ file we get a
 -- 'GenericPackageDescription' which has all the conditional sections.
 -- Before actually building a package we have to decide
@@ -85,6 +85,18 @@ module Distribution.PackageDescription (
         testModules,
         enabledTests,
 
+        -- * Benchmarks
+        Benchmark(..),
+        BenchmarkInterface(..),
+        BenchmarkType(..),
+        benchmarkType,
+        knownBenchmarkTypes,
+        emptyBenchmark,
+        hasBenchmarks,
+        withBenchmark,
+        benchmarkModules,
+        enabledBenchmarks,
+
         -- * Build information
         BuildInfo(..),
         emptyBuildInfo,
@@ -115,7 +127,7 @@ import Data.List   (nub, intersperse)
 import Data.Maybe  (maybeToList)
 import Data.Monoid (Monoid(mempty, mappend))
 import Control.Monad (MonadPlus(mplus))
-import Text.PrettyPrint.HughesPJ as Disp
+import Text.PrettyPrint as Disp
 import qualified Distribution.Compat.ReadP as Parse
 import qualified Data.Char as Char (isAlphaNum, isDigit, toLower)
 
@@ -175,6 +187,7 @@ data PackageDescription
         library        :: Maybe Library,
         executables    :: [Executable],
         testSuites     :: [TestSuite],
+        benchmarks     :: [Benchmark],
         dataFiles      :: [FilePath],
         dataDir        :: FilePath,
         extraSrcFiles  :: [FilePath],
@@ -237,6 +250,7 @@ emptyPackageDescription
                       library      = Nothing,
                       executables  = [],
                       testSuites   = [],
+                      benchmarks   = [],
                       dataFiles    = [],
                       dataDir      = "",
                       extraSrcFiles = [],
@@ -470,9 +484,7 @@ data TestType = TestTypeExe Version     -- ^ \"type: exitcode-stdio-x.y\"
 
 knownTestTypes :: [TestType]
 knownTestTypes = [ TestTypeExe (Version [1,0] [])
-                   -- 'detailed-0.9' test type is disabled in Cabal-1.10.x
-                   -- needs more work on the details of the library interface
-              {- , TestTypeLib (Version [0,9] []) -} ]
+                 , TestTypeLib (Version [0,9] []) ]
 
 instance Text TestType where
   disp (TestTypeExe ver)          = text "exitcode-stdio-" <> disp ver
@@ -501,6 +513,125 @@ testType test = case testInterface test of
   TestSuiteExeV10 ver _         -> TestTypeExe ver
   TestSuiteLibV09 ver _         -> TestTypeLib ver
   TestSuiteUnsupported testtype -> testtype
+
+-- ---------------------------------------------------------------------------
+-- The Benchmark type
+
+-- | A \"benchmark\" stanza in a cabal file.
+--
+data Benchmark = Benchmark {
+        benchmarkName      :: String,
+        benchmarkInterface :: BenchmarkInterface,
+        benchmarkBuildInfo :: BuildInfo,
+        benchmarkEnabled   :: Bool
+        -- TODO: See TODO for 'testEnabled'.
+    }
+    deriving (Show, Read, Eq)
+
+-- | The benchmark interfaces that are currently defined. Each
+-- benchmark must specify which interface it supports.
+--
+-- More interfaces may be defined in future, either new revisions or
+-- totally new interfaces.
+--
+data BenchmarkInterface =
+
+     -- | Benchmark interface \"exitcode-stdio-1.0\". The benchmark
+     -- takes the form of an executable. It returns a zero exit code
+     -- for success, non-zero for failure. The stdout and stderr
+     -- channels may be logged. It takes no command line parameters
+     -- and nothing on stdin.
+     --
+     BenchmarkExeV10 Version FilePath
+
+     -- | A benchmark that does not conform to one of the above
+     -- interfaces for the given reason (e.g. unknown benchmark type).
+     --
+   | BenchmarkUnsupported BenchmarkType
+   deriving (Eq, Read, Show)
+
+instance Monoid Benchmark where
+    mempty = Benchmark {
+        benchmarkName      = mempty,
+        benchmarkInterface = mempty,
+        benchmarkBuildInfo = mempty,
+        benchmarkEnabled   = False
+    }
+
+    mappend a b = Benchmark {
+        benchmarkName      = combine' benchmarkName,
+        benchmarkInterface = combine  benchmarkInterface,
+        benchmarkBuildInfo = combine  benchmarkBuildInfo,
+        benchmarkEnabled   = if benchmarkEnabled a then True
+                             else benchmarkEnabled b
+    }
+        where combine   field = field a `mappend` field b
+              combine' f = case (f a, f b) of
+                        ("", x) -> x
+                        (x, "") -> x
+                        (x, y) -> error "Ambiguous values for benchmark field: '"
+                            ++ x ++ "' and '" ++ y ++ "'"
+
+instance Monoid BenchmarkInterface where
+    mempty  =  BenchmarkUnsupported (BenchmarkTypeUnknown mempty (Version [] []))
+    mappend a (BenchmarkUnsupported _) = a
+    mappend _ b                        = b
+
+emptyBenchmark :: Benchmark
+emptyBenchmark = mempty
+
+-- | Does this package have any benchmarks?
+hasBenchmarks :: PackageDescription -> Bool
+hasBenchmarks = any (buildable . benchmarkBuildInfo) . benchmarks
+
+-- | Get all the enabled benchmarks from a package.
+enabledBenchmarks :: PackageDescription -> [Benchmark]
+enabledBenchmarks = filter benchmarkEnabled . benchmarks
+
+-- | Perform an action on each buildable 'Benchmark' in a package.
+withBenchmark :: PackageDescription -> (Benchmark -> IO ()) -> IO ()
+withBenchmark pkg_descr f =
+    mapM_ f $ filter (buildable . benchmarkBuildInfo) $ enabledBenchmarks pkg_descr
+
+-- | Get all the module names from a benchmark.
+benchmarkModules :: Benchmark -> [ModuleName]
+benchmarkModules benchmark = otherModules (benchmarkBuildInfo benchmark)
+
+-- | The \"benchmark-type\" field in the benchmark stanza.
+--
+data BenchmarkType = BenchmarkTypeExe Version
+                     -- ^ \"type: exitcode-stdio-x.y\"
+                   | BenchmarkTypeUnknown String Version
+                     -- ^ Some unknown benchmark type e.g. \"type: foo\"
+    deriving (Show, Read, Eq)
+
+knownBenchmarkTypes :: [BenchmarkType]
+knownBenchmarkTypes = [ BenchmarkTypeExe (Version [1,0] []) ]
+
+instance Text BenchmarkType where
+  disp (BenchmarkTypeExe ver)          = text "exitcode-stdio-" <> disp ver
+  disp (BenchmarkTypeUnknown name ver) = text name <> char '-' <> disp ver
+
+  parse = do
+    cs   <- Parse.sepBy1 component (Parse.char '-')
+    _    <- Parse.char '-'
+    ver  <- parse
+    let name = concat (intersperse "-" cs)
+    return $! case lowercase name of
+      "exitcode-stdio" -> BenchmarkTypeExe ver
+      _                -> BenchmarkTypeUnknown name ver
+
+    where
+      component = do
+        cs <- Parse.munch1 Char.isAlphaNum
+        if all Char.isDigit cs then Parse.pfail else return cs
+        -- each component must contain an alphabetic character, to avoid
+        -- ambiguity in identifiers like foo-1 (the 1 is the version number).
+
+benchmarkType :: Benchmark -> BenchmarkType
+benchmarkType benchmark = case benchmarkInterface benchmark of
+  BenchmarkExeV10 ver _              -> BenchmarkTypeExe ver
+  BenchmarkUnsupported benchmarktype -> benchmarktype
 
 -- ---------------------------------------------------------------------------
 -- The BuildInfo type
@@ -603,7 +734,8 @@ emptyBuildInfo :: BuildInfo
 emptyBuildInfo = mempty
 
 -- | The 'BuildInfo' for the library (if there is one and it's buildable), and
--- all buildable executables and test suites.  Useful for gathering dependencies.
+-- all buildable executables, test suites and benchmarks.  Useful for gathering
+-- dependencies.
 allBuildInfo :: PackageDescription -> [BuildInfo]
 allBuildInfo pkg_descr = [ bi | Just lib <- [library pkg_descr]
                               , let bi = libBuildInfo lib
@@ -615,6 +747,10 @@ allBuildInfo pkg_descr = [ bi | Just lib <- [library pkg_descr]
                               , let bi = testBuildInfo tst
                               , buildable bi
                               , testEnabled tst ]
+                      ++ [ bi | tst <- benchmarks pkg_descr
+                              , let bi = benchmarkBuildInfo tst
+                              , buildable bi
+                              , benchmarkEnabled tst ]
   --FIXME: many of the places where this is used, we actually want to look at
   --       unbuildable bits too, probably need separate functions
 
@@ -813,7 +949,8 @@ data GenericPackageDescription =
         genPackageFlags       :: [Flag],
         condLibrary        :: Maybe (CondTree ConfVar [Dependency] Library),
         condExecutables    :: [(String, CondTree ConfVar [Dependency] Executable)],
-        condTestSuites     :: [(String, CondTree ConfVar [Dependency] TestSuite)]
+        condTestSuites     :: [(String, CondTree ConfVar [Dependency] TestSuite)],
+        condBenchmarks     :: [(String, CondTree ConfVar [Dependency] Benchmark)]
       }
     deriving (Show, Eq)
 

@@ -6,6 +6,13 @@
 --
 -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module CgTicky (
 	emitTickyCounter,
 
@@ -36,13 +43,12 @@ module CgTicky (
        staticTickyHdr,
   ) where
 
-#include "../includes/DerivedConstants.h"
+#include "../includes/dist-derivedconstants/header/DerivedConstants.h"
 	-- For REP_xxx constants, which are MachReps
 
 import ClosureInfo
 import CgUtils
 import CgMonad
-import SMRep
 
 import OldCmm
 import OldCmmUtils
@@ -60,6 +66,7 @@ import Module
 -- Turgid imports for showTypeCategory
 import PrelNames
 import TcType
+import Type
 import TyCon
 
 import DynFlags
@@ -84,8 +91,8 @@ emitTickyCounter :: ClosureInfo -> [Id] -> Int -> Code
 emitTickyCounter cl_info args on_stk
   = ifTicky $
     do	{ mod_name <- getModuleName
-	; fun_descr_lit <- mkStringCLit (fun_descr mod_name)
-	; arg_descr_lit <- mkStringCLit arg_descr
+	; fun_descr_lit <- newStringCLit (fun_descr mod_name)
+	; arg_descr_lit <- newStringCLit arg_descr
 	; emitDataLits ticky_ctr_label 	-- Must match layout of StgEntCounter
 -- krc: note that all the fields are I32 now; some were I16 before, 
 -- but the code generator wasn't handling that properly and it led to chaos, 
@@ -245,18 +252,19 @@ tickyDynAlloc :: ClosureInfo -> Code
 -- Called when doing a dynamic heap allocation
 tickyDynAlloc cl_info
   = ifTicky $
-    case smRepClosureType (closureSMRep cl_info) of
-	Just Constr           -> tick_alloc_con
-	Just ConstrNoCaf      -> tick_alloc_con
-	Just Fun	      -> tick_alloc_fun
-	Just Thunk 	      -> tick_alloc_thk
-	Just ThunkSelector    -> tick_alloc_thk
+    case cl_info of {
+      ConInfo {} -> tick_alloc_con ;
+      ClosureInfo { closureLFInfo = lf_info } -> 
+    case lf_info of
+	LFCon {}        -> tick_alloc_con
+	LFReEntrant {}  -> tick_alloc_fun
+	LFThunk {}      -> tick_alloc_thk
         -- black hole
-        Nothing               -> return ()
+        _               -> return () }
   where
 	-- will be needed when we fill in stubs
-    _cl_size   =	closureSize cl_info
-    _slop_size = slopSize cl_info
+    _cl_size   = closureSize cl_info
+--    _slop_size = slopSize cl_info
 
     tick_alloc_thk 
 	| closureUpdReqd cl_info = tick_alloc_up_thk

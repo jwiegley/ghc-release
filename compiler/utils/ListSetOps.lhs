@@ -5,6 +5,13 @@
 \section[ListSetOps]{Set-like operations on lists}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module ListSetOps (
         unionLists, minusList, insertList,
 
@@ -15,8 +22,11 @@ module ListSetOps (
 
         -- Duplicate handling
         hasNoDups, runs, removeDups, findDupsEq,
-        equivClasses, equivClassesByUniq
+        equivClasses, equivClassesByUniq,
 
+	-- Remove redudant elts
+	removeRedundant	   -- Used in the ghc/InteractiveUI, 
+			   -- although not in the compiler itself
    ) where
 
 #include "HsVersions.h"
@@ -208,6 +218,22 @@ findDupsEq _  [] = []
 findDupsEq eq (x:xs) | null eq_xs  = findDupsEq eq xs
                      | otherwise   = (x:eq_xs) : findDupsEq eq neq_xs
     where (eq_xs, neq_xs) = partition (eq x) xs
+
+removeRedundant :: (a -> a -> Bool)   -- True <=> discard the *second* argument
+		-> [a] -> [a]
+-- Remove any element y for which 
+--     another element x is in the list
+-- and (x `subsumes` y)
+-- Preserves order
+removeRedundant subsumes xs
+  = WARN( length xs > 10, text "removeRedundant" <+> int (length xs) )
+          -- This is a quadratic algorithm :-) so warn if the list gets long
+    go [] xs
+  where
+    go acc [] = reverse acc
+    go acc (x:xs) 
+       | any (`subsumes` x) acc = go acc xs
+       | otherwise              = go (x : filterOut (x `subsumes`) acc) xs
 \end{code}
 
 

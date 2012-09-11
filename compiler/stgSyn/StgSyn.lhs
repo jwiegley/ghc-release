@@ -9,6 +9,13 @@ form of @CoreSyntax@, the style being one that happens to be ideally
 suited to spineless tagless code generation.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module StgSyn (
 	GenStgArg(..), 
 	GenStgLiveVars,
@@ -39,9 +46,7 @@ module StgSyn (
 
 	pprStgBinding, pprStgBindings, pprStgBindingsWithSRTs
 
-#ifdef DEBUG
 	, pprStgLVs
-#endif
     ) where
 
 #include "HsVersions.h"
@@ -62,15 +67,15 @@ import TyCon            ( TyCon )
 import UniqSet
 import Unique		( Unique )
 import Bitmap
+import DynFlags
+import Platform
 import StaticFlags	( opt_SccProfilingOn )
 import Module
 import FastString
 
-#if mingw32_TARGET_OS
 import Packages		( isDllName )
 import Type		( typePrimRep )
 import TyCon		( PrimRep(..) )
-#endif
 \end{code}
 
 %************************************************************************
@@ -110,18 +115,21 @@ isStgTypeArg :: StgArg -> Bool
 isStgTypeArg (StgTypeArg _) = True
 isStgTypeArg _              = False
 
-isDllConApp :: PackageId -> DataCon -> [StgArg] -> Bool
+isDllConApp :: DynFlags -> DataCon -> [StgArg] -> Bool
 -- Does this constructor application refer to 
 -- anything in a different *Windows* DLL?
 -- If so, we can't allocate it statically
-#if mingw32_TARGET_OS
-isDllConApp this_pkg con args
-  = isDllName this_pkg (dataConName con) || any is_dll_arg args
+isDllConApp dflags con args
+ | platformOS (targetPlatform dflags) == OSMinGW32
+    = isDllName this_pkg (dataConName con) || any is_dll_arg args
+ | otherwise = False
   where
-    is_dll_arg ::StgArg -> Bool
+    is_dll_arg :: StgArg -> Bool
     is_dll_arg (StgVarArg v) =  isAddrRep (typePrimRep (idType v))
                              && isDllName this_pkg (idName v)
     is_dll_arg _             = False
+
+    this_pkg = thisPackage dflags
 
 isAddrRep :: PrimRep -> Bool
 -- True of machine adddresses; these are the things that don't
@@ -139,10 +147,6 @@ isAddrRep :: PrimRep -> Bool
 isAddrRep AddrRep = True
 isAddrRep PtrRep  = True
 isAddrRep _       = False
-
-#else
-isDllConApp _ _ _ = False
-#endif
 
 stgArgType :: StgArg -> Type
 	-- Very half baked becase we have lost the type arguments
@@ -377,7 +381,9 @@ Finally for @scc@ expressions we introduce a new STG construct.
 \begin{code}
   | StgSCC
 	CostCentre		-- label of SCC expression
-	(GenStgExpr bndr occ)	-- scc expression
+        !Bool                   -- bump the entry count?
+        !Bool                   -- push the cost centre?
+        (GenStgExpr bndr occ)   -- scc expression
 \end{code}
 
 %************************************************************************
@@ -764,9 +770,12 @@ pprStgExpr (StgLetNoEscape lvs_whole lvs_rhss bind expr)
 			     char ']']))))
 		2 (ppr expr)]
 
-pprStgExpr (StgSCC cc expr)
-  = sep [ hsep [ptext (sLit "_scc_"), ppr cc],
-	  pprStgExpr expr ]
+pprStgExpr (StgSCC cc tick push expr)
+  = sep [ hsep [scc, ppr cc], pprStgExpr expr ]
+  where
+    scc | tick && push = ptext (sLit "_scc_")
+        | tick         = ptext (sLit "_tick_")
+        | otherwise    = ptext (sLit "_push_")
 
 pprStgExpr (StgTick m n expr)
   = sep [ hsep [ptext (sLit "_tick_"),  pprModule m,text (show n)],
@@ -805,7 +814,6 @@ instance Outputable AltType where
 \end{code}
 
 \begin{code}
-#ifdef DEBUG
 pprStgLVs :: Outputable occ => GenStgLiveVars occ -> SDoc
 pprStgLVs lvs
   = getPprStyle $ \ sty ->
@@ -813,7 +821,6 @@ pprStgLVs lvs
 	empty
     else
 	hcat [text "{-lvs:", interpp'SP (uniqSetToList lvs), text "-}"]
-#endif
 \end{code}
 
 \begin{code}

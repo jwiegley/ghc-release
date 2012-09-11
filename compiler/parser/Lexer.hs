@@ -24,6 +24,7 @@ module Lexer (
    activeContext, nextIsEOF,
    getLexState, popLexState, pushLexState,
    extension, bangPatEnabled, datatypeContextsEnabled,
+   traditionalRecordSyntaxEnabled,
    addWarning,
    lexTokenStream
   ) where
@@ -49,6 +50,7 @@ import Data.Maybe
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Ratio
+import Data.Word
 
 #if __GLASGOW_HASKELL__ >= 603
 #include "ghcconfig.h"
@@ -81,7 +83,7 @@ alex_deflt :: AlexAddr
 alex_deflt = AlexA# "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x68\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x68\x00\xff\xff\x68\x00\xff\xff\x68\x00\xff\xff\xff\xff\xff\xff\xff\xff\x68\x00\xff\xff\xff\xff\x1b\x00\x1c\x00\x1b\x00\x1c\x00\x19\x00\x1a\x00\x19\x00\x19\x00\xff\xff\x68\x00\xff\xff\xff\xff\xff\xff\x2a\x00\x2b\x00\x2a\x00\x2a\x00\x2c\x00\x2d\x00\x2c\x00\x2d\x00\x33\x00\x34\x00\x33\x00\x35\x00\x33\x00\x33\x00\x34\x00\x35\x00\x38\x00\x39\x00\x38\x00\x39\x00\x36\x00\x37\x00\x36\x00\x36\x00\x37\x00\x36\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x48\x00\x48\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x50\x00\x50\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x68\x00\xff\xff\xff\xff\xff\xff\x68\x00\xff\xff\xff\xff\xff\xff\x68\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x68\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"#
 
 alex_accept = listArray (0::Int,233) [[],[(AlexAcc (alex_action_13))],[(AlexAcc (alex_action_17))],[(AlexAcc (alex_action_18))],[(AlexAcc (alex_action_19))],[],[],[(AlexAcc (alex_action_24))],[],[],[],[],[(AlexAccSkip)],[(AlexAccSkip)],[(AlexAcc (alex_action_1))],[(AlexAcc (alex_action_1))],[(AlexAccPred  (alex_action_2) ( isNormalComment ))],[(AlexAccPred  (alex_action_2) ( isNormalComment )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_2) ( isNormalComment ))],[(AlexAccPred  (alex_action_2) ( isNormalComment ))],[(AlexAccPred  (alex_action_14) ( notFollowedBy '-' ))],[],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_63))],[(AlexAcc (alex_action_63))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_3))],[(AlexAccPred  (alex_action_8) ( atEOL ))],[(AlexAccPred  (alex_action_8) ( atEOL )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_8) ( atEOL ))],[(AlexAccPred  (alex_action_8) ( atEOL ))],[],[(AlexAcc (alex_action_24))],[],[],[(AlexAcc (alex_action_75))],[(AlexAccPred  (alex_action_7) ( atEOL ))],[(AlexAccPred  (alex_action_7) ( atEOL )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_7) ( atEOL ))],[(AlexAccPred  (alex_action_7) ( atEOL )),(AlexAcc (alex_action_75))],[(AlexAcc (alex_action_4))],[(AlexAcc (alex_action_4))],[(AlexAcc (alex_action_4))],[(AlexAcc (alex_action_4))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) ))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_33))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_35))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) )),(AlexAccPred  (alex_action_37) ( ifExtension haddockEnabled ))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) ))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_35))],[(AlexAcc (alex_action_6))],[(AlexAcc (alex_action_6))],[(AlexAcc (alex_action_6))],[(AlexAcc (alex_action_6))],[(AlexAccPred  (alex_action_7) ( atEOL ))],[(AlexAccPred  (alex_action_7) ( atEOL )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_7) ( atEOL )),(AlexAcc (alex_action_75))],[(AlexAccPred  (alex_action_7) ( atEOL ))],[(AlexAccPred  (alex_action_7) ( atEOL )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_7) ( atEOL )),(AlexAcc (alex_action_75))],[(AlexAccSkip)],[(AlexAccPred  (alex_action_10) (alexPrevCharIs '\n'))],[(AlexAccPred  (alex_action_10) (alexPrevCharIs '\n'))],[],[],[],[(AlexAccSkipPred  (alexPrevCharIs '\n'))],[],[],[],[],[],[],[],[(AlexAccSkipPred  (alexPrevCharIs '\n'))],[],[],[(AlexAccSkip)],[(AlexAccPred  (alex_action_16) (alexPrevCharIs '\n'))],[(AlexAccPred  (alex_action_16) (alexPrevCharIs '\n'))],[],[],[],[(AlexAcc (alex_action_20))],[(AlexAccPred  (alex_action_21) ( known_pragma linePrags ))],[(AlexAccPred  (alex_action_21) ( known_pragma linePrags )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_21) ( known_pragma linePrags )),(AlexAccPred  (alex_action_29) ( known_pragma oneWordPrags )),(AlexAccPred  (alex_action_30) ( known_pragma ignoredPrags )),(AlexAccPred  (alex_action_32) ( known_pragma fileHeaderPrags ))],[(AlexAccPred  (alex_action_21) ( known_pragma linePrags )),(AlexAccPred  (alex_action_29) ( known_pragma oneWordPrags )),(AlexAccPred  (alex_action_30) ( known_pragma ignoredPrags )),(AlexAccPred  (alex_action_34) ( known_pragma fileHeaderPrags ))],[],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_36))],[(AlexAcc (alex_action_36))],[],[(AlexAcc (alex_action_24))],[],[],[(AlexAcc (alex_action_22))],[(AlexAcc (alex_action_23))],[],[],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_26))],[],[],[(AlexAcc (alex_action_27))],[(AlexAcc (alex_action_27))],[],[],[(AlexAccPred  (alex_action_28) ( known_pragma twoWordPrags ))],[],[(AlexAcc (alex_action_31))],[],[(AlexAcc (alex_action_75))],[],[(AlexAcc (alex_action_75))],[(AlexAccPred  (alex_action_38) ( ifExtension haddockEnabled ))],[],[(AlexAccPred  (alex_action_39) ( ifExtension parrEnabled ))],[(AlexAcc (alex_action_58))],[(AlexAccPred  (alex_action_40) ( ifExtension parrEnabled ))],[(AlexAcc (alex_action_76))],[(AlexAccPred  (alex_action_41) ( ifExtension thEnabled ))],[(AlexAccPred  (alex_action_42) ( ifExtension thEnabled )),(AlexAccPred  (alex_action_50) ( ifExtension qqEnabled ))],[],[(AlexAccPred  (alex_action_43) ( ifExtension thEnabled )),(AlexAccPred  (alex_action_50) ( ifExtension qqEnabled ))],[],[(AlexAccPred  (alex_action_44) ( ifExtension thEnabled )),(AlexAccPred  (alex_action_50) ( ifExtension qqEnabled ))],[],[(AlexAccPred  (alex_action_45) ( ifExtension thEnabled )),(AlexAccPred  (alex_action_50) ( ifExtension qqEnabled ))],[],[(AlexAccPred  (alex_action_46) ( ifExtension thEnabled ))],[(AlexAcc (alex_action_75))],[(AlexAccPred  (alex_action_47) ( ifExtension thEnabled ))],[(AlexAccPred  (alex_action_47) ( ifExtension thEnabled ))],[(AlexAcc (alex_action_75))],[(AlexAccPred  (alex_action_48) ( ifExtension thEnabled ))],[(AlexAccPred  (alex_action_49) ( ifExtension qqEnabled ))],[],[],[],[(AlexAccPred  (alex_action_50) ( ifExtension qqEnabled ))],[],[],[(AlexAccPred  (alex_action_51) ( ifExtension arrowsEnabled `alexAndPred` notFollowedBySymbol ))],[(AlexAcc (alex_action_56))],[(AlexAccPred  (alex_action_52) ( ifExtension arrowsEnabled ))],[(AlexAccPred  (alex_action_53) ( ifExtension ipEnabled ))],[(AlexAccPred  (alex_action_53) ( ifExtension ipEnabled ))],[(AlexAcc (alex_action_75))],[(AlexAccPred  (alex_action_54) ( ifExtension unboxedTuplesEnabled `alexAndPred` notFollowedBySymbol ))],[(AlexAccPred  (alex_action_55) ( ifExtension unboxedTuplesEnabled ))],[(AlexAcc (alex_action_56))],[(AlexAcc (alex_action_57))],[(AlexAcc (alex_action_58))],[(AlexAcc (alex_action_59))],[(AlexAcc (alex_action_60))],[(AlexAcc (alex_action_61))],[(AlexAcc (alex_action_62))],[(AlexAcc (alex_action_64))],[(AlexAcc (alex_action_65))],[(AlexAcc (alex_action_65))],[(AlexAcc (alex_action_65))],[(AlexAcc (alex_action_65))],[],[],[(AlexAcc (alex_action_66))],[(AlexAcc (alex_action_66))],[(AlexAcc (alex_action_68))],[(AlexAcc (alex_action_68))],[(AlexAcc (alex_action_66))],[(AlexAcc (alex_action_66))],[(AlexAcc (alex_action_68))],[(AlexAcc (alex_action_68))],[(AlexAcc (alex_action_67))],[(AlexAcc (alex_action_67))],[(AlexAcc (alex_action_67))],[(AlexAcc (alex_action_67))],[(AlexAccPred  (alex_action_69) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_70) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_71) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_72) ( ifExtension magicHashEnabled ))],[(AlexAcc (alex_action_73))],[(AlexAcc (alex_action_73))],[(AlexAcc (alex_action_74))],[(AlexAcc (alex_action_74))],[(AlexAcc (alex_action_75))],[(AlexAcc (alex_action_75))],[(AlexAcc (alex_action_76))],[(AlexAcc (alex_action_77))],[(AlexAcc (alex_action_77))],[(AlexAcc (alex_action_78))],[],[(AlexAcc (alex_action_79))],[],[(AlexAcc (alex_action_80))],[(AlexAcc (alex_action_80))],[(AlexAcc (alex_action_80))],[],[],[],[],[],[(AlexAccPred  (alex_action_81) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_82) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_83) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_84) ( ifExtension magicHashEnabled ))],[],[],[(AlexAccPred  (alex_action_85) ( ifExtension magicHashEnabled ))],[],[],[(AlexAccPred  (alex_action_86) ( ifExtension magicHashEnabled ))],[],[],[(AlexAccPred  (alex_action_87) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_88) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_89) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_90) ( ifExtension magicHashEnabled ))],[],[],[],[],[],[],[],[],[(AlexAccPred  (alex_action_91) ( ifExtension magicHashEnabled ))],[(AlexAcc (alex_action_92))],[(AlexAcc (alex_action_93))]]
-{-# LINE 417 "compiler/parser/Lexer.x" #-}
+{-# LINE 419 "compiler/parser/Lexer.x" #-}
 
 -- -----------------------------------------------------------------------------
 -- The token type
@@ -123,6 +125,7 @@ data Token
   | ITunsafe
   | ITstdcallconv
   | ITccallconv
+  | ITcapiconv
   | ITprimcallconv
   | ITmdo
   | ITfamily
@@ -143,6 +146,7 @@ data Token
   | ITgenerated_prag
   | ITcore_prag                 -- hdaume: core annotations
   | ITunpack_prag
+  | ITnounpack_prag
   | ITann_prag
   | ITclose_prag
   | IToptions_prag String
@@ -162,6 +166,7 @@ data Token
   | ITrarrow
   | ITat
   | ITtilde
+  | ITtildehsh
   | ITdarrow
   | ITminus
   | ITbang
@@ -188,6 +193,7 @@ data Token
   | ITcomma
   | ITunderscore
   | ITbackquote
+  | ITsimpleQuote               --  '
 
   | ITvarid   FastString        -- identifiers
   | ITconid   FastString
@@ -222,7 +228,6 @@ data Token
   | ITcloseQuote                --  |]
   | ITidEscape   FastString     --  $x
   | ITparenEscape               --  $(
-  | ITvarQuote                  --  '
   | ITtyQuote                   --  ''
   | ITquasiQuote (FastString,FastString,RealSrcSpan) --  [:...|...|]
 
@@ -249,9 +254,7 @@ data Token
   | ITlineComment     String     -- comment starting by "--"
   | ITblockComment    String     -- comment in {- -}
 
-#ifdef DEBUG
-  deriving Show -- debugging
-#endif
+  deriving Show
 
 -- the bitmap provided as the third component indicates whether the
 -- corresponding extension keyword is valid under the extension options
@@ -308,6 +311,7 @@ reservedWordsFM = listToUFM $
          ( "unsafe",         ITunsafe,        bit ffiBit),
          ( "stdcall",        ITstdcallconv,   bit ffiBit),
          ( "ccall",          ITccallconv,     bit ffiBit),
+         ( "capi",           ITcapiconv,      bit cApiFfiBit),
          ( "prim",           ITprimcallconv,  bit ffiBit),
 
          ( "rec",            ITrec,           bit recBit),
@@ -328,6 +332,7 @@ reservedSymsFM = listToUFM $
        ,("->",  ITrarrow,   always)
        ,("@",   ITat,       always)
        ,("~",   ITtilde,    always)
+       ,("~#",  ITtildehsh, always)
        ,("=>",  ITdarrow,   always)
        ,("-",   ITminus,    always)
        ,("!",   ITbang,     always)
@@ -450,7 +455,7 @@ ifExtension pred bits _ _ _ = pred bits
 multiline_doc_comment :: Action
 multiline_doc_comment span buf _len = withLexedDocType (worker "")
   where
-    worker commentAcc input docType oneLine = case alexGetChar input of
+    worker commentAcc input docType oneLine = case alexGetChar' input of
       Just ('\n', input')
         | oneLine -> docCommentEnd input commentAcc docType buf span
         | otherwise -> case checkIfCommentLine input' of
@@ -461,15 +466,15 @@ multiline_doc_comment span buf _len = withLexedDocType (worker "")
 
     checkIfCommentLine input = check (dropNonNewlineSpace input)
       where
-        check input = case alexGetChar input of
-          Just ('-', input) -> case alexGetChar input of
-            Just ('-', input) -> case alexGetChar input of
+        check input = case alexGetChar' input of
+          Just ('-', input) -> case alexGetChar' input of
+            Just ('-', input) -> case alexGetChar' input of
               Just (c, _) | c /= '-' -> Just input
               _ -> Nothing
             _ -> Nothing
           _ -> Nothing
 
-        dropNonNewlineSpace input = case alexGetChar input of
+        dropNonNewlineSpace input = case alexGetChar' input of
           Just (c, input')
             | isSpace c && c /= '\n' -> dropNonNewlineSpace input'
             | otherwise -> input
@@ -494,13 +499,13 @@ nested_comment cont span _str _len = do
                                if b
                                  then docCommentEnd input commentAcc ITblockComment _str span
                                  else cont
-    go commentAcc n input = case alexGetChar input of
+    go commentAcc n input = case alexGetChar' input of
       Nothing -> errBrace input span
-      Just ('-',input) -> case alexGetChar input of
+      Just ('-',input) -> case alexGetChar' input of
         Nothing  -> errBrace input span
         Just ('\125',input) -> go commentAcc (n-1) input
         Just (_,_)          -> go ('-':commentAcc) n input
-      Just ('\123',input) -> case alexGetChar input of
+      Just ('\123',input) -> case alexGetChar' input of
         Nothing  -> errBrace input span
         Just ('-',input) -> go ('-':'\123':commentAcc) (n+1) input
         Just (_,_)       -> go ('\123':commentAcc) n input
@@ -509,14 +514,14 @@ nested_comment cont span _str _len = do
 nested_doc_comment :: Action
 nested_doc_comment span buf _len = withLexedDocType (go "")
   where
-    go commentAcc input docType _ = case alexGetChar input of
+    go commentAcc input docType _ = case alexGetChar' input of
       Nothing -> errBrace input span
-      Just ('-',input) -> case alexGetChar input of
+      Just ('-',input) -> case alexGetChar' input of
         Nothing -> errBrace input span
         Just ('\125',input) ->
           docCommentEnd input commentAcc docType buf span
         Just (_,_) -> go ('-':commentAcc) input docType False
-      Just ('\123', input) -> case alexGetChar input of
+      Just ('\123', input) -> case alexGetChar' input of
         Nothing  -> errBrace input span
         Just ('-',input) -> do
           setInput input
@@ -537,7 +542,7 @@ withLexedDocType lexDocComment = do
     '#' -> lexDocComment input ITdocOptionsOld False
     _ -> panic "withLexedDocType: Bad doc type"
  where
-    lexDocSection n input = case alexGetChar input of
+    lexDocSection n input = case alexGetChar' input of
       Just ('*', input) -> lexDocSection (n+1) input
       Just (_,   _)     -> lexDocComment input (ITdocSection n) True
       Nothing -> do setInput input; lexToken -- eof reached, lex it normally
@@ -791,9 +796,22 @@ setLine code span buf len = do
 
 setFile :: Int -> Action
 setFile code span buf len = do
-  let file = lexemeToFastString (stepOn buf) (len-2)
+  let file = mkFastString (go (lexemeToString (stepOn buf) (len-2)))
+        where go ('\\':c:cs) = c : go cs
+              go (c:cs)      = c : go cs
+              go []          = []
+              -- decode escapes in the filename.  e.g. on Windows
+              -- when our filenames have backslashes in, gcc seems to
+              -- escape the backslashes.  One symptom of not doing this
+              -- is that filenames in error messages look a bit strange:
+              --   C:\\foo\bar.hs
+              -- only the first backslash is doubled, because we apply
+              -- System.FilePath.normalise before printing out
+              -- filenames and it does not remove duplicate
+              -- backslashes after the drive letter (should it?).
   setAlrLastLoc $ alrInitialLoc file
   setSrcLoc (mkRealSrcLoc file (srcSpanEndLine span) (srcSpanEndCol span))
+  addSrcFile file
   _ <- popLexState
   pushLexState code
   lexToken
@@ -870,7 +888,7 @@ lex_string s = do
         | Just ('&',i) <- next -> do
                 setInput i; lex_string s
         | Just (c,i) <- next, c <= '\x7f' && is_space c -> do
-                           -- is_space only works for <= '\x7f' (#3751)
+                           -- is_space only works for <= '\x7f' (#3751, #5425)
                 setInput i; lex_stringgap s
         where next = alexGetChar' i
 
@@ -886,14 +904,15 @@ lex_stringgap s = do
   c <- getCharOrFail i
   case c of
     '\\' -> lex_string s
-    c | is_space c -> lex_stringgap s
+    c | c <= '\x7f' && is_space c -> lex_stringgap s
+                           -- is_space only works for <= '\x7f' (#3751, #5425)
     _other -> lit_error i
 
 
 lex_char_tok :: Action
 -- Here we are basically parsing character literals, such as 'x' or '\n'
 -- but, when Template Haskell is on, we additionally spot
--- 'x and ''T, returning ITvarQuote and ITtyQuote respectively,
+-- 'x and ''T, returning ITsimpleQuote and ITtyQuote respectively,
 -- but WITHOUT CONSUMING the x or T part  (the parser does that).
 -- So we have to do two characters of lookahead: when we see 'x we need to
 -- see if there's a trailing quote
@@ -904,11 +923,8 @@ lex_char_tok span _buf _len = do        -- We've seen '
         Nothing -> lit_error  i1
 
         Just ('\'', i2@(AI end2 _)) -> do       -- We've seen ''
-                  th_exts <- extension thEnabled
-                  if th_exts then do
-                        setInput i2
-                        return (L (mkRealSrcSpan loc end2)  ITtyQuote)
-                   else lit_error i1
+                   setInput i2
+                   return (L (mkRealSrcSpan loc end2)  ITtyQuote)
 
         Just ('\\', i2@(AI _end2 _)) -> do      -- We've seen 'backslash
                   setInput i2
@@ -931,10 +947,8 @@ lex_char_tok span _buf _len = do        -- We've seen '
                 _other -> do            -- We've seen 'x not followed by quote
                                         -- (including the possibility of EOF)
                                         -- If TH is on, just parse the quote only
-                        th_exts <- extension thEnabled
                         let (AI end _) = i1
-                        if th_exts then return (L (mkRealSrcSpan loc end) ITvarQuote)
-                                   else lit_error i2
+                        return (L (mkRealSrcSpan loc end) ITsimpleQuote)
 
 finish_char_tok :: RealSrcLoc -> Char -> P (RealLocated Token)
 finish_char_tok loc ch  -- We've already seen the closing quote
@@ -1082,33 +1096,34 @@ lex_quasiquote_tok span buf len = do
                 -- 'tail' drops the initial '[',
                 -- while the -1 drops the trailing '|'
   quoteStart <- getSrcLoc
-  quote <- lex_quasiquote ""
+  quote <- lex_quasiquote quoteStart ""
   end <- getSrcLoc
   return (L (mkRealSrcSpan (realSrcSpanStart span) end)
            (ITquasiQuote (mkFastString quoter,
                           mkFastString (reverse quote),
                           mkRealSrcSpan quoteStart end)))
 
-lex_quasiquote :: String -> P String
-lex_quasiquote s = do
+lex_quasiquote :: RealSrcLoc -> String -> P String
+lex_quasiquote start s = do
   i <- getInput
   case alexGetChar' i of
-    Nothing -> lit_error i
+    Nothing -> quasiquote_error start
 
-    Just ('\\',i)
-        | Just ('|',i) <- next -> do
-                setInput i; lex_quasiquote ('|' : s)
-        | Just (']',i) <- next -> do
-                setInput i; lex_quasiquote (']' : s)
-        where next = alexGetChar' i
-
+    -- NB: The string "|]" terminates the quasiquote,
+    -- with absolutely no escaping. See the extensive
+    -- discussion on Trac #5348 for why there is no
+    -- escape handling.
     Just ('|',i)
-        | Just (']',i) <- next -> do
-                setInput i; return s
-        where next = alexGetChar' i
+        | Just (']',i) <- alexGetChar' i
+        -> do { setInput i; return s }
 
     Just (c, i) -> do
-         setInput i; lex_quasiquote (c : s)
+         setInput i; lex_quasiquote start (c : s)
+
+quasiquote_error :: RealSrcLoc -> P a
+quasiquote_error start = do
+  (AI end buf) <- getInput
+  reportLexError start end buf "unterminated quasiquotation"
 
 -- -----------------------------------------------------------------------------
 -- Warnings
@@ -1150,6 +1165,7 @@ data PState = PState {
                                    -- extensions
         context    :: [LayoutContext],
         lex_state  :: [Int],
+        srcfiles   :: [FastString],
         -- Used in the alternative layout rule:
         -- These tokens are the next ones to be sent out. They are
         -- just blindly emitted, without the rule looking at them again:
@@ -1237,6 +1253,9 @@ setSrcLoc new_loc = P $ \s -> POk s{loc=new_loc} ()
 getSrcLoc :: P RealSrcLoc
 getSrcLoc = P $ \s@(PState{ loc=loc }) -> POk s loc
 
+addSrcFile :: FastString -> P ()
+addSrcFile f = P $ \s -> POk s{ srcfiles = f : srcfiles s } ()
+
 setLastToken :: RealSrcSpan -> Int -> P ()
 setLastToken loc len = P $ \s -> POk s {
   last_loc=loc,
@@ -1248,14 +1267,22 @@ data AlexInput = AI RealSrcLoc StringBuffer
 alexInputPrevChar :: AlexInput -> Char
 alexInputPrevChar (AI _ buf) = prevChar buf '\n'
 
+-- backwards compatibility for Alex 2.x
 alexGetChar :: AlexInput -> Maybe (Char,AlexInput)
-alexGetChar (AI loc s)
+alexGetChar inp = case alexGetByte inp of
+                    Nothing    -> Nothing
+                    Just (b,i) -> c `seq` Just (c,i)
+                       where c = chr $ fromIntegral b
+
+alexGetByte :: AlexInput -> Maybe (Word8,AlexInput)
+alexGetByte (AI loc s)
   | atEnd s   = Nothing
-  | otherwise = adj_c `seq` loc' `seq` s' `seq`
+  | otherwise = byte `seq` loc' `seq` s' `seq`
                 --trace (show (ord c)) $
-                Just (adj_c, (AI loc' s'))
+                Just (byte, (AI loc' s'))
   where (c,s') = nextChar s
         loc'   = advanceSrcLoc loc c
+        byte   = fromIntegral $ ord adj_c
 
         non_graphic     = '\x0'
         upper           = '\x1'
@@ -1397,6 +1424,8 @@ ffiBit :: Int
 ffiBit= 0
 interruptibleFfiBit :: Int
 interruptibleFfiBit = 1
+cApiFfiBit :: Int
+cApiFfiBit = 2
 parrBit :: Int
 parrBit = 3
 arrowsBit :: Int
@@ -1444,6 +1473,8 @@ nondecreasingIndentationBit :: Int
 nondecreasingIndentationBit = 25
 safeHaskellBit :: Int
 safeHaskellBit = 26
+traditionalRecordSyntaxBit :: Int
+traditionalRecordSyntaxBit = 27
 
 always :: Int -> Bool
 always           _     = True
@@ -1485,6 +1516,8 @@ relaxedLayout :: Int -> Bool
 relaxedLayout flags = testBit flags relaxedLayoutBit
 nondecreasingIndentation :: Int -> Bool
 nondecreasingIndentation flags = testBit flags nondecreasingIndentationBit
+traditionalRecordSyntaxEnabled :: Int -> Bool
+traditionalRecordSyntaxEnabled flags = testBit flags traditionalRecordSyntaxBit
 
 -- PState for parsing options pragmas
 --
@@ -1507,6 +1540,7 @@ mkPState flags buf loc =
       extsBitmap    = fromIntegral bitmap,
       context       = [],
       lex_state     = [bol, 0],
+      srcfiles      = [],
       alr_pending_implicit_tokens = [],
       alr_next_token = Nothing,
       alr_last_loc = alrInitialLoc (fsLit "<no file>"),
@@ -1517,6 +1551,7 @@ mkPState flags buf loc =
     where
       bitmap =     ffiBit                      `setBitIf` xopt Opt_ForeignFunctionInterface flags
                .|. interruptibleFfiBit         `setBitIf` xopt Opt_InterruptibleFFI         flags
+               .|. cApiFfiBit                  `setBitIf` xopt Opt_CApiFFI                  flags
                .|. parrBit                     `setBitIf` xopt Opt_ParallelArrays           flags
                .|. arrowsBit                   `setBitIf` xopt Opt_Arrows                   flags
                .|. thBit                       `setBitIf` xopt Opt_TemplateHaskell          flags
@@ -1540,7 +1575,8 @@ mkPState flags buf loc =
                .|. alternativeLayoutRuleBit    `setBitIf` xopt Opt_AlternativeLayoutRule    flags
                .|. relaxedLayoutBit            `setBitIf` xopt Opt_RelaxedLayout            flags
                .|. nondecreasingIndentationBit `setBitIf` xopt Opt_NondecreasingIndentation flags
-               .|. safeHaskellBit              `setBitIf` safeHaskellOn                     flags
+               .|. safeHaskellBit              `setBitIf` safeImportsOn                     flags
+               .|. traditionalRecordSyntaxBit  `setBitIf` xopt Opt_TraditionalRecordSyntax  flags
       --
       setBitIf :: Int -> Bool -> Int
       b `setBitIf` cond | cond      = bit b
@@ -1918,6 +1954,7 @@ oneWordPrags = Map.fromList([("rules", rulePrag),
                            ("generated", token ITgenerated_prag),
                            ("core", token ITcore_prag),
                            ("unpack", token ITunpack_prag),
+                           ("nounpack", token ITnounpack_prag),
                            ("ann", token ITann_prag),
                            ("vectorize", token ITvect_prag),
                            ("novectorize", token ITnovect_prag)])

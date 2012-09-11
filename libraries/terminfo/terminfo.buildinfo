@@ -1,0 +1,4 @@
+includes: ncurses.h term.h
+include-dirs: 
+extra-lib-dirs: 
+extra-libraries: ncurses

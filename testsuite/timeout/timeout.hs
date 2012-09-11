@@ -1,15 +1,16 @@
 {-# OPTIONS -cpp #-}
+module Main where
 
 import Prelude hiding (catch)
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (putMVar, takeMVar, newEmptyMVar)
+import Control.Monad
 import Control.Exception
 import Data.Maybe (isNothing)
 import System.Environment (getArgs)
 import System.Exit
 import System.IO (hPutStrLn, stderr)
-import Control.Monad
 
 #if !defined(mingw32_HOST_OS)
 import System.Posix hiding (killProcess)
@@ -104,12 +105,16 @@ ignoreIOExceptions io = io `catch` ((\_ -> return ()) :: IOException -> IO ())
 
 #else
 run secs cmd =
+    let escape '\\' = "\\\\"
+        escape '"'  = "\\\""
+        escape c    = [c]
+        cmd' = "sh -c \"" ++ concatMap escape cmd ++ "\"" in
     alloca $ \p_startupinfo ->
     alloca $ \p_pi ->
-    withTString ("sh -c \"" ++ cmd ++ "\"") $ \cmd' ->
+    withTString cmd' $ \cmd'' ->
     do job <- createJobObjectW nullPtr nullPtr
        let creationflags = 0
-       b <- createProcessW nullPtr cmd' nullPtr nullPtr True
+       b <- createProcessW nullPtr cmd'' nullPtr nullPtr True
                            creationflags
                            nullPtr nullPtr p_startupinfo p_pi
        unless b $ errorWin "createProcessW"

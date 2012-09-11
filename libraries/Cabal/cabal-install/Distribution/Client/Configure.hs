@@ -32,8 +32,8 @@ import Distribution.Simple.Compiler
          , PackageDB(..), PackageDBStack )
 import Distribution.Simple.Program (ProgramConfiguration )
 import Distribution.Simple.Setup
-         ( ConfigFlags(..), toFlag, flagToMaybe, fromFlagOrDefault )
-import Distribution.Client.PackageIndex (PackageIndex)
+         ( ConfigFlags(..), fromFlag, toFlag, flagToMaybe, fromFlagOrDefault )
+import Distribution.Simple.PackageIndex (PackageIndex)
 import Distribution.Simple.Utils
          ( defaultPackageDesc )
 import Distribution.Package
@@ -121,7 +121,7 @@ configure verbosity packageDBs repos comp conf
 --
 planLocalPackage :: Verbosity -> Compiler
                  -> ConfigFlags -> ConfigExFlags
-                 -> PackageIndex InstalledPackage
+                 -> PackageIndex
                  -> SourcePackageDb
                  -> IO (Progress String String InstallPlan)
 planLocalPackage verbosity comp configFlags configExFlags installedPkgIndex
@@ -134,6 +134,8 @@ planLocalPackage verbosity comp configFlags configExFlags installedPkgIndex
         Source.packageDescription = pkg,
         packageSource             = LocalUnpackedPackage "."
       }
+
+      solver = fromFlag $ configSolver configExFlags
 
       resolverParams =
 
@@ -158,7 +160,7 @@ planLocalPackage verbosity comp configFlags configExFlags installedPkgIndex
             (SourcePackageDb mempty packagePrefs)
             [SpecificSourcePackage localPkg]
 
-  return (resolveDependencies buildPlatform (compilerId comp) resolverParams)
+  return (resolveDependencies buildPlatform (compilerId comp) solver resolverParams)
 
 
 -- | Call an installer for an 'SourcePackage' but override the configure

@@ -25,11 +25,7 @@ import GHC
 import Name
 import InstEnv
 import Class
-#if MIN_VERSION_ghc(7,1,0)
 import GhcMonad (withSession)
-#else
-import HscTypes (withSession)
-#endif
 import TysPrim( funTyCon )
 import MonadUtils (liftIO)
 import TcRnDriver (tcRnGetInfo)
@@ -77,20 +73,17 @@ lookupInstDoc :: Name -> Interface -> IfaceMap -> InstIfaceMap -> Maybe (Doc Nam
 -- TODO: capture this pattern in a function (when we have streamlined the
 -- handling of instances)
 lookupInstDoc name iface ifaceMap instIfaceMap =
-  case Map.lookup name (ifaceInstanceDocMap iface) of
+  case Map.lookup name (ifaceDocMap iface) of
     Just doc -> Just doc
     Nothing ->
       case Map.lookup modName ifaceMap of
         Just iface2 ->
-          case Map.lookup name (ifaceInstanceDocMap iface2) of
+          case Map.lookup name (ifaceDocMap iface2) of
             Just doc -> Just doc
             Nothing -> Nothing
         Nothing ->
           case Map.lookup modName instIfaceMap of
-            Just instIface ->
-              case Map.lookup name (instDocMap instIface) of
-                Just (doc, _) -> doc
-                Nothing -> Nothing
+            Just instIface -> Map.lookup name (instDocMap instIface)
             Nothing -> Nothing
   where
     modName = nameModule name
@@ -116,7 +109,6 @@ getAllInfo name = withSession $ \hsc_env -> do
 data SimpleType = SimpleType Name [SimpleType] deriving (Eq,Ord)
 
 
--- TODO: should we support PredTy here?
 instHead :: ([TyVar], [PredType], Class, [Type]) -> ([Int], Name, [SimpleType])
 instHead (_, _, cls, args)
   = (map argCount args, className cls, map simplify args)
@@ -134,7 +126,6 @@ instHead (_, _, cls, args)
       where (SimpleType s ts) = simplify t1
     simplify (TyVarTy v) = SimpleType (tyVarName v) []
     simplify (TyConApp tc ts) = SimpleType (tyConName tc) (map simplify ts)
-    simplify _ = error "simplify"
 
 
 -- sortImage f = sortBy (\x y -> compare (f x) (f y))

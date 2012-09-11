@@ -1,11 +1,17 @@
 [("GCC extra via C opts", "@GccExtraViaCOpts@"),
  ("C compiler command", "@SettingsCCompilerCommand@"),
  ("C compiler flags", "@SettingsCCompilerFlags@"),
- ("ar command", "@ArCmd@"),
+ ("ar command", "@SettingsArCommand@"),
  ("ar flags", "@ArArgs@"),
  ("ar supports at file", "@ArSupportsAtFile@"),
  ("touch command", "@SettingsTouchCommand@"),
  ("dllwrap command", "@SettingsDllWrapCommand@"),
  ("windres command", "@SettingsWindresCommand@"),
- ("perl command", "@SettingsPerlCommand@")]
+ ("perl command", "@SettingsPerlCommand@"),
+ ("target os", "@HaskellTargetOs@"),
+ ("target arch", "@HaskellTargetArch@"),
+ ("target word size", "@WordSize@"),
+ ("target has GNU nonexec stack", "@HaskellHaveGnuNonexecStack@"),
+ ("target has subsections via symbols", "@HaskellHaveSubsectionsViaSymbols@")
+ ]
 

@@ -6,6 +6,13 @@
 Desugaring foreign calls
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module DsCCall 
 	( dsCCall
 	, mkFCall
@@ -135,10 +142,10 @@ unboxArg arg
 
   -- Recursive newtypes
   | Just(_rep_ty, co) <- splitNewTypeRepCo_maybe arg_ty
-  = unboxArg (mkCoerce co arg)
+  = unboxArg (mkCast arg co)
       
   -- Booleans
-  | Just (tc,_) <- splitTyConApp_maybe arg_ty, 
+  | Just tc <- tyConAppTyCon_maybe arg_ty, 
     tc `hasKey` boolTyConKey
   = do prim_arg <- newSysLocalDs intPrimTy
        return (Var prim_arg,
@@ -176,43 +183,6 @@ unboxArg arg
                \ body -> Case arg case_bndr (exprType body) [(DataAlt data_con,vars,body)]
               )
 
-  ----- Cases for .NET; almost certainly bit-rotted ---------
-  | Just (tc, [arg_ty]) <- splitTyConApp_maybe arg_ty,
-    tc == listTyCon,
-    Just (cc,[]) <- splitTyConApp_maybe arg_ty,
-    cc == charTyCon
-    -- String; dotnet only
-  = do unpack_id <- dsLookupGlobalId marshalStringName
-       prim_string <- newSysLocalDs addrPrimTy
-       return (Var prim_string,
-               \ body ->
-                 let
-                  io_ty = exprType body
-                  Just (_,io_arg,_) = tcSplitIOType_maybe io_ty
-                 in
-                 mkApps (Var unpack_id)
-                        [ Type io_arg
-                        , arg
-                        , Lam prim_string body
-                        ])
-  | Just (tc, [_]) <- splitTyConApp_maybe arg_ty,
-    tyConName tc == objectTyConName
-    -- Object; dotnet only
-  = do unpack_id <- dsLookupGlobalId marshalObjectName
-       prim_obj <- newSysLocalDs addrPrimTy
-       return (Var prim_obj,
-               \ body ->
-                 let
-                  io_ty = exprType body
-                  Just (_,io_arg,_) = tcSplitIOType_maybe io_ty
-                 in
-                 mkApps (Var unpack_id)
-                        [ Type io_arg
-                        , arg
-                        , Lam prim_obj body
-                        ])
-  --------------- End of cases for .NET --------------------
-
   | otherwise
   = do l <- getSrcSpanDs
        pprPanic "unboxArg: " (ppr l <+> ppr arg_ty)
@@ -225,8 +195,8 @@ unboxArg arg
     (data_con_arg_ty1 : _)			= data_con_arg_tys
 
     (_ : _ : data_con_arg_ty3 : _) = data_con_arg_tys
-    maybe_arg3_tycon    	   = splitTyConApp_maybe data_con_arg_ty3
-    Just (arg3_tycon,_)		   = maybe_arg3_tycon
+    maybe_arg3_tycon    	   = tyConAppTyCon_maybe data_con_arg_ty3
+    Just arg3_tycon		   = maybe_arg3_tycon
 \end{code}
 
 
@@ -246,7 +216,7 @@ boxResult :: Type
 --	State# RealWorld -> (# State# RealWorld #)
 
 boxResult result_ty
-  | Just (io_tycon, io_res_ty, co) <- tcSplitIOType_maybe result_ty
+  | Just (io_tycon, io_res_ty) <- tcSplitIOType_maybe result_ty
 	-- isIOType_maybe handles the case where the type is a 
 	-- simple wrapping of IO.  E.g.
 	-- 	newtype Wrap a = W (IO a)
@@ -259,11 +229,11 @@ boxResult result_ty
 		= case res of
 		     (Just ty,_) 
 		       | isUnboxedTupleType ty 
-		       -> let (Just (_, ls)) = splitTyConApp_maybe ty in tail ls
+		       -> let Just ls = tyConAppArgs_maybe ty in tail ls
 		     _ -> []
 
 	      return_result state anss
-		= mkConApp (tupleCon Unboxed (2 + length extra_result_tys))
+		= mkConApp (tupleCon UnboxedTuple (2 + length extra_result_tys))
 	         	   (map Type (realWorldStatePrimTy : io_res_ty : extra_result_tys)
 			      ++ (state : anss)) 
 
@@ -273,7 +243,7 @@ boxResult result_ty
 	; let io_data_con = head (tyConDataCons io_tycon)
 	      toIOCon     = dataConWrapId io_data_con
 
-	      wrap the_call = mkCoerce (mkSymCo co) $
+	      wrap the_call =
 			      mkApps (Var toIOCon)
 			    	     [ Type io_res_ty, 
 			    	       Lam state_id $
@@ -320,16 +290,16 @@ mk_alt return_result (Just prim_res_ty, wrap_result)
     		-- The ccall returns a non-() value
   | isUnboxedTupleType prim_res_ty= do
     let
-        Just (_, ls) = splitTyConApp_maybe prim_res_ty
+        Just ls = tyConAppArgs_maybe prim_res_ty
         arity = 1 + length ls
     args_ids@(result_id:as) <- mapM newSysLocalDs ls
     state_id <- newSysLocalDs realWorldStatePrimTy
     let
         the_rhs = return_result (Var state_id) 
                                 (wrap_result (Var result_id) : map Var as)
-        ccall_res_ty = mkTyConApp (tupleTyCon Unboxed arity)
+        ccall_res_ty = mkTyConApp (tupleTyCon UnboxedTuple arity)
                                   (realWorldStatePrimTy : ls)
-        the_alt      = ( DataAlt (tupleCon Unboxed arity)
+        the_alt      = ( DataAlt (tupleCon UnboxedTuple arity)
                        , (state_id : args_ids)
                        , the_rhs
                        )
@@ -372,7 +342,7 @@ resultWrapper result_ty
   -- Recursive newtypes
   | Just (rep_ty, co) <- splitNewTypeRepCo_maybe result_ty
   = do (maybe_ty, wrapper) <- resultWrapper rep_ty
-       return (maybe_ty, \e -> mkCoerce (mkSymCo co) (wrapper e))
+       return (maybe_ty, \e -> mkCast (wrapper e) (mkSymCo co))
 
   -- The type might contain foralls (eg. for dummy type arguments,
   -- referring to 'Ptr a' is legal).
@@ -391,20 +361,6 @@ resultWrapper result_ty
        return
          (maybe_ty, \e -> mkApps (Var (dataConWrapId data_con)) 
                                  (map Type tycon_arg_tys ++ [wrapper (narrow_wrapper e)]))
-
-    -- Strings; 'dotnet' only.
-  | Just (tc, [arg_ty]) <- maybe_tc_app,               tc == listTyCon,
-    Just (cc,[])        <- splitTyConApp_maybe arg_ty, cc == charTyCon
-  = do pack_id <- dsLookupGlobalId unmarshalStringName
-       return (Just addrPrimTy,
-                 \ e -> App (Var pack_id) e)
-
-    -- Objects; 'dotnet' only.
-  | Just (tc, [_]) <- maybe_tc_app, 
-    tyConName tc == objectTyConName
-  = do pack_id <- dsLookupGlobalId unmarshalObjectName
-       return (Just addrPrimTy,
-                 \ e -> App (Var pack_id) e)
 
   | otherwise
   = pprPanic "resultWrapper" (ppr result_ty)

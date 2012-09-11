@@ -1,4 +1,7 @@
 {-# LANGUAGE TypeFamilies #-}
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Safe #-}
+#endif
 
 -----------------------------------------------------------------------------
 --		The fuel monad
@@ -29,6 +32,8 @@ fuelRemaining = getFuel
 
 class FuelMonadT fm where
   runWithFuel :: (Monad m, FuelMonad (fm m)) => Fuel -> fm m a -> m a
+  liftFuel    :: (Monad m, FuelMonad (fm m)) => m a -> fm m a
+
 
 
 type Fuel = Int
@@ -64,6 +69,7 @@ instance Monad m => FuelMonad (CheckingFuelMonad m) where
 
 instance FuelMonadT CheckingFuelMonad where
   runWithFuel fuel m = do { (a, _) <- unFM m fuel; return a }
+  liftFuel m = FM $ \f -> do { a <- m; return (a, f) }
 
 ----------------------------------------------------------------
 
@@ -88,6 +94,7 @@ instance CheckpointMonad m => CheckpointMonad (InfiniteFuelMonad m) where
 
 instance FuelMonadT InfiniteFuelMonad where
   runWithFuel _ = unIFM
+  liftFuel = IFM
 
 infiniteFuel :: Fuel -- effectively infinite, any, but subtractable
 infiniteFuel = maxBound

@@ -1,13 +1,15 @@
 name:		Win32
-version:	2.2.1.0
+version:	2.2.2.0
 license:	BSD3
 license-file:	LICENSE
 author:		Alastair Reid
 copyright:	Alastair Reid, 1999-2003
-maintainer:	Esa Ilari Vuokko <ei@vuokko.info>
-bug-reports: http://hackage.haskell.org/trac/ghc/newticket?component=libraries%20%28other%29
+maintainer:	Bryan O'Sullivan <bos@serpentine.com>
+bug-reports:    https://github.com/haskell/win32/issues
+homepage:       https://github.com/haskell/win32
 category:	System, Graphics
 synopsis:	A binding to part of the Win32 library
+description:	A binding to part of the Win32 library.
 build-type:     Simple
 cabal-version:  >=1.6
 extra-source-files:
@@ -57,7 +59,7 @@ Library
         System.Win32.Security
         System.Win32.Types
         System.Win32.Shell
-    extensions: ForeignFunctionInterface
+    extensions: ForeignFunctionInterface, CPP
     if impl(ghc >= 7.1)
         extensions: NondecreasingIndentation
     extra-libraries:
@@ -76,5 +78,4 @@ Library
 
 source-repository head
     type:     git
-    location: http://darcs.haskell.org/packages/Win32.git/
-
+    location: git://github.com/haskell/win32

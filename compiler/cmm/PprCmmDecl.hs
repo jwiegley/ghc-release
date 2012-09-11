@@ -32,15 +32,21 @@
 -- A useful example pass over Cmm is in nativeGen/MachCodeGen.hs
 --
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module PprCmmDecl
-    ( writeCmms, pprCmms, pprCmm, pprSection, pprStatic
+    ( writeCmms, pprCmms, pprCmmGroup, pprSection, pprStatic
     )
 where
 
-import CmmDecl
 import CLabel
 import PprCmmExpr
-
+import Cmm
 
 import Outputable
 import Platform
@@ -51,57 +57,54 @@ import System.IO
 
 -- Temp Jan08
 import SMRep
-import ClosureInfo
 #include "../includes/rts/storage/FunTypes.h"
 
 
-pprCmms :: (Outputable info, PlatformOutputable g)
-        => Platform -> [GenCmm CmmStatics info g] -> SDoc
+pprCmms :: (PlatformOutputable info, PlatformOutputable g)
+        => Platform -> [GenCmmGroup CmmStatics info g] -> SDoc
 pprCmms platform cmms = pprCode CStyle (vcat (intersperse separator $ map (pprPlatform platform) cmms))
         where
           separator = space $$ ptext (sLit "-------------------") $$ space
 
-writeCmms :: (Outputable info, PlatformOutputable g)
-          => Platform -> Handle -> [GenCmm CmmStatics info g] -> IO ()
+writeCmms :: (PlatformOutputable info, PlatformOutputable g)
+          => Platform -> Handle -> [GenCmmGroup CmmStatics info g] -> IO ()
 writeCmms platform handle cmms = printForC handle (pprCmms platform cmms)
 
 -----------------------------------------------------------------------------
 
-instance (Outputable d, Outputable info, PlatformOutputable g)
-      => PlatformOutputable (GenCmm d info g) where
-    pprPlatform platform c = pprCmm platform c
-
-instance (Outputable d, Outputable info, PlatformOutputable i)
-      => PlatformOutputable (GenCmmTop d info i) where
+instance (PlatformOutputable d, PlatformOutputable info, PlatformOutputable i)
+      => PlatformOutputable (GenCmmDecl d info i) where
     pprPlatform platform t = pprTop platform t
 
-instance Outputable CmmStatics where
-    ppr e = pprStatics e
+instance PlatformOutputable CmmStatics where
+    pprPlatform = pprStatics
 
-instance Outputable CmmStatic where
-    ppr e = pprStatic e
+instance PlatformOutputable CmmStatic where
+    pprPlatform = pprStatic
 
-instance Outputable CmmInfoTable where
-    ppr e = pprInfoTable e
+instance PlatformOutputable CmmInfoTable where
+    pprPlatform = pprInfoTable
 
 
 -----------------------------------------------------------------------------
 
-pprCmm :: (Outputable d, Outputable info, PlatformOutputable g)
-       => Platform -> GenCmm d info g -> SDoc
-pprCmm platform (Cmm tops)
+pprCmmGroup :: (PlatformOutputable d,
+                PlatformOutputable info,
+                PlatformOutputable g)
+            => Platform -> GenCmmGroup d info g -> SDoc
+pprCmmGroup platform tops
     = vcat $ intersperse blankLine $ map (pprTop platform) tops
 
 -- --------------------------------------------------------------------------
 -- Top level `procedure' blocks.
 --
-pprTop :: (Outputable d, Outputable info, PlatformOutputable i)
-       => Platform -> GenCmmTop d info i -> SDoc
+pprTop :: (PlatformOutputable d, PlatformOutputable info, PlatformOutputable i)
+       => Platform -> GenCmmDecl d info i -> SDoc
 
 pprTop platform (CmmProc info lbl graph)
 
-  = vcat [ pprCLabel lbl <> lparen <> rparen
-         , nest 8 $ lbrace <+> ppr info $$ rbrace
+  = vcat [ pprCLabel platform lbl <> lparen <> rparen
+         , nest 8 $ lbrace <+> pprPlatform platform info $$ rbrace
          , nest 4 $ pprPlatform platform graph
          , rbrace ]
 
@@ -110,63 +113,32 @@ pprTop platform (CmmProc info lbl graph)
 --
 --      section "data" { ... }
 --
-pprTop _ (CmmData section ds) = 
-    (hang (pprSection section <+> lbrace) 4 (ppr ds))
+pprTop platform (CmmData section ds) =
+    (hang (pprSection section <+> lbrace) 4 (pprPlatform platform ds))
     $$ rbrace
 
 -- --------------------------------------------------------------------------
 -- Info tables.
 
-pprInfoTable :: CmmInfoTable -> SDoc
-pprInfoTable CmmNonInfoTable = empty
-pprInfoTable (CmmInfoTable is_local stat_clos (ProfilingInfo closure_type closure_desc) tag info) =
-    vcat [ptext (sLit "is local: ") <> ppr is_local <+>
-          ptext (sLit "has static closure: ") <> ppr stat_clos <+>
-          ptext (sLit "type: ") <> pprLit closure_type,
-          ptext (sLit "desc: ") <> pprLit closure_desc,
-          ptext (sLit "tag: ") <> integer (toInteger tag),
-          pprTypeInfo info]
+pprInfoTable :: Platform -> CmmInfoTable -> SDoc
+pprInfoTable _ CmmNonInfoTable
+  = empty
+pprInfoTable platform
+             (CmmInfoTable { cit_lbl = lbl, cit_rep = rep
+                           , cit_prof = prof_info
+                           , cit_srt = _srt })  
+  = vcat [ ptext (sLit "label:") <+> pprPlatform platform lbl
+         , ptext (sLit "rep:") <> ppr rep
+         , case prof_info of
+	     NoProfilingInfo -> empty
+             ProfilingInfo ct cd -> vcat [ ptext (sLit "type:") <+> pprWord8String ct
+                                         , ptext (sLit "desc: ") <> pprWord8String cd ] ]
 
-pprTypeInfo :: ClosureTypeInfo -> SDoc
-pprTypeInfo (ConstrInfo layout constr descr) =
-    vcat [ptext (sLit "ptrs: ") <> integer (toInteger (fst layout)),
-          ptext (sLit "nptrs: ") <> integer (toInteger (snd layout)),
-          ptext (sLit "constructor: ") <> integer (toInteger constr),
-          pprLit descr]
-pprTypeInfo (FunInfo layout srt arity _args slow_entry) =
-    vcat [ptext (sLit "ptrs: ") <> integer (toInteger (fst layout)),
-          ptext (sLit "nptrs: ") <> integer (toInteger (snd layout)),
-          ptext (sLit "srt: ") <> ppr srt,
--- Temp Jan08
-          ptext (sLit ("fun_type: ")) <> integer (toInteger (argDescrType _args)),
-
-          ptext (sLit "arity: ") <> integer (toInteger arity),
-          --ptext (sLit "args: ") <> ppr args, -- TODO: needs to be printed
-          ptext (sLit "slow: ") <> pprLit slow_entry
-         ]
-pprTypeInfo (ThunkInfo layout srt) =
-    vcat [ptext (sLit "ptrs: ") <> integer (toInteger (fst layout)),
-          ptext (sLit "nptrs: ") <> integer (toInteger (snd layout)),
-          ptext (sLit "srt: ") <> ppr srt]
-pprTypeInfo (ThunkSelectorInfo offset srt) =
-    vcat [ptext (sLit "ptrs: ") <> integer (toInteger offset),
-          ptext (sLit "srt: ") <> ppr srt]
-pprTypeInfo (ContInfo stack srt) =
-    vcat [ptext (sLit "stack: ") <> ppr stack,
-          ptext (sLit "srt: ") <> ppr srt]
-
--- Temp Jan08
-argDescrType :: ArgDescr -> StgHalfWord
--- The "argument type" RTS field type
-argDescrType (ArgSpec n) = n
-argDescrType (ArgGen liveness)
-  | isBigLiveness liveness = ARG_GEN_BIG
-  | otherwise		   = ARG_GEN
-
--- Temp Jan08
-isBigLiveness :: Liveness -> Bool
-isBigLiveness (BigLiveness _)   = True
-isBigLiveness (SmallLiveness _) = False
+instance PlatformOutputable C_SRT where
+  pprPlatform _ (NoC_SRT) = ptext (sLit "_no_srt_")
+  pprPlatform platform (C_SRT label off bitmap)
+      = parens (pprPlatform platform label <> comma <> ppr off
+                                           <> comma <> text (show bitmap))
 
 instance Outputable ForeignHint where
   ppr NoHint     = empty
@@ -174,18 +146,20 @@ instance Outputable ForeignHint where
 --  ppr AddrHint   = quotes(text "address")
 -- Temp Jan08
   ppr AddrHint   = (text "PtrHint")
+instance PlatformOutputable ForeignHint where
+    pprPlatform _ = ppr
 
 -- --------------------------------------------------------------------------
 -- Static data.
 --      Strings are printed as C strings, and we print them as I8[],
 --      following C--
 --
-pprStatics :: CmmStatics -> SDoc
-pprStatics (Statics lbl ds) = vcat ((pprCLabel lbl <> colon) : map ppr ds)
+pprStatics :: Platform -> CmmStatics -> SDoc
+pprStatics platform (Statics lbl ds) = vcat ((pprCLabel platform lbl <> colon) : map (pprPlatform platform) ds)
 
-pprStatic :: CmmStatic -> SDoc
-pprStatic s = case s of
-    CmmStaticLit lit   -> nest 4 $ ptext (sLit "const") <+> pprLit lit <> semi
+pprStatic :: Platform -> CmmStatic -> SDoc
+pprStatic platform s = case s of
+    CmmStaticLit lit   -> nest 4 $ ptext (sLit "const") <+> pprLit platform lit <> semi
     CmmUninitialised i -> nest 4 $ text "I8" <> brackets (int i)
     CmmString s'       -> nest 4 $ text "I8[]" <+> text (show s')
 

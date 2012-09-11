@@ -7,6 +7,13 @@ And, as we have the info in hand, we may convert some lets to
 let-no-escapes.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module CoreToStg ( coreToStg, coreExprToStg ) where
 
 #include "HsVersions.h"
@@ -29,11 +36,12 @@ import Maybes           ( maybeToBool )
 import Name             ( getOccName, isExternalName, nameOccName )
 import OccName          ( occNameString, occNameFS )
 import BasicTypes       ( Arity )
-import Module
+import Literal
 import Outputable
 import MonadUtils
 import FastString
 import Util
+import DynFlags
 import ForeignCall
 import PrimOp           ( PrimCall(..) )
 \end{code}
@@ -139,10 +147,10 @@ for x, solely to put in the SRTs lower down.
 %************************************************************************
 
 \begin{code}
-coreToStg :: PackageId -> [CoreBind] -> IO [StgBinding]
-coreToStg this_pkg pgm
+coreToStg :: DynFlags -> CoreProgram -> IO [StgBinding]
+coreToStg dflags pgm
   = return pgm'
-  where (_, _, pgm') = coreTopBindsToStg this_pkg emptyVarEnv pgm
+  where (_, _, pgm') = coreTopBindsToStg dflags emptyVarEnv pgm
 
 coreExprToStg :: CoreExpr -> StgExpr
 coreExprToStg expr
@@ -150,36 +158,36 @@ coreExprToStg expr
 
 
 coreTopBindsToStg
-    :: PackageId
+    :: DynFlags
     -> IdEnv HowBound           -- environment for the bindings
-    -> [CoreBind]
+    -> CoreProgram
     -> (IdEnv HowBound, FreeVarsInfo, [StgBinding])
 
 coreTopBindsToStg _        env [] = (env, emptyFVInfo, [])
-coreTopBindsToStg this_pkg env (b:bs)
+coreTopBindsToStg dflags env (b:bs)
   = (env2, fvs2, b':bs')
   where
         -- Notice the mutually-recursive "knot" here:
         --   env accumulates down the list of binds,
         --   fvs accumulates upwards
-        (env1, fvs2, b' ) = coreTopBindToStg this_pkg env fvs1 b
-        (env2, fvs1, bs') = coreTopBindsToStg this_pkg env1 bs
+        (env1, fvs2, b' ) = coreTopBindToStg dflags env fvs1 b
+        (env2, fvs1, bs') = coreTopBindsToStg dflags env1 bs
 
 coreTopBindToStg
-        :: PackageId
+        :: DynFlags
         -> IdEnv HowBound
         -> FreeVarsInfo         -- Info about the body
         -> CoreBind
         -> (IdEnv HowBound, FreeVarsInfo, StgBinding)
 
-coreTopBindToStg this_pkg env body_fvs (NonRec id rhs)
+coreTopBindToStg dflags env body_fvs (NonRec id rhs)
   = let
         env'      = extendVarEnv env id how_bound
         how_bound = LetBound TopLet $! manifestArity rhs
 
         (stg_rhs, fvs') =
             initLne env $ do
-              (stg_rhs, fvs') <- coreToTopStgRhs this_pkg body_fvs (id,rhs)
+              (stg_rhs, fvs') <- coreToTopStgRhs dflags body_fvs (id,rhs)
               return (stg_rhs, fvs')
 
         bind = StgNonRec id stg_rhs
@@ -191,7 +199,7 @@ coreTopBindToStg this_pkg env body_fvs (NonRec id rhs)
       --     assertion again!
     (env', fvs' `unionFVInfo` body_fvs, bind)
 
-coreTopBindToStg this_pkg env body_fvs (Rec pairs)
+coreTopBindToStg dflags env body_fvs (Rec pairs)
   = ASSERT( not (null pairs) )
     let
         binders = map fst pairs
@@ -202,7 +210,7 @@ coreTopBindToStg this_pkg env body_fvs (Rec pairs)
 
         (stg_rhss, fvs')
           = initLne env' $ do
-               (stg_rhss, fvss') <- mapAndUnzipM (coreToTopStgRhs this_pkg body_fvs) pairs
+               (stg_rhss, fvss') <- mapAndUnzipM (coreToTopStgRhs dflags body_fvs) pairs
                let fvs' = unionFVInfos fvss'
                return (stg_rhss, fvs')
 
@@ -230,16 +238,16 @@ consistentCafInfo id bind
 
 \begin{code}
 coreToTopStgRhs
-        :: PackageId
+        :: DynFlags
         -> FreeVarsInfo         -- Free var info for the scope of the binding
         -> (Id,CoreExpr)
         -> LneM (StgRhs, FreeVarsInfo)
 
-coreToTopStgRhs this_pkg scope_fv_info (bndr, rhs)
+coreToTopStgRhs dflags scope_fv_info (bndr, rhs)
   = do { (new_rhs, rhs_fvs, _) <- coreToStgExpr rhs
        ; lv_info <- freeVarsToLiveVars rhs_fvs
 
-       ; let stg_rhs   = mkTopStgRhs this_pkg rhs_fvs (mkSRT lv_info) bndr_info new_rhs
+       ; let stg_rhs   = mkTopStgRhs dflags rhs_fvs (mkSRT lv_info) bndr_info new_rhs
              stg_arity = stgRhsArity stg_rhs
        ; return (ASSERT2( arity_ok stg_arity, mk_arity_msg stg_arity) stg_rhs,
                  rhs_fvs) }
@@ -265,7 +273,7 @@ coreToTopStgRhs this_pkg scope_fv_info (bndr, rhs)
                 ptext (sLit "Id arity:") <+> ppr id_arity,
                 ptext (sLit "STG arity:") <+> ppr stg_arity]
 
-mkTopStgRhs :: PackageId -> FreeVarsInfo
+mkTopStgRhs :: DynFlags -> FreeVarsInfo
             -> SRT -> StgBinderInfo -> StgExpr
             -> StgRhs
 
@@ -276,8 +284,8 @@ mkTopStgRhs _ rhs_fvs srt binder_info (StgLam _ bndrs body)
                   srt
                   bndrs body
 
-mkTopStgRhs this_pkg _ _ _ (StgConApp con args)
-  | not (isDllConApp this_pkg con args)  -- Dynamic StgConApps are updatable
+mkTopStgRhs dflags _ _ _ (StgConApp con args)
+  | not (isDllConApp dflags con args)  -- Dynamic StgConApps are updatable
   = StgRhsCon noCCS con args
 
 mkTopStgRhs _ rhs_fvs srt binder_info rhs
@@ -312,6 +320,9 @@ on these components, but it in turn is not scrutinised as the basis for any
 decisions.  Hence no black holes.
 
 \begin{code}
+-- No LitInteger's should be left by the time this is called. CorePrep
+-- should have converted them all to a real core representation.
+coreToStgExpr (Lit (LitInteger {})) = panic "coreToStgExpr: LitInteger"
 coreToStgExpr (Lit l)      = return (StgLit l, emptyFVInfo, emptyVarSet)
 coreToStgExpr (Var v)      = coreToStgApp Nothing v               []
 coreToStgExpr (Coercion _) = coreToStgApp Nothing coercionTokenId []
@@ -336,17 +347,16 @@ coreToStgExpr expr@(Lam _ _)
 
     return (result_expr, fvs, escs)
 
-coreToStgExpr (Note (SCC cc) expr) = do
-    (expr2, fvs, escs) <- coreToStgExpr expr
-    return (StgSCC cc expr2, fvs, escs)
+coreToStgExpr (Tick (HpcTick m n) expr)
+  = do (expr2, fvs, escs) <- coreToStgExpr expr
+       return (StgTick m n expr2, fvs, escs)
 
-coreToStgExpr (Case (Var id) _bndr _ty [(DEFAULT,[],expr)])
-  | Just (TickBox m n) <- isTickBoxOp_maybe id = do
-    (expr2, fvs, escs) <- coreToStgExpr expr
-    return (StgTick m n expr2, fvs, escs)
+coreToStgExpr (Tick (ProfNote cc tick push) expr)
+  = do (expr2, fvs, escs) <- coreToStgExpr expr
+       return (StgSCC cc tick push expr2, fvs, escs)
 
-coreToStgExpr (Note _ expr)
-  = coreToStgExpr expr
+coreToStgExpr (Tick Breakpoint{} _expr)
+  = panic "coreToStgExpr: breakpoint should not happen"
 
 coreToStgExpr (Cast expr _)
   = coreToStgExpr expr
@@ -433,14 +443,14 @@ coreToStgExpr e = pprPanic "coreToStgExpr" (ppr e)
 \begin{code}
 mkStgAltType :: Id -> [CoreAlt] -> AltType
 mkStgAltType bndr alts
-  = case splitTyConApp_maybe (repType (idType bndr)) of
-        Just (tc,_) | isUnboxedTupleTyCon tc -> UbxTupAlt tc
-                    | isUnLiftedTyCon tc     -> PrimAlt tc
-                    | isHiBootTyCon tc       -> look_for_better_tycon
-                    | isAlgTyCon tc          -> AlgAlt tc
-                    | otherwise              -> ASSERT2( _is_poly_alt_tycon tc, ppr tc )
-                                                PolyAlt
-        Nothing                              -> PolyAlt
+  = case tyConAppTyCon_maybe (repType (idType bndr)) of
+        Just tc | isUnboxedTupleTyCon tc -> UbxTupAlt tc
+                | isUnLiftedTyCon tc     -> PrimAlt tc
+                | isAbstractTyCon tc     -> look_for_better_tycon
+                | isAlgTyCon tc          -> AlgAlt tc
+                | otherwise              -> ASSERT2( _is_poly_alt_tycon tc, ppr tc )
+                                            PolyAlt
+        Nothing                          -> PolyAlt
 
   where
    _is_poly_alt_tycon tc
@@ -450,8 +460,8 @@ mkStgAltType bndr alts
                             -- function application where argument has a
                             -- type-family type
 
-   -- Sometimes, the TyCon is a HiBootTyCon which may not have any
-   -- constructors inside it.  Then we can get a better TyCon by
+   -- Sometimes, the TyCon is a AbstractTyCon which may not have any
+   -- constructors inside it.  Then we may get a better TyCon by
    -- grabbing the one from a constructor alternative
    -- if one exists.
    look_for_better_tycon
@@ -787,9 +797,7 @@ mkStgRhs rhs_fvs srt binder_info rhs
                     then (if isNotTop toplev
                             then SingleEntry    -- HA!  Paydirt for "dem"
                             else
-#ifdef DEBUG
-                     trace "WARNING: SE CAFs unsupported, forcing UPD instead" $
-#endif
+                     (if debugIsOn then trace "WARNING: SE CAFs unsupported, forcing UPD instead" else id) $
                      Updatable)
                 else Updatable
         -- For now we forbid SingleEntry CAFs; they tickle the
@@ -1106,15 +1114,16 @@ filterStgBinders bndrs = filter isId bndrs
 
 
 \begin{code}
-        -- Ignore all notes except SCC
 myCollectBinders :: Expr Var -> ([Var], Expr Var)
 myCollectBinders expr
   = go [] expr
   where
     go bs (Lam b e)          = go (b:bs) e
-    go bs e@(Note (SCC _) _) = (reverse bs, e)
+    go bs e@(Tick t e')
+        | tickishIsCode t    = (reverse bs, e)
+        | otherwise          = go bs e'
+        -- Ignore only non-code source annotations
     go bs (Cast e _)         = go bs e
-    go bs (Note _ e)         = go bs e
     go bs e                  = (reverse bs, e)
 
 myCollectArgs :: CoreExpr -> (Id, [CoreArg])
@@ -1125,9 +1134,8 @@ myCollectArgs expr
   where
     go (Var v)          as = (v, as)
     go (App f a) as        = go f (a:as)
-    go (Note (SCC _) _) _  = pprPanic "CoreToStg.myCollectArgs" (ppr expr)
+    go (Tick _ _)     _  = pprPanic "CoreToStg.myCollectArgs" (ppr expr)
     go (Cast e _)       as = go e as
-    go (Note _ e)       as = go e as
     go (Lam b e)        as
        | isTyVar b         = go e as  -- Note [Collect args]
     go _                _  = pprPanic "CoreToStg.myCollectArgs" (ppr expr)

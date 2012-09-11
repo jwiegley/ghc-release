@@ -1,3 +1,4 @@
+{-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 -- ----------------------------------------------------------------------------
 -- 
@@ -17,3 +18,4 @@ import GHC.Word
 
 data Fingerprint = Fingerprint {-# UNPACK #-} !Word64 {-# UNPACK #-} !Word64
   deriving (Eq, Ord)
+

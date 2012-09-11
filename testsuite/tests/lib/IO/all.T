@@ -70,7 +70,7 @@ test('misc001',
 
 test('openFile001',  normal, compile_and_run, [''])
 test('openFile002',  exit_code(1), compile_and_run, [''])
-test('openFile003',  normal, compile_and_run, [''])
+test('openFile003',  extra_clean(['openFile003Dir']), compile_and_run, [''])
 test('openFile004',  extra_clean(['openFile004.out']), compile_and_run, [''])
 test('openFile005',
      [if_compiler_type('hugs', expect_fail),
@@ -119,7 +119,8 @@ test('concio002', reqlib('process'), compile_and_run, [''])
 
 test('2122', extra_clean(['2122-test']), compile_and_run, [''])
 test('3307',
-     [extra_clean(['chinese-file-小说', 'chinese-name'])],
+     [if_msys(expect_fail), # See trac #5599
+      extra_clean(['chinese-file-小说', 'chinese-name'])],
      run_command,
      ['$MAKE -s --no-print-directory 3307-test'])
 test('4855', normal, compile_and_run, [''])
@@ -128,38 +129,25 @@ test('hSetEncoding001',extra_run_opts('hSetEncoding001.in'), compile_and_run, ['
 test('decodingerror001',normal, compile_and_run, [''])
 test('decodingerror002',normal, compile_and_run, [''])
 
+encoding001Encodings = ["utf8", "utf8_bom", "utf16", "utf16le",
+                        "utf16be", "utf32", "utf32le", "utf32be"]
+encoding001CleanFiles = []
+for e in encoding001Encodings:
+    encoding001CleanFiles.append('encoding001.' + e)
+for e1 in encoding001Encodings:
+    for e2 in encoding001Encodings:
+        encoding001CleanFiles.append('encoding001.' + e1 + '.' + e2)
 test('encoding001',
-     extra_clean([
-           'encoding001.utf16', 'encoding001.utf16.utf16be',
-           'encoding001.utf16.utf16le', 'encoding001.utf16.utf32',
-           'encoding001.utf16.utf32be', 'encoding001.utf16.utf32le',
-           'encoding001.utf16.utf8', 'encoding001.utf16be',
-           'encoding001.utf16be.utf16', 'encoding001.utf16be.utf16le',
-           'encoding001.utf16be.utf32', 'encoding001.utf16be.utf32be',
-           'encoding001.utf16be.utf32le', 'encoding001.utf16be.utf8',
-           'encoding001.utf16le', 'encoding001.utf16le.utf16',
-           'encoding001.utf16le.utf16be', 'encoding001.utf16le.utf32',
-           'encoding001.utf16le.utf32be', 'encoding001.utf16le.utf32le',
-           'encoding001.utf16le.utf8', 'encoding001.utf32',
-           'encoding001.utf32.utf16', 'encoding001.utf32.utf16be',
-           'encoding001.utf32.utf16le', 'encoding001.utf32.utf32be',
-           'encoding001.utf32.utf32le', 'encoding001.utf32.utf8',
-           'encoding001.utf32be', 'encoding001.utf32be.utf16',
-           'encoding001.utf32be.utf16be', 'encoding001.utf32be.utf16le',
-           'encoding001.utf32be.utf32', 'encoding001.utf32be.utf32le',
-           'encoding001.utf32be.utf8', 'encoding001.utf32le',
-           'encoding001.utf32le.utf16', 'encoding001.utf32le.utf16be',
-           'encoding001.utf32le.utf16le', 'encoding001.utf32le.utf32',
-           'encoding001.utf32le.utf32be', 'encoding001.utf32le.utf8',
-           'encoding001.utf8', 'encoding001.utf8.utf16',
-           'encoding001.utf8.utf16be', 'encoding001.utf8.utf16le',
-           'encoding001.utf8.utf32', 'encoding001.utf8.utf32be',
-           'encoding001.utf8.utf32le']), 
+     extra_clean(encoding001CleanFiles),
      compile_and_run, [''])
 
 test('encoding002', normal, compile_and_run, [''])
 
-test('environment001', extra_clean(['environment001']), run_command, ['$MAKE -s --no-print-directory environment001-test'])
+test('environment001',
+     [if_msys(expect_fail), # See trac #5599
+      extra_clean(['environment001'])],
+     run_command,
+     ['$MAKE -s --no-print-directory environment001-test'])
 
 test('newline001', extra_clean(['newline001.out']), compile_and_run, [''])
 
@@ -170,5 +158,5 @@ test('T4144', normal, compile_and_run, [''])
 
 test('encodingerror001', normal, compile_and_run, [''])
 
-test('4808', exit_code(1), compile_and_run, [''])
+test('4808', [exit_code(1), extra_clean(['4808.test'])], compile_and_run, [''])
 test('4895', normal, compile_and_run, [''])

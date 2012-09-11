@@ -100,6 +100,243 @@ AC_DEFUN([FPTOOLS_SET_PLATFORM_VARS],
         soext='.dylib'
         ;;
     esac
+
+    BuildPlatform="$BuildArch-$BuildVendor-$BuildOS"
+    BuildPlatform_CPP=`echo "$BuildPlatform" | sed -e 's/\./_/g' -e 's/-/_/g'`
+    BuildArch_CPP=`    echo "$BuildArch"     | sed -e 's/\./_/g' -e 's/-/_/g'`
+    BuildVendor_CPP=`  echo "$BuildVendor"   | sed -e 's/\./_/g' -e 's/-/_/g'`
+    BuildOS_CPP=`      echo "$BuildOS"       | sed -e 's/\./_/g' -e 's/-/_/g'`
+
+    HostPlatform="$HostArch-$HostVendor-$HostOS"
+    HostPlatform_CPP=`echo "$HostPlatform" | sed -e 's/\./_/g' -e 's/-/_/g'`
+    HostArch_CPP=`    echo "$HostArch"     | sed -e 's/\./_/g' -e 's/-/_/g'`
+    HostVendor_CPP=`  echo "$HostVendor"   | sed -e 's/\./_/g' -e 's/-/_/g'`
+    HostOS_CPP=`      echo "$HostOS"       | sed -e 's/\./_/g' -e 's/-/_/g'`
+
+    TargetPlatform="$TargetArch-$TargetVendor-$TargetOS"
+    TargetPlatform_CPP=`echo "$TargetPlatform" | sed -e 's/\./_/g' -e 's/-/_/g'`
+    TargetArch_CPP=`    echo "$TargetArch"     | sed -e 's/\./_/g' -e 's/-/_/g'`
+    TargetVendor_CPP=`  echo "$TargetVendor"   | sed -e 's/\./_/g' -e 's/-/_/g'`
+    TargetOS_CPP=`      echo "$TargetOS"       | sed -e 's/\./_/g' -e 's/-/_/g'`
+
+    echo "GHC build  : $BuildPlatform"
+    echo "GHC host   : $HostPlatform"
+    echo "GHC target : $TargetPlatform"
+
+    AC_SUBST(BuildPlatform)
+    AC_SUBST(HostPlatform)
+    AC_SUBST(TargetPlatform)
+    AC_SUBST(HostPlatform_CPP)
+    AC_SUBST(BuildPlatform_CPP)
+    AC_SUBST(TargetPlatform_CPP)
+
+    AC_SUBST(HostArch_CPP)
+    AC_SUBST(BuildArch_CPP)
+    AC_SUBST(TargetArch_CPP)
+
+    AC_SUBST(HostOS_CPP)
+    AC_SUBST(BuildOS_CPP)
+    AC_SUBST(TargetOS_CPP)
+
+    AC_SUBST(HostVendor_CPP)
+    AC_SUBST(BuildVendor_CPP)
+    AC_SUBST(TargetVendor_CPP)
+
+    AC_SUBST(exeext)
+    AC_SUBST(soext)
+])
+
+
+# FPTOOLS_SET_HASKELL_PLATFORM_VARS
+# ----------------------------------
+# Set the Haskell platform variables
+AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
+[
+    checkArch() {
+        case [$]1 in
+        i386)
+            test -z "[$]2" || eval "[$]2=ArchX86"
+            ;;
+        x86_64)
+            GET_ARM_ISA()
+            test -z "[$]2" || eval "[$]2=ArchX86_64"
+            ;;
+        powerpc)
+            test -z "[$]2" || eval "[$]2=ArchPPC"
+            ;;
+        powerpc64)
+            test -z "[$]2" || eval "[$]2=ArchPPC_64"
+            ;;
+        sparc)
+            test -z "[$]2" || eval "[$]2=ArchSPARC"
+            ;;
+        arm)
+            GET_ARM_ISA()
+            test -z "[$]2" || eval "[$]2=\"ArchARM {armISA = \$ARM_ISA, armISAExt = \$ARM_ISA_EXT}\""
+            ;;
+        alpha|mips|mipseb|mipsel|hppa|hppa1_1|ia64|m68k|rs6000|s390|s390x|sparc64|vax)
+            test -z "[$]2" || eval "[$]2=ArchUnknown"
+            ;;
+        *)
+            echo "Unknown arch [$]1"
+            exit 1
+            ;;
+        esac
+    }
+
+    checkVendor() {
+        case [$]1 in
+        dec|unknown|hp|apple|next|sun|sgi|ibm)
+            ;;
+        *)
+            echo "Unknown vendor [$]1"
+            exit 1
+            ;;
+        esac
+    }
+
+    checkOS() {
+        case [$]1 in
+        linux)
+            test -z "[$]2" || eval "[$]2=OSLinux"
+            ;;
+        darwin)
+            test -z "[$]2" || eval "[$]2=OSDarwin"
+            ;;
+        solaris2)
+            test -z "[$]2" || eval "[$]2=OSSolaris2"
+            ;;
+        mingw32)
+            test -z "[$]2" || eval "[$]2=OSMinGW32"
+            ;;
+        freebsd)
+            test -z "[$]2" || eval "[$]2=OSFreeBSD"
+            ;;
+        kfreebsdgnu)
+            test -z "[$]2" || eval "[$]2=OSKFreeBSD"
+            ;;
+        openbsd)
+            test -z "[$]2" || eval "[$]2=OSOpenBSD"
+            ;;
+        netbsd)
+            test -z "[$]2" || eval "[$]2=OSNetBSD"
+            ;;
+        dragonfly|osf1|osf3|hpux|linuxaout|freebsd2|cygwin32|gnu|nextstep2|nextstep3|sunos4|ultrix|irix|aix|haiku)
+            test -z "[$]2" || eval "[$]2=OSUnknown"
+            ;;
+        *)
+            echo "Unknown OS '[$]1'"
+            exit 1
+            ;;
+        esac
+    }
+
+    dnl ** check for Apple-style dead-stripping support
+    dnl    (.subsections-via-symbols assembler directive)
+
+    AC_MSG_CHECKING(for .subsections_via_symbols)
+    AC_COMPILE_IFELSE(
+        [AC_LANG_PROGRAM([], [__asm__ (".subsections_via_symbols");])],
+        [AC_MSG_RESULT(yes)
+         HaskellHaveSubsectionsViaSymbols=True
+         AC_DEFINE([HAVE_SUBSECTIONS_VIA_SYMBOLS],[1],
+                   [Define to 1 if Apple-style dead-stripping is supported.])
+        ],
+        [HaskellHaveSubsectionsViaSymbols=False
+         AC_MSG_RESULT(no)])
+
+    dnl *** check for GNU non-executable stack note support (ELF only)
+    dnl     (.section .note.GNU-stack,"",@progbits)
+
+    dnl This test doesn't work with "gcc -g" in gcc 4.4 (GHC trac #3889:
+    dnl     Error: can't resolve `.note.GNU-stack' {.note.GNU-stack section} - `.Ltext0' {.text section}
+    dnl so we empty CFLAGS while running this test
+    CFLAGS2="$CFLAGS"
+    CFLAGS=
+    AC_MSG_CHECKING(for GNU non-executable stack support)
+    AC_COMPILE_IFELSE(
+        [AC_LANG_PROGRAM([__asm__ (".section .note.GNU-stack,\"\",@progbits");], [0])],
+        [AC_MSG_RESULT(yes)
+         HaskellHaveGnuNonexecStack=True],
+        [AC_MSG_RESULT(no)
+         HaskellHaveGnuNonexecStack=False])
+    CFLAGS="$CFLAGS2"
+
+    checkArch "$BuildArch" ""
+    checkVendor "$BuildVendor"
+    checkOS "$BuildOS" ""
+
+    checkArch "$HostArch" ""
+    checkVendor "$HostVendor"
+    checkOS "$HostOS" ""
+
+    checkArch "$TargetArch" "HaskellTargetArch"
+    checkVendor "$TargetVendor"
+    checkOS "$TargetOS" "HaskellTargetOs"
+
+    AC_SUBST(HaskellTargetArch)
+    AC_SUBST(HaskellTargetOs)
+    AC_SUBST(HaskellHaveSubsectionsViaSymbols)
+    AC_SUBST(HaskellHaveGnuNonexecStack)
+])
+
+
+# GET_ARM_ISA
+# ----------------------------------
+# Get info about the ISA on the Arm arch
+AC_DEFUN([GET_ARM_ISA],
+[
+    AC_COMPILE_IFELSE([
+        AC_LANG_PROGRAM(
+            [],
+            [#if defined(__ARM_ARCH_2__)  || \
+                 defined(__ARM_ARCH_3__)  || \
+                 defined(__ARM_ARCH_3M__) || \
+                 defined(__ARM_ARCH_4__)  || \
+                 defined(__ARM_ARCH_4T__) || \
+                 defined(__ARM_ARCH_5__)  || \
+                 defined(__ARM_ARCH_5T__) || \
+                 defined(__ARM_ARCH_5E__) || \
+                 defined(__ARM_ARCH_5TE__)
+                 return 0;
+             #else
+                 not pre arm v6
+             #endif]
+        )],
+        [AC_DEFINE(arm_HOST_ARCH_PRE_ARMv6, 1, [ARM pre v6])
+         AC_DEFINE(arm_HOST_ARCH_PRE_ARMv7, 1, [ARM pre v7])
+         changequote(, )dnl
+         ARM_ISA=ARMv5
+         ARM_ISA_EXT="[]"
+         changequote([, ])dnl
+        ],
+        [
+            AC_COMPILE_IFELSE([
+                AC_LANG_PROGRAM(
+                    [],
+                    [#if defined(__ARM_ARCH_6__)   || \
+                         defined(__ARM_ARCH_6J__)  || \
+                         defined(__ARM_ARCH_6T2__) || \
+                         defined(__ARM_ARCH_6Z__)  || \
+                         defined(__ARM_ARCH_6ZK__) || \
+                         defined(__ARM_ARCH_6M__)
+                         return 0;
+                     #else
+                         not pre arm v7
+                     #endif]
+                )],
+                [AC_DEFINE(arm_HOST_ARCH_PRE_ARMv7, 1, [ARM pre v7])
+                 changequote(, )dnl
+                 ARM_ISA=ARMv6
+                 ARM_ISA_EXT="[]"
+                 changequote([, ])dnl
+                ],
+                [changequote(, )dnl
+                 ARM_ISA=ARMv7
+                 ARM_ISA_EXT="[VFPv3,NEON]"
+                 changequote([, ])dnl
+                ])
+        ])
 ])
 
 
@@ -111,14 +348,16 @@ AC_DEFUN([FP_SETTINGS],
     if test "$windows" = YES
     then
         SettingsCCompilerCommand='$topdir/../mingw/bin/gcc.exe'
-        SettingsCCompilerFlags=''
+        SettingsCCompilerFlags="$CONF_CC_OPTS_STAGE2 $CONF_GCC_LINKER_OPTS_STAGE2"
+        SettingsArCommand='$topdir/../mingw/bin/ar.exe'
         SettingsPerlCommand='$topdir/../perl/perl.exe'
         SettingsDllWrapCommand='$topdir/../mingw/bin/dllwrap.exe'
         SettingsWindresCommand='$topdir/../mingw/bin/windres.exe'
         SettingsTouchCommand='$topdir/touchy.exe'
     else
         SettingsCCompilerCommand="$WhatGccIsCalled"
-        SettingsCCompilerFlags="$CONF_CC_OPTS_STAGE2"
+        SettingsCCompilerFlags="$CONF_CC_OPTS_STAGE2 $CONF_GCC_LINKER_OPTS_STAGE2"
+        SettingsArCommand="$ArCmd"
         SettingsPerlCommand="$PerlCmd"
         SettingsDllWrapCommand="/bin/false"
         SettingsWindresCommand="/bin/false"
@@ -126,6 +365,7 @@ AC_DEFUN([FP_SETTINGS],
     fi
     AC_SUBST(SettingsCCompilerCommand)
     AC_SUBST(SettingsCCompilerFlags)
+    AC_SUBST(SettingsArCommand)
     AC_SUBST(SettingsPerlCommand)
     AC_SUBST(SettingsDllWrapCommand)
     AC_SUBST(SettingsWindresCommand)
@@ -181,6 +421,19 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
     then
         $2="$$2 -fno-stack-protector"
     fi
+
+    # Reduce memory usage when linking. See trac #5240.
+    if test -n "$LdHashSize31"
+    then
+        $3="$$3 -Wl,$LdHashSize31"
+        $4="$$4     $LdHashSize31"
+    fi
+    if test -n "$LdReduceMemoryOverheads"
+    then
+        $3="$$3 -Wl,$LdReduceMemoryOverheads"
+        $4="$$4     $LdReduceMemoryOverheads"
+    fi
+
     rm -f conftest.c conftest.o
     AC_MSG_RESULT([done])
 ])
@@ -517,34 +770,64 @@ if test ! -f compiler/cmm/CmmLex.hs || test ! -f compiler/parser/Lexer.hs
 then
     FP_COMPARE_VERSIONS([$fptools_cv_alex_version],[-lt],[2.1.0],
       [AC_MSG_ERROR([Alex version 2.1.0 or later is required to compile GHC.])])[]
+    FP_COMPARE_VERSIONS([$fptools_cv_alex_version],[-ge],[3.0],
+      [Alex3=YES],[Alex3=NO])
 fi
 AlexVersion=$fptools_cv_alex_version;
 AC_SUBST(AlexVersion)
+AC_SUBST(Alex3)
 ])
+
+
+# FP_PROG_LD_FLAG
+# ---------------
+# Sets the output variable $2 to $1 if ld supports the $1 flag.
+# Otherwise the variable's value is empty.
+AC_DEFUN([FP_PROG_LD_FLAG],
+[
+AC_CACHE_CHECK([whether ld understands $1], [fp_cv_$2],
+[echo 'foo() {}' > conftest.c
+${CC-cc} -c conftest.c
+if ${LdCmd} -r $1 -o conftest2.o conftest.o > /dev/null 2>&1; then
+   fp_cv_$2=$1
+else
+   fp_cv_$2=
+fi
+rm -rf conftest*])
+$2=$fp_cv_$2
+])# FP_PROG_LD_FLAG
 
 
 # FP_PROG_LD_X
 # ------------
-# Sets the output variable LdXFlag to -x if ld supports this flag, otherwise the
-# variable's value is empty.
+# Sets the output variable LdXFlag to -x if ld supports this flag.
+# Otherwise the variable's value is empty.
 AC_DEFUN([FP_PROG_LD_X],
 [
-AC_CACHE_CHECK([whether ld understands -x], [fp_cv_ld_x],
-[echo 'foo() {}' > conftest.c
-${CC-cc} -c conftest.c
-if ${LdCmd} -r -x -o conftest2.o conftest.o > /dev/null 2>&1; then
-   fp_cv_ld_x=yes
-else
-   fp_cv_ld_x=no
-fi
-rm -rf conftest*])
-if test "$fp_cv_ld_x" = yes; then
-  LdXFlag=-x
-else
-  LdXFlag=
-fi
+FP_PROG_LD_FLAG([-x],[LdXFlag])
 AC_SUBST([LdXFlag])
 ])# FP_PROG_LD_X
+
+
+# FP_PROG_LD_HashSize31
+# ------------
+# Sets the output variable LdHashSize31 to --hash-size=31 if ld supports
+# this flag. Otherwise the variable's value is empty.
+AC_DEFUN([FP_PROG_LD_HashSize31],
+[
+FP_PROG_LD_FLAG([--hash-size=31],[LdHashSize31])
+])# FP_PROG_LD_HashSize31
+
+
+# FP_PROG_LD_ReduceMemoryOverheads
+# ------------
+# Sets the output variable LdReduceMemoryOverheads to
+# --reduce-memory-overheads if ld supports this flag.
+# Otherwise the variable's value is empty.
+AC_DEFUN([FP_PROG_LD_ReduceMemoryOverheads],
+[
+FP_PROG_LD_FLAG([--reduce-memory-overheads],[LdReduceMemoryOverheads])
+])# FP_PROG_LD_ReduceMemoryOverheads
 
 
 # FP_PROG_LD_BUILD_ID
@@ -586,6 +869,31 @@ else
 fi])
 AC_SUBST([LdIsGNULd], [`echo $fp_cv_gnu_ld | sed 'y/yesno/YESNO/'`])
 ])# FP_PROG_LD_IS_GNU
+
+
+# FP_PROG_LD_NO_COMPACT_UNWIND
+# ----------------------------
+
+# Sets the output variable LdHasNoCompactUnwind to YES if ld supports
+# -no_compact_unwind, or NO otherwise.
+AC_DEFUN([FP_PROG_LD_NO_COMPACT_UNWIND],
+[
+AC_CACHE_CHECK([whether ld understands -no_compact_unwind], [fp_cv_ld_no_compact_unwind],
+[echo 'foo() {}' > conftest.c
+${CC-cc} -c conftest.c
+if ${LdCmd} -r -no_compact_unwind -o conftest2.o conftest.o > /dev/null 2>&1; then
+   fp_cv_ld_no_compact_unwind=yes
+else
+   fp_cv_ld_no_compact_unwind=no
+fi
+rm -rf conftest*])
+if test "$fp_cv_ld_no_compact_unwind" = yes; then
+  LdHasNoCompactUnwind=YES
+else
+  LdHasNoCompactUnwind=NO
+fi
+AC_SUBST([LdHasNoCompactUnwind])
+])# FP_PROG_LD_NO_COMPACT_UNWIND
 
 
 # FP_PROG_AR
@@ -759,6 +1067,22 @@ AC_SUBST([GccVersion], [$fp_cv_gcc_version])
 AC_SUBST(GccLT34)
 AC_SUBST(GccLT46)
 ])# FP_GCC_VERSION
+
+dnl Check to see if the C compiler uses an LLVM back end
+dnl
+AC_DEFUN([FP_CC_LLVM_BACKEND],
+[AC_REQUIRE([AC_PROG_CC])
+AC_MSG_CHECKING([whether C compiler has an LLVM back end])
+$CC -x c /dev/null -dM -E > conftest.txt 2>&1
+if grep "__llvm__" conftest.txt >/dev/null 2>&1; then
+  AC_SUBST([CC_LLVM_BACKEND], [1])
+  AC_MSG_RESULT([yes])
+else
+  AC_SUBST([CC_LLVM_BACKEND], [0])
+  AC_MSG_RESULT([no])
+fi
+rm -f conftest.txt
+])
 
 dnl Small feature test for perl version. Assumes PerlCmd
 dnl contains path to perl binary.
@@ -1493,6 +1817,9 @@ case "$1" in
   rs6000)
     $2="rs6000"
     ;;
+  s390x*)
+    $2="s390x"
+    ;;
   s390*)
     $2="s390"
     ;;
@@ -1564,6 +1891,12 @@ AC_DEFUN([BOOTSTRAPPING_GHC_INFO_FIELD],[
 if test $GhcCanonVersion -ge 701
 then
     $1=`"$WithGhc" --info | grep "^ ,(\"$2\"," | sed -e 's/.*","//' -e 's/")$//'`
+    tmp=${$1#\$topdir/}
+    if test "${$1}" != "$tmp"
+    then
+        topdir=`"$WithGhc" --print-libdir | sed 's#\\\\#/#g'`
+        $1="$topdir/$tmp"
+    fi
 else
     $1=$3
 fi
@@ -1612,10 +1945,12 @@ AC_DEFUN([XCODE_VERSION],[
 # Finds where gcc is
 AC_DEFUN([FIND_GCC],[
     if test "$TargetOS_CPP" = "darwin" &&
-        test "$XCodeVersion1" -ge 4
+       test "$XCodeVersion1" -eq 4 &&
+       test "$XCodeVersion2" -lt 2
     then
-        # From Xcode 4, use 'gcc-4.2' to force the use of the gcc legacy
-        # backend (instead of the LLVM backend)
+        # In Xcode 4.1, 'gcc-4.2' is the gcc legacy backend (rather
+        # than the LLVM backend). We prefer the legacy gcc, but in
+        # Xcode 4.2 'gcc-4.2' was removed.
         FP_ARG_WITH_PATH_GNU_PROG([CC], [gcc-4.2])
     else
         FP_ARG_WITH_PATH_GNU_PROG([CC], [gcc])

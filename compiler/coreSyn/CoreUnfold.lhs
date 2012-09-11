@@ -15,6 +15,13 @@ literal'').  In the corner of a @CoreUnfolding@ unfolding, you will
 find, unsurprisingly, a Core expression.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module CoreUnfold (
 	Unfolding, UnfoldingGuidance,	-- Abstract types
 
@@ -29,10 +36,11 @@ module CoreUnfold (
 	couldBeSmallEnoughToInline, inlineBoringOk,
 	certainlyWillInline, smallEnoughToInline,
 
-	callSiteInline, CallCtxt(..), 
+	callSiteInline, CallCtxt(..),
 
-	exprIsConApp_maybe
-
+        -- Reexport from CoreSubst (it only live there so it can be used
+        -- by the Very Simple Optimiser)
+        exprIsConApp_maybe, exprIsLiteral_maybe
     ) where
 
 #include "HsVersions.h"
@@ -44,23 +52,18 @@ import PprCore		()	-- Instances
 import TcType           ( tcSplitDFunTy )
 import OccurAnal        ( occurAnalyseExpr )
 import CoreSubst hiding( substTy )
-import CoreFVs         ( exprFreeVars )
 import CoreArity       ( manifestArity, exprBotStrictness_maybe )
 import CoreUtils
 import Id
 import DataCon
-import TyCon
 import Literal
 import PrimOp
 import IdInfo
 import BasicTypes	( Arity )
 import Type
-import Coercion
 import PrelNames
-import VarEnv           ( mkInScopeSet )
 import Bag
 import Util
-import Pair
 import FastTypes
 import FastString
 import Outputable
@@ -171,8 +174,7 @@ mkUnfolding src top_lvl is_bottoming expr
 		    uf_guidance   = guidance }
   where
     is_cheap = exprIsCheap expr
-    (arity, guidance) = calcUnfoldingGuidance is_cheap
-                                              opt_UF_CreationThreshold expr
+    (arity, guidance) = calcUnfoldingGuidance expr
 	-- Sometimes during simplification, there's a large let-bound thing	
 	-- which has been substituted, and so is now dead; so 'expr' contains
 	-- two copies of the thing while the occurrence-analysed expression doesn't
@@ -208,20 +210,19 @@ inlineBoringOk e
     go credit (App f (Type {}))            = go credit f
     go credit (App f a) | credit > 0  
                         , exprIsTrivial a  = go (credit-1) f
-    go credit (Note _ e) 		   = go credit e     
+    go credit (Tick _ e)                 = go credit e -- dubious
     go credit (Cast e _) 		   = go credit e
     go _      (Var {})         		   = boringCxtOk
     go _      _                		   = boringCxtNotOk
 
 calcUnfoldingGuidance
-	:: Bool		-- True <=> the rhs is cheap, or we want to treat it
-	   		--          as cheap (INLINE things)	 
-        -> Int		-- Bomb out if size gets bigger than this
-	-> CoreExpr    	-- Expression to look at
+	:: CoreExpr    	-- Expression to look at
 	-> (Arity, UnfoldingGuidance)
-calcUnfoldingGuidance expr_is_cheap bOMB_OUT_SIZE expr
+calcUnfoldingGuidance expr
   = case collectBinders expr of { (bndrs, body) ->
     let
+        bOMB_OUT_SIZE = opt_UF_CreationThreshold 
+               -- Bomb out if size gets bigger than this
         val_bndrs   = filter isId bndrs
 	n_val_bndrs = length val_bndrs
 
@@ -229,8 +230,7 @@ calcUnfoldingGuidance expr_is_cheap bOMB_OUT_SIZE expr
           = case (sizeExpr (iUnbox bOMB_OUT_SIZE) val_bndrs body) of
       	      TooBig -> UnfNever
       	      SizeIs size cased_bndrs scrut_discount
-      	        | uncondInline n_val_bndrs (iBox size)
-                , expr_is_cheap
+      	        | uncondInline expr n_val_bndrs (iBox size)
       	        -> UnfWhen unSaturatedOk boringCxtOk   -- Note [INLINE for small functions]
 	        | otherwise
       	        -> UnfIfGoodArgs { ug_args  = map (discount cased_bndrs) val_bndrs
@@ -275,9 +275,10 @@ Notice that 'x' counts 0, while (f x) counts 2.  That's deliberate: there's
 a function call to account for.  Notice also that constructor applications 
 are very cheap, because exposing them to a caller is so valuable.
 
-[25/5/11] All sizes are now multiplied by 10, except for primops.
-This makes primops look cheap, and seems to be almost unversally
-beneficial.  Done partly as a result of #4978.
+[25/5/11] All sizes are now multiplied by 10, except for primops
+(which have sizes like 1 or 4.  This makes primops look fantastically
+cheap, and seems to be almost unversally beneficial.  Done partly as a
+result of #4978.
 
 Note [Do not inline top-level bottoming functions]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -285,7 +286,6 @@ The FloatOut pass has gone to some trouble to float out calls to 'error'
 and similar friends.  See Note [Bottoming floats] in SetLevels.
 Do not re-inline them!  But we *do* still inline if they are very small
 (the uncondInline stuff).
-
 
 Note [INLINE for small functions]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -299,43 +299,54 @@ inline unconditionally, regardless of how boring the context is.
 
 Things to note:
 
- * We inline *unconditionally* if inlined thing is smaller (using sizeExpr)
-   than the thing it's replacing.  Notice that
+(1) We inline *unconditionally* if inlined thing is smaller (using sizeExpr)
+    than the thing it's replacing.  Notice that
       (f x) --> (g 3) 		  -- YES, unconditionally
       (f x) --> x : []		  -- YES, *even though* there are two
       	    	    		  --      arguments to the cons
       x     --> g 3		  -- NO
       x	    --> Just v		  -- NO
 
-  It's very important not to unconditionally replace a variable by
-  a non-atomic term.
+    It's very important not to unconditionally replace a variable by
+    a non-atomic term.
 
-* We do this even if the thing isn't saturated, else we end up with the
-  silly situation that
-     f x y = x
-     ...map (f 3)...
-  doesn't inline.  Even in a boring context, inlining without being
-  saturated will give a lambda instead of a PAP, and will be more
-  efficient at runtime.
+(2) We do this even if the thing isn't saturated, else we end up with the
+    silly situation that
+       f x y = x
+       ...map (f 3)...
+    doesn't inline.  Even in a boring context, inlining without being
+    saturated will give a lambda instead of a PAP, and will be more
+    efficient at runtime.
 
-* However, when the function's arity > 0, we do insist that it 
-  has at least one value argument at the call site.  Otherwise we find this:
-       f = /\a \x:a. x
-       d = /\b. MkD (f b)
-  If we inline f here we get
-       d = /\b. MkD (\x:b. x)
-  and then prepareRhs floats out the argument, abstracting the type
-  variables, so we end up with the original again!
+(3) However, when the function's arity > 0, we do insist that it 
+    has at least one value argument at the call site.  (This check is
+    made in the UnfWhen case of callSiteInline.) Otherwise we find this:
+         f = /\a \x:a. x
+         d = /\b. MkD (f b)
+    If we inline f here we get
+         d = /\b. MkD (\x:b. x)
+    and then prepareRhs floats out the argument, abstracting the type
+    variables, so we end up with the original again!
 
+(4) We must be much more cautious about arity-zero things. Consider
+       let x = y +# z in ...
+    In *size* terms primops look very small, because the generate a
+    single instruction, but we do not want to unconditionally replace
+    every occurrence of x with (y +# z).  So we only do the
+    unconditional-inline thing for *trivial* expressions.
+  
+    NB: you might think that PostInlineUnconditionally would do this
+    but it doesn't fire for top-level things; see SimplUtils
+    Note [Top level and postInlineUnconditionally]
 
 \begin{code}
-uncondInline :: Arity -> Int -> Bool
+uncondInline :: CoreExpr -> Arity -> Int -> Bool
 -- Inline unconditionally if there no size increase
 -- Size of call is arity (+1 for the function)
 -- See Note [INLINE for small functions]
-uncondInline arity size 
-  | arity == 0 = size == 0
-  | otherwise  = size <= 10 * (arity + 1)
+uncondInline rhs arity size 
+  | arity > 0 = size <= 10 * (arity + 1) -- See Note [INLINE for small functions] (1)
+  | otherwise = exprIsTrivial rhs        -- See Note [INLINE for small functions] (4)
 \end{code}
 
 
@@ -352,7 +363,7 @@ sizeExpr bOMB_OUT_SIZE top_args expr
   = size_up expr
   where
     size_up (Cast e _) = size_up e
-    size_up (Note _ e) = size_up e
+    size_up (Tick _ e) = size_up e
     size_up (Type _)   = sizeZero           -- Types cost nothing
     size_up (Coercion _) = sizeZero
     size_up (Lit lit)  = sizeN (litSize lit)
@@ -495,7 +506,8 @@ sizeExpr bOMB_OUT_SIZE top_args expr
 -- | Finds a nominal size of a string literal.
 litSize :: Literal -> Int
 -- Used by CoreUnfold.sizeExpr
-litSize (MachStr str) = 10 + 10 * ((lengthFS str + 3) `div` 4)
+litSize (LitInteger {}) = 100	-- Note [Size of literal integers]
+litSize (MachStr str)   = 10 + 10 * ((lengthFS str + 3) `div` 4)
 	-- If size could be 0 then @f "x"@ might be too small
 	-- [Sept03: make literal strings a bit bigger to avoid fruitless 
 	--  duplication of little strings]
@@ -559,6 +571,17 @@ conSize dc n_val_args
      -- REALLY like unfolding constructors that get scrutinised.
      -- [SDM, 25/5/11]
 \end{code}
+
+Note [Literal integer size]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Literal integers *can* be big (mkInteger [...coefficients...]), but
+need not be (S# n).  We just use an aribitrary big-ish constant here
+so that, in particular, we don't inline top-level defns like
+   n = S# 5
+There's no point in doing so -- any optimsations will see the S#
+through n's unfolding.  Nor will a big size inhibit unfoldings functions
+that mention a literal Integer, because the float-out pass will float
+all those constants to top level.
 
 Note [Constructor size]
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -732,16 +755,27 @@ smallEnoughToInline _
 ----------------
 certainlyWillInline :: Unfolding -> Bool
   -- Sees if the unfolding is pretty certain to inline	
-certainlyWillInline (CoreUnfolding { uf_is_cheap = is_cheap, uf_arity = n_vals, uf_guidance = guidance })
+certainlyWillInline (CoreUnfolding { uf_arity = n_vals, uf_guidance = guidance })
   = case guidance of
       UnfNever      -> False
       UnfWhen {}    -> True
       UnfIfGoodArgs { ug_size = size} 
-                    -> is_cheap && size - (10 * (n_vals +1)) <= opt_UF_UseThreshold
+                    -> n_vals > 0     -- See Note [certainlyWillInline: be caseful of thunks]
+                    && size - (10 * (n_vals +1)) <= opt_UF_UseThreshold
 
 certainlyWillInline _
   = False
 \end{code}
+
+Note [certainlyWillInline: be caseful of thunks]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Don't claim that thunks will certainly inline, because that risks work
+duplication.  Even if the work duplication is not great (eg is_cheap
+holds), it can make a big difference in an inner loop In Trac #5623 we
+found that the WorkWrap phase thought that
+       y = case x of F# v -> F# (v +# v)
+was certainlyWillInline, so the addition got duplicated.  
+
 
 %************************************************************************
 %*									*
@@ -879,7 +913,7 @@ tryUnfolding dflags id lone_variable
 
           UnfWhen unsat_ok boring_ok 
              -> (enough_args && (boring_ok || some_benefit), empty )
-             where      -- See Note [INLINE for small functions]
+             where      -- See Note [INLINE for small functions (3)]
                enough_args = saturated || (unsat_ok && n_val_args > 0)
 
           UnfIfGoodArgs { ug_args = arg_discounts, ug_res = res_discount, ug_size = size }
@@ -1069,7 +1103,8 @@ to be cheap, and that's good because exprIsConApp_maybe doesn't
 think that expression is a constructor application.
 
 I used to test is_value rather than is_cheap, which was utterly
-wrong, because the above expression responds True to exprIsHNF.
+wrong, because the above expression responds True to exprIsHNF, 
+which is what sets is_value.
 
 This kind of thing can occur if you have
 
@@ -1179,7 +1214,7 @@ interestingArg e = go e 0
     go (App fn (Type _)) n = go fn n
     go (App fn (Coercion _)) n = go fn n
     go (App fn _)        n = go fn (n+1)
-    go (Note _ a) 	 n = go a n
+    go (Tick _ a)      n = go a n
     go (Cast e _) 	 n = go e n
     go (Lam v e)  	 n 
        | isTyVar v	   = go e n
@@ -1192,162 +1227,3 @@ nonTriv ::  ArgSummary -> Bool
 nonTriv TrivArg = False
 nonTriv _       = True
 \end{code}
-
-%************************************************************************
-%*									*
-         exprIsConApp_maybe
-%*									*
-%************************************************************************
-
-Note [exprIsConApp_maybe]
-~~~~~~~~~~~~~~~~~~~~~~~~~
-exprIsConApp_maybe is a very important function.  There are two principal
-uses:
-  * case e of { .... }
-  * cls_op e, where cls_op is a class operation
-
-In both cases you want to know if e is of form (C e1..en) where C is
-a data constructor.
-
-However e might not *look* as if 
-
-\begin{code}
--- | Returns @Just (dc, [t1..tk], [x1..xn])@ if the argument expression is 
--- a *saturated* constructor application of the form @dc t1..tk x1 .. xn@,
--- where t1..tk are the *universally-qantified* type args of 'dc'
-exprIsConApp_maybe :: IdUnfoldingFun -> CoreExpr -> Maybe (DataCon, [Type], [CoreExpr])
-
-exprIsConApp_maybe id_unf (Note note expr)
-  | notSccNote note
-  = exprIsConApp_maybe id_unf expr
-	-- We ignore all notes except SCCs.  For example,
-	--  	case _scc_ "foo" (C a b) of
-	--			C a b -> e
-	-- should not be optimised away, because we'll lose the
-	-- entry count on 'foo'; see Trac #4414
-
-exprIsConApp_maybe id_unf (Cast expr co)
-  =     -- Here we do the KPush reduction rule as described in the FC paper
-	-- The transformation applies iff we have
-	--	(C e1 ... en) `cast` co
-	-- where co :: (T t1 .. tn) ~ to_ty
-	-- The left-hand one must be a T, because exprIsConApp returned True
-	-- but the right-hand one might not be.  (Though it usually will.)
-
-    case exprIsConApp_maybe id_unf expr of {
-	Nothing 	                 -> Nothing ;
-	Just (dc, _dc_univ_args, dc_args) -> 
-
-    let Pair _from_ty to_ty = coercionKind co
-	dc_tc = dataConTyCon dc
-    in
-    case splitTyConApp_maybe to_ty of {
-	Nothing -> Nothing ;
-	Just (to_tc, to_tc_arg_tys) 
-		| dc_tc /= to_tc -> Nothing
-		-- These two Nothing cases are possible; we might see 
-		--	(C x y) `cast` (g :: T a ~ S [a]),
-		-- where S is a type function.  In fact, exprIsConApp
-		-- will probably not be called in such circumstances,
-		-- but there't nothing wrong with it 
-
-	 	| otherwise  ->
-    let
-	tc_arity       = tyConArity dc_tc
-	dc_univ_tyvars = dataConUnivTyVars dc
-        dc_ex_tyvars   = dataConExTyVars dc
-        arg_tys        = dataConRepArgTys dc
-
-        (ex_args, val_args) = splitAtList dc_ex_tyvars dc_args
-
-	-- Make the "theta" from Fig 3 of the paper
-        gammas = decomposeCo tc_arity co
-        theta  = zipOpenCvSubst (dc_univ_tyvars ++ dc_ex_tyvars)
-                                (gammas         ++ map mkReflCo (stripTypeArgs ex_args))
-
-          -- Cast the value arguments (which include dictionaries)
-	new_val_args = zipWith cast_arg arg_tys val_args
-	cast_arg arg_ty arg = mkCoerce (liftCoSubst theta arg_ty) arg
-    in
-#ifdef DEBUG
-    let dump_doc = vcat [ppr dc,      ppr dc_univ_tyvars, ppr dc_ex_tyvars,
-                         ppr arg_tys, ppr dc_args,        ppr _dc_univ_args,
-                         ppr ex_args, ppr val_args]
-    in
-    ASSERT2( eqType _from_ty (mkTyConApp dc_tc _dc_univ_args), dump_doc )
-    ASSERT2( all isTypeArg ex_args, dump_doc )
-    ASSERT2( equalLength val_args arg_tys, dump_doc )
-#endif
-
-    Just (dc, to_tc_arg_tys, ex_args ++ new_val_args)
-    }}
-
-exprIsConApp_maybe id_unf expr 
-  = analyse expr [] 
-  where
-    analyse (App fun arg) args = analyse fun (arg:args)
-    analyse fun@(Lam {})  args = beta fun [] args 
-
-    analyse (Var fun) args
-	| Just con <- isDataConWorkId_maybe fun
-        , count isValArg args == idArity fun
-	, let (univ_ty_args, rest_args) = splitAtList (dataConUnivTyVars con) args
-	= Just (con, stripTypeArgs univ_ty_args, rest_args)
-
-	-- Look through dictionary functions; see Note [Unfolding DFuns]
-        | DFunUnfolding dfun_nargs con ops <- unfolding
-        , let sat = length args == dfun_nargs    -- See Note [DFun arity check]
-          in if sat then True else 
-             pprTrace "Unsaturated dfun" (ppr fun <+> int dfun_nargs $$ ppr args) False   
-        , let (dfun_tvs, _n_theta, _cls, dfun_res_tys) = tcSplitDFunTy (idType fun)
-              subst    = zipOpenTvSubst dfun_tvs (stripTypeArgs (takeList dfun_tvs args))
-              mk_arg e = mkApps e args
-        = Just (con, substTys subst dfun_res_tys, map mk_arg ops)
-
-	-- Look through unfoldings, but only cheap ones, because
-	-- we are effectively duplicating the unfolding
-	| Just rhs <- expandUnfolding_maybe unfolding
-	= -- pprTrace "expanding" (ppr fun $$ ppr rhs) $
-          analyse rhs args
-        where
-	  unfolding = id_unf fun
-
-    analyse _ _ = Nothing
-
-    -----------
-    beta (Lam v body) pairs (arg : args) 
-        | isTyCoArg arg
-        = beta body ((v,arg):pairs) args 
-
-    beta (Lam {}) _ _    -- Un-saturated, or not a type lambda
-	= Nothing
-
-    beta fun pairs args
-        = analyse (substExpr (text "subst-expr-is-con-app") subst fun) args
-        where
-          subst = mkOpenSubst (mkInScopeSet (exprFreeVars fun)) pairs
-	  -- doc = vcat [ppr fun, ppr expr, ppr pairs, ppr args]
-
-stripTypeArgs :: [CoreExpr] -> [Type]
-stripTypeArgs args = ASSERT2( all isTypeArg args, ppr args )
-                     [ty | Type ty <- args]
-  -- We really do want isTypeArg here, not isTyCoArg!
-\end{code}
-
-Note [Unfolding DFuns]
-~~~~~~~~~~~~~~~~~~~~~~
-DFuns look like
-
-  df :: forall a b. (Eq a, Eq b) -> Eq (a,b)
-  df a b d_a d_b = MkEqD (a,b) ($c1 a b d_a d_b)
-                               ($c2 a b d_a d_b)
-
-So to split it up we just need to apply the ops $c1, $c2 etc
-to the very same args as the dfun.  It takes a little more work
-to compute the type arguments to the dictionary constructor.
-
-Note [DFun arity check]
-~~~~~~~~~~~~~~~~~~~~~~~
-Here we check that the total number of supplied arguments (inclding 
-type args) matches what the dfun is expecting.  This may be *less*
-than the ordinary arity of the dfun: see Note [DFun unfoldings] in CoreSyn

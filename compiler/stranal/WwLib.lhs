@@ -4,6 +4,13 @@
 \section[WwLib]{A library for the ``worker\/wrapper'' back-end to the strictness analyser}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module WwLib ( mkWwBodies, mkWWstr, mkWorkerArgs ) where
 
 #include "HsVersions.h"
@@ -24,7 +31,7 @@ import TysPrim		( realWorldStatePrimTy )
 import TysWiredIn	( tupleCon )
 import Type
 import Coercion         ( mkSymCo, splitNewTypeRepCo_maybe )
-import BasicTypes	( Boxity(..) )
+import BasicTypes	( TupleSort(..) )
 import Literal		( absentLiteralOf )
 import UniqSupply
 import Unique
@@ -450,7 +457,7 @@ mkWWcpr body_ty RetCPR
       let
         (wrap_wild : work_wild : args) = zipWith mk_ww_local uniqs (ubx_tup_ty : body_ty : con_arg_tys)
 	arg_vars		       = varsToCoreExprs args
-	ubx_tup_con		       = tupleCon Unboxed n_con_args
+	ubx_tup_con		       = tupleCon UnboxedTuple n_con_args
 	ubx_tup_ty		       = exprType ubx_tup_app
 	ubx_tup_app		       = mkConApp ubx_tup_con (map Type con_arg_tys   ++ arg_vars)
         con_app			       = mkProductBox args body_ty
@@ -475,10 +482,18 @@ mkWWcpr body_ty _other		-- No CPR info
 --	\ x -> case (_scc_ "foo" E) of I# x -> x)
 --
 -- This transform doesn't move work or allocation
--- from one cost centre to another
+-- from one cost centre to another.
+--
+-- Later [SDM]: presumably this is because we want the simplifier to
+-- eliminate the case, and the scc would get in the way?  I'm ok with
+-- including the case itself in the cost centre, since it is morally
+-- part of the function (post transformation) anyway.
+
 workerCase :: Id -> CoreExpr -> [Id] -> DataCon -> CoreExpr -> CoreExpr
-workerCase bndr (Note (SCC cc) e) args con body = Note (SCC cc) (mkUnpackCase bndr e args con body)
-workerCase bndr e args con body = mkUnpackCase bndr e args con body
+workerCase bndr (Tick tickish e) args con body
+   = Tick tickish (mkUnpackCase bndr e args con body)
+workerCase bndr e args con body
+   = mkUnpackCase bndr e args con body
 \end{code}
 
 
@@ -515,7 +530,7 @@ mk_absent_let :: Id -> Maybe (CoreExpr -> CoreExpr)
 mk_absent_let arg 
   | not (isUnLiftedType arg_ty)
   = Just (Let (NonRec arg abs_rhs))
-  | Just (tc, _) <- splitTyConApp_maybe arg_ty
+  | Just tc <- tyConAppTyCon_maybe arg_ty
   , Just lit <- absentLiteralOf tc
   = Just (Let (NonRec arg (Lit lit)))
   | arg_ty `eqType` realWorldStatePrimTy 

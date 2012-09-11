@@ -3,12 +3,20 @@
 %
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module OptCoercion ( optCoercion ) where 
 
 #include "HsVersions.h"
 
 import Coercion
 import Type hiding( substTyVarBndr, substTy, extendTvSubst )
+import TcType       ( exactTyVarsOfType )
 import TyCon
 import Var
 import VarSet
@@ -239,15 +247,17 @@ opt_trans_rule is co1 co2@(TyConAppCo tc cos2)
 opt_trans_rule is co1 co2
   | Just (tv1,r1) <- splitForAllCo_maybe co1
   , Just (tv2,r2) <- etaForAllCo_maybe co2
-  , let r2' = substCoWithTy is tv2 (mkTyVarTy tv1) r2
+  , let r2' = substCoWithTy is' tv2 (mkTyVarTy tv1) r2
+        is' = is `extendInScopeSet` tv1
   = fireTransRule "EtaAllL" co1 co2 $
-    mkForAllCo tv1 (opt_trans2 (extendInScopeSet is tv1) r1 r2')
+    mkForAllCo tv1 (opt_trans2 is' r1 r2')
 
   | Just (tv2,r2) <- splitForAllCo_maybe co2
   , Just (tv1,r1) <- etaForAllCo_maybe co1
-  , let r1' = substCoWithTy is tv1 (mkTyVarTy tv2) r1
+  , let r1' = substCoWithTy is' tv1 (mkTyVarTy tv2) r1
+        is' = is `extendInScopeSet` tv2
   = fireTransRule "EtaAllR" co1 co2 $
-    mkForAllCo tv1 (opt_trans2 (extendInScopeSet is tv2) r1' r2)
+    mkForAllCo tv1 (opt_trans2 is' r1' r2)
 
 -- Push transitivity inside axioms
 opt_trans_rule is co1 co2

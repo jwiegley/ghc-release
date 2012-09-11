@@ -1,6 +1,6 @@
 
 T2664.hs:31:33:
-    Could not deduce (Dual a ~ Dual b)
+    Could not deduce (Dual b ~ Dual a)
     from the context (Connect a, Connect b)
       bound by the instance declaration at T2664.hs:22:10-52
     or from ((a :*: b) ~ Dual c, c ~ Dual (a :*: b))

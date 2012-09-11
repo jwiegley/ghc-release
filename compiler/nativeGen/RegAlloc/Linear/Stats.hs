@@ -1,3 +1,10 @@
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module RegAlloc.Linear.Stats (
 	binSpillReasons,
 	countRegRegMovesNat,
@@ -37,7 +44,7 @@ binSpillReasons reasons
 -- | Count reg-reg moves remaining in this code.
 countRegRegMovesNat 
 	:: Instruction instr
-	=> NatCmmTop statics instr -> Int
+	=> NatCmmDecl statics instr -> Int
 
 countRegRegMovesNat cmm
 	= execState (mapGenBlockTopM countBlock cmm) 0
@@ -58,7 +65,7 @@ countRegRegMovesNat cmm
 -- | Pretty print some RegAllocStats
 pprStats 
 	:: Instruction instr 
-	=> [NatCmmTop statics instr] -> [RegAllocStats] -> SDoc
+	=> [NatCmmDecl statics instr] -> [RegAllocStats] -> SDoc
 
 pprStats code statss
  = let	-- sum up all the instrs inserted by the spiller

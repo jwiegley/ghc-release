@@ -2,6 +2,13 @@
 % (c) The University of Glasgow 2001-2006
 %
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module MkExternalCore (
 	emitExternalCore
 ) where
@@ -14,9 +21,9 @@ import CoreSyn
 import HscTypes	
 import TyCon
 -- import Class
--- import TysPrim( eqPredPrimTyCon )
 import TypeRep
 import Type
+import Kind
 import PprExternalCore () -- Instances
 import DataCon
 import Coercion
@@ -161,8 +168,7 @@ make_exp (Case e v ty alts) = do
   scrut <- make_exp e
   newAlts  <- mapM make_alt alts
   return $ C.Case scrut (make_vbind v) (make_ty ty) newAlts
-make_exp (Note (SCC _) e) = make_exp e >>= (return . C.Note "SCC") -- temporary
-make_exp (Note (CoreNote s) e) = make_exp e >>= (return . C.Note s)  -- hdaume: core annotations
+make_exp (Tick _ e) = make_exp e >>= (return . C.Tick "SCC") -- temporary
 make_exp _ = error "MkExternalCore died: make_exp"
 
 make_alt :: CoreAlt -> CoreM C.Alt
@@ -228,15 +234,12 @@ make_ty' (TyConApp tc ts) 	 = make_tyConApp tc ts
 -- expose the representation in interface files, which definitely isn't right.
 -- Maybe CoreTidy should know whether to expand newtypes or not?
 
-make_ty' (PredTy p)	= make_ty (predTypeRep p)
-
 make_tyConApp :: TyCon -> [Type] -> C.Ty
 make_tyConApp tc ts =
   foldl C.Tapp (C.Tcon (qtc tc)) 
 	    (map make_ty ts)
 
 make_kind :: Kind -> C.Kind
-make_kind (PredTy (EqPred t1 t2)) = C.Keq (make_ty t1) (make_ty t2)
 make_kind (FunTy k1 k2)  = C.Karrow (make_kind k1) (make_kind k2)
 make_kind k
   | isLiftedTypeKind k   = C.Klifted

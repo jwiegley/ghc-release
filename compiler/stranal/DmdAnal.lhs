@@ -7,6 +7,13 @@
 			-----------------
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module DmdAnal ( dmdAnalPgm, dmdAnalTopRhs, 
 		 both {- needed by WwLib -}
    ) where
@@ -35,7 +42,7 @@ import TysWiredIn	( unboxedPairDataCon )
 import TysPrim		( realWorldStatePrimTy )
 import UniqFM		( addToUFM_Directly, lookupUFM_Directly,
 			  minusUFM, filterUFM )
-import Type		( isUnLiftedType, eqType, splitTyConApp_maybe )
+import Type		( isUnLiftedType, eqType, tyConAppTyCon_maybe )
 import Coercion         ( coercionKind )
 import Util		( mapAndUnzip, lengthIs, zipEqual )
 import BasicTypes	( Arity, TopLevelFlag(..), isTopLevel, isNeverActive,
@@ -62,14 +69,14 @@ To think about
 %************************************************************************
 
 \begin{code}
-dmdAnalPgm :: DynFlags -> [CoreBind] -> IO [CoreBind]
+dmdAnalPgm :: DynFlags -> CoreProgram -> IO CoreProgram
 dmdAnalPgm _ binds
   = do {
 	let { binds_plus_dmds = do_prog binds } ;
 	return binds_plus_dmds
     }
   where
-    do_prog :: [CoreBind] -> [CoreBind]
+    do_prog :: CoreProgram -> CoreProgram
     do_prog binds = snd $ mapAccumL dmdAnalTopBind emptySigEnv binds
 
 dmdAnalTopBind :: SigEnv
@@ -157,7 +164,7 @@ dmdAnal env dmd (Cast e co)
     (dmd_ty, e') = dmdAnal env dmd' e
     to_co        = pSnd (coercionKind co)
     dmd'
-      | Just (tc, _) <- splitTyConApp_maybe to_co
+      | Just tc <- tyConAppTyCon_maybe to_co
       , isRecursiveTyCon tc = evalDmd
       | otherwise           = dmd
 	-- This coerce usually arises from a recursive
@@ -166,8 +173,8 @@ dmdAnal env dmd (Cast e co)
 	-- inside recursive products -- we might not reach
 	-- a fixpoint.  So revert to a vanilla Eval demand
 
-dmdAnal env dmd (Note n e)
-  = (dmd_ty, Note n e')
+dmdAnal env dmd (Tick t e)
+  = (dmd_ty, Tick t e')
   where
     (dmd_ty, e') = dmdAnal env dmd e
 

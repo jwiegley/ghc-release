@@ -88,3 +88,10 @@ test('T5252',
      extra_clean(['T5252a.hi', 'T5252a.o']),
      run_command, 
      ['$MAKE -s --no-print-directory T5252'])
+test('T5455', normal, compile, [''])
+test('T5001',
+     [only_ways(['optasm']),
+      only_compiler_types(['ghc']),
+      extra_clean(['T5001a.hi', 'T5001a.o'])],
+     multimod_compile,
+     ['T5001', '-v0'])

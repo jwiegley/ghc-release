@@ -21,8 +21,11 @@ module SysTools (
         runWindres,
         runLlvmOpt,
         runLlvmLlc,
+        runClang,
         figureLlvmVersion,
         readElfSection,
+
+        askCc,
 
         touch,                  -- String -> String -> IO ()
         copy,
@@ -45,6 +48,7 @@ import Config
 import Outputable
 import ErrUtils
 import Panic
+import Platform
 import Util
 import DynFlags
 import StaticFlags
@@ -180,6 +184,17 @@ initSysTools mbMinusB
                                             _ ->
                                                 xs
                                Nothing -> pgmError ("No entry for " ++ show key ++ " in " ++ show settingsFile)
+              readSetting key = case lookup key mySettings of
+                                Just xs ->
+                                    case maybeRead xs of
+                                    Just v -> return v
+                                    Nothing -> pgmError ("Failed to read " ++ show key ++ " value " ++ show xs)
+                                Nothing -> pgmError ("No entry for " ++ show key ++ " in " ++ show settingsFile)
+        ; targetArch <- readSetting "target arch"
+        ; targetOS <- readSetting "target os"
+        ; targetWordSize <- readSetting "target word size"
+        ; targetHasGnuNonexecStack <- readSetting "target has GNU nonexec stack"
+        ; targetHasSubsectionsViaSymbols <- readSetting "target has subsections via symbols"
         ; myExtraGccViaCFlags <- getSetting "GCC extra via C opts"
         -- On Windows, mingw is distributed with GHC,
         -- so we look in TopDir/../mingw/bin
@@ -239,6 +254,13 @@ initSysTools mbMinusB
               lo_prog = "opt"
 
         ; return $ Settings {
+                        sTargetPlatform = Platform {
+                                              platformArch = targetArch,
+                                              platformOS   = targetOS,
+                                              platformWordSize = targetWordSize,
+                                              platformHasGnuNonexecStack = targetHasGnuNonexecStack,
+                                              platformHasSubsectionsViaSymbols = targetHasSubsectionsViaSymbols
+                                          },
                         sTmpDir = normalise tmpdir,
                         sGhcUsagePath = ghc_usage_msg_path,
                         sGhciUsagePath = ghci_usage_msg_path,
@@ -380,6 +402,37 @@ runCc dflags args =   do
 isContainedIn :: String -> String -> Bool
 xs `isContainedIn` ys = any (xs `isPrefixOf`) (tails ys)
 
+askCc :: DynFlags -> [Option] -> IO String
+askCc dflags args = do
+  let (p,args0) = pgm_c dflags
+      args1 = args0 ++ args
+  mb_env <- getGccEnv args1
+  runSomethingWith dflags "gcc" p args1 $ \real_args ->
+    readCreateProcess (proc p real_args){ env = mb_env }
+
+-- Version of System.Process.readProcessWithExitCode that takes an environment
+readCreateProcess
+    :: CreateProcess
+    -> IO (ExitCode, String)    -- ^ stdout
+readCreateProcess proc = do
+    (_, Just outh, _, pid) <-
+        createProcess proc{ std_out = CreatePipe }
+
+    -- fork off a thread to start consuming the output
+    output  <- hGetContents outh
+    outMVar <- newEmptyMVar
+    _ <- forkIO $ evaluate (length output) >> putMVar outMVar ()
+
+    -- wait on the output
+    takeMVar outMVar
+    hClose outh
+
+    -- wait on the process
+    ex <- waitForProcess pid
+
+    return (ex, output)
+
+
 -- If the -B<dir> option is set, add <dir> to PATH.  This works around
 -- a bug in gcc on Windows Vista where it can't find its auxiliary
 -- binaries (see bug #1110).
@@ -423,6 +476,22 @@ runLlvmLlc dflags args = do
   let (p,args0) = pgm_lc dflags
   runSomething dflags "LLVM Compiler" p (args0++args)
 
+-- | Run the clang compiler (used as an assembler for the LLVM
+-- backend on OS X as LLVM doesn't support the OS X system
+-- assembler)
+runClang :: DynFlags -> [Option] -> IO ()
+runClang dflags args = do
+  -- we simply assume its available on the PATH
+  let clang = "clang"
+  Exception.catch (do
+        runSomething dflags "Clang (Assembler)" clang args
+    )
+    (\(err :: SomeException) -> do
+        putMsg dflags $ text $ "Error running clang! you need clang installed"
+                            ++ " to use the LLVM backend"
+        throw err
+    )
+
 -- | Figure out which version of LLVM we are running this session
 figureLlvmVersion :: DynFlags -> IO (Maybe Int)
 figureLlvmVersion dflags = do
@@ -454,9 +523,13 @@ figureLlvmVersion dflags = do
              return $ Just v
             )
             (\err -> do
-                putMsg dflags $ text $ "Error (" ++ show err ++ ")"
-                putMsg dflags $ text "Warning: Couldn't figure out LLVM version!"
-                putMsg dflags $ text "Make sure you have installed LLVM"
+                debugTraceMsg dflags 2
+                    (text "Error (figuring out LLVM version):" <+>
+                     text (show err))
+                putMsg dflags $ vcat
+                    [ text "Warning:", nest 9 $
+                          text "Couldn't figure out LLVM version!" $$
+                          text "Make sure you have installed LLVM"]
                 return Nothing)
   return ver
   
@@ -511,10 +584,22 @@ copyWithHeader dflags purpose maybe_header from to = do
   hout <- openBinaryFile to   WriteMode
   hin  <- openBinaryFile from ReadMode
   ls <- hGetContents hin -- inefficient, but it'll do for now. ToDo: speed up
-  maybe (return ()) (hPutStr hout) maybe_header
+  maybe (return ()) (header hout) maybe_header
   hPutStr hout ls
   hClose hout
   hClose hin
+ where
+#if __GLASGOW_HASKELL__ >= 702
+  -- write the header string in UTF-8.  The header is something like
+  --   {-# LINE "foo.hs" #-}
+  -- and we want to make sure a Unicode filename isn't mangled.
+  header h str = do
+   hSetEncoding h utf8
+   hPutStr h str
+   hSetBinaryMode h True
+#else
+  header h str = hPutStr h str
+#endif
 
 -- | read the contents of the named section in an ELF object as a
 -- String.
@@ -675,38 +760,45 @@ runSomethingFiltered
   -> Maybe [(String,String)] -> IO ()
 
 runSomethingFiltered dflags filter_fn phase_name pgm args mb_env = do
+    runSomethingWith dflags phase_name pgm args $ \real_args -> do
+        r <- builderMainLoop dflags filter_fn pgm real_args mb_env
+        return (r,())
+
+runSomethingWith
+  :: DynFlags -> String -> String -> [Option]
+  -> ([String] -> IO (ExitCode, a))
+  -> IO a
+
+runSomethingWith dflags phase_name pgm args io = do
   let real_args = filter notNull (map showOpt args)
 #if __GLASGOW_HASKELL__ >= 701
       cmdLine = showCommandForUser pgm real_args
 #else
       cmdLine = unwords (pgm:real_args)
 #endif
-  traceCmd dflags phase_name cmdLine $ do
-  (exit_code, doesn'tExist) <-
-     catchIO (do
-         rc <- builderMainLoop dflags filter_fn pgm real_args mb_env
-         case rc of
-           ExitSuccess{} -> return (rc, False)
-           ExitFailure n
-             -- rawSystem returns (ExitFailure 127) if the exec failed for any
-             -- reason (eg. the program doesn't exist).  This is the only clue
-             -- we have, but we need to report something to the user because in
-             -- the case of a missing program there will otherwise be no output
-             -- at all.
-            | n == 127  -> return (rc, True)
-            | otherwise -> return (rc, False))
-                -- Should 'rawSystem' generate an IO exception indicating that
-                -- 'pgm' couldn't be run rather than a funky return code, catch
-                -- this here (the win32 version does this, but it doesn't hurt
-                -- to test for this in general.)
-              (\ err ->
-                if IO.isDoesNotExistError err
-                 then return (ExitFailure 1, True)
-                 else IO.ioError err)
-  case (doesn'tExist, exit_code) of
-     (True, _)        -> ghcError (InstallationError ("could not execute: " ++ pgm))
-     (_, ExitSuccess) -> return ()
-     _                -> ghcError (PhaseFailed phase_name exit_code)
+  traceCmd dflags phase_name cmdLine $ handleProc pgm phase_name $ io real_args
+
+handleProc :: String -> String -> IO (ExitCode, r) -> IO r
+handleProc pgm phase_name proc = do
+    (rc, r) <- proc `catchIO` handler
+    case rc of
+      ExitSuccess{} -> return r
+      ExitFailure n
+        -- rawSystem returns (ExitFailure 127) if the exec failed for any
+        -- reason (eg. the program doesn't exist).  This is the only clue
+        -- we have, but we need to report something to the user because in
+        -- the case of a missing program there will otherwise be no output
+        -- at all.
+       | n == 127  -> does_not_exist
+       | otherwise -> ghcError (PhaseFailed phase_name rc)
+  where
+    handler err =
+       if IO.isDoesNotExistError err
+          then does_not_exist
+          else IO.ioError err
+
+    does_not_exist = ghcError (InstallationError ("could not execute: " ++ pgm))
+
 
 builderMainLoop :: DynFlags -> (String -> String) -> FilePath
                 -> [String] -> Maybe [(String, String)]
@@ -822,7 +914,7 @@ data BuildMessage
   | BuildError !SrcLoc !SDoc
   | EOF
 
-traceCmd :: DynFlags -> String -> String -> IO () -> IO ()
+traceCmd :: DynFlags -> String -> String -> IO a -> IO a
 -- trace the command (at two levels of verbosity)
 traceCmd dflags phase_name cmd_line action
  = do   { let verb = verbosity dflags

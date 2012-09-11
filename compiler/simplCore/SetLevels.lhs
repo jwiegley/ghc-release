@@ -42,6 +42,13 @@
   the scrutinee of the case, and we can inline it.  
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module SetLevels (
 	setLevels, 
 
@@ -56,23 +63,27 @@ module SetLevels (
 
 import CoreSyn
 import CoreMonad	( FloatOutSwitches(..) )
-import CoreUtils	( exprType, exprOkForSpeculation, mkPiTypes )
+import CoreUtils	( exprType, exprOkForSpeculation )
 import CoreArity	( exprBotStrictness_maybe )
 import CoreFVs		-- all of it
+import Coercion         ( isCoVar )
 import CoreSubst	( Subst, emptySubst, extendInScope, substBndr, substRecBndrs,
-			  extendIdSubst, cloneBndrs, cloneIdBndr, cloneRecIdBndrs )
+			  extendIdSubst, extendSubstWithVar, cloneBndr, cloneRecIdBndrs, substTy, substCo )
 import Id
 import IdInfo
 import Var
 import VarSet
 import VarEnv
+import Literal		( litIsTrivial )
 import Demand		( StrictSig, increaseStrictSigArity )
 import Name		( getOccName, mkSystemVarName )
 import OccName		( occNameString )
-import Type		( isUnLiftedType, Type )
+import Type		( isUnLiftedType, Type, sortQuantVars, mkPiTypes )
+import Kind		( kiVarsOfKinds )
 import BasicTypes	( Arity )
 import UniqSupply
 import Util
+import MonadUtils
 import Outputable
 import FastString
 \end{code}
@@ -204,7 +215,7 @@ instance Eq Level where
 
 \begin{code}
 setLevels :: FloatOutSwitches
-	  -> [CoreBind]
+	  -> CoreProgram
 	  -> UniqSupply
 	  -> [LevelledBind]
 
@@ -264,8 +275,8 @@ don't want @lvlExpr@ to turn the scrutinee of the @case@ into an MFE
 If there were another lambda in @r@'s rhs, it would get level-2 as well.
 
 \begin{code}
-lvlExpr _ _ (  _, AnnType ty) = return (Type ty)
-lvlExpr _ _ ( _, AnnCoercion co) = return (Coercion co)
+lvlExpr _ env (_, AnnType ty) = return (Type (substTy (le_subst env) ty))
+lvlExpr _ env (_, AnnCoercion co) = return (Coercion (substCo (le_subst env) co))
 lvlExpr _ env (_, AnnVar v)   = return (lookupVar env v)
 lvlExpr _ _   (_, AnnLit lit) = return (Lit lit)
 
@@ -306,13 +317,13 @@ lvlExpr ctxt_lvl env expr@(_, AnnApp _ _) = do
          fun'  <- lvlExpr ctxt_lvl env fun
          return (foldl App fun' args')
 
-lvlExpr ctxt_lvl env (_, AnnNote note expr) = do
+lvlExpr ctxt_lvl env (_, AnnTick tickish expr) = do
     expr' <- lvlExpr ctxt_lvl env expr
-    return (Note note expr')
+    return (Tick tickish expr')
 
 lvlExpr ctxt_lvl env (_, AnnCast expr (_, co)) = do
     expr' <- lvlExpr ctxt_lvl env expr
-    return (Cast expr' co)
+    return (Cast expr' (substCo (le_subst env) co))
 
 -- We don't split adjacent lambdas.  That is, given
 --	\x y -> (x+1,y)
@@ -345,19 +356,20 @@ lvlExpr ctxt_lvl env (_, AnnCase scrut@(scrut_fvs,_) case_bndr ty alts)
        ; lvlCase ctxt_lvl env scrut_fvs scrut' case_bndr ty alts }
 
 -------------------------------------------
-lvlCase :: Level                -- ctxt_lvl: Level of enclosing expression
-        -> LevelEnv             -- Level of in-scope names/tyvars
-        -> VarSet               -- Free vars of input scrutinee
-        -> LevelledExpr         -- Processed scrutinee
-        -> Id -> Type           -- Case binder and result type
-        -> [AnnAlt Id VarSet]   -- Input alternatives
-        -> LvlM LevelledExpr    -- Result expression
+lvlCase :: Level		-- ctxt_lvl: Level of enclosing expression
+	-> LevelEnv		-- Level of in-scope names/tyvars
+        -> VarSet		-- Free vars of input scrutinee
+        -> LevelledExpr		-- Processed scrutinee
+	-> Id -> Type		-- Case binder and result type
+	-> [AnnAlt Id VarSet]	-- Input alternatives
+	-> LvlM LevelledExpr	-- Result expression
 lvlCase ctxt_lvl env scrut_fvs scrut' case_bndr ty alts
   | [(con@(DataAlt {}), bs, rhs)] <- alts
-  , exprOkForSpeculation scrut'   -- See Note [Check the output scrutinee for okForSpec]
-  , not (isTopLvl dest_lvl)       -- Can't have top-level cases
-  = -- See Note [Case floating]
-    -- Always float the case if possible
+  , exprOkForSpeculation scrut'	  -- See Note [Check the output scrutinee for okForSpec]
+  , not (isTopLvl dest_lvl)	  -- Can't have top-level cases
+  =     -- See Note [Floating cases]
+    	-- Always float the case if possible
+  	-- Unlike lets we don't insist that it escapes a value lambda
     do { (rhs_env, (case_bndr':bs')) <- cloneVars env (case_bndr:bs) dest_lvl
        	 	   -- We don't need to use extendCaseBndrLvlEnv here
 		   -- because we are floating the case outwards so
@@ -435,20 +447,20 @@ lvlMFE ::  Bool			-- True <=> strict context [body of case or let]
 -- lvlMFE is just like lvlExpr, except that it might let-bind
 -- the expression, so that it can itself be floated.
 
-lvlMFE _ _ _ (_, AnnType ty)
-  = return (Type ty)
+lvlMFE _ _ env (_, AnnType ty)
+  = return (Type (substTy (le_subst env) ty))
 
 -- No point in floating out an expression wrapped in a coercion or note
 -- If we do we'll transform  lvl = e |> co 
 --			 to  lvl' = e; lvl = lvl' |> co
 -- and then inline lvl.  Better just to float out the payload.
-lvlMFE strict_ctxt ctxt_lvl env (_, AnnNote n e)
+lvlMFE strict_ctxt ctxt_lvl env (_, AnnTick t e)
   = do { e' <- lvlMFE strict_ctxt ctxt_lvl env e
-       ; return (Note n e') }
+       ; return (Tick t e') }
 
 lvlMFE strict_ctxt ctxt_lvl env (_, AnnCast e (_, co))
   = do	{ e' <- lvlMFE strict_ctxt ctxt_lvl env e
-	; return (Cast e' co) }
+	; return (Cast e' (substCo (le_subst env) co)) }
 
 -- Note [Case MFEs]
 lvlMFE True ctxt_lvl env e@(_, AnnCase {})
@@ -505,23 +517,23 @@ Note [Unlifted MFEs]
 ~~~~~~~~~~~~~~~~~~~~
 We don't float unlifted MFEs, which potentially loses big opportunites.
 For example:
-        \x -> f (h y)
+	\x -> f (h y)
 where h :: Int -> Int# is expensive. We'd like to float the (h y) outside
 the \x, but we don't because it's unboxed.  Possible solution: box it.
 
 Note [Bottoming floats]
 ~~~~~~~~~~~~~~~~~~~~~~~
 If we see
-        f = \x. g (error "urk")
+	f = \x. g (error "urk")
 we'd like to float the call to error, to get
-        lvl = error "urk"
-        f = \x. g lvl
+	lvl = error "urk"
+	f = \x. g lvl
 Furthermore, we want to float a bottoming expression even if it has free
 variables:
-        f = \x. g (let v = h x in error ("urk" ++ v))
+	f = \x. g (let v = h x in error ("urk" ++ v))
 Then we'd like to abstact over 'x' can float the whole arg of g:
-        lvl = \x. let v = h x in error ("urk" ++ v)
-        f = \x. g (lvl x)
+	lvl = \x. let v = h x in error ("urk" ++ v)
+	f = \x. g (lvl x)
 See Maessen's paper 1999 "Bottom extraction: factoring error handling out
 of functional programs" (unpublished I think).
 
@@ -566,7 +578,8 @@ notWorthFloating e abs_vars
   = go e (count isId abs_vars)
   where
     go (_, AnnVar {}) n    = n >= 0
-    go (_, AnnLit {}) n    = n >= 0
+    go (_, AnnLit lit) n   = ASSERT( n==0 ) 
+                             litIsTrivial lit	-- Note [Floating literals]
     go (_, AnnCast e _)  n = go e n
     go (_, AnnApp e arg) n 
        | (_, AnnType {}) <- arg = go e n
@@ -583,6 +596,16 @@ notWorthFloating e abs_vars
     is_triv (_, AnnApp e (_, AnnCoercion {})) = is_triv e
     is_triv _                             = False     
 \end{code}
+
+Note [Floating literals]
+~~~~~~~~~~~~~~~~~~~~~~~~
+It's important to float Integer literals, so that they get shared,
+rather than being allocated every time round the loop.
+Hence the litIsTrivial.
+
+We'd *like* to share MachStr literal strings too, mainly so we could
+CSE them, but alas can't do so directly because they are unlifted.
+
 
 Note [Escaping a value lambda]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -645,6 +668,8 @@ lvlBind :: Level		-- Context level; might be Top even for bindings
 lvlBind ctxt_lvl env (AnnNonRec bndr rhs@(rhs_fvs,_))
   | isTyVar bndr    -- Don't do anything for TyVar binders
 	            --   (simplifier gets rid of them pronto)
+  || isCoVar bndr   -- Difficult to fix up CoVar occurrences (see extendPolyLvlEnv)
+                    -- so we will ignore this case for now
   || not (profitableFloat ctxt_lvl dest_lvl)
   || (isTopLvl dest_lvl && isUnLiftedType (idType bndr))
 	  -- We can't float an unlifted binding to top level, so we don't 
@@ -821,7 +846,7 @@ isFunction :: CoreExprWithFVs -> Bool
 -- constructors.  So the simple thing is just to look for lambdas
 isFunction (_, AnnLam b e) | isId b    = True
                            | otherwise = isFunction e
-isFunction (_, AnnNote _ e)            = isFunction e
+-- isFunction (_, AnnTick _ e)          = isFunction e  -- dubious
 isFunction _                           = False
 
 countFreeIds :: VarSet -> Int
@@ -844,7 +869,10 @@ data LevelEnv
   = LE { le_switches :: FloatOutSwitches
        , le_lvl_env  :: VarEnv Level	-- Domain is *post-cloned* TyVars and Ids
        , le_subst    :: Subst 		-- Domain is pre-cloned Ids; tracks the in-scope set
-					-- 	so that subtitution is capture-avoiding
+					-- 	so that substitution is capture-avoiding
+                                        -- The Id -> CoreExpr in the Subst is ignored
+                                        -- (since we want to substitute in LevelledExpr
+                                        -- instead) but we do use the Co/TyVar substs
        , le_env      :: IdEnv ([Var], LevelledExpr)	-- Domain is pre-cloned Ids
     }
 	-- We clone let-bound variables so that they are still
@@ -913,17 +941,18 @@ extendCaseBndrLvlEnv :: LevelEnv -> Expr LevelledBndr
                      -> LevelledBndr -> LevelEnv
 extendCaseBndrLvlEnv le@(LE { le_subst = subst, le_env = id_env }) 
                      (Var scrut_var) (TB case_bndr _)
-  = le { le_subst   = extendIdSubst subst case_bndr (Var scrut_var)
-       , le_env     = extendVarEnv id_env case_bndr ([scrut_var], Var scrut_var) }
+  = le { le_subst   = extendSubstWithVar subst case_bndr scrut_var
+       , le_env     = extendVarEnv id_env case_bndr ([scrut_var], ASSERT(not (isCoVar scrut_var)) Var scrut_var) }
      
 extendCaseBndrLvlEnv env _scrut case_bndr
   = extendLvlEnv env [case_bndr]
 
-extendPolyLvlEnv :: Level -> LevelEnv -> [Var] -> [(Var, Var)] -> LevelEnv
+extendPolyLvlEnv :: Level -> LevelEnv -> [Var] -> [(Var {- :: t -}, Var {- :: mkPiTypes abs_vars t -})] -> LevelEnv
 extendPolyLvlEnv dest_lvl 
                  le@(LE { le_lvl_env = lvl_env, le_subst = subst, le_env = id_env }) 
                  abs_vars bndr_pairs
-  = le { le_lvl_env = foldl add_lvl   lvl_env bndr_pairs
+   = ASSERT( all (not . isCoVar . fst) bndr_pairs ) -- What would we add to the CoSubst in this case. No easy answer, so avoid floating 
+    le { le_lvl_env = foldl add_lvl   lvl_env bndr_pairs
        , le_subst   = foldl add_subst subst   bndr_pairs
        , le_env     = foldl add_id    id_env  bndr_pairs }
   where
@@ -938,8 +967,10 @@ extendCloneLvlEnv lvl le@(LE { le_lvl_env = lvl_env, le_env = id_env })
        , le_subst   = new_subst
        , le_env     = foldl add_id  id_env  bndr_pairs }
   where
-     add_lvl env (_, v') = extendVarEnv env v' lvl
-     add_id  env (v, v') = extendVarEnv env v ([v'], Var v')
+     add_lvl env (_, v_cloned) = extendVarEnv env v_cloned lvl
+     add_id  env (v, v_cloned) = if isTyVar v
+                                 then delVarEnv    env v
+                                 else extendVarEnv env v ([v_cloned], ASSERT(not (isCoVar v_cloned)) Var v_cloned)
 
 maxFvLevel :: (Var -> Bool) -> LevelEnv -> VarSet -> Level
 maxFvLevel max_me (LE { le_lvl_env = lvl_env, le_env = id_env }) var_set
@@ -966,22 +997,13 @@ abstractVars :: Level -> LevelEnv -> VarSet -> [Var]
 	-- whose level is greater than the destination level
 	-- These are the ones we are going to abstract out
 abstractVars dest_lvl (LE { le_lvl_env = lvl_env, le_env = id_env }) fvs
-  = map zap $ uniq $ sortLe le 
+  = map zap $ uniq $ sortQuantVars  -- IA0_NOTE: centralizing sorting on variables
 	[var | fv <- varSetElems fvs
 	     , var <- absVarsOf id_env fv
 	     , abstract_me var ]
 	-- NB: it's important to call abstract_me only on the OutIds the
 	-- come from absVarsOf (not on fv, which is an InId)
   where
-	-- Sort the variables so the true type variables come first;
-	-- the tyvars scope over Ids and coercion vars
-    v1 `le` v2 = case (is_tv v1, is_tv v2) of
-		   (True, False) -> True
-		   (False, True) -> False
-		   _    	 -> v1 <= v2	-- Same family
-
-    is_tv v = isTyVar v 
-
     uniq :: [Var] -> [Var]
 	-- Remove adjacent duplicates; the sort will have brought them together
     uniq (v1:v2:vs) | v1 == v2  = uniq (v2:vs)
@@ -1006,7 +1028,9 @@ absVarsOf :: IdEnv ([Var], LevelledExpr) -> Var -> [Var]
 	-- variables
 	--
 	-- Also, if x::a is an abstracted variable, then so is a; that is,
-	--	we must look in x's type
+	-- we must look in x's type. What's more, if a mentions kind variables,
+	-- we must also return those.
+	-- 
 	-- And similarly if x is a coercion variable.
 absVarsOf id_env v 
   | isId v    = [av2 | av1 <- lookup_avs v
@@ -1017,7 +1041,9 @@ absVarsOf id_env v
 			Just (abs_vars, _) -> abs_vars
 			Nothing	           -> [v]
 
-    add_tyvars v = v : varSetElems (varTypeTyVars v)
+    add_tyvars v = v : (varSetElems tyvars ++ varSetElems kivars)
+    tyvars = varTypeTyVars v
+    kivars = kiVarsOfKinds (map tyVarKind (varSetElems tyvars))
 \end{code}
 
 \begin{code}
@@ -1083,30 +1109,19 @@ substLetBndrsRec
                           , le_subst = subst'
                           , le_env = delVarEnvList id_env bndrs }
 
-cloneVar :: LevelEnv -> Id -> Level -> LvlM (LevelEnv, Id)
-cloneVar env v dest_lvl
-  = ASSERT( isId v )
-    do { us <- getUniqueSupplyM
-       ; let (subst', v1) = cloneIdBndr (le_subst env) us v
-      	     v2     	  = zapDemandIdInfo v1
+cloneVar :: LevelEnv -> Var -> Level -> LvlM (LevelEnv, Var)
+cloneVar env v dest_lvl -- Works for Ids, TyVars and CoVars
+  = do { u <- getUniqueM
+       ; let (subst', v1) = cloneBndr (le_subst env) u v
+      	     v2     	  = if isId v1 then zapDemandIdInfo v1 else v1
       	     env'	  = extendCloneLvlEnv dest_lvl env subst' [(v,v2)]
        ; return (env', v2) }
 
 cloneVars :: LevelEnv -> [Var] -> Level -> LvlM (LevelEnv, [Var])
-cloneVars env vs dest_lvl    -- Works for tyvars etc too; typically case alts
-  = do { us <- getUniqueSupplyM
-       ; let (subst', vs1) = cloneBndrs (le_subst env) us vs
-      	     vs2     	   = map zap_demand vs1 
-      	     env'	   = extendCloneLvlEnv dest_lvl env subst' (vs `zip` vs2)
-       ; return (env', vs2) }
-  where
-    zap_demand :: Var -> Var -- Note [Zapping the demand info]
-    zap_demand  v | not (isId v) = v
-                  | otherwise    = zapDemandIdInfo v
-
+cloneVars env vs dest_lvl = mapAccumLM (\env v -> cloneVar env v dest_lvl) env vs
 
 cloneRecVars :: LevelEnv -> [Id] -> Level -> LvlM (LevelEnv, [Id])
-cloneRecVars env vs dest_lvl
+cloneRecVars env vs dest_lvl -- Works for CoVars too (since cloneRecIdBndrs does)
   = ASSERT( all isId vs ) do
     us <- getUniqueSupplyM
     let

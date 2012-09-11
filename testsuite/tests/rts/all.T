@@ -35,7 +35,8 @@ test('divbyzero',
              if_platform('i386-unknown-mingw32', exit_code(1))]),
      compile_and_run, [''])
 
-test('outofmem', normal, run_command, ['$MAKE -s --no-print-directory outofmem'])
+test('outofmem', if_os('darwin', skip), 
+                 run_command, ['$MAKE -s --no-print-directory outofmem'])
 test('outofmem2', extra_run_opts('+RTS -M5m -RTS'),
                   run_command, ['$MAKE -s --no-print-directory outofmem2'])
 
@@ -82,7 +83,7 @@ test('T2615',
        cmd_prefix('$MAKE T2615-prep && ' +
                   # Add current directory to dlopen search path
                   'LD_LIBRARY_PATH=$LD_LIBRARY_PATH:. '),
-       extra_clean(['libfoo_T2615.so'])],
+       extra_clean(['libfoo_T2615.so', 'libfoo_T2615.o'])],
      compile_and_run,
      ['-package ghc'])
 
@@ -92,7 +93,10 @@ test('traceEvent', [ omit_ways(['dyn'] + prof_ways),
                      extra_run_opts('+RTS -ls -RTS') ], 
                    compile_and_run, ['-eventlog'])
 
-test('T4059', normal, run_command, ['$MAKE -s --no-print-directory T4059'])
+test('T4059',
+     extra_clean(['T4059_c.o']),
+     run_command,
+     ['$MAKE -s --no-print-directory T4059'])
 
 # Test for #4274
 test('exec_signals', [
@@ -111,7 +115,14 @@ def config_5250(opts):
         opts.skip = 1;
 
 test('5250', [ config_5250,
+               # stack ptr is not 16-byte aligned on 32-bit Windows
+               if_os('mingw32', expect_fail),
                extra_clean(['spalign.o']),
                omit_ways(['ghci']) ],
              compile_and_run, ['spalign.c'])
+
+test('T5423',
+     extra_clean(['T5423_cmm.o']),
+     run_command,
+     ['$MAKE -s --no-print-directory T5423'])
 

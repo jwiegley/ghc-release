@@ -3,6 +3,9 @@
 -- This module deliberately defines orphan instances for now. Should
 -- become unnecessary once we move to using the binary package properly:
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Trustworthy #-}
+#endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Distribution.InstalledPackageInfo.Binary

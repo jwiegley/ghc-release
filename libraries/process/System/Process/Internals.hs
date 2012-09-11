@@ -2,6 +2,9 @@
 {-# OPTIONS_HADDOCK hide #-}
 {-# OPTIONS_GHC -w #-}
 -- XXX We get some warnings on Windows
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Trustworthy #-}
+#endif
 
 -----------------------------------------------------------------------------
 -- |
@@ -20,21 +23,21 @@
 -- #hide
 module System.Process.Internals (
 #ifndef __HUGS__
-	ProcessHandle(..), ProcessHandle__(..), 
-	PHANDLE, closePHANDLE, mkProcessHandle, 
-	withProcessHandle, withProcessHandle_,
+        ProcessHandle(..), ProcessHandle__(..), 
+        PHANDLE, closePHANDLE, mkProcessHandle, 
+        withProcessHandle, withProcessHandle_,
 #ifdef __GLASGOW_HASKELL__
         CreateProcess(..),
         CmdSpec(..), StdStream(..),
-	runGenProcess_,
+        runGenProcess_,
 #endif
 #if !defined(mingw32_HOST_OS) && !defined(__MINGW32__)
-	 pPrPr_disableITimers, c_execvpe,
-	ignoreSignal, defaultSignal,
+         pPrPr_disableITimers, c_execvpe,
+        ignoreSignal, defaultSignal,
 #endif
 #endif
-	withFilePathException, withCEnvironment,
-	translate,
+        withFilePathException, withCEnvironment,
+        translate,
 
 #ifndef __HUGS__
         fdToHandle,
@@ -43,17 +46,17 @@ module System.Process.Internals (
 
 #ifndef __HUGS__
 #if !defined(mingw32_HOST_OS) && !defined(__MINGW32__)
-import System.Posix.Types ( CPid )
+import System.Posix.Types
 import System.Posix.Process.Internals ( pPrPr_disableITimers, c_execvpe )
-import System.IO 	( IOMode(..) )
+import System.IO        ( IOMode(..) )
 #else
 import Data.Word ( Word32 )
 import Data.IORef
 #endif
 #endif
 
-import System.IO 	( Handle )
-import System.Exit	( ExitCode )
+import System.IO        ( Handle )
+import System.Exit      ( ExitCode )
 import Control.Concurrent
 import Control.Exception
 import Foreign.C
@@ -78,25 +81,25 @@ import GHC.IO.IOMode
 import System.Win32.DebugApi (PHANDLE)
 #endif
 #else
-import GHC.IOBase	( haFD, FD, IOException(..) )
+import GHC.IOBase       ( haFD, FD, IOException(..) )
 import GHC.Handle
 #endif
 
 # elif __HUGS__
 
-import Hugs.Exception	( IOException(..) )
+import Hugs.Exception   ( IOException(..) )
 
 # endif
 
 #ifdef base4
-import System.IO.Error		( ioeSetFileName )
+import System.IO.Error          ( ioeSetFileName )
 #endif
 #if defined(mingw32_HOST_OS)
-import Control.Monad		( when )
-import System.Directory		( doesFileExist )
-import System.IO.Error		( isDoesNotExistError, doesNotExistErrorType,
-				  mkIOError )
-import System.Environment	( getEnv )
+import Control.Monad            ( when )
+import System.Directory         ( doesFileExist )
+import System.IO.Error          ( isDoesNotExistError, doesNotExistErrorType,
+                                  mkIOError )
+import System.Environment       ( getEnv )
 import System.FilePath
 #endif
 
@@ -122,15 +125,15 @@ data ProcessHandle__ = OpenHandle PHANDLE | ClosedHandle ExitCode
 newtype ProcessHandle = ProcessHandle (MVar ProcessHandle__)
 
 withProcessHandle
-	:: ProcessHandle 
-	-> (ProcessHandle__ -> IO (ProcessHandle__, a))
-	-> IO a
+        :: ProcessHandle 
+        -> (ProcessHandle__ -> IO (ProcessHandle__, a))
+        -> IO a
 withProcessHandle (ProcessHandle m) io = modifyMVar m io
 
 withProcessHandle_
-	:: ProcessHandle 
-	-> (ProcessHandle__ -> IO ProcessHandle__)
-	-> IO ()
+        :: ProcessHandle 
+        -> (ProcessHandle__ -> IO ProcessHandle__)
+        -> IO ()
 withProcessHandle_ (ProcessHandle m) io = modifyMVar_ m io
 
 #if !defined(mingw32_HOST_OS) && !defined(__MINGW32__)
@@ -164,18 +167,18 @@ mkProcessHandle h = do
 
 processHandleFinaliser m =
    modifyMVar_ m $ \p_ -> do 
-	case p_ of
-	  OpenHandle ph -> closePHANDLE ph
-	  _ -> return ()
-	return (error "closed process handle")
+        case p_ of
+          OpenHandle ph -> closePHANDLE ph
+          _ -> return ()
+        return (error "closed process handle")
 
 closePHANDLE :: PHANDLE -> IO ()
 closePHANDLE ph = c_CloseHandle ph
 
 foreign import stdcall unsafe "CloseHandle"
   c_CloseHandle
-	:: PHANDLE
-	-> IO ()
+        :: PHANDLE
+        -> IO ()
 #endif
 #endif /* !__HUGS__ */
 
@@ -209,8 +212,8 @@ data StdStream
 runGenProcess_
   :: String                     -- ^ function name (for error messages)
   -> CreateProcess
-  -> Maybe CLong		-- ^ handler for SIGINT
-  -> Maybe CLong		-- ^ handler for SIGQUIT
+  -> Maybe CLong                -- ^ handler for SIGINT
+  -> Maybe CLong                -- ^ handler for SIGQUIT
   -> IO (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)
 
 #if !defined(mingw32_HOST_OS) && !defined(__MINGW32__)
@@ -245,13 +248,13 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
      fderr <- mbFd fun fd_stderr mb_stderr
 
      let (set_int, inthand) 
-		= case mb_sigint of
-			Nothing   -> (0, 0)
-			Just hand -> (1, hand)
-	 (set_quit, quithand) 
-		= case mb_sigquit of
-			Nothing   -> (0, 0)
-			Just hand -> (1, hand)
+                = case mb_sigint of
+                        Nothing   -> (0, 0)
+                        Just hand -> (1, hand)
+         (set_quit, quithand) 
+                = case mb_sigquit of
+                        Nothing   -> (0, 0)
+                        Just hand -> (1, hand)
 
      -- runInteractiveProcess() blocks signals around the fork().
      -- Since blocking/unblocking of signals is a global state
@@ -259,10 +262,10 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
      -- runInteractiveProcess().
      proc_handle <- withMVar runInteractiveProcess_lock $ \_ ->
                     throwErrnoIfMinus1 fun $
-	                 c_runInteractiveProcess pargs pWorkDir pEnv 
+                         c_runInteractiveProcess pargs pWorkDir pEnv 
                                 fdin fdout fderr
-				pfdStdInput pfdStdOutput pfdStdError
-			        set_int inthand set_quit quithand
+                                pfdStdInput pfdStdOutput pfdStdError
+                                set_int inthand set_quit quithand
                                 ((if mb_close_fds then RUN_PROCESS_IN_CLOSE_FDS else 0)
                                 .|.(if mb_create_group then RUN_PROCESS_IN_NEW_GROUP else 0))
 
@@ -280,7 +283,7 @@ runInteractiveProcess_lock = unsafePerformIO $ newMVar ()
 foreign import ccall unsafe "runInteractiveProcess" 
   c_runInteractiveProcess
         ::  Ptr CString
-	-> CString
+        -> CString
         -> Ptr CString
         -> FD
         -> FD
@@ -288,10 +291,10 @@ foreign import ccall unsafe "runInteractiveProcess"
         -> Ptr FD
         -> Ptr FD
         -> Ptr FD
-	-> CInt				-- non-zero: set child's SIGINT handler
-	-> CLong			-- SIGINT handler
-	-> CInt				-- non-zero: set child's SIGQUIT handler
-	-> CLong			-- SIGQUIT handler
+        -> CInt                         -- non-zero: set child's SIGINT handler
+        -> CLong                        -- SIGINT handler
+        -> CInt                         -- non-zero: set child's SIGQUIT handler
+        -> CLong                        -- SIGQUIT handler
         -> CInt                         -- flags
         -> IO PHANDLE
 
@@ -340,9 +343,9 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
      -- the threaded RTS.
      proc_handle <- withMVar runInteractiveProcess_lock $ \_ ->
                     throwErrnoIfBadPHandle fun $
-	                 c_runInteractiveProcess pcmdline pWorkDir pEnv 
+                         c_runInteractiveProcess pcmdline pWorkDir pEnv 
                                 fdin fdout fderr
-				pfdStdInput pfdStdOutput pfdStdError
+                                pfdStdInput pfdStdOutput pfdStdError
                                 ((if mb_close_fds then RUN_PROCESS_IN_CLOSE_FDS else 0)
                                 .|.(if mb_create_group then RUN_PROCESS_IN_NEW_GROUP else 0))
 
@@ -395,7 +398,7 @@ mbFd fun _std (UseHandle hdl) =
          return (Handle__{haDevice=fd,..}, FD.fdFD fd)
       Nothing ->
           ioError (mkIOError illegalOperationErrorType
-		      "createProcess" (Just hdl) Nothing
+                      "createProcess" (Just hdl) Nothing
                    `ioeSetErrorString` "handle is not a file descriptor")
 #endif
 
@@ -413,12 +416,17 @@ pfdToHandle pfd mode = do
                        False {-is_socket-}
                        False {-non-blocking-}
   fD <- FD.setNonBlockingMode fD True -- see #3316
-  mkHandleFromFD fD fd_type filepath mode False{-is_socket-}
-                       (Just localeEncoding)
+  enc <- getLocaleEncoding
+  mkHandleFromFD fD fd_type filepath mode False {-is_socket-} (Just enc)
 #else
   fdToHandle' fd (Just Stream)
-     False{-Windows: not a socket,  Unix: don't set non-blocking-}
-     filepath mode True{-binary-}
+     False {-Windows: not a socket,  Unix: don't set non-blocking-}
+     filepath mode True {-binary-}
+#endif
+
+#if __GLASGOW_HASKELL__ < 703
+getLocaleEncoding :: IO TextEncoding
+getLocaleEncoding = return localeEncoding
 #endif
 
 #ifndef __HUGS__
@@ -452,13 +460,13 @@ commandToProcess
   -> IO (FilePath, String)
 commandToProcess (ShellCommand string) = do
   cmd <- findCommandInterpreter
-  return (cmd, translate cmd ++ "/c " ++ string)
-	-- We don't want to put the cmd into a single
-	-- argument, because cmd.exe will not try to split it up.  Instead,
-	-- we just tack the command on the end of the cmd.exe command line,
-	-- which partly works.  There seem to be some quoting issues, but
-	-- I don't have the energy to find+fix them right now (ToDo). --SDM
-	-- (later) Now I don't know what the above comment means.  sigh.
+  return (cmd, translate cmd ++ " /c " ++ string)
+        -- We don't want to put the cmd into a single
+        -- argument, because cmd.exe will not try to split it up.  Instead,
+        -- we just tack the command on the end of the cmd.exe command line,
+        -- which partly works.  There seem to be some quoting issues, but
+        -- I don't have the energy to find+fix them right now (ToDo). --SDM
+        -- (later) Now I don't know what the above comment means.  sigh.
 commandToProcess (RawCommand cmd args) = do
   return (cmd, translate cmd ++ concatMap ((' ':) . translate) args)
 
@@ -487,24 +495,24 @@ findCommandInterpreter = do
     -}
     path <- getEnv "PATH"
     let
-	-- use our own version of System.Directory.findExecutable, because
-	-- that assumes the .exe suffix.
-	search :: [FilePath] -> IO (Maybe FilePath)
-	search [] = return Nothing
-	search (d:ds) = do
-		let path1 = d </> "cmd.exe"
-		    path2 = d </> "command.com"
-		b1 <- doesFileExist path1
-		b2 <- doesFileExist path2
-		if b1 then return (Just path1)
-		      else if b2 then return (Just path2)
-		                 else search ds
+        -- use our own version of System.Directory.findExecutable, because
+        -- that assumes the .exe suffix.
+        search :: [FilePath] -> IO (Maybe FilePath)
+        search [] = return Nothing
+        search (d:ds) = do
+                let path1 = d </> "cmd.exe"
+                    path2 = d </> "command.com"
+                b1 <- doesFileExist path1
+                b2 <- doesFileExist path2
+                if b1 then return (Just path1)
+                      else if b2 then return (Just path2)
+                                 else search ds
     --
     mb_path <- search (splitSearchPath path)
 
     case mb_path of
       Nothing -> ioError (mkIOError doesNotExistErrorType 
-				"findCommandInterpreter" Nothing Nothing)
+                                "findCommandInterpreter" Nothing Nothing)
       Just cmd -> return cmd
 #endif
 

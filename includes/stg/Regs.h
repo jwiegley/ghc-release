@@ -80,6 +80,7 @@ typedef struct StgRegTable_ {
   StgPtr 	  rSpLim;
   StgPtr 	  rHp;
   StgPtr 	  rHpLim;
+  struct CostCentreStack_ * rCCCS;  // current cost-centre-stack
   struct StgTSO_ *     rCurrentTSO;
   struct nursery_ *    rNursery;
   struct bdescr_ *     rCurrentNursery; /* Hp/HpLim point into this block */
@@ -141,6 +142,8 @@ typedef struct StgRegTable_ {
 #define SAVE_R6             (BaseReg->rR6)
 #define SAVE_R7             (BaseReg->rR7)
 #define SAVE_R8             (BaseReg->rR8)
+#define SAVE_R9             (BaseReg->rR9)
+#define SAVE_R10            (BaseReg->rR10)
  
 #define SAVE_F1             (BaseReg->rF1)
 #define SAVE_F2             (BaseReg->rF2)
@@ -341,6 +344,12 @@ GLOBAL_REG_DECL(P_,Hp,REG_Hp)
 #error HpLim cannot be in a register
 #else
 #define HpLim (BaseReg->rHpLim)
+#endif
+
+#if defined(REG_CCCS) && !defined(NO_GLOBAL_REG_DECLS)
+GLOBAL_REG_DECL(struct CostCentreStack_ *,CCCS,REG_CCCS)
+#else
+#define CCCS (BaseReg->rCCCS)
 #endif
 
 #if defined(REG_CurrentTSO) && !defined(NO_GLOBAL_REG_DECLS)
@@ -611,6 +620,8 @@ GLOBAL_REG_DECL(bdescr *,HpAlloc,REG_HpAlloc)
   CALLER_SAVE_R6				\
   CALLER_SAVE_R7				\
   CALLER_SAVE_R8				\
+  CALLER_SAVE_R9				\
+  CALLER_SAVE_R10				\
   CALLER_SAVE_F1				\
   CALLER_SAVE_F2				\
   CALLER_SAVE_F3				\
@@ -638,6 +649,8 @@ GLOBAL_REG_DECL(bdescr *,HpAlloc,REG_HpAlloc)
   CALLER_RESTORE_R6				\
   CALLER_RESTORE_R7				\
   CALLER_RESTORE_R8				\
+  CALLER_RESTORE_R9				\
+  CALLER_RESTORE_R10			\
   CALLER_RESTORE_F1				\
   CALLER_RESTORE_F2				\
   CALLER_RESTORE_F3				\

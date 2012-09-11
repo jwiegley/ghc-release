@@ -19,19 +19,19 @@ instance MyClass Baz
 data Quux a  = Quux a   deriving Eq
 data Quux2 a = Quux2 a  deriving Eq
 instance Eq a  => MyClass (Quux a)
-instance Num a => MyClass (Quux2 a)
+instance Ord a => MyClass (Quux2 a)
 
 class MyClass2 a b
 instance MyClass2 Int Bool
 
 main = do
     putStrLn $(do { info <- reify ''MyClass; lift (pprint info) })
-    print $(isClassInstance ''Eq [ConT ''Foo] >>= lift)
-    print $(isClassInstance ''MyClass [ConT ''Foo] >>= lift)
-    print $ not $(isClassInstance ''Show [ConT ''Foo] >>= lift)
-    print $(isClassInstance ''MyClass [ConT ''Bar] >>= lift) -- this one
-    print $(isClassInstance ''MyClass [ConT ''Baz] >>= lift)
-    print $(isClassInstance ''MyClass [AppT (ConT ''Quux) (ConT ''Int)] >>= lift) --this one
-    print $(isClassInstance ''MyClass [AppT (ConT ''Quux2) (ConT ''Int)] >>= lift) -- this one
-    print $(isClassInstance ''MyClass2 [ConT ''Int, ConT ''Bool] >>= lift)
-    print $(isClassInstance ''MyClass2 [ConT ''Bool, ConT ''Bool] >>= lift)
+    print $(isInstance ''Eq [ConT ''Foo] >>= lift)
+    print $(isInstance ''MyClass [ConT ''Foo] >>= lift)
+    print $ not $(isInstance ''Show [ConT ''Foo] >>= lift)
+    print $(isInstance ''MyClass [ConT ''Bar] >>= lift) -- this one
+    print $(isInstance ''MyClass [ConT ''Baz] >>= lift)
+    print $(isInstance ''MyClass [AppT (ConT ''Quux) (ConT ''Int)] >>= lift) --this one
+    print $(isInstance ''MyClass [AppT (ConT ''Quux2) (ConT ''Int)] >>= lift) -- this one
+    print $(isInstance ''MyClass2 [ConT ''Int, ConT ''Bool] >>= lift)
+    print $(isInstance ''MyClass2 [ConT ''Bool, ConT ''Bool] >>= lift)

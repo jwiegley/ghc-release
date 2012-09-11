@@ -4,6 +4,13 @@
 \section[LiberateCase]{Unroll recursion to allow evals to be lifted from a loop}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module LiberateCase ( liberateCase ) where
 
 #include "HsVersions.h"
@@ -117,7 +124,7 @@ and the level of @h@ is zero (NB not one).
 %************************************************************************
 
 \begin{code}
-liberateCase :: DynFlags -> [CoreBind] -> [CoreBind]
+liberateCase :: DynFlags -> CoreProgram -> CoreProgram
 liberateCase dflags binds = do_prog (initEnv dflags) binds
   where
     do_prog _   [] = []
@@ -201,7 +208,7 @@ libCase _   (Lit lit)           = Lit lit
 libCase _   (Type ty)           = Type ty
 libCase _   (Coercion co)       = Coercion co
 libCase env (App fun arg)       = App (libCase env fun) (libCase env arg)
-libCase env (Note note body)    = Note note (libCase env body)
+libCase env (Tick tickish body) = Tick tickish (libCase env body)
 libCase env (Cast e co)         = Cast (libCase env e) co
 
 libCase env (Lam binder body)

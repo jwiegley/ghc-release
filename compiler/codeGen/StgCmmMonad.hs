@@ -6,6 +6,13 @@
 --
 -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module StgCmmMonad (
 	FCode,	-- type
 
@@ -13,7 +20,7 @@ module StgCmmMonad (
 	returnFC, fixC, fixC_, nopC, whenC, 
 	newUnique, newUniqSupply, 
 
-	emit, emitData, emitProc, emitProcWithConvention, emitSimpleProc,
+	emit, emitDecl, emitProc, emitProcWithConvention, emitSimpleProc,
 
 	getCmm, cgStmtsToBlocks,
 	getCodeR, getCode, getHeapUsage,
@@ -49,15 +56,12 @@ module StgCmmMonad (
 
 #include "HsVersions.h"
 
+import Cmm
 import StgCmmClosure
 import DynFlags
 import MkGraph
 import BlockId
-import CmmDecl
-import CmmExpr
-import CmmNode (UpdFrameOffset)
 import CLabel
-import TyCon	( PrimRep )
 import SMRep
 import Module
 import Id
@@ -180,7 +184,6 @@ data CgIdInfo
 			-- virtue of being externalised, for splittable C
 	, cg_lf  :: LambdaFormInfo 
 	, cg_loc :: CgLoc		     -- CmmExpr for the *tagged* value
-	, cg_rep :: PrimRep		     -- Cache for (idPrimRep id)
         , cg_tag :: {-# UNPACK #-} !DynTag   -- Cache for (lfDynTag cg_lf)
         }
 
@@ -194,13 +197,13 @@ data CgLoc
 	-- To tail-call it, assign to these locals, 
 	-- and branch to the block id
 
-instance Outputable CgIdInfo where
-  ppr (CgIdInfo { cg_id = id, cg_loc = loc })
-    = ppr id <+> ptext (sLit "-->") <+> ppr loc
+instance PlatformOutputable CgIdInfo where
+  pprPlatform platform (CgIdInfo { cg_id = id, cg_loc = loc })
+    = ppr id <+> ptext (sLit "-->") <+> pprPlatform platform loc
 
-instance Outputable CgLoc where
-  ppr (CmmLoc e)    = ptext (sLit "cmm") <+> ppr e
-  ppr (LneLoc b rs) = ptext (sLit "lne") <+> ppr b <+> ppr rs
+instance PlatformOutputable CgLoc where
+  pprPlatform platform (CmmLoc e)    = ptext (sLit "cmm") <+> pprPlatform platform e
+  pprPlatform _        (LneLoc b rs) = ptext (sLit "lne") <+> ppr b <+> ppr rs
 
 
 -- Sequel tells what to do with the result of this expression
@@ -244,7 +247,7 @@ data CgState
   = MkCgState {
      cgs_stmts :: CmmAGraph,	  -- Current procedure
 
-     cgs_tops  :: OrdList CmmTop,
+     cgs_tops  :: OrdList CmmDecl,
 	-- Other procedures and data blocks in this compilation unit
 	-- Both are ordered only so that we can 
 	-- reduce forward references, when it's easy to do so
@@ -593,12 +596,10 @@ emit ag
   = do	{ state <- getState
 	; setState $ state { cgs_stmts = cgs_stmts state <*> ag } }
 
-emitData :: Section -> CmmStatics -> FCode ()
-emitData sect lits
+emitDecl :: CmmDecl -> FCode ()
+emitDecl decl
   = do 	{ state <- getState
-	; setState $ state { cgs_tops = cgs_tops state `snocOL` data_block } }
-  where
-    data_block = CmmData sect lits
+	; setState $ state { cgs_tops = cgs_tops state `snocOL` decl } }
 
 emitProcWithConvention :: Convention -> CmmInfoTable -> CLabel -> [CmmFormal] ->
                           CmmAGraph -> FCode ()
@@ -618,7 +619,7 @@ emitSimpleProc :: CLabel -> CmmAGraph -> FCode ()
 emitSimpleProc lbl code = 
   emitProc CmmNonInfoTable lbl [] code
 
-getCmm :: FCode () -> FCode Cmm
+getCmm :: FCode () -> FCode CmmGroup
 -- Get all the CmmTops (there should be no stmts)
 -- Return a single Cmm which may be split from other Cmms by
 -- object splitting (at a later stage)
@@ -626,7 +627,7 @@ getCmm code
   = do	{ state1 <- getState
 	; ((), state2) <- withState code (state1 { cgs_tops  = nilOL })
 	; setState $ state2 { cgs_tops = cgs_tops state1 } 
-	; return (Cmm (fromOL (cgs_tops state2))) }
+        ; return (fromOL (cgs_tops state2)) }
 
 -- ----------------------------------------------------------------------------
 -- CgStmts

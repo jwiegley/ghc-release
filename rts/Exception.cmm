@@ -369,7 +369,7 @@ stg_catchzh
   
     /* Set up the catch frame */
     Sp = Sp - SIZEOF_StgCatchFrame;
-    SET_HDR(Sp,stg_catch_frame_info,W_[CCCS]);
+    SET_HDR(Sp,stg_catch_frame_info,CCCS);
     
     StgCatchFrame_handler(Sp) = R2;
     StgCatchFrame_exceptions_blocked(Sp) = 
@@ -426,7 +426,11 @@ stg_raisezh
      * the info was only displayed for an *uncaught* exception.
      */
     if (RtsFlags_ProfFlags_showCCSOnException(RtsFlags) != 0::I32) {
-      foreign "C" fprintCCS_stderr(W_[CCCS] "ptr") [];
+        SAVE_THREAD_STATE();
+        foreign "C" fprintCCS_stderr(CCCS "ptr",
+                                     exception "ptr",
+                                     CurrentTSO "ptr") [];
+        LOAD_THREAD_STATE();
     }
 #endif
     
@@ -539,13 +543,32 @@ retry_pop_stack:
      */
     W_ frame;
     frame = Sp;
-    if (frame_type == CATCH_FRAME) {
+    if (frame_type == CATCH_FRAME)
+    {
       Sp = Sp + SIZEOF_StgCatchFrame;
       if ((StgCatchFrame_exceptions_blocked(frame) & TSO_BLOCKEX) == 0) {
           Sp_adj(-1);
           Sp(0) = stg_unmaskAsyncExceptionszh_ret_info;
       }
-    } else {
+
+      /* Ensure that async excpetions are blocked when running the handler.
+      */
+      StgTSO_flags(CurrentTSO) = %lobits32(
+          TO_W_(StgTSO_flags(CurrentTSO)) | TSO_BLOCKEX | TSO_INTERRUPTIBLE);
+
+      /* The interruptible state is inherited from the context of the
+       * catch frame, but note that TSO_INTERRUPTIBLE is only meaningful
+       * if TSO_BLOCKEX is set.  (we got this wrong earlier, and #4988
+       * was a symptom of the bug).
+       */
+      if ((StgCatchFrame_exceptions_blocked(frame) &
+           (TSO_BLOCKEX | TSO_INTERRUPTIBLE)) == TSO_BLOCKEX) {
+          StgTSO_flags(CurrentTSO) = %lobits32(
+              TO_W_(StgTSO_flags(CurrentTSO)) & ~TSO_INTERRUPTIBLE);
+      }
+    }
+    else /* CATCH_STM_FRAME */
+    {
       W_ trec, outer;
       trec = StgTSO_trec(CurrentTSO);
       outer  = StgTRecHeader_enclosing_trec(trec);
@@ -553,22 +576,6 @@ retry_pop_stack:
       foreign "C" stmFreeAbortedTRec(MyCapability() "ptr", trec "ptr") [];
       StgTSO_trec(CurrentTSO) = outer;
       Sp = Sp + SIZEOF_StgCatchSTMFrame;
-    }
-
-    /* Ensure that async excpetions are blocked when running the handler.
-    */
-    StgTSO_flags(CurrentTSO) = %lobits32(
-        TO_W_(StgTSO_flags(CurrentTSO)) | TSO_BLOCKEX | TSO_INTERRUPTIBLE);
-
-    /* The interruptible state is inherited from the context of the
-     * catch frame, but note that TSO_INTERRUPTIBLE is only meaningful
-     * if TSO_BLOCKEX is set.  (we got this wrong earlier, and #4988
-     * was a symptom of the bug).
-     */
-    if ((StgCatchFrame_exceptions_blocked(frame) &
-         (TSO_BLOCKEX | TSO_INTERRUPTIBLE)) == TSO_BLOCKEX) {
-        StgTSO_flags(CurrentTSO) = %lobits32(
-            TO_W_(StgTSO_flags(CurrentTSO)) & ~TSO_INTERRUPTIBLE);
     }
 
     /* Call the handler, passing the exception value and a realworld

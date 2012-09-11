@@ -1,4 +1,8 @@
-{-# LANGUAGE CPP, ForeignFunctionInterface #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Trustworthy #-}
+#endif
+
 module Trace.Hpc.Reflect
   ( clearTix
   , examineTix

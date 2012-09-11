@@ -26,6 +26,7 @@ void endEventLogging(void);
 void freeEventLogging(void);
 void abortEventLogging(void); // #4512 - after fork child needs to abort
 void flushEventLog(void);     // event log inherited from parent
+void moreCapEventBufs (nat from, nat to);
 
 /* 
  * Post a scheduler event to the capability's event buffer (an event
@@ -48,11 +49,11 @@ void postCapMsg(Capability *cap, char *msg, va_list ap);
 void postEventStartup(EventCapNo n_caps);
 
 /*
- * Post a capability set modification event
+ * Post an event that is associated with a capability set
  */
-void postCapsetModifyEvent (EventTypeNum tag,
-                            EventCapsetID capset,
-                            StgWord32 other);
+void postCapsetEvent (EventTypeNum tag,
+                      EventCapsetID capset,
+                      StgWord info);
 
 /*
  * Post a capability set event with a string payload
@@ -68,6 +69,27 @@ void postCapsetVecEvent (EventTypeNum tag,
                          EventCapsetID capset,
                          int argc,
                          char *msg[]);
+
+void postWallClockTime (EventCapsetID capset);
+
+/* 
+ * Post a `par` spark event
+ */
+void postSparkEvent(Capability *cap, EventTypeNum tag, StgWord info1);
+
+/*
+ * Post an event with several counters relating to `par` sparks.
+ */
+void postSparkCountersEvent (Capability *cap, 
+                             SparkCounters counters,
+                             StgWord remaining);
+
+/*
+ * Post an event to annotate a thread with a label
+ */
+void postThreadLabel(Capability    *cap,
+                     EventThreadID  id,
+                     char          *label);
 
 #else /* !TRACING */
 
@@ -91,6 +113,12 @@ INLINE_HEADER void postCapMsg (Capability *cap STG_UNUSED,
                                va_list ap STG_UNUSED)
 { /* nothing */ }
 
+
+INLINE_HEADER void postThreadLabel(Capability    *cap   STG_UNUSED,
+                                   EventThreadID  id    STG_UNUSED,
+                                   char          *label STG_UNUSED)
+{ /* nothing */ }
+                                   
 #endif
 
 #include "EndPrivate.h"

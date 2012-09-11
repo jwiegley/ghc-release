@@ -11,34 +11,83 @@
 -- Common types for dependency resolution.
 -----------------------------------------------------------------------------
 module Distribution.Client.Dependency.Types (
+    ExtDependency(..),
+
+    Solver(..),
     DependencyResolver,
 
     PackageConstraint(..),
     PackagePreferences(..),
     InstalledPreference(..),
+    PackagesPreferenceDefault(..),
 
     Progress(..),
     foldProgress,
   ) where
 
+import Control.Applicative
+         ( Applicative(..), Alternative(..) )
+
+import Data.Char
+         ( isAlpha, toLower )
+import Data.Monoid
+         ( Monoid(..) )
+
 import Distribution.Client.Types
-         ( SourcePackage(..), InstalledPackage )
+         ( SourcePackage(..) )
 import qualified Distribution.Client.InstallPlan as InstallPlan
 
+import Distribution.Compat.ReadP
+         ( (<++) )
+
+import qualified Distribution.Compat.ReadP as Parse
+         ( pfail, munch1 )
 import Distribution.PackageDescription
          ( FlagAssignment )
-import Distribution.Client.PackageIndex
+import qualified Distribution.Client.PackageIndex as PackageIndex
+         ( PackageIndex )
+import qualified Distribution.Simple.PackageIndex as InstalledPackageIndex
          ( PackageIndex )
 import Distribution.Package
-         ( PackageName )
+         ( Dependency, PackageName, InstalledPackageId )
 import Distribution.Version
          ( VersionRange )
 import Distribution.Compiler
          ( CompilerId )
 import Distribution.System
          ( Platform )
+import Distribution.Text
+         ( Text(..) )
+
+import Text.PrettyPrint
+         ( text )
 
 import Prelude hiding (fail)
+
+-- | Covers source dependencies and installed dependencies in
+-- one type.
+data ExtDependency = SourceDependency Dependency
+                   | InstalledDependency InstalledPackageId
+
+instance Text ExtDependency where
+  disp (SourceDependency    dep) = disp dep
+  disp (InstalledDependency dep) = disp dep
+
+  parse = (SourceDependency `fmap` parse) <++ (InstalledDependency `fmap` parse)
+
+-- | All the solvers that can be selected.
+data Solver = TopDown | Modular
+  deriving (Eq, Ord, Show, Bounded, Enum)
+
+instance Text Solver where
+  disp TopDown = text "topdown"
+  disp Modular = text "modular"
+  parse = do
+    name <- Parse.munch1 isAlpha
+    case map toLower name of
+      "topdown" -> return TopDown
+      "modular" -> return Modular
+      _         -> Parse.pfail
 
 -- | A dependency resolver is a function that works out an installation plan
 -- given the set of installed and available packages and a set of deps to
@@ -50,8 +99,8 @@ import Prelude hiding (fail)
 --
 type DependencyResolver = Platform
                        -> CompilerId
-                       -> PackageIndex InstalledPackage
-                       -> PackageIndex SourcePackage
+                       -> InstalledPackageIndex.PackageIndex
+                       ->          PackageIndex.PackageIndex SourcePackage
                        -> (PackageName -> PackagePreferences)
                        -> [PackageConstraint]
                        -> [PackageName]
@@ -86,6 +135,30 @@ data PackagePreferences = PackagePreferences VersionRange InstalledPreference
 --
 data InstalledPreference = PreferInstalled | PreferLatest
 
+-- | Global policy for all packages to say if we prefer package versions that
+-- are already installed locally or if we just prefer the latest available.
+--
+data PackagesPreferenceDefault =
+
+     -- | Always prefer the latest version irrespective of any existing
+     -- installed version.
+     --
+     -- * This is the standard policy for upgrade.
+     --
+     PreferAllLatest
+
+     -- | Always prefer the installed versions over ones that would need to be
+     -- installed. Secondarily, prefer latest versions (eg the latest installed
+     -- version or if there are none then the latest source version).
+   | PreferAllInstalled
+
+     -- | Prefer the latest version for packages that are explicitly requested
+     -- but prefers the installed version for any other packages.
+     --
+     -- * This is the standard policy for install.
+     --
+   | PreferLatestForSelected
+
 -- | A type to represent the unfolding of an expensive long running
 -- calculation that may fail. We may get intermediate steps before the final
 -- retult which may be used to indicate progress and\/or logging messages.
@@ -114,3 +187,11 @@ instance Functor (Progress step fail) where
 instance Monad (Progress step fail) where
   return a = Done a
   p >>= f  = foldProgress Step Fail f p
+
+instance Applicative (Progress step fail) where
+  pure a  = Done a
+  p <*> x = foldProgress Step Fail (flip fmap x) p
+
+instance Monoid fail => Alternative (Progress step fail) where
+  empty   = Fail mempty
+  p <|> q = foldProgress Step (const q) Done p

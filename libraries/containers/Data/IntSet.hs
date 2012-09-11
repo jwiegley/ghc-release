@@ -1,4 +1,6 @@
-{-# LANGUAGE CPP, MagicHash #-}
+#if !defined(TESTING) && __GLASGOW_HASKELL__ >= 703
+{-# LANGUAGE Trustworthy #-}
+#endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.IntSet
@@ -81,7 +83,13 @@ module Data.IntSet (
             -- * Map
             , map
 
-            -- * Fold
+            -- * Folds
+            , foldr
+            , foldl
+            -- ** Strict folds
+            , foldr'
+            , foldl'
+            -- ** Legacy folds
             , fold
 
             -- * Min\/Max
@@ -124,6 +132,7 @@ import qualified Data.List as List
 import Data.Monoid (Monoid(..))
 import Data.Maybe (fromMaybe)
 import Data.Typeable
+import Control.DeepSeq (NFData)
 
 #if __GLASGOW_HASKELL__
 import Text.Read
@@ -138,6 +147,12 @@ import GlaExts ( Word(..), Int(..), shiftRL# )
 #else
 import Data.Word
 #endif
+
+-- Use macros to define strictness of functions.
+-- STRICT_x_OF_y denotes an y-ary function strict in the x-th parameter.
+-- We do not use BangPatterns, because they are not in any standard and we
+-- want the compilers to be compiled by as many compilers as possible.
+#define STRICT_1_OF_2(fn) fn arg _ | arg `seq` False = undefined
 
 infixl 9 \\{-This comment teaches CPP correct behaviour -}
 
@@ -174,10 +189,18 @@ m1 \\ m2 = difference m1 m2
 {--------------------------------------------------------------------
   Types  
 --------------------------------------------------------------------}
+
+-- The order of constructors of IntSet matters when considering performance.
+-- Currently in GHC 7.0, when type has 3 constructors, they are matched from
+-- the first to the last -- the best performance is achieved when the
+-- constructors are ordered by frequency.
+-- On GHC 7.0, reordering constructors from Nil | Tip | Bin to Bin | Tip | Nil
+-- improves the containers_benchmark by 11% on x86 and by 9% on x86_64.
+
 -- | A set of integers.
-data IntSet = Nil
+data IntSet = Bin {-# UNPACK #-} !Prefix {-# UNPACK #-} !Mask !IntSet !IntSet
             | Tip {-# UNPACK #-} !Int
-            | Bin {-# UNPACK #-} !Prefix {-# UNPACK #-} !Mask !IntSet !IntSet
+            | Nil
 -- Invariant: Nil is never found as a child of Bin.
 -- Invariant: The Mask is a power of 2.  It is the largest bit position at which
 --            two elements of the set differ.
@@ -659,22 +682,75 @@ map f = fromList . List.map f . toList
 {--------------------------------------------------------------------
   Fold
 --------------------------------------------------------------------}
--- | /O(n)/. Fold over the elements of a set in an unspecified order.
+-- | /O(n)/. Fold the elements in the set using the given right-associative
+-- binary operator. This function is an equivalent of 'foldr' and is present
+-- for compatibility only.
 --
--- > sum set   == fold (+) 0 set
--- > elems set == fold (:) [] set
+-- /Please note that fold will be deprecated in the future and removed./
 fold :: (Int -> b -> b) -> b -> IntSet -> b
-fold f z t
-  = case t of
-      Bin 0 m l r | m < 0 -> go (go z l) r  -- put negative numbers before.
-      Bin _ _ _ _ -> go z t
-      Tip x       -> f x z
-      Nil         -> z
-  where
-    go z' (Bin _ _ l r) = go (go z' r) l
-    go z' (Tip x)       = f x z'
-    go z' Nil           = z'
+fold = foldr
 {-# INLINE fold #-}
+
+-- | /O(n)/. Fold the elements in the set using the given right-associative
+-- binary operator, such that @'foldr' f z == 'Prelude.foldr' f z . 'toAscList'@.
+--
+-- For example,
+--
+-- > toAscList set = foldr (:) [] set
+foldr :: (Int -> b -> b) -> b -> IntSet -> b
+foldr f z t =
+  case t of Bin 0 m l r | m < 0 -> go (go z l) r -- put negative numbers before
+            _                   -> go z t
+  where
+    go z' Nil           = z'
+    go z' (Tip x)       = f x z'
+    go z' (Bin _ _ l r) = go (go z' r) l
+{-# INLINE foldr #-}
+
+-- | /O(n)/. A strict version of 'foldr'. Each application of the operator is
+-- evaluated before using the result in the next application. This
+-- function is strict in the starting value.
+foldr' :: (Int -> b -> b) -> b -> IntSet -> b
+foldr' f z t =
+  case t of Bin 0 m l r | m < 0 -> go (go z l) r -- put negative numbers before
+            _                   -> go z t
+  where
+    STRICT_1_OF_2(go)
+    go z' Nil           = z'
+    go z' (Tip x)       = f x z'
+    go z' (Bin _ _ l r) = go (go z' r) l
+{-# INLINE foldr' #-}
+
+-- | /O(n)/. Fold the elements in the set using the given left-associative
+-- binary operator, such that @'foldl' f z == 'Prelude.foldl' f z . 'toAscList'@.
+--
+-- For example,
+--
+-- > toDescList set = foldl (flip (:)) [] set
+foldl :: (a -> Int -> a) -> a -> IntSet -> a
+foldl f z t =
+  case t of Bin 0 m l r | m < 0 -> go (go z r) l -- put negative numbers before
+            _                   -> go z t
+  where
+    STRICT_1_OF_2(go)
+    go z' Nil           = z'
+    go z' (Tip x)       = f z' x
+    go z' (Bin _ _ l r) = go (go z' l) r
+{-# INLINE foldl #-}
+
+-- | /O(n)/. A strict version of 'foldl'. Each application of the operator is
+-- evaluated before using the result in the next application. This
+-- function is strict in the starting value.
+foldl' :: (a -> Int -> a) -> a -> IntSet -> a
+foldl' f z t =
+  case t of Bin 0 m l r | m < 0 -> go (go z r) l -- put negative numbers before
+            _                   -> go z t
+  where
+    STRICT_1_OF_2(go)
+    go z' Nil           = z'
+    go z' (Tip x)       = f z' x
+    go z' (Bin _ _ l r) = go (go z' l) r
+{-# INLINE foldl' #-}
 
 {--------------------------------------------------------------------
   List variations 
@@ -813,6 +889,15 @@ instance Read IntSet where
 
 #include "Typeable.h"
 INSTANCE_TYPEABLE0(IntSet,intSetTc,"IntSet")
+
+{--------------------------------------------------------------------
+  NFData
+--------------------------------------------------------------------}
+
+-- The IntSet constructors consist only of strict fields of Ints and
+-- IntSets, thus the default NFData instance which evaluates to whnf
+-- should suffice
+instance NFData IntSet
 
 {--------------------------------------------------------------------
   Debugging

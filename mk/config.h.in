@@ -113,9 +113,6 @@
 /* Define to 1 if you have the `gettimeofday' function. */
 #undef HAVE_GETTIMEOFDAY
 
-/* Define to 1 if GNU non-executable stack notes are supported. */
-#undef HAVE_GNU_NONEXEC_STACK
-
 /* Define to 1 if you have the <grp.h> header file. */
 #undef HAVE_GRP_H
 
@@ -389,6 +386,12 @@
 
 /* Define for large files, on AIX-style hosts. */
 #undef _LARGE_FILES
+
+/* ARM pre v6 */
+#undef arm_HOST_ARCH_PRE_ARMv6
+
+/* ARM pre v7 */
+#undef arm_HOST_ARCH_PRE_ARMv7
 
 /* Define to empty if `const' does not conform to ANSI C. */
 #undef const

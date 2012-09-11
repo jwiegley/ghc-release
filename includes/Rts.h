@@ -155,6 +155,36 @@ void _assertFail(const char *filename, unsigned int linenum)
 #endif
 
 /* -----------------------------------------------------------------------------
+   Time values in the RTS
+   -------------------------------------------------------------------------- */
+
+// For most time values in the RTS we use a fixed resolution of nanoseconds,
+// normalising the time we get from platform-dependent APIs to this
+// resolution.
+#define TIME_RESOLUTION 1000000000
+typedef StgInt64 Time;
+
+#if TIME_RESOLUTION == 1000000000
+// I'm being lazy, but it's awkward to define fully general versions of these
+#define TimeToUS(t)      (t / 1000)
+#define TimeToNS(t)      (t)
+#define USToTime(t)      ((Time)(t) * 1000)
+#define NSToTime(t)      ((Time)(t))
+#else
+#error Fix TimeToNS(), TimeToUS() etc.
+#endif
+
+#define SecondsToTime(t) ((Time)(t) * TIME_RESOLUTION)
+#define TimeToSeconds(t) ((t) / TIME_RESOLUTION)
+
+// Use instead of SecondsToTime() when we have a floating-point
+// seconds value, to avoid truncating it.
+INLINE_HEADER Time fsecondsToTime (double t)
+{
+    return (Time)(t * TIME_RESOLUTION);
+}
+
+/* -----------------------------------------------------------------------------
    Include everything STG-ish
    -------------------------------------------------------------------------- */
 
@@ -213,6 +243,7 @@ void _assertFail(const char *filename, unsigned int linenum)
 #include "rts/TTY.h"
 #include "rts/Utils.h"
 #include "rts/PrimFloat.h"
+#include "rts/Main.h"
 
 /* Misc stuff without a home */
 DLL_IMPORT_RTS extern char **prog_argv;	/* so we can get at these from Haskell */

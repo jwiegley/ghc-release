@@ -6,15 +6,22 @@
 HsTypes: Abstract syntax: user-defined types
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 {-# LANGUAGE DeriveDataTypeable #-}
 
 module HsTypes (
-	HsType(..), LHsType, 
+	HsType(..), LHsType, HsKind, LHsKind,
 	HsTyVarBndr(..), LHsTyVarBndr,
-	HsExplicitFlag(..),
+	HsTupleSort(..), HsExplicitFlag(..),
 	HsContext, LHsContext,
-	HsPred(..), LHsPred,
 	HsQuasiQuote(..),
+        HsTyWrapper(..),
 
 	LBangType, BangType, HsBang(..), 
         getBangType, getBangStrictness, 
@@ -22,20 +29,22 @@ module HsTypes (
 	ConDeclField(..), pprConDeclFields,
 	
 	mkExplicitHsForAllTy, mkImplicitHsForAllTy, hsExplicitTvs,
-	hsTyVarName, hsTyVarNames, replaceTyVarName,
-	hsTyVarKind, hsTyVarNameKind,
+	hsTyVarName, hsTyVarNames, replaceTyVarName, replaceLTyVarName,
+	hsTyVarKind, hsLTyVarKind, hsTyVarNameKind,
 	hsLTyVarName, hsLTyVarNames, hsLTyVarLocName, hsLTyVarLocNames,
-	splitHsInstDeclTy, splitHsFunType,
-	splitHsAppTys, mkHsAppTys,
-	
-	-- Type place holder
-	PostTcType, placeHolderType, PostTcKind, placeHolderKind,
+	splitHsInstDeclTy_maybe, splitLHsInstDeclTy_maybe,
+        splitHsForAllTy, splitLHsForAllTy,
+        splitHsClassTy_maybe, splitLHsClassTy_maybe,
+        splitHsFunType,
+	splitHsAppTys, mkHsAppTys, mkHsOpTy,
 
 	-- Printing
 	pprParendHsType, pprHsForAll, pprHsContext, ppr_hs_context,
     ) where
 
 import {-# SOURCE #-} HsExpr ( HsSplice, pprSplice )
+
+import HsLit
 
 import NameSet( FreeVars )
 import Type
@@ -49,26 +58,6 @@ import FastString
 import Data.Data
 \end{code}
 
-
-%************************************************************************
-%*									*
-\subsection{Annotating the syntax}
-%*									*
-%************************************************************************
-
-\begin{code}
-type PostTcKind = Kind
-type PostTcType = Type		-- Used for slots in the abstract syntax
-				-- where we want to keep slot for a type
-				-- to be added by the type checker...but
-				-- before typechecking it's just bogus
-
-placeHolderType :: PostTcType	-- Used before typechecking
-placeHolderType  = panic "Evaluated the place holder for a PostTcType"
-
-placeHolderKind :: PostTcKind	-- Used before typechecking
-placeHolderKind  = panic "Evaluated the place holder for a PostTcKind"
-\end{code}
 
 %************************************************************************
 %*									*
@@ -124,16 +113,11 @@ This is the syntax for types as seen in type signatures.
 \begin{code}
 type LHsContext name = Located (HsContext name)
 
-type HsContext name = [LHsPred name]
-
-type LHsPred name = Located (HsPred name)
-
-data HsPred name = HsClassP name [LHsType name]		 -- class constraint
-		 | HsEqualP (LHsType name) (LHsType name)-- equality constraint
-		 | HsIParam (IPName name) (LHsType name)
-		 deriving (Data, Typeable)
+type HsContext name = [LHsType name]
 
 type LHsType name = Located (HsType name)
+type HsKind name = HsType name
+type LHsKind name = Located (HsKind name)
 
 data HsType name
   = HsForAllTy	HsExplicitFlag   	-- Renamer leaves this flag unchanged, to record the way
@@ -144,7 +128,8 @@ data HsType name
 		(LHsContext name)
 		(LHsType name)
 
-  | HsTyVar		name		-- Type variable or type constructor
+  | HsTyVar		name		-- Type variable, type constructor, or data constructor
+                                        -- see Note [Promotions (HsTyVar)]
 
   | HsAppTy		(LHsType name)
 			(LHsType name)
@@ -156,28 +141,23 @@ data HsType name
 
   | HsPArrTy		(LHsType name)	-- Elem. type of parallel array: [:t:]
 
-  | HsTupleTy		Boxity
+  | HsTupleTy		HsTupleSort
 			[LHsType name]	-- Element types (length gives arity)
 
-  | HsOpTy		(LHsType name) (Located name) (LHsType name)
+  | HsOpTy		(LHsType name) (LHsTyOp name) (LHsType name)
 
-  | HsParTy		(LHsType name)   
+  | HsParTy		(LHsType name)   -- See Note [Parens in HsSyn] in HsExpr
 	-- Parenthesis preserved for the precedence re-arrangement in RnTypes
 	-- It's important that a * (b + c) doesn't get rearranged to (a*b) + c!
-	-- 
-	-- However, NB that toHsType doesn't add HsParTys (in an effort to keep
-	-- interface files smaller), so when printing a HsType we may need to
-	-- add parens.  
 
-  | HsPredTy		(HsPred name)	-- Only used in the type of an instance
-					-- declaration, eg.  Eq [a] -> Eq a
-					--			       ^^^^
-					--                            HsPredTy
-					-- Note no need for location info on the
-					-- Enclosed HsPred; the one on the type will do
+  | HsIParamTy		(IPName name)    -- (?x :: ty)
+                        (LHsType name)   -- Implicit parameters as they occur in contexts
+
+  | HsEqTy              (LHsType name)   -- ty1 ~ ty2
+                        (LHsType name)   -- Always allowed even without TypeOperators, and has special kinding rule
 
   | HsKindSig		(LHsType name)	-- (ty :: kind)
-			Kind		-- A type with a kind signature
+			(LHsKind name)  -- A type with a kind signature
 
   | HsQuasiQuoteTy	(HsQuasiQuote name)
 
@@ -192,8 +172,94 @@ data HsType name
 
   | HsCoreTy Type	-- An escape hatch for tunnelling a *closed* 
     	       		-- Core Type through HsSyn.  
-					 
+
+  | HsExplicitListTy     -- A promoted explicit list
+        PostTcKind       -- See Note [Promoted lists and tuples]
+        [LHsType name]   
+                         
+  | HsExplicitTupleTy    -- A promoted explicit tuple
+        [PostTcKind]     -- See Note [Promoted lists and tuples]
+        [LHsType name]   
+
+  | HsWrapTy HsTyWrapper (HsType name)  -- only in typechecker output
   deriving (Data, Typeable)
+
+data HsTyWrapper
+  = WpKiApps [Kind]  -- kind instantiation: [] k1 k2 .. kn
+  deriving (Data, Typeable)
+
+type LHsTyOp name = HsTyOp (Located name)
+type HsTyOp name = (HsTyWrapper, name)
+
+mkHsOpTy :: LHsType name -> Located name -> LHsType name -> HsType name
+mkHsOpTy ty1 op ty2 = HsOpTy ty1 (WpKiApps [], op) ty2
+\end{code}
+
+Note [Promotions (HsTyVar)]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+HsTyVar: A name in a type or kind.
+  Here are the allowed namespaces for the name.
+    In a type:
+      Var: not allowed
+      Data: promoted data constructor
+      Tv: type variable
+      TcCls before renamer: type constructor, class constructor, or promoted data constructor
+      TcCls after renamer: type constructor or class constructor
+    In a kind:
+      Var, Data: not allowed
+      Tv: kind variable
+      TcCls: kind constructor or promoted type constructor
+
+
+Note [Promoted lists and tuples]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Notice the difference between
+   HsListTy    HsExplicitListTy
+   HsTupleTy   HsExplicitListTupleTy
+
+E.g.    f :: [Int]                      HsListTy                
+
+        g3  :: T '[]                   All these use  
+        g2  :: T '[True]                  HsExplicitListTy        
+        g1  :: T '[True,False]          
+        g1a :: T [True,False]             (can omit ' where unambiguous)
+
+  kind of T :: [Bool] -> *        This kind uses HsListTy!
+
+E.g.    h :: (Int,Bool)                 HsTupleTy; f is a pair               
+        k :: S '(True,False)            HsExplicitTypleTy; S is indexed by   
+                                           a type-level pair of booleans 
+        kind of S :: (Bool,Bool) -> *   This kind uses HsExplicitTupleTy
+
+Note [Distinguishing tuple kinds]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Apart from promotion, tuples can have one of three different kinds:
+
+        x :: (Int, Bool)                -- Regular boxed tuples
+        f :: Int# -> (# Int#, Int# #)   -- Unboxed tuples
+        g :: (Eq a, Ord a) => a         -- Constraint tuples
+
+For convenience, internally we use a single constructor for all of these,
+namely HsTupleTy, but keep track of the tuple kind (in the first argument to
+HsTupleTy, a HsTupleSort). We can tell if a tuple is unboxed while parsing,
+because of the #. However, with -XConstraintKinds we can only distinguish
+between constraint and boxed tuples during type checking, in general. Hence the
+four constructors of HsTupleSort:
+        
+        HsUnboxedTuple                  -> Produced by the parser
+        HsBoxedTuple                    -> Certainly a boxed tuple
+        HsConstraintTuple               -> Certainly a constraint tuple
+        HsBoxedOrConstraintTuple        -> Could be a boxed or a constraint 
+                                        tuple. Produced by the parser only,
+                                        disappears after type checking
+
+\begin{code}
+data HsTupleSort = HsUnboxedTuple
+                 | HsBoxedTuple
+                 | HsConstraintTuple
+                 | HsBoxedOrConstraintTuple
+                 deriving (Data, Typeable)
 
 data HsExplicitFlag = Explicit | Implicit deriving (Data, Typeable)
 
@@ -227,7 +293,7 @@ mkHsForAllTy exp tvs ctxt ty = HsForAllTy exp tvs ctxt ty
 mk_forall_ty :: HsExplicitFlag -> [LHsTyVarBndr name] -> LHsType name -> HsType name
 mk_forall_ty exp  tvs  (L _ (HsParTy ty))		    = mk_forall_ty exp tvs ty
 mk_forall_ty exp1 tvs1 (L _ (HsForAllTy exp2 tvs2 ctxt ty)) = mkHsForAllTy (exp1 `plus` exp2) (tvs1 ++ tvs2) ctxt ty
-mk_forall_ty exp  tvs  ty			            = HsForAllTy exp tvs (L noSrcSpan []) ty
+mk_forall_ty exp  tvs  ty			            = HsForAllTy exp tvs (noLoc []) ty
 	-- Even if tvs is empty, we still make a HsForAll!
 	-- In the Implicit case, this signals the place to do implicit quantification
 	-- In the Explicit case, it prevents implicit quantification	
@@ -251,9 +317,10 @@ data HsTyVarBndr name
          name 		-- See Note [Printing KindedTyVars]
          PostTcKind
 
-  | KindedTyVar 
-         name 
-         Kind 
+  | KindedTyVar
+         name
+         (LHsKind name)	-- The user-supplied kind signature
+         PostTcKind
       --  *** NOTA BENE *** A "monotype" in a pragma can have
       -- for-alls in it, (mostly to do with dictionaries).  These
       -- must be explicitly Kinded.
@@ -261,15 +328,18 @@ data HsTyVarBndr name
 
 hsTyVarName :: HsTyVarBndr name -> name
 hsTyVarName (UserTyVar n _)   = n
-hsTyVarName (KindedTyVar n _) = n
+hsTyVarName (KindedTyVar n _ _) = n
 
 hsTyVarKind :: HsTyVarBndr name -> Kind
 hsTyVarKind (UserTyVar _ k)   = k
-hsTyVarKind (KindedTyVar _ k) = k
+hsTyVarKind (KindedTyVar _ _ k) = k
+
+hsLTyVarKind :: LHsTyVarBndr name -> Kind
+hsLTyVarKind  = hsTyVarKind . unLoc
 
 hsTyVarNameKind :: HsTyVarBndr name -> (name, Kind)
 hsTyVarNameKind (UserTyVar n k)   = (n,k)
-hsTyVarNameKind (KindedTyVar n k) = (n,k)
+hsTyVarNameKind (KindedTyVar n _ k) = (n,k)
 
 hsLTyVarName :: LHsTyVarBndr name -> name
 hsLTyVarName = hsTyVarName . unLoc
@@ -286,9 +356,18 @@ hsLTyVarLocName = fmap hsTyVarName
 hsLTyVarLocNames :: [LHsTyVarBndr name] -> [Located name]
 hsLTyVarLocNames = map hsLTyVarLocName
 
-replaceTyVarName :: HsTyVarBndr name1 -> name2 -> HsTyVarBndr name2
-replaceTyVarName (UserTyVar _ k)   n' = UserTyVar n' k
-replaceTyVarName (KindedTyVar _ k) n' = KindedTyVar n' k
+replaceTyVarName :: (Monad m) => HsTyVarBndr name1 -> name2  -- new type name
+                    -> (LHsKind name1 -> m (LHsKind name2))  -- kind renaming
+                    -> m (HsTyVarBndr name2)
+replaceTyVarName (UserTyVar _ k) n' _ = return $ UserTyVar n' k
+replaceTyVarName (KindedTyVar _ k tck) n' rn = do
+  k' <- rn k
+  return $ KindedTyVar n' k' tck
+
+replaceLTyVarName :: (Monad m) => LHsTyVarBndr name1 -> name2
+                  -> (LHsKind name1 -> m (LHsKind name2))
+                  -> m (LHsTyVarBndr name2)
+replaceLTyVarName (L loc n1) n2 rn = replaceTyVarName n1 n2 rn >>= return . L loc
 \end{code}
 
 
@@ -306,22 +385,53 @@ mkHsAppTys fun_ty (arg_ty:arg_tys)
        -- Add noLocs for inner nodes of the application; 
        -- they are never used 
 
-splitHsInstDeclTy 
-    :: OutputableBndr name
-    => HsType name 
-    -> ([LHsTyVarBndr name], HsContext name, name, [LHsType name])
-	-- Split up an instance decl type, returning the pieces
+splitHsInstDeclTy_maybe :: HsType name 
+                        -> Maybe ([LHsTyVarBndr name], HsContext name, name, [LHsType name])
+splitHsInstDeclTy_maybe ty
+  = fmap (\(tvs, cxt, L _ n, tys) -> (tvs, cxt, n, tys)) $ splitLHsInstDeclTy_maybe (noLoc ty)
 
-splitHsInstDeclTy inst_ty
-  = case inst_ty of
-	HsParTy (L _ ty)	      -> splitHsInstDeclTy ty
-	HsForAllTy _ tvs cxt (L _ ty) -> split_tau tvs (unLoc cxt) ty
-	other 			      -> split_tau []  []          other
-    -- The type vars should have been computed by now, even if they were implicit
+splitLHsInstDeclTy_maybe
+    :: LHsType name 
+    -> Maybe ([LHsTyVarBndr name], HsContext name, Located name, [LHsType name])
+	-- Split up an instance decl type, returning the pieces
+splitLHsInstDeclTy_maybe inst_ty = do
+    let (tvs, cxt, ty) = splitLHsForAllTy inst_ty
+    (cls, tys) <- splitLHsClassTy_maybe ty
+    return (tvs, cxt, cls, tys)
+
+splitHsForAllTy :: HsType name -> ([LHsTyVarBndr name], HsContext name, HsType name)
+splitHsForAllTy ty = case splitLHsForAllTy (noLoc ty) of (tvs, cxt, L _ ty) -> (tvs, cxt, ty)
+
+splitLHsForAllTy
+    :: LHsType name 
+    -> ([LHsTyVarBndr name], HsContext name, LHsType name)
+splitLHsForAllTy poly_ty
+  = case unLoc poly_ty of
+        HsParTy ty              -> splitLHsForAllTy ty
+        HsForAllTy _ tvs cxt ty -> (tvs, unLoc cxt, ty)
+        _                       -> ([], [], poly_ty)
+        -- The type vars should have been computed by now, even if they were implicit
+
+splitHsClassTy_maybe :: HsType name -> Maybe (name, [LHsType name])
+splitHsClassTy_maybe ty = fmap (\(L _ n, tys) -> (n, tys)) $ splitLHsClassTy_maybe (noLoc ty)
+
+splitLHsClassTy_maybe :: LHsType name -> Maybe (Located name, [LHsType name])
+--- Watch out.. in ...deriving( Show )... we use this on 
+--- the list of partially applied predicates in the deriving,
+--- so there can be zero args.
+
+-- In TcDeriv we also use this to figure out what data type is being
+-- mentioned in a deriving (Generic (Foo bar baz)) declaration (i.e. "Foo").
+splitLHsClassTy_maybe ty
+  = checkl ty []
   where
-    split_tau tvs cxt (HsPredTy (HsClassP cls tys)) = (tvs, cxt, cls, tys)
-    split_tau tvs cxt (HsParTy (L _ ty))	    = split_tau tvs cxt ty
-    split_tau _ _ _ = pprPanic "splitHsInstDeclTy" (ppr inst_ty)
+    checkl (L l ty) args = case ty of
+        HsTyVar t          -> Just (L l t, args)
+        HsAppTy l r        -> checkl l (r:args)
+        HsOpTy l (_, tc) r -> checkl (fmap HsTyVar tc) (l:r:args)
+        HsParTy t          -> checkl t args
+        HsKindSig ty _     -> checkl ty args
+        _                  -> Nothing
 
 -- Splits HsType into the (init, last) parts
 -- Breaks up any parens in the result type: 
@@ -345,18 +455,9 @@ splitHsFunType other 	   	   = ([], other)
 instance (OutputableBndr name) => Outputable (HsType name) where
     ppr ty = pprHsType ty
 
-instance (Outputable name) => Outputable (HsTyVarBndr name) where
+instance (OutputableBndr name) => Outputable (HsTyVarBndr name) where
     ppr (UserTyVar name _)      = ppr name
-    ppr (KindedTyVar name kind) = hsep [ppr name, dcolon, pprParendKind kind]
-
-instance OutputableBndr name => Outputable (HsPred name) where
-    ppr (HsClassP clas tys) = ppr clas <+> hsep (map pprLHsType tys)
-    ppr (HsEqualP t1 t2)    = hsep [pprLHsType t1, ptext (sLit "~"), 
-				    pprLHsType t2]
-    ppr (HsIParam n ty)     = hsep [ppr n, dcolon, ppr ty]
-
-pprLHsType :: OutputableBndr name => LHsType name -> SDoc
-pprLHsType = pprParendHsType . unLoc
+    ppr (KindedTyVar name kind _) = parens $ hsep [ppr name, dcolon, ppr kind]
 
 pprHsForAll :: OutputableBndr name => HsExplicitFlag -> [LHsTyVarBndr name] ->  LHsContext name -> SDoc
 pprHsForAll exp tvs cxt 
@@ -370,15 +471,8 @@ pprHsForAll exp tvs cxt
 
 pprHsContext :: (OutputableBndr name) => HsContext name -> SDoc
 pprHsContext []	        = empty
-pprHsContext [L _ pred] 
-   | noParenHsPred pred = ppr pred <+> darrow
+pprHsContext [L _ pred] = ppr pred <+> darrow
 pprHsContext cxt        = ppr_hs_context cxt <+> darrow
-
-noParenHsPred :: HsPred name -> Bool
--- c.f. TypeRep.noParenPred
-noParenHsPred (HsClassP {}) = True
-noParenHsPred (HsEqualP {}) = True
-noParenHsPred (HsIParam {}) = False
 
 ppr_hs_context :: (OutputableBndr name) => HsContext name -> SDoc
 ppr_hs_context []  = empty
@@ -447,21 +541,44 @@ ppr_mono_ty _    (HsQuasiQuoteTy qq) = ppr qq
 ppr_mono_ty _    (HsRecTy flds)      = pprConDeclFields flds
 ppr_mono_ty _    (HsTyVar name)      = ppr name
 ppr_mono_ty prec (HsFunTy ty1 ty2)   = ppr_fun_ty prec ty1 ty2
-ppr_mono_ty _    (HsTupleTy con tys) = tupleParens con (interpp'SP tys)
-ppr_mono_ty _    (HsKindSig ty kind) = parens (ppr_mono_lty pREC_TOP ty <+> dcolon <+> pprKind kind)
+ppr_mono_ty _    (HsTupleTy con tys) = tupleParens std_con (interpp'SP tys)
+  where std_con = case con of
+                    HsUnboxedTuple -> UnboxedTuple
+                    _              -> BoxedTuple
+ppr_mono_ty _    (HsKindSig ty kind) = parens (ppr_mono_lty pREC_TOP ty <+> dcolon <+> ppr kind)
 ppr_mono_ty _    (HsListTy ty)	     = brackets (ppr_mono_lty pREC_TOP ty)
 ppr_mono_ty _    (HsPArrTy ty)	     = pabrackets (ppr_mono_lty pREC_TOP ty)
-ppr_mono_ty _    (HsPredTy pred)     = ppr pred
+ppr_mono_ty prec (HsIParamTy n ty)   = maybeParen prec pREC_FUN (ppr n <+> dcolon <+> ppr_mono_lty pREC_TOP ty)
 ppr_mono_ty _    (HsSpliceTy s _ _)  = pprSplice s
 ppr_mono_ty _    (HsCoreTy ty)       = ppr ty
+ppr_mono_ty _    (HsExplicitListTy _ tys) = quote $ brackets (interpp'SP tys)
+ppr_mono_ty _    (HsExplicitTupleTy _ tys) = quote $ parens (interpp'SP tys)
+
+ppr_mono_ty ctxt_prec (HsWrapTy (WpKiApps _kis) ty)
+  = ppr_mono_ty ctxt_prec ty
+-- We are not printing kind applications. If we wanted to do so, we should do
+-- something like this:
+{-
+  = go ctxt_prec kis ty
+  where
+    go ctxt_prec [] ty = ppr_mono_ty ctxt_prec ty
+    go ctxt_prec (ki:kis) ty
+      = maybeParen ctxt_prec pREC_CON $
+        hsep [ go pREC_FUN kis ty
+             , ptext (sLit "@") <> pprParendKind ki ]
+-}
+
+ppr_mono_ty ctxt_prec (HsEqTy ty1 ty2)
+  = maybeParen ctxt_prec pREC_OP $
+    ppr_mono_lty pREC_OP ty1 <+> char '~' <+> ppr_mono_lty pREC_OP ty2
 
 ppr_mono_ty ctxt_prec (HsAppTy fun_ty arg_ty)
   = maybeParen ctxt_prec pREC_CON $
     hsep [ppr_mono_lty pREC_FUN fun_ty, ppr_mono_lty pREC_CON arg_ty]
 
-ppr_mono_ty ctxt_prec (HsOpTy ty1 op ty2)  
+ppr_mono_ty ctxt_prec (HsOpTy ty1 (wrapper, op) ty2)
   = maybeParen ctxt_prec pREC_OP $
-    ppr_mono_lty pREC_OP ty1 <+> ppr op <+> ppr_mono_lty pREC_OP ty2
+    ppr_mono_lty pREC_OP ty1 <+> ppr_mono_ty pREC_CON (HsWrapTy wrapper (HsTyVar (unLoc op))) <+> ppr_mono_lty pREC_OP ty2
 
 ppr_mono_ty _         (HsParTy ty)
   = parens (ppr_mono_lty pREC_TOP ty)

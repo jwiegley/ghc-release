@@ -4,7 +4,7 @@ dnl
 #!/bin/sh
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.2.2], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.4.1], [glasgow-haskell-bugs@haskell.org], [ghc])
 
 FP_BINDIST_GHC_PWD
 FP_FIND_ROOT
@@ -56,6 +56,9 @@ FIND_GCC()
 FP_GCC_VERSION
 AC_PROG_CPP
 
+FP_PROG_LD_HashSize31
+FP_PROG_LD_ReduceMemoryOverheads
+
 #
 dnl ** Check gcc version and flags we need to pass it **
 #
@@ -80,12 +83,22 @@ AC_SUBST(CONF_CPP_OPTS_STAGE0)
 AC_SUBST(CONF_CPP_OPTS_STAGE1)
 AC_SUBST(CONF_CPP_OPTS_STAGE2)
 
-FP_SETTINGS
+dnl ** Set up the variables for the platform in the settings file.
+dnl May need to use gcc to find platform details.
+dnl --------------------------------------------------------------
+FPTOOLS_SET_HASKELL_PLATFORM_VARS
+
+dnl WordSize for settings.in
+AC_CHECK_SIZEOF(void *, 4)
+WordSize=$ac_cv_sizeof_void_p
+AC_SUBST(WordSize)
 
 #
 dnl ** how to invoke `ar' and `ranlib'
 #
 FP_PROG_AR_NEEDS_RANLIB
+
+FP_SETTINGS
 
 #
 AC_CONFIG_FILES(settings mk/config.mk mk/install.mk)

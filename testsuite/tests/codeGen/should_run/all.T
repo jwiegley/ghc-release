@@ -54,10 +54,8 @@ test('cgrun053', normal, compile_and_run, [''])
 test('cgrun054', normal, compile_and_run, [''])
 test('cgrun055', normal, compile_and_run, [''])
 test('cgrun056', normal, compile_and_run, [''])
-test('cgrun057', composes([expect_broken(948),
-                        only_ways(['prof','profasm']),
-                        extra_run_opts('+RTS -xc')]),
-     compile_and_run, [''])
+test('cgrun057', [ only_ways(prof_ways),
+                   extra_run_opts('+RTS -xc') ], compile_and_run, [''])
 test('cgrun058', normal, compile_and_run, [''])
 test('cgrun059', exit_code(1), compile_and_run, [''])
 test('cgrun060',
@@ -72,9 +70,10 @@ test('cgrun066', normal, compile_and_run, [''])
 test('cgrun067', extra_clean(['Cgrun067A.hi', 'Cgrun067A.o']),
      compile_and_run, [''])
 test('cgrun068', reqlib('random'), compile_and_run, [''])
-test('cgrun069', omit_ways(['ghci']), multisrc_compile_and_run,
-                 ['cgrun069', ['cgrun069_cmm.cmm'], ''])
+test('cgrun069', omit_ways(['ghci']), multi_compile_and_run,
+                 ['cgrun069', [('cgrun069_cmm.cmm', '')], ''])
 test('cgrun070', normal, compile_and_run, [''])
+test('cgrun071', normal, compile_and_run, [''])
 
 test('1852', normal, compile_and_run, [''])
 test('1861', extra_run_opts('0'), compile_and_run, [''])
@@ -84,6 +83,7 @@ test('3207', normal, compile_and_run, [''])
 test('3561', normal, compile_and_run, [''])
 test('3677', extra_run_opts('+RTS -K8k -RTS'), compile_and_run, [''])
 test('4441', normal, compile_and_run, [''])
-test('5149', omit_ways(['ghci']), multisrc_compile_and_run,
-                 ['5149', ['5149_cmm.cmm'], ''])
+test('5149', omit_ways(['ghci']), multi_compile_and_run,
+                 ['5149', [('5149_cmm.cmm', '')], ''])
 test('5129', normal, compile_and_run, [''])
+test('5626', exit_code(1), compile_and_run, [''])

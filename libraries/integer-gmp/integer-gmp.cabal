@@ -1,5 +1,5 @@
 name:           integer-gmp
-version:        0.3.0.0
+version:        0.4.0.0
 license:        BSD3
 license-file:   LICENSE
 maintainer:     libraries@haskell.org
@@ -23,6 +23,7 @@ Library {
     build-depends: ghc-prim
     exposed-modules: GHC.Integer
                      GHC.Integer.GMP.Internals
+                     GHC.Integer.GMP.Prim
                      GHC.Integer.Logarithms
                      GHC.Integer.Logarithms.Internals
     other-modules: GHC.Integer.Type

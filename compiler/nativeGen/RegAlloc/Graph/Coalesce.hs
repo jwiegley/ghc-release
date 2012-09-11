@@ -1,6 +1,13 @@
 -- | Register coalescing.
 --
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module RegAlloc.Graph.Coalesce (
 	regCoalesce,
 	slurpJoinMovs
@@ -27,8 +34,8 @@ import Data.List
 --	the same and the move instruction safely erased.
 regCoalesce 
 	:: Instruction instr
-	=> [LiveCmmTop statics instr] 
-	-> UniqSM [LiveCmmTop statics instr]
+	=> [LiveCmmDecl statics instr] 
+	-> UniqSM [LiveCmmDecl statics instr]
 
 regCoalesce code
  = do	
@@ -61,7 +68,7 @@ sinkReg fm r
 --	then we can rename the two regs to the same thing and eliminate the move.
 slurpJoinMovs 
 	:: Instruction instr
-	=> LiveCmmTop statics instr 
+	=> LiveCmmDecl statics instr 
 	-> Bag (Reg, Reg)
 
 slurpJoinMovs live

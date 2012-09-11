@@ -58,6 +58,7 @@ module Distribution.Simple.Utils (
 
         -- * running programs
         rawSystemExit,
+        rawSystemExitCode,
         rawSystemExitWithEnv,
         rawSystemStdout,
         rawSystemStdInOut,
@@ -373,6 +374,15 @@ rawSystemExit verbosity path args = do
   unless (exitcode == ExitSuccess) $ do
     debug verbosity $ path ++ " returned " ++ show exitcode
     exitWith exitcode
+
+rawSystemExitCode :: Verbosity -> FilePath -> [String] -> IO ExitCode
+rawSystemExitCode verbosity path args = do
+  printRawCommandAndArgs verbosity path args
+  hFlush stdout
+  exitcode <- rawSystem path args
+  unless (exitcode == ExitSuccess) $ do
+    debug verbosity $ path ++ " returned " ++ show exitcode
+  return exitcode
 
 rawSystemExitWithEnv :: Verbosity
                      -> FilePath
@@ -979,7 +989,7 @@ findPackageDesc dir
     multiDesc :: [String] -> IO a
     multiDesc l = die $ "Multiple cabal files found.\n"
                     ++ "Please use only one of: "
-                    ++ show l
+                    ++ intercalate ", " l
 
 -- |Optional auxiliary package information file (/pkgname/@.buildinfo@)
 defaultHookedPackageDesc :: IO (Maybe FilePath)

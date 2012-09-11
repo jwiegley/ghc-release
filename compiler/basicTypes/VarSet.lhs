@@ -4,9 +4,16 @@
 %
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module VarSet (
         -- * Var, Id and TyVar set types
-	VarSet, IdSet, TyVarSet, TyCoVarSet, CoVarSet,
+	VarSet, IdSet, TyVarSet, CoVarSet,
 	
 	-- ** Manipulating these sets
 	emptyVarSet, unitVarSet, mkVarSet,
@@ -22,7 +29,7 @@ module VarSet (
 
 #include "HsVersions.h"
 
-import Var      ( Var, TyVar, CoVar, TyCoVar, Id )
+import Var      ( Var, TyVar, CoVar, Id )
 import Unique
 import UniqSet
 \end{code}
@@ -37,7 +44,6 @@ import UniqSet
 type VarSet       = UniqSet Var
 type IdSet 	  = UniqSet Id
 type TyVarSet	  = UniqSet TyVar
-type TyCoVarSet   = UniqSet TyCoVar
 type CoVarSet     = UniqSet CoVar
 
 emptyVarSet	:: VarSet

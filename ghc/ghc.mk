@@ -10,7 +10,6 @@
 #
 # -----------------------------------------------------------------------------
 
-# ToDo
 ghc_USES_CABAL = YES
 ghc_PACKAGE = ghc-bin
 
@@ -27,8 +26,11 @@ ghc_stage1_MORE_HC_OPTS = $(GhcStage1HcOpts)
 ghc_stage2_MORE_HC_OPTS = $(GhcStage2HcOpts)
 ghc_stage3_MORE_HC_OPTS = $(GhcStage3HcOpts)
 
-ghc_stage2_CC_OPTS = -Iincludes
-ghc_stage3_CC_OPTS = -Iincludes
+# We need __GLASGOW_HASKELL__ in hschooks.c, so we have to build C
+# sources with GHC:
+ghc_stage1_UseGhcForCC = YES
+ghc_stage2_UseGhcForCC = YES
+ghc_stage3_UseGhcForCC = YES
 
 ghc_stage1_C_FILES_NODEPS = ghc/hschooks.c
 
@@ -97,7 +99,7 @@ ifneq "$(BINDIST)" "YES"
 ghc/stage1/build/tmp/$(ghc_stage1_PROG) : $(BOOT_LIBS)
 ifeq "$(GhcProfiled)" "YES"
 ghc/stage2/build/tmp/$(ghc_stage2_PROG) : $(compiler_stage2_p_LIB)
-ghc/stage2/build/tmp/$(ghc_stage2_PROG) : $(foreach lib,$(PACKAGES),$(libraries/$(lib)_dist-install_p_LIB))
+ghc/stage2/build/tmp/$(ghc_stage2_PROG) : $(foreach lib,$(PACKAGES_STAGE1),$(libraries/$(lib)_dist-install_p_LIB))
 endif
 
 # Modules here import HsVersions.h, so we need ghc_boot_platform.h
@@ -144,7 +146,7 @@ ifeq "$(Windows)" "NO"
 install: install_ghc_link
 .PNONY: install_ghc_link
 install_ghc_link: 
-	"$(RM)" $(RM_OPTS) "$(DESTDIR)$(bindir)/ghc"
+	$(call removeFiles,"$(DESTDIR)$(bindir)/ghc")
 	$(LN_S) ghc-$(ProjectVersion) "$(DESTDIR)$(bindir)/ghc"
 else
 # On Windows we install the main binary as $(bindir)/ghc.exe
@@ -152,7 +154,7 @@ else
 install: install_ghc_post
 .PHONY: install_ghc_post
 install_ghc_post: install_bins
-	"$(RM)" $(RM_OPTS) $(DESTDIR)$(bindir)/ghc.exe
+	$(call removeFiles,$(DESTDIR)$(bindir)/ghc.exe)
 	"$(MV)" -f $(DESTDIR)$(bindir)/ghc-stage$(INSTALL_GHC_STAGE).exe $(DESTDIR)$(bindir)/ghc.exe
 endif
 

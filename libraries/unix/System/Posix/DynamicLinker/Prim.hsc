@@ -1,4 +1,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Trustworthy #-}
+#endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Posix.DynamicLinker.Prim
@@ -27,7 +30,7 @@ module System.Posix.DynamicLinker.Prim (
   packRTLDFlags,
   RTLDFlags(..),
   packDL,
-  DL(..)
+  DL(..),
  )
 
 where
@@ -36,7 +39,7 @@ where
 
 import Data.Bits	( (.|.) )
 import Foreign.Ptr	( Ptr, FunPtr, nullPtr )
-import Foreign.C.Types	( CInt )
+import Foreign.C.Types
 import Foreign.C.String	( CString )
 
 -- RTLD_NEXT madness

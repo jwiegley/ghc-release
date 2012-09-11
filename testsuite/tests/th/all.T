@@ -43,14 +43,14 @@ test('TH_NestedSplices',
 
 # Testing profiling with TH is a bit tricky; we've already disabled
 # the prof way above, and also we want to add options specifically for
-# profiling (-osuf p_o) because this is necessary when mixing
+# profiling (-osuf p.o) because this is necessary when mixing
 # profiling w/ TH.  Furthermore we must have built the program the
 # normal way first, which is why the work is done by a Makefile rule.
 test('TH_spliceE5_prof',
      [req_profiling,
       omit_ways(['ghci']),
-      extra_clean(['TH_spliceE5_prof_Lib.p_o', 'TH_spliceE5_prof_Lib.hi',
-                   'TH_spliceE5_prof_Lib.o','TH_spliceE5_prof.p_o'])],
+      extra_clean(['TH_spliceE5_prof_Lib.p.o', 'TH_spliceE5_prof_Lib.hi',
+                   'TH_spliceE5_prof_Lib.o','TH_spliceE5_prof.p.o'])],
      run_command,
      ['$MAKE -s --no-print-directory TH_spliceE5_prof'])
 
@@ -70,6 +70,8 @@ test('TH_reifyDecl2', normal, compile, ['-v0'])
 test('TH_reifyType1', normal, compile, [''])
 test('TH_reifyType2', normal, compile, [''])
 test('TH_reifyMkName', normal, compile, ['-v0'])
+
+test('TH_reifyInstances', normal, compile, ['-v0'])
 
 test('TH_spliceDecl1', normal, compile, ['-v0'])
 test('TH_spliceDecl2', normal, compile, ['-v0'])
@@ -182,4 +184,36 @@ test('T5126', normal, compile, ['-v0'])
 test('T5217', normal, compile, ['-v0 -dsuppress-uniques -ddump-splices'])
 test('T5037', normal, compile, ['-v0'])
 test('TH_unboxedSingleton', normal, compile, ['-v0'])
+test('T5290', normal, compile, ['-v0 -ddump-splices'])
+test('T5362', normal, compile, ['-v0'])
 
+test('TH_unresolvedInfix',
+     extra_clean(['TH_unresolvedInfix_Lib.hi', 'TH_unresolvedInfix_Lib.o']),
+     multimod_compile_and_run,
+     ['TH_unresolvedInfix.hs', '-v0'])
+test('TH_unresolvedInfix2',
+     normal,
+     compile_fail,
+     ['-v0'])
+
+test('T5358', normal, compile_fail, [''])
+test('T5379', normal, compile_and_run, [''])
+test('T5404', normal, compile, ['-v0'])
+test('T5410', normal, compile_and_run, ['-v0'])
+test('TH_lookupName', 
+     extra_clean(['TH_lookupName_Lib.hi', 'TH_lookupName_Lib.o']),
+     multimod_compile_and_run,
+     ['TH_lookupName.hs', ''])
+test('T5452', normal, compile, ['-v0'])
+test('T5434', extra_clean(['T5434a.hi','T5434a.o']), 
+              multimod_compile, ['T5434','-v0 -Wall'])
+test('T5508', normal, compile, ['-v0 -ddump-splices'])
+test('TH_Depends',
+     [extra_clean(['TH_Depends_External.o', 'TH_Depends_External.hi',
+                   'TH_Depends_external.txt'])],
+     run_command,
+     ['$MAKE -s --no-print-directory TH_Depends'])
+test('T5597', extra_clean(['T5597a.hi','T5597a.o']), 
+              multimod_compile, ['T5597','-v0'])
+test('T5665', extra_clean(['T5665a.hi','T5665a.o']), 
+              multimod_compile, ['T5665','-v0'])

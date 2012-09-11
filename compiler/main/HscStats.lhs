@@ -4,6 +4,13 @@
 \section[GHC_Stats]{Statistics for per-module compilations}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module HscStats ( ppSourceStats ) where
 
 #include "HsVersions.h"
@@ -123,7 +130,8 @@ ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
     sig_info (GenericSig _ _)   = (0,0,0,0,1)
     sig_info _                  = (0,0,0,0,0)
 
-    import_info (L _ (ImportDecl _ _ _ safe qual as spec))
+    import_info (L _ (ImportDecl { ideclSafe = safe, ideclQualified = qual
+                                 , ideclAs = as, ideclHiding = spec }))
 	= add7 (1, safe_info safe, qual_info qual, as_info as, 0,0,0) (spec_info spec)
     safe_info = qual_info
     qual_info False  = 0

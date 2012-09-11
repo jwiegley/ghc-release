@@ -17,15 +17,14 @@ module Haddock.Backends.LaTeX (
 import Haddock.Types
 import Haddock.Utils
 import Haddock.GhcUtils
-import Pretty hiding (Doc)
+import Pretty hiding (Doc, quote)
 import qualified Pretty
 
 import GHC
 import OccName
-import Name                 ( isTyConName, nameOccName )
-import RdrName              ( rdrNameOcc, isRdrTc )
-import BasicTypes           ( IPName(..), Boxity(..) )
-import Outputable           ( Outputable, ppr, showSDoc )
+import Name                 ( nameOccName )
+import RdrName              ( rdrNameOcc )
+import BasicTypes           ( ipNameName )
 import FastString           ( unpackFS, unpackLitString )
 
 import qualified Data.Map as Map
@@ -450,7 +449,7 @@ rDoc = maybeDoc . fmap latexStripTrailingWhitespace
 -------------------------------------------------------------------------------
 
 
-ppClassHdr :: Bool -> Located [LHsPred DocName] -> DocName
+ppClassHdr :: Bool -> Located [LHsType DocName] -> DocName
            -> [Located (HsTyVarBndr DocName)] -> [Located ([DocName], [DocName])]
            -> Bool -> LaTeX
 ppClassHdr summ lctxt n tvs fds unicode =
@@ -473,7 +472,7 @@ ppClassDecl :: [DocInstance DocName] -> SrcSpan
             -> Maybe (Doc DocName) -> [(DocName, DocForDecl DocName)]
             -> TyClDecl DocName -> Bool -> LaTeX
 ppClassDecl instances loc mbDoc subdocs
-  (ClassDecl lctxt lname ltyvars lfds lsigs _ ats _) unicode
+  (ClassDecl lctxt lname ltyvars lfds lsigs _ ats at_defs _) unicode
   = declWithDoc classheader (if null body then Nothing else Just (vcat body)) $$
     instancesBit
   where
@@ -486,8 +485,8 @@ ppClassDecl instances loc mbDoc subdocs
     body = catMaybes [fmap docToLaTeX mbDoc, body_]
 
     body_
-      | null lsigs, null ats = Nothing
-      | null ats  = Just methodTable
+      | null lsigs, null ats, null at_defs = Nothing
+      | null ats, null at_defs = Just methodTable
 ---     | otherwise = atTable $$ methodTable
       | otherwise = error "LaTeX.ppClassDecl"
 
@@ -771,7 +770,7 @@ ppContextNoArrow []  _ = empty
 ppContextNoArrow cxt unicode = pp_hs_context (map unLoc cxt) unicode
 
 
-ppContextNoLocs :: [HsPred DocName] -> Bool -> LaTeX
+ppContextNoLocs :: [HsType DocName] -> Bool -> LaTeX
 ppContextNoLocs []  _ = empty
 ppContextNoLocs cxt unicode = pp_hs_context cxt unicode <+> darrow unicode
 
@@ -780,17 +779,10 @@ ppContext :: HsContext DocName -> Bool -> LaTeX
 ppContext cxt unicode = ppContextNoLocs (map unLoc cxt) unicode
 
 
-pp_hs_context :: [HsPred DocName] -> Bool -> LaTeX
+pp_hs_context :: [HsType DocName] -> Bool -> LaTeX
 pp_hs_context []  _       = empty
-pp_hs_context [p] unicode = ppPred unicode p
-pp_hs_context cxt unicode = parenList (map (ppPred unicode) cxt)
-
-
-ppPred :: Bool -> HsPred DocName -> LaTeX
-ppPred unicode (HsClassP n ts) = ppAppNameTypes n (map unLoc ts) unicode
-ppPred unicode (HsEqualP t1 t2) = ppLType unicode t1 <> text "~" <> ppLType unicode t2
-ppPred unicode (HsIParam (IPName n) t)
-  = char '?' <> ppDocName n <> dcolon unicode <> ppLType unicode t
+pp_hs_context [p] unicode = ppType unicode p
+pp_hs_context cxt unicode = parenList (map (ppType unicode) cxt)
 
 
 -------------------------------------------------------------------------------
@@ -798,18 +790,14 @@ ppPred unicode (HsIParam (IPName n) t)
 -------------------------------------------------------------------------------
 
 
-ppKind :: Outputable a => a -> LaTeX
-ppKind k = text (showSDoc (ppr k))
-
-
 ppBang :: HsBang -> LaTeX
 ppBang HsNoBang = empty
 ppBang _        = char '!' -- Unpacked args is an implementation detail,
 
 
-tupleParens :: Boxity -> [LaTeX] -> LaTeX
-tupleParens Boxed   = parenList
-tupleParens Unboxed = ubxParenList
+tupleParens :: HsTupleSort -> [LaTeX] -> LaTeX
+tupleParens HsUnboxedTuple = ubxParenList
+tupleParens _              = parenList
 
 
 -------------------------------------------------------------------------------
@@ -847,6 +835,12 @@ ppType       unicode ty = ppr_mono_ty pREC_TOP ty unicode
 ppParendType unicode ty = ppr_mono_ty pREC_CON ty unicode
 ppFunLhType  unicode ty = ppr_mono_ty pREC_FUN ty unicode
 
+ppLKind :: Bool -> LHsKind DocName -> LaTeX
+ppLKind unicode y = ppKind unicode (unLoc y)
+
+ppKind :: Bool -> HsKind DocName -> LaTeX
+ppKind unicode ki = ppr_mono_ty pREC_TOP ki unicode
+
 
 -- Drop top-level for-all type variables in user style
 -- since they are implicit in Haskell
@@ -875,20 +869,27 @@ ppr_mono_ty _         (HsBangTy b ty)     u = ppBang b <> ppLParendType u ty
 ppr_mono_ty _         (HsTyVar name)      _ = ppDocName name
 ppr_mono_ty ctxt_prec (HsFunTy ty1 ty2)   u = ppr_fun_ty ctxt_prec ty1 ty2 u
 ppr_mono_ty _         (HsTupleTy con tys) u = tupleParens con (map (ppLType u) tys)
-ppr_mono_ty _         (HsKindSig ty kind) u = parens (ppr_mono_lty pREC_TOP ty u <+> dcolon u <+> ppKind kind)
+ppr_mono_ty _         (HsKindSig ty kind) u = parens (ppr_mono_lty pREC_TOP ty u <+> dcolon u <+> ppLKind u kind)
 ppr_mono_ty _         (HsListTy ty)       u = brackets (ppr_mono_lty pREC_TOP ty u)
 ppr_mono_ty _         (HsPArrTy ty)       u = pabrackets (ppr_mono_lty pREC_TOP ty u)
-ppr_mono_ty _         (HsPredTy p)        u = parens (ppPred u p)
+ppr_mono_ty _         (HsIParamTy n ty)   u = brackets (ppDocName (ipNameName n) <+> dcolon u <+> ppr_mono_lty pREC_TOP ty u)
 ppr_mono_ty _         (HsSpliceTy {})     _ = error "ppr_mono_ty HsSpliceTy"
 ppr_mono_ty _         (HsQuasiQuoteTy {}) _ = error "ppr_mono_ty HsQuasiQuoteTy"
 ppr_mono_ty _         (HsRecTy {})        _ = error "ppr_mono_ty HsRecTy"
 ppr_mono_ty _         (HsCoreTy {})       _ = error "ppr_mono_ty HsCoreTy"
+ppr_mono_ty _         (HsExplicitListTy _ tys) u = Pretty.quote $ brackets $ hsep $ punctuate comma $ map (ppLType u) tys
+ppr_mono_ty _         (HsExplicitTupleTy _ tys) u = Pretty.quote $ parenList $ map (ppLType u) tys
+ppr_mono_ty _         (HsWrapTy {})       _ = error "ppr_mono_ty HsWrapTy"
+
+ppr_mono_ty ctxt_prec (HsEqTy ty1 ty2) unicode
+  = maybeParen ctxt_prec pREC_OP $
+    ppr_mono_lty pREC_OP ty1 unicode <+> char '~' <+> ppr_mono_lty pREC_OP ty2 unicode
 
 ppr_mono_ty ctxt_prec (HsAppTy fun_ty arg_ty) unicode
   = maybeParen ctxt_prec pREC_CON $
     hsep [ppr_mono_lty pREC_FUN fun_ty unicode, ppr_mono_lty pREC_CON arg_ty unicode]
 
-ppr_mono_ty ctxt_prec (HsOpTy ty1 op ty2) unicode
+ppr_mono_ty ctxt_prec (HsOpTy ty1 (_, op) ty2) unicode
   = maybeParen ctxt_prec pREC_FUN $
     ppr_mono_lty pREC_OP ty1 unicode <+> ppr_op <+> ppr_mono_lty pREC_OP ty2 unicode
   where
@@ -996,56 +997,45 @@ latexMonoMunge c   s = latexMunge c s
 -------------------------------------------------------------------------------
 
 
-parLatexMarkup :: (a -> LaTeX) -> (a -> Bool)
-               -> DocMarkup a (StringContext -> LaTeX)
-parLatexMarkup ppId isTyCon = Markup {
-  markupParagraph     = \p v -> p v <> text "\\par" $$ text "",
-  markupEmpty         = \_ -> empty,
-  markupString        = \s v -> text (fixString v s),
-  markupAppend        = \l r v -> l v <> r v,
-  markupIdentifier    = markupId,
-  markupModule        = \m _ -> let (mdl,_ref) = break (=='#') m in tt (text mdl),
-  markupEmphasis      = \p v -> emph (p v),
-  markupMonospaced    = \p _ -> tt (p Mono),
-  markupUnorderedList = \p v -> itemizedList (map ($v) p) $$ text "",
-  markupPic           = \path _ -> parens (text "image: " <> text path),
-  markupOrderedList   = \p v -> enumeratedList (map ($v) p) $$ text "",
-  markupDefList       = \l v -> descriptionList (map (\(a,b) -> (a v, b v)) l),
-  markupCodeBlock     = \p _ -> quote (verb (p Verb)) $$ text "",
-  markupURL           = \u _ -> text "\\url" <> braces (text u),
-  markupAName         = \_ _ -> empty,
-  markupExample       = \e _ -> quote $ verb $ text $ unlines $ map exampleToString e
+parLatexMarkup :: (a -> LaTeX) -> DocMarkup a (StringContext -> LaTeX)
+parLatexMarkup ppId = Markup {
+  markupParagraph            = \p v -> p v <> text "\\par" $$ text "",
+  markupEmpty                = \_ -> empty,
+  markupString               = \s v -> text (fixString v s),
+  markupAppend               = \l r v -> l v <> r v,
+  markupIdentifier           = markupId ppId,
+  markupIdentifierUnchecked  = markupId (ppVerbOccName . snd),
+  markupModule               = \m _ -> let (mdl,_ref) = break (=='#') m in tt (text mdl),
+  markupEmphasis             = \p v -> emph (p v),
+  markupMonospaced           = \p _ -> tt (p Mono),
+  markupUnorderedList        = \p v -> itemizedList (map ($v) p) $$ text "",
+  markupPic                  = \path _ -> parens (text "image: " <> text path),
+  markupOrderedList          = \p v -> enumeratedList (map ($v) p) $$ text "",
+  markupDefList              = \l v -> descriptionList (map (\(a,b) -> (a v, b v)) l),
+  markupCodeBlock            = \p _ -> quote (verb (p Verb)) $$ text "",
+  markupURL                  = \u _ -> text "\\url" <> braces (text u),
+  markupAName                = \_ _ -> empty,
+  markupExample              = \e _ -> quote $ verb $ text $ unlines $ map exampleToString e
   }
   where
     fixString Plain s = latexFilter s
     fixString Verb  s = s
     fixString Mono  s = latexMonoFilter s
 
-    markupId id v =
+    markupId ppId_ id v =
       case v of
         Verb  -> theid
         Mono  -> theid
         Plain -> text "\\haddockid" <> braces theid
-      where theid = ppId (choose id)
-
-    -- If an id can refer to multiple things, we give precedence to type
-    -- constructors.  This should ideally be done during renaming from RdrName
-    -- to Name, but since we will move this process from GHC into Haddock in
-    -- the future, we fix it here in the meantime.
-    -- TODO: mention this rule in the documentation.
-    choose [] = error "empty identifier list in HsDoc"
-    choose [x] = x
-    choose (x:y:_)
-      | isTyCon x = x
-      | otherwise = y
+      where theid = ppId_ id
 
 
 latexMarkup :: DocMarkup DocName (StringContext -> LaTeX)
-latexMarkup = parLatexMarkup ppVerbDocName (isTyConName . getName)
+latexMarkup = parLatexMarkup ppVerbDocName
 
 
 rdrLatexMarkup :: DocMarkup RdrName (StringContext -> LaTeX)
-rdrLatexMarkup = parLatexMarkup ppVerbRdrName isRdrTc
+rdrLatexMarkup = parLatexMarkup ppVerbRdrName
 
 
 docToLaTeX :: Doc DocName -> LaTeX

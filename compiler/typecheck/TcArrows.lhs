@@ -5,6 +5,13 @@
 Typecheck arrow notation
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module TcArrows ( tcProc ) where
 
 import {-# SOURCE #-}	TcExpr( tcMonoExpr, tcInferRho, tcSyntaxOp, tcCheckId )
@@ -18,7 +25,7 @@ import TcPat
 import TcUnify
 import TcRnMonad
 import TcEnv
-import Coercion
+import TcEvidence
 import Id( mkLocalId )
 import Inst
 import Name
@@ -43,17 +50,17 @@ import Control.Monad
 \begin{code}
 tcProc :: InPat Name -> LHsCmdTop Name		-- proc pat -> expr
        -> TcRhoType				-- Expected type of whole proc expression
-       -> TcM (OutPat TcId, LHsCmdTop TcId, Coercion)
+       -> TcM (OutPat TcId, LHsCmdTop TcId, TcCoercion)
 
 tcProc pat cmd exp_ty
   = newArrowScope $
-    do	{ (coi, (exp_ty1, res_ty)) <- matchExpectedAppTy exp_ty 
-	; (coi1, (arr_ty, arg_ty)) <- matchExpectedAppTy exp_ty1
+    do	{ (co, (exp_ty1, res_ty)) <- matchExpectedAppTy exp_ty 
+	; (co1, (arr_ty, arg_ty)) <- matchExpectedAppTy exp_ty1
 	; let cmd_env = CmdEnv { cmd_arr = arr_ty }
         ; (pat', cmd') <- tcPat ProcExpr pat arg_ty $
 			  tcCmdTop cmd_env cmd [] res_ty
-        ; let res_coi = mkTransCo coi (mkAppCo coi1 (mkReflCo res_ty))
-        ; return (pat', cmd', res_coi) }
+        ; let res_co = mkTcTransCo co (mkTcAppCo co1 (mkTcReflCo res_ty))
+        ; return (pat', cmd', res_co) }
 \end{code}
 
 
@@ -119,17 +126,28 @@ tc_cmd env in_cmd@(HsCase scrut matches) (stk, res_ty)
                       mc_body = mc_body }
     mc_body body res_ty' = tcCmd env body (stk, res_ty')
 
-tc_cmd env (HsIf mb_fun pred b1 b2) (stack_ty,res_ty)
+tc_cmd env (HsIf Nothing pred b1 b2) res_ty    -- Ordinary 'if'
+  = do  { pred' <- tcMonoExpr pred boolTy
+        ; b1'   <- tcCmd env b1 res_ty
+        ; b2'   <- tcCmd env b2 res_ty
+        ; return (HsIf Nothing pred' b1' b2')
+    }
+
+tc_cmd env (HsIf (Just fun) pred b1 b2) res_ty -- Rebindable syntax for if
   = do 	{ pred_ty <- newFlexiTyVarTy openTypeKind
-	; b_ty <- newFlexiTyVarTy openTypeKind
-        ; let if_ty = mkFunTys [pred_ty, b_ty, b_ty] res_ty
-	; mb_fun' <- case mb_fun of 
-              Nothing  -> return Nothing
-              Just fun -> liftM Just (tcSyntaxOp IfOrigin fun if_ty)
+        -- For arrows, need ifThenElse :: forall r. T -> r -> r -> r
+        -- because we're going to apply it to the environment, not
+        -- the return value.
+        ; [r_tv] <- tcInstSkolTyVars [alphaTyVar]
+	; let r_ty = mkTyVarTy r_tv
+        ; let if_ty = mkFunTys [pred_ty, r_ty, r_ty] r_ty
+        ; checkTc (not (r_tv `elemVarSet` tyVarsOfType pred_ty))
+                  (ptext (sLit "Predicate type of `ifThenElse' depends on result type"))
+	; fun'  <- tcSyntaxOp IfOrigin fun if_ty
   	; pred' <- tcMonoExpr pred pred_ty
-	; b1'   <- tcCmd env b1 (stack_ty,b_ty)
-	; b2'   <- tcCmd env b2 (stack_ty,b_ty)
-	; return (HsIf mb_fun' pred' b1' b2')
+	; b1'   <- tcCmd env b1 res_ty
+	; b2'   <- tcCmd env b2 res_ty
+	; return (HsIf (Just fun') pred' b1' b2')
     }
 
 -------------------------------------------
@@ -269,9 +287,14 @@ tc_cmd env cmd@(HsArrForm expr fixity cmd_args) (cmd_stk, res_ty)
 		-- Check that it has the right shape:
 		-- 	((w,s1) .. sn)
 		-- where the si do not mention w
-	   ; checkTc (corner_ty `eqType` mkTyVarTy w_tv && 
-		      not (w_tv `elemVarSet` tyVarsOfTypes arg_tys))
+           ; _bogus <- unifyType corner_ty (mkTyVarTy w_tv)
+	   ; checkTc (not (w_tv `elemVarSet` tyVarsOfTypes arg_tys))
 		     (badFormFun i tup_ty')
+     -- JPM: WARNING: this test is utterly bogus; see #5609
+     -- We are not using the coercion returned by the unify;
+     -- and (even more seriously) the w not in arg_tys test is totally
+     -- bogus if there are suspended equality constraints. This code
+     -- needs to be re-architected.
 
 	   ; tcCmdTop (env { cmd_arr = b }) cmd arg_tys s }
 
@@ -325,25 +348,32 @@ tcArrDoStmt env ctxt (BindStmt pat rhs _ _) res_ty thing_inside
                             thing_inside res_ty
 	; return (BindStmt pat' rhs' noSyntaxExpr noSyntaxExpr, thing) }
 
-tcArrDoStmt env ctxt (RecStmt { recS_stmts = stmts, recS_later_ids = laterNames
-                            , recS_rec_ids = recNames }) res_ty thing_inside
-  = do	{ rec_tys <- newFlexiTyVarTys (length recNames) liftedTypeKind
-	; let rec_ids = zipWith mkLocalId recNames rec_tys
-	; tcExtendIdEnv rec_ids $ do
-    	{ (stmts', (later_ids, rec_rets))
+tcArrDoStmt env ctxt (RecStmt { recS_stmts = stmts, recS_later_ids = later_names
+                            , recS_rec_ids = rec_names }) res_ty thing_inside
+  = do  { let tup_names = rec_names ++ filterOut (`elem` rec_names) later_names
+        ; tup_elt_tys <- newFlexiTyVarTys (length tup_names) liftedTypeKind
+        ; let tup_ids = zipWith mkLocalId tup_names tup_elt_tys
+        ; tcExtendIdEnv tup_ids $ do
+        { (stmts', tup_rets)
 		<- tcStmtsAndThen ctxt (tcArrDoStmt env) stmts res_ty	$ \ _res_ty' ->
 			-- ToDo: res_ty not really right
-		   do { rec_rets <- zipWithM tcCheckId recNames rec_tys
-		      ; later_ids <- tcLookupLocalIds laterNames
-		      ; return (later_ids, rec_rets) }
+                   zipWithM tcCheckId tup_names tup_elt_tys
 
-	; thing <- tcExtendIdEnv later_ids (thing_inside res_ty)
+        ; thing <- thing_inside res_ty
 		-- NB:	The rec_ids for the recursive things 
 		-- 	already scope over this part. This binding may shadow
 		--	some of them with polymorphic things with the same Name
 		--	(see note [RecStmt] in HsExpr)
 
+        ; let rec_ids = takeList rec_names tup_ids
+        ; later_ids <- tcLookupLocalIds later_names
+
+        ; let rec_rets = takeList rec_names tup_rets
+        ; let ret_table = zip tup_ids tup_rets
+        ; let later_rets = [r | i <- later_ids, (j, r) <- ret_table, i == j]
+
         ; return (emptyRecStmt { recS_stmts = stmts', recS_later_ids = later_ids
+                               , recS_later_rets = later_rets
                                , recS_rec_ids = rec_ids, recS_rec_rets = rec_rets
                                , recS_ret_ty = res_ty }, thing)
 	}}

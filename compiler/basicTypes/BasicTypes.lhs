@@ -16,6 +16,13 @@ types that
 \begin{code}
 {-# LANGUAGE DeriveDataTypeable #-}
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module BasicTypes(
 	Version, bumpVersion, initialVersion,
 
@@ -44,7 +51,8 @@ module BasicTypes(
 
 	Boxity(..), isBoxed, 
 
-	TupCon(..), tupleParens,
+        TupleSort(..), tupleSortBoxity, boxityNormalTupleSort,
+        tupleParens,
 
 	OccInfo(..), seqOccInfo, zapFragileOcc, isOneOcc, 
 	isDeadOcc, isStrongLoopBreaker, isWeakLoopBreaker, isNoOcc,
@@ -168,9 +176,10 @@ early in the hierarchy), but also in HsSyn.
 
 \begin{code}
 newtype IPName name = IPName name	-- ?x
-  deriving( Eq, Ord, Data, Typeable )
-  -- Ord is used in the IP name cache finite map
-  -- (used in HscTypes.OrigIParamCache)
+  deriving( Eq, Data, Typeable )
+
+instance Functor IPName where
+    fmap = mapIPName
 
 ipNameName :: IPName name -> name
 ipNameName (IPName n) = n
@@ -284,7 +293,7 @@ instance Outputable TopLevelFlag where
 
 %************************************************************************
 %*									*
-		Top-level/not-top level flag
+		Boxity flag
 %*									*
 %************************************************************************
 
@@ -363,7 +372,7 @@ data OverlapFlag
   -- instantiating 'b' would change which instance 
   -- was chosen
   | Incoherent { isSafeOverlap :: Bool }
-  deriving( Eq )
+  deriving (Eq, Data, Typeable)
 
 instance Outputable OverlapFlag where
    ppr (NoOverlap  b) = empty <+> pprSafeOverlap b
@@ -382,14 +391,26 @@ pprSafeOverlap False = empty
 %************************************************************************
 
 \begin{code}
-data TupCon = TupCon Boxity Arity
+data TupleSort
+  = BoxedTuple
+  | UnboxedTuple
+  | ConstraintTuple
+  deriving( Eq, Data, Typeable )
 
-instance Eq TupCon where
-  (TupCon b1 a1) == (TupCon b2 a2) = b1==b2 && a1==a2
-   
-tupleParens :: Boxity -> SDoc -> SDoc
-tupleParens Boxed   p = parens p
-tupleParens Unboxed p = ptext (sLit "(#") <+> p <+> ptext (sLit "#)")
+tupleSortBoxity :: TupleSort -> Boxity
+tupleSortBoxity BoxedTuple     = Boxed
+tupleSortBoxity UnboxedTuple   = Unboxed
+tupleSortBoxity ConstraintTuple = Boxed
+
+boxityNormalTupleSort :: Boxity -> TupleSort
+boxityNormalTupleSort Boxed   = BoxedTuple
+boxityNormalTupleSort Unboxed = UnboxedTuple
+
+tupleParens :: TupleSort -> SDoc -> SDoc
+tupleParens BoxedTuple      p = parens p
+tupleParens ConstraintTuple p = parens p -- The user can't write fact tuples 
+                                         -- directly, we overload the (,,) syntax
+tupleParens UnboxedTuple p = ptext (sLit "(#") <+> p <+> ptext (sLit "#)")
 \end{code}
 
 %************************************************************************
@@ -567,6 +588,7 @@ data HsBang = HsNoBang
 	    | HsUnpackFailed   -- An UNPACK pragma that we could not make 
 	      		       -- use of, because the type isn't unboxable; 
                                -- equivalant to HsStrict except for checkValidDataCon
+            | HsNoUnpack       -- {-# NOUNPACK #-} ! (GHC extension, meaning "strict but not unboxed")
   deriving (Eq, Data, Typeable)
 
 instance Outputable HsBang where
@@ -574,6 +596,7 @@ instance Outputable HsBang where
     ppr HsStrict       = char '!'
     ppr HsUnpack       = ptext (sLit "{-# UNPACK #-} !")
     ppr HsUnpackFailed = ptext (sLit "{-# UNPACK (failed) #-} !")
+    ppr HsNoUnpack     = ptext (sLit "{-# NOUNPACK #-} !")
 
 isBanged :: HsBang -> Bool
 isBanged HsNoBang = False

@@ -19,7 +19,6 @@ import Distribution.Client.Types
 import Distribution.Client.Targets
 import Distribution.Client.FetchUtils hiding (fetchPackage)
 import Distribution.Client.Dependency
-import Distribution.Client.PackageIndex (PackageIndex)
 import Distribution.Client.IndexUtils as IndexUtils
          ( getSourcePackages, getInstalledPackages )
 import qualified Distribution.Client.InstallPlan as InstallPlan
@@ -30,6 +29,7 @@ import Distribution.Package
          ( packageId )
 import Distribution.Simple.Compiler
          ( Compiler(compilerId), PackageDBStack )
+import Distribution.Simple.PackageIndex (PackageIndex)
 import Distribution.Simple.Program
          ( ProgramConfiguration )
 import Distribution.Simple.Setup
@@ -112,7 +112,7 @@ fetch verbosity packageDBs repos comp conf
 planPackages :: Verbosity
              -> Compiler
              -> FetchFlags
-             -> PackageIndex InstalledPackage
+             -> PackageIndex
              -> SourcePackageDb
              -> [PackageSpecifier SourcePackage]
              -> IO [SourcePackage]
@@ -124,6 +124,7 @@ planPackages verbosity comp fetchFlags
       installPlan <- foldProgress logMsg die return $
                        resolveDependencies
                          buildPlatform (compilerId comp)
+                         solver
                          resolverParams
 
       -- The packages we want to fetch are those packages the 'InstallPlan'
@@ -140,16 +141,28 @@ planPackages verbosity comp fetchFlags
   where
     resolverParams =
 
+        setMaxBackjumps (if maxBackjumps < 0 then Nothing
+                                             else Just maxBackjumps)
+
+      . setIndependentGoals independentGoals
+
+      . setReorderGoals reorderGoals
+
         -- Reinstall the targets given on the command line so that the dep
         -- resolver will decide that they need fetching, even if they're
-        -- already installed. Sicne we want to get the source packages of
+        -- already installed. Since we want to get the source packages of
         -- things we might have installed (but not have the sources for).
-        reinstallTargets
+      . reinstallTargets
 
       $ standardInstallPolicy installedPkgIndex sourcePkgDb pkgSpecifiers
 
     includeDependencies = fromFlag (fetchDeps fetchFlags)
     logMsg message rest = debug verbosity message >> rest
+
+    solver           = fromFlag (fetchSolver           fetchFlags)
+    reorderGoals     = fromFlag (fetchReorderGoals     fetchFlags)
+    independentGoals = fromFlag (fetchIndependentGoals fetchFlags)
+    maxBackjumps     = fromFlag (fetchMaxBackjumps     fetchFlags)
 
 
 checkTarget :: UserTarget -> IO ()

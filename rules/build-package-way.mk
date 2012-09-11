@@ -80,7 +80,7 @@ endif
 else
 # Build the ordinary .a library
 $$($1_$2_$3_LIB) : $$($1_$2_$3_ALL_OBJS)
-	"$$(RM)" $$(RM_OPTS) $$@ $$@.contents
+	$$(call removeFiles,$$@ $$@.contents)
 ifeq "$$($1_$2_SplitObjs)" "YES"
 	$$(FIND) $$(patsubst %.$$($3_osuf),%_$$($3_osuf)_split,$$($1_$2_$3_HS_OBJS)) -name '*.$$($3_osuf)' -print >> $$@.contents
 	echo $$($1_$2_$3_NON_HS_OBJS) >> $$@.contents
@@ -92,7 +92,7 @@ ifeq "$$($1_$2_ArSupportsAtFile)" "YES"
 else
 	"$$(XARGS)" $$(XARGS_OPTS) "$$($1_$2_AR)" $$($1_$2_AR_OPTS) $$($1_$2_EXTRA_AR_ARGS) $$@ < $$@.contents
 endif
-	"$$(RM)" $$(RM_OPTS) $$@.contents
+	$$(call removeFiles,$$@.contents)
 endif
 
 $(call all-target,$1_$2,all_$1_$2_$3)
@@ -114,7 +114,7 @@ BINDIST_LIBS += $$($1_$2_GHCI_LIB)
 endif
 endif
 $$($1_$2_GHCI_LIB) : $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS) $$($1_$2_$3_S_OBJS) $$($1_$2_EXTRA_OBJS)
-	"$$(LD)" -r -o $$@ $$(EXTRA_LD_OPTS) $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS) $$($1_$2_$3_S_OBJS) $$($1_$2_EXTRA_OBJS)
+	"$$(LD)" $$(CONF_LD_LINKER_OPTS_STAGE$4) -r -o $$@ $$(EXTRA_LD_OPTS) $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS) $$($1_$2_$3_S_OBJS) $$($1_$2_EXTRA_OBJS)
 
 ifeq "$$($1_$2_BUILD_GHCI_LIB)" "YES"
 # Don't bother making ghci libs for bootstrapping packages

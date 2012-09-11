@@ -6,46 +6,32 @@ ByteCodeItbls: Generate infotables for interpreter-made bytecodes
 \begin{code}
 {-# OPTIONS -optc-DNON_POSIX_SOURCE #-}
 
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module ByteCodeItbls ( ItblEnv, ItblPtr(..), itblCode, mkITbls
                      , StgInfoTable(..)
                      ) where
 
 #include "HsVersions.h"
 
-import Name		( Name, getName )
+import Name             ( Name, getName )
 import NameEnv
-import SMRep		( typeCgRep )
-import DataCon		( DataCon, dataConRepArgTys, dataConIdentity )
-import TyCon		( TyCon, tyConFamilySize, isDataTyCon, tyConDataCons )
-import Constants	( mIN_PAYLOAD_SIZE, wORD_SIZE )
-import CgHeapery	( mkVirtHeapOffsets )
-import FastString	( FastString(..) )
+import ClosureInfo
+import DataCon          ( DataCon, dataConRepArgTys, dataConIdentity )
+import TyCon            ( TyCon, tyConFamilySize, isDataTyCon, tyConDataCons )
+import Constants        ( mIN_PAYLOAD_SIZE, wORD_SIZE )
+import CgHeapery        ( mkVirtHeapOffsets )
 import Util
-import Outputable
 
 import Foreign
 import Foreign.C
-import Foreign.C.String
-import Data.Bits	( Bits(..), shiftR )
 
-import GHC.Exts		( Int(I#), addr2Int# )
+import GHC.Exts         ( Int(I#), addr2Int# )
 import GHC.Ptr          ( Ptr(..) )
-
-import Debug.Trace
-import Text.Printf
 \end{code}
 
 %************************************************************************
-%*									*
+%*                                                                      *
 \subsection{Manufacturing of info tables for DataCons}
-%*									*
+%*                                                                      *
 %************************************************************************
 
 \begin{code}
@@ -57,11 +43,12 @@ itblCode (ItblPtr ptr)
  | otherwise            = castPtr ptr
 
 -- XXX bogus
+conInfoTableSizeB :: Int
 conInfoTableSizeB = 3 * wORD_SIZE
 
 type ItblEnv = NameEnv (Name, ItblPtr)
-	-- We need the Name in the range so we know which
-	-- elements to filter out when unloading a module
+        -- We need the Name in the range so we know which
+        -- elements to filter out when unloading a module
 
 mkItblEnv :: [(Name,ItblPtr)] -> ItblEnv
 mkItblEnv pairs = mkNameEnv [(n, (n,p)) | (n,p) <- pairs]
@@ -84,15 +71,17 @@ mkITbl tc
         dcs = tyConDataCons tc
         n   = tyConFamilySize tc
 
+mkITbl _ = error "Unmatched patter in mkITbl: assertion failed!"
+
 #include "../includes/rts/storage/ClosureTypes.h"
-cONSTR :: Int	-- Defined in ClosureTypes.h
+cONSTR :: Int   -- Defined in ClosureTypes.h
 cONSTR = CONSTR 
 
 -- Assumes constructors are numbered from zero, not one
 make_constr_itbls :: [DataCon] -> IO ItblEnv
 make_constr_itbls cons
    = do is <- mapM mk_dirret_itbl (zip cons [0..])
-	return (mkItblEnv is)
+        return (mkItblEnv is)
      where
         mk_dirret_itbl (dcon, conNo)
            = mk_itbl dcon conNo stg_interp_constr_entry
@@ -102,22 +91,22 @@ make_constr_itbls cons
            let rep_args = [ (typeCgRep arg,arg) | arg <- dataConRepArgTys dcon ]
                (tot_wds, ptr_wds, _) = mkVirtHeapOffsets False{-not a THUNK-} rep_args
 
-               ptrs  = ptr_wds
-               nptrs = tot_wds - ptr_wds
+               ptrs'  = ptr_wds
+               nptrs' = tot_wds - ptr_wds
                nptrs_really
-                  | ptrs + nptrs >= mIN_PAYLOAD_SIZE = nptrs
-                  | otherwise = mIN_PAYLOAD_SIZE - ptrs
-               code = mkJumpToAddr entry_addr
+                  | ptrs' + nptrs' >= mIN_PAYLOAD_SIZE = nptrs'
+                  | otherwise = mIN_PAYLOAD_SIZE - ptrs'
+               code' = mkJumpToAddr entry_addr
                itbl  = StgInfoTable {
 #ifndef GHCI_TABLES_NEXT_TO_CODE
                            entry = entry_addr,
 #endif
-                           ptrs  = fromIntegral ptrs, 
+                           ptrs  = fromIntegral ptrs', 
                            nptrs = fromIntegral nptrs_really,
                            tipe  = fromIntegral cONSTR,
                            srtlen = fromIntegral conNo
 #ifdef GHCI_TABLES_NEXT_TO_CODE
-                         , code  = code
+                         , code  = code'
 #endif
                         }
            qNameCString <- newArray0 0 $ dataConIdentity dcon 
@@ -146,6 +135,7 @@ itblCodeLength = length (mkJumpToAddr undefined)
 
 mkJumpToAddr :: Ptr () -> [ItblCode]
 
+ptrToInt :: Ptr a -> Int
 ptrToInt (Ptr a#) = I# (addr2Int# a#)
 
 #if sparc_TARGET_ARCH
@@ -183,13 +173,13 @@ mkJumpToAddr a
 type ItblCode = Word32
 mkJumpToAddr a =
     let w32 = fromIntegral (ptrToInt a)
-	hi16 x = (x `shiftR` 16) .&. 0xFFFF
-	lo16 x = x .&. 0xFFFF
-    in	[
-	0x3D800000 .|. hi16 w32,
-	0x618C0000 .|. lo16 w32,
-	0x7D8903A6, 0x4E800420
-	]
+        hi16 x = (x `shiftR` 16) .&. 0xFFFF
+        lo16 x = x .&. 0xFFFF
+    in  [
+        0x3D800000 .|. hi16 w32,
+        0x618C0000 .|. lo16 w32,
+        0x7D8903A6, 0x4E800420
+        ]
 
 #elif i386_TARGET_ARCH
 -- Let the address to jump to be 0xWWXXYYZZ.
@@ -210,10 +200,10 @@ mkJumpToAddr a
 
 #elif x86_64_TARGET_ARCH
 -- Generates:
--- 	jmpq *.L1(%rip)
--- 	.align 8
--- .L1:	
--- 	.quad <addr>
+--      jmpq *.L1(%rip)
+--      .align 8
+-- .L1: 
+--      .quad <addr>
 --
 -- We need a full 64-bit pointer (we can't assume the info table is
 -- allocated in low memory).  Assuming the info pointer is aligned to
@@ -225,8 +215,8 @@ mkJumpToAddr a
          insnBytes :: [Word8]
          insnBytes
             = [0xff, 0x25, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
-	       byte0 w64, byte1 w64, byte2 w64, byte3 w64,
-	       byte4 w64, byte5 w64, byte6 w64, byte7 w64]
+               byte0 w64, byte1 w64, byte2 w64, byte3 w64,
+               byte4 w64, byte5 w64, byte6 w64, byte7 w64]
      in
          insnBytes
 
@@ -247,18 +237,21 @@ mkJumpToAddr a
     = undefined
 #endif
 
-
-byte0, byte1, byte2, byte3, byte4, byte5, byte6, byte7
-   :: (Integral w, Bits w) => w -> Word8
+#if defined(i386_TARGET_ARCH) || defined(x86_64_TARGET_ARCH)
+byte0, byte1, byte2, byte3 :: (Integral w, Bits w) => w -> Word8
 byte0 w = fromIntegral w
 byte1 w = fromIntegral (w `shiftR` 8)
 byte2 w = fromIntegral (w `shiftR` 16)
 byte3 w = fromIntegral (w `shiftR` 24)
+#endif
+
+#if defined(x86_64_TARGET_ARCH)
+byte4, byte5, byte6, byte7 :: (Integral w, Bits w) => w -> Word8
 byte4 w = fromIntegral (w `shiftR` 32)
 byte5 w = fromIntegral (w `shiftR` 40)
 byte6 w = fromIntegral (w `shiftR` 48)
 byte7 w = fromIntegral (w `shiftR` 56)
-
+#endif
 
 #ifndef __HADDOCK__
 -- entry point for direct returns for created constr itbls
@@ -284,7 +277,7 @@ instance Storable StgConInfoTable where
    sizeOf conInfoTable    
       = sum [ sizeOf (conDesc conInfoTable)
             , sizeOf (infoTable conInfoTable) ]
-   alignment conInfoTable = SIZEOF_VOID_P
+   alignment _ = SIZEOF_VOID_P
    peek ptr 
       = runState (castPtr ptr) $ do
 #ifdef GHCI_TABLES_NEXT_TO_CODE
@@ -349,7 +342,7 @@ instance Storable StgInfoTable where
 #endif
         ]
 
-   alignment itbl 
+   alignment _ 
       = SIZEOF_VOID_P
 
    poke a0 itbl
@@ -370,26 +363,26 @@ instance Storable StgInfoTable where
       = runState (castPtr a0)
       $ do
 #ifndef GHCI_TABLES_NEXT_TO_CODE
-           entry  <- load
+           entry'  <- load
 #endif
-           ptrs   <- load
-           nptrs  <- load
-           tipe   <- load
-           srtlen <- load
+           ptrs'   <- load
+           nptrs'  <- load
+           tipe'   <- load
+           srtlen' <- load
 #ifdef GHCI_TABLES_NEXT_TO_CODE
-           code   <- sequence (replicate itblCodeLength load)
+           code'   <- sequence (replicate itblCodeLength load)
 #endif
            return 
               StgInfoTable { 
 #ifndef GHCI_TABLES_NEXT_TO_CODE
-                 entry  = entry,
+                 entry  = entry',
 #endif
-                 ptrs   = ptrs,
-                 nptrs  = nptrs, 
-                 tipe   = tipe,
-                 srtlen = srtlen
+                 ptrs   = ptrs',
+                 nptrs  = nptrs',
+                 tipe   = tipe',
+                 srtlen = srtlen'
 #ifdef GHCI_TABLES_NEXT_TO_CODE
-                ,code   = code
+                ,code   = code'
 #endif
               }
 
@@ -401,7 +394,7 @@ newtype State s m a = State (s -> m (s, a))
 instance Monad m => Monad (State s m) where
   return a      = State (\s -> return (s, a))
   State m >>= k = State (\s -> m s >>= \(s', a) -> case k a of State n -> n s')
-  fail str      = State (\s -> fail str)
+  fail str      = State (\_ -> fail str)
 
 class (Monad m, Monad (t m)) => MonadT t m where
   lift :: m a -> t m a
@@ -439,9 +432,6 @@ newExec poke_fn obj
         ex_ptr <- peek pcode
         poke_fn wr_ptr ex_ptr obj
         return (castPtrToFunPtr ex_ptr)
-   where
-   codeSize :: Storable a => a -> [a] -> Int
-   codeSize dummy array = sizeOf(dummy) * length array
 
 foreign import ccall unsafe "allocateExec"
   _allocateExec :: CUInt -> Ptr (Ptr a) -> IO (Ptr a)  

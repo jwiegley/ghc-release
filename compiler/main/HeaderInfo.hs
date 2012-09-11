@@ -8,6 +8,13 @@
 --
 -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module HeaderInfo ( getImports
                   , mkPrelImports -- used by the renamer too
                   , getOptionsFromFile, getOptions
@@ -70,8 +77,8 @@ getImports dflags buf filename source_filename = do
 	  case rdr_module of
 	    L _ (HsModule mb_mod _ imps _ _ _) ->
 	      let
-                main_loc = mkSrcLoc (mkFastString source_filename) 1 1
-		mod = mb_mod `orElse` L (srcLocSpan main_loc) mAIN_NAME
+                main_loc = srcLocSpan (mkSrcLoc (mkFastString source_filename) 1 1)
+		mod = mb_mod `orElse` L main_loc mAIN_NAME
 	        (src_idecls, ord_idecls) = partition (ideclSource.unLoc) imps
 
 		     -- GHC.Prim doesn't exist physically, so don't go looking for it.
@@ -79,18 +86,20 @@ getImports dflags buf filename source_filename = do
 					ord_idecls
 
                 implicit_prelude = xopt Opt_ImplicitPrelude dflags
-                implicit_imports = mkPrelImports (unLoc mod) implicit_prelude imps
+                implicit_imports = mkPrelImports (unLoc mod) main_loc implicit_prelude imps
 	      in
 	      return (src_idecls, implicit_imports ++ ordinary_imps, mod)
 
-mkPrelImports :: ModuleName -> Bool -> [LImportDecl RdrName]
+mkPrelImports :: ModuleName 
+              -> SrcSpan    -- Attribute the "import Prelude" to this location
+              -> Bool -> [LImportDecl RdrName]
               -> [LImportDecl RdrName]
 -- Consruct the implicit declaration "import Prelude" (or not)
 --
 -- NB: opt_NoImplicitPrelude is slightly different to import Prelude ();
 -- because the former doesn't even look at Prelude.hi for instance
 -- declarations, whereas the latter does.
-mkPrelImports this_mod implicit_prelude import_decls
+mkPrelImports this_mod loc implicit_prelude import_decls
   | this_mod == pRELUDE_NAME
    || explicit_prelude_import
    || not implicit_prelude
@@ -98,21 +107,21 @@ mkPrelImports this_mod implicit_prelude import_decls
   | otherwise = [preludeImportDecl]
   where
       explicit_prelude_import
-       = notNull [ () | L _ (ImportDecl mod Nothing _ _ _ _ _) <- import_decls,
-	           unLoc mod == pRELUDE_NAME ]
+       = notNull [ () | L _ (ImportDecl { ideclName = mod
+                                        , ideclPkgQual = Nothing }) 
+                          <- import_decls
+	              , unLoc mod == pRELUDE_NAME ]
 
       preludeImportDecl :: LImportDecl RdrName
       preludeImportDecl
-        = L loc $
-          ImportDecl (L loc pRELUDE_NAME)
-               Nothing  {- No specific package -}
-               False    {- Not a boot interface -}
-               False    {- Not a safe import -}
-               False    {- Not qualified -}
-               Nothing  {- No "as" -}
-               Nothing  {- No import list -}
-
-      loc = mkGeneralSrcSpan (fsLit "Implicit import declaration")
+        = L loc $ ImportDecl { ideclName      = L loc pRELUDE_NAME,
+      		    	       ideclPkgQual   = Nothing,
+      		    	       ideclSource    = False,
+      		    	       ideclSafe      = False,  -- Not a safe import
+      		    	       ideclQualified = False,
+      		    	       ideclImplicit  = True,	-- Implicit!
+      		    	       ideclAs        = Nothing,
+      		    	       ideclHiding    = Nothing  }
 
 parseError :: SrcSpan -> Message -> IO a
 parseError span err = throwOneError $ mkPlainErrMsg span err
@@ -132,8 +141,17 @@ getOptionsFromFile dflags filename
 	      (openBinaryFile filename ReadMode)
               (hClose)
               (\handle -> do
-                  opts <- fmap getOptions' $ lazyGetToks dflags filename handle
+                  opts <- fmap getOptions' $ lazyGetToks dflags' filename handle
                   seqList opts $ return opts)
+    where -- We don't need to get haddock doc tokens when we're just
+          -- getting the options from pragmas, and lazily lexing them
+          -- correctly is a little tricky: If there is "\n" or "\n-"
+          -- left at the end of a buffer then the haddock doc may
+          -- continue past the end of the buffer, despite the fact that
+          -- we already have an apparently-complete token.
+          -- We therefore just turn Opt_Haddock off when doing the lazy
+          -- lex.
+          dflags' = dopt_unset dflags Opt_Haddock
 
 blockSize :: Int
 -- blockSize = 17 -- for testing :-)
@@ -228,9 +246,6 @@ getOptions' toks
           parseToks (open:xs)
               | ITlanguage_prag <- getToken open
               = parseLanguage xs
-          parseToks (x:xs)
-              | ITdocCommentNext _ <- getToken x
-              = parseToks xs
           parseToks _ = []
           parseLanguage (L loc (ITconid fs):rest)
               = checkExtension (L loc fs) :

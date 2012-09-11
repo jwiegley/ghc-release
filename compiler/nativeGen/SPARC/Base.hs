@@ -5,6 +5,13 @@
 --	In the interests of cross-compilation, we want to free ourselves
 --	from the autoconf generated modules like main/Constants
 --
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module SPARC.Base (
 	wordLength,
 	wordLengthInBits,
@@ -66,7 +73,7 @@ is32BitInteger i
 
 
 -- | Sadness.
-largeOffsetError :: Integral a => a -> b
+largeOffsetError :: (Integral a, Show a) => a -> b
 largeOffsetError i
   = panic ("ERROR: SPARC native-code generator cannot handle large offset ("
 		++ show i ++ ");\nprobably because of large constant data structures;" ++ 

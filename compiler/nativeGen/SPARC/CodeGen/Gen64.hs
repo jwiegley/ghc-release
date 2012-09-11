@@ -1,4 +1,11 @@
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 -- | Evaluation of 64 bit values on 32 bit platforms.
 module SPARC.CodeGen.Gen64 (
 	assignMem_I64Code,
@@ -194,7 +201,8 @@ iselExpr64 (CmmMachOp (MO_UU_Conv _ W64) [expr])
 
 
 iselExpr64 expr
-   = pprPanic "iselExpr64(sparc)" (ppr expr)
+   = do dflags <- getDynFlagsNat
+        pprPanic "iselExpr64(sparc)" (pprPlatform (targetPlatform dflags) expr)
 
 
 

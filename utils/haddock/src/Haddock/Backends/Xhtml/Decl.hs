@@ -32,10 +32,9 @@ import qualified Data.Map as Map
 import           Data.Maybe
 import           Text.XHtml hiding     ( name, title, p, quote )
 
-import BasicTypes            ( IPName(..), Boxity(..) )
 import GHC
 import Name
-import Outputable            ( ppr, showSDoc, Outputable )
+import BasicTypes            ( ipNameName )
 
 
 -- TODO: use DeclInfo DocName or something
@@ -114,7 +113,7 @@ tyvarNames = map (getName . hsTyVarName . unLoc)
 
 ppFor :: Bool -> LinksInfo -> SrcSpan -> DocForDecl DocName
       -> ForeignDecl DocName -> Bool -> Qualification -> Html
-ppFor summary links loc doc (ForeignImport (L _ name) (L _ typ) _) unicode qual
+ppFor summary links loc doc (ForeignImport (L _ name) (L _ typ) _ _) unicode qual
   = ppFunSig summary links loc doc [name] typ unicode qual
 ppFor _ _ _ _ _ _ _ = error "ppFor"
 
@@ -150,8 +149,8 @@ ppTyName name
 --------------------------------------------------------------------------------
 
 
-ppTyFamHeader :: Bool -> Bool -> TyClDecl DocName -> Bool -> Html
-ppTyFamHeader summary associated decl unicode =
+ppTyFamHeader :: Bool -> Bool -> TyClDecl DocName -> Bool -> Qualification -> Html
+ppTyFamHeader summary associated decl unicode qual =
 
   (case tcdFlavour decl of
      TypeFamily
@@ -165,7 +164,7 @@ ppTyFamHeader summary associated decl unicode =
   ppTyClBinderWithVars summary decl <+>
 
   case tcdKind decl of
-    Just kind -> dcolon unicode  <+> ppKind kind
+    Just kind -> dcolon unicode  <+> ppLKind unicode qual kind
     Nothing -> noHtml
 
 
@@ -173,13 +172,13 @@ ppTyFam :: Bool -> Bool -> LinksInfo -> SrcSpan -> Maybe (Doc DocName) ->
               TyClDecl DocName -> Bool -> Qualification -> Html
 ppTyFam summary associated links loc mbDoc decl unicode qual
 
-  | summary   = ppTyFamHeader True associated decl unicode
+  | summary   = ppTyFamHeader True associated decl unicode qual
   | otherwise = header_ +++ maybeDocSection qual mbDoc +++ instancesBit
 
   where
     docname = tcdName decl
 
-    header_ = topDeclElem links loc [docname] (ppTyFamHeader summary associated decl unicode)
+    header_ = topDeclElem links loc [docname] (ppTyFamHeader summary associated decl unicode qual)
 
     instancesBit = ppInstances instances docname unicode qual
 
@@ -301,7 +300,7 @@ ppContextNoArrow []  _       _     = noHtml
 ppContextNoArrow cxt unicode qual = pp_hs_context (map unLoc cxt) unicode qual
 
 
-ppContextNoLocs :: [HsPred DocName] -> Bool -> Qualification -> Html
+ppContextNoLocs :: [HsType DocName] -> Bool -> Qualification -> Html
 ppContextNoLocs []  _       _     = noHtml
 ppContextNoLocs cxt unicode qual = pp_hs_context cxt unicode qual 
     <+> darrow unicode
@@ -311,18 +310,10 @@ ppContext :: HsContext DocName -> Bool -> Qualification -> Html
 ppContext cxt unicode qual = ppContextNoLocs (map unLoc cxt) unicode qual
 
 
-pp_hs_context :: [HsPred DocName] -> Bool -> Qualification-> Html
+pp_hs_context :: [HsType DocName] -> Bool -> Qualification-> Html
 pp_hs_context []  _       _     = noHtml
-pp_hs_context [p] unicode qual = ppPred unicode qual p
-pp_hs_context cxt unicode qual = parenList (map (ppPred unicode qual) cxt)
-
-
-ppPred :: Bool -> Qualification -> HsPred DocName -> Html
-ppPred unicode qual (HsClassP n ts) = ppAppNameTypes n (map unLoc ts) unicode qual
-ppPred unicode qual (HsEqualP t1 t2) = ppLType unicode qual t1 <+> toHtml "~"
-    <+> ppLType unicode qual t2
-ppPred unicode qual (HsIParam (IPName n) t)
-  = toHtml "?" +++ ppDocName qual n <+> dcolon unicode <+> ppLType unicode qual t
+pp_hs_context [p] unicode qual = ppType unicode qual p
+pp_hs_context cxt unicode qual = parenList (map (ppType unicode qual) cxt)
 
 
 -------------------------------------------------------------------------------
@@ -330,7 +321,7 @@ ppPred unicode qual (HsIParam (IPName n) t)
 -------------------------------------------------------------------------------
 
 
-ppClassHdr :: Bool -> Located [LHsPred DocName] -> DocName
+ppClassHdr :: Bool -> Located [LHsType DocName] -> DocName
            -> [Located (HsTyVarBndr DocName)] -> [Located ([DocName], [DocName])]
            -> Bool -> Qualification -> Html
 ppClassHdr summ lctxt n tvs fds unicode qual =
@@ -352,7 +343,7 @@ ppFds fds unicode qual =
 ppShortClassDecl :: Bool -> LinksInfo -> TyClDecl DocName -> SrcSpan
                  -> [(DocName, DocForDecl DocName)] -> Bool -> Qualification
                  -> Html
-ppShortClassDecl summary links (ClassDecl lctxt lname tvs fds sigs _ ats _) loc
+ppShortClassDecl summary links (ClassDecl lctxt lname tvs fds sigs _ ats _ _) loc
     subdocs unicode qual = 
   if null sigs && null ats
     then (if summary then id else topDeclElem links loc [nm]) hdr
@@ -381,7 +372,7 @@ ppClassDecl :: Bool -> LinksInfo -> [DocInstance DocName] -> SrcSpan
             -> Maybe (Doc DocName) -> [(DocName, DocForDecl DocName)]
             -> TyClDecl DocName -> Bool -> Qualification -> Html
 ppClassDecl summary links instances loc mbDoc subdocs
-        decl@(ClassDecl lctxt lname ltyvars lfds lsigs _ ats _) unicode qual
+        decl@(ClassDecl lctxt lname ltyvars lfds lsigs _ ats _ _) unicode qual
   | summary = ppShortClassDecl summary links decl loc subdocs unicode qual
   | otherwise = classheader +++ maybeDocSection qual mbDoc
                   +++ atBit +++ methodBit  +++ instancesBit
@@ -643,19 +634,15 @@ ppDataHeader summary decl unicode qual
 --------------------------------------------------------------------------------
 
 
-ppKind :: Outputable a => a -> Html
-ppKind k = toHtml $ showSDoc (ppr k)
-
-
 ppBang :: HsBang -> Html
 ppBang HsNoBang = noHtml
 ppBang _        = toHtml "!" -- Unpacked args is an implementation detail,
                              -- so we just show the strictness annotation
 
 
-tupleParens :: Boxity -> [Html] -> Html
-tupleParens Boxed   = parenList
-tupleParens Unboxed = ubxParenList
+tupleParens :: HsTupleSort -> [Html] -> Html
+tupleParens HsUnboxedTuple = ubxParenList
+tupleParens _              = parenList
 
 
 --------------------------------------------------------------------------------
@@ -692,6 +679,11 @@ ppType       unicode qual ty = ppr_mono_ty pREC_TOP ty unicode qual
 ppParendType unicode qual ty = ppr_mono_ty pREC_CON ty unicode qual
 ppFunLhType  unicode qual ty = ppr_mono_ty pREC_FUN ty unicode qual
 
+ppLKind :: Bool -> Qualification-> LHsKind DocName -> Html
+ppLKind unicode qual y = ppKind unicode qual (unLoc y)
+
+ppKind :: Bool -> Qualification-> HsKind DocName -> Html
+ppKind unicode qual ki = ppr_mono_ty pREC_TOP ki unicode qual
 
 -- Drop top-level for-all type variables in user style
 -- since they are implicit in Haskell
@@ -721,10 +713,10 @@ ppr_mono_ty _         (HsTyVar name)      _ q = ppDocName q name
 ppr_mono_ty ctxt_prec (HsFunTy ty1 ty2)   u q = ppr_fun_ty ctxt_prec ty1 ty2 u q
 ppr_mono_ty _         (HsTupleTy con tys) u q = tupleParens con (map (ppLType u q) tys)
 ppr_mono_ty _         (HsKindSig ty kind) u q =
-    parens (ppr_mono_lty pREC_TOP ty u q <+> dcolon u <+> ppKind kind)
+    parens (ppr_mono_lty pREC_TOP ty u q <+> dcolon u <+> ppLKind u q kind)
 ppr_mono_ty _         (HsListTy ty)       u q = brackets (ppr_mono_lty pREC_TOP ty u q)
 ppr_mono_ty _         (HsPArrTy ty)       u q = pabrackets (ppr_mono_lty pREC_TOP ty u q)
-ppr_mono_ty _         (HsPredTy p)        u q = parens (ppPred u q p)
+ppr_mono_ty _         (HsIParamTy n ty)   u q = brackets (ppDocName q (ipNameName n) <+> dcolon u <+> ppr_mono_lty pREC_TOP ty u q)
 ppr_mono_ty _         (HsSpliceTy {})     _ _ = error "ppr_mono_ty HsSpliceTy"
 #if __GLASGOW_HASKELL__ == 612
 ppr_mono_ty _         (HsSpliceTyOut {})  _ _ = error "ppr_mono_ty HsQuasiQuoteTy"
@@ -733,12 +725,19 @@ ppr_mono_ty _         (HsQuasiQuoteTy {}) _ _ = error "ppr_mono_ty HsQuasiQuoteT
 #endif
 ppr_mono_ty _         (HsRecTy {})        _ _ = error "ppr_mono_ty HsRecTy"
 ppr_mono_ty _         (HsCoreTy {})       _ _ = error "ppr_mono_ty HsCoreTy"
+ppr_mono_ty _         (HsExplicitListTy _ tys) u q = quote $ brackets $ hsep $ punctuate comma $ map (ppLType u q) tys
+ppr_mono_ty _         (HsExplicitTupleTy _ tys) u q = quote $ parenList $ map (ppLType u q) tys
+ppr_mono_ty _         (HsWrapTy {})       _ _ = error "ppr_mono_ty HsWrapTy"
+
+ppr_mono_ty ctxt_prec (HsEqTy ty1 ty2) unicode qual
+  = maybeParen ctxt_prec pREC_OP $
+    ppr_mono_lty pREC_OP ty1 unicode qual <+> char '~' <+> ppr_mono_lty pREC_OP ty2 unicode qual
 
 ppr_mono_ty ctxt_prec (HsAppTy fun_ty arg_ty) unicode qual
   = maybeParen ctxt_prec pREC_CON $
     hsep [ppr_mono_lty pREC_FUN fun_ty unicode qual, ppr_mono_lty pREC_CON arg_ty unicode qual]
 
-ppr_mono_ty ctxt_prec (HsOpTy ty1 op ty2) unicode qual
+ppr_mono_ty ctxt_prec (HsOpTy ty1 (_, op) ty2) unicode qual
   = maybeParen ctxt_prec pREC_FUN $
     ppr_mono_lty pREC_OP ty1 unicode qual <+> ppr_op <+> ppr_mono_lty pREC_OP ty2 unicode qual
   where

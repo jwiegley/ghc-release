@@ -7,6 +7,13 @@ This module contains "tidying" code for *nested* expressions, bindings, rules.
 The code for *top-level* bindings is in TidyPgm.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module CoreTidy (
 	tidyExpr, tidyVarOcc, tidyRule, tidyRules, tidyUnfolding
     ) where
@@ -59,7 +66,7 @@ tidyExpr env (Type ty)  =  Type (tidyType env ty)
 tidyExpr env (Coercion co) = Coercion (tidyCo env co)
 tidyExpr _   (Lit lit)   =  Lit lit
 tidyExpr env (App f a) 	 =  App (tidyExpr env f) (tidyExpr env a)
-tidyExpr env (Note n e)  =  Note (tidyNote env n) (tidyExpr env e)
+tidyExpr env (Tick t e) =  Tick (tidyTickish env t) (tidyExpr env e)
 tidyExpr env (Cast e co) =  Cast (tidyExpr env e) (tidyCo env co)
 
 tidyExpr env (Let b e) 
@@ -81,9 +88,10 @@ tidyAlt _case_bndr env (con, vs, rhs)
   = tidyBndrs env vs 	=: \ (env', vs) ->
     (con, vs, tidyExpr env' rhs)
 
-------------  Notes  --------------
-tidyNote :: TidyEnv -> Note -> Note
-tidyNote _ note            = note
+------------  Tickish  --------------
+tidyTickish :: TidyEnv -> Tickish Id -> Tickish Id
+tidyTickish env (Breakpoint ix ids) = Breakpoint ix (map (tidyVarOcc env) ids)
+tidyTickish _   other_tickish       = other_tickish
 
 ------------  Rules  --------------
 tidyRules :: TidyEnv -> [CoreRule] -> [CoreRule]

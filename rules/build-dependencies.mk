@@ -32,8 +32,7 @@ ifneq "$$(NO_GENERATED_MAKEFILE_RULES)" "YES"
 $$($1_$2_depfile_haskell) : $$(includes_H_CONFIG) $$(includes_H_PLATFORM)
 
 $$($1_$2_depfile_haskell) : $$($1_$2_HS_SRCS) $$($1_$2_HS_BOOT_SRCS) $$($1_$2_HC_MK_DEPEND_DEP) | $$$$(dir $$$$@)/.
-	"$$(RM)" $$(RM_OPTS) $$@.tmp
-	touch $$@.tmp
+	$$(call removeFiles,$$@.tmp)
 ifneq "$$($1_$2_HS_SRCS)" ""
 	"$$($1_$2_HC_MK_DEPEND)" -M $$($1_$2_MKDEPENDHS_FLAGS) \
 	    $$(filter-out -split-objs, $$($1_$2_v_ALL_HC_OPTS)) \
@@ -55,8 +54,7 @@ endif
 $$($1_$2_depfile_c_asm) : $$(includes_H_CONFIG) $$(includes_H_PLATFORM)
 
 $$($1_$2_depfile_c_asm) : $$($1_$2_C_FILES_DEPS) $$($1_$2_S_FILES) | $$$$(dir $$$$@)/.
-	"$$(RM)" $$(RM_OPTS) $$@.tmp
-	touch $$@.tmp
+	$$(call removeFiles,$$@.tmp)
 ifneq "$$(strip $$($1_$2_C_FILES_DEPS)$$($1_$2_S_FILES))" ""
 # We ought to actually do this for each way in $$($1_$2_WAYS), but then
 # it takes a long time to make the C deps for the RTS (30 seconds rather
@@ -64,7 +62,7 @@ ifneq "$$(strip $$($1_$2_C_FILES_DEPS)$$($1_$2_S_FILES))" ""
 # copy the deps for each way on the assumption that they are the same
 	$$(foreach f,$$($1_$2_C_FILES_DEPS) $$($1_$2_S_FILES), \
 	    $$(call addCFileDeps,$1,$2,$$($1_$2_depfile_c_asm),$$f,$$($1_$2_WAYS)))
-	"$$(RM)" $$(RM_OPTS) $$@.bit
+	$$(call removeFiles,$$@.bit)
 endif
 	echo "$1_$2_depfile_c_asm_EXISTS = YES" >> $$@.tmp
 	mv $$@.tmp $$@

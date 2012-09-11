@@ -72,6 +72,7 @@ module Distribution.Simple.Setup (
   SDistFlags(..),    emptySDistFlags,    defaultSDistFlags,    sdistCommand,
   TestFlags(..),     emptyTestFlags,     defaultTestFlags,     testCommand,
   TestShowDetails(..),
+  BenchmarkFlags(..), emptyBenchmarkFlags, defaultBenchmarkFlags, benchmarkCommand,
   CopyDest(..),
   configureArgs, configureOptions, configureCCompiler, configureLinker,
   installDirsOptions,
@@ -292,6 +293,7 @@ data ConfigFlags = ConfigFlags {
                                        -- dependencies
     configConfigurationsFlags :: FlagAssignment,
     configTests :: Flag Bool,     -- ^Enable test suite compilation
+    configBenchmarks :: Flag Bool,     -- ^Enable benchmark compilation
     configLibCoverage :: Flag Bool    -- ^ Enable test suite program coverage
   }
   deriving (Read,Show)
@@ -315,6 +317,7 @@ defaultConfigFlags progConf = emptyConfigFlags {
     configSplitObjs    = Flag False, -- takes longer, so turn off by default
     configStripExes    = Flag True,
     configTests  = Flag False,
+    configBenchmarks   = Flag False,
     configLibCoverage = Flag False
   }
 
@@ -478,6 +481,10 @@ configureOptions showOrParseArgs =
          "build library and test suites with Haskell Program Coverage enabled. (GHC only)"
          configLibCoverage (\v flags -> flags { configLibCoverage = v })
          (boolOpt [] [])
+      ,option "" ["benchmarks"]
+         "dependency checking and compilation for benchmarks listed in the package description file."
+         configBenchmarks (\v flags -> flags { configBenchmarks = v })
+         (boolOpt [] [])
       ]
   where
     readFlagList :: String -> FlagAssignment
@@ -587,7 +594,8 @@ instance Monoid ConfigFlags where
     configExtraIncludeDirs    = mempty,
     configConfigurationsFlags = mempty,
     configTests   = mempty,
-    configLibCoverage = mempty
+    configLibCoverage = mempty,
+    configBenchmarks    = mempty
   }
   mappend a b =  ConfigFlags {
     configPrograms      = configPrograms b,
@@ -619,7 +627,8 @@ instance Monoid ConfigFlags where
     configExtraIncludeDirs    = combine configExtraIncludeDirs,
     configConfigurationsFlags = combine configConfigurationsFlags,
     configTests = combine configTests,
-    configLibCoverage = combine configLibCoverage
+    configLibCoverage = combine configLibCoverage,
+    configBenchmarks    = combine configBenchmarks
   }
     where combine field = field a `mappend` field b
 
@@ -1002,6 +1011,7 @@ data HaddockFlags = HaddockFlags {
     haddockCss          :: Flag FilePath,
     haddockHscolour     :: Flag Bool,
     haddockHscolourCss  :: Flag FilePath,
+    haddockContents     :: Flag PathTemplate,
     haddockDistPref     :: Flag FilePath,
     haddockVerbosity    :: Flag Verbosity
   }
@@ -1019,6 +1029,7 @@ defaultHaddockFlags  = HaddockFlags {
     haddockCss          = NoFlag,
     haddockHscolour     = Flag False,
     haddockHscolourCss  = NoFlag,
+    haddockContents     = NoFlag,
     haddockDistPref     = Flag defaultDistPref,
     haddockVerbosity    = Flag normal
   }
@@ -1074,6 +1085,13 @@ haddockCommand = makeCommand name shortDesc longDesc defaultHaddockFlags options
          "Use PATH as the HsColour stylesheet"
          haddockHscolourCss (\v flags -> flags { haddockHscolourCss = v })
          (reqArgFlag "PATH")
+      
+      ,option "" ["contents-location"]
+         "Bake URL in as the location for the contents page"
+         haddockContents (\v flags -> flags { haddockContents = v })
+         (reqArg' "URL"
+                (toFlag . toPathTemplate)
+                (flagToList . fmap fromPathTemplate))
       ]
       ++ programConfigurationPaths   progConf ParseArgs
              haddockProgramPaths (\v flags -> flags { haddockProgramPaths = v})
@@ -1098,6 +1116,7 @@ instance Monoid HaddockFlags where
     haddockCss          = mempty,
     haddockHscolour     = mempty,
     haddockHscolourCss  = mempty,
+    haddockContents     = mempty,
     haddockDistPref     = mempty,
     haddockVerbosity    = mempty
   }
@@ -1112,6 +1131,7 @@ instance Monoid HaddockFlags where
     haddockCss          = combine haddockCss,
     haddockHscolour     = combine haddockHscolour,
     haddockHscolourCss  = combine haddockHscolourCss,
+    haddockContents     = combine haddockContents,
     haddockDistPref     = combine haddockDistPref,
     haddockVerbosity    = combine haddockVerbosity
   }
@@ -1265,7 +1285,7 @@ data TestFlags = TestFlags {
     --TODO: eliminate the test list and pass it directly as positional args to the testHook
     testList :: Flag [String],
     -- TODO: think about if/how options are passed to test exes
-    testOptions :: Flag [PathTemplate]
+    testOptions :: [PathTemplate]
   }
 
 defaultTestFlags :: TestFlags
@@ -1277,7 +1297,7 @@ defaultTestFlags  = TestFlags {
     testShowDetails = toFlag Failures,
     testKeepTix = toFlag False,
     testList = Flag [],
-    testOptions = Flag []
+    testOptions = []
   }
 
 testCommand :: CommandUI TestFlags
@@ -1325,16 +1345,16 @@ testCommand = makeCommand name shortDesc longDesc defaultTestFlags options
              ++ "(name templates can use $pkgid, $compiler, "
              ++ "$os, $arch, $test-suite)")
             testOptions (\v flags -> flags { testOptions = v })
-            (reqArg' "TEMPLATES" (toFlag . map toPathTemplate . splitArgs)
-                (map fromPathTemplate . fromFlagOrDefault []))
+            (reqArg' "TEMPLATES" (map toPathTemplate . splitArgs)
+                (const []))
       , option [] ["test-option"]
             ("give extra option to test executables "
              ++ "(no need to quote options containing spaces, "
              ++ "name template can use $pkgid, $compiler, "
              ++ "$os, $arch, $test-suite)")
             testOptions (\v flags -> flags { testOptions = v })
-            (reqArg' "TEMPLATE" (\x -> toFlag [toPathTemplate x])
-                (map fromPathTemplate . fromFlagOrDefault []))
+            (reqArg' "TEMPLATE" (\x -> [toPathTemplate x])
+                (map fromPathTemplate))
       ]
 
 emptyTestFlags :: TestFlags
@@ -1360,6 +1380,67 @@ instance Monoid TestFlags where
     testKeepTix = combine testKeepTix,
     testList = combine testList,
     testOptions = combine testOptions
+  }
+    where combine field = field a `mappend` field b
+
+-- ------------------------------------------------------------
+-- * Benchmark flags
+-- ------------------------------------------------------------
+
+data BenchmarkFlags = BenchmarkFlags {
+    benchmarkDistPref  :: Flag FilePath,
+    benchmarkVerbosity :: Flag Verbosity,
+    benchmarkOptions :: [PathTemplate]
+  }
+
+defaultBenchmarkFlags :: BenchmarkFlags
+defaultBenchmarkFlags  = BenchmarkFlags {
+    benchmarkDistPref  = Flag defaultDistPref,
+    benchmarkVerbosity = Flag normal,
+    benchmarkOptions = []
+  }
+
+benchmarkCommand :: CommandUI BenchmarkFlags
+benchmarkCommand = makeCommand name shortDesc longDesc defaultBenchmarkFlags options
+  where
+    name       = "bench"
+    shortDesc  = "Run the benchmark, if any (configure with UserHooks)."
+    longDesc   = Nothing
+    options showOrParseArgs =
+      [ optionVerbosity benchmarkVerbosity (\v flags -> flags { benchmarkVerbosity = v })
+      , optionDistPref
+            benchmarkDistPref (\d flags -> flags { benchmarkDistPref = d })
+            showOrParseArgs
+      , option [] ["benchmark-options"]
+            ("give extra options to benchmark executables "
+             ++ "(name templates can use $pkgid, $compiler, "
+             ++ "$os, $arch, $benchmark)")
+            benchmarkOptions (\v flags -> flags { benchmarkOptions = v })
+            (reqArg' "TEMPLATES" (map toPathTemplate . splitArgs)
+                (const []))
+      , option [] ["benchmark-option"]
+            ("give extra option to benchmark executables "
+             ++ "(no need to quote options containing spaces, "
+             ++ "name template can use $pkgid, $compiler, "
+             ++ "$os, $arch, $benchmark)")
+            benchmarkOptions (\v flags -> flags { benchmarkOptions = v })
+            (reqArg' "TEMPLATE" (\x -> [toPathTemplate x])
+                (map fromPathTemplate))
+      ]
+
+emptyBenchmarkFlags :: BenchmarkFlags
+emptyBenchmarkFlags = mempty
+
+instance Monoid BenchmarkFlags where
+  mempty = BenchmarkFlags {
+    benchmarkDistPref  = mempty,
+    benchmarkVerbosity = mempty,
+    benchmarkOptions = mempty
+  }
+  mappend a b = BenchmarkFlags {
+    benchmarkDistPref  = combine benchmarkDistPref,
+    benchmarkVerbosity = combine benchmarkVerbosity,
+    benchmarkOptions = combine benchmarkOptions
   }
     where combine field = field a `mappend` field b
 

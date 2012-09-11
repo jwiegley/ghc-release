@@ -5,6 +5,13 @@
 \section[Id]{@Ids@: Value and constructor identifiers}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 -- |
 -- #name_types#
 -- GHC uses several kinds of name internally:
@@ -21,6 +28,7 @@
 --   be global or local, see "Var#globalvslocal"
 --
 -- * 'Var.Var': see "Var#name_types"
+
 module Id (
         -- * The main types
 	Var, Id, isId,
@@ -54,11 +62,10 @@ module Id (
 	isFCallId, isFCallId_maybe,
 	isDataConWorkId, isDataConWorkId_maybe, isDataConId_maybe, idDataCon,
         isConLikeId, isBottomingId, idIsFrom,
-        isTickBoxOp, isTickBoxOp_maybe,
-	hasNoBinding, 
+        hasNoBinding,
 
 	-- ** Evidence variables
-	DictId, isDictId, isEvVar, evVarPred,
+	DictId, isDictId, isEvVar,
 
 	-- ** Inline pragma stuff
 	idInlinePragma, setInlinePragma, modifyInlinePragma,
@@ -98,7 +105,7 @@ import IdInfo
 import BasicTypes
 
 -- Imported and re-exported 
-import Var( Var, Id, DictId, EvVar,
+import Var( Var, Id, DictId,
             idInfo, idDetails, globaliseId, varType,
             isId, isLocalId, isGlobalId, isExportedId )
 import qualified Var
@@ -426,20 +433,6 @@ isDeadBinder bndr | isId bndr = isDeadOcc (idOccInfo bndr)
 		  | otherwise = False	-- TyVars count as not dead
 \end{code}
 
-\begin{code}
-isTickBoxOp :: Id -> Bool
-isTickBoxOp id = 
-  case Var.idDetails id of
-    TickBoxOpId _    -> True
-    _                -> False
-
-isTickBoxOp_maybe :: Id -> Maybe TickBoxOp
-isTickBoxOp_maybe id = 
-  case Var.idDetails id of
-    TickBoxOpId tick -> Just tick
-    _                -> Nothing
-\end{code}
-
 %************************************************************************
 %*									*
               Evidence variables									
@@ -452,12 +445,6 @@ isEvVar var = isPredTy (varType var)
 
 isDictId :: Id -> Bool
 isDictId id = isDictTy (idType id)
-
-evVarPred :: EvVar -> PredType
-evVarPred var
-  = case splitPredTy_maybe (varType var) of
-      Just pred -> pred
-      Nothing   -> pprPanic "evVarPred" (ppr var <+> ppr (varType var))
 \end{code}
 
 %************************************************************************
@@ -619,9 +606,9 @@ isStateHackType ty
   | opt_NoStateHack 
   = False
   | otherwise
-  = case splitTyConApp_maybe ty of
-	Just (tycon,_) -> tycon == statePrimTyCon
-        _              -> False
+  = case tyConAppTyCon_maybe ty of
+	Just tycon -> tycon == statePrimTyCon
+        _          -> False
 	-- This is a gross hack.  It claims that 
 	-- every function over realWorldStatePrimTy is a one-shot
 	-- function.  This is pretty true in practice, and makes a big

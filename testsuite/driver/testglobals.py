@@ -98,6 +98,9 @@ class TestConfig:
         self.threads = 1
         self.use_threads = 0
 
+        # Should we check for files being written more than once?
+        self.check_files_written = False
+
 global config
 config = TestConfig()
 
@@ -139,16 +142,16 @@ class TestOptions:
 
        # if not None then we look for namebase.stderr etc rather than
        # using the test name
-       self.with_namebase = None;
+       self.with_namebase = None
 
        # skip this test?
-       self.skip = 0;
+       self.skip = 0
 
        # skip these ways
        self.omit_ways = []
 
-       # skip all ways except these ([] == do all ways)
-       self.only_ways = []
+       # skip all ways except these (None == do all ways)
+       self.only_ways = None
 
        # add these ways to the default set
        self.extra_ways = []
@@ -192,19 +195,20 @@ class TestOptions:
        # ('bytes allocated',
        #   9300000000,
        #   9400000000)
-       self.compiler_stats_num_fields = []
-       self.stats_num_fields = []
+       self.compiler_stats_num_fields = {}
+       self.stats_num_fields = {}
 
        # should we run this test alone, i.e. not run it in parallel with
        # any other threads
-       self.alone = 0
+       self.alone = False
 
        # Does this test use a literate (.lhs) file?
        self.literate = 0
 
-       # Does this test use a .c or .m file?
-       self.c_src    = 0
-       self.objc_src = 0
+       # Does this test use a .c, .m or .mm file?
+       self.c_src      = 0
+       self.objc_src   = 0
+       self.objcpp_src = 0
 
        # Command to run before the test
        self.pre_cmd = None
@@ -212,14 +216,17 @@ class TestOptions:
        # Command to run for extra cleaning
        self.clean_cmd = None
 
-       # Prefix to put on the command before running it
-       self.cmd_prefix = ''
+       # Command wrapper: a function to apply to the command before running it
+       self.cmd_wrapper = None
 
        # Prefix to put on the command before compiling it
        self.compile_cmd_prefix = ''
 
        # Extra output normalisation
        self.extra_normaliser = lambda x: x
+
+       # Extra normalisation for compiler error messages
+       self.extra_errmsg_normaliser = lambda x: x
 
        # The directory the test is in
        self.testdir = '.'

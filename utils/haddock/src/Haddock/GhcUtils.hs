@@ -20,6 +20,7 @@ import Data.Version
 import Control.Applicative  ( (<$>) )
 import Control.Arrow
 import Data.Foldable hiding (concatMap)
+import Data.Function
 import Data.Traversable
 import Distribution.Compat.ReadP
 import Distribution.Text
@@ -30,9 +31,7 @@ import Name
 import Packages
 import Module
 import RdrName (GlobalRdrEnv)
-#if MIN_VERSION_ghc(7,1,0)
 import GhcMonad (withSession)
-#endif
 import HscTypes
 import UniqFM
 import GHC
@@ -63,10 +62,6 @@ unpackPackageId p
   where str = packageIdString p
 
 
-mkModuleNoPackage :: String -> Module
-mkModuleNoPackage str = mkModule (stringToPackageId "") (mkModuleName str)
-
-
 lookupLoadedHomeModuleGRE  :: GhcMonad m => ModuleName -> m (Maybe GlobalRdrEnv)
 lookupLoadedHomeModuleGRE mod_name = withSession $ \hsc_env ->
   case lookupUFM (hsc_HPT hsc_env) mod_name of
@@ -83,22 +78,16 @@ isVarSym = isLexVarSym . occNameFS
 
 
 getMainDeclBinder :: HsDecl name -> [name]
-getMainDeclBinder (TyClD d) = [tcdName d]
+getMainDeclBinder (TyClD d) | not (isFamInstDecl d) = [tcdName d]
 getMainDeclBinder (ValD d) =
-#if __GLASGOW_HASKELL__ == 612
-  case collectAcc d [] of
-    []       -> []
-    (name:_) -> [unLoc name]
-#else
   case collectHsBindBinders d of
     []       -> []
     (name:_) -> [name]
-#endif
-
 getMainDeclBinder (SigD d) = sigNameNoLoc d
-getMainDeclBinder (ForD (ForeignImport name _ _)) = [unLoc name]
-getMainDeclBinder (ForD (ForeignExport _ _ _)) = []
+getMainDeclBinder (ForD (ForeignImport name _ _ _)) = [unLoc name]
+getMainDeclBinder (ForD (ForeignExport _ _ _ _)) = []
 getMainDeclBinder _ = []
+
 
 -- Useful when there is a signature with multiple names, e.g.
 --   foo, bar :: Types..
@@ -153,6 +142,11 @@ isInstD (TyClD d) = isFamInstDecl d
 isInstD _ = False
 
 
+isValD :: HsDecl a -> Bool
+isValD (ValD _) = True
+isValD _ = False
+
+
 declATs :: HsDecl a -> [a]
 declATs (TyClD d) | isClassDecl d = map (tcdName . unL) $ tcdATs d
 declATs _ = []
@@ -177,6 +171,10 @@ unL (L _ x) = x
 
 reL :: a -> Located a
 reL = L undefined
+
+
+before :: Located a -> Located a -> Bool
+before = (<) `on` getLoc
 
 
 instance Foldable (GenLocated l) where
@@ -265,7 +263,7 @@ modifySessionDynFlags f = do
 -- | A variant of 'gbracket' where the return value from the first computation
 -- is not required.
 gbracket_ :: ExceptionMonad m => m a -> m b -> m c -> m c
-gbracket_ before after thing = gbracket before (const after) (const thing)
+gbracket_ before_ after thing = gbracket before_ (const after) (const thing)
 
 
 -------------------------------------------------------------------------------

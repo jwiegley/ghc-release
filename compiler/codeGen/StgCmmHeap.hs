@@ -12,8 +12,8 @@ module StgCmmHeap (
 
         entryHeapCheck, altHeapCheck,
 
-        layOutDynConstr, layOutStaticConstr,
-        mkVirtHeapOffsets, mkStaticClosureFields, mkStaticClosure,
+        mkVirtHeapOffsets, mkVirtConstrOffsets,
+        mkStaticClosureFields, mkStaticClosure,
 
         allocDynClosure, allocDynClosureCmm, emitSetDynHdr
     ) where
@@ -35,45 +35,23 @@ import StgCmmEnv
 import MkGraph
 
 import SMRep
-import CmmExpr
+import Cmm
 import CmmUtils
-import DataCon
-import TyCon
 import CostCentre
 import Outputable
+import IdInfo( CafInfo(..), mayHaveCafRefs )
 import Module
 import FastString( mkFastString, fsLit )
 import Constants
-
------------------------------------------------------------
---              Layout of heap objects
------------------------------------------------------------
-
-layOutDynConstr, layOutStaticConstr
-        :: DataCon -> [(PrimRep, a)]
-        -> (ClosureInfo, [(NonVoid a, VirtualHpOffset)])
-        -- No Void arguments in result
-
-layOutDynConstr    = layOutConstr False
-layOutStaticConstr = layOutConstr True
-
-layOutConstr :: Bool -> DataCon -> [(PrimRep, a)]
-             -> (ClosureInfo, [(NonVoid a, VirtualHpOffset)])
-layOutConstr is_static data_con args
-   = (mkConInfo is_static data_con tot_wds ptr_wds,
-      things_w_offsets)
-  where
-    (tot_wds, --  #ptr_wds + #nonptr_wds
-     ptr_wds, --  #ptr_wds
-     things_w_offsets) = mkVirtHeapOffsets False{-not a thunk-} args
-
+import DynFlags
 
 -----------------------------------------------------------
 --              Initialise dynamic heap objects
 -----------------------------------------------------------
 
 allocDynClosure
-        :: ClosureInfo
+        :: CmmInfoTable
+        -> LambdaFormInfo
         -> CmmExpr              -- Cost Centre to stick in the object
         -> CmmExpr              -- Cost Centre to blame for this alloc
                                 -- (usually the same; sometimes "OVERHEAD")
@@ -84,7 +62,7 @@ allocDynClosure
         -> FCode (LocalReg, CmmAGraph)
 
 allocDynClosureCmm
-        :: ClosureInfo -> CmmExpr -> CmmExpr
+        :: CmmInfoTable -> LambdaFormInfo -> CmmExpr -> CmmExpr
         -> [(CmmExpr, VirtualHpOffset)]
         -> FCode (LocalReg, CmmAGraph)
 
@@ -105,23 +83,20 @@ allocDynClosureCmm
 --         but Hp+8 means something quite different...
 
 
-allocDynClosure cl_info use_cc _blame_cc args_w_offsets
+allocDynClosure info_tbl lf_info use_cc _blame_cc args_w_offsets
   = do  { let (args, offsets) = unzip args_w_offsets
         ; cmm_args <- mapM getArgAmode args     -- No void args
-        ; allocDynClosureCmm cl_info use_cc _blame_cc (zip cmm_args offsets)
+        ; allocDynClosureCmm info_tbl lf_info
+                             use_cc _blame_cc (zip cmm_args offsets)
         }
 
-allocDynClosureCmm cl_info use_cc _blame_cc amodes_w_offsets
+allocDynClosureCmm info_tbl lf_info use_cc _blame_cc amodes_w_offsets
   = do  { virt_hp <- getVirtHp
 
         -- SAY WHAT WE ARE ABOUT TO DO
-        ; tickyDynAlloc cl_info
-        ; profDynAlloc cl_info use_cc
-                -- ToDo: This is almost certainly wrong
-                -- We're ignoring blame_cc. But until we've
-                -- fixed the boxing hack in chooseDynCostCentres etc,
-                -- we're worried about making things worse by "fixing"
-                -- this part to use blame_cc!
+        ; let rep = cit_rep info_tbl
+        ; tickyDynAlloc rep lf_info
+        ; profDynAlloc rep use_cc
 
         -- FIND THE OFFSET OF THE INFO-PTR WORD
         ; let   info_offset = virt_hp + 1
@@ -130,7 +105,7 @@ allocDynClosureCmm cl_info use_cc _blame_cc amodes_w_offsets
                 -- Remember, virtHp points to last allocated word,
                 -- ie 1 *before* the info-ptr word of new object.
 
-                info_ptr = CmmLit (CmmLabel (infoTableLabelFromCI cl_info))
+                info_ptr = CmmLit (CmmLabel (cit_lbl info_tbl))
 
         -- ALLOCATE THE OBJECT
         ; base <- getHpRelOffset info_offset
@@ -140,7 +115,7 @@ allocDynClosureCmm cl_info use_cc _blame_cc amodes_w_offsets
         ; hpStore base cmm_args offsets
 
         -- BUMP THE VIRTUAL HEAP POINTER
-        ; setVirtHp (virt_hp + closureSize cl_info)
+        ; setVirtHp (virt_hp + heapClosureSize rep)
 
         -- Assign to a temporary and return
         -- Note [Return a LocalReg]
@@ -173,16 +148,16 @@ hpStore base vals offs
 -- and adding a static link field if necessary.
 
 mkStaticClosureFields
-        :: ClosureInfo
+        :: CmmInfoTable
         -> CostCentreStack
-        -> Bool                 -- Has CAF refs
+        -> CafInfo
         -> [CmmLit]             -- Payload
         -> [CmmLit]             -- The full closure
-mkStaticClosureFields cl_info ccs caf_refs payload
+mkStaticClosureFields info_tbl ccs caf_refs payload
   = mkStaticClosure info_lbl ccs payload padding
         static_link_field saved_info_field
   where
-    info_lbl = infoTableLabelFromCI cl_info
+    info_lbl = cit_lbl info_tbl
 
     -- CAFs must have consistent layout, regardless of whether they
     -- are actually updatable or not.  The layout of a CAF is:
@@ -192,30 +167,30 @@ mkStaticClosureFields cl_info ccs caf_refs payload
     --        1 indirectee
     --        0 info ptr
     --
-    -- the static_link and saved_info fields must always be in the same
-    -- place.  So we use closureNeedsUpdSpace rather than
-    -- closureUpdReqd here:
+    -- the static_link and saved_info fields must always be in the
+    -- same place.  So we use isThunkRep rather than closureUpdReqd
+    -- here:
 
-    is_caf = closureNeedsUpdSpace cl_info
+    is_caf = isThunkRep (cit_rep info_tbl)
 
     padding
         | not is_caf = []
         | otherwise  = ASSERT(null payload) [mkIntCLit 0]
 
     static_link_field
-        | is_caf || staticClosureNeedsLink cl_info = [static_link_value]
-        | otherwise                                = []
+        | is_caf || staticClosureNeedsLink info_tbl = [static_link_value]
+        | otherwise                                 = []
 
     saved_info_field
         | is_caf     = [mkIntCLit 0]
         | otherwise  = []
 
-        -- for a static constructor which has NoCafRefs, we set the
+        -- For a static constructor which has NoCafRefs, we set the
         -- static link field to a non-zero value so the garbage
         -- collector will ignore it.
     static_link_value
-        | caf_refs      = mkIntCLit 0
-        | otherwise     = mkIntCLit 1
+        | mayHaveCafRefs caf_refs  = mkIntCLit 0
+        | otherwise                = mkIntCLit 1  -- No CAF refs
 
 
 mkStaticClosure :: CLabel -> CostCentreStack -> [CmmLit]
@@ -353,34 +328,37 @@ entryHeapCheck :: ClosureInfo
                -> FCode ()
 
 entryHeapCheck cl_info offset nodeSet arity args code
-  = do updfr_sz <- getUpdFrameOff
+  = do dflags <- getDynFlags
+
+       let platform = targetPlatform dflags
+
+           is_thunk = arity == 0
+           is_fastf = case closureFunInfo cl_info of
+                           Just (_, ArgGen _) -> False
+                           _otherwise         -> True
+
+           args' = map (CmmReg . CmmLocal) args
+           setN = case nodeSet of
+                          Just n  -> mkAssign nodeReg (CmmReg $ CmmLocal n)
+                          Nothing -> mkAssign nodeReg $
+                              CmmLit (CmmLabel $ staticClosureLabel platform cl_info)
+
+           {- Thunks:          Set R1 = node, jump GCEnter1
+              Function (fast): Set R1 = node, jump GCFun
+              Function (slow): Set R1 = node, call generic_gc -}
+           gc_call upd = setN <*> gc_lbl upd
+           gc_lbl upd
+               | is_thunk  = mkDirectJump (CmmReg $ CmmGlobal GCEnter1) [] sp
+               | is_fastf  = mkDirectJump (CmmReg $ CmmGlobal GCFun) [] sp
+               | otherwise = mkForeignJump Slow (CmmReg $ CmmGlobal GCFun) args' upd
+               where sp = max offset upd
+           {- DT (12/08/10) This is a little fishy, mainly the sp fix up amount.
+            - This is since the ncg inserts spills before the stack/heap check.
+            - This should be fixed up and then we won't need to fix up the Sp on
+            - GC calls, but until then this fishy code works -}
+
+       updfr_sz <- getUpdFrameOff
        heapCheck True (gc_call updfr_sz) code
-
-  where
-    is_thunk = arity == 0
-    is_fastf = case closureFunInfo cl_info of
-                    Just (_, ArgGen _) -> False
-                    _otherwise         -> True
-
-    args' = map (CmmReg . CmmLocal) args
-    setN = case nodeSet of
-                   Just n  -> mkAssign nodeReg (CmmReg $ CmmLocal n)
-                   Nothing -> mkAssign nodeReg $
-                       CmmLit (CmmLabel $ closureLabelFromCI cl_info)
-
-    {- Thunks:          Set R1 = node, jump GCEnter1
-       Function (fast): Set R1 = node, jump GCFun
-       Function (slow): Set R1 = node, call generic_gc -}
-    gc_call upd = setN <*> gc_lbl upd
-    gc_lbl upd
-        | is_thunk  = mkDirectJump (CmmReg $ CmmGlobal GCEnter1) [] sp
-        | is_fastf  = mkDirectJump (CmmReg $ CmmGlobal GCFun) [] sp
-        | otherwise = mkForeignJump Slow (CmmReg $ CmmGlobal GCFun) args' upd
-        where sp = max offset upd
-    {- DT (12/08/10) This is a little fishy, mainly the sp fix up amount.
-     - This is since the ncg inserts spills before the stack/heap check.
-     - This should be fixed up and then we won't need to fix up the Sp on
-     - GC calls, but until then this fishy code works -}
 
 {-
     -- This code is slightly outdated now and we could easily keep the above

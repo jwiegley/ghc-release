@@ -1,3 +1,6 @@
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Trustworthy #-}
+#endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Win32.Time
@@ -23,7 +26,7 @@ import Foreign          ( Storable(sizeOf, alignment, peekByteOff, peek,
                                    pokeByteOff, poke)
                         , Ptr, nullPtr, castPtr, plusPtr, advancePtr
                         , with, alloca, allocaBytes, copyArray )
-import Foreign.C        ( CInt, CWchar
+import Foreign.C        ( CInt(..), CWchar(..)
                         , peekCWString, withCWStringLen, withCWString )
 
 #include "windows.h"

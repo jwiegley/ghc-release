@@ -4,6 +4,13 @@
 \section[SimplUtils]{The simplifier utilities}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module SimplUtils (
 	-- Rebuilding
 	mkLam, mkCase, prepareAlts, tryEtaExpand,
@@ -36,7 +43,7 @@ import StaticFlags
 import CoreSyn
 import qualified CoreSubst
 import PprCore
-import DataCon	( dataConCannotMatch )
+import DataCon	( dataConCannotMatch, dataConWorkId )
 import CoreFVs
 import CoreUtils
 import CoreArity
@@ -124,7 +131,11 @@ data SimplCont
         CallCtxt        -- Whether *this* argument position is interesting
 	SimplCont		
 
-data ArgInfo 
+  | TickIt
+        (Tickish Id)    -- Tick tickish []
+        SimplCont
+
+data ArgInfo
   = ArgInfo {
         ai_fun   :: Id,		-- The function
 	ai_args  :: [OutExpr],	-- ...applied to these args (which are in *reverse* order)
@@ -154,6 +165,7 @@ instance Outputable SimplCont where
   ppr (Select dup bndr alts se cont) = (ptext (sLit "Select") <+> ppr dup <+> ppr bndr) $$ 
 				       (nest 2 $ vcat [ppr (seTvSubst se), ppr alts]) $$ ppr cont 
   ppr (CoerceIt co cont)	     = (ptext (sLit "CoerceIt") <+> ppr co) $$ ppr cont
+  ppr (TickIt t cont)                = (ptext (sLit "TickIt") <+> ppr t) $$ ppr cont
 
 data DupFlag = NoDup       -- Unsimplified, might be big
              | Simplified  -- Simplified
@@ -227,6 +239,7 @@ contResultType env ty cont
     go (StrictArg ai _ cont)          _  = go cont (funResultTy (argInfoResultTy ai))
     go (Select _ _ alts se cont)      _  = go cont (subst_ty se (coreAltsType alts))
     go (ApplyTo _ arg se cont)        ty = go cont (apply_to_arg ty arg se)
+    go (TickIt _ cont)                ty = go cont ty
 
     apply_to_arg ty (Type ty_arg)     se = applyTy ty (subst_ty se ty_arg)
     apply_to_arg ty (Coercion co_arg) se = applyCo ty (subst_co se co_arg)
@@ -331,6 +344,7 @@ interestingCallContext cont
     interesting (StrictArg _ cci _) = cci
     interesting (StrictBind {})	    = BoringCtxt
     interesting (Stop cci)   	    = cci
+    interesting (TickIt _ cci)      = interesting cci
     interesting (CoerceIt _ cont)   = interesting cont
 	-- If this call is the arg of a strict function, the context
 	-- is a bit interesting.  If we inline here, we may get useful
@@ -453,6 +467,7 @@ interestingArgContext rules call_cont
     go (StrictBind {})	   = False	-- ??
     go (CoerceIt _ c)	   = go c
     go (Stop cci)          = interesting cci
+    go (TickIt _ c)        = go c
 
     interesting (ArgCtxt rules) = rules
     interesting _               = False
@@ -791,8 +806,9 @@ Inlining them won't make the program run faster!
 
 Note [Do not inline CoVars unconditionally]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Coercion variables appear inside coercions, and have a separate
-substitution, so don't inline them via the IdSubst!
+Coercion variables appear inside coercions, and the RHS of a let-binding
+is a term (not a coercion) so we can't necessarily inline the latter in
+the former.
 
 \begin{code}
 preInlineUnconditionally :: SimplEnv -> TopLevelFlag -> InId -> InExpr -> Bool
@@ -828,7 +844,7 @@ preInlineUnconditionally env top_lvl bndr rhs
 	-- E.g. let f = \ab.BIG in \y. map f xs
 	-- 	Don't want to substitute for f, because then we allocate
 	--	its closure every time the \y is called
-	-- But: let f = \ab.BIG in \y. map (f y) xs
+        -- But: let f = \ab.BIG in \y. map (f y) xs
 	--	Now we do want to substitute for f, even though it's not 
 	--	saturated, because we're going to allocate a closure for 
 	--	(f y) every time round the loop anyhow.
@@ -838,8 +854,9 @@ preInlineUnconditionally env top_lvl bndr rhs
 	-- Sadly, not quite the same as exprIsHNF.
     canInlineInLam (Lit _)		= True
     canInlineInLam (Lam b e)		= isRuntimeVar b || canInlineInLam e
-    canInlineInLam (Note _ e)		= canInlineInLam e
-    canInlineInLam _			= False
+    canInlineInLam _                    = False
+      -- not ticks.  Counting ticks cannot be duplicated, and non-counting
+      -- ticks around a Lam will disappear anyway.
 
     early_phase = case sm_phase mode of
                     Phase 0 -> False
@@ -1045,7 +1062,7 @@ mkLam _env bndrs body
       | not (any bad bndrs)
 	-- Note [Casts and lambdas]
       = do { lam <- mkLam' dflags bndrs body
-           ; return (mkCoerce (mkPiCos bndrs co) lam) }
+           ; return (mkCast lam (mkPiCos bndrs co)) }
       where
         co_vars  = tyCoVarsOfCo co
 	bad bndr = isCoVar bndr && bndr `elemVarSet` co_vars      
@@ -1122,8 +1139,7 @@ tryEtaExpand env bndr rhs
       = return (exprArity rhs, rhs)
 
       | sm_eta_expand (getMode env)      -- Provided eta-expansion is on
-      , let dicts_cheap = dopt Opt_DictsCheap dflags
-            new_arity   = findArity dicts_cheap bndr rhs old_arity
+      , let new_arity = findArity dflags bndr rhs old_arity
       , new_arity > manifest_arity  	-- And the curent manifest arity isn't enough
       		    			-- See Note [Eta expansion to manifes arity]
       = do { tick (EtaExpansion bndr)
@@ -1135,16 +1151,21 @@ tryEtaExpand env bndr rhs
     old_arity  = idArity bndr
     _dmd_arity = length $ fst $ splitStrictSig $ idStrictness bndr
 
-findArity :: Bool -> Id -> CoreExpr -> Arity -> Arity
+findArity :: DynFlags -> Id -> CoreExpr -> Arity -> Arity
 -- This implements the fixpoint loop for arity analysis
 -- See Note [Arity analysis]
-findArity dicts_cheap bndr rhs old_arity
-  = go (exprEtaExpandArity (mk_cheap_fn dicts_cheap init_cheap_app) rhs)
+findArity dflags bndr rhs old_arity
+  = go (exprEtaExpandArity dflags init_cheap_app rhs)
        -- We always call exprEtaExpandArity once, but usually 
        -- that produces a result equal to old_arity, and then
        -- we stop right away (since arities should not decrease)
        -- Result: the common case is that there is just one iteration
   where
+    init_cheap_app :: CheapAppFun
+    init_cheap_app fn n_val_args
+      | fn == bndr = True   -- On the first pass, this binder gets infinite arity
+      | otherwise  = isCheapApp fn n_val_args
+
     go :: Arity -> Arity
     go cur_arity
       | cur_arity <= old_arity = cur_arity	
@@ -1155,46 +1176,12 @@ findArity dicts_cheap bndr rhs old_arity
                              , ppr rhs])
                     go new_arity
       where
-        new_arity = exprEtaExpandArity (mk_cheap_fn dicts_cheap cheap_app) rhs
-      
+        new_arity = exprEtaExpandArity dflags cheap_app rhs
+
         cheap_app :: CheapAppFun
         cheap_app fn n_val_args
           | fn == bndr = n_val_args < cur_arity
           | otherwise  = isCheapApp fn n_val_args
-
-    init_cheap_app :: CheapAppFun
-    init_cheap_app fn n_val_args
-      | fn == bndr = True
-      | otherwise  = isCheapApp fn n_val_args
- 
-mk_cheap_fn :: Bool -> CheapAppFun -> CheapFun
-mk_cheap_fn dicts_cheap cheap_app
-  | not dicts_cheap
-  = \e _     -> exprIsCheap' cheap_app e
-  | otherwise
-  = \e mb_ty -> exprIsCheap' cheap_app e
-             || case mb_ty of
-                  Nothing -> False
-                  Just ty -> isDictLikeTy ty
-	-- If the experimental -fdicts-cheap flag is on, we eta-expand through
-	-- dictionary bindings.  This improves arities. Thereby, it also
-	-- means that full laziness is less prone to floating out the
-	-- application of a function to its dictionary arguments, which
-	-- can thereby lose opportunities for fusion.  Example:
-	-- 	foo :: Ord a => a -> ...
-	--	foo = /\a \(d:Ord a). let d' = ...d... in \(x:a). ....
-	--		-- So foo has arity 1
-	--
-	--	f = \x. foo dInt $ bar x
-	--
-	-- The (foo DInt) is floated out, and makes ineffective a RULE 
-	--	foo (bar x) = ...
-	--
-	-- One could go further and make exprIsCheap reply True to any
-	-- dictionary-typed expression, but that's more work.
-	-- 
-	-- See Note [Dictionary-like types] in TcType.lhs for why we use
-  	-- isDictLikeTy here rather than isDictTy
 \end{code}
 
 Note [Eta-expanding at let bindings]
@@ -1355,7 +1342,7 @@ abstractFloats main_tvs body_env body
 	; return (float_binds, CoreSubst.substExpr (text "abstract_floats1") subst body) }
   where
     main_tv_set = mkVarSet main_tvs
-    body_floats = getFloats body_env
+    body_floats = getFloatBinds body_env
     empty_subst = CoreSubst.mkEmptySubst (seInScope body_env)
 
     abstract :: CoreSubst.Subst -> OutBind -> SimplM (CoreSubst.Subst, OutBind)
@@ -1366,7 +1353,7 @@ abstractFloats main_tvs body_env body
 	   ; return (subst', (NonRec poly_id poly_rhs)) }
       where
 	rhs' = CoreSubst.substExpr (text "abstract_floats2") subst rhs
-	tvs_here = varSetElems (main_tv_set `intersectVarSet` exprSomeFreeVars isTyVar rhs')
+	tvs_here = varSetElemsKvsFirst (main_tv_set `intersectVarSet` exprSomeFreeVars isTyVar rhs')
 	
 		-- Abstract only over the type variables free in the rhs
 		-- wrt which the new binding is abstracted.  But the naive
@@ -1405,7 +1392,7 @@ abstractFloats main_tvs body_env body
 		-- If you ever want to be more selective, remember this bizarre case too:
 		--	x::a = x
 		-- Here, we must abstract 'x' over 'a'.
-	 tvs_here = main_tvs
+	 tvs_here = sortQuantVars main_tvs
 
     mk_poly tvs_here var
       = do { uniq <- getUniqueM
@@ -1728,18 +1715,22 @@ mkCase dflags scrut bndr alts = mkCase1 dflags scrut bndr alts
 mkCase1 _dflags scrut case_bndr alts	-- Identity case
   | all identity_alt alts
   = do { tick (CaseIdentity case_bndr)
-       ; return (re_cast scrut) }
+       ; return (re_cast scrut rhs1) }
   where
-    identity_alt (con, args, rhs) = check_eq con args (de_cast rhs)
+    identity_alt (con, args, rhs) = check_eq rhs con args
 
-    check_eq DEFAULT       _    (Var v)   = v == case_bndr
-    check_eq (LitAlt lit') _    (Lit lit) = lit == lit'
-    check_eq (DataAlt con) args rhs       = rhs `cheapEqExpr` mkConApp con (arg_tys ++ varsToCoreExprs args)
-					 || rhs `cheapEqExpr` Var case_bndr
+    check_eq (Cast rhs co) con args         = not (any (`elemVarSet` tyCoVarsOfCo co) args)
+        {- See Note [RHS casts] -}            && check_eq rhs con args
+    check_eq (Lit lit) (LitAlt lit') _      = lit == lit'
+    check_eq (Var v)   _ _ | v == case_bndr = True
+    check_eq (Var v)   (DataAlt con) []     = v == dataConWorkId con   -- Optimisation only
+    check_eq rhs       (DataAlt con) args   = rhs `cheapEqExpr` mkConApp con (arg_tys ++ varsToCoreExprs args)
     check_eq _ _ _ = False
 
     arg_tys = map Type (tyConAppArgs (idType case_bndr))
 
+        -- Note [RHS casts]
+        -- ~~~~~~~~~~~~~~~~
 	-- We've seen this:
 	--	case e of x { _ -> x `cast` c }
 	-- And we definitely want to eliminate this case, to give
@@ -1749,12 +1740,11 @@ mkCase1 _dflags scrut case_bndr alts	-- Identity case
 	-- if (all identity_alt alts) holds.
 	-- 
 	-- Don't worry about nested casts, because the simplifier combines them
-    de_cast (Cast e _) = e
-    de_cast e	       = e
 
-    re_cast scrut = case head alts of
-			(_,_,Cast _ co) -> Cast scrut co
-			_    	        -> scrut
+    ((_,_,rhs1):_) = alts
+
+    re_cast scrut (Cast rhs co) = Cast (re_cast scrut rhs) co
+    re_cast scrut _             = scrut
 
 --------------------------------------------------
 --	3. Merge Identical Alternatives

@@ -4,6 +4,13 @@ o% (c) The AQUA Project, Glasgow University, 1993-1998
 \section[SimplMonad]{The simplifier Monad}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module SimplEnv (
 	InId, InBind, InExpr, InAlt, InArg, InType, InBndr, InVar,
 	OutId, OutTyVar, OutBind, OutExpr, OutAlt, OutArg, OutType, OutBndr, OutVar,
@@ -12,9 +19,7 @@ module SimplEnv (
 	-- The simplifier mode
 	setMode, getMode, updMode,
 
-        setEnclosingCC, getEnclosingCC,
-
-	-- Environments
+        -- Environments
 	SimplEnv(..), StaticEnv, pprSimplEnv,	-- Temp not abstract
         mkSimplEnv, extendIdSubst, SimplEnv.extendTvSubst, SimplEnv.extendCvSubst,
 	zapSubstEnv, setSubstEnv, 
@@ -32,7 +37,7 @@ module SimplEnv (
 	-- Floats
   	Floats, emptyFloats, isEmptyFloats, addNonRec, addFloats, extendFloats,
 	wrapFloats, floatBinds, setFloats, zapFloats, addRecFloats,
-	doFloatFromRhs, getFloats
+        doFloatFromRhs, getFloatBinds, getFloats, mapFloats
     ) where
 
 #include "HsVersions.h"
@@ -42,7 +47,6 @@ import CoreMonad	( SimplifierMode(..) )
 import IdInfo
 import CoreSyn
 import CoreUtils
-import CostCentre
 import Var
 import VarEnv
 import VarSet
@@ -107,12 +111,11 @@ data SimplEnv
      -- wrt the original expression
 
 	seMode 	    :: SimplifierMode,
-        seCC        :: CostCentreStack, -- The enclosing CCS (when profiling)
 
 	-- The current substitution
-	seTvSubst   :: TvSubstEnv,	-- InTyVar   |--> OutType
-        seCvSubst   :: CvSubstEnv,      -- InTyCoVar |--> OutCoercion
-	seIdSubst   :: SimplIdSubst,	-- InId      |--> OutExpr
+	seTvSubst   :: TvSubstEnv,	-- InTyVar |--> OutType
+        seCvSubst   :: CvSubstEnv,      -- InCoVar |--> OutCoercion
+	seIdSubst   :: SimplIdSubst,	-- InId    |--> OutExpr
 
      ----------- Dynamic part of the environment -----------
      -- Dynamic in the sense of describing the setup where
@@ -227,8 +230,7 @@ seIdSubst:
 \begin{code}
 mkSimplEnv :: SimplifierMode -> SimplEnv
 mkSimplEnv mode
-  = SimplEnv { seCC = subsumedCCS
-             , seMode = mode
+  = SimplEnv { seMode = mode
              , seInScope = init_in_scope
              , seFloats = emptyFloats
              , seTvSubst = emptyVarEnv
@@ -268,13 +270,6 @@ setMode mode env = env { seMode = mode }
 
 updMode :: (SimplifierMode -> SimplifierMode) -> SimplEnv -> SimplEnv
 updMode upd env = env { seMode = upd (seMode env) }
-
----------------------
-getEnclosingCC :: SimplEnv -> CostCentreStack
-getEnclosingCC env = seCC env
-
-setEnclosingCC :: SimplEnv -> CostCentreStack -> SimplEnv
-setEnclosingCC env cc = env {seCC = cc}
 
 ---------------------
 extendIdSubst :: SimplEnv -> Id -> SimplSR -> SimplEnv
@@ -402,6 +397,7 @@ classifyFF (NonRec bndr rhs)
   | otherwise		     = FltCareful
 
 doFloatFromRhs :: TopLevelFlag -> RecFlag -> Bool -> OutExpr -> SimplEnv -> Bool
+-- If you change this function look also at FloatIn.noFloatFromRhs
 doFloatFromRhs lvl rec str rhs (SimplEnv {seFloats = Floats fs ff}) 
   =  not (isNilOL fs) && want_to_float && can_float
   where
@@ -431,6 +427,13 @@ addNonRec env id rhs
 	       -- and hence any inner substitutions
     env { seFloats = seFloats env `addFlts` unitFloat (NonRec id rhs),
 	  seInScope = extendInScopeSet (seInScope env) id }
+
+mapFloats :: SimplEnv -> ((Id,CoreExpr) -> (Id,CoreExpr)) -> SimplEnv
+mapFloats env@SimplEnv { seFloats = Floats fs ff } fun
+   = env { seFloats = Floats (mapOL app fs) ff }
+   where
+     app (NonRec b e) = case fun (b,e) of (b',e') -> NonRec b' e'
+     app (Rec bs)     = Rec (map fun bs)
 
 extendFloats :: SimplEnv -> OutBind -> SimplEnv
 -- Add these bindings to the floats, and extend the in-scope env too
@@ -474,8 +477,11 @@ wrapFlts (Floats bs _) body = foldrOL wrap body bs
     wrap (Rec prs)    body = Let (Rec prs) body
     wrap (NonRec b r) body = bindNonRec b r body
 
-getFloats :: SimplEnv -> [CoreBind]
-getFloats (SimplEnv {seFloats = Floats bs _}) = fromOL bs
+getFloatBinds :: SimplEnv -> [CoreBind]
+getFloatBinds env = floatBinds (seFloats env)
+
+getFloats :: SimplEnv -> Floats
+getFloats env = seFloats env
 
 isEmptyFloats :: SimplEnv -> Bool
 isEmptyFloats env = isEmptyFlts (seFloats env)

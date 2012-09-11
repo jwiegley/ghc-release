@@ -1,0 +1,7 @@
+
+T5287.hs:6:29:
+    Ambiguous type variable `oops' in the constraint:
+      (A e oops)
+        arising from the 'deriving' clause of a data type declaration
+    Probable fix: use a 'standalone deriving' declaration instead
+    When deriving the instance for (Read (E e))

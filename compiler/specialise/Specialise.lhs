@@ -4,12 +4,20 @@
 \section[Specialise]{Stamping out overloading, and (optionally) polymorphism}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module Specialise ( specProgram ) where
 
 #include "HsVersions.h"
 
 import Id
 import TcType
+import Type
 import CoreMonad
 import CoreSubst 
 import CoreUnfold
@@ -17,7 +25,7 @@ import VarSet
 import VarEnv
 import CoreSyn
 import Rules
-import CoreUtils	( exprIsTrivial, applyTypeToArgs, mkPiTypes )
+import CoreUtils	( exprIsTrivial, applyTypeToArgs )
 import CoreFVs		( exprFreeVars, exprsFreeVars, idFreeVars )
 import UniqSupply	( UniqSM, initUs_, MonadUnique(..) )
 import Name
@@ -715,9 +723,9 @@ specExpr _     (Lit lit) = return (Lit lit,                 emptyUDs)
 specExpr subst (Cast e co) = do
     (e', uds) <- specExpr subst e
     return ((Cast e' (CoreSubst.substCo subst co)), uds)
-specExpr subst (Note note body) = do
+specExpr subst (Tick tickish body) = do
     (body', uds) <- specExpr subst body
-    return (Note (specNote subst note) body', uds)
+    return (Tick (specTickish subst tickish) body', uds)
 
 
 ---------------- Applications might generate a call instance --------------------
@@ -765,10 +773,12 @@ specExpr subst (Let bind body) = do
         -- All done
     return (foldr Let body' binds', uds)
 
--- Must apply the type substitution to coerceions
-specNote :: Subst -> Note -> Note
-specNote _ note = note
-
+specTickish :: Subst -> Tickish Id -> Tickish Id
+specTickish subst (Breakpoint ix ids)
+  = Breakpoint ix [ id' | id <- ids, Var id' <- [specVar subst id]]
+  -- drop vars from the list if they have a non-variable substitution.
+  -- should never happen, but it's harmless to drop them anyway.
+specTickish _ other_tickish = other_tickish
 
 specCase :: Subst 
          -> CoreExpr	 	-- Scrutinee, already done
@@ -1577,7 +1587,7 @@ mkCallUDs f args
     _trace_doc = vcat [ppr f, ppr args, ppr n_tyvars, ppr n_dicts
                       , ppr (map interestingDict dicts)]
     (tyvars, theta, _) = tcSplitSigmaTy (idType f)
-    constrained_tyvars = tyVarsOfTheta theta 
+    constrained_tyvars = tyVarsOfTypes theta 
     n_tyvars	       = length tyvars
     n_dicts	       = length theta
 
@@ -1610,7 +1620,7 @@ interestingDict (Type _)	  = False
 interestingDict (Coercion _)      = False
 interestingDict (App fn (Type _)) = interestingDict fn
 interestingDict (App fn (Coercion _)) = interestingDict fn
-interestingDict (Note _ a)	  = interestingDict a
+interestingDict (Tick _ a)      = interestingDict a
 interestingDict (Cast e _)	  = interestingDict e
 interestingDict _                 = True
 \end{code}

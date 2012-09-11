@@ -6,6 +6,13 @@
 --
 -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module StgCmmTicky (
 	emitTickyCounter,
 
@@ -39,19 +46,19 @@ module StgCmmTicky (
   ) where
 
 #include "HsVersions.h"
-#include "../includes/DerivedConstants.h"
+#include "../includes/dist-derivedconstants/header/DerivedConstants.h"
 	-- For REP_xxx constants, which are MachReps
 
 import StgCmmClosure
 import StgCmmUtils
 import StgCmmMonad
-import SMRep
 
 import StgSyn
 import CmmExpr
 import MkGraph
 import CmmUtils
 import CLabel
+import SMRep
 
 import Module
 import Name
@@ -66,6 +73,7 @@ import DynFlags
 -- Turgid imports for showTypeCategory
 import PrelNames
 import TcType
+import Type
 import TyCon
 
 import Data.Maybe
@@ -87,9 +95,14 @@ staticTickyHdr = []
 emitTickyCounter :: ClosureInfo -> [Id] -> FCode ()
 emitTickyCounter cl_info args
   = ifTicky $
-    do	{ mod_name <- getModuleName
-	; fun_descr_lit <- mkStringCLit (fun_descr mod_name)
-	; arg_descr_lit <- mkStringCLit arg_descr
+    do	{ dflags <- getDynFlags
+        ; mod_name <- getModuleName
+        ; let platform = targetPlatform dflags
+              ticky_ctr_label = closureRednCountsLabel platform cl_info
+              arg_descr = map (showTypeCategory . idType) args
+              fun_descr mod_name = ppr_for_ticky_name mod_name (closureName cl_info)
+	; fun_descr_lit <- newStringCLit (fun_descr mod_name)
+	; arg_descr_lit <- newStringCLit arg_descr
 	; emitDataLits ticky_ctr_label 	-- Must match layout of StgEntCounter
 -- krc: note that all the fields are I32 now; some were I16 before, 
 -- but the code generator wasn't handling that properly and it led to chaos, 
@@ -103,11 +116,6 @@ emitTickyCounter cl_info args
 	      zeroCLit, 		-- Allocs
 	      zeroCLit 			-- Link
 	    ] }
-  where
-    name = closureName cl_info
-    ticky_ctr_label = mkRednCountsLabel name $ clHasCafRefs cl_info
-    arg_descr = map (showTypeCategory . idType) args
-    fun_descr mod_name = ppr_for_ticky_name mod_name name
 
 -- When printing the name of a thing in a ticky file, we want to
 -- give the module name even for *local* things.   We print
@@ -247,6 +255,7 @@ tickySlowCallPat _args = return ()
     (str, True)  -> bumpTickyCounter' (mkRtsSlowTickyCtrLabel pat)
     (str, False) -> bumpTickyCounter  (sLit "TICK_SLOW_CALL_OTHER")
 
+-- Don't use CgRep; put this function in StgCmmLayout
 callPattern :: [CgRep] -> (String,Bool)
 callPattern reps 
   | match == length reps = (chars, True)
@@ -265,26 +274,24 @@ argChar DoubleArg = 'd'
 -- -----------------------------------------------------------------------------
 -- Ticky allocation
 
-tickyDynAlloc :: ClosureInfo -> FCode ()
+tickyDynAlloc :: SMRep -> LambdaFormInfo -> FCode ()
 -- Called when doing a dynamic heap allocation
-tickyDynAlloc cl_info
+-- LambdaFormInfo only needed to distinguish between updatable/non-updatable thunks
+tickyDynAlloc rep lf
   = ifTicky $
-    case smRepClosureType (closureSMRep cl_info) of
-	Just Constr           -> tick_alloc_con
-	Just ConstrNoCaf      -> tick_alloc_con
-	Just Fun	      -> tick_alloc_fun
-	Just Thunk 	      -> tick_alloc_thk
-	Just ThunkSelector    -> tick_alloc_thk
-        -- black hole
-        Nothing               -> return ()
+    case () of
+      _ | isConRep rep   -> tick_alloc_con
+        | isThunkRep rep -> tick_alloc_thk
+        | isFunRep   rep -> tick_alloc_fun
+        | otherwise      -> return ()
   where
-	-- will be needed when we fill in stubs
-    _cl_size   =	closureSize cl_info
-    _slop_size = slopSize cl_info
+        -- will be needed when we fill in stubs
+    _cl_size   = heapClosureSize rep
+--    _slop_size = slopSize cl_info
 
     tick_alloc_thk 
-	| closureUpdReqd cl_info = tick_alloc_up_thk
-	| otherwise	         = tick_alloc_se_thk
+        | lfUpdatable lf = tick_alloc_up_thk
+        | otherwise      = tick_alloc_se_thk
 
     -- krc: changed from panic to return () 
     -- just to get something working

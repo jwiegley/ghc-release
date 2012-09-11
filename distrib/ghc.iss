@@ -2,8 +2,8 @@
 
 [Setup]
 AppName=GHC
-AppVerName=GHC 7.2.2
-DefaultDirName={sd}\ghc\ghc-7.2.2
+AppVerName=GHC 7.4.1
+DefaultDirName={sd}\ghc\ghc-7.4.1
 UsePreviousAppDir=no
 DefaultGroupName=GHC
 UninstallDisplayIcon={app}\bin\ghci.exe
@@ -24,16 +24,16 @@ Name: path; Description: "Add bin directories to PATH"
 
 ; install main payload, license file and icon
 [Files]
-Source: "bindistprep\ghc-7.2.2\*"; DestDir: "{app}"; Flags: recursesubdirs
+Source: "bindistprep\ghc-7.4.1\*"; DestDir: "{app}"; Flags: recursesubdirs
 Source: "distrib\windows-installer-licences.txt"; DestDir: "{app}\doc"
 Source: "distrib\hsicon.ico"; DestDir: "{app}\icons"
 
 ; Start Menu shortcuts
 [Icons]
-Name: "{group}\7.2.2\GHCi"; Filename: "{app}\bin\ghci.exe"; WorkingDir: "{app}\bin"
-Name: "{group}\7.2.2\GHC Documentation"; Filename: "{app}\doc\html\index.html"
-Name: "{group}\7.2.2\GHC Library Documentation"; Filename: "{app}\doc\html\libraries\index.html"
-Name: "{group}\7.2.2\GHC Flag Reference"; Filename: "{app}\doc\html\users_guide\flag-reference.html"
+Name: "{group}\7.4.1\GHCi"; Filename: "{app}\bin\ghci.exe"; WorkingDir: "{app}\bin"
+Name: "{group}\7.4.1\GHC Documentation"; Filename: "{app}\doc\html\index.html"
+Name: "{group}\7.4.1\GHC Library Documentation"; Filename: "{app}\doc\html\libraries\index.html"
+Name: "{group}\7.4.1\GHC Flag Reference"; Filename: "{app}\doc\html\users_guide\flag-reference.html"
 
 [Registry]
 ; set up file associations
@@ -47,15 +47,15 @@ Root: HKCR; Subkey: "ghc_haskell"; ValueType: string; ValueName: ""; ValueData: 
 Root: HKCR; Subkey: "ghc_haskell\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\bin\ghci.exe"" ""%1"""; Flags: uninsdeletevalue; Tasks: fileassoc\default
 
 ; add versioned GHCi entry to right-click menu
-Root: HKCR; Subkey: "ghc_haskell\shell\Open with GHCi 7.2.2"; ValueType: none; ValueName: ""; ValueData: ""; Flags: uninsdeletekey; Tasks: fileassoc\addon
-Root: HKCR; Subkey: "ghc_haskell\shell\Open with GHCi 7.2.2\command"; ValueType: string; ValueName: ""; ValueData: """{app}\bin\ghci.exe"" ""%1"""; Flags: uninsdeletevalue; Tasks: fileassoc\addon
+Root: HKCR; Subkey: "ghc_haskell\shell\Open with GHCi 7.4.1"; ValueType: none; ValueName: ""; ValueData: ""; Flags: uninsdeletekey; Tasks: fileassoc\addon
+Root: HKCR; Subkey: "ghc_haskell\shell\Open with GHCi 7.4.1\command"; ValueType: string; ValueName: ""; ValueData: """{app}\bin\ghci.exe"" ""%1"""; Flags: uninsdeletevalue; Tasks: fileassoc\addon
 
 ; associate file type with icon
 Root: HKCR; Subkey: "ghc_haskell\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\icons\hsicon.ico"; Tasks: fileassoc\icon
 
 ; these flags were always set in the past, by the installer
 ; some programs may rely on them to find GHC
-Root: HKCU; Subkey: "Software\Haskell\GHC\ghc-7.2.2"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Haskell\GHC\ghc-7.4.1"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Haskell\GHC"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletevalue
 
 ; set the PATH variable, for both GHC and Cabal

@@ -5,10 +5,11 @@
 \section[TcExpr]{Typecheck an expression}
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
 -- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module TcExpr ( tcPolyExpr, tcPolyExprNC, tcMonoExpr, tcMonoExprNC, 
@@ -30,6 +31,7 @@ import TcUnify
 import BasicTypes
 import Inst
 import TcBinds
+import FamInst( tcLookupFamInst )
 import TcEnv
 import TcArrows
 import TcMatches
@@ -37,12 +39,14 @@ import TcHsType
 import TcPat
 import TcMType
 import TcType
+import DsMonad hiding (Splice)
 import Id
 import DataCon
 import Name
 import TyCon
 import Type
-import Coercion
+import Kind( splitKiTyVars )
+import TcEvidence
 import Var
 import VarSet
 import VarEnv
@@ -50,7 +54,6 @@ import TysWiredIn
 import TysPrim( intPrimTy )
 import PrimOp( tagToEnumKey )
 import PrelNames
-import Module
 import DynFlags
 import SrcLoc
 import Util
@@ -281,12 +284,20 @@ tcExpr (OpApp arg1 op fix arg2) res_ty
   , op_name `hasKey` dollarIdKey	-- Note [Typing rule for ($)]
   = do { traceTc "Application rule" (ppr op)
        ; (arg1', arg1_ty) <- tcInferRho arg1
+
        ; let doc = ptext (sLit "The first argument of ($) takes")
        ; (co_arg1, [arg2_ty], op_res_ty) <- matchExpectedFunTys doc 1 arg1_ty
        	 -- arg2_ty maybe polymorphic; that's the point
+
+       -- Make sure that the argument and result types have kind '*'
+       -- Eg we do not want to allow  (D#  $  4.0#)   Trac #5570
+       ; _ <- unifyKind (typeKind arg2_ty) liftedTypeKind
+       ; _ <- unifyKind (typeKind res_ty)  liftedTypeKind
+
        ; arg2' <- tcArg op (arg2, arg2_ty, 2)
        ; co_res <- unifyType op_res_ty res_ty
        ; op_id <- tcLookupId op_name
+
        ; let op' = L loc (HsWrap (mkWpTyApps [arg2_ty, op_res_ty]) (HsVar op_id))
        ; return $ mkHsWrapCo co_res $
          OpApp (mkLHsWrapCo co_arg1 arg1') op' fix arg2' }
@@ -294,7 +305,7 @@ tcExpr (OpApp arg1 op fix arg2) res_ty
   | otherwise
   = do { traceTc "Non Application rule" (ppr op)
        ; (op', op_ty) <- tcInferFun op
-       ; (co_fn, arg_tys, op_res_ty) <- unifyOpFunTys op 2 op_ty
+       ; (co_fn, arg_tys, op_res_ty) <- unifyOpFunTysWrap op 2 op_ty
        ; co_res <- unifyType op_res_ty res_ty
        ; [arg1', arg2'] <- tcArgs op [arg1, arg2] arg_tys
        ; return $ mkHsWrapCo co_res $
@@ -305,7 +316,7 @@ tcExpr (OpApp arg1 op fix arg2) res_ty
  
 tcExpr (SectionR op arg2) res_ty
   = do { (op', op_ty) <- tcInferFun op
-       ; (co_fn, [arg1_ty, arg2_ty], op_res_ty) <- unifyOpFunTys op 2 op_ty
+       ; (co_fn, [arg1_ty, arg2_ty], op_res_ty) <- unifyOpFunTysWrap op 2 op_ty
        ; co_res <- unifyType (mkFunTy arg1_ty op_res_ty) res_ty
        ; arg2' <- tcArg op (arg2, arg2_ty, 2)
        ; return $ mkHsWrapCo co_res $
@@ -317,7 +328,7 @@ tcExpr (SectionL arg1 op) res_ty
        ; let n_reqd_args | xopt Opt_PostfixOperators dflags = 1
                          | otherwise                        = 2
 
-       ; (co_fn, (arg1_ty:arg_tys), op_res_ty) <- unifyOpFunTys op n_reqd_args op_ty
+       ; (co_fn, (arg1_ty:arg_tys), op_res_ty) <- unifyOpFunTysWrap op n_reqd_args op_ty
        ; co_res <- unifyType (mkFunTys arg_tys op_res_ty) res_ty
        ; arg1' <- tcArg op (arg1, arg1_ty, 1)
        ; return $ mkHsWrapCo co_res $
@@ -325,7 +336,7 @@ tcExpr (SectionL arg1 op) res_ty
 
 tcExpr (ExplicitTuple tup_args boxity) res_ty
   | all tupArgPresent tup_args
-  = do { let tup_tc = tupleTyCon boxity (length tup_args)
+  = do { let tup_tc = tupleTyCon (boxityNormalTupleSort boxity) (length tup_args)
        ; (coi, arg_tys) <- matchExpectedTyConApp tup_tc res_ty
        ; tup_args1 <- tcTupArgs tup_args arg_tys
        ; return $ mkHsWrapCo coi (ExplicitTuple tup_args1 boxity) }
@@ -335,7 +346,7 @@ tcExpr (ExplicitTuple tup_args boxity) res_ty
     do { let kind = case boxity of { Boxed   -> liftedTypeKind
                                    ; Unboxed -> argTypeKind }
              arity = length tup_args 
-             tup_tc = tupleTyCon boxity arity
+             tup_tc = tupleTyCon (boxityNormalTupleSort boxity) arity
 
        ; arg_tys <- newFlexiTyVarTys (tyConArity tup_tc) kind
        ; let actual_res_ty
@@ -636,16 +647,24 @@ tcExpr (RecordUpd record_expr rbinds _ _ _) res_ty
 	-- 
 	; let fixed_tvs = getFixedTyVars con1_tvs relevant_cons
 	      is_fixed_tv tv = tv `elemVarSet` fixed_tvs
-	      mk_inst_ty tv result_inst_ty 
+	      mk_inst_ty subst tv result_inst_ty 
 	        | is_fixed_tv tv = return result_inst_ty	    -- Same as result type
-	        | otherwise      = newFlexiTyVarTy (tyVarKind tv)  -- Fresh type, of correct kind
+	        | otherwise      = newFlexiTyVarTy (subst (tyVarKind tv))  -- Fresh type, of correct kind
 
 	; (_, result_inst_tys, result_inst_env) <- tcInstTyVars con1_tvs
-	; scrut_inst_tys <- zipWithM mk_inst_ty con1_tvs result_inst_tys
 
-	; let rec_res_ty    = TcType.substTy result_inst_env con1_res_ty
+        ; let (con1_r_kvs, con1_r_tvs) = splitKiTyVars con1_tvs
+              n_kinds = length con1_r_kvs
+              (result_inst_r_kis, result_inst_r_tys) = splitAt n_kinds result_inst_tys
+	; scrut_inst_r_kis <- zipWithM (mk_inst_ty (TcType.substTy (zipTopTvSubst [] []))) con1_r_kvs result_inst_r_kis
+          -- IA0_NOTE: we have to build the kind substitution
+        ; let kind_subst = TcType.substTy (zipTopTvSubst con1_r_kvs scrut_inst_r_kis)
+	; scrut_inst_r_tys <- zipWithM (mk_inst_ty kind_subst) con1_r_tvs result_inst_r_tys
+
+	; let scrut_inst_tys = scrut_inst_r_kis ++ scrut_inst_r_tys
+              rec_res_ty    = TcType.substTy result_inst_env con1_res_ty
 	      con1_arg_tys' = map (TcType.substTy result_inst_env) con1_arg_tys
-	      scrut_subst   = zipTopTvSubst con1_tvs scrut_inst_tys
+              scrut_subst   = zipTopTvSubst con1_tvs scrut_inst_tys
 	      scrut_ty      = TcType.substTy scrut_subst con1_res_ty
 
         ; co_res <- unifyType rec_res_ty res_ty
@@ -661,7 +680,7 @@ tcExpr (RecordUpd record_expr rbinds _ _ _) res_ty
 
 	-- Step 7: make a cast for the scrutinee, in the case that it's from a type family
 	; let scrut_co | Just co_con <- tyConFamilyCoercion_maybe tycon 
-		       = WpCast $ mkAxInstCo co_con scrut_inst_tys
+		       = WpCast (mkTcAxInstCo co_con scrut_inst_tys)
 		       | otherwise
 		       = idHsWrapper
 	-- Phew!
@@ -679,7 +698,7 @@ tcExpr (RecordUpd record_expr rbinds _ _ _) res_ty
 		      	    flds = dataConFieldLabels con
     			    fixed_tvs = exactTyVarsOfTypes fixed_tys
 			    	    -- fixed_tys: See Note [Type of a record update]
-			    	        `unionVarSet` tyVarsOfTheta theta 
+			    	        `unionVarSet` tyVarsOfTypes theta 
 				    -- Universally-quantified tyvars that
 				    -- appear in any of the *implicit*
 				    -- arguments to the constructor are fixed
@@ -739,8 +758,9 @@ tcExpr (PArrSeq _ seq@(FromTo expr1 expr2)) res_ty
   = do	{ (coi, elt_ty) <- matchExpectedPArrTy res_ty
 	; expr1' <- tcPolyExpr expr1 elt_ty
 	; expr2' <- tcPolyExpr expr2 elt_ty
+	; enumFromToP <- initDsTc $ dsDPHBuiltin enumFromToPVar
 	; enum_from_to <- newMethodFromName (PArrSeqOrigin seq) 
-				 (enumFromToPName basePackageId) elt_ty    -- !!!FIXME: chak
+				 (idName enumFromToP) elt_ty
 	; return $ mkHsWrapCo coi 
                      (PArrSeq enum_from_to (FromTo expr1' expr2')) }
 
@@ -749,13 +769,14 @@ tcExpr (PArrSeq _ seq@(FromThenTo expr1 expr2 expr3)) res_ty
 	; expr1' <- tcPolyExpr expr1 elt_ty
 	; expr2' <- tcPolyExpr expr2 elt_ty
 	; expr3' <- tcPolyExpr expr3 elt_ty
+	; enumFromThenToP <- initDsTc $ dsDPHBuiltin enumFromThenToPVar
 	; eft <- newMethodFromName (PArrSeqOrigin seq)
-		      (enumFromThenToPName basePackageId) elt_ty        -- !!!FIXME: chak
+		      (idName enumFromThenToP) elt_ty        -- !!!FIXME: chak
 	; return $ mkHsWrapCo coi 
                      (PArrSeq eft (FromThenTo expr1' expr2' expr3')) }
 
 tcExpr (PArrSeq _ _) _ 
-  = panic "TcExpr.tcMonoExpr: Infinite parallel array!"
+  = panic "TcExpr.tcExpr: Infinite parallel array!"
     -- the parser shouldn't have generated it and the renamer shouldn't have
     -- let it through
 \end{code}
@@ -900,10 +921,10 @@ tcTupArgs args tys
 			           ; return (Present expr') }
 
 ----------------
-unifyOpFunTys :: LHsExpr Name -> Arity -> TcRhoType
-              -> TcM (Coercion, [TcSigmaType], TcRhoType)	 		
+unifyOpFunTysWrap :: LHsExpr Name -> Arity -> TcRhoType
+                  -> TcM (TcCoercion, [TcSigmaType], TcRhoType)	 		
 -- A wrapper for matchExpectedFunTys
-unifyOpFunTys op arity ty = matchExpectedFunTys herald arity ty
+unifyOpFunTysWrap op arity ty = matchExpectedFunTys herald arity ty
   where
     herald = ptext (sLit "The operator") <+> quotes (ppr op) <+> ptext (sLit "takes")
 
@@ -1128,18 +1149,18 @@ tcTagToEnum loc fun_name arg res_ty
     doc3 = ptext (sLit "No family instance for this type")
 
     get_rep_ty :: TcType -> TyCon -> [TcType]
-               -> TcM (Coercion, TyCon, [TcType])
+               -> TcM (TcCoercion, TyCon, [TcType])
     	-- Converts a family type (eg F [a]) to its rep type (eg FList a)
 	-- and returns a coercion between the two
     get_rep_ty ty tc tc_args
       | not (isFamilyTyCon tc) 
-      = return (mkReflCo ty, tc, tc_args)
+      = return (mkTcReflCo ty, tc, tc_args)
       | otherwise 
       = do { mb_fam <- tcLookupFamInst tc tc_args
            ; case mb_fam of 
 	       Nothing -> failWithTc (tagToEnumError ty doc3)
                Just (rep_tc, rep_args) 
-                   -> return ( mkSymCo (mkAxInstCo co_tc rep_args)
+                   -> return ( mkTcSymCo (mkTcAxInstCo co_tc rep_args)
                              , rep_tc, rep_args )
                  where
                    co_tc = expectJust "tcTagToEnum" $

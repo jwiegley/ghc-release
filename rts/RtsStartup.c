@@ -69,6 +69,13 @@ void exitLinker( void );	// there is no Linker.h file to include
 // Count of how many outstanding hs_init()s there have been.
 static int hs_init_count = 0;
 
+static void flushStdHandles(void);
+
+const RtsConfig defaultRtsConfig  = {
+    .rts_opts_enabled = RtsOptsSafeOnly,
+    .rts_opts = NULL
+};
+
 /* -----------------------------------------------------------------------------
    Initialise floating point unit on x86 (currently disabled; See Note
    [x86 Floating point precision] in compiler/nativeGen/X86/Instr.hs)
@@ -104,6 +111,12 @@ x86_init_fpu ( void )
 void
 hs_init(int *argc, char **argv[])
 {
+    hs_init_ghc(argc, argv, defaultRtsConfig);
+}
+
+void
+hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
+{
     hs_init_count++;
     if (hs_init_count > 1) {
 	// second and subsequent inits are ignored
@@ -130,7 +143,8 @@ hs_init(int *argc, char **argv[])
     /* Parse the flags, separating the RTS flags from the programs args */
     if (argc != NULL && argv != NULL) {
 	setFullProgArgv(*argc,*argv);
-        setupRtsFlags(argc, *argv);
+        setupRtsFlags(argc, *argv,
+                      rts_config.rts_opts_enabled, rts_config.rts_opts);
     }
 
     /* Initialise the stats department, phase 1 */
@@ -154,6 +168,7 @@ hs_init(int *argc, char **argv[])
     initScheduler();
 
     /* Trace some basic information about the process */
+    traceWallClockTime();
     traceOSProcessInfo();
 
     /* initialize the storage manager */
@@ -168,6 +183,7 @@ hs_init(int *argc, char **argv[])
      */
     getStablePtr((StgPtr)runIO_closure);
     getStablePtr((StgPtr)runNonIO_closure);
+    getStablePtr((StgPtr)flushStdHandles_closure);
 
     getStablePtr((StgPtr)runFinalizerBatch_closure);
 
@@ -295,6 +311,8 @@ hs_exit_(rtsBool wait_foreign)
     
     OnExitHook();
 
+    flushStdHandles();
+
     // sanity check
 #if defined(DEBUG)
     checkFPUStack();
@@ -404,6 +422,17 @@ hs_exit_(rtsBool wait_foreign)
 
     // Free the various argvs
     freeRtsArgs();
+}
+
+// Flush stdout and stderr.  We do this during shutdown so that it
+// happens even when the RTS is being used as a library, without a
+// main (#5594)
+static void flushStdHandles(void)
+{
+    Capability *cap;
+    cap = rts_lock();
+    rts_evalIO(&cap, flushStdHandles_closure, NULL);
+    rts_unlock(cap);
 }
 
 // The real hs_exit():

@@ -1,3 +1,9 @@
+{-# OPTIONS_HADDOCK hide #-}
+-- #hide
+#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE Safe #-}
+#endif
+
 -- | This module contains functions for displaying
 --   HTML as a pretty tree.
 module Text.XHtml.Debug ( HtmlTree(..), treeHtml, treeColors, debugHtml ) where

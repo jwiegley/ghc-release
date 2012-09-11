@@ -19,9 +19,9 @@ module Distribution.Client.Install (
   ) where
 
 import Data.List
-         ( unfoldr, find, nub, sort )
+         ( unfoldr, find, nub, sort, (\\) )
 import Data.Maybe
-         ( isJust, fromMaybe )
+         ( isJust, fromMaybe, maybeToList )
 import Control.Exception as Exception
          ( handleJust )
 #if MIN_VERSION_base(4,0,0)
@@ -48,6 +48,8 @@ import System.IO.Error
 
 import Distribution.Client.Targets
 import Distribution.Client.Dependency
+import Distribution.Client.Dependency.Types
+         ( Solver(..) )
 import Distribution.Client.FetchUtils
 import qualified Distribution.Client.Haddock as Haddock (regenerateHaddockIndex)
 -- import qualified Distribution.Client.Info as Info
@@ -74,6 +76,7 @@ import qualified Distribution.Client.InstallSymlink as InstallSymlink
          ( symlinkBinaries )
 import qualified Distribution.Client.Win32SelfUpgrade as Win32SelfUpgrade
 import qualified Distribution.Client.World as World
+import qualified Distribution.InstalledPackageInfo as Installed
 import Paths_cabal_install (getBinDir)
 
 import Distribution.Simple.Compiler
@@ -81,10 +84,10 @@ import Distribution.Simple.Compiler
          , PackageDB(..), PackageDBStack )
 import Distribution.Simple.Program (ProgramConfiguration, defaultProgramConfiguration)
 import qualified Distribution.Simple.InstallDirs as InstallDirs
-import qualified Distribution.Client.PackageIndex as PackageIndex
-import Distribution.Client.PackageIndex (PackageIndex)
+import qualified Distribution.Simple.PackageIndex as PackageIndex
+import Distribution.Simple.PackageIndex (PackageIndex)
 import Distribution.Simple.Setup
-         ( haddockCommand, HaddockFlags(..), emptyHaddockFlags
+         ( haddockCommand, HaddockFlags(..)
          , buildCommand, BuildFlags(..), emptyBuildFlags
          , toFlag, fromFlag, fromFlagOrDefault, flagToMaybe )
 import qualified Distribution.Simple.Setup as Cabal
@@ -100,7 +103,8 @@ import Distribution.Package
          , Dependency(..), thisPackageVersion )
 import qualified Distribution.PackageDescription as PackageDescription
 import Distribution.PackageDescription
-         ( PackageDescription, GenericPackageDescription(..), TestSuite(..) )
+         ( Benchmark(..), PackageDescription, GenericPackageDescription(..)
+         , TestSuite(..), Flag(..), FlagName(..), FlagAssignment )
 import Distribution.PackageDescription.Configuration
          ( finalizePackageDescription, mapTreeData )
 import Distribution.Version
@@ -145,10 +149,11 @@ install, upgrade
   -> ConfigFlags
   -> ConfigExFlags
   -> InstallFlags
+  -> HaddockFlags
   -> [UserTarget]
   -> IO ()
 install verbosity packageDBs repos comp conf
-  globalFlags configFlags configExFlags installFlags userTargets0 = do
+  globalFlags configFlags configExFlags installFlags haddockFlags userTargets0 = do
 
     installedPkgIndex <- getInstalledPackages verbosity comp packageDBs conf
     sourcePkgDb       <- getSourcePackages    verbosity repos
@@ -169,7 +174,7 @@ install verbosity packageDBs repos comp conf
                          comp configFlags configExFlags installFlags
                          installedPkgIndex sourcePkgDb pkgSpecifiers
 
-    printPlanMessages verbosity installedPkgIndex installPlan dryRun
+    checkPrintPlan verbosity installedPkgIndex installPlan installFlags solver
 
     unless dryRun $ do
       installPlan' <- performInstallations verbosity
@@ -179,13 +184,14 @@ install verbosity packageDBs repos comp conf
   where
     context :: InstallContext
     context = (packageDBs, repos, comp, conf,
-               globalFlags, configFlags, configExFlags, installFlags)
+               globalFlags, configFlags, configExFlags, installFlags, haddockFlags)
 
     dryRun      = fromFlag (installDryRun installFlags)
+    solver      = fromFlag (configSolver  configExFlags)
     logMsg message rest = debug verbosity message >> rest
 
 
-upgrade _ _ _ _ _ _ _ _ _ _ = die $
+upgrade _ _ _ _ _ _ _ _ _ _ _ = die $
     "Use the 'cabal install' command instead of 'cabal upgrade'.\n"
  ++ "You can install the latest version of a package using 'cabal install'. "
  ++ "The 'cabal upgrade' command has been removed because people found it "
@@ -205,7 +211,8 @@ type InstallContext = ( PackageDBStack
                       , GlobalFlags
                       , ConfigFlags
                       , ConfigExFlags
-                      , InstallFlags )
+                      , InstallFlags
+                      , HaddockFlags )
 
 -- ------------------------------------------------------------
 -- * Installation planning
@@ -215,7 +222,7 @@ planPackages :: Compiler
              -> ConfigFlags
              -> ConfigExFlags
              -> InstallFlags
-             -> PackageIndex InstalledPackage
+             -> PackageIndex
              -> SourcePackageDb
              -> [PackageSpecifier SourcePackage]
              -> Progress String String InstallPlan
@@ -224,6 +231,7 @@ planPackages comp configFlags configExFlags installFlags
 
         resolveDependencies
           buildPlatform (compilerId comp)
+          solver
           resolverParams
 
     >>= if onlyDeps then adjustPlanOnlyDeps else return
@@ -231,7 +239,16 @@ planPackages comp configFlags configExFlags installFlags
   where
     resolverParams =
 
-        setPreferenceDefault (if upgradeDeps then PreferAllLatest
+        setMaxBackjumps (if maxBackjumps < 0 then Nothing
+                                             else Just maxBackjumps)
+
+      . setIndependentGoals independentGoals
+
+      . setReorderGoals reorderGoals
+
+      . setAvoidReinstalls avoidReinstalls
+
+      . setPreferenceDefault (if upgradeDeps then PreferAllLatest
                                              else PreferLatestForSelected)
 
       . addPreferences
@@ -249,11 +266,11 @@ planPackages comp configFlags configExFlags installFlags
           [ PackageConstraintFlags (pkgSpecifierTarget pkgSpecifier) flags
           | let flags = configConfigurationsFlags configFlags
           , not (null flags)
-          , pkgSpecifier <- pkgSpecifiers' ]
+          , pkgSpecifier <- pkgSpecifiers'' ]
 
       . (if reinstall then reinstallTargets else id)
 
-      $ standardInstallPolicy installedPkgIndex sourcePkgDb pkgSpecifiers'
+      $ standardInstallPolicy installedPkgIndex sourcePkgDb pkgSpecifiers''
 
     -- Mark test suites as enabled if invoked with '--enable-tests'. This
     -- ensures that test suite dependencies are included.
@@ -267,6 +284,18 @@ planPackages comp configFlags configExFlags installFlags
             { condTestSuites = map (\(n, t) -> (n, enable t)) suites } }
     enableTests x = x
 
+    -- Mark benchmarks as enabled if invoked with
+    -- '--enable-benchmarks'. This ensures that benchmark dependencies
+    -- are included.
+    pkgSpecifiers'' = map enableBenchmarks pkgSpecifiers'
+    benchmarksEnabled = fromFlagOrDefault False $ configBenchmarks configFlags
+    enableBenchmarks (SpecificSourcePackage pkg) =
+        let pkgDescr = Source.packageDescription pkg
+            bms = condBenchmarks pkgDescr
+            enable = mapTreeData (\t -> t { benchmarkEnabled = benchmarksEnabled })
+        in SpecificSourcePackage $ pkg { Source.packageDescription = pkgDescr
+            { condBenchmarks = map (\(n, t) -> (n, enable t)) bms } }
+    enableBenchmarks x = x
 
     --TODO: this is a general feature and should be moved to D.C.Dependency
     -- Also, the InstallPlan.remove should return info more precise to the
@@ -278,7 +307,7 @@ planPackages comp configFlags configExFlags installFlags
       where
         isTarget pkg = packageName pkg `elem` targetnames
         targetnames  = map pkgSpecifierTarget pkgSpecifiers
-        
+
         explain :: [InstallPlan.PlanProblem] -> String
         explain problems =
             "Cannot select only the dependencies (as requested by the "
@@ -295,20 +324,26 @@ planPackages comp configFlags configExFlags installFlags
                   , depid <- depids
                   , packageName depid `elem` targetnames ]
 
-    reinstall   = fromFlag (installReinstall installFlags)
-    upgradeDeps = fromFlag (installUpgradeDeps installFlags)
-    onlyDeps    = fromFlag (installOnlyDeps installFlags)
+    solver           = fromFlag (configSolver            configExFlags)
+    reinstall        = fromFlag (installReinstall        installFlags)
+    reorderGoals     = fromFlag (installReorderGoals     installFlags)
+    independentGoals = fromFlag (installIndependentGoals installFlags)
+    avoidReinstalls  = fromFlag (installAvoidReinstalls  installFlags)
+    maxBackjumps     = fromFlag (installMaxBackjumps     installFlags)
+    upgradeDeps      = fromFlag (installUpgradeDeps      installFlags)
+    onlyDeps         = fromFlag (installOnlyDeps         installFlags)
 
 -- ------------------------------------------------------------
 -- * Informational messages
 -- ------------------------------------------------------------
 
-printPlanMessages :: Verbosity
-                  -> PackageIndex InstalledPackage
-                  -> InstallPlan
-                  -> Bool
-                  -> IO ()
-printPlanMessages verbosity installed installPlan dryRun = do
+checkPrintPlan :: Verbosity
+               -> PackageIndex
+               -> InstallPlan
+               -> InstallFlags
+               -> Solver
+               -> IO ()
+checkPrintPlan verbosity installed installPlan installFlags solver = do
 
   when nothingToInstall $
     notice verbosity $
@@ -316,18 +351,89 @@ printPlanMessages verbosity installed installPlan dryRun = do
       ++ "already installed.\n If you want to reinstall anyway then use "
       ++ "the --reinstall flag."
 
-  when (dryRun || verbosity >= verbose) $
-    printDryRun verbosity installed installPlan
+  let lPlan = linearizeInstallPlan installed installPlan
+  let containsReinstalls = any (isReinstall . snd) lPlan
+  let adaptedVerbosity | containsReinstalls = verbose `max` verbosity
+                       | otherwise          = verbosity
+
+  when (dryRun || adaptedVerbosity >= verbose) $
+    printDryRun adaptedVerbosity lPlan
+
+  when (containsReinstalls && not overrideReinstall) $
+    (if dryRun then notice adaptedVerbosity else die) $
+         "The install plan contains reinstalls which can break "
+      ++ "your GHC installation. "
+      ++ (if solver /= Modular
+          then "You can try --solver=modular for the new modular solver that "
+            ++ "chooses such reinstalls less often and also offers the "
+            ++ "--avoid-reinstalls option. "
+          else "You can use the --avoid-reinstalls option to try to find an "
+            ++ "install plan without such reinstalls. ")
+      ++ "You can also ghc-pkg unregister the affected packages and run "
+      ++ "ghc-pkg check to see the effect on reverse dependencies. "
+      ++ "If you know what you are doing you can use the "
+      ++ "--force-reinstalls option to override this reinstall check."
 
   where
     nothingToInstall = null (InstallPlan.ready installPlan)
+    dryRun = fromFlag (installDryRun installFlags)
+    overrideReinstall = fromFlag (installOverrideReinstall installFlags)
 
+linearizeInstallPlan :: PackageIndex
+                     -> InstallPlan
+                     -> [(ConfiguredPackage, PackageStatus)]
+linearizeInstallPlan installedPkgIndex plan = unfoldr next plan
+  where
+    next plan' = case InstallPlan.ready plan' of
+      []      -> Nothing
+      (pkg:_) -> Just ((pkg, status), InstallPlan.completed pkgid result plan')
+        where pkgid  = packageId pkg
+              status = packageStatus installedPkgIndex pkg
+              result = BuildOk DocsNotTried TestsNotTried
+              --FIXME: This is a bit of a hack,
+              -- pretending that each package is installed
+
+data PackageStatus = NewPackage
+                   | NewVersion [Version]
+                   | Reinstall  [PackageChange]
+
+type PackageChange = MergeResult PackageIdentifier PackageIdentifier
+
+isReinstall :: PackageStatus -> Bool
+isReinstall (Reinstall _) = True
+isReinstall _             = False
+
+packageStatus :: PackageIndex -> ConfiguredPackage -> PackageStatus
+packageStatus installedPkgIndex cpkg =
+  case PackageIndex.lookupPackageName installedPkgIndex
+                                      (packageName cpkg) of
+    [] -> NewPackage
+    ps ->  case find ((==packageId cpkg) . Installed.sourcePackageId) (concatMap snd ps) of
+      Nothing  -> NewVersion (map fst ps)
+      Just pkg -> Reinstall (changes pkg cpkg)
+
+  where
+
+    changes :: Installed.InstalledPackageInfo
+            -> ConfiguredPackage
+            -> [MergeResult PackageIdentifier PackageIdentifier]
+    changes pkg pkg' = filter changed
+                     $ mergeBy (comparing packageName)
+                         -- get dependencies of installed package (convert to source pkg ids via index)
+                         (nub . sort . concatMap (maybeToList .
+                                                  fmap Installed.sourcePackageId .
+                                                  PackageIndex.lookupInstalledPackageId installedPkgIndex) .
+                                                  Installed.depends $ pkg)
+                         -- get dependencies of configured package
+                         (nub . sort . depends $ pkg')
+
+    changed (InBoth    pkgid pkgid') = pkgid /= pkgid'
+    changed _                        = True
 
 printDryRun :: Verbosity
-            -> PackageIndex InstalledPackage
-            -> InstallPlan
+            -> [(ConfiguredPackage, PackageStatus)]
             -> IO ()
-printDryRun verbosity installedPkgIndex plan = case unfoldr next plan of
+printDryRun verbosity plan = case plan of
   []   -> return ()
   pkgs
     | verbosity >= Verbosity.verbose -> notice verbosity $ unlines $
@@ -335,35 +441,37 @@ printDryRun verbosity installedPkgIndex plan = case unfoldr next plan of
       : map showPkgAndReason pkgs
     | otherwise -> notice verbosity $ unlines $
         "In order, the following would be installed (use -v for more details):"
-      : map (display . packageId) pkgs
+      : map (display . packageId) (map fst pkgs)
   where
-    next plan' = case InstallPlan.ready plan' of
-      []      -> Nothing
-      (pkg:_) -> Just (pkg, InstallPlan.completed pkgid result plan')
-        where pkgid = packageId pkg
-              result = BuildOk DocsNotTried TestsNotTried
-              --FIXME: This is a bit of a hack,
-              -- pretending that each package is installed
-
-    showPkgAndReason pkg' = display (packageId pkg') ++ " " ++
-          case PackageIndex.lookupPackageName installedPkgIndex
-                                              (packageName pkg') of
-            [] -> "(new package)"
-            ps ->  case find ((==packageId pkg') . packageId) ps of
-              Nothing  -> "(new version)"
-              Just pkg -> "(reinstall)" ++ case changes pkg pkg' of
+    showPkgAndReason (pkg', pr) = display (packageId pkg') ++
+          showFlagAssignment (nonDefaultFlags pkg') ++ " " ++
+          case pr of
+            NewPackage   -> "(new package)"
+            NewVersion _ -> "(new version)"
+            Reinstall cs -> "(reinstall)" ++ case cs of
                 []   -> ""
-                diff -> " changes: "  ++ intercalate ", " diff
-    changes pkg pkg' = map change . filter changed
-                     $ mergeBy (comparing packageName)
-                         (nub . sort . depends $ pkg)
-                         (nub . sort . depends $ pkg')
+                diff -> " changes: "  ++ intercalate ", " (map change diff)
+
+    toFlagAssignment :: [Flag] -> FlagAssignment
+    toFlagAssignment = map (\ f -> (flagName f, flagDefault f))
+
+    nonDefaultFlags :: ConfiguredPackage -> FlagAssignment
+    nonDefaultFlags (ConfiguredPackage spkg fa _) =
+      let defaultAssignment =
+            toFlagAssignment
+             (genPackageFlags (Source.packageDescription spkg))
+      in  fa \\ defaultAssignment
+
+    -- FIXME: this should be a proper function in a proper place
+    showFlagAssignment = concatMap ((' ' :) . showFlagValue)
+    showFlagValue (f, True)   = '+' : showFlagName f
+    showFlagValue (f, False)  = '-' : showFlagName f
+    showFlagName (FlagName f) = f
+
     change (OnlyInLeft pkgid)        = display pkgid ++ " removed"
     change (InBoth     pkgid pkgid') = display pkgid ++ " -> "
                                     ++ display (packageVersion pkgid')
     change (OnlyInRight      pkgid') = display pkgid' ++ " added"
-    changed (InBoth    pkgid pkgid') = pkgid /= pkgid'
-    changed _                        = True
 
 -- ------------------------------------------------------------
 -- * Post installation stuff
@@ -384,7 +492,7 @@ postInstallActions :: Verbosity
                    -> InstallPlan
                    -> IO ()
 postInstallActions verbosity
-  (packageDBs, _, comp, conf, globalFlags, configFlags, _, installFlags)
+  (packageDBs, _, comp, conf, globalFlags, configFlags, _, installFlags, _)
   targets installPlan = do
 
   unless oneShot $
@@ -572,12 +680,12 @@ data InstallMisc = InstallMisc {
 
 performInstallations :: Verbosity
                      -> InstallContext
-                     -> PackageIndex InstalledPackage
+                     -> PackageIndex
                      -> InstallPlan
                      -> IO InstallPlan
 performInstallations verbosity
   (packageDBs, _, comp, conf,
-   globalFlags, configFlags, configExFlags, installFlags)
+   globalFlags, configFlags, configExFlags, installFlags, haddockFlags)
   installedPkgIndex installPlan = do
 
   executeInstallPlan installPlan $ \cpkg ->
@@ -587,7 +695,7 @@ performInstallations verbosity
         installLocalPackage verbosity (packageId pkg) src' $ \mpath ->
           installUnpackedPackage verbosity
                                  (setupScriptOptions installedPkgIndex)
-                                 miscOptions configFlags' installFlags
+                                 miscOptions configFlags' installFlags haddockFlags
                                  compid pkg mpath useLogFile
 
   where
@@ -744,13 +852,14 @@ installUnpackedPackage :: Verbosity
                    -> InstallMisc
                    -> ConfigFlags
                    -> InstallFlags
+                   -> HaddockFlags
                    -> CompilerId
                    -> PackageDescription
                    -> Maybe FilePath -- ^ Directory to change to before starting the installation.
                    -> Maybe (PackageIdentifier -> FilePath) -- ^ File to log output to (if any)
                    -> IO BuildResult
 installUnpackedPackage verbosity scriptOptions miscOptions
-                       configFlags installConfigFlags
+                       configFlags installConfigFlags haddockFlags
                        compid pkg workingDir useLogFile =
 
   -- Configure phase
@@ -763,7 +872,7 @@ installUnpackedPackage verbosity scriptOptions miscOptions
 
   -- Doc generation phase
       docsResult <- if shouldHaddock
-        then (do setup haddockCommand haddockFlags
+        then (do setup haddockCommand haddockFlags'
                  return DocsOk)
                `catchIO`   (\_ -> return DocsFailed)
                `catchExit` (\_ -> return DocsFailed)
@@ -790,8 +899,7 @@ installUnpackedPackage verbosity scriptOptions miscOptions
       buildVerbosity = toFlag verbosity'
     }
     shouldHaddock    = fromFlag (installDocumentation installConfigFlags)
-    haddockFlags _   = emptyHaddockFlags {
-      haddockDistPref  = configDistPref configFlags,
+    haddockFlags' _   = haddockFlags {
       haddockVerbosity = toFlag verbosity'
     }
     installFlags _   = Cabal.emptyInstallFlags {

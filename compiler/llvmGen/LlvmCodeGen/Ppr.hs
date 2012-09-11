@@ -3,7 +3,7 @@
 --
 
 module LlvmCodeGen.Ppr (
-        pprLlvmHeader, pprLlvmCmmTop, pprLlvmData, infoSection, iTableSuf
+        pprLlvmHeader, pprLlvmCmmDecl, pprLlvmData, infoSection, iTableSuf
     ) where
 
 #include "HsVersions.h"
@@ -51,7 +51,14 @@ moduleLayout =
     $+$ text "target triple = \"x86_64-linux-gnu\""
 #endif
 
-#else /* Not x86 */
+#elif defined (arm_TARGET_ARCH)
+
+#if linux_TARGET_OS
+    text "target datalayout = \"e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v64:64:64-v128:64:128-a0:0:64-n32\""
+    $+$ text "target triple = \"arm-unknown-linux-gnueabi\""
+#endif
+
+#else
     -- FIX: Other targets
     empty
 #endif
@@ -59,8 +66,8 @@ moduleLayout =
 
 -- | Header code for LLVM modules
 pprLlvmHeader :: Doc
-pprLlvmHeader = moduleLayout
-
+pprLlvmHeader =
+    moduleLayout $+$ ppLlvmFunctionDecls (map snd ghcInternalFunctions)
 
 -- | Pretty print LLVM data code
 pprLlvmData :: LlvmData -> Doc
@@ -78,11 +85,11 @@ pprLlvmData (globals, types) =
 
 
 -- | Pretty print LLVM code
-pprLlvmCmmTop :: LlvmEnv -> Int -> LlvmCmmTop -> (Doc, [LlvmVar])
-pprLlvmCmmTop _ _ (CmmData _ lmdata)
+pprLlvmCmmDecl :: LlvmEnv -> Int -> LlvmCmmDecl -> (Doc, [LlvmVar])
+pprLlvmCmmDecl _ _ (CmmData _ lmdata)
   = (vcat $ map pprLlvmData lmdata, [])
 
-pprLlvmCmmTop env count (CmmProc mb_info entry_lbl (ListGraph blks))
+pprLlvmCmmDecl env count (CmmProc mb_info entry_lbl (ListGraph blks))
   = let (idoc, ivar) = case mb_info of
                         Nothing -> (empty, [])
                         Just (Statics info_lbl dat)
@@ -97,7 +104,7 @@ pprLlvmCmmTop env count (CmmProc mb_info entry_lbl (ListGraph blks))
                       else Internal
             lmblocks = map (\(BasicBlock id stmts) ->
                                 LlvmBlock (getUnique id) stmts) blks
-            fun = mkLlvmFunc lbl' link  sec' lmblocks
+            fun = mkLlvmFunc env lbl' link  sec' lmblocks
         in ppLlvmFunction fun
     ), ivar)
 
@@ -105,12 +112,12 @@ pprLlvmCmmTop env count (CmmProc mb_info entry_lbl (ListGraph blks))
 -- | Pretty print CmmStatic
 pprInfoTable :: LlvmEnv -> Int -> CLabel -> CmmStatics -> (Doc, [LlvmVar])
 pprInfoTable env count info_lbl stat
-  = let unres = genLlvmData (Text, stat)
+  = let unres = genLlvmData env (Text, stat)
         (_, (ldata, ltypes)) = resolveLlvmData env unres
 
         setSection ((LMGlobalVar _ ty l _ _ c), d)
             = let sec = mkLayoutSection count
-                  ilabel = strCLabel_llvm info_lbl
+                  ilabel = strCLabel_llvm env info_lbl
                               `appendFS` fsLit iTableSuf
                   gv = LMGlobalVar ilabel ty l sec llvmInfAlign c
                   v = if l == Internal then [gv] else []

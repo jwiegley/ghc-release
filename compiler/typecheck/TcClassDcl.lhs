@@ -6,10 +6,17 @@
 Typechecking class declarations
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module TcClassDcl ( tcClassSigs, tcClassDecl2, 
 		    findMethodBind, instantiateMethod, tcInstanceMethodBody,
-		    mkGenericDefMethBind,
-		    tcAddDeclCtxt, badMethodErr, badATErr, omittedATWarn
+                    mkGenericDefMethBind,
+		    tcAddDeclCtxt, badMethodErr
 		  ) where
 
 #include "HsVersions.h"
@@ -17,10 +24,12 @@ module TcClassDcl ( tcClassSigs, tcClassDecl2,
 import HsSyn
 import TcEnv
 import TcPat( addInlinePrags )
+import TcEvidence( idHsWrapper )
 import TcBinds
 import TcUnify
 import TcHsType
 import TcMType
+import Type     ( getClassPredTys_maybe )
 import TcType
 import TcRnMonad
 import BuildTyCl( TcMethInfo )
@@ -111,7 +120,7 @@ tcClassSigs clas sigs def_methods
     dm_bind_names = [op | L _ (FunBind {fun_id = L _ op}) <- bagToList def_methods]
 
     tc_sig genop_env (op_names, op_hs_ty)
-      = do { op_ty <- tcHsKindedType op_hs_ty	-- Class tyvars already in scope
+      = do { op_ty <- tcHsType op_hs_ty	-- Class tyvars already in scope
            ; return [ (op_name, f op_name, op_ty) | L _ op_name <- op_names ] }
            where
              f nm | nm `elemNameEnv` genop_env = GenericDM
@@ -119,7 +128,7 @@ tcClassSigs clas sigs def_methods
                   | otherwise                  = NoDM
 
     tc_gen_sig (op_names, gen_hs_ty)
-      = do { gen_op_ty <- tcHsKindedType gen_hs_ty
+      = do { gen_op_ty <- tcHsType gen_hs_ty
            ; return [ (op_name, gen_op_ty) | L _ op_name <- op_names ] }
 \end{code}
 
@@ -235,15 +244,17 @@ tcInstanceMethodBody skol_info tyvars dfun_ev_vars
                              -- Substitute the local_meth_name for the binder
 			     -- NB: the binding is always a FunBind
         ; traceTc "TIM" (ppr local_meth_id $$ ppr (meth_sig_fn (idName local_meth_id))) 
-	; (ev_binds, (tc_bind, _)) 
+	; (ev_binds, (tc_bind, _, _)) 
                <- checkConstraints skol_info tyvars dfun_ev_vars $
 		  tcExtendIdEnv [local_meth_id] $
 	          tcPolyBinds TopLevel meth_sig_fn no_prag_fn 
 		  	     NonRecursive NonRecursive
 		  	     [lm_bind]
 
-        ; let full_bind = AbsBinds { abs_tvs = tyvars, abs_ev_vars = dfun_ev_vars
-                                   , abs_exports = [(tyvars, meth_id, local_meth_id, specs)]
+        ; let export = ABE { abe_wrap = idHsWrapper, abe_poly = meth_id
+                           , abe_mono = local_meth_id, abe_prags = specs }
+              full_bind = AbsBinds { abs_tvs = tyvars, abs_ev_vars = dfun_ev_vars
+                                   , abs_exports = [export]
                                    , abs_ev_binds = ev_binds
                                    , abs_binds = tc_bind }
 
@@ -357,8 +368,8 @@ mkGenericDefMethBind clas inst_tys sel_id dm_name
 		   (vcat [ppr clas <+> ppr inst_tys,
 			  nest 2 (ppr sel_id <+> equals <+> ppr rhs)]))
 
-        ; return (noLoc $ mkFunBind (noLoc (idName sel_id))
-                                    [mkSimpleMatch [] rhs]) }
+        ; return (noLoc $ mkTopFunBind (noLoc (idName sel_id))
+                                       [mkSimpleMatch [] rhs]) }
   where
     rhs = nlHsVar dm_name
 \end{code}
@@ -398,14 +409,6 @@ badGenericMethod clas op
   = hsep [ptext (sLit "Class"), quotes (ppr clas), 
 	  ptext (sLit "has a generic-default signature without a binding"), quotes (ppr op)]
 
-badATErr :: Class -> Name -> SDoc
-badATErr clas at
-  = hsep [ptext (sLit "Class"), quotes (ppr clas), 
-	  ptext (sLit "does not have an associated type"), quotes (ppr at)]
-
-omittedATWarn :: Name -> SDoc
-omittedATWarn at
-  = ptext (sLit "No explicit AT declaration for") <+> quotes (ppr at)
 {-
 badGenericInstanceType :: LHsBinds Name -> SDoc
 badGenericInstanceType binds

@@ -149,12 +149,12 @@ typedef struct Task_ {
     // really want separate stats for each call in a nested chain of
     // foreign->haskell->foreign->haskell calls, but we'll get a
     // separate Task for each of the haskell calls.
-    Ticks       elapsedtimestart;
-    Ticks       muttimestart;
-    Ticks       mut_time;
-    Ticks       mut_etime;
-    Ticks       gc_time;
-    Ticks       gc_etime;
+    Time       elapsedtimestart;
+    Time       muttimestart;
+    Time       mut_time;
+    Time       mut_etime;
+    Time       gc_time;
+    Time       gc_etime;
 
     // Links tasks on the returning_tasks queue of a Capability, and
     // on spare_workers.
@@ -208,7 +208,7 @@ void workerTaskStop (Task *task);
 void taskTimeStamp (Task *task);
 
 // The current Task has finished a GC, record the amount of time spent.
-void taskDoneGC (Task *task, Ticks cpu_time, Ticks elapsed_time);
+void taskDoneGC (Task *task, Time cpu_time, Time elapsed_time);
 
 // Put the task back on the free list, mark it stopped.  Used by
 // forkProcess().
@@ -235,19 +235,31 @@ void interruptWorkerTask (Task *task);
 
 #endif /* THREADED_RTS */
 
+// Update any (Capability *) pointers belonging to Tasks after the
+// Capability array is moved/resized.
+//
+void updateCapabilityRefs (void);
+
 // -----------------------------------------------------------------------------
 // INLINE functions... private from here on down:
 
 // A thread-local-storage key that we can use to get access to the
 // current thread's Task structure.
 #if defined(THREADED_RTS)
-#if (defined(linux_HOST_OS) && \
+#if ((defined(linux_HOST_OS) && \
      (defined(i386_HOST_ARCH) || defined(x86_64_HOST_ARCH))) || \
-    (defined(mingw32_HOST_OS) && __GNUC__ >= 4 && __GNUC_MINOR__ >= 4)
+    (defined(mingw32_HOST_OS) && __GNUC__ >= 4 && __GNUC_MINOR__ >= 4)) && \
+    (!defined(llvm_CC_FLAVOR))
 #define MYTASK_USE_TLV
 extern __thread Task *my_task;
 #else
 extern ThreadLocalKey currentTaskKey;
+#endif
+// LLVM-based compilers do not upport the __thread attribute, so we need
+// to store the gct variable as a pthread local storage. We declare the
+// key here to keep thread local storage initialization in the same place.
+#if defined(llvm_CC_FLAVOR)
+extern ThreadLocalKey gctKey;
 #endif
 #else
 extern Task *my_task;

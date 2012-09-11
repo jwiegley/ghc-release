@@ -12,11 +12,17 @@ have a standard form, namely:
 - primitive operations
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module MkId (
         mkDictFunId, mkDictFunTy, mkDictSelId,
 
-        mkDataConIds,
-        mkPrimOpId, mkFCallId, mkTickBoxOpId, mkBreakPointOpId,
+        mkDataConIds, mkPrimOpId, mkFCallId,
 
         mkReboxingAlt, wrapNewTypeBody, unwrapNewTypeBody,
         wrapFamInstBody, unwrapFamInstScrut,
@@ -36,13 +42,13 @@ module MkId (
 
 import Rules
 import TysPrim
-import TysWiredIn	( unitTy )
+import TysWiredIn
 import PrelRules
 import Type
 import Coercion
 import TcType
 import MkCore
-import CoreUtils	( exprType, mkCoerce )
+import CoreUtils	( exprType, mkCast )
 import CoreUnfold
 import Literal
 import TyCon
@@ -65,7 +71,6 @@ import Pair
 import Outputable
 import FastString
 import ListSetOps
-import Module
 \end{code}
 
 %************************************************************************
@@ -293,20 +298,23 @@ mkDataConIds wrap_name wkr_name data_con
         -- extra constraints where necessary.
     wrap_tvs    = (univ_tvs `minusList` map fst eq_spec) ++ ex_tvs
     res_ty_args = substTyVars (mkTopTvSubst eq_spec) univ_tvs
-    ev_tys      = mkPredTys other_theta
+    ev_tys      = other_theta
     wrap_ty     = mkForAllTys wrap_tvs $ 
                   mkFunTys ev_tys $
                   mkFunTys orig_arg_tys $ res_ty
 
         ----------- Wrappers for algebraic data types -------------- 
     alg_wrap_id = mkGlobalId (DataConWrapId data_con) wrap_name wrap_ty alg_wrap_info
-    alg_wrap_info = noCafIdInfo         -- The NoCaf-ness is set by noCafIdInfo
+    alg_wrap_info = noCafIdInfo
                     `setArityInfo`         wrap_arity
                         -- It's important to specify the arity, so that partial
                         -- applications are treated as values
 		    `setInlinePragInfo`    alwaysInlinePragma
                     `setUnfoldingInfo`     wrap_unf
                     `setStrictnessInfo` Just wrap_sig
+                        -- We need to get the CAF info right here because TidyPgm
+                        -- does not tidy the IdInfo of implicit bindings (like the wrapper)
+                        -- so it not make sure that the CAF info is sane
 
     all_strict_marks = dataConExStricts data_con ++ dataConStrictMarks data_con
     wrap_sig = mkStrictSig (mkTopDmdType wrap_arg_dmds cpr_info)
@@ -339,6 +347,8 @@ mkDataConIds wrap_name wkr_name data_con
                                      `mkVarApps` ex_tvs                 
                                      `mkCoApps`  map (mkReflCo . snd) eq_spec
                                      `mkVarApps` reverse rep_ids
+                            -- Dont box the eq_spec coercions since they are
+                            -- marked as HsUnpack by mk_dict_strict_mark
 
     (ev_args,i2) = mkLocals 1  ev_tys
     (id_args,i3) = mkLocals i2 orig_arg_tys
@@ -481,7 +491,7 @@ mkDictSelId no_unf name clas
 
     the_arg_id     = arg_ids !! val_index
     pred       	   = mkClassPred clas (mkTyVarTys tyvars)
-    dict_id    	   = mkTemplateLocal 1 $ mkPredTy pred
+    dict_id    	   = mkTemplateLocal 1 pred
     arg_ids    	   = mkTemplateLocalsNum 2 arg_tys
 
     rhs = mkLams tyvars  (Lam dict_id   rhs_body)
@@ -673,7 +683,7 @@ wrapNewTypeBody :: TyCon -> [Type] -> CoreExpr -> CoreExpr
 wrapNewTypeBody tycon args result_expr
   = ASSERT( isNewTyCon tycon )
     wrapFamInstBody tycon args $
-    mkCoerce (mkSymCo co) result_expr
+    mkCast result_expr (mkSymCo co)
   where
     co = mkAxInstCo (newTyConCo tycon) args
 
@@ -685,7 +695,7 @@ wrapNewTypeBody tycon args result_expr
 unwrapNewTypeBody :: TyCon -> [Type] -> CoreExpr -> CoreExpr
 unwrapNewTypeBody tycon args result_expr
   = ASSERT( isNewTyCon tycon )
-    mkCoerce (mkAxInstCo (newTyConCo tycon) args) result_expr
+    mkCast result_expr (mkAxInstCo (newTyConCo tycon) args)
 
 -- If the type constructor is a representation type of a data instance, wrap
 -- the expression into a cast adjusting the expression type, which is an
@@ -695,14 +705,14 @@ unwrapNewTypeBody tycon args result_expr
 wrapFamInstBody :: TyCon -> [Type] -> CoreExpr -> CoreExpr
 wrapFamInstBody tycon args body
   | Just co_con <- tyConFamilyCoercion_maybe tycon
-  = mkCoerce (mkSymCo (mkAxInstCo co_con args)) body
+  = mkCast body (mkSymCo (mkAxInstCo co_con args))
   | otherwise
   = body
 
 unwrapFamInstScrut :: TyCon -> [Type] -> CoreExpr -> CoreExpr
 unwrapFamInstScrut tycon args scrut
   | Just co_con <- tyConFamilyCoercion_maybe tycon
-  = mkCoerce (mkAxInstCo co_con args) scrut
+  = mkCast scrut (mkAxInstCo co_con args)
   | otherwise
   = scrut
 \end{code}
@@ -761,30 +771,6 @@ mkFCallId uniq fcall ty
     (arg_tys, _) = tcSplitFunTys tau
     arity        = length arg_tys
     strict_sig   = mkStrictSig (mkTopDmdType (replicate arity evalDmd) TopRes)
-
--- Tick boxes and breakpoints are both represented as TickBoxOpIds,
--- except for the type:
---
---    a plain HPC tick box has type (State# RealWorld)
---    a breakpoint Id has type forall a.a
---
--- The breakpoint Id will be applied to a list of arbitrary free variables,
--- which is why it needs a polymorphic type.
-
-mkTickBoxOpId :: Unique -> Module -> TickBoxId -> Id
-mkTickBoxOpId uniq mod ix = mkTickBox' uniq mod ix realWorldStatePrimTy
-
-mkBreakPointOpId :: Unique -> Module -> TickBoxId -> Id
-mkBreakPointOpId uniq mod ix = mkTickBox' uniq mod ix ty
- where ty = mkSigmaTy [openAlphaTyVar] [] openAlphaTy
-
-mkTickBox' :: Unique -> Module -> TickBoxId -> Type -> Id
-mkTickBox' uniq mod ix ty = mkGlobalId (TickBoxOpId tickbox) name ty info    
-  where
-    tickbox = TickBox mod ix
-    occ_str = showSDoc (braces (ppr tickbox))
-    name    = mkTickBoxOpName uniq occ_str
-    info    = noCafIdInfo
 \end{code}
 
 
@@ -838,7 +824,7 @@ mkDictFunId dfun_name tvs theta clas tys
 
 mkDictFunTy :: [TyVar] -> ThetaType -> Class -> [Type] -> Type
 mkDictFunTy tvs theta clas tys
-  = mkSigmaTy tvs theta (mkDictTy clas tys)
+  = mkSigmaTy tvs theta (mkClassPred clas tys)
 \end{code}
 
 
@@ -1038,7 +1024,7 @@ voidArgId       -- :: State# RealWorld
 coercionTokenId :: Id 	      -- :: () ~ ()
 coercionTokenId -- Used to replace Coercion terms when we go to STG
   = pcMiscPrelId coercionTokenName 
-                 (mkTyConApp eqPredPrimTyCon [unitTy, unitTy])
+                 (mkTyConApp eqPrimTyCon [liftedTypeKind, unitTy, unitTy])
                  noCafIdInfo
 \end{code}
 

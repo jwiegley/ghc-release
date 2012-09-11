@@ -1,6 +1,7 @@
 {-# LANGUAGE GADTs #-}
+-- ToDo: remove -fno-warn-warnings-deprecations
 {-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
--- ToDo: remove
+-- ToDo: remove -fno-warn-incomplete-patterns
 {-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
 
 module CmmCommonBlockElim
@@ -11,7 +12,7 @@ where
 
 import BlockId
 import Cmm
-import CmmExpr
+import CmmUtils
 import Prelude hiding (iterate, succ, unzip, zip)
 
 import Compiler.Hoopl

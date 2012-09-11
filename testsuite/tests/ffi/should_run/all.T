@@ -68,6 +68,7 @@ if config.platform.startswith('i386-'):
         maybe_skip = only_ways(['ghci'])
 
 test('ffi009', [skip_if_fast, expect_fail_for(['extcore','optextcore']),
+                reqlib('random'),
                 maybe_skip] ,compile_and_run, [opts])
 
 # Doesn't work with External Core due to __labels
@@ -91,7 +92,9 @@ test('ffi012', skip_if_not_windows, compile_and_run, [''])
 test('ffi013', expect_fail_for(['extcore','optextcore']), compile_and_run, [''])
 
 # threaded2 sometimes gives ffi014: Main_dDu: interrupted
-test('ffi014', only_ways(['threaded1','threaded2']), compile_and_run, ['ffi014_cbits.c'])
+test('ffi014',
+     [only_ways(['threaded1','threaded2']), extra_clean(['ffi014_cbits.o'])],
+     compile_and_run, ['ffi014_cbits.c'])
 
 # GHCi can't handle the separate C file (ToDo: fix this somehow)
 test('ffi015', [ omit_ways(['ghci']), extra_clean(['ffi015_cbits.o']) ],
@@ -133,7 +136,10 @@ test('2276_ghci', [ only_ways(['ghci']),
 
 test('2469', normal, compile_and_run, ['-optc-std=gnu99'])
 
-test('2594', omit_ways(['ghci']), compile_and_run, ['2594_c.c'])
+test('2594',
+     [extra_clean(['2594_c.o']), omit_ways(['ghci'])],
+     compile_and_run,
+     ['2594_c.c'])
 
 test('fptr01', [ omit_ways(['ghci']), extra_clean(['fptr01_c.o']) ],
                compile_and_run, ['fptr01_c.c'])
@@ -165,3 +171,19 @@ test('4038', normal, compile_and_run, flagsFor4038)
 test('4221', [ omit_ways(['ghci']), extra_clean(['4221_c.o']) ],
                compile_and_run, ['4221_c.c'])
 
+test('5402', [ omit_ways(['ghci']),
+               exit_code(42),
+               extra_clean(['5402_main.o']),
+                 # The 5402_setup hack is to ensure that we generate
+                 # 5402_stub.h before compiling 5402_main.c, which
+                 # needs it.
+               compile_cmd_prefix('$MAKE --no-print-directory 5402_setup && ') ],
+             compile_and_run, ["-no-hs-main 5402_main.c"])
+
+test('5594', [ omit_ways(['ghci']),
+               extra_clean(['5594_c.o']),
+               compile_cmd_prefix('$MAKE --no-print-directory 5594_setup && ') ],
+               # The 5594_setup hack is to ensure that we generate
+               # 5594_stub.h before compiling 5594_c.c, which
+               # needs it.
+               compile_and_run, ['5594_c.c -no-hs-main'])

@@ -1,14 +1,21 @@
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module TcInteract ( 
-     solveInteract, solveInteractGiven, solveInteractWanted,
-     AtomicInert, tyVarsOfInert, 
-     InertSet, emptyInert, updInertSet, extractUnsolved, solveOne,
+     solveInteractWanted, -- Solves [WantedEvVar]
+     solveInteractGiven,  -- Solves [EvVar],GivenLoc
+     solveInteractCts,    -- Solves [Cts]
   ) where  
 
 #include "HsVersions.h"
 
 
-import BasicTypes 
+import BasicTypes ()
 import TcCanonical
 import VarSet
 import Type
@@ -16,18 +23,18 @@ import Unify
 
 import Id 
 import Var
+import VarEnv ( ) -- unitVarEnv, mkInScopeSet
 
 import TcType
-import HsBinds
 
-import Inst( tyVarsOfEvVar )
 import Class
 import TyCon
 import Name
+import IParam
 
 import FunDeps
 
-import Coercion
+import TcEvidence
 import Outputable
 
 import TcRnTypes
@@ -35,268 +42,193 @@ import TcErrors
 import TcSMonad
 import Maybes( orElse )
 import Bag
-import qualified Data.Map as Map
+
+import Control.Monad ( foldM )
+import TrieMap
+
+import VarEnv
+import qualified Data.Traversable as Traversable
 
 import Control.Monad( when )
-
+import Pair ( pSnd )
+import UniqFM
 import FastString ( sLit ) 
 import DynFlags
 \end{code}
-
-Note [InertSet invariants]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-An InertSet is a bag of canonical constraints, with the following invariants:
-
-  1 No two constraints react with each other. 
-    
-    A tricky case is when there exists a given (solved) dictionary 
-    constraint and a wanted identical constraint in the inert set, but do 
-    not react because reaction would create loopy dictionary evidence for 
-    the wanted. See note [Recursive dictionaries]
-
-  2 Given equalities form an idempotent substitution [none of the
-    given LHS's occur in any of the given RHS's or reactant parts]
-
-  3 Wanted equalities also form an idempotent substitution
-
-  4 The entire set of equalities is acyclic.
-
-  5 Wanted dictionaries are inert with the top-level axiom set 
-
-  6 Equalities of the form tv1 ~ tv2 always have a touchable variable
-    on the left (if possible).
-
-  7 No wanted constraints tv1 ~ tv2 with tv1 touchable. Such constraints
-    will be marked as solved right before being pushed into the inert set. 
-    See note [Touchables and givens].
-
-  8 No Given constraint mentions a touchable unification variable, but 
-    Given/Solved may do so. 
-
-  9 Given constraints will also have their superclasses in the inert set, 
-    but Given/Solved will not. 
- 
-Note that 6 and 7 are /not/ enforced by canonicalization but rather by 
-insertion in the inert list, ie by TcInteract. 
-
-During the process of solving, the inert set will contain some
-previously given constraints, some wanted constraints, and some given
-constraints which have arisen from solving wanted constraints. For
-now we do not distinguish between given and solved constraints.
-
-Note that we must switch wanted inert items to given when going under an
-implication constraint (when in top-level inference mode).
-
-\begin{code}
-
-data CCanMap a = CCanMap { cts_given   :: Map.Map a CanonicalCts
-                                          -- Invariant: all Given
-                         , cts_derived :: Map.Map a CanonicalCts 
-                                          -- Invariant: all Derived
-                         , cts_wanted  :: Map.Map a CanonicalCts } 
-                                          -- Invariant: all Wanted
-
-cCanMapToBag :: Ord a => CCanMap a -> CanonicalCts 
-cCanMapToBag cmap = Map.fold unionBags rest_wder (cts_given cmap)
-  where rest_wder = Map.fold unionBags rest_der  (cts_wanted cmap) 
-        rest_der  = Map.fold unionBags emptyCCan (cts_derived cmap)
-
-emptyCCanMap :: CCanMap a 
-emptyCCanMap = CCanMap { cts_given = Map.empty
-                       , cts_derived = Map.empty, cts_wanted = Map.empty } 
-
-updCCanMap:: Ord a => (a,CanonicalCt) -> CCanMap a -> CCanMap a 
-updCCanMap (a,ct) cmap 
-  = case cc_flavor ct of 
-      Wanted {} 
-          -> cmap { cts_wanted = Map.insertWith unionBags a this_ct (cts_wanted cmap) } 
-      Given {} 
-          -> cmap { cts_given = Map.insertWith unionBags a this_ct (cts_given cmap) }
-      Derived {}
-          -> cmap { cts_derived = Map.insertWith unionBags a this_ct (cts_derived cmap) }
-  where this_ct = singleCCan ct 
-
-getRelevantCts :: Ord a => a -> CCanMap a -> (CanonicalCts, CCanMap a) 
--- Gets the relevant constraints and returns the rest of the CCanMap
-getRelevantCts a cmap 
-    = let relevant = unionManyBags [ Map.findWithDefault emptyCCan a (cts_wanted cmap)
-                                   , Map.findWithDefault emptyCCan a (cts_given cmap)
-                                   , Map.findWithDefault emptyCCan a (cts_derived cmap) ]
-          residual_map = cmap { cts_wanted = Map.delete a (cts_wanted cmap) 
-                              , cts_given = Map.delete a (cts_given cmap) 
-                              , cts_derived = Map.delete a (cts_derived cmap) }
-      in (relevant, residual_map) 
-
-extractUnsolvedCMap :: Ord a => CCanMap a -> (CanonicalCts, CCanMap a)
--- Gets the wanted or derived constraints and returns a residual
--- CCanMap with only givens.
-extractUnsolvedCMap cmap =
-  let wntd = Map.fold unionBags emptyCCan (cts_wanted cmap)
-      derd = Map.fold unionBags emptyCCan (cts_derived cmap)
-  in (wntd `unionBags` derd, 
-           cmap { cts_wanted = Map.empty, cts_derived = Map.empty })
-
-
--- See Note [InertSet invariants]
-data InertSet 
-  = IS { inert_eqs          :: CanonicalCts               -- Equalities only (CTyEqCan)
-       , inert_dicts        :: CCanMap Class              -- Dictionaries only
-       , inert_ips          :: CCanMap (IPName Name)      -- Implicit parameters 
-       , inert_frozen       :: CanonicalCts
-       , inert_funeqs       :: CCanMap TyCon              -- Type family equalities only
-               -- This representation allows us to quickly get to the relevant 
-               -- inert constraints when interacting a work item with the inert set.
-       }
-
-tyVarsOfInert :: InertSet -> TcTyVarSet 
-tyVarsOfInert (IS { inert_eqs    = eqs
-                  , inert_dicts  = dictmap
-                  , inert_ips    = ipmap
-                  , inert_frozen = frozen
-                  , inert_funeqs = funeqmap }) = tyVarsOfCanonicals cts
-  where
-    cts = eqs `andCCan` frozen `andCCan` cCanMapToBag dictmap
-              `andCCan` cCanMapToBag ipmap `andCCan` cCanMapToBag funeqmap
-
-instance Outputable InertSet where
-  ppr is = vcat [ vcat (map ppr (Bag.bagToList $ inert_eqs is))
-                , vcat (map ppr (Bag.bagToList $ cCanMapToBag (inert_dicts is)))
-                , vcat (map ppr (Bag.bagToList $ cCanMapToBag (inert_ips is))) 
-                , vcat (map ppr (Bag.bagToList $ cCanMapToBag (inert_funeqs is)))
-                , text "Frozen errors =" <+> -- Clearly print frozen errors
-                    vcat (map ppr (Bag.bagToList $ inert_frozen is))
-                ]
-                       
-emptyInert :: InertSet
-emptyInert = IS { inert_eqs    = Bag.emptyBag
-                , inert_frozen = Bag.emptyBag
-                , inert_dicts  = emptyCCanMap
-                , inert_ips    = emptyCCanMap
-                , inert_funeqs = emptyCCanMap }
-
-updInertSet :: InertSet -> AtomicInert -> InertSet 
-updInertSet is item 
-  | isCTyEqCan item                     -- Other equality 
-  = let eqs' = inert_eqs is `Bag.snocBag` item 
-    in is { inert_eqs = eqs' } 
-  | Just cls <- isCDictCan_Maybe item   -- Dictionary 
-  = is { inert_dicts = updCCanMap (cls,item) (inert_dicts is) } 
-  | Just x  <- isCIPCan_Maybe item      -- IP 
-  = is { inert_ips   = updCCanMap (x,item) (inert_ips is) }  
-  | Just tc <- isCFunEqCan_Maybe item   -- Function equality 
-  = is { inert_funeqs = updCCanMap (tc,item) (inert_funeqs is) }
-  | otherwise 
-  = is { inert_frozen = inert_frozen is `Bag.snocBag` item }
-
-extractUnsolved :: InertSet -> (InertSet, CanonicalCts)
--- Postcondition: the returned canonical cts are either Derived, or Wanted.
-extractUnsolved is@(IS {inert_eqs = eqs}) 
-  = let is_solved  = is { inert_eqs    = solved_eqs
-                        , inert_dicts  = solved_dicts
-                        , inert_ips    = solved_ips
-                        , inert_frozen = emptyCCan
-                        , inert_funeqs = solved_funeqs }
-    in (is_solved, unsolved)
-
-  where (unsolved_eqs, solved_eqs)       = Bag.partitionBag (not.isGivenOrSolvedCt) eqs
-        (unsolved_ips, solved_ips)       = extractUnsolvedCMap (inert_ips is) 
-        (unsolved_dicts, solved_dicts)   = extractUnsolvedCMap (inert_dicts is) 
-        (unsolved_funeqs, solved_funeqs) = extractUnsolvedCMap (inert_funeqs is) 
-
-        unsolved = unsolved_eqs `unionBags` inert_frozen is `unionBags`
-                   unsolved_ips `unionBags` unsolved_dicts `unionBags` unsolved_funeqs
-\end{code}
-
-%*********************************************************************
-%*                                                                   * 
+**********************************************************************
+*                                                                    * 
 *                      Main Interaction Solver                       *
 *                                                                    *
 **********************************************************************
 
-Note [Basic plan] 
-~~~~~~~~~~~~~~~~~
-1. Canonicalise (unary)
-2. Pairwise interaction (binary)
-    * Take one from work list 
-    * Try all pair-wise interactions with each constraint in inert
-   
-   As an optimisation, we prioritize the equalities both in the 
-   worklist and in the inerts. 
+Note [Basic Simplifier Plan] 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-3. Try to solve spontaneously for equalities involving touchables 
-4. Top-level interaction (binary wrt top-level)
-   Superclass decomposition belongs in (4), see note [Superclasses]
+1. Pick an element from the WorkList if there exists one with depth 
+   less thanour context-stack depth. 
 
+2. Run it down the 'stage' pipeline. Stages are: 
+      - canonicalization
+      - inert reactions
+      - spontaneous reactions
+      - top-level intreactions
+   Each stage returns a StopOrContinue and may have sideffected 
+   the inerts or worklist.
+  
+   The threading of the stages is as follows: 
+      - If (Stop) is returned by a stage then we start again from Step 1. 
+      - If (ContinueWith ct) is returned by a stage, we feed 'ct' on to 
+        the next stage in the pipeline. 
+4. If the element has survived (i.e. ContinueWith x) the last stage 
+   then we add him in the inerts and jump back to Step 1.
+
+If in Step 1 no such element exists, we have exceeded our context-stack 
+depth and will simply fail.
 \begin{code}
-type AtomicInert = CanonicalCt     -- constraint pulled from InertSet
-type WorkItem    = CanonicalCt     -- constraint pulled from WorkList
 
-------------------------
-data StopOrContinue 
-  = Stop			-- Work item is consumed
-  | ContinueWith WorkItem	-- Not consumed
+solveInteractCts :: [Ct] -> TcS ()
+solveInteractCts cts 
+  = do { evvar_cache <- getTcSEvVarCacheMap
+       ; (cts_thinner, new_evvar_cache) <- add_cts_in_cache evvar_cache cts
+       ; traceTcS "solveInteractCts" (vcat [ text "cts_original =" <+> ppr cts, 
+                                             text "cts_thinner  =" <+> ppr cts_thinner
+                                           ])
+       ; setTcSEvVarCacheMap new_evvar_cache 
+       ; updWorkListTcS (appendWorkListCt cts_thinner) >> solveInteract }
+ 
+  where
+    add_cts_in_cache evvar_cache cts
+      = do { ctxt <- getTcSContext
+           ; foldM (solve_or_cache (simplEqsOnly ctxt)) ([],evvar_cache) cts }
 
-instance Outputable StopOrContinue where
-  ppr Stop             = ptext (sLit "Stop")
-  ppr (ContinueWith w) = ptext (sLit "ContinueWith") <+> ppr w
+    solve_or_cache :: Bool    -- Solve equalities only, not classes etc
+                   -> ([Ct],TypeMap (EvVar,CtFlavor))
+                   -> Ct
+                   -> TcS ([Ct],TypeMap (EvVar,CtFlavor))
+    solve_or_cache eqs_only (acc_cts,acc_cache) ct
+      | dont_cache eqs_only (classifyPredType pred_ty)
+      = return (ct:acc_cts,acc_cache)
 
--- Results after interacting a WorkItem as far as possible with an InertSet
-data StageResult
-  = SR { sr_inerts     :: InertSet
-           -- The new InertSet to use (REPLACES the old InertSet)
-       , sr_new_work   :: WorkList
-           -- Any new work items generated (should be ADDED to the old WorkList)
-           -- Invariant: 
-           --    sr_stop = Just workitem => workitem is *not* in sr_inerts and
-           --                               workitem is inert wrt to sr_inerts
-       , sr_stop       :: StopOrContinue
-       }
+      | Just (ev',fl') <- lookupTM pred_ty acc_cache
+      , fl' `canSolve` fl
+      , isWanted fl
+      = do { _ <- setEvBind ev (EvId ev') fl
+           ; return (acc_cts,acc_cache) }
 
-instance Outputable StageResult where
-  ppr (SR { sr_inerts = inerts, sr_new_work = work, sr_stop = stop })
-    = ptext (sLit "SR") <+> 
-      braces (sep [ ptext (sLit "inerts =") <+> ppr inerts <> comma
-             	  , ptext (sLit "new work =") <+> ppr work <> comma
-             	  , ptext (sLit "stop =") <+> ppr stop])
+      | otherwise -- If it's a given keep it in the work list, even if it exists in the cache!
+      = return (ct:acc_cts, alterTM pred_ty (\_ -> Just (ev,fl)) acc_cache)
+      where fl = cc_flavor ct
+            ev = cc_id ct
+            pred_ty = ctPred ct
 
-type SubGoalDepth = Int	  -- Starts at zero; used to limit infinite
-     		    	  -- recursion of sub-goals
-type SimplifierStage = SubGoalDepth -> WorkItem -> InertSet -> TcS StageResult 
+    dont_cache :: Bool -> PredTree -> Bool
+    -- Do not use the cache, not update it, if this is true
+    dont_cache _ (IPPred {}) = True    -- IPPreds have subtle shadowing
+    dont_cache _ (EqPred ty1 ty2)      -- Report Int ~ Bool errors separately
+      | Just tc1 <- tyConAppTyCon_maybe ty1
+      , Just tc2 <- tyConAppTyCon_maybe ty2
+      , tc1 /= tc2
+      = isDecomposableTyCon tc1 && isDecomposableTyCon tc2
+      | otherwise = False
+    dont_cache eqs_only _ = eqs_only
+            -- If we are simplifying equalities only,
+            -- do not cache non-equalities
+            -- See Note [Simplifying RULE lhs constraints] in TcSimplify
 
--- Combine a sequence of simplifier 'stages' to create a pipeline 
-runSolverPipeline :: SubGoalDepth
-                  -> [(String, SimplifierStage)]
-		  -> InertSet -> WorkItem 
-                  -> TcS (InertSet, WorkList)
--- Precondition: non-empty list of stages 
-runSolverPipeline depth pipeline inerts workItem
-  = do { traceTcS "Start solver pipeline" $ 
-            vcat [ ptext (sLit "work item =") <+> ppr workItem
-                 , ptext (sLit "inerts    =") <+> ppr inerts]
+solveInteractGiven :: GivenLoc -> [EvVar] -> TcS () 
+solveInteractGiven gloc evs
+  = solveInteractCts (map mk_noncan evs)
+  where mk_noncan ev = CNonCanonical { cc_id = ev
+                                     , cc_flavor = Given gloc GivenOrig 
+                                     , cc_depth = 0 }
 
-       ; let itr_in = SR { sr_inerts = inerts
-                         , sr_new_work = emptyWorkList
-                         , sr_stop = ContinueWith workItem }
-       ; itr_out <- run_pipeline pipeline itr_in
-       ; let new_inert 
-              = case sr_stop itr_out of 
-       	          Stop              -> sr_inerts itr_out
-                  ContinueWith item -> sr_inerts itr_out `updInertSet` item
-       ; return (new_inert, sr_new_work itr_out) }
+solveInteractWanted :: [WantedEvVar] -> TcS ()
+-- Solve these wanteds along with current inerts and wanteds!
+solveInteractWanted wevs
+  = solveInteractCts (map mk_noncan wevs) 
+  where mk_noncan (EvVarX v w) 
+          = CNonCanonical { cc_id = v, cc_flavor = Wanted w, cc_depth = 0 }
+
+
+-- The main solver loop implements Note [Basic Simplifier Plan]
+---------------------------------------------------------------
+solveInteract :: TcS ()
+-- Returns the final InertSet in TcS, WorkList will be eventually empty.
+solveInteract
+  = {-# SCC "solveInteract" #-}
+    do { dyn_flags <- getDynFlags
+       ; let max_depth = ctxtStkDepth dyn_flags
+             solve_loop
+              = {-# SCC "solve_loop" #-}
+                do { sel <- selectNextWorkItem max_depth
+                   ; case sel of 
+                      NoWorkRemaining     -- Done, successfuly (modulo frozen)
+                        -> return ()
+                      MaxDepthExceeded ct -- Failure, depth exceeded
+                        -> solverDepthErrorTcS (cc_depth ct) [ct]
+                      NextWorkItem ct     -- More work, loop around!
+                        -> runSolverPipeline thePipeline ct >> solve_loop }
+       ; solve_loop }
+
+type WorkItem = Ct
+type SimplifierStage = WorkItem -> TcS StopOrContinue
+
+continueWith :: WorkItem -> TcS StopOrContinue
+continueWith work_item = return (ContinueWith work_item) 
+
+data SelectWorkItem 
+       = NoWorkRemaining      -- No more work left (effectively we're done!)
+       | MaxDepthExceeded Ct  -- More work left to do but this constraint has exceeded
+                              -- the max subgoal depth and we must stop 
+       | NextWorkItem Ct      -- More work left, here's the next item to look at 
+
+selectNextWorkItem :: SubGoalDepth -- Max depth allowed
+                   -> TcS SelectWorkItem
+selectNextWorkItem max_depth
+  = updWorkListTcS_return pick_next
   where 
-    run_pipeline :: [(String, SimplifierStage)]
-                 -> StageResult -> TcS StageResult
-    run_pipeline [] itr                         = return itr
-    run_pipeline _  itr@(SR { sr_stop = Stop }) = return itr
+    pick_next :: WorkList -> (SelectWorkItem, WorkList)
+    pick_next wl = case selectWorkItem wl of
+                     (Nothing,_) 
+                         -> (NoWorkRemaining,wl)           -- No more work
+                     (Just ct, new_wl) 
+                         | cc_depth ct > max_depth         -- Depth exceeded
+                         -> (MaxDepthExceeded ct,new_wl)
+                     (Just ct, new_wl) 
+                         -> (NextWorkItem ct, new_wl)      -- New workitem and worklist
 
-    run_pipeline ((name,stage):stages) 
-                 (SR { sr_new_work = accum_work
-                     , sr_inerts   = inerts
-                     , sr_stop     = ContinueWith work_item })
-      = do { itr <- stage depth work_item inerts 
-           ; traceTcS ("Stage result (" ++ name ++ ")") (ppr itr)
-           ; let itr' = itr { sr_new_work = accum_work `unionWorkList` sr_new_work itr }
-           ; run_pipeline stages itr' }
+runSolverPipeline :: [(String,SimplifierStage)] -- The pipeline 
+                  -> WorkItem                   -- The work item 
+                  -> TcS () 
+-- Run this item down the pipeline, leaving behind new work and inerts
+runSolverPipeline pipeline workItem 
+  = do { initial_is <- getTcSInerts 
+       ; traceTcS "Start solver pipeline {" $ 
+                  vcat [ ptext (sLit "work item = ") <+> ppr workItem 
+                       , ptext (sLit "inerts    = ") <+> ppr initial_is]
+
+       ; final_res  <- run_pipeline pipeline (ContinueWith workItem)
+
+       ; final_is <- getTcSInerts
+       ; case final_res of 
+           Stop            -> do { traceTcS "End solver pipeline (discharged) }" 
+                                       (ptext (sLit "inerts    = ") <+> ppr final_is)
+                                 ; return () }
+           ContinueWith ct -> do { traceTcS "End solver pipeline (not discharged) }" $
+                                       vcat [ ptext (sLit "final_item = ") <+> ppr ct
+                                            , ptext (sLit "inerts     = ") <+> ppr final_is]
+                                 ; updInertSetTcS ct }
+       }
+  where run_pipeline :: [(String,SimplifierStage)] -> StopOrContinue -> TcS StopOrContinue
+        run_pipeline [] res = return res 
+        run_pipeline _ Stop = return Stop 
+        run_pipeline ((stg_name,stg):stgs) (ContinueWith ct)
+          = do { traceTcS ("runStage " ++ stg_name ++ " {")
+                          (text "workitem   = " <+> ppr ct) 
+               ; res <- stg ct 
+               ; traceTcS ("end stage " ++ stg_name ++ " }") empty
+               ; run_pipeline stgs res 
+               }
 \end{code}
 
 Example 1:
@@ -323,171 +255,21 @@ React with (a ~ Int)   ==> IR (ContinueWith (F Int ~ b)) True []
 React with (F Int ~ b) ==> IR Stop True []    -- after substituting we re-canonicalize and get nothing
 
 \begin{code}
--- Main interaction solver: we fully solve the worklist 'in one go', 
--- returning an extended inert set.
---
--- See Note [Touchables and givens].
-solveInteractGiven :: InertSet -> GivenLoc -> [EvVar] -> TcS InertSet
-solveInteractGiven inert gloc evs
-  = do { (_, inert_ret) <- solveInteract inert $ listToBag $
-                           map mk_given evs
-       ; return inert_ret }
-  where
-    flav = Given gloc GivenOrig
-    mk_given ev = mkEvVarX ev flav
-
-solveInteractWanted :: InertSet -> [WantedEvVar] -> TcS InertSet
-solveInteractWanted inert wvs
-  = do { (_,inert_ret) <- solveInteract inert $ listToBag $
-                          map wantedToFlavored wvs
-       ; return inert_ret }
-
-solveInteract :: InertSet -> Bag FlavoredEvVar -> TcS (Bool, InertSet)
--- Post: (True,  inert_set) means we managed to discharge all constraints
---                          without actually doing any interactions!
---       (False, inert_set) means some interactions occurred
-solveInteract inert ws 
-  = do { dyn_flags <- getDynFlags
-       ; sctx <- getTcSContext
-
-       ; traceTcS "solveInteract, before clever canonicalization:" $
-         vcat [ text "ws = " <+>  ppr (mapBag (\(EvVarX ev ct)
-                                                   -> (ct,evVarPred ev)) ws)
-              , text "inert = " <+> ppr inert ]
-
-       ; can_ws <- mkCanonicalFEVs ws
-
-       ; (flag, inert_ret)
-           <- foldrWorkListM (tryPreSolveAndInteract sctx dyn_flags) (True,inert) can_ws
-
-       ; traceTcS "solveInteract, after clever canonicalization (and interaction):" $
-         vcat [ text "No interaction happened = " <+> ppr flag
-              , text "inert_ret = " <+> ppr inert_ret ]
-
-       ; return (flag, inert_ret) }
-
-tryPreSolveAndInteract :: SimplContext
-                       -> DynFlags
-                       -> CanonicalCt
-                       -> (Bool, InertSet)
-                       -> TcS (Bool, InertSet)
--- Returns: True if it was able to discharge this constraint AND all previous ones
-tryPreSolveAndInteract sctx dyn_flags ct (all_previous_discharged, inert)
-  = do { let inert_cts = get_inert_cts (evVarPred ev_var)
-
-       ; this_one_discharged <- 
-           if isCFrozenErr ct then 
-               return False
-           else
-               dischargeFromCCans inert_cts ev_var fl
-
-       ; if this_one_discharged
-         then return (all_previous_discharged, inert)
-
-         else do
-       { inert_ret <- solveOneWithDepth (ctxtStkDepth dyn_flags,0,[]) ct inert
-       ; return (False, inert_ret) } }
-
-  where
-    ev_var = cc_id ct
-    fl = cc_flavor ct 
-
-    get_inert_cts (ClassP clas _)
-      | simplEqsOnly sctx = emptyCCan
-      | otherwise         = fst (getRelevantCts clas (inert_dicts inert))
-    get_inert_cts (IParam {})
-      = emptyCCan -- We must not do the same thing for IParams, because (contrary
-                  -- to dictionaries), work items /must/ override inert items.
-                 -- See Note [Overriding implicit parameters] in TcInteract.
-    get_inert_cts (EqPred {})
-      = inert_eqs inert `unionBags` cCanMapToBag (inert_funeqs inert)
-
-dischargeFromCCans :: CanonicalCts -> EvVar -> CtFlavor -> TcS Bool
--- See if this (pre-canonicalised) work-item is identical to a 
--- one already in the inert set. Reasons:
---    a) Avoid creating superclass constraints for millions of incoming (Num a) constraints
---    b) Termination for improve_eqs in TcSimplify.simpl_loop
-dischargeFromCCans cans ev fl
-  = Bag.foldrBag discharge_ct (return False) cans
-  where 
-    the_pred = evVarPred ev
-
-    discharge_ct :: CanonicalCt -> TcS Bool -> TcS Bool
-    discharge_ct ct _rest
-      | evVarPred (cc_id ct) `eqPred` the_pred
-      , cc_flavor ct `canSolve` fl
-      = do { when (isWanted fl) $ setEvBind ev (evVarTerm (cc_id ct))
-           	 -- Deriveds need no evidence
-    	         -- For Givens, we already have evidence, and we don't need it twice 
-           ; return True }
-
-    discharge_ct _ct rest = rest
+thePipeline :: [(String,SimplifierStage)]
+thePipeline = [ ("canonicalization",        canonicalizationStage)
+              , ("spontaneous solve",       spontaneousSolveStage)
+              , ("interact with inerts",    interactWithInertsStage)
+              , ("top-level reactions",     topReactionsStage) ]
 \end{code}
 
-Note [Avoiding the superclass explosion] 
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
-This note now is not as significant as it used to be because we no
-longer add the superclasses of Wanted as Derived, except only if they
-have equality superclasses or superclasses with functional
-dependencies. The fear was that hundreds of identical wanteds would
-give rise each to the same superclass or equality Derived's which
-would lead to a blo-up in the number of interactions.
-
-Instead, what we do with tryPreSolveAndCanon, is when we encounter a
-new constraint, we very quickly see if it can be immediately
-discharged by a class constraint in our inert set or the previous
-canonicals. If so, we add nothing to the returned canonical
-constraints.
 
 \begin{code}
-solveOne :: WorkItem -> InertSet -> TcS InertSet 
-solveOne workItem inerts 
-  = do { dyn_flags <- getDynFlags
-       ; solveOneWithDepth (ctxtStkDepth dyn_flags,0,[]) workItem inerts
-       }
 
------------------
-solveInteractWithDepth :: (Int, Int, [WorkItem])
-                       -> WorkList -> InertSet -> TcS InertSet
-solveInteractWithDepth ctxt@(max_depth,n,stack) ws inert
-  | isEmptyWorkList ws
-  = return inert
+-- The canonicalization stage, see TcCanonical for details
+----------------------------------------------------------
+canonicalizationStage :: SimplifierStage
+canonicalizationStage = TcCanonical.canonicalize 
 
-  | n > max_depth 
-  = solverDepthErrorTcS n stack
-
-  | otherwise 
-  = do { traceTcS "solveInteractWithDepth" $ 
-              vcat [ text "Current depth =" <+> ppr n
-                   , text "Max depth =" <+> ppr max_depth
-                   , text "ws =" <+> ppr ws ]
-
-
-       ; foldrWorkListM (solveOneWithDepth ctxt) inert ws }
-              -- use foldr to preserve the order
-
-------------------
--- Fully interact the given work item with an inert set, and return a
--- new inert set which has assimilated the new information.
-solveOneWithDepth :: (Int, Int, [WorkItem])
-                  -> WorkItem -> InertSet -> TcS InertSet
-solveOneWithDepth (max_depth, depth, stack) work inert
-  = do { traceFireTcS depth (text "Solving {" <+> ppr work)
-       ; (new_inert, new_work) <- runSolverPipeline depth thePipeline inert work
-         
-	 -- Recursively solve the new work generated 
-         -- from workItem, with a greater depth
-       ; res_inert <- solveInteractWithDepth (max_depth, depth+1, work:stack) new_work new_inert 
-
-       ; traceFireTcS depth (text "Done }" <+> ppr work) 
-
-       ; return res_inert }
-
-thePipeline :: [(String,SimplifierStage)]
-thePipeline = [ ("interact with inert eqs", interactWithInertEqsStage)
-              , ("interact with inerts",    interactWithInertsStage)
-              , ("spontaneous solve",       spontaneousSolveStage)
-              , ("top-level reactions",     topReactionsStage) ]
 \end{code}
 
 *********************************************************************************
@@ -523,72 +305,208 @@ Case 3: IP improvement work
 
 \begin{code}
 spontaneousSolveStage :: SimplifierStage 
-spontaneousSolveStage depth workItem inerts 
+spontaneousSolveStage workItem
   = do { mSolve <- trySpontaneousSolve workItem
+       ; spont_solve mSolve } 
+  where spont_solve SPCantSolve 
+          | isCTyEqCan workItem                    -- Unsolved equality
+          = do { kickOutRewritableInerts workItem  -- NB: will add workItem in inerts
+               ; return Stop }
+          | otherwise
+          = continueWith workItem
+        spont_solve (SPSolved workItem')           -- Post: workItem' must be equality
+          = do { bumpStepCountTcS
+               ; traceFireTcS (cc_depth workItem) $
+                 ptext (sLit "Spontaneous") 
+                           <+> parens (ppr (cc_flavor workItem)) <+> ppr workItem
 
-       ; case mSolve of 
-           SPCantSolve -> -- No spontaneous solution for him, keep going
-               return $ SR { sr_new_work   = emptyWorkList
-                           , sr_inerts     = inerts
-                           , sr_stop       = ContinueWith workItem }
+                 -- NB: will add the item in the inerts
+               ; kickOutRewritableInerts workItem'
+               -- .. and Stop
+               ; return Stop }
 
-           SPSolved workItem'
-               | not (isGivenOrSolvedCt workItem) 
-	       	 -- Original was wanted or derived but we have now made him 
-                 -- given so we have to interact him with the inerts due to
-                 -- its status change. This in turn may produce more work.
-		 -- We do this *right now* (rather than just putting workItem'
-		 -- back into the work-list) because we've solved 
-               -> do { bumpStepCountTcS
-	       	     ; traceFireTcS depth (ptext (sLit "Spontaneous (w/d)") <+> ppr workItem)
-                     ; (new_inert, new_work) <- runSolverPipeline depth
-                             [ ("recursive interact with inert eqs", interactWithInertEqsStage)
-                             , ("recursive interact with inerts", interactWithInertsStage)
-                             ] inerts workItem'
-                     ; return $ SR { sr_new_work = new_work 
-                                   , sr_inerts   = new_inert -- will include workItem' 
-                                   , sr_stop     = Stop }
-                     }
-               | otherwise 
-                   -> -- Original was given; he must then be inert all right, and
-                      -- workList' are all givens from flattening
-                      do { bumpStepCountTcS
-	       	         ; traceFireTcS depth (ptext (sLit "Spontaneous (g)") <+> ppr workItem)
-                         ; return $ SR { sr_new_work = emptyWorkList
-                                       , sr_inerts   = inerts `updInertSet` workItem' 
-                                       , sr_stop     = Stop } }
-           SPError -> -- Return with no new work
-               return $ SR { sr_new_work = emptyWorkList
-                           , sr_inerts   = inerts
-                           , sr_stop     = Stop }
-       }
+kickOutRewritableInerts :: Ct -> TcS () 
+-- Pre:  ct is a CTyEqCan 
+-- Post: The TcS monad is left with the thinner non-rewritable inerts; but which
+--       contains the new constraint.
+--       The rewritable end up in the worklist
+kickOutRewritableInerts ct
+  = {-# SCC "kickOutRewritableInerts" #-}
+    do { (wl,ieqs) <- {-# SCC "kick_out_rewritable" #-}
+                      modifyInertTcS (kick_out_rewritable ct)
 
-data SPSolveResult = SPCantSolve | SPSolved WorkItem | SPError
+       -- Step 1: Rewrite as many of the inert_eqs on the spot! 
+       -- NB: if it is a solved constraint just use the cached evidence
+       
+       ; let ct_coercion = getCtCoercion ct 
+
+       ; new_ieqs <- {-# SCC "rewriteInertEqsFromInertEq" #-}
+                     rewriteInertEqsFromInertEq (cc_tyvar ct,ct_coercion, cc_flavor ct) ieqs
+       ; modifyInertTcS (\is -> ((), is { inert_eqs = new_ieqs }))
+
+       -- Step 2: Add the new guy in
+       ; updInertSetTcS ct
+
+       ; traceTcS "Kick out" (ppr ct $$ ppr wl)
+       ; updWorkListTcS (unionWorkList wl) }
+
+rewriteInertEqsFromInertEq :: (TcTyVar, TcCoercion, CtFlavor) -- A new substitution
+                           -> TyVarEnv (Ct, TcCoercion)       -- All inert equalities
+                           -> TcS (TyVarEnv (Ct,TcCoercion)) -- The new inert equalities
+rewriteInertEqsFromInertEq (subst_tv, subst_co, subst_fl) ieqs
+-- The goal: traverse the inert equalities and rewrite some of them, dropping some others
+-- back to the worklist. This is delicate, see Note [Delicate equality kick-out]
+ = do { mieqs <- Traversable.mapM do_one ieqs 
+      ; traceTcS "Original inert equalities:" (ppr ieqs)
+      ; let flatten_justs elem venv
+              | Just (act,aco) <- elem = extendVarEnv venv (cc_tyvar act) (act,aco)
+              | otherwise = venv                                     
+            final_ieqs = foldVarEnv flatten_justs emptyVarEnv mieqs
+      ; traceTcS "Remaining inert equalities:" (ppr final_ieqs)
+      ; return final_ieqs }
+
+ where do_one (ct,inert_co)
+         | subst_fl `canRewrite` fl && (subst_tv `elemVarSet` tyVarsOfCt ct) 
+                                      -- Annoyingly inefficient, but we can't simply check 
+                                      -- that isReflCo co because of cached solved ReflCo evidence.
+         = if fl `canRewrite` subst_fl then 
+               -- If also the inert can rewrite the subst it's totally safe 
+               -- to rewrite on the spot
+               do { (ct',inert_co') <- rewrite_on_the_spot (ct,inert_co)
+                  ; return $ Just (ct',inert_co') }
+           else -- We have to throw inert back to worklist for occurs checks 
+              do { updWorkListTcS (extendWorkListEq ct)
+                 ; return Nothing }
+         | otherwise -- Just keep it there
+         = return $ Just (ct,inert_co)
+         where 
+	   -- We have new guy         co : tv ~ something
+	   -- and old inert  {wanted} cv : tv' ~ rhs[tv]
+	   -- We want to rewrite to
+	   --  	      	     {wanted} cv' : tv' ~ rhs[something] 
+           --                cv = cv' ; rhs[Sym co]
+	   --                  
+           rewrite_on_the_spot (ct,_inert_co)
+             = do { let rhs' = pSnd (tcCoercionKind co)
+                  ; delCachedEvVar ev fl
+                  ; evc <- newEqVar fl (mkTyVarTy tv) rhs'
+                  ; let ev'   = evc_the_evvar evc
+                  ; let evco' = mkTcCoVarCo ev' 
+                  ; fl' <- if isNewEvVar evc then
+                               do { case fl of 
+                                      Wanted {} 
+                                        -> setEqBind ev (evco' `mkTcTransCo` mkTcSymCo co) fl
+                                      Given {} 
+                                        -> setEqBind ev' (mkTcCoVarCo ev `mkTcTransCo` co) fl
+                                      Derived {}
+                                        -> return fl }
+                           else
+                               if isWanted fl then 
+                                   setEqBind ev (evco' `mkTcTransCo` mkTcSymCo co) fl
+                               else return fl
+                  ; let ct' = ct { cc_id = ev', cc_flavor = fl', cc_rhs = rhs' }
+                  ; return (ct',evco') }
+           ev  = cc_id ct
+           fl  = cc_flavor ct
+           tv  = cc_tyvar ct
+           rhs = cc_rhs ct
+           co  = liftTcCoSubstWith [subst_tv] [subst_co] rhs
+
+kick_out_rewritable :: Ct -> InertSet -> ((WorkList,TyVarEnv (Ct,TcCoercion)), InertSet)
+-- Returns ALL equalities, to be dealt with later
+kick_out_rewritable ct (IS { inert_eqs    = eqmap
+                           , inert_eq_tvs = inscope
+                           , inert_dicts  = dictmap
+                           , inert_ips    = ipmap
+                           , inert_funeqs = funeqmap
+                           , inert_irreds = irreds
+                           , inert_frozen = frozen
+                           } )
+  = ((kicked_out, eqmap), remaining)
+  where
+    kicked_out = WorkList { wl_eqs    = []
+                          , wl_funeqs = bagToList feqs_out
+                          , wl_rest   = bagToList (fro_out `andCts` dicts_out 
+                                          `andCts` ips_out `andCts` irs_out) }
+  
+    remaining = IS { inert_eqs = emptyVarEnv
+                   , inert_eq_tvs = inscope -- keep the same, safe and cheap
+                   , inert_dicts = dicts_in
+                   , inert_ips = ips_in
+                   , inert_funeqs = feqs_in
+                   , inert_irreds = irs_in
+                   , inert_frozen = fro_in 
+                   }
+
+    fl = cc_flavor ct
+    tv = cc_tyvar ct
+                               
+    (ips_out,   ips_in)     = partitionCCanMap rewritable ipmap
+
+    (feqs_out,  feqs_in)    = partitionCtTypeMap rewritable funeqmap
+    (dicts_out, dicts_in)   = partitionCCanMap rewritable dictmap
+
+    (irs_out,   irs_in)   = partitionBag rewritable irreds
+    (fro_out,   fro_in)   = partitionBag rewritable frozen
+
+    rewritable ct = (fl `canRewrite` cc_flavor ct)  &&
+                    (tv `elemVarSet` tyVarsOfCt ct)
+\end{code}
+
+Note [Delicate equality kick-out]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
+
+Delicate:
+When kicking out rewritable constraints, it would be safe to simply
+kick out all rewritable equalities, but instead we only kick out those
+that, when rewritten, may result in occur-check errors. We rewrite the
+rest on the spot. Example:
+
+          WorkItem =   [S] a ~ b
+          Inerts   = { [W] b ~ [a] }
+Now at this point the work item cannot be further rewritten by the
+inert (due to the weaker inert flavor), so we are examining if we can
+instead rewrite the inert from the workitem. But if we rewrite it on
+the spot we have to recanonicalize because of the danger of occurs
+errors.  On the other hand if the inert flavor was just as powerful or
+more powerful than the workitem flavor, the work-item could not have
+reached this stage (because it would have already been rewritten by
+the inert).
+
+The coclusion is: we kick out the 'dangerous' equalities that may
+require recanonicalization (occurs checks) and the rest we rewrite
+unconditionally without further checks, on-the-spot with function
+rewriteInertEqsFromInertEq.
+
+
+\begin{code}
+data SPSolveResult = SPCantSolve
+                   | SPSolved WorkItem 
+
 -- SPCantSolve means that we can't do the unification because e.g. the variable is untouchable
 -- SPSolved workItem' gives us a new *given* to go on 
--- SPError means that it's completely impossible to solve this equality, eg due to a kind error
-
 
 -- @trySpontaneousSolve wi@ solves equalities where one side is a
 -- touchable unification variable.
 --     	    See Note [Touchables and givens] 
 trySpontaneousSolve :: WorkItem -> TcS SPSolveResult
-trySpontaneousSolve workItem@(CTyEqCan { cc_id = cv, cc_flavor = gw, cc_tyvar = tv1, cc_rhs = xi })
+trySpontaneousSolve workItem@(CTyEqCan { cc_id = eqv, cc_flavor = gw
+                                       , cc_tyvar = tv1, cc_rhs = xi, cc_depth = d })
   | isGivenOrSolved gw
   = return SPCantSolve
   | Just tv2 <- tcGetTyVar_maybe xi
   = do { tch1 <- isTouchableMetaTyVar tv1
        ; tch2 <- isTouchableMetaTyVar tv2
        ; case (tch1, tch2) of
-           (True,  True)  -> trySpontaneousEqTwoWay cv gw tv1 tv2
-           (True,  False) -> trySpontaneousEqOneWay cv gw tv1 xi
-           (False, True)  -> trySpontaneousEqOneWay cv gw tv2 (mkTyVarTy tv1)
+           (True,  True)  -> trySpontaneousEqTwoWay d eqv gw tv1 tv2
+           (True,  False) -> trySpontaneousEqOneWay d eqv gw tv1 xi
+           (False, True)  -> trySpontaneousEqOneWay d eqv gw tv2 (mkTyVarTy tv1)
 	   _ -> return SPCantSolve }
   | otherwise
   = do { tch1 <- isTouchableMetaTyVar tv1
-       ; if tch1 then trySpontaneousEqOneWay cv gw tv1 xi
-                 else do { traceTcS "Untouchable LHS, can't spontaneously solve workitem:" 
-                                    (ppr workItem) 
+       ; if tch1 then trySpontaneousEqOneWay d eqv gw tv1 xi
+                 else do { traceTcS "Untouchable LHS, can't spontaneously solve workitem:" $
+                           ppr workItem 
                          ; return SPCantSolve }
        }
 
@@ -598,51 +516,46 @@ trySpontaneousSolve workItem@(CTyEqCan { cc_id = cv, cc_flavor = gw, cc_tyvar = 
 trySpontaneousSolve _ = return SPCantSolve
 
 ----------------
-trySpontaneousEqOneWay :: CoVar -> CtFlavor -> TcTyVar -> Xi -> TcS SPSolveResult
+trySpontaneousEqOneWay :: SubGoalDepth 
+                       -> EqVar -> CtFlavor -> TcTyVar -> Xi -> TcS SPSolveResult
 -- tv is a MetaTyVar, not untouchable
-trySpontaneousEqOneWay cv gw tv xi	
+trySpontaneousEqOneWay d eqv gw tv xi	
   | not (isSigTyVar tv) || isTyVarTy xi 
   = do { let kxi = typeKind xi -- NB: 'xi' is fully rewritten according to the inerts 
                                -- so we have its more specific kind in our hands
-       ; if kxi `isSubKind` tyVarKind tv then
-             solveWithIdentity cv gw tv xi
+       ; is_sub_kind <- kxi `isSubKindTcS` tyVarKind tv
+       ; if is_sub_kind then
+             solveWithIdentity d eqv gw tv xi
          else return SPCantSolve
-{-
-         else if tyVarKind tv `isSubKind` kxi then
-             return SPCantSolve -- kinds are compatible but we can't solveWithIdentity this way
-                                -- This case covers the  a_touchable :: * ~ b_untouchable :: ?? 
-                                -- which has to be deferred or floated out for someone else to solve 
-                                -- it in a scope where 'b' is no longer untouchable.
-         else do { addErrorTcS KindError gw (mkTyVarTy tv) xi -- See Note [Kind errors]
-                 ; return SPError }
--}
        }
   | otherwise -- Still can't solve, sig tyvar and non-variable rhs
   = return SPCantSolve
 
 ----------------
-trySpontaneousEqTwoWay :: CoVar -> CtFlavor -> TcTyVar -> TcTyVar -> TcS SPSolveResult
+trySpontaneousEqTwoWay :: SubGoalDepth 
+                       -> EqVar -> CtFlavor -> TcTyVar -> TcTyVar -> TcS SPSolveResult
 -- Both tyvars are *touchable* MetaTyvars so there is only a chance for kind error here
-trySpontaneousEqTwoWay cv gw tv1 tv2
-  | k1 `isSubKind` k2
-  , nicer_to_update_tv2 = solveWithIdentity cv gw tv2 (mkTyVarTy tv1)
-  | k2 `isSubKind` k1 
-  = solveWithIdentity cv gw tv1 (mkTyVarTy tv2)
-  | otherwise -- None is a subkind of the other, but they are both touchable! 
-  = return SPCantSolve
-    -- do { addErrorTcS KindError gw (mkTyVarTy tv1) (mkTyVarTy tv2)
-    --   ; return SPError }
+
+trySpontaneousEqTwoWay d eqv gw tv1 tv2
+  = do { k1_sub_k2 <- k1 `isSubKindTcS` k2
+       ; if k1_sub_k2 && nicer_to_update_tv2
+         then solveWithIdentity d eqv gw tv2 (mkTyVarTy tv1)
+         else do
+       { k2_sub_k1 <- k2 `isSubKindTcS` k1
+       ; MASSERT( k2_sub_k1 )  -- they were unified in TcCanonical
+       ; solveWithIdentity d eqv gw tv1 (mkTyVarTy tv2) } }
   where
     k1 = tyVarKind tv1
     k2 = tyVarKind tv2
     nicer_to_update_tv2 = isSigTyVar tv1 || isSystemName (Var.varName tv2)
+
 \end{code}
 
 Note [Kind errors] 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Consider the wanted problem: 
       alpha ~ (# Int, Int #) 
-where alpha :: ?? and (# Int, Int #) :: (#). We can't spontaneously solve this constraint, 
+where alpha :: ArgKind and (# Int, Int #) :: (#). We can't spontaneously solve this constraint, 
 but we should rather reject the program that give rise to it. If 'trySpontaneousEqTwoWay' 
 simply returns @CantSolve@ then that wanted constraint is going to propagate all the way and 
 get quantified over in inference mode. That's bad because we do know at this point that the 
@@ -710,7 +623,8 @@ unification variables as RHS of type family equations: F xis ~ alpha.
 \begin{code}
 ----------------
 
-solveWithIdentity :: CoVar -> CtFlavor -> TcTyVar -> Xi -> TcS SPSolveResult
+solveWithIdentity :: SubGoalDepth 
+                  -> EqVar -> CtFlavor -> TcTyVar -> Xi -> TcS SPSolveResult
 -- Solve with the identity coercion 
 -- Precondition: kind(xi) is a sub-kind of kind(tv)
 -- Precondition: CtFlavor is Wanted or Derived
@@ -718,23 +632,25 @@ solveWithIdentity :: CoVar -> CtFlavor -> TcTyVar -> Xi -> TcS SPSolveResult
 --     must work for Derived as well as Wanted
 -- Returns: workItem where 
 --        workItem = the new Given constraint
-solveWithIdentity cv wd tv xi 
+solveWithIdentity d eqv wd tv xi 
   = do { traceTcS "Sneaky unification:" $ 
-                       vcat [text "Coercion variable:  " <+> ppr wd, 
+                       vcat [text "Coercion variable:  " <+> ppr eqv <+> ppr wd, 
                              text "Coercion:           " <+> pprEq (mkTyVarTy tv) xi,
                              text "Left  Kind is     : " <+> ppr (typeKind (mkTyVarTy tv)),
                              text "Right Kind is     : " <+> ppr (typeKind xi)
-                  ]
+                            ]
 
        ; setWantedTyBind tv xi
-       ; let refl_xi = mkReflCo xi
-       ; cv_given <- newGivenCoVar (mkTyVarTy tv) xi refl_xi
+       ; let refl_xi = mkTcReflCo xi
 
-       ; when (isWanted wd) (setCoBind cv refl_xi)
+       ; let solved_fl = mkSolvedFlavor wd UnkSkol (EvCoercion refl_xi) 
+       ; (_,eqv_given) <- newGivenEqVar solved_fl (mkTyVarTy tv) xi refl_xi
+
+       ; when (isWanted wd) $ do { _ <- setEqBind eqv refl_xi wd; return () }
            -- We don't want to do this for Derived, that's why we use 'when (isWanted wd)'
-       ; return $ SPSolved (CTyEqCan { cc_id = cv_given
-                                     , cc_flavor = mkSolvedFlavor wd UnkSkol
-                                     , cc_tyvar  = tv, cc_rhs = xi }) }
+       ; return $ SPSolved (CTyEqCan { cc_id     = eqv_given
+                                     , cc_flavor = solved_fl
+                                     , cc_tyvar  = tv, cc_rhs = xi, cc_depth = d }) }
 \end{code}
 
 
@@ -771,171 +687,77 @@ or, equivalently,
 
 \begin{code}
 -- Interaction result of  WorkItem <~> AtomicInert
-data InteractResult
-   = IR { ir_stop         :: StopOrContinue
-            -- Stop
-            --   => Reagent (work item) consumed.
-            -- ContinueWith new_reagent
-            --   => Reagent transformed but keep gathering interactions. 
-            --      The transformed item remains inert with respect 
-            --      to any previously encountered inerts.
 
-        , ir_inert_action :: InertAction
-            -- Whether the inert item should remain in the InertSet.
+data InteractResult 
+    = IRWorkItemConsumed { ir_fire :: String } 
+    | IRInertConsumed    { ir_fire :: String } 
+    | IRKeepGoing        { ir_fire :: String }
 
-        , ir_new_work     :: WorkList
-            -- new work items to add to the WorkList
+irWorkItemConsumed :: String -> TcS InteractResult
+irWorkItemConsumed str = return (IRWorkItemConsumed str) 
 
-        , ir_fire :: Maybe String    -- Tells whether a rule fired, and if so what
-        }
+irInertConsumed :: String -> TcS InteractResult
+irInertConsumed str = return (IRInertConsumed str) 
 
--- What to do with the inert reactant.
-data InertAction = KeepInert | DropInert 
-
-mkIRContinue :: String -> WorkItem -> InertAction -> WorkList -> TcS InteractResult
-mkIRContinue rule wi keep newWork 
-  = return $ IR { ir_stop = ContinueWith wi, ir_inert_action = keep
-                , ir_new_work = newWork, ir_fire = Just rule }
-
-mkIRStopK :: String -> WorkList -> TcS InteractResult
-mkIRStopK rule newWork
-  = return $ IR { ir_stop = Stop, ir_inert_action = KeepInert
-                , ir_new_work = newWork, ir_fire = Just rule }
-
-mkIRStopD :: String -> WorkList -> TcS InteractResult
-mkIRStopD rule newWork
-  = return $ IR { ir_stop = Stop, ir_inert_action = DropInert
-                , ir_new_work = newWork, ir_fire = Just rule }
-
-noInteraction :: Monad m => WorkItem -> m InteractResult
-noInteraction wi
-  = return $ IR { ir_stop = ContinueWith wi, ir_inert_action = KeepInert
-                , ir_new_work = emptyWorkList, ir_fire = Nothing }
-
-data WhichComesFromInert = LeftComesFromInert | RightComesFromInert 
-     -- See Note [Efficient Orientation] 
+irKeepGoing :: String -> TcS InteractResult 
+irKeepGoing str = return (IRKeepGoing str) 
+-- You can't discard neither workitem or inert, but you must keep 
+-- going. It's possible that new work is waiting in the TcS worklist. 
 
 
----------------------------------------------------
--- Interact a single WorkItem with the equalities of an inert set as
--- far as possible, i.e. until we get a Stop result from an individual
--- reaction (i.e. when the WorkItem is consumed), or until we've
--- interact the WorkItem with the entire equalities of the InertSet
-
-interactWithInertEqsStage :: SimplifierStage 
-interactWithInertEqsStage depth workItem inert
-  = Bag.foldrBagM (interactNext depth) initITR (inert_eqs inert)
-                        -- use foldr to preserve the order          
-  where
-    initITR = SR { sr_inerts   = inert { inert_eqs = emptyCCan }
-                 , sr_new_work = emptyWorkList
-                 , sr_stop     = ContinueWith workItem }
-
----------------------------------------------------
--- Interact a single WorkItem with *non-equality* constraints in the inert set. 
--- Precondition: equality interactions must have already happened, hence we have 
--- to pick up some information from the incoming inert, before folding over the 
--- "Other" constraints it contains!
-
-interactWithInertsStage :: SimplifierStage
-interactWithInertsStage depth workItem inert
-  = let (relevant, inert_residual) = getISRelevant workItem inert 
-        initITR = SR { sr_inerts   = inert_residual
-                     , sr_new_work = emptyWorkList
-                     , sr_stop     = ContinueWith workItem } 
-    in Bag.foldrBagM (interactNext depth) initITR relevant 
-                        -- use foldr to preserve the order
-  where 
-    getISRelevant :: CanonicalCt -> InertSet -> (CanonicalCts, InertSet) 
-    getISRelevant (CFrozenErr {}) is = (emptyCCan, is)
-                  -- Nothing s relevant; we have alread interacted
-                  -- it with the equalities in the inert set
-
-    getISRelevant (CDictCan { cc_class = cls } ) is
-      = let (relevant, residual_map) = getRelevantCts cls (inert_dicts is)
-        in (relevant, is { inert_dicts = residual_map }) 
-    getISRelevant (CFunEqCan { cc_fun = tc } ) is 
-      = let (relevant, residual_map) = getRelevantCts tc (inert_funeqs is) 
-        in (relevant, is { inert_funeqs = residual_map })
-    getISRelevant (CIPCan { cc_ip_nm = nm }) is 
-      = let (relevant, residual_map) = getRelevantCts nm (inert_ips is)
-        in (relevant, is { inert_ips = residual_map }) 
-    -- An equality, finally, may kick everything except equalities out 
-    -- because we have already interacted the equalities in interactWithInertEqsStage
-    getISRelevant _eq_ct is  -- Equality, everything is relevant for this one 
-                             -- TODO: if we were caching variables, we'd know that only 
-                             --       some are relevant. Experiment with this for now. 
-      = let cts = cCanMapToBag (inert_ips is) `unionBags` 
-                    cCanMapToBag (inert_dicts is) `unionBags` cCanMapToBag (inert_funeqs is)
-        in (cts, is { inert_dicts  = emptyCCanMap
-                    , inert_ips    = emptyCCanMap
-                    , inert_funeqs = emptyCCanMap })
-
-interactNext :: SubGoalDepth -> AtomicInert -> StageResult -> TcS StageResult 
-interactNext depth inert it
-  | ContinueWith work_item <- sr_stop it
-  = do { let inerts = sr_inerts it 
-
-       ; IR { ir_new_work = new_work, ir_inert_action = inert_action
-            , ir_fire = fire_info, ir_stop = stop } 
-            <- interactWithInert inert work_item
-
-       ; let mk_msg rule 
-      	       = text rule <+> keep_doc
-      	         <+> vcat [ ptext (sLit "Inert =") <+> ppr inert
-      	                  , ptext (sLit "Work =")  <+> ppr work_item
-      	                  , ppUnless (isEmptyWorkList new_work) $
-                            ptext (sLit "New =") <+> ppr new_work ]
-             keep_doc = case inert_action of
-                 	  KeepInert -> ptext (sLit "[keep]")
-                 	  DropInert -> ptext (sLit "[drop]")
-       ; case fire_info of
-           Just rule -> do { bumpStepCountTcS
-                           ; traceFireTcS depth (mk_msg rule) }
-           Nothing  -> return ()
-
-       -- New inerts depend on whether we KeepInert or not 
-       ; let inerts_new = case inert_action of
-                            KeepInert -> inerts `updInertSet` inert
-                            DropInert -> inerts
-
-       ; return $ SR { sr_inerts   = inerts_new
-                     , sr_new_work = sr_new_work it `unionWorkList` new_work
-                     , sr_stop     = stop } }
-  | otherwise 
-  = return $ it { sr_inerts = (sr_inerts it) `updInertSet` inert }
-
--- Do a single interaction of two constraints.
-interactWithInert :: AtomicInert -> WorkItem -> TcS InteractResult
-interactWithInert inert workItem 
+interactWithInertsStage :: WorkItem -> TcS StopOrContinue 
+-- Precondition: if the workitem is a CTyEqCan then it will not be able to 
+-- react with anything at this stage. 
+interactWithInertsStage wi 
   = do { ctxt <- getTcSContext
-       ; let is_allowed  = allowedInteraction (simplEqsOnly ctxt) inert workItem 
+       ; if simplEqsOnly ctxt then 
+             return (ContinueWith wi)
+         else 
+             extractRelevantInerts wi >>= 
+               foldlBagM interact_next (ContinueWith wi) }
 
-       ; if is_allowed then 
-              doInteractWithInert inert workItem 
-          else 
-              noInteraction workItem 
-       }
-
-allowedInteraction :: Bool -> AtomicInert -> WorkItem -> Bool 
--- Allowed interactions 
-allowedInteraction eqs_only (CDictCan {}) (CDictCan {}) = not eqs_only
-allowedInteraction eqs_only (CIPCan {})   (CIPCan {})   = not eqs_only
-allowedInteraction _ _ _ = True 
-
+  where interact_next Stop atomic_inert 
+          = updInertSetTcS atomic_inert >> return Stop
+        interact_next (ContinueWith wi) atomic_inert 
+          = do { ir <- doInteractWithInert atomic_inert wi
+               ; let mk_msg rule keep_doc 
+                       = text rule <+> keep_doc
+      	                 <+> vcat [ ptext (sLit "Inert =") <+> ppr atomic_inert
+      	                          , ptext (sLit "Work =")  <+> ppr wi ]
+               ; case ir of 
+                   IRWorkItemConsumed { ir_fire = rule } 
+                       -> do { bumpStepCountTcS
+                             ; traceFireTcS (cc_depth wi) 
+                                            (mk_msg rule (text "WorkItemConsumed"))
+                             ; updInertSetTcS atomic_inert
+                             ; return Stop } 
+                   IRInertConsumed { ir_fire = rule }
+                       -> do { bumpStepCountTcS
+                             ; traceFireTcS (cc_depth atomic_inert) 
+                                            (mk_msg rule (text "InertItemConsumed"))
+                             ; return (ContinueWith wi) }
+                   IRKeepGoing {} -- Should we do a bumpStepCountTcS? No for now.
+                       -> do { updInertSetTcS atomic_inert
+                             ; return (ContinueWith wi) }
+               }
+   
 --------------------------------------------
-doInteractWithInert :: CanonicalCt -> CanonicalCt -> TcS InteractResult
--- Identical class constraints.
+data WhichComesFromInert = LeftComesFromInert | RightComesFromInert
 
+doInteractWithInert :: Ct -> Ct -> TcS InteractResult
+-- Identical class constraints.
 doInteractWithInert
   inertItem@(CDictCan { cc_id = d1, cc_flavor = fl1, cc_class = cls1, cc_tyargs = tys1 }) 
-   workItem@(CDictCan { cc_id = d2, cc_flavor = fl2, cc_class = cls2, cc_tyargs = tys2 })
+   workItem@(CDictCan { cc_id = _d2, cc_flavor = fl2, cc_class = cls2, cc_tyargs = tys2 })
 
   | cls1 == cls2  
-  = do { let pty1 = ClassP cls1 tys1
-             pty2 = ClassP cls2 tys2
+  = do { let pty1 = mkClassPred cls1 tys1
+             pty2 = mkClassPred cls2 tys2
              inert_pred_loc     = (pty1, pprFlavorArising fl1)
              work_item_pred_loc = (pty2, pprFlavorArising fl2)
+
+       ; traceTcS "doInteractWithInert" (vcat [ text "inertItem = " <+> ppr inertItem
+                                              , text "workItem  = " <+> ppr workItem ])
 
        ; any_fundeps 
            <- if isGivenOrSolved fl1 && isGivenOrSolved fl2 then return Nothing
@@ -952,89 +774,27 @@ doInteractWithInert
            -- No Functional Dependencies 
            Nothing             
                | eqTypes tys1 tys2 -> solveOneFromTheOther "Cls/Cls" (EvId d1,fl1) workItem
-               | otherwise         -> noInteraction workItem
+               | otherwise         -> irKeepGoing "NOP"
 
            -- Actual Functional Dependencies
-           Just (rewritten_tys2,cos2,fd_work) 
-               | not (eqTypes tys1 rewritten_tys2) 
-               -- Standard thing: create derived fds and keep on going. Importantly we don't
+           Just (_rewritten_tys2,_cos2,fd_work)
+              -- Standard thing: create derived fds and keep on going. Importantly we don't
                -- throw workitem back in the worklist because this can cause loops. See #5236.
-               -> do { fd_cans <- mkCanonicalFDAsDerived fd_work
-                     ; mkIRContinue "Cls/Cls fundep (not solved)" workItem KeepInert fd_cans }
-
-               -- This WHOLE otherwise branch is an optimization where the fd made the things match
-               | otherwise  
-               , let dict_co = mkTyConAppCo (classTyCon cls1) cos2
-               -> case fl2 of
-                    Given {} 
-                        -> pprPanic "Unexpected given!" (ppr inertItem $$ ppr workItem)
-                           -- The only way to have created a fundep is if the inert was
-                           -- wanted or derived, in which case the workitem can't be given!
-                    Derived {}
-                        -- The types were made to exactly match so we don't need 
-                        -- the workitem any longer.
-                        -> do { fd_cans <- mkCanonicalFDAsDerived fd_work
-                               -- No rewriting really, so let's create deriveds fds
-                              ; mkIRStopK "Cls/Cls fundep (solved)" fd_cans }
-		    Wanted  {} 
-		        | isDerived fl1 
-                            -> do { setDictBind d2 (EvCast d1 dict_co)
-			          ; let inert_w = inertItem { cc_flavor = fl2 }
-			   -- A bit naughty: we take the inert Derived, 
-			   -- turn it into a Wanted, use it to solve the work-item
-			   -- and put it back into the work-list
-			   -- Maybe rather than starting again, we could keep going 
-                           -- with the rewritten workitem, having dropped the inert, but its
-                           -- safe to restart.
-                          
-                           -- Also: we have rewriting so lets create wanted fds
-                                  ; fd_cans <- mkCanonicalFDAsWanted fd_work
-                                  ; mkIRStopD "Cls/Cls fundep (solved)" $ 
-                                    workListFromNonEq inert_w `unionWorkList` fd_cans }
-		        | otherwise
-                        -> do { setDictBind d2 (EvCast d1 dict_co)
-                          -- Rewriting is happening, so we have to create wanted fds
-                              ; fd_cans <- mkCanonicalFDAsWanted fd_work
-                              ; mkIRStopK "Cls/Cls fundep (solved)" fd_cans }
+               -> do { emitFDWorkAsDerived fd_work (cc_depth workItem)
+                     ; irKeepGoing "Cls/Cls (new fundeps)" } -- Just keep going without droping the inert 
        }
   where get_workitem_wloc (Wanted wl)  = wl 
         get_workitem_wloc (Derived wl) = wl 
         get_workitem_wloc (Given {})   = panic "Unexpected given!"
 
 
--- Class constraint and given equality: use the equality to rewrite
--- the class constraint. 
-doInteractWithInert (CTyEqCan { cc_id = cv, cc_flavor = ifl, cc_tyvar = tv, cc_rhs = xi }) 
-                    (CDictCan { cc_id = dv, cc_flavor = wfl, cc_class = cl, cc_tyargs = xis }) 
-  | ifl `canRewrite` wfl 
-  , tv `elemVarSet` tyVarsOfTypes xis
-  = do { rewritten_dict <- rewriteDict (cv,tv,xi) (dv,wfl,cl,xis)
-            -- Continue with rewritten Dictionary because we can only be in the 
-            -- interactWithEqsStage, so the dictionary is inert. 
-       ; mkIRContinue "Eq/Cls" rewritten_dict KeepInert emptyWorkList }
-    
-doInteractWithInert (CDictCan { cc_id = dv, cc_flavor = ifl, cc_class = cl, cc_tyargs = xis }) 
-           workItem@(CTyEqCan { cc_id = cv, cc_flavor = wfl, cc_tyvar = tv, cc_rhs = xi })
-  | wfl `canRewrite` ifl
-  , tv `elemVarSet` tyVarsOfTypes xis
-  = do { rewritten_dict <- rewriteDict (cv,tv,xi) (dv,ifl,cl,xis)
-       ; mkIRContinue "Cls/Eq" workItem DropInert (workListFromNonEq rewritten_dict) }
-
--- Class constraint and given equality: use the equality to rewrite
--- the class constraint.
-doInteractWithInert (CTyEqCan { cc_id = cv, cc_flavor = ifl, cc_tyvar = tv, cc_rhs = xi }) 
-                    (CIPCan { cc_id = ipid, cc_flavor = wfl, cc_ip_nm = nm, cc_ip_ty = ty }) 
-  | ifl `canRewrite` wfl
-  , tv `elemVarSet` tyVarsOfType ty 
-  = do { rewritten_ip <- rewriteIP (cv,tv,xi) (ipid,wfl,nm,ty) 
-       ; mkIRContinue "Eq/IP" rewritten_ip KeepInert emptyWorkList } 
-
-doInteractWithInert (CIPCan { cc_id = ipid, cc_flavor = ifl, cc_ip_nm = nm, cc_ip_ty = ty }) 
-           workItem@(CTyEqCan { cc_id = cv, cc_flavor = wfl, cc_tyvar = tv, cc_rhs = xi })
-  | wfl `canRewrite` ifl
-  , tv `elemVarSet` tyVarsOfType ty
-  = do { rewritten_ip <- rewriteIP (cv,tv,xi) (ipid,ifl,nm,ty) 
-       ; mkIRContinue "IP/Eq" workItem DropInert (workListFromNonEq rewritten_ip) }
+-- Two pieces of irreducible evidence: if their types are *exactly identical* we can
+-- rewrite them. We can never improve using this: if we want ty1 :: Constraint and have
+-- ty2 :: Constraint it clearly does not mean that (ty1 ~ ty2)
+doInteractWithInert (CIrredEvCan { cc_id = id1, cc_flavor = ifl, cc_ty = ty1 })
+           workItem@(CIrredEvCan { cc_ty = ty2 })
+  | ty1 `eqType` ty2
+  = solveOneFromTheOther "Irred/Irred" (EvId id1,ifl) workItem
 
 -- Two implicit parameter constraints.  If the names are the same,
 -- but their types are not, we generate a wanted type equality 
@@ -1049,284 +809,131 @@ doInteractWithInert (CIPCan { cc_id = id1, cc_flavor = ifl, cc_ip_nm = nm1, cc_i
 	-- Do not require type equality
 	-- For example, given let ?x::Int = 3 in let ?x::Bool = True in ...
 	--              we must *override* the outer one with the inner one
-    mkIRContinue "IP/IP override" workItem DropInert emptyWorkList
+    irInertConsumed "IP/IP (override inert)"
 
   | nm1 == nm2 && ty1 `eqType` ty2 
   = solveOneFromTheOther "IP/IP" (EvId id1,ifl) workItem 
 
   | nm1 == nm2
   =  	-- See Note [When improvement happens]
-    do { co_var <- newCoVar ty2 ty1 -- See Note [Efficient Orientation]
-       ; let flav = Wanted (combineCtLoc ifl wfl)
-       ; cans <- mkCanonical flav co_var
+    do { let flav = Wanted (combineCtLoc ifl wfl)
+       ; eqv <- newEqVar flav ty2 ty1 -- See Note [Efficient Orientation]
+       ; when (isNewEvVar eqv) $
+              (let ct = CNonCanonical { cc_id     = evc_the_evvar eqv 
+                                      , cc_flavor = flav
+                                      , cc_depth  = cc_depth workItem }
+              in updWorkListTcS (extendWorkListEq ct))
+
        ; case wfl of
            Given   {} -> pprPanic "Unexpected given IP" (ppr workItem)
            Derived {} -> pprPanic "Unexpected derived IP" (ppr workItem)
            Wanted  {} ->
-               do { setIPBind (cc_id workItem) $
-                    EvCast id1 (mkSymCo (mkCoVarCo co_var))
-                  ; mkIRStopK "IP/IP interaction (solved)" cans }
-       }
+               do { _ <- setEvBind (cc_id workItem) 
+                            (mkEvCast id1 (mkTcSymCo (mkTcTyConAppCo (ipTyCon nm1) [mkTcCoVarCo (evc_the_evvar eqv)]))) wfl
+                  ; irWorkItemConsumed "IP/IP (solved by rewriting)" } }
 
--- Never rewrite a given with a wanted equality, and a type function
--- equality can never rewrite an equality. We rewrite LHS *and* RHS 
--- of function equalities so that our inert set exposes everything that 
--- we know about equalities.
-
--- Inert: equality, work item: function equality
-doInteractWithInert (CTyEqCan { cc_id = cv1, cc_flavor = ifl, cc_tyvar = tv, cc_rhs = xi1 }) 
-                    (CFunEqCan { cc_id = cv2, cc_flavor = wfl, cc_fun = tc
-                               , cc_tyargs = args, cc_rhs = xi2 })
-  | ifl `canRewrite` wfl 
-  , tv `elemVarSet` tyVarsOfTypes (xi2:args) -- Rewrite RHS as well
-  = do { rewritten_funeq <- rewriteFunEq (cv1,tv,xi1) (cv2,wfl,tc,args,xi2) 
-       ; mkIRStopK "Eq/FunEq" (workListFromEq rewritten_funeq) } 
-         -- Must Stop here, because we may no longer be inert after the rewritting.
-
--- Inert: function equality, work item: equality
-doInteractWithInert (CFunEqCan {cc_id = cv1, cc_flavor = ifl, cc_fun = tc
-                              , cc_tyargs = args, cc_rhs = xi1 }) 
-           workItem@(CTyEqCan { cc_id = cv2, cc_flavor = wfl, cc_tyvar = tv, cc_rhs = xi2 })
-  | wfl `canRewrite` ifl
-  , tv `elemVarSet` tyVarsOfTypes (xi1:args) -- Rewrite RHS as well
-  = do { rewritten_funeq <- rewriteFunEq (cv2,tv,xi2) (cv1,ifl,tc,args,xi1) 
-       ; mkIRContinue "FunEq/Eq" workItem DropInert (workListFromEq rewritten_funeq) } 
-         -- One may think that we could (KeepTransformedInert rewritten_funeq) 
-         -- but that is wrong, because it may end up not being inert with respect 
-         -- to future inerts. Example: 
-         -- Original inert = {    F xis ~  [a], b ~ Maybe Int } 
-         -- Work item comes along = a ~ [b] 
-         -- If we keep { F xis ~ [b] } in the inert set we will end up with: 
-         --      { F xis ~ [b], b ~ Maybe Int, a ~ [Maybe Int] } 
-         -- At the end, which is *not* inert. So we should unfortunately DropInert here.
-
-doInteractWithInert (CFunEqCan { cc_id = cv1, cc_flavor = fl1, cc_fun = tc1
-                               , cc_tyargs = args1, cc_rhs = xi1 }) 
-           workItem@(CFunEqCan { cc_id = cv2, cc_flavor = fl2, cc_fun = tc2
-                               , cc_tyargs = args2, cc_rhs = xi2 })
-  | tc1 == tc2 && and (zipWith eqType args1 args2) 
-  , Just GivenSolved <- isGiven_maybe fl1 
-  = mkIRContinue "Funeq/Funeq" workItem DropInert emptyWorkList
-  | tc1 == tc2 && and (zipWith eqType args1 args2) 
-  , Just GivenSolved <- isGiven_maybe fl2 
-  = mkIRStopK "Funeq/Funeq" emptyWorkList
-
+doInteractWithInert (CFunEqCan { cc_id = eqv1, cc_flavor = fl1, cc_fun = tc1
+                               , cc_tyargs = args1, cc_rhs = xi1, cc_depth = d1 }) 
+                    (CFunEqCan { cc_id = eqv2, cc_flavor = fl2, cc_fun = tc2
+                               , cc_tyargs = args2, cc_rhs = xi2, cc_depth = d2 })
+  | lhss_match  
+  , Just (GivenSolved {}) <- isGiven_maybe fl1 -- Inert is solved and we can simply ignore it
+                                          -- when workitem is given/solved
+  , isGivenOrSolved fl2
+  = irInertConsumed "FunEq/FunEq"
+  | lhss_match 
+  , Just (GivenSolved {}) <- isGiven_maybe fl2 -- Workitem is solved and we can ignore it when
+                                               -- the inert is given/solved
+  , isGivenOrSolved fl1                 
+  = irWorkItemConsumed "FunEq/FunEq" 
   | fl1 `canSolve` fl2 && lhss_match
-  = do { cans <- rewriteEqLHS LeftComesFromInert  (mkCoVarCo cv1,xi1) (cv2,fl2,xi2) 
-       ; mkIRStopK "FunEq/FunEq" cans } 
+  = do { rewriteEqLHS LeftComesFromInert  (eqv1,xi1) (eqv2,d2,fl2,xi2) 
+       ; irWorkItemConsumed "FunEq/FunEq" }
+
   | fl2 `canSolve` fl1 && lhss_match
-  = do { cans <- rewriteEqLHS RightComesFromInert (mkCoVarCo cv2,xi2) (cv1,fl1,xi1) 
-       ; mkIRContinue "FunEq/FunEq" workItem DropInert cans }
+  = do { rewriteEqLHS RightComesFromInert (eqv2,xi2) (eqv1,d1,fl1,xi1) 
+       ; irInertConsumed "FunEq/FunEq"}
   where
     lhss_match = tc1 == tc2 && eqTypes args1 args2 
 
-doInteractWithInert (CTyEqCan { cc_id = cv1, cc_flavor = fl1, cc_tyvar = tv1, cc_rhs = xi1 }) 
-           workItem@(CTyEqCan { cc_id = cv2, cc_flavor = fl2, cc_tyvar = tv2, cc_rhs = xi2 })
--- Check for matching LHS 
-  | fl1 `canSolve` fl2 && tv1 == tv2 
-  = do { cans <- rewriteEqLHS LeftComesFromInert (mkCoVarCo cv1,xi1) (cv2,fl2,xi2) 
-       ; mkIRStopK "Eq/Eq lhs" cans } 
 
-  | fl2 `canSolve` fl1 && tv1 == tv2 
-  = do { cans <- rewriteEqLHS RightComesFromInert (mkCoVarCo cv2,xi2) (cv1,fl1,xi1) 
-       ; mkIRContinue "Eq/Eq lhs" workItem DropInert cans }
-
--- Check for rewriting RHS 
-  | fl1 `canRewrite` fl2 && tv1 `elemVarSet` tyVarsOfType xi2 
-  = do { rewritten_eq <- rewriteEqRHS (cv1,tv1,xi1) (cv2,fl2,tv2,xi2) 
-       ; mkIRStopK "Eq/Eq rhs" rewritten_eq }
-
-  | fl2 `canRewrite` fl1 && tv2 `elemVarSet` tyVarsOfType xi1
-  = do { rewritten_eq <- rewriteEqRHS (cv2,tv2,xi2) (cv1,fl1,tv1,xi1) 
-       ; mkIRContinue "Eq/Eq rhs" workItem DropInert rewritten_eq } 
-
-doInteractWithInert (CTyEqCan   { cc_id = cv1, cc_flavor = fl1, cc_tyvar = tv1, cc_rhs = xi1 })
-                    (CFrozenErr { cc_id = cv2, cc_flavor = fl2 })
-  | fl1 `canRewrite` fl2 && tv1 `elemVarSet` tyVarsOfEvVar cv2
-  = do { rewritten_frozen <- rewriteFrozen (cv1, tv1, xi1) (cv2, fl2)
-       ; mkIRStopK "Frozen/Eq" rewritten_frozen }
-
-doInteractWithInert (CFrozenErr { cc_id = cv2, cc_flavor = fl2 })
-           workItem@(CTyEqCan   { cc_id = cv1, cc_flavor = fl1, cc_tyvar = tv1, cc_rhs = xi1 })
-  | fl1 `canRewrite` fl2 && tv1 `elemVarSet` tyVarsOfEvVar cv2
-  = do { rewritten_frozen <- rewriteFrozen (cv1, tv1, xi1) (cv2, fl2)
-       ; mkIRContinue "Frozen/Eq" workItem DropInert rewritten_frozen }
-
--- Fall-through case for all other situations
-doInteractWithInert _ workItem = noInteraction workItem
-
--------------------------
--- Equational Rewriting 
-rewriteDict  :: (CoVar, TcTyVar, Xi) -> (DictId, CtFlavor, Class, [Xi]) -> TcS CanonicalCt
-rewriteDict (cv,tv,xi) (dv,gw,cl,xis) 
-  = do { let cos  = map (liftCoSubstWith [tv] [mkCoVarCo cv]) xis   -- xis[tv] ~ xis[xi]
-             args = substTysWith [tv] [xi] xis
-             con  = classTyCon cl 
-             dict_co = mkTyConAppCo con cos 
-       ; dv' <- newDictVar cl args 
-       ; case gw of 
-           Wanted {}         -> setDictBind dv (EvCast dv' (mkSymCo dict_co))
-           Given {}          -> setDictBind dv' (EvCast dv dict_co) 
-           Derived {}        -> return () -- Derived dicts we don't set any evidence
-
-       ; return (CDictCan { cc_id = dv'
-                          , cc_flavor = gw 
-                          , cc_class = cl 
-                          , cc_tyargs = args }) } 
-
-rewriteIP :: (CoVar,TcTyVar,Xi) -> (EvVar,CtFlavor, IPName Name, TcType) -> TcS CanonicalCt 
-rewriteIP (cv,tv,xi) (ipid,gw,nm,ty) 
-  = do { let ip_co = liftCoSubstWith [tv] [mkCoVarCo cv] ty     -- ty[tv] ~ t[xi]
-             ty'   = substTyWith   [tv] [xi] ty
-       ; ipid' <- newIPVar nm ty' 
-       ; case gw of 
-           Wanted {}         -> setIPBind ipid  (EvCast ipid' (mkSymCo ip_co))
-           Given {}          -> setIPBind ipid' (EvCast ipid ip_co) 
-           Derived {}        -> return () -- Derived ips: we don't set any evidence
-
-       ; return (CIPCan { cc_id = ipid'
-                        , cc_flavor = gw
-                        , cc_ip_nm = nm
-                        , cc_ip_ty = ty' }) }
-   
-rewriteFunEq :: (CoVar,TcTyVar,Xi) -> (CoVar,CtFlavor,TyCon, [Xi], Xi) -> TcS CanonicalCt
-rewriteFunEq (cv1,tv,xi1) (cv2,gw, tc,args,xi2)                   -- cv2 :: F args ~ xi2
-  = do { let co_subst = liftCoSubstWith [tv] [mkCoVarCo cv1]
-             arg_cos  = map co_subst args
-             args'    = substTysWith [tv] [xi1] args
-             fun_co   = mkTyConAppCo tc arg_cos                -- fun_co :: F args ~ F args'
-
-             xi2'    = substTyWith [tv] [xi1] xi2
-             xi2_co  = co_subst xi2 -- xi2_co :: xi2 ~ xi2'
-
-       ; cv2' <- newCoVar (mkTyConApp tc args') xi2'
-       ; case gw of 
-           Wanted {} -> setCoBind cv2  (fun_co         `mkTransCo` 
-                                        mkCoVarCo cv2' `mkTransCo` 
-                                        mkSymCo xi2_co)
-           Given {}  -> setCoBind cv2' (mkSymCo fun_co `mkTransCo` 
-                                        mkCoVarCo cv2  `mkTransCo` 
-                                        xi2_co)
-           Derived {} -> return () 
-
-       ; return (CFunEqCan { cc_id = cv2'
-                           , cc_flavor = gw
-                           , cc_tyargs = args'
-                           , cc_fun = tc 
-                           , cc_rhs = xi2' }) }
+doInteractWithInert _ _ = irKeepGoing "NOP"
 
 
-rewriteEqRHS :: (CoVar,TcTyVar,Xi) -> (CoVar,CtFlavor,TcTyVar,Xi) -> TcS WorkList
--- Use the first equality to rewrite the second, flavors already checked. 
--- E.g.          c1 : tv1 ~ xi1   c2 : tv2 ~ xi2
--- rewrites c2 to give
---               c2' : tv2 ~ xi2[xi1/tv1]
--- We must do an occurs check to sure the new constraint is canonical
--- So we might return an empty bag
-rewriteEqRHS (cv1,tv1,xi1) (cv2,gw,tv2,xi2) 
-  | Just tv2' <- tcGetTyVar_maybe xi2'
-  , tv2 == tv2'	 -- In this case xi2[xi1/tv1] = tv2, so we have tv2~tv2
-  = do { when (isWanted gw) (setCoBind cv2 (mkSymCo co2')) 
-       ; return emptyWorkList } 
-  | otherwise
-  = do { cv2' <- newCoVar (mkTyVarTy tv2) xi2'
-       ; case gw of
-             Wanted {} -> setCoBind cv2 $ mkCoVarCo cv2' `mkTransCo` 
-                                          mkSymCo co2'
-             Given {}  -> setCoBind cv2' $ mkCoVarCo cv2 `mkTransCo` 
-                                           co2'
-             Derived {} -> return ()
-       ; canEqToWorkList gw cv2' (mkTyVarTy tv2) xi2' }
-  where 
-    xi2' = substTyWith [tv1] [xi1] xi2 
-    co2' = liftCoSubstWith [tv1] [mkCoVarCo cv1] xi2  -- xi2 ~ xi2[xi1/tv1]
-
-rewriteEqLHS :: WhichComesFromInert -> (Coercion,Xi) -> (CoVar,CtFlavor,Xi) -> TcS WorkList
+rewriteEqLHS :: WhichComesFromInert -> (EqVar,Xi) -> (EqVar,SubGoalDepth,CtFlavor,Xi) -> TcS ()
 -- Used to ineract two equalities of the following form: 
 -- First Equality:   co1: (XXX ~ xi1)  
 -- Second Equality:  cv2: (XXX ~ xi2) 
 -- Where the cv1 `canRewrite` cv2 equality 
 -- We have an option of creating new work (xi1 ~ xi2) OR (xi2 ~ xi1), 
 --    See Note [Efficient Orientation] for that 
-rewriteEqLHS LeftComesFromInert (co1,xi1) (cv2,gw,xi2) 
-  = do { cv2' <- newCoVar xi2 xi1 
-       ; case gw of 
-           Wanted {} -> setCoBind cv2 $ 
-                        co1 `mkTransCo` mkSymCo (mkCoVarCo cv2')
-           Given {}  -> setCoBind cv2' $ 
-                        mkSymCo (mkCoVarCo cv2) `mkTransCo` co1 
-           Derived {} -> return ()
-       ; mkCanonical gw cv2' }
+rewriteEqLHS LeftComesFromInert (eqv1,xi1) (eqv2,d,gw,xi2) 
+  = do { delCachedEvVar eqv2 gw -- Similarly to canonicalization!
+       ; evc <- newEqVar gw xi2 xi1
+       ; let eqv2' = evc_the_evvar evc
+       ; gw' <- case gw of 
+           Wanted {} 
+               -> setEqBind eqv2 
+                    (mkTcCoVarCo eqv1 `mkTcTransCo` mkTcSymCo (mkTcCoVarCo eqv2')) gw
+           Given {}
+               -> setEqBind eqv2'
+                    (mkTcSymCo (mkTcCoVarCo eqv2) `mkTcTransCo` mkTcCoVarCo eqv1) gw
+           Derived {} 
+               -> return gw
+       ; when (isNewEvVar evc) $ 
+              updWorkListTcS (extendWorkListEq (CNonCanonical { cc_id     = eqv2'
+                                                              , cc_flavor = gw'
+                                                              , cc_depth  = d } ) ) }
 
-rewriteEqLHS RightComesFromInert (co1,xi1) (cv2,gw,xi2) 
-  = do { cv2' <- newCoVar xi1 xi2
-       ; case gw of
-           Wanted {} -> setCoBind cv2 $
-                        co1 `mkTransCo` mkCoVarCo cv2'
-           Given {}  -> setCoBind cv2' $
-                        mkSymCo co1 `mkTransCo` mkCoVarCo cv2
-           Derived {} -> return ()
-       ; mkCanonical gw cv2' }
+rewriteEqLHS RightComesFromInert (eqv1,xi1) (eqv2,d,gw,xi2) 
+  = do { delCachedEvVar eqv2 gw -- Similarly to canonicalization!
+       ; evc <- newEqVar gw xi1 xi2
+       ; let eqv2' = evc_the_evvar evc
+       ; gw' <- case gw of
+           Wanted {} 
+               -> setEqBind eqv2
+                    (mkTcCoVarCo eqv1 `mkTcTransCo` mkTcCoVarCo eqv2') gw
+           Given {}  
+               -> setEqBind eqv2'
+                    (mkTcSymCo (mkTcCoVarCo eqv1) `mkTcTransCo` mkTcCoVarCo eqv2) gw
+           Derived {} 
+               -> return gw
 
-rewriteFrozen :: (CoVar,TcTyVar,Xi) -> (CoVar,CtFlavor) -> TcS WorkList
-rewriteFrozen (cv1, tv1, xi1) (cv2, fl2)
-  = do { cv2' <- newCoVar ty2a' ty2b'  -- ty2a[xi1/tv1] ~ ty2b[xi1/tv1]
-       ; case fl2 of
-             Wanted {} -> setCoBind cv2 $ co2a'                `mkTransCo`
-                       	         	  mkCoVarCo cv2' `mkTransCo`
-                       	         	  mkSymCo co2b'
+       ; when (isNewEvVar evc) $
+              updWorkListTcS (extendWorkListEq (CNonCanonical { cc_id = eqv2'
+                                                              , cc_flavor = gw'
+                                                              , cc_depth  = d } ) ) }
 
-             Given {} -> setCoBind cv2' $ mkSymCo co2a'  `mkTransCo`
-                      	 		  mkCoVarCo cv2  `mkTransCo`
-                      	 		  co2b'
-
-             Derived {} -> return ()
-
-      ; return (workListFromNonEq $ CFrozenErr { cc_id = cv2', cc_flavor = fl2 }) }
-  where
-    (ty2a, ty2b) = coVarKind cv2          -- cv2 : ty2a ~ ty2b
-    ty2a' = substTyWith [tv1] [xi1] ty2a
-    ty2b' = substTyWith [tv1] [xi1] ty2b
-
-    co2a' = liftCoSubstWith [tv1] [mkCoVarCo cv1] ty2a  -- ty2a ~ ty2a[xi1/tv1]
-    co2b' = liftCoSubstWith [tv1] [mkCoVarCo cv1] ty2b  -- ty2b ~ ty2b[xi1/tv1]
-
-solveOneFromTheOther_ExtraWork :: String -> (EvTerm, CtFlavor) 
-                               -> CanonicalCt -> WorkList -> TcS InteractResult
--- First argument inert, second argument work-item. They both represent 
--- wanted/given/derived evidence for the *same* predicate so 
--- we can discharge one directly from the other. 
---
--- Precondition: value evidence only (implicit parameters, classes) 
---               not coercion
-solveOneFromTheOther_ExtraWork info (ev_term,ifl) workItem extra_work
+solveOneFromTheOther :: String             -- Info 
+                     -> (EvTerm, CtFlavor) -- Inert 
+                     -> Ct        -- WorkItem 
+                     -> TcS InteractResult
+-- Preconditions: 
+-- 1) inert and work item represent evidence for the /same/ predicate
+-- 2) ip/class/irred evidence (no coercions) only
+solveOneFromTheOther info (ev_term,ifl) workItem
   | isDerived wfl
-  = mkIRStopK ("Solved[DW] " ++ info) extra_work
+  = irWorkItemConsumed ("Solved[DW] " ++ info)
 
   | isDerived ifl -- The inert item is Derived, we can just throw it away, 
     	      	  -- The workItem is inert wrt earlier inert-set items, 
 		  -- so it's safe to continue on from this point
-  = mkIRContinue ("Solved[DI] " ++ info) workItem DropInert extra_work
+  = irInertConsumed ("Solved[DI] " ++ info)
   
-  | Just GivenSolved <- isGiven_maybe ifl, isGivenOrSolved wfl
+  | Just (GivenSolved {}) <- isGiven_maybe ifl, isGivenOrSolved wfl
     -- Same if the inert is a GivenSolved -- just get rid of it
-  = mkIRContinue ("Solved[SI] " ++ info) workItem DropInert extra_work
+  = irInertConsumed ("Solved[SI] " ++ info)
 
   | otherwise
   = ASSERT( ifl `canSolve` wfl )
       -- Because of Note [The Solver Invariant], plus Derived dealt with
-    do { when (isWanted wfl) $ setEvBind wid ev_term
+    do { when (isWanted wfl) $ do { _ <- setEvBind wid ev_term wfl; return () }
            -- Overwrite the binding, if one exists
 	   -- If both are Given, we already have evidence; no need to duplicate
-       ; mkIRStopK ("Solved " ++ info) extra_work }
+       ; irWorkItemConsumed ("Solved " ++ info) }
   where 
      wfl = cc_flavor workItem
      wid = cc_id workItem
-
-
-solveOneFromTheOther :: String -> (EvTerm, CtFlavor) -> CanonicalCt -> TcS InteractResult
-solveOneFromTheOther str evfl ct 
-  = solveOneFromTheOther_ExtraWork str evfl ct emptyWorkList -- extra work is empty 
 
 \end{code}
 
@@ -1678,60 +1285,42 @@ we keep the synonym-using RHS without expansion.
 *********************************************************************************
 
 \begin{code}
--- If a work item has any form of interaction with top-level we get this 
+
+topReactionsStage :: SimplifierStage 
+topReactionsStage workItem 
+ = tryTopReact workItem 
+   
+
+tryTopReact :: WorkItem -> TcS StopOrContinue
+tryTopReact wi 
+ = do { inerts <- getTcSInerts
+      ; ctxt   <- getTcSContext
+      ; if simplEqsOnly ctxt then return (ContinueWith wi) -- or Stop?
+        else 
+            do { tir <- doTopReact inerts wi
+               ; case tir of 
+                   NoTopInt 
+                       -> return (ContinueWith wi)
+                   SomeTopInt rule what_next 
+                       -> do { bumpStepCountTcS 
+                             ; traceFireTcS (cc_depth wi) $
+                               ptext (sLit "Top react:") <+> text rule
+                             ; return what_next }
+               } }
+
 data TopInteractResult 
-  = NoTopInt         -- No top-level interaction
-                     -- Equivalent to (SomeTopInt emptyWorkList (ContinueWith work_item))
-  | SomeTopInt 
-      { tir_new_work  :: WorkList	-- Sub-goals or new work (could be given, 
-                                        --                        for superclasses)
-      , tir_new_inert :: StopOrContinue -- The input work item, ready to become *inert* now: 
-      }                       		-- NB: in ``given'' (solved) form if the 
-                              		-- original was wanted or given and instance match
-                              		-- was found, but may also be in wanted form if we 
-                                        -- only reacted with functional dependencies 
-					-- arising from top-level instances.
+ = NoTopInt
+ | SomeTopInt { tir_rule :: String, tir_new_item :: StopOrContinue }
 
-topReactionsStage :: SimplifierStage
-topReactionsStage depth workItem inerts
-  = do { tir <- tryTopReact inerts workItem
-             -- NB: we pass the inerts as well. See Note [Instance and Given overlap]
-       ; case tir of
-           NoTopInt ->
-               return $ SR { sr_inerts   = inerts
-                           , sr_new_work = emptyWorkList
-                           , sr_stop     = ContinueWith workItem }
-           SomeTopInt tir_new_work tir_new_inert ->
-               do { bumpStepCountTcS
-                  ; traceFireTcS depth (ptext (sLit "Top react")
-                       <+> vcat [ ptext (sLit "Work =") <+> ppr workItem
-                                , ptext (sLit "New =") <+> ppr tir_new_work ])
-                  ; return $ SR { sr_inerts   = inerts
-                           	, sr_new_work = tir_new_work
-                           	, sr_stop     = tir_new_inert
-                           	} }
-       }
-
-tryTopReact :: InertSet -> WorkItem -> TcS TopInteractResult 
-tryTopReact inerts workitem 
-  = do {  -- A flag controls the amount of interaction allowed
-          -- See Note [Simplifying RULE lhs constraints]
-         ctxt <- getTcSContext
-       ; if allowedTopReaction (simplEqsOnly ctxt) workitem 
-         then do { traceTcS "tryTopReact / calling doTopReact" (ppr workitem)
-                 ; doTopReact inerts workitem }
-         else return NoTopInt 
-       } 
-
-allowedTopReaction :: Bool -> WorkItem -> Bool
-allowedTopReaction eqs_only (CDictCan {}) = not eqs_only
-allowedTopReaction _        _             = True
 
 doTopReact :: InertSet -> WorkItem -> TcS TopInteractResult
--- The work item does not react with the inert set, so try interaction with top-level instances
--- NB: The place to add superclasses in *not* in doTopReact stage. Instead superclasses are 
---     added in the worklist as part of the canonicalisation process. 
--- See Note [Adding superclasses] in TcCanonical.
+
+-- The work item does not react with the inert set, so try interaction
+-- with top-level instances 
+-- NB: The place to add superclasses in *not*
+-- in doTopReact stage. Instead superclasses are added in the worklist
+-- as part of the canonicalisation process. See Note [Adding superclasses].
+
 
 -- Given dictionary
 -- See Note [Given constraint that matches an instance declaration]
@@ -1743,19 +1332,18 @@ doTopReact _inerts workItem@(CDictCan { cc_flavor = Derived loc
                                       , cc_class = cls, cc_tyargs = xis })
   = do { instEnvs <- getInstEnvs
        ; let fd_eqns = improveFromInstEnv instEnvs
-                                                (ClassP cls xis, pprArisingAt loc)
+                           (mkClassPred cls xis, pprArisingAt loc)
        ; m <- rewriteWithFunDeps fd_eqns xis loc
        ; case m of
            Nothing -> return NoTopInt
            Just (xis',_,fd_work) ->
                let workItem' = workItem { cc_tyargs = xis' }
                    -- Deriveds are not supposed to have identity (cc_id is unused!)
-               in do { fd_cans <- mkCanonicalFDAsDerived fd_work
-                     ; return $ SomeTopInt { tir_new_work  = fd_cans 
-                                           , tir_new_inert = ContinueWith workItem' }
-                     }
+               in do { emitFDWorkAsDerived fd_work (cc_depth workItem)
+                     ; return $ 
+                       SomeTopInt { tir_rule  = "Derived Cls fundeps" 
+                                  , tir_new_item = ContinueWith workItem' } }
        }
-
 
 -- Wanted dictionary
 doTopReact inerts workItem@(CDictCan { cc_flavor = fl@(Wanted loc)
@@ -1763,7 +1351,8 @@ doTopReact inerts workItem@(CDictCan { cc_flavor = fl@(Wanted loc)
   -- See Note [MATCHING-SYNONYMS]
   = do { traceTcS "doTopReact" (ppr workItem)
        ; instEnvs <- getInstEnvs
-       ; let fd_eqns = improveFromInstEnv instEnvs $ (ClassP cls xis, pprArisingAt loc)
+       ; let fd_eqns = improveFromInstEnv instEnvs 
+                            (mkClassPred cls xis, pprArisingAt loc)
 
        ; any_fundeps <- rewriteWithFunDeps fd_eqns xis loc
        ; case any_fundeps of
@@ -1772,99 +1361,110 @@ doTopReact inerts workItem@(CDictCan { cc_flavor = fl@(Wanted loc)
                do { lkup_inst_res  <- matchClassInst inerts cls xis loc
                   ; case lkup_inst_res of
                       GenInst wtvs ev_term
-                          -> doSolveFromInstance wtvs ev_term workItem emptyWorkList
+                          -> doSolveFromInstance wtvs ev_term workItem
                       NoInstance
                           -> return NoTopInt
                   }
            -- Actual Functional Dependencies
-           Just (xis',cos,fd_work) ->
-               do { lkup_inst_res <- matchClassInst inerts cls xis' loc
-                  ; case lkup_inst_res of
-                      NoInstance
-                          -> do { fd_cans <- mkCanonicalFDAsDerived fd_work
-                                ; return $
-                                 SomeTopInt { tir_new_work  = fd_cans
-                                             , tir_new_inert = ContinueWith workItem } }
-                      -- This WHOLE branch is an optimization: we can immediately discharge the dictionary
-                      GenInst wtvs ev_term
-                          -> do { let dict_co = mkTyConAppCo (classTyCon cls) cos
-                                ; fd_cans <- mkCanonicalFDAsWanted fd_work
-                                ; dv' <- newDictVar cls xis'
-                                ; setDictBind dv' ev_term
-                                ; doSolveFromInstance wtvs (EvCast dv' dict_co) workItem fd_cans }
-                  } }
+           Just (_xis',_cos,fd_work) ->
+               do { emitFDWorkAsDerived fd_work (cc_depth workItem)
+                  ; return SomeTopInt { tir_rule = "Dict/Top (fundeps)"
+                                      , tir_new_item = ContinueWith workItem } } }
 
    where doSolveFromInstance :: [WantedEvVar] 
                              -> EvTerm 
-                             -> CanonicalCt 
-                             -> WorkList -> TcS TopInteractResult
+                             -> Ct 
+                             -> TcS TopInteractResult
          -- Precondition: evidence term matches the predicate of cc_id of workItem
-         doSolveFromInstance wtvs ev_term workItem extra_work
+         doSolveFromInstance wtvs ev_term workItem
             | null wtvs
             = do { traceTcS "doTopReact/found nullary instance for" (ppr (cc_id workItem))
-                 ; setDictBind (cc_id workItem) ev_term
-                 ; return $ SomeTopInt { tir_new_work  = extra_work
-                                       , tir_new_inert = Stop } }
+                 ; _ <- setEvBind (cc_id workItem) ev_term fl
+                 ; return $ 
+                   SomeTopInt { tir_rule = "Dict/Top (solved, no new work)" 
+                              , tir_new_item = Stop } } -- Don't put him in the inerts
             | otherwise 
-            = do { traceTcS "doTopReact/found non-nullary instance for" (ppr (cc_id workItem))
-                 ; setDictBind (cc_id workItem) ev_term 
+            = do { traceTcS "doTopReact/found non-nullary instance for" $ 
+                   ppr (cc_id workItem)
+                 ; _ <- setEvBind (cc_id workItem) ev_term fl
                         -- Solved and new wanted work produced, you may cache the 
                         -- (tentatively solved) dictionary as Solved given.
-                 ; let solved    = workItem { cc_flavor = solved_fl }
-                       solved_fl = mkSolvedFlavor fl UnkSkol  
-                 ; inst_work <- canWanteds wtvs
-                 ; return $ SomeTopInt { tir_new_work  = inst_work `unionWorkList` extra_work
-                                       , tir_new_inert = ContinueWith solved } }
-
+--                 ; let _solved = workItem { cc_flavor = solved_fl }
+--                       solved_fl = mkSolvedFlavor fl UnkSkol
+                 ; let ct_from_wev (EvVarX v fl)
+                           = CNonCanonical { cc_id = v, cc_flavor = Wanted fl
+                                           , cc_depth  = cc_depth workItem + 1 }
+                       wtvs_cts = map ct_from_wev wtvs
+                 ; updWorkListTcS (appendWorkListCt wtvs_cts)
+                 ; return $
+                   SomeTopInt { tir_rule     = "Dict/Top (solved, more work)"
+                              , tir_new_item = Stop }
+                 }
+--                              , tir_new_item = ContinueWith solved } } -- Cache in inerts the Solved item
 
 -- Type functions
 doTopReact _inerts (CFunEqCan { cc_flavor = fl })
-  | Just GivenSolved <- isGiven_maybe fl
+  | Just (GivenSolved {}) <- isGiven_maybe fl
   = return NoTopInt -- If Solved, no more interactions should happen
 
 -- Otherwise, it's a Given, Derived, or Wanted
-doTopReact _inerts workItem@(CFunEqCan { cc_id = cv, cc_flavor = fl
+doTopReact _inerts workItem@(CFunEqCan { cc_id = eqv, cc_flavor = fl
                                        , cc_fun = tc, cc_tyargs = args, cc_rhs = xi })
   = ASSERT (isSynFamilyTyCon tc)   -- No associated data families have reached that far 
-    do { match_res <- matchFam tc args -- See Note [MATCHING-SYNONYMS]
+    do { match_res <- matchFam tc args   -- See Note [MATCHING-SYNONYMS]
        ; case match_res of 
-           MatchInstNo -> return NoTopInt 
-           MatchInstSingle (rep_tc, rep_tys)
+           Nothing -> return NoTopInt 
+           Just (rep_tc, rep_tys)
              -> do { let Just coe_tc = tyConFamilyCoercion_maybe rep_tc
                          Just rhs_ty = tcView (mkTyConApp rep_tc rep_tys)
 			    -- Eagerly expand away the type synonym on the
 			    -- RHS of a type function, so that it never
 			    -- appears in an error message
                             -- See Note [Type synonym families] in TyCon
-                         coe = mkAxInstCo coe_tc rep_tys 
+                         coe = mkTcAxInstCo coe_tc rep_tys 
                    ; case fl of
-                       Wanted {} -> do { cv' <- newCoVar rhs_ty xi
-                                       ; setCoBind cv $ coe `mkTransCo` mkCoVarCo cv'
-                                       ; can_cts <- mkCanonical fl cv'
-                                       ; let solved = workItem { cc_flavor = solved_fl }
-                                             solved_fl = mkSolvedFlavor fl UnkSkol
-                                       ; if isEmptyWorkList can_cts then 
-                                              return (SomeTopInt can_cts Stop) -- No point in caching
-                                         else return $ 
-                                              SomeTopInt { tir_new_work = can_cts
-                                                         , tir_new_inert = ContinueWith solved }
-                                       }
-                       Given {} -> do { cv' <- newGivenCoVar xi rhs_ty $ 
-                                               mkSymCo (mkCoVarCo cv) `mkTransCo` coe 
-                                      ; can_cts <- mkCanonical fl cv'
+                       Wanted {} -> do { evc <- newEqVar fl rhs_ty xi -- Wanted version
+                                       ; let eqv' = evc_the_evvar evc
+                                       ; let coercion = coe `mkTcTransCo` mkTcCoVarCo eqv'
+                                       ; _ <- setEqBind eqv coercion fl
+                                       ; when (isNewEvVar evc) $ 
+                                            (let ct = CNonCanonical { cc_id = eqv'
+                                                                    , cc_flavor = fl 
+                                                                    , cc_depth = cc_depth workItem + 1} 
+                                             in updWorkListTcS (extendWorkListEq ct))
+
+                                       ; let _solved   = workItem { cc_flavor = solved_fl }
+                                             solved_fl = mkSolvedFlavor fl UnkSkol (EvCoercion coercion)
+
+                                       ; updateFlatCache eqv solved_fl tc args xi WhenSolved
+
+                                       ; return $ 
+                                         SomeTopInt { tir_rule = "Fun/Top (solved, more work)"
+                                                    , tir_new_item = Stop } }
+                                                  --  , tir_new_item = ContinueWith solved } }
+                                                     -- Cache in inerts the Solved item
+
+                       Given {} -> do { (fl',eqv') <- newGivenEqVar fl xi rhs_ty $ 
+                                                         mkTcSymCo (mkTcCoVarCo eqv) `mkTcTransCo` coe
+                                      ; let ct = CNonCanonical { cc_id = eqv'
+                                                               , cc_flavor = fl'
+                                                               , cc_depth = cc_depth workItem + 1}  
+                                      ; updWorkListTcS (extendWorkListEq ct) 
+
                                       ; return $ 
-                                        SomeTopInt { tir_new_work = can_cts
-                                                   , tir_new_inert = Stop }
-                                      }
-                       Derived {} -> do { cv' <- newDerivedId (EqPred xi rhs_ty)
-                                        ; can_cts <- mkCanonical fl cv'
+                                        SomeTopInt { tir_rule = "Fun/Top (given)"
+                                                   , tir_new_item = ContinueWith workItem } }
+                       Derived {} -> do { evc <- newEvVar fl (mkEqPred (xi, rhs_ty))
+                                        ; let eqv' = evc_the_evvar evc
+                                        ; when (isNewEvVar evc) $ 
+                                            (let ct = CNonCanonical { cc_id  = eqv'
+                                                                 , cc_flavor = fl
+                                                                 , cc_depth  = cc_depth workItem + 1 } 
+                                             in updWorkListTcS (extendWorkListEq ct)) 
                                         ; return $ 
-                                          SomeTopInt { tir_new_work = can_cts
-                                                     , tir_new_inert = Stop }
-                                        }
+                                          SomeTopInt { tir_rule = "Fun/Top (derived)"
+                                                     , tir_new_item = Stop } }
                    }
-           _ 
-             -> panicTcS $ text "TcSMonad.matchFam returned multiple instances!"
        }
 
 
@@ -1986,7 +1586,7 @@ two possibilities:
        now solvable by the given Q [a]. 
  
      However, this option is restrictive, for instance [Example 3] from 
-     Note [Recursive dictionaries] will fail to work. 
+     Note [Recursive instances and superclases] will fail to work. 
 
   2. Ignore the problem, hoping that the situations where there exist indeed
      such multiple strategies are rare: Indeed the cause of the previous 
@@ -2085,7 +1685,7 @@ matchClassInst inerts clas tys loc
             MatchInstSingle (_,_)
               | given_overlap untch -> 
                   do { traceTcS "Delaying instance application" $ 
-                       vcat [ text "Workitem=" <+> pprPredTy (ClassP clas tys)
+                       vcat [ text "Workitem=" <+> pprType (mkClassPred clas tys)
                             , text "Relevant given dictionaries=" <+> ppr givens_for_this_clas ]
                      ; return NoInstance -- see Note [Instance and Given overlap]
                      }
@@ -2104,15 +1704,18 @@ matchClassInst inerts clas tys loc
                  ; if null theta then
                        return (GenInst [] (EvDFunApp dfun_id tys []))
                    else do
-                     { ev_vars <- instDFunConstraints theta
-                     ; let wevs = [EvVarX w loc | w <- ev_vars]
+                     { evc_vars <- instDFunConstraints theta (Wanted loc)
+                     ; let ev_vars = map evc_the_evvar evc_vars
+                           new_evc_vars = filter isNewEvVar evc_vars 
+                           wevs = map (\v -> EvVarX (evc_the_evvar v) loc) new_evc_vars
+                                  -- wevs are only the real new variables that can be emitted 
                      ; return $ GenInst wevs (EvDFunApp dfun_id tys ev_vars) }
                  }
         }
    where 
-     givens_for_this_clas :: CanonicalCts
-     givens_for_this_clas = Map.lookup clas (cts_given (inert_dicts inerts))
-                            `orElse` emptyBag
+     givens_for_this_clas :: Cts
+     givens_for_this_clas 
+         = lookupUFM (cts_given (inert_dicts inerts)) clas `orElse` emptyCts
 
      given_overlap :: TcsUntouchables -> Bool
      given_overlap untch = anyBag (matchable untch) givens_for_this_clas

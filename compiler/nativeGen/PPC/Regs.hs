@@ -4,6 +4,13 @@
 -- 
 -- -----------------------------------------------------------------------------
 
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module PPC.Regs (
 	-- squeeze functions
 	virtualRegSqueeze,
@@ -464,6 +471,12 @@ freeReg REG_R7   = fastBool False
 #endif	
 #ifdef REG_R8  
 freeReg REG_R8   = fastBool False
+#endif
+#ifdef REG_R9
+freeReg REG_R9   = fastBool False
+#endif
+#ifdef REG_R10
+freeReg REG_R10  = fastBool False
 #endif
 #ifdef REG_F1
 freeReg REG_F1 = fastBool False

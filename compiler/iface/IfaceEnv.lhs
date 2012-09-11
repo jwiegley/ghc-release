@@ -1,20 +1,26 @@
 (c) The University of Glasgow 2002-2006
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module IfaceEnv (
-	newGlobalBinder, newIPName, newImplicitBinder, 
+	newGlobalBinder, newImplicitBinder, 
 	lookupIfaceTop,
 	lookupOrig, lookupOrigNameCache, extendNameCache,
-	newIfaceName, newIfaceNames,
+	newIPName, newIfaceName, newIfaceNames,
 	extendIfaceIdEnv, extendIfaceTyVarEnv, 
 	tcIfaceLclId, tcIfaceTyVar, lookupIfaceTyVar,
-	tcIfaceTick,
 
 	ifaceExportNames,
 
 	-- Name-cache stuff
-	allocateGlobalBinder, initNameCache, updNameCache,
-        getNameCache, mkNameCacheUpdater, NameCacheUpdater
+	allocateGlobalBinder, allocateIPName, initNameCache, updNameCache,
+        getNameCache, mkNameCacheUpdater, NameCacheUpdater(..)
    ) where
 
 #include "HsVersions.h"
@@ -23,17 +29,18 @@ import TcRnMonad
 import TysWiredIn
 import HscTypes
 import TyCon
+import Type
 import DataCon
 import Var
 import Name
+import Avail
 import PrelNames
 import Module
 import UniqFM
 import FastString
 import UniqSupply
-import BasicTypes
 import SrcLoc
-import MkId
+import BasicTypes
 
 import Outputable
 import Exception     ( evaluate )
@@ -70,39 +77,49 @@ allocateGlobalBinder
   -> (NameCache, Name)
 allocateGlobalBinder name_supply mod occ loc
   = case lookupOrigNameCache (nsNames name_supply) mod occ of
-	-- A hit in the cache!  We are at the binding site of the name.
-	-- This is the moment when we know the SrcLoc
-	-- of the Name, so we set this field in the Name we return.
-	--
-	-- Then (bogus) multiple bindings of the same Name
-	-- get different SrcLocs can can be reported as such.
-	--
-	-- Possible other reason: it might be in the cache because we
-	-- 	encountered an occurrence before the binding site for an
-	--	implicitly-imported Name.  Perhaps the current SrcLoc is
-	--	better... but not really: it'll still just say 'imported'
-	--
-	-- IMPORTANT: Don't mess with wired-in names.  
-	-- 	      Their wired-in-ness is in their NameSort
-	--	      and their Module is correct.
+        -- A hit in the cache!  We are at the binding site of the name.
+        -- This is the moment when we know the SrcLoc
+        -- of the Name, so we set this field in the Name we return.
+        --
+        -- Then (bogus) multiple bindings of the same Name
+        -- get different SrcLocs can can be reported as such.
+        --
+        -- Possible other reason: it might be in the cache because we
+        -- 	encountered an occurrence before the binding site for an
+        --	implicitly-imported Name.  Perhaps the current SrcLoc is
+        --	better... but not really: it'll still just say 'imported'
+        --
+        -- IMPORTANT: Don't mess with wired-in names.
+        -- 	      Their wired-in-ness is in their NameSort
+        --	      and their Module is correct.
 
-	Just name | isWiredInName name -> (name_supply, name)
-		  | otherwise -> (new_name_supply, name')
-		  where
-		    uniq      = nameUnique name
-		    name'     = mkExternalName uniq mod occ loc
-		    new_cache = extendNameCache (nsNames name_supply) mod occ name'
-		    new_name_supply = name_supply {nsNames = new_cache}		     
+        Just name | isWiredInName name -> (name_supply, name)
+                  | mod /= iNTERACTIVE -> (new_name_supply, name')
+                     -- Note [interactive name cache]
+                  where
+                    uniq            = nameUnique name
+                    name'           = mkExternalName uniq mod occ loc
+                    new_cache       = extendNameCache (nsNames name_supply) mod occ name'
+                    new_name_supply = name_supply {nsNames = new_cache}
 
-	-- Miss in the cache!
-	-- Build a completely new Name, and put it in the cache
-	Nothing -> (new_name_supply, name)
-		where
-		  (uniq, us')     = takeUniqFromSupply (nsUniqs name_supply)
-		  name            = mkExternalName uniq mod occ loc
-		  new_cache       = extendNameCache (nsNames name_supply) mod occ name
-		  new_name_supply = name_supply {nsUniqs = us', nsNames = new_cache}
+        -- Miss in the cache!
+        -- Build a completely new Name, and put it in the cache
+        _ -> (new_name_supply, name)
+                  where
+                    (uniq, us')     = takeUniqFromSupply (nsUniqs name_supply)
+                    name            = mkExternalName uniq mod occ loc
+                    new_cache       = extendNameCache (nsNames name_supply) mod occ name
+                    new_name_supply = name_supply {nsUniqs = us', nsNames = new_cache}
 
+{- Note [interactive name cache]
+
+In GHCi we always create Names with the same Module, ":Interactive".
+However, we want to be able to shadow older declarations with newer
+ones, and we don't want the Name cache giving us back the same Unique
+for the new Name as for the old, hence this special case.
+
+See also Note [Outputable Orig RdrName] in HscTypes.
+-}
 
 newImplicitBinder :: Name			-- Base name
 	          -> (OccName -> OccName) 	-- Occurrence name modifier
@@ -148,21 +165,20 @@ lookupOrig mod occ
                   in (name_cache{ nsUniqs = us, nsNames = new_cache }, name)
     }}}
 
-newIPName :: IPName OccName -> TcRnIf m n (IPName Name)
-newIPName occ_name_ip =
-  updNameCache $ \name_cache ->
-    let
-	ipcache = nsIPs name_cache
-        key = occ_name_ip  -- Ensures that ?x and %x get distinct Names
-    in
-    case Map.lookup key ipcache of
-      Just name_ip -> (name_cache, name_ip)
-      Nothing      -> (new_ns, name_ip)
-	  where
-	    (uniq, us') = takeUniqFromSupply (nsUniqs name_cache)
-	    name_ip     = mapIPName (mkIPName uniq) occ_name_ip
-	    new_ipcache = Map.insert key name_ip ipcache
-	    new_ns      = name_cache {nsUniqs = us', nsIPs = new_ipcache}
+allocateIPName :: NameCache -> FastString -> (NameCache, IPName Name)
+allocateIPName name_cache ip = case Map.lookup ip ipcache of
+    Just name_ip -> (name_cache, name_ip)
+    Nothing      -> (new_ns, name_ip)
+       where
+         (us_here, us') = splitUniqSupply (nsUniqs name_cache)
+         tycon_u:datacon_u:dc_wrk_u:co_ax_u:_ = uniqsFromSupply us_here
+         name_ip     = mkIPName ip tycon_u datacon_u dc_wrk_u co_ax_u
+         new_ipcache = Map.insert ip name_ip ipcache
+         new_ns      = name_cache {nsUniqs = us', nsIPs = new_ipcache}
+  where ipcache = nsIPs name_cache
+
+newIPName :: FastString -> TcRnIf m n (IPName Name)
+newIPName ip = updNameCache $ flip allocateIPName ip
 \end{code}
 
 %************************************************************************
@@ -174,17 +190,18 @@ newIPName occ_name_ip =
 \begin{code}
 lookupOrigNameCache :: OrigNameCache -> Module -> OccName -> Maybe Name
 lookupOrigNameCache _ mod occ
-  -- XXX Why is gHC_UNIT not mentioned here?
+  -- Don't need to mention gHC_UNIT here because it is explicitly
+  -- included in TysWiredIn.wiredInTyCons
   | mod == gHC_TUPLE || mod == gHC_PRIM,		-- Boxed tuples from one, 
     Just tup_info <- isTupleOcc_maybe occ	-- unboxed from the other
   = 	-- Special case for tuples; there are too many
 	-- of them to pre-populate the original-name cache
     Just (mk_tup_name tup_info)
   where
-    mk_tup_name (ns, boxity, arity)
-	| ns == tcName   = tyConName (tupleTyCon boxity arity)
-	| ns == dataName = dataConName (tupleCon boxity arity)
-	| otherwise      = Var.varName (dataConWorkId (tupleCon boxity arity))
+    mk_tup_name (ns, sort, arity)
+	| ns == tcName   = tyConName (tupleTyCon sort arity)
+	| ns == dataName = dataConName (tupleCon sort arity)
+	| otherwise      = Var.varName (dataConWorkId (tupleCon sort arity))
 
 lookupOrigNameCache nc mod occ	-- The normal case
   = case lookupModuleEnv nc mod of
@@ -214,16 +231,16 @@ updNameCache upd_fn = do
 -- | A function that atomically updates the name cache given a modifier
 -- function.  The second result of the modifier function will be the result
 -- of the IO action.
-type NameCacheUpdater c = (NameCache -> (NameCache, c)) -> IO c
+data NameCacheUpdater = NCU { updateNameCache :: forall c. (NameCache -> (NameCache, c)) -> IO c }
 
 -- | Return a function to atomically update the name cache.
-mkNameCacheUpdater :: TcRnIf a b (NameCacheUpdater c)
+mkNameCacheUpdater :: TcRnIf a b NameCacheUpdater
 mkNameCacheUpdater = do
   nc_var <- hsc_NC `fmap` getTopEnv
   let update_nc f = do r <- atomicModifyIORef nc_var f
                        _ <- evaluate =<< readIORef nc_var
                        return r
-  return update_nc
+  return (NCU update_nc)
 \end{code}
 
 
@@ -232,7 +249,7 @@ initNameCache :: UniqSupply -> [Name] -> NameCache
 initNameCache us names
   = NameCache { nsUniqs = us,
 		nsNames = initOrigNames names,
-		nsIPs   = Map.empty }
+                nsIPs   = Map.empty }
 
 initOrigNames :: [Name] -> OrigNameCache
 initOrigNames names = foldl extendOrigNameCache emptyModuleEnv names
@@ -308,19 +325,3 @@ newIfaceNames occs
 	; return [ mkInternalName uniq occ noSrcSpan
 		 | (occ,uniq) <- occs `zip` uniqsFromSupply uniqs] }
 \end{code}
-
-%************************************************************************
-%*									*
-		(Re)creating tick boxes
-%*									*
-%************************************************************************
-
-\begin{code}
-tcIfaceTick :: Module -> Int -> IfL Id
-tcIfaceTick modName tickNo 
-  = do { uniq <- newUnique
-       ; return $ mkTickBoxOpId uniq modName tickNo
-       }
-\end{code}
-
-
