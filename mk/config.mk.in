@@ -297,13 +297,14 @@ PackageSourceURL = http://darcs.haskell.org/packages/$(PACKAGE)/%{FILE}
 #		doing object-file splitting
 
 ArchSupportsSplitObjs=$(strip $(if $(filter $(TargetArch_CPP),i386 x86_64 powerpc sparc),YES,NO))
-# Object splitting is disabled on darwin due to #4013
-OsSupportsSplitObjs=$(strip $(if $(filter $(TargetOS_CPP),mingw32 cygwin32 linux solaris2 freebsd dragonfly netbsd openbsd),YES,NO))
+OsSupportsSplitObjs=$(strip $(if $(filter $(TargetOS_CPP),mingw32 cygwin32 linux darwin solaris2 freebsd dragonfly netbsd openbsd),YES,NO))
+SplitObjsBroken = @SplitObjsBroken@
 
 # lazy test, so that $(GhcUnregisterised) can be set in build.mk
 SupportsSplitObjs=$(strip \
                     $(if $(and $(filter YES,$(ArchSupportsSplitObjs)),\
                                $(filter YES,$(OsSupportsSplitObjs)),\
+                               $(filter NO,$(SplitObjsBroken)),\
                                $(filter NO,$(BootingFromHc)),\
                                $(filter NO,$(GhcUnregisterised))),\
                           YES,NO))
@@ -618,16 +619,18 @@ CTAGS 			= $(ETAGS)
 RAWCPP_FLAGS            = -undef -traditional
 FIND			= @FindCmd@
 SORT		        = @SortCmd@
-INSTALL			= @INSTALL@
+
 #
 # Sigh - the autoconf macro for INSTALL will subst a relative path to the fallback
 # install-sh script (if chosen). This not terribly useful to us, so we convert
 # it into an abs. path.
 # 
+INSTALL			= @INSTALL@
 INSTALL			:= $(subst .././install-sh,$(TOP)/install-sh,$(INSTALL))
+
 LATEX			= latex
-PDFLATEX        = pdflatex
-BIBTEX          = bibtex
+PDFLATEX                = pdflatex
+BIBTEX                  = bibtex
 LN_S			= @LN_S@
 MV			= mv
 NROFF			= nroff

@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.0.2], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.0.3], [glasgow-haskell-bugs@haskell.org], [ghc])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=YES}
@@ -88,6 +88,11 @@ AC_ARG_WITH([ghc],
     AC_PATH_PROG([GHC], [ghc])
   fi
   WithGhc="$GHC"])
+
+
+dnl ** Tell the make system which OS we are using
+dnl $OSTYPE is set by the operating system to "msys" or "cygwin" or something 
+AC_SUBST(OSTYPE)
 
 dnl ** Booting from .hc files?
 dnl --------------------------------------------------------------
@@ -413,6 +418,41 @@ dnl --------------------------------------------------------------
 FP_ARG_WITH_PATH_GNU_PROG([NM], [nm])
 NmCmd="$NM"
 AC_SUBST([NmCmd])
+
+SplitObjsBroken=NO
+if test "$TargetOS_CPP" = "darwin"
+then
+    AC_MSG_CHECKING(XCode version)
+    XCodeVersion=`xcodebuild -version | grep Xcode | sed "s/Xcode //"`
+    # Old XCode versions don't actually give the XCode version
+    if test "$XCodeVersion" = ""
+    then
+        AC_MSG_RESULT(not found (too old?))
+        SplitObjsBroken=YES
+    else
+        AC_MSG_RESULT($XCodeVersion)
+        XCodeVersion1=`echo "$XCodeVersion" | sed 's/\..*//'`
+changequote(, )dnl
+        XCodeVersion2=`echo "$XCodeVersion" | sed 's/[^.]*\.\([^.]*\).*/\1/'`
+changequote([, ])dnl
+        AC_MSG_NOTICE(XCode version component 1: $XCodeVersion1)
+        AC_MSG_NOTICE(XCode version component 2: $XCodeVersion2)
+        # Split objects is broken (#4013) with XCode < 3.2
+        if test "$XCodeVersion1" -lt 3
+        then
+            SplitObjsBroken=YES
+        else
+            if test "$XCodeVersion1" -eq 3
+            then
+                if test "$XCodeVersion2" -lt 2
+                then
+                    SplitObjsBroken=YES
+                fi
+            fi
+        fi
+    fi
+fi
+AC_SUBST([SplitObjsBroken])
 
 dnl ** Mac OS X: explicit deployment target
 dnl --------------------------------------------------------------
