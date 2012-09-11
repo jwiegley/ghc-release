@@ -66,6 +66,13 @@
 #define MAX_CHARLIKE		255
 #define MIN_CHARLIKE		0
 
+/* Each byte in the card table for an StgMutaArrPtrs covers
+ * (1<<MUT_ARR_PTRS_CARD_BITS) elements in the array.  To find a good
+ * value for this, I used the benchmarks nofib/gc/hash,
+ * nofib/gc/graph, and nofib/gc/gc_bench.
+ */
+#define MUT_ARR_PTRS_CARD_BITS 7
+
 /* -----------------------------------------------------------------------------
    STG Registers.
 
@@ -284,5 +291,14 @@
 #if RESERVED_STACK_WORDS != (3 + RET_DYN_BITMAP_SIZE + RET_DYN_NONPTR_REGS_SIZE)
 #error RESERVED_STACK_WORDS may be wrong!
 #endif
+
+/*
+ * The number of times we spin in a spin lock before yielding (see
+ * #3758).  To tune this value, use the benchmark in #3758: run the
+ * server with -N2 and the client both on a dual-core.  Also make sure
+ * that the chosen value doesn't slow down any of the parallel
+ * benchmarks in nofib/parallel.
+ */
+#define SPIN_COUNT 1000
 
 #endif /* RTS_CONSTANTS_H */

@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [6.12.1], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [6.12.2], [glasgow-haskell-bugs@haskell.org], [ghc])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=YES}
@@ -208,40 +208,87 @@ System types:
   --host=HOST       cross-compile to build programs to run on HOST [guessed]
   --target=TARGET   configure for building compilers for TARGET [guessed]]])dnl
 
-if test "$build" = ""
+if test "${WithGhc}" != ""
+then
+        bootstrap_host=`"${WithGhc}" +RTS --info | grep '^ ,("Host platform"' | sed -e 's/.*, "//' -e 's/")//' | tr -d '\r'`
+        bootstrap_target=`"${WithGhc}" +RTS --info | grep '^ ,("Target platform"' | sed -e 's/.*, "//' -e 's/")//' | tr -d '\r'`
+        if test "$bootstrap_host" != "$bootstrap_target"
+        then
+                echo "Bootstrapping GHC is a cross compiler. This probably isn't going to work"
+        fi
+fi
+
+# We have to run these unconditionally, but we may discard their
+# results in the following code
+AC_CANONICAL_BUILD
+AC_CANONICAL_HOST
+AC_CANONICAL_TARGET
+
+# If no argument was given for a configuration variable, then discard
+# the guessed canonical system and use the configuration of the
+# bootstrapping ghc. If an argument was given, map it from gnu format
+# to ghc format.
+#
+# For why we do it this way, see: #3637, #1717, #2951
+
+if test "$build_alias" = ""
 then
     if test "${WithGhc}" != ""
     then
-        build=`"${WithGhc}" +RTS --info | grep '^ ,("Target platform"' | sed -e 's/.*, "//' -e 's/")//' | tr -d '\r'`
+        build=$bootstrap_target
         echo "Build platform inferred as: $build"
     else
         echo "Can't work out build platform"
         exit 1
     fi
+
+    BuildArch=`echo "$build" | sed 's/-.*//'`
+    BuildVendor=`echo "$build" | sed -e 's/.*-\(.*\)-.*/\1/'`
+    BuildOS=`echo "$build" | sed 's/.*-//'`
+else
+    GHC_CONVERT_CPU([$build_cpu], [BuildArch])
+    GHC_CONVERT_VENDOR([$build_vendor], [BuildVendor])
+    GHC_CONVERT_OS([$build_os], [BuildOS])
 fi
 
-if test "$host" = ""
+if test "$host_alias" = ""
 then
     if test "${WithGhc}" != ""
     then
-        host=`"${WithGhc}" +RTS --info | grep '^ ,("Target platform"' | sed -e 's/.*, "//' -e 's/")//' | tr -d '\r'`
+        host=$bootstrap_target
         echo "Host platform inferred as: $host"
     else
         echo "Can't work out host platform"
         exit 1
     fi
+
+    HostArch=`echo "$host" | sed 's/-.*//'`
+    HostVendor=`echo "$host" | sed -e 's/.*-\(.*\)-.*/\1/'`
+    HostOS=`echo "$host" | sed 's/.*-//'`
+else
+    GHC_CONVERT_CPU([$host_cpu], [HostArch])
+    GHC_CONVERT_VENDOR([$host_vendor], [HostVendor])
+    GHC_CONVERT_OS([$host_os], [HostOS])
 fi
 
-if test "$target" = ""
+if test "$target_alias" = ""
 then
     if test "${WithGhc}" != ""
     then
-        target=`"${WithGhc}" +RTS --info | grep '^ ,("Target platform"' | sed -e 's/.*, "//' -e 's/")//' | tr -d '\r'`
+        target=$bootstrap_target
         echo "Target platform inferred as: $target"
     else
         echo "Can't work out target platform"
         exit 1
     fi
+
+    TargetArch=`echo "$target" | sed 's/-.*//'`
+    TargetVendor=`echo "$target" | sed -e 's/.*-\(.*\)-.*/\1/'`
+    TargetOS=`echo "$target" | sed 's/.*-//'`
+else
+    GHC_CONVERT_CPU([$target_cpu], [TargetArch])
+    GHC_CONVERT_VENDOR([$target_vendor], [TargetVendor])
+    GHC_CONVERT_OS([$target_os], [TargetOS])
 fi
 
 exeext=''
@@ -296,7 +343,7 @@ checkVendor() {
 
 checkOS() {
     case $1 in
-    linux|freebsd|netbsd|openbsd|dragonfly|osf1|osf3|hpux|linuxaout|kfreebsdgnu|freebsd2|solaris2|cygwin32|mingw32|darwin|gnu|nextstep2|nextstep3|sunos4|ultrix|irix|aix)
+    linux|freebsd|netbsd|openbsd|dragonfly|osf1|osf3|hpux|linuxaout|kfreebsdgnu|freebsd2|solaris2|cygwin32|mingw32|darwin|gnu|nextstep2|nextstep3|sunos4|ultrix|irix|aix|haiku)
         ;;
     *)
         echo "Unknown OS '$1'"
@@ -305,10 +352,7 @@ checkOS() {
     esac
 }
 
-BuildPlatform=$build
-BuildArch=`echo "$build" | sed 's/-.*//'`
-BuildVendor=`echo "$build" | sed -e 's/.*-\(.*\)-.*/\1/'`
-BuildOS=`echo "$build" | sed 's/.*-//'`
+BuildPlatform="$BuildArch-$BuildVendor-$BuildOS"
 BuildPlatform_CPP=`echo "$BuildPlatform" | sed -e 's/\./_/g' -e 's/-/_/g'`
 BuildArch_CPP=`    echo "$BuildArch"     | sed -e 's/\./_/g' -e 's/-/_/g'`
 BuildVendor_CPP=`  echo "$BuildVendor"   | sed -e 's/\./_/g' -e 's/-/_/g'`
@@ -318,10 +362,7 @@ checkArch "$BuildArch"
 checkVendor "$BuildVendor"
 checkOS "$BuildOS"
 
-HostPlatform=$host
-HostArch=`echo "$host" | sed 's/-.*//'`
-HostVendor=`echo "$host" | sed -e 's/.*-\(.*\)-.*/\1/'`
-HostOS=`echo "$host" | sed 's/.*-//'`
+HostPlatform="$HostArch-$HostVendor-$HostOS"
 HostPlatform_CPP=`echo "$HostPlatform" | sed -e 's/\./_/g' -e 's/-/_/g'`
 HostArch_CPP=`    echo "$HostArch"     | sed -e 's/\./_/g' -e 's/-/_/g'`
 HostVendor_CPP=`  echo "$HostVendor"   | sed -e 's/\./_/g' -e 's/-/_/g'`
@@ -331,10 +372,7 @@ checkArch "$HostArch"
 checkVendor "$HostVendor"
 checkOS "$HostOS"
 
-TargetPlatform=$target
-TargetArch=`echo "$target" | sed 's/-.*//'`
-TargetVendor=`echo "$target" | sed -e 's/.*-\(.*\)-.*/\1/'`
-TargetOS=`echo "$target" | sed 's/.*-//'`
+TargetPlatform="$TargetArch-$TargetVendor-$TargetOS"
 TargetPlatform_CPP=`echo "$TargetPlatform" | sed -e 's/\./_/g' -e 's/-/_/g'`
 TargetArch_CPP=`    echo "$TargetArch"     | sed -e 's/\./_/g' -e 's/-/_/g'`
 TargetVendor_CPP=`  echo "$TargetVendor"   | sed -e 's/\./_/g' -e 's/-/_/g'`
@@ -389,6 +427,7 @@ then
     if ! test -d inplace/mingw ||
          test inplace/mingw -ot ghc-tarballs/mingw/binutils*.tar.gz ||
          test inplace/mingw -ot ghc-tarballs/mingw/gcc-core*.tar.gz ||
+         test inplace/mingw -ot ghc-tarballs/mingw/gcc-g++*.tar.gz ||
          test inplace/mingw -ot ghc-tarballs/mingw/libcrypt*.tar.bz2 ||
          test inplace/mingw -ot ghc-tarballs/mingw/mingw-runtime*.tar.gz ||
          test inplace/mingw -ot ghc-tarballs/mingw/msysCORE*.tar.gz ||
@@ -403,6 +442,7 @@ then
             cd inplace/mingw &&
             tar -zxf ../../ghc-tarballs/mingw/binutils*.tar.gz &&
             tar -zxf ../../ghc-tarballs/mingw/gcc-core*.tar.gz &&
+            tar -zxf ../../ghc-tarballs/mingw/gcc-g++*.tar.gz &&
             tar -jxf ../../ghc-tarballs/mingw/libcrypt*.tar.bz2 &&
             tar -zxf ../../ghc-tarballs/mingw/mingw-runtime*.tar.gz &&
             tar -zxf ../../ghc-tarballs/mingw/w32api*.tar.gz &&
@@ -538,6 +578,7 @@ dnl If you can run configure, you certainly have /bin/sh
 AC_DEFINE([HAVE_BIN_SH], [1], [Define to 1 if you have /bin/sh.])
 
 dnl ** how to invoke `ar' and `ranlib'
+FP_PROG_AR_SUPPORTS_ATFILE
 FP_PROG_AR_NEEDS_RANLIB
 FP_PROG_AR_SUPPORTS_INPUT
 
@@ -608,7 +649,7 @@ dnl    off_t, because it will affect the result of that test.
 AC_SYS_LARGEFILE
 
 dnl ** check for specific header (.h) files that we are interested in
-AC_CHECK_HEADERS([bfd.h ctype.h dirent.h dlfcn.h errno.h fcntl.h grp.h limits.h locale.h nlist.h pthread.h pwd.h signal.h sys/mman.h sys/resource.h sys/time.h sys/timeb.h sys/timers.h sys/times.h sys/utsname.h sys/wait.h termios.h time.h utime.h windows.h winsock.h sched.h])
+AC_CHECK_HEADERS([bfd.h ctype.h dirent.h dlfcn.h errno.h fcntl.h grp.h limits.h locale.h nlist.h pthread.h pwd.h signal.h sys/mman.h sys/resource.h sys/select.h sys/time.h sys/timeb.h sys/timers.h sys/times.h sys/utsname.h sys/wait.h termios.h time.h utime.h windows.h winsock.h sched.h])
 
 dnl ** check if it is safe to include both <time.h> and <sys/time.h>
 AC_HEADER_TIME
@@ -715,17 +756,18 @@ if test $HaveLibMingwEx = YES ; then
   AC_DEFINE([HAVE_MINGWEX], [1], [Define to 1 if you have the mingwex library.])
 fi
 
+dnl ** check for math library
+dnl    Keep that check as early as possible.
+dnl    as we need to know whether we need libm
+dnl    for math functions or not
+dnl    (see http://hackage.haskell.org/trac/ghc/ticket/3730)
+AC_SEARCH_LIBS(atan, m, 
+  [AC_DEFINE([HAVE_LIBM], [1], [Define to 1 if you need to link with libm])])
+
 dnl ** check whether this machine has BFD and liberty installed (used for debugging)
 dnl    the order of these tests matters: bfd needs liberty
 AC_CHECK_LIB(iberty, xmalloc)
 AC_CHECK_LIB(bfd,    bfd_init)
-
-dnl ** check for math library
-AC_CHECK_FUNC(atan,[fp_libm_not_needed=yes;LIBM=],[fp_libm_not_needed=dunno])
-if test x"$fp_libm_not_needed" = xdunno; then
-   AC_CHECK_LIB([m], [atan], [LIBS="-lm $LIBS"; LIBM="-lm"],[LIBM=])
-fi
-AC_SUBST([LIBM])
 
 dnl ################################################################
 dnl Check for libraries
@@ -855,11 +897,17 @@ fi
 AC_SUBST(BUILD_DOCBOOK_PS)
 AC_SUBST(BUILD_DOCBOOK_PDF)
 
+LIBRARY_VERSION(base)
+LIBRARY_VERSION(Cabal)
+LIBRARY_VERSION(ghc-prim)
+LIBRARY_ghc_VERSION="$ProjectVersion"
+AC_SUBST(LIBRARY_ghc_VERSION)
+
 if grep '	' compiler/ghc.cabal.in 2>&1 >/dev/null; then
    AC_MSG_ERROR([compiler/ghc.cabal.in contains tab characters; please remove them])
 fi
 
-AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal ghc.spec extra-gcc-opts docs/users_guide/ug-book.xml distrib/ghc.iss distrib/configure.ac])
+AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal ghc.spec extra-gcc-opts docs/users_guide/ug-book.xml docs/users_guide/ug-ent.xml libraries/prologue.txt distrib/ghc.iss distrib/configure.ac])
 AC_CONFIG_COMMANDS([mk/stamp-h],[echo timestamp > mk/stamp-h])
 AC_OUTPUT
 

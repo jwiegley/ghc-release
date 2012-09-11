@@ -216,7 +216,7 @@ type InstallDirTemplates = InstallDirs PathTemplate
 -- Default installation directories
 
 defaultInstallDirs :: CompilerFlavor -> Bool -> Bool -> IO InstallDirTemplates
-defaultInstallDirs comp userInstall hasLibs = do
+defaultInstallDirs comp userInstall _hasLibs = do
   windowsProgramFilesDir <- getWindowsProgramFilesDir
   userInstallPrefix      <- getAppUserDataDirectory "cabal"
   lhcPrefix              <- getAppUserDataDirectory "lhc"
@@ -244,13 +244,10 @@ defaultInstallDirs comp userInstall hasLibs = do
       progdir      = "$libdir" </> "hugs" </> "programs",
       includedir   = "$libdir" </> "$libsubdir" </> "include",
       datadir      = case buildOS of
-        Windows    | hasLibs   -> windowsProgramFilesDir </> "Haskell"
-                   | otherwise -> "$prefix"
+        Windows   -> "$prefix"
         _other    -> "$prefix" </> "share",
       datasubdir   = "$pkgid",
-      docdir       = case buildOS of
-        Windows   -> "$prefix"  </> "doc" </> "$pkgid"
-        _other    -> "$datadir" </> "doc" </> "$pkgid",
+      docdir       = "$datadir" </> "doc" </> "$pkgid",
       mandir       = "$datadir" </> "man",
       htmldir      = "$docdir"  </> "html",
       haddockdir   = "$htmldir"
@@ -443,7 +440,7 @@ compilerTemplateEnv compilerId =
   ]
 
 platformTemplateEnv :: Platform -> PathTemplateEnv
-platformTemplateEnv (Platform os arch) =
+platformTemplateEnv (Platform arch os) =
   [(OSVar,       PathTemplate [Ordinary $ display os])
   ,(ArchVar,     PathTemplate [Ordinary $ display arch])
   ]

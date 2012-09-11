@@ -27,7 +27,7 @@ $$($1_$2_depfile) : $$(MKDIRHIER) $$(MKDEPENDC) $$($1_$2_HS_SRCS) $$($1_$2_HS_BO
 	touch $$@.tmp
 ifneq "$$($1_$2_C_SRCS)$$($1_$2_S_SRCS)" ""
 	"$$(MKDEPENDC)" -f $$($1_$2_depfile).tmp $$($1_MKDEPENDC_OPTS) $$(foreach way,$$($1_WAYS),-s $$(way)) -- $$($1_$2_v_ALL_CC_OPTS) -- $$($1_$2_C_FILES) $$($1_$2_S_FILES)
-	sed -e "s|$1/\([^ :]*o[ :]\)|$1/$2/build/\1|g" -e "s|$$(TOP)/||" -e "s|$2/build/$2/build|$2/build|g" <$$($1_$2_depfile).tmp >$$($1_$2_depfile)
+	sed -e "s|$1/\([^ :]*o[ :]\)|$1/$2/build/\1|g" -e "s|$$(TOP)/||g$(CASE_INSENSITIVE_SED)" -e "s|$2/build/$2/build|$2/build|g" <$$($1_$2_depfile).tmp >$$($1_$2_depfile)
 endif
 ifneq "$$($1_$2_HS_SRCS)" ""
 	"$$($1_$2_HC_MK_DEPEND)" -M $$($1_$2_MKDEPENDHS_FLAGS) \
@@ -58,3 +58,13 @@ endif
 endif
 
 endef
+
+# Case insensitivity is only needed on Windows, and s///i isn't
+# portable, so we only define it on Windows (where it is available,
+# as we use the GNU tools):
+ifeq "$(Windows)" "YES"
+CASE_INSENSITIVE_SED = i
+else
+CASE_INSENSITIVE_SED =
+endif
+

@@ -141,8 +141,7 @@ copy_tag_nolock(StgClosure **p, const StgInfoTable *info,
 
     to = alloc_for_copy(size,stp);
     *p = TAG_CLOSURE(tag,(StgClosure*)to);
-    src->header.info = (const StgInfoTable *)MK_FORWARDING_PTR(to);
-    
+
     TICK_GC_WORDS_COPIED(size);
 
     from = (StgPtr)src;
@@ -150,6 +149,11 @@ copy_tag_nolock(StgClosure **p, const StgInfoTable *info,
     for (i = 1; i < size; i++) { // unroll for small i
 	to[i] = from[i];
     }
+
+    // if somebody else reads the forwarding pointer, we better make
+    // sure there's a closure at the end of it.
+    write_barrier();
+    src->header.info = (const StgInfoTable *)MK_FORWARDING_PTR(to);
 
 //  if (to+size+2 < bd->start + BLOCK_SIZE_W) {
 //      __builtin_prefetch(to + size + 2, 1);
@@ -881,7 +885,7 @@ selector_chain:
         } while (info_ptr == (W_)&stg_WHITEHOLE_info);
 
         // make sure someone else didn't get here first...
-        if (IS_FORWARDING_PTR(p) || 
+        if (IS_FORWARDING_PTR(info_ptr) || 
             INFO_PTR_TO_STRUCT(info_ptr)->type != THUNK_SELECTOR) {
             // v. tricky now.  The THUNK_SELECTOR has been evacuated
             // by another thread, and is now either a forwarding ptr or IND.

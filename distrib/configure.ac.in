@@ -62,8 +62,13 @@ dnl ** Find the path to sed **
 AC_PATH_PROG(SedCmd,sed)
 
 #
-dnl ** How to invoke cpp directly **
+dnl ** How to invoke gcc/cpp **
 #
+FP_ARG_WITH_PATH_GNU_PROG([CC], [gcc])
+export CC
+WhatGccIsCalled="$CC"
+AC_SUBST(WhatGccIsCalled)
+
 FP_HAVE_GCC
 AC_PROG_CPP
 
@@ -80,6 +85,25 @@ AC_SUBST(CONF_LD_OPTS)
 #
 AC_CONFIG_FILES(extra-gcc-opts mk/config.mk mk/install.mk)
 AC_OUTPUT
+
+# We get caught by
+#     http://savannah.gnu.org/bugs/index.php?1516
+#     $(eval ...) inside conditionals causes errors
+# with make 3.80, so warn the user if it looks like they're about to
+# try to use it.
+# We would use "grep -q" here, but Solaris's grep doesn't support it.
+checkMake380() {
+    if $1 --version 2>&1 | head -1 | grep 'GNU Make 3\.80' > /dev/null
+    then
+        echo
+        echo "WARNING: It looks like \"$1\" is GNU make 3.80."
+        echo "This version cannot be used to build GHC."
+        echo "Please use GNU make >= 3.81."
+    fi
+}
+
+checkMake380 make
+checkMake380 gmake
 
 echo "****************************************************"
 echo "Configuration done, ready to 'make install'"

@@ -201,6 +201,9 @@ void newCAF     (StgClosure*);
 void newDynCAF  (StgClosure *);
 void revertCAFs (void);
 
+// Request that all CAFs are retained indefinitely.
+void setKeepCAFs (void);
+
 /* -----------------------------------------------------------------------------
    This is the write barrier for MUT_VARs, a.k.a. IORefs.  A
    MUT_VAR_CLEAN object is not on the mutable list; a MUT_VAR_DIRTY

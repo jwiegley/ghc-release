@@ -19,8 +19,8 @@ rts_dist_HC = $(GHC_STAGE1)
 # merge GhcLibWays and GhcRTSWays but strip out duplicates
 rts_WAYS = $(GhcLibWays) $(filter-out $(GhcLibWays),$(GhcRTSWays))
 
-ALL_RTS_LIBS = $(foreach way,$(rts_WAYS),rts/dist/build/libHSrts$($(way)_libsuf)) \
-	       rts/dist/build/libHSrtsmain.a
+ALL_RTS_LIBS = rts/dist/build/libHSrtsmain.a \
+	       $(foreach way,$(rts_WAYS),rts/dist/build/libHSrts$($(way)_libsuf))
 all_rts : $(ALL_RTS_LIBS)
 
 # -----------------------------------------------------------------------------
@@ -81,6 +81,8 @@ rts/libs.depend : $(GHC_PKG_INPLACE)
 
 define build-rts-way # args: $1 = way
 
+ifneq "$$(BINDIST)" "YES"
+
 # The per-way CC_OPTS
 ifneq "$$(findstring debug, $1)" ""
 rts_dist_$1_HC_OPTS =
@@ -121,6 +123,8 @@ $$(rts_$1_LIB) : $$(rts_$1_OBJS)
 	echo $$(rts_$1_OBJS) | "$$(XARGS)" $$(XARGS_OPTS) "$$(AR)" $$(AR_OPTS) $$(EXTRA_AR_ARGS) $$@
 endif
 
+endif
+
 endef
 
 # And expand the above for each way:
@@ -143,7 +147,6 @@ WARNING_OPTS += -Winline
 WARNING_OPTS += -Waggregate-return
 WARNING_OPTS += -Wpointer-arith
 WARNING_OPTS += -Wmissing-noreturn
-WARNING_OPTS += -Wcast-align
 WARNING_OPTS += -Wnested-externs
 WARNING_OPTS += -Wredundant-decls 
 
@@ -152,6 +155,15 @@ WARNING_OPTS += -Wredundant-decls
 #WARNING_OPTS += -Wbad-function-cast
 #WARNING_OPTS += -Wshadow
 #WARNING_OPTS += -Wcast-qual
+
+# This one seems buggy on GCC 4.1.2, which is the only GCC version we 
+# have that can bootstrap the SPARC build. We end up with lots of supurious
+# warnings of the form "cast increases required alignment of target type".
+# Some legitimate warnings can be fixed by adding an intermediate cast to
+# (void*), but we get others in rts/sm/GCUtils.c concerning the gct var
+# that look innocuous to me. We could enable this again once we deprecate
+# support for registerised builds on this arch. -- BL 2010/02/03
+# WARNING_OPTS += -Wcast-align
 
 STANDARD_OPTS += -Iincludes -Irts
 # COMPILING_RTS is only used when building Win32 DLL support.
@@ -257,7 +269,6 @@ rts/RetainerSet_CC_OPTS += -Wno-format
 # On Windows:
 rts/win32/ConsoleHandler_CC_OPTS += -w
 rts/win32/ThrIOManager_CC_OPTS += -w
-rts/win32/Ticker_CC_OPTS += -w
 # The above warning supression flags are a temporary kludge.
 # While working on this module you are encouraged to remove it and fix
 # any warnings in the module. See
@@ -343,8 +354,10 @@ $(DYNWRAPPER_PROG): $(DYNWRAPPER_SRC)
 # -----------------------------------------------------------------------------
 # build the static lib containing the C main symbol
 
+ifneq "$(BINDIST)" "YES"
 rts/dist/build/libHSrtsmain.a : rts/dist/build/Main.o
 	"$(AR)" $(AR_OPTS) $(EXTRA_AR_ARGS) $@ $<
+endif
 
 # -----------------------------------------------------------------------------
 # The RTS package config
@@ -367,13 +380,7 @@ endif
 # -----------------------------------------------------------------------------
 # installing
 
-install : install_rts
-
-.PHONY: install_rts
-install_rts:
-	$(INSTALL_DIR) "$(DESTDIR)$(ghclibdir)"
-	$(INSTALL_DIR) "$(DESTDIR)$(ghclibdir)/include"
-	"$(CP)" $(ALL_RTS_LIBS) "$(DESTDIR)$(ghclibdir)"
+INSTALL_LIBS += $(ALL_RTS_LIBS)
 
 # -----------------------------------------------------------------------------
 # cleaning

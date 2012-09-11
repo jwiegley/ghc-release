@@ -264,7 +264,7 @@ if test "x$HostPlatform"  = "xi386-unknown-mingw32" && \
    test "${HappyCmd}"    != ""
 then
     # Canonicalise to <drive>:/path/to/gcc
-    HappyCmd=`cygpath -m ${HappyCmd}`
+    HappyCmd=`cygpath -m "${HappyCmd}"`
     AC_MSG_NOTICE([normalized happy command to $HappyCmd])
 fi
 
@@ -300,7 +300,7 @@ if test "x$HostPlatform"  = "xi386-unknown-mingw32" && \
    test "${AlexCmd}"     != ""
 then
     # Canonicalise to <drive>:/path/to/gcc
-    AlexCmd=`cygpath -m ${AlexCmd}`
+    AlexCmd=`cygpath -m "${AlexCmd}"`
 fi
 
 AC_CACHE_CHECK([for version of alex], fptools_cv_alex_version,
@@ -372,10 +372,10 @@ AC_DEFUN([FP_PROG_AR],
 if test -z "$fp_prog_ar_raw"; then
   AC_MSG_ERROR([cannot find ar in your PATH, no idea how to make a library])
 fi
-fp_prog_ar=$fp_prog_ar_raw
+fp_prog_ar="$fp_prog_ar_raw"
 case $HostPlatform in
   *mingw32) if test x${OSTYPE} != xmsys; then
- 	      fp_prog_ar="`cygpath -w ${fp_prog_ar_raw} | sed -e 's@\\\\@/@g'`"
+ 	      fp_prog_ar="`cygpath -w "${fp_prog_ar_raw}" | sed -e 's@\\\\@/@g'`"
               AC_MSG_NOTICE([normalized ar command to $fp_prog_ar])
             fi
             ;;
@@ -389,14 +389,41 @@ esac
 AC_DEFUN([FP_PROG_AR_IS_GNU],
 [AC_REQUIRE([FP_PROG_AR])
 AC_CACHE_CHECK([whether $fp_prog_ar_raw is GNU ar], [fp_cv_prog_ar_is_gnu],
-[if $fp_prog_ar_raw --version 2> /dev/null | grep "GNU" > /dev/null 2>&1; then
+[if "$fp_prog_ar_raw" --version 2> /dev/null | grep "GNU" > /dev/null 2>&1; then
   fp_cv_prog_ar_is_gnu=yes
 else
   fp_cv_prog_ar_is_gnu=no
 fi])
 fp_prog_ar_is_gnu=$fp_cv_prog_ar_is_gnu
+AC_SUBST([ArIsGNUAr], [`echo $fp_prog_ar_is_gnu | tr 'a-z' 'A-Z'`])
 ])# FP_PROG_AR_IS_GNU
 
+
+# FP_PROG_AR_SUPPORTS_ATFILE
+# -----------------
+# Sets fp_prog_ar_supports_atfile to yes or no, depending on whether
+# or not it supports the @file syntax
+AC_DEFUN([FP_PROG_AR_SUPPORTS_ATFILE],
+[AC_REQUIRE([FP_PROG_AR])
+ AC_REQUIRE([FP_PROG_AR_ARGS])
+AC_CACHE_CHECK([whether $fp_prog_ar_raw supports @file], [fp_cv_prog_ar_supports_atfile],
+[
+rm -f conftest*
+touch conftest.file
+echo conftest.file  > conftest.atfile
+echo conftest.file >> conftest.atfile
+"$fp_prog_ar_raw" $fp_prog_ar_args conftest.a @conftest.atfile > /dev/null 2>&1
+fp_prog_ar_supports_atfile_tmp=`"$fp_prog_ar_raw" t conftest.a 2> /dev/null | grep -c conftest.file`
+rm -f conftest*
+if test "$fp_prog_ar_supports_atfile_tmp" -eq 2
+then
+  fp_cv_prog_ar_supports_atfile=yes
+else
+  fp_cv_prog_ar_supports_atfile=no
+fi])
+fp_prog_ar_supports_atfile=$fp_cv_prog_ar_supports_atfile
+AC_SUBST([ArSupportsAtFile], [`echo $fp_prog_ar_supports_atfile | tr 'a-z' 'A-Z'`])
+])# FP_PROG_AR_SUPPORTS_ATFILE
 
 # FP_PROG_AR_ARGS
 # ---------------
@@ -473,7 +500,7 @@ AC_CACHE_CHECK([whether $fp_prog_ar_raw supports -input], [fp_cv_prog_ar_support
 if test $fp_prog_ar_is_gnu = no; then
   rm -f conftest*
   touch conftest.lst
-  if FP_EVAL_STDERR([$fp_prog_ar_raw $fp_prog_ar_args conftest.a -input conftest.lst]) >/dev/null; then
+  if FP_EVAL_STDERR(["$fp_prog_ar_raw" $fp_prog_ar_args conftest.a -input conftest.lst]) >/dev/null; then
     test -s conftest.err || fp_cv_prog_ar_supports_input=yes
   fi
   rm -f conftest*
@@ -1233,6 +1260,107 @@ case "$hardtop" in
    space characters.  Suggestion: move the build tree somewhere else.])
  ;;
 esac
+])
+
+# GHC_CONVERT_CPU(cpu, target_var)
+# --------------------------------
+# converts cpu from gnu to ghc naming, and assigns the result to $target_var
+AC_DEFUN([GHC_CONVERT_CPU],[
+case "$1" in
+  alpha*)
+    $2="alpha"
+    ;;
+  arm*)
+    $2="arm"
+    ;;
+  hppa1.1*)
+    $2="hppa1_1"
+    ;;
+  hppa*)
+    $2="hppa"
+    ;;
+  i386)
+    $2="i386"
+    ;;
+  ia64)
+    $2="ia64"
+    ;;
+  m68k*)
+    $2="m68k"
+    ;;
+  mipseb*)
+    $2="mipseb"
+    ;;
+  mipsel*)
+    $2="mipsel"
+    ;;
+  mips*)
+    $2="mips"
+    ;;
+  powerpc64*)
+    $2="powerpc64"
+    ;;
+  powerpc*)
+    $2="powerpc"
+    ;;
+  rs6000)
+    $2="rs6000"
+    ;;
+  s390*)
+    $2="s390"
+    ;;
+  sparc64*)
+    $2="sparc64"
+    ;;
+  sparc*)
+    $2="sparc"
+    ;;
+  vax)
+    $2="vax"
+    ;;
+  x86_64)
+    $2="x86_64"
+    ;;
+  *)
+    echo "Unknown CPU $1"
+    exit 1
+    ;;
+  esac
+])
+
+# GHC_CONVERT_VENDOR(vendor, target_var)
+# --------------------------------
+# converts vendor from gnu to ghc naming, and assigns the result to $target_var
+AC_DEFUN([GHC_CONVERT_VENDOR],[
+$2="$1"
+])
+
+# GHC_CONVERT_OS(os, target_var)
+# --------------------------------
+# converts os from gnu to ghc naming, and assigns the result to $target_var
+AC_DEFUN([GHC_CONVERT_OS],[
+case "$1" in
+  linux-*|linux)
+    $2="linux"
+    ;;
+  # As far as I'm aware, none of these have relevant variants
+  freebsd|netbsd|openbsd|dragonfly|osf1|osf3|hpux|linuxaout|kfreebsdgnu|freebsd2|solaris2|cygwin32|mingw32|darwin|gnu|nextstep2|nextstep3|sunos4|ultrix|irix|aix|haiku)
+    $2="$1"
+    ;;
+  *)
+    echo "Unknown OS $1"
+    exit 1
+    ;;
+  esac
+])
+
+# LIBRARY_VERSION(lib)
+# --------------------------------
+# Gets the version number of a library.
+# If $1 is ghc-prim, then we define LIBRARY_ghc_prim_VERSION as 1.2.3
+AC_DEFUN([LIBRARY_VERSION],[
+LIBRARY_[]translit([$1], [-], [_])[]_VERSION=`grep -i "^version:" libraries/$1/$1.cabal | sed "s/.* //"`
+AC_SUBST(LIBRARY_[]translit([$1], [-], [_])[]_VERSION)
 ])
 
 # LocalWords:  fi

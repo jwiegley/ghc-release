@@ -83,8 +83,9 @@ import qualified Distribution.InstalledPackageInfo as InstalledPackageInfo
 import Distribution.Simple.PackageIndex (PackageIndex)
 import qualified Distribution.Simple.PackageIndex as PackageIndex
 import Distribution.Simple.LocalBuildInfo
-         ( LocalBuildInfo(..), ComponentLocalBuildInfo(..) )
-import Distribution.Simple.InstallDirs
+         ( LocalBuildInfo(..), ComponentLocalBuildInfo(..),
+           absoluteInstallDirs )
+import Distribution.Simple.InstallDirs hiding ( absoluteInstallDirs )
 import Distribution.Simple.BuildPaths
 import Distribution.Simple.Utils
 import Distribution.Package
@@ -115,6 +116,7 @@ import Distribution.Text
 import Language.Haskell.Extension (Extension(..))
 
 import Control.Monad            ( unless, when )
+import Data.Char                ( isSpace )
 import Data.List
 import Data.Maybe               ( catMaybes )
 import Data.Monoid              ( Monoid(..) )
@@ -200,21 +202,29 @@ configureToolchain :: ConfiguredProgram -> ProgramConfiguration
 configureToolchain ghcProg =
     addKnownProgram gccProgram {
       programFindLocation = findProg gccProgram
-                              [ baseDir </> "gcc.exe",
-                                mingwDir </> "bin" </> "gcc.exe" ],
+                              [ if ghcVersion >= Version [6,12] []
+                                  then mingwBinDir </> "gcc.exe"
+                                  else baseDir     </> "gcc.exe" ],
       programPostConf     = configureGcc
     }
   . addKnownProgram ldProgram {
       programFindLocation = findProg ldProgram
-                              [ libDir </> "ld.exe",
-                                mingwDir </> "mingw32" </> "bin" </> "ld.exe" ],
+                              [ if ghcVersion >= Version [6,12] []
+                                  then mingwBinDir </> "ld.exe"
+                                  else libDir      </> "ld.exe" ],
       programPostConf     = configureLd
+    }
+  . addKnownProgram arProgram {
+      programFindLocation = findProg arProgram
+                              [ if ghcVersion >= Version [6,12] []
+                                  then mingwBinDir </> "ar.exe"
+                                  else libDir      </> "ar.exe" ]
     }
   where
     Just ghcVersion = programVersion ghcProg
     compilerDir = takeDirectory (programPath ghcProg)
     baseDir     = takeDirectory compilerDir
-    mingwDir    = baseDir </> "mingw"
+    mingwBinDir = baseDir </> "mingw" </> "bin"
     libDir      = baseDir </> "gcc-lib"
     includeDir  = baseDir </> "include" </> "mingw"
     isWindows   = case buildOS of Windows -> True; _ -> False
@@ -352,6 +362,7 @@ getInstalledPackages :: Verbosity -> PackageDBStack -> ProgramConfiguration
 getInstalledPackages verbosity packagedbs conf = do
   checkPackageDbStack packagedbs
   pkgss <- getInstalledPackages' verbosity packagedbs conf
+  topDir <- ghcLibDir' verbosity ghcProg
   let indexes = [ PackageIndex.fromList (map (substTopDir topDir) pkgs)
                 | (_, pkgs) <- pkgss ]
   return $! hackRtsPackage (mconcat indexes)
@@ -361,8 +372,6 @@ getInstalledPackages verbosity packagedbs conf = do
     -- paths. We need to substitute the right value in so that when
     -- we, for example, call gcc, we have proper paths to give it
     Just ghcProg = lookupProgram ghcProgram conf
-    compilerDir  = takeDirectory (programPath ghcProg)
-    topDir       = takeDirectory compilerDir
 
     hackRtsPackage index =
       case PackageIndex.lookupPackageName index (PackageName "rts") of
@@ -370,6 +379,11 @@ getInstalledPackages verbosity packagedbs conf = do
            -> PackageIndex.insert (removeMingwIncludeDir rts) index
         _  -> index -- No (or multiple) ghc rts package is registered!!
                     -- Feh, whatever, the ghc testsuite does some crazy stuff.
+
+ghcLibDir' :: Verbosity -> ConfiguredProgram -> IO FilePath
+ghcLibDir' verbosity ghcProg =
+    (reverse . dropWhile isSpace . reverse) `fmap`
+     rawSystemProgramStdout verbosity ghcProg ["--print-libdir"]
 
 checkPackageDbStack :: PackageDBStack -> IO ()
 checkPackageDbStack (GlobalPackageDB:rest)
@@ -521,6 +535,9 @@ buildLib verbosity pkg_descr lbi lib clbi = do
       sharedLibFilePath  = libTargetDir </> mkSharedLibName pkgid
                                               (compilerId (compiler lbi))
       ghciLibFilePath    = libTargetDir </> mkGHCiLibName pkgid
+      libInstallPath = libdir $ absoluteInstallDirs pkg_descr lbi NoCopyDest
+      sharedLibInstallPath = libInstallPath </> mkSharedLibName pkgid
+                                              (compilerId (compiler lbi))
 
   stubObjs <- fmap catMaybes $ sequence
     [ findFileWithExtension [objExtension] [libTargetDir]
@@ -579,6 +596,11 @@ buildLib verbosity pkg_descr lbi lib clbi = do
               "-shared",
               "-dynamic",
               "-o", sharedLibFilePath ]
+            -- For dynamic libs, Mac OS/X needs to know the install location
+            -- at build time.
+            ++ (if buildOS == OSX
+                then ["-dylib-install-name", sharedLibInstallPath]
+                else [])
             ++ dynamicObjectFiles
             ++ ["-package-name", display pkgid ]
             ++ ghcPackageFlags lbi clbi
@@ -786,15 +808,14 @@ ghcPackageFlags lbi clbi
 
 ghcPackageDbOptions :: PackageDBStack -> [String]
 ghcPackageDbOptions dbstack = case dbstack of
-  (GlobalPackageDB:dbs)
-    | UserPackageDB `elem` dbs -> concatMap specific dbs
-    | otherwise                -> "-no-user-package-conf"
-                                : concatMap specific dbs
-  _                            -> ierror
+  (GlobalPackageDB:UserPackageDB:dbs) -> concatMap specific dbs
+  (GlobalPackageDB:dbs)               -> "-no-user-package-conf"
+                                       : concatMap specific dbs
+  _                                   -> ierror
   where
     specific (SpecificPackageDB db) = [ "-package-conf", db ]
-    specific _                      = []
-    ierror = error "internal error: unexpected package db stack"
+    specific _ = ierror
+    ierror     = error "internal error: unexpected package db stack"
 
 constructCcCmdLine :: LocalBuildInfo -> BuildInfo -> ComponentLocalBuildInfo
                    -> FilePath -> FilePath -> Verbosity -> Bool

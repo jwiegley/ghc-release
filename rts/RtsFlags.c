@@ -10,6 +10,7 @@
 #include "PosixSource.h"
 #include "Rts.h"
 
+#include "RtsOpts.h"
 #include "RtsUtils.h"
 #include "Profiling.h"
 
@@ -51,8 +52,11 @@ open_stats_file (
     const char *FILENAME_FMT,
     FILE **file_ret);
 
-static I_ decode(const char *s);
+static StgWord64 decodeSize(const char *flag, nat offset, StgWord64 min, StgWord64 max);
 static void bad_option(const char *s);
+#ifdef TRACING
+static void read_trace_flags(char *arg);
+#endif
 
 /* -----------------------------------------------------------------------------
  * Command-line option parsing routines.
@@ -258,12 +262,15 @@ usage_text[] = {
 
 #ifdef TRACING
 "",
-"  -v       Log events to stderr",
-"  -l       Log events in binary format to the file <program>.eventlog",
-"  -vt      Include time stamps when tracing events to stderr with -v",
-"",
-"  -ls      Log scheduler events",
-"",
+"  -l[flags]  Log events in binary format to the file <program>.eventlog",
+#  ifdef DEBUG
+"  -v[flags]  Log events to stderr",
+#  endif
+"             where [flags] can contain:",
+"                s    scheduler events",
+#  ifdef DEBUG
+"                t    add time stamps (only useful with -v)",
+#  endif
 #endif
 
 #if !defined(PROFILING)
@@ -301,7 +308,7 @@ usage_text[] = {
 "  -Dc  DEBUG: program coverage",
 "  -Dr  DEBUG: sparks",
 "",
-"     NOTE: all -D options also enable -v automatically.  Use -l to create a",
+"     NOTE: DEBUG events are sent to stderr by default; add -l to create a",
 "     binary event log file instead.",
 "",
 #endif /* DEBUG */
@@ -409,7 +416,13 @@ setupRtsFlags(int *argc, char *argv[], int *rts_argc, char *rts_argv[])
 	char *ghc_rts = getenv("GHCRTS");
 
 	if (ghc_rts != NULL) {
-	    splitRtsFlags(ghc_rts, rts_argc, rts_argv);
+            if (rtsOptsEnabled) {
+                splitRtsFlags(ghc_rts, rts_argc, rts_argv);
+            }
+            else {
+                errorBelch("Warning: Ignoring GHCRTS variable as RTS options are disabled.\n         Link with -rtsopts to enable them.");
+                // We don't actually exit, just warn
+            }
 	}
     }
 
@@ -428,7 +441,13 @@ setupRtsFlags(int *argc, char *argv[], int *rts_argc, char *rts_argv[])
 	    break;
 	}
 	else if (strequal("+RTS", argv[arg])) {
-	    mode = RTS;
+            if (rtsOptsEnabled) {
+                mode = RTS;
+            }
+            else {
+                errorBelch("RTS options are disabled. Link with -rtsopts to enable them.");
+                stg_exit(EXIT_FAILURE);
+            }
 	}
 	else if (strequal("-RTS", argv[arg])) {
 	    mode = PGM;
@@ -471,7 +490,7 @@ setupRtsFlags(int *argc, char *argv[], int *rts_argc, char *rts_argv[])
 # define TICKY_BUILD_ONLY(x) x
 #else
 # define TICKY_BUILD_ONLY(x) \
-errorBelch("not built for: ticky-ticky stats"); \
+errorBelch("the flag %s requires the program to be built with -ticky", rts_argv[arg]); \
 error = rtsTrue;
 #endif
 
@@ -479,7 +498,7 @@ error = rtsTrue;
 # define PROFILING_BUILD_ONLY(x)   x
 #else
 # define PROFILING_BUILD_ONLY(x) \
-errorBelch("not built for: -prof"); \
+errorBelch("the flag %s requires the program to be built with -prof", rts_argv[arg]); \
 error = rtsTrue;
 #endif
 
@@ -487,7 +506,7 @@ error = rtsTrue;
 # define TRACING_BUILD_ONLY(x)   x
 #else
 # define TRACING_BUILD_ONLY(x) \
-errorBelch("not built for: -par-prof"); \
+errorBelch("the flag %s requires the program to be built with -eventlog or -debug", rts_argv[arg]); \
 error = rtsTrue;
 #endif
 
@@ -495,7 +514,15 @@ error = rtsTrue;
 # define THREADED_BUILD_ONLY(x)      x
 #else
 # define THREADED_BUILD_ONLY(x) \
-errorBelch("not built for: -smp"); \
+errorBelch("the flag %s requires the program to be built with -threaded", rts_argv[arg]); \
+error = rtsTrue;
+#endif
+
+#ifdef DEBUG
+# define DEBUG_BUILD_ONLY(x) x
+#else
+# define DEBUG_BUILD_ONLY(x) \
+errorBelch("the flag %s requires the program to be built with -debug", rts_argv[arg]); \
 error = rtsTrue;
 #endif
 
@@ -531,12 +558,10 @@ error = rtsTrue;
                   }
 		  break;
 	      case 'A':
-		RtsFlags.GcFlags.minAllocAreaSize
-		  = decode(rts_argv[arg]+2) / BLOCK_SIZE;
-		if (RtsFlags.GcFlags.minAllocAreaSize <= 0) {
-		  bad_option(rts_argv[arg]);
-		}
-		break;
+                  RtsFlags.GcFlags.minAllocAreaSize
+                      = decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_INT_MAX)
+                           / BLOCK_SIZE;
+                  break;
 
 #ifdef USE_PAPI
 	      case 'a':
@@ -594,8 +619,8 @@ error = rtsTrue;
 		  bad_option( rts_argv[arg] );
 		break;
 	      
-#ifdef DEBUG
 	      case 'D':
+              DEBUG_BUILD_ONLY(
 	      { 
 		  char *c;
 
@@ -653,61 +678,46 @@ error = rtsTrue;
                   // -Dx also turns on -v.  Use -l to direct trace
                   // events to the .eventlog file instead.
                   RtsFlags.TraceFlags.tracing = TRACE_STDERR;
-		  break;
-	      }
-#endif
+         })
+              break;
 
 	      case 'K':
-		RtsFlags.GcFlags.maxStkSize = 
-		  decode(rts_argv[arg]+2) / sizeof(W_);
-
-		if (RtsFlags.GcFlags.maxStkSize == 0) 
-		  bad_option( rts_argv[arg] );
-		break;
+                  RtsFlags.GcFlags.maxStkSize =
+                      decodeSize(rts_argv[arg], 2, 1, HS_WORD_MAX) / sizeof(W_);
+                  break;
 
 	      case 'k':
-		RtsFlags.GcFlags.initialStkSize = 
-		  decode(rts_argv[arg]+2) / sizeof(W_);
-
-		if (RtsFlags.GcFlags.initialStkSize == 0) 
-		  bad_option( rts_argv[arg] );
-		break;
+                  RtsFlags.GcFlags.initialStkSize =
+                      decodeSize(rts_argv[arg], 2, 1, HS_WORD_MAX) / sizeof(W_);
+                  break;
 
 	      case 'M':
-		RtsFlags.GcFlags.maxHeapSize = 
-		  decode(rts_argv[arg]+2) / BLOCK_SIZE;
-		/* user give size in *bytes* but "maxHeapSize" is in *blocks* */
-
-		if (RtsFlags.GcFlags.maxHeapSize <= 0) {
-		  bad_option(rts_argv[arg]);
-		}
-		break;
+                  RtsFlags.GcFlags.maxHeapSize =
+                      decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_WORD_MAX) / BLOCK_SIZE;
+                  /* user give size in *bytes* but "maxHeapSize" is in *blocks* */
+                  break;
 
 	      case 'm':
-		RtsFlags.GcFlags.pcFreeHeap = atof(rts_argv[arg]+2);
+                  RtsFlags.GcFlags.pcFreeHeap = atof(rts_argv[arg]+2);
 
-		if (RtsFlags.GcFlags.pcFreeHeap < 0 || 
-		    RtsFlags.GcFlags.pcFreeHeap > 100)
-		  bad_option( rts_argv[arg] );
-		break;
+                  if (RtsFlags.GcFlags.pcFreeHeap < 0 ||
+                      RtsFlags.GcFlags.pcFreeHeap > 100)
+                      bad_option( rts_argv[arg] );
+                  break;
 
 	      case 'G':
-		RtsFlags.GcFlags.generations = decode(rts_argv[arg]+2);
-		if (RtsFlags.GcFlags.generations < 1) {
-		  bad_option(rts_argv[arg]);
-		}
-		break;
+                  RtsFlags.GcFlags.generations =
+                      decodeSize(rts_argv[arg], 2, 1, HS_INT_MAX);
+                  break;
 
-	      case 'T':
-		RtsFlags.GcFlags.steps = decode(rts_argv[arg]+2);
-		if (RtsFlags.GcFlags.steps < 1) {
-		  bad_option(rts_argv[arg]);
-		}
+              case 'T':
+                  RtsFlags.GcFlags.steps =
+                      decodeSize(rts_argv[arg], 2, 1, HS_INT_MAX);
 		break;
 
 	      case 'H':
-		RtsFlags.GcFlags.heapSizeSuggestion = 
-		  decode(rts_argv[arg]+2) / BLOCK_SIZE;
+		RtsFlags.GcFlags.heapSizeSuggestion =
+                    (nat)(decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_WORD_MAX) / BLOCK_SIZE);
 		break;
 
 #ifdef RTS_GTK_FRONTPANEL
@@ -755,26 +765,6 @@ error = rtsTrue;
 		break;
 
 	      /* =========== PROFILING ========================== */
-
-              case 'l':
-#ifdef TRACING
-                switch(rts_argv[arg][2]) {
-		case '\0':
-                    RtsFlags.TraceFlags.tracing = TRACE_EVENTLOG;
-                    break;
-                case 's':
-                    RtsFlags.TraceFlags.tracing = TRACE_EVENTLOG;
-                    RtsFlags.TraceFlags.scheduler = rtsTrue;
-                    break;
-		default:
-		    errorBelch("unknown RTS option: %s",rts_argv[arg]);
-		    error = rtsTrue;
-		    break;
-                }
-#else
-                errorBelch("not built for: -eventlog");
-#endif
-                break;
 
 	      case 'P': /* detailed cost centre profiling (time/alloc) */
 	      case 'p': /* cost centre profiling (time/alloc) */
@@ -966,7 +956,7 @@ error = rtsTrue;
                 }
                 break;
 
-#if defined(THREADED_RTS) && !defined(NOSMP)
+#if !defined(NOSMP)
 	      case 'N':
 		THREADED_BUILD_ONLY(
 		if (rts_argv[arg][2] == '\0') {
@@ -1006,6 +996,7 @@ error = rtsTrue;
                     ) break;
 
 	      case 'q':
+                THREADED_BUILD_ONLY(
 		    switch (rts_argv[arg][2]) {
 		    case '\0':
 			errorBelch("incomplete RTS option: %s",rts_argv[arg]);
@@ -1044,7 +1035,7 @@ error = rtsTrue;
 			error = rtsTrue;
 			break;
 		    }
-		    break;
+		    ) break;
 #endif
 	      /* =========== PARALLEL =========================== */
 	      case 'e':
@@ -1077,26 +1068,19 @@ error = rtsTrue;
 
 	      /* =========== TRACING ---------=================== */
 
+              case 'l':
+                  TRACING_BUILD_ONLY(
+                      RtsFlags.TraceFlags.tracing = TRACE_EVENTLOG;
+                      read_trace_flags(&rts_argv[arg][2]);
+                      );
+                  break;
+
 	      case 'v':
-                switch(rts_argv[arg][2]) {
-#ifdef TRACING
-                case '\0':
-                    RtsFlags.TraceFlags.tracing = TRACE_STDERR;
-                    break;
-		case 't':
-		    RtsFlags.TraceFlags.timestamp = rtsTrue;
-		    break;
-#endif
-		case 's':
-		case 'g':
-                    // ignored for backwards-compat
-		    break;
-		default:
-		    errorBelch("unknown RTS option: %s",rts_argv[arg]);
-		    error = rtsTrue;
-		    break;
-		}
-                break;
+                  DEBUG_BUILD_ONLY(
+                      RtsFlags.TraceFlags.tracing = TRACE_STDERR;
+                      read_trace_flags(&rts_argv[arg][2]);
+                      );
+                  break;
 
 	      /* =========== EXTENDED OPTIONS =================== */
 
@@ -1278,29 +1262,71 @@ open_stats_file (
 
 
 
-static I_
-decode(const char *s)
+static StgWord64
+decodeSize(const char *flag, nat offset, StgWord64 min, StgWord64 max)
 {
-    I_ c;
+    char c;
+    const char *s;
     StgDouble m;
+    StgWord64 val;
+
+    s = flag + offset;
 
     if (!*s)
-	return 0;
+    {
+        m = 0;
+    }
+    else
+    {
+        m = atof(s);
+        c = s[strlen(s)-1];
 
-    m = atof(s);
-    c = s[strlen(s)-1];
+        if (c == 'g' || c == 'G') 
+            m *= 1024*1024*1024;
+        else if (c == 'm' || c == 'M')
+            m *= 1024*1024;
+        else if (c == 'k' || c == 'K')
+            m *= 1024;
+        else if (c == 'w' || c == 'W')
+            m *= sizeof(W_);
+    }
 
-    if (c == 'g' || c == 'G')
-	m *= 1000*1000*1000;	/* UNchecked! */
-    else if (c == 'm' || c == 'M')
-	m *= 1000*1000;			/* We do not use powers of 2 (1024) */
-    else if (c == 'k' || c == 'K')	/* to avoid possible bad effects on */
-	m *= 1000;			/* a direct-mapped cache.   	    */ 
-    else if (c == 'w' || c == 'W')
-	m *= sizeof(W_);
+    val = (StgWord64)m;
 
-    return (I_)m;
+    if (m < 0 || val < min || val > max) {
+        errorBelch("error in RTS option %s: size outside allowed range (%" FMT_Word64 " - %" FMT_Word64 ")", 
+                   flag, min, max);
+        stg_exit(EXIT_FAILURE);
+    }
+
+    return val;
 }
+
+#if defined(TRACING)
+static void read_trace_flags(char *arg)
+{
+    char *c;
+
+    for (c  = arg; *c != '\0'; c++) {
+        switch(*c) {
+        case '\0':
+            break;
+        case 's':
+            RtsFlags.TraceFlags.scheduler = rtsTrue;
+            break;
+        case 't':
+            RtsFlags.TraceFlags.timestamp = rtsTrue;
+            break;
+        case 'g':
+            // ignored for backwards-compat
+            break;
+        default:
+            errorBelch("unknown trace option: %c",*c);
+            break;
+        }
+    }
+}
+#endif
 
 static void GNU_ATTRIBUTE(__noreturn__)
 bad_option(const char *s)

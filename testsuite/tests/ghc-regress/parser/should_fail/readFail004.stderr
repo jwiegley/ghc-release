@@ -1,0 +1,3 @@
+
+readFail004.hs:19:0:
+    lexical error in string/character literal at character '.'

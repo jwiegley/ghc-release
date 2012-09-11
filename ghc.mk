@@ -495,6 +495,7 @@ endif
 
 BUILD_DIRS += \
    docs/users_guide \
+   docs/ext-core \
    docs/man \
    libraries/Cabal/doc \
    $(GHC_UNLIT_DIR) \
@@ -739,7 +740,7 @@ libraries/ghc-prim/dist-install/build/autogen/GHC/PrimopWrappers.hs: \
 
 install: install_packages install_libs install_libexecs install_headers \
          install_libexec_scripts install_bins install_docs \
-		 install_topdirs install_topdir_scripts
+		 install_topdirs
 
 install_bins: $(INSTALL_BINS)
 	$(INSTALL_DIR) "$(DESTDIR)$(bindir)"
@@ -792,12 +793,6 @@ else
 	"$(MV)" "$(DESTDIR)$(ghclibexecdir)/ghc-stage2" "$(DESTDIR)$(ghclibexecdir)/ghc"
 endif
 
-install_topdir_scripts: $(INSTALL_TOPDIR_SCRIPTS)
-	$(INSTALL_DIR) "$(DESTDIR)$(topdir)"
-	for i in $(INSTALL_TOPDIR_SCRIPTS); do \
-		$(INSTALL_SCRIPT) $(INSTALL_OPTS) $$i "$(DESTDIR)$(topdir)"; \
-	done
-
 install_topdirs: $(INSTALL_TOPDIRS)
 	$(INSTALL_DIR) "$(DESTDIR)$(topdir)"
 	for i in $(INSTALL_TOPDIRS); do \
@@ -846,7 +841,7 @@ INSTALLED_GHC_REAL=$(DESTDIR)$(bindir)/ghc.exe
 INSTALLED_GHC_PKG_REAL=$(DESTDIR)$(bindir)/ghc-pkg.exe
 endif
 
-INSTALLED_PACKAGES = $(filter-out haskeline mtl terminfo,$(PACKAGES))
+INSTALLED_PACKAGES = $(filter-out haskeline mtl terminfo utf8-string,$(PACKAGES))
 HIDDEN_PACKAGES = ghc-binary
 
 define set_INSTALL_DISTDIR
@@ -903,6 +898,7 @@ $(eval $(call bindist,.,\
     $(INPLACE_BIN)/ghc-cabal \
     utils/ghc-pwd/ghc-pwd \
 	$(BINDIST_WRAPPERS) \
+	$(BINDIST_PERL_SOURCES) \
 	$(BINDIST_LIBS) \
 	$(BINDIST_HI) \
 	$(BINDIST_EXTRAS) \
@@ -915,7 +911,6 @@ $(eval $(call bindist,.,\
     $(INSTALL_LIBEXECS) \
     $(INSTALL_LIBEXEC_SCRIPTS) \
     $(INSTALL_TOPDIRS) \
-    $(INSTALL_TOPDIR_SCRIPTS) \
     $(INSTALL_BINS) \
     $(INSTALL_MANPAGES) \
     $(INSTALL_DOCS) \

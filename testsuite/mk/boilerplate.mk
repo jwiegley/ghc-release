@@ -19,27 +19,31 @@ define canonicalise
 # $1 = path variable
 $1_CYGPATH := $$(shell $(SHELL) -c "cygpath -m '$$($1)'" 2> /dev/null)
 ifneq "$$($1_CYGPATH)" ""
-$1 := $$($1_CYGPATH)
+# We use 'override' in case we are trying to update a value given on
+# the commandline (e.g. TEST_HC)
+override $1 := $$($1_CYGPATH)
 endif
 endef
 
 define canonicaliseExecutable
 # $1 = program path variable
-ifneq "$$(shell test -e '$$($1).exe' && echo exists)" ""
-$1 := $$($1).exe
+ifneq "$$(shell test -x '$$($1).exe' && echo exists)" ""
+# We use 'override' in case we are trying to update a value given on
+# the commandline (e.g. TEST_HC)
+override $1 := $$($1).exe
 endif
 $(call canonicalise,$1)
 endef
 
-define get-ghc-rts-field # $1 = rseult variable, $2 = field name
+define get-ghc-rts-field # $1 = result variable, $2 = field name
 $1 := $$(shell '$$(TEST_HC)' +RTS --info | grep '^ .("$2",' | tr -d '\r' | sed -e 's/.*", *"//' -e 's/")$$$$//')
 endef
 
-define get-ghc-field # $1 = rseult variable, $2 = field name
+define get-ghc-field # $1 = result variable, $2 = field name
 $1 := $$(shell '$$(TEST_HC)' --info | grep '^ .("$2",' | tr -d '\r' | sed -e 's/.*", *"//' -e 's/")$$$$//')
 endef
 
-define get-ghc-feature-bool # $1 = rseult variable, $2 = field name
+define get-ghc-feature-bool # $1 = result variable, $2 = field name
 SHELL_RES := $$(shell '$$(TEST_HC)' --info | grep '^ .("$2",' | tr -d '\r' | sed -e 's/.*", *"//' -e 's/")$$$$//')
 $1 := $$(strip \
 	  $$(if $$(SHELL_RES), \
@@ -74,6 +78,15 @@ else
 TEST_HC := $(shell which ghc)
 endif
 
+else
+IN_TREE_COMPILER = NO
+# We want to support both "ghc" and "/usr/bin/ghc" as values of TEST_HC
+# passed in by the user, but
+#     which ghc          == /usr/bin/ghc
+#     which /usr/bin/ghc == /usr/bin/ghc
+# so we can just always 'which' it. We need to use 'override' in order
+# to override a value given on the commandline.
+override TEST_HC := $(shell which '$(TEST_HC)')
 endif
 
 # We can't use $(dir ...) here as TEST_HC might be in a path
@@ -97,27 +110,27 @@ HPC := $(BIN_ROOT)/hpc
 endif
 
 $(eval $(call canonicaliseExecutable,TEST_HC))
-ifeq "$(shell test -e '$(TEST_HC)' && echo exists)" ""
+ifeq "$(shell test -x '$(TEST_HC)' && echo exists)" ""
 $(error Cannot find ghc: $(TEST_HC))
 endif
 
 $(eval $(call canonicaliseExecutable,GHC_PKG))
-ifeq "$(shell test -e '$(GHC_PKG)' && echo exists)" ""
+ifeq "$(shell test -x '$(GHC_PKG)' && echo exists)" ""
 $(error Cannot find ghc-pkg: $(GHC_PKG))
 endif
 
 $(eval $(call canonicaliseExecutable,HSC2HS))
-ifeq "$(shell test -e '$(HSC2HS)' && echo exists)" ""
+ifeq "$(shell test -x '$(HSC2HS)' && echo exists)" ""
 $(error Cannot find hsc2hs: $(HSC2HS))
 endif
 
 $(eval $(call canonicaliseExecutable,HP2PS_ABS))
-ifeq "$(shell test -e '$(HP2PS_ABS)' && echo exists)" ""
+ifeq "$(shell test -x '$(HP2PS_ABS)' && echo exists)" ""
 $(error Cannot find hp2ps: $(HP2PS_ABS))
 endif
 
 $(eval $(call canonicaliseExecutable,HPC))
-ifeq "$(shell test -e '$(HPC)' && echo exists)" ""
+ifeq "$(shell test -x '$(HPC)' && echo exists)" ""
 $(error Cannot find hpc: $(HPC))
 endif
 

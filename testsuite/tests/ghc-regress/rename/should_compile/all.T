@@ -119,8 +119,10 @@ test('T2914', normal, compile, [''])
 test('T3221', normal, compile, [''])
 test('T3262', normal, compile, [''])
 test('T3371', normal, compile, [''])
-test('T1074', normal, compile, ['-Wall'])
+test('T1074b', normal, compile, ['-Wall'])
 test('T3640', normal, compile, [''])
+test('T3901', expect_fail, compile, [''])
+test('T1954', normal, compile, [''])
 
 test('timing001', normal, compile, [''])
 test('timing002', normal, compile, [''])
@@ -128,4 +130,10 @@ test('timing003', normal, compile, [''])
 
 test('T1792_imports', extra_clean(['T1792_imports.imports']), run_command,
      ['$MAKE -s --no-print-directory T1792_imports'])
+
+test('T3823',
+     extra_clean(['T3823A.hi-boot', 'T3823A.hi', 'T3823B.hi',
+                  'T3823A.o-boot', 'T3823A.o', 'T3823B.o']),
+     run_command,
+     ['$MAKE -s --no-print-directory T3823'])
 

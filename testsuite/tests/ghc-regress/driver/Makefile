@@ -18,25 +18,25 @@ OBJSUFFIX = .o
 # One-shot compilations, non-hierarchical modules
 
 test011:
-	$(RM) A.hi
-	$(RM) A$(OBJSUFFIX)
-	"$(TEST_HC)" -c A.hs
-	test -f A.hi
-	test -f A$(OBJSUFFIX)
+	$(RM) A011.hi
+	$(RM) A011$(OBJSUFFIX)
+	"$(TEST_HC)" -c A011.hs
+	test -f A011.hi
+	test -f A011$(OBJSUFFIX)
 
 # test -o
 test012:
-	$(RM) A.hi
-	$(RM) A$(OBJSUFFIX)oo
-	"$(TEST_HC)" -c A.hs -o A$(OBJSUFFIX)oo
-	test -f A$(OBJSUFFIX)oo
+	$(RM) A012.hi
+	$(RM) A012$(OBJSUFFIX)oo
+	"$(TEST_HC)" -c A012.hs -o A012$(OBJSUFFIX)oo
+	test -f A012$(OBJSUFFIX)oo
 
 # test -ohi
 test013:
-	$(RM) A.xhi
-	$(RM) A$(OBJSUFFIX)
-	"$(TEST_HC)" -c A.hs -ohi A.xhi
-	test -f A.xhi
+	$(RM) A013.xhi
+	$(RM) A013$(OBJSUFFIX)
+	"$(TEST_HC)" -c A013.hs -ohi A013.xhi
+	test -f A013.xhi
 
 # test -odir
 test014:
@@ -58,19 +58,22 @@ test015:
 
 # test stub generation
 test016:
-	$(RM) F.hi F$(OBJSUFFIX) F_stub.c F_stub.h
-	"$(TEST_HC)" -c F.hs
-	test -f F_stub$(OBJSUFFIX)
-	test -f F_stub.c
-	test -f F_stub.h
+	$(RM) F016.hi F016$(OBJSUFFIX) F016_stub.c F016_stub.h
+	"$(TEST_HC)" -c F016.hs
+	test -f F016_stub$(OBJSUFFIX)
+	test -f F016_stub.c
+	test -f F016_stub.h
 
 # test -stubdir (filename differs from module name)
 test017:
-	$(RM) F.hi F$(OBJSUFFIX) stub/TestStub_stub.c stub/TestStub_stub.h stub/TestStub_stub$(OBJSUFFIX) F_stub$(OBJSUFFIX) 
-	"$(TEST_HC)" -c F.hs -stubdir stub
-	test -f F_stub$(OBJSUFFIX)
-	test -f stub/TestStub_stub.c
-	test -f stub/TestStub_stub.h
+	$(RM) F017.hi F017$(OBJSUFFIX)
+	$(RM) stub017/TestStub_stub.c stub017/TestStub_stub.h
+	$(RM) stub017/TestStub_stub$(OBJSUFFIX)
+	$(RM) F017_stub$(OBJSUFFIX)
+	"$(TEST_HC)" -c F017.hs -stubdir stub017
+	test -f F017_stub$(OBJSUFFIX)
+	test -f stub017/TestStub017_stub.c
+	test -f stub017/TestStub017_stub.h
 
 # test -odir with stubs (filename differs from module name)
 test018:
@@ -89,321 +92,323 @@ test018a:
 # test -outputdir
 test019:
 	$(RM) -rf out019
-	"$(TEST_HC)" -c F.hs -outputdir out019
-	test -f out019/TestStub.hi
-	test -f out019/TestStub$(OBJSUFFIX)
-	test -f out019/TestStub_stub$(OBJSUFFIX)
-	test -f out019/TestStub_stub.c
-	test -f out019/TestStub_stub.h
+	"$(TEST_HC)" -c F019.hs -outputdir out019
+	test -f out019/TestStub019.hi
+	test -f out019/TestStub019$(OBJSUFFIX)
+	test -f out019/TestStub019_stub$(OBJSUFFIX)
+	test -f out019/TestStub019_stub.c
+	test -f out019/TestStub019_stub.h
 
 # -----------------------------------------------------------------------------
 # One-shot compilation, hierarchical modules
 
 test021:
-	$(RM) B/C.hi
-	$(RM) B/C$(OBJSUFFIX)
-	"$(TEST_HC)" -c B/C.hs
-	test -f B/C.hi
-	test -f B/C$(OBJSUFFIX)
+	$(RM) B021/C.hi
+	$(RM) B021/C$(OBJSUFFIX)
+	"$(TEST_HC)" -c B021/C.hs
+	test -f B021/C.hi
+	test -f B021/C$(OBJSUFFIX)
 
 # test -o
 test022:
-	$(RM) B/C.hi
-	$(RM) B/C$(OBJSUFFIX)oo
-	"$(TEST_HC)" -c B/C.hs -o B/C$(OBJSUFFIX)oo
-	test -f B/C$(OBJSUFFIX)oo
+	$(RM) B022/C.hi
+	$(RM) B022/C$(OBJSUFFIX)oo
+	"$(TEST_HC)" -c B022/C.hs -o B022/C$(OBJSUFFIX)oo
+	test -f B022/C$(OBJSUFFIX)oo
 
 # test -ohi
 test023:
-	$(RM) B/C.xhi
-	$(RM) B/C$(OBJSUFFIX)
-	"$(TEST_HC)" -c B/C.hs -ohi B/C.xhi
-	test -f B/C.xhi
+	$(RM) B023/C.xhi
+	$(RM) B023/C$(OBJSUFFIX)
+	"$(TEST_HC)" -c B023/C.hs -ohi B023/C.xhi
+	test -f B023/C.xhi
 
 # test -odir
 test024:
-	$(RM) -f B/C024.hi
+	$(RM) -f B024/C.hi
 	$(RM) -rf obj024
 	mkdir obj024
-	"$(TEST_HC)" -c B/C024.hs -odir obj024
-	test -f obj024/B/C024$(OBJSUFFIX)
+	"$(TEST_HC)" -c B024/C.hs -odir obj024
+	test -f obj024/B024/C$(OBJSUFFIX)
 
 # test -odir with non-Haskell compilation
 test024a:
-	$(RM) -f B/stub.c
-	$(RM) -rf obj
-	mkdir obj
-	echo >B/stub.c
-	"$(TEST_HC)" -c B/stub.c -odir obj
-	test -f obj/B/stub$(OBJSUFFIX)
+	$(RM) -f B024a/stub.c
+	$(RM) -rf obj024a
+	mkdir obj024a
+	echo >B024a/stub.c
+	"$(TEST_HC)" -c B024a/stub.c -odir obj024a
+	test -f obj024a/B024a/stub$(OBJSUFFIX)
 
 # test -hidir
 test025:
-	$(RM) -rf hi
-	mkdir hi
-	$(RM) B/C$(OBJSUFFIX)
-	"$(TEST_HC)" -c B/C.hs -hidir hi
-	test -f hi/B/C.hi
+	$(RM) -rf hi025
+	mkdir hi025
+	$(RM) B025/C$(OBJSUFFIX)
+	"$(TEST_HC)" -c B025/C.hs -hidir hi025
+	test -f hi025/B025/C.hi
 
 # This is a hierarchical module that lives in a subdirectory.
 test026:
-	$(RM) d1/P/Q.hi
-	$(RM) d1/P/Q$(OBJSUFFIX)
-	"$(TEST_HC)" -c d1/P/Q.hs
-	test -f d1/P/Q.hi
-	test -f d1/P/Q$(OBJSUFFIX)
+	$(RM) d026/P/Q.hi
+	$(RM) d026/P/Q$(OBJSUFFIX)
+	"$(TEST_HC)" -c d026/P/Q.hs
+	test -f d026/P/Q.hi
+	test -f d026/P/Q$(OBJSUFFIX)
 
 # test stub generation
 # -fvia-C, because we want to check that the .hc file can #include the stub.h
 test027:
-	$(RM) B/F.hi B/F$(OBJSUFFIX) B/F_stub.c B/F_stub.h
-	"$(TEST_HC)" -c B/F.hs -fvia-C
-	test -f B/F_stub.c
-	test -f B/F_stub.h
+	$(RM) B027/F.hi B027/F$(OBJSUFFIX) B027/F_stub.c B027/F_stub.h
+	"$(TEST_HC)" -c B027/F.hs -fvia-C
+	test -f B027/F_stub.c
+	test -f B027/F_stub.h
 
 # test -stubdir
 # -fvia-C, because we want to check that the .hc file can #include the stub.h
 test028:
-	$(RM) B/F.hi B/F$(OBJSUFFIX) stub/B/F_stub.c stub/B/F_stub.h
-	"$(TEST_HC)" -c B/F.hs -stubdir stub -fvia-C
-	test -f stub/B/F_stub.c
-	test -f stub/B/F_stub.h
+	$(RM) B028/F.hi B028/F$(OBJSUFFIX)
+	$(RM) stub028/B028/F_stub.c stub028/B028/F_stub.h
+	"$(TEST_HC)" -c B028/F.hs -stubdir stub028 -fvia-C
+	test -f stub028/B028/F_stub.c
+	test -f stub028/B028/F_stub.h
 
 # -----------------------------------------------------------------------------
 # Compilation-manager compilations, flat modules
 
 test031:
-	$(RM) A.hi
-	$(RM) A$(OBJSUFFIX)
-	"$(TEST_HC)" -v0 --make A.hs
-	test -f A.hi
-	test -f A$(OBJSUFFIX)
+	$(RM) A031.hi
+	$(RM) A031$(OBJSUFFIX)
+	"$(TEST_HC)" -v0 --make A031.hs
+	test -f A031.hi
+	test -f A031$(OBJSUFFIX)
 
 # test -odir
 test032:
-	$(RM) A.hi
-	$(RM) -rf obj
-	mkdir obj
-	"$(TEST_HC)" -v0 --make A.hs -odir obj
-	test -f obj/A$(OBJSUFFIX)
+	$(RM) A032.hi
+	$(RM) -rf obj032
+	mkdir obj032
+	"$(TEST_HC)" -v0 --make A032.hs -odir obj032
+	test -f obj032/A032$(OBJSUFFIX)
 
 # test -hidir
 test033:
-	$(RM) -rf hi
-	$(RM) A$(OBJSUFFIX)
-	mkdir hi
-	"$(TEST_HC)" -v0 --make A.hs -hidir hi
-	test -f hi/A.hi
+	$(RM) -rf hi033
+	$(RM) A033$(OBJSUFFIX)
+	mkdir hi033
+	"$(TEST_HC)" -v0 --make A033.hs -hidir hi033
+	test -f hi033/A033.hi
 
 # test stub generation
 test034:
-	$(RM) F.hi F$(OBJSUFFIX) F_stub.c F_stub.h
-	"$(TEST_HC)" -v0 --make F.hs
-	test -f F_stub.c
-	test -f F_stub.h
+	$(RM) F034.hi F034$(OBJSUFFIX) F034_stub.c F034_stub.h
+	"$(TEST_HC)" -v0 --make F034.hs
+	test -f F034_stub.c
+	test -f F034_stub.h
 
 # test -stubdir (filename differs from module name)
 test035:
-	$(RM) F.hi F$(OBJSUFFIX) stub/Stubs_stub.c stub/Stubs_stub.h
-	"$(TEST_HC)" -v0 --make F.hs -stubdir stub
-	test -f stub/TestStub_stub.c
-	test -f stub/TestStub_stub.h
+	$(RM) F035.hi F$(OBJSUFFIX) stub035/Stubs_stub.c stub035/Stubs_stub.h
+	"$(TEST_HC)" -v0 --make F035.hs -stubdir stub035
+	test -f stub035/TestStub035_stub.c
+	test -f stub035/TestStub035_stub.h
 
 # -----------------------------------------------------------------------------
 # Compilation-manager compilations, hierarchical modules
 
 test041:
-	$(RM) B/C.hi
-	$(RM) B/C$(OBJSUFFIX)
-	"$(TEST_HC)" -v0 --make B/C.hs
-	test -f B/C.hi
-	test -f B/C$(OBJSUFFIX)
+	$(RM) B041/C.hi
+	$(RM) B041/C$(OBJSUFFIX)
+	"$(TEST_HC)" -v0 --make B041/C.hs
+	test -f B041/C.hi
+	test -f B041/C$(OBJSUFFIX)
 
 # test -odir
 test042:
-	$(RM) -rf obj
-	mkdir obj
-	$(RM) B/C.hi
-	"$(TEST_HC)" -v0 --make B/C.hs -odir obj
-	test -f obj/B/C$(OBJSUFFIX)
+	$(RM) -rf obj042
+	mkdir obj042
+	$(RM) B042/C.hi
+	"$(TEST_HC)" -v0 --make B042/C.hs -odir obj042
+	test -f obj042/B042/C$(OBJSUFFIX)
 
 # test -hidir
 test043:
-	$(RM) -f B/C$(OBJSUFFIX)
-	$(RM) -rf hi
-	mkdir hi
-	"$(TEST_HC)" -v0 --make B/C.hs -hidir hi
-	test -f hi/B/C.hi
+	$(RM) -f B043/C$(OBJSUFFIX)
+	$(RM) -rf hi043
+	mkdir hi043
+	"$(TEST_HC)" -v0 --make B043/C.hs -hidir hi043
+	test -f hi043/B043/C.hi
 
 # test stub generation
 test044:
-	$(RM) B/F.hi B/F$(OBJSUFFIX) B/F_stub.c B/F_stub.h
-	"$(TEST_HC)" -v0 --make B/F.hs
-	test -f B/F_stub.c
-	test -f B/F_stub.h
+	$(RM) B044/F.hi B044/F$(OBJSUFFIX) B044/F_stub.c B044/F_stub.h
+	"$(TEST_HC)" -v0 --make B044/F.hs
+	test -f B044/F_stub.c
+	test -f B044/F_stub.h
 
 # test -stubdir
 test045:
-	$(RM) B/F.hi B/F$(OBJSUFFIX) stub/B/F_stub.c stub/B/F_stub.h
-	"$(TEST_HC)" -v0 --make B/F.hs -stubdir stub
-	test -f stub/B/F_stub.c
-	test -f stub/B/F_stub.h
+	$(RM) B045/F.hi B045/F$(OBJSUFFIX)
+	$(RM) stub045/B045/F_stub.c stub045/B045/F_stub.h
+	"$(TEST_HC)" -v0 --make B045/F.hs -stubdir stub045
+	test -f stub045/B045/F_stub.c
+	test -f stub045/B045/F_stub.h
 
 # -----------------------------------------------------------------------------
 # Compilation-manager compilations, hierarchical modules, non-root modules
 
 test051:
-	$(RM) d2/R/S.hi
-	$(RM) d2/R/S$(OBJSUFFIX)
-	$(RM) d1/P/Q.hi
-	$(RM) d1/P/Q$(OBJSUFFIX)
-	"$(TEST_HC)" -v0 --make -id1 -id2 R.S
-	test -f d2/R/S.hi
-	test -f d2/R/S$(OBJSUFFIX)
-	test -f d1/P/Q.hi
-	test -f d1/P/Q$(OBJSUFFIX)
+	$(RM) d051_2/R/S.hi
+	$(RM) d051_2/R/S$(OBJSUFFIX)
+	$(RM) d051_1/P/Q.hi
+	$(RM) d051_1/P/Q$(OBJSUFFIX)
+	"$(TEST_HC)" -v0 --make -id051_1 -id051_2 R.S
+	test -f d051_2/R/S.hi
+	test -f d051_2/R/S$(OBJSUFFIX)
+	test -f d051_1/P/Q.hi
+	test -f d051_1/P/Q$(OBJSUFFIX)
 
 # test -odir
 test052:
-	$(RM) d2/R/S.hi
-	$(RM) d1/P/Q.hi
-	$(RM) -rf obj
-	mkdir obj
-	"$(TEST_HC)" -v0 --make -id1 -id2 -odir obj R.S 
-	test -f d2/R/S.hi
-	test -f obj/R/S$(OBJSUFFIX)
-	test -f d1/P/Q.hi
-	test -f obj/P/Q$(OBJSUFFIX)
+	$(RM) d052_2/R/S.hi
+	$(RM) d052_1/P/Q.hi
+	$(RM) -rf obj052
+	mkdir obj052
+	"$(TEST_HC)" -v0 --make -id052_1 -id052_2 -odir obj052 R.S
+	test -f d052_2/R/S.hi
+	test -f obj052/R/S$(OBJSUFFIX)
+	test -f d052_1/P/Q.hi
+	test -f obj052/P/Q$(OBJSUFFIX)
 
 # test -hidir
 test053:
-	$(RM) hi/R/S.hi
-	$(RM) d2/R/S$(OBJSUFFIX)
-	$(RM) hi/P/Q.hi
-	$(RM) d1/P/Q$(OBJSUFFIX)
-	"$(TEST_HC)" -v0 --make -id1 -id2 -hidir hi R.S
-	test -f hi/R/S.hi
-	test -f d2/R/S$(OBJSUFFIX)
-	test -f hi/P/Q.hi
-	test -f d1/P/Q$(OBJSUFFIX)
+	$(RM) hi053/R/S.hi
+	$(RM) d053_2/R/S$(OBJSUFFIX)
+	$(RM) hi053/P/Q.hi
+	$(RM) d053_1/P/Q$(OBJSUFFIX)
+	"$(TEST_HC)" -v0 --make -id053_1 -id053_2 -hidir hi053 R.S
+	test -f hi053/R/S.hi
+	test -f d053_2/R/S$(OBJSUFFIX)
+	test -f hi053/P/Q.hi
+	test -f d053_1/P/Q$(OBJSUFFIX)
 
 # -----------------------------------------------------------------------------
 # Other tests
 
 # Test the -keep-hc-files works without --make
 test060:
-	$(RM) A.hi A$(OBJSUFFIX) A.hc
-	"$(TEST_HC)" -c -keep-hc-files -fvia-C A.hs
-	test -f A.hc
+	$(RM) A060.hi A060$(OBJSUFFIX) A060.hc
+	"$(TEST_HC)" -c -keep-hc-files -fvia-C A060.hs
+	test -f A060.hc
 
 # Test the -keep-hc-files works with --make
 test061:
-	$(RM) A.hi A$(OBJSUFFIX) A.hc
-	"$(TEST_HC)" -v0 --make -keep-hc-files -fvia-C A.hs
-	test -f A.hc
+	$(RM) A061.hi A061$(OBJSUFFIX) A061.hc
+	"$(TEST_HC)" -v0 --make -keep-hc-files -fvia-C A061.hs
+	test -f A061.hc
 
 # Test that -keep-s-files works with --make and -fvia-C
-test061a.1:
-	$(RM) A.hi A$(OBJSUFFIX) A.s
-	"$(TEST_HC)" -v0 --make -keep-s-files -fvia-C A.hs
-	test -f A.s
+test061a:
+	$(RM) A061a.hi A061a$(OBJSUFFIX) A061a.s
+	"$(TEST_HC)" -v0 --make -keep-s-files -fvia-C A061a.hs
+	test -f A061a.s
 
 # Test that -keep-s-files works without --make
-test061a.2:
-	$(RM) A.hi A$(OBJSUFFIX) A.s
-	"$(TEST_HC)" -c -keep-s-files -fvia-C A.hs
-	test -f A.s
+test061b:
+	$(RM) A061b.hi A061b$(OBJSUFFIX) A061b.s
+	"$(TEST_HC)" -c -keep-s-files -fvia-C A061b.hs
+	test -f A061b.s
 
 # Test that -main-is works with --make
-test062.1:
-	$(RM) Hello.hs Hello.hi Hello$(OBJSUFFIX) Hello.hc hello
-	echo "module Hello where { hello = putStrLn \"ok\" }" >Hello.hs
-	"$(TEST_HC)" -v0 --make -main-is Hello.hello Hello -o hello
-	./hello
-test062.2:
-	$(RM) Hello.hs Hello.hi Hello$(OBJSUFFIX) Hello.hc hello
-	echo "module Hello where { main = putStrLn \"ok\" }" >Hello.hs
-	"$(TEST_HC)" -v0 --make -main-is Hello Hello -o hello
-	./hello
-test062.3:
-	$(RM) Hello.hs Hello.hi Hello$(OBJSUFFIX) Hello.hc hello
-	echo "module Main (hello) where { hello = putStrLn \"ok\" }" >Hello.hs
-	"$(TEST_HC)" -v0 --make -main-is hello Hello.hs -o hello
-	./hello
-test062.4:
-	$(RM) B/Hello.hs B/Hello.hi B/Hello$(OBJSUFFIX) B/Hello.hc hello
-	echo "module B.Hello (hello) where { hello = putStrLn \"ok\" }" >B/Hello.hs
-	"$(TEST_HC)" -v0 --make -main-is B.Hello.hello B/Hello.hs -o hello
-	./hello
-test062.5:
-	$(RM) B/Hello.hs B/Hello.hi B/Hello$(OBJSUFFIX) Hello.hc hello
-	echo "module B.Hello (main) where { main = putStrLn \"ok\" }" >B/Hello.hs
-	"$(TEST_HC)" -v0 --make -main-is B.Hello B/Hello.hs -o hello
-	./hello
+test062a:
+	$(RM) Hello062a.hs Hello062a.hi Hello062a$(OBJSUFFIX) Hello062a.hc hello062a
+	echo "module Hello062a where { hello062a = putStrLn \"ok\" }" >Hello062a.hs
+	"$(TEST_HC)" -v0 --make -main-is Hello062a.hello062a Hello062a -o hello062a
+	./hello062a
+test062b:
+	$(RM) Hello062b.hs Hello062b.hi Hello062b$(OBJSUFFIX) Hello062b.hc hello062b
+	echo "module Hello062b where { main = putStrLn \"ok\" }" >Hello062b.hs
+	"$(TEST_HC)" -v0 --make -main-is Hello062b Hello062b -o hello062b
+	./hello062b
+test062c:
+	$(RM) Hello062c.hs Hello062c.hi Hello062c$(OBJSUFFIX) Hello062c.hc hello062c
+	echo "module Main (hello062c) where { hello062c = putStrLn \"ok\" }" >Hello062c.hs
+	"$(TEST_HC)" -v0 --make -main-is hello062c Hello062c.hs -o hello062c
+	./hello062c
+test062d:
+	$(RM) B062d/Hello062d.hs B062d/Hello062d.hi B062d/Hello062d$(OBJSUFFIX) B062d/Hello062d.hc hello062d
+	echo "module B062d.Hello062d (hello062d) where { hello062d = putStrLn \"ok\" }" >B062d/Hello062d.hs
+	"$(TEST_HC)" -v0 --make -main-is B062d.Hello062d.hello062d B062d/Hello062d.hs -o hello062d
+	./hello062d
+test062e:
+	$(RM) B062e/Hello062e.hs B062e/Hello062e.hi B062e/Hello062e$(OBJSUFFIX) Hello062e.hc hello062e
+	echo "module B062e.Hello062e (main) where { main = putStrLn \"ok\" }" >B062e/Hello062e.hs
+	"$(TEST_HC)" -v0 --make -main-is B062e.Hello062e B062e/Hello062e.hs -o hello062e
+	./hello062e
 
 # Test that -i deletes the list of search paths.
 # The compilation will fail, but we ignore the failure and just
 # compare the output, because make might give us a different exit code.
 test063:
-	$(RM) A.hi A$(OBJSUFFIX) A.hc D.hi D$(OBJSUFFIX) D.hc
-	-"$(TEST_HC)" --make -i -v0 D.hs
+	$(RM) A063.hi A063$(OBJSUFFIX) A063.hc D063.hi D063$(OBJSUFFIX) D063.hc
+	-"$(TEST_HC)" --make -i -v0 D063.hs
 
 # Test -E
 test064:
-	$(RM) A.hi A.hspp
-	"$(TEST_HC)" -E A.hs
-	test -f A.hspp
+	$(RM) A064.hi A064.hspp
+	"$(TEST_HC)" -E A064.hs
+	test -f A064.hspp
 
 # Test -E/-cpp
 test065:
-	$(RM) A.hi A.hspp
-	"$(TEST_HC)" -E -cpp A.hs
-	test -f A.hspp
+	$(RM) A065.hi A065.hspp
+	"$(TEST_HC)" -E -cpp A065.hs
+	test -f A065.hspp
 
 # Test -E/-o
 test066:
-	$(RM) A.hi A.tmp
-	"$(TEST_HC)" -E A.hs -o A.tmp
-	test -f A.tmp
+	$(RM) A066.hi A066.tmp
+	"$(TEST_HC)" -E A066.hs -o A066.tmp
+	test -f A066.tmp
 
 # Test -E/-cpp/-o
 test067:
-	$(RM) A.hi A.tmp
-	"$(TEST_HC)" -cpp -E A.hs -o A.tmp
-	test -f A.tmp
+	$(RM) A067.hi A067.tmp
+	"$(TEST_HC)" -cpp -E A067.hs -o A067.tmp
+	test -f A067.tmp
 
 # Test -C
 test068:
-	$(RM) A.hi A.hc
-	"$(TEST_HC)" -C A.hs
-	test -f A.hc
+	$(RM) A068.hi A068.hc
+	"$(TEST_HC)" -C A068.hs
+	test -f A068.hc
 
 # Test -C/-o
 test069:
-	$(RM) A.hi A.tmp
-	"$(TEST_HC)" -C A.hs -o A.tmp
-	test -f A.tmp
+	$(RM) A069.hi A069.tmp
+	"$(TEST_HC)" -C A069.hs -o A069.tmp
+	test -f A069.tmp
 
 # Test -S
 test070:
-	$(RM) A.hi A.s
-	"$(TEST_HC)" -S A.hs
-	test -f A.s
+	$(RM) A070.hi A070.s
+	"$(TEST_HC)" -S A070.hs
+	test -f A070.s
 
 # Test -S/-o
 test071:
-	$(RM) A.hi A.tmp
-	"$(TEST_HC)" -S A.hs -o A.tmp
-	test -f A.tmp
+	$(RM) A071.hi A071.tmp
+	"$(TEST_HC)" -S A071.hs -o A071.tmp
+	test -f A071.tmp
 
 # No recompilation required, but we requested a .hc file --> should recompile
 # Broken briefy in ghc-6.3.
 test080:
-	$(RM) A.hi A$(OBJSUFFIX) A.hc
-	"$(TEST_HC)" -c A.hs
-	test -f A$(OBJSUFFIX)
-	"$(TEST_HC)" -C A.hs
-	test -f A.hc
+	$(RM) A080.hi A080$(OBJSUFFIX) A080.hc
+	"$(TEST_HC)" -c A080.hs
+	test -f A080$(OBJSUFFIX)
+	"$(TEST_HC)" -C A080.hs
+	test -f A080.hc
 
 
 # Tests for #2248, -o and .exe
@@ -415,10 +420,10 @@ echo "module Main where { main = putStrLn \"ok\" }" >$(1).hs
 test -f $(1)$(exeext)
 endef
 
-test081.1:
-	$(call test081, Test_0)
-test081.2:
-	$(call test081, Test.0)
+test081a:
+	$(call test081, Test_081a)
+test081b:
+	$(call test081, Test.081b)
 
 # -----------------------------------------------------------------------------
 # --make tests
@@ -432,23 +437,23 @@ test100:
 # -----------------------------------------------------------------------------
 # dependency-generation tests
 
-DEPFILE= depend
+DEPFILE200 = depend200
 
 # Test that we can create a dependency file, and that we can
 # modify an existing dependency file.
 test200:
-	$(RM) $(DEPFILE)
-	"$(TEST_HC)" -M -dep-makefile $(DEPFILE) D
-	test -f $(DEPFILE)
-	"$(TEST_HC)" -M -dep-makefile $(DEPFILE) D B.C A
-	test -f $(DEPFILE)
-	"$(TEST_HC)" -M -dep-makefile $(DEPFILE) D.hs B/C.hs A.hs
-	test -f $(DEPFILE)
+	$(RM) $(DEPFILE200)
+	"$(TEST_HC)" -M -dep-makefile $(DEPFILE200) D200
+	test -f $(DEPFILE200)
+	"$(TEST_HC)" -M -dep-makefile $(DEPFILE200) D200 B200.C A200
+	test -f $(DEPFILE200)
+	"$(TEST_HC)" -M -dep-makefile $(DEPFILE200) D200.hs B200/C.hs A200.hs
+	test -f $(DEPFILE200)
 
 # -----------------------------------------------------------------------------
 
 2566::
-	if "$(TEST_HC)" -c foo.bar; then false else true; fi
+	if "$(TEST_HC)" -c foo2566.bar; then false else true; fi
 
 .PHONY: mode001
 # We use
@@ -472,3 +477,15 @@ mode001:
 shared001:
 	$(RM) Shared001.hi Shared001.o HSdll.dll.a HSdll.dll Shared001_stub.*
 	"$(TEST_HC)" -shared Shared001.hs
+
+.PHONY: rtsOpts
+rtsOpts:
+	$(RM) rtsOpts$(exeext) rtsOpts.hi rtsOpts.o
+	"$(TEST_HC)" -v0 --make rtsOpts
+	echo "Normal"
+	-./rtsOpts +RTS -C0 2>&1
+	$(RM) rtsOpts$(exeext) rtsOpts.hi rtsOpts.o
+	"$(TEST_HC)" -v0 --make rtsOpts -no-rtsopts
+	echo "No RTS opts"
+	-./rtsOpts +RTS -C0 2>&1
+

@@ -199,11 +199,20 @@ class TestOptions:
        # Does this test use a .c file?
        self.c_src = 0
 
+       # Command to run before the test
+       self.pre_cmd = None
+
+       # Command to run for extra cleaning
+       self.clean_cmd = None
+
        # Prefix to put on the command before running it
        self.cmd_prefix = ''
 
        # Extra output normalisation
        self.extra_normaliser = lambda x: x
+
+       # The directory the test is in
+       self.testdir = '.'
 
 # The default set of options
 global default_testopts

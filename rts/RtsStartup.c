@@ -17,6 +17,7 @@
 
 #include "sm/Storage.h"
 #include "RtsUtils.h"
+#include "Prelude.h"
 #include "Schedule.h"   /* initScheduler */
 #include "Stats.h"      /* initStats */
 #include "STM.h"        /* initSTM */
@@ -164,15 +165,24 @@ hs_init(int *argc, char **argv[])
      * knows about.  We don't know whether these turn out to be CAFs
      * or refer to CAFs, but we have to assume that they might.
      */
-    getStablePtr((StgPtr)base_GHCziTopHandler_runIO_closure);
-    getStablePtr((StgPtr)base_GHCziTopHandler_runNonIO_closure);
+    getStablePtr((StgPtr)runIO_closure);
+    getStablePtr((StgPtr)runNonIO_closure);
+
+    getStablePtr((StgPtr)runFinalizerBatch_closure);
+
     getStablePtr((StgPtr)stackOverflow_closure);
     getStablePtr((StgPtr)heapOverflow_closure);
-    getStablePtr((StgPtr)runFinalizerBatch_closure);
     getStablePtr((StgPtr)unpackCString_closure);
     getStablePtr((StgPtr)blockedIndefinitelyOnMVar_closure);
     getStablePtr((StgPtr)nonTermination_closure);
     getStablePtr((StgPtr)blockedIndefinitelyOnSTM_closure);
+    getStablePtr((StgPtr)nestedAtomically_closure);
+
+    getStablePtr((StgPtr)runSparks_closure);
+    getStablePtr((StgPtr)ensureIOManagerIsRunning_closure);
+#ifndef mingw32_HOST_OS
+    getStablePtr((StgPtr)runHandlers_closure);
+#endif
 
     /* initialise the shared Typeable store */
     initGlobalStore();
@@ -355,7 +365,7 @@ hs_exit_(rtsBool wait_foreign)
 
     /* stop the ticker */
     stopTimer();
-    exitTimer();
+    exitTimer(wait_foreign);
 
     // set the terminal settings back to what they were
 #if !defined(mingw32_HOST_OS)    

@@ -1821,7 +1821,7 @@ f "2"    = 2
       special option or libraries compiled in a certain way.  To get access to
       the support libraries for Concurrent Haskell, just import
       <ulink
-	url="../libraries/base/Control-Concurrent.html"><literal>Control.Concurrent</literal></ulink>.  More information on Concurrent Haskell is provided in the documentation for that module.</para>
+	url="&libraryBaseLocation;/Control-Concurrent.html"><literal>Control.Concurrent</literal></ulink>.  More information on Concurrent Haskell is provided in the documentation for that module.</para>
 
     <para>The following RTS option(s) affect the behaviour of Concurrent
       Haskell programs:<indexterm><primary>RTS options, concurrent</primary></indexterm></para>
@@ -2087,7 +2087,7 @@ statements or clauses.
 
   <para>GHC can dump its optimized intermediate code (said to be in &ldquo;Core&rdquo; format) 
   to a file as a side-effect of compilation. Non-GHC back-end tools can read and process Core files; these files have the suffix
-  <filename>.hcr</filename>. The Core format is described in <ulink url="../ext-core/core.pdf">
+  <filename>.hcr</filename>. The Core format is described in <ulink url="../../core.pdf">
   <citetitle>An External Representation for the GHC Core Language</citetitle></ulink>, 
   and sample tools
   for manipulating Core files (in Haskell) are in the GHC source distribution 

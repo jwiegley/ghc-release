@@ -171,10 +171,10 @@ STATIC_INLINE void
 newReturningTask (Capability *cap, Task *task)
 {
     ASSERT_LOCK_HELD(&cap->lock);
-    ASSERT(task->return_link == NULL);
+    ASSERT(task->next == NULL);
     if (cap->returning_tasks_hd) {
-	ASSERT(cap->returning_tasks_tl->return_link == NULL);
-	cap->returning_tasks_tl->return_link = task;
+	ASSERT(cap->returning_tasks_tl->next == NULL);
+	cap->returning_tasks_tl->next = task;
     } else {
 	cap->returning_tasks_hd = task;
     }
@@ -188,11 +188,11 @@ popReturningTask (Capability *cap)
     Task *task;
     task = cap->returning_tasks_hd;
     ASSERT(task);
-    cap->returning_tasks_hd = task->return_link;
+    cap->returning_tasks_hd = task->next;
     if (!cap->returning_tasks_hd) {
 	cap->returning_tasks_tl = NULL;
     }
-    task->return_link = NULL;
+    task->next = NULL;
     return task;
 }
 #endif
@@ -219,7 +219,7 @@ initCapability( Capability *cap, nat i )
     initMutex(&cap->lock);
     cap->running_task      = NULL; // indicates cap is free
     cap->spare_workers     = NULL;
-    cap->suspended_ccalling_tasks = NULL;
+    cap->suspended_ccalls  = NULL;
     cap->returning_tasks_hd = NULL;
     cap->returning_tasks_tl = NULL;
     cap->wakeup_queue_hd    = END_TSO_QUEUE;
@@ -340,7 +340,7 @@ giveCapabilityToTask (Capability *cap USED_IF_DEBUG, Task *task)
     ASSERT_LOCK_HELD(&cap->lock);
     ASSERT(task->cap == cap);
     debugTrace(DEBUG_sched, "passing capability %d to %s %p",
-               cap->no, task->tso ? "bound task" : "worker",
+               cap->no, task->incall->tso ? "bound task" : "worker",
                (void *)task->id);
     ACQUIRE_LOCK(&task->lock);
     task->wakeup = rtsTrue;
@@ -392,8 +392,11 @@ releaseCapability_ (Capability* cap,
     // give this Capability to the appropriate Task.
     if (!emptyRunQueue(cap) && cap->run_queue_hd->bound) {
 	// Make sure we're not about to try to wake ourselves up
-	ASSERT(task != cap->run_queue_hd->bound);
-	task = cap->run_queue_hd->bound;
+	// ASSERT(task != cap->run_queue_hd->bound);
+        // assertion is false: in schedule() we force a yield after
+	// ThreadBlocked, but the thread may be back on the run queue
+	// by now.
+	task = cap->run_queue_hd->bound->task;
 	giveCapabilityToTask(cap,task);
 	return;
     }
@@ -406,7 +409,7 @@ releaseCapability_ (Capability* cap,
 	if (sched_state < SCHED_SHUTTING_DOWN || !emptyRunQueue(cap)) {
 	    debugTrace(DEBUG_sched,
 		       "starting new worker on capability %d", cap->no);
-	    startWorkerTask(cap, workerStart);
+	    startWorkerTask(cap);
 	    return;
 	}
     }
@@ -457,9 +460,7 @@ releaseCapabilityAndQueueWorker (Capability* cap USED_IF_THREADS)
     // in which case it is not replaced on the spare_worker queue.
     // This happens when the system is shutting down (see
     // Schedule.c:workerStart()).
-    // Also, be careful to check that this task hasn't just exited
-    // Haskell to do a foreign call (task->suspended_tso).
-    if (!isBoundTask(task) && !task->stopped && !task->suspended_tso) {
+    if (!isBoundTask(task) && !task->stopped) {
 	task->next = cap->spare_workers;
 	cap->spare_workers = task;
     }
@@ -607,7 +608,7 @@ yieldCapability (Capability** pCap, Task *task)
 		continue;
 	    }
 
-	    if (task->tso == NULL) {
+	    if (task->incall->tso == NULL) {
 		ASSERT(cap->spare_workers != NULL);
 		// if we're not at the front of the queue, release it
 		// again.  This is unlikely to happen.
@@ -650,12 +651,12 @@ wakeupThreadOnCapability (Capability *my_cap,
 
     // ASSUMES: cap->lock is held (asserted in wakeupThreadOnCapability)
     if (tso->bound) {
-	ASSERT(tso->bound->cap == tso->cap);
-    	tso->bound->cap = other_cap;
+	ASSERT(tso->bound->task->cap == tso->cap);
+    	tso->bound->task->cap = other_cap;
     }
     tso->cap = other_cap;
 
-    ASSERT(tso->bound ? tso->bound->cap == other_cap : 1);
+    ASSERT(tso->bound ? tso->bound->task->cap == other_cap : 1);
 
     if (other_cap->running_task == NULL) {
 	// nobody is running this Capability, we can add our thread
@@ -776,15 +777,23 @@ shutdownCapability (Capability *cap, Task *task, rtsBool safe)
         // that will try to return to code that has been unloaded.
         // We can be a bit more relaxed when this is a standalone
         // program that is about to terminate, and let safe=false.
-        if (cap->suspended_ccalling_tasks && safe) {
+        if (cap->suspended_ccalls && safe) {
 	    debugTrace(DEBUG_sched, 
 		       "thread(s) are involved in foreign calls, yielding");
             cap->running_task = NULL;
 	    RELEASE_LOCK(&cap->lock);
+            // The IO manager thread might have been slow to start up,
+            // so the first attempt to kill it might not have
+            // succeeded.  Just in case, try again - the kill message
+            // will only be sent once.
+            //
+            // To reproduce this deadlock: run ffi002(threaded1)
+            // repeatedly on a loaded machine.
+            ioManagerDie();
             yieldThread();
             continue;
         }
-            
+
         traceSchedEvent(cap, EVENT_SHUTDOWN, 0, 0);
 	RELEASE_LOCK(&cap->lock);
 	break;
@@ -857,7 +866,7 @@ markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta,
 {
     nat i;
     Capability *cap;
-    Task *task;
+    InCall *incall;
 
     // Each GC thread is responsible for following roots from the
     // Capability of the same number.  There will usually be the same
@@ -872,9 +881,9 @@ markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta,
 	evac(user, (StgClosure **)(void *)&cap->wakeup_queue_hd);
 	evac(user, (StgClosure **)(void *)&cap->wakeup_queue_tl);
 #endif
-	for (task = cap->suspended_ccalling_tasks; task != NULL; 
-	     task=task->next) {
-	    evac(user, (StgClosure **)(void *)&task->suspended_tso);
+	for (incall = cap->suspended_ccalls; incall != NULL; 
+	     incall=incall->next) {
+	    evac(user, (StgClosure **)(void *)&incall->suspended_tso);
 	}
 
 #if defined(THREADED_RTS)

@@ -10,7 +10,7 @@
 module Main (main) where
 
 import Version ( version, targetOS, targetARCH )
-import Distribution.InstalledPackageInfo.Binary
+import Distribution.InstalledPackageInfo.Binary()
 import qualified Distribution.Simple.PackageIndex as PackageIndex
 import Distribution.ModuleName hiding (main)
 import Distribution.InstalledPackageInfo
@@ -52,8 +52,21 @@ import qualified Data.ByteString.Lazy as B
 import qualified Data.Binary as Bin
 import qualified Data.Binary.Get as Bin
 
+#if __GLASGOW_HASKELL__ < 612 || defined(mingw32_HOST_OS)
+-- mingw32 needs these for getExecDir, GHC <6.12 needs them for openNewFile
 import Foreign
 import Foreign.C
+#endif
+
+#if __GLASGOW_HASKELL__ < 612
+import System.Posix.Internals
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO.Handle.FD (fdToHandle)
+#else
+import GHC.Handle (fdToHandle)
+#endif
+#endif
+
 #ifdef mingw32_HOST_OS
 import GHC.ConsoleHandler
 #else
@@ -61,12 +74,6 @@ import System.Posix hiding (fdToHandle)
 #endif
 
 import IO ( isPermissionError )
-import System.Posix.Internals
-#if __GLASGOW_HASKELL__ >= 611
-import GHC.IO.Handle.FD (fdToHandle)
-#else
-import GHC.Handle (fdToHandle)
-#endif
 
 #if defined(GLOB)
 import System.Process(runInteractiveCommand)
@@ -726,7 +733,7 @@ changeDBDir verbosity cmds db = do
   do_cmd (AddPackage p) = do
     let file = location db </> display (installedPackageId p) <.> "conf"
     when (verbosity > Normal) $ putStrLn ("writing " ++ file)
-    writeFileAtomic file (showInstalledPackageInfo p)
+    writeFileUtf8Atomic file (showInstalledPackageInfo p)
   do_cmd (ModifyPackage p) = 
     do_cmd (AddPackage p)
 
@@ -735,7 +742,7 @@ updateDBCache verbosity db = do
   let filename = location db </> cachefilename
   when (verbosity > Normal) $
       putStrLn ("writing cache " ++ filename)
-  writeBinPackageDB filename (map convertPackageInfoOut (packages db))
+  writeBinaryFileAtomic filename (map convertPackageInfoOut (packages db))
     `catch` \e ->
       if isPermissionError e
       then die (filename ++ ": you don't have permission to modify this file")
@@ -1148,7 +1155,7 @@ writeNewConfig verbosity filename ipis = do
   let shown = concat $ intersperse ",\n "
                      $ map (show . convertPackageInfoOut) ipis
       fileContents = "[" ++ shown ++ "\n]"
-  writeFileAtomic filename fileContents
+  writeFileUtf8Atomic filename fileContents
     `catch` \e ->
       if isPermissionError e
       then die (filename ++ ": you don't have permission to modify this file")
@@ -1548,12 +1555,26 @@ catchError io handler = io `Exception.catch` handler'
     where handler' (Exception.ErrorCall err) = handler err
 
 
+writeBinaryFileAtomic :: Bin.Binary a => FilePath -> a -> IO ()
+writeBinaryFileAtomic targetFile obj =
+  withFileAtomic targetFile $ \h -> do
+     hSetBinaryMode h True
+     B.hPutStr h (Bin.encode obj)
+
+writeFileUtf8Atomic :: FilePath -> String -> IO ()
+writeFileUtf8Atomic targetFile content =
+  withFileAtomic targetFile $ \h -> do
+#if __GLASGOW_HASKELL__ >= 612
+     hSetEncoding h utf8
+#endif
+     hPutStr h content
+
 -- copied from Cabal's Distribution.Simple.Utils, except that we want
 -- to use text files here, rather than binary files.
-writeFileAtomic :: FilePath -> String -> IO ()
-writeFileAtomic targetFile content = do
+withFileAtomic :: FilePath -> (Handle -> IO ()) -> IO ()
+withFileAtomic targetFile write_content = do
   (newFile, newHandle) <- openNewFile targetDir template
-  do  hPutStr newHandle content
+  do  write_content newHandle
       hClose newHandle
 #if mingw32_HOST_OS || mingw32_TARGET_OS
       renameFile newFile targetFile
@@ -1580,10 +1601,16 @@ writeFileAtomic targetFile content = do
     --      to always return a valid dir
     (targetDir_,targetName) = splitFileName targetFile
 
--- Ugh, this is a copy/paste of code from the base library, but
--- if uses 666 rather than 600 for the permissions.
 openNewFile :: FilePath -> String -> IO (FilePath, Handle)
 openNewFile dir template = do
+#if __GLASGOW_HASKELL__ >= 612
+  -- this was added to System.IO in 6.12.1
+  -- we must use this version because the version below opens the file
+  -- in binary mode.
+  openTempFileWithDefaultPermissions dir template
+#else
+  -- Ugh, this is a copy/paste of code from the base library, but
+  -- if uses 666 rather than 600 for the permissions.
   pid <- c_getpid
   findTempName pid
   where
@@ -1640,6 +1667,7 @@ std_flags, output_flags, rw_flags :: CInt
 std_flags    = o_NONBLOCK   .|. o_NOCTTY
 output_flags = std_flags    .|. o_CREAT
 rw_flags     = output_flags .|. o_RDWR
+#endif /* GLASGOW_HASKELL < 612 */
 
 -- | The function splits the given string to substrings
 -- using 'isSearchPathSeparator'.

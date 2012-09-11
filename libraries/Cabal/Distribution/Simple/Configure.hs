@@ -364,16 +364,7 @@ configure (pkg_descr0, pbi) cfg
                 (\xs -> ([ x | Left x <- xs ], [ x | Right x <- xs ]))
               . map (selectDependency internalPackageSet installedPackageSet)
 
-            (failedDeps, allPkgDeps) = case flavor of
-              GHC -> selectDependencies (buildDepends pkg_descr)
-              JHC -> selectDependencies (buildDepends pkg_descr)
-              LHC -> selectDependencies (buildDepends pkg_descr)
-              _   -> ([], bogusSelection)
-                where
-                  bogusSelection :: [ResolvedDependency]
-                  bogusSelection = zipWith ExternalDependency
-                                           (buildDepends pkg_descr)
-                                           bogusDependencies
+            (failedDeps, allPkgDeps) = selectDependencies (buildDepends pkg_descr)
 
             internalPkgDeps = [ pkgid | InternalDependency _ pkgid <- allPkgDeps ]
             externalPkgDeps = [ pkg   | ExternalDependency _ pkg   <- allPkgDeps ]
@@ -428,9 +419,11 @@ configure (pkg_descr0, pbi) cfg
         -- check extensions
         let extlist = nub $ concatMap extensions (allBuildInfo pkg_descr)
         let exts = unsupportedExtensions comp extlist
-        unless (null exts) $ warn verbosity $ -- Just warn, FIXME: Should this be an error?
-            display flavor ++ " does not support the following extensions: " ++
-            intercalate ", " (map display exts)
+        when (not (null exts)) $
+          die $ "The package " ++ display (packageId pkg_descr0)
+             ++ " requires the following language extensions which are not "
+             ++ "supported by " ++ display (compilerId comp) ++ ": "
+             ++ intercalate ", " (map display exts)
 
         let requiredBuildTools = concatMap buildTools (allBuildInfo pkg_descr)
         programsConfig'' <-
@@ -462,7 +455,7 @@ configure (pkg_descr0, pbi) cfg
                 if newPackageDepsBehaviour pkg_descr'
                   then [ (installedPackageId pkg, packageId pkg)
                        | pkg <- selectSubset bi externalPkgDeps ]
-                    ++ [ (InstalledPackageId (display pkgid), pkgid)
+                    ++ [ (inplacePackageId pkgid, pkgid)
                        | pkgid <- selectSubset bi internalPkgDeps ]
                   else [ (installedPackageId pkg, packageId pkg)
                        | pkg <- externalPkgDeps ]
@@ -537,6 +530,10 @@ configure (pkg_descr0, pbi) cfg
               modifyExecutable e = e{ buildInfo    = buildInfo e    `mappend` extraBi}
           in pkg_descr{ library     = modifyLib        `fmap` library pkg_descr
                       , executables = modifyExecutable  `map` executables pkg_descr}
+
+-- Quick hack in 1.8 branch, it's done properly in HEAD
+inplacePackageId :: PackageId -> InstalledPackageId
+inplacePackageId pkgid = InstalledPackageId (display pkgid ++ "-inplace")
 
 -- -----------------------------------------------------------------------------
 -- Configuring package dependencies
@@ -638,8 +635,10 @@ getInstalledPackages verbosity comp packageDBs progconf = do
   info verbosity "Reading installed packages..."
   case compilerFlavor comp of
     GHC -> Just `fmap` GHC.getInstalledPackages verbosity packageDBs progconf
+    Hugs-> Just `fmap`Hugs.getInstalledPackages verbosity packageDBs progconf
     JHC -> Just `fmap` JHC.getInstalledPackages verbosity packageDBs progconf
     LHC -> Just `fmap` LHC.getInstalledPackages verbosity packageDBs progconf
+    NHC -> Just `fmap` NHC.getInstalledPackages verbosity packageDBs progconf
     _   -> return Nothing
 
 -- | Currently the user interface specifies the package dbs to use with just a

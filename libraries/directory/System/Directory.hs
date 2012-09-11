@@ -21,7 +21,9 @@ module System.Directory
 
     -- * Actions on directories
       createDirectory		-- :: FilePath -> IO ()
+#ifndef __NHC__
     , createDirectoryIfMissing  -- :: Bool -> FilePath -> IO ()
+#endif
     , removeDirectory		-- :: FilePath -> IO ()
     , removeDirectoryRecursive  -- :: FilePath -> IO ()
     , renameDirectory		-- :: FilePath -> FilePath -> IO ()
@@ -82,9 +84,9 @@ import Control.Monad           ( when, unless )
 import Control.Exception.Base
 
 #ifdef __NHC__
-import Directory hiding ( getDirectoryContents
-                        , doesDirectoryExist, doesFileExist
-                        , getModificationTime )
+import Directory -- hiding ( getDirectoryContents
+                 --        , doesDirectoryExist, doesFileExist
+                 --        , getModificationTime )
 import System (system)
 #endif /* __NHC__ */
 
@@ -201,7 +203,7 @@ getPermissions name = do
   write_ok <- Posix.fileAccess name False True  False
   exec_ok  <- Posix.fileAccess name False False True
   stat <- Posix.getFileStatus name
-  let is_dir = Posix.fileMode stat .&. Posix.directoryMode /= 0
+  let is_dir = Posix.isDirectory stat
   return (
     Permissions {
       readable   = read_ok,
@@ -329,6 +331,7 @@ copyPermissions fromFPath toFPath
 
 #endif
 
+#ifndef __NHC__
 -- | @'createDirectoryIfMissing' parents dir@ creates a new directory 
 -- @dir@ if it doesn\'t exist. If the first argument is 'True'
 -- the function will also create all parent directories if they are missing.
@@ -370,12 +373,13 @@ createDirectoryIfMissing create_parents path0
                           else throw e
 #else
               stat <- Posix.getFileStatus dir
-              if Posix.fileMode stat .&. Posix.directoryMode /= 0 
+              if Posix.isDirectory stat
                  then return ()
                  else throw e
 #endif
               ) `catch` ((\_ -> return ()) :: IOException -> IO ())
           | otherwise              -> throw e
+#endif  /* !__NHC__ */
 
 #if __GLASGOW_HASKELL__
 {- | @'removeDirectory' dir@ removes an existing directory /dir/.  The
@@ -614,7 +618,7 @@ renameFile opath npath = do
    is_dir <- isDirectory st
 #else
    stat <- Posix.getSymbolicLinkStatus opath
-   let is_dir = Posix.fileMode stat .&. Posix.directoryMode /= 0
+   let is_dir = Posix.isDirectory stat
 #endif
    if is_dir
 	then ioException (ioeSetErrorString
@@ -739,7 +743,7 @@ findExecutable binary =
 #endif
 
 
-#ifndef __HUGS__
+#ifdef __GLASGOW_HASKELL__
 {- |@'getDirectoryContents' dir@ returns a list of /all/ entries
 in /dir/. 
 
@@ -776,16 +780,16 @@ getDirectoryContents path =
   modifyIOError ((`ioeSetFileName` path) . 
                  (`ioeSetLocation` "getDirectoryContents")) $ do
 #ifndef mingw32_HOST_OS
-  bracket
-    (Posix.openDirStream path)
-    Posix.closeDirStream
-    loop
+    bracket
+      (Posix.openDirStream path)
+      Posix.closeDirStream
+      loop
  where
   loop dirp = do
      e <- Posix.readDirStream dirp
      if null e then return [] else do
-     es <- loop dirp
-     return (e:es)
+       es <- loop dirp
+       return (e:es)
 #else
   bracket
      (Win32.findFirstFile (path </> "*"))
@@ -804,7 +808,7 @@ getDirectoryContents path =
                  -- no need to reverse, ordering is undefined
 #endif /* mingw32 */
 
-#endif /* !__HUGS__ */
+#endif /* __GLASGOW_HASKELL__ */
 
 
 {- |If the operating system has a notion of current directories,
@@ -883,7 +887,7 @@ setCurrentDirectory path =
 
 #endif /* __GLASGOW_HASKELL__ */
 
-#ifndef __HUGS__
+#ifdef __GLASGOW_HASKELL__
 {- |The operation 'doesDirectoryExist' returns 'True' if the argument file
 exists and is a directory, and 'False' otherwise.
 -}
@@ -894,7 +898,7 @@ doesDirectoryExist name =
    (withFileStatus "doesDirectoryExist" name $ \st -> isDirectory st)
 #else
    (do stat <- Posix.getFileStatus name
-       return (Posix.fileMode stat .&. Posix.directoryMode /= 0))
+       return (Posix.isDirectory stat))
 #endif
    `catch` ((\ _ -> return False) :: IOException -> IO Bool)
 
@@ -908,7 +912,7 @@ doesFileExist name =
    (withFileStatus "doesFileExist" name $ \st -> do b <- isDirectory st; return (not b))
 #else
    (do stat <- Posix.getFileStatus name
-       return (Posix.fileMode stat .&. Posix.directoryMode == 0))
+       return (not (Posix.isDirectory stat)))
 #endif
    `catch` ((\ _ -> return False) :: IOException -> IO Bool)
 
@@ -937,7 +941,7 @@ getModificationTime name = do
 #endif
 
 
-#endif /* !__HUGS__ */
+#endif /* __GLASGOW_HASKELL__ */
 
 #ifdef mingw32_HOST_OS
 withFileStatus :: String -> FilePath -> (Ptr CStat -> IO a) -> IO a
@@ -1011,16 +1015,16 @@ getHomeDirectory :: IO FilePath
 getHomeDirectory =
   modifyIOError ((`ioeSetLocation` "getHomeDirectory")) $ do
 #if defined(mingw32_HOST_OS)
-  r <- try $ Win32.sHGetFolderPath nullPtr Win32.cSIDL_PROFILE nullPtr 0
-  case (r :: Either IOException String) of
-    Right s -> return s
-    Left  _ -> do
-      r1 <- try $ Win32.sHGetFolderPath nullPtr Win32.cSIDL_WINDOWS nullPtr 0
-      case r1 of
-        Right s -> return s
-        Left  e -> ioError (e :: IOException)
+    r <- try $ Win32.sHGetFolderPath nullPtr Win32.cSIDL_PROFILE nullPtr 0
+    case (r :: Either IOException String) of
+      Right s -> return s
+      Left  _ -> do
+        r1 <- try $ Win32.sHGetFolderPath nullPtr Win32.cSIDL_WINDOWS nullPtr 0
+        case r1 of
+          Right s -> return s
+          Left  e -> ioError (e :: IOException)
 #else
-  getEnv "HOME"
+    getEnv "HOME"
 #endif
 
 {- | Returns the pathname of a directory in which application-specific
@@ -1054,11 +1058,11 @@ getAppUserDataDirectory :: String -> IO FilePath
 getAppUserDataDirectory appName = do
   modifyIOError ((`ioeSetLocation` "getAppUserDataDirectory")) $ do
 #if defined(mingw32_HOST_OS)
-  s <- Win32.sHGetFolderPath nullPtr Win32.cSIDL_APPDATA nullPtr 0
-  return (s++'\\':appName)
+    s <- Win32.sHGetFolderPath nullPtr Win32.cSIDL_APPDATA nullPtr 0
+    return (s++'\\':appName)
 #else
-  path <- getEnv "HOME"
-  return (path++'/':'.':appName)
+    path <- getEnv "HOME"
+    return (path++'/':'.':appName)
 #endif
 
 {- | Returns the current user's document directory.
@@ -1086,9 +1090,9 @@ getUserDocumentsDirectory :: IO FilePath
 getUserDocumentsDirectory = do
   modifyIOError ((`ioeSetLocation` "getUserDocumentsDirectory")) $ do
 #if defined(mingw32_HOST_OS)
-  Win32.sHGetFolderPath nullPtr Win32.cSIDL_PERSONAL nullPtr 0
+    Win32.sHGetFolderPath nullPtr Win32.cSIDL_PERSONAL nullPtr 0
 #else
-  getEnv "HOME"
+    getEnv "HOME"
 #endif
 
 {- | Returns the current directory for temporary files.

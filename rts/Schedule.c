@@ -312,7 +312,7 @@ schedule (Capability *initialCapability, Task *task)
 	// If we are a worker, just exit.  If we're a bound thread
 	// then we will exit below when we've removed our TSO from
 	// the run queue.
-	if (task->tso == NULL && emptyRunQueue(cap)) {
+	if (!isBoundTask(task) && emptyRunQueue(cap)) {
 	    return cap;
 	}
 	break;
@@ -378,10 +378,10 @@ schedule (Capability *initialCapability, Task *task)
     // Check whether we can run this thread in the current task.
     // If not, we have to pass our capability to the right task.
     {
-	Task *bound = t->bound;
+        InCall *bound = t->bound;
       
 	if (bound) {
-	    if (bound == task) {
+	    if (bound->task == task) {
 		// yes, the Haskell thread is bound to the current native thread
 	    } else {
 		debugTrace(DEBUG_sched,
@@ -393,7 +393,7 @@ schedule (Capability *initialCapability, Task *task)
 	    }
 	} else {
 	    // The thread we want to run is unbound.
-	    if (task->tso) { 
+	    if (task->incall->tso) { 
 		debugTrace(DEBUG_sched,
 			   "this OS thread cannot run thread %lu",
                            (unsigned long)t->id);
@@ -441,7 +441,7 @@ run_thread:
 
     ASSERT_FULL_CAPABILITY_INVARIANTS(cap,task);
     ASSERT(t->cap == cap);
-    ASSERT(t->bound ? t->bound->cap == cap : 1);
+    ASSERT(t->bound ? t->bound->task->cap == cap : 1);
 
     prev_what_next = t->what_next;
 
@@ -635,9 +635,9 @@ shouldYieldCapability (Capability *cap, Task *task)
     //     and this task it bound).
     return (waiting_for_gc || 
             cap->returning_tasks_hd != NULL ||
-            (!emptyRunQueue(cap) && (task->tso == NULL
+            (!emptyRunQueue(cap) && (task->incall->tso == NULL
                                      ? cap->run_queue_hd->bound != NULL
-                                     : cap->run_queue_hd->bound != task)));
+                                     : cap->run_queue_hd->bound != task->incall)));
 }
 
 // This is the single place where a Task goes to sleep.  There are
@@ -764,7 +764,7 @@ schedulePushWork(Capability *cap USED_IF_THREADS,
 		next = t->_link;
 		t->_link = END_TSO_QUEUE;
 		if (t->what_next == ThreadRelocated
-		    || t->bound == task // don't move my bound thread
+		    || t->bound == task->incall // don't move my bound thread
 		    || tsoLocked(t)) {  // don't move a locked thread
 		    setTSOLink(cap, prev, t);
 		    prev = t;
@@ -780,7 +780,7 @@ schedulePushWork(Capability *cap USED_IF_THREADS,
 
                     traceSchedEvent (cap, EVENT_MIGRATE_THREAD, t, free_caps[i]->no);
 
-		    if (t->bound) { t->bound->cap = free_caps[i]; }
+		    if (t->bound) { t->bound->task->cap = free_caps[i]; }
 		    t->cap = free_caps[i];
 		    i++;
 		}
@@ -976,13 +976,13 @@ scheduleDetectDeadlock (Capability *cap, Task *task)
 	/* Probably a real deadlock.  Send the current main thread the
 	 * Deadlock exception.
 	 */
-	if (task->tso) {
-	    switch (task->tso->why_blocked) {
+	if (task->incall->tso) {
+	    switch (task->incall->tso->why_blocked) {
 	    case BlockedOnSTM:
 	    case BlockedOnBlackHole:
 	    case BlockedOnException:
 	    case BlockedOnMVar:
-		throwToSingleThreaded(cap, task->tso, 
+		throwToSingleThreaded(cap, task->incall->tso, 
 				      (StgClosure *)nonTermination_closure);
 		return;
 	    default:
@@ -1171,8 +1171,8 @@ scheduleHandleStackOverflow (Capability *cap, Task *task, StgTSO *t)
 	/* The TSO attached to this Task may have moved, so update the
 	 * pointer to it.
 	 */
-	if (task->tso == t) {
-	    task->tso = new_t;
+	if (task->incall->tso == t) {
+	    task->incall->tso = new_t;
 	}
 	pushOnRunQueue(cap,new_t);
     }
@@ -1185,6 +1185,24 @@ scheduleHandleStackOverflow (Capability *cap, Task *task, StgTSO *t)
 static rtsBool
 scheduleHandleYield( Capability *cap, StgTSO *t, nat prev_what_next )
 {
+    /* put the thread back on the run queue.  Then, if we're ready to
+     * GC, check whether this is the last task to stop.  If so, wake
+     * up the GC thread.  getThread will block during a GC until the
+     * GC is finished.
+     */
+
+    ASSERT(t->_link == END_TSO_QUEUE);
+    
+    // Shortcut if we're just switching evaluators: don't bother
+    // doing stack squeezing (which can be expensive), just run the
+    // thread.
+    if (cap->context_switch == 0 && t->what_next != prev_what_next) {
+	debugTrace(DEBUG_sched,
+		   "--<< thread %ld (%s) stopped to switch evaluators", 
+		   (long)t->id, what_next_strs[t->what_next]);
+	return rtsTrue;
+    }
+
     // Reset the context switch flag.  We don't do this just before
     // running the thread, because that would mean we would lose ticks
     // during GC, which can lead to unfair scheduling (a thread hogs
@@ -1193,30 +1211,9 @@ scheduleHandleYield( Capability *cap, StgTSO *t, nat prev_what_next )
     // better than the alternative.
     cap->context_switch = 0;
     
-    /* put the thread back on the run queue.  Then, if we're ready to
-     * GC, check whether this is the last task to stop.  If so, wake
-     * up the GC thread.  getThread will block during a GC until the
-     * GC is finished.
-     */
-#ifdef DEBUG
-    if (t->what_next != prev_what_next) {
-	debugTrace(DEBUG_sched,
-		   "--<< thread %ld (%s) stopped to switch evaluators", 
-		   (long)t->id, what_next_strs[t->what_next]);
-    }
-#endif
-    
     IF_DEBUG(sanity,
 	     //debugBelch("&& Doing sanity check on yielding TSO %ld.", t->id);
 	     checkTSO(t));
-    ASSERT(t->_link == END_TSO_QUEUE);
-    
-    // Shortcut if we're just switching evaluators: don't bother
-    // doing stack squeezing (which can be expensive), just run the
-    // thread.
-    if (t->what_next != prev_what_next) {
-	return rtsTrue;
-    }
 
     addToRunQueue(cap,t);
 
@@ -1285,7 +1282,7 @@ scheduleHandleThreadFinished (Capability *cap STG_UNUSED, Task *task, StgTSO *t)
 
       if (t->bound) {
 
-	  if (t->bound != task) {
+	  if (t->bound != task->incall) {
 #if !defined(THREADED_RTS)
 	      // Must be a bound thread that is not the topmost one.  Leave
 	      // it on the run queue until the stack has unwound to the
@@ -1302,12 +1299,12 @@ scheduleHandleThreadFinished (Capability *cap STG_UNUSED, Task *task, StgTSO *t)
 #endif
 	  }
 
-	  ASSERT(task->tso == t);
+	  ASSERT(task->incall->tso == t);
 
 	  if (t->what_next == ThreadComplete) {
 	      if (task->ret) {
 		  // NOTE: return val is tso->sp[1] (see StgStartup.hc)
-		  *(task->ret) = (StgClosure *)task->tso->sp[1]; 
+		  *(task->ret) = (StgClosure *)task->incall->tso->sp[1]; 
 	      }
 	      task->stat = Success;
 	  } else {
@@ -1325,8 +1322,19 @@ scheduleHandleThreadFinished (Capability *cap STG_UNUSED, Task *task, StgTSO *t)
 	      }
 	  }
 #ifdef DEBUG
-	  removeThreadLabel((StgWord)task->tso->id);
+	  removeThreadLabel((StgWord)task->incall->tso->id);
 #endif
+
+          // We no longer consider this thread and task to be bound to
+          // each other.  The TSO lives on until it is GC'd, but the
+          // task is about to be released by the caller, and we don't
+          // want anyone following the pointer from the TSO to the
+          // defunct task (which might have already been
+          // re-used). This was a real bug: the GC updated
+          // tso->bound->tso which lead to a deadlock.
+          t->bound = NULL;
+          task->incall->tso = NULL;
+
 	  return rtsTrue; // tells schedule() to return
       }
 
@@ -1563,7 +1571,6 @@ forkProcess(HsStablePtr *entry
            )
 {
 #ifdef FORKPROCESS_PRIMOP_SUPPORTED
-    Task *task;
     pid_t pid;
     StgTSO* t,*next;
     Capability *cap;
@@ -1625,6 +1632,13 @@ forkProcess(HsStablePtr *entry
 		// exception, but we do want to raiseAsync() because these
 		// threads may be evaluating thunks that we need later.
 		deleteThread_(cap,t);
+
+                // stop the GC from updating the InCall to point to
+                // the TSO.  This is only necessary because the
+                // OSThread bound to the TSO has been killed, and
+                // won't get a chance to exit in the usual way (see
+                // also scheduleHandleThreadFinished).
+                t->bound = NULL;
 	    }
           }
 	}
@@ -1638,7 +1652,7 @@ forkProcess(HsStablePtr *entry
 
 	// Any suspended C-calling Tasks are no more, their OS threads
 	// don't exist now:
-	cap->suspended_ccalling_tasks = NULL;
+	cap->suspended_ccalls = NULL;
 
 	// Empty the threads lists.  Otherwise, the garbage
 	// collector may attempt to resurrect some of these threads.
@@ -1646,17 +1660,7 @@ forkProcess(HsStablePtr *entry
             all_steps[s].threads = END_TSO_QUEUE;
         }
 
-	// Wipe the task list, except the current Task.
-	ACQUIRE_LOCK(&sched_mutex);
-	for (task = all_tasks; task != NULL; task=task->all_link) {
-	    if (task != cap->running_task) {
-#if defined(THREADED_RTS)
-                initMutex(&task->lock); // see #1391
-#endif
-		discardTask(task);
-	    }
-	}
-	RELEASE_LOCK(&sched_mutex);
+        discardTasksExcept(cap->running_task);
 
 #if defined(THREADED_RTS)
 	// Wipe our spare workers list, they no longer exist.  New
@@ -1724,35 +1728,41 @@ deleteAllThreads ( Capability *cap )
 }
 
 /* -----------------------------------------------------------------------------
-   Managing the suspended_ccalling_tasks list.
+   Managing the suspended_ccalls list.
    Locks required: sched_mutex
    -------------------------------------------------------------------------- */
 
 STATIC_INLINE void
 suspendTask (Capability *cap, Task *task)
 {
-    ASSERT(task->next == NULL && task->prev == NULL);
-    task->next = cap->suspended_ccalling_tasks;
-    task->prev = NULL;
-    if (cap->suspended_ccalling_tasks) {
-	cap->suspended_ccalling_tasks->prev = task;
+    InCall *incall;
+    
+    incall = task->incall;
+    ASSERT(incall->next == NULL && incall->prev == NULL);
+    incall->next = cap->suspended_ccalls;
+    incall->prev = NULL;
+    if (cap->suspended_ccalls) {
+	cap->suspended_ccalls->prev = incall;
     }
-    cap->suspended_ccalling_tasks = task;
+    cap->suspended_ccalls = incall;
 }
 
 STATIC_INLINE void
 recoverSuspendedTask (Capability *cap, Task *task)
 {
-    if (task->prev) {
-	task->prev->next = task->next;
+    InCall *incall;
+
+    incall = task->incall;
+    if (incall->prev) {
+	incall->prev->next = incall->next;
     } else {
-	ASSERT(cap->suspended_ccalling_tasks == task);
-	cap->suspended_ccalling_tasks = task->next;
+	ASSERT(cap->suspended_ccalls == incall);
+	cap->suspended_ccalls = incall->next;
     }
-    if (task->next) {
-	task->next->prev = task->prev;
+    if (incall->next) {
+	incall->next->prev = incall->prev;
     }
-    task->next = task->prev = NULL;
+    incall->next = incall->prev = NULL;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1809,7 +1819,8 @@ suspendThread (StgRegTable *reg)
   }
 
   // Hand back capability
-  task->suspended_tso = tso;
+  task->incall->suspended_tso = tso;
+  task->incall->suspended_cap = cap;
 
   ACQUIRE_LOCK(&cap->lock);
 
@@ -1830,6 +1841,7 @@ StgRegTable *
 resumeThread (void *task_)
 {
     StgTSO *tso;
+    InCall *incall;
     Capability *cap;
     Task *task = task_;
     int saved_errno;
@@ -1842,18 +1854,22 @@ resumeThread (void *task_)
     saved_winerror = GetLastError();
 #endif
 
-    cap = task->cap;
+    incall = task->incall;
+    cap = incall->suspended_cap;
+    task->cap = cap;
+
     // Wait for permission to re-enter the RTS with the result.
     waitForReturnCapability(&cap,task);
     // we might be on a different capability now... but if so, our
-    // entry on the suspended_ccalling_tasks list will also have been
+    // entry on the suspended_ccalls list will also have been
     // migrated.
 
     // Remove the thread from the suspended list
     recoverSuspendedTask(cap,task);
 
-    tso = task->suspended_tso;
-    task->suspended_tso = NULL;
+    tso = incall->suspended_tso;
+    incall->suspended_tso = NULL;
+    incall->suspended_cap = NULL;
     tso->_link = END_TSO_QUEUE; // no write barrier reqd
 
     traceSchedEvent(cap, EVENT_RUN_THREAD, tso, tso->what_next);
@@ -1924,29 +1940,31 @@ Capability *
 scheduleWaitThread (StgTSO* tso, /*[out]*/HaskellObj* ret, Capability *cap)
 {
     Task *task;
+    StgThreadID id;
 
     // We already created/initialised the Task
     task = cap->running_task;
 
     // This TSO is now a bound thread; make the Task and TSO
     // point to each other.
-    tso->bound = task;
+    tso->bound = task->incall;
     tso->cap = cap;
 
-    task->tso = tso;
+    task->incall->tso = tso;
     task->ret = ret;
     task->stat = NoStatus;
 
     appendToRunQueue(cap,tso);
 
-    debugTrace(DEBUG_sched, "new bound thread (%lu)", (unsigned long)tso->id);
+    id = tso->id;
+    debugTrace(DEBUG_sched, "new bound thread (%lu)", (unsigned long)id);
 
     cap = schedule(cap,task);
 
     ASSERT(task->stat != NoStatus);
     ASSERT_FULL_CAPABILITY_INVARIANTS(cap,task);
 
-    debugTrace(DEBUG_sched, "bound thread (%lu) finished", (unsigned long)task->tso->id);
+    debugTrace(DEBUG_sched, "bound thread (%lu) finished", (unsigned long)id);
     return cap;
 }
 
@@ -1955,23 +1973,8 @@ scheduleWaitThread (StgTSO* tso, /*[out]*/HaskellObj* ret, Capability *cap)
  * ------------------------------------------------------------------------- */
 
 #if defined(THREADED_RTS)
-void OSThreadProcAttr
-workerStart(Task *task)
+void scheduleWorker (Capability *cap, Task *task)
 {
-    Capability *cap;
-
-    // See startWorkerTask().
-    ACQUIRE_LOCK(&task->lock);
-    cap = task->cap;
-    RELEASE_LOCK(&task->lock);
-
-    if (RtsFlags.ParFlags.setAffinity) {
-        setThreadAffinity(cap->no, n_capabilities);
-    }
-
-    // set the thread-local pointer to the Task:
-    taskEnter(task);
-
     // schedule() runs without a lock.
     cap = schedule(cap,task);
 
@@ -2037,6 +2040,8 @@ initScheduler(void)
   initSparkPools();
 #endif
 
+  RELEASE_LOCK(&sched_mutex);
+
 #if defined(THREADED_RTS)
   /*
    * Eagerly start one worker to run each Capability, except for
@@ -2050,13 +2055,11 @@ initScheduler(void)
       for (i = 1; i < n_capabilities; i++) {
 	  cap = &capabilities[i];
 	  ACQUIRE_LOCK(&cap->lock);
-	  startWorkerTask(cap, workerStart);
+	  startWorkerTask(cap);
 	  RELEASE_LOCK(&cap->lock);
       }
   }
 #endif
-
-  RELEASE_LOCK(&sched_mutex);
 }
 
 void
@@ -2076,7 +2079,8 @@ exitScheduler(
     if (sched_state < SCHED_SHUTTING_DOWN) {
 	sched_state = SCHED_INTERRUPTING;
         waitForReturnCapability(&task->cap,task);
-	scheduleDoGC(task->cap,task,rtsFalse);    
+	scheduleDoGC(task->cap,task,rtsFalse);
+        ASSERT(task->incall->tso == NULL);
         releaseCapability(task->cap);
     }
     sched_state = SCHED_SHUTTING_DOWN;
@@ -2086,6 +2090,7 @@ exitScheduler(
 	nat i;
 	
 	for (i = 0; i < n_capabilities; i++) {
+            ASSERT(task->incall->tso == NULL);
 	    shutdownCapability(&capabilities[i], task, wait_foreign);
 	}
 	boundTaskExiting(task);
@@ -2133,7 +2138,7 @@ performGC_(rtsBool force_major)
 
     // We must grab a new Task here, because the existing Task may be
     // associated with a particular Capability, and chained onto the 
-    // suspended_ccalling_tasks queue.
+    // suspended_ccalls queue.
     task = newBoundTask();
 
     waitForReturnCapability(&task->cap,task);
@@ -2333,8 +2338,8 @@ threadStackUnderflow (Task *task STG_UNUSED, StgTSO *tso)
 
     // The TSO attached to this Task may have moved, so update the
     // pointer to it.
-    if (task->tso == tso) {
-        task->tso = new_tso;
+    if (task->incall->tso == tso) {
+        task->incall->tso = new_tso;
     }
 
     unlockTSO(new_tso);

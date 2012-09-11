@@ -1268,6 +1268,11 @@ Optional Features:
   --enable-FEATURE[=ARG]  include FEATURE [ARG=yes]
   --disable-largefile     omit support for large files
 
+Optional Packages:
+  --with-PACKAGE[=ARG]    use PACKAGE [ARG=yes]
+  --without-PACKAGE       do not use PACKAGE (same as --with-PACKAGE=no)
+C compiler
+
 Some influential environment variables:
   CC          C compiler command
   CFLAGS      C compiler flags
@@ -1713,10 +1718,12 @@ ac_compiler_gnu=$ac_cv_c_compiler_gnu
 # Safety check: Ensure that we are in the correct source directory.
 
 
-ac_config_headers="$ac_config_headers include/HsUnixConfig.h"
 
+# Check whether --with-cc was given.
+if test "${with_cc+set}" = set; then
+  withval=$with_cc; CC=$withval
+fi
 
-# Is this a Unix system?
 ac_ext=c
 ac_cpp='$CPP $CPPFLAGS'
 ac_compile='$CC -c $CFLAGS $CPPFLAGS conftest.$ac_ext >&5'
@@ -2636,6 +2643,11 @@ ac_compile='$CC -c $CFLAGS $CPPFLAGS conftest.$ac_ext >&5'
 ac_link='$CC -o conftest$ac_exeext $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS >&5'
 ac_compiler_gnu=$ac_cv_c_compiler_gnu
 
+
+ac_config_headers="$ac_config_headers include/HsUnixConfig.h"
+
+
+# Is this a Unix system?
 
 ac_ext=c
 ac_cpp='$CPP $CPPFLAGS'
@@ -5904,7 +5916,7 @@ _ACEOF
 cat confdefs.h >>conftest.$ac_ext
 cat >>conftest.$ac_ext <<_ACEOF
 /* end confdefs.h.  */
-#include </usr/include/unistd.h>
+#include <unistd.h>
 
 _ACEOF
 if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
@@ -5941,7 +5953,7 @@ _ACEOF
 cat confdefs.h >>conftest.$ac_ext
 cat >>conftest.$ac_ext <<_ACEOF
 /* end confdefs.h.  */
-#include </usr/include/stdlib.h>
+#include <stdlib.h>
 
 _ACEOF
 if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |

@@ -1,0 +1,21 @@
+
+readFail001.hs:25:9:
+    The fixity signature for `+#' lacks an accompanying binding
+
+readFail001.hs:38:47: Not in scope: type constructor or class `EqLeaf'
+
+readFail001.hs:38:58: Not in scope: type constructor or class `EqLeaf'
+
+readFail001.hs:87:10: Not in scope: `x'
+
+readFail001.hs:88:11: Not in scope: `x'
+
+readFail001.hs:94:18: Not in scope: `isSpace'
+
+readFail001.hs:95:12: Not in scope: `foo'
+
+readFail001.hs:107:29: Not in scope: data constructor `Foo'
+
+readFail001.hs:107:41: Not in scope: data constructor `Bar'
+
+readFail001.hs:112:22: Not in scope: type constructor or class `Foo'

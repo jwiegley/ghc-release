@@ -341,6 +341,22 @@ def c_src( opts ):
 
 # ----
 
+def pre_cmd( cmd ):
+    return lambda opts, c=cmd: _pre_cmd(opts, cmd)
+
+def _pre_cmd( opts, cmd ):
+    opts.pre_cmd = cmd
+
+# ----
+
+def clean_cmd( cmd ):
+    return lambda opts, c=cmd: _clean_cmd(opts, cmd)
+
+def _clean_cmd( opts, cmd ):
+    opts.clean_cmd = cmd
+
+# ----
+
 def cmd_prefix( prefix ):
     return lambda opts, p=prefix: _cmd_prefix(opts, prefix)
 
@@ -374,26 +390,20 @@ def _compose( opts, f, g ):
 # -----------------------------------------------------------------------------
 # The current directory of tests
 
-global testdir
-testdir = '.'
-
 def newTestDir( dir ):
-    global testdir, thisdir_testopts
-    testdir = dir
+    global thisdir_testopts
     # reset the options for this test directory
     thisdir_testopts = copy.copy(default_testopts)
-
-def getTestDir():
-    return testdir
+    thisdir_testopts.testdir = dir
 
 # -----------------------------------------------------------------------------
 # Actually doing tests
 
-# name  :: String
-# setup :: TestOpts -> IO ()  
-def test ( name, setup, func, args):
+allTests = []
+allTestNames = set([])
+
+def runTest (opts, name, setup, func, args):
     n = 1
-    opts = copy.copy(thisdir_testopts)
 
     if type(setup) is types.ListType:
        setup = composes(setup)
@@ -419,6 +429,17 @@ def test ( name, setup, func, args):
                 t.thread_pool.release()
     else:
         test_common_work (name, opts, func, args)
+
+# name  :: String
+# setup :: TestOpts -> IO ()  
+def test (name, setup, func, args):
+    global allTests
+    global allTestNames
+    if name in allTestNames:
+        framework_fail(name, 'duplicate', 'There are multiple tests with this name')
+    myTestOpts = copy.copy(thisdir_testopts)
+    allTests += [lambda : runTest(myTestOpts, name, setup, func, args)]
+    allTestNames.add(name)
 
 if config.use_threads:
     def test_common_thread(n, name, opts, func, args):
@@ -476,55 +497,75 @@ def test_common_work (name, opts, func, args):
         if way not in do_ways:
             skiptest (name,way)
 
-    clean(map (lambda suff: name + suff,
-              ['', '.exe', '.exe.manifest', '.genscript',
-               '.stderr.normalised',        '.stdout.normalised',
-               '.run.stderr',               '.run.stdout',
-               '.run.stderr.normalised',    '.run.stdout.normalised',
-               '.comp.stderr',              '.comp.stdout',
-               '.comp.stderr.normalised',   '.comp.stdout.normalised',
-               '.interp.stderr',            '.interp.stdout',
-               '.interp.stderr.normalised', '.interp.stdout.normalised',
-               '.stats',
-               '.hi', '.o', '.prof', '.exe.prof', '.hc', '_stub.h', '_stub.c',
-               '_stub.o', '.hp', '.exe.hp', '.ps', '.aux', '.hcr', '.eventlog']))
+    if getTestOpts().cleanup != '':
+        clean(map (lambda suff: name + suff,
+                  ['', '.exe', '.exe.manifest', '.genscript',
+                   '.stderr.normalised',        '.stdout.normalised',
+                   '.run.stderr',               '.run.stdout',
+                   '.run.stderr.normalised',    '.run.stdout.normalised',
+                   '.comp.stderr',              '.comp.stdout',
+                   '.comp.stderr.normalised',   '.comp.stdout.normalised',
+                   '.interp.stderr',            '.interp.stdout',
+                   '.interp.stderr.normalised', '.interp.stdout.normalised',
+                   '.stats',
+                   '.hi', '.o', '.prof', '.exe.prof', '.hc',
+                   '_stub.h', '_stub.c', '_stub.o',
+                   '.hp', '.exe.hp', '.ps', '.aux', '.hcr', '.eventlog']))
 
-    clean(getTestOpts().clean_files)
+        clean(getTestOpts().clean_files)
+
+        try:
+            cleanCmd = getTestOpts().clean_cmd
+            if cleanCmd != None:
+                result = runCmd('cd ' + getTestOpts().testdir + ' && ' + cleanCmd)
+                if result != 0:
+                    framework_fail(name, 'cleaning', 'clean-command failed: ' + str(result))
+        except e:
+            framework_fail(name, way, 'clean-command exception')
 
 def clean(names):
     clean_full_paths(map (lambda name: in_testdir(name), names))
 
-def clean_o_hi():
-    clean_full_paths(glob.glob(in_testdir('*.o')) + glob.glob(in_testdir('*.hi')))
-
 def clean_full_paths(names):
-    if getTestOpts().cleanup != '':
-        for name in names:
+    for name in names:
+        try:
+            # Remove files...
+            os.remove(name)
+        except OSError, e1:
             try:
-                # Remove files...
-                os.remove(name)
-            except OSError, e1:
-                try:
-                    # ... and empty directories
-                    os.rmdir(name)
-                except OSError, e2:
-                    # We don't want to fail here, but we do want to know
-                    # what went wrong, so print out the exceptions.
-                    # ENOENT isn't a problem, though, as we clean files
-                    # that don't necessarily exist.
-                    if e1.errno != errno.ENOENT:
-                        print e1
-                    if e2.errno != errno.ENOENT:
-                        print e2
+                # ... and empty directories
+                os.rmdir(name)
+            except OSError, e2:
+                # We don't want to fail here, but we do want to know
+                # what went wrong, so print out the exceptions.
+                # ENOENT isn't a problem, though, as we clean files
+                # that don't necessarily exist.
+                if e1.errno != errno.ENOENT:
+                    print e1
+                if e2.errno != errno.ENOENT:
+                    print e2
 
 def do_test(name, way, func, args):
     full_name = name + '(' + way + ')'
 
     try:
-        print '=====>', full_name
+        print '=====>', full_name, t.total_tests, 'of', len(allTests), \
+                        str([t.n_unexpected_passes,   \
+                             t.n_unexpected_failures, \
+                             t.n_framework_failures])
         
         if config.use_threads:
             t.lock.release()
+
+        try:
+            preCmd = getTestOpts().pre_cmd
+            if preCmd != None:
+                result = runCmd('cd ' + getTestOpts().testdir + ' && ' + preCmd)
+                if result != 0:
+                    framework_fail(name, way, 'pre-command failed: ' + str(result))
+        except e:
+            framework_fail(name, way, 'pre-command exception')
+
         try:
             result = apply(func, [name,way] + args)
         finally:
@@ -748,7 +789,7 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link ):
     if opts.compiler_stats_num_fields != []:
         extra_hc_opts += ' +RTS -V0 -t' + stats_file + ' --machine-readable -RTS'
 
-    cmd = 'cd ' + testdir + " && '" \
+    cmd = 'cd ' + getTestOpts().testdir + " && '" \
           + config.compiler + "' " \
           + join(config.compiler_always_flags,' ') + ' ' \
           + to_do + ' ' + srcname + ' ' \
@@ -819,7 +860,7 @@ def simple_run( name, way, prog, args ):
         stdin_comes_from = ''
     else:
         stdin_comes_from = ' <' + use_stdin
-    cmd = 'cd ' + testdir + ' && ' \
+    cmd = 'cd ' + getTestOpts().testdir + ' && ' \
 	    + prog + ' ' + args + ' '  \
         + my_rts_flags + ' '       \
         + stdin_comes_from         \
@@ -926,7 +967,7 @@ def interpreter_run( name, way, extra_hc_opts, compile_only, top_mod ):
         
     script.close()
 
-    cmd = 'cd ' + testdir + " && " + cmd_prefix + "'" \
+    cmd = 'cd ' + getTestOpts().testdir + " && " + cmd_prefix + "'" \
           + config.compiler + "' " \
           + join(config.compiler_always_flags,' ') + ' ' \
           + srcname + ' ' \
@@ -1015,7 +1056,7 @@ def extcore_run( name, way, extra_hc_opts, compile_only, top_mod ):
     else:
         to_do = ' --make ' + top_mod + ' ' 
 
-    cmd = 'cd ' + testdir + " && '" \
+    cmd = 'cd ' + getTestOpts().testdir + " && '" \
           + config.compiler + "' " \
           + join(config.compiler_always_flags,' ') + ' ' \
           + join(config.way_flags[way],' ') + ' ' \
@@ -1045,7 +1086,7 @@ def extcore_run( name, way, extra_hc_opts, compile_only, top_mod ):
         
     flags = join(filter(lambda f: f != '-fext-core',config.way_flags[way]),' ')
     
-    cmd = 'cd ' + testdir + " && '" \
+    cmd = 'cd ' + getTestOpts().testdir + " && '" \
           + config.compiler + "' " \
           + join(config.compiler_always_flags,' ') + ' ' \
           + to_compile + ' ' \
@@ -1132,7 +1173,7 @@ def write_file(file, str):
 def check_hp_ok(name):
 
     # do not qualify for hp2ps because we should be in the right directory
-    hp2psCmd = 'cd ' + testdir + ' && ' + config.hp2ps + ' ' + name 
+    hp2psCmd = "cd " + getTestOpts().testdir + " && '" + config.hp2ps + "' " + name
 
     hp2psResult = runCmdExitCode(hp2psCmd)
 
@@ -1358,7 +1399,7 @@ def add_hs_lhs_suffix(name):
         return add_suffix(name, 'hs')
 
 def in_testdir( name ):
-    return (testdir + '/' + name)
+    return (getTestOpts().testdir + '/' + name)
 
 def qualify( name, suff ):
     return in_testdir(add_suffix(name, suff))

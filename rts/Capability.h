@@ -59,7 +59,7 @@ struct Capability_ {
     // the suspended TSOs easily.  Hence, when migrating a Task from
     // the returning_tasks list, we must also migrate its entry from
     // this list.
-    Task *suspended_ccalling_tasks;
+    InCall *suspended_ccalls;
 
     // One mutable list per generation, so we don't need to take any
     // locks when updating an old-generation thunk.  This also lets us
@@ -294,7 +294,8 @@ recordMutableCap (StgClosure *p, Capability *cap, nat gen)
     bdescr *bd;
 
     // We must own this Capability in order to modify its mutable list.
-    ASSERT(cap->running_task == myTask());
+    //    ASSERT(cap->running_task == myTask());
+    // NO: assertion is violated by performPendingThrowTos()
     bd = cap->mut_lists[gen];
     if (bd->free >= bd->start + BLOCK_SIZE_W) {
 	bdescr *new_bd;

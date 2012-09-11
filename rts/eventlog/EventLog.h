@@ -33,7 +33,7 @@ void postSchedEvent(Capability *cap, EventTypeNum tag,
 
 void postMsg(char *msg, va_list ap);
 
-void postUserMsg(Capability *cap, char *msg);
+void postUserMsg(Capability *cap, char *msg, va_list ap);
 
 void postCapMsg(Capability *cap, char *msg, va_list ap);
 

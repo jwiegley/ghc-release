@@ -66,7 +66,8 @@ endif
 
 BINDIST_STAMPS = libffi/stamp.ffi.build libfii/stamp.ffi.configure
 
-INSTALL_HEADERS   += libffi/dist-install/build/ffi.h
+INSTALL_HEADERS   += libffi/dist-install/build/ffi.h \
+                     libffi/dist-install/build/ffitarget.h
 libffi_STATIC_LIB  = libffi/dist-install/build/libffi.a
 INSTALL_LIBS      += libffi/dist-install/build/libHSffi.a \
                      libffi/dist-install/build/libHSffi_p.a \
@@ -85,8 +86,7 @@ libffi_DYNAMIC_LIBS = $(libffi_HS_DYN_LIB)
 else
 libffi_DYNAMIC_PROG =
 libffi_DYNAMIC_LIBS = libffi/dist-install/build/libffi.so \
-                      libffi/dist-install/build/libffi.so.5 \
-                      libffi/dist-install/build/libffi.so.5.0.9
+                      libffi/dist-install/build/libffi.so.5
 endif
 
 ifeq "$(BuildSharedLibs)" "YES"
@@ -110,7 +110,7 @@ endif
 ifneq "$(BINDIST)" "YES"
 $(libffi_STAMP_CONFIGURE):
 	"$(RM)" $(RM_OPTS) -r $(LIBFFI_DIR) libffi/build
-	cd libffi && $(TAR) -zxf ../ghc-tarballs/libffi/libffi*.tar.gz
+	cat ghc-tarballs/libffi/libffi*.tar.gz | $(GZIP) -d | { cd libffi && $(TAR) -xf - ; }
 	mv libffi/libffi-* libffi/build
 	chmod +x libffi/ln
 	cd libffi/build && "$(PATCH)" -p1 < ../libffi.dllize-3.0.8.patch
@@ -149,6 +149,9 @@ $(libffi_STAMP_CONFIGURE):
 
 libffi/dist-install/build/ffi.h: $(libffi_STAMP_CONFIGURE) | $$(dir $$@)/.
 	"$(CP)" libffi/build/include/ffi.h $@
+
+libffi/dist-install/build/ffitarget.h: $(libffi_STAMP_CONFIGURE) | $$(dir $$@)/.
+	"$(CP)" libffi/build/include/ffitarget.h $@
 
 $(libffi_STAMP_BUILD): $(libffi_STAMP_CONFIGURE) | libffi/dist-install/build/.
 	$(MAKE) -C libffi/build MAKEFLAGS=

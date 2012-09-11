@@ -179,7 +179,7 @@ openFd :: FilePath
 openFd name how maybe_mode (OpenFileFlags appendFlag exclusiveFlag nocttyFlag
 				nonBlockFlag truncateFlag) = do
    withCString name $ \s -> do
-    fd <- throwErrnoPathIfMinus1 "openFd" name (c_open s all_flags mode_w)
+    fd <- throwErrnoPathIfMinus1Retry "openFd" name (c_open s all_flags mode_w)
     return (Fd fd)
   where
     all_flags  = creat .|. flags .|. open_mode
@@ -199,6 +199,22 @@ openFd name how maybe_mode (OpenFileFlags appendFlag exclusiveFlag nocttyFlag
 		   ReadOnly  -> (#const O_RDONLY)
 		   WriteOnly -> (#const O_WRONLY)
 		   ReadWrite -> (#const O_RDWR)
+
+    throwErrnoPathIfMinus1Retry :: Num a => String -> FilePath -> IO a -> IO a
+    throwErrnoPathIfMinus1Retry loc path f =
+      throwErrnoPathIfRetry (== -1) loc path f
+
+    throwErrnoPathIfRetry :: (a -> Bool) -> String -> FilePath -> IO a -> IO a
+    throwErrnoPathIfRetry pr loc path f =
+      do
+        res <- f
+        if pr res
+          then do
+            err <- getErrno
+            if err == eINTR
+              then throwErrnoPathIfRetry pr loc path f
+              else throwErrnoPath loc path
+          else return res
 
 foreign import ccall unsafe "__hscore_open"
    c_open :: CString -> CInt -> CMode -> IO CInt
@@ -238,7 +254,17 @@ fdToHandle :: Fd -> IO Handle
 
 #ifdef __GLASGOW_HASKELL__
 #if __GLASGOW_HASKELL__ >= 611
-handleToFd h = withHandle "handleToFd" h $ \ h_@Handle__{haType=_,..} -> do
+handleToFd h@(FileHandle _ m) = do
+  withHandle' "handleToFd" h m $ handleToFd' h
+handleToFd h@(DuplexHandle _ r w) = do
+  _ <- withHandle' "handleToFd" h r $ handleToFd' h
+  withHandle' "handleToFd" h w $ handleToFd' h
+  -- for a DuplexHandle, make sure we mark both sides as closed,
+  -- otherwise a finalizer will come along later and close the other
+  -- side. (#3914)
+
+handleToFd' :: Handle -> Handle__ -> IO (Handle__, Fd)
+handleToFd' h h_@Handle__{haType=_,..} = do
   case cast haDevice of
     Nothing -> ioError (ioeSetErrorString (mkIOError IllegalOperation
                                            "handleToFd" (Just h) Nothing) 

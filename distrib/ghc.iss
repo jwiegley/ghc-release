@@ -1,8 +1,8 @@
 
 [Setup]
 AppName=GHC
-AppVerName=GHC 6.12.1
-DefaultDirName={sd}\ghc\ghc-6.12.1
+AppVerName=GHC 6.12.2
+DefaultDirName={sd}\ghc\ghc-6.12.2
 UsePreviousAppDir=no
 DefaultGroupName=GHC
 UninstallDisplayIcon={app}\bin\ghci.exe
@@ -11,16 +11,17 @@ SolidCompression=yes
 PrivilegesRequired=none
 ChangesAssociations=yes
 ChangesEnvironment=yes
+LicenseFile=distrib/windows-installer-licences.txt
 
 
 [Files]
-Source: "bindistprep\ghc-6.12.1\*"; DestDir: "{app}"; Flags: recursesubdirs
+Source: "bindistprep\ghc-6.12.2\*"; DestDir: "{app}"; Flags: recursesubdirs
 
 [Icons]
-Name: "{group}\6.12.1\GHCi"; Filename: "{app}\bin\ghci.exe"
-Name: "{group}\6.12.1\GHC Documentation"; Filename: "{app}\doc\index.html"
-Name: "{group}\6.12.1\GHC Library Documentation"; Filename: "{app}\doc\libraries\index.html"
-Name: "{group}\6.12.1\GHC Flag Reference"; Filename: "{app}\doc\users_guide\flag-reference.html"
+Name: "{group}\6.12.2\GHCi"; Filename: "{app}\bin\ghci.exe"; WorkingDir: "{app}\bin"
+Name: "{group}\6.12.2\GHC Documentation"; Filename: "{app}\doc\html\index.html"
+Name: "{group}\6.12.2\GHC Library Documentation"; Filename: "{app}\doc\html\libraries\index.html"
+Name: "{group}\6.12.2\GHC Flag Reference"; Filename: "{app}\doc\html\users_guide\flag-reference.html"
 
 [Registry]
 ; set up icon associations
@@ -34,7 +35,7 @@ Root: HKCR; Subkey: "ghc_haskell\shell\open\command"; ValueType: string; ValueNa
 
 ; these flags were always set in the past, by the installer
 ; some programs may rely on them to find GHC
-Root: HKCU; Subkey: "Software\Haskell\GHC\ghc-6.12.1"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Haskell\GHC\ghc-6.12.2"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Haskell\GHC"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletevalue
 
 ; set the PATH variable, for both GHC and Cabal

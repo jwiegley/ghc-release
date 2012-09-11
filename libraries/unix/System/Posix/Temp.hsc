@@ -4,7 +4,7 @@
 -- Module      :  System.Posix.Temp
 -- Copyright   :  (c) Volker Stolz <vs@foldr.org>
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  vs@foldr.org
 -- Stability   :  provisional
 -- Portability :  non-portable (requires POSIX)
@@ -15,12 +15,12 @@
 
 module System.Posix.Temp (
 
-	mkstemp
+    mkstemp
 
 {- Not ported (yet?):
-	tmpfile: can we handle FILE*?
-	tmpnam: ISO C, should go in base?
-	tempname: dito
+    tmpfile: can we handle FILE*?
+    tmpnam: ISO C, should go in base?
+    tempname: dito
 -}
 
 ) where
@@ -33,9 +33,10 @@ import System.Posix.Types
 import Foreign.C
 
 -- |'mkstemp' - make a unique filename and open it for
--- reading\/writing (only safe on GHC & Hugs)
-
-mkstemp :: String -> IO (String, Handle)
+-- reading\/writing (only safe on GHC & Hugs).
+-- The returned 'FilePath' is the (possibly relative) path of
+-- the created file.
+mkstemp :: String -> IO (FilePath, Handle)
 mkstemp template = do
 #if defined(__GLASGOW_HASKELL__) || defined(__HUGS__)
   withCString template $ \ ptr -> do
