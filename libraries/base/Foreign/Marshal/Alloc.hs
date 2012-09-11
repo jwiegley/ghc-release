@@ -9,7 +9,29 @@
 -- Stability   :  provisional
 -- Portability :  portable
 --
--- Marshalling support: basic routines for memory allocation
+-- The module "Foreign.Marshal.Alloc" provides operations to allocate and
+-- deallocate blocks of raw memory (i.e., unstructured chunks of memory
+-- outside of the area maintained by the Haskell storage manager).  These
+-- memory blocks are commonly used to pass compound data structures to
+-- foreign functions or to provide space in which compound result values
+-- are obtained from foreign functions.
+-- 
+-- If any of the allocation functions fails, a value of 'nullPtr' is
+-- produced.  If 'free' or 'reallocBytes' is applied to a memory area
+-- that has been allocated with 'alloca' or 'allocaBytes', the
+-- behaviour is undefined.  Any further access to memory areas allocated with
+-- 'alloca' or 'allocaBytes', after the computation that was passed to
+-- the allocation function has terminated, leads to undefined behaviour.  Any
+-- further access to the memory area referenced by a pointer passed to
+-- 'realloc', 'reallocBytes', or 'free' entails undefined
+-- behaviour.
+-- 
+-- All storage allocated by functions that allocate based on a /size in bytes/
+-- must be sufficiently aligned for any of the basic foreign types
+-- that fits into the newly allocated storage. All storage allocated by
+-- functions that allocate based on a specific type must be sufficiently
+-- aligned for that type. Array allocation routines need to obey the same
+-- alignment constraints for each array element.
 --
 -----------------------------------------------------------------------------
 
@@ -18,6 +40,7 @@ module Foreign.Marshal.Alloc (
   -- ** Local allocation
   alloca,       -- :: Storable a =>        (Ptr a -> IO b) -> IO b
   allocaBytes,  -- ::               Int -> (Ptr a -> IO b) -> IO b
+  allocaBytesAligned,  -- ::        Int -> Int -> (Ptr a -> IO b) -> IO b
 
   -- ** Dynamic allocation
   malloc,       -- :: Storable a =>        IO (Ptr a)
@@ -45,7 +68,6 @@ import GHC.Real
 import GHC.Ptr
 import GHC.Err
 import GHC.Base
-import GHC.Num
 #elif defined(__NHC__)
 import NHC.FFI                  ( FinalizerPtr, CInt(..) )
 import IO                       ( bracket )
@@ -70,6 +92,7 @@ import Hugs.ForeignPtr          ( FinalizerPtr )
 -- The memory may be deallocated using 'free' or 'finalizerFree' when
 -- no longer required.
 --
+{-# INLINE malloc #-}
 malloc :: Storable a => IO (Ptr a)
 malloc  = doMalloc undefined
   where
@@ -93,6 +116,7 @@ mallocBytes size  = failWhenNULL "malloc" (_malloc (fromIntegral size))
 -- The memory is freed when @f@ terminates (either normally or via an
 -- exception), so the pointer passed to @f@ must /not/ be used after this.
 --
+{-# INLINE alloca #-}
 alloca :: Storable a => (Ptr a -> IO b) -> IO b
 alloca  = doAlloca undefined
   where

@@ -1,5 +1,5 @@
 Name: Cabal
-Version: 1.8.0.6
+Version: 1.10.0.0
 Copyright: 2003-2006, Isaac Jones
            2005-2009, Duncan Coutts
 License: BSD3
@@ -18,6 +18,7 @@ Description:
         The Haskell Cabal is part of a larger infrastructure for distributing,
         organizing, and cataloging Haskell libraries and tools.
 Category: Distribution
+cabal-version: >=1.6
 Build-Type: Custom
 -- Even though we do use the default Setup.lhs it's vital to bootstrapping
 -- that we build Setup.lhs using our own local Cabal source code.
@@ -29,11 +30,6 @@ source-repository head
   type:     darcs
   location: http://darcs.haskell.org/cabal/
 
-source-repository this
-  type:     darcs
-  location: http://darcs.haskell.org/cabal-branches/cabal-1.8/
-  tag: 1.8.0.6
-
 Flag base4
     Description: Choose the even newer, even smaller, split-up base package.
 
@@ -41,15 +37,15 @@ Flag base3
     Description: Choose the new smaller, split-up base package.
 
 Library
-  build-depends:   base       >= 1   && < 5,
-                   filepath   >= 1   && < 1.2
+  build-depends:   base       >= 2   && < 5,
+                   filepath   >= 1   && < 1.3
   if flag(base4) { build-depends: base >= 4 } else { build-depends: base < 4 }
   if flag(base3) { build-depends: base >= 3 } else { build-depends: base < 3 }
   if flag(base3)
-    Build-Depends: directory  >= 1   && < 1.1,
+    Build-Depends: directory  >= 1   && < 1.2,
                    process    >= 1   && < 1.1,
                    old-time   >= 1   && < 1.1,
-                   containers >= 0.1 && < 0.4,
+                   containers >= 0.1 && < 0.5,
                    array      >= 0.1 && < 0.4,
                    pretty     >= 1   && < 1.1
 
@@ -59,7 +55,6 @@ Library
   ghc-options: -Wall -fno-ignore-asserts
   if impl(ghc >= 6.8)
     ghc-options: -fwarn-tabs
-  cpp-options: "-DCABAL_VERSION=1,8,0,6"
   nhc98-Options: -K4M
 
   Exposed-Modules:
@@ -107,9 +102,12 @@ Library
         Distribution.Simple.Register,
         Distribution.Simple.Setup,
         Distribution.Simple.SrcDist,
+        Distribution.Simple.Test,
+        Distribution.Simple.UHC,
         Distribution.Simple.UserHooks,
         Distribution.Simple.Utils,
         Distribution.System,
+        Distribution.TestSuite,
         Distribution.Text,
         Distribution.Verbosity,
         Distribution.Version,
@@ -122,6 +120,7 @@ Library
         Distribution.Compat.CopyFile,
         Distribution.Compat.TempFile,
         Distribution.Simple.GHC.IPI641,
-        Distribution.Simple.GHC.IPI642
+        Distribution.Simple.GHC.IPI642,
+        Paths_Cabal
 
   Extensions: CPP

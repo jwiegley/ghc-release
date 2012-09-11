@@ -9,10 +9,11 @@
 // external headers
 #include "Rts.h"
 
-#ifdef TRACING
-
 // internal headers
 #include "Trace.h"
+
+#ifdef TRACING
+
 #include "GetTime.h"
 #include "Stats.h"
 #include "eventlog/EventLog.h"
@@ -58,17 +59,11 @@ void initTracing (void)
     initMutex(&trace_utx);
 #endif
 
-#define TRACE_FLAG(name, class) \
-    class = RtsFlags.TraceFlags.name ? 1 : 0;
-
-    TRACE_FLAG(scheduler, TRACE_sched);
-
 #ifdef DEBUG
 #define DEBUG_FLAG(name, class) \
     class = RtsFlags.DebugFlags.name ? 1 : 0;
 
     DEBUG_FLAG(scheduler,    DEBUG_sched);
-    DEBUG_FLAG(scheduler,    TRACE_sched); // -Ds enabled all sched events
 
     DEBUG_FLAG(interpreter,  DEBUG_interp);
     DEBUG_FLAG(weak,         DEBUG_weak);
@@ -84,6 +79,11 @@ void initTracing (void)
     DEBUG_FLAG(hpc,          DEBUG_hpc);
     DEBUG_FLAG(sparks,       DEBUG_sparks);
 #endif
+
+    // -Ds turns on scheduler tracing too
+    TRACE_sched =
+        RtsFlags.TraceFlags.scheduler ||
+        RtsFlags.DebugFlags.scheduler;
 
     eventlog_enabled = RtsFlags.TraceFlags.tracing == TRACE_EVENTLOG;
 
@@ -194,8 +194,17 @@ static void traceSchedEvent_stderr (Capability *cap, EventTypeNum tag,
     case EVENT_GC_END:          // (cap)
         debugBelch("cap %d: finished GC\n", cap->no);
         break;
+    case EVENT_GC_IDLE:        // (cap)
+        debugBelch("cap %d: GC idle\n", cap->no);
+        break;
+    case EVENT_GC_WORK:          // (cap)
+        debugBelch("cap %d: GC working\n", cap->no);
+        break;
+    case EVENT_GC_DONE:          // (cap)
+        debugBelch("cap %d: GC done\n", cap->no);
+        break;
     default:
-        debugBelch("cap %2d: thread %lu: event %d\n\n", 
+        debugBelch("cap %d: thread %lu: event %d\n\n", 
                    cap->no, (lnat)tso->id, tag);
         break;
     }
@@ -217,13 +226,25 @@ void traceSchedEvent_ (Capability *cap, EventTypeNum tag,
     }
 }
 
+void traceEvent_ (Capability *cap, EventTypeNum tag)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        traceSchedEvent_stderr(cap, tag, 0, 0);
+    } else
+#endif
+    {
+        postEvent(cap,tag);
+    }
+}
+
 #ifdef DEBUG
 static void traceCap_stderr(Capability *cap, char *msg, va_list ap)
 {
     ACQUIRE_LOCK(&trace_utx);
 
     tracePreface();
-    debugBelch("cap %2d: ", cap->no);
+    debugBelch("cap %d: ", cap->no);
     vdebugBelch(msg,ap);
     debugBelch("\n");
 
@@ -293,6 +314,7 @@ static void traceFormatUserMsg(Capability *cap, char *msg, ...)
             postUserMsg(cap, msg, ap);
         }
     }
+    dtraceUserMsg(cap->no, msg);
 }
 
 void traceUserMsg(Capability *cap, char *msg)
@@ -333,3 +355,15 @@ void traceEnd (void)
 #endif /* DEBUG */
 
 #endif /* TRACING */
+
+// If DTRACE is enabled, but neither DEBUG nor TRACING, we need a C land
+// wrapper for the user-msg probe (as we can't expand that in PrimOps.cmm)
+//
+#if !defined(DEBUG) && !defined(TRACING) && defined(DTRACE)
+
+void dtraceUserMsgWrapper(Capability *cap, char *msg)
+{
+    dtraceUserMsg(cap->no, msg);
+}
+
+#endif /* !defined(DEBUG) && !defined(TRACING) && defined(DTRACE) */

@@ -53,7 +53,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -}
 module Distribution.Simple.Configure (configure,
                                       writePersistBuildConfig,
                                       getPersistBuildConfig,
-                                      checkPersistBuildConfig,
+                                      checkPersistBuildConfigOutdated,
                                       maybeGetPersistBuildConfig,
                                       localBuildInfoFile,
                                       getInstalledPackages,
@@ -66,7 +66,8 @@ module Distribution.Simple.Configure (configure,
 
 import Distribution.Simple.Compiler
     ( CompilerFlavor(..), Compiler(compilerId), compilerFlavor, compilerVersion
-    , showCompilerId, unsupportedExtensions, PackageDB(..), PackageDBStack )
+    , showCompilerId, unsupportedLanguages, unsupportedExtensions
+    , PackageDB(..), PackageDBStack )
 import Distribution.Package
     ( PackageName(PackageName), PackageIdentifier(PackageIdentifier), PackageId
     , packageName, packageVersion, Package(..)
@@ -78,12 +79,12 @@ import Distribution.InstalledPackageInfo as Installed
 import qualified Distribution.Simple.PackageIndex as PackageIndex
 import Distribution.Simple.PackageIndex (PackageIndex)
 import Distribution.PackageDescription as PD
-    ( PackageDescription(..), GenericPackageDescription(..)
-    , Library(..), hasLibs, Executable(..), BuildInfo(..)
+    ( PackageDescription(..), specVersion, GenericPackageDescription(..)
+    , Library(..), hasLibs, Executable(..), BuildInfo(..), allExtensions
     , HookedBuildInfo, updatePackageDescription, allBuildInfo
-    , FlagName(..) )
+    , FlagName(..), TestSuite(..) )
 import Distribution.PackageDescription.Configuration
-    ( finalizePackageDescription )
+    ( finalizePackageDescription, flattenPackageDescription )
 import Distribution.PackageDescription.Check
     ( PackageCheck(..), checkPackage, checkPackageFiles )
 import Distribution.Simple.Program
@@ -91,7 +92,7 @@ import Distribution.Simple.Program
     , ProgramConfiguration, defaultProgramConfiguration
     , configureAllKnownPrograms, knownPrograms, lookupKnownProgram
     , userSpecifyArgss, userSpecifyPaths
-    , lookupProgram, requireProgram, requireProgramVersion
+    , requireProgram, requireProgramVersion
     , pkgConfigProgram, gccProgram, rawSystemProgramStdoutConf )
 import Distribution.Simple.Setup
     ( ConfigFlags(..), CopyDest(..), fromFlag, fromFlagOrDefault, flagToMaybe )
@@ -99,18 +100,18 @@ import Distribution.Simple.InstallDirs
     ( InstallDirs(..), defaultInstallDirs, combineInstallDirs )
 import Distribution.Simple.LocalBuildInfo
     ( LocalBuildInfo(..), ComponentLocalBuildInfo(..)
-    , absoluteInstallDirs, prefixRelativeInstallDirs )
+    , absoluteInstallDirs, prefixRelativeInstallDirs, inplacePackageId )
+import Distribution.Simple.BuildPaths
+    ( autogenModulesDir )
 import Distribution.Simple.Utils
     ( die, warn, info, setupMessage, createDirectoryIfMissingVerbose
-    , intercalate, cabalVersion, cabalBootstrapping
+    , intercalate, cabalVersion
     , withFileContents, writeFileAtomic 
     , withTempFile )
 import Distribution.System
     ( OS(..), buildOS, buildPlatform )
 import Distribution.Version
-    ( Version(..), anyVersion, orLaterVersion, withinRange
-    , isSpecificVersion, isAnyVersion
-    , LowerBound(..), asVersionIntervals )
+         ( Version(..), anyVersion, orLaterVersion, withinRange, isAnyVersion )
 import Distribution.Verbosity
     ( Verbosity, lessVerbose )
 
@@ -119,13 +120,14 @@ import qualified Distribution.Simple.JHC  as JHC
 import qualified Distribution.Simple.LHC  as LHC
 import qualified Distribution.Simple.NHC  as NHC
 import qualified Distribution.Simple.Hugs as Hugs
+import qualified Distribution.Simple.UHC  as UHC
 
 import Control.Monad
     ( when, unless, foldM, filterM )
 import Data.List
     ( nub, partition, isPrefixOf, inits )
 import Data.Maybe
-    ( fromMaybe, isNothing )
+         ( isNothing, catMaybes )
 import Data.Monoid
     ( Monoid(..) )
 import System.Directory
@@ -221,9 +223,7 @@ showHeader pkgid =
   where
 
 currentCabalId :: PackageIdentifier
-currentCabalId = PackageIdentifier (PackageName "Cabal") currentVersion
-  where currentVersion | cabalBootstrapping = Version [0] []
-                       | otherwise          = cabalVersion
+currentCabalId = PackageIdentifier (PackageName "Cabal") cabalVersion
 
 currentCompilerId :: PackageIdentifier
 currentCompilerId = PackageIdentifier (PackageName System.Info.compilerName)
@@ -244,12 +244,11 @@ parseHeader header = case words header of
 
 -- |Check that localBuildInfoFile is up-to-date with respect to the
 -- .cabal file.
-checkPersistBuildConfig :: FilePath -> FilePath -> IO ()
-checkPersistBuildConfig distPref pkg_descr_file = do
+checkPersistBuildConfigOutdated :: FilePath -> FilePath -> IO Bool
+checkPersistBuildConfigOutdated distPref pkg_descr_file = do
   t0 <- getModificationTime pkg_descr_file
   t1 <- getModificationTime $ localBuildInfoFile distPref
-  when (t0 > t1) $
-    die (pkg_descr_file ++ " has been changed, please re-configure.")
+  return (t0 > t1)
 
 -- |@dist\/setup-config@
 localBuildInfoFile :: FilePath -> FilePath
@@ -311,16 +310,20 @@ configure (pkg_descr0, pbi) cfg
                 Installed.sourcePackageId = pid
               }
             internalPackageSet = PackageIndex.fromList [internalPackage]
-        maybeInstalledPackageSet <- getInstalledPackages (lessVerbose verbosity) comp
+        installedPackageSet <- getInstalledPackages (lessVerbose verbosity) comp
                                       packageDbs programsConfig'
 
         let -- Constraint test function for the solver
-            dependencySatisfiable = case maybeInstalledPackageSet of
-              Nothing   -> const True -- we do not know what is available so
-                                      -- we pretend everything is available
-              Just pkgs -> not . null . PackageIndex.lookupDependency pkgs'
-                where
-                  pkgs' = PackageIndex.insert internalPackage pkgs
+            dependencySatisfiable =
+                not . null . PackageIndex.lookupDependency pkgs'
+              where
+                pkgs' = PackageIndex.insert internalPackage installedPackageSet
+            pkg_descr0'' =
+                --TODO: avoid disabling tests entirely, we otherwise cannot
+                -- perform semantic checks, see also checkPackageProblems
+                if fromFlag (configTests cfg)
+                    then pkg_descr0
+                    else pkg_descr0 { condTestSuites = [] }
 
         (pkg_descr0', flags) <-
                 case finalizePackageDescription
@@ -329,7 +332,7 @@ configure (pkg_descr0, pbi) cfg
                        Distribution.System.buildPlatform
                        (compilerId comp)
                        (configConstraints cfg)
-                       pkg_descr0
+                       pkg_descr0''
                 of Right r -> return r
                    Left missing ->
                        die $ "At least the following dependencies are missing:\n"
@@ -349,18 +352,7 @@ configure (pkg_descr0, pbi) cfg
         checkPackageProblems verbosity pkg_descr0
           (updatePackageDescription pbi pkg_descr)
 
-        let installedPackageSet = fromMaybe bogusPackageSet maybeInstalledPackageSet
-            -- FIXME: For Hugs, nhc98 and other compilers we do not know what
-            -- packages are already installed, so we just make some up, pretend
-            -- that they do exist and just hope for the best. We make them up
-            -- based on what other package the package we're currently building
-            -- happens to depend on. See 'inventBogusPackageInfo' below.
-            -- Let's hope they really are installed... :-)
-            bogusDependencies = map inventBogusPackageInfo
-                                    (buildDepends pkg_descr)
-            bogusPackageSet = PackageIndex.fromList bogusDependencies
-
-            selectDependencies =
+        let selectDependencies =
                 (\xs -> ([ x | Left x <- xs ], [ x | Right x <- xs ]))
               . map (selectDependency internalPackageSet installedPackageSet)
 
@@ -416,8 +408,15 @@ configure (pkg_descr0, pbi) cfg
         let installDirs = combineInstallDirs fromFlagOrDefault
                             defaultDirs (configInstallDirs cfg)
 
-        -- check extensions
-        let extlist = nub $ concatMap extensions (allBuildInfo pkg_descr)
+        -- check languages and extensions
+        let langlist = nub $ catMaybes $ map defaultLanguage (allBuildInfo pkg_descr)
+        let langs = unsupportedLanguages comp langlist
+        when (not (null langs)) $
+          die $ "The package " ++ display (packageId pkg_descr0)
+             ++ " requires the following languages which are not "
+             ++ "supported by " ++ display (compilerId comp) ++ ": "
+             ++ intercalate ", " (map display langs)
+        let extlist = nub $ concatMap allExtensions (allBuildInfo pkg_descr)
         let exts = unsupportedExtensions comp extlist
         when (not (null exts)) $
           die $ "The package " ++ display (packageId pkg_descr0)
@@ -450,6 +449,8 @@ configure (pkg_descr0, pbi) cfg
         -- versions of the same package.
         let configLib lib = configComponent (libBuildInfo lib)
             configExe exe = (exeName exe, configComponent(buildInfo exe))
+            configTest test = (testName test,
+                    configComponent(testBuildInfo test))
             configComponent bi = ComponentLocalBuildInfo {
               componentPackageDeps =
                 if newPackageDepsBehaviour pkg_descr'
@@ -467,6 +468,10 @@ configure (pkg_descr0, pbi) cfg
                 names = [ name | Dependency name _ <- targetBuildDepends bi ]
 
         let lbi = LocalBuildInfo{
+                    configFlags         = cfg,
+                    extraConfigArgs     = [],  -- Currently configure does not
+                                               -- take extra args, but if it
+                                               -- did they would go here.
                     installDirTemplates = installDirs,
                     compiler            = comp,
                     buildDir            = distPref </> "build",
@@ -475,6 +480,7 @@ configure (pkg_descr0, pbi) cfg
                                             (configScratchDir cfg),
                     libraryConfig       = configLib `fmap` library pkg_descr',
                     executableConfigs   = configExe `fmap` executables pkg_descr',
+                    testSuiteConfigs    = configTest `fmap` testSuites pkg_descr',
                     installedPkgs       = packageDependsIndex,
                     pkgDescrFile        = Nothing,
                     localPkgDescr       = pkg_descr',
@@ -531,24 +537,8 @@ configure (pkg_descr0, pbi) cfg
           in pkg_descr{ library     = modifyLib        `fmap` library pkg_descr
                       , executables = modifyExecutable  `map` executables pkg_descr}
 
--- Quick hack in 1.8 branch, it's done properly in HEAD
-inplacePackageId :: PackageId -> InstalledPackageId
-inplacePackageId pkgid = InstalledPackageId (display pkgid ++ "-inplace")
-
 -- -----------------------------------------------------------------------------
 -- Configuring package dependencies
-
--- |Converts build dependencies to a versioned dependency.  only sets
--- version information for exact versioned dependencies.
-inventBogusPackageInfo :: Dependency -> InstalledPackageInfo
-inventBogusPackageInfo (Dependency s vr) =
-  emptyInstalledPackageInfo {
-    Installed.sourcePackageId = case isSpecificVersion vr of
-      -- if they specify the exact version, use that:
-      Just v -> PackageIdentifier s v
-      -- otherwise, just set it to empty
-      Nothing -> PackageIdentifier s (Version [] [])
-  }
 
 reportProgram :: Verbosity -> Program -> Maybe ConfiguredProgram -> IO ()
 reportProgram verbosity prog Nothing
@@ -630,16 +620,18 @@ reportFailedDependencies failed =
 
 getInstalledPackages :: Verbosity -> Compiler
                      -> PackageDBStack -> ProgramConfiguration
-                     -> IO (Maybe PackageIndex)
+                     -> IO PackageIndex
 getInstalledPackages verbosity comp packageDBs progconf = do
   info verbosity "Reading installed packages..."
   case compilerFlavor comp of
-    GHC -> Just `fmap` GHC.getInstalledPackages verbosity packageDBs progconf
-    Hugs-> Just `fmap`Hugs.getInstalledPackages verbosity packageDBs progconf
-    JHC -> Just `fmap` JHC.getInstalledPackages verbosity packageDBs progconf
-    LHC -> Just `fmap` LHC.getInstalledPackages verbosity packageDBs progconf
-    NHC -> Just `fmap` NHC.getInstalledPackages verbosity packageDBs progconf
-    _   -> return Nothing
+    GHC -> GHC.getInstalledPackages verbosity packageDBs progconf
+    Hugs->Hugs.getInstalledPackages verbosity packageDBs progconf
+    JHC -> JHC.getInstalledPackages verbosity packageDBs progconf
+    LHC -> LHC.getInstalledPackages verbosity packageDBs progconf
+    NHC -> NHC.getInstalledPackages verbosity packageDBs progconf
+    UHC -> UHC.getInstalledPackages verbosity comp packageDBs progconf
+    flv -> die $ "don't know how to find the installed packages for "
+              ++ display flv
 
 -- | Currently the user interface specifies the package dbs to use with just a
 -- single valued option, a 'PackageDB'. However internally we represent the
@@ -664,13 +656,8 @@ newPackageDepsBehaviourMinVersion = Version { versionBranch = [1,7,1], versionTa
 -- specified is >= a certain minimum. Otherwise, for compatibility we use the
 -- old behaviour.
 newPackageDepsBehaviour :: PackageDescription -> Bool
-newPackageDepsBehaviour pkg_descr =
-   minVersionRequired >= newPackageDepsBehaviourMinVersion
-  where
-    minVersionRequired =
-      case asVersionIntervals (descCabalVersion pkg_descr) of
-        []                      -> Version [0] []
-        ((LowerBound v _, _):_) -> v
+newPackageDepsBehaviour pkg =
+   specVersion pkg >= newPackageDepsBehaviourMinVersion
 
 -- -----------------------------------------------------------------------------
 -- Configuring program dependencies
@@ -804,9 +791,15 @@ configCompiler (Just hcFlavor) hcPath hcPkg conf verbosity = do
                  LHC.configure  verbosity hcPath Nothing ghcConf
       Hugs -> Hugs.configure verbosity hcPath hcPkg conf
       NHC  -> NHC.configure  verbosity hcPath hcPkg conf
+      UHC  -> UHC.configure  verbosity hcPath hcPkg conf
       _    -> die "Unknown compiler"
 
 
+-- Try to build a test C program which includes every header and links every
+-- lib. If that fails, try to narrow it down by preprocessing (only) and linking
+-- with individual headers and libs.  If none is the obvious culprit then give a
+-- generic error message.
+-- TODO: produce a log file from the compiler errors, if any.
 checkForeignDeps :: PackageDescription -> LocalBuildInfo -> Verbosity -> IO ()
 checkForeignDeps pkg lbi verbosity = do
   ifBuildsWith allHeaders (commonCcArgs ++ makeLdArgs allLibs) -- I'm feeling lucky
@@ -822,22 +815,23 @@ checkForeignDeps pkg lbi verbosity = do
             ok <- builds (makeProgram headers) args
             if ok then success else failure
 
-        -- NOTE: if some package-local header has errors,
-        -- we will report that this header is missing.
-        -- Maybe additional tests for local headers are needed
-        -- for better diagnostics
         findOffendingHdr =
-            ifBuildsWith allHeaders cppArgs
+            ifBuildsWith allHeaders ccArgs
                          (return Nothing)
                          (go . tail . inits $ allHeaders)
             where
               go [] = return Nothing       -- cannot happen
-              go (hdrs:hdrsInits) = do
+              go (hdrs:hdrsInits) =
+                    -- Try just preprocessing first
                     ifBuildsWith hdrs cppArgs
-                                 (go hdrsInits)
-                                 (return . Just . last $ hdrs)
+                      -- If that works, try compiling too
+                      (ifBuildsWith hdrs ccArgs
+                        (go hdrsInits)
+                        (return . Just . Right . last $ hdrs))
+                      (return . Just . Left . last $ hdrs)
 
-              cppArgs = "-c":commonCcArgs -- don't try to link
+              cppArgs = "-E":commonCppArgs -- preprocess only
+              ccArgs  = "-c":commonCcArgs  -- don't try to link
 
         findMissingLibs = ifBuildsWith [] (makeLdArgs allLibs)
                                        (return [])
@@ -845,8 +839,8 @@ checkForeignDeps pkg lbi verbosity = do
 
         libExists lib = builds (makeProgram []) (makeLdArgs [lib])
 
-        commonCcArgs  = programArgs gccProg
-                     ++ hcDefines (compiler lbi)
+        commonCppArgs = hcDefines (compiler lbi)
+                     ++ [ "-I" ++ autogenModulesDir lbi ]
                      ++ [ "-I" ++ dir | dir <- collectField PD.includeDirs ]
                      ++ ["-I."]
                      ++ collectField PD.cppOptions
@@ -854,6 +848,12 @@ checkForeignDeps pkg lbi verbosity = do
                      ++ [ "-I" ++ dir
                         | dep <- deps
                         , dir <- Installed.includeDirs dep ]
+                     ++ [ opt
+                        | dep <- deps
+                        , opt <- Installed.ccOptions dep ]
+
+        commonCcArgs  = commonCppArgs
+                     ++ collectField PD.ccOptions
                      ++ [ opt
                         | dep <- deps
                         , opt <- Installed.ccOptions dep ]
@@ -872,7 +872,6 @@ checkForeignDeps pkg lbi verbosity = do
 
         collectField f = concatMap f allBi
         allBi = allBuildInfo pkg
-        Just gccProg = lookupProgram  gccProgram (withPrograms lbi)
         deps = PackageIndex.topologicalOrder (installedPkgs lbi)
 
         builds program args = do
@@ -888,34 +887,56 @@ checkForeignDeps pkg lbi verbosity = do
            `catchIO`   (\_ -> return False)
            `catchExit` (\_ -> return False)
 
-        explainErrors Nothing [] = return ()
-        explainErrors hdr libs   = die $ unlines $
-             (if plural then "Missing dependencies on foreign libraries:"
-                        else "Missing dependency on a foreign library:")
-           : case hdr of
-               Nothing -> []
-               Just h  -> ["* Missing header file: " ++ h ]
+        explainErrors Nothing [] = return () -- should be impossible!
+        explainErrors hdr libs = die $ unlines $
+             [ if plural
+                 then "Missing dependencies on foreign libraries:"
+                 else "Missing dependency on a foreign library:"
+             | missing ]
+          ++ case hdr of
+               Just (Left h) -> ["* Missing (or bad) header file: " ++ h ]
+               _             -> []
           ++ case libs of
                []    -> []
                [lib] -> ["* Missing C library: " ++ lib]
                _     -> ["* Missing C libraries: " ++ intercalate ", " libs]
-          ++ [if plural then messagePlural else messageSingular]
+          ++ [if plural then messagePlural else messageSingular | missing]
+          ++ case hdr of
+               Just (Left  _) -> [ headerCppMessage ]
+               Just (Right h) -> [ (if missing then "* " else "")
+                                   ++ "Bad header file: " ++ h
+                                 , headerCcMessage ]
+               _              -> []
+
           where
-            plural = length libs >= 2
-            messageSingular =
-                 "This problem can usually be solved by installing the system "
-              ++ "package that provides this library (you may need the "
-              ++ "\"-dev\" version). If the library is already installed "
-              ++ "but in a non-standard location then you can use the flags "
-              ++ "--extra-include-dirs= and --extra-lib-dirs= to specify "
-              ++ "where it is."
-            messagePlural =
-                 "This problem can usually be solved by installing the system "
-              ++ "packages that provide these libraries (you may need the "
-              ++ "\"-dev\" versions). If the libraries are already installed "
-              ++ "but in a non-standard location then you can use the flags "
-              ++ "--extra-include-dirs= and --extra-lib-dirs= to specify "
-              ++ "where they are."
+            plural  = length libs >= 2
+            -- Is there something missing? (as opposed to broken)
+            missing = not (null libs)
+                   || case hdr of Just (Left _) -> True; _ -> False
+
+        messageSingular =
+             "This problem can usually be solved by installing the system "
+          ++ "package that provides this library (you may need the "
+          ++ "\"-dev\" version). If the library is already installed "
+          ++ "but in a non-standard location then you can use the flags "
+          ++ "--extra-include-dirs= and --extra-lib-dirs= to specify "
+          ++ "where it is."
+        messagePlural =
+             "This problem can usually be solved by installing the system "
+          ++ "packages that provide these libraries (you may need the "
+          ++ "\"-dev\" versions). If the libraries are already installed "
+          ++ "but in a non-standard location then you can use the flags "
+          ++ "--extra-include-dirs= and --extra-lib-dirs= to specify "
+          ++ "where they are."
+        headerCppMessage =
+             "If the header file does exist, it may contain errors that "
+          ++ "are caught by the C compiler at the preprocessing stage. "
+          ++ "In this case you can re-run configure with the verbosity "
+          ++ "flag -v3 to see the error messages."
+        headerCcMessage =
+             "The header file contains a compile error. "
+          ++ "You can re-run configure with the verbosity flag "
+          ++ "-v3 to see the error messages from the C compiler."
 
         --FIXME: share this with the PreProcessor module
         hcDefines :: Compiler -> [String]
@@ -949,7 +970,7 @@ checkPackageProblems :: Verbosity
                      -> GenericPackageDescription
                      -> PackageDescription
                      -> IO ()
-checkPackageProblems verbosity gpkg pkg = do
+checkPackageProblems verbosity gpkg pkg0 = do
   ioChecks      <- checkPackageFiles pkg "."
   let pureChecks = checkPackage gpkg (Just pkg)
       errors   = [ e | PackageBuildImpossible e <- pureChecks ++ ioChecks ]
@@ -958,3 +979,16 @@ checkPackageProblems verbosity gpkg pkg = do
     then mapM_ (warn verbosity) warnings
     else do mapM_ (hPutStrLn stderr . ("Error: " ++)) errors
             exitWith (ExitFailure 1)
+  where
+    -- TODO: Sigh, this is a fairly unpleasent hack. The issue is that
+    -- we want to check test-suite sections even when tests are disabled.
+    -- When tests are disabled we have to exclude the test-suite sections
+    -- when resolving the conditionals. But the checks we do are done
+    -- on the post-resolved form! Ug. A better solution would be either
+    -- 1) to do the checks on the pre-resolved form
+    -- 2) to resolve in two steps: find a flag assignment, then apply it
+    --    that'd allow us to find the flag assingment ignoring tests
+    --    but then to apply it anyway.
+    -- In the meantime we stick the tests back in before checking by
+    -- flattening the pre-resovled form.
+    pkg = pkg0 { testSuites = testSuites (flattenPackageDescription gpkg) }

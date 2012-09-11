@@ -172,7 +172,7 @@ basicKnownKeyNames
 	newStablePtrName,
 
     -- GHC Extensions
-    groupWithName,
+        groupWithName,
 
 	-- Strings and lists
 	unpackCStringName, unpackCStringAppendName,
@@ -181,6 +181,8 @@ basicKnownKeyNames
 	-- List operations
 	concatName, filterName, mapName,
 	zipName, foldrName, buildName, augmentName, appendName,
+
+        dollarName,	    -- The ($) apply function
 
         -- Parallel array operations
 	nullPName, lengthPName, replicatePName,	singletonPName, mapPName,
@@ -234,7 +236,9 @@ genericTyConNames = [crossTyConName, plusTyConName, genUnitTyConName]
 pRELUDE :: Module
 pRELUDE		= mkBaseModule_ pRELUDE_NAME
 
-gHC_PRIM, gHC_TYPES, gHC_BOOL, gHC_UNIT, gHC_ORDERING, gHC_GENERICS, gHC_CLASSES, gHC_BASE, gHC_ENUM,
+gHC_PRIM, gHC_TYPES, gHC_BOOL, gHC_UNIT, gHC_ORDERING, gHC_GENERICS,
+    gHC_MAGIC,
+    gHC_CLASSES, gHC_BASE, gHC_ENUM,
     gHC_SHOW, gHC_READ, gHC_NUM, gHC_INTEGER, gHC_INTEGER_TYPE, gHC_LIST, gHC_PARR,
     gHC_TUPLE, dATA_TUPLE, dATA_EITHER, dATA_STRING, dATA_FOLDABLE, dATA_TRAVERSABLE,
     gHC_PACK, gHC_CONC, gHC_IO, gHC_IO_Exception,
@@ -242,12 +246,15 @@ gHC_PRIM, gHC_TYPES, gHC_BOOL, gHC_UNIT, gHC_ORDERING, gHC_GENERICS, gHC_CLASSES
     gHC_FLOAT, gHC_TOP_HANDLER, sYSTEM_IO, dYNAMIC, tYPEABLE, gENERICS,
     dOTNET, rEAD_PREC, lEX, gHC_INT, gHC_WORD, mONAD, mONAD_FIX, aRROW, cONTROL_APPLICATIVE,
     gHC_DESUGAR, rANDOM, gHC_EXTS, cONTROL_EXCEPTION_BASE :: Module
+
 gHC_PRIM	= mkPrimModule (fsLit "GHC.Prim")   -- Primitive types and values
 gHC_TYPES       = mkPrimModule (fsLit "GHC.Types")
 gHC_UNIT	= mkPrimModule (fsLit "GHC.Unit")
 gHC_BOOL	= mkPrimModule (fsLit "GHC.Bool")
 gHC_ORDERING	= mkPrimModule (fsLit "GHC.Ordering")
 gHC_GENERICS	= mkPrimModule (fsLit "GHC.Generics")
+gHC_MAGIC	= mkPrimModule (fsLit "GHC.Magic")
+
 gHC_CLASSES	= mkBaseModule (fsLit "GHC.Classes")
 gHC_BASE	= mkBaseModule (fsLit "GHC.Base")
 gHC_ENUM	= mkBaseModule (fsLit "GHC.Enum")
@@ -255,7 +262,7 @@ gHC_SHOW	= mkBaseModule (fsLit "GHC.Show")
 gHC_READ	= mkBaseModule (fsLit "GHC.Read")
 gHC_NUM		= mkBaseModule (fsLit "GHC.Num")
 gHC_INTEGER	= mkIntegerModule (fsLit "GHC.Integer")
-gHC_INTEGER_TYPE	= mkIntegerModule (fsLit "GHC.Integer.Type")
+gHC_INTEGER_TYPE= mkIntegerModule (fsLit "GHC.Integer.Type")
 gHC_LIST	= mkBaseModule (fsLit "GHC.List")
 gHC_PARR	= mkBaseModule (fsLit "GHC.PArr")
 gHC_TUPLE	= mkPrimModule (fsLit "GHC.Tuple")
@@ -283,7 +290,7 @@ tYPEABLE	= mkBaseModule (fsLit "Data.Typeable")
 gENERICS        = mkBaseModule (fsLit "Data.Data")
 dOTNET		= mkBaseModule (fsLit "GHC.Dotnet")
 rEAD_PREC	= mkBaseModule (fsLit "Text.ParserCombinators.ReadPrec")
-lEX		    = mkBaseModule (fsLit "Text.Read.Lex")
+lEX		= mkBaseModule (fsLit "Text.Read.Lex")
 gHC_INT		= mkBaseModule (fsLit "GHC.Int")
 gHC_WORD	= mkBaseModule (fsLit "GHC.Word")
 mONAD		= mkBaseModule (fsLit "Control.Monad")
@@ -562,7 +569,7 @@ stringTyConName         = tcQual  gHC_BASE (fsLit "String") stringTyConKey
 
 -- The 'inline' function
 inlineIdName :: Name
-inlineIdName	 	= varQual gHC_BASE (fsLit "inline") inlineIdKey
+inlineIdName	 	= varQual gHC_MAGIC (fsLit "inline") inlineIdKey
 
 -- Base classes (Eq, Ord, Functor)
 eqClassName, eqName, ordClassName, geName, functorClassName :: Name
@@ -594,14 +601,15 @@ groupWithName = varQual gHC_EXTS (fsLit "groupWith") groupWithIdKey
 fromStringName, otherwiseIdName, foldrName, buildName, augmentName,
     mapName, appendName, assertName,
     breakpointName, breakpointCondName, breakpointAutoName,
-    opaqueTyConName :: Name
+    dollarName, opaqueTyConName :: Name
 fromStringName = methName dATA_STRING (fsLit "fromString") fromStringClassOpKey
 otherwiseIdName   = varQual gHC_BASE (fsLit "otherwise")  otherwiseIdKey
 foldrName	  = varQual gHC_BASE (fsLit "foldr")      foldrIdKey
 buildName	  = varQual gHC_BASE (fsLit "build")      buildIdKey
 augmentName	  = varQual gHC_BASE (fsLit "augment")    augmentIdKey
-mapName       = varQual gHC_BASE (fsLit "map")        mapIdKey
+mapName           = varQual gHC_BASE (fsLit "map")        mapIdKey
 appendName	  = varQual gHC_BASE (fsLit "++")         appendIdKey
+dollarName	  = varQual gHC_BASE (fsLit "$")          dollarIdKey
 assertName        = varQual gHC_BASE (fsLit "assert")     assertIdKey
 breakpointName    = varQual gHC_BASE (fsLit "breakpoint") breakpointIdKey
 breakpointCondName= varQual gHC_BASE (fsLit "breakpointCond") breakpointCondIdKey
@@ -923,7 +931,8 @@ addrPrimTyConKey, arrayPrimTyConKey, boolTyConKey, byteArrayPrimTyConKey,
     listTyConKey, foreignObjPrimTyConKey, weakPrimTyConKey,
     mutableArrayPrimTyConKey, mutableByteArrayPrimTyConKey,
     orderingTyConKey, mVarPrimTyConKey, ratioTyConKey, rationalTyConKey,
-    realWorldTyConKey, stablePtrPrimTyConKey, stablePtrTyConKey :: Unique
+    realWorldTyConKey, stablePtrPrimTyConKey, stablePtrTyConKey,
+    anyTyConKey :: Unique
 addrPrimTyConKey			= mkPreludeTyConUnique	1
 arrayPrimTyConKey			= mkPreludeTyConUnique	3
 boolTyConKey				= mkPreludeTyConUnique	4
@@ -956,10 +965,7 @@ rationalTyConKey			= mkPreludeTyConUnique 33
 realWorldTyConKey			= mkPreludeTyConUnique 34
 stablePtrPrimTyConKey			= mkPreludeTyConUnique 35
 stablePtrTyConKey			= mkPreludeTyConUnique 36
-
-anyPrimTyConKey, anyPrimTyCon1Key :: Unique
-anyPrimTyConKey				= mkPreludeTyConUnique 37
-anyPrimTyCon1Key			= mkPreludeTyConUnique 38
+anyTyConKey				= mkPreludeTyConUnique 37
 
 statePrimTyConKey, stableNamePrimTyConKey, stableNameTyConKey,
     mutVarPrimTyConKey, ioTyConKey,
@@ -1026,7 +1032,8 @@ argTypeKindTyConKey                     = mkPreludeTyConUnique 91
 
 -- Coercion constructors
 symCoercionTyConKey, transCoercionTyConKey, leftCoercionTyConKey,
-    rightCoercionTyConKey, instCoercionTyConKey, unsafeCoercionTyConKey
+    rightCoercionTyConKey, instCoercionTyConKey, unsafeCoercionTyConKey,
+    csel1CoercionTyConKey, csel2CoercionTyConKey, cselRCoercionTyConKey
     :: Unique
 symCoercionTyConKey                     = mkPreludeTyConUnique 93
 transCoercionTyConKey                   = mkPreludeTyConUnique 94
@@ -1034,10 +1041,13 @@ leftCoercionTyConKey                    = mkPreludeTyConUnique 95
 rightCoercionTyConKey                   = mkPreludeTyConUnique 96
 instCoercionTyConKey                    = mkPreludeTyConUnique 97
 unsafeCoercionTyConKey                  = mkPreludeTyConUnique 98
+csel1CoercionTyConKey                   = mkPreludeTyConUnique 99
+csel2CoercionTyConKey                   = mkPreludeTyConUnique 100
+cselRCoercionTyConKey                   = mkPreludeTyConUnique 101
 
 unknownTyConKey, unknown1TyConKey, unknown2TyConKey, unknown3TyConKey,
     opaqueTyConKey :: Unique
-unknownTyConKey				= mkPreludeTyConUnique 99
+unknownTyConKey				= mkPreludeTyConUnique 129
 unknown1TyConKey			= mkPreludeTyConUnique 130
 unknown2TyConKey			= mkPreludeTyConUnique 131
 unknown3TyConKey			= mkPreludeTyConUnique 132
@@ -1103,7 +1113,7 @@ rightDataConKey				= mkPreludeDataConUnique 26
 
 \begin{code}
 absentErrorIdKey, augmentIdKey, appendIdKey, buildIdKey, errorIdKey,
-    foldlIdKey, foldrIdKey, recSelErrorIdKey,
+    foldlIdKey, foldrIdKey, recSelErrorIdKey, 
     integerMinusOneIdKey, integerPlusOneIdKey,
     integerPlusTwoIdKey, integerZeroIdKey,
     int2IntegerIdKey, seqIdKey, irrefutPatErrorIdKey, eqStringIdKey,
@@ -1192,9 +1202,10 @@ breakpointAutoJumpIdKey       = mkPreludeMiscIdUnique 67
 inlineIdKey :: Unique
 inlineIdKey		      = mkPreludeMiscIdUnique 68
 
-mapIdKey, groupWithIdKey :: Unique
-mapIdKey		      = mkPreludeMiscIdUnique 69
+mapIdKey, groupWithIdKey, dollarIdKey :: Unique
+mapIdKey	      = mkPreludeMiscIdUnique 69
 groupWithIdKey        = mkPreludeMiscIdUnique 70
+dollarIdKey           = mkPreludeMiscIdUnique 71
 
 -- Parallel array functions
 singletonPIdKey, nullPIdKey, lengthPIdKey, replicatePIdKey, mapPIdKey,
@@ -1298,6 +1309,13 @@ numericTyKeys =
 	, doubleTyConKey
 	, floatTyConKey
 	]
+
+kindKeys :: [Unique] 
+kindKeys = [ liftedTypeKindTyConKey
+	   , openTypeKindTyConKey
+	   , unliftedTypeKindTyConKey
+	   , ubxTupleKindTyConKey 
+	   , argTypeKindTyConKey ]
 \end{code}
 
 

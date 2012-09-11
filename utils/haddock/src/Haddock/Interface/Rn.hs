@@ -1,5 +1,4 @@
-
-module Haddock.Interface.Rn ( rnHsDoc, rnHaddockModInfo ) where
+module Haddock.Interface.Rn ( rnDoc, rnHaddockModInfo ) where
 
 import Haddock.Types
 
@@ -11,7 +10,7 @@ import Outputable  ( ppr, defaultUserStyle )
 
 rnHaddockModInfo :: GlobalRdrEnv -> HaddockModInfo RdrName -> HaddockModInfo Name
 rnHaddockModInfo gre (HaddockModInfo desc port stab maint) =
-  HaddockModInfo (fmap (rnHsDoc gre) desc) port stab maint
+  HaddockModInfo (fmap (rnDoc gre) desc) port stab maint
 
 ids2string :: [RdrName] -> String
 ids2string []    = []
@@ -20,8 +19,8 @@ ids2string (x:_) = show $ ppr x defaultUserStyle
 data Id x = Id {unId::x}
 instance Monad Id where (Id v)>>=f = f v; return = Id
 
-rnHsDoc :: GlobalRdrEnv -> HsDoc RdrName -> HsDoc Name
-rnHsDoc gre = unId . do_rn
+rnDoc :: GlobalRdrEnv -> Doc RdrName -> Doc Name
+rnDoc gre = unId . do_rn
   where
  do_rn doc_to_rn = case doc_to_rn of 
   
@@ -43,7 +42,7 @@ rnHsDoc gre = unId . do_rn
     let gres = concatMap (\rdrName ->
                  map gre_name (lookupGRE_RdrName rdrName gre)) choices
     case gres of
-      [] -> return (DocString (ids2string ids))
+      []   -> return (DocMonospaced (DocString (ids2string ids)))
       ids' -> return (DocIdentifier ids')
 
   DocModule str -> return (DocModule str)
@@ -80,3 +79,5 @@ rnHsDoc gre = unId . do_rn
   DocPic str -> return (DocPic str)
 
   DocAName str -> return (DocAName str)
+
+  DocExamples e -> return (DocExamples e)

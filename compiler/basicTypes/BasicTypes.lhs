@@ -14,12 +14,14 @@ types that
 \end{itemize}
 
 \begin{code}
+{-# LANGUAGE DeriveDataTypeable #-}
+
 module BasicTypes(
 	Version, bumpVersion, initialVersion,
 
 	Arity, 
 
-    FunctionOrData(..),
+        FunctionOrData(..),
 	
 	WarningTxt(..),
 
@@ -42,8 +44,9 @@ module BasicTypes(
 
 	TupCon(..), tupleParens,
 
-	OccInfo(..), seqOccInfo, isFragileOcc, isOneOcc, 
+	OccInfo(..), seqOccInfo, zapFragileOcc, isOneOcc, 
 	isDeadOcc, isLoopBreaker, isNonRuleLoopBreaker, isNoOcc,
+        nonRuleLoopBreaker,
 
 	InsideLam, insideLam, notInsideLam,
 	OneBranch, oneBranch, notOneBranch,
@@ -51,21 +54,29 @@ module BasicTypes(
 
         EP(..),
 
-	StrictnessMark(..), isMarkedUnboxed, isMarkedStrict,
+	HsBang(..), isBanged, isMarkedUnboxed, 
+        StrictnessMark(..), isMarkedStrict,
+
+	DefMethSpec(..),
 
 	CompilerPhase, 
-	Activation(..), isActive, isNeverActive, isAlwaysActive,
-        RuleMatchInfo(..), isConLike, isFunLike,
-        InlinePragma(..), defaultInlinePragma, isDefaultInlinePragma,
+	Activation(..), isActive, isNeverActive, isAlwaysActive, isEarlyActive,
+        RuleMatchInfo(..), isConLike, isFunLike, 
+        InlineSpec(..), 
+        InlinePragma(..), defaultInlinePragma, alwaysInlinePragma, 
+        neverInlinePragma, dfunInlinePragma, 
+	isDefaultInlinePragma, isInlinePragma, isInlinablePragma,
+        inlinePragmaSpec, inlinePragmaSat,
         inlinePragmaActivation, inlinePragmaRuleMatchInfo,
         setInlinePragmaActivation, setInlinePragmaRuleMatchInfo,
-	InlineSpec(..), defaultInlineSpec, alwaysInlineSpec, neverInlineSpec,
 
 	SuccessFlag(..), succeeded, failed, successIf
    ) where
 
 import FastString
 import Outputable
+
+import Data.Data hiding (Fixity)
 \end{code}
 
 %************************************************************************
@@ -86,7 +97,7 @@ type Arity = Int
 
 \begin{code}
 data FunctionOrData = IsFunction | IsData
-    deriving (Eq, Ord)
+    deriving (Eq, Ord, Data, Typeable)
 
 instance Outputable FunctionOrData where
     ppr IsFunction = text "(function)"
@@ -121,7 +132,7 @@ initialVersion = 1
 -- reason/explanation from a WARNING or DEPRECATED pragma
 data WarningTxt = WarningTxt [FastString]
                 | DeprecatedTxt [FastString]
-    deriving Eq
+    deriving (Eq, Data, Typeable)
 
 instance Outputable WarningTxt where
     ppr (WarningTxt    ws) = doubleQuotes (vcat (map ftext ws))
@@ -140,8 +151,9 @@ early in the hierarchy), but also in HsSyn.
 
 \begin{code}
 newtype IPName name = IPName name	-- ?x
-  deriving( Eq, Ord )	-- Ord is used in the IP name cache finite map
-			--	(used in HscTypes.OrigIParamCache)
+  deriving( Eq, Ord, Data, Typeable )
+  -- Ord is used in the IP name cache finite map
+  -- (used in HscTypes.OrigIParamCache)
 
 ipNameName :: IPName name -> name
 ipNameName (IPName n) = n
@@ -172,6 +184,7 @@ type RuleName = FastString
 \begin{code}
 ------------------------
 data Fixity = Fixity Int FixityDirection
+  deriving (Data, Typeable)
 
 instance Outputable Fixity where
     ppr (Fixity prec dir) = hcat [ppr dir, space, int prec]
@@ -181,7 +194,7 @@ instance Eq Fixity where		-- Used to determine if two fixities conflict
 
 ------------------------
 data FixityDirection = InfixL | InfixR | InfixN 
-		     deriving(Eq)
+		     deriving (Eq, Data, Typeable)
 
 instance Outputable FixityDirection where
     ppr InfixL = ptext (sLit "infixl")
@@ -262,7 +275,7 @@ instance Outputable TopLevelFlag where
 data Boxity
   = Boxed
   | Unboxed
-  deriving( Eq )
+  deriving( Eq, Data, Typeable )
 
 isBoxed :: Boxity -> Bool
 isBoxed Boxed   = True
@@ -279,7 +292,7 @@ isBoxed Unboxed = False
 \begin{code}
 data RecFlag = Recursive 
 	     | NonRecursive
-	     deriving( Eq )
+	     deriving( Eq, Data, Typeable )
 
 isRec :: RecFlag -> Bool
 isRec Recursive    = True
@@ -314,6 +327,7 @@ data OverlapFlag
 		--
 		-- Example: constraint (Foo [Int])
 		-- 	    instances  (Foo [Int])
+	
 		--		       (Foo [a])	OverlapOk
 		-- Since the second instance has the OverlapOk flag,
 		-- the first instance will be chosen (otherwise 
@@ -476,17 +490,20 @@ isNonRuleLoopBreaker :: OccInfo -> Bool
 isNonRuleLoopBreaker (IAmALoopBreaker False) = True   -- Loop-breaker that breaks a non-rule cycle
 isNonRuleLoopBreaker _                       = False
 
+nonRuleLoopBreaker :: OccInfo
+nonRuleLoopBreaker = IAmALoopBreaker False
+
 isDeadOcc :: OccInfo -> Bool
 isDeadOcc IAmDead = True
 isDeadOcc _       = False
 
 isOneOcc :: OccInfo -> Bool
-isOneOcc (OneOcc _ _ _) = True
-isOneOcc _              = False
+isOneOcc (OneOcc {}) = True
+isOneOcc _           = False
 
-isFragileOcc :: OccInfo -> Bool
-isFragileOcc (OneOcc _ _ _) = True
-isFragileOcc _              = False
+zapFragileOcc :: OccInfo -> OccInfo
+zapFragileOcc (OneOcc {}) = NoOccInfo
+zapFragileOcc occ         = occ
 \end{code}
 
 \begin{code}
@@ -511,7 +528,7 @@ instance Show OccInfo where
 
 %************************************************************************
 %*									*
-\subsection{Strictness indication}
+		Strictness indication
 %*									*
 %************************************************************************
 
@@ -519,26 +536,70 @@ The strictness annotations on types in data type declarations
 e.g. 	data T = MkT !Int !(Bool,Bool)
 
 \begin{code}
-data StrictnessMark	-- Used in interface decls only
-   = MarkedStrict	
-   | MarkedUnboxed	
-   | NotMarkedStrict	
-   deriving( Eq )
+-------------------------
+-- HsBang describes what the *programmer* wrote
+-- This info is retained in the DataCon.dcStrictMarks field
+data HsBang = HsNoBang	
 
-isMarkedUnboxed :: StrictnessMark -> Bool
-isMarkedUnboxed MarkedUnboxed = True
-isMarkedUnboxed _             = False
+	    | HsStrict	
+
+	    | HsUnpack	       -- {-# UNPACK #-} ! (GHC extension, meaning "unbox")
+
+	    | HsUnpackFailed   -- An UNPACK pragma that we could not make 
+	      		       -- use of, because the type isn't unboxable; 
+                               -- equivalant to HsStrict except for checkValidDataCon
+  deriving (Eq, Data, Typeable)
+
+instance Outputable HsBang where
+    ppr HsNoBang       = empty
+    ppr HsStrict       = char '!'
+    ppr HsUnpack       = ptext (sLit "{-# UNPACK #-} !")
+    ppr HsUnpackFailed = ptext (sLit "{-# UNPACK (failed) #-} !")
+
+isBanged :: HsBang -> Bool
+isBanged HsNoBang = False
+isBanged _        = True
+
+isMarkedUnboxed :: HsBang -> Bool
+isMarkedUnboxed HsUnpack = True
+isMarkedUnboxed _        = False
+
+-------------------------
+-- StrictnessMark is internal only, used to indicate strictness 
+-- of the DataCon *worker* fields
+data StrictnessMark = MarkedStrict | NotMarkedStrict	
+
+instance Outputable StrictnessMark where
+  ppr MarkedStrict     = ptext (sLit "!")
+  ppr NotMarkedStrict  = empty
 
 isMarkedStrict :: StrictnessMark -> Bool
 isMarkedStrict NotMarkedStrict = False
 isMarkedStrict _               = True   -- All others are strict
-
-instance Outputable StrictnessMark where
-  ppr MarkedStrict     = ptext (sLit "!")
-  ppr MarkedUnboxed    = ptext (sLit "!!")
-  ppr NotMarkedStrict  = ptext (sLit "_")
 \end{code}
 
+
+%************************************************************************
+%*									*
+		Default method specfication
+%*									*
+%************************************************************************
+
+The DefMethSpec enumeration just indicates what sort of default method
+is used for a class. It is generated from source code, and present in 
+interface files; it is converted to Class.DefMeth before begin put in a 
+Class object.
+
+\begin{code}
+data DefMethSpec = NoDM        -- No default method
+                 | VanillaDM   -- Default method given with polymorphic code
+                 | GenericDM   -- Default method given with generic code
+
+instance Outputable DefMethSpec where
+  ppr NoDM      = empty
+  ppr VanillaDM = ptext (sLit "{- Has default method -}")
+  ppr GenericDM = ptext (sLit "{- Has generic default method -}")
+\end{code}
 
 %************************************************************************
 %*									*
@@ -583,12 +644,90 @@ data Activation = NeverActive
 		| AlwaysActive
 		| ActiveBefore CompilerPhase	-- Active only *before* this phase
 		| ActiveAfter CompilerPhase	-- Active in this phase and later
-		deriving( Eq )			-- Eq used in comparing rules in HsDecls
+		deriving( Eq, Data, Typeable )	-- Eq used in comparing rules in HsDecls
 
-data RuleMatchInfo = ConLike
+data RuleMatchInfo = ConLike 			-- See Note [CONLIKE pragma]
                    | FunLike
-                   deriving( Eq )
+                   deriving( Eq, Data, Typeable, Show )
+	-- Show needed for Lexer.x
 
+data InlinePragma  	     -- Note [InlinePragma]
+  = InlinePragma
+      { inl_inline :: InlineSpec
+
+      , inl_sat    :: Maybe Arity    -- Just n <=> Inline only when applied to n 
+      		      	    	     --            explicit (non-type, non-dictionary) args
+				     --   That is, inl_sat describes the number of *source-code*
+                                     --   arguments the thing must be applied to.  We add on the 
+                                     --   number of implicit, dictionary arguments when making
+			             --   the InlineRule, and don't look at inl_sat further
+
+      , inl_act    :: Activation     -- Says during which phases inlining is allowed
+
+      , inl_rule   :: RuleMatchInfo  -- Should the function be treated like a constructor?
+    } deriving( Eq, Data, Typeable )
+
+data InlineSpec   -- What the user's INLINE pragama looked like
+  = Inline
+  | Inlinable
+  | NoInline
+  | EmptyInlineSpec
+  deriving( Eq, Data, Typeable, Show )
+	-- Show needed for Lexer.x
+\end{code}
+
+Note [InlinePragma]
+~~~~~~~~~~~~~~~~~~~
+This data type mirrors what you can write in an INLINE or NOINLINE pragma in 
+the source program.
+
+If you write nothing at all, you get defaultInlinePragma:
+   inl_inline = False
+   inl_act    = AlwaysActive
+   inl_rule   = FunLike
+
+It's not possible to get that combination by *writing* something, so 
+if an Id has defaultInlinePragma it means the user didn't specify anything.
+
+If inl_inline = True, then the Id should have an InlineRule unfolding.
+
+Note [CONLIKE pragma]
+~~~~~~~~~~~~~~~~~~~~~
+The ConLike constructor of a RuleMatchInfo is aimed at the following.
+Consider first
+    {-# RULE "r/cons" forall a as. r (a:as) = f (a+1) #-}
+    g b bs = let x = b:bs in ..x...x...(r x)...
+Now, the rule applies to the (r x) term, because GHC "looks through" 
+the definition of 'x' to see that it is (b:bs).
+
+Now consider
+    {-# RULE "r/f" forall v. r (f v) = f (v+1) #-}
+    g v = let x = f v in ..x...x...(r x)...
+Normally the (r x) would *not* match the rule, because GHC would be
+scared about duplicating the redex (f v), so it does not "look
+through" the bindings.  
+
+However the CONLIKE modifier says to treat 'f' like a constructor in
+this situation, and "look through" the unfolding for x.  So (r x)
+fires, yielding (f (v+1)).
+
+This is all controlled with a user-visible pragma:
+     {-# NOINLINE CONLIKE [1] f #-}
+
+The main effects of CONLIKE are:
+
+    - The occurrence analyser (OccAnal) and simplifier (Simplify) treat
+      CONLIKE thing like constructors, by ANF-ing them
+
+    - New function coreUtils.exprIsExpandable is like exprIsCheap, but
+      additionally spots applications of CONLIKE functions
+
+    - A CoreUnfolding has a field that caches exprIsExpandable
+
+    - The rule matcher consults this field.  See
+      Note [Expanding variables] in Rules.lhs.
+
+\begin{code}
 isConLike :: RuleMatchInfo -> Bool
 isConLike ConLike = True
 isConLike _            = False
@@ -597,55 +736,67 @@ isFunLike :: RuleMatchInfo -> Bool
 isFunLike FunLike = True
 isFunLike _            = False
 
-data InlinePragma
-  = InlinePragma
-      Activation        -- Says during which phases inlining is allowed
-      RuleMatchInfo     -- Should the function be treated like a constructor?
-  deriving( Eq )
+isInlineSpec :: InlineSpec -> Bool
+isInlineSpec Inline    = True
+isInlineSpec Inlinable = True
+isInlineSpec _         = False
 
-defaultInlinePragma :: InlinePragma
-defaultInlinePragma = InlinePragma AlwaysActive FunLike
+isEmptyInlineSpec :: InlineSpec -> Bool
+isEmptyInlineSpec EmptyInlineSpec = True
+isEmptyInlineSpec _               = False
+
+defaultInlinePragma, alwaysInlinePragma, neverInlinePragma, dfunInlinePragma
+  :: InlinePragma
+defaultInlinePragma = InlinePragma { inl_act = AlwaysActive
+                                   , inl_rule = FunLike
+                                   , inl_inline = EmptyInlineSpec
+                                   , inl_sat = Nothing }
+
+alwaysInlinePragma = defaultInlinePragma { inl_inline = Inline }
+neverInlinePragma  = defaultInlinePragma { inl_act    = NeverActive }
+
+inlinePragmaSpec :: InlinePragma -> InlineSpec
+inlinePragmaSpec = inl_inline
+
+-- A DFun has an always-active inline activation so that 
+-- exprIsConApp_maybe can "see" its unfolding
+-- (However, its actual Unfolding is a DFunUnfolding, which is
+--  never inlined other than via exprIsConApp_maybe.)
+dfunInlinePragma   = defaultInlinePragma { inl_act  = AlwaysActive
+                                         , inl_rule = ConLike }
 
 isDefaultInlinePragma :: InlinePragma -> Bool
-isDefaultInlinePragma (InlinePragma activation match_info)
-  = isAlwaysActive activation && isFunLike match_info
+isDefaultInlinePragma (InlinePragma { inl_act = activation
+                                    , inl_rule = match_info
+                                    , inl_inline = inline })
+  = isEmptyInlineSpec inline && isAlwaysActive activation && isFunLike match_info
+
+isInlinePragma :: InlinePragma -> Bool
+isInlinePragma prag = isInlineSpec (inl_inline prag)
+
+isInlinablePragma :: InlinePragma -> Bool
+isInlinablePragma prag = case inl_inline prag of
+                           Inlinable -> True
+                           _         -> False
+
+inlinePragmaSat :: InlinePragma -> Maybe Arity
+inlinePragmaSat = inl_sat
 
 inlinePragmaActivation :: InlinePragma -> Activation
-inlinePragmaActivation (InlinePragma activation _) = activation
+inlinePragmaActivation (InlinePragma { inl_act = activation }) = activation
 
 inlinePragmaRuleMatchInfo :: InlinePragma -> RuleMatchInfo
-inlinePragmaRuleMatchInfo (InlinePragma _ info) = info
+inlinePragmaRuleMatchInfo (InlinePragma { inl_rule = info }) = info
 
 setInlinePragmaActivation :: InlinePragma -> Activation -> InlinePragma
-setInlinePragmaActivation (InlinePragma _ info) activation
-  = InlinePragma activation info
+setInlinePragmaActivation prag activation = prag { inl_act = activation }
 
 setInlinePragmaRuleMatchInfo :: InlinePragma -> RuleMatchInfo -> InlinePragma
-setInlinePragmaRuleMatchInfo (InlinePragma activation _) info
-  = InlinePragma activation info
-
-data InlineSpec
-  = Inline
-        InlinePragma
-	Bool 		-- True  <=> INLINE
-			-- False <=> NOINLINE
-  deriving( Eq )
-
-defaultInlineSpec :: InlineSpec
-alwaysInlineSpec, neverInlineSpec :: RuleMatchInfo -> InlineSpec
-
-defaultInlineSpec = Inline defaultInlinePragma False
-                                                -- Inlining is OK, but not forced
-alwaysInlineSpec match_info
-                = Inline (InlinePragma AlwaysActive match_info) True
-                                                -- INLINE always
-neverInlineSpec match_info
-                = Inline (InlinePragma NeverActive  match_info) False
-                                                -- NOINLINE
+setInlinePragmaRuleMatchInfo prag info = prag { inl_rule = info }
 
 instance Outputable Activation where
-   ppr NeverActive      = ptext (sLit "NEVER")
-   ppr AlwaysActive     = ptext (sLit "ALWAYS")
+   ppr AlwaysActive     = brackets (ptext (sLit "ALWAYS"))
+   ppr NeverActive      = brackets (ptext (sLit "NEVER"))
    ppr (ActiveBefore n) = brackets (char '~' <> int n)
    ppr (ActiveAfter n)  = brackets (int n)
 
@@ -653,26 +804,25 @@ instance Outputable RuleMatchInfo where
    ppr ConLike = ptext (sLit "CONLIKE")
    ppr FunLike = ptext (sLit "FUNLIKE")
 
-instance Outputable InlinePragma where
-  ppr (InlinePragma activation FunLike)
-       = ppr activation
-  ppr (InlinePragma activation match_info)
-       = ppr match_info <+> ppr activation
-    
 instance Outputable InlineSpec where
-   ppr (Inline (InlinePragma act match_info) is_inline)  
-	| is_inline = ptext (sLit "INLINE")
-                      <+> ppr_match_info
-		      <+> case act of
-			     AlwaysActive -> empty
-			     _            -> ppr act
-	| otherwise = ptext (sLit "NOINLINE")
-                      <+> ppr_match_info
-		      <+> case act of
-			     NeverActive  -> empty
-			     _            -> ppr act
-     where
-       ppr_match_info = if isFunLike match_info then empty else ppr match_info
+   ppr Inline          = ptext (sLit "INLINE")
+   ppr NoInline        = ptext (sLit "NOINLINE")
+   ppr Inlinable       = ptext (sLit "INLINABLE")
+   ppr EmptyInlineSpec = empty
+
+instance Outputable InlinePragma where
+  ppr (InlinePragma { inl_inline = inline, inl_act = activation
+                    , inl_rule = info, inl_sat = mb_arity })
+    = ppr inline <> pp_act inline activation <+> pp_sat <+> pp_info 
+    where
+      pp_act Inline   AlwaysActive = empty	
+      pp_act NoInline NeverActive  = empty
+      pp_act _        act          = ppr act
+
+      pp_sat | Just ar <- mb_arity = parens (ptext (sLit "sat-args=") <> int ar)
+             | otherwise           = empty
+      pp_info | isFunLike info = empty
+              | otherwise      = ppr info
 
 isActive :: CompilerPhase -> Activation -> Bool
 isActive _ NeverActive      = False
@@ -680,11 +830,15 @@ isActive _ AlwaysActive     = True
 isActive p (ActiveAfter n)  = p <= n
 isActive p (ActiveBefore n) = p >  n
 
-isNeverActive, isAlwaysActive :: Activation -> Bool
+isNeverActive, isAlwaysActive, isEarlyActive :: Activation -> Bool
 isNeverActive NeverActive = True
 isNeverActive _           = False
 
 isAlwaysActive AlwaysActive = True
 isAlwaysActive _            = False
+
+isEarlyActive AlwaysActive      = True
+isEarlyActive (ActiveBefore {}) = True
+isEarlyActive _		        = False
 \end{code}
 

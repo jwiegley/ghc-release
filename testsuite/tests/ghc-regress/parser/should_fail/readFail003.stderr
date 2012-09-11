@@ -1,13 +1,36 @@
 
-readFail003.hs:4:23:
-    Occurs check: cannot construct the infinite type: t = (t, [a], t1)
-      Expected type: (t, [a], t1)
-      Inferred type: t
+readFail003.hs:4:27:
+    Occurs check: cannot construct the infinite type:
+      t = (t, [a], [a1])
     In the expression: a
     In a pattern binding:
-	~(a, b, c)
-	    | nullity b = a
-	    | nullity c = a
-	    | otherwise = a
-	    where
-		nullity = null
+      ~(a, b, c)
+        | nullity b = a
+        | nullity c = a
+        | otherwise = a
+        where
+            nullity = null
+
+readFail003.hs:5:27:
+    Occurs check: cannot construct the infinite type:
+      t = (t, [a], [a1])
+    In the expression: a
+    In a pattern binding:
+      ~(a, b, c)
+        | nullity b = a
+        | nullity c = a
+        | otherwise = a
+        where
+            nullity = null
+
+readFail003.hs:6:27:
+    Occurs check: cannot construct the infinite type:
+      t = (t, [a], [a1])
+    In the expression: a
+    In a pattern binding:
+      ~(a, b, c)
+        | nullity b = a
+        | nullity c = a
+        | otherwise = a
+        where
+            nullity = null

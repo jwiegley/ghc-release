@@ -49,6 +49,7 @@ data OS
 	| OSSolaris
 	| OSMinGW32
 	| OSFreeBSD
+	| OSOpenBSD
 	deriving (Show, Eq)
 
 
@@ -56,6 +57,7 @@ data OS
 osElfTarget :: OS -> Bool
 osElfTarget OSLinux   = True
 osElfTarget OSFreeBSD = True
+osElfTarget OSOpenBSD = True
 osElfTarget _         = False
 
 -- | This is the target platform as far as the #ifdefs are concerned.
@@ -95,7 +97,9 @@ defaultTargetOS	= OSSolaris
 #elif mingw32_TARGET_OS
 defaultTargetOS	= OSMinGW32
 #elif freebsd_TARGET_OS
-defaultTargetOS        = OSFreeBSD
+defaultTargetOS	= OSFreeBSD
+#elif openbsd_TARGET_OS
+defaultTargetOS	= OSOpenBSD
 #else
 defaultTargetOS	= OSUnknown
 #endif

@@ -55,18 +55,21 @@ import Distribution.Package
          ( PackageIdentifier, Package(..), packageName )
 import qualified Distribution.ModuleName as ModuleName
 import Distribution.PackageDescription as PD
-         (PackageDescription(..), BuildInfo(..),
-          Library(..), hasLibs, withLib,
-          Executable(..), withExe)
+         ( PackageDescription(..), BuildInfo(..), allExtensions
+         , Library(..), hasLibs, withLib
+         , Executable(..), withExe )
 import Distribution.Simple.Compiler
          ( Compiler(..), compilerVersion )
+import Distribution.Simple.GHC ( ghcLibDir )
 import Distribution.Simple.Program
          ( ConfiguredProgram(..), requireProgramVersion
-         , rawSystemProgram, rawSystemProgramStdoutConf, rawSystemProgramStdout
-         , hscolourProgram, haddockProgram, ghcProgram )
+         , rawSystemProgram, rawSystemProgramStdout
+         , hscolourProgram, haddockProgram )
 import Distribution.Simple.PreProcess (ppCpp', ppUnlit,
                                 PPSuffixHandler, runSimplePreProcessor)
 import Distribution.Simple.Setup
+        ( defaultHscolourFlags, Flag(..), flagToMaybe, fromFlag
+        , HaddockFlags(..), HscolourFlags(..) )
 import Distribution.Simple.Build (initialBuildSteps)
 import Distribution.Simple.InstallDirs (InstallDirs(..), PathTemplate,
                                         PathTemplateVariable(..),
@@ -103,7 +106,6 @@ import Control.Monad ( when, guard )
 import Control.Exception (assert)
 import Data.Monoid
 import Data.Maybe    ( fromMaybe, listToMaybe )
-import Data.Char     (isSpace)
 
 import System.FilePath((</>), (<.>), splitFileName, splitExtension,
                        normalise, splitPath, joinPath)
@@ -198,18 +200,22 @@ haddock pkg_descr lbi suffixes flags = do
             [ fromFlags flags
             , fromPackageDescription pkg_descr ]
 
-    withLibLBI pkg_descr lbi $ \lib clbi -> do
-        let bi = libBuildInfo lib
-        libArgs <- fromLibrary lbi lib clbi
-        prepareSources verbosity lbi isVersion2 bi (args `mappend` libArgs) $
-             runHaddock verbosity confHaddock
+    withLibLBI pkg_descr lbi $ \lib clbi ->
+        withTempDirectory verbosity (buildDir lbi) "tmp" $ \tmp -> do
+          let bi = libBuildInfo lib
+          libArgs  <- fromLibrary tmp lbi lib clbi
+          libArgs' <- prepareSources verbosity tmp
+                        lbi isVersion2 bi (args `mappend` libArgs)
+          runHaddock verbosity confHaddock libArgs'
 
     when (flag haddockExecutables) $
-      withExeLBI pkg_descr lbi $ \exe clbi -> do
-        let bi = buildInfo exe
-        exeArgs <- fromExecutable lbi exe clbi
-        prepareSources verbosity lbi  isVersion2 bi (args `mappend` exeArgs) $
-             runHaddock verbosity confHaddock
+      withExeLBI pkg_descr lbi $ \exe clbi ->
+        withTempDirectory verbosity (buildDir lbi) "tmp" $ \tmp -> do
+          let bi = buildInfo exe
+          exeArgs  <- fromExecutable tmp lbi exe clbi
+          exeArgs' <- prepareSources verbosity tmp
+                        lbi isVersion2 bi (args `mappend` exeArgs)
+          runHaddock verbosity confHaddock exeArgs'
 
   where
     verbosity = flag haddockVerbosity
@@ -218,15 +224,14 @@ haddock pkg_descr lbi suffixes flags = do
 -- | performs cpp and unlit preprocessing where needed on the files in
 -- | argTargets, which must have an .hs or .lhs extension.
 prepareSources :: Verbosity
+                  -> FilePath
                   -> LocalBuildInfo
                   -> Bool            -- haddock == 2.*
                   -> BuildInfo
                   -> HaddockArgs
-                  -> (HaddockArgs -> IO a)
-                  -> IO a
-prepareSources verbosity lbi isVersion2 bi args@HaddockArgs{argTargets=files} k =
-              withTempDirectory verbosity (buildDir lbi) "tmp" $ \tmp ->
-                   mapM (mockPP tmp) files >>= \targets -> k args {argTargets=targets}
+                  -> IO HaddockArgs
+prepareSources verbosity tmp lbi isVersion2 bi args@HaddockArgs{argTargets=files} =
+              mapM (mockPP tmp) files >>= \targets -> return args {argTargets=targets}
           where
             mockPP pref file = do 
                  let (filePref, fileName) = splitFileName file
@@ -251,7 +256,7 @@ prepareSources verbosity lbi isVersion2 bi args@HaddockArgs{argTargets=files} k 
                      removeFile targetFile
 
                  return hsFile
-            needsCpp = CPP `elem` extensions bi
+            needsCpp = CPP `elem` allExtensions bi
             defines | isVersion2 = []
                     | otherwise  = ["-D__HADDOCK__"]
 
@@ -287,22 +292,38 @@ fromPackageDescription pkg_descr =
         subtitle | null (synopsis pkg_descr) = ""
                  | otherwise                 = ": " ++ synopsis pkg_descr
 
-fromLibrary :: LocalBuildInfo -> Library -> ComponentLocalBuildInfo -> IO HaddockArgs
-fromLibrary lbi lib clbi =
+fromLibrary :: FilePath
+            -> LocalBuildInfo -> Library -> ComponentLocalBuildInfo
+            -> IO HaddockArgs
+fromLibrary tmp lbi lib clbi =
             do inFiles <- map snd `fmap` getLibSourceFiles lbi lib
                return $ mempty {
                             argHideModules = (mempty,otherModules $ bi),
-                            argGhcFlags = ghcOptions lbi bi clbi (buildDir lbi),
+                            argGhcFlags = ghcOptions lbi bi clbi (buildDir lbi)
+                                       -- Noooooooooo!!!!!111
+                                       -- haddock stomps on our precious .hi
+                                       -- and .o files. Workaround by telling
+                                       -- haddock to write them elsewhere.
+                                       ++ [ "-odir", tmp, "-hidir", tmp
+                                          , "-stubdir", tmp ],
                             argTargets = inFiles 
                           }
     where 
       bi = libBuildInfo lib
       
-fromExecutable :: LocalBuildInfo -> Executable -> ComponentLocalBuildInfo -> IO HaddockArgs
-fromExecutable lbi exe clbi =
+fromExecutable :: FilePath
+               -> LocalBuildInfo -> Executable -> ComponentLocalBuildInfo
+               -> IO HaddockArgs
+fromExecutable tmp lbi exe clbi =
             do inFiles <- map snd `fmap` getExeSourceFiles lbi exe
                return $ mempty {
-                            argGhcFlags = ghcOptions lbi bi clbi (buildDir lbi),
+                            argGhcFlags = ghcOptions lbi bi clbi (buildDir lbi)
+                                       -- Noooooooooo!!!!!111
+                                       -- haddock stomps on our precious .hi
+                                       -- and .o files. Workaround by telling
+                                       -- haddock to write them elsewhere.
+                                       ++ [ "-odir", tmp, "-hidir", tmp
+                                          , "-stubdir", tmp ],
                             argOutputDir = Dir (exeName exe),
                             argTitle = Flag (exeName exe),
                             argTargets = inFiles 
@@ -546,11 +567,6 @@ getSourceFiles dirs modules = flip mapM modules $ \m -> fmap ((,) m) $
 -- | The directory where we put build results for an executable
 exeBuildDir :: LocalBuildInfo -> Executable -> FilePath
 exeBuildDir lbi exe = buildDir lbi </> exeName exe </> exeName exe ++ "-tmp"
-
-ghcLibDir :: Verbosity -> LocalBuildInfo -> IO FilePath
-ghcLibDir verbosity lbi = 
-    (reverse . dropWhile isSpace . reverse) `fmap`
-     rawSystemProgramStdoutConf verbosity ghcProgram (withPrograms lbi) ["--print-libdir"]
 
 ---------------------------------------------------------------------------------------------
 

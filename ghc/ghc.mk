@@ -18,6 +18,14 @@ ghc_stage1_HC_OPTS = $(GhcStage1HcOpts)
 ghc_stage2_HC_OPTS = $(GhcStage2HcOpts)
 ghc_stage3_HC_OPTS = $(GhcStage3HcOpts)
 
+ghc_stage2_CC_OPTS = -Iincludes
+ghc_stage3_CC_OPTS = -Iincludes
+
+ghc_stage1_C_FILES_NODEPS = ghc/hschooks.c
+
+ghc_stage2_MKDEPENDC_OPTS = -DMAKING_GHC_BUILD_SYSTEM_DEPENDENCIES
+ghc_stage3_MKDEPENDC_OPTS = -DMAKING_GHC_BUILD_SYSTEM_DEPENDENCIES
+
 ifeq "$(GhcWithInterpreter)" "YES"
 ghc_stage2_HC_OPTS += -DGHCI
 ghc_stage3_HC_OPTS += -DGHCI
@@ -25,6 +33,11 @@ endif
 
 ifeq "$(GhcDebugged)" "YES"
 ghc_HC_OPTS += -debug
+endif
+
+ifeq "$(GhcDynamic)" "YES"
+ghc_stage2_HC_OPTS += -dynamic
+ghc_stage3_HC_OPTS += -dynamic
 endif
 
 ifeq "$(GhcThreaded)" "YES"
@@ -95,16 +108,15 @@ define ghc_stage$(INSTALL_GHC_STAGE)_INSTALL_SHELL_WRAPPER_EXTRA
 echo 'executablename="$$exedir/ghc"' >> "$(WRAPPER)"
 endef
 
-# If we "make 1" or "make 2" then we don't want the rules for the stage
-# that we haven't been asked to build
-ifeq "$(stage)" "1"
-ghc_stage2_NOT_NEEDED = YES
-endif
-ifeq "$(stage)" "2"
+# if stage is set to something other than "1" or "", disable stage 1
+ifneq "$(filter-out 1,$(stage))" ""
 ghc_stage1_NOT_NEEDED = YES
 endif
-# We don't want the rules for stage3 unless we have been explicitly
-# asked to build it
+# if stage is set to something other than "2" or "", disable stage 2
+ifneq "$(filter-out 2,$(stage))" ""
+ghc_stage2_NOT_NEEDED = YES
+endif
+# stage 3 has to be requested explicitly with stage=3
 ifneq "$(stage)" "3"
 ghc_stage3_NOT_NEEDED = YES
 endif
@@ -119,10 +131,15 @@ ghc/stage1/build/tmp/$(ghc_stage1_PROG) : $(compiler_stage1_v_LIB)
 ghc/stage2/build/tmp/$(ghc_stage2_PROG) : $(compiler_stage2_v_LIB)
 ghc/stage3/build/tmp/$(ghc_stage3_PROG) : $(compiler_stage3_v_LIB)
 
+ifeq "$(GhcProfiled)" "YES"
+ghc/stage2/build/tmp/$(ghc_stage2_PROG) : $(compiler_stage2_p_LIB)
+ghc/stage2/build/tmp/$(ghc_stage2_PROG) : $(foreach lib,$(PACKAGES),$(libraries/$(lib)_dist-install_p_LIB))
+endif
+
 # Modules here import HsVersions.h, so we need ghc_boot_platform.h
-$(ghc_stage1_depfile) : compiler/stage1/$(PLATFORM_H)
-$(ghc_stage2_depfile) : compiler/stage2/$(PLATFORM_H)
-$(ghc_stage3_depfile) : compiler/stage3/$(PLATFORM_H)
+$(ghc_stage1_depfile_haskell) : compiler/stage1/$(PLATFORM_H)
+$(ghc_stage2_depfile_haskell) : compiler/stage2/$(PLATFORM_H)
+$(ghc_stage3_depfile_haskell) : compiler/stage3/$(PLATFORM_H)
 
 all_ghc_stage1 : $(GHC_STAGE1)
 all_ghc_stage2 : $(GHC_STAGE2)

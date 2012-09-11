@@ -79,7 +79,7 @@ data FunPtr a = FunPtr Addr# deriving (Eq, Ord)
 -- a function type with zero or more arguments where
 --
 -- * the argument types are /marshallable foreign types/,
---   i.e. 'Char', 'Int', 'Prelude.Double', 'Prelude.Float',
+--   i.e. 'Char', 'Int', 'Double', 'Float',
 --   'Bool', 'Data.Int.Int8', 'Data.Int.Int16', 'Data.Int.Int32',
 --   'Data.Int.Int64', 'Data.Word.Word8', 'Data.Word.Word16',
 --   'Data.Word.Word32', 'Data.Word.Word64', @'Ptr' a@, @'FunPtr' a@,
@@ -87,7 +87,7 @@ data FunPtr a = FunPtr Addr# deriving (Eq, Ord)
 --   using @newtype@.
 -- 
 -- * the return type is either a marshallable foreign type or has the form
---   @'Prelude.IO' t@ where @t@ is a marshallable foreign type or @()@.
+--   @'IO' t@ where @t@ is a marshallable foreign type or @()@.
 --
 -- A value of type @'FunPtr' a@ may be a pointer to a foreign function,
 -- either returned by another foreign function or imported with a

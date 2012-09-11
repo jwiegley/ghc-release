@@ -34,6 +34,7 @@
 #include "Profiling.h"
 #include "Timer.h"
 #include "Globals.h"
+void exitLinker( void );	// there is no Linker.h file to include
 
 #if defined(RTS_GTK_FRONTPANEL)
 #include "FrontPanel.h"
@@ -118,12 +119,6 @@ hs_init(int *argc, char **argv[])
      */
     stat_startInit();
 
-#if defined(DEBUG)
-    /* Start off by initialising the allocator debugging so we can
-     * use it anywhere */
-    initAllocator();
-#endif
-
     /* Set the RTS flags to default values. */
 
     initRtsFlagsDefaults();
@@ -149,6 +144,9 @@ hs_init(int *argc, char **argv[])
 #ifdef TRACING
     initTracing();
 #endif
+    /* Dtrace events are always enabled
+     */
+    dtraceEventStartup();
 
     /* initialise scheduler data structures (needs to be done before
      * initStorage()).
@@ -347,6 +345,9 @@ hs_exit_(rtsBool wait_foreign)
     
     OnExitHook();
 
+    // Free the full argv storage
+    freeFullProgArgv();
+
 #if defined(THREADED_RTS)
     ioManagerDie();
 #endif
@@ -390,6 +391,9 @@ hs_exit_(rtsBool wait_foreign)
 
     /* free shared Typeable store */
     exitGlobalStore();
+
+    /* free linker data */
+    exitLinker();
 
     /* free file locking tables, if necessary */
 #if !defined(mingw32_HOST_OS)    
@@ -440,13 +444,11 @@ hs_exit_(rtsBool wait_foreign)
     /* free hash table storage */
     exitHashTable();
 
-    // Finally, free all our storage
-    freeStorage();
-
-#if defined(DEBUG)
-    /* and shut down the allocator debugging */
-    shutdownAllocator();
-#endif
+    // Finally, free all our storage.  However, we only free the heap
+    // memory if we have waited for foreign calls to complete;
+    // otherwise a foreign call in progress may still be referencing
+    // heap memory (e.g. by being passed a ByteArray#).
+    freeStorage(wait_foreign);
 
 }
 

@@ -1,5 +1,7 @@
 \begin{code}
 {-# OPTIONS_GHC -XNoImplicitPrelude #-}
+-- We believe we could deorphan this module, by moving lots of things
+-- around, but we haven't got there yet:
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# OPTIONS_HADDOCK hide #-}
 -----------------------------------------------------------------------------
@@ -7,7 +9,7 @@
 -- Module      :  GHC.Num
 -- Copyright   :  (c) The University of Glasgow 1994-2002
 -- License     :  see libraries/base/LICENSE
--- 
+--
 -- Maintainer  :  cvs-ghc@haskell.org
 -- Stability   :  internal
 -- Portability :  non-portable (GHC Extensions)
@@ -41,7 +43,7 @@ import GHC.Integer
 infixl 7  *
 infixl 6  +, -
 
-default ()              -- Double isn't available yet, 
+default ()              -- Double isn't available yet,
                         -- and we shouldn't be using defaults anyway
 \end{code}
 
@@ -62,7 +64,7 @@ class  (Eq a, Show a) => Num a  where
     -- | Absolute value.
     abs                 :: a -> a
     -- | Sign of a number.
-    -- The functions 'abs' and 'signum' should satisfy the law: 
+    -- The functions 'abs' and 'signum' should satisfy the law:
     --
     -- > abs x * signum x == x
     --
@@ -75,6 +77,8 @@ class  (Eq a, Show a) => Num a  where
     -- so such literals have type @('Num' a) => a@.
     fromInteger         :: Integer -> a
 
+    {-# INLINE (-) #-}
+    {-# INLINE negate #-}
     x - y               = x + negate y
     negate x            = 0 - x
 
@@ -117,27 +121,6 @@ divModInt ::  Int -> Int -> (Int, Int)
 divModInt x@(I# _) y@(I# _) = (x `divInt` y, x `modInt` y)
     -- Stricter.  Sorry if you don't like it.  (WDP 94/10)
 \end{code}
-
-%*********************************************************
-%*                                                      *
-\subsection{The @Integer@ instances for @Eq@, @Ord@}
-%*                                                      *
-%*********************************************************
-
-\begin{code}
-instance  Eq Integer  where
-    (==) = eqInteger
-    (/=) = neqInteger
-
-------------------------------------------------------------------------
-instance Ord Integer where
-    (<=) = leInteger
-    (>)  = gtInteger
-    (<)  = ltInteger
-    (>=) = geInteger
-    compare = compareInteger
-\end{code}
-
 
 %*********************************************************
 %*                                                      *

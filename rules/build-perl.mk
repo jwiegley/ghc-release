@@ -19,16 +19,17 @@
 # $(eval $(call build-perl,driver/mangler,dist))
 
 define build-perl
+$(call trace, build-perl($1,$2))
 # $1 = dir
 # $2 = distdir
 
 ifeq "$$($1_$2_TOPDIR)" "YES"
-$1_$2_INPLACE = $(INPLACE_TOPDIR)/$$($1_$2_PROG)
+$1_$2_INPLACE = $$(INPLACE_TOPDIR)/$$($1_$2_PROG)
 else
-$1_$2_INPLACE = $(INPLACE_BIN)/$$($1_$2_PROG)
+$1_$2_INPLACE = $$(INPLACE_BIN)/$$($1_$2_PROG)
 endif
 
-$(call all-target,$$($1_$2_INPLACE))
+$(call all-target,$1_$2,$$($1_$2_INPLACE))
 
 $(call clean-target,$1,$2,$1/$2 $$($1_$2_INPLACE))
 .PHONY: clean_$1
@@ -37,8 +38,7 @@ clean_$1 : clean_$1_$2
 # INPLACE_BIN etc. might be empty if we're cleaning
 ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
 ifneq "$$(BINDIST)" "YES"
-$1/$2/$$($1_$2_PROG).prl: $1/$$($1_PERL_SRC) $$(UNLIT)
-	"$$(MKDIRHIER)" $1/$2
+$1/$2/$$($1_$2_PROG).prl: $1/$$($1_PERL_SRC) $$(UNLIT) | $$$$(dir $$$$@)/.
 	"$$(UNLIT)" $$(UNLIT_OPTS) $$< $$@
 endif
 
@@ -46,10 +46,10 @@ $1/$2/$$($1_$2_PROG): $1/$2/$$($1_$2_PROG).prl
 	"$$(RM)" $$(RM_OPTS) $$@
 	echo '#!$$(PERL)'                                  >> $$@
 	echo '$$$$TARGETPLATFORM  = "$$(TARGETPLATFORM)";' >> $$@
+	echo '$$$$TABLES_NEXT_TO_CODE  = "$(GhcEnableTablesNextToCode)";' >> $$@
 	cat $$<                                            >> $$@
 
-$$($1_$2_INPLACE): $1/$2/$$($1_$2_PROG)
-	"$$(MKDIRHIER)" $$(dir $$@)
+$$($1_$2_INPLACE): $1/$2/$$($1_$2_PROG) | $$$$(dir $$$$@)/.
 	"$$(CP)" $$< $$@
 	$$(EXECUTABLE_FILE) $$@
 

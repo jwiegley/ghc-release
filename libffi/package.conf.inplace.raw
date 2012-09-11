@@ -1,0 +1,35 @@
+name:		ffi
+version:	1.0
+id:             builtin_ffi
+license:	BSD3
+maintainer:	glasgow-haskell-users@haskell.org
+exposed:	True
+
+exposed-modules:
+hidden-modules:
+import-dirs:
+
+
+
+
+library-dirs:		"/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/libffi/dist-install/build"
+
+
+hs-libraries:   "HSffi"
+
+
+
+
+include-dirs:		"/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/libffi/dist-install/build"
+
+
+depends:
+hugs-options:
+cc-options:
+
+framework-dirs:
+frameworks:
+
+haddock-interfaces:
+haddock-html:
+

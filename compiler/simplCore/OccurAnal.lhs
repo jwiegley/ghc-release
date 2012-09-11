@@ -19,24 +19,26 @@ module OccurAnal (
 
 import CoreSyn
 import CoreFVs
-import CoreUtils        ( exprIsTrivial, isDefaultAlt )
-import Coercion		( mkSymCoercion )
+import Type		( tyVarsOfType )
+import CoreUtils        ( exprIsTrivial, isDefaultAlt, mkCoerceI, isExpandableApp )
+import Coercion		( CoercionI(..), mkSymCoI )
 import Id
-import Name		( localiseName )
-import IdInfo
+import NameEnv
+import NameSet
+import Name		( Name, localiseName )
 import BasicTypes
-
 import VarSet
 import VarEnv
-
+import Var		( Var, varUnique )
 import Maybes           ( orElse )
 import Digraph          ( SCC(..), stronglyConnCompFromEdgedVerticesR )
 import PrelNames        ( buildIdKey, foldrIdKey, runSTRepIdKey, augmentIdKey )
-import Unique           ( Unique )
-import UniqFM           ( keysUFM, intersectUFM_C, foldUFM_Directly )
-import Util             ( mapAndUnzip )
+import Unique
+import UniqFM
+import Util             ( mapAndUnzip, filterOut )
+import Bag
 import Outputable
-
+import FastString
 import Data.List
 \end{code}
 
@@ -50,22 +52,25 @@ import Data.List
 Here's the externally-callable interface:
 
 \begin{code}
-occurAnalysePgm :: [CoreBind] -> [CoreBind]
-occurAnalysePgm binds
-  = snd (go initOccEnv binds)
+occurAnalysePgm :: [CoreBind] -> [CoreRule] -> [CoreBind]
+occurAnalysePgm binds rules
+  = snd (go (initOccEnv rules) binds)
   where
+    initial_uds = addIdOccs emptyDetails (rulesFreeVars rules)
+    -- The RULES keep things alive!
+
     go :: OccEnv -> [CoreBind] -> (UsageDetails, [CoreBind])
     go _ []
-        = (emptyDetails, [])
+        = (initial_uds, [])
     go env (bind:binds)
         = (final_usage, bind' ++ binds')
         where
            (bs_usage, binds')   = go env binds
-           (final_usage, bind') = occAnalBind env bind bs_usage
+           (final_usage, bind') = occAnalBind env env bind bs_usage
 
 occurAnalyseExpr :: CoreExpr -> CoreExpr
         -- Do occurrence analysis, and discard occurence info returned
-occurAnalyseExpr expr = snd (occAnal initOccEnv expr)
+occurAnalyseExpr expr = snd (occAnal (initOccEnv []) expr)
 \end{code}
 
 
@@ -79,14 +84,15 @@ Bindings
 ~~~~~~~~
 
 \begin{code}
-occAnalBind :: OccEnv
+occAnalBind :: OccEnv 		-- The incoming OccEnv
+	    -> OccEnv		-- Same, but trimmed by (binderOf bind)
             -> CoreBind
             -> UsageDetails             -- Usage details of scope
             -> (UsageDetails,           -- Of the whole let(rec)
                 [CoreBind])
 
-occAnalBind env (NonRec binder rhs) body_usage
-  | isTyVar binder			-- A type let; we don't gather usage info
+occAnalBind env _ (NonRec binder rhs) body_usage
+  | isTyCoVar binder			-- A type let; we don't gather usage info
   = (body_usage, [NonRec binder rhs])
 
   | not (binder `usedIn` body_usage)    -- It's not mentioned
@@ -149,13 +155,17 @@ However things are made quite a bit more complicated by RULES.  Remember
     To that end, we build a Rec group for each cyclic strongly
     connected component,
         *treating f's rules as extra RHSs for 'f'*.
+    More concretely, the SCC analysis runs on a graph with an edge
+    from f -> g iff g is mentioned in
+        (a) f's rhs
+        (b) f's RULES
+    These are rec_edges.
 
-    When we make the Rec groups we include variables free in *either*
-    LHS *or* RHS of the rule.  The former might seems silly, but see
-    Note [Rule dependency info].
-
-    So in Example [eftInt], eftInt and eftIntFB will be put in the
-    same Rec, even though their 'main' RHSs are both non-recursive.
+    Under (b) we include variables free in *either* LHS *or* RHS of
+    the rule.  The former might seems silly, but see Note [Rule
+    dependency info].  So in Example [eftInt], eftInt and eftIntFB
+    will be put in the same Rec, even though their 'main' RHSs are
+    both non-recursive.
 
   * Note [Rules are visible in their own rec group]
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -175,7 +185,7 @@ However things are made quite a bit more complicated by RULES.  Remember
     "loop"?  In particular, a RULE is like an equation for 'f' that
     is *always* inlined if it is applicable.  We do *not* disable
     rules for loop-breakers.  It's up to whoever makes the rules to
-    make sure that the rules themselves alwasys terminate.  See Note
+    make sure that the rules themselves always terminate.  See Note
     [Rules for recursive functions] in Simplify.lhs
 
     Hence, if
@@ -192,6 +202,14 @@ However things are made quite a bit more complicated by RULES.  Remember
     Note that when we compute this rule_fv_env, we only consider variables
     free in the *RHS* of the rule, in contrast to the way we build the
     Rec group in the first place (Note [Rule dependency info])
+
+    Note that if 'g' has RHS that mentions 'w', we should add w to
+    g's loop-breaker edges.  More concretely there is an edge from f -> g 
+    iff
+    	(a) g is mentioned in f's RHS
+	(b) h is mentioned in f's RHS, and 
+            g appears in the RHS of a RULE of h
+            or a transitive sequence of rules starting with h
 
     Note that in Example [eftInt], *neither* eftInt *nor* eftIntFB is
     chosen as a loop breaker, because their RHSs don't mention each other.
@@ -221,13 +239,15 @@ However things are made quite a bit more complicated by RULES.  Remember
 
     So we must *not* postInlineUnconditionally 'g', even though
     its RHS turns out to be trivial.  (I'm assuming that 'g' is
-    not choosen as a loop breaker.)
+    not choosen as a loop breaker.)  Why not?  Because then we
+    drop the binding for 'g', which leaves it out of scope in the
+    RULE!
 
     We "solve" this by making g a "weak" or "rules-only" loop breaker,
     with OccInfo = IAmLoopBreaker True.  A normal "strong" loop breaker
     has IAmLoopBreaker False.  So
 
-                                Inline  postInlineUnconditinoally
+                                Inline  postInlineUnconditionally
         IAmLoopBreaker False    no      no
         IAmLoopBreaker True     yes     no
         other                   yes     yes
@@ -245,6 +265,14 @@ However things are made quite a bit more complicated by RULES.  Remember
         RULE f x = 4
     Then if we substitute y for x, we'd better do so in the
     rule's LHS too, so we'd better ensure the dependency is respected
+
+
+  * Note [Inline rules]
+    ~~~~~~~~~~~~~~~~~~~
+    None of the above stuff about RULES applies to Inline Rules,
+    stored in a CoreUnfolding.  The unfolding, if any, is simplified
+    at the same time as the regular RHS of the function, so it should
+    be treated *exactly* like an extra RHS.
 
 
 Example [eftInt]
@@ -282,7 +310,7 @@ This showed up when compiling Control.Concurrent.Chan.getChanContents.
 
 
 \begin{code}
-occAnalBind env (Rec pairs) body_usage
+occAnalBind _ env (Rec pairs) body_usage
   = foldr occAnalRec (body_usage, []) sccs
 	-- For a recursive group, we 
 	--	* occ-analyse all the RHSs
@@ -299,11 +327,13 @@ occAnalBind env (Rec pairs) body_usage
     rec_edges = {-# SCC "occAnalBind.assoc" #-}  map make_node pairs
     
     make_node (bndr, rhs)
-	= (ND bndr rhs' rhs_usage rhs_fvs, idUnique bndr, out_edges)
+	= (ND bndr rhs' all_rhs_usage rhs_fvs, varUnique bndr, out_edges)
 	where
 	  (rhs_usage, rhs') = occAnalRhs env bndr rhs
-	  rhs_fvs = intersectUFM_C (\b _ -> b) bndr_set rhs_usage
-	  out_edges = keysUFM (rhs_fvs `unionVarSet` idRuleVars bndr)
+	  all_rhs_usage = addIdOccs rhs_usage rule_vars -- Note [Rules are extra RHSs]
+	  rhs_fvs   = intersectUFM_C (\b _ -> b) bndr_set rhs_usage
+	  out_edges = keysUFM (rhs_fvs `unionVarSet` rule_vars)
+          rule_vars = idRuleVars bndr      -- See Note [Rule dependency info]
         -- (a -> b) means a mentions b
         -- Given the usage details (a UFM that gives occ info for each free var of
         -- the RHS) we can get the list of free vars -- or rather their Int keys --
@@ -324,7 +354,7 @@ occAnalRec (AcyclicSCC (ND bndr rhs rhs_usage _, _, _)) (body_usage, binds)
   = (body_usage, binds)
 
   | otherwise			-- It's mentioned in the body
-  = (body_usage' +++ addRuleUsage rhs_usage bndr,	-- Note [Rules are extra RHSs]
+  = (body_usage' +++ rhs_usage,	
      NonRec tagged_bndr rhs : binds)
   where
     (body_usage', tagged_bndr) = tagBinder body_usage bndr
@@ -346,8 +376,7 @@ occAnalRec (CyclicSCC nodes) (body_usage, binds)
 	----------------------------
 	-- Tag the binders with their occurrence info
     total_usage = foldl add_usage body_usage nodes
-    add_usage body_usage (ND bndr _ rhs_usage _, _, _)
-	= body_usage +++ addRuleUsage rhs_usage bndr
+    add_usage usage_so_far (ND _ _ rhs_usage _, _, _) = usage_so_far +++ rhs_usage
     (final_usage, tagged_nodes) = mapAccumL tag_node total_usage nodes
 
     tag_node :: UsageDetails -> Node Details -> (UsageDetails, Node Details)
@@ -371,50 +400,22 @@ occAnalRec (CyclicSCC nodes) (body_usage, binds)
  	  | otherwise = foldr (reOrderRec 0) [] $
 			stronglyConnCompFromEdgedVerticesR loop_breaker_edges
 
-	-- See Note [Choosing loop breakers] for looop_breaker_edges
+	-- See Note [Choosing loop breakers] for loop_breaker_edges
     loop_breaker_edges = map mk_node tagged_nodes
     mk_node (details@(ND _ _ _ rhs_fvs), k, _) = (details, k, new_ks)
 	where
-	  new_ks = keysUFM (extendFvs rule_fv_env rhs_fvs rhs_fvs)
+	  new_ks = keysUFM (fst (extendFvs rule_fv_env rhs_fvs))
 
     ------------------------------------
     rule_fv_env :: IdEnv IdSet  -- Variables from this group mentioned in RHS of rules
                                 -- Domain is *subset* of bound vars (others have no rule fvs)
-    rule_fv_env = rule_loop init_rule_fvs
-
+    rule_fv_env   = transClosureFV init_rule_fvs 
     no_rules      = null init_rule_fvs
     init_rule_fvs = [(b, rule_fvs)
                     | b <- bndrs
+		    , isId b
                     , let rule_fvs = idRuleRhsVars b `intersectVarSet` bndr_set
                     , not (isEmptyVarSet rule_fvs)]
-
-    rule_loop :: [(Id,IdSet)] -> IdEnv IdSet    -- Finds fixpoint
-    rule_loop fv_list
-        | no_change = env
-        | otherwise = rule_loop new_fv_list
-        where
-          env = mkVarEnv init_rule_fvs
-          (no_change, new_fv_list) = mapAccumL bump True fv_list
-          bump no_change (b,fvs)
-                | new_fvs `subVarSet` fvs = (no_change, (b,fvs))
-                | otherwise               = (False,     (b,new_fvs `unionVarSet` fvs))
-                where
-                  new_fvs = extendFvs env emptyVarSet fvs
-
-idRuleRhsVars :: Id -> VarSet
--- Just the variables free on the *rhs* of a rule
--- See Note [Choosing loop breakers]
-idRuleRhsVars id = foldr (unionVarSet . ruleRhsFreeVars) emptyVarSet (idCoreRules id)
-
-extendFvs :: IdEnv IdSet -> IdSet -> IdSet -> IdSet
--- (extendFVs env fvs s) returns (fvs `union` env(s))
-extendFvs env fvs id_set
-  = foldUFM_Directly add fvs id_set
-  where
-    add uniq _ fvs
-        = case lookupVarEnv_Directly env uniq  of
-            Just fvs' -> fvs' `unionVarSet` fvs
-            Nothing   -> fvs
 \end{code}
 
 @reOrderRec@ is applied to the list of (binder,rhs) pairs for a cyclic
@@ -456,9 +457,14 @@ type Node details = (details, Unique, [Unique])	-- The Ints are gotten from the 
 						-- which is gotten from the Id.
 data Details = ND Id 		-- Binder
 		  CoreExpr	-- RHS
-		  UsageDetails	-- Full usage from RHS (*not* including rules)
-		  IdSet		-- Other binders from this Rec group mentioned on RHS
-				-- (derivable from UsageDetails but cached here)
+
+		  UsageDetails	-- Full usage from RHS, 
+                                -- including *both* RULES *and* InlineRule unfolding
+
+		  IdSet		-- Other binders *from this Rec group* mentioned in
+		  		--   * the  RHS
+		  		--   * any InlineRule unfolding
+				-- but *excluding* any RULES
 
 reOrderRec :: Int -> SCC (Node Details)
            -> [(Id,CoreExpr)] -> [(Id,CoreExpr)]
@@ -514,53 +520,45 @@ reOrderCycle depth (bind : binds) pairs
 
     score :: Node Details -> Int        -- Higher score => less likely to be picked as loop breaker
     score (ND bndr rhs _ _, _, _)
-        | workerExists (idWorkerInfo bndr)      = 10
-                -- Note [Worker inline loop]
+        | not (isId bndr) = 100	    -- A type or cercion varialbe is never a loop breaker
 
-        | exprIsTrivial rhs        = 5  -- Practically certain to be inlined
+        | isDFunId bndr = 9   -- Never choose a DFun as a loop breaker
+	   	     	      -- Note [DFuns should not be loop breakers]
+
+        | Just (inl_source, _) <- isStableUnfolding_maybe (idUnfolding bndr)
+	= case inl_source of
+	     InlineWrapper {} -> 10  -- Note [INLINE pragmas]
+	     _other	      ->  3  -- Data structures are more important than this
+	     		             -- so that dictionary/method recursion unravels
+		-- Note that this case hits all InlineRule things, so we
+		-- never look at 'rhs for InlineRule stuff. That's right, because
+		-- 'rhs' is irrelevant for inlining things with an InlineRule
+                
+        | is_con_app rhs = 5  -- Data types help with cases: Note [Constructor applications]
+                
+        | exprIsTrivial rhs = 10  -- Practically certain to be inlined
                 -- Used to have also: && not (isExportedId bndr)
                 -- But I found this sometimes cost an extra iteration when we have
                 --      rec { d = (a,b); a = ...df...; b = ...df...; df = d }
                 -- where df is the exported dictionary. Then df makes a really
                 -- bad choice for loop breaker
 
-        | is_con_app rhs = 3    -- Data types help with cases
-                -- Note [Constructor applictions]
-
+	
 -- If an Id is marked "never inline" then it makes a great loop breaker
 -- The only reason for not checking that here is that it is rare
 -- and I've never seen a situation where it makes a difference,
 -- so it probably isn't worth the time to test on every binder
 --	| isNeverActive (idInlinePragma bndr) = -10
 
-        | inlineCandidate bndr rhs = 2  -- Likely to be inlined
-                -- Note [Inline candidates]
+        | isOneOcc (idOccInfo bndr) = 2  -- Likely to be inlined
 
-        | not (neverUnfold (idUnfolding bndr)) = 1
-                -- the Id has some kind of unfolding
+        | canUnfold (realIdUnfolding bndr) = 1
+                -- The Id has some kind of unfolding
+		-- Ignore loop-breaker-ness here because that is what we are setting!
 
         | otherwise = 0
 
-    inlineCandidate :: Id -> CoreExpr -> Bool
-    inlineCandidate _  (Note InlineMe _) = True
-    inlineCandidate id _                 = isOneOcc (idOccInfo id)
-
-        -- Note [conapp]
-        --
-        -- It's really really important to inline dictionaries.  Real
-        -- example (the Enum Ordering instance from GHC.Base):
-        --
-        --      rec     f = \ x -> case d of (p,q,r) -> p x
-        --              g = \ x -> case d of (p,q,r) -> q x
-        --              d = (v, f, g)
-        --
-        -- Here, f and g occur just once; but we can't inline them into d.
-        -- On the other hand we *could* simplify those case expressions if
-        -- we didn't stupidly choose d as the loop breaker.
-        -- But we won't because constructor args are marked "Many".
-        -- Inlining dictionaries is really essential to unravelling
-        -- the loops in static numeric dictionaries, see GHC.Float.
-
+	-- Checking for a constructor application
         -- Cheap and cheerful; the simplifer moves casts out of the way
         -- The lambda case is important to spot x = /\a. C (f a)
         -- which comes up when C is a dictionary constructor and
@@ -569,7 +567,7 @@ reOrderCycle depth (bind : binds) pairs
         --
         -- However we *also* treat (\x. C p q) as a con-app-like thing,
         --      Note [Closure conversion]
-    is_con_app (Var v)    = isDataConWorkId v
+    is_con_app (Var v)    = isConLikeId v
     is_con_app (App f _)  = is_con_app f
     is_con_app (Lam _ e)  = is_con_app e
     is_con_app (Note _ e) = is_con_app e
@@ -577,7 +575,8 @@ reOrderCycle depth (bind : binds) pairs
 
 makeLoopBreaker :: Bool -> Id -> Id
 -- Set the loop-breaker flag: see Note [Weak loop breakers]
-makeLoopBreaker weak bndr = setIdOccInfo bndr (IAmALoopBreaker weak)
+makeLoopBreaker weak bndr 
+  = ASSERT2( isId bndr, ppr bndr ) setIdOccInfo bndr (IAmALoopBreaker weak)
 \end{code}
 
 Note [Complexity of loop breaking]
@@ -617,13 +616,14 @@ linear in the number of instance declarations.
 
 Note [INLINE pragmas]
 ~~~~~~~~~~~~~~~~~~~~~
-Never choose a function with an INLINE pramga as the loop breaker!  
+Avoid choosing a function with an INLINE pramga as the loop breaker!  
 If such a function is mutually-recursive with a non-INLINE thing,
 then the latter should be the loop-breaker.
 
-A particular case is wrappers generated by the demand analyser.
-If you make then into a loop breaker you may get an infinite 
-inlining loop.  For example:
+Usually this is just a question of optimisation. But a particularly
+bad case is wrappers generated by the demand analyser: if you make
+then into a loop breaker you may get an infinite inlining loop.  For
+example:
   rec {
         $wfoo x = ....foo x....
 
@@ -634,8 +634,36 @@ strict (and hence it gets an auto-generated wrapper).  Result: an
 infinite inlining in the importing scope.  So be a bit careful if you
 change this.  A good example is Tree.repTree in
 nofib/spectral/minimax. If the repTree wrapper is chosen as the loop
-breaker then compiling Game.hs goes into an infinite loop (this
-happened when we gave is_con_app a lower score than inline candidates).
+breaker then compiling Game.hs goes into an infinite loop.  This
+happened when we gave is_con_app a lower score than inline candidates:
+
+  Tree.repTree
+    = __inline_me (/\a. \w w1 w2 -> 
+                   case Tree.$wrepTree @ a w w1 w2 of
+                    { (# ww1, ww2 #) -> Branch @ a ww1 ww2 })
+  Tree.$wrepTree
+    = /\a w w1 w2 -> 
+      (# w2_smP, map a (Tree a) (Tree.repTree a w1 w) (w w2) #)
+
+Here we do *not* want to choose 'repTree' as the loop breaker.
+
+Note [DFuns should not be loop breakers]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+It's particularly bad to make a DFun into a loop breaker.  See
+Note [How instance declarations are translated] in TcInstDcls
+
+We give DFuns a higher score than ordinary CONLIKE things because 
+if there's a choice we want the DFun to be the non-looop breker. Eg
+ 
+rec { sc = /\ a \$dC. $fBWrap (T a) ($fCT @ a $dC)
+
+      $fCT :: forall a_afE. (Roman.C a_afE) => Roman.C (Roman.T a_afE)
+      {-# DFUN #-}
+      $fCT = /\a \$dC. MkD (T a) ((sc @ a $dC) |> blah) ($ctoF @ a $dC)
+    }
+
+Here 'sc' (the superclass) looks CONLIKE, but we'll never get to it
+if we can't unravel the DFun first.
 
 Note [Constructor applications]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -693,10 +721,14 @@ occAnalRhs :: OccEnv
                                 -- For non-recs the binder is alrady tagged
                                 -- with occurrence info
            -> (UsageDetails, CoreExpr)
+	      -- Returned usage details includes any INLINE rhs
 
 occAnalRhs env id rhs
-  = occAnal ctxt rhs
+  | isId id   = (addIdOccs rhs_usage (idUnfoldingVars id), rhs')
+  | otherwise = (rhs_usage, rhs')
+    	-- Include occurrences for the "extra RHS" from a CoreUnfolding
   where
+    (rhs_usage, rhs') = occAnal ctxt rhs
     ctxt | certainly_inline id = env
          | otherwise           = rhsCtxt env
         -- Note that we generally use an rhsCtxt.  This tells the occ anal n
@@ -722,14 +754,19 @@ occAnalRhs env id rhs
 
 
 \begin{code}
-addRuleUsage :: UsageDetails -> Id -> UsageDetails
+addRuleUsage :: UsageDetails -> Var -> UsageDetails
 -- Add the usage from RULES in Id to the usage
-addRuleUsage usage id
-  = foldVarSet add usage (idRuleVars id)
+addRuleUsage usage var 
+  | isId var  = addIdOccs usage (idRuleVars var)
+  | otherwise = usage
         -- idRuleVars here: see Note [Rule dependency info]
+
+addIdOccs :: UsageDetails -> VarSet -> UsageDetails
+addIdOccs usage id_set = foldVarSet add usage id_set
   where
-    add v u = addOneOcc u v NoOccInfo
-	-- Give a non-committal binder info (i.e manyOcc) because
+    add v u | isId v    = addOneOcc u v NoOccInfo
+            | otherwise = u
+	-- Give a non-committal binder info (i.e NoOccInfo) because
 	--   a) Many copies of the specialised thing can appear
 	--   b) We don't want to substitute a BIG expression inside a RULE
 	--	even if that's the only occurrence of the thing
@@ -774,11 +811,6 @@ occAnal _   expr@(Lit _) = (emptyDetails, expr)
 \end{code}
 
 \begin{code}
-occAnal env (Note InlineMe body)
-  = case occAnal env body of { (usage, body') ->
-    (mapVarEnv markMany usage, Note InlineMe body')
-    }
-
 occAnal env (Note note@(SCC _) body)
   = case occAnal env body of { (usage, body') ->
     (mapVarEnv markInsideSCC usage, Note note body')
@@ -791,7 +823,7 @@ occAnal env (Note note body)
 
 occAnal env (Cast expr co)
   = case occAnal env expr of { (usage, expr') ->
-    (markRhsUds env True usage, Cast expr' co)
+      (markManyIf (isRhsEnv env) usage, Cast expr' co)
         -- If we see let x = y `cast` co
         -- then mark y as 'Many' so that we don't
         -- immediately inline y again.
@@ -806,7 +838,7 @@ occAnal env app@(App _ _)
 --   (a) occurrences inside type lambdas only not marked as InsideLam
 --   (b) type variables not in environment
 
-occAnal env (Lam x body) | isTyVar x
+occAnal env (Lam x body) | isTyCoVar x
   = case occAnal env body of { (body_usage, body') ->
     (body_usage, Lam x body')
     }
@@ -823,7 +855,9 @@ occAnal env (Lam x body) | isTyVar x
 occAnal env expr@(Lam _ _)
   = case occAnal env_body body of { (body_usage, body') ->
     let
-        (final_usage, tagged_binders) = tagBinders body_usage binders
+        (final_usage, tagged_binders) = tagLamBinders body_usage binders'
+		      -- Use binders' to put one-shot info on the lambdas
+
         --      URGH!  Sept 99: we don't seem to be able to use binders' here, because
         --      we get linear-typed things in the resulting program that we can't handle yet.
         --      (e.g. PrelShow)  TODO
@@ -836,7 +870,8 @@ occAnal env expr@(Lam _ _)
     (really_final_usage,
      mkLams tagged_binders body') }
   where
-    env_body        = vanillaCtxt env        -- Body is (no longer) an RhsContext
+    env_body        = vanillaCtxt (trimOccEnv env binders)
+		        -- Body is (no longer) an RhsContext
     (binders, body) = collectBinders expr
     binders'        = oneShotGroup env binders
     linear          = all is_one_shot binders'
@@ -847,8 +882,7 @@ occAnal env (Case scrut bndr ty alts)
     case mapAndUnzip occ_anal_alt alts of { (alts_usage_s, alts')   ->
     let
         alts_usage  = foldr1 combineAltsUsageDetails alts_usage_s
-        alts_usage' = addCaseBndrUsage alts_usage
-        (alts_usage1, tagged_bndr) = tagBinder alts_usage' bndr
+        (alts_usage1, tagged_bndr) = tag_case_bndr alts_usage bndr
         total_usage = scrut_usage +++ alts_usage1
     in
     total_usage `seq` (total_usage, Case scrut' tagged_bndr ty alts') }}
@@ -862,20 +896,13 @@ occAnal env (Case scrut bndr ty alts)
         --      case x of w { (p,q) -> f w }
         -- into
         --      case x of w { (p,q) -> f (p,q) }
-    addCaseBndrUsage usage = case lookupVarEnv usage bndr of
-                                Nothing -> usage
-                                Just _  -> extendVarEnv usage bndr NoOccInfo
+    tag_case_bndr usage bndr
+      = case lookupVarEnv usage bndr of
+          Nothing -> (usage,                  setIdOccInfo bndr IAmDead)
+          Just _  -> (usage `delVarEnv` bndr, setIdOccInfo bndr NoOccInfo)
 
-    alt_env = mkAltEnv env bndr_swap
-        -- Consider     x = case v of { True -> (p,q); ... }
-        -- Then it's fine to inline p and q
-
-    bndr_swap = case scrut of
-		  Var v           -> Just (v, Var bndr)
-		  Cast (Var v) co -> Just (v, Cast (Var bndr) (mkSymCoercion co))
-		  _other          -> Nothing
-
-    occ_anal_alt = occAnalAlt alt_env bndr bndr_swap
+    alt_env      = mkAltEnv env scrut bndr
+    occ_anal_alt = occAnalAlt alt_env bndr
 
     occ_anal_scrut (Var v) (alt1 : other_alts)
         | not (null other_alts) || not (isDefaultAlt alt1)
@@ -886,9 +913,11 @@ occAnal env (Case scrut bndr ty alts)
 	= occAnal (vanillaCtxt env) scrut    -- No need for rhsCtxt
 
 occAnal env (Let bind body)
-  = case occAnal env body                of { (body_usage, body') ->
-    case occAnalBind env bind body_usage of { (final_usage, new_binds) ->
+  = case occAnal env_body body                    of { (body_usage, body') ->
+    case occAnalBind env env_body bind body_usage of { (final_usage, new_binds) ->
        (final_usage, mkLets new_binds body') }}
+  where
+    env_body = trimOccEnv env (bindersOf bind)
 
 occAnalArgs :: OccEnv -> [CoreExpr] -> (UsageDetails, [CoreExpr])
 occAnalArgs env args
@@ -908,13 +937,23 @@ occAnalApp :: OccEnv
 occAnalApp env (Var fun, args)
   = case args_stuff of { (args_uds, args') ->
     let
-        final_args_uds = markRhsUds env is_pap args_uds
+       final_args_uds = markManyIf (isRhsEnv env && is_exp) args_uds
+	  -- We mark the free vars of the argument of a constructor or PAP
+	  -- as "many", if it is the RHS of a let(rec).
+	  -- This means that nothing gets inlined into a constructor argument
+	  -- position, which is what we want.  Typically those constructor
+	  -- arguments are just variables, or trivial expressions.
+	  --
+	  -- This is the *whole point* of the isRhsEnv predicate
     in
     (fun_uds +++ final_args_uds, mkApps (Var fun) args') }
   where
     fun_uniq = idUnique fun
     fun_uds  = mkOneOcc env fun (valArgCount args > 0)
-    is_pap = isConLikeId fun || valArgCount args < idArity fun
+    is_exp = isExpandableApp fun (valArgCount args)
+    	   -- See Note [CONLIKE pragma] in BasicTypes
+	   -- The definition of is_exp should match that in
+	   -- Simplify.prepareRhs
 
                 -- Hack for build, fold, runST
     args_stuff  | fun_uniq == buildIdKey    = appSpecial env 2 [True,True]  args
@@ -946,21 +985,11 @@ occAnalApp env (fun, args)
     (final_uds, mkApps fun' args') }}
 
 
-markRhsUds :: OccEnv            -- Check if this is a RhsEnv
-           -> Bool              -- and this is true
-           -> UsageDetails      -- The do markMany on this
+markManyIf :: Bool              -- If this is true
+           -> UsageDetails      -- Then do markMany on this
            -> UsageDetails
--- We mark the free vars of the argument of a constructor or PAP
--- as "many", if it is the RHS of a let(rec).
--- This means that nothing gets inlined into a constructor argument
--- position, which is what we want.  Typically those constructor
--- arguments are just variables, or trivial expressions.
---
--- This is the *whole point* of the isRhsEnv predicate
-markRhsUds env is_pap arg_uds
-  | isRhsEnv env && is_pap = mapVarEnv markMany arg_uds
-  | otherwise              = arg_uds
-
+markManyIf True  uds = mapVarEnv markMany uds
+markManyIf False uds = uds
 
 appSpecial :: OccEnv
            -> Int -> CtxtTy     -- Argument number, and context to use for it
@@ -984,6 +1013,292 @@ appSpecial env n ctxt args
         (arg_uds +++ args_uds, arg':args') }}
 \end{code}
 
+
+Note [Binders in case alternatives]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+    case x of y { (a,b) -> f y }
+We treat 'a', 'b' as dead, because they don't physically occur in the
+case alternative.  (Indeed, a variable is dead iff it doesn't occur in
+its scope in the output of OccAnal.)  It really helps to know when
+binders are unused.  See esp the call to isDeadBinder in
+Simplify.mkDupableAlt
+
+In this example, though, the Simplifier will bring 'a' and 'b' back to
+life, beause it binds 'y' to (a,b) (imagine got inlined and
+scrutinised y).
+
+\begin{code}
+occAnalAlt :: OccEnv
+           -> CoreBndr
+           -> CoreAlt
+           -> (UsageDetails, Alt IdWithOccInfo)
+occAnalAlt env case_bndr (con, bndrs, rhs)
+  = let 
+        env' = trimOccEnv env bndrs
+    in 
+    case occAnal env' rhs of { (rhs_usage1, rhs1) ->
+    let
+	proxies = getProxies env' case_bndr 
+	(rhs_usage2, rhs2) = foldrBag wrapProxy (rhs_usage1, rhs1) proxies
+        (alt_usg, tagged_bndrs) = tagLamBinders rhs_usage2 bndrs
+        bndrs' = tagged_bndrs      -- See Note [Binders in case alternatives]
+    in
+    (alt_usg, (con, bndrs', rhs2)) }
+
+wrapProxy :: ProxyBind -> (UsageDetails, CoreExpr) -> (UsageDetails, CoreExpr)
+wrapProxy (bndr, rhs_var, co) (body_usg, body)
+  | not (bndr `usedIn` body_usg) 
+  = (body_usg, body)
+  | otherwise
+  = (body_usg' +++ rhs_usg, Let (NonRec tagged_bndr rhs) body)
+  where
+    (body_usg', tagged_bndr) = tagBinder body_usg bndr
+    rhs_usg = unitVarEnv rhs_var NoOccInfo	-- We don't need exact info
+    rhs = mkCoerceI co (Var rhs_var)
+\end{code}
+
+
+%************************************************************************
+%*                                                                      *
+                    OccEnv									
+%*                                                                      *
+%************************************************************************
+
+\begin{code}
+data OccEnv
+  = OccEnv { occ_encl  	  :: !OccEncl      -- Enclosing context information
+    	   , occ_ctxt  	  :: !CtxtTy       -- Tells about linearity
+	   , occ_proxy 	  :: ProxyEnv
+           , occ_rule_fvs :: ImpRuleUsage }
+
+
+-----------------------------
+-- OccEncl is used to control whether to inline into constructor arguments
+-- For example:
+--      x = (p,q)               -- Don't inline p or q
+--      y = /\a -> (p a, q a)   -- Still don't inline p or q
+--      z = f (p,q)             -- Do inline p,q; it may make a rule fire
+-- So OccEncl tells enought about the context to know what to do when
+-- we encounter a contructor application or PAP.
+
+data OccEncl
+  = OccRhs              -- RHS of let(rec), albeit perhaps inside a type lambda
+                        -- Don't inline into constructor args here
+  | OccVanilla          -- Argument of function, body of lambda, scruintee of case etc.
+                        -- Do inline into constructor args here
+
+instance Outputable OccEncl where
+  ppr OccRhs     = ptext (sLit "occRhs")
+  ppr OccVanilla = ptext (sLit "occVanilla")
+
+type CtxtTy = [Bool]
+        -- []           No info
+        --
+        -- True:ctxt    Analysing a function-valued expression that will be
+        --                      applied just once
+        --
+        -- False:ctxt   Analysing a function-valued expression that may
+        --                      be applied many times; but when it is,
+        --                      the CtxtTy inside applies
+
+initOccEnv :: [CoreRule] -> OccEnv
+initOccEnv rules = OccEnv { occ_encl  = OccVanilla
+	      	    	  , occ_ctxt  = []
+		    	  , occ_proxy = PE emptyVarEnv emptyVarSet
+                    	  , occ_rule_fvs = findImpRuleUsage rules }
+
+vanillaCtxt :: OccEnv -> OccEnv
+vanillaCtxt env = env { occ_encl = OccVanilla, occ_ctxt = [] }
+
+rhsCtxt :: OccEnv -> OccEnv
+rhsCtxt env = env { occ_encl = OccRhs, occ_ctxt = [] }
+
+setCtxtTy :: OccEnv -> CtxtTy -> OccEnv
+setCtxtTy env ctxt = env { occ_ctxt = ctxt }
+
+isRhsEnv :: OccEnv -> Bool
+isRhsEnv (OccEnv { occ_encl = OccRhs })     = True
+isRhsEnv (OccEnv { occ_encl = OccVanilla }) = False
+
+oneShotGroup :: OccEnv -> [CoreBndr] -> [CoreBndr]
+        -- The result binders have one-shot-ness set that they might not have had originally.
+        -- This happens in (build (\cn -> e)).  Here the occurrence analyser
+        -- linearity context knows that c,n are one-shot, and it records that fact in
+        -- the binder. This is useful to guide subsequent float-in/float-out tranformations
+
+oneShotGroup (OccEnv { occ_ctxt = ctxt }) bndrs
+  = go ctxt bndrs []
+  where
+    go _ [] rev_bndrs = reverse rev_bndrs
+
+    go (lin_ctxt:ctxt) (bndr:bndrs) rev_bndrs
+        | isId bndr = go ctxt bndrs (bndr':rev_bndrs)
+        where
+          bndr' | lin_ctxt  = setOneShotLambda bndr
+                | otherwise = bndr
+
+    go ctxt (bndr:bndrs) rev_bndrs = go ctxt bndrs (bndr:rev_bndrs)
+
+addAppCtxt :: OccEnv -> [Arg CoreBndr] -> OccEnv
+addAppCtxt env@(OccEnv { occ_ctxt = ctxt }) args
+  = env { occ_ctxt = replicate (valArgCount args) True ++ ctxt }
+\end{code}
+
+%************************************************************************
+%*                                                                      *
+                    ImpRuleUsage
+%*                                                                      *
+%************************************************************************
+
+\begin{code}
+type ImpRuleUsage = NameEnv UsageDetails
+  -- Maps an *imported* Id f to the UsageDetails for *local* Ids
+  -- used on the RHS for a *local* rule for f.
+\end{code}
+
+Note [ImpRuleUsage]
+~~~~~~~~~~~~~~~~
+Consider this, where A.g is an imported Id
+ 
+   f x = A.g x
+   {-# RULE "foo" forall x. A.g x = f x #-}
+
+Obviously there's a loop, but the danger is that the occurrence analyser
+will say that 'f' is not a loop breaker.  Then the simplifier will 
+optimise 'f' to
+   f x = f x
+and then gaily inline 'f'.  Result infinite loop.  More realistically, 
+these kind of rules are generated when specialising imported INLINABLE Ids.
+
+Solution: treat an occurrence of A.g as an occurrence of all the local Ids
+that occur on the RULE's RHS.  This mapping from imported Id to local Ids
+is held in occ_rule_fvs.
+
+\begin{code}
+findImpRuleUsage :: [CoreRule] -> ImpRuleUsage
+-- Find the *local* Ids that can be reached transitively,
+-- via local rules, from each *imported* Id.  
+-- Sigh: this function seems more complicated than it is really worth
+findImpRuleUsage rules
+  = mkNameEnv [ (f, mapUFM (\_ -> NoOccInfo) ls)
+              | f <- rule_names 
+              , let ls = find_lcl_deps f
+              , not (isEmptyVarSet ls) ]
+  where
+    rule_names    = map ru_fn rules
+    rule_name_set = mkNameSet rule_names
+
+    imp_deps :: NameEnv VarSet
+      -- (f,g) means imported Id 'g' appears in RHS of 
+      --       rule for imported Id 'f', *or* does so transitively
+    imp_deps = foldr add_imp emptyNameEnv rules
+    add_imp rule acc = extendNameEnv_C unionVarSet acc (ru_fn rule)
+                             (exprSomeFreeVars keep_imp (ru_rhs rule))
+    keep_imp v = isId v && (idName v `elemNameSet` rule_name_set)
+    full_imp_deps = transClosureFV (ufmToList imp_deps)
+
+    lcl_deps :: NameEnv VarSet
+      -- (f, l) means localId 'l' appears immediately 
+      --        in the RHS of a rule for imported Id 'f'
+      -- Remember, many rules might have the same ru_fn
+      -- so we do need to fold 
+    lcl_deps = foldr add_lcl emptyNameEnv rules
+    add_lcl rule acc = extendNameEnv_C unionVarSet acc (ru_fn rule)
+                                       (exprFreeIds (ru_rhs rule))
+
+    find_lcl_deps :: Name -> VarSet
+    find_lcl_deps f 
+      = foldVarSet (unionVarSet . lookup_lcl . idName) (lookup_lcl f) 
+                   (lookupNameEnv full_imp_deps f `orElse` emptyVarSet)
+    lookup_lcl :: Name -> VarSet
+    lookup_lcl g = lookupNameEnv lcl_deps g `orElse` emptyVarSet
+
+-------------
+transClosureFV :: Uniquable a => [(a, VarSet)] -> UniqFM VarSet
+-- If (f,g), (g,h) are in the input, then (f,h) is in the output
+transClosureFV fv_list
+  | no_change = env
+  | otherwise = transClosureFV new_fv_list
+  where
+    env = listToUFM fv_list
+    (no_change, new_fv_list) = mapAccumL bump True fv_list
+    bump no_change (b,fvs)
+      | no_change_here = (no_change, (b,fvs))
+      | otherwise      = (False,     (b,new_fvs))
+      where
+        (new_fvs, no_change_here) = extendFvs env fvs
+
+-------------
+extendFvs :: UniqFM VarSet -> VarSet -> (VarSet, Bool)
+-- (extendFVs env s) returns 
+--     (s `union` env(s), env(s) `subset` s)
+extendFvs env s
+  = foldVarSet add (s, True) s
+  where
+    add v (vs, no_change_so_far)
+        = case lookupUFM env v of
+            Just fvs | not (fvs `subVarSet` s) 
+                     -> (vs `unionVarSet` fvs, False)
+            _        -> (vs, no_change_so_far)
+\end{code}
+
+
+%************************************************************************
+%*                                                                      *
+                    ProxyEnv									
+%*                                                                      *
+%************************************************************************
+
+\begin{code}
+data ProxyEnv 
+   = PE (IdEnv (Id, [(Id,CoercionI)])) VarSet
+     	-- Main env, and its free variables (of both range and domain)
+\end{code}
+
+Note [ProxyEnv]
+~~~~~~~~~~~~~~~
+The ProxyEnv keeps track of the connection between case binders and
+scrutinee.  Specifically, if
+     sc |-> (sc, [...(cb, co)...])
+is a binding in the ProxyEnv, then
+     cb = sc |> coi
+Typically we add such a binding when encountering the case expression
+     case (sc |> coi) of cb { ... }
+
+Things to note:
+  * The domain of the ProxyEnv is the variable (or casted variable) 
+    scrutinees of enclosing cases.  This is additionally used
+    to ensure we gather occurrence info even for GlobalId scrutinees;
+    see Note [Binder swap for GlobalId scrutinee]
+
+  * The ProxyEnv is just an optimisation; you can throw away any 
+    element without losing correctness.  And we do so when pushing
+    it inside a binding (see trimProxyEnv).
+
+  * One scrutinee might map to many case binders:  Eg
+      case sc of cb1 { DEFAULT -> ....case sc of cb2 { ... } .. }
+
+INVARIANTS
+ * If sc1 |-> (sc2, [...(cb, co)...]), then sc1==sc2
+   It's a UniqFM and we sometimes need the domain Id
+
+ * Any particular case binder 'cb' occurs only once in entire range
+
+ * No loops
+
+The Main Reason for having a ProxyEnv is so that when we encounter
+    case e of cb { pi -> ri }
+we can find all the in-scope variables derivable from 'cb', 
+and effectively add let-bindings for them (or at least for the
+ones *mentioned* in ri) thus:
+    case e of cb { pi -> let { x = ..cb..; y = ...cb.. }
+                         in ri }
+In this way we'll replace occurrences of 'x', 'y' with 'cb',
+which implements the Binder-swap idea (see Note [Binder swap])
+
+The function getProxies finds these bindings; then we 
+add just the necessary ones, using wrapProxy. 
 
 Note [Binder swap]
 ~~~~~~~~~~~~~~~~~~
@@ -1040,22 +1355,50 @@ same simplifier pass that reduced (f v) to v.
 
 I think this is just too bad.  CSE will recover some of it.
 
+Note [Case of cast]
+~~~~~~~~~~~~~~~~~~~
+Consider        case (x `cast` co) of b { I# ->
+                ... (case (x `cast` co) of {...}) ...
+We'd like to eliminate the inner case.  That is the motivation for
+equation (2) in Note [Binder swap].  When we get to the inner case, we
+inline x, cancel the casts, and away we go.
+
 Note [Binder swap on GlobalId scrutinees]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When the scrutinee is a GlobalId we must take care in two ways
 
  i) In order to *know* whether 'x' occurs free in the RHS, we need its
     occurrence info. BUT, we don't gather occurrence info for
-    GlobalIds.  That's what the (small) occ_scrut_ids set in OccEnv is
+    GlobalIds.  That's one use for the (small) occ_proxy env in OccEnv is
     for: it says "gather occurrence info for these.
 
  ii) We must call localiseId on 'x' first, in case it's a GlobalId, or
      has an External Name. See, for example, SimplEnv Note [Global Ids in
      the substitution].
 
+Note [getProxies is subtle]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The code for getProxies isn't all that obvious. Consider
+
+  case v |> cov  of x { DEFAULT ->
+  case x |> cox1 of y { DEFAULT ->
+  case x |> cox2 of z { DEFAULT -> r
+
+These will give us a ProxyEnv looking like:
+  x |-> (x, [(y, cox1), (z, cox2)])
+  v |-> (v, [(x, cov)])
+
+From this we want to extract the bindings
+    x = z |> sym cox2
+    v = x |> sym cov
+    y = x |> cox1
+
+Notice that later bindings may mention earlier ones, and that
+we need to go "both ways".
+
 Historical note [no-case-of-case]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We *used* to suppress the binder-swap in case expressoins when 
+We *used* to suppress the binder-swap in case expressions when 
 -fno-case-of-case is on.  Old remarks:
     "This happens in the first simplifier pass,
     and enhances full laziness.  Here's the bad case:
@@ -1114,159 +1457,117 @@ It's fixed by doing the binder-swap in OccAnal because we can do the
 binder-swap unconditionally and still get occurrence analysis
 information right.
 
-Note [Case of cast]
-~~~~~~~~~~~~~~~~~~~
-Consider        case (x `cast` co) of b { I# ->
-                ... (case (x `cast` co) of {...}) ...
-We'd like to eliminate the inner case.  That is the motivation for
-equation (2) in Note [Binder swap].  When we get to the inner case, we
-inline x, cancel the casts, and away we go.
-
-Note [Binders in case alternatives]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Consider
-    case x of y { (a,b) -> f y }
-We treat 'a', 'b' as dead, because they don't physically occur in the
-case alternative.  (Indeed, a variable is dead iff it doesn't occur in
-its scope in the output of OccAnal.)  This invariant is It really
-helpe to know when binders are unused.  See esp the call to
-isDeadBinder in Simplify.mkDupableAlt
-
-In this example, though, the Simplifier will bring 'a' and 'b' back to
-life, beause it binds 'y' to (a,b) (imagine got inlined and
-scrutinised y).
-
 \begin{code}
-occAnalAlt :: OccEnv
-           -> CoreBndr
-	   -> Maybe (Id, CoreExpr)  -- Note [Binder swap]
-           -> CoreAlt
-           -> (UsageDetails, Alt IdWithOccInfo)
-occAnalAlt env case_bndr mb_scrut_var (con, bndrs, rhs)
-  = case occAnal env rhs of { (rhs_usage, rhs') ->
-    let
-        (alt_usg, tagged_bndrs) = tagBinders rhs_usage bndrs
-        bndrs' = tagged_bndrs      -- See Note [Binders in case alternatives]
-    in
-    case mb_scrut_var of
-	Just (scrut_var, scrut_rhs)		-- See Note [Binder swap]
-	  | scrut_var `localUsedIn` alt_usg	-- (a) Fast path, usually false
-	  , not (any shadowing bndrs)		-- (b) 
-	  -> (addOneOcc usg_wo_scrut case_bndr NoOccInfo,
-			-- See Note [Case binder usage] for the NoOccInfo
-	      (con, bndrs', Let (NonRec scrut_var2 scrut_rhs) rhs'))
-	  where
-	   scrut_var1 = mkLocalId (localiseName (idName scrut_var)) (idType scrut_var)
-			-- Localise the scrut_var before shadowing it; we're making a 
-			-- new binding for it, and it might have an External Name, or
-			-- even be a GlobalId; Note [Binder swap on GlobalId scrutinees]
-	   	      	-- Also we don't want any INLILNE or NOINLINE pragmas!
-
-	   (usg_wo_scrut, scrut_var2) = tagBinder alt_usg scrut_var1
-	   shadowing bndr = bndr `elemVarSet` rhs_fvs
-	   rhs_fvs = exprFreeVars scrut_rhs
-
-	_other -> (alt_usg, (con, bndrs', rhs')) }
-\end{code}
-
-
-%************************************************************************
-%*                                                                      *
-\subsection[OccurAnal-types]{OccEnv}
-%*                                                                      *
-%************************************************************************
-
-\begin{code}
-data OccEnv
-  = OccEnv { occ_encl 	   :: !OccEncl      -- Enclosing context information
-    	   , occ_ctxt 	   :: !CtxtTy       -- Tells about linearity
-	   , occ_scrut_ids :: !GblScrutIds }
-
-type GblScrutIds = IdSet  -- GlobalIds that are scrutinised, and for which
-     		   	  -- we want to gather occurence info; see
-			  -- Note [Binder swap for GlobalId scrutinee]
-			  -- No need to prune this if there's a shadowing binding
-			  -- because it's OK for it to be too big
-
--- OccEncl is used to control whether to inline into constructor arguments
--- For example:
---      x = (p,q)               -- Don't inline p or q
---      y = /\a -> (p a, q a)   -- Still don't inline p or q
---      z = f (p,q)             -- Do inline p,q; it may make a rule fire
--- So OccEncl tells enought about the context to know what to do when
--- we encounter a contructor application or PAP.
-
-data OccEncl
-  = OccRhs              -- RHS of let(rec), albeit perhaps inside a type lambda
-                        -- Don't inline into constructor args here
-  | OccVanilla          -- Argument of function, body of lambda, scruintee of case etc.
-                        -- Do inline into constructor args here
-
-type CtxtTy = [Bool]
-        -- []           No info
-        --
-        -- True:ctxt    Analysing a function-valued expression that will be
-        --                      applied just once
-        --
-        -- False:ctxt   Analysing a function-valued expression that may
-        --                      be applied many times; but when it is,
-        --                      the CtxtTy inside applies
-
-initOccEnv :: OccEnv
-initOccEnv = OccEnv { occ_encl = OccRhs
-	      	    , occ_ctxt = []
-		    , occ_scrut_ids = emptyVarSet }
-
-vanillaCtxt :: OccEnv -> OccEnv
-vanillaCtxt env = OccEnv { occ_encl = OccVanilla, occ_ctxt = []
-	      	         , occ_scrut_ids = occ_scrut_ids env }
-
-rhsCtxt :: OccEnv -> OccEnv
-rhsCtxt env = OccEnv { occ_encl = OccRhs, occ_ctxt = []
-	      	     , occ_scrut_ids = occ_scrut_ids env }
-
-mkAltEnv :: OccEnv -> Maybe (Id, CoreExpr) -> OccEnv
--- Does two things: a) makes the occ_ctxt = OccVanilla
--- 	    	    b) extends the scrut_ids if necessary
-mkAltEnv env (Just (scrut_id, _))
-  | not (isLocalId scrut_id) 
-  = OccEnv { occ_encl      = OccVanilla
-	   , occ_scrut_ids = extendVarSet (occ_scrut_ids env) scrut_id
-	   , occ_ctxt      = occ_ctxt env }
-mkAltEnv env _
-  | isRhsEnv env = env { occ_encl = OccVanilla }
-  | otherwise    = env
-
-setCtxtTy :: OccEnv -> CtxtTy -> OccEnv
-setCtxtTy env ctxt = env { occ_ctxt = ctxt }
-
-isRhsEnv :: OccEnv -> Bool
-isRhsEnv (OccEnv { occ_encl = OccRhs })     = True
-isRhsEnv (OccEnv { occ_encl = OccVanilla }) = False
-
-oneShotGroup :: OccEnv -> [CoreBndr] -> [CoreBndr]
-        -- The result binders have one-shot-ness set that they might not have had originally.
-        -- This happens in (build (\cn -> e)).  Here the occurrence analyser
-        -- linearity context knows that c,n are one-shot, and it records that fact in
-        -- the binder. This is useful to guide subsequent float-in/float-out tranformations
-
-oneShotGroup (OccEnv { occ_ctxt = ctxt }) bndrs
-  = go ctxt bndrs []
+extendProxyEnv :: ProxyEnv -> Id -> CoercionI -> Id -> ProxyEnv
+-- (extendPE x co y) typically arises from 
+--		  case (x |> co) of y { ... }
+-- It extends the proxy env with the binding 
+-- 	               y = x |> co
+extendProxyEnv pe scrut co case_bndr
+  | scrut == case_bndr = PE env1 fvs1	-- If case_bndr shadows scrut,
+  | otherwise          = PE env2 fvs2	--   don't extend
   where
-    go _ [] rev_bndrs = reverse rev_bndrs
+    PE env1 fvs1 = trimProxyEnv pe [case_bndr]
+    env2 = extendVarEnv_Acc add single env1 scrut1 (case_bndr,co)
+    single cb_co = (scrut1, [cb_co]) 
+    add cb_co (x, cb_cos) = (x, cb_co:cb_cos)
+    fvs2 = fvs1 `unionVarSet`  freeVarsCoI co
+		`extendVarSet` case_bndr
+		`extendVarSet` scrut1
 
-    go (lin_ctxt:ctxt) (bndr:bndrs) rev_bndrs
-        | isId bndr = go ctxt bndrs (bndr':rev_bndrs)
-        where
-          bndr' | lin_ctxt  = setOneShotLambda bndr
-                | otherwise = bndr
+    scrut1 = mkLocalId (localiseName (idName scrut)) (idType scrut)
+	-- Localise the scrut_var before shadowing it; we're making a 
+	-- new binding for it, and it might have an External Name, or
+	-- even be a GlobalId; Note [Binder swap on GlobalId scrutinees]
+	-- Also we don't want any INLILNE or NOINLINE pragmas!
 
-    go ctxt (bndr:bndrs) rev_bndrs = go ctxt bndrs (bndr:rev_bndrs)
+-----------
+type ProxyBind = (Id, Id, CoercionI)
 
-addAppCtxt :: OccEnv -> [Arg CoreBndr] -> OccEnv
-addAppCtxt env@(OccEnv { occ_ctxt = ctxt }) args
-  = env { occ_ctxt = replicate (valArgCount args) True ++ ctxt }
+getProxies :: OccEnv -> Id -> Bag ProxyBind
+-- Return a bunch of bindings [...(xi,ei)...] 
+-- such that  let { ...; xi=ei; ... } binds the xi using y alone
+-- See Note [getProxies is subtle]
+getProxies (OccEnv { occ_proxy = PE pe _ }) case_bndr
+  = -- pprTrace "wrapProxies" (ppr case_bndr) $
+    go_fwd case_bndr
+  where
+    fwd_pe :: IdEnv (Id, CoercionI)
+    fwd_pe = foldVarEnv add1 emptyVarEnv pe
+           where
+             add1 (x,ycos) env = foldr (add2 x) env ycos
+             add2 x (y,co) env = extendVarEnv env y (x,co)
+
+    go_fwd :: Id -> Bag ProxyBind
+	-- Return bindings derivable from case_bndr
+    go_fwd case_bndr = -- pprTrace "go_fwd" (vcat [ppr case_bndr, text "fwd_pe =" <+> ppr fwd_pe, 
+                       --                         text "pe =" <+> ppr pe]) $ 
+                       go_fwd' case_bndr
+
+    go_fwd' case_bndr
+        | Just (scrut, co) <- lookupVarEnv fwd_pe case_bndr
+        = unitBag (scrut,  case_bndr, mkSymCoI co)
+	  `unionBags` go_fwd scrut
+          `unionBags` go_bwd scrut [pr | pr@(cb,_) <- lookup_bwd scrut
+                                       , cb /= case_bndr]
+        | otherwise 
+        = emptyBag
+
+    lookup_bwd :: Id -> [(Id, CoercionI)]
+	-- Return case_bndrs that are connected to scrut 
+    lookup_bwd scrut = case lookupVarEnv pe scrut of
+          		  Nothing          -> []
+	  		  Just (_, cb_cos) -> cb_cos
+
+    go_bwd :: Id -> [(Id, CoercionI)] -> Bag ProxyBind
+    go_bwd scrut cb_cos = foldr (unionBags . go_bwd1 scrut) emptyBag cb_cos
+
+    go_bwd1 :: Id -> (Id, CoercionI) -> Bag ProxyBind
+    go_bwd1 scrut (case_bndr, co) 
+       = -- pprTrace "go_bwd1" (ppr case_bndr) $
+         unitBag (case_bndr, scrut, co)
+	 `unionBags` go_bwd case_bndr (lookup_bwd case_bndr)
+
+-----------
+mkAltEnv :: OccEnv -> CoreExpr -> Id -> OccEnv
+-- Does two things: a) makes the occ_ctxt = OccVanilla
+-- 	    	    b) extends the ProxyEnv if possible
+mkAltEnv env scrut cb
+  = env { occ_encl  = OccVanilla, occ_proxy = pe' }
+  where
+    pe  = occ_proxy env
+    pe' = case scrut of
+             Var v           -> extendProxyEnv pe v (IdCo (idType v)) cb
+             Cast (Var v) co -> extendProxyEnv pe v (ACo co)          cb
+	     _other          -> trimProxyEnv pe [cb]
+
+-----------
+trimOccEnv :: OccEnv -> [CoreBndr] -> OccEnv
+trimOccEnv env bndrs = env { occ_proxy = trimProxyEnv (occ_proxy env) bndrs }
+
+-----------
+trimProxyEnv :: ProxyEnv -> [CoreBndr] -> ProxyEnv
+-- We are about to push this ProxyEnv inside a binding for 'bndrs'
+-- So dump any ProxyEnv bindings which mention any of the bndrs
+trimProxyEnv (PE pe fvs) bndrs 
+  | not (bndr_set `intersectsVarSet` fvs) 
+  = PE pe fvs
+  | otherwise
+  = PE pe' (fvs `minusVarSet` bndr_set)
+  where
+    pe' = mapVarEnv trim pe
+    bndr_set = mkVarSet bndrs
+    trim (scrut, cb_cos) | scrut `elemVarSet` bndr_set = (scrut, [])
+			 | otherwise = (scrut, filterOut discard cb_cos)
+    discard (cb,co) = bndr_set `intersectsVarSet` 
+                      extendVarSet (freeVarsCoI co) cb
+                             
+-----------
+freeVarsCoI :: CoercionI -> VarSet
+freeVarsCoI (IdCo t) = tyVarsOfType t
+freeVarsCoI (ACo co) = tyVarsOfType co
 \end{code}
+
 
 %************************************************************************
 %*                                                                      *
@@ -1296,23 +1597,26 @@ addOneOcc usage id info
 emptyDetails :: UsageDetails
 emptyDetails = (emptyVarEnv :: UsageDetails)
 
-localUsedIn, usedIn :: Id -> UsageDetails -> Bool
-v `localUsedIn` details = v `elemVarEnv` details
-v `usedIn`      details =  isExportedId v || v `localUsedIn` details
+usedIn :: Id -> UsageDetails -> Bool
+v `usedIn` details = isExportedId v || v `elemVarEnv` details
 
 type IdWithOccInfo = Id
 
-tagBinders :: UsageDetails          -- Of scope
-           -> [Id]                  -- Binders
-           -> (UsageDetails,        -- Details with binders removed
-              [IdWithOccInfo])    -- Tagged binders
-
-tagBinders usage binders
- = let
-     usage' = usage `delVarEnvList` binders
-     uss    = map (setBinderOcc usage) binders
-   in
-   usage' `seq` (usage', uss)
+tagLamBinders :: UsageDetails          -- Of scope
+              -> [Id]                  -- Binders
+              -> (UsageDetails,        -- Details with binders removed
+                 [IdWithOccInfo])    -- Tagged binders
+-- Used for lambda and case binders
+-- It copes with the fact that lambda bindings can have InlineRule 
+-- unfoldings, used for join points
+tagLamBinders usage binders = usage' `seq` (usage', bndrs')
+  where
+    (usage', bndrs') = mapAccumR tag_lam usage binders
+    tag_lam usage bndr = (usage2, setBinderOcc usage bndr)
+      where
+        usage1 = usage `delVarEnv` bndr
+        usage2 | isId bndr = addIdOccs usage1 (idUnfoldingVars bndr)
+               | otherwise = usage1
 
 tagBinder :: UsageDetails           -- Of scope
           -> Id                     -- Binders
@@ -1328,7 +1632,7 @@ tagBinder usage binder
 
 setBinderOcc :: UsageDetails -> CoreBndr -> CoreBndr
 setBinderOcc usage bndr
-  | isTyVar bndr      = bndr
+  | isTyCoVar bndr    = bndr
   | isExportedId bndr = case idOccInfo bndr of
                           NoOccInfo -> bndr
                           _         -> setIdOccInfo bndr NoOccInfo
@@ -1352,8 +1656,11 @@ setBinderOcc usage bndr
 mkOneOcc :: OccEnv -> Id -> InterestingCxt -> UsageDetails
 mkOneOcc env id int_cxt
   | isLocalId id = unitVarEnv id (OneOcc False True int_cxt)
-  | id `elemVarSet` occ_scrut_ids env = unitVarEnv id NoOccInfo
-  | otherwise       		      = emptyDetails
+  | PE env _ <- occ_proxy env
+  , id `elemVarEnv` env = unitVarEnv id NoOccInfo
+  | Just uds <- lookupNameEnv (occ_rule_fvs env) (idName id)
+  = uds
+  | otherwise           = emptyDetails
 
 markMany, markInsideLam, markInsideSCC :: OccInfo -> OccInfo
 

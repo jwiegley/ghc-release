@@ -1,6 +1,9 @@
-{-# OPTIONS -fallow-undecidable-instances #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}	    -- Temporary, I hope.  SLPJ Aug08
--- Needed for the same reasons as in Reader, State etc
+-- Undecidable instances needed for the same reasons as in Reader, State etc:
+{-# LANGUAGE UndecidableInstances #-}
+-- De-orphaning this module is tricky:
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+-- To handle instances moved to base:
+{-# LANGUAGE CPP #-}
 
 {- |
 Module      :  Control.Monad.Error
@@ -61,6 +64,10 @@ import Control.Monad.RWS.Class
 
 import Control.Monad.Instances ()
 
+-- | Note: this instance does not satisfy the second 'MonadPlus' law
+--
+-- > v >> mzero   =  mzero
+--
 instance MonadPlus IO where
     mzero       = ioError (userError "mzero")
     m `mplus` n = m `catch` \_ -> n
@@ -72,23 +79,28 @@ instance MonadError IOError IO where
 -- ---------------------------------------------------------------------------
 -- Our parameterizable error monad
 
-instance (Error e) => Monad (Either e) where
+#if !(MIN_VERSION_base(4,2,1))
+
+-- These instances are in base-4.3
+
+instance Monad (Either e) where
     return        = Right
     Left  l >>= _ = Left l
     Right r >>= k = k r
-    fail msg      = Left (strMsg msg)
 
-instance (Error e) => MonadPlus (Either e) where
-    mzero            = Left noMsg
-    Left _ `mplus` n = n
-    m      `mplus` _ = m
-
-instance (Error e) => MonadFix (Either e) where
+instance MonadFix (Either e) where
     mfix f = let
         a = f $ case a of
             Right r -> r
             _       -> error "empty mfix argument"
         in a
+
+#endif /* base to 4.2.0.x */
+
+instance (Error e) => MonadPlus (Either e) where
+    mzero            = Left noMsg
+    Left _ `mplus` n = n
+    m      `mplus` _ = m
 
 instance (Error e) => MonadError e (Either e) where
     throwError             = Left

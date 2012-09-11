@@ -6,13 +6,6 @@
 The @match@ function
 
 \begin{code}
-{-# OPTIONS -fno-warn-incomplete-patterns #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module Match ( match, matchEquations, matchWrapper, matchSimply, matchSinglePat ) where
 
 #include "HsVersions.h"
@@ -35,7 +28,6 @@ import Id
 import DataCon
 import MatchCon
 import MatchLit
-import PrelInfo
 import Type
 import TysWiredIn
 import ListSetOps
@@ -43,9 +35,10 @@ import SrcLoc
 import Maybes
 import Util
 import Name
-import FiniteMap
 import Outputable
 import FastString
+
+import qualified Data.Map as Map
 \end{code}
 
 This function is a wrapper of @match@, it must be called from all the parts where 
@@ -293,7 +286,7 @@ match vars@(v:_) ty eqns
        ; let grouped = groupEquations tidy_eqns
 
          -- print the view patterns that are commoned up to help debug
-       ; ifOptM Opt_D_dump_view_pattern_commoning (debug grouped)
+       ; ifDOptM Opt_D_dump_view_pattern_commoning (debug grouped)
 
 	; match_results <- mapM match_group grouped
 	; return (adjustMatchResult (foldr1 (.) aux_binds) $
@@ -303,11 +296,11 @@ match vars@(v:_) ty eqns
     dropGroup = map snd
 
     match_group :: [(PatGroup,EquationInfo)] -> DsM MatchResult
+    match_group [] = panic "match_group"
     match_group eqns@((group,_) : _)
         = case group of
             PgCon _    -> matchConFamily  vars ty (subGroup [(c,e) | (PgCon c, e) <- eqns])
             PgLit _    -> matchLiterals   vars ty (subGroup [(l,e) | (PgLit l, e) <- eqns])
-
             PgAny      -> matchVariables  vars ty (dropGroup eqns)
             PgN _      -> matchNPats      vars ty (dropGroup eqns)
             PgNpK _    -> matchNPlusKPats vars ty (dropGroup eqns)
@@ -334,20 +327,26 @@ matchVariables :: [Id] -> Type -> [EquationInfo] -> DsM MatchResult
 -- Real true variables, just like in matchVar, SLPJ p 94
 -- No binding to do: they'll all be wildcards by now (done in tidy)
 matchVariables (_:vars) ty eqns = match vars ty (shiftEqns eqns)
+matchVariables [] _ _ = panic "matchVariables"
 
 matchBangs :: [Id] -> Type -> [EquationInfo] -> DsM MatchResult
 matchBangs (var:vars) ty eqns
-  = do	{ match_result <- match (var:vars) ty (map decomposeFirst_Bang eqns)
+  = do	{ match_result <- match (var:vars) ty $
+                          map (decomposeFirstPat getBangPat) eqns
 	; return (mkEvalMatchResult var ty match_result) }
+matchBangs [] _ _ = panic "matchBangs"
 
 matchCoercion :: [Id] -> Type -> [EquationInfo] -> DsM MatchResult
 -- Apply the coercion to the match variable and then match that
 matchCoercion (var:vars) ty (eqns@(eqn1:_))
   = do	{ let CoPat co pat _ = firstPat eqn1
-	; var' <- newUniqueId (idName var) (hsPatType pat)
-	; match_result <- match (var':vars) ty (map decomposeFirst_Coercion eqns)
-	; rhs <- dsCoercion co (return (Var var))
-	; return (mkCoLetMatchResult (NonRec var' rhs) match_result) }
+	; var' <- newUniqueId var (hsPatType pat)
+	; match_result <- match (var':vars) ty $
+                          map (decomposeFirstPat getCoPat) eqns
+	; co' <- dsHsWrapper co
+        ; let rhs' = co' (Var var)
+	; return (mkCoLetMatchResult (NonRec var' rhs') match_result) }
+matchCoercion _ _ _ = panic "matchCoercion"
 
 matchView :: [Id] -> Type -> [EquationInfo] -> DsM MatchResult
 -- Apply the view function to the match variable and then match that
@@ -357,23 +356,27 @@ matchView (var:vars) ty (eqns@(eqn1:_))
          -- to figure out the type of the fresh variable
          let ViewPat viewExpr (L _ pat) _ = firstPat eqn1
          -- do the rest of the compilation 
-	; var' <- newUniqueId (idName var) (hsPatType pat)
-	; match_result <- match (var':vars) ty (map decomposeFirst_View eqns)
+	; var' <- newUniqueId var (hsPatType pat)
+	; match_result <- match (var':vars) ty $
+                          map (decomposeFirstPat getViewPat) eqns
          -- compile the view expressions
-       ; viewExpr' <- dsLExpr viewExpr
+        ; viewExpr' <- dsLExpr viewExpr
 	; return (mkViewMatchResult var' viewExpr' var match_result) }
+matchView _ _ _ = panic "matchView"
 
 -- decompose the first pattern and leave the rest alone
 decomposeFirstPat :: (Pat Id -> Pat Id) -> EquationInfo -> EquationInfo
 decomposeFirstPat extractpat (eqn@(EqnInfo { eqn_pats = pat : pats }))
 	= eqn { eqn_pats = extractpat pat : pats}
+decomposeFirstPat _ _ = panic "decomposeFirstPat"
 
-decomposeFirst_Coercion, decomposeFirst_Bang, decomposeFirst_View :: EquationInfo -> EquationInfo
-
-decomposeFirst_Coercion = decomposeFirstPat (\ (CoPat _ pat _) -> pat)
-decomposeFirst_Bang     = decomposeFirstPat (\ (BangPat pat  ) -> unLoc pat)
-decomposeFirst_View     = decomposeFirstPat (\ (ViewPat _ pat _) -> unLoc pat)
-
+getCoPat, getBangPat, getViewPat :: Pat Id -> Pat Id
+getCoPat (CoPat _ pat _)     = pat
+getCoPat _                   = panic "getCoPat"
+getBangPat (BangPat pat  )   = unLoc pat
+getBangPat _                 = panic "getBangPat"
+getViewPat (ViewPat _ pat _) = unLoc pat
+getViewPat _                 = panic "getBangPat"
 \end{code}
 
 %************************************************************************
@@ -433,9 +436,12 @@ tidyEqnInfo :: Id -> EquationInfo
 	--	NPlusKPat
 	-- but no other
 
-tidyEqnInfo v eqn@(EqnInfo { eqn_pats = pat : pats }) = do
-    (wrap, pat') <- tidy1 v pat
-    return (wrap, eqn { eqn_pats = do pat' : pats })
+tidyEqnInfo _ (EqnInfo { eqn_pats = [] }) 
+  = panic "tidyEqnInfo"
+
+tidyEqnInfo v eqn@(EqnInfo { eqn_pats = pat : pats })
+  = do { (wrap, pat') <- tidy1 v pat
+       ; return (wrap, eqn { eqn_pats = do pat' : pats }) }
 
 tidy1 :: Id 			-- The Id being scrutinised
       -> Pat Id 		-- The pattern against which it is to be matched
@@ -463,8 +469,8 @@ tidy1 v (VarPat var)
   = return (wrapBind var v, WildPat (idType var)) 
 
 tidy1 v (VarPatOut var binds)
-  = do	{ prs <- dsLHsBinds binds
-	; return (wrapBind var v . mkCoreLet (Rec prs),
+  = do	{ ds_ev_binds <- dsTcEvBinds binds
+	; return (wrapBind var v . wrapDsEvBinds ds_ev_binds,
 		  WildPat (idType var)) }
 
 	-- case v of { x@p -> mr[] }
@@ -699,21 +705,14 @@ matchEquations  :: HsMatchContext Name
 		-> [Id]	-> [EquationInfo] -> Type
 		-> DsM CoreExpr
 matchEquations ctxt vars eqns_info rhs_ty
-  = do	{ dflags <- getDOptsDs
-	; locn   <- getSrcSpanDs
-	; let   ds_ctxt      = DsMatchContext ctxt locn
+  = do	{ locn <- getSrcSpanDs
+	; let   ds_ctxt   = DsMatchContext ctxt locn
 		error_doc = matchContextErrString ctxt
 
-	; match_result <- match_fun dflags ds_ctxt vars rhs_ty eqns_info
+	; match_result <- matchCheck ds_ctxt vars rhs_ty eqns_info
 
 	; fail_expr <- mkErrorAppDs pAT_ERROR_ID rhs_ty error_doc
 	; extractMatchResult match_result fail_expr }
-  where 
-    match_fun dflags ds_ctxt
-       = case ctxt of 
-           LambdaExpr | dopt Opt_WarnSimplePatterns dflags -> matchCheck ds_ctxt
-                      | otherwise                          -> match
-           _                                               -> matchCheck ds_ctxt
 \end{code}
 
 %************************************************************************
@@ -733,7 +732,7 @@ matchSimply :: CoreExpr			-- Scrutinee
 	    -> CoreExpr			-- Return this if it matches
 	    -> CoreExpr			-- Return this if it doesn't
 	    -> DsM CoreExpr
-
+-- Do not warn about incomplete patterns; see matchSinglePat comments
 matchSimply scrut hs_ctx pat result_expr fail_expr = do
     let
       match_result = cantFailMatchResult result_expr
@@ -745,16 +744,11 @@ matchSimply scrut hs_ctx pat result_expr fail_expr = do
 
 matchSinglePat :: CoreExpr -> HsMatchContext Name -> LPat Id
 	       -> Type -> MatchResult -> DsM MatchResult
-matchSinglePat (Var var) hs_ctx (L _ pat) ty match_result = do
-    dflags <- getDOptsDs
-    locn <- getSrcSpanDs
-    let
-        match_fn dflags
-           | dopt Opt_WarnSimplePatterns dflags = matchCheck ds_ctx
-           | otherwise                          = match
-           where
-             ds_ctx = DsMatchContext hs_ctx locn
-    match_fn dflags [var] ty [EqnInfo { eqn_pats = [pat], eqn_rhs  = match_result }]
+-- Do not warn about incomplete patterns
+-- Used for things like [ e | pat <- stuff ], where 
+-- incomplete patterns are just fine
+matchSinglePat (Var var) _ (L _ pat) ty match_result 
+  = match [var] ty [EqnInfo { eqn_pats = [pat], eqn_rhs  = match_result }]
 
 matchSinglePat scrut hs_ctx pat ty match_result = do
     var <- selectSimpleMatchVarL pat
@@ -801,14 +795,14 @@ subGroup :: Ord a => [(a, EquationInfo)] -> [[EquationInfo]]
 -- Each sub-list in the result has the same PatGroup
 -- See Note [Take care with pattern order]
 subGroup group 
-    = map reverse $ eltsFM $ foldl accumulate emptyFM group
+    = map reverse $ Map.elems $ foldl accumulate Map.empty group
   where
     accumulate pg_map (pg, eqn)
-      = case lookupFM pg_map pg of
-          Just eqns -> addToFM pg_map pg (eqn:eqns)
-          Nothing   -> addToFM pg_map pg [eqn]
+      = case Map.lookup pg pg_map of
+          Just eqns -> Map.insert pg (eqn:eqns) pg_map
+          Nothing   -> Map.insert pg [eqn]      pg_map
 
-    -- pg_map :: FiniteMap a [EquationInfo]
+    -- pg_map :: Map a [EquationInfo]
     -- Equations seen so far in reverse order of appearance
 \end{code}
 
@@ -854,77 +848,87 @@ sameGroup _          _          = False
 --   f (e1 -> True) = ...
 --   f (e2 -> "hi") = ...
 viewLExprEq :: (LHsExpr Id,Type) -> (LHsExpr Id,Type) -> Bool
-viewLExprEq (e1,_) (e2,_) =
-    let 
-        -- short name for recursive call on unLoc
-        lexp e e' = exp (unLoc e) (unLoc e')
+viewLExprEq (e1,_) (e2,_) = lexp e1 e2
+  where
+    lexp :: LHsExpr Id -> LHsExpr Id -> Bool
+    lexp e e' = exp (unLoc e) (unLoc e')
 
-	eq_list :: (a->a->Bool) -> [a] -> [a] -> Bool
-        eq_list _  []     []     = True
-        eq_list _  []     (_:_)  = False
-        eq_list _  (_:_)  []     = False
-        eq_list eq (x:xs) (y:ys) = eq x y && eq_list eq xs ys
+    ---------
+    exp :: HsExpr Id -> HsExpr Id -> Bool
+    -- real comparison is on HsExpr's
+    -- strip parens 
+    exp (HsPar (L _ e)) e'   = exp e e'
+    exp e (HsPar (L _ e'))   = exp e e'
+    -- because the expressions do not necessarily have the same type,
+    -- we have to compare the wrappers
+    exp (HsWrap h e) (HsWrap h' e') = wrap h h' && exp e e'
+    exp (HsVar i) (HsVar i') =  i == i' 
+    -- the instance for IPName derives using the id, so this works if the
+    -- above does
+    exp (HsIPVar i) (HsIPVar i') = i == i' 
+    exp (HsOverLit l) (HsOverLit l') = 
+        -- Overloaded lits are equal if they have the same type
+        -- and the data is the same.
+        -- this is coarser than comparing the SyntaxExpr's in l and l',
+        -- which resolve the overloading (e.g., fromInteger 1),
+        -- because these expressions get written as a bunch of different variables
+        -- (presumably to improve sharing)
+        tcEqType (overLitType l) (overLitType l') && l == l'
+    exp (HsApp e1 e2) (HsApp e1' e2') = lexp e1 e1' && lexp e2 e2'
+    -- the fixities have been straightened out by now, so it's safe
+    -- to ignore them?
+    exp (OpApp l o _ ri) (OpApp l' o' _ ri') = 
+        lexp l l' && lexp o o' && lexp ri ri'
+    exp (NegApp e n) (NegApp e' n') = lexp e e' && exp n n'
+    exp (SectionL e1 e2) (SectionL e1' e2') = 
+        lexp e1 e1' && lexp e2 e2'
+    exp (SectionR e1 e2) (SectionR e1' e2') = 
+        lexp e1 e1' && lexp e2 e2'
+    exp (ExplicitTuple es1 _) (ExplicitTuple es2 _) =
+        eq_list tup_arg es1 es2
+    exp (HsIf _ e e1 e2) (HsIf _ e' e1' e2') =
+        lexp e e' && lexp e1 e1' && lexp e2 e2'
 
-        -- conservative, in that it demands that wrappers be
-        -- syntactically identical and doesn't look under binders
-        --
-        -- coarser notions of equality are possible
-        -- (e.g., reassociating compositions,
-        --        equating different ways of writing a coercion)
-        wrap WpHole WpHole = True
-        wrap (WpCompose w1 w2) (WpCompose w1' w2') = wrap w1 w1' && wrap w2 w2'
-        wrap (WpCast c)  (WpCast c')  = tcEqType c c'
-        wrap (WpApp d)   (WpApp d')   = d == d'
-        wrap (WpTyApp t) (WpTyApp t') = tcEqType t t'
-        -- Enhancement: could implement equality for more wrappers
-        --   if it seems useful (lams and lets)
-        wrap _ _ = False
+    -- Enhancement: could implement equality for more expressions
+    --   if it seems useful
+    -- But no need for HsLit, ExplicitList, ExplicitTuple, 
+    -- because they cannot be functions
+    exp _ _  = False
 
-        -- real comparison is on HsExpr's
-        -- strip parens 
-        exp (HsPar (L _ e)) e'   = exp e e'
-        exp e (HsPar (L _ e'))   = exp e e'
-        -- because the expressions do not necessarily have the same type,
-        -- we have to compare the wrappers
-        exp (HsWrap h e) (HsWrap h' e') = wrap h h' && exp e e'
-        exp (HsVar i) (HsVar i') =  i == i' 
-        -- the instance for IPName derives using the id, so this works if the
-        -- above does
-        exp (HsIPVar i) (HsIPVar i') = i == i' 
-        exp (HsOverLit l) (HsOverLit l') = 
-            -- Overloaded lits are equal if they have the same type
-            -- and the data is the same.
-            -- this is coarser than comparing the SyntaxExpr's in l and l',
-            -- which resolve the overloading (e.g., fromInteger 1),
-            -- because these expressions get written as a bunch of different variables
-            -- (presumably to improve sharing)
-            tcEqType (overLitType l) (overLitType l') && l == l'
-        exp (HsApp e1 e2) (HsApp e1' e2') = lexp e1 e1' && lexp e2 e2'
-        -- the fixities have been straightened out by now, so it's safe
-        -- to ignore them?
-        exp (OpApp l o _ ri) (OpApp l' o' _ ri') = 
-            lexp l l' && lexp o o' && lexp ri ri'
-        exp (NegApp e n) (NegApp e' n') = lexp e e' && exp n n'
-        exp (SectionL e1 e2) (SectionL e1' e2') = 
-            lexp e1 e1' && lexp e2 e2'
-        exp (SectionR e1 e2) (SectionR e1' e2') = 
-            lexp e1 e1' && lexp e2 e2'
-        exp (ExplicitTuple es1 _) (ExplicitTuple es2 _) =
-            eq_list tup_arg es1 es2
-        exp (HsIf e e1 e2) (HsIf e' e1' e2') =
-            lexp e e' && lexp e1 e1' && lexp e2 e2'
+    ---------
+    tup_arg (Present e1) (Present e2) = lexp e1 e2
+    tup_arg (Missing t1) (Missing t2) = tcEqType t1 t2
+    tup_arg _ _ = False
 
-        -- Enhancement: could implement equality for more expressions
-        --   if it seems useful
-	-- But no need for HsLit, ExplicitList, ExplicitTuple, 
-	-- because they cannot be functions
-        exp _ _  = False
+    ---------
+    wrap :: HsWrapper -> HsWrapper -> Bool
+    -- Conservative, in that it demands that wrappers be
+    -- syntactically identical and doesn't look under binders
+    --
+    -- Coarser notions of equality are possible
+    -- (e.g., reassociating compositions,
+    --        equating different ways of writing a coercion)
+    wrap WpHole WpHole = True
+    wrap (WpCompose w1 w2) (WpCompose w1' w2') = wrap w1 w1' && wrap w2 w2'
+    wrap (WpCast c)  (WpCast c')     = tcEqType c c'
+    wrap (WpEvApp et1) (WpEvApp et2) = ev_term et1 et2
+    wrap (WpTyApp t) (WpTyApp t')    = tcEqType t t'
+    -- Enhancement: could implement equality for more wrappers
+    --   if it seems useful (lams and lets)
+    wrap _ _ = False
 
-        tup_arg (Present e1) (Present e2) = lexp e1 e2
-        tup_arg (Missing t1) (Missing t2) = tcEqType t1 t2
-        tup_arg _ _ = False
-    in
-      lexp e1 e2
+    ---------
+    ev_term :: EvTerm -> EvTerm -> Bool
+    ev_term (EvId a)       (EvId b)       = a==b
+    ev_term (EvCoercion a) (EvCoercion b) = tcEqType a b
+    ev_term _ _ = False	
+
+    ---------
+    eq_list :: (a->a->Bool) -> [a] -> [a] -> Bool
+    eq_list _  []     []     = True
+    eq_list _  []     (_:_)  = False
+    eq_list _  (_:_)  []     = False
+    eq_list eq (x:xs) (y:ys) = eq x y && eq_list eq xs ys
 
 patGroup :: Pat Id -> PatGroup
 patGroup (WildPat {})       	      = PgAny

@@ -48,30 +48,28 @@ module SetLevels (
 	Level(..), tOP_LEVEL,
 	LevelledBind, LevelledExpr,
 
-	incMinorLvl, ltMajLvl, ltLvl, isTopLvl, isInlineCtxt
+	incMinorLvl, ltMajLvl, ltLvl, isTopLvl
     ) where
 
 #include "HsVersions.h"
 
 import CoreSyn
-
-import DynFlags		( FloatOutSwitches(..) )
-import CoreUtils	( exprType, exprIsTrivial, mkPiTypes )
+import CoreMonad	( FloatOutSwitches(..) )
+import CoreUtils	( exprType, mkPiTypes )
+import CoreArity	( exprBotStrictness_maybe )
 import CoreFVs		-- all of it
-import CoreSubst	( Subst, emptySubst, extendInScope, extendIdSubst,
-			  cloneIdBndr, cloneRecIdBndrs )
-import Id		( idType, mkSysLocal, isOneShotLambda,
-			  zapDemandIdInfo, transferPolyIdInfo,
-			  idSpecialisation, idWorkerInfo, setIdInfo
-			)
+import CoreSubst	( Subst, emptySubst, extendInScope, extendInScopeList,
+			  extendIdSubst, cloneIdBndr, cloneRecIdBndrs )
+import Id
 import IdInfo
 import Var
 import VarSet
 import VarEnv
-import Name		( getOccName )
+import Demand		( StrictSig, increaseStrictSigArity )
+import Name		( getOccName, mkSystemVarName )
 import OccName		( occNameString )
 import Type		( isUnLiftedType, Type )
-import BasicTypes	( TopLevelFlag(..) )
+import BasicTypes	( TopLevelFlag(..), Arity )
 import UniqSupply
 import Util		( sortLe, isSingleton, count )
 import Outputable
@@ -85,9 +83,7 @@ import FastString
 %************************************************************************
 
 \begin{code}
-data Level = InlineCtxt	-- A level that's used only for
-			-- the context parameter ctxt_lvl
-	   | Level Int	-- Level number of enclosing lambdas
+data Level = Level Int	-- Level number of enclosing lambdas
 	  	   Int	-- Number of big-lambda and/or case expressions between
 			-- here and the nearest enclosing lambda
 \end{code}
@@ -150,55 +146,37 @@ the worker at all.
 type LevelledExpr  = TaggedExpr Level
 type LevelledBind  = TaggedBind Level
 
-tOP_LEVEL, iNLINE_CTXT :: Level
+tOP_LEVEL :: Level
 tOP_LEVEL   = Level 0 0
-iNLINE_CTXT = InlineCtxt
 
 incMajorLvl :: Level -> Level
--- For InlineCtxt we ignore any inc's; we don't want
--- to do any floating at all; see notes above
-incMajorLvl InlineCtxt      = InlineCtxt
 incMajorLvl (Level major _) = Level (major + 1) 0
 
 incMinorLvl :: Level -> Level
-incMinorLvl InlineCtxt		= InlineCtxt
 incMinorLvl (Level major minor) = Level major (minor+1)
 
 maxLvl :: Level -> Level -> Level
-maxLvl InlineCtxt l2  = l2
-maxLvl l1  InlineCtxt = l1
 maxLvl l1@(Level maj1 min1) l2@(Level maj2 min2)
   | (maj1 > maj2) || (maj1 == maj2 && min1 > min2) = l1
   | otherwise					   = l2
 
 ltLvl :: Level -> Level -> Bool
-ltLvl _          InlineCtxt  = False
-ltLvl InlineCtxt (Level _ _) = True
 ltLvl (Level maj1 min1) (Level maj2 min2)
   = (maj1 < maj2) || (maj1 == maj2 && min1 < min2)
 
 ltMajLvl :: Level -> Level -> Bool
     -- Tells if one level belongs to a difft *lambda* level to another
-ltMajLvl _              InlineCtxt     = False
-ltMajLvl InlineCtxt     (Level maj2 _) = 0 < maj2
 ltMajLvl (Level maj1 _) (Level maj2 _) = maj1 < maj2
 
 isTopLvl :: Level -> Bool
 isTopLvl (Level 0 0) = True
 isTopLvl _           = False
 
-isInlineCtxt :: Level -> Bool
-isInlineCtxt InlineCtxt = True
-isInlineCtxt _          = False
-
 instance Outputable Level where
-  ppr InlineCtxt      = text "<INLINE>"
   ppr (Level maj min) = hcat [ char '<', int maj, char ',', int min, char '>' ]
 
 instance Eq Level where
-  InlineCtxt        == InlineCtxt        = True
   (Level maj1 min1) == (Level maj2 min2) = maj1 == maj2 && min1 == min2
-  _                 == _                 = False
 \end{code}
 
 
@@ -215,20 +193,16 @@ setLevels :: FloatOutSwitches
 	  -> [LevelledBind]
 
 setLevels float_lams binds us
-  = initLvl us (do_them binds)
+  = initLvl us (do_them init_env binds)
   where
-    -- "do_them"'s main business is to thread the monad along
-    -- It gives each top binding the same empty envt, because
-    -- things unbound in the envt have level number zero implicitly
-    do_them :: [CoreBind] -> LvlM [LevelledBind]
-
-    do_them [] = return []
-    do_them (b:bs) = do
-        (lvld_bind, _) <- lvlTopBind init_env b
-        lvld_binds <- do_them bs
-        return (lvld_bind : lvld_binds)
-
     init_env = initialEnv float_lams
+
+    do_them :: LevelEnv -> [CoreBind] -> LvlM [LevelledBind]
+    do_them _ [] = return []
+    do_them env (b:bs)
+      = do { (lvld_bind, env') <- lvlTopBind env b
+           ; lvld_binds <- do_them env' bs
+           ; return (lvld_bind : lvld_binds) }
 
 lvlTopBind :: LevelEnv -> Bind Id -> LvlM (LevelledBind, LevelEnv)
 lvlTopBind env (NonRec binder rhs)
@@ -272,21 +246,42 @@ lvlExpr _ _ (  _, AnnType ty) = return (Type ty)
 lvlExpr _ env (_, AnnVar v)   = return (lookupVar env v)
 lvlExpr _ _   (_, AnnLit lit) = return (Lit lit)
 
-lvlExpr ctxt_lvl env (_, AnnApp fun arg) = do
-    fun' <- lvl_fun fun
-    arg' <- lvlMFE  False ctxt_lvl env arg
-    return (App fun' arg')
-  where
--- gaw 2004
-    lvl_fun (_, AnnCase _ _ _ _) = lvlMFE True ctxt_lvl env fun
-    lvl_fun _                    = lvlExpr ctxt_lvl env fun
-	-- We don't do MFE on partial applications generally,
-	-- but we do if the function is big and hairy, like a case
+lvlExpr ctxt_lvl env expr@(_, AnnApp _ _) = do
+    let
+      (fun, args) = collectAnnArgs expr
+    --
+    case fun of
+         -- float out partial applications.  This is very beneficial
+         -- in some cases (-7% runtime -4% alloc over nofib -O2).
+         -- In order to float a PAP, there must be a function at the
+         -- head of the application, and the application must be
+         -- over-saturated with respect to the function's arity.
+      (_, AnnVar f) | floatPAPs env &&
+                      arity > 0 && arity < n_val_args ->
+        do
+         let (lapp, rargs) = left (n_val_args - arity) expr []
+         rargs' <- mapM (lvlMFE False ctxt_lvl env) rargs
+         lapp' <- lvlMFE False ctxt_lvl env lapp
+         return (foldl App lapp' rargs')
+        where
+         n_val_args = count (isValArg . deAnnotate) args
+         arity = idArity f
 
-lvlExpr _ env (_, AnnNote InlineMe expr) = do
--- Don't float anything out of an InlineMe; hence the iNLINE_CTXT
-    expr' <- lvlExpr iNLINE_CTXT env expr
-    return (Note InlineMe expr')
+         -- separate out the PAP that we are floating from the extra
+         -- arguments, by traversing the spine until we have collected
+         -- (n_val_args - arity) value arguments.
+         left 0 e               rargs = (e, rargs)
+         left n (_, AnnApp f a) rargs
+            | isValArg (deAnnotate a) = left (n-1) f (a:rargs)
+            | otherwise               = left n     f (a:rargs)
+         left _ _ _                   = panic "SetLevels.lvlExpr.left"
+
+         -- No PAPs that we can float: just carry on with the
+         -- arguments and the function.
+      _otherwise -> do
+         args' <- mapM (lvlMFE False ctxt_lvl env) args
+         fun'  <- lvlExpr ctxt_lvl env fun
+         return (foldl App fun' args')
 
 lvlExpr ctxt_lvl env (_, AnnNote note expr) = do
     expr' <- lvlExpr ctxt_lvl env expr
@@ -359,12 +354,39 @@ lvlExpr ctxt_lvl env (_, AnnCase expr case_bndr ty alts) = do
 the expression, so that it can itself be floated.
 
 Note [Unlifted MFEs]
-~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~
 We don't float unlifted MFEs, which potentially loses big opportunites.
 For example:
 	\x -> f (h y)
 where h :: Int -> Int# is expensive. We'd like to float the (h y) outside
 the \x, but we don't because it's unboxed.  Possible solution: box it.
+
+Note [Bottoming floats]
+~~~~~~~~~~~~~~~~~~~~~~~
+If we see
+	f = \x. g (error "urk")
+we'd like to float the call to error, to get
+	lvl = error "urk"
+	f = \x. g lvl
+Furthermore, we want to float a bottoming expression even if it has free
+variables:
+	f = \x. g (let v = h x in error ("urk" ++ v))
+Then we'd like to abstact over 'x' can float the whole arg of g:
+	lvl = \x. let v = h x in error ("urk" ++ v)
+	f = \x. g (lvl x)
+See Maessen's paper 1999 "Bottom extraction: factoring error handling out
+of functional programs" (unpublished I think).
+
+When we do this, we set the strictness and arity of the new bottoming 
+Id, so that it's properly exposed as such in the interface file, even if
+this is all happening after strictness analysis.  
+
+Note [Bottoming floats: eta expansion] c.f Note [Bottoming floats]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Tiresomely, though, the simplifier has an invariant that the manifest
+arity of the RHS should be the same as the arity; but we can't call
+etaExpand during SetLevels because it works over a decorated form of
+CoreExpr.  So we do the eta expansion later, in FloatOut.
 
 Note [Case MFEs]
 ~~~~~~~~~~~~~~~~
@@ -384,13 +406,17 @@ lvlMFE ::  Bool			-- True <=> strict context [body of case or let]
 lvlMFE _ _ _ (_, AnnType ty)
   = return (Type ty)
 
--- No point in floating out an expression wrapped in a coercion;
+-- No point in floating out an expression wrapped in a coercion or note
 -- If we do we'll transform  lvl = e |> co 
 --			 to  lvl' = e; lvl = lvl' |> co
 -- and then inline lvl.  Better just to float out the payload.
+lvlMFE strict_ctxt ctxt_lvl env (_, AnnNote n e)
+  = do { e' <- lvlMFE strict_ctxt ctxt_lvl env e
+       ; return (Note n e') }
+
 lvlMFE strict_ctxt ctxt_lvl env (_, AnnCast e co)
-  = do	{ expr' <- lvlMFE strict_ctxt ctxt_lvl env e
-	; return (Cast expr' co) }
+  = do	{ e' <- lvlMFE strict_ctxt ctxt_lvl env e
+	; return (Cast e' co) }
 
 -- Note [Case MFEs]
 lvlMFE True ctxt_lvl env e@(_, AnnCase {})
@@ -398,21 +424,21 @@ lvlMFE True ctxt_lvl env e@(_, AnnCase {})
 
 lvlMFE strict_ctxt ctxt_lvl env ann_expr@(fvs, _)
   |  isUnLiftedType ty			-- Can't let-bind it; see Note [Unlifted MFEs]
-  || isInlineCtxt ctxt_lvl		-- Don't float out of an __inline__ context
-  || exprIsTrivial expr			-- Never float if it's trivial
+  || notWorthFloating ann_expr abs_vars
   || not good_destination
   = 	-- Don't float it out
     lvlExpr ctxt_lvl env ann_expr
 
   | otherwise	-- Float it out!
   = do expr' <- lvlFloatRhs abs_vars dest_lvl env ann_expr
-       var <- newLvlVar "lvl" abs_vars ty
+       var <- newLvlVar abs_vars ty mb_bot
        return (Let (NonRec (TB var dest_lvl) expr') 
                    (mkVarApps (Var var) abs_vars))
   where
     expr     = deAnnotate ann_expr
     ty       = exprType expr
-    dest_lvl = destLevel env fvs (isFunction ann_expr)
+    mb_bot   = exprBotStrictness_maybe expr
+    dest_lvl = destLevel env fvs (isFunction ann_expr) mb_bot
     abs_vars = abstractVars dest_lvl env fvs
 
 	-- A decision to float entails let-binding this thing, and we only do 
@@ -439,6 +465,42 @@ lvlMFE strict_ctxt ctxt_lvl env ann_expr@(fvs, _)
 	  --	concat = /\ a -> lvl a
 	  --	lvl    = /\ a -> foldr ..a.. (++) []
 	  -- which is pretty stupid.  Hence the strict_ctxt test
+
+annotateBotStr :: Id -> Maybe (Arity, StrictSig) -> Id
+annotateBotStr id Nothing            = id
+annotateBotStr id (Just (arity,sig)) = id `setIdArity` arity
+				          `setIdStrictness` sig
+
+notWorthFloating :: CoreExprWithFVs -> [Var] -> Bool
+-- Returns True if the expression would be replaced by
+-- something bigger than it is now.  For example:
+--   abs_vars = tvars only:  return True if e is trivial, 
+--                           but False for anything bigger
+--   abs_vars = [x] (an Id): return True for trivial, or an application (f x)
+--   	      	    	     but False for (f x x)
+--
+-- One big goal is that floating should be idempotent.  Eg if
+-- we replace e with (lvl79 x y) and then run FloatOut again, don't want
+-- to replace (lvl79 x y) with (lvl83 x y)!
+
+notWorthFloating e abs_vars
+  = go e (count isId abs_vars)
+  where
+    go (_, AnnVar {}) n    = n >= 0
+    go (_, AnnLit {}) n    = n >= 0
+    go (_, AnnCast e _)  n = go e n
+    go (_, AnnApp e arg) n 
+       | (_, AnnType {}) <- arg = go e n
+       | n==0                   = False
+       | is_triv arg       	= go e (n-1)
+       | otherwise         	= False
+    go _ _                 	= False
+
+    is_triv (_, AnnLit {})   	       	  = True	-- Treat all literals as trivial
+    is_triv (_, AnnVar {})   	       	  = True	-- (ie not worth floating)
+    is_triv (_, AnnCast e _) 	       	  = is_triv e
+    is_triv (_, AnnApp e (_, AnnType {})) = is_triv e
+    is_triv _                             = False     
 \end{code}
 
 Note [Escaping a value lambda]
@@ -501,9 +563,8 @@ lvlBind :: TopLevelFlag		-- Used solely to decide whether to clone
 	-> LvlM (LevelledBind, LevelEnv)
 
 lvlBind top_lvl ctxt_lvl env (AnnNonRec bndr rhs@(rhs_fvs,_))
-  |  isTyVar bndr 		-- Don't do anything for TyVar binders
+  |  isTyCoVar bndr 		-- Don't do anything for TyVar binders
 				--   (simplifier gets rid of them pronto)
-  || isInlineCtxt ctxt_lvl	-- Don't do anything inside InlineMe
   = do rhs' <- lvlExpr ctxt_lvl env rhs
        return (NonRec (TB bndr ctxt_lvl) rhs', env)
 
@@ -516,22 +577,20 @@ lvlBind top_lvl ctxt_lvl env (AnnNonRec bndr rhs@(rhs_fvs,_))
   | otherwise
   = do  -- Yes, type abstraction; create a new binder, extend substitution, etc
        rhs' <- lvlFloatRhs abs_vars dest_lvl env rhs
-       (env', [bndr']) <- newPolyBndrs dest_lvl env abs_vars [bndr]
+       (env', [bndr']) <- newPolyBndrs dest_lvl env abs_vars [bndr_w_str]
        return (NonRec (TB bndr' dest_lvl) rhs', env')
 
   where
-    bind_fvs = rhs_fvs `unionVarSet` idFreeVars bndr
-    abs_vars = abstractVars dest_lvl env bind_fvs
-    dest_lvl = destLevel env bind_fvs (isFunction rhs)
+    bind_fvs   = rhs_fvs `unionVarSet` idFreeVars bndr
+    abs_vars   = abstractVars dest_lvl env bind_fvs
+    dest_lvl   = destLevel env bind_fvs (isFunction rhs) mb_bot
+    mb_bot     = exprBotStrictness_maybe (deAnnotate rhs)
+    bndr_w_str = annotateBotStr bndr mb_bot
 \end{code}
 
 
 \begin{code}
 lvlBind top_lvl ctxt_lvl env (AnnRec pairs)
-  | isInlineCtxt ctxt_lvl	-- Don't do anything inside InlineMe
-  = do rhss' <- mapM (lvlExpr ctxt_lvl env) rhss
-       return (Rec ([TB b ctxt_lvl | b <- bndrs] `zip` rhss'), env)
-
   | null abs_vars
   = do (new_env, new_bndrs) <- cloneRecVars top_lvl env bndrs ctxt_lvl dest_lvl
        new_rhss <- mapM (lvlExpr ctxt_lvl new_env) rhss
@@ -580,11 +639,11 @@ lvlBind top_lvl ctxt_lvl env (AnnRec pairs)
 		      `minusVarSet`
 		      mkVarSet bndrs
 
-    dest_lvl = destLevel env bind_fvs (all isFunction rhss)
+    dest_lvl = destLevel env bind_fvs (all isFunction rhss) Nothing
     abs_vars = abstractVars dest_lvl env bind_fvs
 
 ----------------------------------------------------
--- Three help functons for the type-abstraction case
+-- Three help functions for the type-abstraction case
 
 lvlFloatRhs :: [CoreBndr] -> Level -> LevelEnv -> CoreExprWithFVs
             -> UniqSM (Expr (TaggedBndr Level))
@@ -637,12 +696,14 @@ lvlLamBndrs lvl bndrs
 \begin{code}
   -- Destintion level is the max Id level of the expression
   -- (We'll abstract the type variables, if any.)
-destLevel :: LevelEnv -> VarSet -> Bool -> Level
-destLevel env fvs is_function
+destLevel :: LevelEnv -> VarSet -> Bool -> Maybe (Arity, StrictSig) -> Level
+destLevel env fvs is_function mb_bot
+  | Just {} <- mb_bot = tOP_LEVEL	-- Send bottoming bindings to the top 
+					-- regardless; see Note [Bottoming floats]
   |  floatLams env
-  && is_function = tOP_LEVEL		-- Send functions to top level; see
+  && is_function      = tOP_LEVEL	-- Send functions to top level; see
 					-- the comments with isFunction
-  | otherwise    = maxIdLevel env fvs
+  | otherwise         = maxIdLevel env fvs
 
 isFunction :: CoreExprWithFVs -> Bool
 -- The idea here is that we want to float *functions* to
@@ -708,6 +769,9 @@ floatLams (fos, _, _, _) = floatOutLambdas fos
 floatConsts :: LevelEnv -> Bool
 floatConsts (fos, _, _, _) = floatOutConstants fos
 
+floatPAPs :: LevelEnv -> Bool
+floatPAPs (fos, _, _, _) = floatOutPartialApplications fos
+
 extendLvlEnv :: LevelEnv -> [TaggedBndr Level] -> LevelEnv
 -- Used when *not* cloning
 extendLvlEnv (float_lams, lvl_env, subst, id_env) prs
@@ -732,6 +796,12 @@ extendLvlEnv (float_lams, lvl_env, subst, id_env) prs
   -- The inside occurrence of @wild@ was being replaced with @ds@,
   -- incorrectly, because the SubstEnv was still lying around.  Ouch!
   -- KSW 2000-07.
+
+extendInScopeEnv :: LevelEnv -> Var -> LevelEnv
+extendInScopeEnv (fl, le, subst, ids) v = (fl, le, extendInScope subst v, ids)
+
+extendInScopeEnvList :: LevelEnv -> [Var] -> LevelEnv
+extendInScopeEnvList (fl, le, subst, ids) vs = (fl, le, extendInScopeList subst vs, ids)
 
 -- extendCaseBndrLvlEnv adds the mapping case-bndr->scrut-var if it can
 -- (see point 4 of the module overview comment)
@@ -806,7 +876,7 @@ abstractVars dest_lvl (_, lvl_env, _, id_env) fvs
 		   (False, True) -> False
 		   _    	 -> v1 <= v2	-- Same family
 
-    is_tv v = isTyVar v && not (isCoVar v)
+    is_tv v = isTyCoVar v && not (isCoVar v)
 
     uniq :: [Var] -> [Var]
 	-- Remove adjacent duplicates; the sort will have brought them together
@@ -820,7 +890,7 @@ abstractVars dest_lvl (_, lvl_env, _, id_env) fvs
 
 	-- We are going to lambda-abstract, so nuke any IdInfo,
 	-- and add the tyvars of the Id (if necessary)
-    zap v | isId v = WARN( workerExists (idWorkerInfo v) ||
+    zap v | isId v = WARN( isStableUnfolding (idUnfolding v) ||
 		           not (isEmptySpecInfo (idSpecialisation v)),
 		           text "absVarsOf: discarding info on" <+> ppr v )
 		     setIdInfo v vanillaIdInfo
@@ -869,19 +939,29 @@ newPolyBndrs dest_lvl env abs_vars bndrs = do
 			     str     = "poly_" ++ occNameString (getOccName bndr)
 			     poly_ty = mkPiTypes abs_vars (idType bndr)
 
-newLvlVar :: String 
-	  -> [CoreBndr] -> Type 	-- Abstract wrt these bndrs
+newLvlVar :: [CoreBndr] -> Type 	-- Abstract wrt these bndrs
+	  -> Maybe (Arity, StrictSig)   -- Note [Bottoming floats]
 	  -> LvlM Id
-newLvlVar str vars body_ty = do
-    uniq <- getUniqueM
-    return (mkSysLocal (mkFastString str) uniq (mkPiTypes vars body_ty))
+newLvlVar vars body_ty mb_bot
+  = do { uniq <- getUniqueM
+       ; return (mkLocalIdWithInfo (mk_name uniq) (mkPiTypes vars body_ty) info) }
+  where
+    mk_name uniq = mkSystemVarName uniq (mkFastString "lvl")
+    arity = count isId vars
+    info = case mb_bot of
+		Nothing               -> vanillaIdInfo
+		Just (bot_arity, sig) -> vanillaIdInfo 
+					   `setArityInfo`      (arity + bot_arity)
+					   `setStrictnessInfo` Just (increaseStrictSigArity arity sig)
     
 -- The deeply tiresome thing is that we have to apply the substitution
 -- to the rules inside each Id.  Grr.  But it matters.
 
 cloneVar :: TopLevelFlag -> LevelEnv -> Id -> Level -> Level -> LvlM (LevelEnv, Id)
 cloneVar TopLevel env v _ _
-  = return (env, v)	-- Don't clone top level things
+  = return (extendInScopeEnv env v, v)	-- Don't clone top level things
+		-- But do extend the in-scope env, to satisfy the in-scope invariant
+
 cloneVar NotTopLevel env@(_,_,subst,_) v ctxt_lvl dest_lvl
   = ASSERT( isId v ) do
     us <- getUniqueSupplyM
@@ -893,7 +973,7 @@ cloneVar NotTopLevel env@(_,_,subst,_) v ctxt_lvl dest_lvl
 
 cloneRecVars :: TopLevelFlag -> LevelEnv -> [Id] -> Level -> Level -> LvlM (LevelEnv, [Id])
 cloneRecVars TopLevel env vs _ _
-  = return (env, vs)	-- Don't clone top level things
+  = return (extendInScopeEnvList env vs, vs)	-- Don't clone top level things
 cloneRecVars NotTopLevel env@(_,_,subst,_) vs ctxt_lvl dest_lvl
   = ASSERT( all isId vs ) do
     us <- getUniqueSupplyM

@@ -3,7 +3,7 @@ test('char002', 	normal, compile_and_run, [''])
 
 test('length001',
      # This fails without -O, as it relies on a RULE being applied
-     [expect_fail_for(['normal', 'ghci', 'threaded1']),
+     [expect_fail_for(['normal', 'ghci', 'threaded1', 'llvm']),
       if_compiler_lt('ghc', '6.11', expect_fail)],
      compile_and_run,
      [''])
@@ -11,7 +11,7 @@ test('length001',
 test('ratio001', 	normal, compile_and_run, [''])
 
 test('rand001',		normal, compile_and_run, [''])
-test('reads001',	normal, compile_and_run, [''])
+test('reads001',		normal, compile_and_run, [''])
 test('show001',		normal, compile_and_run, [''])
 test('text001',		normal, compile_and_run, [''])
 
@@ -23,7 +23,7 @@ test('dynamic002', 	[skip_if_fast,reqlib('packedstring')], compile_and_run, ['-p
 test('enum01', 		skip_if_fast, compile_and_run, ['-cpp'])
 test('enum02', 		skip_if_fast, compile_and_run, ['-cpp'])
 test('enum03', 		skip_if_fast, compile_and_run, ['-cpp'])
-test('enum04', 		expect_fail, compile_and_run, [''])
+test('enum04', 		normal, compile_and_run, [''])
 test('exceptionsrun001', 	normal, compile_and_run, [''])
 test('exceptionsrun002', 	normal, compile_and_run, [''])
 test('list001'	,	skip_if_fast, compile_and_run, [''])
@@ -52,4 +52,4 @@ test('stableptr003', normal, compile_and_run, [''])
 test('stableptr004', extra_run_opts('+RTS -K4m -RTS'), compile_and_run, [''])
 test('stableptr005', normal, compile_and_run, [''])
 
-test('weak001', normal, compile_and_run, ['-fglasgow-exts'])
+test('weak001', normal, compile_and_run, [''])

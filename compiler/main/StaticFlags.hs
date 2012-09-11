@@ -22,7 +22,9 @@ module StaticFlags (
 	-- Output style options
 	opt_PprUserLength,
 	opt_SuppressUniques,
-	opt_PprStyle_Debug,
+        opt_SuppressCoercions,
+	opt_SuppressModulePrefixes,
+	opt_PprStyle_Debug, opt_TraceLevel,
         opt_NoDebugOutput,
 
 	-- profiling opts
@@ -40,7 +42,6 @@ module StaticFlags (
 	opt_DsMultiTyVar,
 	opt_NoStateHack,
         opt_SimpleListLiterals,
-	opt_SpecInlineJoinPoints,
 	opt_CprOff,
 	opt_SimplNoPreInlining,
 	opt_SimplExcessPrecision,
@@ -50,6 +51,7 @@ module StaticFlags (
 	opt_UF_CreationThreshold,
 	opt_UF_UseThreshold,
 	opt_UF_FunAppDiscount,
+	opt_UF_DictDiscount,
 	opt_UF_KeenessFactor,
 	opt_UF_DearOp,
 
@@ -82,7 +84,7 @@ module StaticFlags (
 import Config
 import FastString
 import Util
-import Maybes		( firstJust )
+import Maybes		( firstJusts )
 import Panic
 
 import Data.Maybe       ( listToMaybe )
@@ -136,7 +138,7 @@ lookUp     sw = sw `elem` packed_static_opts
 -- (lookup_str "foo") looks for the flag -foo=X or -fooX, 
 -- and returns the string X
 lookup_str sw 
-   = case firstJust (map (stripPrefix sw) staticFlags) of
+   = case firstJusts (map (stripPrefix sw) staticFlags) of
 	Just ('=' : str) -> Just str
 	Just str         -> Just str
 	Nothing		 -> Nothing	
@@ -183,12 +185,26 @@ opt_IgnoreDotGhci		= lookUp (fsLit "-ignore-dot-ghci")
 -- debugging opts
 opt_SuppressUniques :: Bool
 opt_SuppressUniques		= lookUp  (fsLit "-dsuppress-uniques")
+
+opt_SuppressCoercions :: Bool
+opt_SuppressCoercions           = lookUp  (fsLit "-dsuppress-coercions")
+
+opt_SuppressModulePrefixes :: Bool
+opt_SuppressModulePrefixes	= lookUp  (fsLit "-dsuppress-module-prefixes")
+
 opt_PprStyle_Debug  :: Bool
-opt_PprStyle_Debug		= lookUp  (fsLit "-dppr-debug")
+opt_PprStyle_Debug              = lookUp  (fsLit "-dppr-debug")
+
+opt_TraceLevel :: Int
+opt_TraceLevel = lookup_def_int "-dtrace-level" 1  	-- Standard level is 1
+	       	 			    	        -- Less verbose is 0
+
 opt_PprUserLength   :: Int
 opt_PprUserLength	        = lookup_def_int "-dppr-user-length" 5 --ToDo: give this a name
+
 opt_Fuel            :: Int
 opt_Fuel                        = lookup_def_int "-dopt-fuel" maxBound
+
 opt_NoDebugOutput   :: Bool
 opt_NoDebugOutput               = lookUp  (fsLit "-dno-debug-output")
 
@@ -204,8 +220,10 @@ opt_Hpc				= lookUp (fsLit "-fhpc")
 -- language opts
 opt_DictsStrict :: Bool
 opt_DictsStrict			= lookUp  (fsLit "-fdicts-strict")
+
 opt_IrrefutableTuples :: Bool
 opt_IrrefutableTuples		= lookUp  (fsLit "-firrefutable-tuples")
+
 opt_Parallel :: Bool
 opt_Parallel			= lookUp  (fsLit "-fparallel")
 
@@ -213,9 +231,6 @@ opt_Parallel			= lookUp  (fsLit "-fparallel")
 opt_DsMultiTyVar :: Bool
 opt_DsMultiTyVar		= not (lookUp (fsLit "-fno-ds-multi-tyvar"))
 	-- On by default
-
-opt_SpecInlineJoinPoints :: Bool
-opt_SpecInlineJoinPoints	= lookUp  (fsLit "-fspec-inline-join-points")
 
 opt_SimpleListLiterals :: Bool
 opt_SimpleListLiterals	        = lookUp  (fsLit "-fsimple-list-literals")
@@ -231,12 +246,16 @@ opt_MaxWorkerArgs		= lookup_def_int "-fmax-worker-args" (10::Int)
 
 opt_GranMacros :: Bool
 opt_GranMacros			= lookUp  (fsLit "-fgransim")
+
 opt_HiVersion :: Integer
 opt_HiVersion			= read (cProjectVersionInt ++ cProjectPatchLevel) :: Integer
+
 opt_HistorySize :: Int
 opt_HistorySize			= lookup_def_int "-fhistory-size" 20
+
 opt_OmitBlackHoling :: Bool
 opt_OmitBlackHoling		= lookUp  (fsLit "-dno-black-holing")
+
 opt_StubDeadValues  :: Bool
 opt_StubDeadValues		= lookUp  (fsLit "-dstub-dead-values")
 
@@ -249,23 +268,30 @@ opt_SimplExcessPrecision :: Bool
 opt_SimplExcessPrecision	= lookUp  (fsLit "-fexcess-precision")
 
 -- Unfolding control
-opt_UF_CreationThreshold :: Int
-opt_UF_CreationThreshold	= lookup_def_int "-funfolding-creation-threshold"  (45::Int)
-opt_UF_UseThreshold :: Int
-opt_UF_UseThreshold		= lookup_def_int "-funfolding-use-threshold"	   (6::Int)	-- Discounts can be big
-opt_UF_FunAppDiscount :: Int
-opt_UF_FunAppDiscount		= lookup_def_int "-funfolding-fun-discount"	   (6::Int)	-- It's great to inline a fn
-opt_UF_KeenessFactor :: Float
-opt_UF_KeenessFactor		= lookup_def_float "-funfolding-keeness-factor"	   (1.5::Float)
+-- See Note [Discounts and thresholds] in CoreUnfold
 
-opt_UF_DearOp :: Int
-opt_UF_DearOp   = ( 4 :: Int)
+opt_UF_CreationThreshold, opt_UF_UseThreshold :: Int
+opt_UF_DearOp, opt_UF_FunAppDiscount, opt_UF_DictDiscount :: Int
+opt_UF_KeenessFactor :: Float
+
+opt_UF_CreationThreshold = lookup_def_int "-funfolding-creation-threshold" (45::Int)
+opt_UF_UseThreshold	 = lookup_def_int "-funfolding-use-threshold"	   (6::Int)
+opt_UF_FunAppDiscount	 = lookup_def_int "-funfolding-fun-discount"	   (6::Int)
+
+opt_UF_DictDiscount	 = lookup_def_int "-funfolding-dict-discount"	   (3::Int)
+   -- Be fairly keen to inline a fuction if that means
+   -- we'll be able to pick the right method from a dictionary
+
+opt_UF_KeenessFactor	 = lookup_def_float "-funfolding-keeness-factor"   (1.5::Float)
+opt_UF_DearOp            = ( 4 :: Int)
 
 
 -- Related to linking
 opt_PIC :: Bool
 #if darwin_TARGET_OS && x86_64_TARGET_ARCH
 opt_PIC                         = True
+#elif darwin_TARGET_OS
+opt_PIC                         = lookUp (fsLit "-fPIC") || not opt_Static
 #else
 opt_PIC                         = lookUp (fsLit "-fPIC")
 #endif
@@ -391,6 +417,9 @@ way_details =
 	-- the problems are our fault or theirs, but it seems that using the
 	-- alternative 1:1 threading library libthr works around it:
 	  "-optl-lthr"
+#elif defined(openbsd_TARGET_OS)
+	  "-optc-pthread"
+	, "-optl-pthread"
 #elif defined(solaris2_TARGET_OS)
           "-optl-lrt"
 #endif
@@ -400,7 +429,18 @@ way_details =
 
     Way WayDyn "dyn" False "Dynamic"
 	[ "-DDYNAMIC"
-	, "-optc-DDYNAMIC" ],
+	, "-optc-DDYNAMIC" 
+#if defined(mingw32_TARGET_OS)
+	-- On Windows, code that is to be linked into a dynamic library must be compiled
+	--	with -fPIC. Labels not in the current package are assumed to be in a DLL 
+	--	different from the current one.
+	, "-fPIC"
+#elif defined(openbsd_TARGET_OS)
+	-- Without this, linking the shared libHSffi fails because
+	-- it uses pthread mutexes.
+	, "-optl-pthread"
+#endif
+	],
 
     Way WayProf "p" False "Profiling"
 	[ "-fscc-profiling"

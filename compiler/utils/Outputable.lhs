@@ -17,14 +17,15 @@ module Outputable (
         -- * Pretty printing combinators
 	SDoc,
 	docToSDoc,
-	interppSP, interpp'SP, pprQuotedList, pprWithCommas,
+	interppSP, interpp'SP, pprQuotedList, pprWithCommas, quotedListWithOr,
 	empty, nest,
 	char,
 	text, ftext, ptext,
 	int, integer, float, double, rational,
 	parens, cparen, brackets, braces, quotes, doubleQuotes, angleBrackets,
-	semi, comma, colon, dcolon, space, equals, dot, arrow,
+	semi, comma, colon, dcolon, space, equals, dot, arrow, darrow,
 	lparen, rparen, lbrack, rbrack, lbrace, rbrace, underscore,
+	blankLine,
 	(<>), (<+>), hcat, hsep, 
 	($$), ($+$), vcat,
 	sep, cat, 
@@ -33,7 +34,7 @@ module Outputable (
 	speakNth, speakNTimes, speakN, speakNOf, plural,
 
         -- * Converting 'SDoc' into strings and outputing it
-	printSDoc, printErrs, hPrintDump, printDump,
+	printSDoc, printErrs, printOutput, hPrintDump, printDump,
 	printForC, printForAsm, printForUser, printForUserPartWay,
 	pprCode, mkCodeStyle,
 	showSDoc, showSDocOneLine,
@@ -55,8 +56,8 @@ module Outputable (
 	codeStyle, userStyle, debugStyle, dumpStyle, asmStyle,
 	ifPprDebug, qualName, qualModule,
 	mkErrStyle, defaultErrStyle, defaultDumpStyle, defaultUserStyle,
-        mkUserStyle, Depth(..),
-
+        mkUserStyle, cmdlineParserStyle, Depth(..),
+	
 	-- * Error handling and debugging utilities
 	pprPanic, assertPprPanic, pprPanicFastInt, pprPgmError, 
 	pprTrace, warnPprTrace,
@@ -74,6 +75,8 @@ import Pretty		( Doc, Mode(..) )
 import Panic
 
 import Data.Char
+import Data.Map (Map)
+import qualified Data.Map as M
 import Data.Word
 import System.IO	( Handle, stderr, stdout, hFlush )
 import System.FilePath
@@ -185,6 +188,9 @@ mkUserStyle :: PrintUnqualified -> Depth -> PprStyle
 mkUserStyle unqual depth
    | opt_PprStyle_Debug = PprDebug
    | otherwise          = PprUser unqual depth
+
+cmdlineParserStyle :: PprStyle
+cmdlineParserStyle = PprUser alwaysQualify AllTheWay
 \end{code}
 
 Orthogonal to the above printing styles are (possibly) some
@@ -283,6 +289,9 @@ printErrs :: Doc -> IO ()
 printErrs doc = do Pretty.printDoc PageMode stderr doc
 		   hFlush stderr
 
+printOutput :: Doc -> IO ()
+printOutput doc = Pretty.printDoc PageMode stdout doc
+
 printDump :: SDoc -> IO ()
 printDump doc = hPrintDump stdout doc
 
@@ -291,7 +300,7 @@ hPrintDump h doc = do
    Pretty.printDoc PageMode h (better_doc defaultDumpStyle)
    hFlush h
  where
-   better_doc = doc $$ text ""
+   better_doc = doc $$ blankLine
 
 printForUser :: Handle -> PrintUnqualified -> SDoc -> IO ()
 printForUser handle unqual doc 
@@ -397,23 +406,25 @@ quotes d sty = case show pp_d of
 	       pp_d = d sty
 
 semi, comma, colon, equals, space, dcolon, arrow, underscore, dot :: SDoc
-lparen, rparen, lbrack, rbrack, lbrace, rbrace :: SDoc
+darrow, lparen, rparen, lbrack, rbrack, lbrace, rbrace, blankLine :: SDoc
 
-semi _sty   = Pretty.semi
-comma _sty  = Pretty.comma
-colon _sty  = Pretty.colon
-equals _sty = Pretty.equals
-space _sty  = Pretty.space
-dcolon _sty = Pretty.ptext (sLit "::")
-arrow  _sty = Pretty.ptext (sLit "->")
-underscore  = char '_'
-dot	    = char '.'
-lparen _sty = Pretty.lparen
-rparen _sty = Pretty.rparen
-lbrack _sty = Pretty.lbrack
-rbrack _sty = Pretty.rbrack
-lbrace _sty = Pretty.lbrace
-rbrace _sty = Pretty.rbrace
+blankLine _sty = Pretty.ptext (sLit "")
+dcolon _sty    = Pretty.ptext (sLit "::")
+arrow  _sty    = Pretty.ptext (sLit "->")
+darrow _sty    = Pretty.ptext (sLit "=>")
+semi _sty      = Pretty.semi
+comma _sty     = Pretty.comma
+colon _sty     = Pretty.colon
+equals _sty    = Pretty.equals
+space _sty     = Pretty.space
+underscore     = char '_'
+dot	       = char '.'
+lparen _sty    = Pretty.lparen
+rparen _sty    = Pretty.rparen
+lbrack _sty    = Pretty.lbrack
+rbrack _sty    = Pretty.rbrack
+lbrace _sty    = Pretty.lbrace
+rbrace _sty    = Pretty.rbrace
 
 nest :: Int -> SDoc -> SDoc
 -- ^ Indent 'SDoc' some specified amount
@@ -555,6 +566,9 @@ instance (Outputable a, Outputable b, Outputable c, Outputable d, Outputable e) 
 instance Outputable FastString where
     ppr fs = ftext fs		-- Prints an unadorned string,
 				-- no double quotes or anything
+
+instance (Outputable key, Outputable elt) => Outputable (Map key elt) where
+    ppr m = ppr (M.toList m)
 \end{code}
 
 %************************************************************************
@@ -658,7 +672,15 @@ interpp'SP xs = sep (punctuate comma (map ppr xs))
 --
 -- > [x,y,z]  ==>  `x', `y', `z'
 pprQuotedList :: Outputable a => [a] -> SDoc
-pprQuotedList xs = hsep (punctuate comma (map (quotes . ppr) xs))
+pprQuotedList = quotedList . map ppr
+
+quotedList :: [SDoc] -> SDoc
+quotedList xs = hsep (punctuate comma (map quotes xs))
+
+quotedListWithOr :: [SDoc] -> SDoc
+-- [x,y,z]  ==>  `x', `y' or `z'
+quotedListWithOr xs@(_:_:_) = quotedList (init xs) <+> ptext (sLit "or") <+> quotes (last xs)
+quotedListWithOr xs = quotedList xs
 \end{code}
 
 
@@ -788,7 +810,7 @@ warnPprTrace :: Bool -> String -> Int -> SDoc -> a -> a
 warnPprTrace _     _file _line _msg x | opt_NoDebugOutput = x
 warnPprTrace False _file _line _msg x = x
 warnPprTrace True   file  line  msg x
-  = trace (show (doc PprDebug)) x
+  = trace (show (doc defaultDumpStyle)) x
   where
     doc = sep [hsep [text "WARNING: file", text file, text "line", int line],
 	       msg]

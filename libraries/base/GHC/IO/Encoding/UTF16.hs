@@ -48,10 +48,11 @@ import GHC.IORef
 import System.Posix.Internals
 import Foreign.C
 import GHC.Show
+import GHC.Ptr
 
 puts :: String -> IO ()
 puts s = do withCStringLen (s++"\n") $ \(p,len) -> 
-                c_write 1 p (fromIntegral len)
+                c_write 1 (castPtr p) (fromIntegral len)
             return ()
 #endif
 
@@ -59,7 +60,8 @@ puts s = do withCStringLen (s++"\n") $ \(p,len) ->
 -- The UTF-16 codec: either UTF16BE or UTF16LE with a BOM
 
 utf16  :: TextEncoding
-utf16 = TextEncoding { mkTextDecoder = utf16_DF,
+utf16 = TextEncoding { textEncodingName = "UTF-16",
+                       mkTextDecoder = utf16_DF,
  	               mkTextEncoder = utf16_EF }
 
 utf16_DF :: IO (TextDecoder (Maybe DecodeBuffer))
@@ -138,7 +140,8 @@ bom2 = bomL
 -- UTF16LE and UTF16BE
 
 utf16be :: TextEncoding
-utf16be = TextEncoding { mkTextDecoder = utf16be_DF,
+utf16be = TextEncoding { textEncodingName = "UTF-16BE",
+                         mkTextDecoder = utf16be_DF,
  	                 mkTextEncoder = utf16be_EF }
 
 utf16be_DF :: IO (TextDecoder ())
@@ -160,7 +163,8 @@ utf16be_EF =
           })
 
 utf16le :: TextEncoding
-utf16le = TextEncoding { mkTextDecoder = utf16le_DF,
+utf16le = TextEncoding { textEncodingName = "UTF16-LE",
+                         mkTextDecoder = utf16le_DF,
  	                 mkTextEncoder = utf16le_EF }
 
 utf16le_DF :: IO (TextDecoder ())

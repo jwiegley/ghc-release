@@ -9,7 +9,7 @@
 module DsMonad (
 	DsM, mapM, mapAndUnzipM,
 	initDs, initDsTc, fixDs,
-	foldlM, foldrM, ifOptM,
+	foldlM, foldrM, ifDOptM, unsetOptM,
 	Applicative(..),(<$>),
 
 	newLocalName,
@@ -25,6 +25,8 @@ module DsMonad (
 
 	DsMetaEnv, DsMetaVal(..), dsLookupMetaEnv, dsExtendMetaEnv,
 
+        dsLoadModule,
+
 	-- Warnings
 	DsWarning, warnDs, failWithDs,
 
@@ -38,6 +40,7 @@ import TcRnMonad
 import CoreSyn
 import HsSyn
 import TcIface
+import LoadIface
 import RdrName
 import HscTypes
 import Bag
@@ -69,7 +72,6 @@ import Data.IORef
 \begin{code}
 data DsMatchContext
   = DsMatchContext (HsMatchContext Name) SrcSpan
-  | NoMatchContext
   deriving ()
 
 data EquationInfo
@@ -218,8 +220,8 @@ it easier to read debugging output.
 
 \begin{code}
 -- Make a new Id with the same print name, but different type, and new unique
-newUniqueId :: Name -> Type -> DsM Id
-newUniqueId id = mkSysLocalM (occNameFS (nameOccName id))
+newUniqueId :: Id -> Type -> DsM Id
+newUniqueId id = mkSysLocalM (occNameFS (nameOccName (idName id)))
 
 duplicateLocalDs :: Id -> DsM Id
 duplicateLocalDs old_local 
@@ -318,3 +320,13 @@ dsExtendMetaEnv :: DsMetaEnv -> DsM a -> DsM a
 dsExtendMetaEnv menv thing_inside
   = updLclEnv (\env -> env { ds_meta = ds_meta env `plusNameEnv` menv }) thing_inside
 \end{code}
+
+\begin{code}
+dsLoadModule :: SDoc -> Module -> DsM ()
+dsLoadModule doc mod
+  = do { env <- getGblEnv
+       ; setEnvs (ds_if_env env)
+                 (loadSysInterface doc mod >> return ())
+       }
+\end{code}
+

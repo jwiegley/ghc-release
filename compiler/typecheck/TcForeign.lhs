@@ -30,10 +30,6 @@ import TcEnv
 import ForeignCall
 import ErrUtils
 import Id
-#if alpha_TARGET_ARCH
-import Type
-import SMRep
-#endif
 import Name
 import TcType
 import DynFlags
@@ -94,7 +90,7 @@ tcCheckFIType :: Type -> [Type] -> Type -> ForeignImport -> TcM ForeignImport
 
 tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport _ safety _ (CLabel _))
   = ASSERT( null arg_tys )
-    do { checkCg checkCOrAsmOrInterp
+    do { checkCg checkCOrAsmOrLlvmOrInterp
        ; checkSafety safety
        ; check (isFFILabelTy res_ty) (illegalForeignTyErr empty sig_ty)
        ; return idecl }	     -- NB check res_ty not sig_ty!
@@ -106,14 +102,13 @@ tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety _ CWrapper) = do
    	-- valid foreign type.  For legacy reasons ft -> IO (Ptr ft) as well
    	-- as ft -> IO Addr is accepted, too.  The use of the latter two forms
    	-- is DEPRECATED, though.
-    checkCg checkCOrAsmOrInterp
+    checkCg checkCOrAsmOrLlvmOrInterp
     checkCConv cconv
     checkSafety safety
     case arg_tys of
         [arg1_ty] -> do checkForeignArgs isFFIExternalTy arg1_tys
                         checkForeignRes nonIOok  isFFIExportResultTy res1_ty
                         checkForeignRes mustBeIO isFFIDynResultTy    res_ty
-                        checkFEDArgs arg1_tys
                   where
                      (arg1_tys, res1_ty) = tcSplitFunTys arg1_ty
         _ -> addErrTc (illegalForeignTyErr empty sig_ty)
@@ -121,7 +116,7 @@ tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety _ CWrapper) = do
 
 tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety _ (CFunction target))
   | isDynamicTarget target = do -- Foreign import dynamic
-      checkCg checkCOrAsmOrInterp
+      checkCg checkCOrAsmOrLlvmOrInterp
       checkCConv cconv
       checkSafety safety
       case arg_tys of           -- The first arg must be Ptr, FunPtr, or Addr
@@ -137,9 +132,9 @@ tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety _ (CFunction tar
           return idecl
   | cconv == PrimCallConv = do
       dflags <- getDOpts
-      check (dopt Opt_GHCForeignImportPrim dflags)
+      check (xopt Opt_GHCForeignImportPrim dflags)
             (text "Use -XGHCForeignImportPrim to allow `foreign import prim'.")
-      checkCg (checkCOrAsmOrDotNetOrInterp)
+      checkCg (checkCOrAsmOrLlvmOrDotNetOrInterp)
       checkCTarget target
       check (playSafe safety)
             (text "The safe/unsafe annotation should not be used with `foreign import prim'.")
@@ -148,7 +143,7 @@ tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety _ (CFunction tar
       checkForeignRes nonIOok (isFFIPrimResultTy dflags) res_ty
       return idecl
   | otherwise = do              -- Normal foreign import
-      checkCg (checkCOrAsmOrDotNetOrInterp)
+      checkCg (checkCOrAsmOrLlvmOrDotNetOrInterp)
       checkCConv cconv
       checkSafety safety
       checkCTarget target
@@ -158,13 +153,16 @@ tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety _ (CFunction tar
       checkMissingAmpersand dflags arg_tys res_ty
       return idecl
 
+
 -- This makes a convenient place to check
 -- that the C identifier is valid for C
 checkCTarget :: CCallTarget -> TcM ()
-checkCTarget (StaticTarget str) = do
-    checkCg checkCOrAsmOrDotNetOrInterp
+checkCTarget (StaticTarget str _) = do
+    checkCg checkCOrAsmOrLlvmOrDotNetOrInterp
     check (isCLabelString str) (badCName str)
+
 checkCTarget DynamicTarget = panic "checkCTarget DynamicTarget"
+
 
 checkMissingAmpersand :: DynFlags -> [Type] -> Type -> TcM ()
 checkMissingAmpersand dflags arg_tys res_ty
@@ -174,31 +172,6 @@ checkMissingAmpersand dflags arg_tys res_ty
   | otherwise
   = return ()
 \end{code}
-
-On an Alpha, with foreign export dynamic, due to a giant hack when
-building adjustor thunks, we only allow 4 integer arguments with
-foreign export dynamic (i.e., 32 bytes of arguments after padding each
-argument to a quadword, excluding floating-point arguments).
-
-The check is needed for both via-C and native-code routes
-
-\begin{code}
-#include "nativeGen/NCG.h"
-
-checkFEDArgs :: [Type] -> TcM ()
-#if alpha_TARGET_ARCH
-checkFEDArgs arg_tys
-  = check (integral_args <= 32) err
-  where
-    integral_args = sum [ (widthInBytes . argMachRep . primRepToCgRep) prim_rep
-			| prim_rep <- map typePrimRep arg_tys,
-			  primRepHint prim_rep /= FloatHint ]
-    err = ptext (sLit "On Alpha, I can only handle 32 bytes of non-floating-point arguments to foreign export dynamic")
-#else
-checkFEDArgs _ = return ()
-#endif
-\end{code}
-
 
 %************************************************************************
 %*									*
@@ -235,7 +208,7 @@ tcFExport fo@(ForeignExport (L loc nm) hs_ty spec) =
    -- is *stable* (i.e. the compiler won't change it later),
    -- because this name will be referred to by the C code stub.
    id  <- mkStableIdFromName nm sig_ty loc mkForeignExportOcc
-   return (L loc (VarBind id rhs), ForeignExport (L loc id) undefined spec)
+   return (mkVarBind id rhs, ForeignExport (L loc id) undefined spec)
 tcFExport d = pprPanic "tcFExport" (ppr d)
 \end{code}
 
@@ -244,7 +217,7 @@ tcFExport d = pprPanic "tcFExport" (ppr d)
 \begin{code}
 tcCheckFEType :: Type -> ForeignExport -> TcM ()
 tcCheckFEType sig_ty (CExport (CExportStatic str cconv)) = do
-    checkCg checkCOrAsm
+    checkCg checkCOrAsmOrLlvm
     check (isCLabelString str) (badCName str)
     checkCConv cconv
     checkForeignArgs isFFIExternalTy arg_tys
@@ -294,25 +267,28 @@ checkForeignRes non_io_result_ok pred_res_ty ty
 \end{code}
 
 \begin{code}
-checkCOrAsm :: HscTarget -> Maybe SDoc
-checkCOrAsm HscC   = Nothing
-checkCOrAsm HscAsm = Nothing
-checkCOrAsm _
-   = Just (text "requires via-C or native code generation (-fvia-C)")
+checkCOrAsmOrLlvm :: HscTarget -> Maybe SDoc
+checkCOrAsmOrLlvm HscC    = Nothing
+checkCOrAsmOrLlvm HscAsm  = Nothing
+checkCOrAsmOrLlvm HscLlvm = Nothing
+checkCOrAsmOrLlvm _
+   = Just (text "requires via-C, llvm (-fllvm) or native code generation (-fvia-C)")
 
-checkCOrAsmOrInterp :: HscTarget -> Maybe SDoc
-checkCOrAsmOrInterp HscC           = Nothing
-checkCOrAsmOrInterp HscAsm         = Nothing
-checkCOrAsmOrInterp HscInterpreted = Nothing
-checkCOrAsmOrInterp _
-   = Just (text "requires interpreted, C or native code generation")
+checkCOrAsmOrLlvmOrInterp :: HscTarget -> Maybe SDoc
+checkCOrAsmOrLlvmOrInterp HscC           = Nothing
+checkCOrAsmOrLlvmOrInterp HscAsm         = Nothing
+checkCOrAsmOrLlvmOrInterp HscLlvm        = Nothing
+checkCOrAsmOrLlvmOrInterp HscInterpreted = Nothing
+checkCOrAsmOrLlvmOrInterp _
+   = Just (text "requires interpreted, C, Llvm or native code generation")
 
-checkCOrAsmOrDotNetOrInterp :: HscTarget -> Maybe SDoc
-checkCOrAsmOrDotNetOrInterp HscC           = Nothing
-checkCOrAsmOrDotNetOrInterp HscAsm         = Nothing
-checkCOrAsmOrDotNetOrInterp HscInterpreted = Nothing
-checkCOrAsmOrDotNetOrInterp _
-   = Just (text "requires interpreted, C or native code generation")
+checkCOrAsmOrLlvmOrDotNetOrInterp :: HscTarget -> Maybe SDoc
+checkCOrAsmOrLlvmOrDotNetOrInterp HscC           = Nothing
+checkCOrAsmOrLlvmOrDotNetOrInterp HscAsm         = Nothing
+checkCOrAsmOrLlvmOrDotNetOrInterp HscLlvm        = Nothing
+checkCOrAsmOrLlvmOrDotNetOrInterp HscInterpreted = Nothing
+checkCOrAsmOrLlvmOrDotNetOrInterp _
+   = Just (text "requires interpreted, C, Llvm or native code generation")
 
 checkCg :: (HscTarget -> Maybe SDoc) -> TcM ()
 checkCg check = do
@@ -334,7 +310,8 @@ checkCConv CCallConv  = return ()
 #if i386_TARGET_ARCH
 checkCConv StdCallConv = return ()
 #else
-checkCConv StdCallConv = addErrTc (text "calling convention not supported on this platform: stdcall")
+-- This is a warning, not an error. see #3336
+checkCConv StdCallConv = addWarnTc (text "the 'stdcall' calling convention is unsupported on this platform,"$$ text "treating as ccall")
 #endif
 checkCConv PrimCallConv = addErrTc (text "The `prim' calling convention can only be used with `foreign import'")
 checkCConv CmmCallConv = panic "checkCConv CmmCallConv"
@@ -359,7 +336,7 @@ illegalForeignTyErr :: SDoc -> Type -> SDoc
 illegalForeignTyErr arg_or_res ty
   = hang (hsep [ptext (sLit "Unacceptable"), arg_or_res, 
                 ptext (sLit "type in foreign declaration:")])
-	 4 (hsep [ppr ty])
+       2 (hsep [ppr ty])
 
 -- Used for 'arg_or_res' argument to illegalForeignTyErr
 argument, result :: SDoc
@@ -373,6 +350,6 @@ badCName target
 foreignDeclCtxt :: ForeignDecl Name -> SDoc
 foreignDeclCtxt fo
   = hang (ptext (sLit "When checking declaration:"))
-         4 (ppr fo)
+       2 (ppr fo)
 \end{code}
 

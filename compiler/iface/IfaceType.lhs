@@ -68,32 +68,43 @@ data IfacePredType 	-- NewTypes are handled as ordinary TyConApps
 
 type IfaceContext = [IfacePredType]
 
--- NB: If you add a data constructor, remember to add a case to
---     IfaceSyn.eqIfTc!
 data IfaceTyCon 	-- Abbreviations for common tycons with known names
   = IfaceTc Name	-- The common case
   | IfaceIntTc | IfaceBoolTc | IfaceCharTc
   | IfaceListTc | IfacePArrTc
   | IfaceTupTc Boxity Arity 
+  | IfaceAnyTc IfaceKind     -- Used for AnyTyCon (see Note [Any Types] in TysPrim)
+    	       		     -- other than 'Any :: *' itself
   | IfaceLiftedTypeKindTc | IfaceOpenTypeKindTc | IfaceUnliftedTypeKindTc
   | IfaceUbxTupleKindTc | IfaceArgTypeKindTc 
-  deriving( Eq )
 
 ifaceTyConName :: IfaceTyCon -> Name
-ifaceTyConName IfaceIntTc  	  = intTyConName
-ifaceTyConName IfaceBoolTc 	  = boolTyConName
-ifaceTyConName IfaceCharTc 	  = charTyConName
-ifaceTyConName IfaceListTc 	  = listTyConName
-ifaceTyConName IfacePArrTc 	  = parrTyConName
-ifaceTyConName (IfaceTupTc bx ar) = getName (tupleTyCon bx ar)
+ifaceTyConName IfaceIntTc  	       = intTyConName
+ifaceTyConName IfaceBoolTc 	       = boolTyConName
+ifaceTyConName IfaceCharTc 	       = charTyConName
+ifaceTyConName IfaceListTc 	       = listTyConName
+ifaceTyConName IfacePArrTc 	       = parrTyConName
+ifaceTyConName (IfaceTupTc bx ar)      = getName (tupleTyCon bx ar)
 ifaceTyConName IfaceLiftedTypeKindTc   = liftedTypeKindTyConName
 ifaceTyConName IfaceOpenTypeKindTc     = openTypeKindTyConName
 ifaceTyConName IfaceUnliftedTypeKindTc = unliftedTypeKindTyConName
 ifaceTyConName IfaceUbxTupleKindTc     = ubxTupleKindTyConName
 ifaceTyConName IfaceArgTypeKindTc      = argTypeKindTyConName
-ifaceTyConName (IfaceTc ext)      = ext
+ifaceTyConName (IfaceTc ext)           = ext
+ifaceTyConName (IfaceAnyTc k)          = pprPanic "ifaceTyConName" (ppr k)
+	       		    	       	 -- Note [The Name of an IfaceAnyTc]
 \end{code}
 
+Note [The Name of an IfaceAnyTc]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+It isn't easy to get the Name of an IfaceAnyTc in a pure way.  What you
+really need to do is to transform it to a TyCon, and get the Name of that.
+But doing so needs the monad because there's an IfaceKind inside, and we
+need a Kind.
+
+In fact, ifaceTyConName is only used for instances and rules, and we don't
+expect to instantiate those at these (internal-ish) Any types, so rather
+than solve this potential problem now, I'm going to defer it until it happens!
 
 %************************************************************************
 %*									*
@@ -244,14 +255,17 @@ instance Outputable IfacePredType where
 			     <+> sep (map pprParendIfaceType ts)
 
 instance Outputable IfaceTyCon where
-  ppr (IfaceTc ext) = ppr ext
-  ppr other_tc      = ppr (ifaceTyConName other_tc)
+  ppr (IfaceAnyTc k) = ptext (sLit "Any") <> pprParendIfaceType k
+      		       	     -- We can't easily get the Name of an IfaceAnyTc
+			     -- (see Note [The Name of an IfaceAnyTc])
+			     -- so we fake it.  It's only for debug printing!
+  ppr other_tc       = ppr (ifaceTyConName other_tc)
 
 -------------------
 pprIfaceContext :: IfaceContext -> SDoc
 -- Prints "(C a, D b) =>", including the arrow
 pprIfaceContext []     = empty
-pprIfaceContext theta = ppr_preds theta <+> ptext (sLit "=>")
+pprIfaceContext theta = ppr_preds theta <+> darrow
 
 ppr_preds :: [IfacePredType] -> SDoc
 ppr_preds [pred] = ppr pred	-- No parens
@@ -312,6 +326,7 @@ toIfaceType (PredTy st) =
 toIfaceTyCon :: TyCon -> IfaceTyCon
 toIfaceTyCon tc 
   | isTupleTyCon tc = IfaceTupTc (tupleTyConBoxity tc) (tyConArity tc)
+  | isAnyTyCon tc   = IfaceAnyTc (toIfaceKind (tyConKind tc))
   | otherwise	    = toIfaceTyCon_name (tyConName tc)
 
 toIfaceTyCon_name :: Name -> IfaceTyCon
@@ -323,7 +338,8 @@ toIfaceTyCon_name nm
 
 toIfaceWiredInTyCon :: TyCon -> Name -> IfaceTyCon
 toIfaceWiredInTyCon tc nm
-  | isTupleTyCon tc                 =  IfaceTupTc (tupleTyConBoxity tc) (tyConArity tc)
+  | isTupleTyCon tc                 = IfaceTupTc  (tupleTyConBoxity tc) (tyConArity tc)
+  | isAnyTyCon tc                   = IfaceAnyTc (toIfaceKind (tyConKind tc))
   | nm == intTyConName              = IfaceIntTc
   | nm == boolTyConName             = IfaceBoolTc 
   | nm == charTyConName             = IfaceCharTc 

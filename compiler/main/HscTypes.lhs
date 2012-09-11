@@ -123,13 +123,12 @@ import FamInstEnv	( FamInstEnv, FamInst )
 import Rules		( RuleBase )
 import CoreSyn		( CoreBind )
 import VarEnv
-import VarSet
 import Var
 import Id
 import Type		
 
 import Annotations
-import Class		( Class, classSelIds, classATs, classTyCon )
+import Class		( Class, classAllSelIds, classATs, classTyCon )
 import TyCon
 import DataCon		( DataCon, dataConImplicitIds, dataConWrapId )
 import PrelNames	( gHC_PRIM )
@@ -140,13 +139,12 @@ import DriverPhases	( HscSource(..), isHsBoot, hscSourceString, Phase )
 import BasicTypes	( IPName, defaultFixity, WarningTxt(..) )
 import OptimizationFuel	( OptFuelState )
 import IfaceSyn
-import FiniteMap	( FiniteMap )
 import CoreSyn		( CoreRule )
 import Maybes		( orElse, expectJust, catMaybes )
 import Outputable
 import BreakArray
 import SrcLoc		( SrcSpan, Located(..) )
-import LazyUniqFM		( lookupUFM, eltsUFM, emptyUFM )
+import UniqFM		( lookupUFM, eltsUFM, emptyUFM )
 import UniqSupply	( UniqSupply )
 import FastString
 import StringBuffer	( StringBuffer )
@@ -162,6 +160,7 @@ import System.Time	( ClockTime )
 import Data.IORef
 import Data.Array       ( Array, array )
 import Data.List
+import Data.Map (Map)
 import Control.Monad    ( mplus, guard, liftM, when )
 import Exception
 \end{code}
@@ -325,6 +324,12 @@ instance ExceptionMonad Ghc where
       Ghc $ \s -> unGhc act s `gcatch` \e -> unGhc (handle e) s
   gblock (Ghc m)   = Ghc $ \s -> gblock (m s)
   gunblock (Ghc m) = Ghc $ \s -> gunblock (m s)
+  gmask f =
+      Ghc $ \s -> gmask $ \io_restore ->
+                             let
+                                g_restore (Ghc m) = Ghc $ \s -> io_restore (m s)
+                             in
+                                unGhc (f g_restore) s
 
 instance WarnLogMonad Ghc where
   setWarnings warns = Ghc $ \(Session _ wref) -> writeIORef wref warns
@@ -357,6 +362,12 @@ instance ExceptionMonad m => ExceptionMonad (GhcT m) where
       GhcT $ \s -> unGhcT act s `gcatch` \e -> unGhcT (handle e) s
   gblock (GhcT m) = GhcT $ \s -> gblock (m s)
   gunblock (GhcT m) = GhcT $ \s -> gunblock (m s)
+  gmask f =
+      GhcT $ \s -> gmask $ \io_restore ->
+                           let
+                              g_restore (GhcT m) = GhcT $ \s -> io_restore (m s)
+                           in
+                              unGhcT (f g_restore) s
 
 instance MonadIO m => WarnLogMonad (GhcT m) where
   setWarnings warns = GhcT $ \(Session _ wref) -> liftIO $ writeIORef wref warns
@@ -555,21 +566,10 @@ data HscEnv
                 -- by limiting the number of transformations,
                 -- we can use binary search to help find compiler bugs.
 
-        hsc_type_env_var :: Maybe (Module, IORef TypeEnv),
+        hsc_type_env_var :: Maybe (Module, IORef TypeEnv)
                 -- ^ Used for one-shot compilation only, to initialise
                 -- the 'IfGblEnv'. See 'TcRnTypes.tcg_type_env_var' for 
                 -- 'TcRunTypes.TcGblEnv'
-
-        hsc_global_rdr_env :: GlobalRdrEnv,
-                -- ^ A mapping from 'RdrName's that are in global scope during
-                -- the compilation of the current file to more detailed
-                -- information about those names. Not necessarily just the
-                -- names directly imported by the module being compiled!
-        
-        hsc_global_type_env :: TypeEnv
-                -- ^ Typing information about all those things in global scope.
-                -- Not necessarily just the things directly imported by the module 
-                -- being compiled!
  }
 
 hscEPS :: HscEnv -> IO ExternalPackageState
@@ -978,9 +978,7 @@ data ModGuts
 	mg_insts     :: ![Instance],	 -- ^ Class instances declared in this module
 	mg_fam_insts :: ![FamInst],	 -- ^ Family instances declared in this module
         mg_rules     :: ![CoreRule],	 -- ^ Before the core pipeline starts, contains 
-                                         -- rules declared in this module. After the core
-                                         -- pipeline starts, it is changed to contain all
-                                         -- known rules for those things imported
+		     			 -- See Note [Overall plumbing for rules] in Rules.lhs
 	mg_binds     :: ![CoreBind],	 -- ^ Bindings for this module
 	mg_foreign   :: !ForeignStubs,   -- ^ Foreign exports declared in this module
 	mg_warns     :: !Warnings,	 -- ^ Warnings declared in the module
@@ -1127,20 +1125,14 @@ data InteractiveContext
 	ic_toplev_scope :: [Module],	-- ^ The context includes the "top-level" scope of
 					-- these modules
 
-	ic_exports :: [Module],		-- ^ The context includes just the exports of these
+	ic_exports :: [(Module, Maybe (ImportDecl RdrName))],		-- ^ The context includes just the exported parts of these
 					-- modules
 
 	ic_rn_gbl_env :: GlobalRdrEnv,	-- ^ The contexts' cached 'GlobalRdrEnv', built from
 					-- 'ic_toplev_scope' and 'ic_exports'
 
-	ic_tmp_ids :: [Id],             -- ^ Names bound during interaction with the user.
+	ic_tmp_ids :: [Id]              -- ^ Names bound during interaction with the user.
                                         -- Later Ids shadow earlier ones with the same OccName.
-
-        ic_tyvars :: TyVarSet           -- ^ Skolem type variables free in
-                                        -- 'ic_tmp_ids'.  These arise at
-                                        -- breakpoints in a polymorphic 
-                                        -- context, where we have only partial
-                                        -- type information.
 
 #ifdef GHCI
         , ic_resume :: [Resume]         -- ^ The stack of breakpoint contexts
@@ -1155,8 +1147,7 @@ emptyInteractiveContext
   = InteractiveContext { ic_toplev_scope = [],
 			 ic_exports = [],
 			 ic_rn_gbl_env = emptyGlobalRdrEnv,
-			 ic_tmp_ids = [],
-                         ic_tyvars = emptyVarSet
+			 ic_tmp_ids = []
 #ifdef GHCI
                          , ic_resume = []
 #endif
@@ -1170,29 +1161,20 @@ icPrintUnqual dflags ictxt = mkPrintUnqualified dflags (ic_rn_gbl_env ictxt)
 extendInteractiveContext
         :: InteractiveContext
         -> [Id]
-        -> TyVarSet
         -> InteractiveContext
-extendInteractiveContext ictxt ids tyvars
-  = ictxt { ic_tmp_ids =  snub((ic_tmp_ids ictxt \\ ids) ++ ids),
+extendInteractiveContext ictxt ids
+  = ictxt { ic_tmp_ids =  snub ((ic_tmp_ids ictxt \\ ids) ++ ids)
                           -- NB. must be this way around, because we want
                           -- new ids to shadow existing bindings.
-            ic_tyvars   = ic_tyvars ictxt `unionVarSet` tyvars }
+          }
     where snub = map head . group . sort
 
 substInteractiveContext :: InteractiveContext -> TvSubst -> InteractiveContext
 substInteractiveContext ictxt subst | isEmptyTvSubst subst = ictxt
-substInteractiveContext ictxt@InteractiveContext{ic_tmp_ids=ids} subst =
-   let ids'     = map (\id -> id `setIdType` substTy subst (idType id)) ids
-       subst_dom= varEnvKeys$ getTvSubstEnv subst
-       subst_ran= varEnvElts$ getTvSubstEnv subst
-       new_tvs  = [ tv | Just tv <- map getTyVar_maybe subst_ran]  
-       ic_tyvars'= (`delVarSetListByKey` subst_dom) 
-                 . (`extendVarSetList`   new_tvs)
-                   $ ic_tyvars ictxt
-    in ictxt { ic_tmp_ids = ids'
-             , ic_tyvars   = ic_tyvars' }
-
-          where delVarSetListByKey = foldl' delVarSetByKey
+substInteractiveContext ictxt@InteractiveContext{ic_tmp_ids=ids} subst 
+  = ictxt { ic_tmp_ids = map subst_ty ids }
+  where
+   subst_ty id = id `setIdType` substTy subst (idType id)
 \end{code}
 
 %************************************************************************
@@ -1323,7 +1305,7 @@ implicitTyThings (AClass cl)
     --    are only the family decls; they have no implicit things
     map ATyCon (classATs cl) ++
     -- superclass and operation selectors
-    map AnId (classSelIds cl)
+    map AnId (classAllSelIds cl)
 
 implicitTyThings (ADataCon dc) = 
     -- For data cons add the worker and (possibly) wrapper
@@ -1841,7 +1823,7 @@ data NameCache
 type OrigNameCache   = ModuleEnv (OccEnv Name)
 
 -- | Module-local cache of implicit parameter 'OccName's given 'Name's
-type OrigIParamCache = FiniteMap (IPName OccName) (IPName Name)
+type OrigIParamCache = Map (IPName OccName) (IPName Name)
 \end{code}
 
 
@@ -1986,7 +1968,6 @@ on just the OccName easily in a Core pass.
 
 \begin{code}
 -- | Vectorisation information for 'ModGuts', 'ModDetails' and 'ExternalPackageState'.
--- All of this information is always tidy, even in ModGuts.
 data VectInfo      
   = VectInfo {
       vectInfoVar     :: VarEnv  (Var    , Var  ),   -- ^ @(f, f_v)@ keyed on @f@

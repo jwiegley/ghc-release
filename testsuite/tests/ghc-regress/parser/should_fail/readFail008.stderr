@@ -1,5 +1,5 @@
 
-readFail008.hs:5:14:
+readFail008.hs:5:15:
     A newtype constructor cannot have a strictness annotation,
       but `T' does
     In the definition of data constructor `T'

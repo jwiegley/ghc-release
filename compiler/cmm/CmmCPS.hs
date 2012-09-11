@@ -42,7 +42,7 @@ cmmCPS :: DynFlags -- ^ Dynamic flags: -dcmm-lint -ddump-cps-cmm
 cmmCPS dflags cmm_with_calls
   = do	{ when (dopt Opt_DoCmmLinting dflags) $
 	       do showPass dflags "CmmLint"
-		  case firstJust $ map cmmLint cmm_with_calls of
+		  case firstJusts $ map cmmLint cmm_with_calls of
 		    Just err -> do printDump err
 				   ghcExit dflags 1
 		    Nothing  -> return ()
@@ -235,6 +235,7 @@ gatherBlocksIntoContinuation live proc_points blocks start =
       children = (collectNonProcPointTargets proc_points blocks (unitUniqSet start) [start]) `minusUniqSet` (unitUniqSet start)
       start_block = lookupWithDefaultBEnv blocks unknown_block start
       children_blocks = map (lookupWithDefaultBEnv blocks unknown_block) (uniqSetToList children)
+      unknown_block :: a    -- Used at more than one type
       unknown_block = panic "unknown block in gatherBlocksIntoContinuation"
       body = start_block : children_blocks
 

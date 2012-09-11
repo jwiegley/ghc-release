@@ -57,15 +57,7 @@ extern "C" {
 #define RTS_PRIVATE  /* disabled: RTS_PRIVATE */
 #endif
 
-#if __GNUC__ > 4
-#define BEGIN_RTS_PRIVATE #pragma GCC visibility push(hidden)
-#define END_RTS_PRIVATE   #pragma GCC visibility pop
-#else
-#define BEGIN_RTS_PRIVATE /* disabled: BEGIN_RTS_PRIVATE */
-#define END_RTS_PRIVATE   /* disabled: END_RTS_PRIVATE */
-#endif
-
-#if __GNUC__ > 4
+#if __GNUC__ >= 4
 #define RTS_UNLIKELY(p) __builtin_expect((p),0)
 #else
 #define RTS_UNLIKELY(p) p
@@ -106,10 +98,18 @@ void _assertFail(const char *filename, unsigned int linenum)
 	else					\
 	    _assertFail(__FILE__, __LINE__)
 
+#define CHECKM(predicate, msg, ...)             \
+	if (predicate)				\
+	    /*null*/;				\
+	else					\
+            barf(msg, ##__VA_ARGS__)
+
 #ifndef DEBUG
 #define ASSERT(predicate) /* nothing */
+#define ASSERTM(predicate,msg,...) /* nothing */
 #else
 #define ASSERT(predicate) CHECK(predicate)
+#define ASSERTM(predicate,msg,...) CHECKM(predicate,msg,##__VA_ARGS__)
 #endif /* DEBUG */
 
 /* 

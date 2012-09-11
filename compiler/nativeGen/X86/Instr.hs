@@ -28,6 +28,8 @@ import Outputable
 import Constants	(rESERVED_C_STACK_BYTES)
 
 import CLabel
+import UniqSet
+import Unique
 
 -- Size of a PPC memory address, in bytes.
 --
@@ -251,10 +253,10 @@ data Instr
 	-- use MOV for moving (either movss or movsd (movlpd better?))
 	| CVTSS2SD	Reg Reg		-- F32 to F64
 	| CVTSD2SS	Reg Reg		-- F64 to F32
-	| CVTTSS2SIQ	Operand Reg	-- F32 to I32/I64 (with truncation)
-	| CVTTSD2SIQ	Operand	Reg	-- F64 to I32/I64 (with truncation)
-	| CVTSI2SS	Operand Reg	-- I32/I64 to F32
-	| CVTSI2SD	Operand Reg	-- I32/I64 to F64
+	| CVTTSS2SIQ	Size Operand Reg -- F32 to I32/I64 (with truncation)
+	| CVTTSD2SIQ	Size Operand Reg -- F64 to I32/I64 (with truncation)
+	| CVTSI2SS	Size Operand Reg -- I32/I64 to F32
+	| CVTSI2SD	Size Operand Reg -- I32/I64 to F64
 
 	-- use ADD & SUB for arithmetic.  In both cases, operands
 	-- are  Operand Reg.
@@ -351,7 +353,6 @@ x86_regUsageOfInstr instr
     CLTD   _		-> mkRU [eax] [edx]
     NOP			-> mkRU [] []
 
-#if i386_TARGET_ARCH
     GMOV   src dst	-> mkRU [src] [dst]
     GLD    _ src dst	-> mkRU (use_EA src) [dst]
     GST    _ src dst	-> mkRUR (src : use_EA dst)
@@ -377,17 +378,14 @@ x86_regUsageOfInstr instr
     GSIN   _ _ _ src dst -> mkRU [src] [dst]
     GCOS   _ _ _ src dst -> mkRU [src] [dst]
     GTAN   _ _ _ src dst -> mkRU [src] [dst]
-#endif
 
-#if x86_64_TARGET_ARCH
     CVTSS2SD   src dst	-> mkRU [src] [dst]
     CVTSD2SS   src dst	-> mkRU [src] [dst]
-    CVTTSS2SIQ src dst	-> mkRU (use_R src) [dst]
-    CVTTSD2SIQ src dst	-> mkRU (use_R src) [dst]
-    CVTSI2SS   src dst	-> mkRU (use_R src) [dst]
-    CVTSI2SD   src dst	-> mkRU (use_R src) [dst]
+    CVTTSS2SIQ _ src dst -> mkRU (use_R src) [dst]
+    CVTTSD2SIQ _ src dst -> mkRU (use_R src) [dst]
+    CVTSI2SS   _ src dst -> mkRU (use_R src) [dst]
+    CVTSI2SD   _ src dst -> mkRU (use_R src) [dst]
     FDIV _     src dst	-> usageRM src dst
-#endif    
 
     FETCHGOT reg        -> mkRU [] [reg]
     FETCHPC  reg        -> mkRU [] [reg]
@@ -481,7 +479,6 @@ x86_patchRegsOfInstr instr env
     JMP op		-> patch1 JMP op
     JMP_TBL op ids      -> patch1 JMP_TBL op $ ids
 
-#if i386_TARGET_ARCH
     GMOV src dst	-> GMOV (env src) (env dst)
     GLD  sz src dst	-> GLD sz (lookupAddr src) (env dst)
     GST  sz src dst	-> GST sz (env src) (lookupAddr dst)
@@ -507,17 +504,14 @@ x86_patchRegsOfInstr instr env
     GSIN sz l1 l2 src dst	-> GSIN sz l1 l2 (env src) (env dst)
     GCOS sz l1 l2 src dst	-> GCOS sz l1 l2 (env src) (env dst)
     GTAN sz l1 l2 src dst	-> GTAN sz l1 l2 (env src) (env dst)
-#endif
 
-#if x86_64_TARGET_ARCH
     CVTSS2SD src dst	-> CVTSS2SD (env src) (env dst)
     CVTSD2SS src dst	-> CVTSD2SS (env src) (env dst)
-    CVTTSS2SIQ src dst	-> CVTTSS2SIQ (patchOp src) (env dst)
-    CVTTSD2SIQ src dst	-> CVTTSD2SIQ (patchOp src) (env dst)
-    CVTSI2SS src dst	-> CVTSI2SS (patchOp src) (env dst)
-    CVTSI2SD src dst	-> CVTSI2SD (patchOp src) (env dst)
+    CVTTSS2SIQ sz src dst -> CVTTSS2SIQ sz (patchOp src) (env dst)
+    CVTTSD2SIQ sz src dst -> CVTTSD2SIQ sz (patchOp src) (env dst)
+    CVTSI2SS sz src dst	-> CVTSI2SS sz (patchOp src) (env dst)
+    CVTSI2SD sz src dst	-> CVTSI2SD sz (patchOp src) (env dst)
     FDIV sz src dst	-> FDIV sz (patchOp src) (patchOp dst)
-#endif    
 
     CALL (Left _)  _	-> instr
     CALL (Right reg) p	-> CALL (Right (env reg)) p
@@ -536,7 +530,9 @@ x86_patchRegsOfInstr instr env
     _other		-> panic "patchRegs: unrecognised instr"
 
   where
+    patch1 :: (Operand -> a) -> Operand -> a
     patch1 insn op      = insn $! patchOp op
+    patch2 :: (Operand -> Operand -> a) -> Operand -> Operand -> a
     patch2 insn src dst = (insn $! patchOp src) $! patchOp dst
 
     patchOp (OpReg  reg) = OpReg $! env reg
@@ -600,30 +596,16 @@ x86_mkSpillInstr
 	-> Int		-- spill slot to use
 	-> Instr
 
-#if   i386_TARGET_ARCH
 x86_mkSpillInstr reg delta slot
   = let	off     = spillSlotToOffset slot
     in
-    let off_w = (off-delta) `div` 4
+    let off_w = (off-delta) `div` IF_ARCH_i386(4,8)
     in case targetClassOfReg reg of
-	   RcInteger -> MOV II32 (OpReg reg) (OpAddr (spRel off_w))
-	   _         -> GST FF80 reg (spRel off_w) {- RcFloat/RcDouble -}
-
-#elif x86_64_TARGET_ARCH
-x86_mkSpillInstr reg delta slot
-  = let	off     = spillSlotToOffset slot
-    in
-    let off_w = (off-delta) `div` 8
-    in case targetClassOfReg reg of
-	   RcInteger -> MOV II64 (OpReg reg) (OpAddr (spRel off_w))
-	   RcDouble  -> MOV FF64 (OpReg reg) (OpAddr (spRel off_w))
+	   RcInteger   -> MOV IF_ARCH_i386(II32,II64)
+                              (OpReg reg) (OpAddr (spRel off_w))
+	   RcDouble    -> GST FF80 reg (spRel off_w) {- RcFloat/RcDouble -}
+	   RcDoubleSSE -> MOV FF64 (OpReg reg) (OpAddr (spRel off_w))
            _         -> panic "X86.mkSpillInstr: no match"
-		-- ToDo: will it work to always spill as a double?
-		-- does that cause a stall if the data was a float?
-#else
-x86_mkSpillInstr _ _ _
-    =   panic "X86.RegInfo.mkSpillInstr: not defined for this architecture."
-#endif
 
 
 -- | Make a spill reload instruction.
@@ -633,26 +615,16 @@ x86_mkLoadInstr
 	-> Int		-- spill slot to use
 	-> Instr
 
-#if   i386_TARGET_ARCH
 x86_mkLoadInstr reg delta slot
   = let off     = spillSlotToOffset slot
     in
-	let off_w = (off-delta) `div` 4
-        in case targetClassOfReg reg of {
-              RcInteger -> MOV II32 (OpAddr (spRel off_w)) (OpReg reg);
-              _         -> GLD FF80 (spRel off_w) reg} {- RcFloat/RcDouble -}
-#elif x86_64_TARGET_ARCH
-x86_mkLoadInstr reg delta slot
-  = let off     = spillSlotToOffset slot
-    in
-	let off_w = (off-delta) `div` 8
+	let off_w = (off-delta) `div` IF_ARCH_i386(4,8)
         in case targetClassOfReg reg of
-              RcInteger -> MOV II64 (OpAddr (spRel off_w)) (OpReg reg)
-              _         -> MOV FF64 (OpAddr (spRel off_w)) (OpReg reg)
-#else
-x86_mkLoadInstr _ _ _
- 	= panic "X86.RegInfo.mkLoadInstr: not defined for this architecture."
-#endif
+              RcInteger -> MOV IF_ARCH_i386(II32,II64) 
+                               (OpAddr (spRel off_w)) (OpReg reg)
+              RcDouble  -> GLD FF80 (spRel off_w) reg {- RcFloat/RcDouble -}
+              RcDoubleSSE -> MOV FF64 (OpAddr (spRel off_w)) (OpReg reg)
+              _           -> panic "X86.x86_mkLoadInstr"
 
 spillSlotSize :: Int
 spillSlotSize = IF_ARCH_i386(12, 8)
@@ -713,14 +685,12 @@ x86_mkRegRegMoveInstr src dst
  = case targetClassOfReg src of
 #if   i386_TARGET_ARCH
         RcInteger -> MOV II32 (OpReg src) (OpReg dst)
-        RcDouble  -> GMOV src dst
-	RcFloat   -> panic "X86.RegInfo.mkRegRegMoveInstr: no match"
 #else
         RcInteger -> MOV II64 (OpReg src) (OpReg dst)
-        RcDouble  -> MOV FF64 (OpReg src) (OpReg dst)
-	RcFloat   -> panic "X86.RegInfo.mkRegRegMoveInstr: no match"
 #endif
-
+        RcDouble    -> GMOV src dst
+        RcDoubleSSE -> MOV FF64 (OpReg src) (OpReg dst)
+	_     -> panic "X86.RegInfo.mkRegRegMoveInstr: no match"
 
 -- | Check whether an instruction represents a reg-reg move.
 -- 	The register allocator attempts to eliminate reg->reg moves whenever it can,
@@ -799,12 +769,13 @@ data JumpDest = DestBlockId BlockId | DestImm Imm
 
 
 canShortcut :: Instr -> Maybe JumpDest
-canShortcut (JXX ALWAYS id) 	= Just (DestBlockId id)
-canShortcut (JMP (OpImm imm)) 	= Just (DestImm imm)
-canShortcut _ 			= Nothing
+canShortcut (JXX ALWAYS id)    = Just (DestBlockId id)
+canShortcut (JMP (OpImm imm))  = Just (DestImm imm)
+canShortcut _                  = Nothing
 
 
--- The helper ensures that we don't follow cycles.
+-- This helper shortcuts a sequence of branches.
+-- The blockset helps avoid following cycles.
 shortcutJump :: (BlockId -> Maybe JumpDest) -> Instr -> Instr
 shortcutJump fn insn = shortcutJump' fn emptyBlockSet insn
   where shortcutJump' fn seen insn@(JXX cc id) =
@@ -820,10 +791,10 @@ shortcutJump fn insn = shortcutJump' fn emptyBlockSet insn
 shortcutStatic :: (BlockId -> Maybe JumpDest) -> CmmStatic -> CmmStatic
 shortcutStatic fn (CmmStaticLit (CmmLabel lab))
   | Just uq <- maybeAsmTemp lab 
-  = CmmStaticLit (CmmLabel (shortBlockId fn (BlockId uq)))
+  = CmmStaticLit (CmmLabel (shortBlockId fn emptyUniqSet (BlockId uq)))
 shortcutStatic fn (CmmStaticLit (CmmLabelDiffOff lbl1 lbl2 off))
   | Just uq <- maybeAsmTemp lbl1
-  = CmmStaticLit (CmmLabelDiffOff (shortBlockId fn (BlockId uq)) lbl2 off)
+  = CmmStaticLit (CmmLabelDiffOff (shortBlockId fn emptyUniqSet (BlockId uq)) lbl2 off)
         -- slightly dodgy, we're ignoring the second label, but this
         -- works with the way we use CmmLabelDiffOff for jump tables now.
 
@@ -832,12 +803,14 @@ shortcutStatic _ other_static
 
 shortBlockId 
 	:: (BlockId -> Maybe JumpDest)
+	-> UniqSet Unique
 	-> BlockId
 	-> CLabel
 
-shortBlockId fn blockid@(BlockId uq) =
-   case fn blockid of
-      Nothing -> mkAsmTempLabel uq
-      Just (DestBlockId blockid')  -> shortBlockId fn blockid'
-      Just (DestImm (ImmCLbl lbl)) -> lbl
-      _other -> panic "shortBlockId"
+shortBlockId fn seen blockid@(BlockId uq) =
+  case (elementOfUniqSet uq seen, fn blockid) of
+    (True, _)    -> mkAsmTempLabel uq
+    (_, Nothing) -> mkAsmTempLabel uq
+    (_, Just (DestBlockId blockid'))  -> shortBlockId fn (addOneToUniqSet seen uq) blockid'
+    (_, Just (DestImm (ImmCLbl lbl))) -> lbl
+    (_, _other) -> panic "shortBlockId"

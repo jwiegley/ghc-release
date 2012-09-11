@@ -4,6 +4,9 @@
  *
  * Capabilities
  *
+ * For details on the high-level design, see
+ *   http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Scheduler
+ *
  * A Capability holds all the state an OS thread/task needs to run
  * Haskell code: its STG registers, a pointer to its TSO, a nursery
  * etc. During STG execution, a pointer to the Capabilitity is kept in
@@ -22,7 +25,7 @@
 #include "Task.h"
 #include "Sparks.h"
 
-BEGIN_RTS_PRIVATE
+#include "BeginPrivate.h"
 
 struct Capability_ {
     // State required by the STG virtual machine when running Haskell
@@ -42,9 +45,6 @@ struct Capability_ {
     // true if this Capability is running Haskell code, used for
     // catching unsafe call-ins.
     rtsBool in_haskell;
-
-    // true if this Capability is currently in the GC
-    rtsBool in_gc;
 
     // The run queue.  The Task owning this Capability has exclusive
     // access to its run queue, so can wake up threads without
@@ -69,6 +69,9 @@ struct Capability_ {
     bdescr **mut_lists;
     bdescr **saved_mut_lists; // tmp use during GC
 
+    // block for allocating pinned objects into
+    bdescr *pinned_object_block;
+
     // Context switch flag. We used to have one global flag, now one 
     // per capability. Locks required  : none (conflicts are harmless)
     int context_switch;
@@ -88,11 +91,8 @@ struct Capability_ {
     Task *returning_tasks_hd; // Singly-linked, with head/tail
     Task *returning_tasks_tl;
 
-    // A list of threads to append to this Capability's run queue at
-    // the earliest opportunity.  These are threads that have been
-    // woken up by another Capability.
-    StgTSO *wakeup_queue_hd;
-    StgTSO *wakeup_queue_tl;
+    // Messages, or END_TSO_QUEUE.
+    Message *inbox;
 
     SparkPool *sparks;
 
@@ -202,7 +202,9 @@ extern volatile StgWord waiting_for_gc;
 //
 void waitForReturnCapability (Capability **cap/*in/out*/, Task *task);
 
-INLINE_HEADER void recordMutableCap (StgClosure *p, Capability *cap, nat gen);
+EXTERN_INLINE void recordMutableCap (StgClosure *p, Capability *cap, nat gen);
+
+EXTERN_INLINE void recordClosureMutated (Capability *cap, StgClosure *p);
 
 #if defined(THREADED_RTS)
 
@@ -224,12 +226,6 @@ void yieldCapability (Capability** pCap, Task *task);
 // On return: pCap points to the capability.
 //
 void waitForCapability (Task *task, Mutex *mutex, Capability **pCap);
-
-// Wakes up a thread on a Capability (probably a different Capability
-// from the one held by the current Task).
-//
-void wakeupThreadOnCapability (Capability *my_cap, Capability *other_cap,
-                               StgTSO *tso);
 
 // Wakes up a worker thread on just one Capability, used when we
 // need to service some global event.
@@ -280,15 +276,25 @@ void freeCapabilities (void);
 
 // For the GC:
 void markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta, 
-                           rtsBool prune_sparks);
+                           rtsBool no_mark_sparks);
 void markCapabilities (evac_fn evac, void *user);
 void traverseSparkQueues (evac_fn evac, void *user);
+
+/* -----------------------------------------------------------------------------
+   Messages
+   -------------------------------------------------------------------------- */
+
+#ifdef THREADED_RTS
+
+INLINE_HEADER rtsBool emptyInbox(Capability *cap);;
+
+#endif // THREADED_RTS
 
 /* -----------------------------------------------------------------------------
  * INLINE functions... private below here
  * -------------------------------------------------------------------------- */
 
-INLINE_HEADER void
+EXTERN_INLINE void
 recordMutableCap (StgClosure *p, Capability *cap, nat gen)
 {
     bdescr *bd;
@@ -306,6 +312,15 @@ recordMutableCap (StgClosure *p, Capability *cap, nat gen)
     }
     *bd->free++ = (StgWord)p;
 }
+
+EXTERN_INLINE void
+recordClosureMutated (Capability *cap, StgClosure *p)
+{
+    bdescr *bd;
+    bd = Bdescr((StgPtr)p);
+    if (bd->gen_no != 0) recordMutableCap(p,cap,bd->gen_no);
+}
+
 
 #if defined(THREADED_RTS)
 INLINE_HEADER rtsBool
@@ -333,6 +348,15 @@ contextSwitchCapability (Capability *cap)
     cap->context_switch = 1;
 }
 
-END_RTS_PRIVATE
+#ifdef THREADED_RTS
+
+INLINE_HEADER rtsBool emptyInbox(Capability *cap)
+{
+    return (cap->inbox == (Message*)END_TSO_QUEUE);
+}
+
+#endif
+
+#include "EndPrivate.h"
 
 #endif /* CAPABILITY_H */

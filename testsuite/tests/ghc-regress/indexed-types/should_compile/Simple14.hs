@@ -15,6 +15,10 @@ ntI = undefined
 
 foo :: forall m n. EQ_ (Maybe m) (Maybe n)
 foo = ntI (`eqE` (eqI :: EQ_ m n))
--- This works:
+-- Alternative
 -- foo = ntI (\eq -> eq `eqE` (eqI :: EQ_ m n))
 
+-- eq :: EQ_ (Maybe m) (Maybe n)
+-- Need (Maybe m ~ Maybe n) =>  EQ_ m n ~ EQ_ zeta zeta
+-- which redues to (m~n) => m ~ zeta
+-- but then we are stuck

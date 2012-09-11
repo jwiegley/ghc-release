@@ -5,7 +5,7 @@
 
 \begin{code}
 module ErrUtils (
-	Message, mkLocMessage, printError,
+	Message, mkLocMessage, printError, pprMessageBag,
 	Severity(..),
 
 	ErrMsg, WarnMsg,
@@ -18,7 +18,7 @@ module ErrUtils (
 
 	ghcExit,
 	doIfSet, doIfSet_dyn, 
-	dumpIfSet, dumpIf_core, dumpIfSet_core, dumpIfSet_dyn, dumpIfSet_dyn_or,
+	dumpIfSet, dumpIfSet_dyn, dumpIfSet_dyn_or,
         mkDumpDoc, dumpSDoc,
 
 	--  * Messages during compilation
@@ -49,8 +49,12 @@ import System.IO
 
 type Message = SDoc
 
+pprMessageBag :: Bag Message -> SDoc
+pprMessageBag msgs = vcat (punctuate blankLine (bagToList msgs))
+
 data Severity
-  = SevInfo
+  = SevOutput
+  | SevInfo
   | SevWarning
   | SevError
   | SevFatal
@@ -202,19 +206,6 @@ dumpIfSet flag hdr doc
   | not flag   = return ()
   | otherwise  = printDump (mkDumpDoc hdr doc)
 
-dumpIf_core :: Bool -> DynFlags -> DynFlag -> String -> SDoc -> IO ()
-dumpIf_core cond dflags dflag hdr doc
-  | cond
-    || verbosity dflags >= 4
-    || dopt Opt_D_verbose_core2core dflags
-  = dumpSDoc dflags dflag hdr doc
-
-  | otherwise = return ()
-
-dumpIfSet_core :: DynFlags -> DynFlag -> String -> SDoc -> IO ()
-dumpIfSet_core dflags flag hdr doc
-  = dumpIf_core (dopt flag dflags) dflags flag hdr doc
-
 dumpIfSet_dyn :: DynFlags -> DynFlag -> String -> SDoc -> IO ()
 dumpIfSet_dyn dflags flag hdr doc
   | dopt flag dflags || verbosity dflags >= 4 
@@ -231,10 +222,10 @@ dumpIfSet_dyn_or dflags flags hdr doc
 
 mkDumpDoc :: String -> SDoc -> SDoc
 mkDumpDoc hdr doc 
-   = vcat [text "", 
+   = vcat [blankLine,
 	   line <+> text hdr <+> line,
 	   doc,
-	   text ""]
+	   blankLine]
      where 
         line = text (replicate 20 '=')
 
@@ -320,7 +311,7 @@ fatalErrorMsg dflags msg = log_action dflags SevFatal noSrcSpan defaultErrStyle 
 
 compilationProgressMsg :: DynFlags -> String -> IO ()
 compilationProgressMsg dflags msg
-  = ifVerbose dflags 1 (log_action dflags SevInfo noSrcSpan defaultUserStyle (text msg))
+  = ifVerbose dflags 1 (log_action dflags SevOutput noSrcSpan defaultUserStyle (text msg))
 
 showPass :: DynFlags -> String -> IO ()
 showPass dflags what 

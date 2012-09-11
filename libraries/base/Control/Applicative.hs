@@ -45,6 +45,10 @@ import Control.Monad.Instances ()
 import Data.Functor ((<$>), (<$))
 import Data.Monoid (Monoid(..))
 
+#ifdef __GLASGOW_HASKELL__
+import GHC.Conc (STM, retry, orElse)
+#endif
+
 infixl 3 <|>
 infixl 4 <*>, <*, *>, <**>
 
@@ -145,6 +149,16 @@ instance Applicative IO where
         pure = return
         (<*>) = ap
 
+#ifdef __GLASGOW_HASKELL__
+instance Applicative STM where
+    pure = return
+    (<*>) = ap
+
+instance Alternative STM where
+    empty = retry
+    (<|>) = orElse
+#endif
+
 instance Applicative ((->) a) where
         pure = const
         (<*>) f g x = f x (g x)
@@ -152,6 +166,11 @@ instance Applicative ((->) a) where
 instance Monoid a => Applicative ((,) a) where
         pure x = (mempty, x)
         (u, f) <*> (v, x) = (u `mappend` v, f x)
+
+instance Applicative (Either e) where
+        pure          = Right
+        Left  e <*> _ = Left e
+        Right f <*> r = fmap f r
 
 -- new instances
 

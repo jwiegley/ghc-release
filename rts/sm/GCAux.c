@@ -45,6 +45,10 @@ isAlive(StgClosure *p)
 
     // ignore static closures 
     //
+    // ToDo: This means we never look through IND_STATIC, which means
+    // isRetainer needs to handle the IND_STATIC case rather than
+    // raising an error.
+    //
     // ToDo: for static closures, check the static link field.
     // Problem here is that we sometimes don't set the link field, eg.
     // for static closures with an empty SRT or CONSTR_STATIC_NOCAFs.
@@ -90,8 +94,6 @@ isAlive(StgClosure *p)
     case IND:
     case IND_STATIC:
     case IND_PERM:
-    case IND_OLDGEN:		// rely on compatible layout with StgInd 
-    case IND_OLDGEN_PERM:
       // follow indirections 
       p = ((StgInd *)q)->indirectee;
       continue;
@@ -119,14 +121,15 @@ revertCAFs( void )
 {
     StgIndStatic *c;
 
-    for (c = (StgIndStatic *)revertible_caf_list; c != NULL; 
+    for (c = (StgIndStatic *)revertible_caf_list; 
+         c != (StgIndStatic *)END_OF_STATIC_LIST; 
 	 c = (StgIndStatic *)c->static_link) 
     {
 	SET_INFO(c, c->saved_info);
 	c->saved_info = NULL;
 	// could, but not necessary: c->static_link = NULL; 
     }
-    revertible_caf_list = NULL;
+    revertible_caf_list = END_OF_STATIC_LIST;
 }
 
 void
@@ -134,12 +137,14 @@ markCAFs (evac_fn evac, void *user)
 {
     StgIndStatic *c;
 
-    for (c = (StgIndStatic *)caf_list; c != NULL; 
+    for (c = (StgIndStatic *)caf_list;
+         c != (StgIndStatic*)END_OF_STATIC_LIST; 
 	 c = (StgIndStatic *)c->static_link) 
     {
 	evac(user, &c->indirectee);
     }
-    for (c = (StgIndStatic *)revertible_caf_list; c != NULL; 
+    for (c = (StgIndStatic *)revertible_caf_list; 
+         c != (StgIndStatic*)END_OF_STATIC_LIST; 
 	 c = (StgIndStatic *)c->static_link) 
     {
 	evac(user, &c->indirectee);

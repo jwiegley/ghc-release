@@ -13,37 +13,33 @@
 --
 -- Utils for dealing with types from the GHC API
 -----------------------------------------------------------------------------
-
 module Haddock.GhcUtils where
 
 
 import Data.Version
-import qualified Data.Map as Map
 import Control.Arrow
 import Data.Foldable hiding (concatMap)
 import Data.Traversable
-#if __GLASGOW_HASKELL__ >= 611
 import Distribution.Compat.ReadP
 import Distribution.Text
-#endif
 
+import Exception
 import Outputable
 import Name
 import Packages
 import Module
 import RdrName (GlobalRdrEnv)
 import HscTypes
+#if __GLASGOW_HASKELL__ >= 613
+import UniqFM
+#else
 import LazyUniqFM
+#endif
 import GHC
 
 
 moduleString :: Module -> String
-moduleString = moduleNameString . moduleName 
-
-
--- return the name of the package, with version info
-modulePackageString :: Module -> String
-modulePackageString = packageIdString . modulePackageId
+moduleString = moduleNameString . moduleName
 
 
 -- return the (name,version) of the package
@@ -53,7 +49,7 @@ modulePackageInfo modu = case unpackPackageId pkg of
                           Just x -> (display $ pkgName x, showVersion (pkgVersion x))
   where pkg = modulePackageId modu
 
-#if __GLASGOW_HASKELL__ >= 611
+
 -- This was removed from GHC 6.11
 -- XXX we shouldn't be using it, probably
 
@@ -65,7 +61,7 @@ unpackPackageId p
         []      -> Nothing
         (pid:_) -> Just pid
   where str = packageIdString p
-#endif
+
 
 mkModuleNoPackage :: String -> Module
 mkModuleNoPackage str = mkModule (stringToPackageId "") (mkModuleName str)
@@ -78,10 +74,6 @@ lookupLoadedHomeModuleGRE mod_name = withSession $ \hsc_env ->
     _not_a_home_module -> return Nothing
 
 
-instance (Outputable a, Outputable b) => Outputable (Map.Map a b) where
-  ppr m = ppr (Map.toList m)
-
-
 isNameSym :: Name -> Bool
 isNameSym = isSymOcc . nameOccName
 
@@ -92,10 +84,18 @@ isVarSym = isLexVarSym . occNameFS
 
 getMainDeclBinder :: HsDecl name -> Maybe name
 getMainDeclBinder (TyClD d) = Just (tcdName d)
-getMainDeclBinder (ValD d)
-   = case collectAcc d [] of
-        []       -> Nothing 
-        (name:_) -> Just (unLoc name)
+getMainDeclBinder (ValD d) =
+#if __GLASGOW_HASKELL__ == 612
+  case collectAcc d [] of
+    []       -> Nothing
+    (name:_) -> Just (unLoc name)
+#else
+  case collectHsBindBinders d of
+    []       -> Nothing
+    (name:_) -> Just name
+#endif
+
+
 getMainDeclBinder (SigD d) = sigNameNoLoc d
 getMainDeclBinder (ForD (ForeignImport name _ _)) = Just (unLoc name)
 getMainDeclBinder (ForD (ForeignExport _ _ _)) = Nothing
@@ -137,7 +137,7 @@ trace_ppr x y = trace (pretty x) y
 
 
 -------------------------------------------------------------------------------
--- Located
+-- * Located
 -------------------------------------------------------------------------------
 
 
@@ -154,11 +154,11 @@ instance Foldable Located where
 
 
 instance Traversable Located where
-  mapM f (L l x) = (return . L l) =<< f x  
+  mapM f (L l x) = (return . L l) =<< f x
 
 
 -------------------------------------------------------------------------------
--- NamedThing instances
+-- * NamedThing instances
 -------------------------------------------------------------------------------
 
 
@@ -171,7 +171,7 @@ instance NamedThing (ConDecl Name) where
 
 
 -------------------------------------------------------------------------------
--- Subordinates
+-- * Subordinates
 -------------------------------------------------------------------------------
 
 
@@ -218,3 +218,36 @@ parentMap d = [ (c, p) | (p, cs) <- families d, c <- cs ]
 parents :: Name -> HsDecl Name -> [Name]
 parents n (TyClD d) = [ p | (c, p) <- parentMap d, c == n ]
 parents _ _ = []
+
+
+-------------------------------------------------------------------------------
+-- * Utils that work in monads defined by GHC
+-------------------------------------------------------------------------------
+
+
+modifySessionDynFlags :: (DynFlags -> DynFlags) -> Ghc ()
+modifySessionDynFlags f = do
+  dflags <- getSessionDynFlags
+  _ <- setSessionDynFlags (f dflags)
+  return ()
+
+
+-- | A variant of 'gbracket' where the return value from the first computation
+-- is not required.
+gbracket_ :: ExceptionMonad m => m a -> m b -> m c -> m c
+gbracket_ before after thing = gbracket before (const after) (const thing)
+
+
+-------------------------------------------------------------------------------
+-- * DynFlags
+-------------------------------------------------------------------------------
+
+
+setObjectDir, setHiDir, setStubDir, setOutputDir :: String -> DynFlags -> DynFlags
+setObjectDir  f d = d{ objectDir  = Just f}
+setHiDir      f d = d{ hiDir      = Just f}
+setStubDir    f d = d{ stubDir    = Just f, includePaths = f : includePaths d }
+  -- -stubdir D adds an implicit -I D, so that gcc can find the _stub.h file
+  -- \#included from the .hc file when compiling with -fvia-C.
+setOutputDir  f = setObjectDir f . setHiDir f . setStubDir f
+

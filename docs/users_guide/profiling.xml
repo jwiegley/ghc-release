@@ -249,8 +249,8 @@ MAIN                     MAIN             0    0.0   0.0    100.0 100.0
       <para>Cost centres are just program annotations.  When you say
       <option>-auto-all</option> to the compiler, it automatically
       inserts a cost centre annotation around every top-level function
-      in your program, but you are entirely free to add the cost
-      centre annotations yourself.</para>
+      not marked INLINE in your program, but you are entirely free to
+      add the cost centre annotations yourself.</para>
 
       <para>The syntax of a cost centre annotation is</para>
 
@@ -401,7 +401,9 @@ x = nfib 25
 	<listitem>
 	  <para> GHC will automatically add
           <function>&lowbar;scc&lowbar;</function> constructs for all
-          top-level, exported functions.</para>
+          top-level, exported functions not marked INLINE. If you
+          want a cost centre on an INLINE function, you have to add
+          it manually.</para>
 	</listitem>
       </varlistentry>
       
@@ -411,9 +413,11 @@ x = nfib 25
           <indexterm><primary><option>-auto-all</option></primary></indexterm>
         </term>
 	<listitem>
-	  <para> <emphasis>All</emphasis> top-level functions,
-	  exported or not, will be automatically
-	  <function>&lowbar;scc&lowbar;</function>'d.</para>
+          <para> <emphasis>All</emphasis> top-level functions
+          not marked INLINE, exported or not, will be automatically
+          <function>&lowbar;scc&lowbar;</function>'d.
+          The functions marked INLINE must be given a cost centre
+          manually.</para>
 	</listitem>
       </varlistentry>
 
@@ -458,9 +462,10 @@ x = nfib 25
     <variablelist>
       <varlistentry>
 	<term>
-          <option>-p</option> or <option>-P</option>:
+          <option>-p</option> or <option>-P</option> or <option>-pa</option>:
           <indexterm><primary><option>-p</option></primary></indexterm>
           <indexterm><primary><option>-P</option></primary></indexterm>
+          <indexterm><primary><option>-pa</option></primary></indexterm>
           <indexterm><primary>time profile</primary></indexterm>
         </term>
 	<listitem>
@@ -472,8 +477,23 @@ x = nfib 25
 	  <para>The <option>-P</option> option produces a more
           detailed report containing the actual time and allocation
           data as well.  (Not used much.)</para>
+
+          <para>The <option>-pa</option> option produces the most detailed
+          report containing all cost centres in addition to the actual time
+          and allocation data.</para>
 	</listitem>
       </varlistentry>
+
+     <varlistentry>
+       <term><option>-V<replaceable>secs</replaceable></option>
+       <indexterm><primary><option>-V</option></primary><secondary>RTS
+       option</secondary></indexterm></term>
+       <listitem>
+         <para>Sets the interval that the RTS clock ticks at, which is
+         also the sampling interval of the time and allocation profile.
+         The default is 0.02&nbsp;second.</para>
+       </listitem>
+     </varlistentry>
 
       <varlistentry>
 	<term>
@@ -740,7 +760,8 @@ x = nfib 25
             0.1&nbsp;second).  Fractions are allowed: for example
             <option>-i0.2</option> will get 5 samples per second.
             This only affects heap profiling; time profiles are always
-            sampled on a 1/50 second frequency.</para>
+            sampled with the frequency of the RTS clock. See
+            <xref linkend="prof-time-options"/> for changing that.</para>
 	  </listitem>
 	</varlistentry>
 
@@ -1763,7 +1784,6 @@ Total bytes copied during GC: 190096
 
 <!-- Emacs stuff:
      ;;; Local Variables: ***
-     ;;; mode: xml ***
      ;;; sgml-parent-document: ("users_guide.xml" "book" "chapter") ***
      ;;; End: ***
  -->

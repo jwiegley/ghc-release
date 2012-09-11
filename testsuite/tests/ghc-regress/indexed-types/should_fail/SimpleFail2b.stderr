@@ -1,5 +1,5 @@
 
-SimpleFail2b.hs:9:10:
+SimpleFail2b.hs:9:11:
     Conflicting definitions for `Sd'
-    Bound at: SimpleFail2b.hs:9:10-11
-              SimpleFail2b.hs:10:10-11
+    Bound at: SimpleFail2b.hs:9:11-12
+              SimpleFail2b.hs:10:11-12

@@ -63,6 +63,7 @@ STAGE3_GHC := $(abspath $(TOP)/../inplace/bin/ghc-stage3)
 
 ifneq "$(wildcard $(STAGE1_GHC) $(STAGE1_GHC).exe)" ""
 
+IN_TREE_COMPILER = YES
 ifeq "$(BINDIST)" "YES"
 TEST_HC := $(abspath $(TOP)/../)/bindisttest/install dir/bin/ghc
 else ifeq "$(stage)" "1"
@@ -75,6 +76,7 @@ TEST_HC := $(STAGE2_GHC)
 endif
 
 else
+IN_TREE_COMPILER = NO
 TEST_HC := $(shell which ghc)
 endif
 
@@ -149,5 +151,10 @@ ifeq "$(HostOS)" "mingw32"
 WINDOWS = YES
 else
 WINDOWS = NO
+endif
+ifeq "$(HostOS)" "darwin"
+DARWIN = YES
+else
+DARWIN = NO
 endif
 

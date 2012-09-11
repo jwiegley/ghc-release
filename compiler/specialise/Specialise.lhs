@@ -4,36 +4,35 @@
 \section[Specialise]{Stamping out overloading, and (optionally) polymorphism}
 
 \begin{code}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module Specialise ( specProgram ) where
 
 #include "HsVersions.h"
 
 import Id
 import TcType
+import CoreMonad
 import CoreSubst 
-import CoreUnfold	( mkUnfolding )
+import CoreUnfold
 import VarSet
 import VarEnv
 import CoreSyn
 import Rules
 import CoreUtils	( exprIsTrivial, applyTypeToArgs, mkPiTypes )
 import CoreFVs		( exprFreeVars, exprsFreeVars, idFreeVars )
-import UniqSupply	( UniqSupply, UniqSM, initUs_, MonadUnique(..) )
+import UniqSupply	( UniqSM, initUs_, MonadUnique(..) )
 import Name
 import MkId		( voidArgId, realWorldPrimId )
-import FiniteMap
 import Maybes		( catMaybes, isJust )
+import BasicTypes	
+import HscTypes
 import Bag
 import Util
 import Outputable
 import FastString
 
+import Data.Map (Map)
+import qualified Data.Map as Map
+import qualified FiniteMap as Map
 \end{code}
 
 %************************************************************************
@@ -561,23 +560,97 @@ Hence, the invariant is this:
 %************************************************************************
 
 \begin{code}
-specProgram :: UniqSupply -> [CoreBind] -> [CoreBind]
-specProgram us binds = initSM us $
-                       do { (binds', uds') <- go binds
-			  ; return (wrapDictBinds (ud_binds uds') binds') }
+specProgram :: ModGuts -> CoreM ModGuts
+specProgram guts 
+  = do { hpt_rules <- getRuleBase
+       ; let local_rules = mg_rules guts
+             rule_base = extendRuleBaseList hpt_rules (mg_rules guts)
+
+	     -- Specialise the bindings of this module
+       ; (binds', uds) <- runSpecM (go (mg_binds guts))
+
+	     -- Specialise imported functions 
+       ; (new_rules, spec_binds) <- specImports emptyVarSet rule_base uds
+
+       ; return (guts { mg_binds = spec_binds ++ binds'
+                      , mg_rules = local_rules ++ new_rules }) }
   where
 	-- We need to start with a Subst that knows all the things
 	-- that are in scope, so that the substitution engine doesn't
 	-- accidentally re-use a unique that's already in use
 	-- Easiest thing is to do it all at once, as if all the top-level
 	-- decls were mutually recursive
-    top_subst       = mkEmptySubst (mkInScopeSet (mkVarSet (bindersOfBinds binds)))
+    top_subst = mkEmptySubst $ mkInScopeSet $ mkVarSet $ 
+                bindersOfBinds $ mg_binds guts
 
     go []           = return ([], emptyUDs)
     go (bind:binds) = do (binds', uds) <- go binds
                          (bind', uds') <- specBind top_subst bind uds
                          return (bind' ++ binds', uds')
+
+specImports :: VarSet	 	-- Don't specialise these ones
+	       			-- See Note [Avoiding recursive specialisation]
+            -> RuleBase	 	-- Rules from this module and the home package
+	       			-- (but not external packages, which can change)
+            -> UsageDetails	-- Calls for imported things, and floating bindings
+            -> CoreM ( [CoreRule]   -- New rules
+                     , [CoreBind] ) -- Specialised bindings and floating bindings
+specImports done rb uds
+  = do { let import_calls = varEnvElts (ud_calls uds)
+       ; (rules, spec_binds) <- go rb import_calls
+       ; return (rules, wrapDictBinds (ud_binds uds) spec_binds) }
+  where
+    go _ [] = return ([], [])
+    go rb (CIS fn calls_for_fn : other_calls)
+      = do { (rules1, spec_binds1) <- specImport done rb fn (Map.toList calls_for_fn)
+           ; (rules2, spec_binds2) <- go (extendRuleBaseList rb rules1) other_calls
+           ; return (rules1 ++ rules2, spec_binds1 ++ spec_binds2) }
+
+specImport :: VarSet	    	    -- Don't specialise these
+	       			    -- See Note [Avoiding recursive specialisation]
+           -> RuleBase	    	    -- Rules from this module
+           -> Id -> [CallInfo]	    -- Imported function and calls for it
+           -> CoreM ( [CoreRule]    -- New rules
+                    , [CoreBind] )  -- Specialised bindings
+specImport done rb fn calls_for_fn
+  | not (fn `elemVarSet` done)
+  , isInlinablePragma (idInlinePragma fn)
+  , Just rhs <- maybeUnfoldingTemplate (realIdUnfolding fn)
+  = do {     -- Get rules from the external package state
+       	     -- We keep doing this in case we "page-fault in" 
+	     -- more rules as we go along
+       ; hsc_env <- getHscEnv
+       ; eps <- liftIO $ hscEPS hsc_env 
+       ; let full_rb = unionRuleBase rb (eps_rule_base eps)
+             rules_for_fn = getRules full_rb fn 
+
+       ; (rules1, spec_pairs, uds) <- runSpecM $
+              specCalls emptySubst rules_for_fn calls_for_fn fn rhs
+       ; let spec_binds1 = [NonRec b r | (b,r) <- spec_pairs]
+       	     -- After the rules kick in we may get recursion, but 
+	     -- we rely on a global GlomBinds to sort that out later
+       
+	      -- Now specialise any cascaded calls
+       ; (rules2, spec_binds2) <- specImports (extendVarSet done fn) 
+                                              (extendRuleBaseList rb rules1)
+                                              uds
+
+       ; return (rules2 ++ rules1, spec_binds2 ++ spec_binds1) }
+
+  | otherwise
+  = WARN( True, ptext (sLit "specImport discard") <+> ppr fn <+> ppr calls_for_fn )
+    return ([], [])    
 \end{code}
+
+Avoiding recursive specialisation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When we specialise 'f' we may find new overloaded calls to 'g', 'h' in
+'f's RHS.  So we want to specialise g,h.  But we don't want to
+specialise f any more!  It's possible that f's RHS might have a
+recursive yet-more-specialised call, so we'd diverge in that case.
+And if the call is to the same type, one specialisation is enough.
+Avoiding this recursive specialisation loop is the reason for the 
+'done' VarSet passed to specImports and specImport.
 
 %************************************************************************
 %*									*
@@ -587,7 +660,7 @@ specProgram us binds = initSM us $
 
 \begin{code}
 specVar :: Subst -> Id -> CoreExpr
-specVar subst v = lookupIdSubst subst v
+specVar subst v = lookupIdSubst (text "specVar") subst v
 
 specExpr :: Subst -> CoreExpr -> SpecM (CoreExpr, UsageDetails)
 -- We carry a substitution down:
@@ -632,21 +705,12 @@ specExpr subst e@(Lam _ _) = do
 	-- More efficient to collect a group of binders together all at once
 	-- and we don't want to split a lambda group with dumped bindings
 
-specExpr subst (Case scrut case_bndr ty alts) = do
-    (scrut', uds_scrut) <- specExpr subst scrut
-    (alts', uds_alts) <- mapAndCombineSM spec_alt alts
-    return (Case scrut' case_bndr' (CoreSubst.substTy subst ty) alts', 
-            uds_scrut `plusUDs` uds_alts)
-  where
-    (subst_alt, case_bndr') = substBndr subst case_bndr
-	-- No need to clone case binder; it can't float like a let(rec)
-
-    spec_alt (con, args, rhs) = do
-          (rhs', uds) <- specExpr subst_rhs rhs
-          let (free_uds, dumped_dbs) = dumpUDs args' uds
-          return ((con, args', wrapDictBindsE dumped_dbs rhs'), free_uds)
-        where
-          (subst_rhs, args') = substBndrs subst_alt args
+specExpr subst (Case scrut case_bndr ty alts) 
+  = do { (scrut', scrut_uds) <- specExpr subst scrut
+       ; (scrut'', case_bndr', alts', alts_uds) 
+             <- specCase subst scrut' case_bndr alts 
+       ; return (Case scrut'' case_bndr' (CoreSubst.substTy subst ty) alts'
+                , scrut_uds `plusUDs` alts_uds) }
 
 ---------------- Finally, let is the interesting case --------------------
 specExpr subst (Let bind body) = do
@@ -665,11 +729,117 @@ specExpr subst (Let bind body) = do
 -- Must apply the type substitution to coerceions
 specNote :: Subst -> Note -> Note
 specNote _ note = note
+
+
+specCase :: Subst 
+         -> CoreExpr	 	-- Scrutinee, already done
+         -> Id -> [CoreAlt]
+         -> SpecM ( CoreExpr	-- New scrutinee
+	    	  , Id
+	    	  , [CoreAlt]
+                  , UsageDetails)
+specCase subst scrut' case_bndr [(con, args, rhs)]
+  | isDictId case_bndr  	 -- See Note [Floating dictionaries out of cases]
+  , interestingDict scrut'
+  , not (isDeadBinder case_bndr && null sc_args')
+  = do { (case_bndr_flt : sc_args_flt) <- mapM clone_me (case_bndr' : sc_args')
+
+       ; let sc_rhss = [ Case (Var case_bndr_flt) case_bndr' (idType sc_arg')
+                              [(con, args', Var sc_arg')]
+                       | sc_arg' <- sc_args' ]
+
+	     -- Extend the substitution for RHS to map the *original* binders
+	     -- to their floated verions.  Attach an unfolding to these floated
+	     -- binders so they look interesting to interestingDict
+	     mb_sc_flts :: [Maybe DictId]
+             mb_sc_flts = map (lookupVarEnv clone_env) args'
+             clone_env  = zipVarEnv sc_args' (zipWith add_unf sc_args_flt sc_rhss)
+             subst_prs  = (case_bndr, Var (add_unf case_bndr_flt scrut'))
+                        : [ (arg, Var sc_flt) 
+                          | (arg, Just sc_flt) <- args `zip` mb_sc_flts ]
+             subst_rhs' = extendIdSubstList subst_rhs subst_prs
+                                                      
+       ; (rhs',   rhs_uds)   <- specExpr subst_rhs' rhs
+       ; let scrut_bind    = mkDB (NonRec case_bndr_flt scrut')
+             case_bndr_set = unitVarSet case_bndr_flt
+             sc_binds      = [(NonRec sc_arg_flt sc_rhs, case_bndr_set)
+                             | (sc_arg_flt, sc_rhs) <- sc_args_flt `zip` sc_rhss ]
+             flt_binds     = scrut_bind : sc_binds
+             (free_uds, dumped_dbs) = dumpUDs (case_bndr':args') rhs_uds
+             all_uds = flt_binds `addDictBinds` free_uds
+             alt'    = (con, args', wrapDictBindsE dumped_dbs rhs')
+       ; return (Var case_bndr_flt, case_bndr', [alt'], all_uds) }
+  where
+    (subst_rhs, (case_bndr':args')) = substBndrs subst (case_bndr:args)
+    sc_args' = filter is_flt_sc_arg args'
+             
+    clone_me bndr = do { uniq <- getUniqueM
+                       ; return (mkUserLocal occ uniq ty loc) }
+       where
+         name = idName bndr
+         ty   = idType bndr
+         occ  = nameOccName name
+         loc  = getSrcSpan name
+
+    add_unf sc_flt sc_rhs  -- Sole purpose: make sc_flt respond True to interestingDictId
+      = setIdUnfolding sc_flt (mkSimpleUnfolding sc_rhs)
+
+    arg_set = mkVarSet args'
+    is_flt_sc_arg var =  isId var
+                      && not (isDeadBinder var)
+	              && isDictTy var_ty
+                      && not (tyVarsOfType var_ty `intersectsVarSet` arg_set)
+       where
+         var_ty = idType var
+
+
+specCase subst scrut case_bndr alts
+  = do { (alts', uds_alts) <- mapAndCombineSM spec_alt alts
+       ; return (scrut, case_bndr', alts', uds_alts) }
+  where
+    (subst_alt, case_bndr') = substBndr subst case_bndr
+    spec_alt (con, args, rhs) = do
+          (rhs', uds) <- specExpr subst_rhs rhs
+          let (free_uds, dumped_dbs) = dumpUDs (case_bndr' : args') uds
+          return ((con, args', wrapDictBindsE dumped_dbs rhs'), free_uds)
+        where
+          (subst_rhs, args') = substBndrs subst_alt args
 \end{code}
+
+Note [Floating dictionaries out of cases]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+   g = \d. case d of { MkD sc ... -> ...(f sc)... }
+Naively we can't float d2's binding out of the case expression,
+because 'sc' is bound by the case, and that in turn means we can't
+specialise f, which seems a pity.  
+
+So we invert the case, by floating out a binding 
+for 'sc_flt' thus:
+    sc_flt = case d of { MkD sc ... -> sc }
+Now we can float the call instance for 'f'.  Indeed this is just
+what'll happen if 'sc' was originally bound with a let binding,
+but case is more efficient, and necessary with equalities. So it's
+good to work with both.
+
+You might think that this won't make any difference, because the
+call instance will only get nuked by the \d.  BUT if 'g' itself is 
+specialised, then transitively we should be able to specialise f.
+
+In general, given
+   case e of cb { MkD sc ... -> ...(f sc)... }
+we transform to
+   let cb_flt = e
+       sc_flt = case cb_flt of { MkD sc ... -> sc }
+   in
+   case cb_flt of bg { MkD sc ... -> ....(f sc_flt)... }
+
+The "_flt" things are the floated binds; we use the current substitution
+to substitute sc -> sc_flt in the RHS
 
 %************************************************************************
 %*									*
-\subsubsection{Dealing with a binding}
+                     Dealing with a binding
 %*									*
 %************************************************************************
 
@@ -769,20 +939,13 @@ specDefn :: Subst
 	    	   UsageDetails)	-- Stuff to fling upwards from the specialised versions
 
 specDefn subst body_uds fn rhs
-	-- The first case is the interesting one
-  |  rhs_tyvars `lengthIs`     n_tyvars -- Rhs of fn's defn has right number of big lambdas
-  && rhs_ids    `lengthAtLeast` n_dicts	-- and enough dict args
-  && notNull calls_for_me		-- And there are some calls to specialise
-
---   && not (certainlyWillInline (idUnfolding fn))	-- And it's not small
---	See Note [Inline specialisation] for why we do not 
---	switch off specialisation for inline functions
-
-  = do {       -- Make a specialised version for each call in calls_for_me
-         stuff <- mapM spec_call calls_for_me
-       ; let (spec_defns, spec_uds, spec_rules) = unzip3 (catMaybes stuff)
-             fn' = addIdSpecialisations fn spec_rules
-             final_uds = body_uds_without_me `plusUDs` plusUDList spec_uds 
+  = do { let (body_uds_without_me, calls_for_me) = callsForMe fn body_uds
+             rules_for_me = idCoreRules fn
+       ; (rules, spec_defns, spec_uds) <- specCalls subst rules_for_me 
+                                                    calls_for_me fn rhs
+       ; return ( fn `addIdSpecialisations` rules
+                , spec_defns
+                , body_uds_without_me `plusUDs` spec_uds) }
 		-- It's important that the `plusUDs` is this way
 		-- round, because body_uds_without_me may bind
 		-- dictionaries that are used in calls_for_me passed
@@ -790,27 +953,60 @@ specDefn subst body_uds fn rhs
 		-- spec_uds may mention dictionaries bound in
 		-- body_uds_without_me
 
-       ; return (fn', spec_defns, final_uds) }
+---------------------------
+specCalls :: Subst
+          -> [CoreRule]			-- Existing RULES for the fn
+	  -> [CallInfo]	
+	  -> Id -> CoreExpr
+	  -> SpecM ([CoreRule],		-- New RULES for the fn
+		    [(Id,CoreExpr)],	-- Extra, specialised bindings
+	    	    UsageDetails)	-- New usage details from the specialised RHSs
+
+-- This function checks existing rules, and does not create
+-- duplicate ones. So the caller does not nneed to do this filtering.
+-- See 'already_covered'
+
+specCalls subst rules_for_me calls_for_me fn rhs
+	-- The first case is the interesting one
+  |  rhs_tyvars `lengthIs`     n_tyvars -- Rhs of fn's defn has right number of big lambdas
+  && rhs_ids    `lengthAtLeast` n_dicts	-- and enough dict args
+  && notNull calls_for_me		-- And there are some calls to specialise
+  && not (isNeverActive (idInlineActivation fn))
+	-- Don't specialise NOINLINE things
+	-- See Note [Auto-specialisation and RULES]
+
+--   && not (certainlyWillInline (idUnfolding fn))	-- And it's not small
+--	See Note [Inline specialisation] for why we do not 
+--	switch off specialisation for inline functions
+
+  = -- pprTrace "specDefn: some" (ppr fn $$ ppr calls_for_me $$ ppr rules_for_me) $
+    do { stuff <- mapM spec_call calls_for_me
+       ; let (spec_defns, spec_uds, spec_rules) = unzip3 (catMaybes stuff)
+       ; return (spec_rules, spec_defns, plusUDList spec_uds) }
 
   | otherwise	-- No calls or RHS doesn't fit our preconceptions
   = WARN( notNull calls_for_me, ptext (sLit "Missed specialisation opportunity for") <+> ppr fn )
 	  -- Note [Specialisation shape]
-    return (fn, [], body_uds_without_me)
+    -- pprTrace "specDefn: none" (ppr fn $$ ppr calls_for_me) $
+    return ([], [], emptyUDs)
   
   where
     fn_type	       = idType fn
     fn_arity	       = idArity fn
+    fn_unf             = realIdUnfolding fn	-- Ignore loop-breaker-ness here
     (tyvars, theta, _) = tcSplitSigmaTy fn_type
     n_tyvars	       = length tyvars
     n_dicts	       = length theta
-    inline_act         = idInlineActivation fn
+    inl_prag           = idInlinePragma fn
+    inl_act            = inlinePragmaActivation inl_prag
+    is_local           = isLocalId fn
 
-    (body_uds_without_me, calls_for_me) = callsForMe fn body_uds
+	-- Figure out whether the function has an INLINE pragma
+	-- See Note [Inline specialisations]
 
-	-- It's important that we "see past" any INLINE pragma
-	-- else we'll fail to specialise an INLINE thing
-    (inline_rhs, rhs_inside) = dropInline rhs
-    (rhs_tyvars, rhs_ids, rhs_body) = collectTyAndValBinders rhs_inside
+    spec_arity = unfoldingArity fn_unf - n_dicts  -- Arity of the *specialised* inline rule
+
+    (rhs_tyvars, rhs_ids, rhs_body) = collectTyAndValBinders rhs
 
     rhs_dict_ids = take n_dicts rhs_ids
     body         = mkLams (drop n_dicts rhs_ids) rhs_body
@@ -818,8 +1014,9 @@ specDefn subst body_uds fn rhs
 
     already_covered :: [CoreExpr] -> Bool
     already_covered args	  -- Note [Specialisations already covered]
-       = isJust (lookupRule (const True) (substInScope subst) 
-       	 		    fn args (idCoreRules fn))
+       = isJust (lookupRule (const True) realIdUnfolding 
+                            (substInScope subst) 
+       	 		    fn args rules_for_me)
 
     mk_ty_args :: [Maybe Type] -> [CoreExpr]
     mk_ty_args call_ts = zipWithEqual "spec_call" mk_ty_arg rhs_tyvars call_ts
@@ -859,7 +1056,7 @@ specDefn subst body_uds fn rhs
 	   	ty_args       = mk_ty_args call_ts
 	   	rhs_subst     = CoreSubst.extendTvSubstList subst spec_tv_binds
 
-	   ; (rhs_subst1, inst_dict_ids) <- cloneDictBndrs rhs_subst rhs_dict_ids
+	   ; (rhs_subst1, inst_dict_ids) <- newDictBndrs rhs_subst rhs_dict_ids
 	     		  -- Clone rhs_dicts, including instantiating their types
 
 	   ; let (rhs_subst2, dx_binds) = bindAuxiliaryDicts rhs_subst1 $
@@ -878,30 +1075,39 @@ specDefn subst body_uds fn rhs
 	         spec_id_ty = mkPiTypes lam_args body_ty
 	
            ; spec_f <- newSpecIdSM fn spec_id_ty
-  	   ; let spec_f_w_arity = setIdArity spec_f (max 0 (fn_arity - n_dicts))
-		-- Adding arity information just propagates it a bit faster
-		-- See Note [Arity decrease] in Simplify
-
            ; (spec_rhs, rhs_uds) <- specExpr rhs_subst2 (mkLams lam_args body)
 	   ; let
 		-- The rule to put in the function's specialisation is:
 		--	forall b, d1',d2'.  f t1 b t3 d1' d2' = f1 b  
 	        rule_name = mkFastString ("SPEC " ++ showSDoc (ppr fn <+> ppr spec_ty_args))
-  		spec_env_rule = mkLocalRule
-			          rule_name
-				  inline_act 	-- Note [Auto-specialisation and RULES]
+  		spec_env_rule = mkRule True {- Auto generated -} is_local
+                                  rule_name
+				  inl_act 	-- Note [Auto-specialisation and RULES]
 			 	  (idName fn)
 			          (poly_tyvars ++ inst_dict_ids)
 				  inst_args 
-				  (mkVarApps (Var spec_f_w_arity) app_args)
+				  (mkVarApps (Var spec_f) app_args)
 
 		-- Add the { d1' = dx1; d2' = dx2 } usage stuff
 	   	final_uds = foldr consDictBind rhs_uds dx_binds
 
-	   	spec_pr | inline_rhs = (spec_f_w_arity `setInlineActivation` inline_act, Note InlineMe spec_rhs)
-		        | otherwise  = (spec_f_w_arity, 	 	                 spec_rhs)
+		-- Add an InlineRule if the parent has one
+		-- See Note [Inline specialisations]
+		spec_unf
+                  = case inlinePragmaSpec inl_prag of
+                      Inline    -> mkInlineUnfolding (Just spec_arity) spec_rhs
+                      Inlinable -> mkInlinableUnfolding spec_rhs
+                      _         -> NoUnfolding
 
-	   ; return (Just (spec_pr, final_uds, spec_env_rule)) } }
+		-- Adding arity information just propagates it a bit faster
+		-- 	See Note [Arity decrease] in Simplify
+		-- Copy InlinePragma information from the parent Id.
+		-- So if f has INLINE[1] so does spec_f
+  	        spec_f_w_arity = spec_f `setIdArity`          max 0 (fn_arity - n_dicts)
+                                        `setInlinePragma` inl_prag
+                                        `setIdUnfolding`  spec_unf
+
+	   ; return (Just ((spec_f_w_arity, spec_rhs), final_uds, spec_env_rule)) } }
       where
 	my_zipEqual xs ys zs
 	 | debugIsOn && not (equalLength xs ys && equalLength ys zs)
@@ -925,9 +1131,12 @@ bindAuxiliaryDicts subst triples = go subst [] triples
     go subst binds ((d, dx_id, dx) : pairs)
       | exprIsTrivial dx = go (extendIdSubst subst d dx) binds pairs
              -- No auxiliary binding necessary
+	     -- Note that we bind the *original* dict in the substitution,
+	     -- overriding any d->dx_id binding put there by substBndrs
+
       | otherwise        = go subst_w_unf (NonRec dx_id dx : binds) pairs
       where
-        dx_id1 = dx_id `setIdUnfolding` mkUnfolding False dx
+        dx_id1 = dx_id `setIdUnfolding` mkSimpleUnfolding dx
 	subst_w_unf = extendIdSubst subst d (Var dx_id1)
        	     -- Important!  We're going to substitute dx_id1 for d
 	     -- and we want it to look "interesting", else we won't gather *any*
@@ -937,6 +1146,9 @@ bindAuxiliaryDicts subst triples = go subst [] triples
 	     -- a consequent call (g d') with an auxiliary definition
 	     --	    d' = df dNumInt
   	     -- We want that consequent call to look interesting
+	     --
+	     -- Again, note that we bind the *original* dict in the substitution,
+	     -- overriding any d->dx_id binding put there by substBndrs
 \end{code}
 
 Note [From non-recursive to recursive]
@@ -1025,7 +1237,7 @@ group.  (In this case it'll unravel a short moment later.)
 
 
 Conclusion: we catch the nasty case using filter_dfuns in
-callsForMe To be honest I'm not 100% certain that this is 100%
+callsForMe. To be honest I'm not 100% certain that this is 100%
 right, but it works.  Sigh.
 
 
@@ -1100,10 +1312,14 @@ also add
 	RULE f g_spec = 0
 
 But that's a bit complicated.  For now we ask the programmer's help,
-by *copying the INLINE activation pragma* to the auto-specialised rule.
-So if g says {-# NOINLINE[2] g #-}, then the auto-spec rule will also
-not be active until phase 2.  
+by *copying the INLINE activation pragma* to the auto-specialised
+rule.  So if g says {-# NOINLINE[2] g #-}, then the auto-spec rule
+will also not be active until phase 2.  And that's what programmers
+should jolly well do anyway, even aside from specialisation, to ensure
+that g doesn't inline too early.
 
+This in turn means that the RULE would never fire for a NOINLINE
+thing so not much point in generating a specialisation at all.
 
 Note [Specialisation shape]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1129,13 +1345,12 @@ It's a silly exapmle, but we get
 where choose doesn't have any dict arguments.  Thus far I have not
 tried to fix this (wait till there's a real example).
 
-
 Note [Inline specialisations]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We transfer to the specialised function any INLINE stuff from the
-original.  This means (a) the Activation in the IdInfo, and (b) any
-InlineMe on the RHS.  We do not, however, transfer the RuleMatchInfo
-since we do not expect the specialisation to occur in rewrite rules.
+original.  This means 
+   (a) the Activation for its inlining (from its InlinePragma)
+   (b) any InlineRule
 
 This is a change (Jun06).  Previously the idea is that the point of
 inlining was precisely to specialise the function at its call site,
@@ -1154,14 +1369,6 @@ arguments alone are enough to specialise (even though the args are too
 boring to trigger inlining), and it's certainly better to call the 
 specialised version.
 
-A case in point is dictionary functions, which are current marked
-INLINE, but which are worth specialising.
-
-\begin{code}
-dropInline :: CoreExpr -> (Bool, CoreExpr)
-dropInline (Note InlineMe rhs) = (True,  rhs)
-dropInline rhs		       = (False, rhs)
-\end{code}
 
 %************************************************************************
 %*									*
@@ -1204,17 +1411,21 @@ emptyUDs = MkUD { ud_binds = emptyBag, ud_calls = emptyVarEnv }
 type CallDetails  = IdEnv CallInfoSet
 newtype CallKey   = CallKey [Maybe Type]			-- Nothing => unconstrained type argument
 
--- CallInfo uses a FiniteMap, thereby ensuring that
+-- CallInfo uses a Map, thereby ensuring that
 -- we record only one call instance for any key
 --
 -- The list of types and dictionaries is guaranteed to
 -- match the type of f
-type CallInfoSet = FiniteMap CallKey ([DictExpr], VarSet)
+data CallInfoSet = CIS Id (Map CallKey ([DictExpr], VarSet))
      	      		-- Range is dict args and the vars of the whole
 			-- call (including tyvars)
 			-- [*not* include the main id itself, of course]
 
 type CallInfo = (CallKey, ([DictExpr], VarSet))
+
+instance Outputable CallInfoSet where
+  ppr (CIS fn map) = hang (ptext (sLit "CIS") <+> ppr fn)
+                        2 (ppr map)
 
 instance Outputable CallKey where
   ppr (CallKey ts) = ppr ts
@@ -1233,22 +1444,23 @@ instance Ord CallKey where
 		  cmp (Just t1) (Just t2) = tcCmpType t1 t2
 
 unionCalls :: CallDetails -> CallDetails -> CallDetails
-unionCalls c1 c2 = plusVarEnv_C plusFM c1 c2
+unionCalls c1 c2 = plusVarEnv_C unionCallInfoSet c1 c2
 
--- plusCalls :: UsageDetails -> CallDetails -> UsageDetails
--- plusCalls uds call_ds = uds { ud_calls = ud_calls uds `unionCalls` call_ds }
+unionCallInfoSet :: CallInfoSet -> CallInfoSet -> CallInfoSet
+unionCallInfoSet (CIS f calls1) (CIS _ calls2) = CIS f (calls1 `Map.union` calls2)
 
 callDetailsFVs :: CallDetails -> VarSet
 callDetailsFVs calls = foldVarEnv (unionVarSet . callInfoFVs) emptyVarSet calls
 
 callInfoFVs :: CallInfoSet -> VarSet
-callInfoFVs call_info = foldFM (\_ (_,fv) vs -> unionVarSet fv vs) emptyVarSet call_info
+callInfoFVs (CIS _ call_info) = Map.foldRight (\(_,fv) vs -> unionVarSet fv vs) emptyVarSet call_info
 
 ------------------------------------------------------------			
 singleCall :: Id -> [Maybe Type] -> [DictExpr] -> UsageDetails
 singleCall id tys dicts 
   = MkUD {ud_binds = emptyBag, 
-	  ud_calls = unitVarEnv id (unitFM (CallKey tys) (dicts, call_fvs)) }
+	  ud_calls = unitVarEnv id $ CIS id $ 
+                     Map.singleton (CallKey tys) (dicts, call_fvs) }
   where
     call_fvs = exprsFreeVars dicts `unionVarSet` tys_fvs
     tys_fvs  = tyVarsOfTypes (catMaybes tys)
@@ -1264,8 +1476,8 @@ singleCall id tys dicts
 
 mkCallUDs :: Id -> [CoreExpr] -> UsageDetails
 mkCallUDs f args 
-  | not (isLocalId f)	-- Imported from elsewhere
-  || null theta	   	-- Not overloaded
+  | not (want_calls_for f)  -- Imported from elsewhere
+  || null theta	   	    -- Not overloaded
   || not (all isClassPred theta)	
 	-- Only specialise if all overloading is on class params. 
 	-- In ptic, with implicit params, the type args
@@ -1292,6 +1504,8 @@ mkCallUDs f args
     mk_spec_ty tyvar ty 
 	| tyvar `elemVarSet` constrained_tyvars = Just ty
 	| otherwise				= Nothing
+
+    want_calls_for f = isLocalId f || isInlinablePragma (idInlinePragma f)
 \end{code}
 
 Note [Interesting dictionary arguments]
@@ -1302,7 +1516,7 @@ There really is not much point in specialising f wrt the dictionary d,
 because the code for the specialised f is not improved at all, because
 d is lambda-bound.  We simply get junk specialisations.
 
-What is "interesting"?  Just that it has *some* structure.
+What is "interesting"?  Just that it has *some* structure.  
 
 \begin{code}
 interestingDict :: CoreExpr -> Bool
@@ -1364,6 +1578,9 @@ snocDictBinds uds dbs
 consDictBind :: CoreBind -> UsageDetails -> UsageDetails
 consDictBind bind uds = uds { ud_binds = mkDB bind `consBag` ud_binds uds }
 
+addDictBinds :: [DictBind] -> UsageDetails -> UsageDetails
+addDictBinds binds uds = uds { ud_binds = listToBag binds `unionBags` ud_binds uds }
+
 snocDictBind :: UsageDetails -> CoreBind -> UsageDetails
 snocDictBind uds bind = uds { ud_binds = ud_binds uds `snocBag` mkDB bind }
 
@@ -1384,7 +1601,8 @@ dumpUDs :: [CoreBndr] -> UsageDetails -> (UsageDetails, Bag DictBind)
 -- Used at a lambda or case binder; just dump anything mentioning the binder
 dumpUDs bndrs uds@(MkUD { ud_binds = orig_dbs, ud_calls = orig_calls })
   | null bndrs = (uds, emptyBag)  -- Common in case alternatives
-  | otherwise  = (free_uds, dump_dbs)
+  | otherwise  = -- pprTrace "dumpUDs" (ppr bndrs $$ ppr free_uds $$ ppr dump_dbs) $
+                 (free_uds, dump_dbs)
   where
     free_uds = MkUD { ud_binds = free_dbs, ud_calls = free_calls }
     bndr_set = mkVarSet bndrs
@@ -1396,7 +1614,8 @@ dumpUDs bndrs uds@(MkUD { ud_binds = orig_dbs, ud_calls = orig_calls })
 dumpBindUDs :: [CoreBndr] -> UsageDetails -> (UsageDetails, Bag DictBind, Bool)
 -- Used at a lambda or case binder; just dump anything mentioning the binder
 dumpBindUDs bndrs (MkUD { ud_binds = orig_dbs, ud_calls = orig_calls })
-  = (free_uds, dump_dbs, float_all)
+  = -- pprTrace "dumpBindUDs" (ppr bndrs $$ ppr free_uds $$ ppr dump_dbs) $
+    (free_uds, dump_dbs, float_all)
   where
     free_uds = MkUD { ud_binds = free_dbs, ud_calls = free_calls }
     bndr_set = mkVarSet bndrs
@@ -1417,12 +1636,12 @@ callsForMe fn (MkUD { ud_binds = orig_dbs, ud_calls = orig_calls })
     uds_without_me = MkUD { ud_binds = orig_dbs, ud_calls = delVarEnv orig_calls fn }
     calls_for_me = case lookupVarEnv orig_calls fn of
 			Nothing -> []
-			Just cs -> filter_dfuns (fmToList cs)
+			Just (CIS _ calls) -> filter_dfuns (Map.toList calls)
 
     dep_set = foldlBag go (unitVarSet fn) orig_dbs
     go dep_set (db,fvs) | fvs `intersectsVarSet` dep_set
                         = extendVarSetList dep_set (bindersOf db)
-                        | otherwise = fvs
+                        | otherwise = dep_set
 
 	-- Note [Specialisation of dictionary functions]
     filter_dfuns | isDFunId fn = filter ok_call
@@ -1454,7 +1673,8 @@ deleteCallsMentioning bs calls
   = mapVarEnv filter_calls calls
   where
     filter_calls :: CallInfoSet -> CallInfoSet
-    filter_calls = filterFM (\_ (_, fvs) -> not (fvs `intersectsVarSet` bs))
+    filter_calls (CIS f calls) = CIS f (Map.filter keep_call calls)
+    keep_call (_, fvs) = not (fvs `intersectsVarSet` bs)
 
 deleteCallsFor :: [Id] -> CallDetails -> CallDetails
 -- Remove calls *for* bs
@@ -1471,8 +1691,9 @@ deleteCallsFor bs calls = delVarEnvList calls bs
 \begin{code}
 type SpecM a = UniqSM a
 
-initSM :: UniqSupply -> SpecM a -> a
-initSM	  = initUs_
+runSpecM:: SpecM a -> CoreM a
+runSpecM spec = do { us <- getUniqueSupplyM
+                   ; return (initUs_ us spec) }
 
 mapAndCombineSM :: (a -> SpecM (b, UsageDetails)) -> [a] -> SpecM ([b], UsageDetails)
 mapAndCombineSM _ []     = return ([], emptyUDs)
@@ -1493,19 +1714,27 @@ cloneBindSM subst (Rec pairs) = do
     let (subst', bndrs') = cloneRecIdBndrs subst us (map fst pairs)
     return (subst', subst', Rec (bndrs' `zip` map snd pairs))
 
-cloneDictBndrs :: Subst -> [CoreBndr] -> SpecM (Subst, [CoreBndr])
-cloneDictBndrs subst bndrs 
-  = do { us <- getUniqueSupplyM
-       ; return (cloneIdBndrs subst us bndrs) }
+newDictBndrs :: Subst -> [CoreBndr] -> SpecM (Subst, [CoreBndr])
+-- Make up completely fresh binders for the dictionaries
+-- Their bindings are going to float outwards
+newDictBndrs subst bndrs 
+  = do { bndrs' <- mapM new bndrs
+       ; let subst' = extendIdSubstList subst 
+                        [(d, Var d') | (d,d') <- bndrs `zip` bndrs']
+       ; return (subst', bndrs' ) }
+  where
+    new b = do { uniq <- getUniqueM
+    	       ; let n   = idName b
+                     ty' = CoreSubst.substTy subst (idType b)
+               ; return (mkUserLocal (nameOccName n) uniq ty' (getSrcSpan n)) }
 
 newSpecIdSM :: Id -> Type -> SpecM Id
     -- Give the new Id a similar occurrence name to the old one
 newSpecIdSM old_id new_ty
   = do	{ uniq <- getUniqueM
-    	; let 
-	    name    = idName old_id
-	    new_occ = mkSpecOcc (nameOccName name)
-	    new_id  = mkUserLocal new_occ uniq new_ty (getSrcSpan name)
+    	; let name    = idName old_id
+	      new_occ = mkSpecOcc (nameOccName name)
+	      new_id  = mkUserLocal new_occ uniq new_ty (getSrcSpan name)
         ; return new_id }
 \end{code}
 

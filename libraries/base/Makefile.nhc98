@@ -1,7 +1,7 @@
 THISPKG	= base
 SEARCH	= -I$(TOPDIR)/targets/$(MACHINE) -Iinclude \
 	  -I../../prelude/PreludeIO -I../../prelude/`$(LOCAL)harch`
-EXTRA_H_FLAGS   = -H4M -K3M
+EXTRA_H_FLAGS   = -H4M -K6M
 EXTRA_C_FLAGS   = -D__NHC__
 EXTRA_HBC_FLAGS = -H16M -A1M
 
@@ -19,7 +19,7 @@ SRCS	= \
 	Data/HashTable.hs Data/Typeable.hs Data/Dynamic.hs \
 	Data/Monoid.hs \
 	Data/Eq.hs Data/Ord.hs Data/Fixed.hs \
-	Data/Foldable.hs Data/Traversable.hs \
+	Data/Functor.hs Data/Foldable.hs Data/Traversable.hs \
 	Data/Function.hs \
 	Control/Monad.hs Control/Monad/Fix.hs Control/Monad/Instances.hs \
 	Control/Arrow.hs Control/Applicative.hs \
@@ -40,9 +40,10 @@ SRCS	= \
 	Text/Read.hs Text/Show.hs Text/Show/Functions.hs \
 	Text/ParserCombinators/ReadP.hs Data/Version.hs \
 	Unsafe/Coerce.hs \
-	WCsubst.c dirUtils.c \
+	WCsubst.c \
 	GHC/IO/Device.hs \
 	System/Posix/Types.hs System/Posix/Internals.hs \
+	System/Console/GetOpt.hs \
 
 #	Data/String.hs
 #	Text/ParserCombinators/ReadPrec.hs
@@ -55,13 +56,13 @@ SRCS	= \
 #	System/Random.hs System/Locale.hs System/Time.hsc \
 #	System/Cmd.hs \
 #	System/Timeout.hs \
-#	System/Console/GetOpt.hs \
 
 #	Text/Regex/Posix.hsc Text/Regex.hs \
 #	[Data/Dynamic.hs] Data/Generics.hs Data/STRef.hs Data/Unique.hs
 #	System/Mem.hs System/Mem/StableName.hs System/Mem/Weak.hs
 #	System/Posix/Types.hs System/Posix/Signals.hsc
 #	System/FilePath.hs
+#	dirUtils.c
 
 
 # Here are the main rules.

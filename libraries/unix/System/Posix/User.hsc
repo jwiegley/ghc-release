@@ -39,13 +39,17 @@ module System.Posix.User (
     -- ** Modifying the user environment
     setUserID,
     setGroupID,
+    setEffectiveUserID,
+    setEffectiveGroupID,
+    setGroups
 
   ) where
 
 #include "HsUnix.h"
 
 import System.Posix.Types
-import Foreign
+import Foreign hiding (unsafePerformIO)
+import System.IO.Unsafe (unsafePerformIO)
 import Foreign.C
 import System.Posix.Internals	( CGroup, CPasswd )
 
@@ -109,6 +113,16 @@ foreign import ccall unsafe "getgroups"
   c_getgroups :: CInt -> Ptr CGid -> IO CInt
 
 
+-- | @setGroups@ calls @setgroups@ to set the list of
+--   supplementary @GroupID@s associated with the current process.
+setGroups :: [GroupID] -> IO ()
+setGroups groups = do
+    withArrayLen groups $ \ ngroups arr ->
+       throwErrnoIfMinus1_ "setGroups" (c_setgroups (fromIntegral ngroups) arr)
+
+foreign import ccall unsafe "setgroups"
+  c_setgroups :: CInt -> Ptr CGid -> IO CInt
+
 
 
 -- | @getLoginName@ calls @getlogin@ to obtain the login name
@@ -130,6 +144,15 @@ setUserID uid = throwErrnoIfMinus1_ "setUserID" (c_setuid uid)
 foreign import ccall unsafe "setuid"
   c_setuid :: CUid -> IO CInt
 
+-- | @setEffectiveUserID uid@ calls @seteuid@ to set the effective
+--   user-id associated with the current process to @uid@. This
+--   does not update the real user-id or set-user-id.
+setEffectiveUserID :: UserID -> IO ()
+setEffectiveUserID uid = throwErrnoIfMinus1_ "setEffectiveUserID" (c_seteuid uid)
+
+foreign import ccall unsafe "seteuid"
+  c_seteuid :: CUid -> IO CInt
+
 -- | @setGroupID gid@ calls @setgid@ to set the real, effective, and
 --   saved set-group-id associated with the current process to @gid@.
 setGroupID :: GroupID -> IO ()
@@ -137,6 +160,17 @@ setGroupID gid = throwErrnoIfMinus1_ "setGroupID" (c_setgid gid)
 
 foreign import ccall unsafe "setgid"
   c_setgid :: CGid -> IO CInt
+
+-- | @setEffectiveGroupID uid@ calls @setegid@ to set the effective
+--   group-id associated with the current process to @gid@. This
+--   does not update the real group-id or set-group-id.
+setEffectiveGroupID :: GroupID -> IO ()
+setEffectiveGroupID gid =
+  throwErrnoIfMinus1_ "setEffectiveGroupID" (c_setegid gid)
+
+
+foreign import ccall unsafe "setegid"
+  c_setegid :: CGid -> IO CInt
 
 -- -----------------------------------------------------------------------------
 -- User names

@@ -17,7 +17,7 @@ test('simpl013', normal, compile, [''])
 test('simpl014', normal, compile, [''])
 test('simpl015', only_ways(['optc','optasm']), compile, [''])
 test('simpl016', normal, compile, [''])
-test('simpl017', normal, compile, [''])
+test('simpl017', normal, compile_fail, [''])
 test('simpl018', normal, compile, [''])
 test('simpl019', normal, compile, [''])
 test('simpl020',
@@ -36,14 +36,31 @@ test('spec003', normal, compile, [''])
 test('rule1', normal, compile, [''])
 test('rule2', [only_ways(['optc','optasm']),
                if_compiler_lt('ghc', '6.13', expect_fail)],
-              compile, [''])
+              compile, ['-dsuppress-uniques'])
 
+test('dfun-loop', normal, compile, [''])
 test('strict-float', normal, compile, [''])
 test('T3118', normal, compile, [''])
+test('T4203', normal, compile, [''])
 
 # With -prof -fvia-C, this test makes gcc go out to lunch, and the
 # testsuite driver times out.
 test('T3016', [ skip_if_fast, omit_ways(['optc','profc']) ], compile, [''])
+
+test('T1647', normal, compile, ['-fdicts-strict -dcore-lint'])
+
+test('T3234',
+     only_ways(['optc','optasm']),
+     compile,
+     ['-ddump-simpl-stats -dsuppress-uniques'])
+
+test('T3717', only_ways(['optc','optasm']), 
+              compile, 
+              ['-ddump-simpl -dsuppress-uniques'])
+
+test('spec-inline', only_ways(['optc','optasm']), 
+              	    compile, 
+              	    ['-O2 -ddump-simpl -dsuppress-uniques'])
 
 test('T3055',
      [extra_clean(['T3055.hi', 'T3055.o', 'T3055.simpl']),
@@ -51,7 +68,21 @@ test('T3055',
      run_command,
      ['$MAKE -s --no-print-directory T3055'])
 
-test('T1647', normal, compile, ['-fdicts-strict -dcore-lint'])
+test('T4306',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T4306'])
 
-test('T3234', only_ways(['optc','optasm']), compile, ['-ddump-simpl-stats'])
+test('T4201',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T4201'])
 
+test('T3772',
+#      only_ways(['optc','optasm']), 
+     extra_clean(['T3772_A.hi', 'T3772_A.o']),
+     run_command, ['$MAKE -s --no-print-directory T3772'])
+
+test('T3831', normal, compile, [''])
+test('T4345', normal, compile, [''])
+test('T4398', normal, compile, [''])

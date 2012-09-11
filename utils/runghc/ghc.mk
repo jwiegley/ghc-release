@@ -10,16 +10,16 @@
 #
 # -----------------------------------------------------------------------------
 
-utils/runghc_dist_MODULES = Main
-utils/runghc_dist_HC_OPTS = -cpp -DVERSION="\"$(ProjectVersion)\""
+utils/runghc_PACKAGE = runghc
+utils/runghc_dist_USES_CABAL = YES
 utils/runghc_dist_PROG    = runghc$(exeext)
 utils/runghc_dist_SHELL_WRAPPER = YES
 utils/runghc_dist_INSTALL_SHELL_WRAPPER = YES
+utils/runghc_dist_EXTRA_HC_OPTS = -cpp -DVERSION="\"$(ProjectVersion)\""
 
 ifneq "$(BINDIST)" "YES"
 # hack: the build system has trouble with Main modules not called Main.hs
-utils/runghc/dist/build/Main.hs : utils/runghc/runghc.hs $(MKDIRHIER)
-	"$(MKDIRHIER)" $(dir $@)
+utils/runghc/dist/build/Main.hs : utils/runghc/runghc.hs | $$(dir $$@)/.
 	"$(CP)" $< $@
 endif
 

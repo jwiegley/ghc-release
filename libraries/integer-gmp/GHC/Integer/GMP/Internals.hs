@@ -51,12 +51,8 @@ module GHC.Integer.GMP.Internals (
 
   ) where
 
-import GHC.Prim (Int#, Word#, Double#, ByteArray#)
+import GHC.Prim
 import GHC.Integer.Type
-
-#if WORD_SIZE_IN_BITS < 64
-import GHC.Prim (Int64#, Word64#)
-#endif
 
 -- Double isn't available yet, and we shouldn't be using defaults anyway:
 default ()
@@ -143,18 +139,8 @@ foreign import prim "integer_cmm_int2Integerzh" int2Integer#
 
 -- |
 --
-foreign import prim "integer_cmm_integer2Intzh" integer2Int#
-  :: Int# -> ByteArray# -> Int#
-
--- |
---
 foreign import prim "integer_cmm_word2Integerzh" word2Integer#
   :: Word# -> (# Int#, ByteArray# #)
-
--- |
---
-foreign import prim "integer_cmm_integer2Wordzh" integer2Word#
-  :: Int# -> ByteArray# -> Word#
 
 -- |
 --
@@ -199,3 +185,15 @@ foreign import ccall unsafe "hs_integerToInt64"
 foreign import ccall unsafe "hs_integerToWord64"
     integerToWord64# :: Int# -> ByteArray# -> Word64#
 #endif
+
+-- used to be primops:
+integer2Int# :: Int# -> ByteArray# -> Int#
+integer2Int# s d = if s ==# 0#
+                       then 0#
+                       else let !v = indexIntArray# d 0# in
+                            if s <# 0#
+                               then negateInt# v
+                               else v
+
+integer2Word# :: Int# -> ByteArray# -> Word#
+integer2Word# s d = int2Word# (integer2Int# s d)

@@ -65,6 +65,7 @@ import qualified Distribution.Simple.NHC  as NHC
 import qualified Distribution.Simple.JHC  as JHC
 import qualified Distribution.Simple.LHC  as LHC
 import qualified Distribution.Simple.Hugs as Hugs
+import qualified Distribution.Simple.UHC  as UHC
 
 import Control.Monad (when, unless)
 import System.Directory
@@ -73,6 +74,8 @@ import System.FilePath
          ( takeFileName, takeDirectory, (</>), isAbsolute )
 
 import Distribution.Verbosity
+import Distribution.Text
+         ( display )
 
 -- |Perform the \"@.\/setup install@\" and \"@.\/setup copy@\"
 -- actions.  Move files into place based on the prefix argument.  FIX:
@@ -148,23 +151,28 @@ install pkg_descr lbi flags = do
   when (hasLibs pkg_descr) $ installIncludeFiles verbosity pkg_descr incPref
 
   case compilerFlavor (compiler lbi) of
-     GHC  -> do withLib pkg_descr $ \_ ->
-                  GHC.installLib flags lbi libPref dynlibPref buildPref pkg_descr
-                withExe pkg_descr $ \_ ->
-                  GHC.installExe flags lbi installDirs buildPref (progPrefixPref, progSuffixPref) pkg_descr
-     LHC  -> do withLib pkg_descr $ \_ ->
-                  LHC.installLib flags lbi libPref dynlibPref buildPref pkg_descr
-                withExe pkg_descr $ \_ ->
-                  LHC.installExe flags lbi installDirs buildPref (progPrefixPref, progSuffixPref) pkg_descr
-     JHC  -> do withLib pkg_descr $ JHC.installLib verbosity libPref buildPref pkg_descr
-                withExe pkg_descr $ JHC.installExe verbosity binPref buildPref (progPrefixPref, progSuffixPref) pkg_descr
+     GHC  -> do withLib pkg_descr $
+                  GHC.installLib verbosity lbi libPref dynlibPref buildPref pkg_descr
+                withExe pkg_descr $
+                  GHC.installExe verbosity lbi installDirs buildPref (progPrefixPref, progSuffixPref) pkg_descr
+     LHC  -> do withLib pkg_descr $
+                  LHC.installLib verbosity lbi libPref dynlibPref buildPref pkg_descr
+                withExe pkg_descr $
+                  LHC.installExe verbosity lbi installDirs buildPref (progPrefixPref, progSuffixPref) pkg_descr
+     JHC  -> do withLib pkg_descr $
+                  JHC.installLib verbosity libPref buildPref pkg_descr
+                withExe pkg_descr $
+                  JHC.installExe verbosity binPref buildPref (progPrefixPref, progSuffixPref) pkg_descr
      Hugs -> do
        let targetProgPref = progdir (absoluteInstallDirs pkg_descr lbi NoCopyDest)
        let scratchPref = scratchDir lbi
-       Hugs.install verbosity libPref progPref binPref targetProgPref scratchPref (progPrefixPref, progSuffixPref) pkg_descr
+       Hugs.install verbosity lbi libPref progPref binPref targetProgPref scratchPref (progPrefixPref, progSuffixPref) pkg_descr
      NHC  -> do withLib pkg_descr $ NHC.installLib verbosity libPref buildPref (packageId pkg_descr)
                 withExe pkg_descr $ NHC.installExe verbosity binPref buildPref (progPrefixPref, progSuffixPref)
-     _    -> die ("only installing with GHC, JHC, Hugs or nhc98 is implemented")
+     UHC  -> do withLib pkg_descr $ UHC.installLib verbosity lbi libPref dynlibPref buildPref pkg_descr
+     _    -> die $ "installing with "
+                ++ display (compilerFlavor (compiler lbi))
+                ++ " is not implemented"
   return ()
   -- register step should be performed by caller.
 

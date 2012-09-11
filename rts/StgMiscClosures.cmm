@@ -235,45 +235,6 @@ INFO_TABLE(stg_IND_PERM,1,0,IND_PERM,"IND_PERM","IND_PERM")
     jump %GET_ENTRY(R1);
 }  
 
-
-INFO_TABLE(stg_IND_OLDGEN,1,0,IND_OLDGEN,"IND_OLDGEN","IND_OLDGEN")
-{
-    TICK_ENT_STATIC_IND();	/* tick */
-    R1 = UNTAG(StgInd_indirectee(R1));
-    TICK_ENT_VIA_NODE();
-    jump %GET_ENTRY(R1);
-}
-
-INFO_TABLE(stg_IND_OLDGEN_PERM,1,0,IND_OLDGEN_PERM,"IND_OLDGEN_PERM","IND_OLDGEN_PERM")
-{
-    /* Don't: TICK_ENT_STATIC_IND(Node); for ticky-ticky; 
-       this ind is here only to help profiling */
-
-#if defined(TICKY_TICKY) && !defined(PROFILING)
-    /* TICKY_TICKY && !PROFILING means PERM_IND *replaces* an IND, 
-       rather than being extra  */
-    TICK_ENT_PERM_IND(); /* tick */
-#endif
-
-    LDV_ENTER(R1);
-
-    /* Enter PAP cost centre -- lexical scoping only */
-    ENTER_CCS_PAP_CL(R1);
-
-    /* see comment in IND_PERM */
-#ifdef TICKY_TICKY
-#  ifdef PROFILING
-#    error Profiling and ticky-ticky do not mix at present!
-#  endif  /* PROFILING */
-    StgHeader_info(R1) = stg_IND_OLDGEN_info;
-#endif /* TICKY_TICKY */
-
-    R1 = UNTAG(StgInd_indirectee(R1));
-
-    TICK_ENT_VIA_NODE();
-    jump %GET_ENTRY(R1);
-}
-
 /* ----------------------------------------------------------------------------
    Black holes.
 
@@ -283,96 +244,105 @@ INFO_TABLE(stg_IND_OLDGEN_PERM,1,0,IND_OLDGEN_PERM,"IND_OLDGEN_PERM","IND_OLDGEN
    waiting for the evaluation of the closure to finish.
    ------------------------------------------------------------------------- */
 
-/* Note: a BLACKHOLE must be big enough to be
- * overwritten with an indirection/evacuee/catch.  Thus we claim it
- * has 1 non-pointer word of payload. 
- */
-INFO_TABLE(stg_BLACKHOLE,0,1,BLACKHOLE,"BLACKHOLE","BLACKHOLE")
+INFO_TABLE(stg_BLACKHOLE,1,0,BLACKHOLE,"BLACKHOLE","BLACKHOLE")
 {
-    TICK_ENT_BH();
+    W_ r, p, info, bq, msg, owner, bd;
 
-#ifdef THREADED_RTS
-    // foreign "C" debugBelch("BLACKHOLE entry\n");
-#endif
+    TICK_ENT_DYN_IND();	/* tick */
 
-    /* Actually this is not necessary because R1 is about to be destroyed. */
-    LDV_ENTER(R1);
+retry:
+    p = StgInd_indirectee(R1);
+    if (GETTAG(p) != 0) {
+        R1 = p;
+        jump %ENTRY_CODE(Sp(0));
+    }
 
-#if defined(THREADED_RTS)
-    ACQUIRE_LOCK(sched_mutex "ptr");
-    // released in stg_block_blackhole_finally
-#endif
+    info = StgHeader_info(p);
+    if (info == stg_IND_info) {
+        // This could happen, if e.g. we got a BLOCKING_QUEUE that has
+        // just been replaced with an IND by another thread in
+        // wakeBlockingQueue().
+        goto retry;
+    }
 
-    /* Put ourselves on the blackhole queue */
-    StgTSO__link(CurrentTSO) = W_[blackhole_queue];
-    W_[blackhole_queue] = CurrentTSO;
+    if (info == stg_TSO_info ||
+        info == stg_BLOCKING_QUEUE_CLEAN_info ||
+        info == stg_BLOCKING_QUEUE_DIRTY_info)
+    {
+        ("ptr" msg) = foreign "C" allocate(MyCapability() "ptr", 
+                                           BYTES_TO_WDS(SIZEOF_MessageBlackHole)) [R1];
+        
+        SET_HDR(msg, stg_MSG_BLACKHOLE_info, CCS_SYSTEM);
+        MessageBlackHole_tso(msg) = CurrentTSO;
+        MessageBlackHole_bh(msg) = R1;
+               
+        (r) = foreign "C" messageBlackHole(MyCapability() "ptr", msg "ptr") [R1];
 
-    /* jot down why and on what closure we are blocked */
-    StgTSO_why_blocked(CurrentTSO) = BlockedOnBlackHole::I16;
-    StgTSO_block_info(CurrentTSO) = R1;
-
-    jump stg_block_blackhole;
+        if (r == 0) {
+            goto retry;
+        } else {
+            StgTSO_why_blocked(CurrentTSO) = BlockedOnBlackHole::I16;
+            StgTSO_block_info(CurrentTSO) = msg;
+            jump stg_block_blackhole;
+        }
+    }
+    else
+    {
+        R1 = p;
+        ENTER();
+    }
 }
 
-/* identical to BLACKHOLEs except for the infotag */
-INFO_TABLE(stg_CAF_BLACKHOLE,0,1,CAF_BLACKHOLE,"CAF_BLACKHOLE","CAF_BLACKHOLE")
+INFO_TABLE(__stg_EAGER_BLACKHOLE,1,0,BLACKHOLE,"BLACKHOLE","BLACKHOLE")
 {
-    TICK_ENT_BH();
-    LDV_ENTER(R1);
-
-#if defined(THREADED_RTS)
-    // foreign "C" debugBelch("BLACKHOLE entry\n");
-#endif
-
-#if defined(THREADED_RTS)
-    ACQUIRE_LOCK(sched_mutex "ptr");
-    // released in stg_block_blackhole_finally
-#endif
-
-    /* Put ourselves on the blackhole queue */
-    StgTSO__link(CurrentTSO) = W_[blackhole_queue];
-    W_[blackhole_queue] = CurrentTSO;
-
-    /* jot down why and on what closure we are blocked */
-    StgTSO_why_blocked(CurrentTSO) = BlockedOnBlackHole::I16;
-    StgTSO_block_info(CurrentTSO) = R1;
-
-    jump stg_block_blackhole;
+    jump ENTRY_LBL(stg_BLACKHOLE);
 }
 
-INFO_TABLE(__stg_EAGER_BLACKHOLE,0,1,BLACKHOLE,"EAGER_BLACKHOLE","EAGER_BLACKHOLE")
+// CAF_BLACKHOLE is allocated when entering a CAF.  The reason it is
+// distinct from BLACKHOLE is so that we can tell the difference
+// between an update frame on the stack that points to a CAF under
+// evaluation, and one that points to a closure that is under
+// evaluation by another thread (a BLACKHOLE).  See threadPaused().
+//
+INFO_TABLE(stg_CAF_BLACKHOLE,1,0,BLACKHOLE,"BLACKHOLE","BLACKHOLE")
 {
-    TICK_ENT_BH();
-
-#ifdef THREADED_RTS
-    // foreign "C" debugBelch("BLACKHOLE entry\n");
-#endif
-
-    /* Actually this is not necessary because R1 is about to be destroyed. */
-    LDV_ENTER(R1);
-
-#if defined(THREADED_RTS)
-    ACQUIRE_LOCK(sched_mutex "ptr");
-    // released in stg_block_blackhole_finally
-#endif
-
-    /* Put ourselves on the blackhole queue */
-    StgTSO__link(CurrentTSO) = W_[blackhole_queue];
-    W_[blackhole_queue] = CurrentTSO;
-
-    /* jot down why and on what closure we are blocked */
-    StgTSO_why_blocked(CurrentTSO) = BlockedOnBlackHole::I16;
-    StgTSO_block_info(CurrentTSO) = R1;
-
-    jump stg_block_blackhole;
+    jump ENTRY_LBL(stg_BLACKHOLE);
 }
+
+INFO_TABLE(stg_BLOCKING_QUEUE_CLEAN,4,0,BLOCKING_QUEUE,"BLOCKING_QUEUE","BLOCKING_QUEUE")
+{ foreign "C" barf("BLOCKING_QUEUE_CLEAN object entered!") never returns; }
+    
+
+INFO_TABLE(stg_BLOCKING_QUEUE_DIRTY,4,0,BLOCKING_QUEUE,"BLOCKING_QUEUE","BLOCKING_QUEUE")
+{ foreign "C" barf("BLOCKING_QUEUE_DIRTY object entered!") never returns; }
+    
 
 /* ----------------------------------------------------------------------------
    Whiteholes are used for the "locked" state of a closure (see lockClosure())
    ------------------------------------------------------------------------- */
 
 INFO_TABLE(stg_WHITEHOLE, 0,0, WHITEHOLE, "WHITEHOLE", "WHITEHOLE")
-{ foreign "C" barf("WHITEHOLE object entered!") never returns; }
+{ 
+#if defined(THREADED_RTS)
+    W_ info, i;
+
+    i = 0;
+loop:
+    // spin until the WHITEHOLE is updated
+    info = StgHeader_info(R1);
+    if (info == stg_WHITEHOLE_info) {
+        i = i + 1;
+        if (i == SPIN_COUNT) {
+            i = 0;
+            foreign "C" yieldThread() [R1];
+        }
+        goto loop;
+    }
+    jump %ENTRY_CODE(info);
+#else
+    foreign "C" barf("WHITEHOLE object entered!") never returns;
+#endif
+}
 
 /* ----------------------------------------------------------------------------
    Some static info tables for things that don't get entered, and
@@ -419,7 +389,7 @@ CLOSURE(stg_NO_FINALIZER_closure,stg_NO_FINALIZER);
    Stable Names are unlifted too.
    ------------------------------------------------------------------------- */
 
-INFO_TABLE(stg_STABLE_NAME,0,1,STABLE_NAME,"STABLE_NAME","STABLE_NAME")
+INFO_TABLE(stg_STABLE_NAME,0,1,PRIM,"STABLE_NAME","STABLE_NAME")
 { foreign "C" barf("STABLE_NAME object entered!") never returns; }
 
 /* ----------------------------------------------------------------------------
@@ -439,22 +409,22 @@ INFO_TABLE(stg_MVAR_DIRTY,3,0,MVAR_DIRTY,"MVAR","MVAR")
    STM
    -------------------------------------------------------------------------- */
 
-INFO_TABLE(stg_TVAR, 0, 0, TVAR, "TVAR", "TVAR")
+INFO_TABLE(stg_TVAR, 2, 1, MUT_PRIM, "TVAR", "TVAR")
 { foreign "C" barf("TVAR object entered!") never returns; }
 
-INFO_TABLE(stg_TVAR_WATCH_QUEUE, 0, 0, TVAR_WATCH_QUEUE, "TVAR_WATCH_QUEUE", "TVAR_WATCH_QUEUE")
+INFO_TABLE(stg_TVAR_WATCH_QUEUE, 3, 0, MUT_PRIM, "TVAR_WATCH_QUEUE", "TVAR_WATCH_QUEUE")
 { foreign "C" barf("TVAR_WATCH_QUEUE object entered!") never returns; }
 
-INFO_TABLE(stg_ATOMIC_INVARIANT, 0, 0, ATOMIC_INVARIANT, "ATOMIC_INVARIANT", "ATOMIC_INVARIANT")
+INFO_TABLE(stg_ATOMIC_INVARIANT, 2, 1, MUT_PRIM, "ATOMIC_INVARIANT", "ATOMIC_INVARIANT")
 { foreign "C" barf("ATOMIC_INVARIANT object entered!") never returns; }
 
-INFO_TABLE(stg_INVARIANT_CHECK_QUEUE, 0, 0, INVARIANT_CHECK_QUEUE, "INVARIANT_CHECK_QUEUE", "INVARIANT_CHECK_QUEUE")
+INFO_TABLE(stg_INVARIANT_CHECK_QUEUE, 3, 0, MUT_PRIM, "INVARIANT_CHECK_QUEUE", "INVARIANT_CHECK_QUEUE")
 { foreign "C" barf("INVARIANT_CHECK_QUEUE object entered!") never returns; }
 
 INFO_TABLE(stg_TREC_CHUNK, 0, 0, TREC_CHUNK, "TREC_CHUNK", "TREC_CHUNK")
 { foreign "C" barf("TREC_CHUNK object entered!") never returns; }
 
-INFO_TABLE(stg_TREC_HEADER, 0, 0, TREC_HEADER, "TREC_HEADER", "TREC_HEADER")
+INFO_TABLE(stg_TREC_HEADER, 3, 1, MUT_PRIM, "TREC_HEADER", "TREC_HEADER")
 { foreign "C" barf("TREC_HEADER object entered!") never returns; }
 
 INFO_TABLE_CONSTR(stg_END_STM_WATCH_QUEUE,0,0,0,CONSTR_NOCAF_STATIC,"END_STM_WATCH_QUEUE","END_STM_WATCH_QUEUE")
@@ -478,6 +448,25 @@ CLOSURE(stg_END_STM_CHUNK_LIST_closure,stg_END_STM_CHUNK_LIST);
 CLOSURE(stg_NO_TREC_closure,stg_NO_TREC);
 
 /* ----------------------------------------------------------------------------
+   Messages
+   ------------------------------------------------------------------------- */
+
+// PRIM rather than CONSTR, because PRIM objects cannot be duplicated by the GC.
+
+INFO_TABLE_CONSTR(stg_MSG_TRY_WAKEUP,2,0,0,PRIM,"MSG_TRY_WAKEUP","MSG_TRY_WAKEUP")
+{ foreign "C" barf("MSG_TRY_WAKEUP object entered!") never returns; }
+
+INFO_TABLE_CONSTR(stg_MSG_THROWTO,4,0,0,PRIM,"MSG_THROWTO","MSG_THROWTO")
+{ foreign "C" barf("MSG_THROWTO object entered!") never returns; }
+
+INFO_TABLE_CONSTR(stg_MSG_BLACKHOLE,3,0,0,PRIM,"MSG_BLACKHOLE","MSG_BLACKHOLE")
+{ foreign "C" barf("MSG_BLACKHOLE object entered!") never returns; }
+
+// used to overwrite a MSG_THROWTO when the message has been used/revoked
+INFO_TABLE_CONSTR(stg_MSG_NULL,1,0,0,PRIM,"MSG_NULL","MSG_NULL")
+{ foreign "C" barf("MSG_NULL object entered!") never returns; }
+
+/* ----------------------------------------------------------------------------
    END_TSO_QUEUE
 
    This is a static nullary constructor (like []) that we use to mark the
@@ -488,18 +477,6 @@ INFO_TABLE_CONSTR(stg_END_TSO_QUEUE,0,0,0,CONSTR_NOCAF_STATIC,"END_TSO_QUEUE","E
 { foreign "C" barf("END_TSO_QUEUE object entered!") never returns; }
 
 CLOSURE(stg_END_TSO_QUEUE_closure,stg_END_TSO_QUEUE);
-
-/* ----------------------------------------------------------------------------
-   Exception lists
-   ------------------------------------------------------------------------- */
-
-INFO_TABLE_CONSTR(stg_END_EXCEPTION_LIST,0,0,0,CONSTR_NOCAF_STATIC,"END_EXCEPTION_LIST","END_EXCEPTION_LIST")
-{ foreign "C" barf("END_EXCEPTION_LIST object entered!") never returns; }
-
-CLOSURE(stg_END_EXCEPTION_LIST_closure,stg_END_EXCEPTION_LIST);
-
-INFO_TABLE(stg_EXCEPTION_CONS,1,1,CONSTR,"EXCEPTION_CONS","EXCEPTION_CONS")
-{ foreign "C" barf("EXCEPTION_CONS object entered!") never returns; }
 
 /* ----------------------------------------------------------------------------
    Arrays
@@ -555,6 +532,13 @@ INFO_TABLE( stg_dummy_ret, 0, 0, CONSTR_NOCAF_STATIC, "DUMMY_RET", "DUMMY_RET")
 CLOSURE(stg_dummy_ret_closure,stg_dummy_ret);
 
 /* ----------------------------------------------------------------------------
+   MVAR_TSO_QUEUE
+   ------------------------------------------------------------------------- */
+
+INFO_TABLE_CONSTR(stg_MVAR_TSO_QUEUE,2,0,0,PRIM,"MVAR_TSO_QUEUE","MVAR_TSO_QUEUE")
+{ foreign "C" barf("MVAR_TSO_QUEUE object entered!") never returns; }
+
+/* ----------------------------------------------------------------------------
    CHARLIKE and INTLIKE closures.  
 
    These are static representations of Chars and small Ints, so that
@@ -562,14 +546,16 @@ CLOSURE(stg_dummy_ret_closure,stg_dummy_ret);
    replace them with references to the static objects.
    ------------------------------------------------------------------------- */
 
-#if defined(__PIC__) && defined(mingw32_TARGET_OS)
+#if defined(__PIC__) && defined(mingw32_HOST_OS)
 /*
- * When sticking the RTS in a DLL, we delay populating the
+ * When sticking the RTS in a Windows DLL, we delay populating the
  * Charlike and Intlike tables until load-time, which is only
  * when we've got the real addresses to the C# and I# closures.
- *
+ *	
+ *	-- this is currently broken BL 2009/11/14.
+ *	   we don't rewrite to static closures at all with Windows DLLs.
  */
-#warning Is this correct? _imp is a pointer!
+// #warning Is this correct? _imp is a pointer!
 #define Char_hash_static_info _imp__ghczmprim_GHCziTypes_Czh_static_info
 #define Int_hash_static_info _imp__ghczmprim_GHCziTypes_Izh_static_info
 #else
@@ -587,6 +573,7 @@ CLOSURE(stg_dummy_ret_closure,stg_dummy_ret);
 
 /* end the name with _closure, to convince the mangler this is a closure */
 
+#if !(defined(__PIC__) && defined(mingw32_HOST_OS))
 section "data" {
  stg_CHARLIKE_closure:
     CHARLIKE_HDR(0)
@@ -883,3 +870,5 @@ section "data" {
     INTLIKE_HDR(15)
     INTLIKE_HDR(16)	/* MAX_INTLIKE == 16 */
 }
+
+#endif // !(defined(__PIC__) && defined(mingw32_HOST_OS))

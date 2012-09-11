@@ -7,6 +7,7 @@
 \begin{code}
 -- We expose the relevant stuff from this module via the Type module
 {-# OPTIONS_HADDOCK hide #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 
 module TypeRep (
 	TyThing(..), 
@@ -20,7 +21,7 @@ module TypeRep (
 	-- Pretty-printing
 	pprType, pprParendType, pprTypeApp,
 	pprTyThing, pprTyThingCategory, 
-	pprPred, pprTheta, pprForAll, pprThetaArrow, pprClassPred,
+	pprPred, pprEqPred, pprTheta, pprForAll, pprThetaArrow, pprClassPred,
 
 	-- Kinds
 	liftedTypeKind, unliftedTypeKind, openTypeKind,
@@ -61,6 +62,9 @@ import Class
 import PrelNames
 import Outputable
 import FastString
+
+-- libraries
+import Data.Data hiding ( TyCon )
 \end{code}
 
 	----------------------
@@ -155,6 +159,7 @@ data Type
 	                -- of a 'FunTy' (unlike the 'PredType' constructors 'ClassP' or 'IParam')
 	                
 	                -- See Note [PredTy], and Note [Equality predicates]
+  deriving (Data, Typeable)
 
 -- | The key type representing kinds in the compiler.
 -- Invariant: a kind is always in one of these forms:
@@ -196,6 +201,7 @@ data PredType
   = ClassP Class [Type]		-- ^ Class predicate e.g. @Eq a@
   | IParam (IPName Name) Type	-- ^ Implicit parameter e.g. @?x :: Int@
   | EqPred Type Type		-- ^ Equality predicate e.g @ty1 ~ ty2@
+  deriving (Data, Typeable)
 
 -- | A collection of 'PredType's
 type ThetaType = [PredType]
@@ -304,14 +310,11 @@ funTyCon = mkFunTyCon funTyConName (mkArrowKinds [argTypeKind, openTypeKind] lif
 tySuperKindTyCon     = mkSuperKindTyCon tySuperKindTyConName
 coSuperKindTyCon     = mkSuperKindTyCon coSuperKindTyConName
 
-liftedTypeKindTyCon   = mkKindTyCon liftedTypeKindTyConName
-openTypeKindTyCon     = mkKindTyCon openTypeKindTyConName
-unliftedTypeKindTyCon = mkKindTyCon unliftedTypeKindTyConName
-ubxTupleKindTyCon     = mkKindTyCon ubxTupleKindTyConName
-argTypeKindTyCon      = mkKindTyCon argTypeKindTyConName
-
-mkKindTyCon :: Name -> TyCon
-mkKindTyCon name = mkVoidPrimTyCon name tySuperKind 0
+liftedTypeKindTyCon   = mkKindTyCon liftedTypeKindTyConName   tySuperKind
+openTypeKindTyCon     = mkKindTyCon openTypeKindTyConName     tySuperKind
+unliftedTypeKindTyCon = mkKindTyCon unliftedTypeKindTyConName tySuperKind
+ubxTupleKindTyCon     = mkKindTyCon ubxTupleKindTyConName     tySuperKind
+argTypeKindTyCon      = mkKindTyCon argTypeKindTyConName      tySuperKind
 
 --------------------------
 -- ... and now their names
@@ -431,9 +434,12 @@ pprTypeApp tc tys = ppr_type_app TopPrec (getName tc) tys
 pprPred :: PredType -> SDoc
 pprPred (ClassP cls tys) = pprClassPred cls tys
 pprPred (IParam ip ty)   = ppr ip <> dcolon <> pprType ty
-pprPred (EqPred ty1 ty2) = sep [ ppr_type FunPrec ty1
-                               , nest 2 (ptext (sLit "~"))
-                               , ppr_type FunPrec ty2]
+pprPred (EqPred ty1 ty2) = pprEqPred (ty1,ty2)
+
+pprEqPred :: (Type,Type) -> SDoc
+pprEqPred (ty1,ty2) = sep [ ppr_type FunPrec ty1
+                          , nest 2 (ptext (sLit "~"))
+                          , ppr_type FunPrec ty2]
 			       -- Precedence looks like (->) so that we get
 			       --    Maybe a ~ Bool
 			       --    (a->a) ~ Bool
@@ -443,12 +449,23 @@ pprClassPred :: Class -> [Type] -> SDoc
 pprClassPred clas tys = ppr_type_app TopPrec (getName clas) tys
 
 pprTheta :: ThetaType -> SDoc
-pprTheta theta = parens (sep (punctuate comma (map pprPred theta)))
+-- pprTheta [pred] = pprPred pred	 -- I'm in two minds about this
+pprTheta theta  = parens (sep (punctuate comma (map pprPred theta)))
 
 pprThetaArrow :: ThetaType -> SDoc
-pprThetaArrow theta 
-  | null theta = empty
-  | otherwise  = parens (sep (punctuate comma (map pprPred theta))) <+> ptext (sLit "=>")
+pprThetaArrow []     = empty
+pprThetaArrow [pred] 
+  | noParenPred pred = pprPred pred <+> darrow
+pprThetaArrow preds  = parens (sep (punctuate comma (map pprPred preds))) <+> darrow
+
+noParenPred :: PredType -> Bool
+-- A predicate that can appear without parens before a "=>"
+--       C a => a -> a
+--       a~b => a -> b
+-- But   (?x::Int) => Int -> Int
+noParenPred (ClassP {}) = True
+noParenPred (EqPred {}) = True
+noParenPred (IParam {}) = False
 
 ------------------
 instance Outputable Type where
@@ -471,7 +488,8 @@ ppr_type :: Prec -> Type -> SDoc
 ppr_type _ (TyVarTy tv)		-- Note [Infix type variables]
   | isSymOcc (getOccName tv)  = parens (ppr tv)
   | otherwise		      = ppr tv
-ppr_type _ (PredTy pred)      = ifPprDebug (ptext (sLit "<pred>")) <> (ppr pred)
+ppr_type p (PredTy pred)      = maybeParen p TyConPrec $
+                                ifPprDebug (ptext (sLit "<pred>")) <> (ppr pred)
 ppr_type p (TyConApp tc tys)  = ppr_tc_app p tc tys
 
 ppr_type p (AppTy t1 t2) = maybeParen p TyConPrec $
@@ -485,8 +503,11 @@ ppr_type p (FunTy ty1 ty2)
     maybeParen p FunPrec $
     sep (ppr_type FunPrec ty1 : ppr_fun_tail ty2)
   where
-    ppr_fun_tail (FunTy ty1 ty2) = (arrow <+> ppr_type FunPrec ty1) : ppr_fun_tail ty2
-    ppr_fun_tail other_ty        = [arrow <+> pprType other_ty]
+    ppr_fun_tail (FunTy ty1 ty2) 
+      | not (is_pred ty1) = (arrow <+> ppr_type FunPrec ty1) : ppr_fun_tail ty2
+    ppr_fun_tail other_ty = [arrow <+> pprType other_ty]
+    is_pred (PredTy {}) = True
+    is_pred _           = False
 
 ppr_forall_type :: Prec -> Type -> SDoc
 ppr_forall_type p ty

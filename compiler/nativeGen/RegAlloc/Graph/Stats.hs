@@ -1,8 +1,6 @@
 {-# OPTIONS -fno-warn-missing-signatures #-}
--- Carries interesting info for debugging / profiling of the 
+-- | Carries interesting info for debugging / profiling of the 
 --	graph coloring register allocator.
---
-
 module RegAlloc.Graph.Stats (
 	RegAllocStats (..),
 
@@ -23,9 +21,11 @@ import qualified GraphColor as Color
 import RegAlloc.Liveness
 import RegAlloc.Graph.Spill
 import RegAlloc.Graph.SpillCost
+import RegAlloc.Graph.TrivColorable
 import Instruction
 import RegClass
 import Reg
+import TargetReg
 
 import Cmm
 import Outputable
@@ -45,7 +45,8 @@ data RegAllocStats instr
 
 	-- a spill stage
 	| RegAllocStatsSpill
-	{ raGraph	:: Color.Graph VirtualReg RegClass RealReg	-- ^ the partially colored graph
+	{ raCode	:: [LiveCmmTop instr]				-- ^ the code we tried to allocate registers for
+	, raGraph	:: Color.Graph VirtualReg RegClass RealReg	-- ^ the partially colored graph
 	, raCoalesced	:: UniqFM VirtualReg				-- ^ the regs that were coaleced
 	, raSpillStats	:: SpillStats 					-- ^ spiller stats
 	, raSpillCosts	:: SpillCostInfo 				-- ^ number of instrs each reg lives for
@@ -53,13 +54,15 @@ data RegAllocStats instr
 
 	-- a successful coloring
 	| RegAllocStatsColored
-	{ raGraph	 :: Color.Graph VirtualReg RegClass RealReg	-- ^ the uncolored graph
-	, raGraphColored :: Color.Graph VirtualReg RegClass RealReg 	-- ^ the coalesced and colored graph
-	, raCoalesced	:: UniqFM VirtualReg				-- ^ the regs that were coaleced
-	, raPatched	:: [LiveCmmTop instr] 				-- ^ code with vregs replaced by hregs
-	, raSpillClean  :: [LiveCmmTop instr]				-- ^ code with unneeded spill\/reloads cleaned out
-	, raFinal	:: [NatCmmTop instr] 				-- ^ final code
-	, raSRMs	:: (Int, Int, Int) }				-- ^ spill\/reload\/reg-reg moves present in this code
+	{ raCode	  :: [LiveCmmTop instr]				-- ^ the code we tried to allocate registers for
+	, raGraph	  :: Color.Graph VirtualReg RegClass RealReg	-- ^ the uncolored graph
+	, raGraphColored  :: Color.Graph VirtualReg RegClass RealReg 	-- ^ the coalesced and colored graph
+	, raCoalesced	  :: UniqFM VirtualReg				-- ^ the regs that were coaleced
+	, raCodeCoalesced :: [LiveCmmTop instr]				-- ^ code with coalescings applied 
+	, raPatched	  :: [LiveCmmTop instr] 			-- ^ code with vregs replaced by hregs
+	, raSpillClean    :: [LiveCmmTop instr]				-- ^ code with unneeded spill\/reloads cleaned out
+	, raFinal	  :: [NatCmmTop instr] 				-- ^ final code
+	, raSRMs	  :: (Int, Int, Int) }				-- ^ spill\/reload\/reg-reg moves present in this code
 
 instance Outputable instr => Outputable (RegAllocStats instr) where
 
@@ -68,26 +71,27 @@ instance Outputable instr => Outputable (RegAllocStats instr) where
 	$$ text "#  Native code with liveness information."
 	$$ ppr (raLiveCmm s)
 	$$ text ""
---	$$ text "#  Initial register conflict graph."
---	$$ Color.dotGraph regDotColor trivColorable (raGraph s)
+	$$ text "#  Initial register conflict graph."
+	$$ Color.dotGraph 
+		targetRegDotColor
+		(trivColorable 
+			targetVirtualRegSqueeze
+			targetRealRegSqueeze)
+		(raGraph s)
 
 
  ppr (s@RegAllocStatsSpill{})
  	=  text "#  Spill"
 
---	$$ text "#  Register conflict graph."
---	$$ Color.dotGraph regDotColor trivColorable (raGraph s)
---	$$ text ""
+	$$ text "#  Code with liveness information."
+	$$ (ppr (raCode s))
+	$$ text ""
 
 	$$ (if (not $ isNullUFM $ raCoalesced s)
 		then 	text "#  Registers coalesced."
 			$$ (vcat $ map ppr $ ufmToList $ raCoalesced s)
 			$$ text ""
 		else empty)
-
---	$$ text "#  Spill costs.  reg uses defs lifetime degree cost"
---	$$ vcat (map (pprSpillCostRecord (raGraph s)) $ eltsUFM $ raSpillCosts s)
---	$$ text ""
 
 	$$ text "#  Spills inserted."
 	$$ ppr (raSpillStats s)
@@ -100,19 +104,28 @@ instance Outputable instr => Outputable (RegAllocStats instr) where
  ppr (s@RegAllocStatsColored { raSRMs = (spills, reloads, moves) })
  	=  text "#  Colored"
 
---	$$ text "#  Register conflict graph (initial)."
---	$$ Color.dotGraph regDotColor trivColorable (raGraph s)
---	$$ text ""
+	$$ text "#  Code with liveness information."
+	$$ (ppr (raCode s))
+	$$ text ""
 
---	$$ text "#  Register conflict graph (colored)."
---	$$ Color.dotGraph regDotColor trivColorable (raGraphColored s)
---	$$ text ""
+	$$ text "#  Register conflict graph (colored)."
+	$$ Color.dotGraph 
+		targetRegDotColor
+		(trivColorable 
+			targetVirtualRegSqueeze
+			targetRealRegSqueeze)
+		(raGraphColored s)
+	$$ text ""
 
 	$$ (if (not $ isNullUFM $ raCoalesced s)
 		then 	text "#  Registers coalesced."
 			$$ (vcat $ map ppr $ ufmToList $ raCoalesced s)
 			$$ text ""
 		else empty)
+
+	$$ text "#  Native code after coalescings applied."
+	$$ ppr (raCodeCoalesced s)
+	$$ text ""
 
 	$$ text "#  Native code after register allocation."
 	$$ ppr (raPatched s)
@@ -240,7 +253,6 @@ pprStatsLifeConflict stats graph
 
 -- | Count spill/reload/reg-reg moves.
 --	Lets us see how well the register allocator has done.
---
 countSRMs 
 	:: Instruction instr
 	=> LiveCmmTop instr -> (Int, Int, Int)
@@ -253,15 +265,15 @@ countSRM_block (BasicBlock i instrs)
  	return	$ BasicBlock i instrs'
 
 countSRM_instr li
-	| SPILL _ _	<- li
-	= do	modify 	$ \(s, r, m)	-> (s + 1, r, m)
+	| LiveInstr SPILL{} _	 <- li
+	= do	modify  $ \(s, r, m)	-> (s + 1, r, m)
 		return li
 
-	| RELOAD _ _	<- li
-	= do	modify	$ \(s, r, m)	-> (s, r + 1, m)
+	| LiveInstr RELOAD{} _ 	<- li
+	= do	modify  $ \(s, r, m)	-> (s, r + 1, m)
 		return li
-
-	| Instr instr _	<- li
+	
+	| LiveInstr instr _	<- li
 	, Just _	<- takeRegRegMoveInstr instr
 	= do	modify	$ \(s, r, m)	-> (s, r, m + 1)
 		return li
@@ -273,18 +285,3 @@ countSRM_instr li
 addSRM (s1, r1, m1) (s2, r2, m2)
 	= (s1+s2, r1+r2, m1+m2)
 
-
-
-
-
-
-{-
-toX11Color (r, g, b)
- = let	rs	= padL 2 '0' (showHex r "")
- 	gs	= padL 2 '0' (showHex r "")
-	bs	= padL 2 '0' (showHex r "")
-
-	padL n c s
-		= replicate (n - length s) c ++ s
-  in	"#" ++ rs ++ gs ++ bs
--}

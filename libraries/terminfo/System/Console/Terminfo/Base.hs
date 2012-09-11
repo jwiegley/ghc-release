@@ -159,13 +159,18 @@ hRunTermOutput h term (TermOutput to) = do
     putc_ptr <- mkCallback putc
     withCurTerm term $ mapM_ (writeToTerm putc_ptr h) (to [])
     freeHaskellFunPtr putc_ptr
+    hFlush h
   where
     putc c = let c' = toEnum $ fromEnum c
              in hPutChar h c' >> hFlush h >> return c
 
+-- NOTE: Currently, the output is checked every time tparm is called.
+-- It might be faster to check for padding once in tiGetOutput1.
 writeToTerm :: FunPtr CharOutput -> Handle -> TermOutputType -> IO ()
-writeToTerm putc _ (TOCmd numLines s) = tPuts s numLines putc
-writeToTerm _ h (TOStr s) = hPutStr h s >> hFlush h
+writeToTerm putc h (TOCmd numLines s)
+    | strHasPadding s = tPuts s numLines putc
+    | otherwise = hPutStr h s
+writeToTerm _ h (TOStr s) = hPutStr h s
 
 infixl 2 <#>
 
@@ -262,7 +267,9 @@ tParm cap = Capability $ \t -> return $ Just
     where tparm' (p1:p2:p3:p4:p5:p6:p7:p8:p9:_)
             = withCString cap $ \c_cap -> do
                 result <- tparm c_cap p1 p2 p3 p4 p5 p6 p7 p8 p9
-                peekCString result
+                if result == nullPtr
+                    then return ""
+                    else peekCString result
           tparm' _ = fail "tParm: List too short"
 
 -- | Look up an output capability in the terminfo database.  

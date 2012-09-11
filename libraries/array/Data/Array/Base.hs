@@ -125,20 +125,18 @@ unsafeReplaceST arr ies = do
 unsafeAccumST :: (IArray a e, Ix i) => (e -> e' -> e) -> a i e -> [(Int, e')] -> ST s (STArray s i e)
 unsafeAccumST f arr ies = do
     marr <- thaw arr
-    sequence_ [do
-        old <- unsafeRead marr i
-        unsafeWrite marr i (f old new)
-        | (i, new) <- ies]
+    sequence_ [do old <- unsafeRead marr i
+                  unsafeWrite marr i (f old new)
+              | (i, new) <- ies]
     return marr
 
 {-# INLINE unsafeAccumArrayST #-}
 unsafeAccumArrayST :: Ix i => (e -> e' -> e) -> e -> (i,i) -> [(Int, e')] -> ST s (STArray s i e)
 unsafeAccumArrayST f e (l,u) ies = do
     marr <- newArray (l,u) e
-    sequence_ [do
-        old <- unsafeRead marr i
-        unsafeWrite marr i (f old new)
-        | (i, new) <- ies]
+    sequence_ [do old <- unsafeRead marr i
+                  unsafeWrite marr i (f old new)
+              | (i, new) <- ies]
     return marr
 
 
@@ -476,10 +474,9 @@ unsafeAccumUArray :: (MArray (STUArray s) e (ST s), Ix i)
                   => (e -> e' -> e) -> UArray i e -> [(Int, e')] -> ST s (UArray i e)
 unsafeAccumUArray f arr ies = do
     marr <- thawSTUArray arr
-    sequence_ [do
-        old <- unsafeRead marr i
-        unsafeWrite marr i (f old new)
-        | (i, new) <- ies]
+    sequence_ [do old <- unsafeRead marr i
+                  unsafeWrite marr i (f old new)
+              | (i, new) <- ies]
     unsafeFreezeSTUArray marr
 
 {-# INLINE unsafeAccumArrayUArray #-}
@@ -487,10 +484,9 @@ unsafeAccumArrayUArray :: (MArray (STUArray s) e (ST s), Ix i)
                        => (e -> e' -> e) -> e -> (i,i) -> [(Int, e')] -> ST s (UArray i e)
 unsafeAccumArrayUArray f initialValue (l,u) ies = do
     marr <- newArray (l,u) initialValue
-    sequence_ [do
-        old <- unsafeRead marr i
-        unsafeWrite marr i (f old new)
-        | (i, new) <- ies]
+    sequence_ [do old <- unsafeRead marr i
+                  unsafeWrite marr i (f old new)
+              | (i, new) <- ies]
     unsafeFreezeSTUArray marr
 
 {-# INLINE eqUArray #-}
@@ -963,11 +959,15 @@ class (Monad m) => MArray a e m where
     unsafeRead  :: Ix i => a i e -> Int -> m e
     unsafeWrite :: Ix i => a i e -> Int -> e -> m ()
 
-    {- INLINE newArray #-}
+    {-# INLINE newArray #-}
 	-- The INLINE is crucial, because until we know at least which monad 	
 	-- we are in, the code below allocates like crazy.  So inline it,
 	-- in the hope that the context will know the monad.
-    newArray = newArrayImpl
+    newArray (l,u) initialValue = do
+        let n = safeRangeSize (l,u)
+        marr <- unsafeNewArray_ (l,u)
+        sequence_ [unsafeWrite marr i initialValue | i <- [0 .. n - 1]]
+        return marr
 
     {-# INLINE unsafeNewArray_ #-}
     unsafeNewArray_ (l,u) = newArray (l,u) arrEleBottom
@@ -989,17 +989,6 @@ class (Monad m) => MArray a e m where
     -- why not omit newArray?  Because in the boxed case, we can omit the
     -- default initialisation with undefined values if we *do* know the
     -- initial value and it is constant for all elements.
-
--- Workaround for performance bug #3586, GHC 6.12 only (not 6.13 and
--- later, which fixed the underlying problem).
-{-# INLINE newArrayImpl #-}
-newArrayImpl :: (Ix i, MArray a e m) => (i, i) -> e -> m (a i e)
-newArrayImpl (l,u) initialValue = do
-        let n = safeRangeSize (l,u)
-        marr <- unsafeNewArray_ (l,u)
-        sequence_ [unsafeWrite marr i initialValue | i <- [0 .. n - 1]]
-        return marr
-
 
 instance MArray IOArray e IO where
 #if defined(__HUGS__)
@@ -1072,10 +1061,9 @@ mapArray f marr = do
   (l,u) <- getBounds marr
   n <- getNumElements marr
   marr' <- newArray_ (l,u)
-  sequence_ [do
-        e <- unsafeRead marr i
-        unsafeWrite marr' i (f e)
-        | i <- [0 .. n - 1]]
+  sequence_ [do e <- unsafeRead marr i
+                unsafeWrite marr' i (f e)
+            | i <- [0 .. n - 1]]
   return marr'
 
 {-# INLINE mapIndices #-}
@@ -1085,10 +1073,9 @@ mapIndices :: (MArray a e m, Ix i, Ix j) => (i,i) -> (i -> j) -> a j e -> m (a i
 mapIndices (l',u') f marr = do
     marr' <- newArray_ (l',u')
     n' <- getNumElements marr'
-    sequence_ [do
-        e <- readArray marr (f i')
-        unsafeWrite marr' (safeIndex (l',u') n' i') e
-        | i' <- range (l',u')]
+    sequence_ [do e <- readArray marr (f i')
+                  unsafeWrite marr' (safeIndex (l',u') n' i') e
+              | i' <- range (l',u')]
     return marr'
 
 -----------------------------------------------------------------------------

@@ -38,7 +38,7 @@ GlobalParStats globalParStats;
 #endif
 
 #if defined(PAR)
-ullong startTime = 0;
+StgWord64 startTime = 0;
 #endif
 
 #if defined(PAR) && !defined(DEBUG)
@@ -345,7 +345,7 @@ int prog_argc, rts_argc;
   ASSERT(startTime==0);
   // startTime = msTime();
   startTime = CURRENT_TIME;
-  ullong_format_string(CURRENT_TIME, time_string, rtsFalse/*no commas!*/);
+  showStgWord64(CURRENT_TIME, time_string, rtsFalse/*no commas!*/);
   fprintf(gr_file, "PE %2u [%s]: TIME\n", thisPE, time_string);
 
 # if 0
@@ -407,7 +407,7 @@ end_gr_simulation(void)
 {
    char time_string[TIME_STR_LEN];
 
-   ullong_format_string(CURRENT_TIME, time_string, rtsFalse/*no commas!*/);
+   showStgWord64(CURRENT_TIME, time_string, rtsFalse/*no commas!*/);
 
    if (RtsFlags.GranFlags.GranSimStats.Suppressed)
      return;
@@ -530,7 +530,7 @@ end_gr_simulation(void)
 {
   char time_string[TIME_STR_LEN];
 
-  ullong_format_string(CURRENT_TIME-startTime, time_string, rtsFalse/*no commas!*/);
+  showStgWord64(CURRENT_TIME-startTime, time_string, rtsFalse/*no commas!*/);
 
   fprintf(stderr, "Computation finished after @ %s @ ms. %d sparks created, %d sparks ignored. Check %s for details.\n",
 	    time_string, sparksCreated, sparksIgnored, gr_filename);
@@ -590,10 +590,10 @@ StgInt sparkname, len;
   StgWord id;
   char time_string[TIME_STR_LEN], node_str[NODE_STR_LEN];
 # if defined(GRAN)
-  ullong_format_string(time,
+  showStgWord64(time,
 		       time_string, rtsFalse/*no commas!*/);
 # elif defined(PAR)
-  ullong_format_string(time,
+  showStgWord64(time,
 		       time_string, rtsFalse/*no commas!*/);
 # endif
   output_file = gr_file;
@@ -702,10 +702,10 @@ rtsBool mandatory_thread;
   FILE *output_file; // DEBUGGING ONLY !!!!!!!!!!!!!!!!!!!!!!!!!1
   char time_string[TIME_STR_LEN];
 # if defined(GRAN)
-  ullong_format_string(TIME_ON_PROC(proc), 
+  showStgWord64(TIME_ON_PROC(proc), 
 		       time_string, rtsFalse/*no commas!*/);
 # elif defined(PAR)
-  ullong_format_string(CURRENT_TIME,
+  showStgWord64(CURRENT_TIME,
 		       time_string, rtsFalse/*no commas!*/);
 # endif
 
@@ -1045,7 +1045,7 @@ get_closure_info(StgClosure* node, nat *size, nat *ptrs, nat *nonptrs,
     /* ToDo: check whether this can be merged with the default case */
     *size = arr_words_sizeW((StgArrWords *)node); 
     *ptrs = 0;
-    *nonptrs = ((StgArrWords *)node)->words;
+    *nonptrs = arr_words_words(((StgArrWords *)node));
     *vhs = *size - *ptrs - *nonptrs - sizeofW(StgHeader);
     return info;
 

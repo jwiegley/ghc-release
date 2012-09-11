@@ -8,7 +8,7 @@ import re
 #
 config.compiler_type         = 'ghc'
 config.compiler              = 'ghc'
-config.compiler_always_flags = ['-fforce-recomp', '-dcore-lint', '-dcmm-lint', '-no-user-package-conf']
+config.compiler_always_flags = ['-fforce-recomp', '-dcore-lint', '-dcmm-lint', '-dno-debug-output', '-no-user-package-conf', '-rtsopts']
 
 config.hp2ps		     = 'hp2ps'
 config.hpc		     = 'hpc'
@@ -25,7 +25,8 @@ config.run_ways		     = ['normal', 'optc', 'hpc']
 config.other_ways            = ['extcore','optextcore',
                                 'prof_hc_hb','prof_hb',
                                 'prof_hd','prof_hy','prof_hr',
-                                'threaded2_qw']
+                                'threaded2_qw',
+                                'llvm', 'optllvm']
 
 if (ghc_with_native_codegen == 1):
 	config.compile_ways.append('optasm')
@@ -56,11 +57,18 @@ if (ghc_with_dynamic_rts == 1):
 if (ghc_with_profiling == 1 and ghc_with_threaded_rts == 1):
         config.run_ways.append('profthreaded')
 
+if (ghc_with_llvm == 1):
+        config.run_ways.append('optllvm')
+
+config.in_tree_compiler = in_tree_compiler
+
 config.way_flags = {
 	'normal'     : [],
-	'optc'       : ['-O -fvia-C'],
+	'optc'       : ['-O -fno-warn-deprecated-flags -fvia-C'],
 	'optasm'     : ['-O -fasm'],
-	'profc'      : ['-O -prof -auto-all -fvia-C'],
+	'llvm'       : ['-fllvm'],
+	'optllvm'    : ['-O -fllvm'],
+	'profc'      : ['-O -prof -auto-all -fno-warn-deprecated-flags -fvia-C'],
 	'profasm'    : ['-O -prof -auto-all -fasm'],
 	'profthreaded' : ['-O -prof -auto-all -fasm -threaded'],
 	'ghci'       : ['--interactive', '-v0', '-ignore-dot-ghci', '+RTS', '-I0.1', '-RTS'],
@@ -82,6 +90,8 @@ config.way_rts_flags = {
 	'normal'     : [],
 	'optc'       : [],
 	'optasm'     : [],
+	'llvm'       : [],
+	'optllvm'    : [],
 	'profc'      : ['-p'],
 	'profasm'    : ['-hc'], # test heap profiling too
 	'profthreaded' : ['-p'],
@@ -110,18 +120,27 @@ threaded_ways = filter(lambda x: x in config.run_ways,
 
 def get_compiler_info():
     # This should really not go through the shell
-    h = os.popen('"' + config.compiler + '" --numeric-version', 'r')
-    v = h.read()
+    h = os.popen('"' + config.compiler + '" --info', 'r')
+    s = h.read()
+    s = re.sub('[\r\n]', '', s)
     h.close()
-    v = re.sub('[\r\n]', '', v)
-    v = v.split('-')
+    compilerInfoDict = dict(eval(s))
+    h = os.popen('"' + config.compiler + '" +RTS --info', 'r')
+    s = h.read()
+    s = re.sub('[\r\n]', '', s)
+    h.close()
+    rtsInfoDict = dict(eval(s))
+
+    v = compilerInfoDict["Project version"].split('-')
     config.compiler_version = v[0]
     config.compiler_maj_version = re.sub('^([0-9]+\.[0-9]+).*',r'\1', v[0])
     config.compiler_tags = v[1:]
 
-    # remove profthreaded for GHC <6.9, it didn't work
-    if ('profthreaded' in config.run_ways) and version_lt(config.compiler_version, '6.9'):
-        config.run_ways.remove('profthreaded')
+    if re.match(".*_p(_.*|$)", rtsInfoDict["RTS way"]):
+        config.compiler_profiled = True
+        config.run_ways = filter(lambda x: x != 'ghci', config.run_ways)
+    else:
+        config.compiler_profiled = False
 
-    if version_ge(config.compiler_version, '6.9'):
-        config.compiler_always_flags.append('-dno-debug-output')
+    config.package_conf_cache_file = compilerInfoDict["Global Package DB"] + '/package.cache'
+

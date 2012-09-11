@@ -12,6 +12,7 @@
 
 
 define build-package-way # $1 = dir, $2 = distdir, $3 = way, $4 = stage
+$(call trace, build-package-way($1,$2,$3))
 
 $(call distdir-way-opts,$1,$2,$3,$4)
 $(call hs-suffix-rules,$1,$2,$3)
@@ -25,6 +26,15 @@ $(call hs-objs,$1,$2,$3)
 # the second is indexed by the package id, distdir and way
 $1_$2_$3_LIB = $1/$2/build/libHS$$($1_PACKAGE)-$$($1_$2_VERSION)$$($3_libsuf)
 $$($1_PACKAGE)-$($1_$2_VERSION)_$2_$3_LIB = $$($1_$2_$3_LIB)
+
+# hack: the DEPS_LIBS mechanism assumes that the distdirs for packges
+# that depend on each other are the same, but that is not the case for
+# ghc where we use stage1/stage2 rather than dist/dist-install.
+# Really we should use a consistent scheme for distdirs, but in the
+# meantime we work around it by defining ghc-<ver>_dist-install_way_LIB:
+ifeq "$$($1_PACKAGE) $2" "ghc stage2"
+$$($1_PACKAGE)-$($1_$2_VERSION)_dist-install_$3_LIB = $$($1_$2_$3_LIB)
+endif
 
 # All the .a/.so library file dependencies for this library
 $1_$2_$3_DEPS_LIBS=$$(foreach dep,$$($1_$2_DEPS),$$($$(dep)_$2_$3_LIB))
@@ -42,13 +52,26 @@ $1_$2_$3_NON_HS_OBJS = $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS)  $$($1_$2_$3_S_
 $1_$2_$3_ALL_OBJS = $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_NON_HS_OBJS)
 
 ifeq "$3" "dyn"
+
 # Link a dynamic library
+# On windows we have to supply the extra libs this one links to when building it.
+ifeq "$$(HOSTPLATFORM)" "i386-unknown-mingw32"
 $$($1_$2_$3_LIB) : $$($1_$2_$3_ALL_OBJS) $$(ALL_RTS_LIBS) $$($1_$2_$3_DEPS_LIBS)
 	"$$($1_$2_HC)" $$($1_$2_$3_ALL_OBJS) \
          `$$($1_$2_$3_MKSTUBOBJS)` \
          -shared -dynamic -dynload deploy \
-         -no-auto-link-packages $$(addprefix -package,$$($1_$2_DEPS)) \
+	 $$(addprefix -l,$$($1_$2_EXTRA_LIBRARIES)) \
+         -no-auto-link-packages $$(addprefix -package ,$$($1_$2_DEPS)) \
          -o $$@
+else
+$$($1_$2_$3_LIB) : $$($1_$2_$3_ALL_OBJS) $$(ALL_RTS_LIBS) $$($1_$2_$3_DEPS_LIBS)
+	"$$($1_$2_HC)" $$($1_$2_$3_ALL_OBJS) \
+         `$$($1_$2_$3_MKSTUBOBJS)` \
+         -shared -dynamic -dynload deploy \
+	     -dylib-install-name $(ghclibdir)/`basename "$$@" | sed 's/^libHS//;s/[-]ghc.*//'`/`basename "$$@"` \
+         -no-auto-link-packages $$(addprefix -package ,$$($1_$2_DEPS)) \
+         -o $$@
+endif
 else
 # Build the ordinary .a library
 $$($1_$2_$3_LIB) : $$($1_$2_$3_ALL_OBJS)
@@ -81,12 +104,16 @@ ifeq "$3" "v"
 $1_$2_GHCI_LIB = $1/$2/build/HS$$($1_PACKAGE)-$$($1_$2_VERSION).$$($3_osuf)
 # Don't put bootstrapping packages in the bindist
 ifneq "$4" "0"
+ifeq "$$(UseArchivesForGhci)" "NO"
 BINDIST_LIBS += $$($1_$2_GHCI_LIB)
+endif
 endif
 $$($1_$2_GHCI_LIB) : $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS) $$($1_$2_$3_S_OBJS) $$($1_$2_EXTRA_OBJS)
 	"$$(LD)" -r -o $$@ $$(EXTRA_LD_OPTS) $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS) $$($1_$2_$3_S_OBJS) `$$($1_$2_$3_MKSTUBOBJS)` $$($1_$2_EXTRA_OBJS)
 
+ifeq "$$(UseArchivesForGhci)" "NO"
 $(call all-target,$1_$2,$$($1_$2_GHCI_LIB))
+endif
 endif
 
 endef

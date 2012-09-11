@@ -19,6 +19,7 @@ import LoadIface
 import IfaceEnv
 import BuildTyCl
 import TcRnMonad
+import TcType
 import Type
 import TypeRep
 import HscTypes
@@ -37,13 +38,17 @@ import Class
 import TyCon
 import DataCon
 import TysWiredIn
+import TysPrim		( anyTyConOfKind )
 import Var              ( TyVar )
+import BasicTypes	( nonRuleLoopBreaker )
 import qualified Var
 import VarEnv
 import Name
 import NameEnv
+import OccurAnal	( occurAnalyseExpr )
+import Demand		( isBottomingSig )
 import Module
-import LazyUniqFM
+import UniqFM
 import UniqSupply
 import Outputable	
 import ErrUtils
@@ -52,7 +57,6 @@ import SrcLoc
 import DynFlags
 import Util
 import FastString
-import BasicTypes (Arity)
 
 import Control.Monad
 import Data.List
@@ -410,16 +414,21 @@ the forkM stuff.
 tcIfaceDecl :: Bool	-- True <=> discard IdInfo on IfaceId bindings
 	    -> IfaceDecl
 	    -> IfL TyThing
+tcIfaceDecl = tc_iface_decl NoParentTyCon
 
-tcIfaceDecl ignore_prags (IfaceId {ifName = occ_name, ifType = iface_type, 
- 	    		 	   ifIdDetails = details, ifIdInfo = info})
+tc_iface_decl :: TyConParent	-- For nested declarations
+              -> Bool	-- True <=> discard IdInfo on IfaceId bindings
+	      -> IfaceDecl
+	      -> IfL TyThing
+tc_iface_decl _ ignore_prags (IfaceId {ifName = occ_name, ifType = iface_type, 
+ 	                               ifIdDetails = details, ifIdInfo = info})
   = do	{ name <- lookupIfaceTop occ_name
 	; ty <- tcIfaceType iface_type
-	; details <- tcIdDetails details
+	; details <- tcIdDetails ty details
 	; info <- tcIdInfo ignore_prags name ty info
 	; return (AnId (mkGlobalId details name ty info)) }
 
-tcIfaceDecl _ (IfaceData {ifName = occ_name, 
+tc_iface_decl parent _ (IfaceData {ifName = occ_name, 
 			  ifTyVars = tv_bndrs, 
 			  ifCtxt = ctxt, ifGadtSyntax = gadt_syn,
 			  ifCons = rdr_cons, 
@@ -430,34 +439,33 @@ tcIfaceDecl _ (IfaceData {ifName = occ_name,
     { tc_name <- lookupIfaceTop occ_name
     ; tycon <- fixM ( \ tycon -> do
 	    { stupid_theta <- tcIfaceCtxt ctxt
-	    ; mb_fam_inst  <- tcFamInst mb_family
 	    ; cons <- tcIfaceDataCons tc_name tycon tyvars rdr_cons
-	    ; buildAlgTyCon tc_name tyvars stupid_theta
-			    cons is_rec want_generic gadt_syn mb_fam_inst
+	    ; mb_fam_inst  <- tcFamInst mb_family
+	    ; buildAlgTyCon tc_name tyvars stupid_theta cons is_rec
+			    want_generic gadt_syn parent mb_fam_inst
 	    })
     ; traceIf (text "tcIfaceDecl4" <+> ppr tycon)
     ; return (ATyCon tycon) }
 
-tcIfaceDecl _ (IfaceSyn {ifName = occ_name, ifTyVars = tv_bndrs, 
-		         ifSynRhs = mb_rhs_ty,
-		         ifSynKind = kind, ifFamInst = mb_family})
+tc_iface_decl parent _ (IfaceSyn {ifName = occ_name, ifTyVars = tv_bndrs, 
+		         	  ifSynRhs = mb_rhs_ty,
+		         	  ifSynKind = kind, ifFamInst = mb_family})
    = bindIfaceTyVars_AT tv_bndrs $ \ tyvars -> do
-     { tc_name <- lookupIfaceTop occ_name
+     { tc_name  <- lookupIfaceTop occ_name
      ; rhs_kind <- tcIfaceType kind	-- Note [Synonym kind loop]
-     ; ~(rhs, fam) <- forkM (mk_doc tc_name) $ 
-       	      	      do { rhs <- tc_syn_rhs rhs_kind mb_rhs_ty
-			 ; fam <- tcFamInst mb_family
-			 ; return (rhs, fam) }
-     ; tycon <- buildSynTyCon tc_name tyvars rhs rhs_kind fam
-     ; return $ ATyCon tycon
+     ; rhs      <- forkM (mk_doc tc_name) $ 
+       	      	   tc_syn_rhs mb_rhs_ty
+     ; fam_info <- tcFamInst mb_family
+     ; tycon <- buildSynTyCon tc_name tyvars rhs rhs_kind parent fam_info
+     ; return (ATyCon tycon)
      }
    where
      mk_doc n = ptext (sLit "Type syonym") <+> ppr n
-     tc_syn_rhs kind Nothing   = return (OpenSynTyCon kind Nothing)
-     tc_syn_rhs _    (Just ty) = do { rhs_ty <- tcIfaceType ty
-		   		    ; return (SynonymTyCon rhs_ty) }
+     tc_syn_rhs Nothing   = return SynFamilyTyCon
+     tc_syn_rhs (Just ty) = do { rhs_ty <- tcIfaceType ty
+		               ; return (SynonymTyCon rhs_ty) }
 
-tcIfaceDecl ignore_prags
+tc_iface_decl _parent ignore_prags
 	    (IfaceClass {ifCtxt = rdr_ctxt, ifName = occ_name, 
 			 ifTyVars = tv_bndrs, ifFDs = rdr_fds, 
 			 ifATs = rdr_ats, ifSigs = rdr_sigs, 
@@ -469,9 +477,9 @@ tcIfaceDecl ignore_prags
     ; ctxt <- tcIfaceCtxt rdr_ctxt
     ; sigs <- mapM tc_sig rdr_sigs
     ; fds  <- mapM tc_fd rdr_fds
-    ; ats' <- mapM (tcIfaceDecl ignore_prags) rdr_ats
-    ; let ats = map (setAssocFamilyPermutation tyvars) ats'
-    ; cls  <- buildClass ignore_prags cls_name tyvars ctxt fds ats sigs tc_isrec
+    ; cls  <- fixM $ \ cls -> do
+              { ats  <- mapM (tc_iface_decl (AssocFamilyTyCon cls) ignore_prags) rdr_ats
+              ; buildClass ignore_prags cls_name tyvars ctxt fds ats sigs tc_isrec }
     ; return (AClass cls) }
   where
    tc_sig (IfaceClassOp occ dm rdr_ty)
@@ -488,7 +496,7 @@ tcIfaceDecl ignore_prags
 			   ; tvs2' <- mapM tcIfaceTyVar tvs2
 			   ; return (tvs1', tvs2') }
 
-tcIfaceDecl _ (IfaceForeign {ifName = rdr_name, ifExtName = ext_name})
+tc_iface_decl _ _ (IfaceForeign {ifName = rdr_name, ifExtName = ext_name})
   = do	{ name <- lookupIfaceTop rdr_name
 	; return (ATyCon (mkForeignTyCon name ext_name 
 					 liftedTypeKind 0)) }
@@ -503,7 +511,7 @@ tcIfaceDataCons :: Name -> TyCon -> [TyVar] -> IfaceConDecls -> IfL AlgTyConRhs
 tcIfaceDataCons tycon_name tycon _ if_cons
   = case if_cons of
 	IfAbstractTyCon	 -> return mkAbstractTyConRhs
-	IfOpenDataTyCon	 -> return mkOpenDataTyConRhs
+	IfOpenDataTyCon	 -> return DataFamilyTyCon
 	IfDataTyCon cons -> do 	{ data_cons <- mapM tc_con_decl cons
 				; return (mkDataTyConRhs data_cons) }
 	IfNewTyCon con	 -> do 	{ data_con <- tc_con_decl con
@@ -619,7 +627,8 @@ tcIfaceRules ignore_prags if_rules
 
 tcIfaceRule :: IfaceRule -> IfL CoreRule
 tcIfaceRule (IfaceRule {ifRuleName = name, ifActivation = act, ifRuleBndrs = bndrs,
-			ifRuleHead = fn, ifRuleArgs = args, ifRuleRhs = rhs })
+			ifRuleHead = fn, ifRuleArgs = args, ifRuleRhs = rhs,
+                        ifRuleAuto = auto })
   = do	{ ~(bndrs', args', rhs') <- 
 		-- Typecheck the payload lazily, in the hope it'll never be looked at
 		forkM (ptext (sLit "Rule") <+> ftext name) $
@@ -630,8 +639,9 @@ tcIfaceRule (IfaceRule {ifRuleName = name, ifActivation = act, ifRuleBndrs = bnd
 	; let mb_tcs = map ifTopFreeName args
 	; return (Rule { ru_name = name, ru_fn = fn, ru_act = act, 
 			  ru_bndrs = bndrs', ru_args = args', 
-			  ru_rhs = rhs', 
+			  ru_rhs = occurAnalyseExpr rhs', 
 			  ru_rough = mb_tcs,
+                          ru_auto = auto,
 			  ru_local = False }) }	-- An imported RULE is never for a local Id
 						-- or, even if it is (module loop, perhaps)
 						-- we'll just leave it in the non-local set
@@ -884,7 +894,6 @@ tcIfaceExpr (IfaceCast expr co) = do
 tcIfaceExpr (IfaceNote note expr) = do
     expr' <- tcIfaceExpr expr
     case note of
-        IfaceInlineMe     -> return (Note InlineMe   expr')
         IfaceSCC cc       -> return (Note (SCC cc)   expr')
         IfaceCoreNote n   -> return (Note (CoreNote n) expr')
 
@@ -912,7 +921,7 @@ tcIfaceAlt scrut (tycon, inst_tys) (IfaceDataAlt data_occ, arg_strs, rhs)
 	; tcIfaceDataAlt con inst_tys arg_strs rhs }
 		  
 tcIfaceAlt _ (tycon, inst_tys) (IfaceTupleAlt _boxity, arg_occs, rhs)
-  = ASSERT( isTupleTyCon tycon )
+  = ASSERT2( isTupleTyCon tycon, ppr tycon )
     do	{ let [data_con] = tyConDataCons tycon
 	; tcIfaceDataAlt data_con inst_tys arg_occs rhs }
 
@@ -963,10 +972,14 @@ do_one (IfaceRec pairs) thing_inside
 %************************************************************************
 
 \begin{code}
-tcIdDetails :: IfaceIdDetails -> IfL IdDetails
-tcIdDetails IfVanillaId = return VanillaId
-tcIdDetails IfDFunId    = return DFunId
-tcIdDetails (IfRecSelId tc naughty)
+tcIdDetails :: Type -> IfaceIdDetails -> IfL IdDetails
+tcIdDetails _  IfVanillaId = return VanillaId
+tcIdDetails ty IfDFunId
+  = return (DFunId (isNewTyCon (classTyCon cls)))
+  where
+    (_, cls, _) = tcSplitDFunTy ty
+
+tcIdDetails _ (IfRecSelId tc naughty)
   = do { tc' <- tcIfaceTyCon tc
        ; return (RecSelId { sel_tycon = tc', sel_naughty = naughty }) }
 
@@ -982,52 +995,76 @@ tcIdInfo ignore_prags name ty info
     init_info = vanillaIdInfo
 
     tcPrag :: IdInfo -> IfaceInfoItem -> IfL IdInfo
-    tcPrag info HsNoCafRefs         = return (info `setCafInfo`   NoCafRefs)
-    tcPrag info (HsArity arity)     = return (info `setArityInfo` arity)
-    tcPrag info (HsStrictness str)  = return (info `setAllStrictnessInfo` Just str)
+    tcPrag info HsNoCafRefs        = return (info `setCafInfo`   NoCafRefs)
+    tcPrag info (HsArity arity)    = return (info `setArityInfo` arity)
+    tcPrag info (HsStrictness str) = return (info `setStrictnessInfo` Just str)
+    tcPrag info (HsInline prag)    = return (info `setInlinePragInfo` prag)
 
 	-- The next two are lazy, so they don't transitively suck stuff in
-    tcPrag info (HsWorker nm arity) = tcWorkerInfo ty info nm arity
-    tcPrag info (HsInline inline_prag) = return (info `setInlinePragInfo` inline_prag)
-    tcPrag info (HsUnfold expr) = do
-          maybe_expr' <- tcPragExpr name expr
-	  let
-		-- maybe_expr' doesn't get looked at if the unfolding
-		-- is never inspected; so the typecheck doesn't even happen
-		unfold_info = case maybe_expr' of
-				Nothing    -> noUnfolding
-				Just expr' -> mkTopUnfolding expr' 
-          return (info `setUnfoldingInfoLazily` unfold_info)
+    tcPrag info (HsUnfold lb if_unf) 
+      = do { unf <- tcUnfolding name ty info if_unf
+    	   ; let info1 | lb        = info `setOccInfo` nonRuleLoopBreaker
+	     	       | otherwise = info
+	   ; return (info1 `setUnfoldingInfoLazily` unf) }
 \end{code}
 
 \begin{code}
-tcWorkerInfo :: Type -> IdInfo -> Name -> Arity -> IfL IdInfo
-tcWorkerInfo ty info wkr arity
-  = do 	{ mb_wkr_id <- forkM_maybe doc (tcIfaceExtId wkr)
-
-	-- We return without testing maybe_wkr_id, but as soon as info is
-	-- looked at we will test it.  That's ok, because its outside the
-	-- knot; and there seems no big reason to further defer the
-	-- tcIfaceId lookup.  (Contrast with tcPragExpr, where postponing walking
-	-- over the unfolding until it's actually used does seem worth while.)
-	; us <- newUniqueSupply
-
-	; return (case mb_wkr_id of
-		     Nothing     -> info
-		     Just wkr_id -> add_wkr_info us wkr_id info) }
+tcUnfolding :: Name -> Type -> IdInfo -> IfaceUnfolding -> IfL Unfolding
+tcUnfolding name _ info (IfCoreUnfold stable if_expr)
+  = do 	{ mb_expr <- tcPragExpr name if_expr
+        ; let unf_src = if stable then InlineStable else InlineRhs
+	; return (case mb_expr of
+		    Nothing   -> NoUnfolding
+		    Just expr -> mkUnfolding unf_src
+                                             True {- Top level -} 
+                                             is_bottoming expr) }
   where
-    doc = text "Worker for" <+> ppr wkr
-    add_wkr_info us wkr_id info
-	= info `setUnfoldingInfoLazily`  mk_unfolding us wkr_id
-	       `setWorkerInfo`           HasWorker wkr_id arity
+     -- Strictness should occur before unfolding!
+    is_bottoming = case strictnessInfo info of
+    		     Just sig -> isBottomingSig sig
+ 		     Nothing  -> False
 
-    mk_unfolding us wkr_id = mkTopUnfolding (initUs_ us (mkWrapper ty strict_sig) wkr_id)
+tcUnfolding name _ _ (IfCompulsory if_expr)
+  = do 	{ mb_expr <- tcPragExpr name if_expr
+	; return (case mb_expr of
+		    Nothing   -> NoUnfolding
+		    Just expr -> mkCompulsoryUnfolding expr) }
 
-    	-- We are relying here on strictness info always appearing 
-	-- before worker info,  fingers crossed ....
-    strict_sig = case newStrictnessInfo info of
+tcUnfolding name _ _ (IfInlineRule arity unsat_ok boring_ok if_expr)
+  = do 	{ mb_expr <- tcPragExpr name if_expr
+	; return (case mb_expr of
+		    Nothing   -> NoUnfolding
+		    Just expr -> mkCoreUnfolding InlineStable True expr arity 
+                                                 (UnfWhen unsat_ok boring_ok))
+    }
+
+tcUnfolding name ty info (IfWrapper arity wkr)
+  = do 	{ mb_wkr_id <- forkM_maybe doc (tcIfaceExtId wkr)
+	; us <- newUniqueSupply
+	; return (case mb_wkr_id of
+		     Nothing     -> noUnfolding
+		     Just wkr_id -> make_inline_rule wkr_id us) }
+  where
+    doc = text "Worker for" <+> ppr name
+
+    make_inline_rule wkr_id us 
+	= mkWwInlineRule wkr_id
+	  		 (initUs_ us (mkWrapper ty strict_sig) wkr_id) 
+		         arity
+
+    	-- Again we rely here on strictness info always appearing 
+	-- before unfolding
+    strict_sig = case strictnessInfo info of
 		   Just sig -> sig
 		   Nothing  -> pprPanic "Worker info but no strictness for" (ppr wkr)
+
+tcUnfolding name dfun_ty _ (IfDFunUnfold ops)
+  = do { mb_ops1 <- forkM_maybe doc $ mapM tcIfaceExpr ops
+       ; return (case mb_ops1 of
+       	 	    Nothing   -> noUnfolding
+                    Just ops1 -> mkDFunUnfolding dfun_ty ops1) }
+  where
+    doc = text "Class ops for dfun" <+> ppr name
 \end{code}
 
 For unfoldings we try to do the job lazily, so that we never type check
@@ -1040,7 +1077,7 @@ tcPragExpr name expr
     core_expr' <- tcIfaceExpr expr
 
                 -- Check for type consistency in the unfolding
-    ifOptM Opt_DoCoreLinting $ do
+    ifDOptM Opt_DoCoreLinting $ do
         in_scope <- get_in_scope_ids
         case lintUnfolding noSrcLoc in_scope core_expr' of
           Nothing       -> return ()
@@ -1122,6 +1159,8 @@ tcIfaceTyCon IfaceCharTc      	= tcWiredInTyCon charTyCon
 tcIfaceTyCon IfaceListTc      	= tcWiredInTyCon listTyCon
 tcIfaceTyCon IfacePArrTc      	= tcWiredInTyCon parrTyCon
 tcIfaceTyCon (IfaceTupTc bx ar) = tcWiredInTyCon (tupleTyCon bx ar)
+tcIfaceTyCon (IfaceAnyTc kind)  = do { tc_kind <- tcIfaceType kind
+                                     ; tcWiredInTyCon (anyTyConOfKind tc_kind) }
 tcIfaceTyCon (IfaceTc name)     = do { thing <- tcIfaceGlobal name 
 				     ; return (check_tc (tyThingTyCon thing)) }
   where
@@ -1198,7 +1237,7 @@ tcIfaceLetBndr (IfLetBndr fs ty info)
     tc_info [] = vanillaIdInfo
     tc_info (HsInline p     : i) = tc_info i `setInlinePragInfo` p 
     tc_info (HsArity a      : i) = tc_info i `setArityInfo` a 
-    tc_info (HsStrictness s : i) = tc_info i `setAllStrictnessInfo` Just s 
+    tc_info (HsStrictness s : i) = tc_info i `setStrictnessInfo` Just s 
     tc_info (other          : i) = pprTrace "tcIfaceLetBndr: discarding unexpected IdInfo" 
 					    (ppr other) (tc_info i)
 

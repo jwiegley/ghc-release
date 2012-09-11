@@ -1,5 +1,5 @@
 
-T3395.hs:6:8:
+T3395.hs:6:9:
     Illegal last statement of a list comprehension:
       r1 <- undefined
     (It should be an expression.)
@@ -9,7 +9,7 @@ T3395.hs:6:8:
         $ CompE
             [NoBindS (VarE $ mkName "undefined"),
              BindS (VarP $ mkName "r1") (VarE $ mkName "undefined")])
-    In the definition of `foo':
+    In an equation for `foo':
         foo = $(return
               $ CompE
                   [NoBindS (VarE $ mkName "undefined"),

@@ -1,3 +1,4 @@
+{-# LANGUAGE ForeignFunctionInterface #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Haddock.Utils
@@ -10,77 +11,83 @@
 -- Stability   :  experimental
 -- Portability :  portable
 -----------------------------------------------------------------------------
-
-
 module Haddock.Utils (
 
   -- * Misc utilities
-  restrictTo, 
+  restrictTo,
   toDescription, toInstalledDescription,
 
   -- * Filename utilities
-  moduleHtmlFile, nameHtmlRef,
+  moduleHtmlFile,
   contentsHtmlFile, indexHtmlFile,
   frameIndexHtmlFile,
   moduleIndexFrameName, mainFrameName, synopsisFrameName,
-  subIndexHtmlFile, pathJoin,
-  anchorNameStr,
-  cssFile, iconFile, jsFile, plusFile, minusFile, framesFile,
+  subIndexHtmlFile,
+  jsFile, framesFile,
+
+  -- * Anchor and URL utilities
+  moduleNameUrl, moduleUrl,
+  nameAnchorId,
+  makeAnchorId,
 
   -- * Miscellaneous utilities
   getProgramName, bye, die, dieMsg, noDieMsg, mapSnd, mapMaybeM, escapeStr,
- 
+
   -- * HTML cross reference mapping
   html_xrefs_ref,
 
-  -- * HsDoc markup 
-  markup, 
+  -- * Doc markup 
+  markup,
   idMarkup,
 
   -- * List utilities
   replace,
+  spanWith,
 
-  -- * Binary extras
---  FormatVersion, mkFormatVersion  
-  
   -- * MTL stuff
   MonadIO(..),
-  
+
   -- * Logging
   parseVerbosity,
-  out
+  out,
+
+  -- * System tools
+  getProcessID
  ) where
+
 
 import Haddock.Types
 import Haddock.GhcUtils
 
 import GHC
 import Name
-import Binary
 
 import Control.Monad ( liftM )
-import Data.Char ( isAlpha, ord, chr )
+import Data.Char ( isAlpha, isAlphaNum, isAscii, ord, chr )
 import Numeric ( showIntAtBase )
 import Data.Map ( Map )
 import qualified Data.Map as Map hiding ( Map )
 import Data.IORef ( IORef, newIORef, readIORef )
 import Data.List ( isSuffixOf )
 import Data.Maybe ( fromJust )
-import Data.Word ( Word8 )
-import Data.Bits ( testBit )
 import System.Environment ( getProgName )
 import System.Exit ( exitWith, ExitCode(..) )
 import System.IO ( hPutStr, stderr )
-import System.IO.Unsafe	 ( unsafePerformIO )
-import System.FilePath
+import System.IO.Unsafe ( unsafePerformIO )
+import qualified System.FilePath.Posix as HtmlPath
 import Distribution.Verbosity
 import Distribution.ReadE
+
+#ifndef mingw32_HOST_OS
+import qualified System.Posix.Internals
+#endif
 
 import MonadUtils ( MonadIO(..) )
 
 
--- -----------------------------------------------------------------------------
--- Logging
+--------------------------------------------------------------------------------
+-- * Logging
+--------------------------------------------------------------------------------
 
 
 parseVerbosity :: String -> Either String Verbosity
@@ -97,43 +104,48 @@ out progVerbosity msgVerbosity msg
   | otherwise = return ()
 
 
--- -----------------------------------------------------------------------------
--- Some Utilities
+--------------------------------------------------------------------------------
+-- * Some Utilities
+--------------------------------------------------------------------------------
 
 
--- | extract a module's short description.
-toDescription :: Interface -> Maybe (HsDoc Name)
+-- | Extract a module's short description.
+toDescription :: Interface -> Maybe (Doc Name)
 toDescription = hmi_description . ifaceInfo
 
--- | extract a module's short description.
-toInstalledDescription :: InstalledInterface -> Maybe (HsDoc Name)
+
+-- | Extract a module's short description.
+toInstalledDescription :: InstalledInterface -> Maybe (Doc Name)
 toInstalledDescription = hmi_description . instInfo
 
 
--- ---------------------------------------------------------------------------
--- Making abstract declarations
+--------------------------------------------------------------------------------
+-- * Making abstract declarations
+--------------------------------------------------------------------------------
 
-restrictTo :: [Name] -> (LHsDecl Name) -> (LHsDecl Name)
+
+restrictTo :: [Name] -> LHsDecl Name -> LHsDecl Name
 restrictTo names (L loc decl) = L loc $ case decl of
-  TyClD d | isDataDecl d && tcdND d == DataType -> 
-    TyClD (d { tcdCons = restrictCons names (tcdCons d) }) 
-  TyClD d | isDataDecl d && tcdND d == NewType -> 
+  TyClD d | isDataDecl d && tcdND d == DataType ->
+    TyClD (d { tcdCons = restrictCons names (tcdCons d) })
+  TyClD d | isDataDecl d && tcdND d == NewType ->
     case restrictCons names (tcdCons d) of
-      []    -> TyClD (d { tcdND = DataType, tcdCons = [] }) 
+      []    -> TyClD (d { tcdND = DataType, tcdCons = [] })
       [con] -> TyClD (d { tcdCons = [con] })
       _ -> error "Should not happen"
-  TyClD d | isClassDecl d -> 
+  TyClD d | isClassDecl d ->
     TyClD (d { tcdSigs = restrictDecls names (tcdSigs d),
                tcdATs = restrictATs names (tcdATs d) })
   _ -> decl
-   
+
+
 restrictCons :: [Name] -> [LConDecl Name] -> [LConDecl Name]
-restrictCons names decls = [ L p d | L p (Just d) <- map (fmap keep) decls ]  
-  where 
-    keep d | unLoc (con_name d) `elem` names = 
+restrictCons names decls = [ L p d | L p (Just d) <- map (fmap keep) decls ]
+  where
+    keep d | unLoc (con_name d) `elem` names =
       case con_details d of
         PrefixCon _ -> Just d
-        RecCon fields  
+        RecCon fields
           | all field_avail fields -> Just d
           | otherwise -> Just (d { con_details = PrefixCon (field_types fields) })
           -- if we have *all* the field names available, then
@@ -143,9 +155,10 @@ restrictCons names decls = [ L p d | L p (Just d) <- map (fmap keep) decls ]
         InfixCon _ _ -> Just d
       where
         field_avail (ConDeclField n _ _) = unLoc n `elem` names
-        field_types flds = [ t | ConDeclField _ t _ <- flds ] 
-      
+        field_types flds = [ t | ConDeclField _ t _ <- flds ]
+
     keep _ | otherwise = Nothing
+
 
 restrictDecls :: [Name] -> [LSig Name] -> [LSig Name]
 restrictDecls names decls = filter keep decls
@@ -157,24 +170,26 @@ restrictATs :: [Name] -> [LTyClDecl Name] -> [LTyClDecl Name]
 restrictATs names ats = [ at | at <- ats , tcdName (unL at) `elem` names ]
 
 
--- -----------------------------------------------------------------------------
--- Filename mangling functions stolen from s main/DriverUtil.lhs.
+--------------------------------------------------------------------------------
+-- * Filename mangling functions stolen from s main/DriverUtil.lhs.
+--------------------------------------------------------------------------------
+
 
 moduleHtmlFile :: Module -> FilePath
 moduleHtmlFile mdl =
   case Map.lookup mdl html_xrefs of
     Nothing  -> mdl' ++ ".html"
-    Just fp0 -> pathJoin [fp0, mdl' ++ ".html"]
+    Just fp0 -> HtmlPath.joinPath [fp0, mdl' ++ ".html"]
   where
-   mdl' = map (\c -> if c == '.' then '-' else c) 
+   mdl' = map (\c -> if c == '.' then '-' else c)
               (moduleNameString (moduleName mdl))
 
-nameHtmlRef :: Module -> OccName -> String	
-nameHtmlRef mdl n = moduleHtmlFile mdl ++ '#':escapeStr (anchorNameStr n)
+
 
 contentsHtmlFile, indexHtmlFile :: String
 contentsHtmlFile = "index.html"
 indexHtmlFile = "doc-index.html"
+
 
 -- | The name of the module index file to be displayed inside a frame.
 -- Modules are display in full, but without indentation.  Clicking opens in
@@ -182,42 +197,76 @@ indexHtmlFile = "doc-index.html"
 frameIndexHtmlFile :: String
 frameIndexHtmlFile = "index-frames.html"
 
+
 moduleIndexFrameName, mainFrameName, synopsisFrameName :: String
 moduleIndexFrameName = "modules"
 mainFrameName = "main"
 synopsisFrameName = "synopsis"
+
 
 subIndexHtmlFile :: Char -> String
 subIndexHtmlFile a = "doc-index-" ++ b ++ ".html"
    where b | isAlpha a = [a]
            | otherwise = show (ord a)
 
-anchorNameStr :: OccName -> String
-anchorNameStr name | isValOcc name = "v:" ++ occNameString name 
-                   | otherwise     = "t:" ++ occNameString name
 
-pathJoin :: [FilePath] -> FilePath
-pathJoin = foldr join []
-  where join :: FilePath -> FilePath -> FilePath
-        join path1 ""    = path1
-	join ""    path2 = path2
-	join path1 path2
-          | isPathSeparator (last path1) = path1++path2
-          | otherwise                    = path1++pathSeparator:path2
+-------------------------------------------------------------------------------
+-- * Anchor and URL utilities
+--
+-- NB: Anchor IDs, used as the destination of a link within a document must
+-- conform to XML's NAME production. That, taken with XHTML and HTML 4.01's
+-- various needs and compatibility constraints, means these IDs have to match:
+--      [A-Za-z][A-Za-z0-9:_.-]*
+-- Such IDs do not need to be escaped in any way when used as the fragment part
+-- of a URL. Indeed, %-escaping them can lead to compatibility issues as it
+-- isn't clear if such fragment identifiers should, or should not be unescaped
+-- before being matched with IDs in the target document.
+-------------------------------------------------------------------------------
+ 
 
--- -----------------------------------------------------------------------------
--- Files we need to copy from our $libdir
+moduleUrl :: Module -> String
+moduleUrl = moduleHtmlFile
 
-cssFile, iconFile, jsFile, plusFile, minusFile, framesFile :: String
-cssFile   = "haddock.css"
-iconFile  = "haskell_icon.gif"
+
+moduleNameUrl :: Module -> OccName -> String
+moduleNameUrl mdl n = moduleUrl mdl ++ '#' : nameAnchorId n
+
+
+nameAnchorId :: OccName -> String
+nameAnchorId name = makeAnchorId (prefix : ':' : occNameString name)
+ where prefix | isValOcc name = 'v'
+              | otherwise     = 't'
+
+
+-- | Takes an arbitrary string and makes it a valid anchor ID. The mapping is
+-- identity preserving.
+makeAnchorId :: String -> String
+makeAnchorId [] = []
+makeAnchorId (f:r) = escape isAlpha f ++ concatMap (escape isLegal) r
+  where
+    escape p c | p c = [c]
+               | otherwise = '-' : (show (ord c)) ++ "-"
+    isLegal ':' = True
+    isLegal '_' = True
+    isLegal '.' = True
+    isLegal c = isAscii c && isAlphaNum c
+       -- NB: '-' is legal in IDs, but we use it as the escape char
+
+
+-------------------------------------------------------------------------------
+-- * Files we need to copy from our $libdir
+-------------------------------------------------------------------------------
+
+
+jsFile, framesFile :: String
 jsFile    = "haddock-util.js"
-plusFile  = "plus.gif"
-minusFile = "minus.gif"
 framesFile = "frames.html"
 
------------------------------------------------------------------------------
--- misc.
+
+-------------------------------------------------------------------------------
+-- * Misc. 
+-------------------------------------------------------------------------------
+
 
 getProgramName :: IO String
 getProgramName = liftM (`withoutSuffix` ".bin") getProgName
@@ -225,34 +274,42 @@ getProgramName = liftM (`withoutSuffix` ".bin") getProgName
             | suff `isSuffixOf` str = take (length str - length suff) str
             | otherwise             = str
 
+
 bye :: String -> IO a
 bye s = putStr s >> exitWith ExitSuccess
+
 
 die :: String -> IO a
 die s = hPutStr stderr s >> exitWith (ExitFailure 1)
 
+
 dieMsg :: String -> IO a
 dieMsg s = getProgramName >>= \prog -> die (prog ++ ": " ++ s)
 
+
 noDieMsg :: String -> IO ()
 noDieMsg s = getProgramName >>= \prog -> hPutStr stderr (prog ++ ": " ++ s)
+
 
 mapSnd :: (b -> c) -> [(a,b)] -> [(a,c)]
 mapSnd _ [] = []
 mapSnd f ((x,y):xs) = (x,f y) : mapSnd f xs
 
+
 mapMaybeM :: Monad m => (a -> m b) -> Maybe a -> m (Maybe b)
 mapMaybeM _ Nothing = return Nothing
 mapMaybeM f (Just a) = liftM Just (f a)
 
+
 escapeStr :: String -> String
 escapeStr = escapeURIString isUnreserved
+
 
 -- Following few functions are copy'n'pasted from Network.URI module
 -- to avoid depending on the network lib, since doing so gives a
 -- circular build dependency between haddock and network
 -- (at least if you want to build network with haddock docs)
-
+-- NB: These functions do NOT escape Unicode strings for URLs as per the RFCs
 escapeURIChar :: (Char -> Bool) -> Char -> String
 escapeURIChar p c
     | p c       = [c]
@@ -267,8 +324,10 @@ escapeURIChar p c
             | d < 10    = chr (ord '0' + fromIntegral d)
             | otherwise = chr (ord 'A' + fromIntegral (d - 10))
 
+
 escapeURIString :: (Char -> Bool) -> String -> String
 escapeURIString = concatMap . escapeURIChar
+
 
 isUnreserved :: Char -> Bool
 isUnreserved c = isAlphaNumChar c || (c `elem` "-_.~")
@@ -281,18 +340,21 @@ isAlphaNumChar c = isAlphaChar c || isDigitChar c
 
 
 -----------------------------------------------------------------------------
--- HTML cross references
-
+-- * HTML cross references
+--
 -- For each module, we need to know where its HTML documentation lives
 -- so that we can point hyperlinks to it.  It is extremely
 -- inconvenient to plumb this information to all the places that need
 -- it (basically every function in HaddockHtml), and furthermore the
 -- mapping is constant for any single run of Haddock.  So for the time
 -- being I'm going to use a write-once global variable.
+-----------------------------------------------------------------------------
+
 
 {-# NOINLINE html_xrefs_ref #-}
 html_xrefs_ref :: IORef (Map Module FilePath)
 html_xrefs_ref = unsafePerformIO (newIORef (error "module_map"))
+
 
 {-# NOINLINE html_xrefs #-}
 html_xrefs :: Map Module FilePath
@@ -300,18 +362,27 @@ html_xrefs = unsafePerformIO (readIORef html_xrefs_ref)
 
 
 -----------------------------------------------------------------------------
--- List utils
+-- * List utils
 -----------------------------------------------------------------------------
 
 
 replace :: Eq a => a -> a -> [a] -> [a]
-replace a b = map (\x -> if x == a then b else x) 
+replace a b = map (\x -> if x == a then b else x)
+
+
+spanWith :: (a -> Maybe b) -> [a] -> ([b],[a])
+spanWith _ [] = ([],[])
+spanWith p xs@(a:as)
+  | Just b <- p a = let (bs,cs) = spanWith p as in (b:bs,cs)
+  | otherwise     = ([],xs)
 
 
 -----------------------------------------------------------------------------
--- put here temporarily
+-- * Put here temporarily
+-----------------------------------------------------------------------------
 
-markup :: DocMarkup id a -> HsDoc id -> a
+
+markup :: DocMarkup id a -> Doc id -> a
 markup m DocEmpty              = markupEmpty m
 markup m (DocAppend d1 d2)     = markupAppend m (markup m d1) (markup m d2)
 markup m (DocString s)         = markupString m s
@@ -327,12 +398,15 @@ markup m (DocCodeBlock d)      = markupCodeBlock m (markup m d)
 markup m (DocURL url)          = markupURL m url
 markup m (DocAName ref)        = markupAName m ref
 markup m (DocPic img)          = markupPic m img
+markup m (DocExamples e)       = markupExample m e
 
-markupPair :: DocMarkup id a -> (HsDoc id, HsDoc id) -> (a, a)
+
+markupPair :: DocMarkup id a -> (Doc id, Doc id) -> (a, a)
 markupPair m (a,b) = (markup m a, markup m b)
 
+
 -- | The identity markup
-idMarkup :: DocMarkup a (HsDoc a)
+idMarkup :: DocMarkup a (Doc a)
 idMarkup = Markup {
   markupEmpty         = DocEmpty,
   markupString        = DocString,
@@ -348,36 +422,20 @@ idMarkup = Markup {
   markupCodeBlock     = DocCodeBlock,
   markupURL           = DocURL,
   markupAName         = DocAName,
-  markupPic           = DocPic
+  markupPic           = DocPic,
+  markupExample       = DocExamples
   }
 
 
 -----------------------------------------------------------------------------
--- put here temporarily
+-- * System tools
+-----------------------------------------------------------------------------
 
-newtype FormatVersion = FormatVersion Int deriving (Eq,Ord)
 
-nullFormatVersion :: FormatVersion
-nullFormatVersion = mkFormatVersion 0
+#ifdef mingw32_HOST_OS
+foreign import ccall unsafe "_getpid" getProcessID :: IO Int -- relies on Int == Int32 on Windows
+#else
+getProcessID :: IO Int
+getProcessID = fmap fromIntegral System.Posix.Internals.c_getpid
+#endif
 
-mkFormatVersion :: Int -> FormatVersion
-mkFormatVersion = FormatVersion
-
-instance Binary FormatVersion where
-   put_ bh (FormatVersion i) =
-      case compare i 0 of
-         EQ -> return ()
-         GT -> put_ bh (-i)
-         LT -> error (
-            "Binary.hs: negative FormatVersion " ++ show i 
-               ++ " is not allowed")
-   get bh =
-      do
-         (w8 :: Word8) <- get bh   
-         if testBit w8 7
-            then
-               do
-                  i <- get bh
-                  return (FormatVersion (-i))
-            else
-               return nullFormatVersion

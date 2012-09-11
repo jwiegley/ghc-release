@@ -1,5 +1,5 @@
 {-# OPTIONS_HADDOCK hide #-}
-{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveDataTypeable, DeriveFunctor #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Haddock.Types
@@ -14,20 +14,14 @@
 -- Types that are commonly used through-out Haddock. Some of the most
 -- important types are defined here, like 'Interface' and 'DocName'.
 -----------------------------------------------------------------------------
-
 module Haddock.Types (
   module Haddock.Types
--- avoid duplicate-export warnings, use the conditional to only
--- mention things not defined in this module:
-#if __GLASGOW_HASKELL__ >= 611
   , HsDocString, LHsDocString
-#else
-  , HsDoc(..), LHsDoc, HaddockModInfo(..), emptyHaddockModInfo
-#endif
  ) where
 
 
 import Control.Exception
+import Control.Arrow
 import Data.Typeable
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -35,159 +29,57 @@ import GHC hiding (NoLink)
 import Name
 
 
--- convenient short-hands
-type Decl = LHsDecl Name
-type Doc  = HsDoc Name
-
-#if __GLASGOW_HASKELL__ <= 610
-type HsDocString = HsDoc Name
-type LHsDocString = Located HsDocString
-#endif
-
--- | Arguments and result are indexed by Int, zero-based from the left,
--- because that's the easiest to use when recursing over types.
-type FnArgsDoc name = Map Int (HsDoc name)
-type DocForDecl name = (Maybe (HsDoc name), FnArgsDoc name)
-
-noDocForDecl :: DocForDecl name
-noDocForDecl = (Nothing, Map.empty)
-
--- | A declaration that may have documentation, including its subordinates,
--- which may also have documentation
-type DeclInfo = (Decl, DocForDecl Name, [(Name, DocForDecl Name)])
+-----------------------------------------------------------------------------
+-- * Convenient synonyms
+-----------------------------------------------------------------------------
 
 
--- | A 'DocName' is an identifier that may be documented. The 'Module'
--- component specifies the place which we want to link to in the documentation.
-data DocName = Documented Name Module | Undocumented Name
-  deriving Eq
-
-
--- | The 'OccName' belonging to this name
-docNameOcc :: DocName -> OccName
-docNameOcc = nameOccName . getName
-
-
-instance NamedThing DocName where
-  getName (Documented name _) = name
-  getName (Undocumented name) = name
-
-
-{-! for DocOption derive: Binary !-}
-data DocOption
-  = OptHide           -- ^ This module should not appear in the docs
-  | OptPrune
-  | OptIgnoreExports  -- ^ Pretend everything is exported
-  | OptNotHome        -- ^ Not the best place to get docs for things
-                      -- exported by this module.
-  deriving (Eq, Show)
-
-
-data ExportItem name
-
-  = ExportDecl {		  		
-	
-      -- | A declaration
-      expItemDecl :: LHsDecl name, 
-			       
-      -- | Maybe a doc comment, and possibly docs for arguments (if this
-      -- decl is a function or type-synonym)
-      expItemMbDoc :: DocForDecl name,
-
-      -- | Subordinate names, possibly with documentation
-      expItemSubDocs :: [(name, DocForDecl name)],
-
-      -- | Instances relevant to this declaration
-      expItemInstances :: [InstHead name]
-	
-	  }	-- ^ An exported declaration 
-		    
-  | ExportNoDecl {
-      expItemName :: name,
-
-      -- | Subordinate names
-      expItemSubs :: [name]
-
-		} -- ^ An exported entity for which we have no 
-          -- documentation (perhaps because it resides in
-          -- another package)
-
-  | ExportGroup { 
-
-      -- | Section level (1, 2, 3, ... )
-      expItemSectionLevel :: Int,
-
-      -- | Section id (for hyperlinks)
-      expItemSectionId :: String,     
-			
-      -- | Section heading text
-      expItemSectionText :: HsDoc name
-
-    } -- ^ A section heading
-
-  | ExportDoc (HsDoc name) -- ^ Some documentation
-
-  | ExportModule Module    -- ^ A cross-reference to another module
-
-
-type InstHead name = ([HsPred name], name, [HsType name])
-type ModuleMap     = Map Module Interface
+type IfaceMap      = Map Module Interface
 type InstIfaceMap  = Map Module InstalledInterface
-type DocMap        = Map Name (HsDoc DocName)
-type LinkEnv       = Map Name Module
-
-#if __GLASGOW_HASKELL__ >= 611
-type GhcDocHdr = Maybe LHsDocString
-#else
-type GhcDocHdr = (HaddockModInfo Name, Maybe (HsDoc Name))
-#endif
-
--- | This structure holds the module information we get from GHC's 
--- type checking phase
-data GhcModule = GhcModule {
-   ghcModule         :: Module,
-   ghcFilename       :: FilePath,
-   ghcMbDocOpts      :: Maybe String,
-   ghcMbDocHdr       :: GhcDocHdr,
-   ghcGroup          :: HsGroup Name,
-   ghcMbExports      :: Maybe [LIE Name],
-   ghcExportedNames  :: [Name],
-   ghcDefinedNames   :: [Name],
-   ghcNamesInScope   :: [Name],
-   ghcInstances      :: [Instance]
-}
+type DocMap        = Map Name (Doc DocName)
+type SrcMap        = Map PackageId FilePath
+type Decl          = LHsDecl Name
+type GhcDocHdr     = Maybe LHsDocString
+type DocPaths      = (FilePath, Maybe FilePath) -- paths to HTML and sources
 
 
--- | This is the data structure used to render a Haddock page for a module - it
--- is the "interface" of the module. The core of Haddock lies in creating this 
--- structure (see Haddock.Interface). The structure also holds intermediate
--- data needed during its creation.
+-----------------------------------------------------------------------------
+-- * Interface
+-----------------------------------------------------------------------------
+
+
+-- | 'Interface' holds all information used to render a single Haddock page.
+-- It represents the /interface/ of a module. The core business of Haddock
+-- lies in creating this structure. Note that the record contains some fields
+-- that are only used to create the final record, and that are not used by the
+-- backends.
 data Interface = Interface {
 
-  -- | The module represented by this interface
+  -- | The module represented by this interface.
   ifaceMod             :: Module,
 
-  -- | The original filename for this module
+  -- | Original file name of the module.
   ifaceOrigFilename    :: FilePath,
 
-  -- | Textual information about the module 
+  -- | Textual information about the module.
   ifaceInfo            :: !(HaddockModInfo Name),
 
-  -- | The documentation header for this module
-  ifaceDoc             :: !(Maybe (HsDoc Name)),
+  -- | Documentation header.
+  ifaceDoc             :: !(Maybe (Doc Name)),
 
-  -- | The renamed documentation header for this module
-  ifaceRnDoc           :: Maybe (HsDoc DocName),
+  -- | Documentation header with link information.
+  ifaceRnDoc           :: Maybe (Doc DocName),
 
-  -- | The Haddock options for this module (prune, ignore-exports, etc)
+  -- | Haddock options for this module (prune, ignore-exports, etc).
   ifaceOptions         :: ![DocOption],
 
-  -- | The declarations of the module.  Excludes declarations that don't
-  -- have names (instances and stand-alone documentation comments). Includes
-  -- subordinate names, but they are mapped to their parent declarations.
+  -- | Declarations originating from the module. Excludes declarations without
+  -- names (instances and stand-alone documentation comments). Includes
+  -- names of subordinate declarations mapped to their parent declarations.
   ifaceDeclMap         :: Map Name DeclInfo,
 
-  -- | Everything declared in the module (including subordinates) that has docs
+  -- | Documentation of declarations originating from the module (including
+  -- subordinates).
   ifaceRnDocMap        :: Map Name (DocForDecl DocName),
 
   ifaceSubMap          :: Map Name [Name],
@@ -195,58 +87,45 @@ data Interface = Interface {
   ifaceExportItems     :: ![ExportItem Name],
   ifaceRnExportItems   :: [ExportItem DocName],
 
-  -- | All names defined in this module
-  ifaceLocals          :: ![Name],
-
-  -- | All names exported by this module
+  -- | All names exported by the module.
   ifaceExports         :: ![Name],
 
-  -- | All the visible names exported by this module
-  -- For a name to be visible, it has to:
-  --
-  --  * be exported normally, and not via a full module re-exportation.
-  --
-  --  * have a declaration in this module or any of it's imports, with the
-  --    exception that it can't be from another package.
-  --
-  -- Basically, a visible name is a name that will show up in the documentation
-  -- for this module.
+  -- | All \"visible\" names exported by the module.
+  -- A visible name is a name that will show up in the documentation of the
+  -- module.
   ifaceVisibleExports  :: ![Name],
 
-  -- | The instances exported by this module
-  ifaceInstances       :: ![Instance]
+  -- | Instances exported by the module.
+  ifaceInstances       :: ![Instance],
+
+  -- | Documentation of instances defined in the module.
+  ifaceInstanceDocMap  :: Map Name (Doc Name)
 }
 
 
--- | A smaller version of 'Interface' that we can get from the Haddock
--- interface files.
+-- | A smaller version of 'Interface' that can be created from Haddock's
+-- interface files ('InterfaceFile').
 data InstalledInterface = InstalledInterface {
 
-  -- | The module represented by this interface
+  -- | The module represented by this interface.
   instMod            :: Module,
 
-  -- | Textual information about the module 
+  -- | Textual information about the module.
   instInfo           :: HaddockModInfo Name,
 
-  -- | Everything declared in the module (including subordinates) that has docs
+  -- | Documentation of declarations originating from the module (including
+  -- subordinates).
   instDocMap         :: Map Name (DocForDecl Name),
 
-  -- | All names exported by this module
+  -- | All names exported by this module.
   instExports        :: [Name],
 
-  -- | All the visible names exported by this module
-  -- For a name to be visible, it has to:
-  --
-  --  * be exported normally, and not via a full module re-exportation.
-  --
-  --  * have a declaration in this module or any of it's imports, with the
-  --    exception that it can't be from another package.
-  --
-  -- Basically, a visible name is a name that will show up in the documentation
-  -- for this module.
+  -- | All \"visible\" names exported by the module.
+  -- A visible name is a name that will show up in the documentation of the
+  -- module.
   instVisibleExports :: [Name],
 
-  -- | The Haddock options for this module (prune, ignore-exports, etc)
+  -- | Haddock options for this module (prune, ignore-exports, etc).
   instOptions        :: [DocOption],
 
   instSubMap         :: Map Name [Name]
@@ -265,33 +144,160 @@ toInstalledIface interface = InstalledInterface {
   instSubMap         = ifaceSubMap         interface
 }
 
-unrenameHsDoc :: HsDoc DocName -> HsDoc Name
-unrenameHsDoc = fmapHsDoc getName
+
+-----------------------------------------------------------------------------
+-- * Export items & declarations
+-----------------------------------------------------------------------------
+
+
+data ExportItem name
+
+  = ExportDecl {
+
+      -- | A declaration
+      expItemDecl :: LHsDecl name,
+
+      -- | Maybe a doc comment, and possibly docs for arguments (if this
+      -- decl is a function or type-synonym)
+      expItemMbDoc :: DocForDecl name,
+
+      -- | Subordinate names, possibly with documentation
+      expItemSubDocs :: [(name, DocForDecl name)],
+
+      -- | Instances relevant to this declaration, possibly with documentation
+      expItemInstances :: [DocInstance name]
+
+    } -- ^ An exported declaration
+
+  | ExportNoDecl {
+      expItemName :: name,
+
+      -- | Subordinate names
+      expItemSubs :: [name]
+
+    } -- ^ An exported entity for which we have no
+      -- documentation (perhaps because it resides in
+      -- another package)
+
+  | ExportGroup {
+
+      -- | Section level (1, 2, 3, ... )
+      expItemSectionLevel :: Int,
+
+      -- | Section id (for hyperlinks)
+      expItemSectionId :: String,
+
+      -- | Section heading text
+      expItemSectionText :: Doc name
+
+    } -- ^ A section heading
+
+  | ExportDoc (Doc name) -- ^ Some documentation
+
+  | ExportModule Module    -- ^ A cross-reference to another module
+
+
+-- | A declaration that may have documentation, including its subordinates,
+-- which may also have documentation
+type DeclInfo = (Decl, DocForDecl Name, [(Name, DocForDecl Name)])
+
+
+-- | Arguments and result are indexed by Int, zero-based from the left,
+-- because that's the easiest to use when recursing over types.
+type FnArgsDoc name = Map Int (Doc name)
+type DocForDecl name = (Maybe (Doc name), FnArgsDoc name)
+
+
+noDocForDecl :: DocForDecl name
+noDocForDecl = (Nothing, Map.empty)
+
+
 unrenameDocForDecl :: DocForDecl DocName -> DocForDecl Name
 unrenameDocForDecl (mbDoc, fnArgsDoc) =
-    (fmap unrenameHsDoc mbDoc, fmap unrenameHsDoc fnArgsDoc)
+    (fmap unrenameDoc mbDoc, fmap unrenameDoc fnArgsDoc)
 
-#if __GLASGOW_HASKELL__ >= 611
-data HsDoc id
+
+-----------------------------------------------------------------------------
+-- * Hyperlinking
+-----------------------------------------------------------------------------
+
+
+-- | An environment used to create hyper-linked syntax.
+type LinkEnv = Map Name Module
+
+
+-- | An extension of 'Name' that may contain the preferred place to link to in
+-- the documentation.
+data DocName = Documented Name Module | Undocumented Name deriving Eq
+-- TODO: simplify to data DocName = DocName Name (Maybe Module)
+
+
+-- | The 'OccName' of this name.
+docNameOcc :: DocName -> OccName
+docNameOcc = nameOccName . getName
+
+
+instance NamedThing DocName where
+  getName (Documented name _) = name
+  getName (Undocumented name) = name
+
+
+-----------------------------------------------------------------------------
+-- * Instances
+-----------------------------------------------------------------------------
+
+
+-- | An instance head that may have documentation.
+type DocInstance name = (InstHead name, Maybe (Doc name))
+
+
+-- | The head of an instance. Consists of a context, a class name and a list of
+-- instance types.
+type InstHead name = ([HsPred name], name, [HsType name])
+
+
+-----------------------------------------------------------------------------
+-- * Documentation comments
+-----------------------------------------------------------------------------
+
+
+type LDoc id = Located (Doc id)
+
+
+data Doc id
   = DocEmpty
-  | DocAppend (HsDoc id) (HsDoc id)
+  | DocAppend (Doc id) (Doc id)
   | DocString String
-  | DocParagraph (HsDoc id)
+  | DocParagraph (Doc id)
   | DocIdentifier [id]
   | DocModule String
-  | DocEmphasis (HsDoc id)
-  | DocMonospaced (HsDoc id)
-  | DocUnorderedList [HsDoc id]
-  | DocOrderedList [HsDoc id]
-  | DocDefList [(HsDoc id, HsDoc id)]
-  | DocCodeBlock (HsDoc id)
+  | DocEmphasis (Doc id)
+  | DocMonospaced (Doc id)
+  | DocUnorderedList [Doc id]
+  | DocOrderedList [Doc id]
+  | DocDefList [(Doc id, Doc id)]
+  | DocCodeBlock (Doc id)
   | DocURL String
   | DocPic String
   | DocAName String
-  deriving (Eq, Show)
+  | DocExamples [Example]
+  deriving (Eq, Show, Functor)
 
-type LHsDoc id = Located (HsDoc id)
-#endif
+
+unrenameDoc :: Doc DocName -> Doc Name
+unrenameDoc = fmap getName
+
+
+data Example = Example
+  { exampleExpression :: String
+  , exampleResult     :: [String]
+  } deriving (Eq, Show)
+
+
+exampleToString :: Example -> String
+exampleToString (Example expression result) =
+    ">>> " ++ expression ++ "\n" ++  unlines result
+
 
 data DocMarkup id a = Markup {
   markupEmpty         :: a,
@@ -308,16 +314,18 @@ data DocMarkup id a = Markup {
   markupCodeBlock     :: a -> a,
   markupURL           :: String -> a,
   markupAName         :: String -> a,
-  markupPic           :: String -> a
+  markupPic           :: String -> a,
+  markupExample       :: [Example] -> a
 }
 
-#if __GLASGOW_HASKELL__ >= 611
+
 data HaddockModInfo name = HaddockModInfo {
-        hmi_description :: Maybe (HsDoc name),
+        hmi_description :: Maybe (Doc name),
         hmi_portability :: Maybe String,
         hmi_stability   :: Maybe String,
         hmi_maintainer  :: Maybe String
 }
+
 
 emptyHaddockModInfo :: HaddockModInfo a
 emptyHaddockModInfo = HaddockModInfo {
@@ -326,17 +334,39 @@ emptyHaddockModInfo = HaddockModInfo {
         hmi_stability   = Nothing,
         hmi_maintainer  = Nothing
 }
-#endif
+
+
+-----------------------------------------------------------------------------
+-- * Options
+-----------------------------------------------------------------------------
+
+
+{-! for DocOption derive: Binary !-}
+-- | Source-level options for controlling the documentation.
+data DocOption
+  = OptHide           -- ^ This module should not appear in the docs
+  | OptPrune
+  | OptIgnoreExports  -- ^ Pretend everything is exported
+  | OptNotHome        -- ^ Not the best place to get docs for things
+                      -- exported by this module.
+  deriving (Eq, Show)
+
+
+-----------------------------------------------------------------------------
+-- * Error handling
+-----------------------------------------------------------------------------
 
 
 -- A monad which collects error messages, locally defined to avoid a dep on mtl
 
-type ErrMsg = String
 
+type ErrMsg = String
 newtype ErrMsgM a = Writer { runWriter :: (a, [ErrMsg]) }
+
 
 instance Functor ErrMsgM where
         fmap f (Writer (a, msgs)) = Writer (f a, msgs)
+
 
 instance Monad ErrMsgM where
         return a = Writer (a, [])
@@ -345,11 +375,13 @@ instance Monad ErrMsgM where
                 (b, w') = runWriter (k a)
                 in (b, w ++ w')
 
+
 tell :: [ErrMsg] -> ErrMsgM ()
 tell w = Writer ((), w)
 
 
 -- Exceptions
+
 
 -- | Haddock's own exception type
 data HaddockException = HaddockException String deriving Typeable
@@ -362,6 +394,7 @@ instance Show HaddockException where
 throwE :: String -> a
 instance Exception HaddockException
 throwE str = throw (HaddockException str)
+
 
 -- In "Haddock.Interface.Create", we need to gather
 -- @Haddock.Types.ErrMsg@s a lot, like @ErrMsgM@ does,
@@ -379,29 +412,13 @@ liftErrMsg = WriterGhc . return . runWriter
 --  for now, use (liftErrMsg . tell) for this
 --tell :: [ErrMsg] -> ErrMsgGhc ()
 --tell msgs = WriterGhc $ return ( (), msgs )
+
+
 instance Functor ErrMsgGhc where
-  fmap f (WriterGhc x) = WriterGhc (fmap (\(a,msgs)->(f a,msgs)) x)
+  fmap f (WriterGhc x) = WriterGhc (fmap (first f) x)
+
+
 instance Monad ErrMsgGhc where
   return a = WriterGhc (return (a, []))
   m >>= k = WriterGhc $ runWriterGhc m >>= \ (a, msgs1) ->
-               fmap (\ (b, msgs2) -> (b, msgs1 ++ msgs2)) (runWriterGhc (k a))
-
--- When HsDoc syntax is part of the Haddock codebase, we'll just
--- declare a Functor instance.
-fmapHsDoc :: (a->b) -> HsDoc a -> HsDoc b
-fmapHsDoc _ DocEmpty = DocEmpty
-fmapHsDoc f (DocAppend a b) = DocAppend (fmapHsDoc f a) (fmapHsDoc f b)
-fmapHsDoc _ (DocString s) = DocString s
-fmapHsDoc _ (DocModule s) = DocModule s
-fmapHsDoc _ (DocURL s) = DocURL s
-fmapHsDoc _ (DocPic s) = DocPic s
-fmapHsDoc _ (DocAName s) = DocAName s
-fmapHsDoc f (DocParagraph a) = DocParagraph (fmapHsDoc f a)
-fmapHsDoc f (DocEmphasis a) = DocEmphasis (fmapHsDoc f a)
-fmapHsDoc f (DocMonospaced a) = DocMonospaced (fmapHsDoc f a)
-fmapHsDoc f (DocCodeBlock a) = DocMonospaced (fmapHsDoc f a)
-fmapHsDoc f (DocIdentifier a) = DocIdentifier (map f a)
-fmapHsDoc f (DocOrderedList a) = DocOrderedList (map (fmapHsDoc f) a)
-fmapHsDoc f (DocUnorderedList a) = DocUnorderedList (map (fmapHsDoc f) a)
-fmapHsDoc f (DocDefList a) = DocDefList (map (\(b,c)->(fmapHsDoc f b, fmapHsDoc f c)) a)
-
+               fmap (second (msgs1 ++)) (runWriterGhc (k a))

@@ -15,7 +15,7 @@
 -- maintenance and no testing. Perhaps at some point we should stop pretending
 -- that it works.
 --
--- Uses the parsed command-line from Distribution.Setup in order to build
+-- Uses the parsed command-line from "Distribution.Simple.Setup" in order to build
 -- Haskell tools using a backend build system based on make. Obviously we
 -- assume that there is a configure script, and that after the ConfigCmd has
 -- been run, there is a Makefile. Further assumptions:
@@ -171,8 +171,6 @@ copyAction flags args = do
   let destArgs = case fromFlag $ copyDest flags of
         NoCopyDest      -> ["install"]
         CopyTo path     -> ["copy", "destdir=" ++ path]
-        CopyPrefix path -> ["install", "prefix=" ++ path]
-                -- CopyPrefix is backwards compat, DEPRECATED
   rawSystemExit (fromFlag $ copyVerbosity flags) "make" destArgs
 
 installAction :: InstallFlags -> [String] -> IO ()

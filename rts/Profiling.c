@@ -40,7 +40,7 @@ unsigned int HP_ID;
 
 /* figures for the profiling report.
  */
-static ullong total_alloc;
+static StgWord64 total_alloc;
 static lnat   total_prof_ticks;
 
 /* Globals for opening the profiling log file(s)
@@ -697,7 +697,7 @@ report_per_cc_costs( void )
       
       if (RtsFlags.CcFlags.doCostCentres >= COST_CENTRES_VERBOSE) {
 	fprintf(prof_file, "  %5" FMT_Word64 " %9" FMT_Word64,
-		(StgWord64)(cc->time_ticks), cc->mem_alloc);
+		(StgWord64)(cc->time_ticks), cc->mem_alloc*sizeof(W_));
       }
       fprintf(prof_file, "\n");
   }
@@ -770,7 +770,7 @@ reportCCSProfiling( void )
         (int) RtsFlags.MiscFlags.tickInterval);
 
     fprintf(prof_file, "\ttotal alloc = %11s bytes",
-	    ullong_format_string(total_alloc * sizeof(W_),
+	    showStgWord64(total_alloc * sizeof(W_),
 				 temp, rtsTrue/*commas*/));
 
 #if defined(PROFILING_DETAIL_COUNTS)

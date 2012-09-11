@@ -17,20 +17,17 @@ import CostCentre
 import Var
 import Id
 import IdInfo
-import NewDemand
-#ifdef OLD_STRICTNESS
-import Id
-import IdInfo
-#endif
-
+import Demand
 import DataCon
 import TyCon
 import Type
 import Coercion
+import StaticFlags
 import BasicTypes
 import Util
 import Outputable
 import FastString
+import Data.Maybe
 \end{code}
 
 %************************************************************************
@@ -70,13 +67,16 @@ pprTopBinds binds = vcat (map pprTopBind binds)
 
 pprTopBind :: OutputableBndr a => Bind a -> SDoc
 pprTopBind (NonRec binder expr)
- = ppr_binding (binder,expr) $$ text ""
+ = ppr_binding (binder,expr) $$ blankLine
 
-pprTopBind (Rec binds)
+pprTopBind (Rec [])
+  = ptext (sLit "Rec { }")
+pprTopBind (Rec (b:bs))
   = vcat [ptext (sLit "Rec {"),
-	  vcat (map ppr_binding binds),
+	  ppr_binding b,
+	  vcat [blankLine $$ ppr_binding b | b <- bs],
 	  ptext (sLit "end Rec }"),
-	  text ""]
+	  blankLine]
 \end{code}
 
 \begin{code}
@@ -114,9 +114,11 @@ ppr_expr _       (Lit lit)  = ppr lit
 ppr_expr add_par (Cast expr co) 
   = add_par $
     sep [pprParendExpr expr, 
-	 ptext (sLit "`cast`") <+> parens (pprCo co)]
+	 ptext (sLit "`cast`") <+> pprCo co]
   where
-    pprCo co = sep [ppr co, dcolon <+> ppr (coercionKindPredTy co)]
+    pprCo co | opt_SuppressCoercions = ptext (sLit "...")
+             | otherwise = parens
+                         $ sep [ppr co, dcolon <+> pprEqPred (coercionKind co)]
 	 
 
 ppr_expr add_par expr@(Lam _ _)
@@ -209,9 +211,6 @@ ppr_expr add_par (Let bind expr)
 ppr_expr add_par (Note (SCC cc) expr)
   = add_par (sep [pprCostCentreCore cc, pprCoreExpr expr])
 
-ppr_expr add_par (Note InlineMe expr)
-  = add_par $ ptext (sLit "__inline_me") <+> pprParendExpr expr
-
 ppr_expr add_par (Note (CoreNote s) expr)
   = add_par $ 
     sep [sep [ptext (sLit "__core_note"), pprHsString (mkFastString s)],
@@ -248,43 +247,38 @@ instance OutputableBndr Var where
 
 pprCoreBinder :: BindingSite -> Var -> SDoc
 pprCoreBinder LetBind binder
-  | isTyVar binder = pprKindedTyVarBndr binder
-  | otherwise
-  = vcat [sig, pprIdExtras binder, pragmas]
-  where
-    sig     = pprTypedBinder binder
-    pragmas = ppIdInfo binder (idInfo binder)
+  | isTyCoVar binder = pprKindedTyVarBndr binder
+  | otherwise      = pprTypedBinder binder $$ 
+		     ppIdInfo binder (idInfo binder)
 
 -- Lambda bound type variables are preceded by "@"
-pprCoreBinder LambdaBind bndr 
-  | isDeadBinder bndr
+pprCoreBinder bind_site bndr 
   = getPprStyle $ \ sty ->
-    if debugStyle sty then
-	parens (pprTypedBinder bndr)
-    else
-	char '_'
-  | otherwise
-  = parens (pprTypedBinder bndr)
-
--- Case bound things don't get a signature or a herald, unless we have debug on
-pprCoreBinder CaseBind bndr 
-  = getPprStyle $ \ sty ->
-    if debugStyle sty then
-	parens (pprTypedBinder bndr)
-    else
-	if isDeadBinder bndr then char '_'
-	else pprUntypedBinder bndr
+    pprTypedLCBinder bind_site (debugStyle sty) bndr
 
 pprUntypedBinder :: Var -> SDoc
 pprUntypedBinder binder
-  | isTyVar binder = ptext (sLit "@") <+> ppr binder	-- NB: don't print kind
+  | isTyCoVar binder = ptext (sLit "@") <+> ppr binder	-- NB: don't print kind
   | otherwise      = pprIdBndr binder
+
+pprTypedLCBinder :: BindingSite -> Bool -> Var -> SDoc
+-- For lambda and case binders, show the unfolding info (usually none)
+pprTypedLCBinder bind_site debug_on var
+  | not debug_on && isDeadBinder var    = char '_'
+  | not debug_on, CaseBind <- bind_site = pprUntypedBinder var  -- No parens, no kind info
+  | isTyCoVar var                         = parens (pprKindedTyVarBndr var)
+  | otherwise = parens (hang (pprIdBndr var) 
+                           2 (vcat [ dcolon <+> pprType (idType var), pp_unf]))
+              where
+		unf_info = unfoldingInfo (idInfo var)
+                pp_unf | hasSomeUnfolding unf_info = ptext (sLit "Unf=") <> ppr unf_info
+                       | otherwise                 = empty
 
 pprTypedBinder :: Var -> SDoc
 -- Print binder with a type or kind signature (not paren'd)
 pprTypedBinder binder
-  | isTyVar binder  = pprKindedTyVarBndr binder
-  | otherwise	    = pprIdBndr binder <+> dcolon <+> pprType (idType binder)
+  | isTyCoVar binder  = pprKindedTyVarBndr binder
+  | otherwise	    = hang (pprIdBndr binder) 2 (dcolon <+> pprType (idType binder))
 
 pprKindedTyVarBndr :: TyVar -> SDoc
 -- Print a type variable binder with its kind (but not if *)
@@ -307,58 +301,121 @@ pprIdBndrInfo info
   where
     prag_info = inlinePragInfo info
     occ_info  = occInfo info
-    dmd_info  = newDemandInfo info
+    dmd_info  = demandInfo info
     lbv_info  = lbvarInfo info
 
-    no_info = isDefaultInlinePragma prag_info && isNoOcc occ_info && 
-	      (case dmd_info of { Nothing -> True; Just d -> isTop d }) &&
-	      hasNoLBVarInfo lbv_info
+    has_prag = not (isDefaultInlinePragma prag_info)
+    has_occ  = not (isNoOcc occ_info)
+    has_dmd  = case dmd_info of { Nothing -> False; Just d -> not (isTop d) }
+    has_lbv  = not (hasNoLBVarInfo lbv_info)
 
-    doc | no_info = empty
- 	| otherwise
-        = brackets $ hsep [ppr prag_info, ppr occ_info, 
-			   ppr dmd_info, ppr lbv_info
-#ifdef OLD_STRICTNESS
-			   , ppr (demandInfo id)
-#endif
-			  ]
+    doc = showAttributes 
+	  [ (has_prag, ptext (sLit "InlPrag=") <> ppr prag_info)
+	  , (has_occ,  ptext (sLit "Occ=") <> ppr occ_info)
+	  , (has_dmd,  ptext (sLit "Dmd=") <> ppr dmd_info)
+	  , (has_lbv , ptext (sLit "Lbv=") <> ppr lbv_info)
+	  ]
 \end{code}
 
 
+-----------------------------------------------------
+--	IdDetails and IdInfo
+-----------------------------------------------------
+
 \begin{code}
-pprIdExtras :: Id -> SDoc
-pprIdExtras id = pp_scope <> ppr (idDetails id)
+ppIdInfo :: Id -> IdInfo -> SDoc
+ppIdInfo id info
+  = showAttributes
+    [ (True, pp_scope <> ppr (idDetails id))
+    , (has_arity,      ptext (sLit "Arity=") <> int arity)
+    , (has_caf_info,   ptext (sLit "Caf=") <> ppr caf_info)
+    , (has_strictness, ptext (sLit "Str=") <> pprStrictness str_info)
+    , (has_unf,        ptext (sLit "Unf=") <> ppr unf_info)
+    , (not (null rules), ptext (sLit "RULES:") <+> vcat (map pprRule rules))
+    ]	-- Inline pragma, occ, demand, lbvar info
+	-- printed out with all binders (when debug is on); 
+	-- see PprCore.pprIdBndr
   where
     pp_scope | isGlobalId id   = ptext (sLit "GblId")
     	     | isExportedId id = ptext (sLit "LclIdX")
     	     | otherwise       = ptext (sLit "LclId")
 
-ppIdInfo :: Id -> IdInfo -> SDoc
-ppIdInfo _ info
-  = brackets $
-    vcat [  ppArityInfo a,
-	    ppWorkerInfo (workerInfo info),
-	    ppCafInfo (cafInfo info),
-#ifdef OLD_STRICTNESS
-	    ppStrictnessInfo s,
-            ppCprInfo m,
-#endif
-	    pprNewStrictness (newStrictnessInfo info),
-	    if null rules then empty
-	    else ptext (sLit "RULES:") <+> vcat (map pprRule rules)
-	-- Inline pragma, occ, demand, lbvar info
-	-- printed out with all binders (when debug is on); 
-	-- see PprCore.pprIdBndr
-	]
-  where
-    a = arityInfo info
-#ifdef OLD_STRICTNESS
-    s = strictnessInfo info
-    m = cprInfo info
-#endif
+    arity = arityInfo info
+    has_arity = arity /= 0
+
+    caf_info = cafInfo info
+    has_caf_info = not (mayHaveCafRefs caf_info)
+
+    str_info = strictnessInfo info
+    has_strictness = isJust str_info
+
+    unf_info = unfoldingInfo info
+    has_unf = hasSomeUnfolding unf_info
+
     rules = specInfoRules (specInfo info)
+
+showAttributes :: [(Bool,SDoc)] -> SDoc
+showAttributes stuff 
+  | null docs = empty
+  | otherwise = brackets (sep (punctuate comma docs))
+  where
+    docs = [d | (True,d) <- stuff]
 \end{code}
 
+-----------------------------------------------------
+--	Unfolding and UnfoldingGuidance
+-----------------------------------------------------
+
+\begin{code}
+instance Outputable UnfoldingGuidance where
+    ppr UnfNever  = ptext (sLit "NEVER")
+    ppr (UnfWhen unsat_ok boring_ok)
+      = ptext (sLit "ALWAYS_IF") <> 
+        parens (ptext (sLit "unsat_ok=") <> ppr unsat_ok <> comma <>
+                ptext (sLit "boring_ok=") <> ppr boring_ok)
+    ppr (UnfIfGoodArgs { ug_args = cs, ug_size = size, ug_res = discount })
+      = hsep [ ptext (sLit "IF_ARGS"), 
+	       brackets (hsep (map int cs)),
+	       int size,
+	       int discount ]
+
+instance Outputable UnfoldingSource where
+  ppr InlineCompulsory  = ptext (sLit "Compulsory")
+  ppr (InlineWrapper w) = ptext (sLit "Worker=") <> ppr w
+  ppr InlineStable      = ptext (sLit "InlineStable")
+  ppr InlineRhs         = ptext (sLit "<vanilla>")
+
+instance Outputable Unfolding where
+  ppr NoUnfolding             	 = ptext (sLit "No unfolding")
+  ppr (OtherCon cs)           	 = ptext (sLit "OtherCon") <+> ppr cs
+  ppr (DFunUnfolding ar con ops) = ptext (sLit "DFun") <> parens (ptext (sLit "arity=") <> int ar)  
+                                   <+> ppr con
+                                   <+> brackets (pprWithCommas pprParendExpr ops)
+  ppr (CoreUnfolding { uf_src = src
+                     , uf_tmpl=rhs, uf_is_top=top, uf_is_value=hnf
+                     , uf_is_conlike=conlike, uf_is_cheap=cheap
+      		     , uf_expandable=exp, uf_guidance=g, uf_arity=arity}) 
+	= ptext (sLit "Unf") <> braces (pp_info $$ pp_rhs)
+    where
+      pp_info = fsep $ punctuate comma 
+                [ ptext (sLit "Src=")        <> ppr src
+                , ptext (sLit "TopLvl=")     <> ppr top 
+                , ptext (sLit "Arity=")      <> int arity
+                , ptext (sLit "Value=")      <> ppr hnf
+                , ptext (sLit "ConLike=")    <> ppr conlike
+                , ptext (sLit "Cheap=")      <> ppr cheap
+                , ptext (sLit "Expandable=") <> ppr exp
+                , ptext (sLit "Guidance=")   <> ppr g ]
+      pp_tmpl = ptext (sLit "Tmpl=") <+> ppr rhs
+      pp_rhs | isStableSource src = pp_tmpl
+             | otherwise          = empty
+            -- Don't print the RHS or we get a quadratic 
+	    -- blowup in the size of the printout!
+\end{code}
+
+-----------------------------------------------------
+--	Rules
+-----------------------------------------------------
 
 \begin{code}
 instance Outputable CoreRule where

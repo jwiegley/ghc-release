@@ -23,11 +23,11 @@ import Reg
 
 import GraphBase
 
-
 import BlockId
 import Cmm
 import UniqFM
 import UniqSet
+import Digraph		(flattenSCCs)
 import Outputable
 import State
 
@@ -71,21 +71,16 @@ slurpSpillCostInfo cmm
 	= execState (countCmm cmm) zeroSpillCostInfo
  where
 	countCmm CmmData{}		= return ()
-	countCmm (CmmProc info _ _ (ListGraph blocks))
-		= mapM_ (countComp info) blocks
-
-	countComp info (BasicBlock _ blocks)
-		= mapM_ (countBlock info) blocks
+	countCmm (CmmProc info _ _ sccs)
+		= mapM_ (countBlock info)
+		$ flattenSCCs sccs
 
 	-- lookup the regs that are live on entry to this block in
 	--	the info table from the CmmProc
  	countBlock info (BasicBlock blockId instrs)
-		| LiveInfo _ _ blockLive	<- info
-		, Just rsLiveEntry		<- lookupBlockEnv blockLive blockId
-
-		, rsLiveEntry_virt	<- mapUniqSet (\(RegVirtual vr) -> vr) 
-					$  filterUniqSet isVirtualReg rsLiveEntry
-						
+		| LiveInfo _ _ (Just blockLive) _ <- info
+		, Just rsLiveEntry  <- lookupBlockEnv blockLive blockId
+		, rsLiveEntry_virt  <- takeVirtuals rsLiveEntry
 		= countLIs rsLiveEntry_virt instrs
 
 		| otherwise
@@ -95,13 +90,7 @@ slurpSpillCostInfo cmm
 		= return ()
 
 	-- skip over comment and delta pseudo instrs
-	countLIs rsLive (SPILL{} : lis)
-		= countLIs rsLive lis
-		
-	countLIs rsLive (RELOAD{} : lis)
-		= countLIs rsLive lis
-
-	countLIs rsLive (Instr instr Nothing : lis)
+	countLIs rsLive (LiveInstr instr Nothing : lis)
 		| isMetaInstr instr
 		= countLIs rsLive lis
 
@@ -109,7 +98,7 @@ slurpSpillCostInfo cmm
 		= pprPanic "RegSpillCost.slurpSpillCostInfo"
 			(text "no liveness information on instruction " <> ppr instr)
 
-	countLIs rsLiveEntry (Instr instr (Just live) : lis)
+	countLIs rsLiveEntry (LiveInstr instr (Just live) : lis)
 	 = do
 		-- increment the lifetime counts for regs live on entry to this instr
 		mapM_ incLifetime $ uniqSetToList rsLiveEntry
@@ -120,10 +109,6 @@ slurpSpillCostInfo cmm
 		mapM_ incDefs 	$ catMaybes $ map takeVirtualReg $ nub written
 
 		-- compute liveness for entry to next instruction.
-		let takeVirtuals set
-			= mapUniqSet (\(RegVirtual vr) -> vr)
-			$ filterUniqSet isVirtualReg set
-
 		let liveDieRead_virt	= takeVirtuals (liveDieRead  live)
 		let liveDieWrite_virt	= takeVirtuals (liveDieWrite live)
 		let liveBorn_virt	= takeVirtuals (liveBorn     live)
@@ -141,6 +126,13 @@ slurpSpillCostInfo cmm
 	incUses	    reg	= modify $ \s -> addToUFM_C plusSpillCostRecord s reg (reg, 0, 1, 0)
 	incLifetime reg	= modify $ \s -> addToUFM_C plusSpillCostRecord s reg (reg, 0, 0, 1)
 
+
+takeVirtuals :: UniqSet Reg -> UniqSet VirtualReg
+takeVirtuals set = mapUniqSet get_virtual
+		$ filterUniqSet isVirtualReg set
+  where
+   get_virtual (RegVirtual vr) = vr 
+   get_virtual _ = panic "getVirt" 
 
 -- | Choose a node to spill from this graph
 

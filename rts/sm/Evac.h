@@ -14,7 +14,7 @@
 #ifndef SM_EVAC_H
 #define SM_EVAC_H
 
-BEGIN_RTS_PRIVATE
+#include "BeginPrivate.h"
 
 // Use a register argument for evacuate, if available.
 // Earlier, the regparm attribute was used whenever __GNUC__ >= 2, but this
@@ -26,7 +26,7 @@ BEGIN_RTS_PRIVATE
 //         registers EAX, EDX, and ECX instead of on the stack. Functions that
 //         take a variable number of arguments will continue to be passed all of
 //         their arguments on the stack.
-#if __GNUC__ >= 2 && (defined(x86_64_TARGET_ARCH) || defined(i386_TARGET_ARCH))
+#if __GNUC__ >= 2 && (defined(x86_64_HOST_ARCH) || defined(i386_HOST_ARCH))
 #define REGPARM1 __attribute__((regparm(1)))
 #else
 #define REGPARM1
@@ -37,7 +37,7 @@ REGPARM1 void evacuate1 (StgClosure **p);
 
 extern lnat thunk_selector_depth;
 
-END_RTS_PRIVATE
+#include "EndPrivate.h"
 
 #endif /* SM_EVAC_H */
 

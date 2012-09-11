@@ -63,8 +63,8 @@ module Foreign.Marshal.Array (
 ) where
 
 import Foreign.Ptr      (Ptr, plusPtr)
-import Foreign.Storable (Storable(sizeOf,peekElemOff,pokeElemOff))
-import Foreign.Marshal.Alloc (mallocBytes, allocaBytes, reallocBytes)
+import Foreign.Storable (Storable(alignment,sizeOf,peekElemOff,pokeElemOff))
+import Foreign.Marshal.Alloc (mallocBytes, allocaBytesAligned, reallocBytes)
 import Foreign.Marshal.Utils (copyBytes, moveBytes)
 
 #ifdef __GLASGOW_HASKELL__
@@ -101,13 +101,17 @@ allocaArray :: Storable a => Int -> (Ptr a -> IO b) -> IO b
 allocaArray  = doAlloca undefined
   where
     doAlloca            :: Storable a' => a' -> Int -> (Ptr a' -> IO b') -> IO b'
-    doAlloca dummy size  = allocaBytes (size * sizeOf dummy)
+    doAlloca dummy size  = allocaBytesAligned (size * sizeOf dummy)
+                                              (alignment dummy)
 
 -- |Like 'allocaArray', but add an extra position to hold a special
 -- termination element.
 --
 allocaArray0      :: Storable a => Int -> (Ptr a -> IO b) -> IO b
 allocaArray0 size  = allocaArray (size + 1)
+{-# INLINE allocaArray0 #-}
+  -- needed to get allocaArray to inline into withCString, for unknown
+  -- reasons --SDM 23/4/2010, see #4004 for benchmark
 
 -- |Adjust the size of an array
 --
@@ -126,10 +130,8 @@ reallocArray0 ptr size  = reallocArray ptr (size + 1)
 -- marshalling
 -- -----------
 
--- |Convert an array of given length into a Haskell list.  This version
--- traverses the array backwards using an accumulating parameter,
--- which uses constant stack space.  The previous version using mapM
--- needed linear stack space.
+-- |Convert an array of given length into a Haskell list.  The implementation
+-- is tail-recursive and so uses constant stack space.
 --
 peekArray          :: Storable a => Int -> Ptr a -> IO [a]
 peekArray size ptr | size <= 0 = return []

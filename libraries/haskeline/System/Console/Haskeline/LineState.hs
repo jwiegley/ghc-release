@@ -11,6 +11,7 @@ module System.Console.Haskeline.LineState(
                     mapBaseChars,
                     -- * Line State class
                     LineState(..),
+                    Prefix,
                     -- ** Convenience functions for the drawing backends
                     LineChars,
                     lineChars,
@@ -62,6 +63,9 @@ module System.Console.Haskeline.LineState(
                     applyCmdArg,
                     -- ** Other line state types
                     Message(..),
+                    Password(..),
+                    addPasswordChar,
+                    deletePasswordChar,
                     ) where
 
 import Data.Char
@@ -106,6 +110,15 @@ stringToGraphemes :: String -> [Grapheme]
 stringToGraphemes = mkString . dropWhile isCombiningChar
     where
         mkString [] = []
+        -- Minor hack: "\ESC...\STX" or "\SOH\ESC...\STX", where "\ESC..." is some
+        -- control sequence (e.g., ANSI colors), is represented as a grapheme
+        -- of zero length with '\ESC' as the base character.
+        -- Note that this won't round-trip correctly with graphemesToString.
+        -- In practice, however, that's fine since control characters can only occur
+        -- in the prompt.
+        mkString ('\SOH':cs) = stringToGraphemes cs
+        mkString ('\ESC':cs) | (ctrl,'\STX':rest) <- break (=='\STX') cs
+                    = Grapheme '\ESC' ctrl : stringToGraphemes rest
         mkString (c:cs) = Grapheme c (takeWhile isCombiningChar cs)
                                 : mkString (dropWhile isCombiningChar cs)
 
@@ -115,18 +128,20 @@ graphemesToString = concatMap (\g -> (baseChar g : combiningChars g))
 -- | This class abstracts away the internal representations of the line state,
 -- for use by the drawing actions.  Line state is generally stored in a zipper format.
 class LineState s where
-    beforeCursor :: String -- ^ The input prefix.
+    beforeCursor :: Prefix -- ^ The input prefix.
                     -> s -- ^ The current line state.
-                    -> [Grapheme] -- ^ The text to the left of the cursor, reversed.  (This 
-                                  -- includes the prefix.)
+                    -> [Grapheme] -- ^ The text to the left of the cursor
+                                  -- (including the prefix).
     afterCursor :: s -> [Grapheme] -- ^ The text under and to the right of the cursor.
+
+type Prefix = [Grapheme]
 
 -- | The characters in the line (with the cursor in the middle).  NOT in a zippered format;
 -- both lists are in the order left->right that appears on the screen.
 type LineChars = ([Grapheme],[Grapheme])
 
 -- | Accessor function for the various backends.
-lineChars :: LineState s => String -> s -> LineChars
+lineChars :: LineState s => Prefix -> s -> LineChars
 lineChars prefix s = (beforeCursor prefix s, afterCursor s)
 
 -- | Compute the number of characters under and to the right of the cursor.
@@ -155,7 +170,7 @@ data InsertMode = IMode [Grapheme] [Grapheme]
                     deriving (Show, Eq)
 
 instance LineState InsertMode where
-    beforeCursor prefix (IMode xs _) = stringToGraphemes prefix ++ reverse xs
+    beforeCursor prefix (IMode xs _) = prefix ++ reverse xs
     afterCursor (IMode _ ys) = ys
 
 instance Result InsertMode where
@@ -232,8 +247,8 @@ data CommandMode = CMode [Grapheme] Grapheme [Grapheme] | CEmpty
                     deriving Show
 
 instance LineState CommandMode where
-    beforeCursor prefix CEmpty = stringToGraphemes prefix
-    beforeCursor prefix (CMode xs _ _) = stringToGraphemes prefix ++ reverse xs
+    beforeCursor prefix CEmpty = prefix
+    beforeCursor prefix (CMode xs _ _) = prefix ++ reverse xs
     afterCursor CEmpty = []
     afterCursor (CMode _ c ys) = c:ys
 
@@ -310,7 +325,7 @@ instance Functor ArgMode where
     fmap f am = am {argState = f (argState am)}
 
 instance LineState s => LineState (ArgMode s) where
-    beforeCursor _ am = let pre = "(arg: " ++ show (arg am) ++ ") "
+    beforeCursor _ am = let pre = map baseGrapheme $ "(arg: " ++ show (arg am) ++ ") "
                              in beforeCursor pre (argState am) 
     afterCursor = afterCursor . argState
 
@@ -347,6 +362,29 @@ data Message s = Message {messageState :: s, messageText :: String}
 instance LineState (Message s) where
     beforeCursor _ = stringToGraphemes . messageText
     afterCursor _ = []
+
+----------------
+
+data Password = Password {passwordState :: [Char], -- ^ reversed
+                          passwordChar :: Maybe Char}
+
+instance LineState Password where
+    beforeCursor prefix p
+        = prefix ++ (stringToGraphemes
+                      $ case passwordChar p of
+                        Nothing -> []
+                        Just c -> replicate (length $ passwordState p) c)
+    afterCursor _ = []
+
+instance Result Password where
+    toResult = reverse . passwordState
+
+addPasswordChar :: Char -> Password -> Password
+addPasswordChar c p = p {passwordState = c : passwordState p}
+
+deletePasswordChar :: Password -> Password
+deletePasswordChar (Password (_:cs) m) = Password cs m
+deletePasswordChar p = p
 
 -----------------
 atStart, atEnd :: (Char -> Bool) -> InsertMode -> Bool

@@ -28,7 +28,7 @@ module Control.Monad
     -- ** Naming conventions
     -- $naming
 
-    -- ** Basic functions from the "Prelude"
+    -- ** Basic @Monad@ functions
 
     , mapM          -- :: (Monad m) => (a -> m b) -> [a] -> m [b]
     , mapM_         -- :: (Monad m) => (a -> m b) -> [a] -> m ()
@@ -40,11 +40,13 @@ module Control.Monad
     , (>=>)         -- :: (Monad m) => (a -> m b) -> (b -> m c) -> (a -> m c)
     , (<=<)         -- :: (Monad m) => (b -> m c) -> (a -> m b) -> (a -> m c)
     , forever       -- :: (Monad m) => m a -> m b
+    , void
 
     -- ** Generalisations of list functions
 
     , join          -- :: (Monad m) => m (m a) -> m a
     , msum          -- :: (MonadPlus m) => [m a] -> m a
+    , mfilter       -- :: (MonadPlus m) => (a -> Bool) -> m a -> m a
     , filterM       -- :: (Monad m) => (a -> m Bool) -> [a] -> m [a]
     , mapAndUnzipM  -- :: (Monad m) => (a -> m (b,c)) -> [a] -> m ([b], [c])
     , zipWithM      -- :: (Monad m) => (a -> b -> m c) -> [a] -> [b] -> m [c]
@@ -126,8 +128,6 @@ class Monad m => MonadPlus m where
    -- > mzero >>= f  =  mzero
    -- > v >> mzero   =  mzero
    --
-   -- (but the instance for 'System.IO.IO' defined in Control.Monad.Error
-   -- in the mtl package does not satisfy the second one).
    mzero :: m a 
    -- | an associative operation
    mplus :: m a -> m a -> m a
@@ -182,13 +182,17 @@ infixr 1 <=<, >=>
 (>=>)       :: Monad m => (a -> m b) -> (b -> m c) -> (a -> m c)
 f >=> g     = \x -> f x >>= g
 
--- | Right-to-left Kleisli composition of monads. '(>=>)', with the arguments flipped
+-- | Right-to-left Kleisli composition of monads. @('>=>')@, with the arguments flipped
 (<=<)       :: Monad m => (b -> m c) -> (a -> m b) -> (a -> m c)
 (<=<)       = flip (>=>)
 
 -- | @'forever' act@ repeats the action infinitely.
 forever     :: (Monad m) => m a -> m b
 forever a   = a >> forever a
+
+-- | @'void' value@ discards or ignores the result of evaluation, such as the return value of an 'IO' action.
+void :: Functor f => f a -> f ()
+void = fmap (const ())
 
 -- -----------------------------------------------------------------------------
 -- Other monad functions
@@ -215,11 +219,11 @@ zipWithM_ f xs ys =  sequence_ (zipWith f xs ys)
 
 {- | The 'foldM' function is analogous to 'foldl', except that its result is
 encapsulated in a monad. Note that 'foldM' works from left-to-right over
-the list arguments. This could be an issue where '(>>)' and the `folded
+the list arguments. This could be an issue where @('>>')@ and the `folded
 function' are not commutative.
 
 
->       foldM f a1 [x1, x2, ..., xm ]
+>       foldM f a1 [x1, x2, ..., xm]
 
 ==  
 
@@ -307,6 +311,20 @@ is equivalent to
 ap                :: (Monad m) => m (a -> b) -> m a -> m b
 ap                =  liftM2 id
 
+
+-- -----------------------------------------------------------------------------
+-- Other MonadPlus functions
+
+-- | Direct 'MonadPlus' equivalent of 'filter'
+-- @'filter'@ = @(mfilter:: (a -> Bool) -> [a] -> [a]@
+-- applicable to any 'MonadPlus', for example
+-- @mfilter odd (Just 1) == Just 1@
+-- @mfilter odd (Just 2) == Nothing@
+
+mfilter :: (MonadPlus m) => (a -> Bool) -> m a -> m a
+mfilter p ma = do
+  a <- ma
+  if p a then return a else mzero
 
 {- $naming
 

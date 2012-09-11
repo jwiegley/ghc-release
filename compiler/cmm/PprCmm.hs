@@ -115,7 +115,7 @@ instance Outputable CmmInfo where
 -----------------------------------------------------------------------------
 
 pprCmm :: (Outputable d, Outputable info, Outputable g) => GenCmm d info g -> SDoc
-pprCmm (Cmm tops) = vcat $ intersperse (text "") $ map pprTop tops
+pprCmm (Cmm tops) = vcat $ intersperse blankLine $ map pprTop tops
 
 -- --------------------------------------------------------------------------
 -- Top level `procedure' blocks.
@@ -265,6 +265,8 @@ pprStmt stmt = case stmt of
 	  pp_lhs | null results = empty
 		 | otherwise    = commafy (map ppr_ar results) <+> equals
 		-- Don't print the hints on a native C-- call
+
+          ppr_ar :: Outputable a => CmmHinted a -> SDoc
 	  ppr_ar (CmmHinted ar k) = case cconv of
 			    CmmCallConv -> ppr ar
 			    _           -> ppr (ar,k)
@@ -272,11 +274,16 @@ pprStmt stmt = case stmt of
 		      CmmCallConv -> empty
 		      _           -> ptext (sLit("foreign")) <+> doubleQuotes (ppr cconv)
 
+    -- Call a CallishMachOp, like sin or cos that might be implemented as a library call.
     CmmCall (CmmPrim op) results args safety ret ->
         pprStmt (CmmCall (CmmCallee (CmmLit lbl) CCallConv)
                         results args safety ret)
         where
-          lbl = CmmLabel (mkForeignLabel (mkFastString (show op)) Nothing False IsFunction)
+	  -- HACK: A CallishMachOp doesn't really correspond to a ForeignLabel, but we
+	  --	   use one to get the label printed.
+          lbl = CmmLabel (mkForeignLabel 
+	  			(mkFastString (show op)) 
+	  			Nothing ForeignLabelInThisPackage IsFunction)
 
     CmmBranch ident          -> genBranch ident
     CmmCondBranch expr ident -> genCondBranch expr ident
@@ -506,9 +513,8 @@ pprLit :: CmmLit -> SDoc
 pprLit lit = case lit of
     CmmInt i rep ->
         hcat [ (if i < 0 then parens else id)(integer i)
-             , (if rep == wordWidth
-                    then empty 
-                    else space <> dcolon <+> ppr rep) ]
+             , ppUnless (rep == wordWidth) $
+               space <> dcolon <+> ppr rep ]
 
     CmmFloat f rep     -> hsep [ rational f, dcolon, ppr rep ]
     CmmLabel clbl      -> pprCLabel clbl

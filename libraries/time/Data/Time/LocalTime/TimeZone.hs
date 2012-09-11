@@ -1,4 +1,6 @@
+{-# OPTIONS -fno-warn-unused-imports #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
+#include "HsConfigure.h"
 
 -- #hide
 module Data.Time.LocalTime.TimeZone
@@ -18,6 +20,9 @@ import Data.Time.Clock.POSIX
 import Foreign
 import Foreign.C
 import Data.Typeable
+#if LANGUAGE_Rank2Types
+import Data.Data
+#endif
 
 -- | A TimeZone is a whole number of minutes offset from UTC, together with a name and a \"just for summer\" flag.
 data TimeZone = TimeZone {
@@ -27,7 +32,13 @@ data TimeZone = TimeZone {
 	timeZoneSummerOnly :: Bool,
 	-- | The name of the zone, typically a three- or four-letter acronym.
 	timeZoneName :: String
-} deriving (Eq,Ord)
+} deriving (Eq,Ord
+#if LANGUAGE_DeriveDataTypeable
+#if LANGUAGE_Rank2Types
+    ,Data
+#endif
+#endif
+    )
 
 instance Typeable TimeZone where
 	typeOf _ = mkTyConApp (mkTyCon "Data.Time.LocalTime.TimeZone.TimeZone") []

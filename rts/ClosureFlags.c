@@ -50,9 +50,7 @@ StgWord16 closure_flags[] = {
  [PAP]		   	=  (_HNF|     _NS				 ),
  [AP_STACK]	   	=  (          	       _THU			 ),
  [IND]		   	=  (          _NS|			  _IND ),
- [IND_OLDGEN]	   	=  (          _NS|			  _IND ),
  [IND_PERM]		=  (          _NS|			  _IND ),
- [IND_OLDGEN_PERM]	=  (          _NS|			  _IND ),
  [IND_STATIC]	   	=  (          _NS|_STA|                   _IND ),
  [RET_BCO]		=  (     _BTM                                  ),
  [RET_SMALL]		=  (     _BTM|                       _SRT      ),
@@ -62,8 +60,8 @@ StgWord16 closure_flags[] = {
  [UPDATE_FRAME]        	=  (     _BTM                                  ),
  [CATCH_FRAME]	   	=  (     _BTM                                  ),
  [STOP_FRAME]	   	=  (     _BTM                                  ),
- [CAF_BLACKHOLE]   	=  ( 	 _BTM|_NS|              _UPT           ),
  [BLACKHOLE]		=  ( 	      _NS|              _UPT           ),
+ [BLOCKING_QUEUE]	=  ( 	      _NS|         _MUT|_UPT           ),
  [MVAR_CLEAN]	   	=  (_HNF|     _NS|         _MUT|_UPT           ),
  [MVAR_DIRTY]	   	=  (_HNF|     _NS|         _MUT|_UPT           ),
  [ARR_WORDS]		=  (_HNF|     _NS|              _UPT           ),
@@ -74,20 +72,16 @@ StgWord16 closure_flags[] = {
  [MUT_VAR_CLEAN]	=  (_HNF|     _NS|         _MUT|_UPT           ),
  [MUT_VAR_DIRTY]	=  (_HNF|     _NS|         _MUT|_UPT           ),
  [WEAK]		   	=  (_HNF|     _NS|              _UPT           ),
- [STABLE_NAME]	   	=  (_HNF|     _NS|              _UPT           ),
+ [PRIM]  	   	=  (_HNF|     _NS|              _UPT           ),
+ [MUT_PRIM]  	   	=  (_HNF|     _NS|         _MUT|_UPT           ),
  [TSO]                 	=  (_HNF|     _NS|         _MUT|_UPT           ),
- [TVAR_WATCH_QUEUE]     =  (          _NS|         _MUT|_UPT           ),
- [INVARIANT_CHECK_QUEUE]=  (          _NS|         _MUT|_UPT           ),
- [ATOMIC_INVARIANT]     =  (          _NS|         _MUT|_UPT           ),
- [TVAR]                 =  (_HNF|     _NS|         _MUT|_UPT           ), 
  [TREC_CHUNK]           =  (          _NS|         _MUT|_UPT           ),
- [TREC_HEADER]          =  (          _NS|         _MUT|_UPT           ),
  [ATOMICALLY_FRAME]     =  (     _BTM                                  ),
  [CATCH_RETRY_FRAME]    =  (     _BTM                                  ),
  [CATCH_STM_FRAME]      =  (     _BTM                                  ),
  [WHITEHOLE]		=  ( 0                                         )
 };
 
-#if N_CLOSURE_TYPES != 65
+#if N_CLOSURE_TYPES != 59
 #error Closure types changed: update ClosureFlags.c!
 #endif

@@ -71,6 +71,7 @@ module Distribution.Simple.Setup (
                                                                unregisterCommand,
   SDistFlags(..),    emptySDistFlags,    defaultSDistFlags,    sdistCommand,
   TestFlags(..),     emptyTestFlags,     defaultTestFlags,     testCommand,
+  TestShowDetails(..),
   CopyDest(..),
   configureArgs, configureOptions,
   installDirsOptions,
@@ -87,7 +88,10 @@ module Distribution.Simple.Setup (
 
 import Distribution.Compiler ()
 import Distribution.ReadE
-import Distribution.Text (display, Text(parse))
+import Distribution.Text
+         ( Text(..), display )
+import qualified Distribution.Compat.ReadP as Parse
+import qualified Text.PrettyPrint as Disp
 import Distribution.Package ( Dependency(..) )
 import Distribution.PackageDescription
          ( FlagName(..), FlagAssignment )
@@ -97,7 +101,7 @@ import Distribution.Simple.Compiler
          ( CompilerFlavor(..), defaultCompilerFlavor, PackageDB(..)
          , OptimisationLevel(..), flagToOptimisationLevel )
 import Distribution.Simple.Utils
-         ( wrapLine, lowercase )
+         ( wrapLine, lowercase, intercalate )
 import Distribution.Simple.Program (Program(..), ProgramConfiguration,
                              knownPrograms,
                              addKnownProgram, emptyProgramConfiguration,
@@ -105,12 +109,13 @@ import Distribution.Simple.Program (Program(..), ProgramConfiguration,
 import Distribution.Simple.InstallDirs
          ( InstallDirs(..), CopyDest(..),
            PathTemplate, toPathTemplate, fromPathTemplate )
-import Data.List (sort)
-import Data.Char (isSpace)
-import Data.Monoid (Monoid(..))
 import Distribution.Verbosity
 
--- XXX Not sure where this should live
+import Data.List   ( sort )
+import Data.Char   ( isSpace, isAlpha )
+import Data.Monoid ( Monoid(..) )
+
+-- FIXME Not sure where this should live
 defaultDistPref :: FilePath
 defaultDistPref = "dist"
 
@@ -135,7 +140,7 @@ defaultDistPref = "dist"
 -- Its monoid instance gives us the behaviour where it starts out as
 -- 'NoFlag' and later flags override earlier ones.
 --
-data Flag a = Flag a | NoFlag deriving (Show, Eq)
+data Flag a = Flag a | NoFlag deriving (Show, Read, Eq)
 
 instance Functor Flag where
   fmap f (Flag x) = Flag (f x)
@@ -282,9 +287,10 @@ data ConfigFlags = ConfigFlags {
     configStripExes :: Flag Bool,      -- ^Enable executable stripping
     configConstraints :: [Dependency], -- ^Additional constraints for
                                        -- dependencies
-    configConfigurationsFlags :: FlagAssignment
+    configConfigurationsFlags :: FlagAssignment,
+    configTests :: Flag Bool     -- ^Enable test suite compilation
   }
-  deriving Show
+  deriving (Read,Show)
 
 defaultConfigFlags :: ProgramConfiguration -> ConfigFlags
 defaultConfigFlags progConf = emptyConfigFlags {
@@ -302,7 +308,8 @@ defaultConfigFlags progConf = emptyConfigFlags {
     configUserInstall  = Flag False,           --TODO: reverse this
     configGHCiLib      = Flag True,
     configSplitObjs    = Flag False, -- takes longer, so turn off by default
-    configStripExes    = Flag True
+    configStripExes    = Flag True,
+    configTests  = Flag False
   }
 
 configureCommand :: ProgramConfiguration -> CommandUI ConfigFlags
@@ -333,7 +340,8 @@ configureOptions showOrParseArgs =
                     , (Flag NHC, ([] , ["nhc98"]), "compile with NHC")
                     , (Flag JHC, ([] , ["jhc"]), "compile with JHC")
                     , (Flag LHC, ([] , ["lhc"]), "compile with LHC")
-                    , (Flag Hugs,([] , ["hugs"]), "compile with Hugs")])
+                    , (Flag Hugs,([] , ["hugs"]), "compile with Hugs")
+                    , (Flag UHC, ([] , ["uhc"]), "compile with UHC")])
 
       ,option "w" ["with-compiler"]
          "give the path to a particular compiler"
@@ -350,6 +358,7 @@ configureOptions showOrParseArgs =
          "directory to receive the built package (hugs-only)"
          configScratchDir (\v flags -> flags { configScratchDir = v })
          (reqArgFlag "DIR")
+      --TODO: eliminate scratchdir flag
 
       ,option "" ["program-prefix"]
           "prefix to be applied to installed executables"
@@ -389,14 +398,10 @@ configureOptions showOrParseArgs =
                               Flag NormalOptimisation  -> [Nothing]
                               Flag MaximumOptimisation -> [Just "2"]
                               _                        -> [])
-                 "O" ("enable-optimization": case showOrParseArgs of
-                      -- Allow British English spelling:
-                      ShowArgs -> []; ParseArgs -> ["enable-optimisation"])
+                 "O" ["enable-optimization","enable-optimisation"]
                  "Build with optimization (n is 0--2, default is 1)",
           noArg (Flag NoOptimisation) []
-                ("disable-optimization": case showOrParseArgs of
-                      -- Allow British English spelling:
-                      ShowArgs -> []; ParseArgs -> ["disable-optimisation"])
+                ["disable-optimization","disable-optimisation"]
                 "Build without optimization"
          ]
 
@@ -453,6 +458,10 @@ configureOptions showOrParseArgs =
          (reqArg "DEPENDENCY"
                  (readP_to_E (const "dependency expected") ((\x -> [x]) `fmap` parse))
                  (map (\x -> display x)))
+      ,option "" ["tests"]
+         "dependency checking and compilation for test suites listed in the package description file."
+         configTests (\v flags -> flags { configTests = v })
+         (boolOpt [] [])
       ]
   where
     readFlagList :: String -> FlagAssignment
@@ -559,7 +568,8 @@ instance Monoid ConfigFlags where
     configExtraLibDirs  = mempty,
     configConstraints   = mempty,
     configExtraIncludeDirs    = mempty,
-    configConfigurationsFlags = mempty
+    configConfigurationsFlags = mempty,
+    configTests   = mempty
   }
   mappend a b =  ConfigFlags {
     configPrograms      = configPrograms b,
@@ -588,7 +598,8 @@ instance Monoid ConfigFlags where
     configExtraLibDirs  = combine configExtraLibDirs,
     configConstraints   = combine configConstraints,
     configExtraIncludeDirs    = combine configExtraIncludeDirs,
-    configConfigurationsFlags = combine configConfigurationsFlags
+    configConfigurationsFlags = combine configConfigurationsFlags,
+    configTests = combine configTests
   }
     where combine field = field a `mappend` field b
 
@@ -631,13 +642,6 @@ copyCommand = makeCommand name shortDesc longDesc defaultCopyFlags options
          copyDest (\v flags -> flags { copyDest = v })
          (reqArg "DIR" (succeedReadE (Flag . CopyTo))
                        (\f -> case f of Flag (CopyTo p) -> [p]; _ -> []))
-
-      ,option "" ["copy-prefix"]
-         "[DEPRECATED, directory to copy files to instead of prefix]"
-         copyDest (\v flags -> flags { copyDest = v })
-         (reqArg' "DIR" (Flag . CopyPrefix)
-                       (\f -> case f of Flag (CopyPrefix p) -> [p]; _ -> []))
-
       ]
 
 emptyCopyFlags :: CopyFlags
@@ -1025,7 +1029,7 @@ haddockCommand = makeCommand name shortDesc longDesc defaultHaddockFlags options
          haddockCss (\v flags -> flags { haddockCss = v })
          (reqArgFlag "PATH")
 
-      ,option "" ["hyperlink-source"]
+      ,option "" ["hyperlink-source","hyperlink-sources"]
          "Hyperlink the documentation to the source code (using HsColour)"
          haddockHscolour (\v flags -> flags { haddockHscolour = v })
          trueArg
@@ -1191,16 +1195,49 @@ instance Monoid BuildFlags where
 -- * Test flags
 -- ------------------------------------------------------------
 
+data TestShowDetails = Never | Failures | Always
+    deriving (Eq, Ord, Enum, Bounded, Show)
+
+knownTestShowDetails :: [TestShowDetails]
+knownTestShowDetails = [minBound..maxBound]
+
+instance Text TestShowDetails where
+    disp  = Disp.text . lowercase . show
+
+    parse = maybe Parse.pfail return . classify =<< ident
+      where
+        ident        = Parse.munch1 (\c -> isAlpha c || c == '_' || c == '-')
+        classify str = lookup (lowercase str) enumMap
+        enumMap     :: [(String, TestShowDetails)]
+        enumMap      = [ (display x, x)
+                       | x <- knownTestShowDetails ]
+
+--TODO: do we need this instance?
+instance Monoid TestShowDetails where
+    mempty = Never
+    mappend a b = if a < b then b else a
+
 data TestFlags = TestFlags {
     testDistPref  :: Flag FilePath,
-    testVerbosity :: Flag Verbosity
+    testVerbosity :: Flag Verbosity,
+    testHumanLog :: Flag PathTemplate,
+    testMachineLog :: Flag PathTemplate,
+    testShowDetails :: Flag TestShowDetails,
+    --TODO: eliminate the test list and pass it directly as positional args to the testHook
+    testList :: Flag [String],
+    -- TODO: think about if/how options are passed to test exes
+    testOptions :: Flag [String]
   }
-  deriving Show
 
 defaultTestFlags :: TestFlags
 defaultTestFlags  = TestFlags {
     testDistPref  = Flag defaultDistPref,
-    testVerbosity = Flag normal
+    testVerbosity = Flag normal,
+    testHumanLog = toFlag $ toPathTemplate $ "$pkgid-$test-suite.log",
+    testMachineLog = toFlag $ toPathTemplate $ "$pkgid.log",
+    testShowDetails = toFlag Failures,
+    testList = Flag [],
+    testOptions = Flag []
   }
 
 testCommand :: CommandUI TestFlags
@@ -1210,10 +1247,44 @@ testCommand = makeCommand name shortDesc longDesc defaultTestFlags options
     shortDesc  = "Run the test suite, if any (configure with UserHooks)."
     longDesc   = Nothing
     options showOrParseArgs =
-      [optionVerbosity testVerbosity (\v flags -> flags { testVerbosity = v })
-      ,optionDistPref
-         testDistPref (\d flags -> flags { testDistPref = d })
-         showOrParseArgs
+      [ optionVerbosity testVerbosity (\v flags -> flags { testVerbosity = v })
+      , optionDistPref
+            testDistPref (\d flags -> flags { testDistPref = d })
+            showOrParseArgs
+      , option [] ["log"]
+            ("Log all test suite results to file (name template can use "
+            ++ "$pkgid, $compiler, $os, $arch, $test-suite, $result)")
+            testHumanLog (\v flags -> flags { testHumanLog = v })
+            (reqArg' "TEMPLATE"
+                (toFlag . toPathTemplate)
+                (flagToList . fmap fromPathTemplate))
+      , option [] ["machine-log"]
+            ("Produce a machine-readable log file (name template can use "
+            ++ "$pkgid, $compiler, $os, $arch, $result)")
+            testMachineLog (\v flags -> flags { testMachineLog = v })
+            (reqArg' "TEMPLATE"
+                (toFlag . toPathTemplate)
+                (flagToList . fmap fromPathTemplate))
+      , option [] ["show-details"]
+            ("'always': always show results of individual test cases. "
+             ++ "'never': never show results of individual test cases. "
+             ++ "'failures': show results of failing test cases.")
+            testShowDetails (\v flags -> flags { testShowDetails = v })
+            (reqArg "FILTER"
+                (readP_to_E (\_ -> "--show-details flag expects one of "
+                              ++ intercalate ", "
+                                   (map display knownTestShowDetails))
+                            (fmap toFlag parse))
+                (flagToList . fmap display))
+      , option [] ["test-options"]
+            "give extra options to test executables"
+            testOptions (\v flags -> flags { testOptions = v })
+            (reqArg' "OPTS" (toFlag . splitArgs) (fromFlagOrDefault []))
+      , option [] ["test-option"]
+            ("give extra option to test executables "
+            ++ "(no need to quote options containing spaces)")
+            testOptions (\v flags -> flags { testOptions = v })
+            (reqArg' "OPT" (\x -> toFlag [x]) (fromFlagOrDefault []))
       ]
 
 emptyTestFlags :: TestFlags
@@ -1222,11 +1293,21 @@ emptyTestFlags  = mempty
 instance Monoid TestFlags where
   mempty = TestFlags {
     testDistPref  = mempty,
-    testVerbosity = mempty
+    testVerbosity = mempty,
+    testHumanLog = mempty,
+    testMachineLog = mempty,
+    testShowDetails = mempty,
+    testList = mempty,
+    testOptions = mempty
   }
   mappend a b = TestFlags {
     testDistPref  = combine testDistPref,
-    testVerbosity = combine testVerbosity
+    testVerbosity = combine testVerbosity,
+    testHumanLog = combine testHumanLog,
+    testMachineLog = combine testMachineLog,
+    testShowDetails = combine testShowDetails,
+    testList = combine testList,
+    testOptions = combine testOptions
   }
     where combine field = field a `mappend` field b
 

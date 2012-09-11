@@ -12,13 +12,14 @@ module Annotations (
     
     -- * AnnEnv for collecting and querying Annotations
     AnnEnv,
-    mkAnnEnv, extendAnnEnvList, plusAnnEnv, emptyAnnEnv, findAnns
+    mkAnnEnv, extendAnnEnvList, plusAnnEnv, emptyAnnEnv, findAnns,
+    deserializeAnns
   ) where
 
 import Name
 import Module           ( Module )
 import Outputable
-import LazyUniqFM
+import UniqFM
 import Serialized
 import Unique
 
@@ -62,6 +63,8 @@ instance Outputable name => Outputable (AnnTarget name) where
     ppr (NamedTarget nm) = text "Named target" <+> ppr nm
     ppr (ModuleTarget mod) = text "Module target" <+> ppr mod
 
+instance Outputable Annotation where
+    ppr ann = ppr (ann_target ann)
 
 -- | A collection of annotations
 newtype AnnEnv = MkAnnEnv (UniqFM [Serialized])
@@ -88,4 +91,11 @@ findAnns :: Typeable a => ([Word8] -> a) -> AnnEnv -> CoreAnnTarget -> [a]
 findAnns deserialize (MkAnnEnv ann_env) 
   = (mapMaybe (fromSerialized deserialize))
     . (lookupWithDefaultUFM ann_env [])
+
+-- | Deserialize all annotations of a given type. This happens lazily, that is
+--   no deserialization will take place until the [a] is actually demanded and
+--   the [a] can also be empty (the UniqFM is not filtered).
+deserializeAnns :: Typeable a => ([Word8] -> a) -> AnnEnv -> UniqFM [a]
+deserializeAnns deserialize (MkAnnEnv ann_env)
+  = mapUFM (mapMaybe (fromSerialized deserialize)) ann_env
 \end{code}

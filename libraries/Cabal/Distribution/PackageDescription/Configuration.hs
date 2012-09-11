@@ -1,7 +1,8 @@
 {-# OPTIONS -cpp #-}
 -- OPTIONS required for ghc-6.4.x compat, and must appear first
 {-# LANGUAGE CPP #-}
-{-# OPTIONS_GHC -cpp #-}
+-- -fno-warn-deprecations for use of Map.foldWithKey
+{-# OPTIONS_GHC -cpp -fno-warn-deprecations #-}
 {-# OPTIONS_NHC98 -cpp #-}
 {-# OPTIONS_JHC -fcpp #-}
 -----------------------------------------------------------------------------
@@ -63,7 +64,7 @@ import Distribution.PackageDescription
          ( GenericPackageDescription(..), PackageDescription(..)
          , Library(..), Executable(..), BuildInfo(..)
          , Flag(..), FlagName(..), FlagAssignment
-         , CondTree(..), ConfVar(..), Condition(..) )
+         , CondTree(..), ConfVar(..), Condition(..), TestSuite(..) )
 import Distribution.Version
          ( VersionRange, anyVersion, intersectVersionRanges, withinRange )
 import Distribution.Compiler
@@ -139,7 +140,7 @@ simplifyWithSysParams os arch (CompilerId comp compVer) cond = (cond', flags)
                                   && compVer `withinRange` vr
     interp (Flag  f)   = Left f
 
--- XXX: Add instances and check
+-- TODO: Add instances and check
 --
 -- prop_sC_idempotent cond a o = cond' == cond''
 --   where
@@ -221,9 +222,9 @@ data BT a = BTN a | BTB (BT a) (BT a)  -- very simple binary tree
 -- assignments.
 --
 -- In case of failure, the _smallest_ number of of missing dependencies is
--- returned. [XXX: Could also be specified with a function argument.]
+-- returned. [TODO: Could also be specified with a function argument.]
 --
--- XXX: The current algorithm is rather naive.  A better approach would be to:
+-- TODO: The current algorithm is rather naive.  A better approach would be to:
 --
 -- * Rule out possible paths, by taking a look at the associated dependencies.
 --
@@ -414,21 +415,32 @@ constrainBy left extra =
 
 -- | Collect up the targets in a TargetSet of tagged targets, storing the
 -- dependencies as we go.
-flattenTaggedTargets :: TargetSet PDTagged -> (Maybe Library, [(String, Executable)])
-flattenTaggedTargets (TargetSet targets) = foldr untag (Nothing, []) targets
+flattenTaggedTargets :: TargetSet PDTagged ->
+        (Maybe Library, [(String, Executable)], [(String, TestSuite)])
+flattenTaggedTargets (TargetSet targets) = foldr untag (Nothing, [], []) targets
   where
-    untag (_, Lib _) (Just _, _) = bug "Only one library expected"
-    untag (deps, Lib l) (Nothing, exes) = (Just l', exes)
+    untag (_, Lib _) (Just _, _, _) = bug "Only one library expected"
+    untag (deps, Lib l) (Nothing, exes, tests) = (Just l', exes, tests)
       where
         l' = l {
                 libBuildInfo = (libBuildInfo l) { targetBuildDepends = fromDepMap deps }
             }
-    untag (deps, Exe n e) (mlib, exes)
+    untag (deps, Exe n e) (mlib, exes, tests)
         | any ((== n) . fst) exes = bug "Exe with same name found"
-        | otherwise = (mlib, exes ++ [(n, e')])
+        | any ((== n) . fst) tests = bug "Test sharing name of exe found"
+        | otherwise = (mlib, exes ++ [(n, e')], tests)
       where
         e' = e {
                 buildInfo = (buildInfo e) { targetBuildDepends = fromDepMap deps }
+            }
+    untag (deps, Test n t) (mlib, exes, tests)
+        | any ((== n) . fst) tests = bug "Test with same name found"
+        | any ((== n) . fst) exes = bug "Test sharing name of exe found"
+        | otherwise = (mlib, exes, tests ++ [(n, t')])
+      where
+        t' = t {
+            testBuildInfo = (testBuildInfo t)
+                { targetBuildDepends = fromDepMap deps }
             }
     untag (_, PDNull) x = x  -- actually this should not happen, but let's be liberal
 
@@ -437,7 +449,7 @@ flattenTaggedTargets (TargetSet targets) = foldr untag (Nothing, []) targets
 -- Convert GenericPackageDescription to PackageDescription
 --
 
-data PDTagged = Lib Library | Exe String Executable | PDNull deriving Show
+data PDTagged = Lib Library | Exe String Executable | Test String TestSuite | PDNull deriving Show
 
 instance Monoid PDTagged where
     mempty = PDNull
@@ -445,6 +457,7 @@ instance Monoid PDTagged where
     x `mappend` PDNull = x
     Lib l `mappend` Lib l' = Lib (l `mappend` l')
     Exe n e `mappend` Exe n' e' | n == n' = Exe n (e `mappend` e')
+    Test n t `mappend` Test n' t' | n == n' = Test n (t `mappend` t')
     _ `mappend` _ = bug "Cannot combine incompatible tags"
 
 -- | Create a package description with all configurations resolved.
@@ -481,11 +494,12 @@ finalizePackageDescription ::
              -- ^ Either missing dependencies or the resolved package
              -- description along with the flag assignments chosen.
 finalizePackageDescription userflags satisfyDep (Platform arch os) impl constraints
-        (GenericPackageDescription pkg flags mlib0 exes0) =
+        (GenericPackageDescription pkg flags mlib0 exes0 tests0) =
     case resolveFlags of
-      Right ((mlib, exes'), targetSet, flagVals) ->
+      Right ((mlib, exes', tests'), targetSet, flagVals) ->
         Right ( pkg { library = mlib
                     , executables = exes'
+                    , testSuites = tests'
                     , buildDepends = fromDepMap (overallDependencies targetSet)
                       --TODO: we need to find a way to avoid pulling in deps
                       -- for non-buildable components. However cannot simply
@@ -496,16 +510,18 @@ finalizePackageDescription userflags satisfyDep (Platform arch os) impl constrai
 
       Left missing -> Left missing
   where
-    -- Combine lib and exes into one list of @CondTree@s with tagged data
+    -- Combine lib, exes, and tests into one list of @CondTree@s with tagged data
     condTrees = maybeToList (fmap (mapTreeData Lib) mlib0 )
                 ++ map (\(name,tree) -> mapTreeData (Exe name) tree) exes0
+                ++ map (\(name,tree) -> mapTreeData (Test name) tree) tests0
 
     resolveFlags =
         case resolveWithFlags flagChoices os arch impl constraints condTrees check of
           Right (targetSet, fs) ->
-              let (mlib, exes) = flattenTaggedTargets targetSet in
+              let (mlib, exes, tests) = flattenTaggedTargets targetSet in
               Right ( (fmap libFillInDefaults mlib,
-                       map (\(n,e) -> (exeFillInDefaults e) { exeName = n }) exes),
+                       map (\(n,e) -> (exeFillInDefaults e) { exeName = n }) exes,
+                       map (\(n,t) -> (testFillInDefaults t) { testName = n }) tests),
                      targetSet, fs)
           Left missing      -> Left missing
 
@@ -537,17 +553,18 @@ resolveWithFlags [] Distribution.System.Linux Distribution.System.I386 (Distribu
 -- joined into one field, which may not be possible in the original package
 -- description, due to the use of exclusive choices (if ... else ...).
 --
--- XXX: One particularly tricky case is defaulting.  In the original package
+-- TODO: One particularly tricky case is defaulting.  In the original package
 -- description, e.g., the source directory might either be the default or a
 -- certain, explicitly set path.  Since defaults are filled in only after the
 -- package has been resolved and when no explicit value has been set, the
 -- default path will be missing from the package description returned by this
 -- function.
 flattenPackageDescription :: GenericPackageDescription -> PackageDescription
-flattenPackageDescription (GenericPackageDescription pkg _ mlib0 exes0) =
+flattenPackageDescription (GenericPackageDescription pkg _ mlib0 exes0 tests0) =
     pkg { library = mlib
         , executables = reverse exes
-        , buildDepends = ldeps ++ reverse edeps
+        , testSuites = reverse tests
+        , buildDepends = ldeps ++ reverse edeps ++ reverse tdeps
         }
   where
     (mlib, ldeps) = case mlib0 of
@@ -555,9 +572,13 @@ flattenPackageDescription (GenericPackageDescription pkg _ mlib0 exes0) =
                     (Just (libFillInDefaults l), ds)
         Nothing -> (Nothing, [])
     (exes, edeps) = foldr flattenExe ([],[]) exes0
+    (tests, tdeps) = foldr flattenTst ([],[]) tests0
     flattenExe (n, t) (es, ds) =
         let (e, ds') = ignoreConditions t in
         ( (exeFillInDefaults $ e { exeName = n }) : es, ds' ++ ds )
+    flattenTst (n, t) (es, ds) =
+        let (e, ds') = ignoreConditions t in
+        ( (testFillInDefaults $ e { testName = n }) : es, ds' ++ ds )
 
 -- This is in fact rather a hack.  The original version just overrode the
 -- default values, however, when adding conditions we had to switch to a
@@ -573,6 +594,10 @@ libFillInDefaults lib@(Library { libBuildInfo = bi }) =
 exeFillInDefaults :: Executable -> Executable
 exeFillInDefaults exe@(Executable { buildInfo = bi }) =
     exe { buildInfo = biFillInDefaults bi }
+
+testFillInDefaults :: TestSuite -> TestSuite
+testFillInDefaults tst@(TestSuite { testBuildInfo = bi }) =
+    tst { testBuildInfo = biFillInDefaults bi }
 
 biFillInDefaults :: BuildInfo -> BuildInfo
 biFillInDefaults bi =

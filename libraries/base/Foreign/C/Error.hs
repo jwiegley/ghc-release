@@ -358,7 +358,7 @@ throwErrnoIfRetry pred loc f  =
           else throwErrno loc
       else return res
 
--- | as 'throwErrnoIfRetry', but additionlly if the operation 
+-- | as 'throwErrnoIfRetry', but additionally if the operation 
 -- yields the error code 'eAGAIN' or 'eWOULDBLOCK', an alternative
 -- action is executed before retrying.
 --
@@ -490,7 +490,7 @@ throwErrnoPathIfMinus1_  = throwErrnoPathIf_ (== -1)
 -- conversion of an "errno" value into IO error
 -- --------------------------------------------
 
--- | Construct a Haskell 98 I\/O error based on the given 'Errno' value.
+-- | Construct an 'IOError' based on the given 'Errno' value.
 -- The optional information can be used to improve the accuracy of
 -- error messages.
 --

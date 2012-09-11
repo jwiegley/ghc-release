@@ -3,12 +3,9 @@
 %
 \section[TysWiredIn]{Wired-in knowledge about {\em non-primitive} types}
 
-This module tracks the ``state interface'' document, ``GHC prelude:
-types and operations.''
-
 \begin{code}
 -- | This module is about types that can be defined in Haskell, but which
--- must be wired into the compiler nonetheless.
+--   must be wired into the compiler nonetheless.  C.f module TysPrim
 module TysWiredIn (
         -- * All wired in things
 	wiredInTyCons, 
@@ -41,7 +38,7 @@ module TysWiredIn (
 	mkListTy,
 
 	-- * Tuples
-	mkTupleTy,
+	mkTupleTy, mkBoxedTupleTy,
 	tupleTyCon, tupleCon, 
 	unitTyCon, unitDataCon, unitDataConId, pairTyCon, 
 	unboxedSingletonTyCon, unboxedSingletonDataCon,
@@ -75,8 +72,7 @@ import TyCon		( TyCon, AlgTyConRhs(DataTyCon), tyConDataCons,
 			  mkTupleTyCon, mkAlgTyCon, tyConName,
 			  TyConParent(NoParentTyCon) )
 
-import BasicTypes	( Arity, RecFlag(..), Boxity(..), isBoxed,
-			  StrictnessMark(..) )
+import BasicTypes	( Arity, RecFlag(..), Boxity(..), isBoxed, HsBang(..) )
 
 import Type		( Type, mkTyConTy, mkTyConApp, mkTyVarTy, mkTyVarTys,
 			  TyThing(..) )
@@ -187,16 +183,6 @@ intDataCon_RDR	= nameRdrName intDataConName
 listTyCon_RDR	= nameRdrName listTyConName
 consDataCon_RDR = nameRdrName consDataConName
 parrTyCon_RDR	= nameRdrName parrTyConName
-{-
-tySuperKindTyCon_RDR     = nameRdrName tySuperKindTyConName
-coSuperKindTyCon_RDR = nameRdrName coSuperKindTyConName
-liftedTypeKindTyCon_RDR   = nameRdrName liftedTypeKindTyConName
-openTypeKindTyCon_RDR     = nameRdrName openTypeKindTyConName
-unliftedTypeKindTyCon_RDR = nameRdrName unliftedTypeKindTyConName
-ubxTupleKindTyCon_RDR     = nameRdrName ubxTupleKindTyConName
-argTypeKindTyCon_RDR      = nameRdrName argTypeKindTyConName
-funKindTyCon_RDR          = nameRdrName funKindTyConName
--}
 \end{code}
 
 
@@ -241,7 +227,7 @@ pcDataConWithFixity declared_infix dc_name tyvars arg_tys tycon
   = data_con
   where
     data_con = mkDataCon dc_name declared_infix
-                (map (const NotMarkedStrict) arg_tys)
+                (map (const HsNoBang) arg_tys)
                 [] 	-- No labelled fields
                 tyvars
 		[] 	-- No existential type variables
@@ -328,6 +314,7 @@ unboxedPairTyCon   = tupleTyCon Unboxed 2
 unboxedPairDataCon :: DataCon
 unboxedPairDataCon = tupleCon   Unboxed 2
 \end{code}
+
 
 %************************************************************************
 %*									*
@@ -536,11 +523,17 @@ done by enumeration\srcloc{lib/prelude/InTup?.hs}.
 \end{itemize}
 
 \begin{code}
-mkTupleTy :: Boxity -> Int -> [Type] -> Type
-mkTupleTy boxity arity tys = mkTyConApp (tupleTyCon boxity arity) tys
+mkTupleTy :: Boxity -> [Type] -> Type
+-- Special case for *boxed* 1-tuples, which are represented by the type itself
+mkTupleTy boxity [ty] | Boxed <- boxity = ty
+mkTupleTy boxity tys = mkTyConApp (tupleTyCon boxity (length tys)) tys
+
+-- | Build the type of a small tuple that holds the specified type of thing
+mkBoxedTupleTy :: [Type] -> Type
+mkBoxedTupleTy tys = mkTupleTy Boxed tys
 
 unitTy :: Type
-unitTy = mkTupleTy Boxed 0 []
+unitTy = mkTupleTy Boxed []
 \end{code}
 
 %************************************************************************

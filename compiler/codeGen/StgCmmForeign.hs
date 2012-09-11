@@ -56,11 +56,17 @@ cgForeignCall results result_hints (CCall (CCallSpec target cconv safety)) stg_a
   = do	{ cmm_args <- getFCallArgs stg_args
         ; let ((call_args, arg_hints), cmm_target)
                 = case target of
-                    StaticTarget lbl ->
-                      (unzip cmm_args,
-                       CmmLit (CmmLabel (mkForeignLabel lbl (call_size cmm_args)
-                                                        False IsFunction)))
-                    DynamicTarget    ->  case cmm_args of
+                   StaticTarget lbl mPkgId 
+		     -> let labelSource
+				= case mPkgId of
+					Nothing		-> ForeignLabelInThisPackage
+					Just pkgId	-> ForeignLabelInPackage pkgId
+			    size	= call_size cmm_args
+			in  ( unzip cmm_args
+			    , CmmLit (CmmLabel 
+					(mkForeignLabel lbl size labelSource IsFunction)))
+ 
+                   DynamicTarget    ->  case cmm_args of
                                            (fn,_):rest -> (unzip rest, fn)
                                            [] -> panic "cgForeignCall []"
               fc = ForeignConvention cconv arg_hints result_hints
@@ -97,9 +103,9 @@ emitCCall hinted_results fn hinted_args
     fc = ForeignConvention CCallConv arg_hints result_hints
     
 
-emitPrimCall :: CmmFormal -> CallishMachOp -> CmmActuals -> FCode ()
+emitPrimCall :: CmmFormals -> CallishMachOp -> CmmActuals -> FCode ()
 emitPrimCall res op args
-  = emitForeignCall PlayRisky [res] (PrimTarget op) args NoC_SRT CmmMayReturn
+  = emitForeignCall PlayRisky res (PrimTarget op) args NoC_SRT CmmMayReturn
 
 -- alternative entry point, used by CmmParse
 emitForeignCall

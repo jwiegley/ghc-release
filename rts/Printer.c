@@ -128,21 +128,16 @@ printClosure( StgClosure *obj )
     case CONSTR_NOCAF_STATIC:
         {
             StgWord i, j;
+            StgConInfoTable *con_info = get_con_itbl (obj);
 
-#ifdef PROFILING
-	    debugBelch("%s(", GET_PROF_DESC(info));
-	    debugBelch("%s", obj->header.prof.ccs->cc->label);
-#else
-            debugBelch("CONSTR(");
-            printPtr((StgPtr)obj->header.info);
-            debugBelch("(tag=%d)",info->srt_bitmap);
-#endif
+            debugBelch("%s(", GET_CON_DESC(con_info));
             for (i = 0; i < info->layout.payload.ptrs; ++i) {
-		debugBelch(", ");
+		if (i != 0) debugBelch(", ");
                 printPtr((StgPtr)obj->payload[i]);
             }
             for (j = 0; j < info->layout.payload.nptrs; ++j) {
-                debugBelch(", %p#", obj->payload[i+j]);
+		if (i != 0 || j != 0) debugBelch(", ");
+                debugBelch("%p#", obj->payload[i+j]);
             }
             debugBelch(")\n");
             break;
@@ -157,6 +152,12 @@ printClosure( StgClosure *obj )
 #ifdef PROFILING
 	debugBelch(", %s", obj->header.prof.ccs->cc->label);
 #endif
+	printStdObjPayload(obj);
+	break;
+
+    case PRIM:
+	debugBelch("PRIM(");
+	printPtr((StgPtr)obj->header.info);
 	printStdObjPayload(obj);
 	break;
 
@@ -227,26 +228,20 @@ printClosure( StgClosure *obj )
             debugBelch(")\n"); 
             break;
 
-    case IND_OLDGEN:
-            debugBelch("IND_OLDGEN("); 
-            printPtr((StgPtr)((StgInd*)obj)->indirectee);
-            debugBelch(")\n"); 
-            break;
-
     case IND_PERM:
             debugBelch("IND("); 
             printPtr((StgPtr)((StgInd*)obj)->indirectee);
             debugBelch(")\n"); 
             break;
 
-    case IND_OLDGEN_PERM:
-            debugBelch("IND_OLDGEN_PERM("); 
+    case IND_STATIC:
+            debugBelch("IND_STATIC("); 
             printPtr((StgPtr)((StgInd*)obj)->indirectee);
             debugBelch(")\n"); 
             break;
 
-    case IND_STATIC:
-            debugBelch("IND_STATIC("); 
+    case BLACKHOLE:
+            debugBelch("BLACKHOLE("); 
             printPtr((StgPtr)((StgInd*)obj)->indirectee);
             debugBelch(")\n"); 
             break;
@@ -290,23 +285,11 @@ printClosure( StgClosure *obj )
             break;
         }
 
-    case CAF_BLACKHOLE:
-            debugBelch("CAF_BH"); 
-            break;
-
-    case BLACKHOLE:
-            debugBelch("BH\n"); 
-            break;
-
     case ARR_WORDS:
         {
             StgWord i;
             debugBelch("ARR_WORDS(\"");
-            /* ToDo: we can't safely assume that this is a string! 
-            for (i = 0; arrWordsGetChar(obj,i); ++i) {
-                putchar(arrWordsGetChar(obj,i));
-		} */
-	    for (i=0; i<((StgArrWords *)obj)->words; i++)
+	    for (i=0; i<arr_words_words((StgArrWords *)obj); i++)
 	      debugBelch("%lu", (lnat)((StgArrWords *)obj)->payload[i]);
             debugBelch("\")\n");
             break;
@@ -354,10 +337,6 @@ printClosure( StgClosure *obj )
 		    (StgPtr)(((StgWeak*)obj)->finalizer));
             debugBelch(")\n"); 
 	    /* ToDo: chase 'link' ? */
-            break;
-
-    case STABLE_NAME:
-            debugBelch("STABLE_NAME(%lu)\n", (lnat)((StgStableName*)obj)->sn); 
             break;
 
     case TSO:
@@ -918,19 +897,31 @@ int searched = 0;
 static int
 findPtrBlocks (StgPtr p, bdescr *bd, StgPtr arr[], int arr_size, int i)
 {
-    StgPtr q, r;
+    StgPtr q, r, end;
     for (; bd; bd = bd->link) {
         searched++;
         for (q = bd->start; q < bd->free; q++) {
             if (UNTAG_CLOSURE((StgClosure*)*q) == (StgClosure *)p) {
                 if (i < arr_size) {
-                    r = q;
-                    while (HEAP_ALLOCED((StgPtr)*r) || !LOOKS_LIKE_INFO_PTR(*r) || (P_)*r == NULL) {
-                        r--;
+                    for (r = bd->start; r < bd->free; r = end) {
+                        // skip over zeroed-out slop
+                        while (*r == 0) r++;
+                        if (!LOOKS_LIKE_CLOSURE_PTR(r)) {
+                            debugBelch("%p found at %p, no closure at %p\n",
+                                       p, q, r);
+                            break;
+                        }
+                        end = r + closure_sizeW((StgClosure*)r);
+                        if (q < end) {
+                            debugBelch("%p = ", r);
+                            printClosure((StgClosure *)r);
+                            arr[i++] = r;
+                            break;
+                        }
                     }
-                    debugBelch("%p = ", r);
-                    printClosure((StgClosure *)r);
-                    arr[i++] = r;
+                    if (r >= bd->free) {
+                        debugBelch("%p found at %p, closure?", p, q);
+                    }
                 } else {
                     return i;
                 }
@@ -943,25 +934,19 @@ findPtrBlocks (StgPtr p, bdescr *bd, StgPtr arr[], int arr_size, int i)
 void
 findPtr(P_ p, int follow)
 {
-  nat s, g;
+  nat g;
   bdescr *bd;
-#if defined(__GNUC__)
   const int arr_size = 1024;
-#else
-#define arr_size 1024
-#endif
   StgPtr arr[arr_size];
   int i = 0;
   searched = 0;
 
   for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-      for (s = 0; s < generations[g].n_steps; s++) {
-	  bd = generations[g].steps[s].blocks;
-          i = findPtrBlocks(p,bd,arr,arr_size,i);
-	  bd = generations[g].steps[s].large_objects;
-          i = findPtrBlocks(p,bd,arr,arr_size,i);
-          if (i >= arr_size) return;
-      }
+      bd = generations[g].blocks;
+      i = findPtrBlocks(p,bd,arr,arr_size,i);
+      bd = generations[g].large_objects;
+      i = findPtrBlocks(p,bd,arr,arr_size,i);
+      if (i >= arr_size) return;
   }
   if (follow && i == 1) {
       debugBelch("-->\n");
@@ -996,9 +981,7 @@ void prettyPrintClosure_ (StgClosure *obj)
            
     while (type == IND ||
            type == IND_STATIC ||
-           type == IND_OLDGEN ||
-           type == IND_PERM ||
-           type == IND_OLDGEN_PERM) 
+           type == IND_PERM)
     {
       obj = ((StgInd *)obj)->indirectee;
       type = get_itbl(obj)->type;
@@ -1110,9 +1093,7 @@ char *closure_type_names[] = {
  [PAP]                   = "PAP",
  [AP_STACK]              = "AP_STACK",
  [IND]                   = "IND",
- [IND_OLDGEN]            = "IND_OLDGEN",
  [IND_PERM]              = "IND_PERM",
- [IND_OLDGEN_PERM]       = "IND_OLDGEN_PERM",
  [IND_STATIC]            = "IND_STATIC",
  [RET_BCO]               = "RET_BCO",
  [RET_SMALL]             = "RET_SMALL",
@@ -1122,8 +1103,8 @@ char *closure_type_names[] = {
  [UPDATE_FRAME]          = "UPDATE_FRAME",
  [CATCH_FRAME]           = "CATCH_FRAME",
  [STOP_FRAME]            = "STOP_FRAME",
- [CAF_BLACKHOLE]         = "CAF_BLACKHOLE",
  [BLACKHOLE]             = "BLACKHOLE",
+ [BLOCKING_QUEUE]        = "BLOCKING_QUEUE",
  [MVAR_CLEAN]            = "MVAR_CLEAN",
  [MVAR_DIRTY]            = "MVAR_DIRTY",
  [ARR_WORDS]             = "ARR_WORDS",
@@ -1134,14 +1115,10 @@ char *closure_type_names[] = {
  [MUT_VAR_CLEAN]         = "MUT_VAR_CLEAN",
  [MUT_VAR_DIRTY]         = "MUT_VAR_DIRTY",
  [WEAK]                  = "WEAK",
- [STABLE_NAME]           = "STABLE_NAME",
+ [PRIM]	                 = "PRIM",
+ [MUT_PRIM]              = "MUT_PRIM",
  [TSO]                   = "TSO",
- [TVAR_WATCH_QUEUE]      = "TVAR_WATCH_QUEUE",
- [INVARIANT_CHECK_QUEUE] = "INVARIANT_CHECK_QUEUE",
- [ATOMIC_INVARIANT]      = "ATOMIC_INVARIANT",
- [TVAR]                  = "TVAR",
  [TREC_CHUNK]            = "TREC_CHUNK",
- [TREC_HEADER]           = "TREC_HEADER",
  [ATOMICALLY_FRAME]      = "ATOMICALLY_FRAME",
  [CATCH_RETRY_FRAME]     = "CATCH_RETRY_FRAME",
  [CATCH_STM_FRAME]       = "CATCH_STM_FRAME",

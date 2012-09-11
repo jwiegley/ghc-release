@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [6.12.3], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.0.1], [glasgow-haskell-bugs@haskell.org], [ghc])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=YES}
@@ -125,13 +125,13 @@ if test "$WithGhc" != ""; then
   AC_SUBST(GhcPatchLevel)dnl
   GhcMinVersion2=`echo "$GhcMinVersion" | sed 's/^\\(.\\)$/0\\1/'`
   GhcCanonVersion="$GhcMajVersion$GhcMinVersion2"
-  if test $GhcCanonVersion -ge 609; then ghc_ge_609=YES; else ghc_ge_609=NO; fi
   FP_COMPARE_VERSIONS($GhcVersion,[-ge],[6.10.2],
                       [ghc_ge_6102=YES], [ghc_ge_6102=NO])
   if test $GhcCanonVersion -ge 611; then ghc_ge_611=YES; else ghc_ge_611=NO; fi
-  AC_SUBST(ghc_ge_609)dnl
+  if test $GhcCanonVersion -ge 613; then ghc_ge_613=YES; else ghc_ge_613=NO; fi
   AC_SUBST(ghc_ge_6102)dnl
   AC_SUBST(ghc_ge_611)dnl
+  AC_SUBST(ghc_ge_613)dnl
 fi
 
 dnl ** Must have GHC to build GHC, unless --enable-hc-boot is on
@@ -139,8 +139,8 @@ if test "$BootingFromHc" = "NO" -a -d "$srcdir/compiler"; then
   if test "$WithGhc" = ""; then
      AC_MSG_ERROR([GHC is required unless bootstrapping from .hc files.])
   fi
-  FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[6.8],
-    [AC_MSG_ERROR([GHC version 6.8 or later is required to compile GHC.])])dnl
+  FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[6.10],
+    [AC_MSG_ERROR([GHC version 6.10 or later is required to compile GHC.])])dnl
 
   if test `expr $GhcMinVersion % 2` = "1"; then
      if test "$EnableBootstrapWithDevelSnaphost" = "NO"; then
@@ -313,17 +313,9 @@ case $host in
     ;;
 i386-apple-darwin|powerpc-apple-darwin)
     soext='.dylib'
-    CFLAGS="$CFLAGS -m32"
-    LDFLAGS="$LDFLAGS -m32"
-    CONF_CC_OPTS="$CONF_CC_OPTS -m32"
-    CONF_LD_OPTS="$CONF_LD_OPTS -m32"
     ;;
 x86_64-apple-darwin)
     soext='.dylib'
-    CFLAGS="$CFLAGS -m64"
-    LDFLAGS="$LDFLAGS -m64"
-    CONF_CC_OPTS="$CONF_CC_OPTS -m64"
-    CONF_LD_OPTS="$CONF_LD_OPTS -m64"
     ;;
 esac
 
@@ -434,30 +426,38 @@ then
     NM="$hardtop/inplace/mingw/bin/nm.exe"
     fp_prog_ar_raw="$hardtop/inplace/mingw/bin/ar.exe"
     if ! test -d inplace/mingw ||
-         test inplace/mingw -ot ghc-tarballs/mingw/binutils*.tar.gz ||
-         test inplace/mingw -ot ghc-tarballs/mingw/gcc-core*.tar.gz ||
-         test inplace/mingw -ot ghc-tarballs/mingw/gcc-g++*.tar.gz ||
-         test inplace/mingw -ot ghc-tarballs/mingw/libcrypt*.tar.bz2 ||
-         test inplace/mingw -ot ghc-tarballs/mingw/mingw-runtime*.tar.gz ||
-         test inplace/mingw -ot ghc-tarballs/mingw/msysCORE*.tar.gz ||
-         test inplace/mingw -ot ghc-tarballs/mingw/perl*.tar.bz2 ||
-         test inplace/mingw -ot ghc-tarballs/mingw/w32api*.tar.gz
+         test inplace/mingw -ot ghc-tarballs/mingw/binutils*.tar.lzma  ||
+         test inplace/mingw -ot ghc-tarballs/mingw/gcc-core*.tar.lzma  ||
+         test inplace/mingw -ot ghc-tarballs/mingw/gcc-c++*.tar.lzma   ||
+         test inplace/mingw -ot ghc-tarballs/mingw/libgmp*.tar.gz      ||
+         test inplace/mingw -ot ghc-tarballs/mingw/libmpc*.tar.gz      ||
+         test inplace/mingw -ot ghc-tarballs/mingw/libmpfr*.tar.gz     ||
+         test inplace/mingw -ot ghc-tarballs/mingw/mingwrt*-dev.tar.gz ||
+         test inplace/mingw -ot ghc-tarballs/mingw/mingwrt*-dll.tar.gz ||
+         test inplace/mingw -ot ghc-tarballs/mingw/w32api*.tar.lzma
     then
         AC_MSG_NOTICE([Making in-tree mingw tree])
         rm -rf inplace/mingw
-        mkdir inplace
+        test -d inplace || mkdir inplace
         mkdir inplace/mingw
         (
             cd inplace/mingw &&
-            tar -zxf ../../ghc-tarballs/mingw/binutils*.tar.gz &&
-            tar -zxf ../../ghc-tarballs/mingw/gcc-core*.tar.gz &&
-            tar -zxf ../../ghc-tarballs/mingw/gcc-g++*.tar.gz &&
-            tar -jxf ../../ghc-tarballs/mingw/libcrypt*.tar.bz2 &&
-            tar -zxf ../../ghc-tarballs/mingw/mingw-runtime*.tar.gz &&
-            tar -zxf ../../ghc-tarballs/mingw/w32api*.tar.gz &&
+            tar --lzma -xf ../../ghc-tarballs/mingw/binutils*.tar.lzma  &&
+            tar --lzma -xf ../../ghc-tarballs/mingw/gcc-core*.tar.lzma  &&
+            tar --lzma -xf ../../ghc-tarballs/mingw/gcc-c++*.tar.lzma   &&
+            tar --lzma -xf ../../ghc-tarballs/mingw/libgmp*.tar.lzma    &&
+            tar --lzma -xf ../../ghc-tarballs/mingw/libmpc*.tar.lzma    &&
+            tar --lzma -xf ../../ghc-tarballs/mingw/libmpfr*.tar.lzma   &&
+            tar -z     -xf ../../ghc-tarballs/mingw/mingwrt*-dev.tar.gz &&
+            tar -z     -xf ../../ghc-tarballs/mingw/mingwrt*-dll.tar.gz &&
+            tar --lzma -xf ../../ghc-tarballs/mingw/w32api*.tar.lzma    &&
             mv bin/gcc.exe bin/realgcc.exe
         )
-        inplace/mingw/bin/realgcc.exe driver/gcc/gcc.c driver/utils/getLocation.c -Idriver/utils -o inplace/mingw/bin/gcc.exe
+        PATH=`pwd`/inplace/mingw/bin:$PATH inplace/mingw/bin/realgcc.exe driver/gcc/gcc.c driver/utils/cwrapper.c driver/utils/getLocation.c -Idriver/utils -o inplace/mingw/bin/gcc.exe
+        if ! test -e inplace/mingw/bin/gcc.exe
+        then
+            AC_MSG_ERROR([GHC is required unless bootstrapping from .hc files.])
+        fi
         AC_MSG_NOTICE([In-tree mingw tree created])
     fi
     if ! test -d inplace/perl ||
@@ -566,13 +566,24 @@ dnl     Figure out which C compiler to use.  Gcc is preferred.
 dnl     If gcc, make sure it's at least 2.1
 dnl
 FP_HAVE_GCC
+
+FPTOOLS_SET_C_LD_FLAGS([target],[CFLAGS],[LDFLAGS])
+FPTOOLS_SET_C_LD_FLAGS([build],[CONF_CC_OPTS_STAGE0],[CONF_LD_OPTS_STAGE0])
+FPTOOLS_SET_C_LD_FLAGS([target],[CONF_CC_OPTS_STAGE1],[CONF_LD_OPTS_STAGE1])
+# Stage 3 won't be supported by cross-compilation
+FPTOOLS_SET_C_LD_FLAGS([target],[CONF_CC_OPTS_STAGE2],[CONF_LD_OPTS_STAGE2])
+
 FP_GCC_EXTRA_FLAGS
 
 dnl ** figure out how to invoke cpp directly (gcc -E is no good)
 AC_PROG_CPP
 
-AC_SUBST(CONF_CC_OPTS)
-AC_SUBST(CONF_LD_OPTS)
+AC_SUBST(CONF_CC_OPTS_STAGE0)
+AC_SUBST(CONF_CC_OPTS_STAGE1)
+AC_SUBST(CONF_CC_OPTS_STAGE2)
+AC_SUBST(CONF_LD_OPTS_STAGE0)
+AC_SUBST(CONF_LD_OPTS_STAGE1)
+AC_SUBST(CONF_LD_OPTS_STAGE2)
 
 dnl ** figure out how to do context diffs
 FP_PROG_CONTEXT_DIFF
@@ -609,6 +620,16 @@ AC_PATH_PROGS(TarCmd,gnutar gtar tar,tar)
 dnl ** check for patch
 dnl if GNU patch is named gpatch, look for it first
 AC_PATH_PROGS(PatchCmd,gpatch patch, patch)
+
+dnl ** check for dtrace (currently only implemented for Mac OS X)
+HaveDtrace=NO
+AC_PATH_PROG(DtraceCmd,dtrace)
+if test -n "$DtraceCmd"; then
+  if test "x$TargetOS_CPP-$TargetVendor_CPP" == "xdarwin-apple"; then
+    HaveDtrace=YES
+  fi
+fi
+AC_SUBST(HaveDtrace)
 
 AC_PATH_PROG(HSCOLOUR,HsColour)
 # HsColour is passed to Cabal, so we need a native path
@@ -658,7 +679,7 @@ dnl    off_t, because it will affect the result of that test.
 AC_SYS_LARGEFILE
 
 dnl ** check for specific header (.h) files that we are interested in
-AC_CHECK_HEADERS([bfd.h ctype.h dirent.h dlfcn.h errno.h fcntl.h grp.h limits.h locale.h nlist.h pthread.h pwd.h signal.h sys/mman.h sys/resource.h sys/select.h sys/time.h sys/timeb.h sys/timers.h sys/times.h sys/utsname.h sys/wait.h termios.h time.h utime.h windows.h winsock.h sched.h])
+AC_CHECK_HEADERS([bfd.h ctype.h dirent.h dlfcn.h errno.h fcntl.h grp.h limits.h locale.h nlist.h pthread.h pwd.h signal.h sys/cpuset.h sys/mman.h sys/resource.h sys/select.h sys/time.h sys/timeb.h sys/timers.h sys/times.h sys/utsname.h sys/wait.h termios.h time.h utime.h windows.h winsock.h sched.h])
 
 dnl ** check if it is safe to include both <time.h> and <sys/time.h>
 AC_HEADER_TIME
@@ -770,8 +791,11 @@ dnl    Keep that check as early as possible.
 dnl    as we need to know whether we need libm
 dnl    for math functions or not
 dnl    (see http://hackage.haskell.org/trac/ghc/ticket/3730)
-AC_SEARCH_LIBS(atan, m, 
-  [AC_DEFINE([HAVE_LIBM], [1], [Define to 1 if you need to link with libm])])
+AC_CHECK_LIB(m, atan, HaveLibM=YES, HaveLibM=NO)
+if test $HaveLibM = YES
+then
+  AC_DEFINE([HAVE_LIBM], [1], [Define to 1 if you need to link with libm])
+fi
 
 dnl ** check whether this machine has BFD and liberty installed (used for debugging)
 dnl    the order of these tests matters: bfd needs liberty
@@ -865,6 +889,10 @@ AC_TRY_LINK_FUNC(printf\$LDBLStub,
             [Define to 1 if we have printf$LDBLStub (Apple Mac OS >= 10.4, PPC).])
     ])
 
+dnl ** check for eventfd which is needed by the I/O manager
+AC_CHECK_HEADERS([sys/eventfd.h])
+AC_CHECK_FUNCS([eventfd])
+
 # test for GTK+
 AC_PATH_PROGS([GTK_CONFIG], [pkg-config])
 if test -n "$GTK_CONFIG"; then
@@ -922,7 +950,7 @@ if grep '	' compiler/ghc.cabal.in 2>&1 >/dev/null; then
    AC_MSG_ERROR([compiler/ghc.cabal.in contains tab characters; please remove them])
 fi
 
-AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal ghc.spec extra-gcc-opts docs/users_guide/ug-book.xml docs/users_guide/ug-ent.xml docs/index.html libraries/prologue.txt distrib/ghc.iss distrib/configure.ac])
+AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal ghc.spec extra-gcc-opts docs/users_guide/ug-book.xml docs/users_guide/ug-ent.xml docs/index.html libraries/prologue.txt distrib/ghc.iss distrib/configure.ac distrib/MacOS/installer-scripts/create-links distrib/MacOS/installer-scripts/Uninstaller distrib/MacOS/GHC-system.pmdoc/index.xml])
 AC_CONFIG_COMMANDS([mk/stamp-h],[echo timestamp > mk/stamp-h])
 AC_OUTPUT
 

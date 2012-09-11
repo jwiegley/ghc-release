@@ -10,67 +10,11 @@
 #define UPDATES_H
 
 #ifndef CMINUSMINUS
-BEGIN_RTS_PRIVATE
+#include "BeginPrivate.h"
 #endif
 
 /* -----------------------------------------------------------------------------
    Updates
-
-   We have two layers of update macros.  The top layer, UPD_IND() and
-   friends perform all the work of an update.  In detail:
-
-      - if the closure being updated is a blocking queue, then all the
-        threads waiting on the blocking queue are updated.
-
-      - then the lower level updateWithIndirection() macro is invoked 
-        to actually replace the closure with an indirection (see below).
-
-   -------------------------------------------------------------------------- */
-
-#  define SEMI ;
-# define UPD_IND(updclosure, heapptr) \
-   UPD_REAL_IND(updclosure,INFO_PTR(stg_IND_info),heapptr,SEMI)
-# define UPD_SPEC_IND(updclosure, ind_info, heapptr, and_then) \
-   UPD_REAL_IND(updclosure,ind_info,heapptr,and_then)
-
-/* These macros have to work in both C and C--, so here's the
- * impedance matching:
- */
-#ifdef CMINUSMINUS
-#define BLOCK_BEGIN
-#define BLOCK_END
-#define INFO_PTR(info)      info
-#else
-#define BLOCK_BEGIN         {
-#define BLOCK_END           }
-#define INFO_PTR(info)      &info
-#define StgBlockingQueue_blocking_queue(closure) \
-    (((StgBlockingQueue *)closure)->blocking_queue)
-#endif
-
-/* krc: there used to be an UPD_REAL_IND and an
-   UPD_PERM_IND, the latter of which was used for
-   ticky and cost-centre profiling.
-   for now, we just have UPD_REAL_IND. */
-#define UPD_REAL_IND(updclosure, ind_info, heapptr, and_then)	\
-        BLOCK_BEGIN						\
-	updateWithIndirection(ind_info,				\
-			      updclosure,			\
-			      heapptr,				\
-			      and_then);			\
-	BLOCK_END
-
-/* -----------------------------------------------------------------------------
-   Awaken any threads waiting on a blocking queue (BLACKHOLE_BQ).
-   -------------------------------------------------------------------------- */
-
-/* -----------------------------------------------------------------------------
-   Updates: lower-level macros which update a closure with an
-   indirection to another closure.
-
-   There are several variants of this code.
-
-       PROFILING:
    -------------------------------------------------------------------------- */
 
 /* LDV profiling:
@@ -78,8 +22,8 @@ BEGIN_RTS_PRIVATE
  * which p1 resides.
  *
  * Note: 
- *   After all, we do *NOT* need to call LDV_RECORD_CREATE() for both IND and 
- *   IND_OLDGEN closures because they are inherently used. But, it corrupts
+ *   After all, we do *NOT* need to call LDV_RECORD_CREATE() for IND
+ *   closures because they are inherently used. But, it corrupts
  *   the invariants that every closure keeps its creation time in the profiling
  *  field. So, we call LDV_RECORD_CREATE().
  */
@@ -104,8 +48,7 @@ BEGIN_RTS_PRIVATE
   W_ sz;								\
   W_ i;									\
   inf = %GET_STD_INFO(p);						\
-  if (%INFO_TYPE(inf) != HALF_W_(BLACKHOLE)				\
-	&& %INFO_TYPE(inf) != HALF_W_(CAF_BLACKHOLE)) {			\
+  if (%INFO_TYPE(inf) != HALF_W_(BLACKHOLE)) {				\
       if (%INFO_TYPE(inf) == HALF_W_(THUNK_SELECTOR)) {			\
 	  sz = BYTES_TO_WDS(SIZEOF_StgSelector_NoThunkHdr);		\
      } else {								\
@@ -138,7 +81,6 @@ FILL_SLOP(StgClosure *p)
 
     switch (inf->type) {
     case BLACKHOLE:
-    case CAF_BLACKHOLE:
 	goto no_slop;
 	// we already filled in the slop when we overwrote the thunk
 	// with BLACKHOLE, and also an evacuated BLACKHOLE is only the
@@ -182,56 +124,56 @@ no_slop:
  * invert the optimisation.  Grrrr --SDM).
  */
 #ifdef CMINUSMINUS
-#define generation(n) (W_[generations] + n*SIZEOF_generation)
-#define updateWithIndirection(ind_info, p1, p2, and_then)	\
+
+#define updateWithIndirection(p1, p2, and_then)	\
     W_ bd;							\
 								\
     DEBUG_FILL_SLOP(p1);					\
     LDV_RECORD_DEAD_FILL_SLOP_DYNAMIC(p1);			\
     StgInd_indirectee(p1) = p2;					\
     prim %write_barrier() [];					\
+    SET_INFO(p1, stg_BLACKHOLE_info);                           \
+    LDV_RECORD_CREATE(p1);                                      \
     bd = Bdescr(p1);						\
-    if (bdescr_gen_no(bd) != 0 :: CInt) {			\
+    if (bdescr_gen_no(bd) != 0 :: bits16) {			\
       recordMutableCap(p1, TO_W_(bdescr_gen_no(bd)), R1);  	\
-      SET_INFO(p1, stg_IND_OLDGEN_info);			\
-      LDV_RECORD_CREATE(p1);					\
       TICK_UPD_OLD_IND();					\
       and_then;							\
     } else {							\
-      SET_INFO(p1, ind_info);					\
-      LDV_RECORD_CREATE(p1);					\
       TICK_UPD_NEW_IND();					\
       and_then;							\
   }
-#else
-#define updateWithIndirection(ind_info, p1, p2, and_then)	\
-  {								\
-    bdescr *bd;							\
-								\
-    ASSERT( (P_)p1 != (P_)p2 );                                 \
-    /* not necessarily true: ASSERT( !closure_IND(p1) ); */     \
-    /* occurs in RaiseAsync.c:raiseAsync() */                   \
-    DEBUG_FILL_SLOP(p1);					\
-    LDV_RECORD_DEAD_FILL_SLOP_DYNAMIC(p1);			\
-    ((StgInd *)p1)->indirectee = p2;				\
-    write_barrier();						\
-    bd = Bdescr((P_)p1);					\
-    if (bd->gen_no != 0) {					\
-      recordMutableGenLock(p1, bd->gen_no);			\
-      SET_INFO(p1, &stg_IND_OLDGEN_info);			\
-      TICK_UPD_OLD_IND();					\
-      and_then;							\
-    } else {							\
-      SET_INFO(p1, ind_info);					\
-      LDV_RECORD_CREATE(p1);					\
-      TICK_UPD_NEW_IND();					\
-      and_then;							\
-    }								\
-  }
+
+#else /* !CMINUSMINUS */
+
+INLINE_HEADER void updateWithIndirection (Capability *cap, 
+                                          StgClosure *p1, 
+                                          StgClosure *p2)
+{
+    bdescr *bd;
+    
+    ASSERT( (P_)p1 != (P_)p2 );
+    /* not necessarily true: ASSERT( !closure_IND(p1) ); */
+    /* occurs in RaiseAsync.c:raiseAsync() */
+    DEBUG_FILL_SLOP(p1);
+    LDV_RECORD_DEAD_FILL_SLOP_DYNAMIC(p1);
+    ((StgInd *)p1)->indirectee = p2;
+    write_barrier();
+    SET_INFO(p1, &stg_BLACKHOLE_info);
+    LDV_RECORD_CREATE(p1);
+    bd = Bdescr((StgPtr)p1);
+    if (bd->gen_no != 0) {
+        recordMutableCap(p1, cap, bd->gen_no);
+        TICK_UPD_OLD_IND();
+    } else {
+        TICK_UPD_NEW_IND();
+    }
+}
+
 #endif /* CMINUSMINUS */
 
 #ifndef CMINUSMINUS
-END_RTS_PRIVATE
+#include "EndPrivate.h"
 #endif
 
 #endif /* UPDATES_H */

@@ -9,5 +9,5 @@
 #include "Rts.h"
 #include "RtsOpts.h"
 
-const rtsBool rtsOptsEnabled = rtsTrue;
+const rtsOptsEnabledEnum rtsOptsEnabled = rtsOptsSafeOnly;
 

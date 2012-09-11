@@ -46,6 +46,7 @@ import PrelInfo
 import Outputable
 import ListSetOps
 import Util
+import Module
 import FastString
 import StaticFlags
 \end{code}
@@ -164,13 +165,21 @@ which is guaranteed in range.
 
 Because of this, we use can safely return an addressing mode.
 
+We don't support this optimisation when compiling into Windows DLLs yet
+because they don't support cross package data references well.
+
 \begin{code}
+
+
 buildDynCon binder _ con [arg_amode]
   | maybeIntLikeCon con 
+#if defined(mingw32_TARGET_OS)
+  , not opt_PIC
+#endif
   , (_, CmmLit (CmmInt val _)) <- arg_amode
   , let val_int = (fromIntegral val) :: Int
   , val_int <= mAX_INTLIKE && val_int >= mIN_INTLIKE
-  = do 	{ let intlike_lbl   = mkRtsGcPtrLabel (sLit "stg_INTLIKE_closure")
+  = do 	{ let intlike_lbl   = mkCmmGcPtrLabel rtsPackageId (fsLit "stg_INTLIKE_closure")
 	      offsetW = (val_int - mIN_INTLIKE) * (fixedHdrSize + 1)
 		-- INTLIKE closures consist of a header and one word payload
 	      intlike_amode = CmmLit (cmmLabelOffW intlike_lbl offsetW)
@@ -178,14 +187,18 @@ buildDynCon binder _ con [arg_amode]
 
 buildDynCon binder _ con [arg_amode]
   | maybeCharLikeCon con 
+#if defined(mingw32_TARGET_OS)
+  , not opt_PIC
+#endif
   , (_, CmmLit (CmmInt val _)) <- arg_amode
   , let val_int = (fromIntegral val) :: Int
   , val_int <= mAX_CHARLIKE && val_int >= mIN_CHARLIKE
-  = do 	{ let charlike_lbl   = mkRtsGcPtrLabel (sLit "stg_CHARLIKE_closure")
+  = do 	{ let charlike_lbl   = mkCmmGcPtrLabel rtsPackageId (fsLit "stg_CHARLIKE_closure")
 	      offsetW = (val_int - mIN_CHARLIKE) * (fixedHdrSize + 1)
 		-- CHARLIKE closures consist of a header and one word payload
 	      charlike_amode = CmmLit (cmmLabelOffW charlike_lbl offsetW)
 	; returnFC (taggedStableIdInfo binder charlike_amode (mkConLFInfo con) con) }
+
 \end{code}
 
 Now the general case.

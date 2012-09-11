@@ -109,13 +109,9 @@ processHeapClosureForDead( StgClosure *c )
     case MUT_VAR_CLEAN:
     case MUT_VAR_DIRTY:
     case BCO:
-    case STABLE_NAME:
-    case TVAR_WATCH_QUEUE:
-    case TVAR:
-    case TREC_HEADER:
+    case PRIM:
+    case MUT_PRIM:
     case TREC_CHUNK:
-    case INVARIANT_CHECK_QUEUE:
-    case ATOMIC_INVARIANT:
 	return size;
 
 	/*
@@ -144,20 +140,18 @@ processHeapClosureForDead( StgClosure *c )
     case FUN_1_1:
     case FUN_0_2:
     case BLACKHOLE:
-    case CAF_BLACKHOLE:
+    case BLOCKING_QUEUE:
     case IND_PERM:
-    case IND_OLDGEN_PERM:
 	/*
 	  'Ingore' cases
 	*/
-	// Why can we ignore IND/IND_OLDGEN closures? We assume that
+	// Why can we ignore IND closures? We assume that
 	// any census is preceded by a major garbage collection, which
-	// IND/IND_OLDGEN closures cannot survive. Therefore, it is no
-	// use considering IND/IND_OLDGEN closures in the meanwhile
+	// IND closures cannot survive. Therefore, it is no
+	// use considering IND closures in the meanwhile
 	// because they will perish before the next census at any
 	// rate.
     case IND:
-    case IND_OLDGEN:
 	// Found a dead closure: record its size
 	LDV_recordDead(c, size);
 	return size;
@@ -233,27 +227,6 @@ processNurseryForDead( void )
 }
 
 /* --------------------------------------------------------------------------
- * Calls processHeapClosureForDead() on every *dead* closures in the
- * small object pool.
- * ----------------------------------------------------------------------- */
-static void
-processSmallObjectPoolForDead( void )
-{
-    bdescr *bd;
-    StgPtr p;
-
-    for (bd = g0s0->blocks; bd != NULL; bd = bd->link) {
-	p = bd->start;
-	while (p < bd->free) {
-	    p += processHeapClosureForDead((StgClosure *)p);
-	    while (p < bd->free && !*p)    // skip slop
-		p++;
-	}
-	ASSERT(p == bd->free);
-    }
-}
-
-/* --------------------------------------------------------------------------
  * Calls processHeapClosureForDead() on every *dead* closures in the closure
  * chain.
  * ----------------------------------------------------------------------- */
@@ -280,7 +253,7 @@ processChainForDead( bdescr *bd )
 void
 LdvCensusForDead( nat N )
 {
-    nat g, s;
+    nat g;
 
     // ldvTime == 0 means that LDV profiling is currently turned off.
     if (era == 0)
@@ -292,17 +265,11 @@ LdvCensusForDead( nat N )
 	//
 	barf("Lag/Drag/Void profiling not supported with -G1");
     } else {
-	for (g = 0; g <= N; g++)
-	    for (s = 0; s < generations[g].n_steps; s++) {
-		if (g == 0 && s == 0) {
-		    processSmallObjectPoolForDead();
-		    processNurseryForDead();
-		    processChainForDead(generations[g].steps[s].large_objects);
-		} else{
-		    processHeapForDead(generations[g].steps[s].old_blocks);
-		    processChainForDead(generations[g].steps[s].large_objects);
-		}
-	    }
+        processNurseryForDead();
+	for (g = 0; g <= N; g++) {
+            processHeapForDead(generations[g].old_blocks);
+            processChainForDead(generations[g].large_objects);
+        }
     }
 }
 

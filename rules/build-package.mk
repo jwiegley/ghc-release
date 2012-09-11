@@ -29,6 +29,7 @@
 # libraries/base_dist_LD_OPTS = -package ghc-prim-0.1.0.0
 
 define build-package
+$(call trace, build-package($1,$2,$3))
 # $1 = dir
 # $2 = distdir
 # $3 = GHC stage to use (0 == bootstrapping compiler)
@@ -46,7 +47,7 @@ maintainer-clean : distclean
 .PHONY: clean_$1_$2_config
 clean_$1_$2_config:
 	"$$(RM)" $$(RM_OPTS) $1/config.log $1/config.status $1/include/Hs*Config.h
-	"$$(RM)" $$(RM_OPTS) -r $1/autom4te.cache
+	"$$(RM)" $$(RM_OPTS_REC) $1/autom4te.cache
 
 ifneq "$$($1_$2_NOT_NEEDED)" "YES"
 $$(eval $$(call build-package-helper,$1,$2,$3))
@@ -80,11 +81,11 @@ endif
 
 # --- CONFIGURATION
 
-$(call package-config,$1,$2,$3)
-
 ifneq "$$(NO_INCLUDE_PKGDATA)" "YES"
 include $1/$2/package-data.mk
 endif
+
+$(call package-config,$1,$2,$3)
 
 ifeq "$$($1_$2_DISABLE)" "YES"
 
@@ -131,7 +132,7 @@ $(call includes-sources,$1,$2)
 # We must use a different dependency file if $(GhcLibWays) changes, so
 # encode the ways into the name of the file.
 $1_$2_WAYS_DASHED = $$(subst $$(space),,$$(patsubst %,-%,$$(strip $$($1_$2_WAYS))))
-$1_$2_depfile = $1/$2/build/.depend$$($1_$2_WAYS_DASHED)
+$1_$2_depfile_base = $1/$2/build/.depend$$($1_$2_WAYS_DASHED)
 
 $(call build-dependencies,$1,$2,$3)
 
@@ -147,7 +148,7 @@ endif
 endif
 
 # C and S files are possibly built the "dyn" way.
-ifeq "$(BuildSharedLibs)" "YES"
+ifeq "$$(BuildSharedLibs)" "YES"
 $(call c-objs,$1,$2,dyn)
 $(call c-suffix-rules,$1,$2,dyn,YES)
 endif

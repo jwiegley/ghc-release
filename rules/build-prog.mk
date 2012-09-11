@@ -20,6 +20,7 @@
 # $(eval $(call build-prog,utils/genapply,dist-install,1))
 
 define build-prog
+$(call trace, build-prog($1,$2,$3))
 # $1 = dir
 # $2 = distdir
 # $3 = GHC stage to use (0 == bootstrapping compiler)
@@ -49,15 +50,19 @@ define build-prog-helper
 
 $(call all-target,$1,all_$1_$2)
 
-$(call package-config,$1,$2,$3)
-
 ifeq "$$($1_USES_CABAL)" "YES"
+$1_$2_USES_CABAL = YES
+endif
+
+ifeq "$$($1_$2_USES_CABAL)" "YES"
 ifneq "$$(NO_INCLUDE_PKGDATA)" "YES"
 include $1/$2/package-data.mk
 endif
 endif
 
-ifeq "$$($1_USES_CABAL)$$($1_$2_VERSION)" "YES"
+$(call package-config,$1,$2,$3)
+
+ifeq "$$($1_$2_USES_CABAL)$$($1_$2_VERSION)" "YES"
 $1_$2_DISABLE = YES
 endif
 
@@ -83,12 +88,14 @@ endif
 else
 
 ifneq "$$(BINDIST)" "YES"
+$1_$2_WAYS = v
+
 $(call hs-sources,$1,$2)
 $(call c-sources,$1,$2)
 
 # --- DEPENDENCIES
 
-$1_$2_depfile = $1/$2/build/.depend
+$1_$2_depfile_base = $1/$2/build/.depend
 
 $(call build-dependencies,$1,$2,$3)
 
@@ -97,7 +104,13 @@ $(call build-dependencies,$1,$2,$3)
 # Just the 'v' way for programs
 $(call distdir-way-opts,$1,$2,v,$3)
 
+ifeq "$3" "0"
+# For stage 0, we use GHC to compile C sources so that we don't have to
+# worry about where the RTS header files are
 $(call c-suffix-rules,$1,$2,v,YES)
+else
+$(call c-suffix-rules,$1,$2,v,NO)
+endif
 
 $(call hs-suffix-rules,$1,$2,v)
 $$(foreach dir,$$($1_$2_HS_SRC_DIRS),\
@@ -106,14 +119,20 @@ $$(foreach dir,$$($1_$2_HS_SRC_DIRS),\
 $(call c-objs,$1,$2,v)
 $(call hs-objs,$1,$2,v)
 
-ifeq "$$(BootingFromHc)" "NO"
-$1/$2/build/tmp/$$($1_$2_PROG) : $$($1_$2_v_HS_OBJS) $$($1_$2_v_C_OBJS) $$($1_$2_v_S_OBJS) $$($1_$2_OTHER_OBJS)
-	"$$(MKDIRHIER)" $$(dir $$@)
-	"$$($1_$2_HC)" -o $$@ $$($1_$2_v_ALL_HC_OPTS) $$(LD_OPTS) $$($1_$2_v_HS_OBJS) $$($1_$2_v_C_OBJS) $$($1_$2_v_S_OBJS) $$($1_$2_OTHER_OBJS)
+$1_$2_LINK_WITH_GCC = NO
+ifeq "$$(BootingFromHc)" "YES"
+$1_$2_LINK_WITH_GCC = YES
+endif
+ifeq "$$($1_$2_v_HS_OBJS)" ""
+$1_$2_LINK_WITH_GCC = YES
+endif
+
+ifeq "$$($1_$2_LINK_WITH_GCC)" "NO"
+$1/$2/build/tmp/$$($1_$2_PROG) : $$($1_$2_v_HS_OBJS) $$($1_$2_v_C_OBJS) $$($1_$2_v_S_OBJS) $$($1_$2_OTHER_OBJS) | $$$$(dir $$$$@)/.
+	"$$($1_$2_HC)" -o $$@ $$($1_$2_v_ALL_HC_OPTS) $$(LD_OPTS) $$($1_$2_v_HS_OBJS) $$($1_$2_v_C_OBJS) $$($1_$2_v_S_OBJS) $$($1_$2_OTHER_OBJS) $$(addprefix -l,$$($1_$2_EXTRA_LIBRARIES))
 else
-$1/$2/build/tmp/$$($1_$2_PROG) : $$($1_$2_v_HS_OBJS) $$($1_$2_v_C_OBJS) $$($1_$2_v_S_OBJS) $$($1_$2_OTHER_OBJS)
-	"$$(MKDIRHIER)" $$(dir $$@)
-	"$$(CC)" -o $$@ $$($1_$2_v_ALL_CC_OPTS) $$(LD_OPTS) $$($1_$2_v_HS_OBJS) $$($1_$2_v_C_OBJS) $$($1_$2_v_S_OBJS) $$($1_$2_OTHER_OBJS) $$($1_$2_v_EXTRA_CC_OPTS)
+$1/$2/build/tmp/$$($1_$2_PROG) : $$($1_$2_v_HS_OBJS) $$($1_$2_v_C_OBJS) $$($1_$2_v_S_OBJS) $$($1_$2_OTHER_OBJS) | $$$$(dir $$$$@)/.
+	"$$(CC)" -o $$@ $$($1_$2_v_ALL_CC_OPTS) $$(LD_OPTS) $$($1_$2_v_HS_OBJS) $$($1_$2_v_C_OBJS) $$($1_$2_v_S_OBJS) $$($1_$2_OTHER_OBJS) $$($1_$2_v_EXTRA_CC_OPTS) $$(addprefix -l,$$($1_$2_EXTRA_LIBRARIES))
 endif
 
 # Note [lib-depends] if this program is built with stage1 or greater, we
@@ -147,8 +166,7 @@ $(call clean-target,$1,$2_inplace,$$($1_$2_INPLACE))
 
 # INPLACE_BIN might be empty if we're distcleaning
 ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
-$$($1_$2_INPLACE) : $1/$2/build/tmp/$$($1_$2_PROG) $$(MKDIRHIER)
-	"$$(MKDIRHIER)" $$(dir $$@)
+$$($1_$2_INPLACE) : $1/$2/build/tmp/$$($1_$2_PROG) | $$$$(dir $$$$@)/.
 	"$$(CP)" -p $$< $$@
 	touch $$@
 endif

@@ -19,3 +19,26 @@ T4003:
 	'$(TEST_HC)' -O -c T4003B.hs
 	'$(TEST_HC)' -O -c T4003A.hs
 
+T3449:
+	$(RM) T3449.hi-boot T3449.hi T3449A.hi
+	$(RM) T3449.o-boot  T3449.o  T3449A.o
+	'$(TEST_HC)' -Wall -c T3449.hs-boot
+	'$(TEST_HC)' -Wall -c T3449A.hs
+	'$(TEST_HC)' -Wall -c T3449.hs
+
+T4239:
+	$(RM) T4239A.hi T4239A.o
+	$(RM) T4239.hi  T4239.o T4239.imports
+	'$(TEST_HC)' -c T4239A.hs
+	'$(TEST_HC)' -c T4239.hs -ddump-minimal-imports
+	cat T4239.imports
+
+T4240:
+	$(RM) T4240A.hi T4240A.o
+	$(RM) T4240B.hi T4240B.o
+	$(RM) T4240.hi  T4240.o T4240.imports
+	'$(TEST_HC)' -c T4240A.hs
+	'$(TEST_HC)' -c T4240B.hs
+	'$(TEST_HC)' -c T4240.hs -ddump-minimal-imports
+	cat T4240.imports
+

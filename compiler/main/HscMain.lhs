@@ -14,7 +14,7 @@ module HscMain
     , hscSimplify
     , hscNormalIface, hscWriteIface, hscGenHardCode
 #ifdef GHCI
-    , hscStmt, hscTcExpr, hscKcType
+    , hscStmt, hscTcExpr, hscImport, hscKcType
     , compileExpr
 #endif
     , HsCompiler(..)
@@ -24,6 +24,7 @@ module HscMain
     , hscCompileBatch       -- :: Compiler (HscStatus, ModIface, ModDetails)
     , hscCompileNothing     -- :: Compiler (HscStatus, ModIface, ModDetails)
     , hscCompileInteractive -- :: Compiler (InteractiveStatus, ModIface, ModDetails)
+    , hscCheckRecompBackend
     , HscStatus' (..)
     , InteractiveStatus, HscStatus
 
@@ -45,14 +46,16 @@ import CorePrep		( corePrepExpr )
 import Desugar          ( deSugarExpr )
 import SimplCore        ( simplifyExpr )
 import TcRnDriver	( tcRnStmt, tcRnExpr, tcRnType ) 
-import Type		( Type )
+import Type		( Type, tyVarsOfTypes )
 import PrelNames	( iNTERACTIVE )
 import {- Kind parts of -} Type		( Kind )
+import Id      	     	( idType )
 import CoreLint		( lintUnfolding )
 import DsMeta		( templateHaskellNames )
-import SrcLoc		( SrcSpan, noSrcLoc, interactiveSrcLoc, srcLocSpan, noSrcSpan )
+import SrcLoc		( SrcSpan, noSrcLoc, interactiveSrcLoc, srcLocSpan, noSrcSpan, unLoc )
 import VarSet
 import VarEnv		( emptyTidyEnv )
+import Panic
 #endif
 
 import Id		( Id )
@@ -108,7 +111,7 @@ import HscStats		( ppSourceStats )
 import HscTypes
 import MkExternalCore	( emitExternalCore )
 import FastString
-import LazyUniqFM		( emptyUFM )
+import UniqFM		( emptyUFM )
 import UniqSupply       ( initUs_ )
 import Bag		( unitBag )
 import Exception
@@ -147,9 +150,7 @@ newHscEnv callbacks dflags
 			   hsc_FC      = fc_var,
 			   hsc_MLC     = mlc_var,
 			   hsc_OptFuel = optFuel,
-                           hsc_type_env_var = Nothing,
-                           hsc_global_rdr_env = emptyGlobalRdrEnv,
-                           hsc_global_type_env = emptyNameEnv } ) }
+                           hsc_type_env_var = Nothing } ) }
 
 
 knownKeyNames :: [Name]	-- Put here to avoid loops involving DsMeta,
@@ -183,9 +184,9 @@ hscParse mod_summary = do
             Just b  -> return b
             Nothing -> liftIO $ hGetStringBuffer src_filename
 
-   let loc  = mkSrcLoc (mkFastString src_filename) 1 0
+   let loc  = mkSrcLoc (mkFastString src_filename) 1 1
 
-   case unP parseModule (mkPState buf loc dflags) of
+   case unP parseModule (mkPState dflags buf loc) of
      PFailed span err ->
          throwOneError (mkPlainErrMsg span err)
 
@@ -336,12 +337,6 @@ type Compiler result =  GhcMonad m =>
 
 data HsCompiler a
   = HsCompiler {
-    -- | The main interface.
-    hscCompile :: GhcMonad m =>
-                  HscEnv -> ModSummary -> Bool
-               -> Maybe ModIface -> Maybe (Int, Int)
-               -> m a,
-
     -- | Called when no recompilation is necessary.
     hscNoRecomp :: GhcMonad m =>
                    ModIface -> m a,
@@ -388,6 +383,22 @@ genericHscCompile compiler hscMessage
            -> do hscMessage mb_mod_index True mod_summary
                  hscRecompile compiler mod_summary mb_old_hash
 
+hscCheckRecompBackend :: HsCompiler a -> TcGblEnv -> Compiler a
+hscCheckRecompBackend compiler tc_result 
+                   hsc_env mod_summary source_unchanged mb_old_iface _m_of_n =
+   withTempSession (\_ -> hsc_env) $ do
+     (recomp_reqd, mb_checked_iface)
+         <- {-# SCC "checkOldIface" #-}
+            liftIO $ checkOldIface hsc_env mod_summary
+                                   source_unchanged mb_old_iface
+
+     let mb_old_hash = fmap mi_iface_hash mb_checked_iface
+     case mb_checked_iface of
+       Just iface | not recomp_reqd
+           -> hscNoRecomp compiler iface{ mi_globals = Just (tcg_rdr_env tc_result) }
+       _otherwise
+           -> hscBackend compiler tc_result mod_summary mb_old_hash
+
 genericHscRecompile :: GhcMonad m =>
                        HsCompiler a
                     -> ModSummary -> Maybe Fingerprint
@@ -418,25 +429,18 @@ hscOneShotCompiler :: HsCompiler OneShotResult
 hscOneShotCompiler =
   HsCompiler {
 
-    hscCompile = \hsc_env mod_summary src_changed mb_old_iface mb_i_of_n -> do
-       -- One-shot mode needs a knot-tying mutable variable for interface
-       -- files.  See TcRnTypes.TcGblEnv.tcg_type_env_var.
-      type_env_var <- liftIO $ newIORef emptyNameEnv
-      let
-         mod = ms_mod mod_summary
-         hsc_env' = hsc_env{ hsc_type_env_var = Just (mod, type_env_var) }
-      ---
-      genericHscCompile hscOneShotCompiler
-                        oneShotMsg hsc_env' mod_summary src_changed
-                        mb_old_iface mb_i_of_n
-
-  , hscNoRecomp = \_old_iface -> do
+    hscNoRecomp = \_old_iface -> do
       withSession (liftIO . dumpIfaceStats)
       return HscNoRecomp
 
   , hscRecompile = genericHscRecompile hscOneShotCompiler
 
-  , hscBackend = genericHscBackend hscOneShotCompiler
+  , hscBackend = \ tc_result mod_summary mb_old_hash -> do
+       hsc_env <- getSession
+       case hscTarget (hsc_dflags hsc_env) of
+         HscNothing -> return (HscRecomp False ())
+         _otherw    -> genericHscBackend hscOneShotCompiler 
+                                         tc_result mod_summary mb_old_hash
 
   , hscGenBootOutput = \tc_result mod_summary mb_old_iface -> do
        (iface, changed, _) <- hscSimpleIface tc_result mb_old_iface
@@ -454,7 +458,18 @@ hscOneShotCompiler =
 
 -- Compile Haskell, boot and extCore in OneShot mode.
 hscCompileOneShot :: Compiler OneShotResult
-hscCompileOneShot = hscCompile hscOneShotCompiler
+hscCompileOneShot hsc_env mod_summary src_changed mb_old_iface mb_i_of_n = do
+       -- One-shot mode needs a knot-tying mutable variable for interface
+       -- files.  See TcRnTypes.TcGblEnv.tcg_type_env_var.
+      type_env_var <- liftIO $ newIORef emptyNameEnv
+      let
+         mod = ms_mod mod_summary
+         hsc_env' = hsc_env{ hsc_type_env_var = Just (mod, type_env_var) }
+      ---
+      genericHscCompile hscOneShotCompiler
+                        oneShotMsg hsc_env' mod_summary src_changed
+                        mb_old_iface mb_i_of_n
+
 
 --------------------------------------------------------------
 
@@ -462,9 +477,7 @@ hscBatchCompiler :: HsCompiler BatchResult
 hscBatchCompiler =
   HsCompiler {
 
-    hscCompile = genericHscCompile hscBatchCompiler batchMsg
-
-  , hscNoRecomp = \iface -> do
+    hscNoRecomp = \iface -> do
        details <- genModDetails iface
        return (HscNoRecomp, iface, details)
 
@@ -489,16 +502,14 @@ hscBatchCompiler =
 
 -- Compile Haskell, boot and extCore in batch mode.
 hscCompileBatch :: Compiler (HscStatus, ModIface, ModDetails)
-hscCompileBatch = hscCompile hscBatchCompiler
+hscCompileBatch = genericHscCompile hscBatchCompiler batchMsg
 
 --------------------------------------------------------------
 
 hscInteractiveCompiler :: HsCompiler InteractiveResult
 hscInteractiveCompiler =
   HsCompiler {
-    hscCompile = genericHscCompile hscInteractiveCompiler batchMsg
-
-  , hscNoRecomp = \iface -> do
+    hscNoRecomp = \iface -> do
        details <- genModDetails iface
        return (HscNoRecomp, iface, details)
 
@@ -519,26 +530,18 @@ hscInteractiveCompiler =
 
 -- Compile Haskell, extCore to bytecode.
 hscCompileInteractive :: Compiler (InteractiveStatus, ModIface, ModDetails)
-hscCompileInteractive = hscCompile hscInteractiveCompiler
+hscCompileInteractive = genericHscCompile hscInteractiveCompiler batchMsg
 
 --------------------------------------------------------------
 
 hscNothingCompiler :: HsCompiler NothingResult
 hscNothingCompiler =
   HsCompiler {
-    hscCompile = genericHscCompile hscNothingCompiler batchMsg
-
-  , hscNoRecomp = \iface -> do
+    hscNoRecomp = \iface -> do
        details <- genModDetails iface
        return (HscNoRecomp, iface, details)
 
-  , hscRecompile = \mod_summary mb_old_hash ->
-      case ms_hsc_src mod_summary of
-        ExtCoreFile ->
-          panic "hscCompileNothing: cannot do external core"
-        _otherwise -> do
-          tc_result <- hscFileFrontEnd mod_summary
-          hscBackend hscNothingCompiler tc_result mod_summary mb_old_hash
+  , hscRecompile = genericHscRecompile hscNothingCompiler
 
   , hscBackend = \tc_result _mod_summary mb_old_iface -> do
        (iface, _changed, details) <- hscSimpleIface tc_result mb_old_iface
@@ -550,9 +553,10 @@ hscNothingCompiler =
   , hscGenOutput = \_ _ _ ->
         panic "hscCompileNothing: hscGenOutput should not be called"
   }
+
 -- Type-check Haskell and .hs-boot only (no external core)
 hscCompileNothing :: Compiler (HscStatus, ModIface, ModDetails)
-hscCompileNothing = hscCompile hscNothingCompiler
+hscCompileNothing = genericHscCompile hscNothingCompiler batchMsg
 
 --------------------------------------------------------------
 -- NoRecomp handlers
@@ -789,11 +793,8 @@ tryNewCodeGen	:: HscEnv -> Module -> [TyCon] -> [Module]
 		-> HpcInfo
 		-> IO [Cmm]
 tryNewCodeGen hsc_env this_mod data_tycons imported_mods 
-	      cost_centre_info stg_binds hpc_info
-  | not (dopt Opt_TryNewCodeGen (hsc_dflags hsc_env))
-  = return []
-  | otherwise
-  = do	{ let dflags = hsc_dflags hsc_env
+	      cost_centre_info stg_binds hpc_info =
+  do	{ let dflags = hsc_dflags hsc_env
         ; prog <- StgCmm.codeGen dflags this_mod data_tycons imported_mods 
 		 	 cost_centre_info stg_binds hpc_info
 	; dumpIfSet_dyn dflags Opt_D_dump_cmmz "Cmm produced by new codegen" 
@@ -930,6 +931,12 @@ hscStmt hsc_env stmt = do
 
 	return $ Just (ids, hval)
 
+hscImport :: GhcMonad m => HscEnv -> String -> m (ImportDecl RdrName)
+hscImport hsc_env str = do
+    (L _ (HsModule{hsmodImports=is})) <- hscParseThing parseModule (hsc_dflags hsc_env) str
+    case is of
+        [i] -> return (unLoc i)
+        _ -> throwOneError (mkPlainErrMsg noSrcSpan (ptext (sLit "parse error in import declaration")))
 
 hscTcExpr	-- Typecheck an expression (but don't run it)
   :: GhcMonad m =>
@@ -987,9 +994,9 @@ hscParseThing parser dflags str
 
       buf <- liftIO $ stringToStringBuffer str
 
-      let loc  = mkSrcLoc (fsLit "<interactive>") 1 0
+      let loc  = mkSrcLoc (fsLit "<interactive>") 1 1
 
-      case unP parser (mkPState buf loc dflags) of
+      case unP parser (mkPState dflags buf loc) of
 
 	PFailed span err -> do
           let msg = mkPlainErrMsg span err
@@ -1019,6 +1026,11 @@ hscParseThing parser dflags str
 compileExpr :: HscEnv -> SrcSpan -> CoreExpr -> IO HValue
 
 compileExpr hsc_env srcspan ds_expr
+  | rtsIsProfiled
+  = throwIO (InstallationError "You can't call compileExpr in a profiled compiler")
+    	  -- Otherwise you get a seg-fault when you run it
+
+  | otherwise
   = do	{ let { dflags  = hsc_dflags hsc_env ;
 		lint_on = dopt Opt_DoCoreLinting dflags }
 	      
@@ -1035,7 +1047,7 @@ compileExpr hsc_env srcspan ds_expr
 		-- ToDo: improve SrcLoc
 	; if lint_on then 
                 let ictxt = hsc_IC hsc_env
-                    tyvars = varSetElems (ic_tyvars ictxt)
+                    tyvars = varSetElems (tyVarsOfTypes (map idType (ic_tmp_ids ictxt)))
                 in
 		case lintUnfolding noSrcLoc tyvars prepd_expr of
 		   Just err -> pprPanic "compileExpr" err

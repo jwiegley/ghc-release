@@ -45,7 +45,6 @@ import Data.Maybe	( isJust, isNothing )
 %************************************************************************
 
 \begin{code}
-type DFunId = Id
 data Instance 
   = Instance { is_cls  :: Name		-- Class name
 	
@@ -59,7 +58,7 @@ data Instance
 		-- INVARIANT: is_dfun Id has type 
 		--	forall is_tvs. (...) => is_cls is_tys
 
-	     , is_dfun :: DFunId
+	     , is_dfun :: DFunId -- See Note [Haddock assumptions]
 	     , is_flag :: OverlapFlag	-- See detailed comments with
 					-- the decl of BasicTypes.OverlapFlag
     }
@@ -99,7 +98,20 @@ However, note that:
    (This is so that we can use the matching substitution to
     instantiate the dfun's context.)
 
+Note [Haddock assumptions]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+For normal user-written instances, Haddock relies on
 
+ * the SrcSpan of
+ * the Name of
+ * the is_dfun of
+ * an Instance
+
+being equal to
+
+  * the SrcSpan of
+  * the instance head type of
+  * the InstDecl used to construct the Instance.
 
 \begin{code}
 instanceDFunId :: Instance -> DFunId
@@ -116,7 +128,7 @@ setInstanceDFunId ispec dfun
 	-- are ok; hence the assert
      ispec { is_dfun = dfun, is_tvs = mkVarSet tvs, is_tys = tys }
    where 
-     (tvs, _, _, tys) = tcSplitDFunTy (idType dfun)
+     (tvs, _, tys) = tcSplitDFunTy (idType dfun)
 
 instanceRoughTcs :: Instance -> [Maybe Name]
 instanceRoughTcs = is_tcs
@@ -140,16 +152,20 @@ pprInstanceHdr :: Instance -> SDoc
 -- Prints the Instance as an instance declaration
 pprInstanceHdr ispec@(Instance { is_flag = flag })
   = ptext (sLit "instance") <+> ppr flag
-    <+> sep [pprThetaArrow theta, pprClassPred clas tys]
+    <+> sep [pprThetaArrow theta, ppr res_ty]
   where
-    (_, theta, clas, tys) = instanceHead ispec
+    (_, theta, res_ty) = tcSplitSigmaTy (idType (is_dfun ispec))
 	-- Print without the for-all, which the programmer doesn't write
 
 pprInstances :: [Instance] -> SDoc
 pprInstances ispecs = vcat (map pprInstance ispecs)
 
-instanceHead :: Instance -> ([TyVar], [PredType], Class, [Type])
-instanceHead ispec = tcSplitDFunTy (idType (is_dfun ispec))
+instanceHead :: Instance -> ([TyVar], ThetaType, Class, [Type])
+instanceHead ispec 
+   = (tvs, theta, cls, tys)
+   where
+     (tvs, theta, tau) = tcSplitSigmaTy (idType (is_dfun ispec))
+     (cls, tys) = tcSplitDFunHead tau
 
 mkLocalInstance :: DFunId -> OverlapFlag -> Instance
 -- Used for local instances, where we can safely pull on the DFunId
@@ -158,7 +174,7 @@ mkLocalInstance dfun oflag
 		is_tvs = mkVarSet tvs, is_tys = tys,
 		is_cls = className cls, is_tcs = roughMatchTcs tys }
   where
-    (tvs, _, cls, tys) = tcSplitDFunTy (idType dfun)
+    (tvs, cls, tys) = tcSplitDFunTy (idType dfun)
 
 mkImportedInstance :: Name -> [Maybe Name]
 		   -> DFunId -> OverlapFlag -> Instance
@@ -169,7 +185,7 @@ mkImportedInstance cls mb_tcs dfun oflag
 		is_tvs = mkVarSet tvs, is_tys = tys,
 		is_cls = cls, is_tcs = mb_tcs }
   where
-    (tvs, _, _, tys) = tcSplitDFunTy (idType dfun)
+    (tvs, _, tys) = tcSplitDFunTy (idType dfun)
 
 roughMatchTcs :: [Type] -> [Maybe Name]
 roughMatchTcs tys = map rough tys

@@ -10,19 +10,22 @@ module WwLib ( mkWwBodies, mkWWstr, mkWorkerArgs ) where
 
 import CoreSyn
 import CoreUtils	( exprType )
-import Id		( Id, idType, mkSysLocal, idNewDemandInfo, setIdNewDemandInfo,
+import Id		( Id, idType, mkSysLocal, idDemandInfo, setIdDemandInfo,
 			  isOneShotLambda, setOneShotLambda, setIdUnfolding,
                           setIdInfo
 			)
 import IdInfo		( vanillaIdInfo )
 import DataCon
-import NewDemand	( Demand(..), DmdResult(..), Demands(..) ) 
-import MkId		( realWorldPrimId, voidArgId, mkRuntimeErrorApp, rUNTIME_ERROR_ID,
+import Demand		( Demand(..), DmdResult(..), Demands(..) ) 
+import MkCore		( mkRuntimeErrorApp, aBSENT_ERROR_ID )
+import MkId		( realWorldPrimId, voidArgId, 
                           mkUnpackCase, mkProductBox )
+import TysPrim		( realWorldStatePrimTy )
 import TysWiredIn	( tupleCon )
 import Type
 import Coercion         ( mkSymCoercion, splitNewTypeRepCo_maybe )
 import BasicTypes	( Boxity(..) )
+import Literal		( absentLiteralOf )
 import Var              ( Var )
 import UniqSupply
 import Unique
@@ -133,8 +136,8 @@ mkWwBodies fun_ty demands res_info one_shots
 	             return (id, id, res_ty)
 
 	; let (work_lam_args, work_call_args) = mkWorkerArgs work_args res_ty
-	; return ([idNewDemandInfo v | v <- work_call_args, isId v],
-                  Note InlineMe . wrap_fn_args . wrap_fn_cpr . wrap_fn_str . applyToVars work_call_args . Var,
+	; return ([idDemandInfo v | v <- work_call_args, isId v],
+                  wrap_fn_args . wrap_fn_cpr . wrap_fn_str . applyToVars work_call_args . Var,
                   mkLams work_lam_args. work_fn_str . work_fn_cpr . work_fn_args) }
         -- We use an INLINE unconditionally, even if the wrapper turns out to be
         -- something trivial like
@@ -278,9 +281,9 @@ mkWWargs subst fun_ty arg_info
 applyToVars :: [Var] -> CoreExpr -> CoreExpr
 applyToVars vars fn = mkVarApps fn vars
 
-mk_wrap_arg :: Unique -> Type -> NewDemand.Demand -> Bool -> Id
+mk_wrap_arg :: Unique -> Type -> Demand -> Bool -> Id
 mk_wrap_arg uniq ty dmd one_shot 
-  = set_one_shot one_shot (setIdNewDemandInfo (mkSysLocal (fsLit "w") uniq ty) dmd)
+  = set_one_shot one_shot (setIdDemandInfo (mkSysLocal (fsLit "w") uniq ty) dmd)
   where
     set_one_shot True  id = setOneShotLambda id
     set_one_shot False id = id
@@ -336,17 +339,17 @@ mkWWstr (arg : args) = do
 --	  brings into scope wrap_arg (via lets)
 mkWWstr_one :: Var -> UniqSM ([Var], CoreExpr -> CoreExpr, CoreExpr -> CoreExpr)
 mkWWstr_one arg
-  | isTyVar arg
+  | isTyCoVar arg
   = return ([arg],  nop_fn, nop_fn)
 
   | otherwise
-  = case idNewDemandInfo arg of
+  = case idDemandInfo arg of
 
-	-- Absent case.  We don't deal with absence for unlifted types,
-	-- though, because it's not so easy to manufacture a placeholder
-	-- We'll see if this turns out to be a problem
-      Abs | not (isUnLiftedType (idType arg)) ->
-	return ([], nop_fn, mk_absent_let arg) 
+	-- Absent case.  We can't always handle absence for arbitrary
+        -- unlifted types, so we need to choose just the cases we can
+	-- (that's what mk_absent_let does)
+      Abs | Just work_fn <- mk_absent_let arg
+          -> return ([], nop_fn, work_fn)
 
 	-- Unpack case
       Eval (Prod cs)
@@ -392,7 +395,7 @@ mkWWstr_one arg
 	-- If the wrapper argument is a one-shot lambda, then
 	-- so should (all) the corresponding worker arguments be
 	-- This bites when we do w/w on a case join point
-    set_worker_arg_info worker_arg demand = set_one_shot (setIdNewDemandInfo worker_arg demand)
+    set_worker_arg_info worker_arg demand = set_one_shot (setIdDemandInfo worker_arg demand)
 
     set_one_shot | isOneShotLambda arg = setOneShotLambda
 		 | otherwise	       = \x -> x
@@ -492,18 +495,45 @@ workerCase bndr e args con body = mkUnpackCase bndr e args con body
 %*									*
 %************************************************************************
 
+Note [Absent errors]
+~~~~~~~~~~~~~~~~~~~~
+We make a new binding for Ids that are marked absent, thus
+   let x = absentError "x :: Int"
+The idea is that this binding will never be used; but if it 
+buggily is used we'll get a runtime error message.
+
+Coping with absence for *unlifted* types is important; see, for
+example, Trac #4306.  For these we find a suitable literal,
+using Literal.absentLiteralOf.  We don't have literals for
+every primitive type, so the function is partial.
+
+    [I did try the experiment of using an error thunk for unlifted
+    things too, relying on the simplifier to drop it as dead code,
+    by making absentError 
+      (a) *not* be a bottoming Id, 
+      (b) be "ok for speculation"
+    But that relies on the simplifier finding that it really
+    is dead code, which is fragile, and indeed failed when 
+    profiling is on, which disables various optimisations.  So
+    using a literal will do.]
 
 \begin{code}
-mk_absent_let :: Id -> CoreExpr -> CoreExpr
-mk_absent_let arg body
+mk_absent_let :: Id -> Maybe (CoreExpr -> CoreExpr)
+mk_absent_let arg 
   | not (isUnLiftedType arg_ty)
-  = Let (NonRec arg abs_rhs) body
+  = Just (Let (NonRec arg abs_rhs))
+  | Just (tc, _) <- splitTyConApp_maybe arg_ty
+  , Just lit <- absentLiteralOf tc
+  = Just (Let (NonRec arg (Lit lit)))
+  | arg_ty `coreEqType` realWorldStatePrimTy 
+  = Just (Let (NonRec arg (Var realWorldPrimId)))
   | otherwise
-  = panic "WwLib: haven't done mk_absent_let for primitives yet"
+  = WARN( True, ptext (sLit "No absent value for") <+> ppr arg_ty )
+    Nothing
   where
-    arg_ty = idType arg
-    abs_rhs = mkRuntimeErrorApp rUNTIME_ERROR_ID arg_ty msg
-    msg     = "Oops!  Entered absent arg " ++ showSDocDebug (ppr arg <+> ppr (idType arg))
+    arg_ty  = idType arg
+    abs_rhs = mkRuntimeErrorApp aBSENT_ERROR_ID arg_ty msg
+    msg     = showSDocDebug (ppr arg <+> ppr (idType arg))
 
 mk_seq_case :: Id -> CoreExpr -> CoreExpr
 mk_seq_case arg body = Case (Var arg) (sanitiseCaseBndr arg) (exprType body) [(DEFAULT, [], body)]

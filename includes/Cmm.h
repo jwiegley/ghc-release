@@ -295,9 +295,7 @@
          (TO_W_( %INFO_TYPE(%STD_INFO(info)) )) {	\
   case							\
     IND,						\
-    IND_OLDGEN,						\
     IND_PERM,						\
-    IND_OLDGEN_PERM,					\
     IND_STATIC:						\
    {							\
       P1 = StgInd_indirectee(P1);			\
@@ -380,11 +378,12 @@
    HP_CHK_GEN(alloc,liveness,reentry);			\
    TICK_ALLOC_HEAP_NOCTR(alloc);
 
-// allocateLocal() allocates from the nursery, so we check to see
+// allocate() allocates from the nursery, so we check to see
 // whether the nursery is nearly empty in any function that uses
-// allocateLocal() - this includes many of the primops.
+// allocate() - this includes many of the primops.
 #define MAYBE_GC(liveness,reentry)			\
-  if (bdescr_link(CurrentNursery) == NULL || CInt[alloc_blocks] >= CInt[alloc_blocks_lim]) {		\
+    if (bdescr_link(CurrentNursery) == NULL || \
+        generation_n_new_large_blocks(W_[g0]) >= CInt[alloc_blocks_lim]) {   \
 	R9  = liveness;					\
         R10 = reentry;					\
         HpAlloc = 0;					\
@@ -413,6 +412,9 @@
 
 /* The offset of the payload of an array */
 #define BYTE_ARR_CTS(arr)  ((arr) + SIZEOF_StgArrWords)
+
+/* The number of words allocated in an array payload */
+#define BYTE_ARR_WDS(arr) ROUNDUP_BYTES_TO_WDS(StgArrWords_bytes(arr))
 
 /* Getting/setting the info pointer of a closure */
 #define SET_INFO(p,info) StgHeader_info(p) = info

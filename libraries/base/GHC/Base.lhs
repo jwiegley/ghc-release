@@ -63,6 +63,8 @@ Other Prelude modules are much easier with fewer complex dependencies.
 
 \begin{code}
 {-# OPTIONS_GHC -XNoImplicitPrelude #-}
+-- -fno-warn-orphans is needed for things like:
+-- Orphan rule: "x# -# x#" ALWAYS forall x# :: Int# -# x# x# = 0
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# OPTIONS_HADDOCK hide #-}
 -----------------------------------------------------------------------------
@@ -171,7 +173,7 @@ Instances of 'Functor' should satisfy the following laws:
 > fmap (f . g)  ==  fmap f . fmap g
 
 The instances of 'Functor' for lists, 'Data.Maybe.Maybe' and 'System.IO.IO'
-defined in the "Prelude" satisfy these laws.
+satisfy these laws.
 -}
 
 class  Functor f  where
@@ -224,6 +226,7 @@ class  Monad m  where
     -- failure in a @do@ expression.
     fail        :: String -> m a
 
+    {-# INLINE (>>) #-}
     m >> k      = m >>= \_ -> k
     fail s      = error s
 \end{code}
@@ -236,24 +239,6 @@ class  Monad m  where
 %*********************************************************
 
 \begin{code}
--- do explicitly: deriving (Eq, Ord)
--- to avoid weird names like con2tag_[]#
-
-instance (Eq a) => Eq [a] where
-    {-# SPECIALISE instance Eq [Char] #-}
-    []     == []     = True
-    (x:xs) == (y:ys) = x == y && xs == ys
-    _xs    == _ys    = False
-
-instance (Ord a) => Ord [a] where
-    {-# SPECIALISE instance Ord [Char] #-}
-    compare []     []     = EQ
-    compare []     (_:_)  = LT
-    compare (_:_)  []     = GT
-    compare (x:xs) (y:ys) = case compare x y of
-                                EQ    -> compare xs ys
-                                other -> other
-
 instance Functor [] where
     fmap = map
 
@@ -283,10 +268,12 @@ foldr            :: (a -> b -> b) -> b -> [a] -> b
 -- foldr f z (x:xs) =  f x (foldr f z xs)
 {-# INLINE [0] foldr #-}
 -- Inline only in the final stage, after the foldr/cons rule has had a chance
-foldr k z xs = go xs
-             where
-               go []     = z
-               go (y:ys) = y `k` go ys
+-- Also note that we inline it when it has *two* parameters, which are the 
+-- ones we are keen about specialising!
+foldr k z = go
+          where
+            go []     = z
+            go (y:ys) = y `k` go ys
 
 -- | A list producer that can be fused with 'foldr'.
 -- This function is merely
@@ -374,7 +361,7 @@ map f (x:xs) = f x : map f xs
 -- Note eta expanded
 mapFB ::  (elt -> lst -> lst) -> (a -> elt) -> a -> lst -> lst
 {-# INLINE [0] mapFB #-}
-mapFB c f x ys = c (f x) ys
+mapFB c f = \x ys -> c (f x) ys
 
 -- The rules for map work like this.
 -- 
@@ -431,30 +418,6 @@ mapFB c f x ys = c (f x) ys
 %*********************************************************
 
 \begin{code}
--- |The 'Bool' type is an enumeration.  It is defined with 'False'
--- first so that the corresponding 'Prelude.Enum' instance will give
--- 'Prelude.fromEnum' 'False' the value zero, and
--- 'Prelude.fromEnum' 'True' the value 1.
--- The actual definition is in the ghc-prim package.
-
--- XXX These don't work:
--- deriving instance Eq Bool
--- deriving instance Ord Bool
--- <wired into compiler>:
---     Illegal binding of built-in syntax: con2tag_Bool#
-
-instance Eq Bool where
-    True  == True  = True
-    False == False = True
-    _     == _     = False
-
-instance Ord Bool where
-    compare False True  = LT
-    compare True  False = GT
-    compare _     _     = EQ
-
--- Read is in GHC.Read, Show in GHC.Show
-
 -- |'otherwise' is defined as the value 'True'.  It helps to make
 -- guards more readable.  eg.
 --
@@ -463,36 +426,6 @@ instance Ord Bool where
 otherwise               :: Bool
 otherwise               =  True
 \end{code}
-
-%*********************************************************
-%*                                                      *
-\subsection{Type @Ordering@}
-%*                                                      *
-%*********************************************************
-
-\begin{code}
--- | Represents an ordering relationship between two values: less
--- than, equal to, or greater than.  An 'Ordering' is returned by
--- 'compare'.
--- XXX These don't work:
--- deriving instance Eq Ordering
--- deriving instance Ord Ordering
--- Illegal binding of built-in syntax: con2tag_Ordering#
-instance Eq Ordering where
-    EQ == EQ = True
-    LT == LT = True
-    GT == GT = True
-    _  == _  = False
-        -- Read in GHC.Read, Show in GHC.Show
-
-instance Ord Ordering where
-    LT <= _  = True
-    _  <= LT = False
-    EQ <= _  = True
-    _  <= EQ = False
-    GT <= GT = True
-\end{code}
-
 
 %*********************************************************
 %*                                                      *
@@ -505,33 +438,6 @@ instance Ord Ordering where
 -- of type 'String'.
 --
 type String = [Char]
-
-{-| The character type 'Char' is an enumeration whose values represent
-Unicode (or equivalently ISO\/IEC 10646) characters
-(see <http://www.unicode.org/> for details).
-This set extends the ISO 8859-1 (Latin-1) character set
-(the first 256 charachers), which is itself an extension of the ASCII
-character set (the first 128 characters).
-A character literal in Haskell has type 'Char'.
-
-To convert a 'Char' to or from the corresponding 'Int' value defined
-by Unicode, use 'Prelude.toEnum' and 'Prelude.fromEnum' from the
-'Prelude.Enum' class respectively (or equivalently 'ord' and 'chr').
--}
-
--- We don't use deriving for Eq and Ord, because for Ord the derived
--- instance defines only compare, which takes two primops.  Then
--- '>' uses compare, and therefore takes two primops instead of one.
-
-instance Eq Char where
-    (C# c1) == (C# c2) = c1 `eqChar#` c2
-    (C# c1) /= (C# c2) = c1 `neChar#` c2
-
-instance Ord Char where
-    (C# c1) >  (C# c2) = c1 `gtChar#` c2
-    (C# c1) >= (C# c2) = c1 `geChar#` c2
-    (C# c1) <= (C# c2) = c1 `leChar#` c2
-    (C# c1) <  (C# c2) = c1 `ltChar#` c2
 
 {-# RULES
 "x# `eqChar#` x#" forall x#. x# `eqChar#` x# = True
@@ -639,16 +545,6 @@ lazy x = x
 -- sees it as lazy.  Then the worker/wrapper phase inlines it.
 -- Result: happiness
 
-
--- | The call '(inline f)' reduces to 'f', but 'inline' has a BuiltInRule
--- that tries to inline 'f' (if it has an unfolding) unconditionally
--- The 'NOINLINE' pragma arranges that inline only gets inlined (and
--- hence eliminated) late in compilation, after the rule has had
--- a god chance to fire.
-inline :: a -> a
-{-# NOINLINE[0] inline #-}
-inline x = x
-
 -- Assertion function.  This simply ignores its boolean argument.
 -- The compiler may rewrite it to @('assertError' line)@.
 
@@ -684,8 +580,10 @@ const x _               =  x
 
 -- | Function composition.
 {-# INLINE (.) #-}
-(.)       :: (b -> c) -> (a -> b) -> a -> c
-(.) f g x = f (g x)
+-- Make sure it has TWO args only on the left, so that it inlines
+-- when applied to two functions, even if there is no final argument
+(.)    :: (b -> c) -> (a -> b) -> a -> c
+(.) f g = \x -> f (g x)
 
 -- | @'flip' f@ takes its (first) two arguments in the reverse order of @f@.
 flip                    :: (a -> b -> c) -> b -> a -> c
@@ -982,14 +880,21 @@ unpackAppendCString# addr rest
         !ch = indexCharOffAddr# addr nh
 
 unpackFoldrCString# :: Addr# -> (Char  -> a -> a) -> a -> a 
-{-# NOINLINE [0] unpackFoldrCString# #-}
--- Unlike unpackCString#, there *is* some point in inlining unpackFoldrCString#, 
--- because we get better code for the function call.
--- However, don't inline till right at the end;
--- usually the unpack-list rule turns it into unpackCStringList
+
+-- Usually the unpack-list rule turns unpackFoldrCString# into unpackCString#
+
 -- It also has a BuiltInRule in PrelRules.lhs:
 --      unpackFoldrCString# "foo" c (unpackFoldrCString# "baz" c n)
 --        =  unpackFoldrCString# "foobaz" c n
+
+{-# NOINLINE unpackFoldrCString# #-}
+-- At one stage I had NOINLINE [0] on the grounds that, unlike
+-- unpackCString#, there *is* some point in inlining
+-- unpackFoldrCString#, because we get better code for the
+-- higher-order function call.  BUT there may be a lot of
+-- literal strings, and making a separate 'unpack' loop for
+-- each is highly gratuitous.  See nofib/real/anna/PrettyPrint.
+
 unpackFoldrCString# addr f z 
   = unpack 0#
   where

@@ -31,27 +31,27 @@
 --       qualified varids.
 
 {
-{-# OPTIONS -Wwarn -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
---
--- Note that Alex itself generates code with with some unused bindings and
--- without type signatures, so removing the flag might not be possible.
+-- XXX The above flags turn off warnings in the generated code:
+{-# OPTIONS_GHC -fno-warn-unused-matches #-}
+{-# OPTIONS_GHC -fno-warn-unused-binds #-}
+{-# OPTIONS_GHC -fno-warn-unused-imports #-}
+{-# OPTIONS_GHC -fno-warn-missing-signatures #-}
+-- But alex still generates some code that causes the "lazy unlifted bindings"
+-- warning, and old compilers don't know about it so we can't easily turn
+-- it off, so for now we use the sledge hammer:
+{-# OPTIONS_GHC -w #-}
 
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 
 module Lexer (
    Token(..), lexer, pragState, mkPState, PState(..),
    P(..), ParseResult(..), getSrcLoc, 
-   getPState,
+   getPState, getDynFlags, withThisPackage,
    failLocMsgP, failSpanMsgP, srcParseFail,
-   getMessages,
+   getMessages, 
    popContext, pushCurrentContext, setLastToken, setSrcLoc,
    getLexState, popLexState, pushLexState,
-   extension, standaloneDerivingEnabled, bangPatEnabled,
+   extension, bangPatEnabled, datatypeContextsEnabled,
    addWarning,
    lexTokenStream
   ) where
@@ -64,7 +64,9 @@ import FastString
 import SrcLoc
 import UniqFM
 import DynFlags
+import Module
 import Ctype
+import BasicTypes	( InlineSpec(..), RuleMatchInfo(..) )
 import Util		( readRational )
 
 import Control.Monad
@@ -138,7 +140,7 @@ haskell :-
 
 -- everywhere: skip whitespace and comments
 $white_no_nl+ 				;
-$tab+         { warn Opt_WarnTabs (text "Tab character") }
+$tab+         { warn Opt_WarnTabs (text "Warning: Tab character") }
 
 -- Everywhere: deal with nested comments.  We explicitly rule out
 -- pragmas, "{-#", so that we don't accidentally treat them as comments.
@@ -284,7 +286,7 @@ $tab+         { warn Opt_WarnTabs (text "Tab character") }
 
 -- Haddock comments
 
-<0> {
+<0,option_prags> {
   "-- " $docsym      / { ifExtension haddockEnabled } { multiline_doc_comment }
   "{-" \ ? $docsym   / { ifExtension haddockEnabled } { nested_doc_comment }
 }
@@ -306,7 +308,7 @@ $tab+         { warn Opt_WarnTabs (text "Tab character") }
   \$ @varid / { ifExtension thEnabled }	{ skip_one_varid ITidEscape }
   "$("	    / { ifExtension thEnabled }	{ token ITparenEscape }
 
-  "[$" @varid "|"  / { ifExtension qqEnabled }
+  "[" @varid "|"  / { ifExtension qqEnabled }
                      { lex_quasiquote_tok }
 }
 
@@ -461,8 +463,7 @@ data Token
   | ITusing
 
 	-- Pragmas
-  | ITinline_prag Bool		-- True <=> INLINE, False <=> NOINLINE
-  | ITinline_conlike_prag Bool  -- same
+  | ITinline_prag InlineSpec RuleMatchInfo
   | ITspec_prag			-- SPECIALISE	
   | ITspec_inline_prag Bool	-- SPECIALISE INLINE (or NOINLINE)
   | ITsource_prag
@@ -700,7 +701,14 @@ reservedSymsFM = listToUFM $
                                 explicitForallEnabled i)
        ,("→",   ITrarrow, unicodeSyntaxEnabled)
        ,("←",   ITlarrow, unicodeSyntaxEnabled)
-       ,("⋯",   ITdotdot, unicodeSyntaxEnabled)
+
+       ,("⤙",   ITlarrowtail, \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
+       ,("⤚",   ITrarrowtail, \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
+       ,("⤛",   ITLarrowtail, \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
+       ,("⤜",   ITRarrowtail, \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
+
+       ,("★", ITstar, unicodeSyntaxEnabled)
+
         -- ToDo: ideally, → and ∷ should be "specials", so that they cannot
         -- form part of a large operator.  This would let us have a better
         -- syntax for kinds: ɑ∷*→* would be a legal kind signature. (maybe).
@@ -738,21 +746,23 @@ begin :: Int -> Action
 begin code _span _str _len = do pushLexState code; lexToken
 
 pop :: Action
-pop _span _buf _len = do popLexState; lexToken
+pop _span _buf _len = do _ <- popLexState
+                         lexToken
 
 pop_and :: Action -> Action
-pop_and act span buf len = do popLexState; act span buf len
+pop_and act span buf len = do _ <- popLexState
+                              act span buf len
 
 {-# INLINE nextCharIs #-}
 nextCharIs :: StringBuffer -> (Char -> Bool) -> Bool
 nextCharIs buf p = not (atEnd buf) && p (currentChar buf)
 
 notFollowedBy :: Char -> AlexAccPred Int
-notFollowedBy char _ _ _ (AI _ _ buf) 
+notFollowedBy char _ _ _ (AI _ buf) 
   = nextCharIs buf (/=char)
 
 notFollowedBySymbol :: AlexAccPred Int
-notFollowedBySymbol _ _ _ (AI _ _ buf)
+notFollowedBySymbol _ _ _ (AI _ buf)
   = nextCharIs buf (`notElem` "!#$%&*+./<=>?@\\^|-~")
 
 -- We must reject doc comments as being ordinary comments everywhere.
@@ -761,7 +771,7 @@ notFollowedBySymbol _ _ _ (AI _ _ buf)
 -- valid in all states, but the doc-comment rules are only valid in
 -- the non-layout states.
 isNormalComment :: AlexAccPred Int
-isNormalComment bits _ _ (AI _ _ buf)
+isNormalComment bits _ _ (AI _ buf)
   | haddockEnabled bits = notFollowedByDocOrPragma
   | otherwise           = nextCharIs buf (/='#')
   where
@@ -772,12 +782,12 @@ spaceAndP :: StringBuffer -> (StringBuffer -> Bool) -> Bool
 spaceAndP buf p = p buf || nextCharIs buf (==' ') && p (snd (nextChar buf))
 
 {-
-haddockDisabledAnd p bits _ _ (AI _ _ buf)
+haddockDisabledAnd p bits _ _ (AI _ buf)
   = if haddockEnabled bits then False else (p buf)
 -}
 
 atEOL :: AlexAccPred Int
-atEOL _ _ _ (AI _ _ buf) = atEnd buf || currentChar buf == '\n'
+atEOL _ _ _ (AI _ buf) = atEnd buf || currentChar buf == '\n'
 
 ifExtension :: (Int -> Bool) -> AlexAccPred Int
 ifExtension pred bits _ _ _ = pred bits
@@ -863,7 +873,7 @@ nested_doc_comment span buf _len = withLexedDocType (go "")
 withLexedDocType :: (AlexInput -> (String -> Token) -> Bool -> P (Located Token))
                  -> P (Located Token)
 withLexedDocType lexDocComment = do
-  input@(AI _ _ buf) <- getInput
+  input@(AI _ buf) <- getInput
   case prevChar buf ' ' of
     '|' -> lexDocComment input ITdocCommentNext False
     '^' -> lexDocComment input ITdocCommentPrev False
@@ -880,12 +890,12 @@ withLexedDocType lexDocComment = do
 -- RULES pragmas turn on the forall and '.' keywords, and we turn them
 -- off again at the end of the pragma.
 rulePrag :: Action
-rulePrag span _ _ = do
+rulePrag span _buf _len = do
   setExts (.|. bit inRulePragBit)
   return (L span ITrules_prag)
 
 endPrag :: Action
-endPrag span _ _ = do
+endPrag span _buf _len = do
   setExts (.&. complement (bit inRulePragBit))
   return (L span ITclose_prag)
 
@@ -897,32 +907,20 @@ endPrag span _ _ = do
 -- it writes the wrong token length to the parser state. This function is
 -- called afterwards, so it can just update the state. 
 
--- This is complicated by the fact that Haddock tokens can span multiple lines, 
--- which is something that the original lexer didn't account for. 
--- I have added last_line_len in the parser state which represents the length 
--- of the part of the token that is on the last line. It is now used for layout 
--- calculation in pushCurrentContext instead of last_len. last_len is, like it 
--- was before, the full length of the token, and it is now only used for error
--- messages. /Waern 
-
 docCommentEnd :: AlexInput -> String -> (String -> Token) -> StringBuffer ->
                  SrcSpan -> P (Located Token) 
 docCommentEnd input commentAcc docType buf span = do
   setInput input
-  let (AI loc last_offs nextBuf) = input
+  let (AI loc nextBuf) = input
       comment = reverse commentAcc
       span' = mkSrcSpan (srcSpanStart span) loc
       last_len = byteDiff buf nextBuf
       
-      last_line_len = if (last_offs - last_len < 0) 
-        then last_offs
-        else last_len  
-  
-  span `seq` setLastToken span' last_len last_line_len
+  span `seq` setLastToken span' last_len
   return (L span' (docType comment))
  
 errBrace :: AlexInput -> SrcSpan -> P a
-errBrace (AI end _ _) span = failLocMsgP (srcSpanStart span) end "unterminated `{-'"
+errBrace (AI end _) span = failLocMsgP (srcSpanStart span) end "unterminated `{-'"
 
 open_brace, close_brace :: Action
 open_brace span _str _len = do 
@@ -1060,22 +1058,31 @@ do_bol span _str _len = do
 		return (L span ITvccurly)
 	    EQ -> do
                 --trace "layout: inserting ';'" $ do
-		popLexState
+		_ <- popLexState
 		return (L span ITsemi)
 	    GT -> do
-		popLexState
+		_ <- popLexState
 		lexToken
 
 -- certain keywords put us in the "layout" state, where we might
 -- add an opening curly brace.
 maybe_layout :: Token -> P ()
-maybe_layout ITdo	= pushLexState layout_do
-maybe_layout ITmdo	= pushLexState layout_do
-maybe_layout ITof	= pushLexState layout
-maybe_layout ITlet	= pushLexState layout
-maybe_layout ITwhere	= pushLexState layout
-maybe_layout ITrec	= pushLexState layout
-maybe_layout _	        = return ()
+maybe_layout t = do -- If the alternative layout rule is enabled then
+                    -- we never create an implicit layout context here.
+                    -- Layout is handled XXX instead.
+                    -- The code for closing implicit contexts, or
+                    -- inserting implicit semi-colons, is therefore
+                    -- irrelevant as it only applies in an implicit
+                    -- context.
+                    alr <- extension alternativeLayoutRule
+                    unless alr $ f t
+    where f ITdo    = pushLexState layout_do
+          f ITmdo   = pushLexState layout_do
+          f ITof    = pushLexState layout
+          f ITlet   = pushLexState layout
+          f ITwhere = pushLexState layout
+          f ITrec   = pushLexState layout
+          f _       = return ()
 
 -- Pushing a new implicit layout context.  If the indentation of the
 -- next token is not greater than the previous layout context, then
@@ -1088,8 +1095,9 @@ maybe_layout _	        = return ()
 --
 new_layout_context :: Bool -> Action
 new_layout_context strict span _buf _len = do
-    popLexState
-    (AI _ offset _) <- getInput
+    _ <- popLexState
+    (AI l _) <- getInput
+    let offset = srcLocCol l
     ctx <- getContext
     case ctx of
 	Layout prev_off : _  | 
@@ -1105,7 +1113,7 @@ new_layout_context strict span _buf _len = do
 
 do_layout_left :: Action
 do_layout_left span _buf _len = do
-    popLexState
+    _ <- popLexState
     pushLexState bol  -- we must be at the start of a line
     return (L span ITvccurly)
 
@@ -1115,17 +1123,18 @@ do_layout_left span _buf _len = do
 setLine :: Int -> Action
 setLine code span buf len = do
   let line = parseUnsignedInteger buf len 10 octDecDigit
-  setSrcLoc (mkSrcLoc (srcSpanFile span) (fromIntegral line - 1) 0)
+  setSrcLoc (mkSrcLoc (srcSpanFile span) (fromIntegral line - 1) 1)
 	-- subtract one: the line number refers to the *following* line
-  popLexState
+  _ <- popLexState
   pushLexState code
   lexToken
 
 setFile :: Int -> Action
 setFile code span buf len = do
   let file = lexemeToFastString (stepOn buf) (len-2)
+  setAlrLastLoc noSrcSpan
   setSrcLoc (mkSrcLoc file (srcSpanEndLine span) (srcSpanEndCol span))
-  popLexState
+  _ <- popLexState
   pushLexState code
   lexToken
 
@@ -1152,7 +1161,7 @@ lex_string_prag mkTok span _buf _len
               = case alexGetChar i of
                   Just (c,i') | c == x    -> isString i' xs
                   _other -> False
-          err (AI end _ _) = failLocMsgP (srcSpanStart span) end "unterminated options pragma"
+          err (AI end _) = failLocMsgP (srcSpanStart span) end "unterminated options pragma"
 
 
 -- -----------------------------------------------------------------------------
@@ -1229,14 +1238,14 @@ lex_char_tok span _buf _len = do	-- We've seen '
    case alexGetChar' i1 of
 	Nothing -> lit_error  i1
 
-	Just ('\'', i2@(AI end2 _ _)) -> do 	-- We've seen ''
+	Just ('\'', i2@(AI end2 _)) -> do 	-- We've seen ''
 		  th_exts <- extension thEnabled
 		  if th_exts then do
 			setInput i2
 			return (L (mkSrcSpan loc end2)  ITtyQuote)
 		   else lit_error i1
 
-	Just ('\\', i2@(AI _end2 _ _)) -> do 	-- We've seen 'backslash
+	Just ('\\', i2@(AI _end2 _)) -> do 	-- We've seen 'backslash
 		  setInput i2
 		  lit_ch <- lex_escape
                   i3 <- getInput
@@ -1244,7 +1253,7 @@ lex_char_tok span _buf _len = do	-- We've seen '
 		  if mc == '\'' then finish_char_tok loc lit_ch
 			        else lit_error i3
 
-        Just (c, i2@(AI _end2 _ _))
+        Just (c, i2@(AI _end2 _))
 		| not (isAny c) -> lit_error i1
 		| otherwise ->
 
@@ -1258,7 +1267,7 @@ lex_char_tok span _buf _len = do	-- We've seen '
 		       	  		-- (including the possibility of EOF)
 					-- If TH is on, just parse the quote only
 			th_exts <- extension thEnabled	
-			let (AI end _ _) = i1
+			let (AI end _) = i1
 			if th_exts then return (L (mkSrcSpan loc end) ITvarQuote)
 				   else lit_error i2
 
@@ -1266,15 +1275,15 @@ finish_char_tok :: SrcLoc -> Char -> P (Located Token)
 finish_char_tok loc ch	-- We've already seen the closing quote
 			-- Just need to check for trailing #
   = do	magicHash <- extension magicHashEnabled
-	i@(AI end _ _) <- getInput
+	i@(AI end _) <- getInput
 	if magicHash then do
 		case alexGetChar' i of
-			Just ('#',i@(AI end _ _)) -> do
+			Just ('#',i@(AI end _)) -> do
 				setInput i
 				return (L (mkSrcSpan loc end) (ITprimchar ch))
 			_other ->
 				return (L (mkSrcSpan loc end) (ITchar ch))
-	        else do
+	    else do
 		   return (L (mkSrcSpan loc end) (ITchar ch))
 
 isAny :: Char -> Bool
@@ -1340,11 +1349,13 @@ readNum2 is_digit base conv i = do
   where read i input = do
 	  case alexGetChar' input of
 	    Just (c,input') | is_digit c -> do
-		read (i*base + conv c) input'
+               let i' = i*base + conv c
+               if i' > 0x10ffff
+                  then setInput input >> lexError "numeric escape sequence out of range"
+                  else read i' input'
 	    _other -> do
-		if i >= 0 && i <= 0x10FFFF
-		   then do setInput input; return (chr i)
-		   else lit_error input
+              setInput input; return (chr i)
+
 
 silly_escape_chars :: [(String, Char)]
 silly_escape_chars = [
@@ -1402,8 +1413,9 @@ getCharOrFail i =  do
 
 lex_quasiquote_tok :: Action
 lex_quasiquote_tok span buf len = do
-  let quoter = reverse $ takeWhile (/= '$')
-               $ reverse $ lexemeToString buf (len - 1)
+  let quoter = tail (lexemeToString buf (len - 1))
+		-- 'tail' drops the initial '[', 
+		-- while the -1 drops the trailing '|'
   quoteStart <- getSrcLoc              
   quote <- lex_quasiquote ""
   end <- getSrcLoc 
@@ -1467,21 +1479,43 @@ data PState = PState {
         dflags     :: DynFlags,
         messages   :: Messages,
         last_loc   :: SrcSpan,	-- pos of previous token
-        last_offs  :: !Int, 	-- offset of the previous token from the
-				-- beginning of  the current line.
-				-- \t is equal to 8 spaces.
 	last_len   :: !Int,	-- len of previous token
-        last_line_len :: !Int,
         loc        :: SrcLoc,   -- current loc (end of prev token + 1)
 	extsBitmap :: !Int,	-- bitmap that determines permitted extensions
 	context	   :: [LayoutContext],
-	lex_state  :: [Int]
+	lex_state  :: [Int],
+        -- Used in the alternative layout rule:
+        -- These tokens are the next ones to be sent out. They are
+        -- just blindly emitted, without the rule looking at them again:
+        alr_pending_implicit_tokens :: [Located Token],
+        -- This is the next token to be considered or, if it is Nothing,
+        -- we need to get the next token from the input stream:
+        alr_next_token :: Maybe (Located Token),
+        -- This is what we consider to be the locatino of the last token
+        -- emitted:
+        alr_last_loc :: SrcSpan,
+        -- The stack of layout contexts:
+        alr_context :: [ALRContext],
+        -- Are we expecting a '{'? If it's Just, then the ALRLayout tells
+        -- us what sort of layout the '{' will open:
+        alr_expecting_ocurly :: Maybe ALRLayout,
+        -- Have we just had the '}' for a let block? If so, than an 'in'
+        -- token doesn't need to close anything:
+        alr_justClosedExplicitLetBlock :: Bool
      }
 	-- last_loc and last_len are used when generating error messages,
 	-- and in pushCurrentContext only.  Sigh, if only Happy passed the
 	-- current token to happyError, we could at least get rid of last_len.
 	-- Getting rid of last_loc would require finding another way to 
 	-- implement pushCurrentContext (which is only called from one place).
+
+data ALRContext = ALRNoLayout Bool{- does it contain commas? -}
+                              Bool{- is it a 'let' block? -}
+                | ALRLayout ALRLayout Int
+data ALRLayout = ALRLayoutLet
+               | ALRLayoutWhere
+               | ALRLayoutOf
+               | ALRLayoutDo
 
 newtype P a = P { unP :: PState -> ParseResult a }
 
@@ -1514,6 +1548,14 @@ failSpanMsgP span msg = P $ \_ -> PFailed span msg
 getPState :: P PState
 getPState = P $ \s -> POk s s
 
+getDynFlags :: P DynFlags
+getDynFlags = P $ \s -> POk s (dflags s)
+
+withThisPackage :: (PackageId -> a) -> P a
+withThisPackage f
+ = do	pkg	<- liftM thisPackage getDynFlags
+	return	$ f pkg
+
 extension :: (Int -> Bool) -> P Bool
 extension p = P $ \s -> POk s (p $! extsBitmap s)
 
@@ -1529,27 +1571,25 @@ setSrcLoc new_loc = P $ \s -> POk s{loc=new_loc} ()
 getSrcLoc :: P SrcLoc
 getSrcLoc = P $ \s@(PState{ loc=loc }) -> POk s loc
 
-setLastToken :: SrcSpan -> Int -> Int -> P ()
-setLastToken loc len line_len = P $ \s -> POk s { 
+setLastToken :: SrcSpan -> Int -> P ()
+setLastToken loc len = P $ \s -> POk s { 
   last_loc=loc, 
-  last_len=len,
-  last_line_len=line_len 
-} ()
+  last_len=len
+  } ()
 
-data AlexInput = AI SrcLoc {-#UNPACK#-}!Int StringBuffer
+data AlexInput = AI SrcLoc StringBuffer
 
 alexInputPrevChar :: AlexInput -> Char
-alexInputPrevChar (AI _ _ buf) = prevChar buf '\n'
+alexInputPrevChar (AI _ buf) = prevChar buf '\n'
 
 alexGetChar :: AlexInput -> Maybe (Char,AlexInput)
-alexGetChar (AI loc ofs s) 
+alexGetChar (AI loc s) 
   | atEnd s   = Nothing
-  | otherwise = adj_c `seq` loc' `seq` ofs' `seq` s' `seq` 
+  | otherwise = adj_c `seq` loc' `seq` s' `seq` 
 		--trace (show (ord c)) $
-		Just (adj_c, (AI loc' ofs' s'))
+		Just (adj_c, (AI loc' s'))
   where (c,s') = nextChar s
         loc'   = advanceSrcLoc loc c
-        ofs'   = advanceOffs c ofs
 
 	non_graphic     = '\x0'
 	upper 		= '\x1'
@@ -1595,25 +1635,19 @@ alexGetChar (AI loc ofs s)
 -- This version does not squash unicode characters, it is used when
 -- lexing strings.
 alexGetChar' :: AlexInput -> Maybe (Char,AlexInput)
-alexGetChar' (AI loc ofs s) 
+alexGetChar' (AI loc s) 
   | atEnd s   = Nothing
-  | otherwise = c `seq` loc' `seq` ofs' `seq` s' `seq` 
+  | otherwise = c `seq` loc' `seq` s' `seq` 
 		--trace (show (ord c)) $
-		Just (c, (AI loc' ofs' s'))
+		Just (c, (AI loc' s'))
   where (c,s') = nextChar s
         loc'   = advanceSrcLoc loc c
-        ofs'   = advanceOffs c ofs
-
-advanceOffs :: Char -> Int -> Int
-advanceOffs '\n' _    = 0
-advanceOffs '\t' offs = (offs `quot` 8 + 1) * 8
-advanceOffs _    offs = offs + 1
 
 getInput :: P AlexInput
-getInput = P $ \s@PState{ loc=l, last_offs=o, buffer=b } -> POk s (AI l o b)
+getInput = P $ \s@PState{ loc=l, buffer=b } -> POk s (AI l b)
 
 setInput :: AlexInput -> P ()
-setInput (AI l o b) = P $ \s -> POk s{ loc=l, last_offs=o, buffer=b } ()
+setInput (AI l b) = P $ \s -> POk s{ loc=l, buffer=b } ()
 
 pushLexState :: Int -> P ()
 pushLexState ls = P $ \s@PState{ lex_state=l } -> POk s{lex_state=ls:l} ()
@@ -1623,6 +1657,50 @@ popLexState = P $ \s@PState{ lex_state=ls:l } -> POk s{ lex_state=l } ls
 
 getLexState :: P Int
 getLexState = P $ \s@PState{ lex_state=ls:_ } -> POk s ls
+
+popNextToken :: P (Maybe (Located Token))
+popNextToken
+    = P $ \s@PState{ alr_next_token = m } ->
+              POk (s {alr_next_token = Nothing}) m
+
+setAlrLastLoc :: SrcSpan -> P ()
+setAlrLastLoc l = P $ \s -> POk (s {alr_last_loc = l}) ()
+
+getAlrLastLoc :: P SrcSpan
+getAlrLastLoc = P $ \s@(PState {alr_last_loc = l}) -> POk s l
+
+getALRContext :: P [ALRContext]
+getALRContext = P $ \s@(PState {alr_context = cs}) -> POk s cs
+
+setALRContext :: [ALRContext] -> P ()
+setALRContext cs = P $ \s -> POk (s {alr_context = cs}) ()
+
+getJustClosedExplicitLetBlock :: P Bool
+getJustClosedExplicitLetBlock
+ = P $ \s@(PState {alr_justClosedExplicitLetBlock = b}) -> POk s b
+
+setJustClosedExplicitLetBlock :: Bool -> P ()
+setJustClosedExplicitLetBlock b
+ = P $ \s -> POk (s {alr_justClosedExplicitLetBlock = b}) ()
+
+setNextToken :: Located Token -> P ()
+setNextToken t = P $ \s -> POk (s {alr_next_token = Just t}) ()
+
+popPendingImplicitToken :: P (Maybe (Located Token))
+popPendingImplicitToken
+    = P $ \s@PState{ alr_pending_implicit_tokens = ts } ->
+              case ts of
+              [] -> POk s Nothing
+              (t : ts') -> POk (s {alr_pending_implicit_tokens = ts'}) (Just t)
+
+setPendingImplicitTokens :: [Located Token] -> P ()
+setPendingImplicitTokens ts = P $ \s -> POk (s {alr_pending_implicit_tokens = ts}) ()
+
+getAlrExpectingOCurly :: P (Maybe ALRLayout)
+getAlrExpectingOCurly = P $ \s@(PState {alr_expecting_ocurly = b}) -> POk s b
+
+setAlrExpectingOCurly :: Maybe ALRLayout -> P ()
+setAlrExpectingOCurly b = P $ \s -> POk (s {alr_expecting_ocurly = b}) ()
 
 -- for reasons of efficiency, flags indicating language extensions (eg,
 -- -fglasgow-exts or -XParr) are represented by a bitmap stored in an unboxed
@@ -1659,8 +1737,8 @@ unicodeSyntaxBit :: Int
 unicodeSyntaxBit = 14 -- the forall symbol, arrow symbols, etc
 unboxedTuplesBit :: Int
 unboxedTuplesBit = 15 -- (# and #)
-standaloneDerivingBit :: Int
-standaloneDerivingBit = 16 -- standalone instance deriving declarations
+datatypeContextsBit :: Int
+datatypeContextsBit = 16
 transformComprehensionsBit :: Int
 transformComprehensionsBit = 17
 qqBit :: Int
@@ -1673,6 +1751,8 @@ newQualOpsBit :: Int
 newQualOpsBit = 21 -- Haskell' qualified operator syntax, e.g. Prelude.(+)
 recBit :: Int
 recBit = 22 -- rec
+alternativeLayoutRuleBit :: Int
+alternativeLayoutRuleBit = 23
 
 always :: Int -> Bool
 always           _     = True
@@ -1702,8 +1782,8 @@ unicodeSyntaxEnabled :: Int -> Bool
 unicodeSyntaxEnabled flags = testBit flags unicodeSyntaxBit
 unboxedTuplesEnabled :: Int -> Bool
 unboxedTuplesEnabled flags = testBit flags unboxedTuplesBit
-standaloneDerivingEnabled :: Int -> Bool
-standaloneDerivingEnabled flags = testBit flags standaloneDerivingBit
+datatypeContextsEnabled :: Int -> Bool
+datatypeContextsEnabled flags = testBit flags datatypeContextsBit
 qqEnabled :: Int -> Bool
 qqEnabled        flags = testBit flags qqBit
 -- inRulePrag :: Int -> Bool
@@ -1714,67 +1794,61 @@ newQualOps :: Int -> Bool
 newQualOps       flags = testBit flags newQualOpsBit
 oldQualOps :: Int -> Bool
 oldQualOps flags = not (newQualOps flags)
+alternativeLayoutRule :: Int -> Bool
+alternativeLayoutRule flags = testBit flags alternativeLayoutRuleBit
 
 -- PState for parsing options pragmas
 --
 pragState :: DynFlags -> StringBuffer -> SrcLoc -> PState
-pragState dynflags buf loc =
-  PState {
-      buffer        = buf,
-      messages      = emptyMessages,
-      dflags        = dynflags,
-      last_loc      = mkSrcSpan loc loc,
-      last_offs     = 0,
-      last_len      = 0,
-      last_line_len = 0,
-      loc           = loc,
-      extsBitmap    = 0,
-      context       = [],
-      lex_state     = [bol, option_prags, 0]
-    }
-
+pragState dynflags buf loc = (mkPState dynflags buf loc) {
+                                 lex_state = [bol, option_prags, 0]
+                             }
 
 -- create a parse state
 --
-mkPState :: StringBuffer -> SrcLoc -> DynFlags -> PState
-mkPState buf loc flags  = 
+mkPState :: DynFlags -> StringBuffer -> SrcLoc -> PState
+mkPState flags buf loc =
   PState {
       buffer	      = buf,
       dflags        = flags,
       messages      = emptyMessages,
       last_loc      = mkSrcSpan loc loc,
-      last_offs     = 0,
       last_len      = 0,
-      last_line_len = 0,
       loc           = loc,
       extsBitmap    = fromIntegral bitmap,
       context       = [],
-      lex_state     = [bol, 0]
-	-- we begin in the layout state if toplev_layout is set
+      lex_state     = [bol, 0],
+      alr_pending_implicit_tokens = [],
+      alr_next_token = Nothing,
+      alr_last_loc = noSrcSpan,
+      alr_context = [],
+      alr_expecting_ocurly = Nothing,
+      alr_justClosedExplicitLetBlock = False
     }
     where
-      bitmap = genericsBit `setBitIf` dopt Opt_Generics flags
-	       .|. ffiBit            `setBitIf` dopt Opt_ForeignFunctionInterface flags
-	       .|. parrBit           `setBitIf` dopt Opt_PArr         flags
-	       .|. arrowsBit         `setBitIf` dopt Opt_Arrows       flags
-	       .|. thBit             `setBitIf` dopt Opt_TemplateHaskell flags
-	       .|. qqBit             `setBitIf` dopt Opt_QuasiQuotes flags
-	       .|. ipBit             `setBitIf` dopt Opt_ImplicitParams flags
-	       .|. explicitForallBit `setBitIf` dopt Opt_ExplicitForAll flags
-	       .|. bangPatBit        `setBitIf` dopt Opt_BangPatterns flags
-	       .|. tyFamBit          `setBitIf` dopt Opt_TypeFamilies flags
+      bitmap = genericsBit `setBitIf` xopt Opt_Generics flags
+	       .|. ffiBit            `setBitIf` xopt Opt_ForeignFunctionInterface flags
+	       .|. parrBit           `setBitIf` xopt Opt_PArr         flags
+	       .|. arrowsBit         `setBitIf` xopt Opt_Arrows       flags
+	       .|. thBit             `setBitIf` xopt Opt_TemplateHaskell flags
+	       .|. qqBit             `setBitIf` xopt Opt_QuasiQuotes flags
+	       .|. ipBit             `setBitIf` xopt Opt_ImplicitParams flags
+	       .|. explicitForallBit `setBitIf` xopt Opt_ExplicitForAll flags
+	       .|. bangPatBit        `setBitIf` xopt Opt_BangPatterns flags
+	       .|. tyFamBit          `setBitIf` xopt Opt_TypeFamilies flags
 	       .|. haddockBit        `setBitIf` dopt Opt_Haddock      flags
-	       .|. magicHashBit      `setBitIf` dopt Opt_MagicHash    flags
-	       .|. kindSigsBit       `setBitIf` dopt Opt_KindSignatures flags
-	       .|. recursiveDoBit    `setBitIf` dopt Opt_RecursiveDo flags
-	       .|. recBit 	     `setBitIf` dopt Opt_DoRec  flags
-	       .|. recBit 	     `setBitIf` dopt Opt_Arrows flags
-	       .|. unicodeSyntaxBit  `setBitIf` dopt Opt_UnicodeSyntax flags
-	       .|. unboxedTuplesBit  `setBitIf` dopt Opt_UnboxedTuples flags
-	       .|. standaloneDerivingBit `setBitIf` dopt Opt_StandaloneDeriving flags
-               .|. transformComprehensionsBit `setBitIf` dopt Opt_TransformListComp flags
+	       .|. magicHashBit      `setBitIf` xopt Opt_MagicHash    flags
+	       .|. kindSigsBit       `setBitIf` xopt Opt_KindSignatures flags
+	       .|. recursiveDoBit    `setBitIf` xopt Opt_RecursiveDo flags
+	       .|. recBit 	     `setBitIf` xopt Opt_DoRec  flags
+	       .|. recBit 	     `setBitIf` xopt Opt_Arrows flags
+	       .|. unicodeSyntaxBit  `setBitIf` xopt Opt_UnicodeSyntax flags
+	       .|. unboxedTuplesBit  `setBitIf` xopt Opt_UnboxedTuples flags
+               .|. datatypeContextsBit `setBitIf` xopt Opt_DatatypeContexts flags
+               .|. transformComprehensionsBit `setBitIf` xopt Opt_TransformListComp flags
                .|. rawTokenStreamBit `setBitIf` dopt Opt_KeepRawTokenStream flags
-               .|. newQualOpsBit `setBitIf` dopt Opt_NewQualifiedOperators flags
+               .|. newQualOpsBit `setBitIf` xopt Opt_NewQualifiedOperators flags
+               .|. alternativeLayoutRuleBit `setBitIf` xopt Opt_AlternativeLayoutRule flags
       --
       setBitIf :: Int -> Bool -> Int
       b `setBitIf` cond | cond      = bit b
@@ -1811,9 +1885,11 @@ pushCurrentContext = P $ \ s@PState{ last_loc=loc, context=ctx } ->
     POk s{context = Layout (srcSpanStartCol loc) : ctx} ()
 
 getOffside :: P Ordering
-getOffside = P $ \s@PState{last_offs=offs, context=stk} ->
+getOffside = P $ \s@PState{last_loc=loc, context=stk} ->
+                let offs = srcSpanStartCol loc in
 		let ord = case stk of
-			(Layout n:_) -> compare offs n
+			(Layout n:_) -> --trace ("layout: " ++ show n ++ ", offs: " ++ show offs) $ 
+                                        compare offs n
 			_            -> GT
 		in POk s ord
 
@@ -1845,7 +1921,7 @@ srcParseFail = P $ \PState{ buffer = buf, last_len = len,
 lexError :: String -> P a
 lexError str = do
   loc <- getSrcLoc
-  (AI end _ buf) <- getInput
+  (AI end buf) <- getInput
   reportLexError loc end buf str
 
 -- -----------------------------------------------------------------------------
@@ -1854,30 +1930,253 @@ lexError str = do
 
 lexer :: (Located Token -> P a) -> P a
 lexer cont = do
-  tok@(L _span _tok__) <- lexToken
---  trace ("token: " ++ show tok__) $ do
+  alr <- extension alternativeLayoutRule
+  let lexTokenFun = if alr then lexTokenAlr else lexToken
+  tok@(L _span _tok__) <- lexTokenFun
+  --trace ("token: " ++ show _tok__) $ do
   cont tok
+
+lexTokenAlr :: P (Located Token)
+lexTokenAlr = do mPending <- popPendingImplicitToken
+                 t <- case mPending of
+                      Nothing ->
+                          do mNext <- popNextToken
+                             t <- case mNext of
+                                  Nothing -> lexToken
+                                  Just next -> return next
+                             alternativeLayoutRuleToken t
+                      Just t ->
+                          return t
+                 setAlrLastLoc (getLoc t)
+                 case unLoc t of
+                     ITwhere -> setAlrExpectingOCurly (Just ALRLayoutWhere)
+                     ITlet   -> setAlrExpectingOCurly (Just ALRLayoutLet)
+                     ITof    -> setAlrExpectingOCurly (Just ALRLayoutOf)
+                     ITdo    -> setAlrExpectingOCurly (Just ALRLayoutDo)
+                     ITmdo   -> setAlrExpectingOCurly (Just ALRLayoutDo)
+                     ITrec   -> setAlrExpectingOCurly (Just ALRLayoutDo)
+                     _       -> return ()
+                 return t
+
+alternativeLayoutRuleToken :: Located Token -> P (Located Token)
+alternativeLayoutRuleToken t
+    = do context <- getALRContext
+         lastLoc <- getAlrLastLoc
+         mExpectingOCurly <- getAlrExpectingOCurly
+         justClosedExplicitLetBlock <- getJustClosedExplicitLetBlock
+         setJustClosedExplicitLetBlock False
+         dflags <- getDynFlags
+         let transitional = xopt Opt_AlternativeLayoutRuleTransitional dflags
+             thisLoc = getLoc t
+             thisCol = srcSpanStartCol thisLoc
+             newLine = (lastLoc == noSrcSpan)
+                    || (srcSpanStartLine thisLoc > srcSpanEndLine lastLoc)
+         case (unLoc t, context, mExpectingOCurly) of
+             -- This case handles a GHC extension to the original H98
+             -- layout rule...
+             (ITocurly, _, Just alrLayout) ->
+                 do setAlrExpectingOCurly Nothing
+                    let isLet = case alrLayout of
+                                ALRLayoutLet -> True
+                                _ -> False
+                    setALRContext (ALRNoLayout (containsCommas ITocurly) isLet : context)
+                    return t
+             -- ...and makes this case unnecessary
+             {-
+             -- I think our implicit open-curly handling is slightly
+             -- different to John's, in how it interacts with newlines
+             -- and "in"
+             (ITocurly, _, Just _) ->
+                 do setAlrExpectingOCurly Nothing
+                    setNextToken t
+                    lexTokenAlr
+             -}
+             (_, ALRLayout _ col : ls, Just expectingOCurly)
+              | (thisCol > col) ||
+                (thisCol == col &&
+                 isNonDecreasingIntentation expectingOCurly) ->
+                 do setAlrExpectingOCurly Nothing
+                    setALRContext (ALRLayout expectingOCurly thisCol : context)
+                    setNextToken t
+                    return (L thisLoc ITocurly)
+              | otherwise ->
+                 do setAlrExpectingOCurly Nothing
+                    setPendingImplicitTokens [L lastLoc ITccurly]
+                    setNextToken t
+                    return (L lastLoc ITocurly)
+             (_, _, Just expectingOCurly) ->
+                 do setAlrExpectingOCurly Nothing
+                    setALRContext (ALRLayout expectingOCurly thisCol : context)
+                    setNextToken t
+                    return (L thisLoc ITocurly)
+             -- We do the [] cases earlier than in the spec, as we
+             -- have an actual EOF token
+             (ITeof, ALRLayout _ _ : ls, _) ->
+                 do setALRContext ls
+                    setNextToken t
+                    return (L thisLoc ITccurly)
+             (ITeof, _, _) ->
+                 return t
+             -- the other ITeof case omitted; general case below covers it
+             (ITin, _, _)
+              | justClosedExplicitLetBlock ->
+                 return t
+             (ITin, ALRLayout ALRLayoutLet _ : ls, _)
+              | newLine ->
+                 do setPendingImplicitTokens [t]
+                    setALRContext ls
+                    return (L thisLoc ITccurly)
+             -- This next case is to handle a transitional issue:
+             (ITwhere, ALRLayout _ col : ls, _)
+              | newLine && thisCol == col && transitional ->
+                 do addWarning Opt_WarnAlternativeLayoutRuleTransitional
+                               thisLoc
+                               (transitionalAlternativeLayoutWarning
+                                    "`where' clause at the same depth as implicit layout block")
+                    setALRContext ls
+                    setNextToken t
+                    -- Note that we use lastLoc, as we may need to close
+                    -- more layouts, or give a semicolon
+                    return (L lastLoc ITccurly)
+             -- This next case is to handle a transitional issue:
+             (ITvbar, ALRLayout _ col : ls, _)
+              | newLine && thisCol == col && transitional ->
+                 do addWarning Opt_WarnAlternativeLayoutRuleTransitional
+                               thisLoc
+                               (transitionalAlternativeLayoutWarning
+                                    "`|' at the same depth as implicit layout block")
+                    setALRContext ls
+                    setNextToken t
+                    -- Note that we use lastLoc, as we may need to close
+                    -- more layouts, or give a semicolon
+                    return (L lastLoc ITccurly)
+             (_, ALRLayout _ col : ls, _)
+              | newLine && thisCol == col ->
+                 do setNextToken t
+                    return (L thisLoc ITsemi)
+              | newLine && thisCol < col ->
+                 do setALRContext ls
+                    setNextToken t
+                    -- Note that we use lastLoc, as we may need to close
+                    -- more layouts, or give a semicolon
+                    return (L lastLoc ITccurly)
+             -- We need to handle close before open, as 'then' is both
+             -- an open and a close
+             (u, _, _)
+              | isALRclose u ->
+                 case context of
+                 ALRLayout _ _ : ls ->
+                     do setALRContext ls
+                        setNextToken t
+                        return (L thisLoc ITccurly)
+                 ALRNoLayout _ isLet : ls ->
+                     do let ls' = if isALRopen u
+                                     then ALRNoLayout (containsCommas u) False : ls
+                                     else ls
+                        setALRContext ls'
+                        when isLet $ setJustClosedExplicitLetBlock True
+                        return t
+                 [] ->
+                     do let ls = if isALRopen u
+                                    then [ALRNoLayout (containsCommas u) False]
+                                    else ls
+                        setALRContext ls
+                        -- XXX This is an error in John's code, but
+                        -- it looks reachable to me at first glance
+                        return t
+             (u, _, _)
+              | isALRopen u ->
+                 do setALRContext (ALRNoLayout (containsCommas u) False : context)
+                    return t
+             (ITin, ALRLayout ALRLayoutLet _ : ls, _) ->
+                 do setALRContext ls
+                    setPendingImplicitTokens [t]
+                    return (L thisLoc ITccurly)
+             (ITin, ALRLayout _ _ : ls, _) ->
+                 do setALRContext ls
+                    setNextToken t
+                    return (L thisLoc ITccurly)
+             -- the other ITin case omitted; general case below covers it
+             (ITcomma, ALRLayout _ _ : ls, _)
+              | topNoLayoutContainsCommas ls ->
+                 do setALRContext ls
+                    setNextToken t
+                    return (L thisLoc ITccurly)
+             (ITwhere, ALRLayout ALRLayoutDo _ : ls, _) ->
+                 do setALRContext ls
+                    setPendingImplicitTokens [t]
+                    return (L thisLoc ITccurly)
+             -- the other ITwhere case omitted; general case below covers it
+             (_, _, _) -> return t
+
+transitionalAlternativeLayoutWarning :: String -> SDoc
+transitionalAlternativeLayoutWarning msg
+    = text "transitional layout will not be accepted in the future:"
+   $$ text msg
+
+isALRopen :: Token -> Bool
+isALRopen ITcase        = True
+isALRopen ITif          = True
+isALRopen ITthen        = True
+isALRopen IToparen      = True
+isALRopen ITobrack      = True
+isALRopen ITocurly      = True
+-- GHC Extensions:
+isALRopen IToubxparen   = True
+isALRopen ITparenEscape = True
+isALRopen _             = False
+
+isALRclose :: Token -> Bool
+isALRclose ITof     = True
+isALRclose ITthen   = True
+isALRclose ITelse   = True
+isALRclose ITcparen = True
+isALRclose ITcbrack = True
+isALRclose ITccurly = True
+-- GHC Extensions:
+isALRclose ITcubxparen = True
+isALRclose _        = False
+
+isNonDecreasingIntentation :: ALRLayout -> Bool
+isNonDecreasingIntentation ALRLayoutDo = True
+isNonDecreasingIntentation _           = False
+
+containsCommas :: Token -> Bool
+containsCommas IToparen = True
+containsCommas ITobrack = True
+-- John doesn't have {} as containing commas, but records contain them,
+-- which caused a problem parsing Cabal's Distribution.Simple.InstallDirs
+-- (defaultInstallDirs).
+containsCommas ITocurly = True
+-- GHC Extensions:
+containsCommas IToubxparen = True
+containsCommas _        = False
+
+topNoLayoutContainsCommas :: [ALRContext] -> Bool
+topNoLayoutContainsCommas [] = False
+topNoLayoutContainsCommas (ALRLayout _ _ : ls) = topNoLayoutContainsCommas ls
+topNoLayoutContainsCommas (ALRNoLayout b _ : _) = b
 
 lexToken :: P (Located Token)
 lexToken = do
-  inp@(AI loc1 _ buf) <- getInput
+  inp@(AI loc1 buf) <- getInput
   sc <- getLexState
   exts <- getExts
   case alexScanUser exts inp sc of
     AlexEOF -> do
         let span = mkSrcSpan loc1 loc1
-        setLastToken span 0 0
+        setLastToken span 0
         return (L span ITeof)
-    AlexError (AI loc2 _ buf) ->
+    AlexError (AI loc2 buf) ->
         reportLexError loc1 loc2 buf "lexical error"
     AlexSkip inp2 _ -> do
         setInput inp2
         lexToken
-    AlexToken inp2@(AI end _ buf2) _ t -> do
+    AlexToken inp2@(AI end buf2) _ t -> do
         setInput inp2
         let span = mkSrcSpan loc1 end
         let bytes = byteDiff buf buf2
-        span `seq` setLastToken span bytes bytes
+        span `seq` setLastToken span bytes
         t span buf bytes
 
 reportLexError :: SrcLoc -> SrcLoc -> StringBuffer -> [Char] -> P a
@@ -1893,7 +2192,8 @@ reportLexError loc1 loc2 buf str
 
 lexTokenStream :: StringBuffer -> SrcLoc -> DynFlags -> ParseResult [Located Token]
 lexTokenStream buf loc dflags = unP go initState
-    where initState = mkPState buf loc (dopt_set (dopt_unset dflags Opt_Haddock) Opt_KeepRawTokenStream)
+    where dflags' = dopt_set (dopt_unset dflags Opt_Haddock) Opt_KeepRawTokenStream
+          initState = mkPState dflags' buf loc
           go = do
             ltok <- lexer return
             case ltok of
@@ -1916,8 +2216,11 @@ ignoredPrags = Map.fromList (map ignored pragmas)
                      pragmas = options_pragmas ++ ["cfiles", "contract"]
 
 oneWordPrags = Map.fromList([("rules", rulePrag),
-                           ("inline", token (ITinline_prag True)),
-                           ("notinline", token (ITinline_prag False)),
+                           ("inline", token (ITinline_prag Inline FunLike)),
+                           ("inlinable", token (ITinline_prag Inlinable FunLike)),
+                           ("inlineable", token (ITinline_prag Inlinable FunLike)),
+			   		  -- Spelling variant
+                           ("notinline", token (ITinline_prag NoInline FunLike)),
                            ("specialize", token ITspec_prag),
                            ("source", token ITsource_prag),
                            ("warning", token ITwarning_prag),
@@ -1928,8 +2231,8 @@ oneWordPrags = Map.fromList([("rules", rulePrag),
                            ("unpack", token ITunpack_prag),
                            ("ann", token ITann_prag)])
 
-twoWordPrags = Map.fromList([("inline conlike", token (ITinline_conlike_prag True)),
-                             ("notinline conlike", token (ITinline_conlike_prag False)),
+twoWordPrags = Map.fromList([("inline conlike", token (ITinline_prag Inline ConLike)),
+                             ("notinline conlike", token (ITinline_prag NoInline ConLike)),
                              ("specialize inline", token (ITspec_inline_prag True)),
                              ("specialize notinline", token (ITspec_inline_prag False))])
 
@@ -1940,7 +2243,7 @@ dispatch_pragmas prags span buf len = case Map.lookup (clean_pragma (lexemeToStr
                                        Nothing -> lexError "unknown pragma"
 
 known_pragma :: Map String Action -> AlexAccPred Int
-known_pragma prags _ _ len (AI _ _ buf) = (isJust $ Map.lookup (clean_pragma (lexemeToString (offsetBytes (- len) buf) len)) prags)
+known_pragma prags _ _ len (AI _ buf) = (isJust $ Map.lookup (clean_pragma (lexemeToString (offsetBytes (- len) buf) len)) prags)
                                           && (nextCharIs buf (\c -> not (isAlphaNum c || c == '_')))
 
 clean_pragma :: String -> String
@@ -1952,6 +2255,6 @@ clean_pragma prag = canon_ws (map toLower (unprefix prag))
                                               "noinline" -> "notinline"
                                               "specialise" -> "specialize"
                                               "constructorlike" -> "conlike"
-                                              otherwise -> prag'
+                                              _ -> prag'
                           canon_ws s = unwords (map canonical (words s))
 }

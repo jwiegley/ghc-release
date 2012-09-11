@@ -74,10 +74,10 @@ void initRtsFlagsDefaults(void)
     RtsFlags.GcFlags.minOldGenSize      = (1024 * 1024)       / BLOCK_SIZE;
     RtsFlags.GcFlags.maxHeapSize	= 0;    /* off by default */
     RtsFlags.GcFlags.heapSizeSuggestion	= 0;    /* none */
+    RtsFlags.GcFlags.heapSizeSuggestionAuto = rtsFalse;
     RtsFlags.GcFlags.pcFreeHeap		= 3;	/* 3% */
     RtsFlags.GcFlags.oldGenFactor       = 2;
     RtsFlags.GcFlags.generations        = 2;
-    RtsFlags.GcFlags.steps              = 2;
     RtsFlags.GcFlags.squeezeUpdFrames	= rtsTrue;
     RtsFlags.GcFlags.compact            = rtsFalse;
     RtsFlags.GcFlags.compactThreshold   = 30.0;
@@ -201,7 +201,6 @@ usage_text[] = {
 "  -H<size> Sets the minimum heap size (default 0M)   Egs: -H24m  -H1G",
 "  -m<n>    Minimum % of heap which must be available (default 3%)",
 "  -G<n>    Number of generations (default: 2)",
-"  -T<n>    Number of steps in younger generations (default: 2)",
 "  -c<n>    Use in-place compaction instead of copying in the oldest generation",
 "           when live data is at least <n>% of the maximum heap size set with",
 "           -M (default: 30%)",
@@ -256,7 +255,6 @@ usage_text[] = {
 "  -xt            Include threads (TSOs) in a heap profile",
 "",
 "  -xc      Show current cost centre stack on raising an exception",
-"",
 # endif
 #endif /* PROFILING or PAR */
 
@@ -342,6 +340,8 @@ usage_text[] = {
 "            b - branch mispredictions",
 "            s - stalled cycles",
 "            e - cache miss and branch misprediction events",
+"            +PAPI_EVENT   - collect papi preset event PAPI_EVENT",
+"            #NATIVE_EVENT - collect native event NATIVE_EVENT (in hex)",
 #endif
 "",
 "RTS options may also be specified using the GHCRTS environment variable.",
@@ -413,7 +413,7 @@ setupRtsFlags(int *argc, char *argv[], int *rts_argc, char *rts_argv[])
 	char *ghc_rts = getenv("GHCRTS");
 
 	if (ghc_rts != NULL) {
-            if (rtsOptsEnabled) {
+            if (rtsOptsEnabled != rtsOptsNone) {
                 splitRtsFlags(ghc_rts, rts_argc, rts_argv);
             }
             else {
@@ -438,7 +438,7 @@ setupRtsFlags(int *argc, char *argv[], int *rts_argc, char *rts_argv[])
 	    break;
 	}
 	else if (strequal("+RTS", argv[arg])) {
-            if (rtsOptsEnabled) {
+            if (rtsOptsEnabled != rtsOptsNone) {
                 mode = RTS;
             }
             else {
@@ -450,7 +450,14 @@ setupRtsFlags(int *argc, char *argv[], int *rts_argc, char *rts_argv[])
 	    mode = PGM;
 	}
 	else if (mode == RTS && *rts_argc < MAX_RTS_ARGS-1) {
-	    rts_argv[(*rts_argc)++] = argv[arg];
+	    if ((rtsOptsEnabled == rtsOptsAll) ||
+            strequal(argv[arg], "--info")) {
+            rts_argv[(*rts_argc)++] = argv[arg];
+        }
+        else {
+            errorBelch("Most RTS options are disabled. Link with -rtsopts to enable them.");
+            stg_exit(EXIT_FAILURE);
+        }
 	}
 	else if (mode == PGM) {
 	    argv[(*argc)++] = argv[arg];
@@ -547,7 +554,7 @@ error = rtsTrue;
                   else if (strequal("info",
                                &rts_argv[arg][2])) {
                       printRtsInfo();
-                      exit(0);
+                      stg_exit(0);
                   }
                   else {
 		      errorBelch("unknown RTS option: %s",rts_argv[arg]);
@@ -579,12 +586,18 @@ error = rtsTrue;
 		  RtsFlags.PapiFlags.eventType = PAPI_FLAG_CB_EVENTS;
 		  break;
                 case '+':
+                case '#':
                   if (RtsFlags.PapiFlags.numUserEvents >= MAX_PAPI_USER_EVENTS) {
                       errorBelch("maximum number of PAPI events reached");
                       stg_exit(EXIT_FAILURE);
                   }
+                  nat eventNum  = RtsFlags.PapiFlags.numUserEvents++;
+                  char kind     = rts_argv[arg][2];
+                  nat eventKind = kind == '+' ? PAPI_PRESET_EVENT_KIND : PAPI_NATIVE_EVENT_KIND;
+
+                  RtsFlags.PapiFlags.userEvents[eventNum] = rts_argv[arg] + 3;
                   RtsFlags.PapiFlags.eventType = PAPI_USER_EVENTS;
-                  RtsFlags.PapiFlags.userEvents[RtsFlags.PapiFlags.numUserEvents++] = rts_argv[arg] + 3;
+                  RtsFlags.PapiFlags.userEventsKind[eventNum] = eventKind;
                   break;
 		default:
 		  bad_option( rts_argv[arg] );
@@ -675,7 +688,7 @@ error = rtsTrue;
                   // -Dx also turns on -v.  Use -l to direct trace
                   // events to the .eventlog file instead.
                   RtsFlags.TraceFlags.tracing = TRACE_STDERR;
-         })
+	      })
               break;
 
 	      case 'K':
@@ -707,15 +720,14 @@ error = rtsTrue;
                       decodeSize(rts_argv[arg], 2, 1, HS_INT_MAX);
                   break;
 
-              case 'T':
-                  RtsFlags.GcFlags.steps =
-                      decodeSize(rts_argv[arg], 2, 1, HS_INT_MAX);
-		break;
-
 	      case 'H':
-		RtsFlags.GcFlags.heapSizeSuggestion =
-                    (nat)(decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_WORD_MAX) / BLOCK_SIZE);
-		break;
+                  if (rts_argv[arg][2] == '\0') {
+                      RtsFlags.GcFlags.heapSizeSuggestionAuto = rtsTrue;
+                  } else {
+                      RtsFlags.GcFlags.heapSizeSuggestion =
+                          (nat)(decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_WORD_MAX) / BLOCK_SIZE);
+                  }
+                  break;
 
 #ifdef RTS_GTK_FRONTPANEL
 	      case 'f':
@@ -993,7 +1005,7 @@ error = rtsTrue;
                     ) break;
 
 	      case 'q':
-                THREADED_BUILD_ONLY(
+		THREADED_BUILD_ONLY(
 		    switch (rts_argv[arg][2]) {
 		    case '\0':
 			errorBelch("incomplete RTS option: %s",rts_argv[arg]);
@@ -1032,7 +1044,7 @@ error = rtsTrue;
 			error = rtsTrue;
 			break;
 		    }
-		    ) break;
+                    ) break;
 #endif
 	      /* =========== PARALLEL =========================== */
 	      case 'e':
@@ -1291,8 +1303,9 @@ decodeSize(const char *flag, nat offset, StgWord64 min, StgWord64 max)
     val = (StgWord64)m;
 
     if (m < 0 || val < min || val > max) {
-        errorBelch("error in RTS option %s: size outside allowed range (%" FMT_Word64 " - %" FMT_Word64 ")", 
-                   flag, min, max);
+        // printf doesn't like 64-bit format specs on Windows
+        // apparently, so fall back to unsigned long.
+        errorBelch("error in RTS option %s: size outside allowed range (%lu - %lu)", flag, (lnat)min, (lnat)max);
         stg_exit(EXIT_FAILURE);
     }
 
@@ -1407,3 +1420,18 @@ setFullProgArgv(int argc, char *argv[])
     full_prog_argv[argc] = NULL;
 }
 
+void
+freeFullProgArgv (void)
+{
+    int i;
+
+    if (full_prog_argv != NULL) {
+        for (i = 0; i < full_prog_argc; i++) {
+            stgFree(full_prog_argv[i]);
+        }
+        stgFree(full_prog_argv);
+    }
+
+    full_prog_argc = 0;
+    full_prog_argv = NULL;
+}

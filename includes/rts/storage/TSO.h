@@ -46,7 +46,10 @@ typedef struct {
 /* Reason for thread being blocked. See comment above struct StgTso_. */
 typedef union {
   StgClosure *closure;
-  struct StgTSO_ *tso;
+  StgTSO *prev; // a back-link when the TSO is on the run queue (NotBlocked)
+  struct MessageBlackHole_ *bh;
+  struct MessageThrowTo_ *throwto;
+  struct MessageWakeup_  *wakeup;
   StgInt fd;	/* StgInt instead of int, so that it's the same size as the ptrs */
 #if defined(mingw32_HOST_OS)
   StgAsyncIOResult *async_result;
@@ -77,17 +80,22 @@ typedef struct StgTSO_ {
     */
     struct StgTSO_*         _link;
     /*
+      Currently used for linking TSOs on:
+      * cap->run_queue_{hd,tl}
+      * (non-THREADED_RTS); the blocked_queue
+      * and pointing to the relocated version of a ThreadRelocated
+
        NOTE!!!  do not modify _link directly, it is subject to
        a write barrier for generational GC.  Instead use the
        setTSOLink() function.  Exceptions to this rule are:
 
        * setting the link field to END_TSO_QUEUE
-       * putting a TSO on the blackhole_queue
        * setting the link field of the currently running TSO, as it
          will already be dirty.
     */
 
-    struct StgTSO_*         global_link;    /* Links all threads together */
+    struct StgTSO_*         global_link;    // Links threads on the
+                                            // generation->threads lists
     
     StgWord                 dirty;          /* non-zero => dirty */
     /*
@@ -108,9 +116,9 @@ typedef struct StgTSO_ {
      * setTSOLink().
      */
 
-    StgWord16               what_next;      /* Values defined in Constants.h */
-    StgWord16               why_blocked;    /* Values defined in Constants.h */
-    StgWord32               flags;
+    StgWord16               what_next;      // Values defined in Constants.h
+    StgWord16               why_blocked;    // Values defined in Constants.h
+    StgWord32               flags;          // Values defined in Constants.h
     StgTSOBlockInfo         block_info;
     StgThreadID             id;
     int                     saved_errno;
@@ -123,7 +131,13 @@ typedef struct StgTSO_ {
        exceptions.  In order to access this field, the TSO must be
        locked using lockClosure/unlockClosure (see SMP.h).
     */
-    struct StgTSO_ *        blocked_exceptions;
+    struct MessageThrowTo_ * blocked_exceptions;
+
+    /*
+      A list of StgBlockingQueue objects, representing threads blocked
+      on thunks that are under evaluation by this thread.
+    */
+    struct StgBlockingQueue_ *bq;
 
 #ifdef TICKY_TICKY
     /* TICKY-specific stuff would go here. */
@@ -149,6 +163,19 @@ typedef struct StgTSO_ {
 
 void dirty_TSO  (Capability *cap, StgTSO *tso);
 void setTSOLink (Capability *cap, StgTSO *tso, StgTSO *target);
+void setTSOPrev (Capability *cap, StgTSO *tso, StgTSO *target);
+
+// Apply to a TSO before looking at it if you are not sure whether it
+// might be ThreadRelocated or not (basically, that's most of the time
+// unless the TSO is the current TSO).
+//
+INLINE_HEADER StgTSO * deRefTSO(StgTSO *tso)
+{
+    while (tso->what_next == ThreadRelocated) {
+	tso = tso->_link;
+    }
+    return tso;
+}
 
 /* -----------------------------------------------------------------------------
    Invariants:
@@ -167,7 +194,7 @@ void setTSOLink (Capability *cap, StgTSO *tso, StgTSO *target);
 
 	tso->why_blocked       tso->block_info      location
         ----------------------------------------------------------------------
-	NotBlocked             NULL                 runnable_queue, or running
+	NotBlocked             END_TSO_QUEUE        runnable_queue, or running
 	
         BlockedOnBlackHole     the BLACKHOLE        blackhole_queue
 	
@@ -175,7 +202,7 @@ void setTSOLink (Capability *cap, StgTSO *tso, StgTSO *target);
 
 	BlockedOnSTM           END_TSO_QUEUE        STM wait queue(s)
 	
-        BlockedOnException     the TSO              TSO->blocked_exception
+        BlockedOnMsgThrowTo    MessageThrowTo *     TSO->blocked_exception
 
         BlockedOnRead          NULL                 blocked_queue
         BlockedOnWrite         NULL		    blocked_queue
@@ -189,7 +216,6 @@ void setTSOLink (Capability *cap, StgTSO *tso, StgTSO *target);
       
       tso->what_next == ThreadComplete or ThreadKilled
       tso->link     ==  (could be on some queue somewhere)
-      tso->su       ==  tso->stack + tso->stack_size
       tso->sp       ==  tso->stack + tso->stack_size - 1 (i.e. top stack word)
       tso->sp[0]    ==  return value of thread, if what_next == ThreadComplete,
                         exception             , if what_next == ThreadKilled

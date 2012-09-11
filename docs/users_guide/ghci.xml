@@ -28,8 +28,11 @@
 
 <screen>
 $ ghci
-GHCi, version 6.8.1: http://www.haskell.org/ghc/  :? for help
+GHCi, version 6.12.1: http://www.haskell.org/ghc/  :? for help
+Loading package ghc-prim ... linking ... done.
+Loading package integer-gmp ... linking ... done.
 Loading package base ... linking ... done.
+Loading package ffi-1.0 ... linking ... done.
 Prelude> 
 </screen>
 
@@ -586,10 +589,12 @@ hello
 Prelude IO>
 </screen>
 
-      <para>(Note: you can use <literal>import M</literal> as an
-      alternative to <literal>:module +M</literal>, and
+      <para>(Note: you can use conventional
+      haskell <literal>import</literal> syntax as
+      well, but this does not support
+      <literal>*</literal> forms).
       <literal>:module</literal> can also be shortened to 
-      <literal>:m</literal>). The full syntax of the
+      <literal>:m</literal>. The full syntax of the
       <literal>:module</literal> command is:</para>
 
 <screen>
@@ -814,16 +819,16 @@ it &lt;- <replaceable>e</replaceable>
   ghci> reverse []
 </programlisting>
       What should GHCi do?  Strictly speaking, the program is ambiguous.  <literal>show (reverse [])</literal>
-      (which is what GHCi computes here) has type <literal>Show a => a</literal> and how that displays depends 
+      (which is what GHCi computes here) has type <literal>Show a => String</literal> and how that displays depends
       on the type <literal>a</literal>.  For example:
 <programlisting>
-  ghci> (reverse []) :: String
+  ghci> reverse ([] :: String)
   ""
-  ghci> (reverse []) :: [Int]
+  ghci> reverse ([] :: [Int])
   []
 </programlisting>
     However, it is tiresome for the user to have to specify the type, so GHCi extends Haskell's type-defaulting
-    rules (Section 4.3.4 of the Haskell 98 Report (Revised)) as follows.  The
+    rules (Section 4.3.4 of the Haskell 2010 Report) as follows.  The
     standard rules take each group of constraints <literal>(C1 a, C2 a, ..., Cn
     a)</literal> for each type variable <literal>a</literal>, and defaults the
     type variable if 
@@ -1938,8 +1943,7 @@ maybe :: b -> (a -> b) -> Maybe a -> b
 	    used, respectively.  Tags for all the functions, constructors and
 	    types in the currently loaded modules are created.  All modules must
 	    be interpreted for these commands to work.</para>
-          <para>See also <xref linkend="hasktags" />.</para>
-	</listitem>
+        </listitem>
       </varlistentry>
 
       <varlistentry>
@@ -2918,6 +2922,13 @@ Prelude> :set -fno-glasgow-exts
             because this is normally what you want in an interpreter:
             output appears as it is generated.
           </para>
+          <para> 
+            If you want line-buffered behaviour, as in GHC, you can 
+            start your program thus:
+            <programlisting>
+               main = do { hSetBuffering stdout LineBuffering; ... }
+            </programlisting>
+          </para>
         </listitem>
       </varlistentry>
     </variablelist>
@@ -2927,7 +2938,6 @@ Prelude> :set -fno-glasgow-exts
 
 <!-- Emacs stuff:
      ;;; Local Variables: ***
-     ;;; mode: xml ***
      ;;; sgml-parent-document: ("users_guide.xml" "book" "chapter") ***
      ;;; End: ***
  -->

@@ -21,7 +21,6 @@ module GHC.IO.Handle.FD (
  ) where
 
 import GHC.Base
-import GHC.Num
 import GHC.Real
 import GHC.Show
 import Data.Maybe
@@ -51,6 +50,7 @@ import qualified System.Posix.Internals as Posix
 
 -- | A handle managing input from the Haskell program's standard input channel.
 stdin :: Handle
+{-# NOINLINE stdin #-}
 stdin = unsafePerformIO $ do
    -- ToDo: acquire lock
    setBinaryMode FD.stdin
@@ -60,6 +60,7 @@ stdin = unsafePerformIO $ do
 
 -- | A handle managing output to the Haskell program's standard output channel.
 stdout :: Handle
+{-# NOINLINE stdout #-}
 stdout = unsafePerformIO $ do
    -- ToDo: acquire lock
    setBinaryMode FD.stdout
@@ -69,6 +70,7 @@ stdout = unsafePerformIO $ do
 
 -- | A handle managing output to the Haskell program's standard error channel.
 stderr :: Handle
+{-# NOINLINE stderr #-}
 stderr = unsafePerformIO $ do
     -- ToDo: acquire lock
    setBinaryMode FD.stderr
@@ -81,6 +83,9 @@ stdHandleFinalizer :: FilePath -> MVar Handle__ -> IO ()
 stdHandleFinalizer fp m = do
   h_ <- takeMVar m
   flushWriteBuffer h_
+  case haType h_ of 
+      ClosedHandle -> return ()
+      _other       -> closeTextCodecs h_
   putMVar m (ioe_finalizedHandle fp)
 
 -- We have to put the FDs into binary mode on Windows to avoid the newline

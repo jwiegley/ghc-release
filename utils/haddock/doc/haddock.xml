@@ -10,13 +10,18 @@
       <firstname>Simon</firstname>
       <surname>Marlow</surname>
     </author>
-    <address><email>simonmar@microsoft.com</email></address>
+    <address><email>marlowsd@gmail.com</email></address>
+    <author>
+      <firstname>David</firstname>
+      <surname>Waern</surname>
+    </author>
+    <address><email>david.waern@gmail.com</email></address>
     <copyright>
-      <year>2004</year>
-      <holder>Simon Marlow</holder>
+      <year>2010</year>
+      <holder>Simon Marlow, David Waern</holder>
     </copyright>
     <abstract>
-      <para>This document describes Haddock version 2.6.1, a Haskell
+      <para>This document describes Haddock version 2.8.0, a Haskell
       documentation tool.</para>
     </abstract>
   </bookinfo>
@@ -93,7 +98,7 @@
       </listitem>
       <listitem>
 	<para>We might want documentation in multiple formats - online
-	and printed, for example.  Haddock comes with HTML, DocBook
+	and printed, for example.  Haddock comes with HTML, LaTeX,
   and Hoogle backends, and it is structured in such a way that adding new
 	back-ends is straightforward.</para>
       </listitem>
@@ -120,7 +125,7 @@
       Haddock source code, except where otherwise indicated.</para>
 
       <blockquote>
-	<para>Copyright 2002, Simon Marlow.  All rights reserved.</para>
+	<para>Copyright 2002-2010, Simon Marlow.  All rights reserved.</para>
 
 	<para>Redistribution and use in source and binary forms, with
         or without modification, are permitted provided that the
@@ -157,6 +162,51 @@
     </section>
 
     <section>
+      <title>Contributors</title>
+      <para>Haddock was originally written by Simon Marlow. Since it is an open source
+      project, many people have contributed to its development over the years.
+      Below is a list of contributors in alphabetical order that we hope is
+      somewhat complete. If you think you are missing from this list, please contact
+      us.
+      </para>
+      <itemizedlist>
+	<listitem>Ashley Yakeley</listitem>
+	<listitem>Benjamin Franksen</listitem>
+	<listitem>Brett Letner</listitem>
+        <listitem>Clemens Fruhwirth</listitem>
+        <listitem>Conal Elliott</listitem>
+        <listitem>David Waern</listitem> 
+        <listitem>Duncan Coutts</listitem>
+        <listitem>George Pollard</listitem>
+        <listitem>George Russel</listitem>
+        <listitem>Hal Daume</listitem>
+        <listitem>Ian Lynagh</listitem>
+        <listitem>Isaac Dupree</listitem>
+        <listitem>Joachim Breitner</listitem>
+        <listitem>Krasimir Angelov</listitem>
+        <listitem>Lennart Augustsson</listitem>
+        <listitem>Luke Plant</listitem>
+        <listitem>Malcolm Wallace</listitem>
+        <listitem>Mark Lentczner</listitem>
+        <listitem>Mark Shields</listitem>
+        <listitem>Neil Mitchell</listitem>
+        <listitem>Mike Thomas</listitem>
+        <listitem>Manuel Chakravarty</listitem>
+        <listitem>Oliver Brown</listitem>
+        <listitem>Roman Cheplyaka</listitem>
+        <listitem>Ross Paterson</listitem>
+        <listitem>Simon Hengel</listitem>
+        <listitem>Simon Marlow</listitem>
+        <listitem>Simon Peyton-Jones</listitem>
+        <listitem>Sigbjorn Finne</listitem>
+        <listitem>Stefan O'Rear</listitem>
+        <listitem>Sven Panne</listitem>
+        <listitem>Thomas Schilling</listitem>
+        <listitem>Wolfgang Jeltsch</listitem>
+        <listitem>Yitzchak Gale</listitem>
+      </itemizedlist>
+    </section>
+    <section>
       <title>Acknowledgements</title>
 
       <para>Several documentation systems provided the inspiration for
@@ -180,12 +230,9 @@
 
       <para>and probably several others I've forgotten.</para>
 
-      <para>Thanks to the following people for useful feedback,
-      discussion, patches, packaging, and moral support: Simon Peyton
-      Jones, Mark Shields, Manuel Chakravarty, Ross Patterson, Brett
-      Letner, Sven Panne, Hal Daume, George Russell, Oliver Braun,
-      Ashley Yakeley, Malcolm Wallace, Krasimir Angelov, the members
-      of <email>haskelldoc@haskell.org</email>, and everyone who
+      <para>Thanks to the the members
+      of <email>haskelldoc@haskell.org</email>,
+      <email>haddock@projects.haskell.org</email> and everyone who
       contributed to the many libraries that Haddock makes use
       of.</para>
     </section>
@@ -247,17 +294,6 @@
 
       <varlistentry>
 	<term>
-          <indexterm><primary><option>--optghc</option></primary></indexterm>
-          <option>--optghc</option>=<replaceable>option</replaceable>
-        </term>
-	<listitem>
-	  <para>Pass <replaceable>option</replaceable> to GHC.</para>
-	</listitem>
-      </varlistentry>
-
-
-      <varlistentry>
-	<term>
           <indexterm><primary><option>-o</option></primary></indexterm>
           <option>-o</option> <replaceable>dir</replaceable>
         </term>
@@ -268,6 +304,20 @@
 	<listitem>
 	  <para>Generate files into <replaceable>dir</replaceable>
 	  instead of the current directory.</para>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry>
+	<term>
+	  <indexterm><primary><option>-l</option></primary></indexterm>
+          <option>-l</option> <replaceable>dir</replaceable>
+        </term>
+	<term>
+	  <indexterm><primary><option>--lib</option></primary></indexterm>
+          <option>--lib</option>=<replaceable>dir</replaceable>
+        </term>
+	<listitem>
+	  <para>Use Haddock auxiliary files (themes, javascript, etc...) in <replaceable>dir</replaceable>.</para>
 	</listitem>
       </varlistentry>
 
@@ -329,35 +379,6 @@
 
       <varlistentry>
 	<term>
-	  <indexterm><primary><option>-l</option></primary></indexterm>
-          <option>-l</option> <replaceable>dir</replaceable>
-        </term>
-	<term>
-	  <indexterm><primary><option>--lib</option></primary></indexterm>
-          <option>--lib</option>=<replaceable>dir</replaceable>
-        </term>
-	<listitem>
-	  <para>Use auxiliary files in <replaceable>dir</replaceable>.</para>
-	</listitem>
-      </varlistentry>
-
-      <varlistentry>
-	<term>
-	  <indexterm><primary><option>-S</option></primary></indexterm>
-          <option>-S</option>
-        </term>
-	<term>
-	  <indexterm><primary><option>--docbook</option></primary></indexterm>
-          <option>--docbook</option>
-        </term>
-	<listitem>
-	  <para>Reserved for future use (output documentation in DocBook XML
-	  format).</para>
-	</listitem>
-      </varlistentry>
-
-      <varlistentry>
-	<term>
 	  <indexterm><primary><option>-h</option></primary></indexterm>
           <option>-h</option>
         </term>
@@ -372,6 +393,15 @@
 	  given), including the following:</para>
 	  <variablelist>
 	    <varlistentry>
+	      <term><filename><replaceable>module</replaceable>.html</filename></term>
+	      <term><filename>mini_<replaceable>module</replaceable>.html</filename></term>
+	      <listitem>
+		<para>An HTML page for each
+		<replaceable>module</replaceable>, and a "mini" page for
+		each used when viewing in frames.</para>
+	      </listitem>
+	    </varlistentry>
+	    <varlistentry>
 	      <term><filename>index.html</filename></term>
 	      <listitem>
 		<para>The top level page of the documentation: lists
@@ -380,36 +410,33 @@
 	      </listitem>
 	    </varlistentry>
 	    <varlistentry>
-	      <term><filename>haddock.css</filename></term>
+	      <term><filename>doc-index.html</filename></term>
+	      <term><filename>doc-index-<replaceable>X</replaceable>.html</filename></term>
 	      <listitem>
-		<para>The stylesheet used by the generated HTML.  Feel
-		free to modify this to change the colors or
-		layout, or even specify your own stylesheet using the
-		<option>--css</option> option.</para>
+		<para>The alphabetic index, possibly split into multiple
+		pages if big enough.</para>
+	      </listitem>
+	    </varlistentry>
+	    <varlistentry>
+	      <term><filename>frames.html</filename></term>
+	      <listitem>
+		<para>The top level document when viewing in frames.</para>
+	      </listitem>
+	    </varlistentry>
+	    <varlistentry>
+	      <term><filename><replaceable>some</replaceable>.css</filename></term>
+	      <term><filename><replaceable>etc...</replaceable></filename></term>
+	      <listitem>
+		<para>Files needed for the themes used. Specify your themes
+		using the <option>--theme</option> option.</para>
 	      </listitem>
 	    </varlistentry>
 	    <varlistentry>
 	      <term><filename>haddock-util.js</filename></term>
 	      <listitem>
-		<para>A small piece of JavaScript for collapsing sections
-		of the generated HTML.</para>
-	      </listitem>
-	    </varlistentry>
-	    <varlistentry>
-	      <term><filename><replaceable>module</replaceable>.html</filename></term>
-	      <listitem>
-		<para>An HTML page for each
-		<replaceable>module</replaceable>.</para>
-	      </listitem>
-	    </varlistentry>
-	    <varlistentry>
-	      <term><filename>doc-index.html</filename></term>
-	      <term><filename>doc-index-XX.html</filename></term>
-	      <listitem>
-		<para>The index, split into two
-		(functions/constructors and types/classes, as per
-		Haskell namespaces) and further split
-		alphabetically.</para>
+		<para>Some JavaScript utilities used to implement some of the
+		dynamic features like collapsable sections, and switching to
+		frames view.</para>
 	      </listitem>
 	    </varlistentry>
 	  </variablelist>
@@ -417,61 +444,81 @@
       </varlistentry>
 
       <varlistentry>
+        <term>
+          <indexterm><primary><option>--latex</option></primary></indexterm>
+          <option>--latex</option>
+        </term>
+        <listitem>
+          <para>Generate documentation in LaTeX format.  Several files
+          will be generated into the current directory (or the
+            specified directory if the <option>-o</option> option is
+            given), including the following:</para>
+          
+	  <variablelist>
+	    <varlistentry>
+	      <term><filename><replaceable>package</replaceable>.tex</filename></term>
+	      <listitem>
+                <para>The top-level LaTeX source file; to format the
+                documentation into PDF you might run something like
+                  this:</para>
+<screen>
+$ pdflatex <replaceable>package</replaceable>.tex</screen>
+              </listitem>
+            </varlistentry>
+            <varlistentry>
+              <term><filename>haddock.sty</filename></term>
+              <listitem>
+                <para>The default style.  The file contains
+                definitions for various macros used in the LaTeX
+                sources generated by Haddock; to change the way the
+                formatted output looks, you might want to override
+                these by specifying your own style with
+                the <option>--latex-style</option> option.</para>
+              </listitem>
+            </varlistentry>
+            <varlistentry>
+              <term><filename><replaceable>module</replaceable>.tex</filename></term>
+              <listitem>
+                <para>The LaTeX documentation for
+                each <replaceable>module</replaceable>.</para>
+              </listitem>
+            </varlistentry>
+          </variablelist>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term>
+          <indexterm><primary><option>--latex-style</option></primary></indexterm>
+          <option>--latex-style=<replaceable>style</replaceable></option>
+        </term>
+        <listitem>
+          <para>This option lets you override the default style used
+            by the LaTeX generated by the <option>--latex</option> option.
+            Normally Haddock puts a
+            standard <filename>haddock.sty</filename> in the output
+            directory, and includes the
+            command <literal>\usepackage{haddock}</literal> in the
+            LaTeX source.  If this option is given,
+            then <filename>haddock.sty</filename> is not generated,
+            and the command is
+            instead <literal>\usepackage{<replaceable>style</replaceable>}</literal>.
+          </para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
 	<term>
-          <indexterm><primary><option>-m</option></primary></indexterm>
-          <option>-m</option>
+	  <indexterm><primary><option>-S</option></primary></indexterm>
+          <option>-S</option>
         </term>
 	<term>
-          <indexterm><primary><option>--html-help</option></primary></indexterm>
-          <option>--html-help</option>
+	  <indexterm><primary><option>--docbook</option></primary></indexterm>
+          <option>--docbook</option>
         </term>
 	<listitem>
-	  <para>(In HTML mode only) Produce extra contents and index
-	  files for given HTML Help system. Currently supported Help
-	  systems are Microsoft HTML Help 1.3 and 2.0 and GNOME DevHelp.</para>
-
-	  <para>Using the Microsoft HTML Help system provides two
-	  advantages over plain HTML: the help viewer gives you a nice
-	  hierarchical folding contents pane on the left, and the
-	  documentation files are compressed and therefore much
-	  smaller (roughly a factor of 10). The disadvantage is that
-	  the help can't be viewed over the web.</para>
-
-	  <para>In order to create a compiled Microsoft help file, you
-	  also need the Microsoft HTML Help compiler, which is
-	  available free from
-	  <ulink url="http://www.microsoft.com/">http://www.microsoft.com/</ulink>
-	  (search for <quote>HTML Help compiler</quote>).</para>
-
-	  <para>Viewers</para>
-	  <variablelist>
-            <varlistentry>
-              <term>Microsoft HTML Help Viewer</term>
-              <listitem><para>Distributed with Microsoft Windows</para></listitem>
-            </varlistentry>
-            <varlistentry>
-              <term><ulink url="http://xchm.sourceforge.net">xCHM</ulink></term>
-              <listitem><para>a CHM viewer for UNIX (Linux, *BSD, Solaris), written by Razvan Cojocaru</para></listitem>
-            </varlistentry>
-            <varlistentry>
-              <term><ulink url="http://www.jouledata.com/MacProducts.html">JouleData Solutions' CHM Viewer</ulink></term>
-              <listitem><para>a comercial 100% native Cocoa .chm file viewer for the Mac OS X platform</para></listitem>
-            </varlistentry>
-            <varlistentry>
-              <term><ulink url="http://gnochm.sourceforge.net">GnoCHM</ulink></term>
-              <listitem><para>a CHM file viewer. It is designed to integrate nicely with Gnome.</para></listitem>
-            </varlistentry>
-	  </variablelist>
-
-	  <para>The GNOME DevHelp also provides help viewer which looks like
-	  MSHelp viewer but the documentation files aren't compressed.
-	  The documentation can be viewed with any HTML browser but
-	  DevHelp gives you a nice hierarchical folding contents and
-	  keyword index panes on the left. The DevHelp expects to see
-	  *.devhelp file in the folder where the documentation is placed.
-	  The file contains all required information
-	  to build the contents and index panes.
-	  </para>
+	  <para>Reserved for future use (output documentation in DocBook XML
+	  format).</para>
 	</listitem>
       </varlistentry>
 
@@ -637,6 +684,59 @@
 
       <varlistentry>
 	<term>
+	  <indexterm><primary><option>--theme</option></primary></indexterm>
+          <option>--theme</option>=<replaceable>path</replaceable>
+        </term>
+	<listitem>
+	  <para>Specify a theme to be used for HTML (<option>--html</option>)
+	  documentation. If given multiple times then the pages will use the
+	  first theme given by default, and have alternate style sheets for
+	  the others. The reader can switch between themes with browsers that
+	  support alternate style sheets, or with the "Style" menu that gets 
+	  added when the page is loaded. If
+	  no themes are specified, then just the default built-in theme
+	  ("Ocean") is used.
+	  </para>
+	  
+	  <para>The <replaceable>path</replaceable> parameter can be one of:
+	  </para>
+
+	  <itemizedlist>
+	    <listitem>
+	      <para>A <emphasis>directory</emphasis>: The base name of
+	      the directory becomes the name of the theme. The directory
+	      must contain exactly one
+	      <filename><replaceable>some</replaceable>.css</filename> file.
+	      Other files, usually image files, will be copied, along with
+	      the <filename><replaceable>some</replaceable>.css</filename>
+	      file, into the generated output directory.</para>
+	    </listitem>
+	    <listitem>
+	      <para>A <emphasis>CSS file</emphasis>: The base name of
+	      the file becomes the name of the theme.</para>
+	    </listitem>
+	    <listitem>
+	      <para>The <emphasis>name</emphasis> of a built-in theme
+	      ("Ocean" or "Classic").</para>
+	    </listitem>
+	  </itemizedlist>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry>
+	<term>
+	  <indexterm><primary><option>--built-in-themes</option></primary></indexterm>
+          <option>--built-in-themes</option>
+        </term>
+	<listitem>
+	  <para>Includes the built-in themes ("Ocean" and "Classic").
+	  Can be combined with <option>--theme</option>. Note that order
+	  matters: The first specified theme will be the default.</para>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry>
+	<term>
 	  <indexterm><primary><option>-c</option></primary></indexterm>
           <option>-c</option> <replaceable>file</replaceable>
         </term>
@@ -645,9 +745,7 @@
           <option>--css</option>=<replaceable>file</replaceable>
         </term>
 	<listitem>
-	  <para>Specify a stylesheet to use instead of the default one
-	  that comes with Haddock.  It should specify certain classes:
-	  see the default stylesheet for details.</para>
+	  <para>Deprecated aliases for <option>--theme</option></para>
 	</listitem>
       </varlistentry>
 
@@ -718,6 +816,20 @@
 
       <varlistentry>
         <term>
+          <indexterm><primary><option>-V</option></primary></indexterm>
+          <option>-V</option>
+        </term>
+        <term>
+          <indexterm><primary><option>--version</option></primary></indexterm>
+          <option>--version</option>
+        </term>
+	<listitem>
+	  <para>Output version information and exit.</para>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term>
           <indexterm><primary><option>-v</option></primary></indexterm>
           <option>-v</option>
         </term>
@@ -736,44 +848,39 @@
 
       <varlistentry>
         <term>
-          <indexterm><primary><option>-V</option></primary></indexterm>
-          <option>-V</option>
+          <indexterm><primary><option>--use-contents</option></primary></indexterm>
+          <option>--use-contents=<replaceable>URL</replaceable></option>
         </term>
-        <term>
-          <indexterm><primary><option>--version</option></primary></indexterm>
-          <option>--version</option>
-        </term>
-	<listitem>
-	  <para>Output version information and exit.</para>
-	</listitem>
-      </varlistentry>
-
-      <varlistentry>
         <term>
           <indexterm><primary><option>--use-index</option></primary></indexterm>
           <option>--use-index=<replaceable>URL</replaceable></option>
         </term>
 	<listitem>
 	  <para>When generating HTML, do not generate an index.
-	  Instead, redirect the Index link on each page to
+	  Instead, redirect the Contents and/or Index link on each page to
 	  <replaceable>URL</replaceable>.  This option is intended for
-	  use in conjuction with <option>--gen-index</option> for
-	  generating a separate index covering multiple
+	  use in conjuction with <option>--gen-contents</option> and/or 
+	  <option>--gen-index</option> for
+	  generating a separate contents and/or index covering multiple
 	  libraries.</para>
 	</listitem>
       </varlistentry>
 
       <varlistentry>
         <term>
+          <indexterm><primary><option>--gen-contents</option></primary></indexterm>
+          <option>--gen-contents</option>
+        </term>
+        <term>
           <indexterm><primary><option>--gen-index</option></primary></indexterm>
           <option>--gen-index</option>
         </term>
 	<listitem>
-	  <para>Generate an HTML index containing entries pulled from
-	  all the specified interfaces (interfaces are specified using
+	  <para>Generate an HTML contents and/or index containing entries pulled 
+	  from all the specified interfaces (interfaces are specified using
 	  <option>-i</option> or <option>--read-interface</option>).
-	  This is used to generate a single index for multiple sets of
-	  Haddock documentation.</para>
+	  This is used to generate a single contents and/or index for multiple 
+	  sets of Haddock documentation.</para>
 	</listitem>
       </varlistentry>
 
@@ -806,6 +913,16 @@
       </varlistentry>
       
       <varlistentry>
+	<term>
+          <indexterm><primary><option>--optghc</option></primary></indexterm>
+          <option>--optghc</option>=<replaceable>option</replaceable>
+        </term>
+	<listitem>
+	  <para>Pass <replaceable>option</replaceable> to GHC.</para>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term>
           <indexterm><primary><option>-w</option></primary></indexterm>
           <option>-w</option>
@@ -816,6 +933,26 @@
         </term>
 	<listitem>
 	  <para>Turn off all warnings.</para>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term>
+          <indexterm><primary><option>--no-tmp-comp-dir</option></primary></indexterm>
+          <option>--no-tmp-comp-dir</option>
+        </term>
+	<listitem>
+          <para>
+          Do not use a temporary directory for reading and writing compilation output files
+          (<literal>.o</literal>, <literal>.hi</literal>, and stub files). Instead, use the
+          present directory or another directory that you have explicitly told GHC to use
+          via the <literal>--optghc</literal> flag.
+          </para>
+          <para>
+          This flag can be used to avoid recompilation if compilation files already exist.
+          Compilation files are produced when Haddock has to process modules that make use of
+          Template Haskell, in which case Haddock compiles the modules using the GHC API.  
+          </para>
 	</listitem>
       </varlistentry>
     </variablelist>
@@ -1409,12 +1546,17 @@ module A where
 	one of these special characters, precede it with a backslash
 	(<literal>\</literal>).</para>
 
-	<para>Additionally, the character <literal>&gt;</literal> has
-	a special meaning at the beginning of a line, and the
-	following characters have special meanings at the beginning of
-	a paragraph:
-	<literal>*</literal>, <literal>-</literal>.  These characters
-	can also be escaped using <literal>\</literal>.</para>
+        <para>Additionally, the character <literal>&gt;</literal> has
+        a special meaning at the beginning of a line, and the
+        following characters have special meanings at the beginning of
+        a paragraph:
+        <literal>*</literal>, <literal>-</literal>.  These characters
+        can also be escaped using <literal>\</literal>.</para>
+
+        <para>Furthermore, the character sequence <literal>&gt;&gt;&gt;</literal>
+        has a special meaning at the beginning of a line. To
+        escape it, just prefix the characters in the sequence with a
+        backslash.</para>
       </section>
 
       <section>
@@ -1464,6 +1606,28 @@ module A where
         literally, whereas the <literal>@...@</literal> form
         interprets markup as normal inside the code block.</para>
       </section>
+
+      <section>
+	<title>Examples</title>
+
+	<para> Haddock has markup support for examples of interaction with a
+  <emphasis>read-eval-print loop (REPL)</emphasis>.  An
+	example is introduced with
+	<literal>&gt;&gt;&gt;</literal> followed by an expression followed
+	by zero or more result lines:</para>
+
+<programlisting>
+-- | Two examples are given bellow:
+--
+-- &gt;&gt;&gt; fib 10
+-- 55
+--
+-- &gt;&gt;&gt; putStrLn "foo\nbar"
+-- foo
+-- bar
+</programlisting>
+      </section>
+
 
       <section>
 	<title>Hyperlinked Identifiers</title>

@@ -471,11 +471,12 @@ thread_TSO (StgTSO *tso)
 
     if (   tso->why_blocked == BlockedOnMVar
 	|| tso->why_blocked == BlockedOnBlackHole
-	|| tso->why_blocked == BlockedOnException
+	|| tso->why_blocked == BlockedOnMsgThrowTo
 	) {
 	thread_(&tso->block_info.closure);
     }
     thread_(&tso->blocked_exceptions);
+    thread_(&tso->bq);
     
     thread_(&tso->trec);
 
@@ -622,12 +623,12 @@ thread_obj (StgInfoTable *info, StgPtr p)
 
     case FUN:
     case CONSTR:
-    case STABLE_NAME:
-    case IND_PERM:
+    case PRIM:
+    case MUT_PRIM:
     case MUT_VAR_CLEAN:
     case MUT_VAR_DIRTY:
-    case CAF_BLACKHOLE:
     case BLACKHOLE:
+    case BLOCKING_QUEUE:
     {
 	StgPtr end;
 	
@@ -662,8 +663,8 @@ thread_obj (StgInfoTable *info, StgPtr p)
 	return p + sizeofW(StgMVar);
     }
     
-    case IND_OLDGEN:
-    case IND_OLDGEN_PERM:
+    case IND:
+    case IND_PERM:
 	thread(&((StgInd *)p)->indirectee);
 	return p + sizeofW(StgInd);
 
@@ -705,32 +706,6 @@ thread_obj (StgInfoTable *info, StgPtr p)
     case TSO:
 	return thread_TSO((StgTSO *)p);
     
-    case TVAR_WATCH_QUEUE:
-    {
-        StgTVarWatchQueue *wq = (StgTVarWatchQueue *)p;
-	thread_(&wq->closure);
-	thread_(&wq->next_queue_entry);
-	thread_(&wq->prev_queue_entry);
-	return p + sizeofW(StgTVarWatchQueue);
-    }
-    
-    case TVAR:
-    {
-        StgTVar *tvar = (StgTVar *)p;
-	thread((void *)&tvar->current_value);
-	thread((void *)&tvar->first_watch_queue_entry);
-	return p + sizeofW(StgTVar);
-    }
-    
-    case TREC_HEADER:
-    {
-        StgTRecHeader *trec = (StgTRecHeader *)p;
-	thread_(&trec->enclosing_trec);
-	thread_(&trec->current_chunk);
-	thread_(&trec->invariants_to_check);
-	return p + sizeofW(StgTRecHeader);
-    }
-
     case TREC_CHUNK:
     {
         StgWord i;
@@ -743,23 +718,6 @@ thread_obj (StgInfoTable *info, StgPtr p)
 	  thread(&e->new_value);
 	}
 	return p + sizeofW(StgTRecChunk);
-    }
-
-    case ATOMIC_INVARIANT:
-    {
-        StgAtomicInvariant *invariant = (StgAtomicInvariant *)p;
-	thread_(&invariant->code);
-	thread_(&invariant->last_execution);
-	return p + sizeofW(StgAtomicInvariant);
-    }
-
-    case INVARIANT_CHECK_QUEUE:
-    {
-        StgInvariantCheckQueue *queue = (StgInvariantCheckQueue *)p;
-	thread_(&queue->invariant);
-	thread_(&queue->my_execution);
-	thread_(&queue->next_queue_entry);
-	return p + sizeofW(StgInvariantCheckQueue);
     }
 
     default:
@@ -855,15 +813,15 @@ update_fwd_compact( bdescr *blocks )
 
 	    size = p - q;
 	    if (free + size > free_bd->start + BLOCK_SIZE_W) {
-		// unset the next bit in the bitmap to indicate that
+		// set the next bit in the bitmap to indicate that
 		// this object needs to be pushed into the next
 		// block.  This saves us having to run down the
 		// threaded info pointer list twice during the next pass.
-		unmark(q+1,bd);
+		mark(q+1,bd);
 		free_bd = free_bd->link;
 		free = free_bd->start;
 	    } else {
-		ASSERT(is_marked(q+1,bd));
+		ASSERT(!is_marked(q+1,bd));
 	    }
 
 	    unthread(q,(StgWord)free + GET_CLOSURE_TAG((StgClosure *)iptr));
@@ -876,7 +834,7 @@ update_fwd_compact( bdescr *blocks )
 }
 
 static nat
-update_bkwd_compact( step *stp )
+update_bkwd_compact( generation *gen )
 {
     StgPtr p, free;
 #if 0
@@ -887,7 +845,7 @@ update_bkwd_compact( step *stp )
     nat size, free_blocks;
     StgWord iptr;
 
-    bd = free_bd = stp->old_blocks;
+    bd = free_bd = gen->old_blocks;
     free = free_bd->start;
     free_blocks = 1;
 
@@ -922,7 +880,7 @@ update_bkwd_compact( step *stp )
 	    }
 #endif
 
-	    if (!is_marked(p+1,bd)) {
+	    if (is_marked(p+1,bd)) {
 		// don't forget to update the free ptr in the block desc.
 		free_bd->free = free;
 		free_bd = free_bd->link;
@@ -966,8 +924,8 @@ update_bkwd_compact( step *stp )
 void
 compact(StgClosure *static_objects)
 {
-    nat g, s, blocks;
-    step *stp;
+    nat g, blocks;
+    generation *gen;
 
     // 1. thread the roots
     markCapabilities((evac_fn)thread_root, NULL);
@@ -1001,15 +959,12 @@ compact(StgClosure *static_objects)
     }
 
     // the global thread list
-    for (s = 0; s < total_steps; s++) {
-        thread((void *)&all_steps[s].threads);
+    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+        thread((void *)&generations[g].threads);
     }
 
     // any threads resurrected during this GC
     thread((void *)&resurrected_threads);
-
-    // the blackhole queue
-    thread((void *)&blackhole_queue);
 
     // the task list
     {
@@ -1036,30 +991,24 @@ compact(StgClosure *static_objects)
 
     // 2. update forward ptrs
     for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-	for (s = 0; s < generations[g].n_steps; s++) {
-	    if (g==0 && s ==0) continue;
-	    stp = &generations[g].steps[s];
-	    debugTrace(DEBUG_gc, "update_fwd:  %d.%d", 
-		       stp->gen->no, stp->no);
+        gen = &generations[g];
+        debugTrace(DEBUG_gc, "update_fwd:  %d", g);
 
-	    update_fwd(stp->blocks);
-	    update_fwd_large(stp->scavenged_large_objects);
-	    if (g == RtsFlags.GcFlags.generations-1 && stp->old_blocks != NULL) {
-		debugTrace(DEBUG_gc, "update_fwd:  %d.%d (compact)",
-			   stp->gen->no, stp->no);
-		update_fwd_compact(stp->old_blocks);
-	    }
+        update_fwd(gen->blocks);
+        update_fwd_large(gen->scavenged_large_objects);
+        if (g == RtsFlags.GcFlags.generations-1 && gen->old_blocks != NULL) {
+            debugTrace(DEBUG_gc, "update_fwd:  %d (compact)", g);
+            update_fwd_compact(gen->old_blocks);
 	}
     }
 
     // 3. update backward ptrs
-    stp = &oldest_gen->steps[0];
-    if (stp->old_blocks != NULL) {
-	blocks = update_bkwd_compact(stp);
+    gen = oldest_gen;
+    if (gen->old_blocks != NULL) {
+	blocks = update_bkwd_compact(gen);
 	debugTrace(DEBUG_gc, 
-		   "update_bkwd: %d.%d (compact, old: %d blocks, now %d blocks)",
-		   stp->gen->no, stp->no,
-		   stp->n_old_blocks, blocks);
-	stp->n_old_blocks = blocks;
+		   "update_bkwd: %d (compact, old: %d blocks, now %d blocks)",
+		   gen->no, gen->n_old_blocks, blocks);
+	gen->n_old_blocks = blocks;
     }
 }

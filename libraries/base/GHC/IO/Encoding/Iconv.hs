@@ -30,9 +30,7 @@ module GHC.IO.Encoding.Iconv (
 
 #if !defined(mingw32_HOST_OS)
 
-#undef DEBUG_DUMP
-
-import Foreign
+import Foreign hiding (unsafePerformIO)
 import Foreign.C
 import Data.Maybe
 import GHC.Base
@@ -41,26 +39,21 @@ import GHC.IO.Encoding.Types
 import GHC.Num
 import GHC.Show
 import GHC.Real
-#ifdef DEBUG_DUMP
+import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.Internals
-#endif
+
+c_DEBUG_DUMP :: Bool
+c_DEBUG_DUMP = False
 
 iconv_trace :: String -> IO ()
-
-#ifdef DEBUG_DUMP
-
-iconv_trace s = puts s
+iconv_trace s
+ | c_DEBUG_DUMP = puts s
+ | otherwise    = return ()
 
 puts :: String -> IO ()
-puts s = do withCStringLen (s++"\n") $ \(p, len) -> 
-                c_write 1 (castPtr p) (fromIntegral len)
+puts s = do _ <- withCStringLen (s ++ "\n") $ \(p, len) ->
+                     c_write 1 (castPtr p) (fromIntegral len)
             return ()
-
-#else
-
-iconv_trace _ = return ()
-
-#endif
 
 -- -----------------------------------------------------------------------------
 -- iconv encoders/decoders
@@ -100,14 +93,11 @@ utf32be = unsafePerformIO (mkTextEncoding "UTF32BE")
 {-# NOINLINE localeEncoding #-}
 localeEncoding :: TextEncoding
 localeEncoding = unsafePerformIO $ do
-#if HAVE_LANGINFO_H
-   cstr <- c_localeEncoding -- use nl_langinfo(CODESET) to get the encoding
-                               -- if we have it
+   -- Use locale_charset() or nl_langinfo(CODESET) to get the encoding
+   -- if we have either of them.
+   cstr <- c_localeEncoding
    r <- peekCString cstr
    mkTextEncoding r
-#else
-   mkTextEncoding "" -- GNU iconv accepts "" to mean the -- locale encoding.
-#endif
 
 -- We hope iconv_t is a storable type.  It should be, since it has at least the
 -- value -1, which is a possible return value from iconv_open.
@@ -142,6 +132,7 @@ char_shift | charSize == 2 = 1
 mkTextEncoding :: String -> IO TextEncoding
 mkTextEncoding charset = do
   return (TextEncoding { 
+                textEncodingName = charset,
 		mkTextDecoder = newIConv charset haskellChar iconvDecode,
 		mkTextEncoder = newIConv haskellChar charset iconvEncode})
 

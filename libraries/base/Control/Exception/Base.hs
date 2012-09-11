@@ -1,5 +1,4 @@
 {-# OPTIONS_GHC -XNoImplicitPrelude #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 #include "Typeable.h"
 
@@ -79,6 +78,16 @@ module Control.Exception.Base (
         -- * Asynchronous Exceptions
 
         -- ** Asynchronous exception control
+        mask,
+#ifndef __NHC__
+        mask_,
+        uninterruptibleMask,
+        uninterruptibleMask_,
+        MaskingState(..),
+        getMaskingState,
+#endif
+
+        -- ** (deprecated) Asynchronous exception control
 
         block,
         unblock,
@@ -100,6 +109,7 @@ module Control.Exception.Base (
         -- * Calls for GHC runtime
         recSelError, recConError, irrefutPatError, runtimeError,
         nonExhaustiveGuardsError, patError, noMethodBindingError,
+        absentError,
         nonTermination, nestedAtomically,
 #endif
   ) where
@@ -111,7 +121,7 @@ import GHC.IO.Exception
 import GHC.Exception
 import GHC.Show
 -- import GHC.Exception hiding ( Exception )
-import GHC.Conc
+import GHC.Conc.Sync
 #endif
 
 #ifdef __HUGS__
@@ -176,8 +186,8 @@ data AssertionFailed
 data PatternMatchFail
 data NoMethodError
 data Deadlock
-data BlockedOnDeadMVar
-data BlockedIndefinitely
+data BlockedIndefinitelyOnMVar
+data BlockedIndefinitelyOnSTM
 data ErrorCall
 data RecConError
 data RecSelError
@@ -214,6 +224,10 @@ evaluate x = x `seq` return x
 assert :: Bool -> a -> a
 assert True  x = x
 assert False _ = throw (toException (UserError "" "Assertion failed"))
+
+mask   :: ((IO a-> IO a) -> IO a) -> IO a
+mask action = action restore
+    where restore act = act
 
 #endif
 
@@ -506,12 +520,11 @@ bracket
         -> (a -> IO c)  -- ^ computation to run in-between
         -> IO c         -- returns the value from the in-between computation
 bracket before after thing =
-  block (do
+  mask $ \restore -> do
     a <- before
-    r <- unblock (thing a) `onException` after a
+    r <- restore (thing a) `onException` after a
     _ <- after a
     return r
- )
 #endif
 
 -- | A specialised variant of 'bracket' with just a computation to run
@@ -522,11 +535,10 @@ finally :: IO a         -- ^ computation to run first
                         -- was raised)
         -> IO a         -- returns the value from the first computation
 a `finally` sequel =
-  block (do
-    r <- unblock a `onException` sequel
+  mask $ \restore -> do
+    r <- restore a `onException` sequel
     _ <- sequel
     return r
-  )
 
 -- | A variant of 'bracket' where the return value from the first computation
 -- is not required.
@@ -541,10 +553,9 @@ bracketOnError
         -> (a -> IO c)  -- ^ computation to run in-between
         -> IO c         -- returns the value from the in-between computation
 bracketOnError before after thing =
-  block (do
+  mask $ \restore -> do
     a <- before
-    unblock (thing a) `onException` after a
-  )
+    restore (thing a) `onException` after a
 
 #if !(__GLASGOW_HASKELL__ || __NHC__)
 assert :: Bool -> a -> a
@@ -695,12 +706,14 @@ instance Exception NestedAtomically
 
 #ifdef __GLASGOW_HASKELL__
 recSelError, recConError, irrefutPatError, runtimeError,
-             nonExhaustiveGuardsError, patError, noMethodBindingError
+  nonExhaustiveGuardsError, patError, noMethodBindingError,
+  absentError
         :: Addr# -> a   -- All take a UTF8-encoded C string
 
 recSelError              s = throw (RecSelError ("No match in record selector "
 			                         ++ unpackCStringUtf8# s))  -- No location info unfortunately
 runtimeError             s = error (unpackCStringUtf8# s)                   -- No location info unfortunately
+absentError              s = error ("Oops!  Entered absent arg " ++ unpackCStringUtf8# s)
 
 nonExhaustiveGuardsError s = throw (PatternMatchFail (untangle s "Non-exhaustive guards in"))
 irrefutPatError          s = throw (PatternMatchFail (untangle s "Irrefutable pattern failed for pattern"))

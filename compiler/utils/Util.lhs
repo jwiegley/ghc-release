@@ -30,6 +30,9 @@ module Util (
 
         isIn, isn'tIn,
 
+        -- * Tuples
+        fstOf3, sndOf3, thirdOf3,
+
         -- * List operations controlled by another list
         takeList, dropList, splitAtList, split,
         dropTail,
@@ -44,6 +47,9 @@ module Util (
         isEqual, eqListBy,
         thenCmp, cmpList,
         removeSpaces,
+        
+        -- * Edit distance
+        fuzzyMatch,
 
         -- * Transitive closures
         transitiveClosure,
@@ -73,19 +79,22 @@ module Util (
         escapeSpaces,
         parseSearchPath,
         Direction(..), reslash,
+
+        -- * Utils for defining Data instances
+        abstractConstr, abstractDataType, mkNoRepType
     ) where
 
 #include "HsVersions.h"
 
 import Panic
 
+import Data.Data
 import Data.IORef       ( IORef, newIORef, atomicModifyIORef )
 import System.IO.Unsafe ( unsafePerformIO )
 import Data.List        hiding (group)
 import Control.Concurrent.MVar ( MVar, newMVar, newEmptyMVar )
 
 #ifdef DEBUG
-import qualified Data.List as List ( elem, notElem )
 import FastTypes
 #endif
 
@@ -94,9 +103,14 @@ import System.IO.Error as IO ( catch, isDoesNotExistError )
 import System.Directory ( doesDirectoryExist, createDirectory,
                           getModificationTime )
 import System.FilePath
+import System.Time      ( ClockTime )
+
 import Data.Char        ( isUpper, isAlphaNum, isSpace, ord, isDigit )
 import Data.Ratio       ( (%) )
-import System.Time      ( ClockTime )
+import Data.Ord         ( comparing )
+import Data.Bits
+import Data.Word
+import qualified Data.IntMap as IM
 
 infixr 9 `thenCmp`
 \end{code}
@@ -179,6 +193,15 @@ nTimes :: Int -> (a -> a) -> (a -> a)
 nTimes 0 _ = id
 nTimes 1 f = f
 nTimes n f = f . nTimes (n-1) f
+\end{code}
+
+\begin{code}
+fstOf3   :: (a,b,c) -> a    
+sndOf3   :: (a,b,c) -> b    
+thirdOf3 :: (a,b,c) -> c    
+fstOf3      (a,_,_) =  a
+sndOf3      (_,b,_) =  b
+thirdOf3    (_,_,c) =  c
 \end{code}
 
 %************************************************************************
@@ -386,36 +409,27 @@ Debugging/specialising versions of \tr{elem} and \tr{notElem}
 isIn, isn'tIn :: Eq a => String -> a -> [a] -> Bool
 
 # ifndef DEBUG
-isIn    _msg x ys = elem__    x ys
-isn'tIn _msg x ys = notElem__ x ys
-
---these are here to be SPECIALIZEd (automagically)
-elem__ :: Eq a => a -> [a] -> Bool
-elem__ _ []     = False
-elem__ x (y:ys) = x == y || elem__ x ys
-
-notElem__ :: Eq a => a -> [a] -> Bool
-notElem__ _ []     = True
-notElem__ x (y:ys) = x /= y && notElem__ x ys
+isIn    _msg x ys = x `elem` ys
+isn'tIn _msg x ys = x `notElem` ys
 
 # else /* DEBUG */
 isIn msg x ys
-  = elem (_ILIT(0)) x ys
+  = elem100 (_ILIT(0)) x ys
   where
-    elem _ _ []        = False
-    elem i x (y:ys)
+    elem100 _ _ []        = False
+    elem100 i x (y:ys)
       | i ># _ILIT(100) = trace ("Over-long elem in " ++ msg)
-                                (x `List.elem` (y:ys))
-      | otherwise       = x == y || elem (i +# _ILIT(1)) x ys
+                                (x `elem` (y:ys))
+      | otherwise       = x == y || elem100 (i +# _ILIT(1)) x ys
 
 isn'tIn msg x ys
-  = notElem (_ILIT(0)) x ys
+  = notElem100 (_ILIT(0)) x ys
   where
-    notElem _ _ [] =  True
-    notElem i x (y:ys)
+    notElem100 _ _ [] =  True
+    notElem100 i x (y:ys)
       | i ># _ILIT(100) = trace ("Over-long notElem in " ++ msg)
-                                (x `List.notElem` (y:ys))
-      | otherwise      =  x /= y && notElem (i +# _ILIT(1)) x ys
+                                (x `notElem` (y:ys))
+      | otherwise      =  x /= y && notElem100 (i +# _ILIT(1)) x ys
 # endif /* DEBUG */
 \end{code}
 
@@ -670,6 +684,93 @@ removeSpaces = reverse . dropWhile isSpace . reverse . dropWhile isSpace
 
 %************************************************************************
 %*                                                                      *
+\subsection{Edit distance}
+%*                                                                      *
+%************************************************************************
+
+\begin{code}
+-- | Find the "restricted" Damerau-Levenshtein edit distance between two strings. See: <http://en.wikipedia.org/wiki/Damerau-Levenshtein_distance>.
+-- Based on the algorithm presented in "A Bit-Vector Algorithm for Computing Levenshtein and Damerau Edit Distances" in PSC'02 (Heikki Hyyro).
+-- See http://www.cs.uta.fi/~helmu/pubs/psc02.pdf and http://www.cs.uta.fi/~helmu/pubs/PSCerr.html for an explanation
+restrictedDamerauLevenshteinDistance :: String -> String -> Int
+restrictedDamerauLevenshteinDistance str1 str2 = restrictedDamerauLevenshteinDistanceWithLengths m n str1 str2
+  where
+    m = length str1
+    n = length str2
+
+restrictedDamerauLevenshteinDistanceWithLengths :: Int -> Int -> String -> String -> Int
+restrictedDamerauLevenshteinDistanceWithLengths m n str1 str2
+  | m <= n    = if n <= 32 -- n must be larger so this check is sufficient
+                then restrictedDamerauLevenshteinDistance' (undefined :: Word32) m n str1 str2
+                else restrictedDamerauLevenshteinDistance' (undefined :: Integer) m n str1 str2
+  | otherwise = if m <= 32 -- m must be larger so this check is sufficient
+                then restrictedDamerauLevenshteinDistance' (undefined :: Word32) n m str2 str1
+                else restrictedDamerauLevenshteinDistance' (undefined :: Integer) n m str2 str1
+
+restrictedDamerauLevenshteinDistance' :: (Bits bv) => bv -> Int -> Int -> String -> String -> Int
+restrictedDamerauLevenshteinDistance' _bv_dummy m n str1 str2 
+  | [] <- str1 = n
+  | otherwise  = extractAnswer $ foldl' (restrictedDamerauLevenshteinDistanceWorker (matchVectors str1) top_bit_mask vector_mask) (0, 0, m_ones, 0, m) str2
+  where m_ones@vector_mask = (2 ^ m) - 1
+        top_bit_mask = (1 `shiftL` (m - 1)) `asTypeOf` _bv_dummy
+        extractAnswer (_, _, _, _, distance) = distance
+
+restrictedDamerauLevenshteinDistanceWorker :: (Bits bv) => IM.IntMap bv -> bv -> bv -> (bv, bv, bv, bv, Int) -> Char -> (bv, bv, bv, bv, Int)
+restrictedDamerauLevenshteinDistanceWorker str1_mvs top_bit_mask vector_mask (pm, d0, vp, vn, distance) char2 
+  = seq str1_mvs $ seq top_bit_mask $ seq vector_mask $ seq pm' $ seq d0' $ seq vp' $ seq vn' $ seq distance'' $ seq char2 $ (pm', d0', vp', vn', distance'')
+  where
+    pm' = IM.findWithDefault 0 (ord char2) str1_mvs
+    
+    d0' = ((((sizedComplement vector_mask d0) .&. pm') `shiftL` 1) .&. pm) -- No need to mask the shiftL because of the restricted range of pm
+      .|. ((((pm' .&. vp) + vp) .&. vector_mask) `xor` vp) .|. pm' .|. vn
+    hp' = vn .|. sizedComplement vector_mask (d0' .|. vp)
+    hn' = d0' .&. vp
+    
+    hp'_shift = ((hp' `shiftL` 1) .|. 1) .&. vector_mask
+    hn'_shift = (hn' `shiftL` 1) .&. vector_mask
+    vp' = hn'_shift .|. sizedComplement vector_mask (d0' .|. hp'_shift)
+    vn' = d0' .&. hp'_shift
+    
+    distance' = if hp' .&. top_bit_mask /= 0 then distance + 1 else distance
+    distance'' = if hn' .&. top_bit_mask /= 0 then distance' - 1 else distance'
+
+sizedComplement :: Bits bv => bv -> bv -> bv
+sizedComplement vector_mask vect = vector_mask `xor` vect
+
+matchVectors :: Bits bv => String -> IM.IntMap bv
+matchVectors = snd . foldl' go (0 :: Int, IM.empty)
+  where
+    go (ix, im) char = let ix' = ix + 1
+                           im' = IM.insertWith (.|.) (ord char) (2 ^ ix) im
+                       in seq ix' $ seq im' $ (ix', im')
+
+#ifdef __GLASGOW_HASKELL__
+{-# SPECIALIZE INLINE restrictedDamerauLevenshteinDistance' :: Word32 -> Int -> Int -> String -> String -> Int #-}
+{-# SPECIALIZE INLINE restrictedDamerauLevenshteinDistance' :: Integer -> Int -> Int -> String -> String -> Int #-}
+
+{-# SPECIALIZE restrictedDamerauLevenshteinDistanceWorker :: IM.IntMap Word32 -> Word32 -> Word32 -> (Word32, Word32, Word32, Word32, Int) -> Char -> (Word32, Word32, Word32, Word32, Int) #-}
+{-# SPECIALIZE restrictedDamerauLevenshteinDistanceWorker :: IM.IntMap Integer -> Integer -> Integer -> (Integer, Integer, Integer, Integer, Int) -> Char -> (Integer, Integer, Integer, Integer, Int) #-}
+
+{-# SPECIALIZE INLINE sizedComplement :: Word32 -> Word32 -> Word32 #-}
+{-# SPECIALIZE INLINE sizedComplement :: Integer -> Integer -> Integer #-}
+
+{-# SPECIALIZE matchVectors :: String -> IM.IntMap Word32 #-}
+{-# SPECIALIZE matchVectors :: String -> IM.IntMap Integer #-}
+#endif
+
+-- | Search for possible matches to the users input in the given list, returning a small number of ranked results
+fuzzyMatch :: String -> [String] -> [String]
+fuzzyMatch user_entered possibilites = map fst $ take mAX_RESULTS $ sortBy (comparing snd) 
+                                                [ (poss, distance) | poss <- possibilites
+                                                                   , let distance = restrictedDamerauLevenshteinDistance poss user_entered
+                                                                   , distance <= fuzzy_threshold ]
+  where -- Work out an approriate match threshold (about a quarter of the # of characters the user entered)
+        fuzzy_threshold = max (round $ fromInteger (genericLength user_entered) / (4 :: Rational)) 1
+        mAX_RESULTS = 3
+\end{code}
+
+%************************************************************************
+%*                                                                      *
 \subsection[Utils-pairs]{Pairs}
 %*                                                                      *
 %************************************************************************
@@ -898,5 +999,31 @@ reslash d = f
           slash = case d of
                   Forwards -> '/'
                   Backwards -> '\\'
+\end{code}
+
+%************************************************************************
+%*                                                                      *
+\subsection[Utils-Data]{Utils for defining Data instances}
+%*                                                                      *
+%************************************************************************
+
+These functions helps us to define Data instances for abstract types.
+
+\begin{code}
+abstractConstr :: String -> Constr
+abstractConstr n = mkConstr (abstractDataType n) ("{abstract:"++n++"}") [] Prefix
+\end{code}
+
+\begin{code}
+abstractDataType :: String -> DataType
+abstractDataType n = mkDataType n [abstractConstr n]
+\end{code}
+
+\begin{code}
+-- Old GHC versions come with a base library with this function misspelled.
+#if __GLASGOW_HASKELL__ < 612
+mkNoRepType :: String -> DataType
+mkNoRepType = mkNorepType
+#endif
 \end{code}
 

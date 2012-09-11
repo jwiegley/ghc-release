@@ -1,5 +1,8 @@
 {-# LANGUAGE RecordWildCards, TypeSynonymInstances, StandaloneDeriving, GeneralizedNewtypeDeriving #-}
-{-# OPTIONS_GHC -fno-warn-orphans -fno-warn-name-shadowing #-}
+{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
+-- This module deliberately defines orphan instances for now. Should
+-- become unnecessary once we move to using the binary package properly:
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Distribution.InstalledPackageInfo.Binary
@@ -19,9 +22,24 @@ import Distribution.Package hiding (depends)
 import Distribution.License
 import Distribution.InstalledPackageInfo as IPI
 import Data.Binary as Bin
+import Control.Exception as Exception
 
 readBinPackageDB :: Binary m => FilePath -> IO [InstalledPackageInfo_ m]
-readBinPackageDB file = Bin.decodeFile file
+readBinPackageDB file
+    = do xs <- Bin.decodeFile file
+         _ <- Exception.evaluate $ length xs
+         return xs
+      `catchUserError`
+      (\err -> error ("While parsing " ++ show file ++ ": " ++ err))
+
+catchUserError :: IO a -> (String -> IO a) -> IO a
+#ifdef BASE3
+catchUserError io f = io `Exception.catch` \e -> case e of
+                                                 ErrorCall err -> f err
+                                                 _ -> throw e
+#else
+catchUserError io f = io `Exception.catch` \(ErrorCall err) -> f err
+#endif
 
 writeBinPackageDB :: Binary m => FilePath -> [InstalledPackageInfo_ m] -> IO ()
 writeBinPackageDB file ipis = Bin.encodeFile file ipis

@@ -16,7 +16,7 @@ Utility functions on @Core@ syntax
 -- | Commonly useful utilites for manipulating the Core language
 module CoreUtils (
 	-- * Constructing expressions
-	mkInlineMe, mkSCC, mkCoerce, mkCoerceI,
+	mkSCC, mkCoerce, mkCoerceI,
 	bindNonRec, needsCaseBinding,
 	mkAltExpr, mkPiType, mkPiTypes,
 
@@ -26,9 +26,8 @@ module CoreUtils (
 	-- * Properties of expressions
 	exprType, coreAltType, coreAltsType,
 	exprIsDupable, exprIsTrivial, exprIsCheap, exprIsExpandable,
-	exprIsHNF,exprOkForSpeculation, exprIsBig, 
-	exprIsConApp_maybe, exprIsBottom,
-	rhsIsStatic,
+	exprIsHNF, exprOkForSpeculation, exprIsBig, exprIsConLike,
+	rhsIsStatic, isCheapApp, isExpandableApp,
 
 	-- * Expression and bindings size
 	coreBindsSize, exprSize,
@@ -37,7 +36,10 @@ module CoreUtils (
 	hashExpr,
 
 	-- * Equality
-	cheapEqExpr, 
+	cheapEqExpr, eqExpr, eqExprX,
+
+	-- * Eta reduction
+	tryEtaReduce,
 
 	-- * Manipulating data constructors and types
 	applyTypeToArgs, applyTypeToArg,
@@ -53,7 +55,6 @@ import SrcLoc
 import VarEnv
 import VarSet
 import Name
-import Module
 #if mingw32_TARGET_OS
 import Packages
 #endif
@@ -62,7 +63,7 @@ import DataCon
 import PrimOp
 import Id
 import IdInfo
-import NewDemand
+import TcType	( isPredTy )
 import Type
 import Coercion
 import TyCon
@@ -70,6 +71,7 @@ import CostCentre
 import Unique
 import Outputable
 import TysPrim
+import PrelNames( absentErrorIdKey )
 import FastString
 import Maybes
 import Util
@@ -110,7 +112,7 @@ coreAltType (_,bs,rhs)
   where
     ty           = exprType rhs
     free_tvs     = tyVarsOfType ty
-    bad_binder b = isTyVar b && b `elemVarSet` free_tvs
+    bad_binder b = isTyCoVar b && b `elemVarSet` free_tvs
 
 coreAltsType :: [CoreAlt] -> Type
 -- ^ Returns the type of the first alternative, which should be the same as for all alternatives
@@ -143,10 +145,10 @@ Various possibilities suggest themselves:
    we are doing here.  It's not too expensive, I think.
 
 \begin{code}
-mkPiType  :: Var   -> Type -> Type
+mkPiType  :: EvVar -> Type -> Type
 -- ^ Makes a @(->)@ type or a forall type, depending
 -- on whether it is given a type variable or a term variable.
-mkPiTypes :: [Var] -> Type -> Type
+mkPiTypes :: [EvVar] -> Type -> Type
 -- ^ 'mkPiType' for multiple type or value arguments
 
 mkPiType v ty
@@ -193,51 +195,10 @@ panic_msg e op_ty = pprCoreExpr e $$ ppr op_ty
 %*									*
 %************************************************************************
 
-mkNote removes redundant coercions, and SCCs where possible
-
-\begin{code}
-#ifdef UNUSED
-mkNote :: Note -> CoreExpr -> CoreExpr
-mkNote (SCC cc)	expr		   = mkSCC cc expr
-mkNote InlineMe expr		   = mkInlineMe expr
-mkNote note     expr		   = Note note expr
-#endif
-\end{code}
-
-Drop trivial InlineMe's.  This is somewhat important, because if we have an unfolding
-that looks like	(Note InlineMe (Var v)), the InlineMe doesn't go away because it may
-not be *applied* to anything.
-
-We don't use exprIsTrivial here, though, because we sometimes generate worker/wrapper
-bindings like
-	fw = ...
-	f  = inline_me (coerce t fw)
-As usual, the inline_me prevents the worker from getting inlined back into the wrapper.
-We want the split, so that the coerces can cancel at the call site.  
-
-However, we can get left with tiresome type applications.  Notably, consider
-	f = /\ a -> let t = e in (t, w)
-Then lifting the let out of the big lambda gives
-	t' = /\a -> e
-	f = /\ a -> let t = inline_me (t' a) in (t, w)
-The inline_me is to stop the simplifier inlining t' right back
-into t's RHS.  In the next phase we'll substitute for t (since
-its rhs is trivial) and *then* we could get rid of the inline_me.
-But it hardly seems worth it, so I don't bother.
-
-\begin{code}
--- | Wraps the given expression in an inlining hint unless the expression
--- is trivial in some sense, so that doing so would usually hurt us
-mkInlineMe :: CoreExpr -> CoreExpr
-mkInlineMe e@(Var _)           = e
-mkInlineMe e@(Note InlineMe _) = e
-mkInlineMe e	               = Note InlineMe e
-\end{code}
-
 \begin{code}
 -- | Wrap the given expression in the coercion, dropping identity coercions and coalescing nested coercions
 mkCoerceI :: CoercionI -> CoreExpr -> CoreExpr
-mkCoerceI IdCo e = e
+mkCoerceI (IdCo _) e = e
 mkCoerceI (ACo co) e = mkCoerce co e
 
 -- | Wrap the given expression in the coercion safely, coalescing nested coercions
@@ -253,7 +214,7 @@ mkCoerce co expr
 --    if to_ty `coreEqType` from_ty
 --    then expr
 --    else 
-        ASSERT2(from_ty `coreEqType` (exprType expr), text "Trying to coerce" <+> text "(" <> ppr expr $$ text "::" <+> ppr (exprType expr) <> text ")" $$ ppr co $$ ppr (coercionKindPredTy co))
+        WARN(not (from_ty `coreEqType` exprType expr), text "Trying to coerce" <+> text "(" <> ppr expr $$ text "::" <+> ppr (exprType expr) <> text ")" $$ ppr co $$ pprEqPred (coercionKind co))
          (Cast expr co)
 \end{code}
 
@@ -418,13 +379,14 @@ Similar things can happen (augmented by GADTs) when the Simplifier
 filters down the matching alternatives in Simplify.rebuildCase.
 
 
-
 %************************************************************************
 %*									*
-\subsection{Figuring out things about expressions}
+             exprIsTrivial
 %*									*
 %************************************************************************
 
+Note [exprIsTrivial]
+~~~~~~~~~~~~~~~~~~~~
 @exprIsTrivial@ is true of expressions we are unconditionally happy to
 		duplicate; simple variables and constants, and type
 		applications.  Note that primop Ids aren't considered
@@ -465,6 +427,14 @@ exprIsTrivial _                = False
 \end{code}
 
 
+%************************************************************************
+%*									*
+             exprIsDupable
+%*									*
+%************************************************************************
+
+Note [exprIsDupable]
+~~~~~~~~~~~~~~~~~~~~
 @exprIsDupable@	is true of expressions that can be duplicated at a modest
 		cost in code size.  This will only happen in different case
 		branches, so there's no issue about duplicating work.
@@ -478,12 +448,11 @@ exprIsTrivial _                = False
 
 \begin{code}
 exprIsDupable :: CoreExpr -> Bool
-exprIsDupable (Type _)          = True
-exprIsDupable (Var _)           = True
-exprIsDupable (Lit lit)         = litIsDupable lit
-exprIsDupable (Note InlineMe _) = True
-exprIsDupable (Note _ e)        = exprIsDupable e
-exprIsDupable (Cast e _)        = exprIsDupable e
+exprIsDupable (Type _)   = True
+exprIsDupable (Var _)    = True
+exprIsDupable (Lit lit)  = litIsDupable lit
+exprIsDupable (Note _ e) = exprIsDupable e
+exprIsDupable (Cast e _) = exprIsDupable e
 exprIsDupable expr
   = go expr 0
   where
@@ -497,6 +466,14 @@ dupAppSize :: Int
 dupAppSize = 4		-- Size of application we are prepared to duplicate
 \end{code}
 
+%************************************************************************
+%*									*
+             exprIsCheap, exprIsExpandable
+%*									*
+%************************************************************************
+
+Note [exprIsCheap]   See also Note [Interaction of exprIsCheap and lone variables]
+~~~~~~~~~~~~~~~~~~   in CoreUnfold.lhs
 @exprIsCheap@ looks at a Core expression and returns \tr{True} if
 it is obviously in weak head normal form, or is cheap to get to WHNF.
 [Note that that's not the same as exprIsDupable; an expression might be
@@ -525,29 +502,46 @@ shared.  The main examples of things which aren't WHNF but are
 Notice that a variable is considered 'cheap': we can push it inside a lambda,
 because sharing will make sure it is only evaluated once.
 
+Note [exprIsCheap and exprIsHNF]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note that exprIsHNF does not imply exprIsCheap.  Eg
+	let x = fac 20 in Just x
+This responds True to exprIsHNF (you can discard a seq), but
+False to exprIsCheap.
+
 \begin{code}
-exprIsCheap' :: (Id -> Bool) -> CoreExpr -> Bool
-exprIsCheap' _          (Lit _)           = True
-exprIsCheap' _          (Type _)          = True
-exprIsCheap' _          (Var _)           = True
-exprIsCheap' _          (Note InlineMe _) = True
-exprIsCheap' is_conlike (Note _ e)        = exprIsCheap' is_conlike e
-exprIsCheap' is_conlike (Cast e _)        = exprIsCheap' is_conlike e
-exprIsCheap' is_conlike (Lam x e)         = isRuntimeVar x
-                                            || exprIsCheap' is_conlike e
-exprIsCheap' is_conlike (Case e _ _ alts) = exprIsCheap' is_conlike e && 
-				and [exprIsCheap' is_conlike rhs | (_,_,rhs) <- alts]
+exprIsCheap :: CoreExpr -> Bool
+exprIsCheap = exprIsCheap' isCheapApp
+
+exprIsExpandable :: CoreExpr -> Bool
+exprIsExpandable = exprIsCheap' isExpandableApp	-- See Note [CONLIKE pragma] in BasicTypes
+
+
+exprIsCheap' :: (Id -> Int -> Bool) -> CoreExpr -> Bool
+exprIsCheap' _          (Lit _)   = True
+exprIsCheap' _          (Type _)  = True
+exprIsCheap' _          (Var _)   = True
+exprIsCheap' good_app (Note _ e)  = exprIsCheap' good_app e
+exprIsCheap' good_app (Cast e _)  = exprIsCheap' good_app e
+exprIsCheap' good_app (Lam x e)   = isRuntimeVar x
+                                 || exprIsCheap' good_app e
+
+exprIsCheap' good_app (Case e _ _ alts) = exprIsCheap' good_app e && 
+				          and [exprIsCheap' good_app rhs | (_,_,rhs) <- alts]
 	-- Experimentally, treat (case x of ...) as cheap
 	-- (and case __coerce x etc.)
 	-- This improves arities of overloaded functions where
 	-- there is only dictionary selection (no construction) involved
-exprIsCheap' is_conlike (Let (NonRec x _) e)  
-      | isUnLiftedType (idType x) = exprIsCheap' is_conlike e
-      | otherwise		  = False
-	-- strict lets always have cheap right hand sides,
-	-- and do no allocation.
 
-exprIsCheap' is_conlike other_expr 	-- Applications and variables
+exprIsCheap' good_app (Let (NonRec x _) e)  
+  | isUnLiftedType (idType x) = exprIsCheap' good_app e
+  | otherwise		      = False
+	-- Strict lets always have cheap right hand sides,
+	-- and do no allocation, so just look at the body
+	-- Non-strict lets do allocation so we don't treat them as cheap
+	-- See also 
+
+exprIsCheap' good_app other_expr 	-- Applications and variables
   = go other_expr []
   where
 	-- Accumulate value arguments, then decide
@@ -558,14 +552,12 @@ exprIsCheap' is_conlike other_expr 	-- Applications and variables
 				-- (f t1 t2 t3) counts as WHNF
     go (Var f) args
  	= case idDetails f of
-		RecSelId {}  -> go_sel args
-		ClassOpId _  -> go_sel args
-		PrimOpId op  -> go_primop op args
-
-		_ | is_conlike f -> go_pap args
-                  | length args < idArity f -> go_pap args
-
-	        _ -> isBottomingId f
+		RecSelId {}  	    	     -> go_sel args
+		ClassOpId {} 	    	     -> go_sel args
+		PrimOpId op  	    	     -> go_primop op args
+		_ | good_app f (length args) -> go_pap args
+                  | isBottomingId f 	     -> True
+                  | otherwise       	     -> False
 			-- Application of a function which
 			-- always gives bottom; we treat this as cheap
 			-- because it certainly doesn't need to be shared!
@@ -580,25 +572,58 @@ exprIsCheap' is_conlike other_expr 	-- Applications and variables
  	-- We'll put up with one constructor application, but not dozens
  	
     --------------
-    go_primop op args = primOpIsCheap op && all (exprIsCheap' is_conlike) args
+    go_primop op args = primOpIsCheap op && all (exprIsCheap' good_app) args
  	-- In principle we should worry about primops
  	-- that return a type variable, since the result
  	-- might be applied to something, but I'm not going
  	-- to bother to check the number of args
  
     --------------
-    go_sel [arg] = exprIsCheap' is_conlike arg	-- I'm experimenting with making record selection
+    go_sel [arg] = exprIsCheap' good_app arg	-- I'm experimenting with making record selection
     go_sel _     = False		-- look cheap, so we will substitute it inside a
  					-- lambda.  Particularly for dictionary field selection.
   		-- BUT: Take care with (sel d x)!  The (sel d) might be cheap, but
   		--	there's no guarantee that (sel d x) will be too.  Hence (n_val_args == 1)
 
-exprIsCheap :: CoreExpr -> Bool
-exprIsCheap = exprIsCheap' isDataConWorkId
+isCheapApp :: Id -> Int -> Bool
+isCheapApp fn n_val_args
+  = isDataConWorkId fn 
+  || n_val_args < idArity fn
 
-exprIsExpandable :: CoreExpr -> Bool
-exprIsExpandable = exprIsCheap' isConLikeId
+isExpandableApp :: Id -> Int -> Bool
+isExpandableApp fn n_val_args
+  =  isConLikeId fn
+  || n_val_args < idArity fn
+  || go n_val_args (idType fn)
+  where
+  -- See if all the arguments are PredTys (implicit params or classes)
+  -- If so we'll regard it as expandable; see Note [Expandable overloadings]
+     go 0 _ = True
+     go n_val_args ty 
+       | Just (_, ty) <- splitForAllTy_maybe ty   = go n_val_args ty
+       | Just (arg, ty) <- splitFunTy_maybe ty
+       , isPredTy arg                             = go (n_val_args-1) ty
+       | otherwise                                = False
 \end{code}
+
+Note [Expandable overloadings]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose the user wrote this
+   {-# RULE  forall x. foo (negate x) = h x #-}
+   f x = ....(foo (negate x))....
+He'd expect the rule to fire. But since negate is overloaded, we might
+get this:
+    f = \d -> let n = negate d in \x -> ...foo (n x)...
+So we treat the application of a function (negate in this case) to a
+*dictionary* as expandable.  In effect, every function is CONLIKE when
+it's applied only to dictionaries.
+
+
+%************************************************************************
+%*									*
+             exprOkForSpeculation
+%*									*
+%************************************************************************
 
 \begin{code}
 -- | 'exprOkForSpeculation' returns True of an expression that is:
@@ -611,11 +636,8 @@ exprIsExpandable = exprIsCheap' isConLikeId
 -- Precisely, it returns @True@ iff:
 --
 --  * The expression guarantees to terminate, 
---
 --  * soon, 
---
 --  * without raising an exception,
---
 --  * without causing a side effect (e.g. writing a mutable variable)
 --
 -- Note that if @exprIsHNF e@, then @exprOkForSpecuation e@.
@@ -641,9 +663,17 @@ exprOkForSpeculation (Var v)     = isUnLiftedType (idType v)
 				 && not (isTickBoxOp v)
 exprOkForSpeculation (Note _ e)  = exprOkForSpeculation e
 exprOkForSpeculation (Cast e _)  = exprOkForSpeculation e
+
+exprOkForSpeculation (Case e _ _ alts) 
+  =  exprOkForSpeculation e  -- Note [exprOkForSpeculation: case expressions]
+  && all (\(_,_,rhs) -> exprOkForSpeculation rhs) alts
+
 exprOkForSpeculation other_expr
   = case collectArgs other_expr of
-	(Var f, args) -> spec_ok (idDetails f) args
+	(Var f, args) | f `hasKey` absentErrorIdKey	-- Note [Absent error Id]
+                      -> all exprOkForSpeculation args  --    in WwLib
+                      | otherwise 
+                      -> spec_ok (idDetails f) args
         _             -> False
  
   where
@@ -665,6 +695,10 @@ exprOkForSpeculation other_expr
 				-- A bit conservative: we don't really need
 				-- to care about lazy arguments, but this is easy
 
+    spec_ok (DFunId new_type) _ = not new_type 
+         -- DFuns terminate, unless the dict is implemented with a newtype
+	 -- in which case they may not
+
     spec_ok _ _ = False
 
 -- | True of dyadic operators that can fail only if the second arg is zero!
@@ -681,39 +715,57 @@ isDivOp DoubleDivOp      = True
 isDivOp _                = False
 \end{code}
 
+Note [exprOkForSpeculation: case expressions]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
+
+It's always sound for exprOkForSpeculation to return False, and we
+don't want it to take too long, so it bales out on complicated-looking
+terms.  Notably lets, which can be stacked very deeply; and in any 
+case the argument of exprOkForSpeculation is usually in a strict context,
+so any lets will have been floated away.
+
+However, we keep going on case-expressions.  An example like this one
+showed up in DPH code:
+    foo :: Int -> Int
+    foo 0 = 0
+    foo n = (if n < 5 then 1 else 2) `seq` foo (n-1)
+
+If exprOkForSpeculation doesn't look through case expressions, you get this:
+    T.$wfoo =
+      \ (ww :: GHC.Prim.Int#) ->
+        case ww of ds {
+          __DEFAULT -> case (case <# ds 5 of _ {
+                          GHC.Bool.False -> lvl1; 
+                          GHC.Bool.True -> lvl})
+                       of _ { __DEFAULT ->
+                       T.$wfoo (GHC.Prim.-# ds_XkE 1) };
+          0 -> 0
+        }
+
+The inner case is redundant, and should be nuked.
+
+
+%************************************************************************
+%*									*
+             exprIsHNF, exprIsConLike
+%*									*
+%************************************************************************
+
 \begin{code}
--- | True of expressions that are guaranteed to diverge upon execution
-exprIsBottom :: CoreExpr -> Bool
-exprIsBottom e = go 0 e
-               where
-                -- n is the number of args
-                 go n (Note _ e)     = go n e
-                 go n (Cast e _)     = go n e
-                 go n (Let _ e)      = go n e
-                 go _ (Case e _ _ _) = go 0 e   -- Just check the scrut
-                 go n (App e _)      = go (n+1) e
-                 go n (Var v)        = idAppIsBottom v n
-                 go _ (Lit _)        = False
-                 go _ (Lam _ _)      = False
-                 go _ (Type _)       = False
-
-idAppIsBottom :: Id -> Int -> Bool
-idAppIsBottom id n_val_args = appIsBottom (idNewStrictness id) n_val_args
-\end{code}
-
-\begin{code}
-
--- | This returns true for expressions that are certainly /already/ 
+-- Note [exprIsHNF]		See also Note [exprIsCheap and exprIsHNF]
+-- ~~~~~~~~~~~~~~~~
+-- | exprIsHNF returns true for expressions that are certainly /already/ 
 -- evaluated to /head/ normal form.  This is used to decide whether it's ok 
 -- to change:
 --
 -- > case x of _ -> e
 --
--- into:
+--    into:
 --
 -- > e
 --
 -- and to decide whether it's safe to discard a 'seq'.
+-- 
 -- So, it does /not/ treat variables as evaluated, unless they say they are.
 -- However, it /does/ treat partial applications and constructor applications
 -- as values, even if their arguments are non-trivial, provided the argument
@@ -722,7 +774,7 @@ idAppIsBottom id n_val_args = appIsBottom (idNewStrictness id) n_val_args
 -- > (:) (f x) (map f xs)
 -- > map (...redex...)
 --
--- Because 'seq' on such things completes immediately.
+-- because 'seq' on such things completes immediately.
 --
 -- For unlifted argument types, we have to be careful:
 --
@@ -732,35 +784,61 @@ idAppIsBottom id n_val_args = appIsBottom (idNewStrictness id) n_val_args
 -- happen: see "CoreSyn#let_app_invariant". This invariant states that arguments of
 -- unboxed type must be ok-for-speculation (or trivial).
 exprIsHNF :: CoreExpr -> Bool		-- True => Value-lambda, constructor, PAP
-exprIsHNF (Var v) 	-- NB: There are no value args at this point
-  =  isDataConWorkId v 	-- Catches nullary constructors, 
-			--	so that [] and () are values, for example
-  || idArity v > 0 	-- Catches (e.g.) primops that don't have unfoldings
-  || isEvaldUnfolding (idUnfolding v)
-	-- Check the thing's unfolding; it might be bound to a value
-	-- A worry: what if an Id's unfolding is just itself: 
-	-- then we could get an infinite loop...
-
-exprIsHNF (Lit _)          = True
-exprIsHNF (Type _)         = True       -- Types are honorary Values;
-                                        -- we don't mind copying them
-exprIsHNF (Lam b e)        = isRuntimeVar b || exprIsHNF e
-exprIsHNF (Note _ e)       = exprIsHNF e
-exprIsHNF (Cast e _)       = exprIsHNF e
-exprIsHNF (App e (Type _)) = exprIsHNF e
-exprIsHNF (App e a)        = app_is_value e [a]
-exprIsHNF _                = False
-
--- There is at least one value argument
-app_is_value :: CoreExpr -> [CoreArg] -> Bool
-app_is_value (Var fun) args
-  = idArity fun > valArgCount args	-- Under-applied function
-    ||  isDataConWorkId fun 		--  or data constructor
-app_is_value (Note _ f) as = app_is_value f as
-app_is_value (Cast f _) as = app_is_value f as
-app_is_value (App f a)  as = app_is_value f (a:as)
-app_is_value _          _  = False
+exprIsHNF = exprIsHNFlike isDataConWorkId isEvaldUnfolding
 \end{code}
+
+\begin{code}
+-- | Similar to 'exprIsHNF' but includes CONLIKE functions as well as
+-- data constructors. Conlike arguments are considered interesting by the
+-- inliner.
+exprIsConLike :: CoreExpr -> Bool	-- True => lambda, conlike, PAP
+exprIsConLike = exprIsHNFlike isConLikeId isConLikeUnfolding
+
+-- | Returns true for values or value-like expressions. These are lambdas,
+-- constructors / CONLIKE functions (as determined by the function argument)
+-- or PAPs.
+--
+exprIsHNFlike :: (Var -> Bool) -> (Unfolding -> Bool) -> CoreExpr -> Bool
+exprIsHNFlike is_con is_con_unf = is_hnf_like
+  where
+    is_hnf_like (Var v) -- NB: There are no value args at this point
+      =  is_con v   	-- Catches nullary constructors, 
+			--	so that [] and () are values, for example
+      || idArity v > 0 	-- Catches (e.g.) primops that don't have unfoldings
+      || is_con_unf (idUnfolding v)
+	-- Check the thing's unfolding; it might be bound to a value
+	-- We don't look through loop breakers here, which is a bit conservative
+	-- but otherwise I worry that if an Id's unfolding is just itself, 
+	-- we could get an infinite loop
+
+    is_hnf_like (Lit _)          = True
+    is_hnf_like (Type _)         = True       -- Types are honorary Values;
+                                              -- we don't mind copying them
+    is_hnf_like (Lam b e)        = isRuntimeVar b || is_hnf_like e
+    is_hnf_like (Note _ e)       = is_hnf_like e
+    is_hnf_like (Cast e _)       = is_hnf_like e
+    is_hnf_like (App e (Type _)) = is_hnf_like e
+    is_hnf_like (App e a)        = app_is_value e [a]
+    is_hnf_like (Let _ e)        = is_hnf_like e  -- Lazy let(rec)s don't affect us
+    is_hnf_like _                = False
+
+    -- There is at least one value argument
+    app_is_value :: CoreExpr -> [CoreArg] -> Bool
+    app_is_value (Var fun) args
+      = idArity fun > valArgCount args	  -- Under-applied function
+        || is_con fun    		  --  or constructor-like
+    app_is_value (Note _ f) as = app_is_value f as
+    app_is_value (Cast f _) as = app_is_value f as
+    app_is_value (App f a)  as = app_is_value f (a:as)
+    app_is_value _          _  = False
+\end{code}
+
+
+%************************************************************************
+%*									*
+             Instantiating data constructors
+%*									*
+%************************************************************************
 
 These InstPat functions go here to avoid circularity between DataCon and Id
 
@@ -854,130 +932,11 @@ dataConInstPat arg_fun fss uniqs con inst_tys
     mk_id_var uniq fs ty = mkUserLocal (mkVarOccFS fs) uniq (substTy subst ty) noSrcSpan
     arg_ids = zipWith3 mk_id_var id_uniqs id_fss arg_tys
 
--- | Returns @Just (dc, [x1..xn])@ if the argument expression is 
--- a constructor application of the form @dc x1 .. xn@
-exprIsConApp_maybe :: CoreExpr -> Maybe (DataCon, [CoreExpr])
-exprIsConApp_maybe (Cast expr co)
-  =     -- Here we do the KPush reduction rule as described in the FC paper
-    case exprIsConApp_maybe expr of {
-	Nothing 	   -> Nothing ;
-	Just (dc, dc_args) -> 
-
-	-- The transformation applies iff we have
-	--	(C e1 ... en) `cast` co
-	-- where co :: (T t1 .. tn) ~ (T s1 ..sn)
-	-- That is, with a T at the top of both sides
-	-- The left-hand one must be a T, because exprIsConApp returned True
-	-- but the right-hand one might not be.  (Though it usually will.)
-
-    let (from_ty, to_ty)	   = coercionKind co
-	(from_tc, from_tc_arg_tys) = splitTyConApp from_ty
-  		-- The inner one must be a TyConApp
-    in
-    case splitTyConApp_maybe to_ty of {
-	Nothing -> Nothing ;
-	Just (to_tc, to_tc_arg_tys) 
-		| from_tc /= to_tc -> Nothing
-		-- These two Nothing cases are possible; we might see 
-		--	(C x y) `cast` (g :: T a ~ S [a]),
-		-- where S is a type function.  In fact, exprIsConApp
-		-- will probably not be called in such circumstances,
-		-- but there't nothing wrong with it 
-
-	 	| otherwise  ->
-    let
-	tc_arity = tyConArity from_tc
-
-        (univ_args, rest1)        = splitAt tc_arity dc_args
-        (ex_args, rest2)          = splitAt n_ex_tvs rest1
-	(co_args_spec, rest3)     = splitAt n_cos_spec rest2
-	(co_args_theta, val_args) = splitAt n_cos_theta rest3
-
-        arg_tys 	    = dataConRepArgTys dc
-	dc_univ_tyvars	    = dataConUnivTyVars dc
-        dc_ex_tyvars        = dataConExTyVars dc
-	dc_eq_spec	    = dataConEqSpec dc
-        dc_eq_theta         = dataConEqTheta dc
-        dc_tyvars           = dc_univ_tyvars ++ dc_ex_tyvars
-        n_ex_tvs            = length dc_ex_tyvars
-	n_cos_spec	    = length dc_eq_spec
-	n_cos_theta	    = length dc_eq_theta
-
-	-- Make the "theta" from Fig 3 of the paper
-        gammas              = decomposeCo tc_arity co
-        new_tys             = gammas ++ map (\ (Type t) -> t) ex_args
-        theta               = zipOpenTvSubst dc_tyvars new_tys
-
-          -- First we cast the existential coercion arguments
-        cast_co_spec (tv, ty) co 
-          = cast_co_theta (mkEqPred (mkTyVarTy tv, ty)) co
-        cast_co_theta eqPred (Type co) 
-          | (ty1, ty2) <- getEqPredTys eqPred
-          = Type $ mkSymCoercion (substTy theta ty1)
-		   `mkTransCoercion` co
-		   `mkTransCoercion` (substTy theta ty2)
-        new_co_args = zipWith cast_co_spec  dc_eq_spec  co_args_spec ++
-                      zipWith cast_co_theta dc_eq_theta co_args_theta
-  
-          -- ...and now value arguments
-	new_val_args = zipWith cast_arg arg_tys val_args
-	cast_arg arg_ty arg = mkCoerce (substTy theta arg_ty) arg
-
-    in
-    ASSERT( length univ_args == tc_arity )
-    ASSERT2( from_tc == dataConTyCon dc, ppr expr $$ ppr co $$ ppr from_tc $$ ppr dc $$ ppr (dataConTyCon dc) )
-    ASSERT( and (zipWith coreEqType [t | Type t <- univ_args] from_tc_arg_tys) )
-    ASSERT( all isTypeArg (univ_args ++ ex_args) )
-    ASSERT2( equalLength val_args arg_tys, ppr dc $$ ppr dc_tyvars $$ ppr dc_ex_tyvars $$ ppr arg_tys $$ ppr dc_args $$ ppr univ_args $$ ppr ex_args $$ ppr val_args $$ ppr arg_tys  )
-
-    Just (dc, map Type to_tc_arg_tys ++ ex_args ++ new_co_args ++ new_val_args)
-    }}
-
-{-
--- We do not want to tell the world that we have a
--- Cons, to *stop* Case of Known Cons, which removes
--- the TickBox.
-exprIsConApp_maybe (Note (TickBox {}) expr)
-  = Nothing
-exprIsConApp_maybe (Note (BinaryTickBox {}) expr)
-  = Nothing
--}
-
-exprIsConApp_maybe (Note _ expr)
-  = exprIsConApp_maybe expr
-    -- We ignore InlineMe notes in case we have
-    --	x = __inline_me__ (a,b)
-    -- All part of making sure that INLINE pragmas never hurt
-    -- Marcin tripped on this one when making dictionaries more inlinable
-    --
-    -- In fact, we ignore all notes.  For example,
-    --  	case _scc_ "foo" (C a b) of
-    --			C a b -> e
-    -- should be optimised away, but it will be only if we look
-    -- through the SCC note.
-
-exprIsConApp_maybe expr = analyse (collectArgs expr)
-  where
-    analyse (Var fun, args)
-	| Just con <- isDataConWorkId_maybe fun,
-	  count isValArg args == dataConRepArity con
-	= Just (con,args)
-
-	-- Look through unfoldings, but only cheap ones, because
-	-- we are effectively duplicating the unfolding
-    analyse (Var fun, [])
-	| let unf = idUnfolding fun,
-	  isExpandableUnfolding unf
-	= exprIsConApp_maybe (unfoldingTemplate unf)
-
-    analyse _ = Nothing
 \end{code}
-
-
 
 %************************************************************************
 %*									*
-\subsection{Equality}
+         Equality
 %*									*
 %************************************************************************
 
@@ -1000,17 +959,100 @@ cheapEqExpr (Cast e1 t1) (Cast e2 t2)
   = e1 `cheapEqExpr` e2 && t1 `coreEqCoercion` t2
 
 cheapEqExpr _ _ = False
+\end{code}
 
+\begin{code}
 exprIsBig :: Expr b -> Bool
 -- ^ Returns @True@ of expressions that are too big to be compared by 'cheapEqExpr'
 exprIsBig (Lit _)      = False
 exprIsBig (Var _)      = False
 exprIsBig (Type _)     = False
+exprIsBig (Lam _ e)    = exprIsBig e
 exprIsBig (App f a)    = exprIsBig f || exprIsBig a
 exprIsBig (Cast e _)   = exprIsBig e	-- Hopefully coercions are not too big!
 exprIsBig _            = True
 \end{code}
 
+\begin{code}
+eqExpr :: InScopeSet -> CoreExpr -> CoreExpr -> Bool
+-- Compares for equality, modulo alpha
+eqExpr in_scope e1 e2
+  = eqExprX id_unf (mkRnEnv2 in_scope) e1 e2
+  where
+    id_unf _ = noUnfolding	-- Don't expand
+\end{code}
+    
+\begin{code}
+eqExprX :: IdUnfoldingFun -> RnEnv2 -> CoreExpr -> CoreExpr -> Bool
+-- ^ Compares expressions for equality, modulo alpha.
+-- Does /not/ look through newtypes or predicate types
+-- Used in rule matching, and also CSE
+
+eqExprX id_unfolding_fun env e1 e2
+  = go env e1 e2
+  where
+    go env (Var v1) (Var v2)
+      | rnOccL env v1 == rnOccR env v2
+      = True
+
+    -- The next two rules expand non-local variables
+    -- C.f. Note [Expanding variables] in Rules.lhs
+    -- and  Note [Do not expand locally-bound variables] in Rules.lhs
+    go env (Var v1) e2
+      | not (locallyBoundL env v1)
+      , Just e1' <- expandUnfolding_maybe (id_unfolding_fun (lookupRnInScope env v1))
+      = go (nukeRnEnvL env) e1' e2
+
+    go env e1 (Var v2)
+      | not (locallyBoundR env v2)
+      , Just e2' <- expandUnfolding_maybe (id_unfolding_fun (lookupRnInScope env v2))
+      = go (nukeRnEnvR env) e1 e2'
+
+    go _   (Lit lit1)    (Lit lit2)    = lit1 == lit2
+    go env (Type t1)     (Type t2)     = tcEqTypeX env t1 t2
+    go env (Cast e1 co1) (Cast e2 co2) = tcEqTypeX env co1 co2 && go env e1 e2
+    go env (App f1 a1)   (App f2 a2)   = go env f1 f2 && go env a1 a2
+    go env (Note n1 e1)  (Note n2 e2)  = go_note n1 n2 && go env e1 e2
+
+    go env (Lam b1 e1)  (Lam b2 e2)  
+      =  tcEqTypeX env (varType b1) (varType b2)   -- False for Id/TyVar combination
+      && go (rnBndr2 env b1 b2) e1 e2
+
+    go env (Let (NonRec v1 r1) e1) (Let (NonRec v2 r2) e2) 
+      =  go env r1 r2  -- No need to check binder types, since RHSs match
+      && go (rnBndr2 env v1 v2) e1 e2
+
+    go env (Let (Rec ps1) e1) (Let (Rec ps2) e2) 
+      = all2 (go env') rs1 rs2 && go env' e1 e2
+      where
+        (bs1,rs1) = unzip ps1	   
+        (bs2,rs2) = unzip ps2
+        env' = rnBndrs2 env bs1 bs2
+
+    go env (Case e1 b1 _ a1) (Case e2 b2 _ a2)
+      =  go env e1 e2
+      && tcEqTypeX env (idType b1) (idType b2)
+      && all2 (go_alt (rnBndr2 env b1 b2)) a1 a2
+
+    go _ _ _ = False
+
+    -----------
+    go_alt env (c1, bs1, e1) (c2, bs2, e2)
+      = c1 == c2 && go (rnBndrs2 env bs1 bs2) e1 e2
+
+    -----------
+    go_note (SCC cc1)     (SCC cc2)      = cc1 == cc2
+    go_note (CoreNote s1) (CoreNote s2)  = s1 == s2
+    go_note _             _              = False
+\end{code}
+
+Auxiliary functions
+
+\begin{code}
+locallyBoundL, locallyBoundR :: RnEnv2 -> Var -> Bool
+locallyBoundL rn_env v = inRnEnvL rn_env v
+locallyBoundR rn_env v = inRnEnvR rn_env v
+\end{code}
 
 
 %************************************************************************
@@ -1038,11 +1080,10 @@ exprSize (Type t)        = seqType t `seq` 1
 
 noteSize :: Note -> Int
 noteSize (SCC cc)       = cc `seq` 1
-noteSize InlineMe       = 1
 noteSize (CoreNote s)   = s `seq` 1  -- hdaume: core annotations
  
 varSize :: Var -> Int
-varSize b  | isTyVar b = 1
+varSize b  | isTyCoVar b = 1
 	   | otherwise = seqType (idType b)		`seq`
 			 megaSeqIdInfo (idInfo b) 	`seq`
 			 1
@@ -1126,6 +1167,157 @@ hashVar (_,env) v
  = fromIntegral (lookupVarEnv env v `orElse` hashName (idName v))
 \end{code}
 
+
+%************************************************************************
+%*									*
+		Eta reduction
+%*									*
+%************************************************************************
+
+Note [Eta reduction conditions]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We try for eta reduction here, but *only* if we get all the way to an
+trivial expression.  We don't want to remove extra lambdas unless we
+are going to avoid allocating this thing altogether.
+
+There are some particularly delicate points here:
+
+* Eta reduction is not valid in general:  
+	\x. bot  /=  bot
+  This matters, partly for old-fashioned correctness reasons but,
+  worse, getting it wrong can yield a seg fault. Consider
+	f = \x.f x
+	h y = case (case y of { True -> f `seq` True; False -> False }) of
+		True -> ...; False -> ...
+
+  If we (unsoundly) eta-reduce f to get f=f, the strictness analyser
+  says f=bottom, and replaces the (f `seq` True) with just
+  (f `cast` unsafe-co).  BUT, as thing stand, 'f' got arity 1, and it
+  *keeps* arity 1 (perhaps also wrongly).  So CorePrep eta-expands 
+  the definition again, so that it does not termninate after all.
+  Result: seg-fault because the boolean case actually gets a function value.
+  See Trac #1947.
+
+  So it's important to to the right thing.
+
+* Note [Arity care]: we need to be careful if we just look at f's
+  arity. Currently (Dec07), f's arity is visible in its own RHS (see
+  Note [Arity robustness] in SimplEnv) so we must *not* trust the
+  arity when checking that 'f' is a value.  Otherwise we will
+  eta-reduce
+      f = \x. f x
+  to
+      f = f
+  Which might change a terminiating program (think (f `seq` e)) to a 
+  non-terminating one.  So we check for being a loop breaker first.
+
+  However for GlobalIds we can look at the arity; and for primops we
+  must, since they have no unfolding.  
+
+* Regardless of whether 'f' is a value, we always want to 
+  reduce (/\a -> f a) to f
+  This came up in a RULE: foldr (build (/\a -> g a))
+  did not match 	  foldr (build (/\b -> ...something complex...))
+  The type checker can insert these eta-expanded versions,
+  with both type and dictionary lambdas; hence the slightly 
+  ad-hoc isDictId
+
+* Never *reduce* arity. For example
+      f = \xy. g x y
+  Then if h has arity 1 we don't want to eta-reduce because then
+  f's arity would decrease, and that is bad
+
+These delicacies are why we don't use exprIsTrivial and exprIsHNF here.
+Alas.
+
+Note [Eta reduction with casted arguments]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider  
+    (\(x:t3). f (x |> g)) :: t3 -> t2
+  where
+    f :: t1 -> t2
+    g :: t3 ~ t1
+This should be eta-reduced to
+
+    f |> (sym g -> t2)
+
+So we need to accumulate a coercion, pushing it inward (past
+variable arguments only) thus:
+   f (x |> co_arg) |> co  -->  (f |> (sym co_arg -> co)) x
+   f (x:t)         |> co  -->  (f |> (t -> co)) x
+   f @ a           |> co  -->  (f |> (forall a.co)) @ a
+   f @ (g:t1~t2)   |> co  -->  (f |> (t1~t2 => co)) @ (g:t1~t2)
+These are the equations for ok_arg.
+
+It's true that we could also hope to eta reduce these:
+    (\xy. (f x |> g) y)
+    (\xy. (f x y) |> g)
+But the simplifier pushes those casts outwards, so we don't
+need to address that here.
+
+\begin{code}
+tryEtaReduce :: [Var] -> CoreExpr -> Maybe CoreExpr
+tryEtaReduce bndrs body 
+  = go (reverse bndrs) body (IdCo (exprType body))
+  where
+    incoming_arity = count isId bndrs
+
+    go :: [Var]	           -- Binders, innermost first, types [a3,a2,a1]
+       -> CoreExpr         -- Of type tr
+       -> CoercionI        -- Of type tr ~ ts
+       -> Maybe CoreExpr   -- Of type a1 -> a2 -> a3 -> ts
+    -- See Note [Eta reduction with casted arguments]
+    -- for why we have an accumulating coercion
+    go [] fun co
+      | ok_fun fun = Just (mkCoerceI co fun)
+
+    go (b : bs) (App fun arg) co
+      | Just co' <- ok_arg b arg co
+      = go bs fun co'
+
+    go _ _ _  = Nothing		-- Failure!
+
+    ---------------
+    -- Note [Eta reduction conditions]
+    ok_fun (App fun (Type ty)) 
+	| not (any (`elemVarSet` tyVarsOfType ty) bndrs)
+	=  ok_fun fun
+    ok_fun (Var fun_id)
+	=  not (fun_id `elem` bndrs)
+	&& (ok_fun_id fun_id || all ok_lam bndrs)
+    ok_fun _fun = False
+
+    ---------------
+    ok_fun_id fun = fun_arity fun >= incoming_arity
+
+    ---------------
+    fun_arity fun 	      -- See Note [Arity care]
+       | isLocalId fun && isLoopBreaker (idOccInfo fun) = 0
+       | otherwise = idArity fun   	      
+
+    ---------------
+    ok_lam v = isTyCoVar v || isDictId v
+
+    ---------------
+    ok_arg :: Var 	        -- Of type bndr_t
+           -> CoreExpr          -- Of type arg_t
+           -> CoercionI         -- Of kind (t1~t2)
+           -> Maybe CoercionI   -- Of type (arg_t -> t1 ~  bndr_t -> t2)
+	      	    		--   (and similarly for tyvars, coercion args)
+    -- See Note [Eta reduction with casted arguments]
+    ok_arg bndr (Type ty) co
+       | Just tv <- getTyVar_maybe ty
+       , bndr == tv  = Just (mkForAllTyCoI tv co)
+    ok_arg bndr (Var v) co
+       | bndr == v   = Just (mkFunTyCoI (IdCo (idType bndr)) co)
+    ok_arg bndr (Cast (Var v) co_arg) co
+       | bndr == v  = Just (mkFunTyCoI (ACo (mkSymCoercion co_arg)) co)
+       -- The simplifier combines multiple casts into one, 
+       -- so we can have a simple-minded pattern match here
+    ok_arg _ _ _ = Nothing
+\end{code}
+
+
 %************************************************************************
 %*									*
 \subsection{Determining non-updatable right-hand-sides}
@@ -1144,7 +1336,7 @@ and 'execute' it rather than allocating it statically.
 -- | This function is called only on *top-level* right-hand sides.
 -- Returns @True@ if the RHS can be allocated statically in the output,
 -- with no thunks involved at all.
-rhsIsStatic :: PackageId -> CoreExpr -> Bool
+rhsIsStatic :: (Name -> Bool) -> CoreExpr -> Bool
 -- It's called (i) in TidyPgm.hasCafRefs to decide if the rhs is, or
 -- refers to, CAFs; (ii) in CoreToStg to decide whether to put an
 -- update flag on it and (iii) in DsExpr to decide how to expand
@@ -1194,21 +1386,19 @@ rhsIsStatic :: PackageId -> CoreExpr -> Bool
 -- This is a bit like CoreUtils.exprIsHNF, with the following differences:
 --    a) scc "foo" (\x -> ...) is updatable (so we catch the right SCC)
 --
---    b) (C x xs), where C is a contructors is updatable if the application is
+--    b) (C x xs), where C is a contructor is updatable if the application is
 --	   dynamic
 -- 
 --    c) don't look through unfolding of f in (f x).
 
-rhsIsStatic _this_pkg rhs = is_static False rhs
+rhsIsStatic _is_dynamic_name rhs = is_static False rhs
   where
   is_static :: Bool	-- True <=> in a constructor argument; must be atomic
   	  -> CoreExpr -> Bool
   
-  is_static False (Lam b e) = isRuntimeVar b || is_static False e
-  
-  is_static _      (Note (SCC _) _) = False
-  is_static in_arg (Note _ e)       = is_static in_arg e
-  is_static in_arg (Cast e _)       = is_static in_arg e
+  is_static False (Lam b e)   = isRuntimeVar b || is_static False e
+  is_static in_arg (Note n e) = notSccNote n && is_static in_arg e
+  is_static in_arg (Cast e _) = is_static in_arg e
   
   is_static _      (Lit lit)
     = case lit of
@@ -1227,7 +1417,7 @@ rhsIsStatic _this_pkg rhs = is_static False rhs
    where
     go (Var f) n_val_args
 #if mingw32_TARGET_OS
-        | not (isDllName _this_pkg (idName f))
+        | not (_is_dynamic_name (idName f))
 #endif
 	=  saturated_data_con f n_val_args
 	|| (in_arg && n_val_args == 0)	
@@ -1249,11 +1439,9 @@ rhsIsStatic _this_pkg rhs = is_static False rhs
         --   x = D# (1.0## /## 2.0##)
         -- can't float because /## can fail.
 
-    go (Note (SCC _) _) _          = False
-    go (Note _ f)       n_val_args = go f n_val_args
-    go (Cast e _)       n_val_args = go e n_val_args
-
-    go _                _          = False
+    go (Note n f) n_val_args = notSccNote n && go f n_val_args
+    go (Cast e _) n_val_args = go e n_val_args
+    go _          _          = False
 
     saturated_data_con f n_val_args
 	= case isDataConWorkId_maybe f of

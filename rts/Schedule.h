@@ -14,7 +14,7 @@
 #include "Capability.h"
 #include "Trace.h"
 
-BEGIN_RTS_PRIVATE
+#include "BeginPrivate.h"
 
 /* initScheduler(), exitScheduler()
  * Called from STG :  no
@@ -86,15 +86,6 @@ extern  StgTSO *blocked_queue_hd, *blocked_queue_tl;
 extern  StgTSO *sleeping_queue;
 #endif
 
-/* Set to rtsTrue if there are threads on the blackhole_queue, and
- * it is possible that one or more of them may be available to run.
- * This flag is set to rtsFalse after we've checked the queue, and
- * set to rtsTrue just before we run some Haskell code.  It is used
- * to decide whether we should yield the Capability or not.
- * Locks required  : none (see scheduleCheckBlackHoles()).
- */
-extern rtsBool blackholes_need_checking;
-
 extern rtsBool heap_overflow;
 
 #if defined(THREADED_RTS)
@@ -105,7 +96,6 @@ extern Mutex sched_mutex;
 void interruptStgRts (void);
 
 void resurrectThreads (StgTSO *);
-void performPendingThrowTos (StgTSO *);
 
 /* -----------------------------------------------------------------------------
  * Some convenient macros/inline functions...
@@ -119,26 +109,38 @@ void performPendingThrowTos (StgTSO *);
  * NOTE: tso->link should be END_TSO_QUEUE before calling this macro.
  * ASSUMES: cap->running_task is the current task.
  */
-INLINE_HEADER void
+EXTERN_INLINE void
+appendToRunQueue (Capability *cap, StgTSO *tso);
+
+EXTERN_INLINE void
 appendToRunQueue (Capability *cap, StgTSO *tso)
 {
     ASSERT(tso->_link == END_TSO_QUEUE);
     if (cap->run_queue_hd == END_TSO_QUEUE) {
 	cap->run_queue_hd = tso;
+        tso->block_info.prev = END_TSO_QUEUE;
     } else {
 	setTSOLink(cap, cap->run_queue_tl, tso);
+        setTSOPrev(cap, tso, cap->run_queue_tl);
     }
     cap->run_queue_tl = tso;
-    traceSchedEvent (cap, EVENT_THREAD_RUNNABLE, tso, 0);
+    traceEventThreadRunnable (cap, tso);
 }
 
 /* Push a thread on the beginning of the run queue.
  * ASSUMES: cap->running_task is the current task.
  */
-INLINE_HEADER void
+EXTERN_INLINE void
+pushOnRunQueue (Capability *cap, StgTSO *tso);
+
+EXTERN_INLINE void
 pushOnRunQueue (Capability *cap, StgTSO *tso)
 {
     setTSOLink(cap, tso, cap->run_queue_hd);
+    tso->block_info.prev = END_TSO_QUEUE;
+    if (cap->run_queue_hd != END_TSO_QUEUE) {
+        setTSOPrev(cap, cap->run_queue_hd, tso);
+    }
     cap->run_queue_hd = tso;
     if (cap->run_queue_tl == END_TSO_QUEUE) {
 	cap->run_queue_tl = tso;
@@ -153,12 +155,17 @@ popRunQueue (Capability *cap)
     StgTSO *t = cap->run_queue_hd;
     ASSERT(t != END_TSO_QUEUE);
     cap->run_queue_hd = t->_link;
+    if (t->_link != END_TSO_QUEUE) {
+        t->_link->block_info.prev = END_TSO_QUEUE;
+    }
     t->_link = END_TSO_QUEUE; // no write barrier req'd
     if (cap->run_queue_hd == END_TSO_QUEUE) {
 	cap->run_queue_tl = END_TSO_QUEUE;
     }
     return t;
 }
+
+extern void removeFromRunQueue (Capability *cap, StgTSO *tso);
 
 /* Add a thread to the end of the blocked queue.
  */
@@ -176,25 +183,6 @@ appendToBlockedQueue(StgTSO *tso)
 }
 #endif
 
-#if defined(THREADED_RTS)
-// Assumes: my_cap is owned by the current Task.  We hold
-// other_cap->lock, but we do not necessarily own other_cap; another
-// Task may be running on it.
-INLINE_HEADER void
-appendToWakeupQueue (Capability *my_cap, Capability *other_cap, StgTSO *tso)
-{
-    ASSERT(tso->_link == END_TSO_QUEUE);
-    if (other_cap->wakeup_queue_hd == END_TSO_QUEUE) {
-	other_cap->wakeup_queue_hd = tso;
-    } else {
-        // my_cap is passed to setTSOLink() because it may need to
-        // write to the mutable list.
-	setTSOLink(my_cap, other_cap->wakeup_queue_tl, tso);
-    }
-    other_cap->wakeup_queue_tl = tso;
-}
-#endif
-
 /* Check whether various thread queues are empty
  */
 INLINE_HEADER rtsBool
@@ -208,14 +196,6 @@ emptyRunQueue(Capability *cap)
 {
     return emptyQueue(cap->run_queue_hd);
 }
-
-#if defined(THREADED_RTS)
-INLINE_HEADER rtsBool
-emptyWakeupQueue(Capability *cap)
-{
-    return emptyQueue(cap->wakeup_queue_hd);
-}
-#endif
 
 #if !defined(THREADED_RTS)
 #define EMPTY_BLOCKED_QUEUE()  (emptyQueue(blocked_queue_hd))
@@ -234,7 +214,7 @@ emptyThreadQueues(Capability *cap)
 
 #endif /* !IN_STG_CODE */
 
-END_RTS_PRIVATE
+#include "EndPrivate.h"
 
 #endif /* SCHEDULE_H */
 

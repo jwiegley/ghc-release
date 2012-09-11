@@ -84,6 +84,9 @@ class TestConfig:
         # Do we have shared libraries?
         self.have_shared_libs = False
 
+        # Are we testing an in-tree compiler?
+        self.in_tree_compiler = True
+
         # the timeout program
         self.timeout_prog = ''
         self.timeout = 300
@@ -207,6 +210,9 @@ class TestOptions:
 
        # Prefix to put on the command before running it
        self.cmd_prefix = ''
+
+       # Prefix to put on the command before compiling it
+       self.compile_cmd_prefix = ''
 
        # Extra output normalisation
        self.extra_normaliser = lambda x: x

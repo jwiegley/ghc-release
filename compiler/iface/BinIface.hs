@@ -17,13 +17,12 @@ import TcRnMonad
 import IfaceEnv
 import HscTypes
 import BasicTypes
-import NewDemand
+import Demand
 import Annotations
 import IfaceSyn
 import Module
 import Name
 import VarEnv
-import Class
 import DynFlags
 import UniqFM
 import UniqSupply
@@ -335,7 +334,7 @@ data BinDictionary = BinDictionary {
 {-! for StrictnessMark derive: Binary !-}
 {-! for Activation derive: Binary !-}
 
--- NewDemand
+-- Demand
 {-! for Demand derive: Binary !-}
 {-! for Demands derive: Binary !-}
 {-! for DmdResult derive: Binary !-}
@@ -600,25 +599,44 @@ instance Binary RuleMatchInfo where
                       else return FunLike
 
 instance Binary InlinePragma where
-    put_ bh (InlinePragma activation match_info) = do
-            put_ bh activation
-            put_ bh match_info
+    put_ bh (InlinePragma a b c d) = do
+            put_ bh a
+            put_ bh b
+            put_ bh c
+            put_ bh d
 
     get bh = do
-           act  <- get bh
-           info <- get bh
-           return (InlinePragma act info)
+           a <- get bh
+           b <- get bh
+           c <- get bh
+           d <- get bh
+           return (InlinePragma a b c d)
 
-instance Binary StrictnessMark where
-    put_ bh MarkedStrict    = putByte bh 0
-    put_ bh MarkedUnboxed   = putByte bh 1
-    put_ bh NotMarkedStrict = putByte bh 2
+instance Binary InlineSpec where
+    put_ bh EmptyInlineSpec = putByte bh 0
+    put_ bh Inline          = putByte bh 1
+    put_ bh Inlinable       = putByte bh 2
+    put_ bh NoInline        = putByte bh 3
+
+    get bh = do h <- getByte bh
+                case h of
+                  0 -> return EmptyInlineSpec
+                  1 -> return Inline
+                  2 -> return Inlinable
+                  _ -> return NoInline
+
+instance Binary HsBang where
+    put_ bh HsNoBang        = putByte bh 0
+    put_ bh HsStrict        = putByte bh 1
+    put_ bh HsUnpack        = putByte bh 2
+    put_ bh HsUnpackFailed  = putByte bh 3
     get bh = do
 	    h <- getByte bh
 	    case h of
-	      0 -> do return MarkedStrict
-	      1 -> do return MarkedUnboxed
-	      _ -> do return NotMarkedStrict
+	      0 -> do return HsNoBang
+	      1 -> do return HsStrict
+	      2 -> do return HsUnpack
+	      _ -> do return HsUnpackFailed
 
 instance Binary Boxity where
     put_ bh Boxed   = putByte bh 0
@@ -649,16 +667,16 @@ instance Binary RecFlag where
 	      0 -> do return Recursive
 	      _ -> do return NonRecursive
 
-instance Binary DefMeth where
-    put_ bh NoDefMeth  = putByte bh 0
-    put_ bh DefMeth    = putByte bh 1
-    put_ bh GenDefMeth = putByte bh 2
+instance Binary DefMethSpec where
+    put_ bh NoDM      = putByte bh 0
+    put_ bh VanillaDM = putByte bh 1
+    put_ bh GenericDM = putByte bh 2
     get bh = do
 	    h <- getByte bh
 	    case h of
-	      0 -> return NoDefMeth
-	      1 -> return DefMeth
-	      _ -> return GenDefMeth
+	      0 -> return NoDM
+	      1 -> return VanillaDM
+	      _ -> return GenericDM
 
 instance Binary FixityDirection where
     put_ bh InfixL = do
@@ -883,6 +901,7 @@ instance Binary IfaceType where
     put_ bh (IfaceTyConApp IfaceUnliftedTypeKindTc []) = putByte bh 14
     put_ bh (IfaceTyConApp IfaceUbxTupleKindTc [])     = putByte bh 15
     put_ bh (IfaceTyConApp IfaceArgTypeKindTc [])      = putByte bh 16
+    put_ bh (IfaceTyConApp (IfaceAnyTc k) []) 	       = do { putByte bh 17; put_ bh k }
 
 	-- Generic cases
 
@@ -918,6 +937,7 @@ instance Binary IfaceType where
               14 -> return (IfaceTyConApp IfaceUnliftedTypeKindTc [])
               15 -> return (IfaceTyConApp IfaceUbxTupleKindTc [])
               16 -> return (IfaceTyConApp IfaceArgTypeKindTc [])
+              17 -> do { k <- get bh; return (IfaceTyConApp (IfaceAnyTc k) []) }
 
 	      18 -> do { tc <- get bh; tys <- get bh; return (IfaceTyConApp (IfaceTc tc) tys) }
 	      _  -> do { tc <- get bh; tys <- get bh; return (IfaceTyConApp tc tys) }
@@ -937,6 +957,7 @@ instance Binary IfaceTyCon where
    put_ bh IfaceArgTypeKindTc      = putByte bh 10
    put_ bh (IfaceTupTc bx ar) = do { putByte bh 11; put_ bh bx; put_ bh ar }
    put_ bh (IfaceTc ext)      = do { putByte bh 12; put_ bh ext }
+   put_ bh (IfaceAnyTc k)     = do { putByte bh 13; put_ bh k }
 
    get bh = do
 	h <- getByte bh
@@ -952,7 +973,8 @@ instance Binary IfaceTyCon where
           9 -> return IfaceUbxTupleKindTc
           10 -> return IfaceArgTypeKindTc
 	  11 -> do { bx <- get bh; ar <- get bh; return (IfaceTupTc bx ar) }
-	  _ -> do { ext <- get bh; return (IfaceTc ext) }
+	  12 -> do { ext <- get bh; return (IfaceTc ext) }
+	  _  -> do { k <- get bh; return (IfaceAnyTc k) }
 
 instance Binary IfacePredType where
     put_ bh (IfaceClassP aa ab) = do
@@ -1155,18 +1177,15 @@ instance Binary IfaceInfoItem where
     put_ bh (HsStrictness ab) = do
 	    putByte bh 1
 	    put_ bh ab
-    put_ bh (HsUnfold ad) = do
+    put_ bh (HsUnfold lb ad) = do
 	    putByte bh 2
+	    put_ bh lb
 	    put_ bh ad
     put_ bh (HsInline ad) = do
 	    putByte bh 3
 	    put_ bh ad
     put_ bh HsNoCafRefs = do
 	    putByte bh 4
-    put_ bh (HsWorker ae af) = do
-	    putByte bh 5
-	    put_ bh ae
-	    put_ bh af
     get bh = do
 	    h <- getByte bh
 	    case h of
@@ -1174,21 +1193,57 @@ instance Binary IfaceInfoItem where
 		      return (HsArity aa)
 	      1 -> do ab <- get bh
 		      return (HsStrictness ab)
-	      2 -> do ad <- get bh
-		      return (HsUnfold ad)
+	      2 -> do lb <- get bh
+		      ad <- get bh
+                      return (HsUnfold lb ad)
 	      3 -> do ad <- get bh
 		      return (HsInline ad)
-	      4 -> do return HsNoCafRefs
-	      _ -> do ae <- get bh
-		      af <- get bh
-		      return (HsWorker ae af)
+	      _ -> do return HsNoCafRefs
+
+instance Binary IfaceUnfolding where
+    put_ bh (IfCoreUnfold s e) = do
+	putByte bh 0
+	put_ bh s
+	put_ bh e
+    put_ bh (IfInlineRule a b c d) = do
+	putByte bh 1
+	put_ bh a
+	put_ bh b
+	put_ bh c
+	put_ bh d
+    put_ bh (IfWrapper a n) = do
+	putByte bh 2
+	put_ bh a
+	put_ bh n
+    put_ bh (IfDFunUnfold as) = do
+	putByte bh 3
+	put_ bh as
+    put_ bh (IfCompulsory e) = do
+	putByte bh 4
+	put_ bh e
+    get bh = do
+	h <- getByte bh
+	case h of
+	  0 -> do s <- get bh
+		  e <- get bh
+		  return (IfCoreUnfold s e)
+	  1 -> do a <- get bh
+		  b <- get bh
+		  c <- get bh
+		  d <- get bh
+		  return (IfInlineRule a b c d)
+	  2 -> do a <- get bh
+		  n <- get bh
+		  return (IfWrapper a n)
+	  3 -> do as <- get bh
+		  return (IfDFunUnfold as)
+	  _ -> do e <- get bh
+		  return (IfCompulsory e)
 
 instance Binary IfaceNote where
     put_ bh (IfaceSCC aa) = do
 	    putByte bh 0
 	    put_ bh aa
-    put_ bh IfaceInlineMe = do
-	    putByte bh 3
     put_ bh (IfaceCoreNote s) = do
             putByte bh 4
             put_ bh s
@@ -1197,7 +1252,6 @@ instance Binary IfaceNote where
 	    case h of
 	      0 -> do aa <- get bh
 		      return (IfaceSCC aa)
-	      3 -> do return IfaceInlineMe
               4 -> do ac <- get bh
                       return (IfaceCoreNote ac)
               _ -> panic ("get IfaceNote " ++ show h)
@@ -1376,7 +1430,7 @@ instance Binary IfaceClassOp where
 	return (IfaceClassOp occ def ty)
 
 instance Binary IfaceRule where
-    put_ bh (IfaceRule a1 a2 a3 a4 a5 a6 a7) = do
+    put_ bh (IfaceRule a1 a2 a3 a4 a5 a6 a7 a8) = do
 	    put_ bh a1
 	    put_ bh a2
 	    put_ bh a3
@@ -1384,6 +1438,7 @@ instance Binary IfaceRule where
 	    put_ bh a5
 	    put_ bh a6
 	    put_ bh a7
+	    put_ bh a8
     get bh = do
 	    a1 <- get bh
 	    a2 <- get bh
@@ -1392,7 +1447,8 @@ instance Binary IfaceRule where
 	    a5 <- get bh
 	    a6 <- get bh
 	    a7 <- get bh
-	    return (IfaceRule a1 a2 a3 a4 a5 a6 a7)
+	    a8 <- get bh
+	    return (IfaceRule a1 a2 a3 a4 a5 a6 a7 a8)
 
 instance Binary IfaceAnnotation where
     put_ bh (IfaceAnnotation a1 a2) = do

@@ -4,8 +4,6 @@
 {-# OPTIONS_GHC -XRecordWildCards #-}
 {-# OPTIONS_HADDOCK hide #-}
 
-#undef DEBUG_DUMP
-
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.IO.Handle.Internals
@@ -30,7 +28,7 @@ module GHC.IO.Handle.Internals (
   wantSeekableHandle,
 
   mkHandle, mkFileHandle, mkDuplexHandle,
-  openTextEncoding, initBufferState,
+  openTextEncoding, closeTextCodecs, initBufferState,
   dEFAULT_CHAR_BUFFER_SIZE,
 
   flushBuffer, flushWriteBuffer, flushWriteBuffer_, flushCharReadBuffer,
@@ -52,7 +50,7 @@ module GHC.IO.Handle.Internals (
 
 import GHC.IO
 import GHC.IO.IOMode
-import GHC.IO.Encoding
+import GHC.IO.Encoding as Encoding
 import GHC.IO.Handle.Types
 import GHC.IO.Buffer
 import GHC.IO.BufferedIO (BufferedIO)
@@ -61,6 +59,7 @@ import GHC.IO.Device (IODevice, SeekMode(..))
 import qualified GHC.IO.Device as IODevice
 import qualified GHC.IO.BufferedIO as Buffered
 
+import GHC.Conc.Sync
 import GHC.Real
 import GHC.Base
 import GHC.Exception
@@ -71,13 +70,14 @@ import GHC.MVar
 import Data.Typeable
 import Control.Monad
 import Data.Maybe
-import Foreign
+import Foreign hiding (unsafePerformIO)
 -- import System.IO.Error
 import System.Posix.Internals hiding (FD)
 
-#ifdef DEBUG_DUMP
 import Foreign.C
-#endif
+
+c_DEBUG_DUMP :: Bool
+c_DEBUG_DUMP = False
 
 -- ---------------------------------------------------------------------------
 -- Creating a new handle
@@ -124,11 +124,8 @@ withHandle fun h@(DuplexHandle _ m _) act = withHandle' fun h m act
 withHandle' :: String -> Handle -> MVar Handle__
    -> (Handle__ -> IO (Handle__,a)) -> IO a
 withHandle' fun h m act =
-   block $ do
-   h_ <- takeMVar m
-   checkHandleInvariants h_
-   (h',v)  <- (act h_ `catchAny` \err -> putMVar m h_ >> throw err)
-              `catchException` \ex -> ioError (augmentIOError ex fun h)
+ mask_ $ do
+   (h',v)  <- do_operation fun h act m
    checkHandleInvariants h'
    putMVar m h'
    return v
@@ -139,15 +136,9 @@ withHandle_ fun h@(FileHandle _ m)     act = withHandle_' fun h m act
 withHandle_ fun h@(DuplexHandle _ m _) act = withHandle_' fun h m act
 
 withHandle_' :: String -> Handle -> MVar Handle__ -> (Handle__ -> IO a) -> IO a
-withHandle_' fun h m act =
-   block $ do
-   h_ <- takeMVar m
-   checkHandleInvariants h_
-   v  <- (act h_ `catchAny` \err -> putMVar m h_ >> throw err)
-         `catchException` \ex -> ioError (augmentIOError ex fun h)
-   checkHandleInvariants h_
-   putMVar m h_
-   return v
+withHandle_' fun h m act = withHandle' fun h m $ \h_ -> do
+                              a <- act h_
+                              return (h_,a)
 
 withAllHandles__ :: String -> Handle -> (Handle__ -> IO Handle__) -> IO ()
 withAllHandles__ fun h@(FileHandle _ m)     act = withHandle__' fun h m act
@@ -158,14 +149,61 @@ withAllHandles__ fun h@(DuplexHandle _ r w) act = do
 withHandle__' :: String -> Handle -> MVar Handle__ -> (Handle__ -> IO Handle__)
               -> IO ()
 withHandle__' fun h m act =
-   block $ do
-   h_ <- takeMVar m
-   checkHandleInvariants h_
-   h'  <- (act h_ `catchAny` \err -> putMVar m h_ >> throw err)
-          `catchException` \ex -> ioError (augmentIOError ex fun h)
+ mask_ $ do
+   h'  <- do_operation fun h act m
    checkHandleInvariants h'
    putMVar m h'
    return ()
+
+do_operation :: String -> Handle -> (Handle__ -> IO a) -> MVar Handle__ -> IO a
+do_operation fun h act m = do
+  h_ <- takeMVar m
+  checkHandleInvariants h_
+  act h_ `catchException` handler h_
+  where
+    handler h_ e = do
+      putMVar m h_
+      case () of
+        _ | Just ioe <- fromException e ->
+            ioError (augmentIOError ioe fun h)
+        _ | Just async_ex <- fromException e -> do -- see Note [async]
+            let _ = async_ex :: AsyncException
+            t <- myThreadId
+            throwTo t e
+            do_operation fun h act m
+        _otherwise ->
+            throwIO e
+
+-- Note [async]
+--
+-- If an asynchronous exception is raised during an I/O operation,
+-- normally it is fine to just re-throw the exception synchronously.
+-- However, if we are inside an unsafePerformIO or an
+-- unsafeInterleaveIO, this would replace the enclosing thunk with the
+-- exception raised, which is wrong (#3997).  We have to release the
+-- lock on the Handle, but what do we replace the thunk with?  What
+-- should happen when the thunk is subsequently demanded again?
+--
+-- The only sensible choice we have is to re-do the IO operation on
+-- resumption, but then we have to be careful in the IO library that
+-- this is always safe to do.  In particular we should
+--
+--    never perform any side-effects before an interruptible operation
+--
+-- because the interruptible operation may raise an asynchronous
+-- exception, which may cause the operation and its side effects to be
+-- subsequently performed again.
+--
+-- Re-doing the IO operation is achieved by:
+--   - using throwTo to re-throw the asynchronous exception asynchronously
+--     in the current thread
+--   - on resumption, it will be as if throwTo returns.  In that case, we
+--     recursively invoke the original operation (see do_operation above).
+--
+-- Interruptible operations in the I/O library are:
+--    - threadWaitRead/threadWaitWrite
+--    - fillReadBuffer/flushWriteBuffer
+--    - readTextDevice/writeTextDevice
 
 augmentIOError :: IOException -> String -> Handle -> IOException
 augmentIOError ioe@IOError{ ioe_filename = fp } fun h
@@ -322,18 +360,25 @@ ioe_bufsiz n = ioException
 -- has become unreferenced and then resurrected (arguably in the
 -- latter case we shouldn't finalize the Handle...).  Anyway,
 -- we try to emit a helpful message which is better than nothing.
+--
+-- [later; 8/2010] However, a program like this can yield a strange
+-- error message:
+--
+--   main = writeFile "out" loop
+--   loop = let x = x in x
+--
+-- because the main thread and the Handle are both unreachable at the
+-- same time, the Handle may get finalized before the main thread
+-- receives the NonTermination exception, and the exception handler
+-- will then report an error.  We'd rather this was not an error and
+-- the program just prints "<<loop>>".
 
 handleFinalizer :: FilePath -> MVar Handle__ -> IO ()
 handleFinalizer fp m = do
   handle_ <- takeMVar m
-  case haType handle_ of
-      ClosedHandle -> return ()
-      _ -> do flushWriteBuffer handle_ `catchAny` \_ -> return ()
-                -- ignore errors and async exceptions, and close the
-                -- descriptor anyway...
-              _ <- hClose_handle_ handle_
-              return ()
-  putMVar m (ioe_finalizedHandle fp)
+  (handle_', _) <- hClose_help handle_
+  putMVar m handle_'
+  return ()
 
 -- ---------------------------------------------------------------------------
 -- Allocating buffers
@@ -545,7 +590,7 @@ mkFileHandle dev filepath iomode mb_codec tr_newlines = do
 
 -- | like 'mkFileHandle', except that a 'Handle' is created with two
 -- independent buffers, one for reading and one for writing.  Used for
--- full-dupliex streams, such as network sockets.
+-- full-duplex streams, such as network sockets.
 mkDuplexHandle :: (IODevice dev, BufferedIO dev, Typeable dev) => dev
                -> FilePath -> Maybe TextEncoding -> NewlineMode -> IO Handle
 mkDuplexHandle dev filepath mb_codec tr_newlines = do
@@ -594,6 +639,11 @@ openTextEncoding (Just TextEncoding{..}) ha_type cont = do
                      return Nothing
     cont mb_encoder mb_decoder
 
+closeTextCodecs :: Handle__ -> IO ()
+closeTextCodecs Handle__{..} = do
+  case haDecoder of Nothing -> return (); Just d -> Encoding.close d
+  case haEncoder of Nothing -> return (); Just d -> Encoding.close d
+
 -- ---------------------------------------------------------------------------
 -- closing Handles
 
@@ -619,7 +669,7 @@ trymaybe :: IO () -> IO (Maybe SomeException)
 trymaybe io = (do io; return Nothing) `catchException` \e -> return (Just e)
 
 hClose_handle_ :: Handle__ -> IO (Handle__, Maybe SomeException)
-hClose_handle_ Handle__{..} = do
+hClose_handle_ h_@Handle__{..} = do
 
     -- close the file descriptor, but not when this is the read
     -- side of a duplex handle.
@@ -638,8 +688,7 @@ hClose_handle_ Handle__{..} = do
     writeIORef haByteBuffer noByteBuffer
   
     -- release our encoder/decoder
-    case haDecoder of Nothing -> return (); Just d -> close d
-    case haEncoder of Nothing -> return (); Just d -> close d
+    closeTextCodecs h_
 
     -- we must set the fd to -1, because the finalizer is going
     -- to run eventually and try to close/unlock it.
@@ -674,13 +723,12 @@ hLookAhead_ handle_@Handle__{..} = do
 -- debugging
 
 debugIO :: String -> IO ()
-#if defined(DEBUG_DUMP)
-debugIO s = do 
-  withCStringLen (s++"\n") $ \(p,len) -> c_write 1 (castPtr p) (fromIntegral len)
-  return ()
-#else
-debugIO s = return ()
-#endif
+debugIO s
+ | c_DEBUG_DUMP
+    = do _ <- withCStringLen (s ++ "\n") $
+                  \(p, len) -> c_write 1 (castPtr p) (fromIntegral len)
+         return ()
+ | otherwise = return ()
 
 -- ----------------------------------------------------------------------------
 -- Text input/output

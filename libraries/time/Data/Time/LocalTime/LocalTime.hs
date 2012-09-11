@@ -1,4 +1,5 @@
-{-# OPTIONS -fno-warn-orphans #-}
+{-# OPTIONS -fno-warn-orphans -fno-warn-unused-imports #-}
+#include "HsConfigure.h"
 
 -- #hide
 module Data.Time.LocalTime.LocalTime
@@ -17,6 +18,9 @@ import Data.Time.LocalTime.TimeZone
 import Data.Time.Calendar
 import Data.Time.Clock
 import Data.Typeable
+#if LANGUAGE_Rank2Types
+import Data.Data
+#endif
 
 -- | A simple day and time aggregate, where the day is of the specified parameter,
 -- and the time is a TimeOfDay.
@@ -25,7 +29,15 @@ import Data.Typeable
 data LocalTime = LocalTime {
 	localDay    :: Day,
 	localTimeOfDay   :: TimeOfDay
-} deriving (Eq,Ord)
+} deriving (Eq,Ord
+#if LANGUAGE_DeriveDataTypeable
+#if LANGUAGE_Rank2Types
+#if HAS_DataPico
+    ,Data
+#endif
+#endif
+#endif
+    )
 
 instance Typeable LocalTime where
 	typeOf _ = mkTyConApp (mkTyCon "Data.Time.LocalTime.LocalTime.LocalTime") []
@@ -59,6 +71,13 @@ data ZonedTime = ZonedTime {
 	zonedTimeToLocalTime :: LocalTime,
 	zonedTimeZone :: TimeZone
 }
+#if LANGUAGE_DeriveDataTypeable
+#if LANGUAGE_Rank2Types
+#if HAS_DataPico
+    deriving (Data)
+#endif
+#endif
+#endif
 
 instance Typeable ZonedTime where
 	typeOf _ = mkTyConApp (mkTyCon "Data.Time.LocalTime.LocalTime.ZonedTime") []

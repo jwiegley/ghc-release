@@ -1,5 +1,7 @@
 \begin{code}
 {-# OPTIONS_GHC -XNoImplicitPrelude #-}
+-- We believe we could deorphan this module, by moving lots of things
+-- around, but we haven't got there yet:
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# OPTIONS_HADDOCK hide #-}
 -----------------------------------------------------------------------------
@@ -7,7 +9,7 @@
 -- Module      :  GHC.Float
 -- Copyright   :  (c) The University of Glasgow 1994-2002
 -- License     :  see libraries/base/LICENSE
--- 
+--
 -- Maintainer  :  cvs-ghc@haskell.org
 -- Stability   :  internal
 -- Portability :  non-portable (GHC Extensions)
@@ -57,6 +59,11 @@ class  (Fractional a) => Floating a  where
     sinh, cosh, tanh    :: a -> a
     asinh, acosh, atanh :: a -> a
 
+    {-# INLINE (**) #-}
+    {-# INLINE logBase #-}
+    {-# INLINE sqrt #-}
+    {-# INLINE tan #-}
+    {-# INLINE tanh #-}
     x ** y              =  exp (log x * y)
     logBase x y         =  log y / log x
     sqrt x              =  x ** 0.5
@@ -124,13 +131,24 @@ class  (RealFrac a, Floating a) => RealFloat a  where
     significand x       =  encodeFloat m (negate (floatDigits x))
                            where (m,_) = decodeFloat x
 
-    scaleFloat k x      =  encodeFloat m (n+k)
+    scaleFloat k x      =  encodeFloat m (n + clamp b k)
                            where (m,n) = decodeFloat x
-                           
+                                 (l,h) = floatRange x
+                                 d     = floatDigits x
+                                 b     = h - l + 4*d
+                                 -- n+k may overflow, which would lead
+                                 -- to wrong results, hence we clamp the
+                                 -- scaling parameter.
+                                 -- If n + k would be larger than h,
+                                 -- n + clamp b k must be too, simliar
+                                 -- for smaller than l - d.
+                                 -- Add a little extra to keep clear
+                                 -- from the boundary cases.
+
     atan2 y x
       | x > 0            =  atan (y/x)
       | x == 0 && y > 0  =  pi/2
-      | x <  0 && y > 0  =  pi + atan (y/x) 
+      | x <  0 && y > 0  =  pi + atan (y/x)
       |(x <= 0 && y < 0)            ||
        (x <  0 && isNegativeZero y) ||
        (isNegativeZero x && isNegativeZero y)
@@ -149,19 +167,6 @@ class  (RealFrac a, Floating a) => RealFloat a  where
 %*********************************************************
 
 \begin{code}
-instance Eq Float where
-    (F# x) == (F# y) = x `eqFloat#` y
-
-instance Ord Float where
-    (F# x) `compare` (F# y) | x `ltFloat#` y = LT
-                            | x `eqFloat#` y = EQ
-                            | otherwise      = GT
-
-    (F# x) <  (F# y) = x `ltFloat#`  y
-    (F# x) <= (F# y) = x `leFloat#`  y
-    (F# x) >= (F# y) = x `geFloat#`  y
-    (F# x) >  (F# y) = x `gtFloat#`  y
-
 instance  Num Float  where
     (+)         x y     =  plusFloat x y
     (-)         x y     =  minusFloat x y
@@ -255,7 +260,7 @@ instance  Floating Float  where
 
     asinh x = log (x + sqrt (1.0+x*x))
     acosh x = log (x + (x+1.0) * sqrt ((x-1.0)/(x+1.0)))
-    atanh x = log ((x+1.0) / sqrt (1.0-x*x))
+    atanh x = 0.5 * log ((1.0+x) / (1.0-x))
 
 instance  RealFloat Float  where
     floatRadix _        =  FLT_RADIX        -- from float.h
@@ -274,7 +279,9 @@ instance  RealFloat Float  where
                             (m,_) -> encodeFloat m (negate (floatDigits x))
 
     scaleFloat k x      = case decodeFloat x of
-                            (m,n) -> encodeFloat m (n+k)
+                            (m,n) -> encodeFloat m (n + clamp bf k)
+                        where bf = FLT_MAX_EXP - (FLT_MIN_EXP) + 4*FLT_MANT_DIG
+
     isNaN x          = 0 /= isFloatNaN x
     isInfinite x     = 0 /= isFloatInfinite x
     isDenormalized x = 0 /= isFloatDenormalized x
@@ -283,7 +290,7 @@ instance  RealFloat Float  where
 
 instance  Show Float  where
     showsPrec   x = showSignedFloat showFloat x
-    showList = showList__ (showsPrec 0) 
+    showList = showList__ (showsPrec 0)
 \end{code}
 
 %*********************************************************
@@ -293,19 +300,6 @@ instance  Show Float  where
 %*********************************************************
 
 \begin{code}
-instance Eq Double where
-    (D# x) == (D# y) = x ==## y
-
-instance Ord Double where
-    (D# x) `compare` (D# y) | x <## y   = LT
-                            | x ==## y  = EQ
-                            | otherwise = GT
-
-    (D# x) <  (D# y) = x <##  y
-    (D# x) <= (D# y) = x <=## y
-    (D# x) >= (D# y) = x >=## y
-    (D# x) >  (D# y) = x >##  y
-
 instance  Num Double  where
     (+)         x y     =  plusDouble x y
     (-)         x y     =  minusDouble x y
@@ -350,7 +344,7 @@ instance  Floating Double  where
 
     asinh x = log (x + sqrt (1.0+x*x))
     acosh x = log (x + (x+1.0) * sqrt ((x-1.0)/(x+1.0)))
-    atanh x = log ((x+1.0) / sqrt (1.0-x*x))
+    atanh x = 0.5 * log ((1.0+x) / (1.0-x))
 
 {-# RULES "truncate/Double->Int" truncate = double2Int #-}
 instance  RealFrac Double  where
@@ -414,7 +408,8 @@ instance  RealFloat Double  where
                             (m,_) -> encodeFloat m (negate (floatDigits x))
 
     scaleFloat k x      = case decodeFloat x of
-                            (m,n) -> encodeFloat m (n+k)
+                            (m,n) -> encodeFloat m (n + clamp bd k)
+                        where bd = DBL_MAX_EXP - (DBL_MIN_EXP) + 4*DBL_MANT_DIG
 
     isNaN x             = 0 /= isDoubleNaN x
     isInfinite x        = 0 /= isDoubleInfinite x
@@ -424,7 +419,7 @@ instance  RealFloat Double  where
 
 instance  Show Double  where
     showsPrec   x = showSignedFloat showFloat x
-    showList = showList__ (showsPrec 0) 
+    showList = showList__ (showsPrec 0)
 \end{code}
 
 %*********************************************************
@@ -442,7 +437,7 @@ how 0.1 is represented.
 
 NOTE: The instances for Float and Double do not make use of the default
 methods for @enumFromTo@ and @enumFromThenTo@, as these rely on there being
-a `non-lossy' conversion to and from Ints. Instead we make use of the 
+a `non-lossy' conversion to and from Ints. Instead we make use of the
 1.2 default methods (back in the days when Enum had Ord as a superclass)
 for these (@numericEnumFromTo@ and @numericEnumFromThenTo@ below.)
 
@@ -478,7 +473,7 @@ instance  Enum Double  where
 
 \begin{code}
 -- | Show a signed 'RealFloat' value to full precision
--- using standard decimal notation for arguments whose absolute value lies 
+-- using standard decimal notation for arguments whose absolute value lies
 -- between @0.1@ and @9,999,999@, and scientific notation otherwise.
 showFloat :: (RealFloat a) => a -> ShowS
 showFloat x  =  showString (formatRealFloat FFGeneric Nothing x)
@@ -493,7 +488,7 @@ formatRealFloat fmt decs x
    | isInfinite x              = if x < 0 then "-Infinity" else "Infinity"
    | x < 0 || isNegativeZero x = '-':doFmt fmt (floatToDigits (toInteger base) (-x))
    | otherwise                 = doFmt fmt (floatToDigits (toInteger base) x)
- where 
+ where
   base = 10
 
   doFmt format (is, e) =
@@ -574,7 +569,7 @@ roundTo base d is =
 -- This version uses a much slower logarithm estimator. It should be improved.
 
 -- | 'floatToDigits' takes a base and a non-negative 'RealFloat' number,
--- and returns a list of digits and an exponent. 
+-- and returns a list of digits and an exponent.
 -- In particular, if @x>=0@, and
 --
 -- > floatToDigits base x = ([d1,d2,...,dn], e)
@@ -590,7 +585,7 @@ roundTo base d is =
 floatToDigits :: (RealFloat a) => Integer -> a -> ([Int], Int)
 floatToDigits _ 0 = ([0], 0)
 floatToDigits base x =
- let 
+ let
   (f0, e0) = decodeFloat x
   (minExp0, _) = floatRange x
   p = floatDigits x
@@ -598,7 +593,7 @@ floatToDigits base x =
   minExp = minExp0 - p -- the real minimum exponent
   -- Haskell requires that f be adjusted so denormalized numbers
   -- will have an impossibly low exponent.  Adjust for this.
-  (f, e) = 
+  (f, e) =
    let n = minExp - e0 in
    if n > 0 then (f0 `div` (b^n), e0+n) else (f0, e0)
   (r, s, mUp, mDn) =
@@ -615,7 +610,7 @@ floatToDigits base x =
       (f*2, b^(-e)*2, 1, 1)
   k :: Int
   k =
-   let 
+   let
     k0 :: Int
     k0 =
      if b == 2 && base == 10 then
@@ -625,7 +620,7 @@ floatToDigits base x =
         -- Haskell promises that p-1 <= logBase b f < p.
         (p - 1 + e0) * 3 `div` 10
      else
-	-- f :: Integer, log :: Float -> Float, 
+	-- f :: Integer, log :: Float -> Float,
         --               ceiling :: Float -> Int
         ceiling ((log (fromInteger (f+1) :: Float) +
                  fromIntegral e * log (fromInteger b)) /
@@ -651,8 +646,8 @@ floatToDigits base x =
     (False, True)  -> dn+1 : ds
     (True,  True)  -> if rn' * 2 < sN then dn : ds else dn+1 : ds
     (False, False) -> gen (dn:ds) rn' sN mUpN' mDnN'
-  
-  rds = 
+
+  rds =
    if k >= 0 then
       gen [] r (s * expt base k) mUp mDn
    else
@@ -695,7 +690,7 @@ fromRat :: (RealFloat a) => Rational -> a
 fromRat x = x'
         where x' = f e
 
---              If the exponent of the nearest floating-point number to x 
+--              If the exponent of the nearest floating-point number to x
 --              is e, then the significand is the integer nearest xb^(-e),
 --              where b is the floating-point radix.  We start with a good
 --              guess for e, and if it is correct, the exponent of the
@@ -758,7 +753,7 @@ fromRat' x = r
 
 -- Scale x until xMin <= x < xMax, or p (the exponent) <= minExp.
 scaleRat :: Rational -> Int -> Rational -> Rational -> Int -> Rational -> (Rational, Int)
-scaleRat b minExp xMin xMax p x 
+scaleRat b minExp xMin xMax p x
  | p <= minExp = (x, p)
  | x >= xMax   = scaleRat b minExp xMin xMax (p+1) (x/b)
  | x < xMin    = scaleRat b minExp xMin xMax (p-1) (x*b)
@@ -941,36 +936,36 @@ Note [realToFrac int-to-float]
 Don found that the RULES for realToFrac/Int->Double and simliarly
 Float made a huge difference to some stream-fusion programs.  Here's
 an example
-  
+
       import Data.Array.Vector
-  
+
       n = 40000000
-  
+
       main = do
             let c = replicateU n (2::Double)
                 a = mapU realToFrac (enumFromToU 0 (n-1) ) :: UArr Double
             print (sumU (zipWithU (*) c a))
-  
+
 Without the RULE we get this loop body:
-  
+
       case $wtoRational sc_sY4 of ww_aM7 { (# ww1_aM9, ww2_aMa #) ->
       case $wfromRat ww1_aM9 ww2_aMa of tpl_X1P { D# ipv_sW3 ->
       Main.$s$wfold
         (+# sc_sY4 1)
         (+# wild_X1i 1)
         (+## sc2_sY6 (*## 2.0 ipv_sW3))
-  
+
 And with the rule:
-  
+
      Main.$s$wfold
         (+# sc_sXT 1)
         (+# wild_X1h 1)
         (+## sc2_sXV (*## 2.0 (int2Double# sc_sXT)))
-  
+
 The running time of the program goes from 120 seconds to 0.198 seconds
 with the native backend, and 0.143 seconds with the C backend.
-  
-A few more details in Trac #2251, and the patch message 
+
+A few more details in Trac #2251, and the patch message
 "Add RULES for realToFrac from Int".
 
 %*********************************************************
@@ -989,4 +984,13 @@ showSignedFloat showPos p x
    | x < 0 || isNegativeZero x
        = showParen (p > 6) (showChar '-' . showPos (-x))
    | otherwise = showPos x
+\end{code}
+
+We need to prevent over/underflow of the exponent in encodeFloat when
+called from scaleFloat, hence we clamp the scaling parameter.
+We must have a large enough range to cover the maximum difference of
+exponents returned by decodeFloat.
+\begin{code}
+clamp :: Int -> Int -> Int
+clamp bd k = max (-bd) (min bd k)
 \end{code}

@@ -5,12 +5,12 @@
 
 \begin{code}
 module SimplEnv (
-	InId, InBind, InExpr, InAlt, InArg, InType, InBndr,
-	OutId, OutTyVar, OutBind, OutExpr, OutAlt, OutArg, OutType, OutBndr,
+	InId, InBind, InExpr, InAlt, InArg, InType, InBndr, InVar,
+	OutId, OutTyVar, OutBind, OutExpr, OutAlt, OutArg, OutType, OutBndr, OutVar,
         InCoercion, OutCoercion,
 
 	-- The simplifier mode
-	setMode, getMode, 
+	setMode, getMode, updMode,
 
 	-- Switch checker
 	SwitchChecker, SwitchResult(..), getSwitchChecker, getSimplIntSwitch,
@@ -19,17 +19,17 @@ module SimplEnv (
 	setEnclosingCC, getEnclosingCC,
 
 	-- Environments
-	SimplEnv(..), pprSimplEnv,	-- Temp not abstract
+	SimplEnv(..), StaticEnv, pprSimplEnv,	-- Temp not abstract
 	mkSimplEnv, extendIdSubst, SimplEnv.extendTvSubst, 
 	zapSubstEnv, setSubstEnv, 
 	getInScope, setInScope, setInScopeSet, modifyInScope, addNewInScopeIds,
-	getSimplRules, 
+	getSimplRules, inGentleMode,
 
 	SimplSR(..), mkContEx, substId, lookupRecBndr,
 
 	simplNonRecBndr, simplRecBndrs, simplLamBndr, simplLamBndrs, 
  	simplBinder, simplBinders, addBndrRules,
-	substExpr, substWorker, substTy, 
+	substExpr, substTy, substTyVar, getTvSubst, mkCoreSubst,
 
 	-- Floats
   	Floats, emptyFloats, isEmptyFloats, addNonRec, addFloats, extendFloats,
@@ -40,6 +40,7 @@ module SimplEnv (
 #include "HsVersions.h"
 
 import SimplMonad
+import CoreMonad	( SimplifierMode(..) )
 import IdInfo
 import CoreSyn
 import CoreUtils
@@ -49,12 +50,11 @@ import VarEnv
 import VarSet
 import OrdList
 import Id
-import qualified CoreSubst	( Subst, mkSubst, substExpr, substSpec, substWorker )
-import qualified Type		( substTy, substTyVarBndr )
-import Type hiding		( substTy, substTyVarBndr )
+import qualified CoreSubst
+import qualified Type		( substTy, substTyVarBndr, substTyVar )
+import Type hiding		( substTy, substTyVarBndr, substTyVar )
 import Coercion
 import BasicTypes	
-import DynFlags
 import MonadUtils
 import Outputable
 import FastString
@@ -70,6 +70,7 @@ import Data.List
 
 \begin{code}
 type InBndr     = CoreBndr
+type InVar      = Var			-- Not yet cloned
 type InId       = Id			-- Not yet cloned
 type InType     = Type			-- Ditto
 type InBind     = CoreBind
@@ -79,6 +80,7 @@ type InArg      = CoreArg
 type InCoercion = Coercion
 
 type OutBndr     = CoreBndr
+type OutVar	 = Var			-- Cloned
 type OutId	 = Id			-- Cloned
 type OutTyVar	 = TyVar		-- Cloned
 type OutType	 = Type			-- Cloned
@@ -99,28 +101,43 @@ type OutArg	 = CoreArg
 \begin{code}
 data SimplEnv
   = SimplEnv {
+     ----------- Static part of the environment -----------
+     -- Static in the sense of lexically scoped, 
+     -- wrt the original expression
+
 	seMode 	    :: SimplifierMode,
 	seChkr      :: SwitchChecker,
 	seCC        :: CostCentreStack,	-- The enclosing CCS (when profiling)
+
+	-- The current substitution
+	seTvSubst   :: TvSubstEnv,	-- InTyVar |--> OutType
+	seIdSubst   :: SimplIdSubst,	-- InId    |--> OutExpr
+
+     ----------- Dynamic part of the environment -----------
+     -- Dynamic in the sense of describing the setup where
+     -- the expression finally ends up
 
 	-- The current set of in-scope variables
 	-- They are all OutVars, and all bound in this module
 	seInScope   :: InScopeSet,	-- OutVars only
 		-- Includes all variables bound by seFloats
-	seFloats    :: Floats,
+	seFloats    :: Floats
 		-- See Note [Simplifier floats]
-
-	-- The current substitution
-	seTvSubst   :: TvSubstEnv,	-- InTyVar |--> OutType
-	seIdSubst   :: SimplIdSubst	-- InId    |--> OutExpr
-
     }
+
+type StaticEnv = SimplEnv 	-- Just the static part is relevant
 
 pprSimplEnv :: SimplEnv -> SDoc
 -- Used for debugging; selective
 pprSimplEnv env
   = vcat [ptext (sLit "TvSubst:") <+> ppr (seTvSubst env),
- 	  ptext (sLit "IdSubst:") <+> ppr (seIdSubst env) ]
+ 	  ptext (sLit "IdSubst:") <+> ppr (seIdSubst env),
+          ptext (sLit "InScope:") <+> vcat (map ppr_one in_scope_vars)
+    ]
+  where
+   in_scope_vars = varEnvElts (getInScopeVars (seInScope env))
+   ppr_one v | isId v = ppr v <+> ppr (idUnfolding v)
+             | otherwise = ppr v
 
 type SimplIdSubst = IdEnv SimplSR	-- IdId |--> OutExpr
 	-- See Note [Extending the Subst] in CoreSubst
@@ -143,7 +160,8 @@ instance Outputable SimplSR where
 	-- keep uniq _ = uniq `elemUFM_Directly` fvs
 \end{code}
 
-
+Note [SimplEnv invariants]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 seInScope: 
 	The in-scope part of Subst includes *all* in-scope TyVars and Ids
 	The elements of the set may have better IdInfo than the
@@ -179,9 +197,8 @@ seIdSubst:
 * substId adds a binding (DoneId new_id) to the substitution if 
 	the Id's unique has changed
 
-
   Note, though that the substitution isn't necessarily extended
-  if the type changes.  Why not?  Because of the next point:
+  if the type of the Id changes.  Why not?  Because of the next point:
 
 * We *always, always* finish by looking up in the in-scope set 
   any variable that doesn't get a DoneEx or DoneVar hit in the substitution.
@@ -206,8 +223,8 @@ seIdSubst:
 
 
 \begin{code}
-mkSimplEnv :: SimplifierMode -> SwitchChecker -> SimplEnv
-mkSimplEnv mode switches
+mkSimplEnv :: SwitchChecker -> SimplifierMode -> SimplEnv
+mkSimplEnv switches mode
   = SimplEnv { seChkr = switches, seCC = subsumedCCS, 
 	       seMode = mode, seInScope = emptyInScopeSet, 
 	       seFloats = emptyFloats,
@@ -224,6 +241,14 @@ getMode env = seMode env
 
 setMode :: SimplifierMode -> SimplEnv -> SimplEnv
 setMode mode env = env { seMode = mode }
+
+updMode :: (SimplifierMode -> SimplifierMode) -> SimplEnv -> SimplEnv
+updMode upd env = env { seMode = upd (seMode env) }
+
+inGentleMode :: SimplEnv -> Bool
+inGentleMode env = case seMode env of
+	                SimplGently {} -> True
+		        _other         -> False
 
 ---------------------
 getEnclosingCC :: SimplEnv -> CostCentreStack
@@ -509,7 +534,7 @@ simplBinder :: SimplEnv -> InBndr -> SimplM (SimplEnv, OutBndr)
 -- The substitution is extended only if the variable is cloned, because
 -- we *don't* need to use it to track occurrence info.
 simplBinder env bndr
-  | isTyVar bndr  = do	{ let (env', tv) = substTyVarBndr env bndr
+  | isTyCoVar bndr  = do	{ let (env', tv) = substTyVarBndr env bndr
 			; seqTyVar tv `seq` return (env', tv) }
   | otherwise     = do	{ let (env', id) = substIdBndr env bndr
 			; seqId id `seq` return (env', id) }
@@ -656,10 +681,51 @@ addBndrRules env in_id out_id
   | isEmptySpecInfo old_rules = (env, out_id)
   | otherwise = (modifyInScope env final_id, final_id)
   where
-    subst     = mkCoreSubst env
+    subst     = mkCoreSubst (text "local rules") env
     old_rules = idSpecialisation in_id
     new_rules = CoreSubst.substSpec subst out_id old_rules
     final_id  = out_id `setIdSpecialisation` new_rules
+\end{code}
+
+
+%************************************************************************
+%*									*
+		Impedence matching to type substitution
+%*									*
+%************************************************************************
+
+\begin{code}
+getTvSubst :: SimplEnv -> TvSubst
+getTvSubst (SimplEnv { seInScope = in_scope, seTvSubst = tv_env })
+  = mkTvSubst in_scope tv_env
+
+substTy :: SimplEnv -> Type -> Type 
+substTy env ty = Type.substTy (getTvSubst env) ty
+
+substTyVar :: SimplEnv -> TyVar -> Type 
+substTyVar env tv = Type.substTyVar (getTvSubst env) tv
+
+substTyVarBndr :: SimplEnv -> TyVar -> (SimplEnv, TyVar)
+substTyVarBndr env tv
+  = case Type.substTyVarBndr (getTvSubst env) tv of
+	(TvSubst in_scope' tv_env', tv') 
+	   -> (env { seInScope = in_scope', seTvSubst = tv_env'}, tv')
+
+-- When substituting in rules etc we can get CoreSubst to do the work
+-- But CoreSubst uses a simpler form of IdSubstEnv, so we must impedence-match
+-- here.  I think the this will not usually result in a lot of work;
+-- the substitutions are typically small, and laziness will avoid work in many cases.
+
+mkCoreSubst  :: SDoc -> SimplEnv -> CoreSubst.Subst
+mkCoreSubst doc (SimplEnv { seInScope = in_scope, seTvSubst = tv_env, seIdSubst = id_env })
+  = mk_subst tv_env id_env
+  where
+    mk_subst tv_env id_env = CoreSubst.mkSubst in_scope tv_env (mapVarEnv fiddle id_env)
+
+    fiddle (DoneEx e)       = e
+    fiddle (DoneId v)       = Var v
+    fiddle (ContEx tv id e) = CoreSubst.substExpr (text "mkCoreSubst" <+> doc) (mk_subst tv id) e
+    	   	      	      			-- Don't shortcut here
 
 ------------------
 substIdType :: SimplEnv -> Id -> Id
@@ -673,54 +739,16 @@ substIdType (SimplEnv { seInScope = in_scope,  seTvSubst = tv_env}) id
     old_ty = idType id
 
 ------------------
-substUnfolding :: SimplEnv -> Unfolding -> Unfolding
-substUnfolding _   NoUnfolding     	       = NoUnfolding
-substUnfolding _   (OtherCon cons) 	       = OtherCon cons
-substUnfolding env (CompulsoryUnfolding rhs)   = CompulsoryUnfolding (substExpr env rhs)
-substUnfolding env (CoreUnfolding rhs t u v w g) = CoreUnfolding (substExpr env rhs) t u v w g
-
-------------------
-substWorker :: SimplEnv -> WorkerInfo -> WorkerInfo
-substWorker _   NoWorker = NoWorker
-substWorker env wkr_info = CoreSubst.substWorker (mkCoreSubst env) wkr_info
-\end{code}
-
-
-%************************************************************************
-%*									*
-		Impedence matching to type substitution
-%*									*
-%************************************************************************
-
-\begin{code}
-substTy :: SimplEnv -> Type -> Type 
-substTy (SimplEnv { seInScope = in_scope, seTvSubst = tv_env }) ty
-  = Type.substTy (TvSubst in_scope tv_env) ty
-
-substTyVarBndr :: SimplEnv -> TyVar -> (SimplEnv, TyVar)
-substTyVarBndr env@(SimplEnv { seInScope = in_scope, seTvSubst = tv_env }) tv
-  = case Type.substTyVarBndr (TvSubst in_scope tv_env) tv of
-	(TvSubst in_scope' tv_env', tv') 
-	   -> (env { seInScope = in_scope', seTvSubst = tv_env'}, tv')
-
--- When substituting in rules etc we can get CoreSubst to do the work
--- But CoreSubst uses a simpler form of IdSubstEnv, so we must impedence-match
--- here.  I think the this will not usually result in a lot of work;
--- the substitutions are typically small, and laziness will avoid work in many cases.
-
-mkCoreSubst  :: SimplEnv -> CoreSubst.Subst
-mkCoreSubst (SimplEnv { seInScope = in_scope, seTvSubst = tv_env, seIdSubst = id_env })
-  = mk_subst tv_env id_env
-  where
-    mk_subst tv_env id_env = CoreSubst.mkSubst in_scope tv_env (mapVarEnv fiddle id_env)
-
-    fiddle (DoneEx e)       = e
-    fiddle (DoneId v)       = Var v
-    fiddle (ContEx tv id e) = CoreSubst.substExpr (mk_subst tv id) e
-
-substExpr :: SimplEnv -> CoreExpr -> CoreExpr
-substExpr env expr = CoreSubst.substExpr (mkCoreSubst env) expr
+substExpr :: SDoc -> SimplEnv -> CoreExpr -> CoreExpr
+substExpr doc env
+  = CoreSubst.substExpr (text "SimplEnv.substExpr1" <+> doc) 
+                        (mkCoreSubst (text "SimplEnv.substExpr2" <+> doc) env) 
   -- Do *not* short-cut in the case of an empty substitution
-  -- See CoreSubst: Note [Extending the Subst]
+  -- See Note [SimplEnv invariants]
+
+substUnfolding :: SimplEnv -> Unfolding -> Unfolding
+substUnfolding env unf = CoreSubst.substUnfolding (mkCoreSubst (text "subst-unfolding") env) unf
+  -- Do *not* short-cut in the case of an empty substitution
+  -- See Note [SimplEnv invariants]
 \end{code}
 

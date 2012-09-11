@@ -53,31 +53,36 @@
  *
  * ------------------------------------------------------------------------- */
 
-typedef struct step_ {
-    unsigned int         no;		// step number in this generation
-    unsigned int         abs_no;	// absolute step number
+typedef struct nursery_ {
+    bdescr *       blocks;
+    unsigned int   n_blocks;
+} nursery;
 
-    struct generation_ * gen;		// generation this step belongs to
-    unsigned int         gen_no;        // generation number (cached)
+typedef struct generation_ {
+    unsigned int   no;			// generation number
 
-    bdescr *             blocks;	// blocks in this step
-    unsigned int         n_blocks;	// number of blocks
-    unsigned int         n_words;       // number of words
+    bdescr *       blocks;	        // blocks in this gen
+    unsigned int   n_blocks;	        // number of blocks
+    unsigned int   n_words;             // number of used words
 
-    struct step_ *       to;		// destination step for live objects
+    bdescr *       large_objects;	// large objects (doubly linked)
+    unsigned int   n_large_blocks;      // no. of blocks used by large objs
+    unsigned int   n_new_large_blocks;  // count freshly allocated large objects
 
-    bdescr *             large_objects;	 // large objects (doubly linked)
-    unsigned int         n_large_blocks; // no. of blocks used by large objs
+    unsigned int   max_blocks;		// max blocks
+    bdescr        *mut_list;      	// mut objects in this gen (not G0)
 
-    StgTSO *             threads;       // threads in this step
+    StgTSO *       threads;             // threads in this gen
                                         // linked via global_link
+    struct generation_ *to;		// destination gen for live objects
+
+    // stats information
+    unsigned int collections;
+    unsigned int par_collections;
+    unsigned int failed_promotions;
 
     // ------------------------------------
     // Fields below are used during GC only
-
-    // During GC, if we are collecting this step, blocks and n_blocks
-    // are copied into the following two fields.  After GC, these blocks
-    // are freed.
 
 #if defined(THREADED_RTS)
     char pad[128];                      // make sure the following is
@@ -89,10 +94,15 @@ typedef struct step_ {
     int          mark;			// mark (not copy)? (old gen only)
     int          compact;		// compact (not sweep)? (old gen only)
 
+    // During GC, if we are collecting this gen, blocks and n_blocks
+    // are copied into the following two fields.  After GC, these blocks
+    // are freed.
     bdescr *     old_blocks;	        // bdescr of first from-space block
     unsigned int n_old_blocks;		// number of blocks in from-space
     unsigned int live_estimate;         // for sweeping: estimate of live data
     
+    bdescr *     saved_mut_list;
+
     bdescr *     part_blocks;           // partially-full scanned blocks
     unsigned int n_part_blocks;         // count of above
 
@@ -102,52 +112,23 @@ typedef struct step_ {
     bdescr *     bitmap;  		// bitmap for compacting collection
 
     StgTSO *     old_threads;
-
-} step;
-
-
-typedef struct generation_ {
-    unsigned int   no;			// generation number
-    step *         steps;		// steps
-    unsigned int   n_steps;		// number of steps
-    unsigned int   max_blocks;		// max blocks in step 0
-    bdescr        *mut_list;      	// mut objects in this gen (not G0)
-    
-    // stats information
-    unsigned int collections;
-    unsigned int par_collections;
-    unsigned int failed_promotions;
-
-    // temporary use during GC:
-    bdescr        *saved_mut_list;
 } generation;
 
 extern generation * generations;
-
 extern generation * g0;
-extern step * g0s0;
 extern generation * oldest_gen;
-extern step * all_steps;
-extern nat total_steps;
 
 /* -----------------------------------------------------------------------------
    Generic allocation
 
-   StgPtr allocateInGen(generation *g, nat n)
-                                Allocates a chunk of contiguous store
-   				n words long in generation g,
-   				returning a pointer to the first word.
-   				Always succeeds.
-				
-   StgPtr allocate(nat n)       Equaivalent to allocateInGen(g0)
-				
-   StgPtr allocateLocal(Capability *cap, nat n)
+   StgPtr allocate(Capability *cap, nat n)
                                 Allocates memory from the nursery in
 				the current Capability.  This can be
 				done without taking a global lock,
                                 unlike allocate().
 
-   StgPtr allocatePinned(nat n) Allocates a chunk of contiguous store
+   StgPtr allocatePinned(Capability *cap, nat n) 
+                                Allocates a chunk of contiguous store
    				n words long, which is at a fixed
 				address (won't be moved by GC).  
 				Returns a pointer to the first word.
@@ -163,27 +144,16 @@ extern nat total_steps;
 				allocatePinned, for the
 				benefit of the ticky-ticky profiler.
 
-   rtsBool doYouWantToGC(void)  Returns True if the storage manager is
-   				ready to perform a GC, False otherwise.
-
-   lnat  allocatedBytes(void)  Returns the number of bytes allocated
-                                via allocate() since the last GC.
-				Used in the reporting of statistics.
-
    -------------------------------------------------------------------------- */
 
-StgPtr  allocate        ( lnat n );
-StgPtr  allocateInGen   ( generation *g, lnat n );
-StgPtr  allocateLocal   ( Capability *cap, lnat n );
-StgPtr  allocatePinned  ( lnat n );
-lnat    allocatedBytes  ( void );
+StgPtr  allocate        ( Capability *cap, lnat n );
+StgPtr  allocatePinned  ( Capability *cap, lnat n );
 
 /* memory allocator for executable memory */
 void * allocateExec(unsigned int len, void **exec_addr);
 void   freeExec (void *p);
 
 // Used by GC checks in external .cmm code:
-extern nat alloc_blocks;
 extern nat alloc_blocks_lim;
 
 /* -----------------------------------------------------------------------------
@@ -197,12 +167,19 @@ void performMajorGC(void);
    The CAF table - used to let us revert CAFs in GHCi
    -------------------------------------------------------------------------- */
 
-void newCAF     (StgClosure*);
-void newDynCAF  (StgClosure *);
+void newCAF     (StgRegTable *reg, StgClosure *);
+void newDynCAF  (StgRegTable *reg, StgClosure *);
 void revertCAFs (void);
 
 // Request that all CAFs are retained indefinitely.
 void setKeepCAFs (void);
+
+/* -----------------------------------------------------------------------------
+   Stats
+   -------------------------------------------------------------------------- */
+
+// Returns the total number of bytes allocated since the start of the program.
+HsInt64 getAllocations (void);
 
 /* -----------------------------------------------------------------------------
    This is the write barrier for MUT_VARs, a.k.a. IORefs.  A
@@ -216,5 +193,12 @@ void dirty_MUT_VAR(StgRegTable *reg, StgClosure *p);
 /* set to disable CAF garbage collection in GHCi. */
 /* (needed when dynamic libraries are used). */
 extern rtsBool keepCAFs;
+
+INLINE_HEADER void initBdescr(bdescr *bd, generation *gen, generation *dest)
+{
+    bd->gen    = gen;
+    bd->gen_no = gen->no;
+    bd->dest   = dest;
+}
 
 #endif /* RTS_STORAGE_GC_H */

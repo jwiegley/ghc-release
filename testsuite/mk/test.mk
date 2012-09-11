@@ -86,10 +86,28 @@ else
 RUNTEST_OPTS += -e ghc_with_smp=0
 endif
 
+ifneq "$(shell $(SHELL) -c 'llvmc --version | grep version' 2> /dev/null)" ""
+RUNTEST_OPTS += -e ghc_with_llvm=1
+else
+RUNTEST_OPTS += -e ghc_with_llvm=0
+endif
+
 ifeq "$(WINDOWS)" "YES"
 RUNTEST_OPTS += -e windows=True
 else
 RUNTEST_OPTS += -e windows=False
+endif
+
+ifeq "$(DARWIN)" "YES"
+RUNTEST_OPTS += -e darwin=True
+else
+RUNTEST_OPTS += -e darwin=False
+endif
+
+ifeq "$(IN_TREE_COMPILER)" "YES"
+RUNTEST_OPTS += -e in_tree_compiler=True
+else
+RUNTEST_OPTS += -e in_tree_compiler=False
 endif
 
 ifneq "$(THREADS)" ""
@@ -114,7 +132,14 @@ RUNTEST_OPTS +=  \
 	-e 'config.timeout=int($(TIMEOUT)) or config.timeout' \
 	-e 'config.timeout_prog="$(TIMEOUT_PROGRAM)"' \
 	-e 'config.exeext="$(exeext)"' \
-	-e 'config.top="$(TOP_ABS)"' \
+	-e 'config.top="$(TOP_ABS)"'
+
+ifneq "$(OUTPUT_SUMMARY)" ""
+RUNTEST_OPTS +=  \
+	--output-summary "$(OUTPUT_SUMMARY)"
+endif
+
+RUNTEST_OPTS +=  \
 	$(EXTRA_RUNTEST_OPTS)
 
 ifeq "$(fast)" "YES"

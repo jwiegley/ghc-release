@@ -14,7 +14,10 @@ test('simplrun002', normal, compile_and_run, [''])
 test('simplrun003', normal, compile_and_run, [''])
 test('simplrun004', normal, compile_and_run, [''])
 test('simplrun005', normal, compile_and_run, [''])
-test('simplrun006', expect_broken(149), compile_and_run, [''])
+
+test('simplrun006', expect_fail, compile_and_run, [''])
+  # This is a CSE test
+
 test('simplrun007', normal, compile_and_run, [''])
 test('simplrun008', normal, compile_and_run, [''])
 test('simplrun009', normal, compile_and_run, [''])
@@ -33,3 +36,13 @@ test('SeqRule', only_ways(['optc','optasm']), compile_and_run, [''])
 
 test('T3403', normal, compile_and_run, ['-package containers'])
 test('T3591', normal, compile_and_run, [''])
+
+# Run this test *without* optimisation too
+test('T3959', only_ways(['normal','optc','optasm']), compile_and_run, [''])
+test('T3983', [only_ways(['normal','optc','optasm']),
+               extra_clean(['T3983_Foo.hi','T3983_Foo.o','T3983_Bar.hi','T3983_Bar.o',])], 
+              multimod_compile_and_run, 
+              ['T3983',''])
+test('T3972', extra_clean(['T3972A.hi', 'T3972A.o']),
+              compile_and_run,
+              [''])

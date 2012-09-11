@@ -4,7 +4,7 @@ dnl
 #!/bin/sh
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [6.12.3], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.0.1], [glasgow-haskell-bugs@haskell.org], [ghc])
 
 FP_FIND_ROOT
 
@@ -77,10 +77,17 @@ dnl ** Check gcc version and flags we need to pass it **
 #
 FP_GCC_EXTRA_FLAGS
 
-CONF_CC_OPTS=""
-CONF_LD_OPTS=""
-AC_SUBST(CONF_CC_OPTS)
-AC_SUBST(CONF_LD_OPTS)
+FPTOOLS_SET_C_LD_FLAGS([target],[CFLAGS],[LDFLAGS])
+FPTOOLS_SET_C_LD_FLAGS([build],[CONF_CC_OPTS_STAGE0],[CONF_LD_OPTS_STAGE0])
+FPTOOLS_SET_C_LD_FLAGS([target],[CONF_CC_OPTS_STAGE1],[CONF_LD_OPTS_STAGE1])
+FPTOOLS_SET_C_LD_FLAGS([target],[CONF_CC_OPTS_STAGE2],[CONF_LD_OPTS_STAGE2])
+
+AC_SUBST(CONF_CC_OPTS_STAGE0)
+AC_SUBST(CONF_CC_OPTS_STAGE1)
+AC_SUBST(CONF_CC_OPTS_STAGE2)
+AC_SUBST(CONF_LD_OPTS_STAGE0)
+AC_SUBST(CONF_LD_OPTS_STAGE1)
+AC_SUBST(CONF_LD_OPTS_STAGE2)
 
 #
 AC_CONFIG_FILES(extra-gcc-opts mk/config.mk mk/install.mk)

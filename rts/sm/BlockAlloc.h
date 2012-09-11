@@ -9,9 +9,13 @@
 #ifndef BLOCK_ALLOC_H
 #define BLOCK_ALLOC_H
 
-BEGIN_RTS_PRIVATE
+#include "BeginPrivate.h"
 
 /* Debugging  -------------------------------------------------------------- */
+
+extern nat countBlocks       (bdescr *bd);
+extern nat countAllocdBlocks (bdescr *bd);
+extern void returnMemoryToOS(nat n);
 
 #ifdef DEBUG
 void checkFreeListSanity(void);
@@ -23,6 +27,6 @@ void reportUnmarkedBlocks (void);
 extern lnat n_alloc_blocks;   // currently allocated blocks
 extern lnat hw_alloc_blocks;  // high-water allocated blocks
 
-END_RTS_PRIVATE
+#include "EndPrivate.h"
 
 #endif /* BLOCK_ALLOC_H */

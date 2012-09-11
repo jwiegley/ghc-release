@@ -1,5 +1,13 @@
 {
-{-# OPTIONS -Wwarn -w #-}
+{-# OPTIONS -Wwarn -w -XNoMonomorphismRestriction #-}
+-- The NoMonomorphismRestriction deals with a Happy infelicity
+--    With OutsideIn's more conservativ monomorphism restriction
+--    we aren't generalising
+--        notHappyAtAll = error "urk"
+--    which is terrible.  Switching off the restriction allows
+--    the generalisation.  Better would be to make Happy generate
+--    an appropriate signature.
+--
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
 -- any warnings in the module. See
@@ -16,8 +24,9 @@ import RdrName
 import OccName
 import Type ( Kind,
               liftedTypeKindTyCon, openTypeKindTyCon, unliftedTypeKindTyCon,
-              argTypeKindTyCon, ubxTupleKindTyCon, mkArrowKind, mkTyConApp
+              argTypeKindTyCon, ubxTupleKindTyCon, mkTyConApp
             )
+import Coercion( mkArrowKind )
 import Name( Name, nameOccName, nameModule, mkExternalName )
 import Module
 import ParserCoreUtils
@@ -269,13 +278,14 @@ exp	:: { IfaceExpr }
 	| '%case' '(' ty ')' aexp '%of' id_bndr
 	  '{' alts1 '}'		      { IfaceCase $5 (fst $7) $3 $9 }
         | '%cast' aexp aty { IfaceCast $2 $3 }
-	| '%note' STRING exp 	   
-	    { case $2 of
-	       --"SCC"      -> IfaceNote (IfaceSCC "scc") $3
-	       "InlineMe"   -> IfaceNote IfaceInlineMe $3
-            }
+-- No InlineMe any more
+-- 	| '%note' STRING exp 	   
+--	    { case $2 of
+--	       --"SCC"      -> IfaceNote (IfaceSCC "scc") $3
+--	       "InlineMe"   -> IfaceNote IfaceInlineMe $3
+--            }
         | '%external' STRING aty   { IfaceFCall (ForeignCall.CCall 
-                                                    (CCallSpec (StaticTarget (mkFastString $2)) 
+                                                    (CCallSpec (StaticTarget (mkFastString $2) Nothing) 
                                                                CCallConv (PlaySafe False))) 
                                                  $3 }
 

@@ -25,7 +25,7 @@
 #include "Schedule.h"
 #include "Printer.h"
 #include "Weak.h"
-#include "Sanity.h"
+#include "sm/Sanity.h"
 #include "Profiling.h"
 #include "Stats.h"
 #include "ProfHeap.h"
@@ -366,7 +366,7 @@ find_srt( stackPos *info )
 	bitmap = info->next.srt.srt_bitmap;
 	while (bitmap != 0) {
 	    if ((bitmap & 1) != 0) {
-#if defined(__PIC__) && defined(mingw32_TARGET_OS)
+#if defined(__PIC__) && defined(mingw32_HOST_OS)
 		if ((unsigned long)(*(info->next.srt.srt)) & 0x1)
 		    c = (* (StgClosure **)((unsigned long)*(info->next.srt.srt)) & ~0x1);
 		else
@@ -453,8 +453,6 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
 	// no child, no SRT
     case CONSTR_0_1:
     case CONSTR_0_2:
-    case CAF_BLACKHOLE:
-    case BLACKHOLE:
     case ARR_WORDS:
 	*first_child = NULL;
 	return;
@@ -468,8 +466,7 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
 	*first_child = ((StgSelector *)c)->selectee;
 	return;
     case IND_PERM:
-    case IND_OLDGEN_PERM:
-    case IND_OLDGEN:
+    case BLACKHOLE:
 	*first_child = ((StgInd *)c)->indirectee;
 	return;
     case CONSTR_1_0:
@@ -509,7 +506,8 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
 
 	// layout.payload.ptrs, no SRT
     case CONSTR:
-    case STABLE_NAME:
+    case PRIM:
+    case MUT_PRIM:
     case BCO:
     case CONSTR_STATIC:
 	init_ptrs(&se.info, get_itbl(c)->layout.payload.ptrs,
@@ -589,16 +587,6 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
 	    return;     // no child
 	break;
 	
-    case TVAR_WATCH_QUEUE:
-	*first_child = (StgClosure *)((StgTVarWatchQueue *)c)->closure;
-	se.info.next.step = 2;            // 2 = second
-	break;
-    case TVAR:
-	*first_child = (StgClosure *)((StgTVar *)c)->current_value;
-	break;
-    case TREC_HEADER:
-	*first_child = (StgClosure *)((StgTRecHeader *)c)->enclosing_trec;
-	break;
     case TREC_CHUNK:
 	*first_child = (StgClosure *)((StgTRecChunk *)c)->prev_chunk;
 	se.info.next.step = 0;  // entry no.
@@ -827,33 +815,6 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
 	    *r = se->c_child_r;
 	    return;
 
-	case TVAR_WATCH_QUEUE:
-	    if (se->info.next.step == 2) {
-		*c = (StgClosure *)((StgTVarWatchQueue *)se->c)->next_queue_entry;
-		se->info.next.step++;             // move to the next step
-		// no popOff
-	    } else {
-		*c = (StgClosure *)((StgTVarWatchQueue *)se->c)->prev_queue_entry;
-		popOff();
-	    }
-	    *cp = se->c;
-	    *r = se->c_child_r;
-	    return;
-
-	case TVAR:
-	    *c = (StgClosure *)((StgTVar *)se->c)->first_watch_queue_entry;
-	    *cp = se->c;
-	    *r = se->c_child_r;
-	    popOff();
-	    return;
-
-	case TREC_HEADER:
-	    *c = (StgClosure *)((StgTRecHeader *)se->c)->current_chunk;
-	    *cp = se->c;
-	    *r = se->c_child_r;
-	    popOff();
-	    return;
-
 	case TREC_CHUNK: {
 	    // These are pretty complicated: we have N entries, each
 	    // of which contains 3 fields that we want to follow.  So
@@ -883,7 +844,8 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
 	}
 
 	case CONSTR:
-	case STABLE_NAME:
+	case PRIM:
+	case MUT_PRIM:
 	case BCO:
 	case CONSTR_STATIC:
 	    // StgMutArrPtr.ptrs, no SRT
@@ -951,16 +913,12 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
 	    // no child (fixed), no SRT
 	case CONSTR_0_1:
 	case CONSTR_0_2:
-	case CAF_BLACKHOLE:
-	case BLACKHOLE:
 	case ARR_WORDS:
 	    // one child (fixed), no SRT
 	case MUT_VAR_CLEAN:
 	case MUT_VAR_DIRTY:
 	case THUNK_SELECTOR:
 	case IND_PERM:
-	case IND_OLDGEN_PERM:
-	case IND_OLDGEN:
 	case CONSTR_1_1:
 	    // cannot appear
 	case PAP:
@@ -1045,6 +1003,7 @@ isRetainer( StgClosure *c )
     case TSO:
 
 	// mutable objects
+    case MUT_PRIM:
     case MVAR_CLEAN:
     case MVAR_DIRTY:
     case MUT_VAR_CLEAN:
@@ -1071,10 +1030,6 @@ isRetainer( StgClosure *c )
 	// WEAK objects are roots; there is separate code in which traversing
 	// begins from WEAK objects.
     case WEAK:
-
-	// Since the other mutvar-type things are retainers, seems
-	// like the right thing to do:
-    case TVAR:
 	return rtsTrue;
 
 	//
@@ -1097,27 +1052,21 @@ isRetainer( StgClosure *c )
     case FUN_0_2:
 	// partial applications
     case PAP:
-	// blackholes
-    case CAF_BLACKHOLE:
-    case BLACKHOLE:
 	// indirection
     case IND_PERM:
-    case IND_OLDGEN_PERM:
-    case IND_OLDGEN:
     // IND_STATIC used to be an error, but at the moment it can happen
     // as isAlive doesn't look through IND_STATIC as it ignores static
     // closures. See trac #3956 for a program that hit this error.
     case IND_STATIC:
+    case BLACKHOLE:
 	// static objects
     case CONSTR_STATIC:
     case FUN_STATIC:
 	// misc
-    case STABLE_NAME:
+    case PRIM:
     case BCO:
     case ARR_WORDS:
 	// STM
-    case TVAR_WATCH_QUEUE:
-    case TREC_HEADER:
     case TREC_CHUNK:
 	return rtsFalse;
 
@@ -1280,9 +1229,9 @@ retainSRT (StgClosure **srt, nat srt_bitmap, StgClosure *c, retainer c_child_r)
 
   while (bitmap != 0) {
       if ((bitmap & 1) != 0) {
-#ifdef ENABLE_WIN32_DLL_SUPPORT
+#if defined(__PIC__) && defined(mingw32_HOST_OS)
 	  if ( (unsigned long)(*srt) & 0x1 ) {
-	      retainClosure(*stgCast(StgClosure**,(stgCast(unsigned long, *srt) & ~0x1)), 
+	      retainClosure(* (StgClosure**) ((unsigned long) (*srt) & ~0x1), 
 			    c, c_child_r);
 	  } else {
 	      retainClosure(*srt,c,c_child_r);
@@ -1321,7 +1270,7 @@ retainStack( StgClosure *c, retainer c_child_r,
     stackElement *oldStackBoundary;
     StgPtr p;
     StgRetInfoTable *info;
-    StgWord32 bitmap;
+    StgWord bitmap;
     nat size;
 
 #ifdef DEBUG_RETAINER

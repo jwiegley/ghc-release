@@ -9,7 +9,9 @@
 #ifndef SM_STORAGE_H
 #define SM_STORAGE_H
 
-BEGIN_RTS_PRIVATE
+#include "Capability.h"
+
+#include "BeginPrivate.h"
 
 /* -----------------------------------------------------------------------------
    Initialisation / De-initialisation
@@ -17,18 +19,17 @@ BEGIN_RTS_PRIVATE
 
 void initStorage(void);
 void exitStorage(void);
-void freeStorage(void);
+void freeStorage(rtsBool free_heap);
 
 /* -----------------------------------------------------------------------------
    Storage manager state
    -------------------------------------------------------------------------- */
 
-extern bdescr * pinned_object_block;
-
 INLINE_HEADER rtsBool
-doYouWantToGC( void )
+doYouWantToGC( Capability *cap )
 {
-  return (alloc_blocks >= alloc_blocks_lim);
+  return (cap->r.rCurrentNursery->link == NULL ||
+          g0->n_large_blocks >= alloc_blocks_lim);
 }
 
 /* for splitting blocks groups in two */
@@ -120,6 +121,8 @@ void dirty_MVAR(StgRegTable *reg, StgClosure *p);
    Nursery manipulation
    -------------------------------------------------------------------------- */
 
+extern nursery *nurseries;
+
 void     resetNurseries       ( void );
 void     resizeNurseries      ( nat blocks );
 void     resizeNurseriesFixed ( nat blocks );
@@ -129,25 +132,17 @@ lnat     countNurseryBlocks   ( void );
    Stats 'n' DEBUG stuff
    -------------------------------------------------------------------------- */
 
-extern ullong total_allocated;
-
 lnat    calcAllocated  (void);
 lnat    calcLiveBlocks (void);
 lnat    calcLiveWords  (void);
 lnat    countOccupied  (bdescr *bd);
 lnat    calcNeeded     (void);
-HsInt64 getAllocations (void);
-
-#if defined(DEBUG)
-void    memInventory       (rtsBool show);
-void    checkSanity        (void);
-nat     countBlocks        (bdescr *);
-void    checkNurserySanity (step *stp);
-#endif
 
 /* ----------------------------------------------------------------------------
    Storage manager internal APIs and globals
    ------------------------------------------------------------------------- */
+
+extern bdescr *exec_block;
 
 #define END_OF_STATIC_LIST ((StgClosure*)1)
 
@@ -156,6 +151,6 @@ void move_TSO  (StgTSO *src, StgTSO *dest);
 extern StgClosure * caf_list;
 extern StgClosure * revertible_caf_list;
 
-END_RTS_PRIVATE
+#include "EndPrivate.h"
 
 #endif /* SM_STORAGE_H */

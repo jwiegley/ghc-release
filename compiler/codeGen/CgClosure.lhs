@@ -155,8 +155,7 @@ cgRhsClosure bndr cc bndr_info fvs upd_flag args body = do
 	-- Node points to it...
     let
 	name 	     = idName bndr
-	is_elem	     = isIn "cgRhsClosure"
-	bndr_is_a_fv = bndr `is_elem` fvs
+	bndr_is_a_fv = bndr `elem` fvs
 	reduced_fvs | bndr_is_a_fv = fvs `minusList` [bndr]
 		    | otherwise	   = fvs
 
@@ -475,7 +474,12 @@ emitBlackHoleCode is_single_entry = do
      then do
           tickyBlackHole (not is_single_entry)
           let bh_info = CmmReg (CmmGlobal EagerBlackholeInfo)
-	  stmtC (CmmStore (CmmReg nodeReg) bh_info)
+	  stmtsC [
+              CmmStore (cmmOffsetW (CmmReg nodeReg) fixedHdrSize)
+                       (CmmReg (CmmGlobal CurrentTSO)),
+              CmmCall (CmmPrim MO_WriteBarrier) [] [] CmmUnsafe CmmMayReturn,
+	      CmmStore (CmmReg nodeReg) bh_info
+            ]
      else
           nopC
 \end{code}
@@ -490,17 +494,23 @@ setupUpdate closure_info code
   = code
 
   | not (isStaticClosure closure_info)
-  = if closureUpdReqd closure_info
-    then do { tickyPushUpdateFrame;  pushUpdateFrame (CmmReg nodeReg) code }
-    else do { tickyUpdateFrameOmitted; code }
- 
+  = do
+   if not (closureUpdReqd closure_info)
+      then do tickyUpdateFrameOmitted; code
+      else do
+          tickyPushUpdateFrame
+          dflags <- getDynFlags
+          if not opt_SccProfilingOn && dopt Opt_EagerBlackHoling dflags
+              then pushBHUpdateFrame (CmmReg nodeReg) code
+              else pushUpdateFrame   (CmmReg nodeReg) code
+  
   | otherwise	-- A static closure
   = do 	{ tickyUpdateBhCaf closure_info
 
 	; if closureUpdReqd closure_info
 	  then do	-- Blackhole the (updatable) CAF:
 		{ upd_closure <- link_caf closure_info True
-		; pushUpdateFrame upd_closure code }
+		; pushBHUpdateFrame upd_closure code }
 	  else do
 		{ -- krc: removed some ticky-related code here.
 		; tickyUpdateFrameOmitted
@@ -554,14 +564,18 @@ link_caf cl_info _is_upd = do
   { 	-- Alloc black hole specifying CC_HDR(Node) as the cost centre
   ; let	use_cc   = costCentreFrom (CmmReg nodeReg)
         blame_cc = use_cc
-  ; hp_offset <- allocDynClosure bh_cl_info use_cc blame_cc []
+        tso      = CmmReg (CmmGlobal CurrentTSO)
+  ; hp_offset <- allocDynClosure bh_cl_info use_cc blame_cc [(tso,fixedHdrSize)]
   ; hp_rel    <- getHpRelOffset hp_offset
 
 	-- Call the RTS function newCAF to add the CAF to the CafList
 	-- so that the garbage collector can find them
 	-- This must be done *before* the info table pointer is overwritten, 
 	-- because the old info table ptr is needed for reversion
-  ; emitRtsCallWithVols (sLit "newCAF") [CmmHinted (CmmReg nodeReg) AddrHint] [node] False
+  ; emitRtsCallWithVols rtsPackageId (fsLit "newCAF")
+      [ CmmHinted (CmmReg (CmmGlobal BaseReg)) AddrHint,
+        CmmHinted (CmmReg nodeReg) AddrHint ]
+      [node] False
 	-- node is live, so save it.
 
 	-- Overwrite the closure with a (static) indirection 

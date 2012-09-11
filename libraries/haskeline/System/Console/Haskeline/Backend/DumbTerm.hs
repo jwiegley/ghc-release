@@ -1,6 +1,7 @@
 module System.Console.Haskeline.Backend.DumbTerm where
 
 import System.Console.Haskeline.Backend.Posix
+import System.Console.Haskeline.Backend.WCWidth
 import System.Console.Haskeline.Term
 import System.Console.Haskeline.LineState
 import System.Console.Haskeline.Monads as Monads
@@ -8,6 +9,7 @@ import System.Console.Haskeline.Monads as Monads
 import System.IO
 import qualified Data.ByteString as B
 import Control.Concurrent.Chan
+import Control.Monad(liftM)
 
 -- TODO: 
 ---- Put "<" and ">" at end of term if scrolls off.
@@ -22,17 +24,17 @@ initWindow = Window {pos=0}
 newtype DumbTerm m a = DumbTerm {unDumbTerm :: StateT Window (PosixT m) a}
                 deriving (Monad, MonadIO, MonadException,
                           MonadState Window,
-                          MonadReader Handle, MonadReader Encoders)
+                          MonadReader Handles, MonadReader Encoders)
 
 type DumbTermM a = forall m . (MonadIO m, MonadReader Layout m) => DumbTerm m a
 
 instance MonadTrans DumbTerm where
     lift = DumbTerm . lift . lift . lift
 
-runDumbTerm :: IO RunTerm
-runDumbTerm = do
-    ch <- newChan
-    posixRunTerm $ \enc h ->
+runDumbTerm :: Handles -> MaybeT IO RunTerm
+runDumbTerm h = do
+    ch <- liftIO newChan
+    posixRunTerm h $ \enc ->
                 TermOps {
                         getLayout = tryGetLayouts (posixLayouts h)
                         , withGetEvent = withPosixGetEvent ch h enc []
@@ -54,7 +56,7 @@ instance (MonadException m, MonadReader Layout m) => Term (DumbTerm m) where
       
 printText :: MonadIO m => String -> DumbTerm m ()
 printText str = do
-    h <- ask
+    h <- liftM hOut ask
     posixEncode str >>= liftIO . B.hPutStr h
     liftIO $ hFlush h
 
@@ -82,40 +84,40 @@ drawLineDiff' (xs1,ys1) (xs2,ys2) = do
     Window {pos=p} <- get
     w <- maxWidth
     let (xs1',xs2') = matchInit xs1 xs2
-    let newP = p + length xs2' - length xs1'
-    let ys2' = take (w-newP) ys2
-    if length xs1' > p  || newP >= w
+    let (xw1, xw2) = (gsWidth xs1', gsWidth xs2')
+    let newP = p + xw2 - xw1
+    let (ys2', yw2) = takeWidth (w-newP) ys2
+    if xw1 > p  || newP >= w
         then refitLine (xs2,ys2)
         else do -- we haven't moved outside the margins
             put Window {pos=newP}
             case (xs1',xs2') of
                 ([],[]) | ys1 == ys2    -> return () -- no change
                 (_,[]) | xs1' ++ ys1 == ys2 -> -- moved left
-                    printText $ backs (length xs1')
+                    printText $ backs xw1
                 ([],_) | ys1 == xs2' ++ ys2 -> -- moved right
                     printText (graphemesToString xs2')
-                _ -> let
-                        extraLength = length xs1' + length ys1
-                                    - length xs2' - length ys2
-                     in printText $ backs (length xs1')
+                _ -> let extraLength = xw1 + snd (takeWidth (w-p) ys1)
+                                        - xw2 - yw2
+                     in printText $ backs xw1
                         ++ graphemesToString (xs2' ++ ys2') ++ clearDeadText extraLength
-                        ++ backs (length ys2')
+                        ++ backs yw2
 
 refitLine :: ([Grapheme],[Grapheme]) -> DumbTermM ()
 refitLine (xs,ys) = do
     w <- maxWidth
-    let xs' = dropFrames w xs
-    let p = length xs'    
+    let (xs',p) = dropFrames w xs
     put Window {pos=p}
-    let ys' = take (w - p) ys
-    let k = length ys'
+    let (ys',k) = takeWidth (w - p) ys
     printText $ cr ++ graphemesToString (xs' ++ ys')
         ++ spaces (w-k-p)
         ++ backs (w-p)
   where
-    dropFrames w zs = case splitAt w zs of
-                        (_,[]) -> zs
-                        (_,zs') -> dropFrames w zs'
+    -- returns the width of the returned characters.
+    dropFrames w zs = case splitAtWidth w zs of
+                        (_,[],l) -> (zs,l)
+                        (_,zs',_) -> dropFrames w zs'
+
     
 clearDeadText :: Int -> String
 clearDeadText n | n > 0 = spaces n ++ backs n

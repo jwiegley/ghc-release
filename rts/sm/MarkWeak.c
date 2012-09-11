@@ -21,6 +21,8 @@
 #include "Trace.h"
 #include "Schedule.h"
 #include "Weak.h"
+#include "Storage.h"
+#include "Threads.h"
 
 /* -----------------------------------------------------------------------------
    Weak Pointers
@@ -79,8 +81,8 @@ StgWeak *old_weak_ptr_list; // also pending finaliser list
 // List of threads found to be unreachable
 StgTSO *resurrected_threads;
 
-// List of blocked threads found to have pending throwTos
-StgTSO *exception_threads;
+static void resurrectUnreachableThreads (generation *gen);
+static rtsBool tidyThreadList (generation *gen);
 
 void
 initWeakForGC(void)
@@ -89,7 +91,6 @@ initWeakForGC(void)
     weak_ptr_list = NULL;
     weak_stage = WeakPtrs;
     resurrected_threads = END_TSO_QUEUE;
-    exception_threads = END_TSO_QUEUE;
 }
 
 rtsBool 
@@ -109,7 +110,7 @@ traverseWeakPtrList(void)
       /* doesn't matter where we evacuate values/finalizers to, since
        * these pointers are treated as roots (iff the keys are alive).
        */
-      gct->evac_step = 0;
+      gct->evac_gen = 0;
       
       last_w = &old_weak_ptr_list;
       for (w = old_weak_ptr_list; w != NULL; w = next_w) {
@@ -123,14 +124,8 @@ traverseWeakPtrList(void)
 	      continue;
 	  }
 	  
-          info = w->header.info;
-          if (IS_FORWARDING_PTR(info)) {
-	      next_w = (StgWeak *)UN_FORWARDING_PTR(info);
-	      *last_w = next_w;
-	      continue;
-          }
-
-	  switch (INFO_PTR_TO_STRUCT(info)->type) {
+          info = get_itbl(w);
+	  switch (info->type) {
 
 	  case WEAK:
 	      /* Now, check whether the key is reachable.
@@ -182,86 +177,23 @@ traverseWeakPtrList(void)
       return rtsTrue;
 
   case WeakThreads:
-      /* Now deal with the all_threads list, which behaves somewhat like
+      /* Now deal with the step->threads lists, which behave somewhat like
        * the weak ptr list.  If we discover any threads that are about to
        * become garbage, we wake them up and administer an exception.
        */
-     {
-          StgTSO *t, *tmp, *next, **prev;
-          nat g, s;
-          step *stp;
+  {
+      nat g;
 	  
-          // Traverse thread lists for generations we collected...
-          for (g = 0; g <= N; g++) {
-              for (s = 0; s < generations[g].n_steps; s++) {
-                  stp = &generations[g].steps[s];
-
-                  prev = &stp->old_threads;
-
-                  for (t = stp->old_threads; t != END_TSO_QUEUE; t = next) {
-	      
-                      tmp = (StgTSO *)isAlive((StgClosure *)t);
-	      
-                      if (tmp != NULL) {
-                          t = tmp;
-                      }
-
-                      ASSERT(get_itbl(t)->type == TSO);
-                      if (t->what_next == ThreadRelocated) {
-                          next = t->_link;
-                          *prev = next;
-                          continue;
-                      }
-
-                      next = t->global_link;
-
-                      // This is a good place to check for blocked
-                      // exceptions.  It might be the case that a thread is
-                      // blocked on delivering an exception to a thread that
-                      // is also blocked - we try to ensure that this
-                      // doesn't happen in throwTo(), but it's too hard (or
-                      // impossible) to close all the race holes, so we
-                      // accept that some might get through and deal with
-                      // them here.  A GC will always happen at some point,
-                      // even if the system is otherwise deadlocked.
-                      //
-                      // If an unreachable thread has blocked
-                      // exceptions, we really want to perform the
-                      // blocked exceptions rather than throwing
-                      // BlockedIndefinitely exceptions.  This is the
-                      // only place we can discover such threads.
-                      // The target thread might even be
-                      // ThreadFinished or ThreadKilled.  Bugs here
-                      // will only be seen when running on a
-                      // multiprocessor.
-                      if (t->blocked_exceptions != END_TSO_QUEUE) {
-                          if (tmp == NULL) {
-                              evacuate((StgClosure **)&t);
-                              flag = rtsTrue;
-                          }
-                          t->global_link = exception_threads;
-                          exception_threads = t;
-                          *prev = next;
-                          continue;
-                      }
-
-                      if (tmp == NULL) {
-                          // not alive (yet): leave this thread on the
-                          // old_all_threads list.
-                          prev = &(t->global_link);
-                      } 
-                      else {
-                          // alive
-                          *prev = next;
-
-                          // move this thread onto the correct threads list.
-                          step *new_step;
-                          new_step = Bdescr((P_)t)->step;
-                          t->global_link = new_step->threads;
-                          new_step->threads  = t;
-                      }
-                  }
-              }
+      // Traverse thread lists for generations we collected...
+//      ToDo when we have one gen per capability:
+//      for (n = 0; n < n_capabilities; n++) {
+//          if (tidyThreadList(&nurseries[n])) {
+//              flag = rtsTrue;
+//          }
+//      }              
+      for (g = 0; g <= N; g++) {
+          if (tidyThreadList(&generations[g])) {
+              flag = rtsTrue;
           }
       }
 
@@ -272,131 +204,131 @@ traverseWeakPtrList(void)
       /* And resurrect any threads which were about to become garbage.
        */
       {
-          nat g, s;
-          step *stp;
-	  StgTSO *t, *tmp, *next;
-
+          nat g;
           for (g = 0; g <= N; g++) {
-              for (s = 0; s < generations[g].n_steps; s++) {
-                  stp = &generations[g].steps[s];
-
-                  for (t = stp->old_threads; t != END_TSO_QUEUE; t = next) {
-                      next = t->global_link;
-
-                      // ThreadFinished and ThreadComplete: we have to keep
-                      // these on the all_threads list until they
-                      // become garbage, because they might get
-                      // pending exceptions.
-                      switch (t->what_next) {
-                      case ThreadKilled:
-                      case ThreadComplete:
-                          continue;
-                      default:
-                          tmp = t;
-                          evacuate((StgClosure **)&tmp);
-                          tmp->global_link = resurrected_threads;
-                          resurrected_threads = tmp;
-                      }
-                  }
-              }
+              resurrectUnreachableThreads(&generations[g]);
           }
       }
-      
-      /* Finally, we can update the blackhole_queue.  This queue
-       * simply strings together TSOs blocked on black holes, it is
-       * not intended to keep anything alive.  Hence, we do not follow
-       * pointers on the blackhole_queue until now, when we have
-       * determined which TSOs are otherwise reachable.  We know at
-       * this point that all TSOs have been evacuated, however.
-       */
-      { 
-	  StgTSO **pt;
-	  for (pt = &blackhole_queue; *pt != END_TSO_QUEUE; pt = &((*pt)->_link)) {
-	      *pt = (StgTSO *)isAlive((StgClosure *)*pt);
-	      ASSERT(*pt != NULL);
-	  }
-      }
-
+        
       weak_stage = WeakDone;  // *now* we're done,
       return rtsTrue;         // but one more round of scavenging, please
-
+  }
+      
   default:
       barf("traverse_weak_ptr_list");
       return rtsTrue;
   }
+}
+  
+  static void resurrectUnreachableThreads (generation *gen)
+{
+    StgTSO *t, *tmp, *next;
 
+    for (t = gen->old_threads; t != END_TSO_QUEUE; t = next) {
+        next = t->global_link;
+        
+        // ThreadFinished and ThreadComplete: we have to keep
+        // these on the all_threads list until they
+        // become garbage, because they might get
+        // pending exceptions.
+        switch (t->what_next) {
+        case ThreadKilled:
+        case ThreadComplete:
+            continue;
+        default:
+            tmp = t;
+            evacuate((StgClosure **)&tmp);
+            tmp->global_link = resurrected_threads;
+            resurrected_threads = tmp;
+        }
+    }
 }
 
-/* -----------------------------------------------------------------------------
-   The blackhole queue
-   
-   Threads on this list behave like weak pointers during the normal
-   phase of garbage collection: if the blackhole is reachable, then
-   the thread is reachable too.
-   -------------------------------------------------------------------------- */
-rtsBool
-traverseBlackholeQueue (void)
+static rtsBool tidyThreadList (generation *gen)
 {
-    StgTSO *prev, *t, *tmp;
-    rtsBool flag;
-    nat type;
+    StgTSO *t, *tmp, *next, **prev;
+    rtsBool flag = rtsFalse;
 
-    flag = rtsFalse;
-    prev = NULL;
+    prev = &gen->old_threads;
 
-    for (t = blackhole_queue; t != END_TSO_QUEUE; prev=t, t = t->_link) {
-        // if the thread is not yet alive...
-	if (! (tmp = (StgTSO *)isAlive((StgClosure*)t))) {
-            // if the closure it is blocked on is either (a) a
-            // reachable BLAKCHOLE or (b) not a BLACKHOLE, then we
-            // make the thread alive.
-	    if (!isAlive(t->block_info.closure)) {
-                type = get_itbl(t->block_info.closure)->type;
-                if (type == BLACKHOLE || type == CAF_BLACKHOLE) {
-                    continue;
-                }
-            }
-            evacuate((StgClosure **)&t);
-            if (prev) {
-                prev->_link = t;
-            } else {
-                blackhole_queue = t;
-            }
-                 // no write barrier when on the blackhole queue,
-                 // because we traverse the whole queue on every GC.
-            flag = rtsTrue;
-	}
+    for (t = gen->old_threads; t != END_TSO_QUEUE; t = next) {
+	      
+        tmp = (StgTSO *)isAlive((StgClosure *)t);
+	
+        if (tmp != NULL) {
+            t = tmp;
+        }
+        
+        ASSERT(get_itbl(t)->type == TSO);
+        if (t->what_next == ThreadRelocated) {
+            next = t->_link;
+            *prev = next;
+            continue;
+        }
+        
+        next = t->global_link;
+        
+        // if the thread is not masking exceptions but there are
+        // pending exceptions on its queue, then something has gone
+        // wrong:
+        ASSERT(t->blocked_exceptions == END_BLOCKED_EXCEPTIONS_QUEUE
+               || (t->flags & TSO_BLOCKEX));
+        
+        if (tmp == NULL) {
+            // not alive (yet): leave this thread on the
+            // old_all_threads list.
+            prev = &(t->global_link);
+        } 
+        else {
+            // alive
+            *prev = next;
+            
+            // move this thread onto the correct threads list.
+            generation *new_gen;
+            new_gen = Bdescr((P_)t)->gen;
+            t->global_link = new_gen->threads;
+            new_gen->threads  = t;
+        }
     }
+
     return flag;
 }
 
 /* -----------------------------------------------------------------------------
-   After GC, the live weak pointer list may have forwarding pointers
-   on it, because a weak pointer object was evacuated after being
-   moved to the live weak pointer list.  We remove those forwarding
-   pointers here.
+   Evacuate every weak pointer object on the weak_ptr_list, and update
+   the link fields.
 
-   Also, we don't consider weak pointer objects to be reachable, but
-   we must nevertheless consider them to be "live" and retain them.
-   Therefore any weak pointer objects which haven't as yet been
-   evacuated need to be evacuated now.
+   ToDo: with a lot of weak pointers, this will be expensive.  We
+   should have a per-GC weak pointer list, just like threads.
    -------------------------------------------------------------------------- */
 
 void
 markWeakPtrList ( void )
 {
-  StgWeak *w, **last_w, *tmp;
+  StgWeak *w, **last_w;
 
   last_w = &weak_ptr_list;
   for (w = weak_ptr_list; w; w = w->link) {
       // w might be WEAK, EVACUATED, or DEAD_WEAK (actually CON_STATIC) here
-      ASSERT(IS_FORWARDING_PTR(w->header.info)
-             || w->header.info == &stg_DEAD_WEAK_info 
-	     || get_itbl(w)->type == WEAK);
-      tmp = w;
-      evacuate((StgClosure **)&tmp);
-      *last_w = w;
-      last_w = &(w->link);
+
+#ifdef DEBUG
+      {   // careful to do this assertion only reading the info ptr
+          // once, because during parallel GC it might change under our feet.
+          const StgInfoTable *info;
+          info = w->header.info;
+          ASSERT(IS_FORWARDING_PTR(info)
+                 || info == &stg_DEAD_WEAK_info 
+                 || INFO_PTR_TO_STRUCT(info)->type == WEAK);
+      }
+#endif
+
+      evacuate((StgClosure **)last_w);
+      w = *last_w;
+      if (w->header.info == &stg_DEAD_WEAK_info) {
+          last_w = &(((StgDeadWeak*)w)->link);
+      } else {
+          last_w = &(w->link);
+      }
   }
 }
 

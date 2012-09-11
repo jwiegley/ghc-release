@@ -236,6 +236,7 @@ defaultInstallDirs comp userInstall _hasLibs = do
            Hugs   -> "hugs" </> "packages" </> "$pkg"
            JHC    -> "$compiler"
            LHC    -> "$compiler"
+           UHC    -> "$pkgid"
            _other -> "$pkgid" </> "$compiler",
       dynlibdir    = "$libdir",
       libexecdir   = case buildOS of
@@ -315,12 +316,7 @@ absoluteInstallDirs pkgId compilerId copydest dirs =
        _              -> id)
   . appendSubdirs (</>)
   . fmap fromPathTemplate
-  $ substituteInstallDirTemplates env dirs {
-      prefix = case copydest of
-        -- possibly override the prefix
-        CopyPrefix p -> toPathTemplate p
-        _            -> prefix dirs
-    }
+  $ substituteInstallDirTemplates env dirs
   where
     env = initialPathTemplateEnv pkgId compilerId
 
@@ -329,7 +325,6 @@ absoluteInstallDirs pkgId compilerId copydest dirs =
 data CopyDest
   = NoCopyDest
   | CopyTo FilePath
-  | CopyPrefix FilePath         -- DEPRECATED
   deriving (Eq, Show)
 
 -- | Check which of the paths are relative to the installation $prefix.
@@ -373,6 +368,7 @@ newtype PathTemplate = PathTemplate [PathComponent]
 data PathComponent =
        Ordinary FilePath
      | Variable PathTemplateVariable
+     deriving Eq
 
 data PathTemplateVariable =
        PrefixVar     -- ^ The @$prefix@ path variable
@@ -390,6 +386,8 @@ data PathTemplateVariable =
      | OSVar         -- ^ The operating system name, eg @windows@ or @linux@
      | ArchVar       -- ^ The cpu architecture name, eg @i386@ or @x86_64@
      | ExecutableNameVar -- ^ The executable name; used in shell wrappers
+     | TestSuiteNameVar   -- ^ The name of the test suite being run
+     | TestSuiteResultVar -- ^ The result of the test suite being run, eg @pass@, @fail@, or @error@.
   deriving Eq
 
 type PathTemplateEnv = [(PathTemplateVariable, PathTemplate)]
@@ -417,7 +415,6 @@ substPathTemplate environment (PathTemplate template) =
               case lookup variable environment of
                   Just (PathTemplate components) -> components
                   Nothing                        -> [component]
-
 
 -- | The initial environment has all the static stuff but no paths
 initialPathTemplateEnv :: PackageIdentifier -> CompilerId -> PathTemplateEnv
@@ -483,6 +480,8 @@ instance Show PathTemplateVariable where
   show OSVar         = "os"
   show ArchVar       = "arch"
   show ExecutableNameVar = "executablename"
+  show TestSuiteNameVar   = "test-suite"
+  show TestSuiteResultVar = "result"
 
 instance Read PathTemplateVariable where
   readsPrec _ s =
@@ -504,7 +503,9 @@ instance Read PathTemplateVariable where
                  ,("compiler",   CompilerVar)
                  ,("os",         OSVar)
                  ,("arch",       ArchVar)
-                 ,("executablename", ExecutableNameVar)]
+                 ,("executablename", ExecutableNameVar)
+                 ,("test-suite", TestSuiteNameVar)
+                 ,("result", TestSuiteResultVar)]
 
 instance Show PathComponent where
   show (Ordinary path) = path

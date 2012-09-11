@@ -9,7 +9,6 @@
 -- Stability   :  experimental
 -- Portability :  portable
 -----------------------------------------------------------------------------
-
 module Haddock.Interface.Rename (renameInterface) where
 
 
@@ -37,8 +36,13 @@ renameInterface renamingEnv warnings iface =
   let localEnv = foldl fn renamingEnv (ifaceVisibleExports iface)
         where fn env name = Map.insert name (ifaceMod iface) env
 
-      docMap = Map.map (\(_,x,_) -> x) (ifaceDeclMap iface)
-      docs   = Map.toList docMap
+      docMap   = Map.map (\(_,x,_) -> x) (ifaceDeclMap iface)
+
+      -- make instance docs into 'docForDecls'
+      instDocs = [ (name, (Just doc, Map.empty))
+                 | (name, doc) <- Map.toList (ifaceInstanceDocMap iface) ]
+
+      docs     = Map.toList docMap ++ instDocs
       renameMapElem (k,d) = do d' <- renameDocForDecl d; return (k, d')
 
       -- rename names in the exported declarations to point to things that
@@ -141,30 +145,22 @@ renameExportItems :: [ExportItem Name] -> RnM [ExportItem DocName]
 renameExportItems = mapM renameExportItem
 
 
-renameDocForDecl :: (Maybe (HsDoc Name), FnArgsDoc Name) -> RnM (Maybe (HsDoc DocName), FnArgsDoc DocName)
+renameDocForDecl :: (Maybe (Doc Name), FnArgsDoc Name) -> RnM (Maybe (Doc DocName), FnArgsDoc DocName)
 renameDocForDecl (mbDoc, fnArgsDoc) = do
   mbDoc' <- renameMaybeDoc mbDoc
   fnArgsDoc' <- renameFnArgsDoc fnArgsDoc
   return (mbDoc', fnArgsDoc')
 
 
-renameMaybeDoc :: Maybe (HsDoc Name) -> RnM (Maybe (HsDoc DocName))
+renameMaybeDoc :: Maybe (Doc Name) -> RnM (Maybe (Doc DocName))
 renameMaybeDoc = mapM renameDoc
 
-#if __GLASGOW_HASKELL__ >= 611
+
 renameLDocHsSyn :: LHsDocString -> RnM LHsDocString
 renameLDocHsSyn = return
-#else
-renameLDocHsSyn :: LHsDoc Name -> RnM (LHsDoc DocName)
-renameLDocHsSyn = renameLDoc
-
--- This is inside the #if to avoid a defined-but-not-used warning.
-renameLDoc :: LHsDoc Name -> RnM (LHsDoc DocName)
-renameLDoc = mapM renameDoc
-#endif
 
 
-renameDoc :: HsDoc Name -> RnM (HsDoc DocName)
+renameDoc :: Doc Name -> RnM (Doc DocName)
 renameDoc d = case d of
   DocEmpty -> return DocEmpty
   DocAppend a b -> do
@@ -205,6 +201,7 @@ renameDoc d = case d of
   DocURL str -> return (DocURL str)
   DocPic str -> return (DocPic str)
   DocAName str -> return (DocAName str)
+  DocExamples e -> return (DocExamples e)
 
 
 renameFnArgsDoc :: FnArgsDoc Name -> RnM (FnArgsDoc DocName)
@@ -331,15 +328,9 @@ renameLTyClD (L loc d) = return . L loc =<< renameTyClD d
 
 renameTyClD :: TyClDecl Name -> RnM (TyClDecl DocName)
 renameTyClD d = case d of
-#if __GLASGOW_HASKELL__ >= 611
   ForeignType lname b -> do
     lname' <- renameL lname
     return (ForeignType lname' b)
-#else
-  ForeignType lname a b -> do
-    lname' <- renameL lname
-    return (ForeignType lname' a b)
-#endif
 
   TyFamily flav lname ltyvars kind -> do
     lname'   <- renameL lname
@@ -448,7 +439,10 @@ renameExportItem item = case item of
     decl' <- renameLDecl decl
     doc'  <- renameDocForDecl doc
     subs' <- mapM renameSub subs
-    instances' <- mapM renameInstHead instances
+    instances' <- forM instances $ \(inst, idoc) -> do
+      inst' <- renameInstHead inst
+      idoc' <- mapM renameDoc idoc
+      return (inst', idoc')
     return (ExportDecl decl' doc' subs' instances')
   ExportNoDecl x subs -> do
     x'    <- lookupRn id x

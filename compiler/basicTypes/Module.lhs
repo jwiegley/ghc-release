@@ -5,7 +5,7 @@
 Module
 ~~~~~~~~~~
 Simply the name of a module, represented as a FastString.
-These are Uniquable, hence we can build FiniteMaps with Modules as
+These are Uniquable, hence we can build Maps with Modules as
 the keys.
 
 \begin{code}
@@ -35,7 +35,6 @@ module Module
 	integerPackageId,
 	basePackageId,
 	rtsPackageId,
-	haskell98PackageId,
 	thPackageId,
         dphSeqPackageId,
         dphParPackageId,
@@ -60,7 +59,7 @@ module Module
 	lookupWithDefaultModuleEnv, mapModuleEnv, mkModuleEnv, emptyModuleEnv,
 	moduleEnvKeys, moduleEnvElts, moduleEnvToList,
         unitModuleEnv, isEmptyModuleEnv,
-        foldModuleEnv, extendModuleEnv_C, filterModuleEnv,
+        foldModuleEnv, extendModuleEnvWith, filterModuleEnv,
 
 	-- * ModuleName mappings
 	ModuleNameEnv,
@@ -70,16 +69,21 @@ module Module
 	emptyModuleSet, mkModuleSet, moduleSetElts, extendModuleSet, elemModuleSet
     ) where
 
+#include "Typeable.h"
+
 import Config
 import Outputable
 import qualified Pretty
 import Unique
-import FiniteMap
-import LazyUniqFM
+import UniqFM
 import FastString
 import Binary
 import Util
 
+import Data.Data
+import Data.Map (Map)
+import qualified Data.Map as Map
+import qualified FiniteMap as Map
 import System.FilePath
 \end{code}
 
@@ -171,6 +175,14 @@ instance Binary ModuleName where
   put_ bh (ModuleName fs) = put_ bh fs
   get bh = do fs <- get bh; return (ModuleName fs)
 
+INSTANCE_TYPEABLE0(ModuleName,moduleNameTc,"ModuleName")
+
+instance Data ModuleName where
+  -- don't traverse?
+  toConstr _   = abstractConstr "ModuleName"
+  gunfold _ _  = error "gunfold"
+  dataTypeOf _ = mkNoRepType "ModuleName"
+
 stableModuleNameCmp :: ModuleName -> ModuleName -> Ordering
 -- ^ Compares module names lexically, rather than by their 'Unique's
 stableModuleNameCmp n1 n2 = moduleNameFS n1 `compare` moduleNameFS n2
@@ -224,6 +236,14 @@ instance Binary Module where
   put_ bh (Module p n) = put_ bh p >> put_ bh n
   get bh = do p <- get bh; n <- get bh; return (Module p n)
 
+INSTANCE_TYPEABLE0(Module,moduleTc,"Module")
+
+instance Data Module where
+  -- don't traverse?
+  toConstr _   = abstractConstr "Module"
+  gunfold _ _  = error "gunfold"
+  dataTypeOf _ = mkNoRepType "Module"
+
 -- | This gives a stable ordering, as opposed to the Ord instance which
 -- gives an ordering based on the 'Unique's of the components, which may
 -- not be stable from run to run of the compiler.
@@ -271,6 +291,14 @@ instance Uniquable PackageId where
 instance Ord PackageId where
   nm1 `compare` nm2 = getUnique nm1 `compare` getUnique nm2
 
+INSTANCE_TYPEABLE0(PackageId,packageIdTc,"PackageId")
+
+instance Data PackageId where
+  -- don't traverse?
+  toConstr _   = abstractConstr "PackageId"
+  gunfold _ _  = error "gunfold"
+  dataTypeOf _ = mkNoRepType "PackageId"
+
 stablePackageIdCmp :: PackageId -> PackageId -> Ordering
 -- ^ Compares package ids lexically, rather than by their 'Unique's
 stablePackageIdCmp p1 p2 = packageIdFS p1 `compare` packageIdFS p2
@@ -317,14 +345,13 @@ packageIdString = unpackFS . packageIdFS
 -- Make sure you change 'Packages.findWiredInPackages' if you add an entry here
 
 integerPackageId, primPackageId,
-  basePackageId, rtsPackageId, haskell98PackageId,
+  basePackageId, rtsPackageId,
   thPackageId, dphSeqPackageId, dphParPackageId,
   mainPackageId  :: PackageId
 primPackageId      = fsToPackageId (fsLit "ghc-prim")
 integerPackageId   = fsToPackageId (fsLit cIntegerLibrary)
 basePackageId      = fsToPackageId (fsLit "base")
 rtsPackageId	   = fsToPackageId (fsLit "rts")
-haskell98PackageId = fsToPackageId (fsLit "haskell98")
 thPackageId        = fsToPackageId (fsLit "template-haskell")
 dphSeqPackageId    = fsToPackageId (fsLit "dph-seq")
 dphParPackageId    = fsToPackageId (fsLit "dph-par")
@@ -343,76 +370,76 @@ mainPackageId	   = fsToPackageId (fsLit "main")
 
 \begin{code}
 -- | A map keyed off of 'Module's
-newtype ModuleEnv elt = ModuleEnv (FiniteMap Module elt)
+newtype ModuleEnv elt = ModuleEnv (Map Module elt)
 
 filterModuleEnv :: (Module -> a -> Bool) -> ModuleEnv a -> ModuleEnv a
-filterModuleEnv f (ModuleEnv e) = ModuleEnv (filterFM f e)
+filterModuleEnv f (ModuleEnv e) = ModuleEnv (Map.filterWithKey f e)
 
 elemModuleEnv :: Module -> ModuleEnv a -> Bool
-elemModuleEnv m (ModuleEnv e) = elemFM m e
+elemModuleEnv m (ModuleEnv e) = Map.member m e
 
 extendModuleEnv :: ModuleEnv a -> Module -> a -> ModuleEnv a
-extendModuleEnv (ModuleEnv e) m x = ModuleEnv (addToFM e m x)
+extendModuleEnv (ModuleEnv e) m x = ModuleEnv (Map.insert m x e)
 
-extendModuleEnv_C :: (a -> a -> a) -> ModuleEnv a -> Module -> a -> ModuleEnv a
-extendModuleEnv_C f (ModuleEnv e) m x = ModuleEnv (addToFM_C f e m x)
+extendModuleEnvWith :: (a -> a -> a) -> ModuleEnv a -> Module -> a -> ModuleEnv a
+extendModuleEnvWith f (ModuleEnv e) m x = ModuleEnv (Map.insertWith f m x e)
 
 extendModuleEnvList :: ModuleEnv a -> [(Module, a)] -> ModuleEnv a
-extendModuleEnvList (ModuleEnv e) xs = ModuleEnv (addListToFM e xs)
+extendModuleEnvList (ModuleEnv e) xs = ModuleEnv (Map.insertList xs e)
 
 extendModuleEnvList_C :: (a -> a -> a) -> ModuleEnv a -> [(Module, a)]
                       -> ModuleEnv a
-extendModuleEnvList_C f (ModuleEnv e) xs = ModuleEnv (addListToFM_C f e xs)
+extendModuleEnvList_C f (ModuleEnv e) xs = ModuleEnv (Map.insertListWith f xs e)
 
 plusModuleEnv_C :: (a -> a -> a) -> ModuleEnv a -> ModuleEnv a -> ModuleEnv a
-plusModuleEnv_C f (ModuleEnv e1) (ModuleEnv e2) = ModuleEnv (plusFM_C f e1 e2)
+plusModuleEnv_C f (ModuleEnv e1) (ModuleEnv e2) = ModuleEnv (Map.unionWith f e1 e2)
 
 delModuleEnvList :: ModuleEnv a -> [Module] -> ModuleEnv a
-delModuleEnvList (ModuleEnv e) ms = ModuleEnv (delListFromFM e ms)
+delModuleEnvList (ModuleEnv e) ms = ModuleEnv (Map.deleteList ms e)
 
 delModuleEnv :: ModuleEnv a -> Module -> ModuleEnv a
-delModuleEnv (ModuleEnv e) m = ModuleEnv (delFromFM e m)
+delModuleEnv (ModuleEnv e) m = ModuleEnv (Map.delete m e)
 
 plusModuleEnv :: ModuleEnv a -> ModuleEnv a -> ModuleEnv a
-plusModuleEnv (ModuleEnv e1) (ModuleEnv e2) = ModuleEnv (plusFM e1 e2)
+plusModuleEnv (ModuleEnv e1) (ModuleEnv e2) = ModuleEnv (Map.union e1 e2)
 
 lookupModuleEnv :: ModuleEnv a -> Module -> Maybe a
-lookupModuleEnv (ModuleEnv e) m = lookupFM e m
+lookupModuleEnv (ModuleEnv e) m = Map.lookup m e
 
 lookupWithDefaultModuleEnv :: ModuleEnv a -> a -> Module -> a
-lookupWithDefaultModuleEnv (ModuleEnv e) x m = lookupWithDefaultFM e x m
+lookupWithDefaultModuleEnv (ModuleEnv e) x m = Map.findWithDefault x m e
 
 mapModuleEnv :: (a -> b) -> ModuleEnv a -> ModuleEnv b
-mapModuleEnv f (ModuleEnv e) = ModuleEnv (mapFM (\_ v -> f v) e)
+mapModuleEnv f (ModuleEnv e) = ModuleEnv (Map.mapWithKey (\_ v -> f v) e)
 
 mkModuleEnv :: [(Module, a)] -> ModuleEnv a
-mkModuleEnv xs = ModuleEnv (listToFM xs)
+mkModuleEnv xs = ModuleEnv (Map.fromList xs)
 
 emptyModuleEnv :: ModuleEnv a
-emptyModuleEnv = ModuleEnv emptyFM
+emptyModuleEnv = ModuleEnv Map.empty
 
 moduleEnvKeys :: ModuleEnv a -> [Module]
-moduleEnvKeys (ModuleEnv e) = keysFM e
+moduleEnvKeys (ModuleEnv e) = Map.keys e
 
 moduleEnvElts :: ModuleEnv a -> [a]
-moduleEnvElts (ModuleEnv e) = eltsFM e
+moduleEnvElts (ModuleEnv e) = Map.elems e
 
 moduleEnvToList :: ModuleEnv a -> [(Module, a)]
-moduleEnvToList (ModuleEnv e) = fmToList e
+moduleEnvToList (ModuleEnv e) = Map.toList e
 
 unitModuleEnv :: Module -> a -> ModuleEnv a
-unitModuleEnv m x = ModuleEnv (unitFM m x)
+unitModuleEnv m x = ModuleEnv (Map.singleton m x)
 
 isEmptyModuleEnv :: ModuleEnv a -> Bool
-isEmptyModuleEnv (ModuleEnv e) = isEmptyFM e
+isEmptyModuleEnv (ModuleEnv e) = Map.null e
 
 foldModuleEnv :: (a -> b -> b) -> b -> ModuleEnv a -> b
-foldModuleEnv f x (ModuleEnv e) = foldFM (\_ v -> f v) x e
+foldModuleEnv f x (ModuleEnv e) = Map.foldRightWithKey (\_ v -> f v) x e
 \end{code}
 
 \begin{code}
 -- | A set of 'Module's
-type ModuleSet = FiniteMap Module ()
+type ModuleSet = Map Module ()
 
 mkModuleSet	:: [Module] -> ModuleSet
 extendModuleSet :: ModuleSet -> Module -> ModuleSet
@@ -420,11 +447,11 @@ emptyModuleSet  :: ModuleSet
 moduleSetElts   :: ModuleSet -> [Module]
 elemModuleSet   :: Module -> ModuleSet -> Bool
 
-emptyModuleSet    = emptyFM
-mkModuleSet ms    = listToFM [(m,()) | m <- ms ]
-extendModuleSet s m = addToFM s m ()
-moduleSetElts     = keysFM
-elemModuleSet     = elemFM
+emptyModuleSet    = Map.empty
+mkModuleSet ms    = Map.fromList [(m,()) | m <- ms ]
+extendModuleSet s m = Map.insert m () s
+moduleSetElts     = Map.keys
+elemModuleSet     = Map.member
 \end{code}
 
 A ModuleName has a Unique, so we can build mappings of these using

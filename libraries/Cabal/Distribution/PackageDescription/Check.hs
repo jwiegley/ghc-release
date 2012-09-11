@@ -62,13 +62,15 @@ module Distribution.PackageDescription.Check (
         checkPackageFileNames,
   ) where
 
-import Data.Maybe (isNothing, catMaybes, fromMaybe)
+import Data.Maybe
+         ( isNothing, isJust, catMaybes, maybeToList, fromMaybe )
 import Data.List  (sort, group, isPrefixOf, nub, find)
 import Control.Monad
          ( filterM, liftM )
 import qualified System.Directory as System
          ( doesFileExist, doesDirectoryExist )
 
+import Distribution.Package ( pkgName )
 import Distribution.PackageDescription
 import Distribution.PackageDescription.Configuration
          ( flattenPackageDescription, finalizePackageDescription )
@@ -83,18 +85,23 @@ import Distribution.Simple.Utils
 
 import Distribution.Version
          ( Version(..)
-         , VersionRange, withinRange, foldVersionRange'
+         , VersionRange(..), foldVersionRange'
          , anyVersion, noVersion, thisVersion, laterVersion, earlierVersion
          , orLaterVersion, orEarlierVersion
          , unionVersionRanges, intersectVersionRanges
-         , asVersionIntervals, LowerBound(..), UpperBound(..) )
+         , asVersionIntervals, UpperBound(..), isNoVersion )
 import Distribution.Package
          ( PackageName(PackageName), packageName, packageVersion
          , Dependency(..) )
+
 import Distribution.Text
-         ( display )
-import qualified Language.Haskell.Extension as Extension
-import Language.Haskell.Extension (Extension(..))
+         ( display, disp )
+import qualified Text.PrettyPrint as Disp
+import Text.PrettyPrint ((<>), (<+>))
+
+import qualified Language.Haskell.Extension as Extension (deprecatedExtensions)
+import Language.Haskell.Extension
+         ( Language(UnknownLanguage), knownLanguages, Extension(..) )
 import System.FilePath
          ( (</>), takeExtension, isRelative, isAbsolute
          , splitDirectories,  splitPath )
@@ -196,20 +203,39 @@ checkSanity pkg =
   , check (null (executables pkg) && isNothing (library pkg)) $
       PackageBuildImpossible
         "No executables and no library found. Nothing to do."
+
+  , check (not (null exeDuplicates)) $
+      PackageBuildImpossible $ "Duplicate executable sections "
+        ++ commaSep exeDuplicates
+  , check (not (null testDuplicates)) $
+      PackageBuildImpossible $ "Duplicate test sections "
+        ++ commaSep testDuplicates
+
+    --TODO: this seems to duplicate a check on the testsuites
+  , check (not (null testsThatAreExes)) $
+      PackageBuildImpossible $ "These test sections share names with executable sections: "
+        ++ commaSep testsThatAreExes
   ]
+  --TODO: check for name clashes case insensitively: windows file systems cannot cope.
 
   ++ maybe []  checkLibrary    (library pkg)
   ++ concatMap checkExecutable (executables pkg)
+  ++ concatMap (checkTestSuite pkg) (testSuites pkg)
 
   ++ catMaybes [
 
-    check (not $ cabalVersion `withinRange` requiredCabalVersion) $
+    check (specVersion pkg > cabalVersion) $
       PackageBuildImpossible $
-           "This package requires Cabal version: "
-        ++ display requiredCabalVersion
+           "This package description follows version "
+        ++ display (specVersion pkg) ++ " of the Cabal specification. This "
+        ++ "tool only supports up to version " ++ display cabalVersion ++ "."
   ]
-
-  where requiredCabalVersion = descCabalVersion pkg
+  where
+    exeNames = map exeName $ executables pkg
+    testNames = map testName $ testSuites pkg
+    exeDuplicates = dups exeNames
+    testDuplicates = dups testNames
+    testsThatAreExes = filter (flip elem exeNames) testNames
 
 checkLibrary :: Library -> [PackageCheck]
 checkLibrary lib =
@@ -217,13 +243,12 @@ checkLibrary lib =
 
     check (not (null moduleDuplicates)) $
        PackageBuildWarning $
-         "Duplicate modules in library: " ++ commaSep moduleDuplicates
+            "Duplicate modules in library: "
+         ++ commaSep (map display moduleDuplicates)
   ]
 
-  where moduleDuplicates = [ display module_
-                           | let modules = exposedModules lib
-                                        ++ otherModules (libBuildInfo lib)
-                           , (module_:_:_) <- group (sort modules) ]
+  where
+    moduleDuplicates = dups (libModules lib)
 
 checkExecutable :: Executable -> [PackageCheck]
 checkExecutable exe =
@@ -242,12 +267,61 @@ checkExecutable exe =
   , check (not (null moduleDuplicates)) $
        PackageBuildWarning $
             "Duplicate modules in executable '" ++ exeName exe ++ "': "
-         ++ commaSep moduleDuplicates
+         ++ commaSep (map display moduleDuplicates)
   ]
+  where
+    moduleDuplicates = dups (exeModules exe)
 
-  where moduleDuplicates = [ display module_
-                           | let modules = otherModules (buildInfo exe)
-                           , (module_:_:_) <- group (sort modules) ]
+checkTestSuite :: PackageDescription -> TestSuite -> [PackageCheck]
+checkTestSuite pkg test =
+  catMaybes [
+
+    case testInterface test of
+      TestSuiteUnsupported tt@(TestTypeUnknown _ _) -> Just $
+        PackageBuildWarning $
+             quote (display tt) ++ " is not a known type of test suite. "
+          ++ "The known test suite types are: "
+          ++ commaSep (map display knownTestTypes)
+
+      TestSuiteUnsupported tt -> Just $
+        PackageBuildWarning $
+             quote (display tt) ++ " is not a supported test suite version. "
+          ++ "The known test suite types are: "
+          ++ commaSep (map display knownTestTypes)
+      _ -> Nothing
+
+  , check (not $ null moduleDuplicates) $
+      PackageBuildWarning $
+           "Duplicate modules in test suite '" ++ testName test ++ "': "
+        ++ commaSep (map display moduleDuplicates)
+
+  , check mainIsWrongExt $
+      PackageBuildImpossible $
+           "The 'main-is' field must specify a '.hs' or '.lhs' file "
+        ++ "(even if it is generated by a preprocessor)."
+
+  , check exeNameClash $
+      PackageBuildImpossible $
+           "The test suite " ++ testName test
+        ++ " has the same name as an executable."
+
+  , check libNameClash $
+      PackageBuildImpossible $
+           "The test suite " ++ testName test
+        ++ " has the same name as the package."
+  ]
+  where
+    moduleDuplicates = dups $ testModules test
+
+    mainIsWrongExt = case testInterface test of
+      TestSuiteExeV10 _ f -> takeExtension f `notElem` [".hs", ".lhs"]
+      _                   -> False
+
+    exeNameClash = testName test `elem` [ exeName exe | exe <- executables pkg ]
+    libNameClash = testName test `elem` [ libName
+                                        | _lib <- maybeToList (library pkg)
+                                        , let PackageName libName =
+                                                pkgName (package pkg) ]
 
 -- ------------------------------------------------------------
 -- * Additional pure checks
@@ -282,9 +356,20 @@ checkFields pkg =
         "Unknown compiler " ++ commaSep (map quote unknownCompilers)
                             ++ " in 'tested-with' field."
 
+  , check (not (null unknownLanguages)) $
+      PackageBuildWarning $
+        "Unknown languages: " ++ commaSep unknownLanguages
+
   , check (not (null unknownExtensions)) $
       PackageBuildWarning $
         "Unknown extensions: " ++ commaSep unknownExtensions
+
+  , check (not (null languagesUsedAsExtensions)) $
+      PackageBuildWarning $
+           "Languages listed as extensions: "
+        ++ commaSep languagesUsedAsExtensions
+        ++ ". Languages must be specified in either the 'default-language' "
+        ++ " or the 'other-languages' field."
 
   , check (not (null deprecatedExtensions)) $
       PackageDistSuspicious $
@@ -313,15 +398,38 @@ checkFields pkg =
   , check (length (synopsis pkg) >= 80) $
       PackageDistSuspicious
         "The 'synopsis' field is rather long (max 80 chars is recommended)."
+
+    -- check use of impossible constraints "tested-with: GHC== 6.10 && ==6.12"
+  , check (not (null testedWithImpossibleRanges)) $
+      PackageDistInexcusable $
+           "Invalid 'tested-with' version range: "
+        ++ commaSep (map display testedWithImpossibleRanges)
+        ++ ". To indicate that you have tested a package with multiple "
+        ++ "different versions of the same compiler use multiple entries, "
+        ++ "for example 'tested-with: GHC==6.10.4, GHC==6.12.3' and not "
+        ++ "'tested-with: GHC==6.10.4 && ==6.12.3'."
   ]
   where
     unknownCompilers  = [ name | (OtherCompiler name, _) <- testedWith pkg ]
+    unknownLanguages  = [ name | bi <- allBuildInfo pkg
+                               , UnknownLanguage name <- allLanguages bi ]
     unknownExtensions = [ name | bi <- allBuildInfo pkg
-                               , UnknownExtension name <- extensions bi ]
+                               , UnknownExtension name <- allExtensions bi
+                               , name `notElem` map display knownLanguages ]
     deprecatedExtensions = nub $ catMaybes
       [ find ((==ext) . fst) Extension.deprecatedExtensions
       | bi <- allBuildInfo pkg
-      , ext <- extensions bi ]
+      , ext <- allExtensions bi ]
+    languagesUsedAsExtensions =
+      [ name | bi <- allBuildInfo pkg
+             , UnknownExtension name <- allExtensions bi
+             , name `elem` map display knownLanguages ]
+
+    testedWithImpossibleRanges =
+      [ Dependency (PackageName (display compiler)) vr
+      | (compiler, vr) <- testedWith pkg
+      , isNoVersion vr ]
+
 
 checkLicense :: PackageDescription -> [PackageCheck]
 checkLicense pkg =
@@ -424,8 +532,8 @@ checkGhcOptions pkg =
 
   , checkFlags ["-fasm"] $
       PackageDistInexcusable $
-           "'ghc-options: -fasm' is unnecessary and breaks on all "
-        ++ "arches except for x86, x86-64 and ppc."
+           "'ghc-options: -fasm' is unnecessary and will not work on CPU "
+        ++ "architectures other than x86, x86-64, ppc or sparc."
 
   , checkFlags ["-fvia-C"] $
       PackageDistSuspicious $
@@ -664,19 +772,83 @@ checkPaths pkg =
 
 --TODO: use the tar path checks on all the above paths
 
--- | Check that if the package uses new syntax that it declares the
--- @\"cabal-version: >= x.y\"@ version correctly.
+-- | Check that the package declares the version in the @\"cabal-version\"@
+-- field correctly.
 --
 checkCabalVersion :: PackageDescription -> [PackageCheck]
 checkCabalVersion pkg =
   catMaybes [
 
+    -- check syntax of cabal-version field
+    check (specVersion pkg >= Version [1,10] []
+           && not simpleSpecVersionRangeSyntax) $
+      PackageBuildWarning $
+           "Packages relying on Cabal 1.10 or later must only specify a "
+        ++ "version range of the form 'cabal-version: >= x.y'. Use "
+        ++ "'cabal-version: >= " ++ display (specVersion pkg) ++ "'."
+
+    -- check syntax of cabal-version field
+  , check (specVersion pkg < Version [1,9] []
+           && not simpleSpecVersionRangeSyntax) $
+      PackageDistSuspicious $
+           "It is recommended that the 'cabal-version' field only specify a "
+        ++ "version range of the form '>= x.y'. Use "
+        ++ "'cabal-version: >= " ++ display (specVersion pkg) ++ "'. "
+        ++ "Tools based on Cabal 1.10 and later will ignore upper bounds."
+
+    -- check syntax of cabal-version field
+  , checkVersion [1,12] simpleSpecVersionSyntax $
+      PackageBuildWarning $
+           "With Cabal 1.10 or earlier, the 'cabal-version' field must use "
+        ++ "range syntax rather than a simple version number. Use "
+        ++ "'cabal-version: >= " ++ display (specVersion pkg) ++ "'."
+
+    -- check use of test suite stanzas
+  , checkVersion [1,10] (not (null $ testSuites pkg)) $
+      PackageDistInexcusable $
+           "The package uses test suite stanzas. To use this new syntax, "
+        ++ "the package needs to specify at least 'cabal-version: >= 1.10'."
+
+    -- check use of default-language field
+    -- note that we do not need to do an equivalent check for the
+    -- other-language field since that one does not change behaviour
+  , checkVersion [1,10] (any isJust (buildInfoField defaultLanguage)) $
+      PackageBuildWarning $
+           "To use the 'default-language' field the package needs to specify "
+        ++ "at least 'cabal-version: >= 1.10'."
+
+  , check (specVersion pkg >= Version [1,10] []
+           && (any isNothing (buildInfoField defaultLanguage))) $
+      PackageBuildWarning $
+           "Packages using 'cabal-version: >= 1.10' must specify the "
+        ++ "'default-language' field for each component (e.g. Haskell98 or "
+        ++ "Haskell2010). If a component uses different languages in "
+        ++ "different modules then list the other ones in the "
+        ++ "'other-languages' field."
+
+    -- check use of default-extensions field
+    -- don't need to do the equivalent check for other-extensions
+  , checkVersion [1,10] (any (not . null) (buildInfoField defaultExtensions)) $
+      PackageBuildWarning $
+           "To use the 'default-extensions' field the package needs to specify "
+        ++ "at least 'cabal-version: >= 1.10'."
+
+    -- check use of extensions field
+  , check (specVersion pkg >= Version [1,10] []
+           && (any (not . null) (buildInfoField oldExtensions))) $
+      PackageBuildWarning $
+           "For packages using 'cabal-version: >= 1.10' the 'extensions' "
+        ++ "field is deprecated. The new 'default-extensions' field lists "
+        ++ "extensions that are used in all modules in the component, while "
+        ++ "the 'other-extensions' field lists extensions that are used in "
+        ++ "some modules, e.g. via the {-# LANGUAGE #-} pragma."
+
     -- check use of "foo (>= 1.0 && < 1.4) || >=1.8 " version-range syntax
-    checkVersion [1,8] (not (null versionRangeExpressions)) $
+  , checkVersion [1,8] (not (null versionRangeExpressions)) $
       PackageDistInexcusable $
            "The package uses full version-range expressions "
         ++ "in a 'build-depends' field: "
-        ++ commaSep (map display versionRangeExpressions)
+        ++ commaSep (map displayRawDependency versionRangeExpressions)
         ++ ". To use this new syntax the package needs to specify at least "
         ++ "'cabal-version: >= 1.8'. Alternatively, if broader compatibility "
         ++ "is important, then convert to conjunctive normal form, and use "
@@ -692,6 +864,26 @@ checkCabalVersion pkg =
         ++ "is important then use: " ++ commaSep
            [ display (Dependency name (eliminateWildcardSyntax versionRange))
            | Dependency name versionRange <- depsUsingWildcardSyntax ]
+
+    -- check use of "tested-with: GHC (>= 1.0 && < 1.4) || >=1.8 " syntax
+  , checkVersion [1,8] (not (null testedWithVersionRangeExpressions)) $
+      PackageDistInexcusable $
+           "The package uses full version-range expressions "
+        ++ "in a 'tested-with' field: "
+        ++ commaSep (map displayRawDependency testedWithVersionRangeExpressions)
+        ++ ". To use this new syntax the package needs to specify at least "
+        ++ "'cabal-version: >= 1.8'."
+
+    -- check use of "tested-with: GHC == 6.12.*" syntax
+  , checkVersion [1,6] (not (null testedWithUsingWildcardSyntax)) $
+      PackageDistInexcusable $
+           "The package uses wildcard syntax in the 'tested-with' field: "
+        ++ commaSep (map display testedWithUsingWildcardSyntax)
+        ++ ". To use this new syntax the package need to specify at least "
+        ++ "'cabal-version: >= 1.6'. Alternatively, if broader compatability "
+        ++ "is important then use: " ++ commaSep
+           [ display (Dependency name (eliminateWildcardSyntax versionRange))
+           | Dependency name versionRange <- testedWithUsingWildcardSyntax ]
 
     -- check use of "data-files: data/*.txt" syntax
   , checkVersion [1,6] (not (null dataFilesUsingGlobSyntax)) $
@@ -715,7 +907,7 @@ checkCabalVersion pkg =
     -- check use of "source-repository" section
   , checkVersion [1,6] (not (null (sourceRepos pkg))) $
       PackageDistInexcusable $
-           "The 'source-repository' section is new in Cabal-1.6. "
+           "The 'source-repository' section is new in Cabal 1.6. "
         ++ "Unfortunately it messes up the parser in earlier Cabal versions "
         ++ "so you need to specify 'cabal-version: >= 1.6'."
 
@@ -728,38 +920,35 @@ checkCabalVersion pkg =
         ++ "compatability with earlier Cabal versions then use 'OtherLicense'."
 
     -- check for new language extensions
-  , checkVersion [1,2,3] (not (null usedExtensionsThatNeedCabal12)) $
+  , checkVersion [1,2,3] (not (null mentionedExtensionsThatNeedCabal12)) $
       PackageDistInexcusable $
            "Unfortunately the language extensions "
-        ++ commaSep (map (quote . display) usedExtensionsThatNeedCabal12)
+        ++ commaSep (map (quote . display) mentionedExtensionsThatNeedCabal12)
         ++ " break the parser in earlier Cabal versions so you need to "
         ++ "specify 'cabal-version: >= 1.2.3'. Alternatively if you require "
         ++ "compatability with earlier Cabal versions then you may be able to "
         ++ "use an equivalent compiler-specific flag."
 
-  , checkVersion [1,4] (not (null usedExtensionsThatNeedCabal14)) $
+  , checkVersion [1,4] (not (null mentionedExtensionsThatNeedCabal14)) $
       PackageDistInexcusable $
            "Unfortunately the language extensions "
-        ++ commaSep (map (quote . display) usedExtensionsThatNeedCabal14)
+        ++ commaSep (map (quote . display) mentionedExtensionsThatNeedCabal14)
         ++ " break the parser in earlier Cabal versions so you need to "
         ++ "specify 'cabal-version: >= 1.4'. Alternatively if you require "
         ++ "compatability with earlier Cabal versions then you may be able to "
         ++ "use an equivalent compiler-specific flag."
   ]
   where
+    -- Perform a check on packages that use a version of the spec less than
+    -- the version given. This is for cases where a new Cabal version adds
+    -- a new feature and we want to check that it is not used prior to that
+    -- version.
     checkVersion :: [Int] -> Bool -> PackageCheck -> Maybe PackageCheck
     checkVersion ver cond pc
-      | packageName pkg == PackageName "Cabal" = Nothing
-      | requiresAtLeast (Version ver []) = Nothing
-      | not cond  = Nothing
-      | otherwise = Just pc
+      | specVersion pkg >= Version ver []      = Nothing
+      | otherwise                              = check cond pc
 
-    requiresAtLeast :: Version -> Bool
-    requiresAtLeast = case cabalVersionIntervals of
-      (LowerBound ver' _,_):_ -> (ver' >=)
-      _                       -> const False
-     where cabalVersionIntervals = asVersionIntervals (descCabalVersion pkg)
-
+    buildInfoField field         = map field (allBuildInfo pkg)
     dataFilesUsingGlobSyntax     = filter usesGlobSyntax (dataFiles pkg)
     extraSrcFilesUsingGlobSyntax = filter usesGlobSyntax (extraSrcFiles pkg)
     usesGlobSyntax str = case parseFileGlob str of
@@ -768,15 +957,47 @@ checkCabalVersion pkg =
 
     versionRangeExpressions =
         [ dep | dep@(Dependency _ vr) <- buildDepends pkg
-              , depth vr > (2::Int) ]
-        where depth = foldVersionRange'
-                        1 (const 1)
-                        (const 1) (const 1)
-                        (const 1) (const 1)
-                        (const (const 1))
-                        (+) (+)
+              , usesNewVersionRangeSyntax vr ]
+
+    testedWithVersionRangeExpressions =
+        [ Dependency (PackageName (display compiler)) vr
+        | (compiler, vr) <- testedWith pkg
+        , usesNewVersionRangeSyntax vr ]
+
+    simpleSpecVersionRangeSyntax =
+        either (const True)
+               (foldVersionRange'
+                      True
+                      (\_ -> False)
+                      (\_ -> False) (\_ -> False)
+                      (\_ -> True)  -- >=
+                      (\_ -> False)
+                      (\_ _ -> False)
+                      (\_ _ -> False) (\_ _ -> False)
+                      id)
+               (specVersionRaw pkg)
+
+    -- is the cabal-version field a simple version number, rather than a range
+    simpleSpecVersionSyntax =
+      either (const True) (const False) (specVersionRaw pkg)
+
+    usesNewVersionRangeSyntax :: VersionRange -> Bool
+    usesNewVersionRangeSyntax =
+        (> 2) -- uses the new syntax if depth is more than 2
+      . foldVersionRange'
+          (1 :: Int)
+          (const 1)
+          (const 1) (const 1)
+          (const 1) (const 1)
+          (const (const 1))
+          (+) (+)
+          (const 3) -- uses new ()'s syntax
 
     depsUsingWildcardSyntax = [ dep | dep@(Dependency _ vr) <- buildDepends pkg
+                                    , usesWildcardSyntax vr ]
+
+    testedWithUsingWildcardSyntax = [ Dependency (PackageName (display compiler)) vr
+                                    | (compiler, vr) <- testedWith pkg
                                     , usesWildcardSyntax vr ]
 
     usesWildcardSyntax :: VersionRange -> Bool
@@ -786,7 +1007,7 @@ checkCabalVersion pkg =
         (const False) (const False)
         (const False) (const False)
         (\_ _ -> True) -- the wildcard case
-        (||) (||)
+        (||) (||) id
 
     eliminateWildcardSyntax =
       foldVersionRange'
@@ -794,19 +1015,20 @@ checkCabalVersion pkg =
         laterVersion earlierVersion
         orLaterVersion orEarlierVersion
         (\v v' -> intersectVersionRanges (orLaterVersion v) (earlierVersion v'))
-        intersectVersionRanges unionVersionRanges
+        intersectVersionRanges unionVersionRanges id
 
     compatLicenses = [ GPL Nothing, LGPL Nothing, BSD3, BSD4
                      , PublicDomain, AllRightsReserved, OtherLicense ]
 
-    usedExtensions = [ ext | bi <- allBuildInfo pkg, ext <- extensions bi ]
-    usedExtensionsThatNeedCabal12 =
-      nub (filter (`elem` compatExtensionsExtra) usedExtensions)
+    mentionedExtensions = [ ext | bi <- allBuildInfo pkg
+                                , ext <- allExtensions bi ]
+    mentionedExtensionsThatNeedCabal12 =
+      nub (filter (`elem` compatExtensionsExtra) mentionedExtensions)
 
     -- As of Cabal-1.4 we can add new extensions without worrying about
     -- breaking old versions of cabal.
-    usedExtensionsThatNeedCabal14 =
-      nub (filter (`notElem` compatExtensions) usedExtensions)
+    mentionedExtensionsThatNeedCabal14 =
+      nub (filter (`notElem` compatExtensions) mentionedExtensions)
 
     -- The known extensions in Cabal-1.2.3
     compatExtensions =
@@ -832,6 +1054,39 @@ checkCabalVersion pkg =
       , ExtendedDefaultRules, UnboxedTuples, DeriveDataTypeable
       , ConstrainedClassMethods
       ]
+
+-- | A variation on the normal 'Text' instance, shows any ()'s in the original
+-- textual syntax. We need to show these otherwise it's confusing to users when
+-- we complain of their presense but do not pretty print them!
+--
+displayRawVersionRange :: VersionRange -> String
+displayRawVersionRange =
+   Disp.render
+ . fst
+ . foldVersionRange'                         -- precedence:
+     -- All the same as the usual pretty printer, except for the parens
+     (         Disp.text "-any"                           , 0 :: Int)
+     (\v   -> (Disp.text "==" <> disp v                   , 0))
+     (\v   -> (Disp.char '>'  <> disp v                   , 0))
+     (\v   -> (Disp.char '<'  <> disp v                   , 0))
+     (\v   -> (Disp.text ">=" <> disp v                   , 0))
+     (\v   -> (Disp.text "<=" <> disp v                   , 0))
+     (\v _ -> (Disp.text "==" <> dispWild v               , 0))
+     (\(r1, p1) (r2, p2) -> (punct 2 p1 r1 <+> Disp.text "||" <+> punct 2 p2 r2 , 2))
+     (\(r1, p1) (r2, p2) -> (punct 1 p1 r1 <+> Disp.text "&&" <+> punct 1 p2 r2 , 1))
+     (\(r,  _ )          -> (Disp.parens r, 0)) -- parens
+
+  where
+    dispWild (Version b _) =
+           Disp.hcat (Disp.punctuate (Disp.char '.') (map Disp.int b))
+        <> Disp.text ".*"
+    punct p p' | p < p'    = Disp.parens
+               | otherwise = id
+
+displayRawDependency :: Dependency -> String
+displayRawDependency (Dependency pkg vr) =
+  display pkg ++ " " ++ displayRawVersionRange vr
+
 
 -- ------------------------------------------------------------
 -- * Checks on the GenericPackageDescription
@@ -966,9 +1221,11 @@ checkPackageContent ops pkg = do
   setupError      <- checkSetupExists     ops pkg
   configureError  <- checkConfigureExists ops pkg
   localPathErrors <- checkLocalPathsExist ops pkg
+  vcsLocation     <- checkMissingVcsInfo  ops pkg
 
   return $ catMaybes [licenseError, setupError, configureError]
         ++ localPathErrors
+        ++ vcsLocation
 
 checkLicenseExists :: Monad m => CheckPackageContentOps m
                    -> PackageDescription
@@ -1022,6 +1279,35 @@ checkLocalPathsExist ops pkg = do
                         ++ " directory does not exist."
            }
          | (dir, kind) <- missing ]
+
+checkMissingVcsInfo :: Monad m => CheckPackageContentOps m
+                    -> PackageDescription
+                    -> m [PackageCheck]
+checkMissingVcsInfo ops pkg | null (sourceRepos pkg) = do
+    vcsInUse <- liftM or $ mapM (doesDirectoryExist ops) repoDirnames
+    if vcsInUse
+      then return [ PackageDistSuspicious message ]
+      else return []
+  where
+    repoDirnames = [ dirname | repo    <- knownRepoTypes
+                             , dirname <- repoTypeDirname repo ]
+    message  = "When distributing packages it is encouraged to specify source "
+            ++ "control information in the .cabal file using one or more "
+            ++ "'source-repository' sections. See the Cabal user guide for "
+            ++ "details."
+
+checkMissingVcsInfo _ _ = return []
+
+repoTypeDirname :: RepoType -> [FilePath]
+repoTypeDirname Darcs      = ["_darcs"]
+repoTypeDirname Git        = [".git"]
+repoTypeDirname SVN        = [".svn"]
+repoTypeDirname CVS        = ["CVS"]
+repoTypeDirname Mercurial  = [".hg"]
+repoTypeDirname GnuArch    = [".arch-params"]
+repoTypeDirname Bazaar     = [".bzr"]
+repoTypeDirname Monotone   = ["_MTN"]
+repoTypeDirname _          = []
 
 -- ------------------------------------------------------------
 -- * Checks involving files in the package
@@ -1123,3 +1409,6 @@ quote s = "'" ++ s ++ "'"
 
 commaSep :: [String] -> String
 commaSep = intercalate ", "
+
+dups :: Ord a => [a] -> [a]
+dups xs = [ x | (x:_:_) <- group (sort xs) ]

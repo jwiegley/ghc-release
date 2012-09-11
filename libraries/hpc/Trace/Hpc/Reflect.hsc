@@ -1,8 +1,8 @@
-{-# OPTIONS -fglasgow-exts -cpp #-}
-module Trace.Hpc.Reflect 
+{-# LANGUAGE CPP, ForeignFunctionInterface #-}
+module Trace.Hpc.Reflect
   ( clearTix
   , examineTix
-  , updateTix 
+  , updateTix
   ) where
 
 import Trace.Hpc.Tix

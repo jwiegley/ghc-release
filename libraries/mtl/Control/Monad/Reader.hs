@@ -1,5 +1,4 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}	    -- Temporary, I hope.  SLPJ Aug08
-{-# OPTIONS -fallow-undecidable-instances #-}
+{-# LANGUAGE UndecidableInstances #-}
 {- |
 Module      :  Control.Monad.Reader
 Copyright   :  (c) Andy Gill 2001,
@@ -68,13 +67,6 @@ import Control.Monad.Reader.Class
 import Control.Monad.State.Class
 import Control.Monad.Trans
 import Control.Monad.Writer.Class
-
--- ----------------------------------------------------------------------------
--- The partially applied function type is a simple reader monad
-
-instance MonadReader r ((->) r) where
-    ask       = id
-    local f m = m . f
 
 {- |
 The parameterizable reader monad.
@@ -175,12 +167,12 @@ instance (MonadError e m) => MonadError e (ReaderT r m) where
     m `catchError` h = ReaderT $ \r -> runReaderT m r
         `catchError` \e -> runReaderT (h e) r
 
--- Needs -fallow-undecidable-instances
+-- Needs UndecidableInstances
 instance (MonadState s m) => MonadState s (ReaderT r m) where
     get = lift get
     put = lift . put
 
--- This instance needs -fallow-undecidable-instances, because
+-- This instance needs UndecidableInstances, because
 -- it does not satisfy the coverage condition
 instance (MonadWriter w m) => MonadWriter w (ReaderT r m) where
     tell     = lift . tell

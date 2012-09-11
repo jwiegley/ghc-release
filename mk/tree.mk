@@ -23,7 +23,6 @@ GHC_RTS_DIR             = rts
 GHC_DRIVER_DIR          = driver
 GHC_COMPAT_DIR          = compat
 
-GHC_MKDEPENDC_DIR       = $(GHC_UTILS_DIR)/mkdependC
 GHC_LTX_DIR             = $(GHC_UTILS_DIR)/ltx
 GHC_LNDIR_DIR           = $(GHC_UTILS_DIR)/lndir
 GHC_MKDIRHIER_DIR       = $(GHC_UTILS_DIR)/mkdirhier
@@ -66,7 +65,13 @@ BIN_DIST_INST_DIR = bindisttest/$(BIN_DIST_INST_SUBDIR)
 # These are here, rather than in config.mk, as they need to exist in an
 # unconfigured tree so that the various clean targets can be used
 # without configuring:
+ifeq "$(ONLY_SHOW_CLEANS)" "YES"
+RM = utils/testremove/wouldrm
+RM_OPTS = CLEAN_FILES
+RM_OPTS_REC = CLEAN_REC
+else
 RM = rm
 RM_OPTS = -f
 RM_OPTS_REC = -rf
+endif
 

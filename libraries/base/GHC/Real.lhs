@@ -6,7 +6,7 @@
 -- Module      :  GHC.Real
 -- Copyright   :  (c) The University of Glasgow, 1994-2002
 -- License     :  see libraries/base/LICENSE
--- 
+--
 -- Maintainer  :  cvs-ghc@haskell.org
 -- Stability   :  internal
 -- Portability :  non-portable (GHC Extensions)
@@ -30,7 +30,7 @@ infixr 8  ^, ^^
 infixl 7  /, `quot`, `rem`, `div`, `mod`
 infixl 7  %
 
-default ()              -- Double isn't available yet, 
+default ()              -- Double isn't available yet,
                         -- and we shouldn't be using defaults anyway
 \end{code}
 
@@ -58,8 +58,8 @@ infinity, notANumber :: Rational
 infinity   = 1 :% 0
 notANumber = 0 :% 0
 
--- Use :%, not % for Inf/NaN; the latter would 
--- immediately lead to a runtime error, because it normalises. 
+-- Use :%, not % for Inf/NaN; the latter would
+-- immediately lead to a runtime error, because it normalises.
 \end{code}
 
 
@@ -133,10 +133,15 @@ class  (Real a, Enum a) => Integral a  where
     -- | conversion to 'Integer'
     toInteger           :: a -> Integer
 
+    {-# INLINE quot #-}
+    {-# INLINE rem #-}
+    {-# INLINE div #-}
+    {-# INLINE mod #-}
     n `quot` d          =  q  where (q,_) = quotRem n d
     n `rem` d           =  r  where (_,r) = quotRem n d
     n `div` d           =  q  where (q,_) = divMod n d
     n `mod` d           =  r  where (_,r) = divMod n d
+
     divMod n d          =  if signum r == negate (signum d) then (q-1, r+d) else qr
                            where qr@(q,r) = quotRem n d
 
@@ -154,6 +159,8 @@ class  (Num a) => Fractional a  where
     -- @('Fractional' a) => a@.
     fromRational        :: Rational -> a
 
+    {-# INLINE recip #-}
+    {-# INLINE (/) #-}
     recip x             =  1 / x
     x / y               = x * recip y
 
@@ -182,8 +189,9 @@ class  (Real a, Fractional a) => RealFrac a  where
     -- | @'floor' x@ returns the greatest integer not greater than @x@
     floor               :: (Integral b) => a -> b
 
+    {-# INLINE truncate #-}
     truncate x          =  m  where (m,_) = properFraction x
-    
+
     round x             =  let (n,r) = properFraction x
                                m     = if r < 0 then n - 1 else n + 1
                            in case signum (abs r - 0.5) of
@@ -191,10 +199,10 @@ class  (Real a, Fractional a) => RealFrac a  where
                                 0  -> if even n then n else m
                                 1  -> m
                                 _  -> error "round default defn: Bad value"
-    
+
     ceiling x           =  if r > 0 then n + 1 else n
                            where (n,r) = properFraction x
-    
+
     floor x             =  if r < 0 then n - 1 else n
                            where (n,r) = properFraction x
 \end{code}
@@ -320,11 +328,15 @@ instance  (Integral a)  => Num (Ratio a)  where
     signum (x:%_)       =  signum x :% 1
     fromInteger x       =  fromInteger x :% 1
 
+{-# RULES "fromRational/id" fromRational = id :: Rational -> Rational #-}
 instance  (Integral a)  => Fractional (Ratio a)  where
     {-# SPECIALIZE instance Fractional Rational #-}
     (x:%y) / (x':%y')   =  (x*y') % (y*x')
-    recip (x:%y)        =  y % x
-    fromRational (x:%y) =  fromInteger x :% fromInteger y
+    recip (0:%_)        = error "Ratio.%: zero denominator"
+    recip (x:%y)
+        | x < 0         = negate y :% negate x
+        | otherwise     = y :% x
+    fromRational (x:%y) =  fromInteger x % fromInteger y
 
 instance  (Integral a)  => Real (Ratio a)  where
     {-# SPECIALIZE instance Real Rational #-}
@@ -338,7 +350,7 @@ instance  (Integral a)  => RealFrac (Ratio a)  where
 instance  (Integral a)  => Show (Ratio a)  where
     {-# SPECIALIZE instance Show Rational #-}
     showsPrec p (x:%y)  =  showParen (p > ratioPrec) $
-                           showsPrec ratioPrec1 x . 
+                           showsPrec ratioPrec1 x .
                            showString " % " .
                            -- H98 report has spaces round the %
                            -- but we removed them [May 04]
@@ -398,7 +410,7 @@ showSigned :: (Real a)
   -> Int                -- ^ the precedence of the enclosing context
   -> a                  -- ^ the value to show
   -> ShowS
-showSigned showPos p x 
+showSigned showPos p x
    | x < 0     = showParen (p > 6) (showChar '-' . showPos (-x))
    | otherwise = showPos x
 
@@ -426,11 +438,67 @@ x0 ^ y0 | y0 < 0    = error "Negative exponent"
                   | otherwise = g (x * x) ((y - 1) `quot` 2) (x * z)
 
 -- | raise a number to an integral power
-{-# SPECIALISE (^^) ::
-        Rational -> Int -> Rational #-}
 (^^)            :: (Fractional a, Integral b) => a -> b -> a
 x ^^ n          =  if n >= 0 then x^n else recip (x^(negate n))
 
+-------------------------------------------------------
+-- Special power functions for Rational
+--
+-- see #4337
+--
+-- Rationale:
+-- For a legitimate Rational (n :% d), the numerator and denominator are
+-- coprime, i.e. they have no common prime factor.
+-- Therefore all powers (n ^ a) and (d ^ b) are also coprime, so it is
+-- not necessary to compute the greatest common divisor, which would be
+-- done in the default implementation at each multiplication step.
+-- Since exponentiation quickly leads to very large numbers and
+-- calculation of gcds is generally very slow for large numbers,
+-- avoiding the gcd leads to an order of magnitude speedup relatively
+-- soon (and an asymptotic improvement overall).
+--
+-- Note:
+-- We cannot use these functions for general Ratio a because that would
+-- change results in a multitude of cases.
+-- The cause is that if a and b are coprime, their remainders by any
+-- positive modulus generally aren't, so in the default implementation
+-- reduction occurs.
+--
+-- Example:
+-- (17 % 3) ^ 3 :: Ratio Word8
+-- Default:
+-- (17 % 3) ^ 3 = ((17 % 3) ^ 2) * (17 % 3)
+--              = ((289 `mod` 256) % 9) * (17 % 3)
+--              = (33 % 9) * (17 % 3)
+--              = (11 % 3) * (17 % 3)
+--              = (187 % 9)
+-- But:
+-- ((17^3) `mod` 256) % (3^3)   = (4913 `mod` 256) % 27
+--                              = 49 % 27
+--
+-- TODO:
+-- Find out whether special-casing for numerator, denominator or
+-- exponent = 1 (or -1, where that may apply) gains something.
+
+-- Special version of (^) for Rational base
+{-# RULES "(^)/Rational"    (^) = (^%^) #-}
+(^%^)           :: Integral a => Rational -> a -> Rational
+(n :% d) ^%^ e
+    | e < 0     = error "Negative exponent"
+    | e == 0    = 1 :% 1
+    | otherwise = (n ^ e) :% (d ^ e)
+
+-- Special version of (^^) for Rational base
+{-# RULES "(^^)/Rational"   (^^) = (^^%^^) #-}
+(^^%^^)         :: Integral a => Rational -> a -> Rational
+(n :% d) ^^%^^ e
+    | e > 0     = (n ^ e) :% (d ^ e)
+    | e == 0    = 1 :% 1
+    | n > 0     = (d ^ (negate e)) :% (n ^ (negate e))
+    | n == 0    = error "Ratio.%: zero denominator"
+    | otherwise = let nn = d ^ (negate e)
+                      dd = (negate n) ^ (negate e)
+                  in if even e then (nn :% dd) else (negate nn :% dd)
 
 -------------------------------------------------------
 -- | @'gcd' x y@ is the greatest (positive) integer that divides both @x@
@@ -456,9 +524,6 @@ lcm x y         =  abs ((x `quot` (gcd x y)) * y)
 "lcm/Integer->Integer->Integer" lcm = lcmInteger
  #-}
 
--- XXX to use another Integer implementation, you might need to disable
--- the gcd/Integer and lcm/Integer RULES above
---
 gcdInteger' :: Integer -> Integer -> Integer
 gcdInteger' 0 0 = error "GHC.Real.gcdInteger': gcd 0 0 is undefined"
 gcdInteger' a b = gcdInteger a b

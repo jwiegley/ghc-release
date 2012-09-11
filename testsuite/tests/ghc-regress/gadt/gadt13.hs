@@ -1,4 +1,4 @@
-{-# OPTIONS -fglasgow-exts #-}
+{-# LANGUAGE GADTs #-}
 
 -- This should fail, because there is no annotation on shw,
 -- but it succeeds in 6.4.1
@@ -10,5 +10,5 @@ data Term a where
    I :: Int  -> Term Int
 
 shw (I t) = ("I "++) . shows t
-shw (B t) = ("B "++) . shows t
+-- shw (B t) = ("B "++) . shows t
 

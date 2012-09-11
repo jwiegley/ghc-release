@@ -1,41 +1,65 @@
 --------------------------------------------
--- Haddock 2.6.0
+-- Haddock 2.8.0
 --------------------------------------------
 
 A new version of Haddock, the Haskell documentation tool, is out!
 
-This is the version that comes with GHC 6.12.1. It contains the main results of
-Isaac Dupree's Summer of Code project, which are:
+The biggest news this time is that we have a shiny new XHTML backend, created
+by Mark Lentczner, which outputs semantically correct XHTML, making it much
+easier to create new themes for Haddock.
 
-  * Cross-package documentation (exporting something that comes from another
-    package is handled correctly. The full documentation of that thing shows
-    up in your documentation)
+Mark has made an extraordinary effort by going through and rewriting the old
+table based HTML backend, fixing non-standards-compliant quirks, and adding a
+bunch of new useful features on top of that. See the changelog for more
+details.
 
-  * Lexing and parsing of Haddock comment markup is moved from GHC back into
-    Haddock. This will make it easier to make changes to the markup format
+Included is a new default CSS theme created by Thomas Schilling, Mark and Johan
+Tibell, as well as the classic theme converted to work with the new backend.
 
-We have decided to drop compatibility with older GHC versions in order to speed
-up development.
+Another great new feature is markup support for examples, contributed by Simon
+Hengel. The idea is to be able to write examples that function both as
+documentation and unit tests.
+
+Last but not least, we now also have a LaTeX backend. It was written by Simon
+Marlow and it was used to generate the libraries section of the Haskell 2010
+report.
+
+This version is compatible with .haddock files produced by Haddock 2.6.1 and
+above, provided that the version of GHC used to build Haddock stays the same.
 
 --------------------------------------------
--- Full list of changes in version 2.6.0
+-- Changes in version 2.8.0
 --------------------------------------------
 
-  * Drop support for GHC 6.10.*
+  * HTML backend completely rewritten to generate semantically rich XHTML
+    using the xhtml package.
 
-  * Add support for GHC 6.12.1
+  * New default CSS based on the color scheme chosen for the new Haskell
+    wiki, with a pull-out tab for the synopsis.
 
-  * Cross-package documentation
+  * Theme engine based on CSS files. Themes can be switched from the
+    header menu. (New flags --built-in-themes and --theme. The latter
+    is an alias for --css which now has extended semantics).
 
-  * Move lexing and parsing of the Haddock comment markup back to Haddock
+  * Markup support for executable examples/unit-tests. To be used with an
+    upcoming version of the DocTest program.
 
-  * Slightly prettier printing of instance heads
+  * Addition of a LaTeX backend.
 
-  * Support platforms for which GHC has no native code generator
+  * Frames-mode can be enabled from the header menu.
 
-  * Add a flag --print-ghc-libdir
+  * Path to source entities can be specified per package, so that source
+    links work for cross-package documentation.
 
-  * Minor bug fixes
+  * Support for a second form of enumerated lists (1. 2. etc).
+
+  * Additions and changes to the Haddock API.
+
+  * New flag --no-tmp-comp-dir to tell Haddock to read/write
+    compilation files (.o, .hi, etc) to/from GHC's output directory instead of
+    to/from a temporary directory.
+
+  * Various bug fixes.
 
 --------------------------------------------
 -- Links
@@ -45,7 +69,7 @@ Homepage:
  http://www.haskell.org/haddock
 
 Hackage page:
- http://hackage.haskell.org/cgi-bin/hackage-scripts/package/haddock-2.6.0
+ http://hackage.haskell.org/package/haddock-2.8.0
 
 Bugtracker and wiki:
  http://trac.haskell.org/haddock
@@ -62,9 +86,12 @@ Code repository:
 
 The following people contributed patches to this release:
 
- Isaac Dupree
+ Simon Hengel
+ Mark Lentczner
  Ian Lynagh
+ Simon Marlow
  Simon Peyton-Jones
+ Thomas Schilling
  David Waern
 
 --------------------------------------------

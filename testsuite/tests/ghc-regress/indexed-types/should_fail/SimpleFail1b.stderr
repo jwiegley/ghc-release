@@ -1,4 +1,4 @@
 
-SimpleFail1b.hs:4:0:
+SimpleFail1b.hs:4:1:
     Family instance has too many parameters: `T1'
     In the data type instance declaration for `T1'

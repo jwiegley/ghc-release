@@ -270,6 +270,7 @@ hSetEncoding :: Handle -> TextEncoding -> IO ()
 hSetEncoding hdl encoding = do
   withAllHandles__ "hSetEncoding" hdl $ \h_@Handle__{..} -> do
     flushCharBuffer h_
+    closeTextCodecs h_
     openTextEncoding (Just encoding) haType $ \ mb_encoder mb_decoder -> do
     bbuf <- readIORef haByteBuffer
     ref <- newIORef (error "last_decode")
@@ -393,6 +394,9 @@ hSetPosn (HandlePosn h i) = hSeek h AbsoluteSeek i
 --
 -- This operation may fail with:
 --
+--  * 'isIllegalOperationError' if the Handle is not seekable, or does
+--     not support the requested seek mode.
+--
 --  * 'isPermissionError' if a system resource limit would be exceeded.
 
 hSeek :: Handle -> SeekMode -> Integer -> IO () 
@@ -417,6 +421,15 @@ hSeek handle mode offset =
     IODevice.seek haDevice mode offset
 
 
+-- | Computation 'hTell' @hdl@ returns the current position of the
+-- handle @hdl@, as the number of bytes from the beginning of
+-- the file.  The value returned may be subsequently passed to
+-- 'hSeek' to reposition the handle to the current position.
+-- 
+-- This operation may fail with:
+--
+--  * 'isIllegalOperationError' if the Handle is not seekable.
+--
 hTell :: Handle -> IO Integer
 hTell handle = 
     wantSeekableHandle "hGetPosn" handle $ \ handle_@Handle__{..} -> do
@@ -561,6 +574,7 @@ hSetBinaryMode handle bin =
   withAllHandles__ "hSetBinaryMode" handle $ \ h_@Handle__{..} ->
     do 
          flushCharBuffer h_
+         closeTextCodecs h_
 
          let mb_te | bin       = Nothing
                    | otherwise = Just localeEncoding

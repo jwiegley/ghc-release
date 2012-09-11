@@ -57,7 +57,7 @@ module Distribution.ParseUtils (
         parseFilePathQ, parseTokenQ, parseTokenQ',
         parseModuleNameQ, parseBuildTool, parsePkgconfigDependency,
         parseOptVersion, parsePackageNameQ, parseVersionRangeQ,
-        parseTestedWithQ, parseLicenseQ, parseExtensionQ,
+        parseTestedWithQ, parseLicenseQ, parseLanguageQ, parseExtensionQ,
         parseSepList, parseCommaList, parseOptCommaList,
         showFilePath, showToken, showTestedWith, showFreeText, parseFreeText,
         field, simpleField, listField, spaceListField, commaListField,
@@ -78,7 +78,8 @@ import Distribution.Text
          ( Text(..) )
 import Distribution.Simple.Utils
          ( intercalate, lowercase, normaliseLineEndings )
-import Language.Haskell.Extension (Extension)
+import Language.Haskell.Extension
+         ( Language, Extension )
 
 import Text.PrettyPrint.HughesPJ hiding (braces)
 import Data.Char (isSpace, toLower, isAlphaNum, isDigit)
@@ -597,16 +598,19 @@ parseVersionRangeQ = parseQuoted parse <++ parse
 
 parseOptVersion :: ReadP r Version
 parseOptVersion = parseQuoted ver <++ ver
-  where ver = parse <++ return noVersion
+  where ver :: ReadP r Version
+        ver = parse <++ return noVersion
         noVersion = Version{ versionBranch=[], versionTags=[] }
 
 parseTestedWithQ :: ReadP r (CompilerFlavor,VersionRange)
 parseTestedWithQ = parseQuoted tw <++ tw
-  where tw = do compiler <- parseCompilerFlavorCompat
-                skipSpaces
-                version <- parse <++ return anyVersion
-                skipSpaces
-                return (compiler,version)
+  where 
+    tw :: ReadP r (CompilerFlavor,VersionRange)
+    tw = do compiler <- parseCompilerFlavorCompat
+            skipSpaces
+            version <- parse <++ return anyVersion
+            skipSpaces
+            return (compiler,version)
 
 parseLicenseQ :: ReadP r License
 parseLicenseQ = parseQuoted parse <++ parse
@@ -615,6 +619,9 @@ parseLicenseQ = parseQuoted parse <++ parse
 -- because the "compat" version of ReadP isn't quite powerful enough.  In
 -- particular, the type of <++ is ReadP r r -> ReadP r a -> ReadP r a
 -- Hence the trick above to make 'lic' polymorphic.
+
+parseLanguageQ :: ReadP r Language
+parseLanguageQ = parseQuoted parse <++ parse
 
 parseExtensionQ :: ReadP r Extension
 parseExtensionQ = parseQuoted parse <++ parse

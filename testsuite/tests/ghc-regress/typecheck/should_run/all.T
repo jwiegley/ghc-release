@@ -8,8 +8,8 @@
 
 test('tcrun001', normal, compile_and_run, [''])
 test('tcrun002', only_compiler_types(['ghc']), compile_and_run, [''])
-test('tcrun003', normal, compile_and_run, ['-fglasgow-exts'])
-test('tcrun004', normal, compile_and_run, ['-fglasgow-exts'])
+test('tcrun003', normal, compile_and_run, [''])
+test('tcrun004', normal, compile_and_run, [''])
 test('tcrun005', normal, compile_and_run, [''])
 
 # -----------------------------------------------------------------------------
@@ -38,12 +38,12 @@ test('tcrun020', normal, compile_and_run, [''])
 # Doesn't work with External Core due to datatype with no constructors
 test('tcrun021', expect_fail_for(['extcore','optextcore']),
      compile_and_run, ['-package containers'])
-test('tcrun022', compose(omit_ways(['ghci']),only_compiler_types(['ghc'])), compile_and_run, ['-O -fglasgow-exts'])
+test('tcrun022', compose(omit_ways(['ghci']),only_compiler_types(['ghc'])), compile_and_run, ['-O'])
 test('tcrun023', normal, compile_and_run, ['-O'])
 test('tcrun024', normal, compile_and_run, ['-O'])
 test('tcrun025', extra_clean(['TcRun025_B.hi', 'TcRun025_B.o']),
      multimod_compile_and_run, ['tcrun025',''])
-test('tcrun026', normal, compile_fail, [''])
+test('tcrun026', normal, compile_and_run, [''])
 test('tcrun027', normal, compile_and_run, [''])
 # Doesn't work with External Core due to datatype with no constructors
 test('tcrun028', expect_fail_for(['extcore','optextcore']), compile_and_run, [''])
@@ -53,7 +53,7 @@ test('tcrun031', only_compiler_types(['ghc']), compile_and_run, [''])
 test('tcrun032', only_compiler_types(['ghc']), compile_and_run, [''])
 test('tcrun033', only_compiler_types(['ghc']), compile_and_run, [''])
 test('tcrun034', only_compiler_types(['ghc']), compile_and_run, [''])
-test('tcrun035', only_compiler_types(['ghc']), compile_and_run, [''])
+test('tcrun035', only_compiler_types(['ghc']), compile_fail, [''])
 test('tcrun036', only_compiler_types(['ghc']), compile_and_run, [''])
 test('tcrun037', only_compiler_types(['ghc']), compile_and_run, [''])
 
@@ -70,8 +70,11 @@ test('tcrun042', if_compiler_lt('ghc', '6.11', expect_fail), compile_and_run, ['
 test('church', normal, compile_and_run, [''])
 test('testeq2', normal, compile_and_run, [''])
 test('T1624', normal, compile_and_run, [''])
+test('IPRun', normal, compile_and_run, [''])
 
 # Support files for T1735 are in directory T1735_Help/
-test('T1735', normal, multimod_compile_and_run, ['T1735',''])
+test('T1735', if_compiler_lt('ghc', '7.1', expect_broken_for(4395, ['ghci'])), multimod_compile_and_run, ['T1735',''])
 
-test('T3731', expect_broken(3731), compile_and_run, [''])
+test('T3731', normal, compile_and_run, [''])
+test('T3500a', normal, compile_and_run, [''])
+test('T3500b', normal, compile_and_run, [''])

@@ -2,6 +2,46 @@ Notes on new codegen (Sept 09)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Things to do:
+
+ - SDM (2010-02-26) can we remove the Foreign constructor from Convention?
+   Reason: we never generate code for a function with the Foreign
+   calling convention, and the code for calling foreign calls is generated
+
+ - All dataflow analyses are in the FuelMonad, even though they
+   are guarnteed to consume no fuel.  This seems silly
+
+ - CmmContFlowOpt.runCmmContFlowOptZs is not called!
+ - Why is runCmmOpts called from HscMain?  Seems too "high up".
+   In fact HscMain calls (runCmmOpts cmmCfgOptsZ) which is what
+   runCmmContFlowOptZs does.  Tidy up!
+
+
+ - AsmCodeGen has a generic Cmm optimiser; move this into new pipeline
+
+ - AsmCodeGen has post-native-cg branch elimiator (shortCutBranches);
+   we ultimately want to share this with the Cmm branch eliminator.
+
+ - At the moment, references to global registers like Hp are "lowered" 
+   late (in AsmCodeGen.fixAssignTop and cmmToCmm). We should do this
+   early, in the new native codegen, much in the way that we lower 
+   calling conventions.  Might need to be a bit sophisticated about
+   aliasing.
+
+ - Refactor Cmm so that it contains only shared stuff
+   Add a module MoribundCmm which contains stuff from
+   Cmm for old code gen path
+
+ - Question: currently we lift procpoints to become separate
+   CmmProcs.  Do we still want to do this?
+    
+   NB: and advantage of continuing to do this is that
+   we can do common-proc elimination!
+
+ - Move to new Cmm rep:
+     * Make native CG consume New Cmm; 
+     * Convert Old Cmm->New Cmm to keep old path alive
+     * Produce New Cmm when reading in .cmm files
+
  - Consider module names
 
  - Top-level SRT threading is a bit ugly

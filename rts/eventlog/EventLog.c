@@ -13,7 +13,6 @@
 
 #include "Trace.h"
 #include "Capability.h"
-#include "Trace.h"
 #include "RtsUtils.h"
 #include "Stats.h"
 #include "EventLog.h"
@@ -64,6 +63,9 @@ char *EventDesc[] = {
   [EVENT_LOG_MSG]             = "Log message",
   [EVENT_USER_MSG]            = "User message",
   [EVENT_STARTUP]             = "Startup",
+  [EVENT_GC_IDLE]             = "GC idle",
+  [EVENT_GC_WORK]             = "GC working",
+  [EVENT_GC_DONE]             = "GC done",
   [EVENT_BLOCK_MARKER]        = "Block marker"
 };
 
@@ -239,6 +241,9 @@ initEventLogging(void)
         case EVENT_GC_START:        // (cap)
         case EVENT_GC_END:          // (cap)
         case EVENT_STARTUP:
+        case EVENT_GC_IDLE:
+        case EVENT_GC_WORK:
+        case EVENT_GC_DONE:
             eventTypes[t].size = 0;
             break;
 
@@ -395,6 +400,21 @@ postSchedEvent (Capability *cap,
     default:
         barf("postEvent: unknown event tag %d", tag);
     }
+}
+
+void
+postEvent (Capability *cap, EventTypeNum tag)
+{
+    EventsBuf *eb;
+
+    eb = &capEventBuf[cap->no];
+
+    if (!hasRoomForEvent(eb, tag)) {
+        // Flush event buffer to make room for new event.
+        printAndClearEventBuf(eb);
+    }
+
+    postEventHeader(eb, tag);
 }
 
 #define BUF 512

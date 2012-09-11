@@ -17,10 +17,6 @@ import-dirs:
 
 #ifdef INSTALLING
 library-dirs:		LIB_DIR PAPI_LIB_DIR
-# ifdef mingw32_HOST_OS
-			, LIB_DIR"/gcc-lib"
-			/* force the dist-provided gcc-lib/ into scope. */
-# endif
 #else /* !INSTALLING */
 library-dirs:		TOP"/rts/dist/build" PAPI_LIB_DIR
 #endif
@@ -99,9 +95,9 @@ ld-options:
          , "-u", "_base_GHCziWeak_runFinalizzerBatch_closure"
          , "-u", "_base_GHCziTopHandler_runIO_closure"
          , "-u", "_base_GHCziTopHandler_runNonIO_closure"
-	 , "-u", "_base_GHCziConc_ensureIOManagerIsRunning_closure"
-	 , "-u", "_base_GHCziConc_runSparks_closure"
-	 , "-u", "_base_GHCziConc_runHandlers_closure"
+	 , "-u", "_base_GHCziConcziIO_ensureIOManagerIsRunning_closure"
+	 , "-u", "_base_GHCziConcziSync_runSparks_closure"
+	 , "-u", "_base_GHCziConcziSignal_runHandlers_closure"
 #else
            "-u", "ghczmprim_GHCziTypes_Izh_static_info"
          , "-u", "ghczmprim_GHCziTypes_Czh_static_info"
@@ -137,16 +133,16 @@ ld-options:
          , "-u", "base_GHCziWeak_runFinalizzerBatch_closure"
          , "-u", "base_GHCziTopHandler_runIO_closure"
          , "-u", "base_GHCziTopHandler_runNonIO_closure"
-	 , "-u", "base_GHCziConc_ensureIOManagerIsRunning_closure"
-	 , "-u", "base_GHCziConc_runSparks_closure"
-	 , "-u", "base_GHCziConc_runHandlers_closure"
+	 , "-u", "base_GHCziConcziIO_ensureIOManagerIsRunning_closure"
+	 , "-u", "base_GHCziConcziSync_runSparks_closure"
+	 , "-u", "base_GHCziConcziSignal_runHandlers_closure"
 #endif
 
 /*  Pick up static libraries in preference over dynamic if in earlier search
  *  path.  This is important to use the static gmp in preference on Mac OS.
  *  The used option is specific to the Darwin linker.
  */
-#ifdef darwin_BUILD_OS
+#ifdef darwin_HOST_OS
 	 , "-Wl,-search_paths_first"
 #endif
 

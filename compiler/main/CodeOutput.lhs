@@ -9,9 +9,11 @@ module CodeOutput( codeOutput, outputForeignStubs ) where
 #include "HsVersions.h"
 
 #ifndef OMIT_NATIVE_CODEGEN
-import UniqSupply	( mkSplitUniqSupply )
 import AsmCodeGen	( nativeCodeGen )
 #endif
+import LlvmCodeGen ( llvmCodeGen )
+
+import UniqSupply	( mkSplitUniqSupply )
 
 #ifdef JAVA
 import JavaGen		( javaGen )
@@ -32,7 +34,7 @@ import Config
 import ErrUtils		( dumpIfSet_dyn, showPass, ghcExit )
 import Outputable
 import Module
-import Maybes		( firstJust )
+import Maybes		( firstJusts )
 
 import Control.Exception
 import Control.Monad
@@ -67,7 +69,7 @@ codeOutput dflags this_mod location foreign_stubs pkg_deps flat_abstractC
     do	{ when (dopt Opt_DoCmmLinting dflags) $ do
 		{ showPass dflags "CmmLint"
 		; let lints = map cmmLint flat_abstractC
-		; case firstJust lints of
+		; case firstJusts lints of
 			Just err -> do { printDump err
 				       ; ghcExit dflags 1
 				       }
@@ -81,6 +83,7 @@ codeOutput dflags this_mod location foreign_stubs pkg_deps flat_abstractC
              HscInterpreted -> return ();
              HscAsm         -> outputAsm dflags filenm flat_abstractC;
              HscC           -> outputC dflags filenm flat_abstractC pkg_deps;
+             HscLlvm        -> outputLlvm dflags filenm flat_abstractC;
              HscJava        -> 
 #ifdef JAVA
 			       outputJava dflags filenm mod_name tycons core_binds;
@@ -163,6 +166,20 @@ outputAsm _ _ _
 	     (text "Use -fvia-C instead")
 
 #endif
+\end{code}
+
+
+%************************************************************************
+%*									*
+\subsection{LLVM}
+%*									*
+%************************************************************************
+
+\begin{code}
+outputLlvm :: DynFlags -> FilePath -> [RawCmm] -> IO ()
+outputLlvm dflags filenm flat_absC
+  = do ncg_uniqs <- mkSplitUniqSupply 'n'
+       doOutput filenm $ \f -> llvmCodeGen dflags f ncg_uniqs flat_absC
 \end{code}
 
 

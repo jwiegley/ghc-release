@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS -cpp #-}
 -----------------------------------------------------------------------------
 -- |
@@ -169,7 +170,9 @@ newtype Seq a = Seq (FingerTree (Elem a))
 
 instance Functor Seq where
 	fmap f (Seq xs) = Seq (fmap (fmap f) xs)
+#ifdef __GLASGOW_HASKELL__
 	x <$ s = replicate (length s) x
+#endif
 
 instance Foldable Seq where
 	foldr f z (Seq xs) = foldr (flip (foldr f)) z xs
@@ -517,7 +520,7 @@ mapAccumL' f s t = runState (traverse (State . flip f) t) s
 {-# SPECIALIZE applicativeTree :: Int -> Int -> Id a -> Id (FingerTree a) #-}
 -- Special note: the Id specialization automatically does node sharing,
 -- reducing memory usage of the resulting tree to /O(log n)/.
-applicativeTree :: Applicative f => Int -> Int -> f a -> f (FingerTree a)
+applicativeTree :: forall f a. Applicative f => Int -> Int -> f a -> f (FingerTree a)
 applicativeTree n mSize m = mSize `seq` case n of
 	0 -> emptyTree
 	1 -> liftA Single m
@@ -540,6 +543,8 @@ applicativeTree n mSize m = mSize `seq` case n of
 	deepA = liftA3 (Deep (n * mSize))
 	mSize' = 3 * mSize
 	n3 = liftA3 (Node3 mSize') m m m
+
+        emptyTree :: forall b. f (FingerTree b)
 	emptyTree = pure Empty
 
 ------------------------------------------------------------------------
@@ -1442,7 +1447,7 @@ breakl p xs = foldr (\ i _ -> splitAt i xs) (xs, empty) (findIndicesL p xs)
 {-# INLINE breakr #-}
 -- | @'breakr' p@ is equivalent to @'spanr' (not . p)@.
 breakr :: (a -> Bool) -> Seq a -> (Seq a, Seq a)
-breakr p xs = foldr (\ i _ -> flipPair (splitAt i xs)) (xs, empty) (findIndicesR p xs)
+breakr p xs = foldr (\ i _ -> flipPair (splitAt (i + 1) xs)) (xs, empty) (findIndicesR p xs)
   where flipPair (x, y) = (y, x)
 
 -- | /O(n)/.  The 'partition' function takes a predicate @p@ and a
@@ -1500,8 +1505,8 @@ findIndicesL :: (a -> Bool) -> Seq a -> [Int]
 findIndicesL p xs = build (\ c n -> let g i x z = if p x then c i z else z in
 				foldrWithIndex g n xs)
 #else
-findIndicesL p xs = foldrWithIndex g [] xs where
-g i x is = if p x then i:is else is
+findIndicesL p xs = foldrWithIndex g [] xs
+    where g i x is = if p x then i:is else is
 #endif
 
 {-# INLINE findIndicesR #-}
@@ -1512,8 +1517,8 @@ findIndicesR :: (a -> Bool) -> Seq a -> [Int]
 findIndicesR p xs = build (\ c n -> let g z i x = if p x then c i z else z in
 				foldlWithIndex g n xs)
 #else
-findIndicesR p xs = foldlWithIndex g [] xs where
-g is i x = if p x then i:is else is
+findIndicesR p xs = foldlWithIndex g [] xs
+    where g is i x = if p x then i:is else is
 #endif
 
 ------------------------------------------------------------------------
@@ -1574,7 +1579,11 @@ zipWith f xs ys
 
 -- like 'zipWith', but assumes length xs <= length ys
 zipWith' :: (a -> b -> c) -> Seq a -> Seq b -> Seq c
-zipWith' f xs ys = snd (mapAccumL ((\ (z :< zs) x -> (zs, f x z)) . viewl) ys xs)
+zipWith' f xs ys = snd (mapAccumL k ys xs)
+  where
+    k kys x = case viewl kys of
+               (z :< zs) -> (zs, f x z)
+               EmptyL    -> error "zipWith': unexpected EmptyL"
 
 -- | /O(min(n1,n2,n3))/.  'zip3' takes three sequences and returns a
 -- sequence of triples, analogous to 'zip'.
@@ -1679,7 +1688,10 @@ unstableSortBy cmp (Seq xs) =
 -- balanced Seq whose elements are that list using the applicativeTree
 -- generalization.
 fromList2 :: Int -> [a] -> Seq a
-fromList2 n = execState (replicateA n (State (\ (x:xs) -> (xs, x))))
+fromList2 n = execState (replicateA n (State ht))
+  where
+    ht (x:xs) = (xs, x)
+    ht []     = error "fromList2: short list"
 
 -- | A 'PQueue' is a simple pairing heap.
 data PQueue e = PQueue e (PQL e)

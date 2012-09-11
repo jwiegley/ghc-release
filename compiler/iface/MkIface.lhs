@@ -54,7 +54,7 @@ import IfaceSyn
 import LoadIface
 import Id
 import IdInfo
-import NewDemand
+import Demand
 import Annotations
 import CoreSyn
 import CoreFVs
@@ -62,6 +62,7 @@ import Class
 import TyCon
 import DataCon
 import Type
+import Coercion
 import TcType
 import InstEnv
 import FamInstEnv
@@ -83,10 +84,9 @@ import Digraph
 import SrcLoc
 import Outputable
 import BasicTypes       hiding ( SuccessFlag(..) )
-import LazyUniqFM
+import UniqFM
 import Unique
 import Util             hiding ( eqListBy )
-import FiniteMap
 import FastString
 import Maybes
 import ListSetOps
@@ -96,6 +96,8 @@ import Bag
 
 import Control.Monad
 import Data.List
+import Data.Map (Map)
+import qualified Data.Map as Map
 import Data.IORef
 import System.FilePath
 \end{code}
@@ -164,9 +166,8 @@ mkUsedNames
           TcGblEnv{ tcg_inst_uses = dfun_uses_var,
                     tcg_dus = dus
                   }
- = do
-        dfun_uses <- readIORef dfun_uses_var		-- What dfuns are used
-        return (allUses dus `unionNameSets` dfun_uses)
+ = do { dfun_uses <- readIORef dfun_uses_var		-- What dfuns are used
+      ; return (allUses dus `unionNameSets` dfun_uses) }
         
 mkDependencies :: TcGblEnv -> IO Dependencies
 mkDependencies
@@ -279,9 +280,11 @@ mkIface_ hsc_env maybe_old_fingerprint
                                          intermediate_iface decls
 
 		-- Warn about orphans
-	; let orph_warnings   --- Laziness means no work done unless -fwarn-orphans
-	        | dopt Opt_WarnOrphans dflags = rule_warns `unionBags` inst_warns
-	        | otherwise 	       	      = emptyBag
+	; let warn_orphs      = dopt Opt_WarnOrphans dflags
+              warn_auto_orphs = dopt Opt_WarnAutoOrphans dflags
+              orph_warnings   --- Laziness means no work done unless -fwarn-orphans
+	        | warn_orphs || warn_auto_orphs = rule_warns `unionBags` inst_warns
+	        | otherwise 	       	        = emptyBag
 	      errs_and_warns = (orph_warnings, emptyBag)
 	      unqual = mkPrintUnqualified dflags rdr_env
 	      inst_warns = listToBag [ instOrphWarn unqual d 
@@ -289,7 +292,9 @@ mkIface_ hsc_env maybe_old_fingerprint
 	      		   	     , isNothing (ifInstOrph i) ]
 	      rule_warns = listToBag [ ruleOrphWarn unqual this_mod r 
 	      		    	     | r <- iface_rules
-	      		   	     , isNothing (ifRuleOrph r) ]
+	      		   	     , isNothing (ifRuleOrph r)
+                                     , if ifRuleAuto r then warn_auto_orphs
+                                                       else warn_orphs ]
 
 	; if errorsFound dflags errs_and_warns
             then return ( errs_and_warns, Nothing )
@@ -319,7 +324,10 @@ mkIface_ hsc_env maybe_old_fingerprint
      le_occ n1 n2 = nameOccName n1 <= nameOccName n2
 
      dflags = hsc_dflags hsc_env
+
+     deliberatelyOmitted :: String -> a
      deliberatelyOmitted x = panic ("Deliberately omitted: " ++ x)
+
      ifFamInstTcName = ifaceTyConName . ifFamInstTyCon
 
      flattenVectInfo (VectInfo { vectInfoVar   = vVar
@@ -385,7 +393,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
  = do
    eps <- hscEPS hsc_env
    let
-        -- the ABI of a declaration represents everything that is made
+        -- The ABI of a declaration represents everything that is made
         -- visible about the declaration that a client can depend on.
         -- see IfaceDeclABI below.
        declABI :: IfaceDecl -> IfaceDeclABI 
@@ -399,7 +407,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
 	       , let out = localOccs $ freeNamesDeclABI abi
                ]
 
-       name_module n = ASSERT( isExternalName n ) nameModule n
+       name_module n = ASSERT2( isExternalName n, ppr n ) nameModule n
        localOccs = map (getUnique . getParent . getOccName) 
                         . filter ((== this_mod) . name_module)
                         . nameSetToList
@@ -520,7 +528,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
                         -- wiki/Commentary/Compiler/RecompilationAvoidance
 
    -- put the declarations in a canonical order, sorted by OccName
-   let sorted_decls = eltsFM $ listToFM $
+   let sorted_decls = Map.elems $ Map.fromList $
                           [(ifName d, e) | e@(_, d) <- decls_w_hashes]
 
    -- the ABI hash depends on:
@@ -594,19 +602,46 @@ sortDependencies d
           dep_pkgs   = sortBy (compare `on` packageIdFS)  (dep_pkgs d),
           dep_orphs  = sortBy stableModuleCmp (dep_orphs d),
           dep_finsts = sortBy stableModuleCmp (dep_finsts d) }
+\end{code}
 
--- The ABI of a declaration consists of:
-     -- the full name of the identifier (inc. module and package, because
-     --   these are used to construct the symbol name by which the 
-     --   identifier is known externally).
-     -- the fixity of the identifier
-     -- the declaration itself, as exposed to clients.  That is, the
-     --   definition of an Id is included in the fingerprint only if
-     --   it is made available as as unfolding in the interface.
-     -- for Ids: rules
-     -- for classes: instances, fixity & rules for methods
-     -- for datatypes: instances, fixity & rules for constrs
+
+%************************************************************************
+%*		                					*
+          The ABI of an IfaceDecl       									
+%*	       	     							*
+%************************************************************************
+
+Note [The ABI of an IfaceDecl]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The ABI of a declaration consists of:
+
+   (a) the full name of the identifier (inc. module and package,
+       because these are used to construct the symbol name by which
+       the identifier is known externally).
+
+   (b) the declaration itself, as exposed to clients.  That is, the
+       definition of an Id is included in the fingerprint only if
+       it is made available as as unfolding in the interface.
+
+   (c) the fixity of the identifier
+   (d) for Ids: rules
+   (e) for classes: instances, fixity & rules for methods
+   (f) for datatypes: instances, fixity & rules for constrs
+
+Items (c)-(f) are not stored in the IfaceDecl, but instead appear
+elsewhere in the interface file.  But they are *fingerprinted* with
+the Id itself. This is done by grouping (c)-(f) in IfaceDeclExtras,
+and fingerprinting that as part of the Id.
+
+\begin{code}
 type IfaceDeclABI = (Module, IfaceDecl, IfaceDeclExtras)
+
+data IfaceDeclExtras 
+  = IfaceIdExtras    Fixity [IfaceRule]
+  | IfaceDataExtras  Fixity [IfaceInstABI] [(Fixity,[IfaceRule])]
+  | IfaceClassExtras Fixity [IfaceInstABI] [(Fixity,[IfaceRule])]
+  | IfaceSynExtras   Fixity
+  | IfaceOtherDeclExtras
 
 abiDecl :: IfaceDeclABI -> IfaceDecl
 abiDecl (_, decl, _) = decl
@@ -618,13 +653,6 @@ cmp_abiNames abi1 abi2 = ifName (abiDecl abi1) `compare`
 freeNamesDeclABI :: IfaceDeclABI -> NameSet
 freeNamesDeclABI (_mod, decl, extras) =
   freeNamesIfDecl decl `unionNameSets` freeNamesDeclExtras extras
-
-data IfaceDeclExtras 
-  = IfaceIdExtras    Fixity [IfaceRule]
-  | IfaceDataExtras  Fixity [IfaceInstABI] [(Fixity,[IfaceRule])]
-  | IfaceClassExtras Fixity [IfaceInstABI] [(Fixity,[IfaceRule])]
-  | IfaceSynExtras   Fixity
-  | IfaceOtherDeclExtras
 
 freeNamesDeclExtras :: IfaceDeclExtras -> NameSet
 freeNamesDeclExtras (IfaceIdExtras    _ rules)
@@ -641,6 +669,25 @@ freeNamesDeclExtras IfaceOtherDeclExtras
 freeNamesSub :: (Fixity,[IfaceRule]) -> NameSet
 freeNamesSub (_,rules) = unionManyNameSets (map freeNamesIfRule rules)
 
+instance Outputable IfaceDeclExtras where
+  ppr IfaceOtherDeclExtras       = empty
+  ppr (IfaceIdExtras  fix rules) = ppr_id_extras fix rules
+  ppr (IfaceSynExtras fix)       = ppr fix
+  ppr (IfaceDataExtras fix insts stuff)  = vcat [ppr fix, ppr_insts insts,
+                                                 ppr_id_extras_s stuff]
+  ppr (IfaceClassExtras fix insts stuff) = vcat [ppr fix, ppr_insts insts,
+                                                 ppr_id_extras_s stuff]
+
+ppr_insts :: [IfaceInstABI] -> SDoc
+ppr_insts _ = ptext (sLit "<insts>")
+
+ppr_id_extras_s :: [(Fixity, [IfaceRule])] -> SDoc
+ppr_id_extras_s stuff = vcat [ppr_id_extras f r | (f,r)<- stuff]
+
+ppr_id_extras :: Fixity -> [IfaceRule] -> SDoc
+ppr_id_extras fix rules = ppr fix $$ vcat (map ppr rules)
+
+-- This instance is used only to compute fingerprints
 instance Binary IfaceDeclExtras where
   get _bh = panic "no get for IfaceDeclExtras"
   put_ bh (IfaceIdExtras fix rules) = do
@@ -746,7 +793,7 @@ ruleOrphWarn unqual mod rule
   = mkWarnMsg silly_loc unqual $
     ptext (sLit "Orphan rule:") <+> ppr rule
   where
-    silly_loc = srcLocSpan (mkSrcLoc (moduleNameFS (moduleName mod)) 1 0)
+    silly_loc = srcLocSpan (mkSrcLoc (moduleNameFS (moduleName mod)) 1 1)
     -- We don't have a decent SrcSpan for a Rule, not even the CoreRule
     -- Could readily be fixed by adding a SrcSpan to CoreRule, if we wanted to
 
@@ -766,17 +813,16 @@ mkOrphMap get_key decls
   where
     go (non_orphs, orphs) d
 	| Just occ <- get_key d
-	= (extendOccEnv_C (\ ds _ -> d:ds) non_orphs occ [d], orphs)
+	= (extendOccEnv_Acc (:) singleton non_orphs occ d, orphs)
 	| otherwise = (non_orphs, d:orphs)
 \end{code}
 
 
-%*********************************************************
-%*							*
-\subsection{Keeping track of what we've slurped, and fingerprints}
-%*							*
-%*********************************************************
-
+%************************************************************************
+%*		                					*
+       Keeping track of what we've slurped, and fingerprints
+%*	       	     							*
+%************************************************************************
 
 \begin{code}
 mkUsageInfo :: HscEnv -> Module -> ImportedMods -> NameSet -> IO [Usage]
@@ -818,11 +864,11 @@ mk_usage_info pit hsc_env this_mod direct_imports used_names
         | isWiredInName name = mv_map  -- ignore wired-in names
         | otherwise
         = case nameModule_maybe name of
-             Nothing  -> pprTrace "mkUsageInfo: internal name?" (ppr name) mv_map
-             Just mod -> -- We use this fiddly lambda function rather than
-                         -- (++) as the argument to extendModuleEnv_C to
+             Nothing  -> pprPanic "mkUsageInfo: internal name?" (ppr name)
+             Just mod -> -- This lambda function is really just a
+                         -- specialised (++); originally came about to
                          -- avoid quadratic behaviour (trac #2680)
-                         extendModuleEnv_C (\xs _ -> occ:xs) mv_map mod [occ]
+                         extendModuleEnvWith (\_ xs -> occ:xs) mv_map mod [occ]
     		   where occ = nameOccName name
     
     -- We want to create a Usage for a home module if 
@@ -856,7 +902,7 @@ mk_usage_info pit hsc_env this_mod direct_imports used_names
                       usg_mod_name = moduleName mod,
     	  	      usg_mod_hash = mod_hash,
     		      usg_exports  = export_hash,
-    		      usg_entities = fmToList ent_hashs }
+    		      usg_entities = Map.toList ent_hashs }
       where
 	maybe_iface  = lookupIfaceByModule dflags hpt pit mod
 		-- In one-shot mode, the interfaces for home-package 
@@ -873,13 +919,13 @@ mk_usage_info pit hsc_env this_mod direct_imports used_names
     
         used_occs = lookupModuleEnv ent_map mod `orElse` []
 
-    	-- Making a FiniteMap here ensures that (a) we remove duplicates
+    	-- Making a Map here ensures that (a) we remove duplicates
         -- when we have usages on several subordinates of a single parent,
         -- and (b) that the usages emerge in a canonical order, which
-        -- is why we use FiniteMap rather than OccEnv: FiniteMap works
+        -- is why we use Map rather than OccEnv: Map works
         -- using Ord on the OccNames, which is a lexicographic ordering.
-	ent_hashs :: FiniteMap OccName Fingerprint
-        ent_hashs = listToFM (map lookup_occ used_occs)
+	ent_hashs :: Map OccName Fingerprint
+        ent_hashs = Map.fromList (map lookup_occ used_occs)
         
         lookup_occ occ = 
             case hash_env occ of
@@ -919,10 +965,10 @@ mkIfaceExports :: [AvailInfo]
                -> [(Module, [GenAvailInfo OccName])]
                   -- Group by module and sort by occurrence
 mkIfaceExports exports
-  = [ (mod, eltsFM avails)
+  = [ (mod, Map.elems avails)
     | (mod, avails) <- sortBy (stableModuleCmp `on` fst)
                               (moduleEnvToList groupFM)
-                       -- NB. the fmToList is in a random order,
+                       -- NB. the Map.toList is in a random order,
                        -- because Ord Module is not a predictable
                        -- ordering.  Hence we perform a final sort
                        -- using the stable Module ordering.
@@ -930,20 +976,21 @@ mkIfaceExports exports
   where
 	-- Group by the module where the exported entities are defined
 	-- (which may not be the same for all Names in an Avail)
-	-- Deliberately use FiniteMap rather than UniqFM so we
+	-- Deliberately use Map rather than UniqFM so we
 	-- get a canonical ordering
-    groupFM :: ModuleEnv (FiniteMap FastString (GenAvailInfo OccName))
+    groupFM :: ModuleEnv (Map FastString (GenAvailInfo OccName))
     groupFM = foldl add emptyModuleEnv exports
 
-    add_one :: ModuleEnv (FiniteMap FastString (GenAvailInfo OccName))
+    add_one :: ModuleEnv (Map FastString (GenAvailInfo OccName))
 	    -> Module -> GenAvailInfo OccName
-	    -> ModuleEnv (FiniteMap FastString (GenAvailInfo OccName))
+	    -> ModuleEnv (Map FastString (GenAvailInfo OccName))
     add_one env mod avail 
-      =  extendModuleEnv_C plusFM env mod 
-		(unitFM (occNameFS (availName avail)) avail)
+      -- XXX Is there a need to flip Map.union here?
+      =  extendModuleEnvWith (flip Map.union) env mod 
+		(Map.singleton (occNameFS (availName avail)) avail)
 
 	-- NB: we should not get T(X) and T(Y) in the export list
-	--     else the plusFM will simply discard one!  They
+	--     else the Map.union will simply discard one!  They
 	--     should have been combined by now.
     add env (Avail n)
       = ASSERT( isExternalName n ) 
@@ -1296,7 +1343,7 @@ tyThingToIfaceDecl (AClass clas)
 
     toIfaceClassOp (sel_id, def_meth)
 	= ASSERT(sel_tyvars == clas_tyvars)
-	  IfaceClassOp (getOccName sel_id) def_meth (toIfaceType op_ty)
+	  IfaceClassOp (getOccName sel_id) (toDmSpec def_meth) (toIfaceType op_ty)
 	where
 		-- Be careful when splitting the type, because of things
 		-- like  	class Foo a where
@@ -1305,6 +1352,10 @@ tyThingToIfaceDecl (AClass clas)
 		--		  op :: (Ord a) => a -> a
 	  (sel_tyvars, rho_ty) = splitForAllTys (idType sel_id)
 	  op_ty		       = funResultTy rho_ty
+
+    toDmSpec NoDefMeth   = NoDM
+    toDmSpec GenDefMeth  = GenericDM
+    toDmSpec (DefMeth _) = VanillaDM
 
     toIfaceFD (tvs1, tvs2) = (map getFS tvs1, map getFS tvs2)
 
@@ -1336,14 +1387,14 @@ tyThingToIfaceDecl (ATyCon tycon)
     tyvars = tyConTyVars tycon
     (syn_rhs, syn_ki) 
        = case synTyConRhs tycon of
-	    OpenSynTyCon ki _ -> (Nothing,               toIfaceType ki)
-	    SynonymTyCon ty   -> (Just (toIfaceType ty), toIfaceType (typeKind ty))
+	    SynFamilyTyCon  -> (Nothing,               toIfaceType (synTyConResKind tycon))
+	    SynonymTyCon ty -> (Just (toIfaceType ty), toIfaceType (typeKind ty))
 
     ifaceConDecls (NewTyCon { data_con = con })     = 
       IfNewTyCon  (ifaceConDecl con)
     ifaceConDecls (DataTyCon { data_cons = cons })  = 
       IfDataTyCon (map ifaceConDecl cons)
-    ifaceConDecls OpenTyCon {}                      = IfOpenDataTyCon
+    ifaceConDecls DataFamilyTyCon {}                = IfOpenDataTyCon
     ifaceConDecls AbstractTyCon			    = IfAbstractTyCon
 	-- The last case happens when a TyCon has been trimmed during tidying
 	-- Furthermore, tyThingToIfaceDecl is also used
@@ -1395,12 +1446,12 @@ instanceToIfaceInst (Instance { is_dfun = dfun_id, is_flag = oflag,
     is_local name = nameIsLocalOrFrom mod name
 
 	-- Compute orphanhood.  See Note [Orphans] in IfaceSyn
-    (_, _, cls, tys) = tcSplitDFunTy (idType dfun_id)
+    (_, cls, tys) = tcSplitDFunTy (idType dfun_id)
 		-- Slightly awkward: we need the Class to get the fundeps
     (tvs, fds) = classTvsFds cls
     arg_names = [filterNameSet is_local (tyClsNamesOfType ty) | ty <- tys]
     orph | is_local cls_name = Just (nameOccName cls_name)
-	 | all isJust mb_ns  = head mb_ns
+	 | all isJust mb_ns  = ASSERT( not (null mb_ns) ) head mb_ns
 	 | otherwise	     = Nothing
     
     mb_ns :: [Maybe OccName]	-- One for each fundep; a locally-defined name
@@ -1447,7 +1498,7 @@ toIfaceLetBndr id  = IfLetBndr (occNameFS (getOccName id))
 --------------------------
 toIfaceIdDetails :: IdDetails -> IfaceIdDetails
 toIfaceIdDetails VanillaId 		        = IfVanillaId
-toIfaceIdDetails DFunId    		        = IfVanillaId	            
+toIfaceIdDetails (DFunId {})   		        = IfDFunId
 toIfaceIdDetails (RecSelId { sel_naughty = n
 		 	   , sel_tycon = tc })  = IfRecSelId (toIfaceTyCon tc) n
 toIfaceIdDetails other	     		        = pprTrace "toIfaceIdDetails" (ppr other) 
@@ -1456,7 +1507,9 @@ toIfaceIdDetails other	     		        = pprTrace "toIfaceIdDetails" (ppr other)
 toIfaceIdInfo :: IdInfo -> [IfaceInfoItem]
 toIfaceIdInfo id_info
   = catMaybes [arity_hsinfo, caf_hsinfo, strict_hsinfo, 
-	       inline_hsinfo, wrkr_hsinfo,  unfold_hsinfo] 
+	       inline_hsinfo,  unfold_hsinfo] 
+	       -- NB: strictness must be before unfolding
+	       -- See TcIface.tcUnfolding
   where
     ------------  Arity  --------------
     arity_info = arityInfo id_info
@@ -1471,39 +1524,46 @@ toIfaceIdInfo id_info
 
     ------------  Strictness  --------------
 	-- No point in explicitly exporting TopSig
-    strict_hsinfo = case newStrictnessInfo id_info of
+    strict_hsinfo = case strictnessInfo id_info of
 			Just sig | not (isTopSig sig) -> Just (HsStrictness sig)
 			_other			      -> Nothing
 
-    ------------  Worker  --------------
-    work_info   = workerInfo id_info
-    has_worker  = workerExists work_info
-    wrkr_hsinfo = case work_info of
-		    HasWorker work_id wrap_arity -> 
-			Just (HsWorker ((idName work_id)) wrap_arity)
-		    NoWorker -> Nothing
-
     ------------  Unfolding  --------------
-    -- The unfolding is redundant if there is a worker
-    unfold_info  = unfoldingInfo id_info
-    rhs		 = unfoldingTemplate unfold_info
-    no_unfolding = neverUnfold unfold_info
-		  	-- The CoreTidy phase retains unfolding info iff
-			-- we want to expose the unfolding, taking into account
-			-- unconditional NOINLINE, etc.  See TidyPgm.addExternal
-    unfold_hsinfo | no_unfolding = Nothing			
-		  | has_worker   = Nothing	-- Unfolding is implicit
-		  | otherwise	 = Just (HsUnfold (toIfaceExpr rhs))
+    unfold_hsinfo = toIfUnfolding loop_breaker (unfoldingInfo id_info) 
+    loop_breaker  = isNonRuleLoopBreaker (occInfo id_info)
 					
     ------------  Inline prag  --------------
     inline_prag = inlinePragInfo id_info
     inline_hsinfo | isDefaultInlinePragma inline_prag = Nothing
-		  | no_unfolding && not has_worker 
-                      && isFunLike (inlinePragmaRuleMatchInfo inline_prag)
-                                                      = Nothing
-			-- If the iface file give no unfolding info, we 
-			-- don't need to say when inlining is OK!
-		  | otherwise			      = Just (HsInline inline_prag)
+                  | otherwise = Just (HsInline inline_prag)
+
+--------------------------
+toIfUnfolding :: Bool -> Unfolding -> Maybe IfaceInfoItem
+toIfUnfolding lb (CoreUnfolding { uf_tmpl = rhs, uf_arity = arity
+                                , uf_src = src, uf_guidance = guidance })
+  = Just $ HsUnfold lb $
+    case src of
+	InlineStable
+          -> case guidance of
+               UnfWhen unsat_ok boring_ok -> IfInlineRule arity unsat_ok boring_ok if_rhs
+               _other                     -> IfCoreUnfold True if_rhs
+	InlineWrapper w  -> IfWrapper arity (idName w)
+        InlineCompulsory -> IfCompulsory if_rhs
+        InlineRhs        -> IfCoreUnfold False if_rhs
+	-- Yes, even if guidance is UnfNever, expose the unfolding
+	-- If we didn't want to expose the unfolding, TidyPgm would
+	-- have stuck in NoUnfolding.  For supercompilation we want 
+	-- to see that unfolding!
+  where
+    if_rhs = toIfaceExpr rhs
+
+toIfUnfolding lb (DFunUnfolding _ar _con ops)
+  = Just (HsUnfold lb (IfDFunUnfold (map toIfaceExpr ops)))
+      -- No need to serialise the data constructor; 
+      -- we can recover it from the type of the dfun
+
+toIfUnfolding _ _
+  = Nothing
 
 --------------------------
 coreRuleToIfaceRule :: Module -> CoreRule -> IfaceRule
@@ -1513,12 +1573,14 @@ coreRuleToIfaceRule _ (BuiltinRule { ru_fn = fn})
 
 coreRuleToIfaceRule mod (Rule { ru_name = name, ru_fn = fn, 
                                 ru_act = act, ru_bndrs = bndrs,
-	                        ru_args = args, ru_rhs = rhs })
+	                        ru_args = args, ru_rhs = rhs, 
+                                ru_auto = auto })
   = IfaceRule { ifRuleName  = name, ifActivation = act, 
 		ifRuleBndrs = map toIfaceBndr bndrs,
 		ifRuleHead  = fn, 
 		ifRuleArgs  = map do_arg args,
 		ifRuleRhs   = toIfaceExpr rhs,
+                ifRuleAuto  = auto,
 		ifRuleOrph  = orph }
   where
 	-- For type args we must remove synonyms from the outermost
@@ -1543,7 +1605,7 @@ bogusIfaceRule :: Name -> IfaceRule
 bogusIfaceRule id_name
   = IfaceRule { ifRuleName = fsLit "bogus", ifActivation = NeverActive,  
 	ifRuleBndrs = [], ifRuleHead = id_name, ifRuleArgs = [], 
-	ifRuleRhs = IfaceExt id_name, ifRuleOrph = Nothing }
+	ifRuleRhs = IfaceExt id_name, ifRuleOrph = Nothing, ifRuleAuto = True }
 
 ---------------------
 toIfaceExpr :: CoreExpr -> IfaceExpr
@@ -1560,7 +1622,6 @@ toIfaceExpr (Note n e)    = IfaceNote (toIfaceNote n) (toIfaceExpr e)
 ---------------------
 toIfaceNote :: Note -> IfaceNote
 toIfaceNote (SCC cc)      = IfaceSCC cc
-toIfaceNote InlineMe      = IfaceInlineMe
 toIfaceNote (CoreNote s)  = IfaceCoreNote s
 
 ---------------------

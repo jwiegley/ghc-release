@@ -11,8 +11,8 @@ ghci024:
 	printf ":show languages\n" \
 	    | '$(TEST_HC)' --interactive -v0 -ignore-dot-ghci \
 	    | grep -E "^([^ ]|  -XImplicitPrelude|  -XMagicHash)"
-	@echo "~~~~~~~~~~ Testing :show languages, with -fglasgow-exts"
-	printf ":set -fglasgow-exts\n:show languages\n" \
+	@echo "~~~~~~~~~~ Testing :show languages, with -XMagicHash"
+	printf ":set -XMagicHash\n:show languages\n" \
 	    | '$(TEST_HC)' --interactive -v0 -ignore-dot-ghci \
 	    | grep -E "^([^ ]|  -XImplicitPrelude|  -XMagicHash)"
 	@echo "~~~~~~~~~~ Testing :show packages"
@@ -25,4 +25,9 @@ ghci024:
 	    | '$(TEST_HC)' --interactive -v0 -ignore-dot-ghci \
 	    | grep -E "^([^ ]|  -package|base|ghc-prim|integer|rts|Cabal)" \
 	    | sed "s/Cabal-[0-9.]*/Cabal-VERSION/"
+
+.PHONY: ghci037
+ghci037:
+	'$(TEST_HC)' --interactive -v0 -ignore-dot-ghci                   < ghci037.script
+	'$(TEST_HC)' --interactive -v0 -ignore-dot-ghci -fno-ghci-sandbox < ghci037.script
 

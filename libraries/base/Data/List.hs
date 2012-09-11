@@ -230,10 +230,10 @@ infix 5 \\ -- comment to fool cpp
 -- It returns 'Nothing' if the list did not start with the prefix
 -- given, or 'Just' the list after the prefix, if it does.
 --
--- > stripPrefix "foo" "foobar" -> Just "bar"
--- > stripPrefix "foo" "foo" -> Just ""
--- > stripPrefix "foo" "barfoo" -> Nothing
--- > stripPrefix "foo" "barfoobaz" -> Nothing
+-- > stripPrefix "foo" "foobar" == Just "bar"
+-- > stripPrefix "foo" "foo" == Just ""
+-- > stripPrefix "foo" "barfoo" == Nothing
+-- > stripPrefix "foo" "barfoobaz" == Nothing
 stripPrefix :: Eq a => [a] -> [a] -> Maybe [a]
 stripPrefix [] ys = Just ys
 stripPrefix (x:xs) (y:ys)
@@ -297,12 +297,12 @@ isSuffixOf x y          =  reverse x `isPrefixOf` reverse y
 --
 -- Example:
 --
--- >isInfixOf "Haskell" "I really like Haskell." -> True
--- >isInfixOf "Ial" "I really like Haskell." -> False
+-- >isInfixOf "Haskell" "I really like Haskell." == True
+-- >isInfixOf "Ial" "I really like Haskell." == False
 isInfixOf               :: (Eq a) => [a] -> [a] -> Bool
 isInfixOf needle haystack = any (isPrefixOf needle) (tails haystack)
 
--- | The 'nub' function removes duplicate elements from a list.
+-- | /O(n^2)/. The 'nub' function removes duplicate elements from a list.
 -- In particular, it keeps only the first occurrence of each element.
 -- (The name 'nub' means \`essence\'.)
 -- It is a special case of 'nubBy', which allows the programmer to supply
@@ -793,10 +793,50 @@ sort = sortBy compare
 sortBy cmp = foldr (insertBy cmp) []
 #else
 
+{-
+GHC's mergesort replaced by a better implementation, 24/12/2009.
+This code originally contributed to the nhc12 compiler by Thomas Nordin
+in 2002.  Rumoured to have been based on code by Lennart Augustsson, e.g.
+    http://www.mail-archive.com/haskell@haskell.org/msg01822.html
+and possibly to bear similarities to a 1982 paper by Richard O'Keefe:
+"A smooth applicative merge sort".
+
+Benchmarks show it to be often 2x the speed of the previous implementation.
+Fixes ticket http://hackage.haskell.org/trac/ghc/ticket/2143
+-}
+
+sort = sortBy compare
+sortBy cmp = mergeAll . sequences
+  where
+    sequences (a:b:xs)
+      | a `cmp` b == GT = descending b [a]  xs
+      | otherwise       = ascending  b (a:) xs
+    sequences xs = [xs]
+
+    descending a as (b:bs)
+      | a `cmp` b == GT = descending b (a:as) bs
+    descending a as bs  = (a:as): sequences bs
+
+    ascending a as (b:bs)
+      | a `cmp` b /= GT = ascending b (\ys -> as (a:ys)) bs
+    ascending a as bs   = as [a]: sequences bs
+
+    mergeAll [x] = x
+    mergeAll xs  = mergeAll (mergePairs xs)
+
+    mergePairs (a:b:xs) = merge a b: mergePairs xs
+    mergePairs xs       = xs
+
+    merge as@(a:as') bs@(b:bs')
+      | a `cmp` b == GT = b:merge as  bs'
+      | otherwise       = a:merge as' bs
+    merge [] bs         = bs
+    merge as []         = as
+
+{-
 sortBy cmp l = mergesort cmp l
 sort l = mergesort compare l
 
-{-
 Quicksort replaced by mergesort, 14/5/2002.
 
 From: Ian Lynagh <igloo@earth.li>
@@ -837,7 +877,6 @@ func            100000           sorted        sort        5831.47
 func            100000           sorted        mergesort   2.23
 func            100000           revsorted     sort        5872.34
 func            100000           revsorted     mergesort   2.24
--}
 
 mergesort :: (a -> a -> Ordering) -> [a] -> [a]
 mergesort cmp = mergesort' cmp . map wrap
@@ -863,8 +902,9 @@ merge cmp (x:xs) (y:ys)
 wrap :: a -> [a]
 wrap x = [x]
 
-{-
-OLD: qsort version
+
+
+OLDER: qsort version
 
 -- qsort is stable and does not concatenate.
 qsort :: (a -> a -> Ordering) -> [a] -> [a] -> [a]
@@ -988,10 +1028,23 @@ product l       = prod l 1
 -- characters.  The resulting strings do not contain newlines.
 lines                   :: String -> [String]
 lines ""                =  []
+#ifdef __GLASGOW_HASKELL__
+-- Somehow GHC doesn't detect the selector thunks in the below code,
+-- so s' keeps a reference to the first line via the pair and we have
+-- a space leak (cf. #4334).
+-- So we need to make GHC see the selector thunks with a trick.
+lines s                 =  cons (case break (== '\n') s of
+                                    (l, s') -> (l, case s' of
+                                                    []      -> []
+                                                    _:s''   -> lines s''))
+  where
+    cons ~(h, t)        =  h : t
+#else
 lines s                 =  let (l, s') = break (== '\n') s
                            in  l : case s' of
                                         []      -> []
                                         (_:s'') -> lines s''
+#endif
 
 -- | 'unlines' is an inverse operation to 'lines'.
 -- It joins lines, after appending a terminating newline to each.

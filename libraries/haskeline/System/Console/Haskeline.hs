@@ -6,7 +6,7 @@ Unicode-aware and runs both on POSIX-compatible systems and on Windows.
 Users may customize the interface with a @~/.haskeline@ file; see
 <http://trac.haskell.org/haskeline/wiki/UserPrefs> for more information.
 
-An example use of this library for a simple read-eval-print loop is the
+An example use of this library for a simple read-eval-print loop (REPL) is the
 following:
 
 > import System.Console.Haskeline
@@ -27,27 +27,39 @@ following:
 
 
 module System.Console.Haskeline(
-                    -- * Main functions
+                    -- * Interactive sessions
                     -- ** The InputT monad transformer
                     InputT,
                     runInputT,
-                    runInputTWithPrefs,
+                    haveTerminalUI,
+                    -- ** Behaviors
+                    Behavior,
+                    runInputTBehavior,
+                    defaultBehavior,
+                    useFileHandle,
+                    useFile,
+                    preferTerm,
+                    -- * User interaction functions
                     -- ** Reading user input
                     -- $inputfncs
                     getInputLine,
                     getInputChar,
+                    getPassword,
                     -- ** Outputting text
                     -- $outputfncs
                     outputStr,
                     outputStrLn,
-                    -- * Settings
+                    -- * Customization
+                    -- ** Settings
                     Settings(..),
                     defaultSettings,
                     setComplete,
-                    -- * User preferences
+                    -- ** User preferences
                     Prefs(),
                     readPrefs,
                     defaultPrefs,
+                    runInputTWithPrefs,
+                    runInputTBehaviorWithPrefs,
                     -- * Ctrl-C handling
                     -- $ctrlc
                     Interrupt(..),
@@ -73,9 +85,6 @@ import System.Console.Haskeline.RunCommand
 
 import System.IO
 import Data.Char (isSpace, isPrint)
-import Control.Monad
-import qualified Data.ByteString.Char8 as B
-import System.IO.Error (isEOFError)
 
 
 -- | A useful default.  In particular:
@@ -93,17 +102,17 @@ defaultSettings = Settings {complete = completeFilename,
                         autoAddHistory = True}
 
 {- $outputfncs
-The following functions allow cross-platform output of text that may contain
+The following functions enable cross-platform output of text that may contain
 Unicode characters.
 -}
 
--- | Write a string to the standard output.
+-- | Write a Unicode string to the user's standard output.
 outputStr :: MonadIO m => String -> InputT m ()
 outputStr xs = do
     putter <- asks putStrOut
     liftIO $ putter xs
 
--- | Write a string to the standard output, followed by a newline.
+-- | Write a string to the user's standard output, followed by a newline.
 outputStrLn :: MonadIO m => String -> InputT m ()
 outputStrLn = outputStr . (++ "\n")
 
@@ -111,43 +120,30 @@ outputStrLn = outputStr . (++ "\n")
 {- $inputfncs
 The following functions read one line or character of input from the user.
 
-If 'stdin' is connected to a terminal, then these functions perform all user interaction,
-including display of the prompt text, on the user's output terminal (which may differ from
-'stdout').
-They return 'Nothing' if the user pressed @Ctrl-D@ when the
-input text was empty.
+When using terminal-style interaction, these functions return 'Nothing' if the user
+pressed @Ctrl-D@ when the input text was empty.
 
-If 'stdin' is not connected to a terminal or does not have echoing enabled,
-then these functions print the prompt to 'stdout',
-and they return 'Nothing' if an @EOF@ was encountered before any characters were read.
+When using file-style interaction, these functions return 'Nothing' if
+an @EOF@ was encountered before any characters were read.
 -}
 
 
-{- | Reads one line of input.  The final newline (if any) is removed.  Provides a rich
-line-editing user interface if 'stdin' is a terminal.
+{- | Reads one line of input.  The final newline (if any) is removed.  When using terminal-style interaction, this function provides a rich line-editing user interface.
 
 If @'autoAddHistory' == 'True'@ and the line input is nonblank (i.e., is not all
 spaces), it will be automatically added to the history.
 -}
-getInputLine :: forall m . MonadException m => String -- ^ The input prompt
+getInputLine :: MonadException m => String -- ^ The input prompt
                             -> InputT m (Maybe String)
-getInputLine prefix = do
-    -- If other parts of the program have written text, make sure that it 
-    -- appears before we interact with the user on the terminal.
-    liftIO $ hFlush stdout
-    rterm <- ask
-    echo <- liftIO $ hGetEcho stdin
-    case termOps rterm of
-        Just tops | echo -> getInputCmdLine tops prefix
-        _ -> simpleFileLoop prefix rterm
+getInputLine = promptedInput getInputCmdLine $ unMaybeT . getLocaleLine
 
 getInputCmdLine :: MonadException m => TermOps -> String -> InputT m (Maybe String)
 getInputCmdLine tops prefix = do
     emode <- asks editMode
     result <- runInputCmdT tops $ case emode of
-                Emacs -> runCommandLoop tops prefix emacsCommands
+                Emacs -> runCommandLoop tops prefix emacsCommands emptyIM
                 Vi -> evalStateT' emptyViState $
-                        runCommandLoop tops prefix viKeyCommands
+                        runCommandLoop tops prefix viKeyCommands emptyIM
     maybeAddHistory result
     return result
 
@@ -164,80 +160,33 @@ maybeAddHistory result = do
                in modify (adder line)
         _ -> return ()
 
-simpleFileLoop :: MonadIO m => String -> RunTerm -> m (Maybe String)
-simpleFileLoop prefix rterm = liftIO $ do
-    putStrOut rterm prefix
-    atEOF <- hIsEOF stdin
-    if atEOF
-        then return Nothing
-        else do
-            -- It's more efficient to use B.getLine, but that function throws an
-            -- error if stdin is set to NoBuffering.
-            buff <- hGetBuffering stdin
-            line <- case buff of
-                        NoBuffering -> hWithBinaryMode stdin
-                                $ fmap B.pack System.IO.getLine
-                        _ -> B.getLine
-            fmap Just $ decodeForTerm rterm line
-
-
 ----------
 
 {- | Reads one character of input.  Ignores non-printable characters.
 
-If stdin is a terminal, the character will be read without waiting for a newline.
+When using terminal-style interaction, the character will be read without waiting
+for a newline.
 
-If stdin is not a terminal, a newline will be read if it is immediately
+When using file-style interaction, a newline will be read if it is immediately
 available after the input character.
 -}
 getInputChar :: MonadException m => String -- ^ The input prompt
                     -> InputT m (Maybe Char)
-getInputChar prefix = do
-    liftIO $ hFlush stdout
-    rterm <- ask
-    echo <- liftIO $ hGetEcho stdin
-    case termOps rterm of
-        Just tops | echo -> getInputCmdChar tops prefix
-        _ -> simpleFileChar prefix rterm
+getInputChar = promptedInput getInputCmdChar $ \fops -> do
+                        c <- getPrintableChar fops
+                        maybeReadNewline fops
+                        return c
 
-simpleFileChar :: MonadIO m => String -> RunTerm -> m (Maybe Char)
-simpleFileChar prefix rterm = liftIO $ do
-    putStrOut rterm prefix
-    c <- getPrintableChar
-    maybeReadNewline
-    return c
-  where
-    getPrintableChar = returnOnEOF Nothing $ do
-                c <- getLocaleChar rterm
-                if isPrint c
-                    then return (Just c)
-                    else getPrintableChar
-
--- If another character is immediately available, and it is a newline, consume it.
---
--- Note that in ghc-6.8.3 and earlier, hReady returns False at an EOF,
--- whereas in ghc-6.10.1 and later it throws an exception.  (GHC trac #1063).
--- This code handles both of those cases.
---
--- Also note that on Windows with ghc<6.10, hReady may not behave correctly (#1198)
--- The net result is that this might cause
--- But this function will generally only be used when reading buffered input
--- (since stdin isn't a terminal), so it should probably be OK.
-maybeReadNewline :: IO ()
-maybeReadNewline = returnOnEOF () $ do
-    ready <- hReady stdin
-    when ready $ do
-        c <- hLookAhead stdin
-        when (c == '\n') $ getChar >> return ()
-
-returnOnEOF :: a -> IO a -> IO a
-returnOnEOF x = handle $ \e -> if isEOFError e
-                                then return x
-                                else throwIO e
-
+getPrintableChar :: FileOps -> IO (Maybe Char)
+getPrintableChar fops = do
+    c <- unMaybeT $ getLocaleChar fops
+    case fmap isPrint c of
+        Just False -> getPrintableChar fops
+        _ -> return c
+        
 getInputCmdChar :: MonadException m => TermOps -> String -> InputT m (Maybe Char)
 getInputCmdChar tops prefix = runInputCmdT tops 
-        $ runCommandLoop tops prefix acceptOneChar
+        $ runCommandLoop tops prefix acceptOneChar emptyIM
 
 acceptOneChar :: Monad m => KeyCommand m InsertMode (Maybe Char)
 acceptOneChar = choiceCmd [useChar $ \c s -> change (insertChar c) s
@@ -245,6 +194,59 @@ acceptOneChar = choiceCmd [useChar $ \c s -> change (insertChar c) s
                           , ctrlChar 'l' +> clearScreenCmd >|>
                                         keyCommand acceptOneChar
                           , ctrlChar 'd' +> failCmd]
+
+----------
+-- Passwords
+
+{- | Reads one line of input, without displaying the input while it is being typed.
+When using terminal-style interaction, the masking character (if given) will replace each typed character.
+
+When using file-style interaction, this function turns off echoing while reading
+the line of input.
+-}
+ 
+getPassword :: MonadException m => Maybe Char -- ^ A masking character; e.g., @Just \'*\'@
+                            -> String -> InputT m (Maybe String)
+getPassword x = promptedInput
+                    (\tops prefix -> runInputCmdT tops
+                                        $ runCommandLoop tops prefix loop
+                                        $ Password [] x)
+                    (\fops -> let h_in = inputHandle fops
+                              in bracketSet (hGetEcho h_in) (hSetEcho h_in) False
+                                  $ unMaybeT $ getLocaleLine fops)
+ where
+    loop = choiceCmd [ simpleChar '\n' +> finish
+                     , simpleKey Backspace +> change deletePasswordChar
+                                                >|> loop'
+                     , useChar $ \c -> change (addPasswordChar c) >|> loop'
+                     , ctrlChar 'd' +> \p -> if null (passwordState p)
+                                                then failCmd p
+                                                else finish p
+                     , ctrlChar 'l' +> clearScreenCmd >|> loop'
+                     ]
+    loop' = keyCommand loop
+                        
+
+
+-------
+-- | Wrapper for input functions.
+promptedInput :: MonadIO m => (TermOps -> String -> InputT m a)
+                        -> (FileOps -> IO a)
+                        -> String -> InputT m a
+promptedInput doTerm doFile prompt = do
+    -- If other parts of the program have written text, make sure that it
+    -- appears before we interact with the user on the terminal.
+    liftIO $ hFlush stdout
+    rterm <- ask
+    case termOps rterm of
+        Right fops -> liftIO $ do
+                        putStrOut rterm prompt
+                        doFile fops
+        Left tops -> do
+            -- If the prompt contains newlines, print all but the last line.
+            let (lastLine,rest) = break (`elem` "\r\n") $ reverse prompt
+            outputStr $ reverse rest
+            doTerm tops $ reverse lastLine
 
 ------------
 -- Interrupt

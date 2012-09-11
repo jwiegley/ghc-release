@@ -1,4 +1,3 @@
-{-# LANGUAGE PatternGuards #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Haddock.Interface.ExtractFnArgDocs
@@ -9,7 +8,6 @@
 -- Stability   :  experimental
 -- Portability :  portable
 -----------------------------------------------------------------------------
-
 module Haddock.Interface.ExtractFnArgDocs (
   getDeclFnArgDocs, getSigFnArgDocs, getTypeFnArgDocs
 ) where

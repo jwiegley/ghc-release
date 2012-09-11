@@ -12,13 +12,6 @@ have a standard form, namely:
 - primitive operations
 
 \begin{code}
-{-# OPTIONS -fno-warn-missing-signatures #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---  <http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings>
--- for details
-
 module MkId (
         mkDictFunId, mkDefaultMethodId,
         mkDictSelId, 
@@ -32,26 +25,19 @@ module MkId (
 
         -- And some particular Ids; see below for why they are wired in
         wiredInIds, ghcPrimIds,
-        unsafeCoerceId, realWorldPrimId, voidArgId, nullAddrId, seqId,
-        lazyId, lazyIdKey,
-
-        mkRuntimeErrorApp, mkImpossibleExpr,
-        rEC_CON_ERROR_ID, iRREFUT_PAT_ERROR_ID, rUNTIME_ERROR_ID,
-        nON_EXHAUSTIVE_GUARDS_ERROR_ID, nO_METHOD_BINDING_ERROR_ID,
-        pAT_ERROR_ID, eRROR_ID, rEC_SEL_ERROR_ID,
-
-        unsafeCoerceName
+        unsafeCoerceName, unsafeCoerceId, realWorldPrimId, 
+        voidArgId, nullAddrId, seqId, lazyId, lazyIdKey
     ) where
 
 #include "HsVersions.h"
 
 import Rules
 import TysPrim
-import TysWiredIn
 import PrelRules
 import Type
 import Coercion
 import TcType
+import MkCore
 import CoreUtils	( exprType, mkCoerce )
 import CoreUnfold
 import Literal
@@ -65,7 +51,7 @@ import DataCon
 import Id
 import Var              ( Var, TyVar, mkCoVar, mkExportedLocalVar )
 import IdInfo
-import NewDemand
+import Demand
 import CoreSyn
 import Unique
 import PrelNames
@@ -118,24 +104,9 @@ is right here.
 \begin{code}
 wiredInIds :: [Id]
 wiredInIds
-  = [   
-
-    eRROR_ID,   -- This one isn't used anywhere else in the compiler
-                -- But we still need it in wiredInIds so that when GHC
-                -- compiles a program that mentions 'error' we don't
-                -- import its type from the interface file; we just get
-                -- the Id defined here.  Which has an 'open-tyvar' type.
-
-    rUNTIME_ERROR_ID,
-    iRREFUT_PAT_ERROR_ID,
-    nON_EXHAUSTIVE_GUARDS_ERROR_ID,
-    nO_METHOD_BINDING_ERROR_ID,
-    pAT_ERROR_ID,
-    rEC_CON_ERROR_ID,
-    rEC_SEL_ERROR_ID,
-
-    lazyId
-    ] ++ ghcPrimIds
+  =  [lazyId]
+  ++ errorIds		-- Defined in MkCore
+  ++ ghcPrimIds
 
 -- These Ids are exported from GHC.Prim
 ghcPrimIds :: [Id]
@@ -225,10 +196,8 @@ It's a bit more complicated if the data instance is a GADT as well!
 
    data instance T [a] where
         T1 :: forall b. b -> T [Maybe b]
-Hence
-   Co7T a :: T [a] ~ :R7T a
 
-Now we want
+Hence we translate to
 
         -- Wrapper
   $WT1 :: forall b. b -> T [Maybe b]
@@ -238,15 +207,18 @@ Now we want
         -- Worker
   T1 :: forall c b. (c ~ Maybe b) => b -> :R7T c
 
+        -- Coercion from family type to representation type
+  Co7T a :: T [a] ~ :R7T a
+
 \begin{code}
 mkDataConIds :: Name -> Name -> DataCon -> DataConIds
 mkDataConIds wrap_name wkr_name data_con
   | isNewTyCon tycon                    -- Newtype, only has a worker
   = DCIds Nothing nt_work_id                 
 
-  | any isMarkedStrict all_strict_marks      -- Algebraic, needs wrapper
-    || not (null eq_spec)                    -- NB: LoadIface.ifaceDeclSubBndrs
-    || isFamInstTyCon tycon                  --     depends on this test
+  | any isBanged all_strict_marks      -- Algebraic, needs wrapper
+    || not (null eq_spec)              -- NB: LoadIface.ifaceDeclSubBndrs
+    || isFamInstTyCon tycon            --     depends on this test
   = DCIds (Just alg_wrap_id) wrk_id
 
   | otherwise                                -- Algebraic, no wrapper
@@ -265,7 +237,7 @@ mkDataConIds wrap_name wkr_name data_con
     wkr_arity = dataConRepArity data_con
     wkr_info  = noCafIdInfo
                 `setArityInfo`          wkr_arity
-                `setAllStrictnessInfo`  Just wkr_sig
+                `setStrictnessInfo`  Just wkr_sig
                 `setUnfoldingInfo`      evaldUnfolding  -- Record that it's evaluated,
                                                         -- even if arity = 0
 
@@ -329,13 +301,13 @@ mkDataConIds wrap_name wkr_name data_con
                         -- It's important to specify the arity, so that partial
                         -- applications are treated as values
                     `setUnfoldingInfo`     wrap_unf
-                    `setAllStrictnessInfo` Just wrap_sig
+                    `setStrictnessInfo` Just wrap_sig
 
     all_strict_marks = dataConExStricts data_con ++ dataConStrictMarks data_con
     wrap_sig = mkStrictSig (mkTopDmdType arg_dmds cpr_info)
     arg_dmds = map mk_dmd all_strict_marks
-    mk_dmd str | isMarkedStrict str = evalDmd
-               | otherwise          = lazyDmd
+    mk_dmd str | isBanged str = evalDmd
+               | otherwise    = lazyDmd
         -- The Cpr info can be important inside INLINE rhss, where the
         -- wrapper constructor isn't inlined.
         -- And the argument strictness can be important too; we
@@ -345,8 +317,8 @@ mkDataConIds wrap_name wkr_name data_con
         --      ...(let w = C x in ...(w p q)...)...
         -- we want to see that w is strict in its two arguments
 
-    wrap_unf = mkImplicitUnfolding $ Note InlineMe $
-               mkLams wrap_tvs $ 
+    wrap_unf = mkInlineUnfolding (Just (length dict_args + length id_args)) wrap_rhs
+    wrap_rhs = mkLams wrap_tvs $ 
                mkLams eq_args $
                mkLams dict_args $ mkLams id_args $
                foldr mk_case con_app 
@@ -368,27 +340,26 @@ mkDataConIds wrap_name wkr_name data_con
 
     mkCoVarLocals i []     = ([],i)
     mkCoVarLocals i (x:xs) = let (ys,j) = mkCoVarLocals (i+1) xs
-                                 y      = mkCoVar (mkSysTvName (mkBuiltinUnique i) (fsLit "dc_co")) x
+                                 y      = mkCoVar (mkSysTvName (mkBuiltinUnique i) 
+                                                  (fsLit "dc_co")) x
                              in (y:ys,j)
 
     mk_case 
-           :: (Id, StrictnessMark)      -- Arg, strictness
+           :: (Id, HsBang)      -- Arg, strictness
            -> (Int -> [Id] -> CoreExpr) -- Body
            -> Int                       -- Next rep arg id
            -> [Id]                      -- Rep args so far, reversed
            -> CoreExpr
     mk_case (arg,strict) body i rep_args
           = case strict of
-                NotMarkedStrict -> body i (arg:rep_args)
-                MarkedStrict 
-                   | isUnLiftedType (idType arg) -> body i (arg:rep_args)
-                   | otherwise ->
-                        Case (Var arg) arg res_ty [(DEFAULT,[], body i (arg:rep_args))]
-
-                MarkedUnboxed
-                   -> unboxProduct i (Var arg) (idType arg) the_body 
+                HsNoBang -> body i (arg:rep_args)
+                HsUnpack -> unboxProduct i (Var arg) (idType arg) the_body 
                       where
                         the_body i con_args = body i (reverse con_args ++ rep_args)
+                _other  -- HsUnpackFailed and HsStrict
+                   | isUnLiftedType (idType arg) -> body i (arg:rep_args)
+                   | otherwise -> Case (Var arg) arg res_ty 
+                                       [(DEFAULT,[], body i (arg:rep_args))]
 
 mAX_CPR_SIZE :: Arity
 mAX_CPR_SIZE = 10
@@ -401,6 +372,7 @@ mAX_CPR_SIZE = 10
 --         by the caller.  So doing CPR for them may in fact make
 --         things worse.
 
+mkLocals :: Int -> [Type] -> ([Id], Int)
 mkLocals i tys = (zipWith mkTemplateLocal [i..i+n-1] tys, i+n)
                where
                  n = length tys
@@ -443,10 +415,12 @@ at the outside.  When dealing with classes it's very convenient to
 recover the original type signature from the class op selector.
 
 \begin{code}
-mkDictSelId :: Bool	-- True <=> don't include the unfolding
-			-- Little point on imports without -O, because the
-			-- dictionary itself won't be visible
- 	    -> Name -> Class -> Id
+mkDictSelId :: Bool	     -- True <=> don't include the unfolding
+			     -- Little point on imports without -O, because the
+			     -- dictionary itself won't be visible
+ 	    -> Name	     -- Name of one of the *value* selectors 
+	       		     -- (dictionary superclass or method)
+            -> Class -> Id
 mkDictSelId no_unf name clas
   = mkGlobalId (ClassOpId clas) name sel_ty info
   where
@@ -457,45 +431,82 @@ mkDictSelId no_unf name clas
         -- But it's type must expose the representation of the dictionary
         -- to get (say)         C a -> (a -> a)
 
-    info = noCafIdInfo
-                `setArityInfo`          1
-                `setAllStrictnessInfo`  Just strict_sig
-                `setUnfoldingInfo`      (if no_unf then noUnfolding
-						   else mkImplicitUnfolding rhs)
+    base_info = noCafIdInfo
+                `setArityInfo`      1
+                `setStrictnessInfo`  Just strict_sig
+                `setUnfoldingInfo`  (if no_unf then noUnfolding
+				     else mkImplicitUnfolding rhs)
+		   -- In module where class op is defined, we must add
+		   -- the unfolding, even though it'll never be inlined
+		   -- becuase we use that to generate a top-level binding
+		   -- for the ClassOp
 
-        -- We no longer use 'must-inline' on record selectors.  They'll
-        -- inline like crazy if they scrutinise a constructor
+    info = base_info    `setSpecInfo`       mkSpecInfo [rule]
+			`setInlinePragInfo` neverInlinePragma
+		-- Add a magic BuiltinRule, and never inline it
+		-- so that the rule is always available to fire.
+		-- See Note [ClassOp/DFun selection] in TcInstDcls
+
+    n_ty_args = length tyvars
+
+    -- This is the built-in rule that goes
+    -- 	    op (dfT d1 d2) --->  opT d1 d2
+    rule = BuiltinRule { ru_name = fsLit "Class op " `appendFS` 
+    	   	       	 	     occNameFS (getOccName name)
+                       , ru_fn    = name
+    	               , ru_nargs = n_ty_args + 1
+                       , ru_try   = dictSelRule val_index n_ty_args n_eq_args }
 
         -- The strictness signature is of the form U(AAAVAAAA) -> T
         -- where the V depends on which item we are selecting
         -- It's worth giving one, so that absence info etc is generated
         -- even if the selector isn't inlined
     strict_sig = mkStrictSig (mkTopDmdType [arg_dmd] TopRes)
-    arg_dmd | isNewTyCon tycon = evalDmd
-            | otherwise        = Eval (Prod [ if the_arg_id == id then evalDmd else Abs
-                                            | id <- arg_ids ])
+    arg_dmd | new_tycon = evalDmd
+            | otherwise = Eval (Prod [ if the_arg_id == id then evalDmd else Abs
+                                     | id <- arg_ids ])
 
-    tycon      = classTyCon clas
-    [data_con] = tyConDataCons tycon
-    tyvars     = dataConUnivTyVars data_con
-    arg_tys    = {- ASSERT( isVanillaDataCon data_con ) -} dataConRepArgTys data_con
-    eq_theta   = dataConEqTheta data_con
-    the_arg_id = assoc "MkId.mkDictSelId" (map idName (classSelIds clas) `zip` arg_ids) name
+    tycon      	   = classTyCon clas
+    new_tycon  	   = isNewTyCon tycon
+    [data_con] 	   = tyConDataCons tycon
+    tyvars     	   = dataConUnivTyVars data_con
+    arg_tys    	   = dataConRepArgTys data_con	-- Includes the dictionary superclasses
+    eq_theta   	   = dataConEqTheta data_con
+    n_eq_args      = length eq_theta
 
-    pred       = mkClassPred clas (mkTyVarTys tyvars)
-    dict_id    = mkTemplateLocal     1 $ mkPredTy pred
-    (eq_ids,n) = mkCoVarLocals 2 $ mkPredTys eq_theta
-    arg_ids    = mkTemplateLocalsNum n arg_tys
+    -- 'index' is a 0-index into the *value* arguments of the dictionary
+    val_index      = assoc "MkId.mkDictSelId" sel_index_prs name
+    sel_index_prs  = map idName (classAllSelIds clas) `zip` [0..]
 
-    mkCoVarLocals i []     = ([],i)
-    mkCoVarLocals i (x:xs) = let (ys,j) = mkCoVarLocals (i+1) xs
-                                 y      = mkCoVar (mkSysTvName (mkBuiltinUnique i) (fsLit "dc_co")) x
-                             in (y:ys,j)
+    the_arg_id     = arg_ids !! val_index
+    pred       	   = mkClassPred clas (mkTyVarTys tyvars)
+    dict_id    	   = mkTemplateLocal 1 $ mkPredTy pred
+    arg_ids    	   = mkTemplateLocalsNum 2 arg_tys
+    eq_ids     	   = map mkWildEvBinder eq_theta
 
     rhs = mkLams tyvars  (Lam dict_id   rhs_body)
-    rhs_body | isNewTyCon tycon = unwrapNewTypeBody tycon (map mkTyVarTy tyvars) (Var dict_id)
-             | otherwise        = Case (Var dict_id) dict_id (idType the_arg_id)
-                                       [(DataAlt data_con, eq_ids ++ arg_ids, Var the_arg_id)]
+    rhs_body | new_tycon = unwrapNewTypeBody tycon (map mkTyVarTy tyvars) (Var dict_id)
+             | otherwise = Case (Var dict_id) dict_id (idType the_arg_id)
+                                [(DataAlt data_con, eq_ids ++ arg_ids, Var the_arg_id)]
+
+dictSelRule :: Int -> Arity -> Arity 
+            -> IdUnfoldingFun -> [CoreExpr] -> Maybe CoreExpr
+-- Oh, very clever
+--       sel_i t1..tk (df s1..sn d1..dm) = op_i_helper s1..sn d1..dm
+--       sel_i t1..tk (D t1..tk op1 ... opm) = opi
+--
+-- NB: the data constructor has the same number of type and 
+--     coercion args as the selector
+--
+-- This only works for *value* superclasses
+-- There are no selector functions for equality superclasses
+dictSelRule val_index n_ty_args n_eq_args id_unf args
+  | (dict_arg : _) <- drop n_ty_args args
+  , Just (_, _, con_args) <- exprIsConApp_maybe id_unf dict_arg
+  , let val_args = drop n_eq_args con_args
+  = Just (val_args !! val_index)
+  | otherwise
+  = Nothing
 \end{code}
 
 
@@ -618,7 +629,7 @@ mkReboxingAlt us con args rhs
 
     -- Type variable case
     go (arg:args) stricts us 
-      | isTyVar arg
+      | isTyCoVar arg
       = let (binds, args') = go args stricts us
         in  (binds, arg:args')
 
@@ -726,7 +737,7 @@ mkPrimOpId prim_op
     info = noCafIdInfo
            `setSpecInfo`          mkSpecInfo (primOpRules prim_op name)
            `setArityInfo`         arity
-           `setAllStrictnessInfo` Just strict_sig
+           `setStrictnessInfo` Just strict_sig
 
 -- For each ccall we manufacture a separate CCallOpId, giving it
 -- a fresh unique, a type that is correct for this particular ccall,
@@ -752,7 +763,7 @@ mkFCallId uniq fcall ty
 
     info = noCafIdInfo
            `setArityInfo`         arity
-           `setAllStrictnessInfo` Just strict_sig
+           `setStrictnessInfo` Just strict_sig
 
     (_, tau)     = tcSplitForAllTys ty
     (arg_tys, _) = tcSplitFunTys tau
@@ -775,6 +786,7 @@ mkBreakPointOpId :: Unique -> Module -> TickBoxId -> Id
 mkBreakPointOpId uniq mod ix = mkTickBox' uniq mod ix ty
  where ty = mkSigmaTy [openAlphaTyVar] [] openAlphaTy
 
+mkTickBox' :: Unique -> Module -> TickBoxId -> Type -> Id
 mkTickBox' uniq mod ix ty = mkGlobalId (TickBoxOpId tickbox) name ty info    
   where
     tickbox = TickBox mod ix
@@ -815,7 +827,10 @@ BUT make sure they are *exported* LocalIds (mkExportedLocalId) so
 that they aren't discarded by the occurrence analyser.
 
 \begin{code}
-mkDefaultMethodId dm_name ty = mkExportedLocalId dm_name ty
+mkDefaultMethodId :: Id		-- Selector Id
+		  -> Name	-- Default method name
+		  -> Id		-- Default method Id
+mkDefaultMethodId sel_id dm_name = mkExportedLocalId dm_name (idType sel_id)
 
 mkDictFunId :: Name      -- Name to use for the dict fun;
             -> [TyVar]
@@ -825,8 +840,9 @@ mkDictFunId :: Name      -- Name to use for the dict fun;
             -> Id
 
 mkDictFunId dfun_name inst_tyvars dfun_theta clas inst_tys
-  = mkExportedLocalVar DFunId dfun_name dfun_ty vanillaIdInfo
+  = mkExportedLocalVar (DFunId is_nt) dfun_name dfun_ty vanillaIdInfo
   where
+    is_nt = isNewTyCon (classTyCon clas)
     dfun_ty = mkSigmaTy inst_tyvars dfun_theta (mkDictTy clas inst_tys)
 \end{code}
 
@@ -853,42 +869,29 @@ they can unify with both unlifted and lifted types.  Hence we provide
 another gun with which to shoot yourself in the foot.
 
 \begin{code}
-mkWiredInIdName mod fs uniq id
- = mkWiredInName mod (mkOccNameFS varName fs) uniq (AnId id) UserSyntax
-
+lazyIdName, unsafeCoerceName, nullAddrName, seqName, realWorldName :: Name
 unsafeCoerceName = mkWiredInIdName gHC_PRIM (fsLit "unsafeCoerce#") unsafeCoerceIdKey  unsafeCoerceId
 nullAddrName     = mkWiredInIdName gHC_PRIM (fsLit "nullAddr#")     nullAddrIdKey      nullAddrId
 seqName          = mkWiredInIdName gHC_PRIM (fsLit "seq")           seqIdKey           seqId
 realWorldName    = mkWiredInIdName gHC_PRIM (fsLit "realWorld#")    realWorldPrimIdKey realWorldPrimId
 lazyIdName       = mkWiredInIdName gHC_BASE (fsLit "lazy")         lazyIdKey           lazyId
-
-errorName                = mkWiredInIdName gHC_ERR (fsLit "error")            errorIdKey eRROR_ID
-recSelErrorName          = mkWiredInIdName cONTROL_EXCEPTION_BASE (fsLit "recSelError")     recSelErrorIdKey rEC_SEL_ERROR_ID
-runtimeErrorName         = mkWiredInIdName cONTROL_EXCEPTION_BASE (fsLit "runtimeError")    runtimeErrorIdKey rUNTIME_ERROR_ID
-irrefutPatErrorName      = mkWiredInIdName cONTROL_EXCEPTION_BASE (fsLit "irrefutPatError") irrefutPatErrorIdKey iRREFUT_PAT_ERROR_ID
-recConErrorName          = mkWiredInIdName cONTROL_EXCEPTION_BASE (fsLit "recConError")     recConErrorIdKey rEC_CON_ERROR_ID
-patErrorName             = mkWiredInIdName cONTROL_EXCEPTION_BASE (fsLit "patError")         patErrorIdKey pAT_ERROR_ID
-noMethodBindingErrorName = mkWiredInIdName cONTROL_EXCEPTION_BASE (fsLit "noMethodBindingError")
-                                           noMethodBindingErrorIdKey nO_METHOD_BINDING_ERROR_ID
-nonExhaustiveGuardsErrorName 
-  = mkWiredInIdName cONTROL_EXCEPTION_BASE (fsLit "nonExhaustiveGuardsError") 
-                    nonExhaustiveGuardsErrorIdKey nON_EXHAUSTIVE_GUARDS_ERROR_ID
 \end{code}
 
 \begin{code}
 ------------------------------------------------
 -- unsafeCoerce# :: forall a b. a -> b
+unsafeCoerceId :: Id
 unsafeCoerceId
   = pcMiscPrelId unsafeCoerceName ty info
   where
     info = noCafIdInfo `setUnfoldingInfo` mkCompulsoryUnfolding rhs
            
 
-    ty  = mkForAllTys [openAlphaTyVar,openBetaTyVar]
-                      (mkFunTy openAlphaTy openBetaTy)
-    [x] = mkTemplateLocals [openAlphaTy]
-    rhs = mkLams [openAlphaTyVar,openBetaTyVar,x] $
-          Cast (Var x) (mkUnsafeCoercion openAlphaTy openBetaTy)
+    ty  = mkForAllTys [argAlphaTyVar,openBetaTyVar]
+                      (mkFunTy argAlphaTy openBetaTy)
+    [x] = mkTemplateLocals [argAlphaTy]
+    rhs = mkLams [argAlphaTyVar,openBetaTyVar,x] $
+          Cast (Var x) (mkUnsafeCoercion argAlphaTy openBetaTy)
 
 ------------------------------------------------
 nullAddrId :: Id
@@ -905,12 +908,27 @@ seqId :: Id	-- See Note [seqId magic]
 seqId = pcMiscPrelId seqName ty info
   where
     info = noCafIdInfo `setUnfoldingInfo` mkCompulsoryUnfolding rhs
+                       `setSpecInfo` mkSpecInfo [seq_cast_rule]
            
 
-    ty  = mkForAllTys [alphaTyVar,openBetaTyVar]
-                      (mkFunTy alphaTy (mkFunTy openBetaTy openBetaTy))
-    [x,y] = mkTemplateLocals [alphaTy, openBetaTy]
-    rhs = mkLams [alphaTyVar,openBetaTyVar,x,y] (Case (Var x) x openBetaTy [(DEFAULT, [], Var y)])
+    ty  = mkForAllTys [alphaTyVar,argBetaTyVar]
+                      (mkFunTy alphaTy (mkFunTy argBetaTy argBetaTy))
+    [x,y] = mkTemplateLocals [alphaTy, argBetaTy]
+    rhs = mkLams [alphaTyVar,argBetaTyVar,x,y] (Case (Var x) x argBetaTy [(DEFAULT, [], Var y)])
+
+    -- See Note [Built-in RULES for seq]
+    seq_cast_rule = BuiltinRule { ru_name  = fsLit "seq of cast"
+                                , ru_fn    = seqName
+                                , ru_nargs = 4
+                                , ru_try   = match_seq_of_cast
+                                }
+
+match_seq_of_cast :: IdUnfoldingFun -> [CoreExpr] -> Maybe CoreExpr
+    -- See Note [Built-in RULES for seq]
+match_seq_of_cast _ [Type _, Type res_ty, Cast scrut co, expr]
+  = Just (Var seqId `mkApps` [Type (fst (coercionKind co)), Type res_ty,
+                              scrut, expr])
+match_seq_of_cast _ _ = Nothing
 
 ------------------------------------------------
 lazyId :: Id	-- See Note [lazyId magic]
@@ -922,7 +940,7 @@ lazyId = pcMiscPrelId lazyIdName ty info
 
 Note [seqId magic]
 ~~~~~~~~~~~~~~~~~~
-'seq' is special in several ways.  
+'GHC.Prim.seq' is special in several ways. 
 
 a) Its second arg can have an unboxed type
       x `seq` (v +# w)
@@ -932,10 +950,12 @@ b) Its fixity is set in LoadIface.ghcPrimIface
 c) It has quite a bit of desugaring magic. 
    See DsUtils.lhs Note [Desugaring seq (1)] and (2) and (3)
 
-d) There is some special rule handing: Note [RULES for seq]
+d) There is some special rule handing: Note [User-defined RULES for seq]
 
-Note [Rules for seq]
-~~~~~~~~~~~~~~~~~~~~
+e) See Note [Typing rule for seq] in TcExpr.
+
+Note [User-defined RULES for seq]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Roman found situations where he had
       case (f n) of _ -> e
 where he knew that f (which was strict in n) would terminate if n did.
@@ -956,6 +976,20 @@ correctness of the rule is up to you.
 To make this work, we need to be careful that the magical desugaring
 done in Note [seqId magic] item (c) is *not* done on the LHS of a rule.
 Or rather, we arrange to un-do it, in DsBinds.decomposeRuleLhs.
+
+Note [Built-in RULES for seq]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We also have the following built-in rule for seq
+
+  seq (x `cast` co) y = seq x y
+
+This eliminates unnecessary casts and also allows other seq rules to
+match more often.  Notably,     
+
+   seq (f x `cast` co) y  -->  seq (f x) y
+  
+and now a user-defined rule for seq (see Note [User-defined RULES for seq])
+may fire.
 
 
 Note [lazyId magic]
@@ -990,6 +1024,7 @@ E.g.
 This comes up in strictness analysis
 
 \begin{code}
+realWorldPrimId :: Id
 realWorldPrimId -- :: State# RealWorld
   = pcMiscPrelId realWorldName realWorldStatePrimTy
                  (noCafIdInfo `setUnfoldingInfo` evaldUnfolding)
@@ -1004,78 +1039,6 @@ voidArgId       -- :: State# RealWorld
 \end{code}
 
 
-%************************************************************************
-%*                                                                      *
-\subsection[PrelVals-error-related]{@error@ and friends; @trace@}
-%*                                                                      *
-%************************************************************************
-
-GHC randomly injects these into the code.
-
-@patError@ is just a version of @error@ for pattern-matching
-failures.  It knows various ``codes'' which expand to longer
-strings---this saves space!
-
-@absentErr@ is a thing we put in for ``absent'' arguments.  They jolly
-well shouldn't be yanked on, but if one is, then you will get a
-friendly message from @absentErr@ (rather than a totally random
-crash).
-
-@parError@ is a special version of @error@ which the compiler does
-not know to be a bottoming Id.  It is used in the @_par_@ and @_seq_@
-templates, but we don't ever expect to generate code for it.
-
-\begin{code}
-mkRuntimeErrorApp 
-        :: Id           -- Should be of type (forall a. Addr# -> a)
-                        --      where Addr# points to a UTF8 encoded string
-        -> Type         -- The type to instantiate 'a'
-        -> String       -- The string to print
-        -> CoreExpr
-
-mkRuntimeErrorApp err_id res_ty err_msg 
-  = mkApps (Var err_id) [Type res_ty, err_string]
-  where
-    err_string = Lit (mkMachString err_msg)
-
-mkImpossibleExpr :: Type -> CoreExpr
-mkImpossibleExpr res_ty
-  = mkRuntimeErrorApp rUNTIME_ERROR_ID res_ty "Impossible case alternative"
-
-rEC_SEL_ERROR_ID                = mkRuntimeErrorId recSelErrorName
-rUNTIME_ERROR_ID                = mkRuntimeErrorId runtimeErrorName
-iRREFUT_PAT_ERROR_ID            = mkRuntimeErrorId irrefutPatErrorName
-rEC_CON_ERROR_ID                = mkRuntimeErrorId recConErrorName
-pAT_ERROR_ID                    = mkRuntimeErrorId patErrorName
-nO_METHOD_BINDING_ERROR_ID      = mkRuntimeErrorId noMethodBindingErrorName
-nON_EXHAUSTIVE_GUARDS_ERROR_ID  = mkRuntimeErrorId nonExhaustiveGuardsErrorName
-
--- The runtime error Ids take a UTF8-encoded string as argument
-
-mkRuntimeErrorId :: Name -> Id
-mkRuntimeErrorId name = pc_bottoming_Id name runtimeErrorTy
-
-runtimeErrorTy :: Type
-runtimeErrorTy = mkSigmaTy [openAlphaTyVar] [] (mkFunTy addrPrimTy openAlphaTy)
-\end{code}
-
-\begin{code}
-eRROR_ID = pc_bottoming_Id errorName errorTy
-
-errorTy  :: Type
-errorTy  = mkSigmaTy [openAlphaTyVar] [] (mkFunTys [mkListTy charTy] openAlphaTy)
-    -- Notice the openAlphaTyVar.  It says that "error" can be applied
-    -- to unboxed as well as boxed types.  This is OK because it never
-    -- returns, so the return type is irrelevant.
-\end{code}
-
-
-%************************************************************************
-%*                                                                      *
-\subsection{Utilities}
-%*                                                                      *
-%************************************************************************
-
 \begin{code}
 pcMiscPrelId :: Name -> Type -> IdInfo -> Id
 pcMiscPrelId name ty info
@@ -1085,26 +1048,4 @@ pcMiscPrelId name ty info
     -- random calls to GHCbase.unpackPS__.  If GHCbase is the module
     -- being compiled, then it's just a matter of luck if the definition
     -- will be in "the right place" to be in scope.
-
-pc_bottoming_Id :: Name -> Type -> Id
--- Function of arity 1, which diverges after being given one argument
-pc_bottoming_Id name ty
- = pcMiscPrelId name ty bottoming_info
- where
-    bottoming_info = vanillaIdInfo `setAllStrictnessInfo` Just strict_sig
-				   `setArityInfo`         1
-			-- Make arity and strictness agree
-
-        -- Do *not* mark them as NoCafRefs, because they can indeed have
-        -- CAF refs.  For example, pAT_ERROR_ID calls GHC.Err.untangle,
-        -- which has some CAFs
-        -- In due course we may arrange that these error-y things are
-        -- regarded by the GC as permanently live, in which case we
-        -- can give them NoCaf info.  As it is, any function that calls
-        -- any pc_bottoming_Id will itself have CafRefs, which bloats
-        -- SRTs.
-
-    strict_sig = mkStrictSig (mkTopDmdType [evalDmd] BotRes)
-        -- These "bottom" out, no matter what their arguments
 \end{code}
-

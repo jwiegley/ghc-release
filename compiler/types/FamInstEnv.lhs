@@ -88,15 +88,23 @@ pprFamInst famInst
 	2 (ptext (sLit "--") <+> pprNameLoc (getName famInst))
 
 pprFamInstHdr :: FamInst -> SDoc
-pprFamInstHdr (FamInst {fi_fam = fam, fi_tys = tys, fi_tycon = tycon})
-  = pprTyConSort <+> pprHead
+pprFamInstHdr (FamInst {fi_tycon = rep_tc})
+  = pprTyConSort <+> pp_instance <+> pprHead
   where
-    pprHead = pprTypeApp fam tys
-    pprTyConSort | isDataTyCon     tycon = ptext (sLit "data instance")
-		 | isNewTyCon      tycon = ptext (sLit "newtype instance")
-		 | isSynTyCon      tycon = ptext (sLit "type instance")
-		 | isAbstractTyCon tycon = ptext (sLit "data instance")
-		 | otherwise	         = panic "FamInstEnv.pprFamInstHdr"
+    Just (fam_tc, tys) = tyConFamInst_maybe rep_tc 
+    
+    -- For *associated* types, say "type T Int = blah" 
+    -- For *top level* type instances, say "type instance T Int = blah"
+    pp_instance 
+      | isTyConAssoc fam_tc = empty
+      | otherwise           = ptext (sLit "instance")
+
+    pprHead = pprTypeApp fam_tc tys
+    pprTyConSort | isDataTyCon     rep_tc = ptext (sLit "data")
+		 | isNewTyCon      rep_tc = ptext (sLit "newtype")
+		 | isSynTyCon      rep_tc = ptext (sLit "type")
+		 | isAbstractTyCon rep_tc = ptext (sLit "data")
+		 | otherwise	          = panic "FamInstEnv.pprFamInstHdr"
 
 pprFamInsts :: [FamInst] -> SDoc
 pprFamInsts finsts = vcat (map pprFamInst finsts)
@@ -147,13 +155,31 @@ mkImportedFamInst fam mb_tcs tycon
 %*									*
 %************************************************************************
 
-InstEnv maps a family name to the list of known instances for that family.
+Note [FamInstEnv]
+~~~~~~~~~~~~~~~~~~~~~
+A FamInstEnv maps a family name to the list of known instances for that family.
+
+The same FamInstEnv includes both 'data family' and 'type family' instances.
+Type families are reduced during type inference, but not data families;
+the user explains when to use a data family instance by using contructors
+and pattern matching.
+
+Neverthless it is still useful to have data families in the FamInstEnv:
+
+ - For finding overlaps and conflicts
+
+ - For finding the representation type...see FamInstEnv.topNormaliseType
+   and its call site in Simplify
+
+ - In standalone deriving instance Eq (T [Int]) we need to find the 
+   representation type for T [Int]
 
 \begin{code}
 type FamInstEnv = UniqFM FamilyInstEnv	-- Maps a family to its instances
+     -- See Note [FamInstEnv]
 
 type FamInstEnvs = (FamInstEnv, FamInstEnv)
- 	-- External package inst-env, Home-package inst-env
+     -- External package inst-env, Home-package inst-env
 
 data FamilyInstEnv
   = FamIE [FamInst]	-- The instances for a particular family, in any order
@@ -225,6 +251,7 @@ lookupFamInstEnv
     :: FamInstEnvs
     -> TyCon -> [Type]		-- What we are looking for
     -> [FamInstMatch] 	        -- Successful matches
+-- Precondition: the tycon is saturated (or over-saturated)
 
 lookupFamInstEnv
    = lookup_fam_inst_env match True
@@ -242,6 +269,8 @@ lookupFamInstEnvConflicts
 -- to find conflicting matches
 -- The skolem tyvars are needed because we don't have a 
 -- unique supply to hand
+--
+-- Precondition: the tycon is saturated (or over-saturated)
 
 lookupFamInstEnvConflicts envs fam_inst skol_tvs
   = lookup_fam_inst_env my_unify False envs fam tys'
@@ -306,11 +335,14 @@ lookup_fam_inst_env 	      -- The worker, local to this module
     -> FamInstEnvs
     -> TyCon -> [Type]		-- What we are looking for
     -> [FamInstMatch] 	        -- Successful matches
+
+-- Precondition: the tycon is saturated (or over-saturated)
+
 lookup_fam_inst_env match_fun one_sided (pkg_ie, home_ie) fam tys
-  | not (isOpenTyCon fam) 
+  | not (isFamilyTyCon fam) 
   = []
   | otherwise
-  = ASSERT( n_tys >= arity )	-- Family type applications must be saturated
+  = ASSERT2( n_tys >= arity, ppr fam <+> ppr tys )	-- Family type applications must be saturated
     home_matches ++ pkg_matches
   where
     home_matches = lookup home_ie 
@@ -416,7 +448,7 @@ topNormaliseType env ty
 		   | otherwise		 = rec_nts
 
     go rec_nts (TyConApp tc tys)		-- Expand open tycons
-	| isOpenTyCon tc
+	| isFamilyTyCon tc
 	, (ACo co, ty) <- normaliseTcApp env tc tys
 	= 	-- The ACo says "something happened"
 		-- Note that normaliseType fully normalises, but it has do to so
@@ -434,25 +466,28 @@ topNormaliseType env ty
 ---------------
 normaliseTcApp :: FamInstEnvs -> TyCon -> [Type] -> (CoercionI, Type)
 normaliseTcApp env tc tys
-  = let	-- First normalise the arg types so that they'll match 
-	-- when we lookup in in the instance envt
-	(cois, ntys) = mapAndUnzip (normaliseType env) tys
-	tycon_coi    = mkTyConAppCoI tc ntys cois
-    in 	-- Now try the top-level redex
-    case lookupFamInstEnv env tc ntys of
-		-- A matching family instance exists
-	[(fam_inst, tys)] -> (fix_coi, nty)
-	    where
-		rep_tc         = famInstTyCon fam_inst
-		co_tycon       = expectJust "lookupFamInst" (tyConFamilyCoercion_maybe rep_tc)
-		co	       = mkTyConApp co_tycon tys
-		first_coi      = mkTransCoI tycon_coi (ACo co)
-		(rest_coi,nty) = normaliseType env (mkTyConApp rep_tc tys)
-		fix_coi        = mkTransCoI first_coi rest_coi
+  | isFamilyTyCon tc
+  , tyConArity tc <= length tys	   -- Unsaturated data families are possible
+  , [(fam_inst, inst_tys)] <- lookupFamInstEnv env tc ntys 
+  = let    -- A matching family instance exists
+	rep_tc         	= famInstTyCon fam_inst
+	co_tycon       	= expectJust "lookupFamInst" (tyConFamilyCoercion_maybe rep_tc)
+	co	       	= mkTyConApp co_tycon inst_tys
+	first_coi      	= mkTransCoI tycon_coi (ACo co)
+	(rest_coi, nty) = normaliseType env (mkTyConApp rep_tc inst_tys)
+	fix_coi         = mkTransCoI first_coi rest_coi
+    in 
+    (fix_coi, nty)
 
-		-- No unique matching family instance exists;
-		-- we do not do anything
-	_ -> (tycon_coi, TyConApp tc ntys)
+  | otherwise
+  = (tycon_coi, TyConApp tc ntys)
+
+  where
+	-- Normalise the arg types so that they'll match 
+	-- when we lookup in in the instance envt
+    (cois, ntys) = mapAndUnzip (normaliseType env) tys
+    tycon_coi    = mkTyConAppCoI tc cois
+
 ---------------
 normaliseType :: FamInstEnvs 		-- environment with family instances
 	      -> Type  			-- old type
@@ -468,16 +503,16 @@ normaliseType env (TyConApp tc tys)
 normaliseType env (AppTy ty1 ty2)
   = let (coi1,nty1) = normaliseType env ty1
         (coi2,nty2) = normaliseType env ty2
-    in  (mkAppTyCoI nty1 coi1 nty2 coi2, AppTy nty1 nty2)
+    in  (mkAppTyCoI coi1 coi2, mkAppTy nty1 nty2)
 normaliseType env (FunTy ty1 ty2)
   = let (coi1,nty1) = normaliseType env ty1
         (coi2,nty2) = normaliseType env ty2
-    in  (mkFunTyCoI nty1 coi1 nty2 coi2, FunTy nty1 nty2)
+    in  (mkFunTyCoI coi1 coi2, mkFunTy nty1 nty2)
 normaliseType env (ForAllTy tyvar ty1)
   = let (coi,nty1) = normaliseType env ty1
-    in  (mkForAllTyCoI tyvar coi,ForAllTy tyvar nty1)
+    in  (mkForAllTyCoI tyvar coi, ForAllTy tyvar nty1)
 normaliseType _   ty@(TyVarTy _)
-  = (IdCo,ty)
+  = (IdCo ty,ty)
 normaliseType env (PredTy predty)
   = normalisePred env predty
 
@@ -485,12 +520,12 @@ normaliseType env (PredTy predty)
 normalisePred :: FamInstEnvs -> PredType -> (CoercionI,Type)
 normalisePred env (ClassP cls tys)
   =	let (cois,tys') = mapAndUnzip (normaliseType env) tys
-	in  (mkClassPPredCoI cls tys' cois, PredTy $ ClassP cls tys')
+	in  (mkClassPPredCoI cls cois, PredTy $ ClassP cls tys')
 normalisePred env (IParam ipn ty)
   = 	let (coi,ty') = normaliseType env ty
 	in  (mkIParamPredCoI ipn coi, PredTy $ IParam ipn ty')
 normalisePred env (EqPred ty1 ty2)
   = 	let (coi1,ty1') = normaliseType env ty1
             (coi2,ty2') = normaliseType env ty2
-	in  (mkEqPredCoI ty1' coi1 ty2' coi2, PredTy $ EqPred ty1' ty2')
+	in  (mkEqPredCoI coi1 coi2, PredTy $ EqPred ty1' ty2')
 \end{code}

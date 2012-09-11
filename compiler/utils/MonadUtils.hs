@@ -8,6 +8,8 @@ module MonadUtils
         
         , MonadFix(..)
         , MonadIO(..)
+	
+  	, ID, runID
         
         , liftIO1, liftIO2, liftIO3, liftIO4
 
@@ -17,10 +19,13 @@ module MonadUtils
         , mapSndM
         , concatMapM
         , mapMaybeM
+	, fmapMaybeM, fmapEitherM
         , anyM, allM
         , foldlM, foldlM_, foldrM
         , maybeMapM
         ) where
+
+import Outputable 
 
 ----------------------------------------------------------------------------------------
 -- Detection of available libraries
@@ -41,6 +46,20 @@ import Control.Monad.Trans
 #endif
 import Control.Monad
 import Control.Monad.Fix
+
+----------------------------------------------------------------------------------------
+-- The ID monad
+----------------------------------------------------------------------------------------
+
+newtype ID a = ID a
+instance Monad ID where
+  return x     = ID x
+  (ID x) >>= f = f x
+  _ >> y       = y
+  fail s       = panic s
+
+runID :: ID a -> a
+runID (ID x) = x
 
 ----------------------------------------------------------------------------------------
 -- MTL
@@ -129,6 +148,16 @@ concatMapM f xs = liftM concat (mapM f xs)
 -- | Monadic version of mapMaybe
 mapMaybeM :: (Monad m) => (a -> m (Maybe b)) -> [a] -> m [b]
 mapMaybeM f = liftM catMaybes . mapM f
+
+-- | Monadic version of fmap
+fmapMaybeM :: (Monad m) => (a -> m b) -> Maybe a -> m (Maybe b)
+fmapMaybeM _ Nothing  = return Nothing
+fmapMaybeM f (Just x) = f x >>= (return . Just)
+
+-- | Monadic version of fmap
+fmapEitherM :: Monad m => (a -> m b) -> (c -> m d) -> Either a c -> m (Either b d)
+fmapEitherM fl _ (Left  a) = fl a >>= (return . Left)
+fmapEitherM _ fr (Right b) = fr b >>= (return . Right)
 
 -- | Monadic version of 'any', aborts the computation at the first @True@ value
 anyM :: Monad m => (a -> m Bool) -> [a] -> m Bool

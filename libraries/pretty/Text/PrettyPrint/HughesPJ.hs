@@ -420,7 +420,7 @@ Laws for nest
 ~~~~~~~~~~~~~
 <n1>    nest 0 x                = x
 <n2>    nest k (nest k' x)      = nest (k+k') x
-<n3>    nest k (x <> y)         = nest k z <> nest k y
+<n3>    nest k (x <> y)         = nest k x <> nest k y
 <n4>    nest k (x $$ y)         = nest k x $$ nest k y
 <n5>    nest k empty            = empty
 <n6>    x <> nest k y           = x <> y, if x non-empty
@@ -494,7 +494,7 @@ braces p        = char '{' <> p <> char '}'
 -- lazy list versions
 hcat = reduceAB . foldr (beside_' False) empty
 hsep = reduceAB . foldr (beside_' True)  empty
-vcat = reduceAB . foldr (above_' True) empty
+vcat = reduceAB . foldr (above_' False) empty
 
 beside_' :: Bool -> Doc -> Doc -> Doc
 beside_' _ p Empty = p

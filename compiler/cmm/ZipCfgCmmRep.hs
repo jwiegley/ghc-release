@@ -1,3 +1,8 @@
+#if __GLASGOW_HASKELL__ >= 611
+{-# OPTIONS_GHC -XNoMonoLocalBinds #-}
+#endif
+-- Norman likes local bindings
+
 -- This module is pure representation and should be imported only by
 -- clients that need to manipulate representation and know what
 -- they're doing.  Clients that need to create flow graphs should
@@ -114,13 +119,13 @@ data Last
 	  -- the call goes into a loop.
 	}
 
-data MidCallTarget	-- The target of a MidUnsafeCall
-  = ForeignTarget 	-- A foreign procedure
-	CmmExpr			-- Its address
-	ForeignConvention	-- Its calling convention
+data MidCallTarget        -- The target of a MidUnsafeCall
+  = ForeignTarget         -- A foreign procedure
+        CmmExpr                  -- Its address
+        ForeignConvention        -- Its calling convention
 
-  | PrimTarget		-- A possibly-side-effecting machine operation
-	CallishMachOp		-- Which one
+  | PrimTarget            -- A possibly-side-effecting machine operation
+        CallishMachOp            -- Which one
   deriving Eq
 
 data Convention
@@ -277,8 +282,8 @@ instance UserOfLocalRegs MidCallTarget where
   foldRegsUsed f  z (ForeignTarget e _) = foldRegsUsed f z e
 
 instance UserOfSlots MidCallTarget where
+  foldSlotsUsed  f z (ForeignTarget e _) = foldSlotsUsed f z e
   foldSlotsUsed _f z (PrimTarget _)      = z
-  foldSlotsUsed f  z (ForeignTarget e _) = foldSlotsUsed f z e
 
 instance (UserOfLocalRegs a) => UserOfLocalRegs (Maybe a) where
   foldRegsUsed f z (Just x) = foldRegsUsed f z x
@@ -459,10 +464,9 @@ pprMiddle stmt = pp_stmt <+> pp_debug
     	-- call "ccall" foo(x, y)[r1, r2];
     	-- ToDo ppr volatile
     	MidForeignCall safety target results args ->
-    	    hsep [ if null results
-    	              then empty
-    	              else parens (commafy $ map ppr results) <+> equals,
-                      ppr_safety safety,
+    	    hsep [ ppUnless (null results) $
+    	              parens (commafy $ map ppr results) <+> equals,
+                   ppr_safety safety,
     	           ptext $ sLit "call", 
     	           ppr_call_target target <> parens (commafy $ map ppr args) <> semi]
 
@@ -485,7 +489,12 @@ ppr_safety Unsafe         = text "unsafe"
 
 ppr_call_target :: MidCallTarget -> SDoc
 ppr_call_target (ForeignTarget fn c) = ppr_fc c <+> ppr_target fn
-ppr_call_target (PrimTarget op)      = ppr (CmmLabel (mkForeignLabel (mkFastString (show op)) Nothing False IsFunction))
+ppr_call_target (PrimTarget op) 
+ -- HACK: We're just using a ForeignLabel to get this printed, the label
+ --	  might not really be foreign.
+ = ppr (CmmLabel (mkForeignLabel
+ 			(mkFastString (show op)) 
+			Nothing ForeignLabelInThisPackage IsFunction))
 
 ppr_target :: CmmExpr -> SDoc
 ppr_target t@(CmmLit _) = ppr t

@@ -46,7 +46,6 @@ import GHC.IORef
 import GHC.STRef        ( STRef(..) )
 import GHC.Ptr          ( Ptr(..), FunPtr(..) )
 import GHC.Err
-import GHC.Num          ( fromInteger )
 
 #include "Typeable.h"
 
@@ -100,7 +99,7 @@ instance Show (ForeignPtr a) where
     showsPrec p f = showsPrec p (unsafeForeignPtrToPtr f)
 
 
--- |A Finalizer is represented as a pointer to a foreign function that, at
+-- |A finalizer is represented as a pointer to a foreign function that, at
 -- finalisation time, gets as an argument a plain pointer variant of the
 -- foreign pointer that the finalizer is associated with.
 -- 
@@ -222,7 +221,7 @@ addForeignPtrFinalizer (FunPtr fp) (ForeignPtr p c) = case c of
   PlainForeignPtr r -> f r >> return ()
   MallocPtr     _ r -> f r >> return ()
   _ -> error "GHC.ForeignPtr: attempt to add a finalizer to a plain pointer"
-  where
+ where
     f r =
       noMixing CFinalizers r $
         IO $ \s ->
@@ -232,7 +231,7 @@ addForeignPtrFinalizer (FunPtr fp) (ForeignPtr p c) = case c of
 
 addForeignPtrFinalizerEnv ::
   FinalizerEnvPtr env a -> Ptr env -> ForeignPtr a -> IO ()
--- ^ like 'addForeignPtrFinalizerEnv' but allows the finalizer to be
+-- ^ Like 'addForeignPtrFinalizerEnv' but allows the finalizer to be
 -- passed an additional environment parameter to be passed to the
 -- finalizer.  The environment passed to the finalizer is fixed by the
 -- second argument to 'addForeignPtrFinalizerEnv'
@@ -240,7 +239,7 @@ addForeignPtrFinalizerEnv (FunPtr fp) (Ptr ep) (ForeignPtr p c) = case c of
   PlainForeignPtr r -> f r >> return ()
   MallocPtr     _ r -> f r >> return ()
   _ -> error "GHC.ForeignPtr: attempt to add a finalizer to a plain pointer"
-  where
+ where
     f r =
       noMixing CFinalizers r $
         IO $ \s ->
@@ -357,7 +356,7 @@ unsafeForeignPtrToPtr :: ForeignPtr a -> Ptr a
 -- To avoid subtle coding errors, hand written marshalling code
 -- should preferably use 'Foreign.ForeignPtr.withForeignPtr' rather
 -- than combinations of 'unsafeForeignPtrToPtr' and
--- 'touchForeignPtr'.  However, the later routines
+-- 'touchForeignPtr'.  However, the latter routines
 -- are occasionally preferred in tool generated marshalling code.
 unsafeForeignPtrToPtr (ForeignPtr fo _) = Ptr fo
 

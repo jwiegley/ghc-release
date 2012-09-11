@@ -14,6 +14,7 @@ import Reg
 
 import Cmm
 import Bag
+import Digraph
 import UniqFM
 import UniqSet
 import UniqSupply
@@ -24,7 +25,6 @@ import Data.List
 --	For Reg -> Reg moves, if the first reg dies at the same time the second reg is born
 --	then the mov only serves to join live ranges. The two regs can be renamed to be 
 --	the same and the move instruction safely erased.
-
 regCoalesce 
 	:: Instruction instr
 	=> [LiveCmmTop instr] 
@@ -59,7 +59,6 @@ sinkReg fm r
 -- | Slurp out mov instructions that only serve to join live ranges.
 --	During a mov, if the source reg dies and the destiation reg is born
 --	then we can rename the two regs to the same thing and eliminate the move.
---
 slurpJoinMovs 
 	:: Instruction instr
 	=> LiveCmmTop instr 
@@ -68,13 +67,12 @@ slurpJoinMovs
 slurpJoinMovs live
 	= slurpCmm emptyBag live
  where	
-  	slurpCmm   rs  CmmData{}		         = rs
-	slurpCmm   rs (CmmProc _ _ _ (ListGraph blocks)) = foldl' slurpComp  rs blocks
-   	slurpComp  rs (BasicBlock _ blocks)	         = foldl' slurpBlock rs blocks
-        slurpBlock rs (BasicBlock _ instrs)              = foldl' slurpLI    rs instrs
+  	slurpCmm   rs  CmmData{}		= rs
+	slurpCmm   rs (CmmProc _ _ _ sccs) 	= foldl' slurpBlock rs (flattenSCCs sccs)
+        slurpBlock rs (BasicBlock _ instrs)	= foldl' slurpLI    rs instrs
                 
-        slurpLI    rs (Instr _	Nothing)	         = rs
-	slurpLI    rs (Instr instr (Just live))
+        slurpLI    rs (LiveInstr _	Nothing) = rs
+	slurpLI    rs (LiveInstr instr (Just live))
 	 	| Just (r1, r2)	<- takeRegRegMoveInstr instr
 		, elementOfUniqSet r1 $ liveDieRead live
 		, elementOfUniqSet r2 $ liveBorn live
@@ -86,8 +84,5 @@ slurpJoinMovs live
 		
 		| otherwise
 		= rs
-	
-	slurpLI	   rs SPILL{} 	= rs
-	slurpLI    rs RELOAD{}	= rs
 		
 	

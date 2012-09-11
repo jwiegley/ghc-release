@@ -328,6 +328,16 @@ test('dynHelloWorld',
      compile_and_run,
      [''])
 
+test('2464', omit_ways(['optc', 'profc']), compile, [''])
+test('3674', ignore_output, run_command, 
+             ['$MAKE -s --no-print-directory 3674'])
+
 test('rtsOpts', normal, run_command,
                 ['$MAKE -s --no-print-directory rtsOpts'])
+
+test('withRtsOpts', normal, run_command,
+                    ['$MAKE -s --no-print-directory withRtsOpts'])
+test('T3389', normal, compile_and_run, [''])
+test('T3364', normalise_fun(normalise_errmsg), run_command,
+     ['$MAKE -s --no-print-directory T3364'])
 

@@ -23,6 +23,7 @@ import CLabel
 import CmmUtils
 import PrimOp
 import SMRep
+import Module
 import Constants
 import Outputable
 import FastString
@@ -122,7 +123,7 @@ emitPrimOp [res] ParOp [arg] live
         NoC_SRT -- No SRT b/c we do PlayRisky
         CmmMayReturn
   where
-	newspark = CmmLit (CmmLabel (mkRtsCodeLabel (sLit "newSpark")))
+	newspark = CmmLit (CmmLabel (mkCmmCodeLabel rtsPackageId (fsLit "newSpark")))
 
 emitPrimOp [res] ReadMutVarOp [mutv] _
    = stmtC (CmmAssign (CmmLocal res) (cmmLoadIndexW mutv fixedHdrSize gcWord))
@@ -142,16 +143,13 @@ emitPrimOp [] WriteMutVarOp [mutv,var] live
                 CmmMayReturn
 
 --  #define sizzeofByteArrayzh(r,a) \
---     r = (((StgArrWords *)(a))->words * sizeof(W_))
+--     r = ((StgArrWords *)(a))->bytes
 emitPrimOp [res] SizeofByteArrayOp [arg] _
    = stmtC $
-	CmmAssign (CmmLocal res) (CmmMachOp mo_wordMul [
-			  cmmLoadIndexW arg fixedHdrSize bWord,
-			  CmmLit (mkIntCLit wORD_SIZE)
-			])
+	CmmAssign (CmmLocal res) (cmmLoadIndexW arg fixedHdrSize bWord)
 
 --  #define sizzeofMutableByteArrayzh(r,a) \
---      r = (((StgArrWords *)(a))->words * sizeof(W_))
+--      r = ((StgArrWords *)(a))->bytes
 emitPrimOp [res] SizeofMutableByteArrayOp [arg] live
    = emitPrimOp [res] SizeofByteArrayOp [arg] live
 

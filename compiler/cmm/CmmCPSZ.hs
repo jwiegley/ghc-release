@@ -1,3 +1,9 @@
+#if __GLASGOW_HASKELL__ >= 611
+{-# OPTIONS_GHC -XNoMonoLocalBinds #-}
+#endif
+-- Norman likes local bindings
+-- If this module lives on I'd like to get rid of this flag in due course
+
 module CmmCPSZ (
   -- | Converts C-- with full proceedures and parameters
   -- to a CPS transformed C-- with the stack made manifest.
@@ -18,10 +24,11 @@ import ZipCfgCmmRep
 
 import DynFlags
 import ErrUtils
-import FiniteMap
 import HscTypes
 import Data.Maybe
 import Control.Monad
+import Data.Map (Map)
+import qualified Data.Map as Map
 import Outputable
 import StaticFlags
 
@@ -46,19 +53,16 @@ protoCmmCPSZ :: HscEnv -- Compilation env including
              -> (TopSRT, [CmmZ])  -- SRT table and accumulating list of compiled procs
              -> CmmZ              -- Input C-- with Procedures
              -> IO (TopSRT, [CmmZ]) -- Output CPS transformed C--
-protoCmmCPSZ hsc_env (topSRT, rst) (Cmm tops)
-  | not (dopt Opt_TryNewCodeGen (hsc_dflags hsc_env))
-  = return (topSRT, Cmm tops : rst)                -- Only if -fnew-codegen
-  | otherwise
-  = do	let dflags = hsc_dflags hsc_env
-        showPass dflags "CPSZ"
-        (cafEnvs, tops) <- liftM unzip $ mapM (cpsTop hsc_env) tops
-        let topCAFEnv = mkTopCAFInfo (concat cafEnvs)
-        (topSRT, tops) <- foldM (toTops hsc_env topCAFEnv) (topSRT, []) tops
-        -- (topSRT, tops) <- foldM (\ z f -> f topCAFEnv z) (topSRT, []) toTops 
-        let cmms = Cmm (reverse (concat tops))
-        dumpIfSet_dyn dflags Opt_D_dump_cps_cmm "Post CPS Cmm" (ppr cmms)
-        return (topSRT, cmms : rst)
+protoCmmCPSZ hsc_env (topSRT, rst) (Cmm tops) =
+  do let dflags = hsc_dflags hsc_env
+     showPass dflags "CPSZ"
+     (cafEnvs, tops) <- liftM unzip $ mapM (cpsTop hsc_env) tops
+     let topCAFEnv = mkTopCAFInfo (concat cafEnvs)
+     (topSRT, tops) <- foldM (toTops hsc_env topCAFEnv) (topSRT, []) tops
+     -- (topSRT, tops) <- foldM (\ z f -> f topCAFEnv z) (topSRT, []) toTops 
+     let cmms = Cmm (reverse (concat tops))
+     dumpIfSet_dyn dflags Opt_D_dump_cps_cmm "Post CPS Cmm" (ppr cmms)
+     return (topSRT, cmms : rst)
 
 {- [Note global fuel]
 ~~~~~~~~~~~~~~~~~~~~~
@@ -70,7 +74,7 @@ global to one compiler session.
 cpsTop :: HscEnv -> CmmTopZ ->
           IO ([(CLabel, CAFSet)],
               [(CAFSet, CmmTopForInfoTables)])
-cpsTop _ p@(CmmData {}) = return ([], [(emptyFM, NoInfoTable p)])
+cpsTop _ p@(CmmData {}) = return ([], [(Map.empty, NoInfoTable p)])
 cpsTop hsc_env (CmmProc h l args (stackInfo@(entry_off, _), g)) =
     do 
        dump Opt_D_dump_cmmz "Pre Proc Points Added"  g
@@ -116,12 +120,11 @@ cpsTop hsc_env (CmmProc h l args (stackInfo@(entry_off, _), g)) =
        --------------- Stack layout ----------------
        slotEnv <- run $ liveSlotAnal g
        mbpprTrace "live slot analysis results: " (ppr slotEnv) $ return ()
-       cafEnv <- 
-                -- trace "post liveSlotAnal" $
-                 run $ cafAnal g
-       (cafEnv, slotEnv) <-
-        -- trace "post print cafAnal" $
-          return $ extendEnvsForSafeForeignCalls cafEnv slotEnv g
+       -- cafEnv <- -- trace "post liveSlotAnal" $ run $ cafAnal g
+       -- (cafEnv, slotEnv) <-
+       --  -- trace "post print cafAnal" $
+       --    return $ extendEnvsForSafeForeignCalls cafEnv slotEnv g
+       slotEnv <- return $ extendEnvWithSafeForeignCalls liveSlotTransfers slotEnv g
        mbpprTrace "slotEnv extended for safe foreign calls: " (ppr slotEnv) $ return ()
        let areaMap = layout procPoints slotEnv entry_off g
        mbpprTrace "areaMap" (ppr areaMap) $ return ()
@@ -140,8 +143,11 @@ cpsTop hsc_env (CmmProc h l args (stackInfo@(entry_off, _), g)) =
        mapM_ (dump Opt_D_dump_cmmz "after splitting") gs
 
        ------------- More CAFs and foreign calls ------------
+       cafEnv <- run $ cafAnal g
+       cafEnv <- return $ extendEnvWithSafeForeignCalls cafTransfers cafEnv  g
        let localCAFs = catMaybes $ map (localCAFInfo cafEnv) gs
        mbpprTrace "localCAFs" (ppr localCAFs) $ return ()
+
        gs <- liftM concat $ run $ foldM lowerSafeForeignCalls [] gs
        mapM_ (dump Opt_D_dump_cmmz "after lowerSafeForeignCalls") gs
 
@@ -154,7 +160,10 @@ cpsTop hsc_env (CmmProc h l args (stackInfo@(entry_off, _), g)) =
   where dflags = hsc_dflags hsc_env
         mbpprTrace x y z = if dopt Opt_D_dump_cmmz dflags then pprTrace x y z else z
         dump f txt g = dumpIfSet_dyn dflags f txt (ppr g)
+
+        run :: FuelMonad a -> IO a
         run = runFuelIO (hsc_OptFuel hsc_env)
+
         dual_rewrite flag txt pass g =
           do dump flag ("Pre " ++ txt)  g
              g <- run $ pass g
@@ -164,7 +173,7 @@ cpsTop hsc_env (CmmProc h l args (stackInfo@(entry_off, _), g)) =
 -- This probably belongs in CmmBuildInfoTables?
 -- We're just finishing the job here: once we know what CAFs are defined
 -- in non-static closures, we can build the SRTs.
-toTops :: HscEnv -> FiniteMap CLabel CAFSet -> (TopSRT, [[CmmTopZ]])
+toTops :: HscEnv -> Map CLabel CAFSet -> (TopSRT, [[CmmTopZ]])
                  -> [(CAFSet, CmmTopForInfoTables)] -> IO (TopSRT, [[CmmTopZ]])
 
 toTops hsc_env topCAFEnv (topSRT, tops) gs =

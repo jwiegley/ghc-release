@@ -94,7 +94,7 @@ def _reqlib( opts, lib ):
         if have_subprocess:
             # By preference we use subprocess, as the alternative uses
             # /dev/null which mingw doesn't have.
-            p = subprocess.Popen([config.ghc_pkg, 'describe', lib],
+            p = subprocess.Popen([config.ghc_pkg, '--no-user-package-conf', 'describe', lib],
                                  stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE)
             # read from stdout and stderr to avoid blocking due to
@@ -260,6 +260,12 @@ def if_os( os, f ):
     else:
         return normal
 
+def unless_os( os, f ):
+    if config.os == os:
+        return normal
+    else:
+        return f
+
 def if_arch( arch, f ):
     if config.arch == arch:
         return f
@@ -274,11 +280,35 @@ def if_wordsize( ws, f ):
 
 # ---
 
+def if_in_tree_compiler( f ):
+    if config.in_tree_compiler:
+        return f
+    else:
+        return normal
+
+def unless_in_tree_compiler( f ):
+    if config.in_tree_compiler:
+        return normal
+    else:
+        return f
+
 def if_compiler_type( compiler, f ):
     if config.compiler_type == compiler:
         return f
     else:
         return normal
+
+def if_compiler_profiled( f ):
+    if config.compiler_profiled:
+        return f
+    else:
+        return normal
+
+def unless_compiler_profiled( f ):
+    if config.compiler_profiled:
+        return normal
+    else:
+        return f
 
 def if_compiler_lt( compiler, version, f ):
     if config.compiler_type == compiler and \
@@ -362,6 +392,14 @@ def cmd_prefix( prefix ):
 
 def _cmd_prefix( opts, prefix ):
     opts.cmd_prefix = prefix
+
+# ----
+
+def compile_cmd_prefix( prefix ):
+    return lambda opts, p=prefix: _compile_cmd_prefix(opts, prefix)
+
+def _compile_cmd_prefix( opts, prefix ):
+    opts.compile_cmd_prefix = prefix
 
 # ----
 
@@ -456,6 +494,12 @@ if config.use_threads:
 def test_common_work (name, opts, func, args):
     t.total_tests = t.total_tests+1
     setLocalTestOpts(opts)
+
+    try:
+        package_conf_cache_file_start_timestamp = os.stat(config.package_conf_cache_file).st_mtime
+    except e:
+        package_conf_cache_file_start_timestamp = 0.0
+
     # All the ways we might run this test
     if func == compile or func == multimod_compile:
         all_ways = config.compile_ways
@@ -521,7 +565,17 @@ def test_common_work (name, opts, func, args):
                 if result != 0:
                     framework_fail(name, 'cleaning', 'clean-command failed: ' + str(result))
         except e:
-            framework_fail(name, way, 'clean-command exception')
+            framework_fail(name, 'cleaning', 'clean-command exception')
+
+    try:
+        package_conf_cache_file_end_timestamp = os.stat(config.package_conf_cache_file).st_mtime
+    except e:
+        package_conf_cache_file_end_timestamp = 0.0
+
+    if package_conf_cache_file_start_timestamp != package_conf_cache_file_end_timestamp:
+        framework_fail(name, 'whole-test', 'Package cache timestamps do not match: ' + str(package_conf_cache_file_start_timestamp) + ' ' + str(package_conf_cache_file_end_timestamp))
+    elif package_conf_cache_file_start_timestamp == 0.0:
+        framework_fail(name, 'whole-test', 'Package cache timestamps 0.0')
 
 def clean(names):
     clean_full_paths(map (lambda name: in_testdir(name), names))
@@ -789,7 +843,12 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link ):
     if opts.compiler_stats_num_fields != []:
         extra_hc_opts += ' +RTS -V0 -t' + stats_file + ' --machine-readable -RTS'
 
-    cmd = 'cd ' + getTestOpts().testdir + " && '" \
+    if getTestOpts().compile_cmd_prefix == '':
+        cmd_prefix = ''
+    else:
+        cmd_prefix = getTestOpts().compile_cmd_prefix + ' '
+
+    cmd = 'cd ' + getTestOpts().testdir + " && " + cmd_prefix + "'" \
           + config.compiler + "' " \
           + join(config.compiler_always_flags,' ') + ' ' \
           + to_do + ' ' + srcname + ' ' \
@@ -1265,9 +1324,6 @@ def normalise_whitespace( str ):
     return str
 
 def normalise_errmsg( str ):
-    # Look for file names and zap the directory part:
-    #    foo/var/xyzzy/somefile  -->  somefile
-    str = re.sub('([^\\s/]+/)*([^\\s/])', '\\2', str)
     # If somefile ends in ".exe" or ".exe:", zap ".exe" (for Windows)
     #    the colon is there because it appears in error messages; this
     #    hacky solution is used in place of more sophisticated filename
@@ -1512,3 +1568,19 @@ def summary(t, file):
             file.write('   ' + test + '(' + \
                        join(t.unexpected_failures[test],',') + ')\n')
         file.write('\n')
+
+def getStdout(cmd):
+    if have_subprocess:
+        p = subprocess.Popen(cmd,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+        (stdout, stderr) = p.communicate()
+        r = p.wait()
+        if r != 0:
+            raise Exception("Command failed: " + str(cmd))
+        if stderr != '':
+            raise Exception("stderr from command: " + str(cmd))
+        return stdout
+    else:
+        raise Exception("Need subprocess to get stdout, but don't have it")
+

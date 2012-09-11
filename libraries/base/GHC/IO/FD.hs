@@ -22,17 +22,13 @@ module GHC.IO.FD (
   stdin, stdout, stderr
   ) where
 
-#undef DEBUG_DUMP
-
 import GHC.Base
 import GHC.Num
 import GHC.Real
 import GHC.Show
 import GHC.Enum
 import Data.Maybe
-#ifndef mingw32_HOST_OS
 import Control.Monad
-#endif
 import Data.Typeable
 
 import GHC.IO
@@ -41,7 +37,7 @@ import GHC.IO.Buffer
 import GHC.IO.BufferedIO
 import qualified GHC.IO.Device
 import GHC.IO.Device (SeekMode(..), IODeviceType(..))
-import GHC.Conc
+import GHC.Conc.IO
 import GHC.IO.Exception
 
 import Foreign
@@ -50,6 +46,9 @@ import qualified System.Posix.Internals
 import System.Posix.Internals hiding (FD, setEcho, getEcho)
 import System.Posix.Types
 -- import GHC.Ptr
+
+c_DEBUG_DUMP :: Bool
+c_DEBUG_DUMP = False
 
 -- -----------------------------------------------------------------------------
 -- The file-descriptor IO device
@@ -108,20 +107,17 @@ instance BufferedIO FD where
 
 readBuf' :: FD -> Buffer Word8 -> IO (Int, Buffer Word8)
 readBuf' fd buf = do
-#ifdef DEBUG_DUMP
-  puts ("readBuf fd=" ++ show fd ++ " " ++ summaryBuffer buf ++ "\n")
-#endif
+  when c_DEBUG_DUMP $
+      puts ("readBuf fd=" ++ show fd ++ " " ++ summaryBuffer buf ++ "\n")
   (r,buf') <- readBuf fd buf
-#ifdef DEBUG_DUMP
-  puts ("after: " ++ summaryBuffer buf' ++ "\n")
-#endif
+  when c_DEBUG_DUMP $
+      puts ("after: " ++ summaryBuffer buf' ++ "\n")
   return (r,buf')
 
 writeBuf' :: FD -> Buffer Word8 -> IO (Buffer Word8)
 writeBuf' fd buf = do
-#ifdef DEBUG_DUMP
-  puts ("writeBuf fd=" ++ show fd ++ " " ++ summaryBuffer buf ++ "\n")
-#endif
+  when c_DEBUG_DUMP $
+      puts ("writeBuf fd=" ++ show fd ++ " " ++ summaryBuffer buf ++ "\n")
   writeBuf fd buf
 
 -- -----------------------------------------------------------------------------
@@ -378,7 +374,12 @@ foreign import ccall safe "fdReady"
 -- Terminal-related stuff
 
 isTerminal :: FD -> IO Bool
-isTerminal fd = c_isatty (fdFD fd) >>= return.toBool
+isTerminal fd =
+#if defined(mingw32_HOST_OS)
+    is_console (fdFD fd) >>= return.toBool
+#else
+    c_isatty (fdFD fd) >>= return.toBool
+#endif
 
 setEcho :: FD -> Bool -> IO () 
 setEcho fd on = System.Posix.Internals.setEcho (fdFD fd) on
@@ -581,7 +582,19 @@ blockingWriteRawBufferPtr loc fd buf off len
   = fmap fromIntegral $ throwErrnoIfMinus1Retry loc $
         if fdIsSocket fd
            then c_safe_send  (fdFD fd) (buf `plusPtr` off) len 0
-           else c_safe_write (fdFD fd) (buf `plusPtr` off) len
+           else do
+             r <- c_safe_write (fdFD fd) (buf `plusPtr` off) len
+             when (r == -1) c_maperrno
+             return r
+      -- we don't trust write() to give us the correct errno, and
+      -- instead do the errno conversion from GetLastError()
+      -- ourselves.  The main reason is that we treat ERROR_NO_DATA
+      -- (pipe is closing) as EPIPE, whereas write() returns EINVAL
+      -- for this case.  We need to detect EPIPE correctly, because it
+      -- shouldn't be reported as an error when it happens on stdout.
+
+foreign import ccall unsafe "maperrno"             -- in Win32Utils.c
+   c_maperrno :: IO ()
 
 -- NOTE: "safe" versions of the read/write calls for use by the threaded RTS.
 -- These calls may block, but that's ok.
@@ -626,8 +639,7 @@ foreign import ccall unsafe "unlockFile"
   unlockFile :: CInt -> IO CInt
 #endif
 
-#if defined(DEBUG_DUMP)
 puts :: String -> IO ()
-puts s = do withCStringLen s $ \(p,len) -> c_write 1 p (fromIntegral len)
+puts s = do _ <- withCStringLen s $ \(p,len) ->
+                     c_write 1 (castPtr p) (fromIntegral len)
             return ()
-#endif

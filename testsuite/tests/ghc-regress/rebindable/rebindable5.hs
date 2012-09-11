@@ -1,4 +1,5 @@
-{-# OPTIONS -fglasgow-exts -XNoImplicitPrelude #-}
+{-# LANGUAGE RebindableSyntax, NPlusKPatterns, TypeSynonymInstances,
+             MultiParamTypeClasses, FunctionalDependencies #-}
 
 module Main where
 	{

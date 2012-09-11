@@ -8,7 +8,15 @@
 -- ---------------------------------------------------------------------------
 
 {
-{-# OPTIONS -Wwarn -w #-}
+{-# OPTIONS -Wwarn -w -XNoMonomorphismRestriction #-}
+-- The NoMonomorphismRestriction deals with a Happy infelicity
+--    With OutsideIn's more conservativ monomorphism restriction
+--    we aren't generalising
+--        notHappyAtAll = error "urk"
+--    which is terrible.  Switching off the restriction allows
+--    the generalisation.  Better would be to make Happy generate
+--    an appropriate signature.
+
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
 -- any warnings in the module. See
@@ -45,10 +53,10 @@ import SrcLoc		( Located(..), unLoc, getLoc, noLoc, combineSrcSpans,
 			  mkSrcLoc, mkSrcSpan )
 import Module
 import StaticFlags	( opt_SccProfilingOn, opt_Hpc )
-import Type		( Kind, mkArrowKind, liftedTypeKind, unliftedTypeKind )
+import Type		( Kind, liftedTypeKind, unliftedTypeKind )
+import Coercion		( mkArrowKind )
 import Class		( FunDep )
-import BasicTypes	( Boxity(..), Fixity(..), FixityDirection(..), IPName(..),
-			  Activation(..), RuleMatchInfo(..), defaultInlineSpec )
+import BasicTypes
 import DynFlags
 import OrdList
 import HaddockUtils
@@ -252,8 +260,7 @@ incorrect.
  'by'       { L _ ITby }        -- for list transform extension
  'using'    { L _ ITusing }     -- for list transform extension
 
- '{-# INLINE'      	  { L _ (ITinline_prag _) }
- '{-# INLINE_CONLIKE'     { L _ (ITinline_conlike_prag _) }
+ '{-# INLINE'      	  { L _ (ITinline_prag _ _) }
  '{-# SPECIALISE'  	  { L _ ITspec_prag }
  '{-# SPECIALISE_INLINE'  { L _ (ITspec_inline_prag _) }
  '{-# SOURCE'	   { L _ ITsource_prag }
@@ -559,8 +566,8 @@ topdecl :: { OrdList (LHsDecl RdrName) }
         | stand_alone_deriving                  { unitOL (LL (DerivD (unLoc $1))) }
 	| 'default' '(' comma_types0 ')'	{ unitOL (LL $ DefD (DefaultDecl $3)) }
 	| 'foreign' fdecl			{ unitOL (LL (unLoc $2)) }
-        | '{-# DEPRECATED' deprecations '#-}' { $2 }
-        | '{-# WARNING' warnings '#-}'        { $2 }
+        | '{-# DEPRECATED' deprecations '#-}'   { $2 }
+        | '{-# WARNING' warnings '#-}'          { $2 }
 	| '{-# RULES' rules '#-}'		{ $2 }
 	| annotation { unitOL $1 }
       	| decl					{ unLoc $1 }
@@ -696,9 +703,9 @@ opt_kind_sig :: { Located (Maybe Kind) }
 --	(Eq a, Ord b) => T a b
 --      T Int [a]			-- for associated types
 -- Rather a lot of inlining here, else we get reduce/reduce errors
-tycl_hdr :: { Located (LHsContext RdrName, LHsType RdrName) }
-	: context '=>' type		{ LL ($1, $3) }
-	| type                          { L1 (noLoc [], $1) }
+tycl_hdr :: { Located (Maybe (LHsContext RdrName), LHsType RdrName) }
+	: context '=>' type		{ LL (Just $1, $3) }
+	| type                          { L1 (Nothing, $1) }
 
 -----------------------------------------------------------------------------
 -- Stand-alone deriving
@@ -782,8 +789,8 @@ decllist :: { Located (OrdList (LHsDecl RdrName)) }
 binds 	::  { Located (HsLocalBinds RdrName) } 		-- May have implicit parameters
 						-- No type declarations
 	: decllist			{ L1 (HsValBinds (cvBindGroup (unLoc $1))) }
-	| '{'            dbinds '}'	{ LL (HsIPBinds (IPBinds (unLoc $2) emptyLHsBinds)) }
-	|     vocurly    dbinds close	{ L (getLoc $2) (HsIPBinds (IPBinds (unLoc $2) emptyLHsBinds)) }
+	| '{'            dbinds '}'	{ LL (HsIPBinds (IPBinds (unLoc $2) emptyTcEvBinds)) }
+	|     vocurly    dbinds close	{ L (getLoc $2) (HsIPBinds (IPBinds (unLoc $2) emptyTcEvBinds)) }
 
 wherebinds :: { Located (HsLocalBinds RdrName) }	-- May have implicit parameters
 						-- No type declarations
@@ -935,7 +942,7 @@ infixtype :: { LHsType RdrName }
 
 strict_mark :: { Located HsBang }
 	: '!'				{ L1 HsStrict }
-	| '{-# UNPACK' '#-}' '!'	{ LL HsUnbox }
+	| '{-# UNPACK' '#-}' '!'	{ LL HsUnpack }
 
 -- A ctype is a for-all type
 ctype	:: { LHsType RdrName }
@@ -981,7 +988,7 @@ context :: { LHsContext RdrName }
 
 type :: { LHsType RdrName }
         : btype                         { $1 }
-        | btype qtyconop type        { LL $ HsOpTy $1 $2 $3 }
+        | btype qtyconop type           { LL $ HsOpTy $1 $2 $3 }
         | btype tyvarop  type     	{ LL $ HsOpTy $1 $2 $3 }
  	| btype '->'     ctype		{ LL $ HsFunTy $1 $3 }
         | btype '~'      btype  	{ LL $ HsPredTy (HsEqualP $1 $3) }
@@ -1012,10 +1019,10 @@ atype :: { LHsType RdrName }
 	| '[:' ctype ':]'		{ LL $ HsPArrTy  $2 }
 	| '(' ctype ')'		        { LL $ HsParTy   $2 }
 	| '(' ctype '::' kind ')'	{ LL $ HsKindSig $2 (unLoc $4) }
-	| '$(' exp ')'	      		{ LL $ HsSpliceTy (mkHsSplice $2 ) }
-	| TH_ID_SPLICE	      		{ LL $ HsSpliceTy (mkHsSplice 
-					         (L1 $ HsVar (mkUnqual varName 
-							        (getTH_ID_SPLICE $1)))) } -- $x
+	| quasiquote       	        { L1 (HsQuasiQuoteTy (unLoc $1)) }
+	| '$(' exp ')'	      		{ LL $ mkHsSpliceTy $2 }
+	| TH_ID_SPLICE	      		{ LL $ mkHsSpliceTy $ L1 $ HsVar $ 
+					  mkUnqual varName (getTH_ID_SPLICE $1) }
 -- Generics
         | INTEGER                       { L1 (HsNumTy (getINTEGER $1)) }
 
@@ -1043,7 +1050,7 @@ tv_bndrs :: { [LHsTyVarBndr RdrName] }
 	 | {- empty -}			{ [] }
 
 tv_bndr :: { LHsTyVarBndr RdrName }
-	: tyvar				{ L1 (UserTyVar (unLoc $1)) }
+	: tyvar				{ L1 (UserTyVar (unLoc $1) placeHolderKind) }
 	| '(' tyvar '::' kind ')'	{ LL (KindedTyVar (unLoc $2) 
 							  (unLoc $4)) }
 
@@ -1167,7 +1174,9 @@ deriving :: { Located (Maybe [LHsType RdrName]) }
 -----------------------------------------------------------------------------
 -- Value definitions
 
-{- There's an awkward overlap with a type signature.  Consider
+{- Note [Declaration/signature overlap]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+There's an awkward overlap with a type signature.  Consider
 	f :: Int -> Int = ...rhs...
    Then we can't tell whether it's a type signature or a value
    definition with a result signature until we see the '='.
@@ -1219,29 +1228,32 @@ gdrh :: { LGRHS RdrName }
 	: '|' guardquals '=' exp  	{ sL (comb2 $1 $>) $ GRHS (unLoc $2) $4 }
 
 sigdecl :: { Located (OrdList (LHsDecl RdrName)) }
-	: infixexp '::' sigtypedoc
-				{% do s <- checkValSig $1 $3; 
-				      return (LL $ unitOL (LL $ SigD s)) }
-		-- See the above notes for why we need infixexp here
+	: infixexp '::' sigtypedoc	{% do s <- checkValSig $1 $3 
+				         ; return (LL $ unitOL (LL $ SigD s)) }
+		-- See Note [Declaration/signature overlap] for why we need infixexp here
 	| var ',' sig_vars '::' sigtypedoc
 				{ LL $ toOL [ LL $ SigD (TypeSig n $5) | n <- $1 : unLoc $3 ] }
 	| infix prec ops	{ LL $ toOL [ LL $ SigD (FixSig (FixitySig n (Fixity $2 (unLoc $1))))
 					     | n <- unLoc $3 ] }
 	| '{-# INLINE'   activation qvar '#-}'	      
-				{ LL $ unitOL (LL $ SigD (InlineSig $3 (mkInlineSpec $2 FunLike (getINLINE $1)))) }
-        | '{-# INLINE_CONLIKE' activation qvar '#-}'
-                                { LL $ unitOL (LL $ SigD (InlineSig $3 (mkInlineSpec $2 ConLike (getINLINE_CONLIKE $1)))) }
+		{ LL $ unitOL (LL $ SigD (InlineSig $3 (mkInlinePragma (getINLINE $1) $2))) }
 	| '{-# SPECIALISE' qvar '::' sigtypes1 '#-}'
-			 	{ LL $ toOL [ LL $ SigD (SpecSig $2 t defaultInlineSpec) 
+		{ LL $ toOL [ LL $ SigD (SpecSig $2 t defaultInlinePragma) 
 					    | t <- $4] }
 	| '{-# SPECIALISE_INLINE' activation qvar '::' sigtypes1 '#-}'
-			 	{ LL $ toOL [ LL $ SigD (SpecSig $3 t (mkInlineSpec $2 FunLike (getSPEC_INLINE $1)))
+		{ LL $ toOL [ LL $ SigD (SpecSig $3 t (mkInlinePragma (getSPEC_INLINE $1) $2))
 					    | t <- $5] }
 	| '{-# SPECIALISE' 'instance' inst_type '#-}'
-				{ LL $ unitOL (LL $ SigD (SpecInstSig $3)) }
+		{ LL $ unitOL (LL $ SigD (SpecInstSig $3)) }
 
 -----------------------------------------------------------------------------
 -- Expressions
+
+quasiquote :: { Located (HsQuasiQuote RdrName) }
+	: TH_QUASIQUOTE   { let { loc = getLoc $1
+                                ; ITquasiQuote (quoter, quote, quoteSpan) = unLoc $1
+                                ; quoterId = mkUnqual varName quoter }
+                            in L1 (mkHsQuasiQuote quoterId quoteSpan quote) }
 
 exp   :: { LHsExpr RdrName }
 	: infixexp '::' sigtype		{ LL $ ExprWithTySig $1 $3 }
@@ -1261,7 +1273,9 @@ exp10 :: { LHsExpr RdrName }
 							   	(unguardedGRHSs $6)
 							    ]) }
   	| 'let' binds 'in' exp			{ LL $ HsLet (unLoc $2) $4 }
-	| 'if' exp 'then' exp 'else' exp	{ LL $ HsIf $2 $4 $6 }
+	| 'if' exp optSemi 'then' exp optSemi 'else' exp
+                                        {% checkDoAndIfThenElse $2 $3 $5 $6 $8 >>
+                                           return (LL $ mkHsIf $2 $5 $8) }
    	| 'case' exp 'of' altslist		{ LL $ HsCase $2 (mkMatchGroup (unLoc $4)) }
 	| '-' fexp				{ LL $ NegApp $2 noSyntaxExpr }
 
@@ -1287,6 +1301,10 @@ exp10 :: { LHsExpr RdrName }
         | '{-# CORE' STRING '#-}' exp           { LL $ HsCoreAnn (getSTRING $2) $4 }
 						    -- hdaume: core annotation
 	| fexp					{ $1 }
+
+optSemi :: { Bool }
+	: ';'         { True }
+	| {- empty -} { False }
 
 scc_annot :: { Located FastString }
 	: '_scc_' STRING			{% (addWarning Opt_WarnWarningsDeprecations (getLoc $1) (text "_scc_ is deprecated; use an SCC pragma instead")) >>= \_ ->
@@ -1354,14 +1372,10 @@ aexp2	:: { LHsExpr RdrName }
 	-- Template Haskell Extension
 	| TH_ID_SPLICE          { L1 $ HsSpliceE (mkHsSplice 
 					(L1 $ HsVar (mkUnqual varName 
-							(getTH_ID_SPLICE $1)))) } -- $x
-	| '$(' exp ')'   	{ LL $ HsSpliceE (mkHsSplice $2) }               -- $( exp )
+							(getTH_ID_SPLICE $1)))) } 
+	| '$(' exp ')'   	{ LL $ HsSpliceE (mkHsSplice $2) }               
 
-	| TH_QUASIQUOTE       	{ let { loc = getLoc $1
-                                      ; ITquasiQuote (quoter, quote, quoteSpan) = unLoc $1
-                                      ; quoterId = mkUnqual varName quoter
-                                      }
-                                  in sL loc $ HsQuasiQuoteE (mkHsQuasiQuote quoterId quoteSpan quote) }
+
 	| TH_VAR_QUOTE qvar 	{ LL $ HsBracket (VarBr (unLoc $2)) }
 	| TH_VAR_QUOTE qcon 	{ LL $ HsBracket (VarBr (unLoc $2)) }
 	| TH_TY_QUOTE tyvar 	{ LL $ HsBracket (VarBr (unLoc $2)) }
@@ -1370,8 +1384,8 @@ aexp2	:: { LHsExpr RdrName }
 	| '[t|' ctype '|]'      { LL $ HsBracket (TypBr $2) }                       
 	| '[p|' infixexp '|]'   {% checkPattern $2 >>= \p ->
 					return (LL $ HsBracket (PatBr p)) }
-	| '[d|' cvtopbody '|]'	{% checkDecBrGroup $2 >>= \g -> 
-					return (LL $ HsBracket (DecBr g)) }
+	| '[d|' cvtopbody '|]'	{ LL $ HsBracket (DecBrL $2) }
+	| quasiquote       	{ L1 (HsQuasiQuoteE (unLoc $1)) }
 
 	-- arrow notation extension
 	| '(|' aexp2 cmdargs '|)'	{ LL $ HsArrForm $2 Nothing (reverse $3) }
@@ -1415,7 +1429,7 @@ texp :: { LHsExpr RdrName }
 	| qopm infixexp       { LL $ SectionR $1 $2 }
 
        -- View patterns get parenthesized above
-	| exp '->' exp   { LL $ EViewPat $1 $3 }
+	| exp '->' texp   { LL $ EViewPat $1 $3 }
 
 -- Always at least one comma
 tup_exprs :: { [HsTupArg RdrName] }
@@ -1629,11 +1643,10 @@ fbinds1	:: { ([HsRecField RdrName (LHsExpr RdrName)], Bool) }
 	| '..'				{ ([],   True) }
   
 fbind	:: { HsRecField RdrName (LHsExpr RdrName) }
-	: qvar '=' exp	{ HsRecField $1 $3 False }
-        | qvar          { HsRecField $1 (L (getLoc $1) placeHolderPunRhs) True }
-			-- Here's where we say that plain 'x'
-			-- means exactly 'x = x'.  The pun-flag boolean is
-			-- there so we can still print it right
+	: qvar '=' exp	{ HsRecField $1 $3                False }
+        | qvar          { HsRecField $1 placeHolderPunRhs True }
+			-- In the punning case, use a place-holder
+                        -- The renamer fills in the final value
 
 -----------------------------------------------------------------------------
 -- Implicit Parameter Bindings
@@ -1971,9 +1984,9 @@ getPRIMWORD	(L _ (ITprimword x)) = x
 getPRIMFLOAT	(L _ (ITprimfloat  x)) = x
 getPRIMDOUBLE	(L _ (ITprimdouble x)) = x
 getTH_ID_SPLICE (L _ (ITidEscape x)) = x
-getINLINE	(L _ (ITinline_prag b)) = b
-getINLINE_CONLIKE (L _ (ITinline_conlike_prag b)) = b
-getSPEC_INLINE	(L _ (ITspec_inline_prag b)) = b
+getINLINE	(L _ (ITinline_prag inl conl)) = (inl,conl)
+getSPEC_INLINE	(L _ (ITspec_inline_prag True))  = (Inline,  FunLike)
+getSPEC_INLINE	(L _ (ITspec_inline_prag False)) = (NoInline,FunLike)
 
 getDOCNEXT (L _ (ITdocCommentNext x)) = x
 getDOCPREV (L _ (ITdocCommentPrev x)) = x
@@ -2012,6 +2025,6 @@ sL span a = span `seq` a `seq` L span a
 fileSrcSpan :: P SrcSpan
 fileSrcSpan = do 
   l <- getSrcLoc; 
-  let loc = mkSrcLoc (srcLocFile l) 1 0;
+  let loc = mkSrcLoc (srcLocFile l) 1 1;
   return (mkSrcSpan loc loc)
 }

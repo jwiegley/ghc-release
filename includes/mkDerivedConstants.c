@@ -224,6 +224,7 @@ main(int argc, char *argv[])
     field_offset(StgRegTable, rCurrentNursery);
     field_offset(StgRegTable, rHpAlloc);
     struct_field(StgRegTable, rRet);
+    struct_field(StgRegTable, rNursery);
 
     def_offset("stgEagerBlackholeInfo", FUN_OFFSET(stgEagerBlackholeInfo));
     def_offset("stgGCEnter1", FUN_OFFSET(stgGCEnter1));
@@ -233,6 +234,7 @@ main(int argc, char *argv[])
     field_offset(Capability, lock);
     struct_field(Capability, mut_lists);
     struct_field(Capability, context_switch);
+    struct_field(Capability, sparks);
 
     struct_field(bdescr, start);
     struct_field(bdescr, free);
@@ -242,6 +244,7 @@ main(int argc, char *argv[])
 
     struct_size(generation);
     struct_field(generation, mut_list);
+    struct_field(generation, n_new_large_blocks);
 
     struct_size(CostCentreStack);
     struct_field(CostCentreStack, ccsID);
@@ -274,7 +277,7 @@ main(int argc, char *argv[])
     closure_field(StgMutArrPtrs, size);
 
     closure_size(StgArrWords);
-    closure_field(StgArrWords, words);
+    closure_field(StgArrWords, bytes);
     closure_payload(StgArrWords, payload);
 
     closure_field(StgTSO, _link);
@@ -289,6 +292,7 @@ main(int argc, char *argv[])
     closure_field(StgTSO, trec);
     closure_field(StgTSO, flags);
     closure_field(StgTSO, dirty);
+    closure_field(StgTSO, bq);
     closure_field_("StgTSO_CCCS", StgTSO, prof.CCCS);
     tso_field(StgTSO, sp);
     tso_field_offset(StgTSO, stack);
@@ -369,6 +373,10 @@ main(int argc, char *argv[])
     closure_field(StgMVar,tail);
     closure_field(StgMVar,value);
 
+    closure_size(StgMVarTSOQueue);
+    closure_field(StgMVarTSOQueue, link);
+    closure_field(StgMVarTSOQueue, tso);
+
     closure_size(StgBCO);
     closure_field(StgBCO, instrs);
     closure_field(StgBCO, literals);
@@ -379,6 +387,17 @@ main(int argc, char *argv[])
 
     closure_size(StgStableName);
     closure_field(StgStableName,sn);
+
+    closure_size(StgBlockingQueue);
+    closure_field(StgBlockingQueue, bh);
+    closure_field(StgBlockingQueue, owner);
+    closure_field(StgBlockingQueue, queue);
+    closure_field(StgBlockingQueue, link);
+
+    closure_size(MessageBlackHole);
+    closure_field(MessageBlackHole, link);
+    closure_field(MessageBlackHole, tso);
+    closure_field(MessageBlackHole, bh);
 
     struct_field_("RtsFlags_ProfFlags_showCCSOnException",
 		  RTS_FLAGS, ProfFlags.showCCSOnException);

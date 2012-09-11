@@ -14,7 +14,7 @@
 #ifndef SM_GC_H
 #define SM_GC_H
 
-BEGIN_RTS_PRIVATE
+#include "BeginPrivate.h"
 
 void GarbageCollect(rtsBool force_major_gc, nat gc_type, Capability *cap);
 
@@ -26,14 +26,9 @@ void         markCAFs     ( evac_fn evac, void *user );
 extern nat N;
 extern rtsBool major_gc;
 
-extern bdescr *mark_stack_bdescr;
-extern StgPtr *mark_stack;
-extern StgPtr *mark_sp;
-extern StgPtr *mark_splim;
-
-extern rtsBool mark_stack_overflowed;
-extern bdescr *oldgen_scan_bd;
-extern StgPtr  oldgen_scan;
+extern bdescr *mark_stack_bd;
+extern bdescr *mark_stack_top_bd;
+extern StgPtr mark_sp;
 
 extern long copied;
 
@@ -58,6 +53,6 @@ void releaseGCThreads (Capability *cap);
 
 #define WORK_UNIT_WORDS 128
 
-END_RTS_PRIVATE
+#include "EndPrivate.h"
 
 #endif /* SM_GC_H */

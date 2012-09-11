@@ -35,7 +35,7 @@ import Bag
 import Outputable
 import UniqSupply
 import Unique
-import LazyUniqFM
+import UniqFM
 import DynFlags
 import StaticFlags
 import FastString
@@ -69,28 +69,31 @@ initTc :: HscEnv
 
 initTc hsc_env hsc_src keep_rn_syntax mod do_this
  = do { errs_var     <- newIORef (emptyBag, emptyBag) ;
+        meta_var     <- newIORef initTyVarUnique ;
       	tvs_var      <- newIORef emptyVarSet ;
 	dfuns_var    <- newIORef emptyNameSet ;
 	keep_var     <- newIORef emptyNameSet ;
-    used_rdrnames_var <- newIORef Set.empty ;
+        used_rdr_var <- newIORef Set.empty ;
 	th_var	     <- newIORef False ;
+	lie_var	     <- newIORef emptyBag ;
 	dfun_n_var   <- newIORef emptyOccSet ;
 	type_env_var <- case hsc_type_env_var hsc_env of {
                            Just (_mod, te_var) -> return te_var ;
                            Nothing             -> newIORef emptyNameEnv } ;
       	let {
-	     maybe_rn_syntax empty_val
+             maybe_rn_syntax :: forall a. a -> Maybe a ;
+             maybe_rn_syntax empty_val
 		| keep_rn_syntax = Just empty_val
 		| otherwise	 = Nothing ;
 			
 	     gbl_env = TcGblEnv {
 		tcg_mod       = mod,
 		tcg_src	      = hsc_src,
-		tcg_rdr_env   = hsc_global_rdr_env hsc_env,
+		tcg_rdr_env   = emptyGlobalRdrEnv,
 		tcg_fix_env   = emptyNameEnv,
 		tcg_field_env = RecFields emptyNameEnv emptyNameSet,
 		tcg_default   = Nothing,
-		tcg_type_env  = hsc_global_type_env hsc_env,
+		tcg_type_env  = emptyNameEnv,
 		tcg_type_env_var = type_env_var,
 		tcg_inst_env  = emptyInstEnv,
 		tcg_fam_inst_env  = emptyFamInstEnv,
@@ -98,25 +101,28 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
 		tcg_th_used   = th_var,
 		tcg_exports  = [],
 		tcg_imports  = emptyImportAvails,
-        tcg_used_rdrnames = used_rdrnames_var,
+                tcg_used_rdrnames = used_rdr_var,
 		tcg_dus      = emptyDUs,
 
                 tcg_rn_imports = [],
                 tcg_rn_exports = maybe_rn_syntax [],
 		tcg_rn_decls   = maybe_rn_syntax emptyRnGroup,
 
-		tcg_binds    = emptyLHsBinds,
-		tcg_warns    = NoWarnings,
-		tcg_anns     = [],
-		tcg_insts    = [],
-		tcg_fam_insts= [],
-		tcg_rules    = [],
-		tcg_fords    = [],
-		tcg_dfun_n   = dfun_n_var,
-		tcg_keep     = keep_var,
-		tcg_doc_hdr  = Nothing,
-                tcg_hpc      = False,
-                tcg_main     = Nothing
+		tcg_binds     = emptyLHsBinds,
+		tcg_imp_specs = [],
+		tcg_sigs      = emptyNameSet,
+		tcg_ev_binds  = emptyBag,
+		tcg_warns     = NoWarnings,
+		tcg_anns      = [],
+		tcg_insts     = [],
+		tcg_fam_insts = [],
+		tcg_rules     = [],
+		tcg_fords     = [],
+		tcg_dfun_n    = dfun_n_var,
+		tcg_keep      = keep_var,
+		tcg_doc_hdr   = Nothing,
+                tcg_hpc       = False,
+                tcg_main      = Nothing
 	     } ;
 	     lcl_env = TcLclEnv {
 		tcl_errs       = errs_var,
@@ -127,9 +133,9 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
 		tcl_arrow_ctxt = NoArrowCtxt,
 		tcl_env        = emptyNameEnv,
 		tcl_tyvars     = tvs_var,
-		tcl_lie	       = panic "initTc:LIE", -- only valid inside getLIE
-		tcl_tybinds    = panic "initTc:tybinds"	
-                                               -- only valid inside a getTyBinds
+		tcl_lie	       = lie_var,
+                tcl_meta       = meta_var,
+		tcl_untch      = initTyVarUnique
 	     } ;
 	} ;
    
@@ -139,6 +145,13 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
 			; case r of
 			  Right res -> return (Just res)
 			  Left _    -> return Nothing } ;
+
+        -- Check for unsolved constraints
+	lie <- readIORef lie_var ;
+        if isEmptyBag lie 
+           then return ()
+           else pprPanic "initTc: unsolved constraints" 
+                         (pprWantedsWithLocs lie) ;
 
 	-- Collect any error messages
 	msgs <- readIORef errs_var ;
@@ -230,20 +243,29 @@ Command-line flags
 getDOpts :: TcRnIf gbl lcl DynFlags
 getDOpts = do { env <- getTopEnv; return (hsc_dflags env) }
 
+xoptM :: ExtensionFlag -> TcRnIf gbl lcl Bool
+xoptM flag = do { dflags <- getDOpts; return (xopt flag dflags) }
+
 doptM :: DynFlag -> TcRnIf gbl lcl Bool
 doptM flag = do { dflags <- getDOpts; return (dopt flag dflags) }
 
-setOptM :: DynFlag -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
+-- XXX setOptM and unsetOptM operate on different types. One should be renamed.
+
+setOptM :: ExtensionFlag -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
 setOptM flag = updEnv (\ env@(Env { env_top = top }) ->
-			 env { env_top = top { hsc_dflags = dopt_set (hsc_dflags top) flag}} )
+			 env { env_top = top { hsc_dflags = xopt_set (hsc_dflags top) flag}} )
 
 unsetOptM :: DynFlag -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
 unsetOptM flag = updEnv (\ env@(Env { env_top = top }) ->
 			 env { env_top = top { hsc_dflags = dopt_unset (hsc_dflags top) flag}} )
 
 -- | Do it flag is true
-ifOptM :: DynFlag -> TcRnIf gbl lcl () -> TcRnIf gbl lcl ()
-ifOptM flag thing_inside = do { b <- doptM flag; 
+ifDOptM :: DynFlag -> TcRnIf gbl lcl () -> TcRnIf gbl lcl ()
+ifDOptM flag thing_inside = do { b <- doptM flag; 
+				if b then thing_inside else return () }
+
+ifXOptM :: ExtensionFlag -> TcRnIf gbl lcl () -> TcRnIf gbl lcl ()
+ifXOptM flag thing_inside = do { b <- xoptM flag; 
 				if b then thing_inside else return () }
 
 getGhcMode :: TcRnIf gbl lcl GhcMode
@@ -295,6 +317,16 @@ getEpsAndHpt = do { env <- getTopEnv; eps <- readMutVar (hsc_EPS env)
 %************************************************************************
 
 \begin{code}
+newMetaUnique :: TcM Unique
+-- The uniques for TcMetaTyVars are allocated specially
+-- in guaranteed linear order, starting at zero for each module
+newMetaUnique 
+ = do { env <- getLclEnv
+      ; let meta_var = tcl_meta env
+      ; uniq <- readMutVar meta_var
+      ; writeMutVar meta_var (incrUnique uniq)
+      ; return uniq }
+
 newUnique :: TcRnIf gbl lcl Unique
 newUnique
  = do { env <- getEnv ;
@@ -342,9 +374,37 @@ instance MonadUnique (IOEnv (Env gbl lcl)) where
 %************************************************************************
 
 \begin{code}
-traceTc, traceRn, traceSplice :: SDoc -> TcRn ()
+newTcRef :: a -> TcRnIf gbl lcl (TcRef a)
+newTcRef = newMutVar 
+
+readTcRef :: TcRef a -> TcRnIf gbl lcl a
+readTcRef = readMutVar
+
+writeTcRef :: TcRef a -> a -> TcRnIf gbl lcl ()
+writeTcRef = writeMutVar
+
+updTcRef :: TcRef a -> (a -> a) -> TcRnIf gbl lcl ()
+updTcRef = updMutVar
+\end{code}
+
+%************************************************************************
+%*									*
+		Debugging
+%*									*
+%************************************************************************
+
+\begin{code}
+traceTc :: String -> SDoc -> TcRn () 
+traceTc = traceTcN 1
+
+traceTcN :: Int -> String -> SDoc -> TcRn () 
+traceTcN level herald doc
+  | level <= opt_TraceLevel = traceOptTcRn Opt_D_dump_tc_trace $
+                              hang (text herald) 2 doc
+  | otherwise               = return ()
+
+traceRn, traceSplice :: SDoc -> TcRn ()
 traceRn      = traceOptTcRn Opt_D_dump_rn_trace
-traceTc      = traceOptTcRn Opt_D_dump_tc_trace
 traceSplice  = traceOptTcRn Opt_D_dump_splices
 
 
@@ -354,16 +414,17 @@ traceHiDiffs = traceOptIf Opt_D_dump_hi_diffs
 
 
 traceOptIf :: DynFlag -> SDoc -> TcRnIf m n ()  -- No RdrEnv available, so qualify everything
-traceOptIf flag doc = ifOptM flag $
+traceOptIf flag doc = ifDOptM flag $
 		      liftIO (printForUser stderr alwaysQualify doc)
 
 traceOptTcRn :: DynFlag -> SDoc -> TcRn ()
-traceOptTcRn flag doc = ifOptM flag $ do
-			{ ctxt <- getErrCtxt
-			; loc  <- getSrcSpanM
-			; env0 <- tcInitTidyEnv
-			; err_info <- mkErrInfo env0 ctxt 
-			; let real_doc = mkLocMessage loc (doc $$ err_info)
+-- Output the message, with current location if opt_PprStyle_Debug
+traceOptTcRn flag doc = ifDOptM flag $ do
+			{ loc  <- getSrcSpanM
+			; let real_doc 
+                                | opt_PprStyle_Debug = mkLocMessage loc doc
+                                | otherwise = doc   -- The full location is 
+				  	      	    -- usually way too much
 			; dumpTcRn real_doc }
 
 dumpTcRn :: SDoc -> TcRn ()
@@ -376,7 +437,7 @@ debugDumpTcRn doc | opt_NoDebugOutput = return ()
                   | otherwise         = dumpTcRn doc
 
 dumpOptTcRn :: DynFlag -> SDoc -> TcRn ()
-dumpOptTcRn flag doc = ifOptM flag (dumpTcRn doc)
+dumpOptTcRn flag doc = ifDOptM flag (dumpTcRn doc)
 \end{code}
 
 
@@ -501,8 +562,8 @@ warnIf False _   = return ()
 addMessages :: Messages -> TcRn ()
 addMessages (m_warns, m_errs)
   = do { errs_var <- getErrsVar ;
-	 (warns, errs) <- readMutVar errs_var ;
-  	 writeMutVar errs_var (warns `unionBags` m_warns,
+	 (warns, errs) <- readTcRef errs_var ;
+  	 writeTcRef errs_var (warns `unionBags` m_warns,
 			       errs  `unionBags` m_errs) }
 
 discardWarnings :: TcRn a -> TcRn a
@@ -513,9 +574,9 @@ discardWarnings :: TcRn a -> TcRn a
 discardWarnings thing_inside
   | opt_PprStyle_Debug = thing_inside
   | otherwise
-  = do	{ errs_var <- newMutVar emptyMessages
+  = do	{ errs_var <- newTcRef emptyMessages
 	; result <- setErrsVar errs_var thing_inside
-	; (_warns, errs) <- readMutVar errs_var
+	; (_warns, errs) <- readTcRef errs_var
 	; addMessages (emptyBag, errs)
 	; return result }
 \end{code}
@@ -538,18 +599,18 @@ addReportAt loc msg extra_info
          dflags <- getDOpts ;
 	 let { warn = mkLongWarnMsg loc (mkPrintUnqualified dflags rdr_env)
 	                            msg extra_info } ;
-	 (warns, errs) <- readMutVar errs_var ;
-  	 writeMutVar errs_var (warns `snocBag` warn, errs) }
+	 (warns, errs) <- readTcRef errs_var ;
+  	 writeTcRef errs_var (warns `snocBag` warn, errs) }
 
 addLongErrAt :: SrcSpan -> Message -> Message -> TcRn ()
 addLongErrAt loc msg extra
-  = do { traceTc (ptext (sLit "Adding error:") <+> (mkLocMessage loc (msg $$ extra))) ;	
+  = do { traceTc "Adding error:" (mkLocMessage loc (msg $$ extra)) ;	
 	 errs_var <- getErrsVar ;
 	 rdr_env <- getGlobalRdrEnv ;
          dflags <- getDOpts ;
 	 let { err = mkLongErrMsg loc (mkPrintUnqualified dflags rdr_env) msg extra } ;
-	 (warns, errs) <- readMutVar errs_var ;
-  	 writeMutVar errs_var (warns, errs `snocBag` err) }
+	 (warns, errs) <- readTcRef errs_var ;
+  	 writeTcRef errs_var (warns, errs `snocBag` err) }
 \end{code}
 
 
@@ -559,10 +620,10 @@ try_m :: TcRn r -> TcRn (Either IOEnvFailure r)
 try_m thing 
   = do { mb_r <- tryM thing ;
 	 case mb_r of 
-	     Left exn -> do { traceTc (exn_msg exn); return mb_r }
+	     Left exn -> do { traceTc "tryTc/recoverM recovering from" $
+                                      text (showException exn)
+                            ; return mb_r }
 	     Right _  -> return mb_r }
-  where
-    exn_msg exn = text "tryTc/recoverM recovering from" <+> text (showException exn)
 
 -----------------------
 recoverM :: TcRn r 	-- Recovery action; do this if the main one fails
@@ -596,9 +657,9 @@ tryTc :: TcRn a -> TcRn (Messages, Maybe a)
 -- It also returns all the errors and warnings accumulated by m
 -- It always succeeds (never raises an exception)
 tryTc m 
- = do {	errs_var <- newMutVar emptyMessages ;
+ = do {	errs_var <- newTcRef emptyMessages ;
 	res  <- try_m (setErrsVar errs_var m) ; 
-	msgs <- readMutVar errs_var ;
+	msgs <- readTcRef errs_var ;
 	return (msgs, case res of
 			    Left _  -> Nothing
 			    Right val -> Just val)
@@ -629,10 +690,10 @@ tryTcLIE :: TcM a -> TcM (Messages, Maybe a)
 -- for the thing is propagated only if there are no errors
 -- Hence it's restricted to the type-check monad
 tryTcLIE thing_inside
-  = do  { ((msgs, mb_res), lie) <- getLIE (tryTcErrs thing_inside) ;
+  = do  { ((msgs, mb_res), lie) <- captureConstraints (tryTcErrs thing_inside) ;
 	; case mb_res of
 	    Nothing  -> return (msgs, Nothing)
-	    Just val -> do { extendLIEs lie; return (msgs, Just val) }
+	    Just val -> do { emitConstraints lie; return (msgs, Just val) }
 	}
 
 -----------------------
@@ -670,7 +731,7 @@ ifErrsM :: TcRn r -> TcRn r -> TcRn r
 -- otherwise does 'main'
 ifErrsM bale_out normal
  = do { errs_var <- getErrsVar ;
-	msgs <- readMutVar errs_var ;
+	msgs <- readTcRef errs_var ;
 	dflags <- getDOpts ;
 	if errorsFound dflags msgs then
 	   bale_out
@@ -718,15 +779,13 @@ maybeAddErrCtxt Nothing    thing_inside = thing_inside
 popErrCtxt :: TcM a -> TcM a
 popErrCtxt = updCtxt (\ msgs -> case msgs of { [] -> []; (_ : ms) -> ms })
 
-getInstLoc :: InstOrigin -> TcM InstLoc
-getInstLoc origin
+getCtLoc :: orig -> TcM (CtLoc orig)
+getCtLoc origin
   = do { loc <- getSrcSpanM ; env <- getLclEnv ;
-	 return (InstLoc origin loc (tcl_ctxt env)) }
+	 return (CtLoc origin loc (tcl_ctxt env)) }
 
-setInstCtxt :: InstLoc -> TcM a -> TcM a
--- Add the SrcSpan and context from the first Inst in the list
--- 	(they all have similar locations)
-setInstCtxt (InstLoc _ src_loc ctxt) thing_inside
+setCtLoc :: CtLoc orig -> TcM a -> TcM a
+setCtLoc (CtLoc _ src_loc ctxt) thing_inside
   = setSrcSpan src_loc (setErrCtxt ctxt thing_inside)
 \end{code}
 
@@ -833,7 +892,7 @@ mkErrInfo env ctxts
    go :: Int -> TidyEnv -> [ErrCtxt] -> TcM SDoc
    go _ _   [] = return empty
    go n env ((is_landmark, ctxt) : ctxts)
-     | is_landmark || opt_PprStyle_Debug || n < mAX_CONTEXTS
+     | is_landmark || n < mAX_CONTEXTS -- Too verbose || opt_PprStyle_Debug 
      = do { (env', msg) <- ctxt env
 	  ; let n' = if is_landmark then n else n+1
           ; rest <- go n' env' ctxts
@@ -856,52 +915,79 @@ debugTc thing
 
 %************************************************************************
 %*									*
-	     Type constraints (the so-called LIE)
+	     Type constraints
 %*									*
 %************************************************************************
 
 \begin{code}
+newTcEvBinds :: TcM EvBindsVar
+newTcEvBinds = do { ref <- newTcRef emptyEvBindMap
+       		  ; uniq <- newUnique
+       		  ; return (EvBindsVar ref uniq) }
+
+extendTcEvBinds :: TcEvBinds -> EvVar -> EvTerm -> TcM TcEvBinds
+extendTcEvBinds binds@(TcEvBinds binds_var) var rhs 
+  = do { addTcEvBind binds_var var rhs
+       ; return binds }
+extendTcEvBinds (EvBinds bnds) var rhs
+  = return (EvBinds (bnds `snocBag` EvBind var rhs))
+
+addTcEvBind :: EvBindsVar -> EvVar -> EvTerm -> TcM ()
+-- Add a binding to the TcEvBinds by side effect
+addTcEvBind (EvBindsVar ev_ref _) var rhs
+  = do { bnds <- readTcRef ev_ref
+       ; writeTcRef ev_ref (extendEvBinds bnds var rhs) }
+
 chooseUniqueOccTc :: (OccSet -> OccName) -> TcM OccName
 chooseUniqueOccTc fn =
   do { env <- getGblEnv
      ; let dfun_n_var = tcg_dfun_n env
-     ; set <- readMutVar dfun_n_var
+     ; set <- readTcRef dfun_n_var
      ; let occ = fn set
-     ; writeMutVar dfun_n_var (extendOccSet set occ)
-     ; return occ
-     }
+     ; writeTcRef dfun_n_var (extendOccSet set occ)
+     ; return occ }
 
-getLIEVar :: TcM (TcRef LIE)
-getLIEVar = do { env <- getLclEnv; return (tcl_lie env) }
+getConstraintVar :: TcM (TcRef WantedConstraints)
+getConstraintVar = do { env <- getLclEnv; return (tcl_lie env) }
 
-setLIEVar :: TcRef LIE -> TcM a -> TcM a
-setLIEVar lie_var = updLclEnv (\ env -> env { tcl_lie = lie_var })
+setConstraintVar :: TcRef WantedConstraints -> TcM a -> TcM a
+setConstraintVar lie_var = updLclEnv (\ env -> env { tcl_lie = lie_var })
 
-getLIE :: TcM a -> TcM (a, [Inst])
--- (getLIE m) runs m, and returns the type constraints it generates
-getLIE thing_inside
-  = do { lie_var <- newMutVar emptyLIE ;
+emitConstraints :: WantedConstraints -> TcM ()
+emitConstraints ct
+  = do { lie_var <- getConstraintVar ;
+	 updTcRef lie_var (`andWanteds` ct) }
+
+emitConstraint :: WantedConstraint -> TcM ()
+emitConstraint ct
+  = do { lie_var <- getConstraintVar ;
+	 updTcRef lie_var (`extendWanteds` ct) }
+
+captureConstraints :: TcM a -> TcM (a, WantedConstraints)
+-- (captureConstraints m) runs m, and returns the type constraints it generates
+captureConstraints thing_inside
+  = do { lie_var <- newTcRef emptyWanteds ;
 	 res <- updLclEnv (\ env -> env { tcl_lie = lie_var }) 
 			  thing_inside ;
-	 lie <- readMutVar lie_var ;
-	 return (res, lieToList lie) }
+	 lie <- readTcRef lie_var ;
+	 return (res, lie) }
 
-extendLIE :: Inst -> TcM ()
-extendLIE inst
-  = do { lie_var <- getLIEVar ;
-	 lie <- readMutVar lie_var ;
-	 writeMutVar lie_var (inst `consLIE` lie) }
+captureUntouchables :: TcM a -> TcM (a, Untouchables)
+captureUntouchables thing_inside
+  = do { env <- getLclEnv
+       ; low_meta <- readTcRef (tcl_meta env)
+       ; res <- setLclEnv (env { tcl_untch = low_meta }) 
+                thing_inside 
+       ; high_meta <- readTcRef (tcl_meta env)
+       ; return (res, TouchableRange low_meta high_meta) }
 
-extendLIEs :: [Inst] -> TcM ()
-extendLIEs [] 
-  = return ()
-extendLIEs insts
-  = do { lie_var <- getLIEVar ;
-	 lie <- readMutVar lie_var ;
-	 writeMutVar lie_var (mkLIE insts `plusLIE` lie) }
-\end{code}
+isUntouchable :: TcTyVar -> TcM Bool
+isUntouchable tv = do { env <- getLclEnv
+                      ; return (varUnique tv < tcl_untch env) }
 
-\begin{code}
+getLclTypeEnv :: TcM (NameEnv TcTyThing)
+getLclTypeEnv = do { env <- getLclEnv; return (tcl_env env) }
+
 setLclTypeEnv :: TcLclEnv -> TcM a -> TcM a
 -- Set the local type envt, but do *not* disturb other fields,
 -- notably the lie_var
@@ -915,61 +1001,23 @@ setLclTypeEnv lcl_env thing_inside
 
 %************************************************************************
 %*									*
-	     Meta type variable bindings
-%*									*
-%************************************************************************
-
-\begin{code}
-getTcTyVarBindsVar :: TcM (TcRef TcTyVarBinds)
-getTcTyVarBindsVar = do { env <- getLclEnv; return (tcl_tybinds env) }
-
-getTcTyVarBinds :: TcM a -> TcM (a, TcTyVarBinds)
-getTcTyVarBinds thing_inside
-  = do { tybinds_var <- newMutVar emptyBag
-       ; res <- updLclEnv (\ env -> env { tcl_tybinds = tybinds_var }) 
-			  thing_inside
-       ; tybinds <- readMutVar tybinds_var
-       ; return (res, tybinds) 
-       }
-
-bindMetaTyVar :: TcTyVar -> TcType -> TcM ()
-bindMetaTyVar tv ty
-  = do { ASSERTM2( do { details <- readMutVar (metaTvRef tv)
-                      ; return (isFlexi details) }, ppr tv )
-       ; tybinds_var <- getTcTyVarBindsVar
-       ; tybinds <- readMutVar tybinds_var
-       ; writeMutVar tybinds_var (tybinds `snocBag` TcTyVarBind tv ty) 
-       }
-
-getTcTyVarBindsRelation :: TcM [(TcTyVar, TcTyVarSet)]
-getTcTyVarBindsRelation
-  = do { tybinds_var <- getTcTyVarBindsVar
-       ; tybinds <- readMutVar tybinds_var
-       ; return $ map freeTvs (bagToList tybinds)
-       }
-  where
-    freeTvs (TcTyVarBind tv ty) = (tv, tyVarsOfType ty)
-\end{code}
-
-%************************************************************************
-%*									*
 	     Template Haskell context
 %*									*
 %************************************************************************
 
 \begin{code}
 recordThUse :: TcM ()
-recordThUse = do { env <- getGblEnv; writeMutVar (tcg_th_used env) True }
+recordThUse = do { env <- getGblEnv; writeTcRef (tcg_th_used env) True }
 
 keepAliveTc :: Id -> TcM ()  	-- Record the name in the keep-alive set
 keepAliveTc id 
   | isLocalId id = do { env <- getGblEnv; 
-		      ; updMutVar (tcg_keep env) (`addOneToNameSet` idName id) }
+		      ; updTcRef (tcg_keep env) (`addOneToNameSet` idName id) }
   | otherwise = return ()
 
 keepAliveSetTc :: NameSet -> TcM ()  	-- Record the name in the keep-alive set
 keepAliveSetTc ns = do { env <- getGblEnv; 
-		       ; updMutVar (tcg_keep env) (`unionNameSets` ns) }
+		       ; updTcRef (tcg_keep env) (`unionNameSets` ns) }
 
 getStage :: TcM ThStage
 getStage = do { env <- getLclEnv; return (tcl_th_ctxt env) }
@@ -1012,7 +1060,7 @@ initIfaceTcRn :: IfG a -> TcRn a
 initIfaceTcRn thing_inside
   = do  { tcg_env <- getGblEnv 
 	; let { if_env = IfGblEnv { if_rec_types = Just (tcg_mod tcg_env, get_type_env) }
-	      ; get_type_env = readMutVar (tcg_type_env_var tcg_env) }
+	      ; get_type_env = readTcRef (tcg_type_env_var tcg_env) }
 	; setEnvs (if_env, ()) thing_inside }
 
 initIfaceExtCore :: IfL a -> TcRn a
@@ -1031,7 +1079,7 @@ initIfaceCheck :: HscEnv -> IfG a -> IO a
 -- Initialise the environment with no useful info at all
 initIfaceCheck hsc_env do_this
  = do let rec_types = case hsc_type_env_var hsc_env of
-                         Just (mod,var) -> Just (mod, readMutVar var)
+                         Just (mod,var) -> Just (mod, readTcRef var)
                          Nothing        -> Nothing
           gbl_env = IfGblEnv { if_rec_types = rec_types }
       initTcRnIf 'i' hsc_env gbl_env () do_this
@@ -1041,8 +1089,8 @@ initIfaceTc :: ModIface
 -- Used when type-checking checking an up-to-date interface file
 -- No type envt from the current module, but we do know the module dependencies
 initIfaceTc iface do_this
- = do	{ tc_env_var <- newMutVar emptyTypeEnv
-	; let { gbl_env = IfGblEnv { if_rec_types = Just (mod, readMutVar tc_env_var) } ;
+ = do	{ tc_env_var <- newTcRef emptyTypeEnv
+	; let { gbl_env = IfGblEnv { if_rec_types = Just (mod, readTcRef tc_env_var) } ;
 	      ; if_lenv = mkIfLclEnv mod doc
 	   }
 	; setEnvs (gbl_env, if_lenv) (do_this tc_env_var)
@@ -1106,9 +1154,9 @@ forkM_maybe doc thing_inside
 		    -- Bleat about errors in the forked thread, if -ddump-if-trace is on
 		    -- Otherwise we silently discard errors. Errors can legitimately
 		    -- happen when compiling interface signatures (see tcInterfaceSigs)
-		      ifOptM Opt_D_dump_if_trace 
+		      ifDOptM Opt_D_dump_if_trace 
 			     (print_errs (hang (text "forkM failed:" <+> doc)
-				             4 (text (show exn))))
+				             2 (text (show exn))))
 
 		    ; traceIf (text "} ending fork (badly)" <+> doc)
 	  	    ; return Nothing }

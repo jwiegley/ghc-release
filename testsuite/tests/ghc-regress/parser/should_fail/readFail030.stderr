@@ -1,2 +1,2 @@
 
-readFail030.hs:1:13: Unsupported extension: ExtensibleRecords
+readFail030.hs:1:14: Unsupported extension: ExtensibleRecords

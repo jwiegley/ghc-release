@@ -19,7 +19,6 @@ import Outputable
 import Name
 import MkId
 import Id
-import FiniteMap
 import ForeignCall
 import HscTypes
 import CoreUtils
@@ -61,6 +60,10 @@ import BreakArray
 import Data.Maybe
 import Module 
 import IdInfo 
+
+import Data.Map (Map)
+import qualified Data.Map as Map
+import qualified FiniteMap as Map
 
 -- -----------------------------------------------------------------------------
 -- Generating byte code for a complete module 
@@ -127,13 +130,13 @@ type Sequel = Word16 -- back off to this depth before ENTER
 
 -- Maps Ids to the offset from the stack _base_ so we don't have
 -- to mess with it after each push/pop.
-type BCEnv = FiniteMap Id Word16 -- To find vars on the stack
+type BCEnv = Map Id Word16 -- To find vars on the stack
 
 {-
 ppBCEnv :: BCEnv -> SDoc
 ppBCEnv p
    = text "begin-env"
-     $$ nest 4 (vcat (map pp_one (sortBy cmp_snd (fmToList p))))
+     $$ nest 4 (vcat (map pp_one (sortBy cmp_snd (Map.toList p))))
      $$ text "end-env"
      where
         pp_one (var, offset) = int offset <> colon <+> ppr var <+> ppr (idCgRep var)
@@ -250,7 +253,7 @@ schemeR fvs (nm, rhs)
 {-
    | trace (showSDoc (
               (char ' '
-               $$ (ppr.filter (not.isTyVar).varSetElems.fst) rhs
+               $$ (ppr.filter (not.isTyCoVar).varSetElems.fst) rhs
                $$ pprCoreExpr (deAnnotate rhs)
                $$ char ' '
               ))) False
@@ -277,7 +280,7 @@ schemeR_wrk fvs nm original_body (args, body)
 
          szsw_args = map (fromIntegral . idSizeW) all_args
          szw_args  = sum szsw_args
-         p_init    = listToFM (zip all_args (mkStackOffsets 0 szsw_args))
+         p_init    = Map.fromList (zip all_args (mkStackOffsets 0 szsw_args))
 
 	 -- make the arg bitmap
 	 bits = argBits (reverse (map idCgRep all_args))
@@ -314,7 +317,7 @@ getVarOffSets d p = catMaybes . map (getOffSet d p) . tickInfo_locals
 
 getOffSet :: Word16 -> BCEnv -> Id -> Maybe (Id, Word16)
 getOffSet d env id 
-   = case lookupBCEnv_maybe env id of
+   = case lookupBCEnv_maybe id env of
         Nothing     -> Nothing 
         Just offset -> Just (id, d - offset)
 
@@ -329,7 +332,7 @@ fvsToEnv :: BCEnv -> VarSet -> [Id]
 -- it, have to agree about this layout
 fvsToEnv p fvs = [v | v <- varSetElems fvs, 
 		      isId v,		-- Could be a type variable
-		      v `elemFM` p]
+		      v `Map.member` p]
 
 -- -----------------------------------------------------------------------------
 -- schemeE
@@ -389,7 +392,7 @@ schemeE d s p (AnnLet (AnnNonRec x (_,rhs)) (_,body))
 	-- saturatred constructor application.
 	-- Just allocate the constructor and carry on
         alloc_code <- mkConAppCode d s p data_con args_r_to_l
-        body_code <- schemeE (d+1) s (addToFM p x d) body
+        body_code <- schemeE (d+1) s (Map.insert x d p) body
         return (alloc_code `appOL` body_code)
 
 -- General case for let.  Generates correct, if inefficient, code in
@@ -411,7 +414,7 @@ schemeE d s p (AnnLet binds (_,body))
          -- are ptrs, so all have size 1.  d' and p' reflect the stack
          -- after the closures have been allocated in the heap (but not
          -- filled in), and pointers to them parked on the stack.
-         p'    = addListToFM p (zipE xs (mkStackOffsets d (genericReplicate n_binds 1)))
+         p'    = Map.insertList (zipE xs (mkStackOffsets d (genericReplicate n_binds 1))) p
          d'    = d + n_binds
          zipE  = zipEqual "schemeE"
 
@@ -802,7 +805,7 @@ doCase d s p (_,scrut) bndr alts is_unboxed_tuple
 
         -- Env in which to compile the alts, not including
         -- any vars bound by the alts themselves
-        p_alts = addToFM p bndr (d_bndr - 1)
+        p_alts = Map.insert bndr (d_bndr - 1) p
 
 	bndr_ty = idType bndr
         isAlgCase = not (isUnLiftedType bndr_ty) && not is_unboxed_tuple
@@ -826,15 +829,16 @@ doCase d s p (_,scrut) bndr alts is_unboxed_tuple
 		 bind_sizes   = ptr_sizes ++ nptrs_sizes
 		 size         = sum ptr_sizes + sum nptrs_sizes
 		 -- the UNPACK instruction unpacks in reverse order...
-		 p' = addListToFM p_alts 
+		 p' = Map.insertList
 			(zip (reverse (ptrs ++ nptrs))
 			  (mkStackOffsets d_alts (reverse bind_sizes)))
+                        p_alts 
 	     in do
              MASSERT(isAlgCase)
 	     rhs_code <- schemeE (d_alts+size) s p' rhs
              return (my_discr alt, unitOL (UNPACK size) `appOL` rhs_code)
 	   where
-	     real_bndrs = filter (not.isTyVar) bndrs
+	     real_bndrs = filter (not.isTyCoVar) bndrs
 
         my_discr (DEFAULT, _, _) = NoDiscr {-shouldn't really happen-}
         my_discr (DataAlt dc, _, _) 
@@ -877,7 +881,7 @@ doCase d s p (_,scrut) bndr alts is_unboxed_tuple
 	bitmap = intsToReverseBitmap bitmap_size'{-size-}
                         (sortLe (<=) (filter (< bitmap_size') rel_slots))
 	  where
-	  binds = fmToList p
+	  binds = Map.toList p
 	  rel_slots = map fromIntegral $ concat (map spread binds)
 	  spread (id, offset)
 		| isFollowableArg (idCgRep id) = [ rel_offset ]
@@ -1028,7 +1032,8 @@ generateCCall d0 s p (CCallSpec target cconv _) fn args_r_to_l
             = case target of
                  DynamicTarget
                     -> return (False, panic "ByteCodeGen.generateCCall(dyn)")
-                 StaticTarget target
+
+                 StaticTarget target _
                     -> do res <- ioToBc (lookupStaticPtr stdcall_adj_target)
                           return (True, res)
                    where
@@ -1145,6 +1150,8 @@ maybe_getCCallReturnRep fn_ty
                                   -- if it was, it would be impossible 
                                   -- to create a valid return value 
                                   -- placeholder on the stack
+
+         blargh :: a -- Used at more than one type
          blargh = pprPanic "maybe_getCCallReturn: can't handle:" 
                            (pprType fn_ty)
      in 
@@ -1203,7 +1210,7 @@ pushAtom d p (AnnVar v)
    | Just primop <- isPrimOpId_maybe v
    = return (unitOL (PUSH_PRIMOP primop), 1)
 
-   | Just d_v <- lookupBCEnv_maybe p v  -- v is a local variable
+   | Just d_v <- lookupBCEnv_maybe v p  -- v is a local variable
    = let l = d - d_v + sz - 2
      in return (toOL (genericReplicate sz (PUSH_L l)), sz)
 	 -- d - d_v 		    the number of words between the TOS 
@@ -1301,7 +1308,7 @@ mkMultiBranch maybe_ncons raw_ways
             = return (snd val)
             | otherwise
             = do label_neq <- getLabelBc
-                 return (mkTestEQ (fst val) label_neq 
+                 return (testEQ (fst val) label_neq 
    			  `consOL` (snd val
    			  `appOL`   unitOL (LABEL label_neq)
                           `appOL`   the_default))
@@ -1315,7 +1322,7 @@ mkMultiBranch maybe_ncons raw_ways
               label_geq <- getLabelBc
               code_lo <- mkTree vals_lo range_lo (dec v_mid)
               code_hi <- mkTree vals_hi v_mid range_hi
-              return (mkTestLT v_mid label_geq
+              return (testLT v_mid label_geq
                         `consOL` (code_lo
 			`appOL`   unitOL (LABEL label_geq)
 			`appOL`   code_hi))
@@ -1325,34 +1332,32 @@ mkMultiBranch maybe_ncons raw_ways
                             [(_, def)] -> def
                             _ -> panic "mkMultiBranch/the_default"
 
+         testLT (DiscrI i) fail_label = TESTLT_I i fail_label
+         testLT (DiscrW i) fail_label = TESTLT_W i fail_label
+         testLT (DiscrF i) fail_label = TESTLT_F i fail_label
+         testLT (DiscrD i) fail_label = TESTLT_D i fail_label
+         testLT (DiscrP i) fail_label = TESTLT_P i fail_label
+         testLT NoDiscr    _          = panic "mkMultiBranch NoDiscr"
+
+         testEQ (DiscrI i) fail_label = TESTEQ_I i fail_label
+         testEQ (DiscrW i) fail_label = TESTEQ_W i fail_label
+         testEQ (DiscrF i) fail_label = TESTEQ_F i fail_label
+         testEQ (DiscrD i) fail_label = TESTEQ_D i fail_label
+         testEQ (DiscrP i) fail_label = TESTEQ_P i fail_label
+         testEQ NoDiscr    _          = panic "mkMultiBranch NoDiscr"
+
          -- None of these will be needed if there are no non-default alts
-         (mkTestLT, mkTestEQ, init_lo, init_hi)
+         (init_lo, init_hi)
             | null notd_ways
             = panic "mkMultiBranch: awesome foursome"
             | otherwise
-            = case fst (head notd_ways) of {
-              DiscrI _ -> ( \(DiscrI i) fail_label -> TESTLT_I i fail_label,
-                            \(DiscrI i) fail_label -> TESTEQ_I i fail_label,
-                            DiscrI minBound,
-                            DiscrI maxBound );
-              DiscrW _ -> ( \(DiscrW i) fail_label -> TESTLT_W i fail_label,
-                            \(DiscrW i) fail_label -> TESTEQ_W i fail_label,
-                            DiscrW minBound,
-                            DiscrW maxBound );
-              DiscrF _ -> ( \(DiscrF f) fail_label -> TESTLT_F f fail_label,
-                            \(DiscrF f) fail_label -> TESTEQ_F f fail_label,
-                            DiscrF minF,
-                            DiscrF maxF );
-              DiscrD _ -> ( \(DiscrD d) fail_label -> TESTLT_D d fail_label,
-                            \(DiscrD d) fail_label -> TESTEQ_D d fail_label,
-                            DiscrD minD,
-                            DiscrD maxD );
-              DiscrP _ -> ( \(DiscrP i) fail_label -> TESTLT_P i fail_label,
-                            \(DiscrP i) fail_label -> TESTEQ_P i fail_label,
-                            DiscrP algMinBound,
-                            DiscrP algMaxBound );
-              NoDiscr -> panic "mkMultiBranch NoDiscr"
-              }
+            = case fst (head notd_ways) of
+              	DiscrI _ -> ( DiscrI minBound, 	DiscrI maxBound )
+              	DiscrW _ -> ( DiscrW minBound, 	DiscrW maxBound )
+              	DiscrF _ -> ( DiscrF minF,     	DiscrF maxF )
+              	DiscrD _ -> ( DiscrD minD,     	DiscrD maxD )
+              	DiscrP _ -> ( DiscrP algMinBound, DiscrP algMaxBound )
+              	NoDiscr -> panic "mkMultiBranch NoDiscr"
 
          (algMinBound, algMaxBound)
             = case maybe_ncons of
@@ -1417,8 +1422,8 @@ instance Outputable Discr where
    ppr NoDiscr    = text "DEF"
 
 
-lookupBCEnv_maybe :: BCEnv -> Id -> Maybe Word16
-lookupBCEnv_maybe = lookupFM
+lookupBCEnv_maybe :: Id -> BCEnv -> Maybe Word16
+lookupBCEnv_maybe = Map.lookup
 
 idSizeW :: Id -> Int
 idSizeW id = cgRepSizeW (typeCgRep (idType id))
@@ -1454,7 +1459,7 @@ bcView :: AnnExpr' Var ann -> Maybe (AnnExpr' Var ann)
 -- whereas value lambdas cannot; that is why they are nuked here
 bcView (AnnNote _ (_,e)) 	     = Just e
 bcView (AnnCast (_,e) _) 	     = Just e
-bcView (AnnLam v (_,e)) | isTyVar v  = Just e
+bcView (AnnLam v (_,e)) | isTyCoVar v  = Just e
 bcView (AnnApp (_,e) (_, AnnType _)) = Just e
 bcView _                             = Nothing
 

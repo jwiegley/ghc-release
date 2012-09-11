@@ -29,107 +29,129 @@ endef
 
 compiler_CONFIG_HS = compiler/main/Config.hs
 
+# This is just to avoid generating a warning when generating deps
+# involving RtsFlags.h
+compiler_stage1_MKDEPENDC_OPTS = -DMAKING_GHC_BUILD_SYSTEM_DEPENDENCIES
+compiler_stage2_MKDEPENDC_OPTS = -DMAKING_GHC_BUILD_SYSTEM_DEPENDENCIES
+compiler_stage3_MKDEPENDC_OPTS = -DMAKING_GHC_BUILD_SYSTEM_DEPENDENCIES
+
+compiler_stage1_C_FILES_NODEPS = compiler/parser/cutils.c
+
 ifneq "$(BINDIST)" "YES"
-compiler/stage1/package-data.mk : $(compiler_CONFIG_HS)
-compiler/stage2/package-data.mk : $(compiler_CONFIG_HS)
-compiler/stage3/package-data.mk : $(compiler_CONFIG_HS)
+compiler/stage1/package-data.mk : compiler/stage1/build/Config.hs
+compiler/stage2/package-data.mk : compiler/stage2/build/Config.hs
+compiler/stage3/package-data.mk : compiler/stage3/build/Config.hs
 endif
 
-$(compiler_CONFIG_HS) : mk/config.mk mk/project.mk
+compiler/stage%/build/Config.hs : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	"$(RM)" $(RM_OPTS) $@
-	@echo "Creating $@ ... "
-	@echo "module Config where" >>$@
-	@echo "cProjectName          :: String" >> $@
-	@echo "cProjectName          = \"$(ProjectName)\"" >> $@
-	@echo "cProjectVersion       :: String" >> $@
-	@echo "cProjectVersion       = \"$(ProjectVersion)\"" >> $@
-	@echo "cProjectVersionInt    :: String" >> $@
-	@echo "cProjectVersionInt    = \"$(ProjectVersionInt)\"" >> $@
-	@echo "cProjectPatchLevel    :: String" >> $@
-	@echo "cProjectPatchLevel    = \"$(ProjectPatchLevel)\"" >> $@
-	@echo "cBooterVersion        :: String" >> $@
-	@echo "cBooterVersion        = \"$(GhcVersion)\"" >> $@
-	@echo "cStage                :: String" >> $@
-	@echo "cStage                = show (STAGE :: Int)" >> $@
-	@echo "cIntegerLibrary       :: String" >> $@
-	@echo "cIntegerLibrary       = \"$(INTEGER_LIBRARY)\"" >> $@
-	@echo "cSplitObjs            :: String" >> $@
-	@echo "cSplitObjs            = \"$(SupportsSplitObjs)\"" >> $@
-	@echo "cGhcWithInterpreter   :: String" >> $@
-	@echo "cGhcWithInterpreter   = \"$(GhcWithInterpreter)\"" >> $@
-	@echo "cGhcWithNativeCodeGen :: String" >> $@
-	@echo "cGhcWithNativeCodeGen = \"$(GhcWithNativeCodeGen)\"" >> $@
-	@echo "cGhcWithSMP           :: String" >> $@
-	@echo "cGhcWithSMP           = \"$(GhcWithSMP)\"" >> $@
-	@echo "cGhcRTSWays           :: String" >> $@
-	@echo "cGhcRTSWays           = \"$(GhcRTSWays)\"" >> $@
-	@echo "cGhcUnregisterised    :: String" >> $@
-	@echo "cGhcUnregisterised    = \"$(GhcUnregisterised)\"" >> $@
-	@echo "cGhcEnableTablesNextToCode :: String" >> $@
-	@echo "cGhcEnableTablesNextToCode = \"$(GhcEnableTablesNextToCode)\"" >> $@
-	@echo "cLeadingUnderscore    :: String" >> $@
-	@echo "cLeadingUnderscore    = \"$(LeadingUnderscore)\"" >> $@
-	@echo "cRAWCPP_FLAGS         :: String" >> $@
-	@echo "cRAWCPP_FLAGS         = \"$(RAWCPP_FLAGS)\"" >> $@
-	@echo "cGCC                  :: String" >> $@
-	@echo "cGCC                  = \"$(WhatGccIsCalled)\"" >> $@
-	@echo "cMKDLL                :: String" >> $@
-	@echo "cMKDLL                = \"$(BLD_DLL)\"" >> $@
-	@echo "cLdIsGNULd            :: String" >> $@
-	@echo "cLdIsGNULd            = \"$(LdIsGNULd)\"" >> $@
-	@echo "cLD_X                 :: String" >> $@
-	@echo "cLD_X                 = \"$(LD_X)\"" >> $@
-	@echo "cGHC_DRIVER_DIR       :: String" >> $@
-	@echo "cGHC_DRIVER_DIR       = \"$(GHC_DRIVER_DIR)\"" >> $@
-	@echo "cGHC_TOUCHY_PGM       :: String" >> $@
-	@echo "cGHC_TOUCHY_PGM       = \"$(GHC_TOUCHY_PGM)\"" >> $@
-	@echo "cGHC_TOUCHY_DIR       :: String" >> $@
-	@echo "cGHC_TOUCHY_DIR       = \"$(GHC_TOUCHY_DIR)\"" >> $@
-	@echo "cGHC_UNLIT_PGM        :: String" >> $@
-	@echo "cGHC_UNLIT_PGM        = \"$(GHC_UNLIT_PGM)\"" >> $@
-	@echo "cGHC_UNLIT_DIR        :: String" >> $@
-	@echo "cGHC_UNLIT_DIR        = \"$(GHC_UNLIT_DIR)\"" >> $@
-	@echo "cGHC_MANGLER_PGM      :: String" >> $@
-	@echo "cGHC_MANGLER_PGM      = \"$(GHC_MANGLER_PGM)\"" >> $@
-	@echo "cGHC_MANGLER_DIR      :: String" >> $@
-	@echo "cGHC_MANGLER_DIR      = \"$(GHC_MANGLER_DIR)\"" >> $@
-	@echo "cGHC_SPLIT_PGM        :: String" >> $@
-	@echo "cGHC_SPLIT_PGM        = \"$(GHC_SPLIT_PGM)\"" >> $@
-	@echo "cGHC_SPLIT_DIR        :: String" >> $@
-	@echo "cGHC_SPLIT_DIR        = \"$(GHC_SPLIT_DIR)\"" >> $@
-	@echo "cGHC_SYSMAN_PGM       :: String" >> $@
-	@echo "cGHC_SYSMAN_PGM       = \"$(GHC_SYSMAN)\"" >> $@
-	@echo "cGHC_SYSMAN_DIR       :: String" >> $@
-	@echo "cGHC_SYSMAN_DIR       = \"$(GHC_SYSMAN_DIR)\"" >> $@
-	@echo "cGHC_CP               :: String" >> $@
-	@echo "cGHC_CP               = \"$(GHC_CP)\"" >> $@
-	@echo "cGHC_PERL             :: String" >> $@
-	@echo "cGHC_PERL             = \"$(GHC_PERL)\"" >> $@
-	@echo "cEnableWin32DLLs      :: String" >> $@
-	@echo "cEnableWin32DLLs      = \"$(EnableWin32DLLs)\"" >> $@
-	@echo "cCONTEXT_DIFF         :: String" >> $@
-	@echo "cCONTEXT_DIFF         = \"$(CONTEXT_DIFF)\"" >> $@
-	@echo "cUSER_WAY_NAMES       :: String" >> $@
-	@echo "cUSER_WAY_NAMES       = \"$(USER_WAY_NAMES)\"" >> $@
-	@echo "cUSER_WAY_OPTS        :: String" >> $@
-	@echo "cUSER_WAY_OPTS        = \"$(USER_WAY_OPTS)\"" >> $@
-	@echo "cDEFAULT_TMPDIR       :: String" >> $@
-	@echo "cDEFAULT_TMPDIR       = \"$(DEFAULT_TMPDIR)\"" >> $@
-	@echo "cRelocatableBuild     :: Bool"                 >> $@
+	@echo 'Creating $@ ... '
+	@echo '{-# LANGUAGE CPP #-}'                                        >> $@
+	@echo 'module Config where'                                         >> $@
+	@echo                                                               >> $@
+	@echo '#include "ghc_boot_platform.h"'                              >> $@
+	@echo                                                               >> $@
+	@echo 'cBuildPlatform :: String'                                    >> $@
+	@echo 'cBuildPlatform = BuildPlatform_NAME'                         >> $@
+	@echo 'cHostPlatform :: String'                                     >> $@
+	@echo 'cHostPlatform = HostPlatform_NAME'                           >> $@
+	@echo 'cTargetPlatform :: String'                                   >> $@
+	@echo 'cTargetPlatform = TargetPlatform_NAME'                       >> $@
+	@echo                                                               >> $@
+	@echo 'cProjectName          :: String'                             >> $@
+	@echo 'cProjectName          = "$(ProjectName)"'                    >> $@
+	@echo 'cProjectVersion       :: String'                             >> $@
+	@echo 'cProjectVersion       = "$(ProjectVersion)"'                 >> $@
+	@echo 'cProjectVersionInt    :: String'                             >> $@
+	@echo 'cProjectVersionInt    = "$(ProjectVersionInt)"'              >> $@
+	@echo 'cProjectPatchLevel    :: String'                             >> $@
+	@echo 'cProjectPatchLevel    = "$(ProjectPatchLevel)"'              >> $@
+	@echo 'cBooterVersion        :: String'                             >> $@
+	@echo 'cBooterVersion        = "$(GhcVersion)"'                     >> $@
+	@echo 'cStage                :: String'                             >> $@
+	@echo 'cStage                = show (STAGE :: Int)'                 >> $@
+	@echo 'cCcOpts               :: [String]'                           >> $@
+	@echo 'cCcOpts               = words "$(CONF_CC_OPTS_STAGE$*)"'     >> $@
+	@echo 'cLdOpts               :: [String]'                           >> $@
+	@echo 'cLdOpts               = words "$(CONF_LD_OPTS_STAGE$*)"'     >> $@
+	@echo 'cIntegerLibrary       :: String'                             >> $@
+	@echo 'cIntegerLibrary       = "$(INTEGER_LIBRARY)"'                >> $@
+	@echo 'cSplitObjs            :: String'                             >> $@
+	@echo 'cSplitObjs            = "$(SupportsSplitObjs)"'              >> $@
+	@echo 'cGhcWithInterpreter   :: String'                             >> $@
+	@echo 'cGhcWithInterpreter   = "$(GhcWithInterpreter)"'             >> $@
+	@echo 'cGhcWithNativeCodeGen :: String'                             >> $@
+	@echo 'cGhcWithNativeCodeGen = "$(GhcWithNativeCodeGen)"'           >> $@
+	@echo 'cGhcWithLlvmCodeGen   :: String'                             >> $@
+	@echo 'cGhcWithLlvmCodeGen   = "YES"'                               >> $@
+	@echo 'cGhcWithSMP           :: String'                             >> $@
+	@echo 'cGhcWithSMP           = "$(GhcWithSMP)"'                     >> $@
+	@echo 'cGhcRTSWays           :: String'                             >> $@
+	@echo 'cGhcRTSWays           = "$(GhcRTSWays)"'                     >> $@
+	@echo 'cGhcUnregisterised    :: String'                             >> $@
+	@echo 'cGhcUnregisterised    = "$(GhcUnregisterised)"'              >> $@
+	@echo 'cGhcEnableTablesNextToCode :: String'                        >> $@
+	@echo 'cGhcEnableTablesNextToCode = "$(GhcEnableTablesNextToCode)"' >> $@
+	@echo 'cLeadingUnderscore    :: String'                             >> $@
+	@echo 'cLeadingUnderscore    = "$(LeadingUnderscore)"'              >> $@
+	@echo 'cRAWCPP_FLAGS         :: String'                             >> $@
+	@echo 'cRAWCPP_FLAGS         = "$(RAWCPP_FLAGS)"'                   >> $@
+	@echo 'cGCC                  :: String'                             >> $@
+	@echo 'cGCC                  = "$(WhatGccIsCalled)"'                >> $@
+	@echo 'cMKDLL                :: String'                             >> $@
+	@echo 'cMKDLL                = "$(BLD_DLL)"'                        >> $@
+	@echo 'cLdIsGNULd            :: String'                             >> $@
+	@echo 'cLdIsGNULd            = "$(LdIsGNULd)"'                      >> $@
+	@echo 'cLD_X                 :: String'                             >> $@
+	@echo 'cLD_X                 = "$(LD_X)"'                           >> $@
+	@echo 'cGHC_DRIVER_DIR       :: String'                             >> $@
+	@echo 'cGHC_DRIVER_DIR       = "$(GHC_DRIVER_DIR)"'                 >> $@
+	@echo 'cGHC_TOUCHY_PGM       :: String'                             >> $@
+	@echo 'cGHC_TOUCHY_PGM       = "$(GHC_TOUCHY_PGM)"'                 >> $@
+	@echo 'cGHC_TOUCHY_DIR       :: String'                             >> $@
+	@echo 'cGHC_TOUCHY_DIR       = "$(GHC_TOUCHY_DIR)"'                 >> $@
+	@echo 'cGHC_UNLIT_PGM        :: String'                             >> $@
+	@echo 'cGHC_UNLIT_PGM        = "$(GHC_UNLIT_PGM)"'                  >> $@
+	@echo 'cGHC_UNLIT_DIR        :: String'                             >> $@
+	@echo 'cGHC_UNLIT_DIR        = "$(GHC_UNLIT_DIR)"'                  >> $@
+	@echo 'cGHC_MANGLER_PGM      :: String'                             >> $@
+	@echo 'cGHC_MANGLER_PGM      = "$(GHC_MANGLER_PGM)"'                >> $@
+	@echo 'cGHC_MANGLER_DIR      :: String'                             >> $@
+	@echo 'cGHC_MANGLER_DIR      = "$(GHC_MANGLER_DIR)"'                >> $@
+	@echo 'cGHC_SPLIT_PGM        :: String'                             >> $@
+	@echo 'cGHC_SPLIT_PGM        = "$(GHC_SPLIT_PGM)"'                  >> $@
+	@echo 'cGHC_SPLIT_DIR        :: String'                             >> $@
+	@echo 'cGHC_SPLIT_DIR        = "$(GHC_SPLIT_DIR)"'                  >> $@
+	@echo 'cGHC_SYSMAN_PGM       :: String'                             >> $@
+	@echo 'cGHC_SYSMAN_PGM       = "$(GHC_SYSMAN)"'                     >> $@
+	@echo 'cGHC_SYSMAN_DIR       :: String'                             >> $@
+	@echo 'cGHC_SYSMAN_DIR       = "$(GHC_SYSMAN_DIR)"'                 >> $@
+	@echo 'cGHC_PERL             :: String'                             >> $@
+	@echo 'cGHC_PERL             = "$(GHC_PERL)"'                       >> $@
+	@echo 'cDEFAULT_TMPDIR       :: String'                             >> $@
+	@echo 'cDEFAULT_TMPDIR       = "$(DEFAULT_TMPDIR)"'                 >> $@
+	@echo 'cRelocatableBuild     :: Bool'                               >> $@
 ifeq "$(RelocatableBuild)" "YES"
-	@echo "cRelocatableBuild     = True"                  >> $@
+	@echo 'cRelocatableBuild     = True'                                >> $@
 else
-	@echo "cRelocatableBuild     = False"                 >> $@
+	@echo 'cRelocatableBuild     = False'                               >> $@
 endif
-	@echo "cLibFFI               :: Bool"                 >> $@
-ifeq "$(UseLibFFIForAdjustors)" "YES"
-	@echo "cLibFFI               = True"                  >> $@
+	@echo 'cUseArchivesForGhci   :: Bool'                               >> $@
+ifeq "$(UseArchivesForGhci)" "YES"
+	@echo 'cUseArchivesForGhci   = True'                                >> $@
 else
-	@echo "cLibFFI               = False"                 >> $@
+	@echo 'cUseArchivesForGhci   = False'                               >> $@
+endif
+	@echo 'cLibFFI               :: Bool'                               >> $@
+ifeq "$(UseLibFFIForAdjustors)" "YES"
+	@echo 'cLibFFI               = True'                                >> $@
+else
+	@echo 'cLibFFI               = False'                               >> $@
 endif
 	@echo done.
 
-$(eval $(call clean-target,compiler,config_hs,$(compiler_CONFIG_HS)))
+# XXX 2010-08-19: This is a legacy clean. Remove later.
+$(eval $(call clean-target,compiler,config_hs,compiler/main/Config.hs))
 
 # -----------------------------------------------------------------------------
 # Create platform includes
@@ -141,95 +163,93 @@ $(eval $(call clean-target,compiler,config_hs,$(compiler_CONFIG_HS)))
 
 PLATFORM_H = ghc_boot_platform.h
 
-compiler/stage1/$(PLATFORM_H) : mk/config.mk mk/project.mk
-	"$(MKDIRHIER)" $(dir $@)
+compiler/stage1/$(PLATFORM_H) : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	"$(RM)" $(RM_OPTS) $@
 	@echo "Creating $@..."
-	@echo "#ifndef __PLATFORM_H__"  >$@
-	@echo "#define __PLATFORM_H__" >>$@
-	@echo >> $@
+	@echo "#ifndef __PLATFORM_H__"                           >> $@
+	@echo "#define __PLATFORM_H__"                           >> $@
+	@echo                                                    >> $@
 	@echo "#define BuildPlatform_NAME  \"$(BUILDPLATFORM)\"" >> $@
-	@echo "#define HostPlatform_NAME   \"$(HOSTPLATFORM)\"" >> $@
-	@echo "#define TargetPlatform_NAME \"$(TARGETPLATFORM)\"" >> $@
-	@echo >> $@
-	@echo "#define $(BuildPlatform_CPP)_BUILD  	1" >> $@
-	@echo "#define $(HostPlatform_CPP)_HOST		1" >> $@
-	@echo "#define $(TargetPlatform_CPP)_TARGET	1" >> $@
-	@echo >> $@
-	@echo "#define $(BuildArch_CPP)_BUILD_ARCH  	1" >> $@
-	@echo "#define $(HostArch_CPP)_HOST_ARCH	1" >> $@
-	@echo "#define $(TargetArch_CPP)_TARGET_ARCH	1" >> $@
-	@echo "#define BUILD_ARCH \"$(BuildArch_CPP)\"" >> $@
-	@echo "#define HOST_ARCH \"$(HostArch_CPP)\"" >> $@
-	@echo "#define TARGET_ARCH \"$(TargetArch_CPP)\"" >> $@
-	@echo >> $@
-	@echo "#define $(BuildOS_CPP)_BUILD_OS 		1" >> $@
-	@echo "#define $(HostOS_CPP)_HOST_OS		1" >> $@
-	@echo "#define $(TargetOS_CPP)_TARGET_OS	1" >> $@  
-	@echo "#define BUILD_OS \"$(BuildOS_CPP)\"" >> $@
-	@echo "#define HOST_OS \"$(HostOS_CPP)\"" >> $@
-	@echo "#define TARGET_OS \"$(TargetOS_CPP)\"" >> $@
+	@echo "#define HostPlatform_NAME   \"$(BUILDPLATFORM)\"" >> $@
+	@echo "#define TargetPlatform_NAME \"$(HOSTPLATFORM)\""  >> $@
+	@echo                                                    >> $@
+	@echo "#define $(BuildPlatform_CPP)_BUILD 1"             >> $@
+	@echo "#define $(BuildPlatform_CPP)_HOST 1"              >> $@
+	@echo "#define $(HostPlatform_CPP)_TARGET 1"             >> $@
+	@echo                                                    >> $@
+	@echo "#define $(BuildArch_CPP)_BUILD_ARCH 1"            >> $@
+	@echo "#define $(BuildArch_CPP)_HOST_ARCH 1"             >> $@
+	@echo "#define $(HostArch_CPP)_TARGET_ARCH 1"            >> $@
+	@echo "#define BUILD_ARCH \"$(BuildArch_CPP)\""          >> $@
+	@echo "#define HOST_ARCH \"$(BuildArch_CPP)\""           >> $@
+	@echo "#define TARGET_ARCH \"$(HostArch_CPP)\""          >> $@
+	@echo                                                    >> $@
+	@echo "#define $(BuildOS_CPP)_BUILD_OS 1"                >> $@
+	@echo "#define $(BuildOS_CPP)_HOST_OS 1"                 >> $@
+	@echo "#define $(HostOS_CPP)_TARGET_OS 1"                >> $@
+	@echo "#define BUILD_OS \"$(BuildOS_CPP)\""              >> $@
+	@echo "#define HOST_OS \"$(BuildOS_CPP)\""               >> $@
+	@echo "#define TARGET_OS \"$(HostOS_CPP)\""              >> $@
 ifeq "$(HostOS_CPP)" "irix"
-	@echo "#ifndef $(IRIX_MAJOR)_TARGET_OS		 " >> $@  
-	@echo "#define $(IRIX_MAJOR)_TARGET_OS		1" >> $@  
-	@echo "#endif					 " >> $@  
+	@echo "#ifndef $(IRIX_MAJOR)_TARGET_OS"                  >> $@
+	@echo "#define $(IRIX_MAJOR)_TARGET_OS 1"                >> $@
+	@echo "#endif"                                           >> $@
 endif
-	@echo >> $@
-	@echo "#define $(BuildVendor_CPP)_BUILD_VENDOR 	1" >> $@
-	@echo "#define $(HostVendor_CPP)_HOST_VENDOR	1" >> $@
-	@echo "#define $(TargetVendor_CPP)_TARGET_VENDOR  1" >> $@
-	@echo "#define BUILD_VENDOR \"$(BuildVendor_CPP)\"" >> $@
-	@echo "#define HOST_VENDOR \"$(HostVendor_CPP)\"" >> $@
-	@echo "#define TARGET_VENDOR \"$(TargetVendor_CPP)\"" >> $@
-	@echo >> $@
-	@echo "#endif /* __PLATFORM_H__ */"          >> $@
+	@echo                                                    >> $@
+	@echo "#define $(BuildVendor_CPP)_BUILD_VENDOR 1"        >> $@
+	@echo "#define $(BuildVendor_CPP)_HOST_VENDOR 1"         >> $@
+	@echo "#define $(HostVendor_CPP)_TARGET_VENDOR 1"        >> $@
+	@echo "#define BUILD_VENDOR \"$(BuildVendor_CPP)\""      >> $@
+	@echo "#define HOST_VENDOR \"$(BuildVendor_CPP)\""       >> $@
+	@echo "#define TARGET_VENDOR \"$(HostVendor_CPP)\""      >> $@
+	@echo                                                    >> $@
+	@echo "#endif /* __PLATFORM_H__ */"                      >> $@
 	@echo "Done."
 
 # For stage2 and above, the BUILD platform is the HOST of stage1, and
 # the HOST platform is the TARGET of stage1.  The TARGET remains the same
 # (stage1 is the cross-compiler, not stage2).
-compiler/stage2/$(PLATFORM_H) : mk/config.mk mk/project.mk
-	"$(MKDIRHIER)" $(dir $@)
+compiler/stage2/$(PLATFORM_H) : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	"$(RM)" $(RM_OPTS) $@
 	@echo "Creating $@..."
-	@echo "#ifndef __PLATFORM_H__"  >$@
-	@echo "#define __PLATFORM_H__" >>$@
-	@echo >> $@
-	@echo "#define BuildPlatform_NAME  \"$(HOSTPLATFORM)\"" >> $@
-	@echo "#define HostPlatform_NAME   \"$(TARGETPLATFORM)\"" >> $@
+	@echo "#ifndef __PLATFORM_H__"                            >> $@
+	@echo "#define __PLATFORM_H__"                            >> $@
+	@echo                                                     >> $@
+	@echo "#define BuildPlatform_NAME  \"$(BUILDPLATFORM)\""  >> $@
+	@echo "#define HostPlatform_NAME   \"$(HOSTPLATFORM)\""   >> $@
 	@echo "#define TargetPlatform_NAME \"$(TARGETPLATFORM)\"" >> $@
-	@echo >> $@
-	@echo "#define $(HostPlatform_CPP)_BUILD  	1" >> $@
-	@echo "#define $(TargetPlatform_CPP)_HOST		1" >> $@
-	@echo "#define $(TargetPlatform_CPP)_TARGET	1" >> $@
-	@echo >> $@
-	@echo "#define $(HostArch_CPP)_BUILD_ARCH  	1" >> $@
-	@echo "#define $(TargetArch_CPP)_HOST_ARCH	1" >> $@
-	@echo "#define $(TargetArch_CPP)_TARGET_ARCH	1" >> $@
-	@echo "#define BUILD_ARCH \"$(HostArch_CPP)\"" >> $@
-	@echo "#define HOST_ARCH \"$(TargetArch_CPP)\"" >> $@
-	@echo "#define TARGET_ARCH \"$(TargetArch_CPP)\"" >> $@
-	@echo >> $@
-	@echo "#define $(HostOS_CPP)_BUILD_OS 		1" >> $@
-	@echo "#define $(TargetOS_CPP)_HOST_OS		1" >> $@
-	@echo "#define $(TargetOS_CPP)_TARGET_OS	1" >> $@  
-	@echo "#define BUILD_OS \"$(HostOS_CPP)\"" >> $@
-	@echo "#define HOST_OS \"$(TargetOS_CPP)\"" >> $@
-	@echo "#define TARGET_OS \"$(TargetOS_CPP)\"" >> $@
-ifeq "$(HostOS_CPP)" "irix"
-	@echo "#ifndef $(IRIX_MAJOR)_TARGET_OS		 " >> $@  
-	@echo "#define $(IRIX_MAJOR)_TARGET_OS		1" >> $@  
-	@echo "#endif					 " >> $@  
+	@echo                                                     >> $@
+	@echo "#define $(BuildPlatform_CPP)_BUILD 1"              >> $@
+	@echo "#define $(HostPlatform_CPP)_HOST 1"                >> $@
+	@echo "#define $(TargetPlatform_CPP)_TARGET 1"            >> $@
+	@echo                                                     >> $@
+	@echo "#define $(BuildArch_CPP)_BUILD_ARCH 1"             >> $@
+	@echo "#define $(HostArch_CPP)_HOST_ARCH 1"               >> $@
+	@echo "#define $(TargetArch_CPP)_TARGET_ARCH 1"           >> $@
+	@echo "#define BUILD_ARCH \"$(HostArch_CPP)\""            >> $@
+	@echo "#define HOST_ARCH \"$(HostArch_CPP)\""             >> $@
+	@echo "#define TARGET_ARCH \"$(TargetArch_CPP)\""         >> $@
+	@echo                                                     >> $@
+	@echo "#define $(HostOS_CPP)_BUILD_OS 1"                  >> $@
+	@echo "#define $(HostOS_CPP)_HOST_OS 1"                   >> $@
+	@echo "#define $(TargetOS_CPP)_TARGET_OS 1"               >> $@
+	@echo "#define BUILD_OS \"$(HostOS_CPP)\""                >> $@
+	@echo "#define HOST_OS \"$(HostOS_CPP)\""                 >> $@
+	@echo "#define TARGET_OS \"$(TargetOS_CPP)\""             >> $@
+ifeq "$(TargetOS_CPP)" "irix"
+	@echo "#ifndef $(IRIX_MAJOR)_TARGET_OS"                   >> $@
+	@echo "#define $(IRIX_MAJOR)_TARGET_OS 1"                 >> $@
+	@echo "#endif"                                            >> $@
 endif
-	@echo >> $@
-	@echo "#define $(HostVendor_CPP)_BUILD_VENDOR 	1" >> $@
-	@echo "#define $(TargetVendor_CPP)_HOST_VENDOR	1" >> $@
-	@echo "#define $(TargetVendor_CPP)_TARGET_VENDOR  1" >> $@
-	@echo "#define BUILD_VENDOR \"$(HostVendor_CPP)\"" >> $@
-	@echo "#define HOST_VENDOR \"$(TargetVendor_CPP)\"" >> $@
-	@echo "#define TARGET_VENDOR \"$(TargetVendor_CPP)\"" >> $@
-	@echo >> $@
-	@echo "#endif /* __PLATFORM_H__ */"          >> $@
+	@echo                                                     >> $@
+	@echo "#define $(BuildVendor_CPP)_BUILD_VENDOR 1"         >> $@
+	@echo "#define $(HostVendor_CPP)_HOST_VENDOR 1"           >> $@
+	@echo "#define $(TargetVendor_CPP)_TARGET_VENDOR  1"      >> $@
+	@echo "#define BUILD_VENDOR \"$(BuildVendor_CPP)\""       >> $@
+	@echo "#define HOST_VENDOR \"$(HostVendor_CPP)\""         >> $@
+	@echo "#define TARGET_VENDOR \"$(TargetVendor_CPP)\""     >> $@
+	@echo                                                     >> $@
+	@echo "#endif /* __PLATFORM_H__ */"                       >> $@
 	@echo "Done."
 
 compiler/stage3/$(PLATFORM_H) : compiler/stage2/$(PLATFORM_H)
@@ -338,28 +358,25 @@ compiler_CONFIGURE_OPTS += --ld-options=-E
 endif
 
 ifeq "$(GhcUnregisterised)" "NO"
-ifeq "$(HOSTPLATFORM)" "ia64-unknown-linux"
-# needed for generating proper relocation in large binaries: trac #856
-compiler_CONFIGURE_OPTS += --ld-option=-Wl,--relax
-endif
+else
+compiler_CONFIGURE_OPTS += --ghc-option=-DNO_REGS
 endif
 
-# We need to turn on profiling either if we have been asked to
-# (GhcLibProfiled = YES) or if we want GHC itself to be compiled with
-# profiling enabled (GhcProfiled = YES).
-ifneq "$(GhcLibProfiled) $(GhcProfiled)" "NO NO"
-compiler_stage2_CONFIGURE_OPTS += --enable-library-profiling
-# And if we're profiling GHC then we want lots of SCCs.
+# If we're profiling GHC then we want lots of SCCs, so -auto-all
 # We also don't want to waste time building the non-profiling library,
 # either normally or for ghci. Unfortunately this means that we have to
 # tell ghc-pkg --force as it gets upset when libHSghc-6.9.a doesn't
 # exist.
 ifeq "$(GhcProfiled)" "YES"
 compiler_stage2_CONFIGURE_OPTS += --ghc-option=-auto-all
-compiler_stage2_CONFIGURE_OPTS += --disable-library-vanilla
+# We seem to still build the vanilla libraries even if we say
+# --disable-library-vanilla, but installation then fails, as Cabal
+# doesn't copy the vanilla .hi files, but ghc-pkg complains about
+# their absence when we register the package. So for now, we just
+# leave the vanilla libraries enabled.
+# compiler_stage2_CONFIGURE_OPTS += --disable-library-vanilla
 compiler_stage2_CONFIGURE_OPTS += --disable-library-for-ghci
 compiler_stage2_CONFIGURE_OPTS += --ghc-pkg-option=--force
-endif
 endif
 
 ifeq "$(HOSTPLATFORM)" "i386-unknown-mingw32"
@@ -389,11 +406,7 @@ compiler_stage3_CONFIGURE_OPTS := $(compiler_stage2_CONFIGURE_OPTS)
 compiler_stage1_CONFIGURE_OPTS += --ghc-option=-DSTAGE=1
 compiler_stage2_CONFIGURE_OPTS += --ghc-option=-DSTAGE=2
 compiler_stage3_CONFIGURE_OPTS += --ghc-option=-DSTAGE=3
-compiler_stage2_HADDOCK_OPTS += --haddock-option=--optghc=-DSTAGE=2
-
-compiler_stage1_CONFIGURE_OPTS += --ghc-options='$(GhcStage1HcOpts)'
-compiler_stage2_CONFIGURE_OPTS += --ghc-options='$(GhcStage2HcOpts)'
-compiler_stage3_CONFIGURE_OPTS += --ghc-options='$(GhcStage3HcOpts)'
+compiler_stage2_HADDOCK_OPTS += --optghc=-DSTAGE=2
 
 compiler/stage1/package-data.mk : compiler/ghc.mk
 compiler/stage2/package-data.mk : compiler/ghc.mk
@@ -417,8 +430,10 @@ compiler_PACKAGE = ghc
 # below.
 # The ProjectPatchLevel > 20000000 iff it's a date. If it's e.g. 6.12.1
 # then we don't want to remove it
+ifneq "$(CLEANING)" "YES"
 ifeq "$(shell [ $(ProjectPatchLevel) -gt 20000000 ] && echo YES)" "YES"
 compiler_stage1_VERSION_MUNGED = YES
+endif
 endif
 
 ifeq "$(compiler_stage1_VERSION_MUNGED)" "YES"
@@ -441,16 +456,15 @@ compiler_stage1_SplitObjs = NO
 compiler_stage2_SplitObjs = NO
 compiler_stage3_SplitObjs = NO
 
-# If we "make 1" or "make 2" then we don't want the rules for the stage
-# that we haven't been asked to build
-ifeq "$(stage)" "1"
-compiler_stage2_NOT_NEEDED = YES
-endif
-ifeq "$(stage)" "2"
+# if stage is set to something other than "1" or "", disable stage 1
+ifneq "$(filter-out 1,$(stage))" ""
 compiler_stage1_NOT_NEEDED = YES
 endif
-# We don't want the rules for stage3 unless we have been explicitly
-# asked to build it
+# if stage is set to something other than "2" or "", disable stage 2
+ifneq "$(filter-out 2,$(stage))" ""
+compiler_stage2_NOT_NEEDED = YES
+endif
+# stage 3 has to be requested explicitly with stage=3
 ifneq "$(stage)" "3"
 compiler_stage3_NOT_NEEDED = YES
 endif
@@ -458,15 +472,23 @@ $(eval $(call build-package,compiler,stage1,0))
 $(eval $(call build-package,compiler,stage2,1))
 $(eval $(call build-package,compiler,stage3,2))
 
+# after build-package, because that sets compiler_stage1_HC_OPTS:
+compiler_stage1_HC_OPTS += $(GhcStage1HcOpts)
+compiler_stage2_HC_OPTS += $(GhcStage2HcOpts)
+compiler_stage3_HC_OPTS += $(GhcStage3HcOpts)
+
 ifneq "$(BINDIST)" "YES"
 
-$(compiler_stage1_depfile) : compiler/stage1/$(PLATFORM_H)
-$(compiler_stage2_depfile) : compiler/stage2/$(PLATFORM_H)
-$(compiler_stage3_depfile) : compiler/stage3/$(PLATFORM_H)
+compiler_stage2_TAGS_HC_OPTS = -package ghc
+$(eval $(call tags-package,compiler,stage2))
 
-$(compiler_stage1_depfile) : $(includes_H_CONFIG) $(includes_H_PLATFORM) $(includes_GHCCONSTANTS) $(includes_DERIVEDCONSTANTS) $(PRIMOP_BITS)
-$(compiler_stage2_depfile) : $(includes_H_CONFIG) $(includes_H_PLATFORM) $(includes_GHCCONSTANTS) $(includes_DERIVEDCONSTANTS) $(PRIMOP_BITS)
-$(compiler_stage3_depfile) : $(includes_H_CONFIG) $(includes_H_PLATFORM) $(includes_GHCCONSTANTS) $(includes_DERIVEDCONSTANTS) $(PRIMOP_BITS)
+$(compiler_stage1_depfile_haskell) : compiler/stage1/$(PLATFORM_H)
+$(compiler_stage2_depfile_haskell) : compiler/stage2/$(PLATFORM_H)
+$(compiler_stage3_depfile_haskell) : compiler/stage3/$(PLATFORM_H)
+
+$(compiler_stage1_depfile_haskell) : $(includes_H_CONFIG) $(includes_H_PLATFORM) $(includes_GHCCONSTANTS) $(includes_DERIVEDCONSTANTS) $(PRIMOP_BITS)
+$(compiler_stage2_depfile_haskell) : $(includes_H_CONFIG) $(includes_H_PLATFORM) $(includes_GHCCONSTANTS) $(includes_DERIVEDCONSTANTS) $(PRIMOP_BITS)
+$(compiler_stage3_depfile_haskell) : $(includes_H_CONFIG) $(includes_H_PLATFORM) $(includes_GHCCONSTANTS) $(includes_DERIVEDCONSTANTS) $(PRIMOP_BITS)
 
 # Every Constants.o object file depends on includes/GHCConstants.h:
 $(eval $(call compiler-hs-dependency,Constants,$(includes_GHCCONSTANTS) includes/HaskellConstants.hs))
@@ -476,8 +498,15 @@ $(eval $(call compiler-hs-dependency,PrimOp,$(PRIMOP_BITS)))
 
 # GHC itself doesn't know about the above dependencies, so we have to
 # switch off the recompilation checker for those modules:
-compiler/prelude/PrimOps_HC_OPTS += -fforce-recomp
+compiler/prelude/PrimOp_HC_OPTS  += -fforce-recomp
 compiler/main/Constants_HC_OPTS  += -fforce-recomp
+
+# Workaround for #4003 in GHC 6.12.2.  It didn't happen in 6.12.1, and
+# will be fixed in 6.12.3.  Unfortunately we don't have a way to do
+# this for just stage1 in the build system.
+ifeq "$(GhcVersion)" "6.12.2"
+compiler/hsSyn/HsLit_HC_OPTS     += -fomit-interface-pragmas
+endif
 
 # Note [munge-stage1-package-config]
 # Strip the date/patchlevel from the version of stage1.  See Note

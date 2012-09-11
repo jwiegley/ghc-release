@@ -9,7 +9,8 @@ module IfaceSyn (
 
 	IfaceDecl(..), IfaceClassOp(..), IfaceConDecl(..), IfaceConDecls(..),
 	IfaceExpr(..), IfaceAlt, IfaceNote(..), IfaceLetBndr(..),
-	IfaceBinding(..), IfaceConAlt(..), IfaceIdInfo(..), IfaceIdDetails(..),
+	IfaceBinding(..), IfaceConAlt(..), 
+	IfaceIdInfo(..), IfaceIdDetails(..), IfaceUnfolding(..),
 	IfaceInfoItem(..), IfaceRule(..), IfaceAnnotation(..), IfaceAnnTarget,
 	IfaceInst(..), IfaceFamInst(..),
 
@@ -27,7 +28,7 @@ module IfaceSyn (
 
 import IfaceType
 
-import NewDemand
+import Demand
 import Annotations
 import Class
 import NameSet 
@@ -104,7 +105,7 @@ data IfaceDecl
                                                 -- beyond .NET
 		   ifExtName :: Maybe FastString }
 
-data IfaceClassOp = IfaceClassOp OccName DefMeth IfaceType
+data IfaceClassOp = IfaceClassOp OccName DefMethSpec IfaceType
 	-- Nothing    => no default method
 	-- Just False => ordinary polymorphic default method
 	-- Just True  => generic default method
@@ -132,7 +133,7 @@ data IfaceConDecl
 	ifConCtxt    :: IfaceContext,		-- Non-stupid context
 	ifConArgTys  :: [IfaceType],		-- Arg types
 	ifConFields  :: [OccName],		-- ...ditto... (field labels)
-	ifConStricts :: [StrictnessMark]}	-- Empty (meaning all lazy),
+	ifConStricts :: [HsBang]}		-- Empty (meaning all lazy),
 						-- or 1-1 corresp with arg tys
 
 data IfaceInst 
@@ -162,6 +163,7 @@ data IfaceRule
 	ifRuleHead   :: Name,   	-- Head of lhs
 	ifRuleArgs   :: [IfaceExpr],	-- Args of LHS
 	ifRuleRhs    :: IfaceExpr,
+	ifRuleAuto   :: Bool,
 	ifRuleOrph   :: Maybe OccName	-- Just like IfaceInst
     }
 
@@ -201,14 +203,29 @@ data IfaceInfoItem
   = HsArity	 Arity
   | HsStrictness StrictSig
   | HsInline     InlinePragma
-  | HsUnfold	 IfaceExpr
+  | HsUnfold	 Bool		  -- True <=> isNonRuleLoopBreaker is true
+		 IfaceUnfolding   -- See Note [Expose recursive functions] 
   | HsNoCafRefs
-  | HsWorker	 Name Arity	-- Worker, if any see IdInfo.WorkerInfo
-					-- for why we want arity here.
-	-- NB: we need IfaceExtName (not just OccName) because the worker
-	--     can simplify to a function in another module.
+
 -- NB: Specialisations and rules come in separately and are
 -- only later attached to the Id.  Partial reason: some are orphans.
+
+data IfaceUnfolding 
+  = IfCoreUnfold Bool IfaceExpr -- True <=> INLINABLE, False <=> regular unfolding
+                                -- Possibly could eliminate the Bool here, the information
+                                -- is also in the InlinePragma.
+
+  | IfCompulsory IfaceExpr	-- Only used for default methods, in fact
+
+  | IfInlineRule Arity          -- INLINE pragmas
+                 Bool		-- OK to inline even if *un*-saturated
+		 Bool		-- OK to inline even if context is boring
+                 IfaceExpr 
+
+  | IfWrapper    Arity Name	  -- NB: we need a Name (not just OccName) because the worker
+				  --     can simplify to a function in another module.
+
+  | IfDFunUnfold [IfaceExpr]
 
 --------------------------------
 data IfaceExpr
@@ -227,7 +244,6 @@ data IfaceExpr
   | IfaceTick   Module Int
 
 data IfaceNote = IfaceSCC CostCentre
-	       | IfaceInlineMe
                | IfaceCoreNote String
 
 type IfaceAlt = (IfaceConAlt, [FastString], IfaceExpr)
@@ -249,6 +265,13 @@ data IfaceBinding
 -- See Note [IdInfo on nested let-bindings]
 data IfaceLetBndr = IfLetBndr FastString IfaceType IfaceIdInfo
 \end{code}
+
+Note [Expose recursive functions]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For supercompilation we want to put *all* unfoldings in the interface
+file, even for functions that are recursive (or big).  So we need to
+know when an unfolding belongs to a loop-breaker so that we can refrain
+from inlining it (except during supercompilation).
 
 Note [IdInfo on nested let-bindings]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -504,11 +527,14 @@ pprIfaceConDecl tc
   = sep [main_payload,
 	 if is_infix then ptext (sLit "Infix") else empty,
 	 if has_wrap then ptext (sLit "HasWrapper") else empty,
-	 if null strs then empty 
-	      else nest 4 (ptext (sLit "Stricts:") <+> hsep (map ppr strs)),
-	 if null fields then empty
-	      else nest 4 (ptext (sLit "Fields:") <+> hsep (map ppr fields))]
+	 ppUnless (null strs) $
+	    nest 4 (ptext (sLit "Stricts:") <+> hsep (map ppr_bang strs)),
+	 ppUnless (null fields) $
+	    nest 4 (ptext (sLit "Fields:") <+> hsep (map ppr fields))]
   where
+    ppr_bang HsNoBang = char '_'	-- Want to see these
+    ppr_bang bang     = ppr bang
+        
     main_payload = ppr name <+> dcolon <+> 
 		   pprIfaceForAllPart (univ_tvs ++ ex_tvs) (eq_ctxt ++ ctxt) pp_tau
 
@@ -528,7 +554,7 @@ instance Outputable IfaceRule where
 		   ifRuleHead = fn, ifRuleArgs = args, ifRuleRhs = rhs }) 
     = sep [hsep [doubleQuotes (ftext name), ppr act,
 		 ptext (sLit "forall") <+> pprIfaceBndrs bndrs],
-	   nest 2 (sep [ppr fn <+> sep (map (pprIfaceExpr parens) args),
+	   nest 2 (sep [ppr fn <+> sep (map pprParendIfaceExpr args),
 		        ptext (sLit "=") <+> ppr rhs])
       ]
 
@@ -557,6 +583,9 @@ ppr_rough (Just tc) = ppr tc
 \begin{code}
 instance Outputable IfaceExpr where
     ppr e = pprIfaceExpr noParens e
+
+pprParendIfaceExpr :: IfaceExpr -> SDoc
+pprParendIfaceExpr = pprIfaceExpr parens
 
 pprIfaceExpr :: (SDoc -> SDoc) -> IfaceExpr -> SDoc
 	-- The function adds parens in context that need
@@ -593,7 +622,7 @@ pprIfaceExpr add_par (IfaceCase scrut bndr ty alts)
   		  nest 2 (sep (map ppr_alt alts)) <+> char '}'])
 
 pprIfaceExpr _       (IfaceCast expr co)
-  = sep [pprIfaceExpr parens expr,
+  = sep [pprParendIfaceExpr expr,
 	 nest 2 (ptext (sLit "`cast`")),
 	 pprParendIfaceType co]
 
@@ -609,7 +638,7 @@ pprIfaceExpr add_par (IfaceLet (IfaceRec pairs) body)
 		  ptext (sLit "} in"),
 		  pprIfaceExpr noParens body])
 
-pprIfaceExpr add_par (IfaceNote note body) = add_par (ppr note <+> pprIfaceExpr parens body)
+pprIfaceExpr add_par (IfaceNote note body) = add_par (ppr note <+> pprParendIfaceExpr body)
 
 ppr_alt :: (IfaceConAlt, [FastString], IfaceExpr) -> SDoc
 ppr_alt (con, bs, rhs) = sep [ppr_con_bs con bs, 
@@ -626,13 +655,12 @@ ppr_bind (IfLetBndr b ty info, rhs)
 
 ------------------
 pprIfaceApp :: IfaceExpr -> [SDoc] -> SDoc
-pprIfaceApp (IfaceApp fun arg) args = pprIfaceApp fun (nest 2 (pprIfaceExpr parens arg) : args)
-pprIfaceApp fun	 	       args = sep (pprIfaceExpr parens fun : args)
+pprIfaceApp (IfaceApp fun arg) args = pprIfaceApp fun (nest 2 (pprParendIfaceExpr arg) : args)
+pprIfaceApp fun	 	       args = sep (pprParendIfaceExpr fun : args)
 
 ------------------
 instance Outputable IfaceNote where
     ppr (IfaceSCC cc)     = pprCostCentreCore cc
-    ppr IfaceInlineMe     = ptext (sLit "__inline_me")
     ppr (IfaceCoreNote s) = ptext (sLit "__core_note") <+> pprHsString (mkFastString s)
 
 
@@ -652,16 +680,25 @@ instance Outputable IfaceIdDetails where
 
 instance Outputable IfaceIdInfo where
   ppr NoInfo       = empty
-  ppr (HasInfo is) = ptext (sLit "{-") <+> fsep (map ppr is) <+> ptext (sLit "-}")
+  ppr (HasInfo is) = ptext (sLit "{-") <+> pprWithCommas ppr is <+> ptext (sLit "-}")
 
 instance Outputable IfaceInfoItem where
-  ppr (HsUnfold unf)  	 = ptext (sLit "Unfolding:") <+>
-				  	parens (pprIfaceExpr noParens unf)
+  ppr (HsUnfold lb unf)  = ptext (sLit "Unfolding") <> ppWhen lb (ptext (sLit "(loop-breaker)")) 
+                           <> colon <+> ppr unf
   ppr (HsInline prag)    = ptext (sLit "Inline:") <+> ppr prag
   ppr (HsArity arity)    = ptext (sLit "Arity:") <+> int arity
   ppr (HsStrictness str) = ptext (sLit "Strictness:") <+> pprIfaceStrictSig str
   ppr HsNoCafRefs	 = ptext (sLit "HasNoCafRefs")
-  ppr (HsWorker w a)	 = ptext (sLit "Worker:") <+> ppr w <+> int a
+
+instance Outputable IfaceUnfolding where
+  ppr (IfCompulsory e)     = ptext (sLit "<compulsory>") <+> parens (ppr e)
+  ppr (IfCoreUnfold s e)   = (if s then ptext (sLit "<stable>") else empty) <+> parens (ppr e)
+  ppr (IfInlineRule a uok bok e) = sep [ptext (sLit "InlineRule") <+> ppr (a,uok,bok),
+      		           	        pprParendIfaceExpr e]
+  ppr (IfWrapper a wkr)    = ptext (sLit "Worker:") <+> ppr wkr
+                             <+> parens (ptext (sLit "arity") <+> int a)
+  ppr (IfDFunUnfold ns)    = ptext (sLit "DFun:")
+                             <+> brackets (pprWithCommas pprParendIfaceExpr ns)
 
 
 -- -----------------------------------------------------------------------------
@@ -775,9 +812,15 @@ freeNamesIfIdInfo NoInfo = emptyNameSet
 freeNamesIfIdInfo (HasInfo i) = fnList freeNamesItem i
 
 freeNamesItem :: IfaceInfoItem -> NameSet
-freeNamesItem (HsUnfold u)     = freeNamesIfExpr u
-freeNamesItem (HsWorker wkr _) = unitNameSet wkr
-freeNamesItem _                = emptyNameSet
+freeNamesItem (HsUnfold _ u) = freeNamesIfUnfold u
+freeNamesItem _              = emptyNameSet
+
+freeNamesIfUnfold :: IfaceUnfolding -> NameSet
+freeNamesIfUnfold (IfCoreUnfold _ e)     = freeNamesIfExpr e
+freeNamesIfUnfold (IfCompulsory e)       = freeNamesIfExpr e
+freeNamesIfUnfold (IfInlineRule _ _ _ e) = freeNamesIfExpr e
+freeNamesIfUnfold (IfWrapper _ v)        = unitNameSet v
+freeNamesIfUnfold (IfDFunUnfold vs)      = fnList freeNamesIfExpr vs
 
 freeNamesIfExpr :: IfaceExpr -> NameSet
 freeNamesIfExpr (IfaceExt v)	  = unitNameSet v
@@ -820,7 +863,8 @@ freeNamesIfTc (IfaceTc tc) = unitNameSet tc
 freeNamesIfTc _ = emptyNameSet
 
 freeNamesIfRule :: IfaceRule -> NameSet
-freeNamesIfRule (IfaceRule _n _a bs f es rhs _o)
+freeNamesIfRule (IfaceRule { ifRuleBndrs = bs, ifRuleHead = f
+                           , ifRuleArgs = es, ifRuleRhs = rhs })
   = unitNameSet f &&&
     fnList freeNamesIfBndr bs &&&
     fnList freeNamesIfExpr es &&&

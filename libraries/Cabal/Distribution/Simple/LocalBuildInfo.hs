@@ -47,16 +47,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -}
 module Distribution.Simple.LocalBuildInfo (
         LocalBuildInfo(..),
         externalPackageDeps,
+        inplacePackageId,
         withLibLBI,
         withExeLBI,
+        withTestLBI,
         ComponentLocalBuildInfo(..),
         -- * Installation directories
         module Distribution.Simple.InstallDirs,
         absoluteInstallDirs, prefixRelativeInstallDirs,
-        substPathTemplate,
-
-        -- * Deprecated
-        packageDeps
+        substPathTemplate
   ) where
 
 
@@ -67,7 +66,7 @@ import qualified Distribution.Simple.InstallDirs as InstallDirs
 import Distribution.Simple.Program (ProgramConfiguration)
 import Distribution.PackageDescription
          ( PackageDescription(..), withLib, Library, withExe
-         , Executable(exeName) )
+         , Executable(exeName), withTest, TestSuite(..) )
 import Distribution.Package
          ( PackageId, Package(..), InstalledPackageId(..) )
 import Distribution.Simple.Compiler
@@ -76,23 +75,36 @@ import Distribution.Simple.PackageIndex
          ( PackageIndex )
 import Distribution.Simple.Utils
          ( die )
+import Distribution.Simple.Setup
+         ( ConfigFlags )
+import Distribution.Text
+         ( display )
 
 import Data.List (nub)
 
--- |Data cached after configuration step.  See also
--- 'Distribution.Setup.ConfigFlags'.
+-- | Data cached after configuration step.  See also
+-- 'Distribution.Simple.Setup.ConfigFlags'.
 data LocalBuildInfo = LocalBuildInfo {
+        configFlags   :: ConfigFlags,
+        -- ^ Options passed to the configuration step.
+        -- Needed to re-run configuration when .cabal is out of date
+        extraConfigArgs     :: [String],
+        -- ^ Extra args on the command line for the configuration step.
+        -- Needed to re-run configuration when .cabal is out of date
         installDirTemplates :: InstallDirTemplates,
                 -- ^ The installation directories for the various differnt
                 -- kinds of files
+        --TODO: inplaceDirTemplates :: InstallDirs FilePath
         compiler      :: Compiler,
                 -- ^ The compiler we're building with
         buildDir      :: FilePath,
                 -- ^ Where to build the package.
+        --TODO: eliminate hugs's scratchDir, use builddir
         scratchDir    :: FilePath,
                 -- ^ Where to put the result of the Hugs build.
         libraryConfig       :: Maybe ComponentLocalBuildInfo,
         executableConfigs   :: [(String, ComponentLocalBuildInfo)],
+        testSuiteConfigs    :: [(String, ComponentLocalBuildInfo)],
         installedPkgs :: PackageIndex,
                 -- ^ All the info about all installed packages.
         pkgDescrFile  :: Maybe FilePath,
@@ -123,10 +135,6 @@ data ComponentLocalBuildInfo = ComponentLocalBuildInfo {
   }
   deriving (Read, Show)
 
-{-# DEPRECATED packageDeps "use externalPackageDeps or componentPackageDeps" #-}
-packageDeps :: LocalBuildInfo -> [PackageId]
-packageDeps = map snd . externalPackageDeps
-
 -- | External package dependencies for the package as a whole, the union of the
 -- individual 'targetPackageDeps'.
 externalPackageDeps :: LocalBuildInfo -> [(InstalledPackageId, PackageId)]
@@ -134,6 +142,12 @@ externalPackageDeps lbi = nub $
   -- TODO:  what about non-buildable components?
      maybe [] componentPackageDeps (libraryConfig lbi)
   ++ concatMap (componentPackageDeps . snd) (executableConfigs lbi)
+
+-- | The installed package Id we use for local packages registered in the local
+-- package db. This is what is used for intra-package deps between components.
+--
+inplacePackageId :: PackageId -> InstalledPackageId
+inplacePackageId pkgid = InstalledPackageId (display pkgid ++ "-inplace")
 
 -- |If the package description has a library section, call the given
 --  function with the library build info as argument.  Extended version of
@@ -158,6 +172,15 @@ withExeLBI pkg_descr lbi f = withExe pkg_descr $ \exe ->
                     ++ exeName exe ++ " but there is no corresponding "
                     ++ "configuration data"
 
+withTestLBI :: PackageDescription -> LocalBuildInfo
+            -> (TestSuite -> ComponentLocalBuildInfo -> IO ()) -> IO ()
+withTestLBI pkg_descr lbi f =
+    let wrapper test = case lookup (testName test) (testSuiteConfigs lbi) of
+            Just clbi -> f test clbi
+            Nothing -> die $ "internal error: the package contains a test suite "
+                            ++ testName test ++ " but there is no corresponding "
+                            ++ "configuration data"
+    in withTest pkg_descr wrapper
 
 -- -----------------------------------------------------------------------------
 -- Wrappers for a couple functions from InstallDirs

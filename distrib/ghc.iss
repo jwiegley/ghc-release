@@ -1,8 +1,9 @@
+; Inno Setup documentation: http://www.jrsoftware.org/ishelp/
 
 [Setup]
 AppName=GHC
-AppVerName=GHC 6.12.3
-DefaultDirName={sd}\ghc\ghc-6.12.3
+AppVerName=GHC 7.0.1
+DefaultDirName={sd}\ghc\ghc-7.0.1
 UsePreviousAppDir=no
 DefaultGroupName=GHC
 UninstallDisplayIcon={app}\bin\ghci.exe
@@ -13,34 +14,53 @@ ChangesAssociations=yes
 ChangesEnvironment=yes
 LicenseFile=distrib/windows-installer-licences.txt
 
+; tasks can be disabled selectively
+[Tasks]
+Name: fileassoc; Description: "Associate with .hs/.lhs files"
+Name: fileassoc\default; Description: "Make this version of GHCi the default"
+Name: fileassoc\addon; Description: "Add versioned GHCi to right-click menu"
+Name: fileassoc\icon; Description: "Add icon"
+Name: path; Description: "Add bin directories to PATH"
 
+; install main payload, license file and icon
 [Files]
-Source: "bindistprep\ghc-6.12.3\*"; DestDir: "{app}"; Flags: recursesubdirs
+Source: "bindistprep\ghc-7.0.1\*"; DestDir: "{app}"; Flags: recursesubdirs
+Source: "distrib\windows-installer-licences.txt"; DestDir: "{app}\doc"
+Source: "distrib\hsicon.ico"; DestDir: "{app}\icons"
 
+; Start Menu shortcuts
 [Icons]
-Name: "{group}\6.12.3\GHCi"; Filename: "{app}\bin\ghci.exe"; WorkingDir: "{app}\bin"
-Name: "{group}\6.12.3\GHC Documentation"; Filename: "{app}\doc\html\index.html"
-Name: "{group}\6.12.3\GHC Library Documentation"; Filename: "{app}\doc\html\libraries\index.html"
-Name: "{group}\6.12.3\GHC Flag Reference"; Filename: "{app}\doc\html\users_guide\flag-reference.html"
+Name: "{group}\7.0.1\GHCi"; Filename: "{app}\bin\ghci.exe"; WorkingDir: "{app}\bin"
+Name: "{group}\7.0.1\GHC Documentation"; Filename: "{app}\doc\html\index.html"
+Name: "{group}\7.0.1\GHC Library Documentation"; Filename: "{app}\doc\html\libraries\index.html"
+Name: "{group}\7.0.1\GHC Flag Reference"; Filename: "{app}\doc\html\users_guide\flag-reference.html"
 
 [Registry]
-; set up icon associations
-; this does _not_ follow the "play nice" proposal
+; set up file associations
+; this does _not_ entirely follow the "play nice" proposal (cf. ticket #916)
 ; future version should
-Root: HKCR; Subkey: ".hs"; ValueType: string; ValueName: ""; ValueData: "ghc_haskell"; Flags: uninsdeletevalue
-Root: HKCR; Subkey: ".lhs"; ValueType: string; ValueName: ""; ValueData: "ghc_haskell"; Flags: uninsdeletevalue
-Root: HKCR; Subkey: "ghc_haskell"; ValueType: string; ValueName: ""; ValueData: "Haskell Source File"; Flags: uninsdeletekey
-Root: HKCR; Subkey: "ghc_haskell\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\icons\hsicon.ico"
-Root: HKCR; Subkey: "ghc_haskell\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\bin\ghci.exe"" ""%1"""
+Root: HKCR; Subkey: ".hs"; ValueType: string; ValueName: ""; ValueData: "ghc_haskell"; Flags: uninsdeletevalue; Tasks: fileassoc
+Root: HKCR; Subkey: ".lhs"; ValueType: string; ValueName: ""; ValueData: "ghc_haskell"; Flags: uninsdeletevalue; Tasks: fileassoc
+Root: HKCR; Subkey: "ghc_haskell"; ValueType: string; ValueName: ""; ValueData: "Haskell Source File"; Flags: uninsdeletekeyifempty; Tasks: fileassoc
+
+; make this GHCi the default action
+Root: HKCR; Subkey: "ghc_haskell\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\bin\ghci.exe"" ""%1"""; Flags: uninsdeletevalue; Tasks: fileassoc\default
+
+; add versioned GHCi entry to right-click menu
+Root: HKCR; Subkey: "ghc_haskell\shell\Open with GHCi 7.0.1"; ValueType: none; ValueName: ""; ValueData: ""; Flags: uninsdeletekey; Tasks: fileassoc\addon
+Root: HKCR; Subkey: "ghc_haskell\shell\Open with GHCi 7.0.1\command"; ValueType: string; ValueName: ""; ValueData: """{app}\bin\ghci.exe"" ""%1"""; Flags: uninsdeletevalue; Tasks: fileassoc\addon
+
+; associate file type with icon
+Root: HKCR; Subkey: "ghc_haskell\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\icons\hsicon.ico"; Tasks: fileassoc\icon
 
 ; these flags were always set in the past, by the installer
 ; some programs may rely on them to find GHC
-Root: HKCU; Subkey: "Software\Haskell\GHC\ghc-6.12.3"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Haskell\GHC\ghc-7.0.1"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Haskell\GHC"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletevalue
 
 ; set the PATH variable, for both GHC and Cabal
-Root: HKCU; Subkey: "Environment"; ValueName: "Path"; ValueType: "string"; ValueData: "{app}\bin;{olddata}";  Check: NotOnPathAlready('{app}\bin'); Flags: preservestringtype
-Root: HKCU; Subkey: "Environment"; ValueName: "Path"; ValueType: "string"; ValueData: "{pf}\Haskell\bin;{olddata}";  Check: NotOnPathAlready('{pf}\Haskell\bin'); Flags: preservestringtype
+Root: HKCU; Subkey: "Environment"; ValueName: "Path"; ValueType: "string"; ValueData: "{app}\bin;{olddata}";  Check: NotOnPathAlready('{app}\bin'); Flags: preservestringtype; Tasks: path
+Root: HKCU; Subkey: "Environment"; ValueName: "Path"; ValueType: "string"; ValueData: "{pf}\Haskell\bin;{olddata}";  Check: NotOnPathAlready('{pf}\Haskell\bin'); Flags: preservestringtype; Tasks: path
 
 
 ; stolen from Gtk2Hs, I'm sure they like us :-)

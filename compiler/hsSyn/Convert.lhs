@@ -7,7 +7,8 @@ This module converts Template Haskell syntax into HsSyn
 
 \begin{code}
 module Convert( convertToHsExpr, convertToPat, convertToHsDecls,
-                convertToHsType, thRdrNameGuesses ) where
+                convertToHsType, convertToHsPred,
+                thRdrNameGuesses ) where
 
 import HsSyn as Hs
 import qualified Class
@@ -19,6 +20,7 @@ import qualified OccName
 import OccName
 import SrcLoc
 import Type
+import Coercion
 import TysWiredIn
 import BasicTypes as Hs
 import ForeignCall
@@ -56,6 +58,10 @@ convertToPat loc p
 convertToHsType :: SrcSpan -> TH.Type -> Either Message (LHsType RdrName)
 convertToHsType loc t
   = initCvt loc $ wrapMsg "type" t $ cvtType t
+
+convertToHsPred :: SrcSpan -> TH.Pred -> Either Message (LHsPred RdrName)
+convertToHsPred loc t
+  = initCvt loc $ wrapMsg "type" t $ cvtPred t
 
 -------------------------------------------------------------------
 newtype CvtM a = CvtM { unCvtM :: SrcSpan -> Either Message a }
@@ -394,20 +400,27 @@ cvtPragmaD (SpecialiseP nm ty opt_ispec)
        ; ty' <- cvtType ty
        ; return $ SpecSig nm' ty' (cvtInlineSpec opt_ispec) }
 
-cvtInlineSpec :: Maybe TH.InlineSpec -> Hs.InlineSpec
+cvtInlineSpec :: Maybe TH.InlineSpec -> Hs.InlinePragma
 cvtInlineSpec Nothing 
-  = defaultInlineSpec
+  = defaultInlinePragma
 cvtInlineSpec (Just (TH.InlineSpec inline conlike opt_activation)) 
-  = mkInlineSpec opt_activation' matchinfo inline
+  = InlinePragma { inl_act = opt_activation', inl_rule = matchinfo
+                 , inl_inline = inl_spec, inl_sat = Nothing }
   where
     matchinfo       = cvtRuleMatchInfo conlike
-    opt_activation' = fmap cvtActivation opt_activation
+    opt_activation' = cvtActivation opt_activation
 
     cvtRuleMatchInfo False = FunLike
     cvtRuleMatchInfo True  = ConLike
 
-    cvtActivation (False, phase) = ActiveBefore phase
-    cvtActivation (True , phase) = ActiveAfter  phase
+    inl_spec | inline    = Inline
+             | otherwise = NoInline
+ 	     -- Currently we have no way to say Inlinable
+
+    cvtActivation Nothing | inline      = AlwaysActive
+                          | otherwise   = NeverActive
+    cvtActivation (Just (False, phase)) = ActiveBefore phase
+    cvtActivation (Just (True , phase)) = ActiveAfter  phase
 
 ---------------------------------------------------
 --		Declarations
@@ -450,8 +463,8 @@ cvtl e = wrapL (cvt e)
 			    ; return $ HsLam (mkMatchGroup [mkSimpleMatch ps' e']) }
     cvt (TupE [e])     = cvt e	-- Singleton tuples treated like nothing (just parens)
     cvt (TupE es)      = do { es' <- mapM cvtl es; return $ ExplicitTuple (map Present es') Boxed }
-    cvt (CondE x y z)  = do { x' <- cvtl x; y' <- cvtl y; z' <- cvtl z
-			    ; return $ HsIf x' y' z' }
+    cvt (CondE x y z)  = do { x' <- cvtl x; y' <- cvtl y; z' <- cvtl z;
+			    ; return $ HsIf (Just noSyntaxExpr) x' y' z' }
     cvt (LetE ds e)    = do { ds' <- cvtLocalDecs (ptext (sLit "a let expression")) ds
                             ; e' <- cvtl e; return $ HsLet ds' e' }
     cvt (CaseE e ms)   
@@ -585,11 +598,12 @@ cvtLit (WordPrimL w)   = do { force w; return $ HsWordPrim w }
 cvtLit (FloatPrimL f)  = do { force f; return $ HsFloatPrim f }
 cvtLit (DoublePrimL f) = do { force f; return $ HsDoublePrim f }
 cvtLit (CharL c)       = do { force c; return $ HsChar c }
-cvtLit (StringL s)     
-  = do { let { s' = mkFastString s }
-       ; force s'
-       ; return $ HsString s' 
-       }
+cvtLit (StringL s)     = do { let { s' = mkFastString s }
+       		       	    ; force s'      
+       		       	    ; return $ HsString s' }
+cvtLit (StringPrimL s) = do { let { s' = mkFastString s }
+       			    ; force s'           
+       			    ; return $ HsStringPrim s' }
 cvtLit _ = panic "Convert.cvtLit: Unexpected literal"
 	-- cvtLit should not be called on IntegerL, RationalL
 	-- That precondition is established right here in
@@ -622,6 +636,7 @@ cvtp (RecP c fs)      = do { c' <- cNameL c; fs' <- mapM cvtPatFld fs
 		  	   ; return $ ConPatIn c' $ Hs.RecCon (HsRecFields fs' Nothing) }
 cvtp (ListP ps)       = do { ps' <- cvtPats ps; return $ ListPat ps' void }
 cvtp (SigP p t)       = do { p' <- cvtPat p; t' <- cvtType t; return $ SigPatIn p' t' }
+cvtp (ViewP e p)      = do { e' <- cvtl e; p' <- cvtPat p; return $ ViewPat e' p' void }
 
 cvtPatFld :: (TH.Name, TH.Pat) -> CvtM (HsRecField RdrName (LPat RdrName))
 cvtPatFld (s,p)
@@ -637,7 +652,7 @@ cvtTvs tvs = mapM cvt_tv tvs
 cvt_tv :: TH.TyVarBndr -> CvtM (LHsTyVarBndr RdrName)
 cvt_tv (TH.PlainTV nm) 
   = do { nm' <- tName nm
-       ; returnL $ UserTyVar nm' 
+       ; returnL $ UserTyVar nm' placeHolderKind
        }
 cvt_tv (TH.KindedTV nm ki) 
   = do { nm' <- tName nm
@@ -840,14 +855,7 @@ isBuiltInOcc ctxt_ns occ
 mk_uniq_occ :: OccName.NameSpace -> String -> Int# -> OccName.OccName
 mk_uniq_occ ns occ uniq 
   = OccName.mkOccName ns (occ ++ '[' : shows (mk_uniq uniq) "]")
-	-- The idea here is to make a name that 
-	-- a) the user could not possibly write, and
-	-- b) cannot clash with another NameU
-	-- Previously I generated an Exact RdrName with mkInternalName.
-	-- This works fine for local binders, but does not work at all for
-	-- top-level binders, which must have External Names, since they are
-	-- rapidly baked into data constructors and the like.  Baling out
-	-- and generating an unqualified RdrName here is the simple solution
+        -- See Note [Unique OccNames from Template Haskell]
 
 -- The packing and unpacking is rather turgid :-(
 mk_occ :: OccName.NameSpace -> String -> OccName.OccName
@@ -868,3 +876,17 @@ mk_uniq :: Int# -> Unique
 mk_uniq u = mkUniqueGrimily (I# u)
 \end{code}
 
+Note [Unique OccNames from Template Haskell]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The idea here is to make a name that 
+  a) the user could not possibly write (it has a "[" 
+     and letters or digits from the unique)
+  b) cannot clash with another NameU
+Previously I generated an Exact RdrName with mkInternalName.  This
+works fine for local binders, but does not work at all for top-level
+binders, which must have External Names, since they are rapidly baked
+into data constructors and the like.  Baling out and generating an
+unqualified RdrName here is the simple solution
+
+See also Note [Suppressing uniques in OccNames] in OccName, which
+suppresses the unique when opt_SuppressUniques is on.

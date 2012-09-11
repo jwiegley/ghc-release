@@ -16,3 +16,42 @@ test('3586',
      ['-O'])
 
 test('T3245', normal, compile_and_run, ['-O'])
+
+# Test that bytestring reading/writing isn't over-allocating.  We had
+# a bug in hGetBufNonBlocking in 6.13 that triggered this.
+#
+test('lazy-bs-alloc',
+     [stats_num_field('peak_megabytes_allocated', 1,
+                                                  3),
+                                     # expected value: 2 (amd64/Linux)
+      stats_num_field('bytes allocated', 400000,
+                                         600000),
+                                     # expected value: 489776 (amd64/Linux)
+      only_ways(['normal']),
+      extra_run_opts('../../numeric/should_run/arith011.stdout'),
+      ignore_output
+      ],
+      # use a suitably big file, without bloating the repo with a new one:
+     compile_and_run,
+     ['-O'])
+
+# Get reproducible floating-point results on x86
+if config.arch == 'i386':
+   sse2_opts = '-msse2'
+else:
+   sse2_opts = ''
+
+test('T4321', omit_ways(['ghci']), compile_and_run, ['-O ' + sse2_opts])
+test('T3736', normal, run_command, ['$MAKE -s --no-print-directory T3736'])
+test('T3738',
+     [stats_num_field('peak_megabytes_allocated', 1,
+                                                  1),
+                                     # expected value: 1 (amd64/Linux)
+      stats_num_field('bytes allocated', 60000,
+                                         61000),
+                                     # expected value: 60368 (amd64/Linux)
+      only_ways(['normal'])
+      ],
+     compile_and_run,
+     ['-O'])
+

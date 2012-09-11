@@ -125,9 +125,15 @@
 	SET_PROF_HDR((StgClosure *)(c),ccs);		\
    }
 
-#define SET_ARR_HDR(c,info,costCentreStack,n_words)	\
+#define SET_ARR_HDR(c,info,costCentreStack,n_bytes)	\
    SET_HDR(c,info,costCentreStack);			\
-   (c)->words = n_words;
+   (c)->bytes = n_bytes;
+
+// Use when changing a closure from one kind to another
+#define OVERWRITE_INFO(c, new_info)                             \
+   LDV_RECORD_DEAD_FILL_SLOP_DYNAMIC((StgClosure *)(c));       \
+   SET_INFO((c), (new_info));                                  \
+   LDV_RECORD_CREATE(c);
 
 /* -----------------------------------------------------------------------------
    How to get hold of the static link field for a static closure.
@@ -249,7 +255,7 @@ INLINE_HEADER StgOffset THUNK_SELECTOR_sizeW ( void )
 { return sizeofW(StgSelector); }
 
 INLINE_HEADER StgOffset BLACKHOLE_sizeW ( void )
-{ return sizeofW(StgHeader)+MIN_PAYLOAD_SIZE; }
+{ return sizeofW(StgInd); } // a BLACKHOLE is a kind of indirection
 
 /* --------------------------------------------------------------------------
    Sizes of closures
@@ -274,8 +280,11 @@ INLINE_HEADER StgOffset ap_sizeW( StgAP* x )
 INLINE_HEADER StgOffset pap_sizeW( StgPAP* x )
 { return PAP_sizeW(x->n_args); }
 
+INLINE_HEADER StgWord arr_words_words( StgArrWords* x)
+{ return ROUNDUP_BYTES_TO_WDS(x->bytes); }
+
 INLINE_HEADER StgOffset arr_words_sizeW( StgArrWords* x )
-{ return sizeofW(StgArrWords) + x->words; }
+{ return sizeofW(StgArrWords) + arr_words_words(x); }
 
 INLINE_HEADER StgOffset mut_arr_ptrs_sizeW( StgMutArrPtrs* x )
 { return sizeofW(StgMutArrPtrs) + x->size; }
@@ -321,8 +330,6 @@ closure_sizeW_ (StgClosure *p, StgInfoTable *info)
 	return pap_sizeW((StgPAP *)p);
     case IND:
     case IND_PERM:
-    case IND_OLDGEN:
-    case IND_OLDGEN_PERM:
 	return sizeofW(StgInd);
     case ARR_WORDS:
 	return arr_words_sizeW((StgArrWords *)p);
@@ -335,18 +342,8 @@ closure_sizeW_ (StgClosure *p, StgInfoTable *info)
 	return tso_sizeW((StgTSO *)p);
     case BCO:
 	return bco_sizeW((StgBCO *)p);
-    case TVAR_WATCH_QUEUE:
-        return sizeofW(StgTVarWatchQueue);
-    case TVAR:
-        return sizeofW(StgTVar);
     case TREC_CHUNK:
         return sizeofW(StgTRecChunk);
-    case TREC_HEADER:
-        return sizeofW(StgTRecHeader);
-    case ATOMIC_INVARIANT:
-        return sizeofW(StgAtomicInvariant);
-    case INVARIANT_CHECK_QUEUE:
-        return sizeofW(StgInvariantCheckQueue);
     default:
 	return sizeW_fromITBL(info);
     }

@@ -1,7 +1,11 @@
 -----------------------------------------------------------------------
--- $Id: primops.txt.pp,v 1.37 2005/11/25 09:46:19 simonmar Exp $
+-- 
+-- (c) 2010 The University of Glasgow
 --
 -- Primitive Operations and Types
+--
+-- For more information on PrimOps, see
+--   http://hackage.haskell.org/trac/ghc/wiki/Commentary/PrimOps
 --
 -----------------------------------------------------------------------
 
@@ -11,25 +15,10 @@
 --
 -- It should first be preprocessed.
 --
--- To add a new primop, you currently need to update the following files:
+-- Information on how PrimOps are implemented and the steps necessary to
+-- add a new one can be found in the Commentary:
 --
---	- this file (ghc/compiler/prelude/primops.txt.pp), which includes
---	  the type of the primop, and various other properties (its
---	  strictness attributes, whether it is defined as a macro
---	  or as out-of-line code, etc.)
---
---	- if the primop is inline (i.e. a macro), then:
---	  	ghc/compiler/AbsCUtils.lhs (dscCOpStmt)
---		  defines the translation of the primop into simpler
---		  abstract C operations.
---		
---	- or, for an out-of-line primop:
---	        ghc/includes/StgMiscClosures.h (just add the declaration)
---		ghc/rts/PrimOps.cmm     (define it here)
---		ghc/rts/Linker.c       (declare the symbol for GHCi)
---
---	- the User's Guide 
---
+--  http://hackage.haskell.org/trac/ghc/wiki/Commentary/PrimOps
 
 -- This file is divided into named sections, each containing or more
 -- primop entries. Section headers have the format:
@@ -633,8 +622,8 @@ primop  UnsafeThawArrayOp  "unsafeThawArray#" GenPrimOp
 section "Byte Arrays"
 	{Operations on {\tt ByteArray\#}. A {\tt ByteArray\#} is a just a region of
          raw memory in the garbage-collected heap, which is not
-         scanned for pointers. It carries its own size (in bytes,
-         rounded up to the nearest multiple of a word). There are
+         scanned for pointers. It carries its own size (in bytes).
+         There are
          three sets of operations for accessing byte array contents:
          index for reading from immutable byte arrays, and read/write
          for mutable byte arrays.  Each set contains operations for a
@@ -682,13 +671,11 @@ primop  UnsafeFreezeByteArrayOp "unsafeFreezeByteArray#" GenPrimOp
 
 primop  SizeofByteArrayOp "sizeofByteArray#" GenPrimOp  
    ByteArray# -> Int#
-   {Return the size of the array in bytes, rounded up to the nearest multiple
-   of a word.}
+   {Return the size of the array in bytes.}
 
 primop  SizeofMutableByteArrayOp "sizeofMutableByteArray#" GenPrimOp
    MutableByteArray# s -> Int#
-   {Return the size of the array in bytes, rounded up to the nearest multiple
-   of a word.}
+   {Return the size of the array in bytes.}
 
 primop IndexByteArrayOp_Char "indexCharArray#" GenPrimOp
    ByteArray# -> Int# -> Char#
@@ -1160,21 +1147,28 @@ primop  RaiseIOOp "raiseIO#" GenPrimOp
    out_of_line = True
    has_side_effects = True
 
-primop  BlockAsyncExceptionsOp "blockAsyncExceptions#" GenPrimOp
+primop  MaskAsyncExceptionsOp "maskAsyncExceptions#" GenPrimOp
         (State# RealWorld -> (# State# RealWorld, a #))
      -> (State# RealWorld -> (# State# RealWorld, a #))
    with
    out_of_line = True
    has_side_effects = True
 
-primop  UnblockAsyncExceptionsOp "unblockAsyncExceptions#" GenPrimOp
+primop  MaskUninterruptibleOp "maskUninterruptible#" GenPrimOp
         (State# RealWorld -> (# State# RealWorld, a #))
      -> (State# RealWorld -> (# State# RealWorld, a #))
    with
    out_of_line = True
    has_side_effects = True
 
-primop  AsyncExceptionsBlockedOp "asyncExceptionsBlocked#" GenPrimOp
+primop  UnmaskAsyncExceptionsOp "unmaskAsyncExceptions#" GenPrimOp
+        (State# RealWorld -> (# State# RealWorld, a #))
+     -> (State# RealWorld -> (# State# RealWorld, a #))
+   with
+   out_of_line = True
+   has_side_effects = True
+
+primop  MaskStatus "getMaskingState#" GenPrimOp
         State# RealWorld -> (# State# RealWorld, Int# #)
    with
    out_of_line = True
@@ -1550,6 +1544,13 @@ primop GetSparkOp "getSpark#" GenPrimOp
    has_side_effects = True
    out_of_line = True
 
+primop NumSparks "numSparks#" GenPrimOp
+   State# s -> (# State# s, Int# #)
+   { Returns the number of sparks in the local spark pool. }
+   with
+   has_side_effects = True
+   out_of_line = True
+
 -- HWL: The first 4 Int# in all par... annotations denote:
 --   name, granularity info, size of result, degree of parallelism
 --      Same  structure as _seq_ i.e. returns Int#
@@ -1684,11 +1685,9 @@ pseudoop   "inline"
 	{\tt inline} function expands to the identity function in Phase zero; so its
 	use imposes no overhead.
 
-	If the function is defined in another module, GHC only exposes its inlining
-	in the interface file if the function is sufficiently small that it might be
-	inlined by the automatic mechanism. There is currently no way to tell GHC to
-	expose arbitrarily-large functions in the interface file. (This shortcoming
-	is something that could be fixed, with some kind of pragma.) }
+	It is good practice to mark the function with an INLINABLE pragma at
+        its definition, (a) so that GHC guarantees to expose its unfolding regardless
+        of size, and (b) so that you have control over exactly what is inlined. }
 
 pseudoop   "lazy"
    a -> a

@@ -1,30 +1,33 @@
 \begin{code}
 module TcSplice where
 import HsSyn	( HsSplice, HsBracket, HsQuasiQuote,
-                  HsExpr, HsType, LHsExpr, LPat, LHsDecl )
+                  HsExpr, HsType, LHsType, LHsExpr, LPat, LHsDecl )
 import Name	( Name )
+import NameSet	( FreeVars )
 import RdrName	( RdrName )
 import TcRnTypes( TcM, TcId )
-import TcType	( BoxyRhoType, TcKind )
+import TcType	( TcRhoType, TcKind )
 import Annotations ( Annotation, CoreAnnTarget )
 import qualified Language.Haskell.TH as TH
 
 tcSpliceExpr :: HsSplice Name
-	     -> BoxyRhoType
+	     -> TcRhoType
 	     -> TcM (HsExpr TcId)
 
-kcSpliceType :: HsSplice Name
+kcSpliceType :: HsSplice Name -> FreeVars
 	     -> TcM (HsType Name, TcKind)
 
 tcBracket :: HsBracket Name 
-	  -> BoxyRhoType
+	  -> TcRhoType
 	  -> TcM (LHsExpr TcId)
 
 tcSpliceDecls :: LHsExpr Name -> TcM [LHsDecl RdrName]
 
 lookupThName_maybe :: TH.Name -> TcM (Maybe Name)
 
-runQuasiQuoteExpr :: HsQuasiQuote Name.Name -> TcM (LHsExpr RdrName)
-runQuasiQuotePat  :: HsQuasiQuote Name -> TcM (LPat RdrName)
+runQuasiQuoteDecl :: HsQuasiQuote RdrName -> TcM [LHsDecl RdrName]
+runQuasiQuoteExpr :: HsQuasiQuote RdrName -> TcM (LHsExpr RdrName)
+runQuasiQuoteType :: HsQuasiQuote RdrName -> TcM (LHsType RdrName)
+runQuasiQuotePat  :: HsQuasiQuote RdrName -> TcM (LPat RdrName)
 runAnnotation     :: CoreAnnTarget -> LHsExpr Name -> TcM Annotation
 \end{code}

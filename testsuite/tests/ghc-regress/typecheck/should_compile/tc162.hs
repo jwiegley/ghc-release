@@ -1,5 +1,4 @@
-{-# OPTIONS -fglasgow-exts #-}
-
+{-# LANGUAGE Rank2Types #-}
 
 -- These ones failed with 5.04.  They need a coercion
 -- in the pattern matching compiler, so they are a bit
@@ -7,6 +6,8 @@
 
 -- GHC 6.3: these are back to failures, because we no longer do 
 -- 	    type subsumption in pattern-matching
+
+-- GHC 7.0: back to success
 
 module ShouldCompile where
 

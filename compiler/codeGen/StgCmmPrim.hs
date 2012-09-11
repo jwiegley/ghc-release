@@ -28,6 +28,7 @@ import CmmUtils
 import PrimOp
 import SMRep
 import Constants
+import Module
 import FastString
 import Outputable
 
@@ -201,7 +202,7 @@ emitPrimOp [res] ParOp [arg]
 	-- later, we might want to inline it.
     emitCCall
 	[(res,NoHint)]
-    	(CmmLit (CmmLabel (mkRtsCodeLabel (sLit "newSpark"))))
+    	(CmmLit (CmmLabel (mkCmmCodeLabel rtsPackageId (fsLit "newSpark"))))
 	[(CmmReg (CmmGlobal BaseReg), AddrHint), (arg,AddrHint)] 
 
 emitPrimOp [res] ReadMutVarOp [mutv]
@@ -216,23 +217,20 @@ emitPrimOp [] WriteMutVarOp [mutv,var]
 		[(CmmReg (CmmGlobal BaseReg), AddrHint), (mutv,AddrHint)]
 
 --  #define sizzeofByteArrayzh(r,a) \
---     r = (((StgArrWords *)(a))->words * sizeof(W_))
+--     r = ((StgArrWords *)(a))->bytes
 emitPrimOp [res] SizeofByteArrayOp [arg]
    = emit $
-	mkAssign (CmmLocal res) (CmmMachOp mo_wordMul [
-			  cmmLoadIndexW arg fixedHdrSize bWord,
-			  CmmLit (mkIntCLit wORD_SIZE)
-			])
+	mkAssign (CmmLocal res) (cmmLoadIndexW arg fixedHdrSize bWord)
 
 --  #define sizzeofMutableByteArrayzh(r,a) \
---      r = (((StgArrWords *)(a))->words * sizeof(W_))
+--      r = ((StgArrWords *)(a))->bytes
 emitPrimOp [res] SizeofMutableByteArrayOp [arg]
    = emitPrimOp [res] SizeofByteArrayOp [arg]
 
 
 --  #define touchzh(o)                  /* nothing */
-emitPrimOp [] TouchOp [_arg]
-   = nopC
+emitPrimOp res@[] TouchOp args@[_arg]
+   = do emitPrimCall res MO_Touch args
 
 --  #define byteArrayContentszh(r,a) r = BYTE_ARR_CTS(a)
 emitPrimOp [res] ByteArrayContents_Char [arg]
@@ -412,9 +410,9 @@ emitPrimOp [res] op [arg]
    = emit (mkAssign (CmmLocal res) $
 	   CmmMachOp (mop rep wordWidth) [CmmMachOp (mop wordWidth rep) [arg]])
 
-emitPrimOp [res] op args
+emitPrimOp r@[res] op args
    | Just prim <- callishOp op
-   = do emitPrimCall res prim args
+   = do emitPrimCall r prim args
 
    | Just mop <- translateOp op
    = let stmt = mkAssign (CmmLocal res) (CmmMachOp mop args) in

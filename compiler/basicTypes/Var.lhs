@@ -25,8 +25,8 @@
 -- Global 'Id's and 'Var's are those that are imported or correspond to a data constructor, primitive operation, or record selectors.
 -- Local 'Id's and 'Var's are those bound within an expression (e.g. by a lambda) or at the top level of the module being compiled.
 module Var (
-        -- * The main data type
-	Var,
+        -- * The main data type and synonyms
+	Var, TyVar, CoVar, Id, DictId, DFunId, EvVar, EvId, IpId,
 
 	-- ** Taking 'Var's apart
 	varName, varUnique, varType, 
@@ -41,13 +41,10 @@ module Var (
 	setIdExported, setIdNotExported,
 
         -- ** Predicates
-        isCoVar, isId, isTyVar, isTcTyVar,
+        isCoVar, isId, isTyCoVar, isTyVar, isTcTyVar,
         isLocalVar, isLocalId,
 	isGlobalId, isExportedId,
 	mustHaveLocalBinding,
-
-	-- * Type variable data type
-	TyVar,
 
 	-- ** Constructing 'TyVar's
 	mkTyVar, mkTcTyVar, mkWildCoVar,
@@ -58,9 +55,6 @@ module Var (
 	-- ** Modifying 'TyVar's
 	setTyVarName, setTyVarUnique, setTyVarKind,
 
-        -- * Coercion variable data type
-        CoVar,
-
         -- ** Constructing 'CoVar's
         mkCoVar,
 
@@ -68,13 +62,12 @@ module Var (
         coVarName,
 
         -- ** Modifying 'CoVar's
-        setCoVarUnique, setCoVarName,
+        setCoVarUnique, setCoVarName
 
-	-- * 'Var' type synonyms
-	Id, DictId
     ) where
 
 #include "HsVersions.h"
+#include "Typeable.h"
 
 import {-# SOURCE #-}	TypeRep( Type, Kind )
 import {-# SOURCE #-}	TcType( TcTyVarDetails, pprTcTyVarDetails )
@@ -83,11 +76,38 @@ import {-# SOURCE #-}	TypeRep( isCoercionKind )
 
 import Name hiding (varName)
 import Unique
+import Util
 import FastTypes
 import FastString
 import Outputable
+
+import Data.Data
 \end{code}
 
+
+%************************************************************************
+%*									*
+                     Synonyms									
+%*									*
+%************************************************************************
+-- These synonyms are here and not in Id because otherwise we need a very
+-- large number of SOURCE imports of Id.hs :-(
+
+\begin{code}
+type EvVar = Var	-- An evidence variable: dictionary or equality constraint
+     	       		-- Could be an DictId or a CoVar
+
+type Id     = Var       -- A term-level identifier
+type DFunId = Id	-- A dictionary function
+type EvId   = Id        -- Term-level evidence: DictId or IpId
+type DictId = EvId	-- A dictionary variable
+type IpId   = EvId      -- A term-level implicit parameter
+
+type TyVar = Var
+type CoVar = TyVar	-- A coercion variable is simply a type 
+			-- variable of kind @ty1 ~ ty2@. Hence its
+			-- 'varType' is always @PredTy (EqPred t1 t2)@
+\end{code}
 
 %************************************************************************
 %*									*
@@ -120,7 +140,7 @@ data Var
 	varName        :: !Name,
 	realUnique     :: FastInt,
 	varType        :: Kind,
-	tcTyVarDetails :: TcTyVarDetails }
+	tc_tv_details  :: TcTyVarDetails }
 
   | Id {
 	varName    :: !Name,
@@ -161,8 +181,9 @@ instance Outputable Var where
   ppr var = ppr (varName var) <+> ifPprDebug (brackets (ppr_debug var))
 
 ppr_debug :: Var -> SDoc
-ppr_debug (TyVar {})                          = ptext (sLit "tv")
-ppr_debug (TcTyVar {tcTyVarDetails = d})      = pprTcTyVarDetails d
+ppr_debug (TyVar { isCoercionVar = False })   = ptext (sLit "tv")
+ppr_debug (TyVar { isCoercionVar = True })    = ptext (sLit "co")
+ppr_debug (TcTyVar {tc_tv_details = d})       = pprTcTyVarDetails d
 ppr_debug (Id { idScope = s, id_details = d }) = ppr_id_scope s <> pprIdDetails d
 
 ppr_id_scope :: IdScope -> SDoc
@@ -188,6 +209,14 @@ instance Ord Var where
     a >= b = realUnique a >=# realUnique b
     a >	 b = realUnique a >#  realUnique b
     a `compare` b = varUnique a `compare` varUnique b
+
+INSTANCE_TYPEABLE0(Var,varTc,"Var")
+
+instance Data Var where
+  -- don't traverse?
+  toConstr _   = abstractConstr "Var"
+  gunfold _ _  = error "gunfold"
+  dataTypeOf _ = mkNoRepType "Var"
 \end{code}
 
 
@@ -217,8 +246,6 @@ setVarType id ty = id { varType = ty }
 %************************************************************************
 
 \begin{code}
-type TyVar = Var
-
 tyVarName :: TyVar -> Name
 tyVarName = varName
 
@@ -250,8 +277,12 @@ mkTcTyVar name kind details
     TcTyVar {	varName    = name,
 		realUnique = getKeyFastInt (nameUnique name),
 		varType  = kind,
-		tcTyVarDetails = details
+		tc_tv_details = details
 	}
+
+tcTyVarDetails :: TyVar -> TcTyVarDetails
+tcTyVarDetails (TcTyVar { tc_tv_details = details }) = details
+tcTyVarDetails var = pprPanic "tcTyVarDetails" (ppr var)
 \end{code}
 
 %************************************************************************
@@ -261,10 +292,6 @@ mkTcTyVar name kind details
 %************************************************************************
 
 \begin{code}
-type CoVar = TyVar -- A coercion variable is simply a type 
-			-- variable of kind @ty1 ~ ty2@. Hence its
-			-- 'varType' is always @PredTy (EqPred t1 t2)@
-
 coVarName :: CoVar -> Name
 coVarName = varName
 
@@ -295,11 +322,6 @@ mkWildCoVar = mkCoVar (mkSysTvName (mkBuiltinUnique 1) (fsLit "co_wild"))
 %************************************************************************
 
 \begin{code}
--- These synonyms are here and not in Id because otherwise we need a very
--- large number of SOURCE imports of Id.hs :-(
-type Id = Var
-type DictId = Var
-
 idInfo :: Id -> IdInfo
 idInfo (Id { id_info = info }) = info
 idInfo other 	       	       = pprPanic "idInfo" (ppr other)
@@ -363,10 +385,19 @@ setIdNotExported id = ASSERT( isLocalId id )
 %************************************************************************
 
 \begin{code}
-isTyVar :: Var -> Bool
-isTyVar (TyVar {})   = True
+isTyCoVar :: Var -> Bool	-- True of both type and coercion variables
+isTyCoVar (TyVar {})   = True
+isTyCoVar (TcTyVar {}) = True
+isTyCoVar _            = False
+
+isTyVar :: Var -> Bool		-- True of both type variables only
+isTyVar v@(TyVar {}) = not (isCoercionVar v)
 isTyVar (TcTyVar {}) = True
 isTyVar _            = False
+
+isCoVar :: Var -> Bool		-- Only works after type checking (sigh)
+isCoVar v@(TyVar {}) = isCoercionVar v
+isCoVar _            = False
 
 isTcTyVar :: Var -> Bool
 isTcTyVar (TcTyVar {}) = True
@@ -379,11 +410,6 @@ isId _       = False
 isLocalId :: Var -> Bool
 isLocalId (Id { idScope = LocalId _ }) = True
 isLocalId _                            = False
-
-isCoVar :: Var -> Bool
-isCoVar (v@(TyVar {}))             = isCoercionVar v
-isCoVar (TcTyVar {varType = kind}) = isCoercionKind kind  -- used during solving
-isCoVar _                          = False
 
 -- | 'isLocalVar' returns @True@ for type variables as well as local 'Id's
 -- These are the variables that we need to pay attention to when finding free

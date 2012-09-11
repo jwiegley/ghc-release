@@ -25,7 +25,7 @@ module X86.Regs (
 	EABase(..), EAIndex(..), addrModeRegs,
 
 	eax, ebx, ecx, edx, esi, edi, ebp, esp,
-	fake0, fake1, fake2, fake3, fake4, fake5,
+	fake0, fake1, fake2, fake3, fake4, fake5, firstfake,
 
 	rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp,
 	r8,  r9,  r10, r11, r12, r13, r14, r15,
@@ -40,7 +40,6 @@ module X86.Regs (
 	freeReg,
 	globalRegMaybe,
 	
-	get_GlobalReg_reg_or_addr,
 	allocatableRegs
 )
 
@@ -49,17 +48,11 @@ where
 #include "nativeGen/NCG.h"
 #include "HsVersions.h"
 
-#if i386_TARGET_ARCH
-# define STOLEN_X86_REGS 4
--- HACK: go for the max
-#endif
-
 #include "../includes/stg/MachRegs.h"
 
 import Reg
 import RegClass
 
-import CgUtils          ( get_GlobalReg_addr )
 import BlockId
 import Cmm
 import CLabel           ( CLabel )
@@ -88,45 +81,29 @@ virtualRegSqueeze cls vr
 	 -> case vr of
 	 	VirtualRegI{}		-> _ILIT(1)
 		VirtualRegHi{}		-> _ILIT(1)
-		VirtualRegD{}		-> _ILIT(0)
-		VirtualRegF{}		-> _ILIT(0)
-
-	-- We don't use floats on this arch, but we can't
-	--	return error because the return type is unboxed...
-	RcFloat
-	 -> case vr of
-	 	VirtualRegI{}		-> _ILIT(0)
-		VirtualRegHi{}		-> _ILIT(0)
-		VirtualRegD{}		-> _ILIT(0)
-		VirtualRegF{}		-> _ILIT(0)
+                _other                  -> _ILIT(0)
 
 	RcDouble
 	 -> case vr of
-	 	VirtualRegI{}		-> _ILIT(0)
-		VirtualRegHi{}		-> _ILIT(0)
 		VirtualRegD{}		-> _ILIT(1)
 		VirtualRegF{}		-> _ILIT(0)
+                _other                  -> _ILIT(0)
+
+	RcDoubleSSE
+	 -> case vr of
+		VirtualRegSSE{}		-> _ILIT(1)
+                _other                  -> _ILIT(0)
+
+        _other -> _ILIT(0)
 
 {-# INLINE realRegSqueeze #-}
 realRegSqueeze :: RegClass -> RealReg -> FastInt
-
-#if defined(i386_TARGET_ARCH)
 realRegSqueeze cls rr
  = case cls of
  	RcInteger
 	 -> case rr of
 	 	RealRegSingle regNo
-			| regNo	< 8	-> _ILIT(1)	-- first fp reg is 8
-			| otherwise	-> _ILIT(0)
-			
-		RealRegPair{}		-> _ILIT(0)
-
-	-- We don't use floats on this arch, but we can't
-	--	return error because the return type is unboxed...
-	RcFloat
-	 -> case rr of
-	 	RealRegSingle regNo
-			| regNo	< 8	-> _ILIT(0)
+			| regNo	< firstfake -> _ILIT(1)
 			| otherwise	-> _ILIT(0)
 			
 		RealRegPair{}		-> _ILIT(0)
@@ -134,45 +111,17 @@ realRegSqueeze cls rr
 	RcDouble
 	 -> case rr of
 	 	RealRegSingle regNo
-			| regNo	< 8	-> _ILIT(0)
-			| otherwise	-> _ILIT(1)
-			
-		RealRegPair{}		-> _ILIT(0)
-
-#elif defined(x86_64_TARGET_ARCH)
-realRegSqueeze cls rr
- = case cls of
- 	RcInteger
-	 -> case rr of
-	 	RealRegSingle regNo
-			| regNo	< 16	-> _ILIT(1)	-- first xmm reg is 16
+			| regNo >= firstfake && regNo <= lastfake -> _ILIT(1)
 			| otherwise	-> _ILIT(0)
 			
 		RealRegPair{}		-> _ILIT(0)
 
-	-- We don't use floats on this arch, but we can't
-	--	return error because the return type is unboxed...
-	RcFloat
+        RcDoubleSSE
 	 -> case rr of
-	 	RealRegSingle regNo
-			| regNo	< 16	-> _ILIT(0)
-			| otherwise	-> _ILIT(0)
-			
-		RealRegPair{}		-> _ILIT(0)
+	 	RealRegSingle regNo | regNo >= firstxmm -> _ILIT(1)
+                _otherwise                        -> _ILIT(0)
 
-	RcDouble
-	 -> case rr of
-	 	RealRegSingle regNo
-			| regNo	< 16	-> _ILIT(0)
-			| otherwise	-> _ILIT(1)
-			
-		RealRegPair{}		-> _ILIT(0)
-
-#else
-realRegSqueeze _ _	= _ILIT(0)
-#endif
-
-
+        _other -> _ILIT(0)
 
 -- -----------------------------------------------------------------------------
 -- Immediates
@@ -267,6 +216,35 @@ spRel _	= panic "X86.Regs.spRel: not defined for this architecture"
 
 #endif
 
+-- The register numbers must fit into 32 bits on x86, so that we can
+-- use a Word32 to represent the set of free registers in the register
+-- allocator.
+
+firstfake, lastfake :: RegNo
+firstfake = 16
+lastfake  = 21
+
+firstxmm, lastxmm :: RegNo
+firstxmm  = 24
+#if i386_TARGET_ARCH
+lastxmm   = 31
+#else
+lastxmm   = 39
+#endif
+
+lastint :: RegNo
+#if i386_TARGET_ARCH
+lastint = 7 -- not %r8..%r15
+#else
+lastint = 15
+#endif
+
+intregnos, fakeregnos, xmmregnos, floatregnos :: [RegNo]
+intregnos   = [0..lastint]
+fakeregnos  = [firstfake .. lastfake]
+xmmregnos   = [firstxmm  .. lastxmm]
+floatregnos = fakeregnos ++ xmmregnos;
+
 
 -- argRegs is the set of regs which are read for an n-argument call to C.
 -- For archs which pass all args on the stack (x86), is empty.
@@ -275,84 +253,43 @@ spRel _	= panic "X86.Regs.spRel: not defined for this architecture"
 argRegs :: RegNo -> [Reg]
 argRegs _	= panic "MachRegs.argRegs(x86): should not be used!"
 
-
-
-
-
 -- | The complete set of machine registers.
 allMachRegNos :: [RegNo]
-
-#if   i386_TARGET_ARCH
-allMachRegNos	= [0..13]
-
-#elif x86_64_TARGET_ARCH
-allMachRegNos  = [0..31]
-
-#else
-allMachRegNos	= panic "X86.Regs.callClobberedRegs: not defined for this architecture"
-
-#endif
-
+allMachRegNos  = intregnos ++ floatregnos
 
 -- | Take the class of a register.
 {-# INLINE classOfRealReg      #-}
 classOfRealReg :: RealReg -> RegClass
-
-#if   i386_TARGET_ARCH
 -- On x86, we might want to have an 8-bit RegClass, which would
 -- contain just regs 1-4 (the others don't have 8-bit versions).
 -- However, we can get away without this at the moment because the
 -- only allocatable integer regs are also 8-bit compatible (1, 3, 4).
 classOfRealReg reg
  = case reg of
-	RealRegSingle i	-> if i < 8 then RcInteger else RcDouble
+	RealRegSingle i
+          | i <= lastint  -> RcInteger
+          | i <= lastfake -> RcDouble
+          | otherwise     -> RcDoubleSSE
+
 	RealRegPair{}	-> panic "X86.Regs.classOfRealReg: RegPairs on this arch"
-
-#elif x86_64_TARGET_ARCH
--- On x86, we might want to have an 8-bit RegClass, which would
--- contain just regs 1-4 (the others don't have 8-bit versions).
--- However, we can get away without this at the moment because the
--- only allocatable integer regs are also 8-bit compatible (1, 3, 4).
-classOfRealReg reg
- = case reg of
-	RealRegSingle i	-> if i < 16 then RcInteger else RcDouble
-	RealRegPair{}	-> panic "X86.Regs.classOfRealReg: RegPairs on this arch"
-
-#else
-classOfRealReg _	= panic "X86.Regs.regClass: not defined for this architecture"
-
-#endif
-
 
 -- | Get the name of the register with this number.
 showReg :: RegNo -> String
+showReg n
+	| n >= firstxmm	 = "%xmm" ++ show (n-firstxmm)
+        | n >= firstfake = "%fake" ++ show (n-firstfake)
+	| n >= 8	 = "%r" ++ show n
+	| otherwise	 = regNames !! n
 
+regNames :: [String]
+regNames 
 #if   i386_TARGET_ARCH
-showReg n
-   = if   n >= 0 && n < 14
-     then regNames !! n
-     else "%unknown_x86_real_reg_" ++ show n
-
-regNames :: [String]
-regNames 
-   = ["%eax", "%ebx", "%ecx", "%edx", "%esi", "%edi", "%ebp", "%esp", 
-      "%fake0", "%fake1", "%fake2", "%fake3", "%fake4", "%fake5", "%fake6"]
-
+   = ["%eax", "%ebx", "%ecx", "%edx", "%esi", "%edi", "%ebp", "%esp"]
 #elif x86_64_TARGET_ARCH
-showReg n
-	| n >= 16	= "%xmm" ++ show (n-16)
-	| n >= 8	= "%r" ++ show n
-	| otherwise	= regNames !! n
-
-regNames :: [String]
-regNames 
- = ["%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi", "%rbp", "%rsp" ]
-
+   = ["%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi", "%rbp", "%rsp" ]
 #else
-showReg _	= panic "X86.Regs.showReg: not defined for this architecture"
-
+   = []
 #endif
-
 
 
 
@@ -365,7 +302,7 @@ Intel x86 architecture:
 - Only ebx, esi, edi and esp are available across a C call (they are callee-saves).
 - Registers 0-7 have 16-bit counterparts (ax, bx etc.)
 - Registers 0-3 have 8 bit counterparts (ah, bh etc.)
-- Registers 8-13 are fakes; we pretend x86 has 6 conventionally-addressable
+- Registers fake0..fake5 are fakes; we pretend x86 has 6 conventionally-addressable
   fp registers, and 3-operand insns for them, and we translate this into
   real stack-based x86 fp code after register allocation.
 
@@ -385,12 +322,12 @@ esi   = regSingle 4
 edi   = regSingle 5
 ebp   = regSingle 6
 esp   = regSingle 7
-fake0 = regSingle 8
-fake1 = regSingle 9
-fake2 = regSingle 10
-fake3 = regSingle 11
-fake4 = regSingle 12
-fake5 = regSingle 13
+fake0 = regSingle 16
+fake1 = regSingle 17
+fake2 = regSingle 18
+fake3 = regSingle 19
+fake4 = regSingle 20
+fake5 = regSingle 21
 
 
 
@@ -423,25 +360,25 @@ r12   = regSingle 12
 r13   = regSingle 13
 r14   = regSingle 14
 r15   = regSingle 15
-xmm0  = regSingle 16
-xmm1  = regSingle 17
-xmm2  = regSingle 18
-xmm3  = regSingle 19
-xmm4  = regSingle 20
-xmm5  = regSingle 21
-xmm6  = regSingle 22
-xmm7  = regSingle 23
-xmm8  = regSingle 24
-xmm9  = regSingle 25
-xmm10 = regSingle 26
-xmm11 = regSingle 27
-xmm12 = regSingle 28
-xmm13 = regSingle 29
-xmm14 = regSingle 30
-xmm15 = regSingle 31
+xmm0  = regSingle 24
+xmm1  = regSingle 25
+xmm2  = regSingle 26
+xmm3  = regSingle 27
+xmm4  = regSingle 28
+xmm5  = regSingle 29
+xmm6  = regSingle 30
+xmm7  = regSingle 31
+xmm8  = regSingle 32
+xmm9  = regSingle 33
+xmm10 = regSingle 34
+xmm11 = regSingle 35
+xmm12 = regSingle 36
+xmm13 = regSingle 37
+xmm14 = regSingle 38
+xmm15 = regSingle 39
 
 allFPArgRegs :: [Reg]
-allFPArgRegs	= map regSingle [16 .. 23]
+allFPArgRegs	= map regSingle [firstxmm .. firstxmm+7]
 
 ripRel :: Displacement -> AddrMode
 ripRel imm	= AddrBaseIndex EABaseRip EAIndexNone imm
@@ -460,7 +397,7 @@ esp = rsp
 -}
 
 xmm :: RegNo -> Reg
-xmm n = regSingle (16+n)
+xmm n = regSingle (firstxmm+n)
 
 
 
@@ -482,12 +419,6 @@ callClobberedRegs 	:: [Reg]
 #define edi 5
 #define ebp 6
 #define esp 7
-#define fake0 8
-#define fake1 9
-#define fake2 10
-#define fake3 11
-#define fake4 12
-#define fake5 13
 #endif
 
 #if x86_64_TARGET_ARCH
@@ -507,25 +438,31 @@ callClobberedRegs 	:: [Reg]
 #define r13   13
 #define r14   14
 #define r15   15
-#define xmm0  16
-#define xmm1  17
-#define xmm2  18
-#define xmm3  19
-#define xmm4  20
-#define xmm5  21
-#define xmm6  22
-#define xmm7  23
-#define xmm8  24
-#define xmm9  25
-#define xmm10 26
-#define xmm11 27
-#define xmm12 28
-#define xmm13 29
-#define xmm14 30
-#define xmm15 31
 #endif
 
+#define fake0 16
+#define fake1 17
+#define fake2 18
+#define fake3 19
+#define fake4 20
+#define fake5 21
 
+#define xmm0  24
+#define xmm1  25
+#define xmm2  26
+#define xmm3  27
+#define xmm4  28
+#define xmm5  29
+#define xmm6  30
+#define xmm7  31
+#define xmm8  32
+#define xmm9  33
+#define xmm10 34
+#define xmm11 35
+#define xmm12 36
+#define xmm13 37
+#define xmm14 38
+#define xmm15 39
 
 #if i386_TARGET_ARCH
 freeReg esp = fastBool False  --	%esp is the C stack pointer
@@ -697,13 +634,13 @@ allArgRegs  = panic "X86.Regs.allArgRegs: not defined for this architecture"
 #if   i386_TARGET_ARCH
 -- caller-saves registers
 callClobberedRegs
-  = map regSingle [eax,ecx,edx,fake0,fake1,fake2,fake3,fake4,fake5]
+  = map regSingle ([eax,ecx,edx]  ++ floatregnos)
 
 #elif x86_64_TARGET_ARCH
 -- all xmm regs are caller-saves
 -- caller-saves registers
 callClobberedRegs    
-  = map regSingle ([rax,rcx,rdx,rsi,rdi,r8,r9,r10,r11] ++ [16..31])
+  = map regSingle ([rax,rcx,rdx,rsi,rdi,r8,r9,r10,r11] ++ floatregnos)
 
 #else
 callClobberedRegs
@@ -722,20 +659,6 @@ callClobberedRegs	= panic "X86.Regs.globalRegMaybe: not defined"
 
 
 #endif
-
--- We map STG registers onto appropriate CmmExprs.  Either they map
--- to real machine registers or stored as offsets from BaseReg.  Given
--- a GlobalReg, get_GlobalReg_reg_or_addr produces either the real
--- register it is in, on this platform, or a CmmExpr denoting the
--- address in the register table holding it.
--- (See also get_GlobalReg_addr in CgUtils.)
-
-get_GlobalReg_reg_or_addr :: GlobalReg -> Either RealReg CmmExpr
-get_GlobalReg_reg_or_addr mid
-   = case globalRegMaybe mid of
-        Just rr -> Left rr
-        Nothing -> Right (get_GlobalReg_addr mid)
-
 
 -- allocatableRegs is allMachRegNos with the fixed-use regs removed.
 -- i.e., these are the regs for which we are prepared to allow the

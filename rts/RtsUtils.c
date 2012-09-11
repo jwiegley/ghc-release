@@ -52,139 +52,6 @@ extern char *ctime_r(const time_t *, char *);
 #endif
 
 /* -----------------------------------------------------------------------------
-   Debugging allocator
-   -------------------------------------------------------------------------- */
-
-#if defined(DEBUG)
-
-typedef struct Allocated_ {
-    void *addr;
-    size_t len;
-    struct Allocated_ *next;
-} Allocated;
-
-static Allocated *allocs = NULL;
-
-#ifdef THREADED_RTS
-static Mutex allocator_mutex;
-#endif
-
-void
-initAllocator(void)
-{
-    Allocated *a;
-    size_t alloc_size;
-
-#ifdef THREADED_RTS
-    initMutex(&allocator_mutex);
-#endif
-    alloc_size = sizeof(Allocated);
-    if ((a = (Allocated *) malloc(alloc_size)) == NULL) {
-      /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
-      MallocFailHook((W_) alloc_size, "initialising debugging allocator");
-      stg_exit(EXIT_INTERNAL_ERROR);
-    }
-    a->addr = NULL;
-    a->len = 0;
-    a->next = NULL;
-    allocs = a;
-}
-
-void
-shutdownAllocator(void)
-{
-    Allocated *prev, *a;
-
-    if (allocs == NULL) {
-        barf("Allocator shutdown requested, but not initialised!");
-    }
-
-#ifdef THREADED_RTS
-    closeMutex(&allocator_mutex);
-#endif
-
-    prev = allocs;
-    while (1) {
-        a = prev->next;
-        free(prev);
-        if (a == NULL) return;
-        IF_DEBUG(sanity,
-                 debugBelch("Warning: %ld bytes at %p still allocated at shutdown\n",
-                            (long)a->len, a->addr);)
-        prev = a;
-    }
-}
-
-static void addAllocation(void *addr, size_t len) {
-    Allocated *a;
-    size_t alloc_size;
-
-    if (allocs != NULL) {
-        alloc_size = sizeof(Allocated);
-        if ((a = (Allocated *) malloc(alloc_size)) == NULL) {
-          /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
-          MallocFailHook((W_) alloc_size,
-                         "creating info for debugging allocator");
-          stg_exit(EXIT_INTERNAL_ERROR);
-        }
-        a->addr = addr;
-        a->len = len;
-        ACQUIRE_LOCK(&allocator_mutex);
-        a->next = allocs->next;
-        allocs->next = a;
-        RELEASE_LOCK(&allocator_mutex);
-    }
-    else {
-        /* This doesn't actually help as we haven't looked at the flags
-         * at the time that it matters (while running constructors) */
-        IF_DEBUG(sanity,
-                 debugBelch("Ignoring allocation %p %d as allocs is NULL\n",
-                            addr, (int)len);)
-    }
-}
-
-static void removeAllocation(void *addr, int overwrite_with_aa) {
-    Allocated *prev, *a;
-
-    if (addr == NULL) {
-        barf("Freeing NULL!");
-    }
-
-    if (allocs != NULL) {
-        ACQUIRE_LOCK(&allocator_mutex);
-        prev = allocs;
-        a = prev->next;
-        while (a != NULL) {
-            if (a->addr == addr) {
-                prev->next = a->next;
-                if (overwrite_with_aa) {
-                    memset(addr, 0xaa, a->len);
-                }
-                free(a);
-                RELEASE_LOCK(&allocator_mutex);
-                return;
-            }
-            prev = a;
-            a = a->next;
-        }
-        /* We would like to barf here, but we can't as conc021
-         * allocates some stuff in a constructor which then gets freed
-         * during hs_exit */
-        /* barf("Freeing non-allocated memory at %p", addr); */
-        IF_DEBUG(sanity,
-                 debugBelch("Warning: Freeing non-allocated memory at %p\n",
-                            addr);)
-        RELEASE_LOCK(&allocator_mutex);
-    }
-    else {
-        IF_DEBUG(sanity,
-                 debugBelch("Ignoring free of %p as allocs is NULL\n",
-                            addr);)
-    }
-}
-#endif
-
-/* -----------------------------------------------------------------------------
    Result-checking malloc wrappers.
    -------------------------------------------------------------------------- */
 
@@ -200,9 +67,6 @@ stgMallocBytes (int n, char *msg)
       MallocFailHook((W_) n, msg); /*msg*/
       stg_exit(EXIT_INTERNAL_ERROR);
     }
-#if defined(DEBUG)
-    addAllocation(space, n2);
-#endif
     return space;
 }
 
@@ -218,10 +82,6 @@ stgReallocBytes (void *p, int n, char *msg)
       MallocFailHook((W_) n, msg); /*msg*/
       stg_exit(EXIT_INTERNAL_ERROR);
     }
-#if defined(DEBUG)
-    removeAllocation(p, 0);
-    addAllocation(space, n2);
-#endif
     return space;
 }
 
@@ -235,9 +95,6 @@ stgCallocBytes (int n, int m, char *msg)
       MallocFailHook((W_) n*m, msg); /*msg*/
       stg_exit(EXIT_INTERNAL_ERROR);
     }
-#if defined(DEBUG)
-    addAllocation(space, (size_t) n * (size_t) m);
-#endif
     return space;
 }
 
@@ -247,9 +104,6 @@ stgCallocBytes (int n, int m, char *msg)
 void
 stgFree(void* p)
 {
-#if defined(DEBUG)
-  removeAllocation(p, 1);
-#endif
   free(p);
 }
 
@@ -330,25 +184,74 @@ time_str(void)
    -------------------------------------------------------------------------- */
 
 char *
-ullong_format_string(ullong x, char *s, rtsBool with_commas)
+showStgWord64(StgWord64 x, char *s, rtsBool with_commas)
 {
-    if (x < (ullong)1000) 
-	sprintf(s, "%lu", (lnat)x);
-    else if (x < (ullong)1000000)
-	sprintf(s, (with_commas) ? "%lu,%3.3lu" : "%lu%3.3lu",
-		(lnat)((x)/(ullong)1000),
-		(lnat)((x)%(ullong)1000));
-    else if (x < (ullong)1000000000)
-	sprintf(s, (with_commas) ? "%lu,%3.3lu,%3.3lu" :  "%lu%3.3lu%3.3lu",
-		(lnat)((x)/(ullong)1000000),
-		(lnat)((x)/(ullong)1000%(ullong)1000),
-		(lnat)((x)%(ullong)1000));
-    else
-	sprintf(s, (with_commas) ? "%lu,%3.3lu,%3.3lu,%3.3lu" : "%lu%3.3lu%3.3lu%3.3lu",
-		(lnat)((x)/(ullong)1000000000),
-		(lnat)((x)/(ullong)1000000%(ullong)1000),
-		(lnat)((x)/(ullong)1000%(ullong)1000), 
-		(lnat)((x)%(ullong)1000));
+    if (with_commas) {
+        if (x < (StgWord64)1e3)
+                sprintf(s, "%" FMT_Word64, (StgWord64)x);
+        else if (x < (StgWord64)1e6)
+                sprintf(s, "%" FMT_Word64 ",%03" FMT_Word64,
+                        (StgWord64)(x / 1000),
+                        (StgWord64)(x % 1000));
+        else if (x < (StgWord64)1e9)
+                sprintf(s, "%"    FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64,
+                        (StgWord64)(x / 1e6),
+                        (StgWord64)((x / 1000) % 1000),
+                        (StgWord64)(x          % 1000));
+        else if (x < (StgWord64)1e12)
+                sprintf(s, "%"    FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64,
+                        (StgWord64)(x / (StgWord64)1e9),
+                        (StgWord64)((x / (StgWord64)1e6) % 1000),
+                        (StgWord64)((x / (StgWord64)1e3) % 1000),
+                        (StgWord64)(x                    % 1000));
+        else if (x < (StgWord64)1e15)
+                sprintf(s, "%"    FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64,
+                        (StgWord64)(x / (StgWord64)1e12),
+                        (StgWord64)((x / (StgWord64)1e9) % 1000),
+                        (StgWord64)((x / (StgWord64)1e6) % 1000),
+                        (StgWord64)((x / (StgWord64)1e3) % 1000),
+                        (StgWord64)(x                    % 1000));
+        else if (x < (StgWord64)1e18)
+                sprintf(s, "%"    FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64,
+                        (StgWord64)(x / (StgWord64)1e15),
+                        (StgWord64)((x / (StgWord64)1e12) % 1000),
+                        (StgWord64)((x / (StgWord64)1e9)  % 1000),
+                        (StgWord64)((x / (StgWord64)1e6)  % 1000),
+                        (StgWord64)((x / (StgWord64)1e3)  % 1000),
+                        (StgWord64)(x                     % 1000));
+        else
+                sprintf(s, "%"    FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64
+                           ",%03" FMT_Word64,
+                        (StgWord64)(x / (StgWord64)1e18),
+                        (StgWord64)((x / (StgWord64)1e15) % 1000),
+                        (StgWord64)((x / (StgWord64)1e12) % 1000),
+                        (StgWord64)((x / (StgWord64)1e9)  % 1000),
+                        (StgWord64)((x / (StgWord64)1e6)  % 1000),
+                        (StgWord64)((x / (StgWord64)1e3)  % 1000),
+                        (StgWord64)(x                     % 1000));
+    }
+    else {
+        sprintf(s, "%" FMT_Word64, x);
+    }
     return s;
 }
 
@@ -392,14 +295,14 @@ void printRtsInfo(void) {
     printf(" [(\"GHC RTS\", \"YES\")\n");
     mkRtsInfoPair("GHC version",             ProjectVersion);
     mkRtsInfoPair("RTS way",                 RtsWay);
-    mkRtsInfoPair("Host platform",           HostPlatform);
-    mkRtsInfoPair("Host architecture",       HostArch);
-    mkRtsInfoPair("Host OS",                 HostOS);
-    mkRtsInfoPair("Host vendor",             HostVendor);
     mkRtsInfoPair("Build platform",          BuildPlatform);
     mkRtsInfoPair("Build architecture",      BuildArch);
     mkRtsInfoPair("Build OS",                BuildOS);
     mkRtsInfoPair("Build vendor",            BuildVendor);
+    mkRtsInfoPair("Host platform",           HostPlatform);
+    mkRtsInfoPair("Host architecture",       HostArch);
+    mkRtsInfoPair("Host OS",                 HostOS);
+    mkRtsInfoPair("Host vendor",             HostVendor);
     mkRtsInfoPair("Target platform",         TargetPlatform);
     mkRtsInfoPair("Target architecture",     TargetArch);
     mkRtsInfoPair("Target OS",               TargetOS);

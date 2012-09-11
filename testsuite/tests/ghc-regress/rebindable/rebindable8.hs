@@ -1,4 +1,4 @@
-{-# OPTIONS -XNoImplicitPrelude -fglasgow-exts #-}
+{-# LANGUAGE RebindableSyntax, MultiParamTypeClasses #-}
 
 -- Trac #1537
 

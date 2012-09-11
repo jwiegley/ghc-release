@@ -20,7 +20,7 @@ libraries/integer-gmp_CC_OPTS += $(addprefix -I,$(GMP_INCLUDE_DIRS))
 libraries/integer-gmp_CC_OPTS += $(addprefix -L,$(GMP_LIB_DIRS))
 
 libraries/integer-gmp/cbits/mkGmpDerivedConstants$(exeext): libraries/integer-gmp/cbits/mkGmpDerivedConstants.c
-	"$(CC)" $(SRC_CC_OPTS) $(CONF_CC_OPTS) $(libraries/integer-gmp_CC_OPTS) $< -o $@
+	"$(CC)" $(SRC_CC_OPTS) $(CONF_CC_OPTS_STAGE1) $(libraries/integer-gmp_CC_OPTS) $< -o $@
 
 libraries/integer-gmp/cbits/GmpDerivedConstants.h: libraries/integer-gmp/cbits/mkGmpDerivedConstants$(exeext)
 	$< > $@
@@ -57,6 +57,8 @@ $(foreach w,$(GhcLibWays),$(eval $(call GmpDerivedConstants-dependencies,$w)))
 
 ifneq "$(HaveLibGmp)" "YES"
 ifneq "$(HaveFrameworkGMP)" "YES"
+$(libraries/integer-gmp_dist-install_depfile_c_asm): libraries/integer-gmp/gmp/gmp.h
+
 libraries/integer-gmp/cbits/mkGmpDerivedConstants$(exeext): libraries/integer-gmp/gmp/gmp.h
 
 libraries/integer-gmp_CC_OPTS += -I$(TOP)/libraries/integer-gmp/gmp
@@ -107,22 +109,20 @@ GMP_DIR := $(patsubst libraries/integer-gmp/gmp/tarball/%-nodoc-patched.tar.bz2,
 
 libraries/integer-gmp/gmp/libgmp.a libraries/integer-gmp/gmp/gmp.h:
 	$(RM) -rf libraries/integer-gmp/gmp/$(GMP_DIR) libraries/integer-gmp/gmp/gmpbuild libraries/integer-gmp/gmp/objs
-	cat $(GMP_TARBALL) | $(BZIP2) -d | { cd libraries/integer-gmp/gmp && $(TAR) -xf - ; }
+	cat $(GMP_TARBALL) | $(BZIP2_CMD) -d | { cd libraries/integer-gmp/gmp && $(TAR_CMD) -xf - ; }
 	mv libraries/integer-gmp/gmp/$(GMP_DIR) libraries/integer-gmp/gmp/gmpbuild
 	chmod +x libraries/integer-gmp/gmp/ln
 	cd libraries/integer-gmp/gmp; (set -o igncr 2>/dev/null) && set -o igncr; export SHELLOPTS; \
 	    PATH=`pwd`:$$PATH; \
 	    export PATH; \
 	    cd gmpbuild && \
-	    CC=$(WhatGccIsCalled) NM=$(NM) $(SHELL) configure \
+	    CC=$(WhatGccIsCalled) NM=$(NM) AR=$(AR) $(SHELL) configure \
 	          --enable-shared=no --host=$(PLATFORM) --build=$(PLATFORM)
 	$(MAKE) -C libraries/integer-gmp/gmp/gmpbuild MAKEFLAGS=
 	$(CP) libraries/integer-gmp/gmp/gmpbuild/gmp.h libraries/integer-gmp/gmp/
 	$(CP) libraries/integer-gmp/gmp/gmpbuild/.libs/libgmp.a libraries/integer-gmp/gmp/
 	$(MKDIRHIER) libraries/integer-gmp/gmp/objs
-# XXX This should be $(AR), except that has the creation options baked in,
-# so we use ar for now instead
-	cd libraries/integer-gmp/gmp/objs && ar x ../libgmp.a
+	cd libraries/integer-gmp/gmp/objs && $(AR) x ../libgmp.a
 	$(RANLIB) libraries/integer-gmp/gmp/libgmp.a
 
 ifneq "$(NO_CLEAN_GMP)" "YES"
@@ -136,7 +136,7 @@ endif
 # XXX TODO:
 #stamp.gmp.shared:
 #	$(RM) -rf $(GMP_DIR) gmpbuild-shared
-#	$(TAR) -zxf $(GMP_TARBALL)
+#	$(TAR_CMD) -zxf $(GMP_TARBALL)
 #	mv $(GMP_DIR) gmpbuild-shared
 #	chmod +x ln
 #	(set -o igncr 2>/dev/null) && set -o igncr; export SHELLOPTS; \

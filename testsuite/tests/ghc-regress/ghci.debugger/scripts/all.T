@@ -1,4 +1,6 @@
-setTestOpts(composes([extra_run_opts('-ignore-dot-ghci'), normalise_slashes]))
+setTestOpts(composes([extra_run_opts('-ignore-dot-ghci'),
+                     if_compiler_profiled(skip),
+                     normalise_slashes]))
 
 test('print001', normal, ghci_script, ['print001.script'])
 test('print002', normal, ghci_script, ['print002.script'])
@@ -19,8 +21,7 @@ test('print017', normal, ghci_script, ['print017.script'])
 test('print018', normal, ghci_script, ['print018.script'])
 test('print019', normal, ghci_script, ['print019.script'])
 test('print020', expect_broken(2806), ghci_script, ['print020.script'])
-test('print021', if_platform('i386-unknown-mingw32',expect_broken(3498)), 
-                 ghci_script, ['print021.script'])
+test('print021', normal, ghci_script, ['print021.script'])
 test('print022', normal, ghci_script, ['print022.script'])
 test('print023', normal, ghci_script, ['print023.script'])
 test('print024', normal, ghci_script, ['print024.script'])
@@ -32,10 +33,7 @@ test('print029', normal, ghci_script, ['print029.script'])
 test('print030', normal, ghci_script, ['print030.script'])
 test('print031', normal, ghci_script, ['print031.script'])
 test('print032', expect_broken(1995), ghci_script, ['print032.script'])
-test('print033',
-     if_compiler_lt('ghc', '6.11', expect_fail),
-     ghci_script,
-     ['print033.script'])
+test('print033', normal, ghci_script, ['print033.script'])
 test('print034', normal, ghci_script, ['print034.script'])
 
 test('break001', normal, ghci_script, ['break001.script'])
@@ -43,7 +41,8 @@ test('break002', normal, ghci_script, ['break002.script'])
 test('break003', normal, ghci_script, ['break003.script'])
 test('break005', normal, ghci_script, ['break005.script'])
 test('break006', normal, ghci_script, ['break006.script'])
-test('break007', normal, ghci_script, ['break007.script'])
+test('break007', extra_clean(['Break007.o', 'Break007.hi']),
+     ghci_script, ['break007.script'])
 test('break008', normal, ghci_script, ['break008.script'])
 test('break009', normal, ghci_script, ['break009.script'])
 test('break010', normal, ghci_script, ['break010.script'])

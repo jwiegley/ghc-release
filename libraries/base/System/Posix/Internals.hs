@@ -311,6 +311,9 @@ foreign import ccall unsafe "consUtils.h set_console_echo__"
 foreign import ccall unsafe "consUtils.h get_console_echo__"
    get_console_echo :: CInt -> IO CInt
 
+foreign import ccall unsafe "consUtils.h is_console__"
+   is_console :: CInt -> IO CInt
+
 #endif
 
 -- ---------------------------------------------------------------------------
@@ -321,12 +324,12 @@ setNonBlockingFD :: FD -> Bool -> IO ()
 setNonBlockingFD fd set = do
   flags <- throwErrnoIfMinus1Retry "setNonBlockingFD"
                  (c_fcntl_read fd const_f_getfl)
-  -- An error when setting O_NONBLOCK isn't fatal: on some systems 
-  -- there are certain file handles on which this will fail (eg. /dev/null
-  -- on FreeBSD) so we throw away the return code from fcntl_write.
   let flags' | set       = flags .|. o_NONBLOCK
              | otherwise = flags .&. complement o_NONBLOCK
   unless (flags == flags') $ do
+    -- An error when setting O_NONBLOCK isn't fatal: on some systems
+    -- there are certain file handles on which this will fail (eg. /dev/null
+    -- on FreeBSD) so we throw away the return code from fcntl_write.
     _ <- c_fcntl_write fd const_f_setfl (fromIntegral flags')
     return ()
 #else
@@ -390,16 +393,16 @@ foreign import ccall unsafe "HsBase.h __hscore_lseek"
 foreign import ccall unsafe "HsBase.h __hscore_lstat"
    lstat :: CFilePath -> Ptr CStat -> IO CInt
 
-foreign import ccall unsafe "__hscore_open"
+foreign import ccall unsafe "HsBase.h __hscore_open"
    c_open :: CFilePath -> CInt -> CMode -> IO CInt
 
 foreign import ccall unsafe "HsBase.h read" 
    c_read :: CInt -> Ptr Word8 -> CSize -> IO CSsize
 
-foreign import ccall safe "read"
+foreign import ccall safe "HsBase.h read"
    c_safe_read :: CInt -> Ptr Word8 -> CSize -> IO CSsize
 
-foreign import ccall unsafe "__hscore_stat"
+foreign import ccall unsafe "HsBase.h __hscore_stat"
    c_stat :: CFilePath -> Ptr CStat -> IO CInt
 
 foreign import ccall unsafe "HsBase.h umask"
@@ -408,7 +411,7 @@ foreign import ccall unsafe "HsBase.h umask"
 foreign import ccall unsafe "HsBase.h write" 
    c_write :: CInt -> Ptr Word8 -> CSize -> IO CSsize
 
-foreign import ccall safe "write"
+foreign import ccall safe "HsBase.h write"
    c_safe_write :: CInt -> Ptr Word8 -> CSize -> IO CSsize
 
 foreign import ccall unsafe "HsBase.h __hscore_ftruncate"

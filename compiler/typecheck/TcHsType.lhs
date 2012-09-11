@@ -16,7 +16,7 @@ module TcHsType (
 	
 		-- Typechecking kinded types
 	tcHsKindedContext, tcHsKindedType, tcHsBangType,
-	tcTyVarBndrs, dsHsType, tcLHsConResTy,
+	tcTyVarBndrs, dsHsType, kcHsLPred, dsHsLPred,
 	tcDataKindSig, ExpKind(..), EkCtxt(..),
 
 		-- Pattern type signatures
@@ -40,7 +40,6 @@ import TcType
 import {- Kind parts of -} Type
 import Var
 import VarSet
-import Coercion
 import TyCon
 import Class
 import Name
@@ -394,6 +393,9 @@ kc_hs_type (HsAppTy ty1 ty2) = do
 kc_hs_type (HsPredTy pred)
   = wrongPredErr pred
 
+kc_hs_type (HsCoreTy ty)
+  = return (HsCoreTy ty, typeKind ty)
+
 kc_hs_type (HsForAllTy exp tv_names context ty)
   = kcHsTyVars tv_names         $ \ tv_names' ->
     do	{ ctxt' <- kcHsContext context
@@ -419,12 +421,12 @@ kc_hs_type ty@(HsRecTy _)
       -- should have been removed by now
 
 #ifdef GHCI	/* Only if bootstrapped */
-kc_hs_type (HsSpliceTy sp) = kcSpliceType sp
+kc_hs_type (HsSpliceTy sp fvs _) = kcSpliceType sp fvs
 #else
 kc_hs_type ty@(HsSpliceTy {}) = failWithTc (ptext (sLit "Unexpected type splice:") <+> ppr ty)
 #endif
 
-kc_hs_type (HsSpliceTyOut {}) = panic "kc_hs_type"	-- Should not happen at all
+kc_hs_type (HsQuasiQuoteTy {}) = panic "kc_hs_type"	-- Eliminated by renamer
 
 -- remove the doc nodes here, no need to worry about the location since
 -- its the same for a doc node and it's child type node
@@ -472,7 +474,7 @@ mkHsAppTys fun_ty (arg_ty:arg_tys)
 splitFunKind :: SDoc -> Int -> TcKind -> [b] -> TcM ([(b,ExpKind)], TcKind)
 splitFunKind _       _      fk [] = return ([], fk)
 splitFunKind the_fun arg_no fk (arg:args)
-  = do { mb_fk <- unifyFunKind fk
+  = do { mb_fk <- matchExpectedFunKind fk
        ; case mb_fk of
             Nothing       -> failWithTc too_many_args 
             Just (ak,fk') -> do { (aks, rk) <- splitFunKind the_fun (arg_no+1) fk' args
@@ -519,9 +521,9 @@ kc_pred (HsEqualP ty1 ty2)
 ---------------------------
 kcTyVar :: Name -> TcM TcKind
 kcTyVar name = do	-- Could be a tyvar or a tycon
-    traceTc (text "lk1" <+> ppr name)
+    traceTc "lk1" (ppr name)
     thing <- tcLookup name
-    traceTc (text "lk2" <+> ppr name <+> ppr thing)
+    traceTc "lk2" (ppr name <+> ppr thing)
     case thing of 
         ATyVar _ ty             -> return (typeKind ty)
         AThing kind             -> return kind
@@ -623,11 +625,12 @@ ds_type (HsForAllTy _ tv_names ctxt ty)
 ds_type (HsDocTy ty _)  -- Remove the doc comment
   = dsHsType ty
 
-ds_type (HsSpliceTyOut kind) 
+ds_type (HsSpliceTy _ _ kind) 
   = do { kind' <- zonkTcKindToKind kind
        ; newFlexiTyVarTy kind' }
 
-ds_type (HsSpliceTy {}) = panic "ds_type"
+ds_type (HsQuasiQuoteTy {}) = panic "ds_type"	-- Eliminated by renamer
+ds_type (HsCoreTy ty)       = return ty
 
 dsHsTypes :: [LHsType Name] -> TcM [Type]
 dsHsTypes arg_tys = mapM dsHsType arg_tys
@@ -682,35 +685,7 @@ dsHsPred (HsIParam name ty)
        }
 \end{code}
 
-GADT constructor signatures
-
 \begin{code}
-tcLHsConResTy :: LHsType Name -> TcM (TyCon, [TcType])
-tcLHsConResTy (L span res_ty)
-  = setSrcSpan span $
-    case get_args res_ty [] of
-	   (HsTyVar tc_name, args) 
-	      -> do { args' <- mapM dsHsType args
-		    ; thing <- tcLookup tc_name
-		    ; case thing of
-		        AGlobal (ATyCon tc) -> return (tc, args')
-		        _ -> failWithTc (badGadtDecl res_ty) }
-	   _ -> failWithTc (badGadtDecl res_ty)
-  where
-	-- We can't call dsHsType on res_ty, and then do tcSplitTyConApp_maybe
-	-- because that causes a black hole, and for good reason.  Building
-	-- the type means expanding type synonyms, and we can't do that
-	-- inside the "knot".  So we have to work by steam.
-    get_args (HsAppTy (L _ fun) arg)   args = get_args fun (arg:args)
-    get_args (HsParTy (L _ ty))        args = get_args ty  args
-    get_args (HsOpTy ty1 (L _ tc) ty2) args = (HsTyVar tc, ty1:ty2:args)
-    get_args ty                        args = (ty, args)
-
-badGadtDecl :: HsType Name -> SDoc
-badGadtDecl ty
-  = hang (ptext (sLit "Malformed constructor result type:"))
-       2 (ppr ty)
-
 addKcTypeCtxt :: LHsType Name -> TcM a -> TcM a
 	-- Wrap a context around only if we want to show that contexts.  
 addKcTypeCtxt (L _ (HsPredTy _)) thing = thing
@@ -733,14 +708,14 @@ kcHsTyVars :: [LHsTyVarBndr Name]
 	   -> ([LHsTyVarBndr Name] -> TcM r) 	-- These binders are kind-annotated
 						-- They scope over the thing inside
 	   -> TcM r
-kcHsTyVars tvs thing_inside  = do
-    bndrs <- mapM (wrapLocM kcHsTyVar) tvs
-    tcExtendKindEnvTvs bndrs (thing_inside bndrs)
+kcHsTyVars tvs thing_inside
+  = do { kinded_tvs <- mapM (wrapLocM kcHsTyVar) tvs
+       ; tcExtendKindEnvTvs kinded_tvs thing_inside }
 
 kcHsTyVar :: HsTyVarBndr Name -> TcM (HsTyVarBndr Name)
 	-- Return a *kind-annotated* binder, and a tyvar with a mutable kind in it	
-kcHsTyVar (UserTyVar name)        = KindedTyVar name <$> newKindVar
-kcHsTyVar (KindedTyVar name kind) = return (KindedTyVar name kind)
+kcHsTyVar (UserTyVar name _)  = UserTyVar name <$> newKindVar
+kcHsTyVar tv@(KindedTyVar {}) = return tv
 
 ------------------
 tcTyVarBndrs :: [LHsTyVarBndr Name] 	-- Kind-annotated binders, which need kind-zonking
@@ -752,10 +727,9 @@ tcTyVarBndrs bndrs thing_inside = do
     tyvars <- mapM (zonk . unLoc) bndrs
     tcExtendTyVarEnv tyvars (thing_inside tyvars)
   where
-    zonk (KindedTyVar name kind) = do { kind' <- zonkTcKindToKind kind
-				      ; return (mkTyVar name kind') }
-    zonk (UserTyVar name) = WARN( True, ptext (sLit "Un-kinded tyvar") <+> ppr name )
-			    return (mkTyVar name liftedTypeKind)
+    zonk (UserTyVar name kind) = do { kind' <- zonkTcKindToKind kind
+				    ; return (mkTyVar name kind') }
+    zonk (KindedTyVar name kind) = return (mkTyVar name kind)
 
 -----------------------------------
 tcDataKindSig :: Maybe Kind -> TcM [TyVar]
@@ -865,9 +839,9 @@ tcHsPatSigType ctxt hs_ty
 		-- should be bound by the pattern signature
  	  in_scope <- getInLocalScope
 	; let span = getLoc hs_ty
-	      sig_tvs = [ L span (UserTyVar n) 
-			| n <- nameSetToList (extractHsTyVars hs_ty),
-			  not (in_scope n) ]
+	      sig_tvs = userHsTyVarBndrs $ map (L span) $ 
+			filterOut in_scope $
+                        nameSetToList (extractHsTyVars hs_ty)
 
 	; (tyvars, sig_ty) <- tcHsQuantifiedType sig_tvs hs_ty
 	; checkValidType ctxt sig_ty 
@@ -876,19 +850,23 @@ tcHsPatSigType ctxt hs_ty
 
 tcPatSig :: UserTypeCtxt
 	 -> LHsType Name
-	 -> BoxySigmaType
+	 -> TcSigmaType
 	 -> TcM (TcType,	   -- The type to use for "inside" the signature
 		 [(Name, TcType)], -- The new bit of type environment, binding
 				   -- the scoped type variables
-                 CoercionI)        -- Coercion due to unification with actual ty
+                 HsWrapper)        -- Coercion due to unification with actual ty
+		 		   -- Of shape:  res_ty ~ sig_ty
 tcPatSig ctxt sig res_ty
   = do	{ (sig_tvs, sig_ty) <- tcHsPatSigType ctxt sig
+    	-- sig_tvs are the type variables free in 'sig', 
+	-- and not already in scope. These are the ones
+	-- that should be brought into scope
 
 	; if null sig_tvs then do {
 		-- The type signature binds no type variables, 
 		-- and hence is rigid, so use it to zap the res_ty
-		  coi <- boxyUnify sig_ty res_ty
-		; return (sig_ty, [], coi)
+         	  wrap <- tcSubType PatSigOrigin (SigSkol ctxt) res_ty sig_ty
+		; return (sig_ty, [], wrap)
 
 	} else do {
 		-- Type signature binds at least one scoped type variable
@@ -902,9 +880,6 @@ tcPatSig ctxt sig res_ty
 				_              -> False
 	; ASSERT( not in_pat_bind || null sig_tvs ) return ()
 
-	  	-- Check that pat_ty is rigid
-	; checkTc (isRigidTy res_ty) (wobblyPatSig sig_tvs)
-
 		-- Check that all newly-in-scope tyvars are in fact
 		-- constrained by the pattern.  This catches tiresome
 		-- cases like	
@@ -915,24 +890,20 @@ tcPatSig ctxt sig res_ty
 	; let bad_tvs = filterOut (`elemVarSet` exactTyVarsOfType sig_ty) sig_tvs
 	; checkTc (null bad_tvs) (badPatSigTvs sig_ty bad_tvs)
 
-		-- Now match the pattern signature against res_ty
-		-- For convenience, and uniform-looking error messages
-		-- we do the matching by allocating meta type variables, 
-		-- unifying, and reading out the results.
-		-- This is a strictly local operation.
-	; box_tvs <- mapM tcInstBoxyTyVar sig_tvs
-	; coi <- boxyUnify (substTyWith sig_tvs (mkTyVarTys box_tvs) sig_ty) 
-                           res_ty
-	; sig_tv_tys <- mapM readFilledBox box_tvs
+	-- Now do a subsumption check of the pattern signature against res_ty
+	; sig_tvs' <- tcInstSigTyVars sig_tvs
+        ; let sig_ty' = substTyWith sig_tvs sig_tv_tys' sig_ty
+              sig_tv_tys' = mkTyVarTys sig_tvs'
+	; wrap <- tcSubType PatSigOrigin (SigSkol ctxt) res_ty sig_ty'
 
-		-- Check that each is bound to a distinct type variable,
-		-- and one that is not already in scope
-	; let tv_binds = map tyVarName sig_tvs `zip` sig_tv_tys
+	-- Check that each is bound to a distinct type variable,
+	-- and one that is not already in scope
 	; binds_in_scope <- getScopedTyVarBinds
+	; let tv_binds = map tyVarName sig_tvs `zip` sig_tv_tys'
 	; check binds_in_scope tv_binds
 	
-		-- Phew!
-	; return (res_ty, tv_binds, coi)
+	-- Phew!
+	; return (sig_ty', tv_binds, wrap)
 	} }
   where
     check _ [] = return ()
@@ -940,14 +911,9 @@ tcPatSig ctxt sig res_ty
 				      ; check ((n,ty):in_scope) rest }
 
     check_one in_scope n ty
-	= do { checkTc (tcIsTyVarTy ty) (scopedNonVar n ty)
-		-- Must bind to a type variable
-
-	     ; checkTc (null dups) (dupInScope n (head dups) ty)
+	= checkTc (null dups) (dupInScope n (head dups) ty)
 		-- Must not bind to the same type variable
 		-- as some other in-scope type variable
-
-	     ; return () }
 	where
 	  dups = [n' | (n',ty') <- in_scope, tcEqType ty' ty]
 \end{code}
@@ -1059,12 +1025,6 @@ pprHsSigCtxt ctxt hs_ty = sep [ ptext (sLit "In") <+> pprUserTypeCtxt ctxt <> co
 
     pp_n_colon n = ppr n <+> dcolon <+> ppr (unLoc hs_ty)
 
-wobblyPatSig :: [Var] -> SDoc
-wobblyPatSig sig_tvs
-  = hang (ptext (sLit "A pattern type signature cannot bind scoped type variables") 
-		<+> pprQuotedList sig_tvs)
-       2 (ptext (sLit "unless the pattern has a rigid type context"))
-		
 badPatSigTvs :: TcType -> [TyVar] -> SDoc
 badPatSigTvs sig_ty bad_tvs
   = vcat [ fsep [ptext (sLit "The type variable") <> plural bad_tvs, 
@@ -1073,12 +1033,6 @@ badPatSigTvs sig_ty bad_tvs
 	  	 ptext (sLit "but are actually discarded by a type synonym") ]
          , ptext (sLit "To fix this, expand the type synonym") 
          , ptext (sLit "[Note: I hope to lift this restriction in due course]") ]
-
-scopedNonVar :: Name -> Type -> SDoc
-scopedNonVar n ty
-  = vcat [sep [ptext (sLit "The scoped type variable") <+> quotes (ppr n),
-	       nest 2 (ptext (sLit "is bound to the type") <+> quotes (ppr ty))],
-	  nest 2 (ptext (sLit "You can only bind scoped type variables to type variables"))]
 
 dupInScope :: Name -> Name -> Type -> SDoc
 dupInScope n n' _

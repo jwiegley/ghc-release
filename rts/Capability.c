@@ -62,9 +62,8 @@ Capability * rts_unsafeGetMyCapability (void)
 STATIC_INLINE rtsBool
 globalWorkToDo (void)
 {
-    return blackholes_need_checking
-	|| sched_state >= SCHED_INTERRUPTING
-	;
+    return sched_state >= SCHED_INTERRUPTING
+        || recent_activity == ACTIVITY_INACTIVE; // need to check for deadlock
 }
 #endif
 
@@ -84,30 +83,33 @@ findSpark (Capability *cap)
       return 0;
   }
 
-  // first try to get a spark from our own pool.
-  // We should be using reclaimSpark(), because it works without
-  // needing any atomic instructions:
-  //   spark = reclaimSpark(cap->sparks);
-  // However, measurements show that this makes at least one benchmark
-  // slower (prsa) and doesn't affect the others.
-  spark = tryStealSpark(cap);
-  if (spark != NULL) {
-      cap->sparks_converted++;
-
-      // Post event for running a spark from capability's own pool.
-      traceSchedEvent(cap, EVENT_RUN_SPARK, cap->r.rCurrentTSO, 0);
-
-      return spark;
-  }
-
-  if (n_capabilities == 1) { return NULL; } // makes no sense...
-
-  debugTrace(DEBUG_sched,
-	     "cap %d: Trying to steal work from other capabilities", 
-	     cap->no);
-
   do {
       retry = rtsFalse;
+
+      // first try to get a spark from our own pool.
+      // We should be using reclaimSpark(), because it works without
+      // needing any atomic instructions:
+      //   spark = reclaimSpark(cap->sparks);
+      // However, measurements show that this makes at least one benchmark
+      // slower (prsa) and doesn't affect the others.
+      spark = tryStealSpark(cap);
+      if (spark != NULL) {
+          cap->sparks_converted++;
+
+          // Post event for running a spark from capability's own pool.
+          traceEventRunSpark(cap, cap->r.rCurrentTSO);
+
+          return spark;
+      }
+      if (!emptySparkPoolCap(cap)) {
+          retry = rtsTrue;
+      }
+
+      if (n_capabilities == 1) { return NULL; } // makes no sense...
+
+      debugTrace(DEBUG_sched,
+                 "cap %d: Trying to steal work from other capabilities", 
+                 cap->no);
 
       /* visit cap.s 0..n-1 in sequence until a theft succeeds. We could
       start at a random place instead of 0 as well.  */
@@ -129,8 +131,7 @@ findSpark (Capability *cap)
           if (spark != NULL) {
               cap->sparks_converted++;
 
-              traceSchedEvent(cap, EVENT_STEAL_SPARK, 
-                              cap->r.rCurrentTSO, robbed->no);
+              traceEventStealSpark(cap, cap->r.rCurrentTSO, robbed->no);
               
               return spark;
           }
@@ -210,7 +211,6 @@ initCapability( Capability *cap, nat i )
 
     cap->no = i;
     cap->in_haskell        = rtsFalse;
-    cap->in_gc             = rtsFalse;
 
     cap->run_queue_hd      = END_TSO_QUEUE;
     cap->run_queue_tl      = END_TSO_QUEUE;
@@ -222,8 +222,7 @@ initCapability( Capability *cap, nat i )
     cap->suspended_ccalls  = NULL;
     cap->returning_tasks_hd = NULL;
     cap->returning_tasks_tl = NULL;
-    cap->wakeup_queue_hd    = END_TSO_QUEUE;
-    cap->wakeup_queue_tl    = END_TSO_QUEUE;
+    cap->inbox              = (Message*)END_TSO_QUEUE;
     cap->sparks_created     = 0;
     cap->sparks_converted   = 0;
     cap->sparks_pruned      = 0;
@@ -250,6 +249,7 @@ initCapability( Capability *cap, nat i )
     cap->free_trec_headers = NO_TREC;
     cap->transaction_tokens = 0;
     cap->context_switch = 0;
+    cap->pinned_object_block = NULL;
 }
 
 /* ---------------------------------------------------------------------------
@@ -417,7 +417,7 @@ releaseCapability_ (Capability* cap,
     // If we have an unbound thread on the run queue, or if there's
     // anything else to do, give the Capability to a worker thread.
     if (always_wakeup || 
-        !emptyRunQueue(cap) || !emptyWakeupQueue(cap) ||
+        !emptyRunQueue(cap) || !emptyInbox(cap) ||
         !emptySparkPoolCap(cap) || globalWorkToDo()) {
 	if (cap->spare_workers) {
 	    giveCapabilityToTask(cap,cap->spare_workers);
@@ -577,9 +577,9 @@ yieldCapability (Capability** pCap, Task *task)
     Capability *cap = *pCap;
 
     if (waiting_for_gc == PENDING_GC_PAR) {
-        traceSchedEvent(cap, EVENT_GC_START, 0, 0);
+        traceEventGcStart(cap);
         gcWorkerThread(cap);
-        traceSchedEvent(cap, EVENT_GC_END, 0, 0);
+        traceEventGcEnd(cap);
         return;
     }
 
@@ -633,50 +633,6 @@ yieldCapability (Capability** pCap, Task *task)
     ASSERT_FULL_CAPABILITY_INVARIANTS(cap,task);
 
     return;
-}
-
-/* ----------------------------------------------------------------------------
- * Wake up a thread on a Capability.
- *
- * This is used when the current Task is running on a Capability and
- * wishes to wake up a thread on a different Capability.
- * ------------------------------------------------------------------------- */
-
-void
-wakeupThreadOnCapability (Capability *my_cap, 
-                          Capability *other_cap, 
-                          StgTSO *tso)
-{
-    ACQUIRE_LOCK(&other_cap->lock);
-
-    // ASSUMES: cap->lock is held (asserted in wakeupThreadOnCapability)
-    if (tso->bound) {
-	ASSERT(tso->bound->task->cap == tso->cap);
-    	tso->bound->task->cap = other_cap;
-    }
-    tso->cap = other_cap;
-
-    ASSERT(tso->bound ? tso->bound->task->cap == other_cap : 1);
-
-    if (other_cap->running_task == NULL) {
-	// nobody is running this Capability, we can add our thread
-	// directly onto the run queue and start up a Task to run it.
-
-	other_cap->running_task = myTask(); 
-            // precond for releaseCapability_() and appendToRunQueue()
-
-	appendToRunQueue(other_cap,tso);
-
-	releaseCapability_(other_cap,rtsFalse);
-    } else {
-	appendToWakeupQueue(my_cap,other_cap,tso);
-        other_cap->context_switch = 1;
-	// someone is running on this Capability, so it cannot be
-	// freed without first checking the wakeup queue (see
-	// releaseCapability_).
-    }
-
-    RELEASE_LOCK(&other_cap->lock);
 }
 
 /* ----------------------------------------------------------------------------
@@ -794,7 +750,7 @@ shutdownCapability (Capability *cap, Task *task, rtsBool safe)
             continue;
         }
 
-        traceSchedEvent(cap, EVENT_SHUTDOWN, 0, 0);
+        traceEventShutdown(cap);
 	RELEASE_LOCK(&cap->lock);
 	break;
     }
@@ -836,6 +792,7 @@ static void
 freeCapability (Capability *cap)
 {
     stgFree(cap->mut_lists);
+    stgFree(cap->saved_mut_lists);
 #if defined(THREADED_RTS)
     freeSparkPool(cap->sparks);
 #endif
@@ -862,7 +819,7 @@ freeCapabilities (void)
 
 void
 markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta, 
-                      rtsBool prune_sparks USED_IF_THREADS)
+                      rtsBool no_mark_sparks USED_IF_THREADS)
 {
     nat i;
     Capability *cap;
@@ -878,8 +835,7 @@ markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta,
 	evac(user, (StgClosure **)(void *)&cap->run_queue_hd);
 	evac(user, (StgClosure **)(void *)&cap->run_queue_tl);
 #if defined(THREADED_RTS)
-	evac(user, (StgClosure **)(void *)&cap->wakeup_queue_hd);
-	evac(user, (StgClosure **)(void *)&cap->wakeup_queue_tl);
+        evac(user, (StgClosure **)(void *)&cap->inbox);
 #endif
 	for (incall = cap->suspended_ccalls; incall != NULL; 
 	     incall=incall->next) {
@@ -887,9 +843,7 @@ markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta,
 	}
 
 #if defined(THREADED_RTS)
-        if (prune_sparks) {
-            pruneSparkQueue (evac, user, cap);
-        } else {
+        if (!no_mark_sparks) {
             traverseSparkQueue (evac, user, cap);
         }
 #endif
@@ -907,3 +861,8 @@ markCapabilities (evac_fn evac, void *user)
 {
     markSomeCapabilities(evac, user, 0, 1, rtsFalse);
 }
+
+/* -----------------------------------------------------------------------------
+   Messages
+   -------------------------------------------------------------------------- */
+

@@ -6,6 +6,11 @@
 INSTALL_DEST=/Library/Frameworks
 INSTALL_BASE=/
 
+# Turn off things that might make /usr/bin/ls give funky output
+unset CLICOLOR
+unset CLICOLOR_FORCE
+unset LSCOLORS
+
 if [ ${INSTALL_BASE} = / ]; then
   INSTALL_BASE=/usr
 fi
@@ -24,52 +29,63 @@ if [ ${USER} != root ]; then
   exit 1
 fi
 
-VERSIONS=(`ls ${INSTALL_DEST}/GHC.framework/Versions`)
-NO_VERSIONS=${#VERSIONS[@]}
+FRAMEWORK_DIRECTORY="$INSTALL_DEST/GHC.framework"
+VERSIONS_DIRECTORY="$FRAMEWORK_DIRECTORY/Versions"
 
-if [ ${VERSIONS[${NO_VERSIONS}-1]} != Current ]; then
-  echo "Fatal error: last version should be Current"
-  echo "Found versions: ${VERSIONS[@]}"
-  exit 1
+MY_VERSION=7.0.1-x86_64
+MY_DIRECTORY="$VERSIONS_DIRECTORY/$MY_VERSION"
+
+CURRENT_DIRECTORY="$VERSIONS_DIRECTORY/Current"
+CURRENT_VERSION=`readlink "$CURRENT_DIRECTORY"`
+
+removeLinksFrom () {
+    for f in `ls -1 "$MY_DIRECTORY/$1"`
+    do
+        qf="$1/$f"
+        # Only remove if it is a link to our version. e.g. /usr/bin/ghc
+        # will only be removed if we are the current version, but
+        # /usr/bin/ghc-7.0.1 will be removed even if ghc-7.2.1 is the
+        # current version.
+        l=`readlink "$qf" | grep "GHC.framework/Versions/$MY_VERSION"`
+        if [ "$l" != "" ]
+        then
+            rm -f "$qf"
+        fi
+    done
+}
+
+removeLinksFrom /usr/bin
+removeLinksFrom /usr/share/man/man1
+removeLinksFrom /usr/share/doc
+
+echo "Removing $MY_DIRECTORY"
+rm -rf "$MY_DIRECTORY"
+
+if [ "$CURRENT_VERSION" = "$MY_VERSION" ]
+then
+    rm -f "$CURRENT_DIRECTORY"
+
+    # This isn't ideal, but it's a vague approximation to
+    # "the most recent version":
+    NEW_VERSION=`ls -1 "$VERSIONS_DIRECTORY" | tail -1`
+    if [ "$NEW_VERSION" = "" ]
+    then
+        echo "Removing $FRAMEWORK_DIRECTORY"
+        rm -rf "$FRAMEWORK_DIRECTORY"
+    else
+        ln -s "$NEW_VERSION" "$CURRENT_DIRECTORY"
+        NEW_CREATE_LINKS="$VERSIONS_DIRECTORY/$NEW_VERSION/Tools/create-links"
+        if [ -f "$NEW_CREATE_LINKS" ]
+        then
+            sh "$NEW_CREATE_LINKS" unused /Library/Frameworks /
+        fi
+    fi
 fi
-CURRENT_PHYS=`cd /Library/Frameworks/GHC.framework/Versions/Current; pwd -P`
-CURRENT=`basename ${CURRENT_PHYS}`
 
-if [ ${NO_VERSIONS} -ne 2 ]; then
-  echo "Multiple versions of GHC.framework are currently installed."
-  echo "This uninstaller removes GHC.framework entirely and should only"
-  echo "be used if there is exactly one version."
-  echo
-  echo "To remove individual old versions, simply delete the directory"
-  echo "${INSTALL_DEST}/GHC.framework/Versions/VERSION_TO_REMOVE"
-  echo
-  echo "Found versions: ${VERSIONS[@]}(= ${CURRENT})"
-  exit 1
-fi
-
-echo "Removing symbolic links into GHC.framework"
-for thisfile in ${INSTALL_BIN}/*; do
-  if ls -l "${thisfile}" | grep -q GHC.framework/Versions; then
-    rm -f "${thisfile}"
-  fi
-done
-for thisfile in ${INSTALL_MAN1}/*; do
-  if ls -l "${thisfile}" | grep -q GHC.framework/Versions; then
-    rm -f "${thisfile}"
-  fi
-done
-for thisfile in ${INSTALL_HTML}/*; do
-  if ls -l "${thisfile}" | grep -q GHC.framework/Versions; then
-    rm -f "${thisfile}"
-  fi
-done
-
-echo "Removing ${INSTALL_DEST}/GHC.framework"
-rm -rf ${INSTALL_DEST}/GHC.framework
-
-echo "Removing package recipt"
+echo "Removing package receipt"
 # The first is for Leopard packages and the second for Tiger packages.
-rm -f /Library/Receipts/boms/org.haskell.glasgowHaskellCompiler.ghc.pkg.bom
-rm -rf /Library/Receipts/ghc.pkg
+rm -f "/Library/Receipts/boms/org.haskell.ghc.$MY_VERSION.bom"
+rm -rf "/Library/Receipts/ghc.$MY_VERSION.pkg"
 
-echo "${INSTALL_DEST}/GHC.framework has been purged!"
+echo "Done."
+

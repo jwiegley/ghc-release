@@ -2,5 +2,5 @@
 
 module T3953 where
 
-foo = [$notDefinedHere| |]
+foo = [notDefinedHere| |]
  

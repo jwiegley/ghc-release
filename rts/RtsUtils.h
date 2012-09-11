@@ -9,7 +9,7 @@
 #ifndef RTSUTILS_H
 #define RTSUTILS_H
 
-BEGIN_RTS_PRIVATE
+#include "BeginPrivate.h"
 
 /* -----------------------------------------------------------------------------
  * (Checked) dynamic allocation
@@ -35,7 +35,7 @@ void stgFree(void* p);
 void heapOverflow(void);
 
 char *time_str(void);
-char *ullong_format_string(ullong, char *, rtsBool);
+char *showStgWord64(StgWord64, char *, rtsBool);
 
 #ifdef DEBUG
 void heapCheckFail( void );
@@ -46,8 +46,6 @@ void printRtsInfo(void);
 /* Alternate to raise(3) for threaded rts, for OpenBSD */
 int genericRaise(int sig);
 
-int rts_isProfiled(void);
-
-END_RTS_PRIVATE
+#include "EndPrivate.h"
 
 #endif /* RTSUTILS_H */

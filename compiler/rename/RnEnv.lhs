@@ -23,12 +23,12 @@ module RnEnv (
 	addLocalFixities,
 	bindLocatedLocalsFV, bindLocatedLocalsRn,
 	bindSigTyVarsFV, bindPatSigTyVars, bindPatSigTyVarsFV,
-	bindTyVarsRn, extendTyVarEnvFVRn,
+	bindTyVarsRn, bindTyVarsFV, extendTyVarEnvFVRn,
 
 	checkDupRdrNames, checkDupAndShadowedRdrNames,
-        checkDupAndShadowedNames, 
-	mapFvRn, mapFvRnCPS,
-	warnUnusedMatches, warnUnusedModules, warnUnusedImports, 
+        checkDupNames, checkDupAndShadowedNames, 
+	addFvRn, mapFvRn, mapMaybeFvRn, mapFvRnCPS,
+	warnUnusedMatches,
 	warnUnusedTopBinds, warnUnusedLocalBinds,
 	dataTcOccs, unknownNameErr, kindSigErr, perhapsForallMsg
     ) where
@@ -48,10 +48,9 @@ import Name		( Name, nameIsLocalOrFrom, mkInternalName, isWiredInName,
 			  nameSrcLoc, nameSrcSpan, nameOccName, nameModule, isExternalName )
 import NameSet
 import NameEnv
-import LazyUniqFM
+import UniqFM
 import DataCon		( dataConFieldLabels )
 import OccName
-import Module		( Module, ModuleName )
 import PrelNames	( mkUnboundName, rOOT_MAIN, iNTERACTIVE, 
 			  consDataConKey, forall_tv_RDR )
 import Unique
@@ -82,8 +81,8 @@ thenM = (>>=)
 %*********************************************************
 
 \begin{code}
-newTopSrcBinder :: Module -> Located RdrName -> RnM Name
-newTopSrcBinder this_mod (L loc rdr_name)
+newTopSrcBinder :: Located RdrName -> RnM Name
+newTopSrcBinder (L loc rdr_name)
   | Just name <- isExact_maybe rdr_name
   =	-- This is here to catch 
 	--   (a) Exact-name binders created by Template Haskell
@@ -95,13 +94,15 @@ newTopSrcBinder this_mod (L loc rdr_name)
 	--	data T = (,) Int Int
 	-- unless we are in GHC.Tup
     ASSERT2( isExternalName name,  ppr name )
-    do	{ unless (this_mod == nameModule name)
+    do	{ this_mod <- getModule
+        ; unless (this_mod == nameModule name)
 	         (addErrAt loc (badOrigBinding rdr_name))
 	; return name }
 
 
   | Just (rdr_mod, rdr_occ) <- isOrig_maybe rdr_name
-  = do	{ unless (rdr_mod == this_mod || rdr_mod == rOOT_MAIN)
+  = do	{ this_mod <- getModule
+        ; unless (rdr_mod == this_mod || rdr_mod == rOOT_MAIN)
 	         (addErrAt loc (badOrigBinding rdr_name))
 	-- When reading External Core we get Orig names as binders, 
 	-- but they should agree with the module gotten from the monad
@@ -137,7 +138,8 @@ newTopSrcBinder this_mod (L loc rdr_name)
 	        ; return (mkInternalName uniq (rdrNameOcc rdr_name) loc) } 
 	  else	
 	  	-- Normal case
-	     newGlobalBinder this_mod (rdrNameOcc rdr_name) loc }
+             do { this_mod <- getModule
+                ; newGlobalBinder this_mod (rdrNameOcc rdr_name) loc } }
 \end{code}
 
 %*********************************************************
@@ -205,7 +207,7 @@ lookupTopBndrRn_maybe rdr_name
            -- See Note [Type and class operator definitions]
           let occ = rdrNameOcc rdr_name
         ; when (isTcOcc occ && isSymOcc occ)
-               (do { op_ok <- doptM Opt_TypeOperators
+               (do { op_ok <- xoptM Opt_TypeOperators
 	           ; unless op_ok (addErr (opDeclErr rdr_name)) })
 
     	; mb_gre <- lookupGreLocalRn rdr_name
@@ -503,6 +505,8 @@ lookupQualifiedName rdr_name
     doc = ptext (sLit "Need to find") <+> ppr rdr_name
 \end{code}
 
+Note [Looking up signature names]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 lookupSigOccRn is used for type signatures and pragmas
 Is this valid?
   module A
@@ -523,10 +527,13 @@ return the imported 'f', so that later on the reanamer will
 correctly report "misplaced type sig".
 
 \begin{code}
-lookupSigOccRn :: Maybe NameSet	   -- Just ns => source file; these are the binders
+lookupSigOccRn :: Maybe NameSet	   -- Just ns => these are the binders
 				   -- 	 	 in the same group
-				   -- Nothing => hs-boot file; signatures without 
+				   -- Nothing => signatures without 
 				   -- 		 binders are expected
+				   --		 (a) top-level (SPECIALISE prags)
+				   -- 		 (b) class decls
+				   --		 (c) hs-boot files
 	       -> Sig RdrName
 	       -> Located RdrName -> RnM (Located Name)
 lookupSigOccRn mb_bound_names sig
@@ -536,14 +543,13 @@ lookupSigOccRn mb_bound_names sig
 	   Left err   -> do { addErr err; return (mkUnboundName rdr_name) }
 	   Right name -> return name }
 
-lookupBindGroupOcc :: Maybe NameSet  -- Just ns => source file; these are the binders
-				     -- 	 	 in the same group
-				     -- Nothing => hs-boot file; signatures without 
-				     -- 		 binders are expected
-	           -> SDoc
+lookupBindGroupOcc :: Maybe NameSet  -- See notes on the (Maybe NameSet)
+	           -> SDoc           --  in lookupSigOccRn
 	           -> RdrName -> RnM (Either Message Name)
 -- Looks up the RdrName, expecting it to resolve to one of the 
 -- bound names passed in.  If not, return an appropriate error message
+--
+-- See Note [Looking up signature names]
 lookupBindGroupOcc mb_bound_names what rdr_name
   = do	{ local_env <- getLocalRdrEnv
 	; case lookupLocalRdrEnv local_env rdr_name of 
@@ -555,7 +561,8 @@ lookupBindGroupOcc mb_bound_names what rdr_name
 	; case (filter isLocalGRE gres) of
 	    (gre:_) -> check_local_name (gre_name gre)
 			-- If there is more than one local GRE for the 
-			-- same OccName, that will be reported separately
+			-- same OccName 'f', that will be reported separately
+			-- as a duplicate top-level binding for 'f'
 	    [] | null gres -> bale_out_with empty
 	       | otherwise -> bale_out_with import_msg
   	}}
@@ -723,7 +730,7 @@ lookupTyFixityRn (L _ n) = lookupFixityRn n
 %*									*
 			Rebindable names
 	Dealing with rebindable syntax is driven by the 
-	Opt_NoImplicitPrelude dynamic flag.
+	Opt_RebindableSyntax dynamic flag.
 
 	In "deriving" code we don't want to use rebindable syntax
 	so we switch off the flag locally
@@ -762,8 +769,8 @@ checks the type of the user thing against the type of the standard thing.
 lookupSyntaxName :: Name 				-- The standard name
 	         -> RnM (SyntaxExpr Name, FreeVars)	-- Possibly a non-standard name
 lookupSyntaxName std_name
-  = doptM Opt_ImplicitPrelude		`thenM` \ implicit_prelude -> 
-    if implicit_prelude then normal_case
+  = xoptM Opt_RebindableSyntax		`thenM` \ rebindable_on -> 
+    if not rebindable_on then normal_case 
     else
 	-- Get the similarly named thing from the local environment
     lookupOccRn (mkRdrUnqual (nameOccName std_name)) `thenM` \ usr_name ->
@@ -774,8 +781,8 @@ lookupSyntaxName std_name
 lookupSyntaxTable :: [Name]				-- Standard names
 		  -> RnM (SyntaxTable Name, FreeVars)	-- See comments with HsExpr.ReboundNames
 lookupSyntaxTable std_names
-  = doptM Opt_ImplicitPrelude		`thenM` \ implicit_prelude -> 
-    if implicit_prelude then normal_case 
+  = xoptM Opt_RebindableSyntax		`thenM` \ rebindable_on -> 
+    if not rebindable_on then normal_case 
     else
     	-- Get the similarly named thing from the local environment
     mapM (lookupOccRn . mkRdrUnqual . nameOccName) std_names 	`thenM` \ usr_names ->
@@ -836,7 +843,7 @@ bindLocalName name enclosed_scope
 bindLocalNamesFV :: [Name] -> RnM (a, FreeVars) -> RnM (a, FreeVars)
 bindLocalNamesFV names enclosed_scope
   = do	{ (result, fvs) <- bindLocalNames names enclosed_scope
-	; return (result, delListFromNameSet fvs names) }
+	; return (result, delFVs names fvs) }
 
 
 -------------------------------------
@@ -847,16 +854,24 @@ bindLocatedLocalsFV :: [Located RdrName]
 bindLocatedLocalsFV rdr_names enclosed_scope
   = bindLocatedLocalsRn rdr_names	$ \ names ->
     enclosed_scope names		`thenM` \ (thing, fvs) ->
-    return (thing, delListFromNameSet fvs names)
+    return (thing, delFVs names fvs)
 
 -------------------------------------
+bindTyVarsFV ::  [LHsTyVarBndr RdrName]
+	      -> ([LHsTyVarBndr Name] -> RnM (a, FreeVars))
+	      -> RnM (a, FreeVars)
+bindTyVarsFV tyvars thing_inside
+  = bindTyVarsRn tyvars $ \ tyvars' ->
+    do { (res, fvs) <- thing_inside tyvars'
+       ; return (res, delFVs (map hsLTyVarName tyvars') fvs) }
+
 bindTyVarsRn ::  [LHsTyVarBndr RdrName]
 	      -> ([LHsTyVarBndr Name] -> RnM a)
 	      -> RnM a
 -- Haskell-98 binding of type variables; e.g. within a data type decl
 bindTyVarsRn tyvar_names enclosed_scope
   = bindLocatedLocalsRn located_tyvars	$ \ names ->
-    do { kind_sigs_ok <- doptM Opt_KindSignatures
+    do { kind_sigs_ok <- xoptM Opt_KindSignatures
        ; unless (null kinded_tyvars || kind_sigs_ok) 
        	 	(mapM_ (addErr . kindSigErr) kinded_tyvars)
        ; enclosed_scope (zipWith replace tyvar_names names) }
@@ -869,7 +884,7 @@ bindPatSigTyVars :: [LHsType RdrName] -> ([Name] -> RnM a) -> RnM a
   -- Find the type variables in the pattern type 
   -- signatures that must be brought into scope
 bindPatSigTyVars tys thing_inside
-  = do 	{ scoped_tyvars <- doptM Opt_ScopedTypeVariables
+  = do 	{ scoped_tyvars <- xoptM Opt_ScopedTypeVariables
 	; if not scoped_tyvars then 
 		thing_inside []
 	  else 
@@ -896,7 +911,7 @@ bindSigTyVarsFV :: [Name]
 		-> RnM (a, FreeVars)
 	  	-> RnM (a, FreeVars)
 bindSigTyVarsFV tvs thing_inside
-  = do	{ scoped_tyvars <- doptM Opt_ScopedTypeVariables
+  = do	{ scoped_tyvars <- xoptM Opt_ScopedTypeVariables
 	; if not scoped_tyvars then 
 		thing_inside 
 	  else
@@ -940,7 +955,7 @@ checkDupAndShadowedNames envs names
 -------------------------------------
 checkShadowedOccs :: (GlobalRdrEnv, LocalRdrEnv) -> [(SrcSpan,OccName)] -> RnM ()
 checkShadowedOccs (global_env,local_env) loc_occs
-  = ifOptM Opt_WarnNameShadowing $ 
+  = ifDOptM Opt_WarnNameShadowing $ 
     do	{ traceRn (text "shadow" <+> ppr loc_occs)
 	; mapM_ check_shadow loc_occs }
   where
@@ -963,7 +978,7 @@ checkShadowedOccs (global_env,local_env) loc_occs
 	-- punning or wild-cards are on (cf Trac #2723)
     is_shadowed_gre gre@(GRE { gre_par = ParentIs _ })
 	= do { dflags <- getDOpts
-	     ; if (dopt Opt_RecordPuns dflags || dopt Opt_RecordWildCards dflags) 
+	     ; if (xopt Opt_RecordPuns dflags || xopt Opt_RecordWildCards dflags) 
 	       then do { is_fld <- is_rec_fld gre; return (not is_fld) }
 	       else return True }
     is_shadowed_gre _other = return True
@@ -984,10 +999,18 @@ checkShadowedOccs (global_env,local_env) loc_occs
 
 \begin{code}
 -- A useful utility
+addFvRn :: FreeVars -> RnM (thing, FreeVars) -> RnM (thing, FreeVars)
+addFvRn fvs1 thing_inside = do { (res, fvs2) <- thing_inside
+                               ; return (res, fvs1 `plusFV` fvs2) }
+
 mapFvRn :: (a -> RnM (b, FreeVars)) -> [a] -> RnM ([b], FreeVars)
 mapFvRn f xs = do stuff <- mapM f xs
                   case unzip stuff of
                       (ys, fvs_s) -> return (ys, plusFVs fvs_s)
+
+mapMaybeFvRn :: (a -> RnM (b, FreeVars)) -> Maybe a -> RnM (Maybe b, FreeVars)
+mapMaybeFvRn _ Nothing = return (Nothing, emptyFVs)
+mapMaybeFvRn f (Just x) = do { (y, fvs) <- f x; return (Just y, fvs) }
 
 -- because some of the rename functions are CPSed:
 -- maps the function across the list from left to right; 
@@ -1009,22 +1032,19 @@ mapFvRnCPS f (x:xs) cont = f x 		   $ \ x' ->
 %************************************************************************
 
 \begin{code}
-warnUnusedModules :: [(ModuleName,SrcSpan)] -> RnM ()
-warnUnusedModules mods
-  = ifOptM Opt_WarnUnusedImports (mapM_ bleat mods)
-  where
-    bleat (mod,loc) = addWarnAt loc (mk_warn mod)
-    mk_warn m = vcat [ptext (sLit "Module") <+> quotes (ppr m)
-			<+> text "is imported, but nothing from it is used,",
-		      nest 2 (ptext (sLit "except perhaps instances visible in") 
-			<+> quotes (ppr m)),
-		      ptext (sLit "To suppress this warning, use:") 
-			<+> ptext (sLit "import") <+> ppr m <> parens empty ]
-
-
-warnUnusedImports, warnUnusedTopBinds :: [GlobalRdrElt] -> RnM ()
-warnUnusedImports gres  = ifOptM Opt_WarnUnusedImports (warnUnusedGREs gres)
-warnUnusedTopBinds gres = ifOptM Opt_WarnUnusedBinds   (warnUnusedGREs gres)
+warnUnusedTopBinds :: [GlobalRdrElt] -> RnM ()
+warnUnusedTopBinds gres
+    = ifDOptM Opt_WarnUnusedBinds
+    $ do isBoot <- tcIsHsBoot
+         let noParent gre = case gre_par gre of
+                            NoParent -> True
+                            ParentIs _ -> False
+             -- Don't warn about unused bindings with parents in
+             -- .hs-boot files, as you are sometimes required to give
+             -- unused bindings (trac #3449).
+             gres' = if isBoot then filter noParent gres
+                               else                 gres
+         warnUnusedGREs gres'
 
 warnUnusedLocalBinds, warnUnusedMatches :: [Name] -> FreeVars -> RnM ()
 warnUnusedLocalBinds = check_unused Opt_WarnUnusedBinds
@@ -1032,7 +1052,7 @@ warnUnusedMatches    = check_unused Opt_WarnUnusedMatches
 
 check_unused :: DynFlag -> [Name] -> FreeVars -> RnM ()
 check_unused flag bound_names used_names
- = ifOptM flag (warnUnusedLocals (filterOut (`elemNameSet` used_names) bound_names))
+ = ifDOptM flag (warnUnusedLocals (filterOut (`elemNameSet` used_names) bound_names))
 
 -------------------------
 --	Helpers
@@ -1085,7 +1105,7 @@ addNameClashErrRn rdr_name names
     (np1:nps) = names
     msg1 = ptext  (sLit "either") <+> mk_ref np1
     msgs = [ptext (sLit "    or") <+> mk_ref np | np <- nps]
-    mk_ref gre = quotes (ppr (gre_name gre)) <> comma <+> pprNameProvenance gre
+    mk_ref gre = sep [quotes (ppr (gre_name gre)) <> comma, pprNameProvenance gre]
 
 shadowedNameWarn :: OccName -> [SDoc] -> SDoc
 shadowedNameWarn occ shadowed_locs

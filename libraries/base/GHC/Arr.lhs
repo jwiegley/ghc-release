@@ -49,13 +49,13 @@ default ()
 -- An implementation is entitled to assume the following laws about these
 -- operations:
 --
--- * @'inRange' (l,u) i == 'elem' i ('range' (l,u))@
+-- * @'inRange' (l,u) i == 'elem' i ('range' (l,u))@ @ @
 --
 -- * @'range' (l,u) '!!' 'index' (l,u) i == i@, when @'inRange' (l,u) i@
 --
--- * @'map' ('index' (l,u)) ('range' (l,u))) == [0..'rangeSize' (l,u)-1]@
+-- * @'map' ('index' (l,u)) ('range' (l,u))) == [0..'rangeSize' (l,u)-1]@ @ @
 --
--- * @'rangeSize' (l,u) == 'length' ('range' (l,u))@
+-- * @'rangeSize' (l,u) == 'length' ('range' (l,u))@ @ @
 --
 -- Minimal complete instance: 'range', 'index' and 'inRange'.
 --
@@ -76,8 +76,14 @@ class (Ord a) => Ix a where
     unsafeRangeSize     :: (a,a) -> Int
 
         -- Must specify one of index, unsafeIndex
+
+	-- 'index' is typically over-ridden in instances, with essentially
+	-- the same code, but using indexError instead of hopelessIndexError
+	-- Reason: we have 'Show' at the instances
+    {-# INLINE index #-}  -- See Note [Inlining index]
     index b i | inRange b i = unsafeIndex b i   
-              | otherwise   = error "Error in array index"
+              | otherwise   = hopelessIndexError
+
     unsafeIndex b i = index b i
 
     rangeSize b@(_l,h) | inRange b h = unsafeIndex b h + 1
@@ -105,8 +111,54 @@ hence is empty
 %*                                                      *
 %*********************************************************
 
+Note [Inlining index]
+~~~~~~~~~~~~~~~~~~~~~
+We inline the 'index' operation, 
+
+ * Partly because it generates much faster code 
+   (although bigger); see Trac #1216
+
+ * Partly because it exposes the bounds checks to the simplifier which
+   might help a big.
+
+If you make a per-instance index method, you may consider inlining it.
+
+Note [Double bounds-checking of index values]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When you index an array, a!x, there are two possible bounds checks we might make:
+
+  (A) Check that (inRange (bounds a) x) holds.  
+
+      (A) is checked in the method for 'index'
+
+  (B) Check that (index (bounds a) x) lies in the range 0..n, 
+      where n is the size of the underlying array
+
+      (B) is checked in the top-level function (!), in safeIndex.
+
+Of course it *should* be the case that (A) holds iff (B) holds, but that 
+is a property of the particular instances of index, bounds, and inRange,
+so GHC cannot guarantee it.
+
+ * If you do (A) and not (B), then you might get a seg-fault, 
+   by indexing at some bizarre location.  Trac #1610
+
+ * If you do (B) but not (A), you may get no complaint when you index
+   an array out of its semantic bounds.  Trac #2120
+
+At various times we have had (A) and not (B), or (B) and not (A); both
+led to complaints.  So now we implement *both* checks (Trac #2669).
+
+For 1-d, 2-d, and 3-d arrays of Int we have specialised instances to avoid this.
+
+Note [Out-of-bounds error messages]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The default method for 'index' generates hoplelessIndexError, because
+Ix doesn't have Show as a superclass.  For particular base types we
+can do better, so we override the default method for index.
+
 \begin{code}
--- abstract these errors from the relevant index functions so that
+-- Abstract these errors from the relevant index functions so that
 -- the guts of the function will be small enough to inline.
 
 {-# NOINLINE indexError #-}
@@ -117,6 +169,9 @@ indexError rng i tp
            showString " out of range " $
            showParen True (showsPrec 0 rng) "")
 
+hopelessIndexError :: Int -- Try to use 'indexError' instead!
+hopelessIndexError = error "Error in array index"
+
 ----------------------------------------------------------------------
 instance  Ix Char  where
     {-# INLINE range #-}
@@ -125,6 +180,8 @@ instance  Ix Char  where
     {-# INLINE unsafeIndex #-}
     unsafeIndex (m,_n) i = fromEnum i - fromEnum m
 
+    {-# INLINE index #-}  -- See Note [Out-of-bounds error messages]
+                          -- and Note [Inlining index]
     index b i | inRange b i =  unsafeIndex b i
               | otherwise   =  indexError b i "Char"
 
@@ -140,6 +197,8 @@ instance  Ix Int  where
     {-# INLINE unsafeIndex #-}
     unsafeIndex (m,_n) i = i - m
 
+    {-# INLINE index #-}  -- See Note [Out-of-bounds error messages]
+                          -- and Note [Inlining index]
     index b i | inRange b i =  unsafeIndex b i
               | otherwise   =  indexError b i "Int"
 
@@ -154,6 +213,8 @@ instance  Ix Integer  where
     {-# INLINE unsafeIndex #-}
     unsafeIndex (m,_n) i   = fromInteger (i - m)
 
+    {-# INLINE index #-}  -- See Note [Out-of-bounds error messages]
+                          -- and Note [Inlining index]
     index b i | inRange b i =  unsafeIndex b i
               | otherwise   =  indexError b i "Integer"
 
@@ -167,6 +228,8 @@ instance Ix Bool where -- as derived
     {-# INLINE unsafeIndex #-}
     unsafeIndex (l,_) i = fromEnum i - fromEnum l
 
+    {-# INLINE index #-}  -- See Note [Out-of-bounds error messages]
+                          -- and Note [Inlining index]
     index b i | inRange b i =  unsafeIndex b i
               | otherwise   =  indexError b i "Bool"
 
@@ -180,6 +243,8 @@ instance Ix Ordering where -- as derived
     {-# INLINE unsafeIndex #-}
     unsafeIndex (l,_) i = fromEnum i - fromEnum l
 
+    {-# INLINE index #-}  -- See Note [Out-of-bounds error messages]
+                          -- and Note [Inlining index]
     index b i | inRange b i =  unsafeIndex b i
               | otherwise   =  indexError b i "Ordering"
 
@@ -193,7 +258,8 @@ instance Ix () where
     unsafeIndex   ((), ()) () = 0
     {-# INLINE inRange #-}
     inRange ((), ()) () = True
-    {-# INLINE index #-}
+
+    {-# INLINE index #-}  -- See Note [Inlining index]
     index b i = unsafeIndex b i
 
 ----------------------------------------------------------------------
@@ -288,7 +354,6 @@ type IPr = (Int, Int)
 
 -- | The type of immutable non-strict (boxed) arrays
 -- with indices in @i@ and elements in @e@.
--- The Int is the number of elements in the Array.
 data Ix i => Array i e
                  = Array !i         -- the lower bound, l
                          !i         -- the upper bound, u
@@ -346,7 +411,7 @@ arrEleBottom = error "(Array.!): undefined array element"
 --
 -- Because the indices must be checked for these errors, 'array' is
 -- strict in the bounds argument and in the indices of the association
--- list, but nonstrict in the values.  Thus, recurrences such as the
+-- list, but non-strict in the values.  Thus, recurrences such as the
 -- following are possible:
 --
 -- > a = array (1,100) ((1,1) : [(i, i * a!(i-1)) | i <- [2..100]])
@@ -391,15 +456,18 @@ unsafeArray' (l,u) n@(I# n#) ies = runST (ST $ \s1# ->
 
 {-# INLINE fill #-}
 fill :: MutableArray# s e -> (Int, e) -> STRep s a -> STRep s a
-fill marr# (I# i#, e) next s1# =
-    case writeArray# marr# i# e s1#     of { s2# ->
-    next s2# }
+-- NB: put the \s after the "=" so that 'fill' 
+--     inlines when applied to three args 
+fill marr# (I# i#, e) next 
+ = \s1# -> case writeArray# marr# i# e s1# of 
+             s2# -> next s2# 
 
 {-# INLINE done #-}
 done :: Ix i => i -> i -> Int -> MutableArray# s e -> STRep s (Array i e)
-done l u n marr# s1# =
-    case unsafeFreezeArray# marr# s1# of
-        (# s2#, arr# #) -> (# s2#, Array l u n arr# #)
+-- See NB on 'fill'
+done l u n marr# 
+  = \s1# -> case unsafeFreezeArray# marr# s1# of
+              (# s2#, arr# #) -> (# s2#, Array l u n arr# #)
 
 -- This is inefficient and I'm not sure why:
 -- listArray (l,u) es = unsafeArray (l,u) (zip [0 .. rangeSize (l,u) - 1] es)
@@ -430,16 +498,38 @@ arr@(Array l u n _) ! i = unsafeAt arr $ safeIndex (l,u) n i
 {-# INLINE safeRangeSize #-}
 safeRangeSize :: Ix i => (i, i) -> Int
 safeRangeSize (l,u) = let r = rangeSize (l, u)
-                      in if r < 0 then error "Negative range size"
+                      in if r < 0 then negRange
                                   else r
 
-{-# INLINE safeIndex #-}
+-- Don't inline this error message everywhere!!
+negRange :: Int	  -- Uninformative, but Ix does not provide Show
+negRange = error "Negative range size"
+
+{-# INLINE[1] safeIndex #-}
+-- See Note [Double bounds-checking of index values]
+-- Inline *after* (!) so the rules can fire
 safeIndex :: Ix i => (i, i) -> Int -> i -> Int
 safeIndex (l,u) n i = let i' = index (l,u) i
                       in if (0 <= i') && (i' < n)
                          then i'
-                         else error ("Error in array index; " ++ show i' ++
-                                     " not in range [0.." ++ show n ++ ")")
+                         else badSafeIndex i' n
+
+-- See Note [Double bounds-checking of index values]
+{-# RULES
+"safeIndex/I"       safeIndex = lessSafeIndex :: (Int,Int) -> Int -> Int -> Int
+"safeIndex/(I,I)"   safeIndex = lessSafeIndex :: ((Int,Int),(Int,Int)) -> Int -> (Int,Int) -> Int
+"safeIndex/(I,I,I)" safeIndex = lessSafeIndex :: ((Int,Int,Int),(Int,Int,Int)) -> Int -> (Int,Int,Int) -> Int
+  #-}
+
+lessSafeIndex :: Ix i => (i, i) -> Int -> i -> Int
+-- See Note [Double bounds-checking of index values]
+-- Do only (A), the semantic check
+lessSafeIndex (l,u) _ i = index (l,u) i  
+
+-- Don't inline this long error message everywhere!!
+badSafeIndex :: Int -> Int -> Int
+badSafeIndex i' n = error ("Error in array index; " ++ show i' ++
+                        " not in range [0.." ++ show n ++ ")")
 
 {-# INLINE unsafeAt #-}
 unsafeAt :: Ix i => Array i e -> Int -> e
@@ -473,7 +563,7 @@ assocs :: Ix i => Array i e -> [(i, e)]
 assocs arr@(Array l u _ _) =
     [(i, arr ! i) | i <- range (l,u)]
 
--- | The 'accumArray' deals with repeated indices in the association
+-- | The 'accumArray' function deals with repeated indices in the association
 -- list using an /accumulating function/ which combines the values of
 -- associations with the same index.
 -- For example, given a list of values of some index type, @hist@
@@ -511,11 +601,12 @@ unsafeAccumArray' f initial (l,u) n@(I# n#) ies = runST (ST $ \s1# ->
 
 {-# INLINE adjust #-}
 adjust :: (e -> a -> e) -> MutableArray# s e -> (Int, a) -> STRep s b -> STRep s b
-adjust f marr# (I# i#, new) next s1# =
-    case readArray# marr# i# s1# of
-        (# s2#, old #) ->
-            case writeArray# marr# i# (f old new) s2# of
-                s3# -> next s3#
+-- See NB on 'fill'
+adjust f marr# (I# i#, new) next
+  = \s1# -> case readArray# marr# i# s1# of
+        	(# s2#, old #) ->
+        	    case writeArray# marr# i# (f old new) s2# of
+        	        s3# -> next s3#
 
 -- | Constructs an array identical to the first argument except that it has
 -- been updated by the associations in the right argument.

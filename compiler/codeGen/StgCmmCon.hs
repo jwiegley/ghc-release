@@ -30,6 +30,7 @@ import CLabel
 import MkZipCfgCmm (CmmAGraph, mkNop)
 import SMRep
 import CostCentre
+import Module
 import Constants
 import DataCon
 import FastString
@@ -38,7 +39,12 @@ import Literal
 import PrelInfo
 import Outputable
 import Util             ( lengthIs )
+
 import Data.Char
+
+#if defined(mingw32_TARGET_OS)
+import StaticFlags	( opt_PIC )
+#endif
 
 
 ---------------------------------------------------------------
@@ -146,14 +152,21 @@ work with any old argument, but for @Int@-like ones the argument has
 to be a literal.  Reason: @Char@ like closures have an argument type
 which is guaranteed in range.
 
-Because of this, we use can safely return an addressing mode. -}
+Because of this, we use can safely return an addressing mode. 
+
+We don't support this optimisation when compiling into Windows DLLs yet
+because they don't support cross package data references well.
+-}
 
 buildDynCon binder _cc con [arg]
   | maybeIntLikeCon con 
+#if defined(mingw32_TARGET_OS)
+  , not opt_PIC
+#endif
   , StgLitArg (MachInt val) <- arg
   , val <= fromIntegral mAX_INTLIKE 	-- Comparisons at type Integer!
   , val >= fromIntegral mIN_INTLIKE	-- ...ditto...
-  = do 	{ let intlike_lbl   = mkRtsGcPtrLabel (sLit "stg_INTLIKE_closure")
+  = do 	{ let intlike_lbl   = mkCmmGcPtrLabel rtsPackageId (fsLit "stg_INTLIKE_closure")
 	      val_int = fromIntegral val :: Int
 	      offsetW = (val_int - mIN_INTLIKE) * (fixedHdrSize + 1)
 		-- INTLIKE closures consist of a header and one word payload
@@ -161,12 +174,15 @@ buildDynCon binder _cc con [arg]
 	; return (litIdInfo binder (mkConLFInfo con) intlike_amode, mkNop) }
 
 buildDynCon binder _cc con [arg]
-  | maybeCharLikeCon con 
+  | maybeCharLikeCon con
+#if defined(mingw32_TARGET_OS)
+  , not opt_PIC
+#endif
   , StgLitArg (MachChar val) <- arg
   , let val_int = ord val :: Int
   , val_int <= mAX_CHARLIKE
   , val_int >= mIN_CHARLIKE
-  = do 	{ let charlike_lbl   = mkRtsGcPtrLabel (sLit "stg_CHARLIKE_closure")
+  = do 	{ let charlike_lbl   = mkCmmGcPtrLabel rtsPackageId (fsLit "stg_CHARLIKE_closure")
 	      offsetW = (val_int - mIN_CHARLIKE) * (fixedHdrSize + 1)
 		-- CHARLIKE closures consist of a header and one word payload
 	      charlike_amode = cmmLabelOffW charlike_lbl offsetW

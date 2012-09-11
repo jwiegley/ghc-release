@@ -11,7 +11,7 @@ free variables.
 
 \begin{code}
 module RnPat (-- main entry points
-              rnPats, rnBindPat,
+              rnPat, rnPats, rnBindPat,
 
               NameMaker, applyNameMaker,     -- a utility for making names:
               localRecNameMaker, topRecNameMaker,  --   sometimes we want to make local names,
@@ -21,9 +21,6 @@ module RnPat (-- main entry points
 
 	      -- Literals
 	      rnLit, rnOverLit,     
-
-	      -- Quasiquotation
-	      rnQuasiQuote,
 
              -- Pattern Error messages that are also used elsewhere
              checkTupSize, patSigErr
@@ -43,13 +40,13 @@ import TcRnMonad
 import TcHsSyn		( hsOverLitName )
 import RnEnv
 import RnTypes
-import DynFlags		( DynFlag(..) )
+import DynFlags
 import PrelNames
 import Constants	( mAX_TUPLE_SIZE )
 import Name
 import NameSet
-import Module
 import RdrName
+import BasicTypes
 import ListSetOps	( removeDups, minusList )
 import Outputable
 import SrcLoc
@@ -138,15 +135,14 @@ data NameMaker
 
   | LetMk       -- Let bindings, incl top level
 		-- Do *not* check for unused bindings
-      (Maybe Module)   -- Just m  => top level of module m
-                       -- Nothing => not top level
+      TopLevelFlag
       MiniFixityEnv
 
-topRecNameMaker :: Module -> MiniFixityEnv -> NameMaker
-topRecNameMaker mod fix_env = LetMk (Just mod) fix_env
+topRecNameMaker :: MiniFixityEnv -> NameMaker
+topRecNameMaker fix_env = LetMk TopLevel fix_env
 
 localRecNameMaker :: MiniFixityEnv -> NameMaker
-localRecNameMaker fix_env = LetMk Nothing fix_env 
+localRecNameMaker fix_env = LetMk NotTopLevel fix_env 
 
 matchNameMaker :: HsMatchContext a -> NameMaker
 matchNameMaker ctxt = LamMk report_unused
@@ -165,11 +161,11 @@ newName (LamMk report_unused) rdr_name
 	   ; when report_unused $ warnUnusedMatches [name] fvs
 	   ; return (res, name `delFV` fvs) })
 
-newName (LetMk mb_top fix_env) rdr_name
+newName (LetMk is_top fix_env) rdr_name
   = CpsRn (\ thing_inside -> 
-        do { name <- case mb_top of
-                       Nothing  -> newLocalBndrRn rdr_name
-                       Just mod -> newTopSrcBinder mod rdr_name
+        do { name <- case is_top of
+                       NotTopLevel -> newLocalBndrRn rdr_name
+                       TopLevel    -> newTopSrcBinder rdr_name
 	   ; bindLocalName name $	-- Do *not* use bindLocalNameFV here
 					-- See Note [View pattern usage]
              addLocalFixities fix_env [name] $
@@ -243,6 +239,13 @@ rnPats ctxt pats thing_inside
   where
     doc_pat = ptext (sLit "In") <+> pprMatchContext ctxt
 
+rnPat :: HsMatchContext Name -- for error messages
+      -> LPat RdrName 
+      -> (LPat Name -> RnM (a, FreeVars))
+      -> RnM (a, FreeVars)     -- Variables bound by pattern do not 
+      	     	 	       -- appear in the result FreeVars 
+rnPat ctxt pat thing_inside 
+  = rnPats ctxt [pat] (\pats' -> let [pat'] = pats' in thing_inside pat')
 
 applyNameMaker :: NameMaker -> Located RdrName -> RnM Name
 applyNameMaker mk rdr = do { (n, _fvs) <- runCps (newName mk rdr); return n }
@@ -296,7 +299,7 @@ rnPatAndThen mk (VarPat rdr)  = do { loc <- liftCps getSrcSpanM
      -- (e.g. in the pattern (x, x -> y) x needs to be bound in the rhs of the tuple)
                                      
 rnPatAndThen mk (SigPatIn pat ty)
-  = do { patsigs <- liftCps (doptM Opt_ScopedTypeVariables)
+  = do { patsigs <- liftCps (xoptM Opt_ScopedTypeVariables)
        ; if patsigs
          then do { pat' <- rnLPatAndThen mk pat
                  ; ty' <- liftCpsFV (rnHsTypeFVs tvdoc ty)
@@ -308,7 +311,7 @@ rnPatAndThen mk (SigPatIn pat ty)
        
 rnPatAndThen mk (LitPat lit)
   | HsString s <- lit
-  = do { ovlStr <- liftCps (doptM Opt_OverloadedStrings)
+  = do { ovlStr <- liftCps (xoptM Opt_OverloadedStrings)
        ; if ovlStr 
          then rnPatAndThen mk (mkNPat (mkHsIsString s placeHolderType) Nothing)
          else normal_lit }
@@ -339,7 +342,7 @@ rnPatAndThen mk (AsPat rdr pat)
        ; return (AsPat (L (nameSrcSpan new_name) new_name) pat') }
 
 rnPatAndThen mk p@(ViewPat expr pat ty)
-  = do { liftCps $ do { vp_flag <- doptM Opt_ViewPatterns
+  = do { liftCps $ do { vp_flag <- xoptM Opt_ViewPatterns
                       ; checkErr vp_flag (badViewPat p) }
          -- Because of the way we're arranging the recursive calls,
          -- this will be in the right context 
@@ -373,8 +376,7 @@ rnPatAndThen _ p@(QuasiQuotePat {})
   = pprPanic "Can't do QuasiQuotePat without GHCi" (ppr p)
 #else
 rnPatAndThen mk (QuasiQuotePat qq)
-  = do { qq' <- liftCpsFV $ rnQuasiQuote qq
-       ; pat <- liftCps $ runQuasiQuotePat qq'
+  = do { pat <- liftCps $ runQuasiQuotePat qq
        ; L _ pat' <- rnLPatAndThen mk pat
        ; return pat' }
 #endif 	/* GHCI */
@@ -451,8 +453,8 @@ rnHsRecFields1
 -- of each x=e binding
 
 rnHsRecFields1 ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot })
-  = do { pun_ok      <- doptM Opt_RecordPuns
-       ; disambig_ok <- doptM Opt_DisambiguateRecordFields
+  = do { pun_ok      <- xoptM Opt_RecordPuns
+       ; disambig_ok <- xoptM Opt_DisambiguateRecordFields
        ; parent <- check_disambiguation disambig_ok mb_con
        ; flds1 <- mapM (rn_fld pun_ok parent) flds
        ; mapM_ (addErr . dupFieldErr ctxt) dup_flds
@@ -488,7 +490,7 @@ rnHsRecFields1 ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot }
     rn_dotdot (Just n) (Just con) flds -- ".." on record con/pat
       = ASSERT( n == length flds )
         do { loc <- getSrcSpanM	-- Rather approximate
-           ; dd_flag <- doptM Opt_RecordWildCards
+           ; dd_flag <- xoptM Opt_RecordWildCards
            ; checkErr dd_flag (needFlagDotDot ctxt)
 
            ; con_fields <- lookupConstructorFields con
@@ -571,29 +573,6 @@ rnOverLit lit@(OverLit {ol_val=val})
 				_	-> panic "rnOverLit"
 	; return (lit { ol_witness = from_thing_name
 		      , ol_rebindable = rebindable }, fvs) }
-\end{code}
-
-%************************************************************************
-%*									*
-\subsubsection{Quasiquotation}
-%*									*
-%************************************************************************
-
-See Note [Quasi-quote overview] in TcSplice.
-
-\begin{code}
-rnQuasiQuote :: HsQuasiQuote RdrName -> RnM (HsQuasiQuote Name, FreeVars)
-rnQuasiQuote (HsQuasiQuote n quoter quoteSpan quote)
-  = do	{ loc  <- getSrcSpanM
-   	; n' <- newLocalBndrRn (L loc n)
-   	; quoter' <- lookupOccRn quoter
-    ; when (isUnboundName quoter') failM
-           -- If 'quoter' is not in scope, proceed no further
-           -- The error message was generated by lookupOccRn, but it then
-           -- succeeds with an "unbound name", which makes the subsequent
-           -- attempt to run the quote fail in a confusing way
-
-    ; return (HsQuasiQuote n' quoter' quoteSpan quote, unitFV quoter') }
 \end{code}
 
 %************************************************************************

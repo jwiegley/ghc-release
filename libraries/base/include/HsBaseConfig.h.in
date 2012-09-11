@@ -306,8 +306,20 @@
 /* Define to 1 if you have the <ctype.h> header file. */
 #undef HAVE_CTYPE_H
 
+/* Define if you have epoll support. */
+#undef HAVE_EPOLL
+
+/* Define to 1 if you have the `epoll_create1' function. */
+#undef HAVE_EPOLL_CREATE1
+
+/* Define to 1 if you have the `epoll_ctl' function. */
+#undef HAVE_EPOLL_CTL
+
 /* Define to 1 if you have the <errno.h> header file. */
 #undef HAVE_ERRNO_H
+
+/* Define to 1 if you have the `eventfd' function. */
+#undef HAVE_EVENTFD
 
 /* Define to 1 if you have the <fcntl.h> header file. */
 #undef HAVE_FCNTL_H
@@ -327,8 +339,20 @@
 /* Define to 1 if you have the `iswspace' function. */
 #undef HAVE_ISWSPACE
 
+/* Define to 1 if you have the `kevent' function. */
+#undef HAVE_KEVENT
+
+/* Define to 1 if you have the `kevent64' function. */
+#undef HAVE_KEVENT64
+
+/* Define if you have kqueue support. */
+#undef HAVE_KQUEUE
+
 /* Define to 1 if you have the <langinfo.h> header file. */
 #undef HAVE_LANGINFO_H
+
+/* Define to 1 if you have libcharset. */
+#undef HAVE_LIBCHARSET
 
 /* Define to 1 if you have the <limits.h> header file. */
 #undef HAVE_LIMITS_H
@@ -341,6 +365,12 @@
 
 /* Define to 1 if you have the <memory.h> header file. */
 #undef HAVE_MEMORY_H
+
+/* Define if you have poll support. */
+#undef HAVE_POLL
+
+/* Define to 1 if you have the <poll.h> header file. */
+#undef HAVE_POLL_H
 
 /* Define to 1 if you have the <signal.h> header file. */
 #undef HAVE_SIGNAL_H
@@ -356,6 +386,15 @@
 
 /* Define to 1 if you have the <string.h> header file. */
 #undef HAVE_STRING_H
+
+/* Define to 1 if you have the <sys/epoll.h> header file. */
+#undef HAVE_SYS_EPOLL_H
+
+/* Define to 1 if you have the <sys/eventfd.h> header file. */
+#undef HAVE_SYS_EVENTFD_H
+
+/* Define to 1 if you have the <sys/event.h> header file. */
+#undef HAVE_SYS_EVENT_H
 
 /* Define to 1 if you have the <sys/resource.h> header file. */
 #undef HAVE_SYS_RESOURCE_H
@@ -539,6 +578,9 @@
 
 /* Define to the one symbol short name of this package. */
 #undef PACKAGE_TARNAME
+
+/* Define to the home page for this package. */
+#undef PACKAGE_URL
 
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION

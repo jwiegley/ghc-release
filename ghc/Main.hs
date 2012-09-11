@@ -76,8 +76,9 @@ import Data.Maybe
 -- GHC's command-line interface
 
 main :: IO ()
-main =
-    GHC.defaultErrorHandler defaultDynFlags $ do
+main = do
+   hSetBuffering stdout NoBuffering
+   GHC.defaultErrorHandler defaultDynFlags $ do
     -- 1. extract the -B flag from the args
     argv0 <- getArgs
 
@@ -104,7 +105,7 @@ main =
     case mode of
         Left preStartupMode ->
             do case preStartupMode of
-                   ShowSupportedLanguages  -> showSupportedLanguages
+                   ShowSupportedExtensions -> showSupportedExtensions
                    ShowVersion             -> showVersion
                    ShowNumVersion          -> putStrLn cProjectVersion
                    Print str               -> putStrLn str
@@ -350,13 +351,13 @@ type PostStartupMode = Either PreLoadMode PostLoadMode
 data PreStartupMode
   = ShowVersion             -- ghc -V/--version
   | ShowNumVersion          -- ghc --numeric-version
-  | ShowSupportedLanguages  -- ghc --supported-languages
+  | ShowSupportedExtensions -- ghc --supported-extensions
   | Print String            -- ghc --print-foo
 
-showVersionMode, showNumVersionMode, showSupportedLanguagesMode :: Mode
-showVersionMode            = mkPreStartupMode ShowVersion
-showNumVersionMode         = mkPreStartupMode ShowNumVersion
-showSupportedLanguagesMode = mkPreStartupMode ShowSupportedLanguages
+showVersionMode, showNumVersionMode, showSupportedExtensionsMode :: Mode
+showVersionMode             = mkPreStartupMode ShowVersion
+showNumVersionMode          = mkPreStartupMode ShowNumVersion
+showSupportedExtensionsMode = mkPreStartupMode ShowSupportedExtensions
 
 printMode :: String -> Mode
 printMode str              = mkPreStartupMode (Print str)
@@ -429,6 +430,14 @@ isDoInteractiveMode :: Mode -> Bool
 isDoInteractiveMode (Right (Right DoInteractive)) = True
 isDoInteractiveMode _ = False
 
+isStopLnMode :: Mode -> Bool
+isStopLnMode (Right (Right (StopBefore StopLn))) = True
+isStopLnMode _ = False
+
+isDoMakeMode :: Mode -> Bool
+isDoMakeMode (Right (Right DoMake)) = True
+isDoMakeMode _ = False
+
 #ifdef GHCI
 isInteractiveMode :: PostLoadMode -> Bool
 isInteractiveMode DoInteractive = True
@@ -462,7 +471,6 @@ isCompManagerMode DoInteractive = True
 isCompManagerMode (DoEval _)    = True
 isCompManagerMode _             = False
 
-
 -- -----------------------------------------------------------------------------
 -- Parsing the mode flag
 
@@ -475,7 +483,7 @@ parseModeFlags args = do
           runCmdLine (processArgs mode_flags args)
                      (Nothing, [], [])
       mode = case mModeFlag of
-             Nothing -> stopBeforeMode StopLn
+             Nothing     -> doMakeMode
              Just (m, _) -> m
       errs = errs1 ++ map (mkGeneralLocated "on the commandline") errs2
   when (not (null errs)) $ ghcError $ errorsToGhcException errs
@@ -488,23 +496,16 @@ type ModeM = CmdLineP (Maybe (Mode, String), [String], [Located String])
 mode_flags :: [Flag ModeM]
 mode_flags =
   [  ------- help / version ----------------------------------------------
-    Flag "?"                    (PassFlag (setMode showGhcUsageMode))
-         Supported
-  , Flag "-help"                (PassFlag (setMode showGhcUsageMode))
-         Supported
-  , Flag "V"                    (PassFlag (setMode showVersionMode))
-         Supported
-  , Flag "-version"             (PassFlag (setMode showVersionMode))
-         Supported
-  , Flag "-numeric-version"     (PassFlag (setMode showNumVersionMode))
-         Supported
-  , Flag "-info"                (PassFlag (setMode showInfoMode))
-         Supported
-  , Flag "-supported-languages" (PassFlag (setMode showSupportedLanguagesMode))
-         Supported
+    Flag "?"                     (PassFlag (setMode showGhcUsageMode))
+  , Flag "-help"                 (PassFlag (setMode showGhcUsageMode))
+  , Flag "V"                     (PassFlag (setMode showVersionMode))
+  , Flag "-version"              (PassFlag (setMode showVersionMode))
+  , Flag "-numeric-version"      (PassFlag (setMode showNumVersionMode))
+  , Flag "-info"                 (PassFlag (setMode showInfoMode))
+  , Flag "-supported-languages"  (PassFlag (setMode showSupportedExtensionsMode))
+  , Flag "-supported-extensions" (PassFlag (setMode showSupportedExtensionsMode))
   ] ++
   [ Flag k'                     (PassFlag (setMode mode))
-         Supported
   | (k, v) <- compilerInfo,
     let k' = "-print-" ++ map (replaceSpace . toLower) k
         replaceSpace ' ' = '-'
@@ -516,42 +517,34 @@ mode_flags =
       ------- interfaces ----------------------------------------------------
   [ Flag "-show-iface"  (HasArg (\f -> setMode (showInterfaceMode f)
                                                "--show-iface"))
-         Supported
 
       ------- primary modes ------------------------------------------------
+  , Flag "c"            (PassFlag (\f -> do setMode (stopBeforeMode StopLn) f
+                                            addFlag "-no-link" f))
   , Flag "M"            (PassFlag (setMode doMkDependHSMode))
-         Supported
   , Flag "E"            (PassFlag (setMode (stopBeforeMode anyHsc)))
-         Supported
   , Flag "C"            (PassFlag (\f -> do setMode (stopBeforeMode HCc) f
                                             addFlag "-fvia-C" f))
-         Supported
   , Flag "S"            (PassFlag (setMode (stopBeforeMode As)))
-         Supported
   , Flag "-make"        (PassFlag (setMode doMakeMode))
-         Supported
   , Flag "-interactive" (PassFlag (setMode doInteractiveMode))
-         Supported
   , Flag "-abi-hash"    (PassFlag (setMode doAbiHashMode))
-         Supported
   , Flag "e"            (SepArg   (\s -> setMode (doEvalMode s) "-e"))
-         Supported
-
-       -- -fno-code says to stop after Hsc but don't generate any code.
-  , Flag "fno-code"     (PassFlag (\f -> do setMode (stopBeforeMode HCc) f
-                                            addFlag "-fno-code" f
-                                            addFlag "-fforce-recomp" f))
-         Supported
   ]
 
-setMode :: Mode -> String -> ModeM ()
-setMode newMode newFlag = do
+setMode :: Mode -> String -> EwM ModeM ()
+setMode newMode newFlag = liftEwM $ do
     (mModeFlag, errs, flags') <- getCmdLineState
     let (modeFlag', errs') =
             case mModeFlag of
             Nothing -> ((newMode, newFlag), errs)
             Just (oldMode, oldFlag) ->
                 case (oldMode, newMode) of
+                    -- -c/--make are allowed together, and mean --make -no-link
+                    _ |  isStopLnMode oldMode && isDoMakeMode newMode
+                      || isStopLnMode newMode && isDoMakeMode oldMode ->
+                      ((doMakeMode, "--make"), [])
+
                     -- If we have both --help and --interactive then we
                     -- want showGhciUsage
                     _ | isShowGhcUsageMode oldMode &&
@@ -583,8 +576,8 @@ flagMismatchErr :: String -> String -> String
 flagMismatchErr oldFlag newFlag
     = "cannot use `" ++ oldFlag ++  "' with `" ++ newFlag ++ "'"
 
-addFlag :: String -> String -> ModeM ()
-addFlag s flag = do
+addFlag :: String -> String -> EwM ModeM ()
+addFlag s flag = liftEwM $ do
   (m, e, flags') <- getCmdLineState
   putCmdLineState (m, e, mkGeneralLocated loc s : flags')
     where loc = "addFlag by " ++ flag ++ " on the commandline"
@@ -593,7 +586,6 @@ addFlag s flag = do
 -- Run --make mode
 
 doMake :: [(String,Maybe Phase)] -> Ghc ()
-doMake []    = ghcError (UsageError "no input files")
 doMake srcs  = do
     let (hs_srcs, non_hs_srcs) = partition haskellish srcs
 
@@ -603,6 +595,15 @@ doMake srcs  = do
 	  phase `notElem` [As, Cc, CmmCpp, Cmm, StopLn]
 
     hsc_env <- GHC.getSession
+
+    -- if we have no haskell sources from which to do a dependency
+    -- analysis, then just do one-shot compilation and/or linking.
+    -- This means that "ghc Foo.o Bar.o -o baz" links the program as
+    -- we expect.
+    if (null hs_srcs)
+       then oneShot hsc_env StopLn srcs >> GHC.printWarnings
+       else do
+
     o_files <- mapM (\x -> do
                         f <- compileFile hsc_env StopLn x
                         GHC.printWarnings
@@ -656,8 +657,8 @@ showInfo dflags = do
     where flatten (k, String v)       = (k, v)
           flatten (k, FromDynFlags f) = (k, f dflags)
 
-showSupportedLanguages :: IO ()
-showSupportedLanguages = mapM_ putStrLn supportedLanguages
+showSupportedExtensions :: IO ()
+showSupportedExtensions = mapM_ putStrLn supportedLanguagesAndExtensions
 
 showVersion :: IO ()
 showVersion = putStrLn (cProjectName ++ ", version " ++ cProjectVersion)

@@ -127,9 +127,17 @@ typedef struct {
     StgInfoTable *saved_info;
 } StgIndStatic;
 
+typedef struct StgBlockingQueue_ {
+    StgHeader   header;
+    struct StgBlockingQueue_ *link; // here so it looks like an IND
+    StgClosure *bh;  // the BLACKHOLE
+    StgTSO     *owner;
+    struct MessageBlackHole_ *queue;
+} StgBlockingQueue;
+
 typedef struct {
     StgHeader  header;
-    StgWord    words;
+    StgWord    bytes;
     StgWord    payload[FLEXIBLE_ARRAY];
 } StgArrWords;
 
@@ -153,7 +161,7 @@ typedef struct _StgUpdateFrame {
 
 typedef struct {
     StgHeader  header;
-    StgInt      exceptions_blocked;
+    StgWord    exceptions_blocked;
     StgClosure *handler;
 } StgCatchFrame;
 
@@ -297,11 +305,17 @@ typedef struct {
 
 /* Concurrent communication objects */
 
+typedef struct StgMVarTSOQueue_ {
+    StgHeader                header;
+    struct StgMVarTSOQueue_ *link;
+    struct StgTSO_          *tso;
+} StgMVarTSOQueue;
+
 typedef struct {
-  StgHeader       header;
-  struct StgTSO_ *head;
-  struct StgTSO_ *tail;
-  StgClosure*     value;
+    StgHeader                header;
+    struct StgMVarTSOQueue_ *head;
+    struct StgMVarTSOQueue_ *tail;
+    StgClosure*              value;
 } StgMVar;
 
 
@@ -390,10 +404,10 @@ typedef struct StgInvariantCheckQueue_ {
 
 struct StgTRecHeader_ {
   StgHeader                  header;
-  TRecState                  state;
   struct StgTRecHeader_     *enclosing_trec;
   StgTRecChunk              *current_chunk;
   StgInvariantCheckQueue    *invariants_to_check;
+  TRecState                  state;
 };
 
 typedef struct {
@@ -415,5 +429,35 @@ typedef struct {
   StgClosure    *first_code;
   StgClosure    *alt_code;
 } StgCatchRetryFrame;
+
+/* ----------------------------------------------------------------------------
+   Messages
+   ------------------------------------------------------------------------- */
+
+typedef struct Message_ {
+    StgHeader        header;
+    struct Message_ *link;
+} Message;
+
+typedef struct MessageWakeup_ {
+    StgHeader header;
+    Message  *link;
+    StgTSO   *tso;
+} MessageWakeup;
+
+typedef struct MessageThrowTo_ {
+    StgHeader   header;
+    struct MessageThrowTo_ *link;
+    StgTSO     *source;
+    StgTSO     *target;
+    StgClosure *exception;
+} MessageThrowTo;
+
+typedef struct MessageBlackHole_ {
+    StgHeader   header;
+    struct MessageBlackHole_ *link;
+    StgTSO     *tso;
+    StgClosure *bh;
+} MessageBlackHole;
 
 #endif /* RTS_STORAGE_CLOSURES_H */

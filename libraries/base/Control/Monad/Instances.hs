@@ -1,4 +1,5 @@
 {-# OPTIONS_NHC98 --prelude #-}
+-- This module deliberately declares orphan instances:
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 -----------------------------------------------------------------------------
 -- |
@@ -30,3 +31,8 @@ instance Functor ((,) a) where
 instance Functor (Either a) where
         fmap _ (Left x) = Left x
         fmap f (Right y) = Right (f y)
+
+instance Monad (Either e) where
+        return = Right
+        Left  l >>= _ = Left l
+        Right r >>= k = k r

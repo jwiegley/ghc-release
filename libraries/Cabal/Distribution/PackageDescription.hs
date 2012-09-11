@@ -7,13 +7,14 @@
 -- Portability :  portable
 --
 -- This defines the data structure for the @.cabal@ file format. There are
--- several parts to this structure. It has top level info and then 'Library'
--- and 'Executable' sections each of which have associated 'BuildInfo' data
--- that's used to build the library or exe. To further complicate things there
--- is both a 'PackageDescription' and a 'GenericPackageDescription'. This
--- distinction relates to cabal configurations. When we initially read a
--- @.cabal@ file we get a 'GenericPackageDescription' which has all the
--- conditional sections. Before actually building a package we have to decide
+-- several parts to this structure. It has top level info and then 'Library',
+-- 'Executable', and 'TestSuite' sections each of which have associated
+-- 'BuildInfo' data that's used to build the library, exe, or test. To further
+-- complicate things there is both a 'PackageDescription' and a
+-- 'GenericPackageDescription'. This distinction relates to cabal
+-- configurations. When we initially read a @.cabal@ file we get a
+-- 'GenericPackageDescription' which has all the conditional sections.
+-- Before actually building a package we have to decide
 -- on each conditional. Once we've done that we get a 'PackageDescription'.
 -- It was done this way initially to avoid breaking too much stuff when the
 -- feature was introduced. It could probably do with being rationalised at some
@@ -53,6 +54,8 @@ module Distribution.PackageDescription (
         -- * Package descriptions
         PackageDescription(..),
         emptyPackageDescription,
+        specVersion,
+        descCabalVersion,
         BuildType(..),
         knownBuildTypes,
 
@@ -70,10 +73,24 @@ module Distribution.PackageDescription (
         hasExes,
         exeModules,
 
+        -- * Tests
+        TestSuite(..),
+        TestSuiteInterface(..),
+        TestType(..),
+        testType,
+        knownTestTypes,
+        emptyTestSuite,
+        hasTests,
+        withTest,
+        testModules,
+
         -- * Build information
         BuildInfo(..),
         emptyBuildInfo,
         allBuildInfo,
+        allLanguages,
+        allExtensions,
+        usedExtensions,
         hcOptions,
 
         -- ** Supplementary build information
@@ -87,26 +104,34 @@ module Distribution.PackageDescription (
         CondTree(..), ConfVar(..), Condition(..),
 
         -- * Source repositories
-        SourceRepo(..), RepoKind(..), RepoType(..),
+        SourceRepo(..),
+        RepoKind(..),
+        RepoType(..),
+        knownRepoTypes,
   ) where
 
-import Data.List   (nub)
+import Data.List   (nub, intersperse)
+import Data.Maybe  (maybeToList)
 import Data.Monoid (Monoid(mempty, mappend))
+import Control.Monad (MonadPlus(mplus))
 import Text.PrettyPrint.HughesPJ as Disp
 import qualified Distribution.Compat.ReadP as Parse
-import qualified Data.Char as Char (isAlphaNum, toLower)
+import qualified Data.Char as Char (isAlphaNum, isDigit, toLower)
 
 import Distribution.Package
          ( PackageName(PackageName), PackageIdentifier(PackageIdentifier)
          , Dependency, Package(..) )
-import Distribution.ModuleName (ModuleName)
-import Distribution.Version  (Version(Version), VersionRange, anyVersion)
+import Distribution.ModuleName ( ModuleName )
+import Distribution.Version
+         ( Version(Version), VersionRange, anyVersion, orLaterVersion
+         , asVersionIntervals, LowerBound(..) )
 import Distribution.License  (License(AllRightsReserved))
 import Distribution.Compiler (CompilerFlavor)
 import Distribution.System   (OS, Arch)
 import Distribution.Text
          ( Text(..), display )
-import Language.Haskell.Extension (Extension)
+import Language.Haskell.Extension
+         ( Language, Extension )
 
 -- -----------------------------------------------------------------------------
 -- The PackageDescription type
@@ -139,11 +164,16 @@ data PackageDescription
                                              -- with x-, stored in a
                                              -- simple assoc-list.
         buildDepends   :: [Dependency],
-        descCabalVersion :: VersionRange, -- ^If this package depends on a specific version of Cabal, give that here.
+        -- | The version of the Cabal spec that this package description uses.
+        -- For historical reasons this is specified with a version range but
+        -- only ranges of the form @>= v@ make sense. We are in the process of
+        -- transitioning to specifying just a single version, not a range.
+        specVersionRaw :: Either Version VersionRange,
         buildType      :: Maybe BuildType,
         -- components
         library        :: Maybe Library,
         executables    :: [Executable],
+        testSuites     :: [TestSuite],
         dataFiles      :: [FilePath],
         dataDir        :: FilePath,
         extraSrcFiles  :: [FilePath],
@@ -154,6 +184,32 @@ data PackageDescription
 instance Package PackageDescription where
   packageId = package
 
+-- | The version of the Cabal spec that this package should be interpreted
+-- against.
+--
+-- Historically we used a version range but we are switching to using a single
+-- version. Currently we accept either. This function converts into a single
+-- version by ignoring upper bounds in the version range.
+--
+specVersion :: PackageDescription -> Version
+specVersion pkg = case specVersionRaw pkg of
+  Left  version      -> version
+  Right versionRange -> case asVersionIntervals versionRange of
+                          []                            -> Version [0] []
+                          ((LowerBound version _, _):_) -> version
+
+-- | The range of versions of the Cabal tools that this package is intended to
+-- work with.
+--
+-- This function is deprecated and should not be used for new purposes, only to
+-- support old packages that rely on the old interpretation.
+--
+descCabalVersion :: PackageDescription -> VersionRange
+descCabalVersion pkg = case specVersionRaw pkg of
+  Left  version      -> orLaterVersion version
+  Right versionRange -> versionRange
+{-# DEPRECATED descCabalVersion "Use specVersion instead" #-}
+
 emptyPackageDescription :: PackageDescription
 emptyPackageDescription
     =  PackageDescription {
@@ -161,7 +217,7 @@ emptyPackageDescription
                                                        (Version [] []),
                       license      = AllRightsReserved,
                       licenseFile  = "",
-                      descCabalVersion = anyVersion,
+                      specVersionRaw = Right anyVersion,
                       buildType    = Nothing,
                       copyright    = "",
                       maintainer   = "",
@@ -179,6 +235,7 @@ emptyPackageDescription
                       customFieldsPD = [],
                       library      = Nothing,
                       executables  = [],
+                      testSuites   = [],
                       dataFiles    = [],
                       dataDir      = "",
                       extraSrcFiles = [],
@@ -311,6 +368,129 @@ exeModules :: Executable -> [ModuleName]
 exeModules exe = otherModules (buildInfo exe)
 
 -- ---------------------------------------------------------------------------
+-- The TestSuite type
+
+-- | A \"test-suite\" stanza in a cabal file.
+--
+data TestSuite = TestSuite {
+        testName      :: String,
+        testInterface :: TestSuiteInterface,
+        testBuildInfo :: BuildInfo
+    }
+    deriving (Show, Read, Eq)
+
+-- | The test suite interfaces that are currently defined. Each test suite must
+-- specify which interface it supports.
+--
+-- More interfaces may be defined in future, either new revisions or totally
+-- new interfaces.
+--
+data TestSuiteInterface =
+
+     -- | Test interface \"exitcode-stdio-1.0\". The test-suite takes the form
+     -- of an executable. It returns a zero exit code for success, non-zero for
+     -- failure. The stdout and stderr channels may be logged. It takes no
+     -- command line parameters and nothing on stdin.
+     --
+     TestSuiteExeV10 Version FilePath
+
+     -- | Test interface \"detailed-0.9\". The test-suite takes the form of a
+     -- library containing a designated module that exports \"tests :: [Test]\".
+     --
+   | TestSuiteLibV09 Version ModuleName
+
+     -- | A test suite that does not conform to one of the above interfaces for
+     -- the given reason (e.g. unknown test type).
+     --
+   | TestSuiteUnsupported TestType
+   deriving (Eq, Read, Show)
+
+instance Monoid TestSuite where
+    mempty = TestSuite {
+        testName      = mempty,
+        testInterface = mempty,
+        testBuildInfo = mempty
+    }
+
+    mappend a b = TestSuite {
+        testName      = combine' testName,
+        testInterface = combine  testInterface,
+        testBuildInfo = combine  testBuildInfo
+    }
+        where combine   field = field a `mappend` field b
+              combine' f = case (f a, f b) of
+                        ("", x) -> x
+                        (x, "") -> x
+                        (x, y) -> error "Ambiguous values for test field: '"
+                            ++ x ++ "' and '" ++ y ++ "'"
+
+instance Monoid TestSuiteInterface where
+    mempty  =  TestSuiteUnsupported (TestTypeUnknown mempty (Version [] []))
+    mappend a (TestSuiteUnsupported _) = a
+    mappend _ b                        = b
+
+emptyTestSuite :: TestSuite
+emptyTestSuite = mempty
+
+-- | Does this package have any test suites?
+hasTests :: PackageDescription -> Bool
+hasTests = any (buildable . testBuildInfo) . testSuites
+
+-- | Perform an action on each buildable 'TestSuite' in a package.
+withTest :: PackageDescription -> (TestSuite -> IO ()) -> IO ()
+withTest pkg_descr f =
+    mapM_ f $ filter (buildable . testBuildInfo) $
+        testSuites pkg_descr
+
+-- | Get all the module names from a test suite.
+testModules :: TestSuite -> [ModuleName]
+testModules test = (case testInterface test of
+                     TestSuiteLibV09 _ m -> [m]
+                     _                   -> [])
+                ++ otherModules (testBuildInfo test)
+
+-- | The \"test-type\" field in the test suite stanza.
+--
+data TestType = TestTypeExe Version     -- ^ \"type: exitcode-stdio-x.y\"
+              | TestTypeLib Version     -- ^ \"type: detailed-x.y\"
+              | TestTypeUnknown String Version -- ^ Some unknown test type e.g. \"type: foo\"
+    deriving (Show, Read, Eq)
+
+knownTestTypes :: [TestType]
+knownTestTypes = [ TestTypeExe (Version [1,0] [])
+                   -- 'detailed-0.9' test type is disabled in Cabal-1.10.x
+                   -- needs more work on the details of the library interface
+              {- , TestTypeLib (Version [0,9] []) -} ]
+
+instance Text TestType where
+  disp (TestTypeExe ver)          = text "exitcode-stdio-" <> disp ver
+  disp (TestTypeLib ver)          = text "detailed-"       <> disp ver
+  disp (TestTypeUnknown name ver) = text name <> char '-' <> disp ver
+
+  parse = do
+    cs   <- Parse.sepBy1 component (Parse.char '-')
+    _    <- Parse.char '-'
+    ver  <- parse
+    let name = concat (intersperse "-" cs)
+    return $! case lowercase name of
+      "exitcode-stdio" -> TestTypeExe ver
+      "detailed"       -> TestTypeLib ver
+      _                -> TestTypeUnknown name ver
+
+    where
+      component = do
+        cs <- Parse.munch1 Char.isAlphaNum
+        if all Char.isDigit cs then Parse.pfail else return cs
+        -- each component must contain an alphabetic character, to avoid
+        -- ambiguity in identifiers like foo-1 (the 1 is the version number).
+
+testType :: TestSuite -> TestType
+testType test = case testInterface test of
+  TestSuiteExeV10 ver _         -> TestTypeExe ver
+  TestSuiteLibV09 ver _         -> TestTypeLib ver
+  TestSuiteUnsupported testtype -> testtype
+
+-- ---------------------------------------------------------------------------
 -- The BuildInfo type
 
 -- Consider refactoring into executable and library versions.
@@ -325,7 +505,13 @@ data BuildInfo = BuildInfo {
         cSources          :: [FilePath],
         hsSourceDirs      :: [FilePath], -- ^ where to look for the haskell module hierarchy
         otherModules      :: [ModuleName], -- ^ non-exposed or non-main modules
-        extensions        :: [Extension],
+
+        defaultLanguage   :: Maybe Language,-- ^ language used when not explicitly specified
+        otherLanguages    :: [Language],    -- ^ other languages used within the package
+        defaultExtensions :: [Extension],   -- ^ language extensions used by all modules
+        otherExtensions   :: [Extension],   -- ^ other language extensions used within the package
+        oldExtensions     :: [Extension],   -- ^ the old extensions field, treated same as 'defaultExtensions'
+
         extraLibs         :: [String], -- ^ what libraries to link with when compiling a program that uses your package
         extraLibDirs      :: [String],
         includeDirs       :: [FilePath], -- ^directories to find .h files
@@ -353,7 +539,11 @@ instance Monoid BuildInfo where
     cSources          = [],
     hsSourceDirs      = [],
     otherModules      = [],
-    extensions        = [],
+    defaultLanguage   = Nothing,
+    otherLanguages    = [],
+    defaultExtensions = [],
+    otherExtensions   = [],
+    oldExtensions     = [],
     extraLibs         = [],
     extraLibDirs      = [],
     includeDirs       = [],
@@ -376,7 +566,11 @@ instance Monoid BuildInfo where
     cSources          = combineNub cSources,
     hsSourceDirs      = combineNub hsSourceDirs,
     otherModules      = combineNub otherModules,
-    extensions        = combineNub extensions,
+    defaultLanguage   = combineMby defaultLanguage,
+    otherLanguages    = combineNub otherLanguages,
+    defaultExtensions = combineNub defaultExtensions,
+    otherExtensions   = combineNub otherExtensions,
+    oldExtensions     = combineNub oldExtensions,
     extraLibs         = combine    extraLibs,
     extraLibDirs      = combineNub extraLibDirs,
     includeDirs       = combineNub includeDirs,
@@ -391,6 +585,7 @@ instance Monoid BuildInfo where
     where
       combine    field = field a `mappend` field b
       combineNub field = nub (combine field)
+      combineMby field = field b `mplus` field a
 
 emptyBuildInfo :: BuildInfo
 emptyBuildInfo = mempty
@@ -404,6 +599,29 @@ allBuildInfo pkg_descr = [ bi | Just lib <- [library pkg_descr]
                       ++ [ bi | exe <- executables pkg_descr
                               , let bi = buildInfo exe
                               , buildable bi ]
+                      ++ [ bi | tst <- testSuites pkg_descr
+                              , let bi = testBuildInfo tst
+                              , buildable bi ]
+  --FIXME: many of the places where this is used, we actually want to look at
+  --       unbuildable bits too, probably need separate functions
+
+-- | The 'Language's used by this component
+--
+allLanguages :: BuildInfo -> [Language]
+allLanguages bi = maybeToList (defaultLanguage bi)
+               ++ otherLanguages bi
+
+-- | The 'Extension's that are used somewhere by this component
+--
+allExtensions :: BuildInfo -> [Extension]
+allExtensions bi = usedExtensions bi
+                ++ otherExtensions bi
+
+-- | The 'Extensions' that are used by all modules in this component
+--
+usedExtensions :: BuildInfo -> [Extension]
+usedExtensions bi = oldExtensions bi
+                 ++ defaultExtensions bi
 
 type HookedBuildInfo = (Maybe BuildInfo, [(String, BuildInfo)])
 
@@ -585,33 +803,15 @@ data GenericPackageDescription =
         packageDescription :: PackageDescription,
         genPackageFlags       :: [Flag],
         condLibrary        :: Maybe (CondTree ConfVar [Dependency] Library),
-        condExecutables    :: [(String, CondTree ConfVar [Dependency] Executable)]
+        condExecutables    :: [(String, CondTree ConfVar [Dependency] Executable)],
+        condTestSuites     :: [(String, CondTree ConfVar [Dependency] TestSuite)]
       }
     deriving (Show, Eq)
 
 instance Package GenericPackageDescription where
   packageId = packageId . packageDescription
 
-{-
--- XXX: I think we really want a PPrint or Pretty or ShowPretty class.
-instance Show GenericPackageDescription where
-    show (GenericPackageDescription pkg flgs mlib exes) =
-        showPackageDescription pkg ++ "\n" ++
-        (render $ vcat $ map ppFlag flgs) ++ "\n" ++
-        render (maybe empty (\l -> showStanza "Library" (ppCondTree l showDeps)) mlib)
-        ++ "\n" ++
-        (render $ vcat $
-            map (\(n,ct) -> showStanza ("Executable " ++ n) (ppCondTree ct showDeps)) exes)
-      where
-        ppFlag (MkFlag name desc dflt manual) =
-            showStanza ("Flag " ++ name)
-              ((if (null desc) then empty else
-                   text ("Description: " ++ desc)) $+$
-              text ("Default: " ++ show dflt) $+$
-              text ("Manual: " ++ show manual))
-        showDeps = fsep . punctuate comma . map showDependency
-        showStanza h b = text h <+> lbrace $+$ nest 2 b $+$ rbrace
--}
+--TODO: make PackageDescription an instance of Text.
 
 -- | A flag can represent a feature to be included, or a way of linking
 --   a target against its dependencies, or in fact whatever you can think of.
@@ -625,7 +825,7 @@ data Flag = MkFlag
 
 -- | A 'FlagName' is the name of a user-defined configuration flag
 newtype FlagName = FlagName String
-    deriving (Eq, Ord, Show)
+    deriving (Eq, Ord, Show, Read)
 
 -- | A 'FlagAssignment' is a total or partial mapping of 'FlagName's to
 -- 'Bool' flag values. It represents the flags chosen by the user or

@@ -10,10 +10,7 @@ clean:
 	rm -fr install-tmp
 	rm -fr install
 	rm -f .setup-config .installed-pkg-config
-#	unregister if pakage 'test' already exists
-	if '$(GHC_PKG)' --user list | grep test-; then \
-	  '$(GHC_PKG)' --user unregister test; \
-	fi
+	rm -rf local.db
 
 # We use the global package database as there's no easy way to tell
 # ghc-pkg (via Cabal) to use one in ., and the global one at least
@@ -26,7 +23,8 @@ cabal01:
 	$(MAKE) clean
 	'$(TEST_HC)' --make -o setup Setup.lhs -v0
 
-	./setup configure -v0 --prefix=$(PREFIX) --with-compiler='$(TEST_HC)' --with-hc-pkg='$(GHC_PKG)' $(PROF)
+	'$(GHC_PKG)' init local.db
+	./setup configure -v0 --prefix=$(PREFIX) --with-compiler='$(TEST_HC)' --with-hc-pkg='$(GHC_PKG)' --package-db=local.db $(PROF)
 	./setup build -v0
 	./setup copy -v0
 	echo install1:
@@ -39,6 +37,5 @@ cabal01:
 	./setup sdist -v0
 	echo dist:
 	ls -1 dist
-	'$(GHC_PKG)' unregister test
 	if [ "$(CLEANUP)" != "" ]; then $(MAKE) clean; fi
 

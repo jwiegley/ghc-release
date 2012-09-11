@@ -21,6 +21,7 @@
 #include "HsFFI.h"
 
 #include "sm/Storage.h"
+#include "Stats.h"
 #include "Hash.h"
 #include "LinkerInternals.h"
 #include "RtsUtils.h"
@@ -32,12 +33,17 @@
 #include "posix/Signals.h"
 #endif
 
+// get protos for is*()
+#include <ctype.h>
+
 #ifdef HAVE_SYS_TYPES_H
 #include <sys/types.h>
 #endif
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <assert.h>
 
 #ifdef HAVE_SYS_STAT_H
 #include <sys/stat.h>
@@ -76,12 +82,15 @@
 
 #if defined(linux_HOST_OS) || defined(solaris2_HOST_OS) || defined(freebsd_HOST_OS) || defined(dragonfly_HOST_OS) || defined(netbsd_HOST_OS) || defined(openbsd_HOST_OS)
 #  define OBJFORMAT_ELF
+#  include <regex.h>	// regex is already used by dlopen() so this is OK
+			// to use here without requiring an additional lib
 #elif defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
 #  define OBJFORMAT_PEi386
 #  include <windows.h>
 #  include <math.h>
 #elif defined(darwin_HOST_OS)
 #  define OBJFORMAT_MACHO
+#  include <regex.h>
 #  include <mach-o/loader.h>
 #  include <mach-o/nlist.h>
 #  include <mach-o/reloc.h>
@@ -96,6 +105,10 @@
 #endif
 #endif
 
+#if defined(x86_64_HOST_ARCH) && defined(darwin_HOST_OS)
+#define ALWAYS_PIC
+#endif
+
 /* Hash table mapping symbol names to Symbol */
 static /*Str*/HashTable *symhash;
 
@@ -104,6 +117,16 @@ static /*Str*/HashTable *stablehash;
 
 /* List of currently loaded objects */
 ObjectCode *objects = NULL;	/* initially empty */
+
+static HsInt loadOc( ObjectCode* oc );
+static ObjectCode* mkOc( char *path, char *image, int imageSize,
+                         char *archiveMemberName
+#ifndef USE_MMAP
+#ifdef darwin_HOST_OS
+                       , int misalignment
+#endif
+#endif
+                       );
 
 #if defined(OBJFORMAT_ELF)
 static int ocVerifyImage_ELF    ( ObjectCode* oc );
@@ -197,7 +220,7 @@ static void machoInitSymbolsWithoutUnderscore( void );
  * We pick a default address based on the OS, but also make this
  * configurable via an RTS flag (+RTS -xm)
  */
-#if defined(x86_64_HOST_ARCH)
+#if !defined(ALWAYS_PIC) && defined(x86_64_HOST_ARCH)
 
 #if defined(MAP_32BIT)
 // Try to use MAP_32BIT
@@ -332,15 +355,6 @@ typedef struct _RtsSymbolVal {
 #define RTS_POSIX_ONLY_SYMBOLS  /**/
 #define RTS_CYGWIN_ONLY_SYMBOLS /**/
 
-/* Extra syms gen'ed by mingw-2's gcc-3.2: */
-#if __GNUC__>=3
-#define RTS_MINGW_EXTRA_SYMS                    \
-      SymI_NeedsProto(_imp____mb_cur_max)       \
-      SymI_NeedsProto(_imp___pctype)
-#else
-#define RTS_MINGW_EXTRA_SYMS
-#endif
-
 #if HAVE_GETTIMEOFDAY
 #define RTS_MINGW_GETTIMEOFDAY_SYM SymI_NeedsProto(gettimeofday)
 #else
@@ -381,17 +395,17 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(strncpy)                             \
       SymI_HasProto(abort)                               \
       SymI_NeedsProto(_alloca)                           \
-      SymI_NeedsProto(isxdigit)                          \
-      SymI_NeedsProto(isupper)                           \
-      SymI_NeedsProto(ispunct)                           \
-      SymI_NeedsProto(islower)                           \
-      SymI_NeedsProto(isspace)                           \
-      SymI_NeedsProto(isprint)                           \
-      SymI_NeedsProto(isdigit)                           \
-      SymI_NeedsProto(iscntrl)                           \
-      SymI_NeedsProto(isalpha)                           \
-      SymI_NeedsProto(isalnum)                           \
-      SymI_NeedsProto(isascii)                           \
+      SymI_HasProto(isxdigit)                          \
+      SymI_HasProto(isupper)                           \
+      SymI_HasProto(ispunct)                           \
+      SymI_HasProto(islower)                           \
+      SymI_HasProto(isspace)                           \
+      SymI_HasProto(isprint)                           \
+      SymI_HasProto(isdigit)                           \
+      SymI_HasProto(iscntrl)                           \
+      SymI_HasProto(isalpha)                           \
+      SymI_HasProto(isalnum)                           \
+      SymI_HasProto(isascii)                           \
       RTS___MINGW_VFPRINTF_SYM                           \
       SymI_HasProto(strcmp)                              \
       SymI_HasProto(memmove)                             \
@@ -441,12 +455,15 @@ typedef struct _RtsSymbolVal {
       SymI_NeedsProto(opendir)                           \
       SymI_NeedsProto(readdir)                           \
       SymI_NeedsProto(rewinddir)                         \
-      RTS_MINGW_EXTRA_SYMS                               \
+      SymI_NeedsProto(_imp____mb_cur_max)	         \
+      SymI_NeedsProto(_imp___pctype)	         	 \
+      SymI_NeedsProto(__chkstk)				 \
       RTS_MINGW_GETTIMEOFDAY_SYM		         \
       SymI_NeedsProto(closedir)
 #endif
 
-#if defined(darwin_TARGET_OS) && HAVE_PRINTF_LDBLSTUB
+
+#if defined(darwin_HOST_OS) && HAVE_PRINTF_LDBLSTUB
 #define RTS_DARWIN_ONLY_SYMBOLS			            \
      SymI_NeedsProto(asprintf$LDBLStub)                     \
      SymI_NeedsProto(err$LDBLStub)                          \
@@ -504,9 +521,9 @@ typedef struct _RtsSymbolVal {
 
 #if !defined(mingw32_HOST_OS)
 #define RTS_USER_SIGNALS_SYMBOLS \
-   SymI_HasProto(setIOManagerPipe) \
+   SymI_HasProto(setIOManagerControlFd) \
+   SymI_HasProto(setIOManagerWakeupFd) \
    SymI_HasProto(ioManagerWakeup) \
-   SymI_HasProto(ioManagerSync) \
    SymI_HasProto(blockUserSignals) \
    SymI_HasProto(unblockUserSignals)
 #else
@@ -669,6 +686,21 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(RET_SEMI_loads_avoided)
 
 
+// On most platforms, the garbage collector rewrites references
+//	to small integer and char objects to a set of common, shared ones.
+//
+// We don't do this when compiling to Windows DLLs at the moment because
+//	it doesn't support cross package data references well.
+//
+#if defined(__PIC__) && defined(mingw32_HOST_OS)
+#define RTS_INTCHAR_SYMBOLS
+#else
+#define RTS_INTCHAR_SYMBOLS				\
+      SymI_HasProto(stg_CHARLIKE_closure)		\
+      SymI_HasProto(stg_INTLIKE_closure)		
+#endif
+
+
 #define RTS_SYMBOLS				        \
       Maybe_Stable_Names			        \
       RTS_TICKY_SYMBOLS                                 \
@@ -717,8 +749,9 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(debugBelch)				\
       SymI_HasProto(errorBelch)				\
       SymI_HasProto(sysErrorBelch)                      \
-      SymI_HasProto(stg_asyncExceptionsBlockedzh)	\
-      SymI_HasProto(stg_blockAsyncExceptionszh)	        \
+      SymI_HasProto(stg_getMaskingStatezh)		\
+      SymI_HasProto(stg_maskAsyncExceptionszh)	        \
+      SymI_HasProto(stg_maskUninterruptiblezh)	        \
       SymI_HasProto(stg_catchzh)			\
       SymI_HasProto(stg_catchRetryzh)			\
       SymI_HasProto(stg_catchSTMzh)			\
@@ -739,11 +772,12 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(forkOS_createThread)		\
       SymI_HasProto(freeHaskellFunctionPtr)		\
       SymI_HasProto(getOrSetTypeableStore)		\
-      SymI_HasProto(getOrSetGHCConcSignalHandlerStore)		\
-      SymI_HasProto(getOrSetGHCConcPendingEventsStore)		\
-      SymI_HasProto(getOrSetGHCConcPendingDelaysStore)		\
-      SymI_HasProto(getOrSetGHCConcIOManagerThreadStore)	\
-      SymI_HasProto(getOrSetGHCConcProddingStore)		\
+      SymI_HasProto(getOrSetGHCConcSignalSignalHandlerStore)		\
+      SymI_HasProto(getOrSetGHCConcWindowsPendingDelaysStore)		\
+      SymI_HasProto(getOrSetGHCConcWindowsIOManagerThreadStore)	\
+      SymI_HasProto(getOrSetGHCConcWindowsProddingStore)		\
+      SymI_HasProto(getOrSetSystemEventThreadEventManagerStore)		\
+      SymI_HasProto(getOrSetSystemEventThreadIOManagerThreadStore)		\
       SymI_HasProto(genSymZh)				\
       SymI_HasProto(genericRaise)			\
       SymI_HasProto(getProgArgv)			\
@@ -762,9 +796,11 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(stg_unpackClosurezh)                \
       SymI_HasProto(stg_getApStackValzh)                \
       SymI_HasProto(stg_getSparkzh)                     \
+      SymI_HasProto(stg_numSparkszh)                    \
       SymI_HasProto(stg_isCurrentThreadBoundzh)	        \
       SymI_HasProto(stg_isEmptyMVarzh)			\
       SymI_HasProto(stg_killThreadzh)			\
+      SymI_HasProto(loadArchive)          			\
       SymI_HasProto(loadObj)          			\
       SymI_HasProto(insertStableSymbol) 		\
       SymI_HasProto(insertSymbol)     			\
@@ -844,6 +880,7 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(rts_unlock)				\
       SymI_HasProto(rts_unsafeGetMyCapability)          \
       SymI_HasProto(rtsSupportsBoundThreads)		\
+      SymI_HasProto(rts_isProfiled)			\
       SymI_HasProto(setProgArgv)			\
       SymI_HasProto(startupHaskell)			\
       SymI_HasProto(shutdownHaskell)			\
@@ -851,13 +888,14 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(stable_ptr_table)			\
       SymI_HasProto(stackOverflow)			\
       SymI_HasProto(stg_CAF_BLACKHOLE_info)		\
+      SymI_HasProto(stg_BLACKHOLE_info)			\
       SymI_HasProto(__stg_EAGER_BLACKHOLE_info)		\
+      SymI_HasProto(stg_BLOCKING_QUEUE_CLEAN_info)      \
+      SymI_HasProto(stg_BLOCKING_QUEUE_DIRTY_info)	\
       SymI_HasProto(startTimer)                         \
-      SymI_HasProto(stg_CHARLIKE_closure)		\
       SymI_HasProto(stg_MVAR_CLEAN_info)		\
       SymI_HasProto(stg_MVAR_DIRTY_info)		\
       SymI_HasProto(stg_IND_STATIC_info)		\
-      SymI_HasProto(stg_INTLIKE_closure)		\
       SymI_HasProto(stg_ARR_WORDS_info)                 \
       SymI_HasProto(stg_MUT_ARR_PTRS_DIRTY_info)	\
       SymI_HasProto(stg_MUT_ARR_PTRS_FROZEN_info)	\
@@ -917,12 +955,13 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(stg_sel_8_upd_info)			\
       SymI_HasProto(stg_sel_9_upd_info)			\
       SymI_HasProto(stg_upd_frame_info)			\
+      SymI_HasProto(stg_bh_upd_frame_info)		\
       SymI_HasProto(suspendThread)			\
       SymI_HasProto(stg_takeMVarzh)			\
       SymI_HasProto(stg_threadStatuszh)		        \
       SymI_HasProto(stg_tryPutMVarzh)			\
       SymI_HasProto(stg_tryTakeMVarzh)			\
-      SymI_HasProto(stg_unblockAsyncExceptionszh)	\
+      SymI_HasProto(stg_unmaskAsyncExceptionszh)	\
       SymI_HasProto(unloadObj)                          \
       SymI_HasProto(stg_unsafeThawArrayzh)		\
       SymI_HasProto(stg_waitReadzh)			\
@@ -930,9 +969,10 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(stg_writeTVarzh)			\
       SymI_HasProto(stg_yieldzh)                        \
       SymI_NeedsProto(stg_interp_constr_entry)          \
-      SymI_HasProto(alloc_blocks)                       \
+      SymI_HasProto(stg_arg_bitmaps)                    \
       SymI_HasProto(alloc_blocks_lim)                   \
-      SymI_HasProto(allocateLocal)                      \
+      SymI_HasProto(g0)                                 \
+      SymI_HasProto(allocate)                           \
       SymI_HasProto(allocateExec)	                \
       SymI_HasProto(freeExec)		                \
       SymI_HasProto(getAllocations)                     \
@@ -945,7 +985,8 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(n_capabilities)			\
       SymI_HasProto(stg_traceCcszh)                     \
       SymI_HasProto(stg_traceEventzh)                   \
-      RTS_USER_SIGNALS_SYMBOLS
+      RTS_USER_SIGNALS_SYMBOLS				\
+      RTS_INTCHAR_SYMBOLS
 
 
 // 64-bit support functions in libgcc.a
@@ -958,8 +999,7 @@ typedef struct _RtsSymbolVal {
       SymI_NeedsProto(__muldi3)			       \
       SymI_NeedsProto(__ashldi3)		       \
       SymI_NeedsProto(__ashrdi3)		       \
-      SymI_NeedsProto(__lshrdi3)		       \
-      SymI_NeedsProto(__eprintf)
+      SymI_NeedsProto(__lshrdi3)
 #else
 #define RTS_LIBGCC_SYMBOLS
 #endif
@@ -975,7 +1015,7 @@ typedef struct _RtsSymbolVal {
 
 /* entirely bogus claims about types of these symbols */
 #define SymI_NeedsProto(vvv)  extern void vvv(void);
-#if defined(__PIC__) && defined(mingw32_TARGET_OS)
+#if defined(__PIC__) && defined(mingw32_HOST_OS)
 #define SymE_HasProto(vvv)    SymE_HasProto(vvv);
 #define SymE_NeedsProto(vvv)    extern void _imp__ ## vvv (void);
 #else
@@ -1069,7 +1109,7 @@ static void ghciInsertStrHashTable ( char* obj_name,
       (char*)key,
       obj_name
    );
-   exit(1);
+   stg_exit(1);
 }
 /* -----------------------------------------------------------------------------
  * initialize the object linker
@@ -1080,20 +1120,36 @@ static int linker_init_done = 0 ;
 
 #if defined(OBJFORMAT_ELF) || defined(OBJFORMAT_MACHO)
 static void *dl_prog_handle;
+static regex_t re_invalid;
+static regex_t re_realso;
+#ifdef THREADED_RTS
+static Mutex dl_mutex; // mutex to protect dlopen/dlerror critical section
+#endif
 #endif
 
 void
 initLinker( void )
 {
     RtsSymbolVal *sym;
+#if defined(OBJFORMAT_ELF) || defined(OBJFORMAT_MACHO)
+    int compileResult;
+#endif
+
+    IF_DEBUG(linker, debugBelch("initLinker: start\n"));
 
     /* Make initLinker idempotent, so we can call it
        before evey relevant operation; that means we
        don't need to initialise the linker separately */
-    if (linker_init_done == 1) { return; } else {
-      linker_init_done = 1;
+    if (linker_init_done == 1) { 
+	IF_DEBUG(linker, debugBelch("initLinker: idempotent return\n"));
+	return;
+    } else {
+        linker_init_done = 1;
     }
 
+#if defined(THREADED_RTS) && (defined(OBJFORMAT_ELF) || defined(OBJFORMAT_MACHO))
+    initMutex(&dl_mutex);
+#endif
     stablehash = allocStrHashTable();
     symhash = allocStrHashTable();
 
@@ -1101,6 +1157,7 @@ initLinker( void )
     for (sym = rtsSyms; sym->lbl != NULL; sym++) {
 	ghciInsertStrHashTable("(GHCi built-in symbols)",
                                symhash, sym->lbl, sym->addr);
+	IF_DEBUG(linker, debugBelch("initLinker: inserting rts symbol %s, %p\n", sym->lbl, sym->addr));
     }
 #   if defined(OBJFORMAT_MACHO) && defined(powerpc_HOST_ARCH)
     machoInitSymbolsWithoutUnderscore();
@@ -1112,9 +1169,18 @@ initLinker( void )
 #   else
     dl_prog_handle = dlopen(NULL, RTLD_LAZY);
 #   endif /* RTLD_DEFAULT */
+
+    compileResult = regcomp(&re_invalid,
+           "(([^ \t()])+\\.so([^ \t:()])*):([ \t])*invalid ELF header",
+           REG_EXTENDED);
+    ASSERT( compileResult == 0 );
+    compileResult = regcomp(&re_realso,
+           "GROUP *\\( *(([^ )])+)",
+           REG_EXTENDED);
+    ASSERT( compileResult == 0 );
 #   endif
 
-#if defined(x86_64_HOST_ARCH)
+#if !defined(ALWAYS_PIC) && defined(x86_64_HOST_ARCH)
     if (RtsFlags.MiscFlags.linkerMemBase != 0) {
         // User-override for mmap_32bit_base
         mmap_32bit_base = (void*)RtsFlags.MiscFlags.linkerMemBase;
@@ -1129,6 +1195,22 @@ initLinker( void )
      */
     addDLL("msvcrt");
     addDLL("kernel32");
+#endif
+
+    IF_DEBUG(linker, debugBelch("initLinker: done\n"));
+    return;
+}
+
+void
+exitLinker( void ) {
+#if defined(OBJFORMAT_ELF) || defined(OBJFORMAT_MACHO)
+   if (linker_init_done == 1) {
+      regfree(&re_invalid);
+      regfree(&re_realso);
+#ifdef THREADED_RTS
+      closeMutex(&dl_mutex);
+#endif
+   }
 #endif
 }
 
@@ -1167,29 +1249,113 @@ typedef
 static OpenedDLL* opened_dlls = NULL;
 #endif
 
+#  if defined(OBJFORMAT_ELF) || defined(OBJFORMAT_MACHO)
+
+static const char *
+internal_dlopen(const char *dll_name)
+{
+   void *hdl;
+   const char *errmsg;
+   char *errmsg_copy;
+
+   // omitted: RTLD_NOW
+   // see http://www.haskell.org/pipermail/cvs-ghc/2007-September/038570.html
+   IF_DEBUG(linker,
+      debugBelch("internal_dlopen: dll_name = '%s'\n", dll_name));
+
+   //-------------- Begin critical section ------------------
+   // This critical section is necessary because dlerror() is not
+   // required to be reentrant (see POSIX -- IEEE Std 1003.1-2008)
+   // Also, the error message returned must be copied to preserve it
+   // (see POSIX also)
+
+   ACQUIRE_LOCK(&dl_mutex);
+   hdl = dlopen(dll_name, RTLD_LAZY | RTLD_GLOBAL);
+
+   errmsg = NULL;
+   if (hdl == NULL) {
+      /* dlopen failed; return a ptr to the error msg. */
+      errmsg = dlerror();
+      if (errmsg == NULL) errmsg = "addDLL: unknown error";
+      errmsg_copy = stgMallocBytes(strlen(errmsg)+1, "addDLL");
+      strcpy(errmsg_copy, errmsg);
+      errmsg = errmsg_copy;
+   }
+   RELEASE_LOCK(&dl_mutex);
+   //--------------- End critical section -------------------
+
+   return errmsg;
+}
+#  endif
+
 const char *
 addDLL( char *dll_name )
 {
 #  if defined(OBJFORMAT_ELF) || defined(OBJFORMAT_MACHO)
    /* ------------------- ELF DLL loader ------------------- */
-   void *hdl;
+
+#define NMATCH 5
+   regmatch_t match[NMATCH];
    const char *errmsg;
+   FILE* fp;
+   size_t match_length;
+#define MAXLINE 1000
+   char line[MAXLINE];
+   int result;
 
    initLinker();
 
-   // omitted: RTLD_NOW
-   // see http://www.haskell.org/pipermail/cvs-ghc/2007-September/038570.html
-   hdl= dlopen(dll_name, RTLD_LAZY | RTLD_GLOBAL);
+   IF_DEBUG(linker, debugBelch("addDLL: dll_name = '%s'\n", dll_name));
+   errmsg = internal_dlopen(dll_name);
 
-   if (hdl == NULL) {
-      /* dlopen failed; return a ptr to the error msg. */
-      errmsg = dlerror();
-      if (errmsg == NULL) errmsg = "addDLL: unknown error";
-      return errmsg;
-   } else {
+   if (errmsg == NULL) {
       return NULL;
    }
-   /*NOTREACHED*/
+
+   // GHC Trac ticket #2615
+   // On some systems (e.g., Gentoo Linux) dynamic files (e.g. libc.so)
+   // contain linker scripts rather than ELF-format object code. This
+   // code handles the situation by recognizing the real object code
+   // file name given in the linker script.
+   //
+   // If an "invalid ELF header" error occurs, it is assumed that the
+   // .so file contains a linker script instead of ELF object code.
+   // In this case, the code looks for the GROUP ( ... ) linker
+   // directive. If one is found, the first file name inside the
+   // parentheses is treated as the name of a dynamic library and the
+   // code attempts to dlopen that file. If this is also unsuccessful,
+   // an error message is returned.
+
+   // see if the error message is due to an invalid ELF header
+   IF_DEBUG(linker, debugBelch("errmsg = '%s'\n", errmsg));
+   result = regexec(&re_invalid, errmsg, (size_t) NMATCH, match, 0);
+   IF_DEBUG(linker, debugBelch("result = %i\n", result));
+   if (result == 0) {
+      // success -- try to read the named file as a linker script
+      match_length = (size_t) stg_min((match[1].rm_eo - match[1].rm_so),
+		                 MAXLINE-1);
+      strncpy(line, (errmsg+(match[1].rm_so)),match_length);
+      line[match_length] = '\0'; // make sure string is null-terminated
+      IF_DEBUG(linker, debugBelch ("file name = '%s'\n", line));
+      if ((fp = fopen(line, "r")) == NULL) {
+	 return errmsg;	// return original error if open fails
+      }
+      // try to find a GROUP ( ... ) command
+      while (fgets(line, MAXLINE, fp) != NULL) {
+	 IF_DEBUG(linker, debugBelch("input line = %s", line));
+	 if (regexec(&re_realso, line, (size_t) NMATCH, match, 0) == 0) {
+            // success -- try to dlopen the first named file
+            IF_DEBUG(linker, debugBelch("match%s\n",""));
+	    line[match[1].rm_eo] = '\0';
+	    errmsg = internal_dlopen(line+match[1].rm_so);
+	    break;
+	 }
+	 // if control reaches here, no GROUP ( ... ) directive was found
+	 // and the original error message is returned to the caller
+      }
+      fclose(fp);
+   }
+   return errmsg;
 
 #  elif defined(OBJFORMAT_PEi386)
    /* ------------------- Win32 DLL loader ------------------- */
@@ -1287,11 +1453,13 @@ void *
 lookupSymbol( char *lbl )
 {
     void *val;
+    IF_DEBUG(linker, debugBelch("lookupSymbol: looking up %s\n", lbl));
     initLinker() ;
     ASSERT(symhash != NULL);
     val = lookupStrHashTable(symhash, lbl);
 
     if (val == NULL) {
+	IF_DEBUG(linker, debugBelch("lookupSymbol: symbol not found\n"));
 #       if defined(OBJFORMAT_ELF)
 	return dlsym(dl_prog_handle, lbl);
 #       elif defined(OBJFORMAT_MACHO)
@@ -1304,6 +1472,7 @@ lookupSymbol( char *lbl )
                  symbol name. For now, we simply strip it off here (and ONLY
                  here).
         */
+        IF_DEBUG(linker, debugBelch("lookupSymbol: looking up %s with dlsym\n", lbl));
         ASSERT(lbl[0] == '_');
         return dlsym(dl_prog_handle, lbl+1);
 #       else
@@ -1317,13 +1486,13 @@ lookupSymbol( char *lbl )
 #       elif defined(OBJFORMAT_PEi386)
         void* sym;
 
-        sym = lookupSymbolInDLLs(lbl);
+        sym = lookupSymbolInDLLs((unsigned char*)lbl);
         if (sym != NULL) { return sym; };
 
         // Also try looking up the symbol without the @N suffix.  Some
         // DLLs have the suffixes on their symbols, some don't.
-        zapTrailingAtSign ( lbl );
-        sym = lookupSymbolInDLLs(lbl);
+        zapTrailingAtSign ( (unsigned char*)lbl );
+        sym = lookupSymbolInDLLs((unsigned char*)lbl);
         if (sym != NULL) { return sym; };
         return NULL;
 
@@ -1332,6 +1501,7 @@ lookupSymbol( char *lbl )
         return NULL;
 #       endif
     } else {
+	IF_DEBUG(linker, debugBelch("lookupSymbol: value of %s is %p\n", lbl, val));
 	return val;
     }
 }
@@ -1386,7 +1556,7 @@ mmapForLinker (size_t bytes, nat flags, int fd)
    pagesize = getpagesize();
    size = ROUND_UP(bytes, pagesize);
 
-#if defined(x86_64_HOST_ARCH)
+#if !defined(ALWAYS_PIC) && defined(x86_64_HOST_ARCH)
 mmap_again:
 
    if (mmap_32bit_base != 0) {
@@ -1403,7 +1573,7 @@ mmap_again:
        stg_exit(EXIT_FAILURE);
    }
    
-#if defined(x86_64_HOST_ARCH)
+#if !defined(ALWAYS_PIC) && defined(x86_64_HOST_ARCH)
    if (mmap_32bit_base != 0) {
        if (result == map_addr) {
            mmap_32bit_base = (StgWord8*)map_addr + size;
@@ -1445,6 +1615,215 @@ mmap_again:
 }
 #endif // USE_MMAP
 
+static ObjectCode*
+mkOc( char *path, char *image, int imageSize,
+      char *archiveMemberName
+#ifndef USE_MMAP
+#ifdef darwin_HOST_OS
+    , int misalignment
+#endif
+#endif
+    ) {
+   ObjectCode* oc;
+
+   oc = stgMallocBytes(sizeof(ObjectCode), "loadArchive(oc)");
+
+#  if defined(OBJFORMAT_ELF)
+   oc->formatName = "ELF";
+#  elif defined(OBJFORMAT_PEi386)
+   oc->formatName = "PEi386";
+#  elif defined(OBJFORMAT_MACHO)
+   oc->formatName = "Mach-O";
+#  else
+   stgFree(oc);
+   barf("loadObj: not implemented on this platform");
+#  endif
+
+   oc->image = image;
+   /* sigh, strdup() isn't a POSIX function, so do it the long way */
+   oc->fileName = stgMallocBytes( strlen(path)+1, "loadObj" );
+   strcpy(oc->fileName, path);
+
+   if (archiveMemberName) {
+       oc->archiveMemberName = stgMallocBytes( strlen(archiveMemberName)+1, "loadObj" );
+       strcpy(oc->archiveMemberName, archiveMemberName);
+   }
+   else {
+       oc->archiveMemberName = NULL;
+   }
+
+   oc->fileSize          = imageSize;
+   oc->symbols           = NULL;
+   oc->sections          = NULL;
+   oc->proddables        = NULL;
+
+#ifndef USE_MMAP
+#ifdef darwin_HOST_OS
+   oc->misalignment = misalignment;
+#endif
+#endif
+
+   /* chain it onto the list of objects */
+   oc->next              = objects;
+   objects               = oc;
+
+   return oc;
+}
+
+#if defined(USE_ARCHIVES_FOR_GHCI)
+HsInt
+loadArchive( char *path )
+{
+   ObjectCode* oc;
+   char *image;
+   int imageSize;
+   FILE *f;
+   int n;
+   size_t fileNameSize;
+   char *file;
+   size_t fileSize;
+   int isObject;
+   char tmp[12];
+
+   IF_DEBUG(linker, debugBelch("loadArchive `%s'\n", path));
+
+   fileSize = 32;
+   file = stgMallocBytes(fileSize, "loadArchive(file)");
+
+   f = fopen(path, "rb");
+   if (!f)
+       barf("loadObj: can't read `%s'", path);
+
+   n = fread ( tmp, 1, 8, f );
+   if (strncmp(tmp, "!<arch>\n", 8) != 0)
+       barf("loadArchive: Not an archive: `%s'", path);
+
+   while(1) {
+       n = fread ( file, 1, 16, f );
+       if (n != 16) {
+           if (feof(f)) {
+               break;
+           }
+           else {
+               barf("loadArchive: Failed reading file name from `%s'", path);
+           }
+       }
+       n = fread ( tmp, 1, 12, f );
+       if (n != 12)
+           barf("loadArchive: Failed reading mod time from `%s'", path);
+       n = fread ( tmp, 1, 6, f );
+       if (n != 6)
+           barf("loadArchive: Failed reading owner from `%s'", path);
+       n = fread ( tmp, 1, 6, f );
+       if (n != 6)
+           barf("loadArchive: Failed reading group from `%s'", path);
+       n = fread ( tmp, 1, 8, f );
+       if (n != 8)
+           barf("loadArchive: Failed reading mode from `%s'", path);
+       n = fread ( tmp, 1, 10, f );
+       if (n != 10)
+           barf("loadArchive: Failed reading size from `%s'", path);
+       tmp[10] = '\0';
+       for (n = 0; isdigit(tmp[n]); n++);
+       tmp[n] = '\0';
+       imageSize = atoi(tmp);
+       n = fread ( tmp, 1, 2, f );
+       if (strncmp(tmp, "\x60\x0A", 2) != 0)
+           barf("loadArchive: Failed reading magic from `%s' at %ld. Got %c%c", path, ftell(f), tmp[0], tmp[1]);
+
+       /* Check for BSD-variant large filenames */
+       if (0 == strncmp(file, "#1/", 3)) {
+           file[16] = '\0';
+           for (n = 3; isdigit(file[n]); n++);
+           file[n] = '\0';
+           fileNameSize = atoi(file + 3);
+           imageSize -= fileNameSize;
+           if (fileNameSize > fileSize) {
+               /* Double it to avoid potentially continually
+                  increasing it by 1 */
+               fileSize = fileNameSize * 2;
+               file = stgReallocBytes(file, fileSize, "loadArchive(file)");
+           }
+           n = fread ( file, 1, fileNameSize, f );
+           if (n != (int)fileNameSize)
+               barf("loadArchive: Failed reading filename from `%s'", path);
+       }
+       else {
+           fileNameSize = 16;
+       }
+
+       isObject = 0;
+       for (n = 0; n < (int)fileNameSize - 1; n++) {
+           if ((file[n] == '.') && (file[n + 1] == 'o')) {
+               isObject = 1;
+               break;
+           }
+       }
+
+       if (isObject) {
+           char *archiveMemberName;
+
+           /* We can't mmap from the archive directly, as object
+              files need to be 8-byte aligned but files in .ar
+              archives are 2-byte aligned, and if we malloc the
+              memory then we can be given memory above 2^32, so we
+              mmap some anonymous memory and use that. We could
+              do better here. */
+           image = mmapForLinker(imageSize, MAP_ANONYMOUS, -1);
+           n = fread ( image, 1, imageSize, f );
+           if (n != imageSize)
+               barf("loadObj: error whilst reading `%s'", path);
+
+           archiveMemberName = stgMallocBytes(strlen(path) + fileNameSize + 3, "loadArchive(file)");
+           sprintf(archiveMemberName, "%s(%.*s)", path, (int)fileNameSize, file);
+
+           oc = mkOc(path, image, imageSize, archiveMemberName
+#ifndef USE_MMAP
+#ifdef darwin_HOST_OS
+                    , 0
+#endif
+#endif
+                    );
+
+           stgFree(archiveMemberName);
+
+           if (0 == loadOc(oc)) {
+               stgFree(file);
+               return 0;
+           }
+       }
+       else {
+           n = fseek(f, imageSize, SEEK_CUR);
+           if (n != 0)
+               barf("loadArchive: error whilst seeking by %d in `%s'",
+                    imageSize, path);
+       }
+       /* .ar files are 2-byte aligned */
+       if (imageSize % 2) {
+           n = fread ( tmp, 1, 1, f );
+           if (n != 1) {
+               if (feof(f)) {
+                   break;
+               }
+               else {
+                   barf("loadArchive: Failed reading padding from `%s'", path);
+               }
+           }
+       }
+   }
+
+   fclose(f);
+
+   stgFree(file);
+   return 1;
+}
+#else
+HsInt GNU_ATTRIBUTE(__noreturn__)
+loadArchive( char *path STG_UNUSED ) {
+    barf("loadArchive: not enabled");
+}
+#endif
+
 /* -----------------------------------------------------------------------------
  * Load an obj (populate the global symbol table, but don't resolve yet)
  *
@@ -1454,6 +1833,8 @@ HsInt
 loadObj( char *path )
 {
    ObjectCode* oc;
+   char *image;
+   int fileSize;
    struct stat st;
    int r;
 #ifdef USE_MMAP
@@ -1461,6 +1842,8 @@ loadObj( char *path )
 #else
    FILE *f;
 #endif
+   IF_DEBUG(linker, debugBelch("loadObj %s\n", path));
+
    initLinker();
 
    /* debugBelch("loadObj %s\n", path ); */
@@ -1487,34 +1870,13 @@ loadObj( char *path )
        }
    }
 
-   oc = stgMallocBytes(sizeof(ObjectCode), "loadObj(oc)");
-
-#  if defined(OBJFORMAT_ELF)
-   oc->formatName = "ELF";
-#  elif defined(OBJFORMAT_PEi386)
-   oc->formatName = "PEi386";
-#  elif defined(OBJFORMAT_MACHO)
-   oc->formatName = "Mach-O";
-#  else
-   stgFree(oc);
-   barf("loadObj: not implemented on this platform");
-#  endif
-
    r = stat(path, &st);
-   if (r == -1) { return 0; }
+   if (r == -1) {
+       IF_DEBUG(linker, debugBelch("File doesn't exist\n"));
+       return 0;
+   }
 
-   /* sigh, strdup() isn't a POSIX function, so do it the long way */
-   oc->fileName = stgMallocBytes( strlen(path)+1, "loadObj" );
-   strcpy(oc->fileName, path);
-
-   oc->fileSize          = st.st_size;
-   oc->symbols           = NULL;
-   oc->sections          = NULL;
-   oc->proddables        = NULL;
-
-   /* chain it onto the list of objects */
-   oc->next              = objects;
-   objects               = oc;
+   fileSize = st.st_size;
 
 #ifdef USE_MMAP
    /* On many architectures malloc'd memory isn't executable, so we need to use mmap. */
@@ -1527,7 +1889,7 @@ loadObj( char *path )
    if (fd == -1)
       barf("loadObj: can't open `%s'", path);
 
-   oc->image = mmapForLinker(oc->fileSize, 0, fd);
+   image = mmapForLinker(fileSize, 0, fd);
 
    close(fd);
 
@@ -1540,7 +1902,7 @@ loadObj( char *path )
 #   if defined(mingw32_HOST_OS)
 	// TODO: We would like to use allocateExec here, but allocateExec
 	//       cannot currently allocate blocks large enough.
-    oc->image = VirtualAlloc(NULL, oc->fileSize, MEM_RESERVE | MEM_COMMIT,
+    image = VirtualAlloc(NULL, fileSize, MEM_RESERVE | MEM_COMMIT,
                              PAGE_EXECUTE_READWRITE);
 #   elif defined(darwin_HOST_OS)
     // In a Mach-O .o file, all sections can and will be misaligned
@@ -1550,30 +1912,53 @@ loadObj( char *path )
     // as SSE (used by gcc for floating point) and Altivec require
     // 16-byte alignment.
     // We calculate the correct alignment from the header before
-    // reading the file, and then we misalign oc->image on purpose so
+    // reading the file, and then we misalign image on purpose so
     // that the actual sections end up aligned again.
-   oc->misalignment = machoGetMisalignment(f);
-   oc->image = stgMallocBytes(oc->fileSize + oc->misalignment, "loadObj(image)");
-   oc->image += oc->misalignment;
+   misalignment = machoGetMisalignment(f);
+   image = stgMallocBytes(fileSize + misalignment, "loadObj(image)");
+   image += misalignment;
 #  else
-   oc->image = stgMallocBytes(oc->fileSize, "loadObj(image)");
+   image = stgMallocBytes(fileSize, "loadObj(image)");
 #  endif
 
    {
        int n;
-       n = fread ( oc->image, 1, oc->fileSize, f );
-       if (n != oc->fileSize)
+       n = fread ( image, 1, fileSize, f );
+       if (n != fileSize)
            barf("loadObj: error whilst reading `%s'", path);
    }
    fclose(f);
 #endif /* USE_MMAP */
 
+   oc = mkOc(path, image, fileSize, NULL
+#ifndef USE_MMAP
+#ifdef darwin_HOST_OS
+            , misalignment
+#endif
+#endif
+            );
+
+   return loadOc(oc);
+}
+
+static HsInt
+loadOc( ObjectCode* oc ) {
+   int r;
+
+   IF_DEBUG(linker, debugBelch("loadOc\n"));
+
 #  if defined(OBJFORMAT_MACHO) && (defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH))
    r = ocAllocateSymbolExtras_MachO ( oc );
-   if (!r) { return r; }
+   if (!r) {
+       IF_DEBUG(linker, debugBelch("ocAllocateSymbolExtras_MachO failed\n"));
+       return r;
+   }
 #  elif defined(OBJFORMAT_ELF) && (defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH))
    r = ocAllocateSymbolExtras_ELF ( oc );
-   if (!r) { return r; }
+   if (!r) {
+       IF_DEBUG(linker, debugBelch("ocAllocateSymbolExtras_ELF failed\n"));
+       return r;
+   }
 #endif
 
    /* verify the in-memory image */
@@ -1586,7 +1971,10 @@ loadObj( char *path )
 #  else
    barf("loadObj: no verify method");
 #  endif
-   if (!r) { return r; }
+   if (!r) {
+       IF_DEBUG(linker, debugBelch("ocVerifyImage_* failed\n"));
+       return r;
+   }
 
    /* build the symbol list for this image */
 #  if defined(OBJFORMAT_ELF)
@@ -1598,10 +1986,14 @@ loadObj( char *path )
 #  else
    barf("loadObj: no getNames method");
 #  endif
-   if (!r) { return r; }
+   if (!r) {
+       IF_DEBUG(linker, debugBelch("ocGetNames_* failed\n"));
+       return r;
+   }
 
    /* loaded, but not resolved yet */
    oc->status = OBJECT_LOADED;
+   IF_DEBUG(linker, debugBelch("loadObj done.\n"));
 
    return 1;
 }
@@ -1617,6 +2009,7 @@ resolveObjs( void )
     ObjectCode *oc;
     int r;
 
+    IF_DEBUG(linker, debugBelch("resolveObjs: start\n"));
     initLinker();
 
     for (oc = objects; oc; oc = oc->next) {
@@ -1634,6 +2027,7 @@ resolveObjs( void )
 	    oc->status = OBJECT_RESOLVED;
 	}
     }
+    IF_DEBUG(linker, debugBelch("resolveObjs: done\n"));
     return 1;
 }
 
@@ -1644,6 +2038,7 @@ HsInt
 unloadObj( char *path )
 {
     ObjectCode *oc, *prev;
+    HsBool unloadedAnyObj = HS_BOOL_FALSE;
 
     ASSERT(symhash != NULL);
     ASSERT(objects != NULL);
@@ -1683,12 +2078,20 @@ unloadObj( char *path )
 	    stgFree(oc->symbols);
 	    stgFree(oc->sections);
 	    stgFree(oc);
-	    return 1;
+
+            /* This could be a member of an archive so continue
+             * unloading other members. */
+            unloadedAnyObj = HS_BOOL_TRUE;
 	}
     }
 
-    errorBelch("unloadObj: can't find `%s' to unload", path);
-    return 0;
+    if (unloadedAnyObj) {
+        return 1;
+    }
+    else {
+        errorBelch("unloadObj: can't find `%s' to unload", path);
+        return 0;
+    }
 }
 
 /* -----------------------------------------------------------------------------
@@ -1700,7 +2103,7 @@ static void addProddableBlock ( ObjectCode* oc, void* start, int size )
 {
    ProddableBlock* pb
       = stgMallocBytes(sizeof(ProddableBlock), "addProddableBlock");
-   /* debugBelch("aPB %p %p %d\n", oc, start, size); */
+   IF_DEBUG(linker, debugBelch("addProddableBlock %p %p %d\n", oc, start, size));
    ASSERT(size > 0);
    pb->start      = start;
    pb->size       = size;
@@ -1871,7 +2274,7 @@ static SymbolExtra* makeSymbolExtra( ObjectCode* oc,
  * PowerPC specifics (instruction cache flushing)
  * ------------------------------------------------------------------------*/
 
-#ifdef powerpc_TARGET_ARCH
+#ifdef powerpc_HOST_ARCH
 /*
    ocFlushInstructionCache
 
@@ -2072,7 +2475,7 @@ copyName ( UChar* name, UChar* strtab, UChar* dst, int dstSize )
 {
    if (name[0]==0 && name[1]==0 && name[2]==0 && name[3]==0) {
       UInt32 strtab_offset = * (UInt32*)(name+4);
-      strncpy ( dst, strtab+strtab_offset, dstSize );
+      strncpy ( (char*)dst, (char*)strtab+strtab_offset, dstSize );
       dst[dstSize-1] = 0;
    } else {
       int i = 0;
@@ -2103,19 +2506,46 @@ cstring_from_COFF_symbol_name ( UChar* name, UChar* strtab )
    */
    if (name[7]==0) return name;
    /* The annoying case: 8 bytes.  Copy into a temporary
-      (which is never freed ...)
+      (XXX which is never freed ...)
    */
    newstr = stgMallocBytes(9, "cstring_from_COFF_symbol_name");
    ASSERT(newstr);
-   strncpy(newstr,name,8);
+   strncpy((char*)newstr,(char*)name,8);
    newstr[8] = 0;
    return newstr;
 }
 
+/* Getting the name of a section is mildly tricky, so we make a
+   function for it.  Sadly, in one case we have to copy the string 
+   (when it is exactly 8 bytes long there's no trailing '\0'), so for
+   consistency we *always* copy the string; the caller must free it
+*/
+static char *
+cstring_from_section_name (UChar* name, UChar* strtab)
+{
+    char *newstr;
+    
+    if (name[0]=='/') {
+        int strtab_offset = strtol((char*)name+1,NULL,10);
+        int len = strlen(((char*)strtab) + strtab_offset);
+
+        newstr = stgMallocBytes(len, "cstring_from_section_symbol_name");
+        strcpy((char*)newstr, (char*)((UChar*)strtab) + strtab_offset);
+        return newstr;
+    }
+    else
+    {
+        newstr = stgMallocBytes(9, "cstring_from_section_symbol_name");
+        ASSERT(newstr);
+        strncpy((char*)newstr,(char*)name,8);
+        newstr[8] = 0;
+        return newstr;
+    }
+}
 
 /* Just compares the short names (first 8 chars) */
 static COFF_section *
-findPEi386SectionCalled ( ObjectCode* oc,  char* name )
+findPEi386SectionCalled ( ObjectCode* oc,  UChar* name )
 {
    int i;
    COFF_header* hdr
@@ -2173,13 +2603,13 @@ lookupSymbolInDLLs ( UChar *lbl )
                a Rule that governs whether an initial '_' *should always* be
                stripped off when mapping from import lib name to the DLL name.
             */
-            sym = GetProcAddress(o_dll->instance, (lbl+1));
+            sym = GetProcAddress(o_dll->instance, (char*)(lbl+1));
             if (sym != NULL) {
 		/*debugBelch("found %s in %s\n", lbl+1,o_dll->name);*/
 		return sym;
             }
         }
-        sym = GetProcAddress(o_dll->instance, lbl);
+        sym = GetProcAddress(o_dll->instance, (char*)lbl);
         if (sym != NULL) {
             /*debugBelch("found %s in %s\n", lbl,o_dll->name);*/
             return sym;
@@ -2410,7 +2840,16 @@ ocGetNames_PEi386 ( ObjectCode* oc )
       COFF_section* sectab_i
          = (COFF_section*)
            myindex ( sizeof_COFF_section, sectab, i );
-      if (0 != strcmp(sectab_i->Name, ".bss")) continue;
+
+      char *secname = cstring_from_section_name(sectab_i->Name, strtab);
+
+      if (0 != strcmp(secname, ".bss")) {
+          stgFree(secname);
+          continue;
+      }
+
+      stgFree(secname);
+
       /* sof 10/05: the PE spec text isn't too clear regarding what
        * the SizeOfRawData field is supposed to hold for object
        * file sections containing just uninitialized data -- for executables,
@@ -2451,7 +2890,10 @@ ocGetNames_PEi386 ( ObjectCode* oc )
       COFF_section* sectab_i
          = (COFF_section*)
            myindex ( sizeof_COFF_section, sectab, i );
-      IF_DEBUG(linker, debugBelch("section name = %s\n", sectab_i->Name ));
+
+      char *secname = cstring_from_section_name(sectab_i->Name, strtab);
+
+      IF_DEBUG(linker, debugBelch("section name = %s\n", secname ));
 
 #     if 0
       /* I'm sure this is the Right Way to do it.  However, the
@@ -2463,12 +2905,12 @@ ocGetNames_PEi386 ( ObjectCode* oc )
          kind = SECTIONKIND_CODE_OR_RODATA;
 #     endif
 
-      if (0==strcmp(".text",sectab_i->Name) ||
-          0==strcmp(".rdata",sectab_i->Name)||
-          0==strcmp(".rodata",sectab_i->Name))
+      if (0==strcmp(".text",(char*)secname) ||
+          0==strcmp(".rdata",(char*)secname)||
+          0==strcmp(".rodata",(char*)secname))
          kind = SECTIONKIND_CODE_OR_RODATA;
-      if (0==strcmp(".data",sectab_i->Name) ||
-          0==strcmp(".bss",sectab_i->Name))
+      if (0==strcmp(".data",(char*)secname) ||
+          0==strcmp(".bss",(char*)secname))
          kind = SECTIONKIND_RWDATA;
 
       ASSERT(sectab_i->SizeOfRawData == 0 || sectab_i->VirtualSize == 0);
@@ -2481,16 +2923,18 @@ ocGetNames_PEi386 ( ObjectCode* oc )
       if (kind == SECTIONKIND_OTHER
           /* Ignore sections called which contain stabs debugging
              information. */
-          && 0 != strcmp(".stab", sectab_i->Name)
-          && 0 != strcmp(".stabstr", sectab_i->Name)
+          && 0 != strcmp(".stab", (char*)secname)
+          && 0 != strcmp(".stabstr", (char*)secname)
           /* ignore constructor section for now */
-          && 0 != strcmp(".ctors", sectab_i->Name)
+          && 0 != strcmp(".ctors", (char*)secname)
           /* ignore section generated from .ident */
-          && 0!= strcmp("/4", sectab_i->Name)
+          && 0!= strncmp(".debug", (char*)secname, 6)
 	  /* ignore unknown section that appeared in gcc 3.4.5(?) */
-          && 0!= strcmp(".reloc", sectab_i->Name)
+          && 0!= strcmp(".reloc", (char*)secname)
+          && 0 != strcmp(".rdata$zzz", (char*)secname)
          ) {
-         errorBelch("Unknown PEi386 section name `%s' (while processing: %s)", sectab_i->Name, oc->fileName);
+         errorBelch("Unknown PEi386 section name `%s' (while processing: %s)", secname, oc->fileName);
+         stgFree(secname);
          return 0;
       }
 
@@ -2498,6 +2942,8 @@ ocGetNames_PEi386 ( ObjectCode* oc )
          addSection(oc, kind, start, end);
          addProddableBlock(oc, start, end - start + 1);
       }
+
+      stgFree(secname);
    }
 
    /* Copy exported symbols into the ObjectCode. */
@@ -2553,8 +2999,8 @@ ocGetNames_PEi386 ( ObjectCode* oc )
          IF_DEBUG(linker, debugBelch("addSymbol %p `%s'\n", addr,sname);)
          ASSERT(i >= 0 && i < oc->n_symbols);
          /* cstring_from_COFF_symbol_name always succeeds. */
-         oc->symbols[i] = sname;
-         ghciInsertStrHashTable(oc->fileName, symhash, sname, addr);
+         oc->symbols[i] = (char*)sname;
+         ghciInsertStrHashTable(oc->fileName, symhash, (char*)sname, addr);
       } else {
 #        if 0
          debugBelch(
@@ -2604,7 +3050,7 @@ ocResolve_PEi386 ( ObjectCode* oc )
 
    /* ToDo: should be variable-sized?  But is at least safe in the
       sense of buffer-overrun-proof. */
-   char symbol[1000];
+   UChar symbol[1000];
    /* debugBelch("resolving for %s\n", oc->fileName); */
 
    hdr = (COFF_header*)(oc->image);
@@ -2629,12 +3075,20 @@ ocResolve_PEi386 ( ObjectCode* oc )
               ((UChar*)(oc->image)) + sectab_i->PointerToRelocations
            );
 
+      char *secname = cstring_from_section_name(sectab_i->Name, strtab);
+
       /* Ignore sections called which contain stabs debugging
          information. */
-      if (0 == strcmp(".stab", sectab_i->Name)
-          || 0 == strcmp(".stabstr", sectab_i->Name)
-          || 0 == strcmp(".ctors", sectab_i->Name))
-         continue;
+      if (0 == strcmp(".stab", (char*)secname)
+          || 0 == strcmp(".stabstr", (char*)secname)
+          || 0 == strcmp(".ctors", (char*)secname)
+          || 0 == strncmp(".debug", (char*)secname, 6)
+          || 0 == strcmp(".rdata$zzz", (char*)secname)) {
+          stgFree(secname);
+          continue;
+      }
+
+      stgFree(secname);
 
       if ( sectab_i->Characteristics & MYIMAGE_SCN_LNK_NRELOC_OVFL ) {
 	/* If the relocation field (a short) has overflowed, the
@@ -2706,7 +3160,7 @@ ocResolve_PEi386 ( ObjectCode* oc )
                    + sym->Value);
          } else {
             copyName ( sym->Name, strtab, symbol, 1000-1 );
-            S = (UInt32) lookupSymbol( symbol );
+            S = (UInt32) lookupSymbol( (char*)symbol );
             if ((void*)S != NULL) goto foundit;
             errorBelch("%s: unknown symbol `%s'", oc->fileName, symbol);
             return 0;
@@ -2809,10 +3263,18 @@ ocResolve_PEi386 ( ObjectCode* oc )
 #define Elf_Sym     Elf64_Sym
 #define Elf_Rel     Elf64_Rel
 #define Elf_Rela    Elf64_Rela
+#ifndef ELF_ST_TYPE
 #define ELF_ST_TYPE ELF64_ST_TYPE
+#endif
+#ifndef ELF_ST_BIND
 #define ELF_ST_BIND ELF64_ST_BIND
+#endif
+#ifndef ELF_R_TYPE
 #define ELF_R_TYPE  ELF64_R_TYPE
+#endif
+#ifndef ELF_R_SYM
 #define ELF_R_SYM   ELF64_R_SYM
+#endif
 #else
 #define ELFCLASS    ELFCLASS32
 #define Elf_Addr    Elf32_Addr
@@ -3606,6 +4068,9 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
 
       case R_X86_64_PC32:
       {
+#if defined(ALWAYS_PIC)
+          barf("R_X86_64_PC32 relocation, but ALWAYS_PIC.");
+#else
 	  StgInt64 off = value - P;
 	  if (off >= 0x7fffffffL || off < -0x80000000L) {
 #if X86_64_ELF_NONPIC_HACK
@@ -3618,6 +4083,7 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
 #endif
           }
 	  *(Elf64_Word *)P = (Elf64_Word)off;
+#endif
 	  break;
       }
 
@@ -3629,6 +4095,9 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
       }
 
       case R_X86_64_32:
+#if defined(ALWAYS_PIC)
+          barf("R_X86_64_32 relocation, but ALWAYS_PIC.");
+#else
 	  if (value >= 0x7fffffffL) {
 #if X86_64_ELF_NONPIC_HACK	      
               StgInt64 pltAddress = (StgInt64) &makeSymbolExtra(oc, ELF_R_SYM(info), S)
@@ -3640,9 +4109,13 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
 #endif
           }
 	  *(Elf64_Word *)P = (Elf64_Word)value;
+#endif
 	  break;
 
       case R_X86_64_32S:
+#if defined(ALWAYS_PIC)
+          barf("R_X86_64_32S relocation, but ALWAYS_PIC.");
+#else
 	  if ((StgInt64)value > 0x7fffffffL || (StgInt64)value < -0x80000000L) {
 #if X86_64_ELF_NONPIC_HACK	      
               StgInt64 pltAddress = (StgInt64) &makeSymbolExtra(oc, ELF_R_SYM(info), S)
@@ -3654,6 +4127,7 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
 #endif
 	  }
 	  *(Elf64_Sword *)P = (Elf64_Sword)value;
+#endif
 	  break;
 	  
       case R_X86_64_GOTPCREL:
@@ -3666,6 +4140,9 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
       
       case R_X86_64_PLT32:
       {
+#if defined(ALWAYS_PIC)
+          barf("R_X86_64_PLT32 relocation, but ALWAYS_PIC.");
+#else
 	  StgInt64 off = value - P;
 	  if (off >= 0x7fffffffL || off < -0x80000000L) {
               StgInt64 pltAddress = (StgInt64) &makeSymbolExtra(oc, ELF_R_SYM(info), S)
@@ -3673,6 +4150,7 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
               off = pltAddress + A - P;
 	  }
 	  *(Elf64_Word *)P = (Elf64_Word)off;
+#endif
 	  break;
       }
 #endif
@@ -3867,12 +4345,18 @@ static int ocVerifyImage_MachO(ObjectCode* oc)
     char *image = (char*) oc->image;
     struct mach_header *header = (struct mach_header*) image;
 
-#if x86_64_TARGET_ARCH || powerpc64_TARGET_ARCH
-    if(header->magic != MH_MAGIC_64)
+#if x86_64_HOST_ARCH || powerpc64_HOST_ARCH
+    if(header->magic != MH_MAGIC_64) {
+        errorBelch("%s: Bad magic. Expected: %08x, got: %08x.\n",
+                   oc->fileName, MH_MAGIC_64, header->magic);
         return 0;
+    }
 #else
-    if(header->magic != MH_MAGIC)
+    if(header->magic != MH_MAGIC) {
+        errorBelch("%s: Bad magic. Expected: %08x, got: %08x.\n",
+                   oc->fileName, MH_MAGIC, header->magic);
         return 0;
+    }
 #endif
     // FIXME: do some more verifying here
     return 1;
@@ -3888,6 +4372,8 @@ static int resolveImports(
 {
     unsigned i;
     size_t itemSize = 4;
+
+    IF_DEBUG(linker, debugBelch("resolveImports: start\n"));
 
 #if i386_HOST_ARCH
     int isJumpTable = 0;
@@ -3906,12 +4392,16 @@ static int resolveImports(
 	char *nm = image + symLC->stroff + symbol->n_un.n_strx;
 	void *addr = NULL;
 
-	if((symbol->n_type & N_TYPE) == N_UNDF
-	    && (symbol->n_type & N_EXT) && (symbol->n_value != 0))
+	IF_DEBUG(linker, debugBelch("resolveImports: resolving %s\n", nm));
+	if ((symbol->n_type & N_TYPE) == N_UNDF
+	    && (symbol->n_type & N_EXT) && (symbol->n_value != 0)) {
 	    addr = (void*) (symbol->n_value);
-	else
+	    IF_DEBUG(linker, debugBelch("resolveImports: undefined external %s has value %p\n", nm, addr));
+	} else {
 	    addr = lookupSymbol(nm);
-	if(!addr)
+	    IF_DEBUG(linker, debugBelch("resolveImports: looking up %s, %p\n", nm, addr));
+	}
+	if (!addr)
 	{
 	    errorBelch("\n%s: unknown symbol `%s'", oc->fileName, nm);
 	    return 0;
@@ -3934,6 +4424,7 @@ static int resolveImports(
         }
     }
 
+    IF_DEBUG(linker, debugBelch("resolveImports: done\n"));
     return 1;
 }
 
@@ -3944,9 +4435,11 @@ static unsigned long relocateAddress(
     unsigned long address)
 {
     int i;
-    for(i = 0; i < nSections; i++)
+    IF_DEBUG(linker, debugBelch("relocateAddress: start\n"));
+    for (i = 0; i < nSections; i++)
     {
-        if(sections[i].addr <= address
+	    IF_DEBUG(linker, debugBelch("    relocating address in section %d\n", i));
+        if (sections[i].addr <= address
             && address < sections[i].addr + sections[i].size)
         {
             return (unsigned long)oc->image
@@ -3965,7 +4458,9 @@ static int relocateSection(
     int nSections, struct section* sections, struct section *sect)
 {
     struct relocation_info *relocs;
-    int i,n;
+    int i, n;
+
+    IF_DEBUG(linker, debugBelch("relocateSection: start\n"));
 
     if(!strcmp(sect->sectname,"__la_symbol_ptr"))
 	return 1;
@@ -3977,6 +4472,8 @@ static int relocateSection(
 	return 1;
 
     n = sect->nreloc;
+    IF_DEBUG(linker, debugBelch("relocateSection: number of relocations: %d\n", n));
+
     relocs = (struct relocation_info*) (image + sect->reloff);
 
     for(i=0;i<n;i++)
@@ -4014,12 +4511,20 @@ static int relocateSection(
             default:
                 barf("Unknown size.");
         }
-        
-        if(type == X86_64_RELOC_GOT
+
+	IF_DEBUG(linker,
+		 debugBelch("relocateSection: length = %d, thing = %d, baseValue = %p\n",
+			    reloc->r_length, thing, baseValue));
+
+        if (type == X86_64_RELOC_GOT
            || type == X86_64_RELOC_GOT_LOAD)
         {
+            struct nlist *symbol = &nlist[reloc->r_symbolnum];
+            char *nm = image + symLC->stroff + symbol->n_un.n_strx;
+
+	    IF_DEBUG(linker, debugBelch("relocateSection: making jump island for %s, extern = %d, X86_64_RELOC_GOT\n", nm, reloc->r_extern));
             ASSERT(reloc->r_extern);
-            value = (uint64_t) &makeSymbolExtra(oc, reloc->r_symbolnum, value)->addr;
+            value = (uint64_t) &makeSymbolExtra(oc, reloc->r_symbolnum, (unsigned long)lookupSymbol(nm))->addr;
             
             type = X86_64_RELOC_SIGNED;
         }
@@ -4027,11 +4532,21 @@ static int relocateSection(
         {
             struct nlist *symbol = &nlist[reloc->r_symbolnum];
             char *nm = image + symLC->stroff + symbol->n_un.n_strx;
-            if(symbol->n_value == 0)
-                value = (uint64_t) lookupSymbol(nm);
-            else
+
+	    IF_DEBUG(linker, debugBelch("relocateSection: looking up external symbol %s\n", nm));
+	    IF_DEBUG(linker, debugBelch("               : type  = %d\n", symbol->n_type));
+	    IF_DEBUG(linker, debugBelch("               : sect  = %d\n", symbol->n_sect));
+	    IF_DEBUG(linker, debugBelch("               : desc  = %d\n", symbol->n_desc));
+	    IF_DEBUG(linker, debugBelch("               : value = %d\n", symbol->n_value));
+            if ((symbol->n_type & N_TYPE) == N_SECT) {
                 value = relocateAddress(oc, nSections, sections,
                                         symbol->n_value);
+		IF_DEBUG(linker, debugBelch("relocateSection, defined external symbol %s, relocated address %p\n", nm, value));
+	    }
+            else {
+                value = (uint64_t) lookupSymbol(nm);
+		IF_DEBUG(linker, debugBelch("relocateSection: external symbol %s, address %p\n", nm, value));
+	    }
         }
         else
         {
@@ -4039,8 +4554,10 @@ static int relocateSection(
                   - sections[reloc->r_symbolnum-1].addr
 		  + (uint64_t) image;
         }
-        
-        if(type == X86_64_RELOC_BRANCH)
+      
+	IF_DEBUG(linker, debugBelch("relocateSection: value = %p\n", value));
+
+        if (type == X86_64_RELOC_BRANCH)
         {
             if((int32_t)(value - baseValue) != (int64_t)(value - baseValue))
             {
@@ -4125,7 +4642,8 @@ static int relocateSection(
 		    else if(scat->r_type == PPC_RELOC_SECTDIFF
 		        || scat->r_type == PPC_RELOC_LO16_SECTDIFF
 		        || scat->r_type == PPC_RELOC_HI16_SECTDIFF
-		        || scat->r_type == PPC_RELOC_HA16_SECTDIFF)
+		        || scat->r_type == PPC_RELOC_HA16_SECTDIFF
+		        || scat->r_type == PPC_RELOC_LOCAL_SECTDIFF)
 #else
                     else if(scat->r_type == GENERIC_RELOC_SECTDIFF
                         || scat->r_type == GENERIC_RELOC_LOCAL_SECTDIFF)
@@ -4183,16 +4701,18 @@ static int relocateSection(
                         i++;
                     }
  #endif
-                    else 
+                    else
                     {
 		        barf ("Don't know how to handle this Mach-O "
 		              "scattered relocation entry: "
                               "object file %s; entry type %ld; "
                               "address %#lx\n", 
-                              oc->fileName, scat->r_type, scat->r_address);
+                              OC_INFORMATIVE_FILENAME(oc),
+                              scat->r_type,
+                              scat->r_address);
                         return 0;
                      }
-                     
+
 #ifdef powerpc_HOST_ARCH
                     if(scat->r_type == GENERIC_RELOC_VANILLA
                         || scat->r_type == PPC_RELOC_SECTDIFF)
@@ -4226,7 +4746,9 @@ static int relocateSection(
             	         "with this r_length tag: "
                          "object file %s; entry type %ld; "
                          "r_length tag %ld; address %#lx\n", 
-                         oc->fileName, scat->r_type, scat->r_length,
+                         OC_INFORMATIVE_FILENAME(oc),
+                         scat->r_type,
+                         scat->r_length,
                          scat->r_address);
                     return 0;
 		}
@@ -4236,10 +4758,12 @@ static int relocateSection(
 	        barf("Don't know how to handle *PC-relative* Mach-O "
 	             "scattered relocation entry: "
                      "object file %s; entry type %ld; address %#lx\n", 
-                     oc->fileName, scat->r_type, scat->r_address);
+                     OC_INFORMATIVE_FILENAME(oc),
+                     scat->r_type,
+                     scat->r_address);
                return 0;
-            }
-      
+	    }
+
 	}
 	else /* !(relocs[i].r_address & R_SCATTERED) */
 	{
@@ -4290,8 +4814,10 @@ static int relocateSection(
                 {
                     barf("Can't handle this Mach-O relocation entry "
 		         "(not scattered): "
-                         "object file %s; entry type %ld; address %#lx\n", 
-                         oc->fileName, reloc->r_type, reloc->r_address);
+                         "object file %s; entry type %ld; address %#lx\n",
+                         OC_INFORMATIVE_FILENAME(oc),
+                         reloc->r_type,
+                         reloc->r_address);
                     return 0;
                 }
 
@@ -4365,20 +4891,32 @@ static int relocateSection(
 		}
 		else if(reloc->r_type == PPC_RELOC_BR24)
 		{
-                    if((long)word > (long)0x01FFFFFF || (long)word < (long)0xFFE00000)
+                    if((word & 0x03) != 0)
+                        barf("%s: unconditional relative branch with a displacement "
+                             "which isn't a multiple of 4 bytes: %#lx",
+                             OC_INFORMATIVE_FILENAME(oc),
+                             word);
+
+                    if((word & 0xFE000000) != 0xFE000000 &&
+                       (word & 0xFE000000) != 0x00000000)
                     {
                         // The branch offset is too large.
                         // Therefore, we try to use a jump island.
                         if(jumpIsland == 0)
                         {
-                            barf("unconditional relative branch out of range: "
-                                 "no jump island available");
+                            barf("%s: unconditional relative branch out of range: "
+                                 "no jump island available: %#lx",
+                                 OC_INFORMATIVE_FILENAME(oc),
+                                 word);
                         }
                         
                         word = offsetToJumpIsland;
-                        if((long)word > (long)0x01FFFFFF || (long)word < (long)0xFFE00000)
-                            barf("unconditional relative branch out of range: "
-                                 "jump island out of range");
+                        if((word & 0xFE000000) != 0xFE000000 &&
+                           (word & 0xFE000000) != 0x00000000)
+                            barf("%s: unconditional relative branch out of range: "
+                                 "jump island out of range: %#lx",
+                                 OC_INFORMATIVE_FILENAME(oc),
+                                 word);
                     }
 		    *wordPtr = (*wordPtr & 0xFC000003) | (word & 0x03FFFFFC);
 		    continue;
@@ -4390,14 +4928,17 @@ static int relocateSection(
  	         barf("Can't handle Mach-O relocation entry (not scattered) "
                       "with this r_length tag: "
                       "object file %s; entry type %ld; "
-                      "r_length tag %ld; address %#lx\n", 
-                      oc->fileName, reloc->r_type, reloc->r_length,
+                      "r_length tag %ld; address %#lx\n",
+                      OC_INFORMATIVE_FILENAME(oc),
+                      reloc->r_type,
+                      reloc->r_length,
                       reloc->r_address);
 	         return 0;
 	    }
 	}
 #endif
     }
+    IF_DEBUG(linker, debugBelch("relocateSection: done\n"));
     return 1;
 }
 
@@ -4414,6 +4955,8 @@ static int ocGetNames_MachO(ObjectCode* oc)
     unsigned long commonSize = 0;
     char    *commonStorage = NULL;
     unsigned long commonCounter;
+
+    IF_DEBUG(linker,debugBelch("ocGetNames_MachO: start\n"));
 
     for(i=0;i<header->ncmds;i++)
     {
@@ -4433,7 +4976,8 @@ static int ocGetNames_MachO(ObjectCode* oc)
 
     for(i=0;i<segLC->nsects;i++)
     {
-        if(sections[i].size == 0)
+        IF_DEBUG(linker, debugBelch("ocGetNames_MachO: segment %d\n", i));
+        if (sections[i].size == 0)
             continue;
 
         if((sections[i].flags & SECTION_TYPE) == S_ZEROFILL)
@@ -4486,6 +5030,7 @@ static int ocGetNames_MachO(ObjectCode* oc)
             }
         }
     }
+    IF_DEBUG(linker, debugBelch("ocGetNames_MachO: %d external symbols\n", oc->n_symbols));
     oc->symbols = stgMallocBytes(oc->n_symbols * sizeof(char*),
 				   "ocGetNames_MachO(oc->symbols)");
 
@@ -4500,10 +5045,13 @@ static int ocGetNames_MachO(ObjectCode* oc)
                 if(nlist[i].n_type & N_EXT)
                 {
                     char *nm = image + symLC->stroff + nlist[i].n_un.n_strx;
-                    if((nlist[i].n_desc & N_WEAK_DEF) && lookupSymbol(nm))
-                        ; // weak definition, and we already have a definition
+                    if ((nlist[i].n_desc & N_WEAK_DEF) && lookupSymbol(nm)) {
+                        // weak definition, and we already have a definition
+			IF_DEBUG(linker, debugBelch("    weak: %s\n", nm));
+		    }
                     else
                     {
+			    IF_DEBUG(linker, debugBelch("ocGetNames_MachO: inserting %s\n", nm));
                             ghciInsertStrHashTable(oc->fileName, symhash, nm,
                                                     image
                                                     + sections[nlist[i].n_sect-1].offset
@@ -4530,6 +5078,7 @@ static int ocGetNames_MachO(ObjectCode* oc)
 
 	        nlist[i].n_value = commonCounter;
 
+		IF_DEBUG(linker, debugBelch("ocGetNames_MachO: inserting common symbol: %s\n", nm));
 	        ghciInsertStrHashTable(oc->fileName, symhash, nm,
 	                               (void*)commonCounter);
 	        oc->symbols[curSymbol++] = nm;
@@ -4553,7 +5102,8 @@ static int ocResolve_MachO(ObjectCode* oc)
     struct dysymtab_command *dsymLC = NULL;
     struct nlist *nlist;
 
-    for(i=0;i<header->ncmds;i++)
+    IF_DEBUG(linker, debugBelch("ocResolve_MachO: start\n"));
+    for (i = 0; i < header->ncmds; i++)
     {
 	if(lc->cmd == LC_SEGMENT || lc->cmd == LC_SEGMENT_64)
 	    segLC = (struct segment_command*) lc;
@@ -4573,7 +5123,8 @@ static int ocResolve_MachO(ObjectCode* oc)
         unsigned long *indirectSyms
             = (unsigned long*) (image + dsymLC->indirectsymoff);
 
-        for(i=0;i<segLC->nsects;i++)
+	IF_DEBUG(linker, debugBelch("ocResolve_MachO: resolving dsymLC\n"));
+        for (i = 0; i < segLC->nsects; i++)
         {
             if(    !strcmp(sections[i].sectname,"__la_symbol_ptr")
                 || !strcmp(sections[i].sectname,"__la_sym_ptr2")
@@ -4593,12 +5144,18 @@ static int ocResolve_MachO(ObjectCode* oc)
                 if(!resolveImports(oc,image,symLC,&sections[i],indirectSyms,nlist))
                     return 0;
             }
+	    else
+	    {
+		IF_DEBUG(linker, debugBelch("ocResolve_MachO: unknown section\n"));
+	    }
         }
     }
     
     for(i=0;i<segLC->nsects;i++)
     {
-	if(!relocateSection(oc,image,symLC,nlist,segLC->nsects,sections,&sections[i]))
+	    IF_DEBUG(linker, debugBelch("ocResolve_MachO: relocating section %d\n", i));
+
+	if (!relocateSection(oc,image,symLC,nlist,segLC->nsects,sections,&sections[i]))
 	    return 0;
     }
 
@@ -4619,9 +5176,10 @@ static int ocResolve_MachO(ObjectCode* oc)
  * Yuck.
  */
 
+extern void* symbolsWithoutUnderscore[];
+
 static void machoInitSymbolsWithoutUnderscore()
 {
-    extern void* symbolsWithoutUnderscore[];
     void **p = symbolsWithoutUnderscore;
     __asm__ volatile(".globl _symbolsWithoutUnderscore\n.data\n_symbolsWithoutUnderscore:");
 
@@ -4656,12 +5214,18 @@ static int machoGetMisalignment( FILE * f )
     fread(&header, sizeof(header), 1, f);
     rewind(f);
 
-#if x86_64_TARGET_ARCH || powerpc64_TARGET_ARCH
-    if(header.magic != MH_MAGIC_64)
+#if x86_64_HOST_ARCH || powerpc64_HOST_ARCH
+    if(header.magic != MH_MAGIC_64) {
+        errorBelch("Bad magic. Expected: %08x, got: %08x.\n",
+                   MH_MAGIC_64, header->magic);
         return 0;
+    }
 #else
-    if(header.magic != MH_MAGIC)
+    if(header.magic != MH_MAGIC) {
+        errorBelch("Bad magic. Expected: %08x, got: %08x.\n",
+                   MH_MAGIC, header->magic);
         return 0;
+    }
 #endif
 
     misalignment = (header.sizeofcmds + sizeof(header))
@@ -4672,4 +5236,3 @@ static int machoGetMisalignment( FILE * f )
 #endif
 
 #endif
-

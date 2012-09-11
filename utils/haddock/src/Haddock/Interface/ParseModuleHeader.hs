@@ -1,4 +1,3 @@
-
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Haddock.Interface.ParseModuleHeader
@@ -9,14 +8,14 @@
 -- Stability   :  experimental
 -- Portability :  portable
 -----------------------------------------------------------------------------
-
 module Haddock.Interface.ParseModuleHeader (parseModuleHeader) where
 
 import Haddock.Types
-import Haddock.Interface.Lex
-import Haddock.Interface.Parse
+import Haddock.Lex
+import Haddock.Parse
 
 import RdrName
+import DynFlags
 
 import Data.Char
 
@@ -26,8 +25,8 @@ import Data.Char
 -- NB.  The headers must be given in the order Module, Description,
 -- Copyright, License, Maintainer, Stability, Portability, except that
 -- any or all may be omitted.
-parseModuleHeader :: String -> Either String (HaddockModInfo RdrName, HsDoc RdrName)
-parseModuleHeader str0 =
+parseModuleHeader :: DynFlags -> String -> Either String (HaddockModInfo RdrName, Doc RdrName)
+parseModuleHeader dflags str0 =
    let
       getKey :: String -> String -> (Maybe String,String)
       getKey key str = case parseKey key str of
@@ -43,16 +42,18 @@ parseModuleHeader str0 =
       (stabilityOpt,str7) = getKey "Stability" str6
       (portabilityOpt,str8) = getKey "Portability" str7
 
-      description1 :: Either String (Maybe (HsDoc RdrName))
+      description1 :: Either String (Maybe (Doc RdrName))
       description1 = case descriptionOpt of
          Nothing -> Right Nothing
-         Just description -> case parseHaddockString . tokenise $ description of
+         -- TODO: pass real file position
+         Just description -> case parseString $ tokenise dflags description (0,0) of
             Nothing -> Left ("Cannot parse Description: " ++ description)
             Just doc -> Right (Just doc)
    in
       case description1 of
          Left mess -> Left mess
-         Right docOpt -> case parseHaddockParagraphs . tokenise $ str8 of
+         -- TODO: pass real file position
+         Right docOpt -> case parseParas $ tokenise dflags str8 (0,0) of
            Nothing -> Left "Cannot parse header documentation paragraphs"
            Just doc -> Right (HaddockModInfo {
             hmi_description = docOpt,

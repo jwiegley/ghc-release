@@ -21,13 +21,11 @@
 #include "Storage.h"
 #include "RtsUtils.h"
 #include "BlockAlloc.h"
+#include "OSMem.h"
 
 #include <string.h>
 
 static void  initMBlock(void *mblock);
-
-// The free_list is kept sorted by size, smallest first.
-// In THREADED_RTS mode, the free list is protected by sm_mutex.
 
 /* -----------------------------------------------------------------------------
 
@@ -58,7 +56,8 @@ static void  initMBlock(void *mblock);
    The following fields are not used by the allocator:
      bd->flags
      bd->gen_no
-     bd->step
+     bd->gen
+     bd->dest
 
   Exceptions: we don't maintain invariants for all the blocks within a
   group on the free list, because it is expensive to modify every
@@ -70,7 +69,7 @@ static void  initMBlock(void *mblock);
   ~~~~~~~~~~
 
   Preliminaries:
-    - most allocations are for small blocks
+    - most allocations are for a small number of blocks
     - sometimes the OS gives us new memory backwards in the address
       space, sometimes forwards, so we should not be biased towards
       any particular layout in the address space
@@ -120,7 +119,19 @@ static void  initMBlock(void *mblock);
 
   --------------------------------------------------------------------------- */
 
+/* ---------------------------------------------------------------------------
+   WATCH OUT FOR OVERFLOW
+
+   Be very careful with integer overflow here.  If you have an
+   expression like (n_blocks * BLOCK_SIZE), and n_blocks is an int or
+   a nat, then it will very likely overflow on a 64-bit platform.
+   Always cast to StgWord (or W_ for short) first: ((W_)n_blocks * BLOCK_SIZE).
+
+  --------------------------------------------------------------------------- */
+
 #define MAX_FREE_LIST 9
+
+// In THREADED_RTS mode, the free list is protected by sm_mutex.
 
 static bdescr *free_list[MAX_FREE_LIST];
 static bdescr *free_mblock_list;
@@ -282,7 +293,7 @@ alloc_mega_group (nat mblocks)
     if (best)
     {
         // we take our chunk off the end here.
-        nat best_mblocks  = BLOCKS_TO_MBLOCKS(best->blocks);
+        StgWord best_mblocks  = BLOCKS_TO_MBLOCKS(best->blocks);
         bd = FIRST_BDESCR((StgWord8*)MBLOCK_ROUND_DOWN(best) + 
                           (best_mblocks-mblocks)*MBLOCK_SIZE);
 
@@ -337,7 +348,7 @@ allocGroup (nat n)
 
     if (ln == MAX_FREE_LIST) {
 #if 0
-        if ((mblocks_allocated * MBLOCK_SIZE_W - n_alloc_blocks * BLOCK_SIZE_W) > (1024*1024)/sizeof(W_)) {
+        if (((W_)mblocks_allocated * MBLOCK_SIZE_W - (W_)n_alloc_blocks * BLOCK_SIZE_W) > (1024*1024)/sizeof(W_)) {
             debugBelch("Fragmentation, wanted %d blocks:", n);
             RtsFlags.DebugFlags.block_alloc = 1;
             checkFreeListSanity();
@@ -469,10 +480,10 @@ freeGroup(bdescr *p)
   ASSERT(p->free != (P_)-1);
 
   p->free = (void *)-1;  /* indicates that this block is free */
-  p->step = NULL;
+  p->gen = NULL;
   p->gen_no = 0;
   /* fill the block group with garbage if sanity checking is on */
-  IF_DEBUG(sanity,memset(p->start, 0xaa, p->blocks * BLOCK_SIZE));
+  IF_DEBUG(sanity,memset(p->start, 0xaa, (W_)p->blocks * BLOCK_SIZE));
 
   if (p->blocks == 0) barf("freeGroup: block size is zero");
 
@@ -586,7 +597,7 @@ splitBlockGroup (bdescr *bd, nat blocks)
         low_mblocks = 1 + (blocks - BLOCKS_PER_MBLOCK) / (MBLOCK_SIZE / BLOCK_SIZE);
         high_mblocks = (bd->blocks - blocks) / (MBLOCK_SIZE / BLOCK_SIZE);
 
-        new_mblock = (void *) ((P_)MBLOCK_ROUND_DOWN(bd) + low_mblocks * MBLOCK_SIZE_W);
+        new_mblock = (void *) ((P_)MBLOCK_ROUND_DOWN(bd) + (W_)low_mblocks * MBLOCK_SIZE_W);
         initMBlock(new_mblock);
         new_bd = FIRST_BDESCR(new_mblock);
         new_bd->blocks = MBLOCK_GROUP_BLOCKS(high_mblocks);
@@ -625,6 +636,75 @@ initMBlock(void *mblock)
              block += BLOCK_SIZE) {
         bd->start = (void*)block;
     }
+}
+
+/* -----------------------------------------------------------------------------
+   Stats / metrics
+   -------------------------------------------------------------------------- */
+
+nat
+countBlocks(bdescr *bd)
+{
+    nat n;
+    for (n=0; bd != NULL; bd=bd->link) {
+	n += bd->blocks;
+    }
+    return n;
+}
+
+// (*1) Just like countBlocks, except that we adjust the count for a
+// megablock group so that it doesn't include the extra few blocks
+// that would be taken up by block descriptors in the second and
+// subsequent megablock.  This is so we can tally the count with the
+// number of blocks allocated in the system, for memInventory().
+nat
+countAllocdBlocks(bdescr *bd)
+{
+    nat n;
+    for (n=0; bd != NULL; bd=bd->link) {
+	n += bd->blocks;
+	// hack for megablock groups: see (*1) above
+	if (bd->blocks > BLOCKS_PER_MBLOCK) {
+	    n -= (MBLOCK_SIZE / BLOCK_SIZE - BLOCKS_PER_MBLOCK)
+		* (bd->blocks/(MBLOCK_SIZE/BLOCK_SIZE));
+	}
+    }
+    return n;
+}
+
+void returnMemoryToOS(nat n /* megablocks */)
+{
+    static bdescr *bd;
+    nat size;
+
+    bd = free_mblock_list;
+    while ((n > 0) && (bd != NULL)) {
+        size = BLOCKS_TO_MBLOCKS(bd->blocks);
+        if (size > n) {
+            nat newSize = size - n;
+            char *freeAddr = MBLOCK_ROUND_DOWN(bd->start);
+            freeAddr += newSize * MBLOCK_SIZE;
+            bd->blocks = MBLOCK_GROUP_BLOCKS(newSize);
+            freeMBlocks(freeAddr, n);
+            n = 0;
+        }
+        else {
+            char *freeAddr = MBLOCK_ROUND_DOWN(bd->start);
+            n -= size;
+            bd = bd->link;
+            freeMBlocks(freeAddr, size);
+        }
+    }
+    free_mblock_list = bd;
+
+    osReleaseFreeMemory();
+
+    IF_DEBUG(gc,
+        if (n != 0) {
+            debugBelch("Wanted to free %d more MBlocks than are freeable\n",
+                       n);
+        }
+    );
 }
 
 /* -----------------------------------------------------------------------------

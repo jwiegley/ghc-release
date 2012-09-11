@@ -1,6 +1,5 @@
-{-# LANGUAGE MultiParamTypeClasses, ScopedTypeVariables #-}
-{-# OPTIONS -fglasgow-exts #-}
--- -fglagow-exts for kind signatures
+{-# LANGUAGE MultiParamTypeClasses, ScopedTypeVariables, KindSignatures,
+             FlexibleContexts #-}
 
 module ZipDataflow
     ( DebugNodes(), RewritingDepth(..), LastOutFacts(..)
@@ -528,8 +527,14 @@ forward_sol check_maybe = forw
                ; b <-  finish
                ; return (b, fuel)
                }
+
        -- The need for both k1 and k2 suggests that maybe there's an opportunity
        -- for improvement here -- in most cases, they're the same...
+       rec_rewrite :: forall t bI bW.
+                      Maybe (AGraph m l) -> t -> DFM a bW
+                   -> (t -> Fuel -> DFM a bI)
+                   -> (bW -> Fuel -> DFM a bI)
+                   -> a -> Fuel -> DFM a bI
        rec_rewrite rewritten analyzed finish k1 k2 in' fuel =
          case check_maybe fuel rewritten of -- fr_first rewrites id idfact of
            Nothing -> k1 analyzed fuel
@@ -570,7 +575,7 @@ mk_set_or_save :: (DataflowAnalysis df, Monad (df a), Outputable a) =>
                   (BlockId -> Bool) -> LastOutFacts a -> df a ()
 mk_set_or_save is_local (LastOutFacts l) = mapM_ set_or_save_one l
     where set_or_save_one (id, a) =
-              if is_local id then setFact id a else pprTrace "addLastOutFact" (ppr $ length l) $ addLastOutFact (id, a)
+              if is_local id then setFact id a else addLastOutFact (id, a)
 
 
 
@@ -589,7 +594,6 @@ forward_rew
         -> DFM a (ForwardFixedPoint m l a (Graph m l), Fuel)
 forward_rew check_maybe = forw
   where
-    solve = forward_sol check_maybe
     forw :: RewritingDepth
          -> BlockEnv a
          -> PassName
@@ -607,7 +611,8 @@ forward_rew check_maybe = forw
            in_fact `seq` g `seq`
             let Graph entry blockenv = g
                 blocks = G.postorder_dfs_from blockenv entry
-            in do { _ <- solve depth name start transfers rewrites in_fact g fuel
+            in do { _ <- forward_sol check_maybe depth name start 
+                                     transfers rewrites in_fact g fuel
                   ; eid <- freshBlockId "temporary entry id"
                   ; (rewritten, fuel) <-
                       rew_tail (ZFirst eid) in_fact entry emptyBlockEnv fuel
@@ -615,11 +620,18 @@ forward_rew check_maybe = forw
                   ; a <- finish
                   ; return (a, lgraphToGraph (LGraph eid rewritten), fuel)
                   }
+
+          don't_rewrite :: forall t.
+                           BlockEnv a -> DFM a t -> a
+                        -> Graph m l -> Fuel
+                        -> DFM a (t, Graph m l, Fuel)
           don't_rewrite facts finish in_fact g fuel =
-              do  { _ <- solve depth name facts transfers rewrites in_fact g fuel
+              do  { _ <- forward_sol check_maybe depth name facts 
+                                     transfers rewrites in_fact g fuel
                   ; a <- finish
                   ; return (a, g, fuel)
                   }
+
           inner_rew :: DFM a f -> a -> Graph m l -> Fuel -> DFM a (f, Graph m l, Fuel)
           inner_rew f i g fu = getAllFacts >>= \facts -> inner_rew' facts f i g fu
               where inner_rew' = case depth of RewriteShallow -> don't_rewrite
@@ -633,6 +645,7 @@ forward_rew check_maybe = forw
                  ; let fp = FFP cfp last_outs
                  ; return (fp, fuel)
                  }
+
 -- JD: WHY AREN'T WE TAKING ANY FUEL HERE?
           rewrite_blocks :: [Block m l] -> (BlockEnv (Block m l))
                          -> Fuel -> DFM a (BlockEnv (Block m l), Fuel)
@@ -980,7 +993,7 @@ instance FixedPoint ForwardFixedPoint where
 
 
 dump_things :: Bool
-dump_things = True
+dump_things = False
 
 my_trace :: String -> SDoc -> a -> a
 my_trace = if dump_things then pprTrace else \_ _ a -> a
@@ -1028,8 +1041,9 @@ run dir name do_block blocks b =
      pprFacts depth n env =
          my_nest depth (text "facts for iteration" <+> pp_i n <+> text "are:" $$
                         (nest 2 $ vcat $ map pprFact $ blockEnvToList env))
-     pprFact  (id, a) = hang (ppr id <> colon) 4 (ppr a)
 
+pprFact :: (Outputable a, Outputable b) => (a,b) -> SDoc
+pprFact (id, a) = hang (ppr id <> colon) 4 (ppr a)
 
 f4sep :: [SDoc] -> SDoc
 f4sep [] = fsep []

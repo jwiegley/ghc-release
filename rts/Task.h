@@ -4,6 +4,9 @@
  *
  * Tasks
  *
+ * For details on the high-level design, see
+ *   http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Scheduler
+ *
  * -------------------------------------------------------------------------*/
 
 #ifndef TASK_H
@@ -11,7 +14,7 @@
 
 #include "GetTime.h"
 
-BEGIN_RTS_PRIVATE
+#include "BeginPrivate.h"
 
 /* 
    Definition of a Task
@@ -230,8 +233,9 @@ void startWorkerTask (Capability *cap);
 // A thread-local-storage key that we can use to get access to the
 // current thread's Task structure.
 #if defined(THREADED_RTS)
-#if defined(linux_HOST_OS) && \
-    (defined(i386_HOST_ARCH) || defined(x86_64_HOST_ARCH))
+#if (defined(linux_HOST_OS) && \
+     (defined(i386_HOST_ARCH) || defined(x86_64_HOST_ARCH))) || \
+    (defined(mingw32_HOST_OS) && __GNUC__ >= 4 && __GNUC_MINOR__ >= 4)
 #define MYTASK_USE_TLV
 extern __thread Task *my_task;
 #else
@@ -267,6 +271,6 @@ setMyTask (Task *task)
 #endif
 }
 
-END_RTS_PRIVATE
+#include "EndPrivate.h"
 
 #endif /* TASK_H */

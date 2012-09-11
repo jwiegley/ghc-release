@@ -9,18 +9,19 @@
 #include "PosixSource.h"
 #include "Rts.h"
 #include "RtsAPI.h"
+#include "RtsDllMain.h"
 
 #ifdef HAVE_WINDOWS_H
 #include <windows.h>
 #endif
 
 /* I'd be mildly surprised if this wasn't defined, but still. */
-#if defined(__PIC__) && defined(mingw32_TARGET_OS)
+#if defined(__PIC__) && defined(mingw32_HOST_OS)
 BOOL
 WINAPI
-DllMain ( HINSTANCE hInstance
+DllMain ( HINSTANCE hInstance STG_UNUSED
         , DWORD reason
-	, LPVOID reserved
+	, LPVOID reserved STG_UNUSED
 	)
 {
   /*
@@ -30,9 +31,13 @@ DllMain ( HINSTANCE hInstance
    *       you pass to the RTS.
    */
   switch (reason) {
-  case DLL_PROCESS_DETACH: shutdownHaskell();
+  
+  // shutdownHaskelAndExit() is already being called,
+  //	so I don't think we need this. BL 2009/11/17
+ 
+  //case DLL_PROCESS_DETACH: shutdownHaskell();
   }
   return TRUE;
 }
 
-#endif /* defined(__PIC__) && defined(mingw32_TARGET_OS) */
+#endif /* defined(__PIC__) && defined(mingw32_HOST_OS) */

@@ -200,22 +200,6 @@ openFd name how maybe_mode (OpenFileFlags appendFlag exclusiveFlag nocttyFlag
 		   WriteOnly -> (#const O_WRONLY)
 		   ReadWrite -> (#const O_RDWR)
 
-    throwErrnoPathIfMinus1Retry :: Num a => String -> FilePath -> IO a -> IO a
-    throwErrnoPathIfMinus1Retry loc path f =
-      throwErrnoPathIfRetry (== -1) loc path f
-
-    throwErrnoPathIfRetry :: (a -> Bool) -> String -> FilePath -> IO a -> IO a
-    throwErrnoPathIfRetry pr loc path f =
-      do
-        res <- f
-        if pr res
-          then do
-            err <- getErrno
-            if err == eINTR
-              then throwErrnoPathIfRetry pr loc path f
-              else throwErrnoPath loc path
-          else return res
-
 foreign import ccall unsafe "__hscore_open"
    c_open :: CString -> CInt -> CMode -> IO CInt
 

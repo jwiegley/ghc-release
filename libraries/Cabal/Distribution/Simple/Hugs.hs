@@ -46,24 +46,26 @@ module Distribution.Simple.Hugs (
     getInstalledPackages,
     buildLib,
     buildExe,
-    install
+    install,
+    registerPackage,
   ) where
 
 import Distribution.Package
          ( PackageName, PackageIdentifier(..), InstalledPackageId(..)
          , packageName )
 import Distribution.InstalledPackageInfo
-         ( InstalledPackageInfo
+         ( InstalledPackageInfo, emptyInstalledPackageInfo
          , InstalledPackageInfo_( InstalledPackageInfo, installedPackageId
                                 , sourcePackageId )
-         , emptyInstalledPackageInfo, parseInstalledPackageInfo )
+         , parseInstalledPackageInfo, showInstalledPackageInfo )
 import Distribution.PackageDescription
-         ( PackageDescription(..), BuildInfo(..), hcOptions,
-           Executable(..), withExe, Library(..), withLib, libModules )
+         ( PackageDescription(..), BuildInfo(..), hcOptions, allExtensions
+         , Executable(..), withExe, Library(..), withLib, libModules )
 import Distribution.ModuleName (ModuleName)
 import qualified Distribution.ModuleName as ModuleName
 import Distribution.Simple.Compiler
-         ( CompilerFlavor(..), CompilerId(..), Compiler(..), Flag
+         ( CompilerFlavor(..), CompilerId(..)
+         , Compiler(..), Flag, languageToFlags, extensionsToFlags
          , PackageDB(..), PackageDBStack )
 import qualified Distribution.Simple.PackageIndex as PackageIndex
 import Distribution.Simple.PackageIndex (PackageIndex)
@@ -79,18 +81,21 @@ import Distribution.Simple.PreProcess   ( ppCpp, runSimplePreProcessor )
 import Distribution.Simple.PreProcess.Unlit
                                 ( unlit )
 import Distribution.Simple.LocalBuildInfo
-         ( LocalBuildInfo(..), ComponentLocalBuildInfo(..) )
+         ( LocalBuildInfo(..), ComponentLocalBuildInfo(..)
+         , InstallDirs(..), absoluteInstallDirs )
 import Distribution.Simple.BuildPaths
                                 ( autogenModuleName, autogenModulesDir,
                                   dllExtension )
+import Distribution.Simple.Setup
+         ( CopyDest(..) )
 import Distribution.Simple.Utils
          ( createDirectoryIfMissingVerbose, installOrdinaryFiles
-         , withUTF8FileContents, writeFileAtomic, copyFileVerbose
-         , findFile, findFileWithExtension, findModuleFiles
+         , withUTF8FileContents, writeFileAtomic, writeUTF8File
+         , copyFileVerbose, findFile, findFileWithExtension, findModuleFiles
          , rawSystemStdInOut
          , die, info, notice )
 import Language.Haskell.Extension
-                                ( Extension(..) )
+         ( Language(Haskell98), Extension(..) )
 import System.FilePath          ( (</>), takeExtension, (<.>),
                                   searchPathSeparator, normalise, takeDirectory )
 import Distribution.System
@@ -130,6 +135,7 @@ configure verbosity hcPath _hcPkgPath conf = do
 
   let comp = Compiler {
         compilerId             = CompilerId Hugs version,
+        compilerLanguages      = hugsLanguages,
         compilerExtensions     = hugsLanguageExtensions
       }
   return (comp, conf'')
@@ -164,6 +170,9 @@ getVersion verbosity hugsPath = do
     months = [ "January", "February", "March", "April", "May", "June", "July"
              , "August", "September", "October", "November", "December" ]
 
+hugsLanguages :: [(Language, Flag)]
+hugsLanguages = [(Haskell98, "")] --default is 98 mode
+
 -- | The flags for the supported extensions
 hugsLanguageExtensions :: [(Extension, Flag)]
 hugsLanguageExtensions =
@@ -194,9 +203,9 @@ getInstalledPackages :: Verbosity -> PackageDBStack -> ProgramConfiguration
 getInstalledPackages verbosity packagedbs conf = do
   homedir       <- getHomeDirectory
   (hugsProg, _) <- requireProgram verbosity hugsProgram conf
-  let bindir = takeDirectory (programPath hugsProg)
-      libdir = takeDirectory bindir </> "lib" </> "hugs"
-      dbdirs = nub (concatMap (packageDbPaths homedir libdir) packagedbs)
+  let hugsbindir = takeDirectory (programPath hugsProg)
+      hugslibdir = takeDirectory hugsbindir </> "lib" </> "hugs"
+      dbdirs = nub (concatMap (packageDbPaths homedir hugslibdir) packagedbs)
   indexes  <- mapM getIndividualDBPackages dbdirs
   return $! mconcat indexes
 
@@ -312,6 +321,8 @@ buildLib verbosity pkg_descr lbi lib _clbi = do
   where
     paths_modulename = ModuleName.toFilePath (autogenModuleName pkg_descr)
                          <.> ".hs"
+    --TODO: switch to using autogenModulesDir as a search dir, rather than
+    --      always copying the file over.
 
 -- |Building an executable for Hugs.
 buildExe :: Verbosity -> PackageDescription -> LocalBuildInfo
@@ -326,7 +337,7 @@ buildExe verbosity pkg_descr lbi
     srcMainFile <- findFile (hsSourceDirs bi) mainPath
     let exeDir = destDir </> exeName exe
     let destMainFile = exeDir </> hugsMainFilename exe
-    copyModule verbosity (CPP `elem` extensions bi) bi lbi srcMainFile destMainFile
+    copyModule verbosity (CPP `elem` allExtensions bi) bi lbi srcMainFile destMainFile
     let destPathsFile = exeDir </> paths_modulename
     copyFileVerbose verbosity (autogenModulesDir lbi </> paths_modulename)
                               destPathsFile
@@ -345,9 +356,10 @@ compileBuildInfo :: Verbosity
                  -> BuildInfo
                  -> LocalBuildInfo
                  -> IO ()
+--TODO: should not be using mLibSrcDirs at all
 compileBuildInfo verbosity destDir mLibSrcDirs mods bi lbi = do
     -- Pass 1: copy or cpp files from build directory to scratch directory
-    let useCpp = CPP `elem` extensions bi
+    let useCpp = CPP `elem` allExtensions bi
     let srcDir = buildDir lbi
         srcDirs = nub $ srcDir : hsSourceDirs bi ++ mLibSrcDirs
     info verbosity $ "Source directories: " ++ show srcDirs
@@ -534,6 +546,7 @@ stripComments keepPragmas = stripCommentsLevel 0
 -- \<prefix>\/lib\/hugs\/programs\/\<exename>.
 install
     :: Verbosity -- ^verbosity
+    -> LocalBuildInfo
     -> FilePath  -- ^Library install location
     -> FilePath  -- ^Program install location
     -> FilePath  -- ^Executable install location
@@ -542,7 +555,8 @@ install
     -> (FilePath,FilePath)  -- ^Executable (prefix,suffix)
     -> PackageDescription
     -> IO ()
-install verbosity libDir installProgDir binDir targetProgDir buildPref (progprefix,progsuffix) pkg_descr = do
+--FIXME: this script should be generated at build time, just installed at this stage
+install verbosity lbi libDir installProgDir binDir targetProgDir buildPref (progprefix,progsuffix) pkg_descr = do
     removeDirectoryRecursive libDir `catchIO` \_ -> return ()
     withLib pkg_descr $ \ lib ->
       findModuleFiles [buildPref] hugsInstallSuffixes (libModules lib)
@@ -551,6 +565,7 @@ install verbosity libDir installProgDir binDir targetProgDir buildPref (progpref
     when (any (buildable . buildInfo) (executables pkg_descr)) $
         createDirectoryIfMissingVerbose verbosity True binDir
     withExe pkg_descr $ \ exe -> do
+        let bi = buildInfo exe
         let theBuildDir = buildProgDir </> exeName exe
         let installDir = installProgDir </> exeName exe
         let targetDir = targetProgDir </> exeName exe
@@ -560,9 +575,9 @@ install verbosity libDir installProgDir binDir targetProgDir buildPref (progpref
                                          : otherModules (buildInfo exe))
           >>= installOrdinaryFiles verbosity installDir
         let targetName = "\"" ++ (targetDir </> hugsMainFilename exe) ++ "\""
-        -- FIX (HUGS): use extensions, and options from file too?
-        -- see http://hackage.haskell.org/trac/hackage/ticket/43
         let hugsOptions = hcOptions Hugs (buildInfo exe)
+                       ++ languageToFlags (compiler lbi) (defaultLanguage bi)
+                       ++ extensionsToFlags (compiler lbi) (allExtensions bi)
         let baseExeFile = progprefix ++ (exeName exe) ++ progsuffix
         let exeFile = case buildOS of
                           Windows -> binDir </> baseExeFile <.> ".bat"
@@ -588,3 +603,24 @@ hugsInstallSuffixes = [".hs", ".lhs", dllExtension]
 hugsMainFilename :: Executable -> FilePath
 hugsMainFilename exe = "Main" <.> ext
   where ext = takeExtension (modulePath exe)
+
+-- -----------------------------------------------------------------------------
+-- Registering
+
+registerPackage
+  :: Verbosity
+  -> InstalledPackageInfo
+  -> PackageDescription
+  -> LocalBuildInfo
+  -> Bool
+  -> PackageDBStack
+  -> IO ()
+registerPackage verbosity installedPkgInfo pkg lbi inplace _packageDbs = do
+  --TODO: prefer to have it based on the packageDbs, but how do we know
+  -- the package subdir based on the name? the user can set crazy libsubdir
+  let installDirs = absoluteInstallDirs pkg lbi NoCopyDest
+      pkgdir  | inplace   = buildDir lbi
+              | otherwise = libdir installDirs
+  createDirectoryIfMissingVerbose verbosity True pkgdir
+  writeUTF8File (pkgdir </> "package.conf")
+                (showInstalledPackageInfo installedPkgInfo)

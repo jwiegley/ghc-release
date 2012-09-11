@@ -1,8 +1,9 @@
 
-T2693.hs:10:14:
-    Couldn't match expected type `(a1, b)'
-           against inferred type `TFn a'
-      NB: `TFn' is a type function, and may not be injective
-    In the first argument of `fst', namely `x'
-    In the first argument of `(+)', namely `fst x'
-    In the expression: fst x + fst x
+T2693.hs:9:16:
+    Couldn't match type `TFn a' with `(a1, b)'
+    In the expression: undefined :: Maybe (TFn a)
+    In a pattern binding: Just x = undefined :: Maybe (TFn a)
+    In the expression:
+      do { let Just x = ...;
+           let n = fst x + fst x;
+           return () }

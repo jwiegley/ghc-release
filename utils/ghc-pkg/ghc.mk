@@ -30,8 +30,7 @@ endif
 
 else
 
-$(GHC_PKG_INPLACE) : utils/ghc-pkg/dist/build/$(utils/ghc-pkg_dist_PROG)$(exeext) $(MKDIRHIER)
-	"$(MKDIRHIER)" $(INPLACE_PACKAGE_CONF)
+$(GHC_PKG_INPLACE) : utils/ghc-pkg/dist/build/$(utils/ghc-pkg_dist_PROG)$(exeext) | $$(dir $$@)/. $(INPLACE_PACKAGE_CONF)/.
 	"$(RM)" $(RM_OPTS) $(INPLACE_PACKAGE_CONF)/*
 ifeq "$(Windows)" "YES"
 	cp $< $@
@@ -47,10 +46,9 @@ endif
 
 # depend on ghc-cabal, otherwise we build Cabal twice when building in parallel
 # The binary package is not warning-clean, so we need a few -fno-warns here.
-utils/ghc-pkg/dist/build/$(utils/ghc-pkg_dist_PROG)$(exeext): utils/ghc-pkg/Main.hs utils/ghc-pkg/Version.hs $(GHC_CABAL_INPLACE) $(MKDIRHIER)
-	"$(MKDIRHIER)" bootstrapping
-	"$(MKDIRHIER)" utils/ghc-pkg/dist/build
+utils/ghc-pkg/dist/build/$(utils/ghc-pkg_dist_PROG)$(exeext): utils/ghc-pkg/Main.hs utils/ghc-pkg/Version.hs $(GHC_CABAL_INPLACE) | bootstrapping/. $$(dir $$@)/.
 	"$(GHC)" $(SRC_HC_OPTS) --make utils/ghc-pkg/Main.hs -o $@ \
+	       -no-user-package-conf \
 	       -Wall -fno-warn-unused-imports \
 	       -DCABAL_VERSION=$(CABAL_VERSION) \
 	       -DBOOTSTRAPPING \
@@ -81,12 +79,10 @@ $(eval $(call clean-target,utils/ghc-pkg,dist,\
 # -----------------------------------------------------------------------------
 # Building ghc-pkg with stage 1
 
+utils/ghc-pkg_dist-install_USES_CABAL = YES
+utils/ghc-pkg_PACKAGE = ghc-pkg
+
 utils/ghc-pkg_dist-install_PROG = ghc-pkg
-utils/ghc-pkg_dist-install_MODULES = Main Version
-utils/ghc-pkg_dist-install_DEPS = Cabal bin-package-db
-ifeq "$(Windows)" "NO"
-utils/ghc-pkg_dist-install_DEPS += terminfo
-endif
 utils/ghc-pkg_dist-install_SHELL_WRAPPER = YES
 utils/ghc-pkg_dist-install_INSTALL_SHELL_WRAPPER = YES
 utils/ghc-pkg_dist-install_INSTALL_SHELL_WRAPPER_NAME = ghc-pkg-$(ProjectVersion)

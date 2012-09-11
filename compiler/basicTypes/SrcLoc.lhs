@@ -69,9 +69,14 @@ module SrcLoc (
         spans, isSubspanOf
     ) where
 
+#include "Typeable.h"
+
 import Util
 import Outputable
 import FastString
+
+import Data.Bits
+import Data.Data
 \end{code}
 
 %************************************************************************
@@ -87,10 +92,7 @@ this is the obvious stuff:
 data SrcLoc
   = SrcLoc	FastString	-- A precise location (file name)
 		{-# UNPACK #-} !Int		-- line number, begins at 1
-		{-# UNPACK #-} !Int		-- column number, begins at 0
-		-- Don't ask me why lines start at 1 and columns start at
-		-- zero.  That's just the way it is, so there.  --SDM
-
+		{-# UNPACK #-} !Int		-- column number, begins at 1
   | UnhelpfulLoc FastString	-- Just a general indication
 \end{code}
 
@@ -127,19 +129,22 @@ srcLocFile _other	      = (fsLit "<unknown file")
 -- | Raises an error when used on a "bad" 'SrcLoc'
 srcLocLine :: SrcLoc -> Int
 srcLocLine (SrcLoc _ l _) = l
-srcLocLine _other	  = panic "srcLocLine: unknown line"
+srcLocLine (UnhelpfulLoc s) = pprPanic "srcLocLine" (ftext s)
 
 -- | Raises an error when used on a "bad" 'SrcLoc'
 srcLocCol :: SrcLoc -> Int
 srcLocCol (SrcLoc _ _ c) = c
-srcLocCol _other         = panic "srcLocCol: unknown col"
+srcLocCol (UnhelpfulLoc s) = pprPanic "srcLocCol" (ftext s)
 
--- | Move the 'SrcLoc' down by one line if the character is a newline
--- and across by one character in any other case
+-- | Move the 'SrcLoc' down by one line if the character is a newline,
+-- to the next 8-char tabstop if it is a tab, and across by one
+-- character in any other case
 advanceSrcLoc :: SrcLoc -> Char -> SrcLoc
-advanceSrcLoc (SrcLoc f l _) '\n' = SrcLoc f  (l + 1) 0
+advanceSrcLoc (SrcLoc f l _) '\n' = SrcLoc f  (l + 1) 1
+advanceSrcLoc (SrcLoc f l c) '\t' = SrcLoc f  l (((((c - 1) `shiftR` 3) + 1)
+                                                  `shiftL` 3) + 1)
 advanceSrcLoc (SrcLoc f l c) _    = SrcLoc f  l (c + 1)
-advanceSrcLoc loc	     _	  = loc	-- Better than nothing
+advanceSrcLoc loc            _    = loc -- Better than nothing
 \end{code}
 
 %************************************************************************
@@ -179,6 +184,14 @@ instance Outputable SrcLoc where
                   char '\"', pprFastFilePath src_path, text " #-}"]
 
     ppr (UnhelpfulLoc s)  = ftext s
+
+INSTANCE_TYPEABLE0(SrcSpan,srcSpanTc,"SrcSpan")
+
+instance Data SrcSpan where
+  -- don't traverse?
+  toConstr _   = abstractConstr "SrcSpan"
+  gunfold _ _  = error "gunfold"
+  dataTypeOf _ = mkNoRepType "SrcSpan"
 \end{code}
 
 %************************************************************************
@@ -441,6 +454,7 @@ pprDefnLoc loc
 \begin{code}
 -- | We attach SrcSpans to lots of things, so let's have a datatype for it.
 data Located e = L SrcSpan e
+  deriving (Eq, Ord, Typeable, Data)
 
 unLoc :: Located e -> e
 unLoc (L _ e) = e
@@ -477,7 +491,7 @@ instance Functor Located where
   fmap f (L l e) = L l (f e)
 
 instance Outputable e => Outputable (Located e) where
-  ppr (L l e) = ifPprDebug (braces (pprUserSpan False l)) <> ppr e
+  ppr (L l e) = ifPprDebug (braces (pprUserSpan False l)) $$ ppr e
 		-- Print spans without the file name etc
 \end{code}
 

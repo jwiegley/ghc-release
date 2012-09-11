@@ -4,7 +4,7 @@
 -- |
 -- Module      :  Main
 -- Copyright   :  (c) Simon Marlow 2003-2006,
---                    David Waern  2006-2009
+--                    David Waern  2006-2010
 -- License     :  BSD-like
 --
 -- Maintainer  :  haddock@projects.haskell.org
@@ -15,15 +15,16 @@
 --
 -- Program entry point and top-level code.
 -----------------------------------------------------------------------------
+module Main (main, readPackagesAndProcessModules) where
 
-module Main (main) where
 
-
-import Haddock.Backends.Html
+import Haddock.Backends.Xhtml
+import Haddock.Backends.Xhtml.Themes (getThemes)
+import Haddock.Backends.LaTeX
 import Haddock.Backends.Hoogle
 import Haddock.Interface
-import Haddock.Interface.Lex
-import Haddock.Interface.Parse
+import Haddock.Lex
+import Haddock.Parse
 import Haddock.Types
 import Haddock.Version
 import Haddock.InterfaceFile
@@ -39,7 +40,6 @@ import qualified Data.Map as Map
 import System.IO
 import System.Exit
 import System.Environment
-import Distribution.Verbosity
 
 #if defined(mingw32_HOST_OS)
 import Foreign
@@ -58,16 +58,18 @@ import GHC hiding (flags, verbosity)
 import Config
 import DynFlags hiding (flags, verbosity)
 import Panic (handleGhcException)
+import Module
 
 
 --------------------------------------------------------------------------------
--- Exception handling
+-- * Exception handling
 --------------------------------------------------------------------------------
 
 
 handleTopExceptions :: IO a -> IO a
 handleTopExceptions =
   handleNormalExceptions . handleHaddockExceptions . handleGhcExceptions
+
 
 -- | Either returns normally or throws an ExitCode exception;
 -- all other exceptions are turned into exit exceptions.
@@ -90,199 +92,180 @@ handleHaddockExceptions inner =
   catches inner [Handler handler]
   where
     handler (e::HaddockException) = do
-      putStrLn $ "haddock: " ++ (show e)
+      putStrLn $ "haddock: " ++ show e
       exitFailure
 
 
 handleGhcExceptions :: IO a -> IO a
-handleGhcExceptions inner =
+handleGhcExceptions =
   -- error messages propagated as exceptions
-  handleGhcException (\e -> do
+  handleGhcException $ \e -> do
     hFlush stdout
     case e of
       PhaseFailed _ code -> exitWith code
+#if ! MIN_VERSION_ghc(6,13,0)
       Interrupted -> exitFailure
+#endif
       _ -> do
         print (e :: GhcException)
         exitFailure
-  ) inner
 
 
 -------------------------------------------------------------------------------
--- Top level
+-- * Top level
 -------------------------------------------------------------------------------
 
 
 main :: IO ()
 main = handleTopExceptions $ do
 
-  -- parse command-line flags and handle some of them initially
+  -- Parse command-line flags and handle some of them initially.
   args <- getArgs
-  (flags, fileArgs) <- parseHaddockOpts args
-  handleEasyFlags flags
-  verbosity <- getVerbosity flags
+  (flags, files) <- parseHaddockOpts args
+  shortcutFlags flags
 
-  let renderStep packages interfaces = do
-        updateHTMLXRefs packages
-        let ifaceFiles = map fst packages
-            installedIfaces = concatMap ifInstalledIfaces ifaceFiles
-        render flags interfaces installedIfaces
-
-  if not (null fileArgs)
+  if not (null files)
     then do
+      (packages, ifaces, homeLinks) <- readPackagesAndProcessModules flags files
 
-      libDir <- getGhcLibDir flags
+      -- Dump an "interface file" (.haddock file), if requested.
+      case optDumpInterfaceFile flags of
+        Just f -> dumpInterfaceFile f (map toInstalledIface ifaces) homeLinks
+        Nothing -> return ()
 
-      -- We have one global error handler for all GHC source errors.  Other kinds
-      -- of exceptions will be propagated to the top-level error handler.
-      let handleSrcErrors action = flip handleSourceError action $ \err -> do
-            printExceptionAndWarnings err
-            liftIO exitFailure
-
-      -- initialize GHC
-      startGhc libDir (ghcFlags flags) $ \_ -> handleSrcErrors $ do
-
-        -- get packages supplied with --read-interface
-        packages <- readInterfaceFiles nameCacheFromGhc (ifacePairs flags)
-
-
-        -- create the interfaces -- this is the core part of Haddock
-        (interfaces, homeLinks) <- createInterfaces verbosity fileArgs flags
-                                                    (map fst packages)
-
-        liftIO $ do
-          -- render the interfaces
-          renderStep packages interfaces
-
-          -- last but not least, dump the interface file
-          dumpInterfaceFile (map toInstalledIface interfaces) homeLinks flags
+      -- Render the interfaces.
+      renderStep flags packages ifaces
 
     else do
-      -- get packages supplied with --read-interface
-      packages <- readInterfaceFiles freshNameCache (ifacePairs flags)
+      when (any (`elem` [Flag_Html, Flag_Hoogle, Flag_LaTeX]) flags) $
+        throwE "No input file(s)."
 
-      -- render even though there are no input files (usually contents/index)
-      renderStep packages []
+      -- Get packages supplied with --read-interface.
+      packages <- readInterfaceFiles freshNameCache (readIfaceArgs flags)
 
-
--------------------------------------------------------------------------------
--- Rendering
--------------------------------------------------------------------------------
+      -- Render even though there are no input files (usually contents/index).
+      renderStep flags packages []
 
 
--- | Render the interfaces with whatever backend is specified in the flags
-render :: [Flag] -> [Interface] -> [InstalledInterface] -> IO ()
-render flags ifaces installedIfaces = do
+readPackagesAndProcessModules :: [Flag] -> [String]
+                              -> IO ([(DocPaths, InterfaceFile)], [Interface], LinkEnv)
+readPackagesAndProcessModules flags files = do
+  libDir <- getGhcLibDir flags
+
+  -- Catches all GHC source errors, then prints and re-throws them.
+  let handleSrcErrors action' = flip handleSourceError action' $ \err -> do
+        printExceptionAndWarnings err
+        liftIO exitFailure
+
+  -- Initialize GHC.
+  withGhc libDir (ghcFlags flags) $ \_ -> handleSrcErrors $ do
+
+    -- Get packages supplied with --read-interface.
+    packages <- readInterfaceFiles nameCacheFromGhc (readIfaceArgs flags)
+
+    -- Create the interfaces -- this is the core part of Haddock.
+    let ifaceFiles = map snd packages
+    (ifaces, homeLinks) <- processModules (verbosity flags) files flags ifaceFiles
+
+    return (packages, ifaces, homeLinks)
+
+
+renderStep :: [Flag] -> [(DocPaths, InterfaceFile)] -> [Interface] -> IO ()
+renderStep flags pkgs interfaces = do
+  updateHTMLXRefs pkgs
   let
-    title = case [str | Flag_Heading str <- flags] of
-              [] -> ""
-              (t:_) -> t
+    ifaceFiles = map snd pkgs
+    installedIfaces = concatMap ifInstalledIfaces ifaceFiles
+    srcMap = Map.fromList [ (ifPackageId if_, x) | ((_, Just x), if_) <- pkgs ]
+  render flags interfaces installedIfaces srcMap
 
-    maybe_source_urls = (listToMaybe [str | Flag_SourceBaseURL   str <- flags]
-                        ,listToMaybe [str | Flag_SourceModuleURL str <- flags]
-                        ,listToMaybe [str | Flag_SourceEntityURL str <- flags])
 
-    maybe_wiki_urls = (listToMaybe [str | Flag_WikiBaseURL   str <- flags]
-                      ,listToMaybe [str | Flag_WikiModuleURL str <- flags]
-                      ,listToMaybe [str | Flag_WikiEntityURL str <- flags])
-
-  libDir <- getHaddockLibDir flags
-  let unicode = Flag_UseUnicode `elem` flags
-  let css_file = case [str | Flag_CSS str <- flags] of
-                   [] -> Nothing
-                   fs -> Just (last fs)
-
-  odir <- case [str | Flag_OutputDir str <- flags] of
-            [] -> return "."
-            fs -> return (last fs)
-
-  let
-    maybe_contents_url =
-      case [url | Flag_UseContents url <- flags] of
-        [] -> Nothing
-        us -> Just (last us)
-
-    maybe_index_url =
-      case [url | Flag_UseIndex url <- flags] of
-        [] -> Nothing
-        us -> Just (last us)
-
-    maybe_html_help_format =
-      case [hhformat | Flag_HtmlHelp hhformat <- flags] of
-        []      -> Nothing
-        formats -> Just (last formats)
-
-  prologue <- getPrologue flags
+-- | Render the interfaces with whatever backend is specified in the flags.
+render :: [Flag] -> [Interface] -> [InstalledInterface] -> SrcMap -> IO ()
+render flags ifaces installedIfaces srcMap = do
 
   let
+    title                = fromMaybe "" (optTitle flags)
+    unicode              = Flag_UseUnicode `elem` flags
+    opt_wiki_urls        = wikiUrls          flags
+    opt_contents_url     = optContentsUrl    flags
+    opt_index_url        = optIndexUrl       flags
+    odir                 = outputDir         flags
+    opt_latex_style      = optLaTeXStyle     flags
+
     visibleIfaces    = [ i | i <- ifaces, OptHide `notElem` ifaceOptions i ]
 
-    -- *all* visible interfaces including external package modules
+    -- /All/ visible interfaces including external package modules.
     allIfaces        = map toInstalledIface ifaces ++ installedIfaces
     allVisibleIfaces = [ i | i <- allIfaces, OptHide `notElem` instOptions i ]
 
-    packageMod       = ifaceMod (head ifaces)
-    packageStr       = Just (modulePackageString packageMod)
-    (pkgName,pkgVer) = modulePackageInfo packageMod
+    pkgMod           = ifaceMod (head ifaces)
+    pkgId            = modulePackageId pkgMod
+    pkgStr           = Just (packageIdString pkgId)
+    (pkgName,pkgVer) = modulePackageInfo pkgMod
 
+    (srcBase, srcModule, srcEntity) = sourceUrls flags
+    srcMap' = maybe srcMap (\path -> Map.insert pkgId path srcMap) srcEntity
+    sourceUrls' = (srcBase, srcModule, srcMap')
+
+  libDir   <- getHaddockLibDir flags
+  prologue <- getPrologue flags
+  themes <- getThemes libDir flags >>= either bye return
 
   when (Flag_GenIndex `elem` flags) $ do
-    ppHtmlIndex odir title packageStr maybe_html_help_format
-                maybe_contents_url maybe_source_urls maybe_wiki_urls
+    ppHtmlIndex odir title pkgStr
+                themes opt_contents_url sourceUrls' opt_wiki_urls
                 allVisibleIfaces
-    copyHtmlBits odir libDir css_file
-
-  when (Flag_GenContents `elem` flags && Flag_GenIndex `elem` flags) $ do
-    ppHtmlHelpFiles title packageStr visibleIfaces odir maybe_html_help_format []
+    copyHtmlBits odir libDir themes
 
   when (Flag_GenContents `elem` flags) $ do
-    ppHtmlContents odir title packageStr maybe_html_help_format
-                   maybe_index_url maybe_source_urls maybe_wiki_urls
+    ppHtmlContents odir title pkgStr
+                   themes opt_index_url sourceUrls' opt_wiki_urls
                    allVisibleIfaces True prologue
-    copyHtmlBits odir libDir css_file
+    copyHtmlBits odir libDir themes
 
   when (Flag_Html `elem` flags) $ do
-    ppHtml title packageStr visibleIfaces odir
-                prologue maybe_html_help_format
-                maybe_source_urls maybe_wiki_urls
-                maybe_contents_url maybe_index_url unicode
-    copyHtmlBits odir libDir css_file
+    ppHtml title pkgStr visibleIfaces odir
+                prologue
+                themes sourceUrls' opt_wiki_urls
+                opt_contents_url opt_index_url unicode
+    copyHtmlBits odir libDir themes
 
   when (Flag_Hoogle `elem` flags) $ do
     let pkgName2 = if pkgName == "main" && title /= [] then title else pkgName
     ppHoogle pkgName2 pkgVer title prologue visibleIfaces odir
 
+  when (Flag_LaTeX `elem` flags) $ do
+    ppLaTeX title pkgStr visibleIfaces odir prologue opt_latex_style
+                  libDir
 
 -------------------------------------------------------------------------------
--- Reading and dumping interface files
+-- * Reading and dumping interface files
 -------------------------------------------------------------------------------
 
 
 readInterfaceFiles :: MonadIO m =>
                       NameCacheAccessor m
-                   -> [(FilePath, FilePath)] ->
-                      m [(InterfaceFile, FilePath)]
+                   -> [(DocPaths, FilePath)] ->
+                      m [(DocPaths, InterfaceFile)]
 readInterfaceFiles name_cache_accessor pairs = do
   mbPackages <- mapM tryReadIface pairs
   return (catMaybes mbPackages)
   where
     -- try to read an interface, warn if we can't
-    tryReadIface (html, iface) = do
-      eIface <- readInterfaceFile name_cache_accessor iface
+    tryReadIface (paths, file) = do
+      eIface <- readInterfaceFile name_cache_accessor file
       case eIface of
         Left err -> liftIO $ do
-          putStrLn ("Warning: Cannot read " ++ iface ++ ":")
-          putStrLn ("   " ++ show err)
+          putStrLn ("Warning: Cannot read " ++ file ++ ":")
+          putStrLn ("   " ++ err)
           putStrLn "Skipping this interface."
           return Nothing
-        Right f -> return $ Just (f, html)
+        Right f -> return $ Just (paths, f)
 
 
-dumpInterfaceFile :: [InstalledInterface] -> LinkEnv -> [Flag] -> IO ()
-dumpInterfaceFile ifaces homeLinks flags =
-  case [str | Flag_DumpInterface str <- flags] of
-    [] -> return ()
-    fs -> let filename = last fs in writeInterfaceFile filename ifaceFile
+dumpInterfaceFile :: FilePath -> [InstalledInterface] -> LinkEnv -> IO ()
+dumpInterfaceFile path ifaces homeLinks = writeInterfaceFile path ifaceFile
   where
     ifaceFile = InterfaceFile {
         ifInstalledIfaces = ifaces,
@@ -291,13 +274,14 @@ dumpInterfaceFile ifaces homeLinks flags =
 
 
 -------------------------------------------------------------------------------
--- Creating a GHC session
+-- * Creating a GHC session
 -------------------------------------------------------------------------------
 
+
 -- | Start a GHC session with the -haddock flag set. Also turn off
--- compilation and linking.
-startGhc :: String -> [String] -> (DynFlags -> Ghc a) -> IO a
-startGhc libDir flags ghcActs = do
+-- compilation and linking. Then run the given 'Ghc' action.
+withGhc :: String -> [String] -> (DynFlags -> Ghc a) -> IO a
+withGhc libDir flags ghcActs = do
   -- TODO: handle warnings?
   (restFlags, _) <- parseStaticFlags (map noLoc flags)
   runGhc (Just libDir) $ do
@@ -322,16 +306,17 @@ startGhc libDir flags ghcActs = do
       -- TODO: handle warnings?
       (dynflags', rest, _) <- parseDynamicFlags dynflags flags_
       if not (null rest)
-        then throwE ("Couldn't parse GHC options: " ++ (unwords origFlags))
+        then throwE ("Couldn't parse GHC options: " ++ unwords origFlags)
         else return dynflags'
 
 
 -------------------------------------------------------------------------------
--- Misc
+-- * Misc
 -------------------------------------------------------------------------------
 
+
 getHaddockLibDir :: [Flag] -> IO String
-getHaddockLibDir flags = do
+getHaddockLibDir flags =
   case [str | Flag_Lib str <- flags] of
     [] ->
 #ifdef IN_GHC_TREE
@@ -341,8 +326,9 @@ getHaddockLibDir flags = do
 #endif
     fs -> return (last fs)
 
+
 getGhcLibDir :: [Flag] -> IO String
-getGhcLibDir flags = do
+getGhcLibDir flags =
   case [ dir | Flag_GhcLibDir dir <- flags ] of
     [] ->
 #ifdef IN_GHC_TREE
@@ -353,17 +339,8 @@ getGhcLibDir flags = do
     xs -> return $ last xs
 
 
-getVerbosity :: Monad m => [Flag] -> m Verbosity
-getVerbosity flags =
-  case [ str | Flag_Verbosity str <- flags ] of
-    [] -> return normal
-    x:_ -> case parseVerbosity x of
-      Left e -> throwE e
-      Right v -> return v
-
-
-handleEasyFlags :: [Flag] -> IO ()
-handleEasyFlags flags = do
+shortcutFlags :: [Flag] -> IO ()
+shortcutFlags flags = do
   usage <- getUsage
 
   when (Flag_Help           `elem` flags) (bye usage)
@@ -374,12 +351,20 @@ handleEasyFlags flags = do
     dir <- getGhcLibDir flags
     bye $ dir ++ "\n"
 
-  when (Flag_UseUnicode `elem` flags && not (Flag_Html `elem` flags)) $
-  	throwE ("Unicode can only be enabled for HTML output.")
+  when (Flag_UseUnicode `elem` flags && Flag_Html `notElem` flags) $
+    throwE "Unicode can only be enabled for HTML output."
 
   when ((Flag_GenIndex `elem` flags || Flag_GenContents `elem` flags)
         && Flag_Html `elem` flags) $
-    throwE ("-h cannot be used with --gen-index or --gen-contents")
+    throwE "-h cannot be used with --gen-index or --gen-contents"
+
+  when ((Flag_GenIndex `elem` flags || Flag_GenContents `elem` flags)
+        && Flag_Hoogle `elem` flags) $
+    throwE "--hoogle cannot be used with --gen-index or --gen-contents"
+
+  when ((Flag_GenIndex `elem` flags || Flag_GenContents `elem` flags)
+        && Flag_LaTeX `elem` flags) $
+    throwE "--latex cannot be used with --gen-index or --gen-contents"
   where
     byeVersion = bye $
       "Haddock version " ++ projectVersion ++ ", (c) Simon Marlow 2006\n"
@@ -388,22 +373,22 @@ handleEasyFlags flags = do
     byeGhcVersion = bye (cProjectVersion ++ "\n")
 
 
-updateHTMLXRefs :: [(InterfaceFile, FilePath)] -> IO ()
-updateHTMLXRefs packages = do
-  writeIORef html_xrefs_ref (Map.fromList mapping)
+updateHTMLXRefs :: [(DocPaths, InterfaceFile)] -> IO ()
+updateHTMLXRefs packages = writeIORef html_xrefs_ref (Map.fromList mapping)
   where
-    mapping = [ (instMod iface, html) | (ifaces, html) <- packages
+    mapping = [ (instMod iface, html) | ((html, _), ifaces) <- packages
               , iface <- ifInstalledIfaces ifaces ]
 
 
-getPrologue :: [Flag] -> IO (Maybe (HsDoc RdrName))
+getPrologue :: [Flag] -> IO (Maybe (Doc RdrName))
 getPrologue flags =
   case [filename | Flag_Prologue filename <- flags ] of
     [] -> return Nothing
     [filename] -> do
       str <- readFile filename
-      case parseHaddockParagraphs (tokenise str) of
-        Nothing -> throwE "parsing haddock prologue failed"
+      case parseParas (tokenise defaultDynFlags str
+                      (1,0) {- TODO: real position -}) of
+        Nothing -> throwE $ "failed to parse haddock prologue from file: " ++ filename
         Just doc -> return (Just doc)
     _otherwise -> throwE "multiple -p/--prologue options"
 
@@ -421,6 +406,7 @@ getInTreeLibDir =
              Just d -> return (d </> "..")
 #endif
 
+
 getExecDir :: IO (Maybe String)
 #if defined(mingw32_HOST_OS)
 getExecDir = allocaArray len $ \buf -> do
@@ -430,6 +416,7 @@ getExecDir = allocaArray len $ \buf -> do
         else do s <- peekCString buf
                 return (Just (dropFileName s))
   where len = 2048 -- Plenty, PATH_MAX is 512 under Win32.
+
 
 foreign import stdcall unsafe "GetModuleFileNameA"
   getModuleFileName :: Ptr () -> CString -> Int -> IO Int32

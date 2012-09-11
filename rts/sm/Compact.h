@@ -14,37 +14,7 @@
 #ifndef SM_COMPACT_H
 #define SM_COMPACT_H
 
-BEGIN_RTS_PRIVATE
-
-INLINE_HEADER rtsBool
-mark_stack_empty(void)
-{
-    return mark_sp == mark_stack;
-}
-
-INLINE_HEADER rtsBool
-mark_stack_full(void)
-{
-    return mark_sp >= mark_splim;
-}
-
-INLINE_HEADER void
-reset_mark_stack(void)
-{
-    mark_sp = mark_stack;
-}
-
-INLINE_HEADER void
-push_mark_stack(StgPtr p)
-{
-    *mark_sp++ = p;
-}
-
-INLINE_HEADER StgPtr
-pop_mark_stack(void)
-{
-    return *--mark_sp;
-}
+#include "BeginPrivate.h"
 
 INLINE_HEADER void 
 mark(StgPtr p, bdescr *bd)
@@ -78,6 +48,6 @@ is_marked(StgPtr p, bdescr *bd)
 
 void compact (StgClosure *static_objects);
 
-END_RTS_PRIVATE
+#include "EndPrivate.h"
 
 #endif /* SM_COMPACT_H */

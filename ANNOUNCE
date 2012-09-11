@@ -1,15 +1,54 @@
 
-   ==============================================================
-    The (Interactive) Glasgow Haskell Compiler -- version 6.12.3
-   ==============================================================
+   =============================================================
+    The (Interactive) Glasgow Haskell Compiler -- version 7.0.1
+   =============================================================
 
-The GHC Team is pleased to announce a new patchlevel release of GHC.
-This release contains a number of bugfixes relative to 6.12.2, so we
-recommend upgrading.
+The GHC Team is pleased to announce a new major release of GHC. Since
+the 6.12 branch we are delighted that more than 60 people have
+contributed patches to GHC or the accompanying libraries and utilities.
 
-Release notes are here:
+There have been a number of significant changes since the last major
+release, including:
 
-  http://haskell.org/ghc/docs/6.12.3/html/users_guide/release-6-12-3.html
+ * GHC now defaults to the Haskell 2010 language standard
+
+ * -fglasgow-exts is now deprecated, in favour of the individual
+   extension flags
+
+ * On POSIX platforms, there is a new I/O manager based on
+   epoll/kqueue/poll, which allows multithreaded I/O code to scale to a
+   much larger number (100k+) of threads
+
+ * GHC now includes an LLVM code generator which, for certain code, can
+   bring some nice performance improvements
+
+ * The type checker has been overhauled, which means it is now able to
+   correctly handle interactions between the type systemextensions
+
+ * The inliner has been overhauled, which should in general give better
+   performance while reducing unnecessary code-size explosion
+
+ * Large parts of the runtime system have been overhauled, including
+   fixing several instances of pathological performance when there
+   are large numbers of threads
+
+ * Due to changes in the runtime system, if you are using
+   Control.Parallel.Strategies from the parallel package, please upgrade
+   to at least version 2 (preferably version 3)
+
+ * The full Haskell import syntax can now been used to bring modules
+   into scope in GHCi
+
+ * GHC now comes with a more recent mingw bundled on Windows, which
+   includes a fix for windres on Windows 7
+
+ * There is a new -fno-ghci-sandbox flag, which stops GHCi running
+   computations in a separate thread; in particular, this works around
+   an issue running GLUT from GHCi on OS X
+
+The full release notes are here:
+
+  http://www.haskell.org/ghc/docs/7.0.1/html/users_guide/release-7-0-1.html
 
 How to get it
 ~~~~~~~~~~~~~

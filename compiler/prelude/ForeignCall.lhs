@@ -10,6 +10,7 @@
 -- any warnings in the module. See
 --     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
 -- for details
+{-# LANGUAGE DeriveDataTypeable #-}
 
 module ForeignCall (
 	ForeignCall(..),
@@ -24,8 +25,10 @@ module ForeignCall (
 import FastString
 import Binary
 import Outputable
+import Module
 
 import Data.Char
+import Data.Data
 \end{code}
 
 
@@ -62,7 +65,7 @@ data Safety
 
   | PlayRisky		-- None of the above can happen; the call will return
 			-- without interacting with the runtime system at all
-  deriving ( Eq, Show )
+  deriving ( Eq, Show, Data, Typeable )
 	-- Show used just for Show Lex.Token, I think
   {-! derive: Binary !-}
 
@@ -88,6 +91,7 @@ data CExportSpec
   = CExportStatic		-- foreign export ccall foo :: ty
 	CLabelString		-- C Name of exported function
 	CCallConv
+  deriving (Data, Typeable)
   {-! derive: Binary !-}
 
 data CCallSpec
@@ -101,10 +105,26 @@ data CCallSpec
 The call target:
 
 \begin{code}
+
+-- | How to call a particular function in C-land.
 data CCallTarget
-  = StaticTarget  CLabelString  -- An "unboxed" ccall# to `fn'.
-  | DynamicTarget 		-- First argument (an Addr#) is the function pointer
-  deriving( Eq )
+  -- An "unboxed" ccall# to named function in a particular package.
+  = StaticTarget  
+	CLabelString  			-- C-land name of label.
+
+	(Maybe PackageId)		-- What package the function is in.
+					-- If Nothing, then it's taken to be in the current package.
+					-- Note: This information is only used for PrimCalls on Windows.
+					--	 See CLabel.labelDynamic and CoreToStg.coreToStgApp 
+					--	 for the difference in representation between PrimCalls
+					--	 and ForeignCalls. If the CCallTarget is representing
+					--	 a regular ForeignCall then it's safe to set this to Nothing.
+
+  -- The first argument of the import is the name of a function pointer (an Addr#).
+  --	Used when importing a label as "foreign import ccall "dynamic" ..."
+  | DynamicTarget
+  
+  deriving( Eq, Data, Typeable )
   {-! derive: Binary !-}
 
 isDynamicTarget :: CCallTarget -> Bool
@@ -129,7 +149,7 @@ See: http://www.programmersheaven.com/2/Calling-conventions
 
 \begin{code}
 data CCallConv = CCallConv | StdCallConv | CmmCallConv | PrimCallConv
-  deriving (Eq)
+  deriving (Eq, Data, Typeable)
   {-! derive: Binary !-}
 
 instance Outputable CCallConv where
@@ -186,8 +206,14 @@ instance Outputable CCallSpec where
       gc_suf | playSafe safety = text "_GC"
 	     | otherwise       = empty
 
-      ppr_fun DynamicTarget     = text "__dyn_ccall" <> gc_suf <+> text "\"\""
-      ppr_fun (StaticTarget fn) = text "__ccall"     <> gc_suf <+> pprCLabelString fn
+      ppr_fun (StaticTarget fn Nothing)
+     	= text "__pkg_ccall" <> gc_suf <+> pprCLabelString fn
+
+      ppr_fun (StaticTarget fn (Just pkgId))
+     	= text "__pkg_ccall" <> gc_suf <+> ppr pkgId <+> pprCLabelString fn
+
+      ppr_fun DynamicTarget     
+        = text "__dyn_ccall" <> gc_suf <+> text "\"\""
 \end{code}
 
 
@@ -237,16 +263,18 @@ instance Binary CCallSpec where
 	  return (CCallSpec aa ab ac)
 
 instance Binary CCallTarget where
-    put_ bh (StaticTarget aa) = do
+    put_ bh (StaticTarget aa ab) = do
 	    putByte bh 0
 	    put_ bh aa
+            put_ bh ab
     put_ bh DynamicTarget = do
 	    putByte bh 1
     get bh = do
 	    h <- getByte bh
 	    case h of
 	      0 -> do aa <- get bh
-		      return (StaticTarget aa)
+                      ab <- get bh
+		      return (StaticTarget aa ab)
 	      _ -> do return DynamicTarget
 
 instance Binary CCallConv where

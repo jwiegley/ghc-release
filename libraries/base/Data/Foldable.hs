@@ -90,13 +90,18 @@ import Array
 --
 -- a suitable instance would be
 --
--- > instance Foldable Tree
+-- > instance Foldable Tree where
 -- >    foldMap f Empty = mempty
 -- >    foldMap f (Leaf x) = f x
 -- >    foldMap f (Node l k r) = foldMap f l `mappend` f k `mappend` foldMap f r
 --
 -- This is suitable even for abstract types, as the monoid is assumed
--- to satisfy the monoid laws.
+-- to satisfy the monoid laws.  Alternatively, one could define @foldr@:
+--
+-- > instance Foldable Tree where
+-- >    foldr f z Empty = z
+-- >    foldr f z (Leaf x) = f x z
+-- >    foldr f z (Node l k r) = foldr f (f k (foldr f z r)) l
 --
 class Foldable t where
         -- | Combine the elements of a structure using a monoid.
@@ -157,6 +162,9 @@ instance Foldable [] where
 
 instance Ix i => Foldable (Array i) where
         foldr f z = Prelude.foldr f z . elems
+        foldl f z = Prelude.foldl f z . elems
+        foldr1 f = Prelude.foldr1 f . elems
+        foldl1 f = Prelude.foldl1 f . elems
 
 -- | Fold over the elements of a structure,
 -- associating to the right, but strictly.

@@ -9,11 +9,18 @@ type-synonym declarations; those cannot be done at this stage because
 they may be affected by renaming (which isn't fully worked out yet).
 
 \begin{code}
-module RnBinds (rnTopBinds, rnTopBindsLHS, rnTopBindsRHS, -- use these for top-level bindings
-                rnLocalBindsAndThen, rnValBindsLHS, rnValBindsRHS, -- or these for local bindings
-                rnMethodBinds, renameSigs, mkSigTvFn,
-                rnMatchGroup, rnGRHSs,
-                makeMiniFixityEnv, MiniFixityEnv
+module RnBinds (
+   -- Renaming top-level bindings
+   rnTopBinds, rnTopBindsLHS, rnTopBindsRHS, 
+
+   -- Renaming local bindings
+   rnLocalBindsAndThen, rnLocalValBindsLHS, rnLocalValBindsRHS,
+
+   -- Other bindings
+   rnMethodBinds, renameSigs, mkSigTvFn,
+   rnMatchGroup, rnGRHSs,
+   makeMiniFixityEnv, MiniFixityEnv,
+   misplacedSigErr
    ) where
 
 import {-# SOURCE #-} RnExpr( rnLExpr, rnStmts )
@@ -28,7 +35,7 @@ import RnPat          (rnPats, rnBindPat,
                       )
                       
 import RnEnv
-import DynFlags	( DynFlag(..) )
+import DynFlags
 import Name
 import NameEnv
 import NameSet
@@ -158,18 +165,17 @@ rnTopBindsLHS :: MiniFixityEnv
               -> HsValBinds RdrName 
               -> RnM (HsValBindsLR Name RdrName)
 rnTopBindsLHS fix_env binds
-  = do { mod <- getModule
-       ; rnValBindsLHSFromDoc (topRecNameMaker mod fix_env) binds }
+  = rnValBindsLHS (topRecNameMaker fix_env) binds
 
-rnTopBindsRHS :: NameSet	-- Names bound by these binds
-              -> HsValBindsLR Name RdrName 
+rnTopBindsRHS :: HsValBindsLR Name RdrName 
               -> RnM (HsValBinds Name, DefUses)
-rnTopBindsRHS bound_names binds = 
-    do { is_boot <- tcIsHsBoot
+rnTopBindsRHS binds
+  = do { is_boot <- tcIsHsBoot
        ; if is_boot 
          then rnTopBindsBoot binds
-         else rnValBindsRHSGen (\x -> x) -- don't trim free vars
-                               bound_names binds }
+         else rnValBindsRHS noTrimFVs -- don't trim free vars
+                            Nothing   -- Allow SPEC prags for imports
+                            binds }
 
 -- Wrapper if we don't need to do anything in between the left and right,
 -- or anything else in the scope of the left
@@ -177,10 +183,11 @@ rnTopBindsRHS bound_names binds =
 -- Never used when there are fixity declarations
 rnTopBinds :: HsValBinds RdrName 
            -> RnM (HsValBinds Name, DefUses)
-rnTopBinds b = 
-  do nl <- rnTopBindsLHS emptyFsEnv b
-     let bound_names = map unLoc (collectHsValBinders nl)
-     bindLocalNames bound_names $ rnTopBindsRHS (mkNameSet bound_names) nl
+rnTopBinds b
+  = do { nl <- rnTopBindsLHS emptyFsEnv b
+       ; let bound_names = collectHsValBinders nl
+       ; bindLocalNames bound_names $ 
+         rnValBindsRHS noTrimFVs (Just (mkNameSet bound_names)) nl }
        
 
 rnTopBindsBoot :: HsValBindsLR Name RdrName -> RnM (HsValBinds Name, DefUses)
@@ -192,7 +199,6 @@ rnTopBindsBoot (ValBindsIn mbinds sigs)
 	; return (ValBindsOut [] sigs', usesOnly (hsSigsFVs sigs')) }
 rnTopBindsBoot b = pprPanic "rnTopBindsBoot" (ppr b)
 \end{code}
-
 
 
 %*********************************************************
@@ -212,7 +218,7 @@ rnLocalBindsAndThen EmptyLocalBinds thing_inside
   = thing_inside EmptyLocalBinds
 
 rnLocalBindsAndThen (HsValBinds val_binds) thing_inside
-  = rnValBindsAndThen val_binds $ \ val_binds' -> 
+  = rnLocalValBindsAndThen val_binds $ \ val_binds' -> 
       thing_inside (HsValBinds val_binds')
 
 rnLocalBindsAndThen (HsIPBinds binds) thing_inside = do
@@ -223,7 +229,7 @@ rnLocalBindsAndThen (HsIPBinds binds) thing_inside = do
 rnIPBinds :: HsIPBinds RdrName -> RnM (HsIPBinds Name, FreeVars)
 rnIPBinds (IPBinds ip_binds _no_dict_binds) = do
     (ip_binds', fvs_s) <- mapAndUnzipM (wrapLocFstM rnIPBind) ip_binds
-    return (IPBinds ip_binds' emptyLHsBinds, plusFVs fvs_s)
+    return (IPBinds ip_binds' emptyTcEvBinds, plusFVs fvs_s)
 
 rnIPBind :: IPBind RdrName -> RnM (IPBind Name, FreeVars)
 rnIPBind (IPBind n expr) = do
@@ -242,10 +248,10 @@ rnIPBind (IPBind n expr) = do
 \begin{code}
 -- Renaming local binding gropus 
 -- Does duplicate/shadow check
-rnValBindsLHS :: MiniFixityEnv
-              -> HsValBinds RdrName
-              -> RnM ([Name], HsValBindsLR Name RdrName)
-rnValBindsLHS fix_env binds 
+rnLocalValBindsLHS :: MiniFixityEnv
+                   -> HsValBinds RdrName
+                   -> RnM ([Name], HsValBindsLR Name RdrName)
+rnLocalValBindsLHS fix_env binds 
   = do { -- Do error checking: we need to check for dups here because we
      	 -- don't don't bind all of the variables from the ValBinds at once
      	 -- with bindLocatedLocals any more.
@@ -260,8 +266,8 @@ rnValBindsLHS fix_env binds
      	 --   import A(f)
      	 --   g = let f = ... in f
      	 -- should.
-       ; binds' <- rnValBindsLHSFromDoc (localRecNameMaker fix_env) binds 
-       ; let bound_names = map unLoc $ collectHsValBinders binds'
+       ; binds' <- rnValBindsLHS (localRecNameMaker fix_env) binds 
+       ; let bound_names = collectHsValBinders binds'
        ; envs <- getRdrEnvs
        ; checkDupAndShadowedNames envs bound_names
        ; return (bound_names, binds') }
@@ -269,41 +275,44 @@ rnValBindsLHS fix_env binds
 -- renames the left-hand sides
 -- generic version used both at the top level and for local binds
 -- does some error checking, but not what gets done elsewhere at the top level
-rnValBindsLHSFromDoc :: NameMaker 
-                     -> HsValBinds RdrName
-                     -> RnM (HsValBindsLR Name RdrName)
-rnValBindsLHSFromDoc topP (ValBindsIn mbinds sigs)
+rnValBindsLHS :: NameMaker 
+              -> HsValBinds RdrName
+              -> RnM (HsValBindsLR Name RdrName)
+rnValBindsLHS topP (ValBindsIn mbinds sigs)
   = do { mbinds' <- mapBagM (rnBindLHS topP doc) mbinds
        ; return $ ValBindsIn mbinds' sigs }
   where
-    bndrs = collectHsBindBinders mbinds
+    bndrs = collectHsBindsBinders mbinds
     doc   = text "In the binding group for:" <+> pprWithCommas ppr bndrs
 
-rnValBindsLHSFromDoc _ b = pprPanic "rnValBindsLHSFromDoc" (ppr b)
+rnValBindsLHS _ b = pprPanic "rnValBindsLHSFromDoc" (ppr b)
 
 -- General version used both from the top-level and for local things
 -- Assumes the LHS vars are in scope
 --
 -- Does not bind the local fixity declarations
-rnValBindsRHSGen :: (FreeVars -> FreeVars)  -- for trimming free var sets
+rnValBindsRHS :: (FreeVars -> FreeVars)  -- for trimming free var sets
                      -- The trimming function trims the free vars we attach to a
                      -- binding so that it stays reasonably small
-                 -> NameSet	-- Names bound by the LHSes
-                 -> HsValBindsLR Name RdrName
-                 -> RnM (HsValBinds Name, DefUses)
+               -> Maybe NameSet	-- Names bound by the LHSes
+	       	  		-- Nothing if expect sigs for imports
+               -> HsValBindsLR Name RdrName
+               -> RnM (HsValBinds Name, DefUses)
 
-rnValBindsRHSGen trim bound_names (ValBindsIn mbinds sigs)
-  = do {  -- rename the sigs
-         sigs' <- renameSigs (Just bound_names) okBindSig sigs
-          -- rename the RHSes
+rnValBindsRHS trim mb_bound_names (ValBindsIn mbinds sigs)
+  = do { sigs' <- renameSigs mb_bound_names okBindSig sigs
        ; binds_w_dus <- mapBagM (rnBind (mkSigTvFn sigs') trim) mbinds
        ; case depAnalBinds binds_w_dus of
-            (anal_binds, anal_dus) -> do
-       { let valbind' = ValBindsOut anal_binds sigs'
-             valbind'_dus = usesOnly (hsSigsFVs sigs') `plusDU` anal_dus
-       ; return (valbind', valbind'_dus) }}
+           (anal_binds, anal_dus) -> return (valbind', valbind'_dus)
+              where
+                valbind' = ValBindsOut anal_binds sigs'
+                valbind'_dus = usesOnly (hsSigsFVs sigs') `plusDU` anal_dus
+       }
 
-rnValBindsRHSGen _ _ b = pprPanic "rnValBindsRHSGen" (ppr b)
+rnValBindsRHS _ _ b = pprPanic "rnValBindsRHS" (ppr b)
+
+noTrimFVs :: FreeVars -> FreeVars
+noTrimFVs fvs = fvs
 
 -- Wrapper for local binds
 --
@@ -311,11 +320,11 @@ rnValBindsRHSGen _ _ b = pprPanic "rnValBindsRHSGen" (ppr b)
 -- it doesn't (and can't: we don't have the thing inside the binds) happen here
 --
 -- The client is also responsible for bringing the fixities into scope
-rnValBindsRHS :: NameSet  -- names bound by the LHSes
-              -> HsValBindsLR Name RdrName
-              -> RnM (HsValBinds Name, DefUses)
-rnValBindsRHS bound_names binds
-  = rnValBindsRHSGen trim bound_names binds
+rnLocalValBindsRHS :: NameSet  -- names bound by the LHSes
+                   -> HsValBindsLR Name RdrName
+                   -> RnM (HsValBinds Name, DefUses)
+rnLocalValBindsRHS bound_names binds
+  = rnValBindsRHS trim (Just bound_names) binds
   where
     trim fvs = intersectNameSet bound_names fvs 
 	-- Only keep the names the names from this group
@@ -325,22 +334,22 @@ rnValBindsRHS bound_names binds
 --
 -- here there are no local fixity decls passed in;
 -- the local fixity decls come from the ValBinds sigs
-rnValBindsAndThen :: HsValBinds RdrName
-                  -> (HsValBinds Name -> RnM (result, FreeVars))
-                  -> RnM (result, FreeVars)
-rnValBindsAndThen binds@(ValBindsIn _ sigs) thing_inside
+rnLocalValBindsAndThen :: HsValBinds RdrName
+                       -> (HsValBinds Name -> RnM (result, FreeVars))
+                       -> RnM (result, FreeVars)
+rnLocalValBindsAndThen binds@(ValBindsIn _ sigs) thing_inside
  = do	{     -- (A) Create the local fixity environment 
 	  new_fixities <- makeMiniFixityEnv [L loc sig | L loc (FixSig sig) <- sigs]
 
 	      -- (B) Rename the LHSes 
-	; (bound_names, new_lhs) <- rnValBindsLHS new_fixities binds
+	; (bound_names, new_lhs) <- rnLocalValBindsLHS new_fixities binds
 
 	      --     ...and bring them (and their fixities) into scope
 	; bindLocalNamesFV bound_names              $
           addLocalFixities new_fixities bound_names $ do
 
 	{      -- (C) Do the RHS and thing inside
-	  (binds', dus) <- rnValBindsRHS (mkNameSet bound_names) new_lhs 
+	  (binds', dus) <- rnLocalValBindsRHS (mkNameSet bound_names) new_lhs 
         ; (result, result_fvs) <- thing_inside binds'
 
 		-- Report unused bindings based on the (accurate) 
@@ -352,9 +361,9 @@ rnValBindsAndThen binds@(ValBindsIn _ sigs) thing_inside
 
 	; let
             -- The variables "used" in the val binds are: 
-            --   (1) the uses of the binds (duUses)
+            --   (1) the uses of the binds (allUses)
             --   (2) the FVs of the thing-inside
-            all_uses = duUses dus `plusFV` result_fvs
+            all_uses = allUses dus `plusFV` result_fvs
 		-- Note [Unused binding hack]
 		-- ~~~~~~~~~~~~~~~~~~~~~~~~~~
 		-- Note that *in contrast* to the above reporting of
@@ -373,7 +382,7 @@ rnValBindsAndThen binds@(ValBindsIn _ sigs) thing_inside
          	-- The bound names are pruned out of all_uses
 	        -- by the bindLocalNamesFV call above
 
-rnValBindsAndThen bs _ = pprPanic "rnValBindsAndThen" (ppr bs)
+rnLocalValBindsAndThen bs _ = pprPanic "rnLocalValBindsAndThen" (ppr bs)
 
 
 -- Process the fixity declarations, making a FastString -> (Located Fixity) map
@@ -420,41 +429,19 @@ rnBindLHS :: NameMaker
           -- (i.e., any free variables of the pattern)
           -> RnM (LHsBindLR Name RdrName)
 
-rnBindLHS name_maker _ (L loc (PatBind { pat_lhs = pat, 
-                                         pat_rhs = grhss, 
-                                         pat_rhs_ty=pat_rhs_ty
-                                       })) 
+rnBindLHS name_maker _ (L loc bind@(PatBind { pat_lhs = pat }))
   = setSrcSpan loc $ do
       -- we don't actually use the FV processing of rnPatsAndThen here
       (pat',pat'_fvs) <- rnBindPat name_maker pat
-      return (L loc (PatBind { pat_lhs = pat', 
-                               pat_rhs = grhss, 
-                               -- we temporarily store the pat's FVs here;
-                               -- gets updated to the FVs of the whole bind
-                               -- when doing the RHS below
-                               bind_fvs = pat'_fvs,
-                               -- these will get ignored in the next pass,
-                               -- when we rename the RHS
-			       pat_rhs_ty = pat_rhs_ty }))
-
-rnBindLHS name_maker _ (L loc (FunBind { fun_id = name@(L nameLoc _), 
-                                         fun_infix = inf, 
-                                         fun_matches = matches,
-                                         fun_co_fn = fun_co_fn, 
-                                         fun_tick = fun_tick
-                                       }))
+      return (L loc (bind { pat_lhs = pat', bind_fvs = pat'_fvs }))
+                -- We temporarily store the pat's FVs in bind_fvs;
+                -- gets updated to the FVs of the whole bind
+                -- when doing the RHS below
+                            
+rnBindLHS name_maker _ (L loc bind@(FunBind { fun_id = name@(L nameLoc _) }))
   = setSrcSpan loc $ 
     do { newname <- applyNameMaker name_maker name
-       ; return (L loc (FunBind { fun_id = L nameLoc newname, 
-                             	  fun_infix = inf, 
-                             	  fun_matches = matches,
-                             	  -- we temporatily store the LHS's FVs (empty in this case) here
-                             	  -- gets updated when doing the RHS below
-                             	  bind_fvs = emptyFVs,
-                             	  -- everything else will get ignored in the next pass
-                             	  fun_co_fn = fun_co_fn, 
-                             	  fun_tick = fun_tick
-                             	  })) }
+       ; return (L loc (bind { fun_id = L nameLoc newname })) } 
 
 rnBindLHS _ _ b = pprPanic "rnBindLHS" (ppr b)
 
@@ -463,13 +450,13 @@ rnBind :: (Name -> [Name])		-- Signature tyvar function
        -> (FreeVars -> FreeVars)	-- Trimming function for rhs free vars
        -> LHsBindLR Name RdrName
        -> RnM (LHsBind Name, [Name], Uses)
-rnBind _ trim (L loc (PatBind { pat_lhs = pat,
-                                pat_rhs = grhss, 
-                                -- pat fvs were stored here while
-                                -- after processing the LHS          
-                                bind_fvs = pat_fvs }))
+rnBind _ trim (L loc bind@(PatBind { pat_lhs = pat
+                                   , pat_rhs = grhss 
+                                      -- pat fvs were stored in bind_fvs
+                                      -- after processing the LHS          
+                                   , bind_fvs = pat_fvs }))
   = setSrcSpan loc $ 
-    do	{let bndrs = collectPatBinders pat
+    do	{ let bndrs = collectPatBinders pat
 
 	; (grhss', fvs) <- rnGRHSs PatBindRhs grhss
 		-- No scoped type variables for pattern bindings
@@ -477,38 +464,29 @@ rnBind _ trim (L loc (PatBind { pat_lhs = pat,
               fvs'    = trim all_fvs
 
 	; fvs' `seq` -- See Note [Free-variable space leak]
-          return (L loc (PatBind { pat_lhs    = pat,
-                                   pat_rhs    = grhss', 
-				   pat_rhs_ty = placeHolderType, 
-                                   bind_fvs   = fvs' }),
+          return (L loc (bind { pat_rhs  = grhss' 
+			      , bind_fvs = fvs' }),
 		  bndrs, all_fvs) }
 
-rnBind sig_fn 
-       trim 
-       (L loc (FunBind { fun_id = name, 
-                         fun_infix = inf, 
-                         fun_matches = matches,
-                         -- no pattern FVs
-                         bind_fvs = _
-                       })) 
+rnBind sig_fn trim 
+       (L loc bind@(FunBind { fun_id = name 
+                            , fun_infix = is_infix 
+                            , fun_matches = matches })) 
        -- invariant: no free vars here when it's a FunBind
   = setSrcSpan loc $ 
     do	{ let plain_name = unLoc name
 
 	; (matches', fvs) <- bindSigTyVarsFV (sig_fn plain_name) $
 				-- bindSigTyVars tests for Opt_ScopedTyVars
-			     rnMatchGroup (FunRhs plain_name inf) matches
+			     rnMatchGroup (FunRhs plain_name is_infix) matches
 	; let fvs' = trim fvs
 
-	; checkPrecMatch inf plain_name matches'
+	; when is_infix $ checkPrecMatch plain_name matches'
 
 	; fvs' `seq` -- See Note [Free-variable space leak]
-      return (L loc (FunBind { fun_id = name,
-                                  fun_infix = inf, 
-                                  fun_matches = matches',
-				     bind_fvs = fvs',
-                                  fun_co_fn = idHsWrapper, 
-                                  fun_tick = Nothing }), 
+
+          return (L loc (bind { fun_matches = matches'
+			      , bind_fvs   = fvs' }), 
 		  [plain_name], fvs)
       }
 
@@ -608,48 +586,46 @@ rnMethodBinds :: Name			-- Class name
 	      -> RnM (LHsBinds Name, FreeVars)
 
 rnMethodBinds cls sig_fn gen_tyvars binds
-  = foldM do_one (emptyBag,emptyFVs) (bagToList binds)
-  where do_one (binds,fvs) bind = do
-	   (bind', fvs_bind) <- rnMethodBind cls sig_fn gen_tyvars bind
-	   return (bind' `unionBags` binds, fvs_bind `plusFV` fvs)
+  = foldlM do_one (emptyBag,emptyFVs) (bagToList binds)
+  where 
+    do_one (binds,fvs) bind 
+       = do { (bind', fvs_bind) <- rnMethodBind cls sig_fn gen_tyvars bind
+	    ; return (binds `unionBags` bind', fvs_bind `plusFV` fvs) }
 
 rnMethodBind :: Name
 	      -> (Name -> [Name])
 	      -> [Name]
 	      -> LHsBindLR RdrName RdrName
 	      -> RnM (Bag (LHsBindLR Name Name), FreeVars)
-rnMethodBind cls sig_fn gen_tyvars (L loc (FunBind { fun_id = name, fun_infix = inf, 
-					             fun_matches = MatchGroup matches _ }))
+rnMethodBind cls sig_fn gen_tyvars 
+             (L loc bind@(FunBind { fun_id = name, fun_infix = is_infix 
+				  , fun_matches = MatchGroup matches _ }))
   = setSrcSpan loc $ do
     sel_name <- wrapLocM (lookupInstDeclBndr cls) name
     let plain_name = unLoc sel_name
         -- We use the selector name as the binder
 
-    bindSigTyVarsFV (sig_fn plain_name) $ do
-     (new_matches, fvs) <- mapFvRn (rn_match plain_name) matches
-     let
-         new_group = MatchGroup new_matches placeHolderType
+    (new_matches, fvs) <- bindSigTyVarsFV (sig_fn plain_name) $
+                          mapFvRn (rn_match (FunRhs plain_name is_infix)) matches
+    let new_group = MatchGroup new_matches placeHolderType
 
-     checkPrecMatch inf plain_name new_group
-     return (unitBag (L loc (FunBind {
-                                fun_id = sel_name, fun_infix = inf,
-                                fun_matches = new_group,
-                                bind_fvs = fvs, fun_co_fn = idHsWrapper,
-                                fun_tick = Nothing })),
+    when is_infix $ checkPrecMatch plain_name new_group
+    return (unitBag (L loc (bind { fun_id      = sel_name 
+                                 , fun_matches = new_group
+                                 , bind_fvs    = fvs })),
              fvs `addOneFV` plain_name)
         -- The 'fvs' field isn't used for method binds
   where
 	-- Truly gruesome; bring into scope the correct members of the generic 
 	-- type variables.  See comments in RnSource.rnSourceDecl(ClassDecl)
-    rn_match sel_name match@(L _ (Match (L _ (TypePat ty) : _) _ _))
+    rn_match info match@(L _ (Match (L _ (TypePat ty) : _) _ _))
 	= extendTyVarEnvFVRn gen_tvs 	$
-	  rnMatch (FunRhs sel_name inf) match
+	  rnMatch info match
 	where
 	  tvs     = map (rdrNameOcc.unLoc) (extractHsTyRdrTyVars ty)
 	  gen_tvs = [tv | tv <- gen_tyvars, nameOccName tv `elem` tvs] 
 
-    rn_match sel_name match = rnMatch (FunRhs sel_name inf) match
-
+    rn_match info match = rnMatch info match
 
 -- Can't handle method pattern-bindings which bind multiple methods.
 rnMethodBind _ _ _ (L loc bind@(PatBind {})) = do
@@ -678,16 +654,22 @@ signatures.  We'd only need this if we wanted to report unused tyvars.
 
 \begin{code}
 renameSigs :: Maybe NameSet		-- If (Just ns) complain if the sig isn't for one of ns
-	   -> (Sig RdrName -> Bool) 	-- Complain about the wrong kind of signature if this is False
+	   -> (Sig Name -> Bool) 	-- Complain about the wrong kind of signature if this is False
 	   -> [LSig RdrName]
 	   -> RnM [LSig Name]
 -- Renames the signatures and performs error checks
 renameSigs mb_names ok_sig sigs 
-  = do	{ let (good_sigs, bad_sigs) = partition (ok_sig . unLoc) sigs
-	; mapM_ unknownSigErr bad_sigs			-- Misplaced
-	; mapM_ dupSigDeclErr (findDupsEq eqHsSig sigs)	-- Duplicate
-	; sigs' <- mapM (wrapLocM (renameSig mb_names)) good_sigs
-	; return sigs' } 
+  = do	{ mapM_ dupSigDeclErr (findDupsEq eqHsSig sigs)  -- Duplicate
+	  	-- Check for duplicates on RdrName version, 
+		-- because renamed version has unboundName for
+		-- not-in-scope binders, which gives bogus dup-sig errors
+
+	; sigs' <- mapM (wrapLocM (renameSig mb_names)) sigs
+
+	; let (good_sigs, bad_sigs) = partition (ok_sig . unLoc) sigs'
+	; mapM_ misplacedSigErr bad_sigs		 -- Misplaced
+
+	; return good_sigs } 
 
 ----------------------
 -- We use lookupSigOccRn in the signatures, which is a little bit unsatisfactory
@@ -712,8 +694,14 @@ renameSig _ (SpecInstSig ty)
   = do	{ new_ty <- rnLHsType (text "A SPECIALISE instance pragma") ty
 	; return (SpecInstSig new_ty) }
 
+-- {-# SPECIALISE #-} pragmas can refer to imported Ids
+-- so, in the top-level case (when mb_names is Nothing)
+-- we use lookupOccRn.  If there's both an imported and a local 'f'
+-- then the SPECIALISE pragma is ambiguous, unlike alll other signatures
 renameSig mb_names sig@(SpecSig v ty inl)
-  = do	{ new_v <- lookupSigOccRn mb_names sig v
+  = do	{ new_v <- case mb_names of
+                     Just {} -> lookupSigOccRn mb_names sig v
+                     Nothing -> lookupLocatedOccRn v
 	; new_ty <- rnHsSigType (quotes (ppr v)) ty
 	; return (SpecSig new_v new_ty inl) }
 
@@ -784,7 +772,7 @@ rnGRHS ctxt = wrapLocFstM (rnGRHS' ctxt)
 
 rnGRHS' :: HsMatchContext Name -> GRHS RdrName -> RnM (GRHS Name, FreeVars)
 rnGRHS' ctxt (GRHS guards rhs)
-  = do	{ pattern_guards_allowed <- doptM Opt_PatternGuards
+  = do	{ pattern_guards_allowed <- xoptM Opt_PatternGuards
 	; ((guards', rhs'), fvs) <- rnStmts (PatGuard ctxt) guards $
 				    rnLExpr rhs
 
@@ -818,8 +806,8 @@ dupSigDeclErr sigs@(L loc sig : _)
     ppr_sig (L loc sig) = ppr loc <> colon <+> ppr sig
 dupSigDeclErr [] = panic "dupSigDeclErr"
 
-unknownSigErr :: LSig RdrName -> RnM ()
-unknownSigErr (L loc sig)
+misplacedSigErr :: LSig Name -> RnM ()
+misplacedSigErr (L loc sig)
   = addErrAt loc $
     sep [ptext (sLit "Misplaced") <+> hsSigDoc sig <> colon, ppr sig]
 

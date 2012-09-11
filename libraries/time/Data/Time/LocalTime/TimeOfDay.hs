@@ -1,3 +1,5 @@
+{-# OPTIONS -fno-warn-unused-imports #-}
+#include "HsConfigure.h"
 -- #hide
 module Data.Time.LocalTime.TimeOfDay
 (
@@ -13,6 +15,9 @@ import Data.Time.Calendar.Private
 import Data.Time.Clock
 import Data.Typeable
 import Data.Fixed
+#if LANGUAGE_Rank2Types
+import Data.Data
+#endif
 
 -- | Time of day as represented in hour, minute and second (with picoseconds), typically used to express local time of day.
 data TimeOfDay = TimeOfDay {
@@ -23,7 +28,15 @@ data TimeOfDay = TimeOfDay {
 	-- | Note that 0 <= todSec < 61, accomodating leap seconds.
 	-- Any local minute may have a leap second, since leap seconds happen in all zones simultaneously
 	todSec     :: Pico
-} deriving (Eq,Ord)
+} deriving (Eq,Ord
+#if LANGUAGE_DeriveDataTypeable
+#if LANGUAGE_Rank2Types
+#if HAS_DataPico
+    ,Data
+#endif
+#endif
+#endif
+    )
 
 instance Typeable TimeOfDay where
 	typeOf _ = mkTyConApp (mkTyCon "Data.Time.LocalTime.TimeOfDay.TimeOfDay") []
@@ -41,9 +54,9 @@ instance Show TimeOfDay where
 
 makeTimeOfDayValid :: Int -> Int -> Pico -> Maybe TimeOfDay
 makeTimeOfDayValid h m s = do
-	clipValid 0 23 h
-	clipValid 0 59 m
-	clipValid 0 60.999999999999 s
+	_ <- clipValid 0 23 h
+	_ <- clipValid 0 59 m
+	_ <- clipValid 0 60.999999999999 s
 	return (TimeOfDay h m s)
 
 -- | Convert a ToD in UTC to a ToD in some timezone, together with a day adjustment.
@@ -80,4 +93,4 @@ dayFractionToTimeOfDay df = timeToTimeOfDay (realToFrac (df * 86400))
 
 -- | Get the fraction of a day since midnight given a TimeOfDay.
 timeOfDayToDayFraction :: TimeOfDay -> Rational
-timeOfDayToDayFraction tod = realToFrac (timeOfDayToTime tod / posixDayLength)
+timeOfDayToDayFraction tod = realToFrac (timeOfDayToTime tod) / realToFrac posixDayLength

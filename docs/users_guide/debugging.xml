@@ -120,8 +120,9 @@
                 <indexterm><primary><option>-ddump-rules</option></primary></indexterm>
 	      </term>
 	      <listitem>
-		<para>dumps all rewrite rules (including those generated
-	      by the specialisation pass)</para>
+		<para>dumps all rewrite rules specified in this module; 
+                      see <xref linkend="controlling-rules"/>.
+                </para>
 	      </listitem>
 	    </varlistentry>
 
@@ -177,8 +178,8 @@
 
 	    <varlistentry>
 	      <term>
-	        <option>-ddump-workwrap</option>:
-                <indexterm><primary><option>-ddump-workwrap</option></primary></indexterm>
+	        <option>-ddump-worker-wrapper</option>:
+                <indexterm><primary><option>-ddump-worker-wrapper</option></primary></indexterm>
 	      </term>
 	      <listitem>
 		<para>worker/wrapper split output</para>
@@ -285,7 +286,7 @@
         </term>
 	<listitem>
 	  <para>Show the output of each run of the simplifier.  Used when even
-        <option>-dverbose-simpl</option> doesn't cut it.</para>
+        <option>-dverbose-core2core</option> doesn't cut it.</para>
 	</listitem>
       </varlistentry>
 
@@ -374,7 +375,7 @@
         of output!) So: when we're really desperate:</para>
 
 	  <screen>
-% ghc -noC -O -ddump-simpl -dverbose-simpl -dcore-lint Foo.hs
+% ghc -noC -O -ddump-simpl -dverbose-core2core -dcore-lint Foo.hs
 </screen>
 
 	</listitem>
@@ -432,6 +433,27 @@
 	  it makes the output of two compiler runs have many fewer gratuitous differences,
 	    so you can realistically apply <command>diff</command>.  Once <command>diff</command>
 	  has shown you where to look, you can try again without <option>-dsuppress-uniques</option></para>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry>
+	<term>
+          <option>-dsuppress-coercions</option>
+          <indexterm><primary><option>-dsuppress-coercions</option></primary></indexterm>
+        </term>
+	<listitem>
+          <para>Suppress the printing of coercions in Core dumps to make them
+shorter.</para>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry>
+	<term>
+          <option>-dsuppress-module-prefixes</option>
+          <indexterm><primary><option>-dsuppress-module-prefixes</option></primary></indexterm>
+        </term>
+	<listitem>
+          <para>Suppress the printing of module qualification prefixes in Core dumps to make them easier to read.</para>
 	</listitem>
       </varlistentry>
 
@@ -639,7 +661,6 @@ Main.skip2{-r1L6-} =
 
 <!-- Emacs stuff:
      ;;; Local Variables: ***
-     ;;; mode: xml ***
      ;;; sgml-parent-document: ("users_guide.xml" "book" "chapter" "sect1") ***
      ;;; End: ***
  -->

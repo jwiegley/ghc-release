@@ -13,9 +13,6 @@
 /* 
  * WARNING WARNING WARNING
  *
- * Keep the closure tags contiguous: rts/ClosureFlags.c relies on
- * this.
- *
  * If you add or delete any closure types, don't forget to update
  * the closure flags table in rts/ClosureFlags.c.
  */
@@ -50,42 +47,36 @@
 #define PAP			26
 #define AP_STACK                27
 #define IND		        28
-#define IND_OLDGEN	        29
-#define IND_PERM	        30
-#define IND_OLDGEN_PERM	        31
-#define IND_STATIC	        32
-#define RET_BCO                 33
-#define RET_SMALL	        34
-#define RET_BIG		        35
-#define RET_DYN		        36
-#define RET_FUN                 37
-#define UPDATE_FRAME	        38
-#define CATCH_FRAME	        39
-#define STOP_FRAME	        40
-#define CAF_BLACKHOLE		41
-#define BLACKHOLE	        42
-#define MVAR_CLEAN	        43
-#define MVAR_DIRTY	        44
-#define ARR_WORDS	        45
-#define MUT_ARR_PTRS_CLEAN      46
-#define MUT_ARR_PTRS_DIRTY      47
-#define MUT_ARR_PTRS_FROZEN0    48
-#define MUT_ARR_PTRS_FROZEN     49
-#define MUT_VAR_CLEAN	        50
-#define MUT_VAR_DIRTY	        51
-#define WEAK		        52
-#define STABLE_NAME	        53
-#define TSO		        54
-#define TVAR_WATCH_QUEUE        55
-#define INVARIANT_CHECK_QUEUE   56
-#define ATOMIC_INVARIANT        57
-#define TVAR                    58
-#define TREC_CHUNK              59
-#define TREC_HEADER             60
-#define ATOMICALLY_FRAME        61
-#define CATCH_RETRY_FRAME       62
-#define CATCH_STM_FRAME         63
-#define WHITEHOLE               64
-#define N_CLOSURE_TYPES         65
+#define IND_PERM	        29
+#define IND_STATIC	        30
+#define RET_BCO                 31
+#define RET_SMALL	        32
+#define RET_BIG		        33
+#define RET_DYN		        34
+#define RET_FUN                 35
+#define UPDATE_FRAME	        36
+#define CATCH_FRAME	        37
+#define STOP_FRAME	        38
+#define BLOCKING_QUEUE		39
+#define BLACKHOLE	        40
+#define MVAR_CLEAN	        41
+#define MVAR_DIRTY	        42
+#define ARR_WORDS	        43
+#define MUT_ARR_PTRS_CLEAN      44
+#define MUT_ARR_PTRS_DIRTY      45
+#define MUT_ARR_PTRS_FROZEN0    46
+#define MUT_ARR_PTRS_FROZEN     47
+#define MUT_VAR_CLEAN	        48
+#define MUT_VAR_DIRTY	        49
+#define WEAK		        50
+#define PRIM		        51
+#define MUT_PRIM                52
+#define TSO		        53
+#define TREC_CHUNK              54
+#define ATOMICALLY_FRAME        55
+#define CATCH_RETRY_FRAME       56
+#define CATCH_STM_FRAME         57
+#define WHITEHOLE               58
+#define N_CLOSURE_TYPES         59
 
 #endif /* RTS_STORAGE_CLOSURETYPES_H */

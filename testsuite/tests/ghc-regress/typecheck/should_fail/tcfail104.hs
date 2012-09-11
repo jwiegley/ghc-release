@@ -1,18 +1,23 @@
-{-# OPTIONS -fglasgow-exts #-}
+{-# LANGUAGE Rank2Types, ScopedTypeVariables #-}
 
 -- Test the handling of conditionals in rank-n stuff
 -- Should fail, regardless of branch ordering
 
 module ShouldFail where
 
-f v = (if v then
+-- These two are ok
+f1 = (\ (x :: forall a. a->a) -> x) 
+f2 = (\ (x :: forall a. a->a) -> x) id 'c'
+
+-- These fail
+f3 v = (if v then
 	  (\ (x :: forall a. a->a) -> x) 
 	else
 	  (\ x -> x) 
       ) id 'c'
 
-g v = (if v then
-	  (\ (x :: forall a. a->a) -> x) 
-	else
+f4 v = (if v then
 	  (\ x -> x) 
-      ) id 'c'
+	else
+	  (\ (x :: forall a. a->a) -> x) 
+       ) id 'c'

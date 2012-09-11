@@ -1,5 +1,7 @@
 module System.Console.Haskeline.Backend.Win32(
-                win32Term
+                win32Term,
+                win32TermStdin,
+                fileRunTerm
                 )where
 
 
@@ -7,7 +9,7 @@ import System.IO
 import Foreign
 import Foreign.C
 import System.Win32 hiding (multiByteToWideChar)
-import Graphics.Win32.Misc(getStdHandle, sTD_INPUT_HANDLE, sTD_OUTPUT_HANDLE)
+import Graphics.Win32.Misc(getStdHandle, sTD_OUTPUT_HANDLE)
 import Data.List(intercalate)
 import Control.Concurrent hiding (throwTo)
 import Data.Char(isPrint)
@@ -17,7 +19,7 @@ import Control.Monad
 import System.Console.Haskeline.Key
 import System.Console.Haskeline.Monads
 import System.Console.Haskeline.LineState
-import System.Console.Haskeline.Term
+import System.Console.Haskeline.Term as Term
 
 import Data.ByteString.Internal (createAndTrim)
 import qualified Data.ByteString as B
@@ -53,17 +55,23 @@ eventReader h = do
         else do
             es <- readEvents h
             return $ mapMaybe processEvent es
-                       
-getConOut :: IO (Maybe HANDLE)
-getConOut = handle (\(_::IOException) -> return Nothing) $ fmap Just
-    $ createFile "CONOUT$" (gENERIC_READ .|. gENERIC_WRITE)
-                        (fILE_SHARE_READ .|. fILE_SHARE_WRITE) Nothing
-                    oPEN_EXISTING 0 Nothing
 
+consoleHandles :: MaybeT IO Handles
+consoleHandles = do
+    h_in <- open "CONIN$"
+    h_out <- open "CONOUT$"
+    return Handles { hIn = h_in, hOut = h_out }
+  where
+   open file = handle (\(_::IOException) -> mzero) $ liftIO
+                $ createFile file (gENERIC_READ .|. gENERIC_WRITE)
+                        (fILE_SHARE_READ .|. fILE_SHARE_WRITE) Nothing
+                        oPEN_EXISTING 0 Nothing
+
+                       
 processEvent :: InputEvent -> Maybe Event
 processEvent KeyEvent {keyDown = True, unicodeChar = c, virtualKeyCode = vc,
                     controlKeyState = cstate}
-    = fmap (KeyInput . Key modifier') $ keyFromCode vc `mplus` simpleKeyChar
+    = fmap (\e -> KeyInput [Key modifier' e]) $ keyFromCode vc `mplus` simpleKeyChar
   where
     simpleKeyChar = guard (c /= '\NUL') >> return (KeyChar c)
     testMod ck = (cstate .&. ck) /= 0
@@ -215,9 +223,9 @@ foreign import stdcall "windows.h GetConsoleMode" c_GetConsoleMode
 foreign import stdcall "windows.h SetConsoleMode" c_SetConsoleMode
     :: HANDLE -> DWORD -> IO Bool
 
-withWindowMode :: MonadException m => m a -> m a
-withWindowMode f = do
-    h <- liftIO $ getStdHandle sTD_INPUT_HANDLE
+withWindowMode :: MonadException m => Handles -> m a -> m a
+withWindowMode hs f = do
+    let h = hIn hs
     bracket (getConsoleMode h) (setConsoleMode h)
             $ \m -> setConsoleMode h (m .|. (#const ENABLE_WINDOW_INPUT)) >> f
   where
@@ -229,8 +237,13 @@ withWindowMode f = do
 ----------------------------
 -- Drawing
 
-newtype Draw m a = Draw {runDraw :: ReaderT HANDLE m a}
-    deriving (Monad,MonadIO,MonadException, MonadReader HANDLE)
+data Handles = Handles { hIn, hOut :: HANDLE }
+
+closeHandles :: Handles -> IO ()
+closeHandles hs = closeHandle (hIn hs) >> closeHandle (hOut hs)
+
+newtype Draw m a = Draw {runDraw :: ReaderT Handles m a}
+    deriving (Monad,MonadIO,MonadException, MonadReader Handles)
 
 type DrawM a = (MonadIO m, MonadReader Layout m) => Draw m ()
 
@@ -238,16 +251,16 @@ instance MonadTrans Draw where
     lift = Draw . lift
 
 getPos :: MonadIO m => Draw m Coord
-getPos = ask >>= liftIO . getPosition
+getPos = asks hOut >>= liftIO . getPosition
     
 setPos :: MonadIO m => Coord -> Draw m ()
 setPos c = do
-    h <- ask
+    h <- asks hOut
     liftIO (setPosition h c)
 
 printText :: MonadIO m => String -> Draw m ()
 printText txt = do
-    h <- ask
+    h <- asks hOut
     liftIO (writeConsole h txt)
     
 printAfter :: String -> DrawM ()
@@ -278,7 +291,9 @@ crlf :: String
 crlf = "\r\n"
 
 instance (MonadException m, MonadReader Layout m) => Term (Draw m) where
-    drawLineDiff = drawLineDiffWin
+    drawLineDiff (xs1,ys1) (xs2,ys2) = let
+        fixEsc = filter ((/= '\ESC') . baseChar)
+        in drawLineDiffWin (fixEsc xs1, fixEsc ys1) (fixEsc xs2, fixEsc ys2)
     -- TODO now that we capture resize events.
     -- first, looks like the cursor stays on the same line but jumps
     -- to the beginning if cut off.
@@ -300,45 +315,51 @@ instance (MonadException m, MonadReader Layout m) => Term (Draw m) where
     ringBell True = liftIO messageBeep
     ringBell False = return () -- TODO
 
-win32Term :: IO RunTerm
-win32Term = do
-    fileRT <- fileRunTerm
-    inIsTerm <- hIsTerminalDevice stdin
-    if not inIsTerm
-        then return fileRT
-        else do
-            oterm <- getConOut
-            case oterm of
-                Nothing -> return fileRT
-                Just h -> do
-                        ch <- newChan
-                        return fileRT {
-                            wrapInterrupt = withWindowMode . withCtrlCHandler,
-                            termOps = Just TermOps {
-                                getLayout = getBufferSize h
-                                , withGetEvent = win32WithEvent ch
-                                , runTerm = \(RunTermType f) ->
-                                        runReaderT' h $ runDraw f
-                                },
-                            closeTerm = closeHandle h}
+win32TermStdin :: MaybeT IO RunTerm
+win32TermStdin = do
+    liftIO (hIsTerminalDevice stdin) >>= guard
+    win32Term
 
-win32WithEvent :: MonadException m => Chan Event -> (m Event -> m a) -> m a
-win32WithEvent eventChan f = do
-    inH <- liftIO $ getStdHandle sTD_INPUT_HANDLE
-    f $ liftIO $ getEvent inH eventChan
+win32Term :: MaybeT IO RunTerm
+win32Term = do
+    hs <- consoleHandles
+    ch <- liftIO newChan
+    fileRT <- liftIO $ fileRunTerm stdin
+    return fileRT {
+                            termOps = Left TermOps {
+                                getLayout = getBufferSize (hOut hs)
+                                , withGetEvent = withWindowMode hs
+                                                    . win32WithEvent hs ch
+                                , runTerm = \(RunTermType f) ->
+                                        runReaderT' hs $ runDraw f
+                                },
+                            closeTerm = closeHandles hs
+                        }
+
+win32WithEvent :: MonadException m => Handles -> Chan Event
+                                        -> (m Event -> m a) -> m a
+win32WithEvent h eventChan f = f $ liftIO $ getEvent (hIn h) eventChan
 
 -- stdin is not a terminal, but we still need to check the right way to output unicode to stdout.
-fileRunTerm :: IO RunTerm
-fileRunTerm = do
+fileRunTerm :: Handle -> IO RunTerm
+fileRunTerm h_in = do
     putter <- putOut
     cp <- getCodePage
-    return RunTerm {termOps = Nothing,
+    return RunTerm {
                     closeTerm = return (),
                     putStrOut = putter,
                     encodeForTerm = unicodeToCodePage cp,
                     decodeForTerm = codePageToUnicode cp,
-                    getLocaleChar = getMultiByteChar cp,
-                    wrapInterrupt = withCtrlCHandler}
+                    wrapInterrupt = withCtrlCHandler,
+                    termOps = Right FileOps {
+                                inputHandle = h_in,
+                                getLocaleChar = getMultiByteChar cp h_in,
+                                maybeReadNewline = hMaybeReadNewline h_in,
+                                getLocaleLine = Term.hGetLine h_in
+                                            >>= liftIO . codePageToUnicode cp
+                            }
+
+                    }
 
 -- On Windows, Unicode written to the console must be written with the WriteConsole API call.
 -- And to make the API cross-platform consistent, Unicode to a file should be UTF-8.
@@ -352,8 +373,8 @@ putOut = do
         else do
             cp <- getCodePage
             return $ \str -> unicodeToCodePage cp str >>= B.putStr >> hFlush stdout
-                
-    
+
+
 
 type Handler = DWORD -> IO BOOL
 
@@ -420,16 +441,15 @@ getCodePage = do
 foreign import stdcall "IsDBCSLeadByteEx" c_IsDBCSLeadByteEx
         :: CodePage -> BYTE -> BOOL
 
-getMultiByteChar :: CodePage -> IO Char
-getMultiByteChar cp = hWithBinaryMode stdin $ do
-    b1 <- getByte
-    bs <- if c_IsDBCSLeadByteEx cp b1
-            then getByte >>= \b2 -> return [b1,b2]
-            else return [b1]
-    cs <- codePageToUnicode cp (B.pack bs)
-    case cs of
-        [] -> getMultiByteChar cp
-        (c:_) -> return c
+getMultiByteChar :: CodePage -> Handle -> MaybeT IO Char
+getMultiByteChar cp h = hWithBinaryMode h loop
   where
-    -- NOTE: relies on getChar returning an 8-bit Char.
-    getByte = fmap (toEnum . fromEnum) getChar
+    loop = do
+        b1 <- hGetByte h
+        bs <- if c_IsDBCSLeadByteEx cp b1
+                then hGetByte h >>= \b2 -> return [b1,b2]
+                else return [b1]
+        cs <- liftIO $ codePageToUnicode cp (B.pack bs)
+        case cs of
+            [] -> loop
+            (c:_) -> return c

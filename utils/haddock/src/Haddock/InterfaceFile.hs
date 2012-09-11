@@ -11,9 +11,8 @@
 --
 -- Reading and writing the .haddock interface file
 -----------------------------------------------------------------------------
-
 module Haddock.InterfaceFile (
-  InterfaceFile(..),
+  InterfaceFile(..), ifPackageId,
   readInterfaceFile, nameCacheFromGhc, freshNameCache, NameCacheAccessor,
   writeInterfaceFile
 ) where
@@ -40,10 +39,18 @@ import FastMutInt
 import FastString
 import Unique
 
+
 data InterfaceFile = InterfaceFile {
   ifLinkEnv         :: LinkEnv,
   ifInstalledIfaces :: [InstalledInterface]
-} 
+}
+
+
+ifPackageId :: InterfaceFile -> PackageId
+ifPackageId if_ =
+  case ifInstalledIfaces if_ of
+    [] -> error "empty InterfaceFile"
+    iface:_ -> modulePackageId $ instMod iface
 
 
 binaryInterfaceMagic :: Word32
@@ -54,14 +61,14 @@ binaryInterfaceMagic = 0xD0Cface
 -- because we store GHC datatypes in our interface files, we need to make sure
 -- we version our interface files accordingly.
 binaryInterfaceVersion :: Word16
-#if __GLASGOW_HASKELL__ == 610
-binaryInterfaceVersion = 14
-#elif __GLASGOW_HASKELL__ == 611
-binaryInterfaceVersion = 15
-#elif __GLASGOW_HASKELL__ == 612
+#if __GLASGOW_HASKELL__ == 612
 binaryInterfaceVersion = 15
 #elif __GLASGOW_HASKELL__ == 613
 binaryInterfaceVersion = 15
+#elif __GLASGOW_HASKELL__ == 700
+binaryInterfaceVersion = 16
+#elif __GLASGOW_HASKELL__ == 701
+binaryInterfaceVersion = 16
 #else
 #error Unknown GHC version
 #endif
@@ -107,7 +114,7 @@ writeInterfaceFile filename iface = do
   -- write the symtab pointer at the front of the file
   symtab_p <- tellBin bh
   putAt bh symtab_p_p symtab_p
-  seekBin bh symtab_p		
+  seekBin bh symtab_p
 
   -- write the symbol table itself
   symtab_next' <- readFastMutInt symtab_next
@@ -127,6 +134,7 @@ writeInterfaceFile filename iface = do
   -- and send the result to the file
   writeBinMem bh filename
   return ()
+
 
 type NameCacheAccessor m = (m NameCache, NameCache -> m ())
 
@@ -148,6 +156,7 @@ freshNameCache = ( create_fresh_nc , \_ -> return () )
     create_fresh_nc = do
        u  <- mkSplitUniqSupply 'a' -- ??
        return (initNameCache u [])
+
 
 -- | Read a Haddock (@.haddock@) interface file. Return either an 
 -- 'InterfaceFile' or an error message.
@@ -209,8 +218,9 @@ readInterfaceFile (get_name_cache, set_name_cache) filename = do
       seekBin bh1 data_p'
       return (nc', symtab)
 
+
 -------------------------------------------------------------------------------
--- Symbol table
+-- * Symbol table
 -------------------------------------------------------------------------------
 
 
@@ -265,18 +275,21 @@ putSymbolTable bh next_off symtab = do
   let names = elems (array (0,next_off-1) (eltsUFM symtab))
   mapM_ (\n -> serialiseName bh n symtab) names
 
+
 getSymbolTable :: BinHandle -> NameCache -> IO (NameCache, Array Int Name)
 getSymbolTable bh namecache = do
   sz <- get bh
   od_names <- sequence (replicate sz (get bh))
-  let 
+  let
         arr = listArray (0,sz-1) names
-        (namecache', names) =    
+        (namecache', names) =
                 mapAccumR (fromOnDiskName arr) namecache od_names
   --
   return (namecache', arr)
 
+
 type OnDiskName = (PackageId, ModuleName, OccName)
+
 
 fromOnDiskName
    :: Array Int Name
@@ -284,22 +297,23 @@ fromOnDiskName
    -> OnDiskName
    -> (NameCache, Name)
 fromOnDiskName _ nc (pid, mod_name, occ) =
-  let 
+  let
         modu  = mkModule pid mod_name
         cache = nsNames nc
   in
   case lookupOrigNameCache cache modu occ of
      Just name -> (nc, name)
-     Nothing   -> 
-        let 
+     Nothing   ->
+        let
                 us        = nsUniqs nc
                 u         = uniqFromSupply us
                 name      = mkExternalName u modu occ noSrcSpan
                 new_cache = extendNameCache cache modu occ name
-        in        
-        case splitUniqSupply us of { (us',_) -> 
+        in
+        case splitUniqSupply us of { (us',_) ->
         ( nc{ nsUniqs = us', nsNames = new_cache }, name )
         }
+
 
 serialiseName :: BinHandle -> Name -> UniqFM (Int,Name) -> IO ()
 serialiseName bh name _ = do
@@ -308,11 +322,10 @@ serialiseName bh name _ = do
 
 
 -------------------------------------------------------------------------------
--- GhcBinary instances
+-- * GhcBinary instances
 -------------------------------------------------------------------------------
 
--- Hmm, why didn't we dare to make this instance already? It makes things
--- much easier.
+
 instance (Ord k, Binary k, Binary v) => Binary (Map k v) where
   put_ bh m = put_ bh (Map.toList m)
   get bh = fmap (Map.fromList) (get bh)
@@ -347,7 +360,7 @@ instance Binary InstalledInterface where
     visExps <- get bh
     opts    <- get bh
     subMap  <- get bh
-    
+
     return (InstalledInterface modu info docMap
             exps visExps opts subMap)
 
@@ -375,8 +388,18 @@ instance Binary DocOption where
               _ -> fail "invalid binary data found"
 
 
+instance Binary Example where
+    put_ bh (Example expression result) = do
+        put_ bh expression
+        put_ bh result
+    get bh = do
+        expression <- get bh
+        result <- get bh
+        return (Example expression result)
+
+
 {-* Generated by DrIFT : Look, but Don't Touch. *-}
-instance (Binary id) => Binary (HsDoc id) where
+instance (Binary id) => Binary (Doc id) where
     put_ bh DocEmpty = do
             putByte bh 0
     put_ bh (DocAppend aa ab) = do
@@ -422,6 +445,9 @@ instance (Binary id) => Binary (HsDoc id) where
     put_ bh (DocAName an) = do
             putByte bh 14
             put_ bh an
+    put_ bh (DocExamples ao) = do
+            putByte bh 15
+            put_ bh ao
     get bh = do
             h <- getByte bh
             case h of
@@ -470,6 +496,9 @@ instance (Binary id) => Binary (HsDoc id) where
               14 -> do
                     an <- get bh
                     return (DocAName an)
+              15 -> do
+                    ao <- get bh
+                    return (DocExamples ao)
               _ -> fail "invalid binary data found"
 
 
@@ -479,7 +508,7 @@ instance Binary name => Binary (HaddockModInfo name) where
     put_ bh (hmi_portability hmi)
     put_ bh (hmi_stability   hmi)
     put_ bh (hmi_maintainer  hmi)
-  
+
   get bh = do
     descr <- get bh
     porta <- get bh

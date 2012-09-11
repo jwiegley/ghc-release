@@ -4,6 +4,7 @@
 %
 
 \begin{code}
+{-# LANGUAGE DeriveDataTypeable #-}
 
 -- | CoreSyn holds all the main data types for use by for the Glasgow Haskell Compiler midsection
 module CoreSyn (
@@ -25,7 +26,7 @@ module CoreSyn (
 	mkConApp, mkTyBind,
 	varToCoreExpr, varsToCoreExprs,
 
-        isTyVar, isId, cmpAltCon, cmpAlt, ltAlt,
+        isTyCoVar, isId, cmpAltCon, cmpAlt, ltAlt,
 	
 	-- ** Simple 'Expr' access functions and predicates
 	bindersOf, bindersOfBinds, rhssOfBind, rhssOfAlts, 
@@ -33,18 +34,24 @@ module CoreSyn (
 	collectArgs, coreExprCc, flattenBinds, 
 
 	isValArg, isTypeArg, valArgCount, valBndrCount, isRuntimeArg, isRuntimeVar,
+	notSccNote,
 
 	-- * Unfolding data types
-	Unfolding(..),	UnfoldingGuidance(..), 	-- Both abstract everywhere but in CoreUnfold.lhs
+	Unfolding(..),	UnfoldingGuidance(..), UnfoldingSource(..),
+		-- Abstract everywhere but in CoreUnfold.lhs
 	
 	-- ** Constructing 'Unfolding's
 	noUnfolding, evaldUnfolding, mkOtherCon,
+        unSaturatedOk, needSaturated, boringCxtOk, boringCxtNotOk,
 	
 	-- ** Predicates and deconstruction on 'Unfolding'
-	unfoldingTemplate, maybeUnfoldingTemplate, otherCons, 
+	unfoldingTemplate, setUnfoldingTemplate, expandUnfolding_maybe,
+	maybeUnfoldingTemplate, otherCons, unfoldingArity,
 	isValueUnfolding, isEvaldUnfolding, isCheapUnfolding,
-        isExpandableUnfolding, isCompulsoryUnfolding,
-	hasUnfolding, hasSomeUnfolding, neverUnfold,
+        isExpandableUnfolding, isConLikeUnfolding, isCompulsoryUnfolding,
+	isStableUnfolding, isStableUnfolding_maybe, 
+        isClosedUnfolding, hasSomeUnfolding, 
+	canUnfold, neverUnfoldGuidance, isStableSource,
 
 	-- * Strictness
 	seqExpr, seqExprs, seqUnfolding, 
@@ -52,12 +59,15 @@ module CoreSyn (
 	-- * Annotated expression data types
 	AnnExpr, AnnExpr'(..), AnnBind(..), AnnAlt,
 	
+        -- ** Operations on annotated expressions
+        collectAnnArgs,
+
 	-- ** Operations on annotations
 	deAnnotate, deAnnotate', deAnnAlt, collectAnnBndrs,
 
 	-- * Core rule data types
 	CoreRule(..),	-- CoreSubst, CoreTidy, CoreFVs, PprCore only
-	RuleName, 
+	RuleName, IdUnfoldingFun,
 	
 	-- ** Operations on 'CoreRule's 
 	seqRules, ruleArity, ruleName, ruleIdName, ruleActivation_maybe,
@@ -79,9 +89,10 @@ import FastString
 import Outputable
 import Util
 
+import Data.Data
 import Data.Word
 
-infixl 4 `mkApps`, `mkTyApps`, `mkVarApps`
+infixl 4 `mkApps`, `mkTyApps`, `mkVarApps`, `App`
 -- Left associative, so that we can say (f `mkTyApps` xs `mkVarApps` ys)
 \end{code}
 
@@ -94,8 +105,6 @@ infixl 4 `mkApps`, `mkTyApps`, `mkVarApps`
 These data types are the heart of the compiler
 
 \begin{code}
-infixl 8 `App`	-- App brackets to the left
-
 -- | This is the data type that represents GHCs core intermediate language. Currently
 -- GHC uses System FC <http://research.microsoft.com/~simonpj/papers/ext-f/> for this purpose,
 -- which is closely related to the simpler and better known System F <http://en.wikipedia.org/wiki/System_F>.
@@ -131,11 +140,15 @@ infixl 8 `App`	-- App brackets to the left
 -- The type parameter @b@ is for the type of binders in the expression tree.
 data Expr b
   = Var	  Id                            -- ^ Variables
+
   | Lit   Literal                       -- ^ Primitive literals
+
   | App   (Expr b) (Arg b)		-- ^ Applications: note that the argument may be a 'Type'.
                                         --
                                         -- See "CoreSyn#let_app_invariant" for another invariant
+
   | Lam   b (Expr b)                    -- ^ Lambda abstraction
+
   | Let   (Bind b) (Expr b)		-- ^ Recursive and non recursive @let@s. Operationally
                                         -- this corresponds to allocating a thunk for the things
                                         -- bound and then executing the sub-expression.
@@ -148,14 +161,16 @@ data Expr b
                                         -- the meaning of /lifted/ vs. /unlifted/).
                                         --
                                         -- #let_app_invariant#
-                                        -- The right hand side of of a non-recursive 'Let' _and_ the argument of an 'App',
+                                        -- The right hand side of of a non-recursive 'Let' 
+                                        -- _and_ the argument of an 'App',
                                         -- /may/ be of unlifted type, but only if the expression 
-                                        -- is ok-for-speculation.  This means that the let can be floated around 
-                                        -- without difficulty. For example, this is OK:
+                                        -- is ok-for-speculation.  This means that the let can be floated 
+                                        -- around without difficulty. For example, this is OK:
                                         --
 	                                -- > y::Int# = x +# 1#
 	                                --
-	                                -- But this is not, as it may affect termination if the expression is floated out:
+	                                -- But this is not, as it may affect termination if the 
+                                        -- expression is floated out:
 	                                --
 	                                -- > y::Int# = fac 4#
 	                                --
@@ -175,6 +190,7 @@ data Expr b
                                         -- At the moment, the rest of the compiler only deals with type-let
                                         -- in a Let expression, rather than at top level.  We may want to revist
                                         -- this choice.
+
   | Case  (Expr b) b Type [Alt b]  	-- ^ Case split. Operationally this corresponds to evaluating
                                         -- the scrutinee (expression examined) to weak head normal form
                                         -- and then examining at most one level of resulting constructor (i.e. you
@@ -184,15 +200,17 @@ data Expr b
                                         -- and the 'Type' must be that of all the case alternatives
 					--
 					-- #case_invariants#
-					-- This is one of the more complicated elements of the Core language, and comes
-					-- with a number of restrictions:
+					-- This is one of the more complicated elements of the Core language, 
+					-- and comes with a number of restrictions:
 					--
-					-- The 'DEFAULT' case alternative must be first in the list, if it occurs at all.
+					-- The 'DEFAULT' case alternative must be first in the list, 
+                                        -- if it occurs at all.
 					--
 					-- The remaining cases are in order of increasing 
 		                        --      tag	(for 'DataAlts') or
 		                        --      lit	(for 'LitAlts').
-	                                -- This makes finding the relevant constructor easy, and makes comparison easier too.
+	                                -- This makes finding the relevant constructor easy, 
+                                        -- and makes comparison easier too.
 					--
 					-- The list of alternatives must be exhaustive. An /exhaustive/ case 
 					-- does not necessarily mention all constructors:
@@ -206,14 +224,19 @@ data Expr b
                                         --                      Blue  -> ... ) ...
                                         -- @
                                         --
-                                        -- The inner case does not need a @Red@ alternative, because @x@ can't be @Red@ at
-                                        -- that program point.
-  | Cast  (Expr b) Coercion             -- ^ Cast an expression to a particular type. This is used to implement @newtype@s
-                                        -- (a @newtype@ constructor or destructor just becomes a 'Cast' in Core) and GADTs.
+                                        -- The inner case does not need a @Red@ alternative, because @x@ 
+                                        -- can't be @Red@ at that program point.
+
+  | Cast  (Expr b) Coercion             -- ^ Cast an expression to a particular type. 
+                                        -- This is used to implement @newtype@s (a @newtype@ constructor or 
+                                        -- destructor just becomes a 'Cast' in Core) and GADTs.
+
   | Note  Note (Expr b)                 -- ^ Notes. These allow general information to be
                                         -- added to expressions in the syntax tree
+
   | Type  Type			        -- ^ A type: this should only show up at the top
                                         -- level of an Arg
+  deriving (Data, Typeable)
 
 -- | Type synonym for expressions that occur in function argument positions.
 -- Only 'Arg' should contain a 'Type' at top level, general 'Expr' should not
@@ -229,11 +252,12 @@ data AltCon = DataAlt DataCon	-- ^ A plain data constructor: @case e of { Foo x 
                                 -- Invariant: the 'DataCon' is always from a @data@ type, and never from a @newtype@
 	    | LitAlt  Literal   -- ^ A literal: @case e of { 1 -> ... }@
 	    | DEFAULT           -- ^ Trivial alternative: @case e of { _ -> ... }@
-	 deriving (Eq, Ord)
+	 deriving (Eq, Ord, Data, Typeable)
 
 -- | Binding, used for top level bindings in a module and local bindings in a @let@.
 data Bind b = NonRec b (Expr b)
 	    | Rec [(b, (Expr b))]
+  deriving (Data, Typeable)
 \end{code}
 
 -------------------------- CoreSyn INVARIANTS ---------------------------
@@ -272,21 +296,8 @@ See #type_let#
 -- | Allows attaching extra information to points in expressions rather than e.g. identifiers.
 data Note
   = SCC CostCentre      -- ^ A cost centre annotation for profiling
-
-  | InlineMe		-- ^ Instructs the core simplifer to treat the enclosed expression
-			-- as very small, and inline it at its call sites
-
   | CoreNote String     -- ^ A generic core annotation, propagated but not used by GHC
-
--- NOTE: we also treat expressions wrapped in InlineMe as
--- 'cheap' and 'dupable' (in the sense of exprIsCheap, exprIsDupable)
--- What this means is that we obediently inline even things that don't
--- look like valuse.  This is sometimes important:
---	{-# INLINE f #-}
---	f = g . h
--- Here, f looks like a redex, and we aren't going to inline (.) because it's
--- inside an INLINE, so it'll stay looking like a redex.  Nevertheless, we 
--- should inline f even inside lambdas.  In effect, we should trust the programmer.
+  deriving (Data, Typeable)
 \end{code}
 
 
@@ -311,7 +322,7 @@ data CoreRule
   = Rule { 
 	ru_name :: RuleName,            -- ^ Name of the rule, for communication with the user
 	ru_act  :: Activation,          -- ^ When the rule is active
-	
+
 	-- Rough-matching stuff
 	-- see comments with InstEnv.Instance( is_cls, is_rough )
 	ru_fn    :: Name,	        -- ^ Name of the 'Id.Id' at the head of this rule
@@ -324,8 +335,14 @@ data CoreRule
 	
 	-- And the right-hand side
 	ru_rhs   :: CoreExpr,           -- ^ Right hand side of the rule
+		    			-- Occurrence info is guaranteed correct
+					-- See Note [OccInfo in unfoldings and rules]
 
 	-- Locality
+        ru_auto :: Bool,	-- ^ @True@  <=> this rule is auto-generated
+		   		--   @False@ <=> generated at the users behest
+				--   Main effect: reporting of orphan-hood
+
 	ru_local :: Bool	-- ^ @True@ iff the fn at the head of the rule is
 				-- defined in the same module as the rule
 				-- and is not an implicit 'Id' (like a record selector,
@@ -338,16 +355,21 @@ data CoreRule
   -- | Built-in rules are used for constant folding
   -- and suchlike.  They have no free variables.
   | BuiltinRule {               
-	ru_name :: RuleName,    -- ^ As above
-	ru_fn :: Name,          -- ^ As above
-	ru_nargs :: Int,	-- ^ Number of arguments that 'ru_try' expects,
-				-- including type arguments
-	ru_try  :: [CoreExpr] -> Maybe CoreExpr
+	ru_name  :: RuleName,   -- ^ As above
+	ru_fn    :: Name,       -- ^ As above
+	ru_nargs :: Int,	-- ^ Number of arguments that 'ru_try' consumes,
+				-- if it fires, including type arguments
+	ru_try  :: IdUnfoldingFun -> [CoreExpr] -> Maybe CoreExpr
 		-- ^ This function does the rewrite.  It given too many
 		-- arguments, it simply discards them; the returned 'CoreExpr'
 		-- is just the rewrite of 'ru_fn' applied to the first 'ru_nargs' args
     }
 		-- See Note [Extra args in rule matching] in Rules.lhs
+
+type IdUnfoldingFun = Id -> Unfolding
+-- A function that embodies how to unfold an Id if you need
+-- to do that in the Rule.  The reason we need to pass this info in
+-- is that whether an Id is unfoldable depends on the simplifier phase
 
 isBuiltinRule :: CoreRule -> Bool
 isBuiltinRule (BuiltinRule {}) = True
@@ -392,59 +414,171 @@ The @Unfolding@ type is declared here to avoid numerous loops
 -- identifier would have if we substituted its definition in for the identifier.
 -- This type should be treated as abstract everywhere except in "CoreUnfold"
 data Unfolding
-  = NoUnfolding                 -- ^ We have no information about the unfolding
+  = NoUnfolding        -- ^ We have no information about the unfolding
 
-  | OtherCon [AltCon]		-- ^ It ain't one of these constructors.
-				-- @OtherCon xs@ also indicates that something has been evaluated
-				-- and hence there's no point in re-evaluating it.
-				-- @OtherCon []@ is used even for non-data-type values
-				-- to indicated evaluated-ness.  Notably:
-				--
-				-- > data C = C !(Int -> Int)
-				-- > case x of { C f -> ... }
-				--
-				-- Here, @f@ gets an @OtherCon []@ unfolding.
+  | OtherCon [AltCon]  -- ^ It ain't one of these constructors.
+		       -- @OtherCon xs@ also indicates that something has been evaluated
+		       -- and hence there's no point in re-evaluating it.
+		       -- @OtherCon []@ is used even for non-data-type values
+		       -- to indicated evaluated-ness.  Notably:
+		       --
+		       -- > data C = C !(Int -> Int)
+		       -- > case x of { C f -> ... }
+		       --
+		       -- Here, @f@ gets an @OtherCon []@ unfolding.
 
-  | CompulsoryUnfolding CoreExpr	-- ^ There is /no original definition/,
-					-- so you'd better unfold.
+  | DFunUnfolding       -- The Unfolding of a DFunId  
+    			-- See Note [DFun unfoldings]
+      		  	--     df = /\a1..am. \d1..dn. MkD (op1 a1..am d1..dn)
+     		      	--     	    	      	       	   (op2 a1..am d1..dn)
 
-  | CoreUnfolding
-		CoreExpr
-		Bool
-		Bool
-		Bool
-                Bool
-		UnfoldingGuidance
+        Arity 		-- Arity = m+n, the *total* number of args 
+			--   (unusually, both type and value) to the dfun
+
+        DataCon 	-- The dictionary data constructor (possibly a newtype datacon)
+
+        [CoreExpr]	-- The [CoreExpr] are the superclasses and methods [op1,op2], 
+			-- in positional order.
+			-- They are usually variables, but can be trivial expressions
+			-- instead (e.g. a type application).  
+
+  | CoreUnfolding {		-- An unfolding for an Id with no pragma, 
+                                -- or perhaps a NOINLINE pragma
+				-- (For NOINLINE, the phase, if any, is in the 
+                                -- InlinePragInfo for this Id.)
+	uf_tmpl       :: CoreExpr,	  -- Template; occurrence info is correct
+	uf_src        :: UnfoldingSource, -- Where the unfolding came from
+	uf_is_top     :: Bool,		-- True <=> top level binding
+	uf_arity      :: Arity,		-- Number of value arguments expected
+	uf_is_value   :: Bool,		-- exprIsHNF template (cached); it is ok to discard 
+		      			--	a `seq` on this variable
+        uf_is_conlike :: Bool,          -- True <=> applicn of constructor or CONLIKE function
+                                        --      Cached version of exprIsConLike
+	uf_is_cheap   :: Bool,		-- True <=> doesn't waste (much) work to expand 
+                                        --          inside an inlining
+					-- 	Cached version of exprIsCheap
+	uf_expandable :: Bool,		-- True <=> can expand in RULE matching
+		      	 		--      Cached version of exprIsExpandable
+	uf_guidance   :: UnfoldingGuidance	-- Tells about the *size* of the template.
+    }
   -- ^ An unfolding with redundant cached information. Parameters:
   --
-  --  1) Template used to perform unfolding; binder-info is correct
+  --  uf_tmpl: Template used to perform unfolding; 
+  --           NB: Occurrence info is guaranteed correct: 
+  --	           see Note [OccInfo in unfoldings and rules]
   --
-  --  2) Is this a top level binding?
+  --  uf_is_top: Is this a top level binding?
   --
-  --  3) 'exprIsHNF' template (cached); it is ok to discard a 'seq' on
+  --  uf_is_value: 'exprIsHNF' template (cached); it is ok to discard a 'seq' on
   --     this variable
   --
-  --  4) Does this waste only a little work if we expand it inside an inlining?
+  --  uf_is_cheap:  Does this waste only a little work if we expand it inside an inlining?
   --     Basically this is a cached version of 'exprIsCheap'
   --
-  --  5) Tells us about the /size/ of the unfolding template
+  --  uf_guidance:  Tells us about the /size/ of the unfolding template
 
--- | When unfolding should take place
+------------------------------------------------
+data UnfoldingSource 
+  = InlineRhs          -- The current rhs of the function
+    		       -- Replace uf_tmpl each time around
+
+  | InlineStable       -- From an INLINE or INLINABLE pragma 
+                       --   INLINE     if guidance is UnfWhen
+                       --   INLINABLE  if guidance is UnfIfGoodArgs
+                       -- (well, technically an INLINABLE might be made
+                       -- UnfWhen if it was small enough, and then
+                       -- it will behave like INLINE outside the current
+                       -- module, but that is the way automatic unfoldings
+                       -- work so it is consistent with the intended
+                       -- meaning of INLINABLE).
+                       --
+    		       -- uf_tmpl may change, but only as a result of
+                       -- gentle simplification, it doesn't get updated
+                       -- to the current RHS during compilation as with
+                       -- InlineRhs.
+                       --
+    		       -- See Note [InlineRules]
+
+  | InlineCompulsory   -- Something that *has* no binding, so you *must* inline it
+    		       -- Only a few primop-like things have this property 
+                       -- (see MkId.lhs, calls to mkCompulsoryUnfolding).
+                       -- Inline absolutely always, however boring the context.
+
+  | InlineWrapper Id   -- This unfolding is a the wrapper in a 
+		       --     worker/wrapper split from the strictness analyser
+	               -- The Id is the worker-id
+		       -- Used to abbreviate the uf_tmpl in interface files
+		       --	which don't need to contain the RHS; 
+		       --	it can be derived from the strictness info
+
+
+
+-- | 'UnfoldingGuidance' says when unfolding should take place
 data UnfoldingGuidance
-  = UnfoldNever
-  | UnfoldIfGoodArgs	Int	-- and "n" value args
+  = UnfWhen {	-- Inline without thinking about the *size* of the uf_tmpl
+    		-- Used (a) for small *and* cheap unfoldings
+ 		--      (b) for INLINE functions 
+                -- See Note [INLINE for small functions] in CoreUnfold
+      ug_unsat_ok  :: Bool,	-- True <=> ok to inline even if unsaturated
+      ug_boring_ok :: Bool      -- True <=> ok to inline even if the context is boring
+      		-- So True,True means "always"
+    }
 
-			[Int]	-- Discount if the argument is evaluated.
-				-- (i.e., a simplification will definitely
-				-- be possible).  One elt of the list per *value* arg.
+  | UnfIfGoodArgs {	-- Arose from a normal Id; the info here is the
+    		     	-- result of a simple analysis of the RHS
 
-			Int	-- The "size" of the unfolding; to be elaborated
-				-- later. ToDo
+      ug_args ::  [Int],  -- Discount if the argument is evaluated.
+			  -- (i.e., a simplification will definitely
+			  -- be possible).  One elt of the list per *value* arg.
 
-			Int	-- Scrutinee discount: the discount to substract if the thing is in
-				-- a context (case (thing args) of ...),
-				-- (where there are the right number of arguments.)
+      ug_size :: Int,	  -- The "size" of the unfolding.
 
+      ug_res :: Int	  -- Scrutinee discount: the discount to substract if the thing is in
+    }			  -- a context (case (thing args) of ...),
+			  -- (where there are the right number of arguments.)
+
+  | UnfNever	    -- The RHS is big, so don't inline it
+\end{code}
+
+
+Note [DFun unfoldings]
+~~~~~~~~~~~~~~~~~~~~~~
+The Arity in a DFunUnfolding is total number of args (type and value)
+that the DFun needs to produce a dictionary.  That's not necessarily 
+related to the ordinary arity of the dfun Id, esp if the class has
+one method, so the dictionary is represented by a newtype.  Example
+
+     class C a where { op :: a -> Int }
+     instance C a -> C [a] where op xs = op (head xs)
+
+The instance translates to
+
+     $dfCList :: forall a. C a => C [a]  -- Arity 2!
+     $dfCList = /\a.\d. $copList {a} d |> co
+ 
+     $copList :: forall a. C a => [a] -> Int  -- Arity 2!
+     $copList = /\a.\d.\xs. op {a} d (head xs)
+
+Now we might encounter (op (dfCList {ty} d) a1 a2)
+and we want the (op (dfList {ty} d)) rule to fire, because $dfCList
+has all its arguments, even though its (value) arity is 2.  That's
+why we record the number of expected arguments in the DFunUnfolding.
+
+Note that although it's an Arity, it's most convenient for it to give
+the *total* number of arguments, both type and value.  See the use
+site in exprIsConApp_maybe.
+
+\begin{code}
+-- Constants for the UnfWhen constructor
+needSaturated, unSaturatedOk :: Bool
+needSaturated = False
+unSaturatedOk = True
+
+boringCxtNotOk, boringCxtOk :: Bool
+boringCxtOk    = True
+boringCxtNotOk = False
+
+------------------------------------------------
 noUnfolding :: Unfolding
 -- ^ There is no known 'Unfolding'
 evaldUnfolding :: Unfolding
@@ -457,27 +591,38 @@ mkOtherCon :: [AltCon] -> Unfolding
 mkOtherCon = OtherCon
 
 seqUnfolding :: Unfolding -> ()
-seqUnfolding (CoreUnfolding e top b1 b2 b3 g)
-  = seqExpr e `seq` top `seq` b1 `seq` b2 `seq` b3 `seq` seqGuidance g
+seqUnfolding (CoreUnfolding { uf_tmpl = e, uf_is_top = top, 
+		uf_is_value = b1, uf_is_cheap = b2, 
+	   	uf_expandable = b3, uf_is_conlike = b4,
+                uf_arity = a, uf_guidance = g})
+  = seqExpr e `seq` top `seq` b1 `seq` a `seq` b2 `seq` b3 `seq` b4 `seq` seqGuidance g
+
 seqUnfolding _ = ()
 
 seqGuidance :: UnfoldingGuidance -> ()
-seqGuidance (UnfoldIfGoodArgs n ns a b) = n `seq` sum ns `seq` a `seq` b `seq` ()
-seqGuidance _                           = ()
+seqGuidance (UnfIfGoodArgs ns n b) = n `seq` sum ns `seq` b `seq` ()
+seqGuidance _                      = ()
 \end{code}
 
 \begin{code}
+isStableSource :: UnfoldingSource -> Bool
+-- Keep the unfolding template
+isStableSource InlineCompulsory   = True
+isStableSource InlineStable       = True
+isStableSource (InlineWrapper {}) = True
+isStableSource InlineRhs          = False
+ 
 -- | Retrieves the template of an unfolding: panics if none is known
 unfoldingTemplate :: Unfolding -> CoreExpr
-unfoldingTemplate (CoreUnfolding expr _ _ _ _ _) = expr
-unfoldingTemplate (CompulsoryUnfolding expr)     = expr
-unfoldingTemplate _ = panic "getUnfoldingTemplate"
+unfoldingTemplate = uf_tmpl
+
+setUnfoldingTemplate :: Unfolding -> CoreExpr -> Unfolding
+setUnfoldingTemplate unf rhs = unf { uf_tmpl = rhs }
 
 -- | Retrieves the template of an unfolding if possible
 maybeUnfoldingTemplate :: Unfolding -> Maybe CoreExpr
-maybeUnfoldingTemplate (CoreUnfolding expr _ _ _ _ _) = Just expr
-maybeUnfoldingTemplate (CompulsoryUnfolding expr)     = Just expr
-maybeUnfoldingTemplate _                              = Nothing
+maybeUnfoldingTemplate (CoreUnfolding { uf_tmpl = expr })       = Just expr
+maybeUnfoldingTemplate _                            		= Nothing
 
 -- | The constructors that the unfolding could never be: 
 -- returns @[]@ if no information is available
@@ -488,50 +633,127 @@ otherCons _               = []
 -- | Determines if it is certainly the case that the unfolding will
 -- yield a value (something in HNF): returns @False@ if unsure
 isValueUnfolding :: Unfolding -> Bool
-isValueUnfolding (CoreUnfolding _ _ is_evald _ _ _) = is_evald
-isValueUnfolding _                                  = False
+	-- Returns False for OtherCon
+isValueUnfolding (CoreUnfolding { uf_is_value = is_evald }) = is_evald
+isValueUnfolding _                                          = False
 
 -- | Determines if it possibly the case that the unfolding will
 -- yield a value. Unlike 'isValueUnfolding' it returns @True@
 -- for 'OtherCon'
 isEvaldUnfolding :: Unfolding -> Bool
-isEvaldUnfolding (OtherCon _)		            = True
-isEvaldUnfolding (CoreUnfolding _ _ is_evald _ _ _) = is_evald
-isEvaldUnfolding _                                  = False
+	-- Returns True for OtherCon
+isEvaldUnfolding (OtherCon _)		                    = True
+isEvaldUnfolding (CoreUnfolding { uf_is_value = is_evald }) = is_evald
+isEvaldUnfolding _                                          = False
+
+-- | @True@ if the unfolding is a constructor application, the application
+-- of a CONLIKE function or 'OtherCon'
+isConLikeUnfolding :: Unfolding -> Bool
+isConLikeUnfolding (OtherCon _)                             = True
+isConLikeUnfolding (CoreUnfolding { uf_is_conlike = con })  = con
+isConLikeUnfolding _                                        = False
 
 -- | Is the thing we will unfold into certainly cheap?
 isCheapUnfolding :: Unfolding -> Bool
-isCheapUnfolding (CoreUnfolding _ _ _ is_cheap _ _) = is_cheap
-isCheapUnfolding _                                  = False
+isCheapUnfolding (CoreUnfolding { uf_is_cheap = is_cheap }) = is_cheap
+isCheapUnfolding _                                          = False
 
 isExpandableUnfolding :: Unfolding -> Bool
-isExpandableUnfolding (CoreUnfolding _ _ _ _ is_expable _) = is_expable
-isExpandableUnfolding _                                    = False
+isExpandableUnfolding (CoreUnfolding { uf_expandable = is_expable }) = is_expable
+isExpandableUnfolding _                                              = False
 
--- | Must this unfolding happen for the code to be executable?
+expandUnfolding_maybe :: Unfolding -> Maybe CoreExpr
+-- Expand an expandable unfolding; this is used in rule matching 
+--   See Note [Expanding variables] in Rules.lhs
+-- The key point here is that CONLIKE things can be expanded
+expandUnfolding_maybe (CoreUnfolding { uf_expandable = True, uf_tmpl = rhs }) = Just rhs
+expandUnfolding_maybe _                                                       = Nothing
+
+isStableUnfolding_maybe :: Unfolding -> Maybe (UnfoldingSource, Bool)
+isStableUnfolding_maybe (CoreUnfolding { uf_src = src, uf_guidance = guide }) 
+   | isStableSource src
+   = Just (src, unsat_ok)
+   where
+     unsat_ok = case guide of
+     	      	  UnfWhen unsat_ok _ -> unsat_ok
+                  _                  -> needSaturated
+isStableUnfolding_maybe _ = Nothing
+
 isCompulsoryUnfolding :: Unfolding -> Bool
-isCompulsoryUnfolding (CompulsoryUnfolding _) = True
-isCompulsoryUnfolding _                       = False
+isCompulsoryUnfolding (CoreUnfolding { uf_src = InlineCompulsory }) = True
+isCompulsoryUnfolding _                                             = False
 
--- | Do we have an available or compulsory unfolding?
-hasUnfolding :: Unfolding -> Bool
-hasUnfolding (CoreUnfolding _ _ _ _ _ _) = True
-hasUnfolding (CompulsoryUnfolding _)     = True
-hasUnfolding _                           = False
+isStableUnfolding :: Unfolding -> Bool
+-- True of unfoldings that should not be overwritten 
+-- by a CoreUnfolding for the RHS of a let-binding
+isStableUnfolding (CoreUnfolding { uf_src = src }) = isStableSource src
+isStableUnfolding (DFunUnfolding {})		   = True
+isStableUnfolding _                                = False
+
+unfoldingArity :: Unfolding -> Arity
+unfoldingArity (CoreUnfolding { uf_arity = arity }) = arity
+unfoldingArity _	      		   	    = panic "unfoldingArity"
+
+isClosedUnfolding :: Unfolding -> Bool		-- No free variables
+isClosedUnfolding (CoreUnfolding {}) = False
+isClosedUnfolding (DFunUnfolding {}) = False
+isClosedUnfolding _                  = True
 
 -- | Only returns False if there is no unfolding information available at all
 hasSomeUnfolding :: Unfolding -> Bool
 hasSomeUnfolding NoUnfolding = False
 hasSomeUnfolding _           = True
 
--- | Similar to @not . hasUnfolding@, but also returns @True@
--- if it has an unfolding that says it should never occur
-neverUnfold :: Unfolding -> Bool
-neverUnfold NoUnfolding				  = True
-neverUnfold (OtherCon _)			  = True
-neverUnfold (CoreUnfolding _ _ _ _ _ UnfoldNever) = True
-neverUnfold _                                     = False
+neverUnfoldGuidance :: UnfoldingGuidance -> Bool
+neverUnfoldGuidance UnfNever = True
+neverUnfoldGuidance _        = False
+
+canUnfold :: Unfolding -> Bool
+canUnfold (CoreUnfolding { uf_guidance = g }) = not (neverUnfoldGuidance g)
+canUnfold _  				      = False
 \end{code}
+
+Note [InlineRules]
+~~~~~~~~~~~~~~~~~
+When you say 
+      {-# INLINE f #-}
+      f x = <rhs>
+you intend that calls (f e) are replaced by <rhs>[e/x] So we
+should capture (\x.<rhs>) in the Unfolding of 'f', and never meddle
+with it.  Meanwhile, we can optimise <rhs> to our heart's content,
+leaving the original unfolding intact in Unfolding of 'f'. For example
+	all xs = foldr (&&) True xs
+	any p = all . map p  {-# INLINE any #-}
+We optimise any's RHS fully, but leave the InlineRule saying "all . map p",
+which deforests well at the call site.
+
+So INLINE pragma gives rise to an InlineRule, which captures the original RHS.
+
+Moreover, it's only used when 'f' is applied to the
+specified number of arguments; that is, the number of argument on 
+the LHS of the '=' sign in the original source definition. 
+For example, (.) is now defined in the libraries like this
+   {-# INLINE (.) #-}
+   (.) f g = \x -> f (g x)
+so that it'll inline when applied to two arguments. If 'x' appeared
+on the left, thus
+   (.) f g x = f (g x)
+it'd only inline when applied to three arguments.  This slightly-experimental
+change was requested by Roman, but it seems to make sense.
+
+See also Note [Inlining an InlineRule] in CoreUnfold.
+
+
+Note [OccInfo in unfoldings and rules]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In unfoldings and rules, we guarantee that the template is occ-analysed,
+so that the occurence info on the binders is correct.  This is important,
+because the Simplifier does not re-analyse the template when using it. If
+the occurrence info is wrong
+  - We may get more simpifier iterations than necessary, because
+    once-occ info isn't there
+  - More seriously, we may get an infinite loop if there's a Rec
+    without a loop breaker marked
 
 
 %************************************************************************
@@ -777,7 +999,7 @@ collectTyAndValBinders expr
 collectTyBinders expr
   = go [] expr
   where
-    go tvs (Lam b e) | isTyVar b = go (b:tvs) e
+    go tvs (Lam b e) | isTyCoVar b = go (b:tvs) e
     go tvs e			 = (reverse tvs, e)
 
 collectValBinders expr
@@ -845,6 +1067,10 @@ valBndrCount = count isId
 -- | The number of argument expressions that are values rather than types at their top level
 valArgCount :: [Arg b] -> Int
 valArgCount = count isValArg
+
+notSccNote :: Note -> Bool
+notSccNote (SCC {}) = False
+notSccNote _        = True
 \end{code}
 
 
@@ -929,6 +1155,17 @@ type AnnAlt bndr annot = (AltCon, [bndr], AnnExpr bndr annot)
 data AnnBind bndr annot
   = AnnNonRec bndr (AnnExpr bndr annot)
   | AnnRec    [(bndr, AnnExpr bndr annot)]
+\end{code}
+
+\begin{code}
+-- | Takes a nested application expression and returns the the function
+-- being applied and the arguments to which it is applied
+collectAnnArgs :: AnnExpr b a -> (AnnExpr b a, [AnnExpr b a])
+collectAnnArgs expr
+  = go expr []
+  where
+    go (_, AnnApp f a) as = go f (a:as)
+    go e 	       as = (e, as)
 \end{code}
 
 \begin{code}

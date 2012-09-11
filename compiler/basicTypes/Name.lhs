@@ -37,7 +37,7 @@ module Name (
 	BuiltInSyntax(..),
 
 	-- ** Creating 'Name's
-	mkInternalName, mkSystemName,
+	mkInternalName, mkSystemName, mkDerivedInternalName, 
 	mkSystemVarName, mkSysTvName, 
 	mkFCallName, mkIPName,
         mkTickBoxOpName,
@@ -69,12 +69,15 @@ module Name (
 	module OccName
     ) where
 
+#include "Typeable.h"
+
 import {-# SOURCE #-} TypeRep( TyThing )
 
 import OccName
 import Module
 import SrcLoc
 import Unique
+import Util
 import Maybes
 import Binary
 import StaticFlags
@@ -83,6 +86,7 @@ import FastString
 import Outputable
 
 import Data.Array
+import Data.Data
 import Data.Word        ( Word32 )
 \end{code}
 
@@ -249,6 +253,11 @@ mkInternalName uniq occ loc = Name { n_uniq = getKeyFastInt uniq, n_sort = Inter
 	--	* for interface files we tidyCore first, which puts the uniques
 	--	  into the print name (see setNameVisibility below)
 
+mkDerivedInternalName :: (OccName -> OccName) -> Unique -> Name -> Name
+mkDerivedInternalName derive_occ uniq (Name { n_occ = occ, n_loc = loc })
+  = Name { n_uniq = getKeyFastInt uniq, n_sort = Internal
+         , n_occ = derive_occ occ, n_loc = loc }
+
 -- | Create a name which definitely originates in the given module
 mkExternalName :: Unique -> Module -> OccName -> SrcSpan -> Name
 mkExternalName uniq mod occ loc 
@@ -353,6 +362,14 @@ instance Uniquable Name where
 
 instance NamedThing Name where
     getName n = n
+
+INSTANCE_TYPEABLE0(Name,nameTc,"Name")
+
+instance Data Name where
+  -- don't traverse?
+  toConstr _   = abstractConstr "Name"
+  gunfold _ _  = error "gunfold"
+  dataTypeOf _ = mkNoRepType "Name"
 \end{code}
 
 %************************************************************************
@@ -434,6 +451,9 @@ pprModulePrefix :: PprStyle -> Module -> OccName -> SDoc
 -- Print the "M." part of a name, based on whether it's in scope or not
 -- See Note [Printing original names] in HscTypes
 pprModulePrefix sty mod occ
+  | opt_SuppressModulePrefixes = empty
+  
+  | otherwise
   = case qualName sty mod occ of	           -- See Outputable.QualifyName:
       NameQual modname -> ppr modname <> dot       -- Name is in scope       
       NameNotInScope1  -> ppr mod <> dot           -- Not in scope

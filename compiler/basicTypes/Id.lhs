@@ -30,7 +30,7 @@ module Id (
 	mkLocalId, mkLocalIdWithInfo, mkExportedLocalId,
 	mkSysLocal, mkSysLocalM, mkUserLocal, mkUserLocalM,
 	mkTemplateLocals, mkTemplateLocalsNum, mkTemplateLocal,
-	mkWorkerId, 
+	mkWorkerId, mkWiredInIdName,
 
 	-- ** Taking an Id apart
 	idName, idType, idUnique, idInfo, idDetails,
@@ -67,41 +67,29 @@ module Id (
 
 	-- ** Reading 'IdInfo' fields
 	idArity, 
-	idNewDemandInfo, idNewDemandInfo_maybe,
-	idNewStrictness, idNewStrictness_maybe, 
-	idWorkerInfo,
-	idUnfolding,
+	idDemandInfo, idDemandInfo_maybe,
+	idStrictness, idStrictness_maybe, 
+	idUnfolding, realIdUnfolding,
 	idSpecialisation, idCoreRules, idHasRules,
 	idCafInfo,
 	idLBVarInfo,
 	idOccInfo,
 
-#ifdef OLD_STRICTNESS
-	idDemandInfo, 
-	idStrictness, 
-	idCprInfo,
-#endif
-
 	-- ** Writing 'IdInfo' fields
+	setIdUnfoldingLazily,
 	setIdUnfolding,
 	setIdArity,
-	setIdNewDemandInfo, 
-	setIdNewStrictness, zapIdNewStrictness,
-	setIdWorkerInfo,
+	setIdDemandInfo, 
+	setIdStrictness, zapIdStrictness,
 	setIdSpecialisation,
 	setIdCafInfo,
 	setIdOccInfo, zapIdOccInfo,
 
-#ifdef OLD_STRICTNESS
-	setIdStrictness, 
-	setIdDemandInfo, 
-	setIdCprInfo,
-#endif
     ) where
 
 #include "HsVersions.h"
 
-import CoreSyn ( CoreRule, Unfolding )
+import CoreSyn ( CoreRule, Unfolding( NoUnfolding ) )
 
 import IdInfo
 import BasicTypes
@@ -114,13 +102,9 @@ import qualified Var
 
 import TyCon
 import Type
-import TcType
 import TysPrim
-#ifdef OLD_STRICTNESS
-import qualified Demand
-#endif
 import DataCon
-import NewDemand
+import Demand
 import Name
 import Module
 import Class
@@ -136,19 +120,16 @@ import Util( count )
 import StaticFlags
 
 -- infixl so you can say (id `set` a `set` b)
-infixl 	1 `setIdUnfolding`,
+infixl 	1 `setIdUnfoldingLazily`,
+	  `setIdUnfolding`,
 	  `setIdArity`,
-	  `setIdNewDemandInfo`,
-	  `setIdNewStrictness`,
-	  `setIdWorkerInfo`,
+	  `setIdOccInfo`,
+	  `setIdDemandInfo`,
+	  `setIdStrictness`,
 	  `setIdSpecialisation`,
 	  `setInlinePragma`,
+	  `setInlineActivation`,
 	  `idCafInfo`
-#ifdef OLD_STRICTNESS
-	  ,`idCprInfo`
-	  ,`setIdStrictness`
-	  ,`setIdDemandInfo`
-#endif
 \end{code}
 
 %************************************************************************
@@ -191,7 +172,7 @@ localiseId :: Id -> Id
 -- Make an with the same unique and type as the 
 -- incoming Id, but with an *Internal* Name and *LocalId* flavour
 localiseId id 
-  | isLocalId id && isInternalName name
+  | ASSERT( isId id ) isLocalId id && isInternalName name
   = id
   | otherwise
   = mkLocalIdWithInfo (localiseName name) (idType id) (idInfo id)
@@ -279,6 +260,9 @@ mkUserLocal occ uniq ty loc = mkLocalId (mkInternalName uniq occ loc) ty
 mkUserLocalM :: MonadUnique m => OccName -> Type -> SrcSpan -> m Id
 mkUserLocalM occ ty loc = getUniqueM >>= (\uniq -> return (mkUserLocal occ uniq ty loc))
 
+mkWiredInIdName :: Module -> FastString -> Unique -> Id -> Name
+mkWiredInIdName mod fs uniq id
+ = mkWiredInName mod (mkOccNameFS varName fs) uniq (AnId id) UserSyntax
 \end{code}
 
 Make some local @Ids@ for a template @CoreExpr@.  These have bogus
@@ -289,9 +273,7 @@ instantiated before use.
 -- | Workers get local names. "CoreTidy" will externalise these if necessary
 mkWorkerId :: Unique -> Id -> Type -> Id
 mkWorkerId uniq unwrkr ty
-  = mkLocalId wkr_name ty
-  where
-    wkr_name = mkInternalName uniq (mkWorkerOcc (getOccName unwrkr)) (getSrcSpan unwrkr)
+  = mkLocalId (mkDerivedInternalName mkWorkerOcc uniq (getName unwrkr)) ty
 
 -- | Create a /template local/: a family of system local 'Id's in bijection with @Int@s, typically used in unfoldings
 mkTemplateLocal :: Int -> Type -> Id
@@ -350,8 +332,8 @@ isPrimOpId id = case Var.idDetails id of
                         _          -> False
 
 isDFunId id = case Var.idDetails id of
-                        DFunId -> True
-                        _      -> False
+                        DFunId _ -> True
+                        _        -> False
 
 isPrimOpId_maybe id = case Var.idDetails id of
                         PrimOpId op -> Just op
@@ -409,11 +391,11 @@ isImplicitId :: Id -> Bool
 -- file, even if it's mentioned in some other interface unfolding.
 isImplicitId id
   = case Var.idDetails id of
-        FCallId _       -> True
-	ClassOpId _     -> True
-        PrimOpId _      -> True
-        DataConWorkId _ -> True
-	DataConWrapId _ -> True
+        FCallId {}       -> True
+	ClassOpId {}     -> True
+        PrimOpId {}      -> True
+        DataConWorkId {} -> True
+	DataConWrapId {} -> True
 		-- These are are implied by their type or class decl;
 		-- remember that all type and class decls appear in the interface file.
 		-- The dfun id is not an implicit Id; it must *not* be omitted, because 
@@ -474,31 +456,21 @@ idArity id = arityInfo (idInfo id)
 setIdArity :: Id -> Arity -> Id
 setIdArity id arity = modifyIdInfo (`setArityInfo` arity) id
 
-#ifdef OLD_STRICTNESS
-	---------------------------------
-	-- (OLD) STRICTNESS 
-idStrictness :: Id -> StrictnessInfo
-idStrictness id = strictnessInfo (idInfo id)
-
-setIdStrictness :: Id -> StrictnessInfo -> Id
-setIdStrictness id strict_info = modifyIdInfo (`setStrictnessInfo` strict_info) id
-#endif
-
 -- | Returns true if an application to n args would diverge
 isBottomingId :: Id -> Bool
-isBottomingId id = isBottomingSig (idNewStrictness id)
+isBottomingId id = isBottomingSig (idStrictness id)
 
-idNewStrictness_maybe :: Id -> Maybe StrictSig
-idNewStrictness :: Id -> StrictSig
+idStrictness_maybe :: Id -> Maybe StrictSig
+idStrictness :: Id -> StrictSig
 
-idNewStrictness_maybe id = newStrictnessInfo (idInfo id)
-idNewStrictness       id = idNewStrictness_maybe id `orElse` topSig
+idStrictness_maybe id = strictnessInfo (idInfo id)
+idStrictness       id = idStrictness_maybe id `orElse` topSig
 
-setIdNewStrictness :: Id -> StrictSig -> Id
-setIdNewStrictness id sig = modifyIdInfo (`setNewStrictnessInfo` Just sig) id
+setIdStrictness :: Id -> StrictSig -> Id
+setIdStrictness id sig = modifyIdInfo (`setStrictnessInfo` Just sig) id
 
-zapIdNewStrictness :: Id -> Id
-zapIdNewStrictness id = modifyIdInfo (`setNewStrictnessInfo` Nothing) id
+zapIdStrictness :: Id -> Id
+zapIdStrictness id = modifyIdInfo (`setStrictnessInfo` Nothing) id
 
 -- | This predicate says whether the 'Id' has a strict demand placed on it or
 -- has a type such that it can always be evaluated strictly (e.g., an
@@ -509,46 +481,43 @@ zapIdNewStrictness id = modifyIdInfo (`setNewStrictnessInfo` Nothing) id
 isStrictId :: Id -> Bool
 isStrictId id
   = ASSERT2( isId id, text "isStrictId: not an id: " <+> ppr id )
-           (isStrictDmd (idNewDemandInfo id)) || 
+           (isStrictDmd (idDemandInfo id)) || 
            (isStrictType (idType id))
-
-	---------------------------------
-	-- WORKER ID
-idWorkerInfo :: Id -> WorkerInfo
-idWorkerInfo id = workerInfo (idInfo id)
-
-setIdWorkerInfo :: Id -> WorkerInfo -> Id
-setIdWorkerInfo id work_info = modifyIdInfo (`setWorkerInfo` work_info) id
 
 	---------------------------------
 	-- UNFOLDING
 idUnfolding :: Id -> Unfolding
-idUnfolding id = unfoldingInfo (idInfo id)
+-- Do not expose the unfolding of a loop breaker!
+idUnfolding id 
+  | isNonRuleLoopBreaker (occInfo info) = NoUnfolding
+  | otherwise                           = unfoldingInfo info
+  where
+    info = idInfo id
+
+realIdUnfolding :: Id -> Unfolding
+-- Expose the unfolding if there is one, including for loop breakers
+realIdUnfolding id = unfoldingInfo (idInfo id)
+
+setIdUnfoldingLazily :: Id -> Unfolding -> Id
+setIdUnfoldingLazily id unfolding = modifyIdInfo (`setUnfoldingInfoLazily` unfolding) id
 
 setIdUnfolding :: Id -> Unfolding -> Id
 setIdUnfolding id unfolding = modifyIdInfo (`setUnfoldingInfo` unfolding) id
 
-#ifdef OLD_STRICTNESS
-	---------------------------------
-	-- (OLD) DEMAND
-idDemandInfo :: Id -> Demand.Demand
-idDemandInfo id = demandInfo (idInfo id)
+idDemandInfo_maybe :: Id -> Maybe Demand
+idDemandInfo       :: Id -> Demand
 
-setIdDemandInfo :: Id -> Demand.Demand -> Id
-setIdDemandInfo id demand_info = modifyIdInfo (`setDemandInfo` demand_info) id
-#endif
+idDemandInfo_maybe id = demandInfo (idInfo id)
+idDemandInfo       id = demandInfo (idInfo id) `orElse` topDmd
 
-idNewDemandInfo_maybe :: Id -> Maybe NewDemand.Demand
-idNewDemandInfo       :: Id -> NewDemand.Demand
-
-idNewDemandInfo_maybe id = newDemandInfo (idInfo id)
-idNewDemandInfo       id = newDemandInfo (idInfo id) `orElse` NewDemand.topDmd
-
-setIdNewDemandInfo :: Id -> NewDemand.Demand -> Id
-setIdNewDemandInfo id dmd = modifyIdInfo (`setNewDemandInfo` Just dmd) id
+setIdDemandInfo :: Id -> Demand -> Id
+setIdDemandInfo id dmd = modifyIdInfo (`setDemandInfo` Just dmd) id
 
 	---------------------------------
 	-- SPECIALISATION
+
+-- See Note [Specialisations and RULES in IdInfo] in IdInfo.lhs
+
 idSpecialisation :: Id -> SpecInfo
 idSpecialisation id = specInfo (idInfo id)
 
@@ -564,26 +533,10 @@ setIdSpecialisation id spec_info = modifyIdInfo (`setSpecInfo` spec_info) id
 	---------------------------------
 	-- CAF INFO
 idCafInfo :: Id -> CafInfo
-#ifdef OLD_STRICTNESS
-idCafInfo id = case cgInfo (idInfo id) of
-		  NoCgInfo -> pprPanic "idCafInfo" (ppr id)
-		  info     -> cgCafInfo info
-#else
 idCafInfo id = cafInfo (idInfo id)
-#endif
 
 setIdCafInfo :: Id -> CafInfo -> Id
 setIdCafInfo id caf_info = modifyIdInfo (`setCafInfo` caf_info) id
-
-	---------------------------------
-	-- CPR INFO
-#ifdef OLD_STRICTNESS
-idCprInfo :: Id -> CprInfo
-idCprInfo id = cprInfo (idInfo id)
-
-setIdCprInfo :: Id -> CprInfo -> Id
-setIdCprInfo id cpr_info = modifyIdInfo (`setCprInfo` cpr_info) id
-#endif
 
 	---------------------------------
 	-- Occcurrence INFO
@@ -617,7 +570,7 @@ idInlineActivation :: Id -> Activation
 idInlineActivation id = inlinePragmaActivation (idInlinePragma id)
 
 setInlineActivation :: Id -> Activation -> Id
-setInlineActivation id act = modifyInlinePragma id (\(InlinePragma _ match_info) -> InlinePragma act match_info)
+setInlineActivation id act = modifyInlinePragma id (\prag -> setInlinePragmaActivation prag act)
 
 idRuleMatchInfo :: Id -> RuleMatchInfo
 idRuleMatchInfo id = inlinePragmaRuleMatchInfo (idInlinePragma id)
@@ -706,28 +659,43 @@ zapFragileIdInfo = zapInfo zapFragileInfo
 
 Note [transferPolyIdInfo]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
-Suppose we have
+This transfer is used in two places: 
+	FloatOut (long-distance let-floating)
+	SimplUtils.abstractFloats (short-distance let-floating)
+
+Consider the short-distance let-floating:
 
    f = /\a. let g = rhs in ...
 
-where g has interesting strictness information.  Then if we float thus
+Then if we float thus
 
    g' = /\a. rhs
-   f = /\a. ...[g' a/g]
+   f = /\a. ...[g' a/g]....
 
 we *do not* want to lose g's
   * strictness information
   * arity 
   * inline pragma (though that is bit more debatable)
+  * occurrence info
 
-It's simple to retain strictness and arity, but not so simple to retain
+Mostly this is just an optimisation, but it's *vital* to
+transfer the occurrence info.  Consider
+   
+   NonRec { f = /\a. let Rec { g* = ..g.. } in ... }
+
+where the '*' means 'LoopBreaker'.  Then if we float we must get
+
+   Rec { g'* = /\a. ...(g' a)... }
+   NonRec { f = /\a. ...[g' a/g]....}
+
+where g' is also marked as LoopBreaker.  If not, terrible things
+can happen if we re-simplify the binding (and the Simplifier does
+sometimes simplify a term twice); see Trac #4345.
+
+It's not so simple to retain
   * worker info
   * rules
 so we simply discard those.  Sooner or later this may bite us.
-
-This transfer is used in two places: 
-	FloatOut (long-distance let-floating)
-	SimplUtils.abstractFloats (short-distance let-floating)
 
 If we abstract wrt one or more *value* binders, we must modify the 
 arity and strictness info before transferring it.  E.g. 
@@ -751,11 +719,13 @@ transferPolyIdInfo old_id abstract_wrt new_id
     old_info 	    = idInfo old_id
     old_arity       = arityInfo old_info
     old_inline_prag = inlinePragInfo old_info
+    old_occ_info    = occInfo old_info
     new_arity       = old_arity + arity_increase
-    old_strictness  = newStrictnessInfo old_info
+    old_strictness  = strictnessInfo old_info
     new_strictness  = fmap (increaseStrictSigArity arity_increase) old_strictness
 
-    transfer new_info = new_info `setNewStrictnessInfo` new_strictness
+    transfer new_info = new_info `setStrictnessInfo` new_strictness
 			         `setArityInfo` new_arity
  			         `setInlinePragInfo` old_inline_prag
+				 `setOccInfo` old_occ_info
 \end{code}

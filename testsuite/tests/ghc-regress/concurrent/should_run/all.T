@@ -12,16 +12,36 @@ else:
    only_threaded_ways = skip
 
 test('conc069', only_threaded_ways, compile_and_run, [''])
+test('conc069a', only_threaded_ways, compile_and_run, [''])
 # this test gives slightly different results for non-threaded ways, so omit
 # those for now.
 test('conc070', only_threaded_ways, compile_and_run, [''])
 
 test('1980', normal, compile_and_run, [''])
 test('2910', normal, compile_and_run, [''])
+test('2910a', normal, compile_and_run, [''])
 test('3279', normal, compile_and_run, [''])
 
 # This test takes a long time with the default context switch interval
 test('3429', extra_run_opts('+RTS -i0.001 -RTS'), compile_and_run, [''])
+
+# without -O, goes into an infinite loop
+# GHCi cannot deterct the infinite loop, because the thread is always reachable
+# (see also conc033 and others).  We should really fix this.
+test('4030', omit_ways('ghci'), compile_and_run, ['-O'])
+
+# each of these runs for about a second
+test('throwto001', extra_run_opts('1000 2000'), compile_and_run, [''])
+test('throwto002', ignore_output, compile_and_run, [''])
+test('throwto003', normal, compile_and_run, [''])
+
+test('mask001', normal, compile_and_run, [''])
+# ghci does not generate the BlockedIndefinitely exceptions, so omit:
+test('mask002', omit_ways(['ghci']), compile_and_run, [''])
+
+test('async001', normal, compile_and_run, [''])
+
+test('numsparks001', only_ways(['threaded1']), compile_and_run, [''])
 
 # -----------------------------------------------------------------------------
 # These tests we only do for a full run
@@ -53,8 +73,11 @@ test('conc013', only_compiler_types(['ghc']), compile_and_run, [''])
 
 test('conc014', only_compiler_types(['ghc']), compile_and_run, [''])
 test('conc015', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc016', only_compiler_types(['ghc']), compile_and_run, [''])
+test('conc015a', only_compiler_types(['ghc']), compile_and_run, [''])
+test('conc016', [ expect_fail_for(['threaded2']), # see comment in conc016.hs
+                  only_compiler_types(['ghc']) ], compile_and_run, [''])
 test('conc017', only_compiler_types(['ghc']), compile_and_run, [''])
+test('conc017a', only_compiler_types(['ghc']), compile_and_run, [''])
 test('conc018', only_compiler_types(['ghc']), compile_and_run, [''])
 test('conc019', compose(only_compiler_types(['ghc']),
 			extra_run_opts('+RTS -K16m -RTS')),
@@ -137,9 +160,10 @@ test('conc058', only_compiler_types(['ghc']), compile_and_run, [''])
 test('conc059',
      [only_compiler_types(['ghc']),
       only_ways(['threaded1','threaded2']),
+      compile_cmd_prefix('$MAKE conc059_setup && '),
       extra_clean(['conc059_c.o'])],
      compile_and_run,
-     ['conc059_c.c'])
+     ['conc059_c.c -no-hs-main'])
 
 # This test sometimes just exits successfully
 # when run the threaded2 way. The problem hasn't been diagnosed yet
@@ -150,4 +174,8 @@ test('conc064',
 test('conc065', ignore_output, compile_and_run, [''])
 test('conc066', ignore_output, compile_and_run, [''])
 test('conc067', ignore_output, compile_and_run, [''])
-test('conc068', exit_code(1), compile_and_run, [''])
+
+# omit threaded2, the behaviour of this test is non-deterministic with more
+# than one CPU.
+test('conc068', [ omit_ways('threaded2'), exit_code(1) ], compile_and_run, [''])
+

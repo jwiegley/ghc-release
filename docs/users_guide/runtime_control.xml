@@ -10,7 +10,8 @@
   code and then links it with a non-trivial runtime system (RTS),
   which handles storage management, profiling, etc.</para>
 
-  <para>You have some control over the behaviour of the RTS, by giving
+  <para>If you use the <literal>-rtsopts</literal> flag when linking,
+  you have some control over the behaviour of the RTS, by giving
   special command-line arguments to your program.</para>
 
   <para>When your Haskell program starts up, its RTS extracts
@@ -61,14 +62,15 @@
   <literal>+RTS -M128m -RTS</literal>
   to the command line.</para>
 
-  <sect2 id="rts-optinos-environment">
+  <sect2 id="rts-options-environment">
     <title>Setting global RTS options</title>
 
     <indexterm><primary>RTS options</primary><secondary>from the environment</secondary></indexterm>
     <indexterm><primary>environment variable</primary><secondary>for
     setting RTS options</secondary></indexterm>
 
-    <para>RTS options are also taken from the environment variable
+    <para>When the <literal>-rtsopts</literal> flag is used when linking,
+    RTS options are also taken from the environment variable
     <envar>GHCRTS</envar><indexterm><primary><envar>GHCRTS</envar></primary>
       </indexterm>.  For example, to set the maximum heap size
     to 128M for all GHC-compiled programs (using an
@@ -128,6 +130,15 @@
          things like ctrl-C. This option is primarily useful for when
          you are using the Haskell code as a DLL, and want to set your
          own signal handlers.</para>
+
+         <para>Note that even
+           with <option>--install-signal-handlers=no</option>, the RTS
+           interval timer signal is still enabled.  The timer signal
+           is either SIGVTALRM or SIGALRM, depending on the RTS
+           configuration and OS capabilities.  To disable the timer
+           signal, use the <literal>-V0</literal> RTS option (see
+           above).
+         </para>
        </listitem>
      </varlistentry>
 
@@ -1045,6 +1056,20 @@
 
   </sect2>
 
+  <sect2>
+    <title>Linker flags to change RTS behaviour</title>
+
+    <indexterm><primary>RTS behaviour, changing</primary></indexterm>
+
+    <para>
+      GHC lets you exercise rudimentary control over the RTS settings
+      for any given program, by using the <literal>-with-rtsopts</literal>
+      linker flag. For example, to set <literal>-H128m -K1m</literal>,
+      link with <literal>-with-rtsopts="-H128m -K1m"</literal>.
+    </para>
+
+  </sect2>
+
   <sect2 id="rts-hooks">
     <title>&ldquo;Hooks&rdquo; to change RTS behaviour</title>
 
@@ -1270,7 +1295,6 @@ $ ./a.out +RTS --info
 
 <!-- Emacs stuff:
      ;;; Local Variables: ***
-     ;;; mode: xml ***
      ;;; sgml-parent-document: ("users_guide.xml" "book" "chapter" "sect1") ***
      ;;; End: ***
  -->

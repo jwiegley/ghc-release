@@ -1,10 +1,10 @@
 
-readFail042.hs:10:8:
+readFail042.hs:10:9:
     Illegal transform or grouping list comprehension: use -XTransformListComp
 
-readFail042.hs:11:8:
+readFail042.hs:11:9:
     Illegal transform or grouping list comprehension: use -XTransformListComp
 
-readFail042.hs:11:22: Not in scope: `by'
+readFail042.hs:11:23: Not in scope: `by'
 
-readFail042.hs:11:25: Not in scope: `x'
+readFail042.hs:11:26: Not in scope: `x'

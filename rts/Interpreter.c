@@ -11,20 +11,28 @@
 
 // internal headers
 #include "sm/Storage.h"
+#include "sm/Sanity.h"
 #include "RtsUtils.h"
 #include "Schedule.h"
 #include "Updates.h"
-#include "Sanity.h"
 #include "Prelude.h"
 #include "Stable.h"
 #include "Printer.h"
 #include "Disassembler.h"
 #include "Interpreter.h"
 #include "ThreadPaused.h"
+#include "Threads.h"
 
 #include <string.h>     /* for memcpy */
 #ifdef HAVE_ERRNO_H
 #include <errno.h>
+#endif
+
+// When building the RTS in the non-dyn way on Windows, we don't
+//	want declspec(__dllimport__) on the front of function prototypes
+//	from libffi.
+#if defined(mingw32_HOST_OS) && !defined(__PIC__)
+# define LIBFFI_NOT_DLL
 #endif
 
 #include "ffi.h"
@@ -82,7 +90,7 @@
 STATIC_INLINE StgPtr
 allocate_NONUPD (Capability *cap, int n_words)
 {
-    return allocateLocal(cap, stg_max(sizeofW(StgHeader)+MIN_PAYLOAD_SIZE, n_words));
+    return allocate(cap, stg_max(sizeofW(StgHeader)+MIN_PAYLOAD_SIZE, n_words));
 }
 
 int rts_stop_next_breakpoint = 0;
@@ -262,14 +270,13 @@ eval_obj:
              debugBelch("\n\n");
             );
 
-    IF_DEBUG(sanity,checkStackChunk(Sp, cap->r.rCurrentTSO->stack+cap->r.rCurrentTSO->stack_size));
+//    IF_DEBUG(sanity,checkStackChunk(Sp, cap->r.rCurrentTSO->stack+cap->r.rCurrentTSO->stack_size));
+    IF_DEBUG(sanity,checkStackFrame(Sp));
 
     switch ( get_itbl(obj)->type ) {
 
     case IND:
-    case IND_OLDGEN:
     case IND_PERM:
-    case IND_OLDGEN_PERM:
     case IND_STATIC:
     { 
 	tagged_obj = ((StgInd*)obj)->indirectee;
@@ -435,7 +442,8 @@ do_return:
         // to a PAP by the GC, violating the invariant that PAPs
         // always contain a tagged pointer to the function.
 	INTERP_TICK(it_retto_UPDATE);
-	UPD_IND(((StgUpdateFrame *)Sp)->updatee, tagged_obj); 
+        updateThunk(cap, cap->r.rCurrentTSO, 
+                    ((StgUpdateFrame *)Sp)->updatee, tagged_obj);
 	Sp += sizeofW(StgUpdateFrame);
 	goto do_return;
 
@@ -597,7 +605,7 @@ do_apply:
 	    else /* arity > n */ {
 		// build a new PAP and return it.
 		StgPAP *new_pap;
-		new_pap = (StgPAP *)allocateLocal(cap, PAP_sizeW(pap->n_args + m));
+		new_pap = (StgPAP *)allocate(cap, PAP_sizeW(pap->n_args + m));
 		SET_HDR(new_pap,&stg_PAP_info,CCCS);
 		new_pap->arity = pap->arity - n;
 		new_pap->n_args = pap->n_args + m;
@@ -642,7 +650,7 @@ do_apply:
 		// build a PAP and return it.
 		StgPAP *pap;
 		nat i;
-		pap = (StgPAP *)allocateLocal(cap, PAP_sizeW(m));
+		pap = (StgPAP *)allocate(cap, PAP_sizeW(m));
 		SET_HDR(pap, &stg_PAP_info,CCCS);
 		pap->arity = arity - n;
 		pap->fun = obj;
@@ -711,7 +719,7 @@ do_apply:
 
 run_BCO_return:
     // Heap check
-    if (doYouWantToGC()) {
+    if (doYouWantToGC(cap)) {
 	Sp--; Sp[0] = (W_)&stg_enter_info;
 	RETURN_TO_SCHEDULER(ThreadInterpret, HeapOverflow);
     }
@@ -722,7 +730,7 @@ run_BCO_return:
     
 run_BCO_return_unboxed:
     // Heap check
-    if (doYouWantToGC()) {
+    if (doYouWantToGC(cap)) {
 	RETURN_TO_SCHEDULER(ThreadInterpret, HeapOverflow);
     }
     // Stack checks aren't necessary at return points, the stack use
@@ -740,7 +748,7 @@ run_BCO_fun:
 	);
 
     // Heap check
-    if (doYouWantToGC()) {
+    if (doYouWantToGC(cap)) {
 	Sp -= 2; 
 	Sp[1] = (W_)obj; 
 	Sp[0] = (W_)&stg_apply_interp_info; // placeholder, really
@@ -856,7 +864,7 @@ run_BCO:
                   // stg_apply_interp_info pointer and a pointer to
                   // the BCO
                   size_words = BCO_BITMAP_SIZE(obj) + 2;
-                  new_aps = (StgAP_STACK *) allocateLocal(cap, AP_STACK_sizeW(size_words));
+                  new_aps = (StgAP_STACK *) allocate(cap, AP_STACK_sizeW(size_words));
                   SET_HDR(new_aps,&stg_AP_STACK_info,CCS_SYSTEM); 
                   new_aps->size = size_words;
                   new_aps->fun = &stg_dummy_ret_closure; 
@@ -1075,7 +1083,7 @@ run_BCO:
 	case bci_ALLOC_AP: {
 	    StgAP* ap; 
 	    int n_payload = BCO_NEXT;
-	    ap = (StgAP*)allocateLocal(cap, AP_sizeW(n_payload));
+	    ap = (StgAP*)allocate(cap, AP_sizeW(n_payload));
 	    Sp[-1] = (W_)ap;
 	    ap->n_args = n_payload;
 	    SET_HDR(ap, &stg_AP_info, CCS_SYSTEM/*ToDo*/)
@@ -1086,7 +1094,7 @@ run_BCO:
 	case bci_ALLOC_AP_NOUPD: {
 	    StgAP* ap; 
 	    int n_payload = BCO_NEXT;
-	    ap = (StgAP*)allocateLocal(cap, AP_sizeW(n_payload));
+	    ap = (StgAP*)allocate(cap, AP_sizeW(n_payload));
 	    Sp[-1] = (W_)ap;
 	    ap->n_args = n_payload;
 	    SET_HDR(ap, &stg_AP_NOUPD_info, CCS_SYSTEM/*ToDo*/)
@@ -1098,7 +1106,7 @@ run_BCO:
 	    StgPAP* pap; 
 	    int arity = BCO_NEXT;
 	    int n_payload = BCO_NEXT;
-	    pap = (StgPAP*)allocateLocal(cap, PAP_sizeW(n_payload));
+	    pap = (StgPAP*)allocate(cap, PAP_sizeW(n_payload));
 	    Sp[-1] = (W_)pap;
 	    pap->n_args = n_payload;
 	    pap->arity = arity;

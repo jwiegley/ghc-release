@@ -62,21 +62,25 @@ module Distribution.PackageDescription.Parse (
 
 import Data.Char  (isSpace)
 import Data.Maybe (listToMaybe, isJust)
+import Data.Monoid ( Monoid(..) )
 import Data.List  (nub, unfoldr, partition, (\\))
 import Control.Monad (liftM, foldM, when, unless)
 import System.Directory (doesFileExist)
 
 import Distribution.Text
          ( Text(disp, parse), display, simpleParse )
+import Distribution.Compat.ReadP
+         ((+++), option)
 import Text.PrettyPrint.HughesPJ
 
 import Distribution.ParseUtils hiding (parseFields)
 import Distribution.PackageDescription
 import Distribution.Package
-         ( PackageName(..), PackageIdentifier(..), Dependency(..)
-         , packageName, packageVersion )
+         ( PackageIdentifier(..), Dependency(..), packageName, packageVersion )
+import Distribution.ModuleName ( ModuleName )
 import Distribution.Version
-        ( anyVersion, isAnyVersion, withinRange )
+        ( Version(Version), orLaterVersion
+        , LowerBound(..), asVersionIntervals )
 import Distribution.Verbosity (Verbosity)
 import Distribution.Compiler  (CompilerFlavor(..))
 import Distribution.PackageDescription.Configuration (parseCondition, freeVars)
@@ -98,8 +102,8 @@ pkgDescrFieldDescrs =
            disp                   parse
            packageVersion         (\ver pkg -> pkg{package=(package pkg){pkgVersion=ver}})
  , simpleField "cabal-version"
-           disp                   parse
-           descCabalVersion       (\v pkg -> pkg{descCabalVersion=v})
+           (either disp disp)     (liftM Left parse +++ liftM Right parse)
+           specVersionRaw         (\v pkg -> pkg{specVersionRaw=v})
  , simpleField "build-type"
            (maybe empty disp)     (fmap Just parse)
            buildType              (\t pkg -> pkg{buildType=t})
@@ -207,6 +211,94 @@ storeXFieldsExe (f@('x':'-':_), val) e@(Executable { buildInfo = bi }) =
 storeXFieldsExe _ _ = Nothing
 
 -- ---------------------------------------------------------------------------
+-- The TestSuite type
+
+-- | An intermediate type just used for parsing the test-suite stanza.
+-- After validation it is converted into the proper 'TestSuite' type.
+data TestSuiteStanza = TestSuiteStanza {
+       testStanzaTestType   :: Maybe TestType,
+       testStanzaMainIs     :: Maybe FilePath,
+       testStanzaTestModule :: Maybe ModuleName,
+       testStanzaBuildInfo  :: BuildInfo
+     }
+
+emptyTestStanza :: TestSuiteStanza
+emptyTestStanza = TestSuiteStanza Nothing Nothing Nothing mempty
+
+testSuiteFieldDescrs :: [FieldDescr TestSuiteStanza]
+testSuiteFieldDescrs =
+    [ simpleField "type"
+        (maybe empty disp)    (fmap Just parse)
+        testStanzaTestType    (\x suite -> suite { testStanzaTestType = x })
+    , simpleField "main-is"
+        (maybe empty showFilePath)  (fmap Just parseFilePathQ)
+        testStanzaMainIs      (\x suite -> suite { testStanzaMainIs = x })
+    , simpleField "test-module"
+        (maybe empty disp)    (fmap Just parseModuleNameQ)
+        testStanzaTestModule  (\x suite -> suite { testStanzaTestModule = x })
+    ]
+    ++ map biToTest binfoFieldDescrs
+  where
+    biToTest = liftField testStanzaBuildInfo
+                         (\bi suite -> suite { testStanzaBuildInfo = bi })
+
+storeXFieldsTest :: UnrecFieldParser TestSuiteStanza
+storeXFieldsTest (f@('x':'-':_), val) t@(TestSuiteStanza { testStanzaBuildInfo = bi }) =
+    Just $ t {testStanzaBuildInfo = bi{ customFieldsBI = (f,val):(customFieldsBI bi)}}
+storeXFieldsTest _ _ = Nothing
+
+validateTestSuite :: LineNo -> TestSuiteStanza -> ParseResult TestSuite
+validateTestSuite line stanza =
+    case testStanzaTestType stanza of
+      Nothing ->
+        syntaxError line $
+             "The 'type' field is required for test suites. "
+          ++ "The available test types are: "
+          ++ intercalate ", " (map display knownTestTypes)
+
+      Just tt@(TestTypeUnknown _ _) ->
+        return emptyTestSuite {
+          testInterface = TestSuiteUnsupported tt,
+          testBuildInfo = testStanzaBuildInfo stanza
+        }
+
+      Just tt | tt `notElem` knownTestTypes ->
+        return emptyTestSuite {
+          testInterface = TestSuiteUnsupported tt,
+          testBuildInfo = testStanzaBuildInfo stanza
+        }
+
+      Just tt@(TestTypeExe ver) ->
+        case testStanzaMainIs stanza of
+          Nothing   -> syntaxError line (missingField "main-is" tt)
+          Just file -> do
+            when (isJust (testStanzaTestModule stanza)) $
+              warning (extraField "test-module" tt)
+            return emptyTestSuite {
+              testInterface = TestSuiteExeV10 ver file,
+              testBuildInfo = testStanzaBuildInfo stanza
+            }
+
+      Just tt@(TestTypeLib ver) ->
+        case testStanzaTestModule stanza of
+          Nothing      -> syntaxError line (missingField "test-module" tt)
+          Just module_ -> do
+            when (isJust (testStanzaMainIs stanza)) $
+              warning (extraField "main-is" tt)
+            return emptyTestSuite {
+              testInterface = TestSuiteLibV09 ver module_,
+              testBuildInfo = testStanzaBuildInfo stanza
+            }
+
+  where
+    missingField name tt = "The '" ++ name ++ "' field is required for the "
+                        ++ display tt ++ " test suite type."
+
+    extraField   name tt = "The '" ++ name ++ "' field is not used for the '"
+                        ++ display tt ++ "' test suite type."
+
+
+-- ---------------------------------------------------------------------------
 -- The BuildInfo type
 
 
@@ -235,9 +327,23 @@ binfoFieldDescrs =
  , listField   "c-sources"
            showFilePath       parseFilePathQ
            cSources           (\paths binfo -> binfo{cSources=paths})
+
+ , simpleField "default-language"
+           (maybe empty disp) (option Nothing (fmap Just parseLanguageQ))
+           defaultLanguage    (\lang  binfo -> binfo{defaultLanguage=lang})
+ , listField   "other-languages"
+           disp               parseLanguageQ
+           otherLanguages     (\langs binfo -> binfo{otherLanguages=langs})
+ , listField   "default-extensions"
+           disp               parseExtensionQ
+           defaultExtensions  (\exts  binfo -> binfo{defaultExtensions=exts})
+ , listField   "other-extensions"
+           disp               parseExtensionQ
+           otherExtensions    (\exts  binfo -> binfo{otherExtensions=exts})
  , listField   "extensions"
            disp               parseExtensionQ
-           extensions         (\exts  binfo -> binfo{extensions=exts})
+           oldExtensions      (\exts  binfo -> binfo{oldExtensions=exts})
+
  , listField   "extra-libraries"
            showToken          parseTokenQ
            extraLibs          (\xs    binfo -> binfo{extraLibs=xs})
@@ -264,7 +370,7 @@ binfoFieldDescrs =
            ghcProfOptions        (\val binfo -> binfo{ghcProfOptions=val})
  , listField   "ghc-shared-options"
            text               parseTokenQ
-           ghcProfOptions        (\val binfo -> binfo{ghcSharedOptions=val})
+           ghcSharedOptions      (\val binfo -> binfo{ghcSharedOptions=val})
  , optsField   "ghc-options"  GHC
            options            (\path  binfo -> binfo{options=path})
  , optsField   "hugs-options" Hugs
@@ -469,10 +575,14 @@ parsePackageDescription file = do
                    _ -> parseFail err
 
     let cabalVersionNeeded =
-          head $ [ versionRange
+          head $ [ minVersionBound versionRange
                  | Just versionRange <- [ simpleParse v
                                         | F _ "cabal-version" v <- fields0 ] ]
-              ++ [anyVersion]
+              ++ [Version [0] []]
+        minVersionBound versionRange =
+          case asVersionIntervals versionRange of
+            []                            -> Version [0] []
+            ((LowerBound version _, _):_) -> version
 
     handleFutureVersionParseFailure cabalVersionNeeded $ do
 
@@ -507,14 +617,14 @@ parsePackageDescription file = do
 
           -- 'getBody' assumes that the remaining fields only consist of
           -- flags, lib and exe sections.
-        (repos, flags, mlib, exes) <- getBody
+        (repos, flags, mlib, exes, tests) <- getBody
         warnIfRest  -- warn if getBody did not parse up to the last field.
-        when (not (oldSyntax fields0)) $  -- warn if we use new syntax
-          maybeWarnCabalVersion pkg       -- without Cabal >= 1.2
-        checkForUndefinedFlags flags mlib exes
+          -- warn about using old/new syntax with wrong cabal-version:
+        maybeWarnCabalVersion (not $ oldSyntax fields0) pkg
+        checkForUndefinedFlags flags mlib exes tests
         return $ GenericPackageDescription
                    pkg { sourceRepos = repos }
-                   flags mlib exes
+                   flags mlib exes tests
 
   where
     oldSyntax flds = all isSimpleField flds
@@ -522,12 +632,28 @@ parsePackageDescription file = do
         syntaxError (fst (head tabs)) $
           "Do not use tabs for indentation (use spaces instead)\n"
           ++ "  Tabs were used at (line,column): " ++ show tabs
-    maybeWarnCabalVersion pkg =
-        when (packageName pkg /= PackageName "Cabal" -- supress warning for Cabal
-           && isAnyVersion (descCabalVersion pkg)) $
-          lift $ warning $
-            "A package using section syntax should require\n"
-            ++ "\"Cabal-Version: >= 1.2\" or equivalent."
+
+    maybeWarnCabalVersion newsyntax pkg
+      | newsyntax && specVersion pkg < Version [1,2] []
+      = lift $ warning $
+             "A package using section syntax must specify at least\n"
+          ++ "'cabal-version: >= 1.2'."
+
+    maybeWarnCabalVersion newsyntax pkg
+      | not newsyntax && specVersion pkg >= Version [1,2] []
+      = lift $ warning $
+             "A package using 'cabal-version: "
+          ++ displaySpecVersion (specVersionRaw pkg)
+          ++ "' must use section syntax. See the Cabal user guide for details."
+      where
+        displaySpecVersion (Left version)       = display version
+        displaySpecVersion (Right versionRange) =
+          case asVersionIntervals versionRange of
+            [] {- impossible -}           -> display versionRange
+            ((LowerBound version _, _):_) -> display (orLaterVersion version)
+
+    maybeWarnCabalVersion _ _ = return ()
+
 
     handleFutureVersionParseFailure cabalVersionNeeded parseBody =
       (unless versionOk (warning message) >> parseBody)
@@ -535,8 +661,8 @@ parsePackageDescription file = do
         TabsError _   -> parseFail parseError
         _ | versionOk -> parseFail parseError
           | otherwise -> fail message
-      where versionOk = cabalVersion `withinRange` cabalVersionNeeded
-            message   = "This package requires Cabal version: "
+      where versionOk = cabalVersionNeeded <= cabalVersion
+            message   = "This package requires at least Cabal version "
                      ++ display cabalVersionNeeded
 
     -- "Sectionize" an old-style Cabal file.  A sectionized file has:
@@ -598,13 +724,14 @@ parsePackageDescription file = do
         _ -> return (reverse acc)
 
     --
-    -- body ::= { repo | flag | library | executable }+   -- at most one lib
+    -- body ::= { repo | flag | library | executable | test }+   -- at most one lib
     --
     -- The body consists of an optional sequence of declarations of flags and
     -- an arbitrary number of executables and at most one library.
     getBody :: PM ([SourceRepo], [Flag]
                   ,Maybe (CondTree ConfVar [Dependency] Library)
-                  ,[(String, CondTree ConfVar [Dependency] Executable)])
+                  ,[(String, CondTree ConfVar [Dependency] Executable)]
+                  ,[(String, CondTree ConfVar [Dependency] TestSuite)])
     getBody = peekField >>= \mf -> case mf of
       Just (Section line_no sec_type sec_label sec_fields)
         | sec_type == "executable" -> do
@@ -613,18 +740,27 @@ parsePackageDescription file = do
             exename <- lift $ runP line_no "executable" parseTokenQ sec_label
             flds <- collectFields parseExeFields sec_fields
             skipField
-            (repos, flags, lib, exes) <- getBody
-            return (repos, flags, lib, exes ++ [(exename, flds)])
+            (repos, flags, lib, exes, tests) <- getBody
+            return (repos, flags, lib, exes ++ [(exename, flds)], tests)
+
+        | sec_type == "test-suite" -> do
+            when (null sec_label) $ lift $ syntaxError line_no
+                "'test-suite' needs one argument (the test suite's name)"
+            testname <- lift $ runP line_no "test" parseTokenQ sec_label
+            flds <- collectFields (parseTestFields line_no) sec_fields
+            skipField
+            (repos, flags, lib, exes, tests) <- getBody
+            return (repos, flags, lib, exes, tests ++ [(testname, flds)])
 
         | sec_type == "library" -> do
             when (not (null sec_label)) $ lift $
               syntaxError line_no "'library' expects no argument"
             flds <- collectFields parseLibFields sec_fields
             skipField
-            (repos, flags, lib, exes) <- getBody
+            (repos, flags, lib, exes, tests) <- getBody
             when (isJust lib) $ lift $ syntaxError line_no
               "There can only be one library section in a package description."
-            return (repos, flags, Just flds, exes)
+            return (repos, flags, Just flds, exes, tests)
 
         | sec_type == "flag" -> do
             when (null sec_label) $ lift $
@@ -635,8 +771,8 @@ parsePackageDescription file = do
                     (MkFlag (FlagName (lowercase sec_label)) "" True False)
                     sec_fields
             skipField
-            (repos, flags, lib, exes) <- getBody
-            return (repos, flag:flags, lib, exes)
+            (repos, flags, lib, exes, tests) <- getBody
+            return (repos, flag:flags, lib, exes, tests)
 
         | sec_type == "source-repository" -> do
             when (null sec_label) $ lift $ syntaxError line_no $
@@ -660,8 +796,8 @@ parsePackageDescription file = do
                     })
                     sec_fields
             skipField
-            (repos, flags, lib, exes) <- getBody
-            return (repo:repos, flags, lib, exes)
+            (repos, flags, lib, exes, tests) <- getBody
+            return (repo:repos, flags, lib, exes, tests)
 
         | otherwise -> do
             lift $ warning $ "Ignoring unknown section type: " ++ sec_type
@@ -672,7 +808,7 @@ parsePackageDescription file = do
               "Construct not supported at this position: " ++ show f
             skipField
             getBody
-      Nothing -> return ([], [], Nothing, [])
+      Nothing -> return ([], [], Nothing, [], [])
 
     -- Extracts all fields in a block and returns a 'CondTree'.
     --
@@ -710,18 +846,27 @@ parsePackageDescription file = do
     parseLibFields :: [Field] -> PM Library
     parseLibFields = lift . parseFields libFieldDescrs storeXFieldsLib emptyLibrary
 
+    -- Note: we don't parse the "executable" field here, hence the tail hack.
     parseExeFields :: [Field] -> PM Executable
-    parseExeFields = lift . parseFields executableFieldDescrs storeXFieldsExe emptyExecutable
+    parseExeFields = lift . parseFields (tail executableFieldDescrs) storeXFieldsExe emptyExecutable
+
+    parseTestFields :: LineNo -> [Field] -> PM TestSuite
+    parseTestFields line fields = do
+        x <- lift $ parseFields testSuiteFieldDescrs storeXFieldsTest
+                                emptyTestStanza fields
+        lift $ validateTestSuite line x
 
     checkForUndefinedFlags ::
         [Flag] ->
         Maybe (CondTree ConfVar [Dependency] Library) ->
         [(String, CondTree ConfVar [Dependency] Executable)] ->
+        [(String, CondTree ConfVar [Dependency] TestSuite)] ->
         PM ()
-    checkForUndefinedFlags flags mlib exes = do
+    checkForUndefinedFlags flags mlib exes tests = do
         let definedFlags = map flagName flags
         maybe (return ()) (checkCondTreeFlags definedFlags) mlib
         mapM_ (checkCondTreeFlags definedFlags . snd) exes
+        mapM_ (checkCondTreeFlags definedFlags . snd) tests
 
     checkCondTreeFlags :: [FlagName] -> CondTree ConfVar c a -> PM ()
     checkCondTreeFlags definedFlags ct = do
@@ -824,6 +969,8 @@ parseHookedBuildInfo inp = do
 writePackageDescription :: FilePath -> PackageDescription -> IO ()
 writePackageDescription fpath pkg = writeUTF8File fpath (showPackageDescription pkg)
 
+--TODO: make this use section syntax
+-- add equivalent for GenericPackageDescription
 showPackageDescription :: PackageDescription -> String
 showPackageDescription pkg = render $
      ppPackage pkg

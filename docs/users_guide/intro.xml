@@ -346,15 +346,12 @@
   </sect1>
 
 
-&relnotes3;
-&relnotes2;
 &relnotes1;
 
 </chapter>
 
 <!-- Emacs stuff:
      ;;; Local Variables: ***
-     ;;; mode: xml ***
      ;;; sgml-parent-document: ("users_guide.xml" "book" "chapter") ***
      ;;; End: ***
  -->

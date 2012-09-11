@@ -11,6 +11,7 @@
 -- any warnings in the module. See
 --     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
 -- for details
+{-# LANGUAGE DeriveDataTypeable #-}
 
 module Literal
 	( 
@@ -26,6 +27,7 @@ module Literal
 	-- ** Operations on Literals
 	, literalType
 	, hashLiteral
+        , absentLiteralOf
 
         -- ** Predicates on Literals and their contents
 	, litIsDupable, litIsTrivial
@@ -43,18 +45,21 @@ module Literal
 	) where
 
 import TysPrim
+import PrelNames
 import Type
+import TyCon
 import Outputable
 import FastTypes
 import FastString
 import BasicTypes
 import Binary
 import Constants
-
+import UniqFM
 import Data.Int
 import Data.Ratio
 import Data.Word
 import Data.Char
+import Data.Data( Data, Typeable )
 \end{code}
 
 
@@ -106,6 +111,7 @@ data Literal
 				--    the label expects. Only applicable with
 				--    @stdcall@ labels. @Just x@ => @\<x\>@ will
 				--    be appended to label name when emitting assembly.
+  deriving (Data, Typeable)
 \end{code}
 
 Binary instance
@@ -323,6 +329,21 @@ literalType (MachWord64  _) = word64PrimTy
 literalType (MachFloat _)   = floatPrimTy
 literalType (MachDouble _)  = doublePrimTy
 literalType (MachLabel _ _ _) = addrPrimTy
+
+absentLiteralOf :: TyCon -> Maybe Literal
+-- Return a literal of the appropriate primtive
+-- TyCon, to use as a placeholder when it doesn't matter
+absentLiteralOf tc = lookupUFM absent_lits (tyConName tc)
+
+absent_lits :: UniqFM Literal
+absent_lits = listToUFM [ (addrPrimTyConKey,    MachNullAddr)
+            		, (charPrimTyConKey,    MachChar 'x')
+            		, (intPrimTyConKey,     MachInt 0)
+            		, (int64PrimTyConKey,   MachInt64 0)
+            		, (floatPrimTyConKey,   MachFloat 0)
+            		, (doublePrimTyConKey,  MachDouble 0)
+            		, (wordPrimTyConKey,    MachWord 0)
+            		, (word64PrimTyConKey,  MachWord64 0) ]
 \end{code}
 
 

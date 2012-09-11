@@ -93,12 +93,14 @@ import Encoding
 import FastTypes
 import FastFunctions
 import Panic
+import Util
 
-import Foreign
+import Foreign hiding   ( unsafePerformIO )
 import Foreign.C
 import GHC.Exts
 import System.IO
 import System.IO.Unsafe ( unsafePerformIO )
+import Data.Data
 import Data.IORef       ( IORef, newIORef, readIORef, writeIORef )
 import Data.Maybe       ( isJust )
 import Data.Char        ( ord )
@@ -133,7 +135,7 @@ data FastString = FastString {
       n_chars :: {-# UNPACK #-} !Int, -- number of chars
       buf     :: {-# UNPACK #-} !(ForeignPtr Word8),
       enc     :: FSEncoding
-  }
+  } deriving Typeable
 
 data FSEncoding
     -- including strings that don't need any encoding
@@ -158,6 +160,12 @@ instance Ord FastString where
 
 instance Show FastString where
    show fs = show (unpackFS fs)
+
+instance Data FastString where
+  -- don't traverse?
+  toConstr _   = abstractConstr "FastString"
+  gunfold _ _  = error "gunfold"
+  dataTypeOf _ = mkNoRepType "FastString"
 
 cmpFS :: FastString -> FastString -> Ordering
 cmpFS (FastString u1 l1 _ buf1 _) (FastString u2 l2 _ buf2 _) =
@@ -449,7 +457,18 @@ zEncodeFS fs@(FastString _ _ _ _ enc) =
             return efs
 
 appendFS :: FastString -> FastString -> FastString
-appendFS fs1 fs2 = mkFastString (unpackFS fs1 ++ unpackFS fs2)
+appendFS fs1 fs2 =
+  inlinePerformIO $ do
+    r <- mallocForeignPtrBytes len
+    withForeignPtr r $ \ r' -> do
+    withForeignPtr (buf fs1) $ \ fs1Ptr -> do
+    withForeignPtr (buf fs2) $ \ fs2Ptr -> do
+        copyBytes r' fs1Ptr len1
+        copyBytes (advancePtr r' len1) fs2Ptr len2
+        mkFastStringForeignPtr r' r len
+  where len  = len1 + len2
+        len1 = lengthFS fs1
+        len2 = lengthFS fs2
 
 concatFS :: [FastString] -> FastString
 concatFS ls = mkFastString (Prelude.concat (map unpackFS ls)) -- ToDo: do better

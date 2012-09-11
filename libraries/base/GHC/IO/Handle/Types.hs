@@ -86,15 +86,6 @@ import Data.Typeable
 -- enough information to identify the handle for debugging.  A handle is
 -- equal according to '==' only to itself; no attempt
 -- is made to compare the internal state of different handles for equality.
---
--- GHC note: a 'Handle' will be automatically closed when the garbage
--- collector detects that it has become unreferenced by the program.
--- However, relying on this behaviour is not generally recommended:
--- the garbage collector is unpredictable.  If possible, use explicit
--- an explicit 'hClose' to close 'Handle's when they are no longer
--- required.  GHC does not currently attempt to free up file
--- descriptors when they have run out, it is your responsibility to
--- ensure that this doesn't happen.
 
 data Handle 
   = FileHandle                          -- A normal handle to a file
@@ -325,7 +316,7 @@ and hence it is only possible on a seekable Handle.
 -- | The representation of a newline in the external file or stream.
 data Newline = LF    -- ^ '\n'
              | CRLF  -- ^ '\r\n'
-             deriving Eq
+             deriving (Eq, Ord, Read, Show)
 
 -- | Specifies the translation, if any, of newline characters between
 -- internal Strings and the external file or stream.  Haskell Strings
@@ -338,7 +329,7 @@ data NewlineMode
                   outputNL :: Newline
                     -- ^ the representation of newlines on output
                  }
-             deriving Eq
+             deriving (Eq, Ord, Read, Show)
 
 -- | The native newline representation for the current platform: 'LF'
 -- on Unix systems, 'CRLF' on Windows.

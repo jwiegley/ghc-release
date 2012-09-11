@@ -64,15 +64,14 @@ module Distribution.Simple.LHC (
         configure, getInstalledPackages,
         buildLib, buildExe,
         installLib, installExe,
+        registerPackage,
         ghcOptions,
         ghcVerbosityOptions
  ) where
 
-import Distribution.Simple.Setup
-         ( CopyFlags(..), fromFlag )
 import Distribution.PackageDescription as PD
-         ( PackageDescription(..), BuildInfo(..), Executable(..), withExe
-         , Library(..), libModules, hcOptions )
+         ( PackageDescription(..), BuildInfo(..), Executable(..)
+         , Library(..), libModules, hcOptions, usedExtensions, allExtensions )
 import Distribution.InstalledPackageInfo
                                 ( InstalledPackageInfo
                                 , parseInstalledPackageInfo )
@@ -87,7 +86,7 @@ import Distribution.Simple.InstallDirs
 import Distribution.Simple.BuildPaths
 import Distribution.Simple.Utils
 import Distribution.Package
-         ( PackageIdentifier, Package(..), PackageName(..) )
+         ( PackageIdentifier, Package(..) )
 import qualified Distribution.ModuleName as ModuleName
 import Distribution.Simple.Program
          ( Program(..), ConfiguredProgram(..), ProgramConfiguration, ProgArg
@@ -98,10 +97,11 @@ import Distribution.Simple.Program
          , arProgram, ranlibProgram, ldProgram
          , gccProgram, stripProgram
          , lhcProgram, lhcPkgProgram )
+import qualified Distribution.Simple.Program.HcPkg as HcPkg
 import Distribution.Simple.Compiler
          ( CompilerFlavor(..), CompilerId(..), Compiler(..), compilerVersion
          , OptimisationLevel(..), PackageDB(..), PackageDBStack
-         , Flag, extensionsToFlags )
+         , Flag, languageToFlags, extensionsToFlags )
 import Distribution.Version
          ( Version(..), orLaterVersion )
 import Distribution.System
@@ -109,7 +109,8 @@ import Distribution.System
 import Distribution.Verbosity
 import Distribution.Text
          ( display, simpleParse )
-import Language.Haskell.Extension (Extension(..))
+import Language.Haskell.Extension
+         ( Language(Haskell98), Extension(..) )
 
 import Control.Monad            ( unless, when )
 import Data.List
@@ -145,11 +146,13 @@ configure verbosity hcPath hcPkgPath conf = do
     ++ programPath lhcProg ++ " is version " ++ display lhcVersion ++ " "
     ++ programPath lhcPkgProg ++ " is version " ++ display lhcPkgVersion
 
-  languageExtensions <- getLanguageExtensions verbosity lhcProg
+  languages  <- getLanguages  verbosity lhcProg
+  extensions <- getExtensions verbosity lhcProg
 
   let comp = Compiler {
         compilerId             = CompilerId LHC lhcVersion,
-        compilerExtensions     = languageExtensions
+        compilerLanguages      = languages,
+        compilerExtensions     = extensions
       }
       conf''' = configureToolchain lhcProg conf'' -- configure gcc and ld
   return (comp, conf''')
@@ -216,8 +219,12 @@ configureToolchain lhcProg =
         then return ["-x"]
         else return []
 
-getLanguageExtensions :: Verbosity -> ConfiguredProgram -> IO [(Extension, Flag)]
-getLanguageExtensions verbosity lhcProg = do
+getLanguages :: Verbosity -> ConfiguredProgram -> IO [(Language, Flag)]
+getLanguages _ _ = return [(Haskell98, "")]
+--FIXME: does lhc support -XHaskell98 flag? from what version?
+
+getExtensions :: Verbosity -> ConfiguredProgram -> IO [(Extension, Flag)]
+getExtensions verbosity lhcProg = do
     exts <- rawSystemStdout verbosity (programPath lhcProg)
               ["--supported-languages"]
     -- GHC has the annoying habit of inverting some of the extensions
@@ -237,7 +244,7 @@ getInstalledPackages verbosity packagedbs conf = do
   pkgss <- getInstalledPackages' verbosity packagedbs conf
   let indexes = [ PackageIndex.fromList (map (substTopDir topDir) pkgs)
                 | (_, pkgs) <- pkgss ]
-  return $! hackRtsPackage (mconcat indexes)
+  return $! (mconcat indexes)
 
   where
     -- On Windows, various fields have $topdir/foo rather than full
@@ -247,27 +254,12 @@ getInstalledPackages verbosity packagedbs conf = do
     compilerDir  = takeDirectory (programPath ghcProg)
     topDir       = takeDirectory compilerDir
 
-    hackRtsPackage index =
-      case PackageIndex.lookupPackageName index (PackageName "rts") of
-        [(_,[rts])]
-           -> PackageIndex.insert (removeMingwIncludeDir rts) index
-        _  -> error "No (or multiple) rts package is registered!!"
-
 checkPackageDbStack :: PackageDBStack -> IO ()
 checkPackageDbStack (GlobalPackageDB:rest)
   | GlobalPackageDB `notElem` rest = return ()
 checkPackageDbStack _ =
   die $ "GHC.getInstalledPackages: the global package db must be "
      ++ "specified first and cannot be specified multiple times"
-
--- GHC < 6.10 put "$topdir/include/mingw" in rts's installDirs. This
--- breaks when you want to use a different gcc, so we need to filter
--- it out.
-removeMingwIncludeDir :: InstalledPackageInfo -> InstalledPackageInfo
-removeMingwIncludeDir pkg =
-    let ids = InstalledPackageInfo.includeDirs pkg
-        ids' = filter (not . ("mingw" `isSuffixOf`)) ids
-    in pkg { InstalledPackageInfo.includeDirs = ids' }
 
 -- | Get the packages from specific PackageDBs, not cumulative.
 --
@@ -344,7 +336,7 @@ buildLib verbosity pkg_descr lbi lib clbi = do
              (compiler lbi) (withProfLib lbi) (libBuildInfo lib)
 
   let libTargetDir = pref
-      forceVanillaLib = TemplateHaskell `elem` extensions libBi
+      forceVanillaLib = TemplateHaskell `elem` allExtensions libBi
       -- TH always needs vanilla libs, even when building for profiling
 
   createDirectoryIfMissingVerbose verbosity True libTargetDir
@@ -353,6 +345,7 @@ buildLib verbosity pkg_descr lbi lib clbi = do
              ["-package-name", display pkgid ]
           ++ constructGHCCmdLine lbi libBi clbi libTargetDir verbosity
           ++ map display (libModules lib)
+      lhcWrap x = ["--build-library", "--ghc-opts=" ++ unwords x]
       ghcArgsProf = ghcArgs
           ++ ["-prof",
               "-hisuf", "p_hi",
@@ -366,9 +359,9 @@ buildLib verbosity pkg_descr lbi lib clbi = do
              ]
           ++ ghcSharedOptions libBi
   unless (null (libModules lib)) $
-    do ifVanillaLib forceVanillaLib (runGhcProg ghcArgs)
-       ifProfLib (runGhcProg ghcArgsProf)
-       ifSharedLib (runGhcProg ghcArgsShared)
+    do ifVanillaLib forceVanillaLib (runGhcProg $ lhcWrap ghcArgs)
+       ifProfLib (runGhcProg $ lhcWrap ghcArgsProf)
+       ifSharedLib (runGhcProg $ lhcWrap ghcArgsShared)
 
   -- build any C sources
   unless (null (cSources libBi)) $ do
@@ -527,6 +520,7 @@ buildExe verbosity _pkg_descr lbi
   srcMainFile <- findFile (exeDir : hsSourceDirs exeBi) modPath
 
   let cObjs = map (`replaceExtension` objExtension) (cSources exeBi)
+  let lhcWrap x = ("--ghc-opts\"":x) ++ ["\""]
   let binArgs linkExe profExe =
              (if linkExe
                  then ["-o", targetDir </> exeNameReal]
@@ -550,8 +544,8 @@ buildExe verbosity _pkg_descr lbi
   -- with profiling. This is because the code that TH needs to
   -- run at compile time needs to be the vanilla ABI so it can
   -- be loaded up and run by the compiler.
-  when (withProfExe lbi && TemplateHaskell `elem` extensions exeBi)
-     (runGhcProg (binArgs False False))
+  when (withProfExe lbi && TemplateHaskell `elem` allExtensions exeBi)
+     (runGhcProg $ lhcWrap (binArgs False False))
 
   runGhcProg (binArgs True (withProfExe lbi))
 
@@ -634,7 +628,8 @@ ghcOptions lbi bi clbi odir
            NormalOptimisation  -> ["-O"]
            MaximumOptimisation -> ["-O2"])
      ++ hcOptions GHC bi
-     ++ extensionsToFlags c (extensions bi)
+     ++ languageToFlags c (defaultLanguage bi)
+     ++ extensionsToFlags c (usedExtensions bi)
     where c = compiler lbi
 
 ghcPackageFlags :: LocalBuildInfo -> ComponentLocalBuildInfo -> [String]
@@ -657,7 +652,7 @@ ghcPackageDbOptions dbstack = case dbstack of
  where
     specific (SpecificPackageDB db) = [ "-package-conf", db ]
     specific _ = ierror
-    ierror     = error "internal error: unexpected package db stack"
+    ierror     = error ("internal error: unexpected package db stack: " ++ show dbstack)
 
 constructCcCmdLine :: LocalBuildInfo -> BuildInfo -> ComponentLocalBuildInfo
                    -> FilePath -> FilePath -> Verbosity -> (FilePath,[String])
@@ -692,26 +687,25 @@ mkGHCiLibName lib = "HS" ++ display lib <.> "o"
 -- Installing
 
 -- |Install executables for GHC.
-installExe :: CopyFlags -- ^verbosity
+installExe :: Verbosity
            -> LocalBuildInfo
            -> InstallDirs FilePath -- ^Where to copy the files to
            -> FilePath  -- ^Build location
            -> (FilePath, FilePath)  -- ^Executable (prefix,suffix)
            -> PackageDescription
+           -> Executable
            -> IO ()
-installExe flags lbi installDirs buildPref (progprefix, progsuffix) pkg_descr
-    = do let verbosity = fromFlag (copyVerbosity flags)
-             binDir = bindir installDirs
-         createDirectoryIfMissingVerbose verbosity True binDir
-         withExe pkg_descr $ \Executable { exeName = e } -> do
-             let exeFileName = e <.> exeExtension
-                 fixedExeBaseName = progprefix ++ e ++ progsuffix
-                 installBinary dest = do
-                     installExecutableFile verbosity
-                       (buildPref </> e </> exeFileName)
-                       (dest <.> exeExtension)
-                     stripExe verbosity lbi exeFileName (dest <.> exeExtension)
-             installBinary (binDir </> fixedExeBaseName)
+installExe verbosity lbi installDirs buildPref (progprefix, progsuffix) _pkg exe = do
+  let binDir = bindir installDirs
+  createDirectoryIfMissingVerbose verbosity True binDir
+  let exeFileName = exeName exe <.> exeExtension
+      fixedExeBaseName = progprefix ++ exeName exe ++ progsuffix
+      installBinary dest = do
+          installExecutableFile verbosity
+            (buildPref </> exeName exe </> exeFileName)
+            (dest <.> exeExtension)
+          stripExe verbosity lbi exeFileName (dest <.> exeExtension)
+  installBinary (binDir </> fixedExeBaseName)
 
 stripExe :: Verbosity -> LocalBuildInfo -> FilePath -> FilePath -> IO ()
 stripExe verbosity lbi name path = when (stripExes lbi) $
@@ -731,37 +725,38 @@ stripExe verbosity lbi name path = when (stripExes lbi) $
        _   -> []
 
 -- |Install for ghc, .hi, .a and, if --with-ghci given, .o
-installLib    :: CopyFlags -- ^verbosity
+installLib    :: Verbosity
               -> LocalBuildInfo
               -> FilePath  -- ^install location
               -> FilePath  -- ^install location for dynamic librarys
               -> FilePath  -- ^Build location
-              -> PackageDescription -> IO ()
-installLib flags lbi targetDir dynlibTargetDir builtDir
-              pkg@PackageDescription{library=Just lib} = do
-        -- copy .hi files over:
-        let copy src dst n = do
-              createDirectoryIfMissingVerbose verbosity True dst
-              installOrdinaryFile verbosity (src </> n) (dst </> n)
-            copyModuleFiles ext =
-              findModuleFiles [builtDir] [ext] (libModules lib)
-                >>= installOrdinaryFiles verbosity targetDir
-        ifVanilla $ copyModuleFiles "hi"
-        ifProf    $ copyModuleFiles "p_hi"
-        hcrFiles <- findModuleFiles (builtDir : hsSourceDirs (libBuildInfo lib)) ["hcr"] (libModules lib)
-        flip mapM_ hcrFiles $ \(srcBase, srcFile) -> runLhc ["install", srcBase </> srcFile]
+              -> PackageDescription
+              -> Library
+              -> IO ()
+installLib verbosity lbi targetDir dynlibTargetDir builtDir pkg lib = do
+  -- copy .hi files over:
+  let copy src dst n = do
+        createDirectoryIfMissingVerbose verbosity True dst
+        installOrdinaryFile verbosity (src </> n) (dst </> n)
+      copyModuleFiles ext =
+        findModuleFiles [builtDir] [ext] (libModules lib)
+          >>= installOrdinaryFiles verbosity targetDir
+  ifVanilla $ copyModuleFiles "hi"
+  ifProf    $ copyModuleFiles "p_hi"
+  hcrFiles <- findModuleFiles (builtDir : hsSourceDirs (libBuildInfo lib)) ["hcr"] (libModules lib)
+  flip mapM_ hcrFiles $ \(srcBase, srcFile) -> runLhc ["--install-library", srcBase </> srcFile]
 
-        -- copy the built library files over:
-        ifVanilla $ copy builtDir targetDir vanillaLibName
-        ifProf    $ copy builtDir targetDir profileLibName
-        ifGHCi    $ copy builtDir targetDir ghciLibName
-        ifShared  $ copy builtDir dynlibTargetDir sharedLibName
+  -- copy the built library files over:
+  ifVanilla $ copy builtDir targetDir vanillaLibName
+  ifProf    $ copy builtDir targetDir profileLibName
+  ifGHCi    $ copy builtDir targetDir ghciLibName
+  ifShared  $ copy builtDir dynlibTargetDir sharedLibName
 
-        -- run ranlib if necessary:
-        ifVanilla $ updateLibArchive verbosity lbi
-                                     (targetDir </> vanillaLibName)
-        ifProf    $ updateLibArchive verbosity lbi
-                                     (targetDir </> profileLibName)
+  -- run ranlib if necessary:
+  ifVanilla $ updateLibArchive verbosity lbi
+                               (targetDir </> vanillaLibName)
+  ifProf    $ updateLibArchive verbosity lbi
+                               (targetDir </> profileLibName)
 
   where
     vanillaLibName = mkLibName pkgid
@@ -778,11 +773,7 @@ installLib flags lbi targetDir dynlibTargetDir builtDir
     ifGHCi    = when (hasLib && withGHCiLib    lbi)
     ifShared  = when (hasLib && withSharedLib  lbi)
 
-    verbosity = fromFlag (copyVerbosity flags)
     runLhc    = rawSystemProgramConf verbosity lhcProgram (withPrograms lbi)
-
-installLib _ _ _ _ _ PackageDescription{library=Nothing}
-    = die $ "Internal Error. installLibGHC called with no library."
 
 -- | use @ranlib@ or @ar -s@ to build an index. This is necessary on systems
 -- like MacOS X. If we can't find those, don't worry too much about it.
@@ -797,3 +788,18 @@ updateLibArchive verbosity lbi path =
                         "Unable to generate a symbol index for the static "
                      ++ "library '" ++ path
                      ++ "' (missing the 'ranlib' and 'ar' programs)"
+
+-- -----------------------------------------------------------------------------
+-- Registering
+
+registerPackage
+  :: Verbosity
+  -> InstalledPackageInfo
+  -> PackageDescription
+  -> LocalBuildInfo
+  -> Bool
+  -> PackageDBStack
+  -> IO ()
+registerPackage verbosity installedPkgInfo _pkg lbi _inplace packageDbs = do
+  let Just lhcPkg = lookupProgram lhcPkgProgram (withPrograms lbi)
+  HcPkg.reregister verbosity lhcPkg packageDbs (Right installedPkgInfo)

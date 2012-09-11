@@ -43,7 +43,6 @@ maxSpinCount	= 10
 
 
 -- | The top level of the graph coloring register allocator.
---	
 regAlloc
 	:: (Outputable instr, Instruction instr)
 	=> DynFlags
@@ -169,15 +168,14 @@ regAlloc_spin
 		--	and rewrite SPILL/RELOAD pseudos into real instructions along the way
 		let code_final		= map stripLive code_spillclean
 
---		let spillNatTop		= mapGenBlockTop spillNatBlock
---		let code_final		= map spillNatTop code_nat
-		
 		-- record what happened in this stage for debugging
 		let stat		=
 			RegAllocStatsColored
-			{ raGraph		= graph
+			{ raCode		= code
+			, raGraph		= graph
 			, raGraphColored	= graph_colored_lint
 			, raCoalesced		= rmCoalesce
+			, raCodeCoalesced	= code_coalesced
 			, raPatched		= code_patched
 			, raSpillClean		= code_spillclean
 			, raFinal		= code_final
@@ -210,13 +208,16 @@ regAlloc_spin
 			<- regSpill code_coalesced slotsFree rsSpill
 
 		-- recalculate liveness
-		let code_nat	= map stripLive code_spilled
-		code_relive	<- mapM regLiveness code_nat
+		-- NOTE: we have to reverse the SCCs here to get them back into the reverse-dependency
+		--       order required by computeLiveness. If they're not in the correct order
+		--       that function will panic.
+		code_relive	<- mapM (regLiveness . reverseBlocksInTops) code_spilled
 
 		-- record what happened in this stage for debugging
 		let stat	=
 			RegAllocStatsSpill
-			{ raGraph	= graph_colored_lint
+			{ raCode	= code
+			, raGraph	= graph_colored_lint
 			, raCoalesced	= rmCoalesce
 			, raSpillStats	= spillStats
 			, raSpillCosts	= spillCosts
@@ -235,9 +236,7 @@ regAlloc_spin
 			code_relive
 
 
-
 -- | Build a graph from the liveness and coalesce information in this code.
-
 buildGraph 
 	:: Instruction instr
 	=> [LiveCmmTop instr]
@@ -265,7 +264,6 @@ buildGraph code
 
 -- | Add some conflict edges to the graph.
 --	Conflicts between virtual and real regs are recorded as exclusions.
---
 graphAddConflictSet 
 	:: UniqSet Reg
 	-> Color.Graph VirtualReg RegClass RealReg
@@ -288,7 +286,6 @@ graphAddConflictSet set graph
 
 -- | Add some coalesence edges to the graph
 --	Coalesences between virtual and real regs are recorded as preferences.
---
 graphAddCoalesce 
 	:: (Reg, Reg) 
 	-> Color.Graph VirtualReg RegClass RealReg
@@ -380,25 +377,13 @@ seqNode node
 	`seq` (seqVirtualRegList (uniqSetToList (Color.nodeCoalesce node)))
 
 seqVirtualReg :: VirtualReg -> ()
-seqVirtualReg reg
- = case reg of
-	VirtualRegI _	-> ()
-	VirtualRegHi _	-> ()
-	VirtualRegF _	-> ()
-	VirtualRegD _	-> ()
+seqVirtualReg reg = reg `seq` ()
 
 seqRealReg :: RealReg -> ()
-seqRealReg reg
- = case reg of
- 	RealRegSingle _ -> ()
-	RealRegPair _ _	-> ()
+seqRealReg reg = reg `seq` ()
 
 seqRegClass :: RegClass -> ()
-seqRegClass c
- = case c of
- 	RcInteger	-> ()
-	RcFloat		-> ()
-	RcDouble	-> ()
+seqRegClass c = c `seq` ()
 
 seqMaybeRealReg :: Maybe RealReg -> ()
 seqMaybeRealReg mr

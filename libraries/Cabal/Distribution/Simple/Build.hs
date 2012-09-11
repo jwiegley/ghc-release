@@ -57,17 +57,19 @@ import qualified Distribution.Simple.JHC  as JHC
 import qualified Distribution.Simple.LHC  as LHC
 import qualified Distribution.Simple.NHC  as NHC
 import qualified Distribution.Simple.Hugs as Hugs
+import qualified Distribution.Simple.UHC  as UHC
 
 import qualified Distribution.Simple.Build.Macros      as Build.Macros
 import qualified Distribution.Simple.Build.PathsModule as Build.PathsModule
 
 import Distribution.Package
-         ( Package(..), PackageId, InstalledPackageId(..) )
+         ( Package(..), PackageName(..), PackageIdentifier(..)
+         , thisPackageVersion )
 import Distribution.Simple.Compiler
          ( CompilerFlavor(..), compilerFlavor, PackageDB(..) )
 import Distribution.PackageDescription
-         ( PackageDescription(..), BuildInfo(..)
-         , Library(..), Executable(..) )
+         ( PackageDescription(..), BuildInfo(..), Library(..), Executable(..)
+         , TestSuite(..), TestSuiteInterface(..) )
 import qualified Distribution.InstalledPackageInfo as IPI
 import qualified Distribution.ModuleName as ModuleName
 
@@ -77,11 +79,13 @@ import Distribution.Simple.PreProcess
          ( preprocessSources, PPSuffixHandler )
 import Distribution.Simple.LocalBuildInfo
          ( LocalBuildInfo(compiler, buildDir, withPackageDB)
-         , ComponentLocalBuildInfo, withLibLBI, withExeLBI )
+         , ComponentLocalBuildInfo(..), withLibLBI, withExeLBI
+         , inplacePackageId, withTestLBI )
 import Distribution.Simple.BuildPaths
          ( autogenModulesDir, autogenModuleName, cppHeaderName )
 import Distribution.Simple.Register
          ( registerPackage, inplaceInstalledPackageInfo )
+import Distribution.Simple.Test ( stubFilePath, stubName )
 import Distribution.Simple.Utils
          ( createDirectoryIfMissingVerbose, rewriteFile
          , die, info, setupMessage )
@@ -130,7 +134,8 @@ build pkg_descr lbi flags suffixes = do
             IPI.installedPackageId = inplacePackageId (packageId installedPkgInfo)
           }
     registerPackage verbosity
-      installedPkgInfo pkg_descr lbi True{-inplace-} internalPackageDB
+      installedPkgInfo pkg_descr lbi True -- True meaning inplace
+      (withPackageDB lbi ++ [internalPackageDB])
 
   -- Use the internal package db for the exes.
   let lbi' = lbi { withPackageDB = withPackageDB lbi ++ [internalPackageDB] }
@@ -139,9 +144,63 @@ build pkg_descr lbi flags suffixes = do
     info verbosity $ "Building executable " ++ exeName exe ++ "..."
     buildExe verbosity pkg_descr lbi' exe clbi
 
--- Quick hack in 1.8 branch, it's done properly in HEAD
-inplacePackageId :: PackageId -> InstalledPackageId
-inplacePackageId pkgid = InstalledPackageId (display pkgid ++ "-inplace")
+  withTestLBI pkg_descr lbi' $ \test clbi ->
+    case testInterface test of
+        TestSuiteExeV10 _ f -> do
+            let exe = Executable
+                    { exeName = testName test
+                    , modulePath = f
+                    , buildInfo = testBuildInfo test
+                    }
+            info verbosity $ "Building test suite " ++ testName test ++ "..."
+            buildExe verbosity pkg_descr lbi' exe clbi
+        TestSuiteLibV09 _ m -> do
+            pwd <- getCurrentDirectory
+            let lib = Library
+                    { exposedModules = [ m ]
+                    , libExposed = True
+                    , libBuildInfo = testBuildInfo test
+                    }
+                pkg = pkg_descr
+                    { package = (package pkg_descr)
+                        { pkgName = PackageName $ testName test
+                        }
+                    , buildDepends = targetBuildDepends $ testBuildInfo test
+                    , executables = []
+                    , testSuites = []
+                    , library = Just lib
+                    }
+                ipi = (inplaceInstalledPackageInfo
+                    pwd distPref pkg lib lbi clbi)
+                    { IPI.installedPackageId = inplacePackageId $ packageId ipi
+                    }
+                testDir = buildDir lbi' </> stubName test
+                    </> stubName test ++ "-tmp"
+                testLibDep = thisPackageVersion $ package pkg
+                exe = Executable
+                    { exeName = stubName test
+                    , modulePath = stubFilePath test
+                    , buildInfo = (testBuildInfo test)
+                        { hsSourceDirs = [ testDir ]
+                        , targetBuildDepends = testLibDep
+                            : (targetBuildDepends $ testBuildInfo test)
+                        }
+                    }
+                -- | The stub executable needs a new 'ComponentLocalBuildInfo'
+                -- that exposes the relevant test suite library.
+                exeClbi = clbi
+                    { componentPackageDeps =
+                        (IPI.installedPackageId ipi, packageId ipi)
+                        : (filter (\(_, x) -> let PackageName name = pkgName x in name == "Cabal" || name == "base")
+                            $ componentPackageDeps clbi)
+                    }
+            info verbosity $ "Building test suite " ++ testName test ++ "..."
+            buildLib verbosity pkg lbi' lib clbi
+            registerPackage verbosity ipi pkg lbi' True $ withPackageDB lbi'
+            buildExe verbosity pkg_descr lbi' exe exeClbi
+        TestSuiteUnsupported tt -> die $ "No support for building test suite "
+                                      ++ "type " ++ display tt
+
 
 -- | Initialize a new package db file for libraries defined
 -- internally to the package.
@@ -152,6 +211,8 @@ createInternalPackageDB distPref = do
     writeFile dbFile "[]"
     return packageDB
 
+-- TODO: build separate libs in separate dirs so that we can build
+-- multiple libs, e.g. for 'LibTest' library-style testsuites
 buildLib :: Verbosity -> PackageDescription -> LocalBuildInfo
                       -> Library            -> ComponentLocalBuildInfo -> IO ()
 buildLib verbosity pkg_descr lbi lib clbi =
@@ -161,6 +222,7 @@ buildLib verbosity pkg_descr lbi lib clbi =
     LHC  -> LHC.buildLib  verbosity pkg_descr lbi lib clbi
     Hugs -> Hugs.buildLib verbosity pkg_descr lbi lib clbi
     NHC  -> NHC.buildLib  verbosity pkg_descr lbi lib clbi
+    UHC  -> UHC.buildLib  verbosity pkg_descr lbi lib clbi
     _    -> die "Building is not supported with this compiler."
 
 buildExe :: Verbosity -> PackageDescription -> LocalBuildInfo
@@ -172,6 +234,7 @@ buildExe verbosity pkg_descr lbi exe clbi =
     LHC  -> LHC.buildExe  verbosity pkg_descr lbi exe clbi
     Hugs -> Hugs.buildExe verbosity pkg_descr lbi exe clbi
     NHC  -> NHC.buildExe  verbosity pkg_descr lbi exe clbi
+    UHC  -> UHC.buildExe  verbosity pkg_descr lbi exe clbi
     _    -> die "Building is not supported with this compiler."
 
 initialBuildSteps :: FilePath -- ^"dist" prefix

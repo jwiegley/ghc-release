@@ -64,14 +64,14 @@ Library
         Build-Depends: base       < 3
 
     if flag(base3) || flag(base4)
-        Build-Depends: directory  >= 1   && < 1.1,
+        Build-Depends: directory  >= 1   && < 1.2,
                        process    >= 1   && < 1.1,
                        bytestring >= 0.9 && < 0.10,
                        old-time   >= 1   && < 1.1,
-                       containers >= 0.1 && < 0.4,
+                       containers >= 0.1 && < 0.5,
                        array      >= 0.1 && < 0.4
 
-    Build-Depends: filepath >= 1 && < 1.2
+    Build-Depends: filepath >= 1 && < 1.3
     Build-Depends: Cabal, hpc
     if os(windows)
         Build-Depends: Win32
@@ -98,15 +98,12 @@ Library
                 ForeignFunctionInterface, EmptyDataDecls,
                 TypeSynonymInstances, MultiParamTypeClasses,
                 FlexibleInstances, Rank2Types, ScopedTypeVariables,
-                DeriveDataTypeable, RelaxedPolyRec
+                DeriveDataTypeable
 
     Include-Dirs: . parser utils
 
     if flag(stage1)
         Include-Dirs: stage1
-        if impl(ghc < 6.9)
-            Build-Depends: extensible-exceptions
-            Extensions: PatternSignatures
     else
         if flag(stage2)
             Include-Dirs: stage2
@@ -129,12 +126,13 @@ Library
         cmm
         codeGen
         coreSyn
-        cprAnalysis
         deSugar
         ghci
         hsSyn
         iface
+        llvmGen
         main
+        nativeGen
         parser
         prelude
         profiling
@@ -157,12 +155,22 @@ Library
         Id
         IdInfo
         Literal
+        Llvm
+        Llvm.AbsSyn
+        Llvm.PpLlvm
+        Llvm.Types
+        LlvmCodeGen
+        LlvmCodeGen.Base
+        LlvmCodeGen.CodeGen
+        LlvmCodeGen.Data
+        LlvmCodeGen.Ppr
+        LlvmCodeGen.Regs
+        LlvmMangler
         MkId
         Module
         Name
         NameEnv
         NameSet
-        NewDemand
         OccName
         RdrName
         SrcLoc
@@ -203,6 +211,7 @@ Library
         MkZipCfg
         MkZipCfgCmm
         OptimizationFuel
+        PprBase
         PprC
         PprCmm
         PprCmmZ
@@ -219,6 +228,7 @@ Library
         CgClosure
         CgCon
         CgExpr
+        CgExtCode
         CgForeignCall
         CgHeapery
         CgHpc
@@ -265,7 +275,6 @@ Library
         MkExternalCore
         PprCore
         PprExternalCore
-        CprAnalyse
         Check
         Coverage
         Desugar
@@ -328,6 +337,7 @@ Library
         HaddockUtils
         LexCore
         Lexer
+        OptCoercion
         Parser
         ParserCore
         ParserCoreUtils
@@ -373,9 +383,6 @@ Library
         StgLint
         StgSyn
         DmdAnal
-        SaAbsInt
-        SaLib
-        StrictAnal
         WorkWrap
         WwLib
         FamInst
@@ -401,11 +408,14 @@ Library
         TcRnTypes
         TcRules
         TcSimplify
+        TcErrors
         TcTyClsDecls
         TcTyDecls
-        TcTyFuns
         TcType
         TcUnify
+        TcInteract
+        TcCanonical
+        TcSMonad
         Class
         Coercion
         FamInstEnv
@@ -434,7 +444,6 @@ Library
         GraphPpr
         IOEnv
         Interval
-        LazyUniqFM
         ListSetOps
         Maybes
         MonadUtils
@@ -448,17 +457,43 @@ Library
         UniqFM
         UniqSet
         Util
-        VectBuiltIn
-        VectCore
-        VectMonad
-        VectType
-        VectUtils
+        Vectorise.Builtins.Base
+        Vectorise.Builtins.Initialise
+        Vectorise.Builtins.Modules
+        Vectorise.Builtins.Prelude
+        Vectorise.Builtins
+        Vectorise.Monad.Base
+        Vectorise.Monad.Naming
+        Vectorise.Monad.Local
+        Vectorise.Monad.Global
+        Vectorise.Monad.InstEnv
+        Vectorise.Monad
+        Vectorise.Utils.Base
+        Vectorise.Utils.Closure
+        Vectorise.Utils.Hoisting
+        Vectorise.Utils.PADict
+        Vectorise.Utils.PRDict
+        Vectorise.Utils.Poly
+        Vectorise.Utils
+        Vectorise.Type.Env
+        Vectorise.Type.Repr
+        Vectorise.Type.PData
+        Vectorise.Type.PRepr
+        Vectorise.Type.PADict
+        Vectorise.Type.PRDict
+        Vectorise.Type.Type
+        Vectorise.Type.TyConDecl
+        Vectorise.Type.Classify
+        Vectorise.Convert
+        Vectorise.Vect
+        Vectorise.Var
+        Vectorise.Env
+        Vectorise.Exp
         Vectorise
 
+    -- We only need to expose more modules as some of the ncg code is used
+    -- by the LLVM backend so its always included
     if flag(ncg)
-        hs-source-dirs:
-            nativeGen
-
         Exposed-Modules:
             AsmCodeGen
             TargetReg
@@ -467,7 +502,6 @@ Library
             Size
             Reg
             RegClass
-            PprBase
             PIC
             Platform
             Alpha.Regs

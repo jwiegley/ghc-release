@@ -36,8 +36,11 @@ import DataCon
 import ForeignCall
 import Id
 import PrimOp
+import SMRep
 import TyCon
+import Type
 import CostCentre	( CostCentreStack, currentCCS )
+import Control.Monad (when)
 import Maybes
 import Util
 import FastString
@@ -280,24 +283,65 @@ cgCase (OpApp ) bndr srt AlgAlt [(DataAlt flase, a2]
   = 
 -}
 
-cgCase scrut bndr srt alt_type alts 
-  = do	{ up_hp_usg <- getVirtHp	-- Upstream heap usage
-	; let ret_bndrs = chooseReturnBndrs bndr alt_type alts
-	      alt_regs  = map idToReg ret_bndrs
-	      simple_scrut = isSimpleScrut scrut alt_type
-	      gcInAlts | not simple_scrut = True
-	               | isSingleton alts = False
-		       | up_hp_usg > 0    = False
-		       | otherwise        = True
-              gc_plan = if gcInAlts then GcInAlts alt_regs srt else NoGcInAlts
+  -- Note [ticket #3132]: we might be looking at a case of a lifted Id
+  -- that was cast to an unlifted type.  The Id will always be bottom,
+  -- but we don't want the code generator to fall over here.  If we
+  -- just emit an assignment here, the assignment will be
+  -- type-incorrect Cmm.  Hence, we emit the usual enter/return code,
+  -- (and because bottom must be untagged, it will be entered and the
+  -- program will crash).
+  -- The Sequel is a type-correct assignment, albeit bogus.
+  -- The (dead) continuation loops; it would be better to invoke some kind
+  -- of panic function here.
+  --
+  -- However, we also want to allow an assignment to be generated
+  -- in the case when the types are compatible, because this allows
+  -- some slightly-dodgy but occasionally-useful casts to be used,
+  -- such as in RtClosureInspect where we cast an HValue to a MutVar#
+  -- so we can print out the contents of the MutVar#.  If we generate
+  -- code that enters the HValue, then we'll get a runtime panic, because
+  -- the HValue really is a MutVar#.  The types are compatible though,
+  -- so we can just generate an assignment.
+cgCase (StgApp v []) bndr _ alt_type@(PrimAlt _) alts
+  | isUnLiftedType (idType v)
+  || reps_compatible
+  = -- assignment suffices for unlifted types
+    do { when (not reps_compatible) $
+           panic "cgCase: reps do not match, perhaps a dodgy unsafeCoerce?"
+       ; v_info <- getCgIdInfo v
+       ; emit (mkAssign (CmmLocal (idToReg (NonVoid bndr))) (idInfoToAmode v_info))
+       ; _ <- bindArgsToRegs [NonVoid bndr]
+       ; cgAlts NoGcInAlts (NonVoid bndr) alt_type alts }
+  where
+    reps_compatible = idCgRep v == idCgRep bndr
 
-	; mb_cc <- maybeSaveCostCentre simple_scrut
-	; withSequel (AssignTo alt_regs gcInAlts) (cgExpr scrut)
-	; restoreCurrentCostCentre mb_cc
+cgCase scrut@(StgApp v []) _ _ (PrimAlt _) _ 
+  = -- fail at run-time, not compile-time
+    do { mb_cc <- maybeSaveCostCentre True
+       ; withSequel (AssignTo [idToReg (NonVoid v)] False) (cgExpr scrut)
+       ; restoreCurrentCostCentre mb_cc
+       ; emit $ mkComment $ mkFastString "should be unreachable code"
+       ; emit $ withFreshLabel "l" (\l -> mkLabel l <*> mkBranch l)}
+
+cgCase scrut bndr srt alt_type alts 
+  = -- the general case
+    do { up_hp_usg <- getVirtHp        -- Upstream heap usage
+       ; let ret_bndrs = chooseReturnBndrs bndr alt_type alts
+             alt_regs  = map idToReg ret_bndrs
+             simple_scrut = isSimpleScrut scrut alt_type
+             gcInAlts | not simple_scrut = True
+                      | isSingleton alts = False
+                      | up_hp_usg > 0    = False
+                      | otherwise        = True
+             gc_plan = if gcInAlts then GcInAlts alt_regs srt else NoGcInAlts
+
+       ; mb_cc <- maybeSaveCostCentre simple_scrut
+       ; withSequel (AssignTo alt_regs gcInAlts) (cgExpr scrut)
+       ; restoreCurrentCostCentre mb_cc
 
   -- JD: We need Note: [Better Alt Heap Checks]
-	; _ <- bindArgsToRegs ret_bndrs
-	; cgAlts gc_plan (NonVoid bndr) alt_type alts }
+       ; _ <- bindArgsToRegs ret_bndrs
+       ; cgAlts gc_plan (NonVoid bndr) alt_type alts }
 
 -----------------
 maybeSaveCostCentre :: Bool -> FCode (Maybe LocalReg)

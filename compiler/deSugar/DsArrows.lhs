@@ -14,8 +14,7 @@ import Match
 import DsUtils
 import DsMonad
 
-import HsSyn	hiding (collectPatBinders, collectLocatedPatBinders, collectl,
-			collectPatsBinders, collectLocatedPatsBinders)
+import HsSyn	hiding (collectPatBinders, collectPatsBinders )
 import TcHsSyn
 
 -- NB: The desugarer, which straddles the source and Core worlds, sometimes
@@ -35,13 +34,12 @@ import MkCore
 import Name
 import Var
 import Id
-import PrelInfo
 import DataCon
 import TysWiredIn
 import BasicTypes
 import PrelNames
 import Outputable
-
+import Bag
 import VarSet
 import SrcLoc
 
@@ -142,7 +140,7 @@ coreCasePair scrut_var var1 var2 body
 
 \begin{code}
 mkCorePairTy :: Type -> Type -> Type
-mkCorePairTy t1 t2 = mkCoreTupTy [t1, t2]
+mkCorePairTy t1 t2 = mkBoxedTupleTy [t1, t2]
 
 mkCorePairExpr :: CoreExpr -> CoreExpr -> CoreExpr
 mkCorePairExpr e1 e2 = mkCoreTup [e1, e2]
@@ -150,7 +148,7 @@ mkCorePairExpr e1 e2 = mkCoreTup [e1, e2]
 
 The input is divided into a local environment, which is a flat tuple
 (unless it's too big), and a stack, each element of which is paired
-with the stack in turn.  In general, the input has the form
+with the environment in turn.  In general, the input has the form
 
 	(...((x1,...,xn),s1),...sk)
 
@@ -406,7 +404,7 @@ dsCmd ids local_vars env_ids stack res_ty (HsPar cmd)
 --			if e then Left ((xs1)*ts) else Right ((xs2)*ts)) >>>
 --		     c1 ||| c2
 
-dsCmd ids local_vars env_ids stack res_ty (HsIf cond then_cmd else_cmd) = do
+dsCmd ids local_vars env_ids stack res_ty (HsIf mb_fun cond then_cmd else_cmd) = do
     core_cond <- dsLExpr cond
     (core_then, fvs_then, then_ids) <- dsfixCmd ids local_vars stack res_ty then_cmd
     (core_else, fvs_else, else_ids) <- dsfixCmd ids local_vars stack res_ty else_cmd
@@ -414,20 +412,26 @@ dsCmd ids local_vars env_ids stack res_ty (HsIf cond then_cmd else_cmd) = do
     either_con <- dsLookupTyCon eitherTyConName
     left_con   <- dsLookupDataCon leftDataConName
     right_con  <- dsLookupDataCon rightDataConName
-    let
-        left_expr ty1 ty2 e = mkConApp left_con [Type ty1, Type ty2, e]
-        right_expr ty1 ty2 e = mkConApp right_con [Type ty1, Type ty2, e]
+
+    let mk_left_expr ty1 ty2 e = mkConApp left_con [Type ty1, Type ty2, e]
+        mk_right_expr ty1 ty2 e = mkConApp right_con [Type ty1, Type ty2, e]
 
         in_ty = envStackType env_ids stack
         then_ty = envStackType then_ids stack
         else_ty = envStackType else_ids stack
         sum_ty = mkTyConApp either_con [then_ty, else_ty]
         fvs_cond = exprFreeVars core_cond `intersectVarSet` local_vars
-    
-    core_if <- matchEnvStack env_ids stack_ids
-                (mkIfThenElse core_cond
-                    (left_expr  then_ty else_ty (buildEnvStack then_ids stack_ids))
-                    (right_expr then_ty else_ty (buildEnvStack else_ids stack_ids)))
+        
+        core_left  = mk_left_expr  then_ty else_ty (buildEnvStack then_ids stack_ids)
+        core_right = mk_right_expr then_ty else_ty (buildEnvStack else_ids stack_ids)
+
+    core_if <- case mb_fun of 
+       Just fun -> do { core_fun <- dsExpr fun
+                      ; matchEnvStack env_ids stack_ids $
+                        mkCoreApps core_fun [core_cond, core_left, core_right] }
+       Nothing  -> matchEnvStack env_ids stack_ids $
+                   mkIfThenElse core_cond core_left core_right
+
     return (do_map_arrow ids in_ty sum_ty res_ty
                 core_if
                 (do_choice ids then_ty else_ty res_ty core_then core_else),
@@ -450,19 +454,17 @@ is translated to
 The idea is to extract the commands from the case, build a balanced tree
 of choices, and replace the commands with expressions that build tagged
 tuples, obtaining a case expression that can be desugared normally.
-To build all this, we use quadruples decribing segments of the list of
+To build all this, we use triples describing segments of the list of
 case bodies, containing the following fields:
-1. an IdSet containing the environment variables free in the case bodies
-2. a list of expressions of the form (Left|Right)* ((xs)*ts), to be put
+ * a list of expressions of the form (Left|Right)* ((xs)*ts), to be put
    into the case replacing the commands
-3. a sum type that is the common type of these expressions, and also the
+ * a sum type that is the common type of these expressions, and also the
    input type of the arrow
-4. a CoreExpr for an arrow built by combining the translated command
+ * a CoreExpr for an arrow built by combining the translated command
    bodies with |||.
 
 \begin{code}
 dsCmd ids local_vars env_ids stack res_ty (HsCase exp (MatchGroup matches match_ty)) = do
-    core_exp <- dsLExpr exp
     stack_ids <- mapM newSysLocalDs stack
 
     -- Extract and desugar the leaf commands in the case, building tuple
@@ -471,10 +473,9 @@ dsCmd ids local_vars env_ids stack res_ty (HsCase exp (MatchGroup matches match_
     let
         leaves = concatMap leavesMatch matches
         make_branch (leaf, bound_vars) = do
-            (core_leaf, fvs, leaf_ids) <-
+            (core_leaf, _fvs, leaf_ids) <-
                   dsfixCmd ids (local_vars `unionVarSet` bound_vars) stack res_ty leaf
-            return (fvs `minusVarSet` bound_vars,
-                    [mkHsEnvStackExpr leaf_ids stack_ids],
+            return ([mkHsEnvStackExpr leaf_ids stack_ids],
                     envStackType leaf_ids stack,
                     core_leaf)
     
@@ -491,22 +492,19 @@ dsCmd ids local_vars env_ids stack res_ty (HsCase exp (MatchGroup matches match_
         -- Prefix each tuple with a distinct series of Left's and Right's,
         -- in a balanced way, keeping track of the types.
 
-        merge_branches (fvs1, builds1, in_ty1, core_exp1)
-                       (fvs2, builds2, in_ty2, core_exp2) 
-          = (fvs1 `unionVarSet` fvs2,
-             map (left_expr in_ty1 in_ty2) builds1 ++
+        merge_branches (builds1, in_ty1, core_exp1)
+                       (builds2, in_ty2, core_exp2)
+          = (map (left_expr in_ty1 in_ty2) builds1 ++
                 map (right_expr in_ty1 in_ty2) builds2,
              mkTyConApp either_con [in_ty1, in_ty2],
              do_choice ids in_ty1 in_ty2 res_ty core_exp1 core_exp2)
-        (fvs_alts, leaves', sum_ty, core_choices)
-          = foldb merge_branches branches
+        (leaves', sum_ty, core_choices) = foldb merge_branches branches
 
         -- Replace the commands in the case with these tagged tuples,
         -- yielding a HsExpr Id we can feed to dsExpr.
 
         (_, matches') = mapAccumL (replaceLeavesMatch res_ty) leaves' matches
         in_ty = envStackType env_ids stack
-        fvs_exp = exprFreeVars core_exp `intersectVarSet` local_vars
 
         pat_ty    = funArgTy match_ty
         match_ty' = mkFunTy pat_ty sum_ty
@@ -516,7 +514,7 @@ dsCmd ids local_vars env_ids stack res_ty (HsCase exp (MatchGroup matches match_
     core_body <- dsExpr (HsCase exp (MatchGroup matches' match_ty'))
     core_matches <- matchEnvStack env_ids stack_ids core_body
     return (do_map_arrow ids in_ty sum_ty res_ty core_matches core_choices,
-            fvs_exp `unionVarSet` fvs_alts)
+            exprFreeVars core_body `intersectVarSet` local_vars)
 
 --	A | ys |- c :: [ts] t
 --	----------------------------------
@@ -526,7 +524,7 @@ dsCmd ids local_vars env_ids stack res_ty (HsCase exp (MatchGroup matches match_
 
 dsCmd ids local_vars env_ids stack res_ty (HsLet binds body) = do
     let
-        defined_vars = mkVarSet (map unLoc (collectLocalBinders binds))
+        defined_vars = mkVarSet (collectLocalBinders binds)
         local_vars' = local_vars `unionVarSet` defined_vars
     
     (core_body, _free_vars, env_ids') <- dsfixCmd ids local_vars' stack res_ty body
@@ -633,7 +631,7 @@ dsCmdDo ids local_vars env_ids res_ty [] body
 
 dsCmdDo ids local_vars env_ids res_ty (stmt:stmts) body = do
     let
-        bound_vars = mkVarSet (map unLoc (collectLStmtBinders stmt))
+        bound_vars = mkVarSet (collectLStmtBinders stmt)
         local_vars' = local_vars `unionVarSet` bound_vars
     (core_stmts, _, env_ids') <- fixDs (\ ~(_,_,env_ids') -> do
         (core_stmts, fv_stmts) <- dsCmdDo ids local_vars' env_ids' res_ty stmts body
@@ -923,7 +921,7 @@ dsCmdStmts ids local_vars env_ids out_ids [stmt]
 
 dsCmdStmts ids local_vars env_ids out_ids (stmt:stmts) = do
     let
-        bound_vars = mkVarSet (map unLoc (collectLStmtBinders stmt))
+        bound_vars = mkVarSet (collectLStmtBinders stmt)
         local_vars' = local_vars `unionVarSet` bound_vars
     (core_stmts, _fv_stmts, env_ids') <- dsfixCmdStmts ids local_vars' out_ids stmts
     (core_stmt, fv_stmt) <- dsCmdLStmt ids local_vars env_ids env_ids' stmt
@@ -963,10 +961,10 @@ leavesMatch (L _ (Match pats _ (GRHSs grhss binds)))
   = let
 	defined_vars = mkVarSet (collectPatsBinders pats)
 			`unionVarSet`
-		       mkVarSet (map unLoc (collectLocalBinders binds))
+		       mkVarSet (collectLocalBinders binds)
     in
     [(expr, 
-      mkVarSet (map unLoc (collectLStmtsBinders stmts)) 
+      mkVarSet (collectLStmtsBinders stmts) 
 	`unionVarSet` defined_vars) 
     | L _ (GRHS stmts expr) <- grhss]
 \end{code}
@@ -1009,6 +1007,8 @@ foldb f xs = foldb f (fold_pairs xs)
     fold_pairs (x1:x2:xs) = f x1 x2:fold_pairs xs
 \end{code}
 
+Note [Dictionary binders in ConPatOut] See also same Note in HsUtils
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The following functions to collect value variables from patterns are
 copied from HsUtils, with one change: we also collect the dictionary
 bindings (pat_binds) from ConPatOut.  We need them for cases like
@@ -1028,30 +1028,25 @@ See comments in HsUtils for why the other version does not include
 these bindings.
 
 \begin{code}
-collectPatBinders :: OutputableBndr a => LPat a -> [a]
-collectPatBinders pat = map unLoc (collectLocatedPatBinders pat)
+collectPatBinders :: LPat Id -> [Id]
+collectPatBinders pat = collectl pat []
 
-collectLocatedPatBinders :: OutputableBndr a => LPat a -> [Located a]
-collectLocatedPatBinders pat = collectl pat []
-
-collectPatsBinders :: OutputableBndr a => [LPat a] -> [a]
-collectPatsBinders pats = map unLoc (collectLocatedPatsBinders pats)
-
-collectLocatedPatsBinders :: OutputableBndr a => [LPat a] -> [Located a]
-collectLocatedPatsBinders pats = foldr collectl [] pats
+collectPatsBinders :: [LPat Id] -> [Id]
+collectPatsBinders pats = foldr collectl [] pats
 
 ---------------------
-collectl :: OutputableBndr a => LPat a -> [Located a] -> [Located a]
-collectl (L l pat) bndrs
+collectl :: LPat Id -> [Id] -> [Id]
+-- See Note [Dictionary binders in ConPatOut]
+collectl (L _ pat) bndrs
   = go pat
   where
-    go (VarPat var)               = L l var : bndrs
-    go (VarPatOut var bs)         = L l var : collectHsBindLocatedBinders bs
+    go (VarPat var)               = var : bndrs
+    go (VarPatOut var bs)         = var : collectEvBinders bs
                                     ++ bndrs
     go (WildPat _)                = bndrs
     go (LazyPat pat)              = collectl pat bndrs
     go (BangPat pat)              = collectl pat bndrs
-    go (AsPat a pat)              = a : collectl pat bndrs
+    go (AsPat (L _ a) pat)        = a : collectl pat bndrs
     go (ParPat  pat)              = collectl pat bndrs
 
     go (ListPat pats _)           = foldr collectl bndrs pats
@@ -1060,11 +1055,11 @@ collectl (L l pat) bndrs
 
     go (ConPatIn _ ps)            = foldr collectl bndrs (hsConPatArgs ps)
     go (ConPatOut {pat_args=ps, pat_binds=ds}) =
-                                    collectHsBindLocatedBinders ds
+                                    collectEvBinders ds
                                     ++ foldr collectl bndrs (hsConPatArgs ps)
     go (LitPat _)                 = bndrs
     go (NPat _ _ _)               = bndrs
-    go (NPlusKPat n _ _ _)        = n : bndrs
+    go (NPlusKPat (L _ n) _ _ _)  = n : bndrs
 
     go (SigPatIn pat _)           = collectl pat bndrs
     go (SigPatOut pat _)          = collectl pat bndrs
@@ -1072,4 +1067,13 @@ collectl (L l pat) bndrs
     go (CoPat _ pat _)            = collectl (noLoc pat) bndrs
     go (ViewPat _ pat _)          = collectl pat bndrs
     go p@(QuasiQuotePat {})       = pprPanic "collectl/go" (ppr p)
+
+collectEvBinders :: TcEvBinds -> [Id]
+collectEvBinders (EvBinds bs)   = foldrBag add_ev_bndr [] bs
+collectEvBinders (TcEvBinds {}) = panic "ToDo: collectEvBinders"
+
+add_ev_bndr :: EvBind -> [Id] -> [Id]
+add_ev_bndr (EvBind b _) bs | isId b    = b:bs
+                            | otherwise = bs
+  -- A worry: what about coercion variable binders??
 \end{code}

@@ -503,11 +503,15 @@ or (x:xs)       =  x || or xs
 #endif
 
 -- | Applied to a predicate and a list, 'any' determines if any element
--- of the list satisfies the predicate.
+-- of the list satisfies the predicate.  For the result to be
+-- 'False', the list must be finite; 'True', however, results from a 'True'
+-- value for the predicate applied to an element at a finite index of a finite or infinite list.
 any                     :: (a -> Bool) -> [a] -> Bool
 
 -- | Applied to a predicate and a list, 'all' determines if all elements
--- of the list satisfy the predicate.
+-- of the list satisfy the predicate. For the result to be
+-- 'True', the list must be finite; 'False', however, results from a 'False'
+-- value for the predicate applied to an element at a finite index of a finite or infinite list.
 all                     :: (a -> Bool) -> [a] -> Bool
 #ifdef USE_REPORT_PRELUDE
 any p                   =  or . map p
@@ -527,7 +531,8 @@ all p (x:xs)    =  p x && all p xs
 #endif
 
 -- | 'elem' is the list membership predicate, usually written in infix form,
--- e.g., @x \`elem\` xs@.
+-- e.g., @x \`elem\` xs@.  For the result to be
+-- 'False', the list must be finite; 'True', however, results from an element equal to @x@ found at a finite index of a finite or infinite list.
 elem                    :: (Eq a) => a -> [a] -> Bool
 
 -- | 'notElem' is the negation of 'elem'.
@@ -647,7 +652,7 @@ zip _      _      = []
 
 {-# INLINE [0] zipFB #-}
 zipFB :: ((a, b) -> c -> d) -> a -> b -> c -> d
-zipFB c x y r = (x,y) `c` r
+zipFB c = \x y r -> (x,y) `c` r
 
 {-# RULES
 "zip"      [~1] forall xs ys. zip xs ys = build (\c n -> foldr2 (zipFB c) n xs ys)
@@ -680,9 +685,11 @@ zipWith :: (a->b->c) -> [a]->[b]->[c]
 zipWith f (a:as) (b:bs) = f a b : zipWith f as bs
 zipWith _ _      _      = []
 
+-- zipWithFB must have arity 2 since it gets two arguments in the "zipWith"
+-- rule; it might not get inlined otherwise
 {-# INLINE [0] zipWithFB #-}
 zipWithFB :: (a -> b -> c) -> (d -> e -> a) -> d -> e -> b -> c
-zipWithFB c f x y r = (x `f` y) `c` r
+zipWithFB c f = \x y r -> (x `f` y) `c` r
 
 {-# RULES
 "zipWith"       [~1] forall f xs ys.    zipWith f xs ys = build (\c n -> foldr2 (zipWithFB c f) n xs ys)

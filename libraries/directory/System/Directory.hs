@@ -55,13 +55,16 @@ module System.Directory
 
     -- $permissions
 
-    , Permissions(
-	Permissions,
-	readable,		-- :: Permissions -> Bool
-	writable,		-- :: Permissions -> Bool
-	executable,		-- :: Permissions -> Bool
-	searchable		-- :: Permissions -> Bool
-      )
+    , Permissions
+    , emptyPermissions
+    , readable          -- :: Permissions -> Bool
+    , writable          -- :: Permissions -> Bool
+    , executable        -- :: Permissions -> Bool
+    , searchable        -- :: Permissions -> Bool
+    , setOwnerReadable
+    , setOwnerWritable
+    , setOwnerExecutable
+    , setOwnerSearchable
 
     , getPermissions            -- :: FilePath -> IO Permissions
     , setPermissions	        -- :: FilePath -> Permissions -> IO ()
@@ -117,6 +120,8 @@ import qualified System.Win32 as Win32
 import qualified System.Posix as Posix
 #endif
 
+#endif /* __GLASGOW_HASKELL__ */
+
 {- $intro
 A directory contains a series of entries, each of which is a named
 reference to a file system object (file, directory etc.).  Some
@@ -161,6 +166,26 @@ data Permissions
     executable, searchable :: Bool 
    } deriving (Eq, Ord, Read, Show)
 
+emptyPermissions :: Permissions
+emptyPermissions = Permissions {
+                       readable   = False,
+                       writable   = False,
+                       executable = False,
+                       searchable = False
+                   }
+
+setOwnerReadable :: Bool -> Permissions -> Permissions
+setOwnerReadable b p = p { readable = b }
+
+setOwnerWritable :: Bool -> Permissions -> Permissions
+setOwnerWritable b p = p { writable = b }
+
+setOwnerExecutable :: Bool -> Permissions -> Permissions
+setOwnerExecutable b p = p { executable = b }
+
+setOwnerSearchable :: Bool -> Permissions -> Permissions
+setOwnerSearchable b p = p { searchable = b }
+
 {- |The 'getPermissions' operation returns the
 permissions for the file or directory.
 
@@ -172,6 +197,8 @@ The operation may fail with:
 * 'isDoesNotExistError' if the file or directory does not exist.
 
 -}
+
+#ifdef __GLASGOW_HASKELL__
 
 getPermissions :: FilePath -> IO Permissions
 getPermissions name = do
@@ -685,7 +712,7 @@ canonicalizePath fpath =
 #else
   withCString fpath $ \pInPath ->
   allocaBytes long_path_size $ \pOutPath ->
-    do c_realpath pInPath pOutPath
+    do throwErrnoPathIfNull "canonicalizePath" fpath $ c_realpath pInPath pOutPath
        path <- peekCString pOutPath
 #endif
        return (normalise path)
@@ -936,10 +963,15 @@ getModificationTime name = do
  modificationTime st
 #else
   stat <- Posix.getFileStatus name
-  let realToInteger = round . realToFrac :: Real a => a -> Integer
-  return (TOD (realToInteger (Posix.modificationTime stat)) 0)
+  let mod_time :: Posix.EpochTime 
+      mod_time = Posix.modificationTime stat
+      dbl_time :: Double
+      dbl_time = realToFrac mod_time
+  return (TOD (round dbl_time) 0)
 #endif
-
+   -- For info
+   -- round :: (RealFrac a, Integral b => a -> b
+   -- realToFrac :: (Real a, Fractional b) => a -> b
 
 #endif /* __GLASGOW_HASKELL__ */
 
@@ -963,8 +995,9 @@ withFileOrSymlinkStatus loc name f = do
 modificationTime :: Ptr CStat -> IO ClockTime
 modificationTime stat = do
     mtime <- st_mtime stat
-    let realToInteger = round . realToFrac :: Real a => a -> Integer
-    return (TOD (realToInteger (mtime :: CTime)) 0)
+    let dbl_time :: Double
+        dbl_time = realToFrac (mtime :: CTime)
+    return (TOD (round dbl_time) 0)
     
 isDirectory :: Ptr CStat -> IO Bool
 isDirectory stat = do

@@ -50,7 +50,7 @@ typedef struct {
         long mtctr_r12;
         long bctr;
     } jumpIsland;
-#elif x86_64_TARGET_ARCH
+#elif x86_64_HOST_ARCH
     uint64_t    addr;
     uint8_t     jumpIsland[6];
 #endif
@@ -64,6 +64,11 @@ typedef struct _ObjectCode {
     char*      fileName;
     int        fileSize;
     char*      formatName;            /* eg "ELF32", "DLL", "COFF", etc. */
+
+    /* If this object is a member of an archive, archiveMemberName is
+     * like "libarchive.a(object.o)". Otherwise it's NULL.
+     */
+    char*      archiveMemberName;
 
     /* An array containing ptrs to all the symbol names copied from
        this object into the global symbol hash table.  This is so that
@@ -107,6 +112,14 @@ typedef struct _ObjectCode {
 
 } ObjectCode;
 
+#define OC_INFORMATIVE_FILENAME(OC)             \
+    ( (OC)->archiveMemberName ?                 \
+      (OC)->archiveMemberName :                 \
+      (OC)->fileName                            \
+    )
+
 extern ObjectCode *objects;
+
+void exitLinker( void );
 
 #endif /* LINKERINTERNALS_H */

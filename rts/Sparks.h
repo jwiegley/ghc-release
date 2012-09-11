@@ -11,7 +11,7 @@
 
 #include "WSDeque.h"
 
-BEGIN_RTS_PRIVATE
+#include "BeginPrivate.h"
 
 /* typedef for SparkPool in RtsTypes.h */
 
@@ -34,7 +34,7 @@ StgClosure * tryStealSpark     (Capability *cap);
 void         freeSparkPool     (SparkPool *pool);
 void         createSparkThread (Capability *cap);
 void         traverseSparkQueue(evac_fn evac, void *user, Capability *cap);
-void         pruneSparkQueue   (evac_fn evac, void *user, Capability *cap);
+void         pruneSparkQueue   (Capability *cap);
 
 INLINE_HEADER void discardSparks  (SparkPool *pool);
 INLINE_HEADER long sparkPoolSize  (SparkPool *pool);
@@ -65,6 +65,6 @@ INLINE_HEADER void discardSparks (SparkPool *pool)
 
 #endif // THREADED_RTS
 
-END_RTS_PRIVATE
+#include "EndPrivate.h"
 
 #endif /* SPARKS_H */

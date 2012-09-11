@@ -64,7 +64,7 @@ import NCGMonad
 
 
 import Cmm
-import CLabel           ( CLabel, pprCLabel,
+import CLabel           ( CLabel, ForeignLabelSource(..), pprCLabel,
                           mkDynamicLinkerLabel, DynamicLinkerLabelInfo(..),
                           dynamicLinkerLabelInfo, mkPicBaseLabel,
                           labelDynamic, externallyVisibleCLabel )
@@ -81,6 +81,7 @@ import qualified Outputable
 import Panic            ( panic )
 import DynFlags
 import FastString
+
 
 
 --------------------------------------------------------------------------------
@@ -103,15 +104,17 @@ data ReferenceKind
         deriving(Eq)
 
 
-cmmMakeDynamicReference
+cmmMakeDynamicReference, cmmMakeDynamicReference'
   :: Monad m => DynFlags
              -> (CLabel -> m ())  -- a monad & a function
                                   -- used for recording imported symbols
              -> ReferenceKind     -- whether this is the target of a jump
              -> CLabel            -- the label
              -> m CmmExpr
+
+cmmMakeDynamicReference = cmmMakeDynamicReference'
   
-cmmMakeDynamicReference dflags addImport referenceKind lbl
+cmmMakeDynamicReference' dflags addImport referenceKind lbl
   | Just _ <- dynamicLinkerLabelInfo lbl
   = return $ CmmLit $ CmmLabel lbl   -- already processed it, pass through
 
@@ -291,37 +294,37 @@ howToAccessLabel dflags arch OSDarwin _ lbl
 -- when dynamic libraries containing Haskell code are used.
 
 howToAccessLabel _ ArchPPC_64 os kind _
-        | osElfTarget os
-        = if kind == DataReference
-          -- ELF PPC64 (powerpc64-linux), AIX, MacOS 9, BeOS/PPC
-          then AccessViaSymbolPtr
-          -- actually, .label instead of label
-          else AccessDirectly
+	| osElfTarget os
+	= if kind == DataReference
+	    -- ELF PPC64 (powerpc64-linux), AIX, MacOS 9, BeOS/PPC
+            then AccessViaSymbolPtr
+	    -- actually, .label instead of label
+            else AccessDirectly
 
 howToAccessLabel _ _ os _ _
-        -- no PIC -> the dynamic linker does everything for us;
-        --           if we don't dynamically link to Haskell code,
-        --           it actually manages to do so without messing thins up.
-        | osElfTarget os
-        , not opt_PIC && opt_Static
-        = AccessDirectly
+	-- no PIC -> the dynamic linker does everything for us;
+	--           if we don't dynamically link to Haskell code,
+	--           it actually manages to do so without messing thins up.
+	| osElfTarget os
+	, not opt_PIC && opt_Static 
+	= AccessDirectly
 
 howToAccessLabel dflags arch os DataReference lbl
-        | osElfTarget os
-        = case () of
-          -- A dynamic label needs to be accessed via a symbol pointer.
-          _ | labelDynamic (thisPackage dflags) lbl ->
-              AccessViaSymbolPtr
+	| osElfTarget os
+	= case () of
+	    -- A dynamic label needs to be accessed via a symbol pointer.
+          _ | labelDynamic (thisPackage dflags) lbl 
+	    -> AccessViaSymbolPtr
 
-          -- For PowerPC32 -fPIC, we have to access even static data
-          -- via a symbol pointer (see below for an explanation why
-          -- PowerPC32 Linux is especially broken).
-            | arch == ArchPPC
-            , opt_PIC ->
-              AccessViaSymbolPtr
-
-            | otherwise ->
-              AccessDirectly
+ 	    -- For PowerPC32 -fPIC, we have to access even static data
+	    -- via a symbol pointer (see below for an explanation why
+	    -- PowerPC32 Linux is especially broken).
+	    | arch == ArchPPC
+	    , opt_PIC
+	    -> AccessViaSymbolPtr
+	
+	    | otherwise 
+	    -> AccessDirectly
 
 
 	-- In most cases, we have to avoid symbol stubs on ELF, for the following reasons:
@@ -337,20 +340,20 @@ howToAccessLabel dflags arch os DataReference lbl
 	-- and calling functions from PIC code on non-i386 platforms (via a symbol stub) 
 
 howToAccessLabel dflags arch os CallReference lbl
-        | osElfTarget os
-        , labelDynamic (thisPackage dflags) lbl && not opt_PIC
-        = AccessDirectly
+	| osElfTarget os
+	, labelDynamic (thisPackage dflags) lbl && not opt_PIC
+	= AccessDirectly
 
-        | osElfTarget os
-        , arch /= ArchX86
-        , labelDynamic (thisPackage dflags) lbl && opt_PIC
-        = AccessViaStub
+	| osElfTarget os
+	, arch /= ArchX86
+	, labelDynamic (thisPackage dflags) lbl && opt_PIC
+	= AccessViaStub
 
 howToAccessLabel dflags _ os _ lbl
-        | osElfTarget os
-        = if labelDynamic (thisPackage dflags) lbl
-          then AccessViaSymbolPtr
-          else AccessDirectly
+	| osElfTarget os
+	= if labelDynamic (thisPackage dflags) lbl 
+	    then AccessViaSymbolPtr
+	    else AccessDirectly
 
 -- all other platforms
 howToAccessLabel _ _ _ _ _
@@ -387,8 +390,8 @@ picRelative arch OSDarwin lbl
 -- is only used for offsets from the GOT to symbol pointers inside the
 -- GOT.
 picRelative ArchPPC os lbl
-        | osElfTarget os
-        = CmmLabelDiffOff lbl gotLabel 0
+	| osElfTarget os
+	= CmmLabelDiffOff lbl gotLabel 0
 
 
 -- Most Linux versions:
@@ -453,8 +456,10 @@ needImportedSymbols arch os
 -- position-independent code.
 gotLabel :: CLabel
 gotLabel 
-	= mkForeignLabel -- HACK: it's not really foreign
-        	(fsLit ".LCTOC1") Nothing False IsData
+	-- HACK: this label isn't really foreign
+	= mkForeignLabel 
+		(fsLit ".LCTOC1") 
+		Nothing ForeignLabelInThisPackage IsData
 
 
 
@@ -481,16 +486,16 @@ pprGotDeclaration _ OSDarwin
 -- to make the most of the PPC's 16-bit displacements.
 -- Only needed for PIC.
 pprGotDeclaration arch os
-        | osElfTarget os
-        , arch /= ArchPPC_64
-        , not opt_PIC
-        = Pretty.empty
+	| osElfTarget os
+	, arch	/= ArchPPC_64
+	, not opt_PIC 
+	= Pretty.empty
 
-        | osElfTarget os
-        , arch /= ArchPPC_64
-        = vcat [
-                ptext (sLit ".section \".got2\",\"aw\""),
-                ptext (sLit ".LCTOC1 = .+32768") ]
+	| osElfTarget os
+	, arch	/= ArchPPC_64
+	= vcat [
+		ptext (sLit ".section \".got2\",\"aw\""),
+		ptext (sLit ".LCTOC1 = .+32768") ]
 
 pprGotDeclaration _ _
 	= panic "pprGotDeclaration: no match"   
@@ -630,7 +635,7 @@ pprImportedSymbol _ OSDarwin _
 --    section.
 --    The "official" GOT mechanism (label@got) isn't intended to be used
 --    in position dependent code, so we have to create our own "fake GOT"
---    when not opt_PCI && not opt_Static.
+--    when not opt_PIC && not opt_Static.
 --
 -- 2) PowerPC Linux is just plain broken.
 --    While it's theoretically possible to use GOT offsets larger
@@ -646,25 +651,25 @@ pprImportedSymbol _ OSDarwin _
 -- and output each of them using pprImportedSymbol.
 
 pprImportedSymbol ArchPPC_64 os _
-        | osElfTarget os
-        = empty
+	| osElfTarget os
+	= empty
 
 pprImportedSymbol _ os importedLbl
-        | osElfTarget os
-        = case dynamicLinkerLabelInfo importedLbl of
-          Just (SymbolPtr, lbl) ->
-              let symbolSize = case wordWidth of
-                               W32 -> sLit "\t.long"
-                               W64 -> sLit "\t.quad"
-                               _ -> panic "Unknown wordRep in pprImportedSymbol"
+	| osElfTarget os
+	= case dynamicLinkerLabelInfo importedLbl of
+	    Just (SymbolPtr, lbl)
+	      -> let symbolSize = case wordWidth of
+		         W32 -> sLit "\t.long"
+		         W64 -> sLit "\t.quad"
+		         _ -> panic "Unknown wordRep in pprImportedSymbol"
 
-              in vcat [
-                ptext (sLit ".section \".got2\", \"aw\""),
-                ptext (sLit ".LC_") <> pprCLabel_asm lbl <> char ':',
-                ptext symbolSize <+> pprCLabel_asm lbl ]
+	         in vcat [
+	              ptext (sLit ".section \".got2\", \"aw\""),
+	              ptext (sLit ".LC_") <> pprCLabel_asm lbl <> char ':',
+	              ptext symbolSize <+> pprCLabel_asm lbl ]
 
-          -- PLT code stubs are generated automatically by the dynamic linker.
-          _ -> empty
+	    -- PLT code stubs are generated automatically by the dynamic linker.
+	    _ -> empty
 
 pprImportedSymbol _ _ _
 	= panic "PIC.pprImportedSymbol: no match"

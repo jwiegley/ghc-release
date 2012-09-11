@@ -1,3 +1,42 @@
+Changed in version 0.6.3:
+   * #111: Correct width calculations when the prompt contains newlines.
+
+   * #109: Add function completeWordWithPrev.
+
+   * #101, #44: Extend the API with Behaviors, which control the choice between
+     terminal-style and file-style interaction.
+
+   * #78: Correct width calculations for escape sequences ("\ESC...\STX")
+
+   * Better warning message when -fterminfo doesn't work.
+
+   * Added getPassword as a new input function.
+
+Changed in version 0.6.2.4:
+   * Added back a MonadException instance for mtl's StateT.
+
+Changed in version 0.6.2.3:
+   * #110: Recognize the enter key in xterm.
+
+   * #108: Fix behavior after a paste of long, non-ASCII text.
+
+   * #106: Ignore input immediately following an unrecognized control sequence.
+
+   * #104: In vi-mode, allow, e.g., "d2w" as well as "2dw"
+
+   * #103: Fix vi-mode 'c' command with movements.
+
+   * #81: Correctly handle characters with a width > 1.
+
+   * Compatibility updates from the GHC folks for Solaris and for ghc-6.14.
+
+   * Optimization: if several key presses are input all at once (e.g. from a
+     paste), only display the last change.  This can also make Haskeline more
+     responsive when editing long lines.
+
+   * Hard-code some defaults for ctrl-left and ctrl-right, and provide the
+     corresponding Emacs bindings to skip words.
+
 Changed in version 0.6.2.2:
    * Raise dependency to utf8-string>=0.3.6 (fixes a bug when decoding invalid
      input)

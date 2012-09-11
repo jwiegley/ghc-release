@@ -14,16 +14,16 @@
 #ifndef SM_GCUTILS_H
 #define SM_GCUTILS_H
 
-BEGIN_RTS_PRIVATE
+#include "BeginPrivate.h"
 
 bdescr *allocBlock_sync(void);
 void    freeChain_sync(bdescr *bd);
 
-void    push_scanned_block   (bdescr *bd, step_workspace *ws);
-StgPtr  todo_block_full      (nat size, step_workspace *ws);
-StgPtr  alloc_todo_block     (step_workspace *ws, nat size);
+void    push_scanned_block   (bdescr *bd, gen_workspace *ws);
+StgPtr  todo_block_full      (nat size, gen_workspace *ws);
+StgPtr  alloc_todo_block     (gen_workspace *ws, nat size);
 
-bdescr *grab_local_todo_block  (step_workspace *ws);
+bdescr *grab_local_todo_block  (gen_workspace *ws);
 #if defined(THREADED_RTS)
 bdescr *steal_todo_block       (nat s);
 #endif
@@ -61,6 +61,6 @@ recordMutableGen_GC (StgClosure *p, nat gen_no)
     *bd->free++ = (StgWord)p;
 }
 
-END_RTS_PRIVATE
+#include "EndPrivate.h"
 
 #endif /* SM_GCUTILS_H */

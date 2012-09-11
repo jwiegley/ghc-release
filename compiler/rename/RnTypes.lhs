@@ -7,7 +7,7 @@
 module RnTypes ( 
 	-- Type related stuff
 	rnHsType, rnLHsType, rnLHsTypes, rnContext,
-	rnHsSigType, rnHsTypeFVs, rnConDeclFields,
+	rnHsSigType, rnHsTypeFVs, rnConDeclFields, rnLPred,
 
 	-- Precence related stuff
 	mkOpAppRn, mkNegAppRn, mkOpFormRn, mkConOpPatRn,
@@ -18,6 +18,9 @@ module RnTypes (
   ) where
 
 import {-# SOURCE #-} RnExpr( rnLExpr )
+#ifdef GHCI
+import {-# SOURCE #-} TcSplice( runQuasiQuoteType )
+#endif 	/* GHCI */
 
 import DynFlags
 import HsSyn
@@ -113,7 +116,7 @@ rnHsType _ (HsTyVar tyvar) = do
 -- Hence the jiggery pokery with ty1
 rnHsType doc ty@(HsOpTy ty1 (L loc op) ty2)
   = setSrcSpan loc $ 
-    do	{ ops_ok <- doptM Opt_TypeOperators
+    do	{ ops_ok <- xoptM Opt_TypeOperators
 	; op' <- if ops_ok
 		 then lookupOccRn op 
 		 else do { addErr (opTyErr op ty)
@@ -158,7 +161,7 @@ rnHsType doc (HsListTy ty) = do
     return (HsListTy ty')
 
 rnHsType doc (HsKindSig ty k)
-  = do { kind_sigs_ok <- doptM Opt_KindSignatures
+  = do { kind_sigs_ok <- xoptM Opt_KindSignatures
        ; unless kind_sigs_ok (addErr (kindSigErr ty))
        ; ty' <- rnLHsType doc ty
        ; return (HsKindSig ty' k) }
@@ -182,17 +185,24 @@ rnHsType doc (HsPredTy pred) = do
     pred' <- rnPred doc pred
     return (HsPredTy pred')
 
-rnHsType _ (HsSpliceTy sp)
-  = do { (sp', _fvs) <- rnSplice sp	-- ToDo: deal with fvs
-       ; return (HsSpliceTy sp') }
+rnHsType _ (HsSpliceTy sp _ k)
+  = do { (sp', fvs) <- rnSplice sp	-- ToDo: deal with fvs
+       ; return (HsSpliceTy sp' fvs k) }
 
 rnHsType doc (HsDocTy ty haddock_doc) = do
     ty' <- rnLHsType doc ty
     haddock_doc' <- rnLHsDoc haddock_doc
     return (HsDocTy ty' haddock_doc')
 
-rnHsType _ (HsSpliceTyOut {}) = panic "rnHsType"
+#ifndef GHCI
+rnHsType _ ty@(HsQuasiQuoteTy _) = pprPanic "Can't do quasiquotation without GHCi" (ppr ty)
+#else
+rnHsType doc (HsQuasiQuoteTy qq) = do { ty <- runQuasiQuoteType qq
+                                      ; rnHsType doc (unLoc ty) }
+#endif
+rnHsType _ (HsCoreTy ty) = return (HsCoreTy ty)
 
+--------------
 rnLHsTypes :: SDoc -> [LHsType RdrName]
            -> IOEnv (Env TcGblEnv TcLclEnv) [LHsType Name]
 rnLHsTypes doc tys = mapM (rnLHsType doc) tys
@@ -200,7 +210,7 @@ rnLHsTypes doc tys = mapM (rnLHsType doc) tys
 
 
 \begin{code}
-rnForAll :: SDoc -> HsExplicitForAll -> [LHsTyVarBndr RdrName]
+rnForAll :: SDoc -> HsExplicitFlag -> [LHsTyVarBndr RdrName]
 	 -> LHsContext RdrName -> LHsType RdrName -> RnM (HsType Name)
 
 rnForAll doc _ [] (L _ []) (L _ ty) = rnHsType doc ty
@@ -459,18 +469,18 @@ not_op_pat (ConPatIn _ (InfixCon _ _)) = False
 not_op_pat _        	               = True
 
 --------------------------------------
-checkPrecMatch :: Bool -> Name -> MatchGroup Name -> RnM ()
-	-- True indicates an infix lhs
-	-- See comments with rnExpr (OpApp ...) about "deriving"
+checkPrecMatch :: Name -> MatchGroup Name -> RnM ()
+  -- Check precedence of a function binding written infix
+  --   eg  a `op` b `C` c = ...
+  -- See comments with rnExpr (OpApp ...) about "deriving"
 
-checkPrecMatch False _ _
-  = return ()
-checkPrecMatch True op (MatchGroup ms _)	
+checkPrecMatch op (MatchGroup ms _)	
   = mapM_ check ms			 	
   where
-    check (L _ (Match (p1:p2:_) _ _))
-      = do checkPrec op (unLoc p1) False
-           checkPrec op (unLoc p2) True
+    check (L _ (Match (L l1 p1 : L l2 p2 :_) _ _))
+      = setSrcSpan (combineSrcSpans l1 l2) $
+        do checkPrec op p1 False
+           checkPrec op p2 True
 
     check _ = return ()	
 	-- This can happen.  Consider
@@ -560,7 +570,7 @@ ppr_opfix (op, fixity) = pp_op <+> brackets (ppr fixity)
 forAllWarn :: SDoc -> LHsType RdrName -> Located RdrName
            -> TcRnIf TcGblEnv TcLclEnv ()
 forAllWarn doc ty (L loc tyvar)
-  = ifOptM Opt_WarnUnusedMatches 	$
+  = ifDOptM Opt_WarnUnusedMatches 	$
     addWarnAt loc (sep [ptext (sLit "The universally quantified type variable") <+> quotes (ppr tyvar),
 		 	nest 4 (ptext (sLit "does not appear in the type") <+> quotes (ppr ty))]
 		   $$

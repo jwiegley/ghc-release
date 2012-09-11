@@ -876,10 +876,8 @@ heapCensusChain( Census *census, bdescr *bd )
 	    case CONSTR:
 	    case FUN:
 	    case IND_PERM:
-	    case IND_OLDGEN:
-	    case IND_OLDGEN_PERM:
-	    case CAF_BLACKHOLE:
 	    case BLACKHOLE:
+	    case BLOCKING_QUEUE:
 	    case FUN_1_0:
 	    case FUN_0_1:
 	    case FUN_1_1:
@@ -912,7 +910,8 @@ heapCensusChain( Census *census, bdescr *bd )
             case MVAR_CLEAN:
             case MVAR_DIRTY:
 	    case WEAK:
-	    case STABLE_NAME:
+	    case PRIM:
+	    case MUT_PRIM:
 	    case MUT_VAR_CLEAN:
 	    case MUT_VAR_DIRTY:
 		prim = rtsTrue;
@@ -960,31 +959,6 @@ heapCensusChain( Census *census, bdescr *bd )
 		break;
 #endif
 
-	    case TREC_HEADER: 
-		prim = rtsTrue;
-		size = sizeofW(StgTRecHeader);
-		break;
-
-	    case TVAR_WATCH_QUEUE:
-		prim = rtsTrue;
-		size = sizeofW(StgTVarWatchQueue);
-		break;
-		
-	    case INVARIANT_CHECK_QUEUE:
-		prim = rtsTrue;
-		size = sizeofW(StgInvariantCheckQueue);
-		break;
-		
-	    case ATOMIC_INVARIANT:
-		prim = rtsTrue;
-		size = sizeofW(StgAtomicInvariant);
-		break;
-		
-	    case TVAR:
-		prim = rtsTrue;
-		size = sizeofW(StgTVar);
-		break;
-		
 	    case TREC_CHUNK:
 		prim = rtsTrue;
 		size = sizeofW(StgTRecChunk);
@@ -1067,7 +1041,7 @@ heapCensusChain( Census *census, bdescr *bd )
 void
 heapCensus( void )
 {
-  nat g, s;
+  nat g;
   Census *census;
 
   census = &censuses[era];
@@ -1085,17 +1059,11 @@ heapCensus( void )
 #endif
 
   // Traverse the heap, collecting the census info
-  if (RtsFlags.GcFlags.generations == 1) {
-      heapCensusChain( census, g0s0->blocks );
-  } else {
-      for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-	  for (s = 0; s < generations[g].n_steps; s++) {
-	      heapCensusChain( census, generations[g].steps[s].blocks );
-	      // Are we interested in large objects?  might be
-	      // confusing to include the stack in a heap profile.
-	      heapCensusChain( census, generations[g].steps[s].large_objects );
-	  }
-      }
+  for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+      heapCensusChain( census, generations[g].blocks );
+      // Are we interested in large objects?  might be
+      // confusing to include the stack in a heap profile.
+      heapCensusChain( census, generations[g].large_objects );
   }
 
   // dump out the census info

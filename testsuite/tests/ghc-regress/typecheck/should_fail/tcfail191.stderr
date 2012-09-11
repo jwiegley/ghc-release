@@ -1,8 +1,10 @@
 
-tcfail191.hs:10:8:
-    Occurs check: cannot construct the infinite type: a = [a]
+tcfail191.hs:11:26:
+    Couldn't match type `a' with `[a]'
+      `a' is a rigid type variable bound by
+          the polymorphic type `forall a1. [a1] -> [[a1]]'
+            at tcfail191.hs:11:9
     In the expression: take 5
-    In a stmt of a list comprehension:
-        x <- [Gnorf, Brain] then group using take 5
+    In a stmt of a list comprehension: then group using take 5
     In the expression:
-        [() | x <- [Gnorf, Brain] then group using take 5]
+      [() | x <- [Gnorf, Brain], then group using take 5]

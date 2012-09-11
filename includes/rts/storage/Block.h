@@ -48,22 +48,26 @@
 
 #ifndef CMINUSMINUS
 typedef struct bdescr_ {
-  StgPtr start;			/* start addr of memory */
-  StgPtr free;			/* first free byte of memory */
-  struct bdescr_ *link;		/* used for chaining blocks together */
-  union { 
-      struct bdescr_ *back;	/* used (occasionally) for doubly-linked lists*/
-      StgWord *bitmap;
-      StgPtr  scan;             /* scan pointer for copying GC */
-  } u;
-  unsigned int gen_no;		/* generation */
-  struct step_ *step;		/* step */
-  StgWord32 blocks;		/* no. of blocks (if grp head, 0 otherwise) */
-  StgWord32 flags;              /* block is in to-space */
+    StgPtr start;              /* start addr of memory */
+    StgPtr free;               /* first free byte of memory */
+    struct bdescr_ *link;      /* used for chaining blocks together */
+    union {
+        struct bdescr_ *back;  /* used (occasionally) for doubly-linked lists*/
+        StgWord *bitmap;
+        StgPtr  scan;           /* scan pointer for copying GC */
+    } u;
+
+    struct generation_ *gen;   /* generation */
+    struct generation_ *dest;  /* destination gen */
+
+    StgWord32 blocks;		/* no. of blocks (if grp head, 0 otherwise) */
+
+    StgWord16 gen_no;
+    StgWord16 flags;            /* block flags, see below */
 #if SIZEOF_VOID_P == 8
-  StgWord32 _padding[2];
+    StgWord32 _padding[2];
 #else
-  StgWord32 _padding[0];
+    StgWord32 _padding[0];
 #endif
 } bdescr;
 #endif
@@ -94,6 +98,8 @@ typedef struct bdescr_ {
 #define BF_FRAGMENTED 64
 /* we know about this block (for finding leaks) */
 #define BF_KNOWN     128
+/* Block was swept in the last generation */
+#define BF_SWEPT     256
 
 /* Finding the block descriptor for a given block -------------------------- */
 
@@ -105,7 +111,8 @@ typedef struct bdescr_ {
 
 #else
 
-INLINE_HEADER bdescr *Bdescr(StgPtr p)
+EXTERN_INLINE bdescr *Bdescr(StgPtr p);
+EXTERN_INLINE bdescr *Bdescr(StgPtr p)
 {
   return (bdescr *)
     ((((W_)p &  MBLOCK_MASK & ~BLOCK_MASK) >> (BLOCK_SHIFT-BDESCR_SHIFT)) 

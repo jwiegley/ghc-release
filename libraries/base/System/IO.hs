@@ -25,6 +25,15 @@ module System.IO (
 
     Handle,             -- abstract, instance of: Eq, Show.
 
+    -- | GHC note: a 'Handle' will be automatically closed when the garbage
+    -- collector detects that it has become unreferenced by the program.
+    -- However, relying on this behaviour is not generally recommended:
+    -- the garbage collector is unpredictable.  If possible, use
+    -- an explicit 'hClose' to close 'Handle's when they are no longer
+    -- required.  GHC does not currently attempt to free up file
+    -- descriptors when they have run out, it is your responsibility to
+    -- ensure that this doesn't happen.
+
     -- ** Standard handles
 
     -- | Three handles are allocated during program initialisation,
@@ -151,6 +160,7 @@ module System.IO (
     hPutBuf,                   -- :: Handle -> Ptr a -> Int -> IO ()
     hGetBuf,                   -- :: Handle -> Ptr a -> Int -> IO Int
 #if !defined(__NHC__) && !defined(__HUGS__)
+    hGetBufSome,               -- :: Handle -> Ptr a -> Int -> IO Int
     hPutBufNonBlocking,        -- :: Handle -> Ptr a -> Int -> IO Int
     hGetBufNonBlocking,        -- :: Handle -> Ptr a -> Int -> IO Int
 #endif
@@ -240,6 +250,7 @@ import GHC.IO.IOMode
 import GHC.IO.Handle.FD
 import qualified GHC.IO.FD as FD
 import GHC.IO.Handle
+import GHC.IO.Handle.Text ( hGetBufSome )
 import GHC.IORef
 import GHC.IO.Exception ( userError )
 import GHC.IO.Encoding
@@ -438,7 +449,9 @@ hPrint hdl      =  hPutStrLn hdl . show
 -- | @'withFile' name mode act@ opens a file using 'openFile' and passes
 -- the resulting handle to the computation @act@.  The handle will be
 -- closed on exit from 'withFile', whether by normal termination or by
--- raising an exception.
+-- raising an exception.  If closing the handle raises an exception, then
+-- this exception will be raised by 'withFile' rather than any exception
+-- raised by 'act'.
 withFile :: FilePath -> IOMode -> (Handle -> IO r) -> IO r
 withFile name mode = bracket (openFile name mode) hClose
 
@@ -470,6 +483,8 @@ fixIO k = do
 -- Assume a unix platform, where text and binary I/O are identical.
 openBinaryFile = openFile
 hSetBinaryMode _ _ = return ()
+
+type CMode = Int
 #endif
 
 -- | The function creates a temporary file in ReadWrite mode.
@@ -611,8 +626,7 @@ foreign import ccall "getpid" c_getpid :: IO Int
 -- $locking
 -- Implementations should enforce as far as possible, at least locally to the
 -- Haskell process, multiple-reader single-writer locking on files.
--- That is, /there may either be many handles on the same file which manage
--- input, or just one handle on the file which manages output/.  If any
+-- That is, /there may either be many handles on the same file which manage input, or just one handle on the file which manages output/.  If any
 -- open or semi-closed handle is managing a file for output, no new
 -- handle can be allocated for that file.  If any open or semi-closed
 -- handle is managing a file for input, new handles can only be allocated

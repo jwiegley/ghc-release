@@ -33,6 +33,7 @@ import ClosureInfo
 import Constants
 import StaticFlags
 import Outputable
+import Module
 import FastString
 import BasicTypes
 
@@ -77,8 +78,20 @@ emitForeignCall results (CCall (CCallSpec target cconv safety)) args live
   where
       (call_args, cmm_target)
 	= case target of
-	   StaticTarget lbl -> (args, CmmLit (CmmLabel 
-					(mkForeignLabel lbl call_size False IsFunction)))
+	   -- If the packageId is Nothing then the label is taken to be in the
+	   --	package currently being compiled.
+	   StaticTarget lbl mPkgId
+	    -> let labelSource 
+	    		= case mPkgId of
+				Nothing		-> ForeignLabelInThisPackage
+				Just pkgId	-> ForeignLabelInPackage pkgId
+	       in ( args
+	          , CmmLit (CmmLabel 
+			   	(mkForeignLabel lbl call_size labelSource IsFunction)))
+
+	   -- A label imported with "foreign import ccall "dynamic" ..."
+	   --	Note: "dynamic" here doesn't mean "dynamic library".
+	   --	Read the FFI spec for details.
 	   DynamicTarget    ->  case args of
 	                        (CmmHinted fn _):rest -> (rest, fn)
 	                        [] -> panic "emitForeignCall: DynamicTarget []"
@@ -109,9 +122,10 @@ emitForeignCall' safety results target args vols _srt ret
   | not (playSafe safety) = do
     temp_args <- load_args_into_temps args
     let (caller_save, caller_load) = callerSaveVolatileRegs vols
+    let caller_load' = if ret == CmmNeverReturns then [] else caller_load
     stmtsC caller_save
     stmtC (CmmCall target results temp_args CmmUnsafe ret)
-    stmtsC caller_load
+    stmtsC caller_load'
 
   | otherwise = do
     -- Both 'id' and 'new_base' are GCKindNonPtr because they're
@@ -144,8 +158,8 @@ emitForeignCall' safety results target args vols _srt ret
     emitLoadThreadState
 
 suspendThread, resumeThread :: CmmExpr
-suspendThread = CmmLit (CmmLabel (mkRtsCodeLabel (sLit "suspendThread")))
-resumeThread  = CmmLit (CmmLabel (mkRtsCodeLabel (sLit "resumeThread")))
+suspendThread = CmmLit (CmmLabel (mkCmmCodeLabel rtsPackageId (fsLit "suspendThread")))
+resumeThread  = CmmLit (CmmLabel (mkCmmCodeLabel rtsPackageId (fsLit "resumeThread")))
 
 
 -- we might need to load arguments into temporaries before

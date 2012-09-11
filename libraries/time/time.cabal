@@ -1,5 +1,5 @@
 name:           time
-version:        1.1.4
+version:        1.2.0.3
 stability:      stable
 license:        BSD3
 license-file:   LICENSE
@@ -17,8 +17,16 @@ extra-source-files:
     aclocal.m4
     configure.ac
     configure
+    include/HsConfigure.h
     include/HsTime.h
     include/HsTimeConfig.h.in
+    test/Makefile
+    test/*.hs
+    test/*.lhs
+    test/*.ref
+    test/*.dat
+    test/*.c
+    test/*.h
 extra-tmp-files:
     config.log
     config.status
@@ -28,6 +36,14 @@ extra-tmp-files:
 library
 {
     build-depends: base == 4.*, old-locale
+    ghc-options: -Wall
+    if impl(ghc)
+        extensions: Rank2Types DeriveDataTypeable StandaloneDeriving
+        cpp-options: -DLANGUAGE_Rank2Types -DLANGUAGE_DeriveDataTypeable -DLANGUAGE_StandaloneDeriving
+    else
+        if impl(hugs)
+            extensions: Rank2Types
+            cpp-options: -DLANGUAGE_Rank2Types
     if os(windows)
         build-depends: Win32
     exposed-modules:

@@ -1,4 +1,3 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Control.Monad.ST
@@ -32,15 +31,25 @@ module Control.Monad.ST
         unsafeSTToIO            -- :: ST s a -> IO a
       ) where
 
+#if defined(__GLASGOW_HASKELL__)
+import Control.Monad.Fix ()
+#else
 import Control.Monad.Fix
+#endif
 
 #include "Typeable.h"
 
-#ifdef __HUGS__
+#if defined(__GLASGOW_HASKELL__)
+import GHC.ST           ( ST, runST, fixST, unsafeInterleaveST )
+import GHC.Base         ( RealWorld )
+import GHC.IO           ( stToIO, unsafeIOToST, unsafeSTToIO )
+#elif defined(__HUGS__)
 import Data.Typeable
 import Hugs.ST
 import qualified Hugs.LazyST as LazyST
+#endif
 
+#if defined(__HUGS__)
 INSTANCE_TYPEABLE2(ST,sTTc,"ST")
 INSTANCE_TYPEABLE0(RealWorld,realWorldTc,"RealWorld")
 
@@ -52,12 +61,8 @@ unsafeInterleaveST =
     LazyST.lazyToStrictST . LazyST.unsafeInterleaveST . LazyST.strictToLazyST
 #endif
 
-#ifdef __GLASGOW_HASKELL__
-import GHC.ST           ( ST, runST, fixST, unsafeInterleaveST )
-import GHC.Base         ( RealWorld )
-import GHC.IO           ( stToIO, unsafeIOToST, unsafeSTToIO )
-#endif
-
+#if !defined(__GLASGOW_HASKELL__)
 instance MonadFix (ST s) where
         mfix = fixST
+#endif
 

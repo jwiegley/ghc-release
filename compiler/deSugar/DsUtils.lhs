@@ -144,11 +144,48 @@ selectMatchVar :: Pat Id -> DsM Id
 selectMatchVar (BangPat pat) = selectMatchVar (unLoc pat)
 selectMatchVar (LazyPat pat) = selectMatchVar (unLoc pat)
 selectMatchVar (ParPat pat)  = selectMatchVar (unLoc pat)
-selectMatchVar (VarPat var)  = return var
+selectMatchVar (VarPat var)  = return (localiseId var)  -- Note [Localise pattern binders]
 selectMatchVar (AsPat var _) = return (unLoc var)
 selectMatchVar other_pat     = newSysLocalDs (hsPatType other_pat)
 				  -- OK, better make up one...
 \end{code}
+
+Note [Localise pattern binders]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider     module M where
+               [Just a] = e
+After renaming it looks like
+             module M where
+               [Just M.a] = e
+
+We don't generalise, since it's a pattern binding, monomorphic, etc,
+so after desugaring we may get something like
+             M.a = case e of (v:_) ->
+                   case v of Just M.a -> M.a
+Notice the "M.a" in the pattern; after all, it was in the original
+pattern.  However, after optimisation those pattern binders can become
+let-binders, and then end up floated to top level.  They have a
+different *unique* by then (the simplifier is good about maintaining
+proper scoping), but it's BAD to have two top-level bindings with the
+External Name M.a, because that turns into two linker symbols for M.a.
+It's quite rare for this to actually *happen* -- the only case I know
+of is tc003 compiled with the 'hpc' way -- but that only makes it 
+all the more annoying.
+
+To avoid this, we craftily call 'localiseId' in the desugarer, which
+simply turns the External Name for the Id into an Internal one, but
+doesn't change the unique.  So the desugarer produces this:
+             M.a{r8} = case e of (v:_) ->
+                       case v of Just a{r8} -> M.a{r8}
+The unique is still 'r8', but the binding site in the pattern
+is now an Internal Name.  Now the simplifier's usual mechanisms
+will propagate that Name to all the occurrence sites, as well as
+un-shadowing it, so we'll get
+             M.a{r8} = case e of (v:_) ->
+                       case v of Just a{s77} -> a{s77}
+In fact, even CoreSubst.simplOptExpr will do this, and simpleOptExpr
+runs on the output of the desugarer, so all is well by the end of
+the desugaring pass.
 
 
 %************************************************************************
@@ -221,7 +258,7 @@ wrapBinds ((new,old):prs) e = wrapBind new old (wrapBinds prs e)
 wrapBind :: Var -> Var -> CoreExpr -> CoreExpr
 wrapBind new old body	-- Can deal with term variables *or* type variables
   | new==old    = body
-  | isTyVar new = Let (mkTyBind new (mkTyVarTy old)) body
+  | isTyCoVar new = Let (mkTyBind new (mkTyVarTy old)) body
   | otherwise   = Let (NonRec new (Var old))         body
 
 seqVar :: Var -> CoreExpr -> CoreExpr
@@ -419,7 +456,7 @@ But that is bad for two reasons:
 Seq is very, very special!  So we recognise it right here, and desugar to
         case x of _ -> case y of _ -> (# x,y #)
 
-Note [Desugaring seq (2)]  cf Trac #2231
+Note [Desugaring seq (2)]  cf Trac #2273
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 Consider
    let chp = case b of { True -> fst x; False -> 0 }
@@ -447,10 +484,14 @@ should have said explicitly
 
 But that's painful.  So the code here does a little hack to make seq
 more robust: a saturated application of 'seq' is turned *directly* into
-the case expression. So we desugar to:
+the case expression, thus:
+   x  `seq` e2 ==> case x of x -> e2    -- Note shadowing!
+   e1 `seq` e2 ==> case x of _ -> e2
+
+So we desugar our example to:
    let chp = case b of { True -> fst x; False -> 0 }
    case chp of chp { I# -> ...chp... }
-Notice the shadowing of the case binder! And now all is well.
+And now all is well.
 
 The reason it's a hack is because if you define mySeq=seq, the hack
 won't work on mySeq.  
@@ -471,7 +512,7 @@ mkCoreAppDs (Var f `App` Type ty1 `App` Type ty2 `App` arg1) arg2
   where
     case_bndr = case arg1 of
                    Var v1 | isLocalId v1 -> v1        -- Note [Desugaring seq (2) and (3)]
-                   _                     -> mkWildBinder ty1
+                   _                     -> mkWildValBinder ty1
 
 mkCoreAppDs fun arg = mkCoreApp fun arg	 -- The rest is done in MkCore
 
@@ -546,14 +587,14 @@ mkSelectorBinds pat val_expr
       error_expr <- mkErrorAppDs iRREFUT_PAT_ERROR_ID   tuple_ty (ppr pat)
       tuple_expr <- matchSimply val_expr PatBindRhs pat local_tuple error_expr
       tuple_var <- newSysLocalDs tuple_ty
-      let
-          mk_tup_bind binder
-            = (binder, mkTupleSelector binders binder tuple_var (Var tuple_var))
+      let mk_tup_bind binder
+            = (binder, mkTupleSelector local_binders binder tuple_var (Var tuple_var))
       return ( (tuple_var, tuple_expr) : map mk_tup_bind binders )
   where
-    binders     = collectPatBinders pat
-    local_tuple = mkBigCoreVarTup binders
-    tuple_ty    = exprType local_tuple
+    binders       = collectPatBinders pat
+    local_binders = map localiseId binders	-- See Note [Localise pattern binders]
+    local_tuple   = mkBigCoreVarTup binders
+    tuple_ty      = exprType local_tuple
 
     mk_bind scrut_var err_var bndr_var = do
     -- (mk_bind sv err_var) generates
@@ -600,7 +641,7 @@ mkLHsVarPatTup bs  = mkLHsPatTup (map nlVarPat bs)
 mkVanillaTuplePat :: [OutPat Id] -> Boxity -> Pat Id
 -- A vanilla tuple pattern simply gets its type from its sub-patterns
 mkVanillaTuplePat pats box 
-  = TuplePat pats box (mkTupleTy box (length pats) (map hsLPatType pats))
+  = TuplePat pats box (mkTupleTy box (map hsLPatType pats))
 
 -- The Big equivalents for the source tuple expressions
 mkBigLHsVarTup :: [Id] -> LHsExpr Id

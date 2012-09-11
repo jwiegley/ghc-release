@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -fglasgow-exts #-}
+{-# LANGUAGE MagicHash, UnliftedFFITypes #-}
 -- !!! cc004 -- foreign declarations
 module ShouldCompile where
 

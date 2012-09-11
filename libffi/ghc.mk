@@ -36,19 +36,6 @@
 
 PLATFORM := $(shell echo $(HOSTPLATFORM) | sed 's/i[567]86/i486/g')
 
-# 2007-09-26
-#     set -o igncr 
-# is not a valid command on non-Cygwin-systems.
-# Let it fail silently instead of aborting the build.
-#
-# 2007-07-05
-# We do
-#     set -o igncr; export SHELLOPTS
-# here as otherwise checking the size of limbs
-# makes the build fall over on Cygwin. See the thread
-# http://www.cygwin.com/ml/cygwin/2006-12/msg00011.html
-# for more details.
-
 # 2007-07-05
 # Passing
 #     as_ln_s='cp -p'
@@ -67,7 +54,7 @@ endif
 BINDIST_STAMPS = libffi/stamp.ffi.build libfii/stamp.ffi.configure
 
 INSTALL_HEADERS   += libffi/dist-install/build/ffi.h \
-                     libffi/dist-install/build/ffitarget.h
+		     libffi/dist-install/build/ffitarget.h
 libffi_STATIC_LIB  = libffi/dist-install/build/libffi.a
 INSTALL_LIBS      += libffi/dist-install/build/libHSffi.a \
                      libffi/dist-install/build/libHSffi_p.a \
@@ -85,8 +72,15 @@ libffi_DYNAMIC_PROG = $(libffi_HS_DYN_LIB).a
 libffi_DYNAMIC_LIBS = $(libffi_HS_DYN_LIB)
 else
 libffi_DYNAMIC_PROG =
+ifeq "$(darwin_TARGET_OS)" "1"
+libffi_DYNAMIC_LIBS = libffi/dist-install/build/libffi$(soext) \
+                      libffi/dist-install/build/libffi.5$(soext)
+else ifeq "$(openbsd_TARGET_OS)" "1"
+libffi_DYNAMIC_LIBS = libffi/dist-install/build/libffi.so.5.10
+else
 libffi_DYNAMIC_LIBS = libffi/dist-install/build/libffi.so \
                       libffi/dist-install/build/libffi.so.5
+endif
 endif
 
 ifeq "$(BuildSharedLibs)" "YES"
@@ -109,19 +103,14 @@ endif
 
 ifneq "$(BINDIST)" "YES"
 $(libffi_STAMP_CONFIGURE):
-	"$(RM)" $(RM_OPTS) -r $(LIBFFI_DIR) libffi/build
-	cat ghc-tarballs/libffi/libffi*.tar.gz | $(GZIP) -d | { cd libffi && $(TAR) -xf - ; }
+	"$(RM)" $(RM_OPTS_REC) $(LIBFFI_DIR) libffi/build
+	cat ghc-tarballs/libffi/libffi*.tar.gz | $(GZIP_CMD) -d | { cd libffi && $(TAR_CMD) -xf - ; }
 	mv libffi/libffi-* libffi/build
 	chmod +x libffi/ln
-	cd libffi/build && "$(PATCH)" -p1 < ../libffi.dllize-3.0.8.patch
-	# This patch is just the resulting delta from running
-	# automake && autoreconf && libtoolize --force --copy
-	cd libffi/build && "$(PATCH)" -p1 < ../libffi.autotools-update-3.0.8.patch
 
 # Because -Werror may be in SRC_CC_OPTS/SRC_LD_OPTS, we need to turn
 # warnings off or the compilation of libffi might fail due to warnings
 	cd libffi && \
-	  (set -o igncr 2>/dev/null) && set -o igncr; export SHELLOPTS; \
 	    PATH=`pwd`:$$PATH; \
 	    export PATH; \
 	    cd build && \
@@ -129,8 +118,8 @@ $(libffi_STAMP_CONFIGURE):
 	    LD=$(LD) \
 	    AR=$(AR) \
 	    NM=$(NM) \
-        CFLAGS="$(SRC_CC_OPTS) $(CONF_CC_OPTS) -w" \
-        LDFLAGS="$(SRC_LD_OPTS) $(CONF_LD_OPTS) -w" \
+        CFLAGS="$(SRC_CC_OPTS) $(CONF_CC_OPTS_STAGE1) -w" \
+        LDFLAGS="$(SRC_LD_OPTS) $(CONF_LD_OPTS_STAGE1) -w" \
         "$(SHELL)" configure \
 	          --enable-static=yes \
 	          --enable-shared=$(libffi_EnableShared) \
@@ -150,7 +139,7 @@ $(libffi_STAMP_CONFIGURE):
 
 	touch $@
 
-libffi/dist-install/build/ffi.h: $(libffi_STAMP_CONFIGURE) | $$(dir $$@)/.
+libffi/dist-install/build/ffi.h: $(libffi_STAMP_CONFIGURE) libffi/dist-install/build/ffitarget.h | $$(dir $$@)/.
 	"$(CP)" libffi/build/include/ffi.h $@
 
 libffi/dist-install/build/ffitarget.h: $(libffi_STAMP_CONFIGURE) | $$(dir $$@)/.
@@ -159,9 +148,18 @@ libffi/dist-install/build/ffitarget.h: $(libffi_STAMP_CONFIGURE) | $$(dir $$@)/.
 $(libffi_STAMP_BUILD): $(libffi_STAMP_CONFIGURE) | libffi/dist-install/build/.
 	$(MAKE) -C libffi/build MAKEFLAGS=
 	cd libffi/build && ./libtool --mode=install cp libffi.la $(TOP)/libffi/dist-install/build
+
+	# We actually want both static and dllized libraries, because we build
+	#   the runtime system both ways. libffi_convenience.a is the static version.
+ifeq "$(Windows)" "YES"
+	cp libffi/build/.libs/libffi_convenience.a $(libffi_STATIC_LIB)
+endif
+
 	touch $@
 
 $(libffi_STATIC_LIB): $(libffi_STAMP_BUILD)
+	@test -f $@ || { echo "$< exits, but $@ does not."; echo "Suggest removing $<."; exit 1; }
+
 # Rename libffi.a to libHSffi.a
 libffi/dist-install/build/libHSffi.a libffi/dist-install/build/libHSffi_p.a: $(libffi_STATIC_LIB)
 	"$(CP)" $(libffi_STATIC_LIB) libffi/dist-install/build/libHSffi.a
@@ -177,13 +175,15 @@ $(eval $(call all-target,libffi,$(INSTALL_HEADERS) $(INSTALL_LIBS)))
 libffi/dist-install/build/HSffi.o: libffi/dist-install/build/libHSffi.a
 	cd libffi/dist-install/build && \
 	  touch empty.c && \
-	  "$(CC)" $(SRC_CC_OPTS) $(CONF_CC_OPTS) -c empty.c -o HSffi.o
+	  "$(CC)" $(SRC_CC_OPTS) $(CONF_CC_OPTS_STAGE1) -c empty.c -o HSffi.o
 
 $(eval $(call all-target,libffi,libffi/dist-install/build/HSffi.o))
 
 ifeq "$(BuildSharedLibs)" "YES"
 ifeq "$(Windows)" "YES"
 libffi/libffi.dll.a $(libffi_HS_DYN_LIB): $(libffi_STAMP_BUILD)
+	@test -f $@ || { echo "$< exits, but $@ does not."; echo "Suggest removing $<."; exit 1; }
+
 # Windows libtool creates <soname>.dll, and as we already patched that
 # there is no need to copy from libffi.dll to libHSffi...dll.
 # However, the renaming is still required for the import library
@@ -195,9 +195,15 @@ $(eval $(call all-target,libffi,$(libffi_HS_DYN_LIB).a))
 
 else
 $(libffi_DYNAMIC_LIBS): $(libffi_STAMP_BUILD)
+	@test -f $@ || { echo "$< exits, but $@ does not."; echo "Suggest removing $<."; exit 1; }
+
 # Rename libffi.so to libHSffi...so
 $(libffi_HS_DYN_LIB): $(libffi_DYNAMIC_LIBS) | $$(dir $$@)/.
 	"$(CP)" $(word 1,$(libffi_DYNAMIC_LIBS)) $(libffi_HS_DYN_LIB)
+ifeq "$(darwin_TARGET_OS)" "1"
+	# Ensure library's install name is correct before anyone links with it.
+	install_name_tool -id $(ghclibdir)/$(libffi_HS_DYN_LIB_NAME) $(libffi_HS_DYN_LIB)
+endif
 
 $(eval $(call all-target,libffi,$(libffi_HS_DYN_LIB)))
 endif

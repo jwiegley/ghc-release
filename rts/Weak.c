@@ -131,7 +131,7 @@ scheduleFinalizers(Capability *cap, StgWeak *list)
     debugTrace(DEBUG_weak, "weak: batching %d finalizers", n);
 
     size = n + mutArrPtrsCardTableSize(n);
-    arr = (StgMutArrPtrs *)allocateLocal(cap, sizeofW(StgMutArrPtrs) + size);
+    arr = (StgMutArrPtrs *)allocate(cap, sizeofW(StgMutArrPtrs) + size);
     TICK_ALLOC_PRIM(sizeofW(StgMutArrPtrs), n, 0);
     SET_HDR(arr, &stg_MUT_ARR_PTRS_FROZEN_info, CCS_SYSTEM);
     arr->ptrs = n;

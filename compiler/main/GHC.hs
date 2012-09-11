@@ -36,12 +36,6 @@ module GHC (
 	removeTarget,
 	guessTarget,
 	
-        -- * Extending the program scope 
-        extendGlobalRdrScope,
-        setGlobalRdrScope,
-        extendGlobalTypeScope,
-        setGlobalTypeScope,
-
 	-- * Loading\/compiling the program
 	depanal,
 	load, loadWithLogger, LoadHowMuch(..),
@@ -98,7 +92,7 @@ module GHC (
 	typeKind,
 	parseName,
 	RunResult(..),  
-	runStmt, SingleStep(..),
+	runStmt, parseImportDecl, SingleStep(..),
         resume,
         Resume(resumeStmt, resumeThreadId, resumeBreakInfo, resumeSpan,
                resumeHistory, resumeHistoryIx),
@@ -111,13 +105,13 @@ module GHC (
 	showModule,
         isModuleInterpreted,
 	InteractiveEval.compileExpr, HValue, dynCompileExpr,
-	lookupName,
         GHC.obtainTermFromId, GHC.obtainTermFromVal, reconstructType,
         modInfoModBreaks,
         ModBreaks(..), BreakIndex,
         BreakInfo(breakInfo_number, breakInfo_module),
         BreakArray, setBreakOn, setBreakOff, getBreak,
 #endif
+        lookupName,
 
 	-- * Abstract syntax elements
 
@@ -148,7 +142,7 @@ module GHC (
 	TyCon, 
 	tyConTyVars, tyConDataCons, tyConArity,
 	isClassTyCon, isSynTyCon, isNewTyCon, isPrimTyCon, isFunTyCon,
-	isOpenTyCon,
+	isFamilyTyCon,
 	synTyConDefn, synTyConType, synTyConResKind,
 
 	-- ** Type variables
@@ -158,7 +152,7 @@ module GHC (
 	-- ** Data constructors
 	DataCon,
 	dataConSig, dataConType, dataConTyCon, dataConFieldLabels,
-	dataConIsInfix, isVanillaDataCon,
+	dataConIsInfix, isVanillaDataCon, dataConUserType,
 	dataConStrictMarks,  
 	StrictnessMark(..), isMarkedStrict,
 
@@ -176,7 +170,7 @@ module GHC (
 	pprParendType, pprTypeApp, 
 	Kind,
 	PredType,
-	ThetaType, pprThetaArrow,
+	ThetaType, pprForAll, pprThetaArrow,
 
 	-- ** Entities
 	TyThing(..), 
@@ -243,19 +237,20 @@ import Linker           ( HValue )
 import ByteCodeInstr
 import BreakArray
 import InteractiveEval
-import TcRnDriver
 #endif
 
+import TcRnDriver
 import TcIface
-import TcRnTypes        hiding (LIE)
+import TcRnTypes
 import TcRnMonad        ( initIfaceCheck )
 import Packages
 import NameSet
 import RdrName
 import qualified HsSyn -- hack as we want to reexport the whole module
 import HsSyn hiding ((<.>))
-import Type             hiding (typeKind)
-import TcType           hiding (typeKind)
+import Type
+import Coercion		( synTyConResKind )
+import TcType		hiding( typeKind )
 import Id
 import Var
 import TysPrim		( alphaTyVars )
@@ -284,9 +279,7 @@ import SysTools     ( initSysTools, cleanTempFiles, cleanTempFilesExcept,
                       cleanTempDirs )
 import Annotations
 import Module
-import LazyUniqFM
-import qualified UniqFM as UFM
-import FiniteMap
+import UniqFM
 import Panic
 import Digraph
 import Bag		( unitBag, listToBag, emptyBag, isEmptyBag )
@@ -303,6 +296,9 @@ import Lexer
 import System.Directory ( getModificationTime, doesFileExist,
                           getCurrentDirectory )
 import Data.Maybe
+import Data.Map (Map)
+import qualified Data.Map as Map
+import qualified FiniteMap as Map
 import Data.List
 import qualified Data.List as List
 import Data.Typeable    ( Typeable )
@@ -335,6 +331,7 @@ defaultErrorHandler dflags inner =
                 Just (ioe :: IOException) ->
                   fatalErrorMsg dflags (text (show ioe))
                 _ -> case fromException exception of
+		     Just UserInterrupt -> exitWith (ExitFailure 1)
                      Just StackOverflow ->
                          fatalErrorMsg dflags (text "stack overflow: use +RTS -K<size> to increase it")
                      _ -> case fromException exception of
@@ -351,7 +348,6 @@ defaultErrorHandler dflags inner =
   		hFlush stdout
   		case ge of
 		     PhaseFailed _ code -> exitWith code
-		     Interrupted -> exitWith (ExitFailure 1)
 		     Signal _ -> exitWith (ExitFailure 1)
 		     _ -> do fatalErrorMsg dflags (text (show ge))
 			     exitWith (ExitFailure 1)
@@ -592,31 +588,6 @@ guessTarget str Nothing
 	 lhs_file = file <.> "lhs"
 
          target tid = Target tid obj_allowed Nothing
-
--- -----------------------------------------------------------------------------
--- Extending the program scope
-
-extendGlobalRdrScope :: GhcMonad m => [GlobalRdrElt] -> m ()
-extendGlobalRdrScope rdrElts
-    = modifySession $ \hscEnv ->
-      let global_rdr = hsc_global_rdr_env hscEnv
-      in hscEnv{ hsc_global_rdr_env = foldl extendGlobalRdrEnv global_rdr rdrElts }
-
-setGlobalRdrScope :: GhcMonad m => [GlobalRdrElt] -> m ()
-setGlobalRdrScope rdrElts
-    = modifySession $ \hscEnv ->
-      hscEnv{ hsc_global_rdr_env = foldl extendGlobalRdrEnv emptyGlobalRdrEnv rdrElts }
-
-extendGlobalTypeScope :: GhcMonad m => [Id] -> m ()
-extendGlobalTypeScope ids
-    = modifySession $ \hscEnv ->
-      let global_type = hsc_global_type_env hscEnv
-      in hscEnv{ hsc_global_type_env = extendTypeEnvWithIds global_type ids }
-
-setGlobalTypeScope :: GhcMonad m => [Id] -> m ()
-setGlobalTypeScope ids
-    = modifySession $ \hscEnv ->
-      hscEnv{ hsc_global_type_env = extendTypeEnvWithIds emptyTypeEnv ids }
 
 -- -----------------------------------------------------------------------------
 -- Loading the program
@@ -1113,24 +1084,34 @@ loadModule :: (TypecheckedMod mod, GhcMonad m) => mod -> m mod
 loadModule tcm = do
    let ms = modSummary tcm
    let mod = ms_mod_name ms
+   let loc = ms_location ms
    let (tcg, _details) = tm_internals tcm
    hpt_new <-
        withTempSession (\e -> e { hsc_dflags = ms_hspp_opts ms }) $ do
 
          let compilerBackend comp env ms' _ _mb_old_iface _ =
                withTempSession (\_ -> env) $
-                 hscBackend comp tcg ms'
-                            Nothing
+                 hscBackend comp tcg ms' Nothing
+
          hsc_env <- getSession
-         mod_info
-             <- compile' (compilerBackend hscNothingCompiler
-                         ,compilerBackend hscInteractiveCompiler
-                         ,compilerBackend hscBatchCompiler)
-                         hsc_env ms 1 1 Nothing Nothing
+         mod_info <- do
+             mb_linkable <- 
+                  case ms_obj_date ms of
+                     Just t | t > ms_hs_date ms  -> do
+                         l <- liftIO $ findObjectLinkable (ms_mod ms) 
+                                                  (ml_obj_file loc) t
+                         return (Just l)
+                     _otherwise -> return Nothing
+                                                
+             compile' (compilerBackend hscNothingCompiler
+                      ,compilerBackend hscInteractiveCompiler
+                      ,hscCheckRecompBackend hscBatchCompiler tcg)
+                      hsc_env ms 1 1 Nothing mb_linkable
          -- compile' shouldn't change the environment
          return $ addToUFM (hsc_HPT hsc_env) mod mod_info
    modifySession $ \e -> e{ hsc_HPT = hpt_new }
    return tcm
+
 
 -- | This is the way to get access to the Core bindings corresponding
 -- to a module. 'compileToCore' parses, typechecks, and
@@ -1817,14 +1798,14 @@ moduleGraphNodes drop_hs_boot_nodes summaries = (graphFromEdgedVertices nodes, l
     numbered_summaries = zip summaries [1..]
 
     lookup_node :: HscSource -> ModuleName -> Maybe SummaryNode
-    lookup_node hs_src mod = lookupFM node_map (mod, hs_src)
+    lookup_node hs_src mod = Map.lookup (mod, hs_src) node_map
 
     lookup_key :: HscSource -> ModuleName -> Maybe Int
     lookup_key hs_src mod = fmap summaryNodeKey (lookup_node hs_src mod)
 
     node_map :: NodeMap SummaryNode
-    node_map = listToFM [ ((moduleName (ms_mod s), ms_hsc_src s), node)
-                        | node@(s, _, _) <- nodes ]
+    node_map = Map.fromList [ ((moduleName (ms_mod s), ms_hsc_src s), node)
+                            | node@(s, _, _) <- nodes ]
 
     -- We use integers as the keys for the SCC algorithm
     nodes :: [SummaryNode]
@@ -1860,16 +1841,16 @@ moduleGraphNodes drop_hs_boot_nodes summaries = (graphFromEdgedVertices nodes, l
 
 
 type NodeKey   = (ModuleName, HscSource)  -- The nodes of the graph are 
-type NodeMap a = FiniteMap NodeKey a	  -- keyed by (mod, src_file_type) pairs
+type NodeMap a = Map NodeKey a	  -- keyed by (mod, src_file_type) pairs
 
 msKey :: ModSummary -> NodeKey
 msKey (ModSummary { ms_mod = mod, ms_hsc_src = boot }) = (moduleName mod,boot)
 
 mkNodeMap :: [ModSummary] -> NodeMap ModSummary
-mkNodeMap summaries = listToFM [ (msKey s, s) | s <- summaries]
+mkNodeMap summaries = Map.fromList [ (msKey s, s) | s <- summaries]
 	
 nodeMapElts :: NodeMap a -> [a]
-nodeMapElts = eltsFM
+nodeMapElts = Map.elems
 
 -- | If there are {-# SOURCE #-} imports between strongly connected
 -- components in the topological sort, then those imports can
@@ -1974,7 +1955,7 @@ downsweep hsc_env old_summaries excl_mods allow_dup_roots
 			-- for those mentioned in the visited set
 	loop [] done 	  = return (concat (nodeMapElts done))
 	loop ((wanted_mod, is_boot) : ss) done 
-	  | Just summs <- lookupFM done key
+	  | Just summs <- Map.lookup key done
 	  = if isSingleton summs then
 		loop ss done
 	    else
@@ -1985,13 +1966,15 @@ downsweep hsc_env old_summaries excl_mods allow_dup_roots
                                        Nothing excl_mods
                case mb_s of
                    Nothing -> loop ss done
-                   Just s  -> loop (msDeps s ++ ss) (addToFM done key [s])
+                   Just s  -> loop (msDeps s ++ ss) (Map.insert key [s] done)
 	  where
 	    key = (unLoc wanted_mod, if is_boot then HsBootFile else HsSrcFile)
 
+-- XXX Does the (++) here need to be flipped?
 mkRootMap :: [ModSummary] -> NodeMap [ModSummary]
-mkRootMap summaries = addListToFM_C (++) emptyFM 
-			[ (msKey s, [s]) | s <- summaries ]
+mkRootMap summaries = Map.insertListWith (flip (++))
+                                         [ (msKey s, [s]) | s <- summaries ]
+                                         Map.empty
 
 msDeps :: ModSummary -> [(Located ModuleName, IsBootInterface)]
 -- (msDeps s) returns the dependencies of the ModSummary s.
@@ -2007,7 +1990,10 @@ msDeps s =
 	 ++ [ (m,False) | m <- ms_home_imps s ] 
 
 home_imps :: [Located (ImportDecl RdrName)] -> [Located ModuleName]
-home_imps imps = [ ideclName i |  L _ i <- imps, isNothing (ideclPkgQual i) ]
+home_imps imps = [ ideclName i |  L _ i <- imps, isLocal (ideclPkgQual i) ]
+  where isLocal Nothing = True
+        isLocal (Just pkg) | pkg == fsLit "this" = True -- "this" is special
+        isLocal _ = False
 
 ms_home_allimps :: ModSummary -> [ModuleName]
 ms_home_allimps ms = map unLoc (ms_home_srcimps ms ++ ms_home_imps ms)
@@ -2133,7 +2119,7 @@ summariseModule hsc_env old_summary_map is_boot (L loc wanted_mod)
   | wanted_mod `elem` excl_mods
   = return Nothing
 
-  | Just old_summary <- lookupFM old_summary_map (wanted_mod, hsc_src)
+  | Just old_summary <- Map.lookup (wanted_mod, hsc_src) old_summary_map
   = do	 	-- Find its new timestamp; all the 
 		-- ModSummaries in the old map have valid ml_hs_files
 	let location = ms_location old_summary
@@ -2272,7 +2258,7 @@ preprocessFile hsc_env src_fn mb_phase (Just (buf, _time))
 		| Just (Unlit _) <- mb_phase    = True
 	        | Nothing <- mb_phase, Unlit _ <- startPhase src_fn  = True
 		  -- note: local_opts is only required if there's no Unlit phase
-		| dopt Opt_Cpp dflags'		= True
+		| xopt Opt_Cpp dflags'		= True
 		| dopt Opt_Pp  dflags'		= True
 		| otherwise			= False
 
@@ -2355,7 +2341,7 @@ getModuleGraph = liftM hsc_mod_graph getSession
 -- have Template Haskell enabled whether it is actually needed or not.
 needsTemplateHaskell :: ModuleGraph -> Bool
 needsTemplateHaskell ms =
-    any (dopt Opt_TemplateHaskell . ms_hspp_opts) ms
+    any (xopt Opt_TemplateHaskell . ms_hspp_opts) ms
 
 -- | Return @True@ <==> module is loaded.
 isLoaded :: GhcMonad m => ModuleName -> m Bool
@@ -2423,7 +2409,7 @@ getPackageModuleInfo hsc_env mdl = do
 	return (Just (ModuleInfo {
 			minf_type_env  = mkTypeEnv tys,
 			minf_exports   = names,
-			minf_rdr_env   = Just $! nameSetToGlobalRdrEnv names (moduleName mdl),
+			minf_rdr_env   = Just $! availsToGlobalRdrEnv (moduleName mdl) avails,
 			minf_instances = error "getModuleInfo: instances for package module unimplemented",
                         minf_modBreaks = emptyModBreaks  
 		}))
@@ -2523,7 +2509,7 @@ packageDbModules :: GhcMonad m =>
                  -> m [Module]
 packageDbModules only_exposed = do
    dflags <- getSessionDynFlags
-   let pkgs = UFM.eltsUFM (pkgIdMap (pkgState dflags))
+   let pkgs = eltsUFM (pkgIdMap (pkgState dflags))
    return $
      [ mkModule pid modname | p <- pkgs
                             , not only_exposed || exposed p
@@ -2578,7 +2564,7 @@ getModuleSourceAndFlags mod = do
 getTokenStream :: GhcMonad m => Module -> m [Located Token]
 getTokenStream mod = do
   (sourceFile, source, flags) <- getModuleSourceAndFlags mod
-  let startLoc = mkSrcLoc (mkFastString sourceFile) 0 0
+  let startLoc = mkSrcLoc (mkFastString sourceFile) 1 1
   case lexTokenStream source startLoc flags of
     POk _ ts  -> return ts
     PFailed span err -> throw $ mkSrcErr (unitBag $ mkPlainErrMsg span err)
@@ -2589,7 +2575,7 @@ getTokenStream mod = do
 getRichTokenStream :: GhcMonad m => Module -> m [(Located Token, String)]
 getRichTokenStream mod = do
   (sourceFile, source, flags) <- getModuleSourceAndFlags mod
-  let startLoc = mkSrcLoc (mkFastString sourceFile) 0 0
+  let startLoc = mkSrcLoc (mkFastString sourceFile) 1 1
   case lexTokenStream source startLoc flags of
     POk _ ts -> return $ addSourceToTokens startLoc source ts
     PFailed span err -> throw $ mkSrcErr (unitBag $ mkPlainErrMsg span err)
@@ -2620,7 +2606,7 @@ addSourceToTokens loc buf (t@(L span _) : ts)
 showRichTokenStream :: [(Located Token, String)] -> String
 showRichTokenStream ts = go startLoc ts ""
     where sourceFile = srcSpanFile (getLoc . fst . head $ ts)
-          startLoc = mkSrcLoc sourceFile 0 0
+          startLoc = mkSrcLoc sourceFile 1 1
           go _ [] = id
           go loc ((L span _, str):ts)
               | not (isGoodSrcSpan span) = go loc ts
@@ -2711,3 +2697,12 @@ obtainTermFromId bound force id =
       liftIO $ InteractiveEval.obtainTermFromId hsc_env bound force id
 
 #endif
+
+-- | Returns the 'TyThing' for a 'Name'.  The 'Name' may refer to any
+-- entity known to GHC, including 'Name's defined using 'runStmt'.
+lookupName :: GhcMonad m => Name -> m (Maybe TyThing)
+lookupName name = withSession $ \hsc_env -> do
+  mb_tything <- ioMsg $ tcRnLookupName hsc_env name
+  return mb_tything
+  -- XXX: calls panic in some circumstances;  is that ok?
+

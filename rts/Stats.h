@@ -11,7 +11,7 @@
 
 #include "GetTime.h"
 
-BEGIN_RTS_PRIVATE
+#include "BeginPrivate.h"
 
 void      stat_startInit(void);
 void      stat_endInit(void);
@@ -61,6 +61,6 @@ Ticks stat_getElapsedTime(void);
 void statsPrintf( char *s, ... ) 
     GNUC3_ATTRIBUTE(format (printf, 1, 2));
 
-END_RTS_PRIVATE
+#include "EndPrivate.h"
 
 #endif /* STATS_H */

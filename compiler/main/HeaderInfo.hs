@@ -9,6 +9,7 @@
 -----------------------------------------------------------------------------
 
 module HeaderInfo ( getImports
+                  , mkPrelImports -- used by the renamer too
                   , getOptionsFromFile, getOptions
                   , optionsErrorMsgs,
                     checkProcessArgsResult ) where
@@ -20,9 +21,9 @@ import HscTypes
 import Parser		( parseHeader )
 import Lexer
 import FastString
-import HsSyn		( ImportDecl(..), HsModule(..) )
-import Module		( ModuleName, moduleName )
-import PrelNames        ( gHC_PRIM, mAIN_NAME )
+import HsSyn
+import Module
+import PrelNames
 import StringBuffer
 import SrcLoc
 import DynFlags
@@ -55,8 +56,8 @@ getImports :: GhcMonad m =>
            -> m ([Located (ImportDecl RdrName)], [Located (ImportDecl RdrName)], Located ModuleName)
               -- ^ The source imports, normal imports, and the module name.
 getImports dflags buf filename source_filename = do
-  let loc  = mkSrcLoc (mkFastString filename) 1 0
-  case unP parseHeader (mkPState buf loc dflags) of
+  let loc  = mkSrcLoc (mkFastString filename) 1 1
+  case unP parseHeader (mkPState dflags buf loc) of
     PFailed span err -> parseError span err
     POk pst rdr_module -> do
       let _ms@(_warns, errs) = getMessages pst
@@ -70,15 +71,49 @@ getImports dflags buf filename source_filename = do
 	  case rdr_module of
 	    L _ (HsModule mb_mod _ imps _ _ _) ->
 	      let
-                main_loc = mkSrcLoc (mkFastString source_filename) 1 0
+                main_loc = mkSrcLoc (mkFastString source_filename) 1 1
 		mod = mb_mod `orElse` L (srcLocSpan main_loc) mAIN_NAME
 	        (src_idecls, ord_idecls) = partition (ideclSource.unLoc) imps
+
+		     -- GHC.Prim doesn't exist physically, so don't go looking for it.
 		ordinary_imps = filter ((/= moduleName gHC_PRIM) . unLoc . ideclName . unLoc) 
 					ord_idecls
-		     -- GHC.Prim doesn't exist physically, so don't go looking for it.
+
+                implicit_prelude = xopt Opt_ImplicitPrelude dflags
+                implicit_imports = mkPrelImports (unLoc mod) implicit_prelude imps
 	      in
-	      return (src_idecls, ordinary_imps, mod)
-  
+	      return (src_idecls, implicit_imports ++ ordinary_imps, mod)
+
+mkPrelImports :: ModuleName -> Bool -> [LImportDecl RdrName]
+              -> [LImportDecl RdrName]
+-- Consruct the implicit declaration "import Prelude" (or not)
+--
+-- NB: opt_NoImplicitPrelude is slightly different to import Prelude ();
+-- because the former doesn't even look at Prelude.hi for instance
+-- declarations, whereas the latter does.
+mkPrelImports this_mod implicit_prelude import_decls
+  | this_mod == pRELUDE_NAME
+   || explicit_prelude_import
+   || not implicit_prelude
+  = []
+  | otherwise = [preludeImportDecl]
+  where
+      explicit_prelude_import
+       = notNull [ () | L _ (ImportDecl mod Nothing _ _ _ _) <- import_decls,
+	           unLoc mod == pRELUDE_NAME ]
+
+      preludeImportDecl :: LImportDecl RdrName
+      preludeImportDecl
+        = L loc $
+	  ImportDecl (L loc pRELUDE_NAME)
+               Nothing {- no specific package -}
+	       False {- Not a boot interface -}
+	       False	{- Not qualified -}
+	       Nothing	{- No "as" -}
+	       Nothing	{- No import list -}
+
+      loc = mkGeneralSrcSpan (fsLit "Implicit import declaration")
+
 parseError :: GhcMonad m => SrcSpan -> Message -> m a
 parseError span err = throwOneError $ mkPlainErrMsg span err
 
@@ -109,7 +144,7 @@ lazyGetToks dflags filename handle = do
   buf <- hGetStringBufferBlock handle blockSize
   unsafeInterleaveIO $ lazyLexBuf handle (pragState dflags buf loc) False
  where
-  loc  = mkSrcLoc (mkFastString filename) 1 0
+  loc  = mkSrcLoc (mkFastString filename) 1 1
 
   lazyLexBuf :: Handle -> PState -> Bool -> IO [Located Token]
   lazyLexBuf handle state eof = do
@@ -141,7 +176,7 @@ lazyGetToks dflags filename handle = do
 getToks :: DynFlags -> FilePath -> StringBuffer -> [Located Token]
 getToks dflags filename buf = lexAll (pragState dflags buf loc)
  where
-  loc  = mkSrcLoc (mkFastString filename) 1 0
+  loc  = mkSrcLoc (mkFastString filename) 1 1
 
   lexAll state = case unP (lexer return) state of
                    POk _      t@(L _ ITeof) -> [t]
@@ -193,6 +228,9 @@ getOptions' toks
           parseToks (open:xs)
               | ITlanguage_prag <- getToken open
               = parseLanguage xs
+          parseToks (x:xs)
+              | ITdocCommentNext _ <- getToken x
+              = parseToks xs
           parseToks _ = []
           parseLanguage (L loc (ITconid fs):rest)
               = checkExtension (L loc fs) :
@@ -218,7 +256,7 @@ checkProcessArgsResult flags
       liftIO $ throwIO $ mkSrcErr $ listToBag $ map mkMsg flags
     where mkMsg (L loc flag)
               = mkPlainErrMsg loc $
-                  (text "unknown flag in  {-# OPTIONS #-} pragma:" <+>
+                  (text "unknown flag in  {-# OPTIONS_GHC #-} pragma:" <+>
                    text flag)
 
 -----------------------------------------------------------------------------
@@ -228,8 +266,7 @@ checkExtension (L l ext)
 -- Checks if a given extension is valid, and if so returns
 -- its corresponding flag. Otherwise it throws an exception.
  =  let ext' = unpackFS ext in
-    if ext' `elem` supportedLanguages
-       || ext' `elem` (map ("No"++) supportedLanguages)
+    if ext' `elem` supportedLanguagesAndExtensions
     then L l ("-X"++ext')
     else unsupportedExtnError l ext'
 
@@ -246,7 +283,9 @@ unsupportedExtnError :: SrcSpan -> String -> a
 unsupportedExtnError loc unsup =
   throw $ mkSrcErr $ unitBag $
     mkPlainErrMsg loc $
-        text "Unsupported extension: " <> text unsup
+        text "Unsupported extension: " <> text unsup $$
+        if null suggestions then empty else text "Perhaps you meant" <+> quotedListWithOr (map text suggestions)
+  where suggestions = fuzzyMatch unsup supportedLanguagesAndExtensions
 
 
 optionsErrorMsgs :: [String] -> [Located String] -> FilePath -> Messages
@@ -256,5 +295,5 @@ optionsErrorMsgs unhandled_flags flags_lines _filename
 					  L l f' <- flags_lines, f == f' ]
         mkMsg (L flagSpan flag) = 
             ErrUtils.mkPlainErrMsg flagSpan $
-                    text "unknown flag in  {-# OPTIONS #-} pragma:" <+> text flag
+                    text "unknown flag in  {-# OPTIONS_GHC #-} pragma:" <+> text flag
 

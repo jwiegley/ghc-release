@@ -41,6 +41,7 @@ import Name
 
 import HscTypes
 import PrelInfo
+import MkCore	( eRROR_ID )
 import PrelNames
 import PrimOp
 import SrcLoc
@@ -68,6 +69,8 @@ data DerivAuxBind		-- Please add these auxiliary top-level bindings
   = GenCon2Tag TyCon		-- The con2Tag for given TyCon
   | GenTag2Con TyCon		-- ...ditto tag2Con
   | GenMaxTag  TyCon		-- ...and maxTag
+	-- All these generate ZERO-BASED tag operations
+	-- I.e first constructor has tag 0
 
 	-- Scrap your boilerplate
   | MkDataCon DataCon		-- For constructor C we get $cC :: Constr
@@ -182,10 +185,10 @@ gen_Eq_binds loc tycon
     aux_binds | no_nullary_cons = []
 	      | otherwise       = [GenCon2Tag tycon]
 
-    method_binds = listToBag [
-			mk_FunBind loc eq_RDR ((map pats_etc nonnullary_cons) ++ rest),
-			mk_easy_FunBind loc ne_RDR [a_Pat, b_Pat] (
-			nlHsApp (nlHsVar not_RDR) (nlHsPar (nlHsVarApps eq_RDR [a_RDR, b_RDR])))]
+    method_binds = listToBag [eq_bind, ne_bind]
+    eq_bind = mk_FunBind loc eq_RDR (map pats_etc nonnullary_cons ++ rest)
+    ne_bind = mk_easy_FunBind loc ne_RDR [a_Pat, b_Pat] (
+			nlHsApp (nlHsVar not_RDR) (nlHsPar (nlHsVarApps eq_RDR [a_RDR, b_RDR])))
 
     ------------------------------------------------------------------
     pats_etc data_con
@@ -214,225 +217,289 @@ gen_Eq_binds loc tycon
 %*									*
 %************************************************************************
 
-For a derived @Ord@, we concentrate our attentions on @compare@
-\begin{verbatim}
-compare :: a -> a -> Ordering
-data Ordering = LT | EQ | GT deriving ()
-\end{verbatim}
+Note [Generating Ord instances]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose constructors are K1..Kn, and some are nullary.  
+The general form we generate is:
 
-We will use the same example data type as above:
-\begin{verbatim}
-data Foo ... = N1 | N2 ... | Nn | O1 a b | O2 Int | O3 Double b b | ...
-\end{verbatim}
+* Do case on first argument
+	case a of
+          K1 ... -> rhs_1
+          K2 ... -> rhs_2
+          ...
+          Kn ... -> rhs_n
+          _ -> nullary_rhs
 
-\begin{itemize}
-\item
-  We do all the other @Ord@ methods with calls to @compare@:
-\begin{verbatim}
-instance ... (Ord <wurble> <wurble>) where
-    a <  b  = case (compare a b) of { LT -> True;  EQ -> False; GT -> False }
-    a <= b  = case (compare a b) of { LT -> True;  EQ -> True;  GT -> False }
-    a >= b  = case (compare a b) of { LT -> False; EQ -> True;  GT -> True  }
-    a >  b  = case (compare a b) of { LT -> False; EQ -> False; GT -> True  }
+* To make rhs_i
+     If i = 1, 2, n-1, n, generate a single case. 
+	rhs_2    case b of 
+                   K1 {}  -> LT
+                   K2 ... -> ...eq_rhs(K2)...
+                   _      -> GT
 
-    max a b = case (compare a b) of { LT -> b; EQ -> a;  GT -> a }
-    min a b = case (compare a b) of { LT -> a; EQ -> b;  GT -> b }
+     Otherwise do a tag compare against the bigger range
+     (because this is the one most likely to succeed)
+        rhs_3    case tag b of tb ->
+                 if 3 <# tg then GT
+                 else case b of 
+                         K3 ... -> ...eq_rhs(K3)....
+                         _      -> LT
 
-    -- compare to come...
-\end{verbatim}
+* To make eq_rhs(K), which knows that 
+    a = K a1 .. av
+    b = K b1 .. bv
+  we just want to compare (a1,b1) then (a2,b2) etc.
+  Take care on the last field to tail-call into comparing av,bv
 
-\item
-  @compare@ always has two parts.  First, we use the compared
-  data-constructors' tags to deal with the case of different
-  constructors:
-\begin{verbatim}
-compare a b = case (con2tag_Foo a) of { a# ->
-	      case (con2tag_Foo b) of { b# ->
-	      case (a# ==# b#)     of {
-	       True  -> cmp_eq a b
-	       False -> case (a# <# b#) of
-			 True  -> _LT
-			 False -> _GT
-	      }}}
-  where
-    cmp_eq = ... to come ...
-\end{verbatim}
+* To make nullary_rhs generate this
+     case con2tag a of a# -> 
+     case con2tag b of -> 
+     a# `compare` b#
 
-\item
-  We are only left with the ``help'' function @cmp_eq@, to deal with
-  comparing data constructors with the same tag.
+Several special cases:
 
-  For the ordinary constructors (if any), we emit the sorta-obvious
-  compare-style stuff; for our example:
-\begin{verbatim}
-cmp_eq (O1 a1 b1) (O1 a2 b2)
-  = case (compare a1 a2) of { LT -> LT; EQ -> compare b1 b2; GT -> GT }
+* Two or fewer nullary constructors: don't generate nullary_rhs
 
-cmp_eq (O2 a1) (O2 a2)
-  = compare a1 a2
+* Be careful about unlifted comparisons.  When comparing unboxed
+  values we can't call the overloaded functions.  
+  See function unliftedOrdOp
 
-cmp_eq (O3 a1 b1 c1) (O3 a2 b2 c2)
-  = case (compare a1 a2) of {
-      LT -> LT;
-      GT -> GT;
-      EQ -> case compare b1 b2 of {
-	      LT -> LT;
-	      GT -> GT;
-	      EQ -> compare c1 c2
-	    }
-    }
-\end{verbatim}
-
-  Again, we must be careful about unlifted comparisons.  For example,
-  if \tr{a1} and \tr{a2} were \tr{Int#}s in the 2nd example above, we'd need to
-  generate:
-
-\begin{verbatim}
-cmp_eq lt eq gt (O2 a1) (O2 a2)
-  = compareInt# a1 a2
-  -- or maybe the unfolded equivalent
-\end{verbatim}
-
-\item
-  For the remaining nullary constructors, we already know that the
-  tags are equal so:
-\begin{verbatim}
-cmp_eq _ _ = EQ
-\end{verbatim}
-\end{itemize}
-
-If there is only one constructor in the Data Type we don't need the WildCard Pattern. 
-JJQC-30-Nov-1997
-
-\begin{code}
-gen_Ord_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
-
-gen_Ord_binds loc tycon
-  | Just (con, prim_tc) <- primWrapperType_maybe tycon
-  = gen_PrimOrd_binds con prim_tc
-
-  | otherwise 
-  = (unitBag compare, aux_binds)
- 	-- `AndMonoBinds` compare	
-	-- The default declaration in PrelBase handles this
-  where
-    aux_binds | single_con_type = []
-	      | otherwise	= [GenCon2Tag tycon]
-
-    compare = L loc (mkFunBind (L loc compare_RDR) compare_matches)
-    compare_matches = [mkMatch [a_Pat, b_Pat] compare_rhs cmp_eq_binds]
-    cmp_eq_binds    = HsValBinds (ValBindsIn (unitBag cmp_eq) [])
-
-    compare_rhs
-	| single_con_type = cmp_eq_Expr a_Expr b_Expr
- 	| otherwise
-	= untag_Expr tycon [(a_RDR, ah_RDR), (b_RDR, bh_RDR)]
-		  (cmp_tags_Expr eqInt_RDR ah_RDR bh_RDR
-			(cmp_eq_Expr a_Expr b_Expr)	-- True case
-			-- False case; they aren't equal
-			-- So we need to do a less-than comparison on the tags
-		  	(cmp_tags_Expr ltInt_RDR ah_RDR bh_RDR ltTag_Expr gtTag_Expr))
-
-    tycon_data_cons = tyConDataCons tycon
-    single_con_type = isSingleton tycon_data_cons
-    (nullary_cons, nonnullary_cons)
-       | isNewTyCon tycon = ([], tyConDataCons tycon)
-       | otherwise	  = partition isNullarySrcDataCon tycon_data_cons
-
-    cmp_eq = mk_FunBind loc cmp_eq_RDR cmp_eq_match
-    cmp_eq_match
-      | isEnumerationTyCon tycon
-			   -- We know the tags are equal, so if it's an enumeration TyCon,
-			   -- then there is nothing left to do
-			   -- Catch this specially to avoid warnings
-			   -- about overlapping patterns from the desugarer,
-			   -- and to avoid unnecessary pattern-matching
-      = [([nlWildPat,nlWildPat], eqTag_Expr)]
-      | otherwise
-      = map pats_etc nonnullary_cons ++
-	(if single_con_type then	-- Omit wildcards when there's just one 
-	      []			-- constructor, to silence desugarer
-	else
-              [([nlWildPat, nlWildPat], default_rhs)])
-
-    default_rhs | null nullary_cons = impossible_Expr	-- Keep desugarer from complaining about
-							-- inexhaustive patterns
-		| otherwise	    = eqTag_Expr	-- Some nullary constructors;
-							-- Tags are equal, no args => return EQ
-    pats_etc data_con
-	= ([con1_pat, con2_pat],
-	   nested_compare_expr tys_needed as_needed bs_needed)
-	where
-	  con1_pat = nlConVarPat data_con_RDR as_needed
-	  con2_pat = nlConVarPat data_con_RDR bs_needed
-
-	  data_con_RDR = getRdrName data_con
-	  con_arity   = length tys_needed
-	  as_needed   = take con_arity as_RDRs
-	  bs_needed   = take con_arity bs_RDRs
-	  tys_needed  = dataConOrigArgTys data_con
-
-	  nested_compare_expr [ty] [a] [b]
-	    = careful_compare_Case tycon ty eqTag_Expr (nlHsVar a) (nlHsVar b)
-
-	  nested_compare_expr (ty:tys) (a:as) (b:bs)
-	    = let eq_expr = nested_compare_expr tys as bs
-		in  careful_compare_Case tycon ty eq_expr (nlHsVar a) (nlHsVar b)
-
-	  nested_compare_expr _ _ _ = panic "nested_compare_expr"	-- Args always equal length
-\end{code}
-
-Note [Comparision of primitive types]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The general plan does not work well for data types like
-	data T = MkT Int# deriving( Ord )
-The general plan defines the 'compare' method, gets (<) etc from it.  But
-that means we get silly code like:
-   instance Ord T where
+Note [Do not rely on compare]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+It's a bad idea to define only 'compare', and build the other binary
+comparisions on top of it; see Trac #2130, #4019.  Reason: we don't
+want to laboriously make a three-way comparison, only to extract a
+binary result, something like this:
      (>) (I# x) (I# y) = case <# x y of
                             True -> False
                             False -> case ==# x y of 
                                        True  -> False
                                        False -> True
-We would prefer to use the (>#) primop.  See also Trac #2130
-                            
+
+So for sufficiently small types (few constructors, or all nullary) 
+we generate all methods; for large ones we just use 'compare'.
 
 \begin{code}
-gen_PrimOrd_binds :: DataCon -> TyCon ->  (LHsBinds RdrName, DerivAuxBinds)
--- See Note [Comparison of primitive types]
-gen_PrimOrd_binds data_con prim_tc 
-  = (listToBag [mk_op lt_RDR lt_op, mk_op le_RDR le_op, 
-	        mk_op ge_RDR ge_op, mk_op gt_RDR gt_op], [])
-  where
-    mk_op op_RDR op = mk_FunBind (getSrcSpan data_con) op_RDR 
-				 [([apat, bpat], genOpApp a_Expr (primOpRdrName op) b_Expr)]
-    con_RDR = getRdrName data_con
-    apat = nlConVarPat con_RDR [a_RDR]
-    bpat = nlConVarPat con_RDR [b_RDR]
+data OrdOp = OrdCompare | OrdLT | OrdLE | OrdGE | OrdGT
 
-    (lt_op, le_op, ge_op, gt_op)
-       | prim_tc == charPrimTyCon   = (CharLtOp,   CharLeOp,   CharGeOp,   CharGtOp)
-       | prim_tc == intPrimTyCon    = (IntLtOp,    IntLeOp,    IntGeOp,    IntGtOp)
-       | prim_tc == wordPrimTyCon   = (WordLtOp,   WordLeOp,   WordGeOp,   WordGtOp)
-       | prim_tc == addrPrimTyCon   = (AddrLtOp,   AddrLeOp,   AddrGeOp,   AddrGtOp)
-       | prim_tc == floatPrimTyCon  = (FloatLtOp,  FloatLeOp,  FloatGeOp,  FloatGtOp)
-       | prim_tc == doublePrimTyCon = (DoubleLtOp, DoubleLeOp, DoubleGeOp, DoubleGtOp)
-       | otherwise = pprPanic "Unexpected primitive tycon" (ppr prim_tc)
+------------
+ordMethRdr :: OrdOp -> RdrName
+ordMethRdr op
+  = case op of
+       OrdCompare -> compare_RDR
+       OrdLT      -> lt_RDR
+       OrdLE      -> le_RDR
+       OrdGE      -> ge_RDR
+       OrdGT      -> gt_RDR
 
+------------
+ltResult :: OrdOp -> LHsExpr RdrName
+-- Knowing a<b, what is the result for a `op` b?
+ltResult OrdCompare = ltTag_Expr
+ltResult OrdLT      = true_Expr
+ltResult OrdLE      = true_Expr
+ltResult OrdGE      = false_Expr
+ltResult OrdGT      = false_Expr
 
-primWrapperType_maybe :: TyCon -> Maybe (DataCon, TyCon)
--- True of data types that are wrappers around prmitive types
--- 	data T = MkT Word#
--- For these we want to generate all the (<), (<=) etc operations individually
-primWrapperType_maybe tc 
-  | [con] <- tyConDataCons tc
-  , [ty]  <- dataConOrigArgTys con
-  , Just (prim_tc, []) <- tcSplitTyConApp_maybe ty
-  , isPrimTyCon prim_tc
-  = Just (con, prim_tc)
+------------
+eqResult :: OrdOp -> LHsExpr RdrName
+-- Knowing a=b, what is the result for a `op` b?
+eqResult OrdCompare = eqTag_Expr
+eqResult OrdLT      = false_Expr
+eqResult OrdLE      = true_Expr
+eqResult OrdGE      = true_Expr
+eqResult OrdGT      = false_Expr
+
+------------
+gtResult :: OrdOp -> LHsExpr RdrName
+-- Knowing a>b, what is the result for a `op` b?
+gtResult OrdCompare = gtTag_Expr
+gtResult OrdLT      = false_Expr
+gtResult OrdLE      = false_Expr
+gtResult OrdGE      = true_Expr
+gtResult OrdGT      = true_Expr
+
+------------
+gen_Ord_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, DerivAuxBinds)
+gen_Ord_binds loc tycon
+  | null tycon_data_cons	-- No data-cons => invoke bale-out case
+  = (unitBag $ mk_FunBind loc compare_RDR [], [])
   | otherwise
-  = Nothing
+  = (unitBag (mkOrdOp OrdCompare) `unionBags` other_ops, aux_binds)
+  where
+    aux_binds | single_con_type = []
+              | otherwise       = [GenCon2Tag tycon]
+
+	-- Note [Do not rely on compare]
+    other_ops | (last_tag - first_tag) <= 2 	-- 1-3 constructors
+                || null non_nullary_cons	-- Or it's an enumeration
+              = listToBag (map mkOrdOp [OrdLT,OrdLE,OrdGE,OrdGT])
+	      | otherwise
+              = emptyBag
+
+    get_tag con = dataConTag con - fIRST_TAG	
+	-- We want *zero-based* tags, because that's what 
+	-- con2Tag returns (generated by untag_Expr)!
+
+    tycon_data_cons = tyConDataCons tycon
+    single_con_type = isSingleton tycon_data_cons
+    (first_con : _) = tycon_data_cons
+    (last_con : _)  = reverse tycon_data_cons
+    first_tag 	    = get_tag first_con
+    last_tag  	    = get_tag last_con
+
+    (nullary_cons, non_nullary_cons) = partition isNullarySrcDataCon tycon_data_cons
+    
+
+    mkOrdOp :: OrdOp -> LHsBind RdrName
+    -- Returns a binding   op a b = ... compares a and b according to op ....
+    mkOrdOp op = mk_easy_FunBind loc (ordMethRdr op) [a_Pat, b_Pat] (mkOrdOpRhs op)
+
+    mkOrdOpRhs :: OrdOp -> LHsExpr RdrName
+    mkOrdOpRhs op	-- RHS for comparing 'a' and 'b' according to op
+      | length nullary_cons <= 2  -- Two nullary or fewer, so use cases
+      = nlHsCase (nlHsVar a_RDR) $ 
+        map (mkOrdOpAlt op) tycon_data_cons
+	-- i.e.  case a of { C1 x y -> case b of C1 x y -> ....compare x,y...
+        --                   C2 x   -> case b of C2 x -> ....comopare x.... }
+
+      | null non_nullary_cons	 -- All nullary, so go straight to comparing tags
+      = mkTagCmp op 	
+
+      | otherwise		 -- Mixed nullary and non-nullary
+      = nlHsCase (nlHsVar a_RDR) $
+        (map (mkOrdOpAlt op) non_nullary_cons 
+         ++ [mkSimpleHsAlt nlWildPat (mkTagCmp op)])
+
+
+    mkOrdOpAlt :: OrdOp -> DataCon -> LMatch RdrName
+    -- Make the alternative  (Ki a1 a2 .. av -> 
+    mkOrdOpAlt op data_con
+      = mkSimpleHsAlt (nlConVarPat data_con_RDR as_needed) (mkInnerRhs op data_con)
+      where
+        as_needed    = take (dataConSourceArity data_con) as_RDRs
+        data_con_RDR = getRdrName data_con
+
+    mkInnerRhs op data_con
+      | single_con_type
+      = nlHsCase (nlHsVar b_RDR) [ mkInnerEqAlt op data_con ]
+
+      | tag == first_tag
+      = nlHsCase (nlHsVar b_RDR) [ mkInnerEqAlt op data_con
+                                 , mkSimpleHsAlt nlWildPat (ltResult op) ]
+      | tag == last_tag 
+      = nlHsCase (nlHsVar b_RDR) [ mkInnerEqAlt op data_con
+                                 , mkSimpleHsAlt nlWildPat (gtResult op) ]
+      
+      | tag == first_tag + 1
+      = nlHsCase (nlHsVar b_RDR) [ mkSimpleHsAlt (nlConWildPat first_con) (gtResult op)
+                                 , mkInnerEqAlt op data_con
+                                 , mkSimpleHsAlt nlWildPat (ltResult op) ]
+      | tag == last_tag - 1
+      = nlHsCase (nlHsVar b_RDR) [ mkSimpleHsAlt (nlConWildPat last_con) (ltResult op)
+                                 , mkInnerEqAlt op data_con
+                                 , mkSimpleHsAlt nlWildPat (gtResult op) ]
+
+      | tag > last_tag `div` 2	-- lower range is larger
+      = untag_Expr tycon [(b_RDR, bh_RDR)] $
+        nlHsIf (genOpApp (nlHsVar bh_RDR) ltInt_RDR tag_lit)
+	       (gtResult op) $	-- Definitely GT
+        nlHsCase (nlHsVar b_RDR) [ mkInnerEqAlt op data_con
+                                 , mkSimpleHsAlt nlWildPat (ltResult op) ]
+      
+      | otherwise		-- upper range is larger
+      = untag_Expr tycon [(b_RDR, bh_RDR)] $
+        nlHsIf (genOpApp (nlHsVar bh_RDR) gtInt_RDR tag_lit)
+	       (ltResult op) $	-- Definitely LT
+        nlHsCase (nlHsVar b_RDR) [ mkInnerEqAlt op data_con
+                                 , mkSimpleHsAlt nlWildPat (gtResult op) ]
+      where
+        tag     = get_tag data_con 
+        tag_lit = noLoc (HsLit (HsIntPrim (toInteger tag)))
+
+    mkInnerEqAlt :: OrdOp -> DataCon -> LMatch RdrName
+    -- First argument 'a' known to be built with K
+    -- Returns a case alternative  Ki b1 b2 ... bv -> compare (a1,a2,...) with (b1,b2,...)
+    mkInnerEqAlt op data_con
+      = mkSimpleHsAlt (nlConVarPat data_con_RDR bs_needed) $
+        mkCompareFields tycon op (dataConOrigArgTys data_con) 
+      where
+        data_con_RDR = getRdrName data_con
+        bs_needed    = take (dataConSourceArity data_con) bs_RDRs
+
+    mkTagCmp :: OrdOp -> LHsExpr RdrName  
+    -- Both constructors known to be nullary
+    -- genreates (case data2Tag a of a# -> case data2Tag b of b# -> a# `op` b#
+    mkTagCmp op = untag_Expr tycon [(a_RDR, ah_RDR),(b_RDR, bh_RDR)] $
+                  unliftedOrdOp tycon intPrimTy op ah_RDR bh_RDR
+        
+mkCompareFields :: TyCon -> OrdOp -> [Type] -> LHsExpr RdrName
+-- Generates nested comparisons for (a1,a2...) against (b1,b2,...)
+-- where the ai,bi have the given types
+mkCompareFields tycon op tys
+  = go tys as_RDRs bs_RDRs
+  where
+    go []   _      _          = eqResult op
+    go [ty] (a:_)  (b:_)
+      | isUnLiftedType ty     = unliftedOrdOp tycon ty op a b
+      | otherwise             = genOpApp (nlHsVar a) (ordMethRdr op) (nlHsVar b)
+    go (ty:tys) (a:as) (b:bs) = mk_compare ty a b 
+                                  (ltResult op) 
+                                  (go tys as bs)
+                                  (gtResult op) 
+    go _ _ _ = panic "mkCompareFields"
+
+    -- (mk_compare ty a b) generates
+    --    (case (compare a b) of { LT -> <lt>; EQ -> <eq>; GT -> <bt> })
+    -- but with suitable special cases for 
+    mk_compare ty a b lt eq gt
+      | isUnLiftedType ty
+      = unliftedCompare lt_op eq_op a_expr b_expr lt eq gt
+      | otherwise
+      = nlHsCase (nlHsPar (nlHsApp (nlHsApp (nlHsVar compare_RDR) a_expr) b_expr))
+          [mkSimpleHsAlt (nlNullaryConPat ltTag_RDR) lt,
+           mkSimpleHsAlt (nlNullaryConPat eqTag_RDR) eq,
+           mkSimpleHsAlt (nlNullaryConPat gtTag_RDR) gt]
+      where
+        a_expr = nlHsVar a
+        b_expr = nlHsVar b
+        (lt_op, _, eq_op, _, _) = primOrdOps "Ord" tycon ty
+
+unliftedOrdOp :: TyCon -> Type -> OrdOp -> RdrName -> RdrName -> LHsExpr RdrName
+unliftedOrdOp tycon ty op a b
+  = case op of
+       OrdCompare -> unliftedCompare lt_op eq_op a_expr b_expr 
+                                     ltTag_Expr eqTag_Expr gtTag_Expr
+       OrdLT      -> wrap lt_op
+       OrdLE      -> wrap le_op
+       OrdGE      -> wrap ge_op
+       OrdGT      -> wrap gt_op
+  where
+   (lt_op, le_op, eq_op, ge_op, gt_op) = primOrdOps "Ord" tycon ty
+   wrap prim_op = genOpApp a_expr (primOpRdrName prim_op) b_expr 
+   a_expr = nlHsVar a
+   b_expr = nlHsVar b
+
+unliftedCompare :: PrimOp -> PrimOp 
+                -> LHsExpr RdrName -> LHsExpr RdrName	-- What to cmpare
+                -> LHsExpr RdrName -> LHsExpr RdrName -> LHsExpr RdrName  -- Three results
+                -> LHsExpr RdrName
+-- Return (if a < b then lt else if a == b then eq else gt)
+unliftedCompare lt_op eq_op a_expr b_expr lt eq gt
+  = nlHsIf (genOpApp a_expr (primOpRdrName lt_op) b_expr) lt $
+    			-- Test (<) first, not (==), becuase the latter
+    	   		-- is true less often, so putting it first would
+       			-- mean more tests (dynamically)
+        nlHsIf (genOpApp a_expr (primOpRdrName eq_op) b_expr) eq gt
+
+nlConWildPat :: DataCon -> LPat RdrName
+-- The pattern (K {})
+nlConWildPat con = noLoc (ConPatIn (noLoc (getRdrName con))
+                                   (RecCon (HsRecFields { rec_flds = [] 
+                                                        , rec_dotdot = Nothing })))
 \end{code}
+
+                            
 
 %************************************************************************
 %*									*
@@ -566,8 +633,8 @@ gen_Bounded_binds loc tycon
     data_cons = tyConDataCons tycon
 
     ----- enum-flavored: ---------------------------
-    min_bound_enum = mkVarBind loc minBound_RDR (nlHsVar data_con_1_RDR)
-    max_bound_enum = mkVarBind loc maxBound_RDR (nlHsVar data_con_N_RDR)
+    min_bound_enum = mkHsVarBind loc minBound_RDR (nlHsVar data_con_1_RDR)
+    max_bound_enum = mkHsVarBind loc maxBound_RDR (nlHsVar data_con_N_RDR)
 
     data_con_1	  = head data_cons
     data_con_N	  = last data_cons
@@ -577,9 +644,9 @@ gen_Bounded_binds loc tycon
     ----- single-constructor-flavored: -------------
     arity	   = dataConSourceArity data_con_1
 
-    min_bound_1con = mkVarBind loc minBound_RDR $
+    min_bound_1con = mkHsVarBind loc minBound_RDR $
 		     nlHsVarApps data_con_1_RDR (nOfThem arity minBound_RDR)
-    max_bound_1con = mkVarBind loc maxBound_RDR $
+    max_bound_1con = mkHsVarBind loc maxBound_RDR $
 		     nlHsVarApps data_con_1_RDR (nOfThem arity maxBound_RDR)
 \end{code}
 
@@ -808,16 +875,16 @@ gen_Read_binds get_fixity loc tycon
   where
     -----------------------------------------------------------------------
     default_readlist 
-	= mkVarBind loc readList_RDR     (nlHsVar readListDefault_RDR)
+	= mkHsVarBind loc readList_RDR     (nlHsVar readListDefault_RDR)
 
     default_readlistprec
-	= mkVarBind loc readListPrec_RDR (nlHsVar readListPrecDefault_RDR)
+	= mkHsVarBind loc readListPrec_RDR (nlHsVar readListPrecDefault_RDR)
     -----------------------------------------------------------------------
 
     data_cons = tyConDataCons tycon
     (nullary_cons, non_nullary_cons) = partition isNullarySrcDataCon data_cons
     
-    read_prec = mkVarBind loc readPrec_RDR
+    read_prec = mkHsVarBind loc readPrec_RDR
 	 		      (nlHsApp (nlHsVar parens_RDR) read_cons)
 
     read_cons 	          = foldr1 mk_alt (read_nullary_cons ++ read_non_nullary_cons)
@@ -826,14 +893,23 @@ gen_Read_binds get_fixity loc tycon
     read_nullary_cons 
       = case nullary_cons of
     	    []    -> []
-    	    [con] -> [nlHsDo DoExpr [bindLex (ident_pat (data_con_str con))]
-				    (result_expr con [])]
+    	    [con] -> [nlHsDo DoExpr [bindLex (match_con con)] (result_expr con [])]
             _     -> [nlHsApp (nlHsVar choose_RDR) 
     		   	      (nlList (map mk_pair nullary_cons))]
-    
+        -- NB For operators the parens around (:=:) are matched by the
+	-- enclosing "parens" call, so here we must match the naked
+	-- data_con_str con
+
+    match_con con | isSym con_str = symbol_pat con_str
+                  | otherwise     = ident_pat  con_str
+                  where
+                    con_str = data_con_str con
+	-- For nullary constructors we must match Ident s for normal constrs
+	-- and   Symbol s   for operators
+
     mk_pair con = mkLHsTupleExpr [nlHsLit (mkHsString (data_con_str con)), 
 			          result_expr con []]
-    
+
     read_non_nullary_con data_con
       | is_infix  = mk_parser infix_prec  infix_stmts  body
       | is_record = mk_parser record_prec record_stmts body
@@ -961,20 +1037,21 @@ gen_Show_binds get_fixity loc tycon
   = (listToBag [shows_prec, show_list], [])
   where
     -----------------------------------------------------------------------
-    show_list = mkVarBind loc showList_RDR
+    show_list = mkHsVarBind loc showList_RDR
 		  (nlHsApp (nlHsVar showList___RDR) (nlHsPar (nlHsApp (nlHsVar showsPrec_RDR) (nlHsIntLit 0))))
     -----------------------------------------------------------------------
-    shows_prec = mk_FunBind loc showsPrec_RDR (map pats_etc (tyConDataCons tycon))
-      where
-	pats_etc data_con
-	  | nullary_con =  -- skip the showParen junk...
-	     ASSERT(null bs_needed)
-	     ([nlWildPat, con_pat], mk_showString_app con_str)
-	  | otherwise   =
-	     ([a_Pat, con_pat],
-		  showParen_Expr (nlHsPar (genOpApp a_Expr ge_RDR (nlHsLit (HsInt con_prec_plus_one))))
-				 (nlHsPar (nested_compose_Expr show_thingies)))
-	    where
+    data_cons = tyConDataCons tycon
+    shows_prec = mk_FunBind loc showsPrec_RDR (map pats_etc data_cons)
+
+    pats_etc data_con
+      | nullary_con =  -- skip the showParen junk...
+         ASSERT(null bs_needed)
+         ([nlWildPat, con_pat], mk_showString_app op_con_str)
+      | otherwise   =
+         ([a_Pat, con_pat],
+      	  showParen_Expr (nlHsPar (genOpApp a_Expr ge_RDR (nlHsLit (HsInt con_prec_plus_one))))
+      			 (nlHsPar (nested_compose_Expr show_thingies)))
+        where
 	     data_con_RDR  = getRdrName data_con
 	     con_arity     = dataConSourceArity data_con
 	     bs_needed     = take con_arity bs_RDRs
@@ -1158,7 +1235,9 @@ gen_Data_binds loc tycon
 
 	------------ gfoldl
     gfoldl_bind = mk_FunBind loc gfoldl_RDR (map gfoldl_eqn data_cons)
-    gfoldl_eqn con = ([nlVarPat k_RDR, nlVarPat z_RDR, nlConVarPat con_name as_needed], 
+          
+    gfoldl_eqn con 
+      = ([nlVarPat k_RDR, nlVarPat z_RDR, nlConVarPat con_name as_needed], 
 		       foldl mk_k_app (nlHsVar z_RDR `nlHsApp` nlHsVar con_name) as_needed)
 		   where
 		     con_name ::  RdrName
@@ -1216,18 +1295,21 @@ kind2 = liftedTypeKind `mkArrowKind` kind1
 
 gfoldl_RDR, gunfold_RDR, toConstr_RDR, dataTypeOf_RDR, mkConstr_RDR,
     mkDataType_RDR, conIndex_RDR, prefix_RDR, infix_RDR,
-    dataCast1_RDR, dataCast2_RDR, gcast1_RDR, gcast2_RDR :: RdrName
-gfoldl_RDR     = varQual_RDR gENERICS (fsLit "gfoldl")
-gunfold_RDR    = varQual_RDR gENERICS (fsLit "gunfold")
-toConstr_RDR   = varQual_RDR gENERICS (fsLit "toConstr")
-dataTypeOf_RDR = varQual_RDR gENERICS (fsLit "dataTypeOf")
-dataCast1_RDR  = varQual_RDR gENERICS (fsLit "dataCast1")
-dataCast2_RDR  = varQual_RDR gENERICS (fsLit "dataCast2")
-gcast1_RDR     = varQual_RDR tYPEABLE (fsLit "gcast1")
-gcast2_RDR     = varQual_RDR tYPEABLE (fsLit "gcast2")
-mkConstr_RDR   = varQual_RDR gENERICS (fsLit "mkConstr")
-mkDataType_RDR = varQual_RDR gENERICS (fsLit "mkDataType")
-conIndex_RDR   = varQual_RDR gENERICS (fsLit "constrIndex")
+    dataCast1_RDR, dataCast2_RDR, gcast1_RDR, gcast2_RDR,
+    constr_RDR, dataType_RDR :: RdrName
+gfoldl_RDR     = varQual_RDR  gENERICS (fsLit "gfoldl")
+gunfold_RDR    = varQual_RDR  gENERICS (fsLit "gunfold")
+toConstr_RDR   = varQual_RDR  gENERICS (fsLit "toConstr")
+dataTypeOf_RDR = varQual_RDR  gENERICS (fsLit "dataTypeOf")
+dataCast1_RDR  = varQual_RDR  gENERICS (fsLit "dataCast1")
+dataCast2_RDR  = varQual_RDR  gENERICS (fsLit "dataCast2")
+gcast1_RDR     = varQual_RDR  tYPEABLE (fsLit "gcast1")
+gcast2_RDR     = varQual_RDR  tYPEABLE (fsLit "gcast2")
+mkConstr_RDR   = varQual_RDR  gENERICS (fsLit "mkConstr")
+constr_RDR     = tcQual_RDR   gENERICS (fsLit "Constr")
+mkDataType_RDR = varQual_RDR  gENERICS (fsLit "mkDataType")
+dataType_RDR   = tcQual_RDR   gENERICS (fsLit "DataType")
+conIndex_RDR   = varQual_RDR  gENERICS (fsLit "constrIndex")
 prefix_RDR     = dataQual_RDR gENERICS (fsLit "Prefix")
 infix_RDR      = dataQual_RDR gENERICS (fsLit "Infix")
 \end{code}
@@ -1307,11 +1389,15 @@ gen_Functor_binds loc tycon
   = (unitBag fmap_bind, [])
   where
     data_cons = tyConDataCons tycon
-
-    fmap_bind = L loc $ mkFunBind (L loc fmap_RDR) (map fmap_eqn data_cons)
+    fmap_bind = L loc $ mkRdrFunBind (L loc fmap_RDR) eqns
+                                  
     fmap_eqn con = evalState (match_for_con [f_Pat] con parts) bs_RDRs
       where 
         parts = foldDataConArgs ft_fmap con
+
+    eqns | null data_cons = [mkSimpleMatch [nlWildPat, nlWildPat] 
+                                           (error_Expr "Void fmap")]
+         | otherwise      = map fmap_eqn data_cons
 
     ft_fmap :: FFoldType (LHsExpr RdrName -> State [RdrName] (LHsExpr RdrName))
     -- Tricky higher order type; I can't say I fully understand this code :-(
@@ -1473,7 +1559,8 @@ gen_Foldable_binds loc tycon
   where
     data_cons = tyConDataCons tycon
 
-    foldr_bind = L loc $ mkFunBind (L loc foldable_foldr_RDR) (map foldr_eqn data_cons)
+    foldr_bind = L loc $ mkRdrFunBind (L loc foldable_foldr_RDR) eqns
+    eqns = map foldr_eqn data_cons
     foldr_eqn con = evalState (match_for_con z_Expr [f_Pat,z_Pat] con parts) bs_RDRs
       where 
         parts = foldDataConArgs ft_foldr con
@@ -1524,7 +1611,8 @@ gen_Traversable_binds loc tycon
   where
     data_cons = tyConDataCons tycon
 
-    traverse_bind = L loc $ mkFunBind (L loc traverse_RDR) (map traverse_eqn data_cons)
+    traverse_bind = L loc $ mkRdrFunBind (L loc traverse_RDR) eqns
+    eqns = map traverse_eqn data_cons
     traverse_eqn con = evalState (match_for_con [f_Pat] con parts) bs_RDRs
       where 
         parts = foldDataConArgs ft_trav con
@@ -1572,69 +1660,70 @@ The `tags' here start at zero, hence the @fIRST_TAG@ (currently one)
 fiddling around.
 
 \begin{code}
-genAuxBind :: SrcSpan -> DerivAuxBind -> LHsBind RdrName
+genAuxBind :: SrcSpan -> DerivAuxBind -> (LHsBind RdrName, LSig RdrName)
 genAuxBind loc (GenCon2Tag tycon)
-  | lots_of_constructors
-  = mk_FunBind loc rdr_name [([], get_tag_rhs)]
-
-  | otherwise
-  = mk_FunBind loc rdr_name (map mk_stuff (tyConDataCons tycon))
-
+  = (mk_FunBind loc rdr_name eqns, 
+     L loc (TypeSig (L loc rdr_name) (L loc sig_ty)))
   where
     rdr_name = con2tag_RDR tycon
 
-    tvs = map (mkRdrUnqual . getOccName) (tyConTyVars tycon)
-	-- We can't use gerRdrName because that makes an Exact  RdrName
-	-- and we can't put them in the LocalRdrEnv
-
-	-- Give a signature to the bound variable, so 
-	-- that the case expression generated by getTag is
-	-- monomorphic.  In the push-enter model we get better code.
-    get_tag_rhs = L loc $ ExprWithTySig 
-			(nlHsLam (mkSimpleHsAlt (nlVarPat a_RDR) 
-					      (nlHsApp (nlHsVar getTag_RDR) a_Expr)))
-			(noLoc (mkExplicitHsForAllTy (map (noLoc.UserTyVar) tvs) (noLoc []) con2tag_ty))
-
-    con2tag_ty = nlHsTyConApp (getRdrName tycon) (map nlHsTyVar tvs)
-		`nlHsFunTy` 
-		nlHsTyVar (getRdrName intPrimTyCon)
+    sig_ty = HsCoreTy $ 
+             mkSigmaTy (tyConTyVars tycon) (tyConStupidTheta tycon) $
+             mkParentType tycon `mkFunTy` intPrimTy
 
     lots_of_constructors = tyConFamilySize tycon > 8
-                                -- was: mAX_FAMILY_SIZE_FOR_VEC_RETURNS
-                                -- but we don't do vectored returns any more.
+                        -- was: mAX_FAMILY_SIZE_FOR_VEC_RETURNS
+                        -- but we don't do vectored returns any more.
 
-    mk_stuff :: DataCon -> ([LPat RdrName], LHsExpr RdrName)
-    mk_stuff con = ([nlWildConPat con], 
-		    nlHsLit (HsIntPrim (toInteger ((dataConTag con) - fIRST_TAG))))
+    eqns | lots_of_constructors = [get_tag_eqn]
+         | otherwise = map mk_eqn (tyConDataCons tycon)
+
+    get_tag_eqn = ([nlVarPat a_RDR], nlHsApp (nlHsVar getTag_RDR) a_Expr)
+
+    mk_eqn :: DataCon -> ([LPat RdrName], LHsExpr RdrName)
+    mk_eqn con = ([nlWildConPat con], 
+		  nlHsLit (HsIntPrim (toInteger ((dataConTag con) - fIRST_TAG))))
 
 genAuxBind loc (GenTag2Con tycon)
-  = mk_FunBind loc rdr_name 
+  = (mk_FunBind loc rdr_name 
 	[([nlConVarPat intDataCon_RDR [a_RDR]], 
-	   noLoc (ExprWithTySig (nlHsApp (nlHsVar tagToEnum_RDR) a_Expr) 
-			 (nlHsTyVar (getRdrName tycon))))]
+	   nlHsApp (nlHsVar tagToEnum_RDR) a_Expr)],
+     L loc (TypeSig (L loc rdr_name) (L loc sig_ty)))
   where
+    sig_ty = HsCoreTy $ mkForAllTys (tyConTyVars tycon) $
+             intTy `mkFunTy` mkParentType tycon
+
     rdr_name = tag2con_RDR tycon
 
 genAuxBind loc (GenMaxTag tycon)
-  = mkVarBind loc rdr_name 
-		  (nlHsApp (nlHsVar intDataCon_RDR) (nlHsLit (HsIntPrim max_tag)))
+  = (mkHsVarBind loc rdr_name rhs,
+     L loc (TypeSig (L loc rdr_name) (L loc sig_ty)))
   where
     rdr_name = maxtag_RDR tycon
+    sig_ty = HsCoreTy intTy
+    rhs = nlHsApp (nlHsVar intDataCon_RDR) (nlHsLit (HsIntPrim max_tag))
     max_tag =  case (tyConDataCons tycon) of
 		 data_cons -> toInteger ((length data_cons) - fIRST_TAG)
 
 genAuxBind loc (MkTyCon tycon)	--  $dT
-  = mkVarBind loc (mk_data_type_name tycon)
-		  ( nlHsVar mkDataType_RDR 
-                    `nlHsApp` nlHsLit (mkHsString (showSDocOneLine (ppr tycon)))
-                    `nlHsApp` nlList constrs )
+  = (mkHsVarBind loc rdr_name rhs,
+     L loc (TypeSig (L loc rdr_name) sig_ty))
   where
-    constrs = [nlHsVar (mk_constr_name con) | con <- tyConDataCons tycon]
+    rdr_name = mk_data_type_name tycon
+    sig_ty   = nlHsTyVar dataType_RDR
+    constrs  = [nlHsVar (mk_constr_name con) | con <- tyConDataCons tycon]
+    rhs = nlHsVar mkDataType_RDR 
+          `nlHsApp` nlHsLit (mkHsString (showSDocOneLine (ppr tycon)))
+          `nlHsApp` nlList constrs
 
 genAuxBind loc (MkDataCon dc)	--  $cT1 etc
-  = mkVarBind loc (mk_constr_name dc) 
-		  (nlHsApps mkConstr_RDR constr_args)
+  = (mkHsVarBind loc rdr_name rhs,
+     L loc (TypeSig (L loc rdr_name) sig_ty))
   where
+    rdr_name = mk_constr_name dc
+    sig_ty   = nlHsTyVar constr_RDR
+    rhs      = nlHsApps mkConstr_RDR constr_args
+
     constr_args 
        = [ -- nlHsIntLit (toInteger (dataConTag dc)),	  -- Tag
 	   nlHsVar (mk_data_type_name (dataConTyCon dc)), -- DataType
@@ -1654,6 +1743,14 @@ mk_data_type_name tycon = mkAuxBinderName (tyConName tycon) mkDataTOcc
 
 mk_constr_name :: DataCon -> RdrName	-- "$cC"
 mk_constr_name con = mkAuxBinderName (dataConName con) mkDataCOcc
+
+mkParentType :: TyCon -> Type
+-- Turn the representation tycon of a family into
+-- a use of its family constructor
+mkParentType tc
+  = case tyConFamInst_maybe tc of
+       Nothing  -> mkTyConApp tc (mkTyVarTys (tyConTyVars tc))
+       Just (fam_tc,tys) -> mkTyConApp fam_tc tys
 \end{code}
 
 %************************************************************************
@@ -1663,45 +1760,29 @@ mk_constr_name con = mkAuxBinderName (dataConName con) mkDataCOcc
 %************************************************************************
 
 
-ToDo: Better SrcLocs.
+\begin{code}
+mk_FunBind :: SrcSpan -> RdrName
+	   -> [([LPat RdrName], LHsExpr RdrName)]
+	   -> LHsBind RdrName
+mk_FunBind loc fun pats_and_exprs
+  = L loc $ mkRdrFunBind (L loc fun) matches
+  where
+    matches = [mkMatch p e emptyLocalBinds | (p,e) <-pats_and_exprs]
+
+mkRdrFunBind :: Located RdrName -> [LMatch RdrName] -> HsBind RdrName
+mkRdrFunBind fun@(L _ fun_rdr) matches
+ | null matches = mkFunBind fun [mkMatch [] (error_Expr str) emptyLocalBinds]
+	-- Catch-all eqn looks like   
+        --     fmap = error "Void fmap"
+	-- It's needed if there no data cons at all,
+        -- which can happen with -XEmptyDataDecls
+	-- See Trac #4302
+ | otherwise    = mkFunBind fun matches
+ where
+   str = "Void " ++ occNameString (rdrNameOcc fun_rdr)
+\end{code}
 
 \begin{code}
-compare_gen_Case ::
-	  LHsExpr RdrName	-- What to do for equality
-	  -> LHsExpr RdrName -> LHsExpr RdrName
-	  -> LHsExpr RdrName
-careful_compare_Case :: -- checks for primitive types...
-	  TyCon			-- The tycon we are deriving for
-	  -> Type
-	  -> LHsExpr RdrName	-- What to do for equality
-	  -> LHsExpr RdrName -> LHsExpr RdrName
-	  -> LHsExpr RdrName
-
-cmp_eq_Expr :: LHsExpr RdrName -> LHsExpr RdrName -> LHsExpr RdrName
-cmp_eq_Expr a b = nlHsApp (nlHsApp (nlHsVar cmp_eq_RDR) a) b
-	-- Was: compare_gen_Case cmp_eq_RDR
-
-compare_gen_Case (L _ (HsVar eq_tag)) a b | eq_tag == eqTag_RDR
-  = nlHsApp (nlHsApp (nlHsVar compare_RDR) a) b	-- Simple case 
-compare_gen_Case eq a b				-- General case
-  = nlHsCase (nlHsPar (nlHsApp (nlHsApp (nlHsVar compare_RDR) a) b)) {-of-}
-      [mkSimpleHsAlt (nlNullaryConPat ltTag_RDR) ltTag_Expr,
-       mkSimpleHsAlt (nlNullaryConPat eqTag_RDR) eq,
-       mkSimpleHsAlt (nlNullaryConPat gtTag_RDR) gtTag_Expr]
-
-careful_compare_Case tycon ty eq a b
-  | not (isUnLiftedType ty)
-  = compare_gen_Case eq a b
-  | otherwise      -- We have to do something special for primitive things...
-  = nlHsIf (genOpApp a relevant_lt_op b)	-- Test (<) first, not (==), becuase the latter
-	   ltTag_Expr				-- is true less often, so putting it first would
-						-- mean more tests (dynamically)
-	   (nlHsIf (genOpApp a relevant_eq_op b) eq gtTag_Expr)
-  where
-    relevant_eq_op = primOpRdrName (assoc_ty_id "Ord" tycon eq_op_tbl ty)
-    relevant_lt_op = primOpRdrName (assoc_ty_id "Ord" tycon lt_op_tbl ty)
-
-
 box_if_necy :: String		-- The class involved
 	    -> TyCon		-- The tycon involved
 	    -> LHsExpr RdrName	-- The argument
@@ -1712,6 +1793,31 @@ box_if_necy cls_str tycon arg arg_ty
   | otherwise		  = arg
   where
     box_con = assoc_ty_id cls_str tycon box_con_tbl arg_ty
+
+---------------------
+primOrdOps :: String	-- The class involved
+	   -> TyCon	-- The tycon involved
+	   -> Type	-- The type
+	   -> (PrimOp, PrimOp, PrimOp, PrimOp, PrimOp)	-- (lt,le,eq,ge,gt)
+primOrdOps str tycon ty = assoc_ty_id str tycon ord_op_tbl ty
+
+ord_op_tbl :: [(Type, (PrimOp, PrimOp, PrimOp, PrimOp, PrimOp))]
+ord_op_tbl
+ =  [(charPrimTy,	(CharLtOp,   CharLeOp,   CharEqOp,   CharGeOp,	 CharGtOp))
+    ,(intPrimTy,	(IntLtOp,    IntLeOp,    IntEqOp,    IntGeOp,	 IntGtOp))
+    ,(wordPrimTy,	(WordLtOp,   WordLeOp,   WordEqOp,   WordGeOp,	 WordGtOp))
+    ,(addrPrimTy,	(AddrLtOp,   AddrLeOp,   AddrEqOp,   AddrGeOp, 	 AddrGtOp))
+    ,(floatPrimTy,	(FloatLtOp,  FloatLeOp,  FloatEqOp,  FloatGeOp,  FloatGtOp))
+    ,(doublePrimTy,	(DoubleLtOp, DoubleLeOp, DoubleEqOp, DoubleGeOp, DoubleGtOp)) ]
+
+box_con_tbl :: [(Type, RdrName)]
+box_con_tbl =
+    [(charPrimTy,	getRdrName charDataCon)
+    ,(intPrimTy,	getRdrName intDataCon)
+    ,(wordPrimTy,	wordDataCon_RDR)
+    ,(floatPrimTy,	getRdrName floatDataCon)
+    ,(doublePrimTy,	getRdrName doubleDataCon)
+    ]
 
 assoc_ty_id :: String		-- The class involved
 	    -> TyCon		-- The tycon involved
@@ -1725,35 +1831,6 @@ assoc_ty_id cls_str _ tbl ty
   where
     res = [id | (ty',id) <- tbl, ty `tcEqType` ty']
 
-eq_op_tbl :: [(Type, PrimOp)]
-eq_op_tbl =
-    [(charPrimTy,	CharEqOp)
-    ,(intPrimTy,	IntEqOp)
-    ,(wordPrimTy,	WordEqOp)
-    ,(addrPrimTy,	AddrEqOp)
-    ,(floatPrimTy,	FloatEqOp)
-    ,(doublePrimTy,	DoubleEqOp)
-    ]
-
-lt_op_tbl :: [(Type, PrimOp)]
-lt_op_tbl =
-    [(charPrimTy,	CharLtOp)
-    ,(intPrimTy,	IntLtOp)
-    ,(wordPrimTy,	WordLtOp)
-    ,(addrPrimTy,	AddrLtOp)
-    ,(floatPrimTy,	FloatLtOp)
-    ,(doublePrimTy,	DoubleLtOp)
-    ]
-
-box_con_tbl :: [(Type, RdrName)]
-box_con_tbl =
-    [(charPrimTy,	getRdrName charDataCon)
-    ,(intPrimTy,	getRdrName intDataCon)
-    ,(wordPrimTy,	wordDataCon_RDR)
-    ,(floatPrimTy,	getRdrName floatDataCon)
-    ,(doublePrimTy,	getRdrName doubleDataCon)
-    ]
-
 -----------------------------------------------------------------------
 
 and_Expr :: LHsExpr RdrName -> LHsExpr RdrName -> LHsExpr RdrName
@@ -1764,10 +1841,9 @@ and_Expr a b = genOpApp a and_RDR    b
 eq_Expr :: TyCon -> Type -> LHsExpr RdrName -> LHsExpr RdrName -> LHsExpr RdrName
 eq_Expr tycon ty a b = genOpApp a eq_op b
  where
-   eq_op
-    | not (isUnLiftedType ty) = eq_RDR
-    | otherwise               = primOpRdrName (assoc_ty_id "Eq" tycon eq_op_tbl ty)
-         -- we have to do something special for primitive things...
+   eq_op | not (isUnLiftedType ty) = eq_RDR
+         | otherwise               = primOpRdrName prim_eq
+   (_, _, prim_eq, _, _) = primOrdOps "Eq" tycon ty
 \end{code}
 
 \begin{code}
@@ -1776,15 +1852,6 @@ untag_Expr _ [] expr = expr
 untag_Expr tycon ((untag_this, put_tag_here) : more) expr
   = nlHsCase (nlHsPar (nlHsVarApps (con2tag_RDR tycon) [untag_this])) {-of-}
       [mkSimpleHsAlt (nlVarPat put_tag_here) (untag_Expr tycon more expr)]
-
-cmp_tags_Expr ::  RdrName 		-- Comparison op
-	     ->  RdrName ->  RdrName	-- Things to compare
-	     -> LHsExpr RdrName 		-- What to return if true
-	     -> LHsExpr RdrName		-- What to return if false
-	     -> LHsExpr RdrName
-
-cmp_tags_Expr op a b true_case false_case
-  = nlHsIf (genOpApp (nlHsVar a) op (nlHsVar b)) true_case false_case
 
 enum_from_to_Expr
 	:: LHsExpr RdrName -> LHsExpr RdrName
@@ -1811,8 +1878,8 @@ nested_compose_Expr (e:es)
 
 -- impossible_Expr is used in case RHSs that should never happen.
 -- We generate these to keep the desugarer from complaining that they *might* happen!
-impossible_Expr :: LHsExpr RdrName
-impossible_Expr = nlHsApp (nlHsVar error_RDR) (nlHsLit (mkHsString "Urk! in TcGenDeriv"))
+error_Expr :: String -> LHsExpr RdrName
+error_Expr string = nlHsApp (nlHsVar error_RDR) (nlHsLit (mkHsString string))
 
 -- illegal_Expr is used when signalling error conditions in the RHS of a derived
 -- method. It is currently only used by Enum.{succ,pred}
@@ -1851,8 +1918,8 @@ genOpApp e1 op e2 = nlHsPar (nlHsOpApp e1 op e2)
 \end{code}
 
 \begin{code}
-a_RDR, b_RDR, c_RDR, d_RDR, f_RDR, k_RDR, z_RDR, ah_RDR, bh_RDR, ch_RDR, dh_RDR,
-    cmp_eq_RDR :: RdrName
+a_RDR, b_RDR, c_RDR, d_RDR, f_RDR, k_RDR, z_RDR, ah_RDR, bh_RDR, ch_RDR, dh_RDR
+    :: RdrName
 a_RDR		= mkVarUnqual (fsLit "a")
 b_RDR		= mkVarUnqual (fsLit "b")
 c_RDR		= mkVarUnqual (fsLit "c")
@@ -1864,17 +1931,16 @@ ah_RDR		= mkVarUnqual (fsLit "a#")
 bh_RDR		= mkVarUnqual (fsLit "b#")
 ch_RDR		= mkVarUnqual (fsLit "c#")
 dh_RDR		= mkVarUnqual (fsLit "d#")
-cmp_eq_RDR	= mkVarUnqual (fsLit "cmp_eq")
 
 as_RDRs, bs_RDRs, cs_RDRs :: [RdrName]
 as_RDRs		= [ mkVarUnqual (mkFastString ("a"++show i)) | i <- [(1::Int) .. ] ]
 bs_RDRs		= [ mkVarUnqual (mkFastString ("b"++show i)) | i <- [(1::Int) .. ] ]
 cs_RDRs		= [ mkVarUnqual (mkFastString ("c"++show i)) | i <- [(1::Int) .. ] ]
 
-a_Expr, b_Expr, c_Expr, f_Expr, z_Expr, ltTag_Expr, eqTag_Expr, gtTag_Expr,
+a_Expr, c_Expr, f_Expr, z_Expr, ltTag_Expr, eqTag_Expr, gtTag_Expr,
     false_Expr, true_Expr :: LHsExpr RdrName
 a_Expr		= nlHsVar a_RDR
-b_Expr		= nlHsVar b_RDR
+-- b_Expr	= nlHsVar b_RDR
 c_Expr		= nlHsVar c_RDR
 f_Expr		= nlHsVar f_RDR
 z_Expr		= nlHsVar z_RDR
@@ -1916,12 +1982,13 @@ PrelNames, so PrelNames can't import PrimOp.
 primOpRdrName :: PrimOp -> RdrName
 primOpRdrName op = getRdrName (primOpId op)
 
-minusInt_RDR, eqInt_RDR, ltInt_RDR, geInt_RDR, leInt_RDR,
+minusInt_RDR, eqInt_RDR, ltInt_RDR, geInt_RDR, gtInt_RDR, leInt_RDR,
     tagToEnum_RDR :: RdrName
 minusInt_RDR  = primOpRdrName IntSubOp
 eqInt_RDR     = primOpRdrName IntEqOp
 ltInt_RDR     = primOpRdrName IntLtOp
 geInt_RDR     = primOpRdrName IntGeOp
+gtInt_RDR     = primOpRdrName IntGtOp
 leInt_RDR     = primOpRdrName IntLeOp
 tagToEnum_RDR = primOpRdrName TagToEnumOp
 

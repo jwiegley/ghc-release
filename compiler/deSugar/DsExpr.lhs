@@ -43,13 +43,15 @@ import Type
 import Coercion
 import CoreSyn
 import CoreUtils
+import CoreFVs
 import MkCore
 
 import DynFlags
 import StaticFlags
 import CostCentre
 import Id
-import PrelInfo
+import Var
+import VarSet
 import DataCon
 import TysWiredIn
 import BasicTypes
@@ -83,9 +85,9 @@ dsValBinds (ValBindsOut binds _) body = foldrM ds_val_bind body binds
 
 -------------------------
 dsIPBinds :: HsIPBinds Id -> CoreExpr -> DsM CoreExpr
-dsIPBinds (IPBinds ip_binds dict_binds) body
-  = do	{ prs <- dsLHsBinds dict_binds
-	; let inner = Let (Rec prs) body
+dsIPBinds (IPBinds ip_binds ev_binds) body
+  = do	{ ds_ev_binds <- dsTcEvBinds ev_binds
+	; let inner = wrapDsEvBinds ds_ev_binds body
 		-- The dict bindings may not be in 
 		-- dependency order; hence Rec
 	; foldrM ds_ip_bind inner ip_binds }
@@ -101,50 +103,18 @@ ds_val_bind :: (RecFlag, LHsBinds Id) -> CoreExpr -> DsM CoreExpr
 -- a tuple and doing selections.
 -- Silently ignore INLINE and SPECIALISE pragmas...
 ds_val_bind (NonRecursive, hsbinds) body
-  | [L _ (AbsBinds [] [] exports binds)] <- bagToList hsbinds,
-    (L loc bind : null_binds) <- bagToList binds,
-    isBangHsBind bind
-    || isUnboxedTupleBind bind
-    || or [isUnLiftedType (idType g) | (_, g, _, _) <- exports]
-  = let
-      body_w_exports		      = foldr bind_export body exports
-      bind_export (tvs, g, l, _) body = ASSERT( null tvs )
-				        bindNonRec g (Var l) body
-    in
-    ASSERT (null null_binds)
+  | [L loc bind] <- bagToList hsbinds,
 	-- Non-recursive, non-overloaded bindings only come in ones
 	-- ToDo: in some bizarre case it's conceivable that there
 	--       could be dict binds in the 'binds'.  (See the notes
 	--	 below.  Then pattern-match would fail.  Urk.)
-    putSrcSpanDs loc	$
-    case bind of
-      FunBind { fun_id = L _ fun, fun_matches = matches, fun_co_fn = co_fn, 
-		fun_tick = tick, fun_infix = inf }
-        -> do (args, rhs) <- matchWrapper (FunRhs (idName fun ) inf) matches
-              MASSERT( null args ) -- Functions aren't lifted
-              MASSERT( isIdHsWrapper co_fn )
-              rhs' <- mkOptTickBox tick rhs
-              return (bindNonRec fun rhs' body_w_exports)
-
-      PatBind {pat_lhs = pat, pat_rhs = grhss, pat_rhs_ty = ty }
-	-> 	-- let C x# y# = rhs in body
-		-- ==> case rhs of C x# y# -> body
-	   putSrcSpanDs loc			$
-           do { rhs <- dsGuarded grhss ty
-              ; let upat = unLoc pat
-                    eqn = EqnInfo { eqn_pats = [upat], 
-                                    eqn_rhs = cantFailMatchResult body_w_exports }
-              ; var    <- selectMatchVar upat
-              ; result <- matchEquations PatBindRhs [var] [eqn] (exprType body)
-              ; return (scrungleMatch var rhs result) }
-
-      _ -> pprPanic "dsLet: unlifted" (pprLHsBinds hsbinds $$ ppr body)
-
+    strictMatchOnly bind
+  = putSrcSpanDs loc (dsStrictBind bind body)
 
 -- Ordinary case for bindings; none should be unlifted
 ds_val_bind (_is_rec, binds) body
   = do	{ prs <- dsLHsBinds binds
-	; ASSERT( not (any (isUnLiftedType . idType . fst) prs) )
+	; ASSERT2( not (any (isUnLiftedType . idType . fst) prs), ppr _is_rec $$ ppr binds )
 	  case prs of
             [] -> return body
             _  -> return (Let (Rec prs) body) }
@@ -159,9 +129,53 @@ ds_val_bind (_is_rec, binds) body
 	-- NB The previous case dealt with unlifted bindings, so we
 	--    only have to deal with lifted ones now; so Rec is ok
 
-isUnboxedTupleBind :: HsBind Id -> Bool
-isUnboxedTupleBind (PatBind { pat_rhs_ty = ty }) = isUnboxedTupleType ty
-isUnboxedTupleBind _                             = False
+------------------
+dsStrictBind :: HsBind Id -> CoreExpr -> DsM CoreExpr
+dsStrictBind (AbsBinds { abs_tvs = [], abs_ev_vars = []
+               , abs_exports = exports
+               , abs_ev_binds = ev_binds
+               , abs_binds = binds }) body
+  = do { ds_ev_binds <- dsTcEvBinds ev_binds
+       ; let body1 = foldr bind_export body exports
+             bind_export (_, g, l, _) b = bindNonRec g (Var l) b
+       ; body2 <- foldlBagM (\body bind -> dsStrictBind (unLoc bind) body) 
+                            body1 binds 
+       ; return (wrapDsEvBinds ds_ev_binds body2) }
+
+dsStrictBind (FunBind { fun_id = L _ fun, fun_matches = matches, fun_co_fn = co_fn 
+	              , fun_tick = tick, fun_infix = inf }) body
+		-- Can't be a bang pattern (that looks like a PatBind)
+		-- so must be simply unboxed
+  = do { (args, rhs) <- matchWrapper (FunRhs (idName fun ) inf) matches
+       ; MASSERT( null args ) -- Functions aren't lifted
+       ; MASSERT( isIdHsWrapper co_fn )
+       ; rhs' <- mkOptTickBox tick rhs
+       ; return (bindNonRec fun rhs' body) }
+
+dsStrictBind (PatBind {pat_lhs = pat, pat_rhs = grhss, pat_rhs_ty = ty }) body
+  = 	-- let C x# y# = rhs in body
+	-- ==> case rhs of C x# y# -> body
+    do { rhs <- dsGuarded grhss ty
+       ; let upat = unLoc pat
+             eqn = EqnInfo { eqn_pats = [upat], 
+                             eqn_rhs = cantFailMatchResult body }
+       ; var    <- selectMatchVar upat
+       ; result <- matchEquations PatBindRhs [var] [eqn] (exprType body)
+       ; return (scrungleMatch var rhs result) }
+
+dsStrictBind bind body = pprPanic "dsLet: unlifted" (ppr bind $$ ppr body)
+
+----------------------
+strictMatchOnly :: HsBind Id -> Bool
+strictMatchOnly (AbsBinds { abs_binds = binds })
+  = anyBag (strictMatchOnly . unLoc) binds
+strictMatchOnly (PatBind { pat_lhs = lpat, pat_rhs_ty = ty })
+  =  isUnboxedTupleType ty 
+  || isBangLPat lpat   
+  || any (isUnLiftedType . idType) (collectPatBinders lpat)
+strictMatchOnly (FunBind { fun_id = L _ id })
+  = isUnLiftedType (idType id)
+strictMatchOnly _ = False -- I hope!  Checked immediately by caller in fact
 
 scrungleMatch :: Id -> CoreExpr -> CoreExpr -> CoreExpr
 -- Returns something like (let var = scrut in body)
@@ -208,7 +222,9 @@ dsExpr (HsVar var)     	      = return (Var var)
 dsExpr (HsIPVar ip)    	      = return (Var (ipNameName ip))
 dsExpr (HsLit lit)     	      = dsLit lit
 dsExpr (HsOverLit lit) 	      = dsOverLit lit
-dsExpr (HsWrap co_fn e)       = dsCoercion co_fn (dsExpr e)
+dsExpr (HsWrap co_fn e)       = do { co_fn' <- dsHsWrapper co_fn
+                                   ; e' <- dsExpr e
+                                   ; return (co_fn' e') }
 
 dsExpr (NegApp expr neg_expr) 
   = App <$> dsExpr neg_expr <*> dsLExpr expr
@@ -284,9 +300,6 @@ dsExpr (HsSCC cc expr) = do
     mod_name <- getModuleDs
     Note (SCC (mkUserCC cc mod_name)) <$> dsLExpr expr
 
-
--- hdaume: core annotation
-
 dsExpr (HsCoreAnn fs expr)
   = Note (CoreNote $ unpackFS fs) <$> dsLExpr expr
 
@@ -321,8 +334,10 @@ dsExpr (HsDo DoExpr stmts body result_ty)
 dsExpr (HsDo GhciStmt stmts body result_ty)
   = dsDo stmts body result_ty
 
-dsExpr (HsDo (MDoExpr tbl) stmts body result_ty)
-  = dsMDo tbl stmts body result_ty
+dsExpr (HsDo ctxt@(MDoExpr tbl) stmts body result_ty)
+  = do { (meth_binds, tbl') <- dsSyntaxTable tbl
+       ; core_expr <- dsMDo ctxt tbl' stmts body result_ty
+       ; return (mkLets meth_binds core_expr) }
 
 dsExpr (HsDo PArrComp stmts body result_ty)
   =	-- Special case for array comprehensions
@@ -330,8 +345,14 @@ dsExpr (HsDo PArrComp stmts body result_ty)
   where
     [elt_ty] = tcTyConAppArgs result_ty
 
-dsExpr (HsIf guard_expr then_expr else_expr)
-  = mkIfThenElse <$> dsLExpr guard_expr <*> dsLExpr then_expr <*> dsLExpr else_expr
+dsExpr (HsIf mb_fun guard_expr then_expr else_expr)
+  = do { pred <- dsLExpr guard_expr
+       ; b1 <- dsLExpr then_expr
+       ; b2 <- dsLExpr else_expr
+       ; case mb_fun of
+           Just fun -> do { core_fun <- dsExpr fun
+                          ; return (mkCoreApps core_fun [pred,b1,b2]) }
+           Nothing  -> return $ mkIfThenElse pred b1 b2 }
 \end{code}
 
 
@@ -518,8 +539,8 @@ dsExpr expr@(RecordUpd record_expr (HsRecFields { rec_flds = fields })
                      = nlHsVar (lookupNameEnv upd_fld_env field_name `orElse` pat_arg_id)
 		 inst_con = noLoc $ HsWrap wrap (HsVar (dataConWrapId con))
 			-- Reconstruct with the WrapId so that unpacking happens
-		 wrap = mkWpApps theta_vars `WpCompose` 
-			mkWpTyApps (mkTyVarTys ex_tvs) `WpCompose`
+		 wrap = mkWpEvVarApps theta_vars          `WpCompose` 
+			mkWpTyApps    (mkTyVarTys ex_tvs) `WpCompose`
 			mkWpTyApps [ty | (tv, ty) <- univ_tvs `zip` out_inst_tys
 				       , isNothing (lookupTyVar wrap_subst tv) ]
     	         rhs = foldl (\a b -> nlHsApp a b) inst_con val_args
@@ -538,7 +559,7 @@ dsExpr expr@(RecordUpd record_expr (HsRecFields { rec_flds = fields })
 		 
     	         pat = noLoc $ ConPatOut { pat_con = noLoc con, pat_tvs = ex_tvs
 					 , pat_dicts = eqs_vars ++ theta_vars
-					 , pat_binds = emptyLHsBinds 
+					 , pat_binds = emptyTcEvBinds
 					 , pat_args = PrefixCon $ map nlVarPat arg_ids
 					 , pat_ty = in_ty }
 	   ; return (mkSimpleMatch [pat] wrapped_rhs) }
@@ -641,28 +662,40 @@ Example: the foldr/single rule in GHC.Base
    foldr k z [x] = ...
 We do not want to generate a build invocation on the LHS of this RULE!
 
+We fix this by disabling rules in rule LHSs, and testing that
+flag here; see Note [Desugaring RULE left hand sides] in Desugar
+
 To test this I've added a (static) flag -fsimple-list-literals, which
 makes all list literals be generated via the simple route.  
 
 
 \begin{code}
-
 dsExplicitList :: PostTcType -> [LHsExpr Id] -> DsM CoreExpr
 -- See Note [Desugaring explicit lists]
-dsExplicitList elt_ty xs = do
-    dflags <- getDOptsDs
-    xs' <- mapM dsLExpr xs
-    if  opt_SimpleListLiterals || not (dopt Opt_EnableRewriteRules dflags)
-        then return $ mkListExpr elt_ty xs'
-        else mkBuildExpr elt_ty (mkSplitExplicitList (thisPackage dflags) xs')
+dsExplicitList elt_ty xs
+  = do { dflags <- getDOptsDs
+       ; xs' <- mapM dsLExpr xs
+       ; let (dynamic_prefix, static_suffix) = spanTail is_static xs'
+       ; if opt_SimpleListLiterals 	       		-- -fsimple-list-literals
+         || not (dopt Opt_EnableRewriteRules dflags)	-- Rewrite rules off
+	    	-- Don't generate a build if there are no rules to eliminate it!
+		-- See Note [Desugaring RULE left hand sides] in Desugar
+         || null dynamic_prefix   -- Avoid build (\c n. foldr c n xs)!
+         then return $ mkListExpr elt_ty xs'
+         else mkBuildExpr elt_ty (mkSplitExplicitList dynamic_prefix static_suffix) }
   where
-    mkSplitExplicitList this_package xs' (c, _) (n, n_ty) = do
-        let (dynamic_prefix, static_suffix) = spanTail (rhsIsStatic this_package) xs'
-            static_suffix' = mkListExpr elt_ty static_suffix
-        
-        folded_static_suffix <- mkFoldrExpr elt_ty n_ty (Var c) (Var n) static_suffix'
-        let build_body = foldr (App . App (Var c)) folded_static_suffix dynamic_prefix
-        return build_body
+    is_static :: CoreExpr -> Bool
+    is_static e = all is_static_var (varSetElems (exprFreeVars e))
+
+    is_static_var :: Var -> Bool
+    is_static_var v 
+      | isId v = isExternalName (idName v)  -- Top-level things are given external names
+      | otherwise = False                   -- Type variables
+
+    mkSplitExplicitList prefix suffix (c, _) (n, n_ty)
+      = do { let suffix' = mkListExpr elt_ty suffix
+           ; folded_suffix <- mkFoldrExpr elt_ty n_ty (Var c) (Var n) suffix'
+           ; return (foldr (App . App (Var c)) folded_suffix prefix) }
 
 spanTail :: (a -> Bool) -> [a] -> ([a], [a])
 spanTail f xs = (reverse rejected, reverse satisfying)
@@ -716,17 +749,16 @@ dsDo stmts body result_ty
     go loc (RecStmt { recS_stmts = rec_stmts, recS_later_ids = later_ids
                     , recS_rec_ids = rec_ids, recS_ret_fn = return_op
                     , recS_mfix_fn = mfix_op, recS_bind_fn = bind_op
-                    , recS_rec_rets = rec_rets, recS_dicts = binds }) stmts 
+                    , recS_rec_rets = rec_rets, recS_dicts = _ev_binds }) stmts 
       = ASSERT( length rec_ids > 0 )
-        goL (new_bind_stmt : let_stmt : stmts)
+        ASSERT( isEmptyTcEvBinds _ev_binds )   -- No method binds
+        goL (new_bind_stmt : stmts)
       where
         -- returnE <- dsExpr return_id
         -- mfixE <- dsExpr mfix_id
         new_bind_stmt = L loc $ BindStmt (mkLHsPatTup later_pats) mfix_app
                                          bind_op 
 		                             noSyntaxExpr  -- Tuple cannot fail
-
-        let_stmt = L loc $ LetStmt (HsValBinds (ValBindsOut [(Recursive, binds)] []))
 
         tup_ids      = rec_ids ++ filterOut (`elem` rec_ids) later_ids
         rec_tup_pats = map nlVarPat tup_ids
@@ -740,8 +772,7 @@ dsDo stmts body result_ty
         body       = noLoc $ HsDo DoExpr rec_stmts return_app body_ty
         return_app = nlHsApp (noLoc return_op) (mkLHsTupleExpr rets)
 	body_ty    = mkAppTy m_ty tup_ty
-        tup_ty     = mkCoreTupTy (map idType tup_ids)
-                  -- mkCoreTupTy deals with singleton case
+        tup_ty     = mkBoxedTupleTy (map idType tup_ids) -- Deals with singleton case
 
     -- In a do expression, pattern-match failure just calls
     -- the monadic 'fail' rather than throwing an exception
@@ -766,13 +797,14 @@ We turn (RecStmt [v1,..vn] stmts) into:
 				      return (v1,..vn))
 
 \begin{code}
-dsMDo	:: PostTcTable
+dsMDo	:: HsStmtContext Name
+        -> [(Name,Id)]
 	-> [LStmt Id]
 	-> LHsExpr Id
 	-> Type			-- Type of the whole expression
 	-> DsM CoreExpr
 
-dsMDo tbl stmts body result_ty
+dsMDo ctxt tbl stmts body result_ty
   = goL stmts
   where
     goL [] = dsLExpr body
@@ -784,7 +816,6 @@ dsMDo tbl stmts body result_ty
     bind_id   = lookupEvidence tbl bindMName
     then_id   = lookupEvidence tbl thenMName
     fail_id   = lookupEvidence tbl failMName
-    ctxt      = MDoExpr tbl
 
     go _ (LetStmt binds) stmts
       = do { rest <- goL stmts
@@ -809,15 +840,16 @@ dsMDo tbl stmts body result_ty
 	   ; return (mkApps (Var bind_id) [Type (hsLPatType pat), Type b_ty, 
 					     rhs', Lam var match_code]) }
     
-    go loc (RecStmt rec_stmts later_ids rec_ids _ _ _ rec_rets binds) stmts
+    go loc (RecStmt { recS_stmts = rec_stmts, recS_later_ids = later_ids
+                    , recS_rec_ids = rec_ids, recS_rec_rets = rec_rets 
+                    , recS_dicts = _ev_binds }) stmts
       = ASSERT( length rec_ids > 0 )
         ASSERT( length rec_ids == length rec_rets )
+        ASSERT( isEmptyTcEvBinds _ev_binds )
         pprTrace "dsMDo" (ppr later_ids) $
-	 goL (new_bind_stmt : let_stmt : stmts)
+	 goL (new_bind_stmt : stmts)
       where
         new_bind_stmt = L loc $ mkBindStmt (mk_tup_pat later_pats) mfix_app
-	let_stmt = L loc $ LetStmt (HsValBinds (ValBindsOut [(Recursive, binds)] []))
-
 	
 		-- Remove the later_ids that appear (without fancy coercions) 
 		-- in rec_rets, because there's no need to knot-tie them separately
@@ -839,8 +871,7 @@ dsMDo tbl stmts body result_ty
 	mfix_pat = noLoc $ LazyPat $ mk_tup_pat rec_tup_pats
 	body     = noLoc $ HsDo ctxt rec_stmts return_app body_ty
 	body_ty = mkAppTy m_ty tup_ty
-	tup_ty  = mkCoreTupTy (map idType (later_ids' ++ rec_ids))
-		  -- mkCoreTupTy deals with singleton case
+	tup_ty  = mkBoxedTupleTy (map idType (later_ids' ++ rec_ids))  -- Deals with singleton case
 
 	return_app  = nlHsApp (nlHsTyApp return_id [tup_ty]) 
 			      (mkLHsTupleExpr rets)

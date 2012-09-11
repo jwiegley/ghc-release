@@ -132,20 +132,16 @@ regAlloc (CmmData sec d)
 		( CmmData sec d
 		, Nothing )
 	
-regAlloc (CmmProc (LiveInfo info _ _) lbl params (ListGraph []))
+regAlloc (CmmProc (LiveInfo info _ _ _) lbl params [])
 	= return ( CmmProc info lbl params (ListGraph [])
 		 , Nothing )
 	
-regAlloc (CmmProc static lbl params (ListGraph comps))
-	| LiveInfo info (Just first_id) block_live	<- static
+regAlloc (CmmProc static lbl params sccs)
+	| LiveInfo info (Just first_id) (Just block_live) _	<- static
 	= do	
  		-- do register allocation on each component.
 		(final_blocks, stats)
-			<- linearRegAlloc first_id block_live 
-			$ map (\b -> case b of 
-					BasicBlock _ [b]	-> AcyclicSCC b
-					BasicBlock _ bs		-> CyclicSCC  bs)
-			$ comps
+			<- linearRegAlloc first_id block_live sccs
 
 		-- make sure the block that was first in the input list
 		--	stays at the front of the output
@@ -194,7 +190,7 @@ linearRA_SCCs first_id block_live blocksAcc (AcyclicSCC block : sccs)
 
 linearRA_SCCs first_id block_live blocksAcc (CyclicSCC blocks : sccs) 
  = do
-        blockss' <- process first_id block_live blocks [] (return [])
+        blockss' <- process first_id block_live blocks [] (return []) False
 	linearRA_SCCs first_id block_live
 		(reverse (concat blockss') ++ blocksAcc)
 		sccs
@@ -210,14 +206,25 @@ linearRA_SCCs first_id block_live blocksAcc (CyclicSCC blocks : sccs)
    some reason then this function will loop. We should probably do some 
    more sanity checking to guard against this eventuality.
 -}
-		
-process _ _ [] []         accum 
+
+process _ _ [] []         accum _
 	= return $ reverse accum
 
-process first_id block_live [] next_round accum 
-	= process first_id block_live next_round [] accum
+process first_id block_live [] next_round accum madeProgress
+	| not madeProgress
+	
+	  {- BUGS: There are so many unreachable blocks in the code the warnings are overwhelming.
+	     pprTrace "RegAlloc.Linear.Main.process: no progress made, bailing out." 
+		(  text "Unreachable blocks:"
+		$$ vcat (map ppr next_round)) -}
+	= return $ reverse accum
+	
+	| otherwise
+	= process first_id block_live 
+		  next_round [] accum False
 
-process first_id block_live (b@(BasicBlock id _) : blocks) next_round accum 
+process first_id block_live (b@(BasicBlock id _) : blocks) 
+	next_round accum madeProgress
  = do 	
 	block_assig <- getBlockAssigR
 
@@ -225,9 +232,11 @@ process first_id block_live (b@(BasicBlock id _) : blocks) next_round accum
              || id == first_id
          then do 
 		b'  <- processBlock block_live b
-                process first_id block_live blocks next_round (b' : accum)
+                process first_id block_live blocks 
+			next_round (b' : accum) True
 
-         else 	process first_id block_live blocks (b : next_round) accum
+         else 	process first_id block_live blocks 
+			(b : next_round) accum madeProgress
 
 
 -- | Do register allocation on this basic block
@@ -286,7 +295,7 @@ linearRA _          accInstr accFixup _ []
 
 linearRA block_live accInstr accFixups id (instr:instrs)
  = do
- 	(accInstr', new_fixups) 
+	(accInstr', new_fixups) 
 		<- raInsn block_live accInstr id instr
 
 	linearRA block_live accInstr' (new_fixups ++ accFixups) id instrs
@@ -303,17 +312,17 @@ raInsn
 		( [instr]			-- new instructions
 		, [NatBasicBlock instr])	-- extra fixup blocks
 
-raInsn _     new_instrs _ (Instr ii Nothing)  
+raInsn _     new_instrs _ (LiveInstr ii Nothing)  
 	| Just n	<- takeDeltaInstr ii
  	= do	setDeltaR n
 		return (new_instrs, [])
 
-raInsn _     new_instrs _ (Instr ii Nothing)
+raInsn _     new_instrs _ (LiveInstr ii Nothing)
 	| isMetaInstr ii
 	= return (new_instrs, [])
 
 
-raInsn block_live new_instrs id (Instr instr (Just live))
+raInsn block_live new_instrs id (LiveInstr (Instr instr) (Just live))
  = do
     assig    <- getAssigR
 
@@ -374,7 +383,7 @@ genRaInsn block_live new_instrs block_id instr r_dying w_dying =
     clobber_saves 	<- saveClobberedTemps real_written r_dying
 
     -- debugging
-{-  freeregs <- getFreeRegsR
+{-    freeregs <- getFreeRegsR
     assig    <- getAssigR
     pprTrace "genRaInsn" 
     	(ppr instr 

@@ -662,8 +662,6 @@ residencyCensus( void )
 			type = Thunk;
 			break;
 
-		    case CAF_BLACKHOLE:
-		    case EAGER_BLACKHOLE:
 		    case BLACKHOLE:
 /*		    case BLACKHOLE_BQ: FIXME: case does not exist */
 			size = sizeW_fromITBL(info);
@@ -697,12 +695,11 @@ residencyCensus( void )
 			break;
 			
 		    case WEAK:
-		    case STABLE_NAME:
+		    case PRIM:
 		    case MVAR:
 		    case MUT_VAR:
 /*		    case MUT_CONS: FIXME: case does not exist */
 		    case IND_PERM:
-		    case IND_OLDGEN_PERM:
 			size = sizeW_fromITBL(info);
 			type = Other;
 			break;

@@ -44,8 +44,12 @@ import System
 
 -- | Computation 'exitWith' @code@ throws 'ExitCode' @code@.
 -- Normally this terminates the program, returning @code@ to the
--- program's caller.  Before the program terminates, any open or
--- semi-closed handles are first closed.
+-- program's caller.
+--
+-- On program termination, the standard 'Handle's 'stdout' and
+-- 'stderr' are flushed automatically; any other buffered 'Handle's
+-- need to be flushed manually, otherwise the buffered data will be
+-- discarded.
 --
 -- A program that fails in any other way is treated as if it had
 -- called 'exitFailure'.
@@ -82,6 +86,6 @@ exitFailure = exitWith (ExitFailure 1)
 
 -- | The computation 'exitSuccess' is equivalent to
 -- 'exitWith' 'ExitSuccess', It terminates the program
--- sucessfully.
+-- successfully.
 exitSuccess :: IO a
 exitSuccess = exitWith ExitSuccess

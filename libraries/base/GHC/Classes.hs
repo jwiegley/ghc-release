@@ -1,5 +1,7 @@
 
 {-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# OPTIONS_GHC -fno-warn-unused-imports #-}
+-- XXX -fno-warn-unused-imports needed for the GHC.Tuple import below. Sigh.
 {-# OPTIONS_HADDOCK hide #-}
 -----------------------------------------------------------------------------
 -- |
@@ -18,7 +20,14 @@
 module GHC.Classes where
 
 import GHC.Bool
+import GHC.Integer
+-- GHC.Magic is used in some derived instances
+import GHC.Magic ()
 import GHC.Ordering
+import GHC.Prim
+import GHC.Tuple
+import GHC.Types
+import GHC.Unit
 
 infix  4  ==, /=, <, <=, >=, >
 infixr 3  &&
@@ -36,8 +45,67 @@ default ()              -- Double isn't available yet
 class  Eq a  where
     (==), (/=)           :: a -> a -> Bool
 
+    {-# INLINE (/=) #-}
+    {-# INLINE (==) #-}
     x /= y               = not (x == y)
     x == y               = not (x /= y)
+
+deriving instance Eq ()
+deriving instance (Eq  a, Eq  b) => Eq  (a, b)
+deriving instance (Eq  a, Eq  b, Eq  c) => Eq  (a, b, c)
+deriving instance (Eq  a, Eq  b, Eq  c, Eq  d) => Eq  (a, b, c, d)
+deriving instance (Eq  a, Eq  b, Eq  c, Eq  d, Eq  e) => Eq  (a, b, c, d, e)
+deriving instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f)
+               => Eq (a, b, c, d, e, f)
+deriving instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g)
+               => Eq (a, b, c, d, e, f, g)
+deriving instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g,
+                   Eq h)
+               => Eq (a, b, c, d, e, f, g, h)
+deriving instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g,
+                   Eq h, Eq i)
+               => Eq (a, b, c, d, e, f, g, h, i)
+deriving instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g,
+                   Eq h, Eq i, Eq j)
+               => Eq (a, b, c, d, e, f, g, h, i, j)
+deriving instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g,
+                   Eq h, Eq i, Eq j, Eq k)
+               => Eq (a, b, c, d, e, f, g, h, i, j, k)
+deriving instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g,
+                   Eq h, Eq i, Eq j, Eq k, Eq l)
+               => Eq (a, b, c, d, e, f, g, h, i, j, k, l)
+deriving instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g,
+                   Eq h, Eq i, Eq j, Eq k, Eq l, Eq m)
+               => Eq (a, b, c, d, e, f, g, h, i, j, k, l, m)
+deriving instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g,
+                   Eq h, Eq i, Eq j, Eq k, Eq l, Eq m, Eq n)
+               => Eq (a, b, c, d, e, f, g, h, i, j, k, l, m, n)
+deriving instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g,
+                   Eq h, Eq i, Eq j, Eq k, Eq l, Eq m, Eq n, Eq o)
+               => Eq (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o)
+
+instance (Eq a) => Eq [a] where
+    {-# SPECIALISE instance Eq [Char] #-}
+    []     == []     = True
+    (x:xs) == (y:ys) = x == y && xs == ys
+    _xs    == _ys    = False
+
+deriving instance Eq Bool
+deriving instance Eq Ordering
+
+instance Eq Char where
+    (C# c1) == (C# c2) = c1 `eqChar#` c2
+    (C# c1) /= (C# c2) = c1 `neChar#` c2
+
+instance  Eq Integer  where
+    (==) = eqInteger
+    (/=) = neqInteger
+
+instance Eq Float where
+    (F# x) == (F# y) = x `eqFloat#` y
+
+instance Eq Double where
+    (D# x) == (D# y) = x ==## y
 
 -- | The 'Ord' class is used for totally ordered datatypes.
 --
@@ -71,6 +139,90 @@ class  (Eq a) => Ord a  where
         -- because the latter is often more expensive
     max x y = if x <= y then y else x
     min x y = if x <= y then x else y
+
+deriving instance Ord ()
+deriving instance (Ord a, Ord b) => Ord (a, b)
+deriving instance (Ord a, Ord b, Ord c) => Ord (a, b, c)
+deriving instance (Ord a, Ord b, Ord c, Ord d) => Ord (a, b, c, d)
+deriving instance (Ord a, Ord b, Ord c, Ord d, Ord e) => Ord (a, b, c, d, e)
+deriving instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f)
+               => Ord (a, b, c, d, e, f)
+deriving instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g)
+               => Ord (a, b, c, d, e, f, g)
+deriving instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g,
+                   Ord h)
+               => Ord (a, b, c, d, e, f, g, h)
+deriving instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g,
+                   Ord h, Ord i)
+               => Ord (a, b, c, d, e, f, g, h, i)
+deriving instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g,
+                   Ord h, Ord i, Ord j)
+               => Ord (a, b, c, d, e, f, g, h, i, j)
+deriving instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g,
+                   Ord h, Ord i, Ord j, Ord k)
+               => Ord (a, b, c, d, e, f, g, h, i, j, k)
+deriving instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g,
+                   Ord h, Ord i, Ord j, Ord k, Ord l)
+               => Ord (a, b, c, d, e, f, g, h, i, j, k, l)
+deriving instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g,
+                   Ord h, Ord i, Ord j, Ord k, Ord l, Ord m)
+               => Ord (a, b, c, d, e, f, g, h, i, j, k, l, m)
+deriving instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g,
+                   Ord h, Ord i, Ord j, Ord k, Ord l, Ord m, Ord n)
+               => Ord (a, b, c, d, e, f, g, h, i, j, k, l, m, n)
+deriving instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g,
+                   Ord h, Ord i, Ord j, Ord k, Ord l, Ord m, Ord n, Ord o)
+               => Ord (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o)
+
+instance (Ord a) => Ord [a] where
+    {-# SPECIALISE instance Ord [Char] #-}
+    compare []     []     = EQ
+    compare []     (_:_)  = LT
+    compare (_:_)  []     = GT
+    compare (x:xs) (y:ys) = case compare x y of
+                                EQ    -> compare xs ys
+                                other -> other
+
+deriving instance Ord Bool
+deriving instance Ord Ordering
+
+-- We don't use deriving for Ord Char, because for Ord the derived
+-- instance defines only compare, which takes two primops.  Then
+-- '>' uses compare, and therefore takes two primops instead of one.
+instance Ord Char where
+    (C# c1) >  (C# c2) = c1 `gtChar#` c2
+    (C# c1) >= (C# c2) = c1 `geChar#` c2
+    (C# c1) <= (C# c2) = c1 `leChar#` c2
+    (C# c1) <  (C# c2) = c1 `ltChar#` c2
+
+instance Ord Integer where
+    (<=) = leInteger
+    (>)  = gtInteger
+    (<)  = ltInteger
+    (>=) = geInteger
+    compare = compareInteger
+
+instance Ord Float where
+    (F# x) `compare` (F# y)
+        = if      x `ltFloat#` y then LT
+          else if x `eqFloat#` y then EQ
+          else                        GT
+
+    (F# x) <  (F# y) = x `ltFloat#`  y
+    (F# x) <= (F# y) = x `leFloat#`  y
+    (F# x) >= (F# y) = x `geFloat#`  y
+    (F# x) >  (F# y) = x `gtFloat#`  y
+
+instance Ord Double where
+    (D# x) `compare` (D# y)
+        = if      x <##  y then LT
+          else if x ==## y then EQ
+          else                  GT
+
+    (D# x) <  (D# y) = x <##  y
+    (D# x) <= (D# y) = x <=## y
+    (D# x) >= (D# y) = x >=## y
+    (D# x) >  (D# y) = x >##  y
 
 -- OK, so they're technically not part of a class...:
 

@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -XNoImplicitPrelude #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Control.Concurrent.MVar
@@ -45,7 +46,12 @@ import GHC.MVar ( MVar, newEmptyMVar, newMVar, takeMVar, putMVar,
                 )
 #endif
 
+#ifdef __GLASGOW_HASKELL__
+import GHC.Base
+#else
 import Prelude
+#endif
+
 import Control.Exception.Base
 
 {-|
@@ -54,7 +60,7 @@ import Control.Exception.Base
 -}
 readMVar :: MVar a -> IO a
 readMVar m =
-  block $ do
+  mask_ $ do
     a <- takeMVar m
     putMVar m a
     return a
@@ -67,7 +73,7 @@ readMVar m =
 -}
 swapMVar :: MVar a -> a -> IO a
 swapMVar mvar new =
-  block $ do
+  mask_ $ do
     old <- takeMVar mvar
     putMVar mvar new
     return old
@@ -83,9 +89,9 @@ swapMVar mvar new =
 -- http://www.haskell.org//pipermail/haskell/2006-May/017907.html
 withMVar :: MVar a -> (a -> IO b) -> IO b
 withMVar m io =
-  block $ do
+  mask $ \restore -> do
     a <- takeMVar m
-    b <- unblock (io a) `onException` putMVar m a
+    b <- restore (io a) `onException` putMVar m a
     putMVar m a
     return b
 
@@ -97,9 +103,9 @@ withMVar m io =
 {-# INLINE modifyMVar_ #-}
 modifyMVar_ :: MVar a -> (a -> IO a) -> IO ()
 modifyMVar_ m io =
-  block $ do
+  mask $ \restore -> do
     a  <- takeMVar m
-    a' <- unblock (io a) `onException` putMVar m a
+    a' <- restore (io a) `onException` putMVar m a
     putMVar m a'
 
 {-|
@@ -109,8 +115,8 @@ modifyMVar_ m io =
 {-# INLINE modifyMVar #-}
 modifyMVar :: MVar a -> (a -> IO (a,b)) -> IO b
 modifyMVar m io =
-  block $ do
+  mask $ \restore -> do
     a      <- takeMVar m
-    (a',b) <- unblock (io a) `onException` putMVar m a
+    (a',b) <- restore (io a) `onException` putMVar m a
     putMVar m a'
     return b

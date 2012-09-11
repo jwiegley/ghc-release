@@ -56,38 +56,7 @@ documentation</ulink> describes all the libraries that come with GHC.
     <para>The flag <option>-fglasgow-exts</option>
           <indexterm><primary><option>-fglasgow-exts</option></primary></indexterm>
 	  is equivalent to enabling the following extensions: 
-          <option>-XPrintExplicitForalls</option>,
-          <option>-XForeignFunctionInterface</option>,
-          <option>-XUnliftedFFITypes</option>,
-          <option>-XGADTs</option>,
-          <option>-XImplicitParams</option>,
-          <option>-XScopedTypeVariables</option>,
-          <option>-XUnboxedTuples</option>,
-          <option>-XTypeSynonymInstances</option>,
-          <option>-XStandaloneDeriving</option>,
-          <option>-XDeriveDataTypeable</option>,
-          <option>-XFlexibleContexts</option>,
-          <option>-XFlexibleInstances</option>,
-          <option>-XConstrainedClassMethods</option>,
-          <option>-XMultiParamTypeClasses</option>,
-          <option>-XFunctionalDependencies</option>,
-          <option>-XMagicHash</option>,
-          <option>-XPolymorphicComponents</option>,
-          <option>-XExistentialQuantification</option>,
-          <option>-XUnicodeSyntax</option>,
-          <option>-XPostfixOperators</option>,
-          <option>-XPatternGuards</option>,
-          <option>-XLiberalTypeSynonyms</option>,
-          <option>-XExplicitForAll</option>,
-          <option>-XRankNTypes</option>,
-          <option>-XImpredicativeTypes</option>,
-          <option>-XTypeOperators</option>,
-          <option>-XDoRec</option>,
-          <option>-XParallelListComp</option>,
-          <option>-XEmptyDataDecls</option>,
-          <option>-XKindSignatures</option>,
-          <option>-XGeneralizedNewtypeDeriving</option>,
-          <option>-XTypeFamilies</option>.
+          &what_glasgow_exts_does;
 	    Enabling these options is the <emphasis>only</emphasis> 
 	    effect of <option>-fglasgow-exts</option>.
           We are trying to move away from this portmanteau flag, 
@@ -351,6 +320,15 @@ Indeed, the bindings can even be recursive.
 	      <entry>Name</entry>
 	    </row>
 	  </thead>
+
+<!--
+               to find the DocBook entities for these characters, find
+               the Unicode code point (e.g. 0x2237), and grep for it in
+               /usr/share/sgml/docbook/xml-dtd-*/ent/* (or equivalent on
+               your system.  Some of these Unicode code points don't have
+               equivalent DocBook entities.
+            -->
+
 	  <tbody>
 	    <row>
 	      <entry><literal>::</literal></entry>
@@ -391,14 +369,52 @@ Indeed, the bindings can even be recursive.
               <entry>LEFTWARDS ARROW</entry>
 	    </row>
           </tbody>
+
 	  <tbody>
 	    <row>
-	      <entry>..</entry>
-	      <entry>&hellip;</entry>
-	      <entry>0x22EF</entry>
-	      <entry>MIDLINE HORIZONTAL ELLIPSIS</entry>
+	      <entry>-&lt;</entry>
+	      <entry>&larrtl;</entry>
+	      <entry>0x2919</entry>
+	      <entry>LEFTWARDS ARROW-TAIL</entry>
 	    </row>
           </tbody>
+
+	  <tbody>
+	    <row>
+	      <entry>&gt;-</entry>
+	      <entry>&rarrtl;</entry>
+	      <entry>0x291A</entry>
+	      <entry>RIGHTWARDS ARROW-TAIL</entry>
+	    </row>
+          </tbody>
+
+	  <tbody>
+	    <row>
+	      <entry>-&lt;&lt;</entry>
+	      <entry></entry>
+	      <entry>0x291B</entry>
+	      <entry>LEFTWARDS DOUBLE ARROW-TAIL</entry>
+	    </row>
+          </tbody>
+
+	  <tbody>
+	    <row>
+	      <entry>&gt;&gt;-</entry>
+	      <entry></entry>
+	      <entry>0x291C</entry>
+	      <entry>RIGHTWARDS DOUBLE ARROW-TAIL</entry>
+	    </row>
+          </tbody>
+
+	  <tbody>
+	    <row>
+	      <entry>*</entry>
+	      <entry>&starf;</entry>
+	      <entry>0x2605</entry>
+	      <entry>BLACK STAR</entry>
+	    </row>
+          </tbody>
+
         </tgroup>
       </informaltable>
     </sect2>
@@ -771,10 +787,8 @@ let {(x -> y) = e1 ;
      (y -> x) = e2 } in x
 </programlisting>
 
-(We may lift this
-restriction in the future; the only cost is that type checking patterns
-would get a little more complicated.)  
-
+(For some amplification on this design choice see 
+<ulink url="http://hackage.haskell.org/trac/ghc/ticket/4061">Trac #4061</ulink>.)
 
 </para>
 </listitem>
@@ -1244,8 +1258,8 @@ output = [ x
             hierarchy.  It completely defeats that purpose if the
             literal "1" means "<literal>Prelude.fromInteger
             1</literal>", which is what the Haskell Report specifies.
-            So the <option>-XNoImplicitPrelude</option> 
-	      flag <emphasis>also</emphasis> causes
+            So the <option>-XRebindableSyntax</option> 
+	      flag causes
             the following pieces of built-in syntax to refer to
             <emphasis>whatever is in scope</emphasis>, not the Prelude
             versions:
@@ -1277,6 +1291,11 @@ output = [ x
 	      </para></listitem>
 
 	      <listitem>
+		<para>Conditionals (e.g. "<literal>if</literal> e1 <literal>then</literal> e2 <literal>else</literal> e3")
+		means "<literal>ifThenElse</literal> e1 e2 e3".  However <literal>case</literal> expressions are unaffected.
+	      </para></listitem>
+
+	      <listitem>
 	  <para>"Do" notation is translated using whatever
 	      functions <literal>(>>=)</literal>,
 	      <literal>(>>)</literal>, and <literal>fail</literal>,
@@ -1296,6 +1315,9 @@ output = [ x
 		to use this, ask!
 	      </para></listitem>
 	    </itemizedlist>
+<option>-XRebindableSyntax</option> implies <option>-XNoImplicitPrelude</option>.
+</para>
+<para>
 In all cases (apart from arrow notation), the static semantics should be that of the desugared form,
 even if that is a little unexpected. For example, the 
 static semantics of the literal <literal>368</literal>
@@ -1847,6 +1869,26 @@ not <literal>*</literal> then an explicit kind annotation must be used
 
 <para>Such data types have only one value, namely bottom.
 Nevertheless, they can be useful when defining "phantom types".</para>
+</sect2>
+
+<sect2 id="datatype-contexts">
+<title>Data type contexts</title>
+
+<para>Haskell allows datatypes to be given contexts, e.g.</para>
+
+<programlisting>
+data Eq a => Set a = NilSet | ConsSet a (Set a)
+</programlisting>
+
+<para>give constructors with types:</para>
+
+<programlisting>
+NilSet :: Set a
+ConsSet :: Eq a => a -> Set a -> Set a
+</programlisting>
+
+<para>In GHC this feature is an extension called
+<literal>DatatypeContexts</literal>, and on by default.</para>
 </sect2>
 
 <sect2 id="infix-tycons">
@@ -3948,6 +3990,51 @@ of the instance declaration, thus:
      f x = ...
 </programlisting>
 (You need <link linkend="instance-rules"><option>-XFlexibleInstances</option></link> to do this.)
+</para>
+<para>
+Warning: overlapping instances must be used with care.  They 
+can give rise to incoherence (ie different instance choices are made
+in different parts of the program) even without <option>-XIncoherentInstances</option>. Consider:
+<programlisting>
+{-# LANGUAGE OverlappingInstances #-}
+module Help where
+
+    class MyShow a where
+      myshow :: a -> String
+
+    instance MyShow a => MyShow [a] where
+      myshow xs = concatMap myshow xs
+
+    showHelp :: MyShow a => [a] -> String
+    showHelp xs = myshow xs
+
+{-# LANGUAGE FlexibleInstances, OverlappingInstances #-}
+module Main where
+    import Help
+
+    data T = MkT
+
+    instance MyShow T where
+      myshow x = "Used generic instance"
+
+    instance MyShow [T] where
+      myshow xs = "Used more specific instance"
+
+    main = do { print (myshow [MkT]); print (showHelp [MkT]) }
+</programlisting>
+In function <literal>showHelp</literal> GHC sees no overlapping
+instances, and so uses the <literal>MyShow [a]</literal> instance
+without complaint.  In the call to <literal>myshow</literal> in <literal>main</literal>,
+GHC resolves the <literal>MyShow [T]</literal> constraint using the overlapping
+instance declaration in module <literal>Main</literal>. As a result, 
+the program prints
+<programlisting>
+  "Used more specific instance"
+  "Used generic instance"
+</programlisting>
+(An alternative possible behaviour, not currently implemented, 
+would be to reject module <literal>Help</literal>
+on the grounds that a later instance declaration might overlap the local one.)
 </para>
 <para>
 The willingness to be overlapped or incoherent is a property of 
@@ -6149,25 +6236,29 @@ Wiki page</ulink>.
 		    <listitem><para> a list of top-level declarations; the spliced expression 
                     must have type <literal>Q [Dec]</literal></para></listitem>
 		    </itemizedlist>
+            Note that pattern splices are not supported.
 	    Inside a splice you can can only call functions defined in imported modules,
-	not functions defined elsewhere in the same module.</para></listitem>
+	    not functions defined elsewhere in the same module.</para></listitem>
 
 	      <listitem><para>
 		  A expression quotation is written in Oxford brackets, thus:
 		  <itemizedlist>
-		    <listitem><para> <literal>[| ... |]</literal>, where the "..." is an expression; 
+		    <listitem><para> <literal>[| ... |]</literal>, or <literal>[e| ... |]</literal>, 
+                             where the "..." is an expression; 
                              the quotation has type <literal>Q Exp</literal>.</para></listitem>
 		    <listitem><para> <literal>[d| ... |]</literal>, where the "..." is a list of top-level declarations;
                              the quotation has type <literal>Q [Dec]</literal>.</para></listitem>
 		    <listitem><para> <literal>[t| ... |]</literal>, where the "..." is a type;
-                             the quotation has type <literal>Q Typ</literal>.</para></listitem>
+                             the quotation has type <literal>Q Type</literal>.</para></listitem>
+		    <listitem><para> <literal>[p| ... |]</literal>, where the "..." is a pattern;
+                             the quotation has type <literal>Q Pat</literal>.</para></listitem>
 		  </itemizedlist></para></listitem>
 
 	      <listitem><para>
 		  A quasi-quotation can appear in either a pattern context or an
 		  expression context and is also written in Oxford brackets:
 		  <itemizedlist>
-		    <listitem><para> <literal>[$<replaceable>varid</replaceable>| ... |]</literal>,
+		    <listitem><para> <literal>[<replaceable>varid</replaceable>| ... |]</literal>,
                         where the "..." is an arbitrary string; a full description of the
 			quasi-quotation facility is given in <xref linkend="th-quasiquotation"/>.</para></listitem>
 		  </itemizedlist></para></listitem>
@@ -6373,19 +6464,67 @@ several examples are documented in
 Nice to be Quoted: Quasiquoting for Haskell</ulink>" (Proc Haskell Workshop
 2007). The example below shows how to write a quasiquoter for a simple
 expression language.</para>
-
 <para>
-In the example, the quasiquoter <literal>expr</literal> is bound to a value of
-type <literal>Language.Haskell.TH.Quote.QuasiQuoter</literal> which contains two
-functions for quoting expressions and patterns, respectively. The first argument
-to each quoter is the (arbitrary) string enclosed in the Oxford brackets. The
-context of the quasi-quotation statement determines which of the two parsers is
-called: if the quasi-quotation occurs in an expression context, the expression
-parser is called, and if it occurs in a pattern context, the pattern parser is
-called.</para>
+Here are the salient features
+<itemizedlist>
+<listitem><para>
+A quasi-quote has the form
+<literal>[<replaceable>quoter</replaceable>| <replaceable>string</replaceable> |]</literal>.
+<itemizedlist>
+<listitem><para>
+The <replaceable>quoter</replaceable> must be the (unqualified) name of an imported 
+quoter; it cannot be an arbitrary expression.  
+</para></listitem>
+<listitem><para>
+The <replaceable>quoter</replaceable> cannot be "<literal>e</literal>", 
+"<literal>t</literal>", "<literal>d</literal>", or "<literal>p</literal>", since
+those overlap with Template Haskell quotations.
+</para></listitem>
+<listitem><para>
+There must be no spaces in the token
+<literal>[<replaceable>quoter</replaceable>|</literal>.
+</para></listitem>
+<listitem><para>
+The quoted <replaceable>string</replaceable> 
+can be arbitrary, and may contain newlines.
+</para></listitem>
+</itemizedlist>
+</para></listitem>
 
+<listitem><para>
+A quasiquote may appear in place of
+<itemizedlist>
+<listitem><para>An expression</para></listitem>
+<listitem><para>A pattern</para></listitem>
+<listitem><para>A type</para></listitem>
+<listitem><para>A top-level declaration</para></listitem>
+</itemizedlist>
+(Only the first two are described in the paper.)
+</para></listitem>
+
+<listitem><para>
+A quoter is a value of type <literal>Language.Haskell.TH.Quote.QuasiQuoter</literal>, 
+which is defined thus:
+<programlisting>
+data QuasiQuoter = QuasiQuoter { quoteExp  :: String -> Q Exp,
+                                 quotePat  :: String -> Q Pat,
+                                 quoteType :: String -> Q Type,
+                                 quoteDec  :: String -> Q [Dec] }
+</programlisting>
+That is, a quoter is a tuple of four parsers, one for each of the contexts
+in which a quasi-quote can occur.
+</para></listitem>
+<listitem><para>
+A quasi-quote is expanded by applying the appropriate parser to the string
+enclosed by the Oxford brackets.  The context of the quasi-quote (expression, pattern,
+type, declaration) determines which of the parsers is called.
+</para></listitem>
+</itemizedlist>
+</para>
 <para>
-Note that in the example we make use of an antiquoted
+The example below shows quasi-quotation in action.  The quoter <literal>expr</literal>
+is bound to a value of type <literal>QuasiQuoter</literal> defined in module <literal>Expr</literal>.
+The example makes use of an antiquoted
 variable <literal>n</literal>, indicated by the syntax <literal>'int:n</literal>
 (this syntax for anti-quotation was defined by the parser's
 author, <emphasis>not</emphasis> by GHC). This binds <literal>n</literal> to the
@@ -6397,12 +6536,6 @@ an expression parser that returns a value of type <literal>Q Exp</literal> and a
 pattern parser that returns a value of type <literal>Q Pat</literal>.
 </para>
 
-<para>In general, a quasi-quote has the form
-<literal>[$<replaceable>quoter</replaceable>| <replaceable>string</replaceable> |]</literal>.
-The <replaceable>quoter</replaceable> must be the name of an imported quoter; it
-cannot be an arbitrary expression.  The quoted <replaceable>string</replaceable> 
-can be arbitrary, and may contain newlines.
-</para>
 <para>
 Quasiquoters must obey the same stage restrictions as Template Haskell, e.g., in
 the example, <literal>expr</literal> cannot be defined
@@ -6410,22 +6543,21 @@ in <literal>Main.hs</literal> where it is used, but must be imported.
 </para>
 
 <programlisting>
-
-{- Main.hs -}
+{- ------------- file Main.hs --------------- -}
 module Main where
 
 import Expr
 
 main :: IO ()
-main = do { print $ eval [$expr|1 + 2|]
+main = do { print $ eval [expr|1 + 2|]
           ; case IntExpr 1 of
-              { [$expr|'int:n|] -> print n
+              { [expr|'int:n|] -> print n
               ;  _              -> return ()
               }
           }
 
 
-{- Expr.hs -}
+{- ------------- file Expr.hs --------------- -}
 module Expr where
 
 import qualified Language.Haskell.TH as TH
@@ -6452,7 +6584,7 @@ eval (BinopExpr op x y) = (opToFun op) (eval x) (eval y)
     opToFun MulOp = (*)
     opToFun DivOp = div
 
-expr = QuasiQuoter parseExprExp parseExprPat
+expr = QuasiQuoter { quoteExp = parseExprExp, quotePat =  parseExprPat }
 
 -- Parse an Expr, returning its representation as
 -- either a Q Exp or a Q Pat. See the referenced paper
@@ -6468,19 +6600,18 @@ parseExprPat ...
 </programlisting>
 
 <para>Now run the compiler:
-</para>
 <programlisting>
 $ ghc --make -XQuasiQuotes Main.hs -o main
 </programlisting>
+</para>
 
-<para>Run "main" and here is your output:</para>
-
+<para>Run "main" and here is your output:
 <programlisting>
 $ ./main
 3
 1
 </programlisting>
-
+</para>
 </sect2>
 
 </sect1>
@@ -7341,7 +7472,7 @@ Assertion failures can be caught, see the documentation for the
       </para>
 
       <para>A list of all supported language extensions can be obtained by invoking
-	<literal>ghc --supported-languages</literal> (see <xref linkend="modes"/>).</para>
+	<literal>ghc --supported-extensions</literal> (see <xref linkend="modes"/>).</para>
 
       <para>Any extension from the <literal>Extension</literal> type defined in
 	<ulink
@@ -7471,21 +7602,68 @@ key_function :: Int -> String -> (Bool, Double)
 	function "<literal>f</literal>" has a number of other effects:
 <itemizedlist>
 <listitem><para>
-No functions are inlined into <literal>f</literal>.  Otherwise
-GHC might inline a big function into <literal>f</literal>'s right hand side, 
-making <literal>f</literal> big; and then inline <literal>f</literal> blindly.
+While GHC is keen to inline the function, it does not do so
+blindly.  For example, if you write
+<programlisting>
+map key_function xs
+</programlisting>
+there really isn't any point in inlining <literal>key_function</literal> to get
+<programlisting>
+map (\x -> <replaceable>body</replaceable>) xs
+</programlisting>
+In general, GHC only inlines the function if there is some reason (no matter
+how slight) to supose that it is useful to do so.
 </para></listitem>
+
 <listitem><para>
-The float-in, float-out, and common-sub-expression transformations are not 
-applied to the body of <literal>f</literal>.  
+Moreover, GHC will only inline the function if it is <emphasis>fully applied</emphasis>, 
+where "fully applied"
+means applied to as many arguments as appear (syntactically) 
+on the LHS of the function
+definition.  For example:
+<programlisting>
+comp1 :: (b -> c) -> (a -> b) -> a -> c
+{-# INLINE comp1 #-}
+comp1 f g = \x -> f (g x)
+
+comp2 :: (b -> c) -> (a -> b) -> a -> c
+{-# INLINE comp2 #-}
+comp2 f g x = f (g x)
+</programlisting>
+The two functions <literal>comp1</literal> and <literal>comp2</literal> have the 
+same semantics, but <literal>comp1</literal> will be inlined when applied
+to <emphasis>two</emphasis> arguments, while <literal>comp2</literal> requires
+<emphasis>three</emphasis>.  This might make a big difference if you say
+<programlisting>
+map (not `comp1` not) xs
+</programlisting>
+which will optimise better than the corresponding use of `comp2`.
+</para></listitem>
+
+<listitem><para> 
+It is useful for GHC to optimise the definition of an
+INLINE function <literal>f</literal> just like any other non-INLINE function, 
+in case the non-inlined version of <literal>f</literal> is
+ultimately called.  But we don't want to inline 
+the <emphasis>optimised</emphasis> version
+of <literal>f</literal>;
+a major reason for INLINE pragmas is to expose functions 
+in <literal>f</literal>'s RHS that have
+rewrite rules, and it's no good if those functions have been optimised
+away.
+</para>
+<para>
+So <emphasis>GHC guarantees to inline precisely the code that you wrote</emphasis>, no more
+and no less.  It does this by capturing a copy of the definition of the function to use
+for inlining (we call this the "inline-RHS"), which it leaves untouched,
+while optimising the ordinarly RHS as usual.  For externally-visible functions
+the inline-RHS (not the optimised RHS) is recorded in the interface file.
 </para></listitem>
 <listitem><para>
 An INLINE function is not worker/wrappered by strictness analysis.
 It's going to be inlined wholesale instead.
 </para></listitem>
 </itemizedlist>
-All of these effects are aimed at ensuring that what gets inlined is
-exactly what you asked for, no more and no less.
 </para>
 <para>GHC ensures that inlining cannot go on forever: every mutually-recursive
 group is cut by one or more <emphasis>loop breakers</emphasis> that is never inlined
@@ -7513,13 +7691,44 @@ itself, so an INLINE pragma is always ignored.</para>
 {-# INLINE returnUs #-}
 </programlisting>
 
-	<para>See also the <literal>NOINLINE</literal> pragma (<xref
-        linkend="noinline-pragma"/>).</para>
+	<para>See also the <literal>NOINLINE</literal> (<xref linkend="inlinable-pragma"/>) 
+        and <literal>INLINABLE</literal> (<xref linkend="noinline-pragma"/>) 
+        pragmas.</para>
 
 	<para>Note: the HBC compiler doesn't like <literal>INLINE</literal> pragmas,
 	  so if you want your code to be HBC-compatible you'll have to surround
 	  the pragma with C pre-processor directives 
 	  <literal>#ifdef __GLASGOW_HASKELL__</literal>...<literal>#endif</literal>.</para>
+
+      </sect3>
+
+      <sect3 id="inlinable-pragma">
+	<title>INLINABLE pragma</title>
+
+<para>An INLINABLE pragma works very like an INLINE pragma, except that:
+<itemizedlist>
+<listitem><para>
+INLINE says "please inline me", but INLINABLE says "feel free to inline me; use your
+discretion".  In other words the choice is left to GHC, which uses the same
+rules as for pragma-free functions.  Unlike INLINE, That decision is made at 
+the <emphasis>call site</emphasis>, and
+will therefore be affected by the inlining threshold, optimisation level etc.
+</para></listitem>
+<listitem><para>
+Like INLINE, the INLINABLE pragma retains a copy of the original RHS for 
+inlining purposes, and persists it in the interface file, regardless of
+the size of the RHS.
+</para></listitem>
+<listitem><para>
+If you use the special function <literal>inline</literal> (<xref linkend="special-ids"/>) 
+to force inlining at a
+call site, you will get a copy of the the original RHS.
+Indeed, if you intend to use <literal>inline f</literal> it
+is a good idea to mark the definition of <literal>f</literal> INLINABLE, 
+so that GHC guarantees to expose an unfolding regardless of how big it is.
+</para></listitem>
+</itemizedlist>
+</para>
 
       </sect3>
 
@@ -7539,6 +7748,14 @@ itself, so an INLINE pragma is always ignored.</para>
         specified by Haskell 98 as the standard way to disable
         inlining, so it should be used if you want your code to be
         portable).</para>
+      </sect3>
+
+      <sect3 id="conlike-pragma">
+	<title>CONLIKE modifier</title>
+	<indexterm><primary>CONLIKE</primary></indexterm>
+        <para>An INLINE or NOINLINE pragma may have a CONLIKE modifier, 
+        which affects matching in RULEs (only).  See <xref linkend="conlike"/>.
+        </para>
       </sect3>
 
       <sect3 id="phase-control">
@@ -7893,10 +8110,6 @@ data S = S {-# UNPACK #-} !Int {-# UNPACK #-} !Int
       directly in the <function>T</function> constructor.  The
       unpacker can see through newtypes, too.</para>
 
-      <para>If a field cannot be unpacked, you will not get a warning,
-      so it might be an idea to check the generated code with
-      <option>-ddump-simpl</option>.</para>
-
       <para>See also the <option>-funbox-strict-fields</option> flag,
       which essentially has the effect of adding
       <literal>{-#&nbsp;UNPACK&nbsp;#-}</literal> to every strict
@@ -8176,18 +8389,24 @@ not be substituted, and the rule would not fire.
 
 </para>
 </listitem>
-<listitem>
+</itemizedlist>
+
+</para>
+
+</sect2>
+
+<sect2 id="conlike">
+<title>How rules interact with INLINE/NOINLINE and CONLIKE pragmas</title>
 
 <para>
 Ordinary inlining happens at the same time as rule rewriting, which may lead to unexpected
 results.  Consider this (artificial) example
 <programlisting>
 f x = x
-{-# RULES "f" f True = False #-}
-
 g y = f y
-
 h z = g True
+
+{-# RULES "f" f True = False #-}
 </programlisting>
 Since <literal>f</literal>'s right-hand side is small, it is inlined into <literal>g</literal>,
 to give
@@ -8201,14 +8420,37 @@ would have been a better chance that <literal>f</literal>'s RULE might fire.
 </para>
 <para>
 The way to get predictable behaviour is to use a NOINLINE 
-pragma on <literal>f</literal>, to ensure
+pragma, or an INLINE[<replaceable>phase</replaceable>] pragma, on <literal>f</literal>, to ensure
 that it is not inlined until its RULEs have had a chance to fire.
 </para>
-</listitem>
-</itemizedlist>
-
+<para>
+GHC is very cautious about duplicating work.  For example, consider
+<programlisting>
+f k z xs = let xs = build g
+           in ...(foldr k z xs)...sum xs...
+{-# RULES "foldr/build" forall k z g. foldr k z (build g) = g k z #-}
+</programlisting>
+Since <literal>xs</literal> is used twice, GHC does not fire the foldr/build rule.  Rightly
+so, because it might take a lot of work to compute <literal>xs</literal>, which would be
+duplicated if the rule fired.
 </para>
-
+<para>
+Sometimes, however, this approach is over-cautious, and we <emphasis>do</emphasis> want the
+rule to fire, even though doing so would duplicate redex.  There is no way that GHC can work out
+when this is a good idea, so we provide the CONLIKE pragma to declare it, thus:
+<programlisting>
+{-# INLINE[1] CONLIKE f #-}
+f x = <replaceable>blah</replaceable>
+</programlisting>
+CONLIKE is a modifier to an INLINE or NOINLINE pragam.  It specifies that an application
+of f to one argument (in general, the number of arguments to the left of the '=' sign)
+should be considered cheap enough to duplicate, if such a duplication would make rule
+fire.  (The name "CONLIKE" is short for "constructor-like", because constructors certainly
+have such a property.)
+The CONLIKE pragam is a modifier to INLINE/NOINLINE because it really only makes sense to match 
+<literal>f</literal> on the LHS of a rule if you are sure that <literal>f</literal> is
+not going to be inlined before the rule has a chance to fire.
+</para>
 </sect2>
 
 <sect2>
@@ -8468,8 +8710,8 @@ comparison.
 
 </sect2>
 
-<sect2>
-<title>Controlling what's going on</title>
+<sect2 id="controlling-rules">
+<title>Controlling what's going on in rewrite rules</title>
 
 <para>
 
@@ -8477,18 +8719,28 @@ comparison.
 <listitem>
 
 <para>
- Use <option>-ddump-rules</option> to see what transformation rules GHC is using.
+Use <option>-ddump-rules</option> to see the rules that are defined
+<emphasis>in this module</emphasis>.
+This includes rules generated by the specialisation pass, but excludes
+rules imported from other modules. 
 </para>
 </listitem>
-<listitem>
 
+<listitem>
 <para>
  Use <option>-ddump-simpl-stats</option> to see what rules are being fired.
 If you add <option>-dppr-debug</option> you get a more detailed listing.
 </para>
 </listitem>
-<listitem>
 
+<listitem>
+<para>
+ Use <option>-ddump-rule-firings</option> to see in great detail what rules are being fired.
+If you add <option>-dppr-debug</option> you get a still more detailed listing.
+</para>
+</listitem>
+
+<listitem>
 <para>
  The definition of (say) <function>build</function> in <filename>GHC/Base.lhs</filename> looks like this:
 
@@ -8590,7 +8842,23 @@ r) ->
 <para>GHC has a few built-in functions with special behaviour.  These
 are now described in the module <ulink
 url="&libraryGhcPrimLocation;/GHC-Prim.html"><literal>GHC.Prim</literal></ulink>
-in the library documentation.</para>
+in the library documentation.
+In particular:
+<itemizedlist>
+<listitem><para>
+<ulink url="&libraryGhcPrimLocation;/GHC-Prim.html#v%3Ainline"><literal>inline</literal></ulink>
+allows control over inlining on a per-call-site basis.
+</para></listitem>
+<listitem><para>
+<ulink url="&libraryGhcPrimLocation;/GHC-Prim.html#v%3Alazy"><literal>lazy</literal></ulink>
+restrains the strictness analyser.
+</para></listitem>
+<listitem><para>
+<ulink url="&libraryGhcPrimLocation;/GHC-Prim.html#v%3AunsafeCoerce%23"><literal>lazy</literal></ulink> 
+allows you to fool the type checker.
+</para></listitem>
+</itemizedlist>
+</para>
 </sect1>
 
 
@@ -8896,7 +9164,6 @@ standard behaviour.
 
 <!-- Emacs stuff:
      ;;; Local Variables: ***
-     ;;; mode: xml ***
      ;;; sgml-parent-document: ("users_guide.xml" "book" "chapter" "sect1") ***
      ;;; ispell-local-dictionary: "british" ***
      ;;; End: ***

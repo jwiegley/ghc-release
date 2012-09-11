@@ -12,6 +12,7 @@
 -- any warnings in the module. See
 --     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
 -- for details
+{-# LANGUAGE DeriveDataTypeable #-}
 
 -- | Abstract syntax of global declarations.
 --
@@ -23,7 +24,7 @@ module HsDecls (
   -- ** Class or type declarations
   TyClDecl(..), LTyClDecl,
   isClassDecl, isSynDecl, isDataDecl, isTypeDecl, isFamilyDecl,
-  isFamInstDecl, tcdName, tyClDeclNames, tyClDeclTyVars,
+  isFamInstDecl, tcdName, tyClDeclTyVars,
   countTyClDecls,
   -- ** Instance declarations
   InstDecl(..), LInstDecl, NewOrData(..), FamilyFlavour(..),
@@ -42,7 +43,7 @@ module HsDecls (
   CImportSpec(..),
   -- ** Data-constructor declarations
   ConDecl(..), LConDecl, ResType(..), 
-  HsConDeclDetails, hsConDeclArgTys, hsConDeclsNames,
+  HsConDeclDetails, hsConDeclArgTys, 
   -- ** Document comments
   DocDecl(..), LDocDecl, docDeclDoc,
   -- ** Deprecations
@@ -76,6 +77,7 @@ import SrcLoc
 import FastString
 
 import Control.Monad    ( liftM )
+import Data.Data
 import Data.Maybe       ( isJust )
 \end{code}
 
@@ -102,6 +104,8 @@ data HsDecl id
   | RuleD	(RuleDecl id)
   | SpliceD	(SpliceDecl id)
   | DocD	(DocDecl)
+  | QuasiQuoteD	(HsQuasiQuote id)
+  deriving (Data, Typeable)
 
 
 -- NB: all top-level fixity decls are contained EITHER
@@ -137,7 +141,7 @@ data HsGroup id
 	hs_ruleds :: [LRuleDecl id],
 
 	hs_docs   :: [LDocDecl]
-  }
+  } deriving (Data, Typeable)
 
 emptyGroup, emptyRdrGroup, emptyRnGroup :: HsGroup a
 emptyRdrGroup = emptyGroup { hs_valds = emptyValBindsIn }
@@ -204,6 +208,7 @@ instance OutputableBndr name => Outputable (HsDecl name) where
     ppr (AnnD ad)               = ppr ad
     ppr (SpliceD dd)            = ppr dd
     ppr (DocD doc)              = ppr doc
+    ppr (QuasiQuoteD qq)        = ppr qq
 
 instance OutputableBndr name => Outputable (HsGroup name) where
     ppr (HsGroup { hs_valds  = val_decls,
@@ -216,21 +221,36 @@ instance OutputableBndr name => Outputable (HsGroup name) where
 		   hs_fords  = foreign_decls,
 		   hs_defds  = default_decls,
 		   hs_ruleds = rule_decls })
-	= vcat [ppr_ds fix_decls, ppr_ds default_decls, 
-		ppr_ds deprec_decls, ppr_ds ann_decls,
-		ppr_ds rule_decls,
-		ppr val_decls,
-		ppr_ds tycl_decls, ppr_ds inst_decls,
-                ppr_ds deriv_decls,
-		ppr_ds foreign_decls]
+	= vcat_mb empty 
+            [ppr_ds fix_decls, ppr_ds default_decls, 
+	     ppr_ds deprec_decls, ppr_ds ann_decls,
+	     ppr_ds rule_decls,
+	     if isEmptyValBinds val_decls 
+                then Nothing 
+                else Just (ppr val_decls),
+	     ppr_ds tycl_decls, ppr_ds inst_decls,
+             ppr_ds deriv_decls,
+	     ppr_ds foreign_decls]
 	where
-	  ppr_ds [] = empty
-	  ppr_ds ds = text "" $$ vcat (map ppr ds)
+          ppr_ds :: Outputable a => [a] -> Maybe SDoc
+	  ppr_ds [] = Nothing
+	  ppr_ds ds = Just (vcat (map ppr ds))
 
-data SpliceDecl id = SpliceDecl (Located (HsExpr id))	-- Top level splice
+          vcat_mb :: SDoc -> [Maybe SDoc] -> SDoc
+	  -- Concatenate vertically with white-space between non-blanks
+          vcat_mb _    []             = empty
+          vcat_mb gap (Nothing : ds) = vcat_mb gap ds
+          vcat_mb gap (Just d  : ds) = gap $$ d $$ vcat_mb blankLine ds
+
+data SpliceDecl id 
+  = SpliceDecl			-- Top level splice
+        (Located (HsExpr id))
+        HsExplicitFlag		-- Explicit <=> $(f x y)
+				-- Implicit <=> f x y,  i.e. a naked top level expression
+    deriving (Data, Typeable)
 
 instance OutputableBndr name => Outputable (SpliceDecl name) where
-   ppr (SpliceDecl e) = ptext (sLit "$") <> parens (pprExpr (unLoc e))
+   ppr (SpliceDecl e _) = ptext (sLit "$") <> parens (pprExpr (unLoc e))
 \end{code}
 
 
@@ -478,15 +498,17 @@ data TyClDecl name
                                                         --   latter for defaults
 		tcdDocs    :: [LDocDecl]		-- ^ Haddock docs
     }
+  deriving (Data, Typeable)
 
 data NewOrData
   = NewType			-- ^ @newtype Blah ...@
   | DataType			-- ^ @data Blah ...@
-  deriving( Eq )		-- Needed because Demand derives Eq
+  deriving( Eq, Data, Typeable )		-- Needed because Demand derives Eq
 
 data FamilyFlavour
   = TypeFamily			-- ^ @type family ...@
   | DataFamily	                -- ^ @data family ...@
+  deriving (Data, Typeable)
 \end{code}
 
 Simple classifiers
@@ -531,23 +553,6 @@ Dealing with names
 \begin{code}
 tcdName :: TyClDecl name -> name
 tcdName decl = unLoc (tcdLName decl)
-
-tyClDeclNames :: Eq name => TyClDecl name -> [Located name]
--- ^ Returns all the /binding/ names of the decl, along with their SrcLocs.
--- The first one is guaranteed to be the name of the decl. For record fields
--- mentioned in multiple constructors, the SrcLoc will be from the first
--- occurence.  We use the equality to filter out duplicate field names
-
-tyClDeclNames (TyFamily    {tcdLName = name})    = [name]
-tyClDeclNames (TySynonym   {tcdLName = name})    = [name]
-tyClDeclNames (ForeignType {tcdLName = name})    = [name]
-
-tyClDeclNames (ClassDecl {tcdLName = cls_name, tcdSigs = sigs, tcdATs = ats})
-  = cls_name : 
-    concatMap (tyClDeclNames . unLoc) ats ++ [n | L _ (TypeSig n _) <- sigs]
-
-tyClDeclNames (TyData {tcdLName = tc_name, tcdCons = cons})
-  = tc_name : hsConDeclsNames cons
 
 tyClDeclTyVars :: TyClDecl name -> [LHsTyVarBndr name]
 tyClDeclTyVars (TyFamily    {tcdTyVars = tvs}) = tvs
@@ -632,6 +637,7 @@ instance OutputableBndr name
         top_matter    =     ptext (sLit "class") 
 		        <+> pp_decl_head (unLoc context) lclas tyvars Nothing
 		        <+> pprFundeps (map unLoc fds)
+        ppr_semi :: Outputable a => a -> SDoc
 	ppr_semi decl = ppr decl <> semi
 
 pp_decl_head :: OutputableBndr name
@@ -696,7 +702,7 @@ data ConDecl name
         -- ^ Constructor name.  This is used for the DataCon itself, and for
         -- the user-callable wrapper Id.
 
-    , con_explicit  :: HsExplicitForAll
+    , con_explicit  :: HsExplicitFlag
         -- ^ Is there an user-written forall? (cf. 'HsTypes.HsForAllTy')
 
     , con_qvars     :: [LHsTyVarBndr name]
@@ -724,7 +730,7 @@ data ConDecl name
 	--   	       	               GADT-style record decl   C { blah } :: T a b
 	-- Remove this when we no longer parse this stuff, and hence do not
 	-- need to report decprecated use
-    }
+    } deriving (Data, Typeable)
 
 type HsConDeclDetails name = HsConDetails (LBangType name) [ConDeclField name]
 
@@ -737,6 +743,7 @@ data ResType name
    = ResTyH98		-- Constructor was declared using Haskell 98 syntax
    | ResTyGADT (LHsType name)	-- Constructor was declared using GADT-style syntax,
 				--	and here is its result type
+   deriving (Data, Typeable)
 
 instance OutputableBndr name => Outputable (ResType name) where
 	 -- Debugging only
@@ -744,24 +751,6 @@ instance OutputableBndr name => Outputable (ResType name) where
    ppr (ResTyGADT ty) = ptext (sLit "ResTyGADT") <+> pprParendHsType (unLoc ty)
 \end{code}
 
-\begin{code}
-hsConDeclsNames :: (Eq name) => [LConDecl name] -> [Located name]
-  -- See tyClDeclNames for what this does
-  -- The function is boringly complicated because of the records
-  -- And since we only have equality, we have to be a little careful
-hsConDeclsNames cons
-  = snd (foldl do_one ([], []) cons)
-  where
-    do_one (flds_seen, acc) (L _ (ConDecl { con_name = lname, con_details = RecCon flds }))
-	= (map unLoc new_flds ++ flds_seen, lname : new_flds ++ acc)
-	where
-	  new_flds = filterOut (\f -> unLoc f `elem` flds_seen) 
-			       (map cd_fld_name flds)
-
-    do_one (flds_seen, acc) (L _ (ConDecl { con_name = lname }))
-	= (flds_seen, lname:acc)
-\end{code}
-  
 
 \begin{code}
 instance (OutputableBndr name) => Outputable (ConDecl name) where
@@ -812,6 +801,7 @@ data InstDecl name
 		[LSig name]	-- User-supplied pragmatic info
 		[LTyClDecl name]-- Associated types (ie, 'TyData' and
 				-- 'TySynonym' only)
+  deriving (Data, Typeable)
 
 instance (OutputableBndr name) => Outputable (InstDecl name) where
 
@@ -823,8 +813,8 @@ instance (OutputableBndr name) => Outputable (InstDecl name) where
 
 -- Extract the declarations of associated types from an instance
 --
-instDeclATs :: InstDecl name -> [LTyClDecl name]
-instDeclATs (InstDecl _ _ _ ats) = ats
+instDeclATs :: [LInstDecl name] -> [LTyClDecl name]
+instDeclATs inst_decls = [at | L _ (InstDecl _ _ _ ats) <- inst_decls, at <- ats]
 \end{code}
 
 %************************************************************************
@@ -837,6 +827,7 @@ instDeclATs (InstDecl _ _ _ ats) = ats
 type LDerivDecl name = Located (DerivDecl name)
 
 data DerivDecl name = DerivDecl (LHsType name)
+  deriving (Data, Typeable)
 
 instance (OutputableBndr name) => Outputable (DerivDecl name) where
     ppr (DerivDecl ty) 
@@ -858,6 +849,7 @@ type LDefaultDecl name = Located (DefaultDecl name)
 
 data DefaultDecl name
   = DefaultDecl	[LHsType name]
+  deriving (Data, Typeable)
 
 instance (OutputableBndr name)
 	      => Outputable (DefaultDecl name) where
@@ -885,6 +877,7 @@ type LForeignDecl name = Located (ForeignDecl name)
 data ForeignDecl name
   = ForeignImport (Located name) (LHsType name) ForeignImport  -- defines name
   | ForeignExport (Located name) (LHsType name) ForeignExport  -- uses name
+  deriving (Data, Typeable)
 
 -- Specification Of an imported external entity in dependence on the calling
 -- convention 
@@ -907,6 +900,7 @@ data ForeignImport = -- import of a C entity
 			      Safety	      -- safe or unsafe
 			      FastString      -- name of C header
 			      CImportSpec     -- details of the C entity
+  deriving (Data, Typeable)
 
 -- details of an external C entity
 --
@@ -914,11 +908,13 @@ data CImportSpec = CLabel    CLabelString     -- import address of a C label
 		 | CFunction CCallTarget      -- static or dynamic function
 		 | CWrapper		      -- wrapper to expose closures
 					      -- (former f.e.d.)
+  deriving (Data, Typeable)
 
 -- specification of an externally exported entity in dependence on the calling
 -- convention
 --
 data ForeignExport = CExport  CExportSpec    -- contains the calling convention
+  deriving (Data, Typeable)
 
 -- pretty printing of foreign declarations
 --
@@ -940,7 +936,7 @@ instance Outputable ForeignImport where
 
       pprCEntity (CLabel lbl) = 
         ptext (sLit "static") <+> pp_hdr <+> char '&' <> ppr lbl
-      pprCEntity (CFunction (StaticTarget lbl)) = 
+      pprCEntity (CFunction (StaticTarget lbl _)) = 
         ptext (sLit "static") <+> pp_hdr <+> ppr lbl
       pprCEntity (CFunction (DynamicTarget)) =
         ptext (sLit "dynamic")
@@ -970,10 +966,12 @@ data RuleDecl name
         NameSet                 -- Free-vars from the LHS
 	(Located (HsExpr name))	-- RHS
         NameSet                 -- Free-vars from the RHS
+  deriving (Data, Typeable)
 
 data RuleBndr name
   = RuleBndr (Located name)
   | RuleBndrSig (Located name) (LHsType name)
+  deriving (Data, Typeable)
 
 collectRuleBndrSigTys :: [RuleBndr name] -> [LHsType name]
 collectRuleBndrSigTys bndrs = [ty | RuleBndrSig _ ty <- bndrs]
@@ -1007,6 +1005,7 @@ data DocDecl
   | DocCommentPrev HsDocString
   | DocCommentNamed String HsDocString
   | DocGroup Int HsDocString
+  deriving (Data, Typeable)
  
 -- Okay, I need to reconstruct the document comments, but for now:
 instance Outputable DocDecl where
@@ -1032,6 +1031,7 @@ We use exported entities for things to deprecate.
 type LWarnDecl name = Located (WarnDecl name)
 
 data WarnDecl name = Warning name WarningTxt
+  deriving (Data, Typeable)
 
 instance OutputableBndr name => Outputable (WarnDecl name) where
     ppr (Warning thing txt)
@@ -1048,6 +1048,7 @@ instance OutputableBndr name => Outputable (WarnDecl name) where
 type LAnnDecl name = Located (AnnDecl name)
 
 data AnnDecl name = HsAnnotation (AnnProvenance name) (Located (HsExpr name))
+  deriving (Data, Typeable)
 
 instance (OutputableBndr name) => Outputable (AnnDecl name) where
     ppr (HsAnnotation provenance expr) 
@@ -1057,6 +1058,7 @@ instance (OutputableBndr name) => Outputable (AnnDecl name) where
 data AnnProvenance name = ValueAnnProvenance name
                         | TypeAnnProvenance name
                         | ModuleAnnProvenance
+  deriving (Data, Typeable)
 
 annProvenanceName_maybe :: AnnProvenance name -> Maybe name
 annProvenanceName_maybe (ValueAnnProvenance name) = Just name

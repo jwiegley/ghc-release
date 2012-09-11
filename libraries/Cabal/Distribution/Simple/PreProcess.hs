@@ -62,7 +62,9 @@ import Distribution.Package
 import qualified Distribution.ModuleName as ModuleName
 import Distribution.PackageDescription as PD
          ( PackageDescription(..), BuildInfo(..), Executable(..), withExe
-         , Library(..), withLib, libModules )
+         , Library(..), withLib, libModules
+         , TestSuite(..), withTest, testModules
+         , TestSuiteInterface(..) )
 import qualified Distribution.InstalledPackageInfo as Installed
          ( InstalledPackageInfo_(..) )
 import qualified Distribution.Simple.PackageIndex as PackageIndex
@@ -75,13 +77,17 @@ import Distribution.Simple.Utils
          , die, setupMessage, intercalate, copyFileVerbose
          , findFileWithExtension, findFileWithExtension' )
 import Distribution.Simple.Program
-         ( Program(..), ConfiguredProgram(..), lookupProgram, programPath
+         ( Program(..), ConfiguredProgram(..), programPath
+         , lookupProgram, requireProgram, requireProgramVersion
          , rawSystemProgramConf, rawSystemProgram
          , greencardProgram, cpphsProgram, hsc2hsProgram, c2hsProgram
          , happyProgram, alexProgram, haddockProgram, ghcProgram, gccProgram )
+import Distribution.Simple.Test ( writeSimpleTestStub, stubFilePath, stubName )
 import Distribution.System
          ( OS(OSX, Windows), buildOS )
-import Distribution.Version (Version(..))
+import Distribution.Text
+import Distribution.Version
+         ( Version(..), anyVersion, orLaterVersion )
 import Distribution.Verbosity
 
 import Control.Monad (when, unless)
@@ -196,11 +202,39 @@ preprocessSources pkg_descr lbi forSDist verbosity handlers = do
         preprocessFile (hsSourceDirs bi) exeDir forSDist
                          (dropExtensions (modulePath theExe))
                          verbosity builtinSuffixes biHandlers
+    unless (null (testSuites pkg_descr)) $
+        setupMessage verbosity "Preprocessing test suites for" (packageId pkg_descr)
+    withTest pkg_descr $ \test -> case testInterface test of
+        TestSuiteExeV10 _ f ->
+            preProcessTest test f $ buildDir lbi </> testName test
+                </> testName test ++ "-tmp"
+        TestSuiteLibV09 _ _ -> do
+            let testDir = buildDir lbi </> stubName test
+                    </> stubName test ++ "-tmp"
+            writeSimpleTestStub test testDir
+            preProcessTest test (stubFilePath test) testDir
+        TestSuiteUnsupported tt -> die $ "No support for preprocessing test "
+                                      ++ "suite type " ++ display tt
   where hc = compilerFlavor (compiler lbi)
         builtinSuffixes
           | hc == NHC = ["hs", "lhs", "gc"]
           | otherwise = ["hs", "lhs"]
         localHandlers bi = [(ext, h bi lbi) | (ext, h) <- handlers]
+        preProcessTest test exePath testDir = do
+            let bi = testBuildInfo test
+                biHandlers = localHandlers bi
+                sourceDirs = hsSourceDirs bi ++ [ autogenModulesDir lbi ]
+            sequence_ [ preprocessFile sourceDirs (buildDir lbi) forSDist
+                    (ModuleName.toFilePath modu) verbosity builtinSuffixes
+                    biHandlers
+                    | modu <- testModules test ]
+            preprocessFile (testDir : (hsSourceDirs bi)) testDir forSDist
+                (dropExtensions $ exePath) verbosity
+                builtinSuffixes biHandlers
+
+--TODO: try to list all the modules that could not be found
+--      not just the first one. It's annoying and slow due to the need
+--      to reconfigure after editing the .cabal file each time.
 
 -- |Find the first extension of the file that exists, and preprocess it
 -- if required.
@@ -219,8 +253,14 @@ preprocessFile searchLoc buildLoc forSDist baseFile verbosity builtinSuffixes ha
     psrcFiles <- findFileWithExtension' (map fst handlers) searchLoc baseFile
     case psrcFiles of
         -- no preprocessor file exists, look for an ordinary source file
+        -- just to make sure one actually exists at all for this module.
+        -- Note: by looking in the target/output build dir too, we allow
+        -- source files to appear magically in the target build dir without
+        -- any corresponding "real" source file. This lets custom Setup.hs
+        -- files generate source modules directly into the build dir without
+        -- the rest of the build system being aware of it (somewhat dodgy)
       Nothing -> do
-                 bsrcFiles <- findFileWithExtension builtinSuffixes searchLoc baseFile
+                 bsrcFiles <- findFileWithExtension builtinSuffixes (buildLoc : searchLoc) baseFile
                  case bsrcFiles of
                   Nothing -> die $ "can't find source for " ++ baseFile
                                 ++ " in " ++ intercalate ", " searchLoc
@@ -253,13 +293,36 @@ preprocessFile searchLoc buildLoc forSDist baseFile verbosity builtinSuffixes ha
               when recomp $ do
                 let destDir = buildLoc </> dirName srcStem
                 createDirectoryIfMissingVerbose verbosity True destDir
-                runPreProcessor pp
+                runPreProcessorWithHsBootHack pp
                    (psrcLoc, psrcRelFile)
-                   (buildLoc, srcStem <.> "hs") verbosity
+                   (buildLoc, srcStem <.> "hs")
 
-     where dirName = takeDirectory
-           tailNotNull [] = []
-           tailNotNull x  = tail x
+  where
+    dirName = takeDirectory
+    tailNotNull [] = []
+    tailNotNull x  = tail x
+
+    -- FIXME: This is a somewhat nasty hack. GHC requires that hs-boot files
+    -- be in the same place as the hs files, so if we put the hs file in dist/
+    -- then we need to copy the hs-boot file there too. This should probably be
+    -- done another way. Possibly we should also be looking for .lhs-boot
+    -- files, but I think that preprocessors only produce .hs files.
+    runPreProcessorWithHsBootHack pp
+      (inBaseDir,  inRelativeFile)
+      (outBaseDir, outRelativeFile) = do
+        runPreProcessor pp
+          (inBaseDir, inRelativeFile)
+          (outBaseDir, outRelativeFile) verbosity
+
+        exists <- doesFileExist inBoot
+        when exists $ copyFileVerbose verbosity inBoot outBoot
+
+      where
+        inBoot  = replaceExtension inFile  "hs-boot"
+        outBoot = replaceExtension outFile "hs-boot"
+
+        inFile  = normalise (inBaseDir  </> inRelativeFile)
+        outFile = normalise (outBaseDir </> outRelativeFile)
 
 -- ------------------------------------------------------------
 -- * known preprocessors
@@ -294,17 +357,15 @@ ppCpp' extraArgs bi lbi =
     GHC -> ppGhcCpp (cppArgs ++ extraArgs) bi lbi
     _   -> ppCpphs  (cppArgs ++ extraArgs) bi lbi
 
-  where cppArgs = sysDefines ++ cppOptions bi ++ getCppOptions bi lbi
-        sysDefines =
-                ["-D" ++ os ++ "_" ++ loc ++ "_OS" | loc <- locations] ++
-                ["-D" ++ arch ++ "_" ++ loc ++ "_ARCH" | loc <- locations]
-        locations = ["BUILD", "HOST"]
+  where cppArgs = getCppOptions bi lbi
 
 ppGhcCpp :: [String] -> BuildInfo -> LocalBuildInfo -> PreProcessor
 ppGhcCpp extraArgs _bi lbi =
   PreProcessor {
     platformIndependent = False,
-    runPreProcessor = mkSimplePreProcessor $ \inFile outFile verbosity ->
+    runPreProcessor = mkSimplePreProcessor $ \inFile outFile verbosity -> do
+      (ghcProg, ghcVersion, _) <- requireProgramVersion verbosity
+                                    ghcProgram anyVersion (withPrograms lbi)
       rawSystemProgram verbosity ghcProg $
           ["-E", "-cpp"]
           -- This is a bit of an ugly hack. We're going to
@@ -318,14 +379,14 @@ ppGhcCpp extraArgs _bi lbi =
        ++ ["-o", outFile, inFile]
        ++ extraArgs
   }
-  where Just ghcProg = lookupProgram ghcProgram (withPrograms lbi)
-        Just ghcVersion = programVersion ghcProg
 
 ppCpphs :: [String] -> BuildInfo -> LocalBuildInfo -> PreProcessor
 ppCpphs extraArgs _bi lbi =
   PreProcessor {
     platformIndependent = False,
-    runPreProcessor = mkSimplePreProcessor $ \inFile outFile verbosity ->
+    runPreProcessor = mkSimplePreProcessor $ \inFile outFile verbosity -> do
+      (cpphsProg, cpphsVersion, _) <- requireProgramVersion verbosity
+                                        cpphsProgram anyVersion (withPrograms lbi)
       rawSystemProgram verbosity cpphsProg $
           ("-O" ++ outFile) : inFile
         : "--noline" : "--strip"
@@ -334,8 +395,6 @@ ppCpphs extraArgs _bi lbi =
              else [])
         ++ extraArgs
   }
-  where Just cpphsProg = lookupProgram cpphsProgram (withPrograms lbi)
-        Just cpphsVersion = programVersion cpphsProg
 
 -- Haddock versions before 0.8 choke on #line and #file pragmas.  Those
 -- pragmas are necessary for correct links when we preprocess.  So use
@@ -348,55 +407,65 @@ use_optP_P lbi
      _                               -> True
 
 ppHsc2hs :: BuildInfo -> LocalBuildInfo -> PreProcessor
-ppHsc2hs bi lbi = standardPP lbi hsc2hsProgram $
-    [ "--cc=" ++ programPath gccProg
-    , "--ld=" ++ programPath gccProg ]
+ppHsc2hs bi lbi =
+  PreProcessor {
+    platformIndependent = False,
+    runPreProcessor = mkSimplePreProcessor $ \inFile outFile verbosity -> do
+      (gccProg, _) <- requireProgram verbosity gccProgram (withPrograms lbi)
+      rawSystemProgramConf verbosity hsc2hsProgram (withPrograms lbi) $
+          [ "--cc=" ++ programPath gccProg
+          , "--ld=" ++ programPath gccProg ]
 
-    -- Additional gcc options
- ++ [ "--cflag=" ++ opt | opt <- programArgs gccProg ]
- ++ [ "--lflag=" ++ opt | opt <- programArgs gccProg ]
+          -- Additional gcc options
+       ++ [ "--cflag=" ++ opt | opt <- programDefaultArgs  gccProg
+                                    ++ programOverrideArgs gccProg ]
+       ++ [ "--lflag=" ++ opt | opt <- programDefaultArgs  gccProg
+                                    ++ programOverrideArgs gccProg ]
 
-    -- OSX frameworks:
- ++ [ what ++ "=-F" ++ opt
-    | isOSX
-    , opt <- nub (concatMap Installed.frameworkDirs pkgs)
-    , what <- ["--cflag", "--lflag"] ]
- ++ [ "--lflag=" ++ arg
-    | isOSX
-    , opt <- PD.frameworks bi ++ concatMap Installed.frameworks pkgs
-    , arg <- ["-framework", opt] ]
+          -- OSX frameworks:
+       ++ [ what ++ "=-F" ++ opt
+          | isOSX
+          , opt <- nub (concatMap Installed.frameworkDirs pkgs)
+          , what <- ["--cflag", "--lflag"] ]
+       ++ [ "--lflag=" ++ arg
+          | isOSX
+          , opt <- PD.frameworks bi ++ concatMap Installed.frameworks pkgs
+          , arg <- ["-framework", opt] ]
 
-    -- Note that on ELF systems, wherever we use -L, we must also use -R
-    -- because presumably that -L dir is not on the normal path for the
-    -- system's dynamic linker. This is needed because hsc2hs works by
-    -- compiling a C program and then running it.
+          -- Note that on ELF systems, wherever we use -L, we must also use -R
+          -- because presumably that -L dir is not on the normal path for the
+          -- system's dynamic linker. This is needed because hsc2hs works by
+          -- compiling a C program and then running it.
 
-    -- Options from the current package:
- ++ [ "--cflag="   ++ opt | opt <- hcDefines (compiler lbi) ]
- ++ [ "--cflag=-I" ++ dir | dir <- PD.includeDirs  bi ]
- ++ [ "--cflag="   ++ opt | opt <- PD.ccOptions    bi
-                                ++ PD.cppOptions   bi ]
- ++ [ "--lflag=-L" ++ opt | opt <- PD.extraLibDirs bi ]
- ++ [ "--lflag=-Wl,-R," ++ opt | isELF
-                          , opt <- PD.extraLibDirs bi ]
- ++ [ "--lflag=-l" ++ opt | opt <- PD.extraLibs    bi ]
- ++ [ "--lflag="   ++ opt | opt <- PD.ldOptions    bi ]
+       ++ [ "--cflag="   ++ opt | opt <- hcDefines (compiler lbi) ]
+       ++ [ "--cflag="   ++ opt | opt <- sysDefines ]
 
-    -- Options from dependent packages
- ++ [ "--cflag=" ++ opt
-    | pkg <- pkgs
-    , opt <- [ "-I" ++ opt | opt <- Installed.includeDirs pkg ]
-          ++ [         opt | opt <- Installed.ccOptions   pkg ] ]
- ++ [ "--lflag=" ++ opt
-    | pkg <- pkgs
-    , opt <- [ "-L" ++ opt | opt <- Installed.libraryDirs    pkg ]
-          ++ [ "-Wl,-R," ++ opt | isELF
-                           , opt <- Installed.libraryDirs    pkg ]
-          ++ [ "-l" ++ opt | opt <- Installed.extraLibraries pkg ]
-          ++ [         opt | opt <- Installed.ldOptions      pkg ] ]
+          -- Options from the current package:
+       ++ [ "--cflag=-I" ++ dir | dir <- PD.includeDirs  bi ]
+       ++ [ "--cflag="   ++ opt | opt <- PD.ccOptions    bi
+                                      ++ PD.cppOptions   bi ]
+       ++ [ "--lflag=-L" ++ opt | opt <- PD.extraLibDirs bi ]
+       ++ [ "--lflag=-Wl,-R," ++ opt | isELF
+                                , opt <- PD.extraLibDirs bi ]
+       ++ [ "--lflag=-l" ++ opt | opt <- PD.extraLibs    bi ]
+       ++ [ "--lflag="   ++ opt | opt <- PD.ldOptions    bi ]
+
+          -- Options from dependent packages
+       ++ [ "--cflag=" ++ opt
+          | pkg <- pkgs
+          , opt <- [ "-I" ++ opt | opt <- Installed.includeDirs pkg ]
+                ++ [         opt | opt <- Installed.ccOptions   pkg ] ]
+       ++ [ "--lflag=" ++ opt
+          | pkg <- pkgs
+          , opt <- [ "-L" ++ opt | opt <- Installed.libraryDirs    pkg ]
+                ++ [ "-Wl,-R," ++ opt | isELF
+                                 , opt <- Installed.libraryDirs    pkg ]
+                ++ [ "-l" ++ opt | opt <- Installed.extraLibraries pkg ]
+                ++ [         opt | opt <- Installed.ldOptions      pkg ] ]
+       ++ ["-o", outFile, inFile]
+  }
   where
     pkgs = PackageIndex.topologicalOrder (packageHacks (installedPkgs lbi))
-    Just gccProg = lookupProgram  gccProgram (withPrograms lbi)
     isOSX = case buildOS of OSX -> True; _ -> False
     isELF = case buildOS of OSX -> False; Windows -> False; _ -> True;
     packageHacks = case compilerFlavor (compiler lbi) of
@@ -414,24 +483,54 @@ ppHsc2hs bi lbi = standardPP lbi hsc2hsProgram $
 
 
 ppC2hs :: BuildInfo -> LocalBuildInfo -> PreProcessor
-ppC2hs bi lbi
-    = PreProcessor {
-        platformIndependent = False,
-        runPreProcessor = \(inBaseDir, inRelativeFile)
-                           (outBaseDir, outRelativeFile) verbosity ->
-          rawSystemProgramConf verbosity c2hsProgram (withPrograms lbi) $
-               ["--include=" ++ outBaseDir]
-            ++ ["--cppopts=" ++ opt | opt <- getCppOptions bi lbi]
-            ++ ["--output-dir=" ++ outBaseDir,
-                "--output=" ++ outRelativeFile,
-                inBaseDir </> inRelativeFile]
-      }
+ppC2hs bi lbi =
+  PreProcessor {
+    platformIndependent = False,
+    runPreProcessor = \(inBaseDir, inRelativeFile)
+                       (outBaseDir, outRelativeFile) verbosity -> do
+      (c2hsProg, _, _) <- requireProgramVersion verbosity
+                            c2hsProgram (orLaterVersion (Version [0,15] []))
+                            (withPrograms lbi)
+      (gccProg, _) <- requireProgram verbosity gccProgram (withPrograms lbi)
+      rawSystemProgram verbosity c2hsProg $
 
+          -- Options from the current package:
+           [ "--cpp=" ++ programPath gccProg, "--cppopts=-E" ]
+        ++ [ "--cppopts=" ++ opt | opt <- getCppOptions bi lbi ]
+        ++ [ "--include=" ++ outBaseDir ]
+
+          -- Options from dependent packages
+       ++ [ "--cppopts=" ++ opt
+          | pkg <- pkgs
+          , opt <- [ "-I" ++ opt | opt <- Installed.includeDirs pkg ]
+                ++ [         opt | opt@('-':c:_) <- Installed.ccOptions pkg
+                                 , c `elem` "DIU" ] ]
+          --TODO: install .chi files for packages, so we can --include
+          -- those dirs here, for the dependencies
+
+           -- input and output files
+        ++ [ "--output-dir=" ++ outBaseDir
+           , "--output=" ++ outRelativeFile
+           , inBaseDir </> inRelativeFile ]
+  }
+  where
+    pkgs = PackageIndex.topologicalOrder (installedPkgs lbi)
+
+--TODO: perhaps use this with hsc2hs too
+--TODO: remove cc-options from cpphs for cabal-version: >= 1.10
 getCppOptions :: BuildInfo -> LocalBuildInfo -> [String]
 getCppOptions bi lbi
     = hcDefines (compiler lbi)
+   ++ sysDefines
+   ++ cppOptions bi
    ++ ["-I" ++ dir | dir <- PD.includeDirs bi]
    ++ [opt | opt@('-':c:_) <- PD.ccOptions bi, c `elem` "DIU"]
+
+sysDefines :: [String]
+sysDefines = ["-D" ++ os   ++ "_" ++ loc ++ "_OS"   | loc <- locations]
+          ++ ["-D" ++ arch ++ "_" ++ loc ++ "_ARCH" | loc <- locations]
+  where
+    locations = ["BUILD", "HOST"]
 
 hcDefines :: Compiler -> [String]
 hcDefines comp =
@@ -478,21 +577,8 @@ standardPP lbi prog args =
   PreProcessor {
     platformIndependent = False,
     runPreProcessor = mkSimplePreProcessor $ \inFile outFile verbosity ->
-      do rawSystemProgramConf verbosity prog (withPrograms lbi)
-                              (args ++ ["-o", outFile, inFile])
-         -- XXX This is a nasty hack. GHC requires that hs-boot files
-         -- be in the same place as the hs files, so if we put the hs
-         -- file in dist/... then we need to copy the hs-boot file
-         -- there too. This should probably be done another way, e.g.
-         -- by preprocessing all files, with and "id" preprocessor if
-         -- nothing else, so the hs-boot files automatically get copied
-         -- into the right place.
-         -- Possibly we should also be looking for .lhs-boot files, but
-         -- I think that preprocessors only produce .hs files.
-         let inBoot  = replaceExtension inFile  "hs-boot"
-             outBoot = replaceExtension outFile "hs-boot"
-         exists <- doesFileExist inBoot
-         when exists $ copyFileVerbose verbosity inBoot outBoot
+      rawSystemProgramConf verbosity prog (withPrograms lbi)
+                           (args ++ ["-o", outFile, inFile])
   }
 
 -- |Convenience function; get the suffixes of these preprocessors.

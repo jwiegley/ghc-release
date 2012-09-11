@@ -40,7 +40,6 @@ module PPC.Regs (
 	-- horrow show
 	freeReg,
 	globalRegMaybe,
-	get_GlobalReg_reg_or_addr,
 	allocatableRegs
 
 )
@@ -55,7 +54,6 @@ import Reg
 import RegClass
 import Size
 
-import CgUtils          ( get_GlobalReg_addr )
 import BlockId
 import Cmm
 import CLabel           ( CLabel )
@@ -87,25 +85,15 @@ virtualRegSqueeze cls vr
 	 -> case vr of
 	 	VirtualRegI{}		-> _ILIT(1)
 		VirtualRegHi{}		-> _ILIT(1)
-		VirtualRegD{}		-> _ILIT(0)
-		VirtualRegF{}		-> _ILIT(0)
-
-	-- We don't use floats on this arch, but we can't
-	--	return error because the return type is unboxed...
-	RcFloat
-	 -> case vr of
-	 	VirtualRegI{}		-> _ILIT(0)
-		VirtualRegHi{}		-> _ILIT(0)
-		VirtualRegD{}		-> _ILIT(0)
-		VirtualRegF{}		-> _ILIT(0)
+                _other                  -> _ILIT(0)
 
 	RcDouble
 	 -> case vr of
-	 	VirtualRegI{}		-> _ILIT(0)
-		VirtualRegHi{}		-> _ILIT(0)
 		VirtualRegD{}		-> _ILIT(1)
 		VirtualRegF{}		-> _ILIT(0)
+                _other                  -> _ILIT(0)
 
+        _other -> _ILIT(0)
 
 {-# INLINE realRegSqueeze #-}
 realRegSqueeze :: RegClass -> RealReg -> FastInt
@@ -119,16 +107,6 @@ realRegSqueeze cls rr
 			
 		RealRegPair{}		-> _ILIT(0)
 
-	-- We don't use floats on this arch, but we can't
-	--	return error because the return type is unboxed...
-	RcFloat
-	 -> case rr of
-	 	RealRegSingle regNo
-			| regNo	< 32	-> _ILIT(0)
-			| otherwise	-> _ILIT(0)
-			
-		RealRegPair{}		-> _ILIT(0)
-
 	RcDouble
 	 -> case rr of
 	 	RealRegSingle regNo
@@ -136,6 +114,8 @@ realRegSqueeze cls rr
 			| otherwise	-> _ILIT(1)
 			
 		RealRegPair{}		-> _ILIT(0)
+
+        _other -> _ILIT(0)
 
 mkVirtualReg :: Unique -> Size -> VirtualReg
 mkVirtualReg u size
@@ -152,6 +132,7 @@ regDotColor reg
         RcInteger       -> Outputable.text "blue"
         RcFloat         -> Outputable.text "red"
         RcDouble        -> Outputable.text "green"
+        RcDoubleSSE     -> Outputable.text "yellow"
 
 
 -- immediates ------------------------------------------------------------------
@@ -610,20 +591,6 @@ freeReg _		= 0#
 globalRegMaybe _	= panic "PPC.Regs.globalRegMaybe: not defined"
 
 #endif /* powerpc_TARGET_ARCH */
-
-
--- We map STG registers onto appropriate CmmExprs.  Either they map
--- to real machine registers or stored as offsets from BaseReg.  Given
--- a GlobalReg, get_GlobalReg_reg_or_addr produces either the real
--- register it is in, on this platform, or a CmmExpr denoting the
--- address in the register table holding it.
--- (See also get_GlobalReg_addr in CgUtils.)
-
-get_GlobalReg_reg_or_addr :: GlobalReg -> Either Reg CmmExpr
-get_GlobalReg_reg_or_addr mid
-   = case globalRegMaybe mid of
-        Just rr -> Left rr
-        Nothing -> Right (get_GlobalReg_addr mid)
 
 
 -- allocatableRegs is allMachRegNos with the fixed-use regs removed.

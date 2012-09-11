@@ -4,12 +4,6 @@
 #	extra run flags
 #	expected process return value, if not zero
 
-def f( opts ):
-  opts.extra_hc_opts = '-fglasgow-exts'
-
-setTestOpts(f)
-
-
 # Doesn't work with External Core due to __labels
 test('fed001', compose(only_compiler_types(['ghc']),
 			expect_fail_for(['extcore','optextcore'])),
@@ -17,7 +11,12 @@ test('fed001', compose(only_compiler_types(['ghc']),
 
 # Omit GHCi for these two, as they use foreign export
 test('ffi001', omit_ways(['ghci']), compile_and_run, [''])
-test('ffi002', [ omit_ways(['ghci']), extra_clean(['ffi002_c.o']) ],
+test('ffi002', [ omit_ways(['ghci']),
+                 extra_clean(['ffi002_c.o']),
+                 compile_cmd_prefix('$MAKE ffi002_setup && ') ],
+                 # The ffi002_setup hack is to ensure that we generate
+                 # ffi002_stub.h before compiling ffi002_c.c, which
+                 # needs it.
                compile_and_run, ['ffi002_c.c -no-hs-main'])
 
 test('ffi003', normal, compile_and_run, [''])
@@ -58,18 +57,18 @@ test('ffi008', compose(expect_fail_for(['extcore','optextcore']),
 			       omit_ways(['ghci']))), 
 	       compile_and_run, [''])
 
-# On i386, expect fail for way optasm, because the native code generator
-# doesn't do -ffloat-store and gets different answers when
-# optimisation is on. Doesn't have this issue on OpenBSD. Why?
+# On i386, we need -msse2 to get reliable floating point results
+maybe_skip = normal
+opts = ''
+if config.platform.startswith('i386-'):
+   if config.compiler_type == 'ghc' and \
+      version_ge(config.compiler_version, '6.13'):
+	opts = '-msse2'
+   else:
+        maybe_skip = only_ways(['optc','profc','ghci'])
 
-if config.platform == 'i386-unknown-openbsd':
-	ways = expect_fail_for(['extcore','optextcore'])
-elif config.platform.startswith('i386-'):
-	ways = only_ways(['optc','profc','ghci'])
-else:
-	ways = expect_fail_for(['extcore','optextcore'])
-
-test('ffi009', compose(skip_if_fast,ways) ,compile_and_run, [''])
+test('ffi009', [skip_if_fast, expect_fail_for(['extcore','optextcore']),
+                maybe_skip] ,compile_and_run, [opts])
 
 # Doesn't work with External Core due to __labels
 test('ffi010', expect_fail_for(['extcore','optextcore']), compile_and_run, [''])
@@ -116,18 +115,18 @@ test('ffi019', normal, compile_and_run, [''])
 # This one originally failed only GHCi, but doesn't hurt to test all ways.
 test('1679', normal, compile_and_run, [''])
 
-test('1288', [ skip_if_not_windows, omit_ways(['ghci']),
+test('1288', [ omit_ways(['ghci']),
                extra_clean(['1288_c.o']) ],
              compile_and_run, ['1288_c.c'])
-test('1288_ghci', [ skip_if_not_windows, only_ways(['ghci']),
+test('1288_ghci', [ only_ways(['ghci']),
                     cmd_prefix('$MAKE --no-print-directory 1288_ghci_setup && '),
                     extra_clean(['1288_ghci_c.o']) ],
                   compile_and_run, ['1288_ghci_c.o'])
 
-test('2276', [ skip_if_not_windows, omit_ways(['ghci']), 
+test('2276', [ omit_ways(['ghci']), 
                extra_clean(['2276_c.o']) ],
              compile_and_run, ['2276_c.c'])
-test('2276_ghci', [ skip_if_not_windows, only_ways(['ghci']),
+test('2276_ghci', [ only_ways(['ghci']),
                     cmd_prefix('$MAKE --no-print-directory 2276_ghci_setup && '),
                     extra_clean(['2276_ghci_c.o']) ],
                   compile_and_run, ['-fobject-code 2276_ghci_c.o'])
@@ -152,3 +151,14 @@ test('ffi020', [ omit_ways(prof_ways),
 
 
 test('ffi021', normal, compile_and_run, [''])
+
+if config.platform == 'i386-unknown-mingw32':
+    # This test needs a larger C stack than we get by default on Windows
+	flagsFor4038 = ['-optl-Wl,--stack,10485760']
+else:
+	flagsFor4038 = ['']
+test('4038', normal, compile_and_run, flagsFor4038)
+
+test('4221', [ omit_ways(['ghci']), extra_clean(['4221_c.o']) ],
+               compile_and_run, ['4221_c.c'])
+

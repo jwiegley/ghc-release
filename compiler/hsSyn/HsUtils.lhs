@@ -1,3 +1,4 @@
+
 %
 % (c) The University of Glasgow, 1992-2006
 %
@@ -13,8 +14,57 @@ which deal with the intantiated versions are located elsewhere:
    Id			typecheck/TcHsSyn	
 
 \begin{code}
-module HsUtils where
+module HsUtils(
+  -- Terms
+  mkHsPar, mkHsApp, mkHsConApp, mkSimpleHsAlt,
+  mkSimpleMatch, unguardedGRHSs, unguardedRHS, 
+  mkMatchGroup, mkMatch, mkHsLam, mkHsIf,
+  mkHsWrap, mkLHsWrap, mkHsWrapCoI, mkLHsWrapCoI,
+  coiToHsWrapper, mkHsDictLet,
+  mkHsOpApp, mkHsDo, mkHsWrapPat, mkHsWrapPatCoI,
 
+  nlHsTyApp, nlHsVar, nlHsLit, nlHsApp, nlHsApps, nlHsIntLit, nlHsVarApps, 
+  nlHsDo, nlHsOpApp, nlHsLam, nlHsPar, nlHsIf, nlHsCase, nlList,
+  mkLHsTupleExpr, mkLHsVarTuple, missingTupArg,
+
+  -- Bindigns
+  mkFunBind, mkVarBind, mkHsVarBind, mk_easy_FunBind, 
+
+  -- Literals
+  mkHsIntegral, mkHsFractional, mkHsIsString, mkHsString, 
+
+  -- Patterns
+  mkNPat, mkNPlusKPat, nlVarPat, nlLitPat, nlConVarPat, nlConPat, nlInfixConPat,
+  nlNullaryConPat, nlWildConPat, nlWildPat, nlTuplePat, 
+
+  -- Types
+  mkHsAppTy, userHsTyVarBndrs,
+  nlHsAppTy, nlHsTyVar, nlHsFunTy, nlHsTyConApp, 
+
+  -- Stmts
+  mkTransformStmt, mkTransformByStmt, mkExprStmt, mkBindStmt,
+  mkGroupUsingStmt, mkGroupByStmt, mkGroupByUsingStmt, 
+  emptyRecStmt, mkRecStmt, 
+
+  -- Template Haskell
+  unqualSplice, mkHsSpliceTy, mkHsSplice, mkHsQuasiQuote, unqualQuasiQuote,
+
+  -- Flags
+  noRebindableInfo, 
+
+  -- Collecting binders
+  collectLocalBinders, collectHsValBinders, collectHsBindListBinders,
+  collectHsBindsBinders, collectHsBindBinders, collectMethodBinders,
+  collectPatBinders, collectPatsBinders,
+  collectLStmtsBinders, collectStmtsBinders,
+  collectLStmtBinders, collectStmtBinders,
+  collectSigTysFromPats, collectSigTysFromPat,
+
+  hsTyClDeclBinders, hsTyClDeclsBinders, hsConDeclsBinders, 
+  hsForeignDeclsBinders, hsGroupBinders
+  ) where
+
+import HsDecls
 import HsBinds
 import HsExpr
 import HsPat
@@ -27,10 +77,10 @@ import Coercion
 import Type
 import DataCon
 import Name
+import NameSet
 import BasicTypes
 import SrcLoc
 import FastString
-import Outputable
 import Util
 import Bag
 \end{code}
@@ -82,12 +132,24 @@ mkHsWrap co_fn e | isIdHsWrapper co_fn = e
 		 | otherwise	       = HsWrap co_fn e
 
 mkHsWrapCoI :: CoercionI -> HsExpr id -> HsExpr id
-mkHsWrapCoI IdCo     e = e
+mkHsWrapCoI (IdCo _) e = e
 mkHsWrapCoI (ACo co) e = mkHsWrap (WpCast co) e
 
+mkLHsWrapCoI :: CoercionI -> LHsExpr id -> LHsExpr id
+mkLHsWrapCoI (IdCo _) e         = e
+mkLHsWrapCoI (ACo co) (L loc e) = L loc (mkHsWrap (WpCast co) e)
+
 coiToHsWrapper :: CoercionI -> HsWrapper
-coiToHsWrapper IdCo     = idHsWrapper
+coiToHsWrapper (IdCo _) = idHsWrapper
 coiToHsWrapper (ACo co) = WpCast co
+
+mkHsWrapPat :: HsWrapper -> Pat id -> Type -> Pat id
+mkHsWrapPat co_fn p ty | isIdHsWrapper co_fn = p
+		       | otherwise	     = CoPat co_fn p ty
+
+mkHsWrapPatCoI :: CoercionI -> Pat id -> Type -> Pat id
+mkHsWrapPatCoI (IdCo _) pat _  = pat
+mkHsWrapPatCoI (ACo co) pat ty = CoPat (WpCast co) pat ty
 
 mkHsLam :: [LPat id] -> LHsExpr id -> LHsExpr id
 mkHsLam pats body = mkHsPar (L (getLoc body) (HsLam matches))
@@ -97,14 +159,8 @@ mkHsLam pats body = mkHsPar (L (getLoc body) (HsLam matches))
 mkMatchGroup :: [LMatch id] -> MatchGroup id
 mkMatchGroup matches = MatchGroup matches placeHolderType
 
-mkHsDictLet :: LHsBinds Id -> LHsExpr Id -> LHsExpr Id
--- Used for the dictionary bindings gotten from TcSimplify
--- We make them recursive to be on the safe side
-mkHsDictLet binds expr 
-  | isEmptyLHsBinds binds = expr
-  | otherwise             = L (getLoc expr) (HsLet (HsValBinds val_binds) expr)
-			  where
-			    val_binds = ValBindsOut [(Recursive, binds)] []
+mkHsDictLet :: TcEvBinds -> LHsExpr Id -> LHsExpr Id
+mkHsDictLet ev_binds expr = mkLHsWrap (WpLet ev_binds) expr
 
 mkHsConApp :: DataCon -> [Type] -> [HsExpr Id] -> LHsExpr Id
 -- Used for constructing dictionary terms etc, so no locations 
@@ -133,10 +189,6 @@ mkNPlusKPat :: Located id -> HsOverLit id -> Pat id
 mkTransformStmt   :: [LStmt idL] -> LHsExpr idR                -> StmtLR idL idR
 mkTransformByStmt :: [LStmt idL] -> LHsExpr idR -> LHsExpr idR -> StmtLR idL idR
 
-mkGroupUsingStmt   :: [LStmt idL]                -> LHsExpr idR -> StmtLR idL idR
-mkGroupByStmt      :: [LStmt idL] -> LHsExpr idR                -> StmtLR idL idR
-mkGroupByUsingStmt :: [LStmt idL] -> LHsExpr idR -> LHsExpr idR -> StmtLR idL idR
-
 mkExprStmt :: LHsExpr idR -> StmtLR idL idR
 mkBindStmt :: LPat idL -> LHsExpr idR -> StmtLR idL idR
 
@@ -153,15 +205,22 @@ noRebindableInfo = error "noRebindableInfo" 	-- Just another placeholder;
 
 mkHsDo ctxt stmts body = HsDo ctxt stmts body placeHolderType
 
+mkHsIf :: LHsExpr id -> LHsExpr id -> LHsExpr id -> HsExpr id
+mkHsIf c a b = HsIf (Just noSyntaxExpr) c a b
+
 mkNPat lit neg     = NPat lit neg noSyntaxExpr
 mkNPlusKPat id lit = NPlusKPat id lit noSyntaxExpr noSyntaxExpr
 
-mkTransformStmt   stmts usingExpr        = TransformStmt (stmts, []) usingExpr Nothing
-mkTransformByStmt stmts usingExpr byExpr = TransformStmt (stmts, []) usingExpr (Just byExpr)
+mkTransformStmt   stmts usingExpr        = TransformStmt stmts [] usingExpr Nothing
+mkTransformByStmt stmts usingExpr byExpr = TransformStmt stmts [] usingExpr (Just byExpr)
 
-mkGroupUsingStmt   stmts usingExpr        = GroupStmt (stmts, []) (GroupByNothing usingExpr)
-mkGroupByStmt      stmts byExpr           = GroupStmt (stmts, []) (GroupBySomething (Right noSyntaxExpr) byExpr)
-mkGroupByUsingStmt stmts byExpr usingExpr = GroupStmt (stmts, []) (GroupBySomething (Left usingExpr) byExpr)
+mkGroupUsingStmt   :: [LStmt idL]                -> LHsExpr idR -> StmtLR idL idR
+mkGroupByStmt      :: [LStmt idL] -> LHsExpr idR                -> StmtLR idL idR
+mkGroupByUsingStmt :: [LStmt idL] -> LHsExpr idR -> LHsExpr idR -> StmtLR idL idR
+
+mkGroupUsingStmt   stmts usingExpr        = GroupStmt stmts [] Nothing       (Left usingExpr)    
+mkGroupByStmt      stmts byExpr           = GroupStmt stmts [] (Just byExpr) (Right noSyntaxExpr)
+mkGroupByUsingStmt stmts byExpr usingExpr = GroupStmt stmts [] (Just byExpr) (Left usingExpr)    
 
 mkExprStmt expr	    = ExprStmt expr noSyntaxExpr placeHolderType
 mkBindStmt pat expr = BindStmt pat expr noSyntaxExpr noSyntaxExpr
@@ -169,7 +228,7 @@ mkBindStmt pat expr = BindStmt pat expr noSyntaxExpr noSyntaxExpr
 emptyRecStmt = RecStmt { recS_stmts = [], recS_later_ids = [], recS_rec_ids = []
                        , recS_ret_fn = noSyntaxExpr, recS_mfix_fn = noSyntaxExpr
 		       , recS_bind_fn = noSyntaxExpr
-                       , recS_rec_rets = [], recS_dicts = emptyLHsBinds }
+                       , recS_rec_rets = [], recS_dicts = emptyTcEvBinds }
 
 mkRecStmt stmts = emptyRecStmt { recS_stmts = stmts }
 
@@ -182,13 +241,16 @@ mkHsOpApp e1 op e2 = OpApp e1 (noLoc (HsVar op)) (error "mkOpApp:fixity") e2
 mkHsSplice :: LHsExpr RdrName -> HsSplice RdrName
 mkHsSplice e = HsSplice unqualSplice e
 
+mkHsSpliceTy :: LHsExpr RdrName -> HsType RdrName
+mkHsSpliceTy e = HsSpliceTy (mkHsSplice e) emptyFVs placeHolderKind
+
 unqualSplice :: RdrName
 unqualSplice = mkRdrUnqual (mkVarOccFS (fsLit "splice"))
 		-- A name (uniquified later) to
 		-- identify the splice
 
 mkHsQuasiQuote :: RdrName -> SrcSpan -> FastString -> HsQuasiQuote RdrName
-mkHsQuasiQuote quoter span quote = HsQuasiQuote unqualQuasiQuote quoter span quote
+mkHsQuasiQuote quoter span quote = HsQuasiQuote quoter span quote
 
 unqualQuasiQuote :: RdrName
 unqualQuasiQuote = mkRdrUnqual (mkVarOccFS (fsLit "quasiquote"))
@@ -200,7 +262,7 @@ mkHsString s = HsString (mkFastString s)
 
 -------------
 userHsTyVarBndrs :: [Located name] -> [Located (HsTyVarBndr name)]
-userHsTyVarBndrs bndrs = [ L loc (UserTyVar v) | L loc v <- bndrs ]
+userHsTyVarBndrs bndrs = [ L loc (UserTyVar v placeHolderKind) | L loc v <- bndrs ]
 \end{code}
 
 
@@ -270,7 +332,7 @@ nlList   :: [LHsExpr id] -> LHsExpr id
 
 nlHsLam	match		= noLoc (HsLam (mkMatchGroup [match]))
 nlHsPar e		= noLoc (HsPar e)
-nlHsIf cond true false	= noLoc (HsIf cond true false)
+nlHsIf cond true false	= noLoc (mkHsIf cond true false)
 nlHsCase expr matches	= noLoc (HsCase expr (mkMatchGroup matches))
 nlList exprs		= noLoc (ExplicitList placeHolderType exprs)
 
@@ -319,8 +381,12 @@ mkFunBind fn ms = FunBind { fun_id = fn, fun_infix = False, fun_matches = mkMatc
 			    fun_tick = Nothing }
 
 
-mkVarBind :: SrcSpan -> id -> LHsExpr id -> LHsBind id
-mkVarBind loc var rhs = mk_easy_FunBind loc var [] rhs
+mkHsVarBind :: SrcSpan -> id -> LHsExpr id -> LHsBind id
+mkHsVarBind loc var rhs = mk_easy_FunBind loc var [] rhs
+
+mkVarBind :: id -> LHsExpr id -> LHsBind id
+mkVarBind var rhs = L (getLoc rhs) $
+		    VarBind { var_id = var, var_rhs = rhs, var_inline = False }
 
 ------------
 mk_easy_FunBind :: SrcSpan -> id -> [LPat id]
@@ -328,17 +394,6 @@ mk_easy_FunBind :: SrcSpan -> id -> [LPat id]
 
 mk_easy_FunBind loc fun pats expr
   = L loc $ mkFunBind (L loc fun) [mkMatch pats expr emptyLocalBinds]
-
-------------
-mk_FunBind :: SrcSpan -> id
-	   -> [([LPat id], LHsExpr id)]
-	   -> LHsBind id
-
-mk_FunBind _   _   [] = panic "TcGenDeriv:mk_FunBind"
-mk_FunBind loc fun pats_and_exprs
-  = L loc $ mkFunBind (L loc fun) matches
-  where
-    matches = [mkMatch p e emptyLocalBinds | (p,e) <-pats_and_exprs]
 
 ------------
 mkMatch :: [LPat id] -> LHsExpr id -> HsLocalBinds id -> LMatch id
@@ -353,7 +408,7 @@ mkMatch pats expr binds
 
 %************************************************************************
 %*									*
-	Collecting binders from HsBindGroups and HsBinds
+	Collecting binders
 %*									*
 %************************************************************************
 
@@ -367,126 +422,120 @@ where
 
 it should return [x, y, f, a, b] (remember, order important).
 
+Note [Collect binders only after renaming]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+These functions should only be used on HsSyn *after* the renamer,
+to return a [Name] or [Id].  Before renaming the record punning
+and wild-card mechanism makes it hard to know what is bound.
+So these functions should not be applied to (HsSyn RdrName)
+
 \begin{code}
-collectLocalBinders :: HsLocalBindsLR idL idR -> [Located idL]
+----------------- Bindings --------------------------
+collectLocalBinders :: HsLocalBindsLR idL idR -> [idL]
 collectLocalBinders (HsValBinds val_binds) = collectHsValBinders val_binds
 collectLocalBinders (HsIPBinds _)   = []
 collectLocalBinders EmptyLocalBinds = []
 
-collectHsValBinders :: HsValBindsLR idL idR -> [Located idL]
-collectHsValBinders (ValBindsIn  binds _) = collectHsBindLocatedBinders binds
+collectHsValBinders :: HsValBindsLR idL idR -> [idL]
+collectHsValBinders (ValBindsIn  binds _) = collectHsBindsBinders binds
 collectHsValBinders (ValBindsOut binds _) = foldr collect_one [] binds
   where
-   collect_one (_,binds) acc = foldrBag (collectAcc . unLoc) acc binds
+   collect_one (_,binds) acc = collect_binds binds acc
 
-collectAcc :: HsBindLR idL idR -> [Located idL] -> [Located idL]
-collectAcc (PatBind { pat_lhs = p }) acc = collectLocatedPatBinders p ++ acc
-collectAcc (FunBind { fun_id = f })  acc    = f : acc
-collectAcc (VarBind { var_id = f })  acc    = noLoc f : acc
-collectAcc (AbsBinds { abs_exports = dbinds, abs_binds = _binds }) acc
-  = [noLoc dp | (_,dp,_,_) <- dbinds] ++ acc
-	-- ++ foldr collectAcc acc binds
+collectHsBindBinders :: HsBindLR idL idR -> [idL]
+collectHsBindBinders b = collect_bind b []
+
+collect_bind :: HsBindLR idL idR -> [idL] -> [idL]
+collect_bind (PatBind { pat_lhs = p })    acc = collect_lpat p acc
+collect_bind (FunBind { fun_id = L _ f }) acc = f : acc
+collect_bind (VarBind { var_id = f })     acc = f : acc
+collect_bind (AbsBinds { abs_exports = dbinds, abs_binds = _binds }) acc
+  = [dp | (_,dp,_,_) <- dbinds] ++ acc 
+	-- ++ foldr collect_bind acc binds
 	-- I don't think we want the binders from the nested binds
 	-- The only time we collect binders from a typechecked 
 	-- binding (hence see AbsBinds) is in zonking in TcHsSyn
 
-collectHsBindBinders :: LHsBindsLR idL idR -> [idL]
-collectHsBindBinders binds = map unLoc (collectHsBindLocatedBinders binds)
+collectHsBindsBinders :: LHsBindsLR idL idR -> [idL]
+collectHsBindsBinders binds = collect_binds binds []
 
-collectHsBindLocatedBinders :: LHsBindsLR idL idR -> [Located idL]
-collectHsBindLocatedBinders binds = foldrBag (collectAcc . unLoc) [] binds
-\end{code}
+collectHsBindListBinders :: [LHsBindLR idL idR] -> [idL]
+collectHsBindListBinders = foldr (collect_bind . unLoc) []
 
+collect_binds :: LHsBindsLR idL idR -> [idL] -> [idL]
+collect_binds binds acc = foldrBag (collect_bind . unLoc) acc binds
 
-%************************************************************************
-%*									*
-	Getting binders from statements
-%*									*
-%************************************************************************
+collectMethodBinders :: LHsBindsLR RdrName idR -> [Located RdrName]
+-- Used exclusively for the bindings of an instance decl which are all FunBinds
+collectMethodBinders binds = foldrBag get [] binds
+  where
+    get (L _ (FunBind { fun_id = f })) fs = f : fs
+    get _                              fs = fs	
+       -- Someone else complains about non-FunBinds
 
-\begin{code}
-collectLStmtsBinders :: [LStmtLR idL idR] -> [Located idL]
+----------------- Statements --------------------------
+collectLStmtsBinders :: [LStmtLR idL idR] -> [idL]
 collectLStmtsBinders = concatMap collectLStmtBinders
 
-collectStmtsBinders :: [StmtLR idL idR] -> [Located idL]
+collectStmtsBinders :: [StmtLR idL idR] -> [idL]
 collectStmtsBinders = concatMap collectStmtBinders
 
-collectLStmtBinders :: LStmtLR idL idR -> [Located idL]
+collectLStmtBinders :: LStmtLR idL idR -> [idL]
 collectLStmtBinders = collectStmtBinders . unLoc
 
-collectStmtBinders :: StmtLR idL idR -> [Located idL]
+collectStmtBinders :: StmtLR idL idR -> [idL]
   -- Id Binders for a Stmt... [but what about pattern-sig type vars]?
-collectStmtBinders (BindStmt pat _ _ _) = collectLocatedPatBinders pat
+collectStmtBinders (BindStmt pat _ _ _) = collectPatBinders pat
 collectStmtBinders (LetStmt binds)      = collectLocalBinders binds
 collectStmtBinders (ExprStmt _ _ _)     = []
 collectStmtBinders (ParStmt xs)         = collectLStmtsBinders
                                         $ concatMap fst xs
-collectStmtBinders (TransformStmt (stmts, _) _ _) = collectLStmtsBinders stmts
-collectStmtBinders (GroupStmt (stmts, _) _)       = collectLStmtsBinders stmts
-collectStmtBinders (RecStmt { recS_stmts = ss })  = collectLStmtsBinders ss
-\end{code}
+collectStmtBinders (TransformStmt stmts _ _ _)   = collectLStmtsBinders stmts
+collectStmtBinders (GroupStmt     stmts _ _ _)   = collectLStmtsBinders stmts
+collectStmtBinders (RecStmt { recS_stmts = ss }) = collectLStmtsBinders ss
 
 
-%************************************************************************
-%*									*
-%* 	Gathering stuff out of patterns
-%*									*
-%************************************************************************
-
-This function @collectPatBinders@ works with the ``collectBinders''
-functions for @HsBinds@, etc.  The order in which the binders are
-collected is important; see @HsBinds.lhs@.
-
-It collects the bounds *value* variables in renamed patterns; type variables
-are *not* collected.
-
-\begin{code}
+----------------- Patterns --------------------------
 collectPatBinders :: LPat a -> [a]
-collectPatBinders pat = map unLoc (collectLocatedPatBinders pat)
-
-collectLocatedPatBinders :: LPat a -> [Located a]
-collectLocatedPatBinders pat = collectl pat []
+collectPatBinders pat = collect_lpat pat []
 
 collectPatsBinders :: [LPat a] -> [a]
-collectPatsBinders pats = map unLoc (collectLocatedPatsBinders pats)
+collectPatsBinders pats = foldr collect_lpat [] pats
 
-collectLocatedPatsBinders :: [LPat a] -> [Located a]
-collectLocatedPatsBinders pats = foldr collectl [] pats
-
----------------------
-collectl :: LPat name -> [Located name] -> [Located name]
-collectl (L l pat) bndrs
+-------------
+collect_lpat :: LPat name -> [name] -> [name]
+collect_lpat (L _ pat) bndrs
   = go pat
   where
-    go (VarPat var) 	   	  = L l var : bndrs
-    go (VarPatOut var bs) 	  = L l var : collectHsBindLocatedBinders bs 
-				    ++ bndrs
+    go (VarPat var) 	   	  = var : bndrs
+    go (VarPatOut var _) 	  = var : bndrs
+	-- See Note [Dictionary binders in ConPatOut]
     go (WildPat _)	      	  = bndrs
-    go (LazyPat pat)     	  = collectl pat bndrs
-    go (BangPat pat)     	  = collectl pat bndrs
-    go (AsPat a pat)     	  = a : collectl pat bndrs
-    go (ViewPat _ pat _)          = collectl pat bndrs
-    go (ParPat  pat)     	  = collectl pat bndrs
+    go (LazyPat pat)     	  = collect_lpat pat bndrs
+    go (BangPat pat)     	  = collect_lpat pat bndrs
+    go (AsPat (L _ a) pat)     	  = a : collect_lpat pat bndrs
+    go (ViewPat _ pat _)          = collect_lpat pat bndrs
+    go (ParPat  pat)     	  = collect_lpat pat bndrs
 				  
-    go (ListPat pats _)    	  = foldr collectl bndrs pats
-    go (PArrPat pats _)    	  = foldr collectl bndrs pats
-    go (TuplePat pats _ _)  	  = foldr collectl bndrs pats
+    go (ListPat pats _)    	  = foldr collect_lpat bndrs pats
+    go (PArrPat pats _)    	  = foldr collect_lpat bndrs pats
+    go (TuplePat pats _ _)  	  = foldr collect_lpat bndrs pats
 				  
-    go (ConPatIn _ ps)            = foldr collectl bndrs (hsConPatArgs ps)
-    go (ConPatOut {pat_args=ps})  = foldr collectl bndrs (hsConPatArgs ps)
+    go (ConPatIn _ ps)            = foldr collect_lpat bndrs (hsConPatArgs ps)
+    go (ConPatOut {pat_args=ps})  = foldr collect_lpat bndrs (hsConPatArgs ps)
 	-- See Note [Dictionary binders in ConPatOut]
     go (LitPat _)	      	  = bndrs
     go (NPat _ _ _)		  = bndrs
-    go (NPlusKPat n _ _ _)        = n : bndrs
+    go (NPlusKPat (L _ n) _ _ _)  = n : bndrs
  				  
-    go (SigPatIn pat _)	 	  = collectl pat bndrs
-    go (SigPatOut pat _)	  = collectl pat bndrs
+    go (SigPatIn pat _)	 	  = collect_lpat pat bndrs
+    go (SigPatOut pat _)	  = collect_lpat pat bndrs
     go (QuasiQuotePat _)          = bndrs
     go (TypePat _)                = bndrs
-    go (CoPat _ pat _)            = collectl (noLoc pat) bndrs
+    go (CoPat _ pat _)            = go pat
 \end{code}
 
-Note [Dictionary binders in ConPatOut]
+Note [Dictionary binders in ConPatOut] See also same Note in DsArrows
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Do *not* gather (a) dictionary and (b) dictionary bindings as binders
 of a ConPatOut pattern.  For most calls it doesn't matter, because
@@ -513,26 +562,84 @@ variables bound by the lazy pattern are n,m, *not* the dictionary d.
 So in mkSelectorBinds in DsUtils, we want just m,n as the variables bound.
 
 \begin{code}
+hsGroupBinders :: HsGroup Name -> [Name]
+hsGroupBinders (HsGroup { hs_valds = val_decls, hs_tyclds = tycl_decls,
+                          hs_instds = inst_decls, hs_fords = foreign_decls })
+-- Collect the binders of a Group
+  =  collectHsValBinders val_decls
+  ++ hsTyClDeclsBinders tycl_decls inst_decls
+  ++ hsForeignDeclsBinders foreign_decls
+
+hsForeignDeclsBinders :: [LForeignDecl Name] -> [Name]
+hsForeignDeclsBinders foreign_decls
+  = [n | L _ (ForeignImport (L _ n) _ _) <- foreign_decls]
+
+hsTyClDeclsBinders :: [Located (TyClDecl Name)] -> [Located (InstDecl Name)] -> [Name]
+hsTyClDeclsBinders tycl_decls inst_decls
+  = [n | d <- instDeclATs inst_decls ++ tycl_decls, L _ n <- hsTyClDeclBinders d]
+
+hsTyClDeclBinders :: Eq name => Located (TyClDecl name) -> [Located name]
+-- ^ Returns all the /binding/ names of the decl, along with their SrcLocs.
+-- The first one is guaranteed to be the name of the decl. For record fields
+-- mentioned in multiple constructors, the SrcLoc will be from the first
+-- occurence.  We use the equality to filter out duplicate field names
+
+hsTyClDeclBinders (L _ (TyFamily    {tcdLName = name})) = [name]
+hsTyClDeclBinders (L _ (TySynonym   {tcdLName = name})) = [name]
+hsTyClDeclBinders (L _ (ForeignType {tcdLName = name})) = [name]
+
+hsTyClDeclBinders (L _ (ClassDecl {tcdLName = cls_name, tcdSigs = sigs, tcdATs = ats}))
+  = cls_name : 
+    concatMap hsTyClDeclBinders ats ++ [n | L _ (TypeSig n _) <- sigs]
+
+hsTyClDeclBinders (L _ (TyData {tcdLName = tc_name, tcdCons = cons}))
+  = tc_name : hsConDeclsBinders cons
+
+hsConDeclsBinders :: (Eq name) => [LConDecl name] -> [Located name]
+  -- See hsTyClDeclBinders for what this does
+  -- The function is boringly complicated because of the records
+  -- And since we only have equality, we have to be a little careful
+hsConDeclsBinders cons
+  = snd (foldl do_one ([], []) cons)
+  where
+    do_one (flds_seen, acc) (L _ (ConDecl { con_name = lname, con_details = RecCon flds }))
+	= (map unLoc new_flds ++ flds_seen, lname : new_flds ++ acc)
+	where
+	  new_flds = filterOut (\f -> unLoc f `elem` flds_seen) 
+			       (map cd_fld_name flds)
+
+    do_one (flds_seen, acc) (L _ (ConDecl { con_name = lname }))
+	= (flds_seen, lname:acc)
+\end{code}
+
+
+%************************************************************************
+%*									*
+	Collecting type signatures from patterns
+%*									*
+%************************************************************************
+
+\begin{code}
 collectSigTysFromPats :: [InPat name] -> [LHsType name]
-collectSigTysFromPats pats = foldr collect_lpat [] pats
+collectSigTysFromPats pats = foldr collect_sig_lpat [] pats
 
 collectSigTysFromPat :: InPat name -> [LHsType name]
-collectSigTysFromPat pat = collect_lpat pat []
+collectSigTysFromPat pat = collect_sig_lpat pat []
 
-collect_lpat :: InPat name -> [LHsType name] -> [LHsType name]
-collect_lpat pat acc = collect_pat (unLoc pat) acc
+collect_sig_lpat :: InPat name -> [LHsType name] -> [LHsType name]
+collect_sig_lpat pat acc = collect_sig_pat (unLoc pat) acc
 
-collect_pat :: Pat name -> [LHsType name] -> [LHsType name]
-collect_pat (SigPatIn pat ty)  	acc = collect_lpat pat (ty:acc)
-collect_pat (TypePat ty)       	acc = ty:acc
+collect_sig_pat :: Pat name -> [LHsType name] -> [LHsType name]
+collect_sig_pat (SigPatIn pat ty)  	acc = collect_sig_lpat pat (ty:acc)
+collect_sig_pat (TypePat ty)       	acc = ty:acc
 
-collect_pat (LazyPat pat)      	acc = collect_lpat pat acc
-collect_pat (BangPat pat)      	acc = collect_lpat pat acc
-collect_pat (AsPat _ pat)      	acc = collect_lpat pat acc
-collect_pat (ParPat  pat)      	acc = collect_lpat pat acc
-collect_pat (ListPat pats _)   	acc = foldr collect_lpat acc pats
-collect_pat (PArrPat pats _)   	acc = foldr collect_lpat acc pats
-collect_pat (TuplePat pats _ _) acc = foldr collect_lpat acc pats
-collect_pat (ConPatIn _ ps)     acc = foldr collect_lpat acc (hsConPatArgs ps)
-collect_pat _                   acc = acc       -- Literals, vars, wildcard
+collect_sig_pat (LazyPat pat)       acc = collect_sig_lpat pat acc
+collect_sig_pat (BangPat pat)       acc = collect_sig_lpat pat acc
+collect_sig_pat (AsPat _ pat)       acc = collect_sig_lpat pat acc
+collect_sig_pat (ParPat  pat)       acc = collect_sig_lpat pat acc
+collect_sig_pat (ListPat pats _)    acc = foldr collect_sig_lpat acc pats
+collect_sig_pat (PArrPat pats _)    acc = foldr collect_sig_lpat acc pats
+collect_sig_pat (TuplePat pats _ _) acc = foldr collect_sig_lpat acc pats
+collect_sig_pat (ConPatIn _ ps)     acc = foldr collect_sig_lpat acc (hsConPatArgs ps)
+collect_sig_pat _                   acc = acc       -- Literals, vars, wildcard
 \end{code}

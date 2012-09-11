@@ -44,6 +44,7 @@
 #include "Evac.h"
 #include "Scav.h"
 #include "GCUtils.h"
+#include "MarkStack.h"
 #include "MarkWeak.h"
 #include "Sparks.h"
 #include "Sweep.h"
@@ -100,7 +101,7 @@ rtsBool major_gc;
 
 /* Data used for allocation area sizing.
  */
-static lnat g0s0_pcnt_kept = 30; // percentage of g0s0 live at last minor GC 
+static lnat g0_pcnt_kept = 30; // percentage of g0 live at last minor GC 
 
 /* Mut-list stats */
 #ifdef DEBUG
@@ -115,7 +116,7 @@ nat mutlist_MUTVARS,
 gc_thread **gc_threads = NULL;
 
 #if !defined(THREADED_RTS)
-StgWord8 the_gc_thread[sizeof(gc_thread) + 64 * sizeof(step_workspace)];
+StgWord8 the_gc_thread[sizeof(gc_thread) + 64 * sizeof(gen_workspace)];
 #endif
 
 // Number of threads running in *this* GC.  Affects how many
@@ -153,21 +154,12 @@ static void gcCAFs                  (void);
 #endif
 
 /* -----------------------------------------------------------------------------
-   The mark bitmap & stack.
+   The mark stack.
    -------------------------------------------------------------------------- */
 
-#define MARK_STACK_BLOCKS 4
-
-bdescr *mark_stack_bdescr;
-StgPtr *mark_stack;
-StgPtr *mark_sp;
-StgPtr *mark_splim;
-
-// Flag and pointers used for falling back to a linear scan when the
-// mark stack overflows.
-rtsBool mark_stack_overflowed;
-bdescr *oldgen_scan_bd;
-StgPtr  oldgen_scan;
+bdescr *mark_stack_top_bd; // topmost block in the mark stack
+bdescr *mark_stack_bd;     // current block in the mark stack
+StgPtr mark_sp;            // pointer to the next unallocated mark stack entry
 
 /* -----------------------------------------------------------------------------
    GarbageCollect: the main entry point to the garbage collector.
@@ -181,10 +173,10 @@ GarbageCollect (rtsBool force_major_gc,
                 Capability *cap)
 {
   bdescr *bd;
-  step *stp;
+  generation *gen;
   lnat live, allocated, max_copied, avg_copied, slop;
   gc_thread *saved_gct;
-  nat g, s, t, n;
+  nat g, t, n;
 
   // necessary if we stole a callee-saves register for gct:
   saved_gct = gct;
@@ -202,8 +194,8 @@ GarbageCollect (rtsBool force_major_gc,
   }
 #endif
 
-  ASSERT(sizeof(step_workspace) == 16 * sizeof(StgWord));
-  // otherwise adjust the padding in step_workspace.
+  ASSERT(sizeof(gen_workspace) == 16 * sizeof(StgWord));
+  // otherwise adjust the padding in gen_workspace.
 
   // tell the stats department that we've started a GC 
   stat_startGC();
@@ -281,9 +273,8 @@ GarbageCollect (rtsBool force_major_gc,
   memInventory(DEBUG_gc);
 #endif
 
-  // check stack sanity *before* GC
-  IF_DEBUG(sanity, checkFreeListSanity());
-  IF_DEBUG(sanity, checkMutableLists(rtsTrue));
+  // check sanity *before* GC
+  IF_DEBUG(sanity, checkSanity(rtsTrue));
 
   // Initialise all our gc_thread structures
   for (t = 0; t < n_gc_threads; t++) {
@@ -302,16 +293,16 @@ GarbageCollect (rtsBool force_major_gc,
 
   /* Allocate a mark stack if we're doing a major collection.
    */
-  if (major_gc && oldest_gen->steps[0].mark) {
-      nat mark_stack_blocks;
-      mark_stack_blocks = stg_max(MARK_STACK_BLOCKS, 
-                                  oldest_gen->steps[0].n_old_blocks / 100);
-      mark_stack_bdescr = allocGroup(mark_stack_blocks);
-      mark_stack = (StgPtr *)mark_stack_bdescr->start;
-      mark_sp    = mark_stack;
-      mark_splim = mark_stack + (mark_stack_blocks * BLOCK_SIZE_W);
+  if (major_gc && oldest_gen->mark) {
+      mark_stack_bd     = allocBlock();
+      mark_stack_top_bd = mark_stack_bd;
+      mark_stack_bd->link = NULL;
+      mark_stack_bd->u.back = NULL;
+      mark_sp           = mark_stack_bd->start;
   } else {
-      mark_stack_bdescr = NULL;
+      mark_stack_bd     = NULL;
+      mark_stack_top_bd = NULL;
+      mark_sp           = NULL;
   }
 
   // this is the main thread
@@ -343,7 +334,15 @@ SET_GCT(gc_threads[0]);
   // namely to reduce the likelihood of spurious old->new pointers.
   //
   for (g = RtsFlags.GcFlags.generations-1; g > N; g--) {
+#if defined(THREADED_RTS)
+      if (n_gc_threads > 1) {
+          scavenge_mutable_list(generations[g].saved_mut_list, &generations[g]);
+      } else {
+          scavenge_mutable_list1(generations[g].saved_mut_list, &generations[g]);
+      }
+#else
       scavenge_mutable_list(generations[g].saved_mut_list, &generations[g]);
+#endif
       freeChain_sync(generations[g].saved_mut_list);
       generations[g].saved_mut_list = NULL;
 
@@ -355,18 +354,22 @@ SET_GCT(gc_threads[0]);
   // variable).
   if (n_gc_threads == 1) {
       for (n = 0; n < n_capabilities; n++) {
+#if defined(THREADED_RTS)
+          scavenge_capability_mut_Lists1(&capabilities[n]);
+#else
           scavenge_capability_mut_lists(&capabilities[n]);
+#endif
       }
   } else {
       scavenge_capability_mut_lists(&capabilities[gct->thread_index]);
   }
 
   // follow roots from the CAF list (used by GHCi)
-  gct->evac_step = 0;
+  gct->evac_gen = 0;
   markCAFs(mark_root, gct);
 
   // follow all the roots that the application knows about.
-  gct->evac_step = 0;
+  gct->evac_gen = 0;
   markSomeCapabilities(mark_root, gct, gct->thread_index, n_gc_threads,
                        rtsTrue/*prune sparks*/);
 
@@ -392,13 +395,6 @@ SET_GCT(gc_threads[0]);
       // The other threads are now stopped.  We might recurse back to
       // here, but from now on this is the only thread.
       
-      // if any blackholes are alive, make the threads that wait on
-      // them alive too.
-      if (traverseBlackholeQueue()) {
-	  inc_running(); 
-	  continue;
-      }
-  
       // must be last...  invariant is that everything is fully
       // scavenged at this point.
       if (traverseWeakPtrList()) { // returns rtsTrue if evaced something 
@@ -415,6 +411,16 @@ SET_GCT(gc_threads[0]);
   // Now see which stable names are still alive.
   gcStablePtrTable();
 
+#ifdef THREADED_RTS
+  if (n_gc_threads == 1) {
+      for (n = 0; n < n_capabilities; n++) {
+          pruneSparkQueue(&capabilities[n]);
+      }
+  } else {
+      pruneSparkQueue(&capabilities[gct->thread_index]);
+  }
+#endif
+
 #ifdef PROFILING
   // We call processHeapClosureForDead() on every closure destroyed during
   // the current garbage collection, so we invoke LdvCensusForDead().
@@ -426,32 +432,26 @@ SET_GCT(gc_threads[0]);
   // NO MORE EVACUATION AFTER THIS POINT!
 
   // Two-space collector: free the old to-space.
-  // g0s0->old_blocks is the old nursery
-  // g0s0->blocks is to-space from the previous GC
+  // g0->old_blocks is the old nursery
+  // g0->blocks is to-space from the previous GC
   if (RtsFlags.GcFlags.generations == 1) {
-      if (g0s0->blocks != NULL) {
-	  freeChain(g0s0->blocks);
-	  g0s0->blocks = NULL;
+      if (g0->blocks != NULL) {
+	  freeChain(g0->blocks);
+	  g0->blocks = NULL;
       }
   }
 
   // For each workspace, in each thread, move the copied blocks to the step
   {
       gc_thread *thr;
-      step_workspace *ws;
+      gen_workspace *ws;
       bdescr *prev, *next;
 
       for (t = 0; t < n_gc_threads; t++) {
 	  thr = gc_threads[t];
 
-          // not step 0
-          if (RtsFlags.GcFlags.generations == 1) {
-              s = 0;
-          } else {
-              s = 1;
-          }
-          for (; s < total_steps; s++) {
-              ws = &thr->steps[s];
+          for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+              ws = &thr->gens[g];
 
               // Push the final block
               if (ws->todo_bd) { 
@@ -463,14 +463,14 @@ SET_GCT(gc_threads[0]);
               
               prev = NULL;
               for (bd = ws->scavd_list; bd != NULL; bd = bd->link) {
-                  ws->step->n_words += bd->free - bd->start;
+                  ws->gen->n_words += bd->free - bd->start;
                   prev = bd;
               }
               if (prev != NULL) {
-                  prev->link = ws->step->blocks;
-                  ws->step->blocks = ws->scavd_list;
+                  prev->link = ws->gen->blocks;
+                  ws->gen->blocks = ws->scavd_list;
               } 
-              ws->step->n_blocks += ws->n_scavd_blocks;
+              ws->gen->n_blocks += ws->n_scavd_blocks;
           }
       }
 
@@ -480,14 +480,8 @@ SET_GCT(gc_threads[0]);
       for (t = 0; t < n_gc_threads; t++) {
 	  thr = gc_threads[t];
 
-          // not step 0
-          if (RtsFlags.GcFlags.generations == 1) {
-              s = 0;
-          } else {
-              s = 1;
-          }
-          for (; s < total_steps; s++) {
-              ws = &thr->steps[s];
+          for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+              ws = &thr->gens[g];
 
               prev = NULL;
               for (bd = ws->part_list; bd != NULL; bd = next) {
@@ -501,28 +495,28 @@ SET_GCT(gc_threads[0]);
                       freeGroup(bd);
                       ws->n_part_blocks--;
                   } else {
-                      ws->step->n_words += bd->free - bd->start;
+                      ws->gen->n_words += bd->free - bd->start;
                       prev = bd;
                   }
               }
               if (prev != NULL) {
-                  prev->link = ws->step->blocks;
-                  ws->step->blocks = ws->part_list;
+                  prev->link = ws->gen->blocks;
+                  ws->gen->blocks = ws->part_list;
               }
-              ws->step->n_blocks += ws->n_part_blocks;
+              ws->gen->n_blocks += ws->n_part_blocks;
 
-              ASSERT(countBlocks(ws->step->blocks) == ws->step->n_blocks);
-              ASSERT(countOccupied(ws->step->blocks) == ws->step->n_words);
+              ASSERT(countBlocks(ws->gen->blocks) == ws->gen->n_blocks);
+              ASSERT(countOccupied(ws->gen->blocks) == ws->gen->n_words);
 	  }
       }
   }
 
   // Finally: compact or sweep the oldest generation.
-  if (major_gc && oldest_gen->steps[0].mark) {
-      if (oldest_gen->steps[0].compact) 
+  if (major_gc && oldest_gen->mark) {
+      if (oldest_gen->compact) 
           compact(gct->scavenged_static_objects);
       else
-          sweep(&oldest_gen->steps[0]);
+          sweep(oldest_gen);
   }
 
   /* run through all the generations/steps and tidy up 
@@ -580,105 +574,99 @@ SET_GCT(gc_threads[0]);
 		   mutlist_MUTVARS, mutlist_MUTARRS, mutlist_MVARS, mutlist_OTHERS);
     }
 
-    for (s = 0; s < generations[g].n_steps; s++) {
-      bdescr *next, *prev;
-      stp = &generations[g].steps[s];
+    bdescr *next, *prev;
+    gen = &generations[g];
 
-      // for generations we collected... 
-      if (g <= N) {
+    // for generations we collected... 
+    if (g <= N) {
 
 	/* free old memory and shift to-space into from-space for all
 	 * the collected steps (except the allocation area).  These
 	 * freed blocks will probaby be quickly recycled.
 	 */
-	if (!(g == 0 && s == 0 && RtsFlags.GcFlags.generations > 1)) {
-	    if (stp->mark)
-            {
-		// tack the new blocks on the end of the existing blocks
-		if (stp->old_blocks != NULL) {
-
-                    prev = NULL;
-		    for (bd = stp->old_blocks; bd != NULL; bd = next) {
-
-                        next = bd->link;
-
-                        if (!(bd->flags & BF_MARKED))
-                        {
-                            if (prev == NULL) {
-                                stp->old_blocks = next;
-                            } else {
-                                prev->link = next;
-                            }
-                            freeGroup(bd);
-                            stp->n_old_blocks--;
+        if (gen->mark)
+        {
+            // tack the new blocks on the end of the existing blocks
+            if (gen->old_blocks != NULL) {
+                
+                prev = NULL;
+                for (bd = gen->old_blocks; bd != NULL; bd = next) {
+                    
+                    next = bd->link;
+                    
+                    if (!(bd->flags & BF_MARKED))
+                    {
+                        if (prev == NULL) {
+                            gen->old_blocks = next;
+                        } else {
+                            prev->link = next;
                         }
-                        else
-                        {
-                            stp->n_words += bd->free - bd->start;
-
-                            // NB. this step might not be compacted next
-                            // time, so reset the BF_MARKED flags.
-                            // They are set before GC if we're going to
-                            // compact.  (search for BF_MARKED above).
-                            bd->flags &= ~BF_MARKED;
-                            
-                            // between GCs, all blocks in the heap except
-                            // for the nursery have the BF_EVACUATED flag set.
-                            bd->flags |= BF_EVACUATED;
-
-                            prev = bd;
-                        }
-		    }
-
-                    if (prev != NULL) {
-                        prev->link = stp->blocks;
-                        stp->blocks = stp->old_blocks;
+                        freeGroup(bd);
+                        gen->n_old_blocks--;
                     }
-		}
-		// add the new blocks to the block tally
-		stp->n_blocks += stp->n_old_blocks;
-		ASSERT(countBlocks(stp->blocks) == stp->n_blocks);
-                ASSERT(countOccupied(stp->blocks) == stp->n_words);
-	    }
-	    else // not copacted
-	    {
-		freeChain(stp->old_blocks);
-	    }
-	    stp->old_blocks = NULL;
-	    stp->n_old_blocks = 0;
-	}
+                    else
+                    {
+                        gen->n_words += bd->free - bd->start;
+                        
+                        // NB. this step might not be compacted next
+                        // time, so reset the BF_MARKED flags.
+                        // They are set before GC if we're going to
+                        // compact.  (search for BF_MARKED above).
+                        bd->flags &= ~BF_MARKED;
+                        
+                        // between GCs, all blocks in the heap except
+                        // for the nursery have the BF_EVACUATED flag set.
+                        bd->flags |= BF_EVACUATED;
+                        
+                        prev = bd;
+                    }
+                }
 
-	/* LARGE OBJECTS.  The current live large objects are chained on
-	 * scavenged_large, having been moved during garbage
-	 * collection from large_objects.  Any objects left on
-	 * large_objects list are therefore dead, so we free them here.
-	 */
-	for (bd = stp->large_objects; bd != NULL; bd = next) {
-	  next = bd->link;
-	  freeGroup(bd);
-	  bd = next;
-	}
+                if (prev != NULL) {
+                    prev->link = gen->blocks;
+                    gen->blocks = gen->old_blocks;
+                }
+            }
+            // add the new blocks to the block tally
+            gen->n_blocks += gen->n_old_blocks;
+            ASSERT(countBlocks(gen->blocks) == gen->n_blocks);
+            ASSERT(countOccupied(gen->blocks) == gen->n_words);
+        }
+        else // not copacted
+        {
+            freeChain(gen->old_blocks);
+        }
 
-	stp->large_objects  = stp->scavenged_large_objects;
-	stp->n_large_blocks = stp->n_scavenged_large_blocks;
+        gen->old_blocks = NULL;
+        gen->n_old_blocks = 0;
 
-      }
-      else // for older generations... 
-      {
+        /* LARGE OBJECTS.  The current live large objects are chained on
+         * scavenged_large, having been moved during garbage
+         * collection from large_objects.  Any objects left on the
+         * large_objects list are therefore dead, so we free them here.
+         */
+        freeChain(gen->large_objects);
+        gen->large_objects  = gen->scavenged_large_objects;
+        gen->n_large_blocks = gen->n_scavenged_large_blocks;
+	gen->n_new_large_blocks = 0;
+        ASSERT(countBlocks(gen->large_objects) == gen->n_large_blocks);
+    }
+    else // for generations > N
+    {
 	/* For older generations, we need to append the
 	 * scavenged_large_object list (i.e. large objects that have been
 	 * promoted during this GC) to the large_object list for that step.
 	 */
-	for (bd = stp->scavenged_large_objects; bd; bd = next) {
-	  next = bd->link;
-	  dbl_link_onto(bd, &stp->large_objects);
+	for (bd = gen->scavenged_large_objects; bd; bd = next) {
+            next = bd->link;
+            dbl_link_onto(bd, &gen->large_objects);
 	}
-
+        
 	// add the new blocks we promoted during this GC 
-	stp->n_large_blocks += stp->n_scavenged_large_blocks;
-      }
+	gen->n_large_blocks += gen->n_scavenged_large_blocks;
+        ASSERT(countBlocks(gen->large_objects) == gen->n_large_blocks);
     }
-  }
+  } // for all generations
 
   // update the max size of older generations after a major GC
   resize_generations();
@@ -688,33 +676,26 @@ SET_GCT(gc_threads[0]);
 
   // Free the small objects allocated via allocate(), since this will
   // all have been copied into G0S1 now.  
-  if (RtsFlags.GcFlags.generations > 1) {
-      if (g0s0->blocks != NULL) {
-          freeChain(g0s0->blocks);
-          g0s0->blocks = NULL;
-      }
-      g0s0->n_blocks = 0;
-      g0s0->n_words = 0;
-  }
-  alloc_blocks = 0;
   alloc_blocks_lim = RtsFlags.GcFlags.minAllocAreaSize;
 
   // Start a new pinned_object_block
-  pinned_object_block = NULL;
+  for (n = 0; n < n_capabilities; n++) {
+      capabilities[n].pinned_object_block = NULL;
+  }
 
   // Free the mark stack.
-  if (mark_stack_bdescr != NULL) {
-      freeGroup(mark_stack_bdescr);
+  if (mark_stack_top_bd != NULL) {
+      debugTrace(DEBUG_gc, "mark stack: %d blocks",
+                 countBlocks(mark_stack_top_bd));
+      freeChain(mark_stack_top_bd);
   }
 
   // Free any bitmaps.
   for (g = 0; g <= N; g++) {
-      for (s = 0; s < generations[g].n_steps; s++) {
-	  stp = &generations[g].steps[s];
-	  if (stp->bitmap != NULL) {
-	      freeGroup(stp->bitmap);
-	      stp->bitmap = NULL;
-	  }
+      gen = &generations[g];
+      if (gen->bitmap != NULL) {
+          freeGroup(gen->bitmap);
+          gen->bitmap = NULL;
       }
   }
 
@@ -746,22 +727,40 @@ SET_GCT(gc_threads[0]);
   // Reset the nursery
   resetNurseries();
 
-  // start any pending finalizers 
-  RELEASE_SM_LOCK;
-  scheduleFinalizers(cap, old_weak_ptr_list);
-  ACQUIRE_SM_LOCK;
-  
   // send exceptions to any threads which were about to die 
   RELEASE_SM_LOCK;
   resurrectThreads(resurrected_threads);
-  performPendingThrowTos(exception_threads);
   ACQUIRE_SM_LOCK;
 
   // Update the stable pointer hash table.
   updateStablePtrTable(major_gc);
 
-  // check sanity after GC 
-  IF_DEBUG(sanity, checkSanity());
+  // unlock the StablePtr table.  Must be before scheduleFinalizers(),
+  // because a finalizer may call hs_free_fun_ptr() or
+  // hs_free_stable_ptr(), both of which access the StablePtr table.
+  stablePtrPostGC();
+
+  // Start any pending finalizers.  Must be after
+  // updateStablePtrTable() and stablePtrPostGC() (see #4221).
+  RELEASE_SM_LOCK;
+  scheduleFinalizers(cap, old_weak_ptr_list);
+  ACQUIRE_SM_LOCK;
+
+  if (major_gc) {
+      nat need, got;
+      need = BLOCKS_TO_MBLOCKS(n_alloc_blocks);
+      got = mblocks_allocated;
+      /* If the amount of data remains constant, next major GC we'll
+         require (F+1)*need. We leave (F+2)*need in order to reduce
+         repeated deallocation and reallocation. */
+      need = (RtsFlags.GcFlags.oldGenFactor + 2) * need;
+      if (got > need) {
+          returnMemoryToOS(got - need);
+      }
+  }
+
+  // check sanity after GC
+  IF_DEBUG(sanity, checkSanity(rtsTrue));
 
   // extra GC trace info 
   IF_DEBUG(gc, statDescribeGens());
@@ -791,9 +790,6 @@ SET_GCT(gc_threads[0]);
   slop = calcLiveBlocks() * BLOCK_SIZE_W - live;
   stat_endGC(allocated, live, copied, N, max_copied, avg_copied, slop);
 
-  // unlock the StablePtr table
-  stablePtrPostGC();
-
   // Guess which generation we'll collect *next* time
   initialise_N(force_major_gc);
 
@@ -820,7 +816,7 @@ static nat
 initialise_N (rtsBool force_major_gc)
 {
     int g;
-    nat s, blocks, blocks_total;
+    nat blocks, blocks_total;
 
     blocks = 0;
     blocks_total = 0;
@@ -832,11 +828,10 @@ initialise_N (rtsBool force_major_gc)
     }
 
     for (g = RtsFlags.GcFlags.generations - 1; g >= 0; g--) {
-        blocks = 0;
-        for (s = 0; s < generations[g].n_steps; s++) {
-            blocks += generations[g].steps[s].n_words / BLOCK_SIZE_W;
-            blocks += generations[g].steps[s].n_large_blocks;
-        }
+
+        blocks = generations[g].n_words / BLOCK_SIZE_W
+               + generations[g].n_large_blocks;
+
         if (blocks >= generations[g].max_blocks) {
             N = stg_max(N,g);
         }
@@ -863,8 +858,8 @@ initialise_N (rtsBool force_major_gc)
 static void
 new_gc_thread (nat n, gc_thread *t)
 {
-    nat s;
-    step_workspace *ws;
+    nat g;
+    gen_workspace *ws;
 
 #ifdef THREADED_RTS
     t->id = 0;
@@ -885,11 +880,11 @@ new_gc_thread (nat n, gc_thread *t)
     t->papi_events = -1;
 #endif
 
-    for (s = 0; s < total_steps; s++)
+    for (g = 0; g < RtsFlags.GcFlags.generations; g++)
     {
-        ws = &t->steps[s];
-        ws->step = &all_steps[s];
-        ASSERT(s == ws->step->abs_no);
+        ws = &t->gens[g];
+        ws->gen = &generations[g];
+        ASSERT(g == ws->gen->no);
         ws->my_gct = t;
         
         ws->todo_bd = NULL;
@@ -918,7 +913,8 @@ initGcThreads (void)
 
 	for (i = 0; i < RtsFlags.ParFlags.nNodes; i++) {
             gc_threads[i] = 
-                stgMallocBytes(sizeof(gc_thread) + total_steps * sizeof(step_workspace),
+                stgMallocBytes(sizeof(gc_thread) + 
+                               RtsFlags.GcFlags.generations * sizeof(gen_workspace),
                                "alloc_gc_threads");
 
             new_gc_thread(i, gc_threads[i]);
@@ -934,14 +930,23 @@ initGcThreads (void)
 void
 freeGcThreads (void)
 {
+    nat g;
     if (gc_threads != NULL) {
 #if defined(THREADED_RTS)
         nat i;
-	for (i = 0; i < RtsFlags.ParFlags.nNodes; i++) {
+	for (i = 0; i < n_capabilities; i++) {
+            for (g = 0; g < RtsFlags.GcFlags.generations; g++)
+            {
+                freeWSDeque(gc_threads[i]->gens[g].todo_q);
+            }
             stgFree (gc_threads[i]);
 	}
         stgFree (gc_threads);
 #else
+        for (g = 0; g < RtsFlags.GcFlags.generations; g++)
+        {
+            freeWSDeque(gc_threads[0]->gens[g].todo_q);
+        }
         stgFree (gc_threads);
 #endif
         gc_threads = NULL;
@@ -973,27 +978,23 @@ dec_running (void)
 static rtsBool
 any_work (void)
 {
-    int s;
-    step_workspace *ws;
+    int g;
+    gen_workspace *ws;
 
     gct->any_work++;
 
     write_barrier();
 
     // scavenge objects in compacted generation
-    if (mark_stack_overflowed || oldgen_scan_bd != NULL ||
-	(mark_stack_bdescr != NULL && !mark_stack_empty())) {
+    if (mark_stack_bd != NULL && !mark_stack_empty()) {
 	return rtsTrue;
     }
     
     // Check for global work in any step.  We don't need to check for
     // local work, because we have already exited scavenge_loop(),
     // which means there is no local work for this thread.
-    for (s = total_steps-1; s >= 0; s--) {
-        if (s == 0 && RtsFlags.GcFlags.generations > 1) { 
-            continue; 
-        }
-        ws = &gct->steps[s];
+    for (g = 0; g < (int)RtsFlags.GcFlags.generations; g++) {
+        ws = &gct->gens[g];
         if (ws->todo_large_objects) return rtsTrue;
         if (!looksEmptyWSDeque(ws->todo_q)) return rtsTrue;
         if (ws->todo_overflow) return rtsTrue;
@@ -1005,8 +1006,8 @@ any_work (void)
         // look for work to steal
         for (n = 0; n < n_gc_threads; n++) {
             if (n == gct->thread_index) continue;
-            for (s = total_steps-1; s >= 0; s--) {
-                ws = &gc_threads[n]->steps[s];
+            for (g = RtsFlags.GcFlags.generations-1; g >= 0; g--) {
+                ws = &gc_threads[n]->gens[g];
                 if (!looksEmptyWSDeque(ws->todo_q)) return rtsTrue;
             }
         }
@@ -1026,9 +1027,10 @@ scavenge_until_all_done (void)
 {
     nat r;
 	
-    debugTrace(DEBUG_gc, "GC thread %d working", gct->thread_index);
 
 loop:
+    traceEventGcWork(&capabilities[gct->thread_index]);
+
 #if defined(THREADED_RTS)
     if (n_gc_threads > 1) {
         scavenge_loop();
@@ -1042,8 +1044,9 @@ loop:
     // scavenge_loop() only exits when there's no work to do
     r = dec_running();
     
-    debugTrace(DEBUG_gc, "GC thread %d idle (%d still running)", 
-               gct->thread_index, r);
+    traceEventGcIdle(&capabilities[gct->thread_index]);
+
+    debugTrace(DEBUG_gc, "%d GC threads still running", r);
     
     while (gc_running_threads != 0) {
         // usleep(1);
@@ -1057,8 +1060,7 @@ loop:
         // scavenge_loop() to perform any pending work.
     }
     
-    // All threads are now stopped
-    debugTrace(DEBUG_gc, "GC thread %d finished.", gct->thread_index);
+    traceEventGcDone(&capabilities[gct->thread_index]);
 }
 
 #if defined(THREADED_RTS)
@@ -1070,8 +1072,6 @@ gcWorkerThread (Capability *cap)
 
     // necessary if we stole a callee-saves register for gct:
     saved_gct = gct;
-
-    cap->in_gc = rtsTrue;
 
     gct = gc_threads[cap->no];
     gct->id = osThreadId();
@@ -1091,13 +1091,23 @@ gcWorkerThread (Capability *cap)
 #endif
     
     // Every thread evacuates some roots.
-    gct->evac_step = 0;
+    gct->evac_gen = 0;
     markSomeCapabilities(mark_root, gct, gct->thread_index, n_gc_threads,
                          rtsTrue/*prune sparks*/);
     scavenge_capability_mut_lists(&capabilities[gct->thread_index]);
 
     scavenge_until_all_done();
     
+#ifdef THREADED_RTS
+    // Now that the whole heap is marked, we discard any sparks that
+    // were found to be unreachable.  The main GC thread is currently
+    // marking heap reachable via weak pointers, so it is
+    // non-deterministic whether a spark will be retained if it is
+    // only reachable via weak pointers.  To fix this problem would
+    // require another GC barrier, which is too high a price.
+    pruneSparkQueue(cap);
+#endif
+
 #ifdef USE_PAPI
     // count events in this thread towards the GC totals
     papi_thread_stop_gc1_count(gct->papi_events);
@@ -1121,8 +1131,8 @@ gcWorkerThread (Capability *cap)
 void
 waitForGcThreads (Capability *cap USED_IF_THREADS)
 {
-    nat n_threads = RtsFlags.ParFlags.nNodes;
-    nat me = cap->no;
+    const nat n_threads = RtsFlags.ParFlags.nNodes;
+    const nat me = cap->no;
     nat i, j;
     rtsBool retry = rtsTrue;
 
@@ -1196,8 +1206,8 @@ shutdown_gc_threads (nat n_threads USED_IF_THREADS, nat me USED_IF_THREADS)
 void
 releaseGCThreads (Capability *cap USED_IF_THREADS)
 {
-    nat n_threads = RtsFlags.ParFlags.nNodes;
-    nat me = cap->no;
+    const nat n_threads = RtsFlags.ParFlags.nNodes;
+    const nat me = cap->no;
     nat i;
     for (i=0; i < n_threads; i++) {
         if (i == me) continue;
@@ -1218,9 +1228,9 @@ releaseGCThreads (Capability *cap USED_IF_THREADS)
 static void
 init_collected_gen (nat g, nat n_threads)
 {
-    nat s, t, i;
-    step_workspace *ws;
-    step *stp;
+    nat t, i;
+    gen_workspace *ws;
+    generation *gen;
     bdescr *bd;
 
     // Throw away the current mutable list.  Invariant: the mutable
@@ -1235,110 +1245,100 @@ init_collected_gen (nat g, nat n_threads)
 	}
     }
 
-    for (s = 0; s < generations[g].n_steps; s++) {
+    gen = &generations[g];
+    ASSERT(gen->no == g);
 
-	stp = &generations[g].steps[s];
-	ASSERT(stp->gen_no == g);
+    // we'll construct a new list of threads in this step
+    // during GC, throw away the current list.
+    gen->old_threads = gen->threads;
+    gen->threads = END_TSO_QUEUE;
 
-        // we'll construct a new list of threads in this step
-        // during GC, throw away the current list.
-        stp->old_threads = stp->threads;
-        stp->threads = END_TSO_QUEUE;
+    // deprecate the existing blocks
+    gen->old_blocks   = gen->blocks;
+    gen->n_old_blocks = gen->n_blocks;
+    gen->blocks       = NULL;
+    gen->n_blocks     = 0;
+    gen->n_words      = 0;
+    gen->live_estimate = 0;
 
-	// generation 0, step 0 doesn't need to-space 
-	if (g == 0 && s == 0 && RtsFlags.GcFlags.generations > 1) { 
-	    continue; 
-	}
+    // initialise the large object queues.
+    gen->scavenged_large_objects = NULL;
+    gen->n_scavenged_large_blocks = 0;
+    
+    // mark the small objects as from-space
+    for (bd = gen->old_blocks; bd; bd = bd->link) {
+        bd->flags &= ~BF_EVACUATED;
+    }
+    
+    // mark the large objects as from-space
+    for (bd = gen->large_objects; bd; bd = bd->link) {
+        bd->flags &= ~BF_EVACUATED;
+    }
+
+    // for a compacted generation, we need to allocate the bitmap
+    if (gen->mark) {
+        nat bitmap_size; // in bytes
+        bdescr *bitmap_bdescr;
+        StgWord *bitmap;
 	
-	// deprecate the existing blocks
-	stp->old_blocks   = stp->blocks;
-	stp->n_old_blocks = stp->n_blocks;
-	stp->blocks       = NULL;
-	stp->n_blocks     = 0;
-	stp->n_words      = 0;
-	stp->live_estimate = 0;
-
-	// initialise the large object queues.
-	stp->scavenged_large_objects = NULL;
-	stp->n_scavenged_large_blocks = 0;
-
-	// mark the small objects as from-space
-	for (bd = stp->old_blocks; bd; bd = bd->link) {
-	    bd->flags &= ~BF_EVACUATED;
-	}
-
-	// mark the large objects as from-space
-	for (bd = stp->large_objects; bd; bd = bd->link) {
-	    bd->flags &= ~BF_EVACUATED;
-	}
-
-	// for a compacted step, we need to allocate the bitmap
-	if (stp->mark) {
-	    nat bitmap_size; // in bytes
-	    bdescr *bitmap_bdescr;
-	    StgWord *bitmap;
-	    
-	    bitmap_size = stp->n_old_blocks * BLOCK_SIZE / (sizeof(W_)*BITS_PER_BYTE);
-	    
-	    if (bitmap_size > 0) {
-		bitmap_bdescr = allocGroup((lnat)BLOCK_ROUND_UP(bitmap_size) 
-					   / BLOCK_SIZE);
-		stp->bitmap = bitmap_bdescr;
-		bitmap = bitmap_bdescr->start;
+        bitmap_size = gen->n_old_blocks * BLOCK_SIZE / (sizeof(W_)*BITS_PER_BYTE);
+	
+        if (bitmap_size > 0) {
+            bitmap_bdescr = allocGroup((lnat)BLOCK_ROUND_UP(bitmap_size) 
+                                       / BLOCK_SIZE);
+            gen->bitmap = bitmap_bdescr;
+            bitmap = bitmap_bdescr->start;
+            
+            debugTrace(DEBUG_gc, "bitmap_size: %d, bitmap: %p",
+                       bitmap_size, bitmap);
+            
+            // don't forget to fill it with zeros!
+            memset(bitmap, 0, bitmap_size);
+            
+            // For each block in this step, point to its bitmap from the
+            // block descriptor.
+            for (bd=gen->old_blocks; bd != NULL; bd = bd->link) {
+                bd->u.bitmap = bitmap;
+                bitmap += BLOCK_SIZE_W / (sizeof(W_)*BITS_PER_BYTE);
 		
-		debugTrace(DEBUG_gc, "bitmap_size: %d, bitmap: %p",
-			   bitmap_size, bitmap);
-		
-		// don't forget to fill it with zeros!
-		memset(bitmap, 0, bitmap_size);
-		
-		// For each block in this step, point to its bitmap from the
-		// block descriptor.
-		for (bd=stp->old_blocks; bd != NULL; bd = bd->link) {
-		    bd->u.bitmap = bitmap;
-		    bitmap += BLOCK_SIZE_W / (sizeof(W_)*BITS_PER_BYTE);
-		    
-		    // Also at this point we set the BF_MARKED flag
-		    // for this block.  The invariant is that
-		    // BF_MARKED is always unset, except during GC
-		    // when it is set on those blocks which will be
-		    // compacted.
-                    if (!(bd->flags & BF_FRAGMENTED)) {
-                        bd->flags |= BF_MARKED;
-                    }
-		}
-	    }
-	}
+                // Also at this point we set the BF_MARKED flag
+                // for this block.  The invariant is that
+                // BF_MARKED is always unset, except during GC
+                // when it is set on those blocks which will be
+                // compacted.
+                if (!(bd->flags & BF_FRAGMENTED)) {
+                    bd->flags |= BF_MARKED;
+                }
+
+                // BF_SWEPT should be marked only for blocks that are being
+                // collected in sweep()
+                bd->flags &= ~BF_SWEPT;
+            }
+        }
     }
 
     // For each GC thread, for each step, allocate a "todo" block to
     // store evacuated objects to be scavenged, and a block to store
     // evacuated objects that do not need to be scavenged.
     for (t = 0; t < n_threads; t++) {
-	for (s = 0; s < generations[g].n_steps; s++) {
-
-	    // we don't copy objects into g0s0, unless -G0
-	    if (g==0 && s==0 && RtsFlags.GcFlags.generations > 1) continue;
-
-	    ws = &gc_threads[t]->steps[g * RtsFlags.GcFlags.steps + s];
-
-	    ws->todo_large_objects = NULL;
-
-            ws->part_list = NULL;
-            ws->n_part_blocks = 0;
-
-	    // allocate the first to-space block; extra blocks will be
-	    // chained on as necessary.
-	    ws->todo_bd = NULL;
-            ASSERT(looksEmptyWSDeque(ws->todo_q));
-	    alloc_todo_block(ws,0);
-
-            ws->todo_overflow = NULL;
-            ws->n_todo_overflow = 0;
-
-	    ws->scavd_list = NULL;
-	    ws->n_scavd_blocks = 0;
-	}
+        ws = &gc_threads[t]->gens[g];
+        
+        ws->todo_large_objects = NULL;
+        
+        ws->part_list = NULL;
+        ws->n_part_blocks = 0;
+        
+        // allocate the first to-space block; extra blocks will be
+        // chained on as necessary.
+        ws->todo_bd = NULL;
+        ASSERT(looksEmptyWSDeque(ws->todo_q));
+        alloc_todo_block(ws,0);
+        
+        ws->todo_overflow = NULL;
+        ws->n_todo_overflow = 0;
+        
+        ws->scavd_list = NULL;
+        ws->n_scavd_blocks = 0;
     }
 }
 
@@ -1350,9 +1350,9 @@ init_collected_gen (nat g, nat n_threads)
 static void
 init_uncollected_gen (nat g, nat threads)
 {
-    nat s, t, n;
-    step_workspace *ws;
-    step *stp;
+    nat t, n;
+    gen_workspace *ws;
+    generation *gen;
     bdescr *bd;
 
     // save the current mutable lists for this generation, and
@@ -1365,65 +1365,59 @@ init_uncollected_gen (nat g, nat threads)
         capabilities[n].mut_lists[g] = allocBlock();
     }
 
-    for (s = 0; s < generations[g].n_steps; s++) {
-	stp = &generations[g].steps[s];
-	stp->scavenged_large_objects = NULL;
-	stp->n_scavenged_large_blocks = 0;
-    }
-    
-    for (s = 0; s < generations[g].n_steps; s++) {
+    gen = &generations[g];
+
+    gen->scavenged_large_objects = NULL;
+    gen->n_scavenged_large_blocks = 0;
+
+    for (t = 0; t < threads; t++) {
+        ws = &gc_threads[t]->gens[g];
 	    
-        stp = &generations[g].steps[s];
-
-        for (t = 0; t < threads; t++) {
-	    ws = &gc_threads[t]->steps[g * RtsFlags.GcFlags.steps + s];
-	    
-            ASSERT(looksEmptyWSDeque(ws->todo_q));
-	    ws->todo_large_objects = NULL;
-
-            ws->part_list = NULL;
-            ws->n_part_blocks = 0;
-
-	    ws->scavd_list = NULL;
-	    ws->n_scavd_blocks = 0;
-
-	    // If the block at the head of the list in this generation
-	    // is less than 3/4 full, then use it as a todo block.
-	    if (stp->blocks && isPartiallyFull(stp->blocks))
-	    {
-		ws->todo_bd = stp->blocks;
-                ws->todo_free = ws->todo_bd->free;
-                ws->todo_lim = ws->todo_bd->start + BLOCK_SIZE_W;
-		stp->blocks = stp->blocks->link;
-		stp->n_blocks -= 1;
-                stp->n_words -= ws->todo_bd->free - ws->todo_bd->start;
-		ws->todo_bd->link = NULL;
-		// we must scan from the current end point.
-		ws->todo_bd->u.scan = ws->todo_bd->free;
-	    } 
-	    else
-	    {
-		ws->todo_bd = NULL;
-		alloc_todo_block(ws,0);
-	    }
-	}
-
-        // deal out any more partial blocks to the threads' part_lists
-        t = 0;
-        while (stp->blocks && isPartiallyFull(stp->blocks))
+        ASSERT(looksEmptyWSDeque(ws->todo_q));
+        ws->todo_large_objects = NULL;
+        
+        ws->part_list = NULL;
+        ws->n_part_blocks = 0;
+        
+        ws->scavd_list = NULL;
+        ws->n_scavd_blocks = 0;
+        
+        // If the block at the head of the list in this generation
+        // is less than 3/4 full, then use it as a todo block.
+        if (gen->blocks && isPartiallyFull(gen->blocks))
         {
-            bd = stp->blocks;
-            stp->blocks = bd->link;
-	    ws = &gc_threads[t]->steps[g * RtsFlags.GcFlags.steps + s];
-            bd->link = ws->part_list;
-            ws->part_list = bd;
-            ws->n_part_blocks += 1;
-            bd->u.scan = bd->free;
-            stp->n_blocks -= 1;
-            stp->n_words -= bd->free - bd->start;
-            t++;
-            if (t == n_gc_threads) t = 0;
+            ws->todo_bd = gen->blocks;
+            ws->todo_free = ws->todo_bd->free;
+            ws->todo_lim = ws->todo_bd->start + BLOCK_SIZE_W;
+            gen->blocks = gen->blocks->link;
+            gen->n_blocks -= 1;
+            gen->n_words -= ws->todo_bd->free - ws->todo_bd->start;
+            ws->todo_bd->link = NULL;
+            // we must scan from the current end point.
+            ws->todo_bd->u.scan = ws->todo_bd->free;
+        } 
+        else
+        {
+            ws->todo_bd = NULL;
+            alloc_todo_block(ws,0);
         }
+    }
+
+    // deal out any more partial blocks to the threads' part_lists
+    t = 0;
+    while (gen->blocks && isPartiallyFull(gen->blocks))
+    {
+        bd = gen->blocks;
+        gen->blocks = bd->link;
+        ws = &gc_threads[t]->gens[g];
+        bd->link = ws->part_list;
+        ws->part_list = bd;
+        ws->n_part_blocks += 1;
+        bd->u.scan = bd->free;
+        gen->n_blocks -= 1;
+        gen->n_words -= bd->free - bd->start;
+        t++;
+        if (t == n_gc_threads) t = 0;
     }
 }
 
@@ -1438,7 +1432,7 @@ init_gc_thread (gc_thread *t)
     t->scavenged_static_objects = END_OF_STATIC_LIST;
     t->scan_bd = NULL;
     t->mut_lists = capabilities[t->thread_index].mut_lists;
-    t->evac_step = 0;
+    t->evac_gen = 0;
     t->failed_to_evac = rtsFalse;
     t->eager_promotion = rtsTrue;
     t->thunk_selector_depth = 0;
@@ -1504,44 +1498,47 @@ resize_generations (void)
 
     if (major_gc && RtsFlags.GcFlags.generations > 1) {
 	nat live, size, min_alloc, words;
-	nat max  = RtsFlags.GcFlags.maxHeapSize;
-	nat gens = RtsFlags.GcFlags.generations;
+	const nat max  = RtsFlags.GcFlags.maxHeapSize;
+	const nat gens = RtsFlags.GcFlags.generations;
 	
 	// live in the oldest generations
-        if (oldest_gen->steps[0].live_estimate != 0) {
-            words = oldest_gen->steps[0].live_estimate;
+        if (oldest_gen->live_estimate != 0) {
+            words = oldest_gen->live_estimate;
         } else {
-            words = oldest_gen->steps[0].n_words;
+            words = oldest_gen->n_words;
         }
         live = (words + BLOCK_SIZE_W - 1) / BLOCK_SIZE_W +
-            oldest_gen->steps[0].n_large_blocks;
+            oldest_gen->n_large_blocks;
 	
 	// default max size for all generations except zero
 	size = stg_max(live * RtsFlags.GcFlags.oldGenFactor,
 		       RtsFlags.GcFlags.minOldGenSize);
 	
+        if (RtsFlags.GcFlags.heapSizeSuggestionAuto) {
+            RtsFlags.GcFlags.heapSizeSuggestion = size;
+        }
+
 	// minimum size for generation zero
 	min_alloc = stg_max((RtsFlags.GcFlags.pcFreeHeap * max) / 200,
 			    RtsFlags.GcFlags.minAllocAreaSize);
 
 	// Auto-enable compaction when the residency reaches a
 	// certain percentage of the maximum heap size (default: 30%).
-	if (RtsFlags.GcFlags.generations > 1 &&
-	    (RtsFlags.GcFlags.compact ||
-	     (max > 0 &&
-	      oldest_gen->steps[0].n_blocks > 
-	      (RtsFlags.GcFlags.compactThreshold * max) / 100))) {
-	    oldest_gen->steps[0].mark = 1;
-	    oldest_gen->steps[0].compact = 1;
+	if (RtsFlags.GcFlags.compact ||
+            (max > 0 &&
+             oldest_gen->n_blocks > 
+             (RtsFlags.GcFlags.compactThreshold * max) / 100)) {
+	    oldest_gen->mark = 1;
+	    oldest_gen->compact = 1;
 //	  debugBelch("compaction: on\n", live);
 	} else {
-	    oldest_gen->steps[0].mark = 0;
-	    oldest_gen->steps[0].compact = 0;
+	    oldest_gen->mark = 0;
+	    oldest_gen->compact = 0;
 //	  debugBelch("compaction: off\n", live);
 	}
 
         if (RtsFlags.GcFlags.sweep) {
-	    oldest_gen->steps[0].mark = 1;
+	    oldest_gen->mark = 1;
         }
 
 	// if we're going to go over the maximum heap size, reduce the
@@ -1557,7 +1554,7 @@ resize_generations (void)
 		heapOverflow();
 	    }
 	    
-	    if (oldest_gen->steps[0].compact) {
+	    if (oldest_gen->compact) {
 		if ( (size + (size - 1) * (gens - 2) * 2) + min_alloc > max ) {
 		    size = (max - min_alloc) / ((gens - 1) * 2 - 1);
 		}
@@ -1590,7 +1587,7 @@ resize_generations (void)
 static void
 resize_nursery (void)
 {
-    lnat min_nursery = RtsFlags.GcFlags.minAllocAreaSize * n_capabilities;
+    const lnat min_nursery = RtsFlags.GcFlags.minAllocAreaSize * n_capabilities;
 
     if (RtsFlags.GcFlags.generations == 1)
     {   // Two-space collector:
@@ -1610,7 +1607,7 @@ resize_nursery (void)
 	 * performance we get from 3L bytes, reducing to the same
 	 * performance at 2L bytes.
 	 */
-	blocks = g0s0->n_blocks;
+	blocks = generations[0].n_blocks;
 	
 	if ( RtsFlags.GcFlags.maxHeapSize != 0 &&
 	     blocks * RtsFlags.GcFlags.oldGenFactor * 2 > 
@@ -1650,11 +1647,11 @@ resize_nursery (void)
 	if (RtsFlags.GcFlags.heapSizeSuggestion)
 	{
 	    long blocks;
-	    nat needed = calcNeeded(); 	// approx blocks needed at next GC 
+	    const nat needed = calcNeeded(); 	// approx blocks needed at next GC 
 	    
 	    /* Guess how much will be live in generation 0 step 0 next time.
 	     * A good approximation is obtained by finding the
-	     * percentage of g0s0 that was live at the last minor GC.
+	     * percentage of g0 that was live at the last minor GC.
 	     *
 	     * We have an accurate figure for the amount of copied data in
 	     * 'copied', but we must convert this to a number of blocks, with
@@ -1663,7 +1660,7 @@ resize_nursery (void)
 	     */
 	    if (N == 0)
 	    {
-		g0s0_pcnt_kept = ((copied / (BLOCK_SIZE_W - 10)) * 100)
+		g0_pcnt_kept = ((copied / (BLOCK_SIZE_W - 10)) * 100)
 		    / countNurseryBlocks();
 	    }
 	    
@@ -1674,14 +1671,14 @@ resize_nursery (void)
 	     *
 	     * Formula:            suggested - needed
 	     *                ----------------------------
-	     *                    1 + g0s0_pcnt_kept/100
+	     *                    1 + g0_pcnt_kept/100
 	     *
 	     * where 'needed' is the amount of memory needed at the next
-	     * collection for collecting all steps except g0s0.
+	     * collection for collecting all gens except g0.
 	     */
 	    blocks = 
 		(((long)RtsFlags.GcFlags.heapSizeSuggestion - (long)needed) * 100) /
-		(100 + (long)g0s0_pcnt_kept);
+		(100 + (long)g0_pcnt_kept);
 	    
 	    if (blocks < (long)min_nursery) {
 		blocks = min_nursery;

@@ -154,8 +154,8 @@ The 'Show' and 'Read' instances of 'StdGen' provide a primitive way to save the
 state of a random number generator.
 It is required that @'read' ('show' g) == g@.
 
-In addition, 'read' may be used to map an arbitrary string (not necessarily one
-produced by 'show') onto a value of type 'StdGen'. In general, the 'read'
+In addition, 'reads' may be used to map an arbitrary string (not necessarily one
+produced by 'show') onto a value of type 'StdGen'. In general, the 'Read'
 instance of 'StdGen' has the following properties: 
 
 * It guarantees to succeed on any string. 
@@ -340,13 +340,13 @@ randomIvalDouble (l,h) fromDouble rng
 	    let
 	     scaled_x = 
 		fromDouble ((l+h)/2) + 
-                fromDouble ((h-l) / realToFrac int32Range) *
+                fromDouble ((h-l) / realToFrac int32Count) *
 		fromIntegral (x::Int32)
 	    in
 	    (scaled_x, rng')
 
-int32Range :: Integer
-int32Range = toInteger (maxBound::Int32) - toInteger (minBound::Int32)
+int32Count :: Integer
+int32Count = toInteger (maxBound::Int32) - toInteger (minBound::Int32) + 1
 
 iLogBase :: Integer -> Integer -> Integer
 iLogBase b i = if i < b then 1 else 1 + iLogBase b (i `div` b)

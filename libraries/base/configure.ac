@@ -3,7 +3,7 @@ AC_INIT([Haskell base package], [1.0], [libraries@haskell.org], [base])
 # Safety check: Ensure that we are in the correct source directory.
 AC_CONFIG_SRCDIR([include/HsBase.h])
 
-AC_CONFIG_HEADERS([include/HsBaseConfig.h])
+AC_CONFIG_HEADERS([include/HsBaseConfig.h include/EventConfig.h])
 
 AC_ARG_WITH([cc],
             [C compiler],
@@ -17,7 +17,7 @@ dnl ** check for full ANSI header (.h) files
 AC_HEADER_STDC
 
 # check for specific header (.h) files that we are interested in
-AC_CHECK_HEADERS([ctype.h errno.h fcntl.h inttypes.h limits.h signal.h sys/resource.h sys/select.h sys/stat.h sys/syscall.h sys/time.h sys/timeb.h sys/timers.h sys/times.h sys/types.h sys/utsname.h sys/wait.h termios.h time.h unistd.h utime.h windows.h winsock.h langinfo.h])
+AC_CHECK_HEADERS([ctype.h errno.h fcntl.h inttypes.h limits.h signal.h sys/resource.h sys/select.h sys/stat.h sys/syscall.h sys/time.h sys/timeb.h sys/timers.h sys/times.h sys/types.h sys/utsname.h sys/wait.h termios.h time.h unistd.h utime.h windows.h winsock.h langinfo.h poll.h sys/epoll.h sys/event.h sys/eventfd.h])
 
 # Enable large file support. Do this before testing the types ino_t, off_t, and
 # rlim_t, because it will affect the result of that test.
@@ -31,6 +31,22 @@ AC_CHECK_HEADERS([wctype.h], [AC_CHECK_FUNCS(iswspace)])
 AC_CHECK_FUNCS([lstat])
 AC_CHECK_FUNCS([getclock getrusage times])
 AC_CHECK_FUNCS([_chsize ftruncate])
+
+AC_CHECK_FUNCS([epoll_create1 epoll_ctl eventfd kevent kevent64 kqueue poll])
+
+# event-related fun
+
+if test "$ac_cv_header_sys_epoll_h" = yes -a "$ac_cv_func_epoll_ctl" = yes; then
+  AC_DEFINE([HAVE_EPOLL], [1], [Define if you have epoll support.])
+fi
+
+if test "$ac_cv_header_sys_event_h" = yes -a "$ac_cv_func_kqueue" = yes; then
+  AC_DEFINE([HAVE_KQUEUE], [1], [Define if you have kqueue support.])
+fi
+
+if test "$ac_cv_header_poll_h" = yes -a "$ac_cv_func_poll" = yes; then
+  AC_DEFINE([HAVE_POLL], [1], [Define if you have poll support.])
+fi
 
 dnl--------------------------------------------------------------------
 dnl * Deal with arguments telling us iconv is somewhere odd
@@ -135,6 +151,17 @@ FP_SEARCH_LIBS_PROTO(iconv,
                         *)
                              AC_MSG_ERROR([iconv is required on non-Windows platforms]);;
                       esac])
+
+# If possible, we use libcharset instead of nl_langinfo(CODESET) to
+# determine the current locale's character encoding.
+FP_SEARCH_LIBS_PROTO(
+    [locale_charset],
+    [#include <libcharset.h>],
+    [const char* charset = locale_charset();],
+    [charset],
+    [AC_DEFINE([HAVE_LIBCHARSET], [1], [Define to 1 if you have libcharset.])
+     EXTRA_LIBS="$EXTRA_LIBS $ac_lib"])
+
 
 AC_SUBST(EXTRA_LIBS)
 AC_CONFIG_FILES([base.buildinfo])

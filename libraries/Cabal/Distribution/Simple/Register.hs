@@ -68,21 +68,19 @@ import Distribution.Simple.LocalBuildInfo
          ( LocalBuildInfo(..), ComponentLocalBuildInfo(..)
          , InstallDirs(..), absoluteInstallDirs )
 import Distribution.Simple.BuildPaths (haddockName)
-import qualified Distribution.Simple.GHC as GHC
+import qualified Distribution.Simple.GHC  as GHC
+import qualified Distribution.Simple.LHC  as LHC
+import qualified Distribution.Simple.Hugs as Hugs
+import qualified Distribution.Simple.UHC  as UHC
 import Distribution.Simple.Compiler
          ( compilerVersion, CompilerFlavor(..), compilerFlavor
-         , PackageDB(..), PackageDBStack, registrationPackageDB )
+         , PackageDBStack, registrationPackageDB )
 import Distribution.Simple.Program
-         ( ConfiguredProgram
+         ( ConfiguredProgram, runProgramInvocation
          , requireProgram, lookupProgram, ghcPkgProgram, lhcPkgProgram )
 import Distribution.Simple.Program.Script
          ( invocationAsSystemScript )
 import qualified Distribution.Simple.Program.HcPkg as HcPkg
-import Distribution.Simple.Program.Run
-         ( ProgramInvocation(..), IOEncoding(..), programInvocation
-         , runProgramInvocation )
-import Distribution.Simple.Program.Types
-         ( ConfiguredProgram(programId, programVersion) )
 import Distribution.Simple.Setup
          ( RegisterFlags(..), CopyDest(..)
          , fromFlag, fromFlagOrDefault, flagToMaybe )
@@ -95,7 +93,7 @@ import Distribution.InstalledPackageInfo
          , showInstalledPackageInfo )
 import qualified Distribution.InstalledPackageInfo as IPI
 import Distribution.Simple.Utils
-         ( createDirectoryIfMissingVerbose, writeUTF8File, writeFileAtomic
+         ( writeUTF8File, writeFileAtomic
          , die, notice, setupMessage )
 import Distribution.System
          ( OS(..), buildOS )
@@ -103,7 +101,7 @@ import Distribution.Text
          ( display )
 import Distribution.Version ( Version(..) )
 import Distribution.Verbosity as Verbosity
-         ( Verbosity, normal, deafening, silent )
+         ( Verbosity, normal )
 import Distribution.Compat.CopyFile
          ( setFileExecutable )
 
@@ -112,10 +110,10 @@ import System.Directory
          ( getCurrentDirectory, removeDirectoryRecursive )
 import System.IO.Error (try)
 
-import Control.Monad (when)
 import Data.Maybe
          ( isJust, fromMaybe, maybeToList )
-import Data.List (partition, nub)
+import Data.List
+         ( partition, nub )
 
 
 -- -----------------------------------------------------------------------------
@@ -135,7 +133,7 @@ register pkg@PackageDescription { library       = Just lib  }
     case () of
      _ | modeGenerateRegFile   -> writeRegistrationFile installedPkgInfo
        | modeGenerateRegScript -> writeRegisterScript   installedPkgInfo
-       | otherwise             -> registerPackage' verbosity
+       | otherwise             -> registerPackage verbosity
                                     installedPkgInfo pkg lbi inplace packageDbs
 
   where
@@ -167,6 +165,7 @@ register pkg@PackageDescription { library       = Just lib  }
         Hugs -> notice verbosity "Registration scripts not needed for hugs"
         JHC  -> notice verbosity "Registration scripts not needed for jhc"
         NHC  -> notice verbosity "Registration scripts not needed for nhc98"
+        UHC  -> notice verbosity "Registration scripts not needed for uhc"
         _    -> die "Registration scripts are not implemented for this compiler"
 
 register _ _ regFlags = notice verbosity "No package to register"
@@ -211,56 +210,18 @@ registerPackage :: Verbosity
                 -> PackageDescription
                 -> LocalBuildInfo
                 -> Bool
-                -> PackageDB
-                -> IO ()
-registerPackage verbosity installedPkgInfo pkg lbi inplace packageDb =
-    registerPackage' verbosity installedPkgInfo pkg lbi inplace packageDbs
-  where
-    packageDbs
-      | registrationPackageDB (withPackageDB lbi) == packageDb
-                  = withPackageDB lbi
-      | otherwise = withPackageDB lbi ++ [packageDb]
-
-registerPackage' :: Verbosity
-                -> InstalledPackageInfo
-                -> PackageDescription
-                -> LocalBuildInfo
-                -> Bool
                 -> PackageDBStack
                 -> IO ()
-registerPackage' verbosity installedPkgInfo pkg lbi inplace packageDbs = do
+registerPackage verbosity installedPkgInfo pkg lbi inplace packageDbs = do
   setupMessage verbosity "Registering" (packageId pkg)
   case compilerFlavor (compiler lbi) of
-    GHC  -> registerPackageGHC  verbosity installedPkgInfo pkg lbi inplace packageDbs
-    LHC  -> registerPackageLHC  verbosity installedPkgInfo pkg lbi inplace packageDbs
-    Hugs -> registerPackageHugs verbosity installedPkgInfo pkg lbi inplace packageDbs
+    GHC  -> GHC.registerPackage  verbosity installedPkgInfo pkg lbi inplace packageDbs
+    LHC  -> LHC.registerPackage  verbosity installedPkgInfo pkg lbi inplace packageDbs
+    Hugs -> Hugs.registerPackage verbosity installedPkgInfo pkg lbi inplace packageDbs
+    UHC  -> UHC.registerPackage  verbosity installedPkgInfo pkg lbi inplace packageDbs
     JHC  -> notice verbosity "Registering for jhc (nothing to do)"
     NHC  -> notice verbosity "Registering for nhc98 (nothing to do)"
     _    -> die "Registering is not implemented for this compiler"
-
-
-registerPackageGHC, registerPackageLHC, registerPackageHugs
-  :: Verbosity
-  -> InstalledPackageInfo
-  -> PackageDescription
-  -> LocalBuildInfo
-  -> Bool
-  -> PackageDBStack
-  -> IO ()
-registerPackageGHC verbosity installedPkgInfo _pkg lbi _inplace packageDbs = do
-  let Just ghcPkg = lookupProgram ghcPkgProgram (withPrograms lbi)
-  reregister verbosity ghcPkg packageDbs installedPkgInfo
-
-registerPackageLHC verbosity installedPkgInfo _pkg lbi _inplace packageDbs = do
-  let Just lhcPkg = lookupProgram lhcPkgProgram (withPrograms lbi)
-  reregister verbosity lhcPkg packageDbs installedPkgInfo
-
-registerPackageHugs verbosity installedPkgInfo pkg lbi inplace _packageDbs = do
-  when inplace $ die "--inplace is not supported with Hugs"
-  let installDirs = absoluteInstallDirs pkg lbi NoCopyDest
-  createDirectoryIfMissingVerbose verbosity True (libdir installDirs)
-  writeUTF8File (libdir installDirs </> "package.conf")
-                (showInstalledPackageInfo installedPkgInfo)
 
 
 writeHcPkgRegisterScript :: Verbosity
@@ -269,8 +230,8 @@ writeHcPkgRegisterScript :: Verbosity
                          -> PackageDBStack
                          -> IO ()
 writeHcPkgRegisterScript verbosity installedPkgInfo hcPkg packageDbs = do
-  let invocation  = reregisterInvocation hcPkg Verbosity.normal
-                      packageDbs installedPkgInfo
+  let invocation  = HcPkg.reregisterInvocation hcPkg Verbosity.normal
+                      packageDbs (Right installedPkgInfo)
       regScript   = invocationAsSystemScript buildOS   invocation
 
   notice verbosity ("Creating package registration script: " ++ regScriptFileName)
@@ -426,48 +387,3 @@ unregScriptFileName :: FilePath
 unregScriptFileName = case buildOS of
                           Windows -> "unregister.bat"
                           _       -> "unregister.sh"
-
-reregister :: Verbosity -> ConfiguredProgram -> PackageDBStack
-           -> InstalledPackageInfo
-           -> IO ()
-reregister verbosity hcPkg packagedb pkgFile =
-  runProgramInvocation verbosity
-    (reregisterInvocation hcPkg verbosity packagedb pkgFile)
-
-reregisterInvocation :: ConfiguredProgram -> Verbosity -> PackageDBStack
-                    -> InstalledPackageInfo
-                    -> ProgramInvocation
-reregisterInvocation hcPkg verbosity packagedbs pkgInfo =
-    (programInvocation hcPkg args) {
-      progInvokeInput         = Just (showInstalledPackageInfo pkgInfo),
-      progInvokeInputEncoding = IOEncodingUTF8
-    }
-  where
-    args = ["update", "-"] ++ packageDbStackOpts packagedbs
-        ++ verbosityOpts verbosity
-
-    verbosityOpts :: Verbosity -> [String]
-    verbosityOpts v
-
-      -- ghc-pkg < 6.11 does not support -v
-      | programId hcPkg == "ghc-pkg"
-     && programVersion hcPkg < Just (Version [6,11] [])
-                       = []
-
-      | v >= deafening = ["-v2"]
-      | v == silent    = ["-v0"]
-      | otherwise      = []
-
-    packageDbStackOpts :: PackageDBStack -> [String]
-    packageDbStackOpts dbstack = case dbstack of
-      (GlobalPackageDB:UserPackageDB:dbs) -> "--global"
-                                           : "--user"
-                                           : map specific dbs
-      (GlobalPackageDB:dbs)               -> "--global"
-                                           : "--no-user-package-conf"
-                                           : map specific dbs
-      _                                   -> ierror
-      where
-        specific (SpecificPackageDB db) = "--package-conf=" ++ db
-        specific _ = ierror
-        ierror     = error "internal error: unexpected package db stack"

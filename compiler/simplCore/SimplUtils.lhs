@@ -6,18 +6,20 @@
 \begin{code}
 module SimplUtils (
 	-- Rebuilding
-	mkLam, mkCase, prepareAlts, bindCaseBndr,
+	mkLam, mkCase, prepareAlts, 
 
 	-- Inlining,
 	preInlineUnconditionally, postInlineUnconditionally, 
-	activeInline, activeRule, inlineMode,
+	activeUnfolding, activeUnfInRule, activeRule, 
+        simplEnvForGHCi, simplEnvForRules, updModeForInlineRules,
 
 	-- The continuation type
 	SimplCont(..), DupFlag(..), ArgInfo(..),
+        isSimplified,
 	contIsDupable, contResultType, contIsTrivial, contArgs, dropArgs, 
-	countValArgs, countArgs, splitInlineCont,
-	mkBoringStop, mkLazyArgStop, contIsRhsOrArg,
-	interestingCallContext, interestingArgContext,
+	pushSimplifiedArgs, countValArgs, countArgs, addArgTo,
+	mkBoringStop, mkRhsStop, mkLazyArgStop, contIsRhsOrArg,
+	interestingCallContext, 
 
 	interestingArg, mkArgInfo,
 	
@@ -27,6 +29,7 @@ module SimplUtils (
 #include "HsVersions.h"
 
 import SimplEnv
+import CoreMonad	( SimplifierMode(..), Tick(..) )
 import DynFlags
 import StaticFlags
 import CoreSyn
@@ -34,12 +37,12 @@ import qualified CoreSubst
 import PprCore
 import CoreFVs
 import CoreUtils
-import CoreArity	( etaExpand, exprEtaExpandArity )
+import CoreArity
 import CoreUnfold
 import Name
 import Id
-import Var	( isCoVar )
-import NewDemand
+import Var	( Var, isCoVar )
+import Demand
 import SimplMonad
 import Type	hiding( substTy )
 import Coercion ( coercionKind )
@@ -97,60 +100,89 @@ data SimplCont
 	SimplCont
 
   | ApplyTo  		-- C arg
-	DupFlag 
-	InExpr SimplEnv		-- The argument and its static env
+	DupFlag			-- See Note [DupFlag invariants]
+	InExpr StaticEnv	-- The argument and its static env
 	SimplCont
 
   | Select   		-- case C of alts
-	DupFlag 
-	InId [InAlt] SimplEnv	-- The case binder, alts, and subst-env
+	DupFlag 	        -- See Note [DupFlag invariants]
+	InId [InAlt] StaticEnv	-- The case binder, alts, and subst-env
 	SimplCont
 
   -- The two strict forms have no DupFlag, because we never duplicate them
   | StrictBind 		-- (\x* \xs. e) C
 	InId [InBndr]		-- let x* = [] in e 	
-	InExpr SimplEnv		--	is a special case 
+	InExpr StaticEnv	--	is a special case 
 	SimplCont	
 
-  | StrictArg 		-- e C
-	OutExpr			-- e; *always* of form (Var v `App1` e1 .. `App` en)
-	CallCtxt		-- Whether *this* argument position is interesting
- 	ArgInfo			-- Whether the function at the head of e has rules, etc
-	SimplCont		--     plus strictness flags for *further* args
+  | StrictArg 		-- f e1 ..en C
+ 	ArgInfo		-- Specifies f, e1..en, Whether f has rules, etc
+			--     plus strictness flags for *further* args
+        CallCtxt        -- Whether *this* argument position is interesting
+	SimplCont		
 
 data ArgInfo 
   = ArgInfo {
-	ai_rules :: Bool,	-- Function has rules (recursively)
-				--	=> be keener to inline in all args
-	ai_strs :: [Bool],	-- Strictness of arguments
+        ai_fun   :: Id,		-- The function
+	ai_args  :: [OutExpr],	-- ...applied to these args (which are in *reverse* order)
+	ai_rules :: [CoreRule],	-- Rules for this function
+
+	ai_encl :: Bool,	-- Flag saying whether this function 
+				-- or an enclosing one has rules (recursively)
+				--	True => be keener to inline in all args
+	
+	ai_strs :: [Bool],	-- Strictness of remaining arguments
 				--   Usually infinite, but if it is finite it guarantees
 				--   that the function diverges after being given
 				--   that number of args
-	ai_discs :: [Int]	-- Discounts for arguments; non-zero => be keener to inline
+	ai_discs :: [Int]	-- Discounts for remaining arguments; non-zero => be keener to inline
 				--   Always infinite
     }
+
+addArgTo :: ArgInfo -> OutExpr -> ArgInfo
+addArgTo ai arg = ai { ai_args = arg : ai_args ai }
 
 instance Outputable SimplCont where
   ppr (Stop interesting)    	     = ptext (sLit "Stop") <> brackets (ppr interesting)
   ppr (ApplyTo dup arg _ cont)       = ((ptext (sLit "ApplyTo") <+> ppr dup <+> pprParendExpr arg)
 					  {-  $$ nest 2 (pprSimplEnv se) -}) $$ ppr cont
   ppr (StrictBind b _ _ _ cont)      = (ptext (sLit "StrictBind") <+> ppr b) $$ ppr cont
-  ppr (StrictArg f _ _ cont)         = (ptext (sLit "StrictArg") <+> ppr f) $$ ppr cont
-  ppr (Select dup bndr alts _ cont)  = (ptext (sLit "Select") <+> ppr dup <+> ppr bndr) $$ 
-				       (nest 4 (ppr alts)) $$ ppr cont 
+  ppr (StrictArg ai _ cont)          = (ptext (sLit "StrictArg") <+> ppr (ai_fun ai)) $$ ppr cont
+  ppr (Select dup bndr alts se cont) = (ptext (sLit "Select") <+> ppr dup <+> ppr bndr) $$ 
+				       (nest 2 $ vcat [ppr (seTvSubst se), ppr alts]) $$ ppr cont 
   ppr (CoerceIt co cont)	     = (ptext (sLit "CoerceIt") <+> ppr co) $$ ppr cont
 
-data DupFlag = OkToDup | NoDup
+data DupFlag = NoDup       -- Unsimplified, might be big
+             | Simplified  -- Simplified
+             | OkToDup     -- Simplified and small
+
+isSimplified :: DupFlag -> Bool
+isSimplified NoDup = False
+isSimplified _     = True	-- Invariant: the subst-env is empty
 
 instance Outputable DupFlag where
-  ppr OkToDup = ptext (sLit "ok")
-  ppr NoDup   = ptext (sLit "nodup")
+  ppr OkToDup    = ptext (sLit "ok")
+  ppr NoDup      = ptext (sLit "nodup")
+  ppr Simplified = ptext (sLit "simpl")
+\end{code}
 
+Note [DupFlag invariants]
+~~~~~~~~~~~~~~~~~~~~~~~~~
+In both (ApplyTo dup _ env k)
+   and  (Select dup _ _ env k)
+the following invariants hold
 
+  (a) if dup = OkToDup, then continuation k is also ok-to-dup
+  (b) if dup = OkToDup or Simplified, the subst-env is empty
+      (and and hence no need to re-simplify)
 
+\begin{code}
 -------------------
 mkBoringStop :: SimplCont
 mkBoringStop = Stop BoringCtxt
+
+mkRhsStop :: SimplCont	-- See Note [RHS of lets] in CoreUnfold
+mkRhsStop = Stop (ArgCtxt False)
 
 mkLazyArgStop :: CallCtxt -> SimplCont
 mkLazyArgStop cci = Stop cci
@@ -165,8 +197,8 @@ contIsRhsOrArg _               = False
 -------------------
 contIsDupable :: SimplCont -> Bool
 contIsDupable (Stop {})                  = True
-contIsDupable (ApplyTo  OkToDup _ _ _)   = True
-contIsDupable (Select   OkToDup _ _ _ _) = True
+contIsDupable (ApplyTo  OkToDup _ _ _)   = True	-- See Note [DupFlag invariants]
+contIsDupable (Select   OkToDup _ _ _ _) = True -- ...ditto...
 contIsDupable (CoerceIt _ cont)          = contIsDupable cont
 contIsDupable _                          = False
 
@@ -187,12 +219,16 @@ contResultType env ty cont
     go (Stop {})                      ty = ty
     go (CoerceIt co cont)             _  = go cont (snd (coercionKind co))
     go (StrictBind _ bs body se cont) _  = go cont (subst_ty se (exprType (mkLams bs body)))
-    go (StrictArg fn _ _ cont)        _  = go cont (funResultTy (exprType fn))
+    go (StrictArg ai _ cont)          _  = go cont (funResultTy (argInfoResultTy ai))
     go (Select _ _ alts se cont)      _  = go cont (subst_ty se (coreAltsType alts))
     go (ApplyTo _ arg se cont)        ty = go cont (apply_to_arg ty arg se)
 
     apply_to_arg ty (Type ty_arg) se = applyTy ty (subst_ty se ty_arg)
     apply_to_arg ty _             _  = funResultTy ty
+
+argInfoResultTy :: ArgInfo -> OutType
+argInfoResultTy (ArgInfo { ai_fun = fun, ai_args = args })
+  = foldr (\arg fn_ty -> applyTypeToArg fn_ty arg) (idType fun) args
 
 -------------------
 countValArgs :: SimplCont -> Int
@@ -204,45 +240,31 @@ countArgs :: SimplCont -> Int
 countArgs (ApplyTo _ _ _ cont) = 1 + countArgs cont
 countArgs _                    = 0
 
-contArgs :: SimplCont -> ([OutExpr], SimplCont)
+contArgs :: SimplCont -> (Bool, [ArgSummary], SimplCont)
 -- Uses substitution to turn each arg into an OutExpr
-contArgs cont = go [] cont
+contArgs cont@(ApplyTo {})
+  = case go [] cont of { (args, cont') -> (False, args, cont') }
   where
-    go args (ApplyTo _ arg se cont) = go (substExpr se arg : args) cont
-    go args cont		    = (reverse args, cont)
+    go args (ApplyTo _ arg se cont)
+      | isTypeArg arg = go args                           cont
+      | otherwise     = go (is_interesting arg se : args) cont
+    go args cont      = (reverse args, cont)
+
+    is_interesting arg se = interestingArg (substExpr (text "contArgs") se arg)
+    		   -- Do *not* use short-cutting substitution here
+		   -- because we want to get as much IdInfo as possible
+
+contArgs cont = (True, [], cont)
+
+pushSimplifiedArgs :: SimplEnv -> [CoreExpr] -> SimplCont -> SimplCont
+pushSimplifiedArgs _env []         cont = cont
+pushSimplifiedArgs env  (arg:args) cont = ApplyTo Simplified arg env (pushSimplifiedArgs env args cont)
+		   -- The env has an empty SubstEnv
 
 dropArgs :: Int -> SimplCont -> SimplCont
 dropArgs 0 cont = cont
 dropArgs n (ApplyTo _ _ _ cont) = dropArgs (n-1) cont
 dropArgs n other		= pprPanic "dropArgs" (ppr n <+> ppr other)
-
---------------------
-splitInlineCont :: SimplCont -> Maybe (SimplCont, SimplCont)
--- Returns Nothing if the continuation should dissolve an InlineMe Note
--- Return Just (c1,c2) otherwise, 
---	where c1 is the continuation to put inside the InlineMe 
---	and   c2 outside
-
--- Example: (__inline_me__ (/\a. e)) ty
---	Here we want to do the beta-redex without dissolving the InlineMe
--- See test simpl017 (and Trac #1627) for a good example of why this is important
-
-splitInlineCont (ApplyTo dup (Type ty) se c)
-  | Just (c1, c2) <- splitInlineCont c = Just (ApplyTo dup (Type ty) se c1, c2)
-splitInlineCont cont@(Stop {})         = Just (mkBoringStop, cont)
-splitInlineCont cont@(StrictBind {})   = Just (mkBoringStop, cont)
-splitInlineCont _                      = Nothing
-	-- NB: we dissolve an InlineMe in any strict context, 
-	--     not just function aplication.  
-	-- E.g.  foldr k z (__inline_me (case x of p -> build ...))
-	--     Here we want to get rid of the __inline_me__ so we
-	--     can float the case, and see foldr/build
-	--
-	-- However *not* in a strict RHS, else we get
-	-- 	   let f = __inline_me__ (\x. e) in ...f...
-	-- Now if f is guaranteed to be called, hence a strict binding
-	-- we don't thereby want to dissolve the __inline_me__; for
-	-- example, 'f' might be a  wrapper, so we'd inline the worker
 \end{code}
 
 
@@ -288,8 +310,9 @@ interestingCallContext cont
   where
     interesting (Select _ bndr _ _ _)
 	| isDeadBinder bndr = CaseCtxt
-	| otherwise	    = ArgCtxt False 2	-- If the binder is used, this
+	| otherwise	    = ArgCtxt False	-- If the binder is used, this
 						-- is like a strict let
+						-- See Note [RHS of lets] in CoreUnfold
 		
     interesting (ApplyTo _ arg _ cont)
 	| isTypeArg arg = interesting cont
@@ -298,10 +321,10 @@ interestingCallContext cont
 					-- motivation to inline. See Note [Cast then apply]
 					-- in CoreUnfold
 
-    interesting (StrictArg _ cci _ _)	= cci
-    interesting (StrictBind {})	  	= BoringCtxt
-    interesting (Stop cci)   		= cci
-    interesting (CoerceIt _ cont) 	= interesting cont
+    interesting (StrictArg _ cci _) = cci
+    interesting (StrictBind {})	    = BoringCtxt
+    interesting (Stop cci)   	    = cci
+    interesting (CoerceIt _ cont)   = interesting cont
 	-- If this call is the arg of a strict function, the context
 	-- is a bit interesting.  If we inline here, we may get useful
 	-- evaluation information to avoid repeated evals: e.g.
@@ -320,24 +343,27 @@ interestingCallContext cont
 
 -------------------
 mkArgInfo :: Id
+	  -> [CoreRule]	-- Rules for function
 	  -> Int	-- Number of value args
 	  -> SimplCont	-- Context of the call
 	  -> ArgInfo
 
-mkArgInfo fun n_val_args call_cont
+mkArgInfo fun rules n_val_args call_cont
   | n_val_args < idArity fun		-- Note [Unsaturated functions]
-  = ArgInfo { ai_rules = False
+  = ArgInfo { ai_fun = fun, ai_args = [], ai_rules = rules
+            , ai_encl = False
 	    , ai_strs = vanilla_stricts 
 	    , ai_discs = vanilla_discounts }
   | otherwise
-  = ArgInfo { ai_rules = interestingArgContext fun call_cont
+  = ArgInfo { ai_fun = fun, ai_args = [], ai_rules = rules
+            , ai_encl = interestingArgContext rules call_cont
 	    , ai_strs  = add_type_str (idType fun) arg_stricts
 	    , ai_discs = arg_discounts }
   where
     vanilla_discounts, arg_discounts :: [Int]
     vanilla_discounts = repeat 0
     arg_discounts = case idUnfolding fun of
-			CoreUnfolding _ _ _ _ _ (UnfoldIfGoodArgs _ discounts _ _)
+			CoreUnfolding {uf_guidance = UnfIfGoodArgs {ug_args = discounts}}
 			      -> discounts ++ vanilla_discounts
 			_     -> vanilla_discounts
 
@@ -345,7 +371,7 @@ mkArgInfo fun n_val_args call_cont
     vanilla_stricts  = repeat False
 
     arg_stricts
-      = case splitStrictSig (idNewStrictness fun) of
+      = case splitStrictSig (idStrictness fun) of
 	  (demands, result_info)
 		| not (demands `lengthExceeds` n_val_args)
 		-> 	-- Enough args, use the strictness given.
@@ -391,7 +417,7 @@ it'll just be floated out again.  Even if f has lots of discounts
 on its first argument -- it must be saturated for these to kick in
 -}
 
-interestingArgContext :: Id -> SimplCont -> Bool
+interestingArgContext :: [CoreRule] -> SimplCont -> Bool
 -- If the argument has form (f x y), where x,y are boring,
 -- and f is marked INLINE, then we don't want to inline f.
 -- But if the context of the argument is
@@ -402,25 +428,27 @@ interestingArgContext :: Id -> SimplCont -> Bool
 -- where h has rules, then we do want to inline f; hence the
 -- call_cont argument to interestingArgContext
 --
--- The interesting_arg_ctxt flag makes this happen; if it's
+-- The ai-rules flag makes this happen; if it's
 -- set, the inliner gets just enough keener to inline f 
 -- regardless of how boring f's arguments are, if it's marked INLINE
 --
 -- The alternative would be to *always* inline an INLINE function,
 -- regardless of how boring its context is; but that seems overkill
 -- For example, it'd mean that wrapper functions were always inlined
-interestingArgContext fn call_cont
-  = idHasRules fn || go call_cont
+interestingArgContext rules call_cont
+  = notNull rules || enclosing_fn_has_rules
   where
-    go (Select {})	     = False
-    go (ApplyTo {})	     = False
-    go (StrictArg _ cci _ _) = interesting cci
-    go (StrictBind {})	     = False	-- ??
-    go (CoerceIt _ c)	     = go c
-    go (Stop cci)            = interesting cci
+    enclosing_fn_has_rules = go call_cont
 
-    interesting (ArgCtxt rules _) = rules
-    interesting _                 = False
+    go (Select {})	   = False
+    go (ApplyTo {})	   = False
+    go (StrictArg _ cci _) = interesting cci
+    go (StrictBind {})	   = False	-- ??
+    go (CoerceIt _ c)	   = go c
+    go (Stop cci)          = interesting cci
+
+    interesting (ArgCtxt rules) = rules
+    interesting _               = False
 \end{code}
 
 
@@ -432,19 +460,43 @@ interestingArgContext fn call_cont
 %************************************************************************
 
 Inlining is controlled partly by the SimplifierMode switch.  This has two
-settings:
-
+settings
+	
 	SimplGently	(a) Simplifying before specialiser/full laziness
-			(b) Simplifiying inside INLINE pragma
+			(b) Simplifiying inside InlineRules
 			(c) Simplifying the LHS of a rule
 			(d) Simplifying a GHCi expression or Template 
 				Haskell splice
 
 	SimplPhase n _	 Used at all other times
 
-The key thing about SimplGently is that it does no call-site inlining.
-Before full laziness we must be careful not to inline wrappers,
-because doing so inhibits floating
+Note [Gentle mode]
+~~~~~~~~~~~~~~~~~~
+Gentle mode has a separate boolean flag to control
+	a) inlining (sm_inline flag)
+	b) rules    (sm_rules  flag)
+A key invariant about Gentle mode is that it is treated as the EARLIEST
+phase.  Something is inlined if the sm_inline flag is on AND the thing
+is inlinable in the earliest phase.  This is important. Example
+
+  {-# INLINE [~1] g #-}
+  g = ...
+  
+  {-# INLINE f #-}
+  f x = g (g x)
+
+If we were to inline g into f's inlining, then an importing module would
+never be able to do
+	f e --> g (g e) ---> RULE fires
+because the InlineRule for f has had g inlined into it.
+
+On the other hand, it is bad not to do ANY inlining into an
+InlineRule, because then recursive knots in instance declarations
+don't get unravelled.
+
+However, *sometimes* SimplGently must do no call-site inlining at all
+(hence sm_inline = False).  Before full laziness we must be careful
+not to inline wrappers, because doing so inhibits floating
     e.g. ...(case f x of ...)...
     ==> ...(case (case x of I# x# -> fw x#) of ...)...
     ==> ...(case x of I# x# -> case fw x# of ...)...
@@ -456,41 +508,95 @@ running it, we don't want to use -O2.  Indeed, we don't want to inline
 anything, because the byte-code interpreter might get confused about 
 unboxed tuples and suchlike.
 
-INLINE pragmas
-~~~~~~~~~~~~~~
-SimplGently is also used as the mode to simplify inside an InlineMe note.
+Note [RULEs enabled in SimplGently]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+RULES are enabled when doing "gentle" simplification.  Two reasons:
 
-\begin{code}
-inlineMode :: SimplifierMode
-inlineMode = SimplGently
-\end{code}
+  * We really want the class-op cancellation to happen:
+        op (df d1 d2) --> $cop3 d1 d2
+    because this breaks the mutual recursion between 'op' and 'df'
 
-It really is important to switch off inlinings inside such
-expressions.  Consider the following example 
+  * I wanted the RULE
+        lift String ===> ...
+    to work in Template Haskell when simplifying
+    splices, so we get simpler code for literal strings
 
+But watch out: list fusion can prevent floating.  So use phase control
+to switch off those rules until after floating.
+
+Note [Simplifying inside InlineRules]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We must take care with simplification inside InlineRules (which come from
+INLINE pragmas).  
+
+First, consider the following example
      	let f = \pq -> BIG
      	in
      	let g = \y -> f y y
 	    {-# INLINE g #-}
      	in ...g...g...g...g...g...
+Now, if that's the ONLY occurrence of f, it might be inlined inside g,
+and thence copied multiple times when g is inlined. HENCE we treat
+any occurrence in an InlineRule as a multiple occurrence, not a single
+one; see OccurAnal.addRuleUsage.
 
-Now, if that's the ONLY occurrence of f, it will be inlined inside g,
-and thence copied multiple times when g is inlined.
+Second, we do want *do* to some modest rules/inlining stuff in InlineRules,
+partly to eliminate senseless crap, and partly to break the recursive knots
+generated by instance declarations.  To keep things simple, we always set 
+the phase to 'gentle' when processing InlineRules.  OK, so suppose we have
+	{-# INLINE <act> f #-}
+	f = <rhs>
+meaning "inline f in phases p where activation <act>(p) holds". 
+Then what inlinings/rules can we apply to the copy of <rhs> captured in
+f's InlineRule?  Our model is that literally <rhs> is substituted for
+f when it is inlined.  So our conservative plan (implemented by 
+updModeForInlineRules) is this:
 
+  -------------------------------------------------------------
+  When simplifying the RHS of an InlineRule,
+  If the InlineRule becomes active in phase p, then
+    if the current phase is *earlier than* p, 
+       make no inlinings or rules active when simplifying the RHS
+    otherwise 
+       set the phase to p when simplifying the RHS
+  -------------------------------------------------------------
 
-This function may be inlinined in other modules, so we
-don't want to remove (by inlining) calls to functions that have
-specialisations, or that may have transformation rules in an importing
-scope.
+That ensures that
 
-E.g. 	{-# INLINE f #-}
-		f x = ...g...
+  a) Rules/inlinings that *cease* being active before p will 
+     not apply to the InlineRule rhs, consistent with it being
+     inlined in its *original* form in phase p.
 
-and suppose that g is strict *and* has specialisations.  If we inline
-g's wrapper, we deny f the chance of getting the specialised version
-of g when f is inlined at some call site (perhaps in some other
-module).
+  b) Rules/inlinings that only become active *after* p will
+     not apply to the InlineRule rhs, again to be consistent with
+     inlining the *original* rhs in phase p.
 
+For example, 
+ 	{-# INLINE f #-}
+	f x = ...g...
+
+	{-# NOINLINE [1] g #-}
+	g y = ...
+
+	{-# RULE h g = ... #-}
+Here we must not inline g into f's RHS, even when we get to phase 0,
+because when f is later inlined into some other module we want the
+rule for h to fire.
+
+Similarly, consider
+ 	{-# INLINE f #-}
+	f x = ...g...
+
+	g y = ...
+and suppose that there are auto-generated specialisations and a strictness
+wrapper for g.  The specialisations get activation AlwaysActive, and the
+strictness wrapper get activation (ActiveAfter 0).  So the strictness
+wrepper fails the test and won't be inlined into f's InlineRule. That
+means f can inline, expose the specialised call to g, so the specialisation
+rules can fire.
+
+A note about wrappers
+~~~~~~~~~~~~~~~~~~~~~
 It's also important not to inline a worker back into a wrapper.
 A wrapper looks like
 	wraper = inline_me (\x -> ...worker... )
@@ -498,19 +604,43 @@ Normally, the inline_me prevents the worker getting inlined into
 the wrapper (initially, the worker's only call site!).  But,
 if the wrapper is sure to be called, the strictness analyser will
 mark it 'demanded', so when the RHS is simplified, it'll get an ArgOf
-continuation.  That's why the keep_inline predicate returns True for
-ArgOf continuations.  It shouldn't do any harm not to dissolve the
-inline-me note under these circumstances.
+continuation. 
 
-Note that the result is that we do very little simplification
-inside an InlineMe.  
+\begin{code}
+simplEnvForGHCi :: SimplEnv
+simplEnvForGHCi = mkSimplEnv allOffSwitchChecker $
+                  SimplGently { sm_rules = False, sm_inline = False }
+   -- Do not do any inlining, in case we expose some unboxed
+   -- tuple stuff that confuses the bytecode interpreter
 
-	all xs = foldr (&&) True xs
-	any p = all . map p  {-# INLINE any #-}
+simplEnvForRules :: SimplEnv
+simplEnvForRules = mkSimplEnv allOffSwitchChecker $
+                   SimplGently { sm_rules = True, sm_inline = False }
 
-Problem: any won't get deforested, and so if it's exported and the
-importer doesn't use the inlining, (eg passes it as an arg) then we
-won't get deforestation at all.  We havn't solved this problem yet!
+updModeForInlineRules :: Activation -> SimplifierMode -> SimplifierMode
+-- See Note [Simplifying inside InlineRules]
+--    Treat Gentle as phase "infinity"
+--    If current_phase `earlier than` inline_rule_start_phase 
+--      then no_op
+--    else 
+--    if current_phase `same phase` inline_rule_start_phase 
+--      then current_phase   (keep gentle flags)
+--      else inline_rule_start_phase
+updModeForInlineRules inline_rule_act current_mode
+  = case inline_rule_act of
+      NeverActive     -> no_op
+      AlwaysActive    -> mk_gentle current_mode
+      ActiveBefore {} -> mk_gentle current_mode
+      ActiveAfter n   -> mk_phase n current_mode
+  where
+    no_op = SimplGently { sm_rules = False, sm_inline = False }
+
+    mk_gentle (SimplGently {}) = current_mode
+    mk_gentle _                = SimplGently { sm_rules = True, sm_inline = True }
+
+    mk_phase n (SimplPhase _ ss) = SimplPhase n ss
+    mk_phase n (SimplGently {})  = SimplPhase n ["gentle-rules"]
+\end{code}
 
 
 preInlineUnconditionally
@@ -577,11 +707,52 @@ seems a bit fragile.
 Conclusion: inline top level things gaily until Phase 0 (the last
 phase), at which point don't.
 
+Note [pre/postInlineUnconditionally in gentle mode]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Even in gentle mode we want to do preInlineUnconditionally.  The
+reason is that too little clean-up happens if you don't inline
+use-once things.  Also a bit of inlining is *good* for full laziness;
+it can expose constant sub-expressions.  Example in
+spectral/mandel/Mandel.hs, where the mandelset function gets a useful
+let-float if you inline windowToViewport
+
+However, as usual for Gentle mode, do not inline things that are
+inactive in the intial stages.  See Note [Gentle mode].
+
+Note [InlineRule and preInlineUnconditionally]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Surprisingly, do not pre-inline-unconditionally Ids with INLINE pragmas!
+Example
+
+   {-# INLINE f #-}
+   f :: Eq a => a -> a
+   f x = ...
+   
+   fInt :: Int -> Int
+   fInt = f Int dEqInt
+
+   ...fInt...fInt...fInt...
+
+Here f occurs just once, in the RHS of f1. But if we inline it there
+we'll lose the opportunity to inline at each of fInt's call sites.
+The INLINE pragma will only inline when the application is saturated
+for exactly this reason; and we don't want PreInlineUnconditionally
+to second-guess it.  A live example is Trac #3736.
+    c.f. Note [InlineRule and postInlineUnconditionally]
+
+Note [Top-level botomming Ids]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Don't inline top-level Ids that are bottoming, even if they are used just
+once, because FloatOut has gone to some trouble to extract them out.
+Inlining them won't make the program run faster!
+
 \begin{code}
 preInlineUnconditionally :: SimplEnv -> TopLevelFlag -> InId -> InExpr -> Bool
 preInlineUnconditionally env top_lvl bndr rhs
-  | not active 		   = False
-  | opt_SimplNoPreInlining = False
+  | not active 		                     = False
+  | isStableUnfolding (idUnfolding bndr)     = False    -- Note [InlineRule and preInlineUnconditionally]
+  | isTopLevel top_lvl && isBottomingId bndr = False	-- Note [Top-level bottoming Ids]
+  | opt_SimplNoPreInlining                   = False
   | otherwise = case idOccInfo bndr of
 		  IAmDead	     	     -> True	-- Happens in ((\x.1) v)
 	  	  OneOcc in_lam True int_cxt -> try_once in_lam int_cxt
@@ -589,15 +760,15 @@ preInlineUnconditionally env top_lvl bndr rhs
   where
     phase = getMode env
     active = case phase of
-		   SimplGently    -> isAlwaysActive act
+		   SimplGently {} -> isEarlyActive act
+			-- See Note [pre/postInlineUnconditionally in gentle mode]
 		   SimplPhase n _ -> isActive n act
     act = idInlineActivation bndr
-
     try_once in_lam int_cxt	-- There's one textual occurrence
 	| not in_lam = isNotTopLevel top_lvl || early_phase
 	| otherwise  = int_cxt && canInlineInLam rhs
 
--- Be very careful before inlining inside a lambda, becuase (a) we must not 
+-- Be very careful before inlining inside a lambda, because (a) we must not 
 -- invalidate occurrence information, and (b) we want to avoid pushing a
 -- single allocation (here) into multiple allocations (inside lambda).  
 -- Inlining a *function* with a single *saturated* call would be ok, mind you.
@@ -674,17 +845,19 @@ story for now.
 \begin{code}
 postInlineUnconditionally 
     :: SimplEnv -> TopLevelFlag
-    -> InId		-- The binder (an OutId would be fine too)
+    -> OutId		-- The binder (an InId would be fine too)
     -> OccInfo 		-- From the InId
     -> OutExpr
     -> Unfolding
     -> Bool
 postInlineUnconditionally env top_lvl bndr occ_info rhs unfolding
-  | not active		   = False
-  | isLoopBreaker occ_info = False	-- If it's a loop-breaker of any kind, don't inline
+  | not active		        = False
+  | isLoopBreaker occ_info      = False	-- If it's a loop-breaker of any kind, don't inline
 					-- because it might be referred to "earlier"
-  | isExportedId bndr      = False
-  | exprIsTrivial rhs 	   = True
+  | isExportedId bndr           = False
+  | isStableUnfolding unfolding = False	-- Note [InlineRule and postInlineUnconditionally]
+  | exprIsTrivial rhs 	        = True
+  | isTopLevel top_lvl          = False	-- Note [Top level and postInlineUnconditionally]
   | otherwise
   = case occ_info of
 	-- The point of examining occ_info here is that for *non-values* 
@@ -697,7 +870,8 @@ postInlineUnconditionally env top_lvl bndr occ_info rhs unfolding
 	--	case v of
 	--	   True  -> case x of ...
 	--	   False -> case x of ...
-	-- I'm not sure how important this is in practice
+	-- This is very important in practice; e.g. wheel-seive1 doubles 
+	-- in allocation if you miss this out
       OneOcc in_lam _one_br int_cxt	-- OneOcc => no code-duplication issue
 	->     smallEnoughToInline unfolding	-- Small enough to dup
 			-- ToDo: consider discount on smallEnoughToInline if int_cxt is true
@@ -710,8 +884,8 @@ postInlineUnconditionally env top_lvl bndr occ_info rhs unfolding
 			-- PRINCIPLE: when we've already simplified an expression once, 
 			-- make sure that we only inline it if it's reasonably small.
 
-	   &&  ((isNotTopLevel top_lvl && not in_lam) || 
-			-- But outside a lambda, we want to be reasonably aggressive
+           && (not in_lam || 
+			-- Outside a lambda, we want to be reasonably aggressive
 			-- about inlining into multiple branches of case
 			-- e.g. let x = <non-value> 
 			--	in case y of { C1 -> ..x..; C2 -> ..x..; C3 -> ... } 
@@ -745,32 +919,61 @@ postInlineUnconditionally env top_lvl bndr occ_info rhs unfolding
 
   where
     active = case getMode env of
-		   SimplGently    -> isAlwaysActive act
+		   SimplGently {} -> isEarlyActive act
+			-- See Note [pre/postInlineUnconditionally in gentle mode]
 		   SimplPhase n _ -> isActive n act
     act = idInlineActivation bndr
 
-activeInline :: SimplEnv -> OutId -> Bool
-activeInline env id
+activeUnfolding :: SimplEnv -> IdUnfoldingFun
+activeUnfolding env
   = case getMode env of
-      SimplGently -> False
-	-- No inlining at all when doing gentle stuff,
-	-- except for local things that occur once (pre/postInlineUnconditionally)
-	-- The reason is that too little clean-up happens if you 
-	-- don't inline use-once things.   Also a bit of inlining is *good* for
-	-- full laziness; it can expose constant sub-expressions.
-	-- Example in spectral/mandel/Mandel.hs, where the mandelset 
-	-- function gets a useful let-float if you inline windowToViewport
+      SimplGently { sm_inline = False } -> active_unfolding_minimal
+      SimplGently { sm_inline = True  } -> active_unfolding_gentle
+      SimplPhase n _                    -> active_unfolding n
 
-	-- NB: we used to have a second exception, for data con wrappers.
-	-- On the grounds that we use gentle mode for rule LHSs, and 
-	-- they match better when data con wrappers are inlined.
-	-- But that only really applies to the trivial wrappers (like (:)),
-	-- and they are now constructed as Compulsory unfoldings (in MkId)
-	-- so they'll happen anyway.
+activeUnfInRule :: SimplEnv -> IdUnfoldingFun
+-- When matching in RULE, we want to "look through" an unfolding
+-- if *rules* are on, even if *inlinings* are not.  A notable example
+-- is DFuns, which really we want to match in rules like (op dfun)
+-- in gentle mode.
+activeUnfInRule env
+  = case getMode env of
+      SimplGently { sm_rules = False } -> active_unfolding_minimal
+      SimplGently { sm_rules = True  } -> active_unfolding_gentle
+      SimplPhase n _                   -> active_unfolding n
 
-      SimplPhase n _ -> isActive n act
+active_unfolding_minimal :: IdUnfoldingFun
+-- Compuslory unfoldings only
+-- Ignore SimplGently, because we want to inline regardless;
+-- the Id has no top-level binding at all
+--
+-- NB: we used to have a second exception, for data con wrappers.
+-- On the grounds that we use gentle mode for rule LHSs, and 
+-- they match better when data con wrappers are inlined.
+-- But that only really applies to the trivial wrappers (like (:)),
+-- and they are now constructed as Compulsory unfoldings (in MkId)
+-- so they'll happen anyway.
+active_unfolding_minimal id
+  | isCompulsoryUnfolding unf = unf
+  | otherwise                 = NoUnfolding
   where
-    act = idInlineActivation id
+    unf = realIdUnfolding id	-- Never a loop breaker
+
+active_unfolding_gentle :: IdUnfoldingFun
+-- Anything that is early-active
+-- See Note [Gentle mode]
+active_unfolding_gentle id
+  | isEarlyActive (idInlineActivation id) = idUnfolding id
+  | otherwise                             = NoUnfolding
+      -- idUnfolding checks for loop-breakers
+      -- Things with an INLINE pragma may have 
+      -- an unfolding *and* be a loop breaker  
+      -- (maybe the knot is not yet untied)
+
+active_unfolding :: CompilerPhase -> IdUnfoldingFun
+active_unfolding n id
+  | isActive n (idInlineActivation id) = idUnfolding id
+  | otherwise                          = NoUnfolding
 
 activeRule :: DynFlags -> SimplEnv -> Maybe (Activation -> Bool)
 -- Nothing => No rules at all
@@ -779,14 +982,40 @@ activeRule dflags env
   = Nothing	-- Rewriting is off
   | otherwise
   = case getMode env of
-	SimplGently    -> Just isAlwaysActive
-			-- Used to be Nothing (no rules in gentle mode)
-			-- Main motivation for changing is that I wanted
-			-- 	lift String ===> ...
-			-- to work in Template Haskell when simplifying
-			-- splices, so we get simpler code for literal strings
-	SimplPhase n _ -> Just (isActive n)
+      SimplGently { sm_rules = rules_on } 
+        | rules_on  -> Just isEarlyActive	-- Note [RULEs enabled in SimplGently]
+        | otherwise -> Nothing
+      SimplPhase n _ -> Just (isActive n)
 \end{code}
+
+Note [Top level and postInlineUnconditionally]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We don't do postInlineUnconditionally for top-level things (exept ones that
+are trivial):
+  * There is no point, because the main goal is to get rid of local
+    bindings used in multiple case branches.
+  * Doing so will inline top-level error expressions that have been
+    carefully floated out by FloatOut.  More generally, it might 
+    replace static allocation with dynamic.
+
+Note [InlineRule and postInlineUnconditionally]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Do not do postInlineUnconditionally if the Id has an InlineRule, otherwise
+we lose the unfolding.  Example
+
+     -- f has InlineRule with rhs (e |> co)
+     --   where 'e' is big
+     f = e |> co
+
+Then there's a danger we'll optimise to
+
+     f' = e
+     f = f' |> co
+
+and now postInlineUnconditionally, losing the InlineRule on f.  Now f'
+won't inline because 'e' is too big.
+
+    c.f. Note [InlineRule and preInlineUnconditionally]
 
 
 %************************************************************************
@@ -817,20 +1046,51 @@ mkLam _env bndrs body
 	co_vars  = tyVarsOfType co
 	bad bndr = isCoVar bndr && bndr `elemVarSet` co_vars      
 
+    mkLam' dflags bndrs body@(Lam {})
+      = mkLam' dflags (bndrs ++ bndrs1) body1
+      where
+        (bndrs1, body1) = collectBinders body
+
     mkLam' dflags bndrs body
-      | dopt Opt_DoEtaReduction dflags,
-        Just etad_lam <- tryEtaReduce bndrs body
+      | dopt Opt_DoEtaReduction dflags
+      , Just etad_lam <- tryEtaReduce bndrs body
       = do { tick (EtaReduction (head bndrs))
 	   ; return etad_lam }
 
-      | dopt Opt_DoLambdaEtaExpansion dflags,
-   	any isRuntimeVar bndrs
-      = do { let body' = tryEtaExpansion dflags body
+      | dopt Opt_DoLambdaEtaExpansion dflags
+      ,	any ok_to_expand bndrs
+      = do { let body'     = etaExpand fun_arity body
+                 fun_arity = exprEtaExpandArity dflags body
  	   ; return (mkLams bndrs body') }
    
       | otherwise 
       = return (mkLams bndrs body)
+
+    ok_to_expand :: Var -> Bool	-- Note [When to eta expand]
+    ok_to_expand bndr = isId bndr && not (isDictId bndr)
 \end{code}
+
+Note [When to eta expand]
+~~~~~~~~~~~~~~~~~~~~~~~~~
+We only eta expand if there is at least one non-tyvar, non-dict 
+binder.  The proximate cause for not eta-expanding dictionary lambdas 
+was this example:
+   genMap :: C a => ...
+   {-# INLINE genMap #-}
+   genMap f xs = ...
+
+   myMap :: D a => ...
+   {-# INLINE myMap #-}
+   myMap = genMap
+
+Notice that 'genMap' should only inline if applied to two arguments.
+In the InlineRule for myMap we'll have the unfolding 
+    (\d -> genMap Int (..d..))  
+We do not want to eta-expand to 
+    (\d f xs -> genMap Int (..d..) f xs) 
+because then 'genMap' will inline, and it really shouldn't: at least
+as far as the programmer is concerned, it's not applied to two
+arguments!
 
 Note [Casts and lambdas]
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -870,7 +1130,7 @@ because the latter is not well-kinded.
 
 {-	Sept 01: I'm experimenting with getting the
 	full laziness pass to float out past big lambdsa
- | all isTyVar bndrs,	-- Only for big lambdas
+ | all isTyCoVar bndrs,	-- Only for big lambdas
    contIsRhs cont	-- Only try the rhs type-lambda floating
 			-- if this is indeed a right-hand side; otherwise
 			-- we end up floating the thing out, only for float-in
@@ -878,146 +1138,6 @@ because the latter is not well-kinded.
  = do (floats, body') <- tryRhsTyLam env bndrs body
       return (floats, mkLams bndrs body')
 -}
-
-
-%************************************************************************
-%*									*
-		Eta reduction
-%*									*
-%************************************************************************
-
-Note [Eta reduction conditions]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We try for eta reduction here, but *only* if we get all the way to an
-trivial expression.  We don't want to remove extra lambdas unless we
-are going to avoid allocating this thing altogether.
-
-There are some particularly delicate points here:
-
-* Eta reduction is not valid in general:  
-	\x. bot  /=  bot
-  This matters, partly for old-fashioned correctness reasons but,
-  worse, getting it wrong can yield a seg fault. Consider
-	f = \x.f x
-	h y = case (case y of { True -> f `seq` True; False -> False }) of
-		True -> ...; False -> ...
-
-  If we (unsoundly) eta-reduce f to get f=f, the strictness analyser
-  says f=bottom, and replaces the (f `seq` True) with just
-  (f `cast` unsafe-co).  BUT, as thing stand, 'f' got arity 1, and it
-  *keeps* arity 1 (perhaps also wrongly).  So CorePrep eta-expands 
-  the definition again, so that it does not termninate after all.
-  Result: seg-fault because the boolean case actually gets a function value.
-  See Trac #1947.
-
-  So it's important to to the right thing.
-
-* Note [Arity care]: we need to be careful if we just look at f's
-  arity. Currently (Dec07), f's arity is visible in its own RHS (see
-  Note [Arity robustness] in SimplEnv) so we must *not* trust the
-  arity when checking that 'f' is a value.  Otherwise we will
-  eta-reduce
-      f = \x. f x
-  to
-      f = f
-  Which might change a terminiating program (think (f `seq` e)) to a 
-  non-terminating one.  So we check for being a loop breaker first.
-
-  However for GlobalIds we can look at the arity; and for primops we
-  must, since they have no unfolding.  
-
-* Regardless of whether 'f' is a value, we always want to 
-  reduce (/\a -> f a) to f
-  This came up in a RULE: foldr (build (/\a -> g a))
-  did not match 	  foldr (build (/\b -> ...something complex...))
-  The type checker can insert these eta-expanded versions,
-  with both type and dictionary lambdas; hence the slightly 
-  ad-hoc isDictId
-
-* Never *reduce* arity. For example
-      f = \xy. g x y
-  Then if h has arity 1 we don't want to eta-reduce because then
-  f's arity would decrease, and that is bad
-
-These delicacies are why we don't use exprIsTrivial and exprIsHNF here.
-Alas.
-
-\begin{code}
-tryEtaReduce :: [OutBndr] -> OutExpr -> Maybe OutExpr
-tryEtaReduce bndrs body 
-  = go (reverse bndrs) body
-  where
-    incoming_arity = count isId bndrs
-
-    go (b : bs) (App fun arg) | ok_arg b arg = go bs fun	-- Loop round
-    go []       fun           | ok_fun fun   = Just fun		-- Success!
-    go _        _			     = Nothing		-- Failure!
-
-	-- Note [Eta reduction conditions]
-    ok_fun (App fun (Type ty)) 
-	| not (any (`elemVarSet` tyVarsOfType ty) bndrs)
-	=  ok_fun fun
-    ok_fun (Var fun_id)
-	=  not (fun_id `elem` bndrs)
-	&& (ok_fun_id fun_id || all ok_lam bndrs)
-    ok_fun _fun = False
-
-    ok_fun_id fun = fun_arity fun >= incoming_arity
-
-    fun_arity fun 	      -- See Note [Arity care]
-       | isLocalId fun && isLoopBreaker (idOccInfo fun) = 0
-       | otherwise = idArity fun   	      
-
-    ok_lam v = isTyVar v || isDictId v
-
-    ok_arg b arg = varToCoreExpr b `cheapEqExpr` arg
-\end{code}
-
-
-%************************************************************************
-%*									*
-		Eta expansion
-%*									*
-%************************************************************************
-
-
-We go for:
-   f = \x1..xn -> N  ==>   f = \x1..xn y1..ym -> N y1..ym
-				 (n >= 0)
-
-where (in both cases) 
-
-	* The xi can include type variables
-
-	* The yi are all value variables
-
-	* N is a NORMAL FORM (i.e. no redexes anywhere)
-	  wanting a suitable number of extra args.
-
-The biggest reason for doing this is for cases like
-
-	f = \x -> case x of
-		    True  -> \y -> e1
-		    False -> \y -> e2
-
-Here we want to get the lambdas together.  A good exmaple is the nofib
-program fibheaps, which gets 25% more allocation if you don't do this
-eta-expansion.
-
-We may have to sandwich some coerces between the lambdas
-to make the types work.   exprEtaExpandArity looks through coerces
-when computing arity; and etaExpand adds the coerces as necessary when
-actually computing the expansion.
-
-\begin{code}
-tryEtaExpansion :: DynFlags -> OutExpr -> OutExpr
--- There is at least one runtime binder in the binders
-tryEtaExpansion dflags body
-  = etaExpand fun_arity body
-  where
-    fun_arity = exprEtaExpandArity dflags body
-\end{code}
-
 
 %************************************************************************
 %*									*
@@ -1106,7 +1226,7 @@ abstractFloats :: [OutTyVar] -> SimplEnv -> OutExpr -> SimplM ([OutBind], OutExp
 abstractFloats main_tvs body_env body
   = ASSERT( notNull body_floats )
     do	{ (subst, float_binds) <- mapAccumLM abstract empty_subst body_floats
-	; return (float_binds, CoreSubst.substExpr subst body) }
+	; return (float_binds, CoreSubst.substExpr (text "abstract_floats1") subst body) }
   where
     main_tv_set = mkVarSet main_tvs
     body_floats = getFloats body_env
@@ -1119,10 +1239,10 @@ abstractFloats main_tvs body_env body
 		 subst'   = CoreSubst.extendIdSubst subst id poly_app
 	   ; return (subst', (NonRec poly_id poly_rhs)) }
       where
-	rhs' = CoreSubst.substExpr subst rhs
+	rhs' = CoreSubst.substExpr (text "abstract_floats2") subst rhs
 	tvs_here | any isCoVar main_tvs = main_tvs	-- Note [Abstract over coercions]
 		 | otherwise 
-		 = varSetElems (main_tv_set `intersectVarSet` exprSomeFreeVars isTyVar rhs')
+		 = varSetElems (main_tv_set `intersectVarSet` exprSomeFreeVars isTyCoVar rhs')
 	
 		-- Abstract only over the type variables free in the rhs
 		-- wrt which the new binding is abstracted.  But the naive
@@ -1143,7 +1263,8 @@ abstractFloats main_tvs body_env body
     abstract subst (Rec prs)
        = do { (poly_ids, poly_apps) <- mapAndUnzipM (mk_poly tvs_here) ids
 	    ; let subst' = CoreSubst.extendSubstList subst (ids `zip` poly_apps)
-		  poly_rhss = [mkLams tvs_here (CoreSubst.substExpr subst' rhs) | rhs <- rhss]
+		  poly_rhss = [mkLams tvs_here (CoreSubst.substExpr (text "abstract_floats3") subst' rhs) 
+                              | rhs <- rhss]
 	    ; return (subst', Rec (poly_ids `zip` poly_rhss)) }
        where
 	 (ids,rhss) = unzip prs
@@ -1220,83 +1341,61 @@ Historical note: if you use let-bindings instead of a substitution, beware of th
 
 prepareAlts tries these things:
 
-1.  If several alternatives are identical, merge them into
-    a single DEFAULT alternative.  I've occasionally seen this 
-    making a big difference:
+1.  Eliminate alternatives that cannot match, including the
+    DEFAULT alternative.
 
-	case e of		=====>     case e of
-	  C _ -> f x			     D v -> ....v....
-	  D v -> ....v....		     DEFAULT -> f x
-	  DEFAULT -> f x
+2.  If the DEFAULT alternative can match only one possible constructor,
+    then make that constructor explicit.
+    e.g.
+        case e of x { DEFAULT -> rhs }
+     ===>
+        case e of x { (a,b) -> rhs }
+    where the type is a single constructor type.  This gives better code
+    when rhs also scrutinises x or e.
 
-   The point is that we merge common RHSs, at least for the DEFAULT case.
-   [One could do something more elaborate but I've never seen it needed.]
-   To avoid an expensive test, we just merge branches equal to the *first*
-   alternative; this picks up the common cases
-	a) all branches equal
-	b) some branches equal to the DEFAULT (which occurs first)
+3. Returns a list of the constructors that cannot holds in the
+   DEFAULT alternative (if there is one)
 
-2.  Case merging:
-       case e of b {             ==>   case e of b {
-    	 p1 -> rhs1	                 p1 -> rhs1
-    	 ...	                         ...
-    	 pm -> rhsm                      pm -> rhsm
-    	 _  -> case b of b' {            pn -> let b'=b in rhsn
- 		     pn -> rhsn          ...
- 		     ...                 po -> let b'=b in rhso
- 		     po -> rhso          _  -> let b'=b in rhsd
- 		     _  -> rhsd
-       }  
-    
-    which merges two cases in one case when -- the default alternative of
-    the outer case scrutises the same variable as the outer case This
-    transformation is called Case Merging.  It avoids that the same
-    variable is scrutinised multiple times.
+Here "cannot match" includes knowledge from GADTs
 
+It's a good idea do do this stuff before simplifying the alternatives, to
+avoid simplifying alternatives we know can't happen, and to come up with
+the list of constructors that are handled, to put into the IdInfo of the
+case binder, for use when simplifying the alternatives.
 
-The case where transformation (1) showed up was like this (lib/std/PrelCError.lhs):
+Eliminating the default alternative in (1) isn't so obvious, but it can
+happen:
 
-	x | p `is` 1 -> e1
-	  | p `is` 2 -> e2
-	...etc...
+data Colour = Red | Green | Blue
 
-where @is@ was something like
-	
-	p `is` n = p /= (-1) && p == n
+f x = case x of
+        Red -> ..
+        Green -> ..
+        DEFAULT -> h x
 
-This gave rise to a horrible sequence of cases
+h y = case y of
+        Blue -> ..
+        DEFAULT -> [ case y of ... ]
 
-	case p of
-	  (-1) -> $j p
-	  1    -> e1
-	  DEFAULT -> $j p
-
-and similarly in cascade for all the join points!
-
-Note [Dead binders]
-~~~~~~~~~~~~~~~~~~~~
-We do this *here*, looking at un-simplified alternatives, because we
-have to check that r doesn't mention the variables bound by the
-pattern in each alternative, so the binder-info is rather useful.
+If we inline h into f, the default case of the inlined h can't happen.
+If we don't notice this, we may end up filtering out *all* the cases
+of the inner case y, which give us nowhere to go!
 
 \begin{code}
-prepareAlts :: SimplEnv -> OutExpr -> OutId -> [InAlt] -> SimplM ([AltCon], [InAlt])
-prepareAlts env scrut case_bndr' alts
-  = do	{ dflags <- getDOptsSmpl
-	; alts <- combineIdenticalAlts case_bndr' alts
-
-	; let (alts_wo_default, maybe_deflt) = findDefault alts
+prepareAlts :: OutExpr -> OutId -> [InAlt] -> SimplM ([AltCon], [InAlt])
+prepareAlts scrut case_bndr' alts
+  = do	{ let (alts_wo_default, maybe_deflt) = findDefault alts
 	      alt_cons = [con | (con,_,_) <- alts_wo_default]
 	      imposs_deflt_cons = nub (imposs_cons ++ alt_cons)
 		-- "imposs_deflt_cons" are handled 
 		--   EITHER by the context, 
 		--   OR by a non-DEFAULT branch in this case expression.
 
-	; default_alts <- prepareDefault dflags env case_bndr' mb_tc_app 
+	; default_alts <- prepareDefault case_bndr' mb_tc_app 
 					 imposs_deflt_cons maybe_deflt
 
 	; let trimmed_alts = filterOut impossible_alt alts_wo_default
-	      merged_alts = mergeAlts trimmed_alts default_alts
+	      merged_alts  = mergeAlts trimmed_alts default_alts
 		-- We need the mergeAlts in case the new default_alt 
 		-- has turned into a constructor alternative.
 		-- The merge keeps the inner DEFAULT at the front, if there is one
@@ -1317,29 +1416,7 @@ prepareAlts env scrut case_bndr' alts
     impossible_alt _                   = False
 
 
---------------------------------------------------
---	1. Merge identical branches
---------------------------------------------------
-combineIdenticalAlts :: OutId -> [InAlt] -> SimplM [InAlt]
-
-combineIdenticalAlts case_bndr ((_con1,bndrs1,rhs1) : con_alts)
-  | all isDeadBinder bndrs1,			-- Remember the default 
-    length filtered_alts < length con_alts	-- alternative comes first
-	-- Also Note [Dead binders]
-  = do	{ tick (AltMerge case_bndr)
-	; return ((DEFAULT, [], rhs1) : filtered_alts) }
-  where
-    filtered_alts	 = filter keep con_alts
-    keep (_con,bndrs,rhs) = not (all isDeadBinder bndrs && rhs `cheapEqExpr` rhs1)
-
-combineIdenticalAlts _ alts = return alts
-
--------------------------------------------------------------------------
---			Prepare the default alternative
--------------------------------------------------------------------------
-prepareDefault :: DynFlags
-	       -> SimplEnv
-	       -> OutId		-- Case binder; need just for its type. Note that as an
+prepareDefault :: OutId		-- Case binder; need just for its type. Note that as an
 				--   OutId, it has maximum information; this is important.
 				--   Test simpl013 is an example
 	       -> Maybe (TyCon, [Type])	-- Type of scrutinee, decomposed
@@ -1347,42 +1424,9 @@ prepareDefault :: DynFlags
 	       -> Maybe InExpr	-- Rhs
 	       -> SimplM [InAlt]	-- Still unsimplified
 					-- We use a list because it's what mergeAlts expects,
-					-- And becuase case-merging can cause many to show up
-
--------	Merge nested cases ----------
-prepareDefault dflags env outer_bndr _bndr_ty imposs_cons (Just deflt_rhs)
-  | dopt Opt_CaseMerge dflags
-  , Case (Var inner_scrut_var) inner_bndr _ inner_alts <- deflt_rhs
-  , DoneId inner_scrut_var' <- substId env inner_scrut_var
-	-- Remember, inner_scrut_var is an InId, but outer_bndr is an OutId
-  , inner_scrut_var' == outer_bndr
-	-- NB: the substId means that if the outer scrutinee was a 
-	--     variable, and inner scrutinee is the same variable, 
-	--     then inner_scrut_var' will be outer_bndr
-	--     via the magic of simplCaseBinder
-  = do	{ tick (CaseMerge outer_bndr)
-
-	; let munge_rhs rhs = bindCaseBndr inner_bndr (Var outer_bndr) rhs
-	; return [(con, args, munge_rhs rhs) | (con, args, rhs) <- inner_alts,
-					       not (con `elem` imposs_cons) ]
-		-- NB: filter out any imposs_cons.  Example:
-		--	case x of 
-		--	  A -> e1
-		--	  DEFAULT -> case x of 
-		--			A -> e2
-		--			B -> e3
-		-- When we merge, we must ensure that e1 takes 
-		-- precedence over e2 as the value for A!  
-	}
-    	-- Warning: don't call prepareAlts recursively!
-    	-- Firstly, there's no point, because inner alts have already had
-    	-- mkCase applied to them, so they won't have a case in their default
-    	-- Secondly, if you do, you get an infinite loop, because the bindCaseBndr
-    	-- in munge_rhs may put a case into the DEFAULT branch!
-
 
 --------- Fill in known constructor -----------
-prepareDefault _ _ case_bndr (Just (tycon, inst_tys)) imposs_cons (Just deflt_rhs)
+prepareDefault case_bndr (Just (tycon, inst_tys)) imposs_cons (Just deflt_rhs)
   | 	-- This branch handles the case where we are 
 	-- scrutinisng an algebraic data type
     isAlgTyCon tycon		-- It's a data type, tuple, or unboxed tuples.  
@@ -1390,18 +1434,19 @@ prepareDefault _ _ case_bndr (Just (tycon, inst_tys)) imposs_cons (Just deflt_rh
 				-- 	case x of { DEFAULT -> e }
 				-- and we don't want to fill in a default for them!
   , Just all_cons <- tyConDataCons_maybe tycon
-  , not (null all_cons)		-- This is a tricky corner case.  If the data type has no constructors,
-				-- which GHC allows, then the case expression will have at most a default
-				-- alternative.  We don't want to eliminate that alternative, because the
-				-- invariant is that there's always one alternative.  It's more convenient
-				-- to leave	
-				--	case x of { DEFAULT -> e }     
-				-- as it is, rather than transform it to
-				--	error "case cant match"
-				-- which would be quite legitmate.  But it's a really obscure corner, and
-				-- not worth wasting code on.
+  , not (null all_cons)	
+	-- This is a tricky corner case.  If the data type has no constructors,
+	-- which GHC allows, then the case expression will have at most a default
+	-- alternative.  We don't want to eliminate that alternative, because the
+	-- invariant is that there's always one alternative.  It's more convenient
+	-- to leave	
+	--	case x of { DEFAULT -> e }     
+	-- as it is, rather than transform it to
+	--	error "case cant match"
+	-- which would be quite legitmate.  But it's a really obscure corner, and
+	-- not worth wasting code on.
   , let imposs_data_cons = [con | DataAlt con <- imposs_cons]	-- We now know it's a data type 
-	impossible con  = con `elem` imposs_data_cons || dataConCannotMatch inst_tys con
+	impossible con   = con `elem` imposs_data_cons || dataConCannotMatch inst_tys con
   = case filterOut impossible all_cons of
 	[]    -> return []	-- Eliminate the default alternative
 				-- altogether if it can't match
@@ -1415,28 +1460,52 @@ prepareDefault _ _ case_bndr (Just (tycon, inst_tys)) imposs_cons (Just deflt_rh
 
 	_ -> return [(DEFAULT, [], deflt_rhs)]
 
-  | debugIsOn, isAlgTyCon tycon, not (isOpenTyCon tycon), null (tyConDataCons tycon)
-	-- This can legitimately happen for type families, so don't report that
+  | debugIsOn, isAlgTyCon tycon
+  , null (tyConDataCons tycon)
+  , not (isFamilyTyCon tycon || isAbstractTyCon tycon)
+	-- Check for no data constructors
+        -- This can legitimately happen for abstract types and type families,
+        -- so don't report that
   = pprTrace "prepareDefault" (ppr case_bndr <+> ppr tycon)
         $ return [(DEFAULT, [], deflt_rhs)]
 
 --------- Catch-all cases -----------
-prepareDefault _dflags _env _case_bndr _bndr_ty _imposs_cons (Just deflt_rhs)
+prepareDefault _case_bndr _bndr_ty _imposs_cons (Just deflt_rhs)
   = return [(DEFAULT, [], deflt_rhs)]
 
-prepareDefault _dflags _env _case_bndr _bndr_ty _imposs_cons Nothing
+prepareDefault _case_bndr _bndr_ty _imposs_cons Nothing
   = return []	-- No default branch
 \end{code}
 
 
 
-=================================================================================
+%************************************************************************
+%*									*
+		mkCase
+%*									*
+%************************************************************************
 
 mkCase tries these things
 
-1.  Eliminate the case altogether if possible
+1.  Merge Nested Cases
 
-2.  Case-identity:
+       case e of b {             ==>   case e of b {
+    	 p1 -> rhs1	                 p1 -> rhs1
+    	 ...	                         ...
+    	 pm -> rhsm                      pm -> rhsm
+    	 _  -> case b of b' {            pn -> let b'=b in rhsn
+ 		     pn -> rhsn          ...
+ 		     ...                 po -> let b'=b in rhso
+ 		     po -> rhso          _  -> let b'=b in rhsd
+ 		     _  -> rhsd
+       }  
+    
+    which merges two cases in one case when -- the default alternative of
+    the outer case scrutises the same variable as the outer case. This
+    transformation is called Case Merging.  It avoids that the same
+    variable is scrutinised multiple times.
+
+2.  Eliminate Identity Case
 
 	case e of 		===> e
 		True  -> True;
@@ -1444,19 +1513,99 @@ mkCase tries these things
 
     and similar friends.
 
+3.  Merge identical alternatives.
+    If several alternatives are identical, merge them into
+    a single DEFAULT alternative.  I've occasionally seen this 
+    making a big difference:
+
+	case e of		=====>     case e of
+	  C _ -> f x			     D v -> ....v....
+	  D v -> ....v....		     DEFAULT -> f x
+	  DEFAULT -> f x
+
+   The point is that we merge common RHSs, at least for the DEFAULT case.
+   [One could do something more elaborate but I've never seen it needed.]
+   To avoid an expensive test, we just merge branches equal to the *first*
+   alternative; this picks up the common cases
+	a) all branches equal
+	b) some branches equal to the DEFAULT (which occurs first)
+
+The case where Merge Identical Alternatives transformation showed up
+was like this (base/Foreign/C/Err/Error.lhs):
+
+	x | p `is` 1 -> e1
+	  | p `is` 2 -> e2
+	...etc...
+
+where @is@ was something like
+	
+	p `is` n = p /= (-1) && p == n
+
+This gave rise to a horrible sequence of cases
+
+	case p of
+	  (-1) -> $j p
+	  1    -> e1
+	  DEFAULT -> $j p
+
+and similarly in cascade for all the join points!
+
 
 \begin{code}
-mkCase :: OutExpr -> OutId -> [OutAlt]	-- Increasing order
-       -> SimplM OutExpr
+mkCase, mkCase1, mkCase2 
+   :: DynFlags 
+   -> OutExpr -> OutId
+   -> [OutAlt]		-- Alternatives in standard (increasing) order
+   -> SimplM OutExpr
 
 --------------------------------------------------
---	2. Identity case
+--	1. Merge Nested Cases
 --------------------------------------------------
 
-mkCase scrut case_bndr alts	-- Identity case
+mkCase dflags scrut outer_bndr ((DEFAULT, _, deflt_rhs) : outer_alts)
+  | dopt Opt_CaseMerge dflags
+  , Case (Var inner_scrut_var) inner_bndr _ inner_alts <- deflt_rhs
+  , inner_scrut_var == outer_bndr
+  = do	{ tick (CaseMerge outer_bndr)
+
+	; let wrap_alt (con, args, rhs) = ASSERT( outer_bndr `notElem` args )
+                                          (con, args, wrap_rhs rhs)
+		-- Simplifier's no-shadowing invariant should ensure
+		-- that outer_bndr is not shadowed by the inner patterns
+              wrap_rhs rhs = Let (NonRec inner_bndr (Var outer_bndr)) rhs
+		-- The let is OK even for unboxed binders, 
+
+	      wrapped_alts | isDeadBinder inner_bndr = inner_alts
+                           | otherwise               = map wrap_alt inner_alts
+
+	      merged_alts = mergeAlts outer_alts wrapped_alts
+		-- NB: mergeAlts gives priority to the left
+		--	case x of 
+		--	  A -> e1
+		--	  DEFAULT -> case x of 
+		--			A -> e2
+		--			B -> e3
+		-- When we merge, we must ensure that e1 takes 
+		-- precedence over e2 as the value for A!  
+
+	; mkCase1 dflags scrut outer_bndr merged_alts
+	}
+    	-- Warning: don't call mkCase recursively!
+    	-- Firstly, there's no point, because inner alts have already had
+    	-- mkCase applied to them, so they won't have a case in their default
+    	-- Secondly, if you do, you get an infinite loop, because the bindCaseBndr
+    	-- in munge_rhs may put a case into the DEFAULT branch!
+
+mkCase dflags scrut bndr alts = mkCase1 dflags scrut bndr alts
+
+--------------------------------------------------
+--	2. Eliminate Identity Case
+--------------------------------------------------
+
+mkCase1 _dflags scrut case_bndr alts	-- Identity case
   | all identity_alt alts
-  = do tick (CaseIdentity case_bndr)
-       return (re_cast scrut)
+  = do { tick (CaseIdentity case_bndr)
+       ; return (re_cast scrut) }
   where
     identity_alt (con, args, rhs) = check_eq con args (de_cast rhs)
 
@@ -1484,22 +1633,93 @@ mkCase scrut case_bndr alts	-- Identity case
 			(_,_,Cast _ co) -> Cast scrut co
 			_    	        -> scrut
 
+--------------------------------------------------
+--	3. Merge Identical Alternatives
+--------------------------------------------------
+mkCase1 dflags scrut case_bndr ((_con1,bndrs1,rhs1) : con_alts)
+  | all isDeadBinder bndrs1			-- Remember the default 
+  , length filtered_alts < length con_alts	-- alternative comes first
+	-- Also Note [Dead binders]
+  = do	{ tick (AltMerge case_bndr)
+	; mkCase2 dflags scrut case_bndr alts' }
+  where
+    alts' = (DEFAULT, [], rhs1) : filtered_alts
+    filtered_alts	  = filter keep con_alts
+    keep (_con,bndrs,rhs) = not (all isDeadBinder bndrs && rhs `cheapEqExpr` rhs1)
 
+mkCase1 dflags scrut bndr alts = mkCase2 dflags scrut bndr alts
 
 --------------------------------------------------
 --	Catch-all
 --------------------------------------------------
-mkCase scrut bndr alts = return (Case scrut bndr (coreAltsType alts) alts)
+mkCase2 _dflags scrut bndr alts 
+  = return (Case scrut bndr (coreAltsType alts) alts)
 \end{code}
 
+Note [Dead binders]
+~~~~~~~~~~~~~~~~~~~~
+Note that dead-ness is maintained by the simplifier, so that it is
+accurate after simplification as well as before.
 
-When adding auxiliary bindings for the case binder, it's worth checking if
-its dead, because it often is, and occasionally these mkCase transformations
-cascade rather nicely.
 
-\begin{code}
-bindCaseBndr :: Id -> CoreExpr -> CoreExpr -> CoreExpr
-bindCaseBndr bndr rhs body
-  | isDeadBinder bndr = body
-  | otherwise         = bindNonRec bndr rhs body
-\end{code}
+Note [Cascading case merge]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Case merging should cascade in one sweep, because it
+happens bottom-up
+
+      case e of a {
+        DEFAULT -> case a of b 
+                      DEFAULT -> case b of c {
+                                     DEFAULT -> e
+                                     A -> ea
+                      B -> eb
+        C -> ec
+==>
+      case e of a {
+        DEFAULT -> case a of b 
+                      DEFAULT -> let c = b in e
+                      A -> let c = b in ea
+                      B -> eb
+        C -> ec
+==>
+      case e of a {
+        DEFAULT -> let b = a in let c = b in e
+        A -> let b = a in let c = b in ea
+        B -> let b = a in eb
+        C -> ec
+
+
+However here's a tricky case that we still don't catch, and I don't
+see how to catch it in one pass:
+
+  case x of c1 { I# a1 ->
+  case a1 of c2 ->
+    0 -> ...
+    DEFAULT -> case x of c3 { I# a2 ->
+               case a2 of ...
+
+After occurrence analysis (and its binder-swap) we get this
+ 
+  case x of c1 { I# a1 -> 
+  let x = c1 in		-- Binder-swap addition
+  case a1 of c2 -> 
+    0 -> ...
+    DEFAULT -> case x of c3 { I# a2 ->
+               case a2 of ...
+
+When we simplify the inner case x, we'll see that
+x=c1=I# a1.  So we'll bind a2 to a1, and get
+
+  case x of c1 { I# a1 -> 
+  case a1 of c2 -> 
+    0 -> ...
+    DEFAULT -> case a1 of ...
+
+This is corect, but we can't do a case merge in this sweep
+because c2 /= a1.  Reason: the binding c1=I# a1 went inwards
+without getting changed to c1=I# c2.  
+
+I don't think this is worth fixing, even if I knew how. It'll
+all come out in the next pass anyway.
+
+  

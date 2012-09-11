@@ -18,6 +18,8 @@ module SysTools (
         runAs, runLink,          -- [Option] -> IO ()
         runMkDLL,
         runWindres,
+        runLlvmOpt,
+        runLlvmLlc,
 
         touch,                  -- String -> String -> IO ()
         copy,
@@ -43,7 +45,6 @@ import ErrUtils
 import Panic
 import Util
 import DynFlags
-import FiniteMap
 
 import Exception
 import Data.IORef
@@ -56,6 +57,7 @@ import System.IO.Error as IO
 import System.Directory
 import Data.Char
 import Data.List
+import qualified Data.Map as Map
 
 #ifndef mingw32_HOST_OS
 import qualified System.Posix.Internals
@@ -219,6 +221,10 @@ initSysTools mbMinusB dflags0
         ; let   as_prog  = gcc_prog
                 ld_prog  = gcc_prog
 
+        -- figure out llvm location. (TODO: Acutally implement).
+        ; let lc_prog = "llc"
+              lo_prog = "opt"
+
         ; return dflags1{
                         ghcUsagePath = ghc_usage_msg_path,
                         ghciUsagePath = ghci_usage_msg_path,
@@ -235,7 +241,9 @@ initSysTools mbMinusB dflags0
                         pgm_dll = (mkdll_prog,mkdll_args),
                         pgm_T   = touch_path,
                         pgm_sysman = top_dir ++ "/ghc/rts/parallel/SysMan",
-                        pgm_windres = windres_path
+                        pgm_windres = windres_path,
+                        pgm_lo  = (lo_prog,[]),
+                        pgm_lc  = (lc_prog,[])
                         -- Hans: this isn't right in general, but you can
                         -- elaborate it in the same way as the others
                 }
@@ -381,6 +389,16 @@ runAs dflags args = do
   mb_env <- getGccEnv args1
   runSomethingFiltered dflags id "Assembler" p args1 mb_env
 
+runLlvmOpt :: DynFlags -> [Option] -> IO ()
+runLlvmOpt dflags args = do
+  let (p,args0) = pgm_lo dflags
+  runSomething dflags "LLVM Optimiser" p (args0++args)
+
+runLlvmLlc :: DynFlags -> [Option] -> IO ()
+runLlvmLlc dflags args = do
+  let (p,args0) = pgm_lc dflags
+  runSomething dflags "LLVM Compiler" p (args0++args)
+
 runLink :: DynFlags -> [Option] -> IO ()
 runLink dflags args = do
   let (p,args0) = pgm_l dflags
@@ -454,8 +472,8 @@ cleanTempDirs dflags
    = unless (dopt Opt_KeepTmpFiles dflags)
    $ do let ref = dirsToClean dflags
         ds <- readIORef ref
-        removeTmpDirs dflags (eltsFM ds)
-        writeIORef ref emptyFM
+        removeTmpDirs dflags (Map.elems ds)
+        writeIORef ref Map.empty
 
 cleanTempFiles :: DynFlags -> IO ()
 cleanTempFiles dflags
@@ -497,7 +515,7 @@ getTempDir :: DynFlags -> IO FilePath
 getTempDir dflags@(DynFlags{tmpDir=tmp_dir})
   = do let ref = dirsToClean dflags
        mapping <- readIORef ref
-       case lookupFM mapping tmp_dir of
+       case Map.lookup tmp_dir mapping of
            Nothing ->
                do x <- getProcessID
                   let prefix = tmp_dir </> "ghc" ++ show x ++ "_"
@@ -506,7 +524,7 @@ getTempDir dflags@(DynFlags{tmpDir=tmp_dir})
                       mkTempDir x
                        = let dirname = prefix ++ show x
                          in do createDirectory dirname
-                               let mapping' = addToFM mapping tmp_dir dirname
+                               let mapping' = Map.insert tmp_dir dirname mapping
                                writeIORef ref mapping'
                                debugTraceMsg dflags 2 (ptext (sLit "Created temporary directory:") <+> text dirname)
                                return dirname

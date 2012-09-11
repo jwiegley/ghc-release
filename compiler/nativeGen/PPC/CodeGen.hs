@@ -180,12 +180,12 @@ getRegisterReg (CmmLocal (LocalReg u pk))
   = RegVirtual $ mkVirtualReg u (cmmTypeSize pk)
 
 getRegisterReg (CmmGlobal mid)
-  = case get_GlobalReg_reg_or_addr mid of
-       Left reg -> reg
-       _other -> pprPanic "getRegisterReg-memory" (ppr $ CmmGlobal mid)
-          -- By this stage, the only MagicIds remaining should be the
-          -- ones which map to a real machine register on this
-          -- platform.  Hence ...
+  = case globalRegMaybe mid of
+        Just reg -> reg
+        Nothing  -> pprPanic "getRegisterReg-memory" (ppr $ CmmGlobal mid)
+        -- By this stage, the only MagicIds remaining should be the
+        -- ones which map to a real machine register on this
+        -- platform.  Hence ...
 
 
 {-
@@ -376,6 +376,11 @@ iselExpr64 expr
 
 
 getRegister :: CmmExpr -> NatM Register
+
+getRegister (CmmReg (CmmGlobal PicBaseReg))
+  = do
+      reg <- getPicBaseNat archWordSize
+      return (Fixed archWordSize reg nilOL)
 
 getRegister (CmmReg reg) 
   = return (Fixed (cmmTypeSize (cmmRegType reg)) 
@@ -1059,7 +1064,7 @@ genCCall target dest_regs argsAndHints
             do
                 dflags <- getDynFlagsNat
                 mopExpr <- cmmMakeDynamicReference dflags addImportNat CallReference $
-                              mkForeignLabel functionName Nothing True IsFunction
+                              mkForeignLabel functionName Nothing ForeignLabelInThisPackage IsFunction
                 let mopLabelOrExpr = case mopExpr of
                         CmmLit (CmmLabel lbl) -> Left lbl
                         _ -> Right mopExpr

@@ -11,6 +11,7 @@
 # -----------------------------------------------------------------------------
 
 define build-package-data
+$(call trace, build-package-data($1,$2,$3))
 # args:
 # $1 = dir
 # $2 = distdir
@@ -24,14 +25,20 @@ ifeq "$$(filter dyn,$$(GhcLibWays))" "dyn"
 $1_$2_CONFIGURE_OPTS += --enable-shared
 endif
 
+ifeq "$$(GhcWithInterpreter) $$(UseArchivesForGhci)" "YES NO"
+$1_$2_CONFIGURE_OPTS += --enable-library-for-ghci
+else
+$1_$2_CONFIGURE_OPTS += --disable-library-for-ghci
+endif
+
 ifeq "$$(HSCOLOUR_SRCS)" "YES"
-$1_$2_CONFIGURE_OPTS += --with-hscolour="$$(HSCOLOUR)"
+$1_$2_CONFIGURE_OPTS += --with-hscolour="$$(HSCOLOUR_CMD)"
 endif
 
 # We filter out -Werror from SRC_CC_OPTS, because when configure tests
 # for a feature it may not generate warning-free C code, and thus may
 # think that the feature doesn't exist if -Werror is on.
-$1_$2_CONFIGURE_OPTS += --configure-option=CFLAGS="$$(filter-out -Werror,$$(SRC_CC_OPTS)) $$(CONF_CC_OPTS) $$($1_CC_OPTS) $$($1_$2_CC_OPTS)"
+$1_$2_CONFIGURE_OPTS += --configure-option=CFLAGS="$$(filter-out -Werror,$$(SRC_CC_OPTS)) $$(CONF_CC_OPTS_STAGE$3) $$($1_CC_OPTS) $$($1_$2_CC_OPTS)"
 $1_$2_CONFIGURE_OPTS += --configure-option=LDFLAGS="$$(SRC_LD_OPTS) $$($1_LD_OPTS) $$($1_$2_LD_OPTS)"
 
 ifneq "$$(ICONV_INCLUDE_DIRS)" ""

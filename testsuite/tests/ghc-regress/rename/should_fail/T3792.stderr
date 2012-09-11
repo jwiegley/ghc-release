@@ -1,2 +1,2 @@
 
-T3792.hs:3:16: Illegal qualified name in import item: Prelude.map
+T3792.hs:3:17: Illegal qualified name in import item: Prelude.map

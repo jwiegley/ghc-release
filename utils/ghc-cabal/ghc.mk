@@ -18,18 +18,16 @@ CABAL_DOTTED_VERSION := $(shell grep "^Version:" libraries/Cabal/Cabal.cabal | s
 CABAL_VERSION := $(subst .,$(comma),$(CABAL_DOTTED_VERSION))
 CABAL_CONSTRAINT := --constraint="Cabal == $(CABAL_DOTTED_VERSION)"
 
-$(GHC_CABAL_INPLACE) : $(GHC_CABAL_DIR)/dist/build/tmp/ghc-cabal$(exeext)
-	"$(MKDIRHIER)" $(dir $@)
+$(GHC_CABAL_INPLACE) : $(GHC_CABAL_DIR)/dist/build/tmp/ghc-cabal$(exeext) | $$(dir $$@)/.
 	"$(CP)" $< $@
 
 $(GHC_CABAL_DIR)/dist/build/tmp/ghc-cabal$(exeext): $(wildcard libraries/Cabal/Distribution/*/*/*.hs)
 $(GHC_CABAL_DIR)/dist/build/tmp/ghc-cabal$(exeext): $(wildcard libraries/Cabal/Distribution/*/*.hs)
 $(GHC_CABAL_DIR)/dist/build/tmp/ghc-cabal$(exeext): $(wildcard libraries/Cabal/Distribution/*.hs)
 
-$(GHC_CABAL_DIR)/dist/build/tmp/ghc-cabal$(exeext): $(GHC_CABAL_DIR)/ghc-cabal.hs $(MKDIRHIER)
-	"$(MKDIRHIER)" bootstrapping
-	"$(MKDIRHIER)" $(dir $@)
+$(GHC_CABAL_DIR)/dist/build/tmp/ghc-cabal$(exeext): $(GHC_CABAL_DIR)/ghc-cabal.hs | $$(dir $$@)/. bootstrapping/.
 	"$(GHC)" $(SRC_HC_OPTS) --make $(GHC_CABAL_DIR)/ghc-cabal.hs -o $@ \
+	       -no-user-package-conf \
 	       -Wall $(WERROR) \
 	       -DCABAL_VERSION=$(CABAL_VERSION) \
 	       -odir  bootstrapping \
@@ -81,12 +79,12 @@ $(GHC_CABAL_DIR)/dist-dummy-ghc/build/dummy-ghc.hs : $(GHC_CABAL_DIR)/ghc.mk $(M
 # line of compiler/main/DynFlags.hs, and if they look like
 #   ( "PostfixOperators", ...
 # then it translates them into
-#   ["PostfixOperators"] ++
+#   ["PostfixOperators", "NoPostfixOperators"] ++
 # Tabs are a pain to handle portably with sed, so rather than worrying
 # about them we just use tr to remove them all before we start.
 	echo 'extensions :: [String]'                                     >> $@
 	echo 'extensions ='                                               >> $@
-	'$(TR)' -d '\t' < compiler/main/DynFlags.hs | '$(SED)' '/^xFlags/,/]/s/^ *( *\("[^"]*"\)[^"]*/  [\1] ++/p;d' >> $@
+	'$(TR)' -d '\t' < compiler/main/DynFlags.hs | '$(SED)' '/^xFlags/,/]/s/^ *( *"\([^"]*\)"[^"]*/  ["\1", "No\1"] ++/p;d' >> $@
 	echo '  []'                                                       >> $@
 
 # We don't build dummy-ghc with Cabal, so we need to pass -package
