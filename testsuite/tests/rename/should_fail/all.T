@@ -36,7 +36,6 @@ test('rnfail035', normal, compile_fail, [''])
 # Missing:
 # test('rnfail037', normal, compile_fail, [''])
 
-test('rnfail038', normal, compile_fail, [''])
 test('rnfail039', normal, compile_fail, [''])
 
 test('rnfail040',
@@ -82,7 +81,7 @@ test('mc13', normal, compile_fail, [''])
 test('mc14', normal, compile_fail, [''])
 test('T5211', normal, compile, [''])  # Warnings only
 test('T1595a', normal, compile_fail, [''])
-test('T5281', normal, compile, [''])  # Warnings only
+test('T5281', normal, multimod_compile, ['T5281', '-v0'])  # Warnings only
 test('T5372',
      extra_clean(['T5372a.hi', 'T5372a.o']),
      multimod_compile_fail,
@@ -95,3 +94,12 @@ test('T5513', normal, compile_fail, [''])
 test('T5533', normal, compile_fail, [''])
 test('T5589', normal, compile_fail, [''])
 test('Misplaced', normal, compile_fail, [''])
+test('T5657', normal, compile_fail, [''])
+test('T5745',
+     extra_clean(['T5745a.hi', 'T5745a.o', 'T5745b.hi', 'T5745b.o']),
+     multimod_compile_fail, ['T5745', '-v0'])
+test('T5892a', normal, compile_fail, [''])
+test('T5892b', normal, compile_fail, [''])
+test('T5951', normal, compile_fail, [''])
+test('T6060', normal, compile_fail, [''])
+test('T6148', normal, compile_fail, [''])

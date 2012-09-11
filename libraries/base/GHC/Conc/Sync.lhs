@@ -61,6 +61,7 @@ module GHC.Conc.Sync
         , runSparks
         , yield         -- :: IO ()
         , labelThread   -- :: ThreadId -> String -> IO ()
+        , mkWeakThreadId -- :: ThreadId -> IO (Weak ThreadId)
 
         , ThreadStatus(..), BlockReason(..)
         , threadStatus  -- :: ThreadId -> IO ThreadStatus
@@ -119,6 +120,7 @@ import GHC.MVar
 import GHC.Real         ( fromIntegral )
 import GHC.Pack         ( packCString# )
 import GHC.Show         ( Show(..), showString )
+import GHC.Weak
 
 infixr 0 `par`, `pseq`
 \end{code}
@@ -204,7 +206,7 @@ forkIO action = IO $ \ s ->
   action_plus = catchException action childHandler
 
 {-# DEPRECATED forkIOUnmasked "use forkIOWithUnmask instead" #-}
--- | This function is deprecated; use 'forkIOWIthUnmask' instead
+-- | This function is deprecated; use 'forkIOWithUnmask' instead
 forkIOUnmasked :: IO () -> IO ThreadId
 forkIOUnmasked io = forkIO (unsafeUnmask io)
 
@@ -281,21 +283,8 @@ numCapabilities = unsafePerformIO $ getNumCapabilities
 
 {- |
 Returns the number of Haskell threads that can run truly
-simultaneously (on separate physical processors) at any given time.
-The number passed to `forkOn` is interpreted modulo this
-value.
-
-An implementation in which Haskell threads are mapped directly to
-OS threads might return the number of physical processor cores in
-the machine, and 'forkOn' would be implemented using the OS's
-affinity facilities.  An implementation that schedules Haskell
-threads onto a smaller number of OS threads (like GHC) would return
-the number of such OS threads that can be running simultaneously.
-
-GHC notes: this returns the number passed as the argument to the
-@+RTS -N@ flag.  In current implementations, the value is fixed
-when the program starts and never changes, but it is possible that
-in the future the number of capabilities might vary at runtime.
+simultaneously (on separate physical processors) at any given time.  To change
+this value, use 'setNumCapabilities'.
 -}
 getNumCapabilities :: IO Int
 getNumCapabilities = do
@@ -304,12 +293,15 @@ getNumCapabilities = do
 
 {- |
 Set the number of Haskell threads that can run truly simultaneously
-(on separate physical processors) at any given time.
+(on separate physical processors) at any given time.  The number
+passed to `forkOn` is interpreted modulo this value.  The initial
+value is given by the @+RTS -N@ runtime flag.
 
-GHC notes: in the current implementation, the value may only be
-/increased/, not decreased, by calling 'setNumCapabilities'.  The
-initial value is given by the @+RTS -N@ flag, and the current value
-may be obtained using 'getNumCapabilities'.
+This is also the number of threads that will participate in parallel
+garbage collection.  It is strongly recommended that the number of
+capabilities is not set larger than the number of physical processor
+cores, and it may often be beneficial to leave one or more cores free
+to avoid contention with other processes in the machine.
 -}
 setNumCapabilities :: Int -> IO ()
 setNumCapabilities i = c_setNumCapabilities (fromIntegral i)
@@ -327,11 +319,8 @@ foreign import ccall unsafe "getNumberOfProcessors"
 numSparks :: IO Int
 numSparks = IO $ \s -> case numSparks# s of (# s', n #) -> (# s', I# n #)
 
-#if defined(mingw32_HOST_OS) && defined(__PIC__)
-foreign import ccall "_imp__n_capabilities" n_capabilities :: Ptr CInt
-#else
 foreign import ccall "&n_capabilities" n_capabilities :: Ptr CInt
-#endif
+
 childHandler :: SomeException -> IO ()
 childHandler err = catchException (real_handler err) childHandler
 
@@ -524,6 +513,26 @@ threadCapability :: ThreadId -> IO (Int, Bool)
 threadCapability (ThreadId t) = IO $ \s ->
    case threadStatus# t s of
      (# s', _, cap#, locked# #) -> (# s', (I# cap#, locked# /=# 0#) #)
+
+-- | make a weak pointer to a 'ThreadId'.  It can be important to do
+-- this if you want to hold a reference to a 'ThreadId' while still
+-- allowing the thread to receive the @BlockedIndefinitely@ family of
+-- exceptions (e.g. 'BlockedIndefinitelyOnMVar').  Holding a normal
+-- 'ThreadId' reference will prevent the delivery of
+-- @BlockedIndefinitely@ exceptions because the reference could be
+-- used as the target of 'throwTo' at any time, which would unblock
+-- the thread.
+--
+-- Holding a @Weak ThreadId@, on the other hand, will not prevent the
+-- thread from receiving @BlockedIndefinitely@ exceptions.  It is
+-- still possible to throw an exception to a @Weak ThreadId@, but the
+-- caller must use @deRefWeak@ first to determine whether the thread
+-- still exists.
+--
+mkWeakThreadId :: ThreadId -> IO (Weak ThreadId)
+mkWeakThreadId t@(ThreadId t#) = IO $ \s ->
+   case mkWeakNoFinalizer# t# t s of
+      (# s1, w #) -> (# s1, Weak w #)
 \end{code}
 
 

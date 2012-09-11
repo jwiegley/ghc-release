@@ -12,6 +12,10 @@ T5658b:
 	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c T5658b.hs -ddump-simpl | grep --count indexIntArray
 # Trac 5658 meant that there were three calls to indexIntArray instead of two
 
+T5776:
+	$(RM) -f T5776.o T5776.hi 
+	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c T5776.hs -ddump-rules | grep --count dEq
+
 T3772:
 	$(RM) -f T3772*.hi T3772*.o
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T3772_A.hs 
@@ -65,4 +69,17 @@ simpl021:
 T5327:
 	$(RM) -f T5327.hi T5327.o
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c T5327.hs -O -ddump-simpl | grep -c "GHC.Prim.># 34 "
+
+.PHONY: T5623
+T5623:
+	$(RM) -f T5623.hi T5623.o
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T5623.hs -O -ddump-prep | grep -c "plusAddr#"
+
+.PHONY: T4138
+T4138:
+	$(RM) -f T4138.hi   T4138.o
+	$(RM) -f T4138_A.hi T4138_A.o
+	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c T4138_A.hs
+	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c T4138.hs -ddump-simpl > T4138.simpl
+	grep -c 'F#' T4138.simpl
 

@@ -72,13 +72,12 @@ cgTopRhsCon id con args
         ; when (platformOS (targetPlatform dflags) == OSMinGW32) $
               -- Windows DLLs have a problem with static cross-DLL refs.
               ASSERT( not (isDllConApp dflags con args) ) return ()
-        ; ASSERT( args `lengthIs` dataConRepArity con ) return ()
+        ; ASSERT( args `lengthIs` dataConRepRepArity con ) return ()
 
         -- LAY IT OUT
         ; amodes <- getArgAmodes args
 
         ; let
-            platform = targetPlatform dflags
             name          = idName id
             lf_info       = mkConLFInfo con
             closure_label = mkClosureLabel name $ idCafInfo id
@@ -92,7 +91,7 @@ cgTopRhsCon id con args
 
             payload = map get_lit amodes_w_offsets
             get_lit (CmmLit lit, _offset) = lit
-            get_lit other = pprPanic "CgCon.get_lit" (pprPlatform platform other)
+            get_lit other = pprPanic "CgCon.get_lit" (ppr other)
                 -- NB1: amodes_w_offsets is sorted into ptrs first, then non-ptrs
                 -- NB2: all the amodes should be Lits!
 
@@ -116,7 +115,7 @@ buildDynCon :: Id                 -- Name of the thing to which this constr will
             -> CostCentreStack    -- Where to grab cost centre from;
                                   -- current CCS if currentOrSubsumedCCS
             -> DataCon            -- The data constructor
-            -> [(CgRep,CmmExpr)] -- Its args
+            -> [(CgRep,CmmExpr)]  -- Its args
             -> FCode CgIdInfo     -- Return details about how to find it
 buildDynCon binder ccs con args
     = do dflags <- getDynFlags
@@ -324,7 +323,7 @@ cgReturnDataCon con amodes
       -- for it to be marked as "used" for LDV profiling.
   | opt_SccProfilingOn    = build_it_then enter_it
   | otherwise
-  = ASSERT( amodes `lengthIs` dataConRepArity con )
+  = ASSERT( amodes `lengthIs` dataConRepRepArity con )
     do  { EndOfBlockInfo _ sequel <- getEndOfBlockInfo
         ; case sequel of
             CaseAlts _ (Just (alts, deflt_lbl)) bndr
@@ -348,12 +347,15 @@ cgReturnDataCon con amodes
                         | otherwise         -> build_it_then (jump_to deflt_lbl) }
 
             _otherwise  -- The usual case
-              -> build_it_then emitReturnInstr
+              -> build_it_then $ emitReturnInstr node_live
         }
   where
+    node_live   = Just [node]
     enter_it    = stmtsC [ CmmAssign nodeReg (cmmUntag (CmmReg nodeReg)),
-                           CmmJump (entryCode (closureInfoPtr (CmmReg nodeReg))) [] ]
-    jump_to lbl = stmtC (CmmJump (CmmLit lbl) [])
+                           CmmJump (entryCode $ closureInfoPtr $ CmmReg nodeReg)
+                                   node_live
+                         ]
+    jump_to lbl = stmtC $ CmmJump (CmmLit lbl) node_live
     build_it_then return_code
       = do {    -- BUILD THE OBJECT IN THE HEAP
                 -- The first "con" says that the name bound to this
@@ -463,8 +465,8 @@ cgDataCon data_con
                                 ; ldvEnter (CmmReg nodeReg)
                                 ; body_code }
 
-            arg_reps :: [(CgRep, Type)]
-            arg_reps = [(typeCgRep ty, ty) | ty <- dataConRepArgTys data_con]
+            arg_reps :: [(CgRep, UnaryType)]
+            arg_reps = [(typeCgRep rep_ty, rep_ty) | ty <- dataConRepArgTys data_con, rep_ty <- flattenRepType (repType ty)]
 
             body_code = do {
                         -- NB: We don't set CC when entering data (WDP 94/06)
@@ -472,7 +474,7 @@ cgDataCon data_con
                            -- The case continuation code is expecting a tagged pointer
                            ; stmtC (CmmAssign nodeReg
                                               (tagCons data_con (CmmReg nodeReg)))
-                           ; performReturn emitReturnInstr }
+                           ; performReturn $ emitReturnInstr (Just []) }
                                 -- noStmts: Ptr to thing already in Node
 
         ; whenC (not (isNullaryRepDataCon data_con))

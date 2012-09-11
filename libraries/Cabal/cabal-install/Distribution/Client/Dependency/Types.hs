@@ -13,6 +13,7 @@
 module Distribution.Client.Dependency.Types (
     ExtDependency(..),
 
+    PreSolver(..),
     Solver(..),
     DependencyResolver,
 
@@ -34,7 +35,7 @@ import Data.Monoid
          ( Monoid(..) )
 
 import Distribution.Client.Types
-         ( SourcePackage(..) )
+         ( OptionalStanza, SourcePackage(..) )
 import qualified Distribution.Client.InstallPlan as InstallPlan
 
 import Distribution.Compat.ReadP
@@ -76,17 +77,23 @@ instance Text ExtDependency where
   parse = (SourceDependency `fmap` parse) <++ (InstalledDependency `fmap` parse)
 
 -- | All the solvers that can be selected.
+data PreSolver = AlwaysTopDown | AlwaysModular | Choose
+  deriving (Eq, Ord, Show, Bounded, Enum)
+
+-- | All the solvers that can be used.
 data Solver = TopDown | Modular
   deriving (Eq, Ord, Show, Bounded, Enum)
 
-instance Text Solver where
-  disp TopDown = text "topdown"
-  disp Modular = text "modular"
+instance Text PreSolver where
+  disp AlwaysTopDown = text "topdown"
+  disp AlwaysModular = text "modular"
+  disp Choose        = text "choose"
   parse = do
     name <- Parse.munch1 isAlpha
     case map toLower name of
-      "topdown" -> return TopDown
-      "modular" -> return Modular
+      "topdown" -> return AlwaysTopDown
+      "modular" -> return AlwaysModular
+      "choose"  -> return Choose
       _         -> Parse.pfail
 
 -- | A dependency resolver is a function that works out an installation plan
@@ -116,6 +123,7 @@ data PackageConstraint
    | PackageConstraintInstalled PackageName
    | PackageConstraintSource    PackageName
    | PackageConstraintFlags     PackageName FlagAssignment
+   | PackageConstraintStanzas   PackageName [OptionalStanza]
   deriving (Show,Eq)
 
 -- | A per-package preference on the version. It is a soft constraint that the

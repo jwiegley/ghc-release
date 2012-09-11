@@ -125,6 +125,7 @@ typedef struct gc_thread_ {
     volatile rtsBool wakeup;
 #endif
     nat thread_index;              // a zero based index identifying the thread
+    rtsBool idle;                  // sitting out of this GC cycle
 
     bdescr * free_blocks;          // a buffer of free blocks for this thread
                                    //  during GC without accessing the block
@@ -175,6 +176,7 @@ typedef struct gc_thread_ {
     // -------------------
     // stats
 
+    lnat allocated;          // result of clearNursery()
     lnat copied;
     lnat scanned;
     lnat any_work;

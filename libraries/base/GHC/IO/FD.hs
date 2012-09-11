@@ -58,6 +58,16 @@ import qualified System.Posix.Internals
 import System.Posix.Internals hiding (FD, setEcho, getEcho)
 import System.Posix.Types
 
+#ifdef mingw32_HOST_OS
+# if defined(i386_HOST_ARCH)
+#  define WINDOWS_CCONV stdcall
+# elif defined(x86_64_HOST_ARCH)
+#  define WINDOWS_CCONV ccall
+# else
+#  error Unknown mingw32 arch
+# endif
+#endif
+
 c_DEBUG_DUMP :: Bool
 c_DEBUG_DUMP = False
 
@@ -155,11 +165,7 @@ openFile filepath iomode non_blocking =
     let 
       oflags1 = case iomode of
                   ReadMode      -> read_flags
-#ifdef mingw32_HOST_OS
-                  WriteMode     -> write_flags .|. o_TRUNC
-#else
                   WriteMode     -> write_flags
-#endif
                   ReadWriteMode -> rw_flags
                   AppendMode    -> append_flags
 
@@ -167,7 +173,7 @@ openFile filepath iomode non_blocking =
       binary_flags = o_BINARY
 #else
       binary_flags = 0
-#endif      
+#endif
 
       oflags2 = oflags1 .|. binary_flags
 
@@ -190,14 +196,11 @@ openFile filepath iomode non_blocking =
             `catchAny` \e -> do _ <- c_close fd
                                 throwIO e
 
-#ifndef mingw32_HOST_OS
-        -- we want to truncate() if this is an open in WriteMode, but only
-        -- if the target is a RegularFile.  ftruncate() fails on special files
-        -- like /dev/null.
-    if iomode == WriteMode && fd_type == RegularFile
-      then setSize fD 0
-      else return ()
-#endif
+    -- we want to truncate() if this is an open in WriteMode, but only
+    -- if the target is a RegularFile.  ftruncate() fails on special files
+    -- like /dev/null.
+    when (iomode == WriteMode && fd_type == RegularFile) $
+      setSize fD 0
 
     return (fD,fd_type)
 
@@ -241,29 +244,26 @@ mkFD fd iomode mb_stat is_socket is_nonblock = do
                    ReadMode -> False
                    _ -> True
 
-#ifdef mingw32_HOST_OS
-    _ <- setmode fd True -- unconditionally set binary mode
-    let _ = (dev,ino,write) -- warning suppression
-#endif
-
     case fd_type of
         Directory -> 
            ioException (IOError Nothing InappropriateType "openFile"
                            "is a directory" Nothing Nothing)
 
-#ifndef mingw32_HOST_OS
         -- regular files need to be locked
         RegularFile -> do
-           -- On Windows we use explicit exclusion via sopen() to implement
-           -- this locking (see __hscore_open()); on Unix we have to
-           -- implment it in the RTS.
-           r <- lockFile fd dev ino (fromBool write)
+           -- On Windows we need an additional call to get a unique device id
+           -- and inode, since fstat just returns 0 for both.
+           (unique_dev, unique_ino) <- getUniqueFileInfo fd dev ino
+           r <- lockFile fd unique_dev unique_ino (fromBool write)
            when (r == -1)  $
                 ioException (IOError Nothing ResourceBusy "openFile"
                                    "file is locked" Nothing Nothing)
-#endif
 
         _other_type -> return ()
+
+#ifdef mingw32_HOST_OS
+    _ <- setmode fd True -- unconditionally set binary mode
+#endif
 
     return (FD{ fdFD = fd,
 #ifndef mingw32_HOST_OS
@@ -273,6 +273,17 @@ mkFD fd iomode mb_stat is_socket is_nonblock = do
 #endif
               },
             fd_type)
+
+getUniqueFileInfo :: CInt -> CDev -> CIno -> IO (Word64, Word64)
+#ifndef mingw32_HOST_OS
+getUniqueFileInfo _ dev ino = return (fromIntegral dev, fromIntegral ino)
+#else
+getUniqueFileInfo fd _ _ = do
+  with 0 $ \devptr -> do
+  with 0 $ \inoptr -> do
+  c_getUniqueFileInfo fd devptr inoptr
+  liftM2 (,) (peek devptr) (peek inoptr)
+#endif
 
 #ifdef mingw32_HOST_OS
 foreign import ccall unsafe "__hscore_setmode"
@@ -304,9 +315,7 @@ stderr = stdFD 2
 
 close :: FD -> IO ()
 close fd =
-#ifndef mingw32_HOST_OS
   (flip finally) (release fd) $
-#endif
   do let closer realFd =
            throwErrnoIfMinus1Retry_ "GHC.IO.FD.close" $
 #ifdef mingw32_HOST_OS
@@ -318,15 +327,11 @@ close fd =
      closeFdWith closer (fromIntegral (fdFD fd))
 
 release :: FD -> IO ()
-#ifdef mingw32_HOST_OS
-release _ = return ()
-#else
 release fd = do _ <- unlockFile (fdFD fd)
                 return ()
-#endif
 
 #ifdef mingw32_HOST_OS
-foreign import stdcall unsafe "HsBase.h closesocket"
+foreign import WINDOWS_CCONV unsafe "HsBase.h closesocket"
    c_closesocket :: CInt -> IO CInt
 #endif
 
@@ -625,10 +630,10 @@ blockingWriteRawBufferPtr loc fd buf off len
 -- NOTE: "safe" versions of the read/write calls for use by the threaded RTS.
 -- These calls may block, but that's ok.
 
-foreign import stdcall safe "recv"
+foreign import WINDOWS_CCONV safe "recv"
    c_safe_recv :: CInt -> Ptr Word8 -> CSize -> CInt{-flags-} -> IO CSsize
 
-foreign import stdcall safe "send"
+foreign import WINDOWS_CCONV safe "send"
    c_safe_send :: CInt -> Ptr Word8 -> CSize -> CInt{-flags-} -> IO CSsize
 
 #endif
@@ -657,11 +662,13 @@ throwErrnoIfMinus1RetryOnBlock loc f on_block  =
 -- -----------------------------------------------------------------------------
 -- Locking/unlocking
 
-#ifndef mingw32_HOST_OS
 foreign import ccall unsafe "lockFile"
-  lockFile :: CInt -> CDev -> CIno -> CInt -> IO CInt
+  lockFile :: CInt -> Word64 -> Word64 -> CInt -> IO CInt
 
 foreign import ccall unsafe "unlockFile"
   unlockFile :: CInt -> IO CInt
-#endif
 
+#ifdef mingw32_HOST_OS
+foreign import ccall unsafe "get_unique_file_info"
+  c_getUniqueFileInfo :: CInt -> Ptr Word64 -> Ptr Word64 -> IO ()
+#endif

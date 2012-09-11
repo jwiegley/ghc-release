@@ -1,15 +1,16 @@
+# coding=utf8
 
 setTestOpts(if_compiler_profiled(skip))
 
-test('ghci001', normal, ghci_script, ['ghci001.script'])
-test('ghci002', normal, ghci_script, ['ghci002.script'])
-test('ghci003', normal, ghci_script, ['ghci003.script'])
-test('ghci004', normal, ghci_script, ['ghci004.script'])
-test('ghci005', normal, ghci_script, ['ghci005.script'])
-test('ghci006', normal, ghci_script, ['ghci006.script'])
-test('ghci007', normal, ghci_script, ['ghci007.script'])
-test('ghci008', normal, ghci_script, ['ghci008.script'])
-test('ghci009', normal, ghci_script, ['ghci009.script'])
+test('ghci001', combined_output, ghci_script, ['ghci001.script'])
+test('ghci002', combined_output, ghci_script, ['ghci002.script'])
+test('ghci003', combined_output, ghci_script, ['ghci003.script'])
+test('ghci004', combined_output, ghci_script, ['ghci004.script'])
+test('ghci005', combined_output, ghci_script, ['ghci005.script'])
+test('ghci006', combined_output, ghci_script, ['ghci006.script'])
+test('ghci007', combined_output, ghci_script, ['ghci007.script'])
+test('ghci008', combined_output, ghci_script, ['ghci008.script'])
+test('ghci009', combined_output, ghci_script, ['ghci009.script'])
 
 # Skip this test: deadlock can't be detected now, because we wait for
 # signals to arrive if there are signal handlers installed, and GHCi
@@ -71,7 +72,7 @@ test('ghci051', normal, ghci_script, ['ghci051.script'])
 test('ghci052', normal, ghci_script, ['ghci052.script'])
 test('ghci053', normal, ghci_script, ['ghci053.script'])
 test('ghci054', normal, ghci_script, ['ghci054.script'])
-test('ghci055', normal, ghci_script, ['ghci055.script'])
+test('ghci055', combined_output, ghci_script, ['ghci055.script'])
 
 test('ghci056',
      [
@@ -80,6 +81,8 @@ test('ghci056',
        extra_clean('ghci056_c.o')
      ],
      ghci_script, ['ghci056.script'])
+
+test('ghci057', normal, ghci_script, ['ghci057.script'])
 
 test('2452', normal, ghci_script, ['2452.script'])
 test('T2766', normal, ghci_script, ['T2766.script'])
@@ -104,7 +107,26 @@ test('T5045', normal, ghci_script, ['T5045.script'])
 test('T5130', normal, ghci_script, ['T5130.script'])
 test('T5417', normal, ghci_script, ['T5417.script'])
 test('T5545', normal, ghci_script, ['T5545.script'])
-test('T5557', normal, ghci_script, ['T5557.script'])
+test('T5557', combined_output, ghci_script, ['T5557.script'])
 test('T5566', normal, ghci_script, ['T5566.script'])
 test('GhciKinds', normal, ghci_script, ['GhciKinds.script'])
 test('T5564', normal, ghci_script, ['T5564.script'])
+test('Defer02', normal, ghci_script, ['Defer02.script'])
+test('T5820', normal, ghci_script, ['T5820.script'])
+test('T5836', normal, ghci_script, ['T5836.script'])
+test('T5979', normalise_slashes, ghci_script, ['T5979.script'])
+test('T5975a',
+     [pre_cmd('touch föøbàr1.hs'),
+      clean_cmd('rm föøbàr1.hs')],
+     ghci_script, ['T5975a.script'])
+test('T5975b',
+     [pre_cmd('touch föøbàr2.hs'),
+      clean_cmd('rm föøbàr2.hs'),
+      extra_hc_opts('föøbàr2.hs')],
+     ghci_script, ['T5975b.script'])
+test('T6027ghci', normal, ghci_script, ['T6027ghci.script'])
+
+test('T6007', normal, ghci_script, ['T6007.script'])
+test('T6091', normal, ghci_script, ['T6091.script'])
+test('T6106', extra_clean(['T6106.hs']), ghci_script, ['T6106.script'])
+test('T6105', normal, ghci_script, ['T6105.script'])

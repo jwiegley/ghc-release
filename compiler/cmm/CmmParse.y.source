@@ -21,7 +21,7 @@
 
 module CmmParse ( parseCmmFile ) where
 
-import CgMonad		hiding (getDynFlags)
+import CgMonad
 import CgExtCode
 import CgHeapery
 import CgUtils
@@ -230,35 +230,31 @@ lits	:: { [ExtFCode CmmExpr] }
 
 cmmproc :: { ExtCode }
 -- TODO: add real SRT/info tables to parsed Cmm
-	: info maybe_formals_without_hints maybe_gc_block maybe_frame '{' body '}'
-		{ do ((entry_ret_label, info, live, formals, gc_block, frame), stmts) <-
+        : info maybe_formals_without_hints '{' body '}'
+                { do ((entry_ret_label, info, live, formals), stmts) <-
 		       getCgStmtsEC' $ loopDecls $ do {
 		         (entry_ret_label, info, live) <- $1;
 		         formals <- sequence $2;
-		         gc_block <- $3;
-		         frame <- $4;
-		         $6;
-		         return (entry_ret_label, info, live, formals, gc_block, frame) }
+                         $4;
+                         return (entry_ret_label, info, live, formals) }
 		     blks <- code (cgStmtsToBlocks stmts)
-		     code (emitInfoTableAndCode entry_ret_label (CmmInfo gc_block frame info) formals blks) }
+                     code (emitInfoTableAndCode entry_ret_label info formals blks) }
 
 	| info maybe_formals_without_hints ';'
 		{ do (entry_ret_label, info, live) <- $1;
 		     formals <- sequence $2;
-		     code (emitInfoTableAndCode entry_ret_label (CmmInfo Nothing Nothing info) formals []) }
+                     code (emitInfoTableAndCode entry_ret_label info formals []) }
 
-	| NAME maybe_formals_without_hints maybe_gc_block maybe_frame '{' body '}'
+        | NAME maybe_formals_without_hints '{' body '}'
 		{% withThisPackage $ \pkg ->
 		   do	newFunctionName $1 pkg
-		   	((formals, gc_block, frame), stmts) <-
+                        (formals, stmts) <-
 			 	getCgStmtsEC' $ loopDecls $ do {
 		          		formals <- sequence $2;
-		          		gc_block <- $3;
-			  		frame <- $4;
-		          		$6;
-		          		return (formals, gc_block, frame) }
+                                        $4;
+                                        return formals }
 			blks <- code (cgStmtsToBlocks stmts)
-			code (emitProc (CmmInfo gc_block frame CmmNonInfoTable) (mkCmmCodeLabel pkg $1) formals blks) }
+                        code (emitProc CmmNonInfoTable (mkCmmCodeLabel pkg $1) formals blks) }
 
 info	:: { ExtFCode (CLabel, CmmInfoTable, [Maybe LocalReg]) }
 	: 'INFO_TABLE' '(' NAME ',' INT ',' INT ',' INT ',' STRING ',' STRING ')'
@@ -411,10 +407,10 @@ stmt	:: { ExtCode }
 		{ do as <- sequence $5; doSwitch $2 $3 as $6 }
 	| 'goto' NAME ';'
 		{ do l <- lookupLabel $2; stmtEC (CmmBranch l) }
-	| 'jump' expr maybe_actuals ';'
-		{ do e1 <- $2; e2 <- sequence $3; stmtEC (CmmJump e1 e2) }
-        | 'return' maybe_actuals ';'
-		{ do e <- sequence $2; stmtEC (CmmReturn e) }
+	| 'jump' expr vols ';'
+		{ do e <- $2; stmtEC (CmmJump e $3) }
+        | 'return' ';'
+		{ stmtEC CmmReturn }
 	| 'if' bool_expr 'goto' NAME
 		{ do l <- lookupLabel $4; cmmRawIf $2 l }
 	| 'if' bool_expr '{' body '}' else 	
@@ -599,18 +595,7 @@ formals_without_hints :: { [ExtFCode LocalReg] }
 formal_without_hint :: { ExtFCode LocalReg }
 	: type NAME		{ newLocal $1 $2 }
 
-maybe_frame :: { ExtFCode (Maybe UpdateFrame) }
-	: {- empty -}			{ return Nothing }
-	| 'jump' expr '(' exprs0 ')'	{ do { target <- $2;
-					       args <- sequence $4;
-					       return $ Just (UpdateFrame target args) } }
-
-maybe_gc_block :: { ExtFCode (Maybe BlockId) }
-	: {- empty -}			{ return Nothing }
-	| 'goto' NAME
-		{ do l <- lookupLabel $2; return (Just l) }
-
-type	:: { CmmType }
+type    :: { CmmType }
 	: 'bits8'		{ b8 }
 	| typenot8		{ $1 }
 
@@ -912,13 +897,13 @@ primCall results_code name args_code vols safety
 		case safety of
 		  CmmUnsafe ->
 		    code (emitForeignCall' PlayRisky results
-		      (CmmPrim p) args vols NoC_SRT CmmMayReturn)
+		      (CmmPrim p Nothing) args vols NoC_SRT CmmMayReturn)
 		  CmmSafe srt ->
 		    code (emitForeignCall' PlaySafe results 
-		      (CmmPrim p) args vols NoC_SRT CmmMayReturn) where
+		      (CmmPrim p Nothing) args vols NoC_SRT CmmMayReturn) where
 		  CmmInterruptible ->
 		    code (emitForeignCall' PlayInterruptible results 
-		      (CmmPrim p) args vols NoC_SRT CmmMayReturn)
+		      (CmmPrim p Nothing) args vols NoC_SRT CmmMayReturn)
 
 doStore :: CmmType -> ExtFCode CmmExpr  -> ExtFCode CmmExpr -> ExtCode
 doStore rep addr_code val_code
@@ -940,13 +925,12 @@ doStore rep addr_code val_code
 emitRetUT :: [(CgRep,CmmExpr)] -> Code
 emitRetUT args = do
   tickyUnboxedTupleReturn (length args)  -- TICK
-  (sp, stmts) <- pushUnboxedTuple 0 args
+  (sp, stmts, live) <- pushUnboxedTuple 0 args
   emitSimultaneously stmts -- NB. the args might overlap with the stack slots
                            -- or regs that we assign to, so better use
                            -- simultaneous assignments here (#3546)
   when (sp /= 0) $ stmtC (CmmAssign spReg (cmmRegOffW spReg (-sp)))
-  stmtC (CmmJump (entryCode (CmmLoad (cmmRegOffW spReg sp) bWord)) [])
-  -- TODO (when using CPS): emitStmt (CmmReturn (map snd args))
+  stmtC $ CmmJump (entryCode (CmmLoad (cmmRegOffW spReg sp) bWord)) (Just live)
 
 -- -----------------------------------------------------------------------------
 -- If-then-else and boolean expressions
@@ -1071,15 +1055,16 @@ parseCmmFile dflags filename = do
 		-- in there we don't want.
   case unP cmmParse init_state of
     PFailed span err -> do
-        let msg = mkPlainErrMsg span err
+        let msg = mkPlainErrMsg dflags span err
         return ((emptyBag, unitBag msg), Nothing)
     POk pst code -> do
-        cmm <- initC dflags no_module (getCmm (unEC code initEnv [] >> return ()))
+        st <- initC
+        let (cmm,_) = runC dflags no_module st (getCmm (unEC code initEnv [] >> return ()))
         let ms = getMessages pst
         if (errorsFound dflags ms)
          then return (ms, Nothing)
          else do
-           dumpIfSet_dyn dflags Opt_D_dump_cmm "Cmm" (pprPlatform (targetPlatform dflags) cmm)
+           dumpIfSet_dyn dflags Opt_D_dump_cmm "Cmm" (ppr cmm)
            return (ms, Just cmm)
   where
 	no_module = panic "parseCmmFile: no module"

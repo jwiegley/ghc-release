@@ -33,7 +33,6 @@ import           Text.XHtml hiding     ( name, title, p, quote )
 
 import GHC
 import Name
-import BasicTypes            ( ipNameName )
 
 
 ppDecl :: Bool -> LinksInfo -> LHsDecl DocName ->
@@ -41,12 +40,9 @@ ppDecl :: Bool -> LinksInfo -> LHsDecl DocName ->
           Bool -> Qualification -> Html
 ppDecl summ links (L loc decl) (mbDoc, fnArgsDoc) instances subdocs unicode qual = case decl of
   TyClD d@(TyFamily {})          -> ppTyFam summ False links loc mbDoc d unicode qual
-  TyClD d@(TyData {})
-    | Nothing <- tcdTyPats d     -> ppDataDecl summ links instances subdocs loc mbDoc d unicode qual
-    | Just _  <- tcdTyPats d     -> ppDataInst summ links loc mbDoc d
-  TyClD d@(TySynonym {})
-    | Nothing <- tcdTyPats d     -> ppTySyn summ links loc (mbDoc, fnArgsDoc) d unicode qual
-    | Just _  <- tcdTyPats d     -> ppTyInst summ False links loc mbDoc d unicode qual
+  TyClD d@(TyDecl{ tcdTyDefn = defn })   
+      | isHsDataDefn defn        -> ppDataDecl summ links instances subdocs loc mbDoc d unicode qual
+      | otherwise                -> ppTySyn summ links loc (mbDoc, fnArgsDoc) d unicode qual
   TyClD d@(ClassDecl {})         -> ppClassDecl summ links instances loc mbDoc subdocs d unicode qual
   SigD (TypeSig lnames (L _ t))  -> ppFunSig summ links loc (mbDoc, fnArgsDoc) (map unLoc lnames) t unicode qual
   ForD d                         -> ppFor summ links loc (mbDoc, fnArgsDoc) d unicode qual
@@ -101,12 +97,12 @@ ppTypeOrFunSig summary links loc docnames typ (doc, argDocs) (pref1, pref2, sep)
       = [(leader <+> ppType unicode qual t, argDoc n, [])]
 
 
-ppTyVars :: [LHsTyVarBndr DocName] -> [Html]
+ppTyVars :: LHsTyVarBndrs DocName -> [Html]
 ppTyVars tvs = map ppTyName (tyvarNames tvs)
 
 
-tyvarNames :: [LHsTyVarBndr DocName] -> [Name]
-tyvarNames = map (getName . hsTyVarName . unLoc)
+tyvarNames :: LHsTyVarBndrs DocName -> [Name]
+tyvarNames = map getName . hsLTyVarNames
 
 
 ppFor :: Bool -> LinksInfo -> SrcSpan -> DocForDecl DocName
@@ -119,7 +115,9 @@ ppFor _ _ _ _ _ _ _ = error "ppFor"
 -- we skip type patterns for now
 ppTySyn :: Bool -> LinksInfo -> SrcSpan -> DocForDecl DocName -> TyClDecl DocName -> Bool
         -> Qualification -> Html
-ppTySyn summary links loc doc (TySynonym (L _ name) ltyvars _ ltype) unicode qual
+ppTySyn summary links loc doc (TyDecl { tcdLName = L _ name, tcdTyVars = ltyvars
+                                      , tcdTyDefn = TySynonym { td_synRhs = ltype } }) 
+        unicode qual
   = ppTypeOrFunSig summary links loc [name] (unLoc ltype) doc
                    (full, hdr, spaceHtml +++ equals) unicode qual
   where
@@ -161,9 +159,9 @@ ppTyFamHeader summary associated decl unicode qual =
 
   ppTyClBinderWithVars summary decl <+>
 
-  case tcdKind decl of
+  case tcdKindSig decl of
     Just kind -> dcolon unicode  <+> ppLKind unicode qual kind
-    Nothing -> noHtml
+    Nothing   -> noHtml
 
 
 ppTyFam :: Bool -> Bool -> LinksInfo -> SrcSpan -> Documentation DocName ->
@@ -185,50 +183,6 @@ ppTyFam summary associated links loc doc decl unicode qual
 
 
 --------------------------------------------------------------------------------
--- * Indexed data types
---------------------------------------------------------------------------------
-
-
-ppDataInst :: a
-ppDataInst = undefined
-
-
---------------------------------------------------------------------------------
--- * Indexed newtypes
---------------------------------------------------------------------------------
-
--- TODO
--- ppNewTyInst = undefined
-
-
---------------------------------------------------------------------------------
--- * Indexed types
---------------------------------------------------------------------------------
-
-
-ppTyInst :: Bool -> Bool -> LinksInfo -> SrcSpan -> Documentation DocName ->
-            TyClDecl DocName -> Bool -> Qualification -> Html
-ppTyInst summary associated links loc doc decl unicode qual
-
-  | summary   = ppTyInstHeader True associated decl unicode qual
-  | otherwise = header_ +++ docSection qual doc
-
-  where
-    docname = tcdName decl
-
-    header_ = topDeclElem links loc [docname]
-                (ppTyInstHeader summary associated decl unicode qual)
-
-
-ppTyInstHeader :: Bool -> Bool -> TyClDecl DocName -> Bool -> Qualification -> Html
-ppTyInstHeader _ _ decl unicode qual =
-  keyword "type instance" <+>
-  ppAppNameTypes (tcdName decl) typeArgs unicode qual
-  where
-    typeArgs = map unLoc . fromJust . tcdTyPats $ decl
-
-
---------------------------------------------------------------------------------
 -- * Associated Types
 --------------------------------------------------------------------------------
 
@@ -238,7 +192,6 @@ ppAssocType :: Bool -> LinksInfo -> DocForDecl DocName -> LTyClDecl DocName -> B
 ppAssocType summ links doc (L loc decl) unicode qual =
   case decl of
     TyFamily  {} -> ppTyFam summ True links loc (fst doc) decl unicode qual
-    TySynonym {} -> ppTySyn summ links loc doc decl unicode qual
     _            -> error "declaration type not supported by ppAssocType"
 
 
@@ -320,7 +273,7 @@ ppHsContext cxt unicode qual = parenList (map (ppType unicode qual) cxt)
 
 
 ppClassHdr :: Bool -> Located [LHsType DocName] -> DocName
-           -> [Located (HsTyVarBndr DocName)] -> [Located ([DocName], [DocName])]
+           -> LHsTyVarBndrs DocName -> [Located ([DocName], [DocName])]
            -> Bool -> Qualification -> Html
 ppClassHdr summ lctxt n tvs fds unicode qual =
   keyword "class"
@@ -341,7 +294,8 @@ ppFds fds unicode qual =
 ppShortClassDecl :: Bool -> LinksInfo -> TyClDecl DocName -> SrcSpan
                  -> [(DocName, DocForDecl DocName)] -> Bool -> Qualification
                  -> Html
-ppShortClassDecl summary links (ClassDecl lctxt lname tvs fds sigs _ ats _ _) loc
+ppShortClassDecl summary links (ClassDecl { tcdCtxt = lctxt, tcdLName = lname, tcdTyVars = tvs
+                                          , tcdFDs = fds, tcdSigs = sigs, tcdATs = ats }) loc
     subdocs unicode qual = 
   if null sigs && null ats
     then (if summary then id else topDeclElem links loc [nm]) hdr
@@ -350,6 +304,8 @@ ppShortClassDecl summary links (ClassDecl lctxt lname tvs fds sigs _ ats _ _) lo
           (
             [ ppAssocType summary links doc at unicode qual | at <- ats
               , let doc = lookupAnySubdoc (tcdName $ unL at) subdocs ]  ++
+
+                -- ToDo: add associated type defaults
 
             [ ppFunSig summary links loc doc names typ unicode qual
               | L _ (TypeSig lnames (L _ typ)) <- sigs
@@ -370,7 +326,8 @@ ppClassDecl :: Bool -> LinksInfo -> [DocInstance DocName] -> SrcSpan
             -> Documentation DocName -> [(DocName, DocForDecl DocName)]
             -> TyClDecl DocName -> Bool -> Qualification -> Html
 ppClassDecl summary links instances loc d subdocs
-        decl@(ClassDecl lctxt lname ltyvars lfds lsigs _ ats _ _) unicode qual
+        decl@(ClassDecl { tcdCtxt = lctxt, tcdLName = lname, tcdTyVars = ltyvars
+                        , tcdFDs = lfds, tcdSigs = lsigs, tcdATs = ats }) unicode qual
   | summary = ppShortClassDecl summary links decl loc subdocs unicode qual
   | otherwise = classheader +++ docSection qual d
                   +++ atBit +++ methodBit  +++ instancesBit
@@ -383,6 +340,7 @@ ppClassDecl summary links instances loc d subdocs
 
     hdr = ppClassHdr summary lctxt (unLoc lname) ltyvars lfds
 
+    -- ToDo: add assocatied typ defaults
     atBit = subAssociatedTypes [ ppAssocType summary links doc at unicode qual
                       | at <- ats
                       , let doc = lookupAnySubdoc (tcdName $ unL at) subdocs ]
@@ -443,7 +401,7 @@ ppShortDataDecl summary _links _loc dataDecl unicode qual
     doConstr c con = toHtml [c] <+> ppShortConstr summary (unLoc con) unicode qual
     doGADTConstr con = ppShortConstr summary (unLoc con) unicode qual
 
-    cons      = tcdCons dataDecl
+    cons      = td_cons (tcdTyDefn dataDecl)
     resTy     = (con_res . unLoc . head) cons
 
 
@@ -458,7 +416,7 @@ ppDataDecl summary links instances subdocs loc doc dataDecl unicode qual
 
   where
     docname   = unLoc . tcdLName $ dataDecl
-    cons      = tcdCons dataDecl
+    cons      = td_cons (tcdTyDefn dataDecl)
     resTy     = (con_res . unLoc . head) cons
 
     header_ = topDeclElem links loc [docname] (ppDataHeader summary dataDecl unicode qual
@@ -612,15 +570,15 @@ ppShortField summary unicode qual (ConDeclField (L _ name) ltype _)
 -- | Print the LHS of a data\/newtype declaration.
 -- Currently doesn't handle 'data instance' decls or kind signatures
 ppDataHeader :: Bool -> TyClDecl DocName -> Bool -> Qualification -> Html
-ppDataHeader summary decl unicode qual
-  | not (isDataDecl decl) = error "ppDataHeader: illegal argument"
-  | otherwise =
-    -- newtype or data
-    (if tcdND decl == NewType then keyword "newtype" else keyword "data") <+>
+ppDataHeader summary decl@(TyDecl { tcdTyDefn = TyData { td_ND = nd, td_ctxt = ctxt } }) 
+             unicode qual
+  = -- newtype or data
+    (case nd of { NewType -> keyword "newtype"; DataType -> keyword "data" }) <+>
     -- context
-    ppLContext (tcdCtxt decl) unicode qual <+>
+    ppLContext ctxt unicode qual <+>
     -- T a b c ..., or a :+: b
     ppTyClBinderWithVars summary decl
+ppDataHeader _ _ _ _ = error "ppDataHeader: illegal argument"
 
 
 --------------------------------------------------------------------------------
@@ -682,13 +640,13 @@ ppKind unicode qual ki = ppr_mono_ty pREC_TOP ki unicode qual
 -- Drop top-level for-all type variables in user style
 -- since they are implicit in Haskell
 
-ppForAll :: HsExplicitFlag -> [Located (HsTyVarBndr DocName)]
+ppForAll :: HsExplicitFlag -> LHsTyVarBndrs DocName
          -> Located (HsContext DocName) -> Bool -> Qualification -> Html
 ppForAll expl tvs cxt unicode qual
   | show_forall = forall_part <+> ppLContext cxt unicode qual
   | otherwise   = ppLContext cxt unicode qual
   where
-    show_forall = not (null tvs) && is_explicit
+    show_forall = not (null (hsQTvBndrs tvs)) && is_explicit
     is_explicit = case expl of {Explicit -> True; Implicit -> False}
     forall_part = hsep (forallSymbol unicode : ppTyVars tvs) +++ dot
 
@@ -710,7 +668,7 @@ ppr_mono_ty _         (HsKindSig ty kind) u q =
     parens (ppr_mono_lty pREC_TOP ty u q <+> dcolon u <+> ppLKind u q kind)
 ppr_mono_ty _         (HsListTy ty)       u q = brackets (ppr_mono_lty pREC_TOP ty u q)
 ppr_mono_ty _         (HsPArrTy ty)       u q = pabrackets (ppr_mono_lty pREC_TOP ty u q)
-ppr_mono_ty _         (HsIParamTy n ty)   u q = brackets (ppDocName q (ipNameName n) <+> dcolon u <+> ppr_mono_lty pREC_TOP ty u q)
+ppr_mono_ty _         (HsIParamTy n ty)   u q = brackets (ppIPName n <+> dcolon u <+> ppr_mono_lty pREC_TOP ty u q)
 ppr_mono_ty _         (HsSpliceTy {})     _ _ = error "ppr_mono_ty HsSpliceTy"
 ppr_mono_ty _         (HsQuasiQuoteTy {}) _ _ = error "ppr_mono_ty HsQuasiQuoteTy"
 ppr_mono_ty _         (HsRecTy {})        _ _ = error "ppr_mono_ty HsRecTy"
@@ -731,8 +689,8 @@ ppr_mono_ty ctxt_prec (HsOpTy ty1 (_, op) ty2) unicode qual
   = maybeParen ctxt_prec pREC_FUN $
     ppr_mono_lty pREC_OP ty1 unicode qual <+> ppr_op <+> ppr_mono_lty pREC_OP ty2 unicode qual
   where
-    ppr_op = if not (isSymOcc occName) then quote (ppLDocName qual op) else ppLDocName qual op
-    occName = nameOccName . getName . unLoc $ op
+    ppr_op = if not (isSymOcc occ) then quote (ppLDocName qual op) else ppLDocName qual op
+    occ = nameOccName . getName . unLoc $ op
 
 ppr_mono_ty ctxt_prec (HsParTy ty) unicode qual
 --  = parens (ppr_mono_lty pREC_TOP ty)
@@ -740,6 +698,12 @@ ppr_mono_ty ctxt_prec (HsParTy ty) unicode qual
 
 ppr_mono_ty ctxt_prec (HsDocTy ty _) unicode qual
   = ppr_mono_lty ctxt_prec ty unicode qual
+
+ppr_mono_ty _ (HsTyLit n) _ _ = ppr_tylit n
+
+ppr_tylit :: HsTyLit -> Html
+ppr_tylit (HsNumTy n) = toHtml (show n)
+ppr_tylit (HsStrTy s) = toHtml (show s)
 
 
 ppr_fun_ty :: Int -> LHsType DocName -> LHsType DocName -> Bool -> Qualification -> Html

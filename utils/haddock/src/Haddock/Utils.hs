@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Haddock.Utils
@@ -13,7 +14,7 @@
 module Haddock.Utils (
 
   -- * Misc utilities
-  restrictTo,
+  restrictTo, emptyHsQTvs,
   toDescription, toInstalledDescription,
 
   -- * Filename utilities
@@ -125,18 +126,24 @@ toInstalledDescription = hmi_description . instInfo
 
 restrictTo :: [Name] -> LHsDecl Name -> LHsDecl Name
 restrictTo names (L loc decl) = L loc $ case decl of
-  TyClD d | isDataDecl d && tcdND d == DataType ->
-    TyClD (d { tcdCons = restrictCons names (tcdCons d) })
-  TyClD d | isDataDecl d && tcdND d == NewType ->
-    case restrictCons names (tcdCons d) of
-      []    -> TyClD (d { tcdND = DataType, tcdCons = [] })
-      [con] -> TyClD (d { tcdCons = [con] })
-      _ -> error "Should not happen"
+  TyClD d | isDataDecl d  -> 
+    TyClD (d { tcdTyDefn = restrictTyDefn names (tcdTyDefn d) })
   TyClD d | isClassDecl d ->
     TyClD (d { tcdSigs = restrictDecls names (tcdSigs d),
                tcdATs = restrictATs names (tcdATs d) })
   _ -> decl
 
+restrictTyDefn :: [Name] -> HsTyDefn Name -> HsTyDefn Name
+restrictTyDefn _ defn@(TySynonym {})
+  = defn
+restrictTyDefn names defn@(TyData { td_ND = new_or_data, td_cons = cons })
+  | DataType <- new_or_data
+  = defn { td_cons = restrictCons names cons }
+  | otherwise    -- Newtype
+  = case restrictCons names cons of
+      []    -> defn { td_ND = DataType, td_cons = [] }
+      [con] -> defn { td_cons = [con] }
+      _ -> error "Should not happen"
 
 restrictCons :: [Name] -> [LConDecl Name] -> [LConDecl Name]
 restrictCons names decls = [ L p d | L p (Just d) <- map (fmap keep) decls ]
@@ -165,6 +172,12 @@ restrictDecls names = mapMaybe (filterLSigNames (`elem` names))
 
 restrictATs :: [Name] -> [LTyClDecl Name] -> [LTyClDecl Name]
 restrictATs names ats = [ at | at <- ats , tcdName (unL at) `elem` names ]
+
+emptyHsQTvs :: LHsTyVarBndrs Name
+-- This function is here, rather than in HsTypes, because it *renamed*, but
+-- does not necessarily have all the rigt kind variables.  It is used
+-- in Haddock just for printing, so it doesn't matter
+emptyHsQTvs = HsQTvs { hsq_kvs = error "haddock:emptyHsQTvs", hsq_tvs = [] }
 
 
 --------------------------------------------------------------------------------
@@ -416,7 +429,7 @@ markup m (DocUnorderedList ds)       = markupUnorderedList m (map (markup m) ds)
 markup m (DocOrderedList ds)         = markupOrderedList m (map (markup m) ds)
 markup m (DocDefList ds)             = markupDefList m (map (markupPair m) ds)
 markup m (DocCodeBlock d)            = markupCodeBlock m (markup m d)
-markup m (DocURL url)                = markupURL m url
+markup m (DocHyperlink l)            = markupHyperlink m l
 markup m (DocAName ref)              = markupAName m ref
 markup m (DocPic img)                = markupPic m img
 markup m (DocExamples e)             = markupExample m e
@@ -443,7 +456,7 @@ idMarkup = Markup {
   markupOrderedList          = DocOrderedList,
   markupDefList              = DocDefList,
   markupCodeBlock            = DocCodeBlock,
-  markupURL                  = DocURL,
+  markupHyperlink            = DocHyperlink,
   markupAName                = DocAName,
   markupPic                  = DocPic,
   markupExample              = DocExamples

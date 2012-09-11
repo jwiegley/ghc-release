@@ -97,7 +97,7 @@ def _reqlib( opts, lib ):
         if have_subprocess:
             # By preference we use subprocess, as the alternative uses
             # /dev/null which mingw doesn't have.
-            p = subprocess.Popen([config.ghc_pkg, '--no-user-package-conf', 'describe', lib],
+            p = subprocess.Popen([config.ghc_pkg, '--no-user-package-db', 'describe', lib],
                                  stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE)
             # read from stdout and stderr to avoid blocking due to
@@ -111,7 +111,7 @@ def _reqlib( opts, lib ):
         have_lib[lib] = got_it
 
     if not got_it:
-        opts.expect = 'fail'
+        opts.expect = 'missing-lib'
 
 def req_profiling( opts ):
     if not config.have_profiling:
@@ -125,6 +125,10 @@ def req_interp( opts ):
     if not config.have_interp:
         opts.expect = 'fail'
 
+def req_smp( opts ):
+    if not config.have_smp:
+        opts.expect = 'fail'
+
 def expect_broken( bug ):
     return lambda opts, b=bug: _expect_broken (opts, b )
 
@@ -136,6 +140,9 @@ def ignore_output( opts ):
 
 def no_stdin( opts ):
     opts.no_stdin = 1
+
+def combined_output( opts ):
+    opts.combined_output = True
 
 # -----
 
@@ -219,6 +226,14 @@ def _extra_run_opts( opts, v ):
 
 # -----
 
+def extra_hc_opts( val ):
+    return lambda opts, v=val: _extra_hc_opts(opts, v);
+
+def _extra_hc_opts( opts, v ):
+    opts.extra_hc_opts = v
+
+# -----
+
 def extra_clean( files ):
     return lambda opts, v=files: _extra_clean(opts, v);
 
@@ -242,6 +257,24 @@ def _compiler_stats_num_field( opts, f, x, y ):
     # copy the dictionary, as the config gets shared between all tests
     opts.compiler_stats_num_fields = opts.compiler_stats_num_fields.copy()
     opts.compiler_stats_num_fields[f] = (x, y)
+
+# -----
+
+def stats_range_field( field, min, max ):
+    return lambda opts, f=field, x=min, y=max: _stats_range_field(opts, f, x, y);
+
+def _stats_range_field( opts, f, x, y ):
+    # copy the dictionary, as the config gets shared between all tests
+    opts.stats_range_fields = opts.stats_range_fields.copy()
+    opts.stats_range_fields[f] = (x, y)
+
+def compiler_stats_range_field( field, min, max ):
+    return lambda opts, f=field, x=min, y=max: _compiler_stats_range_field(opts, f, x, y);
+
+def _compiler_stats_range_field( opts, f, x, y ):
+    # copy the dictionary, as the config gets shared between all tests
+    opts.compiler_stats_range_fields = opts.compiler_stats_range_fields.copy()
+    opts.compiler_stats_range_fields[f] = (x, y)
 
 # -----
 
@@ -486,6 +519,7 @@ def newTestDir( dir ):
     # reset the options for this test directory
     thisdir_testopts = copy.copy(default_testopts)
     thisdir_testopts.testdir = dir
+    thisdir_testopts.compiler_always_flags = config.compiler_always_flags
 
 # -----------------------------------------------------------------------------
 # Actually doing tests
@@ -702,7 +736,9 @@ def do_test(name, way, func, args):
             if config.use_threads:
                 t.lock.acquire()
 
-        if getTestOpts().expect != 'pass' and getTestOpts().expect != 'fail':
+        if getTestOpts().expect != 'pass' and \
+                getTestOpts().expect != 'fail' and \
+                getTestOpts().expect != 'missing-lib':
             framework_fail(name, way, 'bad expected ' + getTestOpts().expect)
 
         try:
@@ -730,11 +766,18 @@ def do_test(name, way, func, args):
                 reason = result['reason']
                 addFailingTestInfo(t.unexpected_failures, getTestOpts().testdir, name, reason, way)
             else:
-                t.n_expected_failures = t.n_expected_failures + 1
-                if name in t.expected_failures:
-                    t.expected_failures[name].append(way)
+                if getTestOpts().expect == 'missing-lib':
+                    t.n_missing_libs = t.n_missing_libs + 1
+                    if name in t.missing_libs:
+                        t.missing_libs[name].append(way)
+                    else:
+                        t.missing_libs[name] = [way]
                 else:
-                    t.expected_failures[name] = [way]
+                    t.n_expected_failures = t.n_expected_failures + 1
+                    if name in t.expected_failures:
+                        t.expected_failures[name].append(way)
+                    else:
+                        t.expected_failures[name] = [way]
         else:
             framework_fail(name, way, 'bad result ' + passFail)
     except:
@@ -817,7 +860,7 @@ def run_command( name, way, cmd ):
 def ghci_script( name, way, script ):
     # filter out -fforce-recomp from compiler_always_flags, because we're
     # actually testing the recompilation behaviour in the GHCi tests.
-    flags = filter(lambda f: f != '-fforce-recomp', config.compiler_always_flags)
+    flags = filter(lambda f: f != '-fforce-recomp', getTestOpts().compiler_always_flags)
     flags.append(getTestOpts().extra_hc_opts)
 
     # We pass HC and HC_OPTS as environment variables, so that the
@@ -928,16 +971,42 @@ def multimod_compile_and_run( name, way, top_mod, extra_hc_opts ):
 def multi_compile_and_run( name, way, top_mod, extra_mods, extra_hc_opts ):
     return compile_and_run__( name, way, top_mod, extra_mods, extra_hc_opts)
 
+def stats( name, way, stats_file ):
+    opts = getTestOpts()
+    return checkStats(stats_file, opts.stats_range_fields
+                                , opts.stats_num_fields)
+
 # -----------------------------------------------------------------------------
 # Check -t stats info
 
-def checkStats(stats_file, num_fields):
+def checkStats(stats_file, range_fields, num_fields):
     result = passed()
-    if len(num_fields) > 0:
+    if len(num_fields) + len(range_fields) > 0:
         f = open(in_testdir(stats_file))
         contents = f.read()
         f.close()
 
+        for (field, (expected, dev)) in range_fields.items():
+            m = re.search('\("' + field + '", "([0-9]+)"\)', contents)
+            if m == None:
+                print 'Failed to find field: ', field
+                result = failBecause('no such stats field')
+            val = int(m.group(1))
+
+            min = expected * ((100 - float(dev))/100);
+            max = expected * ((100 + float(dev))/100);
+
+            if val < min:
+                print field, val, 'is more than ' + repr(dev) + '%'
+                print 'less than the exepected value', expected
+                print 'If this is because you have improved GHC, please'
+                print 'update the test so that GHC doesn\'t regress again'
+                result = failBecause('stat too good')
+            if val > max:
+                print field, val, 'is more than ' + repr(dev) + '% greater than the expected value,', expected, max
+                result = failBecause('stat not good enough')
+
+        # ToDo: remove all uses of this, and delete it
         for (field, (min, max)) in num_fields.items():
             m = re.search('\("' + field + '", "([0-9]+)"\)', contents)
             if m == None:
@@ -1004,7 +1073,7 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link, addsuf, 
         to_do = '-c' # just compile
 
     stats_file = name + '.comp.stats'
-    if len(opts.compiler_stats_num_fields) > 0:
+    if len(opts.compiler_stats_num_fields) + len(opts.compiler_stats_range_fields) > 0:
         extra_hc_opts += ' +RTS -V0 -t' + stats_file + ' --machine-readable -RTS'
 
     # Required by GHC 7.3+, harmless for earlier versions:
@@ -1018,7 +1087,7 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link, addsuf, 
     else:
         cmd_prefix = getTestOpts().compile_cmd_prefix + ' '
 
-    comp_flags = config.compiler_always_flags
+    comp_flags = getTestOpts().compiler_always_flags
     if noforce:
         comp_flags = filter(lambda f: f != '-fforce-recomp', comp_flags)
 
@@ -1040,7 +1109,8 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link, addsuf, 
 
     # ToDo: if the sub-shell was killed by ^C, then exit
 
-    statsResult = checkStats(stats_file, opts.compiler_stats_num_fields)
+    statsResult = checkStats(stats_file, opts.compiler_stats_range_fields
+                                       , opts.compiler_stats_num_fields)
 
     if badResult(statsResult):
         return statsResult
@@ -1093,11 +1163,18 @@ def simple_run( name, way, prog, args ):
         stdin_comes_from = ''
     else:
         stdin_comes_from = ' <' + use_stdin
+
+    if opts.combined_output:
+        redirection = ' >' + run_stdout \
+                    + ' 2>&1'
+    else:
+        redirection = ' >' + run_stdout \
+                    + ' 2>' + run_stderr
+
     cmd = prog + ' ' + args + ' '  \
         + my_rts_flags + ' '       \
         + stdin_comes_from         \
-        + ' >' + run_stdout        \
-        + ' 2>' + run_stderr
+        + redirection
 
     if getTestOpts().cmd_wrapper != None:
         cmd = getTestOpts().cmd_wrapper(cmd);
@@ -1121,7 +1198,7 @@ def simple_run( name, way, prog, args ):
     check_prof = my_rts_flags.find("-p") != -1
 
     if not opts.ignore_output:
-        if not check_stderr_ok(name):
+        if not opts.combined_output and not check_stderr_ok(name):
             return failBecause('bad stderr')
         if not check_stdout_ok(name):
             return failBecause('bad stdout')
@@ -1131,7 +1208,8 @@ def simple_run( name, way, prog, args ):
         if check_prof and not check_prof_ok(name):
             return failBecause('bad profile')
 
-    return checkStats(stats_file, opts.stats_num_fields)
+    return checkStats(stats_file, opts.stats_range_fields
+                                , opts.stats_num_fields)
 
 def rts_flags(way):
     if (way == ''):
@@ -1195,7 +1273,7 @@ def interpreter_run( name, way, extra_hc_opts, compile_only, top_mod ):
     script.close()
 
     cmd = "'" + config.compiler + "' " \
-          + join(config.compiler_always_flags,' ') + ' ' \
+          + join(getTestOpts().compiler_always_flags,' ') + ' ' \
           + srcname + ' ' \
           + join(config.way_flags[way],' ') + ' ' \
           + extra_hc_opts + ' ' \
@@ -1289,7 +1367,7 @@ def extcore_run( name, way, extra_hc_opts, compile_only, top_mod ):
 
     cmd = 'cd ' + getTestOpts().testdir + " && '" \
           + config.compiler + "' " \
-          + join(config.compiler_always_flags,' ') + ' ' \
+          + join(getTestOpts().compiler_always_flags,' ') + ' ' \
           + join(config.way_flags[way],' ') + ' ' \
           + extra_hc_opts + ' ' \
           + getTestOpts().extra_hc_opts \
@@ -1319,7 +1397,7 @@ def extcore_run( name, way, extra_hc_opts, compile_only, top_mod ):
 
     cmd = 'cd ' + getTestOpts().testdir + " && '" \
           + config.compiler + "' " \
-          + join(config.compiler_always_flags,' ') + ' ' \
+          + join(getTestOpts().compiler_always_flags,' ') + ' ' \
           + to_compile + ' ' \
           + extra_hc_opts + ' ' \
           + getTestOpts().extra_hc_opts + ' ' \
@@ -1382,7 +1460,7 @@ def check_stderr_ok( name ):
       if platform_specific:
          return str
       else:
-         return normalise_output(str)
+         return normalise_errmsg(str)
 
    return compare_outputs('stderr', \
                           two_normalisers(norm, getTestOpts().extra_normaliser), \
@@ -1393,9 +1471,15 @@ def dump_stderr( name ):
    print read_no_crs(qualify(name, 'run.stderr'))
 
 def read_no_crs(file):
-    h = open(file)
-    str = h.read()
-    h.close
+    str = ''
+    try:
+        h = open(file)
+        str = h.read()
+        h.close
+    except:
+        # On Windows, if the program fails very early, it seems the
+        # files stdout/stderr are redirected to may not get created
+        pass
     return re.sub('\r', '', str)
 
 def write_file(file, str):
@@ -1524,10 +1608,6 @@ def normalise_errmsg( str ):
     str = re.sub('([^\\s])\\.exe', '\\1', str)
     # normalise slashes, minimise Windows/Unix filename differences
     str = re.sub('\\\\', '/', str)
-    # The inplace ghc's are called ghc-bin-stage[123] to avoid filename
-    # collisions, so we need to normalise that to just "ghc"
-    # (this is for the old build system, I think, so should be removable)
-    str = re.sub('ghc-bin-stage[123]', 'ghc', str)
     # The inplace ghc's are called ghc-stage[123] to avoid filename
     # collisions, so we need to normalise that to just "ghc"
     str = re.sub('ghc-stage[123]', 'ghc', str)
@@ -1594,15 +1674,6 @@ def if_verbose_dump( n, f ):
         except:
             print ''
 
-# Guess flags suitable for the compiler.
-def guess_compiler_flags():
-   if config.compiler_type == 'ghc':
-       return ['-fforce-recomp', '-dcore-lint', '-no-user-package-conf']
-   elif config.compiler_type == 'nhc':
-       return ['-an-nhc-specific-flag']
-   else:
-        return []
-
 def rawSystem(cmd_and_args):
     # We prefer subprocess.call to os.spawnv as the latter
     # seems to send its arguments through a shell or something
@@ -1631,8 +1702,8 @@ def rawSystem(cmd_and_args):
 def runCmd( cmd ):
     if_verbose( 1, cmd )
     r = 0
-    if config.platform == 'i386-unknown-mingw32':
-   # On MinGW, we will always have timeout
+    if config.os == 'mingw32':
+        # On MinGW, we will always have timeout
         assert config.timeout_prog!=''
 
     if config.timeout_prog != '':
@@ -1644,8 +1715,8 @@ def runCmd( cmd ):
 def runCmdFor( name, cmd ):
     if_verbose( 1, cmd )
     r = 0
-    if config.platform == 'i386-unknown-mingw32':
-   # On MinGW, we will always have timeout
+    if config.os == 'mingw32':
+        # On MinGW, we will always have timeout
         assert config.timeout_prog!=''
 
     if config.timeout_prog != '':
@@ -1911,28 +1982,20 @@ def platform_wordsize_qualify( name, suff ):
 
     basepath = qualify(name, suff)
 
-    fns = [ lambda x: x + '-' + config.compiler_type,
-            lambda x: x + '-' + config.compiler_maj_version,
-            lambda x: x + '-ws-' + config.wordsize ]
-
-    paths = [ basepath ]
-    for fn in fns:
-        paths = paths + map(fn, paths)
-
-    paths.reverse()
-
-    plat_paths = map (lambda x: x + '-' + config.platform, paths)
+    paths = [(platformSpecific, basepath + comp + vers + ws + plat)
+             for (platformSpecific, plat) in [(1, '-' + config.platform),
+                                              (1, '-' + config.os),
+                                              (0, '')]
+             for ws   in ['-ws-' + config.wordsize, '']
+             for comp in ['-' + config.compiler_type, '']
+             for vers in ['-' + config.compiler_maj_version, '']]
 
     dir = glob.glob(basepath + '*')
     dir = map (lambda d: normalise_slashes_(d), dir)
 
-    for f in plat_paths:
+    for (platformSpecific, f) in paths:
        if f in dir:
-            return (1,f)
-
-    for f in paths:
-       if f in dir:
-            return (0,f)
+            return (platformSpecific,f)
 
     return (0, basepath)
 
@@ -1981,6 +2044,8 @@ def summary(t, file):
                + ' were skipped\n\n' \
                + string.rjust(`t.n_expected_passes`, 8)
                + ' expected passes\n' \
+               + string.rjust(`t.n_missing_libs`, 8)
+               + ' had missing libraries\n' \
                + string.rjust(`t.n_expected_failures`, 8) \
                + ' expected failures\n' \
                + string.rjust(`t.n_unexpected_passes`, 8) \

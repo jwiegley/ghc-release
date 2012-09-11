@@ -65,9 +65,7 @@ import Text.ParserCombinators.ReadPrec
 
 import Data.Maybe
 
-#ifndef __HADDOCK__
 import {-# SOURCE #-} GHC.Unicode       ( isDigit )
-#endif
 import GHC.Num
 import GHC.Real
 import GHC.Float
@@ -75,8 +73,6 @@ import GHC.Show
 import GHC.Base
 import GHC.Err
 import GHC.Arr
--- For defining instances for the generic deriving mechanism
-import GHC.Generics (Arity(..), Associativity(..), Fixity(..))
 \end{code}
 
 
@@ -278,10 +274,6 @@ lexP :: ReadPrec L.Lexeme
 -- ^ Parse a single lexeme
 lexP = lift L.lex
 
-lexP' :: ReadPrec L.Lexeme'
--- ^ Parse a single lexeme
-lexP' = lift L.lex'
-
 paren :: ReadPrec a -> ReadPrec a
 -- ^ @(paren p)@ parses \"(P0)\"
 --      where @p@ parses \"P0\" in precedence context zero
@@ -461,28 +453,28 @@ instance Read L.Lexeme where
 %*********************************************************
 
 \begin{code}
-readNumber :: Num a => (L.Lexeme' -> ReadPrec a) -> ReadPrec a
+readNumber :: Num a => (L.Lexeme -> ReadPrec a) -> ReadPrec a
 -- Read a signed number
 readNumber convert =
   parens
-  ( do x <- lexP'
+  ( do x <- lexP
        case x of
-         L.Symbol' "-" -> do y <- lexP'
-                             n <- convert y
-                             return (negate n)
+         L.Symbol "-" -> do y <- lexP
+                            n <- convert y
+                            return (negate n)
 
          _   -> convert x
   )
 
 
-convertInt :: Num a => L.Lexeme' -> ReadPrec a
+convertInt :: Num a => L.Lexeme -> ReadPrec a
 convertInt (L.Number n)
  | Just i <- L.numberToInteger n = return (fromInteger i)
 convertInt _ = pfail
 
-convertFrac :: forall a . RealFloat a => L.Lexeme' -> ReadPrec a
-convertFrac (L.Ident' "NaN")      = return (0 / 0)
-convertFrac (L.Ident' "Infinity") = return (1 / 0)
+convertFrac :: forall a . RealFloat a => L.Lexeme -> ReadPrec a
+convertFrac (L.Ident "NaN")      = return (0 / 0)
+convertFrac (L.Ident "Infinity") = return (1 / 0)
 convertFrac (L.Number n) = let resRange = floatRange (undefined :: a)
                            in case L.numberToRangedRational resRange n of
                               Nothing -> return (1 / 0)
@@ -493,6 +485,9 @@ instance Read Int where
   readPrec     = readNumber convertInt
   readListPrec = readListPrecDefault
   readList     = readListDefault
+
+instance Read Word where
+    readsPrec p s = [(fromInteger x, r) | (x, r) <- readsPrec p s]
 
 instance Read Integer where
   readPrec     = readNumber convertInt
@@ -692,12 +687,4 @@ instance (Read a, Read b, Read c, Read d, Read e, Read f, Read g, Read h,
 
 readp :: Read a => ReadP a
 readp = readPrec_to_P readPrec minPrec
-\end{code}
-
-Instances for types of the generic deriving mechanism.
-
-\begin{code}
-deriving instance Read Arity
-deriving instance Read Associativity
-deriving instance Read Fixity
 \end{code}

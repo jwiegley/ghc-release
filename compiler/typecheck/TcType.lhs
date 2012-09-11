@@ -37,10 +37,11 @@ module TcType (
   isSigTyVar, isOverlappableTyVar,  isTyConableTyVar,
   isAmbiguousTyVar, metaTvRef, 
   isFlexi, isIndirect, isRuntimeUnkSkol,
+  isTypeVar, isKindVar,
 
   --------------------------------
   -- Builders
-  mkPhiTy, mkSigmaTy, 
+  mkPhiTy, mkSigmaTy, mkTcEqPred,
 
   --------------------------------
   -- Splitters  
@@ -58,14 +59,13 @@ module TcType (
   -- Predicates. 
   -- Again, newtypes are opaque
   eqType, eqTypes, eqPred, cmpType, cmpTypes, cmpPred, eqTypeX,
-  eqKind, 
+  pickyEqType, eqKind, 
   isSigmaTy, isOverloadedTy,
   isDoubleTy, isFloatTy, isIntTy, isWordTy, isStringTy,
   isIntegerTy, isBoolTy, isUnitTy, isCharTy,
   isTauTy, isTauTyCon, tcIsTyVarTy, tcIsForAllTy, 
   isSynFamilyTyConApp,
   isPredTy, isTyVarClassPred,
-  shallowPredTypePredTree,
   
   ---------------------------------
   -- Misc type manipulators
@@ -88,8 +88,9 @@ module TcType (
   tidyType,      tidyTypes,
   tidyOpenType,  tidyOpenTypes,
   tidyOpenKind,
-  tidyTyVarBndr, tidyFreeTyVars,
+  tidyTyVarBndr, tidyTyVarBndrs, tidyFreeTyVars,
   tidyOpenTyVar, tidyOpenTyVars,
+  tidyTyVarOcc,
   tidyTopType,
   tidyKind, 
   tidyCo, tidyCos,
@@ -100,8 +101,7 @@ module TcType (
   isFFIImportResultTy, -- :: DynFlags -> Type -> Bool
   isFFIExportResultTy, -- :: Type -> Bool
   isFFIExternalTy,     -- :: Type -> Bool
-  isFFIDynArgumentTy,  -- :: Type -> Bool
-  isFFIDynResultTy,    -- :: Type -> Bool
+  isFFIDynTy,          -- :: Type -> Type -> Bool
   isFFIPrimArgumentTy, -- :: DynFlags -> Type -> Bool
   isFFIPrimResultTy,   -- :: DynFlags -> Type -> Bool
   isFFILabelTy,        -- :: Type -> Bool
@@ -114,10 +114,10 @@ module TcType (
   --------------------------------
   -- Rexported from Kind
   Kind, typeKind,
-  unliftedTypeKind, liftedTypeKind, argTypeKind,
+  unliftedTypeKind, liftedTypeKind,
   openTypeKind, constraintKind, mkArrowKind, mkArrowKinds, 
   isLiftedTypeKind, isUnliftedTypeKind, isSubOpenTypeKind, 
-  isSubArgTypeKind, isSubKind, splitKindFunTys, defaultKind,
+  tcIsSubKind, splitKindFunTys, defaultKind,
   mkMetaKindVar,
 
   --------------------------------
@@ -129,10 +129,10 @@ module TcType (
   mkTyVarTy, mkTyVarTys, mkTyConTy,
 
   isClassPred, isEqPred, isIPPred,
-  mkClassPred, mkIPPred,
+  mkClassPred,
   isDictLikeTy,
   tcSplitDFunTy, tcSplitDFunHead, 
-  mkEqPred,
+  mkEqPred, 
 
   -- Type substitutions
   TvSubst(..), 	-- Representation visible to a few friends
@@ -151,7 +151,7 @@ module TcType (
   tyVarsOfType, tyVarsOfTypes,
   tcTyVarsOfType, tcTyVarsOfTypes,
 
-  pprKind, pprParendKind,
+  pprKind, pprParendKind, pprSigmaType,
   pprType, pprParendType, pprTypeApp, pprTyThingCategory,
   pprTheta, pprThetaArrowTy, pprClassPred
 
@@ -172,7 +172,9 @@ import TyCon
 
 -- others:
 import DynFlags
-import Name hiding (varName)
+import Name -- hiding (varName)
+            -- We use this to make dictionaries for type literals.
+            -- Perhaps there's a better way to do this?
 import NameSet
 import VarEnv
 import PrelNames
@@ -349,6 +351,8 @@ data UserTypeCtxt
 			-- 	f (x::t) = ...
   | BindPatSigCtxt	-- Type sig in pattern binding pattern
 			--	(x::t, y) = e
+  | RuleSigCtxt Name    -- LHS of a RULE forall
+                        --    RULE "foo" forall (x :: a -> a). f (Just x) = ...
   | ResSigCtxt		-- Result type sig
 			-- 	f x :: t = ....
   | ForSigCtxt Name	-- Foreign import or export signature
@@ -387,11 +391,7 @@ mkKindName unique = mkSystemName unique kind_var_occ
 
 mkMetaKindVar :: Unique -> IORef MetaDetails -> MetaKindVar
 mkMetaKindVar u r
-  = mkTcTyVar (mkKindName u)
-              tySuperKind  -- not sure this is right,
-                            -- do we need kind vars for
-                            -- coercions?
-              (MetaTv TauTv r)
+  = mkTcTyVar (mkKindName u) superKind (MetaTv TauTv r)
 
 kind_var_occ :: OccName	-- Just one for all MetaKindVars
 			-- They may be jiggled by tidying
@@ -418,6 +418,7 @@ pprTcTyVarDetails (MetaTv SigTv _) = ptext (sLit "sig")
 pprUserTypeCtxt :: UserTypeCtxt -> SDoc
 pprUserTypeCtxt (InfSigCtxt n)    = ptext (sLit "the inferred type for") <+> quotes (ppr n)
 pprUserTypeCtxt (FunSigCtxt n)    = ptext (sLit "the type signature for") <+> quotes (ppr n)
+pprUserTypeCtxt (RuleSigCtxt n)    = ptext (sLit "a RULE for") <+> quotes (ppr n)
 pprUserTypeCtxt ExprSigCtxt       = ptext (sLit "an expression type signature")
 pprUserTypeCtxt (ConArgCtxt c)    = ptext (sLit "the type of the constructor") <+> quotes (ppr c)
 pprUserTypeCtxt (TySynCtxt c)     = ptext (sLit "the RHS of the type synonym") <+> quotes (ppr c)
@@ -450,6 +451,9 @@ Tidying is here becuase it has a special case for FlatSkol
 -- an interface file.
 -- 
 -- It doesn't change the uniques at all, just the print names.
+tidyTyVarBndrs :: TidyEnv -> [TyVar] -> (TidyEnv, [TyVar])
+tidyTyVarBndrs env tvs = mapAccumL tidyTyVarBndr env tvs
+
 tidyTyVarBndr :: TidyEnv -> TyVar -> (TidyEnv, TyVar)
 tidyTyVarBndr tidy_env@(occ_env, subst) tyvar
   = case tidyOccName occ_env occ1 of
@@ -473,7 +477,24 @@ tidyTyVarBndr tidy_env@(occ_env, subst) tyvar
 tidyFreeTyVars :: TidyEnv -> TyVarSet -> TidyEnv
 -- ^ Add the free 'TyVar's to the env in tidy form,
 -- so that we can tidy the type they are free in
-tidyFreeTyVars env tyvars = fst (tidyOpenTyVars env (varSetElems tyvars))
+tidyFreeTyVars (full_occ_env, var_env) tyvars 
+  = fst (tidyOpenTyVars (trimmed_occ_env, var_env) tv_list)
+
+  where
+    tv_list = varSetElems tyvars
+    
+    trimmed_occ_env = foldr mk_occ_env emptyOccEnv tv_list
+      -- The idea here is that we restrict the new TidyEnv to the 
+      -- _free_ vars of the type, so that we don't gratuitously rename
+      -- the _bound_ variables of the type
+
+    mk_occ_env :: TyVar -> TidyOccEnv -> TidyOccEnv
+    mk_occ_env tv env 
+       = case lookupOccEnv full_occ_env occ of
+            Just n  -> extendOccEnv env occ n
+            Nothing -> env
+       where
+         occ = getOccName tv
 
 ---------------
 tidyOpenTyVars :: TidyEnv -> [TyVar] -> (TidyEnv, [TyVar])
@@ -490,32 +511,36 @@ tidyOpenTyVar env@(_, subst) tyvar
 	Nothing	    -> tidyTyVarBndr env tyvar	-- Treat it as a binder
 
 ---------------
-tidyType :: TidyEnv -> Type -> Type
-tidyType env@(_, subst) ty
-  = go ty
+tidyTyVarOcc :: TidyEnv -> TyVar -> Type
+tidyTyVarOcc env@(_, subst) tv
+  = case lookupVarEnv subst tv of
+	Nothing  -> expand tv
+	Just tv' -> expand tv'
   where
-    go (TyVarTy tv)	    = case lookupVarEnv subst tv of
-				Nothing  -> expand tv
-				Just tv' -> expand tv'
-    go (TyConApp tycon tys) = let args = map go tys
-			      in args `seqList` TyConApp tycon args
-    go (AppTy fun arg)	    = (AppTy $! (go fun)) $! (go arg)
-    go (FunTy fun arg)	    = (FunTy $! (go fun)) $! (go arg)
-    go (ForAllTy tv ty)	    = ForAllTy tvp $! (tidyType envp ty)
-			      where
-			        (envp, tvp) = tidyTyVarBndr env tv
-
     -- Expand FlatSkols, the skolems introduced by flattening process
     -- We don't want to show them in type error messages
     expand tv | isTcTyVar tv
               , FlatSkol ty <- tcTyVarDetails tv
-              = go ty
+              = WARN( True, text "I DON'T THINK THIS SHOULD EVER HAPPEN" <+> ppr tv <+> ppr ty )
+                tidyType env ty
               | otherwise
               = TyVarTy tv
 
 ---------------
 tidyTypes :: TidyEnv -> [Type] -> [Type]
 tidyTypes env tys = map (tidyType env) tys
+
+---------------
+tidyType :: TidyEnv -> Type -> Type
+tidyType _   (LitTy n)            = LitTy n
+tidyType env (TyVarTy tv)	  = tidyTyVarOcc env tv
+tidyType env (TyConApp tycon tys) = let args = tidyTypes env tys
+ 		                    in args `seqList` TyConApp tycon args
+tidyType env (AppTy fun arg)	  = (AppTy $! (tidyType env fun)) $! (tidyType env arg)
+tidyType env (FunTy fun arg)	  = (FunTy $! (tidyType env fun)) $! (tidyType env arg)
+tidyType env (ForAllTy tv ty)	  = ForAllTy tvp $! (tidyType envp ty)
+			          where
+			            (envp, tvp) = tidyTyVarBndr env tv
 
 ---------------
 -- | Grabs the free type variables, tidies them
@@ -583,18 +608,19 @@ tidyCos env = map (tidyCo env)
 %************************************************************************
 
 \begin{code}
-
--- | Finds type family instances occuring in a type after expanding synonyms.
+-- | Finds outermost type-family applications occuring in a type,
+-- after expanding synonyms.
 tcTyFamInsts :: Type -> [(TyCon, [Type])]
 tcTyFamInsts ty 
   | Just exp_ty <- tcView ty    = tcTyFamInsts exp_ty
-tcTyFamInsts (TyVarTy _)          = []
+tcTyFamInsts (TyVarTy _)        = []
 tcTyFamInsts (TyConApp tc tys) 
-  | isSynFamilyTyCon tc           = [(tc, tys)]
+  | isSynFamilyTyCon tc         = [(tc, tys)]
   | otherwise                   = concat (map tcTyFamInsts tys)
-tcTyFamInsts (FunTy ty1 ty2)      = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
-tcTyFamInsts (AppTy ty1 ty2)      = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
-tcTyFamInsts (ForAllTy _ ty)      = tcTyFamInsts ty
+tcTyFamInsts (LitTy {})         = []
+tcTyFamInsts (FunTy ty1 ty2)    = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
+tcTyFamInsts (AppTy ty1 ty2)    = tcTyFamInsts ty1 ++ tcTyFamInsts ty2
+tcTyFamInsts (ForAllTy _ ty)    = tcTyFamInsts ty
 \end{code}
 
 %************************************************************************
@@ -641,6 +667,7 @@ exactTyVarsOfType ty
     go ty | Just ty' <- tcView ty = go ty'  -- This is the key line
     go (TyVarTy tv)         = unitVarSet tv
     go (TyConApp _ tys)     = exactTyVarsOfTypes tys
+    go (LitTy {})           = emptyVarSet
     go (FunTy arg res)      = go arg `unionVarSet` go res
     go (AppTy fun arg)      = go fun `unionVarSet` go arg
     go (ForAllTy tyvar ty)  = delVarSet (go ty) tyvar
@@ -751,6 +778,23 @@ mkSigmaTy tyvars theta tau = mkForAllTys tyvars (mkPhiTy theta tau)
 
 mkPhiTy :: [PredType] -> Type -> Type
 mkPhiTy theta ty = foldr mkFunTy ty theta
+
+mkTcEqPred :: TcType -> TcType -> Type
+-- During type checking we build equalities between 
+-- type variables with OpenKind or ArgKind.  Ultimately
+-- they will all settle, but we want the equality predicate
+-- itself to have kind '*'.  I think.
+--
+-- But for now we call mkTyConApp, not mkEqPred, because the invariants
+-- of the latter might not be satisfied during type checking.
+-- Notably when we form an equalty   (a : OpenKind) ~ (Int : *)
+--
+-- But this is horribly delicate: what about type variables
+-- that turn out to be bound to Int#?
+mkTcEqPred ty1 ty2
+  = mkTyConApp eqTyCon [k, ty1, ty2]
+  where
+    k = defaultKind (typeKind ty1)
 \end{code}
 
 @isTauTy@ tests for nested for-alls.  It should not be called on a boxy type.
@@ -776,9 +820,14 @@ getDFunTyKey :: Type -> OccName -- Get some string from a type, to be used to
 getDFunTyKey ty | Just ty' <- tcView ty = getDFunTyKey ty'
 getDFunTyKey (TyVarTy tv)    = getOccName tv
 getDFunTyKey (TyConApp tc _) = getOccName tc
+getDFunTyKey (LitTy x)       = getDFunTyLitKey x
 getDFunTyKey (AppTy fun _)   = getDFunTyKey fun
 getDFunTyKey (FunTy _ _)     = getOccName funTyCon
 getDFunTyKey (ForAllTy _ t)  = getDFunTyKey t
+
+getDFunTyLitKey :: TyLit -> OccName
+getDFunTyLitKey (NumTyLit n) = mkOccName Name.varName (show n)
+getDFunTyLitKey (StrTyLit n) = mkOccName Name.varName (show n)  -- hm
 \end{code}
 
 
@@ -1000,7 +1049,25 @@ tcInstHeadTyAppAllTyVars ty
     get_tv _             = Nothing
 \end{code}
 
+\begin{code}
+pickyEqType :: TcType -> TcType -> Bool
+-- Check when two types _look_ the same, _including_ synonyms.  
+-- So (pickyEqType String [Char]) returns False
+pickyEqType ty1 ty2
+  = go init_env ty1 ty2
+  where
+    init_env = mkRnEnv2 (mkInScopeSet (tyVarsOfType ty1 `unionVarSet` tyVarsOfType ty2))
+    go env (TyVarTy tv1)       (TyVarTy tv2)     = rnOccL env tv1 == rnOccR env tv2
+    go env (ForAllTy tv1 t1)   (ForAllTy tv2 t2) = go (rnBndr2 env tv1 tv2) t1 t2
+    go env (AppTy s1 t1)       (AppTy s2 t2)     = go env s1 s2 && go env t1 t2
+    go env (FunTy s1 t1)       (FunTy s2 t2)     = go env s1 s2 && go env t1 t2
+    go env (TyConApp tc1 ts1) (TyConApp tc2 ts2) = (tc1 == tc2) && gos env ts1 ts2
+    go _ _ _ = False
 
+    gos _   []       []       = True
+    gos env (t1:ts1) (t2:ts2) = go env t1 t2 && gos env ts1 ts2
+    gos _ _ _ = False
+\end{code}
 
 %************************************************************************
 %*									*
@@ -1011,27 +1078,6 @@ tcInstHeadTyAppAllTyVars ty
 Deconstructors and tests on predicate types
 
 \begin{code}
--- | Like 'classifyPredType' but doesn't look through type synonyms.
--- Used to check that programs only use "simple" contexts without any
--- synonyms in them.
-shallowPredTypePredTree :: PredType -> PredTree
-shallowPredTypePredTree ev_ty
-  | TyConApp tc tys <- ev_ty
-  = case () of
-      () | Just clas <- tyConClass_maybe tc
-         -> ClassPred clas tys
-      () | tc `hasKey` eqTyConKey
-         , let [_, ty1, ty2] = tys
-         -> EqPred ty1 ty2
-      () | Just ip <- tyConIP_maybe tc
-         , let [ty] = tys
-         -> IPPred ip ty
-      () | isTupleTyCon tc
-         -> TuplePred tys
-      _ -> IrredPred ev_ty
-  | otherwise
-  = IrredPred ev_ty
-
 isTyVarClassPred :: PredType -> Bool
 isTyVarClassPred ty = case getClassPredTys_maybe ty of
     Just (_, tys) -> all isTyVarTy tys
@@ -1060,7 +1106,7 @@ mkMinimalBySCs ptys = [ ploc |  ploc <- ptys
                              ,  ploc `not_in_preds` rec_scs ]
  where
    rec_scs = concatMap trans_super_classes ptys
-   not_in_preds p ps = null (filter (eqPred p) ps)
+   not_in_preds p ps = not (any (eqPred p) ps)
 
    trans_super_classes pred   -- Superclasses of pred, excluding pred itself
      = case classifyPredType pred of
@@ -1116,7 +1162,7 @@ isOverloadedTy _               = False
 
 \begin{code}
 isFloatTy, isDoubleTy, isIntegerTy, isIntTy, isWordTy, isBoolTy,
-    isUnitTy, isCharTy :: Type -> Bool
+    isUnitTy, isCharTy, isAnyTy :: Type -> Bool
 isFloatTy      = is_tc floatTyConKey
 isDoubleTy     = is_tc doubleTyConKey
 isIntegerTy    = is_tc integerTyConKey
@@ -1125,6 +1171,7 @@ isWordTy       = is_tc wordTyConKey
 isBoolTy       = is_tc boolTyConKey
 isUnitTy       = is_tc unitTyConKey
 isCharTy       = is_tc charTyConKey
+isAnyTy        = is_tc anyTyConKey
 
 isStringTy :: Type -> Bool
 isStringTy ty
@@ -1168,6 +1215,7 @@ tcTyVarsOfType :: Type -> TcTyVarSet
 tcTyVarsOfType (TyVarTy tv)	    = if isTcTyVar tv then unitVarSet tv
 						      else emptyVarSet
 tcTyVarsOfType (TyConApp _ tys)     = tcTyVarsOfTypes tys
+tcTyVarsOfType (LitTy {})           = emptyVarSet
 tcTyVarsOfType (FunTy arg res)	    = tcTyVarsOfType arg `unionVarSet` tcTyVarsOfType res
 tcTyVarsOfType (AppTy fun arg)	    = tcTyVarsOfType fun `unionVarSet` tcTyVarsOfType arg
 tcTyVarsOfType (ForAllTy tyvar ty)  = tcTyVarsOfType ty `delVarSet` tyvar
@@ -1192,6 +1240,7 @@ orphNamesOfType ty | Just ty' <- tcView ty = orphNamesOfType ty'
 orphNamesOfType (TyVarTy _)		   = emptyNameSet
 orphNamesOfType (TyConApp tycon tys)       = orphNamesOfTyCon tycon
                                              `unionNameSets` orphNamesOfTypes tys
+orphNamesOfType (LitTy {})          = emptyNameSet
 orphNamesOfType (FunTy arg res)	    = orphNamesOfType arg `unionNameSets` orphNamesOfType res
 orphNamesOfType (AppTy fun arg)	    = orphNamesOfType fun `unionNameSets` orphNamesOfType arg
 orphNamesOfType (ForAllTy _ ty)	    = orphNamesOfType ty
@@ -1275,26 +1324,33 @@ isFFIImportResultTy dflags ty
 isFFIExportResultTy :: Type -> Bool
 isFFIExportResultTy ty = checkRepTyCon legalFEResultTyCon ty
 
-isFFIDynArgumentTy :: Type -> Bool
--- The argument type of a foreign import dynamic must be Ptr, FunPtr, Addr,
--- or a newtype of either.
-isFFIDynArgumentTy = checkRepTyConKey [ptrTyConKey, funPtrTyConKey]
-
-isFFIDynResultTy :: Type -> Bool
--- The result type of a foreign export dynamic must be Ptr, FunPtr, Addr,
--- or a newtype of either.
-isFFIDynResultTy = checkRepTyConKey [ptrTyConKey, funPtrTyConKey]
+isFFIDynTy :: Type -> Type -> Bool
+-- The type in a foreign import dynamic must be Ptr, FunPtr, or a newtype of
+-- either, and the wrapped function type must be equal to the given type.
+-- We assume that all types have been run through normalizeFfiType, so we don't
+-- need to worry about expanding newtypes here.
+isFFIDynTy expected ty
+    -- Note [Foreign import dynamic]
+    -- In the example below, expected would be 'CInt -> IO ()', while ty would
+    -- be 'FunPtr (CDouble -> IO ())'.
+    | Just (tc, [ty']) <- splitTyConApp_maybe ty
+    , tyConUnique tc `elem` [ptrTyConKey, funPtrTyConKey]
+    , eqType ty' expected
+    = True
+    | otherwise
+    = False
 
 isFFILabelTy :: Type -> Bool
--- The type of a foreign label must be Ptr, FunPtr, Addr,
--- or a newtype of either.
+-- The type of a foreign label must be Ptr, FunPtr, or a newtype of either.
 isFFILabelTy = checkRepTyConKey [ptrTyConKey, funPtrTyConKey]
 
 isFFIPrimArgumentTy :: DynFlags -> Type -> Bool
 -- Checks for valid argument type for a 'foreign import prim'
--- Currently they must all be simple unlifted types.
+-- Currently they must all be simple unlifted types, or the well-known type
+-- Any, which can be used to pass the address to a Haskell object on the heap to
+-- the foreign function.
 isFFIPrimArgumentTy dflags ty
-   = checkRepTyCon (legalFIPrimArgTyCon dflags) ty
+   = isAnyTy ty || checkRepTyCon (legalFIPrimArgTyCon dflags) ty
 
 isFFIPrimResultTy :: DynFlags -> Type -> Bool
 -- Checks for valid result type for a 'foreign import prim'
@@ -1335,6 +1391,21 @@ checkRepTyConKey :: [Unique] -> Type -> Bool
 checkRepTyConKey keys
   = checkRepTyCon (\tc -> tyConUnique tc `elem` keys)
 \end{code}
+
+Note [Foreign import dynamic]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+A dynamic stub must be of the form 'FunPtr ft -> ft' where ft is any foreign
+type.  Similarly, a wrapper stub must be of the form 'ft -> IO (FunPtr ft)'.
+
+We use isFFIDynTy to check whether a signature is well-formed. For example,
+given a (illegal) declaration like:
+
+foreign import ccall "dynamic"
+  foo :: FunPtr (CDouble -> IO ()) -> CInt -> IO ()
+
+isFFIDynTy will compare the 'FunPtr' type 'CDouble -> IO ()' with the curried
+result type 'CInt -> IO ()', and return False, as they are not equal.
+
 
 ----------------------------------------------
 These chaps do the work; they are not exported

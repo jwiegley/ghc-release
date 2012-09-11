@@ -212,7 +212,10 @@ registerPackage :: Verbosity
                 -> PackageDBStack
                 -> IO ()
 registerPackage verbosity installedPkgInfo pkg lbi inplace packageDbs = do
-  setupMessage verbosity "Registering" (packageId pkg)
+  let msg = if inplace
+            then "In-place registering"
+            else "Registering"
+  setupMessage verbosity msg (packageId pkg)
   case compilerFlavor (compiler lbi) of
     GHC  -> GHC.registerPackage  verbosity installedPkgInfo pkg lbi inplace packageDbs
     LHC  -> LHC.registerPackage  verbosity installedPkgInfo pkg lbi inplace packageDbs
@@ -317,9 +320,10 @@ inplaceInstalledPackageInfo :: FilePath -- ^ top of the build tree
                             -> ComponentLocalBuildInfo
                             -> InstalledPackageInfo
 inplaceInstalledPackageInfo inplaceDir distPref pkg lib lbi clbi =
-    generalInstalledPackageInfo adjustReativeIncludeDirs pkg lib clbi installDirs
+    generalInstalledPackageInfo adjustRelativeIncludeDirs pkg lib clbi
+    installDirs
   where
-    adjustReativeIncludeDirs = map (inplaceDir </>)
+    adjustRelativeIncludeDirs = map (inplaceDir </>)
     installDirs =
       (absoluteInstallDirs pkg lbi NoCopyDest) {
         libdir     = inplaceDir </> buildDir lbi,

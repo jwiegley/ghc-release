@@ -27,6 +27,7 @@ module GHC.Err
        (
          absentErr                 -- :: a
        , divZeroError              -- :: a
+       , ratioZeroDenominatorError -- :: a
        , overflowError             -- :: a
 
        , error                     -- :: String -> a
@@ -34,10 +35,8 @@ module GHC.Err
        , undefined                 -- :: a
        ) where
 
-#ifndef __HADDOCK__
 import GHC.Types
 import GHC.Exception
-#endif
 \end{code}
 
 %*********************************************************
@@ -83,6 +82,10 @@ in the libraries before the Exception type has been defined yet.
 {-# NOINLINE divZeroError #-}
 divZeroError :: a
 divZeroError = throw DivideByZero
+
+{-# NOINLINE ratioZeroDenominatorError #-}
+ratioZeroDenominatorError :: a
+ratioZeroDenominatorError = throw RatioZeroDenominator
 
 {-# NOINLINE overflowError #-}
 overflowError :: a

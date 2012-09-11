@@ -303,6 +303,9 @@
 /* The value of SIGINT. */
 #undef CONST_SIGINT
 
+/* Define to 1 if you have the `clock_gettime' function. */
+#undef HAVE_CLOCK_GETTIME
+
 /* Define to 1 if you have the <ctype.h> header file. */
 #undef HAVE_CTYPE_H
 
@@ -350,6 +353,9 @@
 
 /* Define to 1 if you have libcharset. */
 #undef HAVE_LIBCHARSET
+
+/* Define to 1 if you have the `rt' library (-lrt). */
+#undef HAVE_LIBRT
 
 /* Define to 1 if you have the <limits.h> header file. */
 #undef HAVE_LIMITS_H

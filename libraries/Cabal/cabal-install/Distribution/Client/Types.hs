@@ -18,7 +18,10 @@ import Distribution.Package
 import Distribution.InstalledPackageInfo
          ( InstalledPackageInfo )
 import Distribution.PackageDescription
-         ( GenericPackageDescription, FlagAssignment )
+         ( Benchmark(..), GenericPackageDescription(..), FlagAssignment
+         , TestSuite(..) )
+import Distribution.PackageDescription.Configuration
+         ( mapTreeData )
 import Distribution.Client.PackageIndex
          ( PackageIndex )
 import Distribution.Version
@@ -74,17 +77,18 @@ instance PackageFixedDeps InstalledPackage where
 data ConfiguredPackage = ConfiguredPackage
        SourcePackage       -- package info, including repo
        FlagAssignment      -- complete flag assignment for the package
+       [OptionalStanza]    -- list of enabled optional stanzas for the package
        [PackageId]         -- set of exact dependencies. These must be
                            -- consistent with the 'buildDepends' in the
                            -- 'PackageDescription' that you'd get by applying
-                           -- the flag assignment.
+                           -- the flag assignment and optional stanzas.
   deriving Show
 
 instance Package ConfiguredPackage where
-  packageId (ConfiguredPackage pkg _ _) = packageId pkg
+  packageId (ConfiguredPackage pkg _ _ _) = packageId pkg
 
 instance PackageFixedDeps ConfiguredPackage where
-  depends (ConfiguredPackage _ _ deps) = deps
+  depends (ConfiguredPackage _ _ _ deps) = deps
 
 
 -- | A package description along with the location of the package sources.
@@ -97,6 +101,25 @@ data SourcePackage = SourcePackage {
   deriving Show
 
 instance Package SourcePackage where packageId = packageInfoId
+
+data OptionalStanza
+    = TestStanzas
+    | BenchStanzas
+  deriving (Eq, Ord, Show)
+
+enableStanzas
+    :: [OptionalStanza]
+    -> GenericPackageDescription
+    -> GenericPackageDescription
+enableStanzas stanzas gpkg = gpkg
+    { condBenchmarks = flagBenchmarks $ condBenchmarks gpkg
+    , condTestSuites = flagTests $ condTestSuites gpkg
+    }
+  where
+    enableTest t = t { testEnabled = TestStanzas `elem` stanzas }
+    enableBenchmark bm = bm { benchmarkEnabled = BenchStanzas `elem` stanzas }
+    flagBenchmarks = map (\(n, bm) -> (n, mapTreeData enableBenchmark bm))
+    flagTests = map (\(n, t) -> (n, mapTreeData enableTest t))
 
 -- ------------------------------------------------------------
 -- * Package locations and repositories
@@ -156,8 +179,9 @@ data BuildFailure = DependentFailed PackageId
                   | UnpackFailed    SomeException
                   | ConfigureFailed SomeException
                   | BuildFailed     SomeException
+                  | TestsFailed     SomeException
                   | InstallFailed   SomeException
 data BuildSuccess = BuildOk         DocsResult TestsResult
 
 data DocsResult  = DocsNotTried  | DocsFailed  | DocsOk
-data TestsResult = TestsNotTried | TestsFailed | TestsOk
+data TestsResult = TestsNotTried | TestsOk

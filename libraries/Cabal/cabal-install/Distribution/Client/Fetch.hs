@@ -120,6 +120,7 @@ planPackages verbosity comp fetchFlags
              installedPkgIndex sourcePkgDb pkgSpecifiers
 
   | includeDependencies = do
+      solver <- chooseSolver verbosity (fromFlag (fetchSolver fetchFlags)) (compilerId comp)
       notice verbosity "Resolving dependencies..."
       installPlan <- foldProgress logMsg die return $
                        resolveDependencies
@@ -131,7 +132,7 @@ planPackages verbosity comp fetchFlags
       -- that are in the 'InstallPlan.Configured' state.
       return
         [ pkg
-        | (InstallPlan.Configured (InstallPlan.ConfiguredPackage pkg _ _))
+        | (InstallPlan.Configured (InstallPlan.ConfiguredPackage pkg _ _ _))
             <- InstallPlan.toList installPlan ]
 
   | otherwise =
@@ -148,6 +149,8 @@ planPackages verbosity comp fetchFlags
 
       . setReorderGoals reorderGoals
 
+      . setShadowPkgs shadowPkgs
+
         -- Reinstall the targets given on the command line so that the dep
         -- resolver will decide that they need fetching, even if they're
         -- already installed. Since we want to get the source packages of
@@ -159,9 +162,9 @@ planPackages verbosity comp fetchFlags
     includeDependencies = fromFlag (fetchDeps fetchFlags)
     logMsg message rest = debug verbosity message >> rest
 
-    solver           = fromFlag (fetchSolver           fetchFlags)
     reorderGoals     = fromFlag (fetchReorderGoals     fetchFlags)
     independentGoals = fromFlag (fetchIndependentGoals fetchFlags)
+    shadowPkgs       = fromFlag (fetchShadowPkgs       fetchFlags)
     maxBackjumps     = fromFlag (fetchMaxBackjumps     fetchFlags)
 
 

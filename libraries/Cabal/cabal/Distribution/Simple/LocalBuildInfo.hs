@@ -52,6 +52,7 @@ module Distribution.Simple.LocalBuildInfo (
         -- * Buildable package components
         Component(..),
         foldComponent,
+        componentBuildInfo,
         allComponentsBy,
         ComponentName(..),
         ComponentLocalBuildInfo(..),
@@ -148,6 +149,8 @@ externalPackageDeps lbi = filter (not . internal . snd) $ nub $
   -- TODO:  what about non-buildable components?
        maybe [] componentPackageDeps (libraryConfig lbi)
     ++ concatMap (componentPackageDeps . snd) (executableConfigs lbi)
+    ++ concatMap (componentPackageDeps . snd) (testSuiteConfigs lbi)
+    ++ concatMap (componentPackageDeps . snd) (benchmarkConfigs lbi)
   where
     -- True if this dependency is an internal one (depends on the library
     -- defined in the same package).
@@ -193,6 +196,10 @@ foldComponent f _ _ _ (CLib   lib) = f lib
 foldComponent _ f _ _ (CExe   exe) = f exe
 foldComponent _ _ f _ (CTest  tst) = f tst
 foldComponent _ _ _ f (CBench bch) = f bch
+
+componentBuildInfo :: Component -> BuildInfo
+componentBuildInfo =
+  foldComponent libBuildInfo buildInfo testBuildInfo benchmarkBuildInfo
 
 -- | Obtains all components (libs, exes, or test suites), transformed by the
 -- given function.  Useful for gathering dependencies with component context.

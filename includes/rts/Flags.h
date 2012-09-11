@@ -77,7 +77,7 @@ struct DEBUG_FLAGS {
 };
 
 struct COST_CENTRE_FLAGS {
-    unsigned int	    doCostCentres;
+    nat	    doCostCentres;
 # define COST_CENTRES_SUMMARY	1
 # define COST_CENTRES_VERBOSE	2 /* incl. serial time profile */
 # define COST_CENTRES_ALL	3
@@ -88,7 +88,7 @@ struct COST_CENTRE_FLAGS {
 };
 
 struct PROFILING_FLAGS {
-    unsigned int	doHeapProfile;
+    nat	doHeapProfile;
 # define NO_HEAP_PROFILING	0	/* N.B. Used as indexes into arrays */
 # define HEAP_BY_CCS		1
 # define HEAP_BY_MOD		2
@@ -160,16 +160,24 @@ struct MISC_FLAGS {
 struct PAR_FLAGS {
   nat            nNodes;         /* number of threads to run simultaneously */
   rtsBool        migrate;        /* migrate threads between capabilities */
-  unsigned int   maxLocalSparks;
+  nat            maxLocalSparks;
   rtsBool        parGcEnabled;   /* enable parallel GC */
-  unsigned int   parGcGen;       /* do parallel GC in this generation
+  nat            parGcGen;       /* do parallel GC in this generation
                                   * and higher only */
   rtsBool        parGcLoadBalancingEnabled; 
                                  /* enable load-balancing in the
                                   * parallel GC */
-  unsigned int   parGcLoadBalancingGen;
+  nat            parGcLoadBalancingGen;
                                  /* do load-balancing in this
                                   * generation and higher only */
+
+  nat            parGcNoSyncWithIdle;
+                                 /* if a Capability has been idle for
+                                  * this many GCs, do not try to wake
+                                  * it up when doing a
+                                  * non-load-balancing parallel GC.
+                                  * (zero disables) */
+
   rtsBool        setAffinity;    /* force thread affinity with CPUs */
 };
 #endif /* THREADED_RTS */

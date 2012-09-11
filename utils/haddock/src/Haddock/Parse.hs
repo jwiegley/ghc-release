@@ -11,7 +11,7 @@
 module Haddock.Parse where
 
 import Haddock.Lex
-import Haddock.Types (Doc(..), Example(Example))
+import Haddock.Types (Doc(..), Example(Example), Hyperlink(..))
 import Haddock.Doc
 import HsSyn
 import RdrName
@@ -435,7 +435,7 @@ happyReduce_33 = happySpecReduce_1  13# happyReduction_33
 happyReduction_33 happy_x_1
 	 =  case happyOutTok happy_x_1 of { ((TokURL happy_var_1,_)) -> 
 	happyIn18
-		 (DocURL happy_var_1
+		 (DocHyperlink (makeHyperlink happy_var_1)
 	)}
 
 happyReduce_34 = happySpecReduce_1  13# happyReduction_34
@@ -534,6 +534,15 @@ happySeq = happyDoSeq
 
 happyError :: [LToken] -> Maybe a
 happyError toks = Nothing
+
+-- | Create a `Hyperlink` from given string.
+--
+-- A hyperlink consists of a URL and an optional label.  The label is separated
+-- from the url by one or more whitespace characters.
+makeHyperlink :: String -> Hyperlink
+makeHyperlink input = case break isSpace $ strip input of
+  (url, "")    -> Hyperlink url Nothing
+  (url, label) -> Hyperlink url (Just . dropWhile isSpace $ label)
 
 -- | Create an 'Example', stripping superfluous characters as appropriate
 makeExample :: String -> String -> [String] -> Example

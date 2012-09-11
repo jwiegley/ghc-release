@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, BangPatterns #-}
 {-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
 {-# OPTIONS_HADDOCK prune #-}
 #if __GLASGOW_HASKELL__ >= 701
@@ -8,29 +8,33 @@
 -- |
 -- Module      : Data.ByteString.Lazy
 -- Copyright   : (c) Don Stewart 2006
---               (c) Duncan Coutts 2006
+--               (c) Duncan Coutts 2006-2011
 -- License     : BSD-style
 --
--- Maintainer  : dons@galois.com
--- Stability   : experimental
+-- Maintainer  : dons00@gmail.com, duncan@community.haskell.org
+-- Stability   : stable
 -- Portability : portable
 -- 
 -- A time and space-efficient implementation of lazy byte vectors
 -- using lists of packed 'Word8' arrays, suitable for high performance
 -- use, both in terms of large data quantities, or high speed
--- requirements. Byte vectors are encoded as lazy lists of strict 'Word8'
--- arrays of bytes. They provide a means to manipulate large byte vectors
--- without requiring the entire vector be resident in memory.
+-- requirements. Lazy ByteStrings are encoded as lazy lists of strict chunks
+-- of bytes.
 --
--- Some operations, such as concat, append, reverse and cons, have
+-- A key feature of lazy ByteStrings is the means to manipulate large or
+-- unbounded streams of data without requiring the entire sequence to be
+-- resident in memory. To take advantage of this you have to write your
+-- functions in a lazy streaming style, e.g. classic pipeline composition. The
+-- default I\/O chunk size is 32k, which should be good in most circumstances.
+--
+-- Some operations, such as 'concat', 'append', 'reverse' and 'cons', have
 -- better complexity than their "Data.ByteString" equivalents, due to
--- optimisations resulting from the list spine structure. And for other
+-- optimisations resulting from the list spine structure. For other
 -- operations lazy ByteStrings are usually within a few percent of
--- strict ones, but with better heap usage. For data larger than the
--- available memory, or if you have tight memory constraints, this
--- module will be the only option. The default chunk size is 64k, which
--- should be good in most circumstances. For people with large L2
--- caches, you may want to increase this to fit your cache.
+-- strict ones.
+--
+-- The recomended way to assemble lazy ByteStrings from smaller parts
+-- is to use the builder monoid from "Data.ByteString.Lazy.Builder".
 --
 -- This module is intended to be imported @qualified@, to avoid name
 -- clashes with "Prelude" functions.  eg.
@@ -41,7 +45,7 @@
 -- Rewritten to use 'Data.Array.Unboxed.UArray' by Simon Marlow.
 -- Rewritten to support slices and use 'Foreign.ForeignPtr.ForeignPtr'
 -- by David Roundy.
--- Polished and extended by Don Stewart.
+-- Rewritten again and extended by Don Stewart and Duncan Coutts.
 -- Lazy variant by Duncan Coutts and Don Stewart.
 --
 
@@ -55,8 +59,12 @@ module Data.ByteString.Lazy (
         singleton,              -- :: Word8   -> ByteString
         pack,                   -- :: [Word8] -> ByteString
         unpack,                 -- :: ByteString -> [Word8]
+        fromStrict,             -- :: Strict.ByteString -> ByteString
+        toStrict,               -- :: ByteString -> Strict.ByteString
         fromChunks,             -- :: [Strict.ByteString] -> ByteString
         toChunks,               -- :: ByteString -> [Strict.ByteString]
+        foldrChunks,            -- :: (S.ByteString -> a -> a) -> a -> ByteString -> a
+        foldlChunks,            -- :: (a -> S.ByteString -> a) -> a -> ByteString -> a
 
         -- * Basic interface
         cons,                   -- :: Word8 -> ByteString -> ByteString
@@ -242,45 +250,6 @@ import Foreign.Storable
 #define STRICT5(f) f a b c d e | a `seq` b `seq` c `seq` d `seq` e `seq` False = undefined
 
 -- -----------------------------------------------------------------------------
-
-instance Eq  ByteString
-    where (==)    = eq
-
-instance Ord ByteString
-    where compare = cmp
-
-instance Monoid ByteString where
-    mempty  = empty
-    mappend = append
-    mconcat = concat
-
-eq :: ByteString -> ByteString -> Bool
-eq Empty Empty = True
-eq Empty _     = False
-eq _     Empty = False
-eq (Chunk a as) (Chunk b bs) =
-  case compare (S.length a) (S.length b) of
-    LT -> a == (S.take (S.length a) b) && eq as (Chunk (S.drop (S.length a) b) bs)
-    EQ -> a == b                       && eq as bs
-    GT -> (S.take (S.length b) a) == b && eq (Chunk (S.drop (S.length b) a) as) bs
-
-cmp :: ByteString -> ByteString -> Ordering
-cmp Empty Empty = EQ
-cmp Empty _     = LT
-cmp _     Empty = GT
-cmp (Chunk a as) (Chunk b bs) =
-  case compare (S.length a) (S.length b) of
-    LT -> case compare a (S.take (S.length a) b) of
-            EQ     -> cmp as (Chunk (S.drop (S.length a) b) bs)
-            result -> result
-    EQ -> case compare a b of
-            EQ     -> cmp as bs
-            result -> result
-    GT -> case compare (S.take (S.length b) a) b of
-            EQ     -> cmp (Chunk (S.drop (S.length b) a) as) bs
-            result -> result
-
--- -----------------------------------------------------------------------------
 -- Introducing and eliminating 'ByteString's
 
 -- | /O(1)/ The empty 'ByteString'
@@ -295,25 +264,43 @@ singleton w = Chunk (S.singleton w) Empty
 
 -- | /O(n)/ Convert a '[Word8]' into a 'ByteString'. 
 pack :: [Word8] -> ByteString
-pack ws = L.foldr (Chunk . S.pack) Empty (chunks defaultChunkSize ws)
-  where
-    chunks :: Int -> [a] -> [[a]]
-    chunks _    [] = []
-    chunks size xs = case L.splitAt size xs of
-                      (xs', xs'') -> xs' : chunks size xs''
+pack = packBytes
 
 -- | /O(n)/ Converts a 'ByteString' to a '[Word8]'.
 unpack :: ByteString -> [Word8]
-unpack cs = L.concatMap S.unpack (toChunks cs)
---TODO: we can do better here by integrating the concat with the unpack
+unpack = unpackBytes
 
 -- | /O(c)/ Convert a list of strict 'ByteString' into a lazy 'ByteString'
 fromChunks :: [P.ByteString] -> ByteString
 fromChunks cs = L.foldr chunk Empty cs
 
--- | /O(n)/ Convert a lazy 'ByteString' into a list of strict 'ByteString'
+-- | /O(c)/ Convert a lazy 'ByteString' into a list of strict 'ByteString'
 toChunks :: ByteString -> [P.ByteString]
 toChunks cs = foldrChunks (:) [] cs
+
+-- |/O(1)/ Convert a strict 'ByteString' into a lazy 'ByteString'.
+fromStrict :: P.ByteString -> ByteString
+fromStrict bs | S.null bs = Empty
+              | otherwise = Chunk bs Empty
+
+-- |/O(n)/ Convert a lazy 'ByteString' into a strict 'ByteString'.
+--
+-- Note that this is an /expensive/ operation that forces the whole lazy
+-- ByteString into memory and then copies all the data. If possible, try to
+-- avoid converting back and forth between strict and lazy bytestrings.
+--
+toStrict :: ByteString -> S.ByteString
+toStrict Empty           = S.empty
+toStrict (Chunk c Empty) = c
+toStrict cs0 = S.unsafeCreate totalLen $ \ptr -> go cs0 ptr
+  where
+    totalLen = foldlChunks (\a c -> a + S.length c) 0 cs0
+
+    go Empty                        !_       = return ()
+    go (Chunk (S.PS fp off len) cs) !destptr =
+      withForeignPtr fp $ \p -> do
+        S.memcpy destptr (p `plusPtr` off) len
+        go cs (destptr `plusPtr` len)
 
 ------------------------------------------------------------------------
 
@@ -345,6 +332,9 @@ null _     = False
 length :: ByteString -> Int64
 length cs = foldlChunks (\n c -> n + fromIntegral (S.length c)) 0 cs
 {-# INLINE length #-}
+
+infixr 5 `cons`, `cons'` --same as list (:)
+infixl 5 `snoc`
 
 -- | /O(1)/ 'cons' is analogous to '(:)' for lists.
 --
@@ -418,7 +408,7 @@ init (Chunk c0 cs0) = go c0 cs0
 
 -- | /O(n\/c)/ Append two ByteStrings
 append :: ByteString -> ByteString -> ByteString
-append xs ys = foldrChunks Chunk ys xs
+append = mappend
 {-# INLINE append #-}
 
 -- ---------------------------------------------------------------------
@@ -515,12 +505,7 @@ foldr1 f (Chunk c0 cs0) = go c0 cs0
 
 -- | /O(n)/ Concatenate a list of ByteStrings.
 concat :: [ByteString] -> ByteString
-concat css0 = to css0
-  where
-    go Empty        css = to css
-    go (Chunk c cs) css = Chunk c (go cs css)
-    to []               = Empty
-    to (cs:css)         = go cs css
+concat = mconcat
 
 -- | Map a function over a 'ByteString' and concatenate the results
 concatMap :: (Word8 -> ByteString) -> ByteString -> ByteString
@@ -845,53 +830,40 @@ tokens f = L.filter (not.null) . splitWith f
 -- It is a special case of 'groupBy', which allows the programmer to
 -- supply their own equality test.
 group :: ByteString -> [ByteString]
-group Empty          = []
-group (Chunk c0 cs0) = group' [] (S.group c0) cs0
-  where 
-    group' :: [P.ByteString] -> [P.ByteString] -> ByteString -> [ByteString]
-    group' acc@(s':_) ss@(s:_) cs
-      | S.unsafeHead s'
-     /= S.unsafeHead s             = revNonEmptyChunks    acc  : group' [] ss cs
-    group' acc (s:[]) Empty        = revNonEmptyChunks (s:acc) : []
-    group' acc (s:[]) (Chunk c cs) = group' (s:acc) (S.group c) cs
-    group' acc (s:ss) cs           = revNonEmptyChunks (s:acc) : group' [] ss cs
+group = go
+  where
+    go Empty        = []
+    go (Chunk c cs)
+      | S.length c == 1  = to [c] (S.unsafeHead c) cs
+      | otherwise        = to [S.unsafeTake 1 c] (S.unsafeHead c) (Chunk (S.unsafeTail c) cs)
 
-{-
-TODO: check if something like this might be faster
-
-group :: ByteString -> [ByteString]
-group xs
-    | null xs   = []
-    | otherwise = ys : group zs
-    where
-        (ys, zs) = spanByte (unsafeHead xs) xs
--}
+    to acc !_ Empty        = revNonEmptyChunks acc : []
+    to acc !w (Chunk c cs) =
+      case findIndexOrEnd (/= w) c of
+        0                    -> revNonEmptyChunks acc
+                              : go (Chunk c cs)
+        n | n == S.length c  -> to (S.unsafeTake n c : acc) w cs
+          | otherwise        -> revNonEmptyChunks (S.unsafeTake n c : acc)
+                              : go (Chunk (S.unsafeDrop n c) cs)
 
 -- | The 'groupBy' function is the non-overloaded version of 'group'.
 --
 groupBy :: (Word8 -> Word8 -> Bool) -> ByteString -> [ByteString]
-groupBy _ Empty          = []
-groupBy k (Chunk c0 cs0) = groupBy' [] 0 (S.groupBy k c0) cs0
+groupBy k = go
   where
-    groupBy' :: [P.ByteString] -> Word8 -> [P.ByteString] -> ByteString -> [ByteString]
-    groupBy' acc@(_:_) c ss@(s:_) cs
-      | not (c `k` S.unsafeHead s)     = revNonEmptyChunks acc : groupBy' [] 0 ss cs
-    groupBy' acc _ (s:[]) Empty        = revNonEmptyChunks (s : acc) : []
-    groupBy' acc w (s:[]) (Chunk c cs) = groupBy' (s:acc) w' (S.groupBy k c) cs
-                                           where w' | L.null acc = S.unsafeHead s
-                                                    | otherwise  = w
-    groupBy' acc _ (s:ss) cs           = revNonEmptyChunks (s : acc) : groupBy' [] 0 ss cs
+    go Empty        = []
+    go (Chunk c cs)
+      | S.length c == 1  = to [c] (S.unsafeHead c) cs
+      | otherwise        = to [S.unsafeTake 1 c] (S.unsafeHead c) (Chunk (S.unsafeTail c) cs)
 
-{-
-TODO: check if something like this might be faster
-
-groupBy :: (Word8 -> Word8 -> Bool) -> ByteString -> [ByteString]
-groupBy k xs
-    | null xs   = []
-    | otherwise = take n xs : groupBy k (drop n xs)
-    where
-        n = 1 + findIndexOrEnd (not . k (head xs)) (tail xs)
--}
+    to acc !_ Empty        = revNonEmptyChunks acc : []
+    to acc !w (Chunk c cs) =
+      case findIndexOrEnd (not . k w) c of
+        0                    -> revNonEmptyChunks acc
+                              : go (Chunk c cs)
+        n | n == S.length c  -> to (S.unsafeTake n c : acc) w cs
+          | otherwise        -> revNonEmptyChunks (S.unsafeTake n c : acc)
+                              : go (Chunk (S.unsafeDrop n c) cs)
 
 -- | /O(n)/ The 'intercalate' function takes a 'ByteString' and a list of
 -- 'ByteString's and concatenates the list after interspersing the first
@@ -1344,9 +1316,11 @@ interact transformer = putStr . transformer =<< getContents
 -- constant strings created when compiled:
 errorEmptyList :: String -> a
 errorEmptyList fun = moduleError fun "empty ByteString"
+{-# NOINLINE errorEmptyList #-}
 
 moduleError :: String -> String -> a
 moduleError fun msg = error ("Data.ByteString.Lazy." ++ fun ++ ':':' ':msg)
+{-# NOINLINE moduleError #-}
 
 
 -- reverse a list of non-empty chunks into a lazy ByteString

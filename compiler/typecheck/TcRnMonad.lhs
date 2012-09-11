@@ -23,6 +23,8 @@ import Module
 import RdrName
 import Name
 import Type
+import Kind ( isSuperKind )
+
 import TcType
 import InstEnv
 import FamInstEnv
@@ -42,12 +44,12 @@ import UniqSupply
 import Unique
 import UniqFM
 import DynFlags
+import Maybes
 import StaticFlags
 import FastString
 import Panic
 import Util
 
-import System.IO
 import Data.IORef
 import qualified Data.Set as Set
 import Control.Monad
@@ -145,6 +147,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
                 tcl_th_ctxt    = topStage,
                 tcl_arrow_ctxt = NoArrowCtxt,
                 tcl_env        = emptyNameEnv,
+                tcl_tidy       = emptyTidyEnv,
                 tcl_tyvars     = tvs_var,
                 tcl_lie        = lie_var,
                 tcl_meta       = meta_var,
@@ -183,6 +186,9 @@ initTcPrintErrors       -- Used from the interactive loop only
        -> IO (Messages, Maybe r)
 
 initTcPrintErrors env mod todo = initTc env HsSrcFile False mod todo
+
+initTcForLookup :: HscEnv -> TcM a -> IO a
+initTcForLookup hsc_env = liftM (expectJust "initTcInteractive" . snd) . initTc hsc_env HsSrcFile False iNTERACTIVE
 \end{code}
 
 %************************************************************************
@@ -218,6 +224,9 @@ initTcRnIf uniq_tag hsc_env gbl_env lcl_env thing_inside
 %************************************************************************
 
 \begin{code}
+discardResult :: TcM a -> TcM ()
+discardResult a = a >> return ()
+
 getTopEnv :: TcRnIf gbl lcl HscEnv
 getTopEnv = do { env <- getEnv; return (env_top env) }
 
@@ -252,17 +261,14 @@ setEnvs (gbl_env, lcl_env) = updEnv (\ env -> env { env_gbl = gbl_env, env_lcl =
 Command-line flags
 
 \begin{code}
-getDOpts :: TcRnIf gbl lcl DynFlags
-getDOpts = do { env <- getTopEnv; return (hsc_dflags env) }
-
 xoptM :: ExtensionFlag -> TcRnIf gbl lcl Bool
-xoptM flag = do { dflags <- getDOpts; return (xopt flag dflags) }
+xoptM flag = do { dflags <- getDynFlags; return (xopt flag dflags) }
 
 doptM :: DynFlag -> TcRnIf gbl lcl Bool
-doptM flag = do { dflags <- getDOpts; return (dopt flag dflags) }
+doptM flag = do { dflags <- getDynFlags; return (dopt flag dflags) }
 
 woptM :: WarningFlag -> TcRnIf gbl lcl Bool
-woptM flag = do { dflags <- getDOpts; return (wopt flag dflags) }
+woptM flag = do { dflags <- getDynFlags; return (wopt flag dflags) }
 
 setXOptM :: ExtensionFlag -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
 setXOptM flag = updEnv (\ env@(Env { env_top = top }) ->
@@ -426,9 +432,9 @@ traceTc = traceTcN 1
 
 traceTcN :: Int -> String -> SDoc -> TcRn ()
 traceTcN level herald doc
-  | level <= opt_TraceLevel = traceOptTcRn Opt_D_dump_tc_trace $
-                              hang (text herald) 2 doc
-  | otherwise               = return ()
+    = do dflags <- getDynFlags
+         when (level <= traceLevel dflags) $
+             traceOptTcRn Opt_D_dump_tc_trace $ hang (text herald) 2 doc
 
 traceRn, traceSplice :: SDoc -> TcRn ()
 traceRn      = traceOptTcRn Opt_D_dump_rn_trace
@@ -441,22 +447,23 @@ traceHiDiffs = traceOptIf Opt_D_dump_hi_diffs
 
 traceOptIf :: DynFlag -> SDoc -> TcRnIf m n ()  -- No RdrEnv available, so qualify everything
 traceOptIf flag doc = ifDOptM flag $
-                      liftIO (printForUser stderr alwaysQualify doc)
+                          do dflags <- getDynFlags
+                             liftIO (printInfoForUser dflags alwaysQualify doc)
 
 traceOptTcRn :: DynFlag -> SDoc -> TcRn ()
 -- Output the message, with current location if opt_PprStyle_Debug
 traceOptTcRn flag doc = ifDOptM flag $ do
                         { loc  <- getSrcSpanM
                         ; let real_doc
-                                | opt_PprStyle_Debug = mkLocMessage loc doc
+                                | opt_PprStyle_Debug = mkLocMessage SevInfo loc doc
                                 | otherwise = doc   -- The full location is
                                                     -- usually way too much
                         ; dumpTcRn real_doc }
 
 dumpTcRn :: SDoc -> TcRn ()
 dumpTcRn doc = do { rdr_env <- getGlobalRdrEnv
-                  ; dflags <- getDOpts
-                  ; liftIO (printForUser stderr (mkPrintUnqualified dflags rdr_env) doc) }
+                  ; dflags <- getDynFlags
+                  ; liftIO (printInfoForUser dflags (mkPrintUnqualified dflags rdr_env) doc) }
 
 debugDumpTcRn :: SDoc -> TcRn ()
 debugDumpTcRn doc | opt_NoDebugOutput = return ()
@@ -482,6 +489,12 @@ setModule mod thing_inside = updGblEnv (\env -> env { tcg_mod = mod }) thing_ins
 
 getIsGHCi :: TcRn Bool
 getIsGHCi = do { mod <- getModule; return (mod == iNTERACTIVE) }
+
+getGHCiMonad :: TcRn Name
+getGHCiMonad = do { hsc <- getTopEnv; return (ic_monad $ hsc_IC hsc) }
+
+getInteractivePrintName :: TcRn Name
+getInteractivePrintName = do { hsc <- getTopEnv; return (ic_int_print $ hsc_IC hsc) }
 
 tcIsHsBoot :: TcRn Bool
 tcIsHsBoot = do { env <- getGblEnv; return (isHsBoot (tcg_src env)) }
@@ -561,13 +574,13 @@ getErrsVar = do { env <- getLclEnv; return (tcl_errs env) }
 setErrsVar :: TcRef Messages -> TcRn a -> TcRn a
 setErrsVar v = updLclEnv (\ env -> env { tcl_errs =  v })
 
-addErr :: Message -> TcRn ()    -- Ignores the context stack
+addErr :: MsgDoc -> TcRn ()    -- Ignores the context stack
 addErr msg = do { loc <- getSrcSpanM; addErrAt loc msg }
 
-failWith :: Message -> TcRn a
+failWith :: MsgDoc -> TcRn a
 failWith msg = addErr msg >> failM
 
-addErrAt :: SrcSpan -> Message -> TcRn ()
+addErrAt :: SrcSpan -> MsgDoc -> TcRn ()
 -- addErrAt is mainly (exclusively?) used by the renamer, where
 -- tidying is not an issue, but it's all lazy so the extra
 -- work doesn't matter
@@ -576,22 +589,16 @@ addErrAt loc msg = do { ctxt <- getErrCtxt
                       ; err_info <- mkErrInfo tidy_env ctxt
                       ; addLongErrAt loc msg err_info }
 
-addErrs :: [(SrcSpan,Message)] -> TcRn ()
+addErrs :: [(SrcSpan,MsgDoc)] -> TcRn ()
 addErrs msgs = mapM_ add msgs
              where
                add (loc,msg) = addErrAt loc msg
 
-addWarn :: Message -> TcRn ()
-addWarn msg = addReport (ptext (sLit "Warning:") <+> msg) empty
-
-addWarnAt :: SrcSpan -> Message -> TcRn ()
-addWarnAt loc msg = addReportAt loc (ptext (sLit "Warning:") <+> msg) empty
-
-checkErr :: Bool -> Message -> TcRn ()
+checkErr :: Bool -> MsgDoc -> TcRn ()
 -- Add the error if the bool is False
 checkErr ok msg = unless ok (addErr msg)
 
-warnIf :: Bool -> Message -> TcRn ()
+warnIf :: Bool -> MsgDoc -> TcRn ()
 warnIf True  msg = addWarn msg
 warnIf False _   = return ()
 
@@ -626,32 +633,34 @@ discardWarnings thing_inside
 %************************************************************************
 
 \begin{code}
-addReport :: Message -> Message -> TcRn ()
-addReport msg extra_info = do { traceTc "addr" msg; loc <- getSrcSpanM; addReportAt loc msg extra_info }
+mkLongErrAt :: SrcSpan -> MsgDoc -> MsgDoc -> TcRn ErrMsg
+mkLongErrAt loc msg extra
+  = do { traceTc "Adding error:" (mkLocMessage SevError loc (msg $$ extra)) ;
+         rdr_env <- getGlobalRdrEnv ;
+         dflags <- getDynFlags ;
+         return $ mkLongErrMsg dflags loc (mkPrintUnqualified dflags rdr_env) msg extra }
 
-addReportAt :: SrcSpan -> Message -> Message -> TcRn ()
-addReportAt loc msg extra_info
+addLongErrAt :: SrcSpan -> MsgDoc -> MsgDoc -> TcRn ()
+addLongErrAt loc msg extra = mkLongErrAt loc msg extra >>= reportError
+
+reportErrors :: [ErrMsg] -> TcM ()
+reportErrors = mapM_ reportError
+
+reportError :: ErrMsg -> TcRn ()
+reportError err
   = do { errs_var <- getErrsVar ;
-         rdr_env <- getGlobalRdrEnv ;
-         dflags <- getDOpts ;
-         let { warn = mkLongWarnMsg loc (mkPrintUnqualified dflags rdr_env)
-                                    msg extra_info } ;
-         (warns, errs) <- readTcRef errs_var ;
-         writeTcRef errs_var (warns `snocBag` warn, errs) }
-
-addLongErrAt :: SrcSpan -> Message -> Message -> TcRn ()
-addLongErrAt loc msg extra
-  = do { traceTc "Adding error:" (mkLocMessage loc (msg $$ extra)) ;
-         errs_var <- getErrsVar ;
-         rdr_env <- getGlobalRdrEnv ;
-         dflags <- getDOpts ;
-         let { err = mkLongErrMsg loc (mkPrintUnqualified dflags rdr_env) msg extra } ;
          (warns, errs) <- readTcRef errs_var ;
          writeTcRef errs_var (warns, errs `snocBag` err) }
 
+reportWarning :: ErrMsg -> TcRn ()
+reportWarning warn
+  = do { errs_var <- getErrsVar ;
+         (warns, errs) <- readTcRef errs_var ;
+         writeTcRef errs_var (warns `snocBag` warn, errs) }
+
 dumpDerivingInfo :: SDoc -> TcM ()
 dumpDerivingInfo doc
-  = do { dflags <- getDOpts
+  = do { dflags <- getDynFlags
        ; when (dopt Opt_D_dump_deriv dflags) $ do
        { rdr_env <- getGlobalRdrEnv
        ; let unqual = mkPrintUnqualified dflags rdr_env
@@ -721,7 +730,7 @@ tryTcErrs :: TcRn a -> TcRn (Messages, Maybe a)
 -- there might be warnings
 tryTcErrs thing
   = do  { (msgs, res) <- tryTc thing
-        ; dflags <- getDOpts
+        ; dflags <- getDynFlags
         ; let errs_found = errorsFound dflags msgs
         ; return (msgs, case res of
                           Nothing -> Nothing
@@ -771,13 +780,13 @@ checkNoErrs main
         }
 
 ifErrsM :: TcRn r -> TcRn r -> TcRn r
---      ifErrsM bale_out main
+--      ifErrsM bale_out normal
 -- does 'bale_out' if there are errors in errors collection
--- otherwise does 'main'
+-- otherwise does 'normal'
 ifErrsM bale_out normal
  = do { errs_var <- getErrsVar ;
         msgs <- readTcRef errs_var ;
-        dflags <- getDOpts ;
+        dflags <- getDynFlags ;
         if errorsFound dflags msgs then
            bale_out
         else
@@ -802,13 +811,13 @@ getErrCtxt = do { env <- getLclEnv; return (tcl_ctxt env) }
 setErrCtxt :: [ErrCtxt] -> TcM a -> TcM a
 setErrCtxt ctxt = updLclEnv (\ env -> env { tcl_ctxt = ctxt })
 
-addErrCtxt :: Message -> TcM a -> TcM a
+addErrCtxt :: MsgDoc -> TcM a -> TcM a
 addErrCtxt msg = addErrCtxtM (\env -> return (env, msg))
 
-addErrCtxtM :: (TidyEnv -> TcM (TidyEnv, Message)) -> TcM a -> TcM a
+addErrCtxtM :: (TidyEnv -> TcM (TidyEnv, MsgDoc)) -> TcM a -> TcM a
 addErrCtxtM ctxt = updCtxt (\ ctxts -> (False, ctxt) : ctxts)
 
-addLandmarkErrCtxt :: Message -> TcM a -> TcM a
+addLandmarkErrCtxt :: MsgDoc -> TcM a -> TcM a
 addLandmarkErrCtxt msg = updCtxt (\ctxts -> (True, \env -> return (env,msg)) : ctxts)
 
 -- Helper function for the above
@@ -840,32 +849,40 @@ setCtLoc (CtLoc _ src_loc ctxt) thing_inside
     tidy up the message; we then use it to tidy the context messages
 
 \begin{code}
-addErrTc :: Message -> TcM ()
+addErrTc :: MsgDoc -> TcM ()
 addErrTc err_msg = do { env0 <- tcInitTidyEnv
                       ; addErrTcM (env0, err_msg) }
 
-addErrsTc :: [Message] -> TcM ()
+addErrsTc :: [MsgDoc] -> TcM ()
 addErrsTc err_msgs = mapM_ addErrTc err_msgs
 
-addErrTcM :: (TidyEnv, Message) -> TcM ()
+addErrTcM :: (TidyEnv, MsgDoc) -> TcM ()
 addErrTcM (tidy_env, err_msg)
   = do { ctxt <- getErrCtxt ;
          loc  <- getSrcSpanM ;
          add_err_tcm tidy_env err_msg loc ctxt }
+
+-- Return the error message, instead of reporting it straight away
+mkErrTcM :: (TidyEnv, MsgDoc) -> TcM ErrMsg
+mkErrTcM (tidy_env, err_msg)
+  = do { ctxt <- getErrCtxt ;
+         loc  <- getSrcSpanM ;
+         err_info <- mkErrInfo tidy_env ctxt ;
+         mkLongErrAt loc err_msg err_info }
 \end{code}
 
 The failWith functions add an error message and cause failure
 
 \begin{code}
-failWithTc :: Message -> TcM a               -- Add an error message and fail
+failWithTc :: MsgDoc -> TcM a               -- Add an error message and fail
 failWithTc err_msg
   = addErrTc err_msg >> failM
 
-failWithTcM :: (TidyEnv, Message) -> TcM a   -- Add an error message and fail
+failWithTcM :: (TidyEnv, MsgDoc) -> TcM a   -- Add an error message and fail
 failWithTcM local_and_msg
   = addErrTcM local_and_msg >> failM
 
-checkTc :: Bool -> Message -> TcM ()         -- Check that the boolean is true
+checkTc :: Bool -> MsgDoc -> TcM ()         -- Check that the boolean is true
 checkTc True  _   = return ()
 checkTc False err = failWithTc err
 \end{code}
@@ -873,51 +890,51 @@ checkTc False err = failWithTc err
         Warnings have no 'M' variant, nor failure
 
 \begin{code}
-addWarnTc :: Message -> TcM ()
-addWarnTc msg = do { env0 <- tcInitTidyEnv
-                   ; addWarnTcM (env0, msg) }
-
-addWarnTcM :: (TidyEnv, Message) -> TcM ()
-addWarnTcM (env0, msg)
- = do { ctxt <- getErrCtxt ;
-        err_info <- mkErrInfo env0 ctxt ;
-        addReport (ptext (sLit "Warning:") <+> msg) err_info }
-
-warnTc :: Bool -> Message -> TcM ()
+warnTc :: Bool -> MsgDoc -> TcM ()
 warnTc warn_if_true warn_msg
   | warn_if_true = addWarnTc warn_msg
   | otherwise    = return ()
-\end{code}
 
------------------------------------
-         Tidying
+addWarnTc :: MsgDoc -> TcM ()
+addWarnTc msg = do { env0 <- tcInitTidyEnv
+                   ; addWarnTcM (env0, msg) }
 
-We initialise the "tidy-env", used for tidying types before printing,
-by building a reverse map from the in-scope type variables to the
-OccName that the programmer originally used for them
+addWarnTcM :: (TidyEnv, MsgDoc) -> TcM ()
+addWarnTcM (env0, msg)
+ = do { ctxt <- getErrCtxt ;
+        err_info <- mkErrInfo env0 ctxt ;
+        add_warn msg err_info }
 
-\begin{code}
+addWarn :: MsgDoc -> TcRn ()
+addWarn msg = add_warn msg empty
+
+addWarnAt :: SrcSpan -> MsgDoc -> TcRn ()
+addWarnAt loc msg = add_warn_at loc msg empty
+
+add_warn :: MsgDoc -> MsgDoc -> TcRn ()
+add_warn msg extra_info 
+  = do { loc <- getSrcSpanM
+       ; add_warn_at loc msg extra_info }
+
+add_warn_at :: SrcSpan -> MsgDoc -> MsgDoc -> TcRn ()
+add_warn_at loc msg extra_info
+  = do { rdr_env <- getGlobalRdrEnv ;
+         dflags <- getDynFlags ;
+         let { warn = mkLongWarnMsg dflags loc (mkPrintUnqualified dflags rdr_env)
+                                    msg extra_info } ;
+         reportWarning warn }
+
 tcInitTidyEnv :: TcM TidyEnv
 tcInitTidyEnv
   = do  { lcl_env <- getLclEnv
-        ; let nm_tv_prs = [ (name, tcGetTyVar "tcInitTidyEnv" ty)
-                          | ATyVar name ty <- nameEnvElts (tcl_env lcl_env)
-                          , tcIsTyVarTy ty ]
-        ; return (foldl add emptyTidyEnv nm_tv_prs) }
-  where
-    add (env,subst) (name, tyvar)
-        = case tidyOccName env (nameOccName name) of
-            (env', occ') ->  (env', extendVarEnv subst tyvar tyvar')
-                where
-                  tyvar' = setTyVarName tyvar name'
-                  name'  = tidyNameOcc name occ'
+        ; return (tcl_tidy lcl_env) }
 \end{code}
 
 -----------------------------------
         Other helper functions
 
 \begin{code}
-add_err_tcm :: TidyEnv -> Message -> SrcSpan
+add_err_tcm :: TidyEnv -> MsgDoc -> SrcSpan
             -> [ErrCtxt]
             -> TcM ()
 add_err_tcm tidy_env err_msg loc ctxt
@@ -927,8 +944,8 @@ add_err_tcm tidy_env err_msg loc ctxt
 mkErrInfo :: TidyEnv -> [ErrCtxt] -> TcM SDoc
 -- Tidy the error info, trimming excessive contexts
 mkErrInfo env ctxts
- | opt_PprStyle_Debug     -- In -dppr-debug style the output
- = return empty           -- just becomes too voluminous
+--  | opt_PprStyle_Debug     -- In -dppr-debug style the output
+--  = return empty           -- just becomes too voluminous
  | otherwise
  = go 0 env ctxts
  where
@@ -974,6 +991,11 @@ addTcEvBind (EvBindsVar ev_ref _) var t
   = do { bnds <- readTcRef ev_ref
        ; writeTcRef ev_ref (extendEvBinds bnds var t) }
 
+getTcEvBinds :: EvBindsVar -> TcM (Bag EvBind)
+getTcEvBinds (EvBindsVar ev_ref _) 
+  = do { bnds <- readTcRef ev_ref
+       ; return (evBindMapBinds bnds) }
+
 chooseUniqueOccTc :: (OccSet -> OccName) -> TcM OccName
 chooseUniqueOccTc fn =
   do { env <- getGblEnv
@@ -994,25 +1016,16 @@ emitConstraints ct
   = do { lie_var <- getConstraintVar ;
          updTcRef lie_var (`andWC` ct) }
 
-emitFlat :: WantedEvVar -> TcM ()
+emitFlat :: Ct -> TcM ()
 emitFlat ct
   = do { lie_var <- getConstraintVar ;
          updTcRef lie_var (`addFlats` unitBag ct) }
 
-emitFlats :: Bag WantedEvVar -> TcM ()
-emitFlats ct
+emitFlats :: Cts -> TcM ()
+emitFlats cts
   = do { lie_var <- getConstraintVar ;
-         updTcRef lie_var (`addFlats` ct) }
-
-emitWantedCts :: Cts -> TcM () 
--- Precondition: all wanted
-emitWantedCts = mapBagM_ emit_wanted_ct
-  where emit_wanted_ct ct 
-          | v <- cc_id ct 
-          , Wanted loc <- cc_flavor ct 
-          = emitFlat (EvVarX v loc)
-          | otherwise = panic "emitWantedCts: can't emit non-wanted!"
-
+         updTcRef lie_var (`addFlats` cts) }
+    
 emitImplication :: Implication -> TcM ()
 emitImplication ct
   = do { lie_var <- getConstraintVar ;
@@ -1042,8 +1055,13 @@ captureUntouchables thing_inside
        ; return (res, TouchableRange low_meta high_meta) }
 
 isUntouchable :: TcTyVar -> TcM Bool
-isUntouchable tv = do { env <- getLclEnv
-                      ; return (varUnique tv < tcl_untch env) }
+isUntouchable tv
+    -- Kind variables are always touchable
+  | isSuperKind (tyVarKind tv) 
+  = return False
+  | otherwise 
+  = do { env <- getLclEnv
+       ; return (varUnique tv < tcl_untch env) }
 
 getLclTypeEnv :: TcM TcTypeEnv
 getLclTypeEnv = do { env <- getLclEnv; return (tcl_env env) }
@@ -1198,14 +1216,15 @@ getIfModule :: IfL Module
 getIfModule = do { env <- getLclEnv; return (if_mod env) }
 
 --------------------
-failIfM :: Message -> IfL a
+failIfM :: MsgDoc -> IfL a
 -- The Iface monad doesn't have a place to accumulate errors, so we
 -- just fall over fast if one happens; it "shouldnt happen".
 -- We use IfL here so that we can get context info out of the local env
 failIfM msg
   = do  { env <- getLclEnv
         ; let full_msg = (if_loc env <> colon) $$ nest 2 msg
-        ; liftIO (printErrs full_msg defaultErrStyle)
+        ; dflags <- getDynFlags
+        ; liftIO (log_action dflags dflags SevFatal noSrcSpan (defaultErrStyle dflags) full_msg)
         ; failM }
 
 --------------------
@@ -1232,15 +1251,15 @@ forkM_maybe doc thing_inside
                     -- Bleat about errors in the forked thread, if -ddump-if-trace is on
                     -- Otherwise we silently discard errors. Errors can legitimately
                     -- happen when compiling interface signatures (see tcInterfaceSigs)
-                      ifDOptM Opt_D_dump_if_trace
-                             (print_errs (hang (text "forkM failed:" <+> doc)
-                                             2 (text (show exn))))
+                      ifDOptM Opt_D_dump_if_trace $ do
+                          dflags <- getDynFlags
+                          let msg = hang (text "forkM failed:" <+> doc)
+                                       2 (text (show exn))
+                          liftIO $ log_action dflags dflags SevFatal noSrcSpan (defaultErrStyle dflags) msg
 
                     ; traceIf (text "} ending fork (badly)" <+> doc)
                     ; return Nothing }
         }}
-  where
-    print_errs sdoc = liftIO (printErrs sdoc defaultErrStyle)
 
 forkM :: SDoc -> IfL a -> IfL a
 forkM doc thing_inside

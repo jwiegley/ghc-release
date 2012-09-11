@@ -1,7 +1,20 @@
-# This Makefile runs the tests using GHC's testsuite framework.  It
-# assumes the package is part of a GHC build tree with the testsuite
-# installed in ../../../testsuite.
+# The tests should be compiled and run using cabal:
+# > cabal configure --enable-tests
+# > cabal build
+# > cabal test
+#
+# This Makefile is used by developers to compile the tests manually.
 
-TOP=../../../testsuite
-include $(TOP)/mk/boilerplate.mk
-include $(TOP)/mk/test.mk
+all:
+
+%-properties: %-properties.hs force
+	ghc -O2 -DTESTING $< -i.. -o $@ -outputdir tmp
+
+%-strict-properties: %-properties.hs force
+	ghc -O2 -DTESTING -DSTRICT $< -o $@ -i.. -outputdir tmp
+
+.PHONY: force clean
+force:
+
+clean:
+	rm -rf tmp $(patsubst %.hs, %, $(wildcard *-properties.hs)) $(patsubst %-properties.hs, %-strict-properties, $(wildcard *-properties.hs))

@@ -1,6 +1,7 @@
 \begin{code}
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, MagicHash, UnboxedTuples #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, MagicHash, UnboxedTuples, BangPatterns #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# OPTIONS_HADDOCK hide #-}
 -----------------------------------------------------------------------------
 -- |
@@ -91,7 +92,7 @@ their greatest common divisor.
 \begin{code}
 reduce ::  (Integral a) => a -> a -> Ratio a
 {-# SPECIALISE reduce :: Integer -> Integer -> Rational #-}
-reduce _ 0              =  error "Ratio.%: zero denominator"
+reduce _ 0              =  ratioZeroDenominatorError
 reduce x y              =  (x `quot` d) :% (y `quot` d)
                            where d = gcd x y
 \end{code}
@@ -292,6 +293,64 @@ instance  Integral Int  where
 
 %*********************************************************
 %*                                                      *
+\subsection{Instances for @Word@}
+%*                                                      *
+%*********************************************************
+
+\begin{code}
+instance Real Word where
+    toRational x = toInteger x % 1
+
+instance Integral Word where
+    quot    (W# x#) y@(W# y#)
+        | y /= 0                = W# (x# `quotWord#` y#)
+        | otherwise             = divZeroError
+    rem     (W# x#) y@(W# y#)
+        | y /= 0                = W# (x# `remWord#` y#)
+        | otherwise             = divZeroError
+    div     (W# x#) y@(W# y#)
+        | y /= 0                = W# (x# `quotWord#` y#)
+        | otherwise             = divZeroError
+    mod     (W# x#) y@(W# y#)
+        | y /= 0                = W# (x# `remWord#` y#)
+        | otherwise             = divZeroError
+    quotRem (W# x#) y@(W# y#)
+        | y /= 0                = case x# `quotRemWord#` y# of
+                                  (# q, r #) ->
+                                      (W# q, W# r)
+        | otherwise             = divZeroError
+    divMod  (W# x#) y@(W# y#)
+        | y /= 0                = (W# (x# `quotWord#` y#), W# (x# `remWord#` y#))
+        | otherwise             = divZeroError
+    toInteger (W# x#)
+        | i# >=# 0#             = smallInteger i#
+        | otherwise             = wordToInteger x#
+        where
+        !i# = word2Int# x#
+
+instance Enum Word where
+    succ x
+        | x /= maxBound = x + 1
+        | otherwise     = succError "Word"
+    pred x
+        | x /= minBound = x - 1
+        | otherwise     = predError "Word"
+    toEnum i@(I# i#)
+        | i >= 0        = W# (int2Word# i#)
+        | otherwise     = toEnumError "Word" i (minBound::Word, maxBound::Word)
+    fromEnum x@(W# x#)
+        | x <= fromIntegral (maxBound::Int)
+                        = I# (word2Int# x#)
+        | otherwise     = fromEnumError "Word" x
+    enumFrom            = integralEnumFrom
+    enumFromThen        = integralEnumFromThen
+    enumFromTo          = integralEnumFromTo
+    enumFromThenTo      = integralEnumFromThenTo
+\end{code}
+
+
+%*********************************************************
+%*                                                      *
 \subsection{Instances for @Integer@}
 %*                                                      *
 %*********************************************************
@@ -308,6 +367,12 @@ instance  Integral Integer where
 
     _ `rem` 0 = divZeroError
     n `rem`  d = n `remInteger`  d
+
+    _ `div` 0 = divZeroError
+    n `div` d = n `divInteger` d
+
+    _ `mod` 0 = divZeroError
+    n `mod`  d = n `modInteger`  d
 
     _ `divMod` 0 = divZeroError
     a `divMod` b = case a `divModInteger` b of
@@ -347,7 +412,7 @@ instance  (Integral a)  => Num (Ratio a)  where
 instance  (Integral a)  => Fractional (Ratio a)  where
     {-# SPECIALIZE instance Fractional Rational #-}
     (x:%y) / (x':%y')   =  (x*y') % (y*x')
-    recip (0:%_)        = error "Ratio.%: zero denominator"
+    recip (0:%_)        = ratioZeroDenominatorError
     recip (x:%y)
         | x < 0         = negate y :% negate x
         | otherwise     = y :% x
@@ -401,6 +466,12 @@ fromIntegral = fromInteger . toInteger
 
 {-# RULES
 "fromIntegral/Int->Int" fromIntegral = id :: Int -> Int
+    #-}
+
+{-# RULES
+"fromIntegral/Int->Word"  fromIntegral = \(I# x#) -> W# (int2Word# x#)
+"fromIntegral/Word->Int"  fromIntegral = \(W# x#) -> I# (word2Int# x#)
+"fromIntegral/Word->Word" fromIntegral = id :: Word -> Word
     #-}
 
 -- | general coercion to fractional types
@@ -557,7 +628,7 @@ x ^^ n          =  if n >= 0 then x^n else recip (x^(negate n))
     | e > 0     = (n ^ e) :% (d ^ e)
     | e == 0    = 1 :% 1
     | n > 0     = (d ^ (negate e)) :% (n ^ (negate e))
-    | n == 0    = error "Ratio.%: zero denominator"
+    | n == 0    = ratioZeroDenominatorError
     | otherwise = let nn = d ^ (negate e)
                       dd = (negate n) ^ (negate e)
                   in if even e then (nn :% dd) else (negate nn :% dd)

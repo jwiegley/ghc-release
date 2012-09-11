@@ -6,12 +6,13 @@
 
 -- |
 -- Module      : Data.ByteString.Lazy.Char8
--- Copyright   : (c) Don Stewart 2006
+-- Copyright   : (c) Don Stewart 2006-2008
+--               (c) Duncan Coutts 2006-2011
 -- License     : BSD-style
 --
--- Maintainer  : dons@cse.unsw.edu.au
--- Stability   : experimental
--- Portability : non-portable (imports Data.ByteString.Lazy)
+-- Maintainer  : dons00@gmail.com, duncan@community.haskell.org
+-- Stability   : stable
+-- Portability : portable
 --
 -- Manipulate /lazy/ 'ByteString's using 'Char' operations. All Chars will
 -- be truncated to 8 bits. It can be expected that these functions will
@@ -22,6 +23,11 @@
 -- clashes with "Prelude" functions.  eg.
 --
 -- > import qualified Data.ByteString.Lazy.Char8 as C
+--
+-- The Char8 interface to bytestrings provides an instance of IsString
+-- for the ByteString type, enabling you to use string literals, and
+-- have them implicitly packed to ByteStrings.
+-- Use @{-\# LANGUAGE OverloadedStrings \#-}@ to enable this.
 --
 
 module Data.ByteString.Lazy.Char8 (
@@ -36,6 +42,8 @@ module Data.ByteString.Lazy.Char8 (
         unpack,                 -- :: ByteString -> String
         fromChunks,             -- :: [Strict.ByteString] -> ByteString
         toChunks,               -- :: ByteString -> [Strict.ByteString]
+        fromStrict,             -- :: Strict.ByteString -> ByteString
+        toStrict,               -- :: ByteString -> Strict.ByteString
 
         -- * Basic interface
         cons,                   -- :: Char -> ByteString -> ByteString
@@ -183,7 +191,7 @@ module Data.ByteString.Lazy.Char8 (
 
 -- Functions transparently exported
 import Data.ByteString.Lazy 
-        (fromChunks, toChunks
+        (fromChunks, toChunks, fromStrict, toStrict
         ,empty,null,length,tail,init,append,reverse,transpose,cycle
         ,concat,take,drop,splitAt,intercalate,isPrefixOf,group,inits,tails,copy
         ,hGetContents, hGet, hPut, getContents
@@ -216,10 +224,6 @@ import Control.Exception    (bracket)
 import IO                   (bracket)
 #endif
 
-#if __GLASGOW_HASKELL__ >= 608
-import Data.String          (IsString(..))
-#endif
-
 #define STRICT1(f) f a | a `seq` False = undefined
 #define STRICT2(f) f a b | a `seq` b `seq` False = undefined
 #define STRICT3(f) f a b c | a `seq` b `seq` c `seq` False = undefined
@@ -234,20 +238,16 @@ singleton :: Char -> ByteString
 singleton = L.singleton . c2w
 {-# INLINE singleton #-}
 
-#if __GLASGOW_HASKELL__ >= 608
-instance IsString ByteString where
-    fromString = pack
-    {-# INLINE fromString #-}
-#endif
-
 -- | /O(n)/ Convert a 'String' into a 'ByteString'. 
 pack :: [Char] -> ByteString
-pack = L.pack. List.map c2w
+pack = packChars
 
 -- | /O(n)/ Converts a 'ByteString' to a 'String'.
 unpack :: ByteString -> [Char]
-unpack = List.map w2c . L.unpack
-{-# INLINE unpack #-}
+unpack = unpackChars
+
+infixr 5 `cons`, `cons'` --same as list (:)
+infixl 5 `snoc`
 
 -- | /O(1)/ 'cons' is analogous to '(:)' for lists.
 cons :: Char -> ByteString -> ByteString

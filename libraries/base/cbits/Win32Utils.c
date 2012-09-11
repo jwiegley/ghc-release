@@ -110,17 +110,27 @@ void maperrno (void)
 			errno = EINVAL;
 }
 
-HsWord64 getUSecOfDay(void)
+int get_unique_file_info(int fd, HsWord64 *dev, HsWord64 *ino)
 {
-    HsWord64 t;
-    FILETIME ft;
-    GetSystemTimeAsFileTime(&ft);
-    t = ((HsWord64)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
-    t = t / 10LL;
-    /* FILETIMES are in units of 100ns,
-       so we divide by 10 to get microseconds */
-    return t;
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    BY_HANDLE_FILE_INFORMATION info;
+
+    if (GetFileInformationByHandle(h, &info))
+    {
+        *dev = info.dwVolumeSerialNumber;
+        *ino = info.nFileIndexLow
+             | ((HsWord64)info.nFileIndexHigh << 32);
+
+        return 0;
+    }
+
+    return -1;
+}
+
+BOOL file_exists(LPCTSTR path)
+{
+    DWORD r = GetFileAttributes(path);
+    return r != INVALID_FILE_ATTRIBUTES;
 }
 
 #endif
-

@@ -19,21 +19,29 @@ import Control.Monad
 import System.Console.Haskeline.Key
 import System.Console.Haskeline.Monads
 import System.Console.Haskeline.LineState
-import System.Console.Haskeline.Term as Term
+import System.Console.Haskeline.Term
 import System.Console.Haskeline.Backend.WCWidth
 
 import Data.ByteString.Internal (createAndTrim)
 import qualified Data.ByteString as B
 
+##if defined(i386_HOST_ARCH)
+## define WINDOWS_CCONV stdcall
+##elif defined(x86_64_HOST_ARCH)
+## define WINDOWS_CCONV ccall
+##else
+## error Unknown mingw32 arch
+##endif
+
 #include "win_console.h"
 
-foreign import stdcall "windows.h ReadConsoleInputW" c_ReadConsoleInput
+foreign import WINDOWS_CCONV "windows.h ReadConsoleInputW" c_ReadConsoleInput
     :: HANDLE -> Ptr () -> DWORD -> Ptr DWORD -> IO Bool
     
-foreign import stdcall "windows.h WaitForSingleObject" c_WaitForSingleObject
+foreign import WINDOWS_CCONV "windows.h WaitForSingleObject" c_WaitForSingleObject
     :: HANDLE -> DWORD -> IO DWORD
 
-foreign import stdcall "windows.h GetNumberOfConsoleInputEvents"
+foreign import WINDOWS_CCONV "windows.h GetNumberOfConsoleInputEvents"
     c_GetNumberOfConsoleInputEvents :: HANDLE -> Ptr DWORD -> IO Bool
 
 getNumberOfEvents :: HANDLE -> IO Int
@@ -171,14 +179,14 @@ instance Storable Coord where
         (#poke COORD, Y) p (toEnum (coordY c) :: CShort)
                 
                             
-foreign import ccall "SetPosition"
+foreign import ccall "haskeline_SetPosition"
     c_SetPosition :: HANDLE -> Ptr Coord -> IO Bool
     
 setPosition :: HANDLE -> Coord -> IO ()
 setPosition h c = with c $ failIfFalse_ "SetConsoleCursorPosition" 
                     . c_SetPosition h
                     
-foreign import stdcall "windows.h GetConsoleScreenBufferInfo"
+foreign import WINDOWS_CCONV "windows.h GetConsoleScreenBufferInfo"
     c_GetScreenBufferInfo :: HANDLE -> Ptr () -> IO Bool
     
 getPosition :: HANDLE -> IO Coord
@@ -197,20 +205,28 @@ getBufferSize = withScreenBufferInfo $ \p -> do
     c <- (#peek CONSOLE_SCREEN_BUFFER_INFO, dwSize) p
     return Layout {width = coordX c, height = coordY c}
 
-foreign import stdcall "windows.h WriteConsoleW" c_WriteConsoleW
+foreign import WINDOWS_CCONV "windows.h WriteConsoleW" c_WriteConsoleW
     :: HANDLE -> Ptr TCHAR -> DWORD -> Ptr DWORD -> Ptr () -> IO Bool
 
 writeConsole :: HANDLE -> String -> IO ()
 -- For some reason, Wine returns False when WriteConsoleW is called on an empty
 -- string.  Easiest fix: just don't call that function.
 writeConsole _ "" = return ()
-writeConsole h str = withArray tstr $ \t_arr -> alloca $ \numWritten -> do
-    failIfFalse_ "WriteConsole" 
-        $ c_WriteConsoleW h t_arr (toEnum $ length str) numWritten nullPtr
+writeConsole h str = writeConsole' >> writeConsole h ys
   where
-    tstr = map (toEnum . fromEnum) str
-
-foreign import stdcall "windows.h MessageBeep" c_messageBeep :: UINT -> IO Bool
+    (xs,ys) = splitAt limit str
+    -- WriteConsoleW has a buffer limit which is documented as 32768 word8's,
+    -- but bug reports from online suggest that the limit may be lower (~25000).
+    -- To be safe, we pick a round number we know to be less than the limit.
+    limit = 20000 -- known to be less than WriteConsoleW's buffer limit
+    writeConsole'
+        = withArray (map (toEnum . fromEnum) xs)
+            $ \t_arr -> alloca $ \numWritten -> do
+                    failIfFalse_ "WriteConsoleW"
+                        $ c_WriteConsoleW h t_arr (toEnum $ length xs)
+                                numWritten nullPtr
+                        
+foreign import WINDOWS_CCONV "windows.h MessageBeep" c_messageBeep :: UINT -> IO Bool
 
 messageBeep :: IO ()
 messageBeep = c_messageBeep (-1) >> return ()-- intentionally ignore failures.
@@ -218,10 +234,10 @@ messageBeep = c_messageBeep (-1) >> return ()-- intentionally ignore failures.
 
 ----------
 -- Console mode
-foreign import stdcall "windows.h GetConsoleMode" c_GetConsoleMode
+foreign import WINDOWS_CCONV "windows.h GetConsoleMode" c_GetConsoleMode
     :: HANDLE -> Ptr DWORD -> IO Bool
 
-foreign import stdcall "windows.h SetConsoleMode" c_SetConsoleMode
+foreign import WINDOWS_CCONV "windows.h SetConsoleMode" c_SetConsoleMode
     :: HANDLE -> DWORD -> IO Bool
 
 withWindowMode :: MonadException m => Handles -> m a -> m a
@@ -246,7 +262,7 @@ closeHandles hs = closeHandle (hIn hs) >> closeHandle (hOut hs)
 newtype Draw m a = Draw {runDraw :: ReaderT Handles m a}
     deriving (Monad,MonadIO,MonadException, MonadReader Handles)
 
-type DrawM a = (MonadIO m, MonadReader Layout m) => Draw m ()
+type DrawM a = (MonadIO m, MonadReader Layout m) => Draw m a
 
 instance MonadTrans Draw where
     lift = Draw . lift
@@ -254,21 +270,31 @@ instance MonadTrans Draw where
 getPos :: MonadIO m => Draw m Coord
 getPos = asks hOut >>= liftIO . getPosition
     
-setPos :: MonadIO m => Coord -> Draw m ()
+setPos :: Coord -> DrawM ()
 setPos c = do
     h <- asks hOut
-    liftIO (setPosition h c)
+    -- SetPosition will fail if you give it something out of bounds of
+    -- the window buffer (i.e., the input line doesn't fit in the window).
+    -- So we do a simple guard against that uncommon case.
+    -- However, we don't throw away the x coord since it produces sensible
+    -- results for some cases.
+    maxY <- liftM (subtract 1) $ asks height
+    liftIO $ setPosition h c { coordY = max 0 $ min maxY $ coordY c }
 
 printText :: MonadIO m => String -> Draw m ()
 printText txt = do
     h <- asks hOut
     liftIO (writeConsole h txt)
     
-printAfter :: String -> DrawM ()
-printAfter str = do
-    p <- getPos
-    printText str
-    setPos p
+printAfter :: [Grapheme] -> DrawM ()
+printAfter gs = do
+    -- NOTE: you may be tempted to write
+    -- do {p <- getPos; printText (...); setPos p}
+    -- Unfortunately, that would be WRONG, because if printText wraps
+    -- a line at the bottom of the window, causing the window to scroll,
+    -- then the old value of p will be incorrect.
+    printText (graphemesToString gs)
+    movePosLeft gs
     
 drawLineDiffWin :: LineChars -> LineChars -> DrawM ()
 drawLineDiffWin (xs1,ys1) (xs2,ys2) = case matchInit xs1 xs2 of
@@ -278,9 +304,9 @@ drawLineDiffWin (xs1,ys1) (xs2,ys2) = case matchInit xs1 xs2 of
     (xs1',xs2')                         -> do
         movePosLeft xs1'
         let m = gsWidth xs1' + gsWidth ys1 - (gsWidth xs2' + gsWidth ys2)
-        let deadText = replicate m ' '
+        let deadText = stringToGraphemes $ replicate m ' '
         printText (graphemesToString xs2')
-        printAfter (graphemesToString ys2 ++ deadText)
+        printAfter (ys2 ++ deadText)
 
 movePosRight, movePosLeft :: [Grapheme] -> DrawM ()
 movePosRight str = do
@@ -332,11 +358,7 @@ instance (MonadException m, MonadReader Layout m) => Term (Draw m) where
     printLines [] = return ()
     printLines ls = printText $ intercalate crlf ls ++ crlf
     
-    clearLayout = do
-        lay <- ask
-        setPos (Coord 0 0)
-        printText (replicate (width lay * height lay) ' ')
-        setPos (Coord 0 0)
+    clearLayout = clearScreen
     
     moveToNextLine s = do
         movePosRight (snd s)
@@ -361,8 +383,8 @@ win32Term = do
                                 , withGetEvent = withWindowMode hs
                                                     . win32WithEvent hs ch
                                 , saveUnusedKeys = saveKeys ch
-                                , runTerm = \(RunTermType f) ->
-                                        runReaderT' hs $ runDraw f
+                                , evalTerm = EvalTerm (runReaderT' hs . runDraw)
+                                                    (Draw . lift)
                                 },
                             closeTerm = closeHandles hs
                         }
@@ -379,16 +401,15 @@ fileRunTerm h_in = do
     return RunTerm {
                     closeTerm = return (),
                     putStrOut = putter,
-                    encodeForTerm = unicodeToCodePage cp,
-                    decodeForTerm = codePageToUnicode cp,
                     wrapInterrupt = withCtrlCHandler,
-                    termOps = Right FileOps {
-                                inputHandle = h_in,
-                                getLocaleChar = getMultiByteChar cp h_in,
-                                maybeReadNewline = hMaybeReadNewline h_in,
-                                getLocaleLine = Term.hGetLine h_in
+                    termOps = Right FileOps
+                                { inputHandle = h_in
+                                , wrapFileInput = hWithBinaryMode h_in
+                                , getLocaleChar = getMultiByteChar cp h_in
+                                , maybeReadNewline = hMaybeReadNewline h_in
+                                , getLocaleLine = hGetLocaleLine h_in
                                             >>= liftIO . codePageToUnicode cp
-                            }
+                                }
 
                     }
 
@@ -404,7 +425,6 @@ putOut = do
         else do
             cp <- getCodePage
             return $ \str -> unicodeToCodePage cp str >>= B.putStr >> hFlush stdout
-
 
 
 type Handler = DWORD -> IO BOOL
@@ -432,10 +452,11 @@ withCtrlCHandler f = bracket (liftIO $ do
     handler _ _ = return False
 
 
+
 ------------------------
 -- Multi-byte conversion
 
-foreign import stdcall "WideCharToMultiByte" wideCharToMultiByte
+foreign import WINDOWS_CCONV "WideCharToMultiByte" wideCharToMultiByte
         :: CodePage -> DWORD -> LPCWSTR -> CInt -> LPCSTR -> CInt
                 -> LPCSTR -> LPBOOL -> IO CInt
 
@@ -449,7 +470,7 @@ unicodeToCodePage cp wideStr = withCWStringLen wideStr $ \(wideBuff, wideLen) ->
         fmap fromEnum $ wideCharToMultiByte cp 0 wideBuff (toEnum wideLen)
                     (castPtr outBuff) outSize nullPtr nullPtr
 
-foreign import stdcall "MultiByteToWideChar" multiByteToWideChar
+foreign import WINDOWS_CCONV "MultiByteToWideChar" multiByteToWideChar
         :: CodePage -> DWORD -> LPCSTR -> CInt -> LPWSTR -> CInt -> IO CInt
 
 codePageToUnicode :: CodePage -> B.ByteString -> IO String
@@ -469,18 +490,56 @@ getCodePage = do
         then return conCP
         else getACP
 
-foreign import stdcall "IsDBCSLeadByteEx" c_IsDBCSLeadByteEx
+foreign import WINDOWS_CCONV "IsDBCSLeadByteEx" c_IsDBCSLeadByteEx
         :: CodePage -> BYTE -> BOOL
 
 getMultiByteChar :: CodePage -> Handle -> MaybeT IO Char
-getMultiByteChar cp h = hWithBinaryMode h loop
-  where
-    loop = do
+getMultiByteChar cp h = do
         b1 <- hGetByte h
         bs <- if c_IsDBCSLeadByteEx cp b1
                 then hGetByte h >>= \b2 -> return [b1,b2]
                 else return [b1]
         cs <- liftIO $ codePageToUnicode cp (B.pack bs)
         case cs of
-            [] -> loop
+            [] -> getMultiByteChar cp h
             (c:_) -> return c
+
+----------------------------------
+-- Clearing screen
+-- WriteConsole has a limit of ~20,000-30000 characters, which is
+-- less than a 200x200 window, for example.
+-- So we'll use other Win32 functions to clear the screen.
+
+getAttribute :: HANDLE -> IO WORD
+getAttribute = withScreenBufferInfo $
+    (#peek CONSOLE_SCREEN_BUFFER_INFO, wAttributes)
+
+fillConsoleChar :: HANDLE -> Char -> Int -> Coord -> IO ()
+fillConsoleChar h c n start = with start $ \startPtr -> alloca $ \numWritten -> do
+    failIfFalse_ "FillConsoleOutputCharacter"
+        $ c_FillConsoleCharacter h (toEnum $ fromEnum c)
+            (toEnum n) startPtr numWritten
+
+foreign import ccall "haskeline_FillConsoleCharacter" c_FillConsoleCharacter 
+    :: HANDLE -> TCHAR -> DWORD -> Ptr Coord -> Ptr DWORD -> IO BOOL
+
+fillConsoleAttribute :: HANDLE -> WORD -> Int -> Coord -> IO ()
+fillConsoleAttribute h a n start = with start $ \startPtr -> alloca $ \numWritten -> do
+    failIfFalse_ "FillConsoleOutputAttribute"
+        $ c_FillConsoleAttribute h a
+            (toEnum n) startPtr numWritten
+            
+foreign import ccall "haskeline_FillConsoleAttribute" c_FillConsoleAttribute
+    :: HANDLE -> WORD -> DWORD -> Ptr Coord -> Ptr DWORD -> IO BOOL
+
+clearScreen :: DrawM ()
+clearScreen = do
+    lay <- ask
+    h <- asks hOut
+    let windowSize = width lay * height lay
+    let origin = Coord 0 0
+    attr <- liftIO $ getAttribute h
+    liftIO $ fillConsoleChar h ' ' windowSize origin
+    liftIO $ fillConsoleAttribute h attr windowSize origin
+    setPos origin
+

@@ -23,17 +23,17 @@ module System.Directory
     -- $intro
 
     -- * Actions on directories
-      createDirectory           -- :: FilePath -> IO ()
+      createDirectory
 #ifndef __NHC__
-    , createDirectoryIfMissing  -- :: Bool -> FilePath -> IO ()
+    , createDirectoryIfMissing
 #endif
-    , removeDirectory           -- :: FilePath -> IO ()
-    , removeDirectoryRecursive  -- :: FilePath -> IO ()
-    , renameDirectory           -- :: FilePath -> FilePath -> IO ()
+    , removeDirectory
+    , removeDirectoryRecursive
+    , renameDirectory
 
-    , getDirectoryContents      -- :: FilePath -> IO [FilePath]
-    , getCurrentDirectory       -- :: IO FilePath
-    , setCurrentDirectory       -- :: FilePath -> IO ()
+    , getDirectoryContents
+    , getCurrentDirectory
+    , setCurrentDirectory
 
     -- * Pre-defined directories
     , getHomeDirectory
@@ -42,17 +42,18 @@ module System.Directory
     , getTemporaryDirectory
 
     -- * Actions on files
-    , removeFile                -- :: FilePath -> IO ()
-    , renameFile                -- :: FilePath -> FilePath -> IO ()
-    , copyFile                  -- :: FilePath -> FilePath -> IO ()
+    , removeFile
+    , renameFile
+    , copyFile
     
     , canonicalizePath
     , makeRelativeToCurrentDirectory
     , findExecutable
+    , findFile
 
     -- * Existence tests
-    , doesFileExist             -- :: FilePath -> IO Bool
-    , doesDirectoryExist        -- :: FilePath -> IO Bool
+    , doesFileExist
+    , doesDirectoryExist
 
     -- * Permissions
 
@@ -60,32 +61,29 @@ module System.Directory
 
     , Permissions
     , emptyPermissions
-    , readable          -- :: Permissions -> Bool
-    , writable          -- :: Permissions -> Bool
-    , executable        -- :: Permissions -> Bool
-    , searchable        -- :: Permissions -> Bool
+    , readable
+    , writable
+    , executable
+    , searchable
     , setOwnerReadable
     , setOwnerWritable
     , setOwnerExecutable
     , setOwnerSearchable
 
-    , getPermissions            -- :: FilePath -> IO Permissions
-    , setPermissions            -- :: FilePath -> Permissions -> IO ()
+    , getPermissions
+    , setPermissions
     , copyPermissions
 
     -- * Timestamps
 
-    , getModificationTime       -- :: FilePath -> IO ClockTime
+    , getModificationTime
    ) where
-
-import Prelude hiding ( catch )
-import qualified Prelude
 
 import Control.Monad (guard)
 import System.Environment      ( getEnv )
 import System.FilePath
 import System.IO
-import System.IO.Error hiding ( catch, try )
+import System.IO.Error
 import Control.Monad           ( when, unless )
 import Control.Exception.Base
 
@@ -105,7 +103,8 @@ import Foreign.C
 
 {-# CFILES cbits/directory.c #-}
 
-import System.Time             ( ClockTime(..) )
+import Data.Time
+import Data.Time.Clock.POSIX
 
 #ifdef __GLASGOW_HASKELL__
 
@@ -683,11 +682,11 @@ copyFile :: FilePath -> FilePath -> IO ()
 #ifdef __NHC__
 copyFile fromFPath toFPath =
     do readFile fromFPath >>= writeFile toFPath
-       Prelude.catch (copyPermissions fromFPath toFPath)
-                     (\_ -> return ())
+       catchIOError (copyPermissions fromFPath toFPath)
+                    (\_ -> return ())
 #else
 copyFile fromFPath toFPath =
-    copy `Prelude.catch` (\exc -> throw $ ioeSetLocation exc "copyFile")
+    copy `catchIOError` (\exc -> throw $ ioeSetLocation exc "copyFile")
     where copy = bracket (openBinaryFile fromFPath ReadMode) hClose $ \hFrom ->
                  bracketOnError openTmp cleanTmp $ \(tmpFPath, hTmp) ->
                  do allocaBytes bufferSize $ copyContents hFrom hTmp
@@ -706,9 +705,7 @@ copyFile fromFPath toFPath =
                           hPutBuf hTo buffer count
                           copyContents hFrom hTo buffer
 
-          ignoreIOExceptions io = io `catch` ioExceptionIgnorer
-          ioExceptionIgnorer :: IOException -> IO ()
-          ioExceptionIgnorer _ = return ()
+          ignoreIOExceptions io = io `catchIOError` (\_ -> return ())
 #endif
 
 -- | Given path referring to a file or directory, returns a
@@ -777,10 +774,14 @@ findExecutable binary =
 #else
  do
   path <- getEnv "PATH"
-  search (splitSearchPath path)
-  where
-    fileName = binary <.> exeExtension
+  findFile (splitSearchPath path) (binary <.> exeExtension)
+#endif
 
+-- | Search through the given set of directories for the given file.
+-- Used by 'findExecutable' on non-windows platforms.
+findFile :: [FilePath] -> String -> IO (Maybe FilePath)
+findFile paths fileName = search paths
+  where
     search :: [FilePath] -> IO (Maybe FilePath)
     search [] = return Nothing
     search (d:ds) = do
@@ -788,8 +789,6 @@ findExecutable binary =
         b <- doesFileExist path
         if b then return (Just path)
              else search ds
-#endif
-
 
 #ifdef __GLASGOW_HASKELL__
 {- |@'getDirectoryContents' dir@ returns a list of /all/ entries
@@ -986,7 +985,7 @@ The operation may fail with:
 
 -}
 
-getModificationTime :: FilePath -> IO ClockTime
+getModificationTime :: FilePath -> IO UTCTime
 getModificationTime name = do
 #ifdef mingw32_HOST_OS
  -- ToDo: use Win32 API
@@ -994,15 +993,10 @@ getModificationTime name = do
  modificationTime st
 #else
   stat <- Posix.getFileStatus name
-  let mod_time :: Posix.EpochTime 
+  let mod_time :: Posix.EpochTime
       mod_time = Posix.modificationTime stat
-      dbl_time :: Double
-      dbl_time = realToFrac mod_time
-  return (TOD (round dbl_time) 0)
+  return $ posixSecondsToUTCTime $ realToFrac mod_time
 #endif
-   -- For info
-   -- round :: (RealFrac a, Integral b => a -> b
-   -- realToFrac :: (Real a, Fractional b) => a -> b
 
 #endif /* __GLASGOW_HASKELL__ */
 
@@ -1023,13 +1017,11 @@ withFileOrSymlinkStatus loc name f = do
         throwErrnoIfMinus1Retry_ loc (lstat s p)
         f p
 
-modificationTime :: Ptr CStat -> IO ClockTime
+modificationTime :: Ptr CStat -> IO UTCTime
 modificationTime stat = do
     mtime <- st_mtime stat
-    let dbl_time :: Double
-        dbl_time = realToFrac (mtime :: CTime)
-    return (TOD (round dbl_time) 0)
-    
+    return $ posixSecondsToUTCTime $ realToFrac (mtime :: CTime)
+
 isDirectory :: Ptr CStat -> IO Bool
 isDirectory stat = do
   mode <- st_mode stat
@@ -1192,10 +1184,10 @@ getTemporaryDirectory = do
 #else
   getEnv "TMPDIR"
 #if !__NHC__
-    `Prelude.catch` \e -> if isDoesNotExistError e then return "/tmp"
+    `catchIOError` \e -> if isDoesNotExistError e then return "/tmp"
                           else throw e
 #else
-    `Prelude.catch` (\ex -> return "/tmp")
+    `catchIOError` (\ex -> return "/tmp")
 #endif
 #endif
 

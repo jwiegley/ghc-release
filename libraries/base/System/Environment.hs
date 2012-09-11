@@ -6,7 +6,7 @@
 -- Module      :  System.Environment
 -- Copyright   :  (c) The University of Glasgow 2001
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  provisional
 -- Portability :  portable
@@ -17,9 +17,11 @@
 
 module System.Environment
     (
-      getArgs,       -- :: IO [String]
-      getProgName,   -- :: IO String
-      getEnv,        -- :: String -> IO String
+      getArgs,            -- :: IO [String]
+      getProgName,        -- :: IO String
+      getExecutablePath,  -- :: IO FilePath
+      getEnv,             -- :: String -> IO String
+      lookupEnv,          -- :: String -> IO (Maybe String)
 #ifndef __NHC__
       withArgs,
       withProgName,
@@ -60,6 +62,18 @@ import System
   )
 #endif
 
+import System.Environment.ExecutablePath
+
+#ifdef mingw32_HOST_OS
+# if defined(i386_HOST_ARCH)
+#  define WINDOWS_CCONV stdcall
+# elif defined(x86_64_HOST_ARCH)
+#  define WINDOWS_CCONV ccall
+# else
+#  error Unknown mingw32 arch
+# endif
+#endif
+
 #ifdef __GLASGOW_HASKELL__
 -- ---------------------------------------------------------------------------
 -- getArgs, getProgName, getEnv
@@ -70,34 +84,34 @@ import System
 
 getWin32ProgArgv_certainly :: IO [String]
 getWin32ProgArgv_certainly = do
-	mb_argv <- getWin32ProgArgv
-	case mb_argv of
-	  Nothing   -> fmap dropRTSArgs getFullArgs
-	  Just argv -> return argv
+        mb_argv <- getWin32ProgArgv
+        case mb_argv of
+          Nothing   -> fmap dropRTSArgs getFullArgs
+          Just argv -> return argv
 
 withWin32ProgArgv :: [String] -> IO a -> IO a
 withWin32ProgArgv argv act = bracket begin setWin32ProgArgv (\_ -> act)
   where
     begin = do
-	  mb_old_argv <- getWin32ProgArgv
-	  setWin32ProgArgv (Just argv)
-	  return mb_old_argv
+          mb_old_argv <- getWin32ProgArgv
+          setWin32ProgArgv (Just argv)
+          return mb_old_argv
 
 getWin32ProgArgv :: IO (Maybe [String])
 getWin32ProgArgv = alloca $ \p_argc -> alloca $ \p_argv -> do
-	c_getWin32ProgArgv p_argc p_argv
-	argc <- peek p_argc
-	argv_p <- peek p_argv
-	if argv_p == nullPtr
-	 then return Nothing
-	 else do
-	  argv_ps <- peekArray (fromIntegral argc) argv_p
-	  fmap Just $ mapM peekCWString argv_ps
+        c_getWin32ProgArgv p_argc p_argv
+        argc <- peek p_argc
+        argv_p <- peek p_argv
+        if argv_p == nullPtr
+         then return Nothing
+         else do
+          argv_ps <- peekArray (fromIntegral argc) argv_p
+          fmap Just $ mapM peekCWString argv_ps
 
 setWin32ProgArgv :: Maybe [String] -> IO ()
 setWin32ProgArgv Nothing = c_setWin32ProgArgv 0 nullPtr
 setWin32ProgArgv (Just argv) = withMany withCWString argv $ \argv_ps -> withArrayLen argv_ps $ \argc argv_p -> do
-	c_setWin32ProgArgv (fromIntegral argc) argv_p
+        c_setWin32ProgArgv (fromIntegral argc) argv_p
 
 foreign import ccall unsafe "getWin32ProgArgv"
   c_getWin32ProgArgv :: Ptr CInt -> Ptr (Ptr CWString) -> IO ()
@@ -180,7 +194,8 @@ basename f = go f f
 
 
 -- | Computation 'getEnv' @var@ returns the value
--- of the environment variable @var@.  
+-- of the environment variable @var@. For the inverse, POSIX users
+-- can use 'System.Posix.Env.putEnv'.
 --
 -- This computation may fail with:
 --
@@ -188,35 +203,51 @@ basename f = go f f
 --    does not exist.
 
 getEnv :: String -> IO String
-#ifdef mingw32_HOST_OS
-getEnv name = withCWString name $ \s -> try_size s 256
+getEnv name = lookupEnv name >>= maybe handleError return
   where
-    try_size s size = allocaArray (fromIntegral size) $ \p_value -> do
-      res <- c_GetEnvironmentVariable s p_value size
-      case res of
-        0 -> do
-		  err <- c_GetLastError
-		  if err == eRROR_ENVVAR_NOT_FOUND
-		   then ioe_missingEnvVar name
-		   else throwGetLastError "getEnv"
-        _ | res > size -> try_size s res -- Rare: size increased between calls to GetEnvironmentVariable
-          | otherwise  -> peekCWString p_value
+#ifdef mingw32_HOST_OS
+    handleError = do
+        err <- c_GetLastError
+        if err == eRROR_ENVVAR_NOT_FOUND
+            then ioe_missingEnvVar name
+            else throwGetLastError "getEnv"
 
 eRROR_ENVVAR_NOT_FOUND :: DWORD
 eRROR_ENVVAR_NOT_FOUND = 203
 
-foreign import stdcall unsafe "windows.h GetLastError"
+foreign import WINDOWS_CCONV unsafe "windows.h GetLastError"
   c_GetLastError:: IO DWORD
 
-foreign import stdcall unsafe "windows.h GetEnvironmentVariableW"
+#else
+    handleError = ioe_missingEnvVar name
+#endif
+
+-- | Return the value of the environment variable @var@, or @Nothing@ if
+-- there is no such value.
+--
+-- For POSIX users, this is equivalent to 'System.Posix.Env.getEnv'.
+lookupEnv :: String -> IO (Maybe String)
+#ifdef mingw32_HOST_OS
+lookupEnv name = withCWString name $ \s -> try_size s 256
+  where
+    try_size s size = allocaArray (fromIntegral size) $ \p_value -> do
+      res <- c_GetEnvironmentVariable s p_value size
+      case res of
+        0 -> return Nothing
+        _ | res > size -> try_size s res -- Rare: size increased between calls to GetEnvironmentVariable
+          | otherwise  -> peekCWString p_value >>= return . Just
+
+foreign import WINDOWS_CCONV unsafe "windows.h GetEnvironmentVariableW"
   c_GetEnvironmentVariable :: LPTSTR -> LPTSTR -> DWORD -> IO DWORD
 #else
-getEnv name =
+lookupEnv name =
     withCString name $ \s -> do
       litstring <- c_getenv s
       if litstring /= nullPtr
-        then getFileSystemEncoding >>= \enc -> GHC.peekCString enc litstring
-        else ioe_missingEnvVar name
+        then do enc <- getFileSystemEncoding
+                result <- GHC.peekCString enc litstring
+                return $ Just result
+        else return Nothing
 
 foreign import ccall unsafe "getenv"
    c_getenv :: CString -> IO (Ptr CChar)
@@ -224,7 +255,7 @@ foreign import ccall unsafe "getenv"
 
 ioe_missingEnvVar :: String -> IO a
 ioe_missingEnvVar name = ioException (IOError Nothing NoSuchThing "getEnv"
-											  "no environment variable" Nothing (Just name))
+    "no environment variable" Nothing (Just name))
 
 {-|
 'withArgs' @args act@ - while executing action @act@, have 'getArgs'
@@ -270,7 +301,8 @@ withProgArgv new_args act = do
 freeProgArgv :: Ptr CString -> IO ()
 freeProgArgv argv = do
   size <- lengthArray0 nullPtr argv
-  sequence_ [peek (argv `advancePtr` i) >>= free | i <- [size, size-1 .. 0]]
+  sequence_ [ peek (argv `advancePtr` i) >>= free
+            | i <- [size - 1, size - 2 .. 0]]
   free argv
 
 setProgArgv :: [String] -> IO (Ptr CString)
@@ -280,7 +312,7 @@ setProgArgv argv = do
   c_setProgArgv (genericLength argv) vs
   return vs
 
-foreign import ccall unsafe "setProgArgv" 
+foreign import ccall unsafe "setProgArgv"
   c_setProgArgv  :: CInt -> Ptr CString -> IO ()
 
 -- |'getEnvironment' retrieves the entire environment as a
@@ -307,7 +339,7 @@ getEnvironment = bracket c_GetEnvironmentStrings c_FreeEnvironmentStrings $ \pBl
           -- getting the actual String:
           str <- peekCWString pBlock
           fmap (divvy str :) $ go pBlock'
-    
+
     -- Returns pointer to the byte *after* the next null
     seekNull pBlock done = do
         let pBlock' = pBlock `plusPtr` sizeOf (undefined :: CWchar)
@@ -316,10 +348,10 @@ getEnvironment = bracket c_GetEnvironmentStrings c_FreeEnvironmentStrings $ \pBl
            c <- peek pBlock'
            seekNull pBlock' (c == (0 :: Word8 ))
 
-foreign import stdcall unsafe "windows.h GetEnvironmentStringsW"
+foreign import WINDOWS_CCONV unsafe "windows.h GetEnvironmentStringsW"
   c_GetEnvironmentStrings :: IO (Ptr CWchar)
 
-foreign import stdcall unsafe "windows.h FreeEnvironmentStringsW"
+foreign import WINDOWS_CCONV unsafe "windows.h FreeEnvironmentStringsW"
   c_FreeEnvironmentStrings :: Ptr CWchar -> IO Bool
 #else
 getEnvironment = do
@@ -330,7 +362,7 @@ getEnvironment = do
       stuff <- peekArray0 nullPtr pBlock >>= mapM (GHC.peekCString enc)
       return (map divvy stuff)
 
-foreign import ccall unsafe "__hscore_environ" 
+foreign import ccall unsafe "__hscore_environ"
   getEnvBlock :: IO (Ptr CString)
 #endif
 
@@ -340,4 +372,3 @@ divvy str =
     (xs,[])        -> (xs,[]) -- don't barf (like Posix.getEnvironment)
     (name,_:value) -> (name,value)
 #endif  /* __GLASGOW_HASKELL__ */
-

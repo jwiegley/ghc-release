@@ -29,11 +29,6 @@ from testglobals import *
 # value.
 os.environ['TERM'] = 'vt100'
 
-if sys.platform == "cygwin":
-    cygwin = True
-else:
-    cygwin = False
-
 global config
 config = getConfig() # get it from testglobals
 
@@ -113,6 +108,12 @@ if config.use_threads == 1:
     if (maj, min, pat) < (2, 5, 2):
         print "Warning: Ignoring request to use threads as python version < 2.5.2"
         config.use_threads = 0
+    # We also need to disable threads for python 2.7.2, because of
+    # this bug: http://bugs.python.org/issue13817
+    elif (maj, min, pat) == (2, 7, 2):
+        print "Warning: Ignoring request to use threads as python version is 2.7.2"
+        print "See http://bugs.python.org/issue13817 for details."
+        config.use_threads = 0
     if windows:
         print "Warning: Ignoring request to use threads as running on Windows"
         config.use_threads = 0
@@ -120,15 +121,20 @@ if config.use_threads == 1:
 config.cygwin = False
 config.msys = False
 if windows:
-    if cygwin:
+    h = os.popen('uname -s', 'r')
+    v = h.read()
+    h.close()
+    if v.startswith("CYGWIN"):
         config.cygwin = True
-    else:
+    elif v.startswith("MINGW32"):
         config.msys = True
+    else:
+        raise Exception("Can't detect Windows terminal type")
 
 # Try to use UTF8
 if windows:
     import ctypes
-    if cygwin:
+    if config.cygwin:
         # Is this actually right? Which calling convention does it use?
         # As of the time of writing, ctypes.windll doesn't exist in the
         # cygwin python, anyway.
@@ -187,7 +193,7 @@ if windows or darwin:
                 path = re.sub('^"(.*)"$', '\\1', path)
                 path = re.sub('\\\\(.)', '\\1', path)
             if windows:
-                if cygwin:
+                if config.cygwin:
                     # On cygwin we can't put "c:\foo" in $PATH, as : is a
                     # field separator. So convert to /cygdrive/c/foo instead.
                     # Other pythons use ; as the separator, so no problem.

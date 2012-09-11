@@ -32,6 +32,7 @@ module System.Console.Haskeline(
                     InputT,
                     runInputT,
                     haveTerminalUI,
+                    mapInputT,
                     -- ** Behaviors
                     Behavior,
                     runInputTBehavior,
@@ -61,11 +62,16 @@ module System.Console.Haskeline(
                     defaultPrefs,
                     runInputTWithPrefs,
                     runInputTBehaviorWithPrefs,
+                    -- ** History
+                    -- $history
+                    getHistory,
+                    putHistory,
+                    modifyHistory,
                     -- * Ctrl-C handling
-                    -- $ctrlc
-                    Interrupt(..),
                     withInterrupt,
+                    Interrupt(..),
                     handleInterrupt,
+                    -- * Additional submodules
                     module System.Console.Haskeline.Completion,
                     module System.Console.Haskeline.MonadException)
                      where
@@ -110,7 +116,7 @@ Unicode characters.
 -- | Write a Unicode string to the user's standard output.
 outputStr :: MonadIO m => String -> InputT m ()
 outputStr xs = do
-    putter <- asks putStrOut
+    putter <- InputT $ asks putStrOut
     liftIO $ putter xs
 
 -- | Write a string to the user's standard output, followed by a newline.
@@ -136,7 +142,7 @@ spaces), it will be automatically added to the history.
 -}
 getInputLine :: MonadException m => String -- ^ The input prompt
                             -> InputT m (Maybe String)
-getInputLine = promptedInput (getInputCmdLine emptyIM) $ unMaybeT . getLocaleLine
+getInputLine = promptedInput (getInputCmdLine emptyIM) $ runMaybeT . getLocaleLine
 
 {- | Reads one line of input and fills the insertion space with initial text. When using
 terminal-style interaction, this function provides a rich line-editing user interface with the
@@ -158,13 +164,13 @@ getInputLineWithInitial :: MonadException m
                             -> (String, String) -- ^ The initial value left and right of the cursor
                             -> InputT m (Maybe String)
 getInputLineWithInitial prompt (left,right) = promptedInput (getInputCmdLine initialIM)
-                                                (unMaybeT . getLocaleLine) prompt
+                                                (runMaybeT . getLocaleLine) prompt
   where
     initialIM = insertString left $ moveToStart $ insertString right $ emptyIM
 
 getInputCmdLine :: MonadException m => InsertMode -> TermOps -> String -> InputT m (Maybe String)
 getInputCmdLine initialIM tops prefix = do
-    emode <- asks editMode
+    emode <- InputT $ asks editMode
     result <- runInputCmdT tops $ case emode of
                 Emacs -> runCommandLoop tops prefix emacsCommands initialIM
                 Vi -> evalStateT' emptyViState $
@@ -172,17 +178,17 @@ getInputCmdLine initialIM tops prefix = do
     maybeAddHistory result
     return result
 
-maybeAddHistory :: forall m . Monad m => Maybe String -> InputT m ()
+maybeAddHistory :: forall m . MonadIO m => Maybe String -> InputT m ()
 maybeAddHistory result = do
-    settings :: Settings m <- ask
-    histDupes <- asks historyDuplicates
+    settings :: Settings m <- InputT ask
+    histDupes <- InputT $ asks historyDuplicates
     case result of
         Just line | autoAddHistory settings && not (all isSpace line) 
             -> let adder = case histDupes of
                         AlwaysAdd -> addHistory
                         IgnoreConsecutive -> addHistoryUnlessConsecutiveDupe
                         IgnoreAll -> addHistoryRemovingAllDupes
-               in modify (adder line)
+               in modifyHistory (adder line)
         _ -> return ()
 
 ----------
@@ -204,7 +210,7 @@ getInputChar = promptedInput getInputCmdChar $ \fops -> do
 
 getPrintableChar :: FileOps -> IO (Maybe Char)
 getPrintableChar fops = do
-    c <- unMaybeT $ getLocaleChar fops
+    c <- runMaybeT $ getLocaleChar fops
     case fmap isPrint c of
         Just False -> getPrintableChar fops
         _ -> return c
@@ -238,7 +244,7 @@ getPassword x = promptedInput
                                         $ Password [] x)
                     (\fops -> let h_in = inputHandle fops
                               in bracketSet (hGetEcho h_in) (hSetEcho h_in) False
-                                  $ unMaybeT $ getLocaleLine fops)
+                                  $ runMaybeT $ getLocaleLine fops)
  where
     loop = choiceCmd [ simpleChar '\n' +> finish
                      , simpleKey Backspace +> change deletePasswordChar
@@ -251,10 +257,19 @@ getPassword x = promptedInput
                      ]
     loop' = keyCommand loop
                         
+{- $history
+The 'InputT' monad transformer provides direct, low-level access to the user's line history state.
+
+However, for most applications, it should suffice to just use the 'autoAddHistory'
+and 'historyFile' flags.
+
+-}
 
 
 -------
 -- | Wrapper for input functions.
+-- This is the function that calls "wrapFileInput" around file backend input
+-- functions (see Term.hs).
 promptedInput :: MonadIO m => (TermOps -> String -> InputT m a)
                         -> (FileOps -> IO a)
                         -> String -> InputT m a
@@ -262,40 +277,44 @@ promptedInput doTerm doFile prompt = do
     -- If other parts of the program have written text, make sure that it
     -- appears before we interact with the user on the terminal.
     liftIO $ hFlush stdout
-    rterm <- ask
+    rterm <- InputT ask
     case termOps rterm of
         Right fops -> liftIO $ do
                         putStrOut rterm prompt
-                        doFile fops
+                        wrapFileInput fops $ doFile fops
         Left tops -> do
             -- If the prompt contains newlines, print all but the last line.
             let (lastLine,rest) = break (`elem` "\r\n") $ reverse prompt
             outputStr $ reverse rest
             doTerm tops $ reverse lastLine
 
-------------
--- Interrupt
+{- | If Ctrl-C is pressed during the given action, throw an exception
+of type 'Interrupt'.  For example:
 
-{- $ctrlc
-The following functions provide portable handling of Ctrl-C events.  
+> tryAction :: InputT IO ()
+> tryAction = handle (\Interrupt -> outputStrLn "Cancelled.")
+>                $ wrapInterrupt $ someLongAction
 
-These functions are not necessary on GHC version 6.10 or later, which
-processes Ctrl-C events as exceptions by default.
+The action can handle the interrupt itself; a new 'Interrupt' exception will be thrown
+every time Ctrl-C is pressed.
+
+> tryAction :: InputT IO ()
+> tryAction = wrapInterrupt loop
+>     where loop = handle (\Interrupt -> outputStrLn "Cancelled; try again." >> loop)
+>                    someLongAction
+ 
+This behavior differs from GHC's built-in Ctrl-C handling, which
+may immediately terminate the program after the second time that the user presses
+Ctrl-C.
+
 -}
-
--- | If Ctrl-C is pressed during the given computation, throw an exception of type 
--- 'Interrupt'.
 withInterrupt :: MonadException m => InputT m a -> InputT m a
-withInterrupt f = do
-    rterm <- ask
-    wrapInterrupt rterm f
+withInterrupt act = do
+    rterm <- InputT ask
+    liftIOOp_ (wrapInterrupt rterm) act
 
--- | Catch and handle an exception of type 'Interrupt'.
-handleInterrupt :: MonadException m => m a 
-                        -- ^ Handler to run if Ctrl-C is pressed
-                     -> m a -- ^ Computation to run
-                     -> m a
-handleInterrupt f = handleDyn $ \Interrupt -> f
-
-
-
+-- | Catch and handle an exception of type 'Interrupt'.  
+--
+-- > handleInterrupt f = handle $ \Interrupt -> f
+handleInterrupt :: MonadException m => m a -> m a -> m a
+handleInterrupt f = handle $ \Interrupt -> f

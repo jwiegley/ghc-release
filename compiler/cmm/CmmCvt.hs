@@ -12,32 +12,28 @@ import CmmUtils
 import qualified OldCmm as Old
 import OldPprCmm ()
 
-import Compiler.Hoopl hiding ((<*>), mkLabel, mkBranch)
+import Hoopl
 import Data.Maybe
 import Maybes
 import Outputable
 
 cmmOfZgraph :: CmmGroup -> Old.CmmGroup
 cmmOfZgraph tops = map mapTop tops
-  where mapTop (CmmProc h l g) = CmmProc (Old.CmmInfo Nothing Nothing (info_tbl h)) l (ofZgraph g)
+  where mapTop (CmmProc h l g) = CmmProc (info_tbl h) l (ofZgraph g)
         mapTop (CmmData s ds) = CmmData s ds
 
 data ValueDirection = Arguments | Results
 
-add_hints :: Convention -> ValueDirection -> [a] -> [Old.CmmHinted a]
+add_hints :: ForeignTarget -> ValueDirection -> [a] -> [Old.CmmHinted a]
 add_hints conv vd args = zipWith Old.CmmHinted args (get_hints conv vd)
 
-get_hints :: Convention -> ValueDirection -> [ForeignHint]
-get_hints (Foreign (ForeignConvention _ hints _)) Arguments = hints
-get_hints (Foreign (ForeignConvention _ _ hints)) Results   = hints
-get_hints _other_conv                             _vd       = repeat NoHint
-
-get_conv :: ForeignTarget -> Convention
-get_conv (PrimTarget _)       = NativeNodeCall -- JD: SUSPICIOUS
-get_conv (ForeignTarget _ fc) = Foreign fc
+get_hints :: ForeignTarget -> ValueDirection -> [ForeignHint]
+get_hints (ForeignTarget _ (ForeignConvention _ hints _)) Arguments = hints
+get_hints (ForeignTarget _ (ForeignConvention _ _ hints)) Results   = hints
+get_hints (PrimTarget _) _vd = repeat NoHint
 
 cmm_target :: ForeignTarget -> Old.CmmCallTarget
-cmm_target (PrimTarget op) = Old.CmmPrim op
+cmm_target (PrimTarget op) = Old.CmmPrim op Nothing
 cmm_target (ForeignTarget e (ForeignConvention cc _ _)) = Old.CmmCallee e cc
 
 ofZgraph :: CmmGraph -> Old.ListGraph Old.CmmStmt
@@ -89,8 +85,8 @@ ofZgraph g = Old.ListGraph $ mapMaybe convert_block $ postorderDfs g
                             CmmUnsafeForeignCall (PrimTarget MO_Touch) _ _ -> Old.CmmNop
                             CmmUnsafeForeignCall target ress args          -> 
                               Old.CmmCall (cmm_target target)
-                                          (add_hints (get_conv target) Results   ress)
-                                          (add_hints (get_conv target) Arguments args)
+                                          (add_hints target Results   ress)
+                                          (add_hints target Arguments args)
                                           Old.CmmMayReturn
 
                   last :: CmmNode O C -> () -> [Old.CmmStmt]
@@ -105,8 +101,10 @@ ofZgraph g = Old.ListGraph $ mapMaybe convert_block $ postorderDfs g
                               , Just expr' <- maybeInvertCmmExpr expr -> Old.CmmCondBranch expr' fid : tail_of tid
                               | otherwise -> [Old.CmmCondBranch expr tid, Old.CmmBranch fid]
                             CmmSwitch arg ids -> [Old.CmmSwitch arg ids]
-                            CmmCall e _ _ _ _ -> [Old.CmmJump e []]
+                            -- ToDo: STG Live
+                            CmmCall e _ r _ _ _ -> [Old.CmmJump e (Just r)]
                             CmmForeignCall {} -> panic "ofZgraph: CmmForeignCall"
                           tail_of bid = case foldBlockNodesB3 (first, middle, last) block () of
                                           Old.BasicBlock _ stmts -> stmts
                             where Just block = mapLookup bid $ toBlockMap g
+

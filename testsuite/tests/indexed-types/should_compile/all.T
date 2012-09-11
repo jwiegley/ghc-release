@@ -21,7 +21,7 @@ test('Simple16', normal, compile, [''])
 test('Simple17', normal, compile, [''])
 test('Simple18', normal, compile, [''])
 test('Simple19', normal, compile, [''])
-test('Simple20', expect_broken(4296), compile, ['-fcontext-stack=50'])
+test('Simple20', expect_broken(4296), compile, ['-fcontext-stack=10'])
 test('Simple21', normal, compile, [''])
 test('Simple22', normal, compile, [''])
 test('Simple23', normal, compile, [''])
@@ -182,3 +182,16 @@ test('ClassEqContext3', normal, compile, [''])
 test('HO', normal, compile, [''])
 
 
+# The point about this test is that it compiles the two T5955
+# modules *separately*
+test('T5955',
+     extra_clean(['T5955.o', 'T5955.hi', 'T5955a.o', 'T5955a.hi']),
+     run_command,
+     ['$MAKE -s --no-print-directory T5955'])
+
+test('T6152',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T6152'])
+
+test('T6088', normal, compile, [''])

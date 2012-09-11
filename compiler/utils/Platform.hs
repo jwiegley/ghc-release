@@ -7,6 +7,7 @@ module Platform (
         OS(..),
         ArmISA(..),
         ArmISAExt(..),
+        ArmABI(..),
 
         target32Bit,
         osElfTarget
@@ -22,6 +23,7 @@ data Platform
               platformOS                       :: OS,
               platformWordSize                 :: {-# UNPACK #-} !Int,
               platformHasGnuNonexecStack       :: Bool,
+              platformHasIdentDirective        :: Bool,
               platformHasSubsectionsViaSymbols :: Bool
           }
         deriving (Read, Show, Eq)
@@ -40,7 +42,9 @@ data Arch
         | ArchSPARC
         | ArchARM
           { armISA    :: ArmISA
-          , armISAExt :: [ArmISAExt] }
+          , armISAExt :: [ArmISAExt]
+          , armABI    :: ArmABI
+          }
         deriving (Read, Show, Eq)
 
 
@@ -53,13 +57,14 @@ data OS
         | OSSolaris2
         | OSMinGW32
         | OSFreeBSD
+        | OSDragonFly
         | OSOpenBSD
         | OSNetBSD
         | OSKFreeBSD
         | OSHaiku
         deriving (Read, Show, Eq)
 
--- | ARM Instruction Set Architecture and Extensions
+-- | ARM Instruction Set Architecture, Extensions and ABI
 --
 data ArmISA
     = ARMv5
@@ -75,22 +80,28 @@ data ArmISAExt
     | IWMMX2
     deriving (Read, Show, Eq)
 
+data ArmABI
+    = SOFT
+    | SOFTFP
+    | HARD
+    deriving (Read, Show, Eq)
 
 target32Bit :: Platform -> Bool
 target32Bit p = platformWordSize p == 4
 
 -- | This predicates tells us whether the OS supports ELF-like shared libraries.
 osElfTarget :: OS -> Bool
-osElfTarget OSLinux    = True
-osElfTarget OSFreeBSD  = True
-osElfTarget OSOpenBSD  = True
-osElfTarget OSNetBSD   = True
-osElfTarget OSSolaris2 = True
-osElfTarget OSDarwin   = False
-osElfTarget OSMinGW32  = False
-osElfTarget OSKFreeBSD = True
-osElfTarget OSUnknown  = False
+osElfTarget OSLinux     = True
+osElfTarget OSFreeBSD   = True
+osElfTarget OSDragonFly = True
+osElfTarget OSOpenBSD   = True
+osElfTarget OSNetBSD    = True
+osElfTarget OSSolaris2  = True
+osElfTarget OSDarwin    = False
+osElfTarget OSMinGW32   = False
+osElfTarget OSKFreeBSD  = True
 osElfTarget OSHaiku     = True
+osElfTarget OSUnknown   = False
  -- Defaulting to False is safe; it means don't rely on any
  -- ELF-specific functionality.  It is important to have a default for
  -- portability, otherwise we have to answer this question for every

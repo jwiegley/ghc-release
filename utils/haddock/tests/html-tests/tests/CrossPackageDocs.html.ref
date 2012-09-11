@@ -358,7 +358,11 @@ defined in the <a href=""
 		  ></td
 		><td class="doc"
 		><p
-		  >Filename of the executable
+		  >Filename of the executable (see <code
+		    ><a href=""
+		      >proc</a
+		      ></code
+		    > for details)
 </p
 		  ></td
 		></tr
@@ -461,7 +465,7 @@ defined in the <a href=""
     ><p
       >Produced by <a href=""
 	>Haddock</a
-	> version 2.11.0</p
+	> version 2.12.0</p
       ></div
     ></body
   ></html

@@ -9,6 +9,7 @@ module Language.Haskell.TH.Lib where
 
 import Language.Haskell.TH.Syntax
 import Control.Monad( liftM, liftM2 )
+import Data.Word( Word8 )
 
 ----------------------------------------------------------
 -- * Type synonyms
@@ -22,6 +23,7 @@ type DecQ           = Q Dec
 type DecsQ          = Q [Dec]
 type ConQ           = Q Con
 type TypeQ          = Q Type
+type TyLitQ         = Q TyLit
 type CxtQ           = Q Cxt
 type PredQ          = Q Pred
 type MatchQ         = Q Match
@@ -33,7 +35,7 @@ type RangeQ         = Q Range
 type StrictTypeQ    = Q StrictType
 type VarStrictTypeQ = Q VarStrictType
 type FieldExpQ      = Q FieldExp
-type InlineSpecQ    = Q InlineSpec
+type RuleBndrQ      = Q RuleBndr
 
 ----------------------------------------------------------
 -- * Lowercase pattern syntax functions
@@ -53,7 +55,7 @@ charL       :: Char -> Lit
 charL       = CharL
 stringL     :: String -> Lit
 stringL     = StringL
-stringPrimL :: String -> Lit
+stringPrimL :: [Word8] -> Lit
 stringPrimL = StringPrimL
 rationalL   :: Rational -> Lit
 rationalL   = RationalL
@@ -240,6 +242,9 @@ lamE ps e = do ps' <- sequence ps
 lam1E :: PatQ -> ExpQ -> ExpQ
 lam1E p e = lamE [p] e
 
+lamCaseE :: [MatchQ] -> ExpQ
+lamCaseE ms = sequence ms >>= return . LamCaseE
+
 tupE :: [ExpQ] -> ExpQ
 tupE es = do { es1 <- sequence es; return (TupE es1)}
 
@@ -248,6 +253,9 @@ unboxedTupE es = do { es1 <- sequence es; return (UnboxedTupE es1)}
 
 condE :: ExpQ -> ExpQ -> ExpQ -> ExpQ
 condE x y z =  do { a <- x; b <- y; c <- z; return (CondE a b c)}
+
+multiIfE :: [Q (Guard, Exp)] -> ExpQ
+multiIfE alts = sequence alts >>= return . MultiIfE
 
 letE :: [DecQ] -> ExpQ -> ExpQ
 letE ds e = do { ds2 <- sequence ds; e2 <- e; return (LetE ds2 e2) }
@@ -354,24 +362,44 @@ forImpD cc s str n ty
  = do ty' <- ty
       return $ ForeignD (ImportF cc s str n ty')
 
-pragInlD :: Name -> InlineSpecQ -> DecQ
-pragInlD n ispec 
-  = do
-      ispec1 <- ispec 
-      return $ PragmaD (InlineP n ispec1)
+infixLD :: Int -> Name -> DecQ
+infixLD prec nm = return (InfixD (Fixity prec InfixL) nm)
 
-pragSpecD :: Name -> TypeQ -> DecQ
-pragSpecD n ty
+infixRD :: Int -> Name -> DecQ
+infixRD prec nm = return (InfixD (Fixity prec InfixR) nm)
+
+infixND :: Int -> Name -> DecQ
+infixND prec nm = return (InfixD (Fixity prec InfixN) nm)
+
+pragInlD :: Name -> Inline -> RuleMatch -> Phases -> DecQ
+pragInlD name inline rm phases
+  = return $ PragmaD $ InlineP name inline rm phases
+
+pragSpecD :: Name -> TypeQ -> Phases -> DecQ
+pragSpecD n ty phases
   = do
       ty1    <- ty
-      return $ PragmaD (SpecialiseP n ty1 Nothing)
+      return $ PragmaD $ SpecialiseP n ty1 Nothing phases
 
-pragSpecInlD :: Name -> TypeQ -> InlineSpecQ -> DecQ
-pragSpecInlD n ty ispec 
+pragSpecInlD :: Name -> TypeQ -> Inline -> Phases -> DecQ
+pragSpecInlD n ty inline phases
   = do
       ty1    <- ty
-      ispec1 <- ispec
-      return $ PragmaD (SpecialiseP n ty1 (Just ispec1))
+      return $ PragmaD $ SpecialiseP n ty1 (Just inline) phases
+
+pragSpecInstD :: TypeQ -> DecQ
+pragSpecInstD ty
+  = do
+      ty1    <- ty
+      return $ PragmaD $ SpecialiseInstP ty1
+
+pragRuleD :: String -> [RuleBndrQ] -> ExpQ -> ExpQ -> Phases -> DecQ
+pragRuleD n bndrs lhs rhs phases
+  = do
+      bndrs1 <- sequence bndrs
+      lhs1   <- lhs
+      rhs1   <- rhs
+      return $ PragmaD $ RuleP n bndrs1 lhs1 rhs1 phases
 
 familyNoKindD :: FamFlavour -> Name -> [TyVarBndr] -> DecQ
 familyNoKindD flav tc tvs = return $ FamilyD flav tc tvs Nothing
@@ -460,6 +488,9 @@ arrowT = return ArrowT
 listT :: TypeQ
 listT = return ListT
 
+litT :: TyLitQ -> TypeQ
+litT l = fmap LitT l
+
 tupleT :: Int -> TypeQ
 tupleT i = return (TupleT i)
 
@@ -471,6 +502,18 @@ sigT t k
   = do
       t' <- t
       return $ SigT t' k
+
+promotedT :: Name -> TypeQ
+promotedT = return . PromotedT
+
+promotedTupleT :: Int -> TypeQ
+promotedTupleT i = return (PromotedTupleT i)
+
+promotedNilT :: TypeQ
+promotedNilT = return PromotedNilT
+
+promotedConsT :: TypeQ
+promotedConsT = return PromotedConsT
 
 isStrict, notStrict, unpacked :: Q Strict
 isStrict = return $ IsStrict
@@ -484,6 +527,17 @@ varStrictType :: Name -> StrictTypeQ -> VarStrictTypeQ
 varStrictType v st = do (s, t) <- st
                         return (v, s, t)
 
+-- * Type Literals
+
+numTyLit :: Integer -> TyLitQ
+numTyLit n = if n >= 0 then return (NumTyLit n)
+                       else fail ("Negative type-level number: " ++ show n)
+
+strTyLit :: String -> TyLitQ
+strTyLit s = return (StrTyLit s)
+
+
+
 -------------------------------------------------------------------------------
 -- *   Kind
 
@@ -493,11 +547,29 @@ plainTV = PlainTV
 kindedTV :: Name -> Kind -> TyVarBndr
 kindedTV = KindedTV
 
-starK :: Kind
-starK = StarK
+varK :: Name -> Kind
+varK = VarT
 
-arrowK :: Kind -> Kind -> Kind
-arrowK = ArrowK
+conK :: Name -> Kind
+conK = ConT
+
+tupleK :: Int -> Kind
+tupleK = TupleT
+
+arrowK :: Kind
+arrowK = ArrowT
+
+listK :: Kind
+listK = ListT
+
+appK :: Kind -> Kind -> Kind
+appK = AppT
+
+starK :: Kind
+starK = StarT
+
+constraintK :: Kind
+constraintK = ConstraintT
 
 -------------------------------------------------------------------------------
 -- *   Callconv
@@ -515,17 +587,6 @@ safe = Safe
 interruptible = Interruptible
 
 -------------------------------------------------------------------------------
--- *   InlineSpec
-
-inlineSpecNoPhase :: Bool -> Bool -> InlineSpecQ
-inlineSpecNoPhase inline conlike
-  = return $ InlineSpec inline conlike Nothing
-
-inlineSpecPhase :: Bool -> Bool -> Bool -> Int -> InlineSpecQ
-inlineSpecPhase inline conlike beforeFrom phase
-  = return $ InlineSpec inline conlike (Just (beforeFrom, phase))
-
--------------------------------------------------------------------------------
 -- *   FunDep
 
 funDep :: [Name] -> [Name] -> FunDep
@@ -537,6 +598,14 @@ funDep = FunDep
 typeFam, dataFam :: FamFlavour
 typeFam = TypeFam
 dataFam = DataFam
+
+-------------------------------------------------------------------------------
+-- *   RuleBndr
+ruleVar :: Name -> RuleBndrQ
+ruleVar = return . RuleVar
+
+typedRuleVar :: Name -> TypeQ -> RuleBndrQ
+typedRuleVar n ty = ty >>= return . TypedRuleVar n
 
 --------------------------------------------------------------
 -- * Useful helper function

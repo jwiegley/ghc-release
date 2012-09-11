@@ -10,11 +10,6 @@ import Criterion.Main
 import Data.List (foldl')
 import qualified Data.IntSet as S
 
-instance NFData S.IntSet where
-    rnf S.Nil = ()
-    rnf (S.Tip a) = rnf a
-    rnf (S.Bin p m l r) = rnf p `seq` rnf m `seq` rnf l `seq` rnf r
-
 main = do
     let s = S.fromAscList elems :: S.IntSet
         s_even = S.fromAscList elems_even :: S.IntSet
@@ -22,21 +17,21 @@ main = do
     defaultMainWith
         defaultConfig
         (liftIO . evaluate $ rnf [s, s_even, s_odd])
-        [ bench "member" $ nf (member elems) s
-        , bench "insert" $ nf (ins elems) S.empty
-        , bench "map" $ nf (S.map (+ 1)) s
-        , bench "filter" $ nf (S.filter ((== 0) . (`mod` 2))) s
-        , bench "partition" $ nf (S.partition ((== 0) . (`mod` 2))) s
-        , bench "fold" $ nf (S.fold (:) []) s
-        , bench "delete" $ nf (del elems) s
-        , bench "findMin" $ nf S.findMin s
-        , bench "findMax" $ nf S.findMax s
-        , bench "deleteMin" $ nf S.deleteMin s
-        , bench "deleteMax" $ nf S.deleteMax s
-        , bench "unions" $ nf S.unions [s_even, s_odd]
-        , bench "union" $ nf (S.union s_even) s_odd
-        , bench "difference" $ nf (S.difference s) s_even
-        , bench "intersection" $ nf (S.intersection s) s_even
+        [ bench "member" $ whnf (member elems) s
+        , bench "insert" $ whnf (ins elems) S.empty
+        , bench "map" $ whnf (S.map (+ 1)) s
+        , bench "filter" $ whnf (S.filter ((== 0) . (`mod` 2))) s
+        , bench "partition" $ whnf (S.partition ((== 0) . (`mod` 2))) s
+        , bench "fold" $ whnf (S.fold (:) []) s
+        , bench "delete" $ whnf (del elems) s
+        , bench "findMin" $ whnf S.findMin s
+        , bench "findMax" $ whnf S.findMax s
+        , bench "deleteMin" $ whnf S.deleteMin s
+        , bench "deleteMax" $ whnf S.deleteMax s
+        , bench "unions" $ whnf S.unions [s_even, s_odd]
+        , bench "union" $ whnf (S.union s_even) s_odd
+        , bench "difference" $ whnf (S.difference s) s_even
+        , bench "intersection" $ whnf (S.intersection s) s_even
         ]
   where
     elems = [1..2^10]

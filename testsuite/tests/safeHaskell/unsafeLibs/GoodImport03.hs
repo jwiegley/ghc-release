@@ -17,12 +17,8 @@ import Control.Category
 import Control.Concurrent
 import Control.Concurrent.Chan
 import Control.Concurrent.MVar
-import Control.Concurrent.QSem
-import Control.Concurrent.QSemN
-import Control.Concurrent.SampleVar
 
 import Control.Exception
-import Control.OldException
 import Control.Exception.Base
 
 import Control.Monad
@@ -40,7 +36,6 @@ import Data.Fixed
 import Data.Foldable
 import Data.Function
 import Data.Functor
-import Data.HashTable
 import Data.IORef
 import Data.Int
 import Data.Ix

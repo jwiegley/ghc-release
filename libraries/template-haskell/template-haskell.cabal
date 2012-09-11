@@ -1,5 +1,5 @@
 name:		template-haskell
-version:	2.7.0.0
+version:	2.8.0.0
 license:	BSD3
 license-file:	LICENSE
 maintainer:	libraries@haskell.org
@@ -13,7 +13,6 @@ Library
     build-depends: base >= 4.2 && < 5,
                    pretty, containers
     exposed-modules:
-        Language.Haskell.TH.Syntax.Internals
         Language.Haskell.TH.Syntax
         Language.Haskell.TH.PprLib
         Language.Haskell.TH.Ppr

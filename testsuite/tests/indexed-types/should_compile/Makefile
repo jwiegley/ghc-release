@@ -13,3 +13,15 @@ IndTypesPerf:
 	$(RM) IndTypesPerfMerge.o IndTypesPerfMerge.hi
 	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c IndTypesPerfMerge.hs +RTS -M20M
 	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c IndTypesPerf.hs      +RTS -M20M
+
+T5955:
+	$(RM) T5955.o T5955.hi T5955a.o T5955a.hi 
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T5955a.hs
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T5955.hs
+
+
+# Compiling twice made 7.4.1 break
+T6152:
+	$(RM) T6152.o T6152.hi 
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T6152.hs
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T6152.hs -fforce-recomp

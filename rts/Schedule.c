@@ -27,6 +27,7 @@
 #include "ProfHeap.h"
 #include "Weak.h"
 #include "sm/GC.h" // waitForGcThreads, releaseGCThreads, N
+#include "sm/GCThread.h"
 #include "Sparks.h"
 #include "Capability.h"
 #include "Task.h"
@@ -115,6 +116,11 @@ Mutex sched_mutex;
 #define FORKPROCESS_PRIMOP_SUPPORTED
 #endif
 
+// Local stats
+#ifdef THREADED_RTS
+static nat n_failed_trygrab_idles = 0, n_idle_caps = 0;
+#endif
+
 /* -----------------------------------------------------------------------------
  * static function prototypes
  * -------------------------------------------------------------------------- */
@@ -122,12 +128,12 @@ Mutex sched_mutex;
 static Capability *schedule (Capability *initialCapability, Task *task);
 
 //
-// These function all encapsulate parts of the scheduler loop, and are
+// These functions all encapsulate parts of the scheduler loop, and are
 // abstracted only to make the structure and control flow of the
 // scheduler clearer.
 //
 static void schedulePreLoop (void);
-static void scheduleFindWork (Capability *cap);
+static void scheduleFindWork (Capability **pcap);
 #if defined(THREADED_RTS)
 static void scheduleYield (Capability **pcap, Task *task);
 #endif
@@ -139,8 +145,8 @@ static void startWorkerTasks (nat from USED_IF_THREADS, nat to USED_IF_THREADS);
 #endif
 static void scheduleStartSignalHandlers (Capability *cap);
 static void scheduleCheckBlockedThreads (Capability *cap);
-static void scheduleProcessInbox(Capability *cap);
-static void scheduleDetectDeadlock (Capability *cap, Task *task);
+static void scheduleProcessInbox(Capability **cap);
+static void scheduleDetectDeadlock (Capability **pcap, Task *task);
 static void schedulePushWork(Capability *cap, Task *task);
 #if defined(THREADED_RTS)
 static void scheduleActivateSpark(Capability *cap);
@@ -153,8 +159,7 @@ static void scheduleHandleThreadBlocked( StgTSO *t );
 static rtsBool scheduleHandleThreadFinished( Capability *cap, Task *task,
 					     StgTSO *t );
 static rtsBool scheduleNeedHeapProfile(rtsBool ready_to_gc);
-static Capability *scheduleDoGC(Capability *cap, Task *task,
-				rtsBool force_major);
+static void scheduleDoGC(Capability **pcap, Task *task, rtsBool force_major);
 
 static void deleteThread (Capability *cap, StgTSO *tso);
 static void deleteAllThreads (Capability *cap);
@@ -275,7 +280,7 @@ schedule (Capability *initialCapability, Task *task)
     case SCHED_INTERRUPTING:
 	debugTrace(DEBUG_sched, "SCHED_INTERRUPTING");
         /* scheduleDoGC() deletes all the threads */
-	cap = scheduleDoGC(cap,task,rtsFalse);
+        scheduleDoGC(&cap,task,rtsFalse);
 
         // after scheduleDoGC(), we must be shutting down.  Either some
         // other Capability did the final GC, or we did it above,
@@ -297,17 +302,13 @@ schedule (Capability *initialCapability, Task *task)
 	barf("sched_state: %d", sched_state);
     }
 
-    scheduleFindWork(cap);
+    scheduleFindWork(&cap);
 
     /* work pushing, currently relevant only for THREADED_RTS:
        (pushes threads, wakes up idle capabilities for stealing) */
     schedulePushWork(cap,task);
 
-    scheduleDetectDeadlock(cap,task);
-
-#if defined(THREADED_RTS)
-    cap = task->cap;    // reload cap, it might have changed
-#endif
+    scheduleDetectDeadlock(&cap,task);
 
     // Normally, the only way we can get here with no threads to
     // run is if a keyboard interrupt received during 
@@ -390,6 +391,26 @@ schedule (Capability *initialCapability, Task *task)
         deleteThread(cap,t);
     }
 
+    // If this capability is disabled, migrate the thread away rather
+    // than running it.  NB. but not if the thread is bound: it is
+    // really hard for a bound thread to migrate itself.  Believe me,
+    // I tried several ways and couldn't find a way to do it.
+    // Instead, when everything is stopped for GC, we migrate all the
+    // threads on the run queue then (see scheduleDoGC()).
+    //
+    // ToDo: what about TSO_LOCKED?  Currently we're migrating those
+    // when the number of capabilities drops, but we never migrate
+    // them back if it rises again.  Presumably we should, but after
+    // the thread has been migrated we no longer know what capability
+    // it was originally on.
+#ifdef THREADED_RTS
+    if (cap->disabled && !t->bound) {
+        Capability *dest_cap = &capabilities[cap->no % enabled_capabilities];
+        migrateThread(cap, t, dest_cap);
+        continue;
+    }
+#endif
+
     /* context switches are initiated by the timer signal, unless
      * the user specified "context switch as often as possible", with
      * +RTS -C0
@@ -426,6 +447,7 @@ run_thread:
     cap->interrupt = 0;
 
     cap->in_haskell = rtsTrue;
+    cap->idle = 0;
 
     dirty_TSO(cap,t);
     dirty_STACK(cap,t->stackobj);
@@ -551,7 +573,7 @@ run_thread:
     }
 
     if (ready_to_gc || scheduleNeedHeapProfile(ready_to_gc)) {
-      cap = scheduleDoGC(cap,task,rtsFalse);
+      scheduleDoGC(&cap,task,rtsFalse);
     }
   } /* end of while() */
 }
@@ -589,7 +611,7 @@ schedulePreLoop(void)
 {
   // initialisation for scheduler - what cannot go into initScheduler()  
 
-#if defined(mingw32_HOST_OS)
+#if defined(mingw32_HOST_OS) && !defined(USE_MINIINTERPRETER)
     win32AllocStack();
 #endif
 }
@@ -601,30 +623,39 @@ schedulePreLoop(void)
  * -------------------------------------------------------------------------- */
 
 static void
-scheduleFindWork (Capability *cap)
+scheduleFindWork (Capability **pcap)
 {
-    scheduleStartSignalHandlers(cap);
+    scheduleStartSignalHandlers(*pcap);
 
-    scheduleProcessInbox(cap);
+    scheduleProcessInbox(pcap);
 
-    scheduleCheckBlockedThreads(cap);
+    scheduleCheckBlockedThreads(*pcap);
 
 #if defined(THREADED_RTS)
-    if (emptyRunQueue(cap)) { scheduleActivateSpark(cap); }
+    if (emptyRunQueue(*pcap)) { scheduleActivateSpark(*pcap); }
 #endif
 }
 
 #if defined(THREADED_RTS)
 STATIC_INLINE rtsBool
-shouldYieldCapability (Capability *cap, Task *task)
+shouldYieldCapability (Capability *cap, Task *task, rtsBool didGcLast)
 {
     // we need to yield this capability to someone else if..
-    //   - another thread is initiating a GC
+    //   - another thread is initiating a GC, and we didn't just do a GC
+    //     (see Note [GC livelock])
     //   - another Task is returning from a foreign call
     //   - the thread at the head of the run queue cannot be run
     //     by this Task (it is bound to another Task, or it is unbound
     //     and this task it bound).
-    return (pending_sync ||
+    //
+    // Note [GC livelock]
+    //
+    // If we are interrupted to do a GC, then we do not immediately do
+    // another one.  This avoids a starvation situation where one
+    // Capability keeps forcing a GC and the other Capabilities make no
+    // progress at all.
+
+    return ((pending_sync && !didGcLast) ||
             cap->returning_tasks_hd != NULL ||
             (!emptyRunQueue(cap) && (task->incall->tso == NULL
                                      ? cap->run_queue_hd->bound != NULL
@@ -645,20 +676,22 @@ static void
 scheduleYield (Capability **pcap, Task *task)
 {
     Capability *cap = *pcap;
+    int didGcLast = rtsFalse;
 
     // if we have work, and we don't need to give up the Capability, continue.
     //
-    if (!shouldYieldCapability(cap,task) && 
+    if (!shouldYieldCapability(cap,task,rtsFalse) && 
         (!emptyRunQueue(cap) ||
          !emptyInbox(cap) ||
-         sched_state >= SCHED_INTERRUPTING))
+         sched_state >= SCHED_INTERRUPTING)) {
         return;
+    }
 
     // otherwise yield (sleep), and keep yielding if necessary.
     do {
-        yieldCapability(&cap,task);
+        didGcLast = yieldCapability(&cap,task, !didGcLast);
     } 
-    while (shouldYieldCapability(cap,task));
+    while (shouldYieldCapability(cap,task,didGcLast));
 
     // note there may still be no threads on the run queue at this
     // point, the caller has to check.
@@ -700,10 +733,10 @@ schedulePushWork(Capability *cap USED_IF_THREADS,
     // First grab as many free Capabilities as we can.
     for (i=0, n_free_caps=0; i < n_capabilities; i++) {
 	cap0 = &capabilities[i];
-	if (cap != cap0 && tryGrabCapability(cap0,task)) {
+        if (cap != cap0 && !cap0->disabled && tryGrabCapability(cap0,task)) {
 	    if (!emptyRunQueue(cap0)
-                || cap->returning_tasks_hd != NULL
-                || cap->inbox != (Message*)END_TSO_QUEUE) {
+                || cap0->returning_tasks_hd != NULL
+                || cap0->inbox != (Message*)END_TSO_QUEUE) {
 		// it already has some work, we just grabbed it at 
 		// the wrong moment.  Or maybe it's deadlocked!
 		releaseCapability(cap0);
@@ -862,9 +895,10 @@ scheduleCheckBlockedThreads(Capability *cap USED_IF_NOT_THREADS)
  * ------------------------------------------------------------------------- */
 
 static void
-scheduleDetectDeadlock (Capability *cap, Task *task)
+scheduleDetectDeadlock (Capability **pcap, Task *task)
 {
-    /* 
+    Capability *cap = *pcap;
+    /*
      * Detect deadlock: when we have no threads to run, there are no
      * threads blocked, waiting for I/O, or sleeping, and all the
      * other tasks are waiting for work, we must have a deadlock of
@@ -889,7 +923,8 @@ scheduleDetectDeadlock (Capability *cap, Task *task)
 	// they are unreachable and will therefore be sent an
 	// exception.  Any threads thus released will be immediately
 	// runnable.
-	cap = scheduleDoGC (cap, task, rtsTrue/*force major GC*/);
+        scheduleDoGC (pcap, task, rtsTrue/*force major GC*/);
+        cap = *pcap;
         // when force_major == rtsTrue. scheduleDoGC sets
         // recent_activity to ACTIVITY_DONE_GC and turns off the timer
         // signal.
@@ -969,16 +1004,18 @@ scheduleSendPendingMessages(void)
  * ------------------------------------------------------------------------- */
 
 static void
-scheduleProcessInbox (Capability *cap USED_IF_THREADS)
+scheduleProcessInbox (Capability **pcap USED_IF_THREADS)
 {
 #if defined(THREADED_RTS)
     Message *m, *next;
     int r;
+    Capability *cap = *pcap;
 
     while (!emptyInbox(cap)) {
         if (cap->r.rCurrentNursery->link == NULL ||
             g0->n_new_large_words >= large_alloc_lim) {
-            scheduleDoGC(cap, cap->running_task, rtsFalse);
+            scheduleDoGC(pcap, cap->running_task, rtsFalse);
+            cap = *pcap;
         }
 
         // don't use a blocking acquire; if the lock is held by
@@ -1016,7 +1053,7 @@ scheduleProcessInbox (Capability *cap USED_IF_THREADS)
 static void
 scheduleActivateSpark(Capability *cap)
 {
-    if (anySparks())
+    if (anySparks() && !cap->disabled)
     {
         createSparkThread(cap);
         debugTrace(DEBUG_sched, "creating a spark thread");
@@ -1348,7 +1385,7 @@ static nat requestSync (Capability **pcap, Task *task, nat sync_type)
             debugTrace(DEBUG_sched, "someone else is trying to sync (%d)...",
                        prev_pending_sync);
             ASSERT(*pcap);
-            yieldCapability(pcap,task);
+            yieldCapability(pcap,task,rtsTrue);
         } while (pending_sync);
         return prev_pending_sync; // NOTE: task->cap might have changed now
     }
@@ -1408,20 +1445,24 @@ static void releaseAllCapabilities(Capability *cap, Task *task)
  * Perform a garbage collection if necessary
  * -------------------------------------------------------------------------- */
 
-static Capability *
-scheduleDoGC (Capability *cap, Task *task USED_IF_THREADS, rtsBool force_major)
+static void
+scheduleDoGC (Capability **pcap, Task *task USED_IF_THREADS,
+              rtsBool force_major)
 {
+    Capability *cap = *pcap;
     rtsBool heap_census;
 #ifdef THREADED_RTS
+    rtsBool idle_cap[n_capabilities];
     rtsBool gc_type;
     nat i, sync;
+    StgTSO *tso;
 #endif
 
     if (sched_state == SCHED_SHUTTING_DOWN) {
         // The final GC has already been done, and the system is
         // shutting down.  We'll probably deadlock if we try to GC
         // now.
-        return cap;
+        return;
     }
 
 #ifdef THREADED_RTS
@@ -1451,12 +1492,19 @@ scheduleDoGC (Capability *cap, Task *task USED_IF_THREADS, rtsBool force_major)
 	yieldCapability() and releaseCapability() in Capability.c */
 
     do {
-        sync = requestSync(&cap, task, gc_type);
+        sync = requestSync(pcap, task, gc_type);
+        cap = *pcap;
         if (sync == SYNC_GC_SEQ || sync == SYNC_GC_PAR) {
             // someone else had a pending sync request for a GC, so
             // let's assume GC has been done and we don't need to GC
             // again.
-            return cap;
+            return;
+        }
+        if (sched_state == SCHED_SHUTTING_DOWN) {
+            // The scheduler might now be shutting down.  We tested
+            // this above, but it might have become true since then as
+            // we yielded the capability in requestSync().
+            return;
         }
     } while (sync);
 
@@ -1482,8 +1530,58 @@ scheduleDoGC (Capability *cap, Task *task USED_IF_THREADS, rtsBool force_major)
     }
     else
     {
-        // multi-threaded GC: make sure all the Capabilities donate one
-        // GC thread each.
+        // If we are load-balancing collections in this
+        // generation, then we require all GC threads to participate
+        // in the collection.  Otherwise, we only require active
+        // threads to participate, and we set gc_threads[i]->idle for
+        // any idle capabilities.  The rationale here is that waking
+        // up an idle Capability takes much longer than just doing any
+        // GC work on its behalf.
+
+        if (RtsFlags.ParFlags.parGcNoSyncWithIdle == 0
+            || (RtsFlags.ParFlags.parGcLoadBalancingEnabled &&
+                N >= RtsFlags.ParFlags.parGcLoadBalancingGen)) {
+            for (i=0; i < n_capabilities; i++) {
+                if (capabilities[i].disabled) {
+                    idle_cap[i] = tryGrabCapability(&capabilities[i], task);
+                } else {
+                    idle_cap[i] = rtsFalse;
+                }
+            }
+        } else {
+            for (i=0; i < n_capabilities; i++) {
+                if (capabilities[i].disabled) {
+                    idle_cap[i] = tryGrabCapability(&capabilities[i], task);
+                } else if (i == cap->no ||
+                           capabilities[i].idle < RtsFlags.ParFlags.parGcNoSyncWithIdle) {
+                    idle_cap[i] = rtsFalse;
+                } else {
+                    idle_cap[i] = tryGrabCapability(&capabilities[i], task);
+                    if (!idle_cap[i]) {
+                        n_failed_trygrab_idles++;
+                    } else {
+                        n_idle_caps++;
+                    }
+                }
+            }
+        }
+
+        // We set the gc_thread[i]->idle flag if that
+        // capability/thread is not participating in this collection.
+        // We also keep a local record of which capabilities are idle
+        // in idle_cap[], because scheduleDoGC() is re-entrant:
+        // another thread might start a GC as soon as we've finished
+        // this one, and thus the gc_thread[]->idle flags are invalid
+        // as soon as we release any threads after GC.  Getting this
+        // wrong leads to a rare and hard to debug deadlock!
+
+        for (i=0; i < n_capabilities; i++) {
+            gc_threads[i]->idle = idle_cap[i];
+            capabilities[i].idle++;
+        }
+
+        // For all capabilities participating in this GC, wait until
+        // they have stopped mutating and are standing by for GC.
         waitForGcThreads(cap);
         
 #if defined(THREADED_RTS)
@@ -1519,9 +1617,31 @@ delete_threads_and_gc:
         sched_state = SCHED_SHUTTING_DOWN;
     }
     
+    /*
+     * When there are disabled capabilities, we want to migrate any
+     * threads away from them.  Normally this happens in the
+     * scheduler's loop, but only for unbound threads - it's really
+     * hard for a bound thread to migrate itself.  So we have another
+     * go here.
+     */
+#if defined(THREADED_RTS)
+    for (i = enabled_capabilities; i < n_capabilities; i++) {
+        Capability *tmp_cap, *dest_cap;
+        tmp_cap = &capabilities[i];
+        ASSERT(tmp_cap->disabled);
+        if (i != cap->no) {
+            dest_cap = &capabilities[i % enabled_capabilities];
+            while (!emptyRunQueue(tmp_cap)) {
+                tso = popRunQueue(tmp_cap);
+                migrateThread(tmp_cap, tso, dest_cap);
+                if (tso->bound) { tso->bound->task->cap = dest_cap; }
+            }
+        }
+    }
+#endif
+
     heap_census = scheduleNeedHeapProfile(rtsTrue);
 
-    traceEventGcStart(cap);
 #if defined(THREADED_RTS)
     // reset pending_sync *before* GC, so that when the GC threads
     // emerge they don't immediately re-enter the GC.
@@ -1530,25 +1650,33 @@ delete_threads_and_gc:
 #else
     GarbageCollect(force_major || heap_census, heap_census, 0, cap);
 #endif
-    traceEventGcEnd(cap);
 
     traceSparkCounters(cap);
 
-    if (recent_activity == ACTIVITY_INACTIVE && force_major)
-    {
-        // We are doing a GC because the system has been idle for a
-        // timeslice and we need to check for deadlock.  Record the
-        // fact that we've done a GC and turn off the timer signal;
-        // it will get re-enabled if we run any threads after the GC.
-        recent_activity = ACTIVITY_DONE_GC;
-        stopTimer();
-    }
-    else
-    {
+    switch (recent_activity) {
+    case ACTIVITY_INACTIVE:
+        if (force_major) {
+            // We are doing a GC because the system has been idle for a
+            // timeslice and we need to check for deadlock.  Record the
+            // fact that we've done a GC and turn off the timer signal;
+            // it will get re-enabled if we run any threads after the GC.
+            recent_activity = ACTIVITY_DONE_GC;
+            stopTimer();
+            break;
+        }
+        // fall through...
+
+    case ACTIVITY_MAYBE_NO:
         // the GC might have taken long enough for the timer to set
-        // recent_activity = ACTIVITY_INACTIVE, but we aren't
-        // necessarily deadlocked:
+        // recent_activity = ACTIVITY_MAYBE_NO or ACTIVITY_INACTIVE,
+        // but we aren't necessarily deadlocked:
         recent_activity = ACTIVITY_YES;
+        break;
+
+    case ACTIVITY_DONE_GC:
+        // If we are actually active, the scheduler will reset the
+        // recent_activity flag and re-enable the timer.
+        break;
     }
 
 #if defined(THREADED_RTS)
@@ -1565,6 +1693,18 @@ delete_threads_and_gc:
     if (gc_type == SYNC_GC_PAR)
     {
         releaseGCThreads(cap);
+        for (i = 0; i < n_capabilities; i++) {
+            if (i != cap->no) {
+                if (idle_cap[i]) {
+                    ASSERT(capabilities[i].running_task == task);
+                    task->cap = &capabilities[i];
+                    releaseCapability(&capabilities[i]);
+                } else {
+                    ASSERT(capabilities[i].running_task != task);
+                }
+            }
+        }
+        task->cap = cap;
     }
 #endif
 
@@ -1600,7 +1740,7 @@ delete_threads_and_gc:
     }
 #endif
 
-    return cap;
+    return;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1785,7 +1925,7 @@ forkProcess(HsStablePtr *entry
 }
 
 /* ---------------------------------------------------------------------------
- * Increase the number of Capabilities
+ * Changing the number of Capabilities
  *
  * Changing the number of Capabilities is very tricky!  We can only do
  * it with the system fully stopped, so we do a full sync with
@@ -1802,25 +1942,27 @@ void
 setNumCapabilities (nat new_n_capabilities USED_IF_THREADS)
 {
 #if !defined(THREADED_RTS)
-
-    barf("setNumCapabilities: not supported in the non-threaded RTS");
-
+    if (new_n_capabilities != 1) {
+        errorBelch("setNumCapabilities: not supported in the non-threaded RTS");
+    }
+    return;
+#elif defined(NOSMP)
+    if (new_n_capabilities != 1) {
+        errorBelch("setNumCapabilities: not supported on this platform");
+    }
+    return;
 #else
     Task *task;
     Capability *cap;
     nat sync;
     StgTSO* t;
-    nat g;
-    Capability *old_capabilities;
+    nat g, n;
+    Capability *old_capabilities = NULL;
 
-    if (new_n_capabilities == n_capabilities) return;
-
-    if (new_n_capabilities < n_capabilities) {
-        barf("setNumCapabilities: reducing the number of Capabilities is not currently supported.");
-    }
+    if (new_n_capabilities == enabled_capabilities) return;
 
     debugTrace(DEBUG_sched, "changing the number of Capabilities from %d to %d",
-               n_capabilities, new_n_capabilities);
+               enabled_capabilities, new_n_capabilities);
     
     cap = rts_lock();
     task = cap->running_task;
@@ -1833,31 +1975,79 @@ setNumCapabilities (nat new_n_capabilities USED_IF_THREADS)
 
     pending_sync = 0;
 
+    if (new_n_capabilities < enabled_capabilities)
+    {
+        // Reducing the number of capabilities: we do not actually
+        // remove the extra capabilities, we just mark them as
+        // "disabled". This has the following effects:
+        //
+        //   - threads on a disabled capability are migrated away by the
+        //     scheduler loop
+        //
+        //   - disabled capabilities do not participate in GC
+        //     (see scheduleDoGC())
+        //
+        //   - No spark threads are created on this capability
+        //     (see scheduleActivateSpark())
+        //
+        //   - We do not attempt to migrate threads *to* a disabled
+        //     capability (see schedulePushWork()).
+        //
+        // but in other respects, a disabled capability remains
+        // alive.  Threads may be woken up on a disabled capability,
+        // but they will be immediately migrated away.
+        //
+        // This approach is much easier than trying to actually remove
+        // the capability; we don't have to worry about GC data
+        // structures, the nursery, etc.
+        //
+        for (n = new_n_capabilities; n < enabled_capabilities; n++) {
+            capabilities[n].disabled = rtsTrue;
+            traceCapDisable(&capabilities[n]);
+        }
+        enabled_capabilities = new_n_capabilities;
+    }
+    else
+    {
+        // Increasing the number of enabled capabilities.
+        //
+        // enable any disabled capabilities, up to the required number
+        for (n = enabled_capabilities;
+             n < new_n_capabilities && n < n_capabilities; n++) {
+            capabilities[n].disabled = rtsFalse;
+            traceCapEnable(&capabilities[n]);
+        }
+        enabled_capabilities = n;
+
+        if (new_n_capabilities > n_capabilities) {
 #if defined(TRACING)
-    // Allocate eventlog buffers for the new capabilities.  Note this
-    // must be done before calling moreCapabilities(), because that
-    // will emit events to add the new capabilities to capsets.
-    tracingAddCapapilities(n_capabilities, new_n_capabilities);
+            // Allocate eventlog buffers for the new capabilities.  Note this
+            // must be done before calling moreCapabilities(), because that
+            // will emit events about creating the new capabilities and adding
+            // them to existing capsets.
+            tracingAddCapapilities(n_capabilities, new_n_capabilities);
 #endif
 
-    // Resize the capabilities array
-    // NB. after this, capabilities points somewhere new.  Any pointers
-    // of type (Capability *) are now invalid.
-    old_capabilities = moreCapabilities(n_capabilities, new_n_capabilities);
+            // Resize the capabilities array
+            // NB. after this, capabilities points somewhere new.  Any pointers
+            // of type (Capability *) are now invalid.
+            old_capabilities = moreCapabilities(n_capabilities, new_n_capabilities);
 
-    // update our own cap pointer
-    cap = &capabilities[cap->no];
+            // update our own cap pointer
+            cap = &capabilities[cap->no];
 
-    // Resize and update storage manager data structures
-    storageAddCapabilities(n_capabilities, new_n_capabilities);
+            // Resize and update storage manager data structures
+            storageAddCapabilities(n_capabilities, new_n_capabilities);
 
-    // Update (Capability *) refs in the Task manager.
-    updateCapabilityRefs();
+            // Update (Capability *) refs in the Task manager.
+            updateCapabilityRefs();
 
-    // Update (Capability *) refs from TSOs
-    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-        for (t = generations[g].threads; t != END_TSO_QUEUE; t = t->global_link) {
-            t->cap = &capabilities[t->cap->no];
+            // Update (Capability *) refs from TSOs
+            for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+                for (t = generations[g].threads; t != END_TSO_QUEUE; t = t->global_link) {
+                    t->cap = &capabilities[t->cap->no];
+                }
+            }
         }
     }
 
@@ -1868,7 +2058,9 @@ setNumCapabilities (nat new_n_capabilities USED_IF_THREADS)
     startWorkerTasks(n_capabilities, new_n_capabilities);
 
     // finally, update n_capabilities
-    n_capabilities = new_n_capabilities;
+    if (new_n_capabilities > n_capabilities) {
+        n_capabilities = enabled_capabilities = new_n_capabilities;
+    }
 
     // We can't free the old array until now, because we access it
     // while updating pointers in updateCapabilityRefs().
@@ -2114,7 +2306,7 @@ scheduleThreadOn(Capability *cap, StgWord cpu USED_IF_THREADS, StgTSO *tso)
     tso->flags |= TSO_LOCKED; // we requested explicit affinity; don't
 			      // move this thread from now on.
 #if defined(THREADED_RTS)
-    cpu %= n_capabilities;
+    cpu %= enabled_capabilities;
     if (cpu == cap->no) {
 	appendToRunQueue(cap,tso);
     } else {
@@ -2269,14 +2461,18 @@ exitScheduler (rtsBool wait_foreign USED_IF_THREADS)
     // If we haven't killed all the threads yet, do it now.
     if (sched_state < SCHED_SHUTTING_DOWN) {
 	sched_state = SCHED_INTERRUPTING;
-        waitForReturnCapability(&task->cap,task);
-	scheduleDoGC(task->cap,task,rtsFalse);
+        Capability *cap = task->cap;
+        waitForReturnCapability(&cap,task);
+        scheduleDoGC(&cap,task,rtsTrue);
         ASSERT(task->incall->tso == NULL);
-        releaseCapability(task->cap);
+        releaseCapability(cap);
     }
     sched_state = SCHED_SHUTTING_DOWN;
 
     shutdownCapabilities(task, wait_foreign);
+
+    // debugBelch("n_failed_trygrab_idles = %d, n_idle_caps = %d\n",
+    //            n_failed_trygrab_idles, n_idle_caps);
 
     boundTaskExiting(task);
 }
@@ -2328,15 +2524,16 @@ static void
 performGC_(rtsBool force_major)
 {
     Task *task;
+    Capability *cap = NULL;
 
     // We must grab a new Task here, because the existing Task may be
     // associated with a particular Capability, and chained onto the 
     // suspended_ccalls queue.
     task = newBoundTask();
 
-    waitForReturnCapability(&task->cap,task);
-    scheduleDoGC(task->cap,task,force_major);
-    releaseCapability(task->cap);
+    waitForReturnCapability(&cap,task);
+    scheduleDoGC(&cap,task,force_major);
+    releaseCapability(cap);
     boundTaskExiting(task);
 }
 

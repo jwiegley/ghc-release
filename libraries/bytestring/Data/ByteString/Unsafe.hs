@@ -1,14 +1,16 @@
 {-# LANGUAGE CPP #-}
--- We cannot actually specify all the language pragmas, see ghc ticket #
--- If we could, these are what they would be:
-{- LANGUAGE MagicHash -}
+#if __GLASGOW_HASKELL__
+{-# LANGUAGE MagicHash #-}
+#endif
 
 -- |
 -- Module      : Data.ByteString.Unsafe
+-- Copyright   : (c) Don Stewart 2006-2008
+--               (c) Duncan Coutts 2006-2011
 -- License     : BSD-style
--- Maintainer  : dons@cse.unsw.edu.au, duncan@haskell.org
--- Stability   : experimental
--- Portability : portable
+-- Maintainer  : dons00@gmail.com, duncan@community.haskell.org
+-- Stability   : provisional
+-- Portability : non-portable
 --
 -- A module containing unsafe 'ByteString' operations.
 --

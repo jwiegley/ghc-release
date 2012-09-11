@@ -6,6 +6,9 @@
            , ScopedTypeVariables
   #-}
 {-# OPTIONS_GHC -fno-warn-unused-imports #-}
+{-# OPTIONS_GHC -fno-warn-deprecations #-}
+-- kludge for the Control.Concurrent.QSem, Control.Concurrent.QSemN
+-- and Control.Concurrent.SampleVar imports.
 
 -----------------------------------------------------------------------------
 -- |
@@ -36,6 +39,7 @@ module Control.Concurrent (
 
         forkIO,
 #ifdef __GLASGOW_HASKELL__
+        forkFinally,
         forkIOWithUnmask,
         killThread,
         throwTo,
@@ -45,6 +49,7 @@ module Control.Concurrent (
         forkOn,
         forkOnWithUnmask,
         getNumCapabilities,
+        setNumCapabilities,
         threadCapability,
 
         -- * Scheduling
@@ -87,6 +92,9 @@ module Control.Concurrent (
         runInBoundThread,
         runInUnboundThread,
 #endif
+
+        -- * Weak references to ThreadIds
+        mkWeakThreadId,
 
         -- * GHC's implementation of concurrency
 
@@ -201,10 +209,31 @@ Using Hugs, all I\/O operations and foreign calls will block all other
 Haskell threads.
 -}
 
+-- | fork a thread and call the supplied function when the thread is about
+-- to terminate, with an exception or a returned value.  The function is
+-- called with asynchronous exceptions masked.
+--
+-- > forkFinally action and_then =
+-- >   mask $ \restore ->
+-- >     forkIO $ try (restore action) >>= and_then
+--
+-- This function is useful for informing the parent when a child
+-- terminates, for example.
+--
+forkFinally :: IO a -> (Either SomeException a -> IO ()) -> IO ThreadId
+forkFinally action and_then =
+  mask $ \restore ->
+    forkIO $ try (restore action) >>= and_then
+
+-- -----------------------------------------------------------------------------
+-- Merging streams
+
 #ifndef __HUGS__
 max_buff_size :: Int
 max_buff_size = 1
 
+{-# DEPRECATED mergeIO "Control.Concurrent.mergeIO will be removed in GHC 7.8. Please use an alternative, e.g. the SafeSemaphore package, instead." #-}
+{-# DEPRECATED nmergeIO "Control.Concurrent.nmergeIO will be removed in GHC 7.8. Please use an alternative, e.g. the SafeSemaphore package, instead." #-}
 mergeIO :: [a] -> [a] -> IO [a]
 nmergeIO :: [[a]] -> IO [a]
 
@@ -594,11 +623,10 @@ foreign import ccall safe "fdReady"
 >   myForkIO :: IO () -> IO (MVar ())
 >   myForkIO io = do
 >     mvar <- newEmptyMVar
->     forkIO (io `finally` putMVar mvar ())
+>     forkFinally io (\_ -> putMVar mvar ())
 >     return mvar
 
-      Note that we use 'finally' from the
-      "Control.Exception" module to make sure that the
+      Note that we use 'forkFinally' to make sure that the
       'MVar' is written to even if the thread dies or
       is killed for some reason.
 
@@ -623,7 +651,7 @@ foreign import ccall safe "fdReady"
 >        mvar <- newEmptyMVar
 >        childs <- takeMVar children
 >        putMVar children (mvar:childs)
->        forkIO (io `finally` putMVar mvar ())
+>        forkFinally io (\_ -> putMVar mvar ())
 >
 >     main =
 >       later waitForChildren $

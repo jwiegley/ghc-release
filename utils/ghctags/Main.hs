@@ -11,7 +11,7 @@ import HscTypes         ( msHsFilePath )
 import Name             ( getOccString )
 --import ErrUtils         ( printBagOfErrors )
 import Panic            ( panic )
-import DynFlags         ( defaultLogAction )
+import DynFlags         ( defaultFatalMessager, defaultFlushOut )
 import Bag
 import Exception
 import FastString
@@ -19,10 +19,13 @@ import MonadUtils       ( liftIO )
 import SrcLoc
 
 -- Every GHC comes with Cabal anyways, so this is not a bad new dependency
-import Distribution.Simple.GHC ( ghcOptions )
+import Distribution.Simple.GHC ( componentGhcOptions )
 import Distribution.Simple.Configure ( getPersistBuildConfig )
+import Distribution.Simple.Compiler ( compilerVersion )
+import Distribution.Simple.Program.GHC ( renderGhcOptions )
 import Distribution.PackageDescription ( library, libBuildInfo )
-import Distribution.Simple.LocalBuildInfo ( localPkgDescr, buildDir, libraryConfig )
+import Distribution.Simple.LocalBuildInfo ( localPkgDescr, buildDir, libraryConfig, compiler )
+import qualified Distribution.Verbosity as V
 
 import Control.Monad hiding (mapM)
 import System.Environment
@@ -102,7 +105,7 @@ main = do
                      then Just `liftM` openFile "TAGS" openFileMode
                      else return Nothing
 
-  GHC.defaultErrorHandler defaultLogAction $
+  GHC.defaultErrorHandler defaultFatalMessager defaultFlushOut $
     runGhc (Just ghc_topdir) $ do
       --liftIO $ print "starting up session"
       dflags <- getSessionDynFlags
@@ -184,8 +187,9 @@ flagsFromCabal distPref = do
     (Just lib, Just clbi) ->
       let bi = libBuildInfo lib
           odir = buildDir lbi
-          opts = ghcOptions lbi bi clbi odir
-      in return opts
+          opts = componentGhcOptions V.normal lbi bi clbi odir
+          version = compilerVersion (compiler lbi)
+      in return $ renderGhcOptions version opts
     _ -> error "no library"
 
 ----------------------------------------------------------------
@@ -253,7 +257,7 @@ boundValues mod group =
                        , bind <- bagToList binds
                        , x <- boundThings mod bind ]
                _other -> error "boundValues"
-      tys = [ n | ns <- map hsTyClDeclBinders (concat (hs_tyclds group))
+      tys = [ n | ns <- map hsLTyClDeclBinders (concat (hs_tyclds group))
                 , n <- map found ns ]
       fors = concat $ map forBound (hs_fords group)
              where forBound lford = case unLoc lford of

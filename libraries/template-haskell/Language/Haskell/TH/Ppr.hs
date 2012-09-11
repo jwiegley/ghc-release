@@ -9,7 +9,8 @@ module Language.Haskell.TH.Ppr where
 import Text.PrettyPrint (render)
 import Language.Haskell.TH.PprLib
 import Language.Haskell.TH.Syntax
-import Data.Char ( toLower )
+import Data.Word ( Word8 )
+import Data.Char ( toLower, chr )
 import GHC.Show  ( showMultiLineString )
 
 nestDepth :: Int
@@ -105,6 +106,8 @@ pprExp _ (InfixE me1 op me2) = parens $ pprMaybeExp noPrec me1
                                     <+> pprMaybeExp noPrec me2
 pprExp i (LamE ps e) = parensIf (i > noPrec) $ char '\\' <> hsep (map (pprPat appPrec) ps)
                                            <+> text "->" <+> ppr e
+pprExp i (LamCaseE ms) = parensIf (i > noPrec)
+                       $ text "\\case" $$ nest nestDepth (ppr ms)
 pprExp _ (TupE es) = parens $ sep $ punctuate comma $ map ppr es
 pprExp _ (UnboxedTupE es) = hashParens $ sep $ punctuate comma $ map ppr es
 -- Nesting in Cond is to avoid potential problems in do statments
@@ -112,6 +115,12 @@ pprExp i (CondE guard true false)
  = parensIf (i > noPrec) $ sep [text "if"   <+> ppr guard,
                        nest 1 $ text "then" <+> ppr true,
                        nest 1 $ text "else" <+> ppr false]
+pprExp i (MultiIfE alts)
+  = parensIf (i > noPrec) $ vcat $
+      case alts of
+        []            -> [text "if {}"]
+        (alt : alts') -> text "if" <+> pprGuarded arrow alt
+                         : map (nest 3 . pprGuarded arrow) alts'
 pprExp i (LetE ds e) = parensIf (i > noPrec) $ text "let" <+> ppr ds
                                             $$ text " in" <+> ppr e
 pprExp i (CaseE e ms)
@@ -153,13 +162,19 @@ instance Ppr Match where
                         $$ where_clause ds
 
 ------------------------------
+pprGuarded :: Doc -> (Guard, Exp) -> Doc
+pprGuarded eqDoc (guard, expr) = case guard of
+  NormalG guardExpr -> char '|' <+> ppr guardExpr <+> eqDoc <+> ppr expr
+  PatG    stmts     -> char '|' <+> vcat (punctuate comma $ map ppr stmts) $$ 
+                         nest nestDepth (eqDoc <+> ppr expr)
+
+------------------------------
 pprBody :: Bool -> Body -> Doc
-pprBody eq (GuardedB xs) = nest nestDepth $ vcat $ map do_guard xs
-  where eqd = if eq then text "=" else text "->"
-        do_guard (NormalG g, e) = text "|" <+> ppr g <+> eqd <+> ppr e
-        do_guard (PatG ss, e) = text "|" <+> vcat (map ppr ss)
-                             $$ nest nestDepth (eqd <+> ppr e)
-pprBody eq (NormalB e) = (if eq then text "=" else text "->") <+> ppr e
+pprBody eq body = case body of
+    GuardedB xs -> nest nestDepth $ vcat $ map (pprGuarded eqDoc) xs
+    NormalB  e  -> eqDoc <+> ppr e
+  where eqDoc | eq        = equals
+              | otherwise = arrow
 
 ------------------------------
 pprLit :: Precedence -> Lit -> Doc
@@ -173,8 +188,11 @@ pprLit i (DoublePrimL x) = parensIf (i > noPrec && x < 0)
 pprLit i (IntegerL x)    = parensIf (i > noPrec && x < 0) (integer x)
 pprLit _ (CharL c)       = text (show c)
 pprLit _ (StringL s)     = pprString s
-pprLit _ (StringPrimL s) = pprString s <> char '#'
+pprLit _ (StringPrimL s) = pprString (bytesToString s) <> char '#'
 pprLit i (RationalL rat) = parensIf (i > noPrec) $ rational rat
+
+bytesToString :: [Word8] -> String
+bytesToString = map (chr . fromIntegral)
 
 pprString :: String -> Doc
 -- Print newlines as newlines with Haskell string escape notation, 
@@ -235,9 +253,10 @@ ppr_dec _  (ClassD ctxt c xs fds ds)
     $$ where_clause ds
 ppr_dec _ (InstanceD ctxt i ds) = text "instance" <+> pprCxt ctxt <+> ppr i
                                   $$ where_clause ds
-ppr_dec _ (SigD f t) = ppr f <+> text "::" <+> ppr t
-ppr_dec _ (ForeignD f) = ppr f
-ppr_dec _ (PragmaD p) = ppr p
+ppr_dec _ (SigD f t)    = ppr f <+> text "::" <+> ppr t
+ppr_dec _ (ForeignD f)  = ppr f
+ppr_dec _ (InfixD fx n) = pprFixity n fx
+ppr_dec _ (PragmaD p)   = ppr p
 ppr_dec isTop (FamilyD flav tc tvs k) 
   = ppr flav <+> maybeFamily <+> ppr tc <+> hsep (map ppr tvs) <+> maybeKind
   where
@@ -323,33 +342,52 @@ instance Ppr Foreign where
 
 ------------------------------
 instance Ppr Pragma where
-    ppr (InlineP n (InlineSpec inline conlike activation))
+    ppr (InlineP n inline rm phases)
        = text "{-#"
-     <+> (if inline then text "INLINE" else text "NOINLINE")
-     <+> (if conlike then text "CONLIKE" else empty)
-     <+> ppr_activation activation 
+     <+> ppr inline
+     <+> ppr rm
+     <+> ppr phases
      <+> ppr n
      <+> text "#-}"
-    ppr (SpecialiseP n ty Nothing)
-       = sep [ text "{-# SPECIALISE" 
-             , ppr n <+> text "::"
-             , ppr ty
-             , text "#-}"
-             ]
-    ppr (SpecialiseP n ty (Just (InlineSpec inline _conlike activation)))
-       = sep [ text "{-# SPECIALISE" <+> 
-               (if inline then text "INLINE" else text "NOINLINE") <+>
-               ppr_activation activation
-             , ppr n <+> text "::"
-             , ppr ty
-             , text "#-}"
-             ]
-      where
+    ppr (SpecialiseP n ty inline phases)
+       =   text "{-# SPECIALISE"
+       <+> maybe empty ppr inline
+       <+> ppr phases
+       <+> sep [ ppr n <+> text "::"
+               , nest 2 $ ppr ty ]
+       <+> text "#-}"
+    ppr (SpecialiseInstP inst)
+       = text "{-# SPECIALISE instance" <+> ppr inst <+> text "#-}"
+    ppr (RuleP n bndrs lhs rhs phases)
+       = sep [ text "{-# RULES" <+> pprString n <+> ppr phases
+             , nest 4 $ ppr_forall <+> ppr lhs
+             , nest 4 $ char '=' <+> ppr rhs <+> text "#-}" ]
+      where ppr_forall | null bndrs =   empty
+                       | otherwise  =   text "forall"
+                                    <+> fsep (map ppr bndrs)
+                                    <+> char '.'
 
-ppr_activation :: Maybe (Bool, Int) -> Doc
-ppr_activation (Just (beforeFrom, i))
-  = brackets $ (if beforeFrom then empty else char '~') <+> int i
-ppr_activation Nothing = empty
+------------------------------
+instance Ppr Inline where
+    ppr NoInline  = text "NOINLINE"
+    ppr Inline    = text "INLINE"
+    ppr Inlinable = text "INLINABLE"
+
+------------------------------
+instance Ppr RuleMatch where
+    ppr ConLike = text "CONLIKE"
+    ppr FunLike = empty
+
+------------------------------
+instance Ppr Phases where
+    ppr AllPhases       = empty
+    ppr (FromPhase i)   = brackets $ int i
+    ppr (BeforePhase i) = brackets $ char '~' <> int i
+
+------------------------------
+instance Ppr RuleBndr where
+    ppr (RuleVar n)         = ppr n
+    ppr (TypedRuleVar n ty) = parens $ ppr n <+> text "::" <+> ppr ty
 
 ------------------------------
 instance Ppr Clause where
@@ -381,14 +419,22 @@ pprStrictType (Unpacked, t) = text "{-# UNPACK #-} !" <> pprParendType t
 
 ------------------------------
 pprParendType :: Type -> Doc
-pprParendType (VarT v)   = ppr v
-pprParendType (ConT c)   = ppr c
-pprParendType (TupleT 0) = text "()"
-pprParendType (TupleT n) = parens (hcat (replicate (n-1) comma))
-pprParendType (UnboxedTupleT n) = hashParens $ hcat $ replicate (n-1) comma
-pprParendType ArrowT     = parens (text "->")
-pprParendType ListT      = text "[]"
-pprParendType other      = parens (ppr other)
+pprParendType (VarT v)            = ppr v
+pprParendType (ConT c)            = ppr c
+pprParendType (TupleT 0)          = text "()"
+pprParendType (TupleT n)          = parens (hcat (replicate (n-1) comma))
+pprParendType (UnboxedTupleT n)   = hashParens $ hcat $ replicate (n-1) comma
+pprParendType ArrowT              = parens (text "->")
+pprParendType ListT               = text "[]"
+pprParendType (LitT l)            = pprTyLit l
+pprParendType (PromotedT c)       = text "'" <> ppr c
+pprParendType (PromotedTupleT 0)  = text "'()"
+pprParendType (PromotedTupleT n)  = quoteParens (hcat (replicate (n-1) comma))
+pprParendType PromotedNilT        = text "'[]"
+pprParendType PromotedConsT       = text "(':)"
+pprParendType StarT               = char '*'
+pprParendType ConstraintT         = text "Constraint"
+pprParendType other               = parens (ppr other)
 
 instance Ppr Type where
     ppr (ForallT tvars ctxt ty)
@@ -402,6 +448,8 @@ pprTyApp (ArrowT, [arg1,arg2]) = sep [pprFunArgType arg1 <+> text "->", ppr arg2
 pprTyApp (ListT, [arg]) = brackets (ppr arg)
 pprTyApp (TupleT n, args)
  | length args == n = parens (sep (punctuate comma (map ppr args)))
+pprTyApp (PromotedTupleT n, args)
+ | length args == n = quoteParens (sep (punctuate comma (map ppr args)))
 pprTyApp (fun, args) = pprParendType fun <+> sep (map pprParendType args)
 
 pprFunArgType :: Type -> Doc	-- Should really use a precedence argument
@@ -416,18 +464,17 @@ split t = go t []
     where go (AppT t1 t2) args = go t1 (t2:args)
           go ty           args = (ty, args)
 
+pprTyLit :: TyLit -> Doc
+pprTyLit (NumTyLit n) = integer n
+pprTyLit (StrTyLit s) = text (show s)
+
+instance Ppr TyLit where
+  ppr = pprTyLit
+
 ------------------------------
 instance Ppr TyVarBndr where
     ppr (PlainTV nm)    = ppr nm
     ppr (KindedTV nm k) = parens (ppr nm <+> text "::" <+> ppr k)
-
-instance Ppr Kind where
-    ppr StarK          = char '*'
-    ppr (ArrowK k1 k2) = pprArrowArgKind k1 <+> text "->" <+> ppr k2
-
-pprArrowArgKind :: Kind -> Doc
-pprArrowArgKind k@(ArrowK _ _) = parens (ppr k)
-pprArrowArgKind k              = ppr k
 
 ------------------------------
 pprCxt :: Cxt -> Doc
@@ -462,4 +509,7 @@ showtextl = text . map toLower . show
 
 hashParens :: Doc -> Doc
 hashParens d = text "(# " <> d <> text " #)"
+
+quoteParens :: Doc -> Doc
+quoteParens d = text "'(" <> d <> text ")"
 

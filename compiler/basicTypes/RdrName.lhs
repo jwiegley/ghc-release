@@ -44,9 +44,6 @@ module RdrName (
 	isRdrDataCon, isRdrTyVar, isRdrTc, isQual, isQual_maybe, isUnqual, 
 	isOrig, isOrig_maybe, isExact, isExact_maybe, isSrcRdrName,
 
-	-- ** Printing
-	showRdrName,
-
 	-- * Local mapping of 'RdrName' to 'Name.Name'
 	LocalRdrEnv, emptyLocalRdrEnv, extendLocalRdrEnv, extendLocalRdrEnvList,
 	lookupLocalRdrEnv, lookupLocalRdrOcc, elemLocalRdrEnv, inLocalRdrEnvScope, 
@@ -132,6 +129,10 @@ data RdrName
 %************************************************************************
 
 \begin{code}
+
+instance HasOccName RdrName where
+  occName = rdrNameOcc
+
 rdrNameOcc :: RdrName -> OccName
 rdrNameOcc (Qual _ occ) = occ
 rdrNameOcc (Unqual occ) = occ
@@ -278,9 +279,6 @@ instance OutputableBndr RdrName where
     pprInfixOcc  rdr = pprInfixVar  (isSymOcc (rdrNameOcc rdr)) (ppr rdr)
     pprPrefixOcc rdr = pprPrefixVar (isSymOcc (rdrNameOcc rdr)) (ppr rdr)
 
-showRdrName :: RdrName -> String
-showRdrName r = showSDoc (ppr r)
-
 instance Eq RdrName where
     (Exact n1) 	  == (Exact n2)    = n1==n2
 	-- Convert exact to orig
@@ -344,7 +342,7 @@ extendLocalRdrEnv (env, ns) name
 
 extendLocalRdrEnvList :: LocalRdrEnv -> [Name] -> LocalRdrEnv
 extendLocalRdrEnvList (env, ns) names
-  = (extendOccEnvList env [(nameOccName n, n) | n <- names], addListToNameSet  ns names)
+  = (extendOccEnvList env [(nameOccName n, n) | n <- names], addListToNameSet ns names)
 
 lookupLocalRdrEnv :: LocalRdrEnv -> RdrName -> Maybe Name
 lookupLocalRdrEnv (env, _) (Unqual occ) = lookupOccEnv env occ
@@ -520,6 +518,7 @@ pickGREs :: RdrName -> [GlobalRdrElt] -> [GlobalRdrElt]
 -- ^ Take a list of GREs which have the right OccName
 -- Pick those GREs that are suitable for this RdrName
 -- And for those, keep only only the Provenances that are suitable
+-- Only used for Qual and Unqual, not Orig or Exact
 -- 
 -- Consider:
 --
@@ -536,7 +535,8 @@ pickGREs :: RdrName -> [GlobalRdrElt] -> [GlobalRdrElt]
 -- the locally-defined @f@, and a GRE for the imported @f@, with a /single/ 
 -- provenance, namely the one for @Baz(f)@.
 pickGREs rdr_name gres
-  = mapCatMaybes pick gres
+  = ASSERT2( isSrcRdrName rdr_name, ppr rdr_name )
+    mapCatMaybes pick gres
   where
     rdr_is_unqual = isUnqual rdr_name
     rdr_is_qual   = isQual_maybe rdr_name
@@ -585,26 +585,25 @@ mkGlobalRdrEnv gres
 				   (nameOccName (gre_name gre)) 
 				   gre
 
-findLocalDupsRdrEnv :: GlobalRdrEnv -> [OccName] -> (GlobalRdrEnv, [[Name]])
+findLocalDupsRdrEnv :: GlobalRdrEnv -> [OccName] -> [[Name]]
 -- ^ For each 'OccName', see if there are multiple local definitions
--- for it.  If so, remove all but one (to suppress subsequent error messages)
+-- for it; return a list of all such
 -- and return a list of the duplicate bindings
 findLocalDupsRdrEnv rdr_env occs 
   = go rdr_env [] occs
   where
-    go rdr_env dups [] = (rdr_env, dups)
+    go _       dups [] = dups
     go rdr_env dups (occ:occs)
       = case filter isLocalGRE gres of
-	  []       -> WARN( True, ppr occ <+> ppr rdr_env ) 
-		      go rdr_env dups occs	-- Weird!  No binding for occ
-	  [_]      -> go rdr_env dups occs	-- The common case
-	  dup_gres -> go (extendOccEnv rdr_env occ (head dup_gres : nonlocal_gres))
-   		         (map gre_name dup_gres : dups)
-			 occs
+	  []       -> go rdr_env  dups  			 occs
+	  [_]      -> go rdr_env  dups  			 occs	-- The common case
+	  dup_gres -> go rdr_env' (map gre_name dup_gres : dups) occs
       where
         gres = lookupOccEnv rdr_env occ `orElse` []
-	nonlocal_gres = filterOut isLocalGRE gres
-
+        rdr_env' = delFromOccEnv rdr_env occ    
+            -- The delFromOccEnv avoids repeating the same
+            -- complaint twice, when occs itself has a duplicate
+            -- which is a common case
 
 insertGRE :: GlobalRdrElt -> [GlobalRdrElt] -> [GlobalRdrElt]
 insertGRE new_g [] = [new_g]

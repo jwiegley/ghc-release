@@ -71,7 +71,7 @@ pprCs dflags cmms
 
 writeCs :: DynFlags -> Handle -> [RawCmmGroup] -> IO ()
 writeCs dflags handle cmms
-  = printForC handle (pprCs dflags cmms)
+  = printForC dflags handle (pprCs dflags cmms)
 
 -- --------------------------------------------------------------------------
 -- Now do some real work
@@ -172,7 +172,7 @@ pprLocalness lbl | not $ externallyVisibleCLabel lbl = ptext (sLit "static ")
 pprStmt :: Platform -> CmmStmt -> SDoc
 
 pprStmt platform stmt = case stmt of
-    CmmReturn _  -> panic "pprStmt: return statement should have been cps'd away"
+    CmmReturn    -> panic "pprStmt: return statement should have been cps'd away"
     CmmNop       -> empty
     CmmComment _ -> empty -- (hang (ptext (sLit "/*")) 3 (ftext s)) $$ ptext (sLit "*/")
                           -- XXX if the string contains "*/", we need to fix it
@@ -229,7 +229,10 @@ pprStmt platform stmt = case stmt of
                     pprCall platform cast_fn cconv results args <> semi)
                         -- for a dynamic call, no declaration is necessary.
 
-    CmmCall (CmmPrim op) results args _ret ->
+    CmmCall (CmmPrim _ (Just stmts)) _ _ _ ->
+        vcat $ map (pprStmt platform) stmts
+
+    CmmCall (CmmPrim op _) results args _ret ->
         proto $$ fn_call
       where
         cconv = CCallConv
@@ -246,7 +249,7 @@ pprStmt platform stmt = case stmt of
 
     CmmBranch ident          -> pprBranch ident
     CmmCondBranch expr ident -> pprCondBranch platform expr ident
-    CmmJump lbl _params      -> mkJMP_(pprExpr platform lbl) <> semi
+    CmmJump lbl _            -> mkJMP_(pprExpr platform lbl) <> semi
     CmmSwitch arg ids        -> pprSwitch platform arg ids
 
 pprForeignCall :: Platform -> SDoc -> CCallConv -> [HintedCmmFormal] -> [HintedCmmActual] -> (SDoc, SDoc)
@@ -667,7 +670,14 @@ pprCallishMachOp_for_C mop
         MO_Memmove      -> ptext (sLit "memmove")
         (MO_PopCnt w)   -> ptext (sLit $ popCntLabel w)
 
-        MO_Touch -> panic $ "pprCallishMachOp_for_C: MO_Touch not supported!"
+        MO_S_QuotRem  {} -> unsupported
+        MO_U_QuotRem  {} -> unsupported
+        MO_U_QuotRem2 {} -> unsupported
+        MO_Add2       {} -> unsupported
+        MO_U_Mul2     {} -> unsupported
+        MO_Touch         -> unsupported
+    where unsupported = panic ("pprCallishMachOp_for_C: " ++ show mop
+                            ++ " not supported!")
 
 -- ---------------------------------------------------------------------
 -- Useful #defines
@@ -935,12 +945,18 @@ te_Lit _ = return ()
 te_Stmt :: CmmStmt -> TE ()
 te_Stmt (CmmAssign r e)         = te_Reg r >> te_Expr e
 te_Stmt (CmmStore l r)          = te_Expr l >> te_Expr r
-te_Stmt (CmmCall _ rs es _)     = mapM_ (te_temp.hintlessCmm) rs >>
-                                  mapM_ (te_Expr.hintlessCmm) es
+te_Stmt (CmmCall target rs es _) = do te_Target target
+                                      mapM_ (te_temp.hintlessCmm) rs
+                                      mapM_ (te_Expr.hintlessCmm) es
 te_Stmt (CmmCondBranch e _)     = te_Expr e
 te_Stmt (CmmSwitch e _)         = te_Expr e
 te_Stmt (CmmJump e _)           = te_Expr e
 te_Stmt _                       = return ()
+
+te_Target :: CmmCallTarget -> TE ()
+te_Target (CmmCallee {})           = return ()
+te_Target (CmmPrim _ Nothing)      = return ()
+te_Target (CmmPrim _ (Just stmts)) = mapM_ te_Stmt stmts
 
 te_Expr :: CmmExpr -> TE ()
 te_Expr (CmmLit lit)            = te_Lit lit
@@ -1101,10 +1117,11 @@ pprHexVal w rep
         -- times values are unsigned.  This also helps eliminate occasional
         -- warnings about integer overflow from gcc.
 
-        -- on 32-bit platforms, add "ULL" to 64-bit literals
-      repsuffix W64 | wORD_SIZE == 4 = ptext (sLit "ULL")
-        -- on 64-bit platforms with 32-bit int, add "L" to 64-bit literals
-      repsuffix W64 | cINT_SIZE == 4 = ptext (sLit "UL")
+      repsuffix W64
+       | cINT_SIZE       == 8 = char 'U'
+       | cLONG_SIZE      == 8 = ptext (sLit "UL")
+       | cLONG_LONG_SIZE == 8 = ptext (sLit "ULL")
+       | otherwise            = panic "pprHexVal: Can't find a 64-bit type"
       repsuffix _ = char 'U'
 
       go 0 = empty

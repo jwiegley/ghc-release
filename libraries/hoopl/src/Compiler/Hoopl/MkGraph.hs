@@ -15,8 +15,8 @@ module Compiler.Hoopl.MkGraph
 where
 
 import Compiler.Hoopl.Label (Label, uniqueToLbl)
-import Compiler.Hoopl.Graph
-import qualified Compiler.Hoopl.GraphUtil as U
+import Compiler.Hoopl.Block
+import Compiler.Hoopl.Graph as U
 import Compiler.Hoopl.Unique
 import Control.Monad (liftM2)
 
@@ -70,8 +70,8 @@ class GraphRep g where
   mkMiddle :: n O O -> g n O O
   -- | Create a graph from a last node
   mkLast   :: n O C -> g n O C
-  mkFirst = mkExit  . BFirst
-  mkLast  = mkEntry . BLast
+  mkFirst n = mkExit (BlockCO n BNil)
+  mkLast  n = mkEntry (BlockOC BNil n)
   infixl 3 <*>
   infixl 2 |*><*| 
   -- | Concatenate two graphs; control flows from left to right.

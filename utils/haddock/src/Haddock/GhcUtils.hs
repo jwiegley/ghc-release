@@ -78,7 +78,7 @@ isVarSym = isLexVarSym . occNameFS
 
 
 getMainDeclBinder :: HsDecl name -> [name]
-getMainDeclBinder (TyClD d) | not (isFamInstDecl d) = [tcdName d]
+getMainDeclBinder (TyClD d) = [tcdName d]
 getMainDeclBinder (ValD d) =
   case collectHsBindBinders d of
     []       -> []
@@ -138,7 +138,6 @@ isDocD _ = False
 
 isInstD :: HsDecl a -> Bool
 isInstD (InstD _) = True
-isInstD (TyClD d) = isFamInstDecl d
 isInstD _ = False
 
 
@@ -152,12 +151,12 @@ declATs (TyClD d) | isClassDecl d = map (tcdName . unL) $ tcdATs d
 declATs _ = []
 
 
-pretty :: Outputable a => a -> String
-pretty x = showSDoc (ppr x)
+pretty :: Outputable a => DynFlags -> a -> String
+pretty = showPpr
 
 
-trace_ppr :: Outputable a => a -> b -> b
-trace_ppr x y = trace (pretty x) y
+trace_ppr :: Outputable a => DynFlags -> a -> b -> b
+trace_ppr dflags x y = trace (pretty dflags x) y
 
 
 -------------------------------------------------------------------------------
@@ -216,7 +215,7 @@ instance Parent (ConDecl Name) where
 
 instance Parent (TyClDecl Name) where
   children d
-    | isDataDecl  d = map (unL . con_name . unL) . tcdCons $ d
+    | isDataDecl  d = map (unL . con_name . unL) . td_cons . tcdTyDefn $ d
     | isClassDecl d =
         map (tcdName . unL) (tcdATs d) ++
         [ unL n | L _ (TypeSig ns _) <- tcdSigs d, n <- ns ]
@@ -232,7 +231,7 @@ family = getName &&& children
 -- child to its grand-children, recursively.
 families :: TyClDecl Name -> [(Name, [Name])]
 families d
-  | isDataDecl  d = family d : map (family . unL) (tcdCons d)
+  | isDataDecl  d = family d : map (family . unL) (td_cons (tcdTyDefn d))
   | isClassDecl d = family d : concatMap (families . unL) (tcdATs d)
   | otherwise     = []
 

@@ -188,6 +188,7 @@ data Instr
         | SUB         Size Operand Operand
 
         | MUL         Size Operand Operand
+        | MUL2        Size Operand              -- %edx:%eax = operand * %rax
         | IMUL        Size Operand Operand      -- signed int mul
         | IMUL2       Size Operand              -- %edx:%eax = operand * %eax
 
@@ -286,7 +287,7 @@ data Instr
         --  | POPA
 
         -- Jumping around.
-        | JMP         Operand
+        | JMP         Operand [Reg] -- including live Regs at the call
         | JXX         Cond BlockId  -- includes unconditional branches
         | JXX_GBL     Cond Imm      -- non-local version of JXX
         -- Table jump
@@ -330,10 +331,11 @@ x86_regUsageOfInstr instr
     ADC    _ src dst    -> usageRM src dst
     SUB    _ src dst    -> usageRM src dst
     IMUL   _ src dst    -> usageRM src dst
-    IMUL2  _ src       -> mkRU (eax:use_R src) [eax,edx]
+    IMUL2  _ src       -> mkRU (eax:use_R src []) [eax,edx]
     MUL    _ src dst    -> usageRM src dst
-    DIV    _ op -> mkRU (eax:edx:use_R op) [eax,edx]
-    IDIV   _ op -> mkRU (eax:edx:use_R op) [eax,edx]
+    MUL2   _ src        -> mkRU (eax:use_R src []) [eax,edx]
+    DIV    _ op -> mkRU (eax:edx:use_R op []) [eax,edx]
+    IDIV   _ op -> mkRU (eax:edx:use_R op []) [eax,edx]
     AND    _ src dst    -> usageRM src dst
     OR     _ src dst    -> usageRM src dst
 
@@ -346,25 +348,25 @@ x86_regUsageOfInstr instr
     SHL    _ imm dst    -> usageRM imm dst
     SAR    _ imm dst    -> usageRM imm dst
     SHR    _ imm dst    -> usageRM imm dst
-    BT     _ _   src    -> mkRUR (use_R src)
+    BT     _ _   src    -> mkRUR (use_R src [])
 
-    PUSH   _ op         -> mkRUR (use_R op)
+    PUSH   _ op         -> mkRUR (use_R op [])
     POP    _ op         -> mkRU [] (def_W op)
-    TEST   _ src dst    -> mkRUR (use_R src ++ use_R dst)
-    CMP    _ src dst    -> mkRUR (use_R src ++ use_R dst)
+    TEST   _ src dst    -> mkRUR (use_R src $! use_R dst [])
+    CMP    _ src dst    -> mkRUR (use_R src $! use_R dst [])
     SETCC  _ op         -> mkRU [] (def_W op)
     JXX    _ _          -> mkRU [] []
     JXX_GBL _ _         -> mkRU [] []
-    JMP     op          -> mkRUR (use_R op)
-    JMP_TBL op _ _ _    -> mkRUR (use_R op)
+    JMP     op regs     -> mkRUR (use_R op regs)
+    JMP_TBL op _ _ _    -> mkRUR (use_R op [])
     CALL (Left _)  params   -> mkRU params callClobberedRegs
     CALL (Right reg) params -> mkRU (reg:params) callClobberedRegs
     CLTD   _            -> mkRU [eax] [edx]
     NOP                 -> mkRU [] []
 
     GMOV   src dst      -> mkRU [src] [dst]
-    GLD    _ src dst    -> mkRU (use_EA src) [dst]
-    GST    _ src dst    -> mkRUR (src : use_EA dst)
+    GLD    _ src dst    -> mkRU (use_EA src []) [dst]
+    GST    _ src dst    -> mkRUR (src : use_EA dst [])
 
     GLDZ   dst          -> mkRU [] [dst]
     GLD1   dst          -> mkRU [] [dst]
@@ -392,10 +394,10 @@ x86_regUsageOfInstr instr
 
     CVTSS2SD   src dst  -> mkRU [src] [dst]
     CVTSD2SS   src dst  -> mkRU [src] [dst]
-    CVTTSS2SIQ _ src dst -> mkRU (use_R src) [dst]
-    CVTTSD2SIQ _ src dst -> mkRU (use_R src) [dst]
-    CVTSI2SS   _ src dst -> mkRU (use_R src) [dst]
-    CVTSI2SD   _ src dst -> mkRU (use_R src) [dst]
+    CVTTSS2SIQ _ src dst -> mkRU (use_R src []) [dst]
+    CVTTSD2SIQ _ src dst -> mkRU (use_R src []) [dst]
+    CVTSI2SS   _ src dst -> mkRU (use_R src []) [dst]
+    CVTSI2SD   _ src dst -> mkRU (use_R src []) [dst]
     FDIV _     src dst  -> usageRM src dst
 
     FETCHGOT reg        -> mkRU [] [reg]
@@ -404,27 +406,27 @@ x86_regUsageOfInstr instr
     COMMENT _           -> noUsage
     DELTA   _           -> noUsage
 
-    POPCNT _ src dst -> mkRU (use_R src) [dst]
+    POPCNT _ src dst -> mkRU (use_R src []) [dst]
 
     _other              -> panic "regUsage: unrecognised instr"
 
  where
     -- 2 operand form; first operand Read; second Written
     usageRW :: Operand -> Operand -> RegUsage
-    usageRW op (OpReg reg)      = mkRU (use_R op) [reg]
-    usageRW op (OpAddr ea)      = mkRUR (use_R op ++ use_EA ea)
+    usageRW op (OpReg reg)      = mkRU (use_R op []) [reg]
+    usageRW op (OpAddr ea)      = mkRUR (use_R op $! use_EA ea [])
     usageRW _ _                 = panic "X86.RegInfo.usageRW: no match"
 
     -- 2 operand form; first operand Read; second Modified
     usageRM :: Operand -> Operand -> RegUsage
-    usageRM op (OpReg reg)      = mkRU (use_R op ++ [reg]) [reg]
-    usageRM op (OpAddr ea)      = mkRUR (use_R op ++ use_EA ea)
+    usageRM op (OpReg reg)      = mkRU (use_R op [reg]) [reg]
+    usageRM op (OpAddr ea)      = mkRUR (use_R op $! use_EA ea [])
     usageRM _ _                 = panic "X86.RegInfo.usageRM: no match"
 
     -- 1 operand form; operand Modified
     usageM :: Operand -> RegUsage
     usageM (OpReg reg)          = mkRU [reg] [reg]
-    usageM (OpAddr ea)          = mkRUR (use_EA ea)
+    usageM (OpAddr ea)          = mkRUR (use_EA ea [])
     usageM _                    = panic "X86.RegInfo.usageM: no match"
 
     -- Registers defd when an operand is written.
@@ -433,18 +435,18 @@ x86_regUsageOfInstr instr
     def_W _                     = panic "X86.RegInfo.def_W: no match"
 
     -- Registers used when an operand is read.
-    use_R (OpReg reg)  = [reg]
-    use_R (OpImm _)    = []
-    use_R (OpAddr ea)  = use_EA ea
+    use_R (OpReg reg)  tl = reg : tl
+    use_R (OpImm _)    tl = tl
+    use_R (OpAddr ea)  tl = use_EA ea tl
 
     -- Registers used to compute an effective address.
-    use_EA (ImmAddr _ _) = []
-    use_EA (AddrBaseIndex base index _) =
-        use_base base $! use_index index
-        where use_base (EABaseReg r) x = r : x
-              use_base _ x             = x
-              use_index EAIndexNone   = []
-              use_index (EAIndex i _) = [i]
+    use_EA (ImmAddr _ _) tl = tl
+    use_EA (AddrBaseIndex base index _) tl =
+        use_base base $! use_index index tl
+        where use_base (EABaseReg r)  tl = r : tl
+              use_base _              tl = tl
+              use_index EAIndexNone   tl = tl
+              use_index (EAIndex i _) tl = i : tl
 
     mkRUR src = src' `seq` RU src' []
         where src' = filter interesting src
@@ -473,6 +475,7 @@ x86_patchRegsOfInstr instr env
     IMUL sz src dst     -> patch2 (IMUL sz) src dst
     IMUL2 sz src        -> patch1 (IMUL2 sz) src
     MUL sz src dst      -> patch2 (MUL sz) src dst
+    MUL2 sz src         -> patch1 (MUL2 sz) src
     IDIV sz op          -> patch1 (IDIV sz) op
     DIV sz op           -> patch1 (DIV sz) op
     AND  sz src dst     -> patch2 (AND  sz) src dst
@@ -489,7 +492,7 @@ x86_patchRegsOfInstr instr env
     PUSH sz op          -> patch1 (PUSH sz) op
     POP  sz op          -> patch1 (POP  sz) op
     SETCC cond op       -> patch1 (SETCC cond) op
-    JMP op              -> patch1 JMP op
+    JMP op regs         -> JMP (patchOp op) regs
     JMP_TBL op ids s lbl-> JMP_TBL (patchOp op) ids s lbl
 
     GMOV src dst        -> GMOV (env src) (env dst)
@@ -562,10 +565,10 @@ x86_patchRegsOfInstr instr env
       where
         lookupBase EABaseNone       = EABaseNone
         lookupBase EABaseRip        = EABaseRip
-        lookupBase (EABaseReg r)    = EABaseReg (env r)
+        lookupBase (EABaseReg r)    = EABaseReg $! env r
 
         lookupIndex EAIndexNone     = EAIndexNone
-        lookupIndex (EAIndex r i)   = EAIndex (env r) i
+        lookupIndex (EAIndex r i)   = (EAIndex $! env r) i
 
 
 --------------------------------------------------------------------------------
@@ -756,7 +759,7 @@ i386_insert_ffrees blocks
      = BasicBlock id (foldr p [] insns)
      where p insn r = case insn of
                         CALL _ _ -> GFREE : insn : r
-                        JMP _    -> GFREE : insn : r
+                        JMP _ _  -> GFREE : insn : r
                         JXX_GBL _ _ -> panic "i386_insert_ffrees: cannot handle JXX_GBL"
                         _        -> insn : r
 
@@ -797,9 +800,9 @@ getJumpDestBlockId (DestBlockId bid) = Just bid
 getJumpDestBlockId _                 = Nothing
 
 canShortcut :: Instr -> Maybe JumpDest
-canShortcut (JXX ALWAYS id)    = Just (DestBlockId id)
-canShortcut (JMP (OpImm imm))  = Just (DestImm imm)
-canShortcut _                  = Nothing
+canShortcut (JXX ALWAYS id)      = Just (DestBlockId id)
+canShortcut (JMP (OpImm imm) _)  = Just (DestImm imm)
+canShortcut _                    = Nothing
 
 
 -- This helper shortcuts a sequence of branches.

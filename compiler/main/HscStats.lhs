@@ -52,7 +52,6 @@ ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
 	      	("DataDecls        ", data_ds),
 	      	("NewTypeDecls     ", newt_ds),
 	      	("TypeFamilyDecls  ", type_fam_ds),
-	      	("FamilyInstDecls  ", fam_inst_ds),
 	      	("DataConstrs      ", data_constrs),
 		("DataDerivings    ", data_derivs),
 	      	("ClassDecls       ", class_ds),
@@ -89,7 +88,7 @@ ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
 		-- in class decls.  ToDo
 
     tycl_decls  = [d | TyClD d <- decls]
-    (class_ds, type_ds, data_ds, newt_ds, type_fam_ds, fam_inst_ds) = 
+    (class_ds, type_ds, data_ds, newt_ds, type_fam_ds) = 
       countTyClDecls tycl_decls
 
     inst_decls  = [d | InstD d <- decls]
@@ -142,7 +141,7 @@ ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
     spec_info (Just (False, _)) = (0,0,0,0,0,1,0)
     spec_info (Just (True, _))  = (0,0,0,0,0,0,1)
 
-    data_info (TyData {tcdCons = cs, tcdDerivs = derivs})
+    data_info (TyDecl { tcdTyDefn = TyData {td_cons = cs, td_derivs = derivs}})
 	= (length cs, case derivs of Nothing -> 0
 				     Just ds -> length ds)
     data_info _ = (0,0)
@@ -153,7 +152,9 @@ ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
 	       (classops, addpr (foldr add2 (0,0) (map (count_bind.unLoc) (bagToList (tcdMeths decl)))))
     class_info _ = (0,0)
 
-    inst_info (InstDecl _ inst_meths inst_sigs ats)
+    inst_info (FamInstD d) = case countATDecl d of
+                                  (tyd, dtd) -> (0,0,0,tyd,dtd)
+    inst_info (ClsInstD _ inst_meths inst_sigs ats)
 	= case count_sigs (map unLoc inst_sigs) of
 	    (_,_,ss,is,_) ->
 	      case foldr add2 (0, 0) (map (countATDecl . unLoc) ats) of
@@ -162,10 +163,8 @@ ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
 			   (map (count_bind.unLoc) (bagToList inst_meths))), 
                    ss, is, tyDecl, dtDecl)
         where
-	  countATDecl (TyData    {}) = (0, 1)
-	  countATDecl (TySynonym {}) = (1, 0)
-	  countATDecl d              = pprPanic "countATDecl: Unhandled decl"
-                                            (ppr d)
+    countATDecl (FamInstDecl { fid_defn = TyData    {} }) = (0, 1)
+    countATDecl (FamInstDecl { fid_defn = TySynonym {} }) = (1, 0)
 
     addpr :: (Int,Int) -> Int
     add2  :: (Int,Int) -> (Int,Int) -> (Int, Int)

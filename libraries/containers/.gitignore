@@ -1,5 +1,10 @@
-^dist(/|$)
-^setup(/|$)
-^GNUmakefile$
-^Makefile.local$
-^.depend(.bak)?$
+*.hi
+*.o
+*.p_hi
+*.prof
+*.tix
+.hpc/
+/dist/*
+GNUmakefile
+dist-install
+ghc.mk

@@ -1,6 +1,6 @@
 /* --------------------------------------------------------------------------
  *
- * (c) The GHC Team, 1992-2004
+ * (c) The GHC Team, 1992-2012
  *
  * mkDerivedConstants.c
  *
@@ -17,11 +17,12 @@
  * We need offsets of profiled things... better be careful that this
  * doesn't affect the offsets of anything else.
  */
+
 #define PROFILING
 #define THREADED_RTS
 
+#include "PosixSource.h"
 #include "Rts.h"
-
 #include "Stable.h"
 #include "Capability.h"
 
@@ -30,21 +31,25 @@
 #define str(a,b) #a "_" #b
 
 #define OFFSET(s_type, field) ((size_t)&(((s_type*)0)->field))
+#define FIELD_SIZE(s_type, field) ((size_t)sizeof(((s_type*)0)->field))
+#define TYPE_SIZE(type) (sizeof(type))
+
+#pragma GCC poison sizeof
 
 #if defined(GEN_HASKELL)
 #define def_offset(str, offset)                          \
     printf("oFFSET_" str " :: Int\n");                   \
-    printf("oFFSET_" str " = %lu\n", (unsigned long)offset);
+    printf("oFFSET_" str " = %" FMT_SizeT "\n", (size_t)offset);
 #else
 #define def_offset(str, offset) \
-    printf("#define OFFSET_" str " %lu\n", (unsigned long)offset);
+    printf("#define OFFSET_" str " %" FMT_SizeT "\n", (size_t)offset);
 #endif
 
 #if defined(GEN_HASKELL)
 #define ctype(type) /* nothing */
 #else
 #define ctype(type) \
-    printf("#define SIZEOF_" #type " %lu\n", (unsigned long)sizeof(type));
+    printf("#define SIZEOF_" #type " %" FMT_SizeT "\n", (size_t)TYPE_SIZE(type));
 #endif
 
 #if defined(GEN_HASKELL)
@@ -59,7 +64,7 @@
 */
 #define field_type_(str, s_type, field) \
     printf("#define REP_" str " b"); \
-    printf("%lu\n", (unsigned long)sizeof (__typeof__(((((s_type*)0)->field)))) * 8);
+    printf("%" FMT_SizeT "\n", FIELD_SIZE(s_type, field) * 8);
 #define field_type_gcptr_(str, s_type, field) \
     printf("#define REP_" str " gcptr\n");
 #endif
@@ -91,32 +96,32 @@
 #if defined(GEN_HASKELL)
 #define def_size(str, size)                \
     printf("sIZEOF_" str " :: Int\n");     \
-    printf("sIZEOF_" str " = %lu\n", (unsigned long)size);
+    printf("sIZEOF_" str " = %" FMT_SizeT "\n", (size_t)size);
 #else
 #define def_size(str, size) \
-    printf("#define SIZEOF_" str " %lu\n", (unsigned long)size);
+    printf("#define SIZEOF_" str " %" FMT_SizeT "\n", (size_t)size);
 #endif
 
 #if defined(GEN_HASKELL)
 #define def_closure_size(str, size) /* nothing */
 #else
 #define def_closure_size(str, size) \
-    printf("#define SIZEOF_" str " (SIZEOF_StgHeader+%lu)\n", (unsigned long)size);
+    printf("#define SIZEOF_" str " (SIZEOF_StgHeader+%" FMT_SizeT ")\n", (size_t)size);
 #endif
 
 #define struct_size(s_type) \
-    def_size(#s_type, sizeof(s_type));
+    def_size(#s_type, TYPE_SIZE(s_type));
 
 /*
  * Size of a closure type, minus the header, named SIZEOF_<type>_NoHdr
  * Also, we #define SIZEOF_<type> to be the size of the whole closure for .cmm.
  */
 #define closure_size(s_type) \
-    def_size(#s_type "_NoHdr", sizeof(s_type) - sizeof(StgHeader)); \
-    def_closure_size(#s_type, sizeof(s_type) - sizeof(StgHeader));
+    def_size(#s_type "_NoHdr", TYPE_SIZE(s_type) - TYPE_SIZE(StgHeader)); \
+    def_closure_size(#s_type, TYPE_SIZE(s_type) - TYPE_SIZE(StgHeader));
 
 #define thunk_size(s_type) \
-    def_size(#s_type "_NoThunkHdr", sizeof(s_type) - sizeof(StgThunkHeader)); \
+    def_size(#s_type "_NoThunkHdr", TYPE_SIZE(s_type) - TYPE_SIZE(StgThunkHeader)); \
     closure_size(s_type)
 
 /* An access macro for use in C-- sources. */
@@ -124,7 +129,7 @@
     printf("#define " str "(__ptr__)  REP_" str "[__ptr__+SIZEOF_StgHeader+OFFSET_" str "]\n");
 
 #define closure_field_offset_(str, s_type,field) \
-    def_offset(str, OFFSET(s_type,field) - sizeof(StgHeader));
+    def_offset(str, OFFSET(s_type,field) - TYPE_SIZE(StgHeader));
 
 #define closure_field_offset(s_type,field) \
     closure_field_offset_(str(s_type,field),s_type,field)
@@ -156,7 +161,7 @@
 
 /* Byte offset for a TSO field, minus the header and variable prof bit. */
 #define tso_payload_offset(s_type, field) \
-    def_offset(str(s_type,field), OFFSET(s_type,field) - sizeof(StgHeader) - sizeof(StgTSOProfInfo));
+    def_offset(str(s_type,field), OFFSET(s_type,field) - TYPE_SIZE(StgHeader) - TYPE_SIZE(StgTSOProfInfo));
 
 /* Full byte offset for a TSO field, for use from Cmm */
 #define tso_field_offset_macro(str) \
@@ -189,13 +194,13 @@ main(int argc, char *argv[])
 #ifndef GEN_HASKELL
     printf("/* This file is created automatically.  Do not edit by hand.*/\n\n");
 
-    printf("#define STD_HDR_SIZE   %lu\n", (unsigned long)sizeofW(StgHeader) - sizeofW(StgProfHeader));
+    printf("#define STD_HDR_SIZE   %" FMT_SizeT "\n", (size_t)sizeofW(StgHeader) - sizeofW(StgProfHeader));
     /* grrr.. PROFILING is on so we need to subtract sizeofW(StgProfHeader) */
-    printf("#define PROF_HDR_SIZE  %lu\n", (unsigned long)sizeofW(StgProfHeader));
+    printf("#define PROF_HDR_SIZE  %" FMT_SizeT "\n", (size_t)sizeofW(StgProfHeader));
 
     printf("#define BLOCK_SIZE   %u\n", BLOCK_SIZE);
     printf("#define MBLOCK_SIZE   %u\n", MBLOCK_SIZE);
-    printf("#define BLOCKS_PER_MBLOCK  %lu\n", (lnat)BLOCKS_PER_MBLOCK);
+    printf("#define BLOCKS_PER_MBLOCK  %" FMT_SizeT "\n", (lnat)BLOCKS_PER_MBLOCK);
     // could be derived, but better to save doing the calculation twice
 
     printf("\n\n");

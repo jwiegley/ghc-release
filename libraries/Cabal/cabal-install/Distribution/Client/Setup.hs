@@ -39,7 +39,7 @@ import Distribution.Client.Types
 import Distribution.Client.BuildReports.Types
          ( ReportLevel(..) )
 import Distribution.Client.Dependency.Types
-         ( Solver(..) )
+         ( PreSolver(..) )
 import qualified Distribution.Client.Init.Types as IT
          ( InitFlags(..), PackageType(..) )
 import Distribution.Client.Targets
@@ -53,7 +53,7 @@ import qualified Distribution.Simple.Setup as Cabal
 import Distribution.Simple.Setup
          ( ConfigFlags(..), SDistFlags(..), HaddockFlags(..) )
 import Distribution.Simple.Setup
-         ( Flag(..), toFlag, fromFlag, flagToList
+         ( Flag(..), toFlag, fromFlag, flagToMaybe, flagToList
          , optionVerbosity, boolOpt, trueArg, falseArg )
 import Distribution.Simple.InstallDirs
          ( PathTemplate, toPathTemplate, fromPathTemplate )
@@ -62,7 +62,7 @@ import Distribution.Version
 import Distribution.Package
          ( PackageIdentifier, packageName, packageVersion, Dependency(..) )
 import Distribution.Text
-         ( Text(parse), display )
+         ( Text(..), display )
 import Distribution.ReadE
          ( ReadE(..), readP_to_E, succeedReadE )
 import qualified Distribution.Compat.ReadP as Parse
@@ -238,7 +238,7 @@ data ConfigExFlags = ConfigExFlags {
     configCabalVersion :: Flag Version,
     configExConstraints:: [UserConstraint],
     configPreferences  :: [Dependency],
-    configSolver       :: Flag Solver
+    configSolver       :: Flag PreSolver
   }
 
 defaultConfigExFlags :: ConfigExFlags
@@ -306,10 +306,11 @@ data FetchFlags = FetchFlags {
 --    fetchOutput    :: Flag FilePath,
       fetchDeps      :: Flag Bool,
       fetchDryRun    :: Flag Bool,
-      fetchSolver           :: Flag Solver,
+      fetchSolver           :: Flag PreSolver,
       fetchMaxBackjumps     :: Flag Int,
       fetchReorderGoals     :: Flag Bool,
       fetchIndependentGoals :: Flag Bool,
+      fetchShadowPkgs       :: Flag Bool,
       fetchVerbosity :: Flag Verbosity
     }
 
@@ -322,6 +323,7 @@ defaultFetchFlags = FetchFlags {
     fetchMaxBackjumps     = Flag defaultMaxBackjumps,
     fetchReorderGoals     = Flag False,
     fetchIndependentGoals = Flag False,
+    fetchShadowPkgs       = Flag False,
     fetchVerbosity = toFlag normal
    }
 
@@ -332,7 +334,7 @@ fetchCommand = CommandUI {
     commandDescription  = Nothing,
     commandUsage        = usagePackages "fetch",
     commandDefaultFlags = defaultFetchFlags,
-    commandOptions      = \_ -> [
+    commandOptions      = \ showOrParseArgs -> [
          optionVerbosity fetchVerbosity (\v flags -> flags { fetchVerbosity = v })
 
 --     , option "o" ["output"]
@@ -358,9 +360,11 @@ fetchCommand = CommandUI {
        ] ++
 
        optionSolver      fetchSolver           (\v flags -> flags { fetchSolver           = v }) :
-       optionSolverFlags fetchMaxBackjumps     (\v flags -> flags { fetchMaxBackjumps     = v })
+       optionSolverFlags showOrParseArgs
+                         fetchMaxBackjumps     (\v flags -> flags { fetchMaxBackjumps     = v })
                          fetchReorderGoals     (\v flags -> flags { fetchReorderGoals     = v })
                          fetchIndependentGoals (\v flags -> flags { fetchIndependentGoals = v })
+                         fetchShadowPkgs       (\v flags -> flags { fetchShadowPkgs       = v })
 
   }
 
@@ -599,6 +603,7 @@ data InstallFlags = InstallFlags {
     installMaxBackjumps     :: Flag Int,
     installReorderGoals     :: Flag Bool,
     installIndependentGoals :: Flag Bool,
+    installShadowPkgs       :: Flag Bool,
     installReinstall        :: Flag Bool,
     installAvoidReinstalls  :: Flag Bool,
     installOverrideReinstall :: Flag Bool,
@@ -610,7 +615,8 @@ data InstallFlags = InstallFlags {
     installLogFile          :: Flag PathTemplate,
     installBuildReports     :: Flag ReportLevel,
     installSymlinkBinDir    :: Flag FilePath,
-    installOneShot          :: Flag Bool
+    installOneShot          :: Flag Bool,
+    installNumJobs          :: Flag Int
   }
 
 defaultInstallFlags :: InstallFlags
@@ -621,6 +627,7 @@ defaultInstallFlags = InstallFlags {
     installMaxBackjumps    = Flag defaultMaxBackjumps,
     installReorderGoals    = Flag False,
     installIndependentGoals= Flag False,
+    installShadowPkgs      = Flag False,
     installReinstall       = Flag False,
     installAvoidReinstalls = Flag False,
     installOverrideReinstall = Flag False,
@@ -632,7 +639,8 @@ defaultInstallFlags = InstallFlags {
     installLogFile         = mempty,
     installBuildReports    = Flag NoReports,
     installSymlinkBinDir   = mempty,
-    installOneShot         = Flag False
+    installOneShot         = Flag False,
+    installNumJobs         = Flag 1
   }
   where
     docIndexFile = toPathTemplate ("$datadir" </> "doc" </> "index.html")
@@ -640,11 +648,11 @@ defaultInstallFlags = InstallFlags {
 defaultMaxBackjumps :: Int
 defaultMaxBackjumps = 200
 
-defaultSolver :: Solver
-defaultSolver = TopDown
+defaultSolver :: PreSolver
+defaultSolver = Choose
 
 allSolvers :: String
-allSolvers = intercalate ", " (map display ([minBound .. maxBound] :: [Solver]))
+allSolvers = intercalate ", " (map display ([minBound .. maxBound] :: [PreSolver]))
 
 installCommand :: CommandUI (ConfigFlags, ConfigExFlags, InstallFlags, HaddockFlags)
 installCommand = CommandUI {
@@ -716,35 +724,36 @@ installOptions showOrParseArgs =
           trueArg
       ] ++
 
-      optionSolverFlags installMaxBackjumps     (\v flags -> flags { installMaxBackjumps     = v })
+      optionSolverFlags showOrParseArgs
+                        installMaxBackjumps     (\v flags -> flags { installMaxBackjumps     = v })
                         installReorderGoals     (\v flags -> flags { installReorderGoals     = v })
-                        installIndependentGoals (\v flags -> flags { installIndependentGoals = v }) ++
+                        installIndependentGoals (\v flags -> flags { installIndependentGoals = v })
+                        installShadowPkgs       (\v flags -> flags { installShadowPkgs       = v }) ++
 
       [ option [] ["reinstall"]
           "Install even if it means installing the same version again."
           installReinstall (\v flags -> flags { installReinstall = v })
-          trueArg
+          (yesNoOpt showOrParseArgs)
 
       , option [] ["avoid-reinstalls"]
           "Do not select versions that would destructively overwrite installed packages."
           installAvoidReinstalls (\v flags -> flags { installAvoidReinstalls = v })
-          trueArg
+          (yesNoOpt showOrParseArgs)
 
       , option [] ["force-reinstalls"]
-          "Use to override the check that prevents reinstalling already installed versions of package dependencies."
+          "Reinstall packages even if they will most likely break other installed packages."
           installOverrideReinstall (\v flags -> flags { installOverrideReinstall = v })
-          trueArg
+          (yesNoOpt showOrParseArgs)
 
       , option [] ["upgrade-dependencies"]
           "Pick the latest version for all dependencies, rather than trying to pick an installed version."
           installUpgradeDeps (\v flags -> flags { installUpgradeDeps = v })
-          trueArg
+          (yesNoOpt showOrParseArgs)
 
       , option [] ["only-dependencies"]
           "Install only the dependencies necessary to build the given packages"
           installOnlyDeps (\v flags -> flags { installOnlyDeps = v })
-          trueArg
-
+          (yesNoOpt showOrParseArgs)
 
       , option [] ["root-cmd"]
           "Command used to gain root privileges, when installing with --global."
@@ -778,7 +787,14 @@ installOptions showOrParseArgs =
       , option [] ["one-shot"]
           "Do not record the packages in the world file."
           installOneShot (\v flags -> flags { installOneShot = v })
-          trueArg
+          (yesNoOpt showOrParseArgs)
+
+      , option "j" ["jobs"]
+        "Run NUM jobs simultaneously."
+        installNumJobs (\v flags -> flags { installNumJobs = v })
+        (reqArg "NUM" (readP_to_E (\_ -> "jobs should be a number")
+                                  (fmap toFlag (Parse.readS_to_P reads)))
+                      (map show . flagToList))
       ] ++ case showOrParseArgs of      -- TODO: remove when "cabal install" avoids
           ParseArgs ->
             option [] ["only"]
@@ -800,6 +816,7 @@ instance Monoid InstallFlags where
     installUpgradeDeps     = mempty,
     installReorderGoals    = mempty,
     installIndependentGoals= mempty,
+    installShadowPkgs      = mempty,
     installOnly            = mempty,
     installOnlyDeps        = mempty,
     installRootCmd         = mempty,
@@ -807,7 +824,8 @@ instance Monoid InstallFlags where
     installLogFile         = mempty,
     installBuildReports    = mempty,
     installSymlinkBinDir   = mempty,
-    installOneShot         = mempty
+    installOneShot         = mempty,
+    installNumJobs         = mempty
   }
   mappend a b = InstallFlags {
     installDocumentation   = combine installDocumentation,
@@ -820,6 +838,7 @@ instance Monoid InstallFlags where
     installUpgradeDeps     = combine installUpgradeDeps,
     installReorderGoals    = combine installReorderGoals,
     installIndependentGoals= combine installIndependentGoals,
+    installShadowPkgs      = combine installShadowPkgs,
     installOnly            = combine installOnly,
     installOnlyDeps        = combine installOnlyDeps,
     installRootCmd         = combine installRootCmd,
@@ -827,7 +846,8 @@ instance Monoid InstallFlags where
     installLogFile         = combine installLogFile,
     installBuildReports    = combine installBuildReports,
     installSymlinkBinDir   = combine installSymlinkBinDir,
-    installOneShot         = combine installOneShot
+    installOneShot         = combine installOneShot,
+    installNumJobs         = combine installNumJobs
   }
     where combine field = field a `mappend` field b
 
@@ -905,7 +925,7 @@ emptyInitFlags :: IT.InitFlags
 emptyInitFlags  = mempty
 
 defaultInitFlags :: IT.InitFlags
-defaultInitFlags  = emptyInitFlags
+defaultInitFlags  = emptyInitFlags { IT.initVerbosity = toFlag normal }
 
 initCommand :: CommandUI IT.InitFlags
 initCommand = CommandUI {
@@ -1039,6 +1059,8 @@ initCommand = CommandUI {
         IT.buildTools (\v flags -> flags { IT.buildTools = v })
         (reqArg' "TOOL" (Just . (:[]))
                         (fromMaybe []))
+
+      , optionVerbosity IT.initVerbosity (\v flags -> flags { IT.initVerbosity = v })
       ]
   }
   where readMaybe s = case reads s of
@@ -1100,30 +1122,36 @@ instance Monoid SDistExFlags where
 -- * GetOpt Utils
 -- ------------------------------------------------------------
 
-reqArgFlag :: ArgPlaceHolder -> SFlags -> LFlags -> Description ->
-              (b -> Flag String) -> (Flag String -> b -> b) -> OptDescr b
+reqArgFlag :: ArgPlaceHolder ->
+              MkOptDescr (b -> Flag String) (Flag String -> b -> b) b
 reqArgFlag ad = reqArg ad (succeedReadE Flag) flagToList
 
 liftOptions :: (b -> a) -> (a -> b -> b)
             -> [OptionField a] -> [OptionField b]
 liftOptions get set = map (liftOption get set)
 
-optionSolver :: (flags -> Flag Solver)
-             -> (Flag Solver -> flags -> flags)
+yesNoOpt :: ShowOrParseArgs -> MkOptDescr (b -> Flag Bool) (Flag Bool -> (b -> b)) b
+yesNoOpt ShowArgs sf lf = trueArg sf lf
+yesNoOpt _        sf lf = boolOpt' flagToMaybe Flag (sf, lf) ([], map ("no-" ++) lf) sf lf
+
+optionSolver :: (flags -> Flag PreSolver)
+             -> (Flag PreSolver -> flags -> flags)
              -> OptionField flags
 optionSolver get set =
   option [] ["solver"]
-    ("Select dependency solver to use (default: " ++ display defaultSolver ++ "). Choices: " ++ allSolvers ++ ".")
+    ("Select dependency solver to use (default: " ++ display defaultSolver ++ "). Choices: " ++ allSolvers ++ ", where 'choose' chooses between 'topdown' and 'modular' based on compiler version.")
     get set
     (reqArg "SOLVER" (readP_to_E (const $ "solver must be one of: " ++ allSolvers)
                                  (toFlag `fmap` parse))
                      (flagToList . fmap display))
 
-optionSolverFlags :: (flags -> Flag Int   ) -> (Flag Int    -> flags -> flags)
+optionSolverFlags :: ShowOrParseArgs
+                  -> (flags -> Flag Int   ) -> (Flag Int    -> flags -> flags)
+                  -> (flags -> Flag Bool  ) -> (Flag Bool   -> flags -> flags)
                   -> (flags -> Flag Bool  ) -> (Flag Bool   -> flags -> flags)
                   -> (flags -> Flag Bool  ) -> (Flag Bool   -> flags -> flags)
                   -> [OptionField flags]
-optionSolverFlags getmbj setmbj getrg setrg getig setig =
+optionSolverFlags showOrParseArgs getmbj setmbj getrg setrg _getig _setig getsip setsip =
   [ option [] ["max-backjumps"]
       ("Maximum number of backjumps allowed while solving (default: " ++ show defaultMaxBackjumps ++ "). Use a negative number to enable unlimited backtracking. Use 0 to disable backtracking completely.")
       getmbj setmbj
@@ -1133,11 +1161,17 @@ optionSolverFlags getmbj setmbj getrg setrg getig setig =
   , option [] ["reorder-goals"]
       "Try to reorder goals according to certain heuristics. Slows things down on average, but may make backtracking faster for some packages."
       getrg setrg
-      trueArg
-
+      (yesNoOpt showOrParseArgs)
+  -- TODO: Disabled for now because it does not work as advertised (yet).
+{-
   , option [] ["independent-goals"]
       "Treat several goals on the command line as independent. If several goals depend on the same package, different versions can be chosen."
       getig setig
+      (yesNoOpt showOrParseArgs)
+-}
+  , option [] ["shadow-installed-packages"]
+      "If multiple package instances of the same version are installed, treat all but one as shadowed."
+      getsip setsip
       trueArg
   ]
 

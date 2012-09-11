@@ -16,7 +16,10 @@ module X86.Regs (
         spRel,
         argRegs,
         allArgRegs,
+        allIntArgRegs,
+        allHaskellArgRegs,
         callClobberedRegs,
+        instrClobberedRegs,
         allMachRegNos,
         classOfRealReg,
         showReg,
@@ -55,9 +58,9 @@ import RegClass
 
 import BlockId
 import OldCmm
+import CmmCallConv
 import CLabel           ( CLabel )
-import Pretty
-import Outputable       ( panic )
+import Outputable
 import Platform
 import FastTypes
 import FastBool
@@ -127,7 +130,7 @@ data Imm
   = ImmInt      Int
   | ImmInteger  Integer     -- Sigh.
   | ImmCLbl     CLabel      -- AbstractC Label (with baggage)
-  | ImmLit      Doc         -- Simple string
+  | ImmLit      SDoc        -- Simple string
   | ImmIndex    CLabel Int
   | ImmFloat    Rational
   | ImmDouble   Rational
@@ -378,9 +381,6 @@ xmm13 = regSingle 37
 xmm14 = regSingle 38
 xmm15 = regSingle 39
 
-allFPArgRegs :: [Reg]
-allFPArgRegs    = map regSingle [firstxmm .. firstxmm+7]
-
 ripRel :: Displacement -> AddrMode
 ripRel imm      = AddrBaseIndex EABaseRip EAIndexNone imm
 
@@ -406,7 +406,9 @@ xmm n = regSingle (firstxmm+n)
 -- horror show -----------------------------------------------------------------
 freeReg                 :: RegNo -> FastBool
 globalRegMaybe          :: GlobalReg -> Maybe RealReg
-allArgRegs              :: [Reg]
+allArgRegs              :: [(Reg, Reg)]
+allIntArgRegs           :: [Reg]
+allFPArgRegs            :: [Reg]
 callClobberedRegs       :: [Reg]
 
 #if defined(i386_TARGET_ARCH) || defined(x86_64_TARGET_ARCH)
@@ -469,78 +471,39 @@ callClobberedRegs       :: [Reg]
 freeReg esp = fastBool False  --        %esp is the C stack pointer
 #endif
 
+#if i386_TARGET_ARCH
+freeReg esi = fastBool False -- Note [esi/edi not allocatable]
+freeReg edi = fastBool False
+#endif
+
 #if x86_64_TARGET_ARCH
 freeReg rsp = fastBool False  --        %rsp is the C stack pointer
 #endif
 
+-- split patterns in two functions to prevent overlaps
+freeReg r         = freeRegBase r
+
+freeRegBase :: RegNo -> FastBool
+
 #ifdef REG_Base
-freeReg REG_Base = fastBool False
-#endif
-#ifdef REG_R1
-freeReg REG_R1   = fastBool False
-#endif
-#ifdef REG_R2
-freeReg REG_R2   = fastBool False
-#endif
-#ifdef REG_R3
-freeReg REG_R3   = fastBool False
-#endif
-#ifdef REG_R4
-freeReg REG_R4   = fastBool False
-#endif
-#ifdef REG_R5
-freeReg REG_R5   = fastBool False
-#endif
-#ifdef REG_R6
-freeReg REG_R6   = fastBool False
-#endif
-#ifdef REG_R7
-freeReg REG_R7   = fastBool False
-#endif
-#ifdef REG_R8
-freeReg REG_R8   = fastBool False
-#endif
-#ifdef REG_R9
-freeReg REG_R9   = fastBool False
-#endif
-#ifdef REG_R10
-freeReg REG_R10  = fastBool False
-#endif
-#ifdef REG_F1
-freeReg REG_F1 = fastBool False
-#endif
-#ifdef REG_F2
-freeReg REG_F2 = fastBool False
-#endif
-#ifdef REG_F3
-freeReg REG_F3 = fastBool False
-#endif
-#ifdef REG_F4
-freeReg REG_F4 = fastBool False
-#endif
-#ifdef REG_D1
-freeReg REG_D1 = fastBool False
-#endif
-#ifdef REG_D2
-freeReg REG_D2 = fastBool False
+freeRegBase REG_Base = fastBool False
 #endif
 #ifdef REG_Sp
-freeReg REG_Sp   = fastBool False
-#endif
-#ifdef REG_Su
-freeReg REG_Su   = fastBool False
+freeRegBase REG_Sp   = fastBool False
 #endif
 #ifdef REG_SpLim
-freeReg REG_SpLim = fastBool False
+freeRegBase REG_SpLim = fastBool False
 #endif
 #ifdef REG_Hp
-freeReg REG_Hp   = fastBool False
+freeRegBase REG_Hp   = fastBool False
 #endif
 #ifdef REG_HpLim
-freeReg REG_HpLim = fastBool False
+freeRegBase REG_HpLim = fastBool False
 #endif
-freeReg _               = fastBool True
 
+-- All other regs are considered to be "free", because we can track
+-- their liveness accurately.
+freeRegBase _ = fastBool True
 
 --  | Returns 'Nothing' if this global register is not stored
 -- in a real machine register, otherwise returns @'Just' reg@, where
@@ -625,16 +588,42 @@ globalRegMaybe _                        = Nothing
 
 --
 
-#if   i386_TARGET_ARCH
-allArgRegs = panic "X86.Regs.allArgRegs: should not be used!"
+#if defined(mingw32_HOST_OS) && x86_64_TARGET_ARCH
 
-#elif x86_64_TARGET_ARCH
-allArgRegs = map regSingle [rdi,rsi,rdx,rcx,r8,r9]
+allArgRegs = zip (map regSingle [rcx,rdx,r8,r9])
+                 (map regSingle [firstxmm ..])
+allIntArgRegs = panic "X86.Regs.allIntArgRegs: not defined for this platform"
+allFPArgRegs = panic "X86.Regs.allFPArgRegs: not defined for this platform"
 
 #else
-allArgRegs  = panic "X86.Regs.allArgRegs: not defined for this architecture"
+
+allArgRegs = panic "X86.Regs.allArgRegs: not defined for this arch"
+
+# if   i386_TARGET_ARCH
+allIntArgRegs = panic "X86.Regs.allIntArgRegs: should not be used!"
+# elif x86_64_TARGET_ARCH
+allIntArgRegs = map regSingle [rdi,rsi,rdx,rcx,r8,r9]
+# else
+allIntArgRegs = panic "X86.Regs.allIntArgRegs: not defined for this arch"
+# endif
+
+allFPArgRegs    = map regSingle [firstxmm .. firstxmm+7]
+
 #endif
 
+-- All machine registers that are used for argument-passing to Haskell functions
+allHaskellArgRegs :: [Reg]
+allHaskellArgRegs = [ RegReal r | Just r <- map globalRegMaybe globalArgRegs ]
+
+-- Machine registers which might be clobbered by instructions that
+-- generate results into fixed registers, or need arguments in a fixed
+-- register.
+instrClobberedRegs :: [RealReg]
+#if   i386_TARGET_ARCH
+instrClobberedRegs = map RealRegSingle [ eax, ecx, edx ]
+#elif x86_64_TARGET_ARCH
+instrClobberedRegs = map RealRegSingle [ rax, rcx, rdx ]
+#endif
 
 -- | these are the regs which we cannot assume stay alive over a C call.
 
@@ -661,9 +650,16 @@ callClobberedRegs
 freeReg _               = 0#
 globalRegMaybe _        = panic "X86.Regs.globalRegMaybe: not defined"
 
-allArgRegs              = panic "X86.Regs.globalRegMaybe: not defined"
-callClobberedRegs       = panic "X86.Regs.globalRegMaybe: not defined"
+allArgRegs              = panic "X86.Regs.allArgRegs: not defined"
+allIntArgRegs           = panic "X86.Regs.allIntArgRegs: not defined"
+allFPArgRegs            = panic "X86.Regs.allFPArgRegs: not defined"
+callClobberedRegs       = panic "X86.Regs.callClobberedRegs: not defined"
 
+instrClobberedRegs :: [RealReg]
+instrClobberedRegs = panic "X86.Regs.instrClobberedRegs: not defined for this arch"
+
+allHaskellArgRegs :: [Reg]
+allHaskellArgRegs = panic "X86.Regs.allHaskellArgRegs: not defined for this arch"
 
 #endif
 
@@ -675,4 +671,16 @@ allocatableRegs
    = let isFree i = isFastTrue (freeReg i)
      in  map RealRegSingle $ filter isFree allMachRegNos
 
+{-
+Note [esi/edi not allocatable]
 
+%esi is mapped to R1, so %esi would normally be allocatable while it
+is not being used for R1.  However, %esi has no 8-bit version on x86,
+and the linear register allocator is not sophisticated enough to
+handle this irregularity (we need more RegClasses).  The
+graph-colouring allocator also cannot handle this - it was designed
+with more flexibility in mind, but the current implementation is
+restricted to the same set of classes as the linear allocator.
+
+Hence, on x86 esi and edi are treated as not allocatable.
+-}

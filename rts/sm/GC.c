@@ -150,6 +150,7 @@ static StgWord dec_running          (void);
 static void wakeup_gc_threads       (nat me);
 static void shutdown_gc_threads     (nat me);
 static void collect_gct_blocks      (void);
+static lnat collect_pinned_object_blocks (void);
 
 #if 0 && defined(DEBUG)
 static void gcCAFs                  (void);
@@ -177,7 +178,7 @@ GarbageCollect (rtsBool force_major_gc,
 {
   bdescr *bd;
   generation *gen;
-  lnat live_blocks, live_words, allocated, max_copied, avg_copied;
+  lnat live_blocks, live_words, allocated, par_max_copied, par_tot_copied;
 #if defined(THREADED_RTS)
   gc_thread *saved_gct;
 #endif
@@ -208,7 +209,7 @@ GarbageCollect (rtsBool force_major_gc,
   SET_GCT(gc_threads[cap->no]);
 
   // tell the stats department that we've started a GC 
-  stat_startGC(gct);
+  stat_startGC(cap, gct);
 
   // lock the StablePtr table
   stablePtrPreGC();
@@ -230,7 +231,7 @@ GarbageCollect (rtsBool force_major_gc,
   /* Approximate how much we allocated.  
    * Todo: only when generating stats? 
    */
-  allocated = calcAllocated(rtsFalse/* don't count the nursery yet */);
+  allocated = countLargeAllocated(); /* don't count the nursery yet */
 
   /* Figure out which generation to collect
    */
@@ -285,6 +286,10 @@ GarbageCollect (rtsBool force_major_gc,
   // check sanity *before* GC
   IF_DEBUG(sanity, checkSanity(rtsFalse /* before GC */, major_gc));
 
+  // gather blocks allocated using allocatePinned() from each capability
+  // and put them on the g0->large_object list.
+  collect_pinned_object_blocks();
+
   // Initialise all the generations/steps that we're collecting.
   for (g = 0; g <= N; g++) {
       prepare_collected_gen(&generations[g]);
@@ -338,6 +343,13 @@ GarbageCollect (rtsBool force_major_gc,
       }
   } else {
       scavenge_capability_mut_lists(gct->cap);
+      for (n = 0; n < n_capabilities; n++) {
+          if (gc_threads[n]->idle) {
+              markCapability(mark_root, gct, &capabilities[n],
+                             rtsTrue/*don't mark sparks*/);
+              scavenge_capability_mut_lists(&capabilities[n]);
+          }
+      }
   }
 
   // follow roots from the CAF list (used by GHCi)
@@ -401,7 +413,11 @@ GarbageCollect (rtsBool force_major_gc,
           pruneSparkQueue(&capabilities[n]);
       }
   } else {
-      pruneSparkQueue(gct->cap);
+      for (n = 0; n < n_capabilities; n++) {
+          if (n == cap->no || gc_threads[n]->idle) {
+              pruneSparkQueue(&capabilities[n]);
+         }
+      }
   }
 #endif
 
@@ -427,8 +443,8 @@ GarbageCollect (rtsBool force_major_gc,
   }
 
   copied = 0;
-  max_copied = 0;
-  avg_copied = 0;
+  par_max_copied = 0;
+  par_tot_copied = 0;
   { 
       nat i;
       for (i=0; i < n_gc_threads; i++) {
@@ -441,13 +457,12 @@ GarbageCollect (rtsBool force_major_gc,
               debugTrace(DEBUG_gc,"   scav_find_work %ld",   gc_threads[i]->scav_find_work);
           }
           copied += gc_threads[i]->copied;
-          max_copied = stg_max(gc_threads[i]->copied, max_copied);
+          par_max_copied = stg_max(gc_threads[i]->copied, par_max_copied);
       }
+      par_tot_copied = copied;
       if (n_gc_threads == 1) {
-          max_copied = 0;
-          avg_copied = 0;
-      } else {
-          avg_copied = copied;
+          par_max_copied = 0;
+          par_tot_copied = 0;
       }
   }
 
@@ -614,7 +629,16 @@ GarbageCollect (rtsBool force_major_gc,
   }
 
   // Reset the nursery: make the blocks empty
-  allocated += clearNurseries();
+  if (n_gc_threads == 1) {
+      for (n = 0; n < n_capabilities; n++) {
+          allocated += clearNursery(&capabilities[n]);
+      }
+  } else {
+      gct->allocated = clearNursery(cap);
+      for (n = 0; n < n_capabilities; n++) {
+          allocated += gc_threads[n]->allocated;
+      }
+  }
 
   resize_nursery();
 
@@ -640,7 +664,9 @@ GarbageCollect (rtsBool force_major_gc,
           zero_static_object_list(gct->scavenged_static_objects);
       } else {
           for (i = 0; i < n_gc_threads; i++) {
-              zero_static_object_list(gc_threads[i]->scavenged_static_objects);
+              if (!gc_threads[i]->idle) {
+                  zero_static_object_list(gc_threads[i]->scavenged_static_objects);
+              }
           }
       }
   }
@@ -721,9 +747,9 @@ GarbageCollect (rtsBool force_major_gc,
 #endif
 
   // ok, GC over: tell the stats department what happened. 
-  stat_endGC(gct, allocated, live_words,
-             copied, N, max_copied, avg_copied,
-             live_blocks * BLOCK_SIZE_W - live_words /* slop */);
+  stat_endGC(cap, gct, allocated, live_words, copied,
+             live_blocks * BLOCK_SIZE_W - live_words /* slop */,
+             N, n_gc_threads, par_max_copied, par_tot_copied);
 
   // Guess which generation we'll collect *next* time
   initialise_N(force_major_gc);
@@ -808,6 +834,7 @@ new_gc_thread (nat n, gc_thread *t)
 #endif
 
     t->thread_index = n;
+    t->idle = rtsFalse;
     t->free_blocks = NULL;
     t->gc_count = 0;
 
@@ -1048,6 +1075,11 @@ gcWorkerThread (Capability *cap)
 
     // Wait until we're told to wake up
     RELEASE_SPIN_LOCK(&gct->mut_spin);
+    // yieldThread();
+    //    Strangely, adding a yieldThread() here makes the CPU time
+    //    measurements more accurate on Linux, perhaps because it syncs
+    //    the CPU time across the multiple cores.  Without this, CPU time
+    //    is heavily skewed towards GC rather than MUT.
     gct->wakeup = GC_THREAD_STANDING_BY;
     debugTrace(DEBUG_gc, "GC thread %d standing by...", gct->thread_index);
     ACQUIRE_SPIN_LOCK(&gct->gc_spin);
@@ -1071,6 +1103,8 @@ gcWorkerThread (Capability *cap)
 
     scavenge_until_all_done();
     
+    gct->allocated = clearNursery(cap);
+
 #ifdef THREADED_RTS
     // Now that the whole heap is marked, we discard any sparks that
     // were found to be unreachable.  The main GC thread is currently
@@ -1114,7 +1148,7 @@ waitForGcThreads (Capability *cap USED_IF_THREADS)
 
     while(retry) {
         for (i=0; i < n_threads; i++) {
-            if (i == me) continue;
+            if (i == me || gc_threads[i]->idle) continue;
             if (gc_threads[i]->wakeup != GC_THREAD_STANDING_BY) {
                 prodCapability(&capabilities[i], cap->running_task);
             }
@@ -1122,9 +1156,9 @@ waitForGcThreads (Capability *cap USED_IF_THREADS)
         for (j=0; j < 10; j++) {
             retry = rtsFalse;
             for (i=0; i < n_threads; i++) {
-                if (i == me) continue;
+                if (i == me || gc_threads[i]->idle) continue;
                 write_barrier();
-                interruptAllCapabilities();
+                interruptCapability(&capabilities[i]);
                 if (gc_threads[i]->wakeup != GC_THREAD_STANDING_BY) {
                     retry = rtsTrue;
                 }
@@ -1154,8 +1188,8 @@ wakeup_gc_threads (nat me USED_IF_THREADS)
     if (n_gc_threads == 1) return;
 
     for (i=0; i < n_gc_threads; i++) {
-        if (i == me) continue;
-	inc_running();
+        if (i == me || gc_threads[i]->idle) continue;
+        inc_running();
         debugTrace(DEBUG_gc, "waking up gc thread %d", i);
         if (gc_threads[i]->wakeup != GC_THREAD_STANDING_BY) barf("wakeup_gc_threads");
 
@@ -1178,7 +1212,7 @@ shutdown_gc_threads (nat me USED_IF_THREADS)
     if (n_gc_threads == 1) return;
 
     for (i=0; i < n_gc_threads; i++) {
-        if (i == me) continue;
+        if (i == me || gc_threads[i]->idle) continue;
         while (gc_threads[i]->wakeup != GC_THREAD_WAITING_TO_CONTINUE) { write_barrier(); }
     }
 #endif
@@ -1192,8 +1226,8 @@ releaseGCThreads (Capability *cap USED_IF_THREADS)
     const nat me = cap->no;
     nat i;
     for (i=0; i < n_threads; i++) {
-        if (i == me) continue;
-        if (gc_threads[i]->wakeup != GC_THREAD_WAITING_TO_CONTINUE) 
+        if (i == me || gc_threads[i]->idle) continue;
+        if (gc_threads[i]->wakeup != GC_THREAD_WAITING_TO_CONTINUE)
             barf("releaseGCThreads");
         
         gc_threads[i]->wakeup = GC_THREAD_INACTIVE;
@@ -1403,6 +1437,43 @@ collect_gct_blocks (void)
 }
 
 /* -----------------------------------------------------------------------------
+   During mutation, any blocks that are filled by allocatePinned() are
+   stashed on the local pinned_object_blocks list, to avoid needing to
+   take a global lock.  Here we collect those blocks from the
+   cap->pinned_object_blocks lists and put them on the
+   main g0->large_object list.
+
+   Returns: the number of words allocated this way, for stats
+   purposes.
+   -------------------------------------------------------------------------- */
+
+static lnat
+collect_pinned_object_blocks (void)
+{
+    nat n;
+    bdescr *bd, *prev;
+    lnat allocated = 0;
+
+    for (n = 0; n < n_capabilities; n++) {
+        prev = NULL;
+        for (bd = capabilities[n].pinned_object_blocks; bd != NULL; bd = bd->link) {
+            allocated += bd->free - bd->start;
+            prev = bd;
+        }
+        if (prev != NULL) {
+            prev->link = g0->large_objects;
+            if (g0->large_objects != NULL) {
+                g0->large_objects->u.back = prev;
+            }
+            g0->large_objects = capabilities[n].pinned_object_blocks;
+            capabilities[n].pinned_object_blocks = 0;
+        }
+    }
+
+    return allocated;
+}
+
+/* -----------------------------------------------------------------------------
    Initialise a gc_thread before GC
    -------------------------------------------------------------------------- */
 
@@ -1417,6 +1488,7 @@ init_gc_thread (gc_thread *t)
     t->failed_to_evac = rtsFalse;
     t->eager_promotion = rtsTrue;
     t->thunk_selector_depth = 0;
+    t->allocated = 0;
     t->copied = 0;
     t->scanned = 0;
     t->any_work = 0;

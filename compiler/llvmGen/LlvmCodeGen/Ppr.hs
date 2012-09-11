@@ -11,13 +11,13 @@ module LlvmCodeGen.Ppr (
 import Llvm
 import LlvmCodeGen.Base
 import LlvmCodeGen.Data
+import LlvmCodeGen.Regs
 
 import CLabel
 import OldCmm
 
 import FastString
-import qualified Outputable
-import Pretty
+import Outputable
 import Unique
 
 
@@ -25,8 +25,18 @@ import Unique
 -- * Top level
 --
 
+-- | Header code for LLVM modules
+pprLlvmHeader :: SDoc
+pprLlvmHeader =
+    moduleLayout
+    $+$ text ""
+    $+$ ppLlvmFunctionDecls (map snd ghcInternalFunctions)
+    $+$ ppLlvmMetas stgTBAA
+    $+$ text ""
+
+
 -- | LLVM module layout description for the host target
-moduleLayout :: Doc
+moduleLayout :: SDoc
 moduleLayout =
 #if i386_TARGET_ARCH
 
@@ -64,13 +74,8 @@ moduleLayout =
 #endif
 
 
--- | Header code for LLVM modules
-pprLlvmHeader :: Doc
-pprLlvmHeader =
-    moduleLayout $+$ ppLlvmFunctionDecls (map snd ghcInternalFunctions)
-
 -- | Pretty print LLVM data code
-pprLlvmData :: LlvmData -> Doc
+pprLlvmData :: LlvmData -> SDoc
 pprLlvmData (globals, types) =
     let tryConst (v, Just s )   = ppLlvmGlobal (v, Just s)
         tryConst g@(_, Nothing) = ppLlvmGlobal g
@@ -85,7 +90,7 @@ pprLlvmData (globals, types) =
 
 
 -- | Pretty print LLVM code
-pprLlvmCmmDecl :: LlvmEnv -> Int -> LlvmCmmDecl -> (Doc, [LlvmVar])
+pprLlvmCmmDecl :: LlvmEnv -> Int -> LlvmCmmDecl -> (SDoc, [LlvmVar])
 pprLlvmCmmDecl _ _ (CmmData _ lmdata)
   = (vcat $ map pprLlvmData lmdata, [])
 
@@ -110,7 +115,7 @@ pprLlvmCmmDecl env count (CmmProc mb_info entry_lbl (ListGraph blks))
 
 
 -- | Pretty print CmmStatic
-pprInfoTable :: LlvmEnv -> Int -> CLabel -> CmmStatics -> (Doc, [LlvmVar])
+pprInfoTable :: LlvmEnv -> Int -> CLabel -> CmmStatics -> (SDoc, [LlvmVar])
 pprInfoTable env count info_lbl stat
   = let unres = genLlvmData env (Text, stat)
         (_, (ldata, ltypes)) = resolveLlvmData env unres

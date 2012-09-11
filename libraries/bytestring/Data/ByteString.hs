@@ -1,8 +1,8 @@
 {-# LANGUAGE CPP #-}
--- We cannot actually specify all the language pragmas, see ghc ticket #
--- If we could, these are what they would be:
-{- LANGUAGE MagicHash, UnboxedTuples,
-            NamedFieldPuns, BangPatterns, RecordWildCards -}
+#if __GLASGOW_HASKELL__
+{-# LANGUAGE MagicHash, UnboxedTuples,
+            NamedFieldPuns, BangPatterns, RecordWildCards #-}
+#endif
 {-# OPTIONS_HADDOCK prune #-}
 #if __GLASGOW_HASKELL__ >= 701
 {-# LANGUAGE Trustworthy #-}
@@ -12,18 +12,14 @@
 -- Module      : Data.ByteString
 -- Copyright   : (c) The University of Glasgow 2001,
 --               (c) David Roundy 2003-2005,
---               (c) Simon Marlow 2005
---               (c) Bjorn Bringert 2006
---               (c) Don Stewart 2005-2008
---
---               Array fusion code:
---               (c) 2001,2002 Manuel M T Chakravarty & Gabriele Keller
---               (c) 2006      Manuel M T Chakravarty & Roman Leshchinskiy
---
+--               (c) Simon Marlow 2005,
+--               (c) Bjorn Bringert 2006,
+--               (c) Don Stewart 2005-2008,
+--               (c) Duncan Coutts 2006-2011
 -- License     : BSD-style
 --
--- Maintainer  : dons@cse.unsw.edu.au
--- Stability   : experimental
+-- Maintainer  : dons00@gmail.com, duncan@community.haskell.org
+-- Stability   : stable
 -- Portability : portable
 -- 
 -- A time and space-efficient implementation of byte vectors using
@@ -40,7 +36,7 @@
 -- Original GHC implementation by Bryan O\'Sullivan.
 -- Rewritten to use 'Data.Array.Unboxed.UArray' by Simon Marlow.
 -- Rewritten to support slices and use 'ForeignPtr' by David Roundy.
--- Polished and extended by Don Stewart.
+-- Rewritten again and extended by Don Stewart and Duncan Coutts.
 --
 
 module Data.ByteString (
@@ -229,7 +225,7 @@ import Data.Maybe               (isJust, listToMaybe)
 
 -- Control.Exception.assert not available in yhc or nhc
 #ifndef __NHC__
-import Control.Exception        (finally, bracket, assert)
+import Control.Exception        (finally, bracket, assert, throwIO)
 #else
 import Control.Exception	(bracket, finally)
 #endif
@@ -249,7 +245,7 @@ import System.IO                (stdin,stdout,hClose,hFileSize
                                 ,IOMode(..))
 import System.IO.Error          (mkIOError, illegalOperationErrorType)
 
-import Data.Monoid              (Monoid, mempty, mappend, mconcat)
+import Data.Monoid              (Monoid(..))
 
 #if !defined(__GLASGOW_HASKELL__)
 import System.IO.Unsafe
@@ -274,7 +270,7 @@ import GHC.IO.Handle.Internals
 import GHC.IO.Handle.Types
 import GHC.IO.Buffer
 import GHC.IO.BufferedIO as Buffered
-import GHC.IO                   (stToIO, unsafePerformIO)
+import GHC.IO                   (unsafePerformIO)
 import Data.Char                (ord)
 import Foreign.Marshal.Utils    (copyBytes)
 #else
@@ -283,11 +279,9 @@ import GHC.IOBase
 import GHC.Handle
 #endif
 
-import GHC.Prim                 (Word#, (+#), writeWord8OffAddr#)
+import GHC.Prim                 (Word#)
 import GHC.Base                 (build)
 import GHC.Word hiding (Word8)
-import GHC.Ptr                  (Ptr(..))
-import GHC.ST                   (ST(..))
 
 #endif
 
@@ -316,67 +310,6 @@ hWaitForInput _ _ = return ()
 #define STRICT3(f) f a b c | a `seq` b `seq` c `seq` False = undefined
 #define STRICT4(f) f a b c d | a `seq` b `seq` c `seq` d `seq` False = undefined
 #define STRICT5(f) f a b c d e | a `seq` b `seq` c `seq` d `seq` e `seq` False = undefined
-
--- -----------------------------------------------------------------------------
-
-instance Eq  ByteString where
-    (==)    = eq
-
-instance Ord ByteString where
-    compare = compareBytes
-
-instance Monoid ByteString where
-    mempty  = empty
-    mappend = append
-    mconcat = concat
-
--- | /O(n)/ Equality on the 'ByteString' type.
-eq :: ByteString -> ByteString -> Bool
-eq a@(PS p s l) b@(PS p' s' l')
-    | l /= l'            = False    -- short cut on length
-    | p == p' && s == s' = True     -- short cut for the same string
-    | otherwise          = compareBytes a b == EQ
-{-# INLINE eq #-}
--- ^ still needed
-
--- | /O(n)/ 'compareBytes' provides an 'Ordering' for 'ByteStrings' supporting slices. 
-compareBytes :: ByteString -> ByteString -> Ordering
-compareBytes (PS x1 s1 l1) (PS x2 s2 l2)
-    | l1 == 0  && l2 == 0               = EQ  -- short cut for empty strings
-    | otherwise                         = inlinePerformIO $
-        withForeignPtr x1 $ \p1 ->
-        withForeignPtr x2 $ \p2 -> do
-            i <- memcmp (p1 `plusPtr` s1) (p2 `plusPtr` s2) (fromIntegral $ min l1 l2)
-            return $! case i `compare` 0 of
-                        EQ  -> l1 `compare` l2
-                        x   -> x
-
-{-
-
--- Pure Haskell version
-
-compareBytes (PS fp1 off1 len1) (PS fp2 off2 len2)
---    | len1 == 0  && len2 == 0                     = EQ  -- short cut for empty strings
---    | fp1 == fp2 && off1 == off2 && len1 == len2  = EQ  -- short cut for the same string
-    | otherwise                                   = inlinePerformIO $
-    withForeignPtr fp1 $ \p1 ->
-        withForeignPtr fp2 $ \p2 ->
-            cmp (p1 `plusPtr` off1)
-                (p2 `plusPtr` off2) 0 len1 len2
-
--- XXX todo.
-cmp :: Ptr Word8 -> Ptr Word8 -> Int -> Int -> Int-> IO Ordering
-cmp p1 p2 n len1 len2
-      | n == len1 = if n == len2 then return EQ else return LT
-      | n == len2 = return GT
-      | otherwise = do
-          a <- peekByteOff p1 n :: IO Word8
-          b <- peekByteOff p2 n
-          case a `compare` b of
-                EQ -> cmp p1 p2 (n+1) len1 len2
-                LT -> return LT
-                GT -> return GT
--}
 
 -- -----------------------------------------------------------------------------
 -- Introducing and eliminating 'ByteString's
@@ -416,40 +349,12 @@ singleton c = unsafeCreate 1 $ \p -> poke p c
 -- For applications with large numbers of string literals, pack can be a
 -- bottleneck. In such cases, consider using packAddress (GHC only).
 pack :: [Word8] -> ByteString
-
-#if !defined(__GLASGOW_HASKELL__)
-
-pack str = unsafeCreate (P.length str) $ \p -> go p str
-    where
-        go _ []     = return ()
-        go p (x:xs) = poke p x >> go (p `plusPtr` 1) xs -- less space than pokeElemOff
-
-#else /* hack away */
-
-pack str = unsafeCreate (P.length str) $ \(Ptr p) -> stToIO (go p 0# str)
-    where
-        go _ _ []        = return ()
-        go p i (W8# c:cs) = writeByte p i c >> go p (i +# 1#) cs
-
-        writeByte p i c = ST $ \s# ->
-            case writeWord8OffAddr# p i c s# of s2# -> (# s2#, () #)
-
-#endif
+pack = packBytes
 
 -- | /O(n)/ Converts a 'ByteString' to a '[Word8]'.
 unpack :: ByteString -> [Word8]
-
 #if !defined(__GLASGOW_HASKELL__)
-
-unpack (PS _  _ 0) = []
-unpack (PS ps s l) = inlinePerformIO $ withForeignPtr ps $ \p ->
-        go (p `plusPtr` s) (l - 1) []
-    where
-        STRICT3(go)
-        go p 0 acc = peek p          >>= \e -> return (e : acc)
-        go p n acc = peekByteOff p n >>= \e -> go p (n-1) (e : acc)
-{-# INLINE unpack #-}
-
+unpack = unpackBytes
 #else
 
 unpack ps = build (unpackFoldr ps)
@@ -473,18 +378,9 @@ unpackFoldr (PS fp off len) f ch = withPtr fp $ \p -> do
     loop (p `plusPtr` off) (len-1) ch
 {-# INLINE [0] unpackFoldr #-}
 
-unpackList :: ByteString -> [Word8]
-unpackList (PS fp off len) = withPtr fp $ \p -> do
-    let STRICT3(loop)
-        loop _ (-1) acc = return acc
-        loop q n acc = do
-           a <- peekByteOff q n
-           loop q (n-1) (a : acc)
-    loop (p `plusPtr` off) (len-1) []
-
 {-# RULES
 "ByteString unpack-list" [1]  forall p  .
-    unpackFoldr p (:) [] = unpackList p
+    unpackFoldr p (:) [] = unpackBytes p
  #-}
 
 #endif
@@ -504,6 +400,9 @@ length (PS _ _ l) = assert (l >= 0) $ l
 {-# INLINE length #-}
 
 ------------------------------------------------------------------------
+
+infixr 5 `cons` --same as list (:)
+infixl 5 `snoc`
 
 -- | /O(n)/ 'cons' is analogous to (:) for lists, but of different
 -- complexity, as it requires a memcpy.
@@ -566,9 +465,7 @@ init ps@(PS p s l)
 
 -- | /O(n)/ Append two ByteStrings
 append :: ByteString -> ByteString -> ByteString
-append xs ys | null xs   = ys
-             | null ys   = xs
-             | otherwise = concat [xs,ys]
+append = mappend
 {-# INLINE append #-}
 
 -- ---------------------------------------------------------------------
@@ -700,15 +597,7 @@ foldr1' f ps
 
 -- | /O(n)/ Concatenate a list of ByteStrings.
 concat :: [ByteString] -> ByteString
-concat []     = empty
-concat [ps]   = ps
-concat xs     = unsafeCreate len $ \ptr -> go xs ptr
-  where len = P.sum . P.map length $ xs
-        STRICT2(go)
-        go []            _   = return ()
-        go (PS p s l:ps) ptr = do
-                withForeignPtr p $ \fp -> memcpy ptr (fp `plusPtr` s) (fromIntegral l)
-                go ps (ptr `plusPtr` l)
+concat = mconcat
 
 -- | Map a function over a 'ByteString' and concatenate the results
 concatMap :: (Word8 -> ByteString) -> ByteString -> ByteString
@@ -1735,7 +1624,7 @@ packCStringLen :: CStringLen -> IO ByteString
 packCStringLen (cstr, len) | len >= 0 = create len $ \p ->
     memcpy p (castPtr cstr) (fromIntegral len)
 packCStringLen (_, len) =
-    moduleError "packCStringLen" ("negative length: " ++ show len)
+    moduleErrorIO "packCStringLen" ("negative length: " ++ show len)
 
 ------------------------------------------------------------------------
 
@@ -2112,8 +2001,20 @@ errorEmptyList fun = moduleError fun "empty ByteString"
 {-# NOINLINE errorEmptyList #-}
 
 moduleError :: String -> String -> a
-moduleError fun msg = error ("Data.ByteString." ++ fun ++ ':':' ':msg)
+moduleError fun msg = error (moduleErrorMsg fun msg)
 {-# NOINLINE moduleError #-}
+
+moduleErrorIO :: String -> String -> IO a
+moduleErrorIO fun msg =
+#if MIN_VERSION_base(4,0,0)
+    throwIO . userError $ moduleErrorMsg fun msg
+#else
+    throwIO . IOException . userError $ moduleErrorMsg fun msg
+#endif
+{-# NOINLINE moduleErrorIO #-}
+
+moduleErrorMsg :: String -> String -> String
+moduleErrorMsg fun msg = "Data.ByteString." ++ fun ++ ':':' ':msg
 
 -- Find from the end of the string using predicate
 findFromEndUntil :: (Word8 -> Bool) -> ByteString -> Int

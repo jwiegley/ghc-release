@@ -57,6 +57,16 @@ import GHC.Show (Show)
 import GHC.Word (Word32, Word64)
 import GHC.Windows
 
+#ifdef mingw32_HOST_OS
+# if defined(i386_HOST_ARCH)
+#  define WINDOWS_CCONV stdcall
+# elif defined(x86_64_HOST_ARCH)
+#  define WINDOWS_CCONV ccall
+# else
+#  error Unknown mingw32 arch
+# endif
+#endif
+
 -- ----------------------------------------------------------------------------
 -- Thread waiting
 
@@ -140,7 +150,7 @@ waitForDelayEventSTM usecs = do
 
 calculateTarget :: Int -> IO USecs
 calculateTarget usecs = do
-    now <- getUSecOfDay
+    now <- getMonotonicUSec
     return $ now + (fromIntegral usecs)
 
 data DelayReq
@@ -194,9 +204,13 @@ delayTime (Delay t _) = t
 delayTime (DelaySTM t _) = t
 
 type USecs = Word64
+type NSecs = Word64
 
-foreign import ccall unsafe "getUSecOfDay"
-  getUSecOfDay :: IO USecs
+foreign import ccall unsafe "getMonotonicNSec"
+  getMonotonicNSec :: IO NSecs
+
+getMonotonicUSec :: IO USecs
+getMonotonicUSec = fmap (`div` 1000) getMonotonicNSec
 
 {-# NOINLINE prodding #-}
 prodding :: IORef Bool
@@ -232,7 +246,7 @@ service_loop wakeup old_delays = do
   new_delays <- atomicModifyIORef pendingDelays (\a -> ([],a))
   let  delays = foldr insertDelay old_delays new_delays
 
-  now <- getUSecOfDay
+  now <- getMonotonicUSec
   (delays', timeout) <- getDelay now delays
 
   r <- c_WaitForSingleObject wakeup timeout
@@ -322,6 +336,6 @@ foreign import ccall unsafe "readIOManagerEvent" -- in the RTS (ThrIOManager.c)
 foreign import ccall unsafe "sendIOManagerEvent" -- in the RTS (ThrIOManager.c)
   c_sendIOManagerEvent :: Word32 -> IO ()
 
-foreign import stdcall "WaitForSingleObject"
+foreign import WINDOWS_CCONV "WaitForSingleObject"
    c_WaitForSingleObject :: HANDLE -> DWORD -> IO DWORD
 

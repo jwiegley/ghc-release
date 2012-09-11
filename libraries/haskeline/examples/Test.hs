@@ -2,6 +2,7 @@ module Main where
 
 import System.Console.Haskeline
 import System.Environment
+import Control.Exception (AsyncException(..))
 
 {--
 Testing the line-input functions and their interaction with ctrl-c signals.
@@ -29,7 +30,7 @@ main = do
         runInputT mySettings $ withInterrupt $ loop inputFunc 0
     where
         loop inputFunc n = do
-            minput <-  handleInterrupt (return (Just "Caught interrupted"))
+            minput <-  handle (\Interrupt -> return (Just "Caught interrupted"))
                         $ inputFunc (show n ++ ":")
             case minput of
                 Nothing -> return ()

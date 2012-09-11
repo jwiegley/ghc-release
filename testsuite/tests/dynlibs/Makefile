@@ -9,7 +9,7 @@ T3807:
 	$(RM) T3807-export.o T3807-load.o
 	$(RM) T3807test.so
 	$(RM) T3807-load
-	'$(TEST_HC)' $(filter-out -rtsopts,$(TEST_HC_OPTS)) -v0 --make -dynamic -fPIC -shared T3807Export.hs T3807-export.c -o T3807test.so -lHSrts-ghc`'$(TEST_HC)' $(TEST_HC_OPTS) --numeric-version` -rtsopts
+	'$(TEST_HC)' $(filter-out -rtsopts,$(TEST_HC_OPTS)) -v0 --make -dynamic -fPIC -shared T3807Export.hs T3807-export.c -o T3807test.so -lHSrts-ghc`'$(TEST_HC)' $(TEST_HC_OPTS) --numeric-version`
 	'$(TEST_HC)' $(filter-out -rtsopts,$(TEST_HC_OPTS)) -no-auto-link-packages -no-hs-main T3807-load.c -o T3807-load -ldl
 	./T3807-load
 
@@ -19,7 +19,7 @@ T4464:
 	$(RM) T4464H_stub.c T4464H_stub.h T4464H_stub.o
 	$(RM) HS4464.dll HS4464.dll.a t4464.exe
 	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 -shared T4464H.hs T4464B.c -optc-DRTSOPTS=RtsOptsSafeOnly -o HS4464.dll
-	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 T4464C.c HS4464.dll.a -o t4464.exe -no-hs-main
+	'$(TEST_HC)' $(filter-out -rtsopts,$(TEST_HC_OPTS)) -v0 T4464C.c HS4464.dll.a -o t4464.exe -no-hs-main
 	-./t4464.exe
 	echo "====="
 	echo "=====" >&2
@@ -27,7 +27,7 @@ T4464:
 	$(RM) T4464H_stub.c T4464H_stub.h T4464H_stub.o
 	$(RM) HS4464.dll HS4464.dll.a t4464.exe
 	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 -shared T4464H.hs T4464B.c  -optc-DRTSOPTS=RtsOptsAll -o HS4464.dll
-	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 T4464C.c HS4464.dll.a -o t4464.exe -no-hs-main
+	'$(TEST_HC)' $(filter-out -rtsopts,$(TEST_HC_OPTS)) -v0 T4464C.c HS4464.dll.a -o t4464.exe -no-hs-main
 	./t4464.exe
 
 .PHONY: T5373

@@ -1,6 +1,19 @@
 module Distribution.Client.Dependency.Modular.Builder where
 
 -- Building the search tree.
+--
+-- In this phase, we build a search tree that is too large, i.e, it contains
+-- invalid solutions. We keep track of the open goals at each point. We
+-- nondeterministically pick an open goal (via a goal choice node), create
+-- subtrees according to the index and the available solutions, and extend the
+-- set of open goals by superficially looking at the dependencies recorded in
+-- the index.
+--
+-- For each goal, we keep track of all the *reasons* why it is being
+-- introduced. These are for debugging and error messages, mainly. A little bit
+-- of care has to be taken due to the way we treat flags. If a package has
+-- flag-guarded dependencies, we cannot introduce them immediately. Instead, we
+-- store the entire dependency.
 
 import Control.Monad.Reader hiding (sequence, mapM)
 import Data.List as L
@@ -32,6 +45,7 @@ extendOpen qpn' gs s@(BS { rdeps = gs', open = o' }) = go gs' o' gs
   where
     go g o []                                             = s { rdeps = g, open = o }
     go g o (ng@(OpenGoal (Flagged _ _ _ _)    _gr) : ngs) = go g (cons ng () o) ngs
+    go g o (ng@(OpenGoal (Stanza  _   _  )    _gr) : ngs) = go g (cons ng () o) ngs
     go g o (ng@(OpenGoal (Simple (Dep qpn _)) _gr) : ngs)
       | qpn == qpn'                                       = go                       g              o  ngs
                                        -- we ignore self-dependencies at this point; TODO: more care may be needed
@@ -49,7 +63,7 @@ establishScope (Q pp pn) ecs s =
 
 -- | Given the current scope, qualify all the package names in the given set of
 -- dependencies and then extend the set of open goals accordingly.
-scopedExtendOpen :: QPN -> I -> QGoalReasons -> FlaggedDeps PN -> FlagDefaults ->
+scopedExtendOpen :: QPN -> I -> QGoalReasons -> FlaggedDeps PN -> FlagInfo ->
                     BuildState -> BuildState
 scopedExtendOpen qpn i gr fdeps fdefs s = extendOpen qpn gs s
   where
@@ -90,20 +104,27 @@ build = ana go
     -- that is indicated by the flag default.
     --
     -- TODO: Should we include the flag default in the tree?
-    go bs@(BS { scope = sc, next = OneGoal (OpenGoal (Flagged qfn b t f) gr) }) =
-      FChoiceF qfn (gr, sc) trivial (P.fromList (reorder b
-        [(True,  (extendOpen (getPN qfn) (L.map (flip OpenGoal (FDependency qfn True  : gr)) t) bs) { next = Goals }),
-         (False, (extendOpen (getPN qfn) (L.map (flip OpenGoal (FDependency qfn False : gr)) f) bs) { next = Goals })]))
+    go bs@(BS { scope = sc, next = OneGoal (OpenGoal (Flagged qfn@(FN (PI qpn _) _) (FInfo b m) t f) gr) }) =
+      FChoiceF qfn (gr, sc) trivial m (P.fromList (reorder b
+        [(True,  (extendOpen qpn (L.map (flip OpenGoal (FDependency qfn True  : gr)) t) bs) { next = Goals }),
+         (False, (extendOpen qpn (L.map (flip OpenGoal (FDependency qfn False : gr)) f) bs) { next = Goals })]))
       where
         reorder True  = id
         reorder False = reverse
         trivial = L.null t && L.null f
 
+    go bs@(BS { scope = sc, next = OneGoal (OpenGoal (Stanza qsn@(SN (PI qpn _) _) t) gr) }) =
+      SChoiceF qsn (gr, sc) trivial (P.fromList
+        [(False,                                                                        bs  { next = Goals }),
+         (True,  (extendOpen qpn (L.map (flip OpenGoal (SDependency qsn : gr)) t) bs) { next = Goals })])
+      where
+        trivial = L.null t
+
     -- For a particular instance, we change the state: we update the scope,
     -- and furthermore we update the set of goals.
     --
     -- TODO: We could inline this above.
-    go bs@(BS { next = Instance qpn i (PInfo fdeps fdefs ecs) gr }) =
+    go bs@(BS { next = Instance qpn i (PInfo fdeps fdefs ecs _) gr }) =
       go ((establishScope qpn ecs
              (scopedExtendOpen qpn i (PDependency (PI qpn i) : gr) fdeps fdefs bs))
              { next = Goals })

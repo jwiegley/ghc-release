@@ -15,6 +15,7 @@ data Message =
   | Leave           -- ^ decrease indentation level
   | TryP (PI QPN)
   | TryF QFN Bool
+  | TryS QSN Bool
   | Next (Goal QPN)
   | Success
   | Failure (ConflictSet QPN) FailReason
@@ -39,6 +40,7 @@ showMessages p sl = go [] 0
     -- complex patterns
     go v l (TryP (PI qpn i) : Enter : Failure c fr : Leave : ms) = goPReject v l qpn [i] c fr ms
     go v l (TryF qfn b : Enter : Failure c fr : Leave : ms) = (atLevel (F qfn : v) l $ "rejecting: " ++ showQFNBool qfn b ++ showFR c fr) (go v l ms)
+    go v l (TryS qsn b : Enter : Failure c fr : Leave : ms) = (atLevel (S qsn : v) l $ "rejecting: " ++ showQSNBool qsn b ++ showFR c fr) (go v l ms)
     go v l (Next (Goal (P qpn) gr) : TryP pi : ms@(Enter : Next _ : _)) = (atLevel (P qpn : v) l $ "trying: " ++ showPI pi ++ showGRs gr) (go (P qpn : v) l ms)
     go v l (Failure c Backjump : ms@(Leave : Failure c' Backjump : _)) | c == c' = go v l ms
     -- standard display
@@ -46,6 +48,7 @@ showMessages p sl = go [] 0
     go v l (Leave                  : ms) = go (drop 1 v) (l-1) ms
     go v l (TryP pi@(PI qpn _)     : ms) = (atLevel (P qpn : v) l $ "trying: " ++ showPI pi) (go (P qpn : v) l ms)
     go v l (TryF qfn b             : ms) = (atLevel (F qfn : v) l $ "trying: " ++ showQFNBool qfn b) (go (F qfn : v) l ms)
+    go v l (TryS qsn b             : ms) = (atLevel (S qsn : v) l $ "trying: " ++ showQSNBool qsn b) (go (S qsn : v) l ms)
     go v l (Next (Goal (P qpn) gr) : ms) = (atLevel (P qpn : v) l $ "next goal: " ++ showQPN qpn ++ showGRs gr) (go v l ms)
     go v l (Next _                 : ms) = go v l ms -- ignore flag goals in the log
     go v l (Success                : ms) = (atLevel v l $ "done") (go v l ms)
@@ -69,22 +72,27 @@ showGRs []       = ""
 
 showGR :: GoalReason QPN -> String
 showGR UserGoal            = " (user goal)"
-showGR (PDependency pi)    = " (dependency of " ++ showPI pi         ++ ")"
-showGR (FDependency qfn b) = " (dependency of " ++ showQFNBool qfn b ++ ")"
+showGR (PDependency pi)    = " (dependency of " ++ showPI pi            ++ ")"
+showGR (FDependency qfn b) = " (dependency of " ++ showQFNBool qfn b    ++ ")"
+showGR (SDependency qsn)   = " (dependency of " ++ showQSNBool qsn True ++ ")"
 
 showFR :: ConflictSet QPN -> FailReason -> String
 showFR _ InconsistentInitialConstraints = " (inconsistent initial constraints)"
 showFR _ (Conflicting ds)               = " (conflict: " ++ L.intercalate ", " (map showDep ds) ++ ")"
 showFR _ CannotInstall                  = " (only already installed instances can be used)"
 showFR _ CannotReinstall                = " (avoiding to reinstall a package with same version but new dependencies)"
+showFR _ Shadowed                       = " (shadowed by another installed package with same version)"
+showFR _ Broken                         = " (package is broken)"
 showFR _ (GlobalConstraintVersion vr)   = " (global constraint requires " ++ display vr ++ ")"
 showFR _ GlobalConstraintInstalled      = " (global constraint requires installed instance)"
 showFR _ GlobalConstraintSource         = " (global constraint requires source instance)"
 showFR _ GlobalConstraintFlag           = " (global constraint requires opposite flag selection)"
+showFR _ ManualFlag                     = " (manual flag can only be changed explicitly)"
+showFR _ (BuildFailureNotInIndex pn)    = " (unknown package: " ++ display pn ++ ")"
 showFR c Backjump                       = " (backjumping, conflict set: " ++ showCS c ++ ")"
 -- The following are internal failures. They should not occur. In the
 -- interest of not crashing unnecessarily, we still just print an error
 -- message though.
-showFR _ (BuildFailureNotInIndex pn)    = " (BUILD FAILURE: NOT IN INDEX: " ++ display pn ++ ")"
 showFR _ (MalformedFlagChoice qfn)      = " (INTERNAL ERROR: MALFORMED FLAG CHOICE: " ++ showQFN qfn ++ ")"
+showFR _ (MalformedStanzaChoice qsn)    = " (INTERNAL ERROR: MALFORMED STANZA CHOICE: " ++ showQSN qsn ++ ")"
 showFR _ EmptyGoalChoice                = " (INTERNAL ERROR: EMPTY GOAL CHOICE)"

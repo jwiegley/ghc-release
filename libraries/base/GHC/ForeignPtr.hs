@@ -26,6 +26,7 @@
 module GHC.ForeignPtr
   (
         ForeignPtr(..),
+        ForeignPtrContents(..),
         FinalizerPtr,
         FinalizerEnvPtr,
         newForeignPtr_,
@@ -33,6 +34,8 @@ module GHC.ForeignPtr
         mallocPlainForeignPtr,
         mallocForeignPtrBytes,
         mallocPlainForeignPtrBytes,
+        mallocForeignPtrAlignedBytes,
+        mallocPlainForeignPtrAlignedBytes,
         addForeignPtrFinalizer,
         addForeignPtrFinalizerEnv,
         touchForeignPtr,
@@ -182,6 +185,20 @@ mallocForeignPtrBytes (I# size) = do
                          (MallocPtr mbarr# r) #)
      }
 
+-- | This function is similar to 'mallocForeignPtrBytes', except that the
+-- size and alignment of the memory required is given explicitly as numbers of
+-- bytes.
+mallocForeignPtrAlignedBytes :: Int -> Int -> IO (ForeignPtr a)
+mallocForeignPtrAlignedBytes size _align | size < 0 =
+  error "mallocForeignPtrAlignedBytes: size must be >= 0"
+mallocForeignPtrAlignedBytes (I# size) (I# align) = do
+  r <- newIORef (NoFinalizers, [])
+  IO $ \s ->
+     case newAlignedPinnedByteArray# size align s of { (# s', mbarr# #) ->
+       (# s', ForeignPtr (byteArrayContents# (unsafeCoerce# mbarr#))
+                         (MallocPtr mbarr# r) #)
+     }
+
 -- | Allocate some memory and return a 'ForeignPtr' to it.  The memory
 -- will be released automatically when the 'ForeignPtr' is discarded.
 --
@@ -217,6 +234,19 @@ mallocPlainForeignPtrBytes size | size < 0 =
   error "mallocPlainForeignPtrBytes: size must be >= 0"
 mallocPlainForeignPtrBytes (I# size) = IO $ \s ->
     case newPinnedByteArray# size s      of { (# s', mbarr# #) ->
+       (# s', ForeignPtr (byteArrayContents# (unsafeCoerce# mbarr#))
+                         (PlainPtr mbarr#) #)
+     }
+
+-- | This function is similar to 'mallocForeignPtrAlignedBytes', except that
+-- the internally an optimised ForeignPtr representation with no
+-- finalizer is used. Attempts to add a finalizer will cause an
+-- exception to be thrown.
+mallocPlainForeignPtrAlignedBytes :: Int -> Int -> IO (ForeignPtr a)
+mallocPlainForeignPtrAlignedBytes size _align | size < 0 =
+  error "mallocPlainForeignPtrAlignedBytes: size must be >= 0"
+mallocPlainForeignPtrAlignedBytes (I# size) (I# align) = IO $ \s ->
+    case newAlignedPinnedByteArray# size align s of { (# s', mbarr# #) ->
        (# s', ForeignPtr (byteArrayContents# (unsafeCoerce# mbarr#))
                          (PlainPtr mbarr#) #)
      }
@@ -312,7 +342,9 @@ noMixing ftype0 r mkF = do
        return (null fs)
 
 foreignPtrFinalizer :: IORef (Finalizers, [IO ()]) -> IO ()
-foreignPtrFinalizer r = do (_, fs) <- readIORef r; sequence_ fs
+foreignPtrFinalizer r = do
+  fs <- atomicModifyIORef r $ \(f,fs) -> ((f,[]), fs) -- atomic, see #7170
+  sequence_ fs
 
 newForeignPtr_ :: Ptr a -> IO (ForeignPtr a)
 -- ^Turns a plain memory reference into a foreign pointer that may be
@@ -377,10 +409,7 @@ castForeignPtr f = unsafeCoerce# f
 -- immediately.
 finalizeForeignPtr :: ForeignPtr a -> IO ()
 finalizeForeignPtr (ForeignPtr _ (PlainPtr _)) = return () -- no effect
-finalizeForeignPtr (ForeignPtr _ foreignPtr) = do
-        (ftype, finalizers) <- readIORef refFinalizers
-        sequence_ finalizers
-        writeIORef refFinalizers (ftype, [])
+finalizeForeignPtr (ForeignPtr _ foreignPtr) = foreignPtrFinalizer refFinalizers
         where
                 refFinalizers = case foreignPtr of
                         (PlainForeignPtr ref) -> ref

@@ -1,4 +1,5 @@
-{-# OPTIONS_GHC -fglasgow-exts #-}
+{-# LANGUAGE CPP, MultiParamTypeClasses,
+             FlexibleInstances, TypeSynonymInstances #-}
 --
 -- Uses multi-param type classes
 --
@@ -17,7 +18,6 @@ import System.Random
 import System.IO
 import Foreign.C (CChar)
 
-import Data.ByteString.Fusion
 import qualified Data.ByteString      as P
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.Lazy.Internal as L (checkInvariant,ByteString(..))
@@ -60,31 +60,7 @@ instance Functor (Either a) where
 
 -}
 
-mytest :: Testable a => a -> Int -> IO (Bool, Int)
-mytest p n = do
-    result <- quickCheckWithResult testArgs p
-    case result of
-      Success {} -> return (True,  numTests result)
-      _          -> return (False, numTests result)
-  where
-    testArgs = stdArgs {
-                 maxSuccess = n
-                 --chatty   = ... if we want to increase verbosity
-               }
-
 ------------------------------------------------------------------------
-
-instance Random Word8 where
-  randomR = integralRandomR
-  random = randomR (minBound,maxBound)
-
-instance Random CChar where
-  randomR = integralRandomR
-  random = randomR (minBound,maxBound)
-
-instance Random Int64 where
-  randomR = integralRandomR
-  random  = randomR (minBound,maxBound)
 
 integralRandomR :: (Integral a, RandomGen g) => (a,a) -> g -> (a,g)
 integralRandomR  (a,b) g = case randomR (fromIntegral a :: Integer,
@@ -101,7 +77,10 @@ instance CoArbitrary L.ByteString where
   coarbitrary s = coarbitrary (L.unpack s)
 
 instance Arbitrary P.ByteString where
-  arbitrary = P.pack `fmap` arbitrary
+  arbitrary = do
+    bs <- P.pack `fmap` arbitrary
+    n  <- choose (0, 2)
+    return (P.drop n bs) -- to give us some with non-0 offset
 
 instance CoArbitrary P.ByteString where
   coarbitrary s = coarbitrary (P.unpack s)
@@ -117,7 +96,8 @@ instance Arbitrary CByteString where
       fromCChar = fromIntegral
 
 instance Arbitrary CChar where
-  arbitrary = oneof [choose (-128,-1), choose (1,127)]
+  arbitrary = fmap (fromIntegral :: Int -> CChar)
+            $ oneof [choose (-128,-1), choose (1,127)]
 
 ------------------------------------------------------------------------
 --
@@ -158,7 +138,6 @@ instance Model Int   Int          where model = id
 instance Model P     P            where model = id
 instance Model B     B            where model = id
 instance Model Int64 Int64        where model = id
-instance Model Int64 Int          where model = fromIntegral
 instance Model Word8 Word8        where model = id
 instance Model Ordering Ordering  where model = id
 instance Model Char Char  where model = id
@@ -211,10 +190,6 @@ eq2 f g = \a b       ->
     model (f a b)       == g (model a) (model b)
 eq3 f g = \a b c     ->
     model (f a b c)     == g (model a) (model b) (model c)
-eq4 f g = \a b c d   ->
-    model (f a b c d)   == g (model a) (model b) (model c) (model d)
-eq5 f g = \a b c d e ->
-    model (f a b c d e) == g (model a) (model b) (model c) (model d) (model e)
 
 --
 -- And for functions that take non-null input

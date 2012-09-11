@@ -1,5 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, BangPatterns, MagicHash #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, BangPatterns, MagicHash, UnboxedTuples #-}
 {-# OPTIONS_HADDOCK hide #-}
 
 -----------------------------------------------------------------------------
@@ -43,141 +43,13 @@ import GHC.Err
 import GHC.Float ()     -- for RealFrac methods
 
 ------------------------------------------------------------------------
--- type Word
-------------------------------------------------------------------------
-
--- |A 'Word' is an unsigned integral type, with the same size as 'Int'.
-data Word = W# Word# deriving (Eq, Ord)
-
-instance Show Word where
-    showsPrec _ (W# w) = showWord w
-
-showWord :: Word# -> ShowS
-showWord w# cs
- | w# `ltWord#` 10## = C# (chr# (ord# '0'# +# word2Int# w#)) : cs
- | otherwise = case chr# (ord# '0'# +# word2Int# (w# `remWord#` 10##)) of
-               c# ->
-                   showWord (w# `quotWord#` 10##) (C# c# : cs)
-
-instance Num Word where
-    (W# x#) + (W# y#)      = W# (x# `plusWord#` y#)
-    (W# x#) - (W# y#)      = W# (x# `minusWord#` y#)
-    (W# x#) * (W# y#)      = W# (x# `timesWord#` y#)
-    negate (W# x#)         = W# (int2Word# (negateInt# (word2Int# x#)))
-    abs x                  = x
-    signum 0               = 0
-    signum _               = 1
-    fromInteger i          = W# (integerToWord i)
-
-instance Real Word where
-    toRational x = toInteger x % 1
-
-instance Enum Word where
-    succ x
-        | x /= maxBound = x + 1
-        | otherwise     = succError "Word"
-    pred x
-        | x /= minBound = x - 1
-        | otherwise     = predError "Word"
-    toEnum i@(I# i#)
-        | i >= 0        = W# (int2Word# i#)
-        | otherwise     = toEnumError "Word" i (minBound::Word, maxBound::Word)
-    fromEnum x@(W# x#)
-        | x <= fromIntegral (maxBound::Int)
-                        = I# (word2Int# x#)
-        | otherwise     = fromEnumError "Word" x
-    enumFrom            = integralEnumFrom
-    enumFromThen        = integralEnumFromThen
-    enumFromTo          = integralEnumFromTo
-    enumFromThenTo      = integralEnumFromThenTo
-
-instance Integral Word where
-    quot    (W# x#) y@(W# y#)
-        | y /= 0                = W# (x# `quotWord#` y#)
-        | otherwise             = divZeroError
-    rem     (W# x#) y@(W# y#)
-        | y /= 0                = W# (x# `remWord#` y#)
-        | otherwise             = divZeroError
-    div     (W# x#) y@(W# y#)
-        | y /= 0                = W# (x# `quotWord#` y#)
-        | otherwise             = divZeroError
-    mod     (W# x#) y@(W# y#)
-        | y /= 0                = W# (x# `remWord#` y#)
-        | otherwise             = divZeroError
-    quotRem (W# x#) y@(W# y#)
-        | y /= 0                = (W# (x# `quotWord#` y#), W# (x# `remWord#` y#))
-        | otherwise             = divZeroError
-    divMod  (W# x#) y@(W# y#)
-        | y /= 0                = (W# (x# `quotWord#` y#), W# (x# `remWord#` y#))
-        | otherwise             = divZeroError
-    toInteger (W# x#)
-        | i# >=# 0#             = smallInteger i#
-        | otherwise             = wordToInteger x#
-        where
-        !i# = word2Int# x#
-
-instance Bounded Word where
-    minBound = 0
-
-    -- use unboxed literals for maxBound, because GHC doesn't optimise
-    -- (fromInteger 0xffffffff :: Word).
-#if WORD_SIZE_IN_BITS == 32
-    maxBound = W# (int2Word# 0xFFFFFFFF#)
-#else
-    maxBound = W# (int2Word# 0xFFFFFFFFFFFFFFFF#)
-#endif
-
-instance Ix Word where
-    range (m,n)         = [m..n]
-    unsafeIndex (m,_) i = fromIntegral (i - m)
-    inRange (m,n) i     = m <= i && i <= n
-
-instance Read Word where
-    readsPrec p s = [(fromInteger x, r) | (x, r) <- readsPrec p s]
-
-instance Bits Word where
-    {-# INLINE shift #-}
-
-    (W# x#) .&.   (W# y#)    = W# (x# `and#` y#)
-    (W# x#) .|.   (W# y#)    = W# (x# `or#`  y#)
-    (W# x#) `xor` (W# y#)    = W# (x# `xor#` y#)
-    complement (W# x#)       = W# (x# `xor#` mb#)
-        where !(W# mb#) = maxBound
-    (W# x#) `shift` (I# i#)
-        | i# >=# 0#          = W# (x# `shiftL#` i#)
-        | otherwise          = W# (x# `shiftRL#` negateInt# i#)
-    (W# x#) `shiftL` (I# i#) = W# (x# `shiftL#` i#)
-    (W# x#) `unsafeShiftL` (I# i#) = W# (x# `uncheckedShiftL#` i#)
-    (W# x#) `shiftR` (I# i#) = W# (x# `shiftRL#` i#)
-    (W# x#) `unsafeShiftR` (I# i#) = W# (x# `uncheckedShiftRL#` i#)
-    (W# x#) `rotate` (I# i#)
-        | i'# ==# 0# = W# x#
-        | otherwise  = W# ((x# `uncheckedShiftL#` i'#) `or#` (x# `uncheckedShiftRL#` (wsib -# i'#)))
-        where
-        !i'# = word2Int# (int2Word# i# `and#` int2Word# (wsib -# 1#))
-        !wsib = WORD_SIZE_IN_BITS#  {- work around preprocessor problem (??) -}
-    bitSize  _               = WORD_SIZE_IN_BITS
-    isSigned _               = False
-    popCount (W# x#)         = I# (word2Int# (popCnt# x#))
-
-{-# RULES
-"fromIntegral/Int->Word"  fromIntegral = \(I# x#) -> W# (int2Word# x#)
-"fromIntegral/Word->Int"  fromIntegral = \(W# x#) -> I# (word2Int# x#)
-"fromIntegral/Word->Word" fromIntegral = id :: Word -> Word
-  #-}
-
--- No RULES for RealFrac unfortunately.
--- Going through Int isn't possible because Word's range is not
--- included in Int's, going through Integer may or may not be slower.
-
-------------------------------------------------------------------------
 -- type Word8
 ------------------------------------------------------------------------
 
 -- Word8 is represented in the same way as Word. Operations may assume
 -- and must ensure that it holds only values from its logical range.
 
-data Word8 = W8# Word# deriving (Eq, Ord)
+data {-# CTYPE "HsWord8" #-} Word8 = W8# Word# deriving (Eq, Ord)
 -- ^ 8-bit unsigned integer type
 
 instance Show Word8 where
@@ -225,7 +97,9 @@ instance Integral Word8 where
         | y /= 0                  = W8# (x# `remWord#` y#)
         | otherwise               = divZeroError
     quotRem (W8# x#) y@(W8# y#)
-        | y /= 0                  = (W8# (x# `quotWord#` y#), W8# (x# `remWord#` y#))
+        | y /= 0                  = case x# `quotRemWord#` y# of
+                                    (# q, r #) ->
+                                        (W8# q, W8# r)
         | otherwise               = divZeroError
     divMod  (W8# x#) y@(W8# y#)
         | y /= 0                  = (W8# (x# `quotWord#` y#), W8# (x# `remWord#` y#))
@@ -246,6 +120,8 @@ instance Read Word8 where
 
 instance Bits Word8 where
     {-# INLINE shift #-}
+    {-# INLINE bit #-}
+    {-# INLINE testBit #-}
 
     (W8# x#) .&.   (W8# y#)   = W8# (x# `and#` y#)
     (W8# x#) .|.   (W8# y#)   = W8# (x# `or#`  y#)
@@ -265,10 +141,12 @@ instance Bits Word8 where
         | otherwise  = W8# (narrow8Word# ((x# `uncheckedShiftL#` i'#) `or#`
                                           (x# `uncheckedShiftRL#` (8# -# i'#))))
         where
-        !i'# = word2Int# (int2Word# i# `and#` int2Word# 7#)
+        !i'# = word2Int# (int2Word# i# `and#` 7##)
     bitSize  _                = 8
     isSigned _                = False
     popCount (W8# x#)         = I# (word2Int# (popCnt8# x#))
+    bit                       = bitDefault
+    testBit                   = testBitDefault
 
 {-# RULES
 "fromIntegral/Word8->Word8"   fromIntegral = id :: Word8 -> Word8
@@ -314,7 +192,7 @@ instance Bits Word8 where
 -- Word16 is represented in the same way as Word. Operations may assume
 -- and must ensure that it holds only values from its logical range.
 
-data Word16 = W16# Word# deriving (Eq, Ord)
+data {-# CTYPE "HsWord16" #-} Word16 = W16# Word# deriving (Eq, Ord)
 -- ^ 16-bit unsigned integer type
 
 instance Show Word16 where
@@ -362,7 +240,9 @@ instance Integral Word16 where
         | y /= 0                    = W16# (x# `remWord#` y#)
         | otherwise                 = divZeroError
     quotRem (W16# x#) y@(W16# y#)
-        | y /= 0                    = (W16# (x# `quotWord#` y#), W16# (x# `remWord#` y#))
+        | y /= 0                  = case x# `quotRemWord#` y# of
+                                    (# q, r #) ->
+                                        (W16# q, W16# r)
         | otherwise                 = divZeroError
     divMod  (W16# x#) y@(W16# y#)
         | y /= 0                    = (W16# (x# `quotWord#` y#), W16# (x# `remWord#` y#))
@@ -383,6 +263,8 @@ instance Read Word16 where
 
 instance Bits Word16 where
     {-# INLINE shift #-}
+    {-# INLINE bit #-}
+    {-# INLINE testBit #-}
 
     (W16# x#) .&.   (W16# y#)  = W16# (x# `and#` y#)
     (W16# x#) .|.   (W16# y#)  = W16# (x# `or#`  y#)
@@ -402,10 +284,12 @@ instance Bits Word16 where
         | otherwise  = W16# (narrow16Word# ((x# `uncheckedShiftL#` i'#) `or#`
                                             (x# `uncheckedShiftRL#` (16# -# i'#))))
         where
-        !i'# = word2Int# (int2Word# i# `and#` int2Word# 15#)
+        !i'# = word2Int# (int2Word# i# `and#` 15##)
     bitSize  _                = 16
     isSigned _                = False
     popCount (W16# x#)        = I# (word2Int# (popCnt16# x#))
+    bit                       = bitDefault
+    testBit                   = testBitDefault
 
 {-# RULES
 "fromIntegral/Word8->Word16"   fromIntegral = \(W8# x#) -> W16# x#
@@ -488,7 +372,7 @@ instance Bits Word16 where
 
 #endif
 
-data Word32 = W32# Word# deriving (Eq, Ord)
+data {-# CTYPE "HsWord32" #-} Word32 = W32# Word# deriving (Eq, Ord)
 -- ^ 32-bit unsigned integer type
 
 instance Num Word32 where
@@ -544,7 +428,9 @@ instance Integral Word32 where
         | y /= 0                    = W32# (x# `remWord#` y#)
         | otherwise                 = divZeroError
     quotRem (W32# x#) y@(W32# y#)
-        | y /= 0                    = (W32# (x# `quotWord#` y#), W32# (x# `remWord#` y#))
+        | y /= 0                  = case x# `quotRemWord#` y# of
+                                    (# q, r #) ->
+                                        (W32# q, W32# r)
         | otherwise                 = divZeroError
     divMod  (W32# x#) y@(W32# y#)
         | y /= 0                    = (W32# (x# `quotWord#` y#), W32# (x# `remWord#` y#))
@@ -561,6 +447,8 @@ instance Integral Word32 where
 
 instance Bits Word32 where
     {-# INLINE shift #-}
+    {-# INLINE bit #-}
+    {-# INLINE testBit #-}
 
     (W32# x#) .&.   (W32# y#)  = W32# (x# `and#` y#)
     (W32# x#) .|.   (W32# y#)  = W32# (x# `or#`  y#)
@@ -580,10 +468,12 @@ instance Bits Word32 where
         | otherwise  = W32# (narrow32Word# ((x# `uncheckedShiftL#` i'#) `or#`
                                             (x# `uncheckedShiftRL#` (32# -# i'#))))
         where
-        !i'# = word2Int# (int2Word# i# `and#` int2Word# 31#)
+        !i'# = word2Int# (int2Word# i# `and#` 31##)
     bitSize  _                = 32
     isSigned _                = False
     popCount (W32# x#)        = I# (word2Int# (popCnt32# x#))
+    bit                       = bitDefault
+    testBit                   = testBitDefault
 
 {-# RULES
 "fromIntegral/Word8->Word32"   fromIntegral = \(W8# x#) -> W32# x#
@@ -627,7 +517,7 @@ instance Read Word32 where
 
 #if WORD_SIZE_IN_BITS < 64
 
-data Word64 = W64# Word64#
+data {-# CTYPE "HsWord64" #-} Word64 = W64# Word64#
 -- ^ 64-bit unsigned integer type
 
 instance Eq Word64 where
@@ -692,6 +582,8 @@ instance Integral Word64 where
 
 instance Bits Word64 where
     {-# INLINE shift #-}
+    {-# INLINE bit #-}
+    {-# INLINE testBit #-}
 
     (W64# x#) .&.   (W64# y#)  = W64# (x# `and64#` y#)
     (W64# x#) .|.   (W64# y#)  = W64# (x# `or64#`  y#)
@@ -709,10 +601,12 @@ instance Bits Word64 where
         | otherwise  = W64# ((x# `uncheckedShiftL64#` i'#) `or64#`
                              (x# `uncheckedShiftRL64#` (64# -# i'#)))
         where
-        !i'# = word2Int# (int2Word# i# `and#` int2Word# 63#)
+        !i'# = word2Int# (int2Word# i# `and#` 63##)
     bitSize  _                = 64
     isSigned _                = False
     popCount (W64# x#)        = I# (word2Int# (popCnt64# x#))
+    bit                       = bitDefault
+    testBit                   = testBitDefault
 
 -- give the 64-bit shift operations the same treatment as the 32-bit
 -- ones (see GHC.Base), namely we wrap them in tests to catch the
@@ -721,10 +615,10 @@ instance Bits Word64 where
 
 shiftL64#, shiftRL64# :: Word64# -> Int# -> Word64#
 
-a `shiftL64#` b  | b >=# 64#  = wordToWord64# (int2Word# 0#)
+a `shiftL64#` b  | b >=# 64#  = wordToWord64# 0##
                  | otherwise  = a `uncheckedShiftL64#` b
 
-a `shiftRL64#` b | b >=# 64#  = wordToWord64# (int2Word# 0#)
+a `shiftRL64#` b | b >=# 64#  = wordToWord64# 0##
                  | otherwise  = a `uncheckedShiftRL64#` b
 
 {-# RULES
@@ -741,7 +635,7 @@ a `shiftRL64#` b | b >=# 64#  = wordToWord64# (int2Word# 0#)
 -- Operations may assume and must ensure that it holds only values
 -- from its logical range.
 
-data Word64 = W64# Word# deriving (Eq, Ord)
+data {-# CTYPE "HsWord64" #-} Word64 = W64# Word# deriving (Eq, Ord)
 -- ^ 64-bit unsigned integer type
 
 instance Num Word64 where
@@ -787,7 +681,9 @@ instance Integral Word64 where
         | y /= 0                    = W64# (x# `remWord#` y#)
         | otherwise                 = divZeroError
     quotRem (W64# x#) y@(W64# y#)
-        | y /= 0                    = (W64# (x# `quotWord#` y#), W64# (x# `remWord#` y#))
+        | y /= 0                  = case x# `quotRemWord#` y# of
+                                    (# q, r #) ->
+                                        (W64# q, W64# r)
         | otherwise                 = divZeroError
     divMod  (W64# x#) y@(W64# y#)
         | y /= 0                    = (W64# (x# `quotWord#` y#), W64# (x# `remWord#` y#))
@@ -800,6 +696,8 @@ instance Integral Word64 where
 
 instance Bits Word64 where
     {-# INLINE shift #-}
+    {-# INLINE bit #-}
+    {-# INLINE testBit #-}
 
     (W64# x#) .&.   (W64# y#)  = W64# (x# `and#` y#)
     (W64# x#) .|.   (W64# y#)  = W64# (x# `or#`  y#)
@@ -818,10 +716,12 @@ instance Bits Word64 where
         | otherwise  = W64# ((x# `uncheckedShiftL#` i'#) `or#`
                              (x# `uncheckedShiftRL#` (64# -# i'#)))
         where
-        !i'# = word2Int# (int2Word# i# `and#` int2Word# 63#)
+        !i'# = word2Int# (int2Word# i# `and#` 63##)
     bitSize  _                = 64
     isSigned _                = False
     popCount (W64# x#)        = I# (word2Int# (popCnt64# x#))
+    bit                       = bitDefault
+    testBit                   = testBitDefault
 
 {-# RULES
 "fromIntegral/a->Word64" fromIntegral = \x -> case fromIntegral x of W# x# -> W64# x#

@@ -186,3 +186,11 @@ test('T5592',
       extra_clean(['T5592a.hi',      'T5592a.o'])],
      multimod_compile_and_run,
      ['T5592', '-v0'])
+test('T5867',
+     extra_clean(['T5867a.hi', 'T5867a.o']),
+     multimod_compile, ['T5867', '-v0'])
+test('T6027', normal, compile, [''])
+test('T6120', normal, compile, [''])
+test('T7007', normal, compile, [''])
+test('T7145a', normal, compile, ['-Wall -Werror'])
+test('T7145b', normal, compile, ['-Wall'])

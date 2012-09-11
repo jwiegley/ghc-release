@@ -15,40 +15,30 @@ import Vectorise.Builtins
 import Vectorise.Generic.Description
 import CoreSyn
 import CoreUtils
+import FamInstEnv
 import MkCore            ( mkWildCase )
 import TyCon
 import Type
-import BuildTyCl
 import OccName
 import Coercion
 import MkId
 
+import DynFlags
 import FastString
 import MonadUtils
 import Control.Monad
 import Outputable
 
 
-buildPReprTyCon :: TyCon -> TyCon -> SumRepr -> VM TyCon
+buildPReprTyCon :: TyCon -> TyCon -> SumRepr -> VM FamInst
 buildPReprTyCon orig_tc vect_tc repr
  = do name      <- mkLocalisedName mkPReprTyConOcc (tyConName orig_tc)
       rhs_ty    <- sumReprType repr
       prepr_tc  <- builtin preprTyCon
-      liftDs    $  buildSynTyCon name
-                             tyvars
-                             (SynonymTyCon rhs_ty)
-                             (typeKind rhs_ty)
-                             NoParentTyCon
-                             (Just $ mk_fam_inst prepr_tc vect_tc)
+      return $ mkSynFamInst name tyvars prepr_tc instTys rhs_ty
   where
     tyvars = tyConTyVars vect_tc
-
-
-mk_fam_inst :: TyCon -> TyCon -> (TyCon, [Type])
-mk_fam_inst fam_tc arg_tc
-  = (fam_tc, [mkTyConApp arg_tc . mkTyVarTys $ tyConTyVars arg_tc])
-
-
+    instTys = [mkTyConApp vect_tc . mkTyVarTys $ tyConTyVars vect_tc]
 
 -- buildPAScAndMethods --------------------------------------------------------
 
@@ -69,7 +59,7 @@ mk_fam_inst fam_tc arg_tc
 --
 type PAInstanceBuilder
         =  TyCon        -- ^ Vectorised TyCon 
-        -> TyCon        -- ^ Representation TyCon
+        -> CoAxiom      -- ^ Coercion to the representation TyCon
         -> TyCon        -- ^ 'PData'  TyCon
         -> TyCon        -- ^ 'PDatas' TyCon
         -> SumRepr      -- ^ Description of generic representation.
@@ -78,8 +68,7 @@ type PAInstanceBuilder
 
 buildPAScAndMethods :: VM [(String, PAInstanceBuilder)]
 buildPAScAndMethods
- = return [ ("PR",            buildPRDict)
-          , ("toPRepr",       buildToPRepr)
+ = return [ ("toPRepr",       buildToPRepr)
           , ("fromPRepr",     buildFromPRepr)
           , ("toArrPRepr",    buildToArrPRepr)
           , ("fromArrPRepr",  buildFromArrPRepr)
@@ -87,18 +76,10 @@ buildPAScAndMethods
           , ("fromArrPReprs", buildFromArrPReprs)]
 
 
-buildPRDict :: PAInstanceBuilder
-buildPRDict vect_tc prepr_tc _ _ _
-  = prDictOfPReprInstTyCon inst_ty prepr_tc arg_tys
-  where
-    arg_tys = mkTyVarTys (tyConTyVars vect_tc)
-    inst_ty = mkTyConApp vect_tc arg_tys
-
-
 -- buildToPRepr ---------------------------------------------------------------
 -- | Build the 'toRepr' method of the PA class.
 buildToPRepr :: PAInstanceBuilder
-buildToPRepr vect_tc repr_tc _ _ repr
+buildToPRepr vect_tc repr_ax _ _ repr
  = do let arg_ty = mkTyConApp vect_tc ty_args
 
       -- Get the representation type of the argument.
@@ -114,7 +95,7 @@ buildToPRepr vect_tc repr_tc _ _ repr
   where
     ty_args        = mkTyVarTys (tyConTyVars vect_tc)
 
-    wrap_repr_inst = wrapFamInstBody repr_tc ty_args
+    wrap_repr_inst = wrapTypeFamInstBody repr_ax ty_args
 
     -- CoreExp to convert the given argument to the generic representation.
     -- We start by doing a case branch on the possible data constructors.
@@ -172,12 +153,12 @@ buildToPRepr vect_tc repr_tc _ _ repr
 -- |Build the 'fromPRepr' method of the PA class.
 --
 buildFromPRepr :: PAInstanceBuilder
-buildFromPRepr vect_tc repr_tc _ _ repr
+buildFromPRepr vect_tc repr_ax _ _ repr
   = do
       arg_ty <- mkPReprType res_ty
       arg <- newLocalVar (fsLit "x") arg_ty
 
-      result <- from_sum (unwrapFamInstScrut repr_tc ty_args (Var arg))
+      result <- from_sum (unwrapTypeFamInstScrut repr_ax ty_args (Var arg))
                          repr
       return $ Lam arg result
   where
@@ -225,14 +206,13 @@ buildFromPRepr vect_tc repr_tc _ _ repr
 -- |Build the 'toArrRepr' method of the PA class.
 --
 buildToArrPRepr :: PAInstanceBuilder
-buildToArrPRepr vect_tc prepr_tc pdata_tc _ r
+buildToArrPRepr vect_tc repr_co pdata_tc _ r
  = do arg_ty <- mkPDataType el_ty
       res_ty <- mkPDataType =<< mkPReprType el_ty
       arg    <- newLocalVar (fsLit "xs") arg_ty
 
       pdata_co <- mkBuiltinCo pdataTyCon
-      let Just repr_co = tyConFamilyCoercion_maybe prepr_tc
-          co           = mkAppCo pdata_co
+      let co           = mkAppCo pdata_co
                        . mkSymCo
                        $ mkAxInstCo repr_co ty_args
 
@@ -291,13 +271,12 @@ buildToArrPRepr vect_tc prepr_tc pdata_tc _ r
 -- |Build the 'fromArrPRepr' method for the PA class.
 --
 buildFromArrPRepr :: PAInstanceBuilder
-buildFromArrPRepr vect_tc prepr_tc pdata_tc _ r
+buildFromArrPRepr vect_tc repr_co pdata_tc _ r
  = do arg_ty <- mkPDataType =<< mkPReprType el_ty
       res_ty <- mkPDataType el_ty
       arg    <- newLocalVar (fsLit "xs") arg_ty
 
       pdata_co <- mkBuiltinCo pdataTyCon
-      let Just repr_co = tyConFamilyCoercion_maybe prepr_tc
       let co           = mkAppCo pdata_co
                        $ mkAxInstCo repr_co var_tys
 
@@ -367,7 +346,7 @@ buildFromArrPRepr vect_tc prepr_tc pdata_tc _ r
 -- | Build the 'toArrPReprs' instance for the PA class.
 --   This converts a PData of elements into the generic representation.
 buildToArrPReprs :: PAInstanceBuilder
-buildToArrPReprs vect_tc prepr_tc _ pdatas_tc r
+buildToArrPReprs vect_tc repr_co _ pdatas_tc r
  = do
     -- The argument type of the instance.
     --  eg: 'PDatas (Tree a b)'
@@ -383,7 +362,6 @@ buildToArrPReprs vect_tc prepr_tc _ pdatas_tc r
 
     -- Coersion to case between the (PRepr a) type and its instance.
     pdatas_co <- mkBuiltinCo pdatasTyCon
-    let Just repr_co = tyConFamilyCoercion_maybe prepr_tc
     let co           = mkAppCo pdatas_co
                      . mkSymCo
                      $ mkAxInstCo repr_co ty_args
@@ -408,8 +386,10 @@ buildToArrPReprs vect_tc prepr_tc _ pdatas_tc r
      = case ss of
         -- We can't convert data types with no data.
         -- See Note: [Empty PDatas].
-        EmptySum        -> return ([], errorEmptyPDatas el_ty)
-        UnarySum r      -> to_con (errorEmptyPDatas el_ty) r
+        EmptySum        -> do dflags <- getDynFlags
+                              return ([], errorEmptyPDatas dflags el_ty)
+        UnarySum r      -> do dflags <- getDynFlags
+                              to_con (errorEmptyPDatas dflags el_ty) r
 
         Sum{}
          -> do  let psums_tc     = repr_psums_tc ss
@@ -457,7 +437,7 @@ buildToArrPReprs vect_tc prepr_tc _ pdatas_tc r
 
 -- buildFromArrPReprs ---------------------------------------------------------
 buildFromArrPReprs :: PAInstanceBuilder
-buildFromArrPReprs vect_tc prepr_tc _ pdatas_tc r
+buildFromArrPReprs vect_tc repr_co _ pdatas_tc r
  = do   
     -- The argument type of the instance.
     --  eg: 'PDatas (PRepr (Tree a b))'
@@ -471,9 +451,8 @@ buildFromArrPReprs vect_tc prepr_tc _ pdatas_tc r
     -- eg: (xss :: PDatas (PRepr (Tree a b)))
     varg        <- newLocalVar (fsLit "xss") arg_ty
         
-    -- Build the coersion between PRepr and the instance type
+    -- Build the coercion between PRepr and the instance type
     pdatas_co <- mkBuiltinCo pdatasTyCon
-    let Just repr_co = tyConFamilyCoercion_maybe prepr_tc
     let co           = mkAppCo pdatas_co
                      $ mkAxInstCo repr_co var_tys
 
@@ -501,7 +480,8 @@ buildFromArrPReprs vect_tc prepr_tc _ pdatas_tc r
      = case ss of
         -- We can't convert data types with no data.
         -- See Note: [Empty PDatas].
-        EmptySum        -> return (res, errorEmptyPDatas el_ty)
+        EmptySum        -> do dflags <- getDynFlags
+                              return (res, errorEmptyPDatas dflags el_ty)
         UnarySum r      -> from_con res_ty res expr r
 
         Sum {}
@@ -587,9 +567,9 @@ To fix this we'd need to add an Int field to VPDs:Empty1 as well, but that's
 too much hassle and there's no point running a parallel computation on no
 data anyway.
 -}
-errorEmptyPDatas :: Type -> a
-errorEmptyPDatas tc
-    = cantVectorise "Vectorise.PAMethods"
+errorEmptyPDatas :: DynFlags -> Type -> a
+errorEmptyPDatas dflags tc
+    = cantVectorise dflags "Vectorise.PAMethods"
     $ vcat  [ text "Cannot vectorise data type with no parallel data " <> quotes (ppr tc)
             , text "Data types to be vectorised must contain at least one constructor"
             , text "with at least one field." ]

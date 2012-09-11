@@ -109,7 +109,6 @@ import GHC.Types
 import GHC.Classes
 import GHC.CString
 import GHC.Prim
-import {-# SOURCE #-} GHC.Show
 import {-# SOURCE #-} GHC.Err
 import {-# SOURCE #-} GHC.IO (failIO)
 
@@ -229,6 +228,16 @@ class  Monad m  where
     {-# INLINE (>>) #-}
     m >> k      = m >>= \_ -> k
     fail s      = error s
+
+instance Functor ((->) r) where
+    fmap = (.)
+
+instance Monad ((->) r) where
+    return = const
+    f >>= k = \ r -> k (f r) r
+
+instance Functor ((,) a) where
+    fmap f (x,y) = (x, f y)
 \end{code}
 
 
@@ -448,13 +457,6 @@ type String = [Char]
 "x# `ltChar#` x#" forall x#. x# `ltChar#` x# = False
   #-}
 
--- | The 'Prelude.toEnum' method restricted to the type 'Data.Char.Char'.
-chr :: Int -> Char
-chr i@(I# i#)
- | int2Word# i# `leWord#` int2Word# 0x10FFFF# = C# (chr# i#)
- | otherwise
-    = error ("Prelude.chr: bad argument: " ++ showSignedInt (I# 9#) i "")
-
 unsafeChr :: Int -> Char
 unsafeChr (I# i#) = C# (chr# i#)
 
@@ -484,10 +486,7 @@ eqString _        _        = False
 %*********************************************************
 
 \begin{code}
-zeroInt, oneInt, twoInt, maxInt, minInt :: Int
-zeroInt = I# 0#
-oneInt  = I# 1#
-twoInt  = I# 2#
+maxInt, minInt :: Int
 
 {- Seems clumsy. Should perhaps put minInt and MaxInt directly into MachDeps.h -}
 #if WORD_SIZE_IN_BITS == 31
@@ -656,46 +655,35 @@ getTag x = x `seq` dataToTag# x
 %*                                                      *
 %*********************************************************
 
-\begin{code}
-divInt# :: Int# -> Int# -> Int#
-x# `divInt#` y#
-        -- Be careful NOT to overflow if we do any additional arithmetic
-        -- on the arguments...  the following  previous version of this
-        -- code has problems with overflow:
---    | (x# ># 0#) && (y# <# 0#) = ((x# -# y#) -# 1#) `quotInt#` y#
---    | (x# <# 0#) && (y# ># 0#) = ((x# -# y#) +# 1#) `quotInt#` y#
-    | (x# ># 0#) && (y# <# 0#) = ((x# -# 1#) `quotInt#` y#) -# 1#
-    | (x# <# 0#) && (y# ># 0#) = ((x# +# 1#) `quotInt#` y#) -# 1#
-    | otherwise                = x# `quotInt#` y#
-
-modInt# :: Int# -> Int# -> Int#
-x# `modInt#` y#
-    | (x# ># 0#) && (y# <# 0#) ||
-      (x# <# 0#) && (y# ># 0#)    = if r# /=# 0# then r# +# y# else 0#
-    | otherwise                   = r#
-    where
-    !r# = x# `remInt#` y#
-\end{code}
-
 Definitions of the boxed PrimOps; these will be
 used in the case of partial applications, etc.
 
 \begin{code}
-{-# INLINE plusInt #-}
-{-# INLINE minusInt #-}
-{-# INLINE timesInt #-}
 {-# INLINE quotInt #-}
 {-# INLINE remInt #-}
-{-# INLINE negateInt #-}
 
-plusInt, minusInt, timesInt, quotInt, remInt, divInt, modInt :: Int -> Int -> Int
-(I# x) `plusInt`  (I# y) = I# (x +# y)
-(I# x) `minusInt` (I# y) = I# (x -# y)
-(I# x) `timesInt` (I# y) = I# (x *# y)
+quotInt, remInt, divInt, modInt :: Int -> Int -> Int
 (I# x) `quotInt`  (I# y) = I# (x `quotInt#` y)
 (I# x) `remInt`   (I# y) = I# (x `remInt#`  y)
 (I# x) `divInt`   (I# y) = I# (x `divInt#`  y)
 (I# x) `modInt`   (I# y) = I# (x `modInt#`  y)
+
+quotRemInt :: Int -> Int -> (Int, Int)
+(I# x) `quotRemInt` (I# y) = case x `quotRemInt#` y of
+                             (# q, r #) ->
+                                 (I# q, I# r)
+
+divModInt :: Int -> Int -> (Int, Int)
+(I# x) `divModInt` (I# y) = case x `divModInt#` y of
+                            (# q, r #) -> (I# q, I# r)
+
+divModInt# :: Int# -> Int# -> (# Int#, Int# #)
+x# `divModInt#` y#
+ | (x# ># 0#) && (y# <# 0#) = case (x# -# 1#) `quotRemInt#` y# of
+                              (# q, r #) -> (# q -# 1#, r +# y# +# 1# #)
+ | (x# <# 0#) && (y# ># 0#) = case (x# +# 1#) `quotRemInt#` y# of
+                              (# q, r #) -> (# q -# 1#, r +# y# -# 1# #)
+ | otherwise                = x# `quotRemInt#` y#
 
 {-# RULES
 "x# +# 0#" forall x#. x# +# 0# = x#
@@ -707,9 +695,6 @@ plusInt, minusInt, timesInt, quotInt, remInt, divInt, modInt :: Int -> Int -> In
 "x# *# 1#" forall x#. x# *# 1# = x#
 "1# *# x#" forall x#. 1# *# x# = x#
   #-}
-
-negateInt :: Int -> Int
-negateInt (I# x) = I# (negateInt# x)
 
 {-# RULES
 "x# ># x#"  forall x#. x# >#  x# = False
@@ -770,13 +755,13 @@ Similarly for Float (#5178):
 -- | Shift the argument left by the specified number of bits
 -- (which must be non-negative).
 shiftL# :: Word# -> Int# -> Word#
-a `shiftL#` b   | b >=# WORD_SIZE_IN_BITS# = int2Word# 0#
+a `shiftL#` b   | b >=# WORD_SIZE_IN_BITS# = 0##
                 | otherwise                = a `uncheckedShiftL#` b
 
 -- | Shift the argument right by the specified number of bits
 -- (which must be non-negative).
 shiftRL# :: Word# -> Int# -> Word#
-a `shiftRL#` b  | b >=# WORD_SIZE_IN_BITS# = int2Word# 0#
+a `shiftRL#` b  | b >=# WORD_SIZE_IN_BITS# = 0##
                 | otherwise                = a `uncheckedShiftRL#` b
 
 -- | Shift the argument left by the specified number of bits

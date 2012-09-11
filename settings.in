@@ -12,6 +12,9 @@
  ("target arch", "@HaskellTargetArch@"),
  ("target word size", "@WordSize@"),
  ("target has GNU nonexec stack", "@HaskellHaveGnuNonexecStack@"),
- ("target has subsections via symbols", "@HaskellHaveSubsectionsViaSymbols@")
+ ("target has .ident directive", "@HaskellHaveIdentDirective@"),
+ ("target has subsections via symbols", "@HaskellHaveSubsectionsViaSymbols@"),
+ ("LLVM llc command", "@SettingsLlcCommand@"),
+ ("LLVM opt command", "@SettingsOptCommand@")
  ]
 

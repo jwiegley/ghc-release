@@ -40,6 +40,16 @@ import DirectCodegen
 import Flags
 import HSCParser
 
+#ifdef mingw32_HOST_OS
+# if defined(i386_HOST_ARCH)
+#  define WINDOWS_CCONV stdcall
+# elif defined(x86_64_HOST_ARCH)
+#  define WINDOWS_CCONV ccall
+# else
+#  error Unknown mingw32 arch
+# endif
+#endif
+
 #ifdef BUILD_NHC
 getDataFileName s = do here <- getCurrentDirectory
                        return (here++"/"++s)
@@ -170,16 +180,16 @@ findCompiler mb_libdir config
                       Nothing ->
                           die ("Can't find "++default_compiler++"\n")
                       Just path -> return path
-          -- if this hsc2hs is part of a GHC installation on
-          -- Windows, then we should use the mingw gcc that
-          -- comes with GHC (#3929)
-          case mb_libdir of
-              Nothing -> search_path
-              Just d  ->
-                  do let inplaceGcc = d ++ "/../mingw/bin/gcc.exe"
-                     b <- doesFileExist inplaceGcc
-                     if b then return inplaceGcc
-                          else search_path
+              -- if this hsc2hs is part of a GHC installation on
+              -- Windows, then we should use the mingw gcc that
+              -- comes with GHC (#3929)
+              inplaceGccs = case mb_libdir of
+                            Nothing -> []
+                            Just d  -> [d ++ "/../mingw/bin/gcc.exe"]
+              search [] = search_path
+              search (x : xs) = do b <- doesFileExist x
+                                   if b then return x else search xs
+          search inplaceGccs
 
 parseFile :: String -> IO [Token]
 parseFile name
@@ -221,7 +231,7 @@ getExecPath = try_size 2048 -- plenty, PATH_MAX is 512 under Win32.
           _ | ret < size -> fmap Just $ peekCWString buf
             | otherwise  -> try_size (size * 2)
 
-foreign import stdcall unsafe "windows.h GetModuleFileNameW"
+foreign import WINDOWS_CCONV unsafe "windows.h GetModuleFileNameW"
   c_GetModuleFileName :: Ptr () -> CWString -> Word32 -> IO Word32
 #else
 getExecPath = return Nothing

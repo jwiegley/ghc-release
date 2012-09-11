@@ -1,16 +1,18 @@
-{-# LANGUAGE CPP, ForeignFunctionInterface #-}
--- We cannot actually specify all the language pragmas, see ghc ticket #
--- If we could, these are what they would be:
-{- LANGUAGE UnliftedFFITypes, MagicHash,
-            UnboxedTuples, DeriveDataTypeable -}
+{-# LANGUAGE CPP, ForeignFunctionInterface, BangPatterns #-}
+#if __GLASGOW_HASKELL__
+{-# LANGUAGE UnliftedFFITypes, MagicHash,
+            UnboxedTuples, DeriveDataTypeable #-}
+#endif
 {-# OPTIONS_HADDOCK hide #-}
 
 -- |
 -- Module      : Data.ByteString.Internal
+-- Copyright   : (c) Don Stewart 2006-2008
+--               (c) Duncan Coutts 2006-2011
 -- License     : BSD-style
--- Maintainer  : Don Stewart <dons@galois.com>
--- Stability   : experimental
--- Portability : portable
+-- Maintainer  : dons00@gmail.com, duncan@community.haskell.org
+-- Stability   : unstable
+-- Portability : non-portable
 --
 -- A module containing semi-public 'ByteString' internals. This exposes the
 -- 'ByteString' representation and low level construction functions. As such
@@ -25,7 +27,13 @@ module Data.ByteString.Internal (
         -- * The @ByteString@ type and representation
         ByteString(..),         -- instances: Eq, Ord, Show, Read, Data, Typeable
 
-        -- * Low level introduction and elimination
+        -- * Conversion with lists: packing and unpacking
+        packBytes, packUptoLenBytes, unsafePackLenBytes,
+        packChars, packUptoLenChars, unsafePackLenChars,
+        unpackBytes, unpackAppendBytesLazy, unpackAppendBytesStrict,
+        unpackChars, unpackAppendCharsLazy, unpackAppendCharsStrict,
+
+        -- * Low level imperative construction
         create,                 -- :: Int -> (Ptr Word8 -> IO ()) -> IO ByteString
         createAndTrim,          -- :: Int -> (Ptr Word8 -> IO Int) -> IO  ByteString
         createAndTrim',         -- :: Int -> (Ptr Word8 -> IO (Int, Int, a)) -> IO (ByteString, a)
@@ -45,8 +53,8 @@ module Data.ByteString.Internal (
         c_free_finalizer,       -- :: FunPtr (Ptr Word8 -> IO ())
 
         memchr,                 -- :: Ptr Word8 -> Word8 -> CSize -> IO Ptr Word8
-        memcmp,                 -- :: Ptr Word8 -> Ptr Word8 -> CSize -> IO CInt
-        memcpy,                 -- :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
+        memcmp,                 -- :: Ptr Word8 -> Ptr Word8 -> Int -> IO CInt
+        memcpy,                 -- :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
         memset,                 -- :: Ptr Word8 -> Word8 -> CSize -> IO (Ptr Word8)
 
         -- * cbits functions
@@ -65,11 +73,25 @@ module Data.ByteString.Internal (
 
   ) where
 
+import Prelude hiding (concat)
+import qualified Data.List as List
+
 import Foreign.ForeignPtr       (ForeignPtr, withForeignPtr)
 import Foreign.Ptr              (Ptr, FunPtr, plusPtr)
 import Foreign.Storable         (Storable(..))
+#if MIN_VERSION_base(4,5,0) || __GLASGOW_HASKELL__ >= 703
 import Foreign.C.Types          (CInt(..), CSize(..), CULong(..))
+#else
+import Foreign.C.Types          (CInt, CSize, CULong)
+#endif
 import Foreign.C.String         (CString)
+
+import Data.Monoid              (Monoid(..))
+import Control.DeepSeq          (NFData)
+
+#if MIN_VERSION_base(3,0,0)
+import Data.String              (IsString(..))
+#endif
 
 #ifndef __NHC__
 import Control.Exception        (assert)
@@ -78,13 +100,19 @@ import Control.Exception        (assert)
 import Data.Char                (ord)
 import Data.Word                (Word8)
 
-#if defined(__GLASGOW_HASKELL__)
 import Data.Typeable            (Typeable)
-#if __GLASGOW_HASKELL__ >= 610
-import Data.Data                (Data)
+#if MIN_VERSION_base(4,1,0)
+import Data.Data                (Data(..))
+#if MIN_VERSION_base(4,2,0)
+import Data.Data                (mkNoRepType)
 #else
-import Data.Generics            (Data)
+import Data.Data                (mkNorepType)
 #endif
+#else
+import Data.Generics            (Data(..), mkNorepType)
+#endif
+
+#ifdef __GLASGOW_HASKELL__
 import GHC.Base                 (realWorld#,unsafeChr)
 #if __GLASGOW_HASKELL__ >= 611
 import GHC.IO                   (IO(IO))
@@ -154,42 +182,148 @@ data ByteString = PS {-# UNPACK #-} !(ForeignPtr Word8) -- payload
                      {-# UNPACK #-} !Int                -- length
 
 #if defined(__GLASGOW_HASKELL__)
-    deriving (Data, Typeable)
+    deriving (Typeable)
 #endif
 
+instance Eq  ByteString where
+    (==)    = eq
+
+instance Ord ByteString where
+    compare = compareBytes
+
+instance Monoid ByteString where
+    mempty  = PS nullForeignPtr 0 0
+    mappend = append
+    mconcat = concat
+
+instance NFData ByteString
+
 instance Show ByteString where
-    showsPrec p ps r = showsPrec p (unpackWith w2c ps) r
+    showsPrec p ps r = showsPrec p (unpackChars ps) r
 
 instance Read ByteString where
-    readsPrec p str = [ (packWith c2w x, y) | (x, y) <- readsPrec p str ]
+    readsPrec p str = [ (packChars x, y) | (x, y) <- readsPrec p str ]
 
--- | /O(n)/ Converts a 'ByteString' to a '[a]', using a conversion function.
-unpackWith :: (Word8 -> a) -> ByteString -> [a]
-unpackWith _ (PS _  _ 0) = []
-unpackWith k (PS ps s l) = inlinePerformIO $ withForeignPtr ps $ \p ->
-        go (p `plusPtr` s) (l - 1) []
-    where
-        STRICT3(go)
-        go p 0 acc = peek p          >>= \e -> return (k e : acc)
-        go p n acc = peekByteOff p n >>= \e -> go p (n-1) (k e : acc)
-{-# INLINE unpackWith #-}
+#if MIN_VERSION_base(3,0,0)
+instance IsString ByteString where
+    fromString = packChars
+#endif
 
--- | /O(n)/ Convert a '[a]' into a 'ByteString' using some
--- conversion function
-packWith :: (a -> Word8) -> [a] -> ByteString
-packWith k str = unsafeCreate (length str) $ \p -> go p str
-    where
-        STRICT2(go)
-        go _ []     = return ()
-        go p (x:xs) = poke p (k x) >> go (p `plusPtr` 1) xs -- less space than pokeElemOff
-{-# INLINE packWith #-}
+instance Data ByteString where
+  gfoldl f z txt = z packBytes `f` (unpackBytes txt)
+  toConstr _     = error "Data.ByteString.ByteString.toConstr"
+  gunfold _ _    = error "Data.ByteString.ByteString.gunfold"
+#if MIN_VERSION_base(4,2,0)
+  dataTypeOf _   = mkNoRepType "Data.ByteString.ByteString"
+#else
+  dataTypeOf _   = mkNorepType "Data.ByteString.ByteString"
+#endif
+
+------------------------------------------------------------------------
+-- Packing and unpacking from lists
+
+packBytes :: [Word8] -> ByteString
+packBytes ws = unsafePackLenBytes (List.length ws) ws
+
+packChars :: [Char] -> ByteString
+packChars cs = unsafePackLenChars (List.length cs) cs
+
+unsafePackLenBytes :: Int -> [Word8] -> ByteString
+unsafePackLenBytes len xs0 =
+    unsafeCreate len $ \p -> go p xs0
+  where
+    go !_ []     = return ()
+    go !p (x:xs) = poke p x >> go (p `plusPtr` 1) xs
+
+unsafePackLenChars :: Int -> [Char] -> ByteString
+unsafePackLenChars len cs0 =
+    unsafeCreate len $ \p -> go p cs0
+  where
+    go !_ []     = return ()
+    go !p (c:cs) = poke p (c2w c) >> go (p `plusPtr` 1) cs
+
+packUptoLenBytes :: Int -> [Word8] -> (ByteString, [Word8])
+packUptoLenBytes len xs0 =
+    unsafeDupablePerformIO $ create' len $ \p -> go p len xs0
+  where
+    go !_ !n []     = return (len-n, [])
+    go !_ !0 xs     = return (len,   xs)
+    go !p !n (x:xs) = poke p x >> go (p `plusPtr` 1) (n-1) xs
+
+packUptoLenChars :: Int -> [Char] -> (ByteString, [Char])
+packUptoLenChars len cs0 =
+    unsafeDupablePerformIO $ create' len $ \p -> go p len cs0
+  where
+    go !_ !n []     = return (len-n, [])
+    go !_ !0 cs     = return (len,   cs)
+    go !p !n (c:cs) = poke p (c2w c) >> go (p `plusPtr` 1) (n-1) cs
+
+-- Unpacking bytestrings into lists effeciently is a tradeoff: on the one hand
+-- we would like to write a tight loop that just blats the list into memory, on
+-- the other hand we want it to be unpacked lazily so we don't end up with a
+-- massive list data structure in memory.
+--
+-- Our strategy is to combine both: we will unpack lazily in reasonable sized
+-- chunks, where each chunk is unpacked strictly.
+--
+-- unpackBytes and unpackChars do the lazy loop, while unpackAppendBytes and
+-- unpackAppendChars do the chunks strictly.
+
+unpackBytes :: ByteString -> [Word8]
+unpackBytes bs = unpackAppendBytesLazy bs []
+
+unpackChars :: ByteString -> [Char]
+unpackChars bs = unpackAppendCharsLazy bs []
+
+unpackAppendBytesLazy :: ByteString -> [Word8] -> [Word8]
+unpackAppendBytesLazy (PS fp off len) xs
+  | len <= 100 = unpackAppendBytesStrict (PS fp off len) xs
+  | otherwise  = unpackAppendBytesStrict (PS fp off 100) remainder
+  where
+    remainder  = unpackAppendBytesLazy (PS fp (off+100) (len-100)) xs
+
+  -- Why 100 bytes you ask? Because on a 64bit machine the list we allocate
+  -- takes just shy of 4k which seems like a reasonable amount.
+  -- (5 words per list element, 8 bytes per word, 100 elements = 4000 bytes)
+
+unpackAppendCharsLazy :: ByteString -> [Char] -> [Char]
+unpackAppendCharsLazy (PS fp off len) cs
+  | len <= 100 = unpackAppendCharsStrict (PS fp off len) cs
+  | otherwise  = unpackAppendCharsStrict (PS fp off 100) remainder
+  where
+    remainder  = unpackAppendCharsLazy (PS fp (off+100) (len-100)) cs
+
+-- For these unpack functions, since we're unpacking the whole list strictly we
+-- build up the result list in an accumulator. This means we have to build up
+-- the list starting at the end. So our traversal starts at the end of the
+-- buffer and loops down until we hit the sentinal:
+
+unpackAppendBytesStrict :: ByteString -> [Word8] -> [Word8]
+unpackAppendBytesStrict (PS fp off len) xs =
+    inlinePerformIO $ withForeignPtr fp $ \base -> do
+      loop (base `plusPtr` (off-1)) (base `plusPtr` (off-1+len)) xs
+  where
+    loop !sentinal !p acc
+      | p == sentinal = return acc
+      | otherwise     = do x <- peek p
+                           loop sentinal (p `plusPtr` (-1)) (x:acc)
+
+unpackAppendCharsStrict :: ByteString -> [Char] -> [Char]
+unpackAppendCharsStrict (PS fp off len) xs =
+    inlinePerformIO $ withForeignPtr fp $ \base ->
+      loop (base `plusPtr` (off-1)) (base `plusPtr` (off-1+len)) xs
+  where
+    loop !sentinal !p acc
+      | p == sentinal = return acc
+      | otherwise     = do x <- peek p
+                           loop sentinal (p `plusPtr` (-1)) (w2c x:acc)
 
 ------------------------------------------------------------------------
 
 -- | The 0 pointer. Used to indicate the empty Bytestring.
 nullForeignPtr :: ForeignPtr Word8
 #ifdef __GLASGOW_HASKELL__
-nullForeignPtr = ForeignPtr nullAddr# undefined --TODO: should ForeignPtrContents be strict?
+nullForeignPtr = ForeignPtr nullAddr# (error "nullForeignPtr") --TODO: should ForeignPtrContents be strict?
 #else
 nullForeignPtr = unsafePerformIO $ newForeignPtr_ nullPtr
 {-# NOINLINE nullForeignPtr #-}
@@ -238,6 +372,14 @@ create l f = do
     return $! PS fp 0 l
 {-# INLINE create #-}
 
+-- | Create ByteString of up to size @l@ and use action @f@ to fill it's contents which returns its true size.
+create' :: Int -> (Ptr Word8 -> IO (Int, a)) -> IO (ByteString, a)
+create' l f = do
+    fp <- mallocByteString l
+    (l', res) <- withForeignPtr fp $ \p -> f p
+    assert (l' <= l) $ return (PS fp 0 l', res)
+{-# INLINE create' #-}
+
 -- | Given the maximum size needed and a function to make the contents
 -- of a ByteString, createAndTrim makes the 'ByteString'. The generating
 -- function is required to return the actual final size (<= the maximum
@@ -253,7 +395,7 @@ createAndTrim l f = do
         l' <- f p
         if assert (l' <= l) $ l' >= l
             then return $! PS fp 0 l
-            else create l' $ \p' -> memcpy p' p (fromIntegral l')
+            else create l' $ \p' -> memcpy p' p l'
 {-# INLINE createAndTrim #-}
 
 createAndTrim' :: Int -> (Ptr Word8 -> IO (Int, Int, a)) -> IO (ByteString, a)
@@ -264,7 +406,7 @@ createAndTrim' l f = do
         if assert (l' <= l) $ l' >= l
             then return $! (PS fp 0 l, res)
             else do ps <- create l' $ \p' ->
-                            memcpy p' (p `plusPtr` off) (fromIntegral l')
+                            memcpy p' (p `plusPtr` off) l'
                     return $! (ps, res)
 
 -- | Wrapper of 'mallocForeignPtrBytes' with faster implementation for GHC
@@ -277,6 +419,48 @@ mallocByteString l = do
     mallocForeignPtrBytes l
 #endif
 {-# INLINE mallocByteString #-}
+
+------------------------------------------------------------------------
+-- Implementations for Eq, Ord and Monoid instances
+
+eq :: ByteString -> ByteString -> Bool
+eq a@(PS fp off len) b@(PS fp' off' len')
+  | len /= len'              = False    -- short cut on length
+  | fp == fp' && off == off' = True     -- short cut for the same string
+  | otherwise                = compareBytes a b == EQ
+{-# INLINE eq #-}
+-- ^ still needed
+
+compareBytes :: ByteString -> ByteString -> Ordering
+compareBytes (PS _   _    0)    (PS _   _    0)    = EQ  -- short cut for empty strings
+compareBytes (PS fp1 off1 len1) (PS fp2 off2 len2) =
+    inlinePerformIO $
+      withForeignPtr fp1 $ \p1 ->
+      withForeignPtr fp2 $ \p2 -> do
+        i <- memcmp (p1 `plusPtr` off1) (p2 `plusPtr` off2) (min len1 len2)
+        return $! case i `compare` 0 of
+                    EQ  -> len1 `compare` len2
+                    x   -> x
+
+append :: ByteString -> ByteString -> ByteString
+append (PS _   _    0)    b                  = b
+append a                  (PS _   _    0)    = a
+append (PS fp1 off1 len1) (PS fp2 off2 len2) =
+    unsafeCreate (len1+len2) $ \destptr1 -> do
+      let destptr2 = destptr1 `plusPtr` len1
+      withForeignPtr fp1 $ \p1 -> memcpy destptr1 (p1 `plusPtr` off1) len1
+      withForeignPtr fp2 $ \p2 -> memcpy destptr2 (p2 `plusPtr` off2) len2
+
+concat :: [ByteString] -> ByteString
+concat []     = mempty
+concat [bs]   = bs
+concat bss0   = unsafeCreate totalLen $ \ptr -> go bss0 ptr
+  where
+    totalLen = List.sum [ len | (PS _ _ len) <- bss0 ]
+    go []                  !_   = return ()
+    go (PS fp off len:bss) !ptr = do
+      withForeignPtr fp $ \p -> memcpy ptr (p `plusPtr` off) len
+      go bss (ptr `plusPtr` len)
 
 ------------------------------------------------------------------------
 
@@ -353,14 +537,17 @@ foreign import ccall unsafe "string.h memchr" c_memchr
 memchr :: Ptr Word8 -> Word8 -> CSize -> IO (Ptr Word8)
 memchr p w s = c_memchr p (fromIntegral w) s
 
-foreign import ccall unsafe "string.h memcmp" memcmp
+foreign import ccall unsafe "string.h memcmp" c_memcmp
     :: Ptr Word8 -> Ptr Word8 -> CSize -> IO CInt
+
+memcmp :: Ptr Word8 -> Ptr Word8 -> Int -> IO CInt
+memcmp p q s = c_memcmp p q (fromIntegral s)
 
 foreign import ccall unsafe "string.h memcpy" c_memcpy
     :: Ptr Word8 -> Ptr Word8 -> CSize -> IO (Ptr Word8)
 
-memcpy :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
-memcpy p q s = c_memcpy p q s >> return ()
+memcpy :: Ptr Word8 -> Ptr Word8 -> Int -> IO ()
+memcpy p q s = c_memcpy p q (fromIntegral s) >> return ()
 
 {-
 foreign import ccall unsafe "string.h memmove" c_memmove

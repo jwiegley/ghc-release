@@ -40,7 +40,7 @@ symlinkBinary _ _ _ _ = fail "Symlinking feature not available on Windows"
 #else
 
 import Distribution.Client.Types
-         ( SourcePackage(..), ConfiguredPackage(..) )
+         ( SourcePackage(..), ConfiguredPackage(..), enableStanzas )
 import Distribution.Client.Setup
          ( InstallFlags(installSymlinkBinDir) )
 import qualified Distribution.Client.InstallPlan as InstallPlan
@@ -67,9 +67,10 @@ import System.Directory
 import System.FilePath
          ( (</>), splitPath, joinPath, isAbsolute )
 
-import Prelude hiding (catch, ioError)
+import Prelude hiding (ioError)
 import System.IO.Error
-         ( catch, isDoesNotExistError, ioError )
+         ( isDoesNotExistError, ioError )
+import Distribution.Compat.Exception ( catchIO )
 import Control.Exception
          ( assert )
 import Data.Maybe
@@ -132,10 +133,10 @@ symlinkBinaries configFlags installFlags plan =
       , PackageDescription.buildable (PackageDescription.buildInfo exe) ]
 
     pkgDescription :: ConfiguredPackage -> PackageDescription
-    pkgDescription (ConfiguredPackage (SourcePackage _ pkg _) flags _) =
+    pkgDescription (ConfiguredPackage (SourcePackage _ pkg _) flags stanzas _) =
       case finalizePackageDescription flags
              (const True)
-             platform compilerId [] pkg of
+             platform compilerId [] (enableStanzas stanzas pkg) of
         Left _ -> error "finalizePackageDescription ConfiguredPackage failed"
         Right (desc, _) -> desc
 
@@ -209,7 +210,7 @@ targetOkToOverwrite symlink target = handleNotExist $ do
               else return NotOurFile
 
   where
-    handleNotExist action = catch action $ \ioexception ->
+    handleNotExist action = catchIO action $ \ioexception ->
       -- If the target doesn't exist then there's no problem overwriting it!
       if isDoesNotExistError ioexception
         then return NotExists

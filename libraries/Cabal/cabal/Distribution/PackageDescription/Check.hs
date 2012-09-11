@@ -180,6 +180,7 @@ checkConfiguredPackage pkg =
  ++ checkSourceRepos pkg
  ++ checkGhcOptions pkg
  ++ checkCCOptions pkg
+ ++ checkCPPOptions pkg
  ++ checkPaths pkg
  ++ checkCabalVersion pkg
 
@@ -516,6 +517,9 @@ checkLicense pkg =
     unknownLicenseVersion (LGPL (Just v))
       | v `notElem` knownVersions = Just knownVersions
       where knownVersions = [ v' | LGPL (Just v') <- knownLicenses ]
+    unknownLicenseVersion (Apache  (Just v))
+      | v `notElem` knownVersions = Just knownVersions
+      where knownVersions = [ v' | Apache  (Just v') <- knownLicenses ]
     unknownLicenseVersion _ = Nothing
 
 checkSourceRepos :: PackageDescription -> [PackageCheck]
@@ -581,6 +585,11 @@ checkGhcOptions pkg =
         ++ "needs -via-C for correctness rather than performance then it "
         ++ "is using the FFI incorrectly and will probably not work with GHC "
         ++ "6.10 or later."
+
+  , checkFlags ["-fdefer-type-errors"] $
+      PackageDistInexcusable $
+          "'ghc-options: -fdefer-type-errors' is fine during development but "
+       ++ "is not appropriate for a distributed package."
 
   , checkFlags ["-fhpc"] $
       PackageDistInexcusable $
@@ -751,6 +760,15 @@ checkCCOptions pkg =
 
         checkCCFlags :: [String] -> PackageCheck -> Maybe PackageCheck
         checkCCFlags flags = check (any (`elem` flags) all_ccOptions)
+
+checkCPPOptions :: PackageDescription -> [PackageCheck]
+checkCPPOptions pkg =
+  catMaybes [
+    checkAlternatives "cpp-options" "include-dirs"
+      [ (flag, dir) | flag@('-':'I':dir) <- all_cppOptions]
+    ]
+  where all_cppOptions = [ opts | bi <- allBuildInfo pkg
+                                , opts <- cppOptions bi ]
 
 checkAlternatives :: String -> String -> [(String, String)] -> Maybe PackageCheck
 checkAlternatives badField goodField flags =

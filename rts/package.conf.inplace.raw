@@ -428,6 +428,10 @@
 
 
 
+
+
+
+
 name:		rts
 version:	1.0
 id:             builtin_rts
@@ -449,7 +453,7 @@ extra-libraries:
 			      , "rt"
 			      , "dl"
 
-include-dirs:		"/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/rts/dist/build" "/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/includes" "/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/includes/dist-ghcconstants/header" "/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/includes/dist-derivedconstants/header"
+include-dirs:           "/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/rts/dist/build" "/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/includes" "/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/includes/dist-ghcconstants/header" "/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/includes/dist-derivedconstants/header"
 
 includes:		Stg.h
 hugs-options:
@@ -461,7 +465,7 @@ ld-options:
          , "-u", "ghczmprim_GHCziTypes_Fzh_static_info"
          , "-u", "ghczmprim_GHCziTypes_Dzh_static_info"
          , "-u", "base_GHCziPtr_Ptr_static_info"
-         , "-u", "base_GHCziWord_Wzh_static_info"
+         , "-u", "ghczmprim_GHCziTypes_Wzh_static_info"
          , "-u", "base_GHCziInt_I8zh_static_info"
          , "-u", "base_GHCziInt_I16zh_static_info"
          , "-u", "base_GHCziInt_I32zh_static_info"

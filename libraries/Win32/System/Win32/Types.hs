@@ -29,6 +29,8 @@ import System.IO.Unsafe
 import Data.Char
 import Numeric (showHex)
 
+#include "windows_cconv.h"
+
 ----------------------------------------------------------------
 -- Platform specific definitions
 --
@@ -48,6 +50,8 @@ type DWORD         = Word32
 type LONG          = Int32
 type FLOAT         = Float
 type LARGE_INTEGER = Int64
+
+type UINT_PTR      = Word
 
 -- Not really a basic type, but used in many places
 type DDWORD        = Word64
@@ -141,8 +145,8 @@ type   ForeignHANDLE = ForeignPtr ()
 newForeignHANDLE :: HANDLE -> IO ForeignHANDLE
 newForeignHANDLE = newForeignPtr deleteObjectFinaliser
 
-handleToWord :: HANDLE -> UINT
-handleToWord = castPtrToUINT
+handleToWord :: HANDLE -> UINT_PTR
+handleToWord = castPtrToUINTPtr
 
 type   HKEY        = ForeignHANDLE
 type   PKEY        = HANDLE
@@ -162,7 +166,7 @@ nullFinalHANDLE :: ForeignPtr a
 nullFinalHANDLE = unsafePerformIO (newForeignPtr_ nullPtr)
 
 iNVALID_HANDLE_VALUE :: HANDLE
-iNVALID_HANDLE_VALUE = castUINTToPtr 0xffffffff
+iNVALID_HANDLE_VALUE = castUINTPtrToPtr (-1)
 
 ----------------------------------------------------------------
 -- Errors
@@ -248,10 +252,10 @@ dwordsToDdword (hi,low) = (fromIntegral low) .|. (fromIntegral hi `shiftL`bitSiz
 foreign import ccall "HsWin32.h &DeleteObjectFinaliser"
   deleteObjectFinaliser :: FunPtr (Ptr a -> IO ())
 
-foreign import stdcall unsafe "windows.h LocalFree"
+foreign import WINDOWS_CCONV unsafe "windows.h LocalFree"
   localFree :: Ptr a -> IO (Ptr a)
 
-foreign import stdcall unsafe "windows.h GetLastError"
+foreign import WINDOWS_CCONV unsafe "windows.h GetLastError"
   getLastError :: IO ErrCode
 
 {-# CFILES cbits/errors.c #-}
@@ -268,13 +272,10 @@ foreign import ccall unsafe "HsWin32.h"
   hIWORD :: DWORD -> WORD
 
 foreign import ccall unsafe "HsWin32.h"
-  castUINTToPtr :: UINT -> Ptr a
+  castUINTPtrToPtr :: UINT_PTR -> Ptr a
 
 foreign import ccall unsafe "HsWin32.h"
-  castPtrToUINT :: Ptr s -> UINT
-
-foreign import ccall unsafe "HsWin32.h"
-  castFunPtrToLONG :: FunPtr a -> LONG
+  castPtrToUINTPtr :: Ptr s -> UINT_PTR
 
 type LCID = DWORD
 

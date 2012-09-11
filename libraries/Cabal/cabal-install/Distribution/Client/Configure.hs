@@ -82,7 +82,7 @@ configure verbosity packageDBs repos comp conf
         configureCommand (const configFlags) extraArgs
 
     Right installPlan -> case InstallPlan.ready installPlan of
-      [pkg@(ConfiguredPackage (SourcePackage _ _ (LocalUnpackedPackage _)) _ _)] ->
+      [pkg@(ConfiguredPackage (SourcePackage _ _ (LocalUnpackedPackage _)) _ _ _)] ->
         configurePackage verbosity
           (InstallPlan.planPlatform installPlan)
           (InstallPlan.planCompiler installPlan)
@@ -97,22 +97,27 @@ configure verbosity packageDBs repos comp conf
       useCabalVersion  = maybe anyVersion thisVersion
                          (flagToMaybe (configCabalVersion configExFlags)),
       useCompiler      = Just comp,
-      -- Hack: we typically want to allow the UserPackageDB for finding the
-      -- Cabal lib when compiling any Setup.hs even if we're doing a global
-      -- install. However we also allow looking in a specific package db.
-      usePackageDB     = if UserPackageDB `elem` packageDBs
-                           then packageDBs
-                           else packageDBs ++ [UserPackageDB],
-      usePackageIndex  = if UserPackageDB `elem` packageDBs
-                           then Just index
-                           else Nothing,
+      usePackageDB     = packageDBs',
+      usePackageIndex  = index',
       useProgramConfig = conf,
       useDistPref      = fromFlagOrDefault
                            (useDistPref defaultSetupScriptOptions)
                            (configDistPref configFlags),
       useLoggingHandle = Nothing,
-      useWorkingDir    = Nothing
+      useWorkingDir    = Nothing,
+      forceExternalSetupMethod = False,
+      setupCacheLock   = Nothing
     }
+      where
+        -- Hack: we typically want to allow the UserPackageDB for finding the
+        -- Cabal lib when compiling any Setup.hs even if we're doing a global
+        -- install. However we also allow looking in a specific package db.
+        (packageDBs', index') =
+          case packageDBs of
+            (GlobalPackageDB:dbs) | UserPackageDB `notElem` dbs
+                -> (GlobalPackageDB:UserPackageDB:dbs, Nothing)
+            -- but if the user is using an odd db stack, don't touch it
+            dbs -> (dbs, Just index)
 
     logMsg message rest = debug verbosity message >> rest
 
@@ -127,6 +132,7 @@ planLocalPackage :: Verbosity -> Compiler
 planLocalPackage verbosity comp configFlags configExFlags installedPkgIndex
   (SourcePackageDb _ packagePrefs) = do
   pkg <- readPackageDescription verbosity =<< defaultPackageDesc verbosity
+  solver <- chooseSolver verbosity (fromFlag $ configSolver configExFlags) (compilerId comp)
 
   let -- We create a local package and ask to resolve a dependency on it
       localPkg = SourcePackage {
@@ -135,7 +141,9 @@ planLocalPackage verbosity comp configFlags configExFlags installedPkgIndex
         packageSource             = LocalUnpackedPackage "."
       }
 
-      solver = fromFlag $ configSolver configExFlags
+      testsEnabled = fromFlagOrDefault False $ configTests configFlags
+      benchmarksEnabled =
+        fromFlagOrDefault False $ configBenchmarks configFlags
 
       resolverParams =
 
@@ -154,6 +162,15 @@ planLocalPackage verbosity comp configFlags configExFlags installedPkgIndex
             -- package flags from the config file or command line
             [ PackageConstraintFlags (packageName pkg)
                                      (configConfigurationsFlags configFlags) ]
+
+        . addConstraints
+            -- '--enable-tests' and '--enable-benchmarks' constraints from
+            -- command line
+            [ PackageConstraintStanzas (packageName pkg) $ concat
+                [ if testsEnabled then [TestStanzas] else []
+                , if benchmarksEnabled then [BenchStanzas] else []
+                ]
+            ]
 
         $ standardInstallPolicy
             installedPkgIndex
@@ -177,7 +194,7 @@ configurePackage :: Verbosity
                  -> [String]
                  -> IO ()
 configurePackage verbosity platform comp scriptOptions configFlags
-  (ConfiguredPackage (SourcePackage _ gpkg _) flags deps) extraArgs =
+  (ConfiguredPackage (SourcePackage _ gpkg _) flags stanzas deps) extraArgs =
 
   setupWrapper verbosity
     scriptOptions (Just pkg) configureCommand configureFlags extraArgs
@@ -186,11 +203,13 @@ configurePackage verbosity platform comp scriptOptions configFlags
     configureFlags   = filterConfigureFlags configFlags {
       configConfigurationsFlags = flags,
       configConstraints         = map thisPackageVersion deps,
-      configVerbosity           = toFlag verbosity
+      configVerbosity           = toFlag verbosity,
+      configBenchmarks          = toFlag (BenchStanzas `elem` stanzas),
+      configTests               = toFlag (TestStanzas `elem` stanzas)
     }
 
     pkg = case finalizePackageDescription flags
            (const True)
-           platform comp [] gpkg of
+           platform comp [] (enableStanzas stanzas gpkg) of
       Left _ -> error "finalizePackageDescription ConfiguredPackage failed"
       Right (desc, _) -> desc

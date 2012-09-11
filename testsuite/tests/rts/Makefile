@@ -35,7 +35,7 @@ exec_signals-prep:
 4850:
 	$(RM) 4850.o 4850.hi 4850$(exeext)
 	"$(TEST_HC)" $(TEST_HC_OPTS) -v0 -rtsopts -debug -threaded --make 4850
-	./4850 +RTS -s 2>&1 | grep Task | wc -l | tr -d ' '
+	./4850 +RTS -s 2>&1 | grep TASKS | sed 's/^ *TASKS: *\([0-9]*\).*$$/\1/'
 
 .PHONY: T5423
 T5423:
@@ -45,3 +45,12 @@ T5423:
 	"$(TEST_HC)" $(TEST_HC_OPTS) -v0 T5423.o T5423_cmm.o -o T5423$(exeext)
 	./T5423
 
+T6006_setup :
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T6006.hs
+
+.PHONY: T7037
+T7037:
+	$(RM) 7037.o 7037.hi 7037$(exeext)
+	"$(TEST_HC)" $(TEST_HC_OPTS) T7037.hs -v0
+	"$(TEST_HC)" $(filter-out -rtsopts, $(TEST_HC_OPTS)) T7037_main.c -v0 -o T7037_main -no-hs-main
+	./T7037_main

@@ -16,7 +16,6 @@ import Haddock.GhcUtils
 import Haddock.Types
 
 import Bag (emptyBag)
-import BasicTypes ( IPName(..), ipNameName )
 import GHC hiding (NoLink)
 import Name
 
@@ -28,8 +27,8 @@ import Data.Traversable (mapM)
 import Prelude hiding (mapM)
 
 
-renameInterface :: LinkEnv -> Bool -> Interface -> ErrMsgM Interface
-renameInterface renamingEnv warnings iface =
+renameInterface :: DynFlags -> LinkEnv -> Bool -> Interface -> ErrMsgM Interface
+renameInterface dflags renamingEnv warnings iface =
 
   -- first create the local env, where every name exported by this module
   -- is mapped to itself, and everything else comes from the global renaming
@@ -58,7 +57,7 @@ renameInterface renamingEnv warnings iface =
       -- representation. TODO: use the Name constants from the GHC API.
 --      strings = filter (`notElem` ["()", "[]", "(->)"])
 --                (map pretty missingNames)
-      strings = map pretty . filter (\n -> not (isSystemName n || isBuiltInSyntax n)) $ missingNames
+      strings = map (pretty dflags) . filter (\n -> not (isSystemName n || isBuiltInSyntax n)) $ missingNames
 
   in do
     -- report things that we couldn't link to. Only do this for non-hidden
@@ -200,7 +199,7 @@ renameDoc d = case d of
   DocCodeBlock doc -> do
     doc' <- renameDoc doc
     return (DocCodeBlock doc')
-  DocURL str -> return (DocURL str)
+  DocHyperlink l -> return (DocHyperlink l)
   DocPic str -> return (DocPic str)
   DocAName str -> return (DocAName str)
   DocExamples e -> return (DocExamples e)
@@ -216,14 +215,17 @@ renameLType = mapM renameType
 renameLKind :: LHsKind Name -> RnM (LHsKind DocName)
 renameLKind = renameLType
 
-renameMaybeLKind :: Maybe (LHsKind Name) -> RnM (Maybe (LHsKind DocName))
+renameMaybeLKind :: Maybe (LHsKind Name)
+                 -> RnM (Maybe (LHsKind DocName))
 renameMaybeLKind Nothing = return Nothing
-renameMaybeLKind (Just ki) = Just <$> renameLKind ki
+renameMaybeLKind (Just ki)
+  = do { ki' <- renameLKind ki
+       ; return (Just ki') }
 
 renameType :: HsType Name -> RnM (HsType DocName)
 renameType t = case t of
   HsForAllTy expl tyvars lcontext ltype -> do
-    tyvars'   <- mapM renameLTyVarBndr tyvars
+    tyvars'   <- renameLTyVarBndrs tyvars
     lcontext' <- renameLContext lcontext
     ltype'    <- renameLType ltype
     return (HsForAllTy expl tyvars' lcontext' ltype')
@@ -243,7 +245,7 @@ renameType t = case t of
 
   HsListTy ty -> return . HsListTy =<< renameLType ty
   HsPArrTy ty -> return . HsPArrTy =<< renameLType ty
-  HsIParamTy n ty -> liftM2 HsIParamTy (liftM IPName (rename (ipNameName n))) (renameLType ty)
+  HsIParamTy n ty -> liftM (HsIParamTy n) (renameLType ty)
   HsEqTy ty1 ty2 -> liftM2 HsEqTy (renameLType ty1) (renameLType ty2)
 
   HsTupleTy b ts -> return . HsTupleTy b =<< mapM renameLType ts
@@ -266,15 +268,25 @@ renameType t = case t of
     doc' <- renameLDocHsSyn doc
     return (HsDocTy ty' doc')
 
+  HsTyLit x -> return (HsTyLit x)
+
   _ -> error "renameType"
 
 
-renameLTyVarBndr :: LHsTyVarBndr Name -> RnM (LHsTyVarBndr DocName)
-renameLTyVarBndr (L loc tv) = do
-  name' <- rename (hsTyVarName tv)
-  tyvar' <- replaceTyVarName tv name' renameLKind
-  return $ L loc tyvar'
+renameLTyVarBndrs :: LHsTyVarBndrs Name -> RnM (LHsTyVarBndrs DocName)
+renameLTyVarBndrs (HsQTvs { hsq_kvs = _, hsq_tvs = tvs })
+  = do { tvs' <- mapM renameLTyVarBndr tvs
+       ; return (HsQTvs { hsq_kvs = error "haddock:renameLTyVarBndrs", hsq_tvs = tvs' }) }
+                -- This is rather bogus, but I'm not sure what else to do
 
+renameLTyVarBndr :: LHsTyVarBndr Name -> RnM (LHsTyVarBndr DocName)
+renameLTyVarBndr (L loc (UserTyVar n))
+  = do { n' <- rename n
+       ; return (L loc (UserTyVar n')) }
+renameLTyVarBndr (L loc (KindedTyVar n k))
+  = do { n' <- rename n
+       ; k' <- renameLKind k
+       ; return (L loc (KindedTyVar n' k')) }
 
 renameLContext :: Located [LHsType Name] -> RnM (Located [LHsType DocName])
 renameLContext (L loc context) = do
@@ -324,54 +336,67 @@ renameTyClD d = case d of
 --  TyFamily flav lname ltyvars kind tckind -> do
   TyFamily flav lname ltyvars tckind -> do
     lname'   <- renameL lname
-    ltyvars' <- mapM renameLTyVarBndr ltyvars
+    ltyvars' <- renameLTyVarBndrs ltyvars
 --    kind'    <- renameMaybeLKind kind
     tckind'    <- renameMaybeLKind tckind
 --    return (TyFamily flav lname' ltyvars' kind' tckind)
     return (TyFamily flav lname' ltyvars' tckind')
 
-  TyData x lcontext lname ltyvars typats k cons _ -> do
+  TyDecl { tcdLName = lname, tcdTyVars = tyvars, tcdTyDefn = defn, tcdFVs = fvs } -> do
+    lname'    <- renameL lname
+    tyvars'   <- renameLTyVarBndrs tyvars
+    defn'     <- renameTyDefn defn
+    return (TyDecl { tcdLName = lname', tcdTyVars = tyvars', tcdTyDefn = defn', tcdFVs = fvs })
+
+  ClassDecl { tcdCtxt = lcontext, tcdLName = lname, tcdTyVars = ltyvars
+            , tcdFDs = lfundeps, tcdSigs = lsigs, tcdATs = ats, tcdATDefs = at_defs } -> do
     lcontext' <- renameLContext lcontext
     lname'    <- renameL lname
-    ltyvars'  <- mapM renameLTyVarBndr ltyvars
-    typats'   <- mapM (mapM renameLType) typats
-    k'        <- renameMaybeLKind k
-    cons'     <- mapM renameLCon cons
-    -- I don't think we need the derivings, so we return Nothing
-    return (TyData x lcontext' lname' ltyvars' typats' k' cons' Nothing)
-
-  TySynonym lname ltyvars typats ltype -> do
-    lname'   <- renameL lname
-    ltyvars' <- mapM renameLTyVarBndr ltyvars
-    ltype'   <- renameLType ltype
-    typats'  <- mapM (mapM renameLType) typats
-    return (TySynonym lname' ltyvars' typats' ltype')
-
-  ClassDecl lcontext lname ltyvars lfundeps lsigs _ ats at_defs _ -> do
-    lcontext' <- renameLContext lcontext
-    lname'    <- renameL lname
-    ltyvars'  <- mapM renameLTyVarBndr ltyvars
+    ltyvars'  <- renameLTyVarBndrs ltyvars
     lfundeps' <- mapM renameLFunDep lfundeps
     lsigs'    <- mapM renameLSig lsigs
     ats'      <- mapM renameLTyClD ats
-    at_defs'  <- mapM renameLTyClD at_defs
+    at_defs'  <- mapM (mapM renameFamInstD) at_defs
     -- we don't need the default methods or the already collected doc entities
-    return (ClassDecl lcontext' lname' ltyvars' lfundeps' lsigs' emptyBag ats' at_defs' [])
+    return (ClassDecl { tcdCtxt = lcontext', tcdLName = lname', tcdTyVars = ltyvars'
+                      , tcdFDs = lfundeps', tcdSigs = lsigs', tcdMeths= emptyBag
+                      , tcdATs = ats', tcdATDefs = at_defs', tcdDocs = [], tcdFVs = placeHolderNames })
 
   where
-    renameLCon (L loc con) = return . L loc =<< renameCon con
-    renameCon decl@(ConDecl { con_name = lname, con_qvars = ltyvars
-                            , con_cxt = lcontext, con_details = details
-                            , con_res = restype, con_doc = mbldoc }) = do
+    renameLFunDep (L loc (xs, ys)) = do
+      xs' <- mapM rename xs
+      ys' <- mapM rename ys
+      return (L loc (xs', ys'))
+
+    renameLSig (L loc sig) = return . L loc =<< renameSig sig
+
+renameTyDefn :: HsTyDefn Name -> RnM (HsTyDefn DocName)
+renameTyDefn (TyData { td_ND = nd, td_ctxt = lcontext, td_cType = cType
+                     , td_kindSig = k, td_cons = cons }) = do
+    lcontext' <- renameLContext lcontext
+    k'        <- renameMaybeLKind k
+    cons'     <- mapM (mapM renameCon) cons
+    -- I don't think we need the derivings, so we return Nothing
+    return (TyData { td_ND = nd, td_ctxt = lcontext', td_cType = cType
+                   , td_kindSig = k', td_cons = cons', td_derivs = Nothing })
+
+renameTyDefn (TySynonym { td_synRhs = ltype }) = do
+    ltype'   <- renameLType ltype
+    return (TySynonym { td_synRhs = ltype' })
+
+renameCon :: ConDecl Name -> RnM (ConDecl DocName)
+renameCon decl@(ConDecl { con_name = lname, con_qvars = ltyvars
+                        , con_cxt = lcontext, con_details = details
+                        , con_res = restype, con_doc = mbldoc }) = do
       lname'    <- renameL lname
-      ltyvars'  <- mapM renameLTyVarBndr ltyvars
+      ltyvars'  <- renameLTyVarBndrs ltyvars
       lcontext' <- renameLContext lcontext
       details'  <- renameDetails details
       restype'  <- renameResType restype
       mbldoc'   <- mapM renameLDocHsSyn mbldoc
       return (decl { con_name = lname', con_qvars = ltyvars', con_cxt = lcontext'
                    , con_details = details', con_res = restype', con_doc = mbldoc' })
-
+  where
     renameDetails (RecCon fields) = return . RecCon =<< mapM renameField fields
     renameDetails (PrefixCon ps) = return . PrefixCon =<< mapM renameLType ps
     renameDetails (InfixCon a b) = do
@@ -387,14 +412,6 @@ renameTyClD d = case d of
 
     renameResType (ResTyH98) = return ResTyH98
     renameResType (ResTyGADT t) = return . ResTyGADT =<< renameLType t
-
-    renameLFunDep (L loc (xs, ys)) = do
-      xs' <- mapM rename xs
-      ys' <- mapM rename ys
-      return (L loc (xs', ys'))
-
-    renameLSig (L loc sig) = return . L loc =<< renameSig sig
-
 
 renameSig :: Sig Name -> RnM (Sig DocName)
 renameSig sig = case sig of
@@ -418,10 +435,23 @@ renameForD (ForeignExport lname ltype co x) = do
 
 
 renameInstD :: InstDecl Name -> RnM (InstDecl DocName)
-renameInstD (InstDecl ltype _ _ lATs) = do
+renameInstD (ClsInstD { cid_poly_ty =ltype, cid_fam_insts = lATs }) = do
   ltype' <- renameLType ltype
-  lATs' <- mapM renameLTyClD lATs
-  return (InstDecl ltype' emptyBag [] lATs')
+  lATs' <- mapM (mapM renameFamInstD) lATs
+  return (ClsInstD { cid_poly_ty = ltype', cid_binds = emptyBag, cid_sigs = []
+                   , cid_fam_insts = lATs' })
+
+renameInstD (FamInstD { lid_inst = d }) = do
+  d' <- renameFamInstD d
+  return (FamInstD { lid_inst = d' })
+
+renameFamInstD :: FamInstDecl Name -> RnM (FamInstDecl DocName)
+renameFamInstD (FamInstDecl { fid_tycon = tc, fid_pats = pats_w_bndrs, fid_defn = defn })
+  = do { tc' <- renameL tc
+       ; pats' <- mapM renameLType (hswb_cts pats_w_bndrs)
+       ; defn' <- renameTyDefn defn 
+       ; return (FamInstDecl { fid_tycon = tc', fid_pats = pats_w_bndrs { hswb_cts = pats' }
+                             , fid_defn = defn', fid_fvs = placeHolderNames }) }
 
 
 renameExportItem :: ExportItem Name -> RnM (ExportItem DocName)

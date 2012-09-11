@@ -67,7 +67,7 @@ typedef struct nursery_ {
 } nursery;
 
 typedef struct generation_ {
-    unsigned int   no;			// generation number
+    nat            no;			// generation number
 
     bdescr *       blocks;	        // blocks in this gen
     memcount       n_blocks;            // number of blocks
@@ -85,9 +85,9 @@ typedef struct generation_ {
     struct generation_ *to;		// destination gen for live objects
 
     // stats information
-    unsigned int collections;
-    unsigned int par_collections;
-    unsigned int failed_promotions;
+    nat collections;
+    nat par_collections;
+    nat failed_promotions;
 
     // ------------------------------------
     // Fields below are used during GC only
@@ -192,7 +192,7 @@ typedef struct _GCStats {
   StgWord64 current_bytes_slop;
   StgWord64 max_bytes_slop;
   StgWord64 peak_megabytes_allocated;
-  StgWord64 par_avg_bytes_copied;
+  StgWord64 par_tot_bytes_copied;
   StgWord64 par_max_bytes_copied;
   StgDouble mutator_cpu_seconds;
   StgDouble mutator_wall_seconds;
@@ -202,13 +202,14 @@ typedef struct _GCStats {
   StgDouble wall_seconds;
 } GCStats;
 void getGCStats (GCStats *s);
+rtsBool getGCStatsEnabled (void);
 
 // These don't change over execution, so do them elsewhere
 //  StgDouble init_cpu_seconds;
 //  StgDouble init_wall_seconds;
 
 typedef struct _ParGCStats {
-  StgWord64 avg_copied;
+  StgWord64 tot_copied;
   StgWord64 max_copied;
 } ParGCStats;
 void getParGCStats (ParGCStats *s);

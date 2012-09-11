@@ -158,7 +158,6 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
             test -z "[$]2" || eval "[$]2=ArchX86"
             ;;
         x86_64)
-            GET_ARM_ISA()
             test -z "[$]2" || eval "[$]2=ArchX86_64"
             ;;
         powerpc)
@@ -172,7 +171,7 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
             ;;
         arm)
             GET_ARM_ISA()
-            test -z "[$]2" || eval "[$]2=\"ArchARM {armISA = \$ARM_ISA, armISAExt = \$ARM_ISA_EXT}\""
+            test -z "[$]2" || eval "[$]2=\"ArchARM {armISA = \$ARM_ISA, armISAExt = \$ARM_ISA_EXT, armABI = \$ARM_ABI}\""
             ;;
         alpha|mips|mipseb|mipsel|hppa|hppa1_1|ia64|m68k|rs6000|s390|s390x|sparc64|vax)
             test -z "[$]2" || eval "[$]2=ArchUnknown"
@@ -212,6 +211,9 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
         freebsd)
             test -z "[$]2" || eval "[$]2=OSFreeBSD"
             ;;
+        dragonfly)
+            test -z "[$]2" || eval "[$]2=OSDragonFly"
+            ;;
         kfreebsdgnu)
             test -z "[$]2" || eval "[$]2=OSKFreeBSD"
             ;;
@@ -248,6 +250,16 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
         [HaskellHaveSubsectionsViaSymbols=False
          AC_MSG_RESULT(no)])
 
+    dnl ** check for .ident assembler directive
+
+    AC_MSG_CHECKING(whether your assembler supports .ident directive)
+    AC_COMPILE_IFELSE(
+        [AC_LANG_SOURCE([__asm__ (".ident \"GHC x.y.z\"");])],
+        [AC_MSG_RESULT(yes)
+         HaskellHaveIdentDirective=True],
+        [AC_MSG_RESULT(no)
+         HaskellHaveIdentDirective=False])
+
     dnl *** check for GNU non-executable stack note support (ELF only)
     dnl     (.section .note.GNU-stack,"",@progbits)
 
@@ -280,13 +292,14 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
     AC_SUBST(HaskellTargetArch)
     AC_SUBST(HaskellTargetOs)
     AC_SUBST(HaskellHaveSubsectionsViaSymbols)
+    AC_SUBST(HaskellHaveIdentDirective)
     AC_SUBST(HaskellHaveGnuNonexecStack)
 ])
 
 
 # GET_ARM_ISA
 # ----------------------------------
-# Get info about the ISA on the Arm arch
+# Get info about the ISA on the ARM arch
 AC_DEFUN([GET_ARM_ISA],
 [
     AC_COMPILE_IFELSE([
@@ -350,12 +363,13 @@ AC_DEFUN([FP_SETTINGS],
 [
     if test "$windows" = YES
     then
-        SettingsCCompilerCommand='$topdir/../mingw/bin/gcc.exe'
+        mingw_bin_prefix=mingw/bin/
+        SettingsCCompilerCommand="\$topdir/../${mingw_bin_prefix}gcc.exe"
         SettingsCCompilerFlags="$CONF_CC_OPTS_STAGE2 $CONF_GCC_LINKER_OPTS_STAGE2"
-        SettingsArCommand='$topdir/../mingw/bin/ar.exe'
+        SettingsArCommand="\$topdir/../${mingw_bin_prefix}ar.exe"
         SettingsPerlCommand='$topdir/../perl/perl.exe'
-        SettingsDllWrapCommand='$topdir/../mingw/bin/dllwrap.exe'
-        SettingsWindresCommand='$topdir/../mingw/bin/windres.exe'
+        SettingsDllWrapCommand="\$topdir/../${mingw_bin_prefix}dllwrap.exe"
+        SettingsWindresCommand="\$topdir/../${mingw_bin_prefix}windres.exe"
         SettingsTouchCommand='$topdir/touchy.exe'
     else
         SettingsCCompilerCommand="$WhatGccIsCalled"
@@ -365,6 +379,18 @@ AC_DEFUN([FP_SETTINGS],
         SettingsDllWrapCommand="/bin/false"
         SettingsWindresCommand="/bin/false"
         SettingsTouchCommand='touch'
+        if test -z "$LlcCmd"
+        then
+          SettingsLlcCommand="llc"
+        else
+          SettingsLlcCommand="$LlcCmd"
+        fi
+        if test -z "$OptCmd"
+        then
+          SettingsOptCommand="opt"
+        else
+          SettingsOptCommand="$OptCmd"
+        fi
     fi
     AC_SUBST(SettingsCCompilerCommand)
     AC_SUBST(SettingsCCompilerFlags)
@@ -373,6 +399,8 @@ AC_DEFUN([FP_SETTINGS],
     AC_SUBST(SettingsDllWrapCommand)
     AC_SUBST(SettingsWindresCommand)
     AC_SUBST(SettingsTouchCommand)
+    AC_SUBST(SettingsLlcCommand)
+    AC_SUBST(SettingsOptCommand)
 ])
 
 
@@ -442,6 +470,21 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
 ])
 
 
+AC_DEFUN([FP_PATH_PROG],[
+    AC_PATH_PROG($1,$2,$3,$4,$5,$6)
+    # If we have a cygwin path for something, and we try to run it
+    # from cabal or python, then it'll fail. So we convert to a
+    # native path.
+    if test "$HostOS"     = "mingw32" && \
+       test "${OSTYPE}"  != "msys"    && \
+       test "${$1}" != ""
+    then
+        # Canonicalise to <drive>:/path/to/gcc
+        $1=`cygpath -m "${$1}"`
+    fi
+])
+
+
 # FP_VISIBILITY_HIDDEN
 # ----------------------------------
 # Is the visibility hidden attribute supported?
@@ -462,7 +505,7 @@ AC_DEFUN([FP_VISIBILITY_HIDDEN],
 
 # FPTOOLS_FLOAT_WORD_ORDER_BIGENDIAN
 # ----------------------------------
-# Little endian Arm on Linux with some ABIs has big endian word order
+# Little endian ARM on Linux with some ABIs has big endian word order
 # in doubles. Define FLOAT_WORDS_BIGENDIAN if this is the case.
 AC_DEFUN([FPTOOLS_FLOAT_WORD_ORDER_BIGENDIAN],
   [AC_CACHE_CHECK([whether float word order is big endian], [fptools_cv_float_word_order_bigendian],
@@ -505,7 +548,8 @@ AC_DEFUN([FP_EVAL_STDERR],
 # XXX
 #
 # $1 = the variable to set
-# $2 = the command to look for
+# $2 = the with option name
+# $3 = the command to look for
 #
 AC_DEFUN([FP_ARG_WITH_PATH_GNU_PROG],
 [
@@ -523,16 +567,49 @@ AC_ARG_WITH($2,
 [
     if test "$HostOS" != "mingw32"
     then
-        AC_PATH_PROG([$1], [$2])
+        if test "$target_alias" = "" ; then
+            AC_PATH_PROG([$1], [$3])
+        else
+            AC_PATH_PROG([$1], [$target_alias-$3])
+        fi
         if test -z "$$1"
         then
-            AC_MSG_ERROR([cannot find $2 in your PATH, no idea how to link])
+            AC_MSG_ERROR([cannot find $3 in your PATH])
         fi
     fi
 ]
 )
 ]) # FP_ARG_WITH_PATH_GNU_PROG
 
+
+# FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL
+# --------------------
+# XXX
+#
+# $1 = the variable to set
+# $2 = the command to look for
+#
+AC_DEFUN([FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL],
+[
+AC_ARG_WITH($2,
+[AC_HELP_STRING([--with-$2=ARG],
+        [Use ARG as the path to $2 [default=autodetect]])],
+[
+    if test "$HostOS" = "mingw32"
+    then
+        AC_MSG_WARN([Request to use $withval will be ignored])
+    else
+        $1=$withval
+    fi
+],
+[
+    if test "$HostOS" != "mingw32"
+    then
+        AC_PATH_PROG([$1], [$2])
+    fi
+]
+)
+]) # FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL
 
 # FP_PROG_CONTEXT_DIFF
 # --------------------
@@ -585,7 +662,7 @@ AC_CHECK_TYPE([$1], [], [], [$3])[]dnl
 m4_pushdef([fp_Cache], [AS_TR_SH([fp_cv_alignment_$1])])[]dnl
 AC_CACHE_CHECK([alignment of $1], [fp_Cache],
 [if test "$AS_TR_SH([ac_cv_type_$1])" = yes; then
-  FP_COMPUTE_INT([(long) (&((struct { char c; $1 ty; } *)0)->ty)],
+  FP_COMPUTE_INT([offsetof(struct { char c; $1 ty; },ty)],
                  [fp_Cache],
                  [AC_INCLUDES_DEFAULT([$3])],
                  [AC_MSG_ERROR([cannot compute alignment ($1)
@@ -625,7 +702,8 @@ case $HostPlatform in
   esac ;;
 alpha-dec-osf*) fptools_cv_leading_underscore=no;;
 *cygwin32) fptools_cv_leading_underscore=yes;;
-*mingw32) fptools_cv_leading_underscore=yes;;
+i386-unknown-mingw32) fptools_cv_leading_underscore=yes;;
+x86_64-unknown-mingw32) fptools_cv_leading_underscore=no;;
 
     # HACK: Apple doesn't seem to provide nlist in the 64-bit-libraries
 x86_64-apple-darwin*) fptools_cv_leading_underscore=yes;;
@@ -713,16 +791,7 @@ dnl at least Happy version 1.14.  If there's no installed Happy, we look
 dnl for a happy source tree and point the build system at that instead.
 dnl
 AC_DEFUN([FPTOOLS_HAPPY],
-[AC_PATH_PROG(HappyCmd,happy,)
-# Happy is passed to Cabal, so we need a native path
-if test "x$HostPlatform"  = "xi386-unknown-mingw32" && \
-   test "${OSTYPE}"      != "msys"                  && \
-   test "${HappyCmd}"    != ""
-then
-    # Canonicalise to <drive>:/path/to/gcc
-    HappyCmd=`cygpath -m "${HappyCmd}"`
-    AC_MSG_NOTICE([normalized happy command to $HappyCmd])
-fi
+[FP_PATH_PROG(HappyCmd,happy,)
 
 AC_CACHE_CHECK([for version of happy], fptools_cv_happy_version,
 changequote(, )dnl
@@ -749,15 +818,7 @@ dnl at least Alex version 2.0.1.
 dnl
 AC_DEFUN([FPTOOLS_ALEX],
 [
-AC_PATH_PROG(AlexCmd,alex,)
-# Alex is passed to Cabal, so we need a native path
-if test "x$HostPlatform"  = "xi386-unknown-mingw32" && \
-   test "${OSTYPE}"      != "msys"                  && \
-   test "${AlexCmd}"     != ""
-then
-    # Canonicalise to <drive>:/path/to/gcc
-    AlexCmd=`cygpath -m "${AlexCmd}"`
-fi
+FP_PATH_PROG(AlexCmd,alex,)
 
 AC_CACHE_CHECK([for version of alex], fptools_cv_alex_version,
 changequote(, )dnl
@@ -901,21 +962,12 @@ AC_SUBST([LdHasNoCompactUnwind])
 
 # FP_PROG_AR
 # ----------
-# Sets fp_prog_ar_raw to the full path of ar and fp_prog_ar to a non-Cygwin
-# version of it. Exits if no ar can be found
+# Sets fp_prog_ar to a (non-Cygwin) path to ar. Exits if no ar can be found
 AC_DEFUN([FP_PROG_AR],
-[AC_PATH_PROG([fp_prog_ar_raw], [ar])
-if test -z "$fp_prog_ar_raw"; then
+[FP_PATH_PROG([fp_prog_ar], [ar])
+if test -z "$fp_prog_ar"; then
   AC_MSG_ERROR([cannot find ar in your PATH, no idea how to make a library])
 fi
-fp_prog_ar="$fp_prog_ar_raw"
-case $HostPlatform in
-  *mingw32) if test x${OSTYPE} != xmsys; then
- 	      fp_prog_ar="`cygpath -w "${fp_prog_ar_raw}" | sed -e 's@\\\\@/@g'`"
-              AC_MSG_NOTICE([normalized ar command to $fp_prog_ar])
-            fi
-            ;;
-esac
 ])# FP_PROG_AR
 
 
@@ -924,8 +976,8 @@ esac
 # Sets fp_prog_ar_is_gnu to yes or no, depending on whether it is GNU ar or not.
 AC_DEFUN([FP_PROG_AR_IS_GNU],
 [AC_REQUIRE([FP_PROG_AR])
-AC_CACHE_CHECK([whether $fp_prog_ar_raw is GNU ar], [fp_cv_prog_ar_is_gnu],
-[if "$fp_prog_ar_raw" --version 2> /dev/null | grep "GNU" > /dev/null 2>&1; then
+AC_CACHE_CHECK([whether $fp_prog_ar is GNU ar], [fp_cv_prog_ar_is_gnu],
+[if "$fp_prog_ar" --version 2> /dev/null | grep "GNU" > /dev/null 2>&1; then
   fp_cv_prog_ar_is_gnu=yes
 else
   fp_cv_prog_ar_is_gnu=no
@@ -942,14 +994,14 @@ AC_SUBST([ArIsGNUAr], [`echo $fp_prog_ar_is_gnu | tr 'a-z' 'A-Z'`])
 AC_DEFUN([FP_PROG_AR_SUPPORTS_ATFILE],
 [AC_REQUIRE([FP_PROG_AR])
  AC_REQUIRE([FP_PROG_AR_ARGS])
-AC_CACHE_CHECK([whether $fp_prog_ar_raw supports @file], [fp_cv_prog_ar_supports_atfile],
+AC_CACHE_CHECK([whether $fp_prog_ar supports @file], [fp_cv_prog_ar_supports_atfile],
 [
 rm -f conftest*
 touch conftest.file
 echo conftest.file  > conftest.atfile
 echo conftest.file >> conftest.atfile
-"$fp_prog_ar_raw" $fp_prog_ar_args conftest.a @conftest.atfile > /dev/null 2>&1
-fp_prog_ar_supports_atfile_tmp=`"$fp_prog_ar_raw" t conftest.a 2> /dev/null | grep -c conftest.file`
+"$fp_prog_ar" $fp_prog_ar_args conftest.a @conftest.atfile > /dev/null 2>&1
+fp_prog_ar_supports_atfile_tmp=`"$fp_prog_ar" t conftest.a 2> /dev/null | grep -c conftest.file`
 rm -f conftest*
 if test "$fp_prog_ar_supports_atfile_tmp" -eq 2
 then
@@ -978,14 +1030,14 @@ else
   touch conftest.dummy
   for fp_var in clqsZ clqs cqs clq cq ; do
      rm -f conftest.a
-     if "$fp_prog_ar_raw" $fp_var conftest.a conftest.dummy > /dev/null 2> /dev/null; then
+     if "$fp_prog_ar" $fp_var conftest.a conftest.dummy > /dev/null 2> /dev/null; then
         fp_cv_prog_ar_args=$fp_var
         break
      fi
   done
   rm -f conftest*
   if test -z "$fp_cv_prog_ar_args"; then
-    AC_MSG_ERROR([cannot figure out how to use your $fp_prog_ar_raw])
+    AC_MSG_ERROR([cannot figure out how to use your $fp_prog_ar])
   fi
 fi])
 fp_prog_ar_args=$fp_cv_prog_ar_args
@@ -1286,7 +1338,7 @@ EOF
 # which we use for building PDF and PS docs.
 # DblatexCmd is empty if dblatex could not be found.
 AC_DEFUN([FP_PROG_DBLATEX],
-[AC_PATH_PROG([DblatexCmd], [dblatex])
+[FP_PATH_PROG([DblatexCmd], [dblatex])
 if test -z "$DblatexCmd"; then
   AC_MSG_WARN([cannot find dblatex in your PATH, you will not be able to build the PDF and PS documentation])
 fi
@@ -1298,7 +1350,7 @@ fi
 # Sets the output variable XsltprocCmd to the full path of the XSLT processor
 # xsltproc. XsltprocCmd is empty if xsltproc could not be found.
 AC_DEFUN([FP_PROG_XSLTPROC],
-[AC_PATH_PROG([XsltprocCmd], [xsltproc])
+[FP_PATH_PROG([XsltprocCmd], [xsltproc])
 if test -z "$XsltprocCmd"; then
   AC_MSG_WARN([cannot find xsltproc in your PATH, you will not be able to build the HTML documentation])
 fi
@@ -1334,7 +1386,7 @@ AC_SUBST([HAVE_DOCBOOK_XSL])
 # Sets the output variable XmllintCmd to the full path of the XSLT processor
 # xmllint. XmllintCmd is empty if xmllint could not be found.
 AC_DEFUN([FP_PROG_XMLLINT],
-[AC_PATH_PROG([XmllintCmd], [xmllint])
+[FP_PATH_PROG([XmllintCmd], [xmllint])
 if test -z "$XmllintCmd"; then
   AC_MSG_WARN([cannot find xmllint in your PATH, you will not be able to validate your documentation])
 fi
@@ -1525,6 +1577,7 @@ AC_SUBST([ProjectPatchLevel])
 # timer_create() in certain versions of Linux (see bug #1933).
 #
 AC_DEFUN([FP_CHECK_TIMER_CREATE],
+if test "$cross_compiling" = "no" ; then
   [AC_CACHE_CHECK([for a working timer_create(CLOCK_REALTIME)], 
     [fptools_cv_timer_create_works],
     [AC_TRY_RUN([
@@ -1648,6 +1701,7 @@ case $fptools_cv_timer_create_works in
     yes) AC_DEFINE([USE_TIMER_CREATE], 1, 
                    [Define to 1 if we can use timer_create(CLOCK_PROCESS_CPUTIME_ID,...)]);;
 esac
+fi
 ])
 
 # FP_ICONV
@@ -1738,7 +1792,7 @@ AC_MSG_NOTICE(Building in-tree ghc-pwd)
     dnl except we don't want to have to know what make is called. Sigh.
     rm -rf utils/ghc-pwd/dist-boot
     mkdir  utils/ghc-pwd/dist-boot
-    if ! "$WithGhc" -v0 -no-user-package-conf -hidir utils/ghc-pwd/dist-boot -odir utils/ghc-pwd/dist-boot -stubdir utils/ghc-pwd/dist-boot --make utils/ghc-pwd/Main.hs -o utils/ghc-pwd/dist-boot/ghc-pwd
+    if ! "$WithGhc" -v0 -no-user-$GHC_PACKAGE_DB_FLAG -hidir utils/ghc-pwd/dist-boot -odir utils/ghc-pwd/dist-boot -stubdir utils/ghc-pwd/dist-boot --make utils/ghc-pwd/Main.hs -o utils/ghc-pwd/dist-boot/ghc-pwd
     then
         AC_MSG_ERROR([Building ghc-pwd failed])
     fi
@@ -1875,7 +1929,9 @@ case "$1" in
   freebsd|netbsd|openbsd|dragonfly|osf1|osf3|hpux|linuxaout|kfreebsdgnu|freebsd2|solaris2|cygwin32|mingw32|darwin|gnu|nextstep2|nextstep3|sunos4|ultrix|irix|aix|haiku)
     $2="$1"
     ;;
-  freebsd8) # like i686-gentoo-freebsd8
+  freebsd*) # like i686-gentoo-freebsd7
+            #      i686-gentoo-freebsd8
+            #      i686-gentoo-freebsd8.2
     $2="freebsd"
     ;;
   *)
@@ -1946,6 +2002,10 @@ AC_DEFUN([XCODE_VERSION],[
 # FIND_GCC()
 # --------------------------------
 # Finds where gcc is
+#
+# $1 = the variable to set
+# $2 = the with option name
+# $3 = the command to look for
 AC_DEFUN([FIND_GCC],[
     if test "$TargetOS_CPP" = "darwin" &&
        test "$XCodeVersion1" -eq 4 &&
@@ -1954,13 +2014,14 @@ AC_DEFUN([FIND_GCC],[
         # In Xcode 4.1, 'gcc-4.2' is the gcc legacy backend (rather
         # than the LLVM backend). We prefer the legacy gcc, but in
         # Xcode 4.2 'gcc-4.2' was removed.
-        FP_ARG_WITH_PATH_GNU_PROG([CC], [gcc-4.2])
+        FP_ARG_WITH_PATH_GNU_PROG([$1], [gcc-4.2], [gcc-4.2])
+    elif test "$windows" = YES
+    then
+        $1="$CC"
     else
-        FP_ARG_WITH_PATH_GNU_PROG([CC], [gcc])
+        FP_ARG_WITH_PATH_GNU_PROG([$1], [$2], [$3])
     fi
-    export CC
-    WhatGccIsCalled="$CC"
-    AC_SUBST(WhatGccIsCalled)
+    AC_SUBST($1)
 ])
 
 # LocalWords:  fi

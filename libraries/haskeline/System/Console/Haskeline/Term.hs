@@ -7,14 +7,14 @@ import System.Console.Haskeline.Prefs(Prefs)
 import System.Console.Haskeline.Completion(Completion)
 
 import Control.Concurrent
-import Data.Typeable
-import Data.ByteString.Char8 (ByteString)
-import qualified Data.ByteString.Char8 as B
 import Data.Word
-import Control.Exception.Extensible (fromException, AsyncException(..),bracket_)
+import Control.Exception (fromException, AsyncException(..),bracket_)
+import Data.Typeable
 import System.IO
 import Control.Monad(liftM,when,guard)
 import System.IO.Error (isEOFError)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as BC
 
 class (MonadReader Layout m, MonadException m) => Term m where
     reposition :: Layout -> LineChars -> m ()
@@ -32,25 +32,26 @@ clearLine = flip drawLineDiff ([],[])
 data RunTerm = RunTerm {
             -- | Write unicode characters to stdout.
             putStrOut :: String -> IO (),
-            encodeForTerm :: String -> IO ByteString,
-            decodeForTerm :: ByteString -> IO String,
             termOps :: Either TermOps FileOps,
-            wrapInterrupt :: MonadException m => m a -> m a,
+            wrapInterrupt :: forall a . IO a -> IO a,            
             closeTerm :: IO ()
     }
 
 -- | Operations needed for terminal-style interaction.
 data TermOps = TermOps {
             getLayout :: IO Layout
-            , withGetEvent :: (MonadException m, CommandMonad m)
-                                => (m Event -> m a) -> m a
-            , runTerm :: (MonadException m, CommandMonad m) => RunTermType m a -> m a
+            , withGetEvent :: CommandMonad m => (m Event -> m a) -> m a
+            , evalTerm :: forall m . CommandMonad m => EvalTerm m
             , saveUnusedKeys :: [Key] -> IO ()
         }
 
 -- | Operations needed for file-style interaction.
+-- 
+-- Backends can assume that getLocaleLine, getLocaleChar and maybeReadNewline
+-- are "wrapped" by wrapFileInput.
 data FileOps = FileOps {
             inputHandle :: Handle, -- ^ e.g. for turning off echoing.
+            wrapFileInput :: forall a . IO a -> IO a,
             getLocaleLine :: MaybeT IO String,
             getLocaleChar :: MaybeT IO Char,
             maybeReadNewline :: IO ()
@@ -62,17 +63,30 @@ isTerminalStyle r = case termOps r of
                     Left TermOps{} -> True
                     _ -> False
 
+-- Specific, hidden terminal action type
 -- Generic terminal actions which are independent of the Term being used.
--- Wrapped in a newtype so that we don't need RankNTypes.
-newtype RunTermType m a = RunTermType (forall t . 
-            (MonadTrans t, Term (t m), MonadException (t m), CommandMonad (t m))
-                            => t m a)
+data EvalTerm m
+    = forall n . (Term n, CommandMonad n)
+            => EvalTerm (forall a . n a -> m a) (forall a . m a -> n a)
 
-class (MonadReader Prefs m , MonadReader Layout m)
+mapEvalTerm :: (forall a . n a -> m a) -> (forall a . m a -> n a)
+        -> EvalTerm n -> EvalTerm m
+mapEvalTerm eval liftE (EvalTerm eval' liftE')
+    = EvalTerm (eval . eval') (liftE' . liftE)
+
+data Interrupt = Interrupt
+                deriving (Show,Typeable,Eq)
+
+instance Exception Interrupt where
+
+
+
+class (MonadReader Prefs m , MonadReader Layout m, MonadException m)
         => CommandMonad m where
     runCompletion :: (String,String) -> m (String,[Completion])
 
 instance (MonadTrans t, CommandMonad m, MonadReader Prefs (t m),
+        MonadException (t m),
         MonadReader Layout (t m))
             => CommandMonad (t m) where
     runCompletion = lift . runCompletion
@@ -116,11 +130,6 @@ keyEventLoop readEvents eventChan = do
 saveKeys :: Chan Event -> [Key] -> IO ()
 saveKeys ch = writeChan ch . KeyInput
 
-data Interrupt = Interrupt
-                deriving (Show,Typeable,Eq)
-
-instance Exception Interrupt where
-
 data Layout = Layout {width, height :: Int}
                     deriving (Show,Eq)
 
@@ -144,39 +153,27 @@ bracketSet getState set newState f = bracket (liftIO getState)
                             (liftIO . set)
                             (\_ -> liftIO (set newState) >> f)
 
-
 -- | Returns one 8-bit word.  Needs to be wrapped by hWithBinaryMode.
 hGetByte :: Handle -> MaybeT IO Word8
-hGetByte h = do
-    eof <- liftIO $ hIsEOF h
+hGetByte = guardedEOF $ liftM (toEnum . fromEnum) . hGetChar
+
+guardedEOF :: (Handle -> IO a) -> Handle -> MaybeT IO a
+guardedEOF f h = do
+    eof <- lift $ hIsEOF h
     guard (not eof)
-    liftIO $ liftM (toEnum . fromEnum) $ hGetChar h
-
-
--- | Utility function to correctly get a ByteString line of input.
-hGetLine :: Handle -> MaybeT IO ByteString
-hGetLine h = do
-    atEOF <- liftIO $ hIsEOF h
-    guard (not atEOF)
-    -- It's more efficient to use B.getLine, but that function throws an
-    -- error if the Handle (e.g., stdin) is set to NoBuffering.
-    buff <- liftIO $ hGetBuffering h
-    liftIO $ if buff == NoBuffering
-        then hWithBinaryMode h $ fmap B.pack $ System.IO.hGetLine h
-        else B.hGetLine h
+    lift $ f h
 
 -- If another character is immediately available, and it is a newline, consume it.
 --
 -- Two portability fixes:
+--
+-- 1) By itself, this (by using hReady) might crash on invalid characters.
+-- The handle should be set to binary mode or a TextEncoder that
+-- transliterates or ignores invalid input.
 -- 
 -- 1) Note that in ghc-6.8.3 and earlier, hReady returns False at an EOF,
 -- whereas in ghc-6.10.1 and later it throws an exception.  (GHC trac #1063).
 -- This code handles both of those cases.
---
--- 2) Also note that on Windows with ghc<6.10, hReady may not behave correctly (#1198)
--- The net result is that this might cause
--- But this function will generally only be used when reading buffered input
--- (since stdin isn't a terminal), so it should probably be OK.
 hMaybeReadNewline :: Handle -> IO ()
 hMaybeReadNewline h = returnOnEOF () $ do
     ready <- hReady h
@@ -188,3 +185,14 @@ returnOnEOF :: MonadException m => a -> m a -> m a
 returnOnEOF x = handle $ \e -> if isEOFError e
                                 then return x
                                 else throwIO e
+
+-- | Utility function to correctly get a line of input as an undecoded ByteString.
+hGetLocaleLine :: Handle -> MaybeT IO ByteString
+hGetLocaleLine = guardedEOF $ \h -> do
+    -- It's more efficient to use B.getLine, but that function throws an
+    -- error if the Handle (e.g., stdin) is set to NoBuffering.
+    buff <- liftIO $ hGetBuffering h
+    liftIO $ if buff == NoBuffering
+        then fmap BC.pack $ System.IO.hGetLine h
+        else BC.hGetLine h
+

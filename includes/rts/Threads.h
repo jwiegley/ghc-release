@@ -15,6 +15,10 @@
 #ifndef RTS_THREADS_H
 #define RTS_THREADS_H
 
+#ifdef HAVE_SYS_TYPES_H
+#include <sys/types.h>
+#endif
+
 // 
 // Creating threads
 //
@@ -61,10 +65,6 @@ extern Capability MainCapability;
 // Change the number of capabilities (only supports increasing the
 // current value at the moment).
 //
-#if defined(THREADED_RTS)
 extern void setNumCapabilities (nat new);
-#else
-extern void setNumCapabilities (nat new) GNU_ATTRIBUTE(__noreturn__);
-#endif
 
 #endif /* RTS_THREADS_H */

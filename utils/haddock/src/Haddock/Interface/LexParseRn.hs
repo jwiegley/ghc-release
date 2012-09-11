@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wwarn #-}
+{-# LANGUAGE BangPatterns #-}
   -----------------------------------------------------------------------------
 -- |
 -- Module      :  Haddock.Interface.LexParseRn
@@ -61,7 +63,7 @@ process parse dflags gre (HsDocString fs) = do
      Nothing -> do
        tell [ "doc comment parse failed: " ++ str ]
        return Nothing
-     Just doc -> return (Just (rename gre doc))
+     Just doc -> return (Just (rename dflags gre doc))
 
 
 processModuleHeader :: DynFlags -> GlobalRdrEnv -> SafeHaskellMode -> Maybe LHsDocString
@@ -69,6 +71,7 @@ processModuleHeader :: DynFlags -> GlobalRdrEnv -> SafeHaskellMode -> Maybe LHsD
 processModuleHeader dflags gre safety mayStr = do
   (hmi, doc) <-
     case mayStr of
+
       Nothing -> return failure
       Just (L _ (HsDocString fs)) -> do
         let str = unpackFS fs
@@ -77,16 +80,17 @@ processModuleHeader dflags gre safety mayStr = do
             tell ["haddock module header parse failed: " ++ msg]
             return failure
           Right (hmi, doc) -> do
-            let hmi' = hmi { hmi_description = rename gre <$> hmi_description hmi }
-                doc' = rename gre doc
+            let !descr = rename dflags gre <$> hmi_description hmi
+                hmi' = hmi { hmi_description = descr }
+                doc' = rename dflags gre doc
             return (hmi', Just doc')
-  return (hmi { hmi_safety = Just $ showPpr safety }, doc)
+  return (hmi { hmi_safety = Just $ showPpr dflags safety }, doc)
   where
     failure = (emptyHaddockModInfo, Nothing)
 
 
-rename :: GlobalRdrEnv -> Doc RdrName -> Doc Name
-rename gre = rn
+rename :: DynFlags -> GlobalRdrEnv -> Doc RdrName -> Doc Name
+rename dflags gre = rn
   where
     rn d = case d of
       DocAppend a b -> DocAppend (rn a) (rn b)
@@ -97,9 +101,10 @@ rename gre = rn
         case names of
           [] ->
             case choices of
-              [] -> DocMonospaced (DocString (showSDoc $ ppr x))
-              [a] -> outOfScope a
-              a:b:_ | isRdrTc a -> outOfScope a | otherwise -> outOfScope b
+              [] -> DocMonospaced (DocString (showPpr dflags x))
+              [a] -> outOfScope dflags a
+              a:b:_ | isRdrTc a -> outOfScope dflags a
+                    | otherwise -> outOfScope dflags b
           [a] -> DocIdentifier a
           a:b:_ | isTyConName a -> DocIdentifier a | otherwise -> DocIdentifier b
               -- If an id can refer to multiple things, we give precedence to type
@@ -113,7 +118,7 @@ rename gre = rn
       DocCodeBlock doc -> DocCodeBlock (rn doc)
       DocIdentifierUnchecked x -> DocIdentifierUnchecked x
       DocModule str -> DocModule str
-      DocURL str -> DocURL str
+      DocHyperlink l -> DocHyperlink l
       DocPic str -> DocPic str
       DocAName str -> DocAName str
       DocExamples e -> DocExamples e
@@ -121,12 +126,12 @@ rename gre = rn
       DocString str -> DocString str
 
 
-outOfScope :: RdrName -> Doc a
-outOfScope x =
+outOfScope :: DynFlags -> RdrName -> Doc a
+outOfScope dflags x =
   case x of
     Unqual occ -> monospaced occ
     Qual mdl occ -> DocIdentifierUnchecked (mdl, occ)
     Orig _ occ -> monospaced occ
     Exact name -> monospaced name  -- Shouldn't happen since x is out of scope
   where
-    monospaced a = DocMonospaced (DocString (showSDoc $ ppr a))
+    monospaced a = DocMonospaced (DocString (showPpr dflags a))

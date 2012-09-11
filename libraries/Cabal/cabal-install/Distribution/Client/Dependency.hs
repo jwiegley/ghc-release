@@ -14,6 +14,7 @@
 -----------------------------------------------------------------------------
 module Distribution.Client.Dependency (
     -- * The main package dependency resolver
+    chooseSolver,
     resolveDependencies,
     Progress(..),
     foldProgress,
@@ -45,6 +46,7 @@ module Distribution.Client.Dependency (
     setReorderGoals,
     setIndependentGoals,
     setAvoidReinstalls,
+    setShadowPkgs,
     setMaxBackjumps,
     addSourcePackages,
     hideInstalledPackagesSpecificByInstalledPackageId,
@@ -64,7 +66,7 @@ import Distribution.Client.Types
          ( SourcePackageDb(SourcePackageDb)
          , SourcePackage(..) )
 import Distribution.Client.Dependency.Types
-         ( Solver(..), DependencyResolver, PackageConstraint(..)
+         ( PreSolver(..), Solver(..), DependencyResolver, PackageConstraint(..)
          , PackagePreferences(..), InstalledPreference(..)
          , PackagesPreferenceDefault(..)
          , Progress(..), foldProgress )
@@ -74,14 +76,17 @@ import Distribution.Package
          ( PackageName(..), PackageId, Package(..), packageVersion
          , InstalledPackageId, Dependency(Dependency))
 import Distribution.Version
-         ( VersionRange, anyVersion, withinRange, simplifyVersionRange )
+         ( Version(..), VersionRange, anyVersion, withinRange, simplifyVersionRange )
 import Distribution.Compiler
-         ( CompilerId(..) )
+         ( CompilerId(..), CompilerFlavor(..) )
 import Distribution.System
          ( Platform )
-import Distribution.Simple.Utils (comparing)
+import Distribution.Simple.Utils
+         ( comparing, warn, info )
 import Distribution.Text
          ( display )
+import Distribution.Verbosity
+         ( Verbosity )
 
 import Data.List (maximumBy, foldl')
 import Data.Maybe (fromMaybe)
@@ -107,6 +112,7 @@ data DepResolverParams = DepResolverParams {
        depResolverReorderGoals      :: Bool,
        depResolverIndependentGoals  :: Bool,
        depResolverAvoidReinstalls   :: Bool,
+       depResolverShadowPkgs        :: Bool,
        depResolverMaxBackjumps      :: Maybe Int
      }
 
@@ -139,6 +145,7 @@ basicDepResolverParams installedPkgIndex sourcePkgIndex =
        depResolverReorderGoals      = False,
        depResolverIndependentGoals  = False,
        depResolverAvoidReinstalls   = False,
+       depResolverShadowPkgs        = False,
        depResolverMaxBackjumps      = Nothing
      }
 
@@ -188,6 +195,12 @@ setAvoidReinstalls :: Bool -> DepResolverParams -> DepResolverParams
 setAvoidReinstalls b params =
     params {
       depResolverAvoidReinstalls = b
+    }
+
+setShadowPkgs :: Bool -> DepResolverParams -> DepResolverParams
+setShadowPkgs b params =
+    params {
+      depResolverShadowPkgs = b
     }
 
 setMaxBackjumps :: Maybe Int -> DepResolverParams -> DepResolverParams
@@ -305,6 +318,17 @@ standardInstallPolicy
 -- * Interface to the standard resolver
 -- ------------------------------------------------------------
 
+chooseSolver :: Verbosity -> PreSolver -> CompilerId -> IO Solver
+chooseSolver _         AlwaysTopDown _                = return TopDown
+chooseSolver _         AlwaysModular _                = return Modular
+chooseSolver verbosity Choose        (CompilerId f v) = do
+  let chosenSolver | f == GHC && v <= Version [7] [] = TopDown
+                   | otherwise                       = Modular
+      msg TopDown = warn verbosity "Falling back to topdown solver for GHC < 7."
+      msg Modular = info verbosity "Choosing modular solver."
+  msg chosenSolver
+  return chosenSolver
+
 runSolver :: Solver -> SolverConfig -> DependencyResolver
 runSolver TopDown = const topDownResolver -- TODO: warn about unsuported options
 runSolver Modular = modularResolver
@@ -329,7 +353,7 @@ resolveDependencies platform comp _solver params
 resolveDependencies platform comp  solver params =
 
     fmap (mkInstallPlan platform comp)
-  $ runSolver solver (SolverConfig reorderGoals indGoals noReinstalls maxBkjumps)
+  $ runSolver solver (SolverConfig reorderGoals indGoals noReinstalls shadowing maxBkjumps)
                      platform comp installedPkgIndex sourcePkgIndex
                      preferences constraints targets
   where
@@ -341,8 +365,15 @@ resolveDependencies platform comp  solver params =
       reorderGoals
       indGoals
       noReinstalls
+      shadowing
       maxBkjumps      = dontUpgradeBasePackage
-                      . hideBrokenInstalledPackages
+                      -- TODO:
+                      -- The modular solver can properly deal with broken packages
+                      -- and won't select them. So the 'hideBrokenInstalledPackages'
+                      -- function should be moved into a module that is specific
+                      -- to the Topdown solver.
+                      . (if solver /= Modular then hideBrokenInstalledPackages
+                                              else id)
                       $ params
 
     preferences = interpretPackagesPreference
@@ -417,7 +448,7 @@ resolveWithoutDependencies :: DepResolverParams
                            -> Either [ResolveNoDepsError] [SourcePackage]
 resolveWithoutDependencies (DepResolverParams targets constraints
                               prefs defpref installedPkgIndex sourcePkgIndex
-                              _reorderGoals _indGoals _avoidReinstalls _maxBjumps) =
+                              _reorderGoals _indGoals _avoidReinstalls _shadowing _maxBjumps) =
     collectEithers (map selectPackage targets)
   where
     selectPackage :: PackageName -> Either ResolveNoDepsError SourcePackage

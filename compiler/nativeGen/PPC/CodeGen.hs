@@ -57,6 +57,7 @@ import Data.Word
 
 import BasicTypes
 import FastString
+import Util
 
 -- -----------------------------------------------------------------------------
 -- Top-level of the instruction selector
@@ -73,7 +74,7 @@ cmmTopCodeGen
 cmmTopCodeGen (CmmProc info lab (ListGraph blocks)) = do
   (nat_blocks,statics) <- mapAndUnzipM basicBlockCodeGen blocks
   picBaseMb <- getPicBaseMaybeNat
-  dflags <- getDynFlagsNat
+  dflags <- getDynFlags
   let proc = CmmProc info lab (ListGraph $ concat nat_blocks)
       tops = proc : concat statics
       os   = platformOS $ targetPlatform dflags
@@ -104,7 +105,6 @@ basicBlockCodeGen (BasicBlock id stmts) = do
           = (instrs, blocks, CmmData sec dat:statics)
         mkBlocks instr (instrs,blocks,statics)
           = (instr:instrs, blocks, statics)
-  -- in
   return (BasicBlock id top : other_blocks, statics)
 
 stmtsToInstrs :: [CmmStmt] -> NatM InstrBlock
@@ -114,7 +114,7 @@ stmtsToInstrs stmts
 
 stmtToInstrs :: CmmStmt -> NatM InstrBlock
 stmtToInstrs stmt = do
-  dflags <- getDynFlagsNat
+  dflags <- getDynFlags
   case stmt of
     CmmNop         -> return nilOL
     CmmComment s   -> return (unitOL (COMMENT s))
@@ -142,7 +142,7 @@ stmtToInstrs stmt = do
     CmmCondBranch arg id  -> genCondJump id arg
     CmmSwitch arg ids     -> genSwitch arg ids
     CmmJump arg _         -> genJump arg
-    CmmReturn _           ->
+    CmmReturn             ->
       panic "stmtToInstrs: return statement should have been cps'd away"
 
 
@@ -284,7 +284,6 @@ assignMem_I64Code addrTree valueTree = do
                 -- Big-endian store
                 mov_hi = ST II32 rhi hi_addr
                 mov_lo = ST II32 rlo lo_addr
-        -- in
         return (vcode `appOL` addr_code `snocOL` mov_lo `snocOL` mov_hi)
 
 
@@ -297,7 +296,6 @@ assignReg_I64Code (CmmLocal (LocalReg u_dst _)) valueTree = do
          r_src_hi = getHiVRegFromLo r_src_lo
          mov_lo = MR r_dst_lo r_src_lo
          mov_hi = MR r_dst_hi r_src_hi
-   -- in
    return (
         vcode `snocOL` mov_lo `snocOL` mov_hi
      )
@@ -322,17 +320,16 @@ iselExpr64 (CmmLit (CmmInt i _)) = do
   (rlo,rhi) <- getNewRegPairNat II32
   let
         half0 = fromIntegral (fromIntegral i :: Word16)
-        half1 = fromIntegral ((fromIntegral i `shiftR` 16) :: Word16)
-        half2 = fromIntegral ((fromIntegral i `shiftR` 32) :: Word16)
-        half3 = fromIntegral ((fromIntegral i `shiftR` 48) :: Word16)
+        half1 = fromIntegral (fromIntegral (i `shiftR` 16) :: Word16)
+        half2 = fromIntegral (fromIntegral (i `shiftR` 32) :: Word16)
+        half3 = fromIntegral (fromIntegral (i `shiftR` 48) :: Word16)
 
         code = toOL [
                 LIS rlo (ImmInt half1),
                 OR rlo rlo (RIImm $ ImmInt half0),
                 LIS rhi (ImmInt half3),
-                OR rlo rlo (RIImm $ ImmInt half2)
+                OR rhi rhi (RIImm $ ImmInt half2)
                 ]
-  -- in
   return (ChildCode64 code rlo)
 
 iselExpr64 (CmmMachOp (MO_Add _) [e1,e2]) = do
@@ -346,7 +343,6 @@ iselExpr64 (CmmMachOp (MO_Add _) [e1,e2]) = do
                 code2 `appOL`
                 toOL [ ADDC rlo r1lo r2lo,
                        ADDE rhi r1hi r2hi ]
-   -- in
    return (ChildCode64 code rlo)
 
 iselExpr64 (CmmMachOp (MO_UU_Conv W32 W64) [expr]) = do
@@ -357,13 +353,12 @@ iselExpr64 (CmmMachOp (MO_UU_Conv W32 W64) [expr]) = do
     return $ ChildCode64 (expr_code `snocOL` mov_lo `snocOL` mov_hi)
                          rlo
 iselExpr64 expr
-   = do dflags <- getDynFlagsNat
-        pprPanic "iselExpr64(powerpc)" (pprPlatform (targetPlatform dflags) expr)
+   = pprPanic "iselExpr64(powerpc)" (pprExpr expr)
 
 
 
 getRegister :: CmmExpr -> NatM Register
-getRegister e = do dflags <- getDynFlagsNat
+getRegister e = do dflags <- getDynFlags
                    getRegister' dflags e
 
 getRegister' :: DynFlags -> CmmExpr -> NatM Register
@@ -555,7 +550,7 @@ getRegister' _ (CmmLit (CmmInt i rep))
 
 getRegister' _ (CmmLit (CmmFloat f frep)) = do
     lbl <- getNewLabelNat
-    dflags <- getDynFlagsNat
+    dflags <- getDynFlags
     dynRef <- cmmMakeDynamicReference dflags addImportNat DataReference lbl
     Amode addr addr_code <- getAmode dynRef
     let size = floatSize frep
@@ -574,7 +569,7 @@ getRegister' _ (CmmLit lit)
           ]
     in return (Any (cmmTypeSize rep) code)
 
-getRegister' dflags other = pprPanic "getRegister(ppc)" (pprExpr (targetPlatform dflags) other)
+getRegister' _ other = pprPanic "getRegister(ppc)" (pprExpr other)
 
     -- extend?Rep: wrap integer expression of type rep
     -- in a conversion to II32
@@ -845,7 +840,7 @@ genCCall :: CmmCallTarget            -- function to call
          -> [HintedCmmActual]        -- arguments (of mixed type)
          -> NatM InstrBlock
 genCCall target dest_regs argsAndHints
- = do dflags <- getDynFlagsNat
+ = do dflags <- getDynFlags
       case platformOS (targetPlatform dflags) of
           OSLinux    -> genCCall' GCPLinux  target dest_regs argsAndHints
           OSDarwin   -> genCCall' GCPDarwin target dest_regs argsAndHints
@@ -898,8 +893,11 @@ genCCall'
 -}
 
 
-genCCall' _ (CmmPrim MO_WriteBarrier) _ _
+genCCall' _ (CmmPrim MO_WriteBarrier _) _ _
  = return $ unitOL LWSYNC
+
+genCCall' _ (CmmPrim _ (Just stmts)) _ _
+    = stmtsToInstrs stmts
 
 genCCall' gcp target dest_regs argsAndHints
   = ASSERT (not $ any (`elem` [II16]) $ map cmmTypeSize argReps)
@@ -914,7 +912,7 @@ genCCall' gcp target dest_regs argsAndHints
         (labelOrExpr, reduceToFF32) <- case target of
             CmmCallee (CmmLit (CmmLabel lbl)) _ -> return (Left lbl, False)
             CmmCallee expr _ -> return  (Right expr, False)
-            CmmPrim mop -> outOfLineMachOp mop
+            CmmPrim mop _ -> outOfLineMachOp mop
 
         let codeBefore = move_sp_down finalStack `appOL` passArgumentsCode
             codeAfter = move_sp_up finalStack `appOL` moveResult reduceToFF32
@@ -943,7 +941,7 @@ genCCall' gcp target dest_regs argsAndHints
                                 GCPLinux -> roundTo 16 finalStack
 
         -- need to remove alignment information
-        argsAndHints' | (CmmPrim mop) <- target,
+        argsAndHints' | CmmPrim mop _ <- target,
                         (mop == MO_Memcpy ||
                          mop == MO_Memset ||
                          mop == MO_Memmove)
@@ -1093,7 +1091,7 @@ genCCall' gcp target dest_regs argsAndHints
 
         outOfLineMachOp mop =
             do
-                dflags <- getDynFlagsNat
+                dflags <- getDynFlags
                 mopExpr <- cmmMakeDynamicReference dflags addImportNat CallReference $
                               mkForeignLabel functionName Nothing ForeignLabelInThisPackage IsFunction
                 let mopLabelOrExpr = case mopExpr of
@@ -1142,10 +1140,15 @@ genCCall' gcp target dest_regs argsAndHints
 
                     MO_PopCnt w  -> (fsLit $ popCntLabel w, False)
 
-                    MO_WriteBarrier ->
-                        panic $ "outOfLineCmmOp: MO_WriteBarrier not supported"
-                    MO_Touch ->
-                        panic $ "outOfLineCmmOp: MO_Touch not supported"
+                    MO_S_QuotRem {}  -> unsupported
+                    MO_U_QuotRem {}  -> unsupported
+                    MO_U_QuotRem2 {} -> unsupported
+                    MO_Add2 {}       -> unsupported
+                    MO_U_Mul2 {}     -> unsupported
+                    MO_WriteBarrier  -> unsupported
+                    MO_Touch         -> unsupported
+                unsupported = panic ("outOfLineCmmOp: " ++ show mop
+                                  ++ " not supported")
 
 -- -----------------------------------------------------------------------------
 -- Generating a table-branch
@@ -1157,7 +1160,7 @@ genSwitch expr ids
         (reg,e_code) <- getSomeReg expr
         tmp <- getNewRegNat II32
         lbl <- getNewLabelNat
-        dflags <- getDynFlagsNat
+        dflags <- getDynFlags
         dynRef <- cmmMakeDynamicReference dflags addImportNat DataReference lbl
         (tableReg,t_code) <- getSomeReg $ dynRef
         let code = e_code `appOL` t_code `appOL` toOL [
@@ -1359,7 +1362,7 @@ coerceInt2FP fromRep toRep x = do
     lbl <- getNewLabelNat
     itmp <- getNewRegNat II32
     ftmp <- getNewRegNat FF64
-    dflags <- getDynFlagsNat
+    dflags <- getDynFlags
     dynRef <- cmmMakeDynamicReference dflags addImportNat DataReference lbl
     Amode addr addr_code <- getAmode dynRef
     let

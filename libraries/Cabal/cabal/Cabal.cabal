@@ -1,5 +1,5 @@
 Name: Cabal
-Version: 1.14.0
+Version: 1.16.0
 Copyright: 2003-2006, Isaac Jones
            2005-2011, Duncan Coutts
 License: BSD3
@@ -27,8 +27,8 @@ Extra-Source-Files:
         README changelog
 
 source-repository head
-  type:     darcs
-  location: http://darcs.haskell.org/cabal/
+  type:     git
+  location: https://github.com/haskell/cabal/
   subdir:   Cabal
 
 Flag base4
@@ -43,15 +43,15 @@ Library
   if flag(base4) { build-depends: base >= 4 } else { build-depends: base < 4 }
   if flag(base3) { build-depends: base >= 3 } else { build-depends: base < 3 }
   if flag(base3)
-    Build-Depends: directory  >= 1   && < 1.2,
+    Build-Depends: directory  >= 1   && < 1.3,
                    process    >= 1   && < 1.2,
                    old-time   >= 1   && < 1.2,
-                   containers >= 0.1 && < 0.5,
+                   containers >= 0.1 && < 0.6,
                    array      >= 0.1 && < 0.5,
                    pretty     >= 1   && < 1.2
 
   if !os(windows)
-    Build-Depends: unix       >= 2.0 && < 2.6
+    Build-Depends: unix       >= 2.0 && < 2.7
 
   ghc-options: -Wall -fno-ignore-asserts
   if impl(ghc >= 6.8)
@@ -98,6 +98,7 @@ Library
         Distribution.Simple.Program.Ar,
         Distribution.Simple.Program.Builtin,
         Distribution.Simple.Program.Db,
+        Distribution.Simple.Program.GHC,
         Distribution.Simple.Program.HcPkg,
         Distribution.Simple.Program.Hpc,
         Distribution.Simple.Program.Ld,

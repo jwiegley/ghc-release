@@ -1,5 +1,5 @@
 name:           base
-version:        4.5.1.0
+version:        4.6.0.0
 license:        BSD3
 license-file:   LICENSE
 maintainer:     libraries@haskell.org
@@ -38,6 +38,7 @@ Library {
             Foreign.Concurrent,
             GHC.Arr,
             GHC.Base,
+            GHC.Char,
             GHC.Conc,
             GHC.Conc.IO,
             GHC.Conc.Signal,
@@ -57,6 +58,8 @@ Library {
             GHC.Float.RealFracMethods,
             GHC.Foreign,
             GHC.ForeignPtr,
+            GHC.Generics,
+            GHC.GHCi,
             GHC.Handle,
             GHC.IO,
             GHC.IO.Buffer,
@@ -82,6 +85,7 @@ Library {
             GHC.IOArray,
             GHC.IOBase,
             GHC.IORef,
+            GHC.IP,
             GHC.Int,
             GHC.List,
             GHC.MVar,
@@ -98,6 +102,7 @@ Library {
             GHC.Stable,
             GHC.Storable,
             GHC.STRef,
+            GHC.TypeLits,
             GHC.TopHandler,
             GHC.Unicode,
             GHC.Weak,
@@ -120,7 +125,6 @@ Library {
         Control.Concurrent.SampleVar,
         Control.Exception,
         Control.Exception.Base
-        Control.OldException,
         Control.Monad,
         Control.Monad.Fix,
         Control.Monad.Instances,
@@ -212,14 +216,15 @@ Library {
         Control.Monad.ST.Imp
         Control.Monad.ST.Lazy.Imp
         Foreign.ForeignPtr.Imp
+        System.Environment.ExecutablePath
     c-sources:
         cbits/PrelIOUtils.c
         cbits/WCsubst.c
         cbits/Win32Utils.c
+        cbits/DarwinUtils.c
         cbits/consUtils.c
         cbits/iconv.c
         cbits/inputReady.c
-        cbits/selectUtils.c
         cbits/primFloat.c
         cbits/md5.c
     include-dirs: include

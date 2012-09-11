@@ -1,12 +1,5 @@
 {-# OPTIONS -fno-warn-incomplete-patterns -optc-DNON_POSIX_SOURCE #-}
 
-{-# OPTIONS -fno-warn-tabs #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and
--- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSp
--- for details
-
 -----------------------------------------------------------------------------
 --
 -- GHC Driver program
@@ -19,28 +12,29 @@ module Main (main) where
 
 -- The official GHC API
 import qualified GHC
-import GHC		( -- DynFlags(..), HscTarget(..),
+import GHC              ( -- DynFlags(..), HscTarget(..),
                           -- GhcMode(..), GhcLink(..),
                           Ghc, GhcMonad(..),
-			  LoadHowMuch(..) )
+                          LoadHowMuch(..) )
 import CmdLineParser
 
 -- Implementations of the various modes (--show-iface, mkdependHS. etc.)
-import LoadIface	( showIface )
+import LoadIface        ( showIface )
 import HscMain          ( newHscEnv )
-import DriverPipeline	( oneShot, compileFile )
-import DriverMkDepend	( doMkDependHS )
+import DriverPipeline   ( oneShot, compileFile )
+import DriverMkDepend   ( doMkDependHS )
 #ifdef GHCI
-import InteractiveUI	( interactiveUI, ghciWelcomeMsg )
+import InteractiveUI    ( interactiveUI, ghciWelcomeMsg, defaultGhciSettings )
 #endif
 
 
 -- Various other random stuff that we need
 import Config
+import Constants
 import HscTypes
-import Packages		( dumpPackages )
-import DriverPhases	( Phase(..), isSourceFilename, anyHsc,
-			  startPhase, isHaskellSrcFilename )
+import Packages         ( dumpPackages )
+import DriverPhases     ( Phase(..), isSourceFilename, anyHsc,
+                          startPhase, isHaskellSrcFilename )
 import BasicTypes       ( failed )
 import StaticFlags
 import StaticFlagParser
@@ -85,7 +79,8 @@ import Data.Maybe
 main :: IO ()
 main = do
    hSetBuffering stdout NoBuffering
-   GHC.defaultErrorHandler defaultLogAction $ do
+   hSetBuffering stderr NoBuffering
+   GHC.defaultErrorHandler defaultFatalMessager defaultFlushOut $ do
     -- 1. extract the -B flag from the args
     argv0 <- getArgs
 
@@ -162,6 +157,8 @@ main' postLoadMode dflags0 args flagWarnings = do
 
       -- turn on -fimplicit-import-qualified for GHCi now, so that it
       -- can be overriden from the command-line
+      -- XXX: this should really be in the interactive DynFlags, but
+      -- we don't set that until later in interactiveUI
       dflags1a | DoInteractive <- postLoadMode = imp_qual_enabled
                | DoEval _      <- postLoadMode = imp_qual_enabled
                | otherwise                 = dflags1
@@ -170,6 +167,8 @@ main' postLoadMode dflags0 args flagWarnings = do
         -- The rest of the arguments are "dynamic"
         -- Leftover ones are presumably files
   (dflags2, fileish_args, dynamicFlagWarnings) <- GHC.parseDynamicFlags dflags1a args
+
+  GHC.prettyPrintGhcErrors dflags2 $ do
 
   let flagWarnings' = flagWarnings ++ dynamicFlagWarnings
 
@@ -218,16 +217,17 @@ main' postLoadMode dflags0 args flagWarnings = do
        DoMake                 -> doMake srcs
        DoMkDependHS           -> doMkDependHS (map fst srcs)
        StopBefore p           -> liftIO (oneShot hsc_env p srcs)
-       DoInteractive          -> interactiveUI srcs Nothing
-       DoEval exprs           -> interactiveUI srcs $ Just $ reverse exprs
+       DoInteractive          -> ghciUI srcs Nothing
+       DoEval exprs           -> ghciUI srcs $ Just $ reverse exprs
        DoAbiHash              -> abiHash srcs
 
   liftIO $ dumpFinalStats dflags3
 
+ghciUI :: [(FilePath, Maybe Phase)] -> Maybe [String] -> Ghc ()
 #ifndef GHCI
-interactiveUI :: b -> c -> Ghc ()
-interactiveUI _ _ =
-  ghcError (CmdLineError "not built for interactive use")
+ghciUI _ _ = ghcError (CmdLineError "not built for interactive use")
+#else
+ghciUI     = interactiveUI defaultGhciSettings
 #endif
 
 -- -----------------------------------------------------------------------------
@@ -239,12 +239,12 @@ partition_args :: [String] -> [(String, Maybe Phase)] -> [String]
                -> ([(String, Maybe Phase)], [String])
 partition_args [] srcs objs = (reverse srcs, reverse objs)
 partition_args ("-x":suff:args) srcs objs
-  | "none" <- suff	= partition_args args srcs objs
-  | StopLn <- phase	= partition_args args srcs (slurp ++ objs)
-  | otherwise		= partition_args rest (these_srcs ++ srcs) objs
-	where phase = startPhase suff
-	      (slurp,rest) = break (== "-x") args
-	      these_srcs = zip slurp (repeat (Just phase))
+  | "none" <- suff      = partition_args args srcs objs
+  | StopLn <- phase     = partition_args args srcs (slurp ++ objs)
+  | otherwise           = partition_args rest (these_srcs ++ srcs) objs
+        where phase = startPhase suff
+              (slurp,rest) = break (== "-x") args
+              these_srcs = zip slurp (repeat (Just phase))
 partition_args (arg:args) srcs objs
   | looks_like_an_input arg = partition_args args ((arg,Nothing):srcs) objs
   | otherwise               = partition_args args srcs (arg:objs)
@@ -293,33 +293,33 @@ checkOptions mode dflags srcs objs = do
          && isInterpretiveMode mode) $
         hPutStrLn stderr ("Warning: -debug, -threaded and -ticky are ignored by GHCi")
 
-	-- -prof and --interactive are not a good combination
+        -- -prof and --interactive are not a good combination
    when (notNull (filter (not . isRTSWay) (wayNames dflags))
          && isInterpretiveMode mode) $
       do ghcError (UsageError
                    "--interactive can't be used with -prof or -unreg.")
-	-- -ohi sanity check
+        -- -ohi sanity check
    if (isJust (outputHi dflags) &&
       (isCompManagerMode mode || srcs `lengthExceeds` 1))
-	then ghcError (UsageError "-ohi can only be used when compiling a single source file")
-	else do
+        then ghcError (UsageError "-ohi can only be used when compiling a single source file")
+        else do
 
-	-- -o sanity checking
+        -- -o sanity checking
    if (srcs `lengthExceeds` 1 && isJust (outputFile dflags)
-	 && not (isLinkMode mode))
-	then ghcError (UsageError "can't apply -o to multiple source files")
-	else do
+         && not (isLinkMode mode))
+        then ghcError (UsageError "can't apply -o to multiple source files")
+        else do
 
    let not_linking = not (isLinkMode mode) || isNoLink (ghcLink dflags)
 
    when (not_linking && not (null objs)) $
         hPutStrLn stderr ("Warning: the following files would be used as linker inputs, but linking is not being done: " ++ unwords objs)
 
-	-- Check that there are some input files
-	-- (except in the interactive case)
+        -- Check that there are some input files
+        -- (except in the interactive case)
    if null srcs && (null objs || not_linking) && needsInputsMode mode
-	then ghcError (UsageError "no input files")
-	else do
+        then ghcError (UsageError "no input files")
+        else do
 
      -- Verify that output files point somewhere sensible.
    verifyOutputFiles dflags
@@ -351,7 +351,7 @@ verifyOutputFiles dflags = do
    nonExistentDir flg dir =
      ghcError (CmdLineError ("error: directory portion of " ++
                              show dir ++ " does not exist (used with " ++
-			     show flg ++ " option.)"))
+                             show flg ++ " option.)"))
 
 -----------------------------------------------------------------------------
 -- GHC modes of operation
@@ -451,7 +451,7 @@ isDoMakeMode _ = False
 #ifdef GHCI
 isInteractiveMode :: PostLoadMode -> Bool
 isInteractiveMode DoInteractive = True
-isInteractiveMode _		= False
+isInteractiveMode _             = False
 #endif
 
 -- isInterpretiveMode: byte-code compiler involved
@@ -461,19 +461,19 @@ isInterpretiveMode (DoEval _)    = True
 isInterpretiveMode _             = False
 
 needsInputsMode :: PostLoadMode -> Bool
-needsInputsMode DoMkDependHS	= True
-needsInputsMode (StopBefore _)	= True
-needsInputsMode DoMake		= True
-needsInputsMode _		= False
+needsInputsMode DoMkDependHS    = True
+needsInputsMode (StopBefore _)  = True
+needsInputsMode DoMake          = True
+needsInputsMode _               = False
 
 -- True if we are going to attempt to link in this mode.
 -- (we might not actually link, depending on the GhcLink flag)
 isLinkMode :: PostLoadMode -> Bool
 isLinkMode (StopBefore StopLn) = True
-isLinkMode DoMake	       = True
+isLinkMode DoMake              = True
 isLinkMode DoInteractive       = True
 isLinkMode (DoEval _)          = True
-isLinkMode _   		       = False
+isLinkMode _                   = False
 
 isCompManagerMode :: PostLoadMode -> Bool
 isCompManagerMode DoMake        = True
@@ -549,14 +549,21 @@ mode_flags =
                                             addFlag "-no-link" f))
   , Flag "M"            (PassFlag (setMode doMkDependHSMode))
   , Flag "E"            (PassFlag (setMode (stopBeforeMode anyHsc)))
-  , Flag "C"            (PassFlag (\f -> do setMode (stopBeforeMode HCc) f
-                                            addFlag "-fvia-C" f))
+  , Flag "C"            (PassFlag setGenerateC)
   , Flag "S"            (PassFlag (setMode (stopBeforeMode As)))
   , Flag "-make"        (PassFlag (setMode doMakeMode))
   , Flag "-interactive" (PassFlag (setMode doInteractiveMode))
   , Flag "-abi-hash"    (PassFlag (setMode doAbiHashMode))
   , Flag "e"            (SepArg   (\s -> setMode (doEvalMode s) "-e"))
   ]
+
+setGenerateC :: String -> EwM ModeM ()
+setGenerateC f
+  | cGhcUnregisterised /= "YES" = do
+        addWarn ("Compiler not unregisterised, so ignoring " ++ f)
+  | otherwise = do
+        setMode (stopBeforeMode HCc) f
+        addFlag "-fvia-C" f
 
 setMode :: Mode -> String -> EwM ModeM ()
 setMode newMode newFlag = liftEwM $ do
@@ -615,10 +622,10 @@ doMake :: [(String,Maybe Phase)] -> Ghc ()
 doMake srcs  = do
     let (hs_srcs, non_hs_srcs) = partition haskellish srcs
 
-	haskellish (f,Nothing) =
-	  looksLikeModuleName f || isHaskellSrcFilename f || '.' `notElem` f
-	haskellish (_,Just phase) =
-	  phase `notElem` [As, Cc, Cobjc, Cobjcpp, CmmCpp, Cmm, StopLn]
+        haskellish (f,Nothing) =
+          looksLikeModuleName f || isHaskellSrcFilename f || '.' `notElem` f
+        haskellish (_,Just phase) =
+          phase `notElem` [As, Cc, Cobjc, Cobjcpp, CmmCpp, Cmm, StopLn]
 
     hsc_env <- GHC.getSession
 
@@ -710,17 +717,17 @@ dumpFastStringStats dflags = do
   buckets <- getFastStringTable
   let (entries, longest, is_z, has_z) = countFS 0 0 0 0 buckets
       msg = text "FastString stats:" $$
-	    nest 4 (vcat [text "size:           " <+> int (length buckets),
-			  text "entries:        " <+> int entries,
-			  text "longest chain:  " <+> int longest,
-			  text "z-encoded:      " <+> (is_z `pcntOf` entries),
-			  text "has z-encoding: " <+> (has_z `pcntOf` entries)
-			 ])
-	-- we usually get more "has z-encoding" than "z-encoded", because
-	-- when we z-encode a string it might hash to the exact same string,
-	-- which will is not counted as "z-encoded".  Only strings whose
-	-- Z-encoding is different from the original string are counted in
-	-- the "z-encoded" total.
+            nest 4 (vcat [text "size:           " <+> int (length buckets),
+                          text "entries:        " <+> int entries,
+                          text "longest chain:  " <+> int longest,
+                          text "z-encoded:      " <+> (is_z `pcntOf` entries),
+                          text "has z-encoding: " <+> (has_z `pcntOf` entries)
+                         ])
+        -- we usually get more "has z-encoding" than "z-encoded", because
+        -- when we z-encode a string it might hash to the exact same string,
+        -- which will is not counted as "z-encoded".  Only strings whose
+        -- Z-encoding is different from the original string are counted in
+        -- the "z-encoded" total.
   putMsg dflags msg
   where
    x `pcntOf` y = int ((x * 100) `quot` y) <> char '%'
@@ -729,13 +736,13 @@ countFS :: Int -> Int -> Int -> Int -> [[FastString]] -> (Int, Int, Int, Int)
 countFS entries longest is_z has_z [] = (entries, longest, is_z, has_z)
 countFS entries longest is_z has_z (b:bs) =
   let
-	len = length b
-	longest' = max len longest
-	entries' = entries + len
-	is_zs = length (filter isZEncoded b)
-	has_zs = length (filter hasZEncoding b)
+        len = length b
+        longest' = max len longest
+        entries' = entries + len
+        is_zs = length (filter isZEncoded b)
+        has_zs = length (filter hasZEncoding b)
   in
-	countFS entries' longest' (is_z + is_zs) (has_z + has_zs) bs
+        countFS entries' longest' (is_z + is_zs) (has_z + has_zs) bs
 
 -- -----------------------------------------------------------------------------
 -- ABI hash support
@@ -765,7 +772,7 @@ abiHash strs = do
          r <- findImportedModule hsc_env modname Nothing
          case r of
            Found _ m -> return m
-           _error    -> ghcError $ CmdLineError $ showSDoc $
+           _error    -> ghcError $ CmdLineError $ showSDoc dflags $
                           cannotFindInterface dflags modname r
 
   mods <- mapM find_it (map fst strs)
@@ -774,13 +781,13 @@ abiHash strs = do
   ifaces <- initIfaceCheck hsc_env $ mapM get_iface mods
 
   bh <- openBinMem (3*1024) -- just less than a block
-  put_ bh opt_HiVersion
+  put_ bh hiVersion
     -- package hashes change when the compiler version changes (for now)
     -- see #5328
   mapM_ (put_ bh . mi_mod_hash) ifaces
   f <- fingerprintBinMem bh
 
-  putStrLn (showSDoc (ppr f))
+  putStrLn (showPpr dflags f)
 
 -- -----------------------------------------------------------------------------
 -- Util

@@ -17,25 +17,27 @@
 -----------------------------------------------------------------------------
 
 module System.Posix.Env (
-	getEnv
-	, getEnvDefault
-	, getEnvironmentPrim
-	, getEnvironment
-	, putEnv
-	, setEnv
-	, unsetEnv
+      getEnv
+    , getEnvDefault
+    , getEnvironmentPrim
+    , getEnvironment
+    , setEnvironment
+    , putEnv
+    , setEnv
+    , unsetEnv
+    , clearEnv
 ) where
 
 #include "HsUnix.h"
 
-import Foreign.C.Error	( throwErrnoIfMinus1_ )
+import Foreign.C.Error (throwErrnoIfMinus1_)
 import Foreign.C.Types
 import Foreign.C.String
 import Foreign.Marshal.Array
 import Foreign.Ptr
 import Foreign.Storable
-import Control.Monad	( liftM )
-import Data.Maybe	( fromMaybe )
+import Control.Monad
+import Data.Maybe (fromMaybe)
 #if __GLASGOW_HASKELL__ > 700
 import System.Posix.Internals (withFilePath, peekFilePath)
 #elif __GLASGOW_HASKELL__ > 611
@@ -73,10 +75,15 @@ foreign import ccall unsafe "getenv"
 getEnvironmentPrim :: IO [String]
 getEnvironmentPrim = do
   c_environ <- getCEnviron
-  arr <- peekArray0 nullPtr c_environ
-  mapM peekFilePath arr
+  -- environ can be NULL
+  if c_environ == nullPtr
+    then return []
+    else do
+      arr <- peekArray0 nullPtr c_environ
+      mapM peekFilePath arr
 
 getCEnviron :: IO (Ptr CString)
+
 #if darwin_HOST_OS
 -- You should not access _environ directly on Darwin in a bundle/shared library.
 -- See #2458 and http://developer.apple.com/library/mac/#documentation/Darwin/Reference/ManPages/man7/environ.7.html
@@ -101,6 +108,15 @@ getEnvironment = do
  where
    dropEq (x,'=':ys) = (x,ys)
    dropEq (x,_)      = error $ "getEnvironment: insane variable " ++ x
+
+-- |'setEnvironment' resets the entire environment to the given list of
+-- @(key,value)@ pairs.
+
+setEnvironment :: [(String,String)] -> IO ()
+setEnvironment env = do
+  clearEnv
+  forM_ env $ \(key,value) ->
+    setEnv key value True {-overwrite-}
 
 -- |The 'unsetEnv' function deletes all instances of the variable name
 -- from the environment.
@@ -140,7 +156,7 @@ setEnv key value ovrwrt = do
   withFilePath key $ \ keyP ->
     withFilePath value $ \ valueP ->
       throwErrnoIfMinus1_ "setenv" $
-	c_setenv keyP valueP (fromIntegral (fromEnum ovrwrt))
+        c_setenv keyP valueP (fromIntegral (fromEnum ovrwrt))
 
 foreign import ccall unsafe "setenv"
    c_setenv :: CString -> CString -> CInt -> IO CInt
@@ -151,4 +167,19 @@ setEnv key value False = do
   case res of
     Just _  -> return ()
     Nothing -> putEnv (key++"="++value)
+#endif
+
+-- |The 'clearEnv' function clears the environment of all name-value pairs.
+clearEnv :: IO ()
+#if HAVE_CLEARENV
+clearEnv = void c_clearenv
+
+foreign import ccall unsafe "clearenv"
+  c_clearenv :: IO Int
+#else
+-- Fallback to 'environ[0] = NULL'.
+clearEnv = do
+  c_environ <- getCEnviron
+  unless (c_environ == nullPtr) $
+    poke c_environ nullPtr
 #endif

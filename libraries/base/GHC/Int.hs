@@ -1,5 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, BangPatterns, MagicHash,
+{-# LANGUAGE CPP, NoImplicitPrelude, BangPatterns, MagicHash, UnboxedTuples,
              StandaloneDeriving #-}
 {-# OPTIONS_HADDOCK hide #-}
 
@@ -50,7 +50,7 @@ import GHC.Float ()     -- for RealFrac methods
 -- Int8 is represented in the same way as Int. Operations may assume
 -- and must ensure that it holds only values from its logical range.
 
-data Int8 = I8# Int# deriving (Eq, Ord)
+data {-# CTYPE "HsInt8" #-} Int8 = I8# Int# deriving (Eq, Ord)
 -- ^ 8-bit signed integer type
 
 instance Show Int8 where
@@ -105,14 +105,18 @@ instance Integral Int8 where
         | y == 0                     = divZeroError
           -- Note [Order of tests]
         | y == (-1) && x == minBound = (overflowError, 0)
-        | otherwise                  = (I8# (narrow8Int# (x# `quotInt#` y#)),
-                                       I8# (narrow8Int# (x# `remInt#` y#)))
+        | otherwise                  = case x# `quotRemInt#` y# of
+                                       (# q, r #) ->
+                                           (I8# (narrow8Int# q),
+                                            I8# (narrow8Int# r))
     divMod  x@(I8# x#) y@(I8# y#)
         | y == 0                     = divZeroError
           -- Note [Order of tests]
         | y == (-1) && x == minBound = (overflowError, 0)
-        | otherwise                  = (I8# (narrow8Int# (x# `divInt#` y#)),
-                                       I8# (narrow8Int# (x# `modInt#` y#)))
+        | otherwise                  = case x# `divModInt#` y# of
+                                       (# d, m #) ->
+                                           (I8# (narrow8Int# d),
+                                            I8# (narrow8Int# m))
     toInteger (I8# x#)               = smallInteger x#
 
 instance Bounded Int8 where
@@ -129,6 +133,8 @@ instance Read Int8 where
 
 instance Bits Int8 where
     {-# INLINE shift #-}
+    {-# INLINE bit #-}
+    {-# INLINE testBit #-}
 
     (I8# x#) .&.   (I8# y#)   = I8# (word2Int# (int2Word# x# `and#` int2Word# y#))
     (I8# x#) .|.   (I8# y#)   = I8# (word2Int# (int2Word# x# `or#`  int2Word# y#))
@@ -149,10 +155,12 @@ instance Bits Int8 where
                                        (x'# `uncheckedShiftRL#` (8# -# i'#)))))
         where
         !x'# = narrow8Word# (int2Word# x#)
-        !i'# = word2Int# (int2Word# i# `and#` int2Word# 7#)
+        !i'# = word2Int# (int2Word# i# `and#` 7##)
     bitSize  _                = 8
     isSigned _                = True
     popCount (I8# x#)         = I# (word2Int# (popCnt8# (int2Word# x#)))
+    bit                       = bitDefault
+    testBit                   = testBitDefault
 
 {-# RULES
 "fromIntegral/Int8->Int8" fromIntegral = id :: Int8 -> Int8
@@ -197,7 +205,7 @@ instance Bits Int8 where
 -- Int16 is represented in the same way as Int. Operations may assume
 -- and must ensure that it holds only values from its logical range.
 
-data Int16 = I16# Int# deriving (Eq, Ord)
+data {-# CTYPE "HsInt16" #-} Int16 = I16# Int# deriving (Eq, Ord)
 -- ^ 16-bit signed integer type
 
 instance Show Int16 where
@@ -252,14 +260,18 @@ instance Integral Int16 where
         | y == 0                     = divZeroError
           -- Note [Order of tests]
         | y == (-1) && x == minBound = (overflowError, 0)
-        | otherwise                  = (I16# (narrow16Int# (x# `quotInt#` y#)),
-                                        I16# (narrow16Int# (x# `remInt#` y#)))
+        | otherwise                  = case x# `quotRemInt#` y# of
+                                       (# q, r #) ->
+                                           (I16# (narrow16Int# q),
+                                            I16# (narrow16Int# r))
     divMod  x@(I16# x#) y@(I16# y#)
         | y == 0                     = divZeroError
           -- Note [Order of tests]
         | y == (-1) && x == minBound = (overflowError, 0)
-        | otherwise                  = (I16# (narrow16Int# (x# `divInt#` y#)),
-                                        I16# (narrow16Int# (x# `modInt#` y#)))
+        | otherwise                  = case x# `divModInt#` y# of
+                                       (# d, m #) ->
+                                           (I16# (narrow16Int# d),
+                                            I16# (narrow16Int# m))
     toInteger (I16# x#)              = smallInteger x#
 
 instance Bounded Int16 where
@@ -276,6 +288,8 @@ instance Read Int16 where
 
 instance Bits Int16 where
     {-# INLINE shift #-}
+    {-# INLINE bit #-}
+    {-# INLINE testBit #-}
 
     (I16# x#) .&.   (I16# y#)  = I16# (word2Int# (int2Word# x# `and#` int2Word# y#))
     (I16# x#) .|.   (I16# y#)  = I16# (word2Int# (int2Word# x# `or#`  int2Word# y#))
@@ -296,11 +310,12 @@ instance Bits Int16 where
                                          (x'# `uncheckedShiftRL#` (16# -# i'#)))))
         where
         !x'# = narrow16Word# (int2Word# x#)
-        !i'# = word2Int# (int2Word# i# `and#` int2Word# 15#)
+        !i'# = word2Int# (int2Word# i# `and#` 15##)
     bitSize  _                 = 16
     isSigned _                 = True
     popCount (I16# x#)         = I# (word2Int# (popCnt16# (int2Word# x#)))
-
+    bit                        = bitDefault
+    testBit                    = testBitDefault
 
 {-# RULES
 "fromIntegral/Word8->Int16"  fromIntegral = \(W8# x#) -> I16# (word2Int# x#)
@@ -350,7 +365,7 @@ instance Bits Int16 where
 -- from its logical range.
 #endif
 
-data Int32 = I32# Int# deriving (Eq, Ord)
+data {-# CTYPE "HsInt32" #-} Int32 = I32# Int# deriving (Eq, Ord)
 -- ^ 32-bit signed integer type
 
 instance Show Int32 where
@@ -414,14 +429,18 @@ instance Integral Int32 where
         | y == 0                     = divZeroError
           -- Note [Order of tests]
         | y == (-1) && x == minBound = (overflowError, 0)
-        | otherwise                  = (I32# (narrow32Int# (x# `quotInt#` y#)),
-                                     I32# (narrow32Int# (x# `remInt#` y#)))
+        | otherwise                  = case x# `quotRemInt#` y# of
+                                       (# q, r #) ->
+                                           (I32# (narrow32Int# q),
+                                            I32# (narrow32Int# r))
     divMod  x@(I32# x#) y@(I32# y#)
         | y == 0                     = divZeroError
           -- Note [Order of tests]
         | y == (-1) && x == minBound = (overflowError, 0)
-        | otherwise                  = (I32# (narrow32Int# (x# `divInt#` y#)),
-                                     I32# (narrow32Int# (x# `modInt#` y#)))
+        | otherwise                  = case x# `divModInt#` y# of
+                                       (# d, m #) ->
+                                           (I32# (narrow32Int# d),
+                                            I32# (narrow32Int# m))
     toInteger (I32# x#)              = smallInteger x#
 
 instance Read Int32 where
@@ -429,6 +448,8 @@ instance Read Int32 where
 
 instance Bits Int32 where
     {-# INLINE shift #-}
+    {-# INLINE bit #-}
+    {-# INLINE testBit #-}
 
     (I32# x#) .&.   (I32# y#)  = I32# (word2Int# (int2Word# x# `and#` int2Word# y#))
     (I32# x#) .|.   (I32# y#)  = I32# (word2Int# (int2Word# x# `or#`  int2Word# y#))
@@ -450,10 +471,12 @@ instance Bits Int32 where
                                          (x'# `uncheckedShiftRL#` (32# -# i'#)))))
         where
         !x'# = narrow32Word# (int2Word# x#)
-        !i'# = word2Int# (int2Word# i# `and#` int2Word# 31#)
+        !i'# = word2Int# (int2Word# i# `and#` 31##)
     bitSize  _                 = 32
     isSigned _                 = True
     popCount (I32# x#)         = I# (word2Int# (popCnt32# (int2Word# x#)))
+    bit                        = bitDefault
+    testBit                    = testBitDefault
 
 {-# RULES
 "fromIntegral/Word8->Int32"  fromIntegral = \(W8# x#) -> I32# (word2Int# x#)
@@ -513,7 +536,7 @@ instance Ix Int32 where
 
 #if WORD_SIZE_IN_BITS < 64
 
-data Int64 = I64# Int64#
+data {-# CTYPE "HsInt64" #-} Int64 = I64# Int64#
 -- ^ 64-bit signed integer type
 
 instance Eq Int64 where
@@ -616,6 +639,8 @@ instance Read Int64 where
 
 instance Bits Int64 where
     {-# INLINE shift #-}
+    {-# INLINE bit #-}
+    {-# INLINE testBit #-}
 
     (I64# x#) .&.   (I64# y#)  = I64# (word64ToInt64# (int64ToWord64# x# `and64#` int64ToWord64# y#))
     (I64# x#) .|.   (I64# y#)  = I64# (word64ToInt64# (int64ToWord64# x# `or64#`  int64ToWord64# y#))
@@ -636,11 +661,13 @@ instance Bits Int64 where
                                 (x'# `uncheckedShiftRL64#` (64# -# i'#))))
         where
         !x'# = int64ToWord64# x#
-        !i'# = word2Int# (int2Word# i# `and#` int2Word# 63#)
+        !i'# = word2Int# (int2Word# i# `and#` 63##)
     bitSize  _                 = 64
     isSigned _                 = True
     popCount (I64# x#)         =
         I# (word2Int# (popCnt64# (int64ToWord64# x#)))
+    bit                        = bitDefault
+    testBit                    = testBitDefault
 
 -- give the 64-bit shift operations the same treatment as the 32-bit
 -- ones (see GHC.Base), namely we wrap them in tests to catch the
@@ -675,7 +702,7 @@ a `iShiftRA64#` b | b >=# 64# = if a `ltInt64#` (intToInt64# 0#)
 -- Operations may assume and must ensure that it holds only values
 -- from its logical range.
 
-data Int64 = I64# Int# deriving (Eq, Ord)
+data {-# CTYPE "HsInt64" #-} Int64 = I64# Int# deriving (Eq, Ord)
 -- ^ 64-bit signed integer type
 
 instance Show Int64 where
@@ -732,12 +759,16 @@ instance Integral Int64 where
         | y == 0                     = divZeroError
           -- Note [Order of tests]
         | y == (-1) && x == minBound = (overflowError, 0)
-        | otherwise                  = (I64# (x# `quotInt#` y#), I64# (x# `remInt#` y#))
+        | otherwise                  = case x# `quotRemInt#` y# of
+                                       (# q, r #) ->
+                                           (I64# q, I64# r)
     divMod  x@(I64# x#) y@(I64# y#)
         | y == 0                     = divZeroError
           -- Note [Order of tests]
         | y == (-1) && x == minBound = (overflowError, 0)
-        | otherwise                  = (I64# (x# `divInt#` y#), I64# (x# `modInt#` y#))
+        | otherwise                  = case x# `divModInt#` y# of
+                                       (# d, m #) ->
+                                           (I64# d, I64# m)
     toInteger (I64# x#)              = smallInteger x#
 
 instance Read Int64 where
@@ -745,6 +776,8 @@ instance Read Int64 where
 
 instance Bits Int64 where
     {-# INLINE shift #-}
+    {-# INLINE bit #-}
+    {-# INLINE testBit #-}
 
     (I64# x#) .&.   (I64# y#)  = I64# (word2Int# (int2Word# x# `and#` int2Word# y#))
     (I64# x#) .|.   (I64# y#)  = I64# (word2Int# (int2Word# x# `or#`  int2Word# y#))
@@ -765,10 +798,12 @@ instance Bits Int64 where
                            (x'# `uncheckedShiftRL#` (64# -# i'#))))
         where
         !x'# = int2Word# x#
-        !i'# = word2Int# (int2Word# i# `and#` int2Word# 63#)
+        !i'# = word2Int# (int2Word# i# `and#` 63##)
     bitSize  _                 = 64
     isSigned _                 = True
     popCount (I64# x#)         = I# (word2Int# (popCnt64# (int2Word# x#)))
+    bit                        = bitDefault
+    testBit                    = testBitDefault
 
 {-# RULES
 "fromIntegral/a->Int64" fromIntegral = \x -> case fromIntegral x of I# x# -> I64# x#

@@ -22,6 +22,15 @@ ghc_stage2_CONFIGURE_OPTS += --flags=ghci
 ghc_stage3_CONFIGURE_OPTS += --flags=ghci
 endif
 
+ifeq "$(compiler_stage1_VERSION_MUNGED)" "YES"
+# If we munge the stage1 version, and we're using a devel snapshot for
+# stage0, then stage1 may actually have an earlier version than stage0
+# (e.g. boot with ghc-7.5.20120316, building ghc-7.5). We therefore
+# need to tell Cabal to use version 7.5 of the ghc package when building
+# in ghc/stage1
+ghc_stage1_CONFIGURE_OPTS += --constraint "ghc == $(compiler_stage1_MUNGED_VERSION)"
+endif
+
 ghc_stage1_MORE_HC_OPTS = $(GhcStage1HcOpts)
 ghc_stage2_MORE_HC_OPTS = $(GhcStage2HcOpts)
 ghc_stage3_MORE_HC_OPTS = $(GhcStage3HcOpts)
@@ -86,6 +95,10 @@ endif
 ifneq "$(filter-out 2,$(stage))" ""
 ghc_stage2_NOT_NEEDED = YES
 endif
+# When cross-compiling, the stage 1 compiler is our release compiler, so omit stage 2
+ifeq "$(BuildingCrossCompiler)" "YES"
+ghc_stage2_NOT_NEEDED = YES
+endif
 # stage 3 has to be requested explicitly with stage=3
 ifneq "$(stage)" "3"
 ghc_stage3_NOT_NEEDED = YES
@@ -144,10 +157,10 @@ INSTALL_LIBS += settings
 
 ifeq "$(Windows)" "NO"
 install: install_ghc_link
-.PNONY: install_ghc_link
+.PHONY: install_ghc_link
 install_ghc_link: 
 	$(call removeFiles,"$(DESTDIR)$(bindir)/ghc")
-	$(LN_S) ghc-$(ProjectVersion) "$(DESTDIR)$(bindir)/ghc"
+	$(LN_S) $(CrossCompilePrefix)ghc-$(ProjectVersion) "$(DESTDIR)$(bindir)/$(CrossCompilePrefix)ghc"
 else
 # On Windows we install the main binary as $(bindir)/ghc.exe
 # To get ghc-<version>.exe we have a little C program in driver/ghc
@@ -155,6 +168,6 @@ install: install_ghc_post
 .PHONY: install_ghc_post
 install_ghc_post: install_bins
 	$(call removeFiles,$(DESTDIR)$(bindir)/ghc.exe)
-	"$(MV)" -f $(DESTDIR)$(bindir)/ghc-stage$(INSTALL_GHC_STAGE).exe $(DESTDIR)$(bindir)/ghc.exe
+	"$(MV)" -f $(DESTDIR)$(bindir)/ghc-stage$(INSTALL_GHC_STAGE).exe $(DESTDIR)$(bindir)/$(CrossCompilePrefix)ghc.exe
 endif
 

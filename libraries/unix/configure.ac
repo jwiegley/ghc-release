@@ -28,11 +28,30 @@ AC_CHECK_HEADERS([termios.h time.h unistd.h utime.h])
 
 AC_CHECK_FUNCS([getgrgid_r getgrnam_r getpwnam_r getpwuid_r getpwnam getpwuid])
 AC_CHECK_FUNCS([getpwent getgrent])
-AC_CHECK_FUNCS([lchown setenv sysconf unsetenv])
+AC_CHECK_FUNCS([lchown setenv sysconf unsetenv clearenv])
 AC_CHECK_FUNCS([nanosleep])
 AC_CHECK_FUNCS([ptsname])
 AC_CHECK_FUNCS([setitimer])
 AC_CHECK_FUNCS([readdir_r])
+
+AC_CHECK_MEMBERS([struct stat.st_atim])
+AC_CHECK_MEMBERS([struct stat.st_mtim])
+AC_CHECK_MEMBERS([struct stat.st_ctim])
+AC_CHECK_MEMBERS([struct stat.st_atimespec])
+AC_CHECK_MEMBERS([struct stat.st_mtimespec])
+AC_CHECK_MEMBERS([struct stat.st_ctimespec])
+AC_CHECK_MEMBERS([struct stat.st_atimensec])
+AC_CHECK_MEMBERS([struct stat.st_mtimensec])
+AC_CHECK_MEMBERS([struct stat.st_ctimensec])
+AC_CHECK_MEMBERS([struct stat.st_atime_n])
+AC_CHECK_MEMBERS([struct stat.st_mtime_n])
+AC_CHECK_MEMBERS([struct stat.st_ctime_n])
+AC_CHECK_MEMBERS([struct stat.st_uatime])
+AC_CHECK_MEMBERS([struct stat.st_umtime])
+AC_CHECK_MEMBERS([struct stat.st_uctime])
+
+# Additional temp functions
+AC_CHECK_FUNCS([mkstemps mkdtemp])
 
 # Avoid adding rt if absent or unneeded
 AC_CHECK_LIB(rt, shm_open, [EXTRA_LIBS="$EXTRA_LIBS rt" CFLAGS="$CFLAGS -lrt"])

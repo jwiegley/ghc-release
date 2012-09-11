@@ -70,7 +70,7 @@ $(call package-config,$1,$2,$3)
 ifeq "$3" "0"
 $1_$2_WAYS = v
 else
-$1_$2_WAYS = $$(GhcLibWays)
+$1_$2_WAYS = $$(filter-out $$($1_$2_EXCLUDED_WAYS),$$(GhcLibWays))
 endif
 
 # We must use a different dependency file if $(GhcLibWays) changes, so
@@ -133,7 +133,7 @@ CHECKED_$1 = YES
 check_packages: check_$1
 .PHONY: check_$1
 check_$1: $$(GHC_CABAL_INPLACE)
-	$$(GHC_CABAL_INPLACE) check $1
+	CROSS_COMPILE="$(CrossCompilePrefix)" $$(GHC_CABAL_INPLACE) check $1
 endif
 
 ifneq "$3" "0"

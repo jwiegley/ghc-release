@@ -61,6 +61,7 @@ module Distribution.Simple.Configure (configure,
                                       ccLdOptionsBuildInfo,
                                       tryGetConfigStateFile,
                                       checkForeignDeps,
+                                      interpretPackageDbFlags,
                                      )
     where
 
@@ -111,7 +112,7 @@ import Distribution.Simple.Utils
     , withFileContents, writeFileAtomic
     , withTempFile )
 import Distribution.System
-    ( OS(..), buildOS, buildPlatform )
+    ( OS(..), buildOS, Arch(..), buildArch, buildPlatform )
 import Distribution.Version
          ( Version(..), anyVersion, orLaterVersion, withinRange, isAnyVersion )
 import Distribution.Verbosity
@@ -149,8 +150,6 @@ import Distribution.Text
 import Text.PrettyPrint
     ( comma, punctuate, render, nest, sep )
 import Distribution.Compat.Exception ( catchExit, catchIO )
-
-import Prelude hiding (catch)
 
 tryGetConfigStateFile :: (Read a) => FilePath -> IO (Either String a)
 tryGetConfigStateFile filename = do
@@ -279,8 +278,8 @@ configure (pkg_descr0, pbi) cfg
                            . userSpecifyPaths (configProgramPaths cfg)
                            $ configPrograms cfg
             userInstall = fromFlag (configUserInstall cfg)
-            packageDbs = implicitPackageDbStack userInstall
-                           (flagToMaybe $ configPackageDB cfg)
+            packageDbs  = interpretPackageDbFlags userInstall
+                            (configPackageDBs cfg)
 
         -- detect compiler
         (comp, programsConfig') <- configCompiler
@@ -683,6 +682,11 @@ getInstalledPackages :: Verbosity -> Compiler
                      -> PackageDBStack -> ProgramConfiguration
                      -> IO PackageIndex
 getInstalledPackages verbosity comp packageDBs progconf = do
+  when (null packageDBs) $
+    die $ "No package databases have been specified. If you use "
+       ++ "--package-db=clear, you must follow it with --package-db= "
+       ++ "with 'global', 'user' or a specific file."
+
   info verbosity "Reading installed packages..."
   case compilerFlavor comp of
     GHC -> GHC.getInstalledPackages verbosity packageDBs progconf
@@ -694,19 +698,21 @@ getInstalledPackages verbosity comp packageDBs progconf = do
     flv -> die $ "don't know how to find the installed packages for "
               ++ display flv
 
--- | Currently the user interface specifies the package dbs to use with just a
--- single valued option, a 'PackageDB'. However internally we represent the
--- stack of 'PackageDB's explictly as a list. This function converts encodes
--- the package db stack implicit in a single packagedb.
+-- | The user interface specifies the package dbs to use with a combination of
+-- @--global@, @--user@ and @--package-db=global|user|clear|$file@.
+-- This function combines the global/user flag and interprets the package-db
+-- flag into a single package db stack.
 --
-implicitPackageDbStack :: Bool -> Maybe PackageDB -> PackageDBStack
-implicitPackageDbStack userInstall maybePackageDB
-  | userInstall = GlobalPackageDB : UserPackageDB : extra
-  | otherwise   = GlobalPackageDB : extra
+interpretPackageDbFlags :: Bool -> [Maybe PackageDB] -> PackageDBStack
+interpretPackageDbFlags userInstall specificDBs =
+    extra initialStack specificDBs
   where
-    extra = case maybePackageDB of
-      Just (SpecificPackageDB db) -> [SpecificPackageDB db]
-      _                           -> []
+    initialStack | userInstall = [GlobalPackageDB, UserPackageDB]
+                 | otherwise   = [GlobalPackageDB]
+
+    extra dbs' []            = dbs'
+    extra _    (Nothing:dbs) = extra []             dbs
+    extra dbs' (Just db:dbs) = extra (dbs' ++ [db]) dbs
 
 newPackageDepsBehaviourMinVersion :: Version
 newPackageDepsBehaviourMinVersion = Version { versionBranch = [1,7,1], versionTags = [] }
@@ -1003,7 +1009,40 @@ checkForeignDeps pkg lbi verbosity = do
         hcDefines :: Compiler -> [String]
         hcDefines comp =
           case compilerFlavor comp of
-            GHC  -> ["-D__GLASGOW_HASKELL__=" ++ versionInt version]
+            GHC  ->
+                let ghcOS = case buildOS of
+                            Linux     -> ["linux"]
+                            Windows   -> ["mingw32"]
+                            OSX       -> ["darwin"]
+                            FreeBSD   -> ["freebsd"]
+                            OpenBSD   -> ["openbsd"]
+                            NetBSD    -> ["netbsd"]
+                            Solaris   -> ["solaris2"]
+                            AIX       -> ["aix"]
+                            HPUX      -> ["hpux"]
+                            IRIX      -> ["irix"]
+                            HaLVM     -> []
+                            OtherOS _ -> []
+                    ghcArch = case buildArch of
+                              I386        -> ["i386"]
+                              X86_64      -> ["x86_64"]
+                              PPC         -> ["powerpc"]
+                              PPC64       -> ["powerpc64"]
+                              Sparc       -> ["sparc"]
+                              Arm         -> ["arm"]
+                              Mips        -> ["mips"]
+                              SH          -> []
+                              IA64        -> ["ia64"]
+                              S390        -> ["s390"]
+                              Alpha       -> ["alpha"]
+                              Hppa        -> ["hppa"]
+                              Rs6000      -> ["rs6000"]
+                              M68k        -> ["m68k"]
+                              Vax         -> ["vax"]
+                              OtherArch _ -> []
+                in ["-D__GLASGOW_HASKELL__=" ++ versionInt version] ++
+                   map (\os   -> "-D" ++ os   ++ "_HOST_OS=1")   ghcOS ++
+                   map (\arch -> "-D" ++ arch ++ "_HOST_ARCH=1") ghcArch
             JHC  -> ["-D__JHC__=" ++ versionInt version]
             NHC  -> ["-D__NHC__=" ++ versionInt version]
             Hugs -> ["-D__HUGS__"]

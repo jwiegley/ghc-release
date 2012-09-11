@@ -38,7 +38,8 @@ module TcRnTypes(
 	WhereFrom(..), mkModDeps,
 
 	-- Typechecker types
-	TcTypeEnv, TcTyThing(..), pprTcTyThingCategory, 
+	TcTypeEnv, TcTyThing(..), PromotionErr(..), 
+        pprTcTyThingCategory, pprPECategory,
 
 	-- Template Haskell
 	ThStage(..), topStage, topAnnStage, topSpliceStage,
@@ -51,32 +52,33 @@ module TcRnTypes(
         Untouchables(..), inTouchableRange, isNoUntouchables,
 
        -- Canonical constraints
-        Xi, Ct(..), Cts, emptyCts, andCts, andManyCts, 
-        singleCt, extendCts, isEmptyCts, isCTyEqCan, 
-        isCDictCan_Maybe, isCIPCan_Maybe, isCFunEqCan_Maybe,
-        isCIrredEvCan, isCNonCanonical,
-        SubGoalDepth, ctPred,
+        Xi, Ct(..), Cts, emptyCts, andCts, andManyCts, keepWanted,
+        singleCt, extendCts, isEmptyCts, isCTyEqCan, isCFunEqCan,
+        isCDictCan_Maybe, isCFunEqCan_Maybe,
+        isCIrredEvCan, isCNonCanonical, isWantedCt, isDerivedCt, 
+        isGivenCt, 
+        ctWantedLoc, ctEvidence,
+        SubGoalDepth, mkNonCanonical, ctPred, ctEvPred, ctEvTerm, ctEvId,
 
         WantedConstraints(..), insolubleWC, emptyWC, isEmptyWC,
         andWC, addFlats, addImplics, mkFlatWC,
 
-        EvVarX(..), mkEvVarX, evVarOf, evVarX, evVarOfPred,
-        WantedEvVar,
-
         Implication(..),
         CtLoc(..), ctLocSpan, ctLocOrigin, setCtLocOrigin,
 	CtOrigin(..), EqOrigin(..), 
-        WantedLoc, GivenLoc, GivenKind(..), pushErrCtxt,
+        WantedLoc, GivenLoc, pushErrCtxt, 
+        pushErrCtxtSameOrigin,
 
 	SkolemInfo(..),
 
-        CtFlavor(..), pprFlavorArising, isWanted, 
-        isGivenOrSolved, isGiven_maybe, isSolved,
-        isDerived,
+        CtEvidence(..), pprFlavorArising,
+        mkGivenLoc,
+        isWanted, isGiven,
+        isDerived, getWantedLoc, getGivenLoc, canSolve, canRewrite,
 
 	-- Pretty printing
-        pprEvVarTheta, pprWantedEvVar, pprWantedsWithLocs,
-	pprEvVars, pprEvVarWithType, pprWantedEvVarWithLoc,
+        pprEvVarTheta, pprWantedsWithLocs,
+	pprEvVars, pprEvVarWithType, 
         pprArising, pprArisingAt,
 
 	-- Misc other types
@@ -88,7 +90,7 @@ module TcRnTypes(
 
 import HsSyn
 import HscTypes
-import TcEvidence( EvBind, EvBindsVar, EvTerm )
+import TcEvidence
 import Type
 import Class    ( Class )
 import TyCon    ( TyCon )
@@ -114,9 +116,11 @@ import UniqSupply
 import Unique
 import BasicTypes
 import Bag
+import DynFlags
 import Outputable
 import ListSetOps
 import FastString
+import Util
 
 import Data.Set (Set)
 
@@ -185,6 +189,9 @@ data Env gbl lcl
         env_lcl  :: lcl      -- Nested stuff; changes as we go into 
     }
 
+instance ContainsDynFlags (Env gbl lcl) where
+    extractDynFlags env = hsc_dflags (env_top env)
+
 -- TcGblEnv describes the top-level of the module at the 
 -- point at which the typechecker is finished work.
 -- It is this structure that is handed on to the desugarer
@@ -219,8 +226,8 @@ data TcGblEnv
 		-- Updated at intervals (e.g. after dealing with types and classes)
 	
 	tcg_inst_env     :: InstEnv,
-          -- ^ Instance envt for /home-package/ modules; Includes the dfuns in
-	  -- tcg_insts
+          -- ^ Instance envt for all /home-package/ modules; 
+          -- Includes the dfuns in tcg_insts
 	tcg_fam_inst_env :: FamInstEnv,	-- ^ Ditto for family instances
 
 		-- Now a bunch of things about this module that are simply 
@@ -304,7 +311,7 @@ data TcGblEnv
 	tcg_warns     :: Warnings,	    -- ...Warnings and deprecations
 	tcg_anns      :: [Annotation],      -- ...Annotations
         tcg_tcs       :: [TyCon],           -- ...TyCons and Classes
-	tcg_insts     :: [Instance],	    -- ...Instances
+	tcg_insts     :: [ClsInst],	    -- ...Instances
         tcg_fam_insts :: [FamInst],         -- ...Family instances
         tcg_rules     :: [LRuleDecl Id],    -- ...Rules
         tcg_fords     :: [LForeignDecl Id], -- ...Foreign import & exports
@@ -317,8 +324,9 @@ data TcGblEnv
         tcg_main      :: Maybe Name,         -- ^ The Name of the main
                                              -- function, if this module is
                                              -- the main module.
-        tcg_safeInfer :: TcRef Bool          -- Has the typechecker infered this
-                                             -- module as -XSafe (Safe Haskell)
+        tcg_safeInfer :: TcRef Bool          -- Has the typechecker
+                                             -- inferred this module
+                                             -- as -XSafe (Safe Haskell)
     }
 
 data RecFieldEnv 
@@ -423,6 +431,9 @@ data TcLclEnv		-- Changes as we move inside an expression
 
 	tcl_env  :: TcTypeEnv,    -- The local type environment: Ids and
 			          -- TyVars defined in this module
+
+        tcl_tidy :: TidyEnv,      -- Used for tidying types; contains all
+                                  -- in-scope type variables (but not term variables)
 					
 	tcl_tyvars :: TcRef TcTyVarSet,	-- The "global tyvars"
 			-- Namely, the in-scope TyVars bound in tcl_env, 
@@ -560,8 +571,8 @@ data TcTyThing
 	tct_closed :: TopLevelFlag,   -- See Note [Bindings with closed types]
 	tct_level  :: ThLevel }
 
-  | ATyVar  Name TcType		-- The type to which the lexically scoped type vaiable
-				-- is currently refined. We only need the Name
+  | ATyVar  Name TcTyVar	-- The type variable to which the lexically scoped type 
+				-- variable is bound. We only need the Name
 				-- for error-message purposes; it is the corresponding
 				-- Name in the domain of the envt
 
@@ -570,27 +581,18 @@ data TcTyThing
                      -- Can be a mono-kind or a poly-kind; in TcTyClsDcls see
                      -- Note [Type checking recursive type and class declarations]
 
-  | ANothing                    -- see Note [ANothing]
+  | APromotionErr PromotionErr 
 
-{-
-Note [ANothing]
-~~~~~~~~~~~~~~~
+data PromotionErr 
+  = TyConPE          -- TyCon used in a kind before we are ready
+                     --     data T :: T -> * where ...
+  | ClassPE          -- Ditto Class
 
-We don't want to allow promotion in a strongly connected component
-when kind checking.
+  | FamDataConPE     -- Data constructor for a data family
+                     -- See Note [AFamDataCon: not promoting data family constructors] in TcRnDriver
 
-Consider:
-  data T f = K (f (K Any))
-
-When kind checking the `data T' declaration the local env contains the
-mappings:
-  T -> AThing <some initial kind>
-  K -> ANothing
-
-ANothing is only used for DataCons, and only used during type checking
-in tcTyClGroup.
--}
-
+  | RecDataConPE     -- Data constructor in a reuursive loop
+                     -- See Note [ARecDataCon: recusion and promoting data constructors] in TcTyClsDecls
 
 instance Outputable TcTyThing where	-- Debugging only
    ppr (AGlobal g)      = pprTyThing g
@@ -601,15 +603,28 @@ instance Outputable TcTyThing where	-- Debugging only
 				 <+> ppr (tct_level elt))
    ppr (ATyVar tv _)    = text "Type variable" <+> quotes (ppr tv)
    ppr (AThing k)       = text "AThing" <+> ppr k
-   ppr ANothing         = text "ANothing"
+   ppr (APromotionErr err) = text "APromotionErr" <+> ppr err
+
+instance Outputable PromotionErr where
+  ppr ClassPE      = text "ClassPE"
+  ppr TyConPE      = text "TyConPE"
+  ppr FamDataConPE = text "FamDataConPE"
+  ppr RecDataConPE = text "RecDataConPE"
 
 pprTcTyThingCategory :: TcTyThing -> SDoc
-pprTcTyThingCategory (AGlobal thing) = pprTyThingCategory thing
-pprTcTyThingCategory (ATyVar {})     = ptext (sLit "Type variable")
-pprTcTyThingCategory (ATcId {})      = ptext (sLit "Local identifier")
-pprTcTyThingCategory (AThing {})     = ptext (sLit "Kinded thing")
-pprTcTyThingCategory ANothing        = ptext (sLit "Opaque thing")
+pprTcTyThingCategory (AGlobal thing)    = pprTyThingCategory thing
+pprTcTyThingCategory (ATyVar {})        = ptext (sLit "Type variable")
+pprTcTyThingCategory (ATcId {})         = ptext (sLit "Local identifier")
+pprTcTyThingCategory (AThing {})        = ptext (sLit "Kinded thing")
+pprTcTyThingCategory (APromotionErr pe) = pprPECategory pe
+
+pprPECategory :: PromotionErr -> SDoc
+pprPECategory ClassPE      = ptext (sLit "Class")
+pprPECategory TyConPE      = ptext (sLit "Type constructor")
+pprPECategory FamDataConPE = ptext (sLit "Data constructor")
+pprPECategory RecDataConPE = ptext (sLit "Data constructor")
 \end{code}
+
 
 Note [Bindings with closed types]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -650,7 +665,7 @@ Note that:
 
 
 \begin{code}
-type ErrCtxt = (Bool, TidyEnv -> TcM (TidyEnv, Message))
+type ErrCtxt = (Bool, TidyEnv -> TcM (TidyEnv, MsgDoc))
 	-- Monadic so that we have a chance
 	-- to deal with bound type variables just before error
 	-- message construction
@@ -823,10 +838,15 @@ instance Outputable WhereFrom where
 
 
 \begin{code}
--- Types without any type functions inside.  However, note that xi
--- types CAN contain unexpanded type synonyms; however, the
--- (transitive) expansions of those type synonyms will not contain any
--- type functions.
+-- The syntax of xi types:
+-- xi ::= a | T xis | xis -> xis | ... | forall a. tau
+-- Two important notes:
+--      (i) No type families, unless we are under a ForAll
+--      (ii) Note that xi types can contain unexpanded type synonyms; 
+--           however, the (transitive) expansions of those type synonyms 
+--           will not contain any type functions, unless we are under a ForAll.
+-- We enforce the structure of Xi types when we flatten (TcCanonical)
+
 type Xi = Type       -- In many comments, "xi" ranges over Xi
 
 type Cts = Bag Ct
@@ -837,30 +857,19 @@ type SubGoalDepth = Int -- An ever increasing number used to restrict
 data Ct
   -- Atomic canonical constraints 
   = CDictCan {  -- e.g.  Num xi
-      cc_id     :: EvVar,
-      cc_flavor :: CtFlavor, 
-      cc_class  :: Class, 
+      cc_ev :: CtEvidence,   -- See Note [Ct/evidence invariant]
+      cc_class  :: Class,   
       cc_tyargs :: [Xi],
 
       cc_depth  :: SubGoalDepth -- Simplification depth of this constraint
                        -- See Note [WorkList]
     }
 
-  | CIPCan {	-- ?x::tau
-      -- See note [Canonical implicit parameter constraints].
-      cc_id     :: EvVar,
-      cc_flavor :: CtFlavor,
-      cc_ip_nm  :: IPName Name,
-      cc_ip_ty  :: TcTauType, -- Not a Xi! See same not as above
-      cc_depth  :: SubGoalDepth        -- See Note [WorkList]
-    }
-
   | CIrredEvCan {  -- These stand for yet-unknown predicates
-      cc_id     :: EvVar,
-      cc_flavor :: CtFlavor,
+      cc_ev :: CtEvidence,   -- See Note [Ct/evidence invariant]
       cc_ty     :: Xi, -- cc_ty is flat hence it may only be of the form (tv xi1 xi2 ... xin)
                        -- Since, if it were a type constructor application, that'd make the
-                       -- whole constraint a CDictCan, CIPCan, or CTyEqCan. And it can't be
+                       -- whole constraint a CDictCan, or CTyEqCan. And it can't be
                        -- a type family application either because it's a Xi type.
       cc_depth :: SubGoalDepth -- See Note [WorkList]
     }
@@ -871,8 +880,7 @@ data Ct
        --   * typeKind xi `compatKind` typeKind tv
        --       See Note [Spontaneous solving and kind compatibility]
        --   * We prefer unification variables on the left *JUST* for efficiency
-      cc_id     :: EvVar, 
-      cc_flavor :: CtFlavor, 
+      cc_ev :: CtEvidence,    -- See Note [Ct/evidence invariant]
       cc_tyvar  :: TcTyVar, 
       cc_rhs    :: Xi,
 
@@ -882,8 +890,7 @@ data Ct
   | CFunEqCan {  -- F xis ~ xi  
                  -- Invariant: * isSynFamilyTyCon cc_fun 
                  --            * typeKind (F xis) `compatKind` typeKind xi
-      cc_id     :: EvVar,
-      cc_flavor :: CtFlavor, 
+      cc_ev :: CtEvidence,      -- See Note [Ct/evidence invariant]
       cc_fun    :: TyCon,	-- A type function
       cc_tyargs :: [Xi],	-- Either under-saturated or exactly saturated
       cc_rhs    :: Xi,      	--    *never* over-saturated (because if so
@@ -894,41 +901,95 @@ data Ct
     }
 
   | CNonCanonical { -- See Note [NonCanonical Semantics] 
-      cc_id     :: EvVar,
-      cc_flavor :: CtFlavor, 
+      cc_ev :: CtEvidence, 
       cc_depth  :: SubGoalDepth
     }
-
 \end{code}
+
+Note [Ct/evidence invariant]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If  ct :: Ct, then extra fields of 'ct' cache precisely the ctev_pred field
+of (cc_ev ct).   Eg for CDictCan, 
+   ctev_pred (cc_ev ct) = (cc_class ct) (cc_tyargs ct)
+This holds by construction; look at the unique place where CDictCan is
+built (in TcCanonical)
 
 \begin{code}
+mkNonCanonical :: CtEvidence -> Ct
+mkNonCanonical flav = CNonCanonical { cc_ev = flav, cc_depth = 0}
+
+ctEvidence :: Ct -> CtEvidence
+ctEvidence = cc_ev
 
 ctPred :: Ct -> PredType 
-ctPred (CNonCanonical { cc_id = v }) = evVarPred v
-ctPred (CDictCan { cc_class = cls, cc_tyargs = xis }) 
-  = mkClassPred cls xis
-ctPred (CTyEqCan { cc_tyvar = tv, cc_rhs = xi }) 
-  = mkEqPred (mkTyVarTy tv, xi)
-ctPred (CFunEqCan { cc_fun = fn, cc_tyargs = xis1, cc_rhs = xi2 }) 
-  = mkEqPred(mkTyConApp fn xis1, xi2)
-ctPred (CIPCan { cc_ip_nm = nm, cc_ip_ty = xi }) 
-  = mkIPPred nm xi
-ctPred (CIrredEvCan { cc_ty = xi }) = xi
+-- See Note [Ct/evidence invariant]
+ctPred ct = ctEvPred (cc_ev ct)
+
+keepWanted :: Cts -> Cts
+keepWanted = filterBag isWantedCt
+    -- DV: there used to be a note here that read: 
+    -- ``Important: use fold*r*Bag to preserve the order of the evidence variables'' 
+    -- DV: Is this still relevant? 
 \end{code}
 
+
+%************************************************************************
+%*									*
+                    CtEvidence
+         The "flavor" of a canonical constraint
+%*									*
+%************************************************************************
+
+\begin{code}
+ctWantedLoc :: Ct -> WantedLoc
+-- Only works for Wanted/Derived
+ctWantedLoc ct = ASSERT2( not (isGiven (cc_ev ct)), ppr ct )
+                 getWantedLoc (cc_ev ct)
+
+isWantedCt :: Ct -> Bool
+isWantedCt = isWanted . cc_ev 
+
+isGivenCt :: Ct -> Bool
+isGivenCt = isGiven . cc_ev
+
+isDerivedCt :: Ct -> Bool
+isDerivedCt = isDerived . cc_ev
+
+isCTyEqCan :: Ct -> Bool 
+isCTyEqCan (CTyEqCan {})  = True 
+isCTyEqCan (CFunEqCan {}) = False
+isCTyEqCan _              = False 
+
+isCDictCan_Maybe :: Ct -> Maybe Class
+isCDictCan_Maybe (CDictCan {cc_class = cls })  = Just cls
+isCDictCan_Maybe _              = Nothing
+
+isCIrredEvCan :: Ct -> Bool
+isCIrredEvCan (CIrredEvCan {}) = True
+isCIrredEvCan _                = False
+
+isCFunEqCan_Maybe :: Ct -> Maybe TyCon
+isCFunEqCan_Maybe (CFunEqCan { cc_fun = tc }) = Just tc
+isCFunEqCan_Maybe _ = Nothing
+
+isCFunEqCan :: Ct -> Bool
+isCFunEqCan (CFunEqCan {}) = True
+isCFunEqCan _ = False
+
+isCNonCanonical :: Ct -> Bool
+isCNonCanonical (CNonCanonical {}) = True 
+isCNonCanonical _ = False 
+\end{code}
 
 \begin{code}
 instance Outputable Ct where
-  ppr ct = ppr (cc_flavor ct) <> braces (ppr (cc_depth ct))
-                  <+> ppr ev_var <+> dcolon <+> ppr (ctPred ct)
-                  <+> parens (text ct_sort)
-         where ev_var  = cc_id ct
-               ct_sort = case ct of 
+  ppr ct = ppr (cc_ev ct) <+> 
+           braces (ppr (cc_depth ct)) <+> parens (text ct_sort)
+         where ct_sort = case ct of 
                            CTyEqCan {}      -> "CTyEqCan"
                            CFunEqCan {}     -> "CFunEqCan"
                            CNonCanonical {} -> "CNonCanonical"
                            CDictCan {}      -> "CDictCan"
-                           CIPCan {}        -> "CIPCan"
                            CIrredEvCan {}   -> "CIrredEvCan"
 \end{code}
 
@@ -950,31 +1011,6 @@ emptyCts = emptyBag
 
 isEmptyCts :: Cts -> Bool
 isEmptyCts = isEmptyBag
-
-isCTyEqCan :: Ct -> Bool 
-isCTyEqCan (CTyEqCan {})  = True 
-isCTyEqCan (CFunEqCan {}) = False
-isCTyEqCan _              = False 
-
-isCDictCan_Maybe :: Ct -> Maybe Class
-isCDictCan_Maybe (CDictCan {cc_class = cls })  = Just cls
-isCDictCan_Maybe _              = Nothing
-
-isCIPCan_Maybe :: Ct -> Maybe (IPName Name)
-isCIPCan_Maybe  (CIPCan {cc_ip_nm = nm }) = Just nm
-isCIPCan_Maybe _                = Nothing
-
-isCIrredEvCan :: Ct -> Bool
-isCIrredEvCan (CIrredEvCan {}) = True
-isCIrredEvCan _                = False
-
-isCFunEqCan_Maybe :: Ct -> Maybe TyCon
-isCFunEqCan_Maybe (CFunEqCan { cc_fun = tc }) = Just tc
-isCFunEqCan_Maybe _ = Nothing
-
-isCNonCanonical :: Ct -> Bool
-isCNonCanonical (CNonCanonical {}) = True 
-isCNonCanonical _ = False 
 \end{code}
 
 %************************************************************************
@@ -991,7 +1027,7 @@ v%************************************************************************
 \begin{code}
 
 data WantedConstraints
-  = WC { wc_flat  :: Cts                -- Unsolved constraints, all wanted
+  = WC { wc_flat  :: Cts               -- Unsolved constraints, all wanted
        , wc_impl  :: Bag Implication
        , wc_insol :: Cts               -- Insoluble constraints, can be
                                        -- wanted, given, or derived
@@ -1021,12 +1057,9 @@ andWC (WC { wc_flat = f1, wc_impl = i1, wc_insol = n1 })
        , wc_impl  = i1 `unionBags` i2
        , wc_insol = n1 `unionBags` n2 }
 
-addFlats :: WantedConstraints -> Bag WantedEvVar -> WantedConstraints
-addFlats wc wevs 
+addFlats :: WantedConstraints -> Bag Ct -> WantedConstraints
+addFlats wc cts
   = wc { wc_flat = wc_flat wc `unionBags` cts }
-  where cts = mapBag mk_noncan wevs 
-        mk_noncan (EvVarX v wl) 
-          = CNonCanonical { cc_id = v, cc_flavor = Wanted wl, cc_depth = 0}
 
 addImplics :: WantedConstraints -> Bag Implication -> WantedConstraints
 addImplics wc implic = wc { wc_impl = wc_impl wc `unionBags` implic }
@@ -1095,7 +1128,7 @@ data Implication
 	  -- However, we don't zonk ic_env when zonking the Implication
 	  -- Instead we do that when generating a skolem-escape error message
 
-      ic_skols  :: TcTyVarSet,   -- Introduced skolems 
+      ic_skols  :: [TcTyVar],    -- Introduced skolems 
       		   	         -- See Note [Skolems in an implication]
 
       ic_given  :: [EvVar],      -- Given evidence variables
@@ -1160,38 +1193,17 @@ At the end, we will hopefully have substituted uf1 := F alpha, and we
 will be able to report a more informative error:
     'Can't construct the infinite type beta ~ F alpha beta'
 
+Insoluble constraints *do* include Derived constraints. For example,
+a functional dependency might give rise to [D] Int ~ Bool, and we must
+report that.  If insolubles did not contain Deriveds, reportErrors would
+never see it.
+
+
 %************************************************************************
 %*									*
-            EvVarX, WantedEvVar, FlavoredEvVar
+            Pretty printing
 %*									*
 %************************************************************************
-
-\begin{code}
-data EvVarX a = EvVarX EvVar a
-     -- An evidence variable with accompanying info
-
-type WantedEvVar   = EvVarX WantedLoc     -- The location where it arose
-
-
-instance Outputable (EvVarX a) where
-  ppr (EvVarX ev _) = pprEvVarWithType ev
-  -- If you want to see the associated info,
-  -- use a more specific printing function
-
-mkEvVarX :: EvVar -> a -> EvVarX a
-mkEvVarX = EvVarX
-
-evVarOf :: EvVarX a -> EvVar
-evVarOf (EvVarX ev _) = ev
-
-evVarX :: EvVarX a -> a
-evVarX (EvVarX _ a) = a
-
-evVarOfPred :: EvVarX a -> PredType
-evVarOfPred wev = evVarPred (evVarOf wev)
-
-\end{code}
-
 
 \begin{code}
 pprEvVars :: [EvVar] -> SDoc	-- Print with their types
@@ -1208,11 +1220,6 @@ pprWantedsWithLocs wcs
   =  vcat [ pprBag ppr (wc_flat wcs)
           , pprBag ppr (wc_impl wcs)
           , pprBag ppr (wc_insol wcs) ]
-
-pprWantedEvVarWithLoc, pprWantedEvVar :: WantedEvVar -> SDoc
-pprWantedEvVarWithLoc (EvVarX v loc) = hang (pprEvVarWithType v)
-                                          2 (pprArisingAt loc)
-pprWantedEvVar        (EvVarX v _)   = pprEvVarWithType v
 \end{code}
 
 %************************************************************************
@@ -1221,50 +1228,101 @@ pprWantedEvVar        (EvVarX v _)   = pprEvVarWithType v
 %*									*
 %************************************************************************
 
+Note [Evidence field of CtEvidence]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+During constraint solving we never look at the type of ctev_evtm, or
+ctev_evar; instead we look at the cte_pred field.  The evtm/evar field
+may be un-zonked.
+
 \begin{code}
-data CtFlavor
-  = Given GivenLoc GivenKind -- We have evidence for this constraint in TcEvBinds
-  | Derived WantedLoc        -- Derived's are just hints for unifications 
-  | Wanted WantedLoc         -- We have no evidence bindings for this constraint. 
+data CtEvidence 
+  = Given { ctev_gloc :: GivenLoc
+          , ctev_pred :: TcPredType
+          , ctev_evtm :: EvTerm }          -- See Note [Evidence field of CtEvidence]
+    -- Truly given, not depending on subgoals
+    -- NB: Spontaneous unifications belong here
+    
+  | Wanted { ctev_wloc :: WantedLoc
+           , ctev_pred :: TcPredType
+           , ctev_evar :: EvVar }          -- See Note [Evidence field of CtEvidence]
+    -- Wanted goal 
+    
+  | Derived { ctev_wloc :: WantedLoc 
+            , ctev_pred :: TcPredType }
+    -- A goal that we don't really have to solve and can't immediately 
+    -- rewrite anything other than a derived (there's no evidence!) 
+    -- but if we do manage to solve it may help in solving other goals.
 
-data GivenKind
-  = GivenOrig   -- Originates in some given, such as signature or pattern match
-  | GivenSolved (Maybe EvTerm) 
-                -- Is given as result of being solved, maybe provisionally on
-                -- some other wanted constraints. We cache the evidence term 
-                -- sometimes here as well /as well as/ in the EvBinds, 
-                -- see Note [Optimizing Spontaneously Solved Coercions]
+ctEvPred :: CtEvidence -> TcPredType
+-- The predicate of a flavor
+ctEvPred = ctev_pred
 
-instance Outputable CtFlavor where
-  ppr (Given _ GivenOrig)        = ptext (sLit "[G]")
-  ppr (Given _ (GivenSolved {})) = ptext (sLit "[S]") -- Print [S] for Given/Solved's
-  ppr (Wanted {})                = ptext (sLit "[W]")
-  ppr (Derived {})               = ptext (sLit "[D]")
+ctEvTerm :: CtEvidence -> EvTerm
+ctEvTerm (Given   { ctev_evtm = tm }) = tm
+ctEvTerm (Wanted  { ctev_evar = ev }) = EvId ev
+ctEvTerm ctev@(Derived {}) = pprPanic "ctEvTerm: derived constraint cannot have id" 
+                                      (ppr ctev)
 
-pprFlavorArising :: CtFlavor -> SDoc
-pprFlavorArising (Derived wl)   = pprArisingAt wl
-pprFlavorArising (Wanted  wl)   = pprArisingAt wl
-pprFlavorArising (Given gl _)   = pprArisingAt gl
+ctEvId :: CtEvidence -> TcId
+ctEvId (Wanted  { ctev_evar = ev }) = ev
+ctEvId ctev = pprPanic "ctEvId:" (ppr ctev)
 
-isWanted :: CtFlavor -> Bool
+instance Outputable CtEvidence where
+  ppr fl = case fl of
+             Given {}   -> ptext (sLit "[G]") <+> ppr (ctev_evtm fl) <+> ppr_pty
+             Wanted {}  -> ptext (sLit "[W]") <+> ppr (ctev_evar fl) <+> ppr_pty
+             Derived {} -> ptext (sLit "[D]") <+> text "_" <+> ppr_pty
+         where ppr_pty = dcolon <+> ppr (ctEvPred fl)
+
+getWantedLoc :: CtEvidence -> WantedLoc
+-- Precondition: Wanted or Derived
+getWantedLoc fl = ctev_wloc fl
+
+getGivenLoc :: CtEvidence -> GivenLoc 
+-- Precondition: Given
+getGivenLoc fl = ctev_gloc fl
+
+pprFlavorArising :: CtEvidence -> SDoc
+pprFlavorArising (Given { ctev_gloc = gl }) = pprArisingAt gl
+pprFlavorArising ctev                       = pprArisingAt (ctev_wloc ctev)
+
+
+isWanted :: CtEvidence -> Bool
 isWanted (Wanted {}) = True
-isWanted _           = False
+isWanted _ = False
 
-isGivenOrSolved :: CtFlavor -> Bool
-isGivenOrSolved (Given {}) = True
-isGivenOrSolved _ = False
+isGiven :: CtEvidence -> Bool
+isGiven (Given {})  = True
+isGiven _ = False
 
-isSolved :: CtFlavor -> Bool
-isSolved (Given _ (GivenSolved {})) = True
-isSolved _ = False
-
-isGiven_maybe :: CtFlavor -> Maybe GivenKind 
-isGiven_maybe (Given _ gk) = Just gk
-isGiven_maybe _            = Nothing
-
-isDerived :: CtFlavor -> Bool 
+isDerived :: CtEvidence -> Bool
 isDerived (Derived {}) = True
-isDerived _            = False
+isDerived _             = False
+
+canSolve :: CtEvidence -> CtEvidence -> Bool
+-- canSolve ctid1 ctid2 
+-- The constraint ctid1 can be used to solve ctid2 
+-- "to solve" means a reaction where the active parts of the two constraints match.
+--  active(F xis ~ xi) = F xis 
+--  active(tv ~ xi)    = tv 
+--  active(D xis)      = D xis 
+--  active(IP nm ty)   = nm 
+--
+-- NB:  either (a `canSolve` b) or (b `canSolve` a) must hold
+-----------------------------------------
+canSolve (Given {})   _            = True 
+canSolve (Wanted {})  (Derived {}) = True
+canSolve (Wanted {})  (Wanted {})  = True
+canSolve (Derived {}) (Derived {}) = True  -- Derived can't solve wanted/given
+canSolve _ _ = False  	       	     	   -- No evidence for a derived, anyway
+
+canRewrite :: CtEvidence -> CtEvidence -> Bool 
+-- canRewrite ct1 ct2 
+-- The equality constraint ct1 can be used to rewrite inside ct2 
+canRewrite = canSolve 
+
+mkGivenLoc :: WantedLoc -> SkolemInfo -> GivenLoc
+mkGivenLoc wl sk = setCtLocOrigin wl sk
 \end{code}
 
 %************************************************************************
@@ -1295,6 +1353,10 @@ setCtLocOrigin (CtLoc _ s c) o = CtLoc o s c
 
 pushErrCtxt :: orig -> ErrCtxt -> CtLoc orig -> CtLoc orig
 pushErrCtxt o err (CtLoc _ s errs) = CtLoc o s (err:errs)
+
+pushErrCtxtSameOrigin :: ErrCtxt -> CtLoc orig -> CtLoc orig
+-- Just add information w/o updating the origin!
+pushErrCtxtSameOrigin err (CtLoc o s errs) = CtLoc o s (err:errs)
 
 pprArising :: CtOrigin -> SDoc
 -- Used for the main, top-level error message
@@ -1338,7 +1400,7 @@ data SkolemInfo
 
   | ArrowSkol 	  	-- An arrow form (see TcArrows)
 
-  | IPSkol [IPName Name]  -- Binding site of an implicit parameter
+  | IPSkol [HsIPName]   -- Binding site of an implicit parameter
 
   | RuleSkol RuleName	-- The LHS of a RULE
 
@@ -1350,7 +1412,8 @@ data SkolemInfo
   | BracketSkol         -- Template Haskell bracket
 
   | UnifyForAllSkol     -- We are unifying two for-all types
-       TcType
+       [TcTyVar]        -- The instantiated skolem variables
+       TcType           -- The instantiated type *inside* the forall
 
   | UnkSkol             -- Unhelpful info (until I improve it)
 
@@ -1380,7 +1443,7 @@ pprSkolInfo (PatSkol dc mc)  = sep [ ptext (sLit "a pattern with constructor")
 pprSkolInfo (InferSkol ids) = sep [ ptext (sLit "the inferred type of")
                                   , vcat [ ppr name <+> dcolon <+> ppr ty
                                          | (name,ty) <- ids ]]
-pprSkolInfo (UnifyForAllSkol ty) = ptext (sLit "the type") <+> ppr ty
+pprSkolInfo (UnifyForAllSkol tvs ty) = ptext (sLit "the type") <+> ppr (mkForAllTys tvs ty)
 
 -- UnkSkol
 -- For type variables the others are dealt with by pprSkolTvBinding.  
@@ -1405,7 +1468,7 @@ data CtOrigin
 
   | TypeEqOrigin EqOrigin
 
-  | IPOccOrigin  (IPName Name)	-- Occurrence of an implicit parameter
+  | IPOccOrigin  HsIPName 	-- Occurrence of an implicit parameter
 
   | LiteralOrigin (HsOverLit Name)	-- Occurrence of a literal
   | NegateOrigin			-- Occurrence of syntactic negation

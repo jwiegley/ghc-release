@@ -38,7 +38,7 @@ import Distribution.Client.Utils
 import Data.Monoid
          ( Monoid(mempty) )
 import Data.Either
-         ( partitionEithers )         
+         ( partitionEithers )
 import qualified Data.Map as Map
 import Data.Map (Map)
 import qualified Data.Set as Set
@@ -71,8 +71,7 @@ import Control.Exception
 -- Adding a new target package can fail if that package already has conflicting
 -- constraints.
 --
-data (Package installed, Package source)
-  => Constraints installed source reason
+data Constraints installed source reason
    = Constraints
 
        -- | Targets that we know we need. This is the set for which we
@@ -118,7 +117,7 @@ instance Package pkg => Package (ExcludedPkg pkg reason) where
 invariant :: (Package installed, Package source)
           => Constraints installed source a -> Bool
 invariant (Constraints targets available excluded _ original) =
-    
+
     -- Relationship between available, excluded and original
     all check merged
 
@@ -203,7 +202,7 @@ transitionsTo constraints @(Constraints _ available  excluded  _ _)
       mergeBy (\a b -> packageId a `compare` packageId b)
         [ pkg | ExcludedPkg pkg _ _ _ <- PackageIndex.allPackages excluded  ]
         [ pkg | ExcludedPkg pkg _ _ _ <- PackageIndex.allPackages excluded' ]
-    
+
     lostAndGained mr rest = case mr of
       OnlyInLeft pkg                    -> Left pkg : rest
       InBoth (InstalledAndSource pkg _)
@@ -314,7 +313,7 @@ addTarget pkgname
     -- package is simply completely unknown.
   | otherwise
   = Unsatisfiable
-  
+
   where
     conflicts =
       [ (packageId pkg, reasons)
@@ -403,7 +402,7 @@ constrain pkgname constraint reason
 
     maybeCons Nothing  xs = xs
     maybeCons (Just x) xs = x:xs
-        
+
 
     -- For the info about an available or excluded version of the package in
     -- question, update the info given the current constraint.
@@ -425,14 +424,14 @@ constrain pkgname constraint reason
             Nothing
 
         AllAvailable (InstalledAndSource (aiPkg, False) (asPkg, False)) ->
-          removeAvailable False 
+          removeAvailable False
             (InstalledAndSource aiPkg asPkg)
             (PackageIndex.deletePackageId pkgid)
             (ExcludedPkg (InstalledAndSource aiPkg asPkg) [reason] [] [])
             Nothing
 
         AllAvailable (InstalledAndSource (aiPkg, True) (asPkg, False)) ->
-          removeAvailable True 
+          removeAvailable True
             (SourceOnly asPkg)
             (PackageIndex.insert (InstalledOnly aiPkg))
             (ExcludedPkg (SourceOnly asPkg) [] [] [reason])

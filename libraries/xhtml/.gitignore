@@ -1,1 +1,7 @@
 .project
+dist
+GNUmakefile
+dist-install/
+ghc.mk
+test.hs
+.hub

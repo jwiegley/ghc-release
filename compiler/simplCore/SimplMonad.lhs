@@ -15,7 +15,7 @@ module SimplMonad (
 	-- The monad
 	SimplM,
 	initSmpl,
-	getDOptsSmpl, getSimplRules, getFamEnvs,
+	getSimplRules, getFamEnvs,
 
         -- Unique supply
         MonadUnique(..), newId,
@@ -31,10 +31,11 @@ import Type             ( Type )
 import FamInstEnv	( FamInstEnv )
 import Rules		( RuleBase )
 import UniqSupply
-import DynFlags		( DynFlags( simplTickFactor ) )
+import DynFlags
 import CoreMonad
 import Outputable
 import FastString
+import MonadUtils
 \end{code}
 
 %************************************************************************
@@ -52,7 +53,8 @@ newtype SimplM result
 		-> UniqSupply	-- We thread the unique supply because
 				-- constantly splitting it is rather expensive
 		-> SimplCount 
-		-> (result, UniqSupply, SimplCount)}
+		-> IO (result, UniqSupply, SimplCount)}
+  -- we only need IO here for dump output
 
 data SimplTopEnv 
   = STE	{ st_flags :: DynFlags 
@@ -65,30 +67,18 @@ data SimplTopEnv
 \begin{code}
 initSmpl :: DynFlags -> RuleBase -> (FamInstEnv, FamInstEnv) 
 	 -> UniqSupply		-- No init count; set to 0
-	 -> Int			-- Size of the bindings
+	 -> Int			-- Size of the bindings, used to limit
+                                -- the number of ticks we allow
 	 -> SimplM a
-	 -> (a, SimplCount, Maybe SDoc)
+	 -> IO (a, SimplCount)
 
 initSmpl dflags rules fam_envs us size m
-  = case unSM m env us (zeroSimplCount dflags) of
-    (result, _, count) ->
-        let mWarning = if st_max_ticks env <= simplCountN count
-                       then Just (msg count)
-                       else Nothing
-        in (result, count, mWarning)
+  = do (result, _, count) <- unSM m env us (zeroSimplCount dflags)
+       return (result, count)
   where
     env = STE { st_flags = dflags, st_rules = rules
     	      , st_max_ticks = computeMaxTicks dflags size
               , st_fams = fam_envs }
-    msg sc = vcat [ ptext (sLit "Warning: Simplifier ticks exhausted.")
-                  , ptext (sLit "To increase the limit, use -fsimpl-tick-factor=N (default 100)")
-                  , ptext (sLit "If you need to do this, let GHC HQ know, and what factor you needed")
-                  , pp_details sc
-                  , pprSimplCount sc ]
-    pp_details sc
-      | hasDetailedCounts sc = empty
-      | otherwise = ptext (sLit "To see detailed counts use -ddump-simpl-stats")
-
 
 computeMaxTicks :: DynFlags -> Int -> Int
 -- Compute the max simplifier ticks as
@@ -119,20 +109,20 @@ instance Monad SimplM where
    return = returnSmpl
 
 returnSmpl :: a -> SimplM a
-returnSmpl e = SM (\_st_env us sc -> (e, us, sc))
+returnSmpl e = SM (\_st_env us sc -> return (e, us, sc))
 
 thenSmpl  :: SimplM a -> (a -> SimplM b) -> SimplM b
 thenSmpl_ :: SimplM a -> SimplM b -> SimplM b
 
-thenSmpl m k 
-  = SM (\ st_env us0 sc0 ->
-	  case (unSM m st_env us0 sc0) of 
-		(m_result, us1, sc1) -> unSM (k m_result) st_env us1 sc1 )
+thenSmpl m k
+  = SM $ \st_env us0 sc0 -> do
+      (m_result, us1, sc1) <- unSM m st_env us0 sc0
+      unSM (k m_result) st_env us1 sc1
 
-thenSmpl_ m k 
-  = SM (\st_env us0 sc0 ->
-	 case (unSM m st_env us0 sc0) of 
-		(_, us1, sc1) -> unSM k st_env us1 sc1)
+thenSmpl_ m k
+  = SM $ \st_env us0 sc0 -> do
+      (_, us1, sc1) <- unSM m st_env us0 sc0
+      unSM k st_env us1 sc1
 
 -- TODO: this specializing is not allowed
 -- {-# SPECIALIZE mapM         :: (a -> SimplM b) -> [a] -> SimplM [b] #-}
@@ -151,24 +141,29 @@ thenSmpl_ m k
 instance MonadUnique SimplM where
     getUniqueSupplyM
        = SM (\_st_env us sc -> case splitUniqSupply us of
-                                (us1, us2) -> (us1, us2, sc))
+                                (us1, us2) -> return (us1, us2, sc))
 
     getUniqueM
        = SM (\_st_env us sc -> case splitUniqSupply us of
-                                (us1, us2) -> (uniqFromSupply us1, us2, sc))
+                                (us1, us2) -> return (uniqFromSupply us1, us2, sc))
 
     getUniquesM
         = SM (\_st_env us sc -> case splitUniqSupply us of
-                                (us1, us2) -> (uniqsFromSupply us1, us2, sc))
+                                (us1, us2) -> return (uniqsFromSupply us1, us2, sc))
 
-getDOptsSmpl :: SimplM DynFlags
-getDOptsSmpl = SM (\st_env us sc -> (st_flags st_env, us, sc))
+instance HasDynFlags SimplM where
+    getDynFlags = SM (\st_env us sc -> return (st_flags st_env, us, sc))
+
+instance MonadIO SimplM where
+    liftIO m = SM $ \_ us sc -> do
+      x <- m
+      return (x, us, sc)
 
 getSimplRules :: SimplM RuleBase
-getSimplRules = SM (\st_env us sc -> (st_rules st_env, us, sc))
+getSimplRules = SM (\st_env us sc -> return (st_rules st_env, us, sc))
 
 getFamEnvs :: SimplM (FamInstEnv, FamInstEnv)
-getFamEnvs = SM (\st_env us sc -> (st_fams st_env, us, sc))
+getFamEnvs = SM (\st_env us sc -> return (st_fams st_env, us, sc))
 
 newId :: FastString -> Type -> SimplM Id
 newId fs ty = do uniq <- getUniqueM
@@ -184,28 +179,19 @@ newId fs ty = do uniq <- getUniqueM
 
 \begin{code}
 getSimplCount :: SimplM SimplCount
-getSimplCount = SM (\_st_env us sc -> (sc, us, sc))
+getSimplCount = SM (\_st_env us sc -> return (sc, us, sc))
 
 tick :: Tick -> SimplM ()
-tick t = SM (\_st_env us sc -> let sc' = doSimplTick t sc 
-                               in sc' `seq` ((), us, sc'))
+tick t = SM (\_st_env us sc -> let sc' = doSimplTick t sc
+                               in sc' `seq` return ((), us, sc'))
 
 checkedTick :: Tick -> SimplM ()
 -- Try to take a tick, but fail if too many
 checkedTick t 
-  = SM (\_st_env us sc ->
-                         {-
-                         This error is disabled for now due to #5539.
-                         We will still print a warning at the callsites
-                         of initSmpl.
-
-                         if st_max_ticks st_env <= simplCountN sc
+  = SM (\st_env us sc -> if st_max_ticks st_env <= simplCountN sc
                          then pprPanic "Simplifier ticks exhausted" (msg sc)
-                         else
-                         -}
-                              let sc' = doSimplTick t sc 
-                              in sc' `seq` ((), us, sc'))
-{-
+                         else let sc' = doSimplTick t sc 
+                              in sc' `seq` return ((), us, sc'))
   where
     msg sc = vcat [ ptext (sLit "When trying") <+> ppr t
                   , ptext (sLit "To increase the limit, use -fsimpl-tick-factor=N (default 100)")
@@ -215,12 +201,12 @@ checkedTick t
     pp_details sc
       | hasDetailedCounts sc = empty
       | otherwise = ptext (sLit "To see detailed counts use -ddump-simpl-stats")
--}
+                   
 
 freeTick :: Tick -> SimplM ()
 -- Record a tick, but don't add to the total tick count, which is
 -- used to decide when nothing further has happened
 freeTick t 
    = SM (\_st_env us sc -> let sc' = doFreeSimplTick t sc
-                           in sc' `seq` ((), us, sc'))
+                           in sc' `seq` return ((), us, sc'))
 \end{code}

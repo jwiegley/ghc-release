@@ -18,13 +18,11 @@
 module Text.Read.Lex
   -- lexing types
   ( Lexeme(..)  -- :: *; Show, Eq
-  , Lexeme'(..)
 
-  , numberToInteger, numberToRangedRational
+  , numberToInteger, numberToRational, numberToRangedRational
 
   -- lexer
   , lex         -- :: ReadP Lexeme      Skips leading spaces
-  , lex'        -- :: ReadP Lexeme      Skips leading spaces
   , hsLex       -- :: ReadP String
   , lexChar     -- :: ReadP Char        Reads just one char, with H98 escapes
 
@@ -39,15 +37,14 @@ import Text.ParserCombinators.ReadP
 
 #ifdef __GLASGOW_HASKELL__
 import GHC.Base
+import GHC.Char
 import GHC.Num( Num(..), Integer )
 import GHC.Show( Show(..) )
-#ifndef __HADDOCK__
 import {-# SOURCE #-} GHC.Unicode ( isSpace, isAlpha, isAlphaNum )
-#endif
 import GHC.Real( Integral, Rational, (%), fromIntegral,
-                 toInteger, (^), infinity, notANumber )
+                 toInteger, (^) )
 import GHC.List
-import GHC.Enum( maxBound )
+import GHC.Enum( minBound, maxBound )
 #else
 import Prelude hiding ( lex )
 import Data.Char( chr, ord, isSpace, isAlpha, isAlphaNum )
@@ -69,15 +66,8 @@ data Lexeme
   | Punc   String       -- ^ Punctuation or reserved symbol, e.g. @(@, @::@
   | Ident  String       -- ^ Haskell identifier, e.g. @foo@, @Baz@
   | Symbol String       -- ^ Haskell symbol, e.g. @>>@, @:%@
-  | Int Integer         -- ^ Integer literal
-  | Rat Rational        -- ^ Floating point literal
+  | Number Number
   | EOF
- deriving (Eq, Show)
-
-data Lexeme' = Ident' String
-             | Punc'   String
-             | Symbol' String
-             | Number Number
  deriving (Eq, Show)
 
 data Number = MkNumber Int              -- Base
@@ -92,9 +82,26 @@ numberToInteger (MkNumber base iPart) = Just (val (fromIntegral base) 0 iPart)
 numberToInteger (MkDecimal iPart Nothing Nothing) = Just (val 10 0 iPart)
 numberToInteger _ = Nothing
 
+-- This takes a floatRange, and if the Rational would be outside of
+-- the floatRange then it may return Nothing. Not that it will not
+-- /necessarily/ return Nothing, but it is good enough to fix the
+-- space problems in #5688
+-- Ways this is conservative:
+-- * the floatRange is in base 2, but we pretend it is in base 10
+-- * we pad the floateRange a bit, just in case it is very small
+--   and we would otherwise hit an edge case
+-- * We only worry about numbers that have an exponent. If they don't
+--   have an exponent then the Rational won't be much larger than the
+--   Number, so there is no problem
 numberToRangedRational :: (Int, Int) -> Number
                        -> Maybe Rational -- Nothing = Inf
 numberToRangedRational (neg, pos) n@(MkDecimal iPart mFPart (Just exp))
+    -- if exp is out of integer bounds,
+    -- then the number is definitely out of range
+    | exp > fromIntegral (maxBound :: Int) ||
+      exp < fromIntegral (minBound :: Int)
+    = Nothing
+    | otherwise
     = let mFirstDigit = case dropWhile (0 ==) iPart of
                         iPart'@(_ : _) -> Just (length iPart')
                         [] -> case mFPart of
@@ -126,15 +133,16 @@ numberToRational (MkDecimal iPart mFPart mExp)
        | otherwise           -> i % (10 ^ (- exp))
       (Just fPart, Nothing)  -> fracExp 0   i fPart
       (Just fPart, Just exp) -> fracExp exp i fPart
+      -- fracExp is a bit more efficient in calculating the Rational.
+      -- Instead of calculating the fractional part alone, then
+      -- adding the integral part and finally multiplying with
+      -- 10 ^ exp if an exponent was given, do it all at once.
 
 -- -----------------------------------------------------------------------------
 -- Lexing
 
 lex :: ReadP Lexeme
 lex = skipSpaces >> lexToken
-
-lex' :: ReadP Lexeme'
-lex' = skipSpaces >> lexToken'
 
 hsLex :: ReadP String
 -- ^ Haskell lexer: returns the lexed string, rather than the lexeme
@@ -150,11 +158,6 @@ lexToken = lexEOF     +++
            lexSymbol  +++
            lexId      +++
            lexNumber
-
-lexToken' :: ReadP Lexeme'
-lexToken' = lexSymbol' +++
-            lexId'     +++
-            fmap Number lexNumber'
 
 
 -- ----------------------------------------------------------------------
@@ -188,50 +191,17 @@ lexSymbol =
   isSymbolChar c = c `elem` "!@#$%&*+./<=>?\\^|:-~"
   reserved_ops   = ["..", "::", "=", "\\", "|", "<-", "->", "@", "~", "=>"]
 
-lexSymbol' :: ReadP Lexeme'
-lexSymbol' =
-  do s <- munch1 isSymbolChar
-     if s `elem` reserved_ops then
-        return (Punc' s)         -- Reserved-ops count as punctuation
-      else
-        return (Symbol' s)
- where
-  isSymbolChar c = c `elem` "!@#$%&*+./<=>?\\^|:-~"
-  reserved_ops   = ["..", "::", "=", "\\", "|", "<-", "->", "@", "~", "=>"]
-
 -- ----------------------------------------------------------------------
 -- identifiers
 
 lexId :: ReadP Lexeme
-lexId = lex_nan <++ lex_id
-  where
-        -- NaN and Infinity look like identifiers, so
-        -- we parse them first.
-    lex_nan = (string "NaN"      >> return (Rat notANumber)) +++
-              (string "Infinity" >> return (Rat infinity))
-
-    lex_id = do c <- satisfy isIdsChar
-                s <- munch isIdfChar
-                return (Ident (c:s))
-
-          -- Identifiers can start with a '_'
-    isIdsChar c = isAlpha c || c == '_'
-    isIdfChar c = isAlphaNum c || c `elem` "_'"
-
-lexId' :: ReadP Lexeme'
-lexId' = do c <- satisfy isIdsChar
-            s <- munch isIdfChar
-            return (Ident' (c:s))
+lexId = do c <- satisfy isIdsChar
+           s <- munch isIdfChar
+           return (Ident (c:s))
   where
           -- Identifiers can start with a '_'
     isIdsChar c = isAlpha c || c == '_'
     isIdfChar c = isAlphaNum c || c `elem` "_'"
-
-#ifndef __GLASGOW_HASKELL__
-infinity, notANumber :: Rational
-infinity   = 1 :% 0
-notANumber = 0 :% 0
-#endif
 
 -- ---------------------------------------------------------------------------
 -- Lexing character literals
@@ -399,25 +369,12 @@ lexNumber
                         -- If that fails, try for a decimal number
     lexDecNumber        -- Start with ordinary digits
 
-lexNumber' :: ReadP Number
-lexNumber'
-  = lexHexOct'  <++      -- First try for hex or octal 0x, 0o etc
-                         -- If that fails, try for a decimal number
-    lexDecNumber'
-
 lexHexOct :: ReadP Lexeme
 lexHexOct
   = do  _ <- char '0'
         base <- lexBaseChar
         digits <- lexDigits base
-        return (Int (val (fromIntegral base) 0 digits))
-
-lexHexOct' :: ReadP Number
-lexHexOct'
-  = do  _ <- char '0'
-        base <- lexBaseChar
-        digits <- lexDigits base
-        return (MkNumber base digits)
+        return (Number (MkNumber base digits))
 
 lexBaseChar :: ReadP Int
 -- Lex a single character indicating the base; fail if not there
@@ -434,30 +391,7 @@ lexDecNumber =
   do xs    <- lexDigits 10
      mFrac <- lexFrac <++ return Nothing
      mExp  <- lexExp  <++ return Nothing
-     return (value xs mFrac mExp)
- where
-  value xs mFrac mExp = valueFracExp (val 10 0 xs) mFrac mExp
-
-  valueFracExp :: Integer -> Maybe Digits -> Maybe Integer
-               -> Lexeme
-  valueFracExp a Nothing Nothing
-    = Int a                                             -- 43
-  valueFracExp a Nothing (Just exp)
-    | exp >= 0  = Int (a * (10 ^ exp))                  -- 43e7
-    | otherwise = Rat (a % (10 ^ (-exp)))               -- 43e-7
-  valueFracExp a (Just fs) mExp                         -- 4.3[e2]
-    = Rat (fracExp (fromMaybe 0 mExp) a fs)
-    -- Be a bit more efficient in calculating the Rational.
-    -- Instead of calculating the fractional part alone, then
-    -- adding the integral part and finally multiplying with
-    -- 10 ^ exp if an exponent was given, do it all at once.
-
-lexDecNumber' :: ReadP Number
-lexDecNumber' =
-  do xs    <- lexDigits 10
-     mFrac <- lexFrac <++ return Nothing
-     mExp  <- lexExp  <++ return Nothing
-     return (MkDecimal xs mFrac mExp)
+     return (Number (MkDecimal xs mFrac mExp))
 
 lexFrac :: ReadP (Maybe Digits)
 -- Read the fractional part; fail if it doesn't

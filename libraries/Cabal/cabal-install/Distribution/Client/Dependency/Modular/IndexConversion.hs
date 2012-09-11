@@ -18,32 +18,52 @@ import Distribution.Client.Dependency.Modular.Dependency as D
 import Distribution.Client.Dependency.Modular.Flag as F
 import Distribution.Client.Dependency.Modular.Index
 import Distribution.Client.Dependency.Modular.Package
+import Distribution.Client.Dependency.Modular.Tree
 import Distribution.Client.Dependency.Modular.Version
 
 -- | Convert both the installed package index and the source package
 -- index into one uniform solver index.
-convPIs :: OS -> Arch -> CompilerId ->
+--
+-- We use 'allPackagesBySourcePackageId' for the installed package index
+-- because that returns us several instances of the same package and version
+-- in order of preference. This allows us in principle to \"shadow\"
+-- packages if there are several installed packages of the same version.
+-- There are currently some shortcomings in both GHC and Cabal in
+-- resolving these situations. However, the right thing to do is to
+-- fix the problem there, so for now, shadowing is only activated if
+-- explicitly requested.
+convPIs :: OS -> Arch -> CompilerId -> Bool ->
            SI.PackageIndex -> CI.PackageIndex SourcePackage -> Index
-convPIs os arch cid iidx sidx =
-  mkIndex (L.concatMap (convIP iidx)        (SI.allPackages iidx) ++
-           L.map       (convSP os arch cid) (CI.allPackages sidx))
+convPIs os arch cid sip iidx sidx =
+  mkIndex (convIPI' sip iidx ++ convSPI' os arch cid sidx)
 
 -- | Convert a Cabal installed package index to the simpler,
 -- more uniform index format of the solver.
-convIPI :: SI.PackageIndex -> Index
-convIPI idx = mkIndex . L.concatMap (convIP idx) . SI.allPackages $ idx
+convIPI' :: Bool -> SI.PackageIndex -> [(PN, I, PInfo)]
+convIPI' sip idx =
+    -- apply shadowing whenever there are multple installed packages with
+    -- the same version
+    [ maybeShadow (convIP idx pkg)
+    | (_pkgid, pkgs) <- SI.allPackagesBySourcePackageId idx
+    , (maybeShadow, pkg) <- zip (id : repeat shadow) pkgs ]
+  where
+
+    -- shadowing is recorded in the package info
+    shadow (pn, i, PInfo fdeps fds encs _) | sip = (pn, i, PInfo fdeps fds encs (Just Shadowed))
+    shadow x                                     = x
+
+convIPI :: Bool -> SI.PackageIndex -> Index
+convIPI sip = mkIndex . convIPI' sip
 
 -- | Convert a single installed package into the solver-specific format.
---
--- May return the empty list if the installed package is broken.
-convIP :: SI.PackageIndex -> InstalledPackageInfo -> [(PN, I, PInfo)]
+convIP :: SI.PackageIndex -> InstalledPackageInfo -> (PN, I, PInfo)
 convIP idx ipi =
   let ipid = installedPackageId ipi
       i = I (pkgVersion (sourcePackageId ipi)) (Inst ipid)
       pn = pkgName (sourcePackageId ipi)
-  in  maybeToList $ do
-        fds <- mapM (convIPId pn idx) (IPI.depends ipi)
-        return (pn, i, PInfo fds M.empty [])
+  in  case mapM (convIPId pn idx) (IPI.depends ipi) of
+        Nothing  -> (pn, i, PInfo [] M.empty [] (Just Broken))
+        Just fds -> (pn, i, PInfo fds M.empty [] Nothing)
 -- TODO: Installed packages should also store their encapsulations!
 
 -- | Convert dependencies specified by an installed package id into
@@ -62,9 +82,13 @@ convIPId pn' idx ipid =
 
 -- | Convert a cabal-install source package index to the simpler,
 -- more uniform index format of the solver.
+convSPI' :: OS -> Arch -> CompilerId ->
+            CI.PackageIndex SourcePackage -> [(PN, I, PInfo)]
+convSPI' os arch cid = L.map (convSP os arch cid) . CI.allPackages
+
 convSPI :: OS -> Arch -> CompilerId ->
            CI.PackageIndex SourcePackage -> Index
-convSPI os arch cid = mkIndex . L.map (convSP os arch cid) . CI.allPackages
+convSPI os arch cid = mkIndex . convSPI' os arch cid
 
 -- | Convert a single source package into the solver-specific format.
 convSP :: OS -> Arch -> CompilerId -> SourcePackage -> (PN, I, PInfo)
@@ -82,26 +106,32 @@ convSP os arch cid (SourcePackage (PackageIdentifier pn pv) gpd _pl) =
 -- executable and test components. This does not quite seem fair.
 convGPD :: OS -> Arch -> CompilerId ->
            PI PN -> GenericPackageDescription -> PInfo
-convGPD os arch cid
-        pi@(PI _pn _i)
+convGPD os arch cid pi
         (GenericPackageDescription _ flags libs exes tests benchs) =
   let
-    fds = flagDefaults flags
+    fds = flagInfo flags
   in
     PInfo
-      (maybe []  (convCondTree os arch cid pi fds (const True)          ) libs   ++
-       concatMap (convCondTree os arch cid pi fds (const True)     . snd) exes   ++
-       concatMap (convCondTree os arch cid pi fds testEnabled      . snd) tests  ++
-       concatMap (convCondTree os arch cid pi fds benchmarkEnabled . snd) benchs)
+      (maybe []    (convCondTree os arch cid pi fds (const True)          ) libs    ++
+       concatMap   (convCondTree os arch cid pi fds (const True)     . snd) exes    ++
+      (prefix (Stanza (SN pi TestStanzas))
+        (L.map     (convCondTree os arch cid pi fds (const True)     . snd) tests)) ++
+      (prefix (Stanza (SN pi BenchStanzas))
+        (L.map     (convCondTree os arch cid pi fds (const True)     . snd) benchs)))
       fds
       [] -- TODO: add encaps
+      Nothing
+
+prefix :: (FlaggedDeps qpn -> FlaggedDep qpn) -> [FlaggedDeps qpn] -> FlaggedDeps qpn
+prefix _ []  = []
+prefix f fds = [f (concat fds)]
 
 -- | Convert flag information.
-flagDefaults :: [PD.Flag] -> FlagDefaults
-flagDefaults = M.fromList . L.map (\ (MkFlag fn _ b _) -> (fn, b))
+flagInfo :: [PD.Flag] -> FlagInfo
+flagInfo = M.fromList . L.map (\ (MkFlag fn _ b m) -> (fn, FInfo b m))
 
 -- | Convert condition trees to flagged dependencies.
-convCondTree :: OS -> Arch -> CompilerId -> PI PN -> FlagDefaults ->
+convCondTree :: OS -> Arch -> CompilerId -> PI PN -> FlagInfo ->
                 (a -> Bool) -> -- how to detect if a branch is active
                 CondTree ConfVar [Dependency] a -> FlaggedDeps PN
 convCondTree os arch cid pi@(PI pn _) fds p (CondNode info ds branches)
@@ -118,7 +148,7 @@ convCondTree os arch cid pi@(PI pn _) fds p (CondNode info ds branches)
 -- special flags and subsequently simplify to a tree that only depends on
 -- simple flag choices.
 convBranch :: OS -> Arch -> CompilerId ->
-              PI PN -> FlagDefaults ->
+              PI PN -> FlagInfo ->
               (a -> Bool) -> -- how to detect if a branch is active
               (Condition ConfVar,
                CondTree ConfVar [Dependency] a,

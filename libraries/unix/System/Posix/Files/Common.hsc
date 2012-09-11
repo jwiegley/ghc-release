@@ -54,6 +54,7 @@ module System.Posix.Files.Common (
     deviceID, fileID, fileMode, linkCount, fileOwner, fileGroup,
     specialDeviceID, fileSize, accessTime, modificationTime,
     statusChangeTime,
+    accessTimeHiRes, modificationTimeHiRes, statusChangeTimeHiRes,
     isBlockDevice, isCharacterDevice, isNamedPipe, isRegularFile,
     isDirectory, isSymbolicLink, isSocket,
 
@@ -71,6 +72,8 @@ import System.Posix.Error
 import System.Posix.Types
 import System.IO.Unsafe
 import Data.Bits
+import Data.Time.Clock.POSIX
+import Data.Ratio
 import System.Posix.Internals
 import Foreign hiding (unsafePerformIO)
 import Foreign.C
@@ -233,10 +236,16 @@ specialDeviceID  :: FileStatus -> DeviceID
 fileSize         :: FileStatus -> FileOffset
 -- | Time of last access.
 accessTime       :: FileStatus -> EpochTime
+-- | Time of last access in sub-second resolution.
+accessTimeHiRes  :: FileStatus -> POSIXTime
 -- | Time of last modification.
 modificationTime :: FileStatus -> EpochTime
+-- | Time of last modification in sub-second resolution.
+modificationTimeHiRes :: FileStatus -> POSIXTime
 -- | Time of last status change (i.e. owner, group, link count, mode, etc.).
 statusChangeTime :: FileStatus -> EpochTime
+-- | Time of last status change (i.e. owner, group, link count, mode, etc.) in sub-second resolution.
+statusChangeTimeHiRes :: FileStatus -> POSIXTime
 
 deviceID (FileStatus stat) = 
   unsafePerformIO $ withForeignPtr stat $ (#peek struct stat, st_dev)
@@ -260,6 +269,75 @@ modificationTime (FileStatus stat) =
   unsafePerformIO $ withForeignPtr stat $ (#peek struct stat, st_mtime)
 statusChangeTime (FileStatus stat) =
   unsafePerformIO $ withForeignPtr stat $ (#peek struct stat, st_ctime)
+
+accessTimeHiRes (FileStatus stat) =
+  unsafePerformIO $ withForeignPtr stat $ \stat_ptr -> do
+    sec  <- (#peek struct stat, st_atime) stat_ptr :: IO EpochTime
+#ifdef HAVE_STRUCT_STAT_ST_ATIM
+    nsec <- (#peek struct stat, st_atim.tv_nsec) stat_ptr :: IO (#type long)
+    let frac = toInteger nsec % 10^(9::Int)
+#elif HAVE_STRUCT_STAT_ST_ATIMESPEC
+    nsec <- (#peek struct stat, st_atimespec.tv_nsec) stat_ptr :: IO (#type long)
+    let frac = toInteger nsec % 10^(9::Int)
+#elif HAVE_STRUCT_STAT_ST_ATIMENSEC
+    nsec <- (#peek struct stat, st_atimensec) stat_ptr :: IO (#type long)
+    let frac = toInteger nsec % 10^(9::Int)
+#elif HAVE_STRUCT_STAT_ST_ATIME_N
+    nsec <- (#peek struct stat, st_atime_n) stat_ptr :: IO (#type int)
+    let frac = toInteger nsec % 10^(9::Int)
+#elif HAVE_STRUCT_STAT_ST_UATIME
+    usec <- (#peek struct stat, st_uatime) stat_ptr :: IO (#type int)
+    let frac = toInteger usec % 10^(6::Int)
+#else
+    let frac = 0
+#endif
+    return $ fromRational $ toRational sec + frac
+
+modificationTimeHiRes (FileStatus stat) =
+  unsafePerformIO $ withForeignPtr stat $ \stat_ptr -> do
+    sec  <- (#peek struct stat, st_mtime) stat_ptr :: IO EpochTime
+#ifdef HAVE_STRUCT_STAT_ST_MTIM
+    nsec <- (#peek struct stat, st_mtim.tv_nsec) stat_ptr :: IO (#type long)
+    let frac = toInteger nsec % 10^(9::Int)
+#elif HAVE_STRUCT_STAT_ST_MTIMESPEC
+    nsec <- (#peek struct stat, st_mtimespec.tv_nsec) stat_ptr :: IO (#type long)
+    let frac = toInteger nsec % 10^(9::Int)
+#elif HAVE_STRUCT_STAT_ST_MTIMENSEC
+    nsec <- (#peek struct stat, st_mtimensec) stat_ptr :: IO (#type long)
+    let frac = toInteger nsec % 10^(9::Int)
+#elif HAVE_STRUCT_STAT_ST_MTIME_N
+    nsec <- (#peek struct stat, st_mtime_n) stat_ptr :: IO (#type int)
+    let frac = toInteger nsec % 10^(9::Int)
+#elif HAVE_STRUCT_STAT_ST_UMTIME
+    usec <- (#peek struct stat, st_umtime) stat_ptr :: IO (#type int)
+    let frac = toInteger usec % 10^(6::Int)
+#else
+    let frac = 0
+#endif
+    return $ fromRational $ toRational sec + frac
+
+statusChangeTimeHiRes (FileStatus stat) =
+  unsafePerformIO $ withForeignPtr stat $ \stat_ptr -> do
+    sec  <- (#peek struct stat, st_ctime) stat_ptr :: IO EpochTime
+#ifdef HAVE_STRUCT_STAT_ST_CTIM
+    nsec <- (#peek struct stat, st_ctim.tv_nsec) stat_ptr :: IO (#type long)
+    let frac = toInteger nsec % 10^(9::Int)
+#elif HAVE_STRUCT_STAT_ST_CTIMESPEC
+    nsec <- (#peek struct stat, st_ctimespec.tv_nsec) stat_ptr :: IO (#type long)
+    let frac = toInteger nsec % 10^(9::Int)
+#elif HAVE_STRUCT_STAT_ST_CTIMENSEC
+    nsec <- (#peek struct stat, st_ctimensec) stat_ptr :: IO (#type long)
+    let frac = toInteger nsec % 10^(9::Int)
+#elif HAVE_STRUCT_STAT_ST_CTIME_N
+    nsec <- (#peek struct stat, st_ctime_n) stat_ptr :: IO (#type int)
+    let frac = toInteger nsec % 10^(9::Int)
+#elif HAVE_STRUCT_STAT_ST_UCTIME
+    usec <- (#peek struct stat, st_uctime) stat_ptr :: IO (#type int)
+    let frac = toInteger usec % 10^(6::Int)
+#else
+    let frac = 0
+#endif
+    return $ fromRational $ toRational sec + frac
 
 -- | Checks if this file is a block device.
 isBlockDevice     :: FileStatus -> Bool

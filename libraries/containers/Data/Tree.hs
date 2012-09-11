@@ -1,3 +1,7 @@
+{-# LANGUAGE CPP #-}
+#if __GLASGOW_HASKELL__
+{-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
+#endif
 #if __GLASGOW_HASKELL__ >= 703
 {-# LANGUAGE Safe #-}
 #endif
@@ -6,7 +10,7 @@
 -- Module      :  Data.Tree
 -- Copyright   :  (c) The University of Glasgow 2002
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  experimental
 -- Portability :  portable

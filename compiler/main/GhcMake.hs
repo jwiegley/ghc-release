@@ -4,26 +4,18 @@
 --
 -- (c) The University of Glasgow, 2011
 --
---       This module implements multi-module compilation, and is used
---       by --make and GHCi.
+-- This module implements multi-module compilation, and is used
+-- by --make and GHCi.
 --
 -- -----------------------------------------------------------------------------
-
-{-# OPTIONS -fno-warn-tabs #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and
--- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
--- for details
-
 module GhcMake( 
-  depanal, 
-  load, LoadHowMuch(..),
+        depanal, 
+        load, LoadHowMuch(..),
 
-  topSortModuleGraph, 
+        topSortModuleGraph, 
 
-  noModError, cyclicModuleErr
-  ) where
+        noModError, cyclicModuleErr
+    ) where
 
 #include "HsVersions.h"
 
@@ -31,46 +23,46 @@ module GhcMake(
 import qualified Linker         ( unload )
 #endif
 
-import DriverPipeline
 import DriverPhases
-import GhcMonad
-import Module
-import HscTypes
-import ErrUtils
+import DriverPipeline
 import DynFlags
-import HsSyn
+import ErrUtils
 import Finder
+import GhcMonad
 import HeaderInfo
+import HsSyn
+import HscTypes
+import Module
+import RdrName          ( RdrName )
 import TcIface          ( typecheckIface )
 import TcRnMonad        ( initIfaceCheck )
-import RdrName          ( RdrName )
 
-import Exception        ( evaluate, tryIO )
-import Panic
-import SysTools
-import BasicTypes
-import SrcLoc
-import Util
-import Digraph
 import Bag              ( listToBag )
-import Maybes           ( expectJust, mapCatMaybes )
-import StringBuffer
+import BasicTypes
+import Digraph
+import Exception        ( evaluate, tryIO )
 import FastString
+import Maybes           ( expectJust, mapCatMaybes )
 import Outputable
+import Panic
+import SrcLoc
+import StringBuffer
+import SysTools
 import UniqFM
+import Util
 
 import qualified Data.Map as Map
-import qualified FiniteMap as Map( insertListWith)
+import qualified FiniteMap as Map ( insertListWith )
 
-import System.Directory ( doesFileExist, getModificationTime )
-import System.IO        ( fixIO )
-import System.IO.Error  ( isDoesNotExistError )
-import System.Time      ( ClockTime )
-import System.FilePath
 import Control.Monad
-import Data.Maybe
 import Data.List
 import qualified Data.List as List
+import Data.Maybe
+import Data.Time
+import System.Directory
+import System.FilePath
+import System.IO        ( fixIO )
+import System.IO.Error  ( isDoesNotExistError )
 
 -- -----------------------------------------------------------------------------
 -- Loading the program
@@ -133,226 +125,219 @@ data LoadHowMuch
 --
 load :: GhcMonad m => LoadHowMuch -> m SuccessFlag
 load how_much = do
-   mod_graph <- depanal [] False
-   load2 how_much mod_graph
+    mod_graph <- depanal [] False
+    guessOutputFile
+    hsc_env <- getSession
 
-load2 :: GhcMonad m => LoadHowMuch -> [ModSummary]
-      -> m SuccessFlag
-load2 how_much mod_graph = do
-        guessOutputFile
-        hsc_env <- getSession
+    let hpt1   = hsc_HPT hsc_env
+    let dflags = hsc_dflags hsc_env
 
-        let hpt1      = hsc_HPT hsc_env
-        let dflags    = hsc_dflags hsc_env
+    -- The "bad" boot modules are the ones for which we have
+    -- B.hs-boot in the module graph, but no B.hs
+    -- The downsweep should have ensured this does not happen
+    -- (see msDeps)
+    let all_home_mods = [ms_mod_name s 
+                        | s <- mod_graph, not (isBootSummary s)]
+        bad_boot_mods = [s        | s <- mod_graph, isBootSummary s,
+                                    not (ms_mod_name s `elem` all_home_mods)]
+    ASSERT( null bad_boot_mods ) return ()
 
-        -- The "bad" boot modules are the ones for which we have
-        -- B.hs-boot in the module graph, but no B.hs
-        -- The downsweep should have ensured this does not happen
-        -- (see msDeps)
-        let all_home_mods = [ms_mod_name s 
-                            | s <- mod_graph, not (isBootSummary s)]
-            bad_boot_mods = [s        | s <- mod_graph, isBootSummary s,
-                                        not (ms_mod_name s `elem` all_home_mods)]
-        ASSERT( null bad_boot_mods ) return ()
+    -- check that the module given in HowMuch actually exists, otherwise
+    -- topSortModuleGraph will bomb later.
+    let checkHowMuch (LoadUpTo m)           = checkMod m
+        checkHowMuch (LoadDependenciesOf m) = checkMod m
+        checkHowMuch _ = id
 
-        -- check that the module given in HowMuch actually exists, otherwise
-        -- topSortModuleGraph will bomb later.
-        let checkHowMuch (LoadUpTo m)           = checkMod m
-            checkHowMuch (LoadDependenciesOf m) = checkMod m
-            checkHowMuch _ = id
+        checkMod m and_then
+            | m `elem` all_home_mods = and_then
+            | otherwise = do 
+                    liftIO $ errorMsg dflags (text "no such module:" <+>
+                                     quotes (ppr m))
+                    return Failed
 
-            checkMod m and_then
-                | m `elem` all_home_mods = and_then
-                | otherwise = do 
-                        liftIO $ errorMsg dflags (text "no such module:" <+>
-                                         quotes (ppr m))
-                        return Failed
+    checkHowMuch how_much $ do
 
-        checkHowMuch how_much $ do
+    -- mg2_with_srcimps drops the hi-boot nodes, returning a 
+    -- graph with cycles.  Among other things, it is used for
+    -- backing out partially complete cycles following a failed
+    -- upsweep, and for removing from hpt all the modules
+    -- not in strict downwards closure, during calls to compile.
+    let mg2_with_srcimps :: [SCC ModSummary]
+        mg2_with_srcimps = topSortModuleGraph True mod_graph Nothing
 
-        -- mg2_with_srcimps drops the hi-boot nodes, returning a 
-        -- graph with cycles.  Among other things, it is used for
-        -- backing out partially complete cycles following a failed
-        -- upsweep, and for removing from hpt all the modules
-        -- not in strict downwards closure, during calls to compile.
-        let mg2_with_srcimps :: [SCC ModSummary]
-            mg2_with_srcimps = topSortModuleGraph True mod_graph Nothing
+    -- If we can determine that any of the {-# SOURCE #-} imports
+    -- are definitely unnecessary, then emit a warning.
+    warnUnnecessarySourceImports mg2_with_srcimps
 
-        -- If we can determine that any of the {-# SOURCE #-} imports
-        -- are definitely unnecessary, then emit a warning.
-        warnUnnecessarySourceImports mg2_with_srcimps
+    let
+        -- check the stability property for each module.
+        stable_mods@(stable_obj,stable_bco)
+            = checkStability hpt1 mg2_with_srcimps all_home_mods
 
-        let
-            -- check the stability property for each module.
-            stable_mods@(stable_obj,stable_bco)
-                = checkStability hpt1 mg2_with_srcimps all_home_mods
+        -- prune bits of the HPT which are definitely redundant now,
+        -- to save space.
+        pruned_hpt = pruneHomePackageTable hpt1 
+                            (flattenSCCs mg2_with_srcimps)
+                            stable_mods
 
-            -- prune bits of the HPT which are definitely redundant now,
-            -- to save space.
-            pruned_hpt = pruneHomePackageTable hpt1 
-                                (flattenSCCs mg2_with_srcimps)
-                                stable_mods
+    _ <- liftIO $ evaluate pruned_hpt
 
-        _ <- liftIO $ evaluate pruned_hpt
+    -- before we unload anything, make sure we don't leave an old
+    -- interactive context around pointing to dead bindings.  Also,
+    -- write the pruned HPT to allow the old HPT to be GC'd.
+    modifySession $ \_ -> discardIC $ hsc_env { hsc_HPT = pruned_hpt }
 
-        -- before we unload anything, make sure we don't leave an old
-        -- interactive context around pointing to dead bindings.  Also,
-        -- write the pruned HPT to allow the old HPT to be GC'd.
-        modifySession $ \_ -> hsc_env{ hsc_IC = emptyInteractiveContext,
-                                       hsc_HPT = pruned_hpt }
+    liftIO $ debugTraceMsg dflags 2 (text "Stable obj:" <+> ppr stable_obj $$
+                            text "Stable BCO:" <+> ppr stable_bco)
 
-        liftIO $ debugTraceMsg dflags 2 (text "Stable obj:" <+> ppr stable_obj $$
-                                text "Stable BCO:" <+> ppr stable_bco)
+    -- Unload any modules which are going to be re-linked this time around.
+    let stable_linkables = [ linkable
+                           | m <- stable_obj++stable_bco,
+                             Just hmi <- [lookupUFM pruned_hpt m],
+                             Just linkable <- [hm_linkable hmi] ]
+    liftIO $ unload hsc_env stable_linkables
 
-        -- Unload any modules which are going to be re-linked this time around.
-        let stable_linkables = [ linkable
-                               | m <- stable_obj++stable_bco,
-                                 Just hmi <- [lookupUFM pruned_hpt m],
-                                 Just linkable <- [hm_linkable hmi] ]
-        liftIO $ unload hsc_env stable_linkables
+    -- We could at this point detect cycles which aren't broken by
+    -- a source-import, and complain immediately, but it seems better
+    -- to let upsweep_mods do this, so at least some useful work gets
+    -- done before the upsweep is abandoned.
+    --hPutStrLn stderr "after tsort:\n"
+    --hPutStrLn stderr (showSDoc (vcat (map ppr mg2)))
 
-        -- We could at this point detect cycles which aren't broken by
-        -- a source-import, and complain immediately, but it seems better
-        -- to let upsweep_mods do this, so at least some useful work gets
-        -- done before the upsweep is abandoned.
-        --hPutStrLn stderr "after tsort:\n"
-        --hPutStrLn stderr (showSDoc (vcat (map ppr mg2)))
+    -- Now do the upsweep, calling compile for each module in
+    -- turn.  Final result is version 3 of everything.
 
-        -- Now do the upsweep, calling compile for each module in
-        -- turn.  Final result is version 3 of everything.
+    -- Topologically sort the module graph, this time including hi-boot
+    -- nodes, and possibly just including the portion of the graph
+    -- reachable from the module specified in the 2nd argument to load.
+    -- This graph should be cycle-free.
+    -- If we're restricting the upsweep to a portion of the graph, we
+    -- also want to retain everything that is still stable.
+    let full_mg :: [SCC ModSummary]
+        full_mg    = topSortModuleGraph False mod_graph Nothing
 
-        -- Topologically sort the module graph, this time including hi-boot
-        -- nodes, and possibly just including the portion of the graph
-        -- reachable from the module specified in the 2nd argument to load.
-        -- This graph should be cycle-free.
-        -- If we're restricting the upsweep to a portion of the graph, we
-        -- also want to retain everything that is still stable.
-        let full_mg :: [SCC ModSummary]
-            full_mg    = topSortModuleGraph False mod_graph Nothing
+        maybe_top_mod = case how_much of
+                            LoadUpTo m           -> Just m
+                            LoadDependenciesOf m -> Just m
+                            _                    -> Nothing
 
-            maybe_top_mod = case how_much of
-                                LoadUpTo m           -> Just m
-                                LoadDependenciesOf m -> Just m
-                                _                    -> Nothing
+        partial_mg0 :: [SCC ModSummary]
+        partial_mg0 = topSortModuleGraph False mod_graph maybe_top_mod
 
-            partial_mg0 :: [SCC ModSummary]
-            partial_mg0 = topSortModuleGraph False mod_graph maybe_top_mod
+        -- LoadDependenciesOf m: we want the upsweep to stop just
+        -- short of the specified module (unless the specified module
+        -- is stable).
+        partial_mg
+            | LoadDependenciesOf _mod <- how_much
+            = ASSERT( case last partial_mg0 of 
+                        AcyclicSCC ms -> ms_mod_name ms == _mod; _ -> False )
+              List.init partial_mg0
+            | otherwise
+            = partial_mg0
 
-            -- LoadDependenciesOf m: we want the upsweep to stop just
-            -- short of the specified module (unless the specified module
-            -- is stable).
-            partial_mg
-                | LoadDependenciesOf _mod <- how_much
-                = ASSERT( case last partial_mg0 of 
-                            AcyclicSCC ms -> ms_mod_name ms == _mod; _ -> False )
-                  List.init partial_mg0
-                | otherwise
-                = partial_mg0
-  
-            stable_mg = 
-                [ AcyclicSCC ms
-                | AcyclicSCC ms <- full_mg,
-                  ms_mod_name ms `elem` stable_obj++stable_bco,
-                  ms_mod_name ms `notElem` [ ms_mod_name ms' | 
-                                                AcyclicSCC ms' <- partial_mg ] ]
+        stable_mg = 
+            [ AcyclicSCC ms
+            | AcyclicSCC ms <- full_mg,
+              ms_mod_name ms `elem` stable_obj++stable_bco,
+              ms_mod_name ms `notElem` [ ms_mod_name ms' | 
+                                            AcyclicSCC ms' <- partial_mg ] ]
 
-            mg = stable_mg ++ partial_mg
+        mg = stable_mg ++ partial_mg
 
-        -- clean up between compilations
-        let cleanup hsc_env = intermediateCleanTempFiles dflags
-                                  (flattenSCCs mg2_with_srcimps)
-                                  hsc_env
+    -- clean up between compilations
+    let cleanup hsc_env = intermediateCleanTempFiles dflags
+                              (flattenSCCs mg2_with_srcimps)
+                              hsc_env
 
-        liftIO $ debugTraceMsg dflags 2 (hang (text "Ready for upsweep")
-                                   2 (ppr mg))
+    liftIO $ debugTraceMsg dflags 2 (hang (text "Ready for upsweep")
+                               2 (ppr mg))
 
-        setSession hsc_env{ hsc_HPT = emptyHomePackageTable }
-        (upsweep_ok, modsUpswept)
-           <- upsweep pruned_hpt stable_mods cleanup mg
+    setSession hsc_env{ hsc_HPT = emptyHomePackageTable }
+    (upsweep_ok, modsUpswept)
+       <- upsweep pruned_hpt stable_mods cleanup mg
 
-        -- Make modsDone be the summaries for each home module now
-        -- available; this should equal the domain of hpt3.
-        -- Get in in a roughly top .. bottom order (hence reverse).
+    -- Make modsDone be the summaries for each home module now
+    -- available; this should equal the domain of hpt3.
+    -- Get in in a roughly top .. bottom order (hence reverse).
 
-        let modsDone = reverse modsUpswept
+    let modsDone = reverse modsUpswept
 
-        -- Try and do linking in some form, depending on whether the
-        -- upsweep was completely or only partially successful.
+    -- Try and do linking in some form, depending on whether the
+    -- upsweep was completely or only partially successful.
 
-        if succeeded upsweep_ok
+    if succeeded upsweep_ok
 
-         then 
-           -- Easy; just relink it all.
-           do liftIO $ debugTraceMsg dflags 2 (text "Upsweep completely successful.")
+     then 
+       -- Easy; just relink it all.
+       do liftIO $ debugTraceMsg dflags 2 (text "Upsweep completely successful.")
 
-              -- Clean up after ourselves
-              hsc_env1 <- getSession
-              liftIO $ intermediateCleanTempFiles dflags modsDone hsc_env1
+          -- Clean up after ourselves
+          hsc_env1 <- getSession
+          liftIO $ intermediateCleanTempFiles dflags modsDone hsc_env1
 
-              -- Issue a warning for the confusing case where the user
-              -- said '-o foo' but we're not going to do any linking.
-              -- We attempt linking if either (a) one of the modules is
-              -- called Main, or (b) the user said -no-hs-main, indicating
-              -- that main() is going to come from somewhere else.
-              --
-              let ofile = outputFile dflags
-              let no_hs_main = dopt Opt_NoHsMain dflags
-              let 
-                main_mod = mainModIs dflags
-                a_root_is_Main = any ((==main_mod).ms_mod) mod_graph
-                do_linking = a_root_is_Main || no_hs_main || ghcLink dflags == LinkDynLib
+          -- Issue a warning for the confusing case where the user
+          -- said '-o foo' but we're not going to do any linking.
+          -- We attempt linking if either (a) one of the modules is
+          -- called Main, or (b) the user said -no-hs-main, indicating
+          -- that main() is going to come from somewhere else.
+          --
+          let ofile = outputFile dflags
+          let no_hs_main = dopt Opt_NoHsMain dflags
+          let 
+            main_mod = mainModIs dflags
+            a_root_is_Main = any ((==main_mod).ms_mod) mod_graph
+            do_linking = a_root_is_Main || no_hs_main || ghcLink dflags == LinkDynLib
 
-              when (ghcLink dflags == LinkBinary 
-                    && isJust ofile && not do_linking) $
-                liftIO $ debugTraceMsg dflags 1 $
-                    text ("Warning: output was redirected with -o, " ++
-                          "but no output will be generated\n" ++
-                          "because there is no " ++ 
-                          moduleNameString (moduleName main_mod) ++ " module.")
+          when (ghcLink dflags == LinkBinary 
+                && isJust ofile && not do_linking) $
+            liftIO $ debugTraceMsg dflags 1 $
+                text ("Warning: output was redirected with -o, " ++
+                      "but no output will be generated\n" ++
+                      "because there is no " ++ 
+                      moduleNameString (moduleName main_mod) ++ " module.")
 
-              -- link everything together
-              linkresult <- liftIO $ link (ghcLink dflags) dflags do_linking (hsc_HPT hsc_env1)
+          -- link everything together
+          linkresult <- liftIO $ link (ghcLink dflags) dflags do_linking (hsc_HPT hsc_env1)
 
-              loadFinish Succeeded linkresult
+          loadFinish Succeeded linkresult
 
-         else 
-           -- Tricky.  We need to back out the effects of compiling any
-           -- half-done cycles, both so as to clean up the top level envs
-           -- and to avoid telling the interactive linker to link them.
-           do liftIO $ debugTraceMsg dflags 2 (text "Upsweep partially successful.")
+     else 
+       -- Tricky.  We need to back out the effects of compiling any
+       -- half-done cycles, both so as to clean up the top level envs
+       -- and to avoid telling the interactive linker to link them.
+       do liftIO $ debugTraceMsg dflags 2 (text "Upsweep partially successful.")
 
-              let modsDone_names
-                     = map ms_mod modsDone
-              let mods_to_zap_names 
-                     = findPartiallyCompletedCycles modsDone_names 
-                          mg2_with_srcimps
-              let mods_to_keep
-                     = filter ((`notElem` mods_to_zap_names).ms_mod) 
-                          modsDone
+          let modsDone_names
+                 = map ms_mod modsDone
+          let mods_to_zap_names 
+                 = findPartiallyCompletedCycles modsDone_names 
+                      mg2_with_srcimps
+          let mods_to_keep
+                 = filter ((`notElem` mods_to_zap_names).ms_mod) 
+                      modsDone
 
-              hsc_env1 <- getSession
-              let hpt4 = retainInTopLevelEnvs (map ms_mod_name mods_to_keep) 
-                                              (hsc_HPT hsc_env1)
+          hsc_env1 <- getSession
+          let hpt4 = retainInTopLevelEnvs (map ms_mod_name mods_to_keep) 
+                                          (hsc_HPT hsc_env1)
 
-              -- Clean up after ourselves
-              liftIO $ intermediateCleanTempFiles dflags mods_to_keep hsc_env1
+          -- Clean up after ourselves
+          liftIO $ intermediateCleanTempFiles dflags mods_to_keep hsc_env1
 
-              -- there should be no Nothings where linkables should be, now
-              ASSERT(all (isJust.hm_linkable) 
-                        (eltsUFM (hsc_HPT hsc_env))) do
-        
-              -- Link everything together
-              linkresult <- liftIO $ link (ghcLink dflags) dflags False hpt4
+          -- there should be no Nothings where linkables should be, now
+          ASSERT(all (isJust.hm_linkable) 
+                    (eltsUFM (hsc_HPT hsc_env))) do
+    
+          -- Link everything together
+          linkresult <- liftIO $ link (ghcLink dflags) dflags False hpt4
 
-              modifySession $ \hsc_env -> hsc_env{ hsc_HPT = hpt4 }
-              loadFinish Failed linkresult
+          modifySession $ \hsc_env -> hsc_env{ hsc_HPT = hpt4 }
+          loadFinish Failed linkresult
 
--- Finish up after a load.
+
+-- | Finish up after a load.
+loadFinish :: GhcMonad m => SuccessFlag -> SuccessFlag -> m SuccessFlag
 
 -- If the link failed, unload everything and return.
-loadFinish :: GhcMonad m =>
-              SuccessFlag -> SuccessFlag
-           -> m SuccessFlag
 loadFinish _all_ok Failed
   = do hsc_env <- getSession
        liftIO $ unload hsc_env []
@@ -362,16 +347,20 @@ loadFinish _all_ok Failed
 -- Empty the interactive context and set the module context to the topmost
 -- newly loaded module, or the Prelude if none were loaded.
 loadFinish all_ok Succeeded
-  = do modifySession $ \hsc_env -> hsc_env{ hsc_IC = emptyInteractiveContext }
+  = do modifySession discardIC
        return all_ok
 
 
--- Forget the current program, but retain the persistent info in HscEnv
+-- | Forget the current program, but retain the persistent info in HscEnv
 discardProg :: HscEnv -> HscEnv
 discardProg hsc_env
-  = hsc_env { hsc_mod_graph = emptyMG, 
-              hsc_IC = emptyInteractiveContext,
-              hsc_HPT = emptyHomePackageTable }
+  = discardIC $ hsc_env { hsc_mod_graph = emptyMG
+                        , hsc_HPT = emptyHomePackageTable }
+
+-- | Discard the contents of the InteractiveContext, but keep the DynFlags
+discardIC :: HscEnv -> HscEnv
+discardIC hsc_env
+  = hsc_env { hsc_IC = emptyInteractiveContext (ic_dflags (hsc_IC hsc_env)) }
 
 intermediateCleanTempFiles :: DynFlags -> [ModSummary] -> HscEnv -> IO ()
 intermediateCleanTempFiles dflags summaries hsc_env
@@ -416,7 +405,7 @@ guessOutputFile = modifySession $ \env ->
         Nothing -> env { hsc_dflags = dflags { outputFile = name_exe } }
 
 -- -----------------------------------------------------------------------------
-
+--
 -- | Prune the HomePackageTable
 --
 -- Before doing an upsweep, we can throw away:
@@ -430,13 +419,10 @@ guessOutputFile = modifySession $ \env ->
 -- space at the end of the upsweep, because the topmost ModDetails of the
 -- old HPT holds on to the entire type environment from the previous
 -- compilation.
-
-pruneHomePackageTable
-   :: HomePackageTable
-   -> [ModSummary]
-   -> ([ModuleName],[ModuleName])
-   -> HomePackageTable
-
+pruneHomePackageTable :: HomePackageTable
+                      -> [ModSummary]
+                      -> ([ModuleName],[ModuleName])
+                      -> HomePackageTable
 pruneHomePackageTable hpt summ (stable_obj, stable_bco)
   = mapUFM prune hpt
   where prune hmi
@@ -455,9 +441,9 @@ pruneHomePackageTable hpt summ (stable_obj, stable_bco)
         is_stable m = m `elem` stable_obj || m `elem` stable_bco
 
 -- -----------------------------------------------------------------------------
-
--- Return (names of) all those in modsDone who are part of a cycle
--- as defined by theGraph.
+--
+-- | Return (names of) all those in modsDone who are part of a cycle as defined
+-- by theGraph.
 findPartiallyCompletedCycles :: [Module] -> [SCC ModSummary] -> [Module]
 findPartiallyCompletedCycles modsDone theGraph
    = chew theGraph
@@ -478,8 +464,8 @@ findPartiallyCompletedCycles modsDone theGraph
 
 
 -- ---------------------------------------------------------------------------
--- Unloading
-
+--
+-- | Unloading
 unload :: HscEnv -> [Linkable] -> IO ()
 unload hsc_env stable_linkables -- Unload everthing *except* 'stable_linkables'
   = case ghcLink (hsc_dflags hsc_env) of
@@ -493,7 +479,6 @@ unload hsc_env stable_linkables -- Unload everthing *except* 'stable_linkables'
         _other -> return ()
 
 -- -----------------------------------------------------------------------------
-
 {- |
 
   Stability tells us which modules definitely do not need to be recompiled.
@@ -542,13 +527,12 @@ unload hsc_env stable_linkables -- Unload everthing *except* 'stable_linkables'
     - Note that objects are only considered stable if they only depend
       on other objects.  We can't link object code against byte code.
 -}
-
 checkStability
-        :: HomePackageTable             -- HPT from last compilation
-        -> [SCC ModSummary]             -- current module graph (cyclic)
-        -> [ModuleName]                 -- all home modules
-        -> ([ModuleName],               -- stableObject
-            [ModuleName])               -- stableBCO
+        :: HomePackageTable   -- HPT from last compilation
+        -> [SCC ModSummary]   -- current module graph (cyclic)
+        -> [ModuleName]       -- all home modules
+        -> ([ModuleName],     -- stableObject
+            [ModuleName])     -- stableBCO
 
 checkStability hpt sccs all_home_mods = foldl checkSCC ([],[]) sccs
   where
@@ -604,20 +588,19 @@ checkStability hpt sccs all_home_mods = foldl checkSCC ([],[]) sccs
                 _other  -> False
 
 -- -----------------------------------------------------------------------------
-
+--
 -- | The upsweep
 --
 -- This is where we compile each module in the module graph, in a pass
 -- from the bottom to the top of the graph.
 --
 -- There better had not be any cyclic groups here -- we check for them.
-
 upsweep
     :: GhcMonad m
-    => HomePackageTable         -- ^ HPT from last time round (pruned)
+    => HomePackageTable            -- ^ HPT from last time round (pruned)
     -> ([ModuleName],[ModuleName]) -- ^ stable modules (see checkStability)
     -> (HscEnv -> IO ())           -- ^ How to clean up unwanted tmp files
-    -> [SCC ModSummary]         -- ^ Mods to do (the worklist)
+    -> [SCC ModSummary]            -- ^ Mods to do (the worklist)
     -> m (SuccessFlag,
           [ModSummary])
        -- ^ Returns:
@@ -698,7 +681,6 @@ upsweep_mod :: HscEnv
             -> Int  -- index of module
             -> Int  -- total number of modules
             -> IO HomeModInfo
-
 upsweep_mod hsc_env old_hpt (stable_obj, stable_bco) summary mod_index nmods
    =    let 
             this_mod_name = ms_mod_name summary
@@ -858,7 +840,6 @@ retainInTopLevelEnvs keep_these hpt
 
 -- ---------------------------------------------------------------------------
 -- Typecheck module loops
-
 {-
 See bug #930.  This code fixes a long-standing bug in --make.  The
 problem is that when compiling the modules *inside* a loop, a data
@@ -886,7 +867,6 @@ re-typecheck.
 
 Following this fix, GHC can compile itself with --make -O2.
 -}
-
 reTypecheckLoop :: HscEnv -> ModSummary -> ModuleGraph -> IO HscEnv
 reTypecheckLoop hsc_env ms graph
   | not (isBootSummary ms) && 
@@ -926,10 +906,8 @@ reachableBackwards mod summaries
         root  = expectJust "reachableBackwards" (lookup_node HsBootFile mod)
 
 -- ---------------------------------------------------------------------------
--- Topological sort of the module graph
-
-type SummaryNode = (ModSummary, Int, [Int])
-
+--
+-- | Topological sort of the module graph
 topSortModuleGraph
           :: Bool
           -- ^ Drop hi-boot nodes? (see below)
@@ -967,6 +945,8 @@ topSortModuleGraph drop_hs_boot_nodes summaries mb_root_mod
             let root | Just node <- lookup_node HsSrcFile root_mod, graph `hasVertexG` node = node
                      | otherwise = ghcError (ProgramError "module does not exist")
             in graphFromEdgedVertices (seq root (reachableG graph root))
+
+type SummaryNode = (ModSummary, Int, [Int])
 
 summaryNodeKey :: SummaryNode -> Int
 summaryNodeKey (_, k, _) = k
@@ -1041,25 +1021,27 @@ nodeMapElts = Map.elems
 -- were necessary, then the edge would be part of a cycle.
 warnUnnecessarySourceImports :: GhcMonad m => [SCC ModSummary] -> m ()
 warnUnnecessarySourceImports sccs = do
-  logWarnings (listToBag (concatMap (check.flattenSCC) sccs))
-  where check ms =
+  dflags <- getDynFlags
+  logWarnings (listToBag (concatMap (check dflags . flattenSCC) sccs))
+  where check dflags ms =
            let mods_in_this_cycle = map ms_mod_name ms in
-           [ warn i | m <- ms, i <- ms_home_srcimps m,
-                      unLoc i `notElem`  mods_in_this_cycle ]
+           [ warn dflags i | m <- ms, i <- ms_home_srcimps m,
+                             unLoc i `notElem`  mods_in_this_cycle ]
 
-        warn :: Located ModuleName -> WarnMsg
-        warn (L loc mod) = 
-           mkPlainErrMsg loc
+        warn :: DynFlags -> Located ModuleName -> WarnMsg
+        warn dflags (L loc mod) =
+           mkPlainErrMsg dflags loc
                 (ptext (sLit "Warning: {-# SOURCE #-} unnecessary in import of ")
                  <+> quotes (ppr mod))
 
 -----------------------------------------------------------------------------
--- Downsweep (dependency analysis)
-
+--
+-- | Downsweep (dependency analysis)
+--
 -- Chase downwards from the specified root set, returning summaries
 -- for all home modules encountered.  Only follow source-import
 -- links.
-
+--
 -- We pass in the previous collection of summaries, which is used as a
 -- cache to avoid recalculating a module summary if the source is
 -- unchanged.
@@ -1067,7 +1049,6 @@ warnUnnecessarySourceImports sccs = do
 -- The returned list of [ModSummary] nodes has one node for each home-package
 -- module, plus one for any hs-boot files.  The imports of these nodes 
 -- are all there, including the imports of non-home-package modules.
-
 downsweep :: HscEnv
           -> [ModSummary]       -- Old summaries
           -> [ModuleName]       -- Ignore dependencies on these; treat
@@ -1087,6 +1068,7 @@ downsweep hsc_env old_summaries excl_mods allow_dup_roots
        summs <- loop (concatMap msDeps rootSummaries) root_map
        return summs
      where
+        dflags = hsc_dflags hsc_env
         roots = hsc_targets hsc_env
 
         old_summary_map :: NodeMap ModSummary
@@ -1098,14 +1080,14 @@ downsweep hsc_env old_summaries excl_mods allow_dup_roots
                 if exists 
                     then summariseFile hsc_env old_summaries file mb_phase 
                                        obj_allowed maybe_buf
-                    else throwOneError $ mkPlainErrMsg noSrcSpan $
+                    else throwOneError $ mkPlainErrMsg dflags noSrcSpan $
                            text "can't find file:" <+> text file
         getRootSummary (Target (TargetModule modl) obj_allowed maybe_buf)
            = do maybe_summary <- summariseModule hsc_env old_summary_map False 
                                            (L rootLoc modl) obj_allowed 
                                            maybe_buf excl_mods
                 case maybe_summary of
-                   Nothing -> packageModErr modl
+                   Nothing -> packageModErr dflags modl
                    Just s  -> return s
 
         rootLoc = mkGeneralSrcSpan (fsLit "<command line>")
@@ -1118,7 +1100,7 @@ downsweep hsc_env old_summaries excl_mods allow_dup_roots
         checkDuplicates root_map 
            | allow_dup_roots = return ()
            | null dup_roots  = return ()
-           | otherwise       = liftIO $ multiRootsErr (head dup_roots)
+           | otherwise       = liftIO $ multiRootsErr dflags (head dup_roots)
            where
              dup_roots :: [[ModSummary]]        -- Each at least of length 2
              dup_roots = filterOut isSingleton (nodeMapElts root_map)
@@ -1138,7 +1120,7 @@ downsweep hsc_env old_summaries excl_mods allow_dup_roots
           = if isSingleton summs then
                 loop ss done
             else
-                do { multiRootsErr summs; return [] }
+                do { multiRootsErr dflags summs; return [] }
           | otherwise
           = do mb_s <- summariseModule hsc_env old_summary_map 
                                        is_boot wanted_mod True
@@ -1149,14 +1131,12 @@ downsweep hsc_env old_summaries excl_mods allow_dup_roots
           where
             key = (unLoc wanted_mod, if is_boot then HsBootFile else HsSrcFile)
 
--- XXX Does the (++) here need to be flipped?
 mkRootMap :: [ModSummary] -> NodeMap [ModSummary]
 mkRootMap summaries = Map.insertListWith (flip (++))
                                          [ (msKey s, [s]) | s <- summaries ]
                                          Map.empty
 
-msDeps :: ModSummary -> [(Located ModuleName, IsBootInterface)]
--- (msDeps s) returns the dependencies of the ModSummary s.
+-- | Returns the dependencies of the ModSummary s.
 -- A wrinkle is that for a {-# SOURCE #-} import we return
 --      *both* the hs-boot file
 --      *and* the source file
@@ -1164,6 +1144,7 @@ msDeps :: ModSummary -> [(Located ModuleName, IsBootInterface)]
 -- modules always contains B.hs if it contains B.hs-boot.
 -- Remember, this pass isn't doing the topological sort.  It's
 -- just gathering the list of all relevant ModSummaries
+msDeps :: ModSummary -> [(Located ModuleName, IsBootInterface)]
 msDeps s = 
     concat [ [(m,True), (m,False)] | m <- ms_home_srcimps s ] 
          ++ [ (m,False) | m <- ms_home_imps s ] 
@@ -1202,7 +1183,7 @@ summariseFile
         -> FilePath                     -- source file name
         -> Maybe Phase                  -- start phase
         -> Bool                         -- object code allowed?
-        -> Maybe (StringBuffer,ClockTime)
+        -> Maybe (StringBuffer,UTCTime)
         -> IO ModSummary
 
 summariseFile hsc_env old_summaries file mb_phase obj_allowed maybe_buf
@@ -1216,7 +1197,7 @@ summariseFile hsc_env old_summaries file mb_phase obj_allowed maybe_buf
         src_timestamp <- get_src_timestamp
                 -- The file exists; we checked in getRootSummary above.
                 -- If it gets removed subsequently, then this 
-                -- getModificationTime may fail, but that's the right
+                -- getModificationUTCTime may fail, but that's the right
                 -- behaviour.
 
                 -- return the cached summary if the source didn't change
@@ -1237,7 +1218,8 @@ summariseFile hsc_env old_summaries file mb_phase obj_allowed maybe_buf
   where
     get_src_timestamp = case maybe_buf of
                            Just (_,t) -> return t
-                           Nothing    -> liftIO $ getModificationTime file
+                           Nothing    -> liftIO $ getModificationUTCTime file
+                        -- getMofificationUTCTime may fail
 
     new_summary src_timestamp = do
         let dflags = hsc_dflags hsc_env
@@ -1285,7 +1267,7 @@ summariseModule
           -> IsBootInterface    -- True <=> a {-# SOURCE #-} import
           -> Located ModuleName -- Imported module to be summarised
           -> Bool               -- object code allowed?
-          -> Maybe (StringBuffer, ClockTime)
+          -> Maybe (StringBuffer, UTCTime)
           -> [ModuleName]               -- Modules to exclude
           -> IO (Maybe ModSummary)      -- Its new summary
 
@@ -1306,7 +1288,7 @@ summariseModule hsc_env old_summary_map is_boot (L loc wanted_mod)
         case maybe_buf of
            Just (_,t) -> check_timestamp old_summary location src_fn t
            Nothing    -> do
-                m <- tryIO (getModificationTime src_fn)
+                m <- tryIO (getModificationUTCTime src_fn)
                 case m of
                    Right t -> check_timestamp old_summary location src_fn t
                    Left e | isDoesNotExistError e -> find_it
@@ -1362,7 +1344,7 @@ summariseModule hsc_env old_summary_map is_boot (L loc wanted_mod)
                 -- It might have been deleted since the Finder last found it
         maybe_t <- modificationTimeIfExists src_fn
         case maybe_t of
-          Nothing -> noHsFileErr loc src_fn
+          Nothing -> noHsFileErr dflags loc src_fn
           Just t  -> new_summary location' mod src_fn t
 
 
@@ -1374,7 +1356,7 @@ summariseModule hsc_env old_summary_map is_boot (L loc wanted_mod)
         (srcimps, the_imps, L mod_loc mod_name) <- getImports dflags' buf hspp_fn src_fn
 
         when (mod_name /= wanted_mod) $
-                throwOneError $ mkPlainErrMsg mod_loc $ 
+                throwOneError $ mkPlainErrMsg dflags' mod_loc $
                               text "File name does not match module name:" 
                               $$ text "Saw:" <+> quotes (ppr mod_name)
                               $$ text "Expected:" <+> quotes (ppr wanted_mod)
@@ -1398,7 +1380,7 @@ summariseModule hsc_env old_summary_map is_boot (L loc wanted_mod)
                               ms_obj_date  = obj_timestamp }))
 
 
-getObjTimestamp :: ModLocation -> Bool -> IO (Maybe ClockTime)
+getObjTimestamp :: ModLocation -> Bool -> IO (Maybe UTCTime)
 getObjTimestamp location is_boot
   = if is_boot then return Nothing
                else modificationTimeIfExists (ml_obj_file location)
@@ -1407,7 +1389,7 @@ getObjTimestamp location is_boot
 preprocessFile :: HscEnv
                -> FilePath
                -> Maybe Phase -- ^ Starting phase
-               -> Maybe (StringBuffer,ClockTime)
+               -> Maybe (StringBuffer,UTCTime)
                -> IO (DynFlags, FilePath, StringBuffer)
 preprocessFile hsc_env src_fn mb_phase Nothing
   = do
@@ -1422,7 +1404,7 @@ preprocessFile hsc_env src_fn mb_phase (Just (buf, _time))
 
         (dflags', leftovers, warns)
             <- parseDynamicFilePragma dflags local_opts
-        checkProcessArgsResult leftovers
+        checkProcessArgsResult dflags leftovers
         handleFlagWarnings dflags' warns
 
         let needs_preprocessing
@@ -1446,21 +1428,21 @@ preprocessFile hsc_env src_fn mb_phase (Just (buf, _time))
 noModError :: DynFlags -> SrcSpan -> ModuleName -> FindResult -> IO ab
 -- ToDo: we don't have a proper line number for this error
 noModError dflags loc wanted_mod err
-  = throwOneError $ mkPlainErrMsg loc $ cannotFindModule dflags wanted_mod err
+  = throwOneError $ mkPlainErrMsg dflags loc $ cannotFindModule dflags wanted_mod err
                                 
-noHsFileErr :: SrcSpan -> String -> IO a
-noHsFileErr loc path
-  = throwOneError $ mkPlainErrMsg loc $ text "Can't find" <+> text path
+noHsFileErr :: DynFlags -> SrcSpan -> String -> IO a
+noHsFileErr dflags loc path
+  = throwOneError $ mkPlainErrMsg dflags loc $ text "Can't find" <+> text path
  
-packageModErr :: ModuleName -> IO a
-packageModErr mod
-  = throwOneError $ mkPlainErrMsg noSrcSpan $
+packageModErr :: DynFlags -> ModuleName -> IO a
+packageModErr dflags mod
+  = throwOneError $ mkPlainErrMsg dflags noSrcSpan $
         text "module" <+> quotes (ppr mod) <+> text "is a package module"
 
-multiRootsErr :: [ModSummary] -> IO ()
-multiRootsErr [] = panic "multiRootsErr"
-multiRootsErr summs@(summ1:_)
-  = throwOneError $ mkPlainErrMsg noSrcSpan $
+multiRootsErr :: DynFlags -> [ModSummary] -> IO ()
+multiRootsErr _      [] = panic "multiRootsErr"
+multiRootsErr dflags summs@(summ1:_)
+  = throwOneError $ mkPlainErrMsg dflags noSrcSpan $
         text "module" <+> quotes (ppr mod) <+> 
         text "is defined in multiple files:" <+>
         sep (map text files)

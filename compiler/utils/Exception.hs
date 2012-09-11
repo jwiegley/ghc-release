@@ -6,12 +6,10 @@ module Exception
     )
     where
 
-import Prelude hiding (catch)
-
 import Control.Exception
 
 catchIO :: IO a -> (IOException -> IO a) -> IO a
-catchIO = catch
+catchIO = Control.Exception.catch
 
 handleIO :: (IOException -> IO a) -> IO a -> IO a
 handleIO = flip catchIO
@@ -74,19 +72,11 @@ class Monad m => ExceptionMonad m where
       _ <- sequel
       return r
 
-#if __GLASGOW_HASKELL__ < 613
 instance ExceptionMonad IO where
-  gcatch    = catch
-  gmask f   = block $ f unblock
-  gblock    = block
-  gunblock  = unblock
-#else
-instance ExceptionMonad IO where
-  gcatch    = catch
+  gcatch    = Control.Exception.catch
   gmask f   = mask (\x -> f x)
   gblock    = block
   gunblock  = unblock
-#endif
 
 gtry :: (ExceptionMonad m, Exception e) => m a -> m (Either e a)
 gtry act = gcatch (act >>= \a -> return (Right a))

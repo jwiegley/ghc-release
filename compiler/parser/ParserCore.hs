@@ -19,7 +19,7 @@ import OccName
 import TypeRep ( TyThing(..) )
 import Type ( Kind,
               liftedTypeKindTyCon, openTypeKindTyCon, unliftedTypeKindTyCon,
-              argTypeKindTyCon, ubxTupleKindTyCon, mkTyConApp
+              mkTyConApp
             )
 import Kind( mkArrowKind )
 import Name( Name, nameOccName, nameModule, mkExternalName, wiredInNameTyThing_maybe )
@@ -494,11 +494,11 @@ happyReduction_12 (happy_x_8 `HappyStk`
 	case happyOut30 happy_x_3 of { happy_var_3 -> 
 	case happyOut14 happy_x_6 of { happy_var_6 -> 
 	happyIn12
-		 (TyData { tcdND = DataType, tcdCtxt = noLoc [] 
-	         , tcdLName = noLoc (ifaceExtRdrName happy_var_2)
-	         , tcdTyVars = map toHsTvBndr happy_var_3
-	         , tcdTyPats = Nothing, tcdKindSig = Nothing
-	         , tcdCons = happy_var_6, tcdDerivs = Nothing }
+		 (TyDecl { tcdLName = noLoc (ifaceExtRdrName happy_var_2)
+                 , tcdTyVars = mkHsQTvs (map toHsTvBndr happy_var_3)
+                 , tcdTyDefn = TyData { td_ND = DataType, td_ctxt = noLoc [] 
+     	                              , td_kindSig = Nothing
+                                      , td_cons = happy_var_6, td_derivs = Nothing } }
 	) `HappyStk` happyRest}}}
 
 happyReduce_13 = happyReduce 5# 8# happyReduction_13
@@ -513,11 +513,11 @@ happyReduction_13 (happy_x_5 `HappyStk`
 	case happyOut13 happy_x_4 of { happy_var_4 -> 
 	happyIn12
 		 (let tc_rdr = ifaceExtRdrName happy_var_2 in
-		    TyData { tcdND = NewType, tcdCtxt = noLoc []
-			     , tcdLName = noLoc tc_rdr
-			     , tcdTyVars = map toHsTvBndr happy_var_3
-			     , tcdTyPats = Nothing, tcdKindSig = Nothing
-			     , tcdCons = happy_var_4 (rdrNameOcc tc_rdr), tcdDerivs = Nothing }
+          TyDecl { tcdLName = noLoc tc_rdr
+	         , tcdTyVars = mkHsQTvs (map toHsTvBndr happy_var_3)
+                 , tcdTyDefn = TyData { td_ND = NewType, td_ctxt = noLoc []
+		                      , td_kindSig = Nothing
+                                      , td_cons = happy_var_4 (rdrNameOcc tc_rdr), td_derivs = Nothing } }
 	) `HappyStk` happyRest}}}
 
 happyReduce_14 = happySpecReduce_0  9# happyReduction_14
@@ -1017,7 +1017,7 @@ happyReduction_71 happy_x_3
 	case happyOut19 happy_x_3 of { happy_var_3 -> 
 	happyIn35
 		 (IfaceFCall (ForeignCall.CCall 
-                                                    (CCallSpec (StaticTarget (mkFastString happy_var_2) Nothing) 
+                                                    (CCallSpec (StaticTarget (mkFastString happy_var_2) Nothing True) 
                                                                CCallConv PlaySafe)) 
                                                  happy_var_3
 	)}}
@@ -1270,16 +1270,18 @@ ifaceUnliftedTypeKind = ifaceTcType (IfaceTc unliftedTypeKindTyConName)
 ifaceArrow ifT1 ifT2 = IfaceFunTy ifT1 ifT2
 
 toHsTvBndr :: IfaceTvBndr -> LHsTyVarBndr RdrName
-toHsTvBndr (tv,k) = noLoc $ KindedTyVar (mkRdrUnqual (mkTyVarOccFS tv)) (toHsKind k) placeHolderKind
+toHsTvBndr (tv,k) = noLoc $ KindedTyVar (mkRdrUnqual (mkTyVarOccFS tv)) bsig
+                  where
+                    bsig = toHsKind k
 
 ifaceExtRdrName :: Name -> RdrName
 ifaceExtRdrName name = mkOrig (nameModule name) (nameOccName name)
 ifaceExtRdrName other = pprPanic "ParserCore.ifaceExtRdrName" (ppr other)
 
 add_forall tv (L _ (HsForAllTy exp tvs cxt t))
-  = noLoc $ HsForAllTy exp (tv:tvs) cxt t
+  = noLoc $ HsForAllTy exp (mkHsQTvs (tv : hsQTvBndrs tvs)) cxt t
 add_forall tv t
-  = noLoc $ HsForAllTy Explicit [tv] (noLoc []) t
+  = noLoc $ HsForAllTy Explicit (mkHsQTvs [tv]) (noLoc []) t
   
 happyError :: P a 
 happyError s l = failP (show l ++ ": Parse error\n") (take 100 s) l

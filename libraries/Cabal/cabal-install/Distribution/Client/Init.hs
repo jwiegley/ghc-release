@@ -24,34 +24,50 @@ module Distribution.Client.Init (
 import System.IO
   ( hSetBuffering, stdout, BufferMode(..) )
 import System.Directory
-  ( getCurrentDirectory )
+  ( getCurrentDirectory, doesDirectoryExist )
+import System.FilePath
+  ( (</>) )
 import Data.Time
   ( getCurrentTime, utcToLocalTime, toGregorian, localDay, getCurrentTimeZone )
 
 import Data.List
-  ( intersperse, (\\) )
+  ( intersperse, intercalate, nub, groupBy, (\\) )
 import Data.Maybe
-  ( fromMaybe, isJust )
+  ( fromMaybe, isJust, catMaybes )
+import Data.Function
+  ( on )
+import qualified Data.Map as M
 import Data.Traversable
   ( traverse )
+import Control.Applicative
+  ( (<$>) )
 import Control.Monad
   ( when )
 #if MIN_VERSION_base(3,0,0)
 import Control.Monad
   ( (>=>), join )
 #endif
+import Control.Arrow
+  ( (&&&) )
 
 import Text.PrettyPrint hiding (mode, cat)
 
 import Data.Version
   ( Version(..) )
 import Distribution.Version
-  ( orLaterVersion )
+  ( orLaterVersion, withinVersion, VersionRange )
+import Distribution.Verbosity
+  ( Verbosity )
+import Distribution.ModuleName
+  ( ModuleName, fromString )
+import Distribution.InstalledPackageInfo
+  ( InstalledPackageInfo, sourcePackageId, exposed )
+import qualified Distribution.Package as P
 
 import Distribution.Client.Init.Types
   ( InitFlags(..), PackageType(..), Category(..) )
 import Distribution.Client.Init.Licenses
-  ( bsd3, gplv2, gplv3, lgpl2, lgpl3 )
+  ( bsd3, gplv2, gplv3, lgpl2, lgpl3, apache20 )
 import Distribution.Client.Init.Heuristics
   ( guessPackageName, guessAuthorNameMail, SourceFileEntry(..), scanForModules, neededBuildPrograms )
 
@@ -64,14 +80,30 @@ import Distribution.ReadE
   ( runReadE, readP_to_E )
 import Distribution.Simple.Setup
   ( Flag(..), flagToMaybe )
+import Distribution.Simple.Configure
+  ( getInstalledPackages )
+import Distribution.Simple.Compiler
+  ( PackageDBStack, Compiler )
+import Distribution.Simple.Program
+  ( ProgramConfiguration )
+import Distribution.Simple.PackageIndex
+  ( PackageIndex, moduleNameIndex )
 import Distribution.Text
   ( display, Text(..) )
 
-initCabal :: InitFlags -> IO ()
-initCabal initFlags = do
+initCabal :: Verbosity
+          -> PackageDBStack
+          -> Compiler
+          -> ProgramConfiguration
+          -> InitFlags
+          -> IO ()
+initCabal verbosity packageDBs comp conf initFlags = do
+
+  installedPkgIndex <- getInstalledPackages verbosity comp packageDBs conf
+
   hSetBuffering stdout NoBuffering
 
-  initFlags' <- extendFlags initFlags
+  initFlags' <- extendFlags installedPkgIndex initFlags
 
   writeLicense initFlags'
   writeSetupFile initFlags'
@@ -85,18 +117,19 @@ initCabal initFlags = do
 
 -- | Fill in more details by guessing, discovering, or prompting the
 --   user.
-extendFlags :: InitFlags -> IO InitFlags
-extendFlags =  getPackageName
-           >=> getVersion
-           >=> getLicense
-           >=> getAuthorInfo
-           >=> getHomepage
-           >=> getSynopsis
-           >=> getCategory
-           >=> getLibOrExec
-           >=> getGenComments
-           >=> getSrcDir
-           >=> getModulesAndBuildTools
+extendFlags :: PackageIndex -> InitFlags -> IO InitFlags
+extendFlags pkgIx =
+      getPackageName
+  >=> getVersion
+  >=> getLicense
+  >=> getAuthorInfo
+  >=> getHomepage
+  >=> getSynopsis
+  >=> getCategory
+  >=> getLibOrExec
+  >=> getGenComments
+  >=> getSrcDir
+  >=> getModulesBuildToolsAndDeps pkgIx
 
 -- | Combine two actions which may return a value, preferring the first. That
 --   is, run the second action only if the first doesn't return a value.
@@ -145,7 +178,7 @@ getLicense flags = do
   return $ flags { license = maybeToFlag lic }
   where
     listedLicenses =
-      knownLicenses \\ [GPL Nothing, LGPL Nothing, OtherLicense]
+      knownLicenses \\ [GPL Nothing, LGPL Nothing, Apache Nothing, OtherLicense]
 
 -- | The author's name and email. Prompt, or try to guess from an existing
 --   darcs repo.
@@ -169,7 +202,7 @@ getHomepage :: InitFlags -> IO InitFlags
 getHomepage flags = do
   hp  <- queryHomepage
   hp' <-     return (flagToMaybe $ homepage flags)
-         ?>> maybePrompt flags (promptStr "Project homepage/repo URL" hp)
+         ?>> maybePrompt flags (promptStr "Project homepage URL" hp)
          ?>> return hp
 
   return $ flags { homepage = maybeToFlag hp' }
@@ -217,38 +250,108 @@ getGenComments flags = do
                  ?>> return (Just False)
   return $ flags { noComments = maybeToFlag (fmap not genComments) }
   where
-    promptMsg = "Include documentation on what each field means y/n"
+    promptMsg = "Include documentation on what each field means (y/n)"
 
 -- | Try to guess the source root directory (don't prompt the user).
 getSrcDir :: InitFlags -> IO InitFlags
 getSrcDir flags = do
   srcDirs <-     return (sourceDirs flags)
-             ?>> guessSourceDirs
+             ?>> Just `fmap` (guessSourceDirs flags)
 
   return $ flags { sourceDirs = srcDirs }
 
--- XXX
--- | Try to guess source directories.
-guessSourceDirs :: IO (Maybe [String])
-guessSourceDirs = return Nothing
+-- | Try to guess source directories.  Could try harder; for the
+--   moment just looks to see whether there is a directory called 'src'.
+guessSourceDirs :: InitFlags -> IO [String]
+guessSourceDirs flags = do
+  dir      <- fromMaybe getCurrentDirectory
+                (fmap return . flagToMaybe $ packageDir flags)
+  srcIsDir <- doesDirectoryExist (dir </> "src")
+  if srcIsDir
+    then return ["src"]
+    else return []
 
 -- | Get the list of exposed modules and extra tools needed to build them.
-getModulesAndBuildTools :: InitFlags -> IO InitFlags
-getModulesAndBuildTools flags = do
+getModulesBuildToolsAndDeps :: PackageIndex -> InitFlags -> IO InitFlags
+getModulesBuildToolsAndDeps pkgIx flags = do
   dir <- fromMaybe getCurrentDirectory
                    (fmap return . flagToMaybe $ packageDir flags)
 
   -- XXX really should use guessed source roots.
   sourceFiles <- scanForModules dir
 
-  mods <-      return (exposedModules flags)
+  Just mods <-      return (exposedModules flags)
            ?>> (return . Just . map moduleName $ sourceFiles)
 
   tools <-     return (buildTools flags)
            ?>> (return . Just . neededBuildPrograms $ sourceFiles)
 
-  return $ flags { exposedModules = mods
-                 , buildTools     = tools }
+  deps <-      return (dependencies flags)
+           ?>> Just <$> importsToDeps flags
+                        (fromString "Prelude" : concatMap imports sourceFiles)
+                        pkgIx
+
+  return $ flags { exposedModules = Just mods
+                 , buildTools     = tools
+                 , dependencies   = deps
+                 }
+
+importsToDeps :: InitFlags -> [ModuleName] -> PackageIndex -> IO [P.Dependency]
+importsToDeps flags mods pkgIx = do
+
+  let modMap :: M.Map ModuleName [InstalledPackageInfo]
+      modMap  = M.map (filter exposed) $ moduleNameIndex pkgIx
+
+      modDeps :: [(ModuleName, Maybe [InstalledPackageInfo])]
+      modDeps = map (id &&& flip M.lookup modMap) mods
+
+  message flags "\nGuessing dependencies..."
+  nub . catMaybes <$> mapM (chooseDep flags) modDeps
+
+-- Given a module and a list of installed packages providing it,
+-- choose a dependency (i.e. package + version range) to use for that
+-- module.
+chooseDep :: InitFlags -> (ModuleName, Maybe [InstalledPackageInfo])
+          -> IO (Maybe P.Dependency)
+
+chooseDep flags (m, Nothing)
+  = message flags ("\nWarning: no package found providing " ++ display m ++ ".")
+    >> return Nothing
+
+chooseDep flags (m, Just [])
+  = message flags ("\nWarning: no package found providing " ++ display m ++ ".")
+    >> return Nothing
+
+    -- We found some packages: group them by name.
+chooseDep flags (m, Just ps)
+  = case pkgGroups of
+      -- if there's only one group, i.e. multiple versions of a single package,
+      -- we make it into a dependency, choosing the latest-ish version (see toDep).
+      [grp] -> Just <$> toDep grp
+      -- otherwise, we refuse to choose between different packages and make the user
+      -- do it.
+      grps  -> do message flags ("\nWarning: multiple packages found providing "
+                                 ++ display m
+                                 ++ ": " ++ intercalate ", " (map (display . P.pkgName . head) grps))
+                  message flags ("You will need to pick one and manually add it to the Build-depends: field.")
+                  return Nothing
+  where
+    pkgGroups = groupBy ((==) `on` P.pkgName) (map sourcePackageId ps)
+
+    -- Given a list of available versions of the same package, pick a dependency.
+    toDep :: [P.PackageIdentifier] -> IO P.Dependency
+
+    -- If only one version, easy.  We change e.g. 0.4.2  into  0.4.*
+    toDep [pid] = return $ P.Dependency (P.pkgName pid) (pvpize . P.pkgVersion $ pid)
+
+    -- Otherwise, choose the latest version and issue a warning.
+    toDep pids  = do
+      message flags ("\nWarning: multiple versions of " ++ display (P.pkgName . head $ pids) ++ " provide " ++ display m ++ ", choosing the latest.")
+      return $ P.Dependency (P.pkgName . head $ pids)
+                            (pvpize . maximum . map P.pkgVersion $ pids)
+
+    pvpize :: Version -> VersionRange
+    pvpize v = withinVersion $ v { versionBranch = take 2 (versionBranch v) }
 
 ---------------------------------------------------------------------------
 --  Prompting/user interaction  -------------------------------------------
@@ -370,7 +473,7 @@ readMaybe s = case reads s of
 
 writeLicense :: InitFlags -> IO ()
 writeLicense flags = do
-  message flags "Generating LICENSE..."
+  message flags "\nGenerating LICENSE..."
   year <- getYear
   let licenseFile =
         case license flags of
@@ -391,6 +494,9 @@ writeLicense flags = do
 
           Flag (LGPL (Just (Version {versionBranch = [3]})))
             -> Just lgpl3
+
+          Flag (Apache (Just (Version {versionBranch = [2, 0]})))
+            -> Just apache20
 
           _ -> Nothing
 
@@ -416,6 +522,8 @@ writeSetupFile flags = do
     , "main = defaultMain"
     ]
 
+-- XXX ought to do something sensible if a .cabal file already exists,
+-- instead of overwriting.
 writeCabalFile :: InitFlags -> IO Bool
 writeCabalFile flags@(InitFlags{packageName = NoFlag}) = do
   message flags "Error: no package name provided."
@@ -449,7 +557,10 @@ generateCabalFile fileName c =
                 True
 
        , field  "version"       (version       c)
-                (Just "The package version.  See the Haskell package versioning policy (http://www.haskell.org/haskellwiki/Package_versioning_policy) for standards guiding when and how versions should be incremented.")
+                (Just $ "The package version.  See the Haskell package versioning policy (PVP) for standards guiding when and how versions should be incremented.\nhttp://www.haskell.org/haskellwiki/Package_versioning_policy\n"
+                ++ "PVP summary:      +-+------- breaking API changes\n"
+                ++ "                  | | +----- non-breaking API additions\n"
+                ++ "                  | | | +--- code changes with no API change")
                 True
 
        , fieldS "synopsis"      (synopsis      c)
@@ -578,8 +689,16 @@ generateCabalFile fileName c =
                             lineLength = 76,
                             ribbonsPerLine = 1.05
                           }
-                        . fsep . map text . words $ t
+                        . vcat
+                        . map (fcat . map text . breakLine)
+                        . lines
+                        $ t
    showComment Nothing  = text ""
+
+   breakLine  [] = []
+   breakLine  cs = case break (==' ') cs of (w,cs') -> w : breakLine' cs'
+   breakLine' [] = []
+   breakLine' cs = case span (==' ') cs of (w,cs') -> w : breakLine cs'
 
 -- | Generate warnings for missing fields etc.
 generateWarnings :: InitFlags -> IO ()

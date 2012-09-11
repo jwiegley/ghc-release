@@ -11,6 +11,8 @@ This module is nominally ``subordinate'' to @TcDeriv@, which is the
 This is where we do all the grimy bindings' generation.
 
 \begin{code}
+{-# LANGUAGE ScopedTypeVariables #-}
+
 {-# OPTIONS -fno-warn-tabs #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
@@ -47,8 +49,10 @@ import BasicTypes
 import DataCon
 import Name
 
+import DynFlags
 import HscTypes
 import PrelInfo
+import FamInstEnv( FamInst )
 import MkCore	( eRROR_ID )
 import PrelNames hiding (error_RDR)
 import PrimOp
@@ -90,7 +94,7 @@ data DerivStuff     -- Please add this auxiliary stuff
 
   -- Generics
   | DerivTyCon TyCon      -- New data types
-  | DerivFamInst TyCon    -- New type family instances
+  | DerivFamInst FamInst  -- New type family instances
 
   -- New top-level auxiliary bindings 
   | DerivHsBind (LHsBind RdrName, LSig RdrName) -- Also used for SYB
@@ -1266,11 +1270,12 @@ we generate
 
     
 \begin{code}
-gen_Data_binds :: SrcSpan
+gen_Data_binds :: DynFlags
+                -> SrcSpan
 	       -> TyCon 
 	       -> (LHsBinds RdrName,	-- The method bindings
 		   BagDerivStuff)	-- Auxiliary bindings
-gen_Data_binds loc tycon
+gen_Data_binds dflags loc tycon
   = (listToBag [gfoldl_bind, gunfold_bind, toCon_bind, dataTypeOf_bind]
      `unionBags` gcast_binds,
 		-- Auxiliary definitions: the data type and constructors
@@ -1290,7 +1295,7 @@ gen_Data_binds loc tycon
         sig_ty   = nlHsTyVar dataType_RDR
         constrs  = [nlHsVar (mk_constr_name con) | con <- tyConDataCons tycon]
         rhs = nlHsVar mkDataType_RDR 
-              `nlHsApp` nlHsLit (mkHsString (showSDocOneLine (ppr tycon)))
+              `nlHsApp` nlHsLit (mkHsString (showSDocOneLine dflags (ppr tycon)))
               `nlHsApp` nlList constrs
 
     genDataDataCon :: DataCon -> (LHsBind RdrName, LSig RdrName)
@@ -1518,7 +1523,8 @@ data FFoldType a      -- Describes how to fold over a Type in a functor like way
 	, ft_forall  :: TcTyVar -> a -> a   -- Forall type                                     
      }
 
-functorLikeTraverse :: TyVar	     -- ^ Variable to look for
+functorLikeTraverse :: forall a. 
+                       TyVar	     -- ^ Variable to look for
 		    -> FFoldType a   -- ^ How to fold
 		    -> Type	     -- ^ Type to process
 		    -> a
@@ -1528,29 +1534,35 @@ functorLikeTraverse var (FT { ft_triv = caseTrivial,     ft_var = caseVar
 			    , ft_bad_app = caseWrongArg, ft_forall = caseForAll })
 		    ty
   = fst (go False ty)
-  where -- go returns (result of type a, does type contain var)
-        go co ty | Just ty' <- coreView ty = go co ty'
-        go co (TyVarTy    v) | v == var = (if co then caseCoVar else caseVar,True)
-        go co (FunTy x y)  | isPredTy x = go co y
-                           | xc || yc   = (caseFun xr yr,True)
-            where (xr,xc) = go (not co) x
-                  (yr,yc) = go co       y
-        go co (AppTy    x y) | xc = (caseWrongArg,   True)
-                             | yc = (caseTyApp x yr, True)
-            where (_, xc) = go co x
-                  (yr,yc) = go co y
-        go co ty@(TyConApp con args)
-               | not (or xcs)     = (caseTrivial, False)   -- Variable does not occur
-               -- At this point we know that xrs, xcs is not empty,
-               -- and at least one xr is True
-               | isTupleTyCon con = (caseTuple (tupleTyConSort con) xrs, True)
-               | or (init xcs)    = (caseWrongArg, True)   -- T (..var..)    ty
-               | otherwise        =                        -- T (..no var..) ty
-                                    (caseTyApp (fst (splitAppTy ty)) (last xrs), True)
-            where (xrs,xcs) = unzip (map (go co) args)
-        go co (ForAllTy v x) | v /= var && xc = (caseForAll v xr,True)
-            where (xr,xc) = go co x
-        go _ _ = (caseTrivial,False)
+  where 
+    go :: Bool        -- Covariant or contravariant context
+       -> Type 
+       -> (a, Bool)   -- (result of type a, does type contain var)
+
+    go co ty | Just ty' <- coreView ty = go co ty'
+    go co (TyVarTy    v) | v == var = (if co then caseCoVar else caseVar,True)
+    go co (FunTy x y)  | isPredTy x = go co y
+                       | xc || yc   = (caseFun xr yr,True)
+        where (xr,xc) = go (not co) x
+              (yr,yc) = go co       y
+    go co (AppTy    x y) | xc = (caseWrongArg,   True)
+                         | yc = (caseTyApp x yr, True)
+        where (_, xc) = go co x
+              (yr,yc) = go co y
+    go co ty@(TyConApp con args)
+       | not (or xcs)     = (caseTrivial, False)   -- Variable does not occur
+       -- At this point we know that xrs, xcs is not empty,
+       -- and at least one xr is True
+       | isTupleTyCon con = (caseTuple (tupleTyConSort con) xrs, True)
+       | or (init xcs)    = (caseWrongArg, True)         -- T (..var..)    ty
+       | otherwise        = case splitAppTy_maybe ty of  -- T (..no var..) ty
+                              Nothing -> (caseWrongArg, True)   -- Non-decomposable (eg type function)
+                              Just (fun_ty, _) -> (caseTyApp fun_ty (last xrs), True)
+       where 
+         (xrs,xcs) = unzip (map (go co) args)
+    go co (ForAllTy v x) | v /= var && xc = (caseForAll v xr,True)
+        where (xr,xc) = go co x
+    go _ _ = (caseTrivial,False)
 
 -- Return all syntactic subterms of ty that contain var somewhere
 -- These are the things that should appear in instance constraints
@@ -1793,8 +1805,8 @@ genAuxBindSpec loc (DerivMaxTag tycon)
 type SeparateBagsDerivStuff = -- AuxBinds and SYB bindings
                               ( Bag (LHsBind RdrName, LSig RdrName)
                                 -- Extra bindings (used by Generic only)
-                              , Bag TyCon -- Extra top-level datatypes
-                              , Bag TyCon -- Extra family instances
+                              , Bag TyCon   -- Extra top-level datatypes
+                              , Bag FamInst -- Extra family instances
                               , Bag (InstInfo RdrName)) -- Extra instances
 
 genAuxBinds :: SrcSpan -> BagDerivStuff -> SeparateBagsDerivStuff

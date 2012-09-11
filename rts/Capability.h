@@ -46,6 +46,11 @@ struct Capability_ {
     // catching unsafe call-ins.
     rtsBool in_haskell;
 
+    // Has there been any activity on this Capability since the last GC?
+    nat idle;
+
+    rtsBool disabled;
+
     // The run queue.  The Task owning this Capability has exclusive
     // access to its run queue, so can wake up threads without
     // taking a lock, and the common path through the scheduler is
@@ -71,6 +76,8 @@ struct Capability_ {
 
     // block for allocating pinned objects into
     bdescr *pinned_object_block;
+    // full pinned object blocks allocated since the last GC
+    bdescr *pinned_object_blocks;
 
     // Context switch flag.  When non-zero, this means: stop running
     // Haskell code, and switch threads.
@@ -91,7 +98,11 @@ struct Capability_ {
     Task *spare_workers;
     nat n_spare_workers; // count of above
 
-    // This lock protects running_task, returning_tasks_{hd,tl}, wakeup_queue.
+    // This lock protects:
+    //    running_task
+    //    returning_tasks_{hd,tl}
+    //    wakeup_queue
+    //    inbox
     Mutex lock;
 
     // Tasks waiting to return from a foreign call, or waiting to make
@@ -103,6 +114,7 @@ struct Capability_ {
     Task *returning_tasks_tl;
 
     // Messages, or END_TSO_QUEUE.
+    // Locks required: cap->lock
     Message *inbox;
 
     SparkPool *sparks;
@@ -110,6 +122,8 @@ struct Capability_ {
     // Stats on spark creation/conversion
     SparkCounters spark_stats;
 #endif
+    // Total words allocated by this cap since rts start
+    lnat total_allocated;
 
     // Per-capability STM-related data
     StgTVarWatchQueue *free_tvar_watch_queues;
@@ -194,6 +208,8 @@ INLINE_HEADER void releaseCapability_ (Capability* cap STG_UNUSED,
 // declared in includes/rts/Threads.h:
 // extern nat n_capabilities;
 
+extern nat enabled_capabilities;
+
 // Array of all the capabilities
 //
 extern Capability *capabilities;
@@ -241,7 +257,7 @@ EXTERN_INLINE void recordClosureMutated (Capability *cap, StgClosure *p);
 // On return: *pCap is NULL if the capability was released.  The
 // current task should then re-acquire it using waitForCapability().
 //
-void yieldCapability (Capability** pCap, Task *task);
+rtsBool yieldCapability (Capability** pCap, Task *task, rtsBool gcAllowed);
 
 // Acquires a capability for doing some work.
 //
@@ -319,7 +335,7 @@ void traverseSparkQueues (evac_fn evac, void *user);
 
 #ifdef THREADED_RTS
 
-INLINE_HEADER rtsBool emptyInbox(Capability *cap);;
+INLINE_HEADER rtsBool emptyInbox(Capability *cap);
 
 #endif // THREADED_RTS
 

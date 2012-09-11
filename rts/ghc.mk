@@ -28,7 +28,7 @@ all_rts : $(ALL_RTS_LIBS)
 
 ALL_DIRS = hooks parallel sm eventlog
 
-ifeq "$(HOSTPLATFORM)" "i386-unknown-mingw32"
+ifeq "$(HostOS_CPP)" "mingw32"
 ALL_DIRS += win32
 else
 ALL_DIRS += posix
@@ -62,7 +62,7 @@ rts/dist/build/sm/Evac_thr.c : rts/sm/Evac.c | $$(dir $$@)/.
 rts/dist/build/sm/Scav_thr.c : rts/sm/Scav.c | $$(dir $$@)/.
 	cp $< $@
 
-rts_H_FILES := $(wildcard rts/*.h)
+rts_H_FILES := $(wildcard rts/*.h rts/*/*.h)
 
 ifeq "$(USE_DTRACE)" "YES"
 DTRACEPROBES_H = rts/dist/build/RtsProbes.h
@@ -81,13 +81,12 @@ rts/libs.depend : $(GHC_PKG_INPLACE)
 # 	These are made from rts/win32/libHS*.def which contain lists of
 # 	all the symbols in those libraries used by the RTS.
 #
-ifeq  "$(HOSTPLATFORM)" "i386-unknown-mingw32" 
+ifeq "$(HostOS_CPP)" "mingw32" 
 
 ALL_RTS_DEF_LIBNAMES 	= base ghc-prim
 ALL_RTS_DEF_LIBS	= \
 	rts/dist/build/win32/libHSbase.dll.a \
-	rts/dist/build/win32/libHSghc-prim.dll.a \
-	libffi/build/inst/lib/libffi.dll.a
+	rts/dist/build/win32/libHSghc-prim.dll.a
 
 # -- import libs for the regular Haskell libraries
 define make-importlib-def # args $1 = lib name
@@ -116,7 +115,7 @@ $(rts_ffi_objs_stamp): $(libffi_STATIC_LIB) $(TOUCH_DEP) | $$(dir $$@)/.
 rts/dist/build/libffi$(soext): libffi/build/inst/lib/libffi$(soext)
 	cp libffi/build/inst/lib/libffi$(soext)* rts/dist/build
 
-rts/dist/build/libffi-5.dll: libffi/build/inst/bin/libffi-5.dll
+rts/dist/build/$(LIBFFI_DLL): libffi/build/inst/bin/$(LIBFFI_DLL)
 	cp $< $@
 endif
 
@@ -133,6 +132,12 @@ rts_dist_$1_CC_OPTS = -g -O0
 else
 rts_dist_$1_HC_OPTS = $$(GhcRtsHcOpts)
 rts_dist_$1_CC_OPTS = $$(GhcRtsCcOpts)
+endif
+
+ifneq "$$(findstring dyn, $1)" ""
+ifeq "$$(HostOS_CPP)" "mingw32" 
+rts_dist_$1_CC_OPTS += -DCOMPILING_WINDOWS_DLL
+endif
 endif
 
 ifneq "$$(findstring thr, $1)" ""
@@ -162,7 +167,7 @@ ifeq "$(TargetOS_CPP)" "solaris2"
 rts_$1_DTRACE_OBJS = rts/dist/build/RtsProbes.$$($1_osuf)
 
 rts/dist/build/RtsProbes.$$($1_osuf) : $$(rts_$1_OBJS)
-	$(DTRACE) -G -C -Iincludes -DDTRACE -s rts/RtsProbes.d -o \
+	$(DTRACE) -G -C $$(addprefix -I,$$(GHC_INCLUDE_DIRS)) -DDTRACE -s rts/RtsProbes.d -o \
 		$$@ $$(rts_$1_OBJS)
 endif
 endif
@@ -171,11 +176,11 @@ rts_dist_$1_CC_OPTS += -DRtsWay=\"rts_$1\"
 
 # Making a shared library for the RTS.
 ifneq "$$(findstring dyn, $1)" ""
-ifeq "$$(HOSTPLATFORM)" "i386-unknown-mingw32"
-$$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) rts/libs.depend rts/dist/build/libffi-5.dll
+ifeq "$$(HostOS_CPP)" "mingw32" 
+$$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) rts/libs.depend rts/dist/build/$$(LIBFFI_DLL)
 	"$$(RM)" $$(RM_OPTS) $$@
 	"$$(rts_dist_HC)" -package-name rts -shared -dynamic -dynload deploy \
-	  -no-auto-link-packages -Lrts/dist/build -lffi-5 `cat rts/libs.depend` $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) -o $$@
+	  -no-auto-link-packages -Lrts/dist/build -l$(LIBFFI_WINDOWS_LIB) `cat rts/libs.depend` $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) -o $$@
 else
 $$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) rts/libs.depend rts/dist/build/libffi$$(soext)
 	"$$(RM)" $$(RM_OPTS) $$@
@@ -236,7 +241,7 @@ WARNING_OPTS += -Wredundant-decls
 # support for registerised builds on this arch. -- BL 2010/02/03
 # WARNING_OPTS += -Wcast-align
 
-STANDARD_OPTS += -Iincludes -Irts -Irts/dist/build
+STANDARD_OPTS += $(addprefix -I,$(GHC_INCLUDE_DIRS)) -Irts -Irts/dist/build
 # COMPILING_RTS is only used when building Win32 DLL support.
 STANDARD_OPTS += -DCOMPILING_RTS
 
@@ -505,7 +510,7 @@ endif
 
 INSTALL_LIBS += $(ALL_RTS_LIBS)
 INSTALL_LIBS += $(wildcard rts/dist/build/libffi$(soext)*)
-INSTALL_LIBS += $(wildcard rts/dist/build/libffi-5.dll)
+INSTALL_LIBS += $(wildcard rts/dist/build/$(LIBFFI_DLL))
 
 install: install_libffi_headers
 

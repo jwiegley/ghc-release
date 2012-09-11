@@ -50,7 +50,9 @@ if config.arch == 'i386':
 else:
    sse2_opts = ''
 
-test('T4321', omit_ways(['ghci']), compile_and_run, ['-O ' + sse2_opts])
+test('T4321',
+     [omit_ways(['ghci']), expect_broken(4321)],
+     compile_and_run, ['-O ' + sse2_opts])
 
 test('T3736',
      extra_clean(['T3736.speed.f32']),
@@ -117,7 +119,8 @@ test('T5113',
       if_wordsize(64,
           stats_num_field('bytes allocated', 8000000,
                                              9000000)),
-      only_ways(['normal'])
+      only_ways(['normal']),
+      expect_broken(7046)
       ],
      compile_and_run,
      ['-O'])
@@ -217,3 +220,20 @@ test('T5237',
      ],
     compile_and_run,
     ['-O ' + sse2_opts])
+
+test('T5536',
+     [if_wordsize(32,
+          stats_num_field('bytes allocated', 1150000000,
+                                             1250000000)),
+                           # expected value: 1246287228 (i386/Linux)
+      if_wordsize(64,
+          stats_num_field('bytes allocated', 2480000000,
+                                             2510000000)),
+                           # expected value: 2492589480 (amd64/Linux)
+     extra_clean(['T5536.data']),
+     ignore_output,
+     only_ways(['normal'])
+     ],
+    compile_and_run,
+    ['-O'])
+

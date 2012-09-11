@@ -2,6 +2,8 @@
 module Main (main) where
 
 import Data.Bits
+import Data.Int
+import Data.Word
 
 main :: IO ()
 main = do p "plusInteger"        plusInteger
@@ -48,8 +50,15 @@ main = do p "plusInteger"        plusInteger
           p "remInteger"        remInteger
           p "doubleFromInteger" doubleFromInteger
           p "floatFromInteger"  floatFromInteger
+          p "decodeIntegerDouble" decodeIntegerDouble
           p "encodeIntegerDouble" encodeIntegerDouble
           p "encodeIntegerFloat"  encodeIntegerFloat
+          p "integerToWord"       integerToWord
+          p "integerToInt"        integerToInt
+          p "wordToInteger"       wordToInteger
+          p "intToInteger"        intToInteger
+          p "word64ToInteger"     word64ToInteger
+          p "int64ToInteger"      int64ToInteger
 
     where p :: Show a => String -> a -> IO ()
           p str x = putStrLn (str ++ ": " ++ show x)
@@ -178,4 +187,25 @@ encodeIntegerDouble = encodeFloat 100069 2
 
 encodeIntegerFloat :: Float
 encodeIntegerFloat = encodeFloat 100070 2
+
+integerToWord :: Word
+integerToWord = fromInteger 100071 + 100072
+
+integerToInt :: Int
+integerToInt = fromInteger 100073 + 100074
+
+wordToInteger :: Integer
+wordToInteger = toInteger (100075 :: Word) + 100076
+
+intToInteger :: Integer
+intToInteger = toInteger (100077 :: Int) + 100078
+
+word64ToInteger :: Integer
+word64ToInteger = toInteger (100079 :: Word64) + 100080
+
+int64ToInteger :: Integer
+int64ToInteger = toInteger (100081 :: Int64) + 100082
+
+decodeIntegerDouble :: (Integer, Int)
+decodeIntegerDouble = decodeFloat (100083 :: Double)
 

@@ -81,7 +81,7 @@ void dirty_MVAR(StgRegTable *reg, StgClosure *p);
 extern nursery *nurseries;
 
 void     resetNurseries       ( void );
-lnat     clearNurseries       ( void );
+lnat     clearNursery         ( Capability *cap );
 void     resizeNurseries      ( nat blocks );
 void     resizeNurseriesFixed ( nat blocks );
 lnat     countNurseryBlocks   ( void );
@@ -90,7 +90,8 @@ lnat     countNurseryBlocks   ( void );
    Stats 'n' DEBUG stuff
    -------------------------------------------------------------------------- */
 
-lnat    calcAllocated  (rtsBool count_nurseries);
+lnat    updateNurseriesStats (void);
+lnat    countLargeAllocated  (void);
 lnat    countOccupied  (bdescr *bd);
 lnat    calcNeeded     (void);
 

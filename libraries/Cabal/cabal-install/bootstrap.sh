@@ -7,7 +7,6 @@
 # It expects to be run inside the cabal-install directory.
 
 # install settings, you can override these by setting environment vars
-PREFIX=${PREFIX:-${HOME}/.cabal}
 #VERBOSE
 #EXTRA_CONFIGURE_OPTS
 
@@ -20,6 +19,7 @@ FETCH=${FETCH:-fetch}
 TAR=${TAR:-tar}
 GUNZIP=${GUNZIP:-gunzip}
 SCOPE_OF_INSTALLATION="--user"
+DEFAULT_PREFIX="${HOME}/.cabal"
 
 
 for arg in $*
@@ -30,7 +30,7 @@ do
       shift;;
     "--global")
       SCOPE_OF_INSTALLATION=${arg}
-      PREFIX="/usr/local"
+      DEFAULT_PREFIX="/usr/local"
       shift;;
     *)
       echo "Unknown argument or option, quitting: ${arg}"
@@ -43,17 +43,21 @@ do
   esac
 done
 
+PREFIX=${PREFIX:-${DEFAULT_PREFIX}}
 
 # Versions of the packages to install.
 # The version regex says what existing installed versions are ok.
-PARSEC_VER="3.1.1";    PARSEC_VER_REGEXP="[23]\."  # == 2.* || == 3.*
-NETWORK_VER="2.3.0.2"; NETWORK_VER_REGEXP="2\."    # == 2.*
-CABAL_VER="1.10.1.0";  CABAL_VER_REGEXP="1\.10\.[^0]"  # == 1.10.* && >= 1.10.1
-TRANS_VER="0.2.2.0";   TRANS_VER_REGEXP="0\.2\."   # == 0.2.*
-MTL_VER="2.0.1.0";     MTL_VER_REGEXP="[12]\."     # == 1.* || == 2.*
-HTTP_VER="4000.1.1";   HTTP_VER_REGEXP="4000\.[01]\." # == 4000.0.* || 4000.1.*
-ZLIB_VER="0.5.3.1";    ZLIB_VER_REGEXP="0\.[45]\." # == 0.4.* || ==0.5.*
-TIME_VER="1.2.0.4"     TIME_VER_REGEXP="1\.[12]\." # == 0.1.* || ==0.2.*
+PARSEC_VER="3.1.2";    PARSEC_VER_REGEXP="[23]\."  # == 2.* || == 3.*
+DEEPSEQ_VER="1.3.0.0"; DEEPSEQ_VER_REGEXP="1\.[1-9]\." # >= 1.1 && < 2
+TEXT_VER="0.11.2.0";  TEXT_VER_REGEXP="0\.([2-9]|(1[0-1]))\." # >= 0.2 && < 0.12
+NETWORK_VER="2.3.0.13"; NETWORK_VER_REGEXP="2\."    # == 2.*
+CABAL_VER="1.14.0";    CABAL_VER_REGEXP="1\.(13\.3|14\.)"  # >= 1.13.3 && < 1.15
+TRANS_VER="0.3.0.0";   TRANS_VER_REGEXP="0\.[23]\."   # >= 0.2.* && < 0.4.*
+MTL_VER="2.1.1";     MTL_VER_REGEXP="[12]\."     # == 1.* || == 2.*
+HTTP_VER="4000.2.3";   HTTP_VER_REGEXP="4000\.[012]\." # == 4000.0.* || 4000.1.* || 4000.2.*
+ZLIB_VER="0.5.3.3";    ZLIB_VER_REGEXP="0\.[45]\." # == 0.4.* || == 0.5.*
+TIME_VER="1.4"         TIME_VER_REGEXP="1\.[1234]\.?" # >= 1.1 && < 1.5
+RANDOM_VER="1.0.1.1"   RANDOM_VER_REGEXP="1\.0\." # >= 1 && < 1.1
 
 HACKAGE_URL="http://hackage.haskell.org/packages/archive"
 
@@ -86,7 +90,7 @@ ${GHC_PKG} list --global ${SCOPE_OF_INSTALLATION} > ghc-pkg.list \
 need_pkg () {
   PKG=$1
   VER_MATCH=$2
-  if grep " ${PKG}-${VER_MATCH}" ghc-pkg.list > /dev/null 2>&1
+  if egrep " ${PKG}-${VER_MATCH}" ghc-pkg.list > /dev/null 2>&1
   then
     return 1;
   else
@@ -186,20 +190,26 @@ do_pkg () {
 info_pkg "Cabal"        ${CABAL_VER}   ${CABAL_VER_REGEXP}
 info_pkg "transformers" ${TRANS_VER}   ${TRANS_VER_REGEXP}
 info_pkg "mtl"          ${MTL_VER}     ${MTL_VER_REGEXP}
+info_pkg "deepseq"      ${DEEPSEQ_VER} ${DEEPSEQ_VER_REGEXP}
+info_pkg "text"         ${TEXT_VER}    ${TEXT_VER_REGEXP}
 info_pkg "parsec"       ${PARSEC_VER}  ${PARSEC_VER_REGEXP}
 info_pkg "network"      ${NETWORK_VER} ${NETWORK_VER_REGEXP}
 info_pkg "time"         ${TIME_VER}    ${TIME_VER_REGEXP}
 info_pkg "HTTP"         ${HTTP_VER}    ${HTTP_VER_REGEXP}
 info_pkg "zlib"         ${ZLIB_VER}    ${ZLIB_VER_REGEXP}
+info_pkg "random"       ${RANDOM_VER}  ${RANDOM_VER_REGEXP}
 
 do_pkg   "Cabal"        ${CABAL_VER}   ${CABAL_VER_REGEXP}
 do_pkg   "transformers" ${TRANS_VER}   ${TRANS_VER_REGEXP}
 do_pkg   "mtl"          ${MTL_VER}     ${MTL_VER_REGEXP}
+do_pkg   "deepseq"      ${DEEPSEQ_VER} ${DEEPSEQ_VER_REGEXP}
+do_pkg   "text"         ${TEXT_VER}    ${TEXT_VER_REGEXP}
 do_pkg   "parsec"       ${PARSEC_VER}  ${PARSEC_VER_REGEXP}
 do_pkg   "network"      ${NETWORK_VER} ${NETWORK_VER_REGEXP}
 do_pkg   "time"         ${TIME_VER}    ${TIME_VER_REGEXP}
 do_pkg   "HTTP"         ${HTTP_VER}    ${HTTP_VER_REGEXP}
 do_pkg   "zlib"         ${ZLIB_VER}    ${ZLIB_VER_REGEXP}
+do_pkg   "random"       ${RANDOM_VER}  ${RANDOM_VER_REGEXP}
 
 install_pkg "cabal-install"
 

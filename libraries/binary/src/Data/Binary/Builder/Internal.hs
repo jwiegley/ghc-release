@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 #if __GLASGOW_HASKELL__ >= 701
 {-# LANGUAGE Trustworthy #-}
 #endif
@@ -7,7 +8,7 @@
 -- Copyright   : Lennart Kolmodin, Ross Paterson
 -- License     : BSD3-style (see LICENSE)
 -- 
--- Maintainer  : Lennart Kolmodin <kolmodin@dtek.chalmers.se>
+-- Maintainer  : Lennart Kolmodin <kolmodin@gmail.com>
 -- Stability   : experimental
 -- Portability : portable to Hugs and GHC
 --

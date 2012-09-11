@@ -20,6 +20,7 @@ import OldCmm
 import OldPprCmm
 import CmmNode (wrapRecExp)
 import CmmUtils
+import DynFlags
 import StaticFlags
 
 import UniqFM
@@ -61,12 +62,13 @@ cmmEliminateDeadBlocks blocks@(BasicBlock base_id _:_) =
                 stmt m (CmmStore e1 e2) = expr (expr m e1) e2
                 stmt m (CmmCall c _ as _) = f (actuals m as) c
                     where f m (CmmCallee e _) = expr m e
-                          f m (CmmPrim _) = m
+                          f m (CmmPrim _ Nothing) = m
+                          f m (CmmPrim _ (Just stmts)) = foldl' stmt m stmts
                 stmt m (CmmBranch b) = b:m
                 stmt m (CmmCondBranch e b) = b:(expr m e)
                 stmt m (CmmSwitch e bs) = catMaybes bs ++ expr m e
-                stmt m (CmmJump e as) = expr (actuals m as) e
-                stmt m (CmmReturn as) = actuals m as
+                stmt m (CmmJump e _) = expr m e
+                stmt m (CmmReturn) = m
                 actuals m as = foldl' (\m h -> expr m (hintlessCmm h)) m as
                 -- We have to do a deep fold into CmmExpr because
                 -- there may be a BlockId in the CmmBlock literal.
@@ -143,49 +145,45 @@ To inline _smi:
 -}
 
 countUses :: UserOfLocalRegs a => a -> UniqFM Int
-countUses a = foldRegsUsed (\m r -> addToUFM m r (count m r + 1)) emptyUFM a
-  where count m r = lookupWithDefaultUFM m (0::Int) r
+countUses a = foldRegsUsed (\m r -> addToUFM_C (+) m r 1) emptyUFM a
 
-cmmMiniInline :: Platform -> [CmmBasicBlock] -> [CmmBasicBlock]
-cmmMiniInline platform blocks = map do_inline blocks
+cmmMiniInline :: DynFlags -> [CmmBasicBlock] -> [CmmBasicBlock]
+cmmMiniInline dflags blocks = map do_inline blocks
   where do_inline (BasicBlock id stmts)
-          = BasicBlock id (cmmMiniInlineStmts platform (countUses blocks) stmts)
+          = BasicBlock id (cmmMiniInlineStmts dflags (countUses blocks) stmts)
 
-cmmMiniInlineStmts :: Platform -> UniqFM Int -> [CmmStmt] -> [CmmStmt]
-cmmMiniInlineStmts _        _    [] = []
-cmmMiniInlineStmts platform uses (stmt@(CmmAssign (CmmLocal (LocalReg u _)) expr) : stmts)
+cmmMiniInlineStmts :: DynFlags -> UniqFM Int -> [CmmStmt] -> [CmmStmt]
+cmmMiniInlineStmts _      _    [] = []
+cmmMiniInlineStmts dflags uses (stmt@(CmmAssign (CmmLocal (LocalReg u _)) expr) : stmts)
         -- not used: just discard this assignment
-  | Nothing <- lookupUFM uses u
-  = cmmMiniInlineStmts platform uses stmts
+  | 0 <- lookupWithDefaultUFM uses 0 u
+  = cmmMiniInlineStmts dflags uses stmts
 
-        -- used (literal): try to inline at all the use sites
-  | Just n <- lookupUFM uses u, isLit expr
-  =
-     ncgDebugTrace ("nativeGen: inlining " ++ showSDoc (pprStmt platform stmt)) $
-     case lookForInlineLit u expr stmts of
-         (m, stmts')
-             | n == m -> cmmMiniInlineStmts platform (delFromUFM uses u) stmts'
-             | otherwise ->
-                 stmt : cmmMiniInlineStmts platform (adjustUFM (\x -> x - m) uses u) stmts'
-
-        -- used (foldable to literal): try to inline at all the use sites
+        -- used (foldable to small thing): try to inline at all the use sites
   | Just n <- lookupUFM uses u,
-    e@(CmmLit _) <- wrapRecExp foldExp expr
+    e <- wrapRecExp foldExp expr,
+    isTiny e
   =
-     ncgDebugTrace ("nativeGen: inlining " ++ showSDoc (pprStmt platform stmt)) $
-     case lookForInlineLit u e stmts of
+     ncgDebugTrace ("nativeGen: inlining " ++ showSDoc dflags (pprStmt stmt)) $
+     case lookForInlineMany u e stmts of
          (m, stmts')
-             | n == m -> cmmMiniInlineStmts platform (delFromUFM uses u) stmts'
+             | n == m -> cmmMiniInlineStmts dflags (delFromUFM uses u) stmts'
              | otherwise ->
-                 stmt : cmmMiniInlineStmts platform (adjustUFM (\x -> x - m) uses u) stmts'
+                 stmt : cmmMiniInlineStmts dflags (adjustUFM (\x -> x - m) uses u) stmts'
 
         -- used once (non-literal): try to inline at the use site
   | Just 1 <- lookupUFM uses u,
     Just stmts' <- lookForInline u expr stmts
   = 
-     ncgDebugTrace ("nativeGen: inlining " ++ showSDoc (pprStmt platform stmt)) $
-     cmmMiniInlineStmts platform uses stmts'
+     ncgDebugTrace ("nativeGen: inlining " ++ showSDoc dflags (pprStmt stmt)) $
+     cmmMiniInlineStmts dflags uses stmts'
  where
+  isTiny (CmmLit _) = True
+  isTiny (CmmReg (CmmGlobal _)) = True
+         -- not CmmLocal: that might invalidate the usage analysis results
+  isTiny _ = False
+
+  platform = targetPlatform dflags
   foldExp (CmmMachOp op args) = cmmMachOpFold platform op args
   foldExp e = e
 
@@ -198,26 +196,28 @@ cmmMiniInlineStmts platform uses (stmt:stmts)
 -- register, and a list of statements.  Inlines the expression at all
 -- use sites of the register.  Returns the number of substituations
 -- made and the, possibly modified, list of statements.
-lookForInlineLit :: Unique -> CmmExpr -> [CmmStmt] -> (Int, [CmmStmt])
-lookForInlineLit _ _ [] = (0, [])
-lookForInlineLit u expr stmts@(stmt : rest)
-  | Just n <- lookupUFM (countUses stmt) u
-  = case lookForInlineLit u expr rest of
-      (m, stmts) -> let z = n + m
-                    in z `seq` (z, inlineStmt u expr stmt : stmts)
+lookForInlineMany :: Unique -> CmmExpr -> [CmmStmt] -> (Int, [CmmStmt])
+lookForInlineMany u expr stmts = lookForInlineMany' u expr regset stmts
+    where regset = foldRegsUsed extendRegSet emptyRegSet expr
 
-  | ok_to_skip
-  = case lookForInlineLit u expr rest of
+lookForInlineMany' :: Unique -> CmmExpr -> RegSet -> [CmmStmt] -> (Int, [CmmStmt])
+lookForInlineMany' _ _ _ [] = (0, [])
+lookForInlineMany' u expr regset stmts@(stmt : rest)
+  | Just n <- lookupUFM (countUses stmt) u, okToInline expr stmt
+  = let stmt' = inlineStmt u expr stmt in
+    if okToSkip stmt' u expr regset
+       then case lookForInlineMany' u expr regset rest of
+                       (m, stmts) -> let z = n + m
+                                     in z `seq` (z, stmt' : stmts)
+       else (n, stmt' : rest)
+
+  | okToSkip stmt u expr regset
+  = case lookForInlineMany' u expr regset rest of
       (n, stmts) -> (n, stmt : stmts)
 
   | otherwise
   = (0, stmts)
-  where
-    -- We skip over assignments to registers, unless the register
-    -- being assigned to is the one we're inlining.
-    ok_to_skip = case stmt of
-        CmmAssign (CmmLocal (LocalReg u' _)) _ | u' == u -> False
-        _other -> True
+
 
 lookForInline :: Unique -> CmmExpr -> [CmmStmt] -> Maybe [CmmStmt]
 lookForInline u expr stmts = lookForInline' u expr regset stmts
@@ -226,10 +226,10 @@ lookForInline u expr stmts = lookForInline' u expr regset stmts
 lookForInline' :: Unique -> CmmExpr -> RegSet -> [CmmStmt] -> Maybe [CmmStmt]
 lookForInline' _ _    _      [] = panic "lookForInline' []"
 lookForInline' u expr regset (stmt : rest)
-  | Just 1 <- lookupUFM (countUses stmt) u, ok_to_inline
+  | Just 1 <- lookupUFM (countUses stmt) u, okToInline expr stmt
   = Just (inlineStmt u expr stmt : rest)
 
-  | ok_to_skip
+  | okToSkip stmt u expr regset
   = case lookForInline' u expr regset rest of
            Nothing    -> Nothing
            Just stmts -> Just (stmt:stmts)
@@ -237,31 +237,37 @@ lookForInline' u expr regset (stmt : rest)
   | otherwise 
   = Nothing
 
+
+-- we don't inline into CmmCall if the expression refers to global
+-- registers.  This is a HACK to avoid global registers clashing with
+-- C argument-passing registers, really the back-end ought to be able
+-- to handle it properly, but currently neither PprC nor the NCG can
+-- do it.  See also CgForeignCall:load_args_into_temps.
+okToInline :: CmmExpr -> CmmStmt -> Bool
+okToInline expr CmmCall{} = hasNoGlobalRegs expr
+okToInline _ _ = True
+
+-- Expressions aren't side-effecting.  Temporaries may or may not
+-- be single-assignment depending on the source (the old code
+-- generator creates single-assignment code, but hand-written Cmm
+-- and Cmm from the new code generator is not single-assignment.)
+-- So we do an extra check to make sure that the register being
+-- changed is not one we were relying on.  I don't know how much of a
+-- performance hit this is (we have to create a regset for every
+-- instruction.) -- EZY
+okToSkip :: CmmStmt -> Unique -> CmmExpr -> RegSet -> Bool
+okToSkip stmt u expr regset
+   = case stmt of
+         CmmNop -> True
+         CmmComment{} -> True
+         CmmAssign (CmmLocal r@(LocalReg u' _)) _rhs | u' /= u && not (r `elemRegSet` regset) -> True
+         CmmAssign g@(CmmGlobal _) _rhs -> not (g `regUsedIn` expr)
+         CmmStore _ _ -> not_a_load expr
+         _other -> False
   where
-        -- we don't inline into CmmCall if the expression refers to global
-        -- registers.  This is a HACK to avoid global registers clashing with
-        -- C argument-passing registers, really the back-end ought to be able
-        -- to handle it properly, but currently neither PprC nor the NCG can
-        -- do it.  See also CgForeignCall:load_args_into_temps.
-    ok_to_inline = case stmt of
-                     CmmCall{} -> hasNoGlobalRegs expr
-                     _ -> True
-
-   -- Expressions aren't side-effecting.  Temporaries may or may not
-   -- be single-assignment depending on the source (the old code
-   -- generator creates single-assignment code, but hand-written Cmm
-   -- and Cmm from the new code generator is not single-assignment.)
-   -- So we do an extra check to make sure that the register being
-   -- changed is not one we were relying on.  I don't know how much of a
-   -- performance hit this is (we have to create a regset for every
-   -- instruction.) -- EZY
-    ok_to_skip = case stmt of
-                 CmmNop -> True
-                 CmmComment{} -> True
-                 CmmAssign (CmmLocal r@(LocalReg u' _)) _rhs | u' /= u && not (r `elemRegSet` regset) -> True
-                 CmmAssign g@(CmmGlobal _) _rhs -> not (g `regUsedIn` expr)
-                 _other -> False
-
+    not_a_load (CmmMachOp _ args) = all not_a_load args
+    not_a_load (CmmLoad _ _) = False
+    not_a_load _ = True
 
 inlineStmt :: Unique -> CmmExpr -> CmmStmt -> CmmStmt
 inlineStmt u a (CmmAssign r e) = CmmAssign r (inlineExpr u a e)
@@ -269,11 +275,11 @@ inlineStmt u a (CmmStore e1 e2) = CmmStore (inlineExpr u a e1) (inlineExpr u a e
 inlineStmt u a (CmmCall target regs es ret)
    = CmmCall (infn target) regs es' ret
    where infn (CmmCallee fn cconv) = CmmCallee (inlineExpr u a fn) cconv
-         infn (CmmPrim p) = CmmPrim p
+         infn (CmmPrim p mStmts) = CmmPrim p (fmap (map (inlineStmt u a)) mStmts)
          es' = [ (CmmHinted (inlineExpr u a e) hint) | (CmmHinted e hint) <- es ]
 inlineStmt u a (CmmCondBranch e d) = CmmCondBranch (inlineExpr u a e) d
 inlineStmt u a (CmmSwitch e d) = CmmSwitch (inlineExpr u a e) d
-inlineStmt u a (CmmJump e d) = CmmJump (inlineExpr u a e) d
+inlineStmt u a (CmmJump e live) = CmmJump (inlineExpr u a e) live
 inlineStmt _ _ other_stmt = other_stmt
 
 inlineExpr :: Unique -> CmmExpr -> CmmExpr -> CmmExpr

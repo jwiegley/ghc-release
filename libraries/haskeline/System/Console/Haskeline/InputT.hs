@@ -14,8 +14,9 @@ import System.Console.Haskeline.Term
 import System.Directory(getHomeDirectory)
 import System.FilePath
 import Control.Applicative
-import qualified Control.Monad.State as State
+import Control.Monad (liftM, ap)
 import System.IO
+import Data.IORef
 
 -- | Application-specific customizations to the user interface.
 data Settings m = Settings {complete :: CompletionFunc m, -- ^ Custom tab completion.
@@ -38,38 +39,55 @@ setComplete f s = s {complete = f}
 
 -- | A monad transformer which carries all of the state and settings
 -- relevant to a line-reading application.
-newtype InputT m a = InputT {unInputT :: ReaderT RunTerm
-                                (StateT History
-                                (StateT KillRing (ReaderT Prefs
+newtype InputT m a = InputT {unInputT :: 
+                                ReaderT RunTerm
+                                -- Use ReaderT (IO _) vs StateT so that exceptions (e.g., ctrl-c)
+                                -- don't cause us to lose the existing state.
+                                (ReaderT (IORef History)
+                                (ReaderT (IORef KillRing)
+                                (ReaderT Prefs
                                 (ReaderT (Settings m) m)))) a}
-                            deriving (Monad, MonadIO, MonadException,
-                                MonadState History, MonadReader Prefs,
-                                MonadReader (Settings m), MonadReader RunTerm)
+                            deriving (Monad, MonadIO, MonadException)
+                -- NOTE: we're explicitly *not* making InputT an instance of our
+                -- internal MonadState/MonadReader classes.  Otherwise haddock
+                -- displays those instances to the user, and it makes it seem like
+                -- we implement the mtl versions of those classes.
 
 instance Monad m => Functor (InputT m) where
-    fmap = State.liftM
+    fmap = liftM
 
 instance Monad m => Applicative (InputT m) where
     pure = return
-    (<*>) = State.ap
+    (<*>) = ap
 
 instance MonadTrans InputT where
     lift = InputT . lift . lift . lift . lift . lift
 
-instance Monad m => State.MonadState History (InputT m) where
-    get = get
-    put = put
+-- | Get the current line input history.
+getHistory :: MonadIO m => InputT m History
+getHistory = InputT get
+
+-- | Set the line input history.
+putHistory :: MonadIO m => History -> InputT m ()
+putHistory = InputT . put
+
+-- | Change the current line input history.
+modifyHistory :: MonadIO m => (History -> History) -> InputT m ()
+modifyHistory = InputT . modify
 
 -- for internal use only
-type InputCmdT m = StateT Layout (UndoT (StateT HistLog (StateT KillRing
+type InputCmdT m = StateT Layout (UndoT (StateT HistLog (ReaderT (IORef KillRing)
+                        -- HistLog can be just StateT, since its final state
+                        -- isn't used outside of InputCmdT.
                 (ReaderT Prefs (ReaderT (Settings m) m)))))
 
 runInputCmdT :: MonadIO m => TermOps -> InputCmdT m a -> InputT m a
 runInputCmdT tops f = InputT $ do
     layout <- liftIO $ getLayout tops
-    lift $ runHistLog $ runUndoT $ evalStateT' layout f
+    history <- get
+    lift $ lift $ evalStateT' (histLog history) $ runUndoT $ evalStateT' layout f
 
-instance Monad m => CommandMonad (InputCmdT m) where
+instance MonadException m => CommandMonad (InputCmdT m) where
     runCompletion lcs = do
         settings <- ask
         lift $ lift $ lift $ lift $ lift $ lift $ complete settings lcs
@@ -93,7 +111,7 @@ runInputT = runInputTBehavior defaultBehavior
 
 -- | Returns 'True' if the current session uses terminal-style interaction.  (See 'Behavior'.)
 haveTerminalUI :: Monad m => InputT m Bool
-haveTerminalUI = asks isTerminalStyle
+haveTerminalUI = InputT $ asks isTerminalStyle
 
 
 {- | Haskeline has two ways of interacting with the user:
@@ -142,6 +160,11 @@ execInputT prefs settings run (InputT f)
             $ runHistoryFromFile (historyFile settings) (maxHistorySize prefs)
             $ runReaderT f run
 
+-- | Map a user interaction by modifying the base monad computation.
+mapInputT :: (forall b . m b -> m b) -> InputT m a -> InputT m a
+mapInputT f = InputT . mapReaderT (mapReaderT (mapReaderT
+                                  (mapReaderT (mapReaderT f))))
+                    . unInputT
 
 -- | Read input from 'stdin'.  
 -- Use terminal-style interaction if 'stdin' is connected to

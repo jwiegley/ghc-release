@@ -24,7 +24,6 @@ import GHC
 import OccName
 import Name                 ( nameOccName )
 import RdrName              ( rdrNameOcc )
-import BasicTypes           ( ipNameName )
 import FastString           ( unpackFS, unpackLitString )
 
 import qualified Data.Map as Map
@@ -276,12 +275,13 @@ ppDecl :: LHsDecl DocName
 
 ppDecl (L loc decl) (doc, fnArgsDoc) instances subdocs = case decl of
   TyClD d@(TyFamily {})          -> ppTyFam False loc doc d unicode
-  TyClD d@(TyData {})
-    | Nothing <- tcdTyPats d     -> ppDataDecl instances subdocs loc doc d unicode
-    | Just _  <- tcdTyPats d     -> ppDataInst loc doc d
-  TyClD d@(TySynonym {})
-    | Nothing <- tcdTyPats d     -> ppTySyn loc (doc, fnArgsDoc) d unicode
-    | Just _  <- tcdTyPats d     -> ppTyInst False loc doc d unicode
+  TyClD d@(TyDecl{ tcdTyDefn = defn })   
+      | isHsDataDefn defn        -> ppDataDecl instances subdocs loc doc d unicode
+      | otherwise                -> ppTySyn loc (doc, fnArgsDoc) d unicode
+-- Family instances happen via FamInst now
+--  TyClD d@(TySynonym {})         
+--    | Just _  <- tcdTyPats d    -> ppTyInst False loc doc d unicode
+-- Family instances happen via FamInst now
   TyClD d@(ClassDecl {})         -> ppClassDecl instances loc doc subdocs d unicode
   SigD (TypeSig lnames (L _ t))  -> ppFunSig loc (doc, fnArgsDoc) (map unLoc lnames) t unicode
   ForD d                         -> ppFor loc (doc, fnArgsDoc) d unicode
@@ -297,17 +297,6 @@ ppTyFam _ _ _ _ _ =
   error "type family declarations are currently not supported by --latex"
 
 
-ppDataInst :: a
-ppDataInst =
-  error "data instance declarations are currently not supported by --latex"
-
-
-ppTyInst :: Bool -> SrcSpan -> Documentation DocName ->
-            TyClDecl DocName -> Bool -> LaTeX
-ppTyInst _ _ _ _ _ =
-  error "type instance declarations are currently not supported by --latex"
-
-
 ppFor :: SrcSpan -> DocForDecl DocName -> ForeignDecl DocName -> Bool -> LaTeX
 ppFor _ _ _ _ =
   error "foreign declarations are currently not supported by --latex"
@@ -321,7 +310,8 @@ ppFor _ _ _ _ =
 -- we skip type patterns for now
 ppTySyn :: SrcSpan -> DocForDecl DocName -> TyClDecl DocName -> Bool -> LaTeX
 
-ppTySyn loc doc (TySynonym (L _ name) ltyvars _ ltype) unicode
+ppTySyn loc doc (TyDecl { tcdLName = L _ name, tcdTyVars = ltyvars
+                        , tcdTyDefn = TySynonym { td_synRhs = ltype } }) unicode
   = ppTypeOrFunSig loc [name] (unLoc ltype) doc (full, hdr, char '=') unicode
   where
     hdr  = hsep (keyword "type" : ppDocBinder name : ppTyVars ltyvars)
@@ -394,12 +384,12 @@ ppTypeSig nms ty unicode =
     <+> ppType unicode ty
 
 
-ppTyVars :: [LHsTyVarBndr DocName] -> [LaTeX]
+ppTyVars :: LHsTyVarBndrs DocName -> [LaTeX]
 ppTyVars tvs = map ppSymName (tyvarNames tvs)
 
 
-tyvarNames :: [LHsTyVarBndr DocName] -> [Name]
-tyvarNames = map (getName . hsTyVarName . unLoc)
+tyvarNames :: LHsTyVarBndrs DocName -> [Name]
+tyvarNames = map getName . hsLTyVarNames
 
 
 declWithDoc :: LaTeX -> Maybe LaTeX -> LaTeX
@@ -448,7 +438,7 @@ rDoc = maybeDoc . fmap latexStripTrailingWhitespace
 
 
 ppClassHdr :: Bool -> Located [LHsType DocName] -> DocName
-           -> [Located (HsTyVarBndr DocName)] -> [Located ([DocName], [DocName])]
+           -> LHsTyVarBndrs DocName -> [Located ([DocName], [DocName])]
            -> Bool -> LaTeX
 ppClassHdr summ lctxt n tvs fds unicode =
   keyword "class"
@@ -470,7 +460,8 @@ ppClassDecl :: [DocInstance DocName] -> SrcSpan
             -> Documentation DocName -> [(DocName, DocForDecl DocName)]
             -> TyClDecl DocName -> Bool -> LaTeX
 ppClassDecl instances loc doc subdocs
-  (ClassDecl lctxt lname ltyvars lfds lsigs _ ats at_defs _) unicode
+  (ClassDecl { tcdCtxt = lctxt, tcdLName = lname, tcdTyVars = ltyvars, tcdFDs = lfds 
+             , tcdSigs = lsigs, tcdATs = ats, tcdATDefs = at_defs }) unicode
   = declWithDoc classheader (if null body then Nothing else Just (vcat body)) $$
     instancesBit
   where
@@ -557,7 +548,7 @@ ppDataDecl instances subdocs _loc doc dataDecl unicode
    $$ instancesBit
 
   where
-    cons      = tcdCons dataDecl
+    cons      = td_cons (tcdTyDefn dataDecl)
     resTy     = (con_res . unLoc . head) cons
 
     body = catMaybes [constrBit, documentationToLaTeX doc]
@@ -702,27 +693,15 @@ ppSideBySideField subdocs unicode (ConDeclField (L _ name) ltype _) =
 -- | Print the LHS of a data\/newtype declaration.
 -- Currently doesn't handle 'data instance' decls or kind signatures
 ppDataHeader :: TyClDecl DocName -> Bool -> LaTeX
-ppDataHeader decl unicode
-  | not (isDataDecl decl) = error "ppDataHeader: illegal argument"
-  | otherwise =
-    -- newtype or data
-    (if tcdND decl == NewType then keyword "newtype" else keyword "data") <+>
+ppDataHeader (TyDecl { tcdLName = L _ name, tcdTyVars = tyvars
+                     , tcdTyDefn = TyData { td_ND = nd, td_ctxt = ctxt } }) unicode
+  = -- newtype or data
+    (case nd of { NewType -> keyword "newtype"; DataType -> keyword "data" }) <+>
     -- context
-    ppLContext (tcdCtxt decl) unicode <+>
+    ppLContext ctxt unicode <+>
     -- T a b c ..., or a :+: b
-    ppTyClBinderWithVars False decl
-
-
---------------------------------------------------------------------------------
--- * TyClDecl helpers
---------------------------------------------------------------------------------
-
-
--- | Print a type family / newtype / data / class binder and its variables 
-ppTyClBinderWithVars :: Bool -> TyClDecl DocName -> LaTeX
-ppTyClBinderWithVars summ decl =
-  ppAppDocNameNames summ (unLoc $ tcdLName decl) (tyvarNames $ tcdTyVars decl)
-
+    ppAppDocNameNames False name (tyvarNames tyvars)
+ppDataHeader _ _ = error "ppDataHeader: illegal argument"
 
 --------------------------------------------------------------------------------
 -- * Type applications
@@ -842,13 +821,13 @@ ppKind unicode ki = ppr_mono_ty pREC_TOP ki unicode
 -- Drop top-level for-all type variables in user style
 -- since they are implicit in Haskell
 
-ppForAll :: HsExplicitFlag -> [Located (HsTyVarBndr DocName)]
+ppForAll :: HsExplicitFlag -> LHsTyVarBndrs DocName
          -> Located (HsContext DocName) -> Bool -> LaTeX
 ppForAll expl tvs cxt unicode
   | show_forall = forall_part <+> ppLContext cxt unicode
   | otherwise   = ppLContext cxt unicode
   where
-    show_forall = not (null tvs) && is_explicit
+    show_forall = not (null (hsQTvBndrs tvs)) && is_explicit
     is_explicit = case expl of {Explicit -> True; Implicit -> False}
     forall_part = hsep (forallSymbol unicode : ppTyVars tvs) <> dot
 
@@ -869,7 +848,7 @@ ppr_mono_ty _         (HsTupleTy con tys) u = tupleParens con (map (ppLType u) t
 ppr_mono_ty _         (HsKindSig ty kind) u = parens (ppr_mono_lty pREC_TOP ty u <+> dcolon u <+> ppLKind u kind)
 ppr_mono_ty _         (HsListTy ty)       u = brackets (ppr_mono_lty pREC_TOP ty u)
 ppr_mono_ty _         (HsPArrTy ty)       u = pabrackets (ppr_mono_lty pREC_TOP ty u)
-ppr_mono_ty _         (HsIParamTy n ty)   u = brackets (ppDocName (ipNameName n) <+> dcolon u <+> ppr_mono_lty pREC_TOP ty u)
+ppr_mono_ty _         (HsIParamTy n ty)   u = brackets (ppIPName n <+> dcolon u <+> ppr_mono_lty pREC_TOP ty u)
 ppr_mono_ty _         (HsSpliceTy {})     _ = error "ppr_mono_ty HsSpliceTy"
 ppr_mono_ty _         (HsQuasiQuoteTy {}) _ = error "ppr_mono_ty HsQuasiQuoteTy"
 ppr_mono_ty _         (HsRecTy {})        _ = error "ppr_mono_ty HsRecTy"
@@ -899,6 +878,15 @@ ppr_mono_ty ctxt_prec (HsParTy ty) unicode
 
 ppr_mono_ty ctxt_prec (HsDocTy ty _) unicode
   = ppr_mono_lty ctxt_prec ty unicode
+
+ppr_mono_ty _ (HsTyLit t) u = ppr_tylit t u
+
+
+ppr_tylit :: HsTyLit -> Bool -> LaTeX
+ppr_tylit (HsNumTy n) _ = integer n
+ppr_tylit (HsStrTy s) _ = text (show s)
+  -- XXX: Ok in verbatim, but not otherwise
+  -- XXX: Do something with Unicode parameter?
 
 
 ppr_fun_ty :: Int -> LHsType DocName -> LHsType DocName -> Bool -> LaTeX
@@ -930,6 +918,8 @@ ppSymName name
 ppVerbOccName :: OccName -> LaTeX
 ppVerbOccName = text . latexFilter . occNameString
 
+ppIPName :: HsIPName -> LaTeX
+ppIPName ip = text $ unpackFS $ hsIPNameFS ip
 
 ppOccName :: OccName -> LaTeX
 ppOccName = text . occNameString
@@ -1011,7 +1001,7 @@ parLatexMarkup ppId = Markup {
   markupOrderedList          = \p v -> enumeratedList (map ($v) p) $$ text "",
   markupDefList              = \l v -> descriptionList (map (\(a,b) -> (a v, b v)) l),
   markupCodeBlock            = \p _ -> quote (verb (p Verb)) $$ text "",
-  markupURL                  = \u _ -> text "\\url" <> braces (text u),
+  markupHyperlink            = \l _ -> markupLink l,
   markupAName                = \_ _ -> empty,
   markupExample              = \e _ -> quote $ verb $ text $ unlines $ map exampleToString e
   }
@@ -1019,6 +1009,10 @@ parLatexMarkup ppId = Markup {
     fixString Plain s = latexFilter s
     fixString Verb  s = s
     fixString Mono  s = latexMonoFilter s
+
+    markupLink (Hyperlink url mLabel) = case mLabel of
+      Just label -> text "\\href" <> braces (text url) <> braces (text label)
+      Nothing    -> text "\\url"  <> braces (text url)
 
     markupId ppId_ id v =
       case v of

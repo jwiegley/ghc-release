@@ -42,7 +42,7 @@ endif
 ifneq "$$(BINDIST)" "YES"
 $$($$($1_PACKAGE)-$$($1_$2_VERSION)_HADDOCK_FILE) : $$(INPLACE_BIN)/haddock$$(exeext) $$(GHC_CABAL_INPLACE) $$($1_$2_HS_SRCS) $$($$($1_PACKAGE)-$$($1_$2_VERSION)_HADDOCK_DEPS) | $$$$(dir $$$$@)/.
 ifeq "$$(HSCOLOUR_SRCS)" "YES"
-	"$$(GHC_CABAL_INPLACE)" hscolour $2 $1
+	CROSS_COMPILE="$(CrossCompilePrefix)" "$$(GHC_CABAL_INPLACE)" hscolour $2 $1
 endif
 	"$$(TOP)/$$(INPLACE_BIN)/haddock" \
 	  --odir="$1/$2/doc/html/$$($1_PACKAGE)" \
@@ -57,7 +57,8 @@ endif
 	  $$(foreach opt,$$($1_$2_v_ALL_HC_OPTS),--optghc=$$(opt)) \
 	  $$($1_$2_HADDOCK_FLAGS) $$($1_$2_HADDOCK_OPTS) \
 	  $$($1_$2_HS_SRCS) \
-	  $$($1_$2_EXTRA_HADDOCK_SRCS)
+	  $$($1_$2_EXTRA_HADDOCK_SRCS) \
+	  +RTS -t$$@.t --machine-readable
 
 # --no-tmp-comp-dir above is important: it saves a few minutes in a
 # validate.  This flag lets Haddock use the pre-compiled object files

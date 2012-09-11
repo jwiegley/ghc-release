@@ -424,12 +424,16 @@ updateThunk (Capability *cap, StgTSO *tso, StgClosure *thunk, StgClosure *val)
 
     updateWithIndirection(cap, thunk, val);
 
+    // sometimes the TSO is locked when we reach here, so its header
+    // might be WHITEHOLE.  Hence check for the correct owner using
+    // pointer equality first.
+    if ((StgTSO*)v == tso) {
+        return;
+    }
+
     i = v->header.info;
     if (i == &stg_TSO_info) {
-        owner = (StgTSO*)v;
-        if (owner != tso) {
-            checkBlockingQueues(cap, tso);
-        }
+        checkBlockingQueues(cap, tso);
         return;
     }
 
@@ -558,7 +562,8 @@ threadStackOverflow (Capability *cap, StgTSO *tso)
     //
     if (old_stack->sp > old_stack->stack + old_stack->stack_size / 2)
     {
-        chunk_size = 2 * (old_stack->stack_size + sizeofW(StgStack));
+        chunk_size = stg_max(2 * (old_stack->stack_size + sizeofW(StgStack)),
+                             RtsFlags.GcFlags.stkChunkSize);
     }
     else
     {

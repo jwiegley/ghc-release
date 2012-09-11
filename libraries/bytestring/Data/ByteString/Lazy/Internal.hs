@@ -1,15 +1,17 @@
-{-# LANGUAGE CPP, ForeignFunctionInterface #-}
--- We cannot actually specify all the language pragmas, see ghc ticket #
--- If we could, these are what they would be:
-{- LANGUAGE DeriveDataTypeable -}
+{-# LANGUAGE CPP, ForeignFunctionInterface, BangPatterns #-}
+#if __GLASGOW_HASKELL__
+{-# LANGUAGE DeriveDataTypeable #-}
+#endif
 {-# OPTIONS_HADDOCK hide #-}
 
 -- |
 -- Module      : Data.ByteString.Lazy.Internal
+-- Copyright   : (c) Don Stewart 2006-2008
+--               (c) Duncan Coutts 2006-2011
 -- License     : BSD-style
--- Maintainer  : dons@galois.com, duncan@haskell.org
--- Stability   : experimental
--- Portability : portable
+-- Maintainer  : dons00@gmail.com, duncan@community.haskell.org
+-- Stability   : unstable
+-- Portability : non-portable
 -- 
 -- A module containing semi-public 'ByteString' internals. This exposes
 -- the 'ByteString' representation and low level construction functions.
@@ -32,21 +34,39 @@ module Data.ByteString.Lazy.Internal (
         -- * Chunk allocation sizes
         defaultChunkSize,
         smallChunkSize,
-        chunkOverhead
+        chunkOverhead,
+
+        -- * Conversion with lists: packing and unpacking
+        packBytes, packChars,
+        unpackBytes, unpackChars,
 
   ) where
 
-import qualified Data.ByteString.Internal as S
+import Prelude hiding (concat)
 
+import qualified Data.ByteString.Internal as S
+import qualified Data.ByteString          as S (length, take, drop)
+
+import Data.Word        (Word8)
 import Foreign.Storable (Storable(sizeOf))
 
-#if defined(__GLASGOW_HASKELL__)
-import Data.Typeable    (Typeable)
-#if __GLASGOW_HASKELL__ >= 610
-import Data.Data        (Data)
-#else
-import Data.Generics    (Data)
+import Data.Monoid      (Monoid(..))
+import Control.DeepSeq  (NFData, rnf)
+
+#if MIN_VERSION_base(3,0,0)
+import Data.String      (IsString(..))
 #endif
+
+import Data.Typeable            (Typeable)
+#if MIN_VERSION_base(4,1,0)
+import Data.Data                (Data(..))
+#if MIN_VERSION_base(4,2,0)
+import Data.Data                (mkNoRepType)
+#else
+import Data.Data                (mkNorepType)
+#endif
+#else
+import Data.Generics            (Data(..), mkNorepType)
 #endif
 
 -- | A space-efficient representation of a Word8 vector, supporting many
@@ -55,11 +75,73 @@ import Data.Generics    (Data)
 -- Instances of Eq, Ord, Read, Show, Data, Typeable
 --
 data ByteString = Empty | Chunk {-# UNPACK #-} !S.ByteString ByteString
-    deriving (Show, Read
+
 #if defined(__GLASGOW_HASKELL__)
-                        ,Data, Typeable
+    deriving (Typeable)
 #endif
-             )
+
+instance Eq  ByteString where
+    (==)    = eq
+
+instance Ord ByteString where
+    compare = cmp
+
+instance Monoid ByteString where
+    mempty  = Empty
+    mappend = append
+    mconcat = concat
+
+instance NFData ByteString where
+    rnf Empty       = ()
+    rnf (Chunk _ b) = rnf b
+
+instance Show ByteString where
+    showsPrec p ps r = showsPrec p (unpackChars ps) r
+
+instance Read ByteString where
+    readsPrec p str = [ (packChars x, y) | (x, y) <- readsPrec p str ]
+
+#if MIN_VERSION_base(3,0,0)
+instance IsString ByteString where
+    fromString = packChars
+#endif
+
+instance Data ByteString where
+  gfoldl f z txt = z packBytes `f` unpackBytes txt
+  toConstr _     = error "Data.ByteString.Lazy.ByteString.toConstr"
+  gunfold _ _    = error "Data.ByteString.Lazy.ByteString.gunfold"
+#if MIN_VERSION_base(4,2,0)
+  dataTypeOf _   = mkNoRepType "Data.ByteString.Lazy.ByteString"
+#else
+  dataTypeOf _   = mkNorepType "Data.ByteString.Lazy.ByteString"
+#endif
+
+------------------------------------------------------------------------
+-- Packing and unpacking from lists
+
+packBytes :: [Word8] -> ByteString
+packBytes cs0 =
+    packChunks 32 cs0
+  where
+    packChunks n cs = case S.packUptoLenBytes n cs of
+      (bs, [])  -> chunk bs Empty
+      (bs, cs') -> Chunk bs (packChunks (min (n * 2) smallChunkSize) cs')
+
+packChars :: [Char] -> ByteString
+packChars cs0 =
+    packChunks 32 cs0
+  where
+    packChunks n cs = case S.packUptoLenChars n cs of
+      (bs, [])  -> chunk bs Empty
+      (bs, cs') -> Chunk bs (packChunks (min (n * 2) smallChunkSize) cs')
+
+unpackBytes :: ByteString -> [Word8]
+unpackBytes Empty        = []
+unpackBytes (Chunk c cs) = S.unpackAppendBytesLazy c (unpackBytes cs)
+
+unpackChars :: ByteString -> [Char]
+unpackChars Empty        = []
+unpackChars (Chunk c cs) = S.unpackAppendCharsLazy c (unpackChars cs)
 
 ------------------------------------------------------------------------
 
@@ -116,12 +198,12 @@ foldlChunks f z = go z
 -- The following value assumes people have something greater than 128k,
 -- and need to share the cache with other programs.
 
--- | Currently set to 32k, less the memory management overhead
+-- | The chunk size used for I\/O. Currently set to 32k, less the memory management overhead
 defaultChunkSize :: Int
 defaultChunkSize = 32 * k - chunkOverhead
    where k = 1024
 
--- | Currently set to 4k, less the memory management overhead
+-- | The recommended chunk size. Currently set to 4k, less the memory management overhead
 smallChunkSize :: Int
 smallChunkSize = 4 * k - chunkOverhead
    where k = 1024
@@ -129,3 +211,43 @@ smallChunkSize = 4 * k - chunkOverhead
 -- | The memory management overhead. Currently this is tuned for GHC only.
 chunkOverhead :: Int
 chunkOverhead = 2 * sizeOf (undefined :: Int)
+
+------------------------------------------------------------------------
+-- Implementations for Eq, Ord and Monoid instances
+
+eq :: ByteString -> ByteString -> Bool
+eq Empty Empty = True
+eq Empty _     = False
+eq _     Empty = False
+eq (Chunk a as) (Chunk b bs) =
+  case compare (S.length a) (S.length b) of
+    LT -> a == (S.take (S.length a) b) && eq as (Chunk (S.drop (S.length a) b) bs)
+    EQ -> a == b                       && eq as bs
+    GT -> (S.take (S.length b) a) == b && eq (Chunk (S.drop (S.length b) a) as) bs
+
+cmp :: ByteString -> ByteString -> Ordering
+cmp Empty Empty = EQ
+cmp Empty _     = LT
+cmp _     Empty = GT
+cmp (Chunk a as) (Chunk b bs) =
+  case compare (S.length a) (S.length b) of
+    LT -> case compare a (S.take (S.length a) b) of
+            EQ     -> cmp as (Chunk (S.drop (S.length a) b) bs)
+            result -> result
+    EQ -> case compare a b of
+            EQ     -> cmp as bs
+            result -> result
+    GT -> case compare (S.take (S.length b) a) b of
+            EQ     -> cmp (Chunk (S.drop (S.length b) a) as) bs
+            result -> result
+
+append :: ByteString -> ByteString -> ByteString
+append xs ys = foldrChunks Chunk ys xs
+
+concat :: [ByteString] -> ByteString
+concat css0 = to css0
+  where
+    go Empty        css = to css
+    go (Chunk c cs) css = Chunk c (go cs css)
+    to []               = Empty
+    to (cs:css)         = go cs css

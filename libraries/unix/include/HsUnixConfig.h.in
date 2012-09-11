@@ -96,6 +96,9 @@
 /* Define to 1 if you have the <bsd/libutil.h> header file. */
 #undef HAVE_BSD_LIBUTIL_H
 
+/* Define to 1 if you have the `clearenv' function. */
+#undef HAVE_CLEARENV
+
 /* Define if we have /dev/ptc. */
 #undef HAVE_DEV_PTC
 
@@ -149,6 +152,12 @@
 
 /* Define to 1 if you have the <memory.h> header file. */
 #undef HAVE_MEMORY_H
+
+/* Define to 1 if you have the `mkdtemp' function. */
+#undef HAVE_MKDTEMP
+
+/* Define to 1 if you have the `mkstemps' function. */
+#undef HAVE_MKSTEMPS
 
 /* Define to 1 if you have the `nanosleep' function. */
 #undef HAVE_NANOSLEEP
@@ -215,6 +224,51 @@
 
 /* Define to 1 if you have the <string.h> header file. */
 #undef HAVE_STRING_H
+
+/* Define to 1 if `st_atim' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_ATIM
+
+/* Define to 1 if `st_atimensec' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_ATIMENSEC
+
+/* Define to 1 if `st_atimespec' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_ATIMESPEC
+
+/* Define to 1 if `st_atime_n' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_ATIME_N
+
+/* Define to 1 if `st_ctim' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_CTIM
+
+/* Define to 1 if `st_ctimensec' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_CTIMENSEC
+
+/* Define to 1 if `st_ctimespec' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_CTIMESPEC
+
+/* Define to 1 if `st_ctime_n' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_CTIME_N
+
+/* Define to 1 if `st_mtim' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_MTIM
+
+/* Define to 1 if `st_mtimensec' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_MTIMENSEC
+
+/* Define to 1 if `st_mtimespec' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_MTIMESPEC
+
+/* Define to 1 if `st_mtime_n' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_MTIME_N
+
+/* Define to 1 if `st_uatime' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_UATIME
+
+/* Define to 1 if `st_uctime' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_UCTIME
+
+/* Define to 1 if `st_umtime' is a member of `struct stat'. */
+#undef HAVE_STRUCT_STAT_ST_UMTIME
 
 /* Define to 1 if you have the `sysconf' function. */
 #undef HAVE_SYSCONF

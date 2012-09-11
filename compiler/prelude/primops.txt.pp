@@ -210,6 +210,11 @@ primop   IntRemOp    "remInt#"    Dyadic
    {Satisfies \texttt{(quotInt\# x y) *\# y +\# (remInt\# x y) == x}.}
    with can_fail = True
 
+primop   IntQuotRemOp "quotRemInt#"    GenPrimOp
+   Int# -> Int# -> (# Int#, Int# #)
+   {Rounds towards zero.}
+   with can_fail = True
+
 primop   IntNegOp    "negateInt#"    Monadic   Int# -> Int#
 primop   IntAddCOp   "addIntC#"    GenPrimOp   Int# -> Int# -> (# Int#, Int# #)
 	 {Add with carry.  First member of result is (wrapped) sum; 
@@ -264,15 +269,35 @@ primtype Word#
 primop   WordAddOp   "plusWord#"   Dyadic   Word# -> Word# -> Word#
    with commutable = True
 
+-- Returns (# high, low #) (or equivalently, (# carry, low #))
+primop   WordAdd2Op  "plusWord2#"  GenPrimOp
+   Word# -> Word# -> (# Word#, Word# #)
+   with commutable = True
+
 primop   WordSubOp   "minusWord#"   Dyadic   Word# -> Word# -> Word#
 
 primop   WordMulOp   "timesWord#"   Dyadic   Word# -> Word# -> Word#
+   with commutable = True
+
+-- Returns (# high, low #)
+primop   WordMul2Op  "timesWord2#"   GenPrimOp
+   Word# -> Word# -> (# Word#, Word# #)
    with commutable = True
 
 primop   WordQuotOp   "quotWord#"   Dyadic   Word# -> Word# -> Word#
    with can_fail = True
 
 primop   WordRemOp   "remWord#"   Dyadic   Word# -> Word# -> Word#
+   with can_fail = True
+
+primop   WordQuotRemOp "quotRemWord#" GenPrimOp
+   Word# -> Word# -> (# Word#, Word# #)
+   with can_fail = True
+
+-- Takes high word of dividend, then low word of dividend, then divisor.
+-- Requires that high word is not divisible by divisor.
+primop   WordQuotRem2Op "quotRemWord2#" GenPrimOp
+   Word# -> Word# -> Word# -> (# Word#, Word# #)
    with can_fail = True
 
 primop   AndOp   "and#"   Dyadic   Word# -> Word# -> Word#
@@ -1032,6 +1057,14 @@ primop  CopyMutableByteArrayOp "copyMutableByteArray#" GenPrimOp
   code_size = { primOpCodeSizeForeignCall + 4 }
   can_fail = True
 
+primop  SetByteArrayOp "setByteArray#" GenPrimOp
+  MutableByteArray# s -> Int# -> Int# -> Int# -> State# s -> State# s
+  {Set the range of the MutableByteArray# to the specified character.}
+  with
+  has_side_effects = True
+  code_size = { primOpCodeSizeForeignCall + 4 }
+  can_fail = True
+
 ------------------------------------------------------------------------
 section "Arrays of arrays"
 	{Operations on {\tt ArrayArray\#}. An {\tt ArrayArray\#} contains references to {\em unpointed}
@@ -1481,7 +1514,10 @@ primop  RaiseOp "raise#" GenPrimOp
 -- one kind of bottom into another, as it is allowed to do in pure code.
 --
 -- But we *do* want to know that it returns bottom after 
--- being applied to two arguments
+-- being applied to two arguments, so that this function is strict in y
+--     f x y | x>0  	 = raiseIO blah
+--           | y>0  	 = return 1
+--           | otherwise = return 2 
 
 primop  RaiseIOOp "raiseIO#" GenPrimOp
    a -> State# RealWorld -> (# State# RealWorld, b #)
@@ -1789,6 +1825,12 @@ primtype Weak# b
 
 primop  MkWeakOp "mkWeak#" GenPrimOp
    o -> b -> c -> State# RealWorld -> (# State# RealWorld, Weak# b #)
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop  MkWeakNoFinalizerOp "mkWeakNoFinalizer#" GenPrimOp
+   o -> b -> State# RealWorld -> (# State# RealWorld, Weak# b #)
    with
    has_side_effects = True
    out_of_line      = True

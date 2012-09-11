@@ -31,7 +31,7 @@ module DataCon (
 	dataConInstOrigArgTys, dataConRepArgTys, 
 	dataConFieldLabels, dataConFieldType,
 	dataConStrictMarks, dataConExStricts,
-	dataConSourceArity, dataConRepArity,
+	dataConSourceArity, dataConRepArity, dataConRepRepArity,
 	dataConIsInfix,
 	dataConWorkId, dataConWrapId, dataConWrapId_maybe, dataConImplicitIds,
 	dataConRepStrictness,
@@ -42,12 +42,19 @@ module DataCon (
 
         -- * Splitting product types
 	splitProductType_maybe, splitProductType, deepSplitProductType,
-        deepSplitProductType_maybe
+        deepSplitProductType_maybe,
+
+        -- ** Promotion related functions
+        promoteType, isPromotableType, isPromotableTyCon,
+        buildPromotedTyCon, buildPromotedDataCon,
     ) where
 
 #include "HsVersions.h"
 
 import Type
+import TypeRep( Type(..) )  -- Used in promoteType
+import PrelNames( liftedTypeKindTyConKey )
+import Kind
 import Unify
 import Coercion
 import TyCon
@@ -61,6 +68,7 @@ import Util
 import BasicTypes
 import FastString
 import Module
+import VarEnv
 
 import qualified Data.Data as Data
 import qualified Data.Typeable
@@ -462,9 +470,6 @@ instance NamedThing DataCon where
 instance Outputable DataCon where
     ppr con = ppr (dataConName con)
 
-instance Show DataCon where
-    showsPrec p con = showsPrecSDoc p (ppr con)
-
 instance Data.Data DataCon where
     -- don't traverse?
     toConstr _   = abstractConstr "DataCon"
@@ -555,7 +560,7 @@ mkDataCon name declared_infix
 	  mkTyConApp rep_tycon (mkTyVarTys univ_tvs)
 
 eqSpecPreds :: [(TyVar,Type)] -> ThetaType
-eqSpecPreds spec = [ mkEqPred (mkTyVarTy tv, ty) | (tv,ty) <- spec ]
+eqSpecPreds spec = [ mkEqPred (mkTyVarTy tv) ty | (tv,ty) <- spec ]
 
 mk_pred_strict_mark :: PredType -> HsBang
 mk_pred_strict_mark pred 
@@ -684,8 +689,13 @@ dataConSourceArity dc = length (dcOrigArgTys dc)
 -- | Gives the number of actual fields in the /representation/ of the 
 -- data constructor. This may be more than appear in the source code;
 -- the extra ones are the existentially quantified dictionaries
-dataConRepArity :: DataCon -> Int
+dataConRepArity :: DataCon -> Arity
 dataConRepArity (MkData {dcRepArgTys = arg_tys}) = length arg_tys
+
+-- | The number of fields in the /representation/ of the constructor
+-- AFTER taking into account the unpacking of any unboxed tuple fields
+dataConRepRepArity :: DataCon -> RepArity
+dataConRepRepArity dc = typeRepArity (dataConRepArity dc) (dataConRepType dc)
 
 -- | Return whether there are any argument types for this 'DataCon's original source type
 isNullarySrcDataCon :: DataCon -> Bool
@@ -959,4 +969,96 @@ computeRep stricts tys
                       where
                         (_tycon, _tycon_args, arg_dc, arg_tys) 
                            = deepSplitProductType "unbox_strict_arg_ty" ty
+\end{code}
+
+
+%************************************************************************
+%*                                                                      *
+        Promoting of data types to the kind level
+%*                                                                      *
+%************************************************************************
+
+These two 'buildPromoted..' functions are here because
+ * They belong together
+ * 'buildPromotedTyCon' is used by promoteType
+ * 'buildPromotedTyCon' depends on DataCon stuff
+
+\begin{code}
+buildPromotedTyCon :: TyCon -> TyCon
+buildPromotedTyCon tc
+  = mkPromotedTyCon tc (promoteKind (tyConKind tc))
+
+buildPromotedDataCon :: DataCon -> TyCon
+buildPromotedDataCon dc 
+  = ASSERT ( isPromotableType ty )
+    mkPromotedDataCon dc (getName dc) (getUnique dc) kind arity
+  where 
+    ty    = dataConUserType dc
+    kind  = promoteType ty
+    arity = dataConSourceArity dc
+\end{code}
+
+Note [Promoting a Type to a Kind]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppsoe we have a data constructor D
+     D :: forall (a:*). Maybe a -> T a
+We promote this to be a type constructor 'D:
+     'D :: forall (k:BOX). 'Maybe k -> 'T k
+
+The transformation from type to kind is done by promoteType
+
+  * Convert forall (a:*) to forall (k:BOX), and substitute
+
+  * Ensure all foralls are at the top (no higher rank stuff)
+
+  * Ensure that all type constructors mentioned (Maybe and T
+    in the example) are promotable; that is, they have kind 
+          * -> ... -> * -> *
+
+\begin{code}
+isPromotableType :: Type -> Bool
+isPromotableType ty
+  = all (isLiftedTypeKind . tyVarKind) tvs
+    && go rho
+  where
+    (tvs, rho) = splitForAllTys ty
+    go (TyConApp tc tys) | Just n <- isPromotableTyCon tc
+                         = tys `lengthIs` n && all go tys
+    go (FunTy arg res)   = go arg && go res
+    go (TyVarTy tvar)    = tvar `elem` tvs
+    go _                 = False
+
+-- If tc's kind is [ *^n -> * ] returns [ Just n ], else returns [ Nothing ]
+isPromotableTyCon :: TyCon -> Maybe Int
+isPromotableTyCon tc
+  | isDataTyCon tc  -- Only *data* types can be promoted, not newtypes
+    		    -- not synonyms, not type families
+  , all isLiftedTypeKind (res:args) = Just $ length args
+  | otherwise                       = Nothing
+  where
+    (args, res) = splitKindFunTys (tyConKind tc)
+
+-- | Promotes a type to a kind. 
+-- Assumes the argument satisfies 'isPromotableType'
+promoteType :: Type -> Kind
+promoteType ty
+  = mkForAllTys kvs (go rho)
+  where
+    (tvs, rho) = splitForAllTys ty
+    kvs = [ mkKindVar (tyVarName tv) superKind | tv <- tvs ]
+    env = zipVarEnv tvs kvs
+
+    go (TyConApp tc tys) = mkTyConApp (buildPromotedTyCon tc) (map go tys)
+    go (FunTy arg res)   = mkArrowKind (go arg) (go res)
+    go (TyVarTy tv)      | Just kv <- lookupVarEnv env tv 
+                         = TyVarTy kv
+    go _ = panic "promoteType"  -- Argument did not satisfy isPromotableType
+
+promoteKind :: Kind -> SuperKind
+-- Promote the kind of a type constructor
+-- from (* -> * -> *) to (BOX -> BOX -> BOX) 
+promoteKind (TyConApp tc []) 
+  | tc `hasKey` liftedTypeKindTyConKey = superKind
+promoteKind (FunTy arg res) = FunTy (promoteKind arg) (promoteKind res)
+promoteKind k = pprPanic "promoteKind" (ppr k)
 \end{code}

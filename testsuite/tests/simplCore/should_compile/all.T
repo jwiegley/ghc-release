@@ -134,7 +134,16 @@ test('simpl021',
      run_command,
      ['$MAKE -s --no-print-directory simpl021'])
 test('T5327', normal, run_command, ['$MAKE -s --no-print-directory T5327'])
+test('T5623', normal, run_command, ['$MAKE -s --no-print-directory T5623'])
 test('T5658b',
      normal,
      run_command,
      ['$MAKE -s --no-print-directory T5658b'])
+test('T5776',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T5776'])
+test('T4138',
+     extra_clean(['T4138_A.hi', 'T4138_A.o', 'T4138.simpl']),
+     run_command,
+     ['$MAKE -s --no-print-directory T4138'])

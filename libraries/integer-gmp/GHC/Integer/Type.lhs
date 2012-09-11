@@ -22,7 +22,7 @@ import GHC.Prim (
     int2Word#, int2Double#, int2Float#, word2Int#,
     -- Operations on Int# that we use for operations on S#
     quotInt#, remInt#, negateInt#,
-    (==#), (/=#), (<=#), (>=#), (<#), (>#), (*#), (-#), (+#),
+    (==#), (/=#), (<=#), (>=#), (<#), (>#), (*#), (-#),
     mulIntMayOflo#, addIntC#, subIntC#,
     and#, or#, xor#
  )
@@ -31,7 +31,8 @@ import GHC.Integer.GMP.Prim (
     -- GMP-related primitives
     cmpInteger#, cmpIntegerInt#,
     plusInteger#, minusInteger#, timesInteger#,
-    quotRemInteger#, quotInteger#, remInteger#, divModInteger#,
+    quotRemInteger#, quotInteger#, remInteger#,
+    divModInteger#, divInteger#, modInteger#,
     gcdInteger#, gcdIntegerInt#, gcdInt#, divExactInteger#,
     decodeDouble#,
     int2Integer#, integer2Int#, word2Integer#, integer2Word#,
@@ -134,11 +135,6 @@ int64ToInteger i = if ((i `leInt64#` intToInt64# 0x7FFFFFFF#) &&
 
 integerToInt :: Integer -> Int#
 {-# NOINLINE integerToInt #-}
-{-# RULES "integerToInt" forall i. integerToInt (S# i) = i #-}
--- Don't inline integerToInt, because it can't do much unless
--- it sees a (S# i), and inlining just creates fruitless
--- join points.  But we do need a RULE to get the constants
--- to work right:  1::Int had better optimise to (I# 1)!
 integerToInt (S# i)   = i
 integerToInt (J# s d) = integer2Int# s d
 
@@ -189,21 +185,6 @@ divModInteger (S# i) (S# j) = (# S# d, S# m #)
       !d = i `divInt#` j
       !m = i `modInt#` j
 
-      -- XXX Copied from GHC.Base
-      divInt# :: Int# -> Int# -> Int#
-      x# `divInt#` y#
-       =      if (x# ># 0#) && (y# <# 0#) then ((x# -# 1#) `quotInt#` y#) -# 1#
-         else if (x# <# 0#) && (y# ># 0#) then ((x# +# 1#) `quotInt#` y#) -# 1#
-         else x# `quotInt#` y#
-
-      modInt# :: Int# -> Int# -> Int#
-      x# `modInt#` y#
-       = if ((x# ># 0#) && (y# <# 0#)) ||
-            ((x# <# 0#) && (y# ># 0#))
-         then if r# /=# 0# then r# +# y# else 0#
-         else r#
-          where !r# = x# `remInt#` y#
-
 divModInteger i1@(J# _ _) i2@(S# _) = divModInteger i1 (toBig i2)
 divModInteger i1@(S# _) i2@(J# _ _) = divModInteger (toBig i1) i2
 divModInteger (J# s1 d1) (J# s2 d2)
@@ -247,6 +228,29 @@ quotInteger (J# sa a) (S# b)
     case quotInteger# sa a sb b' of (# sq, q #) -> J# sq q }
 quotInteger (J# sa a) (J# sb b)
   = case quotInteger# sa a sb b of (# sg, g #) -> J# sg g
+
+{-# NOINLINE modInteger #-}
+modInteger :: Integer -> Integer -> Integer
+modInteger a@(S# INT_MINBOUND) b = modInteger (toBig a) b
+modInteger (S# a) (S# b) = S# (modInt# a b)
+modInteger ia@(S# _) ib@(J# _ _) = modInteger (toBig ia) ib
+modInteger (J# sa a) (S# b)
+  = case int2Integer# b of { (# sb, b' #) ->
+    case modInteger# sa a sb b' of { (# sr, r #) ->
+    S# (integer2Int# sr r) }}
+modInteger (J# sa a) (J# sb b)
+  = case modInteger# sa a sb b of (# sr, r #) -> J# sr r
+
+{-# NOINLINE divInteger #-}
+divInteger :: Integer -> Integer -> Integer
+divInteger a@(S# INT_MINBOUND) b = divInteger (toBig a) b
+divInteger (S# a) (S# b) = S# (divInt# a b)
+divInteger ia@(S# _) ib@(J# _ _) = divInteger (toBig ia) ib
+divInteger (J# sa a) (S# b)
+  = case int2Integer# b of { (# sb, b' #) ->
+    case divInteger# sa a sb b' of (# sq, q #) -> J# sq q }
+divInteger (J# sa a) (J# sb b)
+  = case divInteger# sa a sb b of (# sg, g #) -> J# sg g
 \end{code}
 
 
@@ -278,8 +282,15 @@ lcmInteger a b =      if a `eqInteger` S# 0# then S# 0#
   where aa = absInteger a
         ab = absInteger b
 
-{-# RULES "gcdInteger/Int" forall a b.
-            gcdInteger (S# a) (S# b) = S# (gcdInt a b)
+-- This rule needs to use absInteger so that it works correctly when
+-- the result is minBound :: Int. But that isn't necessary when the
+-- result is converted to an Int.
+{-# RULES
+"gcdInteger/Int" forall a b.
+    gcdInteger (smallInteger a) (smallInteger b)
+        = absInteger (smallInteger (gcdInt a b))
+"integerToInt/gcdInteger/Int" forall a b.
+    integerToInt (gcdInteger (smallInteger a) (smallInteger b)) = gcdInt a b
   #-}
 gcdInt :: Int# -> Int# -> Int#
 gcdInt 0# y  = absInt y

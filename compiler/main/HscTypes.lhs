@@ -44,6 +44,7 @@ module HscTypes (
         InteractiveContext(..), emptyInteractiveContext,
         icPrintUnqual, icInScopeTTs, icPlusGblRdrEnv,
         extendInteractiveContext, substInteractiveContext,
+        setInteractivePrintName,
         InteractiveImport(..),
         mkPrintUnqualified, pprModulePrefix,
 
@@ -73,7 +74,7 @@ module HscTypes (
         -- * Information on imports and exports
         WhetherHasOrphans, IsBootInterface, Usage(..),
         Dependencies(..), noDependencies,
-        NameCache(..), OrigNameCache, OrigIParamCache,
+        NameCache(..), OrigNameCache,
         IfaceExport,
 
         -- * Warnings
@@ -118,7 +119,7 @@ import HsSyn
 import RdrName
 import Avail
 import Module
-import InstEnv          ( InstEnv, Instance )
+import InstEnv          ( InstEnv, ClsInst )
 import FamInstEnv
 import Rules            ( RuleBase )
 import CoreSyn          ( CoreProgram )
@@ -136,12 +137,11 @@ import Annotations
 import Class
 import TyCon
 import DataCon
-import PrelNames        ( gHC_PRIM )
+import PrelNames        ( gHC_PRIM, ioTyConName, printName )
 import Packages hiding  ( Version(..) )
 import DynFlags
 import DriverPhases
 import BasicTypes
-import OptimizationFuel ( OptFuelState )
 import IfaceSyn
 import CoreSyn          ( CoreRule, CoreVect )
 import Maybes
@@ -162,12 +162,11 @@ import Util
 import Control.Monad    ( mplus, guard, liftM, when )
 import Data.Array       ( Array, array )
 import Data.IORef
-import Data.Map         ( Map )
+import Data.Time
 import Data.Word
 import Data.Typeable    ( Typeable )
 import Exception
 import System.FilePath
-import System.Time      ( ClockTime )
 
 -- -----------------------------------------------------------------------------
 -- Source Errors
@@ -181,8 +180,8 @@ mkSrcErr = SourceError
 srcErrorMessages :: SourceError -> ErrorMessages
 srcErrorMessages (SourceError msgs) = msgs
 
-mkApiErr :: SDoc -> GhcApiError
-mkApiErr = GhcApiError
+mkApiErr :: DynFlags -> SDoc -> GhcApiError
+mkApiErr dflags msg = GhcApiError (showSDoc dflags msg)
 
 throwOneError :: MonadIO m => ErrMsg -> m ab
 throwOneError err = liftIO $ throwIO $ mkSrcErr $ unitBag err
@@ -221,11 +220,11 @@ handleSourceError handler act =
   gcatch act (\(e :: SourceError) -> handler e)
 
 -- | An error thrown if the GHC API is used in an incorrect fashion.
-newtype GhcApiError = GhcApiError SDoc
+newtype GhcApiError = GhcApiError String
   deriving Typeable
 
 instance Show GhcApiError where
-  show (GhcApiError msg) = showSDoc msg
+  show (GhcApiError msg) = msg
 
 instance Exception GhcApiError
 
@@ -235,16 +234,16 @@ printOrThrowWarnings :: DynFlags -> Bag WarnMsg -> IO ()
 printOrThrowWarnings dflags warns
   | dopt Opt_WarnIsError dflags
   = when (not (isEmptyBag warns)) $ do
-      throwIO $ mkSrcErr $ warns `snocBag` warnIsErrorMsg
+      throwIO $ mkSrcErr $ warns `snocBag` warnIsErrorMsg dflags
   | otherwise
-  = printBagOfWarnings dflags warns
+  = printBagOfErrors dflags warns
 
 handleFlagWarnings :: DynFlags -> [Located String] -> IO ()
 handleFlagWarnings dflags warns
  = when (wopt Opt_WarnDeprecatedFlags dflags) $ do
-        -- It would be nicer if warns :: [Located Message], but that
+        -- It would be nicer if warns :: [Located MsgDoc], but that
         -- has circular import problems.
-      let bag = listToBag [ mkPlainWarnMsg loc (text warn)
+      let bag = listToBag [ mkPlainWarnMsg dflags loc (text warn)
                           | L loc warn <- warns ]
 
       printOrThrowWarnings dflags bag
@@ -318,11 +317,6 @@ data HscEnv
                 -- ^ This caches the location of modules, so we don't have to
                 -- search the filesystem multiple times. See also 'hsc_FC'.
 
-        hsc_OptFuel :: OptFuelState,
-                -- ^ Settings to control the use of \"optimization fuel\":
-                -- by limiting the number of transformations,
-                -- we can use binary search to help find compiler bugs.
-
         hsc_type_env_var :: Maybe (Module, IORef TypeEnv)
                 -- ^ Used for one-shot compilation only, to initialise
                 -- the 'IfGblEnv'. See 'TcRnTypes.tcg_type_env_var' for
@@ -343,7 +337,7 @@ data Target
   = Target {
       targetId           :: TargetId, -- ^ module or filename
       targetAllowObjCode :: Bool,     -- ^ object code allowed?
-      targetContents     :: Maybe (StringBuffer,ClockTime)
+      targetContents     :: Maybe (StringBuffer,UTCTime)
                                         -- ^ in-memory text buffer?
     }
 
@@ -454,7 +448,7 @@ lookupIfaceByModule dflags hpt pit mod
 -- modules imported by this one, directly or indirectly, and are in the Home
 -- Package Table.  This ensures that we don't see instances from modules @--make@
 -- compiled before this one, but which are not below this one.
-hptInstances :: HscEnv -> (ModuleName -> Bool) -> ([Instance], [FamInst])
+hptInstances :: HscEnv -> (ModuleName -> Bool) -> ([ClsInst], [FamInst])
 hptInstances hsc_env want_this_module
   = let (insts, famInsts) = unzip $ flip hptAllThings hsc_env $ \mod_info -> do
                 guard (want_this_module (moduleName (mi_module (hm_iface mod_info))))
@@ -680,7 +674,7 @@ data ModIface
                 -- 'HomeModInfo', but that leads to more plumbing.
 
                 -- Instance declarations and rules
-        mi_insts       :: [IfaceInst],     -- ^ Sorted class instance
+        mi_insts       :: [IfaceClsInst],     -- ^ Sorted class instance
         mi_fam_insts   :: [IfaceFamInst],  -- ^ Sorted family instances
         mi_rules       :: [IfaceRule],     -- ^ Sorted rules
         mi_orphan_hash :: !Fingerprint,    -- ^ Hash for orphan rules, class and family
@@ -758,7 +752,7 @@ data ModDetails
         -- The next two fields are created by the typechecker
         md_exports   :: [AvailInfo],
         md_types     :: !TypeEnv,       -- ^ Local type environment for this particular module
-        md_insts     :: ![Instance],    -- ^ 'DFunId's for the instances in this module
+        md_insts     :: ![ClsInst],    -- ^ 'DFunId's for the instances in this module
         md_fam_insts :: ![FamInst],
         md_rules     :: ![CoreRule],    -- ^ Domain may include 'Id's from other modules
         md_anns      :: ![Annotation],  -- ^ Annotations present in this module: currently
@@ -804,7 +798,7 @@ data ModGuts
                                          -- ToDo: I'm unconvinced this is actually used anywhere
         mg_tcs       :: ![TyCon],        -- ^ TyCons declared in this module
                                          -- (includes TyCons for classes)
-        mg_insts     :: ![Instance],     -- ^ Class instances declared in this module
+        mg_insts     :: ![ClsInst],     -- ^ Class instances declared in this module
         mg_fam_insts :: ![FamInst],      -- ^ Family instances declared in this module
         mg_rules     :: ![CoreRule],     -- ^ Before the core pipeline starts, contains
                                          -- See Note [Overall plumbing for rules] in Rules.lhs
@@ -906,6 +900,13 @@ appendStubC (ForeignStubs h c) c_code = ForeignStubs h (c $$ c_code)
 -- context in which statements are executed in a GHC session.
 data InteractiveContext
   = InteractiveContext {
+         ic_dflags     :: DynFlags,
+             -- ^ The 'DynFlags' used to evaluate interative expressions
+             -- and statements.
+
+         ic_monad      :: Name,
+             -- ^ The monad that GHCi is executing in
+
          ic_imports    :: [InteractiveImport],
              -- ^ The GHCi context is extended with these imports
              --
@@ -920,19 +921,30 @@ data InteractiveContext
 
          ic_tythings   :: [TyThing],
              -- ^ TyThings defined by the user, in reverse order of
-             -- definition.
+             -- definition.  At a breakpoint, this list includes the
+             -- local variables in scope at that point
 
          ic_sys_vars   :: [Id],
              -- ^ Variables defined automatically by the system (e.g.
              -- record field selectors).  See Notes [ic_sys_vars]
 
-         ic_instances  :: ([Instance], [FamInst]),
+         ic_instances  :: ([ClsInst], [FamInst]),
              -- ^ All instances and family instances created during
              -- this session.  These are grabbed en masse after each
              -- update to be sure that proper overlapping is retained.
              -- That is, rather than re-check the overlapping each
              -- time we update the context, we just take the results
              -- from the instance code that already does that.
+
+         ic_fix_env :: FixityEnv,
+            -- ^ Fixities declared in let statements
+         
+         ic_int_print  :: Name,
+             -- ^ The function that is used for printing results
+             -- of expressions in ghci and -e mode.
+
+         ic_default :: Maybe [Type],
+             -- ^ The current default types, set by a 'default' declaration
 
 #ifdef GHCI
           ic_resume :: [Resume],
@@ -965,13 +977,20 @@ hscDeclsWithLocation) and save them in ic_sys_vars.
 -}
 
 -- | Constructs an empty InteractiveContext.
-emptyInteractiveContext :: InteractiveContext
-emptyInteractiveContext
-  = InteractiveContext { ic_imports    = [],
+emptyInteractiveContext :: DynFlags -> InteractiveContext
+emptyInteractiveContext dflags
+  = InteractiveContext { ic_dflags     = dflags,
+                         -- IO monad by default
+                         ic_monad      = ioTyConName,
+                         ic_imports    = [],
                          ic_rn_gbl_env = emptyGlobalRdrEnv,
                          ic_tythings   = [],
                          ic_sys_vars   = [],
                          ic_instances  = ([],[]),
+                         ic_fix_env    = emptyNameEnv,
+                         -- System.IO.print by default
+                         ic_int_print  = printName,
+                         ic_default    = Nothing,
 #ifdef GHCI
                          ic_resume     = [],
 #endif
@@ -1006,6 +1025,9 @@ extendInteractiveContext ictxt new_tythings
 
     new_names = [ nameOccName (getName id) | AnId id <- new_tythings ]
 
+setInteractivePrintName :: InteractiveContext -> Name -> InteractiveContext
+setInteractivePrintName ic n = ic{ic_int_print = n}
+
     -- ToDo: should not add Ids to the gbl env here
 
 -- | Add TyThings to the GlobalRdrEnv, earlier ones in the list shadowing
@@ -1029,7 +1051,7 @@ data InteractiveImport
       -- ^ Bring the exports of a particular module
       -- (filtered by an import decl) into scope
 
-  | IIModule Module
+  | IIModule ModuleName
       -- ^ Bring into scope the entire top-level envt of
       -- of this module, including the things imported
       -- into it.
@@ -1076,7 +1098,7 @@ exposed (say P2), so we use M.T for that, and P1:M.T for the other one.
 This is handled by the qual_mod component of PrintUnqualified, inside
 the (ppr mod) of case (3), in Name.pprModulePrefix
 
-\begin{code}
+    \begin{code}
 -- | Creates some functions that work out the best ways to format
 -- names for the user according to a set of heuristics
 mkPrintUnqualified :: DynFlags -> GlobalRdrEnv -> PrintUnqualified
@@ -1094,7 +1116,8 @@ mkPrintUnqualified dflags env = (qual_name, qual_mod)
                    then NameNotInScope1
                    else NameNotInScope2
 
-        | otherwise = panic "mkPrintUnqualified"
+        | otherwise = NameNotInScope1   -- Can happen if 'f' is bound twice in the module
+                                        -- Eg  f = True; g = 0; f = False
       where
         mod = nameModule name
         occ = nameOccName name
@@ -1152,9 +1175,33 @@ mkPrintUnqualified dflags env = (qual_name, qual_mod)
 
 %************************************************************************
 %*                                                                      *
-                TyThing
+                Implicit TyThings
 %*                                                                      *
 %************************************************************************
+
+Note [Implicit TyThings]
+~~~~~~~~~~~~~~~~~~~~~~~~
+  DEFINITION: An "implicit" TyThing is one that does not have its own
+  IfaceDecl in an interface file.  Instead, its binding in the type
+  environment is created as part of typechecking the IfaceDecl for
+  some other thing.
+
+Examples:
+  * All DataCons are implicit, because they are generated from the
+    IfaceDecl for the data/newtype.  Ditto class methods.
+
+  * Record selectors are *not* implicit, because they get their own
+    free-standing IfaceDecl.
+
+  * Associated data/type families are implicit because they are
+    included in the IfaceDecl of the parent class.  (NB: the
+    IfaceClass decl happens to use IfaceDecl recursively for the
+    associated types, but that's irrelevant here.)
+
+  * Dictionary function Ids are not implict.
+
+  * Axioms for newtypes are implicit (same as above), but axioms
+    for data/type family instances are *not* implicit (like DFunIds).
 
 \begin{code}
 -- | Determine the 'TyThing's brought into scope by another 'TyThing'
@@ -1164,7 +1211,7 @@ mkPrintUnqualified dflags env = (qual_name, qual_mod)
 -- scope, just for a start!
 
 -- N.B. the set of TyThings returned here *must* match the set of
--- names returned by LoadIface.ifaceDeclSubBndrs, in the sense that
+-- names returned by LoadIface.ifaceDeclImplicitBndrs, in the sense that
 -- TyThing.getOccName should define a bijection between the two lists.
 -- This invariant is used in LoadIface.loadDecl (see note [Tricky iface loop])
 -- The order of the list does not matter.
@@ -1190,9 +1237,10 @@ implicitTyConThings :: TyCon -> [TyThing]
 implicitTyConThings tc
   = class_stuff ++
       -- fields (names of selectors)
-      -- (possibly) implicit coercion and family coercion
-      --   depending on whether it's a newtype or a family instance or both
+
+      -- (possibly) implicit newtype coercion
     implicitCoTyCon tc ++
+
       -- for each data constructor in order,
       --   the contructor, worker, and (possibly) wrapper
     concatMap (extras_plus . ADataCon) (tyConDataCons tc)
@@ -1207,14 +1255,11 @@ implicitTyConThings tc
 extras_plus :: TyThing -> [TyThing]
 extras_plus thing = thing : implicitTyThings thing
 
--- For newtypes and indexed data types (and both),
--- add the implicit coercion tycon
+-- For newtypes (only) add the implicit coercion tycon
 implicitCoTyCon :: TyCon -> [TyThing]
 implicitCoTyCon tc
-  = map ACoAxiom . catMaybes $ [-- Just if newtype, Nothing if not
-                              newTyConCo_maybe tc,
-                              -- Just if family instance, Nothing if not
-                              tyConFamilyCoercion_maybe tc]
+  | Just co <- newTyConCo_maybe tc = [ACoAxiom co]
+  | otherwise                      = []
 
 -- | Returns @True@ if there should be no interface-file declaration
 -- for this thing on its own: either it is built-in, or it is part
@@ -1224,7 +1269,7 @@ isImplicitTyThing :: TyThing -> Bool
 isImplicitTyThing (ADataCon {}) = True
 isImplicitTyThing (AnId id)     = isImplicitId id
 isImplicitTyThing (ATyCon tc)   = isImplicitTyCon tc
-isImplicitTyThing (ACoAxiom {}) = True
+isImplicitTyThing (ACoAxiom ax) = isImplicitCoAxiom ax
 
 -- | tyThingParent_maybe x returns (Just p)
 -- when pprTyThingInContext sould print a declaration for p
@@ -1310,13 +1355,14 @@ mkTypeEnvWithImplicits things =
   mkTypeEnv (concatMap implicitTyThings things)
 
 typeEnvFromEntities :: [Id] -> [TyCon] -> [FamInst] -> TypeEnv
-typeEnvFromEntities ids tcs faminsts =
+typeEnvFromEntities ids tcs famInsts =
   mkTypeEnv (   map AnId ids
              ++ map ATyCon all_tcs
              ++ concatMap implicitTyConThings all_tcs
+             ++ map (ACoAxiom . famInstAxiom) famInsts
             )
  where
-  all_tcs = tcs ++ map famInstTyCon faminsts
+  all_tcs = tcs ++ famInstsRepTyCons famInsts
 
 lookupTypeEnv = lookupNameEnv
 
@@ -1352,8 +1398,9 @@ lookupType dflags hpt pte name
        lookupNameEnv (md_types (hm_details hm)) name
   | otherwise
   = lookupNameEnv pte name
-  where mod = ASSERT( isExternalName name ) nameModule name
-        this_pkg = thisPackage dflags
+  where 
+    mod = ASSERT2( isExternalName name, ppr name ) nameModule name
+    this_pkg = thisPackage dflags
 
 -- | As 'lookupType', but with a marginally easier-to-use interface
 -- if you have a 'HscEnv'
@@ -1421,7 +1468,7 @@ mkIfaceHashCache pairs
   = \occ -> lookupOccEnv env occ
   where
     env = foldr add_decl emptyOccEnv pairs
-    add_decl (v,d) env0 = foldr add_imp env1 (ifaceDeclSubBndrs d)
+    add_decl (v,d) env0 = foldr add_imp env1 (ifaceDeclImplicitBndrs d)
       where
           decl_name = ifName d
           env1 = extendOccEnv env0 decl_name (decl_name, v)
@@ -1600,7 +1647,7 @@ data Usage
     }                                           -- ^ Module from the current package
   | UsageFile {
         usg_file_path  :: FilePath,
-        usg_mtime      :: ClockTime
+        usg_mtime      :: UTCTime
         -- ^ External file dependency. From a CPP #include or TH addDependentFile. Should be absolute.
   }
     deriving( Eq )
@@ -1724,17 +1771,12 @@ its binding site, we fix it up.
 data NameCache
  = NameCache {  nsUniqs :: UniqSupply,
                 -- ^ Supply of uniques
-                nsNames :: OrigNameCache,
+                nsNames :: OrigNameCache
                 -- ^ Ensures that one original name gets one unique
-                nsIPs   :: OrigIParamCache
-                -- ^ Ensures that one implicit parameter name gets one unique
    }
 
 -- | Per-module cache of original 'OccName's given 'Name's
 type OrigNameCache   = ModuleEnv (OccEnv Name)
-
--- | Module-local cache of implicit parameter 'OccName's given 'Name's
-type OrigIParamCache = Map FastString (IPName Name)
 \end{code}
 
 
@@ -1771,8 +1813,8 @@ data ModSummary
         ms_mod          :: Module,              -- ^ Identity of the module
         ms_hsc_src      :: HscSource,           -- ^ The module source either plain Haskell, hs-boot or external core
         ms_location     :: ModLocation,         -- ^ Location of the various files belonging to the module
-        ms_hs_date      :: ClockTime,           -- ^ Timestamp of source file
-        ms_obj_date     :: Maybe ClockTime,     -- ^ Timestamp of object, if we have one
+        ms_hs_date      :: UTCTime,             -- ^ Timestamp of source file
+        ms_obj_date     :: Maybe UTCTime,       -- ^ Timestamp of object, if we have one
         ms_srcimps      :: [Located (ImportDecl RdrName)],      -- ^ Source imports of the module
         ms_textual_imps :: [Located (ImportDecl RdrName)],      -- ^ Non-source imports of the module from the module *text*
         ms_hspp_file    :: FilePath,            -- ^ Filename of preprocessed source file
@@ -1831,9 +1873,9 @@ instance Outputable ModSummary where
              char '}'
             ]
 
-showModMsg :: HscTarget -> Bool -> ModSummary -> String
-showModMsg target recomp mod_summary
-  = showSDoc $
+showModMsg :: DynFlags -> HscTarget -> Bool -> ModSummary -> String
+showModMsg dflags target recomp mod_summary
+  = showSDoc dflags $
         hsep [text (mod_str ++ replicate (max 0 (16 - length mod_str)) ' '),
               char '(', text (normalise $ msHsFilePath mod_summary) <> comma,
               case target of
@@ -1844,7 +1886,7 @@ showModMsg target recomp mod_summary
               char ')']
  where
     mod     = moduleName (ms_mod mod_summary)
-    mod_str = showSDoc (ppr mod) ++ hscSourceString (ms_hsc_src mod_summary)
+    mod_str = showPpr dflags mod ++ hscSourceString (ms_hsc_src mod_summary)
 \end{code}
 
 %************************************************************************
@@ -2020,26 +2062,26 @@ noIfaceTrustInfo = setSafeMode Sf_None
 trustInfoToNum :: IfaceTrustInfo -> Word8
 trustInfoToNum it
   = case getSafeMode it of
-            Sf_None        -> 0
-            Sf_Unsafe      -> 1
-            Sf_Trustworthy -> 2
-            Sf_Safe        -> 3
-            Sf_SafeInfered -> 4
+            Sf_None         -> 0
+            Sf_Unsafe       -> 1
+            Sf_Trustworthy  -> 2
+            Sf_Safe         -> 3
+            Sf_SafeInferred -> 4
 
 numToTrustInfo :: Word8 -> IfaceTrustInfo
 numToTrustInfo 0 = setSafeMode Sf_None
 numToTrustInfo 1 = setSafeMode Sf_Unsafe
 numToTrustInfo 2 = setSafeMode Sf_Trustworthy
 numToTrustInfo 3 = setSafeMode Sf_Safe
-numToTrustInfo 4 = setSafeMode Sf_SafeInfered
+numToTrustInfo 4 = setSafeMode Sf_SafeInferred
 numToTrustInfo n = error $ "numToTrustInfo: bad input number! (" ++ show n ++ ")"
 
 instance Outputable IfaceTrustInfo where
-    ppr (TrustInfo Sf_None)         = ptext $ sLit "none"
-    ppr (TrustInfo Sf_Unsafe)       = ptext $ sLit "unsafe"
-    ppr (TrustInfo Sf_Trustworthy)  = ptext $ sLit "trustworthy"
-    ppr (TrustInfo Sf_Safe)         = ptext $ sLit "safe"
-    ppr (TrustInfo Sf_SafeInfered)  = ptext $ sLit "safe-infered"
+    ppr (TrustInfo Sf_None)          = ptext $ sLit "none"
+    ppr (TrustInfo Sf_Unsafe)        = ptext $ sLit "unsafe"
+    ppr (TrustInfo Sf_Trustworthy)   = ptext $ sLit "trustworthy"
+    ppr (TrustInfo Sf_Safe)          = ptext $ sLit "safe"
+    ppr (TrustInfo Sf_SafeInferred)  = ptext $ sLit "safe-inferred"
 \end{code}
 
 %************************************************************************
@@ -2072,7 +2114,7 @@ stuff is the *dynamic* linker, and isn't present in a stage-1 compiler
 \begin{code}
 -- | Information we can use to dynamically link modules into the compiler
 data Linkable = LM {
-  linkableTime     :: ClockTime,        -- ^ Time at which this linkable was built
+  linkableTime     :: UTCTime,          -- ^ Time at which this linkable was built
                                         -- (i.e. when the bytecodes were produced,
                                         --       or the mod date on the files)
   linkableModule   :: Module,           -- ^ The linkable module itself

@@ -10,6 +10,7 @@ import Data.Graph
 import Prelude hiding (pi)
 
 import Distribution.PackageDescription (FlagAssignment) -- from Cabal
+import Distribution.Client.Types (OptionalStanza)
 
 import Distribution.Client.Dependency.Modular.Configured
 import Distribution.Client.Dependency.Modular.Dependency
@@ -28,16 +29,25 @@ type PAssignment    = Map QPN I
 -- and in the extreme case fix a concrete instance.
 type PPreAssignment = Map QPN (CI QPN)
 type FAssignment    = Map QFN Bool
+type SAssignment    = Map QSN Bool
 
 -- | A (partial) assignment of variables.
-data Assignment = A PAssignment FAssignment
+data Assignment = A PAssignment FAssignment SAssignment
   deriving (Show, Eq)
 
 -- | A preassignment comprises knowledge about variables, but not
 -- necessarily fixed values.
-data PreAssignment = PA PPreAssignment FAssignment
+data PreAssignment = PA PPreAssignment FAssignment SAssignment
 
 -- | Extend a package preassignment.
+--
+-- Takes the variable that causes the new constraints, a current preassignment
+-- and a set of new dependency constraints.
+--
+-- We're trying to extend the preassignment with each dependency one by one.
+-- Each dependency is for a particular variable. We check if we already have
+-- constraints for that variable in the current preassignment. If so, we're
+-- trying to merge the constraints.
 --
 -- Either returns a witness of the conflict that would arise during the merge,
 -- or the successfully extended assignment.
@@ -64,7 +74,7 @@ extend var pa qa = foldM (\ a (Dep qpn ci) ->
 -- of one package version chosen by the solver, which will lead to
 -- clashes.
 toCPs :: Assignment -> RevDepMap -> [CP QPN]
-toCPs (A pa fa) rdm =
+toCPs (A pa fa sa) rdm =
   let
     -- get hold of the graph
     g   :: Graph
@@ -89,6 +99,12 @@ toCPs (A pa fa) rdm =
            L.map (\ ((FN (PI qpn _) fn), b) -> (qpn, [(fn, b)])) $
            M.toList $
            fa
+    -- Stanzas per package.
+    sapp :: Map QPN [OptionalStanza]
+    sapp = M.fromListWith (++) $
+           L.map (\ ((SN (PI qpn _) sn), b) -> (qpn, if b then [sn] else [])) $
+           M.toList $
+           sa
     -- Dependencies per package.
     depp :: QPN -> [PI QPN]
     depp qpn = let v :: Vertex
@@ -99,6 +115,7 @@ toCPs (A pa fa) rdm =
   in
     L.map (\ pi@(PI qpn _) -> CP pi
                                  (M.findWithDefault [] qpn fapp)
+                                 (M.findWithDefault [] qpn sapp)
                                  (depp qpn))
           ps
 
@@ -106,7 +123,7 @@ toCPs (A pa fa) rdm =
 --
 -- This is preliminary, and geared towards output right now.
 finalize :: Index -> Assignment -> RevDepMap -> IO ()
-finalize idx (A pa fa) rdm =
+finalize idx (A pa fa _) rdm =
   let
     -- get hold of the graph
     g  :: Graph

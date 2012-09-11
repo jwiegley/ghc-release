@@ -13,10 +13,10 @@ TcMatches: Typecheck some @Matches@
 --     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
-module TcMatches ( tcMatchesFun, tcGRHSsPat, tcMatchesCase, tcMatchLambda,
-		   TcMatchCtxt(..), TcStmtChecker,
-		   tcStmts, tcStmtsAndThen, tcDoStmts, tcBody,
-		   tcDoStmt, tcGuardStmt
+module TcMatches ( tcMatchesFun, tcGRHSsPat, tcGRHS, tcMatchesCase,
+                   tcMatchLambda, TcMatchCtxt(..), TcStmtChecker,
+                   tcStmts, tcStmtsAndThen, tcDoStmts, tcBody,
+                   tcDoStmt, tcGuardStmt
        ) where
 
 import {-# SOURCE #-}	TcExpr( tcSyntaxOp, tcInferRhoNC, tcInferRho, tcCheckId,
@@ -397,21 +397,21 @@ tcLcStmt _ _ (ExprStmt rhs _ _ _) elt_ty thing_inside
 	; return (ExprStmt rhs' noSyntaxExpr noSyntaxExpr boolTy, thing) }
 
 -- ParStmt: See notes with tcMcStmt
-tcLcStmt m_tc ctxt (ParStmt bndr_stmts_s _ _ _) elt_ty thing_inside
+tcLcStmt m_tc ctxt (ParStmt bndr_stmts_s _ _) elt_ty thing_inside
   = do	{ (pairs', thing) <- loop bndr_stmts_s
-	; return (ParStmt pairs' noSyntaxExpr noSyntaxExpr noSyntaxExpr, thing) }
+	; return (ParStmt pairs' noSyntaxExpr noSyntaxExpr, thing) }
   where
     -- loop :: [([LStmt Name], [Name])] -> TcM ([([LStmt TcId], [TcId])], thing)
     loop [] = do { thing <- thing_inside elt_ty
 		 ; return ([], thing) }		-- matching in the branches
 
-    loop ((stmts, names) : pairs)
+    loop (ParStmtBlock stmts names _ : pairs)
       = do { (stmts', (ids, pairs', thing))
 		<- tcStmtsAndThen ctxt (tcLcStmt m_tc) stmts elt_ty $ \ _elt_ty' ->
 		   do { ids <- tcLookupLocalIds names
 		      ; (pairs', thing) <- loop pairs
 		      ; return (ids, pairs', thing) }
-	   ; return ( (stmts', ids) : pairs', thing ) }
+	   ; return ( ParStmtBlock stmts' ids noSyntaxExpr : pairs', thing ) }
 
 tcLcStmt m_tc ctxt (TransStmt { trS_form = form, trS_stmts = stmts
                               , trS_bndrs =  bindersMap
@@ -674,7 +674,7 @@ tcMcStmt ctxt (TransStmt { trS_stmts = stmts, trS_bndrs = bindersMap
 --        -> (m st2 -> m st3 -> m (st2, st3))   -- recursive call
 --        -> m (st1, (st2, st3))
 --
-tcMcStmt ctxt (ParStmt bndr_stmts_s mzip_op bind_op return_op) res_ty thing_inside
+tcMcStmt ctxt (ParStmt bndr_stmts_s mzip_op bind_op) res_ty thing_inside
   = do { let star_star_kind = liftedTypeKind `mkArrowKind` liftedTypeKind
        ; m_ty   <- newFlexiTyVarTy star_star_kind
 
@@ -686,14 +686,10 @@ tcMcStmt ctxt (ParStmt bndr_stmts_s mzip_op bind_op return_op) res_ty thing_insi
                         (m_ty `mkAppTy` mkBoxedTupleTy [alphaTy, betaTy])
        ; mzip_op' <- unLoc `fmap` tcPolyExpr (noLoc mzip_op) mzip_ty
 
-       ; return_op' <- fmap unLoc . tcPolyExpr (noLoc return_op) $
-                       mkForAllTy alphaTyVar $
-                       alphaTy `mkFunTy` (m_ty `mkAppTy` alphaTy)
-
-       ; (pairs', thing) <- loop m_ty bndr_stmts_s
+       ; (blocks', thing) <- loop m_ty bndr_stmts_s
 
        -- Typecheck bind:
-       ; let tys      = map (mkBigCoreVarTupTy . snd) pairs'
+       ; let tys      = [ mkBigCoreVarTupTy bs | ParStmtBlock _ bs _ <- blocks']
              tuple_ty = mk_tuple_ty tys
 
        ; bind_op' <- tcSyntaxOp MCompOrigin bind_op $
@@ -701,7 +697,7 @@ tcMcStmt ctxt (ParStmt bndr_stmts_s mzip_op bind_op return_op) res_ty thing_insi
                         `mkFunTy` (tuple_ty `mkFunTy` res_ty)
                         `mkFunTy` res_ty
 
-       ; return (ParStmt pairs' mzip_op' bind_op' return_op', thing) }
+       ; return (ParStmt blocks' mzip_op' bind_op', thing) }
 
   where 
     mk_tuple_ty tys = foldr1 (\tn tm -> mkBoxedTupleTy [tn, tm]) tys
@@ -712,31 +708,19 @@ tcMcStmt ctxt (ParStmt bndr_stmts_s mzip_op bind_op return_op) res_ty thing_insi
     loop _ [] = do { thing <- thing_inside res_ty
                    ; return ([], thing) }           -- matching in the branches
 
-    loop m_ty ((stmts, names) : pairs)
+    loop m_ty (ParStmtBlock stmts names return_op : pairs)
       = do { -- type dummy since we don't know all binder types yet
-             ty_dummy <- newFlexiTyVarTy liftedTypeKind
-           ; (stmts', (ids, pairs', thing))
-                <- tcStmtsAndThen ctxt tcMcStmt stmts ty_dummy $ \res_ty' ->
+             id_tys <- mapM (const (newFlexiTyVarTy liftedTypeKind)) names
+           ; let m_tup_ty = m_ty `mkAppTy` mkBigCoreTupTy id_tys
+           ; (stmts', (ids, return_op', pairs', thing))
+                <- tcStmtsAndThen ctxt tcMcStmt stmts m_tup_ty $ \m_tup_ty' ->
                    do { ids <- tcLookupLocalIds names
-    		      ; let m_tup_ty = m_ty `mkAppTy` mkBigCoreVarTupTy ids
-
-    		      ; check_same m_tup_ty res_ty'
-    		      ; check_same m_tup_ty ty_dummy
-    							 
+    		      ; let tup_ty = mkBigCoreVarTupTy ids
+                      ; return_op' <- tcSyntaxOp MCompOrigin return_op
+                                          (tup_ty `mkFunTy` m_tup_ty')
                       ; (pairs', thing) <- loop m_ty pairs
-                      ; return (ids, pairs', thing) }
-           ; return ( (stmts', ids) : pairs', thing ) }
-
-	-- Check that the types match up.
-	-- This is a grevious hack.  They always *will* match 
-	-- If (>>=) and (>>) are polymorpic in the return type,
-	-- but we don't have any good way to incorporate the coercion
-	-- so for now we just check that it's the identity
-    check_same actual expected
-      = do { co <- unifyType actual expected
-	   ; unless (isTcReflCo co) $
-             failWithMisMatch [UnifyOrigin { uo_expected = expected
-                                           , uo_actual = actual }] }
+                      ; return (ids, return_op', pairs', thing) }
+           ; return (ParStmtBlock stmts' ids return_op' : pairs', thing) }
 
 tcMcStmt _ stmt _ _
   = pprPanic "tcMcStmt: unexpected Stmt" (ppr stmt)

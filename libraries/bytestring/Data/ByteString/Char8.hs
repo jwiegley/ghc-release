@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP #-}
--- We cannot actually specify all the language pragmas, see ghc ticket #
--- If we could, these are what they would be:
-{- LANGUAGE MagicHash, UnboxedTuples -}
+#if __GLASGOW_HASKELL__
+{-# LANGUAGE MagicHash, UnboxedTuples #-}
+#endif
 {-# OPTIONS_HADDOCK prune #-}
 #if __GLASGOW_HASKELL__ >= 701
 {-# LANGUAGE Trustworthy #-}
@@ -10,10 +10,11 @@
 -- |
 -- Module      : Data.ByteString.Char8
 -- Copyright   : (c) Don Stewart 2006-2008
+--               (c) Duncan Coutts 2006-2011
 -- License     : BSD-style
 --
--- Maintainer  : dons@cse.unsw.edu.au
--- Stability   : experimental
+-- Maintainer  : dons00@gmail.com, duncan@community.haskell.org
+-- Stability   : stable
 -- Portability : portable
 --
 -- Manipulate 'ByteString's using 'Char' operations. All Chars will be
@@ -35,12 +36,12 @@
 -- This module is intended to be imported @qualified@, to avoid name
 -- clashes with "Prelude" functions.  eg.
 --
--- > import qualified Data.ByteString.Char8 as B
+-- > import qualified Data.ByteString.Char8 as C
 --
 -- The Char8 interface to bytestrings provides an instance of IsString
 -- for the ByteString type, enabling you to use string literals, and
--- have them implicitly packed to ByteStrings. Use -XOverloadedStrings
--- to enable this.
+-- have them implicitly packed to ByteStrings.
+-- Use @{-\# LANGUAGE OverloadedStrings \#-}@ to enable this.
 --
 
 module Data.ByteString.Char8 (
@@ -247,8 +248,7 @@ import Data.ByteString (empty,null,length,tail,init,append
                        ,useAsCString,useAsCStringLen
                        )
 
-import Data.ByteString.Internal (ByteString(PS), c2w, w2c, isSpaceWord8
-                                ,inlinePerformIO)
+import Data.ByteString.Internal
 
 import Data.Char    ( isSpace )
 import qualified Data.List as List (intersperse)
@@ -260,22 +260,6 @@ import Control.Exception        (bracket)
 import IO			(bracket)
 #endif
 import Foreign
-
-#if defined(__GLASGOW_HASKELL__)
-import GHC.Base                 (Char(..),unpackCString#,ord#,int2Word#)
-#if __GLASGOW_HASKELL__ >= 611
-import GHC.IO                   (stToIO)
-#else
-import GHC.IOBase               (stToIO)
-#endif
-import GHC.Prim                 (Addr#,writeWord8OffAddr#,plusAddr#)
-import GHC.Ptr                  (Ptr(..))
-import GHC.ST                   (ST(..))
-#endif
-
-#if MIN_VERSION_base(3,0,0)
-import Data.String              (IsString(..))
-#endif
 
 #define STRICT1(f) f a | a `seq` False = undefined
 #define STRICT2(f) f a b | a `seq` b `seq` False = undefined
@@ -289,34 +273,14 @@ singleton :: Char -> ByteString
 singleton = B.singleton . c2w
 {-# INLINE singleton #-}
 
-#if MIN_VERSION_base(3,0,0)
-instance IsString ByteString where
-    fromString = pack
-    {-# INLINE fromString #-}
-#endif
-
 -- | /O(n)/ Convert a 'String' into a 'ByteString'
 --
 -- For applications with large numbers of string literals, pack can be a
 -- bottleneck.
 pack :: String -> ByteString
+pack = packChars
+
 #if !defined(__GLASGOW_HASKELL__)
-
-pack str = B.unsafeCreate (P.length str) $ \p -> go p str
-    where go _ []     = return ()
-          go p (x:xs) = poke p (c2w x) >> go (p `plusPtr` 1) xs
-
-#else /* hack away */
-
-pack str = B.unsafeCreate (P.length str) $ \(Ptr p) -> stToIO (go p str)
-  where
-    go :: Addr# -> [Char] -> ST a ()
-    go _ []        = return ()
-    go p (C# c:cs) = writeByte p (int2Word# (ord# c)) >> go (p `plusAddr#` 1#) cs
-
-    writeByte p c = ST $ \s# ->
-        case writeWord8OffAddr# p 0# c s# of s2# -> (# s2#, () #)
-    {-# INLINE writeByte #-}
 {-# INLINE [1] pack #-}
 
 {-# RULES
@@ -328,8 +292,11 @@ pack str = B.unsafeCreate (P.length str) $ \(Ptr p) -> stToIO (go p str)
 
 -- | /O(n)/ Converts a 'ByteString' to a 'String'.
 unpack :: ByteString -> [Char]
-unpack = P.map w2c . B.unpack
+unpack = B.unpackChars
 {-# INLINE unpack #-}
+
+infixr 5 `cons` --same as list (:)
+infixl 5 `snoc`
 
 -- | /O(n)/ 'cons' is analogous to (:) for lists, but of different
 -- complexity, as it requires a memcpy.
