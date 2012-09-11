@@ -1,5 +1,5 @@
 
 This index includes documentation for many Haskell modules.
 
-For documentation on the GHC API, see <ghc-7.2.1/index.html>.
+For documentation on the GHC API, see <ghc-7.2.2/index.html>.
 
