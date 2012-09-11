@@ -320,7 +320,6 @@ extendLocalRdrEnvList env names
   = extendOccEnvList env [(nameOccName n, n) | n <- names]
 
 lookupLocalRdrEnv :: LocalRdrEnv -> RdrName -> Maybe Name
-lookupLocalRdrEnv _   (Exact name) = Just name
 lookupLocalRdrEnv env (Unqual occ) = lookupOccEnv env occ
 lookupLocalRdrEnv _   _            = Nothing
 
@@ -384,18 +383,6 @@ plusParent :: Parent -> Parent -> Parent
 plusParent p1 p2 = ASSERT2( p1 == p2, parens (ppr p1) <+> parens (ppr p2) )
                    p1
 
-{- Why so complicated? -=chak
-plusParent :: Parent -> Parent -> Parent
-plusParent NoParent     rel = 
-  ASSERT2( case rel of { NoParent -> True; other -> False }, 
-	   ptext (sLit "plusParent[NoParent]: ") <+> ppr rel )    
-  NoParent
-plusParent (ParentIs n) rel = 
-  ASSERT2( case rel of { ParentIs m -> n==m;  other -> False }, 
-	   ptext (sLit "plusParent[ParentIs]:") <+> ppr n <> comma <+> ppr rel )
-  ParentIs n
- -}
-
 emptyGlobalRdrEnv :: GlobalRdrEnv
 emptyGlobalRdrEnv = emptyOccEnv
 
@@ -403,7 +390,8 @@ globalRdrEnvElts :: GlobalRdrEnv -> [GlobalRdrElt]
 globalRdrEnvElts env = foldOccEnv (++) [] env
 
 instance Outputable GlobalRdrElt where
-  ppr gre = ppr name <+> parens (ppr (gre_par gre) <+> pprNameProvenance gre)
+  ppr gre = hang (ppr name)
+               2 (parens (ppr (gre_par gre) <+> pprNameProvenance gre))
 	  where
 	    name = gre_name gre
 
@@ -439,10 +427,13 @@ lookupGRE_Name env name
 	    gre_name gre == name ]
 
 getGRE_NameQualifier_maybes :: GlobalRdrEnv -> Name -> [Maybe [ModuleName]]
+-- Returns all the qualifiers by which 'x' is in scope
+-- Nothing means "the unqualified version is in scope"
 getGRE_NameQualifier_maybes env
   = map qualifier_maybe . map gre_prov . lookupGRE_Name env
-  where qualifier_maybe LocalDef       = Nothing
-        qualifier_maybe (Imported iss) = Just $ map (is_as . is_decl) iss 
+  where
+    qualifier_maybe LocalDef       = Nothing
+    qualifier_maybe (Imported iss) = Just $ map (is_as . is_decl) iss
 
 pickGREs :: RdrName -> [GlobalRdrElt] -> [GlobalRdrElt]
 -- ^ Take a list of GREs which have the right OccName
@@ -579,7 +570,7 @@ data Provenance
 	                -- INVARIANT: the list of 'ImportSpec' is non-empty
 
 data ImportSpec = ImpSpec { is_decl :: ImpDeclSpec,
-			    is_item ::  ImpItemSpec }
+			    is_item :: ImpItemSpec }
 		deriving( Eq, Ord )
 
 -- | Describes a particular import declaration and is
@@ -686,14 +677,16 @@ pprNameProvenance (GRE {gre_name = name, gre_prov = Imported whys})
 -- If we know the exact definition point (which we may do with GHCi)
 -- then show that too.  But not if it's just "imported from X".
 ppr_defn :: SrcLoc -> SDoc
-ppr_defn loc | isGoodSrcLoc loc = parens (ptext (sLit "defined at") <+> ppr loc)
-	     | otherwise	= empty
+ppr_defn (RealSrcLoc loc) = parens (ptext (sLit "defined at") <+> ppr loc)
+ppr_defn (UnhelpfulLoc _) = empty
 
 instance Outputable ImportSpec where
    ppr imp_spec
      = ptext (sLit "imported from") <+> ppr (importSpecModule imp_spec) 
-	<+> if isGoodSrcSpan loc then ptext (sLit "at") <+> ppr loc
-				 else empty
+	<+> pprLoc
      where
        loc = importSpecLoc imp_spec
+       pprLoc = case loc of
+                RealSrcSpan s -> ptext (sLit "at") <+> ppr s
+                UnhelpfulSpan _ -> empty
 \end{code}

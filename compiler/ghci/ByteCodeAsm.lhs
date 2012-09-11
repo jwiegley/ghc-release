@@ -6,6 +6,7 @@ ByteCodeLink: Bytecode assembler and linker
 
 \begin{code}
 {-# OPTIONS -optc-DNON_POSIX_SOURCE #-}
+{-# LANGUAGE BangPatterns #-}
 
 module ByteCodeAsm (
         assembleBCOs, assembleBCO,
@@ -29,7 +30,9 @@ import PrimOp
 import Constants
 import FastString
 import SMRep
+import DynFlags
 import Outputable
+import Platform
 
 import Control.Monad    ( foldM )
 import Control.Monad.ST ( runST )
@@ -112,14 +115,14 @@ instance Outputable UnlinkedBCO where
 -- bytecode address in this BCO.
 
 -- Top level assembler fn.
-assembleBCOs :: [ProtoBCO Name] -> [TyCon] -> IO CompiledByteCode
-assembleBCOs proto_bcos tycons
+assembleBCOs :: DynFlags -> [ProtoBCO Name] -> [TyCon] -> IO CompiledByteCode
+assembleBCOs dflags proto_bcos tycons
   = do  itblenv <- mkITbls tycons
-        bcos    <- mapM assembleBCO proto_bcos
+        bcos    <- mapM (assembleBCO dflags) proto_bcos
         return (ByteCode bcos itblenv)
 
-assembleBCO :: ProtoBCO Name -> IO UnlinkedBCO
-assembleBCO (ProtoBCO nm instrs bitmap bsize arity _origin _malloced)
+assembleBCO :: DynFlags -> ProtoBCO Name -> IO UnlinkedBCO
+assembleBCO dflags (ProtoBCO nm instrs bitmap bsize arity _origin _malloced)
    = let
          -- pass 1: collect up the offsets of the local labels.
          -- Remember that the first insn starts at offset
@@ -151,7 +154,7 @@ assembleBCO (ProtoBCO nm instrs bitmap bsize arity _origin _malloced)
          ptrs  <- return emptySS :: IO (SizedSeq BCOPtr)
          let init_asm_state = (insns,lits,ptrs)
          (final_insns, final_lits, final_ptrs)
-            <- mkBits findLabel init_asm_state instrs
+            <- mkBits dflags findLabel init_asm_state instrs
 
          let asm_insns = ssElts final_insns
              n_insns   = sizeSS final_insns
@@ -227,12 +230,13 @@ largeArg w
  | otherwise = error "wORD_SIZE_IN_BITS not 32 or 64?"
 
 -- This is where all the action is (pass 2 of the assembler)
-mkBits :: (Word16 -> Word)              -- label finder
+mkBits :: DynFlags
+       -> (Word16 -> Word)              -- label finder
        -> AsmState
        -> [BCInstr]                     -- instructions (in)
        -> IO AsmState
 
-mkBits findLabel st proto_insns
+mkBits dflags findLabel st proto_insns
   = foldM doInstr st proto_insns
     where
        doInstr :: AsmState -> BCInstr -> IO AsmState
@@ -246,14 +250,14 @@ mkBits findLabel st proto_insns
                                         instr2 st2 bci_PUSH_G p
                PUSH_PRIMOP op     -> do (p, st2) <- ptr st (BCOPtrPrimOp op)
                                         instr2 st2 bci_PUSH_G p
-               PUSH_BCO proto     -> do ul_bco <- assembleBCO proto
+               PUSH_BCO proto     -> do ul_bco <- assembleBCO dflags proto
                                         (p, st2) <- ptr st (BCOPtrBCO ul_bco)
                                         instr2 st2 bci_PUSH_G p
-               PUSH_ALTS proto    -> do ul_bco <- assembleBCO proto
+               PUSH_ALTS proto    -> do ul_bco <- assembleBCO dflags proto
                                         (p, st2) <- ptr st (BCOPtrBCO ul_bco)
                                         instr2 st2 bci_PUSH_ALTS p
                PUSH_ALTS_UNLIFTED proto pk -> do
-                                        ul_bco <- assembleBCO proto
+                                        ul_bco <- assembleBCO dflags proto
                                         (p, st2) <- ptr st (BCOPtrBCO ul_bco)
                                         instr2 st2 (push_alts pk) p
                PUSH_UBX  (Left lit) nws
@@ -309,8 +313,8 @@ mkBits findLabel st proto_insns
                ENTER              -> instr1 st bci_ENTER
                RETURN             -> instr1 st bci_RETURN
                RETURN_UBX rep     -> instr1 st (return_ubx rep)
-               CCALL off m_addr   -> do (np, st2) <- addr st m_addr
-                                        instr3 st2 bci_CCALL off np
+               CCALL off m_addr int -> do (np, st2) <- addr st m_addr
+                                          instr4 st2 bci_CCALL off np int
                BRK_FUN array index info -> do
                   (p1, st2) <- ptr st  (BCOPtrArray array)
                   (p2, st3) <- ptr st2 (BCOPtrBreakInfo info)
@@ -394,12 +398,11 @@ mkBits findLabel st proto_insns
           = do st_l1 <- addToSS st_l0 (BCONPtrItbl (getName dcon))
                return (sizeSS16 st_l0, (st_i0,st_l1,st_p0))
 
-#ifdef mingw32_TARGET_OS
        literal st (MachLabel fs (Just sz) _)
+        | platformOS (targetPlatform dflags) == OSMinGW32
             = litlabel st (appendFS fs (mkFastString ('@':show sz)))
         -- On Windows, stdcall labels have a suffix indicating the no. of
         -- arg words, e.g. foo@8.  testcase: ffi012(ghci)
-#endif
        literal st (MachLabel fs _ _) = litlabel st fs
        literal st (MachWord w)     = int st (fromIntegral w)
        literal st (MachInt j)      = int st (fromIntegral j)
@@ -478,7 +481,7 @@ instrSize16s instr
         ENTER{}                 -> 1
         RETURN{}                -> 1
         RETURN_UBX{}            -> 1
-        CCALL{}                 -> 3
+        CCALL{}                 -> 4
         SWIZZLE{}               -> 3
         BRK_FUN{}               -> 4
 

@@ -21,6 +21,7 @@
 #include "RtsUtils.h"
 #include "sm/Storage.h"
 #include "sm/BlockAlloc.h"
+#include "GCThread.h"
 #include "Sanity.h"
 #include "Schedule.h"
 #include "Apply.h"
@@ -35,6 +36,7 @@
 static void      checkSmallBitmap    ( StgPtr payload, StgWord bitmap, nat );
 static void      checkLargeBitmap    ( StgPtr payload, StgLargeBitmap*, nat );
 static void      checkClosureShallow ( StgClosure * );
+static void      checkSTACK          (StgStack *stack);
 
 /* -----------------------------------------------------------------------------
    Check stack sanity
@@ -43,10 +45,8 @@ static void      checkClosureShallow ( StgClosure * );
 static void
 checkSmallBitmap( StgPtr payload, StgWord bitmap, nat size )
 {
-    StgPtr p;
     nat i;
 
-    p = payload;
     for(i = 0; i < size; i++, bitmap >>= 1 ) {
 	if ((bitmap & 1) == 0) {
 	    checkClosureShallow((StgClosure *)payload[i]);
@@ -139,6 +139,7 @@ checkStackFrame( StgPtr c )
     case CATCH_STM_FRAME:
     case CATCH_FRAME:
       // small bitmap cases (<= 32 entries)
+    case UNDERFLOW_FRAME:
     case STOP_FRAME:
     case RET_SMALL:
 	size = BITMAP_SIZE(info->i.layout.bitmap);
@@ -208,14 +209,12 @@ static void
 checkPAP (StgClosure *tagged_fun, StgClosure** payload, StgWord n_args)
 { 
     StgClosure *fun;
-    StgClosure *p;
     StgFunInfoTable *fun_info;
     
     fun = UNTAG_CLOSURE(tagged_fun);
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(fun));
     fun_info = get_fun_itbl(fun);
     
-    p = (StgClosure *)payload;
     switch (fun_info->f.fun_type) {
     case ARG_GEN:
 	checkSmallBitmap( (StgPtr)payload, 
@@ -331,7 +330,7 @@ checkClosure( StgClosure* p )
 
         ASSERT(get_itbl(bq->owner)->type == TSO);
         ASSERT(bq->queue == (MessageBlackHole*)END_TSO_QUEUE 
-               || get_itbl(bq->queue)->type == TSO);
+               || bq->queue->header.info == &stg_MSG_BLACKHOLE_info);
         ASSERT(bq->link == (StgBlockingQueue*)END_TSO_QUEUE || 
                get_itbl(bq->link)->type == IND ||
                get_itbl(bq->link)->type == BLOCKING_QUEUE);
@@ -384,6 +383,7 @@ checkClosure( StgClosure* p )
     case RET_BIG:
     case RET_DYN:
     case UPDATE_FRAME:
+    case UNDERFLOW_FRAME:
     case STOP_FRAME:
     case CATCH_FRAME:
     case ATOMICALLY_FRAME:
@@ -431,7 +431,11 @@ checkClosure( StgClosure* p )
 
     case TSO:
         checkTSO((StgTSO *)p);
-        return tso_sizeW((StgTSO *)p);
+        return sizeofW(StgTSO);
+
+    case STACK:
+        checkSTACK((StgStack*)p);
+        return stack_sizeW((StgStack*)p);
 
     case TREC_CHUNK:
       {
@@ -461,16 +465,9 @@ checkClosure( StgClosure* p )
    all the objects in the remainder of the chain.
    -------------------------------------------------------------------------- */
 
-void 
-checkHeap(bdescr *bd)
+void checkHeapChain (bdescr *bd)
 {
     StgPtr p;
-
-#if defined(THREADED_RTS)
-    // heap sanity checking doesn't work with SMP, because we can't
-    // zero the slop (see Updates.h).
-    return;
-#endif
 
     for (; bd != NULL; bd = bd->link) {
         if(!(bd->flags & BF_SWEPT)) {
@@ -489,7 +486,7 @@ checkHeap(bdescr *bd)
     }
 }
 
-void 
+void
 checkHeapChunk(StgPtr start, StgPtr end)
 {
   StgPtr p;
@@ -514,19 +511,21 @@ checkLargeObjects(bdescr *bd)
   }
 }
 
+static void
+checkSTACK (StgStack *stack)
+{
+    StgPtr sp = stack->sp;
+    StgOffset stack_size = stack->stack_size;
+    StgPtr stack_end = stack->stack + stack_size;
+
+    ASSERT(stack->stack <= sp && sp <= stack_end);
+
+    checkStackChunk(sp, stack_end);
+}
+
 void
 checkTSO(StgTSO *tso)
 {
-    StgPtr sp = tso->sp;
-    StgPtr stack = tso->stack;
-    StgOffset stack_size = tso->stack_size;
-    StgPtr stack_end = stack + stack_size;
-
-    if (tso->what_next == ThreadRelocated) {
-      checkTSO(tso->_link);
-      return;
-    }
-
     if (tso->what_next == ThreadKilled) {
       /* The garbage collector doesn't bother following any pointers
        * from dead threads, so don't check sanity here.  
@@ -537,16 +536,24 @@ checkTSO(StgTSO *tso)
     ASSERT(tso->_link == END_TSO_QUEUE || 
            tso->_link->header.info == &stg_MVAR_TSO_QUEUE_info ||
            tso->_link->header.info == &stg_TSO_info);
-    ASSERT(LOOKS_LIKE_CLOSURE_PTR(tso->block_info.closure));
+
+    if (   tso->why_blocked == BlockedOnMVar
+	|| tso->why_blocked == BlockedOnBlackHole
+	|| tso->why_blocked == BlockedOnMsgThrowTo
+        || tso->why_blocked == NotBlocked
+	) {
+        ASSERT(LOOKS_LIKE_CLOSURE_PTR(tso->block_info.closure));
+    }
+
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(tso->bq));
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(tso->blocked_exceptions));
+    ASSERT(LOOKS_LIKE_CLOSURE_PTR(tso->stackobj));
 
-    ASSERT(stack <= sp && sp < stack_end);
-
-    checkStackChunk(sp, stack_end);
+    // XXX are we checking the stack twice?
+    checkSTACK(tso->stackobj);
 }
 
-/* 
+/*
    Check that all TSOs have been evacuated.
    Optionally also check the sanity of the TSOs.
 */
@@ -564,13 +571,29 @@ checkGlobalTSOList (rtsBool checkTSOs)
           if (checkTSOs)
               checkTSO(tso);
 
-          tso = deRefTSO(tso);
-
           // If this TSO is dirty and in an old generation, it better
           // be on the mutable list.
-          if (tso->dirty || (tso->flags & TSO_LINK_DIRTY)) {
+          if (tso->dirty) {
               ASSERT(Bdescr((P_)tso)->gen_no == 0 || (tso->flags & TSO_MARKED));
               tso->flags &= ~TSO_MARKED;
+          }
+
+          {
+              StgStack *stack;
+              StgUnderflowFrame *frame;
+
+              stack = tso->stackobj;
+              while (1) {
+                  if (stack->dirty & 1) {
+                      ASSERT(Bdescr((P_)stack)->gen_no == 0 || (stack->dirty & TSO_MARKED));
+                      stack->dirty &= ~TSO_MARKED;
+                  }
+                  frame = (StgUnderflowFrame*) (stack->stack + stack->stack_size
+                                                - sizeofW(StgUnderflowFrame));
+                  if (frame->info != &stg_stack_underflow_frame_info
+                      || frame->next_chunk == (StgStack*)END_TSO_QUEUE) break;
+                  stack = frame->next_chunk;
+              }
           }
       }
   }
@@ -580,7 +603,7 @@ checkGlobalTSOList (rtsBool checkTSOs)
    Check mutable list sanity.
    -------------------------------------------------------------------------- */
 
-void
+static void
 checkMutableList( bdescr *mut_bd, nat gen )
 {
     bdescr *bd;
@@ -590,26 +613,37 @@ checkMutableList( bdescr *mut_bd, nat gen )
     for (bd = mut_bd; bd != NULL; bd = bd->link) {
 	for (q = bd->start; q < bd->free; q++) {
 	    p = (StgClosure *)*q;
-	    ASSERT(!HEAP_ALLOCED(p) || Bdescr((P_)p)->gen_no == gen);
-            if (get_itbl(p)->type == TSO) {
+            ASSERT(!HEAP_ALLOCED(p) || Bdescr((P_)p)->gen_no == gen);
+            checkClosure(p);
+
+            switch (get_itbl(p)->type) {
+            case TSO:
                 ((StgTSO *)p)->flags |= TSO_MARKED;
+                break;
+            case STACK:
+                ((StgStack *)p)->dirty |= TSO_MARKED;
+                break;
             }
-	}
+        }
     }
 }
 
-void
-checkMutableLists (rtsBool checkTSOs)
+static void
+checkLocalMutableLists (nat cap_no)
 {
-    nat g, i;
-
-    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-        checkMutableList(generations[g].mut_list, g);
-        for (i = 0; i < n_capabilities; i++) {
-            checkMutableList(capabilities[i].mut_lists[g], g);
-        }
+    nat g;
+    for (g = 1; g < RtsFlags.GcFlags.generations; g++) {
+        checkMutableList(capabilities[cap_no].mut_lists[g], g);
     }
-    checkGlobalTSOList(checkTSOs);
+}
+
+static void
+checkMutableLists (void)
+{
+    nat i;
+    for (i = 0; i < n_capabilities; i++) {
+        checkLocalMutableLists(i);
+    }
 }
 
 /*
@@ -663,7 +697,8 @@ checkNurserySanity (nursery *nursery)
 
     prev = NULL;
     for (bd = nursery->blocks; bd != NULL; bd = bd->link) {
-	ASSERT(bd->u.back == prev);
+        ASSERT(bd->gen == g0);
+        ASSERT(bd->u.back == prev);
 	prev = bd;
 	blocks += bd->blocks;
     }
@@ -671,41 +706,59 @@ checkNurserySanity (nursery *nursery)
     ASSERT(blocks == nursery->n_blocks);
 }
 
+static void checkGeneration (generation *gen, 
+                             rtsBool after_major_gc USED_IF_THREADS)
+{
+    nat n;
+    gen_workspace *ws;
+
+    ASSERT(countBlocks(gen->blocks) == gen->n_blocks);
+    ASSERT(countBlocks(gen->large_objects) == gen->n_large_blocks);
+
+#if defined(THREADED_RTS)
+    // heap sanity checking doesn't work with SMP, because we can't
+    // zero the slop (see Updates.h).  However, we can sanity-check
+    // the heap after a major gc, because there is no slop.
+    if (!after_major_gc) return;
+#endif
+
+    checkHeapChain(gen->blocks);
+
+    for (n = 0; n < n_capabilities; n++) {
+        ws = &gc_threads[n]->gens[gen->no];
+        checkHeapChain(ws->todo_bd);
+        checkHeapChain(ws->part_list);
+        checkHeapChain(ws->scavd_list);
+    }
+
+    checkLargeObjects(gen->large_objects);
+}
 
 /* Full heap sanity check. */
-void
-checkSanity( rtsBool check_heap )
+static void checkFullHeap (rtsBool after_major_gc)
 {
     nat g, n;
 
     for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-        ASSERT(countBlocks(generations[g].blocks)
-               == generations[g].n_blocks);
-        ASSERT(countBlocks(generations[g].large_objects)
-                   == generations[g].n_large_blocks);
-        if (check_heap) {
-            checkHeap(generations[g].blocks);
-        }
-        checkLargeObjects(generations[g].large_objects);
+        checkGeneration(&generations[g], after_major_gc);
     }
-    
     for (n = 0; n < n_capabilities; n++) {
         checkNurserySanity(&nurseries[n]);
     }
-    
+}
+
+void checkSanity (rtsBool after_gc, rtsBool major_gc)
+{
+    checkFullHeap(after_gc && major_gc);
+
     checkFreeListSanity();
 
-#if defined(THREADED_RTS)
     // always check the stacks in threaded mode, because checkHeap()
     // does nothing in this case.
-    checkMutableLists(rtsTrue);
-#else
-    if (check_heap) {
-        checkMutableLists(rtsFalse);
-    } else {
-        checkMutableLists(rtsTrue);
+    if (after_gc) {
+        checkMutableLists();
+        checkGlobalTSOList(rtsTrue);
     }
-#endif
 }
 
 // If memInventory() calculates that we have a memory leak, this
@@ -718,19 +771,22 @@ checkSanity( rtsBool check_heap )
 static void
 findMemoryLeak (void)
 {
-  nat g, i;
-  for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-      for (i = 0; i < n_capabilities; i++) {
-	  markBlocks(capabilities[i].mut_lists[g]);
-      }
-      markBlocks(generations[g].mut_list);
-      markBlocks(generations[g].blocks);
-      markBlocks(generations[g].large_objects);
-  }
+    nat g, i;
+    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+        for (i = 0; i < n_capabilities; i++) {
+            markBlocks(capabilities[i].mut_lists[g]);
+            markBlocks(gc_threads[i]->gens[g].part_list);
+            markBlocks(gc_threads[i]->gens[g].scavd_list);
+            markBlocks(gc_threads[i]->gens[g].todo_bd);
+        }
+        markBlocks(generations[g].blocks);
+        markBlocks(generations[g].large_objects);
+    }
 
-  for (i = 0; i < n_capabilities; i++) {
-      markBlocks(nurseries[i].blocks);
-  }
+    for (i = 0; i < n_capabilities; i++) {
+        markBlocks(nurseries[i].blocks);
+        markBlocks(capabilities[i].pinned_object_block);
+    }
 
 #ifdef PROFILING
   // TODO:
@@ -810,8 +866,10 @@ memInventory (rtsBool show)
       gen_blocks[g] = 0;
       for (i = 0; i < n_capabilities; i++) {
 	  gen_blocks[g] += countBlocks(capabilities[i].mut_lists[g]);
+          gen_blocks[g] += countBlocks(gc_threads[i]->gens[g].part_list);
+          gen_blocks[g] += countBlocks(gc_threads[i]->gens[g].scavd_list);
+          gen_blocks[g] += countBlocks(gc_threads[i]->gens[g].todo_bd);
       }	  
-      gen_blocks[g] += countAllocdBlocks(generations[g].mut_list);
       gen_blocks[g] += genBlocks(&generations[g]);
   }
 
@@ -819,6 +877,9 @@ memInventory (rtsBool show)
   for (i = 0; i < n_capabilities; i++) {
       ASSERT(countBlocks(nurseries[i].blocks) == nurseries[i].n_blocks);
       nursery_blocks += nurseries[i].n_blocks;
+      if (capabilities[i].pinned_object_block != NULL) {
+          nursery_blocks += capabilities[i].pinned_object_block->blocks;
+      }
   }
 
   retainer_blocks = 0;

@@ -4,7 +4,7 @@ dnl
 #!/bin/sh
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.0.4], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.2.1], [glasgow-haskell-bugs@haskell.org], [ghc])
 
 FP_BINDIST_GHC_PWD
 FP_FIND_ROOT
@@ -47,15 +47,13 @@ dnl ** Find the path to sed **
 #
 AC_PATH_PROG(SedCmd,gsed sed,sed)
 
-#
-dnl ** How to invoke gcc/cpp **
-#
-FP_ARG_WITH_PATH_GNU_PROG([CC], [gcc])
-export CC
-WhatGccIsCalled="$CC"
-AC_SUBST(WhatGccIsCalled)
+XCODE_VERSION()
 
-FP_HAVE_GCC
+dnl ** Which gcc to use?
+dnl --------------------------------------------------------------
+FIND_GCC()
+
+FP_GCC_VERSION
 AC_PROG_CPP
 
 #
@@ -82,13 +80,15 @@ AC_SUBST(CONF_CPP_OPTS_STAGE0)
 AC_SUBST(CONF_CPP_OPTS_STAGE1)
 AC_SUBST(CONF_CPP_OPTS_STAGE2)
 
+FP_SETTINGS
+
 #
 dnl ** how to invoke `ar' and `ranlib'
 #
 FP_PROG_AR_NEEDS_RANLIB
 
 #
-AC_CONFIG_FILES(extra-gcc-opts mk/config.mk mk/install.mk)
+AC_CONFIG_FILES(settings mk/config.mk mk/install.mk)
 AC_OUTPUT
 
 # We get caught by

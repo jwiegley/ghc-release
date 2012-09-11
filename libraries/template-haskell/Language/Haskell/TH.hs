@@ -84,14 +84,14 @@ module Language.Haskell.TH(
     newtypeInstD, tySynInstD, 
     typeFam, dataFam,
     -- **** Foreign Function Interface (FFI)
-    cCall, stdCall, unsafe, safe, threadsafe, forImpD,
+    cCall, stdCall, unsafe, safe, forImpD,
     -- **** Pragmas
     -- | Just inline supported so far
     inlineSpecNoPhase, inlineSpecPhase,
     pragInlD, pragSpecD,
 
 	-- * Pretty-printer
-	Ppr(..), pprint, pprExp, pprLit, pprPat, pprParendType
+    Ppr(..), pprint, pprExp, pprLit, pprPat, pprParendType
 	
    ) where
 

@@ -10,6 +10,7 @@ general, all of these functions return a renamed thing, and a set of
 free variables.
 
 \begin{code}
+{-# LANGUAGE ScopedTypeVariables #-}
 module RnPat (-- main entry points
               rnPat, rnPats, rnBindPat,
 
@@ -47,7 +48,8 @@ import Name
 import NameSet
 import RdrName
 import BasicTypes
-import ListSetOps	( removeDups, minusList )
+import Util		( notNull )
+import ListSetOps	( removeDups )
 import Outputable
 import SrcLoc
 import FastString
@@ -229,12 +231,15 @@ rnPats ctxt pats thing_inside
 	; bindPatSigTyVarsFV (collectSigTysFromPats pats)     $ 
 	  unCpsRn (rnLPatsAndThen (matchNameMaker ctxt) pats) $ \ pats' -> do
         { -- Check for duplicated and shadowed names 
-	         -- Because we don't bind the vars all at once, we can't
-	         -- 	check incrementally for duplicates; 
-	         -- Nor can we check incrementally for shadowing, else we'll
-	         -- 	complain *twice* about duplicates e.g. f (x,x) = ...
-        ; let names = collectPatsBinders pats'
-        ; addErrCtxt doc_pat $ checkDupAndShadowedNames envs_before names
+	  -- Must do this *after* renaming the patterns
+	  -- See Note [Collect binders only after renaming] in HsUtils
+          -- Because we don't bind the vars all at once, we can't
+	  -- 	check incrementally for duplicates; 
+	  -- Nor can we check incrementally for shadowing, else we'll
+	  -- 	complain *twice* about duplicates e.g. f (x,x) = ...
+        ; addErrCtxt doc_pat $ 
+          checkDupAndShadowedNames envs_before $
+          collectPatsBinders pats'
         ; thing_inside pats' } }
   where
     doc_pat = ptext (sLit "In") <+> pprMatchContext ctxt
@@ -367,10 +372,6 @@ rnPatAndThen mk (TuplePat pats boxed _)
        ; pats' <- rnLPatsAndThen mk pats
        ; return (TuplePat pats' boxed placeHolderType) }
 
-rnPatAndThen _ (TypePat ty)
-  = do { ty' <- liftCpsFV $ rnHsTypeFVs (text "In a type pattern") ty
-       ; return (TypePat ty') }
-
 #ifndef GHCI
 rnPatAndThen _ p@(QuasiQuotePat {}) 
   = pprPanic "Can't do QuasiQuotePat without GHCi" (ppr p)
@@ -441,7 +442,8 @@ data HsRecFieldContext
   | HsRecFieldUpd
 
 rnHsRecFields1 
-    :: HsRecFieldContext
+    :: forall arg. 
+       HsRecFieldContext
     -> (RdrName -> arg) -- When punning, use this to build a new field
     -> HsRecFields RdrName (Located arg)
     -> RnM ([HsRecField Name (Located arg)], FreeVars)
@@ -458,64 +460,97 @@ rnHsRecFields1 ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot }
        ; parent <- check_disambiguation disambig_ok mb_con
        ; flds1 <- mapM (rn_fld pun_ok parent) flds
        ; mapM_ (addErr . dupFieldErr ctxt) dup_flds
-       ; flds2 <- rn_dotdot dotdot mb_con flds1
-       ; return (flds2, mkFVs (getFieldIds flds2)) }
+       ; dotdot_flds <- rn_dotdot dotdot mb_con flds1
+       ; let all_flds | null dotdot_flds = flds1
+                      | otherwise        = flds1 ++ dotdot_flds
+       ; return (all_flds, mkFVs (getFieldIds all_flds)) }
   where
     mb_con = case ctxt of
-		HsRecFieldUpd     -> Nothing
-		HsRecFieldCon con -> Just con
-		HsRecFieldPat con -> Just con
+		HsRecFieldCon con | not (isUnboundName con) -> Just con
+		HsRecFieldPat con | not (isUnboundName con) -> Just con
+		_other -> Nothing
+	   -- The unbound name test is because if the constructor 
+	   -- isn't in scope the constructor lookup will add an error
+	   -- add an error, but still return an unbound name. 
+	   -- We don't want that to screw up the dot-dot fill-in stuff.
+
     doc = case mb_con of
             Nothing  -> ptext (sLit "constructor field name")
             Just con -> ptext (sLit "field of constructor") <+> quotes (ppr con)
 
-    name_to_arg (L loc n) = L loc (mk_arg (mkRdrUnqual (nameOccName n)))
-
     rn_fld pun_ok parent (HsRecField { hsRecFieldId = fld
                        	      	     , hsRecFieldArg = arg
                        	      	     , hsRecPun = pun })
-      = do { fld' <- wrapLocM (lookupSubBndr parent doc) fld
+      = do { fld'@(L loc fld_nm) <- wrapLocM (lookupSubBndr parent doc) fld
            ; arg' <- if pun 
                      then do { checkErr pun_ok (badPun fld)
-                             ; return (name_to_arg fld') }
+                             ; return (L loc (mk_arg (mkRdrUnqual (nameOccName fld_nm)))) }
                      else return arg
            ; return (HsRecField { hsRecFieldId = fld'
                                 , hsRecFieldArg = arg'
                                 , hsRecPun = pun }) }
 
-    rn_dotdot Nothing _mb_con flds     -- No ".." at all
-      = return flds
-    rn_dotdot (Just {}) Nothing flds   -- ".." on record update
-      = do { addErr (badDotDot ctxt); return flds }
+    rn_dotdot :: Maybe Int	-- See Note [DotDot fields] in HsPat
+    	      -> Maybe Name	-- The constructor (Nothing for an update
+	      	       		--    or out of scope constructor)
+	      -> [HsRecField Name (Located arg)]   -- Explicit fields
+	      -> RnM [HsRecField Name (Located arg)]   -- Filled in .. fields
+    rn_dotdot Nothing _mb_con _flds     -- No ".." at all
+      = return []
+    rn_dotdot (Just {}) Nothing _flds   -- ".." on record update
+      = do { addErr (badDotDot ctxt); return [] }
     rn_dotdot (Just n) (Just con) flds -- ".." on record con/pat
       = ASSERT( n == length flds )
         do { loc <- getSrcSpanM	-- Rather approximate
            ; dd_flag <- xoptM Opt_RecordWildCards
            ; checkErr dd_flag (needFlagDotDot ctxt)
-
+	   ; (rdr_env, lcl_env) <- getRdrEnvs
            ; con_fields <- lookupConstructorFields con
            ; let present_flds = getFieldIds flds
-                 absent_flds  = con_fields `minusList` present_flds
-                 extras = [ HsRecField
-                              { hsRecFieldId = L loc f
-                              , hsRecFieldArg = name_to_arg (L loc f)
-                              , hsRecPun = False }
-                          | f <- absent_flds ]
+                 parent_tc = find_tycon rdr_env con
 
-           ; return (flds ++ extras) }
+                   -- Only fill in fields whose selectors are in scope (somehow)
+	         fld_in_scope fld = not (null (lookupGRE_Name rdr_env fld))
+
+                   -- For constructor uses, the arg should be in scope (unqualified)
+		   -- ignoring the record field itself
+		   -- Eg.  data R = R { x,y :: Int }
+                   --      f x = R { .. }   -- Should expand to R {x=x}, not R{x=x,y=y}
+		 arg_in_scope rdr = rdr `elemLocalRdrEnv` lcl_env
+                                 || notNull [ gre | gre <- lookupGRE_RdrName rdr rdr_env
+                                                  , case gre_par gre of
+                                                      ParentIs p -> p /= parent_tc
+                                                      _          -> True ]
+
+           ; return [ HsRecField
+                              { hsRecFieldId = loc_f
+                              , hsRecFieldArg = L loc (mk_arg arg_rdr)
+                              , hsRecPun = False }
+                    | f <- con_fields
+		    , let loc_f = L loc f 
+		          arg_rdr = mkRdrUnqual (nameOccName f)
+		    , not (f `elem` present_flds)
+		    , fld_in_scope f
+                    , case ctxt of
+                        HsRecFieldCon {} -> arg_in_scope arg_rdr
+                        _other           -> True ] }
 
     check_disambiguation :: Bool -> Maybe Name -> RnM Parent
-    -- When disambiguation is on, return the parent *type constructor*
-    -- That is, the parent of the data constructor.  That's the parent
-    -- to use for looking up record fields.
+    -- When disambiguation is on, 
     check_disambiguation disambig_ok mb_con
       | disambig_ok, Just con <- mb_con
-      = do { env <- getGlobalRdrEnv
-           ; return (case lookupGRE_Name env con of
-	       	       [gre] -> gre_par gre
-               	       gres  -> WARN( True, ppr con <+> ppr gres ) NoParent) }
+      = do { env <- getGlobalRdrEnv; return (ParentIs (find_tycon env con)) }
       | otherwise = return NoParent
  
+    find_tycon :: GlobalRdrEnv -> Name {- DataCon -} -> Name {- TyCon -}
+    -- Return the parent *type constructor* of the data constructor
+    -- That is, the parent of the data constructor.  
+    -- That's the parent to use for looking up record fields.
+    find_tycon env con 
+      = case lookupGRE_Name env con of
+	  [GRE { gre_par = ParentIs p }] -> p
+          gres  -> pprPanic "find_tycon" (ppr con $$ ppr gres)
+
     dup_flds :: [[RdrName]]
         -- Each list represents a RdrName that occurred more than once
         -- (the list contains all occurrences)

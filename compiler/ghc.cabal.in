@@ -36,22 +36,20 @@ Flag ghci
     Default: False
     Manual: True
 
-Flag ncg
-    Description: Build the NCG.
-    Default: False
-    Manual: True
-
 Flag stage1
     Description: Is this stage 1?
     Default: False
+    Manual: True
 
 Flag stage2
     Description: Is this stage 2?
     Default: False
+    Manual: True
 
 Flag stage3
     Description: Is this stage 3?
     Default: False
+    Manual: True
 
 Library
     Exposed: False
@@ -65,7 +63,7 @@ Library
 
     if flag(base3) || flag(base4)
         Build-Depends: directory  >= 1   && < 1.2,
-                       process    >= 1   && < 1.1,
+                       process    >= 1   && < 1.2,
                        bytestring >= 0.9 && < 0.10,
                        old-time   >= 1   && < 1.1,
                        containers >= 0.1 && < 0.5,
@@ -85,10 +83,8 @@ Library
         CPP-Options: -DGHCI
         Include-Dirs: ../libffi/build/include
 
-    if !flag(ncg)
-        CPP-Options: -DOMIT_NATIVE_CODEGEN
-
     Build-Depends: bin-package-db
+    Build-Depends: hoopl
 
     -- GHC 6.4.2 needs to be able to find WCsubst.c, which needs to be
     -- able to find WCsubst.h
@@ -99,6 +95,8 @@ Library
                 TypeSynonymInstances, MultiParamTypeClasses,
                 FlexibleInstances, Rank2Types, ScopedTypeVariables,
                 DeriveDataTypeable
+    if impl(ghc >= 7.1)
+        Extensions: NondecreasingIndentation
 
     Include-Dirs: . parser utils
 
@@ -152,6 +150,7 @@ Library
         DataCon
         Demand
         Exception
+        GhcMonad
         Id
         IdInfo
         Literal
@@ -182,45 +181,38 @@ Library
         BlockId
         CLabel
         Cmm
-        CmmBrokenBlock
         CmmBuildInfoTables
-        CmmCPS
-        CmmCPSGen
-        CmmCPSZ
+        CmmPipeline
         CmmCallConv
-        CmmCommonBlockElimZ
+        CmmCommonBlockElim
         CmmContFlowOpt
         CmmCvt
+        CmmDecl
         CmmExpr
         CmmInfo
         CmmLex
         CmmLint
         CmmLive
-        CmmLiveZ
+        CmmMachOp
+        CmmNode
         CmmOpt
         CmmParse
         CmmProcPoint
-        CmmProcPointZ
         CmmSpillReload
+        CmmRewriteAssignments
         CmmStackLayout
-        CmmTx
+        CmmType
         CmmUtils
-        CmmZipUtil
-        DFMonad
-        Dataflow
-        MkZipCfg
-        MkZipCfgCmm
+        MkGraph
+        OldCmm
+        OldCmmUtils
+        OldPprCmm
         OptimizationFuel
         PprBase
         PprC
         PprCmm
-        PprCmmZ
-        StackColor
-        StackPlacements
-        ZipCfg
-        ZipCfgCmmRep
-        ZipCfgExtras
-        ZipDataflow
+        PprCmmDecl
+        PprCmmExpr
         Bitmap
         CgBindery
         CgCallConv
@@ -321,6 +313,9 @@ Library
         ErrUtils
         Finder
         GHC
+        GhcMake
+        GhcPlugins
+        DynamicLoading
         HeaderInfo
         HscMain
         HscStats
@@ -350,6 +345,7 @@ Library
         TysPrim
         TysWiredIn
         CostCentre
+        ProfInit
         SCCfinal
         RnBinds
         RnEnv
@@ -423,6 +419,7 @@ Library
         Generics
         InstEnv
         TyCon
+        Kind
         Type
         TypeRep
         Unify
@@ -449,6 +446,7 @@ Library
         MonadUtils
         OrdList
         Outputable
+        Pair
         Panic
         Pretty
         Serialized
@@ -460,7 +458,6 @@ Library
         Vectorise.Builtins.Base
         Vectorise.Builtins.Initialise
         Vectorise.Builtins.Modules
-        Vectorise.Builtins.Prelude
         Vectorise.Builtins
         Vectorise.Monad.Base
         Vectorise.Monad.Naming
@@ -472,7 +469,6 @@ Library
         Vectorise.Utils.Closure
         Vectorise.Utils.Hoisting
         Vectorise.Utils.PADict
-        Vectorise.Utils.PRDict
         Vectorise.Utils.Poly
         Vectorise.Utils
         Vectorise.Type.Env
@@ -480,7 +476,6 @@ Library
         Vectorise.Type.PData
         Vectorise.Type.PRepr
         Vectorise.Type.PADict
-        Vectorise.Type.PRDict
         Vectorise.Type.Type
         Vectorise.Type.TyConDecl
         Vectorise.Type.Classify
@@ -491,10 +486,7 @@ Library
         Vectorise.Exp
         Vectorise
 
-    -- We only need to expose more modules as some of the ncg code is used
-    -- by the LLVM backend so its always included
-    if flag(ncg)
-        Exposed-Modules:
+    Exposed-Modules:
             AsmCodeGen
             TargetReg
             NCGMonad
@@ -504,10 +496,6 @@ Library
             RegClass
             PIC
             Platform
-            Alpha.Regs
-            Alpha.RegInfo
-            Alpha.Instr
-            Alpha.CodeGen
             X86.Regs
             X86.RegInfo
             X86.Instr
@@ -566,7 +554,6 @@ Library
             TcSplice
             Convert
             ByteCodeAsm
-            ByteCodeFFI
             ByteCodeGen
             ByteCodeInstr
             ByteCodeItbls

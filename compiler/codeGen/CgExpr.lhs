@@ -29,8 +29,8 @@ import CgPrimOp
 import CgHpc
 import CgUtils
 import ClosureInfo
-import Cmm
-import CmmUtils
+import OldCmm
+import OldCmmUtils
 import VarSet
 import Literal
 import PrimOp
@@ -150,6 +150,13 @@ cgExpr (StgOpApp (StgPrimOp TagToEnumOp) [arg] res_ty)
 	  -- That won't work.
 	tycon = tyConAppTyCon res_ty
 
+
+cgExpr (StgOpApp (StgPrimOp SeqOp) [StgVarArg a, _] _res_ty)
+  = cgTailCall a []
+  -- seq# :: a -> State# -> (# State# , a #)
+  -- but the return convention for (# State#, a #) is exactly the same as
+  -- for just a, so we can implment seq# by
+  --   seq# a s  ==>  a
 
 cgExpr (StgOpApp (StgPrimOp primop) args res_ty)
   | primOpOutOfLine primop

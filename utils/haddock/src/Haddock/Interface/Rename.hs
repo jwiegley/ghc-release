@@ -265,8 +265,6 @@ renameType t = case t of
 
   HsParTy ty -> return . HsParTy =<< renameLType ty
 
-  HsNumTy n -> return (HsNumTy n)
-
   HsPredTy p -> return . HsPredTy =<< renamePred p
 
   HsKindSig ty k -> do
@@ -403,10 +401,10 @@ renameTyClD d = case d of
 
 renameSig :: Sig Name -> RnM (Sig DocName)
 renameSig sig = case sig of
-  TypeSig lname ltype -> do
-    lname' <- renameL lname
+  TypeSig lnames ltype -> do
+    lnames' <- mapM renameL lnames
     ltype' <- renameLType ltype
-    return (TypeSig lname' ltype')
+    return (TypeSig lnames' ltype')
   -- we have filtered out all other kinds of signatures in Interface.Create
   _ -> error "expected TypeSig"
 

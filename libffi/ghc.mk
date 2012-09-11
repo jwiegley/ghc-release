@@ -34,8 +34,6 @@
 #
 # We use libffi's own configuration stuff.
 
-PLATFORM := $(shell echo $(HOSTPLATFORM) | sed 's/i[567]86/i486/g')
-
 # 2007-07-05
 # Passing
 #     as_ln_s='cp -p'
@@ -116,16 +114,16 @@ $(libffi_STAMP_CONFIGURE):
 	    PATH=`pwd`:$$PATH; \
 	    export PATH; \
 	    cd build && \
-	    CC=$(WhatGccIsCalled) \
+	    CC=$(CC_STAGE1) \
 	    LD=$(LD) \
-	    AR=$(AR) \
+	    AR=$(AR_STAGE1) \
 	    NM=$(NM) \
         CFLAGS="$(SRC_CC_OPTS) $(CONF_CC_OPTS_STAGE1) -w" \
         LDFLAGS="$(SRC_LD_OPTS) $(CONF_GCC_LINKER_OPTS_STAGE1) -w" \
         "$(SHELL)" configure \
 	          --enable-static=yes \
 	          --enable-shared=$(libffi_EnableShared) \
-	          --host=$(PLATFORM) --build=$(PLATFORM)
+	          --host=$(HOSTPLATFORM) --build=$(BUILDPLATFORM)
 
 	# libffi.so needs to be built with the correct soname.
 	# NOTE: this builds libffi_convience.so with the incorrect
@@ -179,13 +177,13 @@ $(eval $(call all-target,libffi,$(INSTALL_HEADERS) $(INSTALL_LIBS)))
 libffi/dist-install/build/HSffi.o: libffi/dist-install/build/libHSffi.a
 	cd libffi/dist-install/build && \
 	  touch empty.c && \
-	  "$(CC)" $(SRC_CC_OPTS) $(CONF_CC_OPTS_STAGE1) -c empty.c -o HSffi.o
+	  "$(CC_STAGE1)" $(SRC_CC_OPTS) $(CONF_CC_OPTS_STAGE1) -c empty.c -o HSffi.o
 
 $(eval $(call all-target,libffi,libffi/dist-install/build/HSffi.o))
 
 ifeq "$(BuildSharedLibs)" "YES"
 ifeq "$(Windows)" "YES"
-libffi/libffi.dll.a $(libffi_HS_DYN_LIB): $(libffi_STAMP_BUILD)
+libffi/dist-install/build/libffi.dll.a $(libffi_HS_DYN_LIB): $(libffi_STAMP_BUILD)
 	@test -f $@ || { echo "$< exits, but $@ does not."; echo "Suggest removing $<."; exit 1; }
 
 # Windows libtool creates <soname>.dll, and as we already patched that
@@ -227,4 +225,3 @@ $(eval $(call manual-package-config,libffi))
 # binary-dist
 
 BINDIST_EXTRAS += libffi/package.conf.in
-

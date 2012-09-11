@@ -13,8 +13,8 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 
 module ForeignCall (
-	ForeignCall(..),
-	Safety(..), playSafe,
+        ForeignCall(..), isSafeForeignCall,
+	Safety(..), playSafe, playInterruptible,
 
 	CExportSpec(..), CLabelString, isCLabelString, pprCLabelString,
 	CCallSpec(..), 
@@ -43,6 +43,9 @@ newtype ForeignCall = CCall CCallSpec
   deriving Eq
   {-! derive: Binary !-}
 
+isSafeForeignCall :: ForeignCall -> Bool
+isSafeForeignCall (CCall (CCallSpec _ _ safe)) = playSafe safe
+
 -- We may need more clues to distinguish foreign calls
 -- but this simple printer will do for now
 instance Outputable ForeignCall where
@@ -59,9 +62,10 @@ data Safety
 			-- by a separate OS thread, i.e., _concurrently_ to the
 			-- execution of other Haskell threads.
 
-      Bool              -- Indicates the deprecated "threadsafe" annotation
-                        -- which is now an alias for "safe". This information
-                        -- is never used except to emit a deprecation warning.
+  | PlayInterruptible   -- Like PlaySafe, but additionally
+                        -- the worker thread running this foreign call may
+                        -- be unceremoniously killed, so it must be scheduled
+                        -- on an unbound thread.
 
   | PlayRisky		-- None of the above can happen; the call will return
 			-- without interacting with the runtime system at all
@@ -70,13 +74,18 @@ data Safety
   {-! derive: Binary !-}
 
 instance Outputable Safety where
-  ppr (PlaySafe False) = ptext (sLit "safe")
-  ppr (PlaySafe True)  = ptext (sLit "threadsafe")
+  ppr PlaySafe = ptext (sLit "safe")
+  ppr PlayInterruptible = ptext (sLit "interruptible")
   ppr PlayRisky = ptext (sLit "unsafe")
 
 playSafe :: Safety -> Bool
-playSafe PlaySafe{} = True
-playSafe PlayRisky  = False
+playSafe PlaySafe = True
+playSafe PlayInterruptible = True
+playSafe PlayRisky = False
+
+playInterruptible :: Safety -> Bool
+playInterruptible PlayInterruptible = True
+playInterruptible _ = False
 \end{code}
 
 
@@ -230,16 +239,17 @@ instance Binary ForeignCall where
     get bh = do aa <- get bh; return (CCall aa)
 
 instance Binary Safety where
-    put_ bh (PlaySafe aa) = do
+    put_ bh PlaySafe = do
 	    putByte bh 0
-	    put_ bh aa
-    put_ bh PlayRisky = do
+    put_ bh PlayInterruptible = do
 	    putByte bh 1
+    put_ bh PlayRisky = do
+	    putByte bh 2
     get bh = do
 	    h <- getByte bh
 	    case h of
-	      0 -> do aa <- get bh
-		      return (PlaySafe aa)
+	      0 -> do return PlaySafe
+	      1 -> do return PlayInterruptible
 	      _ -> do return PlayRisky
 
 instance Binary CExportSpec where

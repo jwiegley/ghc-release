@@ -106,7 +106,9 @@ ppr_expr :: OutputableBndr b => (SDoc -> SDoc) -> Expr b -> SDoc
 	-- The function adds parens in context that need
 	-- an atomic value (e.g. function args)
 
-ppr_expr add_par (Type ty)  = add_par (ptext (sLit "TYPE") <+> ppr ty)	-- Wierd
+ppr_expr add_par (Type ty) = add_par (ptext (sLit "TYPE") <+> ppr ty)	-- Wierd
+
+ppr_expr add_par (Coercion co) = add_par (ptext (sLit "CO") <+> ppr co)
 	           
 ppr_expr _       (Var name) = ppr name
 ppr_expr _       (Lit lit)  = ppr lit
@@ -152,11 +154,27 @@ ppr_expr add_par expr@(App {})
     }
 
 ppr_expr add_par (Case expr var ty [(con,args,rhs)])
+  | opt_PprCaseAsLet
+  = add_par $
+    sep [sep 	[ ptext (sLit "let")
+			<+> char '{'
+			<+> ppr_case_pat con args 
+			<+> ptext (sLit "~")
+			<+> ppr_bndr var
+		, ptext (sLit "<-") 
+		  	<+> ppr_expr id expr
+		, char '}' 
+			<+> ptext (sLit "in")
+	  	]
+	, pprCoreExpr rhs
+    	]
+
+  | otherwise
   = add_par $
     sep [sep [ptext (sLit "case") <+> pprCoreExpr expr,
 	      ifPprDebug (braces (ppr ty)),
 	      sep [ptext (sLit "of") <+> ppr_bndr var, 
-		   char '{' <+> ppr_case_pat con args]
+		   char '{' <+> ppr_case_pat con args <+> arrow]
 	  ],
 	 pprCoreExpr rhs,
 	 char '}'
@@ -170,7 +188,7 @@ ppr_expr add_par (Case expr var ty alts)
 		<+> pprCoreExpr expr
 		<+> ifPprDebug (braces (ppr ty)),
 	      ptext (sLit "of") <+> ppr_bndr var <+> char '{'],
-	 nest 2 (sep (punctuate semi (map pprCoreAlt alts))),
+	 nest 2 (vcat (punctuate semi (map pprCoreAlt alts))),
 	 char '}'
     ]
   where
@@ -218,24 +236,29 @@ ppr_expr add_par (Note (CoreNote s) expr)
 
 pprCoreAlt :: OutputableBndr a => (AltCon, [a] , Expr a) -> SDoc
 pprCoreAlt (con, args, rhs) 
-  = hang (ppr_case_pat con args) 2 (pprCoreExpr rhs)
+  = hang (ppr_case_pat con args <+> arrow) 2 (pprCoreExpr rhs)
 
 ppr_case_pat :: OutputableBndr a => AltCon -> [a] -> SDoc
 ppr_case_pat (DataAlt dc) args
   | isTupleTyCon tc
-  = tupleParens (tupleTyConBoxity tc) (hsep (punctuate comma (map ppr_bndr args))) <+> arrow
+  = tupleParens (tupleTyConBoxity tc) (hsep (punctuate comma (map ppr_bndr args)))
   where
     ppr_bndr = pprBndr CaseBind
     tc = dataConTyCon dc
 
 ppr_case_pat con args
-  = ppr con <+> sep (map ppr_bndr args) <+> arrow
+  = ppr con <+> sep (map ppr_bndr args)
   where
     ppr_bndr = pprBndr CaseBind
 
+
+-- | Pretty print the argument in a function application.
 pprArg :: OutputableBndr a => Expr a -> SDoc
-pprArg (Type ty) = ptext (sLit "@") <+> pprParendType ty
-pprArg expr      = pprParendExpr expr
+pprArg (Type ty) 
+ | opt_SuppressTypeApplications	= empty
+ | otherwise			= ptext (sLit "@") <+> pprParendType ty
+pprArg (Coercion co) = ptext (sLit "@~") <+> pprParendCo co
+pprArg expr          = pprParendExpr expr
 \end{code}
 
 Other printing bits-and-bobs used with the general @pprCoreBinding@
@@ -247,38 +270,40 @@ instance OutputableBndr Var where
 
 pprCoreBinder :: BindingSite -> Var -> SDoc
 pprCoreBinder LetBind binder
-  | isTyCoVar binder = pprKindedTyVarBndr binder
-  | otherwise      = pprTypedBinder binder $$ 
+  | isTyVar binder = pprKindedTyVarBndr binder
+  | otherwise      = pprTypedLetBinder binder $$ 
 		     ppIdInfo binder (idInfo binder)
 
 -- Lambda bound type variables are preceded by "@"
 pprCoreBinder bind_site bndr 
   = getPprStyle $ \ sty ->
-    pprTypedLCBinder bind_site (debugStyle sty) bndr
+    pprTypedLamBinder bind_site (debugStyle sty) bndr
 
 pprUntypedBinder :: Var -> SDoc
 pprUntypedBinder binder
-  | isTyCoVar binder = ptext (sLit "@") <+> ppr binder	-- NB: don't print kind
+  | isTyVar binder = ptext (sLit "@") <+> ppr binder	-- NB: don't print kind
   | otherwise      = pprIdBndr binder
 
-pprTypedLCBinder :: BindingSite -> Bool -> Var -> SDoc
+pprTypedLamBinder :: BindingSite -> Bool -> Var -> SDoc
 -- For lambda and case binders, show the unfolding info (usually none)
-pprTypedLCBinder bind_site debug_on var
+pprTypedLamBinder bind_site debug_on var
   | not debug_on && isDeadBinder var    = char '_'
   | not debug_on, CaseBind <- bind_site = pprUntypedBinder var  -- No parens, no kind info
-  | isTyCoVar var                         = parens (pprKindedTyVarBndr var)
+  | opt_SuppressAll                     = pprUntypedBinder var  -- Suppress the signature
+  | isTyVar var                         = parens (pprKindedTyVarBndr var)
   | otherwise = parens (hang (pprIdBndr var) 
                            2 (vcat [ dcolon <+> pprType (idType var), pp_unf]))
-              where
-		unf_info = unfoldingInfo (idInfo var)
-                pp_unf | hasSomeUnfolding unf_info = ptext (sLit "Unf=") <> ppr unf_info
-                       | otherwise                 = empty
+  where
+    unf_info = unfoldingInfo (idInfo var)
+    pp_unf | hasSomeUnfolding unf_info = ptext (sLit "Unf=") <> ppr unf_info
+           | otherwise                 = empty
 
-pprTypedBinder :: Var -> SDoc
+pprTypedLetBinder :: Var -> SDoc
 -- Print binder with a type or kind signature (not paren'd)
-pprTypedBinder binder
-  | isTyCoVar binder  = pprKindedTyVarBndr binder
-  | otherwise	    = hang (pprIdBndr binder) 2 (dcolon <+> pprType (idType binder))
+pprTypedLetBinder binder
+  | isTyVar binder	       = pprKindedTyVarBndr binder
+  | opt_SuppressTypeSignatures = pprIdBndr binder
+  | otherwise		       = hang (pprIdBndr binder) 2 (dcolon <+> pprType (idType binder))
 
 pprKindedTyVarBndr :: TyVar -> SDoc
 -- Print a type variable binder with its kind (but not if *)
@@ -297,6 +322,8 @@ pprIdBndr id = ppr id <+> pprIdBndrInfo (idInfo id)
 
 pprIdBndrInfo :: IdInfo -> SDoc
 pprIdBndrInfo info 
+  | opt_SuppressIdInfo = empty
+  | otherwise
   = megaSeqIdInfo info `seq` doc -- The seq is useful for poking on black holes
   where
     prag_info = inlinePragInfo info
@@ -325,6 +352,8 @@ pprIdBndrInfo info
 \begin{code}
 ppIdInfo :: Id -> IdInfo -> SDoc
 ppIdInfo id info
+  | opt_SuppressIdInfo	= empty
+  | otherwise
   = showAttributes
     [ (True, pp_scope <> ppr (idDetails id))
     , (has_arity,      ptext (sLit "Arity=") <> int arity)
@@ -410,15 +439,10 @@ instance Outputable Unfolding where
              | otherwise          = empty
             -- Don't print the RHS or we get a quadratic 
 	    -- blowup in the size of the printout!
-
-instance Outputable e => Outputable (DFunArg e) where
-  ppr (DFunPolyArg e)  = braces (ppr e)
-  ppr (DFunConstArg e) = ppr e
-  ppr (DFunLamArg i)   = char '<' <> int i <> char '>'
 \end{code}
 
 -----------------------------------------------------
---	Rules
+--      Rules
 -----------------------------------------------------
 
 \begin{code}
@@ -433,11 +457,24 @@ pprRule (BuiltinRule { ru_fn = fn, ru_name = name})
   = ptext (sLit "Built in rule for") <+> ppr fn <> colon <+> doubleQuotes (ftext name)
 
 pprRule (Rule { ru_name = name, ru_act = act, ru_fn = fn,
-		ru_bndrs = tpl_vars, ru_args = tpl_args,
-		ru_rhs = rhs })
+                ru_bndrs = tpl_vars, ru_args = tpl_args,
+                ru_rhs = rhs })
   = hang (doubleQuotes (ftext name) <+> ppr act)
-       4 (sep [ptext (sLit "forall") <+> braces (sep (map pprTypedBinder tpl_vars)),
-	       nest 2 (ppr fn <+> sep (map pprArg tpl_args)),
-	       nest 2 (ptext (sLit "=") <+> pprCoreExpr rhs)
-	    ])
+       4 (sep [ptext (sLit "forall") <+> 
+                  sep (map (pprCoreBinder LambdaBind) tpl_vars) <> dot,
+               nest 2 (ppr fn <+> sep (map pprArg tpl_args)),
+               nest 2 (ptext (sLit "=") <+> pprCoreExpr rhs)
+            ])
+\end{code}
+
+-----------------------------------------------------
+--      Vectorisation declarations
+-----------------------------------------------------
+
+\begin{code}
+instance Outputable CoreVect where
+  ppr (Vect   var Nothing)  = ptext (sLit "VECTORISE SCALAR") <+> ppr var
+  ppr (Vect   var (Just e)) = hang (ptext (sLit "VECTORISE") <+> ppr var <+> char '=')
+                                4 (pprCoreExpr e)
+  ppr (NoVect var)          = ptext (sLit "NOVECTORISE") <+> ppr var
 \end{code}

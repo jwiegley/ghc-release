@@ -26,7 +26,7 @@ module CoreUnfold (
 
 	interestingArg, ArgSummary(..),
 
-	couldBeSmallEnoughToInline, 
+	couldBeSmallEnoughToInline, inlineBoringOk,
 	certainlyWillInline, smallEnoughToInline,
 
 	callSiteInline, CallCtxt(..), 
@@ -41,8 +41,8 @@ import StaticFlags
 import DynFlags
 import CoreSyn
 import PprCore		()	-- Instances
-import TcType	 	( tcSplitSigmaTy, tcSplitDFunHead )
-import OccurAnal
+import TcType           ( tcSplitDFunTy )
+import OccurAnal        ( occurAnalyseExpr )
 import CoreSubst hiding( substTy )
 import CoreFVs         ( exprFreeVars )
 import CoreArity       ( manifestArity, exprBotStrictness_maybe )
@@ -54,16 +54,18 @@ import Literal
 import PrimOp
 import IdInfo
 import BasicTypes	( Arity )
-import TcType		( tcSplitDFunTy )
-import Type 
+import Type
 import Coercion
 import PrelNames
 import VarEnv           ( mkInScopeSet )
 import Bag
 import Util
+import Pair
 import FastTypes
 import FastString
 import Outputable
+import ForeignCall
+
 import Data.Maybe
 \end{code}
 
@@ -91,15 +93,12 @@ mkImplicitUnfolding expr = mkTopUnfolding False (simpleOptExpr expr)
 mkSimpleUnfolding :: CoreExpr -> Unfolding
 mkSimpleUnfolding = mkUnfolding InlineRhs False False
 
-mkDFunUnfolding :: Type -> [DFunArg CoreExpr] -> Unfolding
+mkDFunUnfolding :: Type -> [CoreExpr] -> Unfolding
 mkDFunUnfolding dfun_ty ops 
   = DFunUnfolding dfun_nargs data_con ops
   where
-    (tvs, theta, head_ty) = tcSplitSigmaTy dfun_ty
-    	  -- NB: tcSplitSigmaTy: do not look through a newtype
-	  --     when the dictionary type is a newtype
-    (cls, _)   = tcSplitDFunHead head_ty
-    dfun_nargs = length tvs + length theta
+    (tvs, n_theta, cls, _) = tcSplitDFunTy dfun_ty
+    dfun_nargs = length tvs + n_theta
     data_con   = classDataCon cls
 
 mkWwInlineRule :: Id -> CoreExpr -> Arity -> Unfolding
@@ -111,7 +110,7 @@ mkWwInlineRule id expr arity
 mkCompulsoryUnfolding :: CoreExpr -> Unfolding
 mkCompulsoryUnfolding expr	   -- Used for things that absolutely must be unfolded
   = mkCoreUnfolding InlineCompulsory True
-                    expr 0    -- Arity of unfolding doesn't matter
+                    (simpleOptExpr expr) 0    -- Arity of unfolding doesn't matter
                     (UnfWhen unSaturatedOk boringCxtOk)
 
 mkInlineUnfolding :: Maybe Arity -> CoreExpr -> Unfolding
@@ -126,12 +125,7 @@ mkInlineUnfolding mb_arity expr
                           Nothing -> (unSaturatedOk, manifestArity expr')
                           Just ar -> (needSaturated, ar)
               
-    boring_ok = case calcUnfoldingGuidance True    -- Treat as cheap
-    	      	     			   False   -- But not bottoming
-                                           (arity+1) expr' of
-              	  (_, UnfWhen _ boring_ok) -> boring_ok
-              	  _other                   -> boringCxtNotOk
-     -- See Note [INLINE for small functions]
+    boring_ok = inlineBoringOk expr'
 
 mkInlinableUnfolding :: CoreExpr -> Unfolding
 mkInlinableUnfolding expr
@@ -162,6 +156,10 @@ mkUnfolding :: UnfoldingSource -> Bool -> Bool -> CoreExpr -> Unfolding
 -- Calculates unfolding guidance
 -- Occurrence-analyses the expression before capturing it
 mkUnfolding src top_lvl is_bottoming expr
+  | top_lvl && is_bottoming
+  , not (exprIsTrivial expr)
+  = NoUnfolding    -- See Note [Do not inline top-level bottoming functions]
+  | otherwise
   = CoreUnfolding { uf_tmpl   	  = occurAnalyseExpr expr,
     		    uf_src        = src,
     		    uf_arity      = arity,
@@ -173,7 +171,7 @@ mkUnfolding src top_lvl is_bottoming expr
 		    uf_guidance   = guidance }
   where
     is_cheap = exprIsCheap expr
-    (arity, guidance) = calcUnfoldingGuidance is_cheap (top_lvl && is_bottoming) 
+    (arity, guidance) = calcUnfoldingGuidance is_cheap
                                               opt_UF_CreationThreshold expr
 	-- Sometimes during simplification, there's a large let-bound thing	
 	-- which has been substituted, and so is now dead; so 'expr' contains
@@ -193,15 +191,35 @@ mkUnfolding src top_lvl is_bottoming expr
 %************************************************************************
 
 \begin{code}
+inlineBoringOk :: CoreExpr -> Bool
+-- See Note [INLINE for small functions]
+-- True => the result of inlining the expression is 
+--         no bigger than the expression itself
+--     eg      (\x y -> f y x)
+-- This is a quick and dirty version. It doesn't attempt
+-- to deal with  (\x y z -> x (y z))
+-- The really important one is (x `cast` c)
+inlineBoringOk e
+  = go 0 e
+  where
+    go :: Int -> CoreExpr -> Bool
+    go credit (Lam x e) | isId x           = go (credit+1) e
+                        | otherwise        = go credit e
+    go credit (App f (Type {}))            = go credit f
+    go credit (App f a) | credit > 0  
+                        , exprIsTrivial a  = go (credit-1) f
+    go credit (Note _ e) 		   = go credit e     
+    go credit (Cast e _) 		   = go credit e
+    go _      (Var {})         		   = boringCxtOk
+    go _      _                		   = boringCxtNotOk
+
 calcUnfoldingGuidance
 	:: Bool		-- True <=> the rhs is cheap, or we want to treat it
 	   		--          as cheap (INLINE things)	 
-        -> Bool		-- True <=> this is a top-level unfolding for a
-	                --          diverging function; don't inline this
         -> Int		-- Bomb out if size gets bigger than this
 	-> CoreExpr    	-- Expression to look at
 	-> (Arity, UnfoldingGuidance)
-calcUnfoldingGuidance expr_is_cheap top_bot bOMB_OUT_SIZE expr
+calcUnfoldingGuidance expr_is_cheap bOMB_OUT_SIZE expr
   = case collectBinders expr of { (bndrs, body) ->
     let
         val_bndrs   = filter isId bndrs
@@ -214,9 +232,6 @@ calcUnfoldingGuidance expr_is_cheap top_bot bOMB_OUT_SIZE expr
       	        | uncondInline n_val_bndrs (iBox size)
                 , expr_is_cheap
       	        -> UnfWhen unSaturatedOk boringCxtOk   -- Note [INLINE for small functions]
-		| top_bot  -- See Note [Do not inline top-level bottoming functions]
-		-> UnfNever
-
 	        | otherwise
       	        -> UnfIfGoodArgs { ug_args  = map (discount cased_bndrs) val_bndrs
       	                         , ug_size  = iBox size
@@ -260,6 +275,9 @@ Notice that 'x' counts 0, while (f x) counts 2.  That's deliberate: there's
 a function call to account for.  Notice also that constructor applications 
 are very cheap, because exposing them to a caller is so valuable.
 
+[25/5/11] All sizes are now multiplied by 10, except for primops.
+This makes primops look cheap, and seems to be almost unversally
+beneficial.  Done partly as a result of #4978.
 
 Note [Do not inline top-level bottoming functions]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -317,7 +335,7 @@ uncondInline :: Arity -> Int -> Bool
 -- See Note [INLINE for small functions]
 uncondInline arity size 
   | arity == 0 = size == 0
-  | otherwise  = size <= arity + 1
+  | otherwise  = size <= 10 * (arity + 1)
 \end{code}
 
 
@@ -336,27 +354,29 @@ sizeExpr bOMB_OUT_SIZE top_args expr
     size_up (Cast e _) = size_up e
     size_up (Note _ e) = size_up e
     size_up (Type _)   = sizeZero           -- Types cost nothing
+    size_up (Coercion _) = sizeZero
     size_up (Lit lit)  = sizeN (litSize lit)
     size_up (Var f)    = size_up_call f []  -- Make sure we get constructor
     	    	       	 	      	    -- discounts even on nullary constructors
 
     size_up (App fun (Type _)) = size_up fun
+    size_up (App fun (Coercion _)) = size_up fun
     size_up (App fun arg)      = size_up arg  `addSizeNSD`
                                  size_up_app fun [arg]
 
-    size_up (Lam b e) | isId b    = lamScrutDiscount (size_up e `addSizeN` 1)
+    size_up (Lam b e) | isId b    = lamScrutDiscount (size_up e `addSizeN` 10)
 		      | otherwise = size_up e
 
     size_up (Let (NonRec binder rhs) body)
       = size_up rhs		`addSizeNSD`
 	size_up body		`addSizeN`
-	(if isUnLiftedType (idType binder) then 0 else 1)
+        (if isUnLiftedType (idType binder) then 0 else 10)
 		-- For the allocation
 		-- If the binder has an unlifted type there is no allocation
 
     size_up (Let (Rec pairs) body)
       = foldr (addSizeNSD . size_up . snd) 
-              (size_up body `addSizeN` length pairs)	-- (length pairs) for the allocation
+              (size_up body `addSizeN` (10 * length pairs))     -- (length pairs) for the allocation
               pairs
 
     size_up (Case (Var v) _ _ alts) 
@@ -373,7 +393,7 @@ sizeExpr bOMB_OUT_SIZE top_args expr
 		-- the case when we are scrutinising an argument variable
 	  alts_size (SizeIs tot tot_disc tot_scrut)  -- Size of all alternatives
 		    (SizeIs max _        _)          -- Size of biggest alternative
-	 	= SizeIs tot (unitBag (v, iBox (_ILIT(2) +# tot -# max)) `unionBags` tot_disc) tot_scrut
+                = SizeIs tot (unitBag (v, iBox (_ILIT(20) +# tot -# max)) `unionBags` tot_disc) tot_scrut
 			-- If the variable is known, we produce a discount that
 			-- will take us back to 'max', the size of the largest alternative
 			-- The 1+ is a little discount for reduced allocation in the caller
@@ -383,20 +403,46 @@ sizeExpr bOMB_OUT_SIZE top_args expr
 
 	  alts_size tot_size _ = tot_size
 
-    size_up (Case e _ _ alts) = size_up e  `addSizeNSD` 
-                                foldr (addAltSize . size_up_alt) sizeZero alts
-	  	-- We don't charge for the case itself
-		-- It's a strict thing, and the price of the call
-		-- is paid by scrut.  Also consider
-		--	case f x of DEFAULT -> e
-		-- This is just ';'!  Don't charge for it.
-		--
-		-- Moreover, we charge one per alternative.
+    size_up (Case e _ _ alts) = size_up e  `addSizeNSD`
+                                foldr (addAltSize . size_up_alt) case_size alts
+      where
+          case_size
+           | is_inline_scrut e, not (lengthExceeds alts 1)  = sizeN (-10)
+           | otherwise = sizeZero
+                -- Normally we don't charge for the case itself, but
+                -- we charge one per alternative (see size_up_alt,
+                -- below) to account for the cost of the info table
+                -- and comparisons.
+                --
+                -- However, in certain cases (see is_inline_scrut
+                -- below), no code is generated for the case unless
+                -- there are multiple alts.  In these cases we
+                -- subtract one, making the first alt free.
+                -- e.g. case x# +# y# of _ -> ...   should cost 1
+                --      case touch# x# of _ -> ...  should cost 0
+                -- (see #4978)
+                --
+                -- I would like to not have the "not (lengthExceeds alts 1)"
+                -- condition above, but without that some programs got worse
+                -- (spectral/hartel/event and spectral/para).  I don't fully
+                -- understand why. (SDM 24/5/11)
+
+                -- unboxed variables, inline primops and unsafe foreign calls
+                -- are all "inline" things:
+          is_inline_scrut (Var v) = isUnLiftedType (idType v)
+          is_inline_scrut scrut
+              | (Var f, _) <- collectArgs scrut
+                = case idDetails f of
+                    FCallId fc  -> not (isSafeForeignCall fc)
+                    PrimOpId op -> not (primOpOutOfLine op)
+                    _other      -> False
+              | otherwise
+                = False
 
     ------------ 
     -- size_up_app is used when there's ONE OR MORE value args
     size_up_app (App fun arg) args 
-	| isTypeArg arg		   = size_up_app fun args
+	| isTyCoArg arg		   = size_up_app fun args
 	| otherwise		   = size_up arg  `addSizeNSD`
                                      size_up_app fun (arg:args)
     size_up_app (Var fun)     args = size_up_call fun args
@@ -406,14 +452,14 @@ sizeExpr bOMB_OUT_SIZE top_args expr
     size_up_call :: Id -> [CoreExpr] -> ExprSize
     size_up_call fun val_args
        = case idDetails fun of
-           FCallId _        -> sizeN opt_UF_DearOp
+           FCallId _        -> sizeN (10 * (1 + length val_args))
            DataConWorkId dc -> conSize    dc (length val_args)
            PrimOpId op      -> primOpSize op (length val_args)
 	   ClassOpId _ 	    -> classOpSize top_args val_args
 	   _     	    -> funSize top_args fun (length val_args)
 
     ------------ 
-    size_up_alt (_con, _bndrs, rhs) = size_up rhs `addSizeN` 1
+    size_up_alt (_con, _bndrs, rhs) = size_up rhs `addSizeN` 10
  	-- Don't charge for args, so that wrappers look cheap
 	-- (See comments about wrappers with Case)
 	--
@@ -449,7 +495,7 @@ sizeExpr bOMB_OUT_SIZE top_args expr
 -- | Finds a nominal size of a string literal.
 litSize :: Literal -> Int
 -- Used by CoreUnfold.sizeExpr
-litSize (MachStr str) = 1 + ((lengthFS str + 3) `div` 4)
+litSize (MachStr str) = 10 + 10 * ((lengthFS str + 3) `div` 4)
 	-- If size could be 0 then @f "x"@ might be too small
 	-- [Sept03: make literal strings a bit bigger to avoid fruitless 
 	--  duplication of little strings]
@@ -464,7 +510,7 @@ classOpSize _ []
 classOpSize top_args (arg1 : other_args)
   = SizeIs (iUnbox size) arg_discount (_ILIT(0))
   where
-    size = 2 + length other_args
+    size = 20 + (10 * length other_args)
     -- If the class op is scrutinising a lambda bound dictionary then
     -- give it a discount, to encourage the inlining of this function
     -- The actual discount is rather arbitrarily chosen
@@ -492,8 +538,7 @@ funSize top_args fun n_val_args
     res_discount | idArity fun > n_val_args = opt_UF_FunAppDiscount
     		 | otherwise   	 	    = 0
         -- If the function is partially applied, show a result discount
-
-    size | some_val_args = 1 + n_val_args
+    size | some_val_args = 10 * (1 + n_val_args)
          | otherwise     = 0
 	-- The 1+ is for the function itself
 	-- Add 1 for each non-trivial arg;
@@ -502,16 +547,17 @@ funSize top_args fun n_val_args
 
 conSize :: DataCon -> Int -> ExprSize
 conSize dc n_val_args
-  | n_val_args == 0 = SizeIs (_ILIT(0)) emptyBag (_ILIT(1))	-- Like variables
-
--- See Note [Constructor size]
-  | isUnboxedTupleCon dc = SizeIs (_ILIT(0)) emptyBag (iUnbox n_val_args +# _ILIT(1))
+  | n_val_args == 0 = SizeIs (_ILIT(0)) emptyBag (_ILIT(10))    -- Like variables
 
 -- See Note [Unboxed tuple result discount]
---  | isUnboxedTupleCon dc = SizeIs (_ILIT(0)) emptyBag (_ILIT(0))
+  | isUnboxedTupleCon dc = SizeIs (_ILIT(0)) emptyBag (iUnbox (10 * (1 + n_val_args)))
 
 -- See Note [Constructor size]
-  | otherwise = SizeIs (_ILIT(1)) emptyBag (iUnbox n_val_args +# _ILIT(1))
+  | otherwise = SizeIs (_ILIT(10)) emptyBag (iUnbox (10 * (10 + n_val_args)))
+     -- discont was (10 * (1 + n_val_args)), but it turns out that
+     -- adding a bigger constant here is an unambiguous win.  We
+     -- REALLY like unfolding constructors that get scrutinised.
+     -- [SDM, 25/5/11]
 \end{code}
 
 Note [Constructor size]
@@ -542,23 +588,15 @@ didn't adopt the idea.
 \begin{code}
 primOpSize :: PrimOp -> Int -> ExprSize
 primOpSize op n_val_args
- | not (primOpIsDupable op) = sizeN opt_UF_DearOp
- | not (primOpOutOfLine op) = sizeN 1
-	-- Be very keen to inline simple primops.
-	-- We give a discount of 1 for each arg so that (op# x y z) costs 2.
-	-- We can't make it cost 1, else we'll inline let v = (op# x y z) 
-	-- at every use of v, which is excessive.
-	--
-	-- A good example is:
-	--	let x = +# p q in C {x}
-	-- Even though x get's an occurrence of 'many', its RHS looks cheap,
-	-- and there's a good chance it'll get inlined back into C's RHS. Urgh!
-
- | otherwise = sizeN n_val_args
+ = if primOpOutOfLine op
+      then sizeN (op_size + n_val_args)
+      else sizeN op_size
+ where
+   op_size = primOpCodeSize op
 
 
 buildSize :: ExprSize
-buildSize = SizeIs (_ILIT(0)) emptyBag (_ILIT(4))
+buildSize = SizeIs (_ILIT(0)) emptyBag (_ILIT(40))
 	-- We really want to inline applications of build
 	-- build t (\cn -> e) should cost only the cost of e (because build will be inlined later)
 	-- Indeed, we should add a result_discount becuause build is 
@@ -567,7 +605,7 @@ buildSize = SizeIs (_ILIT(0)) emptyBag (_ILIT(4))
 	-- The "4" is rather arbitrary.
 
 augmentSize :: ExprSize
-augmentSize = SizeIs (_ILIT(0)) emptyBag (_ILIT(4))
+augmentSize = SizeIs (_ILIT(0)) emptyBag (_ILIT(40))
 	-- Ditto (augment t (\cn -> e) ys) should cost only the cost of
 	-- e plus ys. The -2 accounts for the \cn 
 
@@ -699,7 +737,7 @@ certainlyWillInline (CoreUnfolding { uf_is_cheap = is_cheap, uf_arity = n_vals, 
       UnfNever      -> False
       UnfWhen {}    -> True
       UnfIfGoodArgs { ug_size = size} 
-                    -> is_cheap && size - (n_vals +1) <= opt_UF_UseThreshold
+                    -> is_cheap && size - (10 * (n_vals +1)) <= opt_UF_UseThreshold
 
 certainlyWillInline _
   = False
@@ -771,21 +809,23 @@ callSiteInline dflags id active_unfolding lone_variable arg_infos cont_info
       -- be a loop breaker  (maybe the knot is not yet untied)
 	CoreUnfolding { uf_tmpl = unf_template, uf_is_top = is_top 
 		      , uf_is_cheap = is_cheap, uf_arity = uf_arity
-                      , uf_guidance = guidance }
+                      , uf_guidance = guidance, uf_expandable = is_exp }
           | active_unfolding -> tryUnfolding dflags id lone_variable 
                                     arg_infos cont_info unf_template is_top 
-                                    is_cheap uf_arity guidance
-          | otherwise    -> Nothing
+                                    is_cheap is_exp uf_arity guidance
+          | dopt Opt_D_dump_inlinings dflags && dopt Opt_D_verbose_core2core dflags
+          -> pprTrace "Inactive unfolding:" (ppr id) Nothing
+          | otherwise -> Nothing
 	NoUnfolding 	 -> Nothing 
 	OtherCon {} 	 -> Nothing 
 	DFunUnfolding {} -> Nothing 	-- Never unfold a DFun
 
 tryUnfolding :: DynFlags -> Id -> Bool -> [ArgSummary] -> CallCtxt
-             -> CoreExpr -> Bool -> Bool -> Arity -> UnfoldingGuidance
+             -> CoreExpr -> Bool -> Bool -> Bool -> Arity -> UnfoldingGuidance
 	     -> Maybe CoreExpr	
 tryUnfolding dflags id lone_variable 
              arg_infos cont_info unf_template is_top 
-             is_cheap uf_arity guidance
+             is_cheap is_exp uf_arity guidance
 			-- uf_arity will typically be equal to (idArity id), 
 			-- but may be less for InlineRules
  | dopt Opt_D_dump_inlinings dflags && dopt Opt_D_verbose_core2core dflags
@@ -794,6 +834,7 @@ tryUnfolding dflags id lone_variable
 			text "uf arity" <+> ppr uf_arity,
 			text "interesting continuation" <+> ppr cont_info,
 			text "some_benefit" <+> ppr some_benefit,
+                        text "is exp:" <+> ppr is_exp,
                         text "is cheap:" <+> ppr is_cheap,
 			text "guidance" <+> ppr guidance,
 			extra_doc,
@@ -827,10 +868,10 @@ tryUnfolding dflags id lone_variable
 
     interesting_saturated_call 
       = case cont_info of
-          BoringCtxt -> not is_top && uf_arity > 0	      -- Note [Nested functions]
+          BoringCtxt -> not is_top && uf_arity > 0	  -- Note [Nested functions]
           CaseCtxt   -> not (lone_variable && is_cheap)   -- Note [Lone variables]
-          ArgCtxt {} -> uf_arity > 0     		      -- Note [Inlining in ArgCtxt]
-          ValAppCtxt -> True			      -- Note [Cast then apply]
+          ArgCtxt {} -> uf_arity > 0     		  -- Note [Inlining in ArgCtxt]
+          ValAppCtxt -> True			          -- Note [Cast then apply]
 
     (yes_or_no, extra_doc)
       = case guidance of
@@ -882,7 +923,7 @@ But the defn of GHC.Classes.$dmmin is:
     {- Arity: 3, HasNoCafRefs, Strictness: SLL,
        Unfolding: (\ @ a $dOrd :: GHC.Classes.Ord a x :: a y :: a ->
                    case @ a GHC.Classes.<= @ a $dOrd x y of wild {
-                     GHC.Bool.False -> y GHC.Bool.True -> x }) -}
+                     GHC.Types.False -> y GHC.Types.True -> x }) -}
 
 We *really* want to inline $dmmin, even though it has arity 3, in
 order to unravel the recursion.
@@ -1046,10 +1087,10 @@ computeDiscount n_vals_wanted arg_discounts res_discount arg_infos cont_info
 	--  *efficiency* to be gained (e.g. beta reductions, case reductions) 
 	-- by inlining.
 
-  = 1 		-- Discount of 1 because the result replaces the call
+  = 10          -- Discount of 1 because the result replaces the call
 		-- so we count 1 for the function itself
 
-    + length (take n_vals_wanted arg_infos)
+    + 10 * length (take n_vals_wanted arg_infos)
       	       -- Discount of (un-scaled) 1 for each arg supplied, 
    	       -- because the result replaces the call
 
@@ -1059,13 +1100,13 @@ computeDiscount n_vals_wanted arg_discounts res_discount arg_infos cont_info
     arg_discount = sum (zipWith mk_arg_discount arg_discounts arg_infos)
 
     mk_arg_discount _ 	     TrivArg    = 0 
-    mk_arg_discount _ 	     NonTrivArg = 1   
+    mk_arg_discount _        NonTrivArg = 10
     mk_arg_discount discount ValueArg   = discount 
 
     res_discount' = case cont_info of
 			BoringCtxt  -> 0
 			CaseCtxt    -> res_discount
-			_other      -> 4 `min` res_discount
+                        _other      -> 40 `min` res_discount
 		-- res_discount can be very large when a function returns
 		-- constructors; but we only want to invoke that large discount
 		-- when there's a case continuation.
@@ -1134,12 +1175,14 @@ interestingArg e = go e 0
          conlike_unfolding = isConLikeUnfolding (idUnfolding v)
 
     go (Type _)          _ = TrivArg
-    go (App fn (Type _)) n = go fn n    
+    go (Coercion _)      _ = TrivArg
+    go (App fn (Type _)) n = go fn n
+    go (App fn (Coercion _)) n = go fn n
     go (App fn _)        n = go fn (n+1)
     go (Note _ a) 	 n = go a n
     go (Cast e _) 	 n = go e n
     go (Lam v e)  	 n 
-       | isTyCoVar v	   = go e n
+       | isTyVar v	   = go e n
        | n>0	 	   = go e (n-1)
        | otherwise	   = ValueArg
     go (Let _ e)  	 n = case go e n of { ValueArg -> ValueArg; _ -> NonTrivArg }
@@ -1195,7 +1238,7 @@ exprIsConApp_maybe id_unf (Cast expr co)
 	Nothing 	                 -> Nothing ;
 	Just (dc, _dc_univ_args, dc_args) -> 
 
-    let (_from_ty, to_ty) = coercionKind co
+    let Pair _from_ty to_ty = coercionKind co
 	dc_tc = dataConTyCon dc
     in
     case splitTyConApp_maybe to_ty of {
@@ -1215,41 +1258,28 @@ exprIsConApp_maybe id_unf (Cast expr co)
         dc_ex_tyvars   = dataConExTyVars dc
         arg_tys        = dataConRepArgTys dc
 
-        dc_eqs :: [(Type,Type)]	  -- All equalities from the DataCon
-        dc_eqs = [(mkTyVarTy tv, ty)   | (tv,ty) <- dataConEqSpec dc] ++
-                 [getEqPredTys eq_pred | eq_pred <- dataConEqTheta dc]
-
-        (ex_args, rest1)    = splitAtList dc_ex_tyvars dc_args
-	(co_args, val_args) = splitAtList dc_eqs rest1
+        (ex_args, val_args) = splitAtList dc_ex_tyvars dc_args
 
 	-- Make the "theta" from Fig 3 of the paper
         gammas = decomposeCo tc_arity co
-        theta  = zipOpenTvSubst (dc_univ_tyvars ++ dc_ex_tyvars)
-                                (gammas         ++ stripTypeArgs ex_args)
+        theta  = zipOpenCvSubst (dc_univ_tyvars ++ dc_ex_tyvars)
+                                (gammas         ++ map mkReflCo (stripTypeArgs ex_args))
 
-          -- Cast the existential coercion arguments
-        cast_co (ty1, ty2) (Type co) 
-          = Type $ mkSymCoercion (substTy theta ty1)
-		   `mkTransCoercion` co
-		   `mkTransCoercion` (substTy theta ty2)
-        cast_co _ other_arg = pprPanic "cast_co" (ppr other_arg)
-        new_co_args = zipWith cast_co dc_eqs co_args
-  
           -- Cast the value arguments (which include dictionaries)
 	new_val_args = zipWith cast_arg arg_tys val_args
-	cast_arg arg_ty arg = mkCoerce (substTy theta arg_ty) arg
+	cast_arg arg_ty arg = mkCoerce (liftCoSubst theta arg_ty) arg
     in
 #ifdef DEBUG
     let dump_doc = vcat [ppr dc,      ppr dc_univ_tyvars, ppr dc_ex_tyvars,
                          ppr arg_tys, ppr dc_args,        ppr _dc_univ_args,
                          ppr ex_args, ppr val_args]
     in
-    ASSERT2( coreEqType _from_ty (mkTyConApp dc_tc _dc_univ_args), dump_doc )
-    ASSERT2( all isTypeArg (ex_args ++ co_args), dump_doc )
+    ASSERT2( eqType _from_ty (mkTyConApp dc_tc _dc_univ_args), dump_doc )
+    ASSERT2( all isTypeArg ex_args, dump_doc )
     ASSERT2( equalLength val_args arg_tys, dump_doc )
 #endif
 
-    Just (dc, to_tc_arg_tys, ex_args ++ new_co_args ++ new_val_args)
+    Just (dc, to_tc_arg_tys, ex_args ++ new_val_args)
     }}
 
 exprIsConApp_maybe id_unf expr 
@@ -1269,11 +1299,9 @@ exprIsConApp_maybe id_unf expr
         , let sat = length args == dfun_nargs    -- See Note [DFun arity check]
           in if sat then True else 
              pprTrace "Unsaturated dfun" (ppr fun <+> int dfun_nargs $$ ppr args) False   
-        , let (dfun_tvs, _cls, dfun_res_tys) = tcSplitDFunTy (idType fun)
+        , let (dfun_tvs, _n_theta, _cls, dfun_res_tys) = tcSplitDFunTy (idType fun)
               subst    = zipOpenTvSubst dfun_tvs (stripTypeArgs (takeList dfun_tvs args))
-              mk_arg (DFunConstArg e) = e
-              mk_arg (DFunLamArg i)   = args !! i
-              mk_arg (DFunPolyArg e)  = mkApps e args
+              mk_arg e = mkApps e args
         = Just (con, substTys subst dfun_res_tys, map mk_arg ops)
 
 	-- Look through unfoldings, but only cheap ones, because
@@ -1288,7 +1316,7 @@ exprIsConApp_maybe id_unf expr
 
     -----------
     beta (Lam v body) pairs (arg : args) 
-        | isTypeArg arg
+        | isTyCoArg arg
         = beta body ((v,arg):pairs) args 
 
     beta (Lam {}) _ _    -- Un-saturated, or not a type lambda
@@ -1300,10 +1328,10 @@ exprIsConApp_maybe id_unf expr
           subst = mkOpenSubst (mkInScopeSet (exprFreeVars fun)) pairs
 	  -- doc = vcat [ppr fun, ppr expr, ppr pairs, ppr args]
 
-
 stripTypeArgs :: [CoreExpr] -> [Type]
 stripTypeArgs args = ASSERT2( all isTypeArg args, ppr args )
                      [ty | Type ty <- args]
+  -- We really do want isTypeArg here, not isTyCoArg!
 \end{code}
 
 Note [Unfolding DFuns]

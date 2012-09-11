@@ -16,6 +16,8 @@
 
 #include "BeginPrivate.h"
 
+#include "GCTDecl.h"
+
 bdescr *allocBlock_sync(void);
 void    freeChain_sync(bdescr *bd);
 
@@ -39,7 +41,7 @@ isPartiallyFull(bdescr *bd)
 
 
 #if DEBUG
-void printMutableList (generation *gen);
+void printMutableList (bdescr *bd);
 #endif
 
 // Version of recordMutableGen for use during GC.  This uses the

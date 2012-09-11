@@ -14,8 +14,11 @@ import Distribution.Verbosity
 import Data.Maybe
 
 
-haddockBase = ".." </> ".."
-haddockPath = haddockBase </> "dist" </> "build" </> "haddock" </> "haddock"
+packageRoot   = "."
+haddockPath   = packageRoot </> "dist" </> "build" </> "haddock" </> "haddock"
+testSuiteRoot = packageRoot </> "tests" </> "html-tests"
+testDir       = testSuiteRoot </> "tests"
+outDir        = testSuiteRoot </> "output"
 
 
 main = do
@@ -27,7 +30,7 @@ test = do
   x <- doesFileExist haddockPath
   when (not x) $ die "you need to run 'cabal build' successfully first"
 
-  contents <- getDirectoryContents "tests"
+  contents <- getDirectoryContents testDir
   args <- getArgs
   let (opts, spec) = span ("-" `isPrefixOf`) args
   let mods =
@@ -35,17 +38,16 @@ test = do
           x:_ | x /= "all" -> [x ++ ".hs"]
           _ -> filter ((==) ".hs" . takeExtension) contents
 
-  let outdir = "output"
-  let mods' = map ("tests" </>) mods
+  let mods' = map (testDir </>) mods
   putStrLn ""
   putStrLn "Haddock version: "
   h1 <- runProcess haddockPath ["--version"] Nothing
-                   (Just [("haddock_datadir", haddockBase)]) Nothing Nothing Nothing
+                   (Just [("haddock_datadir", packageRoot)]) Nothing Nothing Nothing
   waitForProcess h1
   putStrLn ""
   putStrLn "GHC version: "
   h2 <- runProcess haddockPath ["--ghc-version"] Nothing
-                   (Just [("haddock_datadir", haddockBase)]) Nothing Nothing Nothing
+                   (Just [("haddock_datadir", packageRoot)]) Nothing Nothing Nothing
   waitForProcess h2
   putStrLn ""
 
@@ -57,15 +59,15 @@ test = do
         let path = init libdir </> librariesPath </> name ++ "-" ++ version
         in  "-i " ++ path ++ "," ++ path </> name ++ ".haddock"
 
-  let base    = mkDep "base" "4.3.0.0"
-      process = mkDep "process" "1.0.1.4"
+  let base    = mkDep "base" "4.3.1.0"
+      process = mkDep "process" "1.0.1.5"
       ghcprim = mkDep "ghc-prim" "0.2.0.0"
 
   putStrLn "Running tests..."
   handle <- runProcess haddockPath
-                       (["-w", "-o", outdir, "-h", "--pretty-html", "--optghc=-fglasgow-exts"
+                       (["-w", "-o", outDir, "-h", "--pretty-html", "--optghc=-fglasgow-exts"
                         , "--optghc=-w", base, process, ghcprim] ++ opts ++ mods')
-                       Nothing (Just [("haddock_datadir", haddockBase)]) Nothing
+                       Nothing (Just [("haddock_datadir", packageRoot)]) Nothing
                        Nothing Nothing
 
   code <- waitForProcess handle
@@ -75,12 +77,12 @@ test = do
 
 check modules strict = do
   forM_ modules $ \mod -> do
-    let outfile = "output" </> (dropExtension mod ++ ".html")
-    let reffile = "tests" </> dropExtension mod ++ ".html.ref"
+    let outfile = outDir  </> dropExtension mod ++ ".html"
+    let reffile = testDir </> dropExtension mod ++ ".html.ref"
     b <- doesFileExist reffile
     if b
       then do
-        copyFile reffile ("output" </> takeFileName reffile)
+        copyFile reffile (outDir </> takeFileName reffile)
         out <- readFile outfile
         ref <- readFile reffile
         if not $ haddockEq out ref
@@ -88,8 +90,8 @@ check modules strict = do
             putStrLn $ "Output for " ++ mod ++ " has changed! Exiting with diff:"
             let ref' = stripLinks ref
                 out' = stripLinks out
-            let reffile' = "output" </> takeFileName reffile ++ ".nolinks"
-                outfile' = "output" </> takeFileName outfile ++ ".nolinks"
+            let reffile' = outDir </> takeFileName reffile ++ ".nolinks"
+                outfile' = outDir </> takeFileName outfile ++ ".nolinks"
             writeFile reffile' ref'
             writeFile outfile' out'
             b <- programOnPath "colordiff"

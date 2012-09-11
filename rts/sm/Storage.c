@@ -15,6 +15,7 @@
 #include "Rts.h"
 
 #include "Storage.h"
+#include "GCThread.h"
 #include "RtsUtils.h"
 #include "Stats.h"
 #include "BlockAlloc.h"
@@ -40,8 +41,8 @@ StgClosure    *caf_list         = NULL;
 StgClosure    *revertible_caf_list = NULL;
 rtsBool       keepCAFs;
 
-nat alloc_blocks_lim;    /* GC if n_large_blocks in any nursery
-                          * reaches this. */
+nat large_alloc_lim;    /* GC if n_large_blocks in any nursery
+                         * reaches this. */
 
 bdescr *exec_block;
 
@@ -77,15 +78,14 @@ initGeneration (generation *gen, int g)
     gen->n_old_blocks = 0;
     gen->large_objects = NULL;
     gen->n_large_blocks = 0;
-    gen->n_new_large_blocks = 0;
-    gen->mut_list = allocBlock();
+    gen->n_new_large_words = 0;
     gen->scavenged_large_objects = NULL;
     gen->n_scavenged_large_blocks = 0;
     gen->mark = 0;
     gen->compact = 0;
     gen->bitmap = NULL;
 #ifdef THREADED_RTS
-    initSpinLock(&gen->sync_large_objects);
+    initSpinLock(&gen->sync);
 #endif
     gen->threads = END_TSO_QUEUE;
     gen->old_threads = END_TSO_QUEUE;
@@ -181,7 +181,7 @@ initStorage( void )
   revertible_caf_list = END_OF_STATIC_LIST;
    
   /* initialise the allocate() interface */
-  alloc_blocks_lim = RtsFlags.GcFlags.minAllocAreaSize;
+  large_alloc_lim = RtsFlags.GcFlags.minAllocAreaSize * BLOCK_SIZE_W;
 
   exec_block = NULL;
 
@@ -209,7 +209,7 @@ initStorage( void )
 void
 exitStorage (void)
 {
-    stat_exit(calcAllocated());
+    stat_exit(calcAllocated(rtsTrue));
 }
 
 void
@@ -401,21 +401,31 @@ allocNurseries( void )
     assignNurseriesToCapabilities();
 }
       
-void
-resetNurseries( void )
+lnat // words allocated
+clearNurseries (void)
 {
+    lnat allocated = 0;
     nat i;
     bdescr *bd;
 
     for (i = 0; i < n_capabilities; i++) {
 	for (bd = nurseries[i].blocks; bd; bd = bd->link) {
-	    bd->free = bd->start;
+            allocated += (lnat)(bd->free - bd->start);
+            bd->free = bd->start;
 	    ASSERT(bd->gen_no == 0);
 	    ASSERT(bd->gen == g0);
 	    IF_DEBUG(sanity,memset(bd->start, 0xaa, BLOCK_SIZE));
 	}
     }
+
+    return allocated;
+}
+
+void
+resetNurseries (void)
+{
     assignNurseriesToCapabilities();
+
 }
 
 lnat
@@ -495,57 +505,18 @@ resizeNurseries (nat blocks)
 
 
 /* -----------------------------------------------------------------------------
-   move_TSO is called to update the TSO structure after it has been
+   move_STACK is called to update the TSO structure after it has been
    moved from one place to another.
    -------------------------------------------------------------------------- */
 
 void
-move_TSO (StgTSO *src, StgTSO *dest)
+move_STACK (StgStack *src, StgStack *dest)
 {
     ptrdiff_t diff;
 
     // relocate the stack pointer... 
     diff = (StgPtr)dest - (StgPtr)src; // In *words* 
     dest->sp = (StgPtr)dest->sp + diff;
-}
-
-/* -----------------------------------------------------------------------------
-   split N blocks off the front of the given bdescr, returning the
-   new block group.  We add the remainder to the large_blocks list
-   in the same step as the original block.
-   -------------------------------------------------------------------------- */
-
-bdescr *
-splitLargeBlock (bdescr *bd, nat blocks)
-{
-    bdescr *new_bd;
-
-    ACQUIRE_SM_LOCK;
-
-    ASSERT(countBlocks(bd->gen->large_objects) == bd->gen->n_large_blocks);
-
-    // subtract the original number of blocks from the counter first
-    bd->gen->n_large_blocks -= bd->blocks;
-
-    new_bd = splitBlockGroup (bd, blocks);
-    initBdescr(new_bd, bd->gen, bd->gen->to);
-    new_bd->flags   = BF_LARGE | (bd->flags & BF_EVACUATED); 
-    // if new_bd is in an old generation, we have to set BF_EVACUATED
-    new_bd->free    = bd->free;
-    dbl_link_onto(new_bd, &bd->gen->large_objects);
-
-    ASSERT(new_bd->free <= new_bd->start + new_bd->blocks * BLOCK_SIZE_W);
-
-    // add the new number of blocks to the counter.  Due to the gaps
-    // for block descriptors, new_bd->blocks + bd->blocks might not be
-    // equal to the original bd->blocks, which is why we do it this way.
-    bd->gen->n_large_blocks += bd->blocks + new_bd->blocks;
-
-    ASSERT(countBlocks(bd->gen->large_objects) == bd->gen->n_large_blocks);
-
-    RELEASE_SM_LOCK;
-
-    return new_bd;
 }
 
 /* -----------------------------------------------------------------------------
@@ -588,7 +559,7 @@ allocate (Capability *cap, lnat n)
 	bd = allocGroup(req_blocks);
 	dbl_link_onto(bd, &g0->large_objects);
 	g0->n_large_blocks += bd->blocks; // might be larger than req_blocks
-	g0->n_new_large_blocks += bd->blocks;
+        g0->n_new_large_words += n;
         RELEASE_SM_LOCK;
         initBdescr(bd, g0, g0);
 	bd->flags = BF_LARGE;
@@ -686,14 +657,29 @@ allocatePinned (Capability *cap, lnat n)
     // If we don't have a block of pinned objects yet, or the current
     // one isn't large enough to hold the new object, allocate a new one.
     if (bd == NULL || (bd->free + n) > (bd->start + BLOCK_SIZE_W)) {
+        // The pinned_object_block remains attached to the capability
+        // until it is full, even if a GC occurs.  We want this
+        // behaviour because otherwise the unallocated portion of the
+        // block would be forever slop, and under certain workloads
+        // (allocating a few ByteStrings per GC) we accumulate a lot
+        // of slop.
+        //
+        // So, the pinned_object_block is initially marked
+        // BF_EVACUATED so the GC won't touch it.  When it is full,
+        // we place it on the large_objects list, and at the start of
+        // the next GC the BF_EVACUATED flag will be cleared, and the
+        // block will be promoted as usual (if anything in it is
+        // live).
         ACQUIRE_SM_LOCK;
-	cap->pinned_object_block = bd = allocBlock();
-	dbl_link_onto(bd, &g0->large_objects);
-	g0->n_large_blocks++;
-	g0->n_new_large_blocks++;
+        if (bd != NULL) {
+            dbl_link_onto(bd, &g0->large_objects);
+            g0->n_large_blocks++;
+            g0->n_new_large_words += bd->free - bd->start;
+        }
+        cap->pinned_object_block = bd = allocBlock();
         RELEASE_SM_LOCK;
         initBdescr(bd, g0, g0);
-	bd->flags  = BF_PINNED | BF_LARGE;
+        bd->flags  = BF_PINNED | BF_LARGE | BF_EVACUATED;
 	bd->free   = bd->start;
     }
 
@@ -731,8 +717,8 @@ dirty_MUT_VAR(StgRegTable *reg, StgClosure *p)
 void
 setTSOLink (Capability *cap, StgTSO *tso, StgTSO *target)
 {
-    if (tso->dirty == 0 && (tso->flags & TSO_LINK_DIRTY) == 0) {
-        tso->flags |= TSO_LINK_DIRTY;
+    if (tso->dirty == 0) {
+        tso->dirty = 1;
         recordClosureMutated(cap,(StgClosure*)tso);
     }
     tso->_link = target;
@@ -741,8 +727,8 @@ setTSOLink (Capability *cap, StgTSO *tso, StgTSO *target)
 void
 setTSOPrev (Capability *cap, StgTSO *tso, StgTSO *target)
 {
-    if (tso->dirty == 0 && (tso->flags & TSO_LINK_DIRTY) == 0) {
-        tso->flags |= TSO_LINK_DIRTY;
+    if (tso->dirty == 0) {
+        tso->dirty = 1;
         recordClosureMutated(cap,(StgClosure*)tso);
     }
     tso->block_info.prev = target;
@@ -751,10 +737,19 @@ setTSOPrev (Capability *cap, StgTSO *tso, StgTSO *target)
 void
 dirty_TSO (Capability *cap, StgTSO *tso)
 {
-    if (tso->dirty == 0 && (tso->flags & TSO_LINK_DIRTY) == 0) {
+    if (tso->dirty == 0) {
+        tso->dirty = 1;
         recordClosureMutated(cap,(StgClosure*)tso);
     }
-    tso->dirty = 1;
+}
+
+void
+dirty_STACK (Capability *cap, StgStack *stack)
+{
+    if (stack->dirty == 0) {
+        stack->dirty = 1;
+        recordClosureMutated(cap,(StgClosure*)stack);
+    }
 }
 
 /*
@@ -784,55 +779,26 @@ dirty_MVAR(StgRegTable *reg, StgClosure *p)
  * -------------------------------------------------------------------------- */
 
 lnat
-calcAllocated( void )
+calcAllocated (rtsBool include_nurseries)
 {
-  nat allocated;
-  bdescr *bd;
+  nat allocated = 0;
   nat i;
 
-  allocated = countNurseryBlocks() * BLOCK_SIZE_W;
-  
-  for (i = 0; i < n_capabilities; i++) {
-      Capability *cap;
-      for ( bd = capabilities[i].r.rCurrentNursery->link; 
-	    bd != NULL; bd = bd->link ) {
-	  allocated -= BLOCK_SIZE_W;
-      }
-      cap = &capabilities[i];
-      if (cap->r.rCurrentNursery->free < 
-	  cap->r.rCurrentNursery->start + BLOCK_SIZE_W) {
-	  allocated -= (cap->r.rCurrentNursery->start + BLOCK_SIZE_W)
-	      - cap->r.rCurrentNursery->free;
-      }
-      if (cap->pinned_object_block != NULL) {
-          allocated -= (cap->pinned_object_block->start + BLOCK_SIZE_W) - 
-              cap->pinned_object_block->free;
+  // When called from GC.c, we already have the allocation count for
+  // the nursery from resetNurseries(), so we don't need to walk
+  // through these block lists again.
+  if (include_nurseries)
+  {
+      for (i = 0; i < n_capabilities; i++) {
+          allocated += countOccupied(nurseries[i].blocks);
       }
   }
 
-  allocated += g0->n_new_large_blocks * BLOCK_SIZE_W;
+  // add in sizes of new large and pinned objects
+  allocated += g0->n_new_large_words;
 
   return allocated;
 }  
-
-/* Approximate the amount of live data in the heap.  To be called just
- * after garbage collection (see GarbageCollect()).
- */
-lnat calcLiveBlocks (void)
-{
-  nat g;
-  lnat live = 0;
-  generation *gen;
-
-  for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-      /* approximate amount of live data (doesn't take into account slop
-       * at end of each block).
-       */
-      gen = &generations[g];
-      live += gen->n_large_blocks + gen->n_blocks;
-  }
-  return live;
-}
 
 lnat countOccupied (bdescr *bd)
 {
@@ -846,18 +812,60 @@ lnat countOccupied (bdescr *bd)
     return words;
 }
 
+lnat genLiveWords (generation *gen)
+{
+    return gen->n_words + countOccupied(gen->large_objects);
+}
+
+lnat genLiveBlocks (generation *gen)
+{
+    return gen->n_blocks + gen->n_large_blocks;
+}
+
+lnat gcThreadLiveWords (nat i, nat g)
+{
+    lnat words;
+
+    words   = countOccupied(gc_threads[i]->gens[g].todo_bd);
+    words  += countOccupied(gc_threads[i]->gens[g].part_list);
+    words  += countOccupied(gc_threads[i]->gens[g].scavd_list);
+
+    return words;
+}
+
+lnat gcThreadLiveBlocks (nat i, nat g)
+{
+    lnat blocks;
+
+    blocks  = countBlocks(gc_threads[i]->gens[g].todo_bd);
+    blocks += gc_threads[i]->gens[g].n_part_blocks;
+    blocks += gc_threads[i]->gens[g].n_scavd_blocks;
+
+    return blocks;
+}
+
 // Return an accurate count of the live data in the heap, excluding
 // generation 0.
 lnat calcLiveWords (void)
 {
     nat g;
     lnat live;
-    generation *gen;
-    
+
     live = 0;
     for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-        gen = &generations[g];
-        live += gen->n_words + countOccupied(gen->large_objects);
+        live += genLiveWords(&generations[g]);
+    }
+    return live;
+}
+
+lnat calcLiveBlocks (void)
+{
+    nat g;
+    lnat live;
+
+    live = 0;
+    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+        live += genLiveBlocks(&generations[g]);
     }
     return live;
 }

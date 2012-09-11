@@ -1,5 +1,5 @@
 name:         hpc
-version:      0.5.0.6
+version:      0.5.1.0
 license:      BSD3
 license-file: LICENSE
 author:       Andy Gill
@@ -11,8 +11,8 @@ build-type:   Simple
 Cabal-Version: >= 1.6
 
 source-repository head
-    type:     darcs
-    location: http://darcs.haskell.org/packages/hpc/
+    type:     git
+    location: http://darcs.haskell.org/packages/hpc.git/
 
 Flag small_base
   Description: Choose the new smaller, split-up base package.

@@ -36,6 +36,7 @@ import StaticFlags
 import CoreSyn
 import qualified CoreSubst
 import PprCore
+import DataCon	( dataConCannotMatch )
 import CoreFVs
 import CoreUtils
 import CoreArity
@@ -45,17 +46,16 @@ import Id
 import Var
 import Demand
 import SimplMonad
-import TcType	( isDictLikeTy )
 import Type	hiding( substTy )
-import Coercion ( coercionKind )
+import Coercion hiding( substCo )
 import TyCon
-import Unify	( dataConCannotMatch )
 import VarSet
 import BasicTypes
 import Util
 import MonadUtils
 import Outputable
 import FastString
+import Pair
 
 import Data.List
 \end{code}
@@ -99,6 +99,7 @@ data SimplCont
 
   | CoerceIt 		-- C `cast` co
 	OutCoercion		-- The coercion simplified
+				-- Invariant: never an identity coercion
 	SimplCont
 
   | ApplyTo  		-- C arg
@@ -208,6 +209,7 @@ contIsDupable _                          = False
 contIsTrivial :: SimplCont -> Bool
 contIsTrivial (Stop {})                   = True
 contIsTrivial (ApplyTo _ (Type _) _ cont) = contIsTrivial cont
+contIsTrivial (ApplyTo _ (Coercion _) _ cont) = contIsTrivial cont
 contIsTrivial (CoerceIt _ cont)           = contIsTrivial cont
 contIsTrivial _                           = False
 
@@ -216,17 +218,19 @@ contResultType :: SimplEnv -> OutType -> SimplCont -> OutType
 contResultType env ty cont
   = go cont ty
   where
-    subst_ty se ty = substTy (se `setInScope` env) ty
+    subst_ty se ty = SimplEnv.substTy (se `setInScope` env) ty
+    subst_co se co = SimplEnv.substCo (se `setInScope` env) co
 
     go (Stop {})                      ty = ty
-    go (CoerceIt co cont)             _  = go cont (snd (coercionKind co))
+    go (CoerceIt co cont)             _  = go cont (pSnd (coercionKind co))
     go (StrictBind _ bs body se cont) _  = go cont (subst_ty se (exprType (mkLams bs body)))
     go (StrictArg ai _ cont)          _  = go cont (funResultTy (argInfoResultTy ai))
     go (Select _ _ alts se cont)      _  = go cont (subst_ty se (coreAltsType alts))
     go (ApplyTo _ arg se cont)        ty = go cont (apply_to_arg ty arg se)
 
-    apply_to_arg ty (Type ty_arg) se = applyTy ty (subst_ty se ty_arg)
-    apply_to_arg ty _             _  = funResultTy ty
+    apply_to_arg ty (Type ty_arg)     se = applyTy ty (subst_ty se ty_arg)
+    apply_to_arg ty (Coercion co_arg) se = applyCo ty (subst_co se co_arg)
+    apply_to_arg ty _                 _  = funResultTy ty
 
 argInfoResultTy :: ArgInfo -> OutType
 argInfoResultTy (ArgInfo { ai_fun = fun, ai_args = args })
@@ -235,6 +239,7 @@ argInfoResultTy (ArgInfo { ai_fun = fun, ai_args = args })
 -------------------
 countValArgs :: SimplCont -> Int
 countValArgs (ApplyTo _ (Type _) _ cont) = countValArgs cont
+countValArgs (ApplyTo _ (Coercion _) _ cont) = countValArgs cont
 countValArgs (ApplyTo _ _        _ cont) = 1 + countValArgs cont
 countValArgs _                           = 0
 
@@ -468,12 +473,17 @@ CoreMonad
         sm_eta_expand :: Bool     -- Whether eta-expansion is enabled
 
 \begin{code}
-simplEnvForGHCi :: SimplEnv
-simplEnvForGHCi = mkSimplEnv $
-                  SimplMode { sm_names = ["GHCi"]
-                            , sm_phase = InitialPhase
-                            , sm_rules = True, sm_inline = False
-                            , sm_eta_expand = False, sm_case_case = True }
+simplEnvForGHCi :: DynFlags -> SimplEnv
+simplEnvForGHCi dflags
+  = mkSimplEnv $ SimplMode { sm_names = ["GHCi"]
+                           , sm_phase = InitialPhase
+                           , sm_rules = rules_on
+                           , sm_inline = False
+                           , sm_eta_expand = eta_expand_on
+                           , sm_case_case = True }
+  where
+    rules_on      = dopt Opt_EnableRewriteRules   dflags
+    eta_expand_on = dopt Opt_DoLambdaEtaExpansion dflags
    -- Do not do any inlining, in case we expose some unboxed
    -- tuple stuff that confuses the bytecode interpreter
 
@@ -481,9 +491,10 @@ updModeForInlineRules :: Activation -> SimplifierMode -> SimplifierMode
 -- See Note [Simplifying inside InlineRules]
 updModeForInlineRules inline_rule_act current_mode
   = current_mode { sm_phase = phaseFromActivation inline_rule_act
-                 , sm_rules = True
                  , sm_inline = True
                  , sm_eta_expand = False }
+		 -- For sm_rules, just inherit; sm_rules might be "off"
+		 -- becuase of -fno-enable-rewrite-rules
   where
     phaseFromActivation (ActiveAfter n) = Phase n
     phaseFromActivation _               = InitialPhase
@@ -658,11 +669,11 @@ active_unfolding_gentle id
     prag = idInlinePragma id
 
 ----------------------
-activeRule :: DynFlags -> SimplEnv -> Maybe (Activation -> Bool)
+activeRule :: SimplEnv -> Activation -> Bool
 -- Nothing => No rules at all
-activeRule _dflags env
-  | not (sm_rules mode) = Nothing     -- Rewriting is off
-  | otherwise           = Just (isActive (sm_phase mode))
+activeRule env
+  | not (sm_rules mode) = \_ -> False     -- Rewriting is off
+  | otherwise           = isActive (sm_phase mode)
   where
     mode = getMode env
 \end{code}
@@ -778,6 +789,11 @@ Don't inline top-level Ids that are bottoming, even if they are used just
 once, because FloatOut has gone to some trouble to extract them out.
 Inlining them won't make the program run faster!
 
+Note [Do not inline CoVars unconditionally]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Coercion variables appear inside coercions, and have a separate
+substitution, so don't inline them via the IdSubst!
+
 \begin{code}
 preInlineUnconditionally :: SimplEnv -> TopLevelFlag -> InId -> InExpr -> Bool
 preInlineUnconditionally env top_lvl bndr rhs
@@ -785,6 +801,7 @@ preInlineUnconditionally env top_lvl bndr rhs
   | isStableUnfolding (idUnfolding bndr)     = False    -- Note [InlineRule and preInlineUnconditionally]
   | isTopLevel top_lvl && isBottomingId bndr = False	-- Note [Top-level bottoming Ids]
   | opt_SimplNoPreInlining                   = False
+  | isCoVar bndr                             = False -- Note [Do not inline CoVars unconditionally]
   | otherwise = case idOccInfo bndr of
 		  IAmDead	     	     -> True	-- Happens in ((\x.1) v)
 	  	  OneOcc in_lam True int_cxt -> try_once in_lam int_cxt
@@ -882,13 +899,14 @@ story for now.
 postInlineUnconditionally 
     :: SimplEnv -> TopLevelFlag
     -> OutId		-- The binder (an InId would be fine too)
+       			--            (*not* a CoVar)
     -> OccInfo 		-- From the InId
     -> OutExpr
     -> Unfolding
     -> Bool
 postInlineUnconditionally env top_lvl bndr occ_info rhs unfolding
   | not active		        = False
-  | isLoopBreaker occ_info      = False	-- If it's a loop-breaker of any kind, don't inline
+  | isWeakLoopBreaker occ_info  = False	-- If it's a loop-breaker of any kind, don't inline
 					-- because it might be referred to "earlier"
   | isExportedId bndr           = False
   | isStableUnfolding unfolding = False	-- Note [InlineRule and postInlineUnconditionally]
@@ -982,6 +1000,7 @@ ones that are trivial):
   * There is less point, because the main goal is to get rid of local
     bindings used in multiple case branches.  
     
+  * The inliner should inline trivial things at call sites anyway.
 
 Note [InlineRule and postInlineUnconditionally]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1026,9 +1045,9 @@ mkLam _env bndrs body
       | not (any bad bndrs)
 	-- Note [Casts and lambdas]
       = do { lam <- mkLam' dflags bndrs body
-	   ; return (mkCoerce (mkPiTypes bndrs co) lam) }
+           ; return (mkCoerce (mkPiCos bndrs co) lam) }
       where
-	co_vars  = tyVarsOfType co
+        co_vars  = tyCoVarsOfCo co
 	bad bndr = isCoVar bndr && bndr `elemVarSet` co_vars      
 
     mkLam' dflags bndrs body@(Lam {})
@@ -1042,7 +1061,7 @@ mkLam _env bndrs body
       = do { tick (EtaReduction (head bndrs))
 	   ; return etad_lam }
 
-      | otherwise 
+      | otherwise
       = return (mkLams bndrs body)
 \end{code}
 
@@ -1085,9 +1104,6 @@ because the latter is not well-kinded.
 %*									*
 %************************************************************************
 
-When we meet a let-binding we try eta-expansion.  To find the 
-arity of the RHS we use a little fixpoint analysis; see Note [Arity analysis]
-
 \begin{code}
 tryEtaExpand :: SimplEnv -> OutId -> OutExpr -> SimplM (Arity, OutExpr)
 -- See Note [Eta-expanding at let bindings]
@@ -1102,17 +1118,20 @@ tryEtaExpand env bndr rhs
          return (new_arity, new_rhs) }
   where
     try_expand dflags
+      | exprIsTrivial rhs
+      = return (exprArity rhs, rhs)
+
       | sm_eta_expand (getMode env)      -- Provided eta-expansion is on
-      , not (exprIsTrivial rhs)
       , let dicts_cheap = dopt Opt_DictsCheap dflags
             new_arity   = findArity dicts_cheap bndr rhs old_arity
-      , new_arity > rhs_arity
+      , new_arity > manifest_arity  	-- And the curent manifest arity isn't enough
+      		    			-- See Note [Eta expansion to manifes arity]
       = do { tick (EtaExpansion bndr)
            ; return (new_arity, etaExpand new_arity rhs) }
       | otherwise
-      = return (rhs_arity, rhs)
+      = return (manifest_arity, rhs)
 
-    rhs_arity  = exprArity rhs
+    manifest_arity = manifestArity rhs
     old_arity  = idArity bndr
     _dmd_arity = length $ fst $ splitStrictSig $ idStrictness bndr
 
@@ -1200,6 +1219,23 @@ We do not want to eta-expand to
 because then 'genMap' will inline, and it really shouldn't: at least
 as far as the programmer is concerned, it's not applied to two
 arguments!
+
+Note [Eta expansion to manifest arity]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Eta expansion does *not* eta-expand trivial RHSs, like
+    x = y
+because these will get substituted out in short order.  (Indeed
+we *eta-contract* if that yields a trivial RHS.)
+
+Otherwise we eta-expand to produce enough manifest lambdas.
+This *does* eta-expand partial applications.  eg
+      x = map g		-->    x = \v -> map g v
+      y = \_ -> map g	-->    y = \_ v -> map g v
+One benefit this is that in the definition of y there was 
+a danger that full laziness would transform to
+      lvl = map g
+      y = \_ -> lvl
+which is stupid.  This doesn't happen in the eta-expanded form.
 
 Note [Arity analysis]
 ~~~~~~~~~~~~~~~~~~~~~
@@ -1330,9 +1366,7 @@ abstractFloats main_tvs body_env body
 	   ; return (subst', (NonRec poly_id poly_rhs)) }
       where
 	rhs' = CoreSubst.substExpr (text "abstract_floats2") subst rhs
-	tvs_here | any isCoVar main_tvs = main_tvs	-- Note [Abstract over coercions]
-		 | otherwise 
-		 = varSetElems (main_tv_set `intersectVarSet` exprSomeFreeVars isTyCoVar rhs')
+	tvs_here = varSetElems (main_tv_set `intersectVarSet` exprSomeFreeVars isTyVar rhs')
 	
 		-- Abstract only over the type variables free in the rhs
 		-- wrt which the new binding is abstracted.  But the naive
@@ -1544,9 +1578,8 @@ prepareDefault case_bndr (Just (tycon, inst_tys)) imposs_cons (Just deflt_rhs)
 	[con] -> 	-- It matches exactly one constructor, so fill it in
 		 do { tick (FillInCaseDefault case_bndr)
                     ; us <- getUniquesM
-                    ; let (ex_tvs, co_tvs, arg_ids) =
-                              dataConRepInstPat us con inst_tys
-                    ; return [(DataAlt con, ex_tvs ++ co_tvs ++ arg_ids, deflt_rhs)] }
+                    ; let (ex_tvs, arg_ids) = dataConRepInstPat us con inst_tys
+                    ; return [(DataAlt con, ex_tvs ++ arg_ids, deflt_rhs)] }
 
 	_ -> return [(DEFAULT, [], deflt_rhs)]
 

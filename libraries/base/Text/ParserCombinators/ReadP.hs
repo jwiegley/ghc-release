@@ -1,4 +1,12 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude #-}
+#ifndef __NHC__
+{-# LANGUAGE Rank2Types #-}
+#endif
+#ifdef __GLASGOW_HASKELL__
+{-# LANGUAGE MagicHash #-}
+#endif
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Text.ParserCombinators.ReadP

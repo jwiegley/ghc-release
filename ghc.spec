@@ -11,7 +11,7 @@
 # This file is subject to the same free software license as GHC.
 
 %define name    ghc
-%define version 7.0.4
+%define version 7.2.1
 %define release 1
 
 Name:           %{name}
@@ -177,7 +177,6 @@ fi
 %{_prefix}/bin/ghci
 %{_prefix}/bin/ghci-%{version}
 %{_prefix}/bin/ghcprof
-%{_prefix}/bin/hasktags
 %{_prefix}/bin/hp2ps
 %{_prefix}/bin/hpc
 %{_prefix}/bin/hsc2hs-ghc

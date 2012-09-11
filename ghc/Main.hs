@@ -14,8 +14,8 @@ module Main (main) where
 import qualified GHC
 import GHC		( -- DynFlags(..), HscTarget(..),
                           -- GhcMode(..), GhcLink(..),
-			  LoadHowMuch(..), -- dopt, DynFlag(..),
-                          defaultCallbacks )
+                          Ghc, GhcMonad(..),
+			  LoadHowMuch(..) )
 import CmdLineParser
 
 -- Implementations of the various modes (--show-iface, mkdependHS. etc.)
@@ -44,7 +44,7 @@ import Outputable
 import SrcLoc
 import Util
 import Panic
--- import MonadUtils       ( liftIO )
+import MonadUtils       ( liftIO )
 
 -- Imports for --abi-hash
 import LoadIface           ( loadUserInterface )
@@ -78,7 +78,7 @@ import Data.Maybe
 main :: IO ()
 main = do
    hSetBuffering stdout NoBuffering
-   GHC.defaultErrorHandler defaultDynFlags $ do
+   GHC.defaultErrorHandler defaultLogAction $ do
     -- 1. extract the -B flag from the args
     argv0 <- getArgs
 
@@ -167,9 +167,9 @@ main' postLoadMode dflags0 args flagWarnings = do
   let flagWarnings' = flagWarnings ++ dynamicFlagWarnings
 
   handleSourceError (\e -> do
-       GHC.printExceptionAndWarnings e
-       liftIO $ exitWith (ExitFailure 1)) $
-    handleFlagWarnings dflags2 flagWarnings'
+       GHC.printException e
+       liftIO $ exitWith (ExitFailure 1)) $ do
+         liftIO $ handleFlagWarnings dflags2 flagWarnings'
 
         -- make sure we clean up after ourselves
   GHC.defaultCleanupHandler dflags2 $ do
@@ -204,14 +204,13 @@ main' postLoadMode dflags0 args flagWarnings = do
 
   ---------------- Do the business -----------
   handleSourceError (\e -> do
-       GHC.printExceptionAndWarnings e
+       GHC.printException e
        liftIO $ exitWith (ExitFailure 1)) $ do
     case postLoadMode of
        ShowInterface f        -> liftIO $ doShowIface dflags3 f
        DoMake                 -> doMake srcs
-       DoMkDependHS           -> do doMkDependHS (map fst srcs)
-                                    GHC.printWarnings
-       StopBefore p           -> oneShot hsc_env p srcs >> GHC.printWarnings
+       DoMkDependHS           -> doMkDependHS (map fst srcs)
+       StopBefore p           -> liftIO (oneShot hsc_env p srcs)
        DoInteractive          -> interactiveUI srcs Nothing
        DoEval exprs           -> interactiveUI srcs $ Just $ reverse exprs
        DoAbiHash              -> abiHash srcs
@@ -359,9 +358,6 @@ showVersionMode             = mkPreStartupMode ShowVersion
 showNumVersionMode          = mkPreStartupMode ShowNumVersion
 showSupportedExtensionsMode = mkPreStartupMode ShowSupportedExtensions
 
-printMode :: String -> Mode
-printMode str              = mkPreStartupMode (Print str)
-
 mkPreStartupMode :: PreStartupMode -> Mode
 mkPreStartupMode = Left
 
@@ -384,8 +380,10 @@ showGhcUsageMode = mkPreLoadMode ShowGhcUsage
 showGhciUsageMode = mkPreLoadMode ShowGhciUsage
 showInfoMode = mkPreLoadMode ShowInfo
 
-printWithDynFlagsMode :: (DynFlags -> String) -> Mode
-printWithDynFlagsMode f = mkPreLoadMode (PrintWithDynFlags f)
+printSetting :: String -> Mode
+printSetting k = mkPreLoadMode (PrintWithDynFlags f)
+    where f dflags = fromMaybe (panic ("Setting not found: " ++ show k))
+                   $ lookup k (compilerInfo dflags)
 
 mkPreLoadMode :: PreLoadMode -> Mode
 mkPreLoadMode = Right . Left
@@ -480,7 +478,7 @@ parseModeFlags :: [Located String]
                       [Located String])
 parseModeFlags args = do
   let ((leftover, errs1, warns), (mModeFlag, errs2, flags')) =
-          runCmdLine (processArgs mode_flags args)
+          runCmdLine (processArgs mode_flags args CmdLineOnly True)
                      (Nothing, [], [])
       mode = case mModeFlag of
              Nothing     -> doMakeMode
@@ -496,40 +494,56 @@ type ModeM = CmdLineP (Maybe (Mode, String), [String], [Located String])
 mode_flags :: [Flag ModeM]
 mode_flags =
   [  ------- help / version ----------------------------------------------
-    Flag "?"                     (PassFlag (setMode showGhcUsageMode))
-  , Flag "-help"                 (PassFlag (setMode showGhcUsageMode))
-  , Flag "V"                     (PassFlag (setMode showVersionMode))
-  , Flag "-version"              (PassFlag (setMode showVersionMode))
-  , Flag "-numeric-version"      (PassFlag (setMode showNumVersionMode))
-  , Flag "-info"                 (PassFlag (setMode showInfoMode))
-  , Flag "-supported-languages"  (PassFlag (setMode showSupportedExtensionsMode))
-  , Flag "-supported-extensions" (PassFlag (setMode showSupportedExtensionsMode))
+    flagC "?"                     (PassFlag (setMode showGhcUsageMode))
+  , flagC "-help"                 (PassFlag (setMode showGhcUsageMode))
+  , flagC "V"                     (PassFlag (setMode showVersionMode))
+  , flagC "-version"              (PassFlag (setMode showVersionMode))
+  , flagC "-numeric-version"      (PassFlag (setMode showNumVersionMode))
+  , flagC "-info"                 (PassFlag (setMode showInfoMode))
+  , flagC "-supported-languages"  (PassFlag (setMode showSupportedExtensionsMode))
+  , flagC "-supported-extensions" (PassFlag (setMode showSupportedExtensionsMode))
   ] ++
-  [ Flag k'                     (PassFlag (setMode mode))
-  | (k, v) <- compilerInfo,
+  [ flagC k'                      (PassFlag (setMode (printSetting k)))
+  | k <- ["Project version",
+          "Booter version",
+          "Stage",
+          "Build platform",
+          "Host platform",
+          "Target platform",
+          "Have interpreter",
+          "Object splitting supported",
+          "Have native code generator",
+          "Support SMP",
+          "Unregisterised",
+          "Tables next to code",
+          "RTS ways",
+          "Leading underscore",
+          "Debug on",
+          "LibDir",
+          "Global Package DB",
+          "C compiler flags",
+          "Gcc Linker flags",
+          "Ld Linker flags"],
     let k' = "-print-" ++ map (replaceSpace . toLower) k
         replaceSpace ' ' = '-'
         replaceSpace c   = c
-        mode = case v of
-               String str -> printMode str
-               FromDynFlags f -> printWithDynFlagsMode f
   ] ++
       ------- interfaces ----------------------------------------------------
-  [ Flag "-show-iface"  (HasArg (\f -> setMode (showInterfaceMode f)
+  [ flagC "-show-iface"  (HasArg (\f -> setMode (showInterfaceMode f)
                                                "--show-iface"))
 
       ------- primary modes ------------------------------------------------
-  , Flag "c"            (PassFlag (\f -> do setMode (stopBeforeMode StopLn) f
-                                            addFlag "-no-link" f))
-  , Flag "M"            (PassFlag (setMode doMkDependHSMode))
-  , Flag "E"            (PassFlag (setMode (stopBeforeMode anyHsc)))
-  , Flag "C"            (PassFlag (\f -> do setMode (stopBeforeMode HCc) f
-                                            addFlag "-fvia-C" f))
-  , Flag "S"            (PassFlag (setMode (stopBeforeMode As)))
-  , Flag "-make"        (PassFlag (setMode doMakeMode))
-  , Flag "-interactive" (PassFlag (setMode doInteractiveMode))
-  , Flag "-abi-hash"    (PassFlag (setMode doAbiHashMode))
-  , Flag "e"            (SepArg   (\s -> setMode (doEvalMode s) "-e"))
+  , flagC "c"            (PassFlag (\f -> do setMode (stopBeforeMode StopLn) f
+                                             addFlag "-no-link" f))
+  , flagC "M"            (PassFlag (setMode doMkDependHSMode))
+  , flagC "E"            (PassFlag (setMode (stopBeforeMode anyHsc)))
+  , flagC "C"            (PassFlag (\f -> do setMode (stopBeforeMode HCc) f
+                                             addFlag "-fvia-C" f))
+  , flagC "S"            (PassFlag (setMode (stopBeforeMode As)))
+  , flagC "-make"        (PassFlag (setMode doMakeMode))
+  , flagC "-interactive" (PassFlag (setMode doInteractiveMode))
+  , flagC "-abi-hash"    (PassFlag (setMode doAbiHashMode))
+  , flagC "e"            (SepArg   (\s -> setMode (doEvalMode s) "-e"))
   ]
 
 setMode :: Mode -> String -> EwM ModeM ()
@@ -592,7 +606,7 @@ doMake srcs  = do
 	haskellish (f,Nothing) = 
 	  looksLikeModuleName f || isHaskellSrcFilename f || '.' `notElem` f
 	haskellish (_,Just phase) = 
-	  phase `notElem` [As, Cc, CmmCpp, Cmm, StopLn]
+	  phase `notElem` [As, Cc, Cobjc, CmmCpp, Cmm, StopLn]
 
     hsc_env <- GHC.getSession
 
@@ -601,13 +615,10 @@ doMake srcs  = do
     -- This means that "ghc Foo.o Bar.o -o baz" links the program as
     -- we expect.
     if (null hs_srcs)
-       then oneShot hsc_env StopLn srcs >> GHC.printWarnings
+       then liftIO (oneShot hsc_env StopLn srcs)
        else do
 
-    o_files <- mapM (\x -> do
-                        f <- compileFile hsc_env StopLn x
-                        GHC.printWarnings
-                        return f)
+    o_files <- mapM (\x -> liftIO $ compileFile hsc_env StopLn x)
                  non_hs_srcs
     liftIO $ mapM_ (consIORef v_Ld_inputs) (reverse o_files)
 
@@ -624,7 +635,7 @@ doMake srcs  = do
 
 doShowIface :: DynFlags -> FilePath -> IO ()
 doShowIface dflags file = do
-  hsc_env <- newHscEnv defaultCallbacks dflags
+  hsc_env <- newHscEnv dflags
   showIface hsc_env file
 
 -- ---------------------------------------------------------------------------
@@ -643,7 +654,7 @@ showBanner _postLoadMode dflags = do
    when (verb >= 2) $
     do hPutStr stderr "Glasgow Haskell Compiler, Version "
        hPutStr stderr cProjectVersion
-       hPutStr stderr ", for Haskell 98, stage "
+       hPutStr stderr ", stage "
        hPutStr stderr cStage
        hPutStr stderr " booted by GHC version "
        hPutStrLn stderr cBooterVersion
@@ -653,9 +664,7 @@ showBanner _postLoadMode dflags = do
 showInfo :: DynFlags -> IO ()
 showInfo dflags = do
         let sq x = " [" ++ x ++ "\n ]"
-        putStrLn $ sq $ concat $ intersperse "\n ," $ map (show . flatten) compilerInfo
-    where flatten (k, String v)       = (k, v)
-          flatten (k, FromDynFlags f) = (k, f dflags)
+        putStrLn $ sq $ intercalate "\n ," $ map show $ compilerInfo dflags
 
 showSupportedExtensions :: IO ()
 showSupportedExtensions = mapM_ putStrLn supportedLanguagesAndExtensions
@@ -753,6 +762,9 @@ abiHash strs = do
   ifaces <- initIfaceCheck hsc_env $ mapM get_iface mods
 
   bh <- openBinMem (3*1024) -- just less than a block
+  put_ bh opt_HiVersion
+    -- package hashes change when the compiler version changes (for now)
+    -- see #5328
   mapM_ (put_ bh . mi_mod_hash) ifaces
   f <- fingerprintBinMem bh
 
@@ -763,3 +775,4 @@ abiHash strs = do
 
 unknownFlagsErr :: [String] -> a
 unknownFlagsErr fs = ghcError (UsageError ("unrecognised flags: " ++ unwords fs))
+

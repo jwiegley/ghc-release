@@ -13,6 +13,7 @@
 
 define build-package-way # $1 = dir, $2 = distdir, $3 = way, $4 = stage
 $(call trace, build-package-way($1,$2,$3))
+$(call profStart, build-package-way($1,$2,$3))
 
 $(call distdir-way-opts,$1,$2,$3,$4)
 $(call hs-suffix-rules,$1,$2,$3)
@@ -39,17 +40,23 @@ endif
 # All the .a/.so library file dependencies for this library
 $1_$2_$3_DEPS_LIBS=$$(foreach dep,$$($1_$2_DEPS),$$($$(dep)_$2_$3_LIB))
 
-ifneq "$$(BootingFromHc)" "YES"
-$1_$2_$3_MKSTUBOBJS = $$(FIND) $1/$2/build -name "*_stub.$$($3_osuf)" -print
-# HACK ^^^ we tried to use $(wildcard), but apparently it fails due to
-# make using cached directory contents, or something.
-else
-$1_$2_$3_MKSTUBOBJS = true
+ifeq "$$(BootingFromHc)" "YES"
 $1_$2_$3_C_OBJS += $$(shell $$(FIND) $1/$2/build -name "*_stub.c" -print | sed 's/c$$$$/o/')
 endif
 
 $1_$2_$3_NON_HS_OBJS = $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS)  $$($1_$2_$3_S_OBJS) $$($1_$2_EXTRA_OBJS)
 $1_$2_$3_ALL_OBJS = $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_NON_HS_OBJS)
+
+# The quadrupled $'s here are because the _v_LIB variables aren't
+# necessarily set when this part of the makefile is read.
+# These deps aren't technically necessary in themselves, but they
+# turn the dependencies of programs on libraries into transitive
+# dependencies.
+ifeq "$4" "0"
+$$($1_$2_$3_LIB) : $$(foreach dep,$$($1_$2_DEP_NAMES),$$$$(libraries/$$(dep)_dist-boot_v_LIB))
+else
+$$($1_$2_$3_LIB) : $$(foreach dep,$$($1_$2_DEP_NAMES),$$$$(libraries/$$(dep)_dist-install_v_LIB))
+endif
 
 ifeq "$3" "dyn"
 
@@ -57,19 +64,17 @@ ifeq "$3" "dyn"
 # On windows we have to supply the extra libs this one links to when building it.
 ifeq "$$(HOSTPLATFORM)" "i386-unknown-mingw32"
 $$($1_$2_$3_LIB) : $$($1_$2_$3_ALL_OBJS) $$(ALL_RTS_LIBS) $$($1_$2_$3_DEPS_LIBS)
-	"$$($1_$2_HC)" $$($1_$2_$3_ALL_OBJS) \
-         `$$($1_$2_$3_MKSTUBOBJS)` \
+	"$$($1_$2_HC)" $$($1_$2_$3_ALL_HC_OPTS) $$($1_$2_$3_ALL_OBJS) \
          -shared -dynamic -dynload deploy \
 	 $$(addprefix -l,$$($1_$2_EXTRA_LIBRARIES)) \
-         -no-auto-link-packages $$(addprefix -package ,$$($1_$2_DEPS)) \
+         -no-auto-link-packages \
          -o $$@
 else
 $$($1_$2_$3_LIB) : $$($1_$2_$3_ALL_OBJS) $$(ALL_RTS_LIBS) $$($1_$2_$3_DEPS_LIBS)
-	"$$($1_$2_HC)" $$($1_$2_$3_ALL_OBJS) \
-         `$$($1_$2_$3_MKSTUBOBJS)` \
+	"$$($1_$2_HC)" $$($1_$2_$3_ALL_HC_OPTS) $$($1_$2_$3_ALL_OBJS) \
          -shared -dynamic -dynload deploy \
 	     -dylib-install-name $(ghclibdir)/`basename "$$@" | sed 's/^libHS//;s/[-]ghc.*//'`/`basename "$$@"` \
-         -no-auto-link-packages $$(addprefix -package ,$$($1_$2_DEPS)) \
+         -no-auto-link-packages \
          -o $$@
 endif
 else
@@ -78,14 +83,14 @@ $$($1_$2_$3_LIB) : $$($1_$2_$3_ALL_OBJS)
 	"$$(RM)" $$(RM_OPTS) $$@ $$@.contents
 ifeq "$$($1_$2_SplitObjs)" "YES"
 	$$(FIND) $$(patsubst %.$$($3_osuf),%_$$($3_osuf)_split,$$($1_$2_$3_HS_OBJS)) -name '*.$$($3_osuf)' -print >> $$@.contents
-	echo $$($1_$2_$3_NON_HS_OBJS) `$$($1_$2_$3_MKSTUBOBJS)` >> $$@.contents
+	echo $$($1_$2_$3_NON_HS_OBJS) >> $$@.contents
 else
-	echo $$($1_$2_$3_ALL_OBJS) `$$($1_$2_$3_MKSTUBOBJS)` >> $$@.contents
+	echo $$($1_$2_$3_ALL_OBJS) >> $$@.contents
 endif
-ifeq "$$(ArSupportsAtFile)" "YES"
-	"$$(AR)" $$(AR_OPTS) $$(EXTRA_AR_ARGS) $$@ @$$@.contents
+ifeq "$$($1_$2_ArSupportsAtFile)" "YES"
+	"$$($1_$2_AR)" $$($1_$2_AR_OPTS) $$($1_$2_EXTRA_AR_ARGS) $$@ @$$@.contents
 else
-	"$$(XARGS)" $$(XARGS_OPTS) "$$(AR)" $$(AR_OPTS) $$(EXTRA_AR_ARGS) $$@ < $$@.contents
+	"$$(XARGS)" $$(XARGS_OPTS) "$$($1_$2_AR)" $$($1_$2_AR_OPTS) $$($1_$2_EXTRA_AR_ARGS) $$@ < $$@.contents
 endif
 	"$$(RM)" $$(RM_OPTS) $$@.contents
 endif
@@ -109,16 +114,16 @@ BINDIST_LIBS += $$($1_$2_GHCI_LIB)
 endif
 endif
 $$($1_$2_GHCI_LIB) : $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS) $$($1_$2_$3_S_OBJS) $$($1_$2_EXTRA_OBJS)
-	"$$(LD)" -r -o $$@ $$(EXTRA_LD_OPTS) $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS) $$($1_$2_$3_S_OBJS) `$$($1_$2_$3_MKSTUBOBJS)` $$($1_$2_EXTRA_OBJS)
+	"$$(LD)" -r -o $$@ $$(EXTRA_LD_OPTS) $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS) $$($1_$2_$3_S_OBJS) $$($1_$2_EXTRA_OBJS)
 
 ifeq "$$($1_$2_BUILD_GHCI_LIB)" "YES"
 # Don't bother making ghci libs for bootstrapping packages
 ifneq "$4" "0"
-# $$(info Here $1 $2 $$($1_$2_BUILD_GHCI_LIB) Q1)
 $(call all-target,$1_$2,$$($1_$2_GHCI_LIB))
 endif
 endif
 endif
 
+$(call profEnd, build-package-way($1,$2,$3))
 endef
 

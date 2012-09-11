@@ -63,8 +63,8 @@ import {-# SOURCE #-} CgBindery ( CgBindings, nukeVolatileBinds )
 
 import DynFlags
 import BlockId
-import Cmm
-import CmmUtils
+import OldCmm
+import OldCmmUtils
 import CLabel
 import StgSyn (SRT)
 import SMRep
@@ -73,9 +73,7 @@ import Id
 import VarEnv
 import OrdList
 import Unique
-import Util()
 import UniqSupply
-import FastString()
 import Outputable
 
 import Control.Monad
@@ -703,6 +701,8 @@ whenC :: Bool -> Code -> Code
 whenC True  code = code
 whenC False _    = nopC
 
+-- Corresponds to 'emit' in new code generator with a smart constructor
+-- from cmm/MkGraph.hs
 stmtC :: CmmStmt -> Code
 stmtC stmt = emitCgStmt (CgStmt stmt)
 
@@ -711,7 +711,7 @@ labelC id = emitCgStmt (CgLabel id)
 
 newLabelC :: FCode BlockId
 newLabelC = do { u <- newUnique
-               ; return $ BlockId u }
+               ; return $ mkBlockId u }
 
 checkedAbsC :: CmmStmt -> Code
 -- Emit code, eliminating no-ops
@@ -736,18 +736,19 @@ emitCgStmt stmt
 	; setState $ state { cgs_stmts = cgs_stmts state `snocOL` stmt }
 	}
 
-emitData :: Section -> [CmmStatic] -> Code
+emitData :: Section -> CmmStatics -> Code
 emitData sect lits
   = do 	{ state <- getState
 	; setState $ state { cgs_tops = cgs_tops state `snocOL` data_block } }
   where
     data_block = CmmData sect lits
 
-emitProc :: CmmInfo -> CLabel -> CmmFormals -> [CmmBasicBlock] -> Code
-emitProc info lbl args blocks
-  = do  { let proc_block = CmmProc info lbl args (ListGraph blocks)
+emitProc :: CmmInfo -> CLabel -> [CmmFormal] -> [CmmBasicBlock] -> Code
+emitProc info lbl [] blocks
+  = do  { let proc_block = CmmProc info lbl (ListGraph blocks)
 	; state <- getState
 	; setState $ state { cgs_tops = cgs_tops state `snocOL` proc_block } }
+emitProc _ _ (_:_) _ = panic "emitProc called with nonempty args"
 
 emitSimpleProc :: CLabel -> Code -> Code
 -- Emit a procedure whose body is the specified code; no info table

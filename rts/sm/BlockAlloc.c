@@ -332,9 +332,7 @@ allocGroup (nat n)
         bd = alloc_mega_group(mblocks);
         // only the bdescrs of the first MB are required to be initialised
         initGroup(bd);
-
-        IF_DEBUG(sanity, checkFreeListSanity());
-        return bd;
+        goto finish;
     }
     
     n_alloc_blocks += n;
@@ -347,8 +345,9 @@ allocGroup (nat n)
     }
 
     if (ln == MAX_FREE_LIST) {
-#if 0
-        if (((W_)mblocks_allocated * MBLOCK_SIZE_W - (W_)n_alloc_blocks * BLOCK_SIZE_W) > (1024*1024)/sizeof(W_)) {
+#if 0  /* useful for debugging fragmentation */
+        if ((W_)mblocks_allocated * BLOCKS_PER_MBLOCK * BLOCK_SIZE_W
+             - (W_)((n_alloc_blocks - n) * BLOCK_SIZE_W) > (2*1024*1024)/sizeof(W_)) {
             debugBelch("Fragmentation, wanted %d blocks:", n);
             RtsFlags.DebugFlags.block_alloc = 1;
             checkFreeListSanity();
@@ -363,8 +362,7 @@ allocGroup (nat n)
         initGroup(rem); // init the slop
         n_alloc_blocks += rem->blocks;
         freeGroup(rem);      	         // add the slop on to the free list
-        IF_DEBUG(sanity, checkFreeListSanity());
-        return bd;
+        goto finish;
     }
 
     bd = free_list[ln];
@@ -372,18 +370,22 @@ allocGroup (nat n)
     if (bd->blocks == n)	        // exactly the right size!
     {
         dbl_link_remove(bd, &free_list[ln]);
+        initGroup(bd);
     }
     else if (bd->blocks >  n)            // block too big...
     {                              
         bd = split_free_block(bd, n, ln);
+        ASSERT(bd->blocks == n);
+        initGroup(bd);
     }
     else
     {
         barf("allocGroup: free list corrupted");
     }
-    initGroup(bd);		// initialise it
+
+finish:
+    IF_DEBUG(sanity, memset(bd->start, 0xaa, bd->blocks * BLOCK_SIZE));
     IF_DEBUG(sanity, checkFreeListSanity());
-    ASSERT(bd->blocks == n);
     return bd;
 }
 
@@ -574,48 +576,6 @@ freeChain_lock(bdescr *bd)
     ACQUIRE_SM_LOCK;
     freeChain(bd);
     RELEASE_SM_LOCK;
-}
-
-// splitBlockGroup(bd,B) splits bd in two.  Afterward, bd will have B
-// blocks, and a new block descriptor pointing to the remainder is
-// returned.
-bdescr *
-splitBlockGroup (bdescr *bd, nat blocks)
-{
-    bdescr *new_bd;
-
-    if (bd->blocks <= blocks) {
-        barf("splitLargeBlock: too small");
-    }
-
-    if (bd->blocks > BLOCKS_PER_MBLOCK) {
-        nat low_mblocks, high_mblocks;
-        void *new_mblock;
-        if ((blocks - BLOCKS_PER_MBLOCK) % (MBLOCK_SIZE / BLOCK_SIZE) != 0) {
-            barf("splitLargeBlock: not a multiple of a megablock");
-        }
-        low_mblocks = 1 + (blocks - BLOCKS_PER_MBLOCK) / (MBLOCK_SIZE / BLOCK_SIZE);
-        high_mblocks = (bd->blocks - blocks) / (MBLOCK_SIZE / BLOCK_SIZE);
-
-        new_mblock = (void *) ((P_)MBLOCK_ROUND_DOWN(bd) + (W_)low_mblocks * MBLOCK_SIZE_W);
-        initMBlock(new_mblock);
-        new_bd = FIRST_BDESCR(new_mblock);
-        new_bd->blocks = MBLOCK_GROUP_BLOCKS(high_mblocks);
-
-        ASSERT(blocks + new_bd->blocks == 
-               bd->blocks + BLOCKS_PER_MBLOCK - MBLOCK_SIZE/BLOCK_SIZE);
-    }
-    else
-    {
-        // NB. we're not updating all the bdescrs in the split groups to
-        // point to the new heads, so this can only be used for large
-        // objects which do not start in the non-head block.
-        new_bd = bd + blocks;
-        new_bd->blocks = bd->blocks - blocks;
-    }
-    bd->blocks = blocks;
-
-    return new_bd;
 }
 
 static void

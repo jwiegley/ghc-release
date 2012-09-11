@@ -1,3 +1,6 @@
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Control.Monad.Fix

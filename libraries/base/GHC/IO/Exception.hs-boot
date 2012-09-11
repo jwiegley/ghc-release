@@ -1,4 +1,5 @@
-{-# OPTIONS -fno-implicit-prelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 module GHC.IO.Exception where
 
 import GHC.Base

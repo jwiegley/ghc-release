@@ -15,10 +15,15 @@
 #ifdef TRACING
 
 #include "GetTime.h"
+#include "GetEnv.h"
 #include "Stats.h"
 #include "eventlog/EventLog.h"
 #include "Threads.h"
 #include "Printer.h"
+
+#ifdef HAVE_UNISTD_H
+#include <unistd.h>
+#endif
 
 #ifdef DEBUG
 // debugging flags, set with +RTS -D<something>
@@ -137,14 +142,26 @@ static char *thread_stop_reasons[] = {
     [ThreadYielding] = "yielding",
     [ThreadBlocked] = "blocked",
     [ThreadFinished] = "finished",
-    [THREAD_SUSPENDED_FOREIGN_CALL] = "suspended while making a foreign call"
+    [THREAD_SUSPENDED_FOREIGN_CALL] = "suspended while making a foreign call",
+    [6 + BlockedOnMVar]         = "blocked on an MVar",
+    [6 + BlockedOnBlackHole]    = "blocked on a black hole",
+    [6 + BlockedOnRead]         = "blocked on a read operation",
+    [6 + BlockedOnWrite]        = "blocked on a write operation",
+    [6 + BlockedOnDelay]        = "blocked on a delay operation",
+    [6 + BlockedOnSTM]          = "blocked on STM",
+    [6 + BlockedOnDoProc]       = "blocked on asyncDoProc",
+    [6 + BlockedOnCCall]        = "blocked on a foreign call",
+    [6 + BlockedOnCCall_Interruptible] = "blocked on a foreign call (interruptible)",
+    [6 + BlockedOnMsgThrowTo]   =  "blocked on throwTo",
+    [6 + ThreadMigrating]       =  "migrating"
 };
 #endif
 
 #ifdef DEBUG
 static void traceSchedEvent_stderr (Capability *cap, EventTypeNum tag, 
                                     StgTSO *tso, 
-                                    StgWord64 other STG_UNUSED)
+                                    StgWord info1 STG_UNUSED,
+                                    StgWord info2 STG_UNUSED)
 {
     ACQUIRE_LOCK(&trace_utx);
 
@@ -168,24 +185,29 @@ static void traceSchedEvent_stderr (Capability *cap, EventTypeNum tag,
         break;
     case EVENT_CREATE_SPARK_THREAD: // (cap, spark_thread)
         debugBelch("cap %d: creating spark thread %lu\n", 
-                   cap->no, (long)other);
+                   cap->no, (long)info1);
         break;
     case EVENT_MIGRATE_THREAD:  // (cap, thread, new_cap)
         debugBelch("cap %d: thread %lu migrating to cap %d\n", 
-                   cap->no, (lnat)tso->id, (int)other);
+                   cap->no, (lnat)tso->id, (int)info1);
         break;
     case EVENT_STEAL_SPARK:     // (cap, thread, victim_cap)
         debugBelch("cap %d: thread %lu stealing a spark from cap %d\n", 
-                   cap->no, (lnat)tso->id, (int)other);
+                   cap->no, (lnat)tso->id, (int)info1);
         break;
-    case EVENT_THREAD_WAKEUP:   // (cap, thread, other_cap)
+    case EVENT_THREAD_WAKEUP:   // (cap, thread, info1_cap)
         debugBelch("cap %d: waking up thread %lu on cap %d\n", 
-                   cap->no, (lnat)tso->id, (int)other);
+                   cap->no, (lnat)tso->id, (int)info1);
         break;
         
     case EVENT_STOP_THREAD:     // (cap, thread, status)
-        debugBelch("cap %d: thread %lu stopped (%s)\n", 
-                   cap->no, (lnat)tso->id, thread_stop_reasons[other]);
+        if (info1 == 6 + BlockedOnBlackHole) {
+            debugBelch("cap %d: thread %lu stopped (blocked on black hole owned by thread %lu)\n",
+                       cap->no, (lnat)tso->id, (long)info2);
+        } else {
+            debugBelch("cap %d: thread %lu stopped (%s)\n",
+                       cap->no, (lnat)tso->id, thread_stop_reasons[info1]);
+        }
         break;
     case EVENT_SHUTDOWN:        // (cap)
         debugBelch("cap %d: shutting down\n", cap->no);
@@ -222,15 +244,94 @@ static void traceSchedEvent_stderr (Capability *cap, EventTypeNum tag,
 #endif
 
 void traceSchedEvent_ (Capability *cap, EventTypeNum tag, 
-                      StgTSO *tso, StgWord64 other)
+                       StgTSO *tso, StgWord info1, StgWord info2)
 {
 #ifdef DEBUG
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
-        traceSchedEvent_stderr(cap, tag, tso, other);
+        traceSchedEvent_stderr(cap, tag, tso, info1, info2);
     } else
 #endif
     {
-        postSchedEvent(cap,tag,tso ? tso->id : 0,other);
+        postSchedEvent(cap,tag,tso ? tso->id : 0, info1, info2);
+    }
+}
+
+void traceCapsetModify_ (EventTypeNum tag,
+                         CapsetID capset,
+                         StgWord32 other)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        ACQUIRE_LOCK(&trace_utx);
+
+        tracePreface();
+        switch (tag) {
+        case EVENT_CAPSET_CREATE:   // (capset, capset_type)
+            debugBelch("created capset %lu of type %d\n", (lnat)capset, (int)other);
+            break;
+        case EVENT_CAPSET_DELETE:   // (capset)
+            debugBelch("deleted capset %lu\n", (lnat)capset);
+            break;
+        case EVENT_CAPSET_ASSIGN_CAP:  // (capset, capno)
+            debugBelch("assigned cap %lu to capset %lu\n",
+                       (lnat)other, (lnat)capset);
+            break;
+        case EVENT_CAPSET_REMOVE_CAP:  // (capset, capno)
+            debugBelch("removed cap %lu from capset %lu\n",
+                       (lnat)other, (lnat)capset);
+            break;
+        }
+        RELEASE_LOCK(&trace_utx);
+    } else
+#endif
+    {
+        if (eventlog_enabled) {
+            postCapsetModifyEvent(tag, capset, other);
+        }
+    }
+}
+
+void traceOSProcessInfo_(void) {
+    if (eventlog_enabled) {
+        postCapsetModifyEvent(EVENT_OSPROCESS_PID,
+                              CAPSET_OSPROCESS_DEFAULT,
+                              getpid());
+
+#if !defined(cygwin32_HOST_OS) && !defined (mingw32_HOST_OS)
+/* Windows has no strong concept of process heirarchy, so no getppid().
+ * In any case, this trace event is mainly useful for tracing programs
+ * that use 'forkProcess' which Windows doesn't support anyway.
+ */
+        postCapsetModifyEvent(EVENT_OSPROCESS_PPID,
+                              CAPSET_OSPROCESS_DEFAULT,
+                              getppid());
+#endif
+        {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "GHC-%s %s", ProjectVersion, RtsWay);
+            postCapsetStrEvent(EVENT_RTS_IDENTIFIER,
+                               CAPSET_OSPROCESS_DEFAULT,
+                               buf);
+        }
+        {
+            int argc = 0; char **argv;
+            getFullProgArgv(&argc, &argv);
+            if (argc != 0) {
+                postCapsetVecEvent(EVENT_PROGRAM_ARGS,
+                                   CAPSET_OSPROCESS_DEFAULT,
+                                   argc, argv);
+            }
+        }
+        {
+            int envc = 0; char **envv;
+            getProgEnvv(&envc, &envv);
+            if (envc != 0) {
+                postCapsetVecEvent(EVENT_PROGRAM_ENV,
+                                   CAPSET_OSPROCESS_DEFAULT,
+                                   envc, envv);
+            }
+            freeProgEnvv(envc, envv);
+        }
     }
 }
 
@@ -238,7 +339,7 @@ void traceEvent_ (Capability *cap, EventTypeNum tag)
 {
 #ifdef DEBUG
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
-        traceSchedEvent_stderr(cap, tag, 0, 0);
+        traceSchedEvent_stderr(cap, tag, 0, 0, 0);
     } else
 #endif
     {
@@ -342,6 +443,12 @@ void traceThreadStatus_ (StgTSO *tso USED_IF_DEBUG)
     }
 }
 
+void traceEventStartup_(int nocaps)
+{
+    if (eventlog_enabled) {
+        postEventStartup(nocaps);
+    }
+}
 
 #ifdef DEBUG
 void traceBegin (const char *str, ...)

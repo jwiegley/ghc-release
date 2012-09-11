@@ -1,5 +1,6 @@
 \begin{code}
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, MagicHash, UnboxedTuples #-}
 {-# OPTIONS_HADDOCK hide #-}
 -----------------------------------------------------------------------------
 -- |
@@ -43,7 +44,7 @@ default ()              -- Double isn't available yet,
 
 \begin{code}
 -- | Rational numbers, with numerator and denominator of some 'Integral' type.
-data  (Integral a)      => Ratio a = !a :% !a  deriving (Eq)
+data  Ratio a = !a :% !a  deriving (Eq)
 
 -- | Arbitrary-precision rational numbers, represented as a ratio of
 -- two 'Integer' values.  A rational number may be constructed using
@@ -245,32 +246,42 @@ instance  Integral Int  where
 
     a `quot` b
      | b == 0                     = divZeroError
-     | a == minBound && b == (-1) = overflowError
+     | b == (-1) && a == minBound = overflowError -- Note [Order of tests]
+                                                  -- in GHC.Int
      | otherwise                  =  a `quotInt` b
 
     a `rem` b
      | b == 0                     = divZeroError
-     | a == minBound && b == (-1) = overflowError
+       -- The quotRem CPU instruction fails for minBound `quotRem` -1,
+       -- but minBound `rem` -1 is well-defined (0). We therefore
+       -- special-case it.
+     | b == (-1)                  = 0
      | otherwise                  =  a `remInt` b
 
     a `div` b
      | b == 0                     = divZeroError
-     | a == minBound && b == (-1) = overflowError
+     | b == (-1) && a == minBound = overflowError -- Note [Order of tests]
+                                                  -- in GHC.Int
      | otherwise                  =  a `divInt` b
 
     a `mod` b
      | b == 0                     = divZeroError
-     | a == minBound && b == (-1) = overflowError
+       -- The divMod CPU instruction fails for minBound `divMod` -1,
+       -- but minBound `mod` -1 is well-defined (0). We therefore
+       -- special-case it.
+     | b == (-1)                  = 0
      | otherwise                  =  a `modInt` b
 
     a `quotRem` b
      | b == 0                     = divZeroError
-     | a == minBound && b == (-1) = overflowError
+       -- Note [Order of tests] in GHC.Int
+     | b == (-1) && a == minBound = (overflowError, 0)
      | otherwise                  =  a `quotRemInt` b
 
     a `divMod` b
      | b == 0                     = divZeroError
-     | a == minBound && b == (-1) = overflowError
+       -- Note [Order of tests] in GHC.Int
+     | b == (-1) && a == minBound = (overflowError, 0)
      | otherwise                  =  a `divModInt` b
 \end{code}
 
@@ -514,11 +525,16 @@ x ^^ n          =  if n >= 0 then x^n else recip (x^(negate n))
                   in if even e then (nn :% dd) else (negate nn :% dd)
 
 -------------------------------------------------------
--- | @'gcd' x y@ is the greatest (positive) integer that divides both @x@
--- and @y@; for example @'gcd' (-3) 6@ = @3@, @'gcd' (-3) (-6)@ = @3@,
--- @'gcd' 0 4@ = @4@.  @'gcd' 0 0@ raises a runtime error.
+-- | @'gcd' x y@ is the non-negative factor of both @x@ and @y@ of which
+-- every common factor of @x@ and @y@ is also a factor; for example
+-- @'gcd' 4 2 = 2@, @'gcd' (-4) 6 = 2@, @'gcd' 0 4@ = @4@. @'gcd' 0 0@ = @0@.
+-- (That is, the common divisor that is \"greatest\" in the divisibility
+-- preordering.)
+--
+-- Note: Since for signed fixed-width integer types, @'abs' 'minBound' < 0@,
+-- the result may be negative if one of the arguments is @'minBound'@ (and
+-- necessarily is if the other is @0@ or @'minBound'@) for such types.
 gcd             :: (Integral a) => a -> a -> a
-gcd 0 0         =  error "Prelude.gcd: gcd 0 0 is undefined"
 gcd x y         =  gcd' (abs x) (abs y)
                    where gcd' a 0  =  a
                          gcd' a b  =  gcd' b (a `rem` b)
@@ -533,16 +549,11 @@ lcm x y         =  abs ((x `quot` (gcd x y)) * y)
 #ifdef OPTIMISE_INTEGER_GCD_LCM
 {-# RULES
 "gcd/Int->Int->Int"             gcd = gcdInt
-"gcd/Integer->Integer->Integer" gcd = gcdInteger'
+"gcd/Integer->Integer->Integer" gcd = gcdInteger
 "lcm/Integer->Integer->Integer" lcm = lcmInteger
  #-}
 
-gcdInteger' :: Integer -> Integer -> Integer
-gcdInteger' 0 0 = error "GHC.Real.gcdInteger': gcd 0 0 is undefined"
-gcdInteger' a b = gcdInteger a b
-
 gcdInt :: Int -> Int -> Int
-gcdInt 0 0 = error "GHC.Real.gcdInt: gcd 0 0 is undefined"
 gcdInt a b = fromIntegral (gcdInteger (fromIntegral a) (fromIntegral b))
 #endif
 

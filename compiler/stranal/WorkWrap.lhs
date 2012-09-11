@@ -100,6 +100,7 @@ matching by looking for strict arguments of the correct type.
 wwExpr :: CoreExpr -> UniqSM CoreExpr
 
 wwExpr e@(Type {}) = return e
+wwExpr e@(Coercion {}) = return e
 wwExpr e@(Lit  {}) = return e
 wwExpr e@(Var  {}) = return e
 
@@ -173,8 +174,8 @@ an INLINABLE pragma could make a program a bit less efficient,
 because you lose the worker/wrapper stuff.  But I don't see a way 
 to avoid that.
 
-Note [Don't w/w inline small non-loop-breker things]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Don't w/w inline small non-loop-breaker things]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In general, we refrain from w/w-ing *small* functions, which are not
 loop breakers, because they'll inline anyway.  But we must take care:
 it may look small now, but get to be big later after other inlining
@@ -182,10 +183,22 @@ has happened.  So we take the precaution of adding an INLINE pragma to
 any such functions.
 
 I made this change when I observed a big function at the end of
-compilation with a useful strictness signature but no w-w.  When 
-I measured it on nofib, it didn't make much difference; just a few
-percent improved allocation on one benchmark (bspt/Euclid.space).  
-But nothing got worse.
+compilation with a useful strictness signature but no w-w.  (It was
+small during demand analysis, we refrained from w/w, and then got big
+when something was inlined in its rhs.) When I measured it on nofib,
+it didn't make much difference; just a few percent improved allocation
+on one benchmark (bspt/Euclid.space).  But nothing got worse.
+
+There is an infelicity though.  We may get something like
+      f = g val
+==>
+      g x = case gw x of r -> I# r
+
+      f {- InlineStable, Template = g val -}
+      f = case gw x of r -> I# r
+
+The code for f duplicates that for g, without any real benefit. It
+won't really be executed, because calls to f will go via the inlining.
 
 Note [Wrapper activation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -413,6 +426,11 @@ then the splitting will go deeper too.
 --	    in case x of 
 --		 I# y -> let x = I# y in x }
 -- See comments above. Is it not beautifully short?
+-- Moreover, it works just as well when there are
+-- several binders, and if the binders are lifted
+-- E.g.     x = e
+--     -->  x = let x = e in
+--              case x of (a,b) -> let x = (a,b)  in x
 
 splitThunk :: Var -> Expr Var -> UniqSM [(Var, Expr Var)]
 splitThunk fn_id rhs = do

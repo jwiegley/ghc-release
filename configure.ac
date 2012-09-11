@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.0.4], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.2.1], [glasgow-haskell-bugs@haskell.org], [ghc])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=YES}
@@ -130,22 +130,22 @@ if test "$WithGhc" != ""; then
   AC_SUBST(GhcPatchLevel)dnl
   GhcMinVersion2=`echo "$GhcMinVersion" | sed 's/^\\(.\\)$/0\\1/'`
   GhcCanonVersion="$GhcMajVersion$GhcMinVersion2"
-  FP_COMPARE_VERSIONS($GhcVersion,[-ge],[6.10.2],
-                      [ghc_ge_6102=YES], [ghc_ge_6102=NO])
-  if test $GhcCanonVersion -ge 611; then ghc_ge_611=YES; else ghc_ge_611=NO; fi
   if test $GhcCanonVersion -ge 613; then ghc_ge_613=YES; else ghc_ge_613=NO; fi
-  AC_SUBST(ghc_ge_6102)dnl
-  AC_SUBST(ghc_ge_611)dnl
   AC_SUBST(ghc_ge_613)dnl
+
+  BOOTSTRAPPING_GHC_INFO_FIELD([CC_STAGE0],[C compiler command],['$(CC)'])
+  BOOTSTRAPPING_GHC_INFO_FIELD([AR_STAGE0],[ar command],['$(AR)'])
+  BOOTSTRAPPING_GHC_INFO_FIELD([AR_OPTS_STAGE0],[ar flags],['$(AR_OPTS)'])
+  BOOTSTRAPPING_GHC_INFO_FIELD([ArSupportsAtFile_STAGE0],[ar supports at file],['$(ArSupportsAtFile)'])
 fi
 
 dnl ** Must have GHC to build GHC, unless --enable-hc-boot is on
-if test "$BootingFromHc" = "NO" -a -d "$srcdir/compiler"; then
+if test "$BootingFromHc" = "NO"; then
   if test "$WithGhc" = ""; then
      AC_MSG_ERROR([GHC is required unless bootstrapping from .hc files.])
   fi
-  FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[6.10],
-    [AC_MSG_ERROR([GHC version 6.10 or later is required to compile GHC.])])dnl
+  FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[6.12],
+    [AC_MSG_ERROR([GHC version 6.12 or later is required to compile GHC.])])dnl
 
   if test `expr $GhcMinVersion % 2` = "1"; then
      if test "$EnableBootstrapWithDevelSnaphost" = "NO"; then
@@ -207,26 +207,6 @@ AC_CANONICAL_TARGET
 
 FPTOOLS_SET_PLATFORM_VARS
 
-exeext=''
-soext='.so'
-case $host in
-*-unknown-cygwin32)
-    AC_MSG_WARN([GHC does not support the Cygwin target at the moment])
-    AC_MSG_WARN([I'm assuming you wanted to build for i386-unknown-mingw32])
-    exit 1
-    ;;
-*-unknown-mingw32)
-    exeext='.exe'
-    soext='.dll'
-    ;;
-i386-apple-darwin|powerpc-apple-darwin)
-    soext='.dylib'
-    ;;
-x86_64-apple-darwin)
-    soext='.dylib'
-    ;;
-esac
-
 # Testing if we shall enable shared libs support on Solaris.
 # Anything older than SunOS 5.11 aka Solaris 11 (Express) is broken.
 
@@ -237,7 +217,7 @@ case $host in
      # here we go with the test
      MINOR=`uname -r|cut -d '.' -f 2-`
      if test "$MINOR" -lt "11"; then
-        SOLARIS_BROKEN_SHLD=YES
+     	SOLARIS_BROKEN_SHLD=YES
      fi
      ;;
 esac
@@ -307,13 +287,20 @@ checkOS "$TargetOS"
 
 # Verify that the installed (bootstrap) GHC is capable of generating
 # code for the requested build platform.
-if test "$build" != "$bootstrap_target"
+if test "$BootingFromHc" = "NO"
 then
-    echo "This GHC (${WithGhc}) does not generate code for the build platform"
-    echo "   GHC target platform    : $bootstrap_target"
-    echo "   Desired build platform : $BuildPlatform"
-    exit 1
+    if test "$BuildPlatform" != "$bootstrap_target"
+    then
+        echo "This GHC (${WithGhc}) does not generate code for the build platform"
+        echo "   GHC target platform    : $bootstrap_target"
+        echo "   Desired build platform : $BuildPlatform"
+        exit 1
+    fi
 fi
+
+echo "GHC build  : $BuildPlatform"
+echo "GHC host   : $HostPlatform"
+echo "GHC target : $TargetPlatform"
 
 AC_SUBST(BuildPlatform)
 AC_SUBST(HostPlatform)
@@ -348,9 +335,6 @@ AC_ARG_WITH(hc,
 )
 AC_SUBST(WithHc)
 
-AC_PATH_PROGS(NHC,nhc nhc98)
-AC_PATH_PROG(HBC,hbc)
-
 # This uses GHC, so put it after the "GHC is required" check above:
 FP_INTREE_GHC_PWD
 FP_FIND_ROOT
@@ -370,6 +354,7 @@ then
          test inplace/mingw -ot ghc-tarballs/mingw/binutils*.tar.lzma  ||
          test inplace/mingw -ot ghc-tarballs/mingw/gcc-core*.tar.lzma  ||
          test inplace/mingw -ot ghc-tarballs/mingw/gcc-c++*.tar.lzma   ||
+         test inplace/mingw -ot ghc-tarballs/mingw/libgcc*.tar.gz      ||
          test inplace/mingw -ot ghc-tarballs/mingw/libgmp*.tar.gz      ||
          test inplace/mingw -ot ghc-tarballs/mingw/libmpc*.tar.gz      ||
          test inplace/mingw -ot ghc-tarballs/mingw/libmpfr*.tar.gz     ||
@@ -386,6 +371,7 @@ then
             tar --lzma -xf ../../ghc-tarballs/mingw/binutils*.tar.lzma  &&
             tar --lzma -xf ../../ghc-tarballs/mingw/gcc-core*.tar.lzma  &&
             tar --lzma -xf ../../ghc-tarballs/mingw/gcc-c++*.tar.lzma   &&
+            tar --lzma -xf ../../ghc-tarballs/mingw/libgcc*.tar.lzma    &&
             tar --lzma -xf ../../ghc-tarballs/mingw/libgmp*.tar.lzma    &&
             tar --lzma -xf ../../ghc-tarballs/mingw/libmpc*.tar.lzma    &&
             tar --lzma -xf ../../ghc-tarballs/mingw/libmpfr*.tar.lzma   &&
@@ -417,12 +403,30 @@ then
     fi
 fi
 
+XCODE_VERSION()
+
+SplitObjsBroken=NO
+if test "$TargetOS_CPP" = "darwin"
+then
+    # Split objects is broken (#4013) with XCode < 3.2
+    if test "$XCodeVersion1" -lt 3
+    then
+        SplitObjsBroken=YES
+    else
+        if test "$XCodeVersion1" -eq 3
+        then
+            if test "$XCodeVersion2" -lt 2
+            then
+                SplitObjsBroken=YES
+            fi
+        fi
+    fi
+fi
+AC_SUBST([SplitObjsBroken])
+
 dnl ** Which gcc to use?
 dnl --------------------------------------------------------------
-FP_ARG_WITH_PATH_GNU_PROG([CC], [gcc])
-export CC
-WhatGccIsCalled="$CC"
-AC_SUBST(WhatGccIsCalled)
+FIND_GCC()
 
 dnl ** Which ld to use?
 dnl --------------------------------------------------------------
@@ -435,41 +439,6 @@ dnl --------------------------------------------------------------
 FP_ARG_WITH_PATH_GNU_PROG([NM], [nm])
 NmCmd="$NM"
 AC_SUBST([NmCmd])
-
-SplitObjsBroken=NO
-if test "$TargetOS_CPP" = "darwin"
-then
-    AC_MSG_CHECKING(XCode version)
-    XCodeVersion=`xcodebuild -version | grep Xcode | sed "s/Xcode //"`
-    # Old XCode versions don't actually give the XCode version
-    if test "$XCodeVersion" = ""
-    then
-        AC_MSG_RESULT(not found (too old?))
-        SplitObjsBroken=YES
-    else
-        AC_MSG_RESULT($XCodeVersion)
-        XCodeVersion1=`echo "$XCodeVersion" | sed 's/\..*//'`
-changequote(, )dnl
-        XCodeVersion2=`echo "$XCodeVersion" | sed 's/[^.]*\.\([^.]*\).*/\1/'`
-changequote([, ])dnl
-        AC_MSG_NOTICE(XCode version component 1: $XCodeVersion1)
-        AC_MSG_NOTICE(XCode version component 2: $XCodeVersion2)
-        # Split objects is broken (#4013) with XCode < 3.2
-        if test "$XCodeVersion1" -lt 3
-        then
-            SplitObjsBroken=YES
-        else
-            if test "$XCodeVersion1" -eq 3
-            then
-                if test "$XCodeVersion2" -lt 2
-                then
-                    SplitObjsBroken=YES
-                fi
-            fi
-        fi
-    fi
-fi
-AC_SUBST([SplitObjsBroken])
 
 dnl ** Mac OS X: explicit deployment target
 dnl --------------------------------------------------------------
@@ -538,7 +507,7 @@ dnl ** look for GCC and find out which version
 dnl     Figure out which C compiler to use.  Gcc is preferred.
 dnl     If gcc, make sure it's at least 2.1
 dnl
-FP_HAVE_GCC
+FP_GCC_VERSION
 
 FPTOOLS_SET_C_LD_FLAGS([target],[CFLAGS],[LDFLAGS],[IGNORE_LINKER_LD_FLAGS],[CPPFLAGS])
 FPTOOLS_SET_C_LD_FLAGS([build],[CONF_CC_OPTS_STAGE0],[CONF_GCC_LINKER_OPTS_STAGE0],[CONF_LD_LINKER_OPTS_STAGE0],[CONF_CPP_OPTS_STAGE0])
@@ -564,6 +533,8 @@ AC_SUBST(CONF_CPP_OPTS_STAGE0)
 AC_SUBST(CONF_CPP_OPTS_STAGE1)
 AC_SUBST(CONF_CPP_OPTS_STAGE2)
 
+FP_SETTINGS
+
 dnl ** figure out how to do context diffs
 FP_PROG_CONTEXT_DIFF
 
@@ -579,7 +550,6 @@ AC_DEFINE([HAVE_BIN_SH], [1], [Define to 1 if you have /bin/sh.])
 dnl ** how to invoke `ar' and `ranlib'
 FP_PROG_AR_SUPPORTS_ATFILE
 FP_PROG_AR_NEEDS_RANLIB
-FP_PROG_AR_SUPPORTS_INPUT
 
 dnl ** Check to see whether ln -s works
 AC_PROG_LN_S
@@ -624,8 +594,6 @@ dnl ** check for DocBook toolchain
 FP_CHECK_DOCBOOK_DTD
 FP_DOCBOOK_XSL
 FP_PROG_DBLATEX
-
-FP_PROG_HSTAGS
 
 dnl ** check for ghc-pkg command
 FP_PROG_GHC_PKG
@@ -779,7 +747,7 @@ fi
 dnl ** check whether this machine has BFD and liberty installed (used for debugging)
 dnl    the order of these tests matters: bfd needs liberty
 AC_CHECK_LIB(iberty, xmalloc)
-AC_CHECK_LIB(bfd,    bfd_init)
+AC_CHECK_LIB(bfd,    bfd_uncompress_section_contents)
 
 dnl ################################################################
 dnl Check for libraries
@@ -817,6 +785,7 @@ FP_LEADING_UNDERSCORE
 dnl ** check for ld, whether it has an -x option, and if it is GNU ld
 FP_PROG_LD_X
 FP_PROG_LD_IS_GNU
+FP_PROG_LD_BUILD_ID
 
 dnl ** check for Apple-style dead-stripping support
 dnl    (.subsections-via-symbols assembler directive)
@@ -848,6 +817,8 @@ AC_COMPILE_IFELSE(
     ],
     [AC_MSG_RESULT(no)])
 CFLAGS="$CFLAGS2"
+
+FP_VISIBILITY_HIDDEN
 
 dnl ** check for librt
 AC_CHECK_LIB(rt, clock_gettime)
@@ -920,7 +891,7 @@ AC_SUBST(BUILD_DOCBOOK_PS)
 AC_SUBST(BUILD_DOCBOOK_PDF)
 
 LIBRARY_VERSION(base)
-LIBRARY_VERSION(Cabal)
+LIBRARY_VERSION(Cabal, Cabal/cabal)
 LIBRARY_VERSION(ghc-prim)
 LIBRARY_ghc_VERSION="$ProjectVersion"
 AC_SUBST(LIBRARY_ghc_VERSION)
@@ -929,7 +900,7 @@ if grep '	' compiler/ghc.cabal.in 2>&1 >/dev/null; then
    AC_MSG_ERROR([compiler/ghc.cabal.in contains tab characters; please remove them])
 fi
 
-AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal ghc.spec extra-gcc-opts docs/users_guide/ug-book.xml docs/users_guide/ug-ent.xml docs/index.html libraries/prologue.txt distrib/ghc.iss distrib/configure.ac])
+AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal ghc.spec settings docs/users_guide/ug-book.xml docs/users_guide/ug-ent.xml docs/index.html libraries/prologue.txt distrib/ghc.iss distrib/configure.ac])
 AC_CONFIG_COMMANDS([mk/stamp-h],[echo timestamp > mk/stamp-h])
 AC_OUTPUT
 

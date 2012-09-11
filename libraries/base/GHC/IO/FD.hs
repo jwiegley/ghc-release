@@ -1,12 +1,19 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude -XBangPatterns #-}
+{-# LANGUAGE CPP
+           , NoImplicitPrelude
+           , BangPatterns
+           , ForeignFunctionInterface
+           , DeriveDataTypeable
+  #-}
+{-# OPTIONS_GHC -fno-warn-identities #-}
 -- Whether there are identities depends on the platform
 {-# OPTIONS_HADDOCK hide #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.IO.FD
 -- Copyright   :  (c) The University of Glasgow, 1994-2008
 -- License     :  see libraries/base/LICENSE
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  internal
 -- Portability :  non-portable
@@ -16,12 +23,12 @@
 -----------------------------------------------------------------------------
 
 module GHC.IO.FD (
-  FD(..),
-  openFile, mkFD, release,
-  setNonBlockingMode,
-  readRawBufferPtr, readRawBufferPtrNoBlock, writeRawBufferPtr,
-  stdin, stdout, stderr
-  ) where
+        FD(..),
+        openFile, mkFD, release,
+        setNonBlockingMode,
+        readRawBufferPtr, readRawBufferPtrNoBlock, writeRawBufferPtr,
+        stdin, stdout, stderr
+    ) where
 
 import GHC.Base
 import GHC.Num
@@ -40,13 +47,15 @@ import qualified GHC.IO.Device
 import GHC.IO.Device (SeekMode(..), IODeviceType(..))
 import GHC.Conc.IO
 import GHC.IO.Exception
+#ifdef mingw32_HOST_OS
+import GHC.Windows
+#endif
 
 import Foreign
 import Foreign.C
 import qualified System.Posix.Internals
 import System.Posix.Internals hiding (FD, setEcho, getEcho)
 import System.Posix.Types
--- import GHC.Ptr
 
 c_DEBUG_DUMP :: Bool
 c_DEBUG_DUMP = False
@@ -132,10 +141,14 @@ writeBuf' fd buf = do
 -- opening files
 
 -- | Open a file and make an 'FD' for it.  Truncates the file to zero
--- size when the `IOMode` is `WriteMode`.  Puts the file descriptor
--- into non-blocking mode on Unix systems.
-openFile :: FilePath -> IOMode -> IO (FD,IODeviceType)
-openFile filepath iomode =
+-- size when the `IOMode` is `WriteMode`.
+openFile
+  :: FilePath -- ^ file to open
+  -> IOMode   -- ^ mode in which to open the file
+  -> Bool     -- ^ open the file in non-blocking mode?
+  -> IO (FD,IODeviceType)
+
+openFile filepath iomode non_blocking =
   withFilePath filepath $ \ f ->
 
     let 
@@ -155,7 +168,10 @@ openFile filepath iomode =
       binary_flags = 0
 #endif      
 
-      oflags = oflags1 .|. binary_flags
+      oflags2 = oflags1 .|. binary_flags
+
+      oflags | non_blocking = oflags2 .|. nonblock_flags
+             | otherwise    = oflags2
     in do
 
     -- the old implementation had a complicated series of three opens,
@@ -164,11 +180,12 @@ openFile filepath iomode =
     -- always returns EISDIR if the file is a directory and was opened
     -- for writing, so I think we're ok with a single open() here...
     fd <- throwErrnoIfMinus1Retry "openFile"
-                (c_open f oflags 0o666)
+                (if non_blocking then c_open      f oflags 0o666
+                                 else c_safe_open f oflags 0o666)
 
     (fD,fd_type) <- mkFD fd iomode Nothing{-no stat-}
                             False{-not a socket-} 
-                            True{-is non-blocking-}
+                            non_blocking
             `catchAny` \e -> do _ <- c_close fd
                                 throwIO e
 
@@ -184,13 +201,14 @@ openFile filepath iomode =
     return (fD,fd_type)
 
 std_flags, output_flags, read_flags, write_flags, rw_flags,
-    append_flags :: CInt
-std_flags    = o_NONBLOCK   .|. o_NOCTTY
+    append_flags, nonblock_flags :: CInt
+std_flags    = o_NOCTTY
 output_flags = std_flags    .|. o_CREAT
 read_flags   = std_flags    .|. o_RDONLY 
 write_flags  = output_flags .|. o_WRONLY
 rw_flags     = output_flags .|. o_RDWR
 append_flags = write_flags  .|. o_APPEND
+nonblock_flags = o_NONBLOCK
 
 
 -- | Make a 'FD' from an existing file descriptor.  Fails if the FD
@@ -603,9 +621,6 @@ blockingWriteRawBufferPtr loc fd buf off len
       -- for this case.  We need to detect EPIPE correctly, because it
       -- shouldn't be reported as an error when it happens on stdout.
 
-foreign import ccall unsafe "maperrno"             -- in Win32Utils.c
-   c_maperrno :: IO ()
-
 -- NOTE: "safe" versions of the read/write calls for use by the threaded RTS.
 -- These calls may block, but that's ok.
 
@@ -648,8 +663,3 @@ foreign import ccall unsafe "lockFile"
 foreign import ccall unsafe "unlockFile"
   unlockFile :: CInt -> IO CInt
 #endif
-
-puts :: String -> IO ()
-puts s = do _ <- withCStringLen s $ \(p,len) ->
-                     c_write 1 (castPtr p) (fromIntegral len)
-            return ()

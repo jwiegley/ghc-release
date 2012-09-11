@@ -25,8 +25,8 @@ import CgUtils
 import Type
 import TysPrim
 import CLabel
-import Cmm
-import CmmUtils
+import OldCmm
+import OldCmmUtils
 import SMRep
 import ForeignCall
 import ClosureInfo
@@ -43,7 +43,7 @@ import Control.Monad
 -- Code generation for Foreign Calls
 
 cgForeignCall
-	:: HintedCmmFormals	-- where to put the results
+	:: [HintedCmmFormal]	-- where to put the results
 	-> ForeignCall		-- the op
 	-> [StgArg]		-- arguments
 	-> StgLiveVars	-- live vars, in case we need to save them
@@ -64,7 +64,7 @@ cgForeignCall results fcall stg_args live
 
 
 emitForeignCall
-	:: HintedCmmFormals	-- where to put the results
+	:: [HintedCmmFormal]	-- where to put the results
 	-> ForeignCall		-- the op
 	-> [CmmHinted CmmExpr] -- arguments
 	-> StgLiveVars	-- live vars, in case we need to save them
@@ -109,9 +109,12 @@ emitForeignCall results (CCall (CCallSpec target cconv safety)) args live
 
 
 -- alternative entry point, used by CmmParse
+-- the new code generator has utility function emitCCall and emitPrimCall
+-- which should be used instead of this (the equivalent emitForeignCall
+-- is not presently exported.)
 emitForeignCall'
 	:: Safety
-	-> HintedCmmFormals	-- where to put the results
+	-> [HintedCmmFormal]	-- where to put the results
 	-> CmmCallTarget	-- the op
 	-> [CmmHinted CmmExpr] -- arguments
 	-> Maybe [GlobalReg]	-- live vars, in case we need to save them
@@ -144,7 +147,8 @@ emitForeignCall' safety results target args vols _srt ret
     -- to this sequence of three CmmUnsafe calls.
     stmtC (CmmCall (CmmCallee suspendThread CCallConv) 
 			[ CmmHinted id AddrHint ]
-			[ CmmHinted (CmmReg (CmmGlobal BaseReg)) AddrHint ] 
+			[ CmmHinted (CmmReg (CmmGlobal BaseReg)) AddrHint
+			, CmmHinted (CmmLit (CmmInt (fromIntegral (fromEnum (playInterruptible safety))) wordWidth)) NoHint]
 			CmmUnsafe ret)
     stmtC (CmmCall temp_target results temp_args CmmUnsafe ret)
     stmtC (CmmCall (CmmCallee resumeThread CCallConv) 
@@ -201,8 +205,9 @@ maybe_assign_temp e
 
 emitSaveThreadState :: Code
 emitSaveThreadState = do
-  -- CurrentTSO->sp = Sp;
-  stmtC $ CmmStore (cmmOffset stgCurrentTSO tso_SP) stgSp
+  -- CurrentTSO->stackobj->sp = Sp;
+  stmtC $ CmmStore (cmmOffset (CmmLoad (cmmOffset stgCurrentTSO tso_stackobj) bWord)
+                              stack_SP) stgSp
   emitCloseNursery
   -- and save the current cost centre stack in the TSO when profiling:
   when opt_SccProfilingOn $
@@ -215,14 +220,17 @@ emitCloseNursery = stmtC $ CmmStore nursery_bdescr_free (cmmOffsetW stgHp 1)
 emitLoadThreadState :: Code
 emitLoadThreadState = do
   tso <- newTemp bWord -- TODO FIXME NOW
+  stack <- newTemp bWord -- TODO FIXME NOW
   stmtsC [
-	-- tso = CurrentTSO;
-  	CmmAssign (CmmLocal tso) stgCurrentTSO,
-	-- Sp = tso->sp;
-	CmmAssign sp (CmmLoad (cmmOffset (CmmReg (CmmLocal tso)) tso_SP)
-	                      bWord),
-	-- SpLim = tso->stack + RESERVED_STACK_WORDS;
-	CmmAssign spLim (cmmOffsetW (cmmOffset (CmmReg (CmmLocal tso)) tso_STACK)
+        -- tso = CurrentTSO
+        CmmAssign (CmmLocal tso) stgCurrentTSO,
+        -- stack = tso->stackobj
+        CmmAssign (CmmLocal stack) (CmmLoad (cmmOffset (CmmReg (CmmLocal tso)) tso_stackobj) bWord),
+        -- Sp = stack->sp;
+        CmmAssign sp (CmmLoad (cmmOffset (CmmReg (CmmLocal stack)) stack_SP)
+                              bWord),
+        -- SpLim = stack->stack + RESERVED_STACK_WORDS;
+        CmmAssign spLim (cmmOffsetW (cmmOffset (CmmReg (CmmLocal stack)) stack_STACK)
 			            rESERVED_STACK_WORDS),
         -- HpAlloc = 0;
         --   HpAlloc is assumed to be set to non-zero only by a failed
@@ -233,7 +241,7 @@ emitLoadThreadState = do
   -- and load the current cost centre stack from the TSO when profiling:
   when opt_SccProfilingOn $
 	stmtC (CmmStore curCCSAddr 
-		(CmmLoad (cmmOffset (CmmReg (CmmLocal tso)) tso_CCCS) bWord))
+                (CmmLoad (cmmOffset (CmmReg (CmmLocal tso)) tso_CCCS) bWord))
 
 emitOpenNursery :: Code
 emitOpenNursery = stmtsC [
@@ -261,20 +269,14 @@ nursery_bdescr_free   = cmmOffset stgCurrentNursery oFFSET_bdescr_free
 nursery_bdescr_start  = cmmOffset stgCurrentNursery oFFSET_bdescr_start
 nursery_bdescr_blocks = cmmOffset stgCurrentNursery oFFSET_bdescr_blocks
 
-tso_SP, tso_STACK, tso_CCCS :: ByteOff
-tso_SP    = tsoFieldB     oFFSET_StgTSO_sp
-tso_STACK = tsoFieldB     oFFSET_StgTSO_stack
-tso_CCCS  = tsoProfFieldB oFFSET_StgTSO_CCCS
+tso_stackobj, tso_CCCS, stack_STACK, stack_SP :: ByteOff
+tso_stackobj = closureField oFFSET_StgTSO_stackobj
+tso_CCCS     = closureField oFFSET_StgTSO_CCCS
+stack_STACK  = closureField oFFSET_StgStack_stack
+stack_SP     = closureField oFFSET_StgStack_sp
 
--- The TSO struct has a variable header, and an optional StgTSOProfInfo in
--- the middle.  The fields we're interested in are after the StgTSOProfInfo.
-tsoFieldB :: ByteOff -> ByteOff
-tsoFieldB off
-  | opt_SccProfilingOn = off + sIZEOF_StgTSOProfInfo + fixedHdrSize * wORD_SIZE
-  | otherwise          = off + fixedHdrSize * wORD_SIZE
-
-tsoProfFieldB :: ByteOff -> ByteOff
-tsoProfFieldB off = off + fixedHdrSize * wORD_SIZE
+closureField :: ByteOff -> ByteOff
+closureField off = off + fixedHdrSize * wORD_SIZE
 
 stgSp, stgHp, stgCurrentTSO, stgCurrentNursery :: CmmExpr
 stgSp		  = CmmReg sp

@@ -41,7 +41,7 @@ module Util (
         nTimes,
 
         -- * Sorting
-        sortLe, sortWith, on,
+        sortLe, sortWith, minWith, on,
 
         -- * Comparisons
         isEqual, eqListBy,
@@ -49,7 +49,7 @@ module Util (
         removeSpaces,
         
         -- * Edit distance
-        fuzzyMatch,
+        fuzzyMatch, fuzzyLookup,
 
         -- * Transitive closures
         transitiveClosure,
@@ -66,12 +66,15 @@ module Util (
         -- * Floating point
         readRational,
 
+        -- * read helpers
+        maybeReadFuzzy,
+
         -- * IO-ish utilities
         createDirectoryHierarchy,
         doesDirNameExist,
         modificationTimeIfExists,
 
-        global, consIORef, globalMVar, globalEmptyMVar,
+        global, consIORef, globalM,
 
         -- * Filenames and paths
         Suffix,
@@ -81,31 +84,34 @@ module Util (
         Direction(..), reslash,
 
         -- * Utils for defining Data instances
-        abstractConstr, abstractDataType, mkNoRepType
+        abstractConstr, abstractDataType, mkNoRepType,
+
+        -- * Utils for printing C code
+        charToC
     ) where
 
 #include "HsVersions.h"
 
+import Exception
 import Panic
 
 import Data.Data
 import Data.IORef       ( IORef, newIORef, atomicModifyIORef )
 import System.IO.Unsafe ( unsafePerformIO )
 import Data.List        hiding (group)
-import Control.Concurrent.MVar ( MVar, newMVar, newEmptyMVar )
 
 #ifdef DEBUG
 import FastTypes
 #endif
 
 import Control.Monad    ( unless )
-import System.IO.Error as IO ( catch, isDoesNotExistError )
+import System.IO.Error as IO ( isDoesNotExistError )
 import System.Directory ( doesDirectoryExist, createDirectory,
                           getModificationTime )
 import System.FilePath
 import System.Time      ( ClockTime )
 
-import Data.Char        ( isUpper, isAlphaNum, isSpace, ord, isDigit )
+import Data.Char        ( isUpper, isAlphaNum, isSpace, chr, ord, isDigit )
 import Data.Ratio       ( (%) )
 import Data.Ord         ( comparing )
 import Data.Bits
@@ -536,6 +542,10 @@ sortWith get_key xs = sortLe le xs
   where
     x `le` y = get_key x < get_key y
 
+minWith :: Ord b => (a -> b) -> [a] -> a
+minWith get_key xs = ASSERT( not (null xs) )
+                     head (sortWith get_key xs)
+
 on :: (a -> a -> c) -> (b -> a) -> b -> b -> c
 on cmp sel = \x y -> sel x `cmp` sel y
 
@@ -689,40 +699,61 @@ removeSpaces = reverse . dropWhile isSpace . reverse . dropWhile isSpace
 %************************************************************************
 
 \begin{code}
--- | Find the "restricted" Damerau-Levenshtein edit distance between two strings. See: <http://en.wikipedia.org/wiki/Damerau-Levenshtein_distance>.
--- Based on the algorithm presented in "A Bit-Vector Algorithm for Computing Levenshtein and Damerau Edit Distances" in PSC'02 (Heikki Hyyro).
--- See http://www.cs.uta.fi/~helmu/pubs/psc02.pdf and http://www.cs.uta.fi/~helmu/pubs/PSCerr.html for an explanation
+-- | Find the "restricted" Damerau-Levenshtein edit distance between two strings.
+-- See: <http://en.wikipedia.org/wiki/Damerau-Levenshtein_distance>.
+-- Based on the algorithm presented in "A Bit-Vector Algorithm for Computing
+-- Levenshtein and Damerau Edit Distances" in PSC'02 (Heikki Hyyro).
+-- See http://www.cs.uta.fi/~helmu/pubs/psc02.pdf and
+--     http://www.cs.uta.fi/~helmu/pubs/PSCerr.html for an explanation
 restrictedDamerauLevenshteinDistance :: String -> String -> Int
-restrictedDamerauLevenshteinDistance str1 str2 = restrictedDamerauLevenshteinDistanceWithLengths m n str1 str2
+restrictedDamerauLevenshteinDistance str1 str2
+  = restrictedDamerauLevenshteinDistanceWithLengths m n str1 str2
   where
     m = length str1
     n = length str2
 
-restrictedDamerauLevenshteinDistanceWithLengths :: Int -> Int -> String -> String -> Int
+restrictedDamerauLevenshteinDistanceWithLengths
+  :: Int -> Int -> String -> String -> Int
 restrictedDamerauLevenshteinDistanceWithLengths m n str1 str2
-  | m <= n    = if n <= 32 -- n must be larger so this check is sufficient
-                then restrictedDamerauLevenshteinDistance' (undefined :: Word32) m n str1 str2
-                else restrictedDamerauLevenshteinDistance' (undefined :: Integer) m n str1 str2
-  | otherwise = if m <= 32 -- m must be larger so this check is sufficient
-                then restrictedDamerauLevenshteinDistance' (undefined :: Word32) n m str2 str1
-                else restrictedDamerauLevenshteinDistance' (undefined :: Integer) n m str2 str1
+  | m <= n
+  = if n <= 32 -- n must be larger so this check is sufficient
+    then restrictedDamerauLevenshteinDistance' (undefined :: Word32) m n str1 str2
+    else restrictedDamerauLevenshteinDistance' (undefined :: Integer) m n str1 str2
 
-restrictedDamerauLevenshteinDistance' :: (Bits bv) => bv -> Int -> Int -> String -> String -> Int
+  | otherwise
+  = if m <= 32 -- m must be larger so this check is sufficient
+    then restrictedDamerauLevenshteinDistance' (undefined :: Word32) n m str2 str1
+    else restrictedDamerauLevenshteinDistance' (undefined :: Integer) n m str2 str1
+
+restrictedDamerauLevenshteinDistance'
+  :: (Bits bv) => bv -> Int -> Int -> String -> String -> Int
 restrictedDamerauLevenshteinDistance' _bv_dummy m n str1 str2 
   | [] <- str1 = n
-  | otherwise  = extractAnswer $ foldl' (restrictedDamerauLevenshteinDistanceWorker (matchVectors str1) top_bit_mask vector_mask) (0, 0, m_ones, 0, m) str2
-  where m_ones@vector_mask = (2 ^ m) - 1
-        top_bit_mask = (1 `shiftL` (m - 1)) `asTypeOf` _bv_dummy
-        extractAnswer (_, _, _, _, distance) = distance
+  | otherwise  = extractAnswer $
+                 foldl' (restrictedDamerauLevenshteinDistanceWorker
+                             (matchVectors str1) top_bit_mask vector_mask)
+                        (0, 0, m_ones, 0, m) str2
+  where
+    m_ones@vector_mask = (2 ^ m) - 1
+    top_bit_mask = (1 `shiftL` (m - 1)) `asTypeOf` _bv_dummy
+    extractAnswer (_, _, _, _, distance) = distance
 
-restrictedDamerauLevenshteinDistanceWorker :: (Bits bv) => IM.IntMap bv -> bv -> bv -> (bv, bv, bv, bv, Int) -> Char -> (bv, bv, bv, bv, Int)
-restrictedDamerauLevenshteinDistanceWorker str1_mvs top_bit_mask vector_mask (pm, d0, vp, vn, distance) char2 
-  = seq str1_mvs $ seq top_bit_mask $ seq vector_mask $ seq pm' $ seq d0' $ seq vp' $ seq vn' $ seq distance'' $ seq char2 $ (pm', d0', vp', vn', distance'')
+restrictedDamerauLevenshteinDistanceWorker
+      :: (Bits bv) => IM.IntMap bv -> bv -> bv
+      -> (bv, bv, bv, bv, Int) -> Char -> (bv, bv, bv, bv, Int)
+restrictedDamerauLevenshteinDistanceWorker str1_mvs top_bit_mask vector_mask
+                                           (pm, d0, vp, vn, distance) char2
+  = seq str1_mvs $ seq top_bit_mask $ seq vector_mask $
+    seq pm' $ seq d0' $ seq vp' $ seq vn' $
+    seq distance'' $ seq char2 $
+    (pm', d0', vp', vn', distance'')
   where
     pm' = IM.findWithDefault 0 (ord char2) str1_mvs
     
-    d0' = ((((sizedComplement vector_mask d0) .&. pm') `shiftL` 1) .&. pm) -- No need to mask the shiftL because of the restricted range of pm
+    d0' = ((((sizedComplement vector_mask d0) .&. pm') `shiftL` 1) .&. pm)
       .|. ((((pm' .&. vp) + vp) .&. vector_mask) `xor` vp) .|. pm' .|. vn
+          -- No need to mask the shiftL because of the restricted range of pm
+
     hp' = vn .|. sizedComplement vector_mask (d0' .|. vp)
     hn' = d0' .&. vp
     
@@ -745,11 +776,19 @@ matchVectors = snd . foldl' go (0 :: Int, IM.empty)
                        in seq ix' $ seq im' $ (ix', im')
 
 #ifdef __GLASGOW_HASKELL__
-{-# SPECIALIZE INLINE restrictedDamerauLevenshteinDistance' :: Word32 -> Int -> Int -> String -> String -> Int #-}
-{-# SPECIALIZE INLINE restrictedDamerauLevenshteinDistance' :: Integer -> Int -> Int -> String -> String -> Int #-}
+{-# SPECIALIZE INLINE restrictedDamerauLevenshteinDistance'
+                      :: Word32 -> Int -> Int -> String -> String -> Int #-}
+{-# SPECIALIZE INLINE restrictedDamerauLevenshteinDistance'
+                      :: Integer -> Int -> Int -> String -> String -> Int #-}
 
-{-# SPECIALIZE restrictedDamerauLevenshteinDistanceWorker :: IM.IntMap Word32 -> Word32 -> Word32 -> (Word32, Word32, Word32, Word32, Int) -> Char -> (Word32, Word32, Word32, Word32, Int) #-}
-{-# SPECIALIZE restrictedDamerauLevenshteinDistanceWorker :: IM.IntMap Integer -> Integer -> Integer -> (Integer, Integer, Integer, Integer, Int) -> Char -> (Integer, Integer, Integer, Integer, Int) #-}
+{-# SPECIALIZE restrictedDamerauLevenshteinDistanceWorker
+               :: IM.IntMap Word32 -> Word32 -> Word32
+               -> (Word32, Word32, Word32, Word32, Int)
+               -> Char -> (Word32, Word32, Word32, Word32, Int) #-}
+{-# SPECIALIZE restrictedDamerauLevenshteinDistanceWorker
+               :: IM.IntMap Integer -> Integer -> Integer
+               -> (Integer, Integer, Integer, Integer, Int)
+               -> Char -> (Integer, Integer, Integer, Integer, Int) #-}
 
 {-# SPECIALIZE INLINE sizedComplement :: Word32 -> Word32 -> Word32 #-}
 {-# SPECIALIZE INLINE sizedComplement :: Integer -> Integer -> Integer #-}
@@ -758,15 +797,32 @@ matchVectors = snd . foldl' go (0 :: Int, IM.empty)
 {-# SPECIALIZE matchVectors :: String -> IM.IntMap Integer #-}
 #endif
 
--- | Search for possible matches to the users input in the given list, returning a small number of ranked results
 fuzzyMatch :: String -> [String] -> [String]
-fuzzyMatch user_entered possibilites = map fst $ take mAX_RESULTS $ sortBy (comparing snd) 
-                                                [ (poss, distance) | poss <- possibilites
-                                                                   , let distance = restrictedDamerauLevenshteinDistance poss user_entered
-                                                                   , distance <= fuzzy_threshold ]
-  where -- Work out an approriate match threshold (about a quarter of the # of characters the user entered)
-        fuzzy_threshold = max (round $ fromInteger (genericLength user_entered) / (4 :: Rational)) 1
-        mAX_RESULTS = 3
+fuzzyMatch key vals = fuzzyLookup key [(v,v) | v <- vals]
+
+-- | Search for possible matches to the users input in the given list,
+-- returning a small number of ranked results
+fuzzyLookup :: String -> [(String,a)] -> [a]
+fuzzyLookup user_entered possibilites
+  = map fst $ take mAX_RESULTS $ sortBy (comparing snd)
+    [ (poss_val, distance) | (poss_str, poss_val) <- possibilites
+                       , let distance = restrictedDamerauLevenshteinDistance
+                                            poss_str user_entered
+                       , distance <= fuzzy_threshold ]
+  where
+    -- Work out an approriate match threshold: 
+    -- We report a candidate if its edit distance is <= the threshold, 
+    -- The threshhold is set to about a quarter of the # of characters the user entered
+    -- 	 Length    Threshold
+    --	   1	     0		-- Don't suggest *any* candidates
+    --	   2	     1		-- for single-char identifiers
+    -- 	   3	     1
+    --	   4	     1
+    --	   5	     1
+    --	   6	     2
+    --
+    fuzzy_threshold = truncate $ fromIntegral (length user_entered + 2) / (4 :: Rational)
+    mAX_RESULTS = 3
 \end{code}
 
 %************************************************************************
@@ -800,11 +856,8 @@ consIORef var x = do
 \end{code}
 
 \begin{code}
-globalMVar :: a -> MVar a
-globalMVar a = unsafePerformIO (newMVar a)
-
-globalEmptyMVar :: MVar a
-globalEmptyMVar = unsafePerformIO newEmptyMVar
+globalM :: IO a -> IORef a
+globalM ma = unsafePerformIO (ma >>= newIORef)
 \end{code}
 
 Module names:
@@ -916,6 +969,17 @@ readRational top_s
 
 
 -----------------------------------------------------------------------------
+-- read helpers
+
+maybeReadFuzzy :: Read a => String -> Maybe a
+maybeReadFuzzy str = case reads str of
+                     [(x, s)]
+                      | all isSpace s ->
+                         Just x
+                     _ ->
+                         Nothing
+
+-----------------------------------------------------------------------------
 -- Create a hierarchy of directories
 
 createDirectoryHierarchy :: FilePath -> IO ()
@@ -939,9 +1003,9 @@ doesDirNameExist fpath = case takeDirectory fpath of
 modificationTimeIfExists :: FilePath -> IO (Maybe ClockTime)
 modificationTimeIfExists f = do
   (do t <- getModificationTime f; return (Just t))
-        `IO.catch` \e -> if isDoesNotExistError e
-                         then return Nothing
-                         else ioError e
+        `catchIO` \e -> if isDoesNotExistError e
+                        then return Nothing
+                        else ioError e
 
 -- split a string at the last character where 'pred' is True,
 -- returning a pair of strings. The first component holds the string
@@ -1019,11 +1083,22 @@ abstractDataType :: String -> DataType
 abstractDataType n = mkDataType n [abstractConstr n]
 \end{code}
 
-\begin{code}
--- Old GHC versions come with a base library with this function misspelled.
-#if __GLASGOW_HASKELL__ < 612
-mkNoRepType :: String -> DataType
-mkNoRepType = mkNorepType
-#endif
-\end{code}
+%************************************************************************
+%*                                                                      *
+\subsection[Utils-C]{Utils for printing C code}
+%*                                                                      *
+%************************************************************************
 
+\begin{code}
+charToC :: Word8 -> String
+charToC w = 
+  case chr (fromIntegral w) of
+	'\"' -> "\\\""
+	'\'' -> "\\\'"
+	'\\' -> "\\\\"
+	c | c >= ' ' && c <= '~' -> [c]
+          | otherwise -> ['\\',
+                         chr (ord '0' + ord c `div` 64),
+                         chr (ord '0' + ord c `div` 8 `mod` 8),
+                         chr (ord '0' + ord c         `mod` 8)]
+\end{code}

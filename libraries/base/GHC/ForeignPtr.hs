@@ -1,5 +1,12 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE CPP
+           , NoImplicitPrelude
+           , BangPatterns
+           , MagicHash
+           , UnboxedTuples
+  #-}
 {-# OPTIONS_HADDOCK hide #-}
+{-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.ForeignPtr

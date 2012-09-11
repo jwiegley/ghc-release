@@ -18,6 +18,7 @@ import CoreFVs
 import CoreMonad	( endPass, CoreToDo(..) )
 import CoreSyn
 import CoreSubst
+import OccurAnal        ( occurAnalyseExpr )
 import Type
 import Coercion
 import TyCon
@@ -36,6 +37,7 @@ import OrdList
 import ErrUtils
 import DynFlags
 import Util
+import Pair
 import Outputable
 import MonadUtils
 import FastString
@@ -77,9 +79,9 @@ The goal of this pass is to prepare for code generation.
     weaker guarantee of no clashes which the simplifier provides.
     And that is what the code generator needs.
 
-    We don't clone TyVars. The code gen doesn't need that, 
+    We don't clone TyVars or CoVars. The code gen doesn't need that, 
     and doing so would be tiresome because then we'd need
-    to substitute in types.
+    to substitute in types and coercions.
 
 
 7.  Give each dynamic CCall occurrence a fresh unique; this is
@@ -103,19 +105,21 @@ Invariants
 Here is the syntax of the Core produced by CorePrep:
 
     Trivial expressions 
-       triv ::= lit |  var  | triv ty  |  /\a. triv  |  triv |> co
+       triv ::= lit |  var  
+              | triv ty  |  /\a. triv 
+              | truv co  |  /\c. triv  |  triv |> co
 
     Applications
-       app ::= lit  |  var  |  app triv  |  app ty  |  app |> co
+       app ::= lit  |  var  |  app triv  |  app ty  | app co | app |> co
 
     Expressions
        body ::= app  
               | let(rec) x = rhs in body     -- Boxed only
               | case body of pat -> body
-	      | /\a. body
+	      | /\a. body | /\c. body 
               | body |> co
 
-    Right hand sides (only place where lambdas can occur)
+    Right hand sides (only place where value lambdas can occur)
        rhs ::= /\a.rhs  |  \x.rhs  |  body
 
 We define a synonym for each of these non-terminals.  Functions
@@ -248,6 +252,61 @@ always fully applied, and the bindings are just there to support
 partial applications. But it's easier to let them through.
 
 
+Note [Dead code in CorePrep]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Imagine that we got an input program like this:
+
+  f :: Show b => Int -> (Int, b -> Maybe Int -> Int)
+  f x = (g True (Just x) + g () (Just x), g)
+    where
+      g :: Show a => a -> Maybe Int -> Int
+      g _ Nothing = x
+      g y (Just z) = if z > 100 then g y (Just (z + length (show y))) else g y unknown
+
+After specialisation and SpecConstr, we would get something like this:
+
+  f :: Show b => Int -> (Int, b -> Maybe Int -> Int)
+  f x = (g$Bool_True_Just x + g$Unit_Unit_Just x, g)
+    where
+      {-# RULES g $dBool = g$Bool 
+                g $dUnit = g$Unit #-}
+      g = ...
+      {-# RULES forall x. g$Bool True (Just x) = g$Bool_True_Just x #-}
+      g$Bool = ...
+      {-# RULES forall x. g$Unit () (Just x) = g$Unit_Unit_Just x #-}
+      g$Unit = ...
+      g$Bool_True_Just = ...
+      g$Unit_Unit_Just = ...
+
+Note that the g$Bool and g$Unit functions are actually dead code: they are only kept
+alive by the occurrence analyser because they are referred to by the rules of g,
+which is being kept alive by the fact that it is used (unspecialised) in the returned pair.
+
+However, at the CorePrep stage there is no way that the rules for g will ever fire,
+and it really seems like a shame to produce an output program that goes to the trouble
+of allocating a closure for the unreachable g$Bool and g$Unit functions.
+
+The way we fix this is to:
+ * In cloneBndr, drop all unfoldings/rules
+ * In deFloatTop, run the occurrence analyser on each top-level RHS to drop
+   the dead local bindings
+
+The reason we don't just OccAnal the whole output of CorePrep is that the tidier
+ensures that all top-level binders are GlobalIds, so they don't show up in the free
+variables any longer. So if you run the occurrence analyser on the output of CoreTidy
+(or later) you e.g. turn this program:
+
+  Rec {
+  f = ... f ...
+  }
+
+Into this one:
+
+  f = ... f ...
+
+(Since f is not considered to be free in its own RHS.)
+
+
 %************************************************************************
 %*									*
 		The main code
@@ -259,7 +318,7 @@ cpeBind :: TopLevelFlag
 	-> CorePrepEnv -> CoreBind
 	-> UniqSM (CorePrepEnv, Floats)
 cpeBind top_lvl env (NonRec bndr rhs)
-  = do { (_, bndr1) <- cloneBndr env bndr
+  = do { (_, bndr1) <- cpCloneBndr env bndr
        ; let is_strict   = isStrictDmd (idDemandInfo bndr)
              is_unlifted = isUnLiftedType (idType bndr)
        ; (floats, bndr2, rhs2) <- cpePair top_lvl NonRecursive 
@@ -274,7 +333,7 @@ cpeBind top_lvl env (NonRec bndr rhs)
 
 cpeBind top_lvl env (Rec pairs)
   = do { let (bndrs,rhss) = unzip pairs
-       ; (env', bndrs1) <- cloneBndrs env (map fst pairs)
+       ; (env', bndrs1) <- cpCloneBndrs env (map fst pairs)
        ; stuff <- zipWithM (cpePair top_lvl Recursive False env') bndrs1 rhss
 
        ; let (floats_s, bndrs2, rhss2) = unzip3 stuff
@@ -384,9 +443,10 @@ cpeRhsE :: CorePrepEnv -> CoreExpr -> UniqSM (Floats, CpeRhs)
 -- For example
 --	f (g x)	  ===>   ([v = g x], f v)
 
-cpeRhsE _env expr@(Type _) = return (emptyFloats, expr)
-cpeRhsE _env expr@(Lit _)  = return (emptyFloats, expr)
-cpeRhsE env expr@(Var {})  = cpeApp env expr
+cpeRhsE _env expr@(Type {})     = return (emptyFloats, expr)
+cpeRhsE _env expr@(Coercion {}) = return (emptyFloats, expr)
+cpeRhsE _env expr@(Lit {})      = return (emptyFloats, expr)
+cpeRhsE env expr@(Var {})       = cpeApp env expr
 
 cpeRhsE env (Var f `App` _ `App` arg)
   | f `hasKey` lazyIdKey  	  -- Replace (lazy a) by a
@@ -412,7 +472,7 @@ cpeRhsE env (Cast expr co)
 
 cpeRhsE env expr@(Lam {})
    = do { let (bndrs,body) = collectBinders expr
-        ; (env', bndrs') <- cloneBndrs env bndrs
+        ; (env', bndrs') <- cpCloneBndrs env bndrs
 	; body' <- cpeBodyNF env' body
 	; return (emptyFloats, mkLams bndrs' body') }
 
@@ -425,12 +485,12 @@ cpeRhsE env (Case scrut bndr ty alts)
   = do { (floats, scrut') <- cpeBody env scrut
        ; let bndr1 = bndr `setIdUnfolding` evaldUnfolding
             -- Record that the case binder is evaluated in the alternatives
-       ; (env', bndr2) <- cloneBndr env bndr1
+       ; (env', bndr2) <- cpCloneBndr env bndr1
        ; alts' <- mapM (sat_alt env') alts
        ; return (floats, Case scrut' bndr2 ty alts') }
   where
     sat_alt env (con, bs, rhs)
-       = do { (env2, bs') <- cloneBndrs env bs
+       = do { (env2, bs') <- cpCloneBndrs env bs
             ; rhs' <- cpeBodyNF env2 rhs
             ; return (con, bs', rhs') }
 
@@ -472,7 +532,7 @@ rhsToBody (Cast e co)
 rhsToBody expr@(Lam {})
   | Just no_lam_result <- tryEtaReducePrep bndrs body
   = return (emptyFloats, no_lam_result)
-  | all isTyCoVar bndrs		-- Type lambdas are ok
+  | all isTyVar bndrs		-- Type lambdas are ok
   = return (emptyFloats, expr)
   | otherwise			-- Some value lambdas
   = do { fn <- newVar (exprType expr)
@@ -523,6 +583,10 @@ cpeApp env expr
       = do { (fun',hd,fun_ty,floats,ss) <- collect_args fun depth
            ; return (App fun' arg, hd, applyTy fun_ty arg_ty, floats, ss) }
 
+    collect_args (App fun arg@(Coercion arg_co)) depth
+      = do { (fun',hd,fun_ty,floats,ss) <- collect_args fun depth
+           ; return (App fun' arg, hd, applyCo fun_ty arg_co, floats, ss) }
+
     collect_args (App fun arg) depth
       = do { (fun',hd,fun_ty,floats,ss) <- collect_args fun (depth+1)
       	   ; let
@@ -552,7 +616,7 @@ cpeApp env expr
 		-- partial application might be seq'd
 
     collect_args (Cast fun co) depth
-      = do { let (_ty1,ty2) = coercionKind co
+      = do { let Pair _ty1 ty2 = coercionKind co
            ; (fun', hd, _, floats, ss) <- collect_args fun depth
            ; return (Cast fun' co, hd, ty2, floats, ss) }
           
@@ -577,10 +641,7 @@ cpeApp env expr
 cpeArg :: CorePrepEnv -> RhsDemand -> CoreArg -> Type
        -> UniqSM (Floats, CpeTriv)
 cpeArg env is_strict arg arg_ty
-  | cpe_ExprIsTrivial arg   -- Do not eta expand etc a trivial argument
-  = cpeBody env arg	    -- Must still do substitution though
-  | otherwise
-  = do { (floats1, arg1) <- cpeRhsE env arg	-- arg1 can be a lambda
+  = do { (floats1, arg1) <- cpeRhsE env arg     -- arg1 can be a lambda
        ; (floats2, arg2) <- if want_float floats1 arg1 
        	 	   	    then return (floats1, arg1)
        	 	   	    else do { body1 <- rhsToBodyNF arg1
@@ -588,10 +649,13 @@ cpeArg env is_strict arg arg_ty
 	 	-- Else case: arg1 might have lambdas, and we can't
 		--            put them inside a wrapBinds
 
-       ; v <- newVar arg_ty
+       ; if cpe_ExprIsTrivial arg2    -- Do not eta expand a trivial argument
+         then return (floats2, arg2)
+         else do
+       { v <- newVar arg_ty
        ; let arg3      = cpeEtaExpand (exprArity arg2) arg2
        	     arg_float = mkFloat is_strict is_unlifted v arg3
-       ; return (addFloat floats2 arg_float, Var v) }
+       ; return (addFloat floats2 arg_float, Var v) } }
   where
     is_unlifted = isUnLiftedType arg_ty
     want_float = wantFloatNested NonRecursive (is_strict || is_unlifted)
@@ -637,9 +701,7 @@ maybeSaturate fn expr n_args
 
 -------------
 saturateDataToTag :: CpeApp -> UniqSM CpeApp
--- Horrid: ensure that the arg of data2TagOp is evaluated
---   (data2tag x) -->  (case x of y -> data2tag y)
--- (yuk yuk) take into account the lambdas we've now introduced
+-- See Note [dataToTag magic]
 saturateDataToTag sat_expr
   = do { let (eta_bndrs, eta_body) = collectBinders sat_expr
        ; eta_body' <- eval_data2tag_arg eta_body
@@ -663,7 +725,14 @@ saturateDataToTag sat_expr
 	= pprPanic "eval_data2tag" (ppr other)
 \end{code}
 
+Note [dataToTag magic]
+~~~~~~~~~~~~~~~~~~~~~~
+Horrid: we must ensure that the arg of data2TagOp is evaluated
+  (data2tag x) -->  (case x of y -> data2tag y)
+(yuk yuk) take into account the lambdas we've now introduced
 
+How might it not be evaluated?  Well, we might have floated it out
+of the scope of a `seq`, or dropped the `seq` altogether.
 
 
 %************************************************************************
@@ -690,11 +759,12 @@ cpe_ExprIsTrivial :: CoreExpr -> Bool
 -- Version that doesn't consider an scc annotation to be trivial.
 cpe_ExprIsTrivial (Var _)                  = True
 cpe_ExprIsTrivial (Type _)                 = True
+cpe_ExprIsTrivial (Coercion _)             = True
 cpe_ExprIsTrivial (Lit _)                  = True
 cpe_ExprIsTrivial (App e arg)              = isTypeArg arg && cpe_ExprIsTrivial e
 cpe_ExprIsTrivial (Note n e)               = notSccNote n  && cpe_ExprIsTrivial e
 cpe_ExprIsTrivial (Cast e _)               = cpe_ExprIsTrivial e
-cpe_ExprIsTrivial (Lam b body) | isTyCoVar b = cpe_ExprIsTrivial body
+cpe_ExprIsTrivial (Lam b body) | isTyVar b = cpe_ExprIsTrivial body
 cpe_ExprIsTrivial _                        = False
 \end{code}
 
@@ -896,8 +966,12 @@ deFloatTop :: Floats -> [CoreBind]
 deFloatTop (Floats _ floats)
   = foldrOL get [] floats
   where
-    get (FloatLet b) bs = b:bs
+    get (FloatLet b) bs = occurAnalyseRHSs b : bs
     get b            _  = pprPanic "corePrepPgm" (ppr b)
+    
+    -- See Note [Dead code in CorePrep]
+    occurAnalyseRHSs (NonRec x e) = NonRec x (occurAnalyseExpr e)
+    occurAnalyseRHSs (Rec xes)    = Rec [(x, occurAnalyseExpr e) | (x, e) <- xes]
 
 -------------------------------------------
 canFloatFromNoCaf ::  Floats -> CpeRhs -> Maybe (Floats, CpeRhs)
@@ -1000,18 +1074,24 @@ lookupCorePrepEnv (CPE env) id
 -- Cloning binders
 -- ---------------------------------------------------------------------------
 
-cloneBndrs :: CorePrepEnv -> [Var] -> UniqSM (CorePrepEnv, [Var])
-cloneBndrs env bs = mapAccumLM cloneBndr env bs
+cpCloneBndrs :: CorePrepEnv -> [Var] -> UniqSM (CorePrepEnv, [Var])
+cpCloneBndrs env bs = mapAccumLM cpCloneBndr env bs
 
-cloneBndr  :: CorePrepEnv -> Var -> UniqSM (CorePrepEnv, Var)
-cloneBndr env bndr
-  | isLocalId bndr
+cpCloneBndr  :: CorePrepEnv -> Var -> UniqSM (CorePrepEnv, Var)
+cpCloneBndr env bndr
+  | isLocalId bndr, not (isCoVar bndr)
   = do bndr' <- setVarUnique bndr <$> getUniqueM
-       return (extendCorePrepEnv env bndr bndr', bndr')
+       
+       -- We are going to OccAnal soon, so drop (now-useless) rules/unfoldings
+       -- so that we can drop more stuff as dead code.
+       -- See also Note [Dead code in CorePrep]
+       let bndr'' = bndr' `setIdUnfolding` noUnfolding
+                          `setIdSpecialisation` emptySpecInfo
+       return (extendCorePrepEnv env bndr bndr'', bndr'')
 
   | otherwise	-- Top level things, which we don't want
 		-- to clone, have become GlobalIds by now
-		-- And we don't clone tyvars
+		-- And we don't clone tyvars, or coercion variables
   = return (env, bndr)
   
 

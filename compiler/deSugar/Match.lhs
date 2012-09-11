@@ -29,6 +29,7 @@ import DataCon
 import MatchCon
 import MatchLit
 import Type
+import Coercion
 import TysWiredIn
 import ListSetOps
 import SrcLoc
@@ -38,6 +39,7 @@ import Name
 import Outputable
 import FastString
 
+import Control.Monad( when )
 import qualified Data.Map as Map
 \end{code}
 
@@ -55,9 +57,9 @@ matchCheck ::  DsMatchContext
             -> [EquationInfo]   -- Info about patterns, etc. (type synonym below)
             -> DsM MatchResult  -- Desugared result!
 
-matchCheck ctx vars ty qs = do
-    dflags <- getDOptsDs
-    matchCheck_really dflags ctx vars ty qs
+matchCheck ctx vars ty qs
+  = do { dflags <- getDOptsDs
+       ; matchCheck_really dflags ctx vars ty qs }
 
 matchCheck_really :: DynFlags
                   -> DsMatchContext
@@ -65,28 +67,31 @@ matchCheck_really :: DynFlags
                   -> Type
                   -> [EquationInfo]
                   -> DsM MatchResult
-matchCheck_really dflags ctx vars ty qs
-  | incomplete && shadow  = do
-      dsShadowWarn ctx eqns_shadow
-      dsIncompleteWarn ctx pats
-      match vars ty qs
-  | incomplete            = do
-      dsIncompleteWarn ctx pats
-      match vars ty qs
-  | shadow                = do
-      dsShadowWarn ctx eqns_shadow
-      match vars ty qs
-  | otherwise             =
-      match vars ty qs
-  where (pats, eqns_shadow) = check qs
-        incomplete    = want_incomplete && (notNull pats)
-        want_incomplete = case ctx of
-                              DsMatchContext RecUpd _ ->
-                                  dopt Opt_WarnIncompletePatternsRecUpd dflags
-                              _ ->
-                                  dopt Opt_WarnIncompletePatterns       dflags
-        shadow        = dopt Opt_WarnOverlappingPatterns dflags
-			&& not (null eqns_shadow)
+matchCheck_really dflags ctx@(DsMatchContext hs_ctx _) vars ty qs
+  = do { when shadow (dsShadowWarn ctx eqns_shadow)
+       ; when incomplete (dsIncompleteWarn ctx pats)
+       ; match vars ty qs }
+  where 
+    (pats, eqns_shadow) = check qs
+    incomplete = incomplete_flag hs_ctx && (notNull pats)
+    shadow     = wopt Opt_WarnOverlappingPatterns dflags
+              	 && notNull eqns_shadow
+
+    incomplete_flag :: HsMatchContext id -> Bool
+    incomplete_flag (FunRhs {})   = wopt Opt_WarnIncompletePatterns dflags
+    incomplete_flag CaseAlt       = wopt Opt_WarnIncompletePatterns dflags
+
+    incomplete_flag LambdaExpr    = wopt Opt_WarnIncompleteUniPatterns dflags
+    incomplete_flag PatBindRhs    = wopt Opt_WarnIncompleteUniPatterns dflags
+    incomplete_flag ProcExpr      = wopt Opt_WarnIncompleteUniPatterns dflags
+
+    incomplete_flag RecUpd        = wopt Opt_WarnIncompletePatternsRecUpd dflags
+
+    incomplete_flag ThPatQuote    = False
+    incomplete_flag (StmtCtxt {}) = False  -- Don't warn about incomplete patterns
+    		    	      	    	   -- in list comprehensions, pattern guards
+					   -- etc.  They are often *supposed* to be
+					   -- incomplete 
 \end{code}
 
 This variable shows the maximum number of lines of output generated for warnings.
@@ -280,13 +285,13 @@ match vars@(v:_) ty eqns
   = ASSERT( not (null eqns ) )
     do	{ 	-- Tidy the first pattern, generating
 		-- auxiliary bindings if necessary
-	  (aux_binds, tidy_eqns) <- mapAndUnzipM (tidyEqnInfo v) eqns
+          (aux_binds, tidy_eqns) <- mapAndUnzipM (tidyEqnInfo v) eqns
 
 		-- Group the equations and match each group in turn
-       ; let grouped = groupEquations tidy_eqns
+        ; let grouped = groupEquations tidy_eqns
 
          -- print the view patterns that are commoned up to help debug
-       ; ifDOptM Opt_D_dump_view_pattern_commoning (debug grouped)
+        ; ifDOptM Opt_D_dump_view_pattern_commoning (debug grouped)
 
 	; match_results <- mapM match_group grouped
 	; return (adjustMatchResult (foldr1 (.) aux_binds) $
@@ -468,11 +473,6 @@ tidy1 _ (WildPat ty)      = return (idDsWrapper, WildPat ty)
 tidy1 v (VarPat var)
   = return (wrapBind var v, WildPat (idType var)) 
 
-tidy1 v (VarPatOut var binds)
-  = do	{ ds_ev_binds <- dsTcEvBinds binds
-	; return (wrapBind var v . wrapDsEvBinds ds_ev_binds,
-		  WildPat (idType var)) }
-
 	-- case v of { x@p -> mr[] }
 	-- = case v of { p -> let x=v in mr[] }
 tidy1 v (AsPat (L _ var) pat)
@@ -523,14 +523,13 @@ tidy1 _ (LitPat lit)
 
 -- NPats: we *might* be able to replace these w/ a simpler form
 tidy1 _ (NPat lit mb_neg eq)
-  = return (idDsWrapper, tidyNPat lit mb_neg eq)
+  = return (idDsWrapper, tidyNPat tidyLitPat lit mb_neg eq)
 
 -- BangPatterns: Pattern matching is already strict in constructors,
 -- tuples etc, so the last case strips off the bang for thoses patterns.
 tidy1 v (BangPat (L _ (LazyPat p)))       = tidy1 v (BangPat p)
 tidy1 v (BangPat (L _ (ParPat p)))        = tidy1 v (BangPat p)
 tidy1 _ p@(BangPat (L _(VarPat _)))       = return (idDsWrapper, p)
-tidy1 _ p@(BangPat (L _(VarPatOut _ _)))  = return (idDsWrapper, p)
 tidy1 _ p@(BangPat (L _ (WildPat _)))     = return (idDsWrapper, p)
 tidy1 _ p@(BangPat (L _ (CoPat _ _ _)))   = return (idDsWrapper, p)
 tidy1 _ p@(BangPat (L _ (SigPatIn _ _)))  = return (idDsWrapper, p)
@@ -741,19 +740,21 @@ matchSimply scrut hs_ctx pat result_expr fail_expr = do
     match_result' <- matchSinglePat scrut hs_ctx pat rhs_ty match_result
     extractMatchResult match_result' fail_expr
 
-
 matchSinglePat :: CoreExpr -> HsMatchContext Name -> LPat Id
 	       -> Type -> MatchResult -> DsM MatchResult
 -- Do not warn about incomplete patterns
 -- Used for things like [ e | pat <- stuff ], where 
 -- incomplete patterns are just fine
-matchSinglePat (Var var) _ (L _ pat) ty match_result 
-  = match [var] ty [EqnInfo { eqn_pats = [pat], eqn_rhs  = match_result }]
+matchSinglePat (Var var) ctx (L _ pat) ty match_result 
+  = do { locn <- getSrcSpanDs
+       ; matchCheck (DsMatchContext ctx locn)
+                    [var] ty  
+                    [EqnInfo { eqn_pats = [pat], eqn_rhs  = match_result }] }
 
-matchSinglePat scrut hs_ctx pat ty match_result = do
-    var <- selectSimpleMatchVarL pat
-    match_result' <- matchSinglePat (Var var) hs_ctx pat ty match_result
-    return (adjustMatchResult (bindNonRec var scrut) match_result')
+matchSinglePat scrut hs_ctx pat ty match_result
+  = do { var <- selectSimpleMatchVarL pat
+       ; match_result' <- matchSinglePat (Var var) hs_ctx pat ty match_result
+       ; return (adjustMatchResult (bindNonRec var scrut) match_result') }
 \end{code}
 
 
@@ -825,7 +826,7 @@ sameGroup (PgCon _)  (PgCon _)  = True		-- One case expression
 sameGroup (PgLit _)  (PgLit _)  = True		-- One case expression
 sameGroup (PgN l1)   (PgN l2)   = l1==l2	-- Order is significant
 sameGroup (PgNpK l1) (PgNpK l2) = l1==l2	-- See Note [Grouping overloaded literal patterns]
-sameGroup (PgCo	t1)  (PgCo t2)  = t1 `coreEqType` t2
+sameGroup (PgCo	t1)  (PgCo t2)  = t1 `eqType` t2
 	-- CoPats are in the same goup only if the type of the
 	-- enclosed pattern is the same. The patterns outside the CoPat
 	-- always have the same type, so this boils down to saying that
@@ -873,7 +874,7 @@ viewLExprEq (e1,_) (e2,_) = lexp e1 e2
         -- which resolve the overloading (e.g., fromInteger 1),
         -- because these expressions get written as a bunch of different variables
         -- (presumably to improve sharing)
-        tcEqType (overLitType l) (overLitType l') && l == l'
+        eqType (overLitType l) (overLitType l') && l == l'
     exp (HsApp e1 e2) (HsApp e1' e2') = lexp e1 e1' && lexp e2 e2'
     -- the fixities have been straightened out by now, so it's safe
     -- to ignore them?
@@ -897,7 +898,7 @@ viewLExprEq (e1,_) (e2,_) = lexp e1 e2
 
     ---------
     tup_arg (Present e1) (Present e2) = lexp e1 e2
-    tup_arg (Missing t1) (Missing t2) = tcEqType t1 t2
+    tup_arg (Missing t1) (Missing t2) = eqType t1 t2
     tup_arg _ _ = False
 
     ---------
@@ -910,9 +911,9 @@ viewLExprEq (e1,_) (e2,_) = lexp e1 e2
     --        equating different ways of writing a coercion)
     wrap WpHole WpHole = True
     wrap (WpCompose w1 w2) (WpCompose w1' w2') = wrap w1 w1' && wrap w2 w2'
-    wrap (WpCast c)  (WpCast c')     = tcEqType c c'
+    wrap (WpCast c)  (WpCast c')     = coreEqCoercion c c'
     wrap (WpEvApp et1) (WpEvApp et2) = ev_term et1 et2
-    wrap (WpTyApp t) (WpTyApp t')    = tcEqType t t'
+    wrap (WpTyApp t) (WpTyApp t')    = eqType t t'
     -- Enhancement: could implement equality for more wrappers
     --   if it seems useful (lams and lets)
     wrap _ _ = False
@@ -920,7 +921,7 @@ viewLExprEq (e1,_) (e2,_) = lexp e1 e2
     ---------
     ev_term :: EvTerm -> EvTerm -> Bool
     ev_term (EvId a)       (EvId b)       = a==b
-    ev_term (EvCoercion a) (EvCoercion b) = tcEqType a b
+    ev_term (EvCoercion a) (EvCoercion b) = coreEqCoercion a b
     ev_term _ _ = False	
 
     ---------
@@ -959,3 +960,4 @@ If the first arg matches '1' but the second does not match 'True', we
 cannot jump to the third equation!  Because the same argument might
 match '2'!
 Hence we don't regard 1 and 2, or (n+1) and (n+2), as part of the same group.
+

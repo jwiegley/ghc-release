@@ -1,4 +1,12 @@
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP
+           , ForeignFunctionInterface
+           , MagicHash
+           , UnboxedTuples
+           , ScopedTypeVariables
+  #-}
 {-# OPTIONS_GHC -fno-warn-unused-imports #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Control.Concurrent
@@ -28,10 +36,16 @@ module Control.Concurrent (
 
         forkIO,
 #ifdef __GLASGOW_HASKELL__
-        forkIOUnmasked,
+        forkIOWithUnmask,
         killThread,
         throwTo,
 #endif
+
+        -- ** Threads with affinity
+        forkOn,
+        forkOnWithUnmask,
+        getNumCapabilities,
+        threadCapability,
 
         -- * Scheduling
 
@@ -71,7 +85,7 @@ module Control.Concurrent (
         forkOS,
         isCurrentThreadBound,
         runInBoundThread,
-        runInUnboundThread
+        runInUnboundThread,
 #endif
 
         -- * GHC's implementation of concurrency
@@ -90,6 +104,10 @@ module Control.Concurrent (
         -- ** Pre-emption
 
         -- $preemption
+
+        -- * Deprecated functions
+        forkIOUnmasked
+
     ) where
 
 import Prelude
@@ -98,8 +116,7 @@ import Control.Exception.Base as Exception
 
 #ifdef __GLASGOW_HASKELL__
 import GHC.Exception
-import GHC.Conc         ( ThreadId(..), myThreadId, killThread, yield,
-                          threadDelay, forkIO, forkIOUnmasked, childHandler )
+import GHC.Conc hiding (threadWaitRead, threadWaitWrite)
 import qualified GHC.Conc
 import GHC.IO           ( IO(..), unsafeInterleaveIO, unsafeUnmask )
 import GHC.IORef        ( newIORef, readIORef, writeIORef )
@@ -406,13 +423,10 @@ runInBoundThread action
             else do
                 ref <- newIORef undefined
                 let action_plus = Exception.try action >>= writeIORef ref
-                resultOrException <-
-                    bracket (newStablePtr action_plus)
-                            freeStablePtr
-                            (\cEntry -> forkOS_entry_reimported cEntry >> readIORef ref)
-                case resultOrException of
-                    Left exception -> Exception.throw (exception :: SomeException)
-                    Right result -> return result
+                bracket (newStablePtr action_plus)
+                        freeStablePtr
+                        (\cEntry -> forkOS_entry_reimported cEntry >> readIORef ref) >>=
+                  unsafeResult
     | otherwise = failNonThreaded
 
 {- | 
@@ -425,23 +439,27 @@ performance loss due to the use of bound threads. A program that
 doesn't need it's main thread to be bound and makes /heavy/ use of concurrency
 (e.g. a web server), might want to wrap it's @main@ action in
 @runInUnboundThread@.
+
+Note that exceptions which are thrown to the current thread are thrown in turn
+to the thread that is executing the given computation. This ensures there's
+always a way of killing the forked thread.
 -}
 runInUnboundThread :: IO a -> IO a
 
 runInUnboundThread action = do
-    bound <- isCurrentThreadBound
-    if bound
-        then do
-            mv <- newEmptyMVar
-            b <- blocked
-            _ <- mask $ \restore -> forkIO $
-              Exception.try (if b then action else restore action) >>=
-              putMVar mv
-            takeMVar mv >>= \ei -> case ei of
-                Left exception -> Exception.throw (exception :: SomeException)
-                Right result -> return result
-        else action
+  bound <- isCurrentThreadBound
+  if bound
+    then do
+      mv <- newEmptyMVar
+      mask $ \restore -> do
+        tid <- forkIO $ Exception.try (restore action) >>= putMVar mv
+        let wait = takeMVar mv `Exception.catch` \(e :: SomeException) ->
+                     Exception.throwTo tid e >> wait
+        wait >>= unsafeResult
+    else action
 
+unsafeResult :: Either SomeException a -> IO a
+unsafeResult = either Exception.throwIO return
 #endif /* __GLASGOW_HASKELL__ */
 
 #ifdef __GLASGOW_HASKELL__
@@ -504,7 +522,7 @@ withThread io = do
 waitFd :: Fd -> CInt -> IO ()
 waitFd fd write = do
    throwErrnoIfMinus1_ "fdReady" $
-        fdReady (fromIntegral fd) write (fromIntegral iNFINITE) 0
+        fdReady (fromIntegral fd) write iNFINITE 0
 
 iNFINITE :: CInt
 iNFINITE = 0xFFFFFFFF -- urgh

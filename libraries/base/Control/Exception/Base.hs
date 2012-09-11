@@ -1,4 +1,8 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, MagicHash #-}
+#ifdef __GLASGOW_HASKELL__
+{-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
+#endif
 
 #include "Typeable.h"
 
@@ -116,7 +120,7 @@ module Control.Exception.Base (
 
 #ifdef __GLASGOW_HASKELL__
 import GHC.Base
-import GHC.IO hiding (finally,onException)
+import GHC.IO hiding (bracket,finally,onException)
 import GHC.IO.Exception
 import GHC.Exception
 import GHC.Show
@@ -397,7 +401,7 @@ catch   :: Exception e
         -> (e -> IO a)  -- ^ Handler to invoke if an exception is raised
         -> IO a
 #if __GLASGOW_HASKELL__
-catch = GHC.IO.catchException
+catch = catchException
 #elif __HUGS__
 catch m h = Hugs.Exception.catchException m h'
   where h' e = case fromException e of
@@ -426,7 +430,7 @@ catchJust
         -> IO a
 catchJust p a handler = catch a handler'
   where handler' e = case p e of
-                        Nothing -> throw e
+                        Nothing -> throwIO e
                         Just b  -> handler b
 
 -- | A version of 'catch' with the arguments swapped around; useful in
@@ -452,7 +456,7 @@ handleJust p =  flip (catchJust p)
 
 mapException :: (Exception e1, Exception e2) => (e1 -> e2) -> a -> a
 mapException f v = unsafePerformIO (catch (evaluate v)
-                                          (\x -> throw (f x)))
+                                          (\x -> throwIO (f x)))
 
 -----------------------------------------------------------------------------
 -- 'try' and variations.
@@ -482,14 +486,14 @@ tryJust p a = do
   case r of
         Right v -> return (Right v)
         Left  e -> case p e of
-                        Nothing -> throw e
+                        Nothing -> throwIO e
                         Just b  -> return (Left b)
 
 -- | Like 'finally', but only performs the final action if there was an
 -- exception raised by the computation.
 onException :: IO a -> IO b -> IO a
 onException io what = io `catch` \e -> do _ <- what
-                                          throw (e :: SomeException)
+                                          throwIO (e :: SomeException)
 
 -----------------------------------------------------------------------------
 -- Some Useful Functions

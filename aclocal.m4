@@ -78,6 +78,58 @@ AC_DEFUN([FPTOOLS_SET_PLATFORM_VARS],
         GHC_CONVERT_VENDOR([$target_vendor], [TargetVendor])
         GHC_CONVERT_OS([$target_os], [TargetOS])
     fi
+
+    windows=NO
+    exeext=''
+    soext='.so'
+    case $host in
+    *-unknown-cygwin32)
+        AC_MSG_WARN([GHC does not support the Cygwin target at the moment])
+        AC_MSG_WARN([I'm assuming you wanted to build for i386-unknown-mingw32])
+        exit 1
+        ;;
+    *-unknown-mingw32)
+        windows=YES
+        exeext='.exe'
+        soext='.dll'
+        ;;
+    i386-apple-darwin|powerpc-apple-darwin)
+        soext='.dylib'
+        ;;
+    x86_64-apple-darwin)
+        soext='.dylib'
+        ;;
+    esac
+])
+
+
+# FP_SETTINGS
+# ----------------------------------
+# Set the variables used in the settings file
+AC_DEFUN([FP_SETTINGS],
+[
+    if test "$windows" = YES
+    then
+        SettingsCCompilerCommand='$topdir/../mingw/bin/gcc.exe'
+        SettingsCCompilerFlags=''
+        SettingsPerlCommand='$topdir/../perl/perl.exe'
+        SettingsDllWrapCommand='$topdir/../mingw/bin/dllwrap.exe'
+        SettingsWindresCommand='$topdir/../mingw/bin/windres.exe'
+        SettingsTouchCommand='$topdir/touchy.exe'
+    else
+        SettingsCCompilerCommand="$WhatGccIsCalled"
+        SettingsCCompilerFlags="$CONF_CC_OPTS_STAGE2"
+        SettingsPerlCommand="$PerlCmd"
+        SettingsDllWrapCommand="/bin/false"
+        SettingsWindresCommand="/bin/false"
+        SettingsTouchCommand='touch'
+    fi
+    AC_SUBST(SettingsCCompilerCommand)
+    AC_SUBST(SettingsCCompilerFlags)
+    AC_SUBST(SettingsPerlCommand)
+    AC_SUBST(SettingsDllWrapCommand)
+    AC_SUBST(SettingsWindresCommand)
+    AC_SUBST(SettingsTouchCommand)
 ])
 
 
@@ -94,20 +146,31 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
     AC_MSG_CHECKING([Setting up $2, $3, $4 and $5])
     case $$1 in
     i386-apple-darwin)
-        # By default, gcc on OS X will generate SSE
-        # instructions, which need things 16-byte aligned,
-        # but we don't 16-byte align things. Thus drop
-        # back to generic i686 compatibility. Trac #2983.
-        $2="$$2 -march=i686 -m32"
-        $3="$$3 -march=i686 -m32"
+        $2="$$2 -m32"
+        $3="$$3 -m32"
         $4="$$4 -arch i386"
-        $5="$$5 -march=i686 -m32"
+        $5="$$5 -m32"
         ;;
     x86_64-apple-darwin)
         $2="$$2 -m64"
         $3="$$3 -m64"
         $4="$$4 -arch x86_64"
         $5="$$5 -m64"
+        ;;
+    alpha-*)
+        # For now, to suppress the gcc warning "call-clobbered
+        # register used for global register variable", we simply
+        # disable all warnings altogether using the -w flag. Oh well.
+        $2="$$2 -w -mieee -D_REENTRANT"
+        $3="$$3 -w -mieee -D_REENTRANT"
+        $5="$$5 -w -mieee -D_REENTRANT"
+        ;;
+    hppa*)
+        # ___HPUX_SOURCE, not _HPUX_SOURCE, is #defined if -ansi!
+        # (very nice, but too bad the HP /usr/include files don't agree.)
+        $2="$$2 -D_HPUX_SOURCE"
+        $3="$$3 -D_HPUX_SOURCE"
+        $5="$$5 -D_HPUX_SOURCE"
         ;;
     esac
 
@@ -120,6 +183,24 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
     fi
     rm -f conftest.c conftest.o
     AC_MSG_RESULT([done])
+])
+
+
+# FP_VISIBILITY_HIDDEN
+# ----------------------------------
+# Is the visibility hidden attribute supported?
+AC_DEFUN([FP_VISIBILITY_HIDDEN],
+[
+    AC_MSG_CHECKING([whether __attribute__((visibility("hidden"))) is supported])
+    echo '__attribute__((visibility("hidden"))) void foo(void) {}' > conftest.c
+    if $CC -Wall -Werror -c conftest.c > /dev/null 2>&1
+    then
+        AC_MSG_RESULT([yes])
+        AC_DEFINE(HAS_VISIBILITY_HIDDEN, 1, [Has visibility hidden])
+    else
+        AC_MSG_RESULT([no])
+    fi
+    rm -f conftest.c conftest.o
 ])
 
 
@@ -167,8 +248,8 @@ AC_DEFUN([FP_EVAL_STDERR],
 # --------------------
 # XXX
 #
-# $1 = the command to look for
-# $2 = the variable to set
+# $1 = the variable to set
+# $2 = the command to look for
 #
 AC_DEFUN([FP_ARG_WITH_PATH_GNU_PROG],
 [
@@ -466,6 +547,31 @@ AC_SUBST([LdXFlag])
 ])# FP_PROG_LD_X
 
 
+# FP_PROG_LD_BUILD_ID
+# ------------
+
+# Sets the output variable LdHasBuildId to YES if ld supports
+# --build-id, or NO otherwise.
+AC_DEFUN([FP_PROG_LD_BUILD_ID],
+[
+AC_CACHE_CHECK([whether ld understands --build-id], [fp_cv_ld_build_id],
+[echo 'foo() {}' > conftest.c
+${CC-cc} -c conftest.c
+if ${LdCmd} -r --build-id=none -o conftest2.o conftest.o > /dev/null 2>&1; then
+   fp_cv_ld_build_id=yes
+else
+   fp_cv_ld_build_id=no
+fi
+rm -rf conftest*])
+if test "$fp_cv_ld_build_id" = yes; then
+  LdHasBuildId=YES
+else
+  LdHasBuildId=NO
+fi
+AC_SUBST([LdHasBuildId])
+])# FP_PROG_LD_BUILD_ID
+
+
 # FP_PROG_LD_IS_GNU
 # -----------------
 # Sets the output variable LdIsGNULd to YES or NO, depending on whether it is
@@ -581,7 +687,7 @@ AC_SUBST([ArArgs], ["$fp_prog_ar_args"])
 # FP_PROG_AR_NEEDS_RANLIB
 # -----------------------
 # Sets the output variable RANLIB to "ranlib" if it is needed and found,
-# to ":" otherwise.
+# to "true" otherwise.
 AC_DEFUN([FP_PROG_AR_NEEDS_RANLIB],
 [AC_REQUIRE([FP_PROG_AR_IS_GNU])
 AC_REQUIRE([FP_PROG_AR_ARGS])
@@ -601,36 +707,10 @@ fi])
 if test $fp_cv_prog_ar_needs_ranlib = yes; then
    AC_PROG_RANLIB
 else
-  RANLIB=":"
+  RANLIB="true"
   AC_SUBST([RANLIB])
 fi
 ])# FP_PROG_AR_NEEDS_RANLIB
-
-
-# FP_PROG_AR_SUPPORTS_INPUT
-# -------------------------
-# Sets the output variable ArSupportsInput to "-input" or "", depending on
-# whether ar supports -input flag is supported or not.
-AC_DEFUN([FP_PROG_AR_SUPPORTS_INPUT],
-[AC_REQUIRE([FP_PROG_AR_IS_GNU])
-AC_REQUIRE([FP_PROG_AR_ARGS])
-AC_CACHE_CHECK([whether $fp_prog_ar_raw supports -input], [fp_cv_prog_ar_supports_input],
-[fp_cv_prog_ar_supports_input=no
-if test $fp_prog_ar_is_gnu = no; then
-  rm -f conftest*
-  touch conftest.lst
-  if FP_EVAL_STDERR(["$fp_prog_ar_raw" $fp_prog_ar_args conftest.a -input conftest.lst]) >/dev/null; then
-    test -s conftest.err || fp_cv_prog_ar_supports_input=yes
-  fi
-  rm -f conftest*
-fi])
-if test $fp_cv_prog_ar_supports_input = yes; then
-    ArSupportsInput="-input"
-else
-    ArSupportsInput=""
-fi
-AC_SUBST([ArSupportsInput])
-])# FP_PROG_AR_SUPPORTS_INPUT
 
 
 dnl
@@ -652,38 +732,33 @@ rm -f conftest
 ])])
 
 
-# FP_HAVE_GCC
+# FP_GCC_VERSION
 # -----------
 # Extra testing of the result AC_PROG_CC, testing the gcc version no. Sets the
-# output variables HaveGcc and GccVersion.
-AC_DEFUN([FP_HAVE_GCC],
+# output variable GccVersion.
+AC_DEFUN([FP_GCC_VERSION],
 [AC_REQUIRE([AC_PROG_CC])
-if test -z "$GCC"; then
-   fp_have_gcc=NO
-else
-   fp_have_gcc=YES
-fi
-if test "$fp_have_gcc" = "NO" -a -d $srcdir/ghc; then
+if test -z "$GCC"
+then
   AC_MSG_ERROR([gcc is required])
 fi
-GccLT34=
+GccLT34=NO
+GccLT46=NO
 AC_CACHE_CHECK([version of gcc], [fp_cv_gcc_version],
-[if test "$fp_have_gcc" = "YES"; then
-   fp_cv_gcc_version="`$CC -v 2>&1 | grep 'version ' | sed -e 's/.*version [[^0-9]]*\([[0-9.]]*\).*/\1/g'`"
-   FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [3.0],
-     [AC_MSG_ERROR([Need at least gcc version 3.0 (3.4+ recommended)])])
-   # See #2770: gcc 2.95 doesn't work any more, apparently.  There probably
-   # isn't a very good reason for that, but for now just make configure
-   # fail.
-   FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [3.4], GccLT34=YES)
- else
-   fp_cv_gcc_version="not-installed"
- fi
+[
+    fp_cv_gcc_version="`$CC -v 2>&1 | grep 'version ' | sed -e 's/.*version [[^0-9]]*\([[0-9.]]*\).*/\1/g'`"
+    FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [3.0],
+                        [AC_MSG_ERROR([Need at least gcc version 3.0 (3.4+ recommended)])])
+    # See #2770: gcc 2.95 doesn't work any more, apparently.  There probably
+    # isn't a very good reason for that, but for now just make configure
+    # fail.
+    FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [3.4], GccLT34=YES)
+    FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [4.6], GccLT46=YES)
 ])
-AC_SUBST([HaveGcc], [$fp_have_gcc])
 AC_SUBST([GccVersion], [$fp_cv_gcc_version])
 AC_SUBST(GccLT34)
-])# FP_HAVE_GCC
+AC_SUBST(GccLT46)
+])# FP_GCC_VERSION
 
 dnl Small feature test for perl version. Assumes PerlCmd
 dnl contains path to perl binary.
@@ -1011,18 +1086,6 @@ AC_SUBST([FopCmd])
 ])# FP_PROG_FOP
 
 
-# FP_PROG_HSTAGS
-# ----------------
-# Sets the output variable HstagsCmd to the full Haskell tags program path.
-# HstagsCmd is empty if no such program could be found.
-AC_DEFUN([FP_PROG_HSTAGS],
-[AC_PATH_PROG([HstagsCmd], [hasktags])
-if test -z "$HstagsCmd"; then
-  AC_MSG_WARN([cannot find hasktags in your PATH, you will not be able to build the tags])
-fi
-])# FP_PROG_HSTAGS
-
-
 # FP_PROG_GHC_PKG
 # ----------------
 # Try to find a ghc-pkg matching the ghc mentioned in the environment variable
@@ -1051,43 +1114,16 @@ AC_SUBST([GhcPkgCmd])
 # Determine which extra flags we need to pass gcc when we invoke it
 # to compile .hc code.
 #
-# Some OSs (Mandrake Linux, in particular) configure GCC with
-# -momit-leaf-frame-pointer on by default. If this is the case, we
-# need to turn it off for mangling to work. The test is currently a
-# bit crude, using only the version number of gcc.
-# 
 # -fwrapv is needed for gcc to emit well-behaved code in the presence of
 # integer wrap around. (Trac #952)
 #
-# -fno-unit-at-a-time or -fno-toplevel-reoder is necessary to avoid gcc
-# reordering things in the module and confusing the manger and/or splitter.
-# (eg. Trac #1427)
-#
 AC_DEFUN([FP_GCC_EXTRA_FLAGS],
-[AC_REQUIRE([FP_HAVE_GCC])
+[AC_REQUIRE([FP_GCC_VERSION])
 AC_CACHE_CHECK([for extra options to pass gcc when compiling via C], [fp_cv_gcc_extra_opts],
 [fp_cv_gcc_extra_opts=
  FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-ge], [3.4],
   [fp_cv_gcc_extra_opts="$fp_cv_gcc_extra_opts -fwrapv"],
   [])
- case $TargetPlatform in
-  i386-*|x86_64-*) 
-     FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-ge], [3.2],
-      [fp_cv_gcc_extra_opts="$fp_cv_gcc_extra_opts -mno-omit-leaf-frame-pointer"],
-      [])
-    FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-ge], [3.4],
-     [FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-ge], [4.2],
-       [fp_cv_gcc_extra_opts="$fp_cv_gcc_extra_opts -fno-toplevel-reorder"],
-       [fp_cv_gcc_extra_opts="$fp_cv_gcc_extra_opts -fno-unit-at-a-time"]
-     )],
-     [])
-  ;;
-  sparc-*-solaris2) 
-    FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-ge], [4.2],
-      [fp_cv_gcc_extra_opts="$fp_cv_gcc_extra_opts -fno-toplevel-reorder"],
-      [])
-  ;;
- esac
 ])
 AC_SUBST([GccExtraViaCOpts],$fp_cv_gcc_extra_opts)
 ])
@@ -1104,7 +1140,7 @@ if test "$RELEASE" = "NO"; then
         AC_MSG_RESULT(given $PACKAGE_VERSION)
     elif test -d .git; then
         changequote(, )dnl
-        ver_date=`git log -n 1 --date=short --pretty=format:%ci | sed "s/^.*\([0-9][0-9][0-9][0-9]\)-\([0-9][0-9]\)-\([0-9][0-9]\).*$/\1\2\3/"`
+        ver_date=`git log -n 1 --date=short --pretty=format:%ci | cut -d ' ' -f 1 | tr -d -`
         if echo $ver_date | grep '^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$' 2>&1 >/dev/null; then true; else
         changequote([, ])dnl
                 AC_MSG_ERROR([failed to detect version date: check that git is in your path])
@@ -1384,7 +1420,7 @@ AC_MSG_NOTICE(Building in-tree ghc-pwd)
 ])
 
 AC_DEFUN([FP_BINDIST_GHC_PWD],[
-    GHC_PWD=utils/ghc-pwd/dist/build/tmp/ghc-pwd
+    GHC_PWD=utils/ghc-pwd/dist-install/build/tmp/ghc-pwd
 ])
 
 AC_DEFUN([FP_FIND_ROOT],[
@@ -1430,7 +1466,7 @@ case "$1" in
   hppa*)
     $2="hppa"
     ;;
-  i386)
+  i386|i486|i586|i686)
     $2="i386"
     ;;
   ia64)
@@ -1483,7 +1519,18 @@ case "$1" in
 # --------------------------------
 # converts vendor from gnu to ghc naming, and assigns the result to $target_var
 AC_DEFUN([GHC_CONVERT_VENDOR],[
-$2="$1"
+  case "$1" in
+  pc|gentoo) # like i686-pc-linux-gnu and i686-gentoo-freebsd8
+    $2="unknown"
+    ;;
+  softfloat) # like armv5tel-softfloat-linux-gnueabi
+    $2="unknown"
+    ;;
+  *)
+    #pass thru by default
+    $2="$1"
+    ;;
+  esac
 ])
 
 # GHC_CONVERT_OS(os, target_var)
@@ -1498,6 +1545,9 @@ case "$1" in
   freebsd|netbsd|openbsd|dragonfly|osf1|osf3|hpux|linuxaout|kfreebsdgnu|freebsd2|solaris2|cygwin32|mingw32|darwin|gnu|nextstep2|nextstep3|sunos4|ultrix|irix|aix|haiku)
     $2="$1"
     ;;
+  freebsd8) # like i686-gentoo-freebsd8
+    $2="freebsd"
+    ;;
   *)
     echo "Unknown OS $1"
     exit 1
@@ -1505,13 +1555,74 @@ case "$1" in
   esac
 ])
 
-# LIBRARY_VERSION(lib)
+# BOOTSTRAPPING_GHC_INFO_FIELD
+# --------------------------------
+# If the bootstrapping compiler is >= 7.1, then set the variable
+# $1 to the value of the ghc --info field $2. Otherwise, set it to
+# $3.
+AC_DEFUN([BOOTSTRAPPING_GHC_INFO_FIELD],[
+if test $GhcCanonVersion -ge 701
+then
+    $1=`"$WithGhc" --info | grep "^ ,(\"$2\"," | sed -e 's/.*","//' -e 's/")$//'`
+else
+    $1=$3
+fi
+AC_SUBST($1)
+])
+
+# LIBRARY_VERSION(lib, [dir])
 # --------------------------------
 # Gets the version number of a library.
 # If $1 is ghc-prim, then we define LIBRARY_ghc_prim_VERSION as 1.2.3
+# $2 points to the directory under libraries/
 AC_DEFUN([LIBRARY_VERSION],[
-LIBRARY_[]translit([$1], [-], [_])[]_VERSION=`grep -i "^version:" libraries/$1/$1.cabal | sed "s/.* //"`
+dir=m4_default([$2],[$1])
+LIBRARY_[]translit([$1], [-], [_])[]_VERSION=`grep -i "^version:" libraries/${dir}/$1.cabal | sed "s/.* //"`
 AC_SUBST(LIBRARY_[]translit([$1], [-], [_])[]_VERSION)
+])
+
+# XCODE_VERSION()
+# --------------------------------
+# Gets the version number of XCode, if on a Mac
+AC_DEFUN([XCODE_VERSION],[
+    if test "$TargetOS_CPP" = "darwin"
+    then
+        AC_MSG_CHECKING(XCode version)
+        XCodeVersion=`xcodebuild -version | grep Xcode | sed "s/Xcode //"`
+        # Old XCode versions don't actually give the XCode version
+        if test "$XCodeVersion" = ""
+        then
+            AC_MSG_RESULT(not found (too old?))
+            XCodeVersion1=0
+            XCodeVersion2=0
+        else
+            AC_MSG_RESULT($XCodeVersion)
+            XCodeVersion1=`echo "$XCodeVersion" | sed 's/\..*//'`
+            changequote(, )dnl
+            XCodeVersion2=`echo "$XCodeVersion" | sed 's/[^.]*\.\([^.]*\).*/\1/'`
+            changequote([, ])dnl
+            AC_MSG_NOTICE(XCode version component 1: $XCodeVersion1)
+            AC_MSG_NOTICE(XCode version component 2: $XCodeVersion2)
+        fi
+    fi
+])
+
+# FIND_GCC()
+# --------------------------------
+# Finds where gcc is
+AC_DEFUN([FIND_GCC],[
+    if test "$TargetOS_CPP" = "darwin" &&
+        test "$XCodeVersion1" -ge 4
+    then
+        # From Xcode 4, use 'gcc-4.2' to force the use of the gcc legacy
+        # backend (instead of the LLVM backend)
+        FP_ARG_WITH_PATH_GNU_PROG([CC], [gcc-4.2])
+    else
+        FP_ARG_WITH_PATH_GNU_PROG([CC], [gcc])
+    fi
+    export CC
+    WhatGccIsCalled="$CC"
+    AC_SUBST(WhatGccIsCalled)
 ])
 
 # LocalWords:  fi

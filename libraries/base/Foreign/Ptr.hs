@@ -1,4 +1,14 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP
+           , NoImplicitPrelude
+           , ForeignFunctionInterface
+           , MagicHash
+           , GeneralizedNewtypeDeriving
+  #-}
+#ifdef __GLASGOW_HASKELL__
+{-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
+#endif
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Foreign.Ptr
@@ -58,7 +68,6 @@ import GHC.Show
 import GHC.Enum
 import GHC.Word         ( Word(..) )
 
--- import Data.Int
 import Data.Word
 #else
 import Control.Monad    ( liftM )

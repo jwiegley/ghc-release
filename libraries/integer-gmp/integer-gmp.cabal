@@ -1,5 +1,5 @@
 name:           integer-gmp
-version:        0.2.0.3
+version:        0.3.0.0
 license:        BSD3
 license-file:   LICENSE
 maintainer:     libraries@haskell.org
@@ -16,13 +16,15 @@ extra-source-files:
   cbits/longlong.c
 
 source-repository head
-    type:     darcs
-    location: http://darcs.haskell.org/packages/integer-gmp/
+    type:     git
+    location: http://darcs.haskell.org/packages/integer-gmp.git/
 
 Library {
     build-depends: ghc-prim
     exposed-modules: GHC.Integer
                      GHC.Integer.GMP.Internals
+                     GHC.Integer.Logarithms
+                     GHC.Integer.Logarithms.Internals
     other-modules: GHC.Integer.Type
     extensions: CPP, MagicHash, UnboxedTuples, NoImplicitPrelude,
                 ForeignFunctionInterface, UnliftedFFITypes

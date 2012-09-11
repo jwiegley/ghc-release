@@ -10,7 +10,30 @@
 #
 # -----------------------------------------------------------------------------
 
-ifneq "$(phase)" "0"
+# We use a tarball like gmp-4.2.4-nodoc.tar.bz2, which is
+# gmp-4.2.4.tar.bz2 repacked without the doc/ directory contents.
+# That's because the doc/ directory contents are under the GFDL,
+# which causes problems for Debian.
+
+GMP_TARBALL := $(wildcard libraries/integer-gmp/gmp/tarball/gmp*.tar.bz2)
+GMP_DIR := $(patsubst libraries/integer-gmp/gmp/tarball/%-nodoc-patched.tar.bz2,%,$(GMP_TARBALL))
+
+ifneq "$(NO_CLEAN_GMP)" "YES"
+$(eval $(call clean-target,gmp,,\
+  libraries/integer-gmp/gmp/config.mk \
+  libraries/integer-gmp/gmp/libgmp.a \
+  libraries/integer-gmp/gmp/gmp.h \
+  libraries/integer-gmp/gmp/gmpbuild \
+  libraries/integer-gmp/gmp/$(GMP_DIR)))
+
+clean : clean_gmp
+.PHONY: clean_gmp
+clean_gmp:
+	"$(RM)" $(RM_OPTS_REC) libraries/integer-gmp/gmp/objs
+	"$(RM)" $(RM_OPTS_REC) libraries/integer-gmp/gmp/gmpbuild
+endif
+
+ifeq "$(phase)" "final"
 
 ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
 include libraries/integer-gmp/gmp/config.mk
@@ -20,7 +43,7 @@ libraries/integer-gmp_CC_OPTS += $(addprefix -I,$(GMP_INCLUDE_DIRS))
 libraries/integer-gmp_CC_OPTS += $(addprefix -L,$(GMP_LIB_DIRS))
 
 libraries/integer-gmp/cbits/mkGmpDerivedConstants$(exeext): libraries/integer-gmp/cbits/mkGmpDerivedConstants.c
-	"$(CC)" $(SRC_CC_OPTS) $(CONF_CC_OPTS_STAGE1) $(libraries/integer-gmp_CC_OPTS) $< -o $@
+	"$(CC_STAGE1)" $(SRC_CC_OPTS) $(CONF_CC_OPTS_STAGE1) $(libraries/integer-gmp_CC_OPTS) $< -o $@
 
 libraries/integer-gmp/cbits/GmpDerivedConstants.h: libraries/integer-gmp/cbits/mkGmpDerivedConstants$(exeext)
 	$< > $@
@@ -77,8 +100,6 @@ libraries/integer-gmp_dist-install_EXTRA_OBJS += libraries/integer-gmp/gmp/objs/
 endif
 endif
 
-PLATFORM := $(shell echo $(HOSTPLATFORM) | sed 's/i[567]86/i486/g')
-
 # 2007-09-26
 #     set -o igncr 
 # is not a valid command on non-Cygwin-systems.
@@ -99,14 +120,6 @@ PLATFORM := $(shell echo $(HOSTPLATFORM) | sed 's/i[567]86/i486/g')
 # follow, as it isn't used consistently. Instead we put an ln.bat in
 # path that always fails.
 
-# We use a tarball like gmp-4.2.4-nodoc.tar.bz2, which is
-# gmp-4.2.4.tar.bz2 repacked without the doc/ directory contents.
-# That's because the doc/ directory contents are under the GFDL,
-# which causes problems for Debian.
-
-GMP_TARBALL := $(wildcard libraries/integer-gmp/gmp/tarball/gmp*.tar.bz2)
-GMP_DIR := $(patsubst libraries/integer-gmp/gmp/tarball/%-nodoc-patched.tar.bz2,%,$(GMP_TARBALL))
-
 libraries/integer-gmp/gmp/libgmp.a libraries/integer-gmp/gmp/gmp.h:
 	$(RM) -rf libraries/integer-gmp/gmp/$(GMP_DIR) libraries/integer-gmp/gmp/gmpbuild libraries/integer-gmp/gmp/objs
 	cat $(GMP_TARBALL) | $(BZIP2_CMD) -d | { cd libraries/integer-gmp/gmp && $(TAR_CMD) -xf - ; }
@@ -116,22 +129,15 @@ libraries/integer-gmp/gmp/libgmp.a libraries/integer-gmp/gmp/gmp.h:
 	    PATH=`pwd`:$$PATH; \
 	    export PATH; \
 	    cd gmpbuild && \
-	    CC=$(WhatGccIsCalled) NM=$(NM) AR=$(AR) $(SHELL) configure \
-	          --enable-shared=no --host=$(PLATFORM) --build=$(PLATFORM)
+	    CC=$(CC_STAGE1) NM=$(NM) AR=$(AR_STAGE1) $(SHELL) configure \
+	          --enable-shared=no \
+	          --host=$(HOSTPLATFORM) --build=$(BUILDPLATFORM)
 	$(MAKE) -C libraries/integer-gmp/gmp/gmpbuild MAKEFLAGS=
 	$(CP) libraries/integer-gmp/gmp/gmpbuild/gmp.h libraries/integer-gmp/gmp/
 	$(CP) libraries/integer-gmp/gmp/gmpbuild/.libs/libgmp.a libraries/integer-gmp/gmp/
 	$(MKDIRHIER) libraries/integer-gmp/gmp/objs
-	cd libraries/integer-gmp/gmp/objs && $(AR) x ../libgmp.a
+	cd libraries/integer-gmp/gmp/objs && $(AR_STAGE1) x ../libgmp.a
 	$(RANLIB) libraries/integer-gmp/gmp/libgmp.a
-
-ifneq "$(NO_CLEAN_GMP)" "YES"
-$(eval $(call clean-target,gmp,,\
-  libraries/integer-gmp/gmp/libgmp.a \
-  libraries/integer-gmp/gmp/gmp.h \
-  libraries/integer-gmp/gmp/gmpbuild \
-  libraries/integer-gmp/gmp/$(GMP_DIR)))
-endif
 
 # XXX TODO:
 #stamp.gmp.shared:
@@ -143,8 +149,9 @@ endif
 #	    PATH=`pwd`:$$PATH; \
 #	    export PATH; \
 #	    cd gmpbuild-shared && \
-#	    CC=$(WhatGccIsCalled) $(SHELL) configure \
-#	          --enable-shared=yes --disable-static --host=$(PLATFORM) --build=$(PLATFORM)
+#	    CC=$(CC_STAGE1) $(SHELL) configure \
+#	          --enable-shared=yes --disable-static \
+#	          --host=$(HOSTPLATFORM) --build=$(BUILDPLATFORM)
 #	touch $@
 #
 #gmp.h: stamp.gmp.static

@@ -27,70 +27,83 @@ import Reg
 import RegClass
 import Size
 
-import CmmExpr	(wordWidth)
+import CmmType	(wordWidth)
 import Outputable
 import Unique
 import FastTypes
+import Platform
+
+import qualified X86.Regs       as X86
+import qualified X86.RegInfo    as X86
+
+import qualified PPC.Regs       as PPC
+
+import qualified SPARC.Regs     as SPARC
+
+targetVirtualRegSqueeze :: Platform -> RegClass -> VirtualReg -> FastInt
+targetVirtualRegSqueeze platform
+    = case platformArch platform of
+      ArchX86     -> X86.virtualRegSqueeze
+      ArchX86_64  -> X86.virtualRegSqueeze
+      ArchPPC     -> PPC.virtualRegSqueeze
+      ArchSPARC   -> SPARC.virtualRegSqueeze
+      ArchPPC_64  -> panic "targetVirtualRegSqueeze ArchPPC_64"
+      ArchARM     -> panic "targetVirtualRegSqueeze ArchARM"
+      ArchUnknown -> panic "targetVirtualRegSqueeze ArchUnknown"
+
+targetRealRegSqueeze :: Platform -> RegClass -> RealReg -> FastInt
+targetRealRegSqueeze platform
+    = case platformArch platform of
+      ArchX86     -> X86.realRegSqueeze
+      ArchX86_64  -> X86.realRegSqueeze
+      ArchPPC     -> PPC.realRegSqueeze
+      ArchSPARC   -> SPARC.realRegSqueeze
+      ArchPPC_64  -> panic "targetRealRegSqueeze ArchPPC_64"
+      ArchARM     -> panic "targetRealRegSqueeze ArchARM"
+      ArchUnknown -> panic "targetRealRegSqueeze ArchUnknown"
+
+targetClassOfRealReg :: Platform -> RealReg -> RegClass
+targetClassOfRealReg platform
+    = case platformArch platform of
+      ArchX86     -> X86.classOfRealReg
+      ArchX86_64  -> X86.classOfRealReg
+      ArchPPC     -> PPC.classOfRealReg
+      ArchSPARC   -> SPARC.classOfRealReg
+      ArchPPC_64  -> panic "targetClassOfRealReg ArchPPC_64"
+      ArchARM     -> panic "targetClassOfRealReg ArchARM"
+      ArchUnknown -> panic "targetClassOfRealReg ArchUnknown"
+
+-- TODO: This should look at targetPlatform too
+targetWordSize :: Size
+targetWordSize = intSize wordWidth
+
+targetMkVirtualReg :: Platform -> Unique -> Size -> VirtualReg
+targetMkVirtualReg platform
+    = case platformArch platform of
+      ArchX86     -> X86.mkVirtualReg
+      ArchX86_64  -> X86.mkVirtualReg
+      ArchPPC     -> PPC.mkVirtualReg
+      ArchSPARC   -> SPARC.mkVirtualReg
+      ArchPPC_64  -> panic "targetMkVirtualReg ArchPPC_64"
+      ArchARM     -> panic "targetMkVirtualReg ArchARM"
+      ArchUnknown -> panic "targetMkVirtualReg ArchUnknown"
+
+targetRegDotColor :: Platform -> RealReg -> SDoc
+targetRegDotColor platform
+    = case platformArch platform of
+      ArchX86     -> X86.regDotColor platform
+      ArchX86_64  -> X86.regDotColor platform
+      ArchPPC     -> PPC.regDotColor
+      ArchSPARC   -> SPARC.regDotColor
+      ArchPPC_64  -> panic "targetRegDotColor ArchPPC_64"
+      ArchARM     -> panic "targetRegDotColor ArchARM"
+      ArchUnknown -> panic "targetRegDotColor ArchUnknown"
 
 
-#if i386_TARGET_ARCH || x86_64_TARGET_ARCH
-import qualified X86.Regs	as X86
-import qualified X86.RegInfo	as X86
-
-#elif powerpc_TARGET_ARCH
-import qualified PPC.Regs	as PPC
-
-#elif sparc_TARGET_ARCH	
-import qualified SPARC.Regs	as SPARC
-
-#else
-#error "RegAlloc.Graph.TargetReg: not defined"
-#endif
-
-targetVirtualRegSqueeze :: RegClass -> VirtualReg -> FastInt
-targetRealRegSqueeze 	:: RegClass -> RealReg -> FastInt
-targetClassOfRealReg 	:: RealReg -> RegClass
-targetWordSize 		:: Size
-targetMkVirtualReg 	:: Unique -> Size -> VirtualReg
-targetRegDotColor 	:: RealReg -> SDoc
-
--- x86 -------------------------------------------------------------------------
-#if i386_TARGET_ARCH || x86_64_TARGET_ARCH
-targetVirtualRegSqueeze = X86.virtualRegSqueeze
-targetRealRegSqueeze 	= X86.realRegSqueeze
-targetClassOfRealReg 	= X86.classOfRealReg
-targetWordSize 		= intSize wordWidth
-targetMkVirtualReg 	= X86.mkVirtualReg
-targetRegDotColor 	= X86.regDotColor
-
--- ppc -------------------------------------------------------------------------
-#elif powerpc_TARGET_ARCH
-targetVirtualRegSqueeze = PPC.virtualRegSqueeze
-targetRealRegSqueeze 	= PPC.realRegSqueeze
-targetClassOfRealReg 	= PPC.classOfRealReg
-targetWordSize 		= intSize wordWidth
-targetMkVirtualReg 	= PPC.mkVirtualReg
-targetRegDotColor 	= PPC.regDotColor
-
--- sparc -----------------------------------------------------------------------
-#elif sparc_TARGET_ARCH
-targetVirtualRegSqueeze = SPARC.virtualRegSqueeze
-targetRealRegSqueeze 	= SPARC.realRegSqueeze
-targetClassOfRealReg 	= SPARC.classOfRealReg
-targetWordSize 		= intSize wordWidth
-targetMkVirtualReg 	= SPARC.mkVirtualReg
-targetRegDotColor 	= SPARC.regDotColor
-
---------------------------------------------------------------------------------
-#else
-#error "RegAlloc.Graph.TargetReg: not defined"
-#endif
-
-
-targetClassOfReg :: Reg -> RegClass
-targetClassOfReg reg
+targetClassOfReg :: Platform -> Reg -> RegClass
+targetClassOfReg platform reg
  = case reg of
- 	RegVirtual vr	-> classOfVirtualReg vr
-	RegReal rr	-> targetClassOfRealReg rr
+   RegVirtual vr -> classOfVirtualReg vr
+   RegReal rr -> targetClassOfRealReg platform rr
 
 

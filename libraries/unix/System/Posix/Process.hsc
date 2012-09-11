@@ -29,12 +29,13 @@ module System.Posix.Process (
     -- ** Process environment
     getProcessID,
     getParentProcessID,
-    getProcessGroupID,
 
     -- ** Process groups
-    createProcessGroup,
+    getProcessGroupID,
+    getProcessGroupIDOf,
+    createProcessGroupFor,
     joinProcessGroup,
-    setProcessGroupID,
+    setProcessGroupIDOf,
 
     -- ** Sessions
     createSession,
@@ -58,12 +59,16 @@ module System.Posix.Process (
     getAnyProcessStatus,
     getGroupProcessStatus,
 
+    -- ** Deprecated
+    createProcessGroup,
+    setProcessGroupID,
+
  ) where
 
 #include "HsUnix.h"
 
 import Foreign.C.Error
-import Foreign.C.String ( CString, withCString )
+import Foreign.C.String
 import Foreign.C.Types ( CInt, CClock )
 import Foreign.Marshal.Alloc ( alloca, allocaBytes )
 import Foreign.Marshal.Array ( withArray0 )
@@ -78,6 +83,13 @@ import Control.Monad
 
 #ifdef __GLASGOW_HASKELL__
 import GHC.TopHandler	( runIO )
+#endif
+
+#if __GLASGOW_HASKELL__ > 611
+import System.Posix.Internals ( withFilePath )
+#else
+withFilePath :: FilePath -> (CString -> IO a) -> IO a
+withFilePath = withCString
 #endif
 
 #ifdef __HUGS__
@@ -111,11 +123,33 @@ getProcessGroupID = c_getpgrp
 foreign import ccall unsafe "getpgrp"
   c_getpgrp :: IO CPid
 
--- | @'createProcessGroup' pid@ calls @setpgid@ to make
+-- | @'getProcessGroupIDOf' pid@ calls @getpgid@ to obtain the
+--   'ProcessGroupID' for process @pid@.
+getProcessGroupIDOf :: ProcessID -> IO ProcessGroupID
+getProcessGroupIDOf pid =
+  throwErrnoIfMinus1 "getProcessGroupIDOf" (c_getpgid pid)
+
+foreign import ccall unsafe "getpgid"
+  c_getpgid :: CPid -> IO CPid
+
+{-
+   To be added in the future, after the deprecation period for the
+   existing createProcessGroup has elapsed:
+
+-- | 'createProcessGroup' calls @setpgid(0,0)@ to make
+--   the current process a new process group leader.
+createProcessGroup :: IO ProcessGroupID
+createProcessGroup = do
+  throwErrnoIfMinus1_ "createProcessGroup" (c_setpgid 0 0)
+  pgid <- getProcessGroupID
+  return pgid
+-}
+
+-- | @'createProcessGroupFor' pid@ calls @setpgid@ to make
 --   process @pid@ a new process group leader.
-createProcessGroup :: ProcessID -> IO ProcessGroupID
-createProcessGroup pid = do
-  throwErrnoIfMinus1_ "createProcessGroup" (c_setpgid pid 0)
+createProcessGroupFor :: ProcessID -> IO ProcessGroupID
+createProcessGroupFor pid = do
+  throwErrnoIfMinus1_ "createProcessGroupFor" (c_setpgid pid 0)
   return pid
 
 -- | @'joinProcessGroup' pgid@ calls @setpgid@ to set the
@@ -124,11 +158,22 @@ joinProcessGroup :: ProcessGroupID -> IO ()
 joinProcessGroup pgid =
   throwErrnoIfMinus1_ "joinProcessGroup" (c_setpgid 0 pgid)
 
--- | @'setProcessGroupID' pid pgid@ calls @setpgid@ to set the
---   'ProcessGroupID' for process @pid@ to @pgid@.
-setProcessGroupID :: ProcessID -> ProcessGroupID -> IO ()
-setProcessGroupID pid pgid =
-  throwErrnoIfMinus1_ "setProcessGroupID" (c_setpgid pid pgid)
+{-
+   To be added in the future, after the deprecation period for the
+   existing setProcessGroupID has elapsed:
+
+-- | @'setProcessGroupID' pgid@ calls @setpgid@ to set the
+--   'ProcessGroupID' of the current process to @pgid@.
+setProcessGroupID :: ProcessGroupID -> IO ()
+setProcessGroupID pgid =
+  throwErrnoIfMinus1_ "setProcessGroupID" (c_setpgid 0 pgid)
+-}
+
+-- | @'setProcessGroupIDOf' pid pgid@ calls @setpgid@ to set the
+--   'ProcessGroupIDOf' for process @pid@ to @pgid@.
+setProcessGroupIDOf :: ProcessID -> ProcessGroupID -> IO ()
+setProcessGroupIDOf pid pgid =
+  throwErrnoIfMinus1_ "setProcessGroupIDOf" (c_setpgid pid pgid)
 
 foreign import ccall unsafe "setpgid"
   c_setpgid :: CPid -> CPid -> IO CInt
@@ -256,7 +301,7 @@ forkProcess action = do
   stable <- newStablePtr (runIO action)
   pid <- throwErrnoIfMinus1 "forkProcess" (forkProcessPrim stable)
   freeStablePtr stable
-  return $ fromIntegral pid
+  return pid
 
 foreign import ccall "forkProcess" forkProcessPrim :: StablePtr (IO ()) -> IO CPid
 #endif /* __GLASGOW_HASKELL__ */
@@ -275,8 +320,8 @@ executeFile :: FilePath			    -- ^ Command
             -> Maybe [(String, String)]	    -- ^ Environment
             -> IO a
 executeFile path search args Nothing = do
-  withCString path $ \s ->
-    withMany withCString (path:args) $ \cstrs ->
+  withFilePath path $ \s ->
+    withMany withFilePath (path:args) $ \cstrs ->
       withArray0 nullPtr cstrs $ \arr -> do
 	pPrPr_disableITimers
 	if search 
@@ -285,11 +330,11 @@ executeFile path search args Nothing = do
         return undefined -- never reached
 
 executeFile path search args (Just env) = do
-  withCString path $ \s ->
-    withMany withCString (path:args) $ \cstrs ->
+  withFilePath path $ \s ->
+    withMany withFilePath (path:args) $ \cstrs ->
       withArray0 nullPtr cstrs $ \arg_arr ->
     let env' = map (\ (name, val) -> name ++ ('=' : val)) env in
-    withMany withCString env' $ \cenv ->
+    withMany withFilePath env' $ \cenv ->
       withArray0 nullPtr cenv $ \env_arr -> do
 	pPrPr_disableITimers
 	if search 
@@ -387,5 +432,29 @@ exitImmediately exitcode = c_exit (exitcode2Int exitcode)
 
 foreign import ccall unsafe "exit"
   c_exit :: CInt -> IO ()
+
+-- -----------------------------------------------------------------------------
+-- Deprecated or subject to change
+
+{-# DEPRECATED createProcessGroup "This function is scheduled to be replaced by something different in the future, we therefore recommend that you do not use this version and use createProcessGroupFor instead." #-}
+-- | @'createProcessGroup' pid@ calls @setpgid@ to make
+--   process @pid@ a new process group leader.
+--   This function is currently deprecated,
+--   and might be changed to making the current
+--   process a new process group leader in future versions.
+createProcessGroup :: ProcessID -> IO ProcessGroupID
+createProcessGroup pid = do
+  throwErrnoIfMinus1_ "createProcessGroup" (c_setpgid pid 0)
+  return pid
+
+{-# DEPRECATED setProcessGroupID "This function is scheduled to be replaced by something different in the future, we therefore recommend that you do not use this version and use setProcessGroupIdOf instead." #-}
+-- | @'setProcessGroupID' pid pgid@ calls @setpgid@ to set the
+--   'ProcessGroupID' for process @pid@ to @pgid@.
+--   This function is currently deprecated,
+--   and might be changed to setting the 'ProcessGroupID'
+--   for the current process in future versions.
+setProcessGroupID :: ProcessID -> ProcessGroupID -> IO ()
+setProcessGroupID pid pgid =
+  throwErrnoIfMinus1_ "setProcessGroupID" (c_setpgid pid pgid)
 
 -- -----------------------------------------------------------------------------

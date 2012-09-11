@@ -20,7 +20,7 @@ module CgUtils (
         emitRODataLits, mkRODataLits,
         emitIf, emitIfThenElse,
 	emitRtsCall, emitRtsCallWithVols, emitRtsCallWithResult,
-	assignTemp, newTemp,
+	assignTemp, assignTemp_, newTemp,
 	emitSimultaneously,
 	emitSwitch, emitLitSwitch,
 	tagToClosure,
@@ -29,7 +29,7 @@ module CgUtils (
 	activeStgRegs, fixStgRegisters,
 
 	cmmAndWord, cmmOrWord, cmmNegate, cmmEqWord, cmmNeWord,
-        cmmUGtWord,
+        cmmUGtWord, cmmSubWord, cmmMulWord, cmmAddWord, cmmUShrWord,
 	cmmOffsetExprW, cmmOffsetExprB,
 	cmmRegOffW, cmmRegOffB,
 	cmmLabelOffW, cmmLabelOffB,
@@ -47,7 +47,7 @@ module CgUtils (
 	packHalfWordsCLit,
 	blankWord,
 
-	getSRTInfo, clHasCafRefs
+	getSRTInfo
   ) where
 
 #include "HsVersions.h"
@@ -61,10 +61,9 @@ import Id
 import IdInfo
 import Constants
 import SMRep
-import PprCmm		( {- instances -} )
-import Cmm
+import OldCmm
+import OldCmmUtils
 import CLabel
-import CmmUtils
 import ForeignCall
 import ClosureInfo
 import StgSyn (SRT(..))
@@ -181,8 +180,10 @@ cmmULtWord e1 e2 = CmmMachOp mo_wordULt [e1, e2]
 cmmUGeWord e1 e2 = CmmMachOp mo_wordUGe [e1, e2]
 cmmUGtWord e1 e2 = CmmMachOp mo_wordUGt [e1, e2]
 --cmmShlWord e1 e2 = CmmMachOp mo_wordShl [e1, e2]
---cmmUShrWord e1 e2 = CmmMachOp mo_wordUShr [e1, e2]
+cmmUShrWord e1 e2 = CmmMachOp mo_wordUShr [e1, e2]
+cmmAddWord e1 e2 = CmmMachOp mo_wordAdd [e1, e2]
 cmmSubWord e1 e2 = CmmMachOp mo_wordSub [e1, e2]
+cmmMulWord e1 e2 = CmmMachOp mo_wordMul [e1, e2]
 
 cmmNegate :: CmmExpr -> CmmExpr
 cmmNegate (CmmLit (CmmInt n rep)) = CmmLit (CmmInt (-n) rep)
@@ -544,26 +545,26 @@ baseRegOffset _			  = panic "baseRegOffset:other"
 emitDataLits :: CLabel -> [CmmLit] -> Code
 -- Emit a data-segment data block
 emitDataLits lbl lits
-  = emitData Data (CmmDataLabel lbl : map CmmStaticLit lits)
+  = emitData Data (Statics lbl $ map CmmStaticLit lits)
 
-mkDataLits :: CLabel -> [CmmLit] -> GenCmmTop CmmStatic info graph
+mkDataLits :: CLabel -> [CmmLit] -> GenCmmTop CmmStatics info graph
 -- Emit a data-segment data block
 mkDataLits lbl lits
-  = CmmData Data (CmmDataLabel lbl : map CmmStaticLit lits)
+  = CmmData Data (Statics lbl $ map CmmStaticLit lits)
 
 emitRODataLits :: String -> CLabel -> [CmmLit] -> Code
 -- Emit a read-only data block
 emitRODataLits caller lbl lits
-  = emitData section (CmmDataLabel lbl : map CmmStaticLit lits)
+  = emitData section (Statics lbl $ map CmmStaticLit lits)
     where section | any needsRelocation lits = RelocatableReadOnlyData
                   | otherwise                = ReadOnlyData
           needsRelocation (CmmLabel _)      = True
           needsRelocation (CmmLabelOff _ _) = True
           needsRelocation _                 = False
 
-mkRODataLits :: CLabel -> [CmmLit] -> GenCmmTop CmmStatic info graph
+mkRODataLits :: CLabel -> [CmmLit] -> GenCmmTop CmmStatics info graph
 mkRODataLits lbl lits
-  = CmmData section (CmmDataLabel lbl : map CmmStaticLit lits)
+  = CmmData section (Statics lbl $ map CmmStaticLit lits)
   where section | any needsRelocation lits = RelocatableReadOnlyData
                 | otherwise                = ReadOnlyData
         needsRelocation (CmmLabel _)      = True
@@ -579,7 +580,7 @@ mkByteStringCLit :: [Word8] -> FCode CmmLit
 mkByteStringCLit bytes
   = do 	{ uniq <- newUnique
 	; let lbl = mkStringLitLabel uniq
-	; emitData ReadOnlyData [CmmDataLabel lbl, CmmString bytes]
+	; emitData ReadOnlyData $ Statics lbl [CmmString bytes]
 	; return (CmmLabel lbl) }
 
 -------------------------------------------------------------------------
@@ -588,6 +589,9 @@ mkByteStringCLit bytes
 --
 -------------------------------------------------------------------------
 
+-- | If the expression is trivial, return it.  Otherwise, assign the
+-- expression to a temporary register and return an expression
+-- referring to this register.
 assignTemp :: CmmExpr -> FCode CmmExpr
 -- For a non-trivial expression, e, create a local
 -- variable and assign the expression to it
@@ -596,6 +600,18 @@ assignTemp e
   | otherwise 	       = do { reg <- newTemp (cmmExprType e) 
 			    ; stmtC (CmmAssign (CmmLocal reg) e)
 			    ; return (CmmReg (CmmLocal reg)) }
+
+-- | If the expression is trivial and doesn't refer to a global
+-- register, return it.  Otherwise, assign the expression to a
+-- temporary register and return an expression referring to this
+-- register.
+assignTemp_ :: CmmExpr -> FCode CmmExpr
+assignTemp_ e
+    | isTrivialCmmExpr e && hasNoGlobalRegs e = return e
+    | otherwise = do
+        reg <- newTemp (cmmExprType e)
+        stmtC (CmmAssign (CmmLocal reg) e)
+        return (CmmReg (CmmLocal reg))
 
 newTemp :: CmmType -> FCode LocalReg
 newTemp rep = do { uniq <- newUnique; return (LocalReg uniq rep) }
@@ -979,12 +995,6 @@ getSRTInfo = do
 
 srt_escape = (-1) :: StgHalfWord
 
-clHasCafRefs :: ClosureInfo -> CafInfo
-clHasCafRefs (ClosureInfo {closureSRT = srt}) = 
-  case srt of NoC_SRT -> NoCafRefs
-              _       -> MayHaveCafRefs
-clHasCafRefs (ConInfo {}) = NoCafRefs
-
 -- -----------------------------------------------------------------------------
 --
 -- STG/Cmm GlobalReg
@@ -1081,9 +1091,9 @@ get_Regtable_addr_from_offset rep offset =
 fixStgRegisters :: RawCmmTop -> RawCmmTop
 fixStgRegisters top@(CmmData _ _) = top
 
-fixStgRegisters (CmmProc info lbl params (ListGraph blocks)) =
+fixStgRegisters (CmmProc info lbl (ListGraph blocks)) =
   let blocks' = map fixStgRegBlock blocks
-  in CmmProc info lbl params $ ListGraph blocks'
+  in CmmProc info lbl $ ListGraph blocks'
 
 fixStgRegBlock :: CmmBasicBlock -> CmmBasicBlock
 fixStgRegBlock (BasicBlock id stmts) =

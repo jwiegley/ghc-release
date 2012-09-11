@@ -11,7 +11,6 @@
 --
 -----------------------------------------------------------------------------
 
-
 module StgCmmClosure (
         SMRep, 
 	DynTag,  tagForCon, isSmallFamily,
@@ -36,7 +35,7 @@ module StgCmmClosure (
 	closureGoodStuffSize, closurePtrsSize,
 	slopSize, 
 
-	closureName, infoTableLabelFromCI,
+	closureName, infoTableLabelFromCI, entryLabelFromCI,
 	closureLabelFromCI,
 	closureTypeInfo,
 	closureLFInfo, isLFThunk,closureSMRep, closureUpdReqd, 
@@ -73,7 +72,7 @@ import ClosureInfo (ArgDescr(..), C_SRT(..), Liveness(..))
 
 import StgSyn
 import SMRep
-import Cmm	( ClosureTypeInfo(..), ConstrDescription )
+import CmmDecl ( ClosureTypeInfo(..), ConstrDescription )
 import CmmExpr
 
 import CLabel
@@ -158,7 +157,6 @@ data LambdaFormInfo
   | LFBlackHole		-- Used for the closures allocated to hold the result
 			-- of a CAF.  We want the target of the update frame to
 			-- be in the heap, so we make a black hole to hold it.
-        CLabel          -- Flavour (info label, eg CAF_BLACKHOLE_info).
 
 
 -------------------------
@@ -305,13 +303,15 @@ type DynTag = Int	-- The tag on a *pointer*
 
 {- 	Note [Data constructor dynamic tags]
 	~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The family size of a data type (the number of constructors)
-can be either:
+The family size of a data type (the number of constructors
+or the arity of a function) can be either:
     * small, if the family size < 2**tag_bits
     * big, otherwise.
 
 Small families can have the constructor tag in the tag bits.
-Big families only use the tag value 1 to represent evaluatedness. -}
+Big families only use the tag value 1 to represent evaluatedness.
+We don't have very many tag bits: for example, we have 2 bits on
+x86-32 and 3 bits on x86-64. -}
 
 isSmallFamily :: Int -> Bool
 isSmallFamily fam_size = fam_size <= mAX_PTR_TAG
@@ -353,7 +353,7 @@ maybeIsLFCon _ = Nothing
 ------------
 isLFThunk :: LambdaFormInfo -> Bool
 isLFThunk (LFThunk _ _ _ _ _)  = True
-isLFThunk (LFBlackHole _)      = True
+isLFThunk LFBlackHole          = True
 	-- return True for a blackhole: this function is used to determine
 	-- whether to use the thunk header in SMP mode, and a blackhole
 	-- must have one.
@@ -439,7 +439,7 @@ nodeMustPointToIt (LFThunk {})	-- Node must point to a standard-form thunk
 
 nodeMustPointToIt (LFUnknown _)   = True
 nodeMustPointToIt LFUnLifted      = False
-nodeMustPointToIt (LFBlackHole _) = True    -- BH entry may require Node to point
+nodeMustPointToIt LFBlackHole     = True    -- BH entry may require Node to point
 nodeMustPointToIt LFLetNoEscape   = False 
 
 -----------------------------------------------------------------------------
@@ -547,7 +547,7 @@ getCallMethod _ name _ (LFUnknown False) n_args
   = ASSERT2 ( n_args == 0, ppr name <+> ppr n_args ) 
     EnterIt -- Not a function
 
-getCallMethod _ _name _ (LFBlackHole _) _n_args
+getCallMethod _ _name _ LFBlackHole _n_args
   = SlowCall	-- Presumably the black hole has by now
 		-- been updated, but we don't know with
 		-- what, so we slow call it
@@ -678,7 +678,8 @@ data ClosureInfo
 	closureSRT    :: !C_SRT,	  -- What SRT applies to this closure
 	closureType   :: !Type,		  -- Type of closure (ToDo: remove)
 	closureDescr  :: !String,	  -- closure description (for profiling)
-        closureCafs   :: !CafInfo         -- whether the closure may have CAFs
+        closureCafs   :: !CafInfo,        -- whether the closure may have CAFs
+	closureInfLcl :: Bool             -- can the info pointer be a local symbol?
     }
 
   -- Constructor closures don't have a unique info table label (they use
@@ -724,7 +725,12 @@ mkClosureInfo is_static id lf_info tot_wds ptr_wds srt_info descr
 		  closureSRT = srt_info,
 		  closureType = idType id,
 		  closureDescr = descr,
-                  closureCafs = idCafInfo id }
+                  closureCafs = idCafInfo id,
+		  closureInfLcl = isDataConWorkId id }
+		    -- Make the _info pointer for the implicit datacon worker binding
+		    -- local. The reason we can do this is that importing code always
+		    -- either uses the _closure or _con_info. By the invariants in CorePrep
+		    -- anything else gets eta expanded.
   where
     name   = idName id
     sm_rep = chooseSMRep is_static lf_info tot_wds ptr_wds
@@ -750,12 +756,13 @@ cafBlackHoleClosureInfo (ClosureInfo { closureName = nm,
 				       closureType = ty,
 				       closureCafs = cafs })
   = ClosureInfo { closureName   = nm,
-		  closureLFInfo = LFBlackHole mkCAFBlackHoleInfoTableLabel,
+		  closureLFInfo = LFBlackHole,
 		  closureSMRep  = BlackHoleRep,
 		  closureSRT    = NoC_SRT,
 		  closureType   = ty,
 		  closureDescr  = "", 
-		  closureCafs   = cafs }
+		  closureCafs   = cafs,
+		  closureInfLcl = False }
 cafBlackHoleClosureInfo _ = panic "cafBlackHoleClosureInfo"
 
 
@@ -939,7 +946,7 @@ closureUpdReqd ConInfo{} = False
 
 lfUpdatable :: LambdaFormInfo -> Bool
 lfUpdatable (LFThunk _ _ upd _ _)  = upd
-lfUpdatable (LFBlackHole _)	   = True
+lfUpdatable LFBlackHole 	   = True
 	-- Black-hole closures are allocated to receive the results of an
 	-- alg case with a named default... so they need to be updated.
 lfUpdatable _ = False
@@ -985,28 +992,39 @@ isToplevClosure _ = False
 --------------------------------------
 
 infoTableLabelFromCI :: ClosureInfo -> CLabel
-infoTableLabelFromCI cl@(ClosureInfo { closureName = name,
-				       closureLFInfo = lf_info })
+infoTableLabelFromCI = fst . labelsFromCI
+
+entryLabelFromCI :: ClosureInfo -> CLabel
+entryLabelFromCI = snd . labelsFromCI
+
+labelsFromCI :: ClosureInfo -> (CLabel, CLabel) -- (Info, Entry)
+labelsFromCI cl@(ClosureInfo { closureName = name,
+			       closureLFInfo = lf_info,
+			       closureInfLcl = is_lcl })
   = case lf_info of
-	LFBlackHole info -> info
+	LFBlackHole -> (mkCAFBlackHoleInfoTableLabel, mkCAFBlackHoleEntryLabel)
 
 	LFThunk _ _ upd_flag (SelectorThunk offset) _ -> 
-		mkSelectorInfoLabel upd_flag offset
+		bothL (mkSelectorInfoLabel, mkSelectorEntryLabel) upd_flag offset
 
 	LFThunk _ _ upd_flag (ApThunk arity) _ -> 
-		mkApInfoTableLabel upd_flag arity
+		bothL (mkApInfoTableLabel, mkApEntryLabel) upd_flag arity
 
-	LFThunk{}      -> mkLocalInfoTableLabel name $ clHasCafRefs cl
+	LFThunk{}      -> bothL std_mk_lbls name $ clHasCafRefs cl
 
-	LFReEntrant _ _ _ _ -> mkLocalInfoTableLabel name $ clHasCafRefs cl
+	LFReEntrant _ _ _ _ -> bothL std_mk_lbls name $ clHasCafRefs cl
 
-	_other -> panic "infoTableLabelFromCI"
+	_other -> panic "labelsFromCI"
+  where std_mk_lbls = if is_lcl then (mkLocalInfoTableLabel, mkLocalEntryLabel) else (mkInfoTableLabel, mkEntryLabel)
 
-infoTableLabelFromCI cl@(ConInfo { closureCon = con, closureSMRep = rep })
-  | isStaticRep rep = mkStaticInfoTableLabel  name $ clHasCafRefs cl
-  | otherwise	    = mkConInfoTableLabel     name $ clHasCafRefs cl
+labelsFromCI cl@(ConInfo { closureCon = con, closureSMRep = rep })
+  | isStaticRep rep = bothL (mkStaticInfoTableLabel, mkStaticConEntryLabel)  name $ clHasCafRefs cl
+  | otherwise	    = bothL (mkConInfoTableLabel,    mkConEntryLabel)     name $ clHasCafRefs cl
   where
     name = dataConName con
+
+bothL :: (a -> b -> c, a -> b -> c) -> a -> b -> (c, c)
+bothL (f, g) x y = (f x y, g x y)
 
 -- ClosureInfo for a closure (as opposed to a constructor) is always local
 closureLabelFromCI :: ClosureInfo -> CLabel
@@ -1085,10 +1103,9 @@ getTyDescription ty
     fun_result other	     = getTyDescription other
 
 getPredTyDescription :: PredType -> String
-getPredTyDescription (ClassP cl _)     = getOccString cl
-getPredTyDescription (IParam ip _)     = getOccString (ipNameName ip)
-getPredTyDescription (EqPred ty1 _ty2) = getTyDescription ty1	-- Urk?
-
+getPredTyDescription (ClassP cl _) = getOccString cl
+getPredTyDescription (IParam ip _) = getOccString (ipNameName ip)
+getPredTyDescription (EqPred {})   = "Type equality"
 
 --------------------------------------
 --   SRTs/CAFs

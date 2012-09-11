@@ -124,7 +124,7 @@ typedef struct {
     StgHeader     header;
     StgClosure   *indirectee;
     StgClosure   *static_link;
-    StgInfoTable *saved_info;
+    const StgInfoTable *saved_info;
 } StgIndStatic;
 
 typedef struct StgBlockingQueue_ {
@@ -164,6 +164,11 @@ typedef struct {
     StgWord    exceptions_blocked;
     StgClosure *handler;
 } StgCatchFrame;
+
+typedef struct {
+    const StgInfoTable* info;
+    struct StgStack_ *next_chunk;
+} StgUnderflowFrame;
 
 typedef struct {
     StgHeader  header;

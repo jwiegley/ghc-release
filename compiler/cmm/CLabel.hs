@@ -51,9 +51,7 @@ module CLabel (
 
 	mkAsmTempLabel,
 
-	mkModuleInitLabel,
-	mkPlainModuleInitLabel,
-	mkModuleInitTableLabel,
+        mkPlainModuleInitLabel,
 
 	mkSplitMarkerLabel,
 	mkDirty_MUT_VAR_Label,
@@ -67,13 +65,11 @@ module CLabel (
 
 	mkTopTickyCtrLabel,
         mkCAFBlackHoleInfoTableLabel,
+        mkCAFBlackHoleEntryLabel,
 	mkRtsPrimOpLabel,
 	mkRtsSlowTickyCtrLabel,
 
-	moduleRegdLabel,
-	moduleRegTableLabel,
-
-	mkSelectorInfoLabel,
+        mkSelectorInfoLabel,
 	mkSelectorEntryLabel,
 
 	mkCmmInfoLabel,
@@ -102,10 +98,9 @@ module CLabel (
         mkDeadStripPreventer,
 
         mkHpcTicksLabel,
-        mkHpcModuleNameLabel,
 
         hasCAF,
-	infoLblToEntryLbl, entryLblToInfoLbl, cvtToClosureLbl, cvtToSRTLbl,
+	cvtToClosureLbl,
 	needsCDecl, isAsmTemp, maybeAsmTemp, externallyVisibleCLabel,
         isMathFun,
  	isCFunctionLabel, isGcPtrLabel, labelDynamic,
@@ -202,22 +197,8 @@ data CLabel
   | StringLitLabel
 	{-# UNPACK #-} !Unique
 
-  | ModuleInitLabel 
-	Module			-- the module name
-	String			-- its "way"
-	-- at some point we might want some kind of version number in
-	-- the module init label, to guard against compiling modules in
-	-- the wrong order.  We can't use the interface file version however,
-	-- because we don't always recompile modules which depend on a module
-	-- whose version has changed.
-
-  | PlainModuleInitLabel	-- without the version & way info
+  | PlainModuleInitLabel        -- without the version & way info
 	Module
-
-  | ModuleInitTableLabel	-- table of imported modules to init
-	Module
-
-  | ModuleRegdLabel
 
   | CC_Label  CostCentre
   | CCS_Label CostCentreStack
@@ -241,9 +222,6 @@ data CLabel
 
   -- | Per-module table of tick locations
   | HpcTicksLabel Module
-
-  -- | Per-module name of the module for Hpc
-  | HpcModuleNameLabel
 
   -- | Label of an StgLargeSRT
   | LargeSRTLabel
@@ -301,11 +279,14 @@ pprDebugCLabel lbl
 	_		-> ppr lbl <> (parens $ text "other CLabel)")
 
 
+-- True if a local IdLabel that we won't mark as exported
+type IsLocal = Bool
+
 data IdLabelInfo
   = Closure		-- ^ Label for closure
   | SRT                 -- ^ Static reference table
-  | InfoTable		-- ^ Info tables for closures; always read-only
-  | Entry		-- ^ Entry point
+  | InfoTable IsLocal	-- ^ Info tables for closures; always read-only
+  | Entry	        -- ^ Entry point
   | Slow		-- ^ Slow entry point
 
   | RednCounts		-- ^ Label of place to keep Ticky-ticky  info for this Id
@@ -379,12 +360,12 @@ mkRednCountsLabel     	name c 	= IdLabel name  c RednCounts
 
 -- These have local & (possibly) external variants:
 mkLocalClosureLabel	name c 	= IdLabel name  c Closure
-mkLocalInfoTableLabel  	name c 	= IdLabel name  c InfoTable
+mkLocalInfoTableLabel  	name c 	= IdLabel name  c (InfoTable True)
 mkLocalEntryLabel	name c 	= IdLabel name  c Entry
 mkLocalClosureTableLabel name c = IdLabel name  c ClosureTable
 
 mkClosureLabel name         c     = IdLabel name c Closure
-mkInfoTableLabel name       c     = IdLabel name c InfoTable
+mkInfoTableLabel name       c     = IdLabel name c (InfoTable False)
 mkEntryLabel name           c     = IdLabel name c Entry
 mkClosureTableLabel name    c     = IdLabel name c ClosureTable
 mkLocalConInfoTableLabel    c con = IdLabel con c ConInfoTable
@@ -409,6 +390,7 @@ mkMAP_DIRTY_infoLabel		= CmmLabel rtsPackageId (fsLit "stg_MUT_ARR_PTRS_DIRTY") 
 mkEMPTY_MVAR_infoLabel		= CmmLabel rtsPackageId (fsLit "stg_EMPTY_MVAR")	CmmInfo
 mkTopTickyCtrLabel		= CmmLabel rtsPackageId (fsLit "top_ct")		CmmData
 mkCAFBlackHoleInfoTableLabel	= CmmLabel rtsPackageId (fsLit "stg_CAF_BLACKHOLE")	CmmInfo
+mkCAFBlackHoleEntryLabel	= CmmLabel rtsPackageId (fsLit "stg_CAF_BLACKHOLE")	CmmEntry
 
 -----
 mkCmmInfoLabel,   mkCmmEntryLabel, mkCmmRetInfoLabel, mkCmmRetLabel,
@@ -490,7 +472,6 @@ mkRtsSlowTickyCtrLabel pat = RtsLabel (RtsSlowTickyCtr pat)
 
 -- Constructing Code Coverage Labels
 mkHpcTicksLabel                = HpcTicksLabel
-mkHpcModuleNameLabel           = HpcModuleNameLabel
 
 
 -- Constructing labels used for dynamic linking
@@ -515,58 +496,19 @@ mkStringLitLabel		= StringLitLabel
 mkAsmTempLabel :: Uniquable a => a -> CLabel
 mkAsmTempLabel a		= AsmTempLabel (getUnique a)
 
-mkModuleInitLabel :: Module -> String -> CLabel
-mkModuleInitLabel mod way	= ModuleInitLabel mod way
-
 mkPlainModuleInitLabel :: Module -> CLabel
 mkPlainModuleInitLabel mod	= PlainModuleInitLabel mod
 
-mkModuleInitTableLabel :: Module -> CLabel
-mkModuleInitTableLabel mod	= ModuleInitTableLabel mod
-
-moduleRegdLabel			= ModuleRegdLabel
-moduleRegTableLabel		= ModuleInitTableLabel	
-
-
 -- -----------------------------------------------------------------------------
--- Converting between info labels and entry/ret labels.
+-- Brutal method of obtaining a closure label
 
-infoLblToEntryLbl :: CLabel -> CLabel 
-infoLblToEntryLbl (IdLabel n c InfoTable)	= IdLabel n c Entry
-infoLblToEntryLbl (IdLabel n c ConInfoTable)	= IdLabel n c ConEntry
-infoLblToEntryLbl (IdLabel n c StaticInfoTable)	= IdLabel n c StaticConEntry
-infoLblToEntryLbl (CaseLabel n CaseReturnInfo)	= CaseLabel n CaseReturnPt
-infoLblToEntryLbl (CmmLabel m str CmmInfo)	= CmmLabel m str CmmEntry
-infoLblToEntryLbl (CmmLabel m str CmmRetInfo)	= CmmLabel m str CmmRet
-infoLblToEntryLbl _
-	= panic "CLabel.infoLblToEntryLbl"
-
-
-entryLblToInfoLbl :: CLabel -> CLabel 
-entryLblToInfoLbl (IdLabel n c Entry)		= IdLabel n c InfoTable
-entryLblToInfoLbl (IdLabel n c ConEntry)	= IdLabel n c ConInfoTable
-entryLblToInfoLbl (IdLabel n c StaticConEntry)	= IdLabel n c StaticInfoTable
-entryLblToInfoLbl (CaseLabel n CaseReturnPt)	= CaseLabel n CaseReturnInfo
-entryLblToInfoLbl (CmmLabel m str CmmEntry)	= CmmLabel m str CmmInfo
-entryLblToInfoLbl (CmmLabel m str CmmRet)	= CmmLabel m str CmmRetInfo
-entryLblToInfoLbl l				
-	= pprPanic "CLabel.entryLblToInfoLbl" (pprCLabel l)
-
-
-cvtToClosureLbl   (IdLabel n c InfoTable)	= IdLabel n c Closure
-cvtToClosureLbl   (IdLabel n c Entry)		= IdLabel n c Closure
+cvtToClosureLbl   (IdLabel n c (InfoTable _))	= IdLabel n c Closure
+cvtToClosureLbl   (IdLabel n c Entry)	        = IdLabel n c Closure
 cvtToClosureLbl   (IdLabel n c ConEntry)	= IdLabel n c Closure
+cvtToClosureLbl   (IdLabel n c RednCounts)	= IdLabel n c Closure
 cvtToClosureLbl l@(IdLabel n c Closure)		= l
 cvtToClosureLbl l 
 	= pprPanic "cvtToClosureLbl" (pprCLabel l)
-
-
-cvtToSRTLbl   (IdLabel n c InfoTable)		= mkSRTLabel n c
-cvtToSRTLbl   (IdLabel n c Entry)		= mkSRTLabel n c
-cvtToSRTLbl   (IdLabel n c ConEntry)		= mkSRTLabel n c
-cvtToSRTLbl l@(IdLabel n c Closure)		= mkSRTLabel n c
-cvtToSRTLbl l 
-	= pprPanic "cvtToSRTLbl" (pprCLabel l)
 
 
 -- -----------------------------------------------------------------------------
@@ -590,10 +532,7 @@ needsCDecl (LargeSRTLabel _)		= False
 needsCDecl (LargeBitmapLabel _)		= False
 needsCDecl (IdLabel _ _ _)		= True
 needsCDecl (CaseLabel _ _)	        = True
-needsCDecl (ModuleInitLabel _ _)	= True
-needsCDecl (PlainModuleInitLabel _)	= True
-needsCDecl (ModuleInitTableLabel _)	= True
-needsCDecl ModuleRegdLabel		= False
+needsCDecl (PlainModuleInitLabel _)     = True
 
 needsCDecl (StringLitLabel _)		= False
 needsCDecl (AsmTempLabel _)		= False
@@ -611,7 +550,6 @@ needsCDecl l@(ForeignLabel{})		= not (isMathFun l)
 needsCDecl (CC_Label _)			= True
 needsCDecl (CCS_Label _)		= True
 needsCDecl (HpcTicksLabel _)            = True
-needsCDecl HpcModuleNameLabel           = False
 
 
 -- | Check whether a label is a local temporary for native code generation
@@ -629,7 +567,7 @@ maybeAsmTemp _ 	    	       		= Nothing
 
 -- | Check whether a label corresponds to a C function that has 
 --      a prototype in a system header somehere, or is built-in
---      to the C compiler. For these labels we abovoid generating our
+--      to the C compiler. For these labels we avoid generating our
 --      own C prototypes.
 isMathFun :: CLabel -> Bool
 isMathFun (ForeignLabel fs _ _ _) 	= fs `elementOfUniqSet` math_funs
@@ -724,21 +662,22 @@ externallyVisibleCLabel :: CLabel -> Bool -- not C "static"
 externallyVisibleCLabel (CaseLabel _ _)		= False
 externallyVisibleCLabel (StringLitLabel _)	= False
 externallyVisibleCLabel (AsmTempLabel _)	= False
-externallyVisibleCLabel (ModuleInitLabel _ _)	= True
 externallyVisibleCLabel (PlainModuleInitLabel _)= True
-externallyVisibleCLabel (ModuleInitTableLabel _)= False
-externallyVisibleCLabel ModuleRegdLabel		= False
-externallyVisibleCLabel (RtsLabel _)		= True
+externallyVisibleCLabel (RtsLabel _)            = True
 externallyVisibleCLabel (CmmLabel _ _ _)	= True
 externallyVisibleCLabel (ForeignLabel{})	= True
-externallyVisibleCLabel (IdLabel name _ _)	= isExternalName name
+externallyVisibleCLabel (IdLabel name _ info)	= isExternalName name && externallyVisibleIdLabel info
 externallyVisibleCLabel (CC_Label _)		= True
 externallyVisibleCLabel (CCS_Label _)		= True
 externallyVisibleCLabel (DynamicLinkerLabel _ _)  = False
 externallyVisibleCLabel (HpcTicksLabel _)	= True
-externallyVisibleCLabel HpcModuleNameLabel	= False
-externallyVisibleCLabel (LargeBitmapLabel _)	= False
+externallyVisibleCLabel (LargeBitmapLabel _)    = False
 externallyVisibleCLabel (LargeSRTLabel _)	= False
+
+externallyVisibleIdLabel :: IdLabelInfo -> Bool
+externallyVisibleIdLabel SRT             = False
+externallyVisibleIdLabel (InfoTable lcl) = not lcl
+externallyVisibleIdLabel _               = True
 
 -- -----------------------------------------------------------------------------
 -- Finding the "type" of a CLabel 
@@ -776,9 +715,7 @@ labelType (RtsLabel (RtsApInfoTable _ _))       = DataLabel
 labelType (RtsLabel (RtsApFast _))              = CodeLabel
 labelType (CaseLabel _ CaseReturnInfo)          = DataLabel
 labelType (CaseLabel _ _)	                = CodeLabel
-labelType (ModuleInitLabel _ _)                 = CodeLabel
 labelType (PlainModuleInitLabel _)              = CodeLabel
-labelType (ModuleInitTableLabel _)              = DataLabel
 labelType (LargeSRTLabel _)                     = DataLabel
 labelType (LargeBitmapLabel _)                  = DataLabel
 labelType (ForeignLabel _ _ _ IsFunction)	= CodeLabel
@@ -787,7 +724,7 @@ labelType _                                     = DataLabel
 
 idInfoLabelType info =
   case info of
-    InfoTable  	  -> DataLabel
+    InfoTable _   -> DataLabel
     Closure    	  -> GcPtrLabel
     ConInfoTable  -> DataLabel
     StaticInfoTable -> DataLabel
@@ -836,10 +773,8 @@ labelDynamic this_pkg lbl =
    CmmLabel pkg _ _     -> True 
 
 #endif
-   ModuleInitLabel m _    -> not opt_Static && this_pkg /= (modulePackageId m)
    PlainModuleInitLabel m -> not opt_Static && this_pkg /= (modulePackageId m)
-   ModuleInitTableLabel m -> not opt_Static && this_pkg /= (modulePackageId m)
-   
+
    -- Note that DynamicLinkerLabels do NOT require dynamic linking themselves.
    _ 		     -> False
 
@@ -892,11 +827,13 @@ entry.
 
 instance Outputable CLabel where
   ppr = pprCLabel
+instance PlatformOutputable CLabel where
+  pprPlatform _ = pprCLabel
 
 pprCLabel :: CLabel -> SDoc
 
-#if ! OMIT_NATIVE_CODEGEN
 pprCLabel (AsmTempLabel u)
+ | cGhcWithNativeCodeGen == "YES"
   =  getPprStyle $ \ sty ->
      if asmStyle sty then 
 	ptext asmTempLabelPrefix <> pprUnique u
@@ -904,23 +841,22 @@ pprCLabel (AsmTempLabel u)
 	char '_' <> pprUnique u
 
 pprCLabel (DynamicLinkerLabel info lbl)
+ | cGhcWithNativeCodeGen == "YES"
    = pprDynamicLinkerAsmLabel info lbl
    
 pprCLabel PicBaseLabel
+ | cGhcWithNativeCodeGen == "YES"
    = ptext (sLit "1b")
    
 pprCLabel (DeadStripPreventer lbl)
+ | cGhcWithNativeCodeGen == "YES"
    = pprCLabel lbl <> ptext (sLit "_dsp")
-#endif
 
-pprCLabel lbl = 
-#if ! OMIT_NATIVE_CODEGEN
-    getPprStyle $ \ sty ->
-    if asmStyle sty then 
-	maybe_underscore (pprAsmCLbl lbl)
-    else
-#endif
-       pprCLbl lbl
+pprCLabel lbl
+   = getPprStyle $ \ sty ->
+     if cGhcWithNativeCodeGen == "YES" && asmStyle sty
+     then maybe_underscore (pprAsmCLbl lbl)
+     else pprCLbl lbl
 
 maybe_underscore doc
   | underscorePrefix = pp_cSEP <> doc
@@ -1007,9 +943,6 @@ pprCLbl (RtsLabel (RtsPrimOp primop))
 pprCLbl (RtsLabel (RtsSlowTickyCtr pat)) 
   = ptext (sLit "SLOW_CALL_") <> text pat <> ptext (sLit "_ctr")
 
-pprCLbl ModuleRegdLabel
-  = ptext (sLit "_module_registered")
-
 pprCLbl (ForeignLabel str _ _ _)
   = ftext str
 
@@ -1018,28 +951,18 @@ pprCLbl (IdLabel name cafs flavor) = ppr name <> ppIdFlavor flavor
 pprCLbl (CC_Label cc) 		= ppr cc
 pprCLbl (CCS_Label ccs) 	= ppr ccs
 
-pprCLbl (ModuleInitLabel mod way)
-   = ptext (sLit "__stginit_") <> ppr mod
-	<> char '_' <> text way
-
 pprCLbl (PlainModuleInitLabel mod)
    = ptext (sLit "__stginit_") <> ppr mod
 
-pprCLbl (ModuleInitTableLabel mod)
-   = ptext (sLit "__stginittable_") <> ppr mod
-
 pprCLbl (HpcTicksLabel mod)
   = ptext (sLit "_hpc_tickboxes_")  <> ppr mod <> ptext (sLit "_hpc")
-
-pprCLbl HpcModuleNameLabel
-  = ptext (sLit "_hpc_module_name_str")
 
 ppIdFlavor :: IdLabelInfo -> SDoc
 ppIdFlavor x = pp_cSEP <>
 	       (case x of
 		       Closure	    	-> ptext (sLit "closure")
 		       SRT		-> ptext (sLit "srt")
-		       InfoTable    	-> ptext (sLit "info")
+		       InfoTable _	-> ptext (sLit "info")
 		       Entry	    	-> ptext (sLit "entry")
 		       Slow	    	-> ptext (sLit "slow")
 		       RednCounts	-> ptext (sLit "ct")

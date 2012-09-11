@@ -1,0 +1,6 @@
+
+tcfail158.hs:14:19:
+    `Val v' is not applied to enough type arguments
+    Expected kind `*', but `Val v' has kind `* -> *'
+    In the type signature for `bar':
+      bar :: forall v. Val v

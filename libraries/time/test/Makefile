@@ -1,5 +1,5 @@
 GHC = ghc
-GHCFLAGS = -package time
+GHCFLAGS = -package time -package QuickCheck-1.2.0.1
 
 default:
 	make CurrentTime.run ShowDST.run test
@@ -50,7 +50,7 @@ TimeZone.ref: FORCE
 	date +%z > $@
 
 TestParseTime: TestParseTime.o
-	$(GHC) $(GHCFLAGS) -package QuickCheck $^ -o $@
+	$(GHC) $(GHCFLAGS) $^ -o $@
 
 test:	\
 	TestMonthDay.diff	\
@@ -64,25 +64,27 @@ test:	\
 	TestFormat.diff0	\
 	TestParseDAT.diff	\
 	TestEaster.diff	\
-#	TestParseTime.run \
+	TestParseTime.run \
 	UseCases.o
+	@echo "Success!"
 
 clean:
 	rm -rf TestMonthDay ConvertBack TestCalendars TestTime LongWeekYears ClipDates	\
 	AddDays TestFormat TestParseDAT TestEaster CurrentTime ShowDST TimeZone TimeZone.ref TestParseTime \
-        *.out *.o *.hi Makefile.bak
+        *.out *.run *.o *.hi Makefile.bak
 
 %.diff: %.ref %.out
 	diff -u $^
 
 %.diff0: %.out
-	echo -n | diff -u - $^
+	diff -u /dev/null $^
 
 %.out: %
 	./$< > $@
 
 %.run: %
 	./$<
+	touch $@
 
 %.hi: %.o
 	@:
@@ -97,6 +99,3 @@ FORCE:
 
 .SECONDARY:
 
-# TestTime.o TestFormat.o CurrentTime.o ShowDST.o TimeZone.o: $(patsubst %.hs,%.hi,$(SRCS))
-
-TestFixed.o: ../Data/Fixed.hi

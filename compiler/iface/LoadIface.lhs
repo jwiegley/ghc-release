@@ -590,7 +590,7 @@ initExternalPackageState
 ghcPrimIface :: ModIface
 ghcPrimIface
   = (emptyModIface gHC_PRIM) {
-	mi_exports  = [(gHC_PRIM, ghcPrimExports)],
+	mi_exports  = ghcPrimExports,
 	mi_decls    = [],
 	mi_fixities = fixities,
 	mi_fix_fn  = mkIfaceFixCache fixities
@@ -655,8 +655,10 @@ pprModIface iface
         , nest 2 (text "ABI hash:" <+> ppr (mi_mod_hash iface))
         , nest 2 (text "export-list hash:" <+> ppr (mi_exp_hash iface))
         , nest 2 (text "orphan hash:" <+> ppr (mi_orphan_hash iface))
+        , nest 2 (text "used TH splices:" <+> ppr (mi_used_th iface))
         , nest 2 (ptext (sLit "where"))
-	, vcat (map pprExport (mi_exports iface))
+	, ptext (sLit "exports:")
+        , nest 2 (vcat (map pprExport (mi_exports iface)))
 	, pprDeps (mi_deps iface)
 	, vcat (map pprUsage (mi_usages iface))
 	, vcat (map pprIfaceAnnotation (mi_anns iface))
@@ -666,7 +668,10 @@ pprModIface iface
 	, vcat (map ppr (mi_fam_insts iface))
 	, vcat (map ppr (mi_rules iface))
         , pprVectInfo (mi_vect_info iface)
+        , pprVectInfo (mi_vect_info iface)
 	, ppr (mi_warns iface)
+	, pprTrustInfo (mi_trust iface)
+	, pprTrustPkg (mi_trust_pkg iface)
  	]
   where
     pp_boot | mi_boot iface = ptext (sLit "[boot]")
@@ -680,41 +685,45 @@ When printing export lists, we print like this:
 
 \begin{code}
 pprExport :: IfaceExport -> SDoc
-pprExport (mod, items)
- = hsep [ ptext (sLit "export"), ppr mod, hsep (map pp_avail items) ]
-  where
-    pp_avail :: GenAvailInfo OccName -> SDoc
-    pp_avail (Avail occ)    = ppr occ
-    pp_avail (AvailTC _ []) = empty
-    pp_avail (AvailTC n (n':ns)) 
-	| n==n'     = ppr n <> pp_export ns
- 	| otherwise = ppr n <> char '|' <> pp_export (n':ns)
-    
+pprExport (Avail n)      = ppr n
+pprExport (AvailTC _ []) = empty
+pprExport (AvailTC n (n':ns)) 
+  | n==n'     = ppr n <> pp_export ns
+  | otherwise = ppr n <> char '|' <> pp_export (n':ns)
+  where  
     pp_export []    = empty
     pp_export names = braces (hsep (map ppr names))
 
 pprUsage :: Usage -> SDoc
 pprUsage usage@UsagePackageModule{}
-  = hsep [ptext (sLit "import"), ppr (usg_mod usage), 
-	  ppr (usg_mod_hash usage)]
+  = pprUsageImport usage usg_mod
 pprUsage usage@UsageHomeModule{}
-  = hsep [ptext (sLit "import"), ppr (usg_mod_name usage), 
-	  ppr (usg_mod_hash usage)] $$
+  = pprUsageImport usage usg_mod_name $$
     nest 2 (
 	maybe empty (\v -> text "exports: " <> ppr v) (usg_exports usage) $$
         vcat [ ppr n <+> ppr v | (n,v) <- usg_entities usage ]
         )
 
+pprUsageImport :: Outputable a => Usage -> (Usage -> a) -> SDoc
+pprUsageImport usage usg_mod'
+  = hsep [ptext (sLit "import"), safe, ppr (usg_mod' usage),
+                       ppr (usg_mod_hash usage)]
+    where
+        safe | usg_safe usage = ptext $ sLit "safe"
+             | otherwise      = ptext $ sLit " -/ "
+
 pprDeps :: Dependencies -> SDoc
 pprDeps (Deps { dep_mods = mods, dep_pkgs = pkgs, dep_orphs = orphs,
 		dep_finsts = finsts })
   = vcat [ptext (sLit "module dependencies:") <+> fsep (map ppr_mod mods),
-	  ptext (sLit "package dependencies:") <+> fsep (map ppr pkgs), 
+	  ptext (sLit "package dependencies:") <+> fsep (map ppr_pkg pkgs),
 	  ptext (sLit "orphans:") <+> fsep (map ppr orphs),
 	  ptext (sLit "family instance modules:") <+> fsep (map ppr finsts)
 	]
   where
     ppr_mod (mod_name, boot) = ppr mod_name <+> ppr_boot boot
+    ppr_pkg (pkg,trust_req)  = ppr pkg <>
+                               (if trust_req then text "*" else empty)
     ppr_boot True  = text "[boot]"
     ppr_boot False = empty
 
@@ -729,15 +738,25 @@ pprFixities fixes = ptext (sLit "fixities") <+> pprWithCommas pprFix fixes
 		    pprFix (occ,fix) = ppr fix <+> ppr occ 
 
 pprVectInfo :: IfaceVectInfo -> SDoc
-pprVectInfo (IfaceVectInfo { ifaceVectInfoVar        = vars
-                           , ifaceVectInfoTyCon      = tycons
-                           , ifaceVectInfoTyConReuse = tyconsReuse
+pprVectInfo (IfaceVectInfo { ifaceVectInfoVar          = vars
+                           , ifaceVectInfoTyCon        = tycons
+                           , ifaceVectInfoTyConReuse   = tyconsReuse
+                           , ifaceVectInfoScalarVars   = scalarVars
+                           , ifaceVectInfoScalarTyCons = scalarTyCons
                            }) = 
   vcat 
   [ ptext (sLit "vectorised variables:") <+> hsep (map ppr vars)
   , ptext (sLit "vectorised tycons:") <+> hsep (map ppr tycons)
   , ptext (sLit "vectorised reused tycons:") <+> hsep (map ppr tyconsReuse)
+  , ptext (sLit "scalar variables:") <+> hsep (map ppr scalarVars)
+  , ptext (sLit "scalar tycons:") <+> hsep (map ppr scalarTyCons)
   ]
+
+pprTrustInfo :: IfaceTrustInfo -> SDoc
+pprTrustInfo trust = ptext (sLit "trusted:") <+> ppr trust
+
+pprTrustPkg :: Bool -> SDoc
+pprTrustPkg tpkg = ptext (sLit "require own pkg trusted:") <+> ppr tpkg
 
 instance Outputable Warnings where
     ppr = pprWarns

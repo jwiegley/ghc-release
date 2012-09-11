@@ -1,4 +1,6 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, FlexibleInstances #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.String
@@ -9,23 +11,33 @@
 -- Stability   :  experimental
 -- Portability :  portable
 --
--- Things related to the String type.
+-- The @String@ type and associated operations.
 --
 -----------------------------------------------------------------------------
 
 module Data.String (
-   IsString(..)
+   String
+ , IsString(..)
+
+ -- * Functions on strings
+ , lines
+ , words
+ , unlines
+ , unwords
  ) where
 
 #ifdef __GLASGOW_HASKELL__
 import GHC.Base
 #endif
 
+import Data.List (lines, words, unlines, unwords)
+
 -- | Class for string-like datastructures; used by the overloaded string
 --   extension (-foverloaded-strings in GHC).
 class IsString a where
     fromString :: String -> a
 
+#ifndef __NHC__
 instance IsString [Char] where
     fromString xs = xs
-
+#endif

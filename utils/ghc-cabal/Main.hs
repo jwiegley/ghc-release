@@ -11,7 +11,7 @@ import Distribution.Simple.Configure
 import Distribution.Simple.LocalBuildInfo
 import Distribution.Simple.Program
 import Distribution.Simple.Program.HcPkg
-import Distribution.Simple.Utils (defaultPackageDesc, writeFileAtomic)
+import Distribution.Simple.Utils (defaultPackageDesc, writeFileAtomic, toUTF8)
 import Distribution.Simple.Build (writeAutogenFiles)
 import Distribution.Simple.Register
 import Distribution.Text
@@ -28,7 +28,8 @@ import System.Exit
 import System.FilePath
 
 main :: IO ()
-main = do args <- getArgs
+main = do hSetBuffering stdout LineBuffering
+          args <- getArgs
           case args of
               "hscolour" : distDir : dir : args' ->
                   runHsColour distDir dir args'
@@ -295,10 +296,10 @@ generate config_args distdir directory
                                          pd lib lbi clbi
                   final_ipi = installedPkgInfo {
                                   Installed.installedPackageId = ipid,
-                                  Installed.haddockHTMLs = ["../" ++ display (packageId pd)]
+                                  Installed.haddockHTMLs = []
                               }
                   content = Installed.showInstalledPackageInfo final_ipi ++ "\n"
-              writeFileAtomic (distdir </> "inplace-pkg-config") content
+              writeFileAtomic (distdir </> "inplace-pkg-config") (toUTF8 content)
           _ -> error "Inconsistent lib components; can't happen?"
 
       let
@@ -344,6 +345,9 @@ generate config_args distdir directory
 
           dep_ids = map snd (externalPackageDeps lbi)
 
+      wrappedIncludeDirs <- wrap $ forDeps Installed.includeDirs
+      wrappedLibraryDirs <- wrap $ forDeps Installed.libraryDirs
+
       let variablePrefix = directory ++ '_':distdir
       let xs = [variablePrefix ++ "_VERSION = " ++ display (pkgVersion (package pd)),
                 variablePrefix ++ "_MODULES = " ++ unwords (map display modules),
@@ -358,30 +362,46 @@ generate config_args distdir directory
                 variablePrefix ++ "_EXTRA_LIBRARIES = " ++ unwords (extraLibs bi),
                 variablePrefix ++ "_EXTRA_LIBDIRS = " ++ unwords (extraLibDirs bi),
                 variablePrefix ++ "_C_SRCS  = " ++ unwords (cSources bi),
-                variablePrefix ++ "_CMM_SRCS  = $(addprefix cbits/,$(notdir $(wildcard " ++ directory ++ "/cbits/*.cmm)))",
+                variablePrefix ++ "_CMM_SRCS  := $(addprefix cbits/,$(notdir $(wildcard " ++ directory ++ "/cbits/*.cmm)))",
                 variablePrefix ++ "_DATA_FILES = "    ++ unwords (dataFiles pd),
                 -- XXX This includes things it shouldn't, like:
                 -- -odir dist-bootstrapping/build
                 variablePrefix ++ "_HC_OPTS = " ++ escape (unwords
                        (   programDefaultArgs ghcProg
                         ++ hcOptions GHC bi
+                        ++ languageToFlags (compiler lbi) (defaultLanguage bi)
                         ++ extensionsToFlags (compiler lbi) (usedExtensions bi)
                         ++ programOverrideArgs ghcProg)),
-                variablePrefix ++ "_CC_OPTS = " ++ unwords (ccOptions bi),
-                variablePrefix ++ "_CPP_OPTS = " ++ unwords (cppOptions bi),
-                variablePrefix ++ "_LD_OPTS = " ++ unwords (ldOptions bi),
-                variablePrefix ++ "_DEP_INCLUDE_DIRS = " ++ unwords (wrap $ forDeps Installed.includeDirs),
-                variablePrefix ++ "_DEP_CC_OPTS = "    ++ unwords (forDeps Installed.ccOptions),
-                variablePrefix ++ "_DEP_LIB_DIRS = "   ++ unwords (wrap $ forDeps Installed.libraryDirs),
-                variablePrefix ++ "_DEP_EXTRA_LIBS = " ++ unwords (forDeps Installed.extraLibraries),
-                variablePrefix ++ "_DEP_LD_OPTS = "    ++ unwords (forDeps Installed.ldOptions),
-                variablePrefix ++ "_BUILD_GHCI_LIB = " ++ boolToYesNo (withGHCiLib lbi)]
+                variablePrefix ++ "_CC_OPTS = "                        ++ unwords (ccOptions bi),
+                variablePrefix ++ "_CPP_OPTS = "                       ++ unwords (cppOptions bi),
+                variablePrefix ++ "_LD_OPTS = "                        ++ unwords (ldOptions bi),
+                variablePrefix ++ "_DEP_INCLUDE_DIRS_SINGLE_QUOTED = " ++ unwords wrappedIncludeDirs,
+                variablePrefix ++ "_DEP_CC_OPTS = "                    ++ unwords (forDeps Installed.ccOptions),
+                variablePrefix ++ "_DEP_LIB_DIRS_SINGLE_QUOTED = "     ++ unwords wrappedLibraryDirs,
+                variablePrefix ++ "_DEP_EXTRA_LIBS = "                 ++ unwords (forDeps Installed.extraLibraries),
+                variablePrefix ++ "_DEP_LD_OPTS = "                    ++ unwords (forDeps Installed.ldOptions),
+                variablePrefix ++ "_BUILD_GHCI_LIB = "                 ++ boolToYesNo (withGHCiLib lbi),
+                "",
+                -- Sometimes we need to modify the automatically-generated package-data.mk
+                -- bindings in a special way for the GHC build system, so allow that here:
+                "$(eval $(" ++ directory ++ "_PACKAGE_MAGIC))"
+                ]
       writeFile (distdir ++ "/package-data.mk") $ unlines xs
-      writeFile (distdir ++ "/haddock-prologue.txt") $ 
+      writeFile (distdir ++ "/haddock-prologue.txt") $
           if null (description pd) then synopsis pd
                                    else description pd
   where
      escape = foldr (\c xs -> if c == '#' then '\\':'#':xs else c:xs) []
-     wrap = map (\s -> "\'" ++ s ++ "\'")
+     wrap = mapM wrap1
+     wrap1 s
+      | null s        = die ["Wrapping empty value"]
+      | '\'' `elem` s = die ["Single quote in value to be wrapped:", s]
+      -- We want to be able to assume things like <space><quote> is the
+      -- start of a value, so check there are no spaces in confusing
+      -- positions
+      | head s == ' ' = die ["Leading space in value to be wrapped:", s]
+      | last s == ' ' = die ["Trailing space in value to be wrapped:", s]
+      | otherwise     = return ("\'" ++ s ++ "\'")
      boolToYesNo True = "YES"
      boolToYesNo False = "NO"
+

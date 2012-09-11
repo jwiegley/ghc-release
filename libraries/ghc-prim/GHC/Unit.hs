@@ -1,9 +1,10 @@
 
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# OPTIONS_GHC -XNoImplicitPrelude  #-}
+{-# OPTIONS_GHC -XDeriveGeneric      #-}
 
 module GHC.Unit where
 
-import GHC.Generics ()
+import GHC.Generics (Generic)
 
 default ()
 
@@ -15,4 +16,4 @@ type signature.
 -- | The unit datatype @()@ has one non-undefined member, the nullary
 -- constructor @()@.
 data () = ()
-
+        deriving Generic

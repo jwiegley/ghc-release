@@ -20,10 +20,10 @@ module StgCmmUtils (
 
 	tagToClosure, mkTaggedObjectLoad,
 
-        callerSaveVolatileRegs, get_GlobalReg_addr,
+        callerSaves, callerSaveVolatileRegs, get_GlobalReg_addr,
 
 	cmmAndWord, cmmOrWord, cmmNegate, cmmEqWord, cmmNeWord,
-        cmmUGtWord,
+        cmmUGtWord, cmmSubWord, cmmMulWord, cmmAddWord, cmmUShrWord,
 	cmmOffsetExprW, cmmOffsetExprB,
 	cmmRegOffW, cmmRegOffB,
 	cmmLabelOffW, cmmLabelOffB,
@@ -49,11 +49,11 @@ module StgCmmUtils (
 import StgCmmMonad
 import StgCmmClosure
 import BlockId
-import Cmm hiding (regUsedIn)
-import MkZipCfgCmm
+import CmmDecl
+import CmmExpr hiding (regUsedIn)
+import MkGraph
 import CLabel
 import CmmUtils
-import PprCmm		( {- instances -} )
 
 import ForeignCall
 import IdInfo
@@ -160,7 +160,8 @@ cmmLoadIndexW base off ty = CmmLoad (cmmOffsetW base off) ty
 
 -----------------------
 cmmULtWord, cmmUGeWord, cmmUGtWord, cmmSubWord,
-  cmmNeWord, cmmEqWord, cmmOrWord, cmmAndWord 
+  cmmNeWord, cmmEqWord, cmmOrWord, cmmAndWord,
+  cmmUShrWord, cmmAddWord, cmmMulWord
   :: CmmExpr -> CmmExpr -> CmmExpr
 cmmOrWord  e1 e2 = CmmMachOp mo_wordOr  [e1, e2]
 cmmAndWord e1 e2 = CmmMachOp mo_wordAnd [e1, e2]
@@ -170,8 +171,10 @@ cmmULtWord e1 e2 = CmmMachOp mo_wordULt [e1, e2]
 cmmUGeWord e1 e2 = CmmMachOp mo_wordUGe [e1, e2]
 cmmUGtWord e1 e2 = CmmMachOp mo_wordUGt [e1, e2]
 --cmmShlWord e1 e2 = CmmMachOp mo_wordShl [e1, e2]
---cmmUShrWord e1 e2 = CmmMachOp mo_wordUShr [e1, e2]
+cmmUShrWord e1 e2 = CmmMachOp mo_wordUShr [e1, e2]
+cmmAddWord e1 e2 = CmmMachOp mo_wordAdd [e1, e2]
 cmmSubWord e1 e2 = CmmMachOp mo_wordSub [e1, e2]
+cmmMulWord e1 e2 = CmmMachOp mo_wordMul [e1, e2]
 
 cmmNegate :: CmmExpr -> CmmExpr
 cmmNegate (CmmLit (CmmInt n rep)) = CmmLit (CmmInt (-n) rep)
@@ -340,6 +343,23 @@ emitRtsCall' res pkg fun args _vols safe
 --  * Regs.h claims that BaseReg should be saved last and loaded first
 --    * This might not have been tickled before since BaseReg is callee save
 --  * Regs.h saves SparkHd, ParkT1, SparkBase and SparkLim
+--
+-- This code isn't actually used right now, because callerSaves
+-- only ever returns true in the current universe for registers NOT in
+-- system_regs (just do a grep for CALLER_SAVES in
+-- includes/stg/MachRegs.h).  It's all one giant no-op, and for
+-- good reason: having to save system registers on every foreign call
+-- would be very expensive, so we avoid assigning them to those
+-- registers when we add support for an architecture.
+--
+-- Note that the old code generator actually does more work here: it
+-- also saves other global registers.  We can't (nor want) to do that
+-- here, as we don't have liveness information.  And really, we
+-- shouldn't be doing the workaround at this point in the pipeline, see
+-- Note [Register parameter passing] and the ToDo on CmmCall in
+-- cmm/CmmNode.hs.  Right now the workaround is to avoid inlining across
+-- unsafe foreign calls in rewriteAssignments, but this is strictly
+-- temporary.
 callerSaveVolatileRegs :: (CmmAGraph, CmmAGraph)
 callerSaveVolatileRegs = (caller_save, caller_load)
   where
@@ -396,6 +416,51 @@ callerSaves :: GlobalReg -> Bool
 #ifdef CALLER_SAVES_Base
 callerSaves BaseReg		= True
 #endif
+#ifdef CALLER_SAVES_R1
+callerSaves (VanillaReg 1 _)	= True
+#endif
+#ifdef CALLER_SAVES_R2
+callerSaves (VanillaReg 2 _)	= True
+#endif
+#ifdef CALLER_SAVES_R3
+callerSaves (VanillaReg 3 _)	= True
+#endif
+#ifdef CALLER_SAVES_R4
+callerSaves (VanillaReg 4 _)	= True
+#endif
+#ifdef CALLER_SAVES_R5
+callerSaves (VanillaReg 5 _)	= True
+#endif
+#ifdef CALLER_SAVES_R6
+callerSaves (VanillaReg 6 _)	= True
+#endif
+#ifdef CALLER_SAVES_R7
+callerSaves (VanillaReg 7 _)	= True
+#endif
+#ifdef CALLER_SAVES_R8
+callerSaves (VanillaReg 8 _)	= True
+#endif
+#ifdef CALLER_SAVES_F1
+callerSaves (FloatReg 1)	= True
+#endif
+#ifdef CALLER_SAVES_F2
+callerSaves (FloatReg 2)	= True
+#endif
+#ifdef CALLER_SAVES_F3
+callerSaves (FloatReg 3)	= True
+#endif
+#ifdef CALLER_SAVES_F4
+callerSaves (FloatReg 4)	= True
+#endif
+#ifdef CALLER_SAVES_D1
+callerSaves (DoubleReg 1)	= True
+#endif
+#ifdef CALLER_SAVES_D2
+callerSaves (DoubleReg 2)	= True
+#endif
+#ifdef CALLER_SAVES_L1
+callerSaves (LongReg 1)		= True
+#endif
 #ifdef CALLER_SAVES_Sp
 callerSaves Sp			= True
 #endif
@@ -443,26 +508,26 @@ baseRegOffset reg		  = pprPanic "baseRegOffset:" (ppr reg)
 emitDataLits :: CLabel -> [CmmLit] -> FCode ()
 -- Emit a data-segment data block
 emitDataLits lbl lits
-  = emitData Data (CmmDataLabel lbl : map CmmStaticLit lits)
+  = emitData Data (Statics lbl $ map CmmStaticLit lits)
 
-mkDataLits :: CLabel -> [CmmLit] -> GenCmmTop CmmStatic info stmt
+mkDataLits :: CLabel -> [CmmLit] -> GenCmmTop CmmStatics info stmt
 -- Emit a data-segment data block
 mkDataLits lbl lits
-  = CmmData Data (CmmDataLabel lbl : map CmmStaticLit lits)
+  = CmmData Data (Statics lbl $ map CmmStaticLit lits)
 
 emitRODataLits :: CLabel -> [CmmLit] -> FCode ()
 -- Emit a read-only data block
 emitRODataLits lbl lits
-  = emitData section (CmmDataLabel lbl : map CmmStaticLit lits)
+  = emitData section (Statics lbl $ map CmmStaticLit lits)
   where section | any needsRelocation lits = RelocatableReadOnlyData
                 | otherwise                = ReadOnlyData
         needsRelocation (CmmLabel _)      = True
         needsRelocation (CmmLabelOff _ _) = True
         needsRelocation _                 = False
 
-mkRODataLits :: CLabel -> [CmmLit] -> GenCmmTop CmmStatic info stmt
+mkRODataLits :: CLabel -> [CmmLit] -> GenCmmTop CmmStatics info stmt
 mkRODataLits lbl lits
-  = CmmData section (CmmDataLabel lbl : map CmmStaticLit lits)
+  = CmmData section (Statics lbl $ map CmmStaticLit lits)
   where section | any needsRelocation lits = RelocatableReadOnlyData
                 | otherwise                = ReadOnlyData
         needsRelocation (CmmLabel _)      = True
@@ -478,7 +543,7 @@ mkByteStringCLit :: [Word8] -> FCode CmmLit
 mkByteStringCLit bytes
   = do 	{ uniq <- newUnique
 	; let lbl = mkStringLitLabel uniq
-	; emitData ReadOnlyData [CmmDataLabel lbl, CmmString bytes]
+	; emitData ReadOnlyData $ Statics lbl [CmmString bytes]
 	; return (CmmLabel lbl) }
 
 -------------------------------------------------------------------------
@@ -488,7 +553,13 @@ mkByteStringCLit bytes
 -------------------------------------------------------------------------
 
 assignTemp :: CmmExpr -> FCode LocalReg
--- Make sure the argument is in a local register
+-- Make sure the argument is in a local register.
+-- We don't bother being particularly aggressive with avoiding
+-- unnecessary local registers, since we can rely on a later
+-- optimization pass to inline as necessary (and skipping out
+-- on things like global registers can be a little dangerous
+-- due to them being trashed on foreign calls--though it means
+-- the optimization pass doesn't have to do as much work)
 assignTemp (CmmReg (CmmLocal reg)) = return reg
 assignTemp e = do { uniq <- newUnique
 		  ; let reg = LocalReg uniq (cmmExprType e)

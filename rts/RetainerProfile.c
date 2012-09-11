@@ -597,11 +597,13 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
     case AP:
     case AP_STACK:
     case TSO:
+    case STACK:
     case IND_STATIC:
     case CONSTR_NOCAF_STATIC:
 	// stack objects
     case UPDATE_FRAME:
     case CATCH_FRAME:
+    case UNDERFLOW_FRAME:
     case STOP_FRAME:
     case RET_DYN:
     case RET_BCO:
@@ -925,13 +927,15 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
 	case AP:
 	case AP_STACK:
 	case TSO:
-	case IND_STATIC:
+        case STACK:
+        case IND_STATIC:
 	case CONSTR_NOCAF_STATIC:
 	    // stack objects
 	case RET_DYN:
 	case UPDATE_FRAME:
 	case CATCH_FRAME:
-	case STOP_FRAME:
+        case UNDERFLOW_FRAME:
+        case STOP_FRAME:
 	case RET_BCO:
 	case RET_SMALL:
 	case RET_BIG:
@@ -1001,6 +1005,7 @@ isRetainer( StgClosure *c )
 	//
 	// TSOs MUST be retainers: they constitute the set of roots.
     case TSO:
+    case STACK:
 
 	// mutable objects
     case MUT_PRIM:
@@ -1080,6 +1085,7 @@ isRetainer( StgClosure *c )
 	// legal objects during retainer profiling.
     case UPDATE_FRAME:
     case CATCH_FRAME:
+    case UNDERFLOW_FRAME:
     case STOP_FRAME:
     case RET_DYN:
     case RET_BCO:
@@ -1257,8 +1263,8 @@ retainSRT (StgClosure **srt, nat srt_bitmap, StgClosure *c, retainer c_child_r)
  *    RSET(c) and RSET(c_child_r) are valid, i.e., their
  *    interpretation conforms to the current value of flip (even when they
  *    are interpreted to be NULL).
- *    If *c is TSO, its state is not any of ThreadRelocated, ThreadComplete,
- *    or ThreadKilled, which means that its stack is ready to process.
+ *    If *c is TSO, its state is not ThreadComplete,or ThreadKilled, 
+ *    which means that its stack is ready to process.
  *  Note:
  *    This code was almost plagiarzied from GC.c! For each pointer,
  *    retainClosure() is invoked instead of evacuate().
@@ -1291,11 +1297,8 @@ retainStack( StgClosure *c, retainer c_child_r,
     // debugBelch("retainStack() called: oldStackBoundary = 0x%x, currentStackBoundary = 0x%x\n", oldStackBoundary, currentStackBoundary);
 #endif
 
-    ASSERT(get_itbl(c)->type != TSO || 
-	   (((StgTSO *)c)->what_next != ThreadRelocated &&
-	    ((StgTSO *)c)->what_next != ThreadComplete &&
-	    ((StgTSO *)c)->what_next != ThreadKilled));
-    
+    ASSERT(get_itbl(c)->type == STACK);
+
     p = stackStart;
     while (p < stackEnd) {
 	info = get_ret_itbl((StgClosure *)p);
@@ -1307,7 +1310,8 @@ retainStack( StgClosure *c, retainer c_child_r,
 	    p += sizeofW(StgUpdateFrame);
 	    continue;
 
-	case STOP_FRAME:
+        case UNDERFLOW_FRAME:
+        case STOP_FRAME:
 	case CATCH_FRAME:
 	case CATCH_STM_FRAME:
 	case CATCH_RETRY_FRAME:
@@ -1560,14 +1564,7 @@ inner_loop:
 #endif
 	    goto loop;
 	}
-	if (((StgTSO *)c)->what_next == ThreadRelocated) {
-#ifdef DEBUG_RETAINER
-	    debugBelch("ThreadRelocated encountered in retainClosure()\n");
-#endif
-	    c = (StgClosure *)((StgTSO *)c)->_link;
-	    goto inner_loop;
-	}
-	break;
+        break;
 
     case IND_STATIC:
 	// We just skip IND_STATIC, so its retainer set is never computed.
@@ -1681,11 +1678,28 @@ inner_loop:
     // than attempting to save the current position, because doing so
     // would be hard.
     switch (typeOfc) {
-    case TSO:
+    case STACK:
 	retainStack(c, c_child_r,
-		    ((StgTSO *)c)->sp,
-		    ((StgTSO *)c)->stack + ((StgTSO *)c)->stack_size);
+                    ((StgStack *)c)->sp,
+                    ((StgStack *)c)->stack + ((StgStack *)c)->stack_size);
 	goto loop;
+
+    case TSO:
+    {
+        StgTSO *tso = (StgTSO *)c;
+
+        retainClosure(tso->stackobj,           c, c_child_r);
+        retainClosure(tso->blocked_exceptions, c, c_child_r);
+        retainClosure(tso->bq,                 c, c_child_r);
+        retainClosure(tso->trec,               c, c_child_r);
+        if (   tso->why_blocked == BlockedOnMVar
+               || tso->why_blocked == BlockedOnBlackHole
+               || tso->why_blocked == BlockedOnMsgThrowTo
+            ) {
+            retainClosure(tso->block_info.closure, c, c_child_r);
+        }
+        goto loop;
+    }
 
     case PAP:
     {
@@ -1740,6 +1754,7 @@ retainRoot(void *user STG_UNUSED, StgClosure **tl)
     currentStackBoundary = stackTop;
 
     c = UNTAG_CLOSURE(*tl);
+    maybeInitRetainerSet(c);
     if (c != &stg_END_TSO_QUEUE_closure && isRetainer(c)) {
 	retainClosure(c, c, getRetainerFrom(c));
     } else {
@@ -1759,7 +1774,7 @@ computeRetainerSet( void )
 {
     StgWeak *weak;
     RetainerSet *rtl;
-    nat g;
+    nat g, n;
     StgPtr ml;
     bdescr *bd;
 #ifdef DEBUG_RETAINER
@@ -1790,7 +1805,8 @@ computeRetainerSet( void )
 	// Traversing through mut_list is necessary
 	// because we can find MUT_VAR objects which have not been
 	// visited during retainer profiling.
-	for (bd = generations[g].mut_list; bd != NULL; bd = bd->link) {
+        for (n = 0; n < n_capabilities; n++) {
+          for (bd = capabilities[n].mut_lists[g]; bd != NULL; bd = bd->link) {
 	    for (ml = bd->start; ml < bd->free; ml++) {
 
 		maybeInitRetainerSet((StgClosure *)*ml);
@@ -1821,7 +1837,8 @@ computeRetainerSet( void )
 		}
 #endif
 	    }
-	}
+          }
+        }
     }
 }
 
@@ -1840,6 +1857,15 @@ computeRetainerSet( void )
  *    However, this is not necessary because any static indirection objects
  *    are just traversed through to reach dynamic objects. In other words,
  *    they are not taken into consideration in computing retainer sets.
+ *
+ * SDM (20/7/2011): I don't think this is doing anything sensible,
+ * because it happens before retainerProfile() and at the beginning of
+ * retainerProfil() we change the sense of 'flip'.  So all of the
+ * calls to maybeInitRetainerSet() here are initialising retainer sets
+ * with the wrong flip.  Also, I don't see why this is necessary.  I
+ * added a maybeInitRetainerSet() call to retainRoot(), and that seems
+ * to have fixed the assertion failure in retainerSetOf() I was
+ * encountering.
  * -------------------------------------------------------------------------- */
 void
 resetStaticObjectForRetainerProfiling( StgClosure *static_objects )

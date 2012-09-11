@@ -31,13 +31,10 @@ module System.Process.Internals (
 #if !defined(mingw32_HOST_OS) && !defined(__MINGW32__)
 	 pPrPr_disableITimers, c_execvpe,
 	ignoreSignal, defaultSignal,
-#else
-# ifdef __GLASGOW_HASKELL__
-	translate,
-# endif
 #endif
 #endif
 	withFilePathException, withCEnvironment,
+	translate,
 
 #ifndef __HUGS__
         fdToHandle,
@@ -78,6 +75,7 @@ import System.IO.Error
 import Data.Typeable
 #if defined(mingw32_HOST_OS)
 import GHC.IO.IOMode
+import System.Win32.DebugApi (PHANDLE)
 #endif
 #else
 import GHC.IOBase	( haFD, FD, IOException(..) )
@@ -107,6 +105,7 @@ import System.FilePath
 #endif
 
 #include "HsProcessConfig.h"
+#include "processFlags.h"
 
 #ifndef __HUGS__
 -- ----------------------------------------------------------------------------
@@ -138,6 +137,9 @@ withProcessHandle_ (ProcessHandle m) io = modifyMVar_ m io
 
 type PHANDLE = CPid
 
+throwErrnoIfBadPHandle :: String -> IO PHANDLE -> IO PHANDLE  
+throwErrnoIfBadPHandle = throwErrnoIfMinus1
+
 mkProcessHandle :: PHANDLE -> IO ProcessHandle
 mkProcessHandle p = do
   m <- newMVar (OpenHandle p)
@@ -148,7 +150,8 @@ closePHANDLE _ = return ()
 
 #else
 
-type PHANDLE = Word32
+throwErrnoIfBadPHandle :: String -> IO PHANDLE -> IO PHANDLE  
+throwErrnoIfBadPHandle = throwErrnoIfNull
 
 -- On Windows, we have to close this HANDLE when it is no longer required,
 -- hence we add a finalizer to it, using an IORef as the box on which to
@@ -179,13 +182,14 @@ foreign import stdcall unsafe "CloseHandle"
 -- ----------------------------------------------------------------------------
 
 data CreateProcess = CreateProcess{
-  cmdspec   :: CmdSpec,                 -- ^ Executable & arguments, or shell command
-  cwd       :: Maybe FilePath,          -- ^ Optional path to the working directory for the new process
-  env       :: Maybe [(String,String)], -- ^ Optional environment (otherwise inherit from the current process)
-  std_in    :: StdStream,               -- ^ How to determine stdin
-  std_out   :: StdStream,               -- ^ How to determine stdout
-  std_err   :: StdStream,               -- ^ How to determine stderr
-  close_fds :: Bool                     -- ^ Close all file descriptors except stdin, stdout and stderr in the new process (on Windows, only works if std_in, std_out, and std_err are all Inherit)
+  cmdspec      :: CmdSpec,                 -- ^ Executable & arguments, or shell command
+  cwd          :: Maybe FilePath,          -- ^ Optional path to the working directory for the new process
+  env          :: Maybe [(String,String)], -- ^ Optional environment (otherwise inherit from the current process)
+  std_in       :: StdStream,               -- ^ How to determine stdin
+  std_out      :: StdStream,               -- ^ How to determine stdout
+  std_err      :: StdStream,               -- ^ How to determine stderr
+  close_fds    :: Bool,                    -- ^ Close all file descriptors except stdin, stdout and stderr in the new process (on Windows, only works if std_in, std_out, and std_err are all Inherit)
+  create_group :: Bool                     -- ^ Create a new process group
  }
 
 data CmdSpec 
@@ -222,7 +226,8 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
                                   std_in = mb_stdin,
                                   std_out = mb_stdout,
                                   std_err = mb_stderr,
-                                  close_fds = mb_close_fds }
+                                  close_fds = mb_close_fds,
+                                  create_group = mb_create_group }
                mb_sigint mb_sigquit
  = do
   let (cmd,args) = commandToProcess cmdsp
@@ -231,8 +236,8 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
    alloca $ \ pfdStdOutput ->
    alloca $ \ pfdStdError  ->
    maybeWith withCEnvironment mb_env $ \pEnv ->
-   maybeWith withCString mb_cwd $ \pWorkDir ->
-   withMany withCString (cmd:args) $ \cstrs ->
+   maybeWith withFilePath mb_cwd $ \pWorkDir ->
+   withMany withFilePath (cmd:args) $ \cstrs ->
    withArray0 nullPtr cstrs $ \pargs -> do
      
      fdin  <- mbFd fun fd_stdin  mb_stdin
@@ -258,7 +263,8 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
                                 fdin fdout fderr
 				pfdStdInput pfdStdOutput pfdStdError
 			        set_int inthand set_quit quithand
-                                (if mb_close_fds then 1 else 0)
+                                ((if mb_close_fds then RUN_PROCESS_IN_CLOSE_FDS else 0)
+                                .|.(if mb_create_group then RUN_PROCESS_IN_NEW_GROUP else 0))
 
      hndStdInput  <- mbPipe mb_stdin  pfdStdInput  WriteMode
      hndStdOutput <- mbPipe mb_stdout pfdStdOutput ReadMode
@@ -286,7 +292,7 @@ foreign import ccall unsafe "runInteractiveProcess"
 	-> CLong			-- SIGINT handler
 	-> CInt				-- non-zero: set child's SIGQUIT handler
 	-> CLong			-- SIGQUIT handler
-        -> CInt                         -- close_fds
+        -> CInt                         -- flags
         -> IO PHANDLE
 
 #endif /* __GLASGOW_HASKELL__ */
@@ -305,7 +311,8 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
                                   std_in = mb_stdin,
                                   std_out = mb_stdout,
                                   std_err = mb_stderr,
-                                  close_fds = mb_close_fds }
+                                  close_fds = mb_close_fds,
+                                  create_group = mb_create_group }
                _ignored_mb_sigint _ignored_mb_sigquit
  = do
   (cmd, cmdline) <- commandToProcess cmdsp
@@ -332,11 +339,12 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
      -- the C code.  Also the MVar will be cheaper when not running
      -- the threaded RTS.
      proc_handle <- withMVar runInteractiveProcess_lock $ \_ ->
-                    throwErrnoIfMinus1 fun $
+                    throwErrnoIfBadPHandle fun $
 	                 c_runInteractiveProcess pcmdline pWorkDir pEnv 
                                 fdin fdout fderr
 				pfdStdInput pfdStdOutput pfdStdError
-                                (if mb_close_fds then 1 else 0)
+                                ((if mb_close_fds then RUN_PROCESS_IN_CLOSE_FDS else 0)
+                                .|.(if mb_create_group then RUN_PROCESS_IN_NEW_GROUP else 0))
 
      hndStdInput  <- mbPipe mb_stdin  pfdStdInput  WriteMode
      hndStdOutput <- mbPipe mb_stdout pfdStdOutput ReadMode
@@ -349,91 +357,22 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
 runInteractiveProcess_lock :: MVar ()
 runInteractiveProcess_lock = unsafePerformIO $ newMVar ()
 
-foreign import ccall unsafe "runInteractiveProcess" 
+foreign import ccall unsafe "runInteractiveProcess"
   c_runInteractiveProcess
         :: CWString
         -> CWString
-        -> Ptr ()
+        -> Ptr CWString
         -> FD
         -> FD
         -> FD
         -> Ptr FD
         -> Ptr FD
         -> Ptr FD
-        -> CInt                         -- close_fds
+        -> CInt                         -- flags
         -> IO PHANDLE
-
--- ------------------------------------------------------------------------
--- Passing commands to the OS on Windows
-
-{-
-On Windows this is tricky.  We use CreateProcess, passing a single
-command-line string (lpCommandLine) as its argument.  (CreateProcess
-is well documented on http://msdn.microsoft.com.)
-
-      - It parses the beginning of the string to find the command. If the
-	file name has embedded spaces, it must be quoted, using double
-	quotes thus 
-		"foo\this that\cmd" arg1 arg2
-
-      - The invoked command can in turn access the entire lpCommandLine string,
-	and the C runtime does indeed do so, parsing it to generate the 
-	traditional argument vector argv[0], argv[1], etc.  It does this
-	using a complex and arcane set of rules which are described here:
-	
-	   http://msdn.microsoft.com/library/default.asp?url=/library/en-us/vccelng/htm/progs_12.asp
-
-	(if this URL stops working, you might be able to find it by
-	searching for "Parsing C Command-Line Arguments" on MSDN.  Also,
-	the code in the Microsoft C runtime that does this translation
-	is shipped with VC++).
-
-Our goal in runProcess is to take a command filename and list of
-arguments, and construct a string which inverts the translatsions
-described above, such that the program at the other end sees exactly
-the same arguments in its argv[] that we passed to rawSystem.
-
-This inverse translation is implemented by 'translate' below.
-
-Here are some pages that give informations on Windows-related 
-limitations and deviations from Unix conventions:
-
-    http://support.microsoft.com/default.aspx?scid=kb;en-us;830473
-    Command lines and environment variables effectively limited to 8191 
-    characters on Win XP, 2047 on NT/2000 (probably even less on Win 9x):
-
-    http://www.microsoft.com/windowsxp/home/using/productdoc/en/default.asp?url=/WINDOWSXP/home/using/productdoc/en/percent.asp
-    Command-line substitution under Windows XP. IIRC these facilities (or at 
-    least a large subset of them) are available on Win NT and 2000. Some 
-    might be available on Win 9x.
-
-    http://www.microsoft.com/windowsxp/home/using/productdoc/en/default.asp?url=/WINDOWSXP/home/using/productdoc/en/Cmd.asp
-    How CMD.EXE processes command lines.
-
-
-Note: CreateProcess does have a separate argument (lpApplicationName)
-with which you can specify the command, but we have to slap the
-command into lpCommandLine anyway, so that argv[0] is what a C program
-expects (namely the application name).  So it seems simpler to just
-use lpCommandLine alone, which CreateProcess supports.
--}
-
--- Translate command-line arguments for passing to CreateProcess().
-translate :: String -> String
-translate str = '"' : snd (foldr escape (True,"\"") str)
-  where escape '"'  (b,     str) = (True,  '\\' : '"'  : str)
-        escape '\\' (True,  str) = (True,  '\\' : '\\' : str)
-        escape '\\' (False, str) = (False, '\\' : str)
-	escape c    (b,     str) = (False, c : str)
-	-- See long comment above for what this function is trying to do.
-	--
-	-- The Bool passed back along the string is True iff the
-	-- rest of the string is a sequence of backslashes followed by
-	-- a double quote.
+#endif
 
 #endif /* __GLASGOW_HASKELL__ */
-
-#endif
 
 fd_stdin, fd_stdout, fd_stderr :: FD
 fd_stdin  = 0
@@ -571,6 +510,79 @@ findCommandInterpreter = do
 
 #endif /* __HUGS__ */
 
+-- ------------------------------------------------------------------------
+-- Escaping commands for shells
+
+{-
+On Windows we also use this for running commands.  We use CreateProcess,
+passing a single command-line string (lpCommandLine) as its argument.
+(CreateProcess is well documented on http://msdn.microsoft.com.)
+
+      - It parses the beginning of the string to find the command. If the
+        file name has embedded spaces, it must be quoted, using double
+        quotes thus
+                "foo\this that\cmd" arg1 arg2
+
+      - The invoked command can in turn access the entire lpCommandLine string,
+        and the C runtime does indeed do so, parsing it to generate the
+        traditional argument vector argv[0], argv[1], etc.  It does this
+        using a complex and arcane set of rules which are described here:
+
+           http://msdn.microsoft.com/library/default.asp?url=/library/en-us/vccelng/htm/progs_12.asp
+
+        (if this URL stops working, you might be able to find it by
+        searching for "Parsing C Command-Line Arguments" on MSDN.  Also,
+        the code in the Microsoft C runtime that does this translation
+        is shipped with VC++).
+
+Our goal in runProcess is to take a command filename and list of
+arguments, and construct a string which inverts the translatsions
+described above, such that the program at the other end sees exactly
+the same arguments in its argv[] that we passed to rawSystem.
+
+This inverse translation is implemented by 'translate' below.
+
+Here are some pages that give informations on Windows-related
+limitations and deviations from Unix conventions:
+
+    http://support.microsoft.com/default.aspx?scid=kb;en-us;830473
+    Command lines and environment variables effectively limited to 8191
+    characters on Win XP, 2047 on NT/2000 (probably even less on Win 9x):
+
+    http://www.microsoft.com/windowsxp/home/using/productdoc/en/default.asp?url=/WINDOWSXP/home/using/productdoc/en/percent.asp
+    Command-line substitution under Windows XP. IIRC these facilities (or at
+    least a large subset of them) are available on Win NT and 2000. Some
+    might be available on Win 9x.
+
+    http://www.microsoft.com/windowsxp/home/using/productdoc/en/default.asp?url=/WINDOWSXP/home/using/productdoc/en/Cmd.asp
+    How CMD.EXE processes command lines.
+
+
+Note: CreateProcess does have a separate argument (lpApplicationName)
+with which you can specify the command, but we have to slap the
+command into lpCommandLine anyway, so that argv[0] is what a C program
+expects (namely the application name).  So it seems simpler to just
+use lpCommandLine alone, which CreateProcess supports.
+-}
+
+translate :: String -> String
+#if mingw32_HOST_OS
+translate str = '"' : snd (foldr escape (True,"\"") str)
+  where escape '"'  (b,     str) = (True,  '\\' : '"'  : str)
+        escape '\\' (True,  str) = (True,  '\\' : '\\' : str)
+        escape '\\' (False, str) = (False, '\\' : str)
+        escape c    (b,     str) = (False, c : str)
+        -- See long comment above for what this function is trying to do.
+        --
+        -- The Bool passed back along the string is True iff the
+        -- rest of the string is a sequence of backslashes followed by
+        -- a double quote.
+#else
+translate str = '\'' : foldr escape "'" str
+  where escape '\'' = showString "'\\''"
+        escape c    = showChar c
+#endif
+
 -- ----------------------------------------------------------------------------
 -- Utils
 
@@ -589,9 +601,9 @@ withCEnvironment envir act =
   let env' = map (\(name, val) -> name ++ ('=':val)) envir 
   in withMany withCString env' (\pEnv -> withArray0 nullPtr pEnv act)
 #else
-withCEnvironment :: [(String,String)] -> (Ptr () -> IO a) -> IO a
+withCEnvironment :: [(String,String)] -> (Ptr CWString -> IO a) -> IO a
 withCEnvironment envir act =
   let env' = foldr (\(name, val) env -> name ++ ('=':val)++'\0':env) "\0" envir
-  in withCString env' (act . castPtr)
+  in withCWString env' (act . castPtr)
 #endif
 

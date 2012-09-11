@@ -51,12 +51,12 @@ compiler/stage%/build/Config.hs : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo                                                               >> $@
 	@echo '#include "ghc_boot_platform.h"'                              >> $@
 	@echo                                                               >> $@
-	@echo 'cBuildPlatform :: String'                                    >> $@
-	@echo 'cBuildPlatform = BuildPlatform_NAME'                         >> $@
-	@echo 'cHostPlatform :: String'                                     >> $@
-	@echo 'cHostPlatform = HostPlatform_NAME'                           >> $@
-	@echo 'cTargetPlatform :: String'                                   >> $@
-	@echo 'cTargetPlatform = TargetPlatform_NAME'                       >> $@
+	@echo 'cBuildPlatformString :: String'                              >> $@
+	@echo 'cBuildPlatformString = BuildPlatform_NAME'                   >> $@
+	@echo 'cHostPlatformString :: String'                               >> $@
+	@echo 'cHostPlatformString = HostPlatform_NAME'                     >> $@
+	@echo 'cTargetPlatformString :: String'                             >> $@
+	@echo 'cTargetPlatformString = TargetPlatform_NAME'                 >> $@
 	@echo                                                               >> $@
 	@echo 'cProjectName          :: String'                             >> $@
 	@echo 'cProjectName          = "$(ProjectName)"'                    >> $@
@@ -70,22 +70,18 @@ compiler/stage%/build/Config.hs : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo 'cBooterVersion        = "$(GhcVersion)"'                     >> $@
 	@echo 'cStage                :: String'                             >> $@
 	@echo 'cStage                = show (STAGE :: Int)'                 >> $@
-	@echo 'cCcOpts               :: [String]'                           >> $@
-	@echo 'cCcOpts               = words "$(CONF_CC_OPTS_STAGE$*)"'     >> $@
 	@echo 'cGccLinkerOpts        :: [String]'                           >> $@
 	@echo 'cGccLinkerOpts        = words "$(CONF_GCC_LINKER_OPTS_STAGE$*)"' >> $@
 	@echo 'cLdLinkerOpts         :: [String]'                           >> $@
 	@echo 'cLdLinkerOpts         = words "$(CONF_LD_LINKER_OPTS_STAGE$*)"'  >> $@
 	@echo 'cIntegerLibrary       :: String'                             >> $@
 	@echo 'cIntegerLibrary       = "$(INTEGER_LIBRARY)"'                >> $@
-	@echo 'cSplitObjs            :: String'                             >> $@
-	@echo 'cSplitObjs            = "$(SupportsSplitObjs)"'              >> $@
+	@echo 'cSupportsSplitObjs    :: String'                             >> $@
+	@echo 'cSupportsSplitObjs    = "$(SupportsSplitObjs)"'              >> $@
 	@echo 'cGhcWithInterpreter   :: String'                             >> $@
 	@echo 'cGhcWithInterpreter   = "$(GhcWithInterpreter)"'             >> $@
 	@echo 'cGhcWithNativeCodeGen :: String'                             >> $@
 	@echo 'cGhcWithNativeCodeGen = "$(GhcWithNativeCodeGen)"'           >> $@
-	@echo 'cGhcWithLlvmCodeGen   :: String'                             >> $@
-	@echo 'cGhcWithLlvmCodeGen   = "YES"'                               >> $@
 	@echo 'cGhcWithSMP           :: String'                             >> $@
 	@echo 'cGhcWithSMP           = "$(GhcWithSMP)"'                     >> $@
 	@echo 'cGhcRTSWays           :: String'                             >> $@
@@ -98,28 +94,18 @@ compiler/stage%/build/Config.hs : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo 'cLeadingUnderscore    = "$(LeadingUnderscore)"'              >> $@
 	@echo 'cRAWCPP_FLAGS         :: String'                             >> $@
 	@echo 'cRAWCPP_FLAGS         = "$(RAWCPP_FLAGS)"'                   >> $@
-	@echo 'cGCC                  :: String'                             >> $@
-	@echo 'cGCC                  = "$(WhatGccIsCalled)"'                >> $@
-	@echo 'cMKDLL                :: String'                             >> $@
-	@echo 'cMKDLL                = "$(BLD_DLL)"'                        >> $@
 	@echo 'cLdIsGNULd            :: String'                             >> $@
 	@echo 'cLdIsGNULd            = "$(LdIsGNULd)"'                      >> $@
+	@echo 'cLdHasBuildId         :: String'                             >> $@
+	@echo 'cLdHasBuildId         = "$(LdHasBuildId)"'                   >> $@
 	@echo 'cLD_X                 :: String'                             >> $@
 	@echo 'cLD_X                 = "$(LD_X)"'                           >> $@
 	@echo 'cGHC_DRIVER_DIR       :: String'                             >> $@
 	@echo 'cGHC_DRIVER_DIR       = "$(GHC_DRIVER_DIR)"'                 >> $@
-	@echo 'cGHC_TOUCHY_PGM       :: String'                             >> $@
-	@echo 'cGHC_TOUCHY_PGM       = "$(GHC_TOUCHY_PGM)"'                 >> $@
-	@echo 'cGHC_TOUCHY_DIR       :: String'                             >> $@
-	@echo 'cGHC_TOUCHY_DIR       = "$(GHC_TOUCHY_DIR)"'                 >> $@
 	@echo 'cGHC_UNLIT_PGM        :: String'                             >> $@
 	@echo 'cGHC_UNLIT_PGM        = "$(GHC_UNLIT_PGM)"'                  >> $@
 	@echo 'cGHC_UNLIT_DIR        :: String'                             >> $@
 	@echo 'cGHC_UNLIT_DIR        = "$(GHC_UNLIT_DIR)"'                  >> $@
-	@echo 'cGHC_MANGLER_PGM      :: String'                             >> $@
-	@echo 'cGHC_MANGLER_PGM      = "$(GHC_MANGLER_PGM)"'                >> $@
-	@echo 'cGHC_MANGLER_DIR      :: String'                             >> $@
-	@echo 'cGHC_MANGLER_DIR      = "$(GHC_MANGLER_DIR)"'                >> $@
 	@echo 'cGHC_SPLIT_PGM        :: String'                             >> $@
 	@echo 'cGHC_SPLIT_PGM        = "$(GHC_SPLIT_PGM)"'                  >> $@
 	@echo 'cGHC_SPLIT_DIR        :: String'                             >> $@
@@ -128,8 +114,6 @@ compiler/stage%/build/Config.hs : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo 'cGHC_SYSMAN_PGM       = "$(GHC_SYSMAN)"'                     >> $@
 	@echo 'cGHC_SYSMAN_DIR       :: String'                             >> $@
 	@echo 'cGHC_SYSMAN_DIR       = "$(GHC_SYSMAN_DIR)"'                 >> $@
-	@echo 'cGHC_PERL             :: String'                             >> $@
-	@echo 'cGHC_PERL             = "$(GHC_PERL)"'                       >> $@
 	@echo 'cDEFAULT_TMPDIR       :: String'                             >> $@
 	@echo 'cDEFAULT_TMPDIR       = "$(DEFAULT_TMPDIR)"'                 >> $@
 	@echo 'cRelocatableBuild     :: Bool'                               >> $@
@@ -262,7 +246,7 @@ PRIMOP_BITS = compiler/primop-data-decl.hs-incl        \
               compiler/primop-has-side-effects.hs-incl \
               compiler/primop-out-of-line.hs-incl      \
               compiler/primop-commutable.hs-incl       \
-              compiler/primop-needs-wrapper.hs-incl    \
+              compiler/primop-code-size.hs-incl        \
               compiler/primop-can-fail.hs-incl         \
               compiler/primop-strictness.hs-incl       \
               compiler/primop-primop-info.hs-incl
@@ -288,8 +272,8 @@ compiler/primop-out-of-line.hs-incl: $(PRIMOPS_TXT) $(GENPRIMOP_INPLACE)
 	"$(GENPRIMOP_INPLACE)" --out-of-line        < $< > $@
 compiler/primop-commutable.hs-incl: $(PRIMOPS_TXT) $(GENPRIMOP_INPLACE)
 	"$(GENPRIMOP_INPLACE)" --commutable         < $< > $@
-compiler/primop-needs-wrapper.hs-incl: $(PRIMOPS_TXT) $(GENPRIMOP_INPLACE)
-	"$(GENPRIMOP_INPLACE)" --needs-wrapper      < $< > $@
+compiler/primop-code-size.hs-incl: $(PRIMOPS_TXT) $(GENPRIMOP_INPLACE)
+	"$(GENPRIMOP_INPLACE)" --code-size          < $< > $@
 compiler/primop-can-fail.hs-incl: $(PRIMOPS_TXT) $(GENPRIMOP_INPLACE)
 	"$(GENPRIMOP_INPLACE)" --can-fail           < $< > $@
 compiler/primop-strictness.hs-incl: $(PRIMOPS_TXT) $(GENPRIMOP_INPLACE)
@@ -343,12 +327,6 @@ endif
 
 endif
 
-ifeq "$(GhcWithNativeCodeGen)" "NO"
-# XXX This should logically be a CPP option, but there doesn't seem to
-# be a flag for that
-compiler_CONFIGURE_OPTS += --ghc-option=-DOMIT_NATIVE_CODEGEN
-endif
-
 ifeq "$(TargetOS_CPP)" "openbsd"
 compiler_CONFIGURE_OPTS += --ld-options=-E
 endif
@@ -371,28 +349,6 @@ compiler_stage2_CONFIGURE_OPTS += --ghc-option=-auto-all
 # leave the vanilla libraries enabled.
 # compiler_stage2_CONFIGURE_OPTS += --disable-library-vanilla
 compiler_stage2_CONFIGURE_OPTS += --ghc-pkg-option=--force
-endif
-
-ifeq "$(HOSTPLATFORM)" "i386-unknown-mingw32"
-# The #include is vital for the via-C route with older compilers, else the C
-# compiler doesn't realise that the stcall foreign imports are indeed
-# stdcall, and doesn't generate the Foo@8 name for them
-# It's only important for older compilers, and in fact newer compilers
-# will give a warning if the -#include flag is used. We therefore only
-# do it for stage1, and only for < 6.11.
-ifeq "$(ghc_ge_611)" "NO"
-compiler_stage1_CONFIGURE_OPTS += --ghc-option='-\#include'    \
-                          --ghc-option='"<windows.h>"' \
-                          --ghc-option='-\#include'    \
-                          --ghc-option='"<process.h>"'
-endif
-endif
-
-# ghc_strlen percolates through so many modules that it is easier to get its
-# prototype via a global option instead of a myriad of per-file OPTIONS.
-# Again, this is only done for older compilers.
-ifeq "$(ghc_ge_611)" "NO"
-compiler_stage1_CONFIGURE_OPTS += --ghc-options='-\#include "cutils.h"'
 endif
 
 compiler_stage3_CONFIGURE_OPTS := $(compiler_stage2_CONFIGURE_OPTS)
@@ -481,6 +437,18 @@ compiler_stage1_HC_OPTS += $(GhcStage1HcOpts)
 compiler_stage2_HC_OPTS += $(GhcStage2HcOpts)
 compiler_stage3_HC_OPTS += $(GhcStage3HcOpts)
 
+ifeq "$(GhcStage1DefaultNewCodegen)" "YES"
+compiler_stage1_HC_OPTS += -DGHC_DEFAULT_NEW_CODEGEN
+endif
+
+ifeq "$(GhcStage2DefaultNewCodegen)" "YES"
+compiler_stage2_HC_OPTS += -DGHC_DEFAULT_NEW_CODEGEN
+endif
+
+ifeq "$(GhcStage3DefaultNewCodegen)" "YES"
+compiler_stage3_HC_OPTS += -DGHC_DEFAULT_NEW_CODEGEN
+endif
+
 ifneq "$(BINDIST)" "YES"
 
 compiler_stage2_TAGS_HC_OPTS = -package ghc
@@ -523,7 +491,9 @@ compiler/stage1/inplace-pkg-config-munged: compiler/stage1/inplace-pkg-config
 	  < $< > $@
 	"$(compiler_stage1_GHC_PKG)" update --force $(compiler_stage1_GHC_PKG_OPTS) $@
 
-$(compiler_stage1_v_LIB) : compiler/stage1/inplace-pkg-config-munged
+# We need to make sure the munged config is in the database before we
+# try to configure ghc-bin
+ghc/stage1/package-data.mk : compiler/stage1/inplace-pkg-config-munged
 endif
 
 endif

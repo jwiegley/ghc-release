@@ -27,9 +27,8 @@ import StgCmmClosure
 
 import StgSyn
 
-import MkZipCfgCmm
+import MkGraph
 import BlockId
-import Cmm()
 import CmmExpr
 import CoreSyn
 import DataCon
@@ -54,6 +53,11 @@ import UniqSupply
 cgExpr	:: StgExpr -> FCode ()
 
 cgExpr (StgApp fun args)     = cgIdApp fun args
+
+{- seq# a s ==> a -}
+cgExpr (StgOpApp (StgPrimOp SeqOp) [StgVarArg a, _] _res_ty) =
+  cgIdApp a []
+
 cgExpr (StgOpApp op args ty) = cgOpApp op args ty
 cgExpr (StgConApp con args)  = cgConApp con args
 cgExpr (StgSCC cc expr)   = do { emitSetCCC cc; cgExpr expr }
@@ -323,6 +327,22 @@ cgCase scrut@(StgApp v []) _ _ (PrimAlt _) _
        ; emit $ mkComment $ mkFastString "should be unreachable code"
        ; emit $ withFreshLabel "l" (\l -> mkLabel l <*> mkBranch l)}
 
+{-
+case seq# a s of v
+  (# s', a' #) -> e
+
+==>
+
+case a of v
+  (# s', a' #) -> e
+
+(taking advantage of the fact that the return convention for (# State#, a #)
+is the same as the return convention for just 'a')
+-}
+cgCase (StgOpApp (StgPrimOp SeqOp) [StgVarArg a, _] _) bndr srt alt_type alts
+  = -- handle seq#, same return convention as vanilla 'a'.
+    cgCase (StgApp a []) bndr srt alt_type alts
+
 cgCase scrut bndr srt alt_type alts 
   = -- the general case
     do { up_hp_usg <- getVirtHp        -- Upstream heap usage
@@ -456,10 +476,8 @@ cgAltRhss gc_plan bndr alts
 	   ; return con }
 
 maybeAltHeapCheck :: GcPlan -> FCode a -> FCode a
-maybeAltHeapCheck NoGcInAlts code
-  = code
-maybeAltHeapCheck (GcInAlts regs _) code
-  = altHeapCheck regs code
+maybeAltHeapCheck NoGcInAlts        code = code
+maybeAltHeapCheck (GcInAlts regs _) code = altHeapCheck regs code
 
 -----------------------------------------------------------------------------
 -- 	Tail calls
@@ -550,8 +568,8 @@ if the assignment to the binder will be dead code (use isDeadBndr).
 The following example illustrates how badly the code turns out:
   STG:
     case <=## [ww_s7Hx y_s7HD] of wild2_sbH8 {
-      GHC.Bool.False -> <true  code> // sbH8 dead
-      GHC.Bool.True  -> <false code> // sbH8 dead
+      GHC.Types.False -> <true  code> // sbH8 dead
+      GHC.Types.True  -> <false code> // sbH8 dead
     };
   Cmm:
     _s7HD::F64 = F64[_sbH7::I64 + 7];  // MidAssign
@@ -611,3 +629,4 @@ we should still generate the same code:
    L2:
       <default-case code>
 -}
+

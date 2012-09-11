@@ -9,18 +9,19 @@
 module DsMonad (
 	DsM, mapM, mapAndUnzipM,
 	initDs, initDsTc, fixDs,
-	foldlM, foldrM, ifDOptM, unsetOptM,
+	foldlM, foldrM, ifDOptM, unsetDOptM, unsetWOptM,
 	Applicative(..),(<$>),
 
-	newLocalName,
-	duplicateLocalDs, newSysLocalDs, newSysLocalsDs, newUniqueId,
-	newFailLocalDs, newPredVarDs,
-	getSrcSpanDs, putSrcSpanDs,
-	getModuleDs,
-	newUnique, 
-	UniqSupply, newUniqueSupply,
-	getDOptsDs, getGhcModeDs, doptDs,
-	dsLookupGlobal, dsLookupGlobalId, dsLookupTyCon, dsLookupDataCon,
+        newLocalName,
+        duplicateLocalDs, newSysLocalDs, newSysLocalsDs, newUniqueId,
+        newFailLocalDs, newPredVarDs,
+        getSrcSpanDs, putSrcSpanDs,
+        getModuleDs,
+        mkPrintUnqualifiedDs,
+        newUnique, 
+        UniqSupply, newUniqueSupply,
+        getDOptsDs, getGhcModeDs, doptDs, woptDs,
+        dsLookupGlobal, dsLookupGlobalId, dsLookupDPHId, dsLookupTyCon, dsLookupDataCon,
         dsLookupClass,
 
 	DsMetaEnv, DsMetaVal(..), dsLookupMetaEnv, dsExtendMetaEnv,
@@ -256,6 +257,9 @@ getDOptsDs = getDOpts
 doptDs :: DynFlag -> TcRnIf gbl lcl Bool
 doptDs = doptM
 
+woptDs :: WarningFlag -> TcRnIf gbl lcl Bool
+woptDs = woptM
+
 getGhcModeDs :: DsM GhcMode
 getGhcModeDs =  getDOptsDs >>= return . ghcMode
 
@@ -282,6 +286,9 @@ failWithDs err
 	; let msg = mkErrMsg loc (ds_unqual env) err
 	; updMutVar (ds_msgs env) (\ (w,e) -> (w, e `snocBag` msg))
 	; failM }
+
+mkPrintUnqualifiedDs :: DsM PrintUnqualified
+mkPrintUnqualifiedDs = ds_unqual <$> getGblEnv
 \end{code}
 
 \begin{code}
@@ -298,6 +305,19 @@ dsLookupGlobal name
 dsLookupGlobalId :: Name -> DsM Id
 dsLookupGlobalId name 
   = tyThingId <$> dsLookupGlobal name
+
+-- Looking up a global DPH 'Id' is like 'dsLookupGlobalId', but the package, in which the looked
+-- up name is located, varies with the active DPH backend.
+--
+dsLookupDPHId :: (PackageId -> Name) -> DsM Id
+dsLookupDPHId nameInPkg
+  = do { dflags <- getDOpts
+       ; case dphPackageMaybe dflags of
+           Just pkg -> tyThingId <$> dsLookupGlobal (nameInPkg pkg)
+           Nothing  -> failWithDs $ ptext err
+       }
+  where
+    err = sLit "To use -XParallelArrays select a DPH backend with -fdph-par or -fdph-seq"
 
 dsLookupTyCon :: Name -> DsM TyCon
 dsLookupTyCon name

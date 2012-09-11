@@ -17,7 +17,6 @@ import Vectorise.Utils.Hoisting
 
 import CoreSyn
 import Type
-import Var
 import MkCore
 import CoreUtils
 import TyCon
@@ -38,9 +37,9 @@ mkClosure
 	-> VM VExpr
 
 mkClosure arg_ty res_ty env_ty (vfn,lfn) (venv,lenv)
- = do Just dict <- paDictOfType env_ty
-      mkv       <- builtin closureVar
-      mkl       <- builtin liftedClosureVar
+ = do dict <- paDictOfType env_ty
+      mkv  <- builtin closureVar
+      mkl  <- builtin liftedClosureVar
       return (Var mkv `mkTyApps` [arg_ty, res_ty, env_ty] `mkApps` [dict, vfn, lfn, venv],
               Var mkl `mkTyApps` [arg_ty, res_ty, env_ty] `mkApps` [dict, vfn, lfn, lenv])
 

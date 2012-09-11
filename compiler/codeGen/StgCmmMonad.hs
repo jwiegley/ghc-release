@@ -51,10 +51,11 @@ module StgCmmMonad (
 
 import StgCmmClosure
 import DynFlags
-import MkZipCfgCmm
-import ZipCfgCmmRep (UpdFrameOffset)
+import MkGraph
 import BlockId
-import Cmm
+import CmmDecl
+import CmmExpr
+import CmmNode (UpdFrameOffset)
 import CLabel
 import TyCon	( PrimRep )
 import SMRep
@@ -63,7 +64,6 @@ import Id
 import VarEnv
 import OrdList
 import Unique
-import Util()
 import UniqSupply
 import FastString(sLit)
 import Outputable
@@ -244,7 +244,7 @@ data CgState
   = MkCgState {
      cgs_stmts :: CmmAGraph,	  -- Current procedure
 
-     cgs_tops  :: OrdList CmmTopZ,
+     cgs_tops  :: OrdList CmmTop,
 	-- Other procedures and data blocks in this compilation unit
 	-- Both are ordered only so that we can 
 	-- reduce forward references, when it's easy to do so
@@ -537,22 +537,22 @@ forkAlts :: [FCode a] -> FCode [a]
 -- that the virtual Hp is moved on to the worst virtual Hp for the branches
 
 forkAlts branch_fcodes
-  = do	{ info_down <- getInfoDown
-	; us <- newUniqSupply
-	; state <- getState
-	; let compile us branch 
-		= (us2, doFCode branch info_down branch_state)
-		where
-		  (us1,us2) = splitUniqSupply us
-	          branch_state = (initCgState us1) {
-					cgs_binds   = cgs_binds state,
-					cgs_hp_usg  = cgs_hp_usg state }
+  = do  { info_down <- getInfoDown
+        ; us <- newUniqSupply
+        ; state <- getState
+        ; let compile us branch
+                = (us2, doFCode branch info_down branch_state)
+                where
+                  (us1,us2) = splitUniqSupply us
+                  branch_state = (initCgState us1) {
+                                        cgs_binds   = cgs_binds state,
+                                        cgs_hp_usg  = cgs_hp_usg state }
 
-	      (_us, results) = mapAccumL compile us branch_fcodes
-	      (branch_results, branch_out_states) = unzip results
-	; setState $ foldl stateIncUsage state branch_out_states
-		-- NB foldl.  state is the *left* argument to stateIncUsage
-	; return branch_results }
+              (_us, results) = mapAccumL compile us branch_fcodes
+              (branch_results, branch_out_states) = unzip results
+        ; setState $ foldl stateIncUsage state branch_out_states
+                -- NB foldl.  state is the *left* argument to stateIncUsage
+        ; return branch_results }
 
 -- collect the code emitted by an FCode computation
 getCodeR :: FCode a -> FCode (a, CmmAGraph)
@@ -593,31 +593,32 @@ emit ag
   = do	{ state <- getState
 	; setState $ state { cgs_stmts = cgs_stmts state <*> ag } }
 
-emitData :: Section -> [CmmStatic] -> FCode ()
+emitData :: Section -> CmmStatics -> FCode ()
 emitData sect lits
   = do 	{ state <- getState
 	; setState $ state { cgs_tops = cgs_tops state `snocOL` data_block } }
   where
     data_block = CmmData sect lits
 
-emitProcWithConvention :: Convention -> CmmInfo -> CLabel -> CmmFormals ->
+emitProcWithConvention :: Convention -> CmmInfoTable -> CLabel -> [CmmFormal] ->
                           CmmAGraph -> FCode ()
 emitProcWithConvention conv info lbl args blocks
   = do  { us <- newUniqSupply
-        ; let (offset, entry) = mkEntry (mkBlockId $ uniqFromSupply us) conv args
+        ; let (offset, entry) = mkCallEntry conv args
               blks = initUs_ us $ lgraphOfAGraph $ entry <*> blocks
-        ; let proc_block = CmmProc info lbl args ((offset, Just initUpdFrameOff), blks)
+        ; let sinfo = StackInfo {arg_space = offset, updfr_space = Just initUpdFrameOff}
+              proc_block = CmmProc (TopInfo {info_tbl=info, stack_info=sinfo}) lbl blks
         ; state <- getState
         ; setState $ state { cgs_tops = cgs_tops state `snocOL` proc_block } }
 
-emitProc :: CmmInfo -> CLabel -> CmmFormals -> CmmAGraph -> FCode ()
+emitProc :: CmmInfoTable -> CLabel -> [CmmFormal] -> CmmAGraph -> FCode ()
 emitProc = emitProcWithConvention NativeNodeCall
 
 emitSimpleProc :: CLabel -> CmmAGraph -> FCode ()
 emitSimpleProc lbl code = 
-  emitProc (CmmInfo Nothing Nothing CmmNonInfoTable) lbl [] code
+  emitProc CmmNonInfoTable lbl [] code
 
-getCmm :: FCode () -> FCode CmmZ
+getCmm :: FCode () -> FCode Cmm
 -- Get all the CmmTops (there should be no stmts)
 -- Return a single Cmm which may be split from other Cmms by
 -- object splitting (at a later stage)

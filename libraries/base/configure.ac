@@ -10,6 +10,13 @@ AC_ARG_WITH([cc],
             [CC=$withval])
 AC_PROG_CC()
 
+case `uname -s` in
+    MINGW*|CYGWIN*)
+        WINDOWS=YES;;
+    *)
+        WINDOWS=NO;;
+esac
+
 # do we have long longs?
 AC_CHECK_TYPES([long long])
 
@@ -32,7 +39,7 @@ AC_CHECK_FUNCS([lstat])
 AC_CHECK_FUNCS([getclock getrusage times])
 AC_CHECK_FUNCS([_chsize ftruncate])
 
-AC_CHECK_FUNCS([epoll_create1 epoll_ctl eventfd kevent kevent64 kqueue poll])
+AC_CHECK_FUNCS([epoll_ctl eventfd kevent kevent64 kqueue poll])
 
 # event-related fun
 
@@ -86,11 +93,19 @@ FPTOOLS_CHECK_HTYPE(double)
 FPTOOLS_CHECK_HTYPE(ptrdiff_t)
 FPTOOLS_CHECK_HTYPE(size_t)
 FPTOOLS_CHECK_HTYPE(wchar_t)
-# Int32 is a HACK for non-ISO C compilers
-FPTOOLS_CHECK_HTYPE(sig_atomic_t, Int32)
+FPTOOLS_CHECK_HTYPE(sig_atomic_t)
 FPTOOLS_CHECK_HTYPE(clock_t)
 FPTOOLS_CHECK_HTYPE(time_t)
-FPTOOLS_CHECK_HTYPE(dev_t, Word32)
+FPTOOLS_CHECK_HTYPE(useconds_t)
+FPTOOLS_CHECK_HTYPE_ELSE(suseconds_t,
+                         [if test "$WINDOWS" = "YES"
+                          then
+                              AC_CV_NAME=Int32
+                              AC_CV_NAME_supported=yes
+                          else
+                              AC_MSG_ERROR([type not found])
+                          fi])
+FPTOOLS_CHECK_HTYPE(dev_t)
 FPTOOLS_CHECK_HTYPE(ino_t)
 FPTOOLS_CHECK_HTYPE(mode_t)
 FPTOOLS_CHECK_HTYPE(off_t)
@@ -103,20 +118,11 @@ FPTOOLS_CHECK_HTYPE(tcflag_t)
 FPTOOLS_CHECK_HTYPE(nlink_t)
 FPTOOLS_CHECK_HTYPE(ssize_t)
 FPTOOLS_CHECK_HTYPE(rlim_t)
-FPTOOLS_CHECK_HTYPE(wint_t)
 
 FPTOOLS_CHECK_HTYPE(intptr_t)
 FPTOOLS_CHECK_HTYPE(uintptr_t)
-# Workaround for OSes that don't have intmax_t and uintmax_t, e.g. OpenBSD.
-if test "$ac_cv_type_long_long" = yes; then
-  fptools_cv_default_htype_intmax=$fptools_cv_htype_long_long
-  fptools_cv_default_htype_uintmax=$fptools_cv_htype_unsigned_long_long
-else
-  fptools_cv_default_htype_intmax=$fptools_cv_htype_long
-  fptools_cv_default_htype_uintmax=$fptools_cv_htype_unsigned_long
-fi
-FPTOOLS_CHECK_HTYPE(intmax_t, $fptools_cv_default_htype_intmax)
-FPTOOLS_CHECK_HTYPE(uintmax_t, $fptools_cv_default_htype_uintmax)
+FPTOOLS_CHECK_HTYPE(intmax_t)
+FPTOOLS_CHECK_HTYPE(uintmax_t)
 
 # test errno values
 FP_CHECK_CONSTS([E2BIG EACCES EADDRINUSE EADDRNOTAVAIL EADV EAFNOSUPPORT EAGAIN EALREADY EBADF EBADMSG EBADRPC EBUSY ECHILD ECOMM ECONNABORTED ECONNREFUSED ECONNRESET EDEADLK EDESTADDRREQ EDIRTY EDOM EDQUOT EEXIST EFAULT EFBIG EFTYPE EHOSTDOWN EHOSTUNREACH EIDRM EILSEQ EINPROGRESS EINTR EINVAL EIO EISCONN EISDIR ELOOP EMFILE EMLINK EMSGSIZE EMULTIHOP ENAMETOOLONG ENETDOWN ENETRESET ENETUNREACH ENFILE ENOBUFS ENODATA ENODEV ENOENT ENOEXEC ENOLCK ENOLINK ENOMEM ENOMSG ENONET ENOPROTOOPT ENOSPC ENOSR ENOSTR ENOSYS ENOTBLK ENOTCONN ENOTDIR ENOTEMPTY ENOTSOCK ENOTTY ENXIO EOPNOTSUPP EPERM EPFNOSUPPORT EPIPE EPROCLIM EPROCUNAVAIL EPROGMISMATCH EPROGUNAVAIL EPROTO EPROTONOSUPPORT EPROTOTYPE ERANGE EREMCHG EREMOTE EROFS ERPCMISMATCH ERREMOTE ESHUTDOWN ESOCKTNOSUPPORT ESPIPE ESRCH ESRMNT ESTALE ETIME ETIMEDOUT ETOOMANYREFS ETXTBSY EUSERS EWOULDBLOCK EXDEV ENOCIGAR], [#include <stdio.h>
@@ -146,11 +152,10 @@ FP_SEARCH_LIBS_PROTO(iconv,
                       iconv_close(cd);],
                      iconv,
                      [EXTRA_LIBS="$EXTRA_LIBS $ac_lib"],
-                     [case `uname -s` in
-                        MINGW*|CYGWIN*) ;;
-                        *)
-                             AC_MSG_ERROR([iconv is required on non-Windows platforms]);;
-                      esac])
+                     [if test "$WINDOWS" = "NO"
+                      then
+                          AC_MSG_ERROR([iconv is required on non-Windows platforms])
+                      fi])
 
 # If possible, we use libcharset instead of nl_langinfo(CODESET) to
 # determine the current locale's character encoding.
@@ -162,6 +167,9 @@ FP_SEARCH_LIBS_PROTO(
     [AC_DEFINE([HAVE_LIBCHARSET], [1], [Define to 1 if you have libcharset.])
      EXTRA_LIBS="$EXTRA_LIBS $ac_lib"])
 
+# Hack - md5.h needs HsFFI.h.  Is there a better way to do this?
+CFLAGS="-I../../includes $CFLAGS"
+AC_CHECK_SIZEOF([struct MD5Context], ,[#include "include/md5.h"])
 
 AC_SUBST(EXTRA_LIBS)
 AC_CONFIG_FILES([base.buildinfo])

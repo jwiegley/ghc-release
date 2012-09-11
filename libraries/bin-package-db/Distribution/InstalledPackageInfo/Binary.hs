@@ -59,11 +59,13 @@ putInstalledPackageInfo ipi = do
   put (stability ipi)
   put (homepage ipi)
   put (pkgUrl ipi)
+  put (synopsis ipi)
   put (description ipi)
   put (category ipi)
   put (exposed ipi)
   put (exposedModules ipi)
   put (hiddenModules ipi)
+  put (trusted ipi)
   put (importDirs ipi)
   put (libraryDirs ipi)
   put (hsLibraries ipi)
@@ -91,11 +93,13 @@ getInstalledPackageInfo = do
   stability <- get
   homepage <- get
   pkgUrl <- get
+  synopsis <- get
   description <- get
   category <- get
   exposed <- get
   exposedModules <- get
   hiddenModules <- get
+  trusted <- get
   importDirs <- get
   libraryDirs <- get
   hsLibraries <- get

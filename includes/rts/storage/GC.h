@@ -70,15 +70,15 @@ typedef struct generation_ {
     unsigned int   no;			// generation number
 
     bdescr *       blocks;	        // blocks in this gen
-    memcount       n_blocks;	        // number of blocks
+    memcount       n_blocks;            // number of blocks
     memcount       n_words;             // number of used words
 
     bdescr *       large_objects;	// large objects (doubly linked)
     memcount       n_large_blocks;      // no. of blocks used by large objs
-    memcount       n_new_large_blocks;  // count freshly allocated large objects
+    memcount       n_new_large_words;   // words of new large objects
+                                        // (for allocation stats)
 
-    memcount       max_blocks;		// max blocks
-    bdescr        *mut_list;      	// mut objects in this gen (not G0)
+    memcount       max_blocks;          // max blocks
 
     StgTSO *       threads;             // threads in this gen
                                         // linked via global_link
@@ -95,7 +95,7 @@ typedef struct generation_ {
 #if defined(THREADED_RTS)
     char pad[128];                      // make sure the following is
                                         // on a separate cache line.
-    SpinLock     sync_large_objects;    // lock for large_objects
+    SpinLock     sync;                  // lock for large_objects
                                         //    and scavenged_large_objects
 #endif
 
@@ -106,14 +106,9 @@ typedef struct generation_ {
     // are copied into the following two fields.  After GC, these blocks
     // are freed.
     bdescr *     old_blocks;	        // bdescr of first from-space block
-    memcount     n_old_blocks;		// number of blocks in from-space
+    memcount     n_old_blocks;         // number of blocks in from-space
     memcount     live_estimate;         // for sweeping: estimate of live data
     
-    bdescr *     saved_mut_list;
-
-    bdescr *     part_blocks;           // partially-full scanned blocks
-    memcount     n_part_blocks;         // count of above
-
     bdescr *     scavenged_large_objects;  // live large objs after GC (d-link)
     memcount     n_scavenged_large_blocks; // size (not count) of above
 
@@ -162,7 +157,7 @@ void * allocateExec(unsigned int len, void **exec_addr);
 void   freeExec (void *p);
 
 // Used by GC checks in external .cmm code:
-extern nat alloc_blocks_lim;
+extern nat large_alloc_lim;
 
 /* -----------------------------------------------------------------------------
    Performing Garbage Collection
@@ -204,9 +199,9 @@ extern rtsBool keepCAFs;
 
 INLINE_HEADER void initBdescr(bdescr *bd, generation *gen, generation *dest)
 {
-    bd->gen    = gen;
-    bd->gen_no = gen->no;
-    bd->dest   = dest;
+    bd->gen     = gen;
+    bd->gen_no  = gen->no;
+    bd->dest_no = dest->no;
 }
 
 #endif /* RTS_STORAGE_GC_H */

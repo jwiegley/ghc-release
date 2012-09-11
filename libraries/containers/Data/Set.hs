@@ -1,4 +1,4 @@
-{-# OPTIONS -cpp #-}
+{-# LANGUAGE CPP #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.Set
@@ -20,12 +20,12 @@
 -- trees of /bounded balance/) as described by:
 --
 --    * Stephen Adams, \"/Efficient sets: a balancing act/\",
---	Journal of Functional Programming 3(4):553-562, October 1993,
---	<http://www.swiss.ai.mit.edu/~adams/BB/>.
+--      Journal of Functional Programming 3(4):553-562, October 1993,
+--      <http://www.swiss.ai.mit.edu/~adams/BB/>.
 --
 --    * J. Nievergelt and E.M. Reingold,
---	\"/Binary search trees of bounded balance/\",
---	SIAM journal of computing 2(1), March 1973.
+--      \"/Binary search trees of bounded balance/\",
+--      SIAM journal of computing 2(1), March 1973.
 --
 -- Note that the implementation is /left-biased/ -- the elements of a
 -- first argument are always preferred to the second, for example in
@@ -34,9 +34,28 @@
 -- equality.
 -----------------------------------------------------------------------------
 
-module Data.Set  ( 
+-- It is crucial to the performance that the functions specialize on the Ord
+-- type when possible. GHC 7.0 and higher does this by itself when it sees th
+-- unfolding of a function -- that is why all public functions are marked
+-- INLINABLE (that exposes the unfolding).
+--
+-- For other compilers and GHC pre 7.0, we mark some of the functions INLINE.
+-- We mark the functions that just navigate down the tree (lookup, insert,
+-- delete and similar). That navigation code gets inlined and thus specialized
+-- when possible. There is a price to pay -- code growth. The code INLINED is
+-- therefore only the tree navigation, all the real work (rebalancing) is not
+-- INLINED by using a NOINLINE.
+--
+-- All methods that can be INLINE are not recursive -- a 'go' function doing
+-- the real work is provided.
+
+module Data.Set (
             -- * Set type
+#if !defined(TESTING)
               Set          -- instance Eq,Ord,Show,Read,Data,Typeable
+#else
+              Set(..)
+#endif
 
             -- * Operators
             , (\\)
@@ -48,18 +67,19 @@ module Data.Set  (
             , notMember
             , isSubsetOf
             , isProperSubsetOf
-            
+
             -- * Construction
             , empty
             , singleton
             , insert
             , delete
-            
+
             -- * Combine
-            , union, unions
+            , union
+            , unions
             , difference
             , intersection
-            
+
             -- * Filter
             , filter
             , partition
@@ -67,8 +87,8 @@ module Data.Set  (
             , splitMember
 
             -- * Map
-	    , map
-	    , mapMonotonic
+            , map
+            , mapMonotonic
 
             -- * Fold
             , fold
@@ -89,26 +109,31 @@ module Data.Set  (
             , elems
             , toList
             , fromList
-            
+
             -- ** Ordered list
             , toAscList
             , fromAscList
             , fromDistinctAscList
-                        
+
             -- * Debugging
             , showTree
             , showTreeWith
             , valid
+
+#if defined(TESTING)
+            -- Internals (for testing)
+            , bin
+            , balanced
+            , join
+            , merge
+#endif
             ) where
 
 import Prelude hiding (filter,foldr,null,map)
 import qualified Data.List as List
 import Data.Monoid (Monoid(..))
 import Data.Foldable (Foldable(foldMap))
-#ifndef __GLASGOW_HASKELL__
-import Data.Typeable (Typeable, typeOf, typeOfDefault)
-#endif
-import Data.Typeable (Typeable1(..), TyCon, mkTyCon, mkTyConApp)
+import Data.Typeable
 
 {-
 -- just for testing
@@ -119,8 +144,14 @@ import qualified List
 
 #if __GLASGOW_HASKELL__
 import Text.Read
-import Data.Data (Data(..), mkNoRepType, gcast1)
+import Data.Data
 #endif
+
+-- Use macros to define strictness of functions.
+-- STRICT_x_OF_y denotes an y-ary function strict in the x-th parameter.
+-- We do not use BangPatterns, because they are not in any standard and we
+-- want the compilers to be compiled by as many compilers as possible.
+#define STRICT_1_OF_2(fn) fn arg _ | arg `seq` False = undefined
 
 {--------------------------------------------------------------------
   Operators
@@ -130,13 +161,16 @@ infixl 9 \\ --
 -- | /O(n+m)/. See 'difference'.
 (\\) :: Ord a => Set a -> Set a -> Set a
 m1 \\ m2 = difference m1 m2
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE (\\) #-}
+#endif
 
 {--------------------------------------------------------------------
   Sets are size balanced trees
 --------------------------------------------------------------------}
 -- | A set of values @a@.
 data Set a    = Tip 
-              | Bin {-# UNPACK #-} !Size a !(Set a) !(Set a) 
+              | Bin {-# UNPACK #-} !Size !a !(Set a) !(Set a) 
 
 type Size     = Int
 
@@ -172,45 +206,51 @@ instance (Data a, Ord a) => Data (Set a) where
 --------------------------------------------------------------------}
 -- | /O(1)/. Is this the empty set?
 null :: Set a -> Bool
-null t
-  = case t of
-      Tip    -> True
-      Bin {} -> False
+null Tip      = True
+null (Bin {}) = False
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE null #-}
+#endif
 
 -- | /O(1)/. The number of elements in the set.
 size :: Set a -> Int
-size t
-  = case t of
-      Tip          -> 0
-      Bin sz _ _ _ -> sz
+size Tip = 0
+size (Bin sz _ _ _) = sz
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE size #-}
+#endif
 
 -- | /O(log n)/. Is the element in the set?
 member :: Ord a => a -> Set a -> Bool
-member x t
-  = case t of
-      Tip -> False
-      Bin _ y l r
-          -> case compare x y of
-               LT -> member x l
-               GT -> member x r
-               EQ -> True       
+member = go
+  where
+    STRICT_1_OF_2(go)
+    go _ Tip = False
+    go x (Bin _ y l r) = case compare x y of
+          LT -> go x l
+          GT -> go x r
+          EQ -> True
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE member #-}
+#else
+{-# INLINE member #-}
+#endif
 
 -- | /O(log n)/. Is the element not in the set?
 notMember :: Ord a => a -> Set a -> Bool
-notMember x t = not $ member x t
+notMember a t = not $ member a t
+{-# INLINE notMember #-}
 
 {--------------------------------------------------------------------
   Construction
 --------------------------------------------------------------------}
 -- | /O(1)/. The empty set.
 empty  :: Set a
-empty
-  = Tip
+empty = Tip
 
 -- | /O(1)/. Create a singleton set.
 singleton :: a -> Set a
-singleton x 
-  = Bin 1 x Tip Tip
+singleton x = Bin 1 x Tip Tip
 
 {--------------------------------------------------------------------
   Insertion, Deletion
@@ -219,26 +259,52 @@ singleton x
 -- If the set already contains an element equal to the given value,
 -- it is replaced with the new value.
 insert :: Ord a => a -> Set a -> Set a
-insert x t
-  = case t of
-      Tip -> singleton x
-      Bin sz y l r
-          -> case compare x y of
-               LT -> balance y (insert x l) r
-               GT -> balance y l (insert x r)
-               EQ -> Bin sz x l r
+insert = go
+  where
+    STRICT_1_OF_2(go)
+    go x Tip = singleton x
+    go x (Bin sz y l r) = case compare x y of
+        LT -> balanceL y (go x l) r
+        GT -> balanceR y l (go x r)
+        EQ -> Bin sz x l r
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINEABLE insert #-}
+#else
+{-# INLINE insert #-}
+#endif
 
+-- Insert an element to the set only if it is not in the set. Used by
+-- `union`.
+insertR :: Ord a => a -> Set a -> Set a
+insertR = go
+  where
+    STRICT_1_OF_2(go)
+    go x Tip = singleton x
+    go x t@(Bin _ y l r) = case compare x y of
+        LT -> balanceL y (go x l) r
+        GT -> balanceR y l (go x r)
+        EQ -> t
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINEABLE insertR #-}
+#else
+{-# INLINE insertR #-}
+#endif
 
 -- | /O(log n)/. Delete an element from a set.
 delete :: Ord a => a -> Set a -> Set a
-delete x t
-  = case t of
-      Tip -> Tip
-      Bin _ y l r
-          -> case compare x y of
-               LT -> balance y (delete x l) r
-               GT -> balance y l (delete x r)
-               EQ -> glue l r
+delete = go
+  where
+    STRICT_1_OF_2(go)
+    go _ Tip = Tip
+    go x (Bin _ y l r) = case compare x y of
+        LT -> balanceR y (go x l) r
+        GT -> balanceL y l (go x r)
+        EQ -> glue l r
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINEABLE delete #-}
+#else
+{-# INLINE delete #-}
+#endif
 
 {--------------------------------------------------------------------
   Subset
@@ -247,6 +313,9 @@ delete x t
 isProperSubsetOf :: Ord a => Set a -> Set a -> Bool
 isProperSubsetOf s1 s2
     = (size s1 < size s2) && (isSubsetOf s1 s2)
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE isProperSubsetOf #-}
+#endif
 
 
 -- | /O(n+m)/. Is this a subset?
@@ -254,6 +323,9 @@ isProperSubsetOf s1 s2
 isSubsetOf :: Ord a => Set a -> Set a -> Bool
 isSubsetOf t1 t2
   = (size t1 <= size t2) && (isSubsetOfX t1 t2)
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE isSubsetOf #-}
+#endif
 
 isSubsetOfX :: Ord a => Set a -> Set a -> Bool
 isSubsetOfX Tip _ = True
@@ -262,6 +334,9 @@ isSubsetOfX (Bin _ x l r) t
   = found && isSubsetOfX l lt && isSubsetOfX r gt
   where
     (lt,found,gt) = splitMember x t
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE isSubsetOfX #-}
+#endif
 
 
 {--------------------------------------------------------------------
@@ -272,34 +347,46 @@ findMin :: Set a -> a
 findMin (Bin _ x Tip _) = x
 findMin (Bin _ _ l _)   = findMin l
 findMin Tip             = error "Set.findMin: empty set has no minimal element"
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE findMin #-}
+#endif
 
 -- | /O(log n)/. The maximal element of a set.
 findMax :: Set a -> a
 findMax (Bin _ x _ Tip)  = x
 findMax (Bin _ _ _ r)    = findMax r
 findMax Tip              = error "Set.findMax: empty set has no maximal element"
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE findMax #-}
+#endif
 
 -- | /O(log n)/. Delete the minimal element.
 deleteMin :: Set a -> Set a
 deleteMin (Bin _ _ Tip r) = r
-deleteMin (Bin _ x l r)   = balance x (deleteMin l) r
+deleteMin (Bin _ x l r)   = balanceR x (deleteMin l) r
 deleteMin Tip             = Tip
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE deleteMin #-}
+#endif
 
 -- | /O(log n)/. Delete the maximal element.
 deleteMax :: Set a -> Set a
 deleteMax (Bin _ _ l Tip) = l
-deleteMax (Bin _ x l r)   = balance x l (deleteMax r)
+deleteMax (Bin _ x l r)   = balanceL x l (deleteMax r)
 deleteMax Tip             = Tip
-
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE deleteMax #-}
+#endif
 
 {--------------------------------------------------------------------
   Union. 
 --------------------------------------------------------------------}
 -- | The union of a list of sets: (@'unions' == 'foldl' 'union' 'empty'@).
 unions :: Ord a => [Set a] -> Set a
-unions ts
-  = foldlStrict union empty ts
-
+unions = foldlStrict union empty
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE unions #-}
+#endif
 
 -- | /O(n+m)/. The union of two sets, preferring the first set when
 -- equal elements are encountered.
@@ -308,19 +395,27 @@ unions ts
 union :: Ord a => Set a -> Set a -> Set a
 union Tip t2  = t2
 union t1 Tip  = t1
-union t1 t2 = hedgeUnion (const LT) (const GT) t1 t2
+union (Bin _ x Tip Tip) t = insert x t
+union t (Bin _ x Tip Tip) = insertR x t
+union t1 t2 = hedgeUnion NothingS NothingS t1 t2
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE union #-}
+#endif
 
 hedgeUnion :: Ord a
-           => (a -> Ordering) -> (a -> Ordering) -> Set a -> Set a -> Set a
+           => MaybeS a -> MaybeS a -> Set a -> Set a -> Set a
 hedgeUnion _     _     t1 Tip
   = t1
-hedgeUnion cmplo cmphi Tip (Bin _ x l r)
-  = join x (filterGt cmplo l) (filterLt cmphi r)
-hedgeUnion cmplo cmphi (Bin _ x l r) t2
-  = join x (hedgeUnion cmplo cmpx l (trim cmplo cmpx t2)) 
-           (hedgeUnion cmpx cmphi r (trim cmpx cmphi t2))
+hedgeUnion blo bhi Tip (Bin _ x l r)
+  = join x (filterGt blo l) (filterLt bhi r)
+hedgeUnion blo bhi (Bin _ x l r) t2
+  = join x (hedgeUnion blo bmi l (trim blo bmi t2))
+           (hedgeUnion bmi bhi r (trim bmi bhi t2))
   where
-    cmpx y  = compare x y
+    bmi = JustS x
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE hedgeUnion #-}
+#endif
 
 {--------------------------------------------------------------------
   Difference
@@ -330,19 +425,25 @@ hedgeUnion cmplo cmphi (Bin _ x l r) t2
 difference :: Ord a => Set a -> Set a -> Set a
 difference Tip _   = Tip
 difference t1 Tip  = t1
-difference t1 t2   = hedgeDiff (const LT) (const GT) t1 t2
+difference t1 t2   = hedgeDiff NothingS NothingS t1 t2
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE difference #-}
+#endif
 
 hedgeDiff :: Ord a
-          => (a -> Ordering) -> (a -> Ordering) -> Set a -> Set a -> Set a
+          => MaybeS a -> MaybeS a -> Set a -> Set a -> Set a
 hedgeDiff _ _ Tip _
   = Tip
-hedgeDiff cmplo cmphi (Bin _ x l r) Tip 
-  = join x (filterGt cmplo l) (filterLt cmphi r)
-hedgeDiff cmplo cmphi t (Bin _ x l r) 
-  = merge (hedgeDiff cmplo cmpx (trim cmplo cmpx t) l) 
-          (hedgeDiff cmpx cmphi (trim cmpx cmphi t) r)
+hedgeDiff blo bhi (Bin _ x l r) Tip
+  = join x (filterGt blo l) (filterLt bhi r)
+hedgeDiff blo bhi t (Bin _ x l r)
+  = merge (hedgeDiff blo bmi (trim blo bmi t) l)
+          (hedgeDiff bmi bhi (trim bmi bhi t) r)
   where
-    cmpx y = compare x y
+    bmi = JustS x
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE hedgeDiff #-}
+#endif
 
 {--------------------------------------------------------------------
   Intersection
@@ -374,6 +475,9 @@ intersection t1@(Bin s1 x1 l1 r1) t2@(Bin s2 x2 l2 r2) =
             tr            = intersection r1 gt
         in if found then join x1 tl tr
            else merge tl tr
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE intersection #-}
+#endif
 
 {--------------------------------------------------------------------
   Filter and partition
@@ -382,20 +486,24 @@ intersection t1@(Bin s1 x1 l1 r1) t2@(Bin s2 x2 l2 r2) =
 filter :: Ord a => (a -> Bool) -> Set a -> Set a
 filter _ Tip = Tip
 filter p (Bin _ x l r)
-  | p x       = join x (filter p l) (filter p r)
-  | otherwise = merge (filter p l) (filter p r)
+    | p x       = join x (filter p l) (filter p r)
+    | otherwise = merge (filter p l) (filter p r)
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE filter #-}
+#endif
 
 -- | /O(n)/. Partition the set into two sets, one with all elements that satisfy
 -- the predicate and one with all elements that don't satisfy the predicate.
 -- See also 'split'.
 partition :: Ord a => (a -> Bool) -> Set a -> (Set a,Set a)
-partition _ Tip = (Tip,Tip)
-partition p (Bin _ x l r)
-  | p x       = (join x l1 r1,merge l2 r2)
-  | otherwise = (merge l1 r1,join x l2 r2)
-  where
-    (l1,l2) = partition p l
-    (r1,r2) = partition p r
+partition _ Tip = (Tip, Tip)
+partition p (Bin _ x l r) = case (partition p l, partition p r) of
+  ((l1, l2), (r1, r2))
+    | p x       -> (join x l1 r1, merge l2 r2)
+    | otherwise -> (merge l1 r1, join x l2 r2)
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE partition #-}
+#endif
 
 {----------------------------------------------------------------------
   Map
@@ -409,6 +517,9 @@ partition p (Bin _ x l r)
 
 map :: (Ord a, Ord b) => (a->b) -> Set a -> Set b
 map f = fromList . List.map f . toList
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE map #-}
+#endif
 
 -- | /O(n)/. The 
 --
@@ -422,51 +533,62 @@ map f = fromList . List.map f . toList
 
 mapMonotonic :: (a->b) -> Set a -> Set b
 mapMonotonic _ Tip = Tip
-mapMonotonic f (Bin sz x l r) =
-    Bin sz (f x) (mapMonotonic f l) (mapMonotonic f r)
-
+mapMonotonic f (Bin sz x l r) = Bin sz (f x) (mapMonotonic f l) (mapMonotonic f r)
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE mapMonotonic #-}
+#endif
 
 {--------------------------------------------------------------------
   Fold
 --------------------------------------------------------------------}
 -- | /O(n)/. Fold over the elements of a set in an unspecified order.
 fold :: (a -> b -> b) -> b -> Set a -> b
-fold f z s
-  = foldr f z s
+fold = foldr
+{-# INLINE fold #-}
 
 -- | /O(n)/. Post-order fold.
 foldr :: (a -> b -> b) -> b -> Set a -> b
-foldr _ z Tip           = z
-foldr f z (Bin _ x l r) = foldr f (f x (foldr f z r)) l
+foldr f = go
+  where
+    go z Tip           = z
+    go z (Bin _ x l r) = go (f x (go z r)) l
+{-# INLINE foldr #-}
 
 {--------------------------------------------------------------------
   List variations 
 --------------------------------------------------------------------}
 -- | /O(n)/. The elements of a set.
 elems :: Set a -> [a]
-elems s
-  = toList s
+elems = toList
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE elems #-}
+#endif
 
 {--------------------------------------------------------------------
   Lists 
 --------------------------------------------------------------------}
 -- | /O(n)/. Convert the set to a list of elements.
 toList :: Set a -> [a]
-toList s
-  = toAscList s
+toList = toAscList
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE toList #-}
+#endif
 
 -- | /O(n)/. Convert the set to an ascending list of elements.
 toAscList :: Set a -> [a]
-toAscList t   
-  = foldr (:) [] t
-
+toAscList = foldr (:) []
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE toAscList #-}
+#endif
 
 -- | /O(n*log n)/. Create a set from a list of elements.
 fromList :: Ord a => [a] -> Set a 
-fromList xs 
-  = foldlStrict ins empty xs
+fromList = foldlStrict ins empty
   where
     ins t x = insert x t
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE fromList #-}
+#endif
 
 {--------------------------------------------------------------------
   Building trees from ascending/descending lists can be done in linear time.
@@ -491,6 +613,9 @@ fromAscList xs
   combineEq' z (x:xs')
     | z==x      =   combineEq' z xs'
     | otherwise = z:combineEq' x xs'
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE fromAscList #-}
+#endif
 
 
 -- | /O(n)/. Build a set from an ascending list of distinct elements in linear time.
@@ -514,6 +639,9 @@ fromDistinctAscList xs
     buildR n c l (x:ys) = build (buildB l x c) n ys
     buildR _ _ _ []     = error "fromDistinctAscList buildR []"
     buildB l x c r zs   = c (bin x l r) zs
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE fromDistinctAscList #-}
+#endif
 
 {--------------------------------------------------------------------
   Eq converts the set to a list. In a lazy setting, this 
@@ -536,19 +664,6 @@ instance Ord a => Ord (Set a) where
 instance Show a => Show (Set a) where
   showsPrec p xs = showParen (p > 10) $
     showString "fromList " . shows (toList xs)
-
-{-
-XXX unused code
-
-showSet :: (Show a) => [a] -> ShowS
-showSet []     
-  = showString "{}" 
-showSet (x:xs) 
-  = showChar '{' . shows x . showTail xs
-  where
-    showTail []       = showChar '}'
-    showTail (x':xs') = showChar ',' . shows x' . showTail xs'
--}
 
 {--------------------------------------------------------------------
   Read
@@ -577,14 +692,15 @@ INSTANCE_TYPEABLE1(Set,setTc,"Set")
 
 {--------------------------------------------------------------------
   Utility functions that return sub-ranges of the original
-  tree. Some functions take a comparison function as argument to
-  allow comparisons against infinite values. A function [cmplo x]
-  should be read as [compare lo x].
+  tree. Some functions take a `Maybe value` as an argument to
+  allow comparisons against infinite values. These are called `blow`
+  (Nothing is -\infty) and `bhigh` (here Nothing is +\infty).
+  We use MaybeS value, which is a Maybe strict in the Just case.
 
-  [trim cmplo cmphi t]  A tree that is either empty or where [cmplo x == LT]
-                        and [cmphi x == GT] for the value [x] of the root.
-  [filterGt cmp t]      A tree where for all values [k]. [cmp k == LT]
-  [filterLt cmp t]      A tree where for all values [k]. [cmp k == GT]
+  [trim blow bhigh t]   A tree that is either empty or where [x > blow]
+                        and [x < bhigh] for the value [x] of the root.
+  [filterGt blow t]     A tree where for all values [k]. [k > blow]
+  [filterLt bhigh t]    A tree where for all values [k]. [k < bhigh]
 
   [split k t]           Returns two trees [l] and [r] where all values
                         in [l] are <[k] and all keys in [r] are >[k].
@@ -592,54 +708,53 @@ INSTANCE_TYPEABLE1(Set,setTc,"Set")
                         was found in the tree.
 --------------------------------------------------------------------}
 
-{--------------------------------------------------------------------
-  [trim lo hi t] trims away all subtrees that surely contain no
-  values between the range [lo] to [hi]. The returned tree is either
-  empty or the key of the root is between @lo@ and @hi@.
---------------------------------------------------------------------}
-trim :: (a -> Ordering) -> (a -> Ordering) -> Set a -> Set a
-trim _     _     Tip = Tip
-trim cmplo cmphi t@(Bin _ x l r)
-  = case cmplo x of
-      LT -> case cmphi x of
-              GT -> t
-              _  -> trim cmplo cmphi l
-      _  -> trim cmplo cmphi r
-
-{-
-XXX unused code
-
-trimMemberLo :: Ord a => a -> (a -> Ordering) -> Set a -> (Bool, Set a)
-trimMemberLo _  _     Tip = (False,Tip)
-trimMemberLo lo cmphi t@(Bin _ x l r)
-  = case compare lo x of
-      LT -> case cmphi x of
-              GT -> (member lo t, t)
-              _  -> trimMemberLo lo cmphi l
-      GT -> trimMemberLo lo cmphi r
-      EQ -> (True,trim (compare lo) cmphi r)
--}
+data MaybeS a = NothingS | JustS !a
 
 {--------------------------------------------------------------------
-  [filterGt x t] filter all values >[x] from tree [t]
-  [filterLt x t] filter all values <[x] from tree [t]
+  [trim blo bhi t] trims away all subtrees that surely contain no
+  values between the range [blo] to [bhi]. The returned tree is either
+  empty or the key of the root is between @blo@ and @bhi@.
 --------------------------------------------------------------------}
-filterGt :: (a -> Ordering) -> Set a -> Set a
-filterGt _ Tip = Tip
-filterGt cmp (Bin _ x l r)
-  = case cmp x of
-      LT -> join x (filterGt cmp l) r
-      GT -> filterGt cmp r
-      EQ -> r
-      
-filterLt :: (a -> Ordering) -> Set a -> Set a
-filterLt _ Tip = Tip
-filterLt cmp (Bin _ x l r)
-  = case cmp x of
-      LT -> filterLt cmp l
-      GT -> join x l (filterLt cmp r)
-      EQ -> l
+trim :: Ord a => MaybeS a -> MaybeS a -> Set a -> Set a
+trim NothingS   NothingS   t = t
+trim (JustS lx) NothingS   t = greater lx t where greater lo (Bin _ x _ r) | x <= lo = greater lo r
+                                                  greater _  t' = t'
+trim NothingS   (JustS hx) t = lesser hx t  where lesser  hi (Bin _ x l _) | x >= hi = lesser  hi l
+                                                  lesser  _  t' = t'
+trim (JustS lx) (JustS hx) t = middle lx hx t  where middle lo hi (Bin _ x _ r) | x <= lo = middle lo hi r
+                                                     middle lo hi (Bin _ x l _) | x >= hi = middle lo hi l
+                                                     middle _  _  t' = t'
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE trim #-}
+#endif
 
+{--------------------------------------------------------------------
+  [filterGt b t] filter all values >[b] from tree [t]
+  [filterLt b t] filter all values <[b] from tree [t]
+--------------------------------------------------------------------}
+filterGt :: Ord a => MaybeS a -> Set a -> Set a
+filterGt NothingS t = t
+filterGt (JustS b) t = filter' b t
+  where filter' _   Tip = Tip
+        filter' b' (Bin _ x l r) =
+          case compare b' x of LT -> join x (filter' b' l) r
+                               EQ -> r
+                               GT -> filter' b' r
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE filterGt #-}
+#endif
+
+filterLt :: Ord a => MaybeS a -> Set a -> Set a
+filterLt NothingS t = t
+filterLt (JustS b) t = filter' b t
+  where filter' _   Tip = Tip
+        filter' b' (Bin _ x l r) =
+          case compare x b' of LT -> join x l (filter' b' r)
+                               EQ -> l
+                               GT -> filter' b' l
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE filterLt #-}
+#endif
 
 {--------------------------------------------------------------------
   Split
@@ -654,12 +769,18 @@ split x (Bin _ y l r)
       LT -> let (lt,gt) = split x l in (lt,join y gt r)
       GT -> let (lt,gt) = split x r in (join y l lt,gt)
       EQ -> (l,r)
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE split #-}
+#endif
 
 -- | /O(log n)/. Performs a 'split' but also returns whether the pivot
 -- element was found in the original set.
 splitMember :: Ord a => a -> Set a -> (Set a,Bool,Set a)
 splitMember x t = let (l,m,r) = splitLookup x t in
      (l,maybe False (const True) m,r)
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE splitMember #-}
+#endif
 
 -- | /O(log n)/. Performs a 'split' but also returns the pivot
 -- element that was found in the original set.
@@ -670,6 +791,9 @@ splitLookup x (Bin _ y l r)
        LT -> let (lt,found,gt) = splitLookup x l in (lt,found,join y gt r)
        GT -> let (lt,found,gt) = splitLookup x r in (join y l lt,found,gt)
        EQ -> (l,Just y,r)
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE splitLookup #-}
+#endif
 
 {--------------------------------------------------------------------
   Utility functions that maintain the balance properties of the tree.
@@ -707,9 +831,12 @@ join :: a -> Set a -> Set a -> Set a
 join x Tip r  = insertMin x r
 join x l Tip  = insertMax x l
 join x l@(Bin sizeL y ly ry) r@(Bin sizeR z lz rz)
-  | delta*sizeL <= sizeR  = balance z (join x l lz) rz
-  | delta*sizeR <= sizeL  = balance y ly (join x ry r)
-  | otherwise             = bin x l r
+  | delta*sizeL < sizeR  = balanceL z (join x l lz) rz
+  | delta*sizeR < sizeL  = balanceR y ly (join x ry r)
+  | otherwise            = bin x l r
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE join #-}
+#endif
 
 
 -- insertMin and insertMax don't perform potentially expensive comparisons.
@@ -718,14 +845,20 @@ insertMax x t
   = case t of
       Tip -> singleton x
       Bin _ y l r
-          -> balance y l (insertMax x r)
-             
+          -> balanceR y l (insertMax x r)
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE insertMax #-}
+#endif
+
 insertMin x t
   = case t of
       Tip -> singleton x
       Bin _ y l r
-          -> balance y (insertMin x l) r
-             
+          -> balanceL y (insertMin x l) r
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE insertMin #-}
+#endif
+
 {--------------------------------------------------------------------
   [merge l r]: merges two trees.
 --------------------------------------------------------------------}
@@ -733,9 +866,12 @@ merge :: Set a -> Set a -> Set a
 merge Tip r   = r
 merge l Tip   = l
 merge l@(Bin sizeL x lx rx) r@(Bin sizeR y ly ry)
-  | delta*sizeL <= sizeR = balance y (merge l ly) ry
-  | delta*sizeR <= sizeL = balance x lx (merge rx r)
-  | otherwise            = glue l r
+  | delta*sizeL < sizeR = balanceL y (merge l ly) ry
+  | delta*sizeR < sizeL = balanceR x lx (merge rx r)
+  | otherwise           = glue l r
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE merge #-}
+#endif
 
 {--------------------------------------------------------------------
   [glue l r]: glues two trees together.
@@ -745,8 +881,11 @@ glue :: Set a -> Set a -> Set a
 glue Tip r = r
 glue l Tip = l
 glue l r   
-  | size l > size r = let (m,l') = deleteFindMax l in balance m l' r
-  | otherwise       = let (m,r') = deleteFindMin r in balance m l r'
+  | size l > size r = let (m,l') = deleteFindMax l in balanceR m l' r
+  | otherwise       = let (m,r') = deleteFindMin r in balanceL m l r'
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE glue #-}
+#endif
 
 
 -- | /O(log n)/. Delete and find the minimal element.
@@ -757,8 +896,11 @@ deleteFindMin :: Set a -> (a,Set a)
 deleteFindMin t 
   = case t of
       Bin _ x Tip r -> (x,r)
-      Bin _ x l r   -> let (xm,l') = deleteFindMin l in (xm,balance x l' r)
+      Bin _ x l r   -> let (xm,l') = deleteFindMin l in (xm,balanceR x l' r)
       Tip           -> (error "Set.deleteFindMin: can not return the minimal element of an empty set", Tip)
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE deleteFindMin #-}
+#endif
 
 -- | /O(log n)/. Delete and find the maximal element.
 -- 
@@ -767,20 +909,29 @@ deleteFindMax :: Set a -> (a,Set a)
 deleteFindMax t
   = case t of
       Bin _ x l Tip -> (x,l)
-      Bin _ x l r   -> let (xm,r') = deleteFindMax r in (xm,balance x l r')
+      Bin _ x l r   -> let (xm,r') = deleteFindMax r in (xm,balanceL x l r')
       Tip           -> (error "Set.deleteFindMax: can not return the maximal element of an empty set", Tip)
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE deleteFindMax #-}
+#endif
 
 -- | /O(log n)/. Retrieves the minimal key of the set, and the set
 -- stripped of that element, or 'Nothing' if passed an empty set.
 minView :: Set a -> Maybe (a, Set a)
 minView Tip = Nothing
 minView x = Just (deleteFindMin x)
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE minView #-}
+#endif
 
 -- | /O(log n)/. Retrieves the maximal key of the set, and the set
 -- stripped of that element, or 'Nothing' if passed an empty set.
 maxView :: Set a -> Maybe (a, Set a)
 maxView Tip = Nothing
 maxView x = Just (deleteFindMax x)
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE maxView #-}
+#endif
 
 {--------------------------------------------------------------------
   [balance x l r] balances two trees with value x.
@@ -788,86 +939,123 @@ maxView x = Just (deleteFindMax x)
   size of one of them. (a rotation).
 
   [delta] is the maximal relative difference between the sizes of
-          two trees, it corresponds with the [w] in Adams' paper,
-          or equivalently, [1/delta] corresponds with the $\alpha$
-          in Nievergelt's paper. Adams shows that [delta] should
-          be larger than 3.745 in order to garantee that the
-          rotations can always restore balance.         
-
+          two trees, it corresponds with the [w] in Adams' paper.
   [ratio] is the ratio between an outer and inner sibling of the
           heavier subtree in an unbalanced setting. It determines
           whether a double or single rotation should be performed
           to restore balance. It is correspondes with the inverse
           of $\alpha$ in Adam's article.
 
-  Note that:
+  Note that according to the Adam's paper:
   - [delta] should be larger than 4.646 with a [ratio] of 2.
   - [delta] should be larger than 3.745 with a [ratio] of 1.534.
-  
+
+  But the Adam's paper is errorneous:
+  - it can be proved that for delta=2 and delta>=5 there does
+    not exist any ratio that would work
+  - delta=4.5 and ratio=2 does not work
+
+  That leaves two reasonable variants, delta=3 and delta=4,
+  both with ratio=2.
+
   - A lower [delta] leads to a more 'perfectly' balanced tree.
   - A higher [delta] performs less rebalancing.
 
-  - Balancing is automatic for random data and a balancing
-    scheme is only necessary to avoid pathological worst cases.
-    Almost any choice will do in practice
-    
-  - Allthough it seems that a rather large [delta] may perform better 
-    than smaller one, measurements have shown that the smallest [delta]
-    of 4 is actually the fastest on a wide range of operations. It
-    especially improves performance on worst-case scenarios like
-    a sequence of ordered insertions.
+  In the benchmarks, delta=3 is faster on insert operations,
+  and delta=4 has slightly better deletes. As the insert speedup
+  is larger, we currently use delta=3.
 
-  Note: in contrast to Adams' paper, we use a ratio of (at least) 2
-  to decide whether a single or double rotation is needed. Allthough
-  he actually proves that this ratio is needed to maintain the
-  invariants, his implementation uses a (invalid) ratio of 1. 
-  He is aware of the problem though since he has put a comment in his 
-  original source code that he doesn't care about generating a 
-  slightly inbalanced tree since it doesn't seem to matter in practice. 
-  However (since we use quickcheck :-) we will stick to strictly balanced 
-  trees.
 --------------------------------------------------------------------}
 delta,ratio :: Int
-delta = 4
+delta = 3
 ratio = 2
 
-balance :: a -> Set a -> Set a -> Set a
-balance x l r
-  | sizeL + sizeR <= 1    = Bin sizeX x l r
-  | sizeR >= delta*sizeL  = rotateL x l r
-  | sizeL >= delta*sizeR  = rotateR x l r
-  | otherwise             = Bin sizeX x l r
-  where
-    sizeL = size l
-    sizeR = size r
-    sizeX = sizeL + sizeR + 1
+-- The balance function is equivalent to the following:
+--
+--   balance :: a -> Set a -> Set a -> Set a
+--   balance x l r
+--     | sizeL + sizeR <= 1   = Bin sizeX x l r
+--     | sizeR > delta*sizeL  = rotateL x l r
+--     | sizeL > delta*sizeR  = rotateR x l r
+--     | otherwise            = Bin sizeX x l r
+--     where
+--       sizeL = size l
+--       sizeR = size r
+--       sizeX = sizeL + sizeR + 1
+--
+--   rotateL :: a -> Set a -> Set a -> Set a
+--   rotateL x l r@(Bin _ _ ly ry) | size ly < ratio*size ry = singleL x l r
+--                                 | otherwise               = doubleL x l r
+--   rotateR :: a -> Set a -> Set a -> Set a
+--   rotateR x l@(Bin _ _ ly ry) r | size ry < ratio*size ly = singleR x l r
+--                                 | otherwise               = doubleR x l r
+--
+--   singleL, singleR :: a -> Set a -> Set a -> Set a
+--   singleL x1 t1 (Bin _ x2 t2 t3)  = bin x2 (bin x1 t1 t2) t3
+--   singleR x1 (Bin _ x2 t1 t2) t3  = bin x2 t1 (bin x1 t2 t3)
+--
+--   doubleL, doubleR :: a -> Set a -> Set a -> Set a
+--   doubleL x1 t1 (Bin _ x2 (Bin _ x3 t2 t3) t4) = bin x3 (bin x1 t1 t2) (bin x2 t3 t4)
+--   doubleR x1 (Bin _ x2 t1 (Bin _ x3 t2 t3)) t4 = bin x3 (bin x2 t1 t2) (bin x1 t3 t4)
+--
+-- It is only written in such a way that every node is pattern-matched only once.
+--
+-- Only balanceL and balanceR are needed at the moment, so balance is not here anymore.
+-- In case it is needed, it can be found in Data.Map.
 
--- rotate
-rotateL :: a -> Set a -> Set a -> Set a
-rotateL x l r@(Bin _ _ ly ry)
-  | size ly < ratio*size ry = singleL x l r
-  | otherwise               = doubleL x l r
-rotateL _ _ Tip = error "rotateL Tip"
+-- Functions balanceL and balanceR are specialised versions of balance.
+-- balanceL only checks whether the left subtree is too big,
+-- balanceR only checks whether the right subtree is too big.
 
-rotateR :: a -> Set a -> Set a -> Set a
-rotateR x l@(Bin _ _ ly ry) r
-  | size ry < ratio*size ly = singleR x l r
-  | otherwise               = doubleR x l r
-rotateR _ Tip _ = error "rotateL Tip"
+-- balanceL is called when left subtree might have been inserted to or when
+-- right subtree might have been deleted from.
+balanceL :: a -> Set a -> Set a -> Set a
+balanceL x l r = case r of
+  Tip -> case l of
+           Tip -> Bin 1 x Tip Tip
+           (Bin _ _ Tip Tip) -> Bin 2 x l Tip
+           (Bin _ lx Tip (Bin _ lrx _ _)) -> Bin 3 lrx (Bin 1 lx Tip Tip) (Bin 1 x Tip Tip)
+           (Bin _ lx ll@(Bin _ _ _ _) Tip) -> Bin 3 lx ll (Bin 1 x Tip Tip)
+           (Bin ls lx ll@(Bin lls _ _ _) lr@(Bin lrs lrx lrl lrr))
+             | lrs < ratio*lls -> Bin (1+ls) lx ll (Bin (1+lrs) x lr Tip)
+             | otherwise -> Bin (1+ls) lrx (Bin (1+lls+size lrl) lx ll lrl) (Bin (1+size lrr) x lrr Tip)
 
--- basic rotations
-singleL, singleR :: a -> Set a -> Set a -> Set a
-singleL x1 t1 (Bin _ x2 t2 t3)  = bin x2 (bin x1 t1 t2) t3
-singleL _  _  Tip               = error "singleL"
-singleR x1 (Bin _ x2 t1 t2) t3  = bin x2 t1 (bin x1 t2 t3)
-singleR _  Tip              _   = error "singleR"
+  (Bin rs _ _ _) -> case l of
+           Tip -> Bin (1+rs) x Tip r
 
-doubleL, doubleR :: a -> Set a -> Set a -> Set a
-doubleL x1 t1 (Bin _ x2 (Bin _ x3 t2 t3) t4) = bin x3 (bin x1 t1 t2) (bin x2 t3 t4)
-doubleL _ _ _ = error "doubleL"
-doubleR x1 (Bin _ x2 t1 (Bin _ x3 t2 t3)) t4 = bin x3 (bin x2 t1 t2) (bin x1 t3 t4)
-doubleR _ _ _ = error "doubleR"
+           (Bin ls lx ll lr)
+              | ls > delta*rs  -> case (ll, lr) of
+                   (Bin lls _ _ _, Bin lrs lrx lrl lrr)
+                     | lrs < ratio*lls -> Bin (1+ls+rs) lx ll (Bin (1+rs+lrs) x lr r)
+                     | otherwise -> Bin (1+ls+rs) lrx (Bin (1+lls+size lrl) lx ll lrl) (Bin (1+rs+size lrr) x lrr r)
+                   (_, _) -> error "Failure in Data.Map.balanceL"
+              | otherwise -> Bin (1+ls+rs) x l r
+{-# NOINLINE balanceL #-}
 
+-- balanceR is called when right subtree might have been inserted to or when
+-- left subtree might have been deleted from.
+balanceR :: a -> Set a -> Set a -> Set a
+balanceR x l r = case l of
+  Tip -> case r of
+           Tip -> Bin 1 x Tip Tip
+           (Bin _ _ Tip Tip) -> Bin 2 x Tip r
+           (Bin _ rx Tip rr@(Bin _ _ _ _)) -> Bin 3 rx (Bin 1 x Tip Tip) rr
+           (Bin _ rx (Bin _ rlx _ _) Tip) -> Bin 3 rlx (Bin 1 x Tip Tip) (Bin 1 rx Tip Tip)
+           (Bin rs rx rl@(Bin rls rlx rll rlr) rr@(Bin rrs _ _ _))
+             | rls < ratio*rrs -> Bin (1+rs) rx (Bin (1+rls) x Tip rl) rr
+             | otherwise -> Bin (1+rs) rlx (Bin (1+size rll) x Tip rll) (Bin (1+rrs+size rlr) rx rlr rr)
+
+  (Bin ls _ _ _) -> case r of
+           Tip -> Bin (1+ls) x l Tip
+
+           (Bin rs rx rl rr)
+              | rs > delta*ls  -> case (rl, rr) of
+                   (Bin rls rlx rll rlr, Bin rrs _ _ _)
+                     | rls < ratio*rrs -> Bin (1+ls+rs) rx (Bin (1+ls+rls) x l rl) rr
+                     | otherwise -> Bin (1+ls+rs) rlx (Bin (1+ls+size rll) x l rll) (Bin (1+rrs+size rlr) rx rlr rr)
+                   (_, _) -> error "Failure in Data.Map.balanceR"
+              | otherwise -> Bin (1+ls+rs) x l r
+{-# NOINLINE balanceR #-}
 
 {--------------------------------------------------------------------
   The bin constructor maintains the size of the tree
@@ -875,17 +1063,18 @@ doubleR _ _ _ = error "doubleR"
 bin :: a -> Set a -> Set a -> Set a
 bin x l r
   = Bin (size l + size r + 1) x l r
+{-# INLINE bin #-}
 
 
 {--------------------------------------------------------------------
   Utilities
 --------------------------------------------------------------------}
 foldlStrict :: (a -> b -> a) -> a -> [b] -> a
-foldlStrict f z xs
-  = case xs of
-      []     -> z
-      (x:xx) -> let z' = f z x in seq z' (foldlStrict f z' xx)
-
+foldlStrict f = go
+  where
+    go z []     = z
+    go z (x:xs) = let z' = f z x in z' `seq` go z' xs
+{-# INLINE foldlStrict #-}
 
 {--------------------------------------------------------------------
   Debugging
@@ -1015,166 +1204,3 @@ validsize t
           Bin sz _ l r -> case (realsize l,realsize r) of
                             (Just n,Just m)  | n+m+1 == sz  -> Just sz
                             _                -> Nothing
-
-{-
-{--------------------------------------------------------------------
-  Testing
---------------------------------------------------------------------}
-testTree :: [Int] -> Set Int
-testTree xs   = fromList xs
-test1 = testTree [1..20]
-test2 = testTree [30,29..10]
-test3 = testTree [1,4,6,89,2323,53,43,234,5,79,12,9,24,9,8,423,8,42,4,8,9,3]
-
-{--------------------------------------------------------------------
-  QuickCheck
---------------------------------------------------------------------}
-qcheck prop
-  = check config prop
-  where
-    config = Config
-      { configMaxTest = 500
-      , configMaxFail = 5000
-      , configSize    = \n -> (div n 2 + 3)
-      , configEvery   = \n args -> let s = show n in s ++ [ '\b' | _ <- s ]
-      }
-
-
-{--------------------------------------------------------------------
-  Arbitrary, reasonably balanced trees
---------------------------------------------------------------------}
-instance (Enum a) => Arbitrary (Set a) where
-  arbitrary = sized (arbtree 0 maxkey)
-            where maxkey  = 10000
-
-arbtree :: (Enum a) => Int -> Int -> Int -> Gen (Set a)
-arbtree lo hi n
-  | n <= 0        = return Tip
-  | lo >= hi      = return Tip
-  | otherwise     = do{ i  <- choose (lo,hi)
-                      ; m  <- choose (1,30)
-                      ; let (ml,mr)  | m==(1::Int)= (1,2)
-                                     | m==2       = (2,1)
-                                     | m==3       = (1,1)
-                                     | otherwise  = (2,2)
-                      ; l  <- arbtree lo (i-1) (n `div` ml)
-                      ; r  <- arbtree (i+1) hi (n `div` mr)
-                      ; return (bin (toEnum i) l r)
-                      }  
-
-
-{--------------------------------------------------------------------
-  Valid tree's
---------------------------------------------------------------------}
-forValid :: (Enum a,Show a,Testable b) => (Set a -> b) -> Property
-forValid f
-  = forAll arbitrary $ \t -> 
---    classify (balanced t) "balanced" $
-    classify (size t == 0) "empty" $
-    classify (size t > 0  && size t <= 10) "small" $
-    classify (size t > 10 && size t <= 64) "medium" $
-    classify (size t > 64) "large" $
-    balanced t ==> f t
-
-forValidIntTree :: Testable a => (Set Int -> a) -> Property
-forValidIntTree f
-  = forValid f
-
-forValidUnitTree :: Testable a => (Set Int -> a) -> Property
-forValidUnitTree f
-  = forValid f
-
-
-prop_Valid 
-  = forValidUnitTree $ \t -> valid t
-
-{--------------------------------------------------------------------
-  Single, Insert, Delete
---------------------------------------------------------------------}
-prop_Single :: Int -> Bool
-prop_Single x
-  = (insert x empty == singleton x)
-
-prop_InsertValid :: Int -> Property
-prop_InsertValid k
-  = forValidUnitTree $ \t -> valid (insert k t)
-
-prop_InsertDelete :: Int -> Set Int -> Property
-prop_InsertDelete k t
-  = not (member k t) ==> delete k (insert k t) == t
-
-prop_DeleteValid :: Int -> Property
-prop_DeleteValid k
-  = forValidUnitTree $ \t -> 
-    valid (delete k (insert k t))
-
-{--------------------------------------------------------------------
-  Balance
---------------------------------------------------------------------}
-prop_Join :: Int -> Property 
-prop_Join x
-  = forValidUnitTree $ \t ->
-    let (l,r) = split x t
-    in valid (join x l r)
-
-prop_Merge :: Int -> Property 
-prop_Merge x
-  = forValidUnitTree $ \t ->
-    let (l,r) = split x t
-    in valid (merge l r)
-
-
-{--------------------------------------------------------------------
-  Union
---------------------------------------------------------------------}
-prop_UnionValid :: Property
-prop_UnionValid
-  = forValidUnitTree $ \t1 ->
-    forValidUnitTree $ \t2 ->
-    valid (union t1 t2)
-
-prop_UnionInsert :: Int -> Set Int -> Bool
-prop_UnionInsert x t
-  = union t (singleton x) == insert x t
-
-prop_UnionAssoc :: Set Int -> Set Int -> Set Int -> Bool
-prop_UnionAssoc t1 t2 t3
-  = union t1 (union t2 t3) == union (union t1 t2) t3
-
-prop_UnionComm :: Set Int -> Set Int -> Bool
-prop_UnionComm t1 t2
-  = (union t1 t2 == union t2 t1)
-
-
-prop_DiffValid
-  = forValidUnitTree $ \t1 ->
-    forValidUnitTree $ \t2 ->
-    valid (difference t1 t2)
-
-prop_Diff :: [Int] -> [Int] -> Bool
-prop_Diff xs ys
-  =  toAscList (difference (fromList xs) (fromList ys))
-    == List.sort ((List.\\) (nub xs)  (nub ys))
-
-prop_IntValid
-  = forValidUnitTree $ \t1 ->
-    forValidUnitTree $ \t2 ->
-    valid (intersection t1 t2)
-
-prop_Int :: [Int] -> [Int] -> Bool
-prop_Int xs ys
-  =  toAscList (intersection (fromList xs) (fromList ys))
-    == List.sort (nub ((List.intersect) (xs)  (ys)))
-
-{--------------------------------------------------------------------
-  Lists
---------------------------------------------------------------------}
-prop_Ordered
-  = forAll (choose (5,100)) $ \n ->
-    let xs = [0..n::Int]
-    in fromAscList xs == fromList xs
-
-prop_List :: [Int] -> Bool
-prop_List xs
-  = (sort (nub xs) == toList (fromList xs))
--}

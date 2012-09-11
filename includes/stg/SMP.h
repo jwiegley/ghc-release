@@ -83,7 +83,7 @@ EXTERN_INLINE void busy_wait_nop(void);
  * http://gee.cs.oswego.edu/dl/jmm/cookbook.html
  *
  * To check whether you got these right, try the test in 
- *   testsuite/tests/ghc-regress/rts/testwsdeque.c
+ *   testsuite/tests/rts/testwsdeque.c
  * This tests the work-stealing deque implementation, which relies on
  * properly working store_load and load_load memory barriers.
  */ 
@@ -306,6 +306,7 @@ load_load_barrier(void) {
 #define store_load_barrier() /* nothing */
 #define load_load_barrier()  /* nothing */
 
+#if !IN_STG_CODE || IN_STGCRUN
 INLINE_HEADER StgWord
 xchg(StgPtr p, StgWord w)
 {
@@ -314,7 +315,8 @@ xchg(StgPtr p, StgWord w)
     return old;
 }
 
-STATIC_INLINE StgWord
+EXTERN_INLINE StgWord cas(StgVolatilePtr p, StgWord o, StgWord n);
+EXTERN_INLINE StgWord
 cas(StgVolatilePtr p, StgWord o, StgWord n)
 {
     StgWord result;
@@ -336,6 +338,7 @@ atomic_dec(StgVolatilePtr p)
 {
     return --(*p);
 }
+#endif
 
 #define VOLATILE_LOAD(p) ((StgWord)*((StgWord*)(p)))
 

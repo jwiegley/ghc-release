@@ -1,3 +1,6 @@
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Mem.Weak
@@ -67,16 +70,12 @@ module System.Mem.Weak (
 	-- $precise
    ) where
 
-import Data.Maybe (Maybe(..))
-
 #ifdef __HUGS__
 import Hugs.Weak
 import Prelude
 #endif
 
 #ifdef __GLASGOW_HASKELL__
-import GHC.Base (return)
-import GHC.Types (IO)
 import GHC.Weak
 #endif
 

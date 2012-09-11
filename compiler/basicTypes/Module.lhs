@@ -39,7 +39,8 @@ module Module
         dphSeqPackageId,
         dphParPackageId,
 	mainPackageId,
-
+        thisGhcPackageId,
+        
 	-- * The Module type
 	Module,
 	modulePackageId, moduleName,
@@ -73,7 +74,6 @@ module Module
 
 import Config
 import Outputable
-import qualified Pretty
 import Unique
 import UniqFM
 import FastString
@@ -155,6 +155,7 @@ addBootSuffixLocn locn
 \begin{code}
 -- | A ModuleName is essentially a simple string, e.g. @Data.List@.
 newtype ModuleName = ModuleName FastString
+    deriving Typeable
 
 instance Uniquable ModuleName where
   getUnique (ModuleName nm) = getUnique nm
@@ -174,8 +175,6 @@ instance Outputable ModuleName where
 instance Binary ModuleName where
   put_ bh (ModuleName fs) = put_ bh fs
   get bh = do fs <- get bh; return (ModuleName fs)
-
-INSTANCE_TYPEABLE0(ModuleName,moduleNameTc,"ModuleName")
 
 instance Data ModuleName where
   -- don't traverse?
@@ -224,7 +223,7 @@ data Module = Module {
    modulePackageId :: !PackageId,  -- pkg-1.0
    moduleName      :: !ModuleName  -- A.B.C
   }
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Typeable)
 
 instance Uniquable Module where
   getUnique (Module p n) = getUnique (packageIdFS p `appendFS` moduleNameFS n)
@@ -235,8 +234,6 @@ instance Outputable Module where
 instance Binary Module where
   put_ bh (Module p n) = put_ bh p >> put_ bh n
   get bh = do p <- get bh; n <- get bh; return (Module p n)
-
-INSTANCE_TYPEABLE0(Module,moduleTc,"Module")
 
 instance Data Module where
   -- don't traverse?
@@ -256,9 +253,10 @@ mkModule :: PackageId -> ModuleName -> Module
 mkModule = Module
 
 pprModule :: Module -> SDoc
-pprModule mod@(Module p n)  = pprPackagePrefix p mod <> pprModuleName n
+pprModule mod@(Module p n)  =
+  pprPackagePrefix p mod <> pprModuleName n
 
-pprPackagePrefix :: PackageId -> Module -> PprStyle -> Pretty.Doc
+pprPackagePrefix :: PackageId -> Module -> SDoc
 pprPackagePrefix p mod = getPprStyle doc
  where
    doc sty
@@ -280,7 +278,7 @@ pprPackagePrefix p mod = getPprStyle doc
 
 \begin{code}
 -- | Essentially just a string identifying a package, including the version: e.g. parsec-1.0
-newtype PackageId = PId FastString deriving( Eq )
+newtype PackageId = PId FastString deriving( Eq, Typeable )
     -- here to avoid module loops with PackageConfig
 
 instance Uniquable PackageId where
@@ -290,8 +288,6 @@ instance Uniquable PackageId where
 -- ordering.
 instance Ord PackageId where
   nm1 `compare` nm2 = getUnique nm1 `compare` getUnique nm2
-
-INSTANCE_TYPEABLE0(PackageId,packageIdTc,"PackageId")
 
 instance Data PackageId where
   -- don't traverse?
@@ -347,14 +343,15 @@ packageIdString = unpackFS . packageIdFS
 integerPackageId, primPackageId,
   basePackageId, rtsPackageId,
   thPackageId, dphSeqPackageId, dphParPackageId,
-  mainPackageId  :: PackageId
+  mainPackageId, thisGhcPackageId  :: PackageId
 primPackageId      = fsToPackageId (fsLit "ghc-prim")
 integerPackageId   = fsToPackageId (fsLit cIntegerLibrary)
 basePackageId      = fsToPackageId (fsLit "base")
-rtsPackageId	   = fsToPackageId (fsLit "rts")
+rtsPackageId       = fsToPackageId (fsLit "rts")
 thPackageId        = fsToPackageId (fsLit "template-haskell")
 dphSeqPackageId    = fsToPackageId (fsLit "dph-seq")
 dphParPackageId    = fsToPackageId (fsLit "dph-par")
+thisGhcPackageId   = fsToPackageId (fsLit ("ghc-" ++ cProjectVersion))
 
 -- | This is the package Id for the current program.  It is the default
 -- package Id if you don't specify a package name.  We don't add this prefix

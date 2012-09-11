@@ -1,3 +1,14 @@
+Changed in version 0.6.4:
+   * Added new function getInputLineWithInitial.
+
+Changed in version 0.6.3.2:
+   * Allow building with mtl-2.0.* .
+
+Changed in version 0.6.3.1:
+   * Updated contraints for ghc-7.0.1.
+
+   * Fix building on ghc-6.10.
+
 Changed in version 0.6.3:
    * #111: Correct width calculations when the prompt contains newlines.
 

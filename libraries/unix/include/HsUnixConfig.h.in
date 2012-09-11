@@ -93,6 +93,9 @@
 /* The value of SIG_UNBLOCK. */
 #undef CONST_SIG_UNBLOCK
 
+/* Define to 1 if you have the <bsd/libutil.h> header file. */
+#undef HAVE_BSD_LIBUTIL_H
+
 /* Define if we have /dev/ptc. */
 #undef HAVE_DEV_PTC
 

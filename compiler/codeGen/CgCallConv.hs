@@ -32,13 +32,13 @@ import CgUtils
 import CgMonad
 import SMRep
 
-import Cmm
+import OldCmm
 import CLabel
 
 import Constants
 import ClosureInfo
 import CgStackery
-import CmmUtils
+import OldCmmUtils
 import Maybes
 import Id
 import Name
@@ -150,7 +150,7 @@ mkLiveness name size bits
   = let
         small_bits = case bits of 
 			[]  -> 0
-			[b] -> fromIntegral b
+                        [b] -> b
 			_   -> panic "livenessToAddrMode"
     in
     return (smallLiveness size small_bits)

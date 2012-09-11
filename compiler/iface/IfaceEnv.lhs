@@ -13,7 +13,7 @@ module IfaceEnv (
 	ifaceExportNames,
 
 	-- Name-cache stuff
-	allocateGlobalBinder, initNameCache, 
+	allocateGlobalBinder, initNameCache, updNameCache,
         getNameCache, mkNameCacheUpdater, NameCacheUpdater
    ) where
 
@@ -98,8 +98,7 @@ allocateGlobalBinder name_supply mod occ loc
 	-- Build a completely new Name, and put it in the cache
 	Nothing -> (new_name_supply, name)
 		where
-		  (us', us1)      = splitUniqSupply (nsUniqs name_supply)
-		  uniq   	  = uniqFromSupply us1
+		  (uniq, us')     = takeUniqFromSupply (nsUniqs name_supply)
 		  name            = mkExternalName uniq mod occ loc
 		  new_cache       = extendNameCache (nsNames name_supply) mod occ name
 		  new_name_supply = name_supply {nsUniqs = us', nsNames = new_cache}
@@ -124,25 +123,7 @@ newImplicitBinder base_name mk_sys_occ
     loc = nameSrcSpan base_name
 
 ifaceExportNames :: [IfaceExport] -> TcRnIf gbl lcl [AvailInfo]
-ifaceExportNames exports = do
-  mod_avails <- mapM (\(mod,avails) -> mapM (lookupAvail mod) avails) exports
-  return (concat mod_avails)
-
--- Convert OccNames in GenAvailInfo to Names.
-lookupAvail :: Module -> GenAvailInfo OccName -> TcRnIf a b AvailInfo
-lookupAvail mod (Avail n) = do 
-  n' <- lookupOrig mod n
-  return (Avail n')
-lookupAvail mod (AvailTC p_occ occs) = do
-  p_name <- lookupOrig mod p_occ
-  let lookup_sub occ | occ == p_occ = return p_name
-                     | otherwise    = lookupOrig mod occ
-  subs <- mapM lookup_sub occs
-  return (AvailTC p_name subs)
-	-- Remember that 'occs' is all the exported things, including
-	-- the parent.  It's possible to export just class ops without
-	-- the class, which shows up as C( op ) here. If the class was
-	-- exported too we'd have C( C, op )
+ifaceExportNames exports = return exports
 
 lookupOrig :: Module -> OccName ->  TcRnIf a b Name
 lookupOrig mod occ
@@ -159,14 +140,12 @@ lookupOrig mod occ
             case lookupOrigNameCache (nsNames name_cache) mod occ of {
 	      Just name -> (name_cache, name);
 	      Nothing   ->
-              let
-                us        = nsUniqs name_cache
-                uniq      = uniqFromSupply us
-                name      = mkExternalName uniq mod occ noSrcSpan
-                new_cache = extendNameCache (nsNames name_cache) mod occ name
-              in
-              case splitUniqSupply us of { (us',_) -> do
-                (name_cache{ nsUniqs = us', nsNames = new_cache }, name)
+              case takeUniqFromSupply (nsUniqs name_cache) of {
+              (uniq, us) ->
+                  let
+                    name      = mkExternalName uniq mod occ noSrcSpan
+                    new_cache = extendNameCache (nsNames name_cache) mod occ name
+                  in (name_cache{ nsUniqs = us, nsNames = new_cache }, name)
     }}}
 
 newIPName :: IPName OccName -> TcRnIf m n (IPName Name)
@@ -180,8 +159,7 @@ newIPName occ_name_ip =
       Just name_ip -> (name_cache, name_ip)
       Nothing      -> (new_ns, name_ip)
 	  where
-	    (us', us1)  = splitUniqSupply (nsUniqs name_cache)
-	    uniq        = uniqFromSupply us1
+	    (uniq, us') = takeUniqFromSupply (nsUniqs name_cache)
 	    name_ip     = mapIPName (mkIPName uniq) occ_name_ip
 	    new_ipcache = Map.insert key name_ip ipcache
 	    new_ns      = name_cache {nsUniqs = us', nsIPs = new_ipcache}

@@ -136,6 +136,18 @@ window.onload = function () {pageLoad();setSynopsis("mini_Examples.html");};
 		></strong
 	      >False
 </pre
+	    ><pre class="screen"
+	    ><code class="prompt"
+	      >&gt;&gt;&gt; </code
+	      ><strong class="userinput"
+	      ><code
+		>putStrLn &quot;foo\n\nbar&quot;
+</code
+		></strong
+	      >foo
+
+bar
+</pre
 	    ></div
 	  ></div
 	></div
@@ -143,7 +155,7 @@ window.onload = function () {pageLoad();setSynopsis("mini_Examples.html");};
     ><div id="footer"
     ><p
       >Produced by <A HREF="">Haddock</a
-	> version 2.9.0</p
+	> version 2.9.2</p
       ></div
     ></body
   ></html

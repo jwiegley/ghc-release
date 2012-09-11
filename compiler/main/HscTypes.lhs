@@ -6,41 +6,29 @@
 \begin{code}
 -- | Types for the per-module compiler
 module HscTypes ( 
-        -- * 'Ghc' monad stuff
-        Ghc(..), GhcT(..), liftGhcT,
-        GhcMonad(..), WarnLogMonad(..),
-        liftIO,
-        ioMsgMaybe, ioMsg,
-        logWarnings, clearWarnings, hasWarnings,
-        SourceError, GhcApiError, mkSrcErr, srcErrorMessages, mkApiErr,
-        throwOneError, handleSourceError,
-        reflectGhc, reifyGhc,
-        handleFlagWarnings,
-
-	-- * Sessions and compilation state
-	Session(..), withSession, modifySession, withTempSession,
+	-- * compilation state
         HscEnv(..), hscEPS,
 	FinderCache, FindResult(..), ModLocationCache,
 	Target(..), TargetId(..), pprTarget, pprTargetId,
 	ModuleGraph, emptyMG,
-        -- ** Callbacks
-        GhcApiCallbacks(..), withLocalCallbacks,
 
         -- * Information about modules
 	ModDetails(..),	emptyModDetails,
-	ModGuts(..), CoreModule(..), CgGuts(..), ForeignStubs(..),
-        ImportedMods,
+        ModGuts(..), CgGuts(..), ForeignStubs(..), appendStubC,
+        ImportedMods, ImportedModsVal,
 
-	ModSummary(..), ms_mod_name, showModMsg, isBootSummary,
+	ModSummary(..), ms_imps, ms_mod_name, showModMsg, isBootSummary,
 	msHsFilePath, msHiFilePath, msObjFilePath,
+        SourceModified(..),
 
         -- * Information about the module being compiled
 	HscSource(..), isHsBoot, hscSourceString,	-- Re-exported from DriverPhases
 	
 	-- * State relating to modules in this package
 	HomePackageTable, HomeModInfo(..), emptyHomePackageTable,
-	hptInstances, hptRules, hptVectInfo,
-	
+        hptInstances, hptRules, hptVectInfo,
+        hptObjs,
+
 	-- * State relating to known packages
 	ExternalPackageState(..), EpsStats(..), addEpsInStats,
 	PackageTypeEnv, PackageIfaceTable, emptyPackageIfaceTable,
@@ -67,13 +55,13 @@ module HscTypes (
 
         -- * TyThings and type environments
 	TyThing(..),
-	tyThingClass, tyThingTyCon, tyThingDataCon, tyThingId,
-	implicitTyThings, isImplicitTyThing,
+	tyThingClass, tyThingTyCon, tyThingDataCon, tyThingId, tyThingCoAxiom,
+	implicitTyThings, implicitTyConThings, implicitClassThings, isImplicitTyThing,
 	
 	TypeEnv, lookupType, lookupTypeHscEnv, mkTypeEnv, emptyTypeEnv,
 	extendTypeEnv, extendTypeEnvList, extendTypeEnvWithIds, lookupTypeEnv,
 	typeEnvElts, typeEnvClasses, typeEnvTyCons, typeEnvIds,
-	typeEnvDataCons,
+	typeEnvDataCons, typeEnvCoAxioms,
 
         -- * MonadThings
         MonadThings(..),
@@ -83,14 +71,14 @@ module HscTypes (
 	Dependencies(..), noDependencies,
 	NameCache(..), OrigNameCache, OrigIParamCache,
 	Avails, availsToNameSet, availsToNameEnv, availName, availNames,
-	GenAvailInfo(..), AvailInfo, RdrAvailInfo, 
-	IfaceExport,
+	AvailInfo(..),
+	IfaceExport, stableAvailCmp, 
 
 	-- * Warnings
 	Warnings(..), WarningTxt(..), plusWarns,
 
 	-- * Linker stuff
-	Linkable(..), isObjectLinkable,
+        Linkable(..), isObjectLinkable, linkableObjs,
 	Unlinked(..), CompiledByteCode,
 	isObject, nameOfObject, isInterpretable, byteCodeOfObject,
         
@@ -102,13 +90,22 @@ module HscTypes (
 
         -- * Vectorisation information
         VectInfo(..), IfaceVectInfo(..), noVectInfo, plusVectInfo, 
-        noIfaceVectInfo
+        noIfaceVectInfo,
+
+        -- * Safe Haskell information
+        IfaceTrustInfo, getSafeMode, setSafeMode, noIfaceTrustInfo,
+        trustInfoToNum, numToTrustInfo, IsSafeImport,
+
+        -- * Compilation errors and warnings
+        SourceError, GhcApiError, mkSrcErr, srcErrorMessages, mkApiErr,
+        throwOneError, handleSourceError,
+        handleFlagWarnings, printOrThrowWarnings,
     ) where
 
 #include "HsVersions.h"
 
 #ifdef GHCI
-import ByteCodeAsm	( CompiledByteCode )
+import ByteCodeAsm      ( CompiledByteCode )
 import {-# SOURCE #-}  InteractiveEval ( Resume )
 #endif
 
@@ -116,16 +113,17 @@ import HsSyn
 import RdrName
 import Name
 import NameEnv
-import NameSet	
+import NameSet  
 import Module
-import InstEnv		( InstEnv, Instance )
-import FamInstEnv	( FamInstEnv, FamInst )
-import Rules		( RuleBase )
-import CoreSyn		( CoreBind )
+import InstEnv          ( InstEnv, Instance )
+import FamInstEnv       ( FamInstEnv, FamInst )
+import Rules            ( RuleBase )
+import CoreSyn          ( CoreBind )
 import VarEnv
+import VarSet
 import Var
 import Id
-import Type		
+import Type             
 
 import Annotations
 import Class		( Class, classAllSelIds, classATs, classTyCon )
@@ -133,27 +131,25 @@ import TyCon
 import DataCon		( DataCon, dataConImplicitIds, dataConWrapId )
 import PrelNames	( gHC_PRIM )
 import Packages hiding ( Version(..) )
-import DynFlags		( DynFlags(..), isOneShot, HscTarget (..), dopt,
-                          DynFlag(..) )
+import DynFlags
 import DriverPhases	( HscSource(..), isHsBoot, hscSourceString, Phase )
 import BasicTypes	( IPName, defaultFixity, WarningTxt(..) )
 import OptimizationFuel	( OptFuelState )
 import IfaceSyn
-import CoreSyn		( CoreRule )
+import CoreSyn		( CoreRule, CoreVect )
 import Maybes		( orElse, expectJust, catMaybes )
 import Outputable
 import BreakArray
-import SrcLoc		( SrcSpan, Located(..) )
+import SrcLoc
 import UniqFM		( lookupUFM, eltsUFM, emptyUFM )
 import UniqSupply	( UniqSupply )
 import FastString
 import StringBuffer	( StringBuffer )
 import Fingerprint
 import MonadUtils
-import Data.Dynamic     ( Typeable )
-import qualified Data.Dynamic as Dyn
 import Bag
 import ErrUtils
+import Util
 
 import System.FilePath
 import System.Time	( ClockTime )
@@ -161,24 +157,16 @@ import Data.IORef
 import Data.Array       ( Array, array )
 import Data.List
 import Data.Map (Map)
+import Data.Word
 import Control.Monad    ( mplus, guard, liftM, when )
 import Exception
-\end{code}
+import Data.Typeable    ( Typeable )
 
+-- -----------------------------------------------------------------------------
+-- Source Errors
 
-%************************************************************************
-%*									*
-\subsection{Compilation environment}
-%*									*
-%************************************************************************
-
-
-\begin{code}
--- | The Session is a handle to the complete state of a compilation
--- session.  A compilation session consists of a set of modules
--- constituting the current program or library, the context for
--- interactive evaluation, and various caches.
-data Session = Session !(IORef HscEnv) !(IORef WarningMessages)
+-- When the compiler (HscMain) discovers errors, it throws an
+-- exception in the IO monad.
 
 mkSrcErr :: ErrorMessages -> SourceError
 srcErrorMessages :: SourceError -> ErrorMessages
@@ -203,17 +191,12 @@ throwOneError err = liftIO $ throwIO $ mkSrcErr $ unitBag err
 --
 -- See 'printExceptionAndWarnings' for more information on what to take care
 -- of when writing a custom error handler.
-data SourceError = SourceError ErrorMessages
+newtype SourceError = SourceError ErrorMessages
+  deriving Typeable
 
 instance Show SourceError where
   show (SourceError msgs) = unlines . map show . bagToList $ msgs
     -- ToDo: is there some nicer way to print this?
-
-sourceErrorTc :: Dyn.TyCon
-sourceErrorTc = Dyn.mkTyCon "SourceError"
-{-# NOINLINE sourceErrorTc #-}
-instance Typeable SourceError where
-  typeOf _ = Dyn.mkTyConApp sourceErrorTc []
 
 instance Exception SourceError
 
@@ -231,270 +214,35 @@ handleSourceError handler act =
 srcErrorMessages (SourceError msgs) = msgs
 
 -- | XXX: what exactly is an API error?
-data GhcApiError = GhcApiError SDoc
+newtype GhcApiError = GhcApiError SDoc
+ deriving Typeable
 
 instance Show GhcApiError where
   show (GhcApiError msg) = showSDoc msg
-
-ghcApiErrorTc :: Dyn.TyCon
-ghcApiErrorTc = Dyn.mkTyCon "GhcApiError"
-{-# NOINLINE ghcApiErrorTc #-}
-instance Typeable GhcApiError where
-  typeOf _ = Dyn.mkTyConApp ghcApiErrorTc []
 
 instance Exception GhcApiError
 
 mkApiErr = GhcApiError
 
--- | A monad that allows logging of warnings.
-class Monad m => WarnLogMonad m where
-  setWarnings  :: WarningMessages -> m ()
-  getWarnings :: m WarningMessages
+-- | Given a bag of warnings, turn them into an exception if
+-- -Werror is enabled, or print them out otherwise.
+printOrThrowWarnings :: DynFlags -> Bag WarnMsg -> IO ()
+printOrThrowWarnings dflags warns
+  | dopt Opt_WarnIsError dflags
+  = when (not (isEmptyBag warns)) $ do
+      throwIO $ mkSrcErr $ warns `snocBag` warnIsErrorMsg
+  | otherwise
+  = printBagOfWarnings dflags warns
 
-logWarnings :: WarnLogMonad m => WarningMessages -> m ()
-logWarnings warns = do
-    warns0 <- getWarnings
-    setWarnings (unionBags warns warns0)
-
--- | Clear the log of 'Warnings'.
-clearWarnings :: WarnLogMonad m => m ()
-clearWarnings = setWarnings emptyBag
-
--- | Returns true if there were any warnings.
-hasWarnings :: WarnLogMonad m => m Bool
-hasWarnings = getWarnings >>= return . not . isEmptyBag
-
--- | A monad that has all the features needed by GHC API calls.
---
--- In short, a GHC monad
---
---   - allows embedding of IO actions,
---
---   - can log warnings,
---
---   - allows handling of (extensible) exceptions, and
---
---   - maintains a current session.
---
--- If you do not use 'Ghc' or 'GhcT', make sure to call 'GHC.initGhcMonad'
--- before any call to the GHC API functions can occur.
---
-class (Functor m, MonadIO m, WarnLogMonad m, ExceptionMonad m)
-    => GhcMonad m where
-  getSession :: m HscEnv
-  setSession :: HscEnv -> m ()
-
--- | Call the argument with the current session.
-withSession :: GhcMonad m => (HscEnv -> m a) -> m a
-withSession f = getSession >>= f
-
--- | Set the current session to the result of applying the current session to
--- the argument.
-modifySession :: GhcMonad m => (HscEnv -> HscEnv) -> m ()
-modifySession f = do h <- getSession
-                     setSession $! f h
-
-withSavedSession :: GhcMonad m => m a -> m a
-withSavedSession m = do
-  saved_session <- getSession
-  m `gfinally` setSession saved_session
-
--- | Call an action with a temporarily modified Session.
-withTempSession :: GhcMonad m => (HscEnv -> HscEnv) -> m a -> m a
-withTempSession f m =
-  withSavedSession $ modifySession f >> m
-
--- | A minimal implementation of a 'GhcMonad'.  If you need a custom monad,
--- e.g., to maintain additional state consider wrapping this monad or using
--- 'GhcT'.
-newtype Ghc a = Ghc { unGhc :: Session -> IO a }
-
-instance Functor Ghc where
-  fmap f m = Ghc $ \s -> f `fmap` unGhc m s
-
-instance Monad Ghc where
-  return a = Ghc $ \_ -> return a
-  m >>= g  = Ghc $ \s -> do a <- unGhc m s; unGhc (g a) s
-
-instance MonadIO Ghc where
-  liftIO ioA = Ghc $ \_ -> ioA
-
-instance ExceptionMonad Ghc where
-  gcatch act handle =
-      Ghc $ \s -> unGhc act s `gcatch` \e -> unGhc (handle e) s
-  gblock (Ghc m)   = Ghc $ \s -> gblock (m s)
-  gunblock (Ghc m) = Ghc $ \s -> gunblock (m s)
-  gmask f =
-      Ghc $ \s -> gmask $ \io_restore ->
-                             let
-                                g_restore (Ghc m) = Ghc $ \s -> io_restore (m s)
-                             in
-                                unGhc (f g_restore) s
-
-instance WarnLogMonad Ghc where
-  setWarnings warns = Ghc $ \(Session _ wref) -> writeIORef wref warns
-  -- | Return 'Warnings' accumulated so far.
-  getWarnings       = Ghc $ \(Session _ wref) -> readIORef wref
-
-instance GhcMonad Ghc where
-  getSession = Ghc $ \(Session r _) -> readIORef r
-  setSession s' = Ghc $ \(Session r _) -> writeIORef r s'
-
--- | A monad transformer to add GHC specific features to another monad.
---
--- Note that the wrapped monad must support IO and handling of exceptions.
-newtype GhcT m a = GhcT { unGhcT :: Session -> m a }
-liftGhcT :: Monad m => m a -> GhcT m a
-liftGhcT m = GhcT $ \_ -> m
-
-instance Functor m => Functor (GhcT m) where
-  fmap f m = GhcT $ \s -> f `fmap` unGhcT m s
-
-instance Monad m => Monad (GhcT m) where
-  return x = GhcT $ \_ -> return x
-  m >>= k  = GhcT $ \s -> do a <- unGhcT m s; unGhcT (k a) s
-
-instance MonadIO m => MonadIO (GhcT m) where
-  liftIO ioA = GhcT $ \_ -> liftIO ioA
-
-instance ExceptionMonad m => ExceptionMonad (GhcT m) where
-  gcatch act handle =
-      GhcT $ \s -> unGhcT act s `gcatch` \e -> unGhcT (handle e) s
-  gblock (GhcT m) = GhcT $ \s -> gblock (m s)
-  gunblock (GhcT m) = GhcT $ \s -> gunblock (m s)
-  gmask f =
-      GhcT $ \s -> gmask $ \io_restore ->
-                           let
-                              g_restore (GhcT m) = GhcT $ \s -> io_restore (m s)
-                           in
-                              unGhcT (f g_restore) s
-
-instance MonadIO m => WarnLogMonad (GhcT m) where
-  setWarnings warns = GhcT $ \(Session _ wref) -> liftIO $ writeIORef wref warns
-  -- | Return 'Warnings' accumulated so far.
-  getWarnings       = GhcT $ \(Session _ wref) -> liftIO $ readIORef wref
-
-instance (Functor m, ExceptionMonad m, MonadIO m) => GhcMonad (GhcT m) where
-  getSession = GhcT $ \(Session r _) -> liftIO $ readIORef r
-  setSession s' = GhcT $ \(Session r _) -> liftIO $ writeIORef r s'
-
--- | Lift an IO action returning errors messages into a 'GhcMonad'.
---
--- In order to reduce dependencies to other parts of the compiler, functions
--- outside the "main" parts of GHC return warnings and errors as a parameter
--- and signal success via by wrapping the result in a 'Maybe' type.  This
--- function logs the returned warnings and propagates errors as exceptions
--- (of type 'SourceError').
---
--- This function assumes the following invariants:
---
---  1. If the second result indicates success (is of the form 'Just x'),
---     there must be no error messages in the first result.
---
---  2. If there are no error messages, but the second result indicates failure
---     there should be warnings in the first result.  That is, if the action
---     failed, it must have been due to the warnings (i.e., @-Werror@).
-ioMsgMaybe :: GhcMonad m =>
-              IO (Messages, Maybe a) -> m a
-ioMsgMaybe ioA = do
-  ((warns,errs), mb_r) <- liftIO ioA
-  logWarnings warns
-  case mb_r of
-    Nothing -> liftIO $ throwIO (mkSrcErr errs)
-    Just r  -> ASSERT( isEmptyBag errs ) return r
-
--- | Lift a non-failing IO action into a 'GhcMonad'.
---
--- Like 'ioMsgMaybe', but assumes that the action will never return any error
--- messages.
-ioMsg :: GhcMonad m => IO (Messages, a) -> m a
-ioMsg ioA = do
-    ((warns,errs), r) <- liftIO ioA
-    logWarnings warns
-    ASSERT( isEmptyBag errs ) return r
-
--- | Reflect a computation in the 'Ghc' monad into the 'IO' monad.
---
--- You can use this to call functions returning an action in the 'Ghc' monad
--- inside an 'IO' action.  This is needed for some (too restrictive) callback
--- arguments of some library functions:
---
--- > libFunc :: String -> (Int -> IO a) -> IO a
--- > ghcFunc :: Int -> Ghc a
--- >
--- > ghcFuncUsingLibFunc :: String -> Ghc a -> Ghc a
--- > ghcFuncUsingLibFunc str =
--- >   reifyGhc $ \s ->
--- >     libFunc $ \i -> do
--- >       reflectGhc (ghcFunc i) s
---
-reflectGhc :: Ghc a -> Session -> IO a
-reflectGhc m = unGhc m
-
--- > Dual to 'reflectGhc'.  See its documentation.
-reifyGhc :: (Session -> IO a) -> Ghc a
-reifyGhc act = Ghc $ act
-
-handleFlagWarnings :: GhcMonad m => DynFlags -> [Located String] -> m ()
+handleFlagWarnings :: DynFlags -> [Located String] -> IO ()
 handleFlagWarnings dflags warns
- = when (dopt Opt_WarnDeprecatedFlags dflags)
-        (handleFlagWarnings' dflags warns)
+ = when (wopt Opt_WarnDeprecatedFlags dflags) $ do
+        -- It would be nicer if warns :: [Located Message], but that
+        -- has circular import problems.
+      let bag = listToBag [ mkPlainWarnMsg loc (text warn) 
+                          | L loc warn <- warns ]
 
-handleFlagWarnings' :: GhcMonad m => DynFlags -> [Located String] -> m ()
-handleFlagWarnings' _ [] = return ()
-handleFlagWarnings' dflags warns
- = do -- It would be nicer if warns :: [Located Message], but that has circular
-      -- import problems.
-      logWarnings $ listToBag (map mkFlagWarning warns)
-      when (dopt Opt_WarnIsError dflags) $
-        liftIO $ throwIO $ mkSrcErr emptyBag
-
-mkFlagWarning :: Located String -> WarnMsg
-mkFlagWarning (L loc warn)
- = mkPlainWarnMsg loc (text warn)
-\end{code}
-
-\begin{code}
--- | These functions are called in various places of the GHC API.
---
--- API clients can override any of these callbacks to change GHC's default
--- behaviour.
-data GhcApiCallbacks
-  = GhcApiCallbacks {
-
-    -- | Called by 'load' after the compilating of each module.
-    --
-    -- The default implementation simply prints all warnings and errors to
-    -- @stderr@.  Don't forget to call 'clearWarnings' when implementing your
-    -- own call.
-    --
-    -- The first argument is the module that was compiled.
-    --
-    -- The second argument is @Nothing@ if no errors occured, but there may
-    -- have been warnings.  If it is @Just err@ at least one error has
-    -- occured.  If 'srcErrorMessages' is empty, compilation failed due to
-    -- @-Werror@.
-    reportModuleCompilationResult :: GhcMonad m =>
-                                     ModSummary -> Maybe SourceError
-                                  -> m ()
-  }
-
--- | Temporarily modify the callbacks.  After the action is executed all
--- callbacks are reset (not, however, any other modifications to the session
--- state.)
-withLocalCallbacks :: GhcMonad m =>
-                      (GhcApiCallbacks -> GhcApiCallbacks)
-                   -> m a -> m a
-withLocalCallbacks f m = do
-  hsc_env <- getSession
-  let cb0 = hsc_callbacks hsc_env
-  let cb' = f cb0
-  setSession (hsc_env { hsc_callbacks = cb' `seq` cb' })
-  r <- m
-  hsc_env' <- getSession
-  setSession (hsc_env' { hsc_callbacks = cb0 })
-  return r
-
+      printOrThrowWarnings dflags bag
 \end{code}
 
 \begin{code}
@@ -512,9 +260,6 @@ data HscEnv
   = HscEnv { 
 	hsc_dflags :: DynFlags,
 		-- ^ The dynamic flag settings
-
-        hsc_callbacks :: GhcApiCallbacks,
-                -- ^ Callbacks for the GHC API.
 
 	hsc_targets :: [Target],
 		-- ^ The targets (or roots) of the current session
@@ -746,6 +491,9 @@ hptSomeThingsBelowUs extract include_hi_boot hsc_env deps
 
 	-- And get its dfuns
     , thing <- things ]
+
+hptObjs :: HomePackageTable -> [FilePath]
+hptObjs hpt = concat (map (maybe [] linkableObjs . hm_linkable) (eltsUFM hpt))
 \end{code}
 
 %************************************************************************
@@ -799,14 +547,22 @@ data FindResult
 	-- ^ The requested package was not found
   | FoundMultiple [PackageId]
 	-- ^ _Error_: both in multiple packages
-  | NotFound [FilePath] (Maybe PackageId) [PackageId] [PackageId]
-	-- ^ The module was not found, including either
-        --    * the specified places were searched
-        --    * the package that this module should have been in
-        --    * list of packages in which the module was hidden,
-        --    * list of hidden packages containing this module
-  | NotFoundInPackage PackageId
-	-- ^ The module was not found in this package
+
+  | NotFound          -- Not found
+      { fr_paths       :: [FilePath]       -- Places where I looked
+
+      , fr_pkg         :: Maybe PackageId  -- Just p => module is in this package's
+                                           --           manifest, but couldn't find
+                                           --           the .hi file
+
+      , fr_mods_hidden :: [PackageId]      -- Module is in these packages,
+                                           --   but the *module* is hidden
+
+      , fr_pkgs_hidden :: [PackageId]      -- Module is in these packages,
+                                           --   but the *package* is hidden
+
+      , fr_suggestions :: [Module]         -- Possible mis-spelled modules
+      }
 
 -- | Cache that remembers where we found a particular module.  Contains both
 -- home modules and package modules.  On @:load@, only home modules are
@@ -860,6 +616,8 @@ data ModIface
                 -- exported by this module, and the 'OccName's of those things
         
         mi_exp_hash :: !Fingerprint,	-- ^ Hash of export list
+
+        mi_used_th :: !Bool,  -- ^ Module required TH splices when it was compiled.  This disables recompilation avoidance (see #481).
 
         mi_fixities :: [(OccName,Fixity)],
                 -- ^ Fixities
@@ -919,8 +677,17 @@ data ModIface
 			-- isn't in decls. It's useful to know that when
 			-- seeing if we are up to date wrt. the old interface.
                         -- The 'OccName' is the parent of the name, if it has one.
-	mi_hpc    :: !AnyHpcUsage
+	mi_hpc    :: !AnyHpcUsage,
 	        -- ^ True if this program uses Hpc at any point in the program.
+	mi_trust  :: !IfaceTrustInfo,
+	        -- ^ Safe Haskell Trust information for this module.
+	mi_trust_pkg :: !Bool
+	        -- ^ Do we require the package this module resides in be trusted
+	        -- to trust this module? This is used for the situation where a
+	        -- module is Safe (so doesn't require the package be trusted
+	        -- itself) but imports some trustworthy modules from its own
+	        -- package (which does require its own package be trusted).
+                -- See Note [RnNames . Trust Own Package]
      }
 
 -- | The 'ModDetails' is essentially a cache for information in the 'ModIface'
@@ -950,14 +717,16 @@ emptyModDetails = ModDetails { md_types = emptyTypeEnv,
                              } 
 
 -- | Records the modules directly imported by a module for extracting e.g. usage information
-type ImportedMods = ModuleEnv [(ModuleName, Bool, SrcSpan)]
+type ImportedMods = ModuleEnv [ImportedModsVal]
+type ImportedModsVal = (ModuleName, Bool, SrcSpan, IsSafeImport)
+
 -- TODO: we are not actually using the codomain of this type at all, so it can be
 -- replaced with ModuleEnv ()
 
 -- | A ModGuts is carried through the compiler, accumulating stuff as it goes
 -- There is only one ModGuts at any time, the one for the module
 -- being compiled right now.  Once it is compiled, a 'ModIface' and 
--- 'ModDetails' are extracted and the ModGuts is dicarded.
+-- 'ModDetails' are extracted and the ModGuts is discarded.
 data ModGuts
   = ModGuts {
         mg_module    :: !Module,         -- ^ Module being compiled
@@ -969,7 +738,8 @@ data ModGuts
 					 -- generate initialisation code
 	mg_used_names:: !NameSet,	 -- ^ What the module needed (used in 'MkIface.mkIface')
 
-        mg_rdr_env   :: !GlobalRdrEnv,	 -- ^ Top-level lexical environment
+        mg_used_th   :: !Bool,           -- ^ Did we run a TH splice?
+        mg_rdr_env   :: !GlobalRdrEnv,   -- ^ Top-level lexical environment
 
 	-- These fields all describe the things **declared in this module**
 	mg_fix_env   :: !FixityEnv,	 -- ^ Fixities declared in this module
@@ -982,9 +752,11 @@ data ModGuts
 	mg_binds     :: ![CoreBind],	 -- ^ Bindings for this module
 	mg_foreign   :: !ForeignStubs,   -- ^ Foreign exports declared in this module
 	mg_warns     :: !Warnings,	 -- ^ Warnings declared in the module
-	mg_anns      :: [Annotation],    -- ^ Annotations declared in this module
-	mg_hpc_info  :: !HpcInfo,        -- ^ Coverage tick boxes in the module
+        mg_anns      :: [Annotation],    -- ^ Annotations declared in this module
+        mg_hpc_info  :: !HpcInfo,        -- ^ Coverage tick boxes in the module
         mg_modBreaks :: !ModBreaks,      -- ^ Breakpoints for the module
+        mg_vect_decls:: ![CoreVect],     -- ^ Vectorisation declarations in this module
+                                         --   (produced by desugarer & consumed by vectoriser)
         mg_vect_info :: !VectInfo,       -- ^ Pool of vectorised declarations in the module
 
 	-- The next two fields are unusual, because they give instance
@@ -995,9 +767,12 @@ data ModGuts
 	mg_inst_env     :: InstEnv,
         -- ^ Class instance environment from /home-package/ modules (including
 	-- this one); c.f. 'tcg_inst_env'
-	mg_fam_inst_env :: FamInstEnv
+	mg_fam_inst_env :: FamInstEnv,
         -- ^ Type-family instance enviroment for /home-package/ modules
 	-- (including this one); c.f. 'tcg_fam_inst_env'
+        mg_trust_pkg :: Bool
+        -- ^ Do we need to trust our own package for Safe Haskell?
+        -- See Note [RnNames . Trust Own Package]
     }
 
 -- The ModGuts takes on several slightly different forms:
@@ -1005,24 +780,6 @@ data ModGuts
 -- After simplification, the following fields change slightly:
 --	mg_rules	Orphan rules only (local ones now attached to binds)
 --	mg_binds	With rules attached
-
--- | A CoreModule consists of just the fields of a 'ModGuts' that are needed for
--- the 'GHC.compileToCoreModule' interface.
-data CoreModule
-  = CoreModule {
-      -- | Module name
-      cm_module   :: !Module,
-      -- | Type environment for types declared in this module
-      cm_types    :: !TypeEnv,
-      -- | Declarations
-      cm_binds    :: [CoreBind],
-      -- | Imports
-      cm_imports  :: ![Module]
-    }
-
-instance Outputable CoreModule where
-   ppr (CoreModule {cm_module = mn, cm_types = te, cm_binds = cb}) =
-      text "%module" <+> ppr mn <+> ppr te $$ vcat (map ppr cb)
 
 -- The ModGuts takes on several slightly different forms:
 --
@@ -1055,11 +812,7 @@ data CgGuts
 		-- data constructor workers; reason: we we regard them
 		-- as part of the code-gen of tycons
 
-	cg_dir_imps :: ![Module],
-		-- ^ Directly-imported modules; used to generate
-		-- initialisation code
-
-	cg_foreign  :: !ForeignStubs,	-- ^ Foreign export stubs
+        cg_foreign  :: !ForeignStubs,   -- ^ Foreign export stubs
 	cg_dep_pkgs :: ![PackageId],	-- ^ Dependent packages, used to 
 	                                -- generate #includes for C code gen
         cg_hpc_info :: !HpcInfo,        -- ^ Program coverage tick box information
@@ -1079,6 +832,10 @@ data ForeignStubs = NoStubs             -- ^ We don't have any stubs
                    --
                    --  2) C stubs to use when calling
                    --     "foreign exported" functions
+
+appendStubC :: ForeignStubs -> SDoc -> ForeignStubs
+appendStubC NoStubs            c_code = ForeignStubs empty c_code
+appendStubC (ForeignStubs h c) c_code = ForeignStubs h (c $$ c_code)
 \end{code}
 
 \begin{code}
@@ -1094,7 +851,8 @@ emptyModIface mod
 	       mi_usages   = [],
 	       mi_exports  = [],
 	       mi_exp_hash = fingerprint0,
-	       mi_fixities = [],
+               mi_used_th  = False,
+               mi_fixities = [],
 	       mi_warns    = NoWarnings,
 	       mi_anns     = [],
 	       mi_insts     = [],
@@ -1107,7 +865,9 @@ emptyModIface mod
 	       mi_warn_fn    = emptyIfaceWarnCache,
 	       mi_fix_fn    = emptyIfaceFixCache,
 	       mi_hash_fn   = emptyIfaceHashCache,
-	       mi_hpc       = False
+	       mi_hpc       = False,
+	       mi_trust     = noIfaceTrustInfo,
+               mi_trust_pkg = False
     }		
 \end{code}
 
@@ -1119,37 +879,47 @@ emptyModIface mod
 %************************************************************************
 
 \begin{code}
--- | Interactive context, recording information relevant to GHCi
+-- | Interactive context, recording information about the state of the
+-- context in which statements are executed in a GHC session.
+--
 data InteractiveContext 
   = InteractiveContext { 
-          ic_toplev_scope :: [Module]   -- ^ The context includes the "top-level" scope of
-					-- these modules
+         -- These two fields are only stored here so that the client
+         -- can retrieve them with GHC.getContext.  GHC itself doesn't
+         -- use them, but it does reset them to empty sometimes (such
+         -- as before a GHC.load).  The context is set with GHC.setContext.
+         ic_toplev_scope :: [Module],
+             -- ^ The context includes the "top-level" scope of
+             -- these modules
+         ic_imports :: [ImportDecl RdrName],
+             -- ^ The context is extended with these import declarations
 
-        , ic_exports :: [(Module, Maybe (ImportDecl RdrName))]    -- ^ The context includes just the exported parts of these
-					-- modules
+         ic_rn_gbl_env :: GlobalRdrEnv,
+             -- ^ The contexts' cached 'GlobalRdrEnv', built by
+             -- 'InteractiveEval.setContext'
 
-        , ic_rn_gbl_env :: GlobalRdrEnv -- ^ The contexts' cached 'GlobalRdrEnv', built from
-					-- 'ic_toplev_scope' and 'ic_exports'
-
-        , ic_tmp_ids :: [Id]   -- ^ Names bound during interaction with the user.
-                               -- Later Ids shadow earlier ones with the same OccName
-                               -- Expressions are typed with these Ids in the envt
-                               -- For runtime-debugging, these Ids may have free
-                               -- TcTyVars of RuntimUnkSkol flavour, but no free TyVars
-                               -- (because the typechecker doesn't expect that)
+         ic_tmp_ids :: [Id],
+             -- ^ Names bound during interaction with the user.  Later
+             -- Ids shadow earlier ones with the same OccName
+             -- Expressions are typed with these Ids in the envt For
+             -- runtime-debugging, these Ids may have free TcTyVars of
+             -- RuntimUnkSkol flavour, but no free TyVars (because the
+             -- typechecker doesn't expect that)
 
 #ifdef GHCI
-        , ic_resume :: [Resume]         -- ^ The stack of breakpoint contexts
+         ic_resume :: [Resume],
+             -- ^ The stack of breakpoint contexts
 #endif
 
-        , ic_cwd :: Maybe FilePath      -- virtual CWD of the program
+         ic_cwd :: Maybe FilePath
+             -- virtual CWD of the program
     }
 
 
 emptyInteractiveContext :: InteractiveContext
 emptyInteractiveContext
   = InteractiveContext { ic_toplev_scope = [],
-			 ic_exports = [],
+                         ic_imports = [],
 			 ic_rn_gbl_env = emptyGlobalRdrEnv,
 			 ic_tmp_ids = []
 #ifdef GHCI
@@ -1283,19 +1053,18 @@ mkPrintUnqualified dflags env = (qual_name, qual_mod)
 -- This invariant is used in LoadIface.loadDecl (see note [Tricky iface loop])
 -- The order of the list does not matter.
 implicitTyThings :: TyThing -> [TyThing]
-
--- For data and newtype declarations:
-implicitTyThings (ATyCon tc)
-  =   -- fields (names of selectors)
-      -- (possibly) implicit coercion and family coercion
-      --   depending on whether it's a newtype or a family instance or both
-    implicitCoTyCon tc ++
-      -- for each data constructor in order,
-      --   the contructor, worker, and (possibly) wrapper
-    concatMap (extras_plus . ADataCon) (tyConDataCons tc)
-		     
-implicitTyThings (AClass cl) 
-  = -- dictionary datatype:
+implicitTyThings (AnId _)       = []
+implicitTyThings (ACoAxiom _cc) = []
+implicitTyThings (ATyCon tc)    = implicitTyConThings tc
+implicitTyThings (AClass cl)    = implicitClassThings cl
+implicitTyThings (ADataCon dc)  = map AnId (dataConImplicitIds dc)
+    -- For data cons add the worker and (possibly) wrapper
+    
+implicitClassThings :: Class -> [TyThing]
+implicitClassThings cl 
+  = -- Does not include default methods, because those Ids may have
+    --    their own pragmas, unfoldings etc, not derived from the Class object
+    -- Dictionary datatype:
     --    [extras_plus:]
     --      type constructor 
     --    [recursive call:]
@@ -1311,11 +1080,16 @@ implicitTyThings (AClass cl)
     -- superclass and operation selectors
     map AnId (classAllSelIds cl)
 
-implicitTyThings (ADataCon dc) = 
-    -- For data cons add the worker and (possibly) wrapper
-    map AnId (dataConImplicitIds dc)
+implicitTyConThings :: TyCon -> [TyThing]
+implicitTyConThings tc 
+  =   -- fields (names of selectors)
+      -- (possibly) implicit coercion and family coercion
+      --   depending on whether it's a newtype or a family instance or both
+    implicitCoTyCon tc ++
+      -- for each data constructor in order,
+      --   the contructor, worker, and (possibly) wrapper
+    concatMap (extras_plus . ADataCon) (tyConDataCons tc)
 
-implicitTyThings (AnId _)   = []
 
 -- add a thing and recursive call
 extras_plus :: TyThing -> [TyThing]
@@ -1325,10 +1099,10 @@ extras_plus thing = thing : implicitTyThings thing
 -- add the implicit coercion tycon
 implicitCoTyCon :: TyCon -> [TyThing]
 implicitCoTyCon tc 
-  = map ATyCon . catMaybes $ [-- Just if newtype, Nothing if not
-                              newTyConCo_maybe tc, 
+  = map ACoAxiom . catMaybes $ [-- Just if newtype, Nothing if not
+                              newTyConCo_maybe tc,
                               -- Just if family instance, Nothing if not
-			        tyConFamilyCoercion_maybe tc] 
+			      tyConFamilyCoercion_maybe tc] 
 
 -- sortByOcc = sortBy (\ x -> \ y -> getOccName x < getOccName y)
 
@@ -1338,10 +1112,11 @@ implicitCoTyCon tc
 -- of some other declaration, or it is generated implicitly by some
 -- other declaration.
 isImplicitTyThing :: TyThing -> Bool
-isImplicitTyThing (ADataCon _)  = True
-isImplicitTyThing (AnId     id) = isImplicitId id
-isImplicitTyThing (AClass   _)  = False
-isImplicitTyThing (ATyCon   tc) = isImplicitTyCon tc
+isImplicitTyThing (ADataCon {}) = True
+isImplicitTyThing (AnId id)     = isImplicitId id
+isImplicitTyThing (AClass {})   = False
+isImplicitTyThing (ATyCon tc)   = isImplicitTyCon tc
+isImplicitTyThing (ACoAxiom {}) = True
 
 extendTypeEnvWithIds :: TypeEnv -> [Id] -> TypeEnv
 extendTypeEnvWithIds env ids
@@ -1363,6 +1138,7 @@ emptyTypeEnv    :: TypeEnv
 typeEnvElts     :: TypeEnv -> [TyThing]
 typeEnvClasses  :: TypeEnv -> [Class]
 typeEnvTyCons   :: TypeEnv -> [TyCon]
+typeEnvCoAxioms :: TypeEnv -> [CoAxiom]
 typeEnvIds      :: TypeEnv -> [Id]
 typeEnvDataCons :: TypeEnv -> [DataCon]
 lookupTypeEnv   :: TypeEnv -> Name -> Maybe TyThing
@@ -1371,6 +1147,7 @@ emptyTypeEnv 	    = emptyNameEnv
 typeEnvElts     env = nameEnvElts env
 typeEnvClasses  env = [cl | AClass cl   <- typeEnvElts env]
 typeEnvTyCons   env = [tc | ATyCon tc   <- typeEnvElts env] 
+typeEnvCoAxioms env = [ax | ACoAxiom ax <- typeEnvElts env] 
 typeEnvIds      env = [id | AnId id     <- typeEnvElts env] 
 typeEnvDataCons env = [dc | ADataCon dc <- typeEnvElts env] 
 
@@ -1425,6 +1202,11 @@ lookupTypeHscEnv hsc_env name = do
 tyThingTyCon :: TyThing -> TyCon
 tyThingTyCon (ATyCon tc) = tc
 tyThingTyCon other	 = pprPanic "tyThingTyCon" (pprTyThing other)
+
+-- | Get the 'CoAxiom' from a 'TyThing' if it is a coercion axiom thing. Panics otherwise
+tyThingCoAxiom :: TyThing -> CoAxiom
+tyThingCoAxiom (ACoAxiom ax) = ax
+tyThingCoAxiom other	     = pprPanic "tyThingCoAxiom" (pprTyThing other)
 
 -- | Get the 'Class' from a 'TyThing' if it is a class thing. Panics otherwise
 tyThingClass :: TyThing -> Class
@@ -1546,27 +1328,24 @@ plusWarns (WarnSome v1) (WarnSome v2) = WarnSome (v1 ++ v2)
 \begin{code}
 -- | A collection of 'AvailInfo' - several things that are \"available\"
 type Avails	  = [AvailInfo]
--- | 'Name'd things that are available
-type AvailInfo    = GenAvailInfo Name
--- | 'RdrName'd things that are available
-type RdrAvailInfo = GenAvailInfo OccName
 
 -- | Records what things are "available", i.e. in scope
-data GenAvailInfo name	= Avail name	 -- ^ An ordinary identifier in scope
-			| AvailTC name
-				  [name] -- ^ A type or class in scope. Parameters:
-				         --
-				         --  1) The name of the type or class
-				         --
-				         --  2) The available pieces of type or class.
-					 --     NB: If the type or class is itself
-					 --     to be in scope, it must be in this list.
-					 --     Thus, typically: @AvailTC Eq [Eq, ==, \/=]@
-			deriving( Eq )
+data AvailInfo = Avail Name	 -- ^ An ordinary identifier in scope
+	       | AvailTC Name
+			 [Name]  -- ^ A type or class in scope. Parameters:
+			         --
+				 --  1) The name of the type or class
+				 --  2) The available pieces of type or class.
+				 -- 
+				 -- The AvailTC Invariant:
+				 --   * If the type or class is itself
+				 --     to be in scope, it must be *first* in this list.
+				 --     Thus, typically: @AvailTC Eq [Eq, ==, \/=]@
+		deriving( Eq )
 			-- Equality used when deciding if the interface has changed
 
 -- | The original names declared of a certain module that are exported
-type IfaceExport = (Module, [GenAvailInfo OccName])
+type IfaceExport = AvailInfo
 
 availsToNameSet :: [AvailInfo] -> NameSet
 availsToNameSet avails = foldr add emptyNameSet avails
@@ -1579,21 +1358,29 @@ availsToNameEnv avails = foldr add emptyNameEnv avails
 
 -- | Just the main name made available, i.e. not the available pieces
 -- of type or class brought into scope by the 'GenAvailInfo'
-availName :: GenAvailInfo name -> name
+availName :: AvailInfo -> Name
 availName (Avail n)     = n
 availName (AvailTC n _) = n
 
 -- | All names made available by the availability information
-availNames :: GenAvailInfo name -> [name]
+availNames :: AvailInfo -> [Name]
 availNames (Avail n)      = [n]
 availNames (AvailTC _ ns) = ns
 
-instance Outputable n => Outputable (GenAvailInfo n) where
+instance Outputable AvailInfo where
    ppr = pprAvail
 
-pprAvail :: Outputable n => GenAvailInfo n -> SDoc
+pprAvail :: AvailInfo -> SDoc
 pprAvail (Avail n)      = ppr n
 pprAvail (AvailTC n ns) = ppr n <> braces (hsep (punctuate comma (map ppr ns)))
+
+stableAvailCmp :: AvailInfo -> AvailInfo -> Ordering
+-- Compare lexicographically
+stableAvailCmp (Avail n1)     (Avail n2)     = n1 `stableNameCmp` n2
+stableAvailCmp (Avail {})     (AvailTC {})   = LT
+stableAvailCmp (AvailTC n ns) (AvailTC m ms) = (n `stableNameCmp` m) `thenCmp`
+                                               (cmpList stableNameCmp ns ms)
+stableAvailCmp (AvailTC {})   (Avail {})     = GT
 \end{code}
 
 \begin{code}
@@ -1658,19 +1445,21 @@ type IsBootInterface = Bool
 data Dependencies
   = Deps { dep_mods   :: [(ModuleName, IsBootInterface)]
                         -- ^ Home-package module dependencies
-	 , dep_pkgs   :: [PackageId]
-	                -- ^ External package dependencies
-	 , dep_orphs  :: [Module]	    
-	                -- ^ Orphan modules (whether home or external pkg),
-	                -- *not* including family instance orphans as they
-	                -- are anyway included in 'dep_finsts'
-         , dep_finsts :: [Module]	    
+         , dep_pkgs   :: [(PackageId, Bool)]
+                       -- ^ External package dependencies. The bool indicates
+                        -- if the package is required to be trusted when the
+                        -- module is imported as a safe import (Safe Haskell).
+                        -- See Note [RnNames . Tracking Trust Transitively]
+         , dep_orphs  :: [Module]
+                        -- ^ Orphan modules (whether home or external pkg),
+                        -- *not* including family instance orphans as they
+                        -- are anyway included in 'dep_finsts'
+         , dep_finsts :: [Module]
                         -- ^ Modules that contain family instances (whether the
                         -- instances are from the home or an external package)
          }
   deriving( Eq )
-	-- Equality used only for old/new comparison in MkIface.addVersionInfo
-
+        -- Equality used only for old/new comparison in MkIface.addVersionInfo
         -- See 'TcRnTypes.ImportAvails' for details on dependencies.
 
 noDependencies :: Dependencies
@@ -1681,7 +1470,10 @@ data Usage
   = UsagePackageModule {
         usg_mod      :: Module,
            -- ^ External package module depended on
-        usg_mod_hash :: Fingerprint
+        usg_mod_hash :: Fingerprint,
+	    -- ^ Cached module fingerprint
+        usg_safe :: IsSafeImport
+            -- ^ Was this module imported as a safe import
     }                                           -- ^ Module from another package
   | UsageHomeModule {
         usg_mod_name :: ModuleName,
@@ -1692,9 +1484,11 @@ data Usage
             -- ^ Entities we depend on, sorted by occurrence name and fingerprinted.
             -- NB: usages are for parent names only, e.g. type constructors 
             -- but not the associated data constructors.
-	usg_exports  :: Maybe Fingerprint
+	usg_exports  :: Maybe Fingerprint,
             -- ^ Fingerprint for the export list we used to depend on this module,
             -- if we depend on the export list
+        usg_safe :: IsSafeImport
+            -- ^ Was this module imported as a safe import
     }                                           -- ^ Module from the current package
     deriving( Eq )
 	-- The export list field is (Just v) if we depend on the export list:
@@ -1861,21 +1655,37 @@ emptyMG = []
 -- * An external-core source module
 data ModSummary
    = ModSummary {
-        ms_mod       :: Module,			-- ^ Identity of the module
-	ms_hsc_src   :: HscSource,		-- ^ The module source either plain Haskell, hs-boot or external core
-        ms_location  :: ModLocation,		-- ^ Location of the various files belonging to the module
-        ms_hs_date   :: ClockTime,		-- ^ Timestamp of source file
-	ms_obj_date  :: Maybe ClockTime,	-- ^ Timestamp of object, if we have one
-        ms_srcimps   :: [Located (ImportDecl RdrName)],	-- ^ Source imports of the module
-        ms_imps      :: [Located (ImportDecl RdrName)],	-- ^ Non-source imports of the module
-        ms_hspp_file :: FilePath,		-- ^ Filename of preprocessed source file
-        ms_hspp_opts :: DynFlags,               -- ^ Cached flags from @OPTIONS@, @INCLUDE@
+        ms_mod          :: Module,		-- ^ Identity of the module
+	ms_hsc_src      :: HscSource,		-- ^ The module source either plain Haskell, hs-boot or external core
+        ms_location     :: ModLocation,		-- ^ Location of the various files belonging to the module
+        ms_hs_date      :: ClockTime,		-- ^ Timestamp of source file
+	ms_obj_date     :: Maybe ClockTime,	-- ^ Timestamp of object, if we have one
+        ms_srcimps      :: [Located (ImportDecl RdrName)],	-- ^ Source imports of the module
+        ms_textual_imps :: [Located (ImportDecl RdrName)],	-- ^ Non-source imports of the module from the module *text*
+        ms_hspp_file    :: FilePath,		-- ^ Filename of preprocessed source file
+        ms_hspp_opts    :: DynFlags,            -- ^ Cached flags from @OPTIONS@, @INCLUDE@
                                                 -- and @LANGUAGE@ pragmas in the modules source code
-	ms_hspp_buf  :: Maybe StringBuffer    	-- ^ The actual preprocessed source, if we have it
+	ms_hspp_buf     :: Maybe StringBuffer   -- ^ The actual preprocessed source, if we have it
      }
 
 ms_mod_name :: ModSummary -> ModuleName
 ms_mod_name = moduleName . ms_mod
+
+ms_imps :: ModSummary -> [Located (ImportDecl RdrName)]
+ms_imps ms = ms_textual_imps ms ++ map mk_additional_import (dynFlagDependencies (ms_hspp_opts ms))
+  where
+    -- This is a not-entirely-satisfactory means of creating an import that corresponds to an
+    -- import that did not occur in the program text, such as those induced by the use of
+    -- plugins (the -plgFoo flag)
+    mk_additional_import mod_nm = noLoc $ ImportDecl {
+      ideclName = noLoc mod_nm,
+      ideclPkgQual = Nothing,
+      ideclSource = False,
+      ideclQualified = False,
+      ideclAs = Nothing,
+      ideclHiding = Nothing,
+      ideclSafe = False
+    }
 
 -- The ModLocation contains both the original source filename and the
 -- filename of the cleaned-up source file after all preprocessing has been
@@ -1902,7 +1712,7 @@ instance Outputable ModSummary where
              nest 3 (sep [text "ms_hs_date = " <> text (show (ms_hs_date ms)),
                           text "ms_mod =" <+> ppr (ms_mod ms) 
 				<> text (hscSourceString (ms_hsc_src ms)) <> comma,
-                          text "ms_imps =" <+> ppr (ms_imps ms),
+                          text "ms_textual_imps =" <+> ppr (ms_textual_imps ms),
                           text "ms_srcimps =" <+> ppr (ms_srcimps ms)]),
              char '}'
             ]
@@ -1923,6 +1733,30 @@ showModMsg target recomp mod_summary
     mod_str = showSDoc (ppr mod) ++ hscSourceString (ms_hsc_src mod_summary)
 \end{code}
 
+%************************************************************************
+%*									*
+\subsection{Recmpilation}
+%*									*
+%************************************************************************
+
+\begin{code}
+-- | Indicates whether a given module's source has been modified since it
+-- was last compiled.
+data SourceModified
+  = SourceModified
+       -- ^ the source has been modified
+  | SourceUnmodified
+       -- ^ the source has not been modified.  Compilation may or may
+       -- not be necessary, depending on whether any dependencies have
+       -- changed since we last compiled.
+  | SourceUnmodifiedAndStable
+       -- ^ the source has not been modified, and furthermore all of
+       -- its (transitive) dependencies are up to date; it definitely
+       -- does not need to be recompiled.  This is important for two
+       -- reasons: (a) we can omit the version check in checkOldIface,
+       -- and (b) if the module used TH splices we don't need to force
+       -- recompilation.
+\end{code}
 
 %************************************************************************
 %*									*
@@ -1956,9 +1790,9 @@ isHpcUsed (NoHpcInfo { hpcUsed = used }) = used
 \end{code}
 
 %************************************************************************
-%*									*
+%*                                                                      *
 \subsection{Vectorisation Support}
-%*									*
+%*                                                                      *
 %************************************************************************
 
 The following information is generated and consumed by the vectorisation
@@ -1971,49 +1805,106 @@ vectorisation, we need to know `f_v', whose `Var' we cannot lookup based
 on just the OccName easily in a Core pass.
 
 \begin{code}
--- | Vectorisation information for 'ModGuts', 'ModDetails' and 'ExternalPackageState'.
+-- |Vectorisation information for 'ModGuts', 'ModDetails' and 'ExternalPackageState'; see also
+-- documentation at 'Vectorise.Env.GlobalEnv'.
 data VectInfo      
-  = VectInfo {
-      vectInfoVar     :: VarEnv  (Var    , Var  ),   -- ^ @(f, f_v)@ keyed on @f@
-      vectInfoTyCon   :: NameEnv (TyCon  , TyCon),   -- ^ @(T, T_v)@ keyed on @T@
-      vectInfoDataCon :: NameEnv (DataCon, DataCon), -- ^ @(C, C_v)@ keyed on @C@
-      vectInfoPADFun  :: NameEnv (TyCon  , Var),     -- ^ @(T_v, paT)@ keyed on @T_v@
-      vectInfoIso     :: NameEnv (TyCon  , Var)      -- ^ @(T, isoT)@ keyed on @T@
+  = VectInfo
+    { vectInfoVar          :: VarEnv  (Var    , Var  )    -- ^ @(f, f_v)@ keyed on @f@
+    , vectInfoTyCon        :: NameEnv (TyCon  , TyCon)    -- ^ @(T, T_v)@ keyed on @T@
+    , vectInfoDataCon      :: NameEnv (DataCon, DataCon)  -- ^ @(C, C_v)@ keyed on @C@
+    , vectInfoPADFun       :: NameEnv (TyCon  , Var)      -- ^ @(T_v, paT)@ keyed on @T_v@
+    , vectInfoIso          :: NameEnv (TyCon  , Var)      -- ^ @(T, isoT)@ keyed on @T@
+    , vectInfoScalarVars   :: VarSet                      -- ^ set of purely scalar variables
+    , vectInfoScalarTyCons :: NameSet                     -- ^ set of scalar type constructors
     }
 
--- | Vectorisation information for 'ModIface': a slightly less low-level view
+-- |Vectorisation information for 'ModIface'; i.e, the vectorisation information propagated 
+-- across module boundaries.
+--
 data IfaceVectInfo 
-  = IfaceVectInfo {
-      ifaceVectInfoVar        :: [Name],
-        -- ^ All variables in here have a vectorised variant
-      ifaceVectInfoTyCon      :: [Name],
-        -- ^ All 'TyCon's in here have a vectorised variant;
-        -- the name of the vectorised variant and those of its
-        -- data constructors are determined by 'OccName.mkVectTyConOcc'
-        -- and 'OccName.mkVectDataConOcc'; the names of
-        -- the isomorphisms are determined by 'OccName.mkVectIsoOcc'
-      ifaceVectInfoTyConReuse :: [Name]              
-        -- ^ The vectorised form of all the 'TyCon's in here coincides with
-        -- the unconverted form; the name of the isomorphisms is determined
-        -- by 'OccName.mkVectIsoOcc'
+  = IfaceVectInfo 
+    { ifaceVectInfoVar          :: [Name]  -- ^ All variables in here have a vectorised variant
+    , ifaceVectInfoTyCon        :: [Name]  -- ^ All 'TyCon's in here have a vectorised variant;
+                                           -- the name of the vectorised variant and those of its
+                                           -- data constructors are determined by
+                                           -- 'OccName.mkVectTyConOcc' and 
+                                           -- 'OccName.mkVectDataConOcc'; the names of the
+                                           -- isomorphisms are determined by 'OccName.mkVectIsoOcc'
+    , ifaceVectInfoTyConReuse   :: [Name]  -- ^ The vectorised form of all the 'TyCon's in here
+                                           -- coincides with the unconverted form; the name of the
+                                           -- isomorphisms is determined by 'OccName.mkVectIsoOcc'
+    , ifaceVectInfoScalarVars   :: [Name]  -- iface version of 'vectInfoScalarVar'
+    , ifaceVectInfoScalarTyCons :: [Name]  -- iface version of 'vectInfoScalarTyCon'
     }
 
 noVectInfo :: VectInfo
-noVectInfo = VectInfo emptyVarEnv emptyNameEnv emptyNameEnv emptyNameEnv emptyNameEnv
+noVectInfo 
+  = VectInfo emptyVarEnv emptyNameEnv emptyNameEnv emptyNameEnv emptyNameEnv emptyVarSet
+             emptyNameSet
 
 plusVectInfo :: VectInfo -> VectInfo -> VectInfo
 plusVectInfo vi1 vi2 = 
-  VectInfo (vectInfoVar     vi1 `plusVarEnv`  vectInfoVar     vi2)
-           (vectInfoTyCon   vi1 `plusNameEnv` vectInfoTyCon   vi2)
-           (vectInfoDataCon vi1 `plusNameEnv` vectInfoDataCon vi2)
-           (vectInfoPADFun  vi1 `plusNameEnv` vectInfoPADFun  vi2)
-           (vectInfoIso     vi1 `plusNameEnv` vectInfoIso     vi2)
+  VectInfo (vectInfoVar          vi1 `plusVarEnv`    vectInfoVar          vi2)
+           (vectInfoTyCon        vi1 `plusNameEnv`   vectInfoTyCon        vi2)
+           (vectInfoDataCon      vi1 `plusNameEnv`   vectInfoDataCon      vi2)
+           (vectInfoPADFun       vi1 `plusNameEnv`   vectInfoPADFun       vi2)
+           (vectInfoIso          vi1 `plusNameEnv`   vectInfoIso          vi2)
+           (vectInfoScalarVars   vi1 `unionVarSet`   vectInfoScalarVars   vi2)
+           (vectInfoScalarTyCons vi1 `unionNameSets` vectInfoScalarTyCons vi2)
 
 concatVectInfo :: [VectInfo] -> VectInfo
 concatVectInfo = foldr plusVectInfo noVectInfo
 
 noIfaceVectInfo :: IfaceVectInfo
-noIfaceVectInfo = IfaceVectInfo [] [] []
+noIfaceVectInfo = IfaceVectInfo [] [] [] [] []
+\end{code}
+
+%************************************************************************
+%*									*
+\subsection{Safe Haskell Support}
+%*									*
+%************************************************************************
+
+This stuff here is related to supporting the Safe Haskell extension,
+primarily about storing under what trust type a module has been compiled.
+
+\begin{code}
+-- | Is an import a safe import?
+type IsSafeImport = Bool
+
+-- | Safe Haskell information for 'ModIface'
+-- Simply a wrapper around SafeHaskellMode to sepperate iface and flags
+newtype IfaceTrustInfo = TrustInfo SafeHaskellMode
+
+getSafeMode :: IfaceTrustInfo -> SafeHaskellMode
+getSafeMode (TrustInfo x) = x
+
+setSafeMode :: SafeHaskellMode -> IfaceTrustInfo
+setSafeMode = TrustInfo
+
+noIfaceTrustInfo :: IfaceTrustInfo
+noIfaceTrustInfo = setSafeMode Sf_None
+
+trustInfoToNum :: IfaceTrustInfo -> Word8
+trustInfoToNum it
+  = case getSafeMode it of
+            Sf_None -> 0
+            Sf_SafeImports -> 1
+            Sf_Trustworthy -> 2
+            Sf_Safe -> 3
+
+numToTrustInfo :: Word8 -> IfaceTrustInfo
+numToTrustInfo 0 = setSafeMode Sf_None
+numToTrustInfo 1 = setSafeMode Sf_SafeImports
+numToTrustInfo 2 = setSafeMode Sf_Trustworthy
+numToTrustInfo 3 = setSafeMode Sf_Safe
+numToTrustInfo n = error $ "numToTrustInfo: bad input number! (" ++ show n ++ ")"
+
+instance Outputable IfaceTrustInfo where
+    ppr (TrustInfo Sf_None)         = ptext $ sLit "none"
+    ppr (TrustInfo Sf_SafeImports)  = ptext $ sLit "safe-imports"
+    ppr (TrustInfo Sf_Trustworthy)  = ptext $ sLit "trustworthy"
+    ppr (TrustInfo Sf_Safe)         = ptext $ sLit "safe"
 \end{code}
 
 %************************************************************************
@@ -2049,6 +1940,9 @@ isObjectLinkable l = not (null unlinked) && all isObject unlinked
 	-- generate a linkable with no Unlinked's as a result of
 	-- compiling a module in HscNothing mode, and this choice
 	-- happens to work well with checkStability in module GHC.
+
+linkableObjs :: Linkable -> [FilePath]
+linkableObjs l = [ f | DotO f <- linkableUnlinked l ]
 
 instance Outputable Linkable where
    ppr (LM when_made mod unlinkeds)
@@ -2124,13 +2018,16 @@ data ModBreaks
         -- ^ An array giving the source span of each breakpoint.
    , modBreaks_vars :: !(Array BreakIndex [OccName])
         -- ^ An array giving the names of the free variables at each breakpoint.
+   , modBreaks_decls :: !(Array BreakIndex [String])
+        -- ^ An array giving the names of the declarations enclosing each breakpoint.
    }
 
 emptyModBreaks :: ModBreaks
 emptyModBreaks = ModBreaks
    { modBreaks_flags = error "ModBreaks.modBreaks_array not initialised"
          -- Todo: can we avoid this? 
-   , modBreaks_locs = array (0,-1) []
-   , modBreaks_vars = array (0,-1) []
+   , modBreaks_locs  = array (0,-1) []
+   , modBreaks_vars  = array (0,-1) []
+   , modBreaks_decls = array (0,-1) []
    }
 \end{code}

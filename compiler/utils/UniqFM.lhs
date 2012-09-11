@@ -36,6 +36,8 @@ module UniqFM (
 	addListToUFM,addListToUFM_C,
 	addToUFM_Directly,
 	addListToUFM_Directly,
+	adjustUFM,
+	adjustUFM_Directly,
 	delFromUFM,
 	delFromUFM_Directly,
 	delListFromUFM,
@@ -45,7 +47,7 @@ module UniqFM (
 	intersectUFM,
 	intersectUFM_C,
 	foldUFM, foldUFM_Directly,
-	mapUFM,
+	mapUFM, mapUFM_Directly,
 	elemUFM, elemUFM_Directly,
 	filterUFM, filterUFM_Directly,
 	sizeUFM,
@@ -53,13 +55,20 @@ module UniqFM (
 	lookupUFM, lookupUFM_Directly,
 	lookupWithDefaultUFM, lookupWithDefaultUFM_Directly,
 	eltsUFM, keysUFM, splitUFM,
-	ufmToList 
+	ufmToList,
+	joinUFM
     ) where
 
 import Unique           ( Uniquable(..), Unique, getKey )
 import Outputable
 
+import Compiler.Hoopl   hiding (Unique)
+
+import Data.Function (on)
 import qualified Data.IntMap as M
+import qualified Data.Foldable as Foldable
+import Data.Typeable
+import Data.Data
 \end{code}
 
 %************************************************************************
@@ -103,6 +112,9 @@ addListToUFM_C	:: Uniquable key => (elt -> elt -> elt)
 			   -> UniqFM elt -> [(key,elt)]
 			   -> UniqFM elt
 
+adjustUFM	:: Uniquable key => (elt -> elt) -> UniqFM elt -> key -> UniqFM elt
+adjustUFM_Directly :: (elt -> elt) -> UniqFM elt -> Unique -> UniqFM elt
+
 delFromUFM	:: Uniquable key => UniqFM elt -> key	 -> UniqFM elt
 delListFromUFM	:: Uniquable key => UniqFM elt -> [key] -> UniqFM elt
 delFromUFM_Directly :: UniqFM elt -> Unique -> UniqFM elt
@@ -122,6 +134,7 @@ intersectUFM_C	:: (elt1 -> elt2 -> elt3)
 foldUFM		:: (elt -> a -> a) -> a -> UniqFM elt -> a
 foldUFM_Directly:: (Unique -> elt -> a -> a) -> a -> UniqFM elt -> a
 mapUFM		:: (elt1 -> elt2) -> UniqFM elt1 -> UniqFM elt2
+mapUFM_Directly :: (Unique -> elt1 -> elt2) -> UniqFM elt1 -> UniqFM elt2
 filterUFM	:: (elt -> Bool) -> UniqFM elt -> UniqFM elt
 filterUFM_Directly :: (Unique -> elt -> Bool) -> UniqFM elt -> UniqFM elt
 
@@ -152,7 +165,14 @@ ufmToList	:: UniqFM elt -> [(Unique, elt)]
 %************************************************************************
 
 \begin{code}
-newtype UniqFM ele = UFM (M.IntMap ele)
+newtype UniqFM ele = UFM { unUFM :: M.IntMap ele }
+  deriving (Typeable,Data)
+
+instance Eq ele => Eq (UniqFM ele) where
+    (==) = (==) `on` unUFM
+
+instance Foldable.Foldable UniqFM where
+    foldMap f = Foldable.foldMap f . unUFM
 
 emptyUFM = UFM M.empty
 isNullUFM (UFM m) = M.null m
@@ -174,6 +194,9 @@ addToUFM_Acc exi new (UFM m) k v =
   UFM (M.insertWith (\_new old -> exi v old) (getKey $ getUnique k) (new v) m)
 addListToUFM_C f = foldl (\m (k, v) -> addToUFM_C f m k v)
 
+adjustUFM f (UFM m) k = UFM (M.adjust f (getKey $ getUnique k) m)
+adjustUFM_Directly f (UFM m) u = UFM (M.adjust f (getKey u) m)
+
 delFromUFM (UFM m) k = UFM (M.delete (getKey $ getUnique k) m)
 delListFromUFM = foldl delFromUFM
 delFromUFM_Directly (UFM m) u = UFM (M.delete (getKey u) m)
@@ -183,24 +206,12 @@ plusUFM (UFM x) (UFM y) = UFM (M.union y x)
 plusUFM_C f (UFM x) (UFM y) = UFM (M.unionWith f x y)
 minusUFM (UFM x) (UFM y) = UFM (M.difference x y)
 intersectUFM (UFM x) (UFM y) = UFM (M.intersection x y)
-#if __GLASGOW_HASKELL__ >= 611
 intersectUFM_C f (UFM x) (UFM y) = UFM (M.intersectionWith f x y)
-#else
--- In GHC 6.10, intersectionWith is (a -> b -> a) instead of (a -> b -> c),
--- so we need to jump through some hoops to get the more general type.
-intersectUFM_C f (UFM x) (UFM y) = UFM z
-    where z = let x' = M.map Left x
-                  f' (Left a) b = Right (f a b)
-                  f' (Right _) _ = panic "intersectUFM_C: f': Right"
-                  z' = M.intersectionWith f' x' y
-                  fromRight (Right a) = a
-                  fromRight _ = panic "intersectUFM_C: Left"
-              in M.map fromRight z'
-#endif
 
 foldUFM k z (UFM m) = M.fold k z m
 foldUFM_Directly k z (UFM m) = M.foldWithKey (k . getUnique) z m
 mapUFM f (UFM m) = UFM (M.map f m)
+mapUFM_Directly f (UFM m) = UFM (M.mapWithKey (f . getUnique) m)
 filterUFM p (UFM m) = UFM (M.filter p m)
 filterUFM_Directly p (UFM m) = UFM (M.filterWithKey (p . getUnique) m)
 
@@ -217,6 +228,16 @@ lookupWithDefaultUFM_Directly (UFM m) v u = M.findWithDefault v (getKey u) m
 keysUFM (UFM m) = map getUnique $ M.keys m
 eltsUFM (UFM m) = M.elems m
 ufmToList (UFM m) = map (\(k, v) -> (getUnique k, v)) $ M.toList m
+
+-- Hoopl
+joinUFM :: JoinFun v -> JoinFun (UniqFM v)
+joinUFM eltJoin l (OldFact old) (NewFact new) = foldUFM_Directly add (NoChange, old) new
+    where add k new_v (ch, joinmap) =
+            case lookupUFM_Directly joinmap k of
+                Nothing -> (SomeChange, addToUFM_Directly joinmap k new_v)
+                Just old_v -> case eltJoin l (OldFact old_v) (NewFact new_v) of
+                                (SomeChange, v') -> (SomeChange, addToUFM_Directly joinmap k v')
+                                (NoChange, _) -> (ch, joinmap)
 
 \end{code}
 

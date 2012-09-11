@@ -29,6 +29,8 @@ struct GC_FLAGS {
 
     nat     maxStkSize;         /* in *words* */
     nat     initialStkSize;     /* in *words* */
+    nat     stkChunkSize;       /* in *words* */
+    nat     stkChunkBufferSize; /* in *words* */
 
     nat	    maxHeapSize;        /* in *blocks* */
     nat     minAllocAreaSize;   /* in *blocks* */
@@ -146,8 +148,7 @@ struct MISC_FLAGS {
 struct PAR_FLAGS {
   nat            nNodes;         /* number of threads to run simultaneously */
   rtsBool        migrate;        /* migrate threads between capabilities */
-  rtsBool        wakeupMigrate;  /* migrate a thread on wakeup */
-  unsigned int	 maxLocalSparks;
+  unsigned int   maxLocalSparks;
   rtsBool        parGcEnabled;   /* enable parallel GC */
   unsigned int   parGcGen;       /* do parallel GC in this generation
                                   * and higher only */
@@ -218,13 +219,6 @@ extern RTS_FLAGS RtsFlags[];
 extern RTS_FLAGS RtsFlags;
 #endif
 
-/* Routines that operate-on/to-do-with RTS flags: */
-
-void initRtsFlagsDefaults(void);
-void setupRtsFlags(int *argc, char *argv[], int *rts_argc, char *rts_argv[]);
-void setProgName(char *argv[]);
-
-
 /*
  * The printf formats are here, so we are less likely to make
  * overly-long filenames (with disastrous results).  No more than 128
@@ -250,7 +244,7 @@ void setProgName(char *argv[]);
 extern int     prog_argc;
 extern char  **prog_argv;
 */
-extern int     rts_argc;  /* ditto */
-extern char   *rts_argv[];
+extern int      rts_argc;  /* ditto */
+extern char   **rts_argv;
 
 #endif	/* RTS_FLAGS_H */

@@ -69,23 +69,23 @@ data HsLocalBindsLR idL idR	-- Bindings in a 'let' expression
 type HsValBinds id = HsValBindsLR id id
 
 data HsValBindsLR idL idR  -- Value bindings (not implicit parameters)
-  = ValBindsIn             -- Before renaming
+  = ValBindsIn             -- Before renaming RHS; idR is always RdrName
 	(LHsBindsLR idL idR) [LSig idR]	-- Not dependency analysed
 					-- Recursive by default
 
-  | ValBindsOut		   -- After renaming
+  | ValBindsOut		   -- After renaming RHS; idR can be Name or Id
 	[(RecFlag, LHsBinds idL)]	-- Dependency analysed, later bindings 
                                         -- in the list may depend on earlier
                                         -- ones.
 	[LSig Name]
   deriving (Data, Typeable)
 
-type LHsBinds id = Bag (LHsBind id)
-type LHsBind  id = Located (HsBind id)
-type HsBind id   = HsBindLR id id
+type LHsBind  id = LHsBindLR  id id
+type LHsBinds id = LHsBindsLR id id
+type HsBind   id = HsBindLR   id id
 
-type LHsBindLR idL idR = Located (HsBindLR idL idR)
 type LHsBindsLR idL idR = Bag (LHsBindLR idL idR)
+type LHsBindLR  idL idR = Located (HsBindLR idL idR)
 
 data HsBindLR idL idR
   = -- | FunBind is used for both functions   @f x = e@
@@ -148,13 +148,14 @@ data HsBindLR idL idR
 	abs_ev_vars :: [EvVar],	 -- Includes equality constraints
 
        -- AbsBinds only gets used when idL = idR after renaming,
-       -- but these need to be idL's for the collect... code in HsUtil to have
-       -- the right type
+       -- but these need to be idL's for the collect... code in HsUtil 
+       -- to have the right type
 	abs_exports :: [([TyVar], idL, idL, TcSpecPrags)],	-- (tvs, poly_id, mono_id, prags)
 
         abs_ev_binds :: TcEvBinds,     -- Evidence bindings
 	abs_binds    :: LHsBinds idL   -- Typechecked user bindings
     }
+
   deriving (Data, Typeable)
 	-- Consider (AbsBinds tvs ds [(ftvs, poly_f, mono_f) binds]
 	-- 
@@ -251,7 +252,7 @@ getTypeSigNames :: HsValBinds a -> NameSet
 getTypeSigNames (ValBindsIn {}) 
   = panic "getTypeSigNames"
 getTypeSigNames (ValBindsOut _ sigs) 
-  = mkNameSet [unLoc n | L _ (TypeSig n _) <- sigs]
+  = mkNameSet [unLoc n | L _ (TypeSig names _) <- sigs, n <- names]
 \end{code}
 
 What AbsBinds means
@@ -295,11 +296,12 @@ ppr_monobind (FunBind { fun_id = fun, fun_infix = inf,
   = pprTicks empty (case tick of 
 			Nothing -> empty
 			Just t  -> text "-- tick id = " <> ppr t)
+    $$  ifPprDebug (pprBndr LetBind (unLoc fun))
     $$  pprFunBind (unLoc fun) inf matches
     $$  ifPprDebug (ppr wrap)
 
-ppr_monobind (AbsBinds { abs_tvs = tyvars, abs_ev_vars = dictvars 
-		       , abs_exports = exports, abs_binds = val_binds
+ppr_monobind (AbsBinds { abs_tvs = tyvars, abs_ev_vars = dictvars
+                       , abs_exports = exports, abs_binds = val_binds
                        , abs_ev_binds = ev_binds })
   = sep [ptext (sLit "AbsBinds"),
   	 brackets (interpp'SP tyvars),
@@ -355,7 +357,7 @@ data IPBind id
 
 instance (OutputableBndr id) => Outputable (HsIPBinds id) where
   ppr (IPBinds bs ds) = pprDeeperList vcat (map ppr bs) 
-			$$ ifPprDebug (ppr ds)
+                        $$ ifPprDebug (ppr ds)
 
 instance (OutputableBndr id) => Outputable (IPBind id) where
   ppr (IPBind id rhs) = pprBndr LetBind id <+> equals <+> pprExpr (unLoc rhs)
@@ -376,7 +378,7 @@ data HsWrapper
   = WpHole			-- The identity coercion
 
   | WpCompose HsWrapper HsWrapper	
-       -- (wrap1 `WpCompse` wrap2)[e] = wrap1[ wrap2[ e ]]
+       -- (wrap1 `WpCompose` wrap2)[e] = wrap1[ wrap2[ e ]]
        -- 
        -- Hence  (\a. []) `WpCompose` (\b. []) = (\a b. [])
        -- But    ([] a)   `WpCompose` ([] b)   = ([] b a)
@@ -455,7 +457,7 @@ data EvTerm
   deriving( Data, Typeable)
 
 evVarTerm :: EvVar -> EvTerm
-evVarTerm v | isCoVar v = EvCoercion (mkCoVarCoercion v)
+evVarTerm v | isCoVar v = EvCoercion (mkCoVarCo v)
             | otherwise = EvId v
 \end{code}
 
@@ -544,7 +546,7 @@ pprHsWrapper doc wrap
     help it WpHole             = it
     help it (WpCompose f1 f2)  = help (help it f2) f1
     help it (WpCast co)   = add_parens $ sep [it False, nest 2 (ptext (sLit "|>") 
-                                                 <+> pprParendType co)]
+                                              <+> pprParendCo co)]
     help it (WpEvApp id)  = no_parens  $ sep [it True, nest 2 (ppr id)]
     help it (WpTyApp ty)  = no_parens  $ sep [it True, ptext (sLit "@") <+> pprParendType ty]
     help it (WpEvLam id)  = add_parens $ sep [ ptext (sLit "\\") <> pp_bndr id, it False]
@@ -570,8 +572,8 @@ instance Outputable EvBind where
 
 instance Outputable EvTerm where
   ppr (EvId v)        	 = ppr v
-  ppr (EvCast v co)   	 = ppr v <+> (ptext (sLit "`cast`")) <+> pprParendType co
-  ppr (EvCoercion co)    = ppr co
+  ppr (EvCast v co)      = ppr v <+> (ptext (sLit "`cast`")) <+> pprParendCo co
+  ppr (EvCoercion co)    = ptext (sLit "CO") <+> ppr co
   ppr (EvSuperClass d n) = ptext (sLit "sc") <> parens (ppr (d,n))
   ppr (EvDFunApp df tys ts) = ppr df <+> sep [ char '@' <> ppr tys, ppr ts ]
 \end{code}
@@ -593,7 +595,11 @@ type LSig name = Located (Sig name)
 data Sig name	-- Signatures and pragmas
   = 	-- An ordinary type signature
 	-- f :: Num a => a -> a
-    TypeSig (Located name) (LHsType name)
+    TypeSig [Located name] (LHsType name)
+
+        -- A type signature for a default method inside a class
+        -- default eq :: (Representable0 a, GEq (Rep0 a)) => a -> a -> Bool
+  | GenericSig [Located name] (LHsType name)
 
 	-- A type signature in generated code, notably the code
 	-- generated for record selectors.  We simply record
@@ -619,10 +625,10 @@ data Sig name	-- Signatures and pragmas
 				-- If it's just defaultInlinePragma, then we said
 				--    SPECIALISE, not SPECIALISE_INLINE
 
-	-- A specialisation pragma for instance declarations only
-	-- {-# SPECIALISE instance Eq [Int] #-}
-  | SpecInstSig (LHsType name)	-- (Class tys); should be a specialisation of the 
-				-- current instance decl
+        -- A specialisation pragma for instance declarations only
+        -- {-# SPECIALISE instance Eq [Int] #-}
+  | SpecInstSig (LHsType name)  -- (Class tys); should be a specialisation of the 
+                                -- current instance decl
   deriving (Data, Typeable)
 
 
@@ -664,34 +670,20 @@ okBindSig :: Sig a -> Bool
 okBindSig _ = True
 
 okHsBootSig :: Sig a -> Bool
-okHsBootSig (TypeSig  _ _) = True
-okHsBootSig (FixSig _) 	   = True
-okHsBootSig _              = False
+okHsBootSig (TypeSig  _ _)    = True
+okHsBootSig (GenericSig  _ _) = False
+okHsBootSig (FixSig _) 	      = True
+okHsBootSig _                 = False
 
 okClsDclSig :: Sig a -> Bool
 okClsDclSig (SpecInstSig _) = False
 okClsDclSig _               = True        -- All others OK
 
 okInstDclSig :: Sig a -> Bool
-okInstDclSig (TypeSig _ _)   = False
-okInstDclSig (FixSig _)      = False
-okInstDclSig _ 	             = True
-
-sigForThisGroup :: NameSet -> LSig Name -> Bool
-sigForThisGroup ns sig
-  = case sigName sig of
-	Nothing -> False
-	Just n  -> n `elemNameSet` ns
-
-sigName :: LSig name -> Maybe name
-sigName (L _ sig) = sigNameNoLoc sig
-
-sigNameNoLoc :: Sig name -> Maybe name    
-sigNameNoLoc (TypeSig   n _)          = Just (unLoc n)
-sigNameNoLoc (SpecSig   n _ _)        = Just (unLoc n)
-sigNameNoLoc (InlineSig n _)          = Just (unLoc n)
-sigNameNoLoc (FixSig (FixitySig n _)) = Just (unLoc n)
-sigNameNoLoc _                        = Nothing
+okInstDclSig (TypeSig _ _)    = False
+okInstDclSig (GenericSig _ _) = False
+okInstDclSig (FixSig _)       = False
+okInstDclSig _ 	              = True
 
 isFixityLSig :: LSig name -> Bool
 isFixityLSig (L _ (FixSig {})) = True
@@ -704,9 +696,10 @@ isVanillaLSig (L _(TypeSig {})) = True
 isVanillaLSig _                 = False
 
 isTypeLSig :: LSig name -> Bool	 -- Type signatures
-isTypeLSig (L _(TypeSig {})) = True
-isTypeLSig (L _(IdSig {}))   = True
-isTypeLSig _                 = False
+isTypeLSig (L _(TypeSig {}))    = True
+isTypeLSig (L _(GenericSig {})) = True
+isTypeLSig (L _(IdSig {}))      = True
+isTypeLSig _                    = False
 
 isSpecLSig :: LSig name -> Bool
 isSpecLSig (L _(SpecSig {})) = True
@@ -729,6 +722,7 @@ isInlineLSig _                    = False
 
 hsSigDoc :: Sig name -> SDoc
 hsSigDoc (TypeSig {}) 		= ptext (sLit "type signature")
+hsSigDoc (GenericSig {})	= ptext (sLit "default type signature")
 hsSigDoc (IdSig {}) 		= ptext (sLit "id signature")
 hsSigDoc (SpecSig {})	 	= ptext (sLit "SPECIALISE pragma")
 hsSigDoc (InlineSig {})         = ptext (sLit "INLINE pragma")
@@ -742,7 +736,8 @@ Signature equality is used when checking for duplicate signatures
 eqHsSig :: Eq a => LSig a -> LSig a -> Bool
 eqHsSig (L _ (FixSig (FixitySig n1 _))) (L _ (FixSig (FixitySig n2 _))) = unLoc n1 == unLoc n2
 eqHsSig (L _ (IdSig n1))         	(L _ (IdSig n2))                = n1 == n2
-eqHsSig (L _ (TypeSig n1 _))         	(L _ (TypeSig n2 _))            = unLoc n1 == unLoc n2
+eqHsSig (L _ (TypeSig ns1 _))         	(L _ (TypeSig ns2 _))           = map unLoc ns1 == map unLoc ns2
+eqHsSig (L _ (GenericSig ns1 _))        (L _ (GenericSig ns2 _))        = map unLoc ns1 == map unLoc ns2
 eqHsSig (L _ (InlineSig n1 _))          (L _ (InlineSig n2 _))          = unLoc n1 == unLoc n2
  	-- For specialisations, we don't have equality over
 	-- HsType, so it's not convenient to spot duplicate 
@@ -755,8 +750,9 @@ instance (OutputableBndr name) => Outputable (Sig name) where
     ppr sig = ppr_sig sig
 
 ppr_sig :: OutputableBndr name => Sig name -> SDoc
-ppr_sig (TypeSig var ty)	  = pprVarSig (unLoc var) (ppr ty)
-ppr_sig (IdSig id)	          = pprVarSig id (ppr (varType id))
+ppr_sig (TypeSig vars ty)	  = pprVarSig (map unLoc vars) (ppr ty)
+ppr_sig (GenericSig vars ty)	  = ptext (sLit "default") <+> pprVarSig (map unLoc vars) (ppr ty)
+ppr_sig (IdSig id)	          = pprVarSig [id] (ppr (varType id))
 ppr_sig (FixSig fix_sig) 	  = ppr fix_sig
 ppr_sig (SpecSig var ty inl) 	  = pragBrackets (pprSpec var (ppr ty) inl)
 ppr_sig (InlineSig var inl)       = pragBrackets (ppr inl <+> ppr var)
@@ -768,11 +764,13 @@ instance Outputable name => Outputable (FixitySig name) where
 pragBrackets :: SDoc -> SDoc
 pragBrackets doc = ptext (sLit "{-#") <+> doc <+> ptext (sLit "#-}") 
 
-pprVarSig :: (Outputable id) => id -> SDoc -> SDoc
-pprVarSig var pp_ty = sep [ppr var <+> dcolon, nest 2 pp_ty]
+pprVarSig :: (Outputable id) => [id] -> SDoc -> SDoc
+pprVarSig vars pp_ty = sep [pprvars <+> dcolon, nest 2 pp_ty]
+  where
+    pprvars = hsep $ punctuate comma (map ppr vars)
 
 pprSpec :: (Outputable id) => id -> SDoc -> InlinePragma -> SDoc
-pprSpec var pp_ty inl = ptext (sLit "SPECIALIZE") <+> pp_inl <+> pprVarSig var pp_ty
+pprSpec var pp_ty inl = ptext (sLit "SPECIALIZE") <+> pp_inl <+> pprVarSig [var] pp_ty
   where
     pp_inl | isDefaultInlinePragma inl = empty
            | otherwise = ppr inl

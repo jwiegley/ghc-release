@@ -1,4 +1,5 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE CPP, NoImplicitPrelude #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Foreign.Marshal
@@ -15,22 +16,14 @@
 
 module Foreign.Marshal
         (
-         -- | The module "Foreign.Marshal" re-exports the other modules in the
+         -- | The module "Foreign.Marshal" re-exports the safe content in the
          -- @Foreign.Marshal@ hierarchy:
-          module Foreign.Marshal.Alloc
-        , module Foreign.Marshal.Array
-        , module Foreign.Marshal.Error
-        , module Foreign.Marshal.Pool
-        , module Foreign.Marshal.Utils
+          module Foreign.Marshal.Safe
          -- | and provides one function:
         , unsafeLocalState
         ) where
 
-import Foreign.Marshal.Alloc
-import Foreign.Marshal.Array
-import Foreign.Marshal.Error
-import Foreign.Marshal.Pool
-import Foreign.Marshal.Utils
+import Foreign.Marshal.Safe
 
 #ifdef __GLASGOW_HASKELL__
 import GHC.IO
@@ -56,5 +49,9 @@ results in undefined behaviour.
 It is expected that this operation will be
 replaced in a future revision of Haskell.
 -}
+{-# DEPRECATED unsafeLocalState
+               "Please import from Foreign.Marshall.Unsafe instead; This will be removed in the next release"
+ #-}
 unsafeLocalState :: IO a -> a
 unsafeLocalState = unsafePerformIO
+

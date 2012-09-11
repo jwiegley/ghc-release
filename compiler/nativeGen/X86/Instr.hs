@@ -21,12 +21,14 @@ import Reg
 import TargetReg
 
 import BlockId
-import Cmm
+import OldCmm
 import FastString
 import FastBool
 import Outputable
+import Platform
 import Constants	(rESERVED_C_STACK_BYTES)
 
+import BasicTypes       (Alignment)
 import CLabel
 import UniqSet
 import Unique
@@ -102,7 +104,7 @@ Hence GLDZ and GLD1.  Bwahahahahahahaha!
 -}
 
 {-
-MORE FLOATING POINT MUSINGS...
+Note [x86 Floating point precision]
 
 Intel's internal floating point registers are by default 80 bit
 extended precision.  This means that all operations done on values in
@@ -141,15 +143,15 @@ This is what gcc does.  Spilling at 80 bits requires taking up a full
 128 bit slot (so we get alignment).  We spill at 80-bits and ignore
 the alignment problems.
 
-In the future, we'll use the SSE registers for floating point.  This
-requires a CPU that supports SSE2 (ordinary SSE only supports 32 bit
-precision float ops), which means P4 or Xeon and above.  Using SSE
-will solve all these problems, because the SSE registers use fixed 32
-bit or 64 bit precision.
+In the future [edit: now available in GHC 7.0.1, with the -msse2
+flag], we'll use the SSE registers for floating point.  This requires
+a CPU that supports SSE2 (ordinary SSE only supports 32 bit precision
+float ops), which means P4 or Xeon and above.  Using SSE will solve
+all these problems, because the SSE registers use fixed 32 bit or 64
+bit precision.
 
 --SDM 1/2003
 -}
-
 
 data Instr
 	-- comment pseudo-op
@@ -158,7 +160,7 @@ data Instr
 	-- some static data spat out during code
 	-- generation.  Will be extracted before
 	-- pretty-printing.
-	| LDATA   Section [CmmStatic]	
+	| LDATA   Section (Alignment, CmmStatics)
 
 	-- start a new basic block.  Useful during
 	-- codegen, removed later.  Preceding 
@@ -227,6 +229,8 @@ data Instr
         | GITOF       Reg Reg -- src(intreg), dst(fpreg)
         | GITOD       Reg Reg -- src(intreg), dst(fpreg)
 	
+        | GDTOF       Reg Reg -- src(fpreg), dst(fpreg)
+
 	| GADD	      Size Reg Reg Reg -- src1, src2, dst
 	| GDIV	      Size Reg Reg Reg -- src1, src2, dst
 	| GSUB	      Size Reg Reg Reg -- src1, src2, dst
@@ -286,7 +290,11 @@ data Instr
 	| JMP	      Operand
 	| JXX	      Cond BlockId  -- includes unconditional branches
 	| JXX_GBL     Cond Imm      -- non-local version of JXX
-	| JMP_TBL     Operand [BlockId]  -- table jump
+	-- Table jump
+	| JMP_TBL     Operand   -- Address to jump to
+	              [Maybe BlockId] -- Blocks in the jump table
+	              Section   -- Data section jump table should be put in
+	              CLabel    -- Label of jump table
 	| CALL	      (Either Imm Reg) [Reg]
 
 	-- Other things.
@@ -347,7 +355,7 @@ x86_regUsageOfInstr instr
     JXX    _ _		-> mkRU [] []
     JXX_GBL _ _		-> mkRU [] []
     JMP     op		-> mkRUR (use_R op)
-    JMP_TBL op _        -> mkRUR (use_R op)
+    JMP_TBL op _ _ _    -> mkRUR (use_R op)
     CALL (Left _)  params   -> mkRU params callClobberedRegs
     CALL (Right reg) params -> mkRU (reg:params) callClobberedRegs
     CLTD   _		-> mkRU [eax] [edx]
@@ -365,6 +373,8 @@ x86_regUsageOfInstr instr
 
     GITOF  src dst	-> mkRU [src] [dst]
     GITOD  src dst	-> mkRU [src] [dst]
+
+    GDTOF  src dst	-> mkRU [src] [dst]
 
     GADD   _ s1 s2 dst	-> mkRU [s1,s2] [dst]
     GSUB   _ s1 s2 dst	-> mkRU [s1,s2] [dst]
@@ -477,7 +487,7 @@ x86_patchRegsOfInstr instr env
     POP  sz op		-> patch1 (POP  sz) op
     SETCC cond op	-> patch1 (SETCC cond) op
     JMP op		-> patch1 JMP op
-    JMP_TBL op ids      -> patch1 JMP_TBL op $ ids
+    JMP_TBL op ids s lbl-> JMP_TBL (patchOp op) ids s lbl
 
     GMOV src dst	-> GMOV (env src) (env dst)
     GLD  sz src dst	-> GLD sz (lookupAddr src) (env dst)
@@ -491,6 +501,8 @@ x86_patchRegsOfInstr instr env
 
     GITOF src dst	-> GITOF (env src) (env dst)
     GITOD src dst	-> GITOD (env src) (env dst)
+
+    GDTOF src dst	-> GDTOF (env src) (env dst)
 
     GADD sz s1 s2 dst	-> GADD sz (env s1) (env s2) (env dst)
     GSUB sz s1 s2 dst	-> GSUB sz (env s1) (env s2) (env dst)
@@ -572,7 +584,7 @@ x86_jumpDestsOfInstr
 x86_jumpDestsOfInstr insn 
   = case insn of
 	JXX _ id	-> [id]
-	JMP_TBL _ ids	-> ids
+	JMP_TBL _ ids _ _ -> [id | Just id <- ids]
 	_		-> []
 
 
@@ -582,7 +594,8 @@ x86_patchJumpInstr
 x86_patchJumpInstr insn patchF
   = case insn of
 	JXX cc id 	-> JXX cc (patchF id)
-	JMP_TBL _ _     -> error "Cannot patch JMP_TBL"
+	JMP_TBL op ids section lbl
+	  -> JMP_TBL op (map (fmap patchF) ids) section lbl
 	_		-> insn
 
 
@@ -591,16 +604,17 @@ x86_patchJumpInstr insn patchF
 -- -----------------------------------------------------------------------------
 -- | Make a spill instruction.
 x86_mkSpillInstr
-	:: Reg		-- register to spill
-	-> Int		-- current stack delta
-	-> Int		-- spill slot to use
-	-> Instr
+    :: Platform
+    -> Reg      -- register to spill
+    -> Int      -- current stack delta
+    -> Int      -- spill slot to use
+    -> Instr
 
-x86_mkSpillInstr reg delta slot
+x86_mkSpillInstr platform reg delta slot
   = let	off     = spillSlotToOffset slot
     in
     let off_w = (off-delta) `div` IF_ARCH_i386(4,8)
-    in case targetClassOfReg reg of
+    in case targetClassOfReg platform reg of
 	   RcInteger   -> MOV IF_ARCH_i386(II32,II64)
                               (OpReg reg) (OpAddr (spRel off_w))
 	   RcDouble    -> GST FF80 reg (spRel off_w) {- RcFloat/RcDouble -}
@@ -610,16 +624,17 @@ x86_mkSpillInstr reg delta slot
 
 -- | Make a spill reload instruction.
 x86_mkLoadInstr
-	:: Reg		-- register to load
-	-> Int		-- current stack delta
-	-> Int		-- spill slot to use
-	-> Instr
+    :: Platform
+    -> Reg      -- register to load
+    -> Int      -- current stack delta
+    -> Int      -- spill slot to use
+    -> Instr
 
-x86_mkLoadInstr reg delta slot
+x86_mkLoadInstr platform reg delta slot
   = let off     = spillSlotToOffset slot
     in
 	let off_w = (off-delta) `div` IF_ARCH_i386(4,8)
-        in case targetClassOfReg reg of
+        in case targetClassOfReg platform reg of
               RcInteger -> MOV IF_ARCH_i386(II32,II64) 
                                (OpAddr (spRel off_w)) (OpReg reg)
               RcDouble  -> GLD FF80 (spRel off_w) reg {- RcFloat/RcDouble -}
@@ -677,12 +692,13 @@ x86_isMetaInstr instr
 --	have to go via memory.
 --
 x86_mkRegRegMoveInstr
-	:: Reg
-	-> Reg
-	-> Instr
+    :: Platform
+    -> Reg
+    -> Reg
+    -> Instr
 
-x86_mkRegRegMoveInstr src dst
- = case targetClassOfReg src of
+x86_mkRegRegMoveInstr platform src dst
+ = case targetClassOfReg platform src of
 #if   i386_TARGET_ARCH
         RcInteger -> MOV II32 (OpReg src) (OpReg dst)
 #else
@@ -749,8 +765,9 @@ is_G_instr instr
 	GLD1{}		-> True
         GFTOI{}		-> True
 	GDTOI{}	 	-> True
-        GITOF{} 	-> True
-	GITOD{} 	-> True
+        GITOF{}		-> True
+	GITOD{}	 	-> True
+        GDTOF{}		-> True
 	GADD{}	 	-> True
 	GDIV{}	 	-> True
 	GSUB{} 		-> True
@@ -768,6 +785,9 @@ is_G_instr instr
 
 data JumpDest = DestBlockId BlockId | DestImm Imm
 
+getJumpDestBlockId :: JumpDest -> Maybe BlockId
+getJumpDestBlockId (DestBlockId bid) = Just bid
+getJumpDestBlockId _                 = Nothing
 
 canShortcut :: Instr -> Maybe JumpDest
 canShortcut (JXX ALWAYS id)    = Just (DestBlockId id)
@@ -778,27 +798,35 @@ canShortcut _                  = Nothing
 -- This helper shortcuts a sequence of branches.
 -- The blockset helps avoid following cycles.
 shortcutJump :: (BlockId -> Maybe JumpDest) -> Instr -> Instr
-shortcutJump fn insn = shortcutJump' fn emptyBlockSet insn
+shortcutJump fn insn = shortcutJump' fn (setEmpty :: BlockSet) insn
   where shortcutJump' fn seen insn@(JXX cc id) =
-          if elemBlockSet id seen then insn
+          if setMember id seen then insn
           else case fn id of
                  Nothing                -> insn
                  Just (DestBlockId id') -> shortcutJump' fn seen' (JXX cc id')
                  Just (DestImm imm)     -> shortcutJump' fn seen' (JXX_GBL cc imm)
-               where seen' = extendBlockSet seen id
+               where seen' = setInsert id seen
         shortcutJump' _ _ other = other
 
 -- Here because it knows about JumpDest
+shortcutStatics :: (BlockId -> Maybe JumpDest) -> (Alignment, CmmStatics) -> (Alignment, CmmStatics)
+shortcutStatics fn (align, Statics lbl statics)
+  = (align, Statics lbl $ map (shortcutStatic fn) statics)
+  -- we need to get the jump tables, so apply the mapping to the entries
+  -- of a CmmData too.
+
+shortcutLabel :: (BlockId -> Maybe JumpDest) -> CLabel -> CLabel
+shortcutLabel fn lab
+  | Just uq <- maybeAsmTemp lab = shortBlockId fn emptyUniqSet (mkBlockId uq)
+  | otherwise                   = lab
+
 shortcutStatic :: (BlockId -> Maybe JumpDest) -> CmmStatic -> CmmStatic
 shortcutStatic fn (CmmStaticLit (CmmLabel lab))
-  | Just uq <- maybeAsmTemp lab 
-  = CmmStaticLit (CmmLabel (shortBlockId fn emptyUniqSet (BlockId uq)))
+  = CmmStaticLit (CmmLabel (shortcutLabel fn lab))
 shortcutStatic fn (CmmStaticLit (CmmLabelDiffOff lbl1 lbl2 off))
-  | Just uq <- maybeAsmTemp lbl1
-  = CmmStaticLit (CmmLabelDiffOff (shortBlockId fn emptyUniqSet (BlockId uq)) lbl2 off)
+  = CmmStaticLit (CmmLabelDiffOff (shortcutLabel fn lbl1) lbl2 off)
         -- slightly dodgy, we're ignoring the second label, but this
         -- works with the way we use CmmLabelDiffOff for jump tables now.
-
 shortcutStatic _ other_static
         = other_static
 
@@ -808,10 +836,11 @@ shortBlockId
 	-> BlockId
 	-> CLabel
 
-shortBlockId fn seen blockid@(BlockId uq) =
+shortBlockId fn seen blockid =
   case (elementOfUniqSet uq seen, fn blockid) of
     (True, _)    -> mkAsmTempLabel uq
     (_, Nothing) -> mkAsmTempLabel uq
     (_, Just (DestBlockId blockid'))  -> shortBlockId fn (addOneToUniqSet seen uq) blockid'
     (_, Just (DestImm (ImmCLbl lbl))) -> lbl
     (_, _other) -> panic "shortBlockId"
+  where uq = getUnique blockid

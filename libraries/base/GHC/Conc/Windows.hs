@@ -1,6 +1,8 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE NoImplicitPrelude, MagicHash, UnboxedTuples, ForeignFunctionInterface,
+             DeriveDataTypeable #-}
 {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 {-# OPTIONS_HADDOCK not-home #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.Conc.Windows
@@ -40,7 +42,6 @@ import Control.Monad
 import Data.Bits (shiftR)
 import Data.Maybe (Maybe(..))
 import Data.Typeable
-import Foreign.C.Error (throwErrno)
 import GHC.Base
 import GHC.Conc.Sync
 import GHC.Enum (Enum)
@@ -53,6 +54,7 @@ import GHC.Read (Read)
 import GHC.Real (div, fromIntegral)
 import GHC.Show (Show)
 import GHC.Word (Word32, Word64)
+import GHC.Windows
 
 -- ----------------------------------------------------------------------------
 -- Thread waiting
@@ -104,7 +106,7 @@ threadDelay :: Int -> IO ()
 threadDelay time
   | threaded  = waitForDelayEvent time
   | otherwise = IO $ \s ->
-        case fromIntegral time of { I# time# ->
+        case time of { I# time# ->
         case delay# time# s of { s' -> (# s', () #)
         }}
 
@@ -234,7 +236,7 @@ service_loop wakeup old_delays = do
 
   r <- c_WaitForSingleObject wakeup timeout
   case r of
-    0xffffffff -> do c_maperrno; throwErrno "service_loop"
+    0xffffffff -> do throwGetLastError "service_loop"
     0 -> do
         r2 <- c_readIOManagerEvent
         exit <-
@@ -310,15 +312,6 @@ getDelay now all@(d : rest)
             milli_seconds = (micro_seconds + 999) `div` 1000
         in return (all, fromIntegral milli_seconds)
 
--- ToDo: this just duplicates part of System.Win32.Types, which isn't
--- available yet.  We should move some Win32 functionality down here,
--- maybe as part of the grand reorganisation of the base package...
-type HANDLE       = Ptr ()
-type DWORD        = Word32
-
-iNFINITE :: DWORD
-iNFINITE = 0xFFFFFFFF -- urgh
-
 foreign import ccall unsafe "getIOManagerEvent" -- in the RTS (ThrIOManager.c)
   c_getIOManagerEvent :: IO HANDLE
 
@@ -327,9 +320,6 @@ foreign import ccall unsafe "readIOManagerEvent" -- in the RTS (ThrIOManager.c)
 
 foreign import ccall unsafe "sendIOManagerEvent" -- in the RTS (ThrIOManager.c)
   c_sendIOManagerEvent :: Word32 -> IO ()
-
-foreign import ccall unsafe "maperrno"             -- in Win32Utils.c
-   c_maperrno :: IO ()
 
 foreign import stdcall "WaitForSingleObject"
    c_WaitForSingleObject :: HANDLE -> DWORD -> IO DWORD

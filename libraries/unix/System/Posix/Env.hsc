@@ -33,14 +33,28 @@ import Foreign.Ptr
 import Foreign.Storable
 import Control.Monad	( liftM )
 import Data.Maybe	( fromMaybe )
+#if __GLASGOW_HASKELL__ > 700
+import System.Posix.Internals (withFilePath, peekFilePath)
+#elif __GLASGOW_HASKELL__ > 611
+import System.Posix.Internals (withFilePath)
+
+peekFilePath :: CString -> IO FilePath
+peekFilePath = peekCString
+#else
+withFilePath :: FilePath -> (CString -> IO a) -> IO a
+withFilePath = withCString
+
+peekFilePath :: CString -> IO FilePath
+peekFilePath = peekCString
+#endif
 
 -- |'getEnv' looks up a variable in the environment.
 
 getEnv :: String -> IO (Maybe String)
 getEnv name = do
-  litstring <- withCString name c_getenv
+  litstring <- withFilePath name c_getenv
   if litstring /= nullPtr
-     then liftM Just $ peekCString litstring
+     then liftM Just $ peekFilePath litstring
      else return Nothing
 
 -- |'getEnvDefault' is a wrapper around 'getEnv' where the
@@ -55,12 +69,24 @@ foreign import ccall unsafe "getenv"
 
 getEnvironmentPrim :: IO [String]
 getEnvironmentPrim = do
-  c_environ <- peek c_environ_p
+  c_environ <- getCEnviron
   arr <- peekArray0 nullPtr c_environ
-  mapM peekCString arr
+  mapM peekFilePath arr
+
+getCEnviron :: IO (Ptr CString)
+#if darwin_HOST_OS
+-- You should not access _environ directly on Darwin in a bundle/shared library.
+-- See #2458 and http://developer.apple.com/library/mac/#documentation/Darwin/Reference/ManPages/man7/environ.7.html
+getCEnviron = nsGetEnviron >>= peek
+
+foreign import ccall unsafe "_NSGetEnviron"
+   nsGetEnviron :: IO (Ptr (Ptr CString))
+#else
+getCEnviron = peek c_environ_p
 
 foreign import ccall unsafe "&environ"
    c_environ_p :: Ptr (Ptr CString)
+#endif
 
 -- |'getEnvironment' retrieves the entire environment as a
 -- list of @(key,value)@ pairs.
@@ -79,7 +105,7 @@ getEnvironment = do
 unsetEnv :: String -> IO ()
 #ifdef HAVE_UNSETENV
 
-unsetEnv name = withCString name $ \ s ->
+unsetEnv name = withFilePath name $ \ s ->
   throwErrnoIfMinus1_ "unsetenv" (c_unsetenv s)
 
 foreign import ccall unsafe "__hsunix_unsetenv"
@@ -92,7 +118,7 @@ unsetEnv name = putEnv (name ++ "=")
 -- and is equivalent to @setEnv(key,value,True{-overwrite-})@.
 
 putEnv :: String -> IO ()
-putEnv keyvalue = withCString keyvalue $ \s ->
+putEnv keyvalue = withFilePath keyvalue $ \s ->
   throwErrnoIfMinus1_ "putenv" (c_putenv s)
 
 foreign import ccall unsafe "putenv"
@@ -108,8 +134,8 @@ foreign import ccall unsafe "putenv"
 setEnv :: String -> String -> Bool {-overwrite-} -> IO ()
 #ifdef HAVE_SETENV
 setEnv key value ovrwrt = do
-  withCString key $ \ keyP ->
-    withCString value $ \ valueP ->
+  withFilePath key $ \ keyP ->
+    withFilePath value $ \ valueP ->
       throwErrnoIfMinus1_ "setenv" $
 	c_setenv keyP valueP (fromIntegral (fromEnum ovrwrt))
 

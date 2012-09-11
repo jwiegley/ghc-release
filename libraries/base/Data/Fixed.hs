@@ -1,5 +1,10 @@
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP #-}
 {-# OPTIONS -Wall -fno-warn-unused-binds #-}
 
+#ifndef __NHC__
+{-# LANGUAGE DeriveDataTypeable #-}
+#endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.Fixed
@@ -35,6 +40,8 @@ module Data.Fixed
 ) where
 
 import Prelude -- necessary to get dependencies right
+import Data.Char
+import Data.List
 #ifndef __NHC__
 import Data.Typeable
 import Data.Data
@@ -152,9 +159,30 @@ showFixed chopTrailingZeros fa@(MkFixed a) = (show i) ++ (withDot (showIntegerZe
     maxnum = 10 ^ digits
     fracNum = div (d * maxnum) res
 
+readsFixed :: (HasResolution a) => ReadS (Fixed a)
+readsFixed = readsSigned
+    where readsSigned ('-' : xs) = [ (negate x, rest)
+                                   | (x, rest) <- readsUnsigned xs ]
+          readsSigned xs = readsUnsigned xs
+          readsUnsigned xs = case span isDigit xs of
+                             ([], _) -> []
+                             (is, xs') ->
+                                 let i = fromInteger (read is)
+                                 in case xs' of
+                                    '.' : xs'' ->
+                                        case span isDigit xs'' of
+                                        ([], _) -> []
+                                        (js, xs''') ->
+                                            let j = fromInteger (read js)
+                                                l = genericLength js :: Integer
+                                            in [(i + (j / (10 ^ l)), xs''')]
+                                    _ -> [(i, xs')]
+
 instance (HasResolution a) => Show (Fixed a) where
     show = showFixed False
 
+instance (HasResolution a) => Read (Fixed a) where
+    readsPrec _ = readsFixed
 
 data E0 = E0
 #ifndef __NHC__

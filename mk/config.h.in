@@ -54,6 +54,9 @@
    significant byte first */
 #undef FLOAT_WORDS_BIGENDIAN
 
+/* Has visibility hidden */
+#undef HAS_VISIBILITY_HIDDEN
+
 /* Define to 1 if you have `alloca', as a function or macro. */
 #undef HAVE_ALLOCA
 

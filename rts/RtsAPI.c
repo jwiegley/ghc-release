@@ -375,8 +375,8 @@ rts_getBool (HaskellObj p)
    -------------------------------------------------------------------------- */
 
 INLINE_HEADER void pushClosure   (StgTSO *tso, StgWord c) {
-  tso->sp--;
-  tso->sp[0] = (W_) c;
+  tso->stackobj->sp--;
+  tso->stackobj->sp[0] = (W_) c;
 }
 
 StgTSO *
@@ -394,7 +394,6 @@ createIOThread (Capability *cap, nat stack_size,  StgClosure *closure)
 {
   StgTSO *t;
   t = createThread (cap, stack_size);
-  pushClosure(t, (W_)&stg_noforceIO_info);
   pushClosure(t, (W_)&stg_ap_v_info);
   pushClosure(t, (W_)closure);
   pushClosure(t, (W_)&stg_enter_info);

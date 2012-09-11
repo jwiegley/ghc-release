@@ -6,6 +6,7 @@
 Buffers for scanning string input stored in external arrays.
 
 \begin{code}
+{-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -O -funbox-strict-fields #-}
 -- We always optimise this, otherwise performance of a non-optimised
 -- compiler is severely affected
@@ -47,13 +48,17 @@ import FastString hiding ( buf )
 import FastTypes
 import FastFunctions
 
-import Foreign
 import System.IO                ( hGetBuf, hFileSize,IOMode(ReadMode), hClose
-                                , Handle, hTell )
+                                , Handle, hTell, openBinaryFile )
+import System.IO.Unsafe         ( unsafePerformIO )
 
 import GHC.Exts
 
-import System.IO                ( openBinaryFile )
+#if __GLASGOW_HASKELL__ >= 701
+import Foreign.Safe
+#else
+import Foreign hiding           ( unsafePerformIO )
+#endif
 
 -- -----------------------------------------------------------------------------
 -- The StringBuffer type
@@ -138,8 +143,9 @@ appendStringBuffers sb1 sb2
           calcLen sb = len sb - cur sb
           size =  sb1_len + sb2_len
 
-stringToStringBuffer :: String -> IO StringBuffer
-stringToStringBuffer str = do
+stringToStringBuffer :: String -> StringBuffer
+stringToStringBuffer str =
+ unsafePerformIO $ do
   let size = utf8EncodedLength str
   buf <- mallocForeignPtrArray (size+3)
   withForeignPtr buf $ \ptr -> do

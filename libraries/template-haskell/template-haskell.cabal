@@ -1,5 +1,5 @@
 name:		template-haskell
-version:	2.5.0.0
+version:	2.6.0.0
 license:	BSD3
 license-file:	LICENSE
 maintainer:	libraries@haskell.org
@@ -21,12 +21,12 @@ Library
         Language.Haskell.TH.Quote
         Language.Haskell.TH
     extensions: MagicHash, PatternGuards, PolymorphicComponents,
-                DeriveDataTypeable, TypeSynonymInstances
+                DeriveDataTypeable
     -- We need to set the package name to template-haskell (without a
     -- version number) as it's magic.
     ghc-options: -package-name template-haskell
 
 source-repository head
-    type:     darcs
-    location: http://darcs.haskell.org/packages/template-haskell/
+    type:     git
+    location: http://darcs.haskell.org/packages/template-haskell.git/
 

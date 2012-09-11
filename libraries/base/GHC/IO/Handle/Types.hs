@@ -1,5 +1,12 @@
-{-# OPTIONS_GHC  -XNoImplicitPrelude -funbox-strict-fields #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP
+           , NoImplicitPrelude
+           , ExistentialQuantification
+           , DeriveDataTypeable
+  #-}
+{-# OPTIONS_GHC -funbox-strict-fields #-}
 {-# OPTIONS_HADDOCK hide #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.IO.Handle.Types

@@ -43,7 +43,7 @@ defaults
    has_side_effects = False
    out_of_line      = False
    commutable       = False
-   needs_wrapper    = False
+   code_size        = { primOpCodeSizeDefault }
    can_fail         = False
    strictness       = { \ arity -> mkStrictSig (mkTopDmdType (replicate arity lazyDmd) TopRes) }
 
@@ -155,6 +155,7 @@ primop   CharLtOp  "ltChar#"   Compare   Char# -> Char# -> Bool
 primop   CharLeOp  "leChar#"   Compare   Char# -> Char# -> Bool
 
 primop   OrdOp   "ord#"  GenPrimOp   Char# -> Int#
+   with code_size = 0
 
 ------------------------------------------------------------------------
 section "Int#"
@@ -212,9 +213,12 @@ primop   IntNegOp    "negateInt#"    Monadic   Int# -> Int#
 primop   IntAddCOp   "addIntC#"    GenPrimOp   Int# -> Int# -> (# Int#, Int# #)
 	 {Add with carry.  First member of result is (wrapped) sum; 
           second member is 0 iff no overflow occured.}
+   with code_size = 2
+
 primop   IntSubCOp   "subIntC#"    GenPrimOp   Int# -> Int# -> (# Int#, Int# #)
 	 {Subtract with carry.  First member of result is (wrapped) difference; 
           second member is 0 iff no overflow occured.}
+   with code_size = 2
 
 primop   IntGtOp  ">#"   Compare   Int# -> Int# -> Bool
 primop   IntGeOp  ">=#"   Compare   Int# -> Int# -> Bool
@@ -231,8 +235,11 @@ primop   IntLtOp  "<#"   Compare   Int# -> Int# -> Bool
 primop   IntLeOp  "<=#"   Compare   Int# -> Int# -> Bool
 
 primop   ChrOp   "chr#"   GenPrimOp   Int# -> Char#
+   with code_size = 0
 
 primop   Int2WordOp "int2Word#" GenPrimOp Int# -> Word#
+   with code_size = 0
+
 primop   Int2FloatOp   "int2Float#"      GenPrimOp  Int# -> Float#
 primop   Int2DoubleOp   "int2Double#"          GenPrimOp  Int# -> Double#
 
@@ -286,6 +293,7 @@ primop   SrlOp   "uncheckedShiftRL#"   GenPrimOp   Word# -> Int# -> Word#
           in the range 0 to word size - 1 inclusive.}
 
 primop   Word2IntOp   "word2Int#"   GenPrimOp   Word# -> Int#
+   with code_size = 0
 
 primop   WordGtOp   "gtWord#"   Compare   Word# -> Word# -> Bool
 primop   WordGeOp   "geWord#"   Compare   Word# -> Word# -> Bool
@@ -396,63 +404,72 @@ primop   Double2FloatOp   "double2Float#" GenPrimOp Double# -> Float#
 
 primop   DoubleExpOp   "expDouble#"      Monadic
    Double# -> Double#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   DoubleLogOp   "logDouble#"      Monadic         
    Double# -> Double#
    with
-   needs_wrapper = True
+   code_size = { primOpCodeSizeForeignCall }
    can_fail = True
 
 primop   DoubleSqrtOp   "sqrtDouble#"      Monadic  
    Double# -> Double#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   DoubleSinOp   "sinDouble#"      Monadic          
    Double# -> Double#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   DoubleCosOp   "cosDouble#"      Monadic          
    Double# -> Double#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   DoubleTanOp   "tanDouble#"      Monadic          
    Double# -> Double#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   DoubleAsinOp   "asinDouble#"      Monadic 
    Double# -> Double#
    with
-   needs_wrapper = True
+   code_size = { primOpCodeSizeForeignCall }
    can_fail = True
 
 primop   DoubleAcosOp   "acosDouble#"      Monadic  
    Double# -> Double#
    with
-   needs_wrapper = True
+   code_size = { primOpCodeSizeForeignCall }
    can_fail = True
 
 primop   DoubleAtanOp   "atanDouble#"      Monadic  
    Double# -> Double#
    with
-   needs_wrapper = True
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   DoubleSinhOp   "sinhDouble#"      Monadic  
    Double# -> Double#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   DoubleCoshOp   "coshDouble#"      Monadic  
    Double# -> Double#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   DoubleTanhOp   "tanhDouble#"      Monadic  
    Double# -> Double#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   DoublePowerOp   "**##" Dyadic  
    Double# -> Double# -> Double#
    {Exponentiation.}
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   DoubleDecode_2IntOp   "decodeDouble_2Int#" GenPrimOp    
    Double# -> (# Int#, Word#, Word#, Int# #)
@@ -506,58 +523,71 @@ primop   Float2IntOp   "float2Int#"      GenPrimOp  Float# -> Int#
 
 primop   FloatExpOp   "expFloat#"      Monadic          
    Float# -> Float#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   FloatLogOp   "logFloat#"      Monadic          
    Float# -> Float#
-   with needs_wrapper = True
-        can_fail = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
+   can_fail = True
 
 primop   FloatSqrtOp   "sqrtFloat#"      Monadic          
    Float# -> Float#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   FloatSinOp   "sinFloat#"      Monadic          
    Float# -> Float#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   FloatCosOp   "cosFloat#"      Monadic          
    Float# -> Float#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   FloatTanOp   "tanFloat#"      Monadic          
    Float# -> Float#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   FloatAsinOp   "asinFloat#"      Monadic          
    Float# -> Float#
-   with needs_wrapper = True
-        can_fail = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
+   can_fail = True
 
 primop   FloatAcosOp   "acosFloat#"      Monadic          
    Float# -> Float#
-   with needs_wrapper = True
-        can_fail = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
+   can_fail = True
 
 primop   FloatAtanOp   "atanFloat#"      Monadic          
    Float# -> Float#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   FloatSinhOp   "sinhFloat#"      Monadic          
    Float# -> Float#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   FloatCoshOp   "coshFloat#"      Monadic          
    Float# -> Float#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   FloatTanhOp   "tanhFloat#"      Monadic          
    Float# -> Float#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   FloatPowerOp   "powerFloat#"      Dyadic   
    Float# -> Float# -> Float#
-   with needs_wrapper = True
+   with
+   code_size = { primOpCodeSizeForeignCall }
 
 primop   Float2DoubleOp   "float2Double#" GenPrimOp  Float# -> Double#
 
@@ -599,6 +629,15 @@ primop  WriteArrayOp "writeArray#" GenPrimOp
    {Write to specified index of mutable array.}
    with
    has_side_effects = True
+   code_size = 2 -- card update too
+
+primop  SizeofArrayOp "sizeofArray#" GenPrimOp
+   Array# a -> Int#
+   {Return the number of elements in the array.}
+
+primop  SizeofMutableArrayOp "sizeofMutableArray#" GenPrimOp
+   MutableArray# s a -> Int#
+   {Return the number of elements in the array.}
 
 primop  IndexArrayOp "indexArray#" GenPrimOp
    Array# a -> Int# -> (# a #)
@@ -617,6 +656,55 @@ primop  UnsafeThawArrayOp  "unsafeThawArray#" GenPrimOp
    with
    out_of_line = True
    has_side_effects = True
+
+primop  CopyArrayOp "copyArray#" GenPrimOp
+  Array# a -> Int# -> MutableArray# s a -> Int# -> Int# -> State# s -> State# s
+  {Copy a range of the Array# to the specified region in the MutableArray#.
+   Both arrays must fully contain the specified ranges, but this is not checked.
+   The two arrays must not be the same array in different states, but this is not checked either.}
+  with
+  has_side_effects = True
+  code_size = { primOpCodeSizeForeignCall + 4 }
+
+primop  CopyMutableArrayOp "copyMutableArray#" GenPrimOp
+  MutableArray# s a -> Int# -> MutableArray# s a -> Int# -> Int# -> State# s -> State# s
+  {Copy a range of the first MutableArray# to the specified region in the second MutableArray#.
+   Both arrays must fully contain the specified ranges, but this is not checked.}
+  with
+  has_side_effects = True
+  code_size = { primOpCodeSizeForeignCall + 4 }
+
+primop  CloneArrayOp "cloneArray#" GenPrimOp
+  Array# a -> Int# -> Int# -> Array# a
+  {Return a newly allocated Array# with the specified subrange of the provided Array#. 
+   The provided Array# should contain the full subrange specified by the two Int#s, but this is not checked.}
+  with
+  has_side_effects = True
+  code_size = { primOpCodeSizeForeignCall + 4 }
+
+primop  CloneMutableArrayOp "cloneMutableArray#" GenPrimOp
+  MutableArray# s a -> Int# -> Int# -> State# s -> (# State# s, MutableArray# s a #)
+  {Return a newly allocated Array# with the specified subrange of the provided Array#.
+   The provided MutableArray# should contain the full subrange specified by the two Int#s, but this is not checked.}
+  with
+  has_side_effects = True
+  code_size = { primOpCodeSizeForeignCall + 4 }
+
+primop  FreezeArrayOp "freezeArray#" GenPrimOp
+  MutableArray# s a -> Int# -> Int# -> State# s -> (# State# s, Array# a #)
+  {Return a newly allocated Array# with the specified subrange of the provided MutableArray#.
+   The provided MutableArray# should contain the full subrange specified by the two Int#s, but this is not checked.}
+  with
+  has_side_effects = True
+  code_size = { primOpCodeSizeForeignCall + 4 }
+
+primop  ThawArrayOp "thawArray#" GenPrimOp
+  Array# a -> Int# -> Int# -> State# s -> (# State# s, MutableArray# s a #)
+  {Return a newly allocated Array# with the specified subrange of the provided MutableArray#.
+   The provided Array# should contain the full subrange specified by the two Int#s, but this is not checked.}
+  with
+  has_side_effects = True
+  code_size = { primOpCodeSizeForeignCall + 4 }
 
 ------------------------------------------------------------------------
 section "Byte Arrays"
@@ -859,6 +947,23 @@ primop  WriteByteArrayOp_Word64 "writeWord64Array#" GenPrimOp
    MutableByteArray# s -> Int# -> WORD64 -> State# s -> State# s
    with has_side_effects = True
 
+primop  CopyByteArrayOp "copyByteArray#" GenPrimOp
+  ByteArray# -> Int# -> MutableByteArray# s -> Int# -> Int# -> State# s -> State# s
+  {Copy a range of the ByteArray# to the specified region in the MutableByteArray#.
+   Both arrays must fully contain the specified ranges, but this is not checked.
+   The two arrays must not be the same array in different states, but this is not checked either.}
+  with
+  has_side_effects = True
+  code_size = { primOpCodeSizeForeignCall }
+
+primop  CopyMutableByteArrayOp "copyMutableByteArray#" GenPrimOp
+  MutableByteArray# s -> Int# -> MutableByteArray# s -> Int# -> Int# -> State# s -> State# s
+  {Copy a range of the first MutableByteArray# to the specified region in the second MutableByteArray#.
+   Both arrays must fully contain the specified ranges, but this is not checked.}
+  with
+  has_side_effects = True
+  code_size = { primOpCodeSizeForeignCall }
+
 ------------------------------------------------------------------------
 section "Addr#"
 ------------------------------------------------------------------------
@@ -880,8 +985,10 @@ primop	 AddrRemOp "remAddr#" GenPrimOp Addr# -> Int# -> Int#
 #if (WORD_SIZE_IN_BITS == 32 || WORD_SIZE_IN_BITS == 64)
 primop   Addr2IntOp  "addr2Int#"     GenPrimOp   Addr# -> Int#
 	{Coerce directly from address to int. Strongly deprecated.}
+   with code_size = 0
 primop   Int2AddrOp   "int2Addr#"    GenPrimOp  Int# -> Addr#
 	{Coerce directly from int to address. Strongly deprecated.}
+   with code_size = 0
 #endif
 
 primop   AddrGtOp  "gtAddr#"   Compare   Addr# -> Addr# -> Bool
@@ -1098,6 +1205,7 @@ primop  WriteMutVarOp "writeMutVar#"  GenPrimOp
    {Write contents of {\tt MutVar\#}.}
    with
    has_side_effects = True
+   code_size = { primOpCodeSizeForeignCall } -- for the write barrier
 
 primop  SameMutVarOp "sameMutVar#" GenPrimOp
    MutVar# s a -> MutVar# s a -> Bool
@@ -1109,6 +1217,12 @@ primop  SameMutVarOp "sameMutVar#" GenPrimOp
 --
 primop  AtomicModifyMutVarOp "atomicModifyMutVar#" GenPrimOp
    MutVar# s a -> (a -> b) -> State# s -> (# State# s, c #)
+   with
+   out_of_line = True
+   has_side_effects = True
+
+primop  CasMutVarOp "casMutVar#" GenPrimOp
+  MutVar# s a -> a -> a -> State# s -> (# State# s, Int#, a #)
    with
    out_of_line = True
    has_side_effects = True
@@ -1140,10 +1254,14 @@ primop  RaiseOp "raise#" GenPrimOp
 -- raiseIO# needs to be a primop, because exceptions in the IO monad
 -- must be *precise* - we don't want the strictness analyser turning
 -- one kind of bottom into another, as it is allowed to do in pure code.
+--
+-- But we *do* want to know that it returns bottom after 
+-- being applied to two arguments
 
 primop  RaiseIOOp "raiseIO#" GenPrimOp
    a -> State# RealWorld -> (# State# RealWorld, b #)
    with
+   strictness  = { \ _arity -> mkStrictSig (mkTopDmdType [lazyDmd,lazyDmd] BotRes) }
    out_of_line = True
    has_side_effects = True
 
@@ -1320,7 +1438,6 @@ primop  DelayOp "delay#" GenPrimOp
    Int# -> State# s -> State# s
    {Sleep specified number of microseconds.}
    with
-   needs_wrapper    = True
    has_side_effects = True
    out_of_line      = True
 
@@ -1328,7 +1445,6 @@ primop  WaitReadOp "waitRead#" GenPrimOp
    Int# -> State# s -> State# s
    {Block until input is available on specified file descriptor.}
    with
-   needs_wrapper    = True
    has_side_effects = True
    out_of_line      = True
 
@@ -1336,7 +1452,6 @@ primop  WaitWriteOp "waitWrite#" GenPrimOp
    Int# -> State# s -> State# s
    {Block until output is possible on specified file descriptor.}
    with
-   needs_wrapper    = True
    has_side_effects = True
    out_of_line      = True
 
@@ -1345,7 +1460,6 @@ primop  AsyncReadOp "asyncRead#" GenPrimOp
    Int# -> Int# -> Int# -> Addr# -> State# RealWorld-> (# State# RealWorld, Int#, Int# #)
    {Asynchronously read bytes from specified file descriptor.}
    with
-   needs_wrapper    = True
    has_side_effects = True
    out_of_line      = True
 
@@ -1353,7 +1467,6 @@ primop  AsyncWriteOp "asyncWrite#" GenPrimOp
    Int# -> Int# -> Int# -> Addr# -> State# RealWorld-> (# State# RealWorld, Int#, Int# #)
    {Asynchronously write bytes from specified file descriptor.}
    with
-   needs_wrapper    = True
    has_side_effects = True
    out_of_line      = True
 
@@ -1361,7 +1474,6 @@ primop  AsyncDoProcOp "asyncDoProc#" GenPrimOp
    Addr# -> Addr# -> State# RealWorld-> (# State# RealWorld, Int#, Int# #)
    {Asynchronously perform procedure (first arg), passing it 2nd arg.}
    with
-   needs_wrapper    = True
    has_side_effects = True
    out_of_line      = True
 
@@ -1437,7 +1549,7 @@ primop  NoDuplicateOp "noDuplicate#" GenPrimOp
    has_side_effects = True
 
 primop  ThreadStatusOp "threadStatus#" GenPrimOp
-   ThreadId# -> State# RealWorld -> (# State# RealWorld, Int# #)
+   ThreadId# -> State# RealWorld -> (# State# RealWorld, Int#, Int#, Int# #)
    with
    out_of_line = True
    has_side_effects = True
@@ -1478,6 +1590,7 @@ primop  FinalizeWeakOp "finalizeWeak#" GenPrimOp
 primop TouchOp "touch#" GenPrimOp
    o -> State# RealWorld -> State# RealWorld
    with
+   code_size = { 0 }
    has_side_effects = True
 
 ------------------------------------------------------------------------
@@ -1497,7 +1610,6 @@ primop  MakeStablePtrOp "makeStablePtr#" GenPrimOp
 primop  DeRefStablePtrOp "deRefStablePtr#" GenPrimOp
    StablePtr# a -> State# RealWorld -> (# State# RealWorld, a #)
    with
-   needs_wrapper    = True
    has_side_effects = True
    out_of_line      = True
 
@@ -1509,7 +1621,6 @@ primop  EqStablePtrOp "eqStablePtr#" GenPrimOp
 primop  MakeStableNameOp "makeStableName#" GenPrimOp
    a -> State# RealWorld -> (# State# RealWorld, StableName# a #)
    with
-   needs_wrapper    = True
    has_side_effects = True
    out_of_line      = True
 
@@ -1537,6 +1648,22 @@ primop  ParOp "par#" GenPrimOp
       -- Note that Par is lazy to avoid that the sparked thing
       -- gets evaluted strictly, which it should *not* be
    has_side_effects = True
+   code_size = { primOpCodeSizeForeignCall }
+
+primop SparkOp "spark#" GenPrimOp
+   a -> State# s -> (# State# s, a #)
+   with has_side_effects = True
+   code_size = { primOpCodeSizeForeignCall }
+
+primop SeqOp "seq#" GenPrimOp
+   a -> State# s -> (# State# s, a #)
+
+   -- why return the value?  So that we can control sharing of seq'd
+   -- values: in
+   --    let x = e in x `seq` ... x ...
+   -- we don't want to inline x, so better to represent it as
+   --    let x = e in case seq# x RW of (# _, x' #) -> ... x' ...
+   -- also it matches the type of rseq in the Eval monad.
 
 primop GetSparkOp "getSpark#" GenPrimOp
    State# s -> (# State# s, Int#, a #)
@@ -1626,6 +1753,8 @@ primtype BCO#
 primop   AddrToHValueOp "addrToHValue#" GenPrimOp
    Addr# -> (# a #)
    {Convert an {\tt Addr\#} to a followable type.}
+   with
+   code_size = 0
 
 primop   MkApUpd0_Op "mkApUpd0#" GenPrimOp
    BCO# -> (# a #)
@@ -1720,9 +1849,19 @@ primtype Any a
 	    but never enters a function value.  
 
 	It's also used to instantiate un-constrained type variables after type
-	checking.  For example
+	checking.  For example, {\tt length} has type
 
-	{\tt length Any []}
+	{\tt length :: forall a. [a] -> Int}
+
+	and the list datacon for the empty list has type
+
+	{\tt [] :: forall a. [a]}
+
+	In order to compose these two terms as {\tt length []} a type
+	application is required, but there is no constraint on the
+	choice.  In this situation GHC uses {\tt Any}:
+
+	{\tt length Any ([] Any)}
 
 	Annoyingly, we sometimes need {\tt Any}s of other kinds, such as {\tt (* -> *)} etc.
 	This is a bit like tuples.   We define a couple of useful ones here,

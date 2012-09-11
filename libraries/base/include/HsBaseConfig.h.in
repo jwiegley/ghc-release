@@ -309,9 +309,6 @@
 /* Define if you have epoll support. */
 #undef HAVE_EPOLL
 
-/* Define to 1 if you have the `epoll_create1' function. */
-#undef HAVE_EPOLL_CREATE1
-
 /* Define to 1 if you have the `epoll_ctl' function. */
 #undef HAVE_EPOLL_CTL
 
@@ -531,6 +528,9 @@
 /* Define to Haskell type for ssize_t */
 #undef HTYPE_SSIZE_T
 
+/* Define to Haskell type for suseconds_t */
+#undef HTYPE_SUSECONDS_T
+
 /* Define to Haskell type for tcflag_t */
 #undef HTYPE_TCFLAG_T
 
@@ -561,11 +561,11 @@
 /* Define to Haskell type for unsigned short */
 #undef HTYPE_UNSIGNED_SHORT
 
+/* Define to Haskell type for useconds_t */
+#undef HTYPE_USECONDS_T
+
 /* Define to Haskell type for wchar_t */
 #undef HTYPE_WCHAR_T
-
-/* Define to Haskell type for wint_t */
-#undef HTYPE_WINT_T
 
 /* Define to the address where bug reports for this package should be sent. */
 #undef PACKAGE_BUGREPORT
@@ -584,6 +584,9 @@
 
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION
+
+/* The size of `struct MD5Context', as computed by sizeof. */
+#undef SIZEOF_STRUCT_MD5CONTEXT
 
 /* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS

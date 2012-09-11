@@ -41,8 +41,10 @@
 typedef pid_t ProcHandle;
 #else
 // Should really be intptr_t, but we don't have that type on the Haskell side
-typedef long ProcHandle;
+typedef PHANDLE ProcHandle;
 #endif
+
+#include "processFlags.h"
 
 #if !(defined(_MSC_VER) || defined(__MINGW32__) || defined(_WIN32))
 
@@ -55,18 +57,18 @@ extern ProcHandle runInteractiveProcess( char *const args[],
 					 int *pfdStdError,
                                          int set_inthandler, long inthandler, 
                                          int set_quithandler, long quithandler,
-                                         int close_fds);
+                                         int flags);
 
 #else
 
 extern ProcHandle runInteractiveProcess( wchar_t *cmd,
 					 wchar_t *workingDirectory,
-					 void *environment,
+					 wchar_t *environment,
                                          int fdStdIn, int fdStdOut, int fdStdErr,
 					 int *pfdStdInput,
 					 int *pfdStdOutput,
 					 int *pfdStdError,
-                                         int close_fds);
+                                         int flags);
 
 #endif
 

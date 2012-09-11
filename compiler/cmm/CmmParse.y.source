@@ -8,16 +8,11 @@
 --
 -----------------------------------------------------------------------------
 
+-- TODO: Add support for interruptible/uninterruptible foreign call specification
+
 {
-{-# OPTIONS -Wwarn -w -XNoMonomorphismRestriction #-}
--- The NoMonomorphismRestriction deals with a Happy infelicity
---    With OutsideIn's more conservativ monomorphism restriction
---    we aren't generalising
---        notHappyAtAll = error "urk"
---    which is terrible.  Switching off the restriction allows
---    the generalisation.  Better would be to make Happy generate
---    an appropriate signature.
---
+{-# LANGUAGE BangPatterns #-} -- required for versions of Happy before 1.18.6
+{-# OPTIONS -Wwarn -w #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
 -- any warnings in the module. See
@@ -42,8 +37,8 @@ import CgClosure
 import CostCentre
 
 import BlockId
-import Cmm
-import PprCmm
+import OldCmm
+import OldPprCmm()
 import CmmUtils
 import CmmLex
 import CLabel
@@ -193,22 +188,24 @@ cmmtop	:: { ExtCode }
 --	* we can derive closure and info table labels from a single NAME
 
 cmmdata :: { ExtCode }
-	: 'section' STRING '{' statics '}' 
-		{ do ss <- sequence $4;
-		     code (emitData (section $2) (concat ss)) }
+	: 'section' STRING '{' data_label statics '}' 
+		{ do lbl <- $4;
+		     ss <- sequence $5;
+		     code (emitData (section $2) (Statics lbl $ concat ss)) }
+
+data_label :: { ExtFCode CLabel }
+    : NAME ':'	
+		{% withThisPackage $ \pkg -> 
+		   return (mkCmmDataLabel pkg $1) }
 
 statics	:: { [ExtFCode [CmmStatic]] }
 	: {- empty -}			{ [] }
 	| static statics		{ $1 : $2 }
-
+    
 -- Strings aren't used much in the RTS HC code, so it doesn't seem
 -- worth allowing inline strings.  C-- doesn't allow them anyway.
 static 	:: { ExtFCode [CmmStatic] }
-	: NAME ':'	
-		{% withThisPackage $ \pkg -> 
-		   return [CmmDataLabel (mkCmmDataLabel pkg $1)] }
-
-	| type expr ';'	{ do e <- $2;
+	: type expr ';'	{ do e <- $2;
 			     return [CmmStaticLit (getLit e)] }
 	| type ';'			{ return [CmmUninitialised
 							(widthInBytes (typeWidth $1))] }
@@ -218,7 +215,6 @@ static 	:: { ExtFCode [CmmStatic] }
         | typenot8 '[' INT ']' ';'	{ return [CmmUninitialised 
 						(widthInBytes (typeWidth $1) * 
 							fromIntegral $3)] }
-	| 'align' INT ';'		{ return [CmmAlign (fromIntegral $2)] }
 	| 'CLOSURE' '(' NAME lits ')'
 		{ do lits <- sequence $4;
 		     return $ map CmmStaticLit $
@@ -270,7 +266,7 @@ info	:: { ExtFCode (CLabel, CmmInfoTable, [Maybe LocalReg]) }
 		{% withThisPackage $ \pkg ->
 		   do prof <- profilingInfo $11 $13
 		      return (mkCmmEntryLabel pkg $3,
-			CmmInfoTable False prof (fromIntegral $9)
+			CmmInfoTable (mkCmmInfoLabel pkg $3) False prof (fromIntegral $9)
 				     (ThunkInfo (fromIntegral $5, fromIntegral $7) NoC_SRT),
 			[]) }
 	
@@ -279,7 +275,7 @@ info	:: { ExtFCode (CLabel, CmmInfoTable, [Maybe LocalReg]) }
 		{% withThisPackage $ \pkg -> 
 		   do prof <- profilingInfo $11 $13
 		      return (mkCmmEntryLabel pkg $3,
-			CmmInfoTable False prof (fromIntegral $9)
+			CmmInfoTable (mkCmmInfoLabel pkg $3) False prof (fromIntegral $9)
 				     (FunInfo (fromIntegral $5, fromIntegral $7) NoC_SRT
 				      0  -- Arity zero
 				      (ArgSpec (fromIntegral $15))
@@ -294,7 +290,7 @@ info	:: { ExtFCode (CLabel, CmmInfoTable, [Maybe LocalReg]) }
 		{% withThisPackage $ \pkg ->
 		   do prof <- profilingInfo $11 $13
 		      return (mkCmmEntryLabel pkg $3,
-			CmmInfoTable False prof (fromIntegral $9)
+			CmmInfoTable (mkCmmInfoLabel pkg $3) False prof (fromIntegral $9)
 				     (FunInfo (fromIntegral $5, fromIntegral $7) NoC_SRT (fromIntegral $17)
 				      (ArgSpec (fromIntegral $15))
 				      zeroCLit),
@@ -310,7 +306,7 @@ info	:: { ExtFCode (CLabel, CmmInfoTable, [Maybe LocalReg]) }
 		     -- but that's the way the old code did it we can fix it some other time.
 		      desc_lit <- code $ mkStringCLit $13
 		      return (mkCmmEntryLabel pkg $3,
-			CmmInfoTable False prof (fromIntegral $11)
+			CmmInfoTable (mkCmmInfoLabel pkg $3) False prof (fromIntegral $11)
 				     (ConstrInfo (fromIntegral $5, fromIntegral $7) (fromIntegral $9) desc_lit),
 			[]) }
 	
@@ -319,7 +315,7 @@ info	:: { ExtFCode (CLabel, CmmInfoTable, [Maybe LocalReg]) }
 		{% withThisPackage $ \pkg ->
 		   do prof <- profilingInfo $9 $11
 		      return (mkCmmEntryLabel pkg $3,
-			CmmInfoTable False prof (fromIntegral $7)
+			CmmInfoTable (mkCmmInfoLabel pkg $3) False prof (fromIntegral $7)
 				     (ThunkSelectorInfo (fromIntegral $5) NoC_SRT),
 			[]) }
 
@@ -328,7 +324,7 @@ info	:: { ExtFCode (CLabel, CmmInfoTable, [Maybe LocalReg]) }
 		{% withThisPackage $ \pkg ->
 		   do let infoLabel = mkCmmInfoLabel pkg $3
 		      return (mkCmmRetLabel pkg $3,
-			CmmInfoTable False (ProfilingInfo zeroCLit zeroCLit) (fromIntegral $5)
+			CmmInfoTable (mkCmmInfoLabel pkg $3) False (ProfilingInfo zeroCLit zeroCLit) (fromIntegral $5)
 				     (ContInfo [] NoC_SRT),
 			[]) }
 
@@ -337,7 +333,7 @@ info	:: { ExtFCode (CLabel, CmmInfoTable, [Maybe LocalReg]) }
 		{% withThisPackage $ \pkg ->
 		   do live <- sequence (map (liftM Just) $7)
 		      return (mkCmmRetLabel pkg $3,
-			CmmInfoTable False (ProfilingInfo zeroCLit zeroCLit) (fromIntegral $5)
+			CmmInfoTable (mkCmmInfoLabel pkg $3) False (ProfilingInfo zeroCLit zeroCLit) (fromIntegral $5)
 			             (ContInfo live NoC_SRT),
 			live) }
 
@@ -401,13 +397,15 @@ stmt	:: { ExtCode }
 	| NAME '(' exprs0 ')' ';'
 		{% stmtMacro $1 $3  }
 	| 'switch' maybe_range expr '{' arms default '}'
-		{ doSwitch $2 $3 $5 $6 }
+		{ do as <- sequence $5; doSwitch $2 $3 as $6 }
 	| 'goto' NAME ';'
 		{ do l <- lookupLabel $2; stmtEC (CmmBranch l) }
 	| 'jump' expr maybe_actuals ';'
 		{ do e1 <- $2; e2 <- sequence $3; stmtEC (CmmJump e1 e2) }
         | 'return' maybe_actuals ';'
 		{ do e <- sequence $2; stmtEC (CmmReturn e) }
+	| 'if' bool_expr 'goto' NAME
+		{ do l <- lookupLabel $4; cmmRawIf $2 l }
 	| 'if' bool_expr '{' body '}' else 	
 		{ cmmIfThenElse $2 $4 $6 }
 
@@ -446,12 +444,16 @@ maybe_range :: { Maybe (Int,Int) }
 	: '[' INT '..' INT ']'	{ Just (fromIntegral $2, fromIntegral $4) }
 	| {- empty -}		{ Nothing }
 
-arms	:: { [([Int],ExtCode)] }
+arms	:: { [ExtFCode ([Int],Either BlockId ExtCode)] }
 	: {- empty -}			{ [] }
 	| arm arms			{ $1 : $2 }
 
-arm	:: { ([Int],ExtCode) }
-	: 'case' ints ':' '{' body '}'	{ ($2, $5) }
+arm	:: { ExtFCode ([Int],Either BlockId ExtCode) }
+	: 'case' ints ':' arm_body	{ do b <- $4; return ($2, b) }
+
+arm_body :: { ExtFCode (Either BlockId ExtCode) }
+	: '{' body '}'			{ return (Right $2) }
+	| 'goto' NAME ';'		{ do l <- lookupLabel $2; return (Left l) }
 
 ints	:: { [Int] }
 	: INT				{ [ fromIntegral $1 ] }
@@ -463,6 +465,8 @@ default :: { Maybe ExtCode }
 	-- 'default' branches
 	| {- empty -}			{ Nothing }
 
+-- Note: OldCmm doesn't support a first class 'else' statement, though
+-- CmmNode does.
 else 	:: { ExtCode }
 	: {- empty -}			{ nopEC }
 	| 'else' '{' body '}'		{ $3 }
@@ -686,15 +690,7 @@ machOps = listToUFM $
 	( "gtu",	MO_U_Gt ),
 	( "ltu",	MO_U_Lt ),
 
-	( "flt",	MO_S_Lt ),
-	( "fle",	MO_S_Le ),
-	( "feq",	MO_Eq ),
-	( "fne",	MO_Ne ),
-	( "fgt",	MO_S_Gt ),
-	( "fge",	MO_S_Ge ),
-	( "fneg",	MO_S_Neg ),
-
-	( "and",	MO_And ),
+        ( "and",        MO_And ),
 	( "or",		MO_Or ),
 	( "xor",	MO_Xor ),
 	( "com",	MO_Not ),
@@ -702,7 +698,20 @@ machOps = listToUFM $
 	( "shrl",	MO_U_Shr ),
 	( "shra",	MO_S_Shr ),
 
-	( "lobits8",  flip MO_UU_Conv W8  ),
+        ( "fadd",       MO_F_Add ),
+        ( "fsub",       MO_F_Sub ),
+        ( "fneg",       MO_F_Neg ),
+        ( "fmul",       MO_F_Mul ),
+        ( "fquot",      MO_F_Quot ),
+
+        ( "feq",        MO_F_Eq ),
+        ( "fne",        MO_F_Ne ),
+        ( "fge",        MO_F_Ge ),
+        ( "fle",        MO_F_Le ),
+        ( "fgt",        MO_F_Gt ),
+        ( "flt",        MO_F_Lt ),
+
+        ( "lobits8",  flip MO_UU_Conv W8  ),
 	( "lobits16", flip MO_UU_Conv W16 ),
 	( "lobits32", flip MO_UU_Conv W32 ),
 	( "lobits64", flip MO_UU_Conv W64 ),
@@ -727,13 +736,17 @@ machOps = listToUFM $
 
 callishMachOps = listToUFM $
 	map (\(x, y) -> (mkFastString x, y)) [
-        ( "write_barrier", MO_WriteBarrier )
+        ( "write_barrier", MO_WriteBarrier ),
+        ( "memcpy", MO_Memcpy ),
+        ( "memset", MO_Memset ),
+        ( "memmove", MO_Memmove )
         -- ToDo: the rest, maybe
     ]
 
 parseSafety :: String -> P CmmSafety
 parseSafety "safe"   = return (CmmSafe NoC_SRT)
 parseSafety "unsafe" = return CmmUnsafe
+parseSafety "interruptible" = return CmmInterruptible
 parseSafety str      = fail ("unrecognised safety: " ++ str)
 
 parseCmmHint :: String -> P ForeignHint
@@ -861,9 +874,11 @@ foreignCall conv_string results_code expr_code args_code vols safety ret
                 code (emitForeignCall' PlayRisky results 
                    (CmmCallee expr' convention) args vols NoC_SRT ret)
               CmmSafe srt ->
-                code (emitForeignCall' (PlaySafe unused) results 
+                code (emitForeignCall' PlaySafe results 
                    (CmmCallee expr' convention) args vols NoC_SRT ret) where
-	        unused = panic "not used by emitForeignCall'"
+              CmmInterruptible ->
+                code (emitForeignCall' PlayInterruptible results 
+                   (CmmCallee expr' convention) args vols NoC_SRT ret)
 
 adjCallTarget :: CCallConv -> CmmExpr -> [CmmHinted CmmExpr] -> CmmExpr
 #ifdef mingw32_TARGET_OS
@@ -895,9 +910,11 @@ primCall results_code name args_code vols safety
 		    code (emitForeignCall' PlayRisky results
 		      (CmmPrim p) args vols NoC_SRT CmmMayReturn)
 		  CmmSafe srt ->
-		    code (emitForeignCall' (PlaySafe unused) results 
+		    code (emitForeignCall' PlaySafe results 
 		      (CmmPrim p) args vols NoC_SRT CmmMayReturn) where
-		    unused = panic "not used by emitForeignCall'"
+		  CmmInterruptible ->
+		    code (emitForeignCall' PlayInterruptible results 
+		      (CmmPrim p) args vols NoC_SRT CmmMayReturn)
 
 doStore :: CmmType -> ExtFCode CmmExpr  -> ExtFCode CmmExpr -> ExtCode
 doStore rep addr_code val_code
@@ -950,6 +967,10 @@ cmmIfThenElse cond then_part else_part = do
      -- fall through to join
      code (labelC join_id)
 
+cmmRawIf cond then_id = do
+    c <- cond
+    emitCond c then_id
+
 -- 'emitCond cond true_id'  emits code to test whether the cond is true,
 -- branching to true_id if so, and falling through otherwise.
 emitCond (BoolTest e) then_id = do
@@ -989,7 +1010,7 @@ emitCond (e1 `BoolAnd` e2) then_id = do
 -- optional range on the switch (eg. switch [0..7] {...}), or by
 -- the minimum/maximum values from the branches.
 
-doSwitch :: Maybe (Int,Int) -> ExtFCode CmmExpr -> [([Int],ExtCode)]
+doSwitch :: Maybe (Int,Int) -> ExtFCode CmmExpr -> [([Int],Either BlockId ExtCode)]
          -> Maybe ExtCode -> ExtCode
 doSwitch mb_range scrut arms deflt
    = do 
@@ -1016,11 +1037,11 @@ doSwitch mb_range scrut arms deflt
 	-- ToDo: check for out of range and jump to default if necessary
         stmtEC (CmmSwitch expr entries)
    where
-	emitArm :: ([Int],ExtCode) -> ExtFCode [(Int,BlockId)]
-	emitArm (ints,code) = do
+	emitArm :: ([Int],Either BlockId ExtCode) -> ExtFCode [(Int,BlockId)]
+	emitArm (ints,Left blockid) = return [ (i,blockid) | i <- ints ]
+	emitArm (ints,Right code) = do
 	   blockid <- forkLabelledCodeEC code
 	   return [ (i,blockid) | i <- ints ]
-
 
 -- -----------------------------------------------------------------------------
 -- Putting it all together
@@ -1040,7 +1061,7 @@ parseCmmFile dflags filename = do
   showPass dflags "ParseCmm"
   buf <- hGetStringBuffer filename
   let
-	init_loc = mkSrcLoc (mkFastString filename) 1 1
+	init_loc = mkRealSrcLoc (mkFastString filename) 1 1
 	init_state = (mkPState dflags buf init_loc) { lex_state = [0] }
 		-- reset the lex_state: the Lexer monad leaves some stuff
 		-- in there we don't want.
@@ -1054,7 +1075,7 @@ parseCmmFile dflags filename = do
         if (errorsFound dflags ms)
          then return (ms, Nothing)
          else do
-           dumpIfSet_dyn dflags Opt_D_dump_cmm "Cmm" (ppr cmm)
+           dumpIfSet_dyn dflags Opt_D_dump_cmm "Cmm" (pprPlatform (targetPlatform dflags) cmm)
            return (ms, Just cmm)
   where
 	no_module = panic "parseCmmFile: no module"

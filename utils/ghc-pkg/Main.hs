@@ -19,7 +19,8 @@ import Distribution.ParseUtils
 import Distribution.Package hiding (depends)
 import Distribution.Text
 import Distribution.Version
-import System.FilePath
+import System.FilePath as FilePath
+import qualified System.FilePath.Posix as FilePath.Posix
 import System.Cmd       ( rawSystem )
 import System.Directory ( getAppUserDataDirectory, createDirectoryIfMissing,
                           getModificationTime )
@@ -34,11 +35,12 @@ import Data.Maybe
 import Data.Char ( isSpace, toLower )
 import Control.Monad
 import System.Directory ( doesDirectoryExist, getDirectoryContents,
-                          doesFileExist, renameFile, removeFile )
+                          doesFileExist, renameFile, removeFile,
+                          getCurrentDirectory )
 import System.Exit ( exitWith, ExitCode(..) )
 import System.Environment ( getArgs, getProgName, getEnv )
 import System.IO
-import System.IO.Error (try, isDoesNotExistError)
+import System.IO.Error
 import Data.List
 import Control.Concurrent
 
@@ -46,15 +48,10 @@ import qualified Data.ByteString.Lazy as B
 import qualified Data.Binary as Bin
 import qualified Data.Binary.Get as Bin
 
-#if __GLASGOW_HASKELL__ < 612 || defined(mingw32_HOST_OS)
+#if defined(mingw32_HOST_OS)
 -- mingw32 needs these for getExecDir, GHC <6.12 needs them for openNewFile
 import Foreign
 import Foreign.C
-#endif
-
-#if __GLASGOW_HASKELL__ < 612
-import System.Posix.Internals
-import GHC.Handle (fdToHandle)
 #endif
 
 #ifdef mingw32_HOST_OS
@@ -63,14 +60,12 @@ import GHC.ConsoleHandler
 import System.Posix hiding (fdToHandle)
 #endif
 
-import IO ( isPermissionError )
-
 #if defined(GLOB)
 import System.Process(runInteractiveCommand)
 import qualified System.Info(os)
 #endif
 
-#if !defined(mingw32_HOST_OS) && __GLASGOW_HASKELL__ >= 611 && !defined(BOOTSTRAPPING)
+#if !defined(mingw32_HOST_OS) && !defined(BOOTSTRAPPING)
 import System.Console.Terminfo as Terminfo
 #endif
 
@@ -108,6 +103,9 @@ data Flag
   | FlagForce
   | FlagForceFiles
   | FlagAutoGHCiLibs
+  | FlagExpandEnvVars
+  | FlagExpandPkgroot
+  | FlagNoExpandPkgroot
   | FlagSimpleOutput
   | FlagNamesOnly
   | FlagIgnoreCase
@@ -133,6 +131,12 @@ flags = [
          "ignore missing directories and libraries only",
   Option ['g'] ["auto-ghci-libs"] (NoArg FlagAutoGHCiLibs)
         "automatically build libs for GHCi (with register)",
+  Option [] ["expand-env-vars"] (NoArg FlagExpandEnvVars)
+        "expand environment variables (${name}-style) in input package descriptions",
+  Option [] ["expand-pkgroot"] (NoArg FlagExpandPkgroot)
+        "expand ${pkgroot}-relative paths to absolute in output package descriptions",
+  Option [] ["no-expand-pkgroot"] (NoArg FlagNoExpandPkgroot)
+        "preserve ${pkgroot}-relative paths in output package descriptions",
   Option ['?'] ["help"] (NoArg FlagHelp)
         "display this help and exit",
   Option ['V'] ["version"] (NoArg FlagVersion)
@@ -193,6 +197,12 @@ usageHeader prog = substProg prog $
   "\n" ++
   "  $p hide {pkg-id}\n" ++
   "    Hide the specified package.\n" ++
+  "\n" ++
+  "  $p trust {pkg-id}\n" ++
+  "    Trust the specified package.\n" ++
+  "\n" ++
+  "  $p distrust {pkg-id}\n" ++
+  "    Distrust the specified package.\n" ++
   "\n" ++
   "  $p list [pkg]\n" ++
   "    List registered packages in the global database, and also the\n" ++
@@ -281,6 +291,12 @@ runit verbosity cli nonopts = do
           | FlagForceFiles `elem` cli   = ForceFiles
           | otherwise                   = NoForce
         auto_ghci_libs = FlagAutoGHCiLibs `elem` cli
+        expand_env_vars= FlagExpandEnvVars `elem` cli
+        mexpand_pkgroot= foldl' accumExpandPkgroot Nothing cli
+          where accumExpandPkgroot _ FlagExpandPkgroot   = Just True
+                accumExpandPkgroot _ FlagNoExpandPkgroot = Just False
+                accumExpandPkgroot x _                   = x
+                
         splitFields fields = unfoldr splitComma (',':fields)
           where splitComma "" = Nothing
                 splitComma fs = Just $ break (==',') (tail fs)
@@ -320,9 +336,11 @@ runit verbosity cli nonopts = do
     ["init", filename] ->
         initPackageDB filename verbosity cli
     ["register", filename] ->
-        registerPackage filename verbosity cli auto_ghci_libs False force
+        registerPackage filename verbosity cli
+                        auto_ghci_libs expand_env_vars False force
     ["update", filename] ->
-        registerPackage filename verbosity cli auto_ghci_libs True force
+        registerPackage filename verbosity cli
+                        auto_ghci_libs expand_env_vars True force
     ["unregister", pkgid_str] -> do
         pkgid <- readGlobPkgId pkgid_str
         unregisterPackage pkgid verbosity cli force
@@ -332,6 +350,12 @@ runit verbosity cli nonopts = do
     ["hide",   pkgid_str] -> do
         pkgid <- readGlobPkgId pkgid_str
         hidePackage pkgid verbosity cli force
+    ["trust",    pkgid_str] -> do
+        pkgid <- readGlobPkgId pkgid_str
+        trustPackage pkgid verbosity cli force
+    ["distrust", pkgid_str] -> do
+        pkgid <- readGlobPkgId pkgid_str
+        distrustPackage pkgid verbosity cli force
     ["list"] -> do
         listPackages verbosity cli Nothing Nothing
     ["list", pkgid_str] ->
@@ -347,23 +371,24 @@ runit verbosity cli nonopts = do
     ["latest", pkgid_str] -> do
         pkgid <- readGlobPkgId pkgid_str
         latestPackage verbosity cli pkgid
-    ["describe", pkgid_str] ->
-        case substringCheck pkgid_str of
-          Nothing -> do pkgid <- readGlobPkgId pkgid_str
-                        describePackage verbosity cli (Id pkgid)
-          Just m -> describePackage verbosity cli (Substring pkgid_str m)
-    ["field", pkgid_str, fields] ->
-        case substringCheck pkgid_str of
-          Nothing -> do pkgid <- readGlobPkgId pkgid_str
-                        describeField verbosity cli (Id pkgid) 
-                                      (splitFields fields)
-          Just m -> describeField verbosity cli (Substring pkgid_str m)
-                                      (splitFields fields)
+    ["describe", pkgid_str] -> do
+        pkgarg <- case substringCheck pkgid_str of
+          Nothing -> liftM Id (readGlobPkgId pkgid_str)
+          Just m  -> return (Substring pkgid_str m)
+        describePackage verbosity cli pkgarg (fromMaybe False mexpand_pkgroot)
+        
+    ["field", pkgid_str, fields] -> do
+        pkgarg <- case substringCheck pkgid_str of
+          Nothing -> liftM Id (readGlobPkgId pkgid_str)
+          Just m  -> return (Substring pkgid_str m)
+        describeField verbosity cli pkgarg
+                      (splitFields fields) (fromMaybe True mexpand_pkgroot)
+
     ["check"] -> do
         checkConsistency verbosity cli
 
     ["dump"] -> do
-        dumpPackages verbosity cli
+        dumpPackages verbosity cli (fromMaybe False mexpand_pkgroot)
 
     ["recache"] -> do
         recache verbosity cli
@@ -400,7 +425,7 @@ globVersion = Version{ versionBranch=[], versionTags=["*"] }
 -- Package databases
 
 -- Some commands operate on a single database:
---      register, unregister, expose, hide
+--      register, unregister, expose, hide, trust, distrust
 -- however these commands also check the union of the available databases
 -- in order to check consistency.  For example, register will check that
 -- dependencies exist before registering a package.
@@ -409,8 +434,16 @@ globVersion = Version{ versionBranch=[], versionTags=["*"] }
 --      list, describe, field
 
 data PackageDB 
-  = PackageDB { location :: FilePath,
-                packages :: [InstalledPackageInfo] }
+  = PackageDB {
+      location, locationAbsolute :: !FilePath,
+      -- We need both possibly-relative and definately-absolute package
+      -- db locations. This is because the relative location is used as
+      -- an identifier for the db, so it is important we do not modify it.
+      -- On the other hand we need the absolute path in a few places
+      -- particularly in relation to the ${pkgroot} stuff.
+      
+      packages :: [InstalledPackageInfo]
+    }
 
 type PackageDBStack = [PackageDB]
         -- A stack of package databases.  Convention: head is the topmost
@@ -422,6 +455,7 @@ allPackagesInStack = concatMap packages
 getPkgDatabases :: Verbosity
                 -> Bool    -- we are modifying, not reading
                 -> Bool    -- read caches, if available
+                -> Bool    -- expand vars, like ${pkgroot} and $topdir
                 -> [Flag]
                 -> IO (PackageDBStack, 
                           -- the real package DB stack: [global,user] ++ 
@@ -434,7 +468,7 @@ getPkgDatabases :: Verbosity
                           -- is used as the list of package DBs for
                           -- commands that just read the DB, such as 'list'.
 
-getPkgDatabases verbosity modify use_cache my_flags = do
+getPkgDatabases verbosity modify use_cache expand_vars my_flags = do
   -- first we determine the location of the global package config.  On Windows,
   -- this is found relative to the ghc-pkg.exe binary, whereas on Unix the
   -- location is passed to the binary using the --global-config flag by the
@@ -452,11 +486,17 @@ getPkgDatabases verbosity modify use_cache my_flags = do
                        Just path -> return path
         fs -> return (last fs)
 
+  -- The value of the $topdir variable used in some package descriptions
+  -- Note that the way we calculate this is slightly different to how it
+  -- is done in ghc itself. We rely on the convention that the global
+  -- package db lives in ghc's libdir.
+  top_dir <- absolutePath (takeDirectory global_conf)
+
   let no_user_db = FlagNoUserDb `elem` my_flags
 
   -- get the location of the user package database, and create it if necessary
   -- getAppUserDataDirectory can fail (e.g. if $HOME isn't set)
-  e_appdir <- try $ getAppUserDataDirectory "ghc"
+  e_appdir <- tryIO $ getAppUserDataDirectory "ghc"
 
   mb_user_conf <-
      if no_user_db then return Nothing else
@@ -477,7 +517,7 @@ getPkgDatabases verbosity modify use_cache my_flags = do
           modify || user_exists = [user_conf, global_conf]
         | otherwise             = [global_conf]
 
-  e_pkg_path <- try (System.Environment.getEnv "GHC_PACKAGE_PATH")
+  e_pkg_path <- tryIO (System.Environment.getEnv "GHC_PACKAGE_PATH")
   let env_stack =
         case e_pkg_path of
                 Left  _ -> sys_databases
@@ -520,7 +560,11 @@ getPkgDatabases verbosity modify use_cache my_flags = do
         | null db_flags = Just virt_global_conf
         | otherwise     = Just (last db_flags)
 
-  db_stack <- mapM (readParseDatabase verbosity mb_user_conf use_cache) final_stack
+  db_stack  <- sequence
+    [ do db <- readParseDatabase verbosity mb_user_conf use_cache db_path
+         if expand_vars then return (mungePackageDBPaths top_dir db)
+                        else return db
+    | db_path <- final_stack ]
 
   let flag_db_stack = [ db | db_name <- flag_db_names,
                         db <- db_stack, location db == db_name ]
@@ -546,19 +590,19 @@ readParseDatabase :: Verbosity
 readParseDatabase verbosity mb_user_conf use_cache path
   -- the user database (only) is allowed to be non-existent
   | Just (user_conf,False) <- mb_user_conf, path == user_conf
-  = return PackageDB { location = path, packages = [] }
+  = mkPackageDB []
   | otherwise
-  = do e <- try $ getDirectoryContents path
+  = do e <- tryIO $ getDirectoryContents path
        case e of
          Left _   -> do
               pkgs <- parseMultiPackageConf verbosity path
-              return PackageDB{ location = path, packages = pkgs }              
+              mkPackageDB pkgs
          Right fs
            | not use_cache -> ignore_cache
            | otherwise -> do
               let cache = path </> cachefilename
               tdir     <- getModificationTime path
-              e_tcache <- try $ getModificationTime cache
+              e_tcache <- tryIO $ getModificationTime cache
               case e_tcache of
                 Left ex -> do
                      when (verbosity > Normal) $
@@ -570,7 +614,7 @@ readParseDatabase verbosity mb_user_conf use_cache path
                         putStrLn ("using cache: " ++ cache)
                      pkgs <- myReadBinPackageDB cache
                      let pkgs' = map convertPackageInfoIn pkgs
-                     return PackageDB { location = path, packages = pkgs' }
+                     mkPackageDB pkgs'
                   | otherwise -> do
                      when (verbosity >= Normal) $ do
                         warn ("WARNING: cache is out of date: " ++ cache)
@@ -581,7 +625,15 @@ readParseDatabase verbosity mb_user_conf use_cache path
                      let confs = filter (".conf" `isSuffixOf`) fs
                      pkgs <- mapM (parseSingletonPackageConf verbosity) $
                                    map (path </>) confs
-                     return PackageDB { location = path, packages = pkgs }
+                     mkPackageDB pkgs
+  where
+    mkPackageDB pkgs = do
+      path_abs <- absolutePath path
+      return PackageDB {
+        location = path,
+        locationAbsolute = path_abs,
+        packages = pkgs
+      }
 
 -- read the package.cache file strictly, to work around a problem with
 -- bytestring 0.9.0.x (fixed in 0.9.1.x) where the file wasn't closed
@@ -607,10 +659,71 @@ parseMultiPackageConf verbosity file = do
 parseSingletonPackageConf :: Verbosity -> FilePath -> IO InstalledPackageInfo
 parseSingletonPackageConf verbosity file = do
   when (verbosity > Normal) $ putStrLn ("reading package config: " ++ file)
-  readUTF8File file >>= parsePackageInfo
+  readUTF8File file >>= fmap fst . parsePackageInfo
 
 cachefilename :: FilePath
 cachefilename = "package.cache"
+
+mungePackageDBPaths :: FilePath -> PackageDB -> PackageDB
+mungePackageDBPaths top_dir db@PackageDB { packages = pkgs } =
+    db { packages = map (mungePackagePaths top_dir pkgroot) pkgs }
+  where
+    pkgroot = takeDirectory (locationAbsolute db)    
+    -- It so happens that for both styles of package db ("package.conf"
+    -- files and "package.conf.d" dirs) the pkgroot is the parent directory
+    -- ${pkgroot}/package.conf  or  ${pkgroot}/package.conf.d/
+
+-- TODO: This code is duplicated in compiler/main/Packages.lhs
+mungePackagePaths :: FilePath -> FilePath
+                  -> InstalledPackageInfo -> InstalledPackageInfo
+-- Perform path/URL variable substitution as per the Cabal ${pkgroot} spec
+-- (http://www.haskell.org/pipermail/libraries/2009-May/011772.html)
+-- Paths/URLs can be relative to ${pkgroot} or ${pkgrooturl}.
+-- The "pkgroot" is the directory containing the package database.
+--
+-- Also perform a similar substitution for the older GHC-specific
+-- "$topdir" variable. The "topdir" is the location of the ghc
+-- installation (obtained from the -B option).
+mungePackagePaths top_dir pkgroot pkg =
+    pkg {
+      importDirs  = munge_paths (importDirs pkg),
+      includeDirs = munge_paths (includeDirs pkg),
+      libraryDirs = munge_paths (libraryDirs pkg),
+      frameworkDirs = munge_paths (frameworkDirs pkg),
+      haddockInterfaces = munge_paths (haddockInterfaces pkg),
+                     -- haddock-html is allowed to be either a URL or a file
+      haddockHTMLs = munge_paths (munge_urls (haddockHTMLs pkg))
+    }
+  where
+    munge_paths = map munge_path
+    munge_urls  = map munge_url
+
+    munge_path p
+      | Just p' <- stripVarPrefix "${pkgroot}" p = pkgroot ++ p'
+      | Just p' <- stripVarPrefix "$topdir"    p = top_dir ++ p'
+      | otherwise                                = p
+
+    munge_url p
+      | Just p' <- stripVarPrefix "${pkgrooturl}" p = toUrlPath pkgroot p'
+      | Just p' <- stripVarPrefix "$httptopdir"   p = toUrlPath top_dir p'
+      | otherwise                                   = p
+
+    toUrlPath r p = "file:///"
+                 -- URLs always use posix style '/' separators:
+                 ++ FilePath.Posix.joinPath
+                        (r : -- We need to drop a leading "/" or "\\"
+                             -- if there is one:
+                             dropWhile (all isPathSeparator)
+                                       (FilePath.splitDirectories p))
+
+    -- We could drop the separator here, and then use </> above. However,
+    -- by leaving it in and using ++ we keep the same path separator
+    -- rather than letting FilePath change it to use \ as the separator
+    stripVarPrefix var path = case stripPrefix var path of
+                              Just [] -> Just []
+                              Just cs@(c : _) | isPathSeparator c -> Just cs
+                              _ -> Nothing
+
 
 -- -----------------------------------------------------------------------------
 -- Creating a new package DB
@@ -622,7 +735,11 @@ initPackageDB filename verbosity _flags = do
   when b1 eexist
   b2 <- doesDirectoryExist filename
   when b2 eexist
-  changeDB verbosity [] PackageDB{ location = filename, packages = [] }
+  filename_abs <- absolutePath filename
+  changeDB verbosity [] PackageDB {
+                          location = filename, locationAbsolute = filename_abs,
+                          packages = []
+                        }
 
 -- -----------------------------------------------------------------------------
 -- Registering
@@ -631,42 +748,54 @@ registerPackage :: FilePath
                 -> Verbosity
                 -> [Flag]
                 -> Bool              -- auto_ghci_libs
+                -> Bool              -- expand_env_vars
                 -> Bool              -- update
                 -> Force
                 -> IO ()
-registerPackage input verbosity my_flags auto_ghci_libs update force = do
+registerPackage input verbosity my_flags auto_ghci_libs expand_env_vars update force = do
   (db_stack, Just to_modify, _flag_dbs) <- 
-      getPkgDatabases verbosity True True my_flags
+      getPkgDatabases verbosity True True False{-expand vars-} my_flags
 
   let
         db_to_operate_on = my_head "register" $
                            filter ((== to_modify).location) db_stack
+  --
+  when (auto_ghci_libs && verbosity >= Silent) $
+    warn "Warning: --auto-ghci-libs is deprecated and will be removed in GHC 7.4"
   --
   s <-
     case input of
       "-" -> do
         when (verbosity >= Normal) $
             putStr "Reading package info from stdin ... "
-#if __GLASGOW_HASKELL__ >= 612
         -- fix the encoding to UTF-8, since this is an interchange format
         hSetEncoding stdin utf8
-#endif
         getContents
       f   -> do
         when (verbosity >= Normal) $
             putStr ("Reading package info from " ++ show f ++ " ... ")
         readUTF8File f
 
-  expanded <- expandEnvVars s force
+  expanded <- if expand_env_vars then expandEnvVars s force
+                                 else return s
 
-  pkg <- parsePackageInfo expanded
+  (pkg, ws) <- parsePackageInfo expanded
   when (verbosity >= Normal) $
       putStrLn "done."
+
+  -- report any warnings from the parse phase
+  _ <- reportValidateErrors [] ws
+         (display (sourcePackageId pkg) ++ ": Warning: ") Nothing
+
+  -- validate the expanded pkg, but register the unexpanded
+  pkgroot <- absolutePath (takeDirectory to_modify)
+  let top_dir = takeDirectory (location (last db_stack))
+      pkg_expanded = mungePackagePaths top_dir pkgroot pkg
 
   let truncated_stack = dropWhile ((/= to_modify).location) db_stack
   -- truncate the stack for validation, because we don't allow
   -- packages lower in the stack to refer to those higher up.
-  validatePackageConfig pkg truncated_stack auto_ghci_libs update force
+  validatePackageConfig pkg_expanded truncated_stack auto_ghci_libs update force
   let 
      removes = [ RemovePackage p
                | p <- packages db_to_operate_on,
@@ -676,10 +805,13 @@ registerPackage input verbosity my_flags auto_ghci_libs update force = do
 
 parsePackageInfo
         :: String
-        -> IO InstalledPackageInfo
+        -> IO (InstalledPackageInfo, [ValidateWarning])
 parsePackageInfo str =
   case parseInstalledPackageInfo str of
-    ParseOk _warns ok -> return ok
+    ParseOk warnings ok -> return (ok, ws)
+      where
+        ws = [ msg | PWarning msg <- warnings
+                   , not ("Unrecognized field pkgroot" `isPrefixOf` msg) ]
     ParseFailed err -> case locatedErrorMsg err of
                            (Nothing, s) -> die s
                            (Just l, s) -> die (show l ++ ": " ++ s)
@@ -733,19 +865,25 @@ updateDBCache verbosity db = do
   when (verbosity > Normal) $
       putStrLn ("writing cache " ++ filename)
   writeBinaryFileAtomic filename (map convertPackageInfoOut (packages db))
-    `catch` \e ->
+    `catchIO` \e ->
       if isPermissionError e
       then die (filename ++ ": you don't have permission to modify this file")
       else ioError e
 
 -- -----------------------------------------------------------------------------
--- Exposing, Hiding, Unregistering are all similar
+-- Exposing, Hiding, Trusting, Distrusting, Unregistering are all similar
 
 exposePackage :: PackageIdentifier -> Verbosity -> [Flag] -> Force -> IO ()
 exposePackage = modifyPackage (\p -> ModifyPackage p{exposed=True})
 
 hidePackage :: PackageIdentifier -> Verbosity -> [Flag] -> Force -> IO ()
 hidePackage = modifyPackage (\p -> ModifyPackage p{exposed=False})
+
+trustPackage :: PackageIdentifier -> Verbosity -> [Flag] -> Force -> IO ()
+trustPackage = modifyPackage (\p -> ModifyPackage p{trusted=True})
+
+distrustPackage :: PackageIdentifier -> Verbosity -> [Flag] -> Force -> IO ()
+distrustPackage = modifyPackage (\p -> ModifyPackage p{trusted=False})
 
 unregisterPackage :: PackageIdentifier -> Verbosity -> [Flag] -> Force -> IO ()
 unregisterPackage = modifyPackage RemovePackage
@@ -759,7 +897,7 @@ modifyPackage
   -> IO ()
 modifyPackage fn pkgid verbosity my_flags force = do
   (db_stack, Just _to_modify, _flag_dbs) <- 
-      getPkgDatabases verbosity True{-modify-} True{-use cache-} my_flags
+      getPkgDatabases verbosity True{-modify-} True{-use cache-} False{-expand vars-} my_flags
 
   (db, ps) <- fmap head $ findPackagesByDB db_stack (Id pkgid)
   let 
@@ -787,7 +925,7 @@ modifyPackage fn pkgid verbosity my_flags force = do
 recache :: Verbosity -> [Flag] -> IO ()
 recache verbosity my_flags = do
   (db_stack, Just to_modify, _flag_dbs) <- 
-     getPkgDatabases verbosity True{-modify-} False{-no cache-} my_flags
+     getPkgDatabases verbosity True{-modify-} False{-no cache-} False{-expand vars-} my_flags
   let
         db_to_operate_on = my_head "recache" $
                            filter ((== to_modify).location) db_stack
@@ -803,7 +941,7 @@ listPackages ::  Verbosity -> [Flag] -> Maybe PackageArg
 listPackages verbosity my_flags mPackageName mModuleName = do
   let simple_output = FlagSimpleOutput `elem` my_flags
   (db_stack, _, flag_db_stack) <- 
-     getPkgDatabases verbosity False True{-use cache-} my_flags
+     getPkgDatabases verbosity False True{-use cache-} False{-expand vars-} my_flags
 
   let db_stack_filtered -- if a package is given, filter out all other packages
         | Just this <- mPackageName =
@@ -854,7 +992,7 @@ listPackages verbosity my_flags mPackageName mModuleName = do
 
   if simple_output then show_simple stack else do
 
-#if defined(mingw32_HOST_OS) || __GLASGOW_HASKELL__ < 611 || defined(BOOTSTRAPPING)
+#if defined(mingw32_HOST_OS) || defined(BOOTSTRAPPING)
   mapM_ show_normal stack
 #else
   let
@@ -896,7 +1034,7 @@ simplePackageList my_flags pkgs = do
 showPackageDot :: Verbosity -> [Flag] -> IO ()
 showPackageDot verbosity myflags = do
   (_, _, flag_db_stack) <- 
-      getPkgDatabases verbosity False True{-use cache-} myflags
+      getPkgDatabases verbosity False True{-use cache-} False{-expand vars-} myflags
 
   let all_pkgs = allPackagesInStack flag_db_stack
       ipix  = PackageIndex.fromList all_pkgs
@@ -918,7 +1056,7 @@ showPackageDot verbosity myflags = do
 latestPackage ::  Verbosity -> [Flag] -> PackageIdentifier -> IO ()
 latestPackage verbosity my_flags pkgid = do
   (_, _, flag_db_stack) <- 
-     getPkgDatabases verbosity False True{-use cache-} my_flags
+     getPkgDatabases verbosity False True{-use cache-} False{-expand vars-} my_flags
 
   ps <- findPackages flag_db_stack (Id pkgid)
   show_pkg (sortBy compPkgIdVer (map sourcePackageId ps))
@@ -929,26 +1067,33 @@ latestPackage verbosity my_flags pkgid = do
 -- -----------------------------------------------------------------------------
 -- Describe
 
-describePackage :: Verbosity -> [Flag] -> PackageArg -> IO ()
-describePackage verbosity my_flags pkgarg = do
+describePackage :: Verbosity -> [Flag] -> PackageArg -> Bool -> IO ()
+describePackage verbosity my_flags pkgarg expand_pkgroot = do
   (_, _, flag_db_stack) <- 
-      getPkgDatabases verbosity False True{-use cache-} my_flags
-  ps <- findPackages flag_db_stack pkgarg
-  doDump ps
+      getPkgDatabases verbosity False True{-use cache-} expand_pkgroot my_flags
+  dbs <- findPackagesByDB flag_db_stack pkgarg
+  doDump expand_pkgroot [ (pkg, locationAbsolute db)
+                        | (db, pkgs) <- dbs, pkg <- pkgs ]
 
-dumpPackages :: Verbosity -> [Flag] -> IO ()
-dumpPackages verbosity my_flags = do
+dumpPackages :: Verbosity -> [Flag] -> Bool -> IO ()
+dumpPackages verbosity my_flags expand_pkgroot = do
   (_, _, flag_db_stack) <- 
-     getPkgDatabases verbosity False True{-use cache-} my_flags
-  doDump (allPackagesInStack flag_db_stack)
+     getPkgDatabases verbosity False True{-use cache-} expand_pkgroot my_flags
+  doDump expand_pkgroot [ (pkg, locationAbsolute db)
+                        | db <- flag_db_stack, pkg <- packages db ]
 
-doDump :: [InstalledPackageInfo] -> IO ()
-doDump pkgs = do
-#if __GLASGOW_HASKELL__ >= 612
+doDump :: Bool -> [(InstalledPackageInfo, FilePath)] -> IO ()
+doDump expand_pkgroot pkgs = do
   -- fix the encoding to UTF-8, since this is an interchange format
   hSetEncoding stdout utf8
-#endif
-  mapM_ putStrLn . intersperse "---" . map showInstalledPackageInfo $ pkgs
+  putStrLn $
+    intercalate "---\n"
+    [ if expand_pkgroot
+        then showInstalledPackageInfo pkg
+        else showInstalledPackageInfo pkg ++ pkgrootField
+    | (pkg, pkgloc) <- pkgs
+    , let pkgroot      = takeDirectory pkgloc
+          pkgrootField = "pkgroot: " ++ show pkgroot ++ "\n" ]
 
 -- PackageId is can have globVersion for the version
 findPackages :: PackageDBStack -> PackageArg -> IO [InstalledPackageInfo]
@@ -987,49 +1132,19 @@ compPkgIdVer p1 p2 = pkgVersion p1 `compare` pkgVersion p2
 -- -----------------------------------------------------------------------------
 -- Field
 
-describeField :: Verbosity -> [Flag] -> PackageArg -> [String] -> IO ()
-describeField verbosity my_flags pkgarg fields = do
+describeField :: Verbosity -> [Flag] -> PackageArg -> [String] -> Bool -> IO ()
+describeField verbosity my_flags pkgarg fields expand_pkgroot = do
   (_, _, flag_db_stack) <- 
-      getPkgDatabases verbosity False True{-use cache-} my_flags
+      getPkgDatabases verbosity False True{-use cache-} expand_pkgroot my_flags
   fns <- toFields fields
   ps <- findPackages flag_db_stack pkgarg
-  let top_dir = takeDirectory (location (last flag_db_stack))
-  mapM_ (selectFields fns) (mungePackagePaths top_dir ps)
+  mapM_ (selectFields fns) ps
   where toFields [] = return []
         toFields (f:fs) = case toField f of
             Nothing -> die ("unknown field: " ++ f)
             Just fn -> do fns <- toFields fs
                           return (fn:fns)
         selectFields fns info = mapM_ (\fn->putStrLn (fn info)) fns
-
-mungePackagePaths :: String -> [InstalledPackageInfo] -> [InstalledPackageInfo]
--- Replace the strings "$topdir" and "$httptopdir" at the beginning of a path
--- with the current topdir (obtained from the -B option).
-mungePackagePaths top_dir ps = map munge_pkg ps
-  where
-  munge_pkg p = p{ importDirs        = munge_paths (importDirs p),
-                   includeDirs       = munge_paths (includeDirs p),
-                   libraryDirs       = munge_paths (libraryDirs p),
-                   frameworkDirs     = munge_paths (frameworkDirs p),
-                   haddockInterfaces = munge_paths (haddockInterfaces p),
-                   haddockHTMLs      = munge_paths (haddockHTMLs p)
-                 }
-
-  munge_paths = map munge_path
-
-  munge_path p
-   | Just p' <- maybePrefixMatch "$topdir"     p =            top_dir ++ p'
-   | Just p' <- maybePrefixMatch "$httptopdir" p = toHttpPath top_dir ++ p'
-   | otherwise                               = p
-
-  toHttpPath p = "file:///" ++ p
-
-maybePrefixMatch :: String -> String -> Maybe String
-maybePrefixMatch []    rest = Just rest
-maybePrefixMatch (_:_) []   = Nothing
-maybePrefixMatch (p:pat) (r:rest)
-  | p == r    = maybePrefixMatch pat rest
-  | otherwise = Nothing
 
 toField :: String -> Maybe (InstalledPackageInfo -> String)
 -- backwards compatibility:
@@ -1056,7 +1171,8 @@ strList = show
 
 checkConsistency :: Verbosity -> [Flag] -> IO ()
 checkConsistency verbosity my_flags = do
-  (db_stack, _, _) <- getPkgDatabases verbosity True True{-use cache-} my_flags
+  (db_stack, _, _) <- 
+         getPkgDatabases verbosity True True{-use cache-} True{-expand vars-} my_flags
          -- check behaves like modify for the purposes of deciding which
          -- databases to use, because ordering is important.
 
@@ -1149,7 +1265,7 @@ writeNewConfig verbosity filename ipis = do
                      $ map (show . convertPackageInfoOut) ipis
       fileContents = "[" ++ shown ++ "\n]"
   writeFileUtf8Atomic filename fileContents
-    `catch` \e ->
+    `catchIO` \e ->
       if isPermissionError e
       then die (filename ++ ": you don't have permission to modify this file")
       else ioError e
@@ -1229,6 +1345,9 @@ checkPackageConfig pkg db_stack auto_ghci_libs update = do
   mapM_ (checkDir False "import-dirs")  (importDirs pkg)
   mapM_ (checkDir True  "library-dirs") (libraryDirs pkg)
   mapM_ (checkDir True  "include-dirs") (includeDirs pkg)
+  mapM_ (checkDir True  "framework-dirs") (frameworkDirs pkg)
+  mapM_ (checkFile   True "haddock-interfaces") (haddockInterfaces pkg)
+  mapM_ (checkDirURL True "haddock-html")       (haddockHTMLs pkg)
   checkModules pkg
   mapM_ (checkHSLib (libraryDirs pkg) auto_ghci_libs) (hsLibraries pkg)
   -- ToDo: check these somehow?
@@ -1280,19 +1399,34 @@ checkDuplicates db_stack pkg update = do
         "Package " ++ display pkgid ++
         " overlaps with: " ++ unwords (map display dups)
 
+checkDir, checkFile, checkDirURL :: Bool -> String -> FilePath -> Validate ()
+checkDir  = checkPath False True
+checkFile = checkPath False False
+checkDirURL = checkPath True True
 
-checkDir :: Bool -> String -> String -> Validate ()
-checkDir warn_only thisfield d
- | "$topdir"     `isPrefixOf` d = return ()
- | "$httptopdir" `isPrefixOf` d = return ()
-        -- can't check these, because we don't know what $(http)topdir is
+checkPath :: Bool -> Bool -> Bool -> String -> FilePath -> Validate ()
+checkPath url_ok is_dir warn_only thisfield d
+ | url_ok && ("http://"  `isPrefixOf` d
+           || "https://" `isPrefixOf` d) = return ()
+
+ | url_ok
+ , Just d' <- stripPrefix "file://" d
+ = checkPath False is_dir warn_only thisfield d'
+
+   -- Note: we don't check for $topdir/${pkgroot} here. We rely on these
+   -- variables having been expanded already, see mungePackagePaths.
+
  | isRelative d = verror ForceFiles $
-                     thisfield ++ ": " ++ d ++ " is a relative path"
+                     thisfield ++ ": " ++ d ++ " is a relative path which "
+                  ++ "makes no sense (as there is nothing for it to be "
+                  ++ "relative to). You can make paths relative to the "
+                  ++ "package database itself by using ${pkgroot}."
         -- relative paths don't make any sense; #4134
  | otherwise = do
-   there <- liftIO $ doesDirectoryExist d
+   there <- liftIO $ if is_dir then doesDirectoryExist d else doesFileExist d
    when (not there) $
-       let msg = thisfield ++ ": " ++ d ++ " doesn't exist or isn't a directory"
+       let msg = thisfield ++ ": " ++ d ++ " doesn't exist or isn't a "
+                                        ++ if is_dir then "directory" else "file"
        in
        if warn_only 
           then vwarn msg
@@ -1331,10 +1465,7 @@ doesFileExistOnPath file path = go path
                        if b then return (Just p) else go ps
 
 doesFileExistIn :: String -> String -> IO Bool
-doesFileExistIn lib d
- | "$topdir"     `isPrefixOf` d = return True
- | "$httptopdir" `isPrefixOf` d = return True
- | otherwise                = doesFileExist (d </> lib)
+doesFileExistIn lib d = doesFileExist (d </> lib)
 
 checkModules :: InstalledPackageInfo -> Validate ()
 checkModules pkg = do
@@ -1385,7 +1516,7 @@ findModules paths =
   return (concat mms)
 
 searchDir path prefix = do
-  fs <- getDirectoryEntries path `catch` \_ -> return []
+  fs <- getDirectoryEntries path `catchIO` \_ -> return []
   searchEntries path prefix fs
 
 searchEntries path prefix [] = return []
@@ -1427,8 +1558,10 @@ expandEnvVars str0 force = go str0 ""
         = go str (c:acc)
 
    lookupEnvVar :: String -> IO String
+   lookupEnvVar "pkgroot"    = return "${pkgroot}"    -- these two are special,
+   lookupEnvVar "pkgrooturl" = return "${pkgrooturl}" -- we don't expand them
    lookupEnvVar nm =
-        catch (System.Environment.getEnv nm)
+        catchIO (System.Environment.getEnv nm)
            (\ _ -> do dieOrForceAll force ("Unable to expand variable " ++
                                         show nm)
                       return "")
@@ -1498,16 +1631,17 @@ getExecDir cmd =
           removeCmdSuffix = return . Just . initN (length cmd) . unDosifyPath
 
 getExecPath :: IO (Maybe String)
-getExecPath =
-     allocaArray len $ \buf -> do
-         ret <- getModuleFileName nullPtr buf len
-         if ret == 0 then return Nothing
-	             else liftM Just $ peekCString buf
-    where len = 2048 -- Plenty, PATH_MAX is 512 under Win32.
+getExecPath = try_size 2048 -- plenty, PATH_MAX is 512 under Win32.
+  where
+    try_size size = allocaArray (fromIntegral size) $ \buf -> do
+        ret <- c_GetModuleFileName nullPtr buf size
+        case ret of
+          0 -> return Nothing
+          _ | ret < size -> fmap Just $ peekCWString buf
+            | otherwise  -> try_size (size * 2)
 
-foreign import stdcall unsafe "GetModuleFileNameA"
-    getModuleFileName :: Ptr () -> CString -> Int -> IO Int32
-
+foreign import stdcall unsafe "windows.h GetModuleFileNameW"
+  c_GetModuleFileName :: Ptr () -> CWString -> Word32 -> IO Word32
 #else
 getLibDir :: IO (Maybe String)
 getLibDir = return Nothing
@@ -1544,15 +1678,17 @@ installSignalHandlers = do
 #if mingw32_HOST_OS || mingw32_TARGET_OS
 throwIOIO :: Exception.IOException -> IO a
 throwIOIO = Exception.throwIO
+#endif
 
 catchIO :: IO a -> (Exception.IOException -> IO a) -> IO a
 catchIO = Exception.catch
-#endif
 
 catchError :: IO a -> (String -> IO a) -> IO a
 catchError io handler = io `Exception.catch` handler'
     where handler' (Exception.ErrorCall err) = handler err
 
+tryIO :: IO a -> IO (Either Exception.IOException a)
+tryIO = Exception.try
 
 writeBinaryFileAtomic :: Bin.Binary a => FilePath -> a -> IO ()
 writeBinaryFileAtomic targetFile obj =
@@ -1563,9 +1699,7 @@ writeBinaryFileAtomic targetFile obj =
 writeFileUtf8Atomic :: FilePath -> String -> IO ()
 writeFileUtf8Atomic targetFile content =
   withFileAtomic targetFile $ \h -> do
-#if __GLASGOW_HASKELL__ >= 612
      hSetEncoding h utf8
-#endif
      hPutStr h content
 
 -- copied from Cabal's Distribution.Simple.Utils, except that we want
@@ -1602,65 +1736,10 @@ withFileAtomic targetFile write_content = do
 
 openNewFile :: FilePath -> String -> IO (FilePath, Handle)
 openNewFile dir template = do
-#if __GLASGOW_HASKELL__ >= 612
   -- this was added to System.IO in 6.12.1
   -- we must use this version because the version below opens the file
   -- in binary mode.
   openTempFileWithDefaultPermissions dir template
-#else
-  -- Ugh, this is a copy/paste of code from the base library, but
-  -- if uses 666 rather than 600 for the permissions.
-  pid <- c_getpid
-  findTempName pid
-  where
-    -- We split off the last extension, so we can use .foo.ext files
-    -- for temporary files (hidden on Unix OSes). Unfortunately we're
-    -- below filepath in the hierarchy here.
-    (prefix,suffix) =
-       case break (== '.') $ reverse template of
-         -- First case: template contains no '.'s. Just re-reverse it.
-         (rev_suffix, "")       -> (reverse rev_suffix, "")
-         -- Second case: template contains at least one '.'. Strip the
-         -- dot from the prefix and prepend it to the suffix (if we don't
-         -- do this, the unique number will get added after the '.' and
-         -- thus be part of the extension, which is wrong.)
-         (rev_suffix, '.':rest) -> (reverse rest, '.':reverse rev_suffix)
-         -- Otherwise, something is wrong, because (break (== '.')) should
-         -- always return a pair with either the empty string or a string
-         -- beginning with '.' as the second component.
-         _                      -> error "bug in System.IO.openTempFile"
-
-    oflags = rw_flags .|. o_EXCL
-
-    withFilePath = withCString
-
-    findTempName x = do
-      fd <- withFilePath filepath $ \ f ->
-              c_open f oflags 0o666
-      if fd < 0
-       then do
-         errno <- getErrno
-         if errno == eEXIST
-           then findTempName (x+1)
-           else ioError (errnoToIOError "openNewBinaryFile" errno Nothing (Just dir))
-       else do
-         -- XXX We want to tell fdToHandle what the filepath is,
-         -- as any exceptions etc will only be able to report the
-         -- fd currently
-         h <-
-              fdToHandle fd
-              `Exception.onException` c_close fd
-         return (filepath, h)
-      where
-        filename        = prefix ++ show x ++ suffix
-        filepath        = dir `combine` filename
-
--- XXX Copied from GHC.Handle
-std_flags, output_flags, rw_flags :: CInt
-std_flags    = o_NONBLOCK   .|. o_NOCTTY
-output_flags = std_flags    .|. o_CREAT
-rw_flags     = output_flags .|. o_RDWR
-#endif /* GLASGOW_HASKELL < 612 */
 
 -- | The function splits the given string to substrings
 -- using 'isSearchPathSeparator'.
@@ -1685,14 +1764,15 @@ parseSearchPath path = split path
 readUTF8File :: FilePath -> IO String
 readUTF8File file = do
   h <- openFile file ReadMode
-#if __GLASGOW_HASKELL__ >= 612
   -- fix the encoding to UTF-8
   hSetEncoding h utf8
-#endif
   hGetContents h
 
 -- removeFileSave doesn't throw an exceptions, if the file is already deleted
 removeFileSafe :: FilePath -> IO ()
 removeFileSafe fn =
-  removeFile fn `catch` \ e ->
+  removeFile fn `catchIO` \ e ->
     when (not $ isDoesNotExistError e) $ ioError e
+
+absolutePath :: FilePath -> IO FilePath
+absolutePath path = return . normalise . (</> path) =<< getCurrentDirectory

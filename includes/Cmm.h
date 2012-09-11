@@ -383,7 +383,7 @@
 // allocate() - this includes many of the primops.
 #define MAYBE_GC(liveness,reentry)			\
     if (bdescr_link(CurrentNursery) == NULL || \
-        generation_n_new_large_blocks(W_[g0]) >= CLong[alloc_blocks_lim]) {   \
+        generation_n_new_large_words(W_[g0]) >= CLong[large_alloc_lim]) {   \
 	R9  = liveness;					\
         R10 = reentry;					\
         HpAlloc = 0;					\
@@ -464,8 +464,16 @@
 #define StgFunInfoExtra_bitmap(i)     StgFunInfoExtraFwd_bitmap(i)
 #endif
 
-#define mutArrPtrsCardWords(n) \
-    ROUNDUP_BYTES_TO_WDS(((n) + (1 << MUT_ARR_PTRS_CARD_BITS) - 1) >> MUT_ARR_PTRS_CARD_BITS)
+#define mutArrCardMask ((1 << MUT_ARR_PTRS_CARD_BITS) - 1)
+#define mutArrPtrCardDown(i) ((i) >> MUT_ARR_PTRS_CARD_BITS)
+#define mutArrPtrCardUp(i)   (((i) + mutArrCardMask) >> MUT_ARR_PTRS_CARD_BITS)
+#define mutArrPtrsCardWords(n) ROUNDUP_BYTES_TO_WDS(mutArrPtrCardUp(n))
+
+#if defined(PROFILING) || (!defined(THREADED_RTS) && defined(DEBUG))
+#define OVERWRITING_CLOSURE(c) foreign "C" overwritingClosure(c "ptr")
+#else
+#define OVERWRITING_CLOSURE(c) /* nothing */
+#endif
 
 /* -----------------------------------------------------------------------------
    Voluntary Yields/Blocks

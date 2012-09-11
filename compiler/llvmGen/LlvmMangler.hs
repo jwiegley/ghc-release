@@ -1,35 +1,50 @@
+{-# OPTIONS -fno-warn-unused-binds #-}
 -- -----------------------------------------------------------------------------
 -- | GHC LLVM Mangler
 --
 -- This script processes the assembly produced by LLVM, rearranging the code
--- so that an info table appears before its corresponding function. We also
--- use it to fix up the stack alignment, which needs to be 16 byte aligned
--- but always ends up off by 4 bytes because GHC sets it to the 'wrong'
--- starting value in the RTS.
+-- so that an info table appears before its corresponding function.
 --
--- We only need this for Mac OS X, other targets don't use it.
+-- On OSX we also use it to fix up the stack alignment, which needs to be 16
+-- byte aligned but always ends up off by word bytes because GHC sets it to
+-- the 'wrong' starting value in the RTS.
 --
 
 module LlvmMangler ( llvmFixupAsm ) where
 
+#include "HsVersions.h"
+
+import LlvmCodeGen.Ppr ( infoSection )
+
 import Control.Exception
+import Control.Monad ( when )
 import qualified Data.ByteString.Char8 as B
 import Data.Char
-import qualified Data.IntMap as I
 import System.IO
 
--- Magic Strings
-infoSec, newInfoSec, newLine, spInst, jmpInst :: B.ByteString
-infoSec    = B.pack "\t.section\t__STRIP,__me"
-newInfoSec = B.pack "\n\t.text"
-newLine    = B.pack "\n"
-spInst     = B.pack ", %esp\n"
-jmpInst    = B.pack "\n\tjmp"
+import Data.List ( sortBy )
+import Data.Function ( on )
 
-infoLen, spFix, labelStart :: Int
-infoLen = B.length infoSec
-spFix   = 4
-labelStart = B.length jmpInst + 1
+-- Magic Strings
+secStmt, infoSec, newLine, spInst, jmpInst, textStmt, dataStmt :: B.ByteString
+secStmt    = B.pack "\t.section\t"
+infoSec    = B.pack infoSection
+newLine    = B.pack "\n"
+jmpInst    = B.pack "\n\tjmp"
+textStmt   = B.pack "\t.text"
+dataStmt   = B.pack "\t.data"
+
+infoLen, labelStart, spFix :: Int
+infoLen    = B.length infoSec
+labelStart = B.length jmpInst
+
+#if x86_64_TARGET_ARCH
+spInst     = B.pack ", %rsp\n"
+spFix      = 8
+#else
+spInst     = B.pack ", %esp\n"
+spFix      = 4
+#endif
 
 -- Search Predicates
 eolPred, dollarPred, commaPred :: Char -> Bool
@@ -42,53 +57,84 @@ llvmFixupAsm :: FilePath -> FilePath -> IO ()
 llvmFixupAsm f1 f2 = do
     r <- openBinaryFile f1 ReadMode
     w <- openBinaryFile f2 WriteMode
-    fixTables r w I.empty
-    B.hPut w (B.pack "\n\n")
+    ss <- readSections r w
     hClose r
+    let fixed = fixTables ss
+    mapM_ (writeSection w) fixed
     hClose w
     return ()
 
-{- |
-    Here we process the assembly file one function and data
-    defenition at a time. When a function is encountered that
-    should have a info table we store it in a map. Otherwise
-    we print it. When an info table is found we retrieve its
-    function from the map and print them both.
+type Section = (B.ByteString, B.ByteString)
 
-    For all functions we fix up the stack alignment. We also
-    fix up the section defenition for functions and info tables.
--}
-fixTables :: Handle -> Handle -> I.IntMap B.ByteString -> IO ()
-fixTables r w m = do
-    f <- getFun r B.empty
-    if B.null f
-       then return ()
-       else let fun   = fixupStack f B.empty
-                (a,b) = B.breakSubstring infoSec fun
-                (x,c) = B.break eolPred b
-                fun'  = a `B.append` newInfoSec `B.append` c
-                n     = readInt $ B.drop infoLen x
-                (bs, m') | B.null b  = ([fun], m)
-                         | even n    = ([], I.insert n fun' m)
-                         | otherwise = case I.lookup (n+1) m of
-                               Just xf' -> ([fun',xf'], m)
-                               Nothing  -> ([fun'], m)
-            in mapM_ (B.hPut w) bs >> fixTables r w m'
+-- | Splits the file contents into its sections. Each is returned as a
+-- pair of the form (header line, contents lines)
+readSections :: Handle -> Handle -> IO [Section]
+readSections r w = go B.empty [] []
+  where
+    go hdr ss ls = do
+      e_l <- (try (B.hGetLine r))::IO (Either IOError B.ByteString)
 
--- | Read in the next function/data defenition
-getFun :: Handle -> B.ByteString -> IO B.ByteString
-getFun r f = do
-    l <- (try (B.hGetLine r))::IO (Either IOError B.ByteString)
-    case l of
-        Right l' | B.null l' -> return f
-                 | otherwise -> getFun r (f `B.append` newLine `B.append` l')
-        Left _ -> return B.empty
+      -- Note that ".type" directives at the end of a section refer to
+      -- the first directive of the *next* section, therefore we take
+      -- it over to that section.
+      let (tys, ls') = span isType ls
+          isType = B.isPrefixOf (B.pack "\t.type")
+          cts = B.intercalate newLine $ reverse ls'
 
+      -- Decide whether to directly output the section or append it
+      -- to the list for resorting.
+      let finishSection
+            | infoSec `B.isInfixOf` hdr =
+                cts `seq` return $ (hdr, cts):ss
+            | otherwise =
+                writeSection w (hdr, fixupStack cts B.empty) >> return ss
+
+      case e_l of
+        Right l | any (`B.isPrefixOf` l) [secStmt, textStmt, dataStmt]
+                  -> finishSection >>= \ss' -> go l ss' tys
+                | otherwise
+                  -> go hdr ss (l:ls)
+        Left _    -> finishSection >>= \ss' -> return (reverse ss')
+
+-- | Writes sections back
+writeSection :: Handle -> Section -> IO ()
+writeSection w (hdr, cts) = do
+  when (not $ B.null hdr) $
+    B.hPutStrLn w hdr
+  B.hPutStrLn w cts
+
+-- | Reorder and convert sections so info tables end up next to the
+-- code. Also does stack fixups.
+fixTables :: [Section] -> [Section]
+fixTables ss = fixed
+  where
+    -- Resort sections: We only assign a non-zero number to all
+    -- sections having the "STRIP ME" marker. As sortBy is stable,
+    -- this will cause all these sections to be appended to the end of
+    -- the file in the order given by the indexes.
+    extractIx hdr
+      | B.null a  = 0
+      | otherwise = 1 + readInt (B.takeWhile isDigit $ B.drop infoLen a)
+      where (_,a) = B.breakSubstring infoSec hdr
+    indexed = zip (map (extractIx . fst) ss) ss
+    sorted = map snd $ sortBy (compare `on` fst) indexed
+
+    -- Turn all the "STRIP ME" sections into normal text sections, as
+    -- they are in the right place now.
+    strip (hdr, cts)
+      | infoSec `B.isInfixOf` hdr = (textStmt, cts)
+      | otherwise                 = (hdr, cts)
+    stripped = map strip sorted
+
+    -- Do stack fixup
+    fix (hdr, cts) = (hdr, fixupStack cts B.empty)
+    fixed = map fix stripped
+ 
 {-|
     Mac OS X requires that the stack be 16 byte aligned when making a function
     call (only really required though when making a call that will pass through
     the dynamic linker). The alignment isn't correctly generated by LLVM as
-    LLVM rightly assumes that the stack wil be aligned to 16n + 12 on entry
+    LLVM rightly assumes that the stack will be aligned to 16n + 12 on entry
     (since the function call was 16 byte aligned and the return address should
     have been pushed, so sub 4). GHC though since it always uses jumps keeps
     the stack 16 byte aligned on both function calls and function entry.
@@ -96,6 +142,11 @@ getFun r f = do
     We correct the alignment here.
 -}
 fixupStack :: B.ByteString -> B.ByteString -> B.ByteString
+
+#if !darwin_TARGET_OS
+fixupStack = const
+
+#else
 fixupStack f f' | B.null f' =
     let -- fixup sub op
         (a, c) = B.breakSubstring spInst f
@@ -114,18 +165,21 @@ fixupStack f f' =
         (a', n) = B.breakEnd dollarPred a
         (n', x) = B.break commaPred n
         num     = B.pack $ show $ readInt n' + spFix
+        -- We need to avoid processing jumps to labels, they are of the form:
+        -- jmp\tL..., jmp\t_f..., jmpl\t_f..., jmpl\t*%eax..., jmpl *L...
+        targ = B.dropWhile ((==)'*') $ B.drop 1 $ B.dropWhile ((/=)'\t') $
+                B.drop labelStart c
     in if B.null c
           then f' `B.append` f
-          -- We need to avoid processing jumps to labels, they are of the form:
-          -- jmp\tL..., jmp\t_f..., jmpl\t_f..., jmpl\t*%eax...
-          else if B.index c labelStart == 'L'
+          else if B.head targ == 'L'
                 then fixupStack b $ f' `B.append` a `B.append` l
                 else fixupStack b $ f' `B.append` a' `B.append` num `B.append`
                                     x `B.append` l
+#endif
 
--- | read an int or error
+-- | Read an int or error
 readInt :: B.ByteString -> Int
 readInt str | B.all isDigit str = (read . B.unpack) str
-            | otherwise = error $ "LLvmMangler Cannot read" ++ show str
-                                ++ "as it's not an Int"
+            | otherwise = error $ "LLvmMangler Cannot read " ++ show str
+                                ++ " as it's not an Int"
 

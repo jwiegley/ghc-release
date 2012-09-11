@@ -1,7 +1,8 @@
 \begin{code}
+{-# LANGUAGE NoImplicitPrelude, NoBangPatterns, MagicHash, UnboxedTuples #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
-{-# LANGUAGE NoImplicitPrelude, NoBangPatterns #-}
 {-# OPTIONS_HADDOCK hide #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.Arr
@@ -17,7 +18,28 @@
 -----------------------------------------------------------------------------
 
 -- #hide
-module GHC.Arr where
+module GHC.Arr (
+        Ix(..), Array(..), STArray(..),
+
+        indexError, hopelessIndexError,
+        arrEleBottom, array, listArray,
+        (!), safeRangeSize, negRange, safeIndex, badSafeIndex,
+        bounds, numElements, numElementsSTArray, indices, elems,
+        assocs, accumArray, adjust, (//), accum,
+        amap, ixmap,
+        eqArray, cmpArray, cmpIntArray,
+        newSTArray, boundsSTArray,
+        readSTArray, writeSTArray,
+        freezeSTArray, thawSTArray,
+
+        -- * Unsafe operations
+        fill, done,
+        unsafeArray, unsafeArray',
+        lessSafeIndex, unsafeAt, unsafeReplace,
+        unsafeAccumArray, unsafeAccumArray', unsafeAccum,
+        unsafeReadSTArray, unsafeWriteSTArray,
+        unsafeFreezeSTArray, unsafeThawSTArray,
+    ) where
 
 import GHC.Enum
 import GHC.Num
@@ -350,17 +372,15 @@ instance  (Ix a1, Ix a2, Ix a3, Ix a4, Ix a5) => Ix (a1,a2,a3,a4,a5)  where
 %*********************************************************
 
 \begin{code}
-type IPr = (Int, Int)
-
 -- | The type of immutable non-strict (boxed) arrays
 -- with indices in @i@ and elements in @e@.
-data Ix i => Array i e
-                 = Array !i         -- the lower bound, l
-                         !i         -- the upper bound, u
-                         !Int       -- a cache of (rangeSize (l,u))
-                                    -- used to make sure an index is
-                                    -- really in range
-                         (Array# e) -- The actual elements
+data Array i e
+         = Array !i         -- the lower bound, l
+                 !i         -- the upper bound, u
+                 !Int       -- a cache of (rangeSize (l,u))
+                            -- used to make sure an index is
+                            -- really in range
+                 (Array# e) -- The actual elements
 
 -- | Mutable, boxed, non-strict arrays in the 'ST' monad.  The type
 -- arguments are as follows:

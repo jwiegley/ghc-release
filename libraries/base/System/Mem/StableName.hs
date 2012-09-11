@@ -1,3 +1,13 @@
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP #-}
+#ifdef __GLASGOW_HASKELL__
+{-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
+{-# LANGUAGE MagicHash #-}
+#if !defined(__PARALLEL_HASKELL__)
+{-# LANGUAGE UnboxedTuples #-}
+#endif
+#endif
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Mem.StableName

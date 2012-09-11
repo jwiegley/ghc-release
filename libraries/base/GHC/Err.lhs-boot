@@ -1,5 +1,7 @@
 \begin{code}
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+
 ---------------------------------------------------------------------------
 --                  Ghc.Err.hs-boot
 ---------------------------------------------------------------------------

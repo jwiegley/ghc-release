@@ -51,7 +51,7 @@ extern "C" {
 // Symbols that are extern, but private to the RTS, are declared
 // with visibility "hidden" to hide them outside the RTS shared
 // library.
-#if !defined(mingw32_HOST_OS)
+#if defined(HAS_VISIBILITY_HIDDEN)
 #define RTS_PRIVATE  GNUC3_ATTRIBUTE(visibility("hidden"))
 #else
 #define RTS_PRIVATE  /* disabled: RTS_PRIVATE */
@@ -219,6 +219,12 @@ DLL_IMPORT_RTS extern char **prog_argv;	/* so we can get at these from Haskell *
 DLL_IMPORT_RTS extern int    prog_argc;
 DLL_IMPORT_RTS extern char  *prog_name;
 
+#ifdef mingw32_HOST_OS
+// We need these two from Haskell too
+void getWin32ProgArgv(int *argc, wchar_t **argv[]);
+void setWin32ProgArgv(int argc, wchar_t *argv[]);
+#endif
+
 void stackOverflow(void);
 
 void stg_exit(int n) GNU_ATTRIBUTE(__noreturn__);
@@ -241,9 +247,6 @@ int stg_sig_install (int, int, void *);
 /* -----------------------------------------------------------------------------
    Miscellaneous garbage
    -------------------------------------------------------------------------- */
-
-/* declarations for runtime flags/values */
-#define MAX_RTS_ARGS 32
 
 #ifdef DEBUG
 #define TICK_VAR(arity) \

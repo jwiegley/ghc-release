@@ -12,6 +12,7 @@
 
 define build-package-data
 $(call trace, build-package-data($1,$2,$3))
+$(call profStart, build-package-data($1,$2,$3))
 # args:
 # $1 = dir
 # $2 = distdir
@@ -62,33 +63,30 @@ ifeq "$3" "0"
 $1_$2_CONFIGURE_OPTS += $$(BOOT_PKG_CONSTRAINTS)
 endif
 
+$1_$2_CONFIGURE_OPTS += --with-gcc="$$(CC_STAGE$3)"
+$1_$2_CONFIGURE_OPTS += --configure-option=--with-cc="$$(CC_STAGE$3)"
+$1_$2_CONFIGURE_OPTS += --with-ar="$$(AR_STAGE$3)"
+$1_$2_CONFIGURE_OPTS += --with-ranlib="$$(RANLIB)"
+
+ifneq "$$(BINDIST)" "YES"
+ifneq "$$(NO_GENERATED_MAKEFILE_RULES)" "YES"
+$1/$2/inplace-pkg-config : $1/$2/package-data.mk
+$1/$2/build/autogen/cabal_macros.h : $1/$2/package-data.mk
+
 # This rule configures the package, generates the package-data.mk file
 # for our build system, and registers the package for use in-place in
 # the build tree.
-$1/$2/package-data.mk $1/$2/inplace-pkg-config $1/$2/build/autogen/cabal_macros.h : $$(GHC_CABAL_INPLACE) $$($1_$2_GHC_PKG_DEP) $1/$$($1_PACKAGE).cabal $$(wildcard $1/configure) $$($1_$2_HC_CONFIG_DEP)
-	"$$(GHC_CABAL_INPLACE)" configure --with-ghc="$$($1_$2_HC_CONFIG)" --with-ghc-pkg="$$($1_$2_GHC_PKG)" --with-gcc="$$(WhatGccIsCalled)" --configure-option=--with-cc="$$(WhatGccIsCalled)" $$($1_CONFIGURE_OPTS) $$($1_$2_CONFIGURE_OPTS) -- $2 $1
+$1/$2/package-data.mk : $$(GHC_CABAL_INPLACE) $$($1_$2_GHC_PKG_DEP) $1/$$($1_PACKAGE).cabal $$(wildcard $1/configure) $$($1_$2_HC_CONFIG_DEP)
+	"$$(GHC_CABAL_INPLACE)" configure --with-ghc="$$($1_$2_HC_CONFIG)" --with-ghc-pkg="$$($1_$2_GHC_PKG)" $$($1_CONFIGURE_OPTS) $$($1_$2_CONFIGURE_OPTS) -- $2 $1
 ifeq "$$($1_$2_PROG)" ""
 ifneq "$$($1_$2_REGISTER_PACKAGE)" "NO"
-ifeq "$$(ghc_ge_6102) $3" "NO 0" # NOTE [1] below
-	    cat $1/$2/inplace-pkg-config | sed "s@^import-dirs:@import-dirs: $(TOP)/$1 $(TOP)/$1/src @" | "$$($1_$2_GHC_PKG)" update --force $$($1_$2_GHC_PKG_OPTS) -
-else
-	    "$$($1_$2_GHC_PKG)" update --force $$($1_$2_GHC_PKG_OPTS) $1/$2/inplace-pkg-config
+	"$$($1_$2_GHC_PKG)" update --force $$($1_$2_GHC_PKG_OPTS) $1/$2/inplace-pkg-config
+endif
 endif
 endif
 endif
 
-# [1] this is a hack for GHC <= 6.10.1.  When making dependencies with
-# ghc -M, in GHC 6.10.1 and earlier, GHC needed to find either the .hi
-# file or the source file for any dependency.  Since we build the
-# .depend files before building the packages, we have to make sure GHC
-# can find the source files; hence we have to make sure that the
-# import-dirs field of each boot package points to the sources for the
-# package as well as the dist/build dir.
-#
-# In GHC 6.10.2, we changed the way ghc -M worked so that it doesn't
-# check for existence of the source file, and doesn't look for the .hi
-# file if there is only one possibility for its location.  Which means
-# that we must *not* do that above hack in this case, because there
-# would be multiple locations to search for the .hi file.
+PACKAGE_DATA_MKS += $1/$2/package-data.mk
 
+$(call profEnd, build-package-data($1,$2,$3))
 endef

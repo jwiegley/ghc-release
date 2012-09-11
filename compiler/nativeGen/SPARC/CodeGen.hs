@@ -8,6 +8,7 @@
 
 module SPARC.CodeGen ( 
 	cmmTopCodeGen, 
+	generateJumpTableForInstr,
 	InstrBlock 
 ) 
 
@@ -36,34 +37,35 @@ import NCGMonad
 
 -- Our intermediate code:
 import BlockId
-import Cmm
+import OldCmm
 import CLabel
 
 -- The rest:
+import DynFlags
 import StaticFlags	( opt_PIC )
 import OrdList
 import Outputable
+import Platform
+import Unique
 
 import Control.Monad	( mapAndUnzipM )
-import DynFlags
 
 -- | Top level code generation
-cmmTopCodeGen 
-	:: DynFlags
-	-> RawCmmTop 
-	-> NatM [NatCmmTop Instr]
+cmmTopCodeGen :: RawCmmTop
+              -> NatM [NatCmmTop CmmStatics Instr]
 
-cmmTopCodeGen _
-	(CmmProc info lab params (ListGraph blocks)) 
- = do	
- 	(nat_blocks,statics) <- mapAndUnzipM basicBlockCodeGen blocks
+cmmTopCodeGen (CmmProc info lab (ListGraph blocks))
+ = do
+      dflags <- getDynFlagsNat
+      let platform = targetPlatform dflags
+      (nat_blocks,statics) <- mapAndUnzipM (basicBlockCodeGen platform) blocks
 
-	let proc 	= CmmProc info lab params (ListGraph $ concat nat_blocks)
-	let tops 	= proc : concat statics
+      let proc = CmmProc info lab (ListGraph $ concat nat_blocks)
+      let tops = proc : concat statics
 
-  	return tops
-  
-cmmTopCodeGen _ (CmmData sec dat) = do
+      return tops
+
+cmmTopCodeGen (CmmData sec dat) = do
   return [CmmData sec dat]  -- no translation, we just use CmmStatic
 
 
@@ -72,12 +74,12 @@ cmmTopCodeGen _ (CmmData sec dat) = do
 -- 	are indicated by the NEWBLOCK instruction.  We must split up the
 -- 	instruction stream into basic blocks again.  Also, we extract
 -- 	LDATAs here too.
-basicBlockCodeGen 
-	:: CmmBasicBlock
-	-> NatM ( [NatBasicBlock Instr]
-		, [NatCmmTop Instr])
+basicBlockCodeGen :: Platform
+                  -> CmmBasicBlock
+                  -> NatM ( [NatBasicBlock Instr]
+                          , [NatCmmTop CmmStatics Instr])
 
-basicBlockCodeGen cmm@(BasicBlock id stmts) = do
+basicBlockCodeGen platform cmm@(BasicBlock id stmts) = do
   instrs <- stmtsToInstrs stmts
   let
 	(top,other_blocks,statics) 
@@ -94,7 +96,7 @@ basicBlockCodeGen cmm@(BasicBlock id stmts) = do
 
 	-- do intra-block sanity checking
 	blocksChecked
-	  	= map (checkBlock cmm)
+	  	= map (checkBlock platform cmm)
 	  	$ BasicBlock id top : other_blocks
 
   return (blocksChecked, statics)
@@ -161,8 +163,8 @@ temporary, then do the other computation, and then use the temporary:
 -- | Convert a BlockId to some CmmStatic data
 jumpTableEntry :: Maybe BlockId -> CmmStatic
 jumpTableEntry Nothing = CmmStaticLit (CmmInt 0 wordWidth)
-jumpTableEntry (Just (BlockId id)) = CmmStaticLit (CmmLabel blockLabel)
-    where blockLabel = mkAsmTempLabel id
+jumpTableEntry (Just blockid) = CmmStaticLit (CmmLabel blockLabel)
+    where blockLabel = mkAsmTempLabel (getUnique blockid)
 
 
 
@@ -298,15 +300,11 @@ genSwitch expr ids
 		dst		<- getNewRegNat II32
 
 		label 		<- getNewLabelNat
-		let jumpTable	= map jumpTableEntry ids
 
 		return $ e_code `appOL`
 		 toOL	
-		 	-- the jump table
-			[ LDATA ReadOnlyData (CmmDataLabel label : jumpTable)
-
-			-- load base of jump table
-			, SETHI (HI (ImmCLbl label)) base_reg
+			[ -- load base of jump table
+			  SETHI (HI (ImmCLbl label)) base_reg
 			, OR    False base_reg (RIImm $ LO $ ImmCLbl label) base_reg
 			
 			-- the addrs in the table are 32 bits wide..
@@ -314,6 +312,11 @@ genSwitch expr ids
 
 			-- load and jump to the destination
 			, LD 	  II32 (AddrRegReg base_reg offset_reg) dst
-			, JMP_TBL (AddrRegImm dst (ImmInt 0)) [i | Just i <- ids]
+			, JMP_TBL (AddrRegImm dst (ImmInt 0)) ids label
 			, NOP ]
 
+generateJumpTableForInstr :: Instr -> Maybe (NatCmmTop CmmStatics Instr)
+generateJumpTableForInstr (JMP_TBL _ ids label) =
+	let jumpTable = map jumpTableEntry ids
+	in Just (CmmData ReadOnlyData (Statics label jumpTable))
+generateJumpTableForInstr _ = Nothing

@@ -6,13 +6,19 @@ maintainer:     igloo@earth.li
 synopsis:       Simple Integer library
 description:
     This package contains an simple Integer library.
-cabal-version:  >=1.2
+cabal-version:  >=1.6
 build-type: Simple
+
+source-repository head
+    type:     git
+    location: http://darcs.haskell.org/packages/integer-simple.git/
 
 Library {
     build-depends: ghc-prim
     exposed-modules: GHC.Integer
                      GHC.Integer.Simple.Internals
+                     GHC.Integer.Logarithms
+                     GHC.Integer.Logarithms.Internals
     other-modules: GHC.Integer.Type
     extensions: CPP, MagicHash, BangPatterns, UnboxedTuples,
                 ForeignFunctionInterface, UnliftedFFITypes,

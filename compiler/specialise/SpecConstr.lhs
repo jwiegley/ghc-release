@@ -1,3 +1,8 @@
+ToDo [Nov 2010]
+~~~~~~~~~~~~~~~
+1. Use a library type rather than an annotation for ForceSpecConstr
+2. Nuke NoSpecConstr
+
 %
 % (c) The GRASP/AQUA Project, Glasgow University, 1992-1998
 %
@@ -28,9 +33,9 @@ import CoreMonad
 import HscTypes         ( ModGuts(..) )
 import WwLib		( mkWorkerArgs )
 import DataCon
-import Coercion	
+import Coercion		hiding( substTy, substCo )
 import Rules
-import Type		hiding( substTy )
+import Type		hiding ( substTy )
 import Id
 import MkCore		( mkImpossibleExpr )
 import Var
@@ -45,6 +50,7 @@ import Demand
 import DmdAnal		( both )
 import Serialized       ( deserializeWithData )
 import Util
+import Pair
 import UniqSupply
 import Outputable
 import FastString
@@ -58,7 +64,6 @@ import Data.List
 #ifndef GHCI
 type SpecConstrAnnotation = ()
 #else
-import Literal          ( literalType )
 import TyCon            ( TyCon )
 import GHC.Exts( SpecConstrAnnotation(..) )
 #endif
@@ -382,6 +387,18 @@ specialising the loops arising from stream fusion, for example in NDP where
 we were getting literally hundreds of (mostly unused) specialisations of
 a local function.
 
+In a case like the above we end up never calling the original un-specialised
+function.  (Although we still leave its code around just in case.)
+
+However, if we find any boring calls in the body, including *unsaturated*
+ones, such as
+      letrec foo x y = ....foo...
+      in map foo xs
+then we will end up calling the un-specialised function, so then we *should*
+use the calls in the un-specialised RHS as seeds.  We call these "boring 
+call patterns, and callsToPats reports if it finds any of these.
+
+
 Note [Do not specialise diverging functions]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Specialising a function that just diverges is a waste of code.
@@ -421,22 +438,87 @@ loop. Here is a (simplified) example from the vector library:
   {-# INLINE foldl #-}
   foldl f z (Stream step s _) = foldl_loop SPEC z s
     where
-      foldl_loop SPEC z s = case step s of
-                              Yield x s' -> foldl_loop SPEC (f z x) s'
-                              Skip       -> foldl_loop SPEC z s'
+      foldl_loop !sPEC z s = case step s of
+                              Yield x s' -> foldl_loop sPEC (f z x) s'
+                              Skip       -> foldl_loop sPEC z s'
                               Done       -> z
 
 SpecConstr will spot the SPEC parameter and always fully specialise
-foldl_loop. Note that we can't just annotate foldl_loop since it isn't a
-top-level function but even if we could, inlining etc. could easily drop the
-annotation. We also have to prevent the SPEC argument from being removed by
-w/w which is why SPEC is a sum type. This is all quite ugly; we ought to come
-up with a better design.
+foldl_loop. Note that
+
+  * We have to prevent the SPEC argument from being removed by
+    w/w which is why (a) SPEC is a sum type, and (b) we have to seq on
+    the SPEC argument.
+
+  * And lastly, the SPEC argument is ultimately eliminated by
+    SpecConstr itself so there is no runtime overhead.
+
+This is all quite ugly; we ought to come up with a better design.
 
 ForceSpecConstr arguments are spotted in scExpr' and scTopBinds which then set
-force_spec to True when calling specLoop. This flag makes specLoop and
-specialise ignore specConstrCount and specConstrThreshold when deciding
-whether to specialise a function.
+sc_force to True when calling specLoop. This flag does three things:
+  * Ignore specConstrThreshold, to specialise functions of arbitrary size
+        (see scTopBind)
+  * Ignore specConstrCount, to make arbitrary numbers of specialisations
+        (see specialise)
+  * Specialise even for arguments that are not scrutinised in the loop
+        (see argToPat; Trac #4488)
+
+This flag is inherited for nested non-recursive bindings (which are likely to
+be join points and hence should be fully specialised) but reset for nested
+recursive bindings.
+
+What alternatives did I consider? Annotating the loop itself doesn't
+work because (a) it is local and (b) it will be w/w'ed and I having
+w/w propagating annotation somehow doesn't seem like a good idea. The
+types of the loop arguments really seem to be the most persistent
+thing.
+
+Annotating the types that make up the loop state doesn't work,
+either, because (a) it would prevent us from using types like Either
+or tuples here, (b) we don't want to restrict the set of types that
+can be used in Stream states and (c) some types are fixed by the user
+(e.g., the accumulator here) but we still want to specialise as much
+as possible.
+
+ForceSpecConstr is done by way of an annotation:
+  data SPEC = SPEC | SPEC2
+  {-# ANN type SPEC ForceSpecConstr #-}
+But SPEC is the *only* type so annotated, so it'd be better to
+use a particular library type.
+
+Alternatives to ForceSpecConstr
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Instead of giving the loop an extra argument of type SPEC, we
+also considered *wrapping* arguments in SPEC, thus
+  data SPEC a = SPEC a | SPEC2
+
+  loop = \arg -> case arg of
+                     SPEC state ->
+                        case state of (x,y) -> ... loop (SPEC (x',y')) ...
+                        S2 -> error ...
+The idea is that a SPEC argument says "specialise this argument
+regardless of whether the function case-analyses it.  But this
+doesn't work well:
+  * SPEC must still be a sum type, else the strictness analyser
+    eliminates it
+  * But that means that 'loop' won't be strict in its real payload
+This loss of strictness in turn screws up specialisation, because
+we may end up with calls like
+   loop (SPEC (case z of (p,q) -> (q,p)))
+Without the SPEC, if 'loop' was strict, the case would move out
+and we'd see loop applied to a pair. But if 'loop' isn' strict
+this doesn't look like a specialisable call.
+
+Note [NoSpecConstr]
+~~~~~~~~~~~~~~~~~~~
+The ignoreDataCon stuff allows you to say
+    {-# ANN type T NoSpecConstr #-}
+to mean "don't specialise on arguments of this type.  It was added
+before we had ForceSpecConstr.  Lacking ForceSpecConstr we specialised
+regardless of size; and then we needed a way to turn that *off*.  Now
+that we have ForceSpecConstr, this NoSpecConstr is probably redundant.
+(Used only for PArray.)
 
 -----------------------------------------------------
 		Stuff not yet handled
@@ -546,6 +628,8 @@ specConstrProgram guts
 data ScEnv = SCE { sc_size  :: Maybe Int,	-- Size threshold
 		   sc_count :: Maybe Int,	-- Max # of specialisations for any one fn
 						-- See Note [Avoiding exponential blowup]
+                   sc_force :: Bool,            -- Force specialisation?
+                                                -- See Note [Forcing specialisation]
 
 		   sc_subst :: Subst,   	-- Current substitution
 						-- Maps InIds to OutExprs
@@ -588,6 +672,7 @@ initScEnv :: DynFlags -> UniqFM SpecConstrAnnotation -> ScEnv
 initScEnv dflags anns
   = SCE { sc_size = specConstrThreshold dflags,
 	  sc_count = specConstrCount dflags,
+          sc_force = False,
 	  sc_subst = emptySubst, 
 	  sc_how_bound = emptyVarEnv, 
 	  sc_vals = emptyVarEnv,
@@ -603,6 +688,9 @@ instance Outputable HowBound where
   ppr RecFun = text "RecFun"
   ppr RecArg = text "RecArg"
 
+scForce :: ScEnv -> Bool -> ScEnv
+scForce env b = env { sc_force = b }
+
 lookupHowBound :: ScEnv -> Id -> Maybe HowBound
 lookupHowBound env id = lookupVarEnv (sc_how_bound env) id
 
@@ -611,6 +699,9 @@ scSubstId env v = lookupIdSubst (text "scSubstId") (sc_subst env) v
 
 scSubstTy :: ScEnv -> Type -> Type
 scSubstTy env ty = substTy (sc_subst env) ty
+
+scSubstCo :: ScEnv -> Coercion -> Coercion
+scSubstCo env co = substCo (sc_subst env) co
 
 zapScSubst :: ScEnv -> ScEnv
 zapScSubst env = env { sc_subst = zapSubstEnv (sc_subst env) }
@@ -690,7 +781,7 @@ extendCaseBndrs env scrut case_bndr con alt_bndrs
 		       	vanilla_args = map Type (tyConAppArgs (idType case_bndr)) ++
 				       varsToCoreExprs alt_bndrs
 
-   zap v | isTyCoVar v = v		-- See NB2 above
+   zap v | isTyVar v = v		-- See NB2 above
          | otherwise = zapIdOccInfo v
 
 
@@ -706,18 +797,16 @@ decreaseSpecCount env n_specs
 ---------------------------------------------------
 -- See Note [SpecConstrAnnotation]
 ignoreType    :: ScEnv -> Type   -> Bool
-ignoreAltCon  :: ScEnv -> AltCon -> Bool
+ignoreDataCon  :: ScEnv -> DataCon -> Bool
 forceSpecBndr :: ScEnv -> Var    -> Bool
 #ifndef GHCI
 ignoreType    _ _ = False
-ignoreAltCon  _ _ = False
+ignoreDataCon  _ _ = False
 forceSpecBndr _ _ = False
 
 #else /* GHCI */
 
-ignoreAltCon env (DataAlt dc) = ignoreTyCon env (dataConTyCon dc)
-ignoreAltCon env (LitAlt lit) = ignoreType env (literalType lit)
-ignoreAltCon _   DEFAULT      = panic "ignoreAltCon"  -- DEFAULT cannot be in a ConVal
+ignoreDataCon env dc = ignoreTyCon env (dataConTyCon dc)
 
 ignoreType env ty
   = case splitTyConApp_maybe ty of
@@ -824,11 +913,6 @@ combineUsages :: [ScUsage] -> ScUsage
 combineUsages [] = nullUsage
 combineUsages us = foldr1 combineUsage us
 
-lookupOcc :: ScUsage -> OutVar -> (ScUsage, ArgOcc)
-lookupOcc (SCU { scu_calls = sc_calls, scu_occs = sc_occs }) bndr
-  = (SCU {scu_calls = sc_calls, scu_occs = delVarEnv sc_occs bndr},
-     lookupVarEnv sc_occs bndr `orElse` NoOcc)
-
 lookupOccs :: ScUsage -> [OutVar] -> (ScUsage, [ArgOcc])
 lookupOccs (SCU { scu_calls = sc_calls, scu_occs = sc_occs }) bndrs
   = (SCU {scu_calls = sc_calls, scu_occs = delVarEnvList sc_occs bndrs},
@@ -837,12 +921,13 @@ lookupOccs (SCU { scu_calls = sc_calls, scu_occs = sc_occs }) bndrs
 data ArgOcc = NoOcc	-- Doesn't occur at all; or a type argument
 	    | UnkOcc	-- Used in some unknown way
 
-	    | ScrutOcc (UniqFM [ArgOcc])	-- See Note [ScrutOcc]
+	    | ScrutOcc 	-- See Note [ScrutOcc]
+                 (DataConEnv [ArgOcc])   -- How the sub-components are used
 
-	    | BothOcc	-- Definitely taken apart, *and* perhaps used in some other way
+type DataConEnv a = UniqFM a	 -- Keyed by DataCon
 
-{-	Note  [ScrutOcc]
-
+{- Note  [ScrutOcc]
+~~~~~~~~~~~~~~~~~~~
 An occurrence of ScrutOcc indicates that the thing, or a `cast` version of the thing,
 is *only* taken apart or applied.
 
@@ -862,8 +947,10 @@ A pattern binds b, x::a, y::b, z::b->a, but not 'a'!
 instance Outputable ArgOcc where
   ppr (ScrutOcc xs) = ptext (sLit "scrut-occ") <> ppr xs
   ppr UnkOcc 	    = ptext (sLit "unk-occ")
-  ppr BothOcc 	    = ptext (sLit "both-occ")
   ppr NoOcc    	    = ptext (sLit "no-occ")
+
+evalScrutOcc :: ArgOcc
+evalScrutOcc = ScrutOcc emptyUFM
 
 -- Experimentally, this vesion of combineOcc makes ScrutOcc "win", so
 -- that if the thing is scrutinised anywhere then we get to see that
@@ -873,10 +960,9 @@ combineOcc :: ArgOcc -> ArgOcc -> ArgOcc
 combineOcc NoOcc	 occ 	       = occ
 combineOcc occ 		 NoOcc	       = occ
 combineOcc (ScrutOcc xs) (ScrutOcc ys) = ScrutOcc (plusUFM_C combineOccs xs ys)
-combineOcc _occ          (ScrutOcc ys) = ScrutOcc ys
-combineOcc (ScrutOcc xs) _occ	       = ScrutOcc xs
+combineOcc UnkOcc        (ScrutOcc ys) = ScrutOcc ys
+combineOcc (ScrutOcc xs) UnkOcc	       = ScrutOcc xs
 combineOcc UnkOcc        UnkOcc        = UnkOcc
-combineOcc _	    _	     	       = BothOcc
 
 combineOccs :: [ArgOcc] -> [ArgOcc] -> [ArgOcc]
 combineOccs xs ys = zipWithEqual "combineOccs" combineOcc xs ys
@@ -891,16 +977,6 @@ setScrutOcc env usg (Var v)    occ
   | otherwise				= usg
 setScrutOcc _env usg _other _occ	-- Catch-all
   = usg	
-
-conArgOccs :: ArgOcc -> AltCon -> [ArgOcc]
--- Find usage of components of data con; returns [UnkOcc...] if unknown
--- See Note [ScrutOcc] for the extra UnkOccs in the vanilla datacon case
-
-conArgOccs (ScrutOcc fm) (DataAlt dc) 
-  | Just pat_arg_occs <- lookupUFM fm dc
-  = [UnkOcc | _ <- dataConUnivTyVars dc] ++ pat_arg_occs
-
-conArgOccs _other _con = repeat UnkOcc
 \end{code}
 
 %************************************************************************
@@ -921,15 +997,16 @@ scExpr env e = scExpr' env e
 
 
 scExpr' env (Var v)     = case scSubstId env v of
-		            Var v' -> return (varUsage env v' UnkOcc, Var v')
+		            Var v' -> return (mkVarUsage env v' [], Var v')
 		            e'     -> scExpr (zapScSubst env) e'
 
 scExpr' env (Type t)    = return (nullUsage, Type (scSubstTy env t))
+scExpr' env (Coercion c) = return (nullUsage, Coercion (scSubstCo env c))
 scExpr' _   e@(Lit {})  = return (nullUsage, e)
 scExpr' env (Note n e)  = do (usg,e') <- scExpr env e
                              return (usg, Note n e')
 scExpr' env (Cast e co) = do (usg, e') <- scExpr env e
-                             return (usg, Cast e' (scSubstTy env co))
+                             return (usg, Cast e' (scSubstCo env co))
 scExpr' env e@(App _ _) = scApp env (collectArgs e)
 scExpr' env (Lam b e)   = do let (env', b') = extendBndr env b
                              (usg, e') <- scExpr env' e
@@ -955,28 +1032,27 @@ scExpr' env (Case scrut b ty alts)
 	  ; (alt_usgs, alt_occs, alts')
 		<- mapAndUnzip3M (sc_alt alt_env scrut' b') alts
 
-	  ; let (alt_usg, b_occ) = lookupOcc (combineUsages alt_usgs) b'
-		scrut_occ        = foldr combineOcc b_occ alt_occs
-		scrut_usg'       = setScrutOcc env scrut_usg scrut' scrut_occ
+	  ; let scrut_occ  = foldr1 combineOcc alt_occs	-- Never empty
+		scrut_usg' = setScrutOcc env scrut_usg scrut' scrut_occ
 	  	-- The combined usage of the scrutinee is given
 	  	-- by scrut_occ, which is passed to scScrut, which
 	  	-- in turn treats a bare-variable scrutinee specially
 
-	  ; return (alt_usg `combineUsage` scrut_usg',
+	  ; return (foldr combineUsage scrut_usg' alt_usgs,
 	  	    Case scrut' b' (scSubstTy env ty) alts') }
 
     sc_alt env scrut' b' (con,bs,rhs)
       = do { let (env1, bs1) = extendBndrsWith RecArg env bs
 		 (env2, bs2) = extendCaseBndrs env1 scrut' b' con bs1
-	   ; (usg,rhs') <- scExpr env2 rhs
-	   ; let (usg', arg_occs) = lookupOccs usg bs2
+	   ; (usg, rhs') <- scExpr env2 rhs
+	   ; let (usg', b_occ:arg_occs) = lookupOccs usg (b':bs2)
 		 scrut_occ = case con of
 				DataAlt dc -> ScrutOcc (unitUFM dc arg_occs)
 				_      	   -> ScrutOcc emptyUFM
-	   ; return (usg', scrut_occ, (con, bs2, rhs')) }
+	   ; return (usg', b_occ `combineOcc` scrut_occ, (con, bs2, rhs')) }
 
 scExpr' env (Let (NonRec bndr rhs) body)
-  | isTyCoVar bndr	-- Type-lets may be created by doBeta
+  | isTyVar bndr	-- Type-lets may be created by doBeta
   = scExpr' (extendScSubst env bndr rhs) body
 
   | otherwise	
@@ -990,17 +1066,15 @@ scExpr' env (Let (NonRec bndr rhs) body)
 
 	; (body_usg, body') <- scExpr body_env3 body
 
-          -- NB: We don't use the ForceSpecConstr mechanism (see
-          -- Note [Forcing specialisation]) for non-recursive bindings
-          -- at the moment. I'm not sure if this is the right thing to do.
-	; let force_spec = False
-	; (spec_usg, specs) <- specialise env force_spec 
+          -- NB: For non-recursive bindings we inherit sc_force flag from
+          -- the parent function (see Note [Forcing specialisation])
+	; (spec_usg, specs) <- specialise env
                                           (scu_calls body_usg) 
 					  rhs_info
                                           (SI [] 0 (Just rhs_usg))
 
 	; return (body_usg { scu_calls = scu_calls body_usg `delVarEnv` bndr' } 
-	            `combineUsage` spec_usg,
+	            `combineUsage` rhs_usg `combineUsage` spec_usg,
 		  mkLets [NonRec b r | (b,r) <- specInfoBinds rhs_info specs] body')
 	}
 
@@ -1017,15 +1091,16 @@ scExpr' env (Let (Rec prs) body)
 	; (body_usg, body')     <- scExpr rhs_env2 body
 
 	-- NB: start specLoop from body_usg
-	; (spec_usg, specs) <- specLoop rhs_env2 force_spec
+	; (spec_usg, specs) <- specLoop (scForce rhs_env2 force_spec)
                                         (scu_calls body_usg) rhs_infos nullUsage
 					[SI [] 0 (Just usg) | usg <- rhs_usgs]
-		-- Do not unconditionally use rhs_usgs. 
+		-- Do not unconditionally generate specialisations from rhs_usgs  
 		-- Instead use them only if we find an unspecialised call
 		-- See Note [Local recursive groups]
 
-	; let all_usg = spec_usg `combineUsage` body_usg
-	      bind'   = Rec (concat (zipWith specInfoBinds rhs_infos specs))
+	; let rhs_usg = combineUsages rhs_usgs
+	      all_usg = spec_usg `combineUsage` rhs_usg `combineUsage` body_usg 
+              bind'   = Rec (concat (zipWith specInfoBinds rhs_infos specs))
 
 	; return (all_usg { scu_calls = scu_calls all_usg `delVarEnvList` bndrs' },
 	          Let bind' body') }
@@ -1060,15 +1135,8 @@ scApp env (Var fn, args)	-- Function is a variable
 	    fn'@(Lam {}) -> scExpr (zapScSubst env) (doBeta fn' args')
 			-- Do beta-reduction and try again
 
-	    Var fn' -> return (arg_usg `combineUsage` fn_usg, mkApps (Var fn') args')
-		where
-		  fn_usg = case lookupHowBound env fn' of
-				Just RecFun -> SCU { scu_calls = unitVarEnv fn' [(sc_vals env, args')], 
-					             scu_occs  = emptyVarEnv }
-				Just RecArg -> SCU { scu_calls = emptyVarEnv,
-					             scu_occs  = unitVarEnv fn' (ScrutOcc emptyUFM) }
-				Nothing     -> nullUsage
-
+	    Var fn' -> return (arg_usg `combineUsage` mkVarUsage env fn' args',
+                               mkApps (Var fn') args')
 
 	    other_fn' -> return (arg_usg, mkApps other_fn' args') }
 		-- NB: doing this ignores any usage info from the substituted
@@ -1090,6 +1158,20 @@ scApp env (other_fn, args)
 	; return (combineUsages arg_usgs `combineUsage` fn_usg, mkApps fn' args') }
 
 ----------------------
+mkVarUsage :: ScEnv -> Id -> [CoreExpr] -> ScUsage
+mkVarUsage env fn args
+  = case lookupHowBound env fn of
+	Just RecFun -> SCU { scu_calls = unitVarEnv fn [(sc_vals env, args)]
+	                   , scu_occs  = emptyVarEnv }
+	Just RecArg -> SCU { scu_calls = emptyVarEnv
+	                   , scu_occs  = unitVarEnv fn arg_occ }
+        Nothing     -> nullUsage
+  where
+    -- I rather think we could use UnkOcc all the time
+    arg_occ | null args = UnkOcc
+            | otherwise = evalScrutOcc
+
+----------------------
 scTopBind :: ScEnv -> CoreBind -> UniqSM (ScEnv, CoreBind)
 scTopBind env (Rec prs)
   | Just threshold <- sc_size env
@@ -1106,7 +1188,7 @@ scTopBind env (Rec prs)
 	; (rhs_usgs, rhs_infos) <- mapAndUnzipM (scRecRhs rhs_env2) (bndrs' `zip` rhss)
 	; let rhs_usg = combineUsages rhs_usgs
 
-	; (_, specs) <- specLoop rhs_env2 force_spec
+	; (_, specs) <- specLoop (scForce rhs_env2 force_spec)
                                  (scu_calls rhs_usg) rhs_infos nullUsage
 				 [SI [] 0 Nothing | _ <- bndrs]
 
@@ -1141,16 +1223,12 @@ scRecRhs env (bndr,rhs)
 specInfoBinds :: RhsInfo -> SpecInfo -> [(Id,CoreExpr)]
 specInfoBinds (RI fn new_rhs _ _ _) (SI specs _ _)
   = [(id,rhs) | OS _ _ id rhs <- specs] ++ 
+    	      -- First the specialised bindings
+
     [(fn `addIdSpecialisations` rules, new_rhs)]
+    	      -- And now the original binding
   where
     rules = [r | OS _ r _ _ <- specs]
-
-----------------------
-varUsage :: ScEnv -> OutVar -> ArgOcc -> ScUsage
-varUsage env v use 
-  | Just RecArg <- lookupHowBound env v = SCU { scu_calls = emptyVarEnv 
-					      , scu_occs = unitVarEnv v use }
-  | otherwise		   	        = nullUsage
 \end{code}
 
 
@@ -1171,10 +1249,13 @@ data SpecInfo = SI [OneSpec]		-- The specialisations we have generated
 
 		   Int			-- Length of specs; used for numbering them
 
-		   (Maybe ScUsage)	-- Nothing => we have generated specialisations
-					--	      from calls in the *original* RHS
-					-- Just cs => we haven't, and this is the usage
-					--	      of the original RHS
+		   (Maybe ScUsage)	-- Just cs  => we have not yet used calls in the
+					--	       from calls in the *original* RHS as
+				 	--	       seeds for new specialisations;
+					--	       if you decide to do so, here is the
+					-- 	       RHS usage (which has not yet been
+					--	       unleashed)
+					-- Nothing => we have
 					-- See Note [Local recursive groups]
 
 	-- One specialisation: Rule plus definition
@@ -1184,14 +1265,13 @@ data OneSpec  = OS CallPat 		-- Call pattern that generated this specialisation
 
 
 specLoop :: ScEnv
-         -> Bool                                -- force specialisation?
-                                                -- Note [Forcing specialisation]
 	 -> CallEnv
 	 -> [RhsInfo]
 	 -> ScUsage -> [SpecInfo]		-- One per binder; acccumulating parameter
 	 -> UniqSM (ScUsage, [SpecInfo])	-- ...ditto...
-specLoop env force_spec all_calls rhs_infos usg_so_far specs_so_far
-  = do	{ specs_w_usg <- zipWithM (specialise env force_spec all_calls) rhs_infos specs_so_far
+
+specLoop env all_calls rhs_infos usg_so_far specs_so_far
+  = do	{ specs_w_usg <- zipWithM (specialise env all_calls) rhs_infos specs_so_far
 	; let (new_usg_s, all_specs) = unzip specs_w_usg
 	      new_usg   = combineUsages new_usg_s
 	      new_calls = scu_calls new_usg
@@ -1199,23 +1279,24 @@ specLoop env force_spec all_calls rhs_infos usg_so_far specs_so_far
 	; if isEmptyVarEnv new_calls then
 		return (all_usg, all_specs) 
  	  else 
-		specLoop env force_spec new_calls rhs_infos all_usg all_specs }
+		specLoop env new_calls rhs_infos all_usg all_specs }
 
 specialise 
    :: ScEnv
-   -> Bool                              -- force specialisation?
-                                        --   Note [Forcing specialisation]
    -> CallEnv				-- Info on calls
    -> RhsInfo
    -> SpecInfo				-- Original RHS plus patterns dealt with
    -> UniqSM (ScUsage, SpecInfo)	-- New specialised versions and their usage
 
+-- Note: this only generates *specialised* bindings
+-- The original binding is added by specInfoBinds
+--
 -- Note: the rhs here is the optimised version of the original rhs
 -- So when we make a specialised copy of the RHS, we're starting
 -- from an RHS whose nested functions have been optimised already.
 
-specialise env force_spec bind_calls (RI fn _ arg_bndrs body arg_occs) 
-			  spec_info@(SI specs spec_count mb_unspec)
+specialise env bind_calls (RI fn _ arg_bndrs body arg_occs) 
+               spec_info@(SI specs spec_count mb_unspec)
   | not (isBottomingId fn)      -- Note [Do not specialise diverging functions]
   , not (isNeverActive (idInlineActivation fn))	-- See Note [Transfer activation]
   , notNull arg_bndrs		-- Only specialise functions
@@ -1231,9 +1312,11 @@ specialise env force_spec bind_calls (RI fn _ arg_bndrs body arg_occs)
 	; let n_pats      = length pats
               spec_count' = n_pats + spec_count
 	; case sc_count env of
-	    Just max | not force_spec && spec_count' > max
-		-> pprTrace "SpecConstr" msg $  
-                   return (nullUsage, spec_info)
+	    Just max | not (sc_force env) && spec_count' > max
+		-> if (debugIsOn || opt_PprStyle_Debug)	 -- Suppress this scary message for
+                   then pprTrace "SpecConstr" msg $  	 -- ordinary users!  Trac #5125
+                        return (nullUsage, spec_info)
+                   else return (nullUsage, spec_info)
 		where
 		   msg = vcat [ sep [ ptext (sLit "Function") <+> quotes (ppr fn)
 		       	            , nest 2 (ptext (sLit "has") <+> 
@@ -1341,6 +1424,7 @@ calcSpecStrictness fn qvars pats
     dmd_env = go emptyVarEnv dmds pats
 
     go env ds (Type {} : pats) = go env ds pats
+    go env ds (Coercion {} : pats) = go env ds pats
     go env (d:ds) (pat : pats) = go (go_one env d pat) ds pats
     go env _      _            = env
 
@@ -1409,7 +1493,6 @@ they are constructor applications.
 \begin{code}
 type CallPat = ([Var], [CoreExpr])	-- Quantified variables and arguments
 
-
 callsToPats :: ScEnv -> [OneSpec] -> [ArgOcc] -> [Call] -> UniqSM (Bool, [CallPat])
 	-- Result has no duplicate patterns, 
 	-- nor ones mentioned in done_pats
@@ -1417,7 +1500,7 @@ callsToPats :: ScEnv -> [OneSpec] -> [ArgOcc] -> [Call] -> UniqSM (Bool, [CallPa
 callsToPats env done_specs bndr_occs calls
   = do	{ mb_pats <- mapM (callToPats env bndr_occs) calls
 
-	; let good_pats :: [([Var], [CoreArg])]
+	; let good_pats :: [CallPat]
 	      good_pats = catMaybes mb_pats
 	      done_pats = [p | OS p _ _ _ <- done_specs] 
 	      is_done p = any (samePat p) done_pats
@@ -1435,21 +1518,20 @@ callToPats env bndr_occs (con_env, args)
   = return Nothing
   | otherwise
   = do	{ let in_scope = substInScope (sc_subst env)
-	; prs <- argsToPats env in_scope con_env (args `zip` bndr_occs)
-	; let (interesting_s, pats) = unzip prs
-	      pat_fvs = varSetElems (exprsFreeVars pats)
+	; (interesting, pats) <- argsToPats env in_scope con_env args bndr_occs
+	; let pat_fvs = varSetElems (exprsFreeVars pats)
 	      qvars   = filterOut (`elemInScopeSet` in_scope) pat_fvs
 		-- Quantify over variables that are not in sccpe
 		-- at the call site
 		-- See Note [Shadowing] at the top
 		
-	      (tvs, ids) = partition isTyCoVar qvars
+	      (tvs, ids) = partition isTyVar qvars
 	      qvars'     = tvs ++ ids
 		-- Put the type variables first; the type of a term
 		-- variable may mention a type variable
 
 	; -- pprTrace "callToPats"  (ppr args $$ ppr prs $$ ppr bndr_occs) $
-	  if or interesting_s
+	  if interesting
 	  then return (Just (qvars', pats))
 	  else return Nothing }
 
@@ -1465,9 +1547,10 @@ argToPat :: ScEnv
 	 -> CoreArg			-- A call arg (or component thereof)
 	 -> ArgOcc
 	 -> UniqSM (Bool, CoreArg)
+
 -- Returns (interesting, pat), 
 -- where pat is the pattern derived from the argument
---	      intersting=True if the pattern is non-trivial (not a variable or type)
+--	      interesting=True if the pattern is non-trivial (not a variable or type)
 -- E.g.		x:xs	     --> (True, x:xs)
 --		f xs         --> (False, w)	   where w is a fresh wildcard
 --		(f xs, 'c')  --> (True, (w, 'c'))  where w is a fresh wildcard
@@ -1476,6 +1559,9 @@ argToPat :: ScEnv
 --						   somewhere further out
 
 argToPat _env _in_scope _val_env arg@(Type {}) _arg_occ
+  = return (False, arg)
+    
+argToPat _env _in_scope _val_env arg@(Coercion {}) _arg_occ
   = return (False, arg)
 
 argToPat env in_scope val_env (Note _ arg) arg_occ
@@ -1502,6 +1588,9 @@ argToPat env in_scope val_env (Case scrut _ _ [(_, _, rhs)]) arg_occ
 -}
 
 argToPat env in_scope val_env (Cast arg co) arg_occ
+  | isReflCo co     -- Substitution in the SpecConstr itself
+                    -- can lead to identity coercions
+  = argToPat env in_scope val_env arg arg_occ
   | not (ignoreType env ty2)
   = do	{ (interesting, arg') <- argToPat env in_scope val_env arg arg_occ
 	; if not interesting then 
@@ -1510,10 +1599,10 @@ argToPat env in_scope val_env (Cast arg co) arg_occ
 	{ -- Make a wild-card pattern for the coercion
 	  uniq <- getUniqueUs
 	; let co_name = mkSysTvName uniq (fsLit "sg")
-	      co_var = mkCoVar co_name (mkCoKind ty1 ty2)
-	; return (interesting, Cast arg' (mkTyVarTy co_var)) } }
+	      co_var = mkCoVar co_name (mkCoType ty1 ty2)
+	; return (interesting, Cast arg' (mkCoVarCo co_var)) } }
   where
-    (ty1, ty2) = coercionKind co
+    Pair ty1 ty2 = coercionKind co
 
     
 
@@ -1532,25 +1621,28 @@ argToPat in_scope val_env arg arg_occ
   -- Check for a constructor application
   -- NB: this *precedes* the Var case, so that we catch nullary constrs
 argToPat env in_scope val_env arg arg_occ
-  | Just (ConVal dc args) <- isValue val_env arg
-  , not (ignoreAltCon env dc)
-  , case arg_occ of
-	ScrutOcc _ -> True		-- Used only by case scrutinee
-	BothOcc    -> case arg of	-- Used elsewhere
-			App {} -> True	--     see Note [Reboxing]
-			_other -> False
-	_other	   -> False	-- No point; the arg is not decomposed
-  = do	{ args' <- argsToPats env in_scope val_env (args `zip` conArgOccs arg_occ dc)
-	; return (True, mk_con_app dc (map snd args')) }
+  | Just (ConVal (DataAlt dc) args) <- isValue val_env arg
+  , not (ignoreDataCon env dc)        -- See Note [NoSpecConstr]
+  , Just arg_occs <- mb_scrut dc
+  = do	{ let (ty_args, rest_args) = splitAtList (dataConUnivTyVars dc) args
+        ; (_, args') <- argsToPats env in_scope val_env rest_args arg_occs
+	; return (True, 
+                  mkConApp dc (ty_args ++ args')) }
+  where
+    mb_scrut dc = case arg_occ of
+    	            ScrutOcc bs 
+                           | Just occs <- lookupUFM bs dc
+                                          -> Just (occs)  -- See Note [Reboxing]
+                    _other | sc_force env -> Just (repeat UnkOcc)
+                           | otherwise    -> Nothing
 
   -- Check if the argument is a variable that 
-  -- is in scope at the function definition site
-  -- It's worth specialising on this if
-  --	(a) it's used in an interesting way in the body
+  --	(a) is used in an interesting way in the body
   --	(b) we know what its value is
+  -- In that case it counts as "interesting"
 argToPat env in_scope val_env (Var v) arg_occ
-  | case arg_occ of { UnkOcc -> False; _other -> True },	-- (a)
-    is_value,							-- (b)
+  | sc_force env || case arg_occ of { UnkOcc -> False; _other -> True }, -- (a)
+    is_value,                                                            -- (b)
     not (ignoreType env (varType v))
   = return (True, Var v)
   where
@@ -1584,17 +1676,18 @@ argToPat _env _in_scope _val_env arg _arg_occ
   = wildCardPat (exprType arg)
 
 wildCardPat :: Type -> UniqSM (Bool, CoreArg)
-wildCardPat ty = do { uniq <- getUniqueUs
-		    ; let id = mkSysLocal (fsLit "sc") uniq ty
-		    ; return (False, Var id) }
+wildCardPat ty
+  = do { uniq <- getUniqueUs
+       ; let id = mkSysLocal (fsLit "sc") uniq ty
+       ; return (False, Var id) }
 
 argsToPats :: ScEnv -> InScopeSet -> ValueEnv
-	   -> [(CoreArg, ArgOcc)]
-	   -> UniqSM [(Bool, CoreArg)]
-argsToPats env in_scope val_env args
-  = mapM do_one args
-  where
-    do_one (arg,occ) = argToPat env in_scope val_env arg occ
+	   -> [CoreArg] -> [ArgOcc]  -- Should be same length
+	   -> UniqSM (Bool, [CoreArg])
+argsToPats env in_scope val_env args occs
+  = do { stuff <- zipWithM (argToPat env in_scope val_env) args occs
+       ; let (interesting_s, args') = unzip stuff
+       ; return (or interesting_s, args') }
 \end{code}
 
 
@@ -1617,7 +1710,7 @@ isValue env (Var v)
 	-- as well, for let-bound constructors!
 
 isValue env (Lam b e)
-  | isTyCoVar b = case isValue env e of
+  | isTyVar b = case isValue env e of
 		  Just _  -> Just LambdaVal
 		  Nothing -> Nothing
   | otherwise = Just LambdaVal
@@ -1639,11 +1732,6 @@ isValue _env expr	-- Maybe it's a constructor application
 
 isValue _env _expr = Nothing
 
-mk_con_app :: AltCon -> [CoreArg] -> CoreExpr
-mk_con_app (LitAlt lit)  []   = Lit lit
-mk_con_app (DataAlt con) args = mkConApp con args
-mk_con_app _other _args = panic "SpecConstr.mk_con_app"
-
 samePat :: CallPat -> CallPat -> Bool
 samePat (vs1, as1) (vs2, as2)
   = all2 same as1 as2
@@ -1657,6 +1745,7 @@ samePat (vs1, as1) (vs2, as2)
     same (App f1 a1) (App f2 a2) = same f1 f2 && same a1 a2
 
     same (Type {}) (Type {}) = True	-- Note [Ignore type differences]
+    same (Coercion {}) (Coercion {}) = True
     same (Note _ e1) e2	= same e1 e2	-- Ignore casts and notes
     same (Cast e1 _) e2	= same e1 e2
     same e1 (Note _ e2) = same e1 e2

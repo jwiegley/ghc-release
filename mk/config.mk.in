@@ -97,6 +97,16 @@ GhcStage1HcOpts=
 GhcStage2HcOpts=-O2
 GhcStage3HcOpts=-O2
 
+# These options modify whether or not a built compiler for a bootstrap
+# stage defaults to using the new code generation path.  The new
+# code generation path is a bit slower, so for development just
+# GhcStage2DefaultNewCodegen=YES, but it's also a good idea to try
+# building all libraries and the stage2 compiler with the
+# new code generator, which involves GhcStage1DefaultNewCodegen=YES.
+GhcStage1DefaultNewCodegen=NO
+GhcStage2DefaultNewCodegen=NO
+GhcStage3DefaultNewCodegen=NO
+
 GhcDebugged=NO
 GhcDynamic=NO
 
@@ -104,12 +114,10 @@ GhcDynamic=NO
 GhcProfiled=NO
 
 # Do we support shared libs?
-SharedLibsPlatformList = \
-	i386-unknown-linux x86_64-unknown-linux \
+SharedLibsPlatformList = i386-unknown-linux x86_64-unknown-linux \
 	i386-unknown-freebsd x86_64-unknown-freebsd \
 	i386-unknown-openbsd x86_64-unknown-openbsd \
 	i386-unknown-mingw32 \
-	i386-unknown-solaris2 \
 	i386-apple-darwin powerpc-apple-darwin
 
 ifeq "$(SOLARIS_BROKEN_SHLD)" "NO"
@@ -152,9 +160,6 @@ OsSupportsNCG=$(strip $(patsubst $(HostOS_CPP), YES, $(patsubst aix,,$(HostOS_CP
 GhcWithNativeCodeGen=$(strip\
     $(if $(filter YESYESNO,\
 		  $(OsSupportsNCG)$(ArchSupportsNCG)$(GhcUnregisterised)),YES,NO))
-
-# Build a compiler with the llvm code generator backend
-GhcWithLlvmCodeGen=NO
 
 HaveLibDL = @HaveLibDL@
 
@@ -277,13 +282,8 @@ GhcThreaded = $(if $(findstring thr,$(GhcRTSWays)),YES,NO)
 #
 # 	-O(2) is pretty desirable, otherwise no inlining of prelude
 #		things (incl "+") happens when compiling with this compiler
-#
-#	-XGenerics switches on generation of support code for 
-#		derivable type classes.  This is now off by default,
-#		but we switch it on for the libraries so that we generate
-#		the code in case someone importing wants it
 
-GhcLibHcOpts=-O2 -XGenerics
+GhcLibHcOpts=-O2
 
 # Strip local symbols from libraries?  This can make the libraries smaller,
 # but makes debugging somewhat more difficult.  Doesn't work with all ld's.
@@ -417,9 +417,6 @@ SRC_HC_OPTS += -H32m -O
 # These flags make flex 8-bit
 SRC_FLEX_OPTS	+= -8
 
-# Default fptools options for dllwrap.
-SRC_BLD_DLL_OPTS += --target=i386-mingw32
-
 # Flags for CPP when running GreenCard on .pgc files
 GC_CPP_OPTS += -P -E -x c -traditional -D__GLASGOW_HASKELL__
 
@@ -435,7 +432,6 @@ GHC_HP2PS_PGM           = hp2ps$(exeext)
 GHC_GHCTAGS_PGM         = ghctags$(exeext)
 GHC_HSC2HS_PGM          = hsc2hs$(exeext)
 GHC_TOUCHY_PGM          = touchy$(exeext)
-GHC_MANGLER_PGM         = ghc-asm
 GHC_SPLIT_PGM           = ghc-split
 GHC_SYSMAN_PGM          = SysMan
 GHC_GENPRIMOP_PGM       = genprimopcode$(exeext)
@@ -445,7 +441,6 @@ GHC_PKG_PGM             = ghc-pkg$(exeext)
 GHC_LTX_PGM             = ltx$(exeext)
 GHC_MKDIRHIER_PGM       = mkdirhier
 GHC_LNDIR_PGM           = lndir
-GHC_DUMMY_GHC_PGM       = dummy-ghc$(exeext)
 
 ifeq "$(TARGETPLATFORM)" "i386-unknown-mingw32"
 GHC_CP			= "xcopy /y"
@@ -456,7 +451,6 @@ GHC_PERL		= $(PERL)
 endif
 
 HP2PS			= $(GHC_HP2PS_DIR)/$(GHC_HP2PS_PGM)
-MANGLER			= $(INPLACE_LIB)/$(GHC_MANGLER_PGM)
 SPLIT			= $(INPLACE_LIB)/$(GHC_SPLIT_PGM)
 SYSMAN 			= $(GHC_SYSMAN_DIR)/$(GHC_SYSMAN_PGM)
 LTX 			= $(GHC_LTX_DIR)/$(GHC_LTX_PGM)
@@ -471,19 +465,14 @@ GHC_PKG_INPLACE		= $(INPLACE_BIN)/$(GHC_PKG_PGM)
 GHCTAGS_INPLACE		= $(INPLACE_BIN)/$(GHC_GHCTAGS_PGM)
 HSC2HS_INPLACE		= $(INPLACE_BIN)/$(GHC_HSC2HS_PGM)
 GENPRIMOP_INPLACE	= $(INPLACE_BIN)/$(GHC_GENPRIMOP_PGM)
-DUMMY_GHC_INPLACE	= $(INPLACE_BIN)/$(GHC_DUMMY_GHC_PGM)
 
 GENERATED_FILE  = chmod a-w
 EXECUTABLE_FILE = chmod +x
 
 #-----------------------------------------------------------------------------
-# Haskell compilers and mkdependHS
+# Installed GHC
 
-# $(GHC), $(HBC) and $(NHC) point to installed versions of the relevant
-# compilers, if available.
-#
-# $(HC) is a generic Haskell 98 compiler, set to $(GHC) by default.
-# $(MKDEPENDHS) is the Haskell dependency generator (ghc -M).
+# $(GHC) points to installed version of the compiler.
 #
 # NOTE: Don't override $(GHC) in build.mk, use configure --with-ghc instead
 # (because the version numbers have to be calculated).
@@ -495,14 +484,6 @@ GHC := @WithGhc@
 ifneq "$(wildcard $(GHC).exe)" ""
 GHC := $(GHC).exe
 endif
-
-GhcDir          = $(dir $(GHC))
-
-# Set to YES if $(GHC) has the editline package installed
-GhcHasEditline	= @GhcHasEditline@
-
-HBC		= @HBC@
-NHC		= @NHC@
 
 # Sometimes we want to invoke ghc from the build tree in different
 # places (eg. it's handy to have a nofib & a ghc build in the same
@@ -533,8 +514,6 @@ GhcMajVersion	= @GhcMajVersion@
 GhcMinVersion	= @GhcMinVersion@
 
 # Keep this in sync with the variables in package-config.mk
-ghc_ge_6102 = @ghc_ge_6102@
-ghc_ge_611 = @ghc_ge_611@
 ghc_ge_613 = @ghc_ge_613@
 
 # Canonicalised ghc version number, used for easy (integer) version
@@ -553,18 +532,20 @@ endif
 # the flag --with-gcc=<blah> instead.  The reason is that the configure script
 # needs to know which gcc you're using in order to perform its tests.
 
-HaveGcc 	= @HaveGcc@
-UseGcc  	= YES
 WhatGccIsCalled = @WhatGccIsCalled@
 GccVersion      = @GccVersion@
-GccLT34		= @GccLT34@
-ifeq "$(strip $(HaveGcc))" "YES"
-ifneq "$(strip $(UseGcc))"  "YES"
-  CC	= cc
-else
-  CC	= $(WhatGccIsCalled)
-endif
-endif
+GccLT34         = @GccLT34@
+GccLT46         = @GccLT46@
+CC              = $(WhatGccIsCalled)
+CC_STAGE0       = @CC_STAGE0@
+CC_STAGE1       = $(CC)
+CC_STAGE2       = $(CC)
+CC_STAGE3       = $(CC)
+AS              = $(WhatGccIsCalled)
+AS_STAGE0       = @CC_STAGE0@
+AS_STAGE1       = $(AS)
+AS_STAGE2       = $(AS)
+AS_STAGE3       = $(AS)
 
 # C compiler and linker flags from configure (e.g. -m<blah> to select
 # correct C compiler backend). The stage number is the stage of GHC
@@ -586,6 +567,12 @@ ifeq "$(TARGETPLATFORM)" "ia64-unknown-linux"
 CONF_CC_OPTS += -G0
 endif
 
+# The .hsc files aren't currently safe for cross-compilation on Windows:
+#     libraries\haskeline\.\System\Console\Haskeline\Backend\Win32.hsc:160
+#     directive "let" is not safe for cross-compilation
+ifneq "$(Windows)" "YES"
+SRC_HSC2HS_OPTS += --cross-safe
+endif
 SRC_HSC2HS_OPTS += $(addprefix --cflag=,$(filter-out -O,$(SRC_CC_OPTS) $(CONF_CC_OPTS_STAGE0)))
 SRC_HSC2HS_OPTS += $(foreach d,$(GMP_INCLUDE_DIRS),-I$(d))
 
@@ -608,10 +595,24 @@ DLLTOOL			= inplace/mingw/bin/dlltool.exe
 
 AR			= @ArCmd@
 AR_OPTS			= @ArArgs@
-ArSupportsInput		= @ArSupportsInput@
 ArSupportsAtFile = @ArSupportsAtFile@
-# Yuckage: for ghc/utils/parallel -- todo: nuke this dependency!!
-BASH                    = /usr/local/bin/bash
+
+AR_STAGE0 = @AR_STAGE0@
+AR_STAGE1 = $(AR)
+AR_STAGE2 = $(AR)
+AR_STAGE3 = $(AR)
+AR_OPTS_STAGE0 = @AR_OPTS_STAGE0@
+AR_OPTS_STAGE1 = $(AR_OPTS)
+AR_OPTS_STAGE2 = $(AR_OPTS)
+AR_OPTS_STAGE3 = $(AR_OPTS)
+EXTRA_AR_ARGS_STAGE0 = $(EXTRA_AR_ARGS)
+EXTRA_AR_ARGS_STAGE1 = $(EXTRA_AR_ARGS)
+EXTRA_AR_ARGS_STAGE2 = $(EXTRA_AR_ARGS)
+EXTRA_AR_ARGS_STAGE3 = $(EXTRA_AR_ARGS)
+ArSupportsAtFile_STAGE0 = @ArSupportsAtFile_STAGE0@
+ArSupportsAtFile_STAGE1 = $(ArSupportsAtFile)
+ArSupportsAtFile_STAGE2 = $(ArSupportsAtFile)
+ArSupportsAtFile_STAGE3 = $(ArSupportsAtFile)
 
 CONTEXT_DIFF		= @ContextDiffCmd@
 CP			= cp
@@ -644,7 +645,6 @@ NROFF			= nroff
 PERL 			= @PerlCmd@
 PYTHON			= @PythonCmd@
 PIC			= pic
-PREPROCESSCMD		= $(CC) -E
 RANLIB			= @RANLIB@
 SED			= @SedCmd@
 TR 			= tr
@@ -665,6 +665,10 @@ LD_X			= @LdXFlag@
 # GNU ld supports input via a linker script, which is useful to avoid
 # overflowing command-line length limits.
 LdIsGNULd		= @LdIsGNULd@
+
+# Set to YES if ld has the --build-id flag.  Sometimes we need to
+# disable it with --build-id=none.
+LdHasBuildId	        = @LdHasBuildId@
 
 # On MSYS, building with SplitObjs=YES fails with 
 #   ar: Bad file number
@@ -736,8 +740,6 @@ XSLTPROC_LABEL_OPTS	 = --stringparam toc.section.depth 3 \
 #-----------------------------------------------------------------------------
 # 		FPtools support software
 
-BLD_DLL			= dllwrap
-
 #
 # ghc-pkg
 #
@@ -753,10 +755,6 @@ HAPPY_VERSION		= @HappyVersion@
 #
 SRC_HAPPY_OPTS		= -agc --strict
 
-# Temp. to work around performance problems in the HEAD around 8/12/2003,
-# A Happy compiled with this compiler needs more stack.
-SRC_HAPPY_OPTS		+= +RTS -K2m -RTS
-
 #
 # Alex
 #
@@ -766,8 +764,6 @@ ALEX_VERSION		= @AlexVersion@
 # Options to pass to Happy when we're going to compile the output with GHC
 #
 SRC_ALEX_OPTS		= -g
-
-HSTAGS = @HstagsCmd@
 
 # Should we build haddock docs?
 HADDOCK_DOCS = YES

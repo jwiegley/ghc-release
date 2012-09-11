@@ -5,7 +5,7 @@
 #define HAVE_EPOLL 1
 
 /* Define to 1 if you have the `epoll_create1' function. */
-#define HAVE_EPOLL_CREATE1 1
+/* #undef HAVE_EPOLL_CREATE1 */
 
 /* Define to 1 if you have the `epoll_ctl' function. */
 #define HAVE_EPOLL_CTL 1

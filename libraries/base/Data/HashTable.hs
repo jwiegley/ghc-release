@@ -1,4 +1,6 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude -funbox-strict-fields -fno-warn-name-shadowing #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude #-}
+{-# OPTIONS_GHC -funbox-strict-fields -fno-warn-name-shadowing #-}
 
 -----------------------------------------------------------------------------
 -- |

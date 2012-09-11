@@ -1,4 +1,6 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, MagicHash #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.List
@@ -410,6 +412,8 @@ intersect               =  intersectBy (==)
 
 -- | The 'intersectBy' function is the non-overloaded version of 'intersect'.
 intersectBy             :: (a -> a -> Bool) -> [a] -> [a] -> [a]
+intersectBy _  [] _     =  []
+intersectBy _  _  []    =  []
 intersectBy eq xs ys    =  [x | x <- xs, any (eq x) ys]
 
 -- | The 'intersperse' function takes an element and a list and
@@ -420,8 +424,16 @@ intersectBy eq xs ys    =  [x | x <- xs, any (eq x) ys]
 
 intersperse             :: a -> [a] -> [a]
 intersperse _   []      = []
-intersperse _   [x]     = [x]
-intersperse sep (x:xs)  = x : sep : intersperse sep xs
+intersperse sep (x:xs)  = x : prependToAll sep xs
+
+
+-- Not exported:
+-- We want to make every element in the 'intersperse'd list available
+-- as soon as possible to avoid space leaks. Experiments suggested that
+-- a separate top-level helper is more efficient than a local worker.
+prependToAll            :: a -> [a] -> [a]
+prependToAll _   []     = []
+prependToAll sep (x:xs) = sep : x : prependToAll sep xs
 
 -- | 'intercalate' @xs xss@ is equivalent to @('concat' ('intersperse' xs xss))@.
 -- It inserts the list @xs@ in between the lists in @xss@ and concatenates the
@@ -733,19 +745,24 @@ groupBy eq (x:xs)       =  (x:ys) : groupBy eq zs
 --
 -- > inits "abc" == ["","a","ab","abc"]
 --
+-- Note that 'inits' has the following strictness property:
+-- @inits _|_ = [] : _|_@
 inits                   :: [a] -> [[a]]
-inits []                =  [[]]
-inits (x:xs)            =  [[]] ++ map (x:) (inits xs)
+inits xs                =  [] : case xs of
+                                  []      -> []
+                                  x : xs' -> map (x :) (inits xs')
 
 -- | The 'tails' function returns all final segments of the argument,
 -- longest first.  For example,
 --
 -- > tails "abc" == ["abc", "bc", "c",""]
 --
+-- Note that 'tails' has the following strictness property:
+-- @tails _|_ = _|_ : _|_@
 tails                   :: [a] -> [[a]]
-tails []                =  [[]]
-tails xxs@(_:xs)        =  xxs : tails xs
-
+tails xs                =  xs : case xs of
+                                  []      -> []
+                                  _ : xs' -> tails xs'
 
 -- | The 'subsequences' function returns the list of all subsequences of the argument.
 --

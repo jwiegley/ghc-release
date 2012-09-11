@@ -234,6 +234,7 @@ main(int argc, char *argv[])
 
     field_offset(Capability, r);
     field_offset(Capability, lock);
+    struct_field(Capability, no);
     struct_field(Capability, mut_lists);
     struct_field(Capability, context_switch);
     struct_field(Capability, sparks);
@@ -245,8 +246,7 @@ main(int argc, char *argv[])
     struct_field(bdescr, link);
 
     struct_size(generation);
-    struct_field(generation, mut_list);
-    struct_field(generation, n_new_large_blocks);
+    struct_field(generation, n_new_large_words);
 
     struct_size(CostCentreStack);
     struct_field(CostCentreStack, ccsID);
@@ -296,9 +296,12 @@ main(int argc, char *argv[])
     closure_field(StgTSO, dirty);
     closure_field(StgTSO, bq);
     closure_field_("StgTSO_CCCS", StgTSO, prof.CCCS);
-    tso_field(StgTSO, sp);
-    tso_field_offset(StgTSO, stack);
-    tso_field(StgTSO, stack_size);
+    closure_field(StgTSO, stackobj);
+
+    closure_field(StgStack, sp);
+    closure_field_offset(StgStack, stack);
+    closure_field(StgStack, stack_size);
+    closure_field(StgStack, dirty);
 
     struct_size(StgTSOProfInfo);
 

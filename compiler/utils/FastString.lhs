@@ -2,6 +2,7 @@
 % (c) The University of Glasgow, 1997-2006
 %
 \begin{code}
+{-# LANGUAGE BangPatterns #-}
 {-# OPTIONS -fno-warn-unused-imports #-}
 -- XXX GHC 6.9 seems to be confused by unpackCString# being used only in
 --     a RULE
@@ -95,7 +96,6 @@ import FastFunctions
 import Panic
 import Util
 
-import Foreign hiding   ( unsafePerformIO )
 import Foreign.C
 import GHC.Exts
 import System.IO
@@ -105,13 +105,15 @@ import Data.IORef       ( IORef, newIORef, readIORef, writeIORef )
 import Data.Maybe       ( isJust )
 import Data.Char        ( ord )
 
-#if __GLASGOW_HASKELL__ >= 611
-import GHC.IO ( IO(..) )
+import GHC.IO           ( IO(..) )
+import GHC.Ptr          ( Ptr(..) )
+
+#if __GLASGOW_HASKELL__ >= 701
+import Foreign.Safe
 #else
-import GHC.IOBase ( IO(..) )
+import Foreign hiding ( unsafePerformIO )
 #endif
 
-import GHC.Ptr          ( Ptr(..) )
 #if defined(__GLASGOW_HASKELL__)
 import GHC.Base         ( unpackCString# )
 #endif

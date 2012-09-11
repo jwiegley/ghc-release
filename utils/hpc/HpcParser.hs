@@ -1,5 +1,6 @@
 {-# OPTIONS_GHC -fno-warn-overlapping-patterns #-}
 {-# OPTIONS -fglasgow-exts -cpp #-}
+{-# LANGUAGE BangPatterns #-} -- required for versions of Happy before 1.18.6
 {-# OPTIONS -Wwarn -XNoMonomorphismRestriction #-}
 -- The NoMonomorphismRestriction deals with a Happy infelicity
 --    With OutsideIn's more conservativ monomorphism restriction

@@ -22,8 +22,9 @@ module HsPat (
 
 	mkPrefixConPat, mkCharLitPat, mkNilPat, 
 
-	isBangHsBind, isBangLPat, hsPatNeedsParens,
-	isIrrefutableHsPat,
+        isBangHsBind, isLiftedPatBind,
+        isBangLPat, hsPatNeedsParens,
+        isIrrefutableHsPat,
 
 	pprParendLPat
     ) where
@@ -64,9 +65,7 @@ data Pat id
 	-- support hsPatType :: Pat Id -> Type
 
   | VarPat	id			-- Variable
-  | VarPatOut	id TcEvBinds		-- Used only for overloaded Ids; the 
-					-- bindings give its overloaded instances
-  | LazyPat	(LPat id)		-- Lazy pattern
+  | LazyPat     (LPat id)               -- Lazy pattern
   | AsPat	(Located id) (LPat id)  -- As pattern
   | ParPat      (LPat id)		-- Parenthesised pattern
   | BangPat	(LPat id)		-- Bang pattern
@@ -123,7 +122,9 @@ data Pat id
   | LitPat	    HsLit		-- Used for *non-overloaded* literal patterns:
 					-- Int#, Char#, Int, Char, String, etc.
 
-  | NPat	    (HsOverLit id)		-- ALWAYS positive
+  | NPat		-- Used for all overloaded literals, 
+    			-- including overloaded strings with -XOverloadedStrings
+                    (HsOverLit id)		-- ALWAYS positive
 		    (Maybe (SyntaxExpr id))	-- Just (Name of 'negate') for negative
 						-- patterns, Nothing otherwise
 		    (SyntaxExpr id)		-- Equality checker, of type t->t->Bool
@@ -132,12 +133,6 @@ data Pat id
 		    (HsOverLit id)	-- It'll always be an HsIntegral
 		    (SyntaxExpr id)	-- (>=) function, of type t->t->Bool
 		    (SyntaxExpr id)	-- Name of '-' (see RnEnv.lookupSyntaxName)
-
-	------------ Generics ---------------
-  | TypePat	    (LHsType id)	-- Type pattern for generic definitions
-                                        -- e.g  f{| a+b |} = ...
-                                        -- These show up only in class declarations,
-                                        -- and should be a top-level pattern
 
 	------------ Pattern type signatures ---------------
   | SigPatIn	    (LPat id)		-- Pattern with a type signature
@@ -257,7 +252,6 @@ patNeedsParens _              = False
 
 pprPat :: (OutputableBndr name) => Pat name -> SDoc
 pprPat (VarPat var)  	  = pprPatBndr var
-pprPat (VarPatOut var bs) = pprPatBndr var <+> braces (ppr bs)
 pprPat (WildPat _)	  = char '_'
 pprPat (LazyPat pat)      = char '~' <> pprParendLPat pat
 pprPat (BangPat pat)      = char '!' <> pprParendLPat pat
@@ -283,7 +277,6 @@ pprPat (NPat l Nothing  _)  = ppr l
 pprPat (NPat l (Just _) _)  = char '-' <> ppr l
 pprPat (NPlusKPat n k _ _)  = hcat [ppr n, char '+', ppr k]
 pprPat (QuasiQuotePat qq)   = ppr qq
-pprPat (TypePat ty)	    = ptext (sLit "{|") <> ppr ty <> ptext (sLit "|}")
 pprPat (CoPat co pat _)	    = pprHsWrapper (ppr pat) co
 pprPat (SigPatIn pat ty)    = ppr pat <+> dcolon <+> ppr ty
 pprPat (SigPatOut pat ty)   = ppr pat <+> dcolon <+> ppr ty
@@ -377,9 +370,28 @@ isBangLPat (L _ (ParPat p))   = isBangLPat p
 isBangLPat _                  = False
 
 isBangHsBind :: HsBind id -> Bool
--- In this module because HsPat is above HsBinds in the import graph
+-- A pattern binding with an outermost bang
+-- Defined in this module because HsPat is above HsBinds in the import graph
 isBangHsBind (PatBind { pat_lhs = p }) = isBangLPat p
 isBangHsBind _                         = False
+
+isLiftedPatBind :: HsBind id -> Bool
+-- A pattern binding with a compound pattern, not just a variable
+--    (I# x)       yes
+--    (# a, b #)   no, even if a::Int#
+--    x            no, even if x::Int#
+-- We want to warn about a missing bang-pattern on the yes's
+isLiftedPatBind (PatBind { pat_lhs = p }) = isLiftedLPat p
+isLiftedPatBind _                         = False
+
+isLiftedLPat :: LPat id -> Bool
+isLiftedLPat (L _ (ParPat p))   = isLiftedLPat p
+isLiftedLPat (L _ (BangPat p))  = isLiftedLPat p
+isLiftedLPat (L _ (AsPat _ p))  = isLiftedLPat p
+isLiftedLPat (L _ (TuplePat _ Unboxed _)) = False
+isLiftedLPat (L _ (VarPat {}))            = False
+isLiftedLPat (L _ (WildPat {}))           = False
+isLiftedLPat _                            = True
 
 isIrrefutableHsPat :: OutputableBndr id => LPat id -> Bool
 -- (isIrrefutableHsPat p) is true if matching against p cannot fail,
@@ -397,7 +409,6 @@ isIrrefutableHsPat pat
 
     go1 (WildPat {})        = True
     go1 (VarPat {})         = True
-    go1 (VarPatOut {})      = True
     go1 (LazyPat {})        = True
     go1 (BangPat pat)       = go pat
     go1 (CoPat _ pat _)     = go1 pat
@@ -423,14 +434,12 @@ isIrrefutableHsPat pat
 
     go1 (QuasiQuotePat {}) = urk pat	-- Gotten rid of by renamer, before
 					-- isIrrefutablePat is called
-    go1 (TypePat {})       = urk pat
 
     urk pat = pprPanic "isIrrefutableHsPat:" (ppr pat)
 
 hsPatNeedsParens :: Pat a -> Bool
 hsPatNeedsParens (WildPat {})        = False
 hsPatNeedsParens (VarPat {})         = False
-hsPatNeedsParens (VarPatOut {})      = True
 hsPatNeedsParens (LazyPat {})        = False
 hsPatNeedsParens (BangPat {})        = False
 hsPatNeedsParens (CoPat {})          = True
@@ -448,7 +457,6 @@ hsPatNeedsParens (LitPat {})   	     = False
 hsPatNeedsParens (NPat {})	     = False
 hsPatNeedsParens (NPlusKPat {})      = True
 hsPatNeedsParens (QuasiQuotePat {})  = True
-hsPatNeedsParens (TypePat {})        = False
 
 conPatNeedsParens :: HsConDetails a b -> Bool
 conPatNeedsParens (PrefixCon args) = not (null args)

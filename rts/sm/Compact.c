@@ -14,6 +14,7 @@
 #include "PosixSource.h"
 #include "Rts.h"
 
+#include "GCThread.h"
 #include "Storage.h"
 #include "RtsUtils.h"
 #include "BlockAlloc.h"
@@ -335,8 +336,9 @@ thread_stack(StgPtr p, StgPtr stack_end)
         case CATCH_STM_FRAME:
         case ATOMICALLY_FRAME:
 	case UPDATE_FRAME:
-	case STOP_FRAME:
-	case CATCH_FRAME:
+        case UNDERFLOW_FRAME:
+        case STOP_FRAME:
+        case CATCH_FRAME:
 	case RET_SMALL:
 	    bitmap = BITMAP_BITS(info->i.layout.bitmap);
 	    size   = BITMAP_SIZE(info->i.layout.bitmap);
@@ -480,8 +482,8 @@ thread_TSO (StgTSO *tso)
     
     thread_(&tso->trec);
 
-    thread_stack(tso->sp, &(tso->stack[tso->stack_size]));
-    return (StgPtr)tso + tso_sizeW(tso);
+    thread_(&tso->stackobj);
+    return (StgPtr)tso + sizeofW(StgTSO);
 }
 
 
@@ -521,9 +523,12 @@ update_fwd_large( bdescr *bd )
           continue;
       }
 
-    case TSO:
-	thread_TSO((StgTSO *)p);
-	continue;
+    case STACK:
+    {
+        StgStack *stack = (StgStack*)p;
+        thread_stack(stack->sp, stack->stack + stack->stack_size);
+        continue;
+    }
 
     case AP_STACK:
 	thread_AP_STACK((StgAP_STACK *)p);
@@ -706,6 +711,13 @@ thread_obj (StgInfoTable *info, StgPtr p)
     case TSO:
 	return thread_TSO((StgTSO *)p);
     
+    case STACK:
+    {
+        StgStack *stack = (StgStack*)p;
+        thread_stack(stack->sp, stack->stack + stack->stack_size);
+        return p + stack_sizeW(stack);
+    }
+
     case TREC_CHUNK:
     {
         StgWord i;
@@ -899,8 +911,8 @@ update_bkwd_compact( generation *gen )
 	    }
 
 	    // relocate TSOs
-	    if (info->type == TSO) {
-		move_TSO((StgTSO *)p, (StgTSO *)free);
+            if (info->type == STACK) {
+                move_STACK((StgStack *)p, (StgStack *)free);
 	    }
 
 	    free += size;
@@ -924,11 +936,13 @@ update_bkwd_compact( generation *gen )
 void
 compact(StgClosure *static_objects)
 {
-    nat g, blocks;
+    nat n, g, blocks;
     generation *gen;
 
     // 1. thread the roots
     markCapabilities((evac_fn)thread_root, NULL);
+
+    markScheduler((evac_fn)thread_root, NULL);
 
     // the weak pointer lists...
     if (weak_ptr_list != NULL) {
@@ -942,12 +956,6 @@ compact(StgClosure *static_objects)
     for (g = 1; g < RtsFlags.GcFlags.generations; g++) {
 	bdescr *bd;
 	StgPtr p;
-        nat n;
-	for (bd = generations[g].mut_list; bd != NULL; bd = bd->link) {
-	    for (p = bd->start; p < bd->free; p++) {
-		thread((StgClosure **)p);
-	    }
-	}
         for (n = 0; n < n_capabilities; n++) {
             for (bd = capabilities[n].mut_lists[g]; 
                  bd != NULL; bd = bd->link) {
@@ -995,6 +1003,10 @@ compact(StgClosure *static_objects)
         debugTrace(DEBUG_gc, "update_fwd:  %d", g);
 
         update_fwd(gen->blocks);
+        for (n = 0; n < n_capabilities; n++) {
+            update_fwd(gc_threads[n]->gens[g].todo_bd);
+            update_fwd(gc_threads[n]->gens[g].part_list);
+        }
         update_fwd_large(gen->scavenged_large_objects);
         if (g == RtsFlags.GcFlags.generations-1 && gen->old_blocks != NULL) {
             debugTrace(DEBUG_gc, "update_fwd:  %d (compact)", g);

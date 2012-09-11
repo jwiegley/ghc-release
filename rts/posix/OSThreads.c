@@ -7,7 +7,7 @@
  *
  * --------------------------------------------------------------------------*/
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__GLIBC__)
 /* We want GNU extensions in DEBUG mode for mutex error checking */
 /* We also want the affinity API, which requires _GNU_SOURCE */
 #define _GNU_SOURCE
@@ -55,6 +55,10 @@
 
 #if defined(darwin_HOST_OS)
 #include <mach/mach.h>
+#endif
+
+#ifdef HAVE_SIGNAL_H
+# include <signal.h>
 #endif
 
 /*
@@ -289,6 +293,12 @@ setThreadAffinity (nat n GNUC3_ATTRIBUTE(__unused__),
 {
 }
 #endif
+
+void
+interruptOSThread (OSThreadId id)
+{
+    pthread_kill(id, SIGPIPE);
+}
 
 #else /* !defined(THREADED_RTS) */
 

@@ -1,7 +1,16 @@
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP
+           , NoImplicitPrelude
+           , RecordWildCards
+           , BangPatterns
+           , PatternGuards
+           , NondecreasingIndentation
+           , MagicHash
+           , ForeignFunctionInterface
+  #-}
 {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 {-# OPTIONS_GHC -fno-warn-unused-matches #-}
 {-# OPTIONS_HADDOCK hide #-}
-{-# LANGUAGE NoImplicitPrelude, RecordWildCards, BangPatterns #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -19,17 +28,18 @@
 
 -- #hide
 module GHC.IO.Handle.Text ( 
-   hWaitForInput, hGetChar, hGetLine, hGetContents, hPutChar, hPutStr,
-   commitBuffer',       -- hack, see below
-   hGetBuf, hGetBufSome, hGetBufNonBlocking, hPutBuf, hPutBufNonBlocking,
-   memcpy, hPutStrLn,
- ) where
+        hWaitForInput, hGetChar, hGetLine, hGetContents, hPutChar, hPutStr,
+        commitBuffer',       -- hack, see below
+        hGetBuf, hGetBufSome, hGetBufNonBlocking, hPutBuf, hPutBufNonBlocking,
+        memcpy, hPutStrLn,
+    ) where
 
 import GHC.IO
 import GHC.IO.FD
 import GHC.IO.Buffer
 import qualified GHC.IO.BufferedIO as Buffered
 import GHC.IO.Exception
+import GHC.IO.Encoding.Failure (surrogatifyRoundtripCharacter, desurrogatifyRoundtripCharacter)
 import GHC.Exception
 import GHC.IO.Handle.Types
 import GHC.IO.Handle.Internals
@@ -39,6 +49,7 @@ import qualified GHC.IO.Device as RawIO
 import Foreign
 import Foreign.C
 
+import qualified Control.Exception as Exception
 import Data.Typeable
 import System.IO.Error
 import Data.Maybe
@@ -240,12 +251,12 @@ hGetLineBufferedLoop handle_@Handle__{..}
 
 maybeFillReadBuffer :: Handle__ -> CharBuffer -> IO (Maybe CharBuffer)
 maybeFillReadBuffer handle_ buf
-  = catch 
+  = Exception.catch
      (do buf' <- getSomeCharacters handle_ buf
          return (Just buf')
      )
-     (\e -> do if isEOFError e 
-                  then return Nothing 
+     (\e -> do if isEOFError e
+                  then return Nothing
                   else ioError e)
 
 -- See GHC.IO.Buffer
@@ -270,10 +281,10 @@ unpack !buf !r !w acc0
                  else do c1 <- peekElemOff pbuf (i-1)
                          let c = (fromIntegral c1 - 0xd800) * 0x400 +
                                  (fromIntegral c2 - 0xdc00) + 0x10000
-                         unpackRB (unsafeChr c : acc) (i-2)
+                         unpackRB (desurrogatifyRoundtripCharacter (unsafeChr c) : acc) (i-2)
 #else
               c <- peekElemOff pbuf i
-              unpackRB (c:acc) (i-1)
+              unpackRB (desurrogatifyRoundtripCharacter c:acc) (i-1)
 #endif
      in
      unpackRB acc0 (w-1)
@@ -296,7 +307,7 @@ unpack_nl !buf !r !w acc0
                             then unpackRB ('\n':acc) (i-2)
                             else unpackRB ('\n':acc) (i-1)
                  else do
-                         unpackRB (c:acc) (i-1)
+                         unpackRB (desurrogatifyRoundtripCharacter c:acc) (i-1)
      in do
      c <- peekElemOff pbuf (w-1)
      if (c == '\r')
@@ -370,8 +381,8 @@ lazyRead handle =
 lazyReadBuffered :: Handle -> Handle__ -> IO (Handle__, [Char])
 lazyReadBuffered h handle_@Handle__{..} = do
    buf <- readIORef haCharBuffer
-   catch 
-        (do 
+   Exception.catch
+        (do
             buf'@Buffer{..} <- getSomeCharacters handle_ buf
             lazy_rest <- lazyRead h
             (s,r) <- if haInputNL == CRLF
@@ -576,7 +587,7 @@ writeBlocks hdl line_buffered add_nl nl
            else do
                shoveString n' cs rest
      | otherwise = do
-        n' <- writeCharBuf raw n c
+        n' <- writeCharBuf raw n (surrogatifyRoundtripCharacter c)
         shoveString n' cs rest
   in
   shoveString 0 s (if add_nl then "\n" else "")

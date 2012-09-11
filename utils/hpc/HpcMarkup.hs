@@ -18,7 +18,7 @@ import Data.Maybe(fromJust)
 import Data.Array
 import Data.Monoid
 import Control.Monad
-import qualified HpcSet as Set
+import qualified Data.Set as Set
 
 ------------------------------------------------------------------------------
 
@@ -452,11 +452,9 @@ writeFileUsing filename text = do
 -- packages, and a single .tix file might contain information about
 -- many package.
 
-#if __GLASGOW_HASKELL__ >= 604
   -- create the dest_dir if needed
   when (not (null dest_dir)) $
     createDirectoryIfMissing True dest_dir
-#endif
 
   writeFile filename text
 

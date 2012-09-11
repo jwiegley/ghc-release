@@ -17,6 +17,7 @@
 #include "MarkWeak.h"
 #include "GC.h"
 #include "GCThread.h"
+#include "GCTDecl.h"
 #include "Evac.h"
 #include "Trace.h"
 #include "Schedule.h"
@@ -110,7 +111,7 @@ traverseWeakPtrList(void)
       /* doesn't matter where we evacuate values/finalizers to, since
        * these pointers are treated as roots (iff the keys are alive).
        */
-      gct->evac_gen = 0;
+      gct->evac_gen_no = 0;
       
       last_w = &old_weak_ptr_list;
       for (w = old_weak_ptr_list; w != NULL; w = next_w) {
@@ -260,18 +261,15 @@ static rtsBool tidyThreadList (generation *gen)
         }
         
         ASSERT(get_itbl(t)->type == TSO);
-        if (t->what_next == ThreadRelocated) {
-            next = t->_link;
-            *prev = next;
-            continue;
-        }
-        
         next = t->global_link;
         
         // if the thread is not masking exceptions but there are
         // pending exceptions on its queue, then something has gone
-        // wrong:
+        // wrong.  However, pending exceptions are OK if there is an
+        // FFI call.
         ASSERT(t->blocked_exceptions == END_BLOCKED_EXCEPTIONS_QUEUE
+               || t->why_blocked == BlockedOnCCall
+               || t->why_blocked == BlockedOnCCall_Interruptible
                || (t->flags & TSO_BLOCKEX));
         
         if (tmp == NULL) {

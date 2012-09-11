@@ -1,16 +1,14 @@
 module CmmCallConv (
   ParamLocation(..),
-  ArgumentFormat,
-  assignArguments,
-  assignArgumentsPos,
-  argumentsSize,
+  assignArgumentsPos
 ) where
 
 #include "HsVersions.h"
 
-import Cmm
+import CmmExpr
 import SMRep
-import ZipCfgCmmRep (Convention(..))
+import Cmm (Convention(..))
+import PprCmm ()
 
 import Constants
 import qualified Data.List as L
@@ -20,25 +18,21 @@ import Outputable
 -- Calculate the 'GlobalReg' or stack locations for function call
 -- parameters as used by the Cmm calling convention.
 
-data ParamLocation a
+data ParamLocation
   = RegisterParam GlobalReg
-  | StackParam a
+  | StackParam ByteOff
 
-instance (Outputable a) => Outputable (ParamLocation a) where
+instance Outputable ParamLocation where
   ppr (RegisterParam g) = ppr g
   ppr (StackParam p)    = ppr p
-
-type ArgumentFormat a b = [(a, ParamLocation b)]
-
--- Stack parameters are returned as word offsets.
-assignArguments :: (a -> CmmType) -> [a] -> ArgumentFormat a WordOff
-assignArguments _ _ = panic "assignArguments only used in dead codegen" -- assignments
 
 -- | JD: For the new stack story, I want arguments passed on the stack to manifest as
 -- positive offsets in a CallArea, not negative offsets from the stack pointer.
 -- Also, I want byte offsets, not word offsets.
-assignArgumentsPos :: (Outputable a) => Convention -> (a -> CmmType) -> [a] ->
-                      ArgumentFormat a ByteOff
+assignArgumentsPos :: Convention -> (a -> CmmType) -> [a] ->
+                      [(a, ParamLocation)]
+-- Given a list of arguments, and a function that tells their types,
+-- return a list showing where each argument is passed
 assignArgumentsPos conv arg_ty reps = assignments
     where -- The calling conventions (CgCallConv.hs) are complicated, to say the least
       regs = case (reps, conv) of
@@ -46,7 +40,8 @@ assignArgumentsPos conv arg_ty reps = assignments
                (_,   NativeDirectCall) -> getRegsWithoutNode
                ([_], NativeReturn)     -> allRegs
                (_,   NativeReturn)     -> getRegsWithNode
-               (_,   GC)               -> getRegsWithNode
+               -- GC calling convention *must* put values in registers
+               (_,   GC)               -> allRegs
                (_,   PrimOpCall)       -> allRegs
                ([_], PrimOpReturn)     -> allRegs
                (_,   PrimOpReturn)     -> getRegsWithNode
@@ -60,6 +55,7 @@ assignArgumentsPos conv arg_ty reps = assignments
       (reg_assts, stk_args) = assign_regs [] reps regs
       stk_args' = case conv of NativeReturn -> part
                                PrimOpReturn -> part
+                               GC | length stk_args /= 0 -> panic "Failed to allocate registers for GC call"
                                _            -> stk_args
                   where part = uncurry (++)
                                        (L.partition (not . isGcPtrType . arg_ty) stk_args)
@@ -91,14 +87,6 @@ assignArgumentsPos conv arg_ty reps = assignments
         where w    = typeWidth (arg_ty r)
               size = (((widthInBytes w - 1) `div` wORD_SIZE) + 1) * wORD_SIZE
               off' = offset + size
-       
-     
-argumentsSize :: (a -> CmmType) -> [a] -> WordOff
-argumentsSize f reps = maximum (0 : map arg_top args)
-    where
-      args = assignArguments f reps
-      arg_top (_, StackParam offset) = -offset
-      arg_top (_, RegisterParam _) = 0
 
 -----------------------------------------------------------------------------
 -- Local information about the registers available

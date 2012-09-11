@@ -14,7 +14,7 @@ module Packages (
 	PackageState(..),
 	initPackages,
 	getPackageDetails,
-	lookupModuleInAllPackages,
+        lookupModuleInAllPackages, lookupModuleWithSuggestions,
 
 	-- * Inspecting the set of packages in scope
 	getPackageIncludePath,
@@ -36,7 +36,7 @@ where
 #include "HsVersions.h"
 
 import PackageConfig	
-import DynFlags		( dopt, DynFlag(..), DynFlags(..), PackageFlag(..) )
+import DynFlags
 import StaticFlags
 import Config		( cProjectVersion )
 import Name		( Name, nameModule_maybe )
@@ -56,7 +56,8 @@ import ErrUtils         ( debugTraceMsg, putMsg, Message )
 import Exception
 
 import System.Directory
-import System.FilePath
+import System.FilePath as FilePath
+import qualified System.FilePath.Posix as FilePath.Posix
 import Control.Monad
 import Data.List as List
 import Data.Map (Map)
@@ -170,7 +171,7 @@ initPackages :: DynFlags -> IO (DynFlags, [PackageId])
 initPackages dflags = do 
   pkg_db <- case pkgDatabase dflags of
                 Nothing -> readPackageConfigs dflags
-                Just db -> return $ maybeHidePackages dflags db
+                Just db -> return $ setBatchPackageFlags dflags db
   (pkg_state, preload, this_pkg)       
         <- mkPackageState dflags pkg_db [] (thisPackage dflags)
   return (dflags{ pkgDatabase = Just pkg_db,
@@ -246,39 +247,74 @@ readPackageConfig dflags conf_file = do
 
   let
       top_dir = topDir dflags
-      pkg_configs1 = mungePackagePaths top_dir proto_pkg_configs
-      pkg_configs2 = maybeHidePackages dflags pkg_configs1
+      pkgroot = takeDirectory conf_file
+      pkg_configs1 = map (mungePackagePaths top_dir pkgroot) proto_pkg_configs
+      pkg_configs2 = setBatchPackageFlags dflags pkg_configs1
   --
   return pkg_configs2
 
-maybeHidePackages :: DynFlags -> [PackageConfig] -> [PackageConfig]
-maybeHidePackages dflags pkgs
-  | dopt Opt_HideAllPackages dflags = map hide pkgs
-  | otherwise 			    = pkgs
+setBatchPackageFlags :: DynFlags -> [PackageConfig] -> [PackageConfig]
+setBatchPackageFlags dflags pkgs = (maybeDistrustAll . maybeHideAll) pkgs
   where
+    maybeHideAll pkgs'
+      | dopt Opt_HideAllPackages dflags = map hide pkgs'
+      | otherwise                       = pkgs'
+
+    maybeDistrustAll pkgs'
+      | dopt Opt_DistrustAllPackages dflags = map distrust pkgs'
+      | otherwise                           = pkgs'
+
     hide pkg = pkg{ exposed = False }
+    distrust pkg = pkg{ exposed = False }
 
-mungePackagePaths :: String -> [PackageConfig] -> [PackageConfig]
--- Replace the string "$topdir" at the beginning of a path
--- with the current topdir (obtained from the -B option).
-mungePackagePaths top_dir ps = map munge_pkg ps
- where 
-  munge_pkg p = p{ importDirs  = munge_paths (importDirs p),
-		   includeDirs = munge_paths (includeDirs p),
-    		   libraryDirs = munge_paths (libraryDirs p),
-		   frameworkDirs = munge_paths (frameworkDirs p),
-                   haddockInterfaces = munge_paths (haddockInterfaces p),
-	           haddockHTMLs = munge_paths (haddockHTMLs p)
-                    }
+-- TODO: This code is duplicated in utils/ghc-pkg/Main.hs
+mungePackagePaths :: FilePath -> FilePath -> PackageConfig -> PackageConfig
+-- Perform path/URL variable substitution as per the Cabal ${pkgroot} spec
+-- (http://www.haskell.org/pipermail/libraries/2009-May/011772.html)
+-- Paths/URLs can be relative to ${pkgroot} or ${pkgrooturl}.
+-- The "pkgroot" is the directory containing the package database.
+--
+-- Also perform a similar substitution for the older GHC-specific
+-- "$topdir" variable. The "topdir" is the location of the ghc
+-- installation (obtained from the -B option).
+mungePackagePaths top_dir pkgroot pkg =
+    pkg {
+      importDirs  = munge_paths (importDirs pkg),
+      includeDirs = munge_paths (includeDirs pkg),
+      libraryDirs = munge_paths (libraryDirs pkg),
+      frameworkDirs = munge_paths (frameworkDirs pkg),
+      haddockInterfaces = munge_paths (haddockInterfaces pkg),
+      haddockHTMLs = munge_urls (haddockHTMLs pkg)
+    }
+  where 
+    munge_paths = map munge_path
+    munge_urls  = map munge_url
 
-  munge_paths = map munge_path
+    munge_path p
+      | Just p' <- stripVarPrefix "${pkgroot}" p = pkgroot ++ p'
+      | Just p' <- stripVarPrefix "$topdir"    p = top_dir ++ p'
+      | otherwise                                = p
 
-  munge_path p 
-	  | Just p' <- stripPrefix "$topdir"     p =            top_dir ++ p'
-	  | Just p' <- stripPrefix "$httptopdir" p = toHttpPath top_dir ++ p'
-	  | otherwise				    = p
+    munge_url p
+      | Just p' <- stripVarPrefix "${pkgrooturl}" p = toUrlPath pkgroot p'
+      | Just p' <- stripVarPrefix "$httptopdir"   p = toUrlPath top_dir p'
+      | otherwise                                   = p
 
-  toHttpPath p = "file:///" ++ p
+    toUrlPath r p = "file:///"
+                 -- URLs always use posix style '/' separators:
+                 ++ FilePath.Posix.joinPath
+                        (r : -- We need to drop a leading "/" or "\\"
+                             -- if there is one:
+                             dropWhile (all isPathSeparator)
+                                       (FilePath.splitDirectories p))
+
+    -- We could drop the separator here, and then use </> above. However,
+    -- by leaving it in and using ++ we keep the same path separator
+    -- rather than letting FilePath change it to use \ as the separator
+    stripVarPrefix var path = case stripPrefix var path of
+                              Just [] -> Just []
+                              Just cs@(c : _) | isPathSeparator c -> Just cs
+                              _ -> Nothing
 
 
 -- -----------------------------------------------------------------------------
@@ -314,6 +350,20 @@ applyPackageFlag unusable pkgs flag =
          Left ps       -> packageFlagErr flag ps
          Right (ps,qs) -> return (map hide ps ++ qs)
     	  where hide p = p {exposed=False}
+
+    -- we trust all matching packages. Maybe should only trust first one?
+    -- and leave others the same or set them untrusted
+    TrustPackage str ->
+       case selectPackages (matchingStr str) pkgs unusable of
+         Left ps       -> packageFlagErr flag ps
+         Right (ps,qs) -> return (map trust ps ++ qs)
+    	  where trust p = p {trusted=True}
+
+    DistrustPackage str ->
+       case selectPackages (matchingStr str) pkgs unusable of
+         Left ps       -> packageFlagErr flag ps
+         Right (ps,qs) -> return (map distrust ps ++ qs)
+    	  where distrust p = p {trusted=False}
 
     _ -> panic "applyPackageFlag"
 
@@ -378,6 +428,8 @@ packageFlagErr flag reasons = ghcError (CmdLineError (showSDoc $ err))
                      HidePackage p   -> text "-hide-package " <> text p
                      ExposePackage p -> text "-package " <> text p
                      ExposePackageId p -> text "-package-id " <> text p
+                     TrustPackage p    -> text "-trust " <> text p
+                     DistrustPackage p -> text "-distrust " <> text p
         ppr_reasons = vcat (map ppr_reason reasons)
         ppr_reason (p, reason) = pprReason (pprIPkg p <+> text "is") reason
 
@@ -622,7 +674,6 @@ mkPackageState
     -> IO (PackageState,
            [PackageId],         -- new packages to preload
            PackageId) -- this package, might be modified if the current
-
                       -- package is a wired-in package.
 
 mkPackageState dflags pkgs0 preload0 this_package = do
@@ -666,7 +717,13 @@ mkPackageState dflags pkgs0 preload0 this_package = do
 -}
 
   let
-      flags = reverse (packageFlags dflags)
+      flags = reverse (packageFlags dflags) ++ dphPackage
+      -- expose the appropriate DPH backend library
+      dphPackage = case dphBackend dflags of
+                     DPHPar  -> [ExposePackage "dph-prim-par", ExposePackage "dph-par"]
+                     DPHSeq  -> [ExposePackage "dph-prim-seq", ExposePackage "dph-seq"]
+                     DPHThis -> []
+                     DPHNone -> []
 
       -- pkgs0 with duplicate packages filtered out.  This is
       -- important: it is possible for a package in the global package
@@ -750,19 +807,19 @@ mkPackageState dflags pkgs0 preload0 this_package = do
       -- set up preloaded package when we are just building it
       preload3 = nub $ filter (/= this_package)
                      $ (basicLinkedPackages ++ preload2)
-
+ 
   -- Close the preload packages with their dependencies
   dep_preload <- closeDeps pkg_db ipid_map (zip preload3 (repeat Nothing))
   let new_dep_preload = filter (`notElem` preload0) dep_preload
 
   let pstate = PackageState{ preloadPackages     = dep_preload,
-		             pkgIdMap   	 = pkg_db,
-		             moduleToPkgConfAll  = mkModuleMap pkg_db,
+                             pkgIdMap            = pkg_db,
+                             moduleToPkgConfAll  = mkModuleMap pkg_db,
                              installedPackageIdMap = ipid_map
-		           }
+                           }
 
   return (pstate, new_dep_preload, this_package)
-
+  
 
 -- -----------------------------------------------------------------------------
 -- Make the mapping from module to package info
@@ -879,10 +936,32 @@ getPackageFrameworks dflags pkgs = do
 -- @(pkgconf, exposed)@ where pkgconf is the PackageConfig for that package,
 -- and exposed is @True@ if the package exposes the module.
 lookupModuleInAllPackages :: DynFlags -> ModuleName -> [(PackageConfig,Bool)]
-lookupModuleInAllPackages dflags m =
-  case lookupUFM (moduleToPkgConfAll (pkgState dflags)) m of
-	Nothing -> []
-	Just ps -> ps
+lookupModuleInAllPackages dflags m
+  = case lookupModuleWithSuggestions dflags m of
+      Right pbs -> pbs
+      Left  _   -> []
+
+lookupModuleWithSuggestions
+  :: DynFlags -> ModuleName
+  -> Either [Module] [(PackageConfig,Bool)]
+         -- Lookup module in all packages
+         -- Right pbs   =>   found in pbs
+         -- Left  ms    =>   not found; but here are sugestions
+lookupModuleWithSuggestions dflags m
+  = case lookupUFM (moduleToPkgConfAll pkg_state) m of
+        Nothing -> Left suggestions
+        Just ps -> Right ps
+  where
+    pkg_state = pkgState dflags
+    suggestions
+      | dopt Opt_HelpfulErrors dflags = fuzzyLookup (moduleNameString m) all_mods
+      | otherwise                     = []
+
+    all_mods :: [(String, Module)]     -- All modules
+    all_mods = [ (moduleNameString mod_nm, mkModule pkg_id mod_nm)
+               | pkg_config <- eltsUFM (pkgIdMap pkg_state)
+               , let pkg_id = packageConfigId pkg_config
+               , mod_nm <- exposedModules pkg_config ]
 
 -- | Find all the 'PackageConfig' in both the preload packages from 'DynFlags' and corresponding to the list of
 -- 'PackageConfig's

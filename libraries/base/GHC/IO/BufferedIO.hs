@@ -1,4 +1,7 @@
-{-# OPTIONS_GHC  -XNoImplicitPrelude -funbox-strict-fields #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# OPTIONS_GHC -funbox-strict-fields #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.IO.BufferedIO
@@ -14,16 +17,15 @@
 -----------------------------------------------------------------------------
 
 module GHC.IO.BufferedIO (
-   BufferedIO(..),
-   readBuf, readBufNonBlocking, writeBuf, writeBufNonBlocking
- ) where
+        BufferedIO(..),
+        readBuf, readBufNonBlocking, writeBuf, writeBufNonBlocking
+    ) where
 
 import GHC.Base
 import GHC.Ptr
 import Data.Word
 import GHC.Num
 import Data.Maybe
--- import GHC.IO
 import GHC.IO.Device as IODevice
 import GHC.IO.Device as RawIO
 import GHC.IO.Buffer

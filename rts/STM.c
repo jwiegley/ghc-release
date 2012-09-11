@@ -879,17 +879,12 @@ static StgBool check_read_only(StgTRecHeader *trec STG_UNUSED) {
 
 /************************************************************************/
 
-void stmPreGCHook() {
-  nat i;
-
+void stmPreGCHook (Capability *cap) {
   lock_stm(NO_TREC);
   TRACE("stmPreGCHook");
-  for (i = 0; i < n_capabilities; i ++) {
-    Capability *cap = &capabilities[i];
-    cap -> free_tvar_watch_queues = END_STM_WATCH_QUEUE;
-    cap -> free_trec_chunks = END_STM_CHUNK_LIST;
-    cap -> free_trec_headers = NO_TREC;
-  }
+  cap->free_tvar_watch_queues = END_STM_WATCH_QUEUE;
+  cap->free_trec_chunks = END_STM_CHUNK_LIST;
+  cap->free_trec_headers = NO_TREC;
   unlock_stm(NO_TREC);
 }
 
@@ -1094,7 +1089,7 @@ static void disconnect_invariant(Capability *cap,
   FOR_EACH_ENTRY(last_execution, e, {
     StgTVar *s = e -> tvar;
     StgTVarWatchQueue *q = s -> first_watch_queue_entry;
-    StgBool found = FALSE;
+    DEBUG_ONLY( StgBool found = FALSE );
     TRACE("  looking for trec on tvar=%p", s);
     for (q = s -> first_watch_queue_entry; 
 	 q != END_STM_WATCH_QUEUE; 
@@ -1115,7 +1110,7 @@ static void disconnect_invariant(Capability *cap,
 	}
 	TRACE("  found it in watch queue entry %p", q);
 	free_stg_tvar_watch_queue(cap, q);
-	found = TRUE;
+	DEBUG_ONLY( found = TRUE );
 	break;
       }
     }

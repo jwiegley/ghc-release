@@ -1,4 +1,6 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, BangPatterns, MagicHash #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.Bits

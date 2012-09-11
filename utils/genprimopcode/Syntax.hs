@@ -40,6 +40,7 @@ data Option
    = OptionFalse  String          -- name = False
    | OptionTrue   String          -- name = True
    | OptionString String String   -- name = { ... unparsed stuff ... }
+   | OptionInteger String Int     -- name = <int>
      deriving Show
 
 -- categorises primops
@@ -109,8 +110,8 @@ sane_ty Compare (TyF t1 (TyF t2 td))
    | t1 == t2 && td == TyApp "Bool" []  = True
 sane_ty Monadic (TyF t1 td) 
    | t1 == td  = True
-sane_ty Dyadic (TyF t1 (TyF t2 _))
-   | t1 == t2 && t2 == t2  = True
+sane_ty Dyadic (TyF t1 (TyF t2 td))
+   | t1 == td && t2 == td  = True
 sane_ty GenPrimOp _
    = True
 sane_ty _ _
@@ -120,6 +121,7 @@ get_attrib_name :: Option -> String
 get_attrib_name (OptionFalse nm) = nm
 get_attrib_name (OptionTrue nm)  = nm
 get_attrib_name (OptionString nm _) = nm
+get_attrib_name (OptionInteger nm _) = nm
 
 lookup_attrib :: String -> [Option] -> Maybe Option
 lookup_attrib _ [] = Nothing

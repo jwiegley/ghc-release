@@ -22,9 +22,9 @@ import NCGMonad
 import Size
 import Reg
 
-import Cmm
-import BlockId
+import OldCmm
 
+import Control.Monad (liftM)
 import OrdList
 import Outputable
 
@@ -83,9 +83,8 @@ getRegister (CmmLit (CmmFloat f W32)) = do
 
     let code dst = toOL [
             -- the data area         
-	    LDATA ReadOnlyData
-	                [CmmDataLabel lbl,
-			 CmmStaticLit (CmmFloat f W32)],
+	    LDATA ReadOnlyData $ Statics lbl
+			 [CmmStaticLit (CmmFloat f W32)],
 
             -- load the literal
 	    SETHI (HI (ImmCLbl lbl)) tmp,
@@ -97,9 +96,8 @@ getRegister (CmmLit (CmmFloat d W64)) = do
     lbl <- getNewLabelNat
     tmp <- getNewRegNat II32
     let code dst = toOL [
-	    LDATA ReadOnlyData
-	                [CmmDataLabel lbl,
-			 CmmStaticLit (CmmFloat d W64)],
+	    LDATA ReadOnlyData $ Statics lbl
+			 [CmmStaticLit (CmmFloat d W64)],
 	    SETHI (HI (ImmCLbl lbl)) tmp,
 	    LD II64 (AddrRegImm tmp (LO (ImmCLbl lbl))) dst] 
     return (Any FF64 code)
@@ -638,8 +636,8 @@ condIntReg NE x y = do
     return (Any II32 code__2)
 
 condIntReg cond x y = do
-    bid1@(BlockId _) <- getBlockIdNat
-    bid2@(BlockId _) <- getBlockIdNat
+    bid1 <- liftM (\a -> seq a a) getBlockIdNat
+    bid2 <- liftM (\a -> seq a a) getBlockIdNat
     CondCode _ cond cond_code <- condIntCode cond x y
     let
 	code__2 dst 
@@ -664,8 +662,8 @@ condIntReg cond x y = do
 
 condFltReg :: Cond -> CmmExpr -> CmmExpr -> NatM Register
 condFltReg cond x y = do
-    bid1@(BlockId _) <- getBlockIdNat
-    bid2@(BlockId _) <- getBlockIdNat
+    bid1 <- liftM (\a -> seq a a) getBlockIdNat
+    bid2 <- liftM (\a -> seq a a) getBlockIdNat
 
     CondCode _ cond cond_code <- condFltCode cond x y
     let

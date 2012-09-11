@@ -1,7 +1,18 @@
 \begin{code}
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE CPP
+           , NoImplicitPrelude
+           , BangPatterns
+           , MagicHash
+           , UnboxedTuples
+           , UnliftedFFITypes
+           , ForeignFunctionInterface
+           , DeriveDataTypeable
+           , StandaloneDeriving
+           , RankNTypes
+  #-}
 {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 {-# OPTIONS_HADDOCK not-home #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.Conc.Sync
@@ -30,9 +41,13 @@ module GHC.Conc.Sync
         -- * Forking and suchlike
         , forkIO        -- :: IO a -> IO ThreadId
         , forkIOUnmasked
-        , forkOnIO      -- :: Int -> IO a -> IO ThreadId
+        , forkIOWithUnmask
+        , forkOn      -- :: Int -> IO a -> IO ThreadId
+        , forkOnIO    -- DEPRECATED
         , forkOnIOUnmasked
+        , forkOnWithUnmask
         , numCapabilities -- :: Int
+        , getNumCapabilities -- :: IO Int
         , numSparks      -- :: IO Int
         , childHandler  -- :: Exception -> IO ()
         , myThreadId    -- :: IO ThreadId
@@ -46,6 +61,7 @@ module GHC.Conc.Sync
 
         , ThreadStatus(..), BlockReason(..)
         , threadStatus  -- :: ThreadId -> IO ThreadStatus
+        , threadCapability
 
         -- * TVars
         , STM(..)
@@ -184,43 +200,104 @@ forkIO action = IO $ \ s ->
  where
   action_plus = catchException action childHandler
 
--- | Like 'forkIO', but the child thread is created with asynchronous exceptions
--- unmasked (see 'Control.Exception.mask').
+{-# DEPRECATED forkIOUnmasked "use forkIOWithUnmask instead" #-}
+-- | This function is deprecated; use 'forkIOWIthUnmask' instead
 forkIOUnmasked :: IO () -> IO ThreadId
 forkIOUnmasked io = forkIO (unsafeUnmask io)
 
-{- |
-Like 'forkIO', but lets you specify on which CPU the thread is
-created.  Unlike a `forkIO` thread, a thread created by `forkOnIO`
-will stay on the same CPU for its entire lifetime (`forkIO` threads
-can migrate between CPUs according to the scheduling policy).
-`forkOnIO` is useful for overriding the scheduling policy when you
-know in advance how best to distribute the threads.
+-- | Like 'forkIO', but the child thread is passed a function that can
+-- be used to unmask asynchronous exceptions.  This function is
+-- typically used in the following way
+--
+-- >  ... mask_ $ forkIOWithUnmask $ \unmask ->
+-- >                 catch (unmask ...) handler
+--
+-- so that the exception handler in the child thread is established
+-- with asynchronous exceptions masked, meanwhile the main body of
+-- the child thread is executed in the unmasked state.
+--
+-- Note that the unmask function passed to the child thread should
+-- only be used in that thread; the behaviour is undefined if it is
+-- invoked in a different thread.
+--
+forkIOWithUnmask :: ((forall a . IO a -> IO a) -> IO ()) -> IO ThreadId
+forkIOWithUnmask io = forkIO (io unsafeUnmask)
 
-The `Int` argument specifies the CPU number; it is interpreted modulo
-'numCapabilities' (note that it actually specifies a capability number
-rather than a CPU number, but to a first approximation the two are
-equivalent).
+{- |
+Like 'forkIO', but lets you specify on which processor the thread
+should run.  Unlike a `forkIO` thread, a thread created by `forkOn`
+will stay on the same processor for its entire lifetime (`forkIO`
+threads can migrate between processors according to the scheduling
+policy).  `forkOn` is useful for overriding the scheduling policy when
+you know in advance how best to distribute the threads.
+
+The `Int` argument specifies a /capability number/ (see
+'getNumCapabilities').  Typically capabilities correspond to physical
+processors, but the exact behaviour is implementation-dependent.  The
+value passed to 'forkOn' is interpreted modulo the total number of
+capabilities as returned by 'getNumCapabilities'.
+
+GHC note: the number of capabilities is specified by the @+RTS -N@
+option when the program is started.  Capabilities can be fixed to
+actual processor cores with @+RTS -qa@ if the underlying operating
+system supports that, although in practice this is usually unnecessary
+(and may actually degrade perforamnce in some cases - experimentation
+is recommended).
 -}
-forkOnIO :: Int -> IO () -> IO ThreadId
-forkOnIO (I# cpu) action = IO $ \ s ->
+forkOn :: Int -> IO () -> IO ThreadId
+forkOn (I# cpu) action = IO $ \ s ->
    case (forkOn# cpu action_plus s) of (# s1, tid #) -> (# s1, ThreadId tid #)
  where
   action_plus = catchException action childHandler
 
--- | Like 'forkOnIO', but the child thread is created with
--- asynchronous exceptions unmasked (see 'Control.Exception.mask').
+{-# DEPRECATED forkOnIO "renamed to forkOn" #-}
+-- | This function is deprecated; use 'forkOn' instead
+forkOnIO :: Int -> IO () -> IO ThreadId
+forkOnIO = forkOn
+
+{-# DEPRECATED forkOnIOUnmasked "use forkOnWithUnmask instead" #-}
+-- | This function is deprecated; use 'forkOnWIthUnmask' instead
 forkOnIOUnmasked :: Int -> IO () -> IO ThreadId
-forkOnIOUnmasked cpu io = forkOnIO cpu (unsafeUnmask io)
+forkOnIOUnmasked cpu io = forkOn cpu (unsafeUnmask io)
+
+-- | Like 'forkIOWithUnmask', but the child thread is pinned to the
+-- given CPU, as with 'forkOn'.
+forkOnWithUnmask :: Int -> ((forall a . IO a -> IO a) -> IO ()) -> IO ThreadId
+forkOnWithUnmask cpu io = forkOn cpu (io unsafeUnmask)
 
 -- | the value passed to the @+RTS -N@ flag.  This is the number of
 -- Haskell threads that can run truly simultaneously at any given
--- time, and is typically set to the number of physical CPU cores on
+-- time, and is typically set to the number of physical processor cores on
 -- the machine.
+-- 
+-- Strictly speaking it is better to use 'getNumCapabilities', because
+-- the number of capabilities might vary at runtime.
+--
 numCapabilities :: Int
-numCapabilities = unsafePerformIO $  do
-                    n <- peek n_capabilities
-                    return (fromIntegral n)
+numCapabilities = unsafePerformIO $ getNumCapabilities
+
+{- |
+Returns the number of Haskell threads that can run truly
+simultaneously (on separate physical processors) at any given time.
+The number passed to `forkOn` is interpreted modulo this
+value.
+
+An implementation in which Haskell threads are mapped directly to
+OS threads might return the number of physical processor cores in
+the machine, and 'forkOn' would be implemented using the OS's
+affinity facilities.  An implementation that schedules Haskell
+threads onto a smaller number of OS threads (like GHC) would return
+the number of such OS threads that can be running simultaneously.
+
+GHC notes: this returns the number passed as the argument to the
+@+RTS -N@ flag.  In current implementations, the value is fixed
+when the program starts and never changes, but it is possible that
+in the future the number of capabilities might vary at runtime.
+-}
+getNumCapabilities :: IO Int
+getNumCapabilities = do
+   n <- peek n_capabilities
+   return (fromIntegral n)
 
 -- | Returns the number of sparks currently in the local spark pool
 numSparks :: IO Int
@@ -274,7 +351,10 @@ another thread.
 If the target thread is currently making a foreign call, then the
 exception will not be raised (and hence 'throwTo' will not return)
 until the call has completed.  This is the case regardless of whether
-the call is inside a 'mask' or not.
+the call is inside a 'mask' or not.  However, in GHC a foreign call
+can be annotated as @interruptible@, in which case a 'throwTo' will
+cause the RTS to attempt to cause the call to return; see the GHC
+documentation for more details.
 
 Important note: the behaviour of 'throwTo' differs from that described in
 the paper \"Asynchronous exceptions in Haskell\"
@@ -293,9 +373,17 @@ thread reaches a /safe point/, where a safe point is where memory
 allocation occurs.  Some loops do not perform any memory allocation
 inside the loop and therefore cannot be interrupted by a 'throwTo'.
 
-Blocked 'throwTo' is fair: if multiple threads are trying to throw an
-exception to the same target thread, they will succeed in FIFO order.
+If the target of 'throwTo' is the calling thread, then the behaviour
+is the same as 'Control.Exception.throwIO', except that the exception
+is thrown as an asynchronous exception.  This means that if there is
+an enclosing pure computation, which would be the case if the current
+IO operation is inside 'unsafePerformIO' or 'unsafeInterleaveIO', that
+computation is not permanently replaced by the exception, but is
+suspended as if it had received an asynchronous exception.
 
+Note that if 'throwTo' is called with the current thread as the
+target, the exception will be thrown even if the thread is currently
+inside 'mask' or 'uninterruptibleMask'.
   -}
 throwTo :: Exception e => ThreadId -> e -> IO ()
 throwTo (ThreadId tid) ex = IO $ \ s ->
@@ -390,19 +478,28 @@ data ThreadStatus
 threadStatus :: ThreadId -> IO ThreadStatus
 threadStatus (ThreadId t) = IO $ \s ->
    case threadStatus# t s of
-     (# s', stat #) -> (# s', mk_stat (I# stat) #)
+    (# s', stat, _cap, _locked #) -> (# s', mk_stat (I# stat) #)
    where
         -- NB. keep these in sync with includes/Constants.h
      mk_stat 0  = ThreadRunning
      mk_stat 1  = ThreadBlocked BlockedOnMVar
      mk_stat 2  = ThreadBlocked BlockedOnBlackHole
-     mk_stat 3  = ThreadBlocked BlockedOnException
-     mk_stat 7  = ThreadBlocked BlockedOnSTM
+     mk_stat 6  = ThreadBlocked BlockedOnSTM
+     mk_stat 10 = ThreadBlocked BlockedOnForeignCall
      mk_stat 11 = ThreadBlocked BlockedOnForeignCall
-     mk_stat 12 = ThreadBlocked BlockedOnForeignCall
+     mk_stat 12 = ThreadBlocked BlockedOnException
      mk_stat 16 = ThreadFinished
      mk_stat 17 = ThreadDied
      mk_stat _  = ThreadBlocked BlockedOnOther
+
+-- | returns the number of the capability on which the thread is currently
+-- running, and a boolean indicating whether the thread is locked to
+-- that capability or not.  A thread is locked to a capability if it
+-- was created with @forkOn@.
+threadCapability :: ThreadId -> IO (Int, Bool)
+threadCapability (ThreadId t) = IO $ \s ->
+   case threadStatus# t s of
+     (# s', _, cap#, locked# #) -> (# s', (I# cap#, locked# /=# 0#) #)
 \end{code}
 
 

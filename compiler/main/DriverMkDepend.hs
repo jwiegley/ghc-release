@@ -16,7 +16,7 @@ module DriverMkDepend (
 #include "HsVersions.h"
 
 import qualified GHC
--- import GHC              ( ModSummary(..), GhcMonad )
+import GhcMonad
 import HsSyn            ( ImportDecl(..) )
 import DynFlags
 import Util
@@ -34,7 +34,6 @@ import FastString
 
 import Exception
 import ErrUtils
--- import MonadUtils       ( liftIO )
 
 import System.Directory
 import System.FilePath

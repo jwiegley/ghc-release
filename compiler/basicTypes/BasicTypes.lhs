@@ -19,7 +19,9 @@ types that
 module BasicTypes(
 	Version, bumpVersion, initialVersion,
 
-	Arity, 
+	Arity,
+	
+	Alignment,
 
         FunctionOrData(..),
 	
@@ -45,8 +47,8 @@ module BasicTypes(
 	TupCon(..), tupleParens,
 
 	OccInfo(..), seqOccInfo, zapFragileOcc, isOneOcc, 
-	isDeadOcc, isLoopBreaker, isNonRuleLoopBreaker, isNoOcc,
-        nonRuleLoopBreaker,
+	isDeadOcc, isStrongLoopBreaker, isWeakLoopBreaker, isNoOcc,
+        strongLoopBreaker, weakLoopBreaker, 
 
 	InsideLam, insideLam, notInsideLam,
 	OneBranch, oneBranch, notOneBranch,
@@ -72,13 +74,16 @@ module BasicTypes(
         inlinePragmaActivation, inlinePragmaRuleMatchInfo,
         setInlinePragmaActivation, setInlinePragmaRuleMatchInfo,
 
-	SuccessFlag(..), succeeded, failed, successIf
+	SuccessFlag(..), succeeded, failed, successIf,
+	
+	FractionalLit(..), negateFractionalLit, integralFractionalLit
    ) where
 
 import FastString
 import Outputable
 
 import Data.Data hiding (Fixity)
+import Data.Function (on)
 \end{code}
 
 %************************************************************************
@@ -89,6 +94,16 @@ import Data.Data hiding (Fixity)
 
 \begin{code}
 type Arity = Int
+\end{code}
+
+%************************************************************************
+%*									*
+\subsection[Alignment]{Alignment}
+%*									*
+%************************************************************************
+
+\begin{code}
+type Alignment = Int -- align to next N-byte boundary (N must be a power of 2).
 \end{code}
 
 %************************************************************************
@@ -321,38 +336,43 @@ instance Outputable RecFlag where
 
 \begin{code}
 data OverlapFlag
-  = NoOverlap	-- This instance must not overlap another
+  -- | This instance must not overlap another
+  = NoOverlap { isSafeOverlap :: Bool }
 
-  | OverlapOk	-- Silently ignore this instance if you find a 
-		-- more specific one that matches the constraint
-		-- you are trying to resolve
-		--
-		-- Example: constraint (Foo [Int])
-		-- 	    instances  (Foo [Int])
-	
-		--		       (Foo [a])	OverlapOk
-		-- Since the second instance has the OverlapOk flag,
-		-- the first instance will be chosen (otherwise 
-		-- its ambiguous which to choose)
+  -- | Silently ignore this instance if you find a 
+  -- more specific one that matches the constraint
+  -- you are trying to resolve
+  --
+  -- Example: constraint (Foo [Int])
+  -- 	    instances  (Foo [Int])
+  --		       (Foo [a])	OverlapOk
+  -- Since the second instance has the OverlapOk flag,
+  -- the first instance will be chosen (otherwise 
+  -- its ambiguous which to choose)
+  | OverlapOk { isSafeOverlap :: Bool }
 
-  | Incoherent	-- Like OverlapOk, but also ignore this instance 
-		-- if it doesn't match the constraint you are
-		-- trying to resolve, but could match if the type variables
-		-- in the constraint were instantiated
-		--
-		-- Example: constraint (Foo [b])
-		--	    instances  (Foo [Int])	Incoherent
-		--		       (Foo [a])
-		-- Without the Incoherent flag, we'd complain that
-		-- instantiating 'b' would change which instance 
-		-- was chosen
+  -- | Like OverlapOk, but also ignore this instance 
+  -- if it doesn't match the constraint you are
+  -- trying to resolve, but could match if the type variables
+  -- in the constraint were instantiated
+  --
+  -- Example: constraint (Foo [b])
+  --	    instances  (Foo [Int])	Incoherent
+  --		       (Foo [a])
+  -- Without the Incoherent flag, we'd complain that
+  -- instantiating 'b' would change which instance 
+  -- was chosen
+  | Incoherent { isSafeOverlap :: Bool }
   deriving( Eq )
 
 instance Outputable OverlapFlag where
-   ppr NoOverlap  = empty
-   ppr OverlapOk  = ptext (sLit "[overlap ok]")
-   ppr Incoherent = ptext (sLit "[incoherent]")
+   ppr (NoOverlap  b) = empty <+> pprSafeOverlap b
+   ppr (OverlapOk  b) = ptext (sLit "[overlap ok]") <+> pprSafeOverlap b
+   ppr (Incoherent b) = ptext (sLit "[incoherent]") <+> pprSafeOverlap b
 
+pprSafeOverlap :: Bool -> SDoc
+pprSafeOverlap True  = ptext $ sLit "[safe]"
+pprSafeOverlap False = empty
 \end{code}
 
 %************************************************************************
@@ -436,24 +456,20 @@ data OccInfo
   -- | This identifier breaks a loop of mutually recursive functions. The field
   -- marks whether it is only a loop breaker due to a reference in a rule
   | IAmALoopBreaker	-- Note [LoopBreaker OccInfo]
-	!RulesOnly	-- True <=> This is a weak or rules-only loop breaker
-			--  	    See OccurAnal Note [Weak loop breakers]
+	!RulesOnly
 
 type RulesOnly = Bool
 \end{code}
 
 Note [LoopBreaker OccInfo]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
-An OccInfo of (IAmLoopBreaker False) is used by the occurrence 
-analyser in two ways:
-  (a) to mark loop-breakers in a group of recursive 
-      definitions (hence the name)
-  (b) to mark binders that must not be inlined in this phase
-      (perhaps it has a NOINLINE pragma)
-Things with (IAmLoopBreaker False) do not get an unfolding 
-pinned on to them, so they are completely opaque.
+   IAmALoopBreaker True  <=> A "weak" or rules-only loop breaker
+   		   	     Do not preInlineUnconditionally
 
-See OccurAnal Note [Weak loop breakers] for (IAmLoopBreaker True).
+   IAmALoopBreaker False <=> A "strong" loop breaker
+                             Do not inline at all
+
+See OccurAnal Note [Weak loop breakers]
 
 
 \begin{code}
@@ -484,16 +500,17 @@ oneBranch, notOneBranch :: OneBranch
 oneBranch    = True
 notOneBranch = False
 
-isLoopBreaker :: OccInfo -> Bool
-isLoopBreaker (IAmALoopBreaker _) = True
-isLoopBreaker _                   = False
+strongLoopBreaker, weakLoopBreaker :: OccInfo
+strongLoopBreaker = IAmALoopBreaker False
+weakLoopBreaker   = IAmALoopBreaker True
 
-isNonRuleLoopBreaker :: OccInfo -> Bool
-isNonRuleLoopBreaker (IAmALoopBreaker False) = True   -- Loop-breaker that breaks a non-rule cycle
-isNonRuleLoopBreaker _                       = False
+isWeakLoopBreaker :: OccInfo -> Bool
+isWeakLoopBreaker (IAmALoopBreaker _) = True
+isWeakLoopBreaker _                   = False
 
-nonRuleLoopBreaker :: OccInfo
-nonRuleLoopBreaker = IAmALoopBreaker False
+isStrongLoopBreaker :: OccInfo -> Bool
+isStrongLoopBreaker (IAmALoopBreaker False) = True   -- Loop-breaker that breaks a non-rule cycle
+isStrongLoopBreaker _                       = False
 
 isDeadOcc :: OccInfo -> Bool
 isDeadOcc IAmDead = True
@@ -862,3 +879,36 @@ isEarlyActive (ActiveBefore {}) = True
 isEarlyActive _		        = False
 \end{code}
 
+
+
+\begin{code}
+-- Used (instead of Rational) to represent exactly the floating point literal that we
+-- encountered in the user's source program. This allows us to pretty-print exactly what
+-- the user wrote, which is important e.g. for floating point numbers that can't represented
+-- as Doubles (we used to via Double for pretty-printing). See also #2245.
+data FractionalLit
+  = FL { fl_text :: String         -- How the value was written in the source
+       , fl_value :: Rational      -- Numeric value of the literal
+       }
+  deriving (Data, Typeable, Show)
+  -- The Show instance is required for the derived Lexer.x:Token instance when DEBUG is on
+
+negateFractionalLit :: FractionalLit -> FractionalLit
+negateFractionalLit (FL { fl_text = '-':text, fl_value = value }) = FL { fl_text = text, fl_value = negate value }
+negateFractionalLit (FL { fl_text = text, fl_value = value }) = FL { fl_text = '-':text, fl_value = negate value }
+
+integralFractionalLit :: Integer -> FractionalLit
+integralFractionalLit i = FL { fl_text = show i, fl_value = fromInteger i }
+
+-- Comparison operations are needed when grouping literals
+-- for compiling pattern-matching (module MatchLit)
+
+instance Eq FractionalLit where
+  (==) = (==) `on` fl_value
+
+instance Ord FractionalLit where
+  compare = compare `on` fl_value
+
+instance Outputable FractionalLit where
+  ppr = text . fl_text
+\end{code}

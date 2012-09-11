@@ -45,7 +45,7 @@ endif
 include mk/custom-settings.mk
 
 # No need to update makefiles for these targets:
-REALGOALS=$(filter-out binary-dist binary-dist-prep bootstrapping-files framework-pkg clean clean_% distclean maintainer-clean show help install-docs test fulltest,$(MAKECMDGOALS))
+REALGOALS=$(filter-out binary-dist binary-dist-prep bootstrapping-files framework-pkg clean clean_% distclean maintainer-clean show help test fulltest,$(MAKECMDGOALS))
 
 # configure touches certain files even if they haven't changed.  This
 # can mean a lot of unnecessary recompilation after a re-configure, so
@@ -60,22 +60,16 @@ REALGOALS=$(filter-out binary-dist binary-dist-prep bootstrapping-files framewor
 # it does nothing if we specify a target that already exists.
 .PHONY: $(REALGOALS)
 $(REALGOALS) all: mk/config.mk.old mk/project.mk.old compiler/ghc.cabal.old
-	@echo "===--- updating makefiles phase 0"
-	$(MAKE) -r --no-print-directory -f ghc.mk phase=0 just-makefiles
+ifneq "$(OMIT_PHASE_0)" "YES"
+	@echo "===--- building phase 0"
+	$(MAKE) -r --no-print-directory -f ghc.mk phase=0 phase_0_builds
+endif
 ifneq "$(OMIT_PHASE_1)" "YES"
-	@echo "===--- updating makefiles phase 1"
-	$(MAKE) -r --no-print-directory -f ghc.mk phase=1 just-makefiles
+	@echo "===--- building phase 1"
+	$(MAKE) -r --no-print-directory -f ghc.mk phase=1 phase_1_builds
 endif
-ifneq "$(OMIT_PHASE_2)" "YES"
-	@echo "===--- updating makefiles phase 2"
-	$(MAKE) -r --no-print-directory -f ghc.mk phase=2 just-makefiles
-endif
-ifneq "$(OMIT_PHASE_3)" "YES"
-	@echo "===--- updating makefiles phase 3"
-	$(MAKE) -r --no-print-directory -f ghc.mk phase=3 just-makefiles
-endif
-	@echo "===--- finished updating makefiles"
-	$(MAKE) -r --no-print-directory -f ghc.mk $@
+	@echo "===--- building final phase"
+	$(MAKE) -r --no-print-directory -f ghc.mk phase=final $@
 
 binary-dist: binary-dist-prep
 ifeq "$(mingw32_TARGET_OS)" "1"
@@ -108,12 +102,6 @@ framework-pkg:
 	$(MAKE) -C distrib/MacOS $@
 endif
 
-# install-docs is a historical target that isn't supported in GHC 6.12. See #3662.
-install-docs:
-	@echo "The install-docs target is not supported in GHC 6.12.1 and later."
-	@echo "'make install' now installs everything, including documentation."
-	@exit 1
-
 # If the user says 'make A B', then we don't want to invoke two
 # instances of the rule above in parallel:
 .NOTPARALLEL:
@@ -122,9 +110,9 @@ endif
 
 .PHONY: test
 test:
-	$(MAKE) -C testsuite/tests/ghc-regress CLEANUP=1 OUTPUT_SUMMARY=../../../testsuite_summary.txt fast
+	$(MAKE) -C testsuite/tests CLEANUP=1 OUTPUT_SUMMARY=../../testsuite_summary.txt fast
 
 .PHONY: fulltest
 fulltest:
-	$(MAKE) -C testsuite/tests/ghc-regress CLEANUP=1 OUTPUT_SUMMARY=../../../testsuite_summary.txt
+	$(MAKE) -C testsuite/tests CLEANUP=1 OUTPUT_SUMMARY=../../testsuite_summary.txt
 

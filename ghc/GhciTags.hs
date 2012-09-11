@@ -13,6 +13,7 @@ module GhciTags (
   createETagsFileCmd
 ) where
 
+import Exception
 import GHC
 import GhciMonad
 import Outputable
@@ -29,7 +30,7 @@ import Panic
 import Data.List
 import Control.Monad
 import System.IO
-import System.IO.Error as IO
+import System.IO.Error
 
 -----------------------------------------------------------------------------
 -- create tags file for currently loaded modules.
@@ -90,20 +91,21 @@ listModuleTags m = do
        let names = fromMaybe [] $GHC.modInfoTopLevelScope mInfo
        let localNames = filter ((m==) . nameModule) names
        mbTyThings <- mapM GHC.lookupName localNames
-       return $! [ tagInfo unqual exported kind name loc
+       return $! [ tagInfo unqual exported kind name realLoc
                      | tyThing <- catMaybes mbTyThings
                      , let name = getName tyThing
                      , let exported = GHC.modInfoIsExportedName mInfo name
                      , let kind = tyThing2TagKind tyThing
                      , let loc = srcSpanStart (nameSrcSpan name)
-                     , isGoodSrcLoc loc
+                     , RealSrcLoc realLoc <- [loc]
                      ]
 
   where
-    tyThing2TagKind (AnId _) = 'v'
+    tyThing2TagKind (AnId _)     = 'v'
     tyThing2TagKind (ADataCon _) = 'd'
-    tyThing2TagKind (ATyCon _) = 't'
-    tyThing2TagKind (AClass _) = 'c'
+    tyThing2TagKind (ATyCon _)   = 't'
+    tyThing2TagKind (AClass _)   = 'c'
+    tyThing2TagKind (ACoAxiom _) = 'x'
 
 
 data TagInfo = TagInfo
@@ -118,7 +120,7 @@ data TagInfo = TagInfo
 
 
 -- get tag info, for later translation into Vim or Emacs style
-tagInfo :: PrintUnqualified -> Bool -> Char -> Name -> SrcLoc -> TagInfo
+tagInfo :: PrintUnqualified -> Bool -> Char -> Name -> RealSrcLoc -> TagInfo
 tagInfo unqual exported kind name loc
     = TagInfo exported kind
         (showSDocForUser unqual $ pprOccName (nameOccName name))
@@ -130,18 +132,18 @@ collateAndWriteTags :: TagsKind -> FilePath -> [TagInfo] -> IO (Either IOError (
 -- ctags style with the Ex exresion being just the line number, Vim et al
 collateAndWriteTags CTagsWithLineNumbers file tagInfos = do
   let tags = unlines $ sortLe (<=) $ map showCTag tagInfos
-  IO.try (writeFile file tags)
+  tryIO (writeFile file tags)
 
 -- ctags style with the Ex exresion being a regex searching the line, Vim et al
 collateAndWriteTags CTagsWithRegExes file tagInfos = do -- ctags style, Vim et al
   tagInfoGroups <- makeTagGroupsWithSrcInfo tagInfos
   let tags = unlines $ sortLe (<=) $ map showCTag $concat tagInfoGroups
-  IO.try (writeFile file tags)
+  tryIO (writeFile file tags)
 
 collateAndWriteTags ETags file tagInfos = do -- etags style, Emacs/XEmacs
   tagInfoGroups <- makeTagGroupsWithSrcInfo $filter tagExported tagInfos
   let tagGroups = map processGroup tagInfoGroups
-  IO.try (writeFile file $ concat tagGroups)
+  tryIO (writeFile file $ concat tagGroups)
 
   where
     processGroup [] = ghcError (CmdLineError "empty tag file group??")

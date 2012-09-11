@@ -1,4 +1,6 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.IO
@@ -200,6 +202,7 @@ module System.IO (
     utf16, utf16le, utf16be,
     utf32, utf32le, utf32be, 
     localeEncoding,
+    char8,
     mkTextEncoding,
 #endif
 
@@ -244,7 +247,7 @@ import System.Posix.Types
 
 #ifdef __GLASGOW_HASKELL__
 import GHC.Base
-import GHC.IO hiding ( onException )
+import GHC.IO hiding ( bracket, onException )
 import GHC.IO.IOMode
 import GHC.IO.Handle.FD
 import qualified GHC.IO.FD as FD

@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -O #-}
 -- We always optimise this, otherwise performance of a non-optimised
 -- compiler is severely affected
@@ -31,7 +32,7 @@ module Encoding (
 import Foreign
 import Data.Char
 import Numeric
-import GHC.Ptr          ( Ptr(..) )
+import GHC.Ptr ( Ptr(..) )
 import GHC.Base
 
 -- -----------------------------------------------------------------------------

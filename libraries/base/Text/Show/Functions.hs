@@ -1,5 +1,8 @@
+{-# LANGUAGE Safe #-}
+{-# LANGUAGE CPP #-}
 -- This module deliberately declares orphan instances:
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Text.Show.Functions

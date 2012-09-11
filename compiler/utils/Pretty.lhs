@@ -152,6 +152,7 @@ Relative to John's original paper, there are the following new features:
 
 
 \begin{code}
+{-# LANGUAGE BangPatterns #-}
 {-# OPTIONS -fno-warn-unused-imports #-}
 -- XXX GHC 6.9 seems to be confused by unpackCString# being used only in
 --     a RULE
@@ -162,7 +163,7 @@ module Pretty (
 
         empty, isEmpty, nest,
 
-        char, text, ftext, ptext,
+        char, text, ftext, ptext, zeroWidthText,
         int, integer, float, double, rational,
         parens, brackets, braces, quotes, doubleQuotes,
         semi, comma, colon, space, equals,
@@ -184,10 +185,9 @@ import BufWrite
 import FastString
 import FastTypes
 import Panic
-
+import StaticFlags
 import Numeric (fromRat)
 import System.IO
---import Foreign.Ptr (castPtr)
 
 #if defined(__GLASGOW_HASKELL__)
 --for a RULES
@@ -223,6 +223,10 @@ The primitive @Doc@ values
 \begin{code}
 empty                     :: Doc
 isEmpty                   :: Doc    -> Bool
+-- | Some text, but without any width. Use for non-printing text
+-- such as a HTML or Latex tags
+zeroWidthText :: String   -> Doc
+
 text                      :: String -> Doc
 char                      :: Char -> Doc
 
@@ -557,8 +561,8 @@ text  s = case iUnbox (length   s) of {sl -> textBeside_ (Str s)  sl Empty}
 ftext :: FastString -> Doc
 ftext s = case iUnbox (lengthFS s) of {sl -> textBeside_ (PStr s) sl Empty}
 ptext :: LitString -> Doc
-ptext s_= case iUnbox (lengthLS s) of {sl -> textBeside_ (LStr s sl) sl Empty}
-  where s = {-castPtr-} s_
+ptext s = case iUnbox (lengthLS s) of {sl -> textBeside_ (LStr s sl) sl Empty}
+zeroWidthText s = textBeside_ (Str s) (_ILIT(0)) Empty
 
 #if defined(__GLASGOW_HASKELL__)
 -- RULE that turns (text "abc") into (ptext (A# "abc"#)) to avoid the
@@ -998,7 +1002,7 @@ spaces n | n <=# _ILIT(0) = ""
 
 \begin{code}
 pprCols :: Int
-pprCols = 100 -- could make configurable
+pprCols = opt_PprCols
 
 printDoc :: Mode -> Handle -> Doc -> IO ()
 printDoc LeftMode hdl doc

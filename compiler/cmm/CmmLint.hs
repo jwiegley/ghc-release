@@ -17,40 +17,41 @@ module CmmLint (
   ) where
 
 import BlockId
-import Cmm
+import OldCmm
 import CLabel
 import Outputable
-import PprCmm
+import OldPprCmm()
 import Constants
 import FastString
+import Platform
 
-import Control.Monad
 import Data.Maybe
 
 -- -----------------------------------------------------------------------------
 -- Exported entry points:
 
 cmmLint :: (Outputable d, Outputable h)
-	=> GenCmm d h (ListGraph CmmStmt) -> Maybe SDoc
-cmmLint (Cmm tops) = runCmmLint (mapM_ lintCmmTop) tops
+        => Platform -> GenCmm d h (ListGraph CmmStmt) -> Maybe SDoc
+cmmLint platform (Cmm tops) = runCmmLint platform (mapM_ lintCmmTop) tops
 
 cmmLintTop :: (Outputable d, Outputable h)
-	   => GenCmmTop d h (ListGraph CmmStmt) -> Maybe SDoc
-cmmLintTop top = runCmmLint lintCmmTop top
+           => Platform -> GenCmmTop d h (ListGraph CmmStmt) -> Maybe SDoc
+cmmLintTop platform top = runCmmLint platform lintCmmTop top
 
-runCmmLint :: Outputable a => (a -> CmmLint b) -> a -> Maybe SDoc
-runCmmLint l p = 
+runCmmLint :: PlatformOutputable a
+           => Platform -> (a -> CmmLint b) -> a -> Maybe SDoc
+runCmmLint platform l p =
    case unCL (l p) of
-	Left err -> Just (vcat [ptext $ sLit ("Cmm lint error:"),
-				nest 2 err,
-				ptext $ sLit ("Program was:"),
-				nest 2 (ppr p)])
-  	Right _  -> Nothing
+   Left err -> Just (vcat [ptext $ sLit ("Cmm lint error:"),
+                           nest 2 err,
+                           ptext $ sLit ("Program was:"),
+                           nest 2 (pprPlatform platform p)])
+   Right _  -> Nothing
 
 lintCmmTop :: (GenCmmTop h i (ListGraph CmmStmt)) -> CmmLint ()
-lintCmmTop (CmmProc _ lbl _ (ListGraph blocks))
+lintCmmTop (CmmProc _ lbl (ListGraph blocks))
   = addLintInfo (text "in proc " <> pprCLabel lbl) $
-        let labels = foldl (\s b -> extendBlockSet s (blockId b)) emptyBlockSet blocks
+        let labels = foldl (\s b -> setInsert (blockId b) s) setEmpty blocks
 	in  mapM_ (lintCmmBlock labels) blocks
 
 lintCmmTop (CmmData {})
@@ -70,8 +71,10 @@ lintCmmBlock labels (BasicBlock id stmts)
 lintCmmExpr :: CmmExpr -> CmmLint CmmType
 lintCmmExpr (CmmLoad expr rep) = do
   _ <- lintCmmExpr expr
-  when (widthInBytes (typeWidth rep) >= wORD_SIZE) $
-     cmmCheckWordAddress expr
+  -- Disabled, if we have the inlining phase before the lint phase,
+  -- we can have funny offsets due to pointer tagging. -- EZY
+  -- when (widthInBytes (typeWidth rep) >= wORD_SIZE) $
+  --   cmmCheckWordAddress expr
   return rep
 lintCmmExpr expr@(CmmMachOp op args) = do
   tys <- mapM lintCmmExpr args
@@ -99,14 +102,14 @@ isOffsetOp _ = False
 
 -- This expression should be an address from which a word can be loaded:
 -- check for funny-looking sub-word offsets.
-cmmCheckWordAddress :: CmmExpr -> CmmLint ()
-cmmCheckWordAddress e@(CmmMachOp op [arg, CmmLit (CmmInt i _)])
+_cmmCheckWordAddress :: CmmExpr -> CmmLint ()
+_cmmCheckWordAddress e@(CmmMachOp op [arg, CmmLit (CmmInt i _)])
   | isOffsetOp op && notNodeReg arg && i `rem` fromIntegral wORD_SIZE /= 0
   = cmmLintDubiousWordOffset e
-cmmCheckWordAddress e@(CmmMachOp op [CmmLit (CmmInt i _), arg])
+_cmmCheckWordAddress e@(CmmMachOp op [CmmLit (CmmInt i _), arg])
   | isOffsetOp op && notNodeReg arg && i `rem` fromIntegral wORD_SIZE /= 0
   = cmmLintDubiousWordOffset e
-cmmCheckWordAddress _
+_cmmCheckWordAddress _
   = return ()
 
 -- No warnings for unaligned arithmetic with the node register,
@@ -142,7 +145,7 @@ lintCmmStmt labels = lint
           lint (CmmJump e args) = lintCmmExpr e >> mapM_ (lintCmmExpr . hintlessCmm) args
           lint (CmmReturn ress) = mapM_ (lintCmmExpr . hintlessCmm) ress
           lint (CmmBranch id)    = checkTarget id
-          checkTarget id = if elemBlockSet id labels then return ()
+          checkTarget id = if setMember id labels then return ()
                            else cmmLintErr (text "Branch to nonexistent id" <+> ppr id)
 
 lintTarget :: CmmCallTarget -> CmmLint ()
@@ -152,6 +155,7 @@ lintTarget (CmmPrim {})    = return ()
 
 checkCond :: CmmExpr -> CmmLint ()
 checkCond (CmmMachOp mop _) | isComparisonMachOp mop = return ()
+checkCond (CmmLit (CmmInt x t)) | x == 0 || x == 1, t == wordWidth = return () -- constant values
 checkCond expr = cmmLintErr (hang (text "expression is not a conditional:") 2
 				    (ppr expr))
 
@@ -180,14 +184,14 @@ addLintInfo info thing = CmmLint $
 cmmLintMachOpErr :: CmmExpr -> [CmmType] -> [Width] -> CmmLint a
 cmmLintMachOpErr expr argsRep opExpectsRep
      = cmmLintErr (text "in MachOp application: " $$ 
-					nest 2 (pprExpr expr) $$
+					nest 2 (ppr expr) $$
 				        (text "op is expecting: " <+> ppr opExpectsRep) $$
 					(text "arguments provide: " <+> ppr argsRep))
 
 cmmLintAssignErr :: CmmStmt -> CmmType -> CmmType -> CmmLint a
 cmmLintAssignErr stmt e_ty r_ty
   = cmmLintErr (text "in assignment: " $$ 
-		nest 2 (vcat [pprStmt stmt, 
+		nest 2 (vcat [ppr stmt, 
 			      text "Reg ty:" <+> ppr r_ty,
 			      text "Rhs ty:" <+> ppr e_ty]))
 			 
@@ -196,4 +200,4 @@ cmmLintAssignErr stmt e_ty r_ty
 cmmLintDubiousWordOffset :: CmmExpr -> CmmLint a
 cmmLintDubiousWordOffset expr
    = cmmLintErr (text "offset is not a multiple of words: " $$
-			nest 2 (pprExpr expr))
+			nest 2 (ppr expr))

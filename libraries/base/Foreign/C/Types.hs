@@ -1,7 +1,16 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP
+           , NoImplicitPrelude
+           , MagicHash
+           , GeneralizedNewtypeDeriving
+  #-}
 {-# OPTIONS_GHC -fno-warn-unused-binds #-}
+#ifdef __GLASGOW_HASKELL__
+{-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
+#endif
 -- XXX -fno-warn-unused-binds stops us warning about unused constructors,
 -- but really we should just remove them if we don't want them
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Foreign.C.Types
@@ -41,7 +50,7 @@ module Foreign.C.Types
           -- foreign types, and are instances of
           -- 'Prelude.Eq', 'Prelude.Ord', 'Prelude.Num', 'Prelude.Read',
           -- 'Prelude.Show', 'Prelude.Enum', 'Typeable' and 'Storable'.
-        , CClock,   CTime
+        , CClock,   CTime, CUSeconds, CSUSeconds
 
         -- extracted from CTime, because we don't want this comment in
         -- the Haskell 2010 report:
@@ -65,13 +74,14 @@ module Foreign.C.Types
 #endif
 #else
           -- Exported non-abstractly in nhc98 to fix an interface file problem.
-          CChar(..),    CSChar(..),  CUChar(..)
-        , CShort(..),   CUShort(..), CInt(..),   CUInt(..)
+          CChar(..),    CSChar(..),   CUChar(..)
+        , CShort(..),   CUShort(..),  CInt(..),      CUInt(..)
         , CLong(..),    CULong(..)
-        , CPtrdiff(..), CSize(..),   CWchar(..), CSigAtomic(..)
+        , CPtrdiff(..), CSize(..),    CWchar(..),    CSigAtomic(..)
         , CLLong(..),   CULLong(..)
-        , CClock(..),   CTime(..)
-        , CFloat(..),   CDouble(..), CLDouble(..)
+        , CClock(..),   CTime(..),    CUSeconds(..), CSUSeconds(..)
+        , CFloat(..),   CDouble(..),  CLDouble(..)
+        , CIntPtr(..),  CUIntPtr(..), CIntMax(..),   CUIntMax(..)
 #endif
           -- ** Other types
 
@@ -85,7 +95,9 @@ import Foreign.Storable
 import Data.Bits        ( Bits(..) )
 import Data.Int         ( Int8,  Int16,  Int32,  Int64  )
 import Data.Word        ( Word8, Word16, Word32, Word64 )
-import {-# SOURCE #-} Data.Typeable (Typeable(typeOf), TyCon, mkTyCon, mkTyConApp)
+import {-# SOURCE #-} Data.Typeable
+  -- loop: Data.Typeable -> Data.List -> Data.Char -> GHC.Unicode
+  --            -> Foreign.C.Type
 
 #ifdef __GLASGOW_HASKELL__
 import GHC.Base
@@ -206,8 +218,11 @@ INTEGRAL_TYPE(CSigAtomic,tyConCSigAtomic,"CSigAtomic",HTYPE_SIG_ATOMIC_T)
 -- | Haskell type representing the C @clock_t@ type.
 ARITHMETIC_TYPE(CClock,tyConCClock,"CClock",HTYPE_CLOCK_T)
 -- | Haskell type representing the C @time_t@ type.
---
 ARITHMETIC_TYPE(CTime,tyConCTime,"CTime",HTYPE_TIME_T)
+-- | Haskell type representing the C @useconds_t@ type.
+ARITHMETIC_TYPE(CUSeconds,tyConCUSeconds,"CUSeconds",HTYPE_USECONDS_T)
+-- | Haskell type representing the C @suseconds_t@ type.
+ARITHMETIC_TYPE(CSUSeconds,tyConCSUSeconds,"CSUSeconds",HTYPE_SUSECONDS_T)
 
 -- FIXME: Implement and provide instances for Eq and Storable
 -- | Haskell type representing the C @FILE@ type.
@@ -278,13 +293,14 @@ representing a C type @t@:
 #else   /* __NHC__ */
 
 import NHC.FFI
-  ( CChar(..),    CSChar(..),  CUChar(..)
-  , CShort(..),   CUShort(..), CInt(..),   CUInt(..)
-  , CLong(..),    CULong(..),  CLLong(..), CULLong(..)
-  , CPtrdiff(..), CSize(..),   CWchar(..), CSigAtomic(..)
-  , CClock(..),   CTime(..)
-  , CFloat(..),   CDouble(..), CLDouble(..)
-  , CFile,        CFpos,       CJmpBuf
+  ( CChar(..),    CSChar(..),   CUChar(..)
+  , CShort(..),   CUShort(..),  CInt(..),      CUInt(..)
+  , CLong(..),    CULong(..),   CLLong(..),    CULLong(..)
+  , CPtrdiff(..), CSize(..),    CWchar(..),    CSigAtomic(..)
+  , CClock(..),   CTime(..),    CUSeconds(..), CSUSeconds(..)
+  , CFloat(..),   CDouble(..),  CLDouble(..)
+  , CIntPtr(..),  CUIntPtr(..), CIntMax(..),   CUIntMax(..)
+  , CFile,        CFpos,        CJmpBuf
   , Storable(..)
   )
 import Data.Bits
@@ -321,5 +337,9 @@ INSTANCE_BITS(CPtrdiff)
 INSTANCE_BITS(CWchar)
 INSTANCE_BITS(CSigAtomic)
 INSTANCE_BITS(CSize)
+INSTANCE_BITS(CIntPtr)
+INSTANCE_BITS(CUIntPtr)
+INSTANCE_BITS(CIntMax)
+INSTANCE_BITS(CUIntMax)
 
 #endif

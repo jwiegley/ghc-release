@@ -58,7 +58,7 @@ import Unique	  ( Unique, Uniquable(..), hasKey,
 		    mkTupleTyConUnique
 		  ) 
 import BasicTypes ( Boxity(..), Arity )
-import Name	  ( Name, mkInternalName, mkExternalName )
+import Name       ( Name, mkInternalName, mkExternalName, mkSystemVarName )
 import SrcLoc
 import FastString
 \end{code}
@@ -89,20 +89,27 @@ isUnboundName name = name `hasKey` unboundKey
 
 
 %************************************************************************
-%*									*
+%*                                                                      *
 \subsection{Known key Names}
-%*									*
+%*                                                                      *
 %************************************************************************
 
-This section tells what the compiler knows about the assocation of
+This section tells what the compiler knows about the association of
 names with uniques.  These ones are the *non* wired-in ones.  The
 wired in ones are defined in TysWiredIn etc.
+
+The names for DPH can come from one of multiple backend packages. At the point where 
+'basicKnownKeyNames' is used, we don't know which backend it will be.  Hence, we list
+the names for multiple backends.  That works out fine, although they use the same uniques,
+as we are guaranteed to only load one backend; hence, only one of the different names
+sharing a unique will be used.
 
 \begin{code}
 basicKnownKeyNames :: [Name]
 basicKnownKeyNames
  = genericTyConNames
  ++ typeableClassNames
+ ++ dphKnownKeyNames dphSeqPackageId ++ dphKnownKeyNames dphParPackageId
  ++ [	-- Type constructors (synonyms especially)
 	ioTyConName, ioDataConName,
 	runMainIOName,
@@ -136,9 +143,12 @@ basicKnownKeyNames
 	traversableClassName,
 
 	-- Numeric stuff
-	negateName, minusName, 
-	fromRationalName, fromIntegerName, 
-	geName, eqName, 
+        negateName, minusName, geName, eqName,
+
+        -- Conversion functions
+        fromRationalName, fromIntegerName,
+        toIntegerName, toRationalName,
+        fromIntegralName, realToFracName,
 
         -- String stuff
         fromStringName,
@@ -146,11 +156,11 @@ basicKnownKeyNames
 	-- Enum stuff
 	enumFromName, enumFromThenName,	
 	enumFromThenToName, enumFromToName,
-	enumFromToPName, enumFromThenToPName,
 
 	-- Monad stuff
 	thenIOName, bindIOName, returnIOName, failIOName,
 	failMName, bindMName, thenMName, returnMName,
+        fmapName,
 
 	-- MonadRec stuff
 	mfixName,
@@ -184,11 +194,6 @@ basicKnownKeyNames
 
         dollarName,	    -- The ($) apply function
 
-        -- Parallel array operations
-	nullPName, lengthPName, replicatePName,	singletonPName, mapPName,
-	filterPName, zipPName, crossMapPName, indexPName,
-	toPName, emptyPName, appPName,
-
 	-- FFI primitive types that are not wired-in.
 	stablePtrTyConName, ptrTyConName, funPtrTyConName,
 	int8TyConName, int16TyConName, int32TyConName, int64TyConName,
@@ -214,13 +219,47 @@ basicKnownKeyNames
 	-- The Either type
 	, eitherTyConName, leftDataConName, rightDataConName
 
+        -- Plugins
+        , pluginTyConName
+                                            
 	-- dotnet interop
 	, objectTyConName, marshalObjectName, unmarshalObjectName
 	, marshalStringName, unmarshalStringName, checkDotnetResName
+	
+	-- Generics
+	, genClassName, gen1ClassName
+	, datatypeClassName, constructorClassName, selectorClassName
+	
+        -- Monad comprehensions
+        , guardMName
+        , liftMName
+        , groupMName
+        , mzipName
     ]
 
 genericTyConNames :: [Name]
-genericTyConNames = [crossTyConName, plusTyConName, genUnitTyConName]
+genericTyConNames = [
+    v1TyConName, u1TyConName, par1TyConName, rec1TyConName,
+    k1TyConName, m1TyConName, sumTyConName, prodTyConName,
+    compTyConName, rTyConName, pTyConName, dTyConName,
+    cTyConName, sTyConName, rec0TyConName, par0TyConName,
+    d1TyConName, c1TyConName, s1TyConName, noSelTyConName,
+    repTyConName, rep1TyConName
+  ]
+
+-- Know names from the DPH package which vary depending on the selected DPH backend.
+--
+dphKnownKeyNames :: PackageId -> [Name]
+dphKnownKeyNames dphPkg
+  = map ($ dphPkg)
+    [
+        -- Parallel array operations
+	  nullPName, lengthPName, replicatePName,	singletonPName, mapPName,
+	  filterPName, zipPName, crossMapPName, indexPName,
+	  toPName, emptyPName, appPName,
+  	enumFromToPName, enumFromThenToPName
+
+    ]
 \end{code}
 
 
@@ -236,24 +275,25 @@ genericTyConNames = [crossTyConName, plusTyConName, genUnitTyConName]
 pRELUDE :: Module
 pRELUDE		= mkBaseModule_ pRELUDE_NAME
 
-gHC_PRIM, gHC_TYPES, gHC_BOOL, gHC_UNIT, gHC_ORDERING, gHC_GENERICS,
+gHC_PRIM, gHC_TYPES, gHC_UNIT, gHC_ORDERING, gHC_GENERICS,
     gHC_MAGIC,
-    gHC_CLASSES, gHC_BASE, gHC_ENUM,
-    gHC_SHOW, gHC_READ, gHC_NUM, gHC_INTEGER, gHC_INTEGER_TYPE, gHC_LIST, gHC_PARR,
+    gHC_CLASSES, gHC_BASE, gHC_ENUM, gHC_CSTRING,
+    gHC_SHOW, gHC_READ, gHC_NUM, gHC_INTEGER, gHC_INTEGER_TYPE, gHC_LIST,
     gHC_TUPLE, dATA_TUPLE, dATA_EITHER, dATA_STRING, dATA_FOLDABLE, dATA_TRAVERSABLE,
-    gHC_PACK, gHC_CONC, gHC_IO, gHC_IO_Exception,
-    gHC_ST, gHC_ARR, gHC_STABLE, gHC_ADDR, gHC_PTR, gHC_ERR, gHC_REAL,
-    gHC_FLOAT, gHC_TOP_HANDLER, sYSTEM_IO, dYNAMIC, tYPEABLE, gENERICS,
-    dOTNET, rEAD_PREC, lEX, gHC_INT, gHC_WORD, mONAD, mONAD_FIX, aRROW, cONTROL_APPLICATIVE,
-    gHC_DESUGAR, rANDOM, gHC_EXTS, cONTROL_EXCEPTION_BASE :: Module
+    gHC_CONC, gHC_IO, gHC_IO_Exception,
+    gHC_ST, gHC_ARR, gHC_STABLE, gHC_PTR, gHC_ERR, gHC_REAL,
+    gHC_FLOAT, gHC_TOP_HANDLER, sYSTEM_IO, dYNAMIC, tYPEABLE, tYPEABLE_INTERNAL, gENERICS,
+    dOTNET, rEAD_PREC, lEX, gHC_INT, gHC_WORD, mONAD, mONAD_FIX, mONAD_GROUP, mONAD_ZIP,
+    aRROW, cONTROL_APPLICATIVE, gHC_DESUGAR, rANDOM, gHC_EXTS,
+    cONTROL_EXCEPTION_BASE :: Module
 
 gHC_PRIM	= mkPrimModule (fsLit "GHC.Prim")   -- Primitive types and values
 gHC_TYPES       = mkPrimModule (fsLit "GHC.Types")
 gHC_UNIT	= mkPrimModule (fsLit "GHC.Unit")
-gHC_BOOL	= mkPrimModule (fsLit "GHC.Bool")
 gHC_ORDERING	= mkPrimModule (fsLit "GHC.Ordering")
 gHC_GENERICS	= mkPrimModule (fsLit "GHC.Generics")
 gHC_MAGIC	= mkPrimModule (fsLit "GHC.Magic")
+gHC_CSTRING	= mkPrimModule (fsLit "GHC.CString")
 
 gHC_CLASSES	= mkBaseModule (fsLit "GHC.Classes")
 gHC_BASE	= mkBaseModule (fsLit "GHC.Base")
@@ -263,22 +303,19 @@ gHC_READ	= mkBaseModule (fsLit "GHC.Read")
 gHC_NUM		= mkBaseModule (fsLit "GHC.Num")
 gHC_INTEGER	= mkIntegerModule (fsLit "GHC.Integer")
 gHC_INTEGER_TYPE= mkIntegerModule (fsLit "GHC.Integer.Type")
-gHC_LIST	= mkBaseModule (fsLit "GHC.List")
-gHC_PARR	= mkBaseModule (fsLit "GHC.PArr")
-gHC_TUPLE	= mkPrimModule (fsLit "GHC.Tuple")
-dATA_TUPLE	= mkBaseModule (fsLit "Data.Tuple")
+gHC_LIST        = mkBaseModule (fsLit "GHC.List")
+gHC_TUPLE       = mkPrimModule (fsLit "GHC.Tuple")
+dATA_TUPLE      = mkBaseModule (fsLit "Data.Tuple")
 dATA_EITHER	= mkBaseModule (fsLit "Data.Either")
 dATA_STRING	= mkBaseModule (fsLit "Data.String")
 dATA_FOLDABLE	= mkBaseModule (fsLit "Data.Foldable")
 dATA_TRAVERSABLE= mkBaseModule (fsLit "Data.Traversable")
-gHC_PACK	= mkBaseModule (fsLit "GHC.Pack")
 gHC_CONC	= mkBaseModule (fsLit "GHC.Conc")
 gHC_IO    	= mkBaseModule (fsLit "GHC.IO")
 gHC_IO_Exception = mkBaseModule (fsLit "GHC.IO.Exception")
 gHC_ST		= mkBaseModule (fsLit "GHC.ST")
 gHC_ARR		= mkBaseModule (fsLit "GHC.Arr")
 gHC_STABLE	= mkBaseModule (fsLit "GHC.Stable")
-gHC_ADDR	= mkBaseModule (fsLit "GHC.Addr")
 gHC_PTR		= mkBaseModule (fsLit "GHC.Ptr")
 gHC_ERR		= mkBaseModule (fsLit "GHC.Err")
 gHC_REAL	= mkBaseModule (fsLit "GHC.Real")
@@ -286,7 +323,8 @@ gHC_FLOAT	= mkBaseModule (fsLit "GHC.Float")
 gHC_TOP_HANDLER	= mkBaseModule (fsLit "GHC.TopHandler")
 sYSTEM_IO	= mkBaseModule (fsLit "System.IO")
 dYNAMIC		= mkBaseModule (fsLit "Data.Dynamic")
-tYPEABLE	= mkBaseModule (fsLit "Data.Typeable")
+tYPEABLE        = mkBaseModule (fsLit "Data.Typeable")
+tYPEABLE_INTERNAL = mkBaseModule (fsLit "Data.Typeable.Internal")
 gENERICS        = mkBaseModule (fsLit "Data.Data")
 dOTNET		= mkBaseModule (fsLit "GHC.Dotnet")
 rEAD_PREC	= mkBaseModule (fsLit "Text.ParserCombinators.ReadPrec")
@@ -295,12 +333,20 @@ gHC_INT		= mkBaseModule (fsLit "GHC.Int")
 gHC_WORD	= mkBaseModule (fsLit "GHC.Word")
 mONAD		= mkBaseModule (fsLit "Control.Monad")
 mONAD_FIX	= mkBaseModule (fsLit "Control.Monad.Fix")
+mONAD_GROUP     = mkBaseModule (fsLit "Control.Monad.Group")
+mONAD_ZIP       = mkBaseModule (fsLit "Control.Monad.Zip")
 aRROW		= mkBaseModule (fsLit "Control.Arrow")
 cONTROL_APPLICATIVE = mkBaseModule (fsLit "Control.Applicative")
 gHC_DESUGAR = mkBaseModule (fsLit "GHC.Desugar")
 rANDOM		= mkBaseModule (fsLit "System.Random")
 gHC_EXTS	= mkBaseModule (fsLit "GHC.Exts")
 cONTROL_EXCEPTION_BASE = mkBaseModule (fsLit "Control.Exception.Base")
+
+gHC_PARR :: PackageId -> Module
+gHC_PARR pkg = mkModule pkg (mkModuleNameFS (fsLit "Data.Array.Parallel"))
+
+gHC_PARR' :: Module
+gHC_PARR' = mkBaseModule (fsLit "GHC.PArr")
 
 mAIN, rOOT_MAIN :: Module
 mAIN	        = mkMainModule_ mAIN_NAME
@@ -328,6 +374,12 @@ mkBaseModule m = mkModule basePackageId (mkModuleNameFS m)
 
 mkBaseModule_ :: ModuleName -> Module
 mkBaseModule_ m = mkModule basePackageId m
+
+mkThisGhcModule :: FastString -> Module
+mkThisGhcModule m = mkModule thisGhcPackageId (mkModuleNameFS m)
+
+mkThisGhcModule_ :: ModuleName -> Module
+mkThisGhcModule_ m = mkModule thisGhcPackageId m
 
 mkMainModule :: FastString -> Module
 mkMainModule m = mkModule mainPackageId (mkModuleNameFS m)
@@ -495,19 +547,66 @@ showString_RDR          = varQual_RDR gHC_SHOW (fsLit "showString")
 showSpace_RDR           = varQual_RDR gHC_SHOW (fsLit "showSpace") 
 showParen_RDR           = varQual_RDR gHC_SHOW (fsLit "showParen") 
 
-typeOf_RDR, mkTypeRep_RDR, mkTyConRep_RDR :: RdrName
-typeOf_RDR     = varQual_RDR tYPEABLE (fsLit "typeOf")
-mkTypeRep_RDR  = varQual_RDR tYPEABLE (fsLit "mkTyConApp")
-mkTyConRep_RDR = varQual_RDR tYPEABLE (fsLit "mkTyCon")
+typeOf_RDR, mkTyCon_RDR, mkTyConApp_RDR :: RdrName
+typeOf_RDR     = varQual_RDR tYPEABLE_INTERNAL (fsLit "typeOf")
+mkTyCon_RDR    = varQual_RDR tYPEABLE_INTERNAL (fsLit "mkTyCon")
+mkTyConApp_RDR = varQual_RDR tYPEABLE_INTERNAL (fsLit "mkTyConApp")
 
 undefined_RDR :: RdrName
 undefined_RDR = varQual_RDR gHC_ERR (fsLit "undefined")
 
+error_RDR :: RdrName
+error_RDR = varQual_RDR gHC_ERR (fsLit "error")
+
+-- Old Generics (constructors and functions)
 crossDataCon_RDR, inlDataCon_RDR, inrDataCon_RDR, genUnitDataCon_RDR :: RdrName
 crossDataCon_RDR   = dataQual_RDR gHC_GENERICS (fsLit ":*:")
 inlDataCon_RDR     = dataQual_RDR gHC_GENERICS (fsLit "Inl")
 inrDataCon_RDR     = dataQual_RDR gHC_GENERICS (fsLit "Inr")
 genUnitDataCon_RDR = dataQual_RDR gHC_GENERICS (fsLit "Unit")
+
+-- Generics (constructors and functions)
+u1DataCon_RDR, par1DataCon_RDR, rec1DataCon_RDR,
+  k1DataCon_RDR, m1DataCon_RDR, l1DataCon_RDR, r1DataCon_RDR,
+  prodDataCon_RDR, comp1DataCon_RDR, from_RDR, from1_RDR,
+  to_RDR, to1_RDR, datatypeName_RDR, moduleName_RDR, conName_RDR,
+  conFixity_RDR, conIsRecord_RDR,
+  noArityDataCon_RDR, arityDataCon_RDR, selName_RDR,
+  prefixDataCon_RDR, infixDataCon_RDR, leftAssocDataCon_RDR,
+  rightAssocDataCon_RDR, notAssocDataCon_RDR :: RdrName
+
+u1DataCon_RDR    = dataQual_RDR gHC_GENERICS (fsLit "U1")
+par1DataCon_RDR  = dataQual_RDR gHC_GENERICS (fsLit "Par1")
+rec1DataCon_RDR  = dataQual_RDR gHC_GENERICS (fsLit "Rec1")
+k1DataCon_RDR    = dataQual_RDR gHC_GENERICS (fsLit "K1")
+m1DataCon_RDR    = dataQual_RDR gHC_GENERICS (fsLit "M1")
+
+l1DataCon_RDR     = dataQual_RDR gHC_GENERICS (fsLit "L1")
+r1DataCon_RDR     = dataQual_RDR gHC_GENERICS (fsLit "R1")
+
+prodDataCon_RDR   = dataQual_RDR gHC_GENERICS (fsLit ":*:")
+comp1DataCon_RDR  = dataQual_RDR gHC_GENERICS (fsLit "Comp1")
+
+from_RDR  = varQual_RDR gHC_GENERICS (fsLit "from")
+from1_RDR = varQual_RDR gHC_GENERICS (fsLit "from1")
+to_RDR    = varQual_RDR gHC_GENERICS (fsLit "to")
+to1_RDR   = varQual_RDR gHC_GENERICS (fsLit "to1")
+
+datatypeName_RDR  = varQual_RDR gHC_GENERICS (fsLit "datatypeName")
+moduleName_RDR    = varQual_RDR gHC_GENERICS (fsLit "moduleName")
+selName_RDR       = varQual_RDR gHC_GENERICS (fsLit "selName")
+conName_RDR       = varQual_RDR gHC_GENERICS (fsLit "conName")
+conFixity_RDR     = varQual_RDR gHC_GENERICS (fsLit "conFixity")
+conIsRecord_RDR   = varQual_RDR gHC_GENERICS (fsLit "conIsRecord")
+
+noArityDataCon_RDR    = dataQual_RDR gHC_GENERICS (fsLit "NoArity")
+arityDataCon_RDR      = dataQual_RDR gHC_GENERICS (fsLit "Arity")
+prefixDataCon_RDR     = dataQual_RDR gHC_GENERICS (fsLit "Prefix")
+infixDataCon_RDR      = dataQual_RDR gHC_GENERICS (fsLit "Infix")
+leftAssocDataCon_RDR  = dataQual_RDR gHC_GENERICS (fsLit "LeftAssociative")
+rightAssocDataCon_RDR = dataQual_RDR gHC_GENERICS (fsLit "RightAssociative")
+notAssocDataCon_RDR   = dataQual_RDR gHC_GENERICS (fsLit "NotAssociative")
+
 
 fmap_RDR, pure_RDR, ap_RDR, foldable_foldr_RDR, traverse_RDR :: RdrName
 fmap_RDR 		= varQual_RDR gHC_BASE (fsLit "fmap")
@@ -540,6 +639,9 @@ and it's convenient to write them all down in one place.
 
 
 \begin{code}
+wildCardName :: Name
+wildCardName = mkSystemVarName wildCardKey (fsLit "wild")
+
 runMainIOName :: Name
 runMainIOName = varQual gHC_TOP_HANDLER (fsLit "runMainIO") runMainKey
 
@@ -551,19 +653,48 @@ eitherTyConName	  = tcQual  dATA_EITHER (fsLit "Either") eitherTyConKey
 leftDataConName   = conName dATA_EITHER (fsLit "Left")   leftDataConKey
 rightDataConName  = conName dATA_EITHER (fsLit "Right")  rightDataConKey
 
--- Generics
-crossTyConName, plusTyConName, genUnitTyConName :: Name
-crossTyConName     = tcQual   gHC_GENERICS (fsLit ":*:") crossTyConKey
-plusTyConName      = tcQual   gHC_GENERICS (fsLit ":+:") plusTyConKey
-genUnitTyConName   = tcQual   gHC_GENERICS (fsLit "Unit") genUnitTyConKey
+-- Generics (types)
+v1TyConName, u1TyConName, par1TyConName, rec1TyConName,
+  k1TyConName, m1TyConName, sumTyConName, prodTyConName,
+  compTyConName, rTyConName, pTyConName, dTyConName, 
+  cTyConName, sTyConName, rec0TyConName, par0TyConName,
+  d1TyConName, c1TyConName, s1TyConName, noSelTyConName,
+  repTyConName, rep1TyConName :: Name
+
+v1TyConName  = tcQual gHC_GENERICS (fsLit "V1") v1TyConKey
+u1TyConName  = tcQual gHC_GENERICS (fsLit "U1") u1TyConKey
+par1TyConName  = tcQual gHC_GENERICS (fsLit "Par1") par1TyConKey
+rec1TyConName  = tcQual gHC_GENERICS (fsLit "Rec1") rec1TyConKey
+k1TyConName  = tcQual gHC_GENERICS (fsLit "K1") k1TyConKey
+m1TyConName  = tcQual gHC_GENERICS (fsLit "M1") m1TyConKey
+
+sumTyConName    = tcQual gHC_GENERICS (fsLit ":+:") sumTyConKey
+prodTyConName   = tcQual gHC_GENERICS (fsLit ":*:") prodTyConKey
+compTyConName   = tcQual gHC_GENERICS (fsLit ":.:") compTyConKey
+
+rTyConName  = tcQual gHC_GENERICS (fsLit "R") rTyConKey
+pTyConName  = tcQual gHC_GENERICS (fsLit "P") pTyConKey
+dTyConName  = tcQual gHC_GENERICS (fsLit "D") dTyConKey
+cTyConName  = tcQual gHC_GENERICS (fsLit "C") cTyConKey
+sTyConName  = tcQual gHC_GENERICS (fsLit "S") sTyConKey
+
+rec0TyConName  = tcQual gHC_GENERICS (fsLit "Rec0") rec0TyConKey
+par0TyConName  = tcQual gHC_GENERICS (fsLit "Par0") par0TyConKey
+d1TyConName  = tcQual gHC_GENERICS (fsLit "D1") d1TyConKey
+c1TyConName  = tcQual gHC_GENERICS (fsLit "C1") c1TyConKey
+s1TyConName  = tcQual gHC_GENERICS (fsLit "S1") s1TyConKey
+noSelTyConName = tcQual gHC_GENERICS (fsLit "NoSelector") noSelTyConKey
+
+repTyConName  = tcQual gHC_GENERICS (fsLit "Rep")  repTyConKey
+rep1TyConName = tcQual gHC_GENERICS (fsLit "Rep1") rep1TyConKey
 
 -- Base strings Strings
 unpackCStringName, unpackCStringAppendName, unpackCStringFoldrName,
     unpackCStringUtf8Name, eqStringName, stringTyConName :: Name
-unpackCStringName       = varQual gHC_BASE (fsLit "unpackCString#") unpackCStringIdKey
-unpackCStringAppendName = varQual gHC_BASE (fsLit "unpackAppendCString#") unpackCStringAppendIdKey
-unpackCStringFoldrName  = varQual gHC_BASE (fsLit "unpackFoldrCString#") unpackCStringFoldrIdKey
-unpackCStringUtf8Name   = varQual gHC_BASE (fsLit "unpackCStringUtf8#") unpackCStringUtf8IdKey
+unpackCStringName       = varQual gHC_CSTRING (fsLit "unpackCString#") unpackCStringIdKey
+unpackCStringAppendName = varQual gHC_CSTRING (fsLit "unpackAppendCString#") unpackCStringAppendIdKey
+unpackCStringFoldrName  = varQual gHC_CSTRING (fsLit "unpackFoldrCString#") unpackCStringFoldrIdKey
+unpackCStringUtf8Name   = varQual gHC_CSTRING (fsLit "unpackCStringUtf8#") unpackCStringUtf8IdKey
 eqStringName	 	= varQual gHC_BASE (fsLit "eqString")  eqStringIdKey
 stringTyConName         = tcQual  gHC_BASE (fsLit "String") stringTyConKey
 
@@ -571,13 +702,18 @@ stringTyConName         = tcQual  gHC_BASE (fsLit "String") stringTyConKey
 inlineIdName :: Name
 inlineIdName	 	= varQual gHC_MAGIC (fsLit "inline") inlineIdKey
 
+-- The 'undefined' function. Used by supercompilation.
+undefinedName :: Name
+undefinedName = varQual gHC_ERR (fsLit "undefined") undefinedKey
+
 -- Base classes (Eq, Ord, Functor)
-eqClassName, eqName, ordClassName, geName, functorClassName :: Name
+fmapName, eqClassName, eqName, ordClassName, geName, functorClassName :: Name
 eqClassName	  = clsQual  gHC_CLASSES (fsLit "Eq")      eqClassKey
 eqName		  = methName gHC_CLASSES (fsLit "==")      eqClassOpKey
 ordClassName	  = clsQual  gHC_CLASSES (fsLit "Ord")     ordClassKey
 geName		  = methName gHC_CLASSES (fsLit ">=")      geClassOpKey
 functorClassName  = clsQual  gHC_BASE (fsLit "Functor") functorClassKey
+fmapName          = methName gHC_BASE (fsLit "fmap")    fmapClassOpKey
 
 -- Class Monad
 monadClassName, thenMName, bindMName, returnMName, failMName :: Name
@@ -640,7 +776,7 @@ fstName, sndName :: Name
 fstName		  = varQual dATA_TUPLE (fsLit "fst") fstIdKey
 sndName		  = varQual dATA_TUPLE (fsLit "snd") sndIdKey
 
--- Module PrelNum
+-- Module GHC.Num
 numClassName, fromIntegerName, minusName, negateName, plusIntegerName,
     timesIntegerName,
     integerTyConName, smallIntegerName :: Name
@@ -653,10 +789,11 @@ timesIntegerName  = varQual  gHC_INTEGER (fsLit "timesInteger") timesIntegerIdKe
 integerTyConName  = tcQual   gHC_INTEGER_TYPE (fsLit "Integer") integerTyConKey
 smallIntegerName = varQual gHC_INTEGER (fsLit "smallInteger") smallIntegerIdKey
 
--- PrelReal types and classes
+-- GHC.Real types and classes
 rationalTyConName, ratioTyConName, ratioDataConName, realClassName,
     integralClassName, realFracClassName, fractionalClassName,
-    fromRationalName :: Name
+    fromRationalName, toIntegerName, toRationalName, fromIntegralName,
+    realToFracName :: Name
 rationalTyConName   = tcQual  gHC_REAL (fsLit "Rational") rationalTyConKey
 ratioTyConName	    = tcQual  gHC_REAL (fsLit "Ratio") ratioTyConKey
 ratioDataConName    = conName gHC_REAL (fsLit ":%") ratioDataConKey
@@ -664,7 +801,11 @@ realClassName	    = clsQual gHC_REAL (fsLit "Real") realClassKey
 integralClassName   = clsQual gHC_REAL (fsLit "Integral") integralClassKey
 realFracClassName   = clsQual gHC_REAL (fsLit "RealFrac") realFracClassKey
 fractionalClassName = clsQual gHC_REAL (fsLit "Fractional") fractionalClassKey
-fromRationalName    = methName gHC_REAL  (fsLit "fromRational") fromRationalClassOpKey
+fromRationalName    = methName gHC_REAL (fsLit "fromRational") fromRationalClassOpKey
+toIntegerName       = methName gHC_REAL (fsLit "toInteger") toIntegerClassOpKey
+toRationalName      = methName gHC_REAL (fsLit "toRational") toRationalClassOpKey
+fromIntegralName    = varQual  gHC_REAL (fsLit "fromIntegral") fromIntegralIdKey
+realToFracName      = varQual  gHC_REAL (fsLit "realToFrac") realToFracIdKey
 
 -- PrelFloat classes
 floatingClassName, realFloatClassName :: Name
@@ -679,14 +820,14 @@ ixClassName = clsQual gHC_ARR (fsLit "Ix") ixClassKey
 typeableClassName, typeable1ClassName, typeable2ClassName,
     typeable3ClassName, typeable4ClassName, typeable5ClassName,
     typeable6ClassName, typeable7ClassName :: Name
-typeableClassName  = clsQual tYPEABLE (fsLit "Typeable") typeableClassKey
-typeable1ClassName = clsQual tYPEABLE (fsLit "Typeable1") typeable1ClassKey
-typeable2ClassName = clsQual tYPEABLE (fsLit "Typeable2") typeable2ClassKey
-typeable3ClassName = clsQual tYPEABLE (fsLit "Typeable3") typeable3ClassKey
-typeable4ClassName = clsQual tYPEABLE (fsLit "Typeable4") typeable4ClassKey
-typeable5ClassName = clsQual tYPEABLE (fsLit "Typeable5") typeable5ClassKey
-typeable6ClassName = clsQual tYPEABLE (fsLit "Typeable6") typeable6ClassKey
-typeable7ClassName = clsQual tYPEABLE (fsLit "Typeable7") typeable7ClassKey
+typeableClassName  = clsQual tYPEABLE_INTERNAL (fsLit "Typeable") typeableClassKey
+typeable1ClassName = clsQual tYPEABLE_INTERNAL (fsLit "Typeable1") typeable1ClassKey
+typeable2ClassName = clsQual tYPEABLE_INTERNAL (fsLit "Typeable2") typeable2ClassKey
+typeable3ClassName = clsQual tYPEABLE_INTERNAL (fsLit "Typeable3") typeable3ClassKey
+typeable4ClassName = clsQual tYPEABLE_INTERNAL (fsLit "Typeable4") typeable4ClassKey
+typeable5ClassName = clsQual tYPEABLE_INTERNAL (fsLit "Typeable5") typeable5ClassKey
+typeable6ClassName = clsQual tYPEABLE_INTERNAL (fsLit "Typeable6") typeable6ClassKey
+typeable7ClassName = clsQual tYPEABLE_INTERNAL (fsLit "Typeable7") typeable7ClassKey
 
 typeableClassNames :: [Name]
 typeableClassNames = 	[ typeableClassName, typeable1ClassName, typeable2ClassName
@@ -725,25 +866,35 @@ showClassName	  = clsQual gHC_SHOW (fsLit "Show")       showClassKey
 readClassName :: Name
 readClassName	   = clsQual gHC_READ (fsLit "Read") readClassKey
 
+-- Classes Generic and Generic1, Datatype, Constructor and Selector
+genClassName, gen1ClassName, datatypeClassName, constructorClassName,
+  selectorClassName :: Name
+genClassName  = clsQual gHC_GENERICS (fsLit "Generic")  genClassKey
+gen1ClassName = clsQual gHC_GENERICS (fsLit "Generic1") gen1ClassKey
+
+datatypeClassName = clsQual gHC_GENERICS (fsLit "Datatype") datatypeClassKey
+constructorClassName = clsQual gHC_GENERICS (fsLit "Constructor") constructorClassKey
+selectorClassName = clsQual gHC_GENERICS (fsLit "Selector") selectorClassKey
+
 -- parallel array types and functions
 enumFromToPName, enumFromThenToPName, nullPName, lengthPName,
     singletonPName, replicatePName, mapPName, filterPName,
     zipPName, crossMapPName, indexPName, toPName,
-    emptyPName, appPName :: Name
-enumFromToPName	   = varQual gHC_PARR (fsLit "enumFromToP") enumFromToPIdKey
-enumFromThenToPName= varQual gHC_PARR (fsLit "enumFromThenToP") enumFromThenToPIdKey
-nullPName	  = varQual gHC_PARR (fsLit "nullP")      	 nullPIdKey
-lengthPName	  = varQual gHC_PARR (fsLit "lengthP")    	 lengthPIdKey
-singletonPName    = varQual gHC_PARR (fsLit "singletonP")         singletonPIdKey
-replicatePName	  = varQual gHC_PARR (fsLit "replicateP") 	 replicatePIdKey
-mapPName	  = varQual gHC_PARR (fsLit "mapP")       	 mapPIdKey
-filterPName	  = varQual gHC_PARR (fsLit "filterP")    	 filterPIdKey
-zipPName	  = varQual gHC_PARR (fsLit "zipP")       	 zipPIdKey
-crossMapPName	  = varQual gHC_PARR (fsLit "crossMapP")     	 crossMapPIdKey
-indexPName	  = varQual gHC_PARR (fsLit "!:")	       	 indexPIdKey
-toPName	          = varQual gHC_PARR (fsLit "toP")	       	 toPIdKey
-emptyPName        = varQual gHC_PARR (fsLit "emptyP")            emptyPIdKey
-appPName          = varQual gHC_PARR (fsLit "+:+")               appPIdKey
+    emptyPName, appPName :: PackageId -> Name
+enumFromToPName     pkg = varQual (gHC_PARR pkg) (fsLit "enumFromToP")     enumFromToPIdKey
+enumFromThenToPName pkg = varQual (gHC_PARR pkg) (fsLit "enumFromThenToP") enumFromThenToPIdKey
+nullPName           pkg = varQual (gHC_PARR pkg) (fsLit "nullP")           nullPIdKey
+lengthPName         pkg = varQual (gHC_PARR pkg) (fsLit "lengthP")         lengthPIdKey
+singletonPName      pkg = varQual (gHC_PARR pkg) (fsLit "singletonP")      singletonPIdKey
+replicatePName      pkg = varQual (gHC_PARR pkg) (fsLit "replicateP")      replicatePIdKey
+mapPName            pkg = varQual (gHC_PARR pkg) (fsLit "mapP")            mapPIdKey
+filterPName         pkg = varQual (gHC_PARR pkg) (fsLit "filterP")         filterPIdKey
+zipPName            pkg = varQual (gHC_PARR pkg) (fsLit "zipP")            zipPIdKey
+crossMapPName       pkg = varQual (gHC_PARR pkg) (fsLit "crossMapP")       crossMapPIdKey
+indexPName          pkg = varQual (gHC_PARR pkg) (fsLit "!:")              indexPIdKey
+toPName             pkg = varQual (gHC_PARR pkg) (fsLit "toP")             toPIdKey
+emptyPName          pkg = varQual (gHC_PARR pkg) (fsLit "emptyP")          emptyPIdKey
+appPName            pkg = varQual (gHC_PARR pkg) (fsLit "+:+")             appPIdKey
 
 -- IO things
 ioTyConName, ioDataConName, thenIOName, bindIOName, returnIOName,
@@ -804,6 +955,14 @@ appAName	   = varQual aRROW (fsLit "app")	  appAIdKey
 choiceAName	   = varQual aRROW (fsLit "|||")	  choiceAIdKey
 loopAName	   = varQual aRROW (fsLit "loop")  loopAIdKey
 
+-- Monad comprehensions
+guardMName, liftMName, groupMName, mzipName :: Name
+guardMName         = varQual mONAD (fsLit "guard") guardMIdKey
+liftMName          = varQual mONAD (fsLit "liftM") liftMIdKey
+groupMName         = varQual mONAD_GROUP (fsLit "mgroupWith") groupMIdKey
+mzipName           = varQual mONAD_ZIP (fsLit "mzip") mzipIdKey
+
+
 -- Annotation type checking
 toAnnotationWrapperName :: Name
 toAnnotationWrapperName = varQual gHC_DESUGAR (fsLit "toAnnotationWrapper") toAnnotationWrapperIdKey
@@ -828,6 +987,12 @@ marshalObjectName   = varQual  dOTNET (fsLit "marshalObject") marshalObjectIdKey
 marshalStringName   = varQual  dOTNET (fsLit "marshalString") marshalStringIdKey
 unmarshalStringName = varQual  dOTNET (fsLit "unmarshalString") unmarshalStringIdKey
 checkDotnetResName  = varQual  dOTNET (fsLit "checkResult")     checkDotnetResNameIdKey
+
+-- plugins
+cORE_MONAD :: Module
+cORE_MONAD = mkThisGhcModule (fsLit "CoreMonad")
+pluginTyConName :: Name
+pluginTyConName = tcQual cORE_MONAD (fsLit "Plugin") pluginTyConKey
 \end{code}
 
 %************************************************************************
@@ -914,6 +1079,15 @@ applicativeClassKey, foldableClassKey, traversableClassKey :: Unique
 applicativeClassKey	= mkPreludeClassUnique 34
 foldableClassKey	= mkPreludeClassUnique 35
 traversableClassKey	= mkPreludeClassUnique 36
+
+genClassKey, gen1ClassKey, datatypeClassKey, constructorClassKey,
+  selectorClassKey :: Unique
+genClassKey   = mkPreludeClassUnique 37
+gen1ClassKey  = mkPreludeClassUnique 38
+
+datatypeClassKey    = mkPreludeClassUnique 39
+constructorClassKey = mkPreludeClassUnique 40
+selectorClassKey    = mkPreludeClassUnique 41
 \end{code}
 
 %************************************************************************
@@ -973,11 +1147,12 @@ statePrimTyConKey, stableNamePrimTyConKey, stableNameTyConKey,
     word32PrimTyConKey, word32TyConKey, word64PrimTyConKey, word64TyConKey,
     liftedConKey, unliftedConKey, anyBoxConKey, kindConKey, boxityConKey,
     typeConKey, threadIdPrimTyConKey, bcoPrimTyConKey, ptrTyConKey,
-    funPtrTyConKey, tVarPrimTyConKey :: Unique
+    funPtrTyConKey, tVarPrimTyConKey, eqPredPrimTyConKey :: Unique
 statePrimTyConKey			= mkPreludeTyConUnique 50
 stableNamePrimTyConKey			= mkPreludeTyConUnique 51
-stableNameTyConKey		        = mkPreludeTyConUnique 52
-mutVarPrimTyConKey			= mkPreludeTyConUnique 55
+stableNameTyConKey                      = mkPreludeTyConUnique 52
+eqPredPrimTyConKey                      = mkPreludeTyConUnique 53
+mutVarPrimTyConKey                      = mkPreludeTyConUnique 55
 ioTyConKey				= mkPreludeTyConUnique 56
 wordPrimTyConKey			= mkPreludeTyConUnique 58
 wordTyConKey				= mkPreludeTyConUnique 59
@@ -999,12 +1174,6 @@ ptrTyConKey				= mkPreludeTyConUnique 74
 funPtrTyConKey				= mkPreludeTyConUnique 75
 tVarPrimTyConKey		    	= mkPreludeTyConUnique 76
 
--- Generic Type Constructors
-crossTyConKey, plusTyConKey, genUnitTyConKey :: Unique
-crossTyConKey		      		= mkPreludeTyConUnique 79
-plusTyConKey		      		= mkPreludeTyConUnique 80
-genUnitTyConKey				= mkPreludeTyConUnique 81
-
 -- Parallel array type constructor
 parrTyConKey :: Unique
 parrTyConKey				= mkPreludeTyConUnique 82
@@ -1017,9 +1186,8 @@ eitherTyConKey :: Unique
 eitherTyConKey				= mkPreludeTyConUnique 84
 
 -- Super Kinds constructors
-tySuperKindTyConKey, coSuperKindTyConKey :: Unique
+tySuperKindTyConKey :: Unique
 tySuperKindTyConKey                    = mkPreludeTyConUnique 85
-coSuperKindTyConKey                    = mkPreludeTyConUnique 86
 
 -- Kind constructors
 liftedTypeKindTyConKey, openTypeKindTyConKey, unliftedTypeKindTyConKey,
@@ -1045,6 +1213,9 @@ csel1CoercionTyConKey                   = mkPreludeTyConUnique 99
 csel2CoercionTyConKey                   = mkPreludeTyConUnique 100
 cselRCoercionTyConKey                   = mkPreludeTyConUnique 101
 
+pluginTyConKey :: Unique
+pluginTyConKey                          = mkPreludeTyConUnique 102
+
 unknownTyConKey, unknown1TyConKey, unknown2TyConKey, unknown3TyConKey,
     opaqueTyConKey :: Unique
 unknownTyConKey				= mkPreludeTyConUnique 129
@@ -1056,8 +1227,43 @@ opaqueTyConKey                          = mkPreludeTyConUnique 133
 stringTyConKey :: Unique
 stringTyConKey				= mkPreludeTyConUnique 134
 
+-- Generics (Unique keys)
+v1TyConKey, u1TyConKey, par1TyConKey, rec1TyConKey,
+  k1TyConKey, m1TyConKey, sumTyConKey, prodTyConKey,
+  compTyConKey, rTyConKey, pTyConKey, dTyConKey,
+  cTyConKey, sTyConKey, rec0TyConKey, par0TyConKey,
+  d1TyConKey, c1TyConKey, s1TyConKey, noSelTyConKey,
+  repTyConKey, rep1TyConKey :: Unique
+
+v1TyConKey    = mkPreludeTyConUnique 135
+u1TyConKey    = mkPreludeTyConUnique 136
+par1TyConKey  = mkPreludeTyConUnique 137
+rec1TyConKey  = mkPreludeTyConUnique 138
+k1TyConKey    = mkPreludeTyConUnique 139
+m1TyConKey    = mkPreludeTyConUnique 140
+
+sumTyConKey   = mkPreludeTyConUnique 141
+prodTyConKey  = mkPreludeTyConUnique 142
+compTyConKey  = mkPreludeTyConUnique 143
+
+rTyConKey = mkPreludeTyConUnique 144
+pTyConKey = mkPreludeTyConUnique 145
+dTyConKey = mkPreludeTyConUnique 146
+cTyConKey = mkPreludeTyConUnique 147
+sTyConKey = mkPreludeTyConUnique 148
+
+rec0TyConKey  = mkPreludeTyConUnique 149
+par0TyConKey  = mkPreludeTyConUnique 150
+d1TyConKey    = mkPreludeTyConUnique 151
+c1TyConKey    = mkPreludeTyConUnique 152
+s1TyConKey    = mkPreludeTyConUnique 153
+noSelTyConKey = mkPreludeTyConUnique 154
+
+repTyConKey  = mkPreludeTyConUnique 155
+rep1TyConKey = mkPreludeTyConUnique 156
+
 ---------------- Template Haskell -------------------
---	USES TyConUniques 100-129
+--	USES TyConUniques 200-299
 -----------------------------------------------------
 
 unitTyConKey :: Unique
@@ -1120,10 +1326,11 @@ absentErrorIdKey, augmentIdKey, appendIdKey, buildIdKey, errorIdKey,
     noMethodBindingErrorIdKey, nonExhaustiveGuardsErrorIdKey,
     runtimeErrorIdKey, parErrorIdKey, parIdKey, patErrorIdKey,
     realWorldPrimIdKey, recConErrorIdKey, recUpdErrorIdKey,
-    traceIdKey,
+    traceIdKey, wildCardKey,
     unpackCStringUtf8IdKey, unpackCStringAppendIdKey,
     unpackCStringFoldrIdKey, unpackCStringIdKey :: Unique
-absentErrorIdKey	      = mkPreludeMiscIdUnique  1
+wildCardKey                   = mkPreludeMiscIdUnique  0  -- See Note [WildCard]
+absentErrorIdKey              = mkPreludeMiscIdUnique  1
 augmentIdKey		      = mkPreludeMiscIdUnique  3
 appendIdKey		      = mkPreludeMiscIdUnique  4
 buildIdKey		      = mkPreludeMiscIdUnique  5
@@ -1207,6 +1414,9 @@ mapIdKey	      = mkPreludeMiscIdUnique 69
 groupWithIdKey        = mkPreludeMiscIdUnique 70
 dollarIdKey           = mkPreludeMiscIdUnique 71
 
+coercionTokenIdKey :: Unique
+coercionTokenIdKey    = mkPreludeMiscIdUnique 72
+
 -- Parallel array functions
 singletonPIdKey, nullPIdKey, lengthPIdKey, replicatePIdKey, mapPIdKey,
     filterPIdKey, zipPIdKey, crossMapPIdKey, indexPIdKey, toPIdKey,
@@ -1235,6 +1445,9 @@ marshalStringIdKey            = mkPreludeMiscIdUnique 96
 unmarshalStringIdKey          = mkPreludeMiscIdUnique 97
 checkDotnetResNameIdKey       = mkPreludeMiscIdUnique 98
 
+undefinedKey :: Unique
+undefinedKey		      = mkPreludeMiscIdUnique 99
+
 \end{code}
 
 Certain class operations from Prelude classes.  They get their own
@@ -1249,7 +1462,8 @@ unboundKey		      = mkPreludeMiscIdUnique 101
 fromIntegerClassOpKey, minusClassOpKey, fromRationalClassOpKey,
     enumFromClassOpKey, enumFromThenClassOpKey, enumFromToClassOpKey,
     enumFromThenToClassOpKey, eqClassOpKey, geClassOpKey, negateClassOpKey,
-    failMClassOpKey, bindMClassOpKey, thenMClassOpKey, returnMClassOpKey
+    failMClassOpKey, bindMClassOpKey, thenMClassOpKey, returnMClassOpKey,
+    fmapClassOpKey
     :: Unique
 fromIntegerClassOpKey	      = mkPreludeMiscIdUnique 102
 minusClassOpKey		      = mkPreludeMiscIdUnique 103
@@ -1264,6 +1478,7 @@ negateClassOpKey	      = mkPreludeMiscIdUnique 111
 failMClassOpKey		      = mkPreludeMiscIdUnique 112
 bindMClassOpKey		      = mkPreludeMiscIdUnique 113 -- (>>=)
 thenMClassOpKey		      = mkPreludeMiscIdUnique 114 -- (>>)
+fmapClassOpKey                = mkPreludeMiscIdUnique 115
 returnMClassOpKey	      = mkPreludeMiscIdUnique 117
 
 -- Recursive do notation
@@ -1287,9 +1502,23 @@ fromStringClassOpKey	      = mkPreludeMiscIdUnique 125
 toAnnotationWrapperIdKey :: Unique
 toAnnotationWrapperIdKey      = mkPreludeMiscIdUnique 126
 
+-- Conversion functions
+fromIntegralIdKey, realToFracIdKey, toIntegerClassOpKey, toRationalClassOpKey :: Unique
+fromIntegralIdKey    = mkPreludeMiscIdUnique 127
+realToFracIdKey      = mkPreludeMiscIdUnique 128
+toIntegerClassOpKey  = mkPreludeMiscIdUnique 129
+toRationalClassOpKey = mkPreludeMiscIdUnique 130
+
+-- Monad comprehensions
+guardMIdKey, liftMIdKey, groupMIdKey, mzipIdKey :: Unique
+guardMIdKey     = mkPreludeMiscIdUnique 131
+liftMIdKey      = mkPreludeMiscIdUnique 132
+groupMIdKey     = mkPreludeMiscIdUnique 133
+mzipIdKey       = mkPreludeMiscIdUnique 134
+
 
 ---------------- Template Haskell -------------------
---	USES IdUniques 200-399
+--	USES IdUniques 200-499
 -----------------------------------------------------
 \end{code}
 

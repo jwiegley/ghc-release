@@ -276,6 +276,15 @@ printClosure( StgClosure *obj )
             break;
         }
 
+    case UNDERFLOW_FRAME:
+        {
+            StgUnderflowFrame* u = (StgUnderflowFrame*)obj;
+            debugBelch("UNDERFLOW_FRAME(");
+            printPtr((StgPtr)u->next_chunk);
+            debugBelch(")\n"); 
+            break;
+        }
+
     case STOP_FRAME:
         {
             StgStopFrame* u = (StgStopFrame*)obj;
@@ -409,10 +418,8 @@ printStackObj( StgPtr sp )
 static void
 printSmallBitmap( StgPtr spBottom, StgPtr payload, StgWord bitmap, nat size )
 {
-    StgPtr p;
     nat i;
 
-    p = payload;
     for(i = 0; i < size; i++, bitmap >>= 1 ) {
 	debugBelch("   stk[%ld] (%p) = ", (long)(spBottom-(payload+i)), payload+i);
 	if ((bitmap & 1) == 0) {
@@ -461,12 +468,10 @@ printStackChunk( StgPtr sp, StgPtr spBottom )
 	    
 	case UPDATE_FRAME:
 	case CATCH_FRAME:
-	    printObj((StgClosure*)sp);
+        case UNDERFLOW_FRAME:
+        case STOP_FRAME:
+            printObj((StgClosure*)sp);
 	    continue;
-
-	case STOP_FRAME:
-	    printObj((StgClosure*)sp);
-	    return;
 
 	case RET_DYN:
 	{ 
@@ -524,11 +529,9 @@ printStackChunk( StgPtr sp, StgPtr spBottom )
 	{
 	    StgFunInfoTable *fun_info;
 	    StgRetFun *ret_fun;
-	    nat size;
 
 	    ret_fun = (StgRetFun *)sp;
 	    fun_info = get_fun_itbl(ret_fun->fun);
-	    size = ret_fun->size;
 	    debugBelch("RET_FUN (%p) (type=%d)\n", ret_fun->fun, fun_info->f.fun_type);
 	    switch (fun_info->f.fun_type) {
 	    case ARG_GEN:
@@ -559,7 +562,8 @@ printStackChunk( StgPtr sp, StgPtr spBottom )
 
 void printTSO( StgTSO *tso )
 {
-    printStackChunk( tso->sp, tso->stack+tso->stack_size);
+    printStackChunk( tso->stackobj->sp,
+                     tso->stackobj->stack+tso->stackobj->stack_size);
 }
 
 /* --------------------------------------------------------------------------
@@ -1039,7 +1043,6 @@ char *what_next_strs[] = {
   [ThreadRunGHC]    = "ThreadRunGHC",
   [ThreadInterpret] = "ThreadInterpret",
   [ThreadKilled]    = "ThreadKilled",
-  [ThreadRelocated] = "ThreadRelocated",
   [ThreadComplete]  = "ThreadComplete"
 };
 
@@ -1102,6 +1105,7 @@ char *closure_type_names[] = {
  [RET_FUN]               = "RET_FUN",
  [UPDATE_FRAME]          = "UPDATE_FRAME",
  [CATCH_FRAME]           = "CATCH_FRAME",
+ [UNDERFLOW_FRAME]       = "UNDERFLOW_FRAME",
  [STOP_FRAME]            = "STOP_FRAME",
  [BLACKHOLE]             = "BLACKHOLE",
  [BLOCKING_QUEUE]        = "BLOCKING_QUEUE",
@@ -1118,6 +1122,7 @@ char *closure_type_names[] = {
  [PRIM]	                 = "PRIM",
  [MUT_PRIM]              = "MUT_PRIM",
  [TSO]                   = "TSO",
+ [STACK]                 = "STACK",
  [TREC_CHUNK]            = "TREC_CHUNK",
  [ATOMICALLY_FRAME]      = "ATOMICALLY_FRAME",
  [CATCH_RETRY_FRAME]     = "CATCH_RETRY_FRAME",

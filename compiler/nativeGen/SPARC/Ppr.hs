@@ -12,7 +12,6 @@ module SPARC.Ppr (
 	pprSectionHeader,
 	pprData,
 	pprInstr,
-	pprUserReg,
 	pprSize,
 	pprImm,
 	pprDataItem
@@ -34,13 +33,14 @@ import Reg
 import Size
 import PprBase
 
-import BlockId
-import Cmm
+import OldCmm
+import OldPprCmm()
 import CLabel
 
-import Unique		( pprUnique )
+import Unique		( Uniquable(..), pprUnique )
 import qualified Outputable
-import Outputable	(Outputable, panic)
+import Outputable (PlatformOutputable, panic)
+import Platform
 import Pretty
 import FastString
 import Data.Word
@@ -48,24 +48,28 @@ import Data.Word
 -- -----------------------------------------------------------------------------
 -- Printing this stuff out
 
-pprNatCmmTop :: NatCmmTop Instr -> Doc
-pprNatCmmTop (CmmData section dats) = 
-  pprSectionHeader section $$ vcat (map pprData dats)
+pprNatCmmTop :: Platform -> NatCmmTop CmmStatics Instr -> Doc
+pprNatCmmTop _ (CmmData section dats) =
+  pprSectionHeader section $$ pprDatas dats
 
  -- special case for split markers:
-pprNatCmmTop (CmmProc [] lbl _ (ListGraph [])) = pprLabel lbl
+pprNatCmmTop _ (CmmProc Nothing lbl (ListGraph [])) = pprLabel lbl
 
-pprNatCmmTop (CmmProc info lbl _ (ListGraph blocks)) = 
+ -- special case for code without info table:
+pprNatCmmTop _ (CmmProc Nothing lbl (ListGraph blocks)) =
   pprSectionHeader Text $$
-  (if null info then -- blocks guaranteed not null, so label needed
-       pprLabel lbl
-   else
+  pprLabel lbl $$ -- blocks guaranteed not null, so label needed
+  vcat (map pprBasicBlock blocks)
+
+pprNatCmmTop _ (CmmProc (Just (Statics info_lbl info)) _entry_lbl (ListGraph blocks)) =
+  pprSectionHeader Text $$
+  (
 #if HAVE_SUBSECTIONS_VIA_SYMBOLS
-            pprCLabel_asm (mkDeadStripPreventer $ entryLblToInfoLbl lbl)
-                <> char ':' $$
+       pprCLabel_asm (mkDeadStripPreventer info_lbl)
+           <> char ':' $$
 #endif
        vcat (map pprData info) $$
-       pprLabel (entryLblToInfoLbl lbl)
+       pprLabel info_lbl
   ) $$
   vcat (map pprBasicBlock blocks)
      -- above: Even the first block gets a label, because with branch-chain
@@ -77,24 +81,23 @@ pprNatCmmTop (CmmProc info lbl _ (ListGraph blocks)) =
         -- from the entry code to a label on the _top_ of of the info table,
         -- so that the linker will not think it is unreferenced and dead-strip
         -- it. That's why the label is called a DeadStripPreventer (_dsp).
-  $$ if not (null info)
-		    then text "\t.long "
-		      <+> pprCLabel_asm (entryLblToInfoLbl lbl)
-		      <+> char '-'
-		      <+> pprCLabel_asm (mkDeadStripPreventer $ entryLblToInfoLbl lbl)
-		    else empty
+  $$ text "\t.long "
+	<+> pprCLabel_asm info_lbl
+	<+> char '-'
+	<+> pprCLabel_asm (mkDeadStripPreventer info_lbl)
 #endif
 
 
 pprBasicBlock :: NatBasicBlock Instr -> Doc
-pprBasicBlock (BasicBlock (BlockId id) instrs) =
-  pprLabel (mkAsmTempLabel id) $$
+pprBasicBlock (BasicBlock blockid instrs) =
+  pprLabel (mkAsmTempLabel (getUnique blockid)) $$
   vcat (map pprInstr instrs)
 
 
+pprDatas :: CmmStatics -> Doc
+pprDatas (Statics lbl dats) = vcat (pprLabel lbl : map pprData dats)
+
 pprData :: CmmStatic -> Doc
-pprData (CmmAlign bytes)         = pprAlign bytes
-pprData (CmmDataLabel lbl)       = pprLabel lbl
 pprData (CmmString str)          = pprASCII str
 pprData (CmmUninitialised bytes) = ptext (sLit ".skip ") <> int bytes
 pprData (CmmStaticLit lit)       = pprDataItem lit
@@ -102,9 +105,7 @@ pprData (CmmStaticLit lit)       = pprDataItem lit
 pprGloblDecl :: CLabel -> Doc
 pprGloblDecl lbl
   | not (externallyVisibleCLabel lbl) = empty
-  | otherwise = ptext IF_ARCH_sparc((sLit ".global "), 
-				    (sLit ".globl ")) <>
-		pprCLabel_asm lbl
+  | otherwise = ptext (sLit ".global ") <> pprCLabel_asm lbl
 
 pprTypeAndSizeDecl :: CLabel -> Doc
 #if linux_TARGET_OS
@@ -128,22 +129,12 @@ pprASCII str
        do1 :: Word8 -> Doc
        do1 w = ptext (sLit "\t.byte\t") <> int (fromIntegral w)
 
-pprAlign :: Int -> Doc
-pprAlign bytes =
-	ptext (sLit ".align ") <> int bytes
-
 
 -- -----------------------------------------------------------------------------
 -- pprInstr: print an 'Instr'
 
-instance Outputable Instr where
-    ppr	 instr	= Outputable.docToSDoc $ pprInstr instr
-
-
--- | Pretty print a register.
---	This is an alias of pprReg for legacy reasons, should remove it.
-pprUserReg :: Reg -> Doc
-pprUserReg = pprReg
+instance PlatformOutputable Instr where
+    pprPlatform _ instr = Outputable.docToSDoc $ pprInstr instr
 
 
 -- | Pretty print a register.
@@ -526,24 +517,24 @@ pprInstr (FxTOy size1 size2 reg1 reg2)
     ]
 
 
-pprInstr (BI cond b (BlockId id))
+pprInstr (BI cond b blockid)
   = hcat [
 	ptext (sLit "\tb"), pprCond cond,
 	if b then pp_comma_a else empty,
 	char '\t',
-	pprCLabel_asm (mkAsmTempLabel id)
+	pprCLabel_asm (mkAsmTempLabel (getUnique blockid))
     ]
 
-pprInstr (BF cond b (BlockId id))
+pprInstr (BF cond b blockid)
   = hcat [
 	ptext (sLit "\tfb"), pprCond cond,
 	if b then pp_comma_a else empty,
 	char '\t',
-	pprCLabel_asm (mkAsmTempLabel id)
+	pprCLabel_asm (mkAsmTempLabel (getUnique blockid))
     ]
 
 pprInstr (JMP addr) = (<>) (ptext (sLit "\tjmp\t")) (pprAddr addr)
-pprInstr (JMP_TBL op _)  = pprInstr (JMP op)
+pprInstr (JMP_TBL op _ _)  = pprInstr (JMP op)
 
 pprInstr (CALL (Left imm) n _)
   = hcat [ ptext (sLit "\tcall\t"), pprImm imm, comma, int n ]

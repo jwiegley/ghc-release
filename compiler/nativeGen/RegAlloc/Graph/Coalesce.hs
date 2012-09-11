@@ -12,7 +12,7 @@ import RegAlloc.Liveness
 import Instruction
 import Reg
 
-import Cmm
+import OldCmm
 import Bag
 import Digraph
 import UniqFM
@@ -27,8 +27,8 @@ import Data.List
 --	the same and the move instruction safely erased.
 regCoalesce 
 	:: Instruction instr
-	=> [LiveCmmTop instr] 
-	-> UniqSM [LiveCmmTop instr]
+	=> [LiveCmmTop statics instr] 
+	-> UniqSM [LiveCmmTop statics instr]
 
 regCoalesce code
  = do	
@@ -61,17 +61,17 @@ sinkReg fm r
 --	then we can rename the two regs to the same thing and eliminate the move.
 slurpJoinMovs 
 	:: Instruction instr
-	=> LiveCmmTop instr 
+	=> LiveCmmTop statics instr 
 	-> Bag (Reg, Reg)
 
 slurpJoinMovs live
 	= slurpCmm emptyBag live
  where	
-  	slurpCmm   rs  CmmData{}		= rs
-	slurpCmm   rs (CmmProc _ _ _ sccs) 	= foldl' slurpBlock rs (flattenSCCs sccs)
-        slurpBlock rs (BasicBlock _ instrs)	= foldl' slurpLI    rs instrs
+  	slurpCmm   rs  CmmData{}		    = rs
+	slurpCmm   rs (CmmProc _ _ sccs) 	= foldl' slurpBlock rs (flattenSCCs sccs)
+	slurpBlock rs (BasicBlock _ instrs)	= foldl' slurpLI    rs instrs
                 
-        slurpLI    rs (LiveInstr _	Nothing) = rs
+	slurpLI    rs (LiveInstr _	Nothing)    = rs
 	slurpLI    rs (LiveInstr instr (Just live))
 	 	| Just (r1, r2)	<- takeRegRegMoveInstr instr
 		, elementOfUniqSet r1 $ liveDieRead live

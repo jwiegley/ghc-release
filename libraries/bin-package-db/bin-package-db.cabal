@@ -24,8 +24,8 @@ Library {
     else
         build-depends: base >= 4 && < 5
 
-    build-depends: ghc-binary == 0.5.*,
-                   Cabal >= 1.8 && < 1.11
+    build-depends: binary == 0.5.*,
+                   Cabal >= 1.8 && < 1.14
 
     extensions: CPP
 }

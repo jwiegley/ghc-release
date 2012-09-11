@@ -15,9 +15,11 @@ module Vectorise.Utils.Base (
 	mkPDataType,
 	mkBuiltinCo,
 	mkVScrut,
-	
+
+        preprSynTyCon,
 	pdataReprTyCon,
 	pdataReprDataCon,
+        prDFunOfTyCon
 )
 where
 import Vectorise.Monad
@@ -34,6 +36,8 @@ import MkId
 import Literal
 import Outputable
 import FastString
+
+import Control.Monad (liftM)
 
 
 -- Simple Types ---------------------------------------------------------------
@@ -129,7 +133,7 @@ mkBuiltinCo :: (Builtins -> TyCon) -> VM Coercion
 mkBuiltinCo get_tc
   = do
       tc <- builtin get_tc
-      return $ mkTyConApp tc []
+      return $ mkTyConAppCo tc []
 
 
 mkVScrut :: VExpr -> VM (CoreExpr, CoreExpr, TyCon, [Type])
@@ -139,6 +143,9 @@ mkVScrut (ve, le)
       return (ve, unwrapFamInstScrut tc arg_tys le, tc, arg_tys)
   where
     ty = exprType ve
+
+preprSynTyCon :: Type -> VM (TyCon, [Type])
+preprSynTyCon ty = builtin preprTyCon >>= (`lookupFamInst` [ty])
 
 pdataReprTyCon :: Type -> VM (TyCon, [Type])
 pdataReprTyCon ty = builtin pdataTyCon >>= (`lookupFamInst` [ty])
@@ -151,4 +158,9 @@ pdataReprDataCon ty
       let [dc] = tyConDataCons tc
       return (dc, arg_tys)
 
+prDFunOfTyCon :: TyCon -> VM CoreExpr
+prDFunOfTyCon tycon
+  = liftM Var
+  . maybeCantVectoriseM "No PR dictionary for tycon" (ppr tycon)
+  $ lookupTyConPR tycon
 

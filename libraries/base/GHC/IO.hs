@@ -1,5 +1,10 @@
+{-# LANGUAGE NoImplicitPrelude
+           , BangPatterns
+           , RankNTypes
+           , MagicHash
+           , UnboxedTuples
+  #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
-{-# LANGUAGE NoImplicitPrelude, BangPatterns, RankNTypes #-}
 {-# OPTIONS_HADDOCK hide #-}
 -----------------------------------------------------------------------------
 -- |
@@ -17,22 +22,22 @@
 
 -- #hide
 module GHC.IO (
-    IO(..), unIO, failIO, liftIO,
-    unsafePerformIO, unsafeInterleaveIO,
-    unsafeDupablePerformIO, unsafeDupableInterleaveIO,
-    noDuplicate,
+        IO(..), unIO, failIO, liftIO,
+        unsafePerformIO, unsafeInterleaveIO,
+        unsafeDupablePerformIO, unsafeDupableInterleaveIO,
+        noDuplicate,
 
         -- To and from from ST
-    stToIO, ioToST, unsafeIOToST, unsafeSTToIO,
+        stToIO, ioToST, unsafeIOToST, unsafeSTToIO,
 
-    FilePath,
+        FilePath,
 
-    catchException, catchAny, throwIO,
-    mask, mask_, uninterruptibleMask, uninterruptibleMask_, 
-    MaskingState(..), getMaskingState,
-    block, unblock, blocked, unsafeUnmask,
-    onException, finally, evaluate
-  ) where
+        catchException, catchAny, throwIO,
+        mask, mask_, uninterruptibleMask, uninterruptibleMask_, 
+        MaskingState(..), getMaskingState,
+        block, unblock, blocked, unsafeUnmask,
+        onException, bracket, finally, evaluate
+    ) where
 
 import GHC.Base
 import GHC.ST
@@ -159,9 +164,9 @@ unsafePerformIO :: IO a -> a
 unsafePerformIO m = unsafeDupablePerformIO (noDuplicate >> m)
 
 {-| 
-This version of 'unsafePerformIO' is slightly more efficient,
+This version of 'unsafePerformIO' is more efficient
 because it omits the check that the IO is only being performed by a
-single thread.  Hence, when you write 'unsafeDupablePerformIO',
+single thread.  Hence, when you use 'unsafeDupablePerformIO',
 there is a possibility that the IO action may be performed multiple
 times (on a multiprocessor), and you should therefore ensure that
 it gives the same results each time.
@@ -254,7 +259,7 @@ catchException :: Exception e => IO a -> (e -> IO a) -> IO a
 catchException (IO io) handler = IO $ catch# io handler'
     where handler' e = case fromException e of
                        Just e' -> unIO (handler e')
-                       Nothing -> raise# e
+                       Nothing -> raiseIO# e
 
 catchAny :: IO a -> (forall e . Exception e => e -> IO a) -> IO a
 catchAny (IO io) handler = IO $ catch# io handler'
@@ -337,6 +342,7 @@ getMaskingState  = IO $ \s ->
                              1# -> MaskedUninterruptible
                              _  -> MaskedInterruptible #)
 
+{-# DEPRECATED blocked "use Control.Exception.getMaskingState instead" #-}
 -- | returns True if asynchronous exceptions are blocked in the
 -- current thread.
 blocked :: IO Bool
@@ -344,7 +350,7 @@ blocked = fmap (/= Unmasked) getMaskingState
 
 onException :: IO a -> IO b -> IO a
 onException io what = io `catchException` \e -> do _ <- what
-                                                   throw (e :: SomeException)
+                                                   throwIO (e :: SomeException)
 
 -- | Executes an IO computation with asynchronous
 -- exceptions /masked/.  That is, any thread which attempts to raise
@@ -426,6 +432,18 @@ uninterruptibleMask io = do
     MaskedInterruptible   -> blockUninterruptible $ io block
     MaskedUninterruptible -> io id
 
+bracket
+        :: IO a         -- ^ computation to run first (\"acquire resource\")
+        -> (a -> IO b)  -- ^ computation to run last (\"release resource\")
+        -> (a -> IO c)  -- ^ computation to run in-between
+        -> IO c         -- returns the value from the in-between computation
+bracket before after thing =
+  mask $ \restore -> do
+    a <- before
+    r <- restore (thing a) `onException` after a
+    _ <- after a
+    return r
+
 finally :: IO a         -- ^ computation to run first
         -> IO b         -- ^ computation to run afterward (even if an exception
                         -- was raised)
@@ -451,4 +469,4 @@ a `finally` sequel =
 -- >   evaluate x = (return $! x) >>= return
 --
 evaluate :: a -> IO a
-evaluate a = IO $ \s -> let !va = a in (# s, va #) -- NB. see #2273
+evaluate a = IO $ \s -> seq# a s -- NB. see #2273, #5129

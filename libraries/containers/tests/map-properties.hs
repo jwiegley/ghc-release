@@ -71,7 +71,7 @@ main = do
 --    q $ label   "prop_mapkeys"          prop_mapkeys
     q $ label   "prop_foldr"            prop_foldr
     q $ label   "prop_foldl"            prop_foldl
-    q $ label   "prop_foldl'"           prop_foldl'
+--     q $ label   "prop_foldl'"           prop_foldl'
     q $ label   "prop_fold"           prop_fold
     q $ label   "prop_folWithKeyd"           prop_foldWithKey
 
@@ -124,20 +124,22 @@ instance (Enum k,Arbitrary a) => Arbitrary (Map k a) where
 -- requires access to internals
 --
 arbtree :: (Enum k,Arbitrary a) => Int -> Int -> Int -> Gen (Map k a)
-arbtree lo hi n
-  | n <= 0        = return Tip
-  | lo >= hi      = return Tip
-  | otherwise     = do{ x  <- arbitrary 
-                      ; i  <- choose (lo,hi)
-                      ; m  <- choose (1,70)
-                      ; let (ml,mr)  | m==(1::Int)= (1,2)
-                                     | m==2       = (2,1)
-                                     | m==3       = (1,1)
-                                     | otherwise  = (2,2)
-                      ; l  <- arbtree lo (i-1) (n `div` ml)
-                      ; r  <- arbtree (i+1) hi (n `div` mr)
-                      ; return (bin (toEnum i) x l r)
-                      }  
+arbtree lo hi n = do t <- gentree lo hi n
+                     if balanced t then return t else arbtree lo hi n
+  where gentree lo hi n
+          | n <= 0        = return Tip
+          | lo >= hi      = return Tip
+          | otherwise     = do{ x  <- arbitrary
+                              ; i  <- choose (lo,hi)
+                              ; m  <- choose (1,70)
+                              ; let (ml,mr)  | m==(1::Int)= (1,2)
+                                             | m==2       = (2,1)
+                                             | m==3       = (1,1)
+                                             | otherwise  = (2,2)
+                              ; l  <- gentree lo (i-1) (n `div` ml)
+                              ; r  <- gentree (i+1) hi (n `div` mr)
+                              ; return (bin (toEnum i) x l r)
+                              }
 
 
 {--------------------------------------------------------------------
@@ -364,11 +366,11 @@ prop_foldl (n :: Int) (ys :: [(Int, Int)]) =
         Data.Map.foldlWithKey (\a _ b -> a + b) n m == List.foldl (+) n (List.map snd xs)
 
 
-prop_foldl' (n :: Int) (ys :: [(Int, Int)]) =
-    let m = fromList ys
-        xs = List.nubBy ((==) `on` fst) (reverse ys) -- note.
-    in 
-        Data.Map.foldlWithKey' (\a _ b -> a + b) n m == List.foldl' (+) n (List.map snd xs)
+-- prop_foldl' (n :: Int) (ys :: [(Int, Int)]) =
+--     let m = fromList ys
+--         xs = List.nubBy ((==) `on` fst) (reverse ys) -- note.
+--     in 
+--         Data.Map.foldlWithKey' (\a _ b -> a + b) n m == List.foldl' (+) n (List.map snd xs)
 
 
 prop_fold (n :: Int) (ys :: [(Int, Int)]) =

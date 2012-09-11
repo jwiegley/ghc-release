@@ -1,3 +1,9 @@
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, DeriveDataTypeable #-}
+#ifdef __GLASGOW_HASKELL__
+{-# LANGUAGE StandaloneDeriving #-}
+#endif
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.Complex
@@ -62,7 +68,7 @@ infix  6  :+
 -- For a complex number @z@, @'abs' z@ is a number with the magnitude of @z@,
 -- but oriented in the positive real direction, whereas @'signum' z@
 -- has the phase of @z@, but unit magnitude.
-data (RealFloat a) => Complex a
+data Complex a
   = !a :+ !a    -- ^ forms a complex number from its real and imaginary
                 -- rectangular components.
 # if __GLASGOW_HASKELL__

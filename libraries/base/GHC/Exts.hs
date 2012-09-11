@@ -1,3 +1,5 @@
+{-# LANGUAGE MagicHash, UnboxedTuples, DeriveDataTypeable #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.Exts
@@ -58,7 +60,6 @@ import GHC.Base
 import GHC.Magic
 import GHC.Word
 import GHC.Int
--- import GHC.Float
 import GHC.Ptr
 import Data.String
 import Data.List

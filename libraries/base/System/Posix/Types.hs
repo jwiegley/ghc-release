@@ -1,5 +1,13 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
-{-# OPTIONS_GHC -fno-warn-unused-binds #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP
+           , NoImplicitPrelude
+           , MagicHash
+           , GeneralizedNewtypeDeriving
+  #-}
+#ifdef __GLASGOW_HASKELL__
+{-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
+#endif
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Posix.Types

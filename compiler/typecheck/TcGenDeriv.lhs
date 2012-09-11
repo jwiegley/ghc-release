@@ -42,7 +42,7 @@ import Name
 import HscTypes
 import PrelInfo
 import MkCore	( eRROR_ID )
-import PrelNames
+import PrelNames hiding (error_RDR)
 import PrimOp
 import SrcLoc
 import TyCon
@@ -50,16 +50,19 @@ import TcType
 import TysPrim
 import TysWiredIn
 import Type
-import Var( TyVar )
 import TypeRep
 import VarSet
+import Module
 import State
 import Util
 import MonadUtils
 import Outputable
 import FastString
 import Bag
-import Data.List	( partition, intersperse )
+import Fingerprint
+import Constants
+
+import Data.List        ( partition, intersperse )
 \end{code}
 
 \begin{code}
@@ -779,7 +782,7 @@ gen_Ix_binds loc tycon
     single_con_range
       = mk_easy_FunBind loc range_RDR 
 	  [nlTuplePat [con_pat as_needed, con_pat bs_needed] Boxed] $
-	nlHsDo ListComp stmts con_expr
+	noLoc (mkHsComp ListComp stmts con_expr)
       where
 	stmts = zipWith3Equal "single_con_range" mk_qual as_needed bs_needed cs_needed
 
@@ -893,15 +896,15 @@ gen_Read_binds get_fixity loc tycon
     read_nullary_cons 
       = case nullary_cons of
     	    []    -> []
-    	    [con] -> [nlHsDo DoExpr [bindLex (match_con con)] (result_expr con [])]
+    	    [con] -> [nlHsDo DoExpr (match_con con ++ [noLoc $ mkLastStmt (result_expr con [])])]
             _     -> [nlHsApp (nlHsVar choose_RDR) 
     		   	      (nlList (map mk_pair nullary_cons))]
         -- NB For operators the parens around (:=:) are matched by the
 	-- enclosing "parens" call, so here we must match the naked
 	-- data_con_str con
 
-    match_con con | isSym con_str = symbol_pat con_str
-                  | otherwise     = ident_pat  con_str
+    match_con con | isSym con_str = [symbol_pat con_str]
+                  | otherwise     = ident_h_pat  con_str
                   where
                     con_str = data_con_str con
 	-- For nullary constructors we must match Ident s for normal constrs
@@ -925,12 +928,12 @@ gen_Read_binds get_fixity loc tycon
 	prefix_parser = mk_parser prefix_prec prefix_stmts body
 
 	read_prefix_con
-	    | isSym con_str = [read_punc "(", bindLex (symbol_pat con_str), read_punc ")"]
-	    | otherwise     = [bindLex (ident_pat con_str)]
+	    | isSym con_str = [read_punc "(", symbol_pat con_str, read_punc ")"]
+	    | otherwise     = ident_h_pat con_str
      	 
 	read_infix_con
-	    | isSym con_str = [bindLex (symbol_pat con_str)]
-	    | otherwise     = [read_punc "`", bindLex (ident_pat con_str), read_punc "`"]
+	    | isSym con_str = [symbol_pat con_str]
+	    | otherwise     = [read_punc "`"] ++ ident_h_pat con_str ++ [read_punc "`"]
 
        	prefix_stmts		-- T a b c
        	  = read_prefix_con ++ read_args
@@ -965,15 +968,23 @@ gen_Read_binds get_fixity loc tycon
     ------------------------------------------------------------------------
     --		Helpers
     ------------------------------------------------------------------------
-    mk_alt e1 e2       = genOpApp e1 alt_RDR e2					-- e1 +++ e2
-    mk_parser p ss b   = nlHsApps prec_RDR [nlHsIntLit p, nlHsDo DoExpr ss b]	-- prec p (do { ss ; b })
-    bindLex pat	       = noLoc (mkBindStmt pat (nlHsVar lexP_RDR))		-- pat <- lexP
-    con_app con as     = nlHsVarApps (getRdrName con) as			-- con as
-    result_expr con as = nlHsApp (nlHsVar returnM_RDR) (con_app con as)		-- return (con as)
+    mk_alt e1 e2       = genOpApp e1 alt_RDR e2				-- e1 +++ e2
+    mk_parser p ss b   = nlHsApps prec_RDR [nlHsIntLit p	        -- prec p (do { ss ; b })
+                                           , nlHsDo DoExpr (ss ++ [noLoc $ mkLastStmt b])]
+    bindLex pat	       = noLoc (mkBindStmt pat (nlHsVar lexP_RDR))	-- pat <- lexP
+    con_app con as     = nlHsVarApps (getRdrName con) as		-- con as
+    result_expr con as = nlHsApp (nlHsVar returnM_RDR) (con_app con as) -- return (con as)
     
     punc_pat s   = nlConPat punc_RDR   [nlLitPat (mkHsString s)]  -- Punc 'c'
-    ident_pat s  = nlConPat ident_RDR  [nlLitPat (mkHsString s)]  -- Ident "foo"
-    symbol_pat s = nlConPat symbol_RDR [nlLitPat (mkHsString s)]  -- Symbol ">>"
+
+    -- For constructors and field labels ending in '#', we hackily
+    -- let the lexer generate two tokens, and look for both in sequence
+    -- Thus [Ident "I"; Symbol "#"].  See Trac #5041
+    ident_h_pat s | Just (ss, '#') <- snocView s = [ ident_pat ss, symbol_pat "#" ]
+                  | otherwise                    = [ ident_pat s ]
+      		      		   
+    ident_pat  s = bindLex $ nlConPat ident_RDR  [nlLitPat (mkHsString s)]  -- Ident "foo" <- lexP
+    symbol_pat s = bindLex $ nlConPat symbol_RDR [nlLitPat (mkHsString s)]  -- Symbol ">>" <- lexP
     
     data_con_str con = occNameString (getOccName con)
     
@@ -991,11 +1002,9 @@ gen_Read_binds get_fixity loc tycon
 	-- or	(#) = 4
 	-- Note the parens!
     read_lbl lbl | isSym lbl_str 
-		 = [read_punc "(", 
-		    bindLex (symbol_pat lbl_str),
-		    read_punc ")"]
+		 = [read_punc "(", symbol_pat lbl_str, read_punc ")"]
 		 | otherwise
-		 = [bindLex (ident_pat lbl_str)]
+		 = ident_h_pat lbl_str
 		 where	
 		   lbl_str = occNameString (getOccName lbl) 
 \end{code}
@@ -1156,8 +1165,9 @@ From the data type
 
 we generate
 
-	instance Typeable2 T where
-		typeOf2 _ = mkTyConApp (mkTyConRep "T") []
+        instance Typeable2 T where
+                typeOf2 _ = mkTyConApp (mkTyCon <hash-high> <hash-low>
+                                                <pkg> <module> "T") []
 
 We are passed the Typeable2 class as well as T
 
@@ -1168,13 +1178,34 @@ gen_Typeable_binds loc tycon
 	mk_easy_FunBind loc 
 		(mk_typeOf_RDR tycon) 	-- Name of appropriate type0f function
 		[nlWildPat] 
-		(nlHsApps mkTypeRep_RDR [tycon_rep, nlList []])
+                (nlHsApps mkTyConApp_RDR [tycon_rep, nlList []])
   where
-    tycon_rep = nlHsVar mkTyConRep_RDR `nlHsApp` nlHsLit (mkHsString (showSDocOneLine (ppr tycon)))
+    tycon_name = tyConName tycon
+    modl       = nameModule tycon_name
+    pkg        = modulePackageId modl
+
+    modl_fs    = moduleNameFS (moduleName modl)
+    pkg_fs     = packageIdFS pkg
+    name_fs    = occNameFS (nameOccName tycon_name)
+
+    tycon_rep = nlHsApps mkTyCon_RDR
+                    (map nlHsLit [int64 high,
+                                  int64 low,
+                                  HsString pkg_fs,
+                                  HsString modl_fs,
+                                  HsString name_fs])
+
+    hashThis = unwords $ map unpackFS [pkg_fs, modl_fs, name_fs]
+    Fingerprint high low = fingerprintString hashThis
+
+    int64
+      | wORD_SIZE == 4 = HsWord64Prim . fromIntegral
+      | otherwise      = HsWordPrim . fromIntegral
+
 
 mk_typeOf_RDR :: TyCon -> RdrName
 -- Use the arity of the TyCon to make the right typeOfn function
-mk_typeOf_RDR tycon = varQual_RDR tYPEABLE (mkFastString ("typeOf" ++ suffix))
+mk_typeOf_RDR tycon = varQual_RDR tYPEABLE_INTERNAL (mkFastString ("typeOf" ++ suffix))
 		where
 		  arity = tyConArity tycon
 		  suffix | arity == 0 = ""
@@ -1665,7 +1696,7 @@ fiddling around.
 genAuxBind :: SrcSpan -> DerivAuxBind -> (LHsBind RdrName, LSig RdrName)
 genAuxBind loc (GenCon2Tag tycon)
   = (mk_FunBind loc rdr_name eqns, 
-     L loc (TypeSig (L loc rdr_name) (L loc sig_ty)))
+     L loc (TypeSig [L loc rdr_name] (L loc sig_ty)))
   where
     rdr_name = con2tag_RDR tycon
 
@@ -1690,7 +1721,7 @@ genAuxBind loc (GenTag2Con tycon)
   = (mk_FunBind loc rdr_name 
 	[([nlConVarPat intDataCon_RDR [a_RDR]], 
 	   nlHsApp (nlHsVar tagToEnum_RDR) a_Expr)],
-     L loc (TypeSig (L loc rdr_name) (L loc sig_ty)))
+     L loc (TypeSig [L loc rdr_name] (L loc sig_ty)))
   where
     sig_ty = HsCoreTy $ mkForAllTys (tyConTyVars tycon) $
              intTy `mkFunTy` mkParentType tycon
@@ -1699,7 +1730,7 @@ genAuxBind loc (GenTag2Con tycon)
 
 genAuxBind loc (GenMaxTag tycon)
   = (mkHsVarBind loc rdr_name rhs,
-     L loc (TypeSig (L loc rdr_name) (L loc sig_ty)))
+     L loc (TypeSig [L loc rdr_name] (L loc sig_ty)))
   where
     rdr_name = maxtag_RDR tycon
     sig_ty = HsCoreTy intTy
@@ -1709,7 +1740,7 @@ genAuxBind loc (GenMaxTag tycon)
 
 genAuxBind loc (MkTyCon tycon)	--  $dT
   = (mkHsVarBind loc rdr_name rhs,
-     L loc (TypeSig (L loc rdr_name) sig_ty))
+     L loc (TypeSig [L loc rdr_name] sig_ty))
   where
     rdr_name = mk_data_type_name tycon
     sig_ty   = nlHsTyVar dataType_RDR
@@ -1720,7 +1751,7 @@ genAuxBind loc (MkTyCon tycon)	--  $dT
 
 genAuxBind loc (MkDataCon dc)	--  $cT1 etc
   = (mkHsVarBind loc rdr_name rhs,
-     L loc (TypeSig (L loc rdr_name) sig_ty))
+     L loc (TypeSig [L loc rdr_name] sig_ty))
   where
     rdr_name = mk_constr_name dc
     sig_ty   = nlHsTyVar constr_RDR
@@ -1831,7 +1862,7 @@ assoc_ty_id cls_str _ tbl ty
 					      text "for primitive type" <+> ppr ty)
   | otherwise = head res
   where
-    res = [id | (ty',id) <- tbl, ty `tcEqType` ty']
+    res = [id | (ty',id) <- tbl, ty `eqType` ty']
 
 -----------------------------------------------------------------------
 

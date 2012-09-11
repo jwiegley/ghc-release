@@ -1,4 +1,5 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, ExistentialQuantification #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -114,6 +115,7 @@ module Control.Exception (
         uninterruptibleMask_,
         MaskingState(..),
         getMaskingState,
+        allowInterrupt,
 #endif
 
         -- ** (deprecated) Asynchronous exception control
@@ -122,7 +124,7 @@ module Control.Exception (
         unblock,
         blocked,
 
-        -- *** Applying @block@ to an exception handler
+        -- *** Applying @mask@ to an exception handler
 
         -- $block_handler
 
@@ -149,6 +151,7 @@ import Control.Exception.Base
 
 #ifdef __GLASGOW_HASKELL__
 import GHC.Base
+import GHC.IO (unsafeUnmask)
 import Data.Maybe
 #else
 import Prelude hiding (catch)
@@ -231,6 +234,16 @@ A typical use of 'tryJust' for recovery looks like this:
 -- -----------------------------------------------------------------------------
 -- Asynchronous exceptions
 
+-- | When invoked inside 'mask', this function allows a blocked
+-- asynchronous exception to be raised, if one exists.  It is
+-- equivalent to performing an interruptible operation (see
+-- #interruptible#), but does not involve any actual blocking.
+--
+-- When called outside 'mask', or inside 'uninterruptibleMask', this
+-- function has no effect.
+allowInterrupt :: IO ()
+allowInterrupt = unsafeUnmask $ return ()
+
 {- $async
 
  #AsynchronousExceptions# Asynchronous exceptions are so-called because they arise due to
@@ -258,12 +271,12 @@ to one of the 'catch' family of functions.  This is because that is
 what you want most of the time - it eliminates a common race condition
 in starting an exception handler, because there may be no exception
 handler on the stack to handle another exception if one arrives
-immediately.  If asynchronous exceptions are blocked on entering the
+immediately.  If asynchronous exceptions are masked on entering the
 handler, though, we have time to install a new exception handler
 before being interrupted.  If this weren\'t the default, one would have
 to write something like
 
->      block $ \restore ->
+>      mask $ \restore ->
 >           catch (restore (...))
 >                 (\e -> handler)
 
@@ -279,7 +292,7 @@ recovering from an asynchronous exception.
 
  #interruptible#
 Some operations are /interruptible/, which means that they can receive
-asynchronous exceptions even in the scope of a 'block'.  Any function
+asynchronous exceptions even in the scope of a 'mask'.  Any function
 which may itself block is defined as interruptible; this includes
 'Control.Concurrent.MVar.takeMVar'
 (but not 'Control.Concurrent.MVar.tryTakeMVar'),
@@ -303,14 +316,15 @@ Similar arguments apply for other interruptible operations like
 'System.IO.openFile'.
 
 It is useful to think of 'mask' not as a way to completely prevent
-asynchronous exceptions, but as a filter that allows them to be raised
-only at certain places.  The main difficulty with asynchronous
+asynchronous exceptions, but as a way to switch from asynchronous mode
+to polling mode.  The main difficulty with asynchronous
 exceptions is that they normally can occur anywhere, but within a
 'mask' an asynchronous exception is only raised by operations that are
 interruptible (or call other interruptible operations).  In many cases
 these operations may themselves raise exceptions, such as I\/O errors,
-so the caller should be prepared to handle exceptions arising from the
-operation anyway.
+so the caller will usually be prepared to handle exceptions arising from the
+operation anyway.  To perfom an explicit poll for asynchronous exceptions
+inside 'mask', use 'allowInterrupt'.
 
 Sometimes it is too onerous to handle exceptions in the middle of a
 critical piece of stateful code.  There are three ways to handle this

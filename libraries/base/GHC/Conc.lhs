@@ -1,7 +1,8 @@
 \begin{code}
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE CPP, NoImplicitPrelude #-}
 {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 {-# OPTIONS_HADDOCK not-home #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.Conc
@@ -30,9 +31,13 @@ module GHC.Conc
         -- * Forking and suchlike
         , forkIO        -- :: IO a -> IO ThreadId
         , forkIOUnmasked
+        , forkIOWithUnmask
+        , forkOn
         , forkOnIO      -- :: Int -> IO a -> IO ThreadId
         , forkOnIOUnmasked
+        , forkOnWithUnmask
         , numCapabilities -- :: Int
+        , getNumCapabilities -- :: IO Int
         , numSparks       -- :: IO Int
         , childHandler  -- :: Exception -> IO ()
         , myThreadId    -- :: IO ThreadId
@@ -46,6 +51,7 @@ module GHC.Conc
 
         , ThreadStatus(..), BlockReason(..)
         , threadStatus  -- :: ThreadId -> IO ThreadStatus
+        , threadCapability
 
         -- * Waiting
         , threadDelay           -- :: Int -> IO ()

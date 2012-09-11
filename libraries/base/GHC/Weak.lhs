@@ -1,6 +1,14 @@
 \begin{code}
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE CPP
+           , NoImplicitPrelude
+           , BangPatterns
+           , MagicHash
+           , UnboxedTuples
+           , DeriveDataTypeable
+           , StandaloneDeriving
+  #-}
 {-# OPTIONS_HADDOCK hide #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.Weak
@@ -16,7 +24,13 @@
 -----------------------------------------------------------------------------
 
 -- #hide
-module GHC.Weak where
+module GHC.Weak (
+        Weak(..),
+        mkWeak,
+        deRefWeak,
+        finalize,
+        runFinalizerBatch
+    ) where
 
 import GHC.Base
 import Data.Maybe

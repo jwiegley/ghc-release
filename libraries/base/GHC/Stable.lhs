@@ -1,6 +1,11 @@
 \begin{code}
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE NoImplicitPrelude
+           , MagicHash
+           , UnboxedTuples
+           , ForeignFunctionInterface
+  #-}
 {-# OPTIONS_HADDOCK hide #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.Stable
@@ -16,18 +21,17 @@
 -----------------------------------------------------------------------------
 
 -- #hide
-module GHC.Stable 
-        ( StablePtr(..)
-        , newStablePtr          -- :: a -> IO (StablePtr a)    
-        , deRefStablePtr        -- :: StablePtr a -> a
-        , freeStablePtr         -- :: StablePtr a -> IO ()
-        , castStablePtrToPtr    -- :: StablePtr a -> Ptr ()
-        , castPtrToStablePtr    -- :: Ptr () -> StablePtr a
-   ) where
+module GHC.Stable (
+        StablePtr(..),
+        newStablePtr,         -- :: a -> IO (StablePtr a)    
+        deRefStablePtr,       -- :: StablePtr a -> a
+        freeStablePtr,        -- :: StablePtr a -> IO ()
+        castStablePtrToPtr,   -- :: StablePtr a -> Ptr ()
+        castPtrToStablePtr    -- :: Ptr () -> StablePtr a
+    ) where
 
 import GHC.Ptr
 import GHC.Base
--- import GHC.IO
 
 -----------------------------------------------------------------------------
 -- Stable Pointers
@@ -104,4 +108,5 @@ instance Eq (StablePtr a) where
         case eqStablePtr# sp1 sp2 of
            0# -> False
            _  -> True
+
 \end{code}

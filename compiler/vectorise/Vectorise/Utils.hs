@@ -4,7 +4,6 @@ module Vectorise.Utils (
   module Vectorise.Utils.Closure,
   module Vectorise.Utils.Hoisting,
   module Vectorise.Utils.PADict,
-  module Vectorise.Utils.PRDict,
   module Vectorise.Utils.Poly,
 
   -- * Annotated Exprs
@@ -28,14 +27,12 @@ import Vectorise.Utils.Base
 import Vectorise.Utils.Closure
 import Vectorise.Utils.Hoisting
 import Vectorise.Utils.PADict
-import Vectorise.Utils.PRDict
 import Vectorise.Utils.Poly
 import Vectorise.Monad
 import Vectorise.Builtins
 import CoreSyn
 import CoreUtils
 import Type
-import Var
 import Control.Monad
 
 
@@ -49,7 +46,7 @@ collectAnnTypeArgs expr = go expr []
 collectAnnTypeBinders :: AnnExpr Var ann -> ([Var], AnnExpr Var ann)
 collectAnnTypeBinders expr = go [] expr
   where
-    go bs (_, AnnLam b e) | isTyCoVar b = go (b:bs) e
+    go bs (_, AnnLam b e) | isTyVar b = go (b:bs) e
     go bs e                           = (reverse bs, e)
 
 collectAnnValBinders :: AnnExpr Var ann -> ([Var], AnnExpr Var ann)
@@ -63,22 +60,59 @@ isAnnTypeArg (_, AnnType _) = True
 isAnnTypeArg _              = False
 
 
--- PD Functions ---------------------------------------------------------------
-replicatePD :: CoreExpr -> CoreExpr -> VM CoreExpr
-replicatePD len x = liftM (`mkApps` [len,x])
-                          (paMethod replicatePDVar "replicatePD" (exprType x))
+-- PD "Parallel Data" Functions -----------------------------------------------
+--
+--   Given some data that has a PA dictionary, we can convert it to its 
+--   representation type, perform some operation on the data, then convert it back.
+--
+--   In the DPH backend, the types of these functions are defined
+--   in dph-common/D.A.P.Lifted/PArray.hs
+--
 
+-- | An empty array of the given type.
 emptyPD :: Type -> VM CoreExpr
 emptyPD = paMethod emptyPDVar "emptyPD"
 
 
-packByTagPD :: Type -> CoreExpr -> CoreExpr -> CoreExpr -> CoreExpr -> VM CoreExpr
+-- | Produce an array containing copies of a given element.
+replicatePD
+	:: CoreExpr	-- ^ Number of copies in the resulting array.
+	-> CoreExpr	-- ^ Value to replicate.
+	-> VM CoreExpr
+
+replicatePD len x 
+	= liftM (`mkApps` [len,x])
+        $ paMethod replicatePDVar "replicatePD" (exprType x)
+
+
+-- | Select some elements from an array that correspond to a particular tag value
+---  and pack them into a new array.
+--   eg  packByTagPD Int# [:23, 42, 95, 50, 27, 49:]  3 [:1, 2, 1, 2, 3, 2:] 2 
+--          ==> [:42, 50, 49:]
+--
+packByTagPD 
+	:: Type		-- ^ Element type.
+	-> CoreExpr	-- ^ Source array.
+	-> CoreExpr	-- ^ Length of resulting array.
+	-> CoreExpr	-- ^ Tag values of elements in source array.
+	-> CoreExpr	-- ^ The tag value for the elements to select.
+	-> VM CoreExpr
+
 packByTagPD ty xs len tags t
   = liftM (`mkApps` [xs, len, tags, t])
           (paMethod packByTagPDVar "packByTagPD" ty)
 
 
-combinePD :: Type -> CoreExpr -> CoreExpr -> [CoreExpr] -> VM CoreExpr
+-- | Combine some arrays based on a selector.
+--     The selector says which source array to choose for each element of the
+--     resulting array.
+combinePD 
+	:: Type		-- ^ Element type
+	-> CoreExpr	-- ^ Length of resulting array
+	-> CoreExpr	-- ^ Selector.
+	-> [CoreExpr]	-- ^ Arrays to combine.
+	-> VM CoreExpr
+
 combinePD ty len sel xs
   = liftM (`mkApps` (len : sel : xs))
           (paMethod (combinePDVar n) ("combine" ++ show n ++ "PD") ty)
@@ -109,8 +143,8 @@ zipScalars arg_tys res_ty
 scalarClosure :: [Type] -> Type -> CoreExpr -> CoreExpr -> VM CoreExpr
 scalarClosure arg_tys res_ty scalar_fun array_fun
   = do
-      ctr      <- builtin (closureCtrFun $ length arg_tys)
-      Just pas <- liftM sequence $ mapM paDictOfType (init arg_tys)
+      ctr <- builtin (closureCtrFun $ length arg_tys)
+      pas <- mapM paDictOfType (init arg_tys)
       return $ Var ctr `mkTyApps` (arg_tys ++ [res_ty])
                        `mkApps`   (pas ++ [scalar_fun, array_fun])
 

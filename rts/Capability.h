@@ -79,6 +79,7 @@ struct Capability_ {
 #if defined(THREADED_RTS)
     // Worker Tasks waiting in the wings.  Singly-linked.
     Task *spare_workers;
+    nat n_spare_workers; // count of above
 
     // This lock protects running_task, returning_tasks_{hd,tl}, wakeup_queue.
     Mutex lock;
@@ -98,8 +99,10 @@ struct Capability_ {
 
     // Stats on spark creation/conversion
     nat sparks_created;
+    nat sparks_dud;
     nat sparks_converted;
-    nat sparks_pruned;
+    nat sparks_gcd;
+    nat sparks_fizzled;
 #endif
 
     // Per-capability STM-related data
@@ -237,11 +240,6 @@ void prodCapability (Capability *cap, Task *task);
 //
 void prodAllCapabilities (void);
 
-// Waits for a capability to drain of runnable threads and workers,
-// and then acquires it.  Used at shutdown time.
-//
-void shutdownCapability (Capability *cap, Task *task, rtsBool wait_foreign);
-
 // Attempt to gain control of a Capability if it is free.
 //
 rtsBool tryGrabCapability (Capability *cap, Task *task);
@@ -267,6 +265,15 @@ extern void grabCapability (Capability **pCap);
 
 #endif /* !THREADED_RTS */
 
+// Waits for a capability to drain of runnable threads and workers,
+// and then acquires it.  Used at shutdown time.
+//
+void shutdownCapability (Capability *cap, Task *task, rtsBool wait_foreign);
+
+// Shut down all capabilities.
+//
+void shutdownCapabilities(Task *task, rtsBool wait_foreign);
+
 // cause all capabilities to context switch as soon as possible.
 void setContextSwitches(void);
 INLINE_HEADER void contextSwitchCapability(Capability *cap);
@@ -275,9 +282,11 @@ INLINE_HEADER void contextSwitchCapability(Capability *cap);
 void freeCapabilities (void);
 
 // For the GC:
-void markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta, 
-                           rtsBool no_mark_sparks);
+void markCapability (evac_fn evac, void *user, Capability *cap,
+                     rtsBool no_mark_sparks USED_IF_THREADS);
+
 void markCapabilities (evac_fn evac, void *user);
+
 void traverseSparkQueues (evac_fn evac, void *user);
 
 /* -----------------------------------------------------------------------------

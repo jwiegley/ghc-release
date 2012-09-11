@@ -35,21 +35,18 @@ else
 ALL_DIRS += posix
 endif
 
+EXCLUDED_SRCS :=
 EXCLUDED_SRCS += rts/Main.c
 EXCLUDED_SRCS += rts/parallel/SysMan.c
 EXCLUDED_SRCS += $(wildcard rts/Vis*.c)
 
-rts_C_SRCS = $(filter-out $(EXCLUDED_SRCS),$(wildcard rts/*.c $(foreach dir,$(ALL_DIRS),rts/$(dir)/*.c)))
-rts_CMM_SRCS = $(wildcard rts/*.cmm)
+rts_C_SRCS := $(filter-out $(EXCLUDED_SRCS),$(wildcard rts/*.c $(foreach dir,$(ALL_DIRS),rts/$(dir)/*.c)))
+rts_CMM_SRCS := $(wildcard rts/*.cmm)
 
 # Don't compile .S files when bootstrapping a new arch
 ifneq "$(PORTING_HOST)" "YES"
-ifneq "$(findstring $(TargetArch_CPP), powerpc powerpc64)" ""
+ifneq "$(findstring $(TargetArch_CPP), i386 powerpc powerpc64)" ""
 rts_S_SRCS += rts/AdjustorAsm.S
-else
-ifneq "$(findstring $(TargetOS_CPP), darwin)" ""
-rts_S_SRCS += rts/AdjustorAsm.S
-endif
 endif
 endif
 
@@ -67,7 +64,7 @@ rts/dist/build/sm/Evac_thr.c : rts/sm/Evac.c | $$(dir $$@)/.
 rts/dist/build/sm/Scav_thr.c : rts/sm/Scav.c | $$(dir $$@)/.
 	cp $< $@
 
-rts_H_FILES = $(wildcard includes/*.h) $(wildcard rts/*.h)
+rts_H_FILES := $(wildcard rts/*.h)
 
 ifeq "$(USE_DTRACE)" "YES"
 DTRACEPROBES_H = rts/dist/build/RtsProbes.h
@@ -145,7 +142,7 @@ endif
 $(call distdir-way-opts,rts,dist,$1)
 $(call c-suffix-rules,rts,dist,$1,YES)
 $(call cmm-suffix-rules,rts,dist,$1)
-$(call hs-suffix-rules-srcdir,rts,dist,$1,$$(dir))
+$(call hs-suffix-rules-srcdir,rts,dist,$1,.)
 # hs-suffix-rules-srcdir is needed when BootingFromHc to get the .hc rules
 
 rts_$1_LIB_NAME = libHSrts$$($1_libsuf)
@@ -193,8 +190,8 @@ endif
 else
 $$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS)
 	"$$(RM)" $$(RM_OPTS) $$@
-	echo $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) | "$$(XARGS)" $$(XARGS_OPTS) "$$(AR)" \
-		$$(AR_OPTS) $$(EXTRA_AR_ARGS) $$@
+	echo $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) | "$$(XARGS)" $$(XARGS_OPTS) "$$(AR_STAGE1)" \
+		$$(AR_OPTS_STAGE1) $$(EXTRA_AR_ARGS_STAGE1) $$@
 endif
 
 endif
@@ -294,6 +291,7 @@ rts/RtsMain_HC_OPTS += -optc-O0
 
 rts/RtsMessages_CC_OPTS += -DProjectVersion=\"$(ProjectVersion)\"
 rts/RtsUtils_CC_OPTS += -DProjectVersion=\"$(ProjectVersion)\"
+rts/Trace_CC_OPTS += -DProjectVersion=\"$(ProjectVersion)\"
 #
 rts/RtsUtils_CC_OPTS += -DHostPlatform=\"$(HOSTPLATFORM)\"
 rts/RtsUtils_CC_OPTS += -DHostArch=\"$(HostArch_CPP)\"
@@ -455,7 +453,7 @@ rts_dist_MKDEPENDC_OPTS += -Irts/dist/build
 
 endif
 
-$(eval $(call build-dependencies,rts,dist,1))
+$(eval $(call dependencies,rts,dist,1))
 
 $(rts_dist_depfile_c_asm) : libffi/dist-install/build/ffi.h $(DTRACEPROBES_H)
 
@@ -498,7 +496,7 @@ endif
 ifneq "$(BINDIST)" "YES"
 rts/dist/build/libHSrtsmain.a : rts/dist/build/Main.o
 	"$(RM)" $(RM_OPTS) $@
-	"$(AR)" $(AR_OPTS) $(EXTRA_AR_ARGS) $@ $<
+	"$(AR_STAGE1)" $(AR_OPTS_STAGE1) $(EXTRA_AR_ARGS_STAGE1) $@ $<
 endif
 
 # -----------------------------------------------------------------------------

@@ -219,13 +219,16 @@ initCapability( Capability *cap, nat i )
     initMutex(&cap->lock);
     cap->running_task      = NULL; // indicates cap is free
     cap->spare_workers     = NULL;
+    cap->n_spare_workers   = 0;
     cap->suspended_ccalls  = NULL;
     cap->returning_tasks_hd = NULL;
     cap->returning_tasks_tl = NULL;
     cap->inbox              = (Message*)END_TSO_QUEUE;
     cap->sparks_created     = 0;
+    cap->sparks_dud         = 0;
     cap->sparks_converted   = 0;
-    cap->sparks_pruned      = 0;
+    cap->sparks_gcd         = 0;
+    cap->sparks_fizzled     = 0;
 #endif
 
     cap->f.stgEagerBlackholeInfo = (W_)&__stg_EAGER_BLACKHOLE_info;
@@ -250,6 +253,8 @@ initCapability( Capability *cap, nat i )
     cap->transaction_tokens = 0;
     cap->context_switch = 0;
     cap->pinned_object_block = NULL;
+
+    traceCapsetAssignCap(CAPSET_OSPROCESS_DEFAULT, i);
 }
 
 /* ---------------------------------------------------------------------------
@@ -263,6 +268,10 @@ initCapability( Capability *cap, nat i )
 void
 initCapabilities( void )
 {
+    /* Declare a single capability set representing the process. 
+       Each capability will get added to this capset. */ 
+    traceCapsetCreate(CAPSET_OSPROCESS_DEFAULT, CapsetTypeOsProcess);
+
 #if defined(THREADED_RTS)
     nat i;
 
@@ -464,9 +473,24 @@ releaseCapabilityAndQueueWorker (Capability* cap USED_IF_THREADS)
     // in which case it is not replaced on the spare_worker queue.
     // This happens when the system is shutting down (see
     // Schedule.c:workerStart()).
-    if (!isBoundTask(task)) {
-	task->next = cap->spare_workers;
-	cap->spare_workers = task;
+    if (!isBoundTask(task))
+    {
+        if (cap->n_spare_workers < MAX_SPARE_WORKERS)
+        {
+            task->next = cap->spare_workers;
+            cap->spare_workers = task;
+            cap->n_spare_workers++;
+        }
+        else
+        {
+            debugTrace(DEBUG_sched, "%d spare workers already, exiting",
+                       cap->n_spare_workers);
+            releaseCapability_(cap,rtsFalse);
+            // hold the lock until after workerTaskStop; c.f. scheduleWorker()
+            workerTaskStop(task);
+            RELEASE_LOCK(&cap->lock);
+            shutdownThread();
+        }
     }
     // Bound tasks just float around attached to their TSOs.
 
@@ -623,7 +647,8 @@ yieldCapability (Capability** pCap, Task *task)
 		}
 		cap->spare_workers = task->next;
 		task->next = NULL;
-	    }
+                cap->n_spare_workers--;
+            }
 	    cap->running_task = task;
 	    RELEASE_LOCK(&cap->lock);
 	    break;
@@ -658,6 +683,31 @@ prodCapability (Capability *cap, Task *task)
 }
 
 /* ----------------------------------------------------------------------------
+ * tryGrabCapability
+ *
+ * Attempt to gain control of a Capability if it is free.
+ *
+ * ------------------------------------------------------------------------- */
+
+rtsBool
+tryGrabCapability (Capability *cap, Task *task)
+{
+    if (cap->running_task != NULL) return rtsFalse;
+    ACQUIRE_LOCK(&cap->lock);
+    if (cap->running_task != NULL) {
+	RELEASE_LOCK(&cap->lock);
+	return rtsFalse;
+    }
+    task->cap = cap;
+    cap->running_task = task;
+    RELEASE_LOCK(&cap->lock);
+    return rtsTrue;
+}
+
+
+#endif /* THREADED_RTS */
+
+/* ----------------------------------------------------------------------------
  * shutdownCapability
  *
  * At shutdown time, we want to let everything exit as cleanly as
@@ -673,8 +723,11 @@ prodCapability (Capability *cap, Task *task)
  * ------------------------------------------------------------------------- */
 
 void
-shutdownCapability (Capability *cap, Task *task, rtsBool safe)
+shutdownCapability (Capability *cap,
+                    Task *task USED_IF_THREADS,
+                    rtsBool safe USED_IF_THREADS)
 {
+#if defined(THREADED_RTS)
     nat i;
 
     task->cap = cap;
@@ -712,12 +765,13 @@ shutdownCapability (Capability *cap, Task *task, rtsBool safe)
                 if (!osThreadIsAlive(t->id)) {
                     debugTrace(DEBUG_sched, 
                                "worker thread %p has died unexpectedly", (void *)t->id);
-                        if (!prev) {
-                            cap->spare_workers = t->next;
-                        } else {
-                            prev->next = t->next;
-                        }
-                        prev = t;
+                    cap->n_spare_workers--;
+                    if (!prev) {
+                        cap->spare_workers = t->next;
+                    } else {
+                        prev->next = t->next;
+                    }
+                    prev = t;
                 }
             }
         }
@@ -765,32 +819,22 @@ shutdownCapability (Capability *cap, Task *task, rtsBool safe)
     // threads performing foreign calls that will eventually try to 
     // return via resumeThread() and attempt to grab cap->lock.
     // closeMutex(&cap->lock);
-}
-
-/* ----------------------------------------------------------------------------
- * tryGrabCapability
- *
- * Attempt to gain control of a Capability if it is free.
- *
- * ------------------------------------------------------------------------- */
-
-rtsBool
-tryGrabCapability (Capability *cap, Task *task)
-{
-    if (cap->running_task != NULL) return rtsFalse;
-    ACQUIRE_LOCK(&cap->lock);
-    if (cap->running_task != NULL) {
-	RELEASE_LOCK(&cap->lock);
-	return rtsFalse;
-    }
-    task->cap = cap;
-    cap->running_task = task;
-    RELEASE_LOCK(&cap->lock);
-    return rtsTrue;
-}
-
-
+    
 #endif /* THREADED_RTS */
+
+    traceCapsetRemoveCap(CAPSET_OSPROCESS_DEFAULT, cap->no);
+}
+
+void
+shutdownCapabilities(Task *task, rtsBool safe)
+{
+    nat i;
+    for (i=0; i < n_capabilities; i++) {
+        ASSERT(task->incall->tso == NULL);
+        shutdownCapability(&capabilities[i], task, safe);
+    }
+    traceCapsetDelete(CAPSET_OSPROCESS_DEFAULT);
+}
 
 static void
 freeCapability (Capability *cap)
@@ -822,11 +866,9 @@ freeCapabilities (void)
    ------------------------------------------------------------------------ */
 
 void
-markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta, 
-                      rtsBool no_mark_sparks USED_IF_THREADS)
+markCapability (evac_fn evac, void *user, Capability *cap,
+                rtsBool no_mark_sparks USED_IF_THREADS)
 {
-    nat i;
-    Capability *cap;
     InCall *incall;
 
     // Each GC thread is responsible for following roots from the
@@ -834,39 +876,31 @@ markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta,
     // or fewer Capabilities as GC threads, but just in case there
     // are more, we mark every Capability whose number is the GC
     // thread's index plus a multiple of the number of GC threads.
-    for (i = i0; i < n_capabilities; i += delta) {
-	cap = &capabilities[i];
-	evac(user, (StgClosure **)(void *)&cap->run_queue_hd);
-	evac(user, (StgClosure **)(void *)&cap->run_queue_tl);
+    evac(user, (StgClosure **)(void *)&cap->run_queue_hd);
+    evac(user, (StgClosure **)(void *)&cap->run_queue_tl);
 #if defined(THREADED_RTS)
-        evac(user, (StgClosure **)(void *)&cap->inbox);
+    evac(user, (StgClosure **)(void *)&cap->inbox);
 #endif
-	for (incall = cap->suspended_ccalls; incall != NULL; 
-	     incall=incall->next) {
-	    evac(user, (StgClosure **)(void *)&incall->suspended_tso);
-	}
-
-#if defined(THREADED_RTS)
-        if (!no_mark_sparks) {
-            traverseSparkQueue (evac, user, cap);
-        }
-#endif
+    for (incall = cap->suspended_ccalls; incall != NULL;
+         incall=incall->next) {
+        evac(user, (StgClosure **)(void *)&incall->suspended_tso);
     }
 
-#if !defined(THREADED_RTS)
-    evac(user, (StgClosure **)(void *)&blocked_queue_hd);
-    evac(user, (StgClosure **)(void *)&blocked_queue_tl);
-    evac(user, (StgClosure **)(void *)&sleeping_queue);
-#endif 
+#if defined(THREADED_RTS)
+    if (!no_mark_sparks) {
+        traverseSparkQueue (evac, user, cap);
+    }
+#endif
+
+    // Free STM structures for this Capability
+    stmPreGCHook(cap);
 }
 
 void
 markCapabilities (evac_fn evac, void *user)
 {
-    markSomeCapabilities(evac, user, 0, 1, rtsFalse);
+    nat n;
+    for (n = 0; n < n_capabilities; n++) {
+        markCapability(evac, user, &capabilities[n], rtsFalse);
+    }
 }
-
-/* -----------------------------------------------------------------------------
-   Messages
-   -------------------------------------------------------------------------- */
-

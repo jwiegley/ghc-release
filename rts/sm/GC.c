@@ -40,6 +40,7 @@
 
 #include "GC.h"
 #include "GCThread.h"
+#include "GCTDecl.h"
 #include "Compact.h"
 #include "Evac.h"
 #include "Scav.h"
@@ -137,8 +138,8 @@ DECLARE_GCT
 static void mark_root               (void *user, StgClosure **root);
 static void zero_static_object_list (StgClosure* first_static);
 static nat  initialise_N            (rtsBool force_major_gc);
-static void init_collected_gen      (nat g, nat threads);
-static void init_uncollected_gen    (nat g, nat threads);
+static void prepare_collected_gen   (generation *gen);
+static void prepare_uncollected_gen (generation *gen);
 static void init_gc_thread          (gc_thread *t);
 static void resize_generations      (void);
 static void resize_nursery          (void);
@@ -146,8 +147,9 @@ static void start_gc_threads        (void);
 static void scavenge_until_all_done (void);
 static StgWord inc_running          (void);
 static StgWord dec_running          (void);
-static void wakeup_gc_threads       (nat n_threads, nat me);
-static void shutdown_gc_threads     (nat n_threads, nat me);
+static void wakeup_gc_threads       (nat me);
+static void shutdown_gc_threads     (nat me);
+static void collect_gct_blocks      (void);
 
 #if 0 && defined(DEBUG)
 static void gcCAFs                  (void);
@@ -169,17 +171,22 @@ StgPtr mark_sp;            // pointer to the next unallocated mark stack entry
 
 void
 GarbageCollect (rtsBool force_major_gc, 
+                rtsBool do_heap_census,
                 nat gc_type USED_IF_THREADS,
                 Capability *cap)
 {
   bdescr *bd;
   generation *gen;
-  lnat live, allocated, max_copied, avg_copied, slop;
+  lnat live_blocks, live_words, allocated, max_copied, avg_copied;
+#if defined(THREADED_RTS)
   gc_thread *saved_gct;
-  nat g, t, n;
+#endif
+  nat g, n;
 
   // necessary if we stole a callee-saves register for gct:
+#if defined(THREADED_RTS)
   saved_gct = gct;
+#endif
 
 #ifdef PROFILING
   CostCentreStack *prev_CCS;
@@ -197,11 +204,11 @@ GarbageCollect (rtsBool force_major_gc,
   ASSERT(sizeof(gen_workspace) == 16 * sizeof(StgWord));
   // otherwise adjust the padding in gen_workspace.
 
-  // tell the stats department that we've started a GC 
-  stat_startGC();
+  // this is the main thread
+  SET_GCT(gc_threads[cap->no]);
 
-  // tell the STM to discard any cached closures it's hoping to re-use
-  stmPreGCHook();
+  // tell the stats department that we've started a GC 
+  stat_startGC(gct);
 
   // lock the StablePtr table
   stablePtrPreGC();
@@ -221,7 +228,7 @@ GarbageCollect (rtsBool force_major_gc,
   /* Approximate how much we allocated.  
    * Todo: only when generating stats? 
    */
-  allocated = calcAllocated();
+  allocated = calcAllocated(rtsFalse/* don't count the nursery yet */);
 
   /* Figure out which generation to collect
    */
@@ -274,22 +281,19 @@ GarbageCollect (rtsBool force_major_gc,
 #endif
 
   // check sanity *before* GC
-  IF_DEBUG(sanity, checkSanity(rtsTrue));
-
-  // Initialise all our gc_thread structures
-  for (t = 0; t < n_gc_threads; t++) {
-      init_gc_thread(gc_threads[t]);
-  }
+  IF_DEBUG(sanity, checkSanity(rtsFalse /* before GC */, major_gc));
 
   // Initialise all the generations/steps that we're collecting.
   for (g = 0; g <= N; g++) {
-      init_collected_gen(g,n_gc_threads);
+      prepare_collected_gen(&generations[g]);
   }
-  
   // Initialise all the generations/steps that we're *not* collecting.
   for (g = N+1; g < RtsFlags.GcFlags.generations; g++) {
-      init_uncollected_gen(g,n_gc_threads);
+      prepare_uncollected_gen(&generations[g]);
   }
+
+  // Prepare this gc_thread
+  init_gc_thread(gct);
 
   /* Allocate a mark stack if we're doing a major collection.
    */
@@ -305,17 +309,6 @@ GarbageCollect (rtsBool force_major_gc,
       mark_sp           = NULL;
   }
 
-  // this is the main thread
-#ifdef THREADED_RTS
-  if (n_gc_threads == 1) {
-      SET_GCT(gc_threads[0]);
-  } else {
-      SET_GCT(gc_threads[cap->no]);
-  }
-#else
-SET_GCT(gc_threads[0]);
-#endif
-
   /* -----------------------------------------------------------------------
    * follow all the roots that we know about:
    */
@@ -325,28 +318,9 @@ SET_GCT(gc_threads[0]);
   // NB. do this after the mutable lists have been saved above, otherwise
   // the other GC threads will be writing into the old mutable lists.
   inc_running();
-  wakeup_gc_threads(n_gc_threads, gct->thread_index);
+  wakeup_gc_threads(gct->thread_index);
 
-  // Mutable lists from each generation > N
-  // we want to *scavenge* these roots, not evacuate them: they're not
-  // going to move in this GC.
-  // Also do them in reverse generation order, for the usual reason:
-  // namely to reduce the likelihood of spurious old->new pointers.
-  //
-  for (g = RtsFlags.GcFlags.generations-1; g > N; g--) {
-#if defined(THREADED_RTS)
-      if (n_gc_threads > 1) {
-          scavenge_mutable_list(generations[g].saved_mut_list, &generations[g]);
-      } else {
-          scavenge_mutable_list1(generations[g].saved_mut_list, &generations[g]);
-      }
-#else
-      scavenge_mutable_list(generations[g].saved_mut_list, &generations[g]);
-#endif
-      freeChain_sync(generations[g].saved_mut_list);
-      generations[g].saved_mut_list = NULL;
-
-  }
+  traceEventGcWork(gct->cap);
 
   // scavenge the capability-private mutable lists.  This isn't part
   // of markSomeCapabilities() because markSomeCapabilities() can only
@@ -361,17 +335,25 @@ SET_GCT(gc_threads[0]);
 #endif
       }
   } else {
-      scavenge_capability_mut_lists(&capabilities[gct->thread_index]);
+      scavenge_capability_mut_lists(gct->cap);
   }
 
   // follow roots from the CAF list (used by GHCi)
-  gct->evac_gen = 0;
+  gct->evac_gen_no = 0;
   markCAFs(mark_root, gct);
 
   // follow all the roots that the application knows about.
-  gct->evac_gen = 0;
-  markSomeCapabilities(mark_root, gct, gct->thread_index, n_gc_threads,
-                       rtsTrue/*prune sparks*/);
+  gct->evac_gen_no = 0;
+  if (n_gc_threads == 1) {
+      for (n = 0; n < n_capabilities; n++) {
+          markCapability(mark_root, gct, &capabilities[n],
+                         rtsTrue/*don't mark sparks*/);
+      }
+  } else {
+      markCapability(mark_root, gct, cap, rtsTrue/*don't mark sparks*/);
+  }
+
+  markScheduler(mark_root, gct);
 
 #if defined(RTS_USER_SIGNALS)
   // mark the signal handlers (signals should be already blocked)
@@ -406,7 +388,7 @@ SET_GCT(gc_threads[0]);
       break;
   }
 
-  shutdown_gc_threads(n_gc_threads, gct->thread_index);
+  shutdown_gc_threads(gct->thread_index);
 
   // Now see which stable names are still alive.
   gcStablePtrTable();
@@ -417,7 +399,7 @@ SET_GCT(gc_threads[0]);
           pruneSparkQueue(&capabilities[n]);
       }
   } else {
-      pruneSparkQueue(&capabilities[gct->thread_index]);
+      pruneSparkQueue(gct->cap);
   }
 #endif
 
@@ -431,86 +413,6 @@ SET_GCT(gc_threads[0]);
 
   // NO MORE EVACUATION AFTER THIS POINT!
 
-  // Two-space collector: free the old to-space.
-  // g0->old_blocks is the old nursery
-  // g0->blocks is to-space from the previous GC
-  if (RtsFlags.GcFlags.generations == 1) {
-      if (g0->blocks != NULL) {
-	  freeChain(g0->blocks);
-	  g0->blocks = NULL;
-      }
-  }
-
-  // For each workspace, in each thread, move the copied blocks to the step
-  {
-      gc_thread *thr;
-      gen_workspace *ws;
-      bdescr *prev, *next;
-
-      for (t = 0; t < n_gc_threads; t++) {
-	  thr = gc_threads[t];
-
-          for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-              ws = &thr->gens[g];
-
-              // Push the final block
-              if (ws->todo_bd) { 
-                  push_scanned_block(ws->todo_bd, ws);
-              }
-
-              ASSERT(gct->scan_bd == NULL);
-              ASSERT(countBlocks(ws->scavd_list) == ws->n_scavd_blocks);
-              
-              prev = NULL;
-              for (bd = ws->scavd_list; bd != NULL; bd = bd->link) {
-                  ws->gen->n_words += bd->free - bd->start;
-                  prev = bd;
-              }
-              if (prev != NULL) {
-                  prev->link = ws->gen->blocks;
-                  ws->gen->blocks = ws->scavd_list;
-              } 
-              ws->gen->n_blocks += ws->n_scavd_blocks;
-          }
-      }
-
-      // Add all the partial blocks *after* we've added all the full
-      // blocks.  This is so that we can grab the partial blocks back
-      // again and try to fill them up in the next GC.
-      for (t = 0; t < n_gc_threads; t++) {
-	  thr = gc_threads[t];
-
-          for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
-              ws = &thr->gens[g];
-
-              prev = NULL;
-              for (bd = ws->part_list; bd != NULL; bd = next) {
-                  next = bd->link;
-                  if (bd->free == bd->start) {
-                      if (prev == NULL) {
-                          ws->part_list = next;
-                      } else {
-                          prev->link = next;
-                      }
-                      freeGroup(bd);
-                      ws->n_part_blocks--;
-                  } else {
-                      ws->gen->n_words += bd->free - bd->start;
-                      prev = bd;
-                  }
-              }
-              if (prev != NULL) {
-                  prev->link = ws->gen->blocks;
-                  ws->gen->blocks = ws->part_list;
-              }
-              ws->gen->n_blocks += ws->n_part_blocks;
-
-              ASSERT(countBlocks(ws->gen->blocks) == ws->gen->n_blocks);
-              ASSERT(countOccupied(ws->gen->blocks) == ws->gen->n_words);
-	  }
-      }
-  }
-
   // Finally: compact or sweep the oldest generation.
   if (major_gc && oldest_gen->mark) {
       if (oldest_gen->compact) 
@@ -519,8 +421,6 @@ SET_GCT(gc_threads[0]);
           sweep(oldest_gen);
   }
 
-  /* run through all the generations/steps and tidy up 
-   */
   copied = 0;
   max_copied = 0;
   avg_copied = 0;
@@ -546,6 +446,16 @@ SET_GCT(gc_threads[0]);
       }
   }
 
+  // Run through all the generations/steps and tidy up.
+  // We're going to:
+  //   - count the amount of "live" data (live_words, live_blocks)
+  //   - count the amount of "copied" data in this GC (copied)
+  //   - free from-space
+  //   - make to-space the new from-space (set BF_EVACUATED on all blocks)
+  //
+  live_words = 0;
+  live_blocks = 0;
+
   for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
 
     if (g == N) {
@@ -557,14 +467,8 @@ SET_GCT(gc_threads[0]);
     // stats.  Every mutable list is copied during every GC.
     if (g > 0) {
 	nat mut_list_size = 0;
-	for (bd = generations[g].mut_list; bd != NULL; bd = bd->link) {
-	    mut_list_size += bd->free - bd->start;
-	}
         for (n = 0; n < n_capabilities; n++) {
-            for (bd = capabilities[n].mut_lists[g]; 
-                 bd != NULL; bd = bd->link) {
-                mut_list_size += bd->free - bd->start;
-            }
+            mut_list_size += countOccupied(capabilities[n].mut_lists[g]);
         }
 	copied +=  mut_list_size;
 
@@ -648,8 +552,7 @@ SET_GCT(gc_threads[0]);
         freeChain(gen->large_objects);
         gen->large_objects  = gen->scavenged_large_objects;
         gen->n_large_blocks = gen->n_scavenged_large_blocks;
-	gen->n_new_large_blocks = 0;
-        ASSERT(countBlocks(gen->large_objects) == gen->n_large_blocks);
+        gen->n_new_large_words = 0;
     }
     else // for generations > N
     {
@@ -664,25 +567,31 @@ SET_GCT(gc_threads[0]);
         
 	// add the new blocks we promoted during this GC 
 	gen->n_large_blocks += gen->n_scavenged_large_blocks;
-        ASSERT(countBlocks(gen->large_objects) == gen->n_large_blocks);
+    }
+
+    ASSERT(countBlocks(gen->large_objects) == gen->n_large_blocks);
+
+    gen->scavenged_large_objects = NULL;
+    gen->n_scavenged_large_blocks = 0;
+
+    // Count "live" data
+    live_words  += genLiveWords(gen);
+    live_blocks += genLiveBlocks(gen);
+
+    // add in the partial blocks in the gen_workspaces, but ignore gen 0
+    // if this is a local GC (we can't count another capability's part_list)
+    {
+        nat i;
+        for (i = 0; i < n_capabilities; i++) {
+            live_words  += gcThreadLiveWords(i, gen->no);
+            live_blocks += gcThreadLiveBlocks(i, gen->no);
+        }
     }
   } // for all generations
 
   // update the max size of older generations after a major GC
   resize_generations();
   
-  // Calculate the amount of live data for stats.
-  live = calcLiveWords();
-
-  // Free the small objects allocated via allocate(), since this will
-  // all have been copied into G0S1 now.  
-  alloc_blocks_lim = RtsFlags.GcFlags.minAllocAreaSize;
-
-  // Start a new pinned_object_block
-  for (n = 0; n < n_capabilities; n++) {
-      capabilities[n].pinned_object_block = NULL;
-  }
-
   // Free the mark stack.
   if (mark_stack_top_bd != NULL) {
       debugTrace(DEBUG_gc, "mark stack: %d blocks",
@@ -699,9 +608,14 @@ SET_GCT(gc_threads[0]);
       }
   }
 
+  // Reset the nursery: make the blocks empty
+  allocated += clearNurseries();
+
   resize_nursery();
 
- // mark the garbage collected CAFs as dead 
+  resetNurseries();
+
+ // mark the garbage collected CAFs as dead
 #if 0 && defined(DEBUG) // doesn't work at the moment 
   if (major_gc) { gcCAFs(); }
 #endif
@@ -719,18 +633,14 @@ SET_GCT(gc_threads[0]);
   // zero the scavenged static object list 
   if (major_gc) {
       nat i;
-      for (i = 0; i < n_gc_threads; i++) {
-          zero_static_object_list(gc_threads[i]->scavenged_static_objects);
+      if (n_gc_threads == 1) {
+          zero_static_object_list(gct->scavenged_static_objects);
+      } else {
+          for (i = 0; i < n_gc_threads; i++) {
+              zero_static_object_list(gc_threads[i]->scavenged_static_objects);
+          }
       }
   }
-
-  // Reset the nursery
-  resetNurseries();
-
-  // send exceptions to any threads which were about to die 
-  RELEASE_SM_LOCK;
-  resurrectThreads(resurrected_threads);
-  ACQUIRE_SM_LOCK;
 
   // Update the stable pointer hash table.
   updateStablePtrTable(major_gc);
@@ -746,6 +656,28 @@ SET_GCT(gc_threads[0]);
   scheduleFinalizers(cap, old_weak_ptr_list);
   ACQUIRE_SM_LOCK;
 
+  // check sanity after GC
+  // before resurrectThreads(), because that might overwrite some
+  // closures, which will cause problems with THREADED where we don't
+  // fill slop.
+  IF_DEBUG(sanity, checkSanity(rtsTrue /* after GC */, major_gc));
+
+  // If a heap census is due, we need to do it before
+  // resurrectThreads(), for the same reason as checkSanity above:
+  // resurrectThreads() will overwrite some closures and leave slop
+  // behind.
+  if (do_heap_census) {
+      debugTrace(DEBUG_sched, "performing heap census");
+      RELEASE_SM_LOCK;
+      heapCensus(gct->gc_start_cpu);
+      ACQUIRE_SM_LOCK;
+  }
+
+  // send exceptions to any threads which were about to die
+  RELEASE_SM_LOCK;
+  resurrectThreads(resurrected_threads);
+  ACQUIRE_SM_LOCK;
+
   if (major_gc) {
       nat need, got;
       need = BLOCKS_TO_MBLOCKS(n_alloc_blocks);
@@ -759,10 +691,7 @@ SET_GCT(gc_threads[0]);
       }
   }
 
-  // check sanity after GC
-  IF_DEBUG(sanity, checkSanity(rtsTrue));
-
-  // extra GC trace info 
+  // extra GC trace info
   IF_DEBUG(gc, statDescribeGens());
 
 #ifdef DEBUG
@@ -787,8 +716,9 @@ SET_GCT(gc_threads[0]);
 #endif
 
   // ok, GC over: tell the stats department what happened. 
-  slop = calcLiveBlocks() * BLOCK_SIZE_W - live;
-  stat_endGC(allocated, live, copied, N, max_copied, avg_copied, slop);
+  stat_endGC(gct, allocated, live_words,
+             copied, N, max_copied, avg_copied,
+             live_blocks * BLOCK_SIZE_W - live_words /* slop */);
 
   // Guess which generation we'll collect *next* time
   initialise_N(force_major_gc);
@@ -861,6 +791,8 @@ new_gc_thread (nat n, gc_thread *t)
     nat g;
     gen_workspace *ws;
 
+    t->cap = &capabilities[n];
+
 #ifdef THREADED_RTS
     t->id = 0;
     initSpinLock(&t->gc_spin);
@@ -887,7 +819,21 @@ new_gc_thread (nat n, gc_thread *t)
         ASSERT(g == ws->gen->no);
         ws->my_gct = t;
         
-        ws->todo_bd = NULL;
+        // We want to call
+        //   alloc_todo_block(ws,0);
+        // but can't, because it uses gct which isn't set up at this point.
+        // Hence, allocate a block for todo_bd manually:
+        {
+            bdescr *bd = allocBlock(); // no lock, locks aren't initialised yet
+            initBdescr(bd, ws->gen, ws->gen->to);
+            bd->flags = BF_EVACUATED;
+            bd->u.scan = bd->free = bd->start;
+
+            ws->todo_bd = bd;
+            ws->todo_free = bd->free;
+            ws->todo_lim = bd->start + BLOCK_SIZE_W;
+        }
+
         ws->todo_q = newWSDeque(128);
         ws->todo_overflow = NULL;
         ws->n_todo_overflow = 0;
@@ -1026,12 +972,10 @@ any_work (void)
 static void
 scavenge_until_all_done (void)
 {
-    nat r;
+    DEBUG_ONLY( nat r );
 	
 
 loop:
-    traceEventGcWork(&capabilities[gct->thread_index]);
-
 #if defined(THREADED_RTS)
     if (n_gc_threads > 1) {
         scavenge_loop();
@@ -1042,10 +986,17 @@ loop:
     scavenge_loop();
 #endif
 
+    collect_gct_blocks();
+
     // scavenge_loop() only exits when there's no work to do
+
+#ifdef DEBUG
     r = dec_running();
-    
-    traceEventGcIdle(&capabilities[gct->thread_index]);
+#else
+    dec_running();
+#endif
+
+    traceEventGcIdle(gct->cap);
 
     debugTrace(DEBUG_gc, "%d GC threads still running", r);
     
@@ -1053,6 +1004,7 @@ loop:
         // usleep(1);
         if (any_work()) {
             inc_running();
+            traceEventGcWork(gct->cap);
             goto loop;
         }
         // any_work() does not remove the work from the queue, it
@@ -1061,7 +1013,7 @@ loop:
         // scavenge_loop() to perform any pending work.
     }
     
-    traceEventGcDone(&capabilities[gct->thread_index]);
+    traceEventGcDone(gct->cap);
 }
 
 #if defined(THREADED_RTS)
@@ -1077,6 +1029,8 @@ gcWorkerThread (Capability *cap)
     gct = gc_threads[cap->no];
     gct->id = osThreadId();
 
+    stat_gcWorkerThreadStart(gct);
+
     // Wait until we're told to wake up
     RELEASE_SPIN_LOCK(&gct->mut_spin);
     gct->wakeup = GC_THREAD_STANDING_BY;
@@ -1090,12 +1044,15 @@ gcWorkerThread (Capability *cap)
     }
     papi_thread_start_gc1_count(gct->papi_events);
 #endif
-    
+
+    init_gc_thread(gct);
+
+    traceEventGcWork(gct->cap);
+
     // Every thread evacuates some roots.
-    gct->evac_gen = 0;
-    markSomeCapabilities(mark_root, gct, gct->thread_index, n_gc_threads,
-                         rtsTrue/*prune sparks*/);
-    scavenge_capability_mut_lists(&capabilities[gct->thread_index]);
+    gct->evac_gen_no = 0;
+    markCapability(mark_root, gct, cap, rtsTrue/*prune sparks*/);
+    scavenge_capability_mut_lists(cap);
 
     scavenge_until_all_done();
     
@@ -1121,6 +1078,9 @@ gcWorkerThread (Capability *cap)
                gct->thread_index);
     ACQUIRE_SPIN_LOCK(&gct->mut_spin);
     debugTrace(DEBUG_gc, "GC thread %d on my way...", gct->thread_index);
+
+    // record the time spent doing GC in the Task structure
+    stat_gcWorkerThreadDone(gct);
 
     SET_GCT(saved_gct);
 }
@@ -1171,11 +1131,14 @@ start_gc_threads (void)
 }
 
 static void
-wakeup_gc_threads (nat n_threads USED_IF_THREADS, nat me USED_IF_THREADS)
+wakeup_gc_threads (nat me USED_IF_THREADS)
 {
 #if defined(THREADED_RTS)
     nat i;
-    for (i=0; i < n_threads; i++) {
+
+    if (n_gc_threads == 1) return;
+
+    for (i=0; i < n_gc_threads; i++) {
         if (i == me) continue;
 	inc_running();
         debugTrace(DEBUG_gc, "waking up gc thread %d", i);
@@ -1192,11 +1155,14 @@ wakeup_gc_threads (nat n_threads USED_IF_THREADS, nat me USED_IF_THREADS)
 // standby state, otherwise they may still be executing inside
 // any_work(), and may even remain awake until the next GC starts.
 static void
-shutdown_gc_threads (nat n_threads USED_IF_THREADS, nat me USED_IF_THREADS)
+shutdown_gc_threads (nat me USED_IF_THREADS)
 {
 #if defined(THREADED_RTS)
     nat i;
-    for (i=0; i < n_threads; i++) {
+
+    if (n_gc_threads == 1) return;
+
+    for (i=0; i < n_gc_threads; i++) {
         if (i == me) continue;
         while (gc_threads[i]->wakeup != GC_THREAD_WAITING_TO_CONTINUE) { write_barrier(); }
     }
@@ -1227,20 +1193,18 @@ releaseGCThreads (Capability *cap USED_IF_THREADS)
    ------------------------------------------------------------------------- */
 
 static void
-init_collected_gen (nat g, nat n_threads)
+prepare_collected_gen (generation *gen)
 {
-    nat t, i;
+    nat i, g, n;
     gen_workspace *ws;
-    generation *gen;
-    bdescr *bd;
+    bdescr *bd, *next;
 
     // Throw away the current mutable list.  Invariant: the mutable
     // list always has at least one block; this means we can avoid a
     // check for NULL in recordMutable().
+    g = gen->no;
     if (g != 0) {
-	freeChain(generations[g].mut_list);
-	generations[g].mut_list = allocBlock();
-	for (i = 0; i < n_capabilities; i++) {
+        for (i = 0; i < n_capabilities; i++) {
 	    freeChain(capabilities[i].mut_lists[g]);
 	    capabilities[i].mut_lists[g] = allocBlock();
 	}
@@ -1263,9 +1227,35 @@ init_collected_gen (nat g, nat n_threads)
     gen->live_estimate = 0;
 
     // initialise the large object queues.
-    gen->scavenged_large_objects = NULL;
-    gen->n_scavenged_large_blocks = 0;
-    
+    ASSERT(gen->scavenged_large_objects == NULL);
+    ASSERT(gen->n_scavenged_large_blocks == 0);
+
+    // grab all the partial blocks stashed in the gc_thread workspaces and
+    // move them to the old_blocks list of this gen.
+    for (n = 0; n < n_capabilities; n++) {
+        ws = &gc_threads[n]->gens[gen->no];
+
+        for (bd = ws->part_list; bd != NULL; bd = next) {
+            next = bd->link;
+            bd->link = gen->old_blocks;
+            gen->old_blocks = bd;
+            gen->n_old_blocks += bd->blocks;
+        }
+        ws->part_list = NULL;
+        ws->n_part_blocks = 0;
+
+        ASSERT(ws->scavd_list == NULL);
+        ASSERT(ws->n_scavd_blocks == 0);
+
+        if (ws->todo_free != ws->todo_bd->start) {
+            ws->todo_bd->free = ws->todo_free;
+            ws->todo_bd->link = gen->old_blocks;
+            gen->old_blocks = ws->todo_bd;
+            gen->n_old_blocks += ws->todo_bd->blocks;
+            alloc_todo_block(ws,0); // always has one block.
+        }
+    }
+
     // mark the small objects as from-space
     for (bd = gen->old_blocks; bd; bd = bd->link) {
         bd->flags &= ~BF_EVACUATED;
@@ -1317,108 +1307,83 @@ init_collected_gen (nat g, nat n_threads)
             }
         }
     }
-
-    // For each GC thread, for each step, allocate a "todo" block to
-    // store evacuated objects to be scavenged, and a block to store
-    // evacuated objects that do not need to be scavenged.
-    for (t = 0; t < n_threads; t++) {
-        ws = &gc_threads[t]->gens[g];
-        
-        ws->todo_large_objects = NULL;
-        
-        ws->part_list = NULL;
-        ws->n_part_blocks = 0;
-        
-        // allocate the first to-space block; extra blocks will be
-        // chained on as necessary.
-        ws->todo_bd = NULL;
-        ASSERT(looksEmptyWSDeque(ws->todo_q));
-        alloc_todo_block(ws,0);
-        
-        ws->todo_overflow = NULL;
-        ws->n_todo_overflow = 0;
-        
-        ws->scavd_list = NULL;
-        ws->n_scavd_blocks = 0;
-    }
 }
 
+
+/* ----------------------------------------------------------------------------
+   Save the mutable lists in saved_mut_lists
+   ------------------------------------------------------------------------- */
+
+static void
+stash_mut_list (Capability *cap, nat gen_no)
+{
+    cap->saved_mut_lists[gen_no] = cap->mut_lists[gen_no];
+    cap->mut_lists[gen_no] = allocBlock_sync();
+}
 
 /* ----------------------------------------------------------------------------
    Initialise a generation that is *not* to be collected 
    ------------------------------------------------------------------------- */
 
 static void
-init_uncollected_gen (nat g, nat threads)
+prepare_uncollected_gen (generation *gen)
 {
-    nat t, n;
-    gen_workspace *ws;
-    generation *gen;
-    bdescr *bd;
+    nat i;
+
+
+    ASSERT(gen->no > 0);
 
     // save the current mutable lists for this generation, and
     // allocate a fresh block for each one.  We'll traverse these
     // mutable lists as roots early on in the GC.
-    generations[g].saved_mut_list = generations[g].mut_list;
-    generations[g].mut_list = allocBlock(); 
-    for (n = 0; n < n_capabilities; n++) {
-        capabilities[n].saved_mut_lists[g] = capabilities[n].mut_lists[g];
-        capabilities[n].mut_lists[g] = allocBlock();
+    for (i = 0; i < n_capabilities; i++) {
+        stash_mut_list(&capabilities[i], gen->no);
     }
 
-    gen = &generations[g];
+    ASSERT(gen->scavenged_large_objects == NULL);
+    ASSERT(gen->n_scavenged_large_blocks == 0);
+}
 
-    gen->scavenged_large_objects = NULL;
-    gen->n_scavenged_large_blocks = 0;
+/* -----------------------------------------------------------------------------
+   Collect the completed blocks from a GC thread and attach them to
+   the generation.
+   -------------------------------------------------------------------------- */
 
-    for (t = 0; t < threads; t++) {
-        ws = &gc_threads[t]->gens[g];
-	    
-        ASSERT(looksEmptyWSDeque(ws->todo_q));
-        ws->todo_large_objects = NULL;
+static void
+collect_gct_blocks (void)
+{
+    nat g;
+    gen_workspace *ws;
+    bdescr *bd, *prev;
+    
+    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+        ws = &gct->gens[g];
         
-        ws->part_list = NULL;
-        ws->n_part_blocks = 0;
+        // there may still be a block attached to ws->todo_bd;
+        // leave it there to use next time.
+
+        if (ws->scavd_list != NULL) {
+            ACQUIRE_SPIN_LOCK(&ws->gen->sync);
+
+            ASSERT(gct->scan_bd == NULL);
+            ASSERT(countBlocks(ws->scavd_list) == ws->n_scavd_blocks);
         
-        ws->scavd_list = NULL;
-        ws->n_scavd_blocks = 0;
-        
-        // If the block at the head of the list in this generation
-        // is less than 3/4 full, then use it as a todo block.
-        if (gen->blocks && isPartiallyFull(gen->blocks))
-        {
-            ws->todo_bd = gen->blocks;
-            ws->todo_free = ws->todo_bd->free;
-            ws->todo_lim = ws->todo_bd->start + BLOCK_SIZE_W;
-            gen->blocks = gen->blocks->link;
-            gen->n_blocks -= 1;
-            gen->n_words -= ws->todo_bd->free - ws->todo_bd->start;
-            ws->todo_bd->link = NULL;
-            // we must scan from the current end point.
-            ws->todo_bd->u.scan = ws->todo_bd->free;
-        } 
-        else
-        {
-            ws->todo_bd = NULL;
-            alloc_todo_block(ws,0);
+            prev = NULL;
+            for (bd = ws->scavd_list; bd != NULL; bd = bd->link) {
+                ws->gen->n_words += bd->free - bd->start;
+                prev = bd;
+            }
+            if (prev != NULL) {
+                prev->link = ws->gen->blocks;
+                ws->gen->blocks = ws->scavd_list;
+            } 
+            ws->gen->n_blocks += ws->n_scavd_blocks;
+
+            ws->scavd_list = NULL;
+            ws->n_scavd_blocks = 0;
+
+            RELEASE_SPIN_LOCK(&ws->gen->sync);
         }
-    }
-
-    // deal out any more partial blocks to the threads' part_lists
-    t = 0;
-    while (gen->blocks && isPartiallyFull(gen->blocks))
-    {
-        bd = gen->blocks;
-        gen->blocks = bd->link;
-        ws = &gc_threads[t]->gens[g];
-        bd->link = ws->part_list;
-        ws->part_list = bd;
-        ws->n_part_blocks += 1;
-        bd->u.scan = bd->free;
-        gen->n_blocks -= 1;
-        gen->n_words -= bd->free - bd->start;
-        t++;
-        if (t == n_gc_threads) t = 0;
     }
 }
 
@@ -1432,8 +1397,8 @@ init_gc_thread (gc_thread *t)
     t->static_objects = END_OF_STATIC_LIST;
     t->scavenged_static_objects = END_OF_STATIC_LIST;
     t->scan_bd = NULL;
-    t->mut_lists = capabilities[t->thread_index].mut_lists;
-    t->evac_gen = 0;
+    t->mut_lists = t->cap->mut_lists;
+    t->evac_gen_no = 0;
     t->failed_to_evac = rtsFalse;
     t->eager_promotion = rtsTrue;
     t->thunk_selector_depth = 0;
@@ -1456,8 +1421,10 @@ mark_root(void *user USED_IF_THREADS, StgClosure **root)
     // so we need to save and restore it here.  NB. only call
     // mark_root() from the main GC thread, otherwise gct will be
     // incorrect.
+#if defined(THREADED_RTS)
     gc_thread *saved_gct;
     saved_gct = gct;
+#endif
     SET_GCT(user);
     
     evacuate(root);

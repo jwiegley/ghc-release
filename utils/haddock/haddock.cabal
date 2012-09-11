@@ -75,7 +75,7 @@ flag test
 executable haddock
   default-language:     Haskell2010
   build-depends:
-    base == 4.3.*,
+    base >= 4.3 && < 4.5,
     filepath,
     directory,
     pretty,
@@ -83,7 +83,7 @@ executable haddock
     array,
     xhtml >= 3000.2 && < 3000.3,
     Cabal >= 1.10,
-    ghc >= 7.0 && < 7.2
+    ghc >= 7.0 && < 7.4
 
   if flag(in-ghc-tree)
     cpp-options: -DIN_GHC_TREE
@@ -135,7 +135,7 @@ executable haddock
 library
   default-language:     Haskell2010
   build-depends:
-    base == 4.3.*,
+    base >= 4.3 && < 4.5,
     filepath,
     directory,
     pretty,
@@ -143,7 +143,7 @@ library
     array,
     xhtml >= 3000.2 && < 3000.3,
     Cabal >= 1.10,
-    ghc >= 7.0 && < 7.2
+    ghc >= 7.0 && < 7.4
 
   if flag(in-ghc-tree)
     cpp-options: -DIN_GHC_TREE
@@ -198,3 +198,11 @@ library
   
   if flag(in-ghc-tree)
     buildable: False
+
+test-suite html-tests
+  type:             exitcode-stdio-1.0
+  default-language: Haskell2010
+  main-is:          runtests.hs
+  hs-source-dirs:   tests/html-tests
+  build-depends:    base, directory, process, filepath, Cabal, regex-compat
+

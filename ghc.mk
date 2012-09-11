@@ -1,3 +1,4 @@
+
 # -----------------------------------------------------------------------------
 #
 # (c) 2009 The University of Glasgow
@@ -85,11 +86,6 @@ else
 $(error Make has restarted itself $(MAKE_RESTARTS) times; is there a makefile bug?)
 endif
 
-# Just bring makefiles up to date:
-.PHONY: just-makefiles
-just-makefiles:
-	@:
-
 ifneq "$(CLEANING)" "YES"
 CLEANING = NO
 endif
@@ -140,9 +136,14 @@ $(error $$(GhcLibWays) is empty, it must contain at least one way)
 endif
 endif
 
+ifeq "$(phase)" ""
+phase = final
+endif
+
 # -----------------------------------------------------------------------------
 # Utility definitions
 
+include rules/prof.mk
 include rules/trace.mk
 include rules/make-command.mk
 
@@ -226,7 +227,9 @@ include rules/package-config.mk
 # -----------------------------------------------------------------------------
 # Building dependencies
 
+include rules/dependencies.mk
 include rules/build-dependencies.mk
+include rules/include-dependencies.mk
 
 # -----------------------------------------------------------------------------
 # Build package-data.mk files
@@ -292,12 +295,17 @@ include rules/bindist.mk
 # Packages that are built but not installed
 INTREE_ONLY_PACKAGES := haskeline mtl terminfo utf8-string xhtml
 
+DPH_PACKAGES := dph/dph-base dph/dph-prim-interface dph/dph-prim-seq \
+                dph/dph-common dph/dph-prim-par dph/dph-par dph/dph-seq \
+                vector primitive random
+
 # Packages that, if present, must be built by the stage2 compiler,
 # because they use TH and/or annotations, or depend on other stage2
-# packages.
-STAGE2_PACKAGES := dph/dph-base dph/dph-prim-interface dph/dph-prim-seq \
-		   dph/dph-common dph/dph-prim-par dph/dph-par dph/dph-seq \
-		   vector primitive
+# packages:
+STAGE2_PACKAGES := $(DPH_PACKAGES) haskell98 haskell2010
+# Packages that we shouldn't build if we don't have TH (e.g. because
+# we're building a profiled compiler):
+TH_PACKAGES := $(DPH_PACKAGES)
 
 # Packages that are built by stage0, in addition to stage1.  These
 # packages are dependencies of GHC, that we do not assume the stage0
@@ -305,11 +313,11 @@ STAGE2_PACKAGES := dph/dph-base dph/dph-prim-interface dph/dph-prim-seq \
 #
 # We assume that the stage0 compiler has a suitable bytestring package,
 # so we don't have to include it below.
-STAGE0_PACKAGES = Cabal hpc extensible-exceptions ghc-binary bin-package-db
+PACKAGES_STAGE0 = Cabal/cabal hpc extensible-exceptions binary bin-package-db hoopl
 
 # These packages are installed, but are installed hidden
 # Why install them at all?  Because the 'ghc' package depends on them
-HIDDEN_PACKAGES = ghc-binary
+HIDDEN_PACKAGES = binary
 
 # $(EXTRA_PACKAGES)  is another classification, of packages built but
 #                    not installed
@@ -322,8 +330,8 @@ HIDDEN_PACKAGES = ghc-binary
 # Packages to build
 # The lists of packages that we *actually* going to build in each stage:
 #
-#  $(STAGE0_PACKAGE)	does double duty; it really is the list of packages
-#			we build the bootstrap compiler in stage 0
+#  $(PACKAGES_STAGE0)   does double duty; it really is the list of packages
+#                       we build the bootstrap compiler in stage 0
 #
 #  $(PACKAGES)          A list of directories relative to libraries/ containing
 #                       packages that will be built by stage1, in dependency
@@ -348,10 +356,12 @@ define addPackageGeneral
 endef
 
 define addPackage # args: $1 = package, $2 = condition
+ifneq "$(filter $1,$(TH_PACKAGES)) $(GhcProfiled)" "$1 YES"
 ifeq "$(filter $1,$(STAGE2_PACKAGES))" "$1"
 $(call addPackageGeneral,PACKAGES_STAGE2,$1,$2)
 else
 $(call addPackageGeneral,PACKAGES,$1,$2)
+endif
 endif
 endef
 
@@ -376,16 +386,16 @@ $(eval $(call addPackage,old-time))
 $(eval $(call addPackage,time))
 $(eval $(call addPackage,directory))
 $(eval $(call addPackage,process))
-$(eval $(call addPackage,random))
 $(eval $(call addPackage,extensible-exceptions))
 $(eval $(call addPackage,haskell98))
 $(eval $(call addPackage,haskell2010))
 $(eval $(call addPackage,hpc))
 $(eval $(call addPackage,pretty))
 $(eval $(call addPackage,template-haskell))
-$(eval $(call addPackage,Cabal))
-$(eval $(call addPackage,ghc-binary))
+$(eval $(call addPackage,Cabal/cabal))
+$(eval $(call addPackage,binary))
 $(eval $(call addPackage,bin-package-db))
+$(eval $(call addPackage,hoopl))
 $(eval $(call addPackage,mtl))
 $(eval $(call addPackage,utf8-string))
 $(eval $(call addPackage,xhtml))
@@ -428,13 +438,13 @@ ghc/stage2/package-data.mk: compiler/stage2/package-data.mk
 # package-data.mk is sufficient, as that in turn depends on all the
 # libraries
 utils/haddock/dist/package-data.mk: compiler/stage2/package-data.mk
-utils/ghc-pwd/dist/package-data.mk: compiler/stage2/package-data.mk
+utils/ghc-pwd/dist-install/package-data.mk: compiler/stage2/package-data.mk
 utils/ghc-cabal/dist-install/package-data.mk: compiler/stage2/package-data.mk
 
 utils/ghc-pkg/dist-install/package-data.mk: compiler/stage2/package-data.mk
 utils/hsc2hs/dist-install/package-data.mk: compiler/stage2/package-data.mk
-utils/compare_sizes/dist/package-data.mk: compiler/stage2/package-data.mk
-utils/runghc/dist/package-data.mk: compiler/stage2/package-data.mk
+utils/compare_sizes/dist-install/package-data.mk: compiler/stage2/package-data.mk
+utils/runghc/dist-install/package-data.mk: compiler/stage2/package-data.mk
 
 # add the final two package.conf dependencies: ghc-prim depends on RTS,
 # and RTS depends on libffi.
@@ -445,14 +455,17 @@ endif
 # --------------------------------
 # Misc package-related settings
 
-BOOT_PKG_CONSTRAINTS := $(foreach p,$(STAGE0_PACKAGES),--constraint "$p == $(shell grep -i "^Version:" libraries/$p/$p.cabal | sed "s/[^0-9.]//g")")
+BOOT_PKG_CONSTRAINTS := \
+    $(foreach d,$(PACKAGES_STAGE0),\
+        $(foreach p,$(basename $(notdir $(wildcard libraries/$d/*.cabal))),\
+            --constraint "$p == $(shell grep -i "^Version:" libraries/$d/$p.cabal | sed "s/[^0-9.]//g")"))
 
 # The actual .a and .so/.dll files: needed for dependencies.
 ALL_STAGE1_LIBS  = $(foreach lib,$(PACKAGES),$(libraries/$(lib)_dist-install_v_LIB))
 ifeq "$(BuildSharedLibs)" "YES"
 ALL_STAGE1_LIBS += $(foreach lib,$(PACKAGES),$(libraries/$(lib)_dist-install_dyn_LIB))
 endif
-BOOT_LIBS = $(foreach lib,$(STAGE0_PACKAGES),$(libraries/$(lib)_dist-boot_v_LIB))
+BOOT_LIBS = $(foreach lib,$(PACKAGES_STAGE0),$(libraries/$(lib)_dist-boot_v_LIB))
 
 OTHER_LIBS = libffi/dist-install/build/libHSffi$(v_libsuf) libffi/dist-install/build/HSffi.o
 ifeq "$(BuildSharedLibs)" "YES"
@@ -491,20 +504,20 @@ libraries/ghc-prim_dist-install_EXTRA_HADDOCK_SRCS = libraries/ghc-prim/dist-ins
 ifneq "$(CLEANING)" "YES"
 ifeq "$(INTEGER_LIBRARY)" "integer-gmp"
 libraries/base_dist-install_CONFIGURE_OPTS += --flags=-integer-simple
+else ifeq "$(INTEGER_LIBRARY)" "integer-simple"
+libraries/base_dist-install_CONFIGURE_OPTS += --flags=integer-simple
 else
-    ifeq "$(INTEGER_LIBRARY)" "integer-simple"
-	libraries/base_dist-install_CONFIGURE_OPTS += --flags=integer-simple
-    else
 $(error Unknown integer library: $(INTEGER_LIBRARY))
-    endif
 endif
 endif
 
 # ----------------------------------------------
 # Checking packages with 'cabal check'
 
+ifeq "$(phase)" "final"
 ifeq "$(CHECK_PACKAGES)" "YES"
 all: check_packages
+endif
 endif
 
 # These packages don't pass the Cabal checks because hs-source-dirs
@@ -520,40 +533,6 @@ CHECKED_compiler = YES
 # -----------------------------------------------------------------------------
 # Include build instructions from all subdirs
 
-# For the rationale behind the build phases, see
-#   http://hackage.haskell.org/trac/ghc/wiki/Building/Architecture/Idiom/PhaseOrdering
-
-# Setting foo_dist_DISABLE=YES means "in directory foo, for build
-# "dist", just read the package-data.mk file, do not build anything".
-
-# We carefully engineer things so that we can build the
-# package-data.mk files early on: they depend only on a few tools also
-# built early.  Having got the package-data.mk files built, we can
-# restart make with up-to-date information about all the packages
-# (this is phase 0).  The remaining problem is the .depend files:
-#
-#   - .depend files in libraries need the stage 1 compiler to build
-#   - ghc/stage1/.depend needs compiler/stage1 built
-#   - compiler/stage1/.depend needs the bootstrap libs built
-#
-# GHC 6.11+ can build a .depend file without having built the
-# dependencies of the package, but we can't rely on the bootstrapping
-# compiler being able to do this, which is why we have to separate the
-# three phases above.
-
-# So this is the final ordering:
-
-# Phase 0 : all package-data.mk files
-#           (requires ghc-cabal, ghc-pkg, mkdirhier, dummy-ghc etc.)
-# Phase 1 : .depend files for bootstrap libs
-#           (requires hsc2hs)
-# Phase 2 : compiler/stage1/.depend
-#           (requires bootstrap libs and genprimopcode)
-# Phase 3 : ghc/stage1/.depend
-#           (requires compiler/stage1)
-#
-# The rest : libraries/*/dist-install, compiler/stage2, ghc/stage2
-
 ifneq "$(BINDIST)" "YES"
 BUILD_DIRS += \
    $(GHC_MKDIRHIER_DIR)
@@ -563,13 +542,11 @@ BUILD_DIRS += \
    docs/users_guide \
    docs/ext-core \
    docs/man \
-   libraries/Cabal/doc \
    $(GHC_UNLIT_DIR) \
    $(GHC_HP2PS_DIR)
 
 ifneq "$(GhcUnregisterised)" "YES"
 BUILD_DIRS += \
-   $(GHC_MANGLER_DIR) \
    $(GHC_SPLIT_DIR)
 endif
 
@@ -600,6 +577,8 @@ endif
 
 ifeq "$(INTEGER_LIBRARY)" "integer-gmp"
 BUILD_DIRS += libraries/integer-gmp/gmp
+else ifneq "$(findstring clean,$(MAKECMDGOALS))" ""
+BUILD_DIRS += libraries/integer-gmp/gmp
 endif
 
 BUILD_DIRS += \
@@ -611,7 +590,6 @@ BUILD_DIRS += \
    utils/testremove \
    utils/ghctags \
    utils/ghc-pwd \
-   utils/dummy-ghc \
    $(GHC_CABAL_DIR) \
    utils/hpc \
    utils/runghc \
@@ -635,44 +613,13 @@ BUILD_DIRS += \
    $(patsubst %, libraries/%, $(PACKAGES_STAGE2))
 endif
 
-# XXX libraries/% must come before any programs built with stage1, see
-# Note [lib-depends].
+# ----------------------------------------------
+# Actually include all the sub-ghc.mk's
 
-ifeq "$(phase)" "0"
-$(foreach lib,$(STAGE0_PACKAGES),$(eval \
-  libraries/$(lib)_dist-boot_DISABLE = YES))
-endif
-
-ifneq "$(findstring $(phase),0 1)" ""
-# We can build deps for compiler/stage1 in phase 2
-compiler_stage1_DISABLE = YES
-endif
-
-ifneq "$(findstring $(phase),0 1 2)" ""
-ghc_stage1_DISABLE = YES
-endif
-
-ifneq "$(findstring $(phase),0 1 2 3)" ""
-# In phases 0-3, we disable stage2-3, the full libraries and haddock
-utils/haddock_dist_DISABLE = YES
-utils/runghc_dist_DISABLE = YES
-utils/ghctags_dist_DISABLE = YES
-utils/hpc_dist_DISABLE = YES
-utils/hsc2hs_dist-install_DISABLE = YES
-utils/ghc-cabal_dist-install_DISABLE = YES
-utils/ghc-pkg_dist-install_DISABLE = YES
-utils/ghc-pwd_dist_DISABLE = YES
-utils/mkUserGuidePart_dist_DISABLE = YES
-utils/compare_sizes_dist_DISABLE = YES
-compiler_stage2_DISABLE = YES
-compiler_stage3_DISABLE = YES
-ghc_stage2_DISABLE = YES
-ghc_stage3_DISABLE = YES
-$(foreach lib,$(PACKAGES) $(PACKAGES_STAGE2),$(eval \
-  libraries/$(lib)_dist-install_DISABLE = YES))
-endif
-
-include $(patsubst %, %/ghc.mk, $(BUILD_DIRS))
+# BUILD_DIRS_EXTRA needs to come after BUILD_DIRS, because stuff in
+# libraries/dph/ghc.mk refers to stuff defined earlier, in particular
+# things like $(libraries/dph/dph-base_dist-install_GHCI_LIB)
+include $(patsubst %, %/ghc.mk, $(BUILD_DIRS) $(BUILD_DIRS_EXTRA))
 
 # A useful pseudo-target (must be after the include above, because it needs
 # the value of things like $(libraries/base_dist-install_v_LIB).
@@ -692,7 +639,7 @@ stage1_libs : $(ALL_STAGE1_LIBS)
 $(foreach pkg,$(PACKAGES) $(PACKAGES_STAGE2),$(eval libraries/$(pkg)_dist-install_HC_OPTS += $$(GhcLibHcOpts)))
 
 # Add $(GhcBootLibHcOpts) to all stage0 package builds
-$(foreach pkg,$(STAGE0_PACKAGES),$(eval libraries/$(pkg)_dist-boot_HC_OPTS += $$(GhcBootLibHcOpts)))
+$(foreach pkg,$(PACKAGES_STAGE0),$(eval libraries/$(pkg)_dist-boot_HC_OPTS += $$(GhcBootLibHcOpts)))
 
 # -----------------------------------------------
 # Haddock-related bits
@@ -700,13 +647,15 @@ $(foreach pkg,$(STAGE0_PACKAGES),$(eval libraries/$(pkg)_dist-boot_HC_OPTS += $$
 # Don't run Haddock for the package that will not be installed
 $(foreach p,$(INTREE_ONLY_PACKAGES),$(eval libraries/$p_dist-install_DO_HADDOCK = NO))
 # We don't haddock the bootstrapping libraries
-$(foreach p,$(STAGE0_PACKAGES),$(eval libraries/$p_dist-boot_DO_HADDOCK = NO))
+$(foreach p,$(PACKAGES_STAGE0),$(eval libraries/$p_dist-boot_DO_HADDOCK = NO))
 
 # Build the Haddock contents and index
 ifeq "$(HADDOCK_DOCS)" "YES"
-libraries/index.html: $(ALL_HADDOCK_FILES)
+libraries/index.html: inplace/bin/haddock$(exeext) $(ALL_HADDOCK_FILES)
 	cd libraries && sh gen_contents_index --inplace
+ifeq "$(phase)" "final"
 $(eval $(call all-target,library_doc_index,libraries/index.html))
+endif
 INSTALL_LIBRARY_DOCS += libraries/*.html libraries/*.gif libraries/*.css libraries/*.js
 CLEAN_FILES += libraries/doc-index* libraries/haddock*.css \
 	       libraries/haddock*.js libraries/index*.html libraries/*.gif
@@ -728,41 +677,16 @@ endif
 
 $(eval $(call clean-target,$(BOOTSTRAPPING_CONF),,$(BOOTSTRAPPING_CONF)))
 
-# These three libraries do not depend on each other, so we can build
-# them straight off:
-
-$(eval $(call build-package,libraries/hpc,dist-boot,0))
-$(eval $(call build-package,libraries/extensible-exceptions,dist-boot,0))
-$(eval $(call build-package,libraries/Cabal,dist-boot,0))
-$(eval $(call build-package,libraries/ghc-binary,dist-boot,0))
-$(eval $(call build-package,libraries/bin-package-db,dist-boot,0))
-
 # register the boot packages in strict sequence, because running
 # multiple ghc-pkgs in parallel doesn't work (registrations may get
 # lost).
 fixed_pkg_prev=
-$(foreach pkg,$(STAGE0_PACKAGES),$(eval $(call fixed_pkg_dep,$(pkg),dist-boot)))
+$(foreach pkg,$(PACKAGES_STAGE0),$(eval $(call fixed_pkg_dep,$(pkg),dist-boot)))
 
-compiler/stage1/package-data.mk : \
-    libraries/Cabal/dist-boot/package-data.mk \
-    libraries/hpc/dist-boot/package-data.mk \
-    libraries/extensible-exceptions/dist-boot/package-data.mk \
-    libraries/bin-package-db/dist-boot/package-data.mk
+compiler/stage1/package-data.mk : $(fixed_pkg_prev)
+endif
 
-# These are necessary because the bootstrapping compiler may not know
-# about cross-package dependencies:
-$(compiler_stage1_depfile_haskell) : $(BOOT_LIBS)
-$(ghc_stage1_depfile_haskell) : $(compiler_stage1_v_LIB)
-
-# A few careful dependencies between bootstrapping packages.  When we
-# can rely on the stage 0 compiler being able to generate
-# cross-package dependencies with -M (fixed in GHC 6.12.1) we can drop
-# these, and also some of the phases.
-#
-# If you miss any out here, then 'make -j8' will probably tell you.
-#
-libraries/bin-package-db/dist-boot/build/Distribution/InstalledPackageInfo/Binary.$(v_osuf) : libraries/ghc-binary/dist-boot/build/Data/Binary.$(v_hisuf) libraries/Cabal/dist-boot/build/Distribution/InstalledPackageInfo.$(v_hisuf)
-
+ifneq "$(BINDIST)" "YES"
 # Make sure we have all the GHCi libs by the time we've built
 # ghc-stage2.  DPH includes a bit of Template Haskell which needs the
 # GHCI libs, and we don't have a better way to express that dependency.
@@ -823,7 +747,7 @@ TAGS: TAGS_compiler
 # -----------------------------------------------------------------------------
 # Installation
 
-install: install_packages install_libs install_libexecs install_headers \
+install: install_libs install_packages install_libexecs install_headers \
          install_libexec_scripts install_bins install_topdirs
 ifeq "$(HADDOCK_DOCS)" "YES"
 install: install_docs
@@ -964,6 +888,12 @@ install_packages: libffi/package.conf.install rts/package.conf.install
 	    $(call make-command,                                           \
 	           "$(INSTALLED_GHC_PKG_REAL)"                             \
 	               --global-conf "$(INSTALLED_PACKAGE_CONF)" hide $p))
+# when we install the packages above, ghc-pkg obeys umask when creating
+# the package.conf files, but for everything else we specify the
+# permissions. We therefore now fix the permissions of package.cache.
+# This means "sudo make install" does the right thing even if it runs
+# with an 077 umask.
+	for f in '$(INSTALLED_PACKAGE_CONF)'/*; do $(CREATE_DATA) "$$f"; done
 
 # -----------------------------------------------------------------------------
 # Binary distributions
@@ -977,22 +907,19 @@ $(eval $(call bindist,.,\
     README \
     INSTALL \
     configure config.sub config.guess install-sh \
-    extra-gcc-opts.in \
+    settings.in \
     packages \
     Makefile \
     mk/config.mk.in \
     $(INPLACE_BIN)/mkdirhier \
     utils/ghc-cabal/dist-install/build/tmp/ghc-cabal \
-    utils/ghc-pwd/dist/build/tmp/ghc-pwd \
+    utils/ghc-pwd/dist-install/build/tmp/ghc-pwd \
     $(BINDIST_WRAPPERS) \
     $(BINDIST_PERL_SOURCES) \
     $(BINDIST_LIBS) \
     $(BINDIST_HI) \
     $(BINDIST_EXTRAS) \
-    $(includes_H_CONFIG) \
-    $(includes_H_PLATFORM) \
     $(includes_H_FILES) \
-    includes/ghcconfig.h \
     $(INSTALL_HEADERS) \
     $(INSTALL_LIBEXECS) \
     $(INSTALL_LIBEXEC_SCRIPTS) \
@@ -1006,7 +933,7 @@ $(eval $(call bindist,.,\
     compiler/stage2/doc \
     $(wildcard libraries/*/dist-install/doc/) \
     $(wildcard libraries/*/*/dist-install/doc/) \
-    $(filter-out extra-gcc-opts,$(INSTALL_LIBS)) \
+    $(filter-out settings,$(INSTALL_LIBS)) \
     $(filter-out %/project.mk mk/config.mk %/mk/install.mk,$(MAKEFILE_LIST)) \
     mk/project.mk \
     mk/install.mk.in \
@@ -1027,7 +954,7 @@ BIN_DIST_MK = $(BIN_DIST_PREP_DIR)/bindist.mk
 unix-binary-dist-prep:
 	"$(RM)" $(RM_OPTS_REC) bindistprep/
 	"$(MKDIRHIER)" $(BIN_DIST_PREP_DIR)
-	set -e; for i in packages LICENSE compiler ghc rts libraries utils docs libffi includes driver mk rules Makefile aclocal.m4 config.sub config.guess install-sh extra-gcc-opts.in ghc.mk inplace distrib/configure.ac distrib/README distrib/INSTALL; do ln -s ../../$$i $(BIN_DIST_PREP_DIR)/; done
+	set -e; for i in packages LICENSE compiler ghc rts libraries utils docs libffi includes driver mk rules Makefile aclocal.m4 config.sub config.guess install-sh settings.in ghc.mk inplace distrib/configure.ac distrib/README distrib/INSTALL; do ln -s ../../$$i $(BIN_DIST_PREP_DIR)/; done
 	echo "HADDOCK_DOCS       = $(HADDOCK_DOCS)"       >> $(BIN_DIST_MK)
 	echo "LATEX_DOCS         = $(LATEX_DOCS)"         >> $(BIN_DIST_MK)
 	echo "BUILD_DOCBOOK_HTML = $(BUILD_DOCBOOK_HTML)" >> $(BIN_DIST_MK)
@@ -1074,9 +1001,15 @@ ifeq "$(mingw32_TARGET_OS)" "1"
 	$(call try10Times,$(PublishCp) $(WINDOWS_INSTALLER) $(PublishLocation)/dist)
 endif
 
+ifeq "$(mingw32_TARGET_OS)" "1"
+DOCDIR_TO_PUBLISH = bindisttest/"install dir"/doc
+else
+DOCDIR_TO_PUBLISH = bindisttest/"install dir"/share/doc/ghc
+endif
+
 .PHONY: publish-docs
 publish-docs:
-	$(call try10Times,$(PublishCp) -r bindisttest/installed/share/doc/ghc/* $(PublishLocation)/docs)
+	$(call try10Times,$(PublishCp) -r $(DOCDIR_TO_PUBLISH)/* $(PublishLocation)/docs)
 
 # -----------------------------------------------------------------------------
 # Source distributions
@@ -1110,7 +1043,7 @@ SRC_DIST_DIRS = mk rules docs distrib bindisttest libffi includes utils docs rts
 SRC_DIST_FILES += \
 	configure.ac config.guess config.sub configure \
 	aclocal.m4 README ANNOUNCE HACKING LICENSE Makefile install-sh \
-	ghc.spec.in ghc.spec extra-gcc-opts.in VERSION \
+	ghc.spec.in ghc.spec settings.in VERSION \
 	boot boot-pkgs packages ghc.mk
 
 SRC_DIST_TARBALL = $(SRC_DIST_NAME)-src.tar.bz2
@@ -1144,7 +1077,7 @@ sdist-prep :
 	$(call sdist_file,compiler,stage2,parser,,Lexer,x)
 	$(call sdist_file,compiler,stage2,parser,,Parser,y.pp)
 	$(call sdist_file,compiler,stage2,parser,,ParserCore,y)
-	$(call sdist_file,utils/hpc,dist,,,HpcParser,y)
+	$(call sdist_file,utils/hpc,dist-install,,,HpcParser,y)
 	$(call sdist_file,utils/genprimopcode,dist,,,Lexer,x)
 	$(call sdist_file,utils/genprimopcode,dist,,,Parser,y)
 	$(call sdist_file,utils/haddock,dist,src,Haddock,Lex,x)
@@ -1201,20 +1134,9 @@ clean : clean_files clean_libraries
 clean_files :
 	"$(RM)" $(RM_OPTS) $(CLEAN_FILES)
 
-ifneq "$(NO_CLEAN_GMP)" "YES"
-CLEAN_FILES += libraries/integer-gmp/gmp/gmp.h
-CLEAN_FILES += libraries/integer-gmp/gmp/libgmp.a
-
-clean : clean_gmp
-.PHONY: clean_gmp
-clean_gmp:
-	"$(RM)" $(RM_OPTS_REC) libraries/integer-gmp/gmp/objs
-	"$(RM)" $(RM_OPTS_REC) libraries/integer-gmp/gmp/gmpbuild
-endif
-
 .PHONY: clean_libraries
 clean_libraries: $(patsubst %,clean_libraries/%_dist-install,$(PACKAGES) $(PACKAGES_STAGE2))
-clean_libraries: $(patsubst %,clean_libraries/%_dist-boot,$(STAGE0_PACKAGES))
+clean_libraries: $(patsubst %,clean_libraries/%_dist-boot,$(PACKAGES_STAGE0))
 
 clean_libraries:
 	"$(RM)" $(RM_OPTS_REC) $(patsubst %, libraries/%/dist, $(PACKAGES) $(PACKAGES_STAGE2))
@@ -1223,6 +1145,8 @@ clean_libraries:
 # We have to define a clean target for each library manually, because the
 # libraries/*/ghc.mk files are not included when we're cleaning.
 ifeq "$(CLEANING)" "YES"
+$(foreach lib,$(PACKAGES_STAGE0),\
+  $(eval $(call clean-target,libraries/$(lib),dist-boot,libraries/$(lib)/dist-boot)))
 $(foreach lib,$(PACKAGES) $(PACKAGES_STAGE2),\
   $(eval $(call clean-target,libraries/$(lib),dist-install,libraries/$(lib)/dist-install)))
 endif
@@ -1236,7 +1160,7 @@ distclean : clean
 	"$(RM)" $(RM_OPTS) config.cache config.status config.log mk/config.h mk/stamp-h
 	"$(RM)" $(RM_OPTS) mk/config.mk mk/are-validating.mk mk/project.mk
 	"$(RM)" $(RM_OPTS) mk/config.mk.old mk/project.mk.old
-	"$(RM)" $(RM_OPTS) extra-gcc-opts docs/users_guide/ug-book.xml
+	"$(RM)" $(RM_OPTS) settings docs/users_guide/ug-book.xml
 	"$(RM)" $(RM_OPTS) compiler/ghc.cabal compiler/ghc.cabal.old
 	"$(RM)" $(RM_OPTS) ghc/ghc-bin.cabal
 	"$(RM)" $(RM_OPTS) libraries/base/include/HsBaseConfig.h
@@ -1276,4 +1200,16 @@ bootstrapping-files: includes/DerivedConstants.h
 bootstrapping-files: includes/GHCConstants.h
 
 .DELETE_ON_ERROR:
+
+# -----------------------------------------------------------------------------
+# Numbered phase targets
+
+.PHONY: phase_0_builds
+phase_0_builds: $(utils/hsc2hs_dist_depfile_haskell)
+phase_0_builds: $(utils/hsc2hs_dist_depfile_c_asm)
+phase_0_builds: $(utils/genprimopcode_dist_depfile_haskell)
+phase_0_builds: $(utils/genprimopcode_dist_depfile_c_asm)
+
+.PHONY: phase_1_builds
+phase_1_builds: $(PACKAGE_DATA_MKS)
 

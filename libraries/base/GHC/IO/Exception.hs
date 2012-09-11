@@ -1,4 +1,6 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude -funbox-strict-fields #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE NoImplicitPrelude, DeriveDataTypeable, MagicHash #-}
+{-# OPTIONS_GHC -funbox-strict-fields #-}
 {-# OPTIONS_HADDOCK hide #-}
 -----------------------------------------------------------------------------
 -- |

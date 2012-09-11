@@ -46,21 +46,21 @@ import Data.Maybe	( isJust, isNothing )
 
 \begin{code}
 data Instance 
-  = Instance { is_cls  :: Name		-- Class name
-	
-		-- Used for "rough matching"; see Note [Rough-match field]
-		-- INVARIANT: is_tcs = roughMatchTcs is_tys
-	     , is_tcs  :: [Maybe Name]	-- Top of type args
+  = Instance { is_cls  :: Name  -- Class name
 
-		-- Used for "proper matching"; see Note [Proper-match fields]
-	     , is_tvs  :: TyVarSet	-- Template tyvars for full match
-	     , is_tys  :: [Type]	-- Full arg types
-		-- INVARIANT: is_dfun Id has type 
-		--	forall is_tvs. (...) => is_cls is_tys
+                -- Used for "rough matching"; see Note [Rough-match field]
+                -- INVARIANT: is_tcs = roughMatchTcs is_tys
+             , is_tcs  :: [Maybe Name]  -- Top of type args
 
-	     , is_dfun :: DFunId -- See Note [Haddock assumptions]
-	     , is_flag :: OverlapFlag	-- See detailed comments with
-					-- the decl of BasicTypes.OverlapFlag
+                -- Used for "proper matching"; see Note [Proper-match fields]
+             , is_tvs  :: TyVarSet      -- Template tyvars for full match
+             , is_tys  :: [Type]        -- Full arg types
+                -- INVARIANT: is_dfun Id has type 
+                --      forall is_tvs. (...) => is_cls is_tys
+
+             , is_dfun :: DFunId -- See Note [Haddock assumptions]
+             , is_flag :: OverlapFlag   -- See detailed comments with
+                                        -- the decl of BasicTypes.OverlapFlag
     }
 \end{code}
 
@@ -119,7 +119,7 @@ instanceDFunId = is_dfun
 
 setInstanceDFunId :: Instance -> DFunId -> Instance
 setInstanceDFunId ispec dfun
-   = ASSERT( idType dfun `tcEqType` idType (is_dfun ispec) )
+   = ASSERT( idType dfun `eqType` idType (is_dfun ispec) )
 	-- We need to create the cached fields afresh from
 	-- the new dfun id.  In particular, the is_tvs in
 	-- the Instance must match those in the dfun!
@@ -128,7 +128,7 @@ setInstanceDFunId ispec dfun
 	-- are ok; hence the assert
      ispec { is_dfun = dfun, is_tvs = mkVarSet tvs, is_tys = tys }
    where 
-     (tvs, _, tys) = tcSplitDFunTy (idType dfun)
+     (tvs, _, _, tys) = tcSplitDFunTy (idType dfun)
 
 instanceRoughTcs :: Instance -> [Maybe Name]
 instanceRoughTcs = is_tcs
@@ -151,12 +151,8 @@ pprInstance ispec
 pprInstanceHdr :: Instance -> SDoc
 -- Prints the Instance as an instance declaration
 pprInstanceHdr ispec@(Instance { is_flag = flag })
-  = getPprStyle $ \ sty ->
-    let theta_to_print
-          | debugStyle sty = theta
-          | otherwise = drop (dfunNSilent dfun) theta
-    in ptext (sLit "instance") <+> ppr flag
-       <+> sep [pprThetaArrow theta_to_print, ppr res_ty]
+  = ptext (sLit "instance") <+> ppr flag
+       <+> sep [pprThetaArrowTy theta, ppr res_ty]
   where
     dfun = is_dfun ispec
     (_, theta, res_ty) = tcSplitSigmaTy (idType dfun)
@@ -166,14 +162,11 @@ pprInstances :: [Instance] -> SDoc
 pprInstances ispecs = vcat (map pprInstance ispecs)
 
 instanceHead :: Instance -> ([TyVar], ThetaType, Class, [Type])
--- Returns the *source* theta, without the silent arguments
-instanceHead ispec
-   = (tvs, drop n_silent theta, cls, tys)
+instanceHead ispec = (tvs, theta, cls, tys)
    where
      (tvs, theta, tau) = tcSplitSigmaTy (idType dfun)
      (cls, tys)        = tcSplitDFunHead tau
      dfun              = is_dfun ispec
-     n_silent          = dfunNSilent dfun
 
 mkLocalInstance :: DFunId
                 -> OverlapFlag
@@ -184,7 +177,7 @@ mkLocalInstance dfun oflag
 		is_tvs = mkVarSet tvs, is_tys = tys,
                 is_cls = className cls, is_tcs = roughMatchTcs tys }
   where
-    (tvs, cls, tys) = tcSplitDFunTy (idType dfun)
+    (tvs, _, cls, tys) = tcSplitDFunTy (idType dfun)
 
 mkImportedInstance :: Name -> [Maybe Name]
 		   -> DFunId -> OverlapFlag -> Instance
@@ -195,7 +188,7 @@ mkImportedInstance cls mb_tcs dfun oflag
 		is_tvs = mkVarSet tvs, is_tys = tys,
 		is_cls = cls, is_tcs = mb_tcs }
   where
-    (tvs, _, tys) = tcSplitDFunTy (idType dfun)
+    (tvs, _, _, tys) = tcSplitDFunTy (idType dfun)
 
 roughMatchTcs :: [Type] -> [Maybe Name]
 roughMatchTcs tys = map rough tys
@@ -357,14 +350,11 @@ or, to put it another way, we have
 ---------------------------------------------------
 type InstEnv = UniqFM ClsInstEnv	-- Maps Class to instances for that class
 
-data ClsInstEnv 
+newtype ClsInstEnv 
   = ClsIE [Instance]	-- The instances for a particular class, in any order
-  	  Bool 		-- True <=> there is an instance of form C a b c
-			-- 	If *not* then the common case of looking up
-			--	(C a b c) can fail immediately
 
 instance Outputable ClsInstEnv where
-  ppr (ClsIE is b) = ptext (sLit "ClsIE") <+> ppr b <+> pprInstances is
+  ppr (ClsIE is) = pprInstances is
 
 -- INVARIANTS:
 --  * The is_tvs are distinct in each Instance
@@ -379,26 +369,24 @@ emptyInstEnv :: InstEnv
 emptyInstEnv = emptyUFM
 
 instEnvElts :: InstEnv -> [Instance]
-instEnvElts ie = [elt | ClsIE elts _ <- eltsUFM ie, elt <- elts]
+instEnvElts ie = [elt | ClsIE elts <- eltsUFM ie, elt <- elts]
 
 classInstances :: (InstEnv,InstEnv) -> Class -> [Instance]
 classInstances (pkg_ie, home_ie) cls 
   = get home_ie ++ get pkg_ie
   where
     get env = case lookupUFM env cls of
-		Just (ClsIE insts _) -> insts
-		Nothing		     -> []
+		Just (ClsIE insts) -> insts
+		Nothing		   -> []
 
 extendInstEnvList :: InstEnv -> [Instance] -> InstEnv
 extendInstEnvList inst_env ispecs = foldl extendInstEnv inst_env ispecs
 
 extendInstEnv :: InstEnv -> Instance -> InstEnv
-extendInstEnv inst_env ins_item@(Instance { is_cls = cls_nm, is_tcs = mb_tcs })
-  = addToUFM_C add inst_env cls_nm (ClsIE [ins_item] ins_tyvar)
+extendInstEnv inst_env ins_item@(Instance { is_cls = cls_nm })
+  = addToUFM_C add inst_env cls_nm (ClsIE [ins_item])
   where
-    add (ClsIE cur_insts cur_tyvar) _ = ClsIE (ins_item : cur_insts)
-					      (ins_tyvar || cur_tyvar)
-    ins_tyvar = not (any isJust mb_tcs)
+    add (ClsIE cur_insts) _ = ClsIE (ins_item : cur_insts)
 \end{code}
 
 
@@ -437,7 +425,9 @@ where the Nothing indicates that 'b' can be freely instantiated.
 lookupInstEnv :: (InstEnv, InstEnv) 	-- External and home package inst-env
 	      -> Class -> [Type]	-- What we are looking for
 	      -> ([InstMatch], 		-- Successful matches
-		  [Instance])		-- These don't match but do unify
+		  [Instance],		-- These don't match but do unify
+                  Bool)                 -- True if error condition caused by
+                                        -- Safe Haskell condition.
 
 -- The second component of the result pair happens when we look up
 --	Foo [a]
@@ -447,10 +437,10 @@ lookupInstEnv :: (InstEnv, InstEnv) 	-- External and home package inst-env
 -- Then which we choose would depend on the way in which 'a'
 -- is instantiated.  So we report that Foo [b] is a match (mapping b->a)
 -- but Foo [Int] is a unifier.  This gives the caller a better chance of
--- giving a suitable error messagen
+-- giving a suitable error message
 
 lookupInstEnv (pkg_ie, home_ie) cls tys
-  = (pruned_matches, all_unifs)
+  = (safe_matches, all_unifs, safe_fail)
   where
     rough_tcs  = roughMatchTcs tys
     all_tvs    = all isNothing rough_tcs
@@ -459,30 +449,49 @@ lookupInstEnv (pkg_ie, home_ie) cls tys
     all_matches = home_matches ++ pkg_matches
     all_unifs   = home_unifs   ++ pkg_unifs
     pruned_matches = foldr insert_overlapping [] all_matches
+    (safe_matches, safe_fail) = if length pruned_matches == 1 
+                        then check_safe (head pruned_matches) all_matches
+                        else (pruned_matches, False)
 	-- Even if the unifs is non-empty (an error situation)
 	-- we still prune the matches, so that the error message isn't
 	-- misleading (complaining of multiple matches when some should be
 	-- overlapped away)
 
+    -- Safe Haskell: We restrict code compiled in 'Safe' mode from 
+    -- overriding code compiled in any other mode. The rational is
+    -- that code compiled in 'Safe' mode is code that is untrusted
+    -- by the ghc user. So we shouldn't let that code change the
+    -- behaviour of code the user didn't compile in 'Safe' mode
+    -- since thats the code they trust. So 'Safe' instances can only
+    -- overlap instances from the same module. A same instance origin
+    -- policy for safe compiled instances.
+    check_safe match@(inst,_) others
+        = case isSafeOverlap (is_flag inst) of
+                -- most specific isn't from a Safe module so OK
+                False -> ([match], False)
+                -- otherwise we make sure it only overlaps instances from
+                -- the same module
+                True -> (go [] others, True)
+        where
+            go bad [] = match:bad
+            go bad (i@(x,_):unchecked) =
+                if inSameMod x
+                    then go bad unchecked
+                    else go (i:bad) unchecked
+            
+            inSameMod b =
+                let na = getName $ getName inst
+                    la = isInternalName na
+                    nb = getName $ getName b
+                    lb = isInternalName nb
+                in (la && lb) || (nameModule na == nameModule nb)
+
     --------------
     lookup env = case lookupUFM env cls of
 		   Nothing -> ([],[])	-- No instances for this class
-		   Just (ClsIE insts has_tv_insts)
-			| all_tvs && not has_tv_insts
-			-> ([],[])	-- Short cut for common case
-			-- The thing we are looking up is of form (C a b c), and
-			-- the ClsIE has no instances of that form, so don't bother to search
-	
-			| otherwise
-			-> find [] [] insts
+		   Just (ClsIE insts) -> find [] [] insts
 
     --------------
-    lookup_tv :: TvSubst -> TyVar -> Either TyVar Type	
-	-- See Note [InstTypes: instantiating types]
-    lookup_tv subst tv = case lookupTyVar subst tv of
-				Just ty -> Right ty
-				Nothing -> Left tv
-
     find ms us [] = (ms, us)
     find ms us (item@(Instance { is_tcs = mb_tcs, is_tvs = tpl_tvs, 
 				 is_tys = tpl_tys, is_flag = oflag,
@@ -499,8 +508,8 @@ lookupInstEnv (pkg_ie, home_ie) cls tys
  	find ((item, map (lookup_tv subst) dfun_tvs) : ms) us rest
 
 	-- Does not match, so next check whether the things unify
-	-- See Note [overlapping instances] above
-      | Incoherent <- oflag
+	-- See Note [Overlapping instances] above
+      | Incoherent _ <- oflag
       = find ms us rest
 
       | otherwise
@@ -513,6 +522,13 @@ lookupInstEnv (pkg_ie, home_ie) cls tys
         case tcUnifyTys instanceBindFun tpl_tys tys of
 	    Just _   -> find ms (item:us) rest
 	    Nothing  -> find ms us	  rest
+
+    ----------------
+    lookup_tv :: TvSubst -> TyVar -> Either TyVar Type	
+	-- See Note [InstTypes: instantiating types]
+    lookup_tv subst tv = case lookupTyVar subst tv of
+				Just ty -> Right ty
+				Nothing -> Left tv
 
 ---------------
 ---------------
@@ -533,14 +549,18 @@ insert_overlapping new_item (item:items)
     old_beats_new = item `beats` new_item
 
     (instA, _) `beats` (instB, _)
-	= overlap_ok && 
-	  isJust (tcMatchTys (is_tvs instB) (is_tys instB) (is_tys instA))
-		-- A beats B if A is more specific than B, and B admits overlap
-		-- I.e. if B can be instantiated to match A
-	where
-	  overlap_ok = case is_flag instB of
-			NoOverlap -> False
-			_         -> True
+          = overlap_ok && 
+            isJust (tcMatchTys (is_tvs instB) (is_tys instB) (is_tys instA))
+                    -- A beats B if A is more specific than B,
+                    -- (ie. if B can be instantiated to match A)
+                    -- and overlap is permitted
+          where
+            -- Overlap permitted if *either* instance permits overlap
+            -- This is a change (Trac #3877, Dec 10). It used to
+            -- require that instB (the less specific one) permitted overlap.
+            overlap_ok = case (is_flag instA, is_flag instB) of
+                              (NoOverlap _, NoOverlap _) -> False
+                              _                          -> True
 \end{code}
 
 

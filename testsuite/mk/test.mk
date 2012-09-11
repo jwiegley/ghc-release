@@ -1,29 +1,33 @@
 # -----------------------------------------------------------------------------
 # Examples of use:
 #
-# 	make		-- run all the tests in the current directory
-# 	make verbose	-- as make test, but up the verbosity
-# 	make accept	-- run the tests, accepting the current output
+#  make           -- run all the tests in the current directory
+#  make verbose   -- as make test, but up the verbosity
+#  make accept    -- run the tests, accepting the current output
 #
 # The following variables may be set on the make command line:
 #
-#	TEST		-- specific test to run
-#	TESTS		-- specific tests to run (same as $TEST really)
-#	EXTRA_HC_OPTS	-- extra flags to send to the Haskell compiler
-#	EXTRA_RUNTEST_OPTS -- extra flags to give the test driver
-#	CONFIG		-- use a different configuration file
-#	COMPILER	-- select a configuration file from config/
-#       THREADS         -- run n tests at once
+#  TEST      -- specific test to run
+#  TESTS     -- specific tests to run (same as $TEST really)
+#  EXTRA_HC_OPTS      -- extra flags to send to the Haskell compiler
+#  EXTRA_RUNTEST_OPTS -- extra flags to give the test driver
+#  CONFIG    -- use a different configuration file
+#  COMPILER  -- select a configuration file from config/
+#  THREADS   -- run n tests at once
 #
 # -----------------------------------------------------------------------------
 
-# export the value of $MAKE for invocation in ghc-regress/driver/
+# export the value of $MAKE for invocation in tests/driver/
 export MAKE
 
 RUNTESTS     = $(TOP)/driver/runtests.py
 COMPILER     = ghc
 CONFIGDIR    = $(TOP)/config
 CONFIG       = $(CONFIGDIR)/$(COMPILER)
+
+# TEST_HC_OPTS is passed to every invocation of TEST_HC 
+# in nested Makefiles
+TEST_HC_OPTS = -dno-debug-output $(EXTRA_HC_OPTS)
 
 RUNTEST_OPTS =
 
@@ -65,11 +69,14 @@ else
 RUNTEST_OPTS += -e ghc_with_dynamic_rts=0
 endif
 
+$(eval $(call get-ghc-field,GhcStage,Stage))
 $(eval $(call get-ghc-feature-bool,GhcWithInterpreter,Have interpreter))
-ifeq "$(GhcWithInterpreter)" "YES"
-RUNTEST_OPTS += -e ghc_with_interpreter=1
-else
+ifeq "$(GhcWithInterpreter)" "NO"
 RUNTEST_OPTS += -e ghc_with_interpreter=0
+else ifeq "$(GhcStage)" "1"
+RUNTEST_OPTS += -e ghc_with_interpreter=0
+else
+RUNTEST_OPTS += -e ghc_with_interpreter=1
 endif
 
 $(eval $(call get-ghc-feature-bool,GhcUnregisterised,Unregisterised))

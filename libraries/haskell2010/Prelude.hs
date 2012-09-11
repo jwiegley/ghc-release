@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude -XBangPatterns #-}
+{-# LANGUAGE NoImplicitPrelude, BangPatterns #-}
 -- |
 -- The Haskell 2010 Prelude: a standard module imported by default
 -- into all Haskell modules.  For more documentation, see the Haskell 2010
@@ -133,10 +133,11 @@ module Prelude (
   ) where
 
 #ifndef __HUGS__
+import qualified "base" Control.Exception.Base as New (catch)
 import "base" Control.Monad
 import "base" System.IO
-import "base" System.IO.Error
-import "base" Data.List
+import "base" System.IO.Error (IOError, ioError, userError)
+import "base" Data.List hiding ( splitAt )
 import "base" Data.Either
 import "base" Data.Maybe
 import "base" Data.Tuple
@@ -149,7 +150,8 @@ import GHC.Base
 import Text.Read
 import GHC.Enum
 import GHC.Num
-import GHC.Real
+import GHC.Real hiding ( gcd )
+import qualified GHC.Real ( gcd )
 import GHC.Float
 import GHC.Show
 import GHC.Err   ( undefined )
@@ -180,4 +182,58 @@ f $! x  = x `seq` f x
 -- avoiding unneeded laziness.
 seq :: a -> b -> b
 seq _ y = y
+#endif
+
+-- | The 'catch' function establishes a handler that receives any
+-- 'IOError' raised in the action protected by 'catch'.
+-- An 'IOError' is caught by
+-- the most recent handler established by one of the exception handling
+-- functions.  These handlers are
+-- not selective: all 'IOError's are caught.  Exception propagation
+-- must be explicitly provided in a handler by re-raising any unwanted
+-- exceptions.  For example, in
+--
+-- > f = catch g (\e -> if IO.isEOFError e then return [] else ioError e)
+--
+-- the function @f@ returns @[]@ when an end-of-file exception
+-- (cf. 'System.IO.Error.isEOFError') occurs in @g@; otherwise, the
+-- exception is propagated to the next outer handler.
+--
+-- When an exception propagates outside the main program, the Haskell
+-- system prints the associated 'IOError' value and exits the program.
+--
+-- Non-I\/O exceptions are not caught by this variant; to catch all
+-- exceptions, use 'Control.Exception.catch' from "Control.Exception".
+catch :: IO a -> (IOError -> IO a) -> IO a
+catch = New.catch
+
+#ifdef __GLASGOW_HASKELL__
+-- | @'gcd' x y@ is the greatest (positive) integer that divides both @x@
+-- and @y@; for example @'gcd' (-3) 6@ = @3@, @'gcd' (-3) (-6)@ = @3@,
+-- @'gcd' 0 4@ = @4@.  @'gcd' 0 0@ raises a runtime error.
+gcd             :: (Integral a) => a -> a -> a
+gcd 0 0         =  error "Prelude.gcd: gcd 0 0 is undefined"
+gcd x y         = GHC.Real.gcd x y
+#endif
+
+#ifndef __HUGS__
+-- The GHC's version of 'splitAt' is too strict in 'n' compared to
+-- Haskell98/2010 version. Ticket #1182.
+
+-- | 'splitAt' @n xs@ returns a tuple where first element is @xs@ prefix of
+-- length @n@ and second element is the remainder of the list:
+--
+-- > splitAt 6 "Hello World!" == ("Hello ","World!")
+-- > splitAt 3 [1,2,3,4,5] == ([1,2,3],[4,5])
+-- > splitAt 1 [1,2,3] == ([1],[2,3])
+-- > splitAt 3 [1,2,3] == ([1,2,3],[])
+-- > splitAt 4 [1,2,3] == ([1,2,3],[])
+-- > splitAt 0 [1,2,3] == ([],[1,2,3])
+-- > splitAt (-1) [1,2,3] == ([],[1,2,3])
+--
+-- It is equivalent to @('take' n xs, 'drop' n xs)@.
+-- 'splitAt' is an instance of the more general 'Data.List.genericSplitAt',
+-- in which @n@ may be of any integral type.
+splitAt                :: Int -> [a] -> ([a],[a])
+splitAt n xs           =  (take n xs, drop n xs)
 #endif

@@ -44,7 +44,6 @@ import TyCon
 import Class
 import Name
 import NameSet
-import PrelNames
 import TysWiredIn
 import BasicTypes
 import SrcLoc
@@ -300,7 +299,7 @@ kc_check_hs_type (HsParTy ty) exp_kind
   = do { ty' <- kc_check_lhs_type ty exp_kind; return (HsParTy ty') }
 
 kc_check_hs_type ty@(HsAppTy ty1 ty2) exp_kind
-  = do { let (fun_ty, arg_tys) = splitHsAppTys ty1 ty2
+  = do { let (fun_ty, arg_tys) = splitHsAppTys ty1 [ty2]
        ; (fun_ty', fun_kind) <- kc_lhs_type fun_ty
        ; arg_tys' <- kcCheckApps fun_ty fun_kind arg_tys ty exp_kind
        ; return (mkHsAppTys fun_ty' arg_tys') }
@@ -365,9 +364,6 @@ kc_hs_type (HsPArrTy ty) = do
     ty' <- kcLiftedType ty
     return (HsPArrTy ty', liftedTypeKind)
 
-kc_hs_type (HsNumTy n)
-   = return (HsNumTy n, liftedTypeKind)
-
 kc_hs_type (HsKindSig ty k) = do
     ty' <- kc_check_lhs_type ty (EK k EkKindSig)
     return (HsKindSig ty' k, k)
@@ -391,11 +387,10 @@ kc_hs_type (HsOpTy ty1 op ty2) = do
     return (HsOpTy ty1' op ty2', res_kind)
 
 kc_hs_type (HsAppTy ty1 ty2) = do
+    let (fun_ty, arg_tys) = splitHsAppTys ty1 [ty2]
     (fun_ty', fun_kind) <- kc_lhs_type fun_ty
     (arg_tys', res_kind) <- kcApps fun_ty fun_kind arg_tys
     return (mkHsAppTys fun_ty' arg_tys', res_kind)
-  where
-    (fun_ty, arg_tys) = splitHsAppTys ty1 ty2
 
 kc_hs_type (HsPredTy pred)
   = wrongPredErr pred
@@ -462,20 +457,6 @@ kcCheckApps the_fun fun_kind args ty exp_kind
 	     -- This improves error message; Trac #2994
        ; kc_check_lhs_types args_w_kinds }
 
-splitHsAppTys :: LHsType Name -> LHsType Name -> (LHsType Name, [LHsType Name])
-splitHsAppTys fun_ty arg_ty = split fun_ty [arg_ty]
-  where
-    split (L _ (HsAppTy f a)) as = split f (a:as)
-    split f       	      as = (f,as)
-
-mkHsAppTys :: LHsType Name -> [LHsType Name] -> HsType Name
-mkHsAppTys fun_ty [] = pprPanic "mkHsAppTys" (ppr fun_ty)
-mkHsAppTys fun_ty (arg_ty:arg_tys)
-  = foldl mk_app (HsAppTy fun_ty arg_ty) arg_tys
-  where
-    mk_app fun arg = HsAppTy (noLoc fun) arg	-- Add noLocs for inner nodes of
-					 	-- the application; they are
-						-- never used 
 
 ---------------------------
 splitFunKind :: SDoc -> Int -> TcKind -> [b] -> TcM ([(b,ExpKind)], TcKind)
@@ -605,11 +586,6 @@ ds_type (HsOpTy ty1 (L span op) ty2) = do
     tau_ty1 <- dsHsType ty1
     tau_ty2 <- dsHsType ty2
     setSrcSpan span (ds_var_app op [tau_ty1,tau_ty2])
-
-ds_type (HsNumTy n)
-  = ASSERT(n==1) do
-    tc <- tcLookupTyCon genUnitTyConName
-    return (mkTyConApp tc [])
 
 ds_type ty@(HsAppTy _ _)
   = ds_app ty []
@@ -857,7 +833,7 @@ tcPatSig :: UserTypeCtxt
 		 [(Name, TcType)], -- The new bit of type environment, binding
 				   -- the scoped type variables
                  HsWrapper)        -- Coercion due to unification with actual ty
-		 		   -- Of shape:  res_ty ~ sig_ty
+                                   -- Of shape:  res_ty ~ sig_ty
 tcPatSig ctxt sig res_ty
   = do	{ (sig_tvs, sig_ty) <- tcHsPatSigType ctxt sig
     	-- sig_tvs are the type variables free in 'sig', 
@@ -869,8 +845,7 @@ tcPatSig ctxt sig res_ty
 		-- and hence is rigid, so use it to zap the res_ty
                   wrap <- tcSubType PatSigOrigin ctxt res_ty sig_ty
 		; return (sig_ty, [], wrap)
-
-	} else do {
+        } else do {
 		-- Type signature binds at least one scoped type variable
 	
 		-- A pattern binding cannot bind scoped type variables
@@ -893,20 +868,20 @@ tcPatSig ctxt sig res_ty
 	; checkTc (null bad_tvs) (badPatSigTvs sig_ty bad_tvs)
 
 	-- Now do a subsumption check of the pattern signature against res_ty
-	; sig_tvs' <- tcInstSigTyVars sig_tvs
+        ; sig_tvs' <- tcInstSigTyVars sig_tvs
         ; let sig_ty' = substTyWith sig_tvs sig_tv_tys' sig_ty
               sig_tv_tys' = mkTyVarTys sig_tvs'
-        ; wrap <- tcSubType PatSigOrigin ctxt res_ty sig_ty'
+	; wrap <- tcSubType PatSigOrigin ctxt res_ty sig_ty'
 
 	-- Check that each is bound to a distinct type variable,
 	-- and one that is not already in scope
-	; binds_in_scope <- getScopedTyVarBinds
+        ; binds_in_scope <- getScopedTyVarBinds
 	; let tv_binds = map tyVarName sig_tvs `zip` sig_tv_tys'
 	; check binds_in_scope tv_binds
 	
 	-- Phew!
-	; return (sig_ty', tv_binds, wrap)
-	} }
+        ; return (sig_ty', tv_binds, wrap)
+        } }
   where
     check _ [] = return ()
     check in_scope ((n,ty):rest) = do { check_one in_scope n ty
@@ -917,7 +892,7 @@ tcPatSig ctxt sig res_ty
 		-- Must not bind to the same type variable
 		-- as some other in-scope type variable
 	where
-	  dups = [n' | (n',ty') <- in_scope, tcEqType ty' ty]
+	  dups = [n' | (n',ty') <- in_scope, eqType ty' ty]
 \end{code}
 
 

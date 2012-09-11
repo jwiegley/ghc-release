@@ -1,5 +1,4 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE CPP, MagicHash #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.IntSet
@@ -37,9 +36,18 @@
 -- (32 or 64).
 -----------------------------------------------------------------------------
 
-module Data.IntSet  ( 
+-- It is essential that the bit fiddling functions like mask, zero, branchMask
+-- etc are inlined. If they do not, the memory allocation skyrockets. The GHC
+-- usually gets it right, but it is disastrous if it does not. Therefore we
+-- explicitly mark these functions INLINE.
+
+module Data.IntSet (
             -- * Set type
+#if !defined(TESTING)
               IntSet          -- instance Eq,Show
+#else
+              IntSet(..)      -- instance Eq,Show
+#endif
 
             -- * Operators
             , (\\)
@@ -51,26 +59,33 @@ module Data.IntSet  (
             , notMember
             , isSubsetOf
             , isProperSubsetOf
-            
+
             -- * Construction
             , empty
             , singleton
             , insert
             , delete
-            
+
             -- * Combine
-            , union, unions
+            , union
+            , unions
             , difference
             , intersection
-            
+
             -- * Filter
             , filter
             , partition
             , split
             , splitMember
 
+            -- * Map
+            , map
+
+            -- * Fold
+            , fold
+
             -- * Min\/Max
-            , findMin   
+            , findMin
             , findMax
             , deleteMin
             , deleteMax
@@ -79,26 +94,26 @@ module Data.IntSet  (
             , maxView
             , minView
 
-            -- * Map
-	    , map
-
-            -- * Fold
-            , fold
-
             -- * Conversion
+
             -- ** List
             , elems
             , toList
             , fromList
-            
+
             -- ** Ordered list
             , toAscList
             , fromAscList
             , fromDistinctAscList
-                        
+
             -- * Debugging
             , showTree
             , showTreeWith
+
+#if defined(TESTING)
+            -- * Internals
+            , match
+#endif
             ) where
 
 
@@ -109,14 +124,6 @@ import qualified Data.List as List
 import Data.Monoid (Monoid(..))
 import Data.Maybe (fromMaybe)
 import Data.Typeable
-
-{-
--- just for testing
-import Test.QuickCheck 
-import List (nub,sort)
-import qualified List
-import qualified Data.Set as Set
--}
 
 #if __GLASGOW_HASKELL__
 import Text.Read
@@ -139,9 +146,11 @@ type Nat = Word
 
 natFromInt :: Int -> Nat
 natFromInt i = fromIntegral i
+{-# INLINE natFromInt #-}
 
 intFromNat :: Nat -> Int
 intFromNat w = fromIntegral w
+{-# INLINE intFromNat #-}
 
 shiftRL :: Nat -> Int -> Nat
 #if __GLASGOW_HASKELL__
@@ -152,6 +161,7 @@ shiftRL (W# x) (I# i)
   = W# (shiftRL# x i)
 #else
 shiftRL x i   = shiftR x i
+{-# INLINE shiftRL #-}
 #endif
 
 {--------------------------------------------------------------------
@@ -218,36 +228,45 @@ size t
       Tip _ -> 1
       Nil   -> 0
 
+-- The 'go' function in the member and lookup causes 10% speedup, but also an
+-- increased memory allocation. It does not cause speedup with other methods
+-- like insert and delete, so it is present only in member and lookup.
+
+-- Also mind the 'nomatch' line in member definition, which is not present in
+-- lookup and not present in IntMap.hs. That condition stops the search if the
+-- prefix of current vertex is different that the element looked for. The
+-- member is correct both with and without this condition. With this condition,
+-- elements not present are rejected sooner, but a little bit more work is done
+-- for the elements in the set (we are talking about 3-5% slowdown). Any of
+-- the solutions is better than the other, because we do not know the
+-- distribution of input data. Current state is historic.
+
 -- | /O(min(n,W))/. Is the value a member of the set?
 member :: Int -> IntSet -> Bool
-member x t
-  = case t of
-      Bin p m l r 
-        | nomatch x p m -> False
-        | zero x m      -> member x l
-        | otherwise     -> member x r
-      Tip y -> (x==y)
-      Nil   -> False
-    
+member x = x `seq` go
+  where
+    go (Bin p m l r)
+      | nomatch x p m = False
+      | zero x m      = go l
+      | otherwise     = go r
+    go (Tip y) = x == y
+    go Nil = False
+
 -- | /O(min(n,W))/. Is the element not in the set?
 notMember :: Int -> IntSet -> Bool
 notMember k = not . member k
 
 -- 'lookup' is used by 'intersection' for left-biasing
 lookup :: Int -> IntSet -> Maybe Int
-lookup k t
-  = let nk = natFromInt k  in seq nk (lookupN nk t)
-
-lookupN :: Nat -> IntSet -> Maybe Int
-lookupN k t
-  = case t of
-      Bin _ m l r
-        | zeroN k (natFromInt m) -> lookupN k l
-        | otherwise              -> lookupN k r
-      Tip kx
-        | (k == natFromInt kx)  -> Just kx
-        | otherwise             -> Nothing
-      Nil -> Nothing
+lookup k = k `seq` go
+  where
+    go (Bin _ m l r)
+      | zero k m  = go l
+      | otherwise = go r
+    go (Tip kx)
+      | k == kx   = Just kx
+      | otherwise = Nothing
+    go Nil = Nothing
 
 {--------------------------------------------------------------------
   Construction
@@ -269,43 +288,43 @@ singleton x
 -- an element of the set, it is replaced by the new one, ie. 'insert'
 -- is left-biased.
 insert :: Int -> IntSet -> IntSet
-insert x t
-  = case t of
-      Bin p m l r 
-        | nomatch x p m -> join x (Tip x) p t
-        | zero x m      -> Bin p m (insert x l) r
-        | otherwise     -> Bin p m l (insert x r)
-      Tip y 
-        | x==y          -> Tip x
-        | otherwise     -> join x (Tip x) y t
-      Nil -> Tip x
+insert x t = x `seq`
+  case t of
+    Bin p m l r
+      | nomatch x p m -> join x (Tip x) p t
+      | zero x m      -> Bin p m (insert x l) r
+      | otherwise     -> Bin p m l (insert x r)
+    Tip y
+      | x==y          -> Tip x
+      | otherwise     -> join x (Tip x) y t
+    Nil -> Tip x
 
 -- right-biased insertion, used by 'union'
 insertR :: Int -> IntSet -> IntSet
-insertR x t
-  = case t of
-      Bin p m l r 
-        | nomatch x p m -> join x (Tip x) p t
-        | zero x m      -> Bin p m (insert x l) r
-        | otherwise     -> Bin p m l (insert x r)
-      Tip y 
-        | x==y          -> t
-        | otherwise     -> join x (Tip x) y t
-      Nil -> Tip x
+insertR x t = x `seq`
+  case t of
+    Bin p m l r
+      | nomatch x p m -> join x (Tip x) p t
+      | zero x m      -> Bin p m (insert x l) r
+      | otherwise     -> Bin p m l (insert x r)
+    Tip y
+      | x==y          -> t
+      | otherwise     -> join x (Tip x) y t
+    Nil -> Tip x
 
 -- | /O(min(n,W))/. Delete a value in the set. Returns the
 -- original set when the value was not present.
 delete :: Int -> IntSet -> IntSet
-delete x t
-  = case t of
-      Bin p m l r 
-        | nomatch x p m -> t
-        | zero x m      -> bin p m (delete x l) r
-        | otherwise     -> bin p m l (delete x r)
-      Tip y 
-        | x==y          -> Nil
-        | otherwise     -> t
-      Nil -> Nil
+delete x t = x `seq`
+  case t of
+    Bin p m l r
+      | nomatch x p m -> t
+      | zero x m      -> bin p m (delete x l) r
+      | otherwise     -> bin p m l (delete x r)
+    Tip y
+      | x==y          -> Nil
+      | otherwise     -> t
+    Nil -> Nil
 
 
 {--------------------------------------------------------------------
@@ -647,19 +666,16 @@ map f = fromList . List.map f . toList
 fold :: (Int -> b -> b) -> b -> IntSet -> b
 fold f z t
   = case t of
-      Bin 0 m l r | m < 0 -> foldr f (foldr f z l) r  
-      -- put negative numbers before.
-      Bin _ _ _ _ -> foldr f z t
+      Bin 0 m l r | m < 0 -> go (go z l) r  -- put negative numbers before.
+      Bin _ _ _ _ -> go z t
       Tip x       -> f x z
       Nil         -> z
+  where
+    go z' (Bin _ _ l r) = go (go z' r) l
+    go z' (Tip x)       = f x z'
+    go z' Nil           = z'
+{-# INLINE fold #-}
 
-foldr :: (Int -> b -> b) -> b -> IntSet -> b
-foldr f z t
-  = case t of
-      Bin _ _ l r -> foldr f (foldr f z r) l
-      Tip x       -> f x z
-      Nil         -> z
-          
 {--------------------------------------------------------------------
   List variations 
 --------------------------------------------------------------------}
@@ -880,6 +896,7 @@ join p1 t1 p2 t2
   where
     m = branchMask p1 p2
     p = mask p1 m
+{-# INLINE join #-}
 
 {--------------------------------------------------------------------
   @bin@ assures that we never have empty trees within a tree.
@@ -888,6 +905,7 @@ bin :: Prefix -> Mask -> IntSet -> IntSet -> IntSet
 bin _ _ l Nil = l
 bin _ _ Nil r = r
 bin p m l r   = Bin p m l r
+{-# INLINE bin #-}
 
   
 {--------------------------------------------------------------------
@@ -896,22 +914,23 @@ bin p m l r   = Bin p m l r
 zero :: Int -> Mask -> Bool
 zero i m
   = (natFromInt i) .&. (natFromInt m) == 0
+{-# INLINE zero #-}
 
 nomatch,match :: Int -> Prefix -> Mask -> Bool
 nomatch i p m
   = (mask i m) /= p
+{-# INLINE nomatch #-}
 
 match i p m
   = (mask i m) == p
+{-# INLINE match #-}
 
 -- Suppose a is largest such that 2^a divides 2*m.
 -- Then mask i m is i with the low a bits zeroed out.
 mask :: Int -> Mask -> Prefix
 mask i m
   = maskW (natFromInt i) (natFromInt m)
-
-zeroN :: Nat -> Nat -> Bool
-zeroN i m = (i .&. m) == 0
+{-# INLINE mask #-}
 
 {--------------------------------------------------------------------
   Big endian operations  
@@ -919,15 +938,18 @@ zeroN i m = (i .&. m) == 0
 maskW :: Nat -> Nat -> Prefix
 maskW i m
   = intFromNat (i .&. (complement (m-1) `xor` m))
+{-# INLINE maskW #-}
 
 shorter :: Mask -> Mask -> Bool
 shorter m1 m2
   = (natFromInt m1) > (natFromInt m2)
+{-# INLINE shorter #-}
 
 branchMask :: Prefix -> Prefix -> Mask
 branchMask p1 p2
   = intFromNat (highestBitMask (natFromInt p1 `xor` natFromInt p2))
-  
+{-# INLINE branchMask #-}
+
 {----------------------------------------------------------------------
   Finding the highest bit (mask) in a word [x] can be done efficiently in
   three ways:
@@ -979,136 +1001,15 @@ highestBitMask x0
         x4 -> case (x4 .|. shiftRL x4 16) of
          x5 -> case (x5 .|. shiftRL x5 32) of   -- for 64 bit platforms
           x6 -> (x6 `xor` (shiftRL x6 1))
+{-# INLINE highestBitMask #-}
 
 
 {--------------------------------------------------------------------
   Utilities 
 --------------------------------------------------------------------}
 foldlStrict :: (a -> b -> a) -> a -> [b] -> a
-foldlStrict f z xs
-  = case xs of
-      []     -> z
-      (x:xx) -> let z' = f z x in seq z' (foldlStrict f z' xx)
-
-
-{-
-{--------------------------------------------------------------------
-  Testing
---------------------------------------------------------------------}
-testTree :: [Int] -> IntSet
-testTree xs   = fromList xs
-test1 = testTree [1..20]
-test2 = testTree [30,29..10]
-test3 = testTree [1,4,6,89,2323,53,43,234,5,79,12,9,24,9,8,423,8,42,4,8,9,3]
-
-{--------------------------------------------------------------------
-  QuickCheck
---------------------------------------------------------------------}
-qcheck prop
-  = check config prop
+foldlStrict f = go
   where
-    config = Config
-      { configMaxTest = 500
-      , configMaxFail = 5000
-      , configSize    = \n -> (div n 2 + 3)
-      , configEvery   = \n args -> let s = show n in s ++ [ '\b' | _ <- s ]
-      }
-
-
-{--------------------------------------------------------------------
-  Arbitrary, reasonably balanced trees
---------------------------------------------------------------------}
-instance Arbitrary IntSet where
-  arbitrary = do{ xs <- arbitrary
-                ; return (fromList xs)
-                }
-
-
-{--------------------------------------------------------------------
-  Single, Insert, Delete
---------------------------------------------------------------------}
-prop_Single :: Int -> Bool
-prop_Single x
-  = (insert x empty == singleton x)
-
-prop_InsertDelete :: Int -> IntSet -> Property
-prop_InsertDelete k t
-  = not (member k t) ==> delete k (insert k t) == t
-
-
-{--------------------------------------------------------------------
-  Union
---------------------------------------------------------------------}
-prop_UnionInsert :: Int -> IntSet -> Bool
-prop_UnionInsert x t
-  = union t (singleton x) == insert x t
-
-prop_UnionAssoc :: IntSet -> IntSet -> IntSet -> Bool
-prop_UnionAssoc t1 t2 t3
-  = union t1 (union t2 t3) == union (union t1 t2) t3
-
-prop_UnionComm :: IntSet -> IntSet -> Bool
-prop_UnionComm t1 t2
-  = (union t1 t2 == union t2 t1)
-
-prop_Diff :: [Int] -> [Int] -> Bool
-prop_Diff xs ys
-  =  toAscList (difference (fromList xs) (fromList ys))
-    == List.sort ((List.\\) (nub xs)  (nub ys))
-
-prop_Int :: [Int] -> [Int] -> Bool
-prop_Int xs ys
-  =  toAscList (intersection (fromList xs) (fromList ys))
-    == List.sort (nub ((List.intersect) (xs)  (ys)))
-
-{--------------------------------------------------------------------
-  Lists
---------------------------------------------------------------------}
-prop_Ordered
-  = forAll (choose (5,100)) $ \n ->
-    let xs = concat [[i-n,i-n]|i<-[0..2*n :: Int]]
-    in fromAscList xs == fromList xs
-
-prop_List :: [Int] -> Bool
-prop_List xs
-  = (sort (nub xs) == toAscList (fromList xs))
-
-{--------------------------------------------------------------------
-  Bin invariants
---------------------------------------------------------------------}
-powersOf2 :: IntSet
-powersOf2 = fromList [2^i | i <- [0..63]]
-
--- Check the invariant that the mask is a power of 2.
-prop_MaskPow2 :: IntSet -> Bool
-prop_MaskPow2 (Bin _ msk left right) = member msk powersOf2 && prop_MaskPow2 left && prop_MaskPow2 right
-prop_MaskPow2 _ = True
-
--- Check that the prefix satisfies its invariant.
-prop_Prefix :: IntSet -> Bool
-prop_Prefix s@(Bin prefix msk left right) = all (\elem -> match elem prefix msk) (toList s) && prop_Prefix left && prop_Prefix right
-prop_Prefix _ = True
-
--- Check that the left elements don't have the mask bit set, and the right
--- ones do.
-prop_LeftRight :: IntSet -> Bool
-prop_LeftRight (Bin _ msk left right) = and [x .&. msk == 0 | x <- toList left] && and [x .&. msk == msk | x <- toList right]
-prop_LeftRight _ = True
-
-{--------------------------------------------------------------------
-  IntSet operations are like Set operations
---------------------------------------------------------------------}
-toSet :: IntSet -> Set.Set Int
-toSet = Set.fromList . toList
-
--- Check that IntSet.isProperSubsetOf is the same as Set.isProperSubsetOf.
-prop_isProperSubsetOf :: IntSet -> IntSet -> Bool
-prop_isProperSubsetOf a b = isProperSubsetOf a b == Set.isProperSubsetOf (toSet a) (toSet b)
-
--- In the above test, isProperSubsetOf almost always returns False (since a
--- random set is almost never a subset of another random set).  So this second
--- test checks the True case.
-prop_isProperSubsetOf2 :: IntSet -> IntSet -> Bool
-prop_isProperSubsetOf2 a b = isProperSubsetOf a c == (a /= c) where
-  c = union a b
--}
+    go z []     = z
+    go z (x:xs) = let z' = f z x in z' `seq` go z' xs
+{-# INLINE foldlStrict #-}

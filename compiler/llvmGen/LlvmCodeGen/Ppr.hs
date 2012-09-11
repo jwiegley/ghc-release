@@ -13,7 +13,7 @@ import LlvmCodeGen.Base
 import LlvmCodeGen.Data
 
 import CLabel
-import Cmm
+import OldCmm
 
 import FastString
 import qualified Outputable
@@ -82,16 +82,16 @@ pprLlvmCmmTop :: LlvmEnv -> Int -> LlvmCmmTop -> (Doc, [LlvmVar])
 pprLlvmCmmTop _ _ (CmmData _ lmdata)
   = (vcat $ map pprLlvmData lmdata, [])
 
-pprLlvmCmmTop env count (CmmProc info lbl _ (ListGraph blks))
-  = let static = CmmDataLabel lbl : info
-        (idoc, ivar) = if not (null info)
-                          then pprInfoTable env count lbl static
-                          else (empty, [])
+pprLlvmCmmTop env count (CmmProc mb_info entry_lbl (ListGraph blks))
+  = let (idoc, ivar) = case mb_info of
+                        Nothing -> (empty, [])
+                        Just (Statics info_lbl dat)
+                         -> pprInfoTable env count info_lbl (Statics entry_lbl dat)
     in (idoc $+$ (
         let sec = mkLayoutSection (count + 1)
-            (lbl',sec') = if not (null info)
-                            then (entryLblToInfoLbl lbl, sec)
-                            else (lbl, Nothing)
+            (lbl',sec') = case mb_info of
+                           Nothing                   -> (entry_lbl, Nothing)
+                           Just (Statics info_lbl _) -> (info_lbl,  sec)
             link = if externallyVisibleCLabel lbl'
                       then ExternallyVisible
                       else Internal
@@ -103,14 +103,14 @@ pprLlvmCmmTop env count (CmmProc info lbl _ (ListGraph blks))
 
 
 -- | Pretty print CmmStatic
-pprInfoTable :: LlvmEnv -> Int -> CLabel -> [CmmStatic] -> (Doc, [LlvmVar])
-pprInfoTable env count lbl stat
+pprInfoTable :: LlvmEnv -> Int -> CLabel -> CmmStatics -> (Doc, [LlvmVar])
+pprInfoTable env count info_lbl stat
   = let unres = genLlvmData (Text, stat)
         (_, (ldata, ltypes)) = resolveLlvmData env unres
 
         setSection ((LMGlobalVar _ ty l _ _ c), d)
             = let sec = mkLayoutSection count
-                  ilabel = strCLabel_llvm (entryLblToInfoLbl lbl)
+                  ilabel = strCLabel_llvm info_lbl
                               `appendFS` fsLit iTableSuf
                   gv = LMGlobalVar ilabel ty l sec llvmInfAlign c
                   v = if l == Internal then [gv] else []
@@ -122,34 +122,25 @@ pprInfoTable env count lbl stat
           then Outputable.panic "LlvmCodeGen.Ppr: invalid info table!"
           else (pprLlvmData ([ldata'], ltypes), llvmUsed)
 
+
 -- | We generate labels for info tables by converting them to the same label
 -- as for the entry code but adding this string as a suffix.
 iTableSuf :: String
 iTableSuf = "_itable"
 
 
--- | Create an appropriate section declaration for subsection <n> of text
--- WARNING: This technique could fail as gas documentation says it only
--- supports up to 8192 subsections per section. Inspection of the source
--- code and some test programs seem to suggest it supports more than this
--- so we are hoping it does.
+-- | Create a specially crafted section declaration that encodes the order this
+-- section should be in the final object code.
+-- 
+-- The LlvmMangler.llvmFixupAsm pass over the assembly produced by LLVM uses
+-- this section declaration to do its processing.
 mkLayoutSection :: Int -> LMSection
 mkLayoutSection n
-  -- On OSX we can't use the GNU Assembler, we must use the OSX assembler, which
-  -- doesn't support subsections. So we post process the assembly code, this
-  -- section specifier will be replaced with '.text' by the mangler.
-  = Just (fsLit $ infoSection ++ show n
-#if darwin_TARGET_OS
-      )
-#else
-      ++ "#")
-#endif
+  = Just (fsLit $ infoSection ++ show n)
 
--- | The section we are putting info tables and their entry code into
+
+-- | The section we are putting info tables and their entry code into, should
+-- be unique since we process the assembly pattern matching this.
 infoSection :: String
-#if darwin_TARGET_OS
-infoSection = "__STRIP,__me"
-#else
-infoSection = ".text; .text "
-#endif
+infoSection = "X98A__STRIP,__me"
 

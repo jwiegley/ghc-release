@@ -23,7 +23,7 @@
 -- * 'Var.Var': see "Var#name_types"
 module Id (
         -- * The main types
-	Id, DictId,
+	Var, Id, isId,
 
 	-- ** Simple construction
 	mkGlobalId, mkVanillaGlobal, mkVanillaGlobalWithInfo,
@@ -34,8 +34,7 @@ module Id (
 
 	-- ** Taking an Id apart
 	idName, idType, idUnique, idInfo, idDetails,
-	isId, idPrimRep,
-	recordSelectorFieldLabel,
+	idPrimRep, recordSelectorFieldLabel,
 
 	-- ** Modifying an Id
 	setIdName, setIdUnique, Id.setIdType, 
@@ -46,16 +45,20 @@ module Id (
 	
 
 	-- ** Predicates on Ids
-	isImplicitId, isDeadBinder, isDictId, isStrictId,
+	isImplicitId, isDeadBinder, 
+        isStrictId,
 	isExportedId, isLocalId, isGlobalId,
 	isRecordSelector, isNaughtyRecordSelector,
-        isClassOpId_maybe, isDFunId, dfunNSilent,
+        isClassOpId_maybe, isDFunId, 
 	isPrimOpId, isPrimOpId_maybe, 
 	isFCallId, isFCallId_maybe,
 	isDataConWorkId, isDataConWorkId_maybe, isDataConId_maybe, idDataCon,
         isConLikeId, isBottomingId, idIsFrom,
         isTickBoxOp, isTickBoxOp_maybe,
 	hasNoBinding, 
+
+	-- ** Evidence variables
+	DictId, isDictId, isEvVar, evVarPred,
 
 	-- ** Inline pragma stuff
 	idInlinePragma, setInlinePragma, modifyInlinePragma,
@@ -95,8 +98,8 @@ import IdInfo
 import BasicTypes
 
 -- Imported and re-exported 
-import Var( Var, Id, DictId,
-            idInfo, idDetails, globaliseId,
+import Var( Var, Id, DictId, EvVar,
+            idInfo, idDetails, globaliseId, varType,
             isId, isLocalId, isGlobalId, isExportedId )
 import qualified Var
 
@@ -335,11 +338,6 @@ isDFunId id = case Var.idDetails id of
                         DFunId {} -> True
                         _         -> False
 
-dfunNSilent :: Id -> Int
-dfunNSilent id = case Var.idDetails id of
-                   DFunId ns _ -> ns
-                   _ -> pprTrace "dfunSilent: not a dfun:" (ppr id) 0
-
 isPrimOpId_maybe id = case Var.idDetails id of
                         PrimOpId op -> Just op
                         _           -> Nothing
@@ -371,10 +369,6 @@ idDataCon :: Id -> DataCon
 --
 -- INVARIANT: @idDataCon (dataConWrapId d) = d@: remember, 'dataConWrapId' can return either the wrapper or the worker
 idDataCon id = isDataConId_maybe id `orElse` pprPanic "idDataCon" (ppr id)
-
-
-isDictId :: Id -> Bool
-isDictId id = isDictTy (idType id)
 
 hasNoBinding :: Id -> Bool
 -- ^ Returns @True@ of an 'Id' which may not have a
@@ -448,6 +442,26 @@ isTickBoxOp_maybe id =
 
 %************************************************************************
 %*									*
+              Evidence variables									
+%*									*
+%************************************************************************
+
+\begin{code}
+isEvVar :: Var -> Bool
+isEvVar var = isPredTy (varType var)
+
+isDictId :: Id -> Bool
+isDictId id = isDictTy (idType id)
+
+evVarPred :: EvVar -> PredType
+evVarPred var
+  = case splitPredTy_maybe (varType var) of
+      Just pred -> pred
+      Nothing   -> pprPanic "evVarPred" (ppr var <+> ppr (varType var))
+\end{code}
+
+%************************************************************************
+%*									*
 \subsection{IdInfo stuff}
 %*									*
 %************************************************************************
@@ -494,8 +508,8 @@ isStrictId id
 idUnfolding :: Id -> Unfolding
 -- Do not expose the unfolding of a loop breaker!
 idUnfolding id 
-  | isNonRuleLoopBreaker (occInfo info) = NoUnfolding
-  | otherwise                           = unfoldingInfo info
+  | isStrongLoopBreaker (occInfo info) = NoUnfolding
+  | otherwise                          = unfoldingInfo info
   where
     info = idInfo id
 

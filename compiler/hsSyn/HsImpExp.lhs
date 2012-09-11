@@ -6,12 +6,6 @@
 HsImpExp: Abstract syntax: imports, exports, interfaces
 
 \begin{code}
-{-# OPTIONS -fno-warn-incomplete-patterns #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
 {-# LANGUAGE DeriveDataTypeable #-}
 
 module HsImpExp where
@@ -21,7 +15,7 @@ import HsDoc		( HsDocString )
 
 import Outputable
 import FastString
-import SrcLoc		( Located(..) )
+import SrcLoc
 
 import Data.Data
 \end{code}
@@ -42,17 +36,29 @@ data ImportDecl name
       ideclName      :: Located ModuleName, -- ^ Module name.
       ideclPkgQual   :: Maybe FastString,   -- ^ Package qualifier.
       ideclSource    :: Bool,               -- ^ True <=> {-# SOURCE #-} import
+      ideclSafe      :: Bool,               -- ^ True => safe import
       ideclQualified :: Bool,               -- ^ True => qualified
       ideclAs        :: Maybe ModuleName,   -- ^ as Module
       ideclHiding    :: Maybe (Bool, [LIE name]) -- ^ (True => hiding, names)
     } deriving (Data, Typeable)
+
+simpleImportDecl :: ModuleName -> ImportDecl name
+simpleImportDecl mn = ImportDecl {
+      ideclName      = noLoc mn,
+      ideclPkgQual   = Nothing,
+      ideclSource    = False,
+      ideclSafe      = True,
+      ideclQualified = False,
+      ideclAs        = Nothing,
+      ideclHiding    = Nothing
+    }
 \end{code}
 
 \begin{code}
 instance (Outputable name) => Outputable (ImportDecl name) where
-    ppr (ImportDecl mod pkg from qual as spec)
-      = hang (hsep [ptext (sLit "import"), ppr_imp from, 
-                    pp_qual qual, pp_pkg pkg, ppr mod, pp_as as])
+    ppr (ImportDecl mod' pkg from safe qual as spec)
+      = hang (hsep [ptext (sLit "import"), ppr_imp from, pp_safe safe,
+                    pp_qual qual, pp_pkg pkg, ppr mod', pp_as as])
 	     4 (pp_spec spec)
       where
         pp_pkg Nothing  = empty
@@ -60,6 +66,9 @@ instance (Outputable name) => Outputable (ImportDecl name) where
 
 	pp_qual False   = empty
 	pp_qual True	= ptext (sLit "qualified")
+
+	pp_safe False   = empty
+	pp_safe True	= ptext (sLit "safe")
 
 	pp_as Nothing   = empty
 	pp_as (Just a)  = ptext (sLit "as") <+> ppr a
@@ -103,6 +112,7 @@ ieName (IEVar n) 	 = n
 ieName (IEThingAbs  n)   = n
 ieName (IEThingWith n _) = n
 ieName (IEThingAll  n)   = n
+ieName _ = panic "ieName failed pattern match!"
 
 ieNames :: IE a -> [a]
 ieNames (IEVar            n   ) = [n]
@@ -122,8 +132,8 @@ instance (Outputable name) => Outputable (IE name) where
     ppr (IEThingAll	thing)	= hcat [ppr thing, text "(..)"]
     ppr (IEThingWith thing withs)
 	= ppr thing <> parens (fsep (punctuate comma (map pprHsVar withs)))
-    ppr (IEModuleContents mod)
-	= ptext (sLit "module") <+> ppr mod
+    ppr (IEModuleContents mod')
+	= ptext (sLit "module") <+> ppr mod'
     ppr (IEGroup n _)           = text ("<IEGroup: " ++ (show n) ++ ">")
     ppr (IEDoc doc)             = ppr doc
     ppr (IEDocNamed string)     = text ("<IEDocNamed: " ++ string ++ ">")

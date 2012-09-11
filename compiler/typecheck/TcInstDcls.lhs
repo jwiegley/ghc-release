@@ -16,26 +16,31 @@ import TcPat( addInlinePrags )
 import TcRnMonad
 import TcMType
 import TcType
+import BuildTyCl
 import Inst
 import InstEnv
 import FamInst
 import FamInstEnv
-import MkCore	( nO_METHOD_BINDING_ERROR_ID )
 import TcDeriv
 import TcEnv
 import RnSource ( addTcgDUs )
 import TcHsType
 import TcUnify
+import MkCore	( nO_METHOD_BINDING_ERROR_ID )
 import Type
 import Coercion
 import TyCon
 import DataCon
 import Class
 import Var
-import VarSet
+import VarEnv( mkInScopeSet )
+import VarSet( mkVarSet )
+import Pair
 import CoreUtils  ( mkPiTypes )
 import CoreUnfold ( mkDFunUnfolding )
-import CoreSyn    ( Expr(Var), DFunArg(..), CoreExpr )
+import CoreSyn    ( Expr(Var), CoreExpr, varToCoreExpr )
+import PrelNames  ( typeableClassNames )
+
 import Id
 import MkId
 import Name
@@ -182,13 +187,14 @@ Instead we use a cunning trick.
 Note [Single-method classes]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If the class has just one method (or, more accurately, just one element
-of {superclasses + methods}), then we still use the *same* strategy
+of {superclasses + methods}), then we use a different strategy.
 
    class C a where op :: a -> a
    instance C a => C [a] where op = <blah>
 
-We translate the class decl into a newtype, which just gives
-a top-level axiom:
+We translate the class decl into a newtype, which just gives a
+top-level axiom. The "constructor" MkC expands to a cast, as does the
+class-op selector.
 
    axiom Co:C a :: C a ~ (a->a)
 
@@ -198,44 +204,82 @@ a top-level axiom:
    MkC :: forall a. (a->a) -> C a
    MkC = /\a.\op. op |> (sym Co:C a)
 
-   df :: forall a. C a => C [a]
-   {-# NOINLINE df   DFun[ $cop_list ] #-}
-   df = /\a. \d. MkC ($cop_list a d)
+The clever RULE stuff doesn't work now, because ($df a d) isn't
+a constructor application, so exprIsConApp_maybe won't return 
+Just <blah>.
+
+Instead, we simply rely on the fact that casts are cheap:
+
+   $df :: forall a. C a => C [a]
+   {-# INLINE df #-}  -- NB: INLINE this
+   $df = /\a. \d. MkC [a] ($cop_list a d)
+       = $cop_list |> forall a. C a -> (sym (Co:C [a]))
 
    $cop_list :: forall a. C a => [a] -> [a]
    $cop_list = <blah>
 
-The "constructor" MkC expands to a cast, as does the class-op selector.
-The RULE works just like for multi-field dictionaries:
+So if we see
+   (op ($df a d))
+we'll inline 'op' and '$df', since both are simply casts, and
+good things happen.
 
-  * (df a d) returns (Just (MkC,..,[$cop_list a d])) 
-    to exprIsConApp_Maybe
+Why do we use this different strategy?  Because otherwise we
+end up with non-inlined dictionaries that look like
+    $df = $cop |> blah
+which adds an extra indirection to every use, which seems stupid.  See
+Trac #4138 for an example (although the regression reported there
+wasn't due to the indirction).
 
-  * The RULE for op picks the right result
-
-This is a bit of a hack, because (df a d) isn't *really* a constructor
-application.  But it works just fine in this case, exprIsConApp_maybe
-is otherwise used only when we hit a case expression which will have
-a real data constructor in it.
-
-The biggest reason for doing it this way, apart from uniformity, is
-that we want to be very careful when we have
+There is an awkward wrinkle though: we want to be very 
+careful when we have
     instance C a => C [a] where
       {-# INLINE op #-}
       op = ...
 then we'll get an INLINE pragma on $cop_list but it's important that
 $cop_list only inlines when it's applied to *two* arguments (the
-dictionary and the list argument
+dictionary and the list argument).  So we nust not eta-expand $df
+above.  We ensure that this doesn't happen by putting an INLINE 
+pragma on the dfun itself; after all, it ends up being just a cast.
 
-The danger is that we'll get something like
-      op_list :: C a => [a] -> [a]
-      op_list = /\a.\d. $cop_list a d
-and then we'll eta expand, and then we'll inline TOO EARLY. This happened in 
-Trac #3772 and I spent far too long fiddling around trying to fix it.
-Look at the test for Trac #3772.
+There is one more dark corner to the INLINE story, even more deeply 
+buried.  Consider this (Trac #3772):
 
-     (Note: re-reading the above, I can't see how using the
-            uniform story solves the problem.)
+    class DeepSeq a => C a where
+      gen :: Int -> a
+
+    instance C a => C [a] where
+      gen n = ...
+
+    class DeepSeq a where
+      deepSeq :: a -> b -> b
+
+    instance DeepSeq a => DeepSeq [a] where
+      {-# INLINE deepSeq #-}
+      deepSeq xs b = foldr deepSeq b xs
+
+That gives rise to these defns:
+
+    $cdeepSeq :: DeepSeq a -> [a] -> b -> b
+    -- User INLINE( 3 args )!
+    $cdeepSeq a (d:DS a) b (x:[a]) (y:b) = ...
+
+    $fDeepSeq[] :: DeepSeq a -> DeepSeq [a]
+    -- DFun (with auto INLINE pragma)
+    $fDeepSeq[] a d = $cdeepSeq a d |> blah
+
+    $cp1 a d :: C a => DeepSep [a]
+    -- We don't want to eta-expand this, lest
+    -- $cdeepSeq gets inlined in it!
+    $cp1 a d = $fDeepSep[] a (scsel a d)
+
+    $fC[] :: C a => C [a]
+    -- Ordinary DFun
+    $fC[] a d = MkC ($cp1 a d) ($cgen a d)
+
+Here $cp1 is the code that generates the superclass for C [a].  The
+issue is this: we must not eta-expand $cp1 either, or else $fDeepSeq[]
+and then $cdeepSeq will inline there, which is definitely wrong.  Like
+on the dfun, we solve this by adding an INLINE pragma to $cp1.
 
 Note [Subtle interaction of recursion and overlap]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -331,59 +375,69 @@ tcInstDecls1 tycl_decls inst_decls deriv_decls
        ; let { (local_info,
                 at_tycons_s)   = unzip local_info_tycons
              ; at_idx_tycons   = concat at_tycons_s ++ idx_tycons
-             ; clas_decls      = filter (isClassDecl . unLoc) tycl_decls
-             ; implicit_things = concatMap implicitTyThings at_idx_tycons
-	     ; aux_binds       = mkRecSelBinds at_idx_tycons
-             }
+             ; implicit_things = concatMap implicitTyConThings at_idx_tycons
+	     ; aux_binds       = mkRecSelBinds at_idx_tycons  }
 
                 -- (2) Add the tycons of indexed types and their implicit
                 --     tythings to the global environment
-       ; tcExtendGlobalEnv (at_idx_tycons ++ implicit_things) $ do {
+       ; tcExtendGlobalEnv (map ATyCon at_idx_tycons ++ implicit_things) $ do {
 
-                -- (3) Instances from generic class declarations
-       ; generic_inst_info <- getGenericInstances clas_decls
 
                 -- Next, construct the instance environment so far, consisting
                 -- of
                 --   (a) local instance decls
-                --   (b) generic instances
-                --   (c) local family instance decls
+                --   (b) local family instance decls
        ; addInsts local_info         $
-         addInsts generic_inst_info  $
          addFamInsts at_idx_tycons   $ do {
 
-                -- (4) Compute instances from "deriving" clauses;
+                -- (3) Compute instances from "deriving" clauses;
                 -- This stuff computes a context for the derived instance
                 -- decl, so it needs to know about all the instances possible
                 -- NB: class instance declarations can contain derivings as
                 --     part of associated data type declarations
-	 failIfErrsM		-- If the addInsts stuff gave any errors, don't
-				-- try the deriving stuff, becuase that may give
-				-- more errors still
-       ; (deriv_inst_info, deriv_binds, deriv_dus) 
+	 failIfErrsM	-- If the addInsts stuff gave any errors, don't
+			-- try the deriving stuff, because that may give
+			-- more errors still
+       ; (deriv_inst_info, deriv_binds, deriv_dus, deriv_tys, deriv_ty_insts) 
               <- tcDeriving tycl_decls inst_decls deriv_decls
-       ; gbl_env <- addInsts deriv_inst_info getGblEnv
+
+       -- Extend the global environment also with the generated datatypes for
+       -- the generic representation
+       ; let all_tycons = map ATyCon (deriv_tys ++ deriv_ty_insts)
+       ; gbl_env <- tcExtendGlobalEnv all_tycons $
+                    tcExtendGlobalEnv (concatMap implicitTyThings all_tycons) $
+                    addFamInsts deriv_ty_insts $
+                    addInsts deriv_inst_info getGblEnv
+
+       -- Check that if the module is compiled with -XSafe, there are no
+       -- hand written instances of Typeable as then unsafe casts could be
+       -- performed. Derivied instances are OK.
+       ; dflags <- getDOpts
+       ; when (safeLanguageOn dflags) $
+             mapM_ (\x -> when (is_cls (iSpec x) `elem` typeableClassNames)
+                               (addErrAt (getSrcSpan $ iSpec x) typInstErr))
+                   local_info
+
        ; return ( addTcgDUs gbl_env deriv_dus,
-                  generic_inst_info ++ deriv_inst_info ++ local_info,
+                  deriv_inst_info ++ local_info,
                   aux_binds `plusHsValBinds` deriv_binds)
     }}}
+  where
+      typInstErr = ptext $ sLit $ "Can't create hand written instances of Typeable in Safe"
+                                ++ " Haskell! Can only derive them"
 
 addInsts :: [InstInfo Name] -> TcM a -> TcM a
 addInsts infos thing_inside
   = tcExtendLocalInstEnv (map iSpec infos) thing_inside
 
-addFamInsts :: [TyThing] -> TcM a -> TcM a
+addFamInsts :: [TyCon] -> TcM a -> TcM a
 addFamInsts tycons thing_inside
-  = tcExtendLocalFamInstEnv (map mkLocalFamInstTyThing tycons) thing_inside
-  where
-    mkLocalFamInstTyThing (ATyCon tycon) = mkLocalFamInst tycon
-    mkLocalFamInstTyThing tything        = pprPanic "TcInstDcls.addFamInsts"
-                                                    (ppr tything)
+  = tcExtendLocalFamInstEnv (map mkLocalFamInst tycons) thing_inside
 \end{code}
 
 \begin{code}
 tcLocalInstDecl1 :: LInstDecl Name
-                 -> TcM (InstInfo Name, [TyThing])
+                 -> TcM (InstInfo Name, [TyCon])
         -- A source-file instance declaration
         -- Type-check all the stuff before the "where"
         --
@@ -427,7 +481,7 @@ tcLocalInstDecl1 (L loc (InstDecl poly_ty binds uprags ats))
     checkValidAndMissingATs :: Class
                             -> ([TyVar], [TcType])     -- instance types
                             -> [(LTyClDecl Name,       -- source form of AT
-                                 TyThing)]    	       -- Core form of AT
+                                 TyCon)]    	       -- Core form of AT
                             -> TcM ()
     checkValidAndMissingATs clas inst_tys ats
       = do { -- Issue a warning for each class AT that is not defined in this
@@ -435,7 +489,7 @@ tcLocalInstDecl1 (L loc (InstDecl poly_ty binds uprags ats))
            ; let class_ats   = map tyConName (classATs clas)
                  defined_ats = listToNameSet . map (tcdName.unLoc.fst)  $ ats
                  omitted     = filterOut (`elemNameSet` defined_ats) class_ats
-           ; warn <- doptM Opt_WarnMissingMethods
+           ; warn <- woptM Opt_WarnMissingMethods
            ; mapM_ (warnTc warn . omittedATWarn) omitted
 
              -- Ensure that all AT indexes that correspond to class parameters
@@ -445,12 +499,11 @@ tcLocalInstDecl1 (L loc (InstDecl poly_ty binds uprags ats))
            ; mapM_ (checkIndexes clas inst_tys) ats
            }
 
-    checkIndexes clas inst_tys (hsAT, ATyCon tycon)
+    checkIndexes clas inst_tys (hsAT, tycon)
 -- !!!TODO: check that this does the Right Thing for indexed synonyms, too!
       = checkIndexes' clas inst_tys hsAT
                       (tyConTyVars tycon,
                        snd . fromJust . tyConFamInst_maybe $ tycon)
-    checkIndexes _ _ _ = panic "checkIndexes"
 
     checkIndexes' clas (instTvs, instTys) hsAT (atTvs, atTys)
       = let atName = tcdName . unLoc $ hsAT
@@ -510,8 +563,8 @@ tcLocalInstDecl1 (L loc (InstDecl poly_ty binds uprags ats))
       | isTyVarTy ty         = return ()
       | otherwise            = addErrTc $ mustBeVarArgErr ty
     checkIndex ty (Just instTy)
-      | ty `tcEqType` instTy = return ()
-      | otherwise            = addErrTc $ wrongATArgErr ty instTy
+      | ty `eqType` instTy = return ()
+      | otherwise          = addErrTc $ wrongATArgErr ty instTy
 
     listToNameSet = addListToNameSet emptyNameSet
 
@@ -524,7 +577,182 @@ tcLocalInstDecl1 (L loc (InstDecl poly_ty binds uprags ats))
           tv1 `sameLexeme` tv2 =
             nameOccName (tyVarName tv1) == nameOccName (tyVarName tv2)
       in
-      extendTvSubst (substSameTyVar tvs replacingTvs) tv replacement
+      TcType.extendTvSubst (substSameTyVar tvs replacingTvs) tv replacement
+\end{code}
+
+
+%************************************************************************
+%*									*
+               Type checking family instances
+%*									*
+%************************************************************************
+
+Family instances are somewhat of a hybrid.  They are processed together with
+class instance heads, but can contain data constructors and hence they share a
+lot of kinding and type checking code with ordinary algebraic data types (and
+GADTs).
+
+\begin{code}
+tcFamInstDecl :: TopLevelFlag -> LTyClDecl Name -> TcM TyCon
+tcFamInstDecl top_lvl (L loc decl)
+  =	-- Prime error recovery, set source location
+    setSrcSpan loc				$
+    tcAddDeclCtxt decl				$
+    do { -- type family instances require -XTypeFamilies
+	 -- and can't (currently) be in an hs-boot file
+       ; type_families <- xoptM Opt_TypeFamilies
+       ; is_boot  <- tcIsHsBoot	  -- Are we compiling an hs-boot file?
+       ; checkTc type_families $ badFamInstDecl (tcdLName decl)
+       ; checkTc (not is_boot) $ badBootFamInstDeclErr
+
+	 -- Perform kind and type checking
+       ; tc <- tcFamInstDecl1 decl
+       ; checkValidTyCon tc	-- Remember to check validity;
+				-- no recursion to worry about here
+
+       -- Check that toplevel type instances are not for associated types.
+       ; when (isTopLevel top_lvl && isAssocFamily tc)
+              (addErr $ assocInClassErr (tcdName decl))
+
+       ; return tc }
+
+isAssocFamily :: TyCon -> Bool	-- Is an assocaited type
+isAssocFamily tycon
+  = case tyConFamInst_maybe tycon of
+          Nothing       -> panic "isAssocFamily: no family?!?"
+          Just (fam, _) -> isTyConAssoc fam
+
+assocInClassErr :: Name -> SDoc
+assocInClassErr name
+ = ptext (sLit "Associated type") <+> quotes (ppr name) <+>
+   ptext (sLit "must be inside a class instance")
+
+
+
+tcFamInstDecl1 :: TyClDecl Name -> TcM TyCon
+
+  -- "type instance"
+tcFamInstDecl1 (decl@TySynonym {tcdLName = L loc tc_name})
+  = kcIdxTyPats decl $ \k_tvs k_typats resKind family ->
+    do { -- check that the family declaration is for a synonym
+         checkTc (isFamilyTyCon family) (notFamily family)
+       ; checkTc (isSynTyCon family) (wrongKindOfFamily family)
+
+       ; -- (1) kind check the right-hand side of the type equation
+       ; k_rhs <- kcCheckLHsType (tcdSynRhs decl) (EK resKind EkUnk)
+       	       	  -- ToDo: the ExpKind could be better
+
+         -- we need the exact same number of type parameters as the family
+         -- declaration 
+       ; let famArity = tyConArity family
+       ; checkTc (length k_typats == famArity) $ 
+           wrongNumberOfParmsErr famArity
+
+         -- (2) type check type equation
+       ; tcTyVarBndrs k_tvs $ \t_tvs -> do {  -- turn kinded into proper tyvars
+       ; t_typats <- mapM tcHsKindedType k_typats
+       ; t_rhs    <- tcHsKindedType k_rhs
+
+         -- (3) check the well-formedness of the instance
+       ; checkValidTypeInst t_typats t_rhs
+
+         -- (4) construct representation tycon
+       ; rep_tc_name <- newFamInstTyConName tc_name t_typats loc
+       ; buildSynTyCon rep_tc_name t_tvs (SynonymTyCon t_rhs) 
+                       (typeKind t_rhs) 
+                       NoParentTyCon (Just (family, t_typats))
+       }}
+
+  -- "newtype instance" and "data instance"
+tcFamInstDecl1 (decl@TyData {tcdND = new_or_data, tcdLName = L loc tc_name,
+			     tcdCons = cons})
+  = kcIdxTyPats decl $ \k_tvs k_typats resKind fam_tycon ->
+    do { -- check that the family declaration is for the right kind
+         checkTc (isFamilyTyCon fam_tycon) (notFamily fam_tycon)
+       ; checkTc (isAlgTyCon fam_tycon) (wrongKindOfFamily fam_tycon)
+
+       ; -- (1) kind check the data declaration as usual
+       ; k_decl <- kcDataDecl decl k_tvs
+       ; let k_ctxt = tcdCtxt k_decl
+	     k_cons = tcdCons k_decl
+
+         -- result kind must be '*' (otherwise, we have too few patterns)
+       ; checkTc (isLiftedTypeKind resKind) $ tooFewParmsErr (tyConArity fam_tycon)
+
+         -- (2) type check indexed data type declaration
+       ; tcTyVarBndrs k_tvs $ \t_tvs -> do {  -- turn kinded into proper tyvars
+
+         -- kind check the type indexes and the context
+       ; t_typats     <- mapM tcHsKindedType k_typats
+       ; stupid_theta <- tcHsKindedContext k_ctxt
+
+         -- (3) Check that
+         --     (a) left-hand side contains no type family applications
+         --         (vanilla synonyms are fine, though, and we checked for
+         --         foralls earlier)
+       ; mapM_ checkTyFamFreeness t_typats
+
+       ; dataDeclChecks tc_name new_or_data stupid_theta k_cons
+
+         -- (4) construct representation tycon
+       ; rep_tc_name <- newFamInstTyConName tc_name t_typats loc
+       ; let ex_ok = True	-- Existentials ok for type families!
+       ; fixM (\ rep_tycon -> do 
+	     { let orig_res_ty = mkTyConApp fam_tycon t_typats
+	     ; data_cons <- tcConDecls ex_ok rep_tycon
+				       (t_tvs, orig_res_ty) k_cons
+	     ; tc_rhs <-
+		 case new_or_data of
+		   DataType -> return (mkDataTyConRhs data_cons)
+		   NewType  -> ASSERT( not (null data_cons) )
+			       mkNewTyConRhs rep_tc_name rep_tycon (head data_cons)
+	     ; buildAlgTyCon rep_tc_name t_tvs stupid_theta tc_rhs Recursive
+			     h98_syntax NoParentTyCon (Just (fam_tycon, t_typats))
+                 -- We always assume that indexed types are recursive.  Why?
+                 -- (1) Due to their open nature, we can never be sure that a
+                 -- further instance might not introduce a new recursive
+                 -- dependency.  (2) They are always valid loop breakers as
+                 -- they involve a coercion.
+	     })
+       }}
+       where
+	 h98_syntax = case cons of 	-- All constructors have same shape
+			L _ (ConDecl { con_res = ResTyGADT _ }) : _ -> False
+			_ -> True
+
+tcFamInstDecl1 d = pprPanic "tcFamInstDecl1" (ppr d)
+
+-- Kind checking of indexed types
+-- -
+
+-- Kind check type patterns and kind annotate the embedded type variables.
+--
+-- * Here we check that a type instance matches its kind signature, but we do
+--   not check whether there is a pattern for each type index; the latter
+--   check is only required for type synonym instances.
+
+kcIdxTyPats :: TyClDecl Name
+	    -> ([LHsTyVarBndr Name] -> [LHsType Name] -> Kind -> TyCon -> TcM a)
+	       -- ^^kinded tvs         ^^kinded ty pats  ^^res kind
+	    -> TcM a
+kcIdxTyPats decl thing_inside
+  = kcHsTyVars (tcdTyVars decl) $ \tvs -> 
+    do { let tc_name = tcdLName decl
+       ; fam_tycon <- tcLookupLocatedTyCon tc_name
+       ; let { (kinds, resKind) = splitKindFunTys (tyConKind fam_tycon)
+	     ; hs_typats	= fromJust $ tcdTyPats decl }
+
+         -- we may not have more parameters than the kind indicates
+       ; checkTc (length kinds >= length hs_typats) $
+	   tooManyParmsErr (tcdLName decl)
+
+         -- type functions can have a higher-kinded result
+       ; let resultKind = mkArrowKinds (drop (length hs_typats) kinds) resKind
+       ; typats <- zipWithM kcCheckLHsType hs_typats 
+       	 	   	    [ EK kind (EkArg (ppr tc_name) n) 
+                            | (kind,n) <- kinds `zip` [1..]]
+       ; thing_inside tvs typats resultKind fam_tycon
+       }
 \end{code}
 
 
@@ -582,26 +810,17 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = ibinds })
     addErrCtxt (instDeclCtxt2 (idType dfun_id)) $ 
     do {  -- Instantiate the instance decl with skolem constants
        ; (inst_tyvars, dfun_theta, inst_head) <- tcSkolDFunType (idType dfun_id)
+                     -- We instantiate the dfun_id with superSkolems.
+                     -- See Note [Subtle interaction of recursion and overlap]
+                     -- and Note [Binding when looking up instances]
        ; let (clas, inst_tys) = tcSplitDFunHead inst_head
-             (class_tyvars, sc_theta, _, op_items) = classBigSig clas
+             (class_tyvars, sc_theta, sc_sels, op_items) = classBigSig clas
              sc_theta' = substTheta (zipOpenTvSubst class_tyvars inst_tys) sc_theta
-             n_ty_args = length inst_tyvars
-             n_silent  = dfunNSilent dfun_id
-             (silent_theta, orig_theta) = splitAt n_silent dfun_theta
+       ; dfun_ev_vars <- newEvVars dfun_theta
 
-       ; silent_ev_vars <- mapM newSilentGiven silent_theta
-       ; orig_ev_vars   <- newEvVars orig_theta
-       ; let dfun_ev_vars = silent_ev_vars ++ orig_ev_vars
-
-       ; (sc_dicts, sc_args)
-             <- mapAndUnzipM (tcSuperClass n_ty_args dfun_ev_vars) sc_theta'
-
-       -- Check that any superclasses gotten from a silent arguemnt
-       -- can be deduced from the originally-specified dfun arguments
-       ; ct_loc <- getCtLoc ScOrigin
-       ; _ <- checkConstraints skol_info inst_tyvars orig_ev_vars $
-              emitFlats $ listToBag $
-              [ mkEvVarX sc ct_loc | sc <- sc_dicts, isSilentEvVar sc ]
+       ; (sc_args, sc_binds)
+             <- mapAndUnzipM (tcSuperClass inst_tyvars dfun_ev_vars) 
+                              (sc_sels `zip` sc_theta')
 
        -- Deal with 'SPECIALISE instance' pragmas
        -- See Note [SPECIALISE instance pragmas]
@@ -619,31 +838,50 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = ibinds })
 
        -- Create the result bindings
        ; self_dict <- newEvVar (ClassP clas inst_tys)
-       ; let dict_constr       = classDataCon clas
-	     dict_bind         = mkVarBind self_dict dict_rhs
-             dict_rhs          = foldl mk_app inst_constr $
-                                 map HsVar sc_dicts ++ map (wrapId arg_wrapper) meth_ids
-             inst_constr       = L loc $ wrapId (mkWpTyApps inst_tys)
-                                                (dataConWrapId dict_constr)
+       ; let class_tc      = classTyCon clas
+             [dict_constr] = tyConDataCons class_tc
+             dict_bind     = mkVarBind self_dict (L loc con_app_args)
+
                      -- We don't produce a binding for the dict_constr; instead we
                      -- rely on the simplifier to unfold this saturated application
                      -- We do this rather than generate an HsCon directly, because
                      -- it means that the special cases (e.g. dictionary with only one
-                     -- member) are dealt with by the common MkId.mkDataConWrapId code rather
-                     -- than needing to be repeated here.
+                     -- member) are dealt with by the common MkId.mkDataConWrapId 
+		     -- code rather than needing to be repeated here.
+		     --    con_app_tys  = MkD ty1 ty2
+		     --    con_app_scs  = MkD ty1 ty2 sc1 sc2
+		     --    con_app_args = MkD ty1 ty2 sc1 sc2 op1 op2
+             con_app_tys  = wrapId (mkWpTyApps inst_tys)
+                                   (dataConWrapId dict_constr)
+             con_app_scs  = mkHsWrap (mkWpEvApps (map mk_sc_ev_term sc_args)) con_app_tys
+             con_app_args = foldl mk_app con_app_scs $
+                            map (wrapId arg_wrapper) meth_ids
 
-             mk_app :: LHsExpr Id -> HsExpr Id -> LHsExpr Id
-             mk_app fun arg = L loc (HsApp fun (L loc arg))
+             mk_app :: HsExpr Id -> HsExpr Id -> HsExpr Id
+             mk_app fun arg = HsApp (L loc fun) (L loc arg)
 
-             arg_wrapper = mkWpEvVarApps dfun_ev_vars <.> mkWpTyApps (mkTyVarTys inst_tyvars)
+	     mk_sc_ev_term :: EvVar -> EvTerm
+             mk_sc_ev_term sc 
+               | null inst_tv_tys
+               , null dfun_ev_vars = evVarTerm sc
+               | otherwise         = EvDFunApp sc inst_tv_tys dfun_ev_vars
+
+	     inst_tv_tys    = mkTyVarTys inst_tyvars
+             arg_wrapper = mkWpEvVarApps dfun_ev_vars <.> mkWpTyApps inst_tv_tys
 
 	        -- Do not inline the dfun; instead give it a magic DFunFunfolding
 	        -- See Note [ClassOp/DFun selection]
 		-- See also note [Single-method classes]
-             dfun_id_w_fun = dfun_id  
-                             `setIdUnfolding`  mkDFunUnfolding dfun_ty (sc_args ++ meth_args)
-                             `setInlinePragma` dfunInlinePragma
-             meth_args = map (DFunPolyArg . Var) meth_ids
+             dfun_id_w_fun
+                | isNewTyCon class_tc
+                = dfun_id `setInlinePragma` alwaysInlinePragma { inl_sat = Just 0 }
+                | otherwise
+                = dfun_id `setIdUnfolding`  mkDFunUnfolding dfun_ty dfun_args
+                          `setInlinePragma` dfunInlinePragma
+
+             dfun_args :: [CoreExpr]
+             dfun_args = map varToCoreExpr sc_args ++
+                         map Var           meth_ids
 
              main_bind = AbsBinds { abs_tvs = inst_tyvars
                                   , abs_ev_vars = dfun_ev_vars
@@ -653,30 +891,40 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = ibinds })
                                   , abs_binds = unitBag dict_bind }
 
        ; return (unitBag (L loc main_bind) `unionBags`
-                 listToBag meth_binds)
+                 listToBag meth_binds      `unionBags`
+                 unionManyBags sc_binds)
        }
  where
-   skol_info = InstSkol         -- See Note [Subtle interaction of recursion and overlap]
    dfun_ty   = idType dfun_id
    dfun_id   = instanceDFunId ispec
    loc       = getSrcSpan dfun_id
 
 ------------------------------
-tcSuperClass :: Int -> [EvVar] -> PredType -> TcM (EvVar, DFunArg CoreExpr)
--- All superclasses should be either
---   (a) be one of the arguments to the dfun, of
---   (b) be a constant, soluble at top level
-tcSuperClass n_ty_args ev_vars pred
-  | Just (ev, i) <- find n_ty_args ev_vars
-  = return (ev, DFunLamArg i)
-  | otherwise
-  = ASSERT2( isEmptyVarSet (tyVarsOfPred pred), ppr pred)       -- Constant!
-    do { sc_dict  <- emitWanted ScOrigin pred
-       ; return (sc_dict, DFunConstArg (Var sc_dict)) }
-  where
-    find _ [] = Nothing
-    find i (ev:evs) | pred `tcEqPred` evVarPred ev = Just (ev, i)
-                    | otherwise                    = find (i+1) evs
+tcSuperClass :: [TcTyVar] -> [EvVar] 
+	     -> (Id, PredType) 
+             -> TcM (TcId, LHsBinds TcId)
+
+-- Build a top level decl like
+--	sc_op = /\a \d. let sc = ... in
+--			sc
+-- and return sc_op, that binding
+
+tcSuperClass tyvars ev_vars (sc_sel, sc_pred)
+  = do { (ev_binds, sc_dict)
+             <- newImplication InstSkol tyvars ev_vars $
+                emitWanted ScOrigin sc_pred
+
+       ; uniq <- newUnique
+       ; let sc_op_ty   = mkForAllTys tyvars $ mkPiTypes ev_vars (varType sc_dict)
+	     sc_op_name = mkDerivedInternalName mkClassOpAuxOcc uniq
+						(getName sc_sel)
+	     sc_op_id   = mkLocalId sc_op_name sc_op_ty
+	     sc_op_bind = mkVarBind sc_op_id (L noSrcSpan $ wrapId sc_wrapper sc_dict)
+             sc_wrapper = mkWpTyLams tyvars
+                          <.> mkWpLams ev_vars
+			  <.> mkWpLet ev_binds
+
+       ; return (sc_op_id, unitBag sc_op_bind) }
 
 ------------------------------
 tcSpecInstPrags :: DFunId -> InstBindings Name
@@ -690,74 +938,26 @@ tcSpecInstPrags dfun_id (VanillaInst binds uprags _)
        ; return (spec_inst_prags, mkPragFun uprags binds) }
 \end{code}
 
-Note [Silent Superclass Arguments]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Superclass loop avoidance]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Consider the following (extreme) situation:
         class C a => D a where ...
         instance D [a] => D [a] where ...
 Although this looks wrong (assume D [a] to prove D [a]), it is only a
-more extreme case of what happens with recursive dictionaries.
+more extreme case of what happens with recursive dictionaries, and it
+can, just about, make sense because the methods do some work before
+recursing.
 
 To implement the dfun we must generate code for the superclass C [a],
-which we can get by superclass selection from the supplied argument!
-So we’d generate:
+which we had better not get by superclass selection from the supplied
+argument:
        dfun :: forall a. D [a] -> D [a]
        dfun = \d::D [a] -> MkD (scsel d) ..
 
-However this means that if we later encounter a situation where
-we have a [Wanted] dw::D [a] we could solve it thus:
-     dw := dfun dw
-Although recursive, this binding would pass the TcSMonadisGoodRecEv
-check because it appears as guarded.  But in reality, it will make a
-bottom superclass. The trouble is that isGoodRecEv can't "see" the
-superclass-selection inside dfun.
-
-Our solution to this problem is to change the way ‘dfuns’ are created
-for instances, so that we pass as first arguments to the dfun some
-``silent superclass arguments’’, which are the immediate superclasses
-of the dictionary we are trying to construct. In our example:
-       dfun :: forall a. (C [a], D [a] -> D [a]
-       dfun = \(dc::C [a]) (dd::D [a]) -> DOrd dc ...
-
-This gives us:
-
-     -----------------------------------------------------------
-     DFun Superclass Invariant
-     ~~~~~~~~~~~~~~~~~~~~~~~~
-     In the body of a DFun, every superclass argument to the
-     returned dictionary is
-       either   * one of the arguments of the DFun,
-       or       * constant, bound at top level
-     -----------------------------------------------------------
-
-This means that no superclass is hidden inside a dfun application, so
-the counting argument in isGoodRecEv (more dfun calls than superclass
-selections) works correctly.
-
-The extra arguments required to satisfy the DFun Superclass Invariant
-always come first, and are called the "silent" arguments.  DFun types
-are built (only) by MkId.mkDictFunId, so that is where we decide
-what silent arguments are to be added.
-
-This net effect is that it is safe to treat a dfun application as
-wrapping a dictionary constructor around its arguments (in particular,
-a dfun never picks superclasses from the arguments under the dictionary
-constructor).
-
-In our example, if we had  [Wanted] dw :: D [a] we would get via the instance:
-    dw := dfun d1 d2
-    [Wanted] (d1 :: C [a])
-    [Wanted] (d2 :: D [a])
-    [Derived] (d :: D [a])
-    [Derived] (scd :: C [a])   scd  := scsel d
-    [Derived] (scd2 :: C [a])  scd2 := scsel d2
-
-And now, though we *can* solve: 
-     d2 := dw
-we will get an isGoodRecEv failure when we try to solve:
-    d1 := scsel d 
- or
-    d1 := scsel d2 
+Rather, we want to get it by finding an instance for (C [a]).  We
+achieve this by 
+    not making the superclasses of a "wanted"
+    available for solving wanted constraints.
 
 Test case SCLoop tests this fix. 
          
@@ -809,7 +1009,7 @@ tcSpecInst dfun_id prag@(SpecInstSig hs_ty)
   = addErrCtxt (spec_ctxt prag) $
     do  { let name = idName dfun_id
         ; (tyvars, theta, clas, tys) <- tcHsInstHead hs_ty
-        ; let (_, spec_dfun_ty) = mkDictFunTy tyvars theta clas tys
+        ; let spec_dfun_ty = mkDictFunTy tyvars theta clas tys
 
         ; co_fn <- tcSubType (SpecPragOrigin name) SpecInstCtxt
                              (idType dfun_id) spec_dfun_ty
@@ -874,10 +1074,11 @@ tcInstanceMethods dfun_id clas tyvars dfun_ev_vars inst_tys
 
     ----------------------
     tc_default :: Id -> DefMeth -> TcM (TcId, LHsBind Id)
-    tc_default sel_id GenDefMeth    -- Derivable type classes stuff
-      = do { meth_bind <- mkGenericDefMethBind clas inst_tys sel_id
+
+    tc_default sel_id (GenDefMeth dm_name)
+      = do { meth_bind <- mkGenericDefMethBind clas inst_tys sel_id dm_name
            ; tc_body sel_id False {- Not generated code? -} meth_bind }
-    	  
+
     tc_default sel_id NoDefMeth	    -- No default method at all
       = do { warnMissingMethod sel_id
     	   ; (meth_id, _) <- mkMethIds clas tyvars dfun_ev_vars 
@@ -912,14 +1113,12 @@ tcInstanceMethods dfun_id clas tyvars dfun_ev_vars inst_tys
                  rhs = HsWrap (mkWpEvVarApps [self_dict] <.> mkWpTyApps inst_tys) $
     		         HsVar dm_id 
 
-    	         meth_bind = L loc $ VarBind { var_id = local_meth_id
-                                             , var_rhs = L loc rhs 
-                                             , var_inline = False }
+    	         meth_bind = mkVarBind local_meth_id (L loc rhs)
                  meth_id1 = meth_id `setInlinePragma` dm_inline_prag
-    		   	    -- Copy the inline pragma (if any) from the default
-    			    -- method to this version. Note [INLINE and default methods]
+    		   	-- Copy the inline pragma (if any) from the default
+    			-- method to this version. Note [INLINE and default methods]
     			    
-                 bind = AbsBinds { abs_tvs = tyvars, abs_ev_vars =  dfun_ev_vars
+                 bind = AbsBinds { abs_tvs = tyvars, abs_ev_vars = dfun_ev_vars
                                  , abs_exports = [( tyvars, meth_id1, local_meth_id
                                                   , mk_meth_spec_prags meth_id1 [])]
                                  , abs_ev_binds = EvBinds (unitBag self_ev_bind)
@@ -999,13 +1198,13 @@ tcInstanceMethods dfun_id clas tyvars dfun_ev_vars inst_tys
 
      inst_tvs = fst (tcSplitForAllTys (idType dfun_id))
      Just (init_inst_tys, _) = snocView inst_tys
-     rep_ty   = fst (coercionKind co)  -- [p]
+     rep_ty   = pFst (coercionKind co)  -- [p]
      rep_pred = mkClassPred clas (init_inst_tys ++ [rep_ty])
 
      -- co : [p] ~ T p
-     co = substTyWith inst_tvs (mkTyVarTys tyvars) $
-          case coi of { IdCo ty -> ty ;
-                        ACo co  -> mkSymCoercion co }
+     co = substCoWithTys (mkInScopeSet (mkVarSet tyvars))
+                         inst_tvs (mkTyVarTys tyvars) $
+          mkSymCo coi
 
      ----------------
      tc_item :: (TcEvBinds, EvVar) -> (Id, DefMeth) -> TcM (TcId, LHsBind TcId)
@@ -1014,22 +1213,20 @@ tcInstanceMethods dfun_id clas tyvars dfun_ev_vars inst_tys
                                                     inst_tys sel_id
 
             ; let meth_rhs  = wrapId (mk_op_wrapper sel_id rep_d) sel_id
-                  meth_bind = VarBind { var_id = local_meth_id
-                                      , var_rhs = L loc meth_rhs
-    				      , var_inline = False }
-
+                  meth_bind = mkVarBind local_meth_id (L loc meth_rhs)
 	          bind = AbsBinds { abs_tvs = tyvars, abs_ev_vars = dfun_ev_vars
                                    , abs_exports = [(tyvars, meth_id, 
                                                      local_meth_id, noSpecPrags)]
 				   , abs_ev_binds = rep_ev_binds
-                                   , abs_binds = unitBag $ L loc meth_bind }
+                                   , abs_binds = unitBag $ meth_bind }
 
             ; return (meth_id, L loc bind) }
 
      ----------------
      mk_op_wrapper :: Id -> EvVar -> HsWrapper
      mk_op_wrapper sel_id rep_d 
-       = WpCast (substTyWith sel_tvs (init_inst_tys ++ [co]) local_meth_ty)
+       = WpCast (liftCoSubstWith sel_tvs (map mkReflCo init_inst_tys ++ [co])
+                               local_meth_ty)
          <.> WpEvApp (EvId rep_d)
          <.> mkWpTyApps (init_inst_tys ++ [rep_ty]) 
        where
@@ -1070,7 +1267,7 @@ derivBindCtxt sel_id clas tys _bind
 
 warnMissingMethod :: Id -> TcM ()
 warnMissingMethod sel_id
-  = do { warn <- doptM Opt_WarnMissingMethods		
+  = do { warn <- woptM Opt_WarnMissingMethods		
        ; warnTc (warn  -- Warn only if -fwarn-missing-methods
                  && not (startsWithUnderscore (getOccName sel_id)))
 					-- Don't warn about _foo methods
@@ -1197,7 +1394,7 @@ instDeclCtxt2 :: Type -> SDoc
 instDeclCtxt2 dfun_ty
   = inst_decl_ctxt (ppr (mkClassPred cls tys))
   where
-    (_,cls,tys) = tcSplitDFunTy dfun_ty
+    (_,_,cls,tys) = tcSplitDFunTy dfun_ty
 
 inst_decl_ctxt :: SDoc -> SDoc
 inst_decl_ctxt doc = ptext (sLit "In the instance declaration for") <+> quotes doc
@@ -1219,4 +1416,37 @@ wrongATArgErr ty instTy =
       , ptext (sLit "Found") <+> quotes (ppr ty)
         <+> ptext (sLit "but expected") <+> quotes (ppr instTy)
       ]
+
+tooManyParmsErr :: Located Name -> SDoc
+tooManyParmsErr tc_name
+  = ptext (sLit "Family instance has too many parameters:") <+> 
+    quotes (ppr tc_name)
+
+tooFewParmsErr :: Arity -> SDoc
+tooFewParmsErr arity
+  = ptext (sLit "Family instance has too few parameters; expected") <+> 
+    ppr arity
+
+wrongNumberOfParmsErr :: Arity -> SDoc
+wrongNumberOfParmsErr exp_arity
+  = ptext (sLit "Number of parameters must match family declaration; expected")
+    <+> ppr exp_arity
+
+badBootFamInstDeclErr :: SDoc
+badBootFamInstDeclErr
+  = ptext (sLit "Illegal family instance in hs-boot file")
+
+notFamily :: TyCon -> SDoc
+notFamily tycon
+  = vcat [ ptext (sLit "Illegal family instance for") <+> quotes (ppr tycon)
+         , nest 2 $ parens (ppr tycon <+> ptext (sLit "is not an indexed type family"))]
+  
+wrongKindOfFamily :: TyCon -> SDoc
+wrongKindOfFamily family
+  = ptext (sLit "Wrong category of family instance; declaration was for a")
+    <+> kindOfFamily
+  where
+    kindOfFamily | isSynTyCon family = ptext (sLit "type synonym")
+		 | isAlgTyCon family = ptext (sLit "data type")
+		 | otherwise = pprPanic "wrongKindOfFamily" (ppr family)
 \end{code}

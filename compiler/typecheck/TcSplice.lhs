@@ -71,6 +71,7 @@ import SrcLoc
 import Outputable
 import Util		( dropList )
 import Data.List	( mapAccumL )
+import Pair
 import Unique
 import Data.Maybe
 import BasicTypes
@@ -386,7 +387,7 @@ tc_bracket outer_stage (VarBr name) 	-- Note [Quoting names]
 	}
 
 tc_bracket _ (ExpBr expr) 
-  = do	{ any_ty <- newFlexiTyVarTy liftedTypeKind
+  = do	{ any_ty <- newFlexiTyVarTy openTypeKind
 	; _ <- tcMonoExprNC expr any_ty  -- NC for no context; tcBracket does that
 	; tcMetaTy expQTyConName }
 	-- Result type is ExpQ (= Q Exp)
@@ -407,7 +408,7 @@ tc_bracket _ (DecBrG decls)
 	; tcMetaTy decsQTyConName } -- Result type is Q [Dec]
 
 tc_bracket _ (PatBr pat)
-  = do	{ any_ty <- newFlexiTyVarTy liftedTypeKind
+  = do	{ any_ty <- newFlexiTyVarTy openTypeKind
 	; _ <- tcPat ThPatQuote pat any_ty $ 
                return ()
 	; tcMetaTy patQTyConName }
@@ -809,6 +810,18 @@ runMeta :: (Outputable hs_syn)
 	-> TcM hs_syn		-- Of type t
 runMeta show_code run_and_convert expr
   = do	{ traceTc "About to run" (ppr expr)
+        ; recordThSpliceUse -- seems to be the best place to do this,
+                            -- we catch all kinds of splices and annotations.
+
+	-- Check that we've had no errors of any sort so far.
+	-- For example, if we found an error in an earlier defn f, but
+	-- recovered giving it type f :: forall a.a, it'd be very dodgy
+	-- to carry ont.  Mind you, the staging restrictions mean we won't
+	-- actually run f, but it still seems wrong. And, more concretely, 
+	-- see Trac #5358 for an example that fell over when trying to
+	-- reify a function with a "?" kind in it.  (These don't occur
+	-- in type-correct programs.
+	; failIfErrsM    
 
 	-- Desugar
 	; ds_expr <- initDsTc (dsLExpr expr)
@@ -816,7 +829,7 @@ runMeta show_code run_and_convert expr
 	; hsc_env <- getTopEnv
 	; src_span <- getSrcSpanM
 	; either_hval <- tryM $ liftIO $
-			 HscMain.compileExpr hsc_env src_span ds_expr
+			 HscMain.hscCompileCoreExpr hsc_env src_span ds_expr
 	; case either_hval of {
 	    Left exn   -> failWithTc (mk_msg "compile and link" exn) ;
 	    Right hval -> do
@@ -896,13 +909,17 @@ instance TH.Quasi (IOEnv (Env TcGblEnv TcLclEnv)) where
   qReport False msg = addReport (text msg) empty
 
   qLocation = do { m <- getModule
-		 ; l <- getSrcSpanM
-		 ; return (TH.Loc { TH.loc_filename = unpackFS (srcSpanFile l)
-				  , TH.loc_module   = moduleNameString (moduleName m)
-				  , TH.loc_package  = packageIdString (modulePackageId m)
-				  , TH.loc_start = (srcSpanStartLine l, srcSpanStartCol l)
-				  , TH.loc_end = (srcSpanEndLine   l, srcSpanEndCol   l) }) }
-		
+                 ; l <- getSrcSpanM
+                 ; r <- case l of
+                        UnhelpfulSpan _ -> pprPanic "qLocation: Unhelpful location"
+                                                    (ppr l)
+                        RealSrcSpan s -> return s
+                 ; return (TH.Loc { TH.loc_filename = unpackFS (srcSpanFile r)
+                                  , TH.loc_module   = moduleNameString (moduleName m)
+                                  , TH.loc_package  = packageIdString (modulePackageId m)
+                                  , TH.loc_start = (srcSpanStartLine r, srcSpanStartCol r)
+                                  , TH.loc_end = (srcSpanEndLine   r, srcSpanEndCol   r) }) }
+
   qReify v = reify v
   qClassInstances = lookupClassInstances
 
@@ -953,11 +970,11 @@ illegalBracket = ptext (sLit "Template Haskell brackets cannot be nested (withou
 %************************************************************************
 
 \begin{code}
-lookupClassInstances :: TH.Name -> [TH.Type] -> TcM [TH.Name]
+lookupClassInstances :: TH.Name -> [TH.Type] -> TcM [TH.ClassInstance]
 lookupClassInstances c ts
    = do { loc <- getSrcSpanM
-        ; case convertToHsPred loc (TH.ClassP c ts) of
-            Left msg -> failWithTc msg
+        ; case convertToHsPred loc (TH.ClassP c ts) of {
+            Left msg -> failWithTc msg;
             Right rdr_pred -> do
         { rn_pred <- rnLPred doc rdr_pred	-- Rename
         ; kc_pred <- kcHsLPred rn_pred		-- Kind check
@@ -965,9 +982,8 @@ lookupClassInstances c ts
 
 	-- Now look up instances
         ; inst_envs <- tcGetInstEnvs
-        ; let (matches, unifies) = lookupInstEnv inst_envs cls tys
-              dfuns = map is_dfun (map fst matches ++ unifies)
-        ; return (map reifyName dfuns) } }
+        ; let (matches, unifies, _) = lookupInstEnv inst_envs cls tys
+        ; mapM reifyClassInstance (map fst matches ++ unifies) } } }
   where
     doc = ptext (sLit "TcSplice.classInstances")
 \end{code}
@@ -1067,8 +1083,9 @@ reifyThing (AGlobal (AnId id))
 	    _             -> return (TH.VarI     v ty Nothing fix)
     }
 
-reifyThing (AGlobal (ATyCon tc))  = reifyTyCon tc
-reifyThing (AGlobal (AClass cls)) = reifyClass cls
+reifyThing (AGlobal (ATyCon tc))   = reifyTyCon tc
+reifyThing (AGlobal (ACoAxiom ax)) = reifyAxiom ax
+reifyThing (AGlobal (AClass cls))  = reifyClass cls
 reifyThing (AGlobal (ADataCon dc))
   = do	{ let name = dataConName dc
 	; ty <- reifyType (idType (dataConWrapId dc))
@@ -1092,12 +1109,24 @@ reifyThing (ATyVar tv ty)
 reifyThing (AThing {}) = panic "reifyThing AThing"
 
 ------------------------------
+reifyAxiom :: CoAxiom -> TcM TH.Info
+reifyAxiom ax@(CoAxiom { co_ax_lhs = lhs, co_ax_rhs = rhs })
+  | Just (tc, args) <- tcSplitTyConApp_maybe lhs
+  = do { args' <- mapM reifyType args
+       ; rhs'  <- reifyType rhs
+       ; return (TH.TyConI $ TH.TySynInstD (reifyName tc) args' rhs') }
+  | otherwise
+  = failWith (ptext (sLit "Can't reify the axiom") <+> ppr ax 
+              <+> dcolon <+> pprEqPred (Pair lhs rhs))
+
 reifyTyCon :: TyCon -> TcM TH.Info
 reifyTyCon tc
   | isFunTyCon tc  
   = return (TH.PrimTyConI (reifyName tc) 2 		  False)
+
   | isPrimTyCon tc 
   = return (TH.PrimTyConI (reifyName tc) (tyConArity tc) (isUnLiftedTyCon tc))
+
   | isFamilyTyCon tc
   = let flavour = reifyFamFlavour tc
         tvs     = tyConTyVars tc
@@ -1108,6 +1137,7 @@ reifyTyCon tc
     in
     return (TH.TyConI $
               TH.FamilyD flavour (reifyName tc) (reifyTyVars tvs) kind')
+
   | isSynTyCon tc
   = do { let (tvs, rhs) = synTyConDefn tc 
        ; rhs' <- reifyType rhs
@@ -1115,7 +1145,7 @@ reifyTyCon tc
 		   TH.TySynD (reifyName tc) (reifyTyVars tvs) rhs') 
        }
 
-reifyTyCon tc
+  | otherwise
   = do 	{ cxt <- reifyCxt (tyConStupidTheta tc)
 	; let tvs = tyConTyVars tc
 	; cons <- mapM (reifyDataCon (mkTyVarTys tvs)) (tyConDataCons tc)
@@ -1190,7 +1220,7 @@ reifyClassInstance i
 reifyType :: TypeRep.Type -> TcM TH.Type
 -- Monadic only because of failure
 reifyType ty@(ForAllTy _ _)        = reify_for_all ty
-reifyType ty@(PredTy {} `FunTy` _) = reify_for_all ty	        -- Types like ((?x::Int) => Char -> Char)
+reifyType ty@(PredTy {} `FunTy` _) = reify_for_all ty  -- Types like ((?x::Int) => Char -> Char)
 reifyType (TyVarTy tv)	    = return (TH.VarT (reifyName tv))
 reifyType (TyConApp tc tys) = reify_tc_app tc tys   -- Do not expand type synonyms here
 reifyType (AppTy t1 t2)     = do { [r1,r2] <- reifyTypes [t1,t2] ; return (r1 `TH.AppT` r2) }

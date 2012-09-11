@@ -207,6 +207,9 @@ void workerTaskStop (Task *task);
 //
 void taskTimeStamp (Task *task);
 
+// The current Task has finished a GC, record the amount of time spent.
+void taskDoneGC (Task *task, Ticks cpu_time, Ticks elapsed_time);
+
 // Put the task back on the free list, mark it stopped.  Used by
 // forkProcess().
 //
@@ -224,6 +227,11 @@ INLINE_HEADER Task *myTask (void);
 // Requires: sched_mutex.
 //
 void startWorkerTask (Capability *cap);
+
+// Interrupts a worker task that is performing an FFI call.  The thread
+// should not be destroyed.
+//
+void interruptWorkerTask (Task *task);
 
 #endif /* THREADED_RTS */
 

@@ -17,20 +17,20 @@ import {-# SOURCE #-} TcSplice ( runQuasiQuoteDecl )
 
 import HsSyn
 import RdrName		( RdrName, isRdrDataCon, elemLocalRdrEnv, rdrNameOcc )
-import RdrHsSyn		( extractGenericPatTyVars, extractHsRhoRdrTyVars )
+import RdrHsSyn		( extractHsRhoRdrTyVars )
 import RnHsSyn
-import RnTypes		( rnLHsType, rnLHsTypes, rnHsSigType, rnHsTypeFVs, rnContext, rnConDeclFields )
+import RnTypes
 import RnBinds		( rnTopBindsLHS, rnTopBindsRHS, rnMethodBinds, renameSigs, mkSigTvFn,
                                 makeMiniFixityEnv)
 import RnEnv		( lookupLocalDataTcNames, lookupLocatedOccRn,
 			  lookupTopBndrRn, lookupLocatedTopBndrRn,
-			  lookupOccRn, newLocalBndrsRn, bindLocalNamesFV,
+			  lookupOccRn, bindLocalNamesFV,
 			  bindLocatedLocalsFV, bindPatSigTyVarsFV,
 			  bindTyVarsRn, bindTyVarsFV, extendTyVarEnvFVRn,
 			  bindLocalNames, checkDupRdrNames, mapFvRn
 			)
 import RnNames       	( getLocalNonValBinders, extendGlobalRdrEnvRn )
-import HscTypes      	( GenAvailInfo(..), availsToNameSet )
+import HscTypes      	( AvailInfo(..), availsToNameSet )
 import RnHsDoc          ( rnHsDoc, rnMbLHsDoc )
 import TcRnMonad
 
@@ -97,6 +97,7 @@ rnSrcDecls group@(HsGroup { hs_valds   = val_decls,
                             hs_fords   = foreign_decls,
                             hs_defds   = default_decls,
                             hs_ruleds  = rule_decls,
+                            hs_vects   = vect_decls,
                             hs_docs    = docs })
  = do {
    -- (A) Process the fixity declarations, creating a mapping from
@@ -168,13 +169,14 @@ rnSrcDecls group@(HsGroup { hs_valds   = val_decls,
    -- (H) Rename Everything else
 
    (rn_inst_decls,    src_fvs2) <- rnList rnSrcInstDecl   inst_decls ;
-   (rn_rule_decls,    src_fvs3) <- setOptM Opt_ScopedTypeVariables $
-   		      		   rnList rnHsRuleDecl    rule_decls ;
-			   -- Inside RULES, scoped type variables are on
-   (rn_foreign_decls, src_fvs4) <- rnList rnHsForeignDecl foreign_decls ;
-   (rn_ann_decls,     src_fvs5) <- rnList rnAnnDecl       ann_decls ;
-   (rn_default_decls, src_fvs6) <- rnList rnDefaultDecl   default_decls ;
-   (rn_deriv_decls,   src_fvs7) <- rnList rnSrcDerivDecl  deriv_decls ;
+   (rn_rule_decls,    src_fvs3) <- setXOptM Opt_ScopedTypeVariables $
+                                   rnList rnHsRuleDecl    rule_decls ;
+                           -- Inside RULES, scoped type variables are on
+   (rn_vect_decls,    src_fvs4) <- rnList rnHsVectDecl    vect_decls ;
+   (rn_foreign_decls, src_fvs5) <- rnList rnHsForeignDecl foreign_decls ;
+   (rn_ann_decls,     src_fvs6) <- rnList rnAnnDecl       ann_decls ;
+   (rn_default_decls, src_fvs7) <- rnList rnDefaultDecl   default_decls ;
+   (rn_deriv_decls,   src_fvs8) <- rnList rnSrcDerivDecl  deriv_decls ;
       -- Haddock docs; no free vars
    rn_docs <- mapM (wrapLocM rnDocDecl) docs ;
 
@@ -190,13 +192,14 @@ rnSrcDecls group@(HsGroup { hs_valds   = val_decls,
 			     hs_annds  = rn_ann_decls,
 			     hs_defds  = rn_default_decls,
 			     hs_ruleds = rn_rule_decls,
+			     hs_vects  = rn_vect_decls,
                              hs_docs   = rn_docs } ;
 
         tycl_bndrs = hsTyClDeclsBinders rn_tycl_decls rn_inst_decls ;
         ford_bndrs = hsForeignDeclsBinders rn_foreign_decls ;
 	other_def  = (Just (mkNameSet tycl_bndrs `unionNameSets` mkNameSet ford_bndrs), emptyNameSet) ;
         other_fvs  = plusFVs [src_fvs1, src_fvs2, src_fvs3, src_fvs4, 
-			      src_fvs5, src_fvs6, src_fvs7] ;
+			      src_fvs5, src_fvs6, src_fvs7, src_fvs8] ;
 		-- It is tiresome to gather the binders from type and class decls
 
 	src_dus = [other_def] `plusDU` bind_dus `plusDU` usesOnly other_fvs ;
@@ -440,30 +443,19 @@ rnSrcInstDecl (InstDecl inst_ty mbinds uprags ats)
 	-- The typechecker (not the renamer) checks that all 
 	-- the bindings are for the right class
     let
-	meth_names  = collectMethodBinders mbinds
 	(inst_tyvars, _, cls,_) = splitHsInstDeclTy (unLoc inst_ty')
     in
-    checkDupRdrNames meth_names 	`thenM_`
-	-- Check that the same method is not given twice in the
-	-- same instance decl	instance C T where
-	--			      f x = ...
-	--			      g y = ...
-	--			      f x = ...
-	-- We must use checkDupRdrNames because the Name of the
-	-- method is the Name of the class selector, whose SrcSpan
-	-- points to the class declaration
-
     extendTyVarEnvForMethodBinds inst_tyvars (		
 	-- (Slightly strangely) the forall-d tyvars scope over
 	-- the method bindings too
 	rnMethodBinds cls (\_ -> []) 	-- No scoped tyvars
-		      [] mbinds
+		      mbinds
     )						`thenM` \ (mbinds', meth_fvs) ->
 	-- Rename the associated types
 	-- The typechecker (not the renamer) checks that all 
 	-- the declarations are for the right class
     let
-	at_names = map (head . hsTyClDeclBinders) ats
+	at_names = map (tcdLName . unLoc) ats	-- The names of the associated types
     in
     checkDupRdrNames at_names		`thenM_`
 	-- See notes with checkDupRdrNames for methods, above
@@ -539,7 +531,7 @@ rnSrcDerivDecl :: DerivDecl RdrName -> RnM (DerivDecl Name, FreeVars)
 rnSrcDerivDecl (DerivDecl ty)
   = do { standalone_deriv_ok <- xoptM Opt_StandaloneDeriving
        ; unless standalone_deriv_ok (addErr standaloneDerivErr)
-       ; ty' <- rnLHsType (text "a deriving decl") ty
+       ; ty' <- rnLHsType (text "In a deriving declaration") ty
        ; let fvs = extractHsTyNames ty'
        ; return (DerivDecl ty', fvs) }
 
@@ -656,6 +648,29 @@ badRuleLhsErr name lhs bad_e
     ptext (sLit "LHS must be of form (f e1 .. en) where f is not forall'd")
 \end{code}
 
+
+%*********************************************************
+%*                                                      *
+\subsection{Vectorisation declarations}
+%*                                                      *
+%*********************************************************
+
+\begin{code}
+rnHsVectDecl :: VectDecl RdrName -> RnM (VectDecl Name, FreeVars)
+rnHsVectDecl (HsVect var Nothing)
+  = do { var' <- wrapLocM lookupTopBndrRn var
+       ; return (HsVect var' Nothing, unitFV (unLoc var'))
+       }
+rnHsVectDecl (HsVect var (Just rhs))
+  = do { var' <- wrapLocM lookupTopBndrRn var
+       ; (rhs', fv_rhs) <- rnLExpr rhs
+       ; return (HsVect var' (Just rhs'), fv_rhs `addOneFV` unLoc var')
+       }
+rnHsVectDecl (HsNoVect var)
+  = do { var' <- wrapLocM lookupTopBndrRn var
+       ; return (HsNoVect var', unitFV (unLoc var'))
+       }
+\end{code}
 
 %*********************************************************
 %*							*
@@ -788,7 +803,7 @@ rnTyClDecl (ClassDecl {tcdCtxt = context, tcdLName = cname,
 
 	-- Check the signatures
 	-- First process the class op sigs (op_sigs), then the fixity sigs (non_op_sigs).
-	; let sig_rdr_names_w_locs = [op | L _ (TypeSig op _) <- sigs]
+	; let sig_rdr_names_w_locs = [op | L _ (TypeSig ops _) <- sigs, op <- ops]
 	; checkDupRdrNames sig_rdr_names_w_locs
 		-- Typechecker is responsible for checking that we only
 		-- give default-method bindings for things in this class.
@@ -804,15 +819,11 @@ rnTyClDecl (ClassDecl {tcdCtxt = context, tcdLName = cname,
 	-- we want to name both "x" tyvars with the same unique, so that they are
 	-- easy to group together in the typechecker.  
 	; (mbinds', meth_fvs) 
-	    <- extendTyVarEnvForMethodBinds tyvars' $ do
-	    { name_env <- getLocalRdrEnv
-	    ; let gen_rdr_tyvars_w_locs = [ tv | tv <- extractGenericPatTyVars mbinds,
-	    		 		         not (unLoc tv `elemLocalRdrEnv` name_env) ]
+	    <- extendTyVarEnvForMethodBinds tyvars' $
 		-- No need to check for duplicate method signatures
 		-- since that is done by RnNames.extendGlobalRdrEnvRn
 		-- and the methods are already in scope
-	    ; gen_tyvars <- newLocalBndrsRn gen_rdr_tyvars_w_locs
-	    ; rnMethodBinds (unLoc cname') (mkSigTvFn sigs') gen_tyvars mbinds }
+	         rnMethodBinds (unLoc cname') (mkSigTvFn sigs') mbinds
 
   -- Haddock docs 
 	; docs' <- mapM (wrapLocM rnDocDecl) docs
@@ -908,12 +919,16 @@ rnConDecl decl@(ConDecl { con_name = name, con_qvars = tvs
         ; rdr_env <- getLocalRdrEnv
         ; let in_scope     = (`elemLocalRdrEnv` rdr_env) . unLoc
 	      arg_tys      = hsConDeclArgTys details
-	      implicit_tvs = case res_ty of
+	      mentioned_tvs = case res_ty of
 	      	    	       ResTyH98 -> filterOut in_scope (get_rdr_tvs arg_tys)
 	      	    	       ResTyGADT ty -> get_rdr_tvs (ty : arg_tys)
-	      new_tvs = case expl of
-	        	  Explicit -> tvs
-		    	  Implicit -> userHsTyVarBndrs implicit_tvs
+
+         -- With an Explicit forall, check for unused binders
+	 -- With Implicit, find the mentioned ones, and use them as binders
+	; new_tvs <- case expl of
+	    	       Implicit -> return (userHsTyVarBndrs mentioned_tvs)
+            	       Explicit -> do { warnUnusedForAlls doc tvs mentioned_tvs
+                                      ; return tvs }
 
         ; mb_doc' <- rnMbLHsDoc mb_doc 
 
@@ -1214,6 +1229,8 @@ add gp@(HsGroup {hs_annds  = ts}) l (AnnD d) ds
   = addl (gp { hs_annds = L l d : ts }) ds
 add gp@(HsGroup {hs_ruleds  = ts}) l (RuleD d) ds
   = addl (gp { hs_ruleds = L l d : ts }) ds
+add gp@(HsGroup {hs_vects  = ts}) l (VectD d) ds
+  = addl (gp { hs_vects = L l d : ts }) ds
 add gp l (DocD d) ds
   = addl (gp { hs_docs = (L l d) : (hs_docs gp) })  ds
 

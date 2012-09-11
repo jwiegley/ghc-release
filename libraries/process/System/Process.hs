@@ -1,4 +1,8 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface #-}
+#if __GLASGOW_HASKELL__ >= 701
+-- not available prior to 7.1
+{-# LANGUAGE InterruptibleFFI #-}
+#endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Process
@@ -49,12 +53,14 @@ module System.Process (
 #endif
         system,
         rawSystem,
+        showCommandForUser,
 
 #ifndef __HUGS__
 	-- * Process completion
 	waitForProcess,
 	getProcessExitCode,
 	terminateProcess,
+	interruptProcessGroupOf,
 #endif
  ) where
 
@@ -80,7 +86,10 @@ import GHC.IO.Exception	( ioException, IOErrorType(..) )
 #else
 import GHC.IOBase	( ioException, IOErrorType(..) )
 #endif
-#if !defined(mingw32_HOST_OS)
+#if defined(mingw32_HOST_OS)
+import System.Win32.Process (getProcessId)
+import System.Win32.Console (generateConsoleCtrlEvent, cTRL_BREAK_EVENT)
+#else
 import System.Posix.Signals
 #endif
 #endif
@@ -167,7 +176,8 @@ proc cmd args = CreateProcess { cmdspec = RawCommand cmd args,
                                 std_in = Inherit,
                                 std_out = Inherit,
                                 std_err = Inherit,
-                                close_fds = False}
+                                close_fds = False,
+                                create_group = False}
 
 -- | Construct a 'CreateProcess' record for passing to 'createProcess',
 -- representing a command to be passed to the shell.
@@ -178,8 +188,9 @@ shell str = CreateProcess { cmdspec = ShellCommand str,
                             std_in = Inherit,
                             std_out = Inherit,
                             std_err = Inherit,
-                            close_fds = False}
-                                            
+                            close_fds = False,
+                            create_group = False}
+
 {- |
 This is the most general way to spawn an external process.  The
 process can be a command line to be executed by a shell or a raw command
@@ -309,7 +320,7 @@ waitForProcess ph = do
 	-- (XXX but there's a small race window here during which another
 	-- thread could close the handle or call waitForProcess)
         alloca $ \pret -> do
-          throwErrnoIfMinus1_ "waitForProcess" (c_waitForProcess h pret)
+          throwErrnoIfMinus1Retry_ "waitForProcess" (c_waitForProcess h pret)
           withProcessHandle ph $ \p_' ->
             case p_' of
               ClosedHandle e -> return (p_',e)
@@ -492,30 +503,22 @@ The return codes and possible failures are the same as for 'system'.
 rawSystem :: String -> [String] -> IO ExitCode
 #ifdef __GLASGOW_HASKELL__
 rawSystem cmd args = syncProcess "rawSystem" (proc cmd args)
-
 #elif !mingw32_HOST_OS
 -- crude fallback implementation: could do much better than this under Unix
-rawSystem cmd args = system (unwords (map translate (cmd:args)))
-
-translate :: String -> String
-translate str = '\'' : foldr escape "'" str
-  where	escape '\'' = showString "'\\''"
-	escape c    = showChar c
+rawSystem cmd args = system (showCommandForUser cmd args)
 #else /* mingw32_HOST_OS &&  ! __GLASGOW_HASKELL__ */
 # if __HUGS__
-rawSystem cmd args = system (unwords (cmd : map translate args))
+rawSystem cmd args = system (cmd ++ showCommandForUser "" args)
 # else
-rawSystem cmd args = system (unwords (map translate (cmd:args)))
+rawSystem cmd args = system (showCommandForUser cmd args)
+#endif
 #endif
 
--- copied from System.Process (qv)
-translate :: String -> String
-translate str = '"' : snd (foldr escape (True,"\"") str)
-  where escape '"'  (b,     str) = (True,  '\\' : '"'  : str)
-        escape '\\' (True,  str) = (True,  '\\' : '\\' : str)
-        escape '\\' (False, str) = (False, '\\' : str)
-        escape c    (b,     str) = (False, c : str)
-#endif
+-- | Given a program @p@ and arguments @args@,
+--   @showCommandForUser p args@ returns a string suitable for pasting
+--   into sh (on POSIX OSs) or cmd.exe (on Windows).
+showCommandForUser :: FilePath -> [String] -> String
+showCommandForUser cmd args = unwords (map translate (cmd : args))
 
 #ifndef __HUGS__
 -- ----------------------------------------------------------------------------
@@ -542,10 +545,41 @@ terminateProcess ph = do
     case p_ of 
       ClosedHandle _ -> return p_
       OpenHandle h -> do
-	throwErrnoIfMinus1_ "terminateProcess" $ c_terminateProcess h
+        throwErrnoIfMinus1Retry_ "terminateProcess" $ c_terminateProcess h
 	return p_
 	-- does not close the handle, we might want to try terminating it
 	-- again, or get its exit code.
+
+-- ----------------------------------------------------------------------------
+-- interruptProcessGroupOf
+
+-- | Sends an interrupt signal to the process group of the given process.
+--
+-- On Unix systems, it sends the group the SIGINT signal.
+--
+-- On Windows systems, it generates a CTRL_BREAK_EVENT and will only work for
+-- processes created using 'createProcess' and setting the 'create_group' flag
+
+interruptProcessGroupOf
+    :: ProcessHandle    -- ^ Lead process in the process group
+    -> IO ()
+interruptProcessGroupOf ph = do
+#if mingw32_HOST_OS
+    withProcessHandle_ ph $ \p_ -> do
+        case p_ of
+            ClosedHandle _ -> return p_
+            OpenHandle h -> do
+                pid <- getProcessId h
+                generateConsoleCtrlEvent cTRL_BREAK_EVENT pid
+                return p_
+#else
+    withProcessHandle_ ph $ \p_ -> do
+        case p_ of
+            ClosedHandle _ -> return p_
+            OpenHandle h -> do
+                signalProcessGroup sigINT h
+                return p_
+#endif
 
 -- ----------------------------------------------------------------------------
 -- getProcessExitCode
@@ -562,7 +596,7 @@ getProcessExitCode ph = do
       ClosedHandle e -> return (p_, Just e)
       OpenHandle h ->
 	alloca $ \pExitCode -> do
-	    res <- throwErrnoIfMinus1 "getProcessExitCode" $
+            res <- throwErrnoIfMinus1Retry "getProcessExitCode" $
 	        	c_getProcessExitCode h pExitCode
 	    code <- peek pExitCode
 	    if res == 0
@@ -587,7 +621,12 @@ foreign import ccall unsafe "getProcessExitCode"
 	-> Ptr CInt
 	-> IO CInt
 
-foreign import ccall safe "waitForProcess" -- NB. safe - can block
+#if __GLASGOW_HASKELL__ < 701
+-- not available prior to 7.1
+#define interruptible safe
+#endif
+
+foreign import ccall interruptible "waitForProcess" -- NB. safe - can block
   c_waitForProcess
 	:: PHANDLE
         -> Ptr CInt

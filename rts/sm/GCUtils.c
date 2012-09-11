@@ -18,6 +18,7 @@
 #include "Storage.h"
 #include "GC.h"
 #include "GCThread.h"
+#include "GCTDecl.h"
 #include "GCUtils.h"
 #include "Printer.h"
 #include "Trace.h"
@@ -90,9 +91,6 @@ bdescr *
 grab_local_todo_block (gen_workspace *ws)
 {
     bdescr *bd;
-    generation *gen;
-
-    gen = ws->gen;
 
     bd = ws->todo_overflow;
     if (bd != NULL)
@@ -213,8 +211,8 @@ todo_block_full (nat size, gen_workspace *ws)
         // Otherwise, push this block out to the global list.
         else 
         {
-            generation *gen;
-            gen = ws->gen;
+            DEBUG_ONLY( generation *gen );
+            DEBUG_ONLY( gen = ws->gen );
             debugTrace(DEBUG_gc, "push todo block %p (%ld words), step %d, todo_q: %ld", 
                   bd->start, (unsigned long)(bd->free - bd->u.scan),
                   gen->no, dequeElements(ws->todo_q));
@@ -294,14 +292,13 @@ alloc_todo_block (gen_workspace *ws, nat size)
 
 #if DEBUG
 void
-printMutableList(generation *gen)
+printMutableList(bdescr *bd)
 {
-    bdescr *bd;
     StgPtr p;
 
-    debugBelch("mutable list %p: ", gen->mut_list);
+    debugBelch("mutable list %p: ", bd);
 
-    for (bd = gen->mut_list; bd != NULL; bd = bd->link) {
+    for (; bd != NULL; bd = bd->link) {
 	for (p = bd->start; p < bd->free; p++) {
 	    debugBelch("%p (%s), ", (void *)*p, info_type((StgClosure *)*p));
 	}

@@ -1,5 +1,5 @@
 name:       array
-version:    0.3.0.2
+version:    0.3.0.3
 license:    BSD3
 license-file:    LICENSE
 maintainer:    libraries@haskell.org
@@ -15,8 +15,8 @@ build-type: Simple
 extra-source-files: include/Typeable.h
 
 source-repository head
-    type:     darcs
-    location: http://darcs.haskell.org/packages/array/
+    type:     git
+    location: http://darcs.haskell.org/packages/array.git/
 
 library
   build-depends: base >= 4.2 && < 5
@@ -40,6 +40,8 @@ library
       TypeSynonymInstances
   if impl(ghc)
     extensions:
+      DeriveDataTypeable,
+      StandaloneDeriving,
       Rank2Types,
       MagicHash,
       UnboxedTuples,

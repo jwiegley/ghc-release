@@ -1,34 +1,114 @@
 {-# OPTIONS -Wall -Werror -fno-warn-type-defaults -fno-warn-unused-binds -fno-warn-orphans #-}
+{-# LANGUAGE FlexibleInstances, ExistentialQuantification #-}
 
 import Control.Monad
 import Data.Char
 import Data.Ratio
+import Data.Maybe
 import Data.Time
 import Data.Time.Calendar.OrdinalDate
 import Data.Time.Calendar.WeekDate
 import Data.Time.Clock.POSIX
 import System.Locale
+import System.Exit
 import Test.QuickCheck
+import Test.QuickCheck.Batch
 
+
+class RunTest p where
+    runTest :: p -> IO TestResult
+
+instance RunTest (IO TestResult) where
+    runTest iob = iob
+
+instance RunTest Property where
+    runTest p = run p (TestOptions {no_of_tests = 10000,length_of_tests = 0,debug_tests = False})
+
+data ExhaustiveTest = forall t. (Show t) => MkExhaustiveTest [t] (t -> IO Bool)
+
+instance RunTest ExhaustiveTest where
+    runTest (MkExhaustiveTest cases f) = do
+        results <- mapM (\t -> do {b <- f t;return (b,show t)}) cases
+        let failures = mapMaybe (\(b,n) -> if b then Nothing else Just n) results
+        let fcount = length failures
+        return (if fcount == 0 then TestOk "OK" 0 [] else TestFailed failures fcount)
 
 ntest :: Int
 ntest = 1000
 
 main :: IO ()
-main = do putStrLn "Should work:"
-          checkAll properties
-          putStrLn "Known failures:"
-          checkAll knownFailures
+main = do
+    putStrLn "Should work:"
+    good1 <- checkAll extests
+    putStrLn "Should work:"
+    good2 <- checkAll properties
+    putStrLn "Known failures:"
+    _ <- checkAll knownFailures
+    exitWith (if good1 && good2 then ExitSuccess else ExitFailure 1)
 
-checkAll :: [NamedProperty] -> IO ()
-checkAll ps = mapM_ (checkOne config) ps
- where config = defaultConfig { configMaxTest = ntest }
-       
-checkOne :: Config -> NamedProperty -> IO ()
-checkOne config (n,p) = 
-    do putStr (rpad 65 ' ' n)
-       check config p
-  where rpad n' c xs = xs ++ replicate (n' - length xs) c
+days2011 :: [Day]
+days2011 = [(fromGregorian 2011 1 1) .. (fromGregorian 2011 12 31)]
+
+extests :: [(String,ExhaustiveTest)]
+extests = [
+    ("parse %y",MkExhaustiveTest [0..99] parseYY),
+    ("parse %C %y 1900s",MkExhaustiveTest [0..99] (parseCYY 19)),
+    ("parse %C %y 2000s",MkExhaustiveTest [0..99] (parseCYY 20)),
+    ("parse %C %y 1400s",MkExhaustiveTest [0..99] (parseCYY 14)),
+    ("parse %C %y 700s",MkExhaustiveTest [0..99] (parseCYY 7)),
+    ("parse %Y%m%d",MkExhaustiveTest days2011 parseYMD),
+    ("parse %Y %m %d",MkExhaustiveTest days2011 parseYearDayD),
+    ("parse %Y %-m %e",MkExhaustiveTest days2011 parseYearDayE)
+    ]
+
+parseYMD :: Day -> IO Bool
+parseYMD day = case toGregorian day of
+    (y,m,d) -> return $ (parse "%Y%m%d" ((show y) ++ (show2 m) ++ (show2 d))) == Just day
+
+parseYearDayD :: Day -> IO Bool
+parseYearDayD day = case toGregorian day of
+    (y,m,d) -> return $ (parse "%Y %m %d" ((show y) ++ " " ++ (show2 m) ++ " " ++ (show2 d))) == Just day
+
+parseYearDayE :: Day -> IO Bool
+parseYearDayE day = case toGregorian day of
+    (y,m,d) -> return $ (parse "%Y %-m %e" ((show y) ++ " " ++ (show m) ++ " " ++ (show d))) == Just day
+
+-- | 1969 - 2068
+expectedYear :: Integer -> Integer
+expectedYear i | i >= 69 = 1900 + i
+expectedYear i = 2000 + i
+
+show2 :: (Integral n) => n -> String
+show2 i = (show (div i 10)) ++ (show (mod i 10))
+
+parseYY :: Integer -> IO Bool
+parseYY i = return (parse "%y" (show2 i) == Just (fromGregorian (expectedYear i) 1 1))
+
+parseCYY :: Integer -> Integer -> IO Bool
+parseCYY c i = return (parse "%C %y" ((show2 c) ++ " " ++ (show2 i)) == Just (fromGregorian ((c * 100) + i) 1 1))
+
+checkAll :: RunTest p => [(String,p)] -> IO Bool
+checkAll ps = fmap and (mapM checkOne ps)
+
+trMessage :: TestResult -> String
+trMessage (TestOk s _ _) = s
+trMessage (TestExausted s i ss) = "Exhausted " ++ (show s) ++ " " ++ (show i) ++ " " ++ (show ss)
+trMessage (TestFailed ss i) = "Failed " ++ (show ss) ++ " " ++ (show i)
+trMessage (TestAborted ex) = "Aborted " ++ (show ex)
+
+trGood :: TestResult -> Bool
+trGood (TestOk _ _ _) = True
+trGood _ = False
+
+checkOne :: RunTest p => (String,p) -> IO Bool
+checkOne (n,p) =
+    do
+       putStr (rpad 65 ' ' n)
+       tr <- runTest p
+       putStrLn (trMessage tr)
+       return (trGood tr)
+  where
+    rpad n' c xs = xs ++ replicate (n' - length xs) c
 
 
 parse :: ParseTime t => String -> String -> Maybe t

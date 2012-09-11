@@ -57,7 +57,7 @@ module Name (
 	isValName, isVarName,
 	isWiredInName, isBuiltInSyntax,
 	wiredInNameTyThing_maybe, 
-	nameIsLocalOrFrom,
+	nameIsLocalOrFrom, stableNameCmp,
 
 	-- * Class 'NamedThing' and overloaded friends
 	NamedThing(..),
@@ -106,6 +106,7 @@ data Name = Name {
 --(note later when changing Int# -> FastInt: is that still true about UNPACK?)
 		n_loc  :: !SrcSpan	-- Definition site
 	    }
+    deriving Typeable
 
 -- NOTE: we make the n_loc field strict to eliminate some potential
 -- (and real!) space leaks, due to the fact that we don't look at
@@ -243,7 +244,10 @@ isSystemName _                        = False
 -- | Create a name which is (for now at least) local to the current module and hence
 -- does not need a 'Module' to disambiguate it from other 'Name's
 mkInternalName :: Unique -> OccName -> SrcSpan -> Name
-mkInternalName uniq occ loc = Name { n_uniq = getKeyFastInt uniq, n_sort = Internal, n_occ = occ, n_loc = loc }
+mkInternalName uniq occ loc = Name { n_uniq = getKeyFastInt uniq
+                                   , n_sort = Internal
+                                   , n_occ = occ
+                                   , n_loc = loc }
 	-- NB: You might worry that after lots of huffing and
 	-- puffing we might end up with two local names with distinct
 	-- uniques, but the same OccName.  Indeed we can, but that's ok
@@ -337,6 +341,26 @@ hashName name = getKey (nameUnique name) + 1
 
 cmpName :: Name -> Name -> Ordering
 cmpName n1 n2 = iBox (n_uniq n1) `compare` iBox (n_uniq n2)
+
+stableNameCmp :: Name -> Name -> Ordering
+-- Compare lexicographically
+stableNameCmp (Name { n_sort = s1, n_occ = occ1 })
+	      (Name { n_sort = s2, n_occ = occ2 })
+  = (s1 `sort_cmp` s2) `thenCmp` (occ1 `compare` occ2)
+    -- The ordinary compare on OccNames is lexicogrpahic
+  where
+    -- Later constructors are bigger
+    sort_cmp (External m1) (External m2)       = m1 `stableModuleCmp` m2
+    sort_cmp (External {}) _                   = LT
+    sort_cmp (WiredIn {}) (External {})        = GT
+    sort_cmp (WiredIn m1 _ _) (WiredIn m2 _ _) = m1 `stableModuleCmp` m2
+    sort_cmp (WiredIn {})     _                = LT
+    sort_cmp Internal         (External {})    = GT
+    sort_cmp Internal         (WiredIn {})     = GT
+    sort_cmp Internal         Internal         = EQ
+    sort_cmp Internal         System           = LT
+    sort_cmp System           System           = EQ
+    sort_cmp System           _                = GT
 \end{code}
 
 %************************************************************************
@@ -362,8 +386,6 @@ instance Uniquable Name where
 
 instance NamedThing Name where
     getName n = n
-
-INSTANCE_TYPEABLE0(Name,nameTc,"Name")
 
 instance Data Name where
   -- don't traverse?
@@ -481,12 +503,14 @@ ppr_z_occ_name occ = ftext (zEncodeFS (occNameFS occ))
 -- Prints (if mod information is available) "Defined at <loc>" or 
 --  "Defined in <mod>" information for a Name.
 pprNameLoc :: Name -> SDoc
-pprNameLoc name
-  | isGoodSrcSpan loc = pprDefnLoc loc
-  | isInternalName name || isSystemName name 
-                      = ptext (sLit "<no location info>")
-  | otherwise         = ptext (sLit "Defined in ") <> ppr (nameModule name)
-  where loc = nameSrcSpan name
+pprNameLoc name = case nameSrcSpan name of
+                  RealSrcSpan s ->
+                      pprDefnLoc s
+                  UnhelpfulSpan _
+                   | isInternalName name || isSystemName name ->
+                      ptext (sLit "<no location info>")
+                   | otherwise ->
+                      ptext (sLit "Defined in ") <> ppr (nameModule name)
 \end{code}
 
 %************************************************************************

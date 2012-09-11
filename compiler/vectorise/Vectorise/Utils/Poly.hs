@@ -11,7 +11,6 @@ import Vectorise.Monad
 import Vectorise.Utils.PADict
 import CoreSyn
 import Type
-import Var
 import FastString
 import Control.Monad
 
@@ -43,11 +42,11 @@ polyArity tvs = do
 
 polyApply :: CoreExpr -> [Type] -> VM CoreExpr
 polyApply expr tys
- = do Just dicts <- liftM sequence $ mapM paDictOfType tys
+ = do dicts <- mapM paDictOfType tys
       return $ expr `mkTyApps` tys `mkApps` dicts
 
 
 polyVApply :: VExpr -> [Type] -> VM VExpr
 polyVApply expr tys
- = do Just dicts <- liftM sequence $ mapM paDictOfType tys
+ = do dicts <- mapM paDictOfType tys
       return     $ mapVect (\e -> e `mkTyApps` tys `mkApps` dicts) expr

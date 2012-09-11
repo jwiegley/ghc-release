@@ -23,6 +23,7 @@
 void initScheduler (void);
 void exitScheduler (rtsBool wait_foreign);
 void freeScheduler (void);
+void markScheduler (evac_fn evac, void *user);
 
 // Place a new thread on the run queue of the current Capability
 void scheduleThread (Capability *cap, StgTSO *tso);
@@ -44,7 +45,7 @@ void wakeUpRts(void);
 StgWord raiseExceptionHelper (StgRegTable *reg, StgTSO *tso, StgClosure *exception);
 
 /* findRetryFrameHelper */
-StgWord findRetryFrameHelper (StgTSO *tso);
+StgWord findRetryFrameHelper (Capability *cap, StgTSO *tso);
 
 /* Entry point for a new worker */
 void scheduleWorker (Capability *cap, Task *task);

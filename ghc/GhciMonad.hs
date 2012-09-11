@@ -14,12 +14,13 @@ module GhciMonad where
 #include "HsVersions.h"
 
 import qualified GHC
+import GhcMonad         hiding (liftIO)
 import Outputable       hiding (printForUser, printForUserPartWay)
 import qualified Outputable
 import Panic            hiding (showException)
 import Util
 import DynFlags
-import HscTypes hiding (liftIO)
+import HscTypes
 import SrcLoc
 import Module
 import ObjLink
@@ -28,13 +29,10 @@ import StaticFlags
 import qualified MonadUtils
 
 import Exception
--- import Data.Maybe
 import Numeric
 import Data.Array
--- import Data.Char
 import Data.Int         ( Int64 )
 import Data.IORef
--- import Data.List
 import System.CPUTime
 import System.Environment
 import System.IO
@@ -58,7 +56,8 @@ data GHCiState = GHCiState
 	editor         :: String,
         stop           :: String,
 	options        :: [GHCiOption],
-        prelude        :: GHC.Module,
+        prelude        :: GHC.ModuleName,
+        line_number    :: !Int,         -- input line
         break_ctr      :: !Int,
         breaks         :: ![(Int, BreakLocation)],
         tickarrays     :: ModuleEnv TickArray,
@@ -79,7 +78,8 @@ data GHCiState = GHCiState
         ghc_e :: Bool -- True if this is 'ghc -e' (or runghc)
      }
 
-data CtxtCmd
+data CtxtCmd    -- In each case, the first [String] are the starred modules
+     		-- and the second are the unstarred ones
   = SetContext [String] [String]
   | AddModules [String] [String]
   | RemModules [String] [String]
@@ -91,6 +91,7 @@ data GHCiOption
 	= ShowTiming		-- show time/allocs after evaluation
 	| ShowType		-- show the type of expressions
 	| RevertCAFs		-- revert CAFs after every evaluation
+        | Multiline             -- use multiline commands
 	deriving Eq
 
 data BreakLocation
@@ -181,10 +182,6 @@ instance GhcMonad (InputT GHCi) where
 instance MonadUtils.MonadIO (InputT GHCi) where
   liftIO = Trans.liftIO
 
-instance WarnLogMonad (InputT GHCi) where
-  setWarnings = lift . setWarnings
-  getWarnings = lift getWarnings
-
 instance ExceptionMonad GHCi where
   gcatch m h = GHCi $ \r -> unGHCi m r `gcatch` (\e -> unGHCi (h e) r)
   gblock (GHCi m)   = GHCi $ \r -> gblock (m r)
@@ -195,10 +192,6 @@ instance ExceptionMonad GHCi where
                                 g_restore (GHCi m) = GHCi $ \s' -> io_restore (m s')
                              in
                                 unGHCi (f g_restore) s
-
-instance WarnLogMonad GHCi where
-  setWarnings warns = liftGhc $ setWarnings warns
-  getWarnings = liftGhc $ getWarnings
 
 instance MonadIO GHCi where
   liftIO = MonadUtils.liftIO
@@ -217,7 +210,7 @@ instance ExceptionMonad (InputT GHCi) where
   gunblock = Haskeline.unblock
 
 -- for convenience...
-getPrelude :: GHCi Module
+getPrelude :: GHCi ModuleName
 getPrelude = getGHCiState >>= return . prelude
 
 getDynFlags :: GhcMonad m => m DynFlags
@@ -260,9 +253,9 @@ runStmt expr step = do
     withProgName (progname st) $
     withArgs (args st) $
       reflectGHCi x $ do
-        GHC.handleSourceError (\e -> do GHC.printExceptionAndWarnings e
+        GHC.handleSourceError (\e -> do GHC.printException e
                                         return GHC.RunFailed) $ do
-          GHC.runStmt expr step
+          GHC.runStmtWithLocation (progname st) (line_number st) expr step 
 
 resume :: (SrcSpan -> Bool) -> GHC.SingleStep -> GHCi GHC.RunResult
 resume canLogSpan step = do

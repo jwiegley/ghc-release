@@ -15,8 +15,11 @@ module Linker ( HValue, getHValue, showLinkerState,
 		linkExpr, unload, withExtendedLinkEnv,
                 extendLinkEnv, deleteFromLinkEnv,
                 extendLoadedPkgs, 
-		linkPackages,initDynLinker,
-                dataConInfoPtrToName
+		linkPackages,initDynLinker,linkModule,
+                dataConInfoPtrToName, lessUnsafeCoerce,
+
+		-- Saving/restoring globals
+		PersistentLinkerState, saveLinkerGlobals, restoreLinkerGlobals
 	) where
 
 #include "HsVersions.h"
@@ -55,6 +58,8 @@ import Constants
 import FastString
 import Config
 
+import GHC.Exts (unsafeCoerce#)
+
 -- Standard libraries
 import Control.Monad
 
@@ -84,13 +89,22 @@ import Exception
 The persistent linker state *must* match the actual state of the 
 C dynamic linker at all times, so we keep it in a private global variable.
 
+The global IORef used for PersistentLinkerState actually contains another MVar.
+The reason for this is that we want to allow another loaded copy of the GHC
+library to side-effect the PLS and for those changes to be reflected here.
 
 The PersistentLinkerState maps Names to actual closures (for
 interpreted code only), for use during linking.
 
 \begin{code}
-GLOBAL_MVAR(v_PersistentLinkerState, panic "Dynamic linker not initialised", PersistentLinkerState)
+GLOBAL_VAR_M(v_PersistentLinkerState, newMVar (panic "Dynamic linker not initialised"), MVar PersistentLinkerState)
 GLOBAL_VAR(v_InitLinkerDone, False, Bool)	-- Set True when dynamic linker is initialised
+
+modifyPLS_ :: (PersistentLinkerState -> IO PersistentLinkerState) -> IO ()
+modifyPLS_ f = readIORef v_PersistentLinkerState >>= flip modifyMVar_ f
+
+modifyPLS :: (PersistentLinkerState -> IO (PersistentLinkerState, a)) -> IO a
+modifyPLS f = readIORef v_PersistentLinkerState >>= flip modifyMVar f
 
 data PersistentLinkerState
    = PersistentLinkerState {
@@ -136,19 +150,19 @@ emptyPLS _ = PersistentLinkerState {
 \begin{code}
 extendLoadedPkgs :: [PackageId] -> IO ()
 extendLoadedPkgs pkgs =
-  modifyMVar_ v_PersistentLinkerState $ \s ->
+  modifyPLS_ $ \s ->
       return s{ pkgs_loaded = pkgs ++ pkgs_loaded s }
 
 extendLinkEnv :: [(Name,HValue)] -> IO ()
 -- Automatically discards shadowed bindings
 extendLinkEnv new_bindings =
-  modifyMVar_ v_PersistentLinkerState $ \pls ->
+  modifyPLS_ $ \pls ->
     let new_closure_env = extendClosureEnv (closure_env pls) new_bindings
     in return pls{ closure_env = new_closure_env }
 
 deleteFromLinkEnv :: [Name] -> IO ()
 deleteFromLinkEnv to_remove =
-  modifyMVar_ v_PersistentLinkerState $ \pls ->
+  modifyPLS_ $ \pls ->
     let new_closure_env = delListFromNameEnv (closure_env pls) to_remove
     in return pls{ closure_env = new_closure_env }
 
@@ -245,11 +259,18 @@ dataConInfoPtrToName x = do
          where
          (modWords, occWord) = ASSERT (length rest1 > 0) (parseModOcc [] (tail rest1))
       parseModOcc :: [[Word8]] -> [Word8] -> ([[Word8]], [Word8])
-      parseModOcc acc str
+      -- We only look for dots if str could start with a module name,
+      -- i.e. if it starts with an upper case character.
+      -- Otherwise we might think that "X.:->" is the module name in
+      -- "X.:->.+", whereas actually "X" is the module name and
+      -- ":->.+" is a constructor name.
+      parseModOcc acc str@(c : _)
+       | isUpper $ chr $ fromIntegral c
          = case break (== dot) str of
               (top, []) -> (acc, top)
-              (top, _:bot) -> parseModOcc (top : acc) bot
-       
+              (top, _ : bot) -> parseModOcc (top : acc) bot
+      parseModOcc acc str = (acc, str)
+
 -- | Get the 'HValue' associated with the given name.
 --
 -- May cause loading the module that contains the name.
@@ -257,7 +278,8 @@ dataConInfoPtrToName x = do
 -- Throws a 'ProgramError' if loading fails or the name cannot be found.
 getHValue :: HscEnv -> Name -> IO HValue
 getHValue hsc_env name = do
-  pls <- modifyMVar v_PersistentLinkerState $ \pls -> do
+  initDynLinker (hsc_dflags hsc_env)
+  pls <- modifyPLS $ \pls -> do
            if (isExternalName name) then do
              (pls', ok) <- linkDependencies hsc_env pls noSrcSpan [nameModule name]
              if (failed ok) then ghcError (ProgramError "")
@@ -270,6 +292,7 @@ linkDependencies :: HscEnv -> PersistentLinkerState
                  -> SrcSpan -> [Module]
                  -> IO (PersistentLinkerState, SuccessFlag)
 linkDependencies hsc_env pls span needed_mods = do
+--   initDynLinker (hsc_dflags hsc_env)
    let hpt = hsc_HPT hsc_env
        dflags = hsc_dflags hsc_env
 	-- The interpreter and dynamic linker can only handle object code built
@@ -302,7 +325,7 @@ withExtendedLinkEnv new_env action
         -- package), so the reset action only removes the names we
         -- added earlier.
           reset_old_env = liftIO $ do
-            modifyMVar_ v_PersistentLinkerState $ \pls ->
+            modifyPLS_ $ \pls ->
                 let cur = closure_env pls
                     new = delListFromNameEnv cur (map fst new_env)
                 in return pls{ closure_env = new }
@@ -326,7 +349,7 @@ filterNameMap mods env
 -- | Display the persistent linker state.
 showLinkerState :: IO ()
 showLinkerState
-  = do pls <- readMVar v_PersistentLinkerState
+  = do pls <- readIORef v_PersistentLinkerState >>= readMVar 
        printDump (vcat [text "----- Linker state -----",
 			text "Pkgs:" <+> ppr (pkgs_loaded pls),
 			text "Objs:" <+> ppr (objs_loaded pls),
@@ -363,7 +386,7 @@ showLinkerState
 --
 initDynLinker :: DynFlags -> IO ()
 initDynLinker dflags =
-  modifyMVar_ v_PersistentLinkerState $ \pls0 -> do
+  modifyPLS_ $ \pls0 -> do
     done <- readIORef v_InitLinkerDone
     if done then return pls0
             else do writeIORef v_InitLinkerDone True
@@ -501,7 +524,7 @@ linkExpr hsc_env span root_ul_bco
    ; initDynLinker dflags
 
         -- Take lock for the actual work.
-   ; modifyMVar v_PersistentLinkerState $ \pls0 -> do {
+   ; modifyPLS $ \pls0 -> do {
 
 	-- Link the packages and modules required
    ; (pls, ok) <- linkDependencies hsc_env pls0 span needed_mods
@@ -626,7 +649,7 @@ getLinkDeps hsc_env hpt pls maybe_normal_osuf span mods
 
             boot_deps' = filter (not . (`elementOfUniqSet` acc_mods)) boot_deps
             acc_mods'  = addListToUniqSet acc_mods (moduleName mod : mod_deps)
-            acc_pkgs'  = addListToUniqSet acc_pkgs pkg_deps
+            acc_pkgs'  = addListToUniqSet acc_pkgs $ map fst pkg_deps
           --
           if pkg /= this_pkg
              then follow_deps mods acc_mods (addOneToUniqSet acc_pkgs' pkg)
@@ -689,6 +712,38 @@ getLinkDeps hsc_env hpt pls maybe_normal_osuf span mods
 	    adjust_ul _ _ = panic "adjust_ul"
 \end{code}
 
+%************************************************************************
+%*									*
+              Loading a single module
+%*									*
+%************************************************************************
+\begin{code}
+
+-- | Link a single module
+linkModule :: HscEnv -> Module -> IO ()
+linkModule hsc_env mod = do
+  initDynLinker (hsc_dflags hsc_env)
+  modifyPLS_ $ \pls -> do
+    (pls', ok) <- linkDependencies hsc_env pls noSrcSpan [mod]
+    if (failed ok) then ghcError (ProgramError "could not link module")
+      else return pls'
+
+-- | Coerce a value as usual, but:
+--
+-- 1) Evaluate it immediately to get a segfault early if the coercion was wrong
+--
+-- 2) Wrap it in some debug messages at verbosity 3 or higher so we can see what happened
+--    if it /does/ segfault
+lessUnsafeCoerce :: DynFlags -> String -> a -> IO b
+lessUnsafeCoerce dflags context what = do
+    debugTraceMsg dflags 3 $ (ptext $ sLit "Coercing a value in") <+> (text context) <> (ptext $ sLit "...")
+    output <- evaluate (unsafeCoerce# what)
+    debugTraceMsg dflags 3 $ ptext $ sLit "Successfully evaluated coercion"
+    return output
+
+
+
+\end{code}
 
 %************************************************************************
 %*									*
@@ -878,7 +933,7 @@ unload dflags linkables
 	initDynLinker dflags
 
 	new_pls
-            <- modifyMVar v_PersistentLinkerState $ \pls -> do
+            <- modifyPLS $ \pls -> do
 	         pls1 <- unload_wkr dflags linkables pls
                  return (pls1, pls1)
 
@@ -990,7 +1045,8 @@ linkPackages :: DynFlags -> [PackageId] -> IO ()
 linkPackages dflags new_pkgs = do
   -- It's probably not safe to try to load packages concurrently, so we take
   -- a lock.
-  modifyMVar_ v_PersistentLinkerState $ \pls -> do
+  initDynLinker dflags
+  modifyPLS_ $ \pls -> do
     linkPackages' dflags new_pkgs pls
 
 linkPackages' :: DynFlags -> [PackageId] -> PersistentLinkerState
@@ -1049,26 +1105,18 @@ linkPackage dflags pkg
         classifieds   <- mapM (locateOneObj dirs) libs'
 
         -- Complication: all the .so's must be loaded before any of the .o's.  
-	let dlls = [ dll | DLL dll    <- classifieds ]
-	    objs = [ obj | Object obj <- classifieds ]
-	    archs = [ arch | Archive arch <- classifieds ]
+        let known_dlls = [ dll  | DLLPath dll    <- classifieds ]
+            dlls       = [ dll  | DLL dll        <- classifieds ]
+            objs       = [ obj  | Object obj     <- classifieds ]
+            archs      = [ arch | Archive arch   <- classifieds ]
 
 	maybePutStr dflags ("Loading package " ++ display (sourcePackageId pkg) ++ " ... ")
 
 	-- See comments with partOfGHCi
 	when (packageName pkg `notElem` partOfGHCi) $ do
 	    loadFrameworks pkg
-            -- When a library A needs symbols from a library B, the order in
-            -- extra_libraries/extra_ld_opts is "-lA -lB", because that's the
-            -- way ld expects it for static linking. Dynamic linking is a
-            -- different story: When A has no dependency information for B,
-            -- dlopen-ing A with RTLD_NOW (see addDLL in Linker.c) will fail
-            -- when B has not been loaded before. In a nutshell: Reverse the
-            -- order of DLLs for dynamic linking.
-	    -- This fixes a problem with the HOpenGL package (see "Compiling
-	    -- HOpenGL under recent versions of GHC" on the HOpenGL list).
-	    mapM_ (load_dyn dirs) (reverse dlls)
-	
+            mapM_ load_dyn (known_dlls ++ map mkSOName dlls)
+
 	-- After loading all the DLLs, we can load the static objects.
 	-- Ordering isn't important here, because we do one final link
 	-- step to resolve everything.
@@ -1080,12 +1128,17 @@ linkPackage dflags pkg
 	if succeeded ok then maybePutStrLn dflags "done."
 	      else ghcError (InstallationError ("unable to load package `" ++ display (sourcePackageId pkg) ++ "'"))
 
-load_dyn :: [FilePath] -> FilePath -> IO ()
-load_dyn dirs dll = do r <- loadDynamic dirs dll
-		       case r of
-			 Nothing  -> return ()
-			 Just err -> ghcError (CmdLineError ("can't load .so/.DLL for: " 
-                                 			      ++ dll ++ " (" ++ err ++ ")" ))
+-- we have already searched the filesystem; the strings passed to load_dyn
+-- can be passed directly to loadDLL.  They are either fully-qualified
+-- ("/usr/lib/libfoo.so"), or unqualified ("libfoo.so").  In the latter case,
+-- loadDLL is going to search the system paths to find the library.
+--
+load_dyn :: FilePath -> IO ()
+load_dyn dll = do r <- loadDLL dll
+                  case r of
+                    Nothing  -> return ()
+                    Just err -> ghcError (CmdLineError ("can't load .so/.DLL for: "
+                                                              ++ dll ++ " (" ++ err ++ ")" ))
 
 loadFrameworks :: InstalledPackageInfo_ ModuleName -> IO ()
 loadFrameworks pkg
@@ -1124,7 +1177,7 @@ locateOneObj dirs lib
      mk_dyn_lib_path dir = dir </> mkSOName dyn_lib_name
      findObject  = liftM (fmap Object)  $ findFile mk_obj_path  dirs
      findArchive = liftM (fmap Archive) $ findFile mk_arch_path dirs
-     findDll     = liftM (fmap DLL)     $ findFile mk_dyn_lib_path dirs
+     findDll     = liftM (fmap DLLPath) $ findFile mk_dyn_lib_path dirs
      assumeDll   = return (DLL lib)
      infixr `orElse`
      f `orElse` g = do m <- f
@@ -1206,4 +1259,20 @@ maybePutStr dflags s | verbosity dflags > 0 = putStr s
 maybePutStrLn :: DynFlags -> String -> IO ()
 maybePutStrLn dflags s | verbosity dflags > 0 = putStrLn s
 		       | otherwise	      = return ()
+\end{code}
+
+%************************************************************************
+%*									*
+	Tunneling global variables into new instance of GHC library
+%*									*
+%************************************************************************
+
+\begin{code}
+saveLinkerGlobals :: IO (MVar PersistentLinkerState, Bool)
+saveLinkerGlobals = liftM2 (,) (readIORef v_PersistentLinkerState) (readIORef v_InitLinkerDone)
+
+restoreLinkerGlobals :: (MVar PersistentLinkerState, Bool) -> IO ()
+restoreLinkerGlobals (pls, ild) = do
+    writeIORef v_PersistentLinkerState pls
+    writeIORef v_InitLinkerDone ild
 \end{code}

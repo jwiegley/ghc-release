@@ -1,8 +1,8 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 module GHC.Unicode where
 
-import GHC.Bool
 import GHC.Types
 
 isAscii         :: Char -> Bool

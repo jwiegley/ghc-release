@@ -709,11 +709,12 @@ specExpr :: Subst -> CoreExpr -> SpecM (CoreExpr, UsageDetails)
 
 ---------------- First the easy cases --------------------
 specExpr subst (Type ty) = return (Type (CoreSubst.substTy subst ty), emptyUDs)
+specExpr subst (Coercion co) = return (Coercion (CoreSubst.substCo subst co), emptyUDs)
 specExpr subst (Var v)   = return (specVar subst v,         emptyUDs)
 specExpr _     (Lit lit) = return (Lit lit,                 emptyUDs)
 specExpr subst (Cast e co) = do
     (e', uds) <- specExpr subst e
-    return ((Cast e' (CoreSubst.substTy subst co)), uds)
+    return ((Cast e' (CoreSubst.substCo subst co)), uds)
 specExpr subst (Note note body) = do
     (body', uds) <- specExpr subst body
     return (Note (specNote subst note) body', uds)
@@ -1137,6 +1138,9 @@ specCalls subst rules_for_me calls_for_me fn rhs
 		-- Add a suitable unfolding if the spec_inl_prag says so
 		-- See Note [Inline specialisations]
 		spec_inl_prag 
+		  | not is_local && isStrongLoopBreaker (idOccInfo fn)
+                  = neverInlinePragma	-- See Note [Specialising imported functions] in OccurAnal
+                  | otherwise	
 		  = case inl_prag of
                        InlinePragma { inl_inline = Inlinable } 
                           -> inl_prag { inl_inline = EmptyInlineSpec }
@@ -1224,16 +1228,22 @@ Note [Specialisation of dictionary functions]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Here is a nasty example that bit us badly: see Trac #3591
 
+     class Eq a => C a
+     instance Eq [a] => C [a]
+
+---------------
+     dfun :: Eq [a] -> C [a]
      dfun a d = MkD a d (meth d)
-     d4 = <blah>
-     d2 = dfun T d4
-     d1 = $p1 d2
-     d3 = dfun T d1
+
+     d4 :: Eq [T] = <blah>
+     d2 ::  C [T] = dfun T d4
+     d1 :: Eq [T] = $p1 d2
+     d3 ::  C [T] = dfun T d1
 
 None of these definitions is recursive. What happened was that we 
 generated a specialisation:
 
-     RULE forall d. dfun T d = dT
+     RULE forall d. dfun T d = dT  :: C [T]
      dT = (MkD a d (meth d)) [T/a, d1/d]
         = MkD T d1 (meth d1)
 
@@ -1512,7 +1522,7 @@ instance Ord CallKey where
 		  cmp Nothing   Nothing   = EQ
 		  cmp Nothing   (Just _)  = LT
 		  cmp (Just _)  Nothing   = GT
-		  cmp (Just t1) (Just t2) = tcCmpType t1 t2
+		  cmp (Just t1) (Just t2) = cmpType t1 t2
 
 unionCalls :: CallDetails -> CallDetails -> CallDetails
 unionCalls c1 c2 = plusVarEnv_C unionCallInfoSet c1 c2
@@ -1597,7 +1607,9 @@ interestingDict :: CoreExpr -> Bool
 interestingDict (Var v) =  hasSomeUnfolding (idUnfolding v)
 			|| isDataConWorkId v
 interestingDict (Type _)	  = False
+interestingDict (Coercion _)      = False
 interestingDict (App fn (Type _)) = interestingDict fn
+interestingDict (App fn (Coercion _)) = interestingDict fn
 interestingDict (Note _ a)	  = interestingDict a
 interestingDict (Cast e _)	  = interestingDict e
 interestingDict _                 = True

@@ -26,6 +26,7 @@ module HsTypes (
 	hsTyVarKind, hsTyVarNameKind,
 	hsLTyVarName, hsLTyVarNames, hsLTyVarLocName, hsLTyVarLocNames,
 	splitHsInstDeclTy, splitHsFunType,
+	splitHsAppTys, mkHsAppTys,
 	
 	-- Type place holder
 	PostTcType, placeHolderType, PostTcKind, placeHolderKind,
@@ -168,8 +169,6 @@ data HsType name
 	-- interface files smaller), so when printing a HsType we may need to
 	-- add parens.  
 
-  | HsNumTy             Integer		-- Generics only
-
   | HsPredTy		(HsPred name)	-- Only used in the type of an instance
 					-- declaration, eg.  Eq [a] -> Eq a
 					--			       ^^^^
@@ -294,6 +293,19 @@ replaceTyVarName (KindedTyVar _ k) n' = KindedTyVar n' k
 
 
 \begin{code}
+splitHsAppTys :: LHsType n -> [LHsType n] -> (LHsType n, [LHsType n])
+splitHsAppTys (L _ (HsAppTy f a)) as = splitHsAppTys f (a:as)
+splitHsAppTys f          	  as = (f,as)
+
+mkHsAppTys :: OutputableBndr n => LHsType n -> [LHsType n] -> HsType n
+mkHsAppTys fun_ty [] = pprPanic "mkHsAppTys" (ppr fun_ty)
+mkHsAppTys fun_ty (arg_ty:arg_tys)
+  = foldl mk_app (HsAppTy fun_ty arg_ty) arg_tys
+  where
+    mk_app fun arg = HsAppTy (noLoc fun) arg	
+       -- Add noLocs for inner nodes of the application; 
+       -- they are never used 
+
 splitHsInstDeclTy 
     :: OutputableBndr name
     => HsType name 
@@ -440,7 +452,6 @@ ppr_mono_ty _    (HsKindSig ty kind) = parens (ppr_mono_lty pREC_TOP ty <+> dcol
 ppr_mono_ty _    (HsListTy ty)	     = brackets (ppr_mono_lty pREC_TOP ty)
 ppr_mono_ty _    (HsPArrTy ty)	     = pabrackets (ppr_mono_lty pREC_TOP ty)
 ppr_mono_ty _    (HsPredTy pred)     = ppr pred
-ppr_mono_ty _    (HsNumTy n)         = integer n  -- generics only
 ppr_mono_ty _    (HsSpliceTy s _ _)  = pprSplice s
 ppr_mono_ty _    (HsCoreTy ty)       = ppr ty
 

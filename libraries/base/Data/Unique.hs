@@ -1,3 +1,10 @@
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP #-}
+
+#ifdef __GLASGOW_HASKELL__
+{-# LANGUAGE MagicHash, DeriveDataTypeable #-}
+#endif
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.Unique

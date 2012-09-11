@@ -12,6 +12,7 @@
 
 define shell-wrapper
 $(call trace, shell-wrapper($1,$2))
+$(call profStart, shell-wrapper($1,$2))
 # $1 = dir
 # $2 = distdir
 
@@ -73,7 +74,6 @@ install_$1_$2_wrapper:
 	echo 'datadir="$$(datadir)"'                             >> "$$(WRAPPER)"
 	echo 'bindir="$$(bindir)"'                               >> "$$(WRAPPER)"
 	echo 'topdir="$$(topdir)"'                               >> "$$(WRAPPER)"
-	echo 'pgmgcc="$$(WhatGccIsCalled)"'                      >> "$$(WRAPPER)"
 	$$($1_$2_SHELL_WRAPPER_EXTRA)
 	$$($1_$2_INSTALL_SHELL_WRAPPER_EXTRA)
 	cat $$($1_$2_SHELL_WRAPPER_NAME)                         >> "$$(WRAPPER)"
@@ -85,4 +85,5 @@ endif
 
 endif # $1_$2_SHELL_WRAPPER
 
+$(call profEnd, shell-wrapper($1,$2))
 endef

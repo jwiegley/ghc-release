@@ -10,11 +10,13 @@ import DriverPhases     ( isHaskellSrcFilename )
 import HscTypes         ( msHsFilePath )
 import Name             ( getOccString )
 --import ErrUtils         ( printBagOfErrors )
-import DynFlags         ( defaultDynFlags )
+import Panic            ( panic )
+import DynFlags         ( defaultLogAction )
 import Bag
 import Exception
 import FastString
 import MonadUtils       ( liftIO )
+import SrcLoc
 
 -- Every GHC comes with Cabal anyways, so this is not a bad new dependency
 import Distribution.Simple.GHC ( ghcOptions )
@@ -48,7 +50,7 @@ type FileName = String
 type ThingName = String -- name of a defined entity in a Haskell program
 
 -- A definition we have found (we know its containing module, name, and location)
-data FoundThing = FoundThing ModuleName ThingName SrcLoc
+data FoundThing = FoundThing ModuleName ThingName RealSrcLoc
 
 -- Data we have obtained from a file (list of things we found)
 data FileData = FileData FileName [FoundThing] (Map Int String)
@@ -100,7 +102,7 @@ main = do
                      then Just `liftM` openFile "TAGS" openFileMode
                      else return Nothing
 
-  GHC.defaultErrorHandler defaultDynFlags $
+  GHC.defaultErrorHandler defaultLogAction $
     runGhc (Just ghc_topdir) $ do
       --liftIO $ print "starting up session"
       dflags <- getSessionDynFlags
@@ -195,7 +197,7 @@ safeLoad :: LoadHowMuch -> Ghc SuccessFlag
 safeLoad mode = do
   _dflags <- getSessionDynFlags
   ghandle (\(e :: SomeException) -> liftIO (print e) >> return Failed ) $
-    handleSourceError (\e -> printExceptionAndWarnings e >> return Failed) $
+    handleSourceError (\e -> printException e >> return Failed) $
       load mode
 
 
@@ -221,7 +223,7 @@ graphData graph handles = do
               let filename = msHsFilePath ms
                   modname = moduleName $ ms_mod ms
               in handleSourceError (\e -> do
-                                       printExceptionAndWarnings e
+                                       printException e
                                        liftIO $ exitWith (ExitFailure 1)) $
                   do liftIO $ putStrLn ("loading " ++ filename)
                      mod <- loadModule =<< typecheckModule =<< parseModule ms
@@ -260,8 +262,10 @@ boundValues mod group =
   in vals ++ tys ++ fors
   where found = foundOfLName mod
 
-startOfLocated :: Located a -> SrcLoc
-startOfLocated lHs = srcSpanStart $ getLoc lHs
+startOfLocated :: Located a -> RealSrcLoc
+startOfLocated lHs = case getLoc lHs of
+                     RealSrcSpan l -> realSrcSpanStart l
+                     UnhelpfulSpan _ -> panic "startOfLocated UnhelpfulSpan"
 
 foundOfLName :: ModuleName -> Located Name -> FoundThing
 foundOfLName mod id = FoundThing mod (getOccString $ unLoc id) (startOfLocated id)
@@ -280,7 +284,6 @@ boundThings modname lbinding =
           in case unLoc lpat of
                WildPat _ -> tl
                VarPat name -> lid name : tl
-               VarPatOut name _ -> lid name : tl -- XXX need help here
                LazyPat p -> patThings p tl
                AsPat id p -> patThings p (thing id : tl)
                ParPat p -> patThings p tl
@@ -293,7 +296,6 @@ boundThings modname lbinding =
                LitPat _ -> tl
                NPat _ _ _ -> tl -- form of literal pattern?
                NPlusKPat id _ _ _ -> thing id : tl
-               TypePat _ -> tl -- XXX need help here
                SigPatIn p _ -> patThings p tl
                SigPatOut p _ -> patThings p tl
                _ -> error "boundThings"

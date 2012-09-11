@@ -13,7 +13,7 @@ module ErrUtils (
         errMsgSpans, errMsgContext, errMsgShortDoc, errMsgExtraInfo,
 	Messages, errorsFound, emptyMessages,
 	mkErrMsg, mkPlainErrMsg, mkLongErrMsg, mkWarnMsg, mkPlainWarnMsg,
-	printErrorsAndWarnings, printBagOfErrors, printBagOfWarnings,
+	printBagOfErrors, printBagOfWarnings,
 	warnIsErrorMsg, mkLongWarnMsg,
 
 	ghcExit,
@@ -24,7 +24,7 @@ module ErrUtils (
 	--  * Messages during compilation
         putMsg, putMsgWith,
 	errorMsg,
-	fatalErrorMsg,
+	fatalErrorMsg, fatalErrorMsg',
 	compilationProgressMsg,
 	showPass,
 	debugTraceMsg,	
@@ -36,12 +36,14 @@ import Bag		( Bag, bagToList, isEmptyBag, emptyBag )
 import Util		( sortLe )
 import Outputable
 import SrcLoc
-import DynFlags		( DynFlags(..), DynFlag(..), dopt )
+import DynFlags
 import StaticFlags	( opt_ErrorSpans )
 
-import Control.Monad
 import System.Exit	( ExitCode(..), exitWith )
 import Data.List
+import qualified Data.Set as Set
+import Data.IORef
+import Control.Monad
 import System.IO
 
 -- -----------------------------------------------------------------------------
@@ -68,7 +70,8 @@ mkLocMessage locn msg
   -- would look strange.  Better to say explicitly "<no location info>".
 
 printError :: SrcSpan -> Message -> IO ()
-printError span msg = printErrs (mkLocMessage span msg $ defaultErrStyle)
+printError span msg =
+  printErrs (mkLocMessage span msg) defaultErrStyle
 
 
 -- -----------------------------------------------------------------------------
@@ -126,56 +129,29 @@ emptyMessages :: Messages
 emptyMessages = (emptyBag, emptyBag)
 
 warnIsErrorMsg :: ErrMsg
-warnIsErrorMsg = mkPlainErrMsg noSrcSpan (text "\nFailing due to -Werror.\n")
+warnIsErrorMsg = mkPlainErrMsg noSrcSpan (text "\nFailing due to -Werror.")
 
 errorsFound :: DynFlags -> Messages -> Bool
--- The dyn-flags are used to see if the user has specified
--- -Werror, which says that warnings should be fatal
-errorsFound dflags (warns, errs) 
-  | dopt Opt_WarnIsError dflags = not (isEmptyBag errs) || not (isEmptyBag warns)
-  | otherwise  		        = not (isEmptyBag errs)
-
-printErrorsAndWarnings :: DynFlags -> Messages -> IO ()
-printErrorsAndWarnings dflags (warns, errs)
-  | no_errs && no_warns = return ()
-  | no_errs             = do printBagOfWarnings dflags warns
-                             when (dopt Opt_WarnIsError dflags) $
-                                 errorMsg dflags $
-                                     text "\nFailing due to -Werror.\n"
-                          -- Don't print any warnings if there are errors
-  | otherwise           = printBagOfErrors dflags errs
-  where
-    no_warns = isEmptyBag warns
-    no_errs  = isEmptyBag errs
+errorsFound _dflags (_warns, errs) = not (isEmptyBag errs)
 
 printBagOfErrors :: DynFlags -> Bag ErrMsg -> IO ()
-printBagOfErrors dflags bag_of_errors
+printBagOfErrors dflags bag_of_errors = 
+  printMsgBag dflags bag_of_errors SevError
+
+printBagOfWarnings :: DynFlags -> Bag WarnMsg -> IO ()
+printBagOfWarnings dflags bag_of_warns = 
+  printMsgBag dflags bag_of_warns SevWarning
+
+printMsgBag :: DynFlags -> Bag ErrMsg -> Severity -> IO ()
+printMsgBag dflags bag sev
   = sequence_   [ let style = mkErrStyle unqual
-		  in log_action dflags SevError s style (d $$ e)
+		  in log_action dflags sev s style (d $$ e)
 		| ErrMsg { errMsgSpans = s:_,
 			   errMsgShortDoc = d,
 			   errMsgExtraInfo = e,
 			   errMsgContext = unqual } <- sorted_errs ]
     where
-      bag_ls	  = bagToList bag_of_errors
-      sorted_errs = sortLe occ'ed_before bag_ls
-
-      occ'ed_before err1 err2 = 
-         case compare (head (errMsgSpans err1)) (head (errMsgSpans err2)) of
-		LT -> True
-		EQ -> True
-		GT -> False
-
-printBagOfWarnings :: DynFlags -> Bag ErrMsg -> IO ()
-printBagOfWarnings dflags bag_of_warns
-  = sequence_   [ let style = mkErrStyle unqual
-		  in log_action dflags SevWarning s style (d $$ e)
-		| ErrMsg { errMsgSpans = s:_,
-			   errMsgShortDoc = d,
-			   errMsgExtraInfo = e,
-			   errMsgContext = unqual } <- sorted_errs ]
-    where
-      bag_ls	  = bagToList bag_of_warns
+      bag_ls	  = bagToList bag
       sorted_errs = sortLe occ'ed_before bag_ls
 
       occ'ed_before err1 err2 = 
@@ -214,11 +190,11 @@ dumpIfSet_dyn dflags flag hdr doc
   = return ()
 
 dumpIfSet_dyn_or :: DynFlags -> [DynFlag] -> String -> SDoc -> IO ()
-dumpIfSet_dyn_or dflags flags hdr doc
-  | or [dopt flag dflags | flag <- flags]
-  || verbosity dflags >= 4 
-  = printDump (mkDumpDoc hdr doc)
-  | otherwise = return ()
+dumpIfSet_dyn_or _ [] _ _ = return ()
+dumpIfSet_dyn_or dflags (flag : flags) hdr doc
+    = if dopt flag dflags || verbosity dflags >= 4
+      then dumpSDoc dflags flag hdr doc
+      else dumpIfSet_dyn_or dflags flags hdr doc
 
 mkDumpDoc :: String -> SDoc -> SDoc
 mkDumpDoc hdr doc 
@@ -235,19 +211,26 @@ mkDumpDoc hdr doc
 --	otherwise emit to stdout.
 dumpSDoc :: DynFlags -> DynFlag -> String -> SDoc -> IO ()
 dumpSDoc dflags dflag hdr doc
- = do	let mFile	= chooseDumpFile dflags dflag
- 	case mFile of
-		-- write the dump to a file
-		--	don't add the header in this case, we can see what kind
-		--	of dump it is from the filename.
-		Just fileName
-		 -> do	handle	<- openFile fileName AppendMode
-		 	hPrintDump handle doc
-		 	hClose handle
+ = do let mFile = chooseDumpFile dflags dflag
+      case mFile of
+            -- write the dump to a file
+            -- don't add the header in this case, we can see what kind
+            -- of dump it is from the filename.
+            Just fileName
+                 -> do
+                        let gdref = generatedDumps dflags
+                        gd <- readIORef gdref
+                        let append = Set.member fileName gd
+                            mode = if append then AppendMode else WriteMode
+                        when (not append) $
+                            writeIORef gdref (Set.insert fileName gd)
+                        handle <- openFile fileName mode
+                        hPrintDump handle doc
+                        hClose handle
 
-		-- write the dump to stdout
-		Nothing
-		 -> do	printDump (mkDumpDoc hdr doc)
+            -- write the dump to stdout
+            Nothing
+                 -> printDump (mkDumpDoc hdr doc)
 
 
 -- | Choose where to put a dump file based on DynFlags
@@ -313,7 +296,10 @@ errorMsg :: DynFlags -> Message -> IO ()
 errorMsg dflags msg = log_action dflags SevError noSrcSpan defaultErrStyle msg
 
 fatalErrorMsg :: DynFlags -> Message -> IO ()
-fatalErrorMsg dflags msg = log_action dflags SevFatal noSrcSpan defaultErrStyle msg
+fatalErrorMsg dflags msg = fatalErrorMsg' (log_action dflags) msg
+
+fatalErrorMsg' :: LogAction -> Message -> IO ()
+fatalErrorMsg' la msg = la SevFatal noSrcSpan defaultErrStyle msg
 
 compilationProgressMsg :: DynFlags -> String -> IO ()
 compilationProgressMsg dflags msg
@@ -326,5 +312,4 @@ showPass dflags what
 debugTraceMsg :: DynFlags -> Int -> Message -> IO ()
 debugTraceMsg dflags val msg
   = ifVerbose dflags val (log_action dflags SevInfo noSrcSpan defaultDumpStyle msg)
-
 \end{code}

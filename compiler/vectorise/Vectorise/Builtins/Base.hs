@@ -13,7 +13,7 @@ module Vectorise.Builtins.Base (
 	indexBuiltin,
 	
 	-- * Projections
-	selTy,
+        selTy,
 	selReplicate,
 	selPick,
 	selTags,
@@ -33,7 +33,6 @@ import TysWiredIn
 import Type
 import TyCon
 import DataCon
-import Var
 import Outputable
 import Data.Array
 
@@ -61,9 +60,12 @@ data Builtins
         , parrayTyCon      :: TyCon			-- ^ PArray
         , parrayDataCon    :: DataCon			-- ^ PArray
         , pdataTyCon       :: TyCon			-- ^ PData
+        , paClass          :: Class                     -- ^ PA
         , paTyCon          :: TyCon			-- ^ PA
         , paDataCon        :: DataCon			-- ^ PA
+        , paPRSel          :: Var                       -- ^ PA
         , preprTyCon       :: TyCon			-- ^ PRepr
+        , prClass          :: Class                     -- ^ PR
         , prTyCon          :: TyCon			-- ^ PR
         , prDataCon        :: DataCon			-- ^ PR
         , replicatePDVar   :: Var			-- ^ replicatePD

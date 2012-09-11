@@ -1,6 +1,6 @@
 Name:           haskeline
 Cabal-Version:  >=1.6
-Version:        0.6.3
+Version:        0.6.4.0
 Category:       User Interfaces
 License:        BSD3
 License-File:   LICENSE
@@ -50,7 +50,7 @@ Library
     }
     else {
         if impl(ghc>=6.11) {
-            Build-depends: base >=4.1 && < 4.4, containers>=0.1 && < 0.5, directory>=1.0 && < 1.2,
+            Build-depends: base >=4.1 && < 4.5, containers>=0.1 && < 0.5, directory>=1.0 && < 1.2,
                            bytestring==0.9.*
         }
         else {
@@ -58,7 +58,7 @@ Library
                            bytestring==0.9.*
         }
     }
-    Build-depends:  filepath >= 1.1 && < 1.3, mtl==1.1.*,
+    Build-depends:  filepath >= 1.1 && < 1.3, mtl >= 1.1 && < 2.1,
                     utf8-string==0.3.* && >=0.3.6,
                     extensible-exceptions==0.1.* && >=0.1.1.0
     Extensions:     ForeignFunctionInterface, Rank2Types, FlexibleInstances,
@@ -69,6 +69,8 @@ Library
                 UndecidableInstances
                 PatternSignatures, CPP, DeriveDataTypeable,
                 PatternGuards
+    if impl(ghc >= 7.1)
+        Extensions: NondecreasingIndentation
     Exposed-Modules:
                 System.Console.Haskeline
                 System.Console.Haskeline.Completion
@@ -78,6 +80,7 @@ Library
                 System.Console.Haskeline.IO
     Other-Modules:
                 System.Console.Haskeline.Backend
+                System.Console.Haskeline.Backend.WCWidth
                 System.Console.Haskeline.Command
                 System.Console.Haskeline.Command.Completion
                 System.Console.Haskeline.Command.History
@@ -94,6 +97,7 @@ Library
                 System.Console.Haskeline.Command.Undo
                 System.Console.Haskeline.Vi
     include-dirs: includes
+    c-sources: cbits/h_wcwidth.c
     if os(windows) {
         Build-depends: Win32>=2.0
         Other-modules: System.Console.Haskeline.Backend.Win32
@@ -102,14 +106,12 @@ Library
         install-includes: win_console.h
         cpp-options: -DMINGW
     } else {
-        Build-depends: unix>=2.0 && < 2.5
+        Build-depends: unix>=2.0 && < 2.6
                         -- unix-2.3 doesn't build on ghc-6.8.1 or earlier
         c-sources: cbits/h_iconv.c
-                   cbits/h_wcwidth.c
         includes: h_iconv.h
         install-includes: h_iconv.h
         Other-modules: 
-                System.Console.Haskeline.Backend.WCWidth
                 System.Console.Haskeline.Backend.Posix
                 System.Console.Haskeline.Backend.IConv
                 System.Console.Haskeline.Backend.DumbTerm

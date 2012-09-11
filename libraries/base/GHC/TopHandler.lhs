@@ -1,7 +1,15 @@
 \begin{code}
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP
+           , NoImplicitPrelude
+           , ForeignFunctionInterface
+           , MagicHash
+           , UnboxedTuples
+           , PatternGuards
+  #-}
 {-# OPTIONS_GHC -fno-warn-unused-imports #-}
 {-# OPTIONS_HADDOCK hide #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.TopHandler
@@ -19,10 +27,10 @@
 
 -- #hide
 module GHC.TopHandler (
-   runMainIO, runIO, runIOFastExit, runNonIO,
-   topHandler, topHandlerFastExit,
-   reportStackOverflow, reportError,
-  ) where
+        runMainIO, runIO, runIOFastExit, runNonIO,
+        topHandler, topHandlerFastExit,
+        reportStackOverflow, reportError,
+    ) where
 
 #include "HsBaseConfig.h"
 

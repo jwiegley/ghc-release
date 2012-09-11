@@ -10,17 +10,21 @@ module CgPrimOp (
    cgPrimOp
  ) where
 
+import BasicTypes
 import ForeignCall
 import ClosureInfo
 import StgSyn
 import CgForeignCall
 import CgBindery
 import CgMonad
+import CgHeapery
 import CgInfoTbls
+import CgTicky
+import CgProf
 import CgUtils
-import Cmm
+import OldCmm
 import CLabel
-import CmmUtils
+import OldCmmUtils
 import PrimOp
 import SMRep
 import Module
@@ -31,7 +35,7 @@ import FastString
 -- ---------------------------------------------------------------------------
 -- Code generation for PrimOps
 
-cgPrimOp   :: CmmFormals	-- where to put the results
+cgPrimOp   :: [CmmFormal]	-- where to put the results
 	   -> PrimOp		-- the op
 	   -> [StgArg]		-- arguments
 	   -> StgLiveVars	-- live vars, in case we need to save them
@@ -43,7 +47,7 @@ cgPrimOp results op args live
        emitPrimOp results op non_void_args live
 
 
-emitPrimOp :: CmmFormals	-- where to put the results
+emitPrimOp :: [CmmFormal]	-- where to put the results
 	   -> PrimOp		-- the op
 	   -> [CmmExpr]		-- arguments
 	   -> StgLiveVars	-- live vars, in case we need to save them
@@ -123,7 +127,27 @@ emitPrimOp [res] ParOp [arg] live
         NoC_SRT -- No SRT b/c we do PlayRisky
         CmmMayReturn
   where
+        newspark = CmmLit (CmmLabel (mkCmmCodeLabel rtsPackageId (fsLit "newSpark")))
+
+emitPrimOp [res] SparkOp [arg] live = do
+    -- returns the value of arg in res.  We're going to therefore
+    -- refer to arg twice (once to pass to newSpark(), and once to
+    -- assign to res), so put it in a temporary.
+    tmp <- newTemp bWord
+    stmtC (CmmAssign (CmmLocal tmp) arg)
+
+    vols <- getVolatileRegs live
+    emitForeignCall' PlayRisky []
+    	(CmmCallee newspark CCallConv) 
+	[   (CmmHinted (CmmReg (CmmGlobal BaseReg)) AddrHint)
+          , (CmmHinted arg AddrHint)  ] 
+	(Just vols)
+        NoC_SRT -- No SRT b/c we do PlayRisky
+        CmmMayReturn
+    stmtC (CmmAssign (CmmLocal res) (CmmReg (CmmLocal tmp)))
+  where
 	newspark = CmmLit (CmmLabel (mkCmmCodeLabel rtsPackageId (fsLit "newSpark")))
+
 
 emitPrimOp [res] ReadMutVarOp [mutv] _
    = stmtC (CmmAssign (CmmLocal res) (cmmLoadIndexW mutv fixedHdrSize gcWord))
@@ -205,11 +229,29 @@ emitPrimOp [res] UnsafeFreezeArrayOp [arg] _
 emitPrimOp [res] UnsafeFreezeByteArrayOp [arg] _
    = stmtC (CmmAssign (CmmLocal res) arg)
 
+emitPrimOp [] CopyArrayOp [src,src_off,dst,dst_off,n] live =
+    doCopyArrayOp src src_off dst dst_off n live
+emitPrimOp [] CopyMutableArrayOp [src,src_off,dst,dst_off,n] live =
+    doCopyMutableArrayOp src src_off dst dst_off n live
+emitPrimOp [res] CloneArrayOp [src,src_off,n] live =
+    emitCloneArray mkMAP_FROZEN_infoLabel res src src_off n live
+emitPrimOp [res] CloneMutableArrayOp [src,src_off,n] live =
+    emitCloneArray mkMAP_DIRTY_infoLabel res src src_off n live
+emitPrimOp [res] FreezeArrayOp [src,src_off,n] live =
+    emitCloneArray mkMAP_FROZEN_infoLabel res src src_off n live
+emitPrimOp [res] ThawArrayOp [src,src_off,n] live =
+    emitCloneArray mkMAP_DIRTY_infoLabel res src src_off n live
+
 -- Reading/writing pointer arrays
 
 emitPrimOp [r] ReadArrayOp  [obj,ix]   _  = doReadPtrArrayOp r obj ix
 emitPrimOp [r] IndexArrayOp [obj,ix]   _  = doReadPtrArrayOp r obj ix
 emitPrimOp []  WriteArrayOp [obj,ix,v] _  = doWritePtrArrayOp obj ix v
+
+emitPrimOp [res] SizeofArrayOp [arg] _
+   = stmtC $ CmmAssign (CmmLocal res) (cmmLoadIndexW arg (fixedHdrSize + oFFSET_StgMutArrPtrs_ptrs) bWord)
+emitPrimOp [res] SizeofMutableArrayOp [arg] live
+   = emitPrimOp [res] SizeofArrayOp [arg] live
 
 -- IndexXXXoffAddr
 
@@ -324,6 +366,13 @@ emitPrimOp res WriteByteArrayOp_Word8     args _ = doWriteByteArrayOp (Just mo_W
 emitPrimOp res WriteByteArrayOp_Word16    args _ = doWriteByteArrayOp (Just mo_WordTo16) b16  res args
 emitPrimOp res WriteByteArrayOp_Word32    args _ = doWriteByteArrayOp (Just mo_WordTo32) b32  res args
 emitPrimOp res WriteByteArrayOp_Word64    args _ = doWriteByteArrayOp Nothing b64  res args
+
+-- Copying byte arrays
+
+emitPrimOp [] CopyByteArrayOp [src,src_off,dst,dst_off,n] live =
+    doCopyByteArrayOp src src_off dst dst_off n live
+emitPrimOp [] CopyMutableByteArrayOp [src,src_off,dst,dst_off,n] live =
+    doCopyMutableByteArrayOp src src_off dst dst_off n live
 
 
 -- The rest just translate straightforwardly
@@ -613,3 +662,249 @@ cmmLoadIndexOffExpr off rep base idx
 setInfo :: CmmExpr -> CmmExpr -> CmmStmt
 setInfo closure_ptr info_ptr = CmmStore closure_ptr info_ptr
 
+-- ----------------------------------------------------------------------------
+-- Copying byte arrays
+
+-- | Takes a source 'ByteArray#', an offset in the source array, a
+-- destination 'MutableByteArray#', an offset into the destination
+-- array, and the number of bytes to copy.  Copies the given number of
+-- bytes from the source array to the destination array.
+doCopyByteArrayOp :: CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr
+                  -> StgLiveVars -> Code
+doCopyByteArrayOp = emitCopyByteArray copy
+  where
+    -- Copy data (we assume the arrays aren't overlapping since
+    -- they're of different types)
+    copy _src _dst dst_p src_p bytes live =
+        emitMemcpyCall dst_p src_p bytes (CmmLit (mkIntCLit 1)) live
+
+-- | Takes a source 'MutableByteArray#', an offset in the source
+-- array, a destination 'MutableByteArray#', an offset into the
+-- destination array, and the number of bytes to copy.  Copies the
+-- given number of bytes from the source array to the destination
+-- array.
+doCopyMutableByteArrayOp :: CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr
+                         -> StgLiveVars -> Code
+doCopyMutableByteArrayOp = emitCopyByteArray copy
+  where
+    -- The only time the memory might overlap is when the two arrays
+    -- we were provided are the same array!
+    -- TODO: Optimize branch for common case of no aliasing.
+    copy src dst dst_p src_p bytes live =
+        emitIfThenElse (cmmEqWord src dst)
+        (emitMemmoveCall dst_p src_p bytes (CmmLit (mkIntCLit 1)) live)
+        (emitMemcpyCall dst_p src_p bytes (CmmLit (mkIntCLit 1)) live)
+
+emitCopyByteArray :: (CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr
+                  -> StgLiveVars -> Code)
+                  -> CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr
+                  -> StgLiveVars
+                  -> Code
+emitCopyByteArray copy src src_off dst dst_off n live = do
+    dst_p <- assignTemp $ cmmOffsetExpr (cmmOffsetB dst arrWordsHdrSize) dst_off
+    src_p <- assignTemp $ cmmOffsetExpr (cmmOffsetB src arrWordsHdrSize) src_off
+    copy src dst dst_p src_p n live
+
+-- ----------------------------------------------------------------------------
+-- Copying pointer arrays
+
+-- EZY: This code has an unusually high amount of assignTemp calls, seen
+-- nowhere else in the code generator.  This is mostly because these
+-- "primitive" ops result in a surprisingly large amount of code.  It
+-- will likely be worthwhile to optimize what is emitted here, so that
+-- our optimization passes don't waste time repeatedly optimizing the
+-- same bits of code.
+
+-- | Takes a source 'Array#', an offset in the source array, a
+-- destination 'MutableArray#', an offset into the destination array,
+-- and the number of elements to copy.  Copies the given number of
+-- elements from the source array to the destination array.
+doCopyArrayOp :: CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr
+              -> StgLiveVars -> Code
+doCopyArrayOp = emitCopyArray copy
+  where
+    -- Copy data (we assume the arrays aren't overlapping since
+    -- they're of different types)
+    copy _src _dst dst_p src_p bytes live =
+        emitMemcpyCall dst_p src_p bytes (CmmLit (mkIntCLit wORD_SIZE)) live
+
+-- | Takes a source 'MutableArray#', an offset in the source array, a
+-- destination 'MutableArray#', an offset into the destination array,
+-- and the number of elements to copy.  Copies the given number of
+-- elements from the source array to the destination array.
+doCopyMutableArrayOp :: CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr
+                     -> StgLiveVars -> Code
+doCopyMutableArrayOp = emitCopyArray copy
+  where
+    -- The only time the memory might overlap is when the two arrays
+    -- we were provided are the same array!
+    -- TODO: Optimize branch for common case of no aliasing.
+    copy src dst dst_p src_p bytes live =
+        emitIfThenElse (cmmEqWord src dst)
+        (emitMemmoveCall dst_p src_p bytes (CmmLit (mkIntCLit wORD_SIZE)) live)
+        (emitMemcpyCall dst_p src_p bytes (CmmLit (mkIntCLit wORD_SIZE)) live)
+
+emitCopyArray :: (CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr
+                  -> StgLiveVars -> Code)
+              -> CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr
+              -> StgLiveVars
+              -> Code
+emitCopyArray copy src0 src_off0 dst0 dst_off0 n0 live = do
+    -- Assign the arguments to temporaries so the code generator can
+    -- calculate liveness for us.
+    src <- assignTemp_ src0
+    src_off <- assignTemp_ src_off0
+    dst <- assignTemp_ dst0
+    dst_off <- assignTemp_ dst_off0
+    n <- assignTemp_ n0
+
+    -- Set the dirty bit in the header.
+    stmtC (setInfo dst (CmmLit (CmmLabel mkMAP_DIRTY_infoLabel)))
+
+    dst_elems_p <- assignTemp $ cmmOffsetB dst arrPtrsHdrSize
+    dst_p <- assignTemp $ cmmOffsetExprW dst_elems_p dst_off
+    src_p <- assignTemp $ cmmOffsetExprW (cmmOffsetB src arrPtrsHdrSize) src_off
+    bytes <- assignTemp $ cmmMulWord n (CmmLit (mkIntCLit wORD_SIZE))
+
+    copy src dst dst_p src_p bytes live
+
+    -- The base address of the destination card table
+    dst_cards_p <- assignTemp $ cmmOffsetExprW dst_elems_p (loadArrPtrsSize dst)
+
+    emitSetCards dst_off dst_cards_p n live
+
+-- | Takes an info table label, a register to return the newly
+-- allocated array in, a source array, an offset in the source array,
+-- and the number of elements to copy.  Allocates a new array and
+-- initializes it form the source array.
+emitCloneArray :: CLabel -> CmmFormal -> CmmExpr -> CmmExpr -> CmmExpr
+               -> StgLiveVars -> Code
+emitCloneArray info_p res_r src0 src_off0 n0 live = do
+    -- Assign the arguments to temporaries so the code generator can
+    -- calculate liveness for us.
+    src <- assignTemp_ src0
+    src_off <- assignTemp_ src_off0
+    n <- assignTemp_ n0
+
+    card_words <- assignTemp $ (n `cmmUShrWord`
+                                (CmmLit (mkIntCLit mUT_ARR_PTRS_CARD_BITS)))
+                  `cmmAddWord` CmmLit (mkIntCLit 1)
+    size <- assignTemp $ n `cmmAddWord` card_words
+    words <- assignTemp $ arrPtrsHdrSizeW `cmmAddWord` size
+
+    arr_r <- newTemp bWord
+    emitAllocateCall arr_r myCapability words live
+    tickyAllocPrim (CmmLit (mkIntCLit arrPtrsHdrSize)) (n `cmmMulWord` wordSize)
+        (CmmLit $ mkIntCLit 0)
+
+    let arr = CmmReg (CmmLocal arr_r)
+    emitSetDynHdr arr (CmmLit (CmmLabel info_p)) curCCSAddr
+    stmtC $ CmmStore (cmmOffsetB arr (fixedHdrSize * wORD_SIZE +
+                                      oFFSET_StgMutArrPtrs_ptrs)) n
+    stmtC $ CmmStore (cmmOffsetB arr (fixedHdrSize * wORD_SIZE +
+                                      oFFSET_StgMutArrPtrs_size)) size
+
+    dst_p <- assignTemp $ cmmOffsetB arr arrPtrsHdrSize
+    src_p <- assignTemp $ cmmOffsetExprW (cmmOffsetB src arrPtrsHdrSize)
+             src_off
+
+    emitMemcpyCall dst_p src_p (n `cmmMulWord` wordSize)
+        (CmmLit (mkIntCLit wORD_SIZE)) live
+
+    emitMemsetCall (cmmOffsetExprW dst_p n)
+        (CmmLit (mkIntCLit 1))
+        (card_words `cmmMulWord` wordSize)
+        (CmmLit (mkIntCLit wORD_SIZE))
+        live
+    stmtC $ CmmAssign (CmmLocal res_r) arr
+  where
+    arrPtrsHdrSizeW = CmmLit $ mkIntCLit $ fixedHdrSize +
+                      (sIZEOF_StgMutArrPtrs_NoHdr `div` wORD_SIZE)
+    wordSize = CmmLit (mkIntCLit wORD_SIZE)
+    myCapability = CmmReg baseReg `cmmSubWord`
+                   CmmLit (mkIntCLit oFFSET_Capability_r)
+
+-- | Takes and offset in the destination array, the base address of
+-- the card table, and the number of elements affected (*not* the
+-- number of cards).  Marks the relevant cards as dirty.
+emitSetCards :: CmmExpr -> CmmExpr -> CmmExpr -> StgLiveVars -> Code
+emitSetCards dst_start dst_cards_start n live = do
+    start_card <- assignTemp $ card dst_start
+    emitMemsetCall (dst_cards_start `cmmAddWord` start_card)
+        (CmmLit (mkIntCLit 1))
+        ((card (dst_start `cmmAddWord` n) `cmmSubWord` start_card)
+         `cmmAddWord` CmmLit (mkIntCLit 1))
+        (CmmLit (mkIntCLit wORD_SIZE))
+        live
+  where
+    -- Convert an element index to a card index
+    card i = i `cmmUShrWord` (CmmLit (mkIntCLit mUT_ARR_PTRS_CARD_BITS))
+
+-- | Emit a call to @memcpy@.
+emitMemcpyCall :: CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr -> StgLiveVars
+               -> Code
+emitMemcpyCall dst src n align live = do
+    vols <- getVolatileRegs live
+    emitForeignCall' PlayRisky
+        [{-no results-}]
+        (CmmPrim MO_Memcpy)
+        [ (CmmHinted dst AddrHint)
+        , (CmmHinted src AddrHint)
+        , (CmmHinted n NoHint)
+        , (CmmHinted align NoHint)
+        ]
+        (Just vols)
+        NoC_SRT -- No SRT b/c we do PlayRisky
+        CmmMayReturn
+
+-- | Emit a call to @memmove@.
+emitMemmoveCall :: CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr -> StgLiveVars
+                -> Code
+emitMemmoveCall dst src n align live = do
+    vols <- getVolatileRegs live
+    emitForeignCall' PlayRisky
+        [{-no results-}]
+        (CmmPrim MO_Memmove)
+        [ (CmmHinted dst AddrHint)
+        , (CmmHinted src AddrHint)
+        , (CmmHinted n NoHint)
+        , (CmmHinted align NoHint)
+        ]
+        (Just vols)
+        NoC_SRT -- No SRT b/c we do PlayRisky
+        CmmMayReturn
+
+-- | Emit a call to @memset@.  The second argument must be a word but
+-- its value must fit inside an unsigned char.
+emitMemsetCall :: CmmExpr -> CmmExpr -> CmmExpr -> CmmExpr -> StgLiveVars
+               -> Code
+emitMemsetCall dst c n align live = do
+    vols <- getVolatileRegs live
+    emitForeignCall' PlayRisky
+        [{-no results-}]
+        (CmmPrim MO_Memset)
+        [ (CmmHinted dst AddrHint)
+        , (CmmHinted c NoHint)
+        , (CmmHinted n NoHint)
+        , (CmmHinted align NoHint)
+        ]
+        (Just vols)
+        NoC_SRT -- No SRT b/c we do PlayRisky
+        CmmMayReturn
+
+-- | Emit a call to @allocate@.
+emitAllocateCall :: LocalReg -> CmmExpr -> CmmExpr -> StgLiveVars -> Code
+emitAllocateCall res cap n live = do
+    vols <- getVolatileRegs live
+    emitForeignCall' PlayRisky
+        [CmmHinted res AddrHint]
+        (CmmCallee allocate CCallConv)
+        [ (CmmHinted cap AddrHint)
+        , (CmmHinted n NoHint)
+        ]
+        (Just vols)
+        NoC_SRT -- No SRT b/c we do PlayRisky
+        CmmMayReturn
+  where
+    allocate = CmmLit (CmmLabel (mkForeignLabel (fsLit "allocate") Nothing
+                                 ForeignLabelInExternalPackage IsFunction))

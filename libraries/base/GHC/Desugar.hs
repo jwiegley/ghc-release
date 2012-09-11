@@ -1,3 +1,10 @@
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP
+           , NoImplicitPrelude
+           , Rank2Types
+           , ExistentialQuantification
+  #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.Desugar

@@ -22,6 +22,7 @@ import Name
 import TcType
 import InstEnv
 import FamInstEnv
+import PrelNames        ( iNTERACTIVE )
 
 import Var
 import Id
@@ -73,7 +74,8 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
       	tvs_var      <- newIORef emptyVarSet ;
         keep_var     <- newIORef emptyNameSet ;
         used_rdr_var <- newIORef Set.empty ;
-	th_var	     <- newIORef False ;
+        th_var       <- newIORef False ;
+        th_splice_var<- newIORef False ;
         lie_var      <- newIORef emptyWC ;
 	dfun_n_var   <- newIORef emptyOccSet ;
 	type_env_var <- case hsc_type_env_var hsc_env of {
@@ -83,8 +85,8 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
              maybe_rn_syntax :: forall a. a -> Maybe a ;
              maybe_rn_syntax empty_val
 		| keep_rn_syntax = Just empty_val
-		| otherwise	 = Nothing ;
-			
+		| otherwise      = Nothing ;
+
 	     gbl_env = TcGblEnv {
 		tcg_mod       = mod,
 		tcg_src	      = hsc_src,
@@ -97,7 +99,8 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
 		tcg_inst_env  = emptyInstEnv,
 		tcg_fam_inst_env  = emptyFamInstEnv,
                 tcg_th_used   = th_var,
-		tcg_exports  = [],
+                tcg_th_splice_used   = th_splice_var,
+                tcg_exports  = [],
 		tcg_imports  = emptyImportAvails,
                 tcg_used_rdrnames = used_rdr_var,
 		tcg_dus      = emptyDUs,
@@ -113,11 +116,12 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
 		tcg_warns     = NoWarnings,
 		tcg_anns      = [],
 		tcg_insts     = [],
-		tcg_fam_insts = [],
-		tcg_rules     = [],
-		tcg_fords     = [],
-		tcg_dfun_n    = dfun_n_var,
-		tcg_keep      = keep_var,
+                tcg_fam_insts = [],
+                tcg_rules     = [],
+                tcg_fords     = [],
+                tcg_vects     = [],
+                tcg_dfun_n    = dfun_n_var,
+                tcg_keep      = keep_var,
 		tcg_doc_hdr   = Nothing,
                 tcg_hpc       = False,
                 tcg_main      = Nothing
@@ -166,9 +170,8 @@ initTcPrintErrors	-- Used from the interactive loop only
        -> Module 
        -> TcM r
        -> IO (Messages, Maybe r)
-initTcPrintErrors env mod todo = do
-  (msgs, res) <- initTc env HsSrcFile False mod todo
-  return (msgs, res)
+
+initTcPrintErrors env mod todo = initTc env HsSrcFile False mod todo
 \end{code}
 
 %************************************************************************
@@ -247,19 +250,28 @@ xoptM flag = do { dflags <- getDOpts; return (xopt flag dflags) }
 doptM :: DynFlag -> TcRnIf gbl lcl Bool
 doptM flag = do { dflags <- getDOpts; return (dopt flag dflags) }
 
--- XXX setOptM and unsetOptM operate on different types. One should be renamed.
+woptM :: WarningFlag -> TcRnIf gbl lcl Bool
+woptM flag = do { dflags <- getDOpts; return (wopt flag dflags) }
 
-setOptM :: ExtensionFlag -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
-setOptM flag = updEnv (\ env@(Env { env_top = top }) ->
-			 env { env_top = top { hsc_dflags = xopt_set (hsc_dflags top) flag}} )
+setXOptM :: ExtensionFlag -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
+setXOptM flag = updEnv (\ env@(Env { env_top = top }) ->
+                          env { env_top = top { hsc_dflags = xopt_set (hsc_dflags top) flag}} )
 
-unsetOptM :: DynFlag -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
-unsetOptM flag = updEnv (\ env@(Env { env_top = top }) ->
-			 env { env_top = top { hsc_dflags = dopt_unset (hsc_dflags top) flag}} )
+unsetDOptM :: DynFlag -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
+unsetDOptM flag = updEnv (\ env@(Env { env_top = top }) ->
+                            env { env_top = top { hsc_dflags = dopt_unset (hsc_dflags top) flag}} )
+
+unsetWOptM :: WarningFlag -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
+unsetWOptM flag = updEnv (\ env@(Env { env_top = top }) ->
+                            env { env_top = top { hsc_dflags = wopt_unset (hsc_dflags top) flag}} )
 
 -- | Do it flag is true
 ifDOptM :: DynFlag -> TcRnIf gbl lcl () -> TcRnIf gbl lcl ()
 ifDOptM flag thing_inside = do { b <- doptM flag; 
+				if b then thing_inside else return () }
+
+ifWOptM :: WarningFlag -> TcRnIf gbl lcl () -> TcRnIf gbl lcl ()
+ifWOptM flag thing_inside = do { b <- woptM flag; 
 				if b then thing_inside else return () }
 
 ifXOptM :: ExtensionFlag -> TcRnIf gbl lcl () -> TcRnIf gbl lcl ()
@@ -328,11 +340,11 @@ newMetaUnique
 newUnique :: TcRnIf gbl lcl Unique
 newUnique
  = do { env <- getEnv ;
-	let { u_var = env_us env } ;
-	us <- readMutVar u_var ;
-        case splitUniqSupply us of { (us1,_) -> do {
-	writeMutVar u_var us1 ;
-	return $! uniqFromSupply us }}}
+        let { u_var = env_us env } ;
+        us <- readMutVar u_var ;
+        case takeUniqFromSupply us of { (uniq, us') -> do {
+        writeMutVar u_var us' ;
+        return $! uniq }}}
    -- NOTE 1: we strictly split the supply, to avoid the possibility of leaving
    -- a chain of unevaluated supplies behind.
    -- NOTE 2: we use the uniq in the supply from the MutVar directly, and
@@ -343,11 +355,11 @@ newUnique
 newUniqueSupply :: TcRnIf gbl lcl UniqSupply
 newUniqueSupply
  = do { env <- getEnv ;
-	let { u_var = env_us env } ;
-	us <- readMutVar u_var ;
+        let { u_var = env_us env } ;
+        us <- readMutVar u_var ;
         case splitUniqSupply us of { (us1,us2) -> do {
-	writeMutVar u_var us1 ;
-	return us2 }}}
+        writeMutVar u_var us1 ;
+        return us2 }}}
 
 newLocalName :: Name -> TcRnIf gbl lcl Name
 newLocalName name	-- Make a clone
@@ -405,7 +417,6 @@ traceRn, traceSplice :: SDoc -> TcRn ()
 traceRn      = traceOptTcRn Opt_D_dump_rn_trace
 traceSplice  = traceOptTcRn Opt_D_dump_splices
 
-
 traceIf, traceHiDiffs :: SDoc -> TcRnIf m n ()
 traceIf      = traceOptIf Opt_D_dump_if_trace
 traceHiDiffs = traceOptIf Opt_D_dump_hi_diffs
@@ -452,6 +463,9 @@ getModule = do { env <- getGblEnv; return (tcg_mod env) }
 setModule :: Module -> TcRn a -> TcRn a
 setModule mod thing_inside = updGblEnv (\env -> env { tcg_mod = mod }) thing_inside
 
+getIsGHCi :: TcRn Bool
+getIsGHCi = do { mod <- getModule; return (mod == iNTERACTIVE) }
+
 tcIsHsBoot :: TcRn Bool
 tcIsHsBoot = do { env <- getGblEnv; return (isHsBoot (tcg_src env)) }
 
@@ -491,9 +505,10 @@ getSrcSpanM :: TcRn SrcSpan
 getSrcSpanM = do { env <- getLclEnv; return (tcl_loc env) }
 
 setSrcSpan :: SrcSpan -> TcRn a -> TcRn a
-setSrcSpan loc thing_inside
-  | isGoodSrcSpan loc = updLclEnv (\env -> env { tcl_loc = loc }) thing_inside
-  | otherwise	      = thing_inside	-- Don't overwrite useful info with useless
+setSrcSpan loc@(RealSrcSpan _) thing_inside
+    = updLclEnv (\env -> env { tcl_loc = loc }) thing_inside
+-- Don't overwrite useful info with useless:
+setSrcSpan (UnhelpfulSpan _) thing_inside = thing_inside
 
 addLocM :: (a -> TcM b) -> Located a -> TcM b
 addLocM fn (L loc a) = setSrcSpan loc $ fn a
@@ -777,11 +792,6 @@ updCtxt :: ([ErrCtxt] -> [ErrCtxt]) -> TcM a -> TcM a
 updCtxt upd = updLclEnv (\ env@(TcLclEnv { tcl_ctxt = ctxt }) -> 
 			   env { tcl_ctxt = upd ctxt })
 
--- Conditionally add an error context
-maybeAddErrCtxt :: Maybe Message -> TcM a -> TcM a
-maybeAddErrCtxt (Just msg) thing_inside = addErrCtxt msg thing_inside
-maybeAddErrCtxt Nothing    thing_inside = thing_inside
-
 popErrCtxt :: TcM a -> TcM a
 popErrCtxt = updCtxt (\ msgs -> case msgs of { [] -> []; (_ : ms) -> ms })
 
@@ -893,6 +903,9 @@ add_err_tcm tidy_env err_msg loc ctxt
 mkErrInfo :: TidyEnv -> [ErrCtxt] -> TcM SDoc
 -- Tidy the error info, trimming excessive contexts
 mkErrInfo env ctxts
+ | opt_PprStyle_Debug     -- In -dppr-debug style the output 
+ = return empty	          -- just becomes too voluminous
+ | otherwise
  = go 0 env ctxts
  where
    go :: Int -> TidyEnv -> [ErrCtxt] -> TcM SDoc
@@ -988,10 +1001,10 @@ captureConstraints :: TcM a -> TcM (a, WantedConstraints)
 -- (captureConstraints m) runs m, and returns the type constraints it generates
 captureConstraints thing_inside
   = do { lie_var <- newTcRef emptyWC ;
-	 res <- updLclEnv (\ env -> env { tcl_lie = lie_var }) 
-			  thing_inside ;
-	 lie <- readTcRef lie_var ;
-	 return (res, lie) }
+         res <- updLclEnv (\ env -> env { tcl_lie = lie_var }) 
+                          thing_inside ;
+         lie <- readTcRef lie_var ;
+         return (res, lie) }
 
 captureUntouchables :: TcM a -> TcM (a, Untouchables)
 captureUntouchables thing_inside
@@ -1016,19 +1029,29 @@ setLclTypeEnv lcl_env thing_inside
   = updLclEnv upd thing_inside
   where
     upd env = env { tcl_env = tcl_env lcl_env,
-		    tcl_tyvars = tcl_tyvars lcl_env }
+                    tcl_tyvars = tcl_tyvars lcl_env }
+
+traceTcConstraints :: String -> TcM ()
+traceTcConstraints msg
+  = do { lie_var <- getConstraintVar
+       ; lie     <- readTcRef lie_var
+       ; traceTc (msg ++ "LIE:") (ppr lie)
+       }
 \end{code}
 
 
 %************************************************************************
-%*									*
-	     Template Haskell context
-%*									*
+%*                                                                      *
+             Template Haskell context
+%*                                                                      *
 %************************************************************************
 
 \begin{code}
 recordThUse :: TcM ()
 recordThUse = do { env <- getGblEnv; writeTcRef (tcg_th_used env) True }
+
+recordThSpliceUse :: TcM ()
+recordThSpliceUse = do { env <- getGblEnv; writeTcRef (tcg_th_splice_used env) True }
 
 keepAliveTc :: Id -> TcM ()  	-- Record the name in the keep-alive set
 keepAliveTc id 
@@ -1148,7 +1171,7 @@ failIfM :: Message -> IfL a
 failIfM msg
   = do 	{ env <- getLclEnv
 	; let full_msg = (if_loc env <> colon) $$ nest 2 msg
-	; liftIO (printErrs (full_msg defaultErrStyle))
+	; liftIO (printErrs full_msg defaultErrStyle)
 	; failM }
 
 --------------------
@@ -1183,7 +1206,7 @@ forkM_maybe doc thing_inside
 	  	    ; return Nothing }
 	}}
   where
-    print_errs sdoc = liftIO (printErrs (sdoc defaultErrStyle))
+    print_errs sdoc = liftIO (printErrs sdoc defaultErrStyle)
 
 forkM :: SDoc -> IfL a -> IfL a
 forkM doc thing_inside

@@ -29,7 +29,7 @@ INLINE_HEADER rtsBool
 doYouWantToGC( Capability *cap )
 {
   return (cap->r.rCurrentNursery->link == NULL ||
-          g0->n_large_blocks >= alloc_blocks_lim);
+          g0->n_new_large_words >= large_alloc_lim);
 }
 
 /* for splitting blocks groups in two */
@@ -37,11 +37,6 @@ bdescr * splitLargeBlock (bdescr *bd, nat blocks);
 
 /* -----------------------------------------------------------------------------
    Generational garbage collection support
-
-   recordMutable(StgPtr p)       Informs the garbage collector that a
-				 previously immutable object has
-				 become (permanently) mutable.  Used
-				 by thawArray and similar.
 
    updateWithIndirection(p1,p2)  Updates the object at p1 with an
 				 indirection pointing to p2.  This is
@@ -69,48 +64,6 @@ extern Mutex sm_mutex;
 #define ASSERT_SM_LOCK()
 #endif
 
-INLINE_HEADER void
-recordMutableGen(StgClosure *p, nat gen_no)
-{
-    bdescr *bd;
-
-    bd = generations[gen_no].mut_list;
-    if (bd->free >= bd->start + BLOCK_SIZE_W) {
-	bdescr *new_bd;
-	new_bd = allocBlock();
-	new_bd->link = bd;
-	bd = new_bd;
-	generations[gen_no].mut_list = bd;
-    }
-    *bd->free++ = (StgWord)p;
-
-}
-
-INLINE_HEADER void
-recordMutableGenLock(StgClosure *p, nat gen_no)
-{
-    ACQUIRE_SM_LOCK;
-    recordMutableGen(p,gen_no);
-    RELEASE_SM_LOCK;
-}
-
-INLINE_HEADER void
-recordMutable(StgClosure *p)
-{
-    bdescr *bd;
-    ASSERT(closure_MUTABLE(p));
-    bd = Bdescr((P_)p);
-    if (bd->gen_no > 0) recordMutableGen(p, bd->gen_no);
-}
-
-INLINE_HEADER void
-recordMutableLock(StgClosure *p)
-{
-    ACQUIRE_SM_LOCK;
-    recordMutable(p);
-    RELEASE_SM_LOCK;
-}
-
 /* -----------------------------------------------------------------------------
    The write barrier for MVARs
    -------------------------------------------------------------------------- */
@@ -124,6 +77,7 @@ void dirty_MVAR(StgRegTable *reg, StgClosure *p);
 extern nursery *nurseries;
 
 void     resetNurseries       ( void );
+lnat     clearNurseries       ( void );
 void     resizeNurseries      ( nat blocks );
 void     resizeNurseriesFixed ( nat blocks );
 lnat     countNurseryBlocks   ( void );
@@ -132,11 +86,18 @@ lnat     countNurseryBlocks   ( void );
    Stats 'n' DEBUG stuff
    -------------------------------------------------------------------------- */
 
-lnat    calcAllocated  (void);
-lnat    calcLiveBlocks (void);
-lnat    calcLiveWords  (void);
+lnat    calcAllocated  (rtsBool count_nurseries);
 lnat    countOccupied  (bdescr *bd);
 lnat    calcNeeded     (void);
+
+lnat    gcThreadLiveWords  (nat i, nat g);
+lnat    gcThreadLiveBlocks (nat i, nat g);
+
+lnat    genLiveWords  (generation *gen);
+lnat    genLiveBlocks (generation *gen);
+
+lnat    calcLiveBlocks (void);
+lnat    calcLiveWords  (void);
 
 /* ----------------------------------------------------------------------------
    Storage manager internal APIs and globals
@@ -146,7 +107,7 @@ extern bdescr *exec_block;
 
 #define END_OF_STATIC_LIST ((StgClosure*)1)
 
-void move_TSO  (StgTSO *src, StgTSO *dest);
+void move_STACK  (StgStack *src, StgStack *dest);
 
 extern StgClosure * caf_list;
 extern StgClosure * revertible_caf_list;

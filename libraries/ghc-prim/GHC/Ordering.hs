@@ -1,12 +1,14 @@
 
 {-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# OPTIONS_GHC -XDeriveGeneric     #-}
 
 module GHC.Ordering where
 
--- We need Inl etc behind the scenes for the Ordering definition
-import GHC.Generics ()
+import GHC.Generics (Generic)
+
 
 default ()
 
 data Ordering = LT | EQ | GT
+        deriving Generic
 

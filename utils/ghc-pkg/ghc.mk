@@ -44,9 +44,11 @@ endif
 
 endif
 
-# depend on ghc-cabal, otherwise we build Cabal twice when building in parallel
+# depend on ghc-cabal, otherwise we build Cabal twice when building in parallel.
+# (ghc-cabal is an order-only dependency, we don't need to rebuild ghc-pkg
+# if ghc-cabal is newer).
 # The binary package is not warning-clean, so we need a few -fno-warns here.
-utils/ghc-pkg/dist/build/$(utils/ghc-pkg_dist_PROG)$(exeext): utils/ghc-pkg/Main.hs utils/ghc-pkg/Version.hs $(GHC_CABAL_INPLACE) | bootstrapping/. $$(dir $$@)/.
+utils/ghc-pkg/dist/build/$(utils/ghc-pkg_dist_PROG)$(exeext): utils/ghc-pkg/Main.hs utils/ghc-pkg/Version.hs | bootstrapping/. $$(dir $$@)/. $(GHC_CABAL_INPLACE) 
 	"$(GHC)" $(SRC_HC_OPTS) --make utils/ghc-pkg/Main.hs -o $@ \
 	       -no-user-package-conf \
 	       -Wall -fno-warn-unused-imports \
@@ -56,11 +58,11 @@ utils/ghc-pkg/dist/build/$(utils/ghc-pkg_dist_PROG)$(exeext): utils/ghc-pkg/Main
 	       -hidir bootstrapping \
                -iutils/ghc-pkg \
 	       -XCPP -XExistentialQuantification -XDeriveDataTypeable \
-	       -ilibraries/Cabal \
+	       -ilibraries/Cabal/cabal \
 	       -ilibraries/filepath \
 	       -ilibraries/extensible-exceptions \
 	       -ilibraries/hpc \
-	       -ilibraries/ghc-binary/src \
+	       -ilibraries/binary/src \
 	       -ilibraries/bin-package-db
 
 

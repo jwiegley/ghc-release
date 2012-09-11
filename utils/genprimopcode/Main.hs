@@ -46,13 +46,13 @@ main = getArgs >>= \args ->
                                        "commutable" 
                                        "commutableOp" p_o_specs)
 
-                      "--needs-wrapper" 
+                      "--code-size"
                          -> putStr (gen_switch_from_attribs 
-                                       "needs_wrapper" 
-                                       "primOpNeedsWrapper" p_o_specs)
+                                       "code_size"
+                                       "primOpCodeSize" p_o_specs)
 
-                      "--can-fail" 
-                         -> putStr (gen_switch_from_attribs 
+                      "--can-fail"
+                         -> putStr (gen_switch_from_attribs
                                        "can_fail" 
                                        "primOpCanFail" p_o_specs)
 
@@ -91,7 +91,7 @@ known_args
        "--has-side-effects",
        "--out-of-line",
        "--commutable",
-       "--needs-wrapper",
+       "--code-size",
        "--can-fail",
        "--strictness",
        "--primop-primop-info",
@@ -132,7 +132,7 @@ gen_hs_source (Info defaults entries) =
 	++ unlines (map (("\t" ++) . hdr) entries)
 	++ ") where\n"
     ++ "\n"
-    ++ "import GHC.Bool\n"
+    ++ "import GHC.Types\n"
     ++ "\n"
     ++ "{-\n"
 	++ unlines (map opt defaults)
@@ -141,6 +141,7 @@ gen_hs_source (Info defaults entries) =
      where opt (OptionFalse n)	  = n ++ " = False"
            opt (OptionTrue n)	  = n ++ " = True"
 	   opt (OptionString n v) = n ++ " = { " ++ v ++ "}"
+           opt (OptionInteger n v) = n ++ " = " ++ show v
 
 	   hdr s@(Section {})			 = sec s
 	   hdr (PrimOpSpec { name = n })	 = wrapOp n ++ ","
@@ -409,7 +410,8 @@ gen_latex_doc (Info defaults entries)
 	       Just (OptionTrue _) -> if_true
 	       Just (OptionFalse _) -> if_false
 	       Just (OptionString _ _) -> error "String value for boolean option"
-	       Nothing -> ""
+               Just (OptionInteger _ _) -> error "Integer value for boolean option"
+               Nothing -> ""
 	   
 	   mk_strictness o = 
 	     case lookup_attrib "strictness" o of
@@ -487,7 +489,7 @@ gen_wrappers (Info _ entries)
 	-- don't need the Prelude here so we add NoImplicitPrelude.
      ++ "module GHC.PrimopWrappers where\n" 
      ++ "import qualified GHC.Prim\n" 
-     ++ "import GHC.Bool (Bool)\n"
+     ++ "import GHC.Types (Bool)\n"
      ++ "import GHC.Unit ()\n"
      ++ "import GHC.Prim (" ++ types ++ ")\n"
      ++ unlines (concatMap f specs)
@@ -550,6 +552,7 @@ gen_switch_from_attribs attrib_name fn_name (Info defaults entries)
 
          getAltRhs (OptionFalse _)    = "False"
          getAltRhs (OptionTrue _)     = "True"
+         getAltRhs (OptionInteger _ i) = show i
          getAltRhs (OptionString _ s) = s
 
          mkAlt po

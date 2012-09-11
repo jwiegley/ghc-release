@@ -21,11 +21,19 @@ module StaticFlags (
 
 	-- Output style options
 	opt_PprUserLength,
+	opt_PprCols,
+	opt_PprCaseAsLet,
+	opt_PprStyle_Debug, opt_TraceLevel,
+        opt_NoDebugOutput, 
+
+	-- Suppressing boring aspects of core dumps
+	opt_SuppressAll,
 	opt_SuppressUniques,
         opt_SuppressCoercions,
 	opt_SuppressModulePrefixes,
-	opt_PprStyle_Debug, opt_TraceLevel,
-        opt_NoDebugOutput,
+	opt_SuppressTypeApplications,
+	opt_SuppressIdInfo,
+	opt_SuppressTypeSignatures,
 
 	-- profiling opts
 	opt_SccProfilingOn,
@@ -39,12 +47,12 @@ module StaticFlags (
 	opt_Parallel,
 
 	-- optimisation opts
-	opt_DsMultiTyVar,
 	opt_NoStateHack,
         opt_SimpleListLiterals,
 	opt_CprOff,
 	opt_SimplNoPreInlining,
 	opt_SimplExcessPrecision,
+	opt_NoOptCoercion,
 	opt_MaxWorkerArgs,
 
 	-- Unfolding control
@@ -64,6 +72,7 @@ module StaticFlags (
 
 	-- misc opts
 	opt_IgnoreDotGhci,
+	opt_GhciScripts,
 	opt_ErrorSpans,
 	opt_GranMacros,
 	opt_HiVersion,
@@ -76,7 +85,10 @@ module StaticFlags (
         opt_Ticky,
 
     -- For the parser
-    addOpt, removeOpt, addWay, getWayFlags, v_opt_C_ready
+    addOpt, removeOpt, addWay, getWayFlags, v_opt_C_ready,
+    
+    -- Saving/restoring globals
+    saveStaticFlagGlobals, restoreStaticFlagGlobals
   ) where
 
 #include "HsVersions.h"
@@ -84,9 +96,10 @@ module StaticFlags (
 import Config
 import FastString
 import Util
-import Maybes		( firstJusts )
+import Maybes		( firstJusts, catMaybes )
 import Panic
 
+import Control.Monad    ( liftM3 )
 import Data.Maybe       ( listToMaybe )
 import Data.IORef
 import System.IO.Unsafe	( unsafePerformIO )
@@ -113,6 +126,7 @@ lookUp	       	 :: FastString -> Bool
 lookup_def_int   :: String -> Int -> Int
 lookup_def_float :: String -> Float -> Float
 lookup_str       :: String -> Maybe String
+lookup_all_str   :: String -> [String]
 
 -- holds the static opts while they're being collected, before
 -- being unsafely read by unpacked_static_opts below.
@@ -143,6 +157,10 @@ lookup_str sw
 	Just str         -> Just str
 	Nothing		 -> Nothing	
 
+lookup_all_str sw = map f $ catMaybes (map (stripPrefix sw) staticFlags) where
+   f ('=' : str) = str
+   f str = str
+
 lookup_def_int sw def = case (lookup_str sw) of
 			    Nothing -> def		-- Use default
 		  	    Just xx -> try_read sw xx
@@ -159,7 +177,7 @@ try_read sw str
   = case reads str of
 	((x,_):_) -> x	-- Be forgiving: ignore trailing goop, and alternative parses
 	[]	  -> ghcError (UsageError ("Malformed argument " ++ str ++ " for flag " ++ sw))
-			-- ToDo: hack alert. We should really parse the arugments
+			-- ToDo: hack alert. We should really parse the arguments
 			-- 	 and announce errors in a more civilised way.
 
 
@@ -181,16 +199,72 @@ unpacked_opts =
 
 opt_IgnoreDotGhci :: Bool
 opt_IgnoreDotGhci		= lookUp (fsLit "-ignore-dot-ghci")
+ 
+opt_GhciScripts :: [String]
+opt_GhciScripts = lookup_all_str "-ghci-script"
 
--- debugging opts
-opt_SuppressUniques :: Bool
-opt_SuppressUniques		= lookUp  (fsLit "-dsuppress-uniques")
+-- debugging options
+-- | Suppress all that is suppressable in core dumps.
+--   Except for uniques, as some simplifier phases introduce new varibles that
+--   have otherwise identical names.
+opt_SuppressAll :: Bool
+opt_SuppressAll	
+	= lookUp  (fsLit "-dsuppress-all")
 
+-- | Suppress all coercions, them replacing with '...'
 opt_SuppressCoercions :: Bool
-opt_SuppressCoercions           = lookUp  (fsLit "-dsuppress-coercions")
+opt_SuppressCoercions
+	=  lookUp  (fsLit "-dsuppress-all") 
+	|| lookUp  (fsLit "-dsuppress-coercions")
 
+-- | Suppress module id prefixes on variables.
 opt_SuppressModulePrefixes :: Bool
-opt_SuppressModulePrefixes	= lookUp  (fsLit "-dsuppress-module-prefixes")
+opt_SuppressModulePrefixes
+	=  lookUp  (fsLit "-dsuppress-all")
+	|| lookUp  (fsLit "-dsuppress-module-prefixes")
+
+-- | Suppress type applications.
+opt_SuppressTypeApplications :: Bool
+opt_SuppressTypeApplications
+	=  lookUp  (fsLit "-dsuppress-all")
+	|| lookUp  (fsLit "-dsuppress-type-applications")
+
+-- | Suppress info such as arity and unfoldings on identifiers.
+opt_SuppressIdInfo :: Bool
+opt_SuppressIdInfo 
+	=  lookUp  (fsLit "-dsuppress-all")
+	|| lookUp  (fsLit "-dsuppress-idinfo")
+
+-- | Suppress separate type signatures in core, but leave types on lambda bound vars
+opt_SuppressTypeSignatures :: Bool
+opt_SuppressTypeSignatures
+	=  lookUp  (fsLit "-dsuppress-all")
+	|| lookUp  (fsLit "-dsuppress-type-signatures")
+
+-- | Suppress unique ids on variables.
+--   Except for uniques, as some simplifier phases introduce new variables that
+--   have otherwise identical names.
+opt_SuppressUniques :: Bool
+opt_SuppressUniques
+	=  lookUp  (fsLit "-dsuppress-uniques")
+
+-- | Display case expressions with a single alternative as strict let bindings
+opt_PprCaseAsLet :: Bool
+opt_PprCaseAsLet	= lookUp   (fsLit "-dppr-case-as-let")
+
+-- | Set the maximum width of the dumps
+--   If GHC's command line options are bad then the options parser uses the
+--   pretty printer display the error message. In this case the staticFlags
+--   won't be initialized yet, so we must check for this case explicitly 
+--   and return the default value.
+opt_PprCols :: Int
+opt_PprCols 
+ = unsafePerformIO
+ $ do	ready <- readIORef v_opt_C_ready
+	if (not ready)
+		then return 100
+		else return $ lookup_def_int "-dppr-cols" 100
+
 
 opt_PprStyle_Debug  :: Bool
 opt_PprStyle_Debug              = lookUp  (fsLit "-dppr-debug")
@@ -207,7 +281,6 @@ opt_Fuel                        = lookup_def_int "-dopt-fuel" maxBound
 
 opt_NoDebugOutput   :: Bool
 opt_NoDebugOutput               = lookUp  (fsLit "-dno-debug-output")
-
 
 -- profiling opts
 opt_SccProfilingOn :: Bool
@@ -226,11 +299,6 @@ opt_IrrefutableTuples		= lookUp  (fsLit "-firrefutable-tuples")
 
 opt_Parallel :: Bool
 opt_Parallel			= lookUp  (fsLit "-fparallel")
-
--- optimisation opts
-opt_DsMultiTyVar :: Bool
-opt_DsMultiTyVar		= not (lookUp (fsLit "-fno-ds-multi-tyvar"))
-	-- On by default
 
 opt_SimpleListLiterals :: Bool
 opt_SimpleListLiterals	        = lookUp  (fsLit "-fsimple-list-literals")
@@ -267,6 +335,9 @@ opt_SimplNoPreInlining		= lookUp  (fsLit "-fno-pre-inlining")
 opt_SimplExcessPrecision :: Bool
 opt_SimplExcessPrecision	= lookUp  (fsLit "-fexcess-precision")
 
+opt_NoOptCoercion :: Bool
+opt_NoOptCoercion    	        = lookUp  (fsLit "-fno-opt-coercion")
+
 -- Unfolding control
 -- See Note [Discounts and thresholds] in CoreUnfold
 
@@ -274,16 +345,16 @@ opt_UF_CreationThreshold, opt_UF_UseThreshold :: Int
 opt_UF_DearOp, opt_UF_FunAppDiscount, opt_UF_DictDiscount :: Int
 opt_UF_KeenessFactor :: Float
 
-opt_UF_CreationThreshold = lookup_def_int "-funfolding-creation-threshold" (45::Int)
-opt_UF_UseThreshold	 = lookup_def_int "-funfolding-use-threshold"	   (6::Int)
-opt_UF_FunAppDiscount	 = lookup_def_int "-funfolding-fun-discount"	   (6::Int)
+opt_UF_CreationThreshold = lookup_def_int "-funfolding-creation-threshold" (450::Int)
+opt_UF_UseThreshold      = lookup_def_int "-funfolding-use-threshold"      (60::Int)
+opt_UF_FunAppDiscount    = lookup_def_int "-funfolding-fun-discount"       (60::Int)
 
-opt_UF_DictDiscount	 = lookup_def_int "-funfolding-dict-discount"	   (3::Int)
+opt_UF_DictDiscount      = lookup_def_int "-funfolding-dict-discount"      (30::Int)
    -- Be fairly keen to inline a fuction if that means
    -- we'll be able to pick the right method from a dictionary
 
 opt_UF_KeenessFactor	 = lookup_def_float "-funfolding-keeness-factor"   (1.5::Float)
-opt_UF_DearOp            = ( 4 :: Int)
+opt_UF_DearOp            = ( 40 :: Int)
 
 
 -- Related to linking
@@ -495,3 +566,21 @@ way_details =
 	[ "-XParr"
 	, "-fvectorise"]
   ]
+
+-----------------------------------------------------------------------------
+-- Tunneling our global variables into a new instance of the GHC library
+
+-- Ignore the v_Ld_inputs global because:
+--  a) It is mutated even once GHC has been initialised, which means that I'd
+--     have to add another layer of indirection to truly share the value
+--  b) We can get away without sharing it because it only affects the link,
+--     and is mutated by the GHC exe. Users who load up a new copy of the GHC
+--     library while another is running almost certainly won't actually access it.
+saveStaticFlagGlobals :: IO (Bool, [String], [Way])
+saveStaticFlagGlobals = liftM3 (,,) (readIORef v_opt_C_ready) (readIORef v_opt_C) (readIORef v_Ways)
+
+restoreStaticFlagGlobals :: (Bool, [String], [Way]) -> IO ()
+restoreStaticFlagGlobals (c_ready, c, ways) = do
+    writeIORef v_opt_C_ready c_ready
+    writeIORef v_opt_C c
+    writeIORef v_Ways ways

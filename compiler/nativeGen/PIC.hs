@@ -63,7 +63,7 @@ import Reg
 import NCGMonad
 
 
-import Cmm
+import OldCmm
 import CLabel           ( CLabel, ForeignLabelSource(..), pprCLabel,
                           mkDynamicLinkerLabel, DynamicLinkerLabelInfo(..),
                           dynamicLinkerLabelInfo, mkPicBaseLabel,
@@ -709,18 +709,17 @@ pprImportedSymbol _ _ _
 
 initializePicBase_ppc 
 	:: Arch -> OS -> Reg 
-	-> [NatCmmTop PPC.Instr] 
-	-> NatM [NatCmmTop PPC.Instr]
+	-> [NatCmmTop CmmStatics PPC.Instr] 
+	-> NatM [NatCmmTop CmmStatics PPC.Instr]
 
 initializePicBase_ppc ArchPPC os picReg
-    (CmmProc info lab params (ListGraph blocks) : statics)
+    (CmmProc info lab (ListGraph blocks) : statics)
     | osElfTarget os
     = do
         gotOffLabel <- getNewLabelNat
         tmp <- getNewRegNat $ intSize wordWidth
         let 
-            gotOffset = CmmData Text [
-                            CmmDataLabel gotOffLabel,
+            gotOffset = CmmData Text $ Statics gotOffLabel [
 			    CmmStaticLit (CmmLabelDiffOff gotLabel
                         	                          mkPicBaseLabel
 				                          0)
@@ -739,11 +738,11 @@ initializePicBase_ppc ArchPPC os picReg
                                : PPC.ADD picReg picReg (PPC.RIReg tmp)
                                : insns)
 
-        return (CmmProc info lab params (ListGraph (b' : tail blocks)) : gotOffset : statics)
+        return (CmmProc info lab (ListGraph (b' : tail blocks)) : gotOffset : statics)
 
 initializePicBase_ppc ArchPPC OSDarwin picReg
-	(CmmProc info lab params (ListGraph blocks) : statics)
-	= return (CmmProc info lab params (ListGraph (b':tail blocks)) : statics)
+	(CmmProc info lab (ListGraph blocks) : statics)
+	= return (CmmProc info lab (ListGraph (b':tail blocks)) : statics)
 
 	where 	BasicBlock bID insns = head blocks
           	b' = BasicBlock bID (PPC.FETCHPC picReg : insns)
@@ -762,19 +761,19 @@ initializePicBase_ppc _ _ _ _
 
 initializePicBase_x86
 	:: Arch -> OS -> Reg 
-	-> [NatCmmTop X86.Instr] 
-	-> NatM [NatCmmTop X86.Instr]
+	-> [NatCmmTop (Alignment, CmmStatics) X86.Instr] 
+	-> NatM [NatCmmTop (Alignment, CmmStatics) X86.Instr]
 
 initializePicBase_x86 ArchX86 os picReg 
-	(CmmProc info lab params (ListGraph blocks) : statics)
+	(CmmProc info lab (ListGraph blocks) : statics)
     | osElfTarget os
-    = return (CmmProc info lab params (ListGraph (b':tail blocks)) : statics)
+    = return (CmmProc info lab (ListGraph (b':tail blocks)) : statics)
     where BasicBlock bID insns = head blocks
           b' = BasicBlock bID (X86.FETCHGOT picReg : insns)
 
 initializePicBase_x86 ArchX86 OSDarwin picReg
-	(CmmProc info lab params (ListGraph blocks) : statics)
-	= return (CmmProc info lab params (ListGraph (b':tail blocks)) : statics)
+	(CmmProc info lab (ListGraph blocks) : statics)
+	= return (CmmProc info lab (ListGraph (b':tail blocks)) : statics)
 
 	where 	BasicBlock bID insns = head blocks
           	b' = BasicBlock bID (X86.FETCHPC picReg : insns)

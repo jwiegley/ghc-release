@@ -1,19 +1,9 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
-
-module Data.Typeable where
+module Data.Typeable (Typeable, mkTyConApp, cast) where
 
 import Data.Maybe
-import GHC.Base
-
-data TypeRep
-data TyCon
-
-mkTyCon      :: String -> TyCon
-mkTyConApp   :: TyCon -> [TypeRep] -> TypeRep
+import {-# SOURCE #-} Data.Typeable.Internal
 
 cast :: (Typeable a, Typeable b) => a -> Maybe b
-
-class Typeable a where
-  typeOf :: a -> TypeRep
 

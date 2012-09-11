@@ -8,15 +8,8 @@
 -- ---------------------------------------------------------------------------
 
 {
-{-# OPTIONS -Wwarn -w -XNoMonomorphismRestriction #-}
--- The NoMonomorphismRestriction deals with a Happy infelicity
---    With OutsideIn's more conservativ monomorphism restriction
---    we aren't generalising
---        notHappyAtAll = error "urk"
---    which is terrible.  Switching off the restriction allows
---    the generalisation.  Better would be to make Happy generate
---    an appropriate signature.
-
+{-# LANGUAGE BangPatterns #-} -- required for versions of Happy before 1.18.6
+{-# OPTIONS -Wwarn -w #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
 -- any warnings in the module. See
@@ -48,9 +41,7 @@ import ForeignCall	( Safety(..), CExportSpec(..), CLabelString,
 			)
 import OccName		( varName, dataName, tcClsName, tvName )
 import DataCon		( DataCon, dataConName )
-import SrcLoc		( Located(..), unLoc, getLoc, noLoc, combineSrcSpans,
-			  SrcSpan, combineLocs, srcLocFile, 
-			  mkSrcLoc, mkSrcSpan )
+import SrcLoc
 import Module
 import StaticFlags	( opt_SccProfilingOn, opt_Hpc )
 import Type		( Kind, liftedTypeKind, unliftedTypeKind )
@@ -247,7 +238,7 @@ incorrect.
  'label'	{ L _ ITlabel } 
  'dynamic'	{ L _ ITdynamic }
  'safe'		{ L _ ITsafe }
- 'threadsafe'	{ L _ ITthreadsafe }  -- ToDo: remove deprecated alias
+ 'interruptible' { L _ ITinterruptible }
  'unsafe'	{ L _ ITunsafe }
  'mdo'		{ L _ ITmdo }
  'family'	{ L _ ITfamily }
@@ -260,19 +251,22 @@ incorrect.
  'by'       { L _ ITby }        -- for list transform extension
  'using'    { L _ ITusing }     -- for list transform extension
 
- '{-# INLINE'      	  { L _ (ITinline_prag _ _) }
- '{-# SPECIALISE'  	  { L _ ITspec_prag }
+ '{-# INLINE'             { L _ (ITinline_prag _ _) }
+ '{-# SPECIALISE'         { L _ ITspec_prag }
  '{-# SPECIALISE_INLINE'  { L _ (ITspec_inline_prag _) }
- '{-# SOURCE'	   { L _ ITsource_prag }
- '{-# RULES'	   { L _ ITrules_prag }
- '{-# CORE'        { L _ ITcore_prag }              -- hdaume: annotated core
- '{-# SCC'	   { L _ ITscc_prag }
- '{-# GENERATED'   { L _ ITgenerated_prag }
- '{-# DEPRECATED'  { L _ ITdeprecated_prag }
- '{-# WARNING'     { L _ ITwarning_prag }
- '{-# UNPACK'      { L _ ITunpack_prag }
- '{-# ANN'         { L _ ITann_prag }
- '#-}'		   { L _ ITclose_prag }
+ '{-# SOURCE'      				{ L _ ITsource_prag }
+ '{-# RULES'       				{ L _ ITrules_prag }
+ '{-# CORE'        				{ L _ ITcore_prag }              -- hdaume: annotated core
+ '{-# SCC'                { L _ ITscc_prag }
+ '{-# GENERATED'          { L _ ITgenerated_prag }
+ '{-# DEPRECATED'         { L _ ITdeprecated_prag }
+ '{-# WARNING'            { L _ ITwarning_prag }
+ '{-# UNPACK'             { L _ ITunpack_prag }
+ '{-# ANN'                { L _ ITann_prag }
+ '{-# VECTORISE'          { L _ ITvect_prag }
+ '{-# VECTORISE_SCALAR'   { L _ ITvect_scalar_prag }
+ '{-# NOVECTORISE'        { L _ ITnovect_prag }
+ '#-}'             				{ L _ ITclose_prag }
 
  '..'		{ L _ ITdotdot }  			-- reserved symbols
  ':'		{ L _ ITcolon }
@@ -432,14 +426,18 @@ header 	:: { Located (HsModule RdrName) }
 		{% fileSrcSpan >>= \ loc ->
 		   return (L loc (HsModule (Just $3) $5 $7 [] $4 $1
                           ))}
-	| missing_module_keyword importdecls
+        | header_body2
 		{% fileSrcSpan >>= \ loc ->
-		   return (L loc (HsModule Nothing Nothing $2 [] Nothing
+                   return (L loc (HsModule Nothing Nothing $1 [] Nothing
                           Nothing)) }
 
 header_body :: { [LImportDecl RdrName] }
 	:  '{'            importdecls		{ $2 }
- 	|      vocurly    importdecls		{ $2 }
+        |      vocurly    importdecls           { $2 }
+
+header_body2 :: { [LImportDecl RdrName] }
+        :  '{' importdecls                      { $2 }
+        |  missing_module_keyword importdecls   { $2 }
 
 -----------------------------------------------------------------------------
 -- The Export List
@@ -505,11 +503,15 @@ importdecls :: { [LImportDecl RdrName] }
 	| {- empty -}				{ [] }
 
 importdecl :: { LImportDecl RdrName }
-	: 'import' maybe_src optqualified maybe_pkg modid maybeas maybeimpspec 
-		{ L (comb4 $1 $5 $6 $7) (ImportDecl $5 $4 $2 $3 (unLoc $6) (unLoc $7)) }
+	: 'import' maybe_src maybe_safe optqualified maybe_pkg modid maybeas maybeimpspec 
+		{ L (comb4 $1 $6 $7 $8) (ImportDecl $6 $5 $2 $3 $4 (unLoc $7) (unLoc $8)) }
 
 maybe_src :: { IsBootInterface }
 	: '{-# SOURCE' '#-}'			{ True }
+	| {- empty -}				{ False }
+
+maybe_safe :: { Bool }
+	: 'safe'				{ True }
 	| {- empty -}				{ False }
 
 maybe_pkg :: { Maybe FastString }
@@ -552,31 +554,34 @@ ops   	:: { Located [Located RdrName] }
 -- Top-Level Declarations
 
 topdecls :: { OrdList (LHsDecl RdrName) }
-        : topdecls ';' topdecl		        { $1 `appOL` $3 }
-        | topdecls ';'			        { $1 }
-	| topdecl			        { $1 }
+        : topdecls ';' topdecl                  { $1 `appOL` $3 }
+        | topdecls ';'                          { $1 }
+        | topdecl                               { $1 }
 
 topdecl :: { OrdList (LHsDecl RdrName) }
-  	: cl_decl			{ unitOL (L1 (TyClD (unLoc $1))) }
-  	| ty_decl			{ unitOL (L1 (TyClD (unLoc $1))) }
-	| 'instance' inst_type where_inst
-	    { let (binds, sigs, ats, _) = cvBindsAndSigs (unLoc $3)
-	      in 
-	      unitOL (L (comb3 $1 $2 $3) (InstD (InstDecl $2 binds sigs ats)))}
+        : cl_decl                       { unitOL (L1 (TyClD (unLoc $1))) }
+        | ty_decl                       { unitOL (L1 (TyClD (unLoc $1))) }
+        | 'instance' inst_type where_inst
+            { let (binds, sigs, ats, _) = cvBindsAndSigs (unLoc $3)
+              in 
+              unitOL (L (comb3 $1 $2 $3) (InstD (InstDecl $2 binds sigs ats)))}
         | stand_alone_deriving                  { unitOL (LL (DerivD (unLoc $1))) }
-	| 'default' '(' comma_types0 ')'	{ unitOL (LL $ DefD (DefaultDecl $3)) }
-	| 'foreign' fdecl			{ unitOL (LL (unLoc $2)) }
+        | 'default' '(' comma_types0 ')'        { unitOL (LL $ DefD (DefaultDecl $3)) }
+        | 'foreign' fdecl                       { unitOL (LL (unLoc $2)) }
         | '{-# DEPRECATED' deprecations '#-}'   { $2 }
         | '{-# WARNING' warnings '#-}'          { $2 }
-	| '{-# RULES' rules '#-}'		{ $2 }
-	| annotation { unitOL $1 }
-      	| decl					{ unLoc $1 }
+        | '{-# RULES' rules '#-}'               { $2 }
+        | '{-# VECTORISE_SCALAR' qvar '#-}'     { unitOL $ LL $ VectD (HsVect   $2 Nothing) }
+        | '{-# VECTORISE' qvar '=' exp '#-}'    { unitOL $ LL $ VectD (HsVect   $2 (Just $4)) }
+        | '{-# NOVECTORISE' qvar '#-}'     			{ unitOL $ LL $ VectD (HsNoVect $2) }
+        | annotation { unitOL $1 }
+        | decl                                  { unLoc $1 }
 
-	-- Template Haskell Extension
-	-- The $(..) form is one possible form of infixexp
-	-- but we treat an arbitrary expression just as if 
-	-- it had a $(..) wrapped around it
-	| infixexp 				{ unitOL (LL $ mkTopSpliceDecl $1) } 
+        -- Template Haskell Extension
+        -- The $(..) form is one possible form of infixexp
+        -- but we treat an arbitrary expression just as if 
+        -- it had a $(..) wrapped around it
+        | infixexp                              { unitOL (LL $ mkTopSpliceDecl $1) } 
 
 -- Type classes
 --
@@ -722,6 +727,11 @@ stand_alone_deriving :: { LDerivDecl RdrName }
 decl_cls  :: { Located (OrdList (LHsDecl RdrName)) }
 decl_cls  : at_decl_cls		        { LL (unitOL (L1 (TyClD (unLoc $1)))) }
 	  | decl                        { $1 }
+
+	  -- A 'default' signature used with the generic-programming extension
+          | 'default' infixexp '::' sigtypedoc
+                    {% do { (TypeSig l ty) <- checkValSig $2 $4
+                          ; return (LL $ unitOL (LL $ SigD (GenericSig l ty))) } }
 
 decls_cls :: { Located (OrdList (LHsDecl RdrName)) }	-- Reversed
 	  : decls_cls ';' decl_cls	{ LL (unLoc $1 `appOL` unLoc $3) }
@@ -883,7 +893,7 @@ fdecl :: { LHsDecl RdrName }
 fdecl : 'import' callconv safety fspec
 		{% mkImport $2 $3 (unLoc $4) >>= return.LL }
       | 'import' callconv        fspec		
-		{% do { d <- mkImport $2 (PlaySafe False) (unLoc $3);
+		{% do { d <- mkImport $2 PlaySafe (unLoc $3);
 			return (LL d) } }
       | 'export' callconv fspec
 		{% mkExport $2 (unLoc $3) >>= return.LL }
@@ -895,8 +905,8 @@ callconv :: { CCallConv }
 
 safety :: { Safety }
 	: 'unsafe'			{ PlayRisky }
-	| 'safe'			{ PlaySafe  False }
-	| 'threadsafe'			{ PlaySafe  True } -- deprecated alias
+	| 'safe'			{ PlaySafe }
+	| 'interruptible'		{ PlayInterruptible }
 
 fspec :: { Located (Located FastString, Located RdrName, LHsType RdrName) }
        : STRING var '::' sigtypedoc     { LL (L (getLoc $1) (getSTRING $1), $2, $4) }
@@ -1023,8 +1033,6 @@ atype :: { LHsType RdrName }
 	| '$(' exp ')'	      		{ LL $ mkHsSpliceTy $2 }
 	| TH_ID_SPLICE	      		{ LL $ mkHsSpliceTy $ L1 $ HsVar $ 
 					  mkUnqual varName (getTH_ID_SPLICE $1) }
--- Generics
-        | INTEGER                       { L1 (HsNumTy (getINTEGER $1)) }
 
 -- An inst_type is what occurs in the head of an instance decl
 --	e.g.  (Foo a, Gaz b) => Wibble a b
@@ -1206,15 +1214,20 @@ docdecld :: { LDocDecl }
         | docsection                            { L1 (case (unLoc $1) of (n, doc) -> DocGroup n doc) }
 
 decl 	:: { Located (OrdList (LHsDecl RdrName)) }
-	: sigdecl			{ $1 }
-	| '!' aexp rhs			{% do { pat <- checkPattern $2;
-					        return (LL $ unitOL $ LL $ ValD ( 
-							PatBind (LL $ BangPat pat) (unLoc $3)
-								placeHolderType placeHolderNames)) } }
-        | infixexp opt_sig rhs          {% do { r <- checkValDef $1 $2 $3;
-                                                let { l = comb2 $1 $> };
-                                                return $! (sL l (unitOL $! (sL l $ ValD r))) } }
-        | docdecl                       { LL $ unitOL $1 }
+	: sigdecl		{ $1 }
+
+        | '!' aexp rhs          {% do { let { e = LL (SectionR (LL (HsVar bang_RDR)) $2) };
+                                        pat <- checkPattern e;
+                                        return $ LL $ unitOL $ LL $ ValD $
+                                               PatBind pat (unLoc $3)
+                                                       placeHolderType placeHolderNames } }
+                                -- Turn it all into an expression so that
+                                -- checkPattern can check that bangs are enabled
+
+        | infixexp opt_sig rhs  {% do { r <- checkValDef $1 $2 $3;
+                                        let { l = comb2 $1 $> };
+                                        return $! (sL l (unitOL $! (sL l $ ValD r))) } }
+        | docdecl               { LL $ unitOL $1 }
 
 rhs	:: { Located (GRHSs RdrName) }
 	: '=' exp wherebinds	{ sL (comb3 $1 $2 $3) $ GRHSs (unguardedRHS $2) (unLoc $3) }
@@ -1228,11 +1241,13 @@ gdrh :: { LGRHS RdrName }
 	: '|' guardquals '=' exp  	{ sL (comb2 $1 $>) $ GRHS (unLoc $2) $4 }
 
 sigdecl :: { Located (OrdList (LHsDecl RdrName)) }
-	: infixexp '::' sigtypedoc	{% do s <- checkValSig $1 $3 
-				         ; return (LL $ unitOL (LL $ SigD s)) }
-		-- See Note [Declaration/signature overlap] for why we need infixexp here
+        : 
+	-- See Note [Declaration/signature overlap] for why we need infixexp here
+	  infixexp '::' sigtypedoc
+                        {% do s <- checkValSig $1 $3 
+                        ; return (LL $ unitOL (LL $ SigD s)) }
 	| var ',' sig_vars '::' sigtypedoc
-				{ LL $ toOL [ LL $ SigD (TypeSig n $5) | n <- $1 : unLoc $3 ] }
+				{ LL $ toOL [ LL $ SigD (TypeSig ($1 : unLoc $3) $5) ] }
 	| infix prec ops	{ LL $ toOL [ LL $ SigD (FixSig (FixitySig n (Fixity $2 (unLoc $1))))
 					     | n <- unLoc $3 ] }
 	| '{-# INLINE'   activation qvar '#-}'	      
@@ -1253,7 +1268,7 @@ quasiquote :: { Located (HsQuasiQuote RdrName) }
 	: TH_QUASIQUOTE   { let { loc = getLoc $1
                                 ; ITquasiQuote (quoter, quote, quoteSpan) = unLoc $1
                                 ; quoterId = mkUnqual varName quoter }
-                            in L1 (mkHsQuasiQuote quoterId quoteSpan quote) }
+                            in L1 (mkHsQuasiQuote quoterId (RealSrcSpan quoteSpan) quote) }
 
 exp   :: { LHsExpr RdrName }
 	: infixexp '::' sigtype		{ LL $ ExprWithTySig $1 $3 }
@@ -1279,12 +1294,9 @@ exp10 :: { LHsExpr RdrName }
    	| 'case' exp 'of' altslist		{ LL $ HsCase $2 (mkMatchGroup (unLoc $4)) }
 	| '-' fexp				{ LL $ NegApp $2 noSyntaxExpr }
 
-  	| 'do' stmtlist			{% let loc = comb2 $1 $2 in
-					   checkDo loc (unLoc $2)  >>= \ (stmts,body) ->
-					   return (L loc (mkHsDo DoExpr stmts body)) }
-  	| 'mdo' stmtlist		{% let loc = comb2 $1 $2 in
-					   checkDo loc (unLoc $2)  >>= \ (stmts,body) ->
-					   return (L loc (mkHsDo (MDoExpr noPostTcTable) stmts body)) }
+  	| 'do' stmtlist			{ L (comb2 $1 $2) (mkHsDo DoExpr  (unLoc $2)) }
+  	| 'mdo' stmtlist		{ L (comb2 $1 $2) (mkHsDo MDoExpr (unLoc $2)) }
+
         | scc_annot exp		    		{ LL $ if opt_SccProfilingOn
 							then HsSCC (unLoc $1) $2
 							else HsPar $2 }
@@ -1356,8 +1368,8 @@ aexp2	:: { LHsExpr RdrName }
 	| RATIONAL			{ sL (getLoc $1) (HsOverLit $! mkHsFractional (getRATIONAL $1) placeHolderType) }
 
         -- N.B.: sections get parsed by these next two productions.
-        -- This allows you to write, e.g., '(+ 3, 4 -)', which isn't correct Haskell98
-        -- (you'd have to write '((+ 3), (4 -))')
+        -- This allows you to write, e.g., '(+ 3, 4 -)', which isn't
+        -- correct Haskell (you'd have to write '((+ 3), (4 -))')
         -- but the less cluttered version fell out of having texps.
 	| '(' texp ')'			{ LL (HsPar $2) }
 	| '(' tup_exprs ')'             { LL (ExplicitTuple $2 Boxed) }
@@ -1417,8 +1429,8 @@ texp :: { LHsExpr RdrName }
 	-- Note [Parsing sections]
 	-- ~~~~~~~~~~~~~~~~~~~~~~~
 	-- We include left and right sections here, which isn't
-	-- technically right according to Haskell 98.  For example
-	--	(3 +, True) isn't legal
+	-- technically right according to the Haskell standard.
+        -- For example (3 +, True) isn't legal.
 	-- However, we want to parse bang patterns like
 	--	(!x, !y)
 	-- and it's convenient to do so here as a section
@@ -1459,7 +1471,10 @@ list :: { LHsExpr RdrName }
 	| texp ',' exp '..' 	{ LL $ ArithSeq noPostTcExpr (FromThen $1 $3) }
 	| texp '..' exp	 	{ LL $ ArithSeq noPostTcExpr (FromTo $1 $3) }
 	| texp ',' exp '..' exp	{ LL $ ArithSeq noPostTcExpr (FromThenTo $1 $3 $5) }
-	| texp '|' flattenedpquals	{ sL (comb2 $1 $>) $ mkHsDo ListComp (unLoc $3) $1 }
+	| texp '|' flattenedpquals	
+             {% checkMonadComp >>= \ ctxt ->
+		return (sL (comb2 $1 $>) $ 
+                        mkHsComp ctxt (unLoc $3) $1) }
 
 lexps :: { Located [LHsExpr RdrName] }
 	: lexps ',' texp 		{ LL (((:) $! $3) $! unLoc $1) }
@@ -1474,7 +1489,7 @@ flattenedpquals :: { Located [LStmt RdrName] }
                     -- We just had one thing in our "parallel" list so 
                     -- we simply return that thing directly
                     
-                    qss -> L1 [L1 $ ParStmt [(qs, undefined) | qs <- qss]]
+                    qss -> L1 [L1 $ ParStmt [(qs, undefined) | qs <- qss] noSyntaxExpr noSyntaxExpr noSyntaxExpr]
                     -- We actually found some actual parallel lists so
                     -- we wrap them into as a ParStmt
                 }
@@ -1495,8 +1510,7 @@ squals :: { Located [LStmt RdrName] }	-- In reverse order, because the last
 
 -- It is possible to enable bracketing (associating) qualifier lists by uncommenting the lines with {| |}
 -- above. Due to a lack of consensus on the syntax, this feature is not being used until we get user
--- demand. Note that the {| |} symbols are reused from -XGenerics and hence if you want to compile
--- a program that makes use of this temporary syntax you must supply that flag to GHC
+-- demand.
 
 transformqual :: { Located ([LStmt RdrName] -> Stmt RdrName) }
 			-- Function is applied to a list of stmts *in order*
@@ -1531,7 +1545,7 @@ parr :: { LHsExpr RdrName }
 						       (reverse (unLoc $1)) }
 	| texp '..' exp	 		{ LL $ PArrSeq noPostTcExpr (FromTo $1 $3) }
 	| texp ',' exp '..' exp		{ LL $ PArrSeq noPostTcExpr (FromThenTo $1 $3 $5) }
-	| texp '|' flattenedpquals	{ LL $ mkHsDo PArrComp (unLoc $3) $1 }
+	| texp '|' flattenedpquals	{ LL $ mkHsComp PArrComp (unLoc $3) $1 }
 
 -- We are reusing `lexps' and `flattenedpquals' from the list case.
 
@@ -1791,7 +1805,7 @@ tyvarid	:: { Located RdrName }
 	| special_id		{ L1 $! mkUnqual tvName (unLoc $1) }
 	| 'unsafe' 		{ L1 $! mkUnqual tvName (fsLit "unsafe") }
 	| 'safe' 		{ L1 $! mkUnqual tvName (fsLit "safe") }
-	| 'threadsafe' 		{ L1 $! mkUnqual tvName (fsLit "threadsafe") }
+	| 'interruptible' 	{ L1 $! mkUnqual tvName (fsLit "interruptible") }
 
 tyvarsym :: { Located RdrName }
 -- Does not include "!", because that is used for strictness marks
@@ -1824,7 +1838,7 @@ varid :: { Located RdrName }
 	| special_id		{ L1 $! mkUnqual varName (unLoc $1) }
 	| 'unsafe'		{ L1 $! mkUnqual varName (fsLit "unsafe") }
 	| 'safe'		{ L1 $! mkUnqual varName (fsLit "safe") }
-	| 'threadsafe'		{ L1 $! mkUnqual varName (fsLit "threadsafe") }
+	| 'interruptible'	{ L1 $! mkUnqual varName (fsLit "interruptible") }
 	| 'forall'		{ L1 $! mkUnqual varName (fsLit "forall") }
 	| 'family'              { L1 $! mkUnqual varName (fsLit "family") }
 
@@ -1850,7 +1864,7 @@ varsym_no_minus :: { Located RdrName } -- varsym not including '-'
 
 -- These special_ids are treated as keywords in various places, 
 -- but as ordinary ids elsewhere.   'special_id' collects all these
--- except 'unsafe', 'forall', and 'family' whose treatment differs
+-- except 'unsafe', 'interruptible', 'forall', and 'family' whose treatment differs
 -- depending on context 
 special_id :: { Located FastString }
 special_id

@@ -64,23 +64,14 @@ import TysPrim
 -- others:
 import Constants	( mAX_TUPLE_SIZE )
 import Module		( Module )
+import DataCon          ( DataCon, mkDataCon, dataConWorkId, dataConSourceArity )
+import Var
+import TyCon
+import TypeRep
 import RdrName
 import Name
-import DataCon		( DataCon, mkDataCon, dataConWorkId, dataConSourceArity )
-import Var
-import TyCon		( TyCon, AlgTyConRhs(DataTyCon), tyConDataCons,
-			  mkTupleTyCon, mkAlgTyCon, tyConName,
-			  TyConParent(NoParentTyCon) )
-
-import BasicTypes	( Arity, RecFlag(..), Boxity(..), isBoxed, HsBang(..) )
-
-import Type		( Type, mkTyConTy, mkTyConApp, mkTyVarTy, mkTyVarTys,
-			  TyThing(..) )
-import Coercion         ( unsafeCoercionTyCon, symCoercionTyCon,
-                          transCoercionTyCon, leftCoercionTyCon, 
-                          rightCoercionTyCon, instCoercionTyCon )
-import TypeRep          ( mkArrowKinds, liftedTypeKind, ubxTupleKind )
-import Unique		( incrUnique, mkTupleTyConUnique,
+import BasicTypes       ( Arity, RecFlag(..), Boxity(..), isBoxed, HsBang(..) )
+import Unique           ( incrUnique, mkTupleTyConUnique,
 			  mkTupleDataConUnique, mkPArrDataConUnique )
 import Data.Array
 import FastString
@@ -124,12 +115,6 @@ wiredInTyCons = [ unitTyCon	-- Not treated like other tuples, because
     	      , intTyCon
     	      , listTyCon
 	      , parrTyCon
-              , unsafeCoercionTyCon
-              , symCoercionTyCon
-              , transCoercionTyCon
-              , leftCoercionTyCon
-              , rightCoercionTyCon
-              , instCoercionTyCon
     	      ]
 \end{code}
 
@@ -153,9 +138,9 @@ intTyConName	  = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "Int") intTyCo
 intDataConName	  = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "I#") intDataConKey  intDataCon
 
 boolTyConName, falseDataConName, trueDataConName :: Name
-boolTyConName	  = mkWiredInTyConName   UserSyntax gHC_BOOL (fsLit "Bool") boolTyConKey boolTyCon
-falseDataConName  = mkWiredInDataConName UserSyntax gHC_BOOL (fsLit "False") falseDataConKey falseDataCon
-trueDataConName	  = mkWiredInDataConName UserSyntax gHC_BOOL (fsLit "True")  trueDataConKey  trueDataCon 
+boolTyConName	  = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "Bool") boolTyConKey boolTyCon
+falseDataConName  = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "False") falseDataConKey falseDataCon
+trueDataConName	  = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "True")  trueDataConKey  trueDataCon
 
 listTyConName, nilDataConName, consDataConName :: Name
 listTyConName	  = mkWiredInTyConName   BuiltInSyntax gHC_TYPES (fsLit "[]") listTyConKey listTyCon
@@ -169,8 +154,10 @@ doubleTyConName    = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "Double") 
 doubleDataConName  = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "D#") doubleDataConKey doubleDataCon
 
 parrTyConName, parrDataConName :: Name
-parrTyConName	  = mkWiredInTyConName   BuiltInSyntax gHC_PARR (fsLit "[::]") parrTyConKey parrTyCon 
-parrDataConName   = mkWiredInDataConName UserSyntax    gHC_PARR (fsLit "PArr") parrDataConKey parrDataCon
+parrTyConName   = mkWiredInTyConName   BuiltInSyntax 
+                    gHC_PARR' (fsLit "[::]") parrTyConKey parrTyCon 
+parrDataConName = mkWiredInDataConName UserSyntax    
+                    gHC_PARR' (fsLit "PArr") parrDataConKey parrDataCon
 
 boolTyCon_RDR, false_RDR, true_RDR, intTyCon_RDR, charTyCon_RDR,
     intDataCon_RDR, listTyCon_RDR, consDataCon_RDR, parrTyCon_RDR:: RdrName
@@ -209,7 +196,6 @@ pcTyCon is_enum is_rec name tyvars cons
 		(DataTyCon cons is_enum)
 		NoParentTyCon
                 is_rec
-		True		-- All the wired-in tycons have generics
 		False		-- Not in GADT syntax
 
 pcDataCon :: Name -> [TyVar] -> [Type] -> TyCon -> DataCon
@@ -274,7 +260,7 @@ unboxedTupleArr = listArray (0,mAX_TUPLE_SIZE) [mk_tuple Unboxed i | i <- [0..mA
 mk_tuple :: Boxity -> Int -> (TyCon,DataCon)
 mk_tuple boxity arity = (tycon, tuple_con)
   where
-	tycon   = mkTupleTyCon tc_name tc_kind arity tyvars tuple_con boxity gen_info 
+	tycon   = mkTupleTyCon tc_name tc_kind arity tyvars tuple_con boxity 
 	modu	= mkTupleModule boxity arity
 	tc_name = mkWiredInName modu (mkTupleOcc tcName boxity arity) tc_uniq
 				(ATyCon tycon) BuiltInSyntax
@@ -291,8 +277,6 @@ mk_tuple boxity arity = (tycon, tuple_con)
 				  (ADataCon tuple_con) BuiltInSyntax
  	tc_uniq   = mkTupleTyConUnique   boxity arity
 	dc_uniq   = mkTupleDataConUnique boxity arity
-	gen_info  = True		-- Tuples all have generics..
-					-- hmm: that's a *lot* of code
 
 unitTyCon :: TyCon
 unitTyCon     = tupleTyCon Boxed 0
@@ -537,9 +521,9 @@ unitTy = mkTupleTy Boxed []
 \end{code}
 
 %************************************************************************
-%*									*
+%*                                                                      *
 \subsection[TysWiredIn-PArr]{The @[::]@ type}
-%*									*
+%*                                                                      *
 %************************************************************************
 
 Special syntax for parallel arrays needs some wired in definitions.
@@ -562,13 +546,13 @@ parrTyCon  = pcNonRecDataTyCon parrTyConName alpha_tyvar [parrDataCon]
 
 parrDataCon :: DataCon
 parrDataCon  = pcDataCon 
-	         parrDataConName 
-		 alpha_tyvar		-- forall'ed type variables
-		 [intPrimTy,		-- 1st argument: Int#
-		  mkTyConApp		-- 2nd argument: Array# a
-		    arrayPrimTyCon 
-		    alpha_ty] 
-		 parrTyCon
+                 parrDataConName 
+                 alpha_tyvar            -- forall'ed type variables
+                 [intTy,                -- 1st argument: Int
+                  mkTyConApp            -- 2nd argument: Array# a
+                    arrayPrimTyCon 
+                    alpha_ty] 
+                 parrTyCon
 
 -- | Check whether a type constructor is the constructor for parallel arrays
 isPArrTyCon    :: TyCon -> Bool
@@ -582,31 +566,29 @@ isPArrTyCon tc  = tyConName tc == parrTyConName
 --   yet another constructor pattern
 --
 parrFakeCon                        :: Arity -> DataCon
-parrFakeCon i | i > mAX_TUPLE_SIZE  = mkPArrFakeCon  i	-- build one specially
+parrFakeCon i | i > mAX_TUPLE_SIZE  = mkPArrFakeCon  i  -- build one specially
 parrFakeCon i                       = parrFakeConArr!i
 
 -- pre-defined set of constructors
 --
 parrFakeConArr :: Array Int DataCon
 parrFakeConArr  = array (0, mAX_TUPLE_SIZE) [(i, mkPArrFakeCon i)   
-					    | i <- [0..mAX_TUPLE_SIZE]]
+                                            | i <- [0..mAX_TUPLE_SIZE]]
 
 -- build a fake parallel array constructor for the given arity
 --
 mkPArrFakeCon       :: Int -> DataCon
 mkPArrFakeCon arity  = data_con
   where
-	data_con  = pcDataCon name [tyvar] tyvarTys parrTyCon
-	tyvar     = head alphaTyVars
-	tyvarTys  = replicate arity $ mkTyVarTy tyvar
+        data_con  = pcDataCon name [tyvar] tyvarTys parrTyCon
+        tyvar     = head alphaTyVars
+        tyvarTys  = replicate arity $ mkTyVarTy tyvar
         nameStr   = mkFastString ("MkPArr" ++ show arity)
-	name      = mkWiredInName gHC_PARR (mkDataOccFS nameStr) unique
-				  (ADataCon data_con) UserSyntax
-	unique      = mkPArrDataConUnique arity
+        name      = mkWiredInName gHC_PARR' (mkDataOccFS nameStr) unique
+                                  (ADataCon data_con) UserSyntax
+        unique      = mkPArrDataConUnique arity
 
 -- | Checks whether a data constructor is a fake constructor for parallel arrays
 isPArrFakeCon      :: DataCon -> Bool
 isPArrFakeCon dcon  = dcon == parrFakeCon (dataConSourceArity dcon)
 \end{code}
-
-

@@ -1,14 +1,7 @@
 {-# OPTIONS_GHC -fno-warn-overlapping-patterns #-}
 {-# OPTIONS -fglasgow-exts -cpp #-}
-{-# OPTIONS -Wwarn -w -XNoMonomorphismRestriction #-}
--- The NoMonomorphismRestriction deals with a Happy infelicity
---    With OutsideIn's more conservativ monomorphism restriction
---    we aren't generalising
---        notHappyAtAll = error "urk"
---    which is terrible.  Switching off the restriction allows
---    the generalisation.  Better would be to make Happy generate
---    an appropriate signature.
---
+{-# LANGUAGE BangPatterns #-} -- required for versions of Happy before 1.18.6
+{-# OPTIONS -Wwarn -w #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
 -- any warnings in the module. See
@@ -1017,13 +1010,12 @@ happyReduction_70 (happy_x_10 `HappyStk`
 	happy_x_2 `HappyStk`
 	happy_x_1 `HappyStk`
 	happyRest)
-	 = case happyOut21 happy_x_3 of { happy_var_3 -> 
-	case happyOut33 happy_x_5 of { happy_var_5 -> 
+	 = case happyOut33 happy_x_5 of { happy_var_5 -> 
 	case happyOut28 happy_x_7 of { happy_var_7 -> 
 	case happyOut36 happy_x_9 of { happy_var_9 -> 
 	happyIn35
-		 (IfaceCase happy_var_5 (fst happy_var_7) happy_var_3 happy_var_9
-	) `HappyStk` happyRest}}}}
+		 (IfaceCase happy_var_5 (fst happy_var_7) happy_var_9
+	) `HappyStk` happyRest}}}
 
 happyReduce_71 = happySpecReduce_3  31# happyReduction_71
 happyReduction_71 happy_x_3
@@ -1044,7 +1036,7 @@ happyReduction_72 happy_x_3
 	happyIn35
 		 (IfaceFCall (ForeignCall.CCall 
                                                     (CCallSpec (StaticTarget (mkFastString happy_var_2) Nothing) 
-                                                               CCallConv (PlaySafe False))) 
+                                                               CCallConv PlaySafe)) 
                                                  happy_var_3
 	)}}
 

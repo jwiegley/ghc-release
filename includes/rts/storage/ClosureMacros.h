@@ -131,9 +131,9 @@
 
 // Use when changing a closure from one kind to another
 #define OVERWRITE_INFO(c, new_info)                             \
-   LDV_RECORD_DEAD_FILL_SLOP_DYNAMIC((StgClosure *)(c));       \
-   SET_INFO((c), (new_info));                                  \
-   LDV_RECORD_CREATE(c);
+    OVERWRITING_CLOSURE((StgClosure *)(c));                     \
+    SET_INFO((c), (new_info));                                  \
+    LDV_RECORD_CREATE(c);
 
 /* -----------------------------------------------------------------------------
    How to get hold of the static link field for a static closure.
@@ -239,63 +239,80 @@ INLINE_HEADER rtsBool LOOKS_LIKE_CLOSURE_PTR (void *p)
    Macros for calculating the size of a closure
    -------------------------------------------------------------------------- */
 
-INLINE_HEADER StgOffset PAP_sizeW   ( nat n_args )
+EXTERN_INLINE StgOffset PAP_sizeW   ( nat n_args );
+EXTERN_INLINE StgOffset PAP_sizeW   ( nat n_args )
 { return sizeofW(StgPAP) + n_args; }
 
-INLINE_HEADER StgOffset AP_sizeW   ( nat n_args )
+EXTERN_INLINE StgOffset AP_sizeW   ( nat n_args );
+EXTERN_INLINE StgOffset AP_sizeW   ( nat n_args )
 { return sizeofW(StgAP) + n_args; }
 
-INLINE_HEADER StgOffset AP_STACK_sizeW ( nat size )
+EXTERN_INLINE StgOffset AP_STACK_sizeW ( nat size );
+EXTERN_INLINE StgOffset AP_STACK_sizeW ( nat size )
 { return sizeofW(StgAP_STACK) + size; }
 
-INLINE_HEADER StgOffset CONSTR_sizeW( nat p, nat np )
+EXTERN_INLINE StgOffset CONSTR_sizeW( nat p, nat np );
+EXTERN_INLINE StgOffset CONSTR_sizeW( nat p, nat np )
 { return sizeofW(StgHeader) + p + np; }
 
-INLINE_HEADER StgOffset THUNK_SELECTOR_sizeW ( void )
+EXTERN_INLINE StgOffset THUNK_SELECTOR_sizeW ( void );
+EXTERN_INLINE StgOffset THUNK_SELECTOR_sizeW ( void )
 { return sizeofW(StgSelector); }
 
-INLINE_HEADER StgOffset BLACKHOLE_sizeW ( void )
+EXTERN_INLINE StgOffset BLACKHOLE_sizeW ( void );
+EXTERN_INLINE StgOffset BLACKHOLE_sizeW ( void )
 { return sizeofW(StgInd); } // a BLACKHOLE is a kind of indirection
 
 /* --------------------------------------------------------------------------
    Sizes of closures
    ------------------------------------------------------------------------*/
 
-INLINE_HEADER StgOffset sizeW_fromITBL( const StgInfoTable* itbl )
+EXTERN_INLINE StgOffset sizeW_fromITBL( const StgInfoTable* itbl );
+EXTERN_INLINE StgOffset sizeW_fromITBL( const StgInfoTable* itbl )
 { return sizeofW(StgClosure)
        + sizeofW(StgPtr)  * itbl->layout.payload.ptrs
        + sizeofW(StgWord) * itbl->layout.payload.nptrs; }
 
-INLINE_HEADER StgOffset thunk_sizeW_fromITBL( const StgInfoTable* itbl )
+EXTERN_INLINE StgOffset thunk_sizeW_fromITBL( const StgInfoTable* itbl );
+EXTERN_INLINE StgOffset thunk_sizeW_fromITBL( const StgInfoTable* itbl )
 { return sizeofW(StgThunk)
        + sizeofW(StgPtr)  * itbl->layout.payload.ptrs
        + sizeofW(StgWord) * itbl->layout.payload.nptrs; }
 
-INLINE_HEADER StgOffset ap_stack_sizeW( StgAP_STACK* x )
+EXTERN_INLINE StgOffset ap_stack_sizeW( StgAP_STACK* x );
+EXTERN_INLINE StgOffset ap_stack_sizeW( StgAP_STACK* x )
 { return AP_STACK_sizeW(x->size); }
 
-INLINE_HEADER StgOffset ap_sizeW( StgAP* x )
+EXTERN_INLINE StgOffset ap_sizeW( StgAP* x );
+EXTERN_INLINE StgOffset ap_sizeW( StgAP* x )
 { return AP_sizeW(x->n_args); }
 
-INLINE_HEADER StgOffset pap_sizeW( StgPAP* x )
+EXTERN_INLINE StgOffset pap_sizeW( StgPAP* x );
+EXTERN_INLINE StgOffset pap_sizeW( StgPAP* x )
 { return PAP_sizeW(x->n_args); }
 
-INLINE_HEADER StgWord arr_words_words( StgArrWords* x)
+EXTERN_INLINE StgWord arr_words_words( StgArrWords* x);
+EXTERN_INLINE StgWord arr_words_words( StgArrWords* x)
 { return ROUNDUP_BYTES_TO_WDS(x->bytes); }
 
-INLINE_HEADER StgOffset arr_words_sizeW( StgArrWords* x )
+EXTERN_INLINE StgOffset arr_words_sizeW( StgArrWords* x );
+EXTERN_INLINE StgOffset arr_words_sizeW( StgArrWords* x )
 { return sizeofW(StgArrWords) + arr_words_words(x); }
 
-INLINE_HEADER StgOffset mut_arr_ptrs_sizeW( StgMutArrPtrs* x )
+EXTERN_INLINE StgOffset mut_arr_ptrs_sizeW( StgMutArrPtrs* x );
+EXTERN_INLINE StgOffset mut_arr_ptrs_sizeW( StgMutArrPtrs* x )
 { return sizeofW(StgMutArrPtrs) + x->size; }
 
-INLINE_HEADER StgWord tso_sizeW ( StgTSO *tso )
-{ return TSO_STRUCT_SIZEW + tso->stack_size; }
+EXTERN_INLINE StgWord stack_sizeW ( StgStack *stack );
+EXTERN_INLINE StgWord stack_sizeW ( StgStack *stack )
+{ return sizeofW(StgStack) + stack->stack_size; }
 
-INLINE_HEADER StgWord bco_sizeW ( StgBCO *bco )
+EXTERN_INLINE StgWord bco_sizeW ( StgBCO *bco );
+EXTERN_INLINE StgWord bco_sizeW ( StgBCO *bco )
 { return bco->size; }
 
-INLINE_HEADER nat
+EXTERN_INLINE nat closure_sizeW_ (StgClosure *p, StgInfoTable *info);
+EXTERN_INLINE nat
 closure_sizeW_ (StgClosure *p, StgInfoTable *info)
 {
     switch (info->type) {
@@ -339,7 +356,9 @@ closure_sizeW_ (StgClosure *p, StgInfoTable *info)
     case MUT_ARR_PTRS_FROZEN0:
 	return mut_arr_ptrs_sizeW((StgMutArrPtrs*)p);
     case TSO:
-	return tso_sizeW((StgTSO *)p);
+        return sizeofW(StgTSO);
+    case STACK:
+        return stack_sizeW((StgStack*)p);
     case BCO:
 	return bco_sizeW((StgBCO *)p);
     case TREC_CHUNK:
@@ -350,8 +369,8 @@ closure_sizeW_ (StgClosure *p, StgInfoTable *info)
 }
 
 // The definitive way to find the size, in words, of a heap-allocated closure
-INLINE_HEADER nat
-closure_sizeW (StgClosure *p)
+EXTERN_INLINE nat closure_sizeW (StgClosure *p);
+EXTERN_INLINE nat closure_sizeW (StgClosure *p)
 {
     return closure_sizeW_(p, get_itbl(p));
 }
@@ -360,7 +379,8 @@ closure_sizeW (StgClosure *p)
    Sizes of stack frames
    -------------------------------------------------------------------------- */
 
-INLINE_HEADER StgWord stack_frame_sizeW( StgClosure *frame )
+EXTERN_INLINE StgWord stack_frame_sizeW( StgClosure *frame );
+EXTERN_INLINE StgWord stack_frame_sizeW( StgClosure *frame )
 {
     StgRetInfoTable *info;
 
@@ -415,6 +435,59 @@ INLINE_HEADER lnat mutArrPtrsCardTableSize (lnat elems)
 INLINE_HEADER StgWord8 *mutArrPtrsCard (StgMutArrPtrs *a, lnat n)
 {
     return ((StgWord8 *)&(a->payload[a->ptrs]) + n);
+}
+
+/* -----------------------------------------------------------------------------
+   Replacing a closure with a different one.  We must call
+   OVERWRITING_CLOSURE(p) on the old closure that is about to be
+   overwritten.
+
+   In PROFILING mode, LDV profiling requires that we fill the slop
+   with zeroes, and record the old closure as dead (LDV_recordDead()).
+
+   In DEBUG mode, we must overwrite the slop with zeroes, because the
+   sanity checker wants to walk through the heap checking all the
+   pointers.
+
+   In multicore mode, we *cannot* overwrite slop with zeroes, because
+   another thread might be reading it.  So,
+
+      LDV PROFILING is not compatible with +RTS -N<n> (for n > 1)
+
+      THREADED_RTS can be used with DEBUG, but full heap sanity
+      checking is disabled except after major GC.
+
+   -------------------------------------------------------------------------- */
+
+#if defined(PROFILING) || (!defined(THREADED_RTS) && defined(DEBUG))
+#define OVERWRITING_CLOSURE(c) overwritingClosure(c)
+#else
+#define OVERWRITING_CLOSURE(c) /* nothing */
+#endif
+
+#ifdef PROFILING
+void LDV_recordDead (StgClosure *c, nat size);
+#endif
+
+EXTERN_INLINE void overwritingClosure (StgClosure *p);
+EXTERN_INLINE void overwritingClosure (StgClosure *p)
+{
+    nat size, i;
+
+#if defined(PROFILING)
+    if (era <= 0) return;
+#endif
+
+    size = closure_sizeW(p);
+
+    // For LDV profiling, we need to record the closure as dead
+#if defined(PROFILING)
+    LDV_recordDead((StgClosure *)(p), size);
+#endif
+
+    for (i = 0; i < size - sizeofW(StgThunkHeader); i++) {
+        ((StgThunk *)(p))->payload[i] = 0;
+    }
 }
 
 #endif /* RTS_STORAGE_CLOSUREMACROS_H */

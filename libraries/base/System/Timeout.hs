@@ -1,3 +1,9 @@
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP #-}
+#ifdef __GLASGOW_HASKELL__
+{-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
+#endif
+
 -------------------------------------------------------------------------------
 -- |
 -- Module      :  System.Timeout
@@ -32,7 +38,7 @@ import Data.Unique         (Unique, newUnique)
 -- interrupt the running IO computation when the timeout has
 -- expired.
 
-data Timeout = Timeout Unique deriving Eq
+newtype Timeout = Timeout Unique deriving Eq
 INSTANCE_TYPEABLE0(Timeout,timeoutTc,"Timeout")
 
 instance Show Timeout where

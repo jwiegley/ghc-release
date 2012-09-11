@@ -1,5 +1,5 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
-{-# OPTIONS_GHC -fno-warn-unused-binds #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, ForeignFunctionInterface #-}
 {-# OPTIONS_HADDOCK hide #-}
 
 -----------------------------------------------------------------------------
@@ -52,6 +52,10 @@ import GHC.IO
 import GHC.IO.IOMode
 import GHC.IO.Exception
 import GHC.IO.Device
+#ifndef mingw32_HOST_OS
+import {-# SOURCE #-} GHC.IO.Encoding (fileSystemEncoding)
+import qualified GHC.Foreign as GHC
+#endif
 #elif __HUGS__
 import Hugs.Prelude (IOException(..), IOErrorType(..))
 import Hugs.IO (IOMode(..))
@@ -65,6 +69,18 @@ import DIOError
 #ifdef __HUGS__
 {-# CFILES cbits/PrelIOUtils.c cbits/consUtils.c #-}
 #endif
+
+
+-- ---------------------------------------------------------------------------
+-- Debugging the base package
+
+puts :: String -> IO ()
+puts s = withCAStringLen (s ++ "\n") $ \(p, len) -> do
+            -- In reality should be withCString, but assume ASCII to avoid loop
+            -- if this is called by GHC.Foreign
+           _ <- c_write 1 (castPtr p) (fromIntegral len)
+           return ()
+
 
 -- ---------------------------------------------------------------------------
 -- Types
@@ -172,10 +188,26 @@ fdGetMode fd = do
 
 #ifdef mingw32_HOST_OS
 withFilePath :: FilePath -> (CWString -> IO a) -> IO a
-withFilePath = withCWString 
+withFilePath = withCWString
+
+peekFilePath :: CWString -> IO FilePath
+peekFilePath = peekCWString
 #else
+
 withFilePath :: FilePath -> (CString -> IO a) -> IO a
+peekFilePath :: CString -> IO FilePath
+peekFilePathLen :: CStringLen -> IO FilePath
+
+#if __GLASGOW_HASKELL__
+withFilePath = GHC.withCString fileSystemEncoding
+peekFilePath = GHC.peekCString fileSystemEncoding
+peekFilePathLen = GHC.peekCStringLen fileSystemEncoding
+#else
 withFilePath = withCString
+peekFilePath = peekCString
+peekFilePathLen = peekCStringLen
+#endif
+
 #endif
 
 -- ---------------------------------------------------------------------------
@@ -395,6 +427,9 @@ foreign import ccall unsafe "HsBase.h __hscore_lstat"
 
 foreign import ccall unsafe "HsBase.h __hscore_open"
    c_open :: CFilePath -> CInt -> CMode -> IO CInt
+
+foreign import ccall safe "HsBase.h __hscore_open"
+   c_safe_open :: CFilePath -> CInt -> CMode -> IO CInt
 
 foreign import ccall unsafe "HsBase.h read" 
    c_read :: CInt -> Ptr Word8 -> CSize -> IO CSsize

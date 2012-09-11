@@ -1,6 +1,8 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, ForeignFunctionInterface #-}
 {-# OPTIONS -#include "WCsubst.h" #-}
 {-# OPTIONS_HADDOCK hide #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.Unicode
@@ -19,14 +21,14 @@
 
 -- #hide
 module GHC.Unicode (
-    isAscii, isLatin1, isControl,
-    isAsciiUpper, isAsciiLower,
-    isPrint, isSpace,  isUpper,
-    isLower, isAlpha,  isDigit,
-    isOctDigit, isHexDigit, isAlphaNum,
-    toUpper, toLower, toTitle,
-    wgencat,
-  ) where
+        isAscii, isLatin1, isControl,
+        isAsciiUpper, isAsciiLower,
+        isPrint, isSpace,  isUpper,
+        isLower, isAlpha,  isDigit,
+        isOctDigit, isHexDigit, isAlphaNum,
+        toUpper, toLower, toTitle,
+        wgencat
+    ) where
 
 import GHC.Base
 import GHC.Real        (fromIntegral)

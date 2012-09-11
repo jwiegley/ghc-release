@@ -33,9 +33,9 @@ import Outputable
 import Pretty           ()
 import Maybes
 import Bag		( emptyBag, listToBag, unitBag )
-
-import MonadUtils       ( MonadIO )
+import MonadUtils
 import Exception
+
 import Control.Monad
 import System.IO
 import System.IO.Unsafe
@@ -46,17 +46,16 @@ import Data.List
 -- | Parse the imports of a source file.
 --
 -- Throws a 'SourceError' if parsing fails.
-getImports :: GhcMonad m =>
-              DynFlags
+getImports :: DynFlags
            -> StringBuffer -- ^ Parse this.
            -> FilePath     -- ^ Filename the buffer came from.  Used for
                            --   reporting parse error locations.
            -> FilePath     -- ^ The original source filename (used for locations
                            --   in the function result)
-           -> m ([Located (ImportDecl RdrName)], [Located (ImportDecl RdrName)], Located ModuleName)
+           -> IO ([Located (ImportDecl RdrName)], [Located (ImportDecl RdrName)], Located ModuleName)
               -- ^ The source imports, normal imports, and the module name.
 getImports dflags buf filename source_filename = do
-  let loc  = mkSrcLoc (mkFastString filename) 1 1
+  let loc  = mkRealSrcLoc (mkFastString filename) 1 1
   case unP parseHeader (mkPState dflags buf loc) of
     PFailed span err -> parseError span err
     POk pst rdr_module -> do
@@ -66,7 +65,7 @@ getImports dflags buf filename source_filename = do
           ms = (emptyBag, errs)
       -- logWarnings warns
       if errorsFound dflags ms
-        then liftIO $ throwIO $ mkSrcErr errs
+        then throwIO $ mkSrcErr errs
         else
 	  case rdr_module of
 	    L _ (HsModule mb_mod _ imps _ _ _) ->
@@ -99,22 +98,23 @@ mkPrelImports this_mod implicit_prelude import_decls
   | otherwise = [preludeImportDecl]
   where
       explicit_prelude_import
-       = notNull [ () | L _ (ImportDecl mod Nothing _ _ _ _) <- import_decls,
+       = notNull [ () | L _ (ImportDecl mod Nothing _ _ _ _ _) <- import_decls,
 	           unLoc mod == pRELUDE_NAME ]
 
       preludeImportDecl :: LImportDecl RdrName
       preludeImportDecl
         = L loc $
-	  ImportDecl (L loc pRELUDE_NAME)
-               Nothing {- no specific package -}
-	       False {- Not a boot interface -}
-	       False	{- Not qualified -}
-	       Nothing	{- No "as" -}
-	       Nothing	{- No import list -}
+          ImportDecl (L loc pRELUDE_NAME)
+               Nothing  {- No specific package -}
+               False    {- Not a boot interface -}
+               False    {- Not a safe import -}
+               False    {- Not qualified -}
+               Nothing  {- No "as" -}
+               Nothing  {- No import list -}
 
       loc = mkGeneralSrcSpan (fsLit "Implicit import declaration")
 
-parseError :: GhcMonad m => SrcSpan -> Message -> m a
+parseError :: SrcSpan -> Message -> IO a
 parseError span err = throwOneError $ mkPlainErrMsg span err
 
 --------------------------------------------------------------
@@ -144,7 +144,7 @@ lazyGetToks dflags filename handle = do
   buf <- hGetStringBufferBlock handle blockSize
   unsafeInterleaveIO $ lazyLexBuf handle (pragState dflags buf loc) False
  where
-  loc  = mkSrcLoc (mkFastString filename) 1 1
+  loc  = mkRealSrcLoc (mkFastString filename) 1 1
 
   lazyLexBuf :: Handle -> PState -> Bool -> IO [Located Token]
   lazyLexBuf handle state eof = do
@@ -161,7 +161,7 @@ lazyGetToks dflags filename handle = do
                   _other    -> do rest <- lazyLexBuf handle state' eof
                                   return (t : rest)
       _ | not eof   -> getMore handle state
-        | otherwise -> return [L (last_loc state) ITeof]
+        | otherwise -> return [L (RealSrcSpan (last_loc state)) ITeof]
                          -- parser assumes an ITeof sentinel at the end
 
   getMore :: Handle -> PState -> IO [Located Token]
@@ -176,12 +176,12 @@ lazyGetToks dflags filename handle = do
 getToks :: DynFlags -> FilePath -> StringBuffer -> [Located Token]
 getToks dflags filename buf = lexAll (pragState dflags buf loc)
  where
-  loc  = mkSrcLoc (mkFastString filename) 1 1
+  loc  = mkRealSrcLoc (mkFastString filename) 1 1
 
   lexAll state = case unP (lexer return) state of
                    POk _      t@(L _ ITeof) -> [t]
                    POk state' t -> t : lexAll state'
-                   _ -> [L (last_loc state) ITeof]
+                   _ -> [L (RealSrcSpan (last_loc state)) ITeof]
 
 
 -- | Parse OPTIONS and LANGUAGE pragmas of the source file.
@@ -285,7 +285,8 @@ unsupportedExtnError loc unsup =
     mkPlainErrMsg loc $
         text "Unsupported extension: " <> text unsup $$
         if null suggestions then empty else text "Perhaps you meant" <+> quotedListWithOr (map text suggestions)
-  where suggestions = fuzzyMatch unsup supportedLanguagesAndExtensions
+  where
+     suggestions = fuzzyMatch unsup supportedLanguagesAndExtensions
 
 
 optionsErrorMsgs :: [String] -> [Located String] -> FilePath -> Messages

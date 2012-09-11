@@ -1,6 +1,7 @@
 {-# OPTIONS -fglasgow-exts -cpp #-}
 {-# LINE 13 "compiler/cmm/CmmLex.x" #-}
 
+{-# LANGUAGE BangPatterns #-}
 {-# OPTIONS -Wwarn -w #-}
 -- The above -Wwarn supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
@@ -12,7 +13,7 @@ module CmmLex (
    CmmToken(..), cmmlex,
   ) where
 
-import Cmm
+import OldCmm
 import Lexer
 
 import SrcLoc
@@ -54,7 +55,7 @@ alex_deflt :: AlexAddr
 alex_deflt = AlexA# "\x6a\x00\xff\xff\xff\xff\x24\x00\xff\xff\xff\xff\x24\x00\xff\xff\x0a\x00\x0b\x00\x0a\x00\x0b\x00\xff\xff\x24\x00\xff\xff\x24\x00\xff\xff\x24\x00\xff\xff\x24\x00\xff\xff\x24\x00\xff\xff\x24\x00\xff\xff\x24\x00\xff\xff\x24\x00\xff\xff\x24\x00\xff\xff\x24\x00\xff\xff\xff\xff\x23\x00\x23\x00\x24\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x6b\x00\x6b\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\x6b\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"#
 
 alex_accept = listArray (0::Int,130) [[],[],[],[(AlexAcc (alex_action_5))],[],[(AlexAccSkip)],[(AlexAccSkip)],[(AlexAccSkipPred  (alexPrevCharIs '\n'))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[(AlexAccPred  (alex_action_2) (alexPrevCharIs '\n'))],[(AlexAccPred  (alex_action_2) (alexPrevCharIs '\n')),(AlexAcc (alex_action_5))],[(AlexAccPred  (alex_action_2) (alexPrevCharIs '\n'))],[(AlexAccPred  (alex_action_2) (alexPrevCharIs '\n')),(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_4))],[],[],[(AlexAcc (alex_action_5))],[(AlexAccSkip)],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_8))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_9))],[(AlexAcc (alex_action_10))],[(AlexAcc (alex_action_11))],[(AlexAcc (alex_action_12))],[(AlexAcc (alex_action_13))],[(AlexAcc (alex_action_14))],[(AlexAcc (alex_action_15))],[(AlexAcc (alex_action_16))],[(AlexAcc (alex_action_17))],[(AlexAcc (alex_action_18))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_19))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_20))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_21))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_22))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_23))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_26))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_27))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_28))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_29))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_30))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_33))],[(AlexAcc (alex_action_33))],[(AlexAcc (alex_action_34))],[],[(AlexAcc (alex_action_35))],[(AlexAcc (alex_action_35))],[(AlexAcc (alex_action_35))],[],[],[],[],[],[(AlexAcc (alex_action_36))],[],[],[],[],[],[],[],[],[]]
-{-# LINE 120 "compiler/cmm/CmmLex.x" #-}
+{-# LINE 121 "compiler/cmm/CmmLex.x" #-}
 
 data CmmToken
   = CmmT_SpecChar  Char
@@ -110,7 +111,7 @@ data CmmToken
 -- -----------------------------------------------------------------------------
 -- Lexer actions
 
-type Action = SrcSpan -> StringBuffer -> Int -> P (Located CmmToken)
+type Action = RealSrcSpan -> StringBuffer -> Int -> P (RealLocated CmmToken)
 
 begin :: Int -> Action
 begin code _span _str _len = do pushLexState code; lexToken
@@ -205,7 +206,7 @@ tok_string str = CmmT_String (read str)
 setLine :: Int -> Action
 setLine code span buf len = do
   let line = parseUnsignedInteger buf len 10 octDecDigit
-  setSrcLoc (mkSrcLoc (srcSpanFile span) (fromIntegral line - 1) 1)
+  setSrcLoc (mkRealSrcLoc (srcSpanFile span) (fromIntegral line - 1) 1)
 	-- subtract one: the line number refers to the *following* line
   -- trace ("setLine "  ++ show line) $ do
   popLexState
@@ -215,7 +216,7 @@ setLine code span buf len = do
 setFile :: Int -> Action
 setFile code span buf len = do
   let file = lexemeToFastString (stepOn buf) (len-2)
-  setSrcLoc (mkSrcLoc file (srcSpanEndLine span) (srcSpanEndCol span))
+  setSrcLoc (mkRealSrcLoc file (srcSpanEndLine span) (srcSpanEndCol span))
   popLexState
   pushLexState code
   lexToken
@@ -226,16 +227,16 @@ setFile code span buf len = do
 
 cmmlex :: (Located CmmToken -> P a) -> P a
 cmmlex cont = do
-  tok@(L _ tok__) <- lexToken
-  --trace ("token: " ++ show tok__) $ do
-  cont tok
+  (L span tok) <- lexToken
+  --trace ("token: " ++ show tok) $ do
+  cont (L (RealSrcSpan span) tok)
 
-lexToken :: P (Located CmmToken)
+lexToken :: P (RealLocated CmmToken)
 lexToken = do
   inp@(loc1,buf) <- getInput
   sc <- getLexState
   case alexScan inp sc of
-    AlexEOF -> do let span = mkSrcSpan loc1 loc1
+    AlexEOF -> do let span = mkRealSrcSpan loc1 loc1
 		  setLastToken span 0
 		  return (L span CmmT_EOF)
     AlexError (loc2,_) -> do failLocMsgP loc1 loc2 "lexical error"
@@ -244,7 +245,7 @@ lexToken = do
 	lexToken
     AlexToken inp2@(end,buf2) len t -> do
 	setInput inp2
-	let span = mkSrcSpan loc1 end
+	let span = mkRealSrcSpan loc1 end
 	span `seq` setLastToken span len
 	t span buf len
 
@@ -252,7 +253,7 @@ lexToken = do
 -- Monad stuff
 
 -- Stuff that Alex needs to know about our input type:
-type AlexInput = (SrcLoc,StringBuffer)
+type AlexInput = (RealSrcLoc,StringBuffer)
 
 alexInputPrevChar :: AlexInput -> Char
 alexInputPrevChar (_,s) = prevChar s '\n'

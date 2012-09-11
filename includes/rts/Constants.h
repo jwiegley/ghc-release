@@ -198,8 +198,7 @@
 #define ThreadRunGHC    1	/* return to address on top of stack */
 #define ThreadInterpret 2	/* interpret this thread */
 #define ThreadKilled	3	/* thread has died, don't run it */
-#define ThreadRelocated	4	/* thread has moved, link points to new locn */
-#define ThreadComplete	5	/* thread has finished */
+#define ThreadComplete  4       /* thread has finished */
 
 /*
  * Constants for the why_blocked field of a TSO
@@ -223,8 +222,8 @@
 #define BlockedOnGA_NoSend  9
 /* Only relevant for THREADED_RTS: */
 #define BlockedOnCCall      10
-#define BlockedOnCCall_NoUnblockExc 11
-   /* same as above but don't unblock async exceptions in resumeThread() */
+#define BlockedOnCCall_Interruptible 11
+   /* same as above but permit killing the worker thread */
 
 /* Involved in a message sent to tso->msg_cap */
 #define BlockedOnMsgThrowTo 12
@@ -266,11 +265,6 @@
 #define TSO_STOPPED_ON_BREAKPOINT 16 
 
 /*
- * TSO_LINK_DIRTY is set when a TSO's link field is modified
- */
-#define TSO_LINK_DIRTY 32
-
-/*
  * Used by the sanity checker to check whether TSOs are on the correct
  * mutable list.
  */
@@ -310,5 +304,14 @@
  * benchmarks in nofib/parallel.
  */
 #define SPIN_COUNT 1000
+
+/* -----------------------------------------------------------------------------
+   Spare workers per Capability in the threaded RTS
+
+   No more than MAX_SPARE_WORKERS will be kept in the thread pool
+   associated with each Capability.
+   -------------------------------------------------------------------------- */
+
+#define MAX_SPARE_WORKERS 6
 
 #endif /* RTS_CONSTANTS_H */

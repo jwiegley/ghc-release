@@ -49,13 +49,21 @@
 
 /* Sp points to the lowest live word on the stack. */
 
-#define BCO_NEXT      instrs[bciPtr++]
-#define BCO_NEXT_32   (bciPtr += 2, (((StgWord) instrs[bciPtr-2]) << 16) + ((StgWord) instrs[bciPtr-1]))
-#define BCO_NEXT_64   (bciPtr += 4, (((StgWord) instrs[bciPtr-4]) << 48) + (((StgWord) instrs[bciPtr-3]) << 32) + (((StgWord) instrs[bciPtr-2]) << 16) + ((StgWord) instrs[bciPtr-1]))
+#define BCO_NEXT         instrs[bciPtr++]
+#define BCO_NEXT_32      (bciPtr += 2)
+#define BCO_READ_NEXT_32 (BCO_NEXT_32, (((StgWord) instrs[bciPtr-2]) << 16) \
+                                     + ( (StgWord) instrs[bciPtr-1]))
+#define BCO_NEXT_64      (bciPtr += 4)
+#define BCO_READ_NEXT_64 (BCO_NEXT_64, (((StgWord) instrs[bciPtr-4]) << 48) \
+                                     + (((StgWord) instrs[bciPtr-3]) << 32) \
+                                     + (((StgWord) instrs[bciPtr-2]) << 16) \
+                                     + ( (StgWord) instrs[bciPtr-1]))
 #if WORD_SIZE_IN_BITS == 32
 #define BCO_NEXT_WORD BCO_NEXT_32
+#define BCO_READ_NEXT_WORD BCO_READ_NEXT_32
 #elif WORD_SIZE_IN_BITS == 64
 #define BCO_NEXT_WORD BCO_NEXT_64
+#define BCO_READ_NEXT_WORD BCO_READ_NEXT_64
 #else
 #error Cannot cope with WORD_SIZE_IN_BITS being nether 32 nor 64
 #endif
@@ -65,13 +73,13 @@
 #define BCO_LIT(n)    literals[n]
 
 #define LOAD_STACK_POINTERS					\
-    Sp = cap->r.rCurrentTSO->sp;				\
+    Sp = cap->r.rCurrentTSO->stackobj->sp;                      \
     /* We don't change this ... */				\
-    SpLim = cap->r.rCurrentTSO->stack + RESERVED_STACK_WORDS;
+    SpLim = tso_SpLim(cap->r.rCurrentTSO);
 
 #define SAVE_STACK_POINTERS			\
     ASSERT(Sp > SpLim); \
-    cap->r.rCurrentTSO->sp = Sp
+    cap->r.rCurrentTSO->stackobj->sp = Sp
 
 #define RETURN_TO_SCHEDULER(todo,retcode)	\
    SAVE_STACK_POINTERS;				\
@@ -266,7 +274,7 @@ eval_obj:
              debugBelch("Sp = %p\n", Sp);
              debugBelch("\n" );
 
-             printStackChunk(Sp,cap->r.rCurrentTSO->stack+cap->r.rCurrentTSO->stack_size);
+             printStackChunk(Sp,cap->r.rCurrentTSO->stackobj->stack+cap->r.rCurrentTSO->stackobj->stack_size);
              debugBelch("\n\n");
             );
 
@@ -381,11 +389,11 @@ do_return:
              debugBelch("Returning: "); printObj(obj);
              debugBelch("Sp = %p\n", Sp);
              debugBelch("\n" );
-             printStackChunk(Sp,cap->r.rCurrentTSO->stack+cap->r.rCurrentTSO->stack_size);
+             printStackChunk(Sp,cap->r.rCurrentTSO->stackobj->stack+cap->r.rCurrentTSO->stackobj->stack_size);
              debugBelch("\n\n");
             );
 
-    IF_DEBUG(sanity,checkStackChunk(Sp, cap->r.rCurrentTSO->stack+cap->r.rCurrentTSO->stack_size));
+    IF_DEBUG(sanity,checkStackChunk(Sp, cap->r.rCurrentTSO->stackobj->stack+cap->r.rCurrentTSO->stackobj->stack_size));
 
     switch (get_itbl((StgClosure *)Sp)->type) {
 
@@ -466,7 +474,7 @@ do_return:
 	INTERP_TICK(it_retto_other);
 	IF_DEBUG(interpreter,
 		 debugBelch("returning to unknown frame -- yielding to sched\n"); 
-		 printStackChunk(Sp,cap->r.rCurrentTSO->stack+cap->r.rCurrentTSO->stack_size);
+                 printStackChunk(Sp,cap->r.rCurrentTSO->stackobj->stack+cap->r.rCurrentTSO->stackobj->stack_size);
 	    );
 	Sp -= 2;
 	Sp[1] = (W_)tagged_obj;
@@ -529,8 +537,8 @@ do_return_unboxed:
 	    INTERP_TICK(it_retto_other);
 	    IF_DEBUG(interpreter,
 		     debugBelch("returning to unknown frame -- yielding to sched\n"); 
-		     printStackChunk(Sp,cap->r.rCurrentTSO->stack+cap->r.rCurrentTSO->stack_size);
-		);
+                     printStackChunk(Sp,cap->r.rCurrentTSO->stackobj->stack+cap->r.rCurrentTSO->stackobj->stack_size);
+                );
 	    RETURN_TO_SCHEDULER_NO_PAUSE(ThreadRunGHC, ThreadYielding);
 	}
 	}
@@ -776,8 +784,12 @@ run_BCO:
 	register StgWord16* instrs    = (StgWord16*)(bco->instrs->payload);
 	register StgWord*  literals   = (StgWord*)(&bco->literals->payload[0]);
 	register StgPtr*   ptrs       = (StgPtr*)(&bco->ptrs->payload[0]);
+#ifdef DEBUG
 	int bcoSize;
-    bcoSize = BCO_NEXT_WORD;
+    bcoSize = BCO_READ_NEXT_WORD;
+#else
+    BCO_NEXT_WORD;
+#endif
 	IF_DEBUG(interpreter,debugBelch("bcoSize = %d\n", bcoSize));
 
 #ifdef INTERP_STATS
@@ -884,21 +896,15 @@ run_BCO:
                   // in a reasonable state for the GC and so that
                   // execution of this BCO can continue when we resume
                   ioAction = (StgClosure *) deRefStablePtr (rts_breakpoint_io_action);
-                  Sp -= 9;
-                  Sp[8] = (W_)obj;   
-                  Sp[7] = (W_)&stg_apply_interp_info;
-                  Sp[6] = (W_)&stg_noforceIO_info;     // see [unreg] below
+                  Sp -= 8;
+                  Sp[7] = (W_)obj;
+                  Sp[6] = (W_)&stg_apply_interp_info;
                   Sp[5] = (W_)new_aps;                 // the AP_STACK
                   Sp[4] = (W_)BCO_PTR(arg3_freeVars);  // the info about local vars of the breakpoint
                   Sp[3] = (W_)False_closure;            // True <=> a breakpoint
                   Sp[2] = (W_)&stg_ap_pppv_info;
                   Sp[1] = (W_)ioAction;                // apply the IO action to its two arguments above
                   Sp[0] = (W_)&stg_enter_info;         // get ready to run the IO action
-                  // Note [unreg]: in unregisterised mode, the return
-                  // convention for IO is different.  The
-                  // stg_noForceIO_info stack frame is necessary to
-                  // account for this difference.
-
                   // set the flag in the TSO to say that we are now
                   // stopping at a breakpoint so that when we resume
                   // we don't stop on the same breakpoint that we
@@ -1362,6 +1368,7 @@ run_BCO:
 	    void *tok;
 	    int stk_offset            = BCO_NEXT;
 	    int o_itbl                = BCO_NEXT;
+	    int interruptible         = BCO_NEXT;
 	    void(*marshall_fn)(void*) = (void (*)(void*))BCO_LIT(o_itbl);
 	    int ret_dyn_size = 
 		RET_DYN_BITMAP_SIZE + RET_DYN_NONPTR_REGS_SIZE
@@ -1450,7 +1457,7 @@ run_BCO:
             ((StgRetDyn *)Sp)->payload[0] = (StgClosure *)obj;
 
 	    SAVE_STACK_POINTERS;
-	    tok = suspendThread(&cap->r);
+	    tok = suspendThread(&cap->r, interruptible ? rtsTrue : rtsFalse);
 
 	    // We already made a copy of the arguments above.
             ffi_call(cif, fn, ret, argptrs);
@@ -1458,6 +1465,14 @@ run_BCO:
 	    // And restart the thread again, popping the RET_DYN frame.
 	    cap = (Capability *)((void *)((unsigned char*)resumeThread(tok) - STG_FIELD_OFFSET(Capability,r)));
 	    LOAD_STACK_POINTERS;
+
+            if (Sp[0] != (W_)&stg_gc_gen_info) {
+                // the stack is not how we left it.  This probably
+                // means that an exception got raised on exit from the
+                // foreign call, so we should just continue with
+                // whatever is on top of the stack now.
+                RETURN_TO_SCHEDULER_NO_PAUSE(ThreadRunGHC, ThreadYielding);
+            }
 
             // Re-load the pointer to the BCO from the RET_DYN frame,
             // it might have moved during the call.  Also reload the

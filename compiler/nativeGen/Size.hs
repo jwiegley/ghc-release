@@ -12,17 +12,18 @@
 --		properly. eg SPARC doesn't care about FF80.
 --
 module Size (
-	Size(..),
-	intSize,
-	floatSize,
-	isFloatSize,
-	cmmTypeSize,
-	sizeToWidth
+    Size(..),
+    intSize,
+    floatSize,
+    isFloatSize,
+    cmmTypeSize,
+    sizeToWidth,
+    sizeInBytes
 )
 
 where
 
-import Cmm
+import OldCmm
 import Outputable
 
 -- It looks very like the old MachRep, but it's now of purely local
@@ -99,5 +100,6 @@ sizeToWidth size
 	FF32		-> W32
 	FF64		-> W64
 	FF80		-> W80
-	
 
+sizeInBytes :: Size -> Int
+sizeInBytes = widthInBytes . sizeToWidth

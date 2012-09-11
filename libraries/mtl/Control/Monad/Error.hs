@@ -52,6 +52,7 @@ module Control.Monad.Error (
     -- $ErrorTExample
   ) where
 
+import qualified Control.Exception as Exception
 import Control.Monad
 import Control.Monad.Cont.Class
 import Control.Monad.Error.Class
@@ -70,25 +71,30 @@ import Control.Monad.Instances ()
 --
 instance MonadPlus IO where
     mzero       = ioError (userError "mzero")
-    m `mplus` n = m `catch` \_ -> n
+    m `mplus` n = m `catchIO` \_ -> n
 
 instance MonadError IOError IO where
     throwError = ioError
-    catchError = catch
+    catchError = catchIO
+
+catchIO :: IO a -> (Exception.IOException -> IO a) -> IO a
+catchIO = Exception.catch
 
 -- ---------------------------------------------------------------------------
 -- Our parameterizable error monad
 
 #if !(MIN_VERSION_base(4,2,1))
 
--- These instances are in base-4.3
+-- These instances are in base-4.3, minus the fail definition and
+-- the Error constraint
 
-instance Monad (Either e) where
+instance (Error e) => Monad (Either e) where
     return        = Right
     Left  l >>= _ = Left l
     Right r >>= k = k r
+    fail msg      = Left (strMsg msg)
 
-instance MonadFix (Either e) where
+instance (Error e) => MonadFix (Either e) where
     mfix f = let
         a = f $ case a of
             Right r -> r

@@ -1,0 +1,11 @@
+[("GCC extra via C opts", "@GccExtraViaCOpts@"),
+ ("C compiler command", "@SettingsCCompilerCommand@"),
+ ("C compiler flags", "@SettingsCCompilerFlags@"),
+ ("ar command", "@ArCmd@"),
+ ("ar flags", "@ArArgs@"),
+ ("ar supports at file", "@ArSupportsAtFile@"),
+ ("touch command", "@SettingsTouchCommand@"),
+ ("dllwrap command", "@SettingsDllWrapCommand@"),
+ ("windres command", "@SettingsWindresCommand@"),
+ ("perl command", "@SettingsPerlCommand@")]
+

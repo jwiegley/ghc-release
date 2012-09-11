@@ -1,5 +1,5 @@
 name:		old-locale
-version:	1.0.0.2
+version:	1.0.0.3
 license:	BSD3
 license-file:	LICENSE
 maintainer:	libraries@haskell.org
@@ -18,6 +18,6 @@ Library
     build-depends: base >= 3 && < 5
 
 source-repository head
-    type:     darcs
-    location: http://darcs.haskell.org/packages/old-locale/
+    type:     git
+    location: http://darcs.haskell.org/packages/old-locale.git/
 

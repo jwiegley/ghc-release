@@ -40,11 +40,13 @@ module TcRnTypes(
         Implication(..),
         CtLoc(..), ctLocSpan, ctLocOrigin, setCtLocOrigin,
 	CtOrigin(..), EqOrigin(..), 
-        WantedLoc, GivenLoc, pushErrCtxt,
+        WantedLoc, GivenLoc, GivenKind(..), pushErrCtxt,
 
-        SkolemInfo(..),
+	SkolemInfo(..),
 
-        CtFlavor(..), pprFlavorArising, isWanted, isGiven, isDerived,
+        CtFlavor(..), pprFlavorArising, isWanted, 
+        isGivenOrSolved, isGiven_maybe,
+        isDerived,
         FlavoredEvVar,
 
 	-- Pretty printing
@@ -62,6 +64,7 @@ module TcRnTypes(
 import HsSyn
 import HscTypes
 import Type
+import Id	( evVarPred )
 import Class    ( Class )
 import DataCon  ( DataCon, dataConUserType )
 import TcType
@@ -233,6 +236,11 @@ data TcGblEnv
           -- is implicit rather than explicit, so we have to zap a
           -- mutable variable.
 
+        tcg_th_splice_used :: TcRef Bool,
+          -- ^ @True@ <=> A Template Haskell splice was used.
+          --
+          -- Splices disable recompilation avoidance (see #481)
+
 	tcg_dfun_n  :: TcRef OccSet,
           -- ^ Allows us to choose unique DFun names.
 
@@ -260,9 +268,10 @@ data TcGblEnv
 	tcg_warns     :: Warnings,	    -- ...Warnings and deprecations
 	tcg_anns      :: [Annotation],      -- ...Annotations
 	tcg_insts     :: [Instance],	    -- ...Instances
-	tcg_fam_insts :: [FamInst],	    -- ...Family instances
-	tcg_rules     :: [LRuleDecl Id],    -- ...Rules
-	tcg_fords     :: [LForeignDecl Id], -- ...Foreign import & exports
+        tcg_fam_insts :: [FamInst],         -- ...Family instances
+        tcg_rules     :: [LRuleDecl Id],    -- ...Rules
+        tcg_fords     :: [LForeignDecl Id], -- ...Foreign import & exports
+        tcg_vects     :: [LVectDecl Id],    -- ...Vectorisation declarations
 
 	tcg_doc_hdr   :: Maybe LHsDocString, -- ^ Maybe Haddock header docs
         tcg_hpc       :: AnyHpcUsage,        -- ^ @True@ if any part of the
@@ -323,6 +332,7 @@ data IfLclEnv
 		-- plus which bit is currently being examined
 
 	if_tv_env  :: UniqFM TyVar,	-- Nested tyvar bindings
+		      	     		-- (and coercions)
 	if_id_env  :: UniqFM Id		-- Nested id binding
     }
 \end{code}
@@ -566,7 +576,8 @@ type ErrCtxt = (Bool, TidyEnv -> TcM (TidyEnv, Message))
 --
 data ImportAvails 
    = ImportAvails {
-	imp_mods :: ModuleEnv [(ModuleName, Bool, SrcSpan)],
+	imp_mods :: ImportedMods,
+	  --      = ModuleEnv [(ModuleName, Bool, SrcSpan, Bool)],
           -- ^ Domain is all directly-imported modules
           -- The 'ModuleName' is what the module was imported as, e.g. in
           -- @
@@ -593,26 +604,43 @@ data ImportAvails
           -- different packages. (currently not the case, but might be in the
           -- future).
 
-	imp_dep_mods :: ModuleNameEnv (ModuleName, IsBootInterface),
-	  -- ^ Home-package modules needed by the module being compiled
-	  --
-	  -- It doesn't matter whether any of these dependencies
-	  -- are actually /used/ when compiling the module; they
-	  -- are listed if they are below it at all.  For
-	  -- example, suppose M imports A which imports X.  Then
-	  -- compiling M might not need to consult X.hi, but X
-	  -- is still listed in M's dependencies.
+        imp_dep_mods :: ModuleNameEnv (ModuleName, IsBootInterface),
+          -- ^ Home-package modules needed by the module being compiled
+          --
+          -- It doesn't matter whether any of these dependencies
+          -- are actually /used/ when compiling the module; they
+          -- are listed if they are below it at all.  For
+          -- example, suppose M imports A which imports X.  Then
+          -- compiling M might not need to consult X.hi, but X
+          -- is still listed in M's dependencies.
 
-	imp_dep_pkgs :: [PackageId],
+        imp_dep_pkgs :: [PackageId],
           -- ^ Packages needed by the module being compiled, whether directly,
           -- or via other modules in this package, or via modules imported
           -- from other packages.
+        
+        imp_trust_pkgs :: [PackageId],
+          -- ^ This is strictly a subset of imp_dep_pkgs and records the
+          -- packages the current module needs to trust for Safe Haskell
+          -- compilation to succeed. A package is required to be trusted if
+          -- we are dependent on a trustworthy module in that package.
+          -- While perhaps making imp_dep_pkgs a tuple of (PackageId, Bool)
+          -- where True for the bool indicates the package is required to be
+          -- trusted is the more logical  design, doing so complicates a lot
+          -- of code not concerned with Safe Haskell.
+          -- See Note [RnNames . Tracking Trust Transitively]
 
- 	imp_orphs :: [Module],
+        imp_trust_own_pkg :: Bool,
+          -- ^ Do we require that our own package is trusted?
+          -- This is to handle efficiently the case where a Safe module imports
+          -- a Trustworthy module that resides in the same package as it.
+          -- See Note [RnNames . Trust Own Package]
+
+        imp_orphs :: [Module],
           -- ^ Orphan modules below us in the import tree (and maybe including
           -- us for imported modules)
 
- 	imp_finsts :: [Module]
+        imp_finsts :: [Module]
           -- ^ Family instance modules below us in the import tree (and maybe
           -- including us for imported modules)
       }
@@ -624,30 +652,41 @@ mkModDeps deps = foldl add emptyUFM deps
 		 add env elt@(m,_) = addToUFM env m elt
 
 emptyImportAvails :: ImportAvails
-emptyImportAvails = ImportAvails { imp_mods   	= emptyModuleEnv,
-				   imp_dep_mods = emptyUFM,
-				   imp_dep_pkgs = [],
-				   imp_orphs    = [],
-				   imp_finsts   = [] }
+emptyImportAvails = ImportAvails { imp_mods          = emptyModuleEnv,
+                                   imp_dep_mods      = emptyUFM,
+                                   imp_dep_pkgs      = [],
+                                   imp_trust_pkgs    = [],
+                                   imp_trust_own_pkg = False,
+                                   imp_orphs         = [],
+                                   imp_finsts        = [] }
 
+-- | Union two ImportAvails
+--
+-- This function is a key part of Import handling, basically
+-- for each import we create a seperate ImportAvails structure
+-- and then union them all together with this function.
 plusImportAvails ::  ImportAvails ->  ImportAvails ->  ImportAvails
 plusImportAvails
   (ImportAvails { imp_mods = mods1,
-		  imp_dep_mods = dmods1, imp_dep_pkgs = dpkgs1, 
+                  imp_dep_mods = dmods1, imp_dep_pkgs = dpkgs1,
+                  imp_trust_pkgs = tpkgs1, imp_trust_own_pkg = tself1,
                   imp_orphs = orphs1, imp_finsts = finsts1 })
   (ImportAvails { imp_mods = mods2,
-		  imp_dep_mods = dmods2, imp_dep_pkgs = dpkgs2,
+                  imp_dep_mods = dmods2, imp_dep_pkgs = dpkgs2,
+                  imp_trust_pkgs = tpkgs2, imp_trust_own_pkg = tself2,
                   imp_orphs = orphs2, imp_finsts = finsts2 })
-  = ImportAvails { imp_mods     = plusModuleEnv_C (++) mods1 mods2,	
-		   imp_dep_mods = plusUFM_C plus_mod_dep dmods1 dmods2,	
-		   imp_dep_pkgs = dpkgs1 `unionLists` dpkgs2,
-		   imp_orphs    = orphs1 `unionLists` orphs2,
-		   imp_finsts   = finsts1 `unionLists` finsts2 }
+  = ImportAvails { imp_mods          = plusModuleEnv_C (++) mods1 mods2,
+                   imp_dep_mods      = plusUFM_C plus_mod_dep dmods1 dmods2,
+                   imp_dep_pkgs      = dpkgs1 `unionLists` dpkgs2,
+                   imp_trust_pkgs    = tpkgs1 `unionLists` tpkgs2,
+                   imp_trust_own_pkg = tself1 || tself2,
+                   imp_orphs         = orphs1 `unionLists` orphs2,
+                   imp_finsts        = finsts1 `unionLists` finsts2 }
   where
     plus_mod_dep (m1, boot1) (m2, boot2) 
-	= WARN( not (m1 == m2), (ppr m1 <+> ppr m2) $$ (ppr boot1 <+> ppr boot2) )
-		-- Check mod-names match
-	  (m1, boot1 && boot2)	-- If either side can "see" a non-hi-boot interface, use that
+        = WARN( not (m1 == m2), (ppr m1 <+> ppr m2) $$ (ppr boot1 <+> ppr boot2) )
+                -- Check mod-names match
+          (m1, boot1 && boot2) -- If either side can "see" a non-hi-boot interface, use that
 \end{code}
 
 %************************************************************************
@@ -673,7 +712,6 @@ instance Outputable WhereFrom where
 %************************************************************************
 %*									*
 		Wanted constraints
-
      These are forced to be in TcRnTypes because
      	   TcLclEnv mentions WantedConstraints
 	   WantedConstraint mentions CtLoc
@@ -714,10 +752,10 @@ andWC (WC { wc_flat = f1, wc_impl = i1, wc_insol = n1 })
        , wc_insol = n1 `unionBags` n2 }
 
 addFlats :: WantedConstraints -> Bag WantedEvVar -> WantedConstraints
-addFlats wc wevs = wc { wc_flat = wevs `unionBags` wc_flat wc }
+addFlats wc wevs = wc { wc_flat = wc_flat wc `unionBags` wevs }
 
 addImplics :: WantedConstraints -> Bag Implication -> WantedConstraints
-addImplics wc implic = wc { wc_impl = implic `unionBags` wc_impl wc }
+addImplics wc implic = wc { wc_impl = wc_impl wc `unionBags` implic }
 
 instance Outputable WantedConstraints where
   ppr (WC {wc_flat = f, wc_impl = i, wc_insol = n})
@@ -792,8 +830,8 @@ data Implication
                                  --   which is also the location of all the
                                  --   given evidence variables
 
-      ic_wanted  :: WantedConstraints, -- The wanted
-      ic_insol  :: Bool,               -- True iff insolubleWC ic_wantted is true
+      ic_wanted :: WantedConstraints,  -- The wanted
+      ic_insol  :: Bool,               -- True iff insolubleWC ic_wanted is true
 
       ic_binds  :: EvBindsVar   -- Points to the place to fill in the
                                 -- abstraction and bindings
@@ -883,11 +921,12 @@ wantedToFlavored (EvVarX v wl) = EvVarX v (Wanted wl)
 
 keepWanted :: Bag FlavoredEvVar -> Bag WantedEvVar
 keepWanted flevs
-  = foldlBag keep_wanted emptyBag flevs
+  = foldrBag keep_wanted emptyBag flevs
+    -- Important: use fold*r*Bag to preserve the order of the evidence variables.
   where
-    keep_wanted :: Bag WantedEvVar -> FlavoredEvVar -> Bag WantedEvVar
-    keep_wanted r (EvVarX ev (Wanted wloc)) = consBag (EvVarX ev wloc) r
-    keep_wanted r _ = r
+    keep_wanted :: FlavoredEvVar -> Bag WantedEvVar -> Bag WantedEvVar
+    keep_wanted (EvVarX ev (Wanted wloc)) r = consBag (EvVarX ev wloc) r
+    keep_wanted _                         r = r
 \end{code}
 
 
@@ -899,7 +938,7 @@ pprEvVarTheta :: [EvVar] -> SDoc
 pprEvVarTheta ev_vars = pprTheta (map evVarPred ev_vars)
                               
 pprEvVarWithType :: EvVar -> SDoc
-pprEvVarWithType v = ppr v <+> dcolon <+> pprPred (evVarPred v)
+pprEvVarWithType v = ppr v <+> dcolon <+> pprPredTy (evVarPred v)
 
 pprWantedsWithLocs :: WantedConstraints -> SDoc
 pprWantedsWithLocs wcs
@@ -921,35 +960,37 @@ pprWantedEvVar        (EvVarX v _)   = pprEvVarWithType v
 
 \begin{code}
 data CtFlavor
-  = Given   GivenLoc  -- We have evidence for this constraint in TcEvBinds
-  | Derived WantedLoc 
-                      -- We have evidence for this constraint in TcEvBinds;
-                      --   *however* this evidence can contain wanteds, so 
-                      --   it's valid only provisionally to the solution of
-                      --   these wanteds 
-  | Wanted WantedLoc  -- We have no evidence bindings for this constraint. 
+  = Given GivenLoc GivenKind -- We have evidence for this constraint in TcEvBinds
+  | Derived WantedLoc        -- Derived's are just hints for unifications 
+  | Wanted WantedLoc         -- We have no evidence bindings for this constraint. 
 
--- data DerivedOrig = DerSC | DerInst | DerSelf
--- Deriveds are either superclasses of other wanteds or deriveds, or partially
--- solved wanteds from instances, or 'self' dictionaries containing yet wanted
--- superclasses. 
+data GivenKind
+  = GivenOrig   -- Originates in some given, such as signature or pattern match
+  | GivenSolved -- Is given as result of being solved, maybe provisionally on
+                -- some other wanted constraints. 
 
 instance Outputable CtFlavor where
-  ppr (Given {})   = ptext (sLit "[G]")
-  ppr (Wanted {})  = ptext (sLit "[W]")
-  ppr (Derived {}) = ptext (sLit "[D]") 
+  ppr (Given _ GivenOrig)   = ptext (sLit "[G]")
+  ppr (Given _ GivenSolved) = ptext (sLit "[S]") -- Print [S] for Given/Solved's
+  ppr (Wanted {})           = ptext (sLit "[W]")
+  ppr (Derived {})          = ptext (sLit "[D]") 
+
 pprFlavorArising :: CtFlavor -> SDoc
-pprFlavorArising (Derived wl )  = pprArisingAt wl
+pprFlavorArising (Derived wl)   = pprArisingAt wl
 pprFlavorArising (Wanted  wl)   = pprArisingAt wl
-pprFlavorArising (Given gl)     = pprArisingAt gl
+pprFlavorArising (Given gl _)   = pprArisingAt gl
 
 isWanted :: CtFlavor -> Bool
 isWanted (Wanted {}) = True
 isWanted _           = False
 
-isGiven :: CtFlavor -> Bool 
-isGiven (Given {}) = True 
-isGiven _          = False 
+isGivenOrSolved :: CtFlavor -> Bool
+isGivenOrSolved (Given {}) = True
+isGivenOrSolved _ = False
+
+isGiven_maybe :: CtFlavor -> Maybe GivenKind 
+isGiven_maybe (Given _ gk) = Just gk
+isGiven_maybe _            = Nothing
 
 isDerived :: CtFlavor -> Bool 
 isDerived (Derived {}) = True
@@ -1036,9 +1077,6 @@ data SkolemInfo
                         -- polymorphic Ids, and are now checking that their RHS
                         -- constraints are satisfied.
 
-  | RuntimeUnkSkol      -- a type variable used to represent an unknown
-                        -- runtime type (used in the GHCi debugger)
-
   | BracketSkol         -- Template Haskell bracket
 
   | UnkSkol             -- Unhelpful info (until I improve it)
@@ -1073,8 +1111,7 @@ pprSkolInfo (InferSkol ids) = sep [ ptext (sLit "the inferred type of")
 -- UnkSkol
 -- For type variables the others are dealt with by pprSkolTvBinding.  
 -- For Insts, these cases should not happen
-pprSkolInfo UnkSkol        = WARN( True, text "pprSkolInfo: UnkSkol" ) ptext (sLit "UnkSkol")
-pprSkolInfo RuntimeUnkSkol = WARN( True, text "pprSkolInfo: RuntimeUnkSkol" ) ptext (sLit "RuntimeUnkSkol")
+pprSkolInfo UnkSkol = WARN( True, text "pprSkolInfo: UnkSkol" ) ptext (sLit "UnkSkol")
 \end{code}
 
 
@@ -1114,6 +1151,7 @@ data CtOrigin
   | StandAloneDerivOrigin -- Typechecking stand-alone deriving
   | DefaultOrigin	-- Typechecking a default decl
   | DoOrigin		-- Arising from a do expression
+  | MCompOrigin         -- Arising from a monad comprehension
   | IfOrigin            -- Arising from an if statement
   | ProcOrigin		-- Arising from a proc expression
   | AnnOrigin           -- An annotation
@@ -1149,6 +1187,7 @@ pprO DerivOrigin	   = ptext (sLit "the 'deriving' clause of a data type declarat
 pprO StandAloneDerivOrigin = ptext (sLit "a 'deriving' declaration")
 pprO DefaultOrigin	   = ptext (sLit "a 'default' declaration")
 pprO DoOrigin	           = ptext (sLit "a do statement")
+pprO MCompOrigin           = ptext (sLit "a statement in a monad comprehension")
 pprO ProcOrigin	           = ptext (sLit "a proc expression")
 pprO (TypeEqOrigin eq)     = ptext (sLit "an equality") <+> ppr eq
 pprO AnnOrigin             = ptext (sLit "an annotation")

@@ -13,13 +13,18 @@
 
 define package-config # args: $1 = dir, $2 = distdir, $3 = GHC stage
 $(call trace, package-config($1,$2,$3))
+$(call profStart, package-config($1,$2,$3))
 
 $1_$2_HC = $$(GHC_STAGE$3)
+$1_$2_CC = $$(CC_STAGE$3)
+$1_$2_AS = $$(AS_STAGE$3)
+$1_$2_AR = $$(AR_STAGE$3)
+$1_$2_AR_OPTS = $$(AR_OPTS_STAGE$3)
+$1_$2_EXTRA_AR_ARGS = $$(EXTRA_AR_ARGS_STAGE$3)
+$1_$2_ArSupportsAtFile = $$(ArSupportsAtFile_STAGE$3)
 
 # configuration stuff that depends on which GHC we're building with
 ifeq "$3" "0"
-$1_$2_ghc_ge_6102 = $$(ghc_ge_6102)
-$1_$2_ghc_ge_611 = $$(ghc_ge_611)
 $1_$2_ghc_ge_613 = $$(ghc_ge_613)
 $1_$2_HC_CONFIG = $$(GHC_STAGE0)
 $1_$2_HC_CONFIG_DEP =
@@ -33,17 +38,15 @@ $1_$2_HC_DEP =
 $1_$2_HC_PKGCONF = -package-conf $$(BOOTSTRAPPING_CONF)
 $1_$2_GHC_PKG_OPTS = --package-conf=$$(BOOTSTRAPPING_CONF)
 $1_$2_CONFIGURE_OPTS += --package-db=$$(TOP)/$$(BOOTSTRAPPING_CONF)
-$1_$2_HC_OPTS += -no-user-package-conf
+$1_$2_MORE_HC_OPTS += -no-user-package-conf
 ifeq "$(ghc_ge_613)" "YES"
-$1_$2_HC_OPTS += -rtsopts
+$1_$2_MORE_HC_OPTS += -rtsopts
 endif
 else
-$1_$2_ghc_ge_6102 = YES
-$1_$2_ghc_ge_611 = YES
 $1_$2_ghc_ge_613 = YES
 $1_$2_HC_PKGCONF = 
-$1_$2_HC_CONFIG = $$(TOP)/$$(DUMMY_GHC_INPLACE)
-$1_$2_HC_CONFIG_DEP = $$(DUMMY_GHC_INPLACE)
+$1_$2_HC_CONFIG = $$(TOP)/$$(GHC_STAGE1)
+$1_$2_HC_CONFIG_DEP = $$(GHC_STAGE1)
 $1_$2_GHC_PKG = $$(TOP)/$$(GHC_PKG_INPLACE)
 $1_$2_GHC_PKG_DEP = $$(GHC_PKG_INPLACE)
 $1_$2_GHC_PKG_OPTS =
@@ -52,11 +55,12 @@ $1_$2_GHC_PKG_OPTS =
 $1_$2_HC_MK_DEPEND = $$(GHC_STAGE1)
 $1_$2_HC_MK_DEPEND_DEP = $$($1_$2_HC_MK_DEPEND)
 $1_$2_HC_DEP = $$($1_$2_HC)
-$1_$2_HC_OPTS += -no-user-package-conf
-$1_$2_HC_OPTS += -rtsopts
+$1_$2_MORE_HC_OPTS += -no-user-package-conf
+$1_$2_MORE_HC_OPTS += -rtsopts
 endif
 
 # Useful later
 $1_$2_SLASH_MODS = $$(subst .,/,$$($1_$2_MODULES))
 
+$(call profEnd, package-config($1,$2,$3))
 endef

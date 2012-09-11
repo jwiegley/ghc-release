@@ -23,12 +23,12 @@ tests = [
     }
 
   , ParseTest {
-      input  = "foobar\n\nghci> fib 10\n55"
+      input  = "foobar\n\n>>> fib 10\n55"
     , result = Just $ DocAppend (DocParagraph $ DocString "foobar\n") (DocExamples $ [Example "fib 10" ["55"]])
     }
 
   , ParseTest {
-      input  = "foobar\nghci> fib 10\n55"
+      input  = "foobar\n>>> fib 10\n55"
     , result = Nothing -- parse error
     }
 
@@ -41,6 +41,12 @@ tests = [
       input  = "foobar\n> some code"
     , result = Nothing -- parse error
     }
+
+  -- test <BLANKLINE> support
+  , ParseTest {
+      input  = ">>> putFooBar\nfoo\n<BLANKLINE>\nbar"
+    , result = Just $ DocExamples $ [Example "putFooBar" ["foo","","bar"]]
+    }
   ]
 
 
@@ -50,7 +56,7 @@ main = do
   where
 
     toTestCase :: ParseTest -> Test
-    toTestCase (ParseTest input result) = TestCase $ assertEqual input (parse input) result
+    toTestCase (ParseTest input result) = TestCase $ assertEqual input result (parse input)
 
     parse :: String -> Maybe (Doc RdrName)
     parse input = parseParas $ tokenise defaultDynFlags input (0,0)

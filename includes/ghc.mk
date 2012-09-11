@@ -27,6 +27,8 @@ includes_H_SUBDIRS += rts/storage
 includes_H_SUBDIRS += stg
 
 includes_H_FILES := $(wildcard $(patsubst %,includes/%/*.h,$(includes_H_SUBDIRS)))
+# This isn't necessary, but it makes the paths look a little prettier
+includes_H_FILES := $(subst /./,/,$(includes_H_FILES))
 
 #
 # Options
@@ -135,7 +137,7 @@ includes_dist-derivedconstants_PROG   = mkDerivedConstants$(exeext)
 
 $(eval $(call build-prog,includes,dist-derivedconstants,0))
 
-$(includes_dist-derivedconstants_depfile_c_asm) : $(includes_H_CONFIG) $(includes_H_PLATFORM) $(wildcard includes/*.h) $(wildcard rts/*.h)
+$(includes_dist-derivedconstants_depfile_c_asm) : $(includes_H_CONFIG) $(includes_H_PLATFORM) $(includes_H_FILES) $$(rts_H_FILES)
 includes/dist-derivedconstants/build/mkDerivedConstants.o : $(includes_H_CONFIG) $(includes_H_PLATFORM)
 
 ifneq "$(BINDIST)" "YES"
@@ -165,7 +167,7 @@ includes_dist-ghcconstants_CC_OPTS = -DGEN_HASKELL
 $(eval $(call build-prog,includes,dist-ghcconstants,0))
 
 ifneq "$(BINDIST)" "YES"
-$(includes_dist-ghcconstants_depfile_c_asm) : $(includes_H_CONFIG) $(includes_H_PLATFORM) $(wildcard includes/*.h) $(wildcard rts/*.h)
+$(includes_dist-ghcconstants_depfile_c_asm) : $(includes_H_CONFIG) $(includes_H_PLATFORM) $(includes_H_FILES) $$(rts_H_FILES)
 
 includes/dist-ghcconstants/build/mkDerivedConstants.o : $(includes_H_CONFIG) $(includes_H_PLATFORM)
 

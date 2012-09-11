@@ -12,7 +12,8 @@ module HsLit where
 #include "HsVersions.h"
 
 import {-# SOURCE #-} HsExpr( SyntaxExpr, pprExpr )
-import HsTypes (PostTcType)
+import BasicTypes ( FractionalLit(..) )
+import HsTypes  ( PostTcType )
 import Type	( Type )
 import Outputable
 import FastString
@@ -36,14 +37,16 @@ data HsLit
   | HsStringPrim    FastString		-- Packed string
   | HsInt	    Integer		-- Genuinely an Int; arises from TcGenDeriv, 
 					--	and from TRANSLATION
-  | HsIntPrim	    Integer		-- Unboxed Int
-  | HsWordPrim	    Integer		-- Unboxed Word
+  | HsIntPrim       Integer             -- literal Int#
+  | HsWordPrim      Integer             -- literal Word#
+  | HsInt64Prim     Integer             -- literal Int64#
+  | HsWord64Prim    Integer             -- literal Word64#
   | HsInteger	    Integer  Type	-- Genuinely an integer; arises only from TRANSLATION
 					-- 	(overloaded literals are done with HsOverLit)
-  | HsRat	    Rational Type	-- Genuinely a rational; arises only from TRANSLATION
+  | HsRat	    FractionalLit Type	-- Genuinely a rational; arises only from TRANSLATION
 					-- 	(overloaded literals are done with HsOverLit)
-  | HsFloatPrim	    Rational		-- Unboxed Float
-  | HsDoublePrim    Rational		-- Unboxed Double
+  | HsFloatPrim	    FractionalLit	-- Unboxed Float
+  | HsDoublePrim    FractionalLit	-- Unboxed Double
   deriving (Data, Typeable)
 
 instance Eq HsLit where
@@ -54,6 +57,8 @@ instance Eq HsLit where
   (HsInt x1)	    == (HsInt x2)	 = x1==x2
   (HsIntPrim x1)    == (HsIntPrim x2)    = x1==x2
   (HsWordPrim x1)   == (HsWordPrim x2)   = x1==x2
+  (HsInt64Prim x1)  == (HsInt64Prim x2)  = x1==x2
+  (HsWord64Prim x1) == (HsWord64Prim x2) = x1==x2
   (HsInteger x1 _)  == (HsInteger x2 _)  = x1==x2
   (HsRat x1 _)	    == (HsRat x2 _)      = x1==x2
   (HsFloatPrim x1)  == (HsFloatPrim x2)  = x1==x2
@@ -63,21 +68,33 @@ instance Eq HsLit where
 data HsOverLit id 	-- An overloaded literal
   = OverLit {
 	ol_val :: OverLitVal, 
-	ol_rebindable :: Bool,		-- True <=> rebindable syntax
-					-- False <=> standard syntax
+	ol_rebindable :: Bool,		-- Note [ol_rebindable]
 	ol_witness :: SyntaxExpr id,	-- Note [Overloaded literal witnesses]
 	ol_type :: PostTcType }
   deriving (Data, Typeable)
 
 data OverLitVal
   = HsIntegral   !Integer   	-- Integer-looking literals;
-  | HsFractional !Rational   	-- Frac-looking literals
+  | HsFractional !FractionalLit	-- Frac-looking literals
   | HsIsString   !FastString 	-- String-looking literals
   deriving (Data, Typeable)
 
 overLitType :: HsOverLit a -> Type
 overLitType = ol_type
 \end{code}
+
+Note [ol_rebindable]
+~~~~~~~~~~~~~~~~~~~~
+The ol_rebindable field is True if this literal is actually 
+using rebindable syntax.  Specifically:
+
+  False iff ol_witness is the standard one
+  True  iff ol_witness is non-standard
+
+Equivalently it's True if
+  a) RebindableSyntax is on
+  b) the witness for fromInteger/fromRational/fromString
+     that happens to be in scope isn't the standard one
 
 Note [Overloaded literal witnesses]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -89,7 +106,7 @@ This witness should replace the literal.
 
 This dual role is unusual, because we're replacing 'fromInteger' with 
 a call to fromInteger.  Reason: it allows commoning up of the fromInteger
-calls, which wouldn't be possible if the desguarar made the application
+calls, which wouldn't be possible if the desguarar made the application.
 
 The PostTcType in each branch records the type the overload literal is
 found to have.
@@ -130,11 +147,13 @@ instance Outputable HsLit where
     ppr (HsStringPrim s) = pprHsString s <> char '#'
     ppr (HsInt i)	 = integer i
     ppr (HsInteger i _)	 = integer i
-    ppr (HsRat f _)	 = rational f
-    ppr (HsFloatPrim f)	 = rational f <> char '#'
-    ppr (HsDoublePrim d) = rational d <> text "##"
+    ppr (HsRat f _)	 = ppr f
+    ppr (HsFloatPrim f)	 = ppr f <> char '#'
+    ppr (HsDoublePrim d) = ppr d <> text "##"
     ppr (HsIntPrim i)	 = integer i  <> char '#'
     ppr (HsWordPrim w)	 = integer w  <> text "##"
+    ppr (HsInt64Prim i)  = integer i  <> text "L#"
+    ppr (HsWord64Prim w) = integer w  <> text "L##"
 
 -- in debug mode, print the expression that it's resolved to, too
 instance OutputableBndr id => Outputable (HsOverLit id) where
@@ -143,6 +162,6 @@ instance OutputableBndr id => Outputable (HsOverLit id) where
 
 instance Outputable OverLitVal where
   ppr (HsIntegral i)   = integer i 
-  ppr (HsFractional f) = rational f
+  ppr (HsFractional f) = ppr f
   ppr (HsIsString s)   = pprHsString s
 \end{code}

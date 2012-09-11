@@ -12,7 +12,7 @@ where
 import RegAlloc.Liveness
 import Instruction
 import Reg
-import Cmm	hiding (RegSet)
+import OldCmm hiding (RegSet)
 import BlockId
 
 import State
@@ -41,13 +41,13 @@ import qualified Data.Set	as Set
 --
 regSpill
 	:: Instruction instr
-	=> [LiveCmmTop instr]		-- ^ the code
+	=> [LiveCmmTop statics instr]	-- ^ the code
 	-> UniqSet Int			-- ^ available stack slots
 	-> UniqSet VirtualReg		-- ^ the regs to spill
 	-> UniqSM
-		([LiveCmmTop instr]	-- code with SPILL and RELOAD meta instructions added.
-		, UniqSet Int		-- left over slots
-		, SpillStats )		-- stats about what happened during spilling
+		([LiveCmmTop statics instr] -- code with SPILL and RELOAD meta instructions added.
+		, UniqSet Int		    -- left over slots
+		, SpillStats )		    -- stats about what happened during spilling
 
 regSpill code slotsFree regs
 
@@ -81,20 +81,20 @@ regSpill code slotsFree regs
 regSpill_top 
 	:: Instruction instr
 	=> RegMap Int 			-- ^ map of vregs to slots they're being spilled to.
-	-> LiveCmmTop instr		-- ^ the top level thing.
-	-> SpillM (LiveCmmTop instr)
+	-> LiveCmmTop statics instr	-- ^ the top level thing.
+	-> SpillM (LiveCmmTop statics instr)
 	
 regSpill_top regSlotMap cmm
  = case cmm of
 	CmmData{}				
 	 -> return cmm
 
-	CmmProc info label params sccs
+	CmmProc info label sccs
 	 |  LiveInfo static firstId mLiveVRegsOnEntry liveSlotsOnEntry <- info
 	 -> do	
 		-- We should only passed Cmms with the liveness maps filled in,  but we'll
 		-- create empty ones if they're not there just in case.
-		let liveVRegsOnEntry	= fromMaybe emptyBlockEnv mLiveVRegsOnEntry
+		let liveVRegsOnEntry	= fromMaybe mapEmpty mLiveVRegsOnEntry
 		
 		-- The liveVRegsOnEntry contains the set of vregs that are live on entry to
 		-- each basic block. If we spill one of those vregs we remove it from that
@@ -103,7 +103,7 @@ regSpill_top regSlotMap cmm
 		-- reload instructions after we've done a successful allocation.
 		let liveSlotsOnEntry' :: Map BlockId (Set Int)
 		    liveSlotsOnEntry'
-			= foldBlockEnv patchLiveSlot liveSlotsOnEntry liveVRegsOnEntry
+			= mapFoldWithKey patchLiveSlot liveSlotsOnEntry liveVRegsOnEntry
 
 		let info'
 			= LiveInfo static firstId
@@ -113,7 +113,7 @@ regSpill_top regSlotMap cmm
 		-- Apply the spiller to all the basic blocks in the CmmProc.
 		sccs'		<- mapM (mapSCCM (regSpill_block regSlotMap)) sccs
 
-		return	$ CmmProc info' label params sccs'
+		return	$ CmmProc info' label sccs'
 
  where	-- | Given a BlockId and the set of registers live in it, 
 	--   if registers in this block are being spilled to stack slots, 
@@ -292,12 +292,11 @@ type SpillM a	= State SpillS a
 
 newUnique :: SpillM Unique
 newUnique
- = do	us	<- gets stateUS
- 	case splitUniqSupply us of
-	 (us1, us2)
-	  -> do let uniq = uniqFromSupply us1
-	  	modify $ \s -> s { stateUS = us2 }
-		return uniq
+ = do   us      <- gets stateUS
+        case takeUniqFromSupply us of
+         (uniq, us')
+          -> do modify $ \s -> s { stateUS = us' }
+                return uniq
 
 accSpillSL (r1, s1, l1) (_, s2, l2)
 	= (r1, s1 + s2, l1 + l2)

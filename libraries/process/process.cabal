@@ -1,5 +1,5 @@
 name:         process
-version:      1.0.1.5
+version:      1.1.0.0
 license:      BSD3
 license-file: LICENSE
 maintainer:   libraries@haskell.org
@@ -18,8 +18,8 @@ build-type:    Configure
 cabal-version: >=1.6
 
 source-repository head
-    type:     darcs
-    location: http://darcs.haskell.org/packages/process/
+    type:     git
+    location: http://darcs.haskell.org/packages/process.git/
 
 flag base4
 
@@ -39,7 +39,10 @@ Library {
     install-includes:
         runProcess.h
         HsProcessConfig.h
-    if !os(windows)
+    if os(windows)
+        build-depends: Win32 >=2.2.0.0
+        extra-libraries: kernel32
+    else
         build-depends: unix
   }
 

@@ -81,6 +81,9 @@ class TestConfig:
         # Do we have profiling support?
         self.have_profiling = False
 
+        # Do we have interpreter support?
+        self.have_interp = False
+
         # Do we have shared libraries?
         self.have_shared_libs = False
 
@@ -199,8 +202,9 @@ class TestOptions:
        # Does this test use a literate (.lhs) file?
        self.literate = 0
 
-       # Does this test use a .c file?
-       self.c_src = 0
+       # Does this test use a .c or .m file?
+       self.c_src    = 0
+       self.objc_src = 0
 
        # Command to run before the test
        self.pre_cmd = None

@@ -9,7 +9,8 @@
 module InteractiveEval (
 #ifdef GHCI
         RunResult(..), Status(..), Resume(..), History(..),
-	runStmt, parseImportDecl, SingleStep(..),
+	runStmt, runStmtWithLocation,
+        parseImportDecl, SingleStep(..),
         resume,
         abandon, abandonAll,
         getResumeContext,
@@ -37,12 +38,11 @@ module InteractiveEval (
 
 #include "HsVersions.h"
 
-import HscMain          hiding (compileExpr)
-import HsSyn (ImportDecl)
+import GhcMonad
+import HscMain
+import HsSyn
 import HscTypes
-import TcRnDriver
-import TcRnMonad (initTc)
-import RnNames		(gresFromAvails, rnImports)
+import RnNames          (gresFromAvails)
 import InstEnv
 import Type
 import TcType		hiding( typeKind )
@@ -64,27 +64,27 @@ import Panic
 import UniqFM
 import Maybes
 import ErrUtils
-import Util
 import SrcLoc
 import BreakArray
 import RtClosureInspect
-import BasicTypes
 import Outputable
 import FastString
 import MonadUtils
 
 import System.Directory
 import Data.Dynamic
-import Data.List (find, partition)
+import Data.List (find)
 import Control.Monad
+#if __GLASGOW_HASKELL__ >= 701
+import Foreign.Safe
+#else
 import Foreign hiding (unsafePerformIO)
+#endif
 import Foreign.C
 import GHC.Exts
 import Data.Array
 import Exception
 import Control.Concurrent
-import Data.List (sortBy)
--- import Foreign.StablePtr
 import System.IO
 import System.IO.Unsafe
 
@@ -139,16 +139,14 @@ data History
    = History {
         historyApStack   :: HValue,
         historyBreakInfo :: BreakInfo,
-        historyEnclosingDecl :: Id
-         -- ^^ A cache of the enclosing top level declaration, for convenience
+        historyEnclosingDecls :: [String]  -- declarations enclosing the breakpoint
    }
 
 mkHistory :: HscEnv -> HValue -> BreakInfo -> History
 mkHistory hsc_env hval bi = let
-    h    = History hval bi decl
-    decl = findEnclosingDecl hsc_env (getHistoryModule h)
-                                     (getHistorySpan hsc_env h)
-    in h
+    decls = findEnclosingDecls hsc_env bi
+    in History hval bi decls
+
 
 getHistoryModule :: History -> Module
 getHistoryModule = breakInfo_module . historyBreakInfo
@@ -163,7 +161,7 @@ getHistorySpan hsc_env hist =
 
 getModBreaks :: HomeModInfo -> ModBreaks
 getModBreaks hmi
-  | Just linkable <- hm_linkable hmi, 
+  | Just linkable <- hm_linkable hmi,
     [BCOs _ modBreaks] <- linkableUnlinked linkable
   = modBreaks
   | otherwise
@@ -173,23 +171,24 @@ getModBreaks hmi
 -- ToDo: a better way to do this would be to keep hold of the decl_path computed
 -- by the coverage pass, which gives the list of lexically-enclosing bindings
 -- for each tick.
-findEnclosingDecl :: HscEnv -> Module -> SrcSpan -> Id
-findEnclosingDecl hsc_env mod span =
-   case lookupUFM (hsc_HPT hsc_env) (moduleName mod) of
-         Nothing -> panic "findEnclosingDecl"
-         Just hmi -> let
-             globals   = typeEnvIds (md_types (hm_details hmi))
-             Just decl = 
-                 find (\id -> let n = idName id in 
-                               nameSrcSpan n < span && isExternalName n)
-                      (reverse$ sortBy (compare `on` (nameSrcSpan.idName))
-                                       globals)
-           in decl
+findEnclosingDecls :: HscEnv -> BreakInfo -> [String]
+findEnclosingDecls hsc_env inf =
+   let hmi = expectJust "findEnclosingDecls" $
+             lookupUFM (hsc_HPT hsc_env) (moduleName $ breakInfo_module inf)
+       mb = getModBreaks hmi
+   in modBreaks_decls mb ! breakInfo_number inf
+
 
 -- | Run a statement in the current interactive context.  Statement
 -- may bind multple values.
 runStmt :: GhcMonad m => String -> SingleStep -> m RunResult
-runStmt expr step =
+runStmt = runStmtWithLocation "<interactive>" 1
+
+-- | Run a statement in the current interactive context.  Passing debug information
+--   Statement may bind multple values.
+runStmtWithLocation :: GhcMonad m => String -> Int -> 
+                       String -> SingleStep -> m RunResult 
+runStmtWithLocation source linenumber expr step =
   do
     hsc_env <- getSession
 
@@ -198,23 +197,15 @@ runStmt expr step =
 
     -- Turn off -fwarn-unused-bindings when running a statement, to hide
     -- warnings about the implicit bindings we introduce.
-    let dflags'  = dopt_unset (hsc_dflags hsc_env) Opt_WarnUnusedBinds
+    let dflags'  = wopt_unset (hsc_dflags hsc_env) Opt_WarnUnusedBinds
         hsc_env' = hsc_env{ hsc_dflags = dflags' }
 
-    r <- hscStmt hsc_env' expr
+    r <- liftIO $ hscStmtWithLocation hsc_env' expr source linenumber
 
     case r of
       Nothing -> return RunFailed -- empty statement / comment
 
       Just (ids, hval) -> do
-          -- XXX: This is the only place we can print warnings before the
-          -- result.  Is this really the right thing to do?  It's fine for
-          -- GHCi, but what's correct for other GHC API clients?  We could
-          -- introduce a callback argument.
-        warns <- getWarnings
-        liftIO $ printBagOfWarnings dflags' warns
-        clearWarnings
-
         status <-
           withVirtualCWD $
             withBreakAction (isStep step) dflags' breakMVar statusMVar $ do
@@ -254,7 +245,7 @@ withVirtualCWD m = do
   gbracket set_cwd reset_cwd $ \_ -> m
 
 parseImportDecl :: GhcMonad m => String -> m (ImportDecl RdrName)
-parseImportDecl expr = withSession $ \hsc_env -> hscImport hsc_env expr
+parseImportDecl expr = withSession $ \hsc_env -> liftIO $ hscImport hsc_env expr
 
 emptyHistory :: BoundedList History
 emptyHistory = nilBL 50 -- keep a log of length 50
@@ -789,39 +780,27 @@ fromListBL bound l = BL (length l) bound l []
 -- module.  They always shadow anything in scope in the current context.
 setContext :: GhcMonad m =>
         [Module]	-- ^ entire top level scope of these modules
-        -> [(Module, Maybe (ImportDecl RdrName))]	-- ^ exports of these modules
+        -> [ImportDecl RdrName]       -- ^ these import declarations
         -> m ()
-setContext toplev_mods other_mods = do
+setContext toplev_mods import_decls = do
     hsc_env <- getSession
     let old_ic  = hsc_IC     hsc_env
         hpt     = hsc_HPT    hsc_env
-        (decls,mods)   = partition (isJust . snd) other_mods -- time for tracing
-        export_mods = map fst mods
-        imprt_decls = map noLoc (catMaybes (map snd decls))
+        imprt_decls = map noLoc import_decls
     --
-    export_env  <- liftIO $ mkExportEnv hsc_env export_mods
     import_env  <-
         if null imprt_decls then return emptyGlobalRdrEnv else do
-            let imports = rnImports imprt_decls
-                this_mod = if null toplev_mods then pRELUDE else head toplev_mods
-            (_, env, _,_) <-
-                ioMsgMaybe $ liftIO $ initTc hsc_env HsSrcFile False this_mod imports
-            return env
+            let this_mod | null toplev_mods = pRELUDE
+                         | otherwise        = head toplev_mods
+            liftIO $ hscRnImportDecls hsc_env this_mod imprt_decls
+
     toplev_envs <- liftIO $ mapM (mkTopLevEnv hpt) toplev_mods
-    let all_env = foldr plusGlobalRdrEnv (plusGlobalRdrEnv export_env import_env) toplev_envs
+
+    let all_env = foldr plusGlobalRdrEnv import_env toplev_envs
     modifySession $ \_ ->
         hsc_env{ hsc_IC = old_ic { ic_toplev_scope = toplev_mods,
-      			 ic_exports      = other_mods,
-      			 ic_rn_gbl_env   = all_env }}
-
--- Make a GlobalRdrEnv based on the exports of the modules only.
-mkExportEnv :: HscEnv -> [Module] -> IO GlobalRdrEnv
-mkExportEnv hsc_env mods
-  = do { stuff <- mapM (getModuleExports hsc_env) mods
-       ; let (_msgs, mb_name_sets) = unzip stuff
-	     envs = [ availsToGlobalRdrEnv (moduleName mod) avails
-                    | (Just avails, mod) <- zip mb_name_sets mods ]
-       ; return $! foldr plusGlobalRdrEnv emptyGlobalRdrEnv envs }
+                                   ic_imports      = import_decls,
+                                   ic_rn_gbl_env   = all_env }}
 
 availsToGlobalRdrEnv :: ModuleName -> [AvailInfo] -> GlobalRdrEnv
 availsToGlobalRdrEnv mod_name avails
@@ -849,9 +828,9 @@ mkTopLevEnv hpt modl
 -- | Get the interactive evaluation context, consisting of a pair of the
 -- set of modules from which we take the full top-level scope, and the set
 -- of modules from which we take just the exports respectively.
-getContext :: GhcMonad m => m ([Module],[(Module, Maybe (ImportDecl RdrName))])
+getContext :: GhcMonad m => m ([Module],[ImportDecl RdrName])
 getContext = withSession $ \HscEnv{ hsc_IC=ic } ->
-	       return (ic_toplev_scope ic, ic_exports ic)
+               return (ic_toplev_scope ic, ic_imports ic)
 
 -- | Returns @True@ if the specified module is interpreted, and hence has
 -- its full top-level scope available.
@@ -871,7 +850,7 @@ moduleIsInterpreted modl = withSession $ \h ->
 getInfo :: GhcMonad m => Name -> m (Maybe (TyThing,Fixity,[Instance]))
 getInfo name
   = withSession $ \hsc_env ->
-    do mb_stuff <- ioMsg $ tcRnGetInfo hsc_env name
+    do mb_stuff <- liftIO $ hscTcRnGetInfo hsc_env name
        case mb_stuff of
          Nothing -> return Nothing
          Just (thing, fixity, ispecs) -> do
@@ -923,8 +902,8 @@ greToRdrNames GRE{ gre_name = name, gre_prov = prov }
 -- the identifier can refer to in the current interactive context.
 parseName :: GhcMonad m => String -> m [Name]
 parseName str = withSession $ \hsc_env -> do
-   (L _ rdr_name) <- hscParseIdentifier (hsc_dflags hsc_env) str
-   ioMsgMaybe $ tcRnLookupRdrName hsc_env rdr_name
+   (L _ rdr_name) <- liftIO $ hscParseIdentifier hsc_env str
+   liftIO $ hscTcRnLookupRdrName hsc_env rdr_name
 
 -- -----------------------------------------------------------------------------
 -- Getting the type of an expression
@@ -932,7 +911,7 @@ parseName str = withSession $ \hsc_env -> do
 -- | Get the type of an expression
 exprType :: GhcMonad m => String -> m Type
 exprType expr = withSession $ \hsc_env -> do
-   ty <- hscTcExpr hsc_env expr
+   ty <- liftIO $ hscTcExpr hsc_env expr
    return $ tidyType emptyTidyEnv ty
 
 -- -----------------------------------------------------------------------------
@@ -941,14 +920,14 @@ exprType expr = withSession $ \hsc_env -> do
 -- | Get the kind of a  type
 typeKind  :: GhcMonad m => String -> m Kind
 typeKind str = withSession $ \hsc_env -> do
-   hscKcType hsc_env str
+   liftIO $ hscKcType hsc_env str
 
 -----------------------------------------------------------------------------
 -- cmCompileExpr: compile an expression and deliver an HValue
 
 compileExpr :: GhcMonad m => String -> m HValue
 compileExpr expr = withSession $ \hsc_env -> do
-  Just (ids, hval) <- hscStmt hsc_env ("let __cmCompileExpr = "++expr)
+  Just (ids, hval) <- liftIO $ hscStmt hsc_env ("let __cmCompileExpr = "++expr)
  		 -- Run it!
   hvals <- liftIO (unsafeCoerce# hval :: IO [HValue])
 
@@ -961,14 +940,9 @@ compileExpr expr = withSession $ \hsc_env -> do
 
 dynCompileExpr :: GhcMonad m => String -> m Dynamic
 dynCompileExpr expr = do
-    (full,exports) <- getContext
-    setContext full $
-        (mkModule
-            (stringToPackageId "base") (mkModuleName "Data.Dynamic")
-        ,Nothing):exports
     let stmt = "let __dynCompileExpr = Data.Dynamic.toDyn (" ++ expr ++ ")"
-    Just (ids, hvals) <- withSession (flip hscStmt stmt)
-    setContext full exports
+    Just (ids, hvals) <- withSession $ \hsc_env -> 
+                           liftIO $ hscStmt hsc_env stmt
     vals <- liftIO (unsafeCoerce# hvals :: IO [Dynamic])
     case (ids,vals) of
         (_:[], v:[])    -> return v

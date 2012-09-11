@@ -1,4 +1,7 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude -#include "HsBase.h" #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, ForeignFunctionInterface #-}
+{-# OPTIONS_GHC -#include "HsBase.h" #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Foreign.C.Error

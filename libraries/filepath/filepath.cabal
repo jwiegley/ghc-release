@@ -1,5 +1,5 @@
 Name:           filepath
-Version:        1.2.0.0
+Version:        1.2.0.1
 License:        BSD3
 license-file:   LICENSE
 Author:         Neil Mitchell
@@ -20,6 +20,6 @@ Library
     Build-Depends:  base >= 2 && < 5
 
 source-repository head
-    type:     darcs
-    location: http://darcs.haskell.org/packages/filepath/
+    type:     git
+    location: http://darcs.haskell.org/packages/filepath.git/
 

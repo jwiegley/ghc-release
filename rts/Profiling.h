@@ -12,11 +12,18 @@
 #include <stdio.h>
 
 #include "BeginPrivate.h"
+#include "Rts.h"
+
+#ifdef PROFILING
+#define PROFILING_ONLY(s) s
+#else
+#define PROFILING_ONLY(s) doNothing()
+#endif
 
 void initProfiling1 (void);
-void freeProfiling1 (void);
 void initProfiling2 (void);
 void endProfiling   (void);
+void freeProfiling  (void);
 
 extern FILE *prof_file;
 extern FILE *hp_file;

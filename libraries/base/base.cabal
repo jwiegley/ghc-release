@@ -1,5 +1,5 @@
 name:           base
-version:        4.3.1.0
+version:        4.4.0.0
 license:        BSD3
 license-file:   LICENSE
 maintainer:     libraries@haskell.org
@@ -17,11 +17,11 @@ extra-tmp-files:
 extra-source-files:
                 config.guess config.sub install-sh
                 aclocal.m4 configure.ac configure
-                include/CTypes.h
+                include/CTypes.h include/md5.h
 
 source-repository head
-    type:     darcs
-    location: http://darcs.haskell.org/packages/base/
+    type:     git
+    location: http://darcs.haskell.org/packages/base.git/
 
 Flag integer-simple
     Description: Use integer-simple
@@ -51,35 +51,41 @@ Library {
             GHC.Err,
             GHC.Exception,
             GHC.Exts,
+            GHC.Fingerprint,
+            GHC.Fingerprint.Type,
             GHC.Float,
+            GHC.Float.ConversionUtils,
+            GHC.Float.RealFracMethods,
+            GHC.Foreign,
             GHC.ForeignPtr,
-            GHC.MVar,
+            GHC.Handle,
             GHC.IO,
-            GHC.IO.IOMode,
             GHC.IO.Buffer,
-            GHC.IO.Device,
             GHC.IO.BufferedIO,
-            GHC.IO.FD,
-            GHC.IO.Exception,
+            GHC.IO.Device,
             GHC.IO.Encoding,
+            GHC.IO.Encoding.CodePage,
+            GHC.IO.Encoding.Failure,
+            GHC.IO.Encoding.Iconv,
             GHC.IO.Encoding.Latin1,
-            GHC.IO.Encoding.UTF8,
+            GHC.IO.Encoding.Types,
             GHC.IO.Encoding.UTF16,
             GHC.IO.Encoding.UTF32,
-            GHC.IO.Encoding.Types,
-            GHC.IO.Encoding.Iconv,
-            GHC.IO.Encoding.CodePage,
+            GHC.IO.Encoding.UTF8,
+            GHC.IO.Exception,
+            GHC.IO.FD,
             GHC.IO.Handle,
-            GHC.IO.Handle.Types,
-            GHC.IO.Handle.Internals,
             GHC.IO.Handle.FD,
+            GHC.IO.Handle.Internals,
             GHC.IO.Handle.Text,
-            GHC.IOBase,
-            GHC.Handle,
-            GHC.IORef,
+            GHC.IO.Handle.Types,
+            GHC.IO.IOMode,
             GHC.IOArray,
+            GHC.IOBase,
+            GHC.IORef,
             GHC.Int,
             GHC.List,
+            GHC.MVar,
             GHC.Num,
             GHC.PArr,
             GHC.Pack,
@@ -87,10 +93,10 @@ Library {
             GHC.Read,
             GHC.Real,
             GHC.ST,
-            GHC.STRef,
             GHC.Show,
             GHC.Stable,
             GHC.Storable,
+            GHC.STRef,
             GHC.TopHandler,
             GHC.Unicode,
             GHC.Weak,
@@ -99,16 +105,7 @@ Library {
         if os(windows)
             exposed-modules: GHC.IO.Encoding.CodePage.Table
                              GHC.Conc.Windows
-        extensions: MagicHash, ExistentialQuantification, Rank2Types,
-                    ScopedTypeVariables, UnboxedTuples,
-                    ForeignFunctionInterface, UnliftedFFITypes,
-                    DeriveDataTypeable, GeneralizedNewtypeDeriving,
-                    FlexibleInstances, StandaloneDeriving,
-                    PatternGuards, EmptyDataDecls, NoImplicitPrelude
-
-        if impl(ghc < 6.10)
-           -- PatternSignatures was deprecated in 6.10
-           extensions: PatternSignatures
+                             GHC.Windows
     }
     exposed-modules:
         Control.Applicative,
@@ -126,9 +123,15 @@ Library {
         Control.Monad,
         Control.Monad.Fix,
         Control.Monad.Instances,
-        Control.Monad.ST
-        Control.Monad.ST.Lazy
-        Control.Monad.ST.Strict
+        Control.Monad.ST,
+        Control.Monad.ST.Safe,
+        Control.Monad.ST.Unsafe,
+        Control.Monad.ST.Lazy,
+        Control.Monad.ST.Lazy.Safe,
+        Control.Monad.ST.Lazy.Unsafe,
+        Control.Monad.ST.Strict,
+        Control.Monad.Group
+        Control.Monad.Zip
         Data.Bits,
         Data.Bool,
         Data.Char,
@@ -157,6 +160,7 @@ Library {
         Data.Traversable
         Data.Tuple,
         Data.Typeable,
+        Data.Typeable.Internal,
         Data.Unique,
         Data.Version,
         Data.Word,
@@ -167,13 +171,18 @@ Library {
         Foreign.C.String,
         Foreign.C.Types,
         Foreign.ForeignPtr,
+        Foreign.ForeignPtr.Safe,
+        Foreign.ForeignPtr.Unsafe,
         Foreign.Marshal,
         Foreign.Marshal.Alloc,
         Foreign.Marshal.Array,
         Foreign.Marshal.Error,
         Foreign.Marshal.Pool,
+        Foreign.Marshal.Safe,
         Foreign.Marshal.Utils,
+        Foreign.Marshal.Unsafe,
         Foreign.Ptr,
+        Foreign.Safe,
         Foreign.StablePtr,
         Foreign.Storable,
         Numeric,
@@ -199,6 +208,10 @@ Library {
         Text.Show,
         Text.Show.Functions
         Unsafe.Coerce
+    other-modules:
+        Control.Monad.ST.Imp
+        Control.Monad.ST.Lazy.Imp
+        Foreign.ForeignPtr.Imp
     c-sources:
         cbits/PrelIOUtils.c
         cbits/WCsubst.c
@@ -208,6 +221,7 @@ Library {
         cbits/inputReady.c
         cbits/selectUtils.c
         cbits/primFloat.c
+        cbits/md5.c
     include-dirs: include
     includes:    HsBase.h
     install-includes:    HsBase.h HsBaseConfig.h EventConfig.h WCsubst.h consUtils.h Typeable.h
@@ -216,24 +230,24 @@ Library {
     }
     if !os(windows) {
         exposed-modules:
-            System.Event
+            GHC.Event
         other-modules:
-            System.Event.Array
-            System.Event.Clock
-            System.Event.Control
-            System.Event.EPoll
-            System.Event.IntMap
-            System.Event.Internal
-            System.Event.KQueue
-            System.Event.Manager
-            System.Event.PSQ
-            System.Event.Poll
-            System.Event.Thread
-            System.Event.Unique
+            GHC.Event.Array
+            GHC.Event.Clock
+            GHC.Event.Control
+            GHC.Event.EPoll
+            GHC.Event.IntMap
+            GHC.Event.Internal
+            GHC.Event.KQueue
+            GHC.Event.Manager
+            GHC.Event.PSQ
+            GHC.Event.Poll
+            GHC.Event.Thread
+            GHC.Event.Unique
     }
-    extensions: CPP
     -- We need to set the package name to base (without a version number)
     -- as it's magic.
     ghc-options: -package-name base
     nhc98-options: -H4M -K3M
+    extensions: CPP
 }

@@ -1,4 +1,6 @@
-{-# OPTIONS_GHC -cpp #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, ForeignFunctionInterface #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.ConsoleHandler
@@ -42,8 +44,6 @@ import Data.Typeable
 #ifdef mingw32_HOST_OS
 import Data.Maybe
 import GHC.Base
-import GHC.Num
-import GHC.Real
 #endif
 
 data Handler
@@ -148,7 +148,7 @@ flushConsole h =
                         "handle is not a file descriptor" Nothing Nothing
       Just fd -> do
         throwErrnoIfMinus1Retry_ "flushConsole" $
-           flush_console_fd (fromIntegral (fdFD fd))
+           flush_console_fd (fdFD fd)
 
 foreign import ccall unsafe "consUtils.h flush_input_console__"
         flush_console_fd :: CInt -> IO CInt

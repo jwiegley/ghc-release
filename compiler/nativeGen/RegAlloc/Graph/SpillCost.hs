@@ -24,11 +24,12 @@ import Reg
 import GraphBase
 
 import BlockId
-import Cmm
+import OldCmm
 import UniqFM
 import UniqSet
 import Digraph		(flattenSCCs)
 import Outputable
+import Platform
 import State
 
 import Data.List	(nub, minimumBy)
@@ -62,16 +63,16 @@ plusSpillCostRecord (r1, a1, b1, c1) (r2, a2, b2, c2)
 --	for each vreg, the number of times it was written to, read from,
 --	and the number of instructions it was live on entry to (lifetime)
 --
-slurpSpillCostInfo
-	:: (Outputable instr, Instruction instr)
-	=> LiveCmmTop instr
-	-> SpillCostInfo
+slurpSpillCostInfo :: (PlatformOutputable instr, Instruction instr)
+                   => Platform
+                   -> LiveCmmTop statics instr
+                   -> SpillCostInfo
 
-slurpSpillCostInfo cmm
+slurpSpillCostInfo platform cmm
 	= execState (countCmm cmm) zeroSpillCostInfo
  where
 	countCmm CmmData{}		= return ()
-	countCmm (CmmProc info _ _ sccs)
+	countCmm (CmmProc info _ sccs)
 		= mapM_ (countBlock info)
 		$ flattenSCCs sccs
 
@@ -79,7 +80,7 @@ slurpSpillCostInfo cmm
 	--	the info table from the CmmProc
  	countBlock info (BasicBlock blockId instrs)
 		| LiveInfo _ _ (Just blockLive) _ <- info
-		, Just rsLiveEntry  <- lookupBlockEnv blockLive blockId
+		, Just rsLiveEntry  <- mapLookup blockId blockLive
 		, rsLiveEntry_virt  <- takeVirtuals rsLiveEntry
 		= countLIs rsLiveEntry_virt instrs
 
@@ -96,7 +97,7 @@ slurpSpillCostInfo cmm
 
 		| otherwise
 		= pprPanic "RegSpillCost.slurpSpillCostInfo"
-			(text "no liveness information on instruction " <> ppr instr)
+			(text "no liveness information on instruction " <> pprPlatform platform instr)
 
 	countLIs rsLiveEntry (LiveInstr instr (Just live) : lis)
 	 = do

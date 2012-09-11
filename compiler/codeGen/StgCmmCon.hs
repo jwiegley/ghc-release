@@ -25,9 +25,9 @@ import StgCmmUtils
 import StgCmmClosure
 import StgCmmProf
 
-import Cmm
+import CmmExpr
 import CLabel
-import MkZipCfgCmm (CmmAGraph, mkNop)
+import MkGraph
 import SMRep
 import CostCentre
 import Module
@@ -193,7 +193,7 @@ buildDynCon binder ccs con args
   = do	{ let (cl_info, args_w_offsets) = layOutDynConstr con (addArgReps args)
 		-- No void args in args_w_offsets
 	; (tmp, init) <- allocDynClosure cl_info use_cc blame_cc args_w_offsets
- 	; return (regIdInfo binder lf_info tmp, init) }
+	; regIdInfo binder lf_info tmp init }
   where
     lf_info = mkConLFInfo con
 
