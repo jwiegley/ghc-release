@@ -250,7 +250,11 @@ getClockTime = do
   allocaBytes (#const sizeof(struct timeval)) $ \ p_timeval -> do
     throwErrnoIfMinus1_ "getClockTime" $ gettimeofday p_timeval nullPtr
     sec  <- (#peek struct timeval,tv_sec)  p_timeval :: IO CTime
+#ifdef darwin_HOST_OS
+    usec <- (#peek struct timeval,tv_usec) p_timeval :: IO CInt
+#else
     usec <- (#peek struct timeval,tv_usec) p_timeval :: IO CTime
+#endif
     return (TOD (realToInteger sec) ((realToInteger usec) * 1000000))
  
 #elif HAVE_FTIME

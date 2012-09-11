@@ -1,0 +1,2 @@
+("","tests/ghc-regress/lib/IO")
+Exception: /no/such/file: canonicalizePath: does not exist (No such file or directory)

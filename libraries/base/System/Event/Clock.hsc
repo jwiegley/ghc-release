@@ -28,7 +28,11 @@ getCurrentTime = do
 
 data CTimeval = CTimeval
     { sec  :: {-# UNPACK #-} !CLong
+#ifdef darwin_HOST_OS
+    , usec :: {-# UNPACK #-} !CInt
+#else
     , usec :: {-# UNPACK #-} !CLong
+#endif
     }
 
 instance Storable CTimeval where

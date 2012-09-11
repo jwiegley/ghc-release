@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.0.3], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.0.4], [glasgow-haskell-bugs@haskell.org], [ghc])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=YES}
@@ -227,6 +227,21 @@ x86_64-apple-darwin)
     ;;
 esac
 
+# Testing if we shall enable shared libs support on Solaris.
+# Anything older than SunOS 5.11 aka Solaris 11 (Express) is broken.
+
+SOLARIS_BROKEN_SHLD=NO
+
+case $host in
+     i386-*-solaris2)
+     # here we go with the test
+     MINOR=`uname -r|cut -d '.' -f 2-`
+     if test "$MINOR" -lt "11"; then
+        SOLARIS_BROKEN_SHLD=YES
+     fi
+     ;;
+esac
+
 checkArch() {
     case $1 in
     alpha|arm|hppa|hppa1_1|i386|ia64|m68k|mips|mipseb|mipsel|powerpc|powerpc64|rs6000|s390|sparc|sparc64|vax|x86_64)
@@ -321,6 +336,8 @@ AC_SUBST(TargetVendor_CPP)
 
 AC_SUBST(exeext)
 AC_SUBST(soext)
+
+AC_SUBST(SOLARIS_BROKEN_SHLD)
 
 AC_ARG_WITH(hc,
 [AC_HELP_STRING([--with-hc=ARG],

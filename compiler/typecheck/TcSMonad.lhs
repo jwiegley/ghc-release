@@ -100,7 +100,6 @@ import Id
 
 import TcRnTypes
 
-import Control.Monad
 import Data.IORef
 \end{code}
 

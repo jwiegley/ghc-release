@@ -382,37 +382,43 @@ cmmNativeGen dflags us cmm count
 			, Nothing
 			, mPprStats)
 
+        ---- x86fp_kludge.  This pass inserts ffree instructions to clear
+        ---- the FPU stack on x86.  The x86 ABI requires that the FPU stack
+        ---- is clear, and library functions can return odd results if it
+        ---- isn't.
+        ----
+        ---- NB. must happen before shortcutBranches, because that
+        ---- generates JXX_GBLs which we can't fix up in x86fp_kludge.
+        let kludged =
+#if i386_TARGET_ARCH
+                {-# SCC "x86fp_kludge" #-}
+                map x86fp_kludge alloced
+#else
+                alloced
+#endif
+
 	---- shortcut branches
 	let shorted	=
 	 	{-# SCC "shortcutBranches" #-}
-	 	shortcutBranches dflags alloced
+	 	shortcutBranches dflags kludged
 
 	---- sequence blocks
 	let sequenced	=
 	 	{-# SCC "sequenceBlocks" #-}
 	 	map sequenceTop shorted
 
-	---- x86fp_kludge
-	let kludged =
-#if i386_TARGET_ARCH
-	 	{-# SCC "x86fp_kludge" #-}
-	 	map x86fp_kludge sequenced
-#else
-		sequenced
-#endif
-
 	---- expansion of SPARC synthetic instrs
 #if sparc_TARGET_ARCH
 	let expanded = 
 		{-# SCC "sparc_expand" #-}
-		map SPARC.expandTop kludged
+		map SPARC.expandTop sequenced
 
 	dumpIfSet_dyn dflags
 		Opt_D_dump_asm_expanded "Synthetic instructions expanded"
 		(vcat $ map (docToSDoc . pprNatCmmTop) expanded)
 #else
 	let expanded = 
-		kludged
+		sequenced
 #endif
 
 	return 	( usAlloc

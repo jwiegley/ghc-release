@@ -99,9 +99,17 @@ getCPUTime = do
     let ru_utime = (#ptr struct rusage, ru_utime) p_rusage
     let ru_stime = (#ptr struct rusage, ru_stime) p_rusage
     u_sec  <- (#peek struct timeval,tv_sec)  ru_utime :: IO CTime
+#ifdef darwin_HOST_OS
+    u_usec <- (#peek struct timeval,tv_usec) ru_utime :: IO CInt
+#else
     u_usec <- (#peek struct timeval,tv_usec) ru_utime :: IO CTime
+#endif
     s_sec  <- (#peek struct timeval,tv_sec)  ru_stime :: IO CTime
+#ifdef darwin_HOST_OS
+    s_usec <- (#peek struct timeval,tv_usec) ru_stime :: IO CInt
+#else
     s_usec <- (#peek struct timeval,tv_usec) ru_stime :: IO CTime
+#endif
     return ((realToInteger u_sec * 1000000 + realToInteger u_usec + 
              realToInteger s_sec * 1000000 + realToInteger s_usec) 
                 * 1000000)

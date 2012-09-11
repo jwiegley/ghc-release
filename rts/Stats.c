@@ -789,14 +789,14 @@ statDescribeGens(void)
 
       gen = &generations[g];
 
-      debugBelch("%5d %7d %9d", g, gen->max_blocks, mut);
+      debugBelch("%5d %7ld %9d", g, (lnat)gen->max_blocks, mut);
 
       for (bd = gen->large_objects, lge = 0; bd; bd = bd->link) {
           lge++;
       }
       live = gen->n_words + countOccupied(gen->large_objects);
       slop = (gen->n_blocks + gen->n_large_blocks) * BLOCK_SIZE_W - live;
-      debugBelch("%8d %8d %8ld %8ld\n", gen->n_blocks, lge,
+      debugBelch("%8ld %8d %8ld %8ld\n", gen->n_blocks, lge,
                  live*sizeof(W_), slop*sizeof(W_));
       tot_live += live;
       tot_slop += slop;

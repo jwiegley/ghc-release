@@ -1239,6 +1239,9 @@ scheduleHandleThreadFinished (Capability *cap STG_UNUSED, Task *task, StgTSO *t)
 #endif
 	  }
 
+	  // See #5187
+	  task->incall->tso = deRefTSO(task->incall->tso);
+
 	  ASSERT(task->incall->tso == t);
 
 	  if (t->what_next == ThreadComplete) {
@@ -1445,18 +1448,18 @@ delete_threads_and_gc:
         recent_activity = ACTIVITY_YES;
     }
 
+    if (heap_census) {
+        debugTrace(DEBUG_sched, "performing heap census");
+        heapCensus();
+	performHeapProfile = rtsFalse;
+    }
+
 #if defined(THREADED_RTS)
     if (gc_type == PENDING_GC_PAR)
     {
         releaseGCThreads(cap);
     }
 #endif
-
-    if (heap_census) {
-        debugTrace(DEBUG_sched, "performing heap census");
-        heapCensus();
-	performHeapProfile = rtsFalse;
-    }
 
     if (heap_overflow && sched_state < SCHED_INTERRUPTING) {
         // GC set the heap_overflow flag, so we should proceed with
