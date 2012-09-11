@@ -22,6 +22,7 @@ endif
 	-$(FIND) $(LIB_DIST_DIR)/build -name "*.hi"    -exec echo $(WHERE_AM_I)/{} \; >> $(BIN_DIST_LIST) 2> /dev/null
 	-$(FIND) $(LIB_DIST_DIR)/build -name "*.p_hi"  -exec echo $(WHERE_AM_I)/{} \; >> $(BIN_DIST_LIST) 2> /dev/null
 	-$(FIND) include -name "*.h"                   -exec echo $(WHERE_AM_I)/{} \; >> $(BIN_DIST_LIST) 2> /dev/null
+	-$(FIND) includes -name "*.h"                  -exec echo $(WHERE_AM_I)/{} \; >> $(BIN_DIST_LIST) 2> /dev/null
 	# Executables
 	-$(FIND) . -name "*.wrapper"                   -exec echo $(WHERE_AM_I)/{} \; >> $(BIN_DIST_LIST) 2> /dev/null
 	-$(FIND) $(EXE_DIST_DIR)/setup-config          -exec echo $(WHERE_AM_I)/{} \; >> $(BIN_DIST_LIST) 2> /dev/null
@@ -34,6 +35,8 @@ endif
 	# Docs
 	# This gives us both docbook docs, and haddock docs
 	$(FIND) . -name "*.haddock"                    -exec echo $(WHERE_AM_I)/{} \; >> $(BIN_DIST_LIST) 2> /dev/null
+	$(FIND) . -name "*.pdf"                        -exec echo $(WHERE_AM_I)/{} \; >> $(BIN_DIST_LIST) 2> /dev/null
+	$(FIND) . -name "*.ps"                         -exec echo $(WHERE_AM_I)/{} \; >> $(BIN_DIST_LIST) 2> /dev/null
 	$(FIND) . -name "*.html"                       -exec echo $(WHERE_AM_I)/{} \; >> $(BIN_DIST_LIST) 2> /dev/null
 	$(FIND) . -name "*.css"                        -exec echo $(WHERE_AM_I)/{} \; >> $(BIN_DIST_LIST) 2> /dev/null
 	$(FIND) . -name "*.gif"                        -exec echo $(WHERE_AM_I)/{} \; >> $(BIN_DIST_LIST) 2> /dev/null

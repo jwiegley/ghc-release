@@ -1,19 +1,21 @@
 name:           extensible-exceptions
-version:        0.1.0.1
+version:        0.1.1.0
 license:        BSD3
 license-file:   LICENSE
 maintainer:     libraries@haskell.org
 synopsis:       Extensible exceptions
 description:
-    Extensible exceptions for old implementations (e.g. GHC < 6.10).
-    This package is being lazily implemented, i.e. not all the new
-    exception types or all the exception functions are necessarily
-    implemented yet.
+    This package provides extensible exceptions for both new and 
+    old versions of GHC (i.e., < 6.10).
 cabal-version:  >=1.2
 build-type: Simple
 
 Library {
-    build-depends: base
+    if impl(ghc>=6.9)
+        cpp-options: -DUSE_NEW_EXCEPTIONS
+        build-depends: base>=4&&<5
+    else
+        build-depends: base<4
     exposed-modules:
         Control.Exception.Extensible
     extensions: CPP, ExistentialQuantification, DeriveDataTypeable

@@ -46,7 +46,12 @@ endif
 ifeq "$(Windows)" "YES"
 SUBDIRS += $(wildcard Win32)
 endif
-SUBDIRS += directory process pretty hpc template-haskell editline Cabal random haskell98
+SUBDIRS += directory process pretty hpc template-haskell Cabal
+SUBDIRS += random haskell98 ghc-mtl extensible-exceptions utf8-string
+ifeq "$(GhcLibsWithUnix)" "YES"
+SUBDIRS += terminfo
+endif
+SUBDIRS += haskeline
 
 # Set GhcBootLibs=YES from the command line to work with just the libraries
 # needed to bootstrap GHC.
@@ -74,6 +79,9 @@ SUBDIRS += dph/dph-seq
 SUBDIRS += dph/dph-par
 endif
 endif
+
+# We don't install the new-in-6.10.3 bootlibs
+SUBDIRS_INSTALL = $(filter-out ghc-mtl utf8-string terminfo haskeline,$(SUBDIRS))
 
 # -----------------------------------------------------------------------------
 
@@ -192,7 +200,8 @@ ALL_CONFIGURE_FLAGS = \
                $(COMMON_CONFIGURE_FLAGS) \
 	           --haddock-options="--use-contents=../index.html \
 	                              --use-index=../doc-index.html" \
-	           $(CONFIGURE_OPTS)
+	           $(CONFIGURE_OPTS) \
+	           $(EXTRA_CABAL_CONFIGURE_FLAGS)
 
 stamp/configure.library.build$(CONFIGURE_STAMP_EXTRAS).dph/dph-par: \
     dph/dph-par
@@ -314,7 +323,7 @@ endif
 
 .PHONY: install install-docs install.library.%
 
-install: $(foreach SUBDIR,$(SUBDIRS),install.library.$(SUBDIR))
+install: $(foreach SUBDIR,$(SUBDIRS_INSTALL),install.library.$(SUBDIR))
 ifeq "$(HADDOCK_DOCS)" "YES"
 	$(INSTALL_DIR)                                                     $(DESTDIR)$(html_installed_root)
 	$(INSTALL_DATA)   index.html doc-index*.html                       $(DESTDIR)$(html_installed_root)
@@ -340,7 +349,7 @@ install-docs:
 # We also need to pass all the other directories in, as they can be
 # overridden when installing a bindist.
 
-$(foreach SUBDIR,$(SUBDIRS),install.library.$(SUBDIR)): \
+$(foreach SUBDIR,$(SUBDIRS_INSTALL),install.library.$(SUBDIR)): \
 install.library.%: ifBuildable/ifBuildable
 	if $(IFBUILDABLE) $*; then \
 	  cd $* && \

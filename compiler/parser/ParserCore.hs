@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-overlapping-patterns #-}
 {-# OPTIONS -fglasgow-exts -cpp #-}
 {-# OPTIONS -w #-}
 -- The above warning supression flag is a temporary kludge.
@@ -34,257 +35,257 @@ import Unique
 
 #include "../HsVersions.h"
 #if __GLASGOW_HASKELL__ >= 503
-import Data.Array
+import qualified Data.Array as Happy_Data_Array
 #else
-import Array
+import qualified Array as Happy_Data_Array
 #endif
 #if __GLASGOW_HASKELL__ >= 503
-import GHC.Exts
+import qualified GHC.Exts as Happy_GHC_Exts
 #else
-import GlaExts
+import qualified GlaExts as Happy_GHC_Exts
 #endif
 
--- parser produced by Happy Version 1.17
+-- parser produced by Happy Version 1.18.4
 
 newtype HappyAbsSyn  = HappyAbsSyn HappyAny
 #if __GLASGOW_HASKELL__ >= 607
-type HappyAny = GHC.Exts.Any
+type HappyAny = Happy_GHC_Exts.Any
 #else
 type HappyAny = forall a . a
 #endif
 happyIn4 :: (HsExtCore RdrName) -> (HappyAbsSyn )
-happyIn4 x = unsafeCoerce# x
+happyIn4 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn4 #-}
 happyOut4 :: (HappyAbsSyn ) -> (HsExtCore RdrName)
-happyOut4 x = unsafeCoerce# x
+happyOut4 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut4 #-}
 happyIn5 :: (Module) -> (HappyAbsSyn )
-happyIn5 x = unsafeCoerce# x
+happyIn5 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn5 #-}
 happyOut5 :: (HappyAbsSyn ) -> (Module)
-happyOut5 x = unsafeCoerce# x
+happyOut5 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut5 #-}
 happyIn6 :: (Name) -> (HappyAbsSyn )
-happyIn6 x = unsafeCoerce# x
+happyIn6 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn6 #-}
 happyOut6 :: (HappyAbsSyn ) -> (Name)
-happyOut6 x = unsafeCoerce# x
+happyOut6 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut6 #-}
 happyIn7 :: (Name) -> (HappyAbsSyn )
-happyIn7 x = unsafeCoerce# x
+happyIn7 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn7 #-}
 happyOut7 :: (HappyAbsSyn ) -> (Name)
-happyOut7 x = unsafeCoerce# x
+happyOut7 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut7 #-}
 happyIn8 :: (Name) -> (HappyAbsSyn )
-happyIn8 x = unsafeCoerce# x
+happyIn8 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn8 #-}
 happyOut8 :: (HappyAbsSyn ) -> (Name)
-happyOut8 x = unsafeCoerce# x
+happyOut8 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut8 #-}
 happyIn9 :: ([String]) -> (HappyAbsSyn )
-happyIn9 x = unsafeCoerce# x
+happyIn9 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn9 #-}
 happyOut9 :: (HappyAbsSyn ) -> ([String])
-happyOut9 x = unsafeCoerce# x
+happyOut9 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut9 #-}
 happyIn10 :: ([String]) -> (HappyAbsSyn )
-happyIn10 x = unsafeCoerce# x
+happyIn10 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn10 #-}
 happyOut10 :: (HappyAbsSyn ) -> ([String])
-happyOut10 x = unsafeCoerce# x
+happyOut10 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut10 #-}
 happyIn11 :: ([TyClDecl RdrName]) -> (HappyAbsSyn )
-happyIn11 x = unsafeCoerce# x
+happyIn11 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn11 #-}
 happyOut11 :: (HappyAbsSyn ) -> ([TyClDecl RdrName])
-happyOut11 x = unsafeCoerce# x
+happyOut11 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut11 #-}
 happyIn12 :: (TyClDecl RdrName) -> (HappyAbsSyn )
-happyIn12 x = unsafeCoerce# x
+happyIn12 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn12 #-}
 happyOut12 :: (HappyAbsSyn ) -> (TyClDecl RdrName)
-happyOut12 x = unsafeCoerce# x
+happyOut12 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut12 #-}
 happyIn13 :: (OccName -> [LConDecl RdrName]) -> (HappyAbsSyn )
-happyIn13 x = unsafeCoerce# x
+happyIn13 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn13 #-}
 happyOut13 :: (HappyAbsSyn ) -> (OccName -> [LConDecl RdrName])
-happyOut13 x = unsafeCoerce# x
+happyOut13 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut13 #-}
 happyIn14 :: ([LConDecl RdrName]) -> (HappyAbsSyn )
-happyIn14 x = unsafeCoerce# x
+happyIn14 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn14 #-}
 happyOut14 :: (HappyAbsSyn ) -> ([LConDecl RdrName])
-happyOut14 x = unsafeCoerce# x
+happyOut14 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut14 #-}
 happyIn15 :: (LConDecl RdrName) -> (HappyAbsSyn )
-happyIn15 x = unsafeCoerce# x
+happyIn15 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn15 #-}
 happyOut15 :: (HappyAbsSyn ) -> (LConDecl RdrName)
-happyOut15 x = unsafeCoerce# x
+happyOut15 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut15 #-}
 happyIn16 :: ([LHsTyVarBndr RdrName]) -> (HappyAbsSyn )
-happyIn16 x = unsafeCoerce# x
+happyIn16 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn16 #-}
 happyOut16 :: (HappyAbsSyn ) -> ([LHsTyVarBndr RdrName])
-happyOut16 x = unsafeCoerce# x
+happyOut16 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut16 #-}
 happyIn17 :: ([LHsType RdrName]) -> (HappyAbsSyn )
-happyIn17 x = unsafeCoerce# x
+happyIn17 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn17 #-}
 happyOut17 :: (HappyAbsSyn ) -> ([LHsType RdrName])
-happyOut17 x = unsafeCoerce# x
+happyOut17 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut17 #-}
 happyIn18 :: ([IfaceType]) -> (HappyAbsSyn )
-happyIn18 x = unsafeCoerce# x
+happyIn18 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn18 #-}
 happyOut18 :: (HappyAbsSyn ) -> ([IfaceType])
-happyOut18 x = unsafeCoerce# x
+happyOut18 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut18 #-}
 happyIn19 :: (IfaceType) -> (HappyAbsSyn )
-happyIn19 x = unsafeCoerce# x
+happyIn19 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn19 #-}
 happyOut19 :: (HappyAbsSyn ) -> (IfaceType)
-happyOut19 x = unsafeCoerce# x
+happyOut19 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut19 #-}
 happyIn20 :: (IfaceType) -> (HappyAbsSyn )
-happyIn20 x = unsafeCoerce# x
+happyIn20 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn20 #-}
 happyOut20 :: (HappyAbsSyn ) -> (IfaceType)
-happyOut20 x = unsafeCoerce# x
+happyOut20 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut20 #-}
 happyIn21 :: (IfaceType) -> (HappyAbsSyn )
-happyIn21 x = unsafeCoerce# x
+happyIn21 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn21 #-}
 happyOut21 :: (HappyAbsSyn ) -> (IfaceType)
-happyOut21 x = unsafeCoerce# x
+happyOut21 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut21 #-}
 happyIn22 :: ([IfaceBinding]) -> (HappyAbsSyn )
-happyIn22 x = unsafeCoerce# x
+happyIn22 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn22 #-}
 happyOut22 :: (HappyAbsSyn ) -> ([IfaceBinding])
-happyOut22 x = unsafeCoerce# x
+happyOut22 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut22 #-}
 happyIn23 :: (IfaceBinding) -> (HappyAbsSyn )
-happyIn23 x = unsafeCoerce# x
+happyIn23 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn23 #-}
 happyOut23 :: (HappyAbsSyn ) -> (IfaceBinding)
-happyOut23 x = unsafeCoerce# x
+happyOut23 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut23 #-}
 happyIn24 :: ([(IfaceLetBndr, IfaceExpr)]) -> (HappyAbsSyn )
-happyIn24 x = unsafeCoerce# x
+happyIn24 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn24 #-}
 happyOut24 :: (HappyAbsSyn ) -> ([(IfaceLetBndr, IfaceExpr)])
-happyOut24 x = unsafeCoerce# x
+happyOut24 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut24 #-}
 happyIn25 :: ((IfaceLetBndr, IfaceExpr)) -> (HappyAbsSyn )
-happyIn25 x = unsafeCoerce# x
+happyIn25 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn25 #-}
 happyOut25 :: (HappyAbsSyn ) -> ((IfaceLetBndr, IfaceExpr))
-happyOut25 x = unsafeCoerce# x
+happyOut25 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut25 #-}
 happyIn26 :: (IfaceBndr) -> (HappyAbsSyn )
-happyIn26 x = unsafeCoerce# x
+happyIn26 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn26 #-}
 happyOut26 :: (HappyAbsSyn ) -> (IfaceBndr)
-happyOut26 x = unsafeCoerce# x
+happyOut26 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut26 #-}
 happyIn27 :: ([IfaceBndr]) -> (HappyAbsSyn )
-happyIn27 x = unsafeCoerce# x
+happyIn27 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn27 #-}
 happyOut27 :: (HappyAbsSyn ) -> ([IfaceBndr])
-happyOut27 x = unsafeCoerce# x
+happyOut27 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut27 #-}
 happyIn28 :: (IfaceIdBndr) -> (HappyAbsSyn )
-happyIn28 x = unsafeCoerce# x
+happyIn28 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn28 #-}
 happyOut28 :: (HappyAbsSyn ) -> (IfaceIdBndr)
-happyOut28 x = unsafeCoerce# x
+happyOut28 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut28 #-}
 happyIn29 :: (IfaceTvBndr) -> (HappyAbsSyn )
-happyIn29 x = unsafeCoerce# x
+happyIn29 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn29 #-}
 happyOut29 :: (HappyAbsSyn ) -> (IfaceTvBndr)
-happyOut29 x = unsafeCoerce# x
+happyOut29 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut29 #-}
 happyIn30 :: ([IfaceTvBndr]) -> (HappyAbsSyn )
-happyIn30 x = unsafeCoerce# x
+happyIn30 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn30 #-}
 happyOut30 :: (HappyAbsSyn ) -> ([IfaceTvBndr])
-happyOut30 x = unsafeCoerce# x
+happyOut30 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut30 #-}
 happyIn31 :: (IfaceKind) -> (HappyAbsSyn )
-happyIn31 x = unsafeCoerce# x
+happyIn31 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn31 #-}
 happyOut31 :: (HappyAbsSyn ) -> (IfaceKind)
-happyOut31 x = unsafeCoerce# x
+happyOut31 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut31 #-}
 happyIn32 :: (IfaceKind) -> (HappyAbsSyn )
-happyIn32 x = unsafeCoerce# x
+happyIn32 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn32 #-}
 happyOut32 :: (HappyAbsSyn ) -> (IfaceKind)
-happyOut32 x = unsafeCoerce# x
+happyOut32 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut32 #-}
 happyIn33 :: (IfaceExpr) -> (HappyAbsSyn )
-happyIn33 x = unsafeCoerce# x
+happyIn33 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn33 #-}
 happyOut33 :: (HappyAbsSyn ) -> (IfaceExpr)
-happyOut33 x = unsafeCoerce# x
+happyOut33 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut33 #-}
 happyIn34 :: (IfaceExpr) -> (HappyAbsSyn )
-happyIn34 x = unsafeCoerce# x
+happyIn34 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn34 #-}
 happyOut34 :: (HappyAbsSyn ) -> (IfaceExpr)
-happyOut34 x = unsafeCoerce# x
+happyOut34 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut34 #-}
 happyIn35 :: (IfaceExpr) -> (HappyAbsSyn )
-happyIn35 x = unsafeCoerce# x
+happyIn35 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn35 #-}
 happyOut35 :: (HappyAbsSyn ) -> (IfaceExpr)
-happyOut35 x = unsafeCoerce# x
+happyOut35 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut35 #-}
 happyIn36 :: ([IfaceAlt]) -> (HappyAbsSyn )
-happyIn36 x = unsafeCoerce# x
+happyIn36 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn36 #-}
 happyOut36 :: (HappyAbsSyn ) -> ([IfaceAlt])
-happyOut36 x = unsafeCoerce# x
+happyOut36 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut36 #-}
 happyIn37 :: (IfaceAlt) -> (HappyAbsSyn )
-happyIn37 x = unsafeCoerce# x
+happyIn37 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn37 #-}
 happyOut37 :: (HappyAbsSyn ) -> (IfaceAlt)
-happyOut37 x = unsafeCoerce# x
+happyOut37 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut37 #-}
 happyIn38 :: (Literal) -> (HappyAbsSyn )
-happyIn38 x = unsafeCoerce# x
+happyIn38 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn38 #-}
 happyOut38 :: (HappyAbsSyn ) -> (Literal)
-happyOut38 x = unsafeCoerce# x
+happyOut38 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut38 #-}
 happyIn39 :: (FastString) -> (HappyAbsSyn )
-happyIn39 x = unsafeCoerce# x
+happyIn39 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn39 #-}
 happyOut39 :: (HappyAbsSyn ) -> (FastString)
-happyOut39 x = unsafeCoerce# x
+happyOut39 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut39 #-}
 happyIn40 :: (String) -> (HappyAbsSyn )
-happyIn40 x = unsafeCoerce# x
+happyIn40 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn40 #-}
 happyOut40 :: (HappyAbsSyn ) -> (String)
-happyOut40 x = unsafeCoerce# x
+happyOut40 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut40 #-}
 happyIn41 :: (OccName) -> (HappyAbsSyn )
-happyIn41 x = unsafeCoerce# x
+happyIn41 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyIn41 #-}
 happyOut41 :: (HappyAbsSyn ) -> (OccName)
-happyOut41 x = unsafeCoerce# x
+happyOut41 x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOut41 #-}
 happyInTok :: (Token) -> (HappyAbsSyn )
-happyInTok x = unsafeCoerce# x
+happyInTok x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyInTok #-}
 happyOutTok :: (HappyAbsSyn ) -> (Token)
-happyOutTok x = unsafeCoerce# x
+happyOutTok x = Happy_GHC_Exts.unsafeCoerce# x
 {-# INLINE happyOutTok #-}
 
 
@@ -303,7 +304,7 @@ happyCheck = HappyA# "\xff\xff\x02\x00\x0f\x00\x04\x00\x0a\x00\x0b\x00\x03\x00\x
 happyTable :: HappyAddr
 happyTable = HappyA# "\x00\x00\x52\x00\x5f\x00\x53\x00\x8e\x00\x4e\x00\x2a\x00\x2b\x00\x52\x00\x7c\x00\x53\x00\x11\x00\x30\x00\x2a\x00\x2b\x00\x52\x00\x3f\x00\x53\x00\x61\x00\x2c\x00\xb4\x00\xa2\x00\x52\x00\x31\x00\x53\x00\x12\x00\x2c\x00\xad\x00\x54\x00\x55\x00\xcc\x00\x4f\x00\x40\x00\x57\x00\x58\x00\x54\x00\x55\x00\xc7\x00\x2e\x00\x32\x00\x57\x00\x58\x00\x54\x00\x55\x00\xca\x00\x2e\x00\x15\x00\x57\x00\x58\x00\x54\x00\x55\x00\xcb\x00\x69\x00\x33\x00\x57\x00\x58\x00\x52\x00\x21\x00\x53\x00\x4d\x00\x4e\x00\x2a\x00\x2b\x00\x52\x00\x16\x00\x53\x00\x19\x00\x12\x00\x2a\x00\x2b\x00\x52\x00\x3f\x00\x53\x00\x16\x00\x2c\x00\x90\x00\xb7\x00\x52\x00\xac\x00\x53\x00\x12\x00\x2c\x00\x95\x00\x54\x00\x55\x00\xa4\x00\x4f\x00\x40\x00\x57\x00\x58\x00\x54\x00\x55\x00\xab\x00\x2e\x00\xb9\x00\x57\x00\x58\x00\x54\x00\x55\x00\x97\x00\x2e\x00\xb9\x00\x57\x00\x58\x00\x54\x00\x55\x00\x73\x00\x32\x00\x33\x00\x57\x00\x58\x00\x52\x00\x65\x00\x53\x00\x52\x00\x9f\x00\x53\x00\x3a\x00\x52\x00\x8d\x00\x53\x00\x52\x00\x12\x00\x53\x00\xc9\x00\xbb\x00\xbc\x00\x91\x00\x92\x00\x3c\x00\x72\x00\xba\x00\xbb\x00\xbc\x00\xa2\x00\x65\x00\x34\x00\xa3\x00\x54\x00\x55\x00\x56\x00\xaf\x00\x73\x00\x57\x00\x58\x00\x7a\x00\x57\x00\x58\x00\x7d\x00\x3d\x00\x57\x00\x58\x00\x7f\x00\x57\x00\x58\x00\x2a\x00\x2b\x00\x2a\x00\x2b\x00\x2a\x00\x2b\x00\x2a\x00\x2b\x00\x2a\x00\x2b\x00\x66\x00\x48\x00\x66\x00\x2c\x00\x84\x00\x2c\x00\x89\x00\x2c\x00\x84\x00\x2c\x00\x6b\x00\x2c\x00\x51\x00\x23\x00\x85\x00\xae\x00\x85\x00\x86\x00\x85\x00\x86\x00\x2a\x00\x2b\x00\x2e\x00\x21\x00\x2e\x00\x25\x00\x2e\x00\x26\x00\x2e\x00\x3a\x00\x2e\x00\x2a\x00\x2b\x00\x2c\x00\x61\x00\x2a\x00\x2b\x00\x2a\x00\x2b\x00\x16\x00\x62\x00\x3c\x00\x3a\x00\x3a\x00\x2c\x00\x38\x00\x3a\x00\x34\x00\x2c\x00\x46\x00\x2c\x00\x2d\x00\x2e\x00\x3b\x00\x3c\x00\xa6\x00\x3a\x00\x42\x00\x3c\x00\x3a\x00\x3a\x00\x3d\x00\x0b\x00\x2e\x00\x3a\x00\x3a\x00\x0d\x00\x2e\x00\xa7\x00\x2e\x00\x43\x00\x3c\x00\xa8\x00\x3a\x00\x3d\x00\x3d\x00\xa9\x00\x93\x00\x3d\x00\x25\x00\x65\x00\x3a\x00\x14\x00\x5f\x00\x04\x00\x96\x00\x0e\x00\x08\x00\x3d\x00\x16\x00\x15\x00\x3d\x00\x3d\x00\x98\x00\xbe\x00\xbf\x00\x3d\x00\x3d\x00\x5a\x00\x61\x00\x5b\x00\x03\x00\x5c\x00\x5d\x00\x5e\x00\x3d\x00\x3f\x00\x5f\x00\x16\x00\x30\x00\x66\x00\xc0\x00\xc9\x00\x3d\x00\x29\x00\x10\x00\x81\x00\x11\x00\x60\x00\xc1\x00\x88\x00\x82\x00\x40\x00\x61\x00\x4b\x00\x75\x00\x76\x00\x77\x00\x78\x00\x4c\x00\x21\x00\x12\x00\x5f\x00\x5a\x00\x4d\x00\x5b\x00\x32\x00\x5c\x00\x5d\x00\x5e\x00\x0f\x00\x10\x00\x5f\x00\x11\x00\x7f\x00\x3f\x00\x16\x00\x21\x00\x61\x00\xc2\x00\x4a\x00\x07\x00\x08\x00\x60\x00\x4b\x00\x72\x00\x8f\x00\x12\x00\x61\x00\x4c\x00\x18\x00\x40\x00\xc3\x00\x16\x00\x4d\x00\xc7\x00\x1f\x00\x73\x00\x1d\x00\x39\x00\x1d\x00\x28\x00\x1d\x00\x1e\x00\x1d\x00\x22\x00\x9e\x00\xc5\x00\x1f\x00\xb9\x00\x1f\x00\x72\x00\x1f\x00\xc4\x00\x1f\x00\xb7\x00\x1f\x00\x75\x00\x76\x00\x77\x00\x78\x00\x6e\x00\xc5\x00\x70\x00\x6e\x00\xa1\x00\x70\x00\x6e\x00\x6f\x00\x70\x00\xb6\x00\x68\x00\x69\x00\x0a\x00\x0b\x00\xb1\x00\xb2\x00\xb3\x00\xb4\x00\xa6\x00\xab\x00\x8b\x00\x82\x00\x8c\x00\x51\x00\x95\x00\x8d\x00\x16\x00\x9e\x00\x9a\x00\x9b\x00\x9c\x00\x9d\x00\x6d\x00\x00\x00\x7c\x00\x8e\x00\x6e\x00\xa1\x00\x89\x00\x84\x00\x00\x00\x6b\x00\x00\x00\x65\x00\x00\x00\x22\x00\x38\x00\x37\x00\x00\x00\x79\x00\x83\x00\x41\x00\x45\x00\x7a\x00\x64\x00\x51\x00\x46\x00\x42\x00\x36\x00\x25\x00\x48\x00\x28\x00\x1b\x00\x03\x00\x1c\x00\x18\x00\x19\x00\x16\x00\x22\x00\x18\x00\x1d\x00\x07\x00\x00\x00\x00\x00\x0d\x00\x00\x00\x18\x00\x00\x00\x00\x00\x06\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"#
 
-happyReduceArr = array (1, 87) [
+happyReduceArr = Happy_Data_Array.array (1, 87) [
 	(1 , happyReduce_1),
 	(2 , happyReduce_2),
 	(3 , happyReduce_3),
@@ -1332,14 +1333,14 @@ happyError s l = failP (show l ++ ": Parse error\n") (take 100 s) l
 {-# LINE 1 "templates/GenericTemplate.hs" #-}
 {-# LINE 1 "templates/GenericTemplate.hs" #-}
 {-# LINE 1 "<built-in>" #-}
-{-# LINE 1 "<command line>" #-}
+{-# LINE 1 "<command-line>" #-}
 {-# LINE 1 "templates/GenericTemplate.hs" #-}
 -- Id: GenericTemplate.hs,v 1.26 2005/01/14 14:47:22 simonmar Exp 
 
 {-# LINE 28 "templates/GenericTemplate.hs" #-}
 
 
-data Happy_IntList = HappyCons Int# Happy_IntList
+data Happy_IntList = HappyCons Happy_GHC_Exts.Int# Happy_IntList
 
 
 
@@ -1384,19 +1385,19 @@ happyDoAction i tk st
 				     happyFail i tk st
 		-1# 	  -> {- nothing -}
 				     happyAccept i tk st
-		n | (n <# (0# :: Int#)) -> {- nothing -}
+		n | (n Happy_GHC_Exts.<# (0# :: Happy_GHC_Exts.Int#)) -> {- nothing -}
 
-				     (happyReduceArr ! rule) i tk st
-				     where rule = (I# ((negateInt# ((n +# (1# :: Int#))))))
+				     (happyReduceArr Happy_Data_Array.! rule) i tk st
+				     where rule = (Happy_GHC_Exts.I# ((Happy_GHC_Exts.negateInt# ((n Happy_GHC_Exts.+# (1# :: Happy_GHC_Exts.Int#))))))
 		n		  -> {- nothing -}
 
 
 				     happyShift new_state i tk st
-				     where new_state = (n -# (1# :: Int#))
+				     where new_state = (n Happy_GHC_Exts.-# (1# :: Happy_GHC_Exts.Int#))
    where off    = indexShortOffAddr happyActOffsets st
-	 off_i  = (off +# i)
-	 check  = if (off_i >=# (0# :: Int#))
-			then (indexShortOffAddr happyCheck off_i ==#  i)
+	 off_i  = (off Happy_GHC_Exts.+# i)
+	 check  = if (off_i Happy_GHC_Exts.>=# (0# :: Happy_GHC_Exts.Int#))
+			then (indexShortOffAddr happyCheck off_i Happy_GHC_Exts.==#  i)
 			else False
  	 action | check     = indexShortOffAddr happyTable off_i
 		| otherwise = indexShortOffAddr happyDefActions st
@@ -1406,27 +1407,27 @@ happyDoAction i tk st
 
 indexShortOffAddr (HappyA# arr) off =
 #if __GLASGOW_HASKELL__ > 500
-	narrow16Int# i
+	Happy_GHC_Exts.narrow16Int# i
 #elif __GLASGOW_HASKELL__ == 500
-	intToInt16# i
+	Happy_GHC_Exts.intToInt16# i
 #else
-	(i `iShiftL#` 16#) `iShiftRA#` 16#
+	Happy_GHC_Exts.iShiftRA# (Happy_GHC_Exts.iShiftL# i 16#) 16#
 #endif
   where
 #if __GLASGOW_HASKELL__ >= 503
-	i = word2Int# ((high `uncheckedShiftL#` 8#) `or#` low)
+	i = Happy_GHC_Exts.word2Int# (Happy_GHC_Exts.or# (Happy_GHC_Exts.uncheckedShiftL# high 8#) low)
 #else
-	i = word2Int# ((high `shiftL#` 8#) `or#` low)
+	i = Happy_GHC_Exts.word2Int# (Happy_GHC_Exts.or# (Happy_GHC_Exts.shiftL# high 8#) low)
 #endif
-	high = int2Word# (ord# (indexCharOffAddr# arr (off' +# 1#)))
-	low  = int2Word# (ord# (indexCharOffAddr# arr off'))
-	off' = off *# 2#
+	high = Happy_GHC_Exts.int2Word# (Happy_GHC_Exts.ord# (Happy_GHC_Exts.indexCharOffAddr# arr (off' Happy_GHC_Exts.+# 1#)))
+	low  = Happy_GHC_Exts.int2Word# (Happy_GHC_Exts.ord# (Happy_GHC_Exts.indexCharOffAddr# arr off'))
+	off' = off Happy_GHC_Exts.*# 2#
 
 
 
 
 
-data HappyAddr = HappyA# Addr#
+data HappyAddr = HappyA# Happy_GHC_Exts.Addr#
 
 
 
@@ -1440,7 +1441,7 @@ data HappyAddr = HappyA# Addr#
 -- Shifting a token
 
 happyShift new_state 0# tk st sts stk@(x `HappyStk` _) =
-     let i = (case unsafeCoerce# x of { (I# (i)) -> i }) in
+     let i = (case Happy_GHC_Exts.unsafeCoerce# x of { (Happy_GHC_Exts.I# (i)) -> i }) in
 --     trace "shifting the error token" $
      happyDoAction i tk new_state (HappyCons (st) (sts)) (stk)
 
@@ -1475,7 +1476,7 @@ happySpecReduce_3 nt fn j tk _ (HappyCons (_) ((HappyCons (_) (sts@((HappyCons (
 happyReduce k i fn 0# tk st sts stk
      = happyFail 0# tk st sts stk
 happyReduce k nt fn j tk st sts stk
-     = case happyDrop (k -# (1# :: Int#)) sts of
+     = case happyDrop (k Happy_GHC_Exts.-# (1# :: Happy_GHC_Exts.Int#)) sts of
 	 sts1@((HappyCons (st1@(action)) (_))) ->
         	let r = fn stk in  -- it doesn't hurt to always seq here...
        		happyDoSeq r (happyGoto nt j tk st1 sts1 r)
@@ -1495,17 +1496,17 @@ happyMonad2Reduce k nt fn j tk st sts stk =
              drop_stk = happyDropStk k stk
 
              off    = indexShortOffAddr happyGotoOffsets st1
-             off_i  = (off +# nt)
+             off_i  = (off Happy_GHC_Exts.+# nt)
              new_state = indexShortOffAddr happyTable off_i
 
 
 
 
 happyDrop 0# l = l
-happyDrop n (HappyCons (_) (t)) = happyDrop (n -# (1# :: Int#)) t
+happyDrop n (HappyCons (_) (t)) = happyDrop (n Happy_GHC_Exts.-# (1# :: Happy_GHC_Exts.Int#)) t
 
 happyDropStk 0# l = l
-happyDropStk n (x `HappyStk` xs) = happyDropStk (n -# (1#::Int#)) xs
+happyDropStk n (x `HappyStk` xs) = happyDropStk (n Happy_GHC_Exts.-# (1#::Happy_GHC_Exts.Int#)) xs
 
 -----------------------------------------------------------------------------
 -- Moving to a new state after a reduction
@@ -1515,7 +1516,7 @@ happyGoto nt j tk st =
    {- nothing -}
    happyDoAction j tk new_state
    where off    = indexShortOffAddr happyGotoOffsets st
-	 off_i  = (off +# nt)
+	 off_i  = (off Happy_GHC_Exts.+# nt)
  	 new_state = indexShortOffAddr happyTable off_i
 
 
@@ -1544,7 +1545,7 @@ happyFail  0# tk old_st (HappyCons ((action)) (sts))
 --                       save the old token and carry on.
 happyFail  i tk (action) sts stk =
 --      trace "entering error recovery" $
-	happyDoAction 0# tk action sts ( (unsafeCoerce# (I# (i))) `HappyStk` stk)
+	happyDoAction 0# tk action sts ( (Happy_GHC_Exts.unsafeCoerce# (Happy_GHC_Exts.I# (i))) `HappyStk` stk)
 
 -- Internal happy errors:
 
@@ -1554,7 +1555,7 @@ notHappyAtAll = error "Internal Happy error\n"
 -- Hack to get the typechecker to accept our action functions
 
 
-happyTcHack :: Int# -> a -> a
+happyTcHack :: Happy_GHC_Exts.Int# -> a -> a
 happyTcHack x y = y
 {-# INLINE happyTcHack #-}
 

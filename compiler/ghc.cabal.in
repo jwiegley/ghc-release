@@ -28,11 +28,6 @@ Flag dynlibs
     Default: False
     Manual: True
 
-Flag editline
-    Description: Use editline
-    Default: False
-    Manual: True
-
 Flag ghci
     Description: Build GHCi support.
     Default: False
@@ -70,10 +65,6 @@ Library
         Build-Depends: Win32
     else
         Build-Depends: unix
-
-    if flag(editline)
-        Build-Depends: editline
-        CPP-Options: -DUSE_EDITLINE
 
     GHC-Options: -Wall -fno-warn-name-shadowing -fno-warn-orphans
 
@@ -465,9 +456,6 @@ Library
             ByteCodeItbls
             ByteCodeLink
             Debugger
-            GhciMonad
-            GhciTags
-            InteractiveUI
             LibFFI
             Linker
             ObjLink

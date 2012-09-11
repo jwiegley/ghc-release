@@ -297,46 +297,20 @@ endif
 %.HxS : %-htmlhelp2/collection.HxC
 	( cd $(dir $<) && if Hxcomp -p collection.HxC -o ../$@ ; then false ; else true ; fi )
 
-%.fo : %.xml
-	$(XSLTPROC) --output $@ \
-		    --stringparam draft.mode no \
-		    $(XSLTPROC_LABEL_OPTS) $(XSLTPROC_OPTS) \
-		    $(DIR_DOCBOOK_XSL)/fo/docbook.xsl $<
+%.ps : %.xml
+	$(DBLATEX) $(DBLATEX_OPTS) $< --ps -o $@
 
-ifeq "$(FOP)" ""
-ifneq "$(PDFXMLTEX)" ""
-%.pdf : %.fo
-	$(PDFXMLTEX) $<
-	if grep "LaTeX Warning: Label(s) may have changed.Rerun to get cross-references right." $(basename $@).log > /dev/null ; then \
-	  $(PDFXMLTEX) $< ; \
-	  $(PDFXMLTEX) $< ; \
-	fi
-endif
-else
-%.ps : %.fo
-	$(FOP) $(FOP_OPTS) -fo $< -ps $@
+%.pdf : %.xml
+	$(DBLATEX) $(DBLATEX_OPTS) $< --pdf -o $@
 
-%.pdf : %.fo
-	$(FOP) $(FOP_OPTS) -fo $< -pdf $@
-endif
-
-ifneq "$(XMLTEX)" ""
-%.dvi : %.fo
-	$(XMLTEX) $<
-	if grep "LaTeX Warning: Label(s) may have changed.Rerun to get cross-references right." $(basename $@).log > /dev/null ; then \
-	  $(XMLTEX) $< ; \
-	  $(XMLTEX) $< ; \
-	fi
-endif
+%.dvi : %.xml
+	$(DBLATEX) $(DBLATEX_OPTS) $< --dvi -o $@
 
 #-----------------------------------------------------------------------------
 # Doc processing suffix rules
 #
 # ToDo: make these more robust
 #
-%.ps : %.dvi
-	@$(RM) $@
-	$(DVIPS) $< -o $@
 
 %.tex : %.tib
 	@$(RM) $*.tex $*.verb-t.tex

@@ -1138,10 +1138,7 @@ ISCC                    =
 
 XSLTPROC		= @XsltprocCmd@
 XMLLINT			= @XmllintCmd@
-FOP			= @FopCmd@
-XMLTEX			= @XmltexCmd@
-PDFXMLTEX		= @PdfxmltexCmd@
-DVIPS			= @DvipsCmd@
+DBLATEX			= @dblatexCmd@
 
 DIR_DOCBOOK_XSL		= @DIR_DOCBOOK_XSL@
 

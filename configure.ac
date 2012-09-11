@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [6.10.2], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [6.10.3], [glasgow-haskell-bugs@haskell.org], [ghc])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=YES}
@@ -679,25 +679,6 @@ if test "$WithGhc" != ""; then
   AC_SUBST(ghc_ge_609)dnl
 fi
 
-# Check whether this GHC has editline installed
-FP_GHC_HAS_EDITLINE
-
-# Dummy arguments to print help for --with-editline-* arguments.
-# Those are actually passed to the editline package's configure script
-# via the CONFIGURE_ARGS variable in mk/config.mk
-AC_ARG_WITH(dummy-editline-includes,
-  [AC_HELP_STRING([--with-editline-includes],
-    [directory containing editline/editline.h or editline/readline.h])],
-    [],
-    [])
-
-AC_ARG_WITH(dummy-editline-libraries,
-  [AC_HELP_STRING([--with-editline-libraries],
-    [directory containing the editline library])],
-    [],
-    [])
-
-
 AC_PATH_PROGS(NHC,nhc nhc98)
 AC_PATH_PROG(HBC,hbc)
 
@@ -1000,7 +981,8 @@ fi
 dnl ** check for DocBook toolchain
 FP_CHECK_DOCBOOK_DTD
 FP_DIR_DOCBOOK_XSL([/usr/share/xml/docbook/stylesheet/nwalsh/current /usr/share/xml/docbook/stylesheet/nwalsh /usr/share/xml/docbook/xsl-stylesheets* /usr/share/sgml/docbook/docbook-xsl-stylesheets* /usr/share/sgml/docbook/xsl-stylesheets* /opt/kde?/share/apps/ksgmltools2/docbook/xsl /usr/share/docbook-xsl /usr/share/sgml/docbkxsl /usr/local/share/xsl/docbook /sw/share/xml/xsl/docbook-xsl /opt/local/share/xsl/docbook-xsl])
-FP_PROG_FO_PROCESSOR
+
+AC_PATH_PROG([dblatexCmd], [dblatex])
 
 dnl ** check for ghc-pkg command
 FP_PROG_GHC_PKG

@@ -15,6 +15,9 @@ Data-Files: extra-gcc-opts
 Build-Type: Simple
 Cabal-Version: >= 1.2
 
+Flag base4
+    Description: Choose the even newer, even smaller, split-up base package.
+
 Flag base3
     Description: Choose the new smaller, split-up base package.
 
@@ -23,17 +26,37 @@ Flag ghci
 
 Executable ghc
     Main-Is: Main.hs
+
+    if flag(base4)
+        Build-Depends: base       >= 4   && < 5
     if flag(base3)
-        Build-Depends: base       >= 3   && < 5,
-                       directory  >= 1   && < 1.1
-    else
-        Build-Depends: base < 3
+        Build-Depends: base       >= 3   && < 4
+    if !flag(base3) && !flag(base4)
+        Build-Depends: base       < 3
+
+    if flag(base3) || flag(base4)
+        Build-Depends: array      >= 0.1 && < 0.3,
+                       bytestring >= 0.9 && < 0.10,
+                       directory  >= 1   && < 1.1,
+                       process    >= 1   && < 1.1
+
     Build-Depends: base, ghc
     Build-Depends: filepath >= 1 && < 1.2
 
+    if os(windows)
+        Build-Depends: Win32
+    else
+        Build-Depends: unix
+
     GHC-Options: -Wall
+    GHC-Options: -fno-warn-name-shadowing
     if flag(ghci)
         CPP-Options: -DGHCI
+        Other-Modules: InteractiveUI, GhciMonad, GhciTags
+        Build-Depends: ghc-mtl, haskeline
+        Extensions: ForeignFunctionInterface,
+                    UnboxedTuples,
+                    FlexibleInstances
 
-    Extensions: CPP, PatternGuards
+    Extensions: CPP, PatternGuards, MagicHash
 

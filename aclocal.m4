@@ -797,86 +797,6 @@ fi
 ])# FP_CHECK_DOCBOOK_DTD
 
 
-# FP_GEN_FO
-# ------------------
-# Generates a formatting objects document in conftest.fo.
-AC_DEFUN([FP_GEN_FO],
-[rm -f conftest.fo
-cat > conftest.fo << EOF
-<?xml version="1.0"?>
-<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
-  <fo:layout-master-set>
-    <fo:simple-page-master master-name="blank">
-      <fo:region-body/>
-    </fo:simple-page-master>
-  </fo:layout-master-set>
-  <fo:page-sequence master-reference="blank">
-    <fo:flow flow-name="xsl-region-body">
-      <fo:block>
-        Test!
-      </fo:block>
-    </fo:flow>
-  </fo:page-sequence>
-</fo:root>
-EOF
-]) # FP_GEN_FO
-
-
-# FP_PROG_FOP
-# -----------
-# Set the output variable 'FopCmd' to the first working 'fop' in the current
-# 'PATH'. Note that /usr/bin/fop is broken in SuSE 9.1 (unpatched), so try
-# /usr/share/fop/fop.sh in that case (or no 'fop'), too.
-AC_DEFUN([FP_PROG_FOP],
-[AC_PATH_PROGS([FopCmd1], [fop fop.sh])
-if test -n "$FopCmd1"; then
-  AC_CACHE_CHECK([for $FopCmd1 usability], [fp_cv_fop_usability],
-    [FP_GEN_FO
-    if "$FopCmd1" -fo conftest.fo -ps conftest.ps > /dev/null 2>&1; then
-      fp_cv_fop_usability=yes
-    else
-      fp_cv_fop_usability=no
-    fi
-    rm -rf conftest*])
-  if test x"$fp_cv_fop_usability" = xyes; then
-     FopCmd=$FopCmd1
-  fi
-fi
-if test -z "$FopCmd"; then
-  AC_PATH_PROGS([FopCmd2], [fop.sh], , [/usr/share/fop])
-  FopCmd=$FopCmd2
-fi
-AC_SUBST([FopCmd])
-])# FP_PROG_FOP
-
-
-# FP_PROG_FO_PROCESSOR
-# --------------------
-# Try to find an FO processor. PassiveTeX output is sometimes a bit strange, so
-# try FOP first. Sets the output variables FopCmd, XmltexCmd, DvipsCmd, and
-# PdfxmltexCmd.
-AC_DEFUN([FP_PROG_FO_PROCESSOR],
-[AC_REQUIRE([FP_PROG_FOP])
-AC_PATH_PROG([XmltexCmd], [xmltex])
-AC_PATH_PROG([DvipsCmd], [dvips])
-if test -z "$FopCmd"; then
-  if test -z "$XmltexCmd"; then
-    AC_MSG_WARN([cannot find an FO => DVI converter, you will not be able to build DVI or PostScript documentation])
-  else
-    if test -z "$DvipsCmd"; then
-      AC_MSG_WARN([cannot find a DVI  => PS converter, you will not be able to build PostScript documentation])
-    fi
-  fi
-  AC_PATH_PROG([PdfxmltexCmd], [pdfxmltex])
-  if test -z "$PdfxmltexCmd"; then
-    AC_MSG_WARN([cannot find an FO => PDF converter, you will not be able to build PDF documentation])
-  fi
-elif test -z "$XmltexCmd"; then
-  AC_MSG_WARN([cannot find an FO => DVI converter, you will not be able to build DVI documentation])
-fi
-])# FP_PROG_FO_PROCESSOR
-
-
 # FP_PROG_GHC_PKG
 # ----------------
 # Try to find a ghc-pkg matching the ghc mentioned in the environment variable
@@ -898,20 +818,6 @@ if test x"$fp_cv_matching_ghc_pkg" = xno; then
 else
   GhcPkgCmd=$fp_cv_matching_ghc_pkg
 fi])# FP_PROG_GHC_PKG
-
-
-# FP_GHC_HAS_EDITLINE
-# -------------------
-AC_DEFUN([FP_GHC_HAS_EDITLINE],
-[AC_REQUIRE([FP_PROG_GHC_PKG])
-AC_CACHE_CHECK([whether ghc has editline package], [fp_cv_ghc_has_editline],
-[if "${GhcPkgCmd-ghc-pkg}" --show-package editline >/dev/null 2>&1; then
-  fp_cv_ghc_has_editline=yes
-else
-  fp_cv_ghc_has_editline=no
- fi])
-AC_SUBST([GhcHasEditline], [`echo $fp_cv_ghc_has_editline | sed 'y/yesno/YESNO/'`])
-])# FP_GHC_HAS_EDITLINE
 
 
 # FP_GCC_EXTRA_FLAGS
