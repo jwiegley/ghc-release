@@ -1,0 +1,6 @@
+
+drvfail002.hs:16:0:
+    Ambiguous constraint `X T c'
+        At least one of the forall'd type variables mentioned by the constraint
+        must be reachable from the type after the '=>'
+    In the instance declaration for `Show T'

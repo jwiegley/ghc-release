@@ -1,0 +1,109 @@
+
+import os
+import re
+
+# Testsuite configuration setup for GHC
+#
+# This file is Python source
+#
+config.compiler_type         = 'ghc'
+config.compiler              = 'ghc'
+config.compiler_always_flags = ['-fforce-recomp', '-dcore-lint', '-dcmm-lint']
+
+config.hp2ps		     = 'hp2ps'
+config.gs		     = 'gs'
+config.confdir               = '.'
+
+# By default, we test the 'normal', 'opt' and 'hpc' ways.
+# 'optasm' is added by mk/test.mk if the compiler has a native code gen,
+# 'prof'   is added by mk/test.mk if the profiling way is enabled.
+config.compile_ways	     = ['normal', 'optc', 'hpc']
+config.run_ways		     = ['normal', 'optc', 'hpc']
+
+# ways that are not enabled by default, but can always be invoked explicitly
+config.other_ways            = ['extcore','optextcore',
+                                'prof_hc_hb','prof_hb',
+                                'prof_hd','prof_hy','prof_hr', 'dyn']
+
+if (ghc_with_native_codegen == 1):
+	config.compile_ways.append('optasm')
+	config.run_ways.append('optasm')
+
+if (ghc_with_profiling == 1):
+	config.have_profiling = True
+	config.compile_ways.append('profc')
+	config.run_ways.append('profc')
+	if (ghc_with_native_codegen == 1):
+		config.compile_ways.append('profasm')
+		config.run_ways.append('profasm')
+
+if (ghc_with_interpreter == 1):
+	config.run_ways.append('ghci')
+
+config.unregisterised = (ghc_unregisterised == 1)
+
+if (ghc_with_threaded_rts == 1):
+	config.run_ways.append('threaded1')
+	if (ghc_with_smp == 1):
+		config.run_ways.append('threaded2')
+
+config.way_flags = {
+	'normal'     : [],
+	'optc'       : ['-O -fvia-C'],
+	'optasm'     : ['-O -fasm'],
+	'profc'      : ['-O -prof -auto-all -fvia-C'],
+	'profasm'    : ['-O -prof -auto-all -fasm'],
+	'profthreaded' : ['-O -prof -auto-all -fasm -threaded'],
+	'ghci'       : ['--interactive', '-v0', '-ignore-dot-ghci'],
+	'extcore'    : ['-fext-core'],
+	'optextcore' : ['-O -fext-core'],
+	'threaded1'  : ['-threaded', '-debug'],
+	'threaded2'  : ['-O', '-threaded'],
+	'hpc'	     : ['-O', '-fhpc' ],
+        'prof_hc_hb' : ['-O -prof -auto-all'],
+        'prof_hb'    : ['-O -prof -auto-all'],
+        'prof_hd'    : ['-O -prof -auto-all'],
+        'prof_hy'    : ['-O -prof -auto-all'],
+        'prof_hr'    : ['-O -prof -auto-all'],
+        'dyn'        : ['-O -dynamic']
+	}
+
+config.way_rts_flags = { 
+	'normal'     : [],
+	'optc'       : [],
+	'optasm'     : [],
+	'profc'      : ['-p'],
+	'profasm'    : ['-hc'], # test heap profiling too
+	'profthreaded' : ['-p'],
+	'ghci'       : [],
+	'extcore'    : [],
+	'optextcore' : [],
+	'threaded1'  : [],
+	'threaded2'  : ['-N2'],
+	'hpc'	     : [],
+        'prof_hc_hb' : ['-hc -hbvoid'],
+        'prof_hb'    : ['-hb'],
+        'prof_hd'    : ['-hd'],
+        'prof_hy'    : ['-hy'],
+        'prof_hr'    : ['-hr'],
+        'dyn'        : []
+    	}
+
+def get_compiler_info():
+    h = os.popen(config.compiler + ' --numeric-version', 'r')
+    v = h.read()
+    h.close()
+    v = re.sub('[\r\n]', '', v)
+    v = v.split('-')
+    config.compiler_version = v[0]
+    config.compiler_maj_version = re.sub('^([0-9]+\.[0-9]+).*',r'\1', v[0])
+    config.compiler_tags = v[1:]
+
+    # enable profthreaded only for GHC 6.9+ with profiling & threaded RTS:
+    if version_ge(config.compiler_version, '6.9') \
+          and ghc_with_profiling == 1 \
+          and ghc_with_threaded_rts == 1:
+        config.run_ways.append('profthreaded')
+
+    if version_ge(config.compiler_version, '6.9'):
+        config.compiler_always_flags.append('-dno-debug-output')

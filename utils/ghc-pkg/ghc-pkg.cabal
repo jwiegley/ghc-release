@@ -1,0 +1,45 @@
+Name: ghc-pkg
+-- XXX Version number
+Version: 6.9
+Copyright: XXX
+License: BSD3
+-- XXX License-File: LICENSE
+Author: XXX
+Maintainer: cvs-fptools@haskell.org
+Synopsis: XXX
+Description:
+	XXX
+Category: Development
+build-type: Simple
+cabal-version: >=1.2
+
+Flag base4
+    Description: Choose the even newer, even smaller, split-up base package.
+
+Flag base3
+  Description: Choose the new smaller, split-up base package.
+
+Executable ghc-pkg
+    Main-Is: Main.hs
+    Extensions: CPP, ForeignFunctionInterface
+
+    if flag(base4)
+        Build-Depends: base       >= 4   && < 5
+    if flag(base3)
+        Build-Depends: base       >= 3   && < 4
+    if !flag(base3) && !flag(base4)
+        Build-Depends: base       < 3
+
+    if flag(base3) || flag(base4)
+        Build-Depends: directory  >= 1   && < 1.1,
+                       process    >= 1   && < 1.1,
+                       pretty     >= 1   && < 1.1
+
+    if impl(ghc < 6.9)
+        Build-Depends: extensible-exceptions
+
+    Build-Depends: haskell98, filepath, Cabal
+    if !os(windows)
+        Build-Depends: unix
+    if os(windows)
+        c-sources: CRT_noglob.c

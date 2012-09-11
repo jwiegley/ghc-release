@@ -1,0 +1,62 @@
+include Makefile.inc
+
+OBJDIR = ${BUILDDIR}/obj/hsc2hs
+TARGET = ${DST}/hsc2hs$(EXE)
+
+SRCS   = Main.hs
+FROMC  = ../libraries/getopt/System/Console/GetOpt.$C \
+	 ../libraries/base/Data/List.$C \
+	 ../libraries/process/System/Cmd.$C \
+	 ../libraries/directory/System/Directory.$C \
+	 ../libraries/base/Control/Monad.$C \
+	 ../libraries/base/Control/Exception.$C \
+	 ../libraries/base/Control/Exception/Base.$C \
+	 ../libraries/base/Data/Typeable.$C \
+	 ../libraries/base/Data/HashTable.$C \
+	 ../libraries/base/Data/Bits.$C \
+	 ../libraries/base/NHC/SizedTypes.$C \
+	 ../libraries/base/Foreign/C/String.$C \
+	 ../libraries/base/Foreign/Marshal/Alloc.$C \
+	 ../libraries/base/Foreign/Marshal/Array.$C \
+	 ../libraries/base/Foreign/Marshal/Utils.$C \
+	 ../libraries/filepath/System/FilePath/Posix.$C
+
+ifeq "$(findstring ghc, ${HC})" "ghc"
+HFLAGS = $(shell $(LOCAL)fixghc $(GHCSYM) -package base -package lang -package process -package directory -package getopt )
+export HFLAGS
+endif
+ifeq "$(findstring hbc, ${HC})" "hbc"
+HFLAGS =
+export HFLAGS
+endif
+ifeq "$(findstring nhc98, ${HC})" "nhc98"
+HFLAGS = -package base -package filepath -package directory -package process -package getopt +CTS -H4M -CTS
+export HFLAGS
+endif
+
+all: $(TARGET)
+install: $(TARGET)
+cfiles: cleanC $(SRCS)
+	$(HMAKE) -hc=$(LOCAL)nhc98 -package base -package filepath \
+	-package directory -package process -package getopt -DBUILD_NHC -C Main.hs
+clean:
+	-rm -f *.hi *.o $(OBJDIR)/*.o
+cleanC: clean
+	-rm -f *.hc *.c
+realclean: clean cleanC
+	-rm -f $(OBJDIR)/Main$(EXE)
+
+$(TARGET): $(OBJDIR) $(SRCS)
+	$(HMAKE) -hc=$(HC) Main -d$(OBJDIR) -DBUILD_NHC \
+		$(shell echo "${BUILDOPTS}") $(HFLAGS) $(CYGFLAG)
+	mv $(OBJDIR)/Main$(EXE) $(TARGET)
+	$(HOSTSTRIP) $(TARGET)
+
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
+
+fromC: $(OBJDIR)
+	cp $(FROMC) .
+	$(LOCAL)nhc98 -cpp -o $(TARGET) -d$(OBJDIR) *.$C
+	$(HOSTSTRIP) $(TARGET)
+

@@ -1,0 +1,74 @@
+test('cg001', normal, compile_and_run, [''])
+test('cg002', normal, compile_and_run, [''])
+test('cg003', normal, compile_and_run, [''])
+test('cg004', normal, compile_and_run, [''])
+test('cg005', normal, compile_and_run, [''])
+test('cg006', normal, compile_and_run, [''])
+test('cg007', normal, compile_and_run, [''])
+test('cg008', normal, compile_and_run, [''])
+test('cg009', normal, compile_and_run, [''])
+test('cg010', normal, compile_and_run, [''])
+test('cg011', normal, compile_and_run, [''])
+test('cg012', only_compiler_types(['ghc']), compile_and_run, ['-fglasgow-exts'])
+test('cg013', normal, compile_and_run, [''])
+test('cg014', normal, compile_and_run, [''])
+test('cg015', only_compiler_types(['ghc']), compile_and_run, ['-fglasgow-exts'])
+test('cg016', exit_code(1), compile_and_run, [''])
+test('cg017', normal, compile_and_run, [''])
+test('cg018', only_compiler_types(['ghc']), compile_and_run, ['-fglasgow-exts'])
+test('cg019', normal, compile_and_run, [''])
+test('cg020', normal, compile_and_run, [''])
+test('cg021', normal, compile_and_run, [''])
+test('cg022', normal, compile_and_run, [''])
+test('cg024', normal, compile_and_run, [''])
+
+test('cg025', compose(reqlib('regex-compat'), compose(extra_run_opts('cg025.hs'),exit_code(1))),
+                      compile_and_run, ['-package regex-compat'])
+
+test('cg026', only_compiler_types(['ghc']), compile_and_run, [''])
+test('cg027', normal, compile_and_run, [''])
+test('cg028', normal, compile_and_run, [''])
+test('cg031', only_compiler_types(['ghc']), compile_and_run, ['-fglasgow-exts'])
+test('cg032', only_compiler_types(['ghc']), compile_and_run, ['-fglasgow-exts'])
+test('cg033', only_compiler_types(['ghc']), compile_and_run, ['-fglasgow-exts'])
+test('cg034', normal, compile_and_run, [''])
+test('cg035', normal, compile_and_run, ['-fglasgow-exts'])
+test('cg036', normal, compile_and_run, [''])
+test('cg037', normal, compile_and_run, [''])
+test('cg038', normal, compile_and_run, [''])
+test('cg039', normal, compile_and_run, [''])
+test('cg040', normal, compile_and_run, [''])
+test('cg043', normal, compile_and_run, [''])
+test('cg044', normal, compile_and_run, [''])
+test('cg045', exit_code(1), compile_and_run, [''])
+test('cg046', normal, compile_and_run, [''])
+test('cg047', normal, compile_and_run, [''])
+test('cg048', normal, compile_and_run, [''])
+test('cg049', normal, compile_and_run, ['-funbox-strict-fields'])
+test('cg050', normal, compile_and_run, [''])
+# Doesn't work with External Core due to datatype declaration with no constructors
+test('cg051', (compose (expect_fail_for(['extcore','optextcore']),exit_code(1))), compile_and_run, [''])
+test('cg052', only_ways(['optc','optasm']), compile_and_run, ['-funbox-strict-fields'])
+test('cg053', normal, compile_and_run, [''])
+test('cg054', normal, compile_and_run, [''])
+test('cg055', normal, compile_and_run, [''])
+test('cg056', normal, compile_and_run, [''])
+
+test('cg057', composes([expect_broken(948),
+                        only_ways(['prof','profasm']),
+                        extra_run_opts('+RTS -xc')]),
+     compile_and_run, [''])
+
+test('cg058', normal, compile_and_run, [''])
+test('cg059', exit_code(1), compile_and_run, [''])
+
+test('1852', normal, compile_and_run, [''])
+test('2080', normal, compile_and_run, [''])
+
+test('cg060',
+     extra_run_opts('+RTS -K64k -RTS'),
+     compile_and_run, [''])
+test('cg061', normal, compile_and_run, [''])
+test('cg062', normal, compile_and_run, [''])
+
+test('1861', extra_run_opts('0'), compile_and_run, [''])

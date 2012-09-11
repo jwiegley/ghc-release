@@ -1,0 +1,26 @@
+-- Tests ForeignPtrEnv finalizers
+
+import Text.Printf
+import Foreign.ForeignPtr
+import Foreign
+import GHC.TopHandler
+import Control.Concurrent
+import Data.List
+import System.Mem
+
+foreign export ccall fin :: Ptr Int -> Ptr Int -> IO ()
+foreign import ccall "&fin" finptr :: FinalizerEnvPtr Int Int
+
+fin :: Ptr Int -> Ptr Int -> IO ()
+fin envp ap = runIO $ do
+  env <- peek envp
+  a <- peek ap
+  printf "%d %d\n" env a
+  return ()
+
+main = do
+  a   <- new (55 :: Int)
+  env <- new (66 :: Int)
+  fp  <- newForeignPtrEnv finptr env a
+  performGC
+  threadDelay 100000

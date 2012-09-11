@@ -1,0 +1,2 @@
+
+mod132.hs:6:6: Not in scope: data constructor `Foo'

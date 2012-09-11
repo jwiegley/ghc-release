@@ -1,0 +1,2 @@
+
+mod123.hs:5:5: Not in scope: type constructor or class `T'

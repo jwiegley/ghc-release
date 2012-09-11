@@ -1,0 +1,2 @@
+
+rnfail007.hs:1:0: The function `main' is not defined in module `Main'

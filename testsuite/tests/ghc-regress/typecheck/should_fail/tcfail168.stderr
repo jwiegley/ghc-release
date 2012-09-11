@@ -1,0 +1,16 @@
+
+tcfail168.hs:8:10:
+    Couldn't match expected type `IO ()'
+           against inferred type `Char -> ()'
+    In a stmt of a 'do' expression: putChar 'a'
+    In the expression:
+        do putChar
+           putChar 'a'
+           putChar 'a'
+           putChar 'a'
+           ....
+    In the definition of `foo':
+        foo = do putChar
+                 putChar 'a'
+                 putChar 'a'
+                 ....

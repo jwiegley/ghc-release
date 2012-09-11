@@ -1,0 +1,121 @@
+# Args to vtc are: extra compile flags
+
+test('rn003', normal, compile, [''])
+test('rn005', normal, compile, [''])
+test('rn006', normal, compile, [''])
+test('rn009',
+     [only_compiler_types(['ghc']),
+      extra_clean(['Imp10Aux.hi',      'Imp10Aux.o',
+                   'Imp10Aux.hi-boot', 'Imp10Aux.o-boot'])],
+     multimod_compile,
+     ['rn009', '-v0'])
+# rn10 tests the same things as 009,011,012
+#test('rn010', only_compiler_types(['ghc']), multimod_compile, ['rn010', '-v0'])
+test('rn011',
+     [only_compiler_types(['ghc']),
+      extra_clean(['Imp100Aux.hi',      'Imp100Aux.o',
+                   'Imp100Aux.hi-boot', 'Imp100Aux.o-boot'])],
+     multimod_compile,
+     ['rn011', '-v0'])
+test('rn012',
+     [only_compiler_types(['ghc']),
+      extra_clean(['Imp500Aux.hi',      'Imp500Aux.o',
+                   'Imp500Aux.hi-boot', 'Imp500Aux.o-boot'])],
+     multimod_compile,
+     ['rn012', '-v0'])
+test('rn013', normal, compile, [''])
+test('rn017',
+     [only_compiler_types(['ghc']),
+      extra_clean(['RnAux017.hi',      'RnAux017.o',
+                   'RnAux017.hi-boot', 'RnAux017.o-boot'])],
+     multimod_compile,
+     ['rn017', '-v0'])
+test('rn019', normal, compile, [''])
+test('rn020', normal, compile, [''])
+test('rn022', normal, compile, [''])
+test('rn023', normal, compile, [''])
+test('rn024', normal, compile, [''])
+test('rn025', normal, compile, [''])
+test('rn026', normal, compile, [''])
+test('rn027', normal, compile, [''])
+test('rn028', normal, compile, [''])
+test('rn029', normal, compile, [''])
+test('rn031', normal, compile, [''])
+test('rn032', normal, compile, [''])
+test('rn033', normal, compile, [''])
+test('rn034', normal, compile, [''])
+test('rn035', normal, compile, [''])
+test('rn036', normal, compile, [''])
+test('rn037', normal, compile, [''])
+	
+# Missing:
+# test('rn038', normal, compile, [''])
+
+test('rn039', normal, compile, [''])
+test('rn040', normal, compile, ['-fwarn-unused-binds -fwarn-unused-matches'])
+test('rn041', normal, compile, [''])
+test('rn042',
+     extra_clean(['Rn042_A.hi', 'Rn042_A.o']),
+     multimod_compile,
+     ['rn042', '-v0'])
+test('rn043',
+     extra_clean(['Rn043_A.hi', 'Rn043_A.o', 'Rn043_B.hi', 'Rn043_B.o']),
+     multimod_compile, ['rn043', '-v0'])
+test('rn044',
+     extra_clean(['Rn044_A.hi', 'Rn044_A.o', 'Rn044_B.hi', 'Rn044_B.o']),
+     multimod_compile, ['rn044', '-v0'])
+test('rn045', normal, compile, [''])
+test('rn046', normal, compile, ['-W'])
+test('rn047', normal, compile, ['-W'])
+test('rn048', normal, compile, ['-W'])
+test('rn049', normal, compile, ['-W'])
+
+test('rn050',
+     extra_clean(['Rn050_A.hi', 'Rn050_A.o']),
+     multimod_compile, ['rn050', '-v0'])
+
+test('rn051', normal, compile, [''])
+
+test('rn052',
+     extra_clean(['Rn052Aux.hi', 'Rn052Aux.o']),
+     multimod_compile, ['rn052', '-v0'])
+
+test('rn053',
+     extra_clean(['Rn053_A.hi', 'Rn053_A.o', 'Rn053_B.hi', 'Rn053_B.o']),
+     multimod_compile, ['rn053', '-v0'])
+
+test('rn054', normal, compile, [''])
+test('rn055', normal, compile, [''])
+test('rn056', normal, compile, [''])
+test('rn057', normal, compile, [''])
+test('rn058', normal, compile, [''])
+test('rn059',
+     extra_clean(['Rn059_A.hi', 'Rn059_A.o', 'Rn059_B.hi', 'Rn059_B.o']),
+     multimod_compile, ['rn059', '-v0'])
+test('rn060', normal, compile, [''])
+test('rn061', normal, compile, [''])
+test('rn062', normal, compile, [''])
+test('rn063', normal, compile, [''])
+test('rn064', normal, compile, [''])
+test('rn065',
+     extra_clean(['Rn065A.hi', 'Rn065A.o']),
+     multimod_compile,
+     ['rn065', '-v0'])
+
+test('rn066',
+     extra_clean(['Rn066_A.hi', 'Rn066_A.o']),
+     multimod_compile, ['rn066', '-v0'])
+
+test('rn067',
+     extra_clean(['Rn067_A.hi', 'Rn067_A.o']),
+     multimod_compile, ['rn067', '-v0'])
+
+test('T1972', normal, compile, [''])
+test('T2205', normal, compile, [''])
+
+test('2334', normal, compile, [''])
+test('T2506', normal, compile, [''])
+
+test('timing001', normal, compile, [''])
+test('timing002', normal, compile, [''])
+test('timing003', normal, compile, [''])

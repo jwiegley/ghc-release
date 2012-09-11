@@ -1,0 +1,3 @@
+#!/bin/sh
+
+exec $executablename -B$datadir -l$datadir ${1+"$@"}

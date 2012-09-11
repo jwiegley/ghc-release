@@ -1,0 +1,6 @@
+
+tcfail182.hs:9:2:
+    Couldn't match expected type `Prelude.Maybe a'
+	   against inferred type `Maybe a1'
+    In the pattern: Foo
+    In the definition of `f': f Foo = 3

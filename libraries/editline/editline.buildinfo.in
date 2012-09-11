@@ -1,0 +1,4 @@
+buildable: @BUILD_PACKAGE_BOOL@
+cc-options: @EDITLINE_CFLAGS@
+ld-options: @EDITLINE_LDFLAGS@
+extra-libraries: @EDITLINE_LIBS@

@@ -1,0 +1,11 @@
+
+TH_runIO.hs:12:8:
+    Exception when trying to run compile-time code:
+      user error (hi)
+      Code: let
+	      fail = fail
+	      $dMonad = GHC.IOBase.$f25
+	    in runIO (fail "hi")
+    In the expression: $(runIO (fail "hi"))
+    In the definition of `foo': foo = $(runIO (fail "hi"))
+
