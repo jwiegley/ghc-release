@@ -5,7 +5,7 @@ utils/haddock_CONFIGURE_OPTS = --flag in-ghc-tree
 utils/haddock_HC_OPTS += -DNEW_GHC_LAYOUT
 utils/haddock_dist_SHELL_WRAPPER = YES
 utils/haddock_dist_INSTALL_SHELL_WRAPPER = YES
-utils/haddock_dist_INSTALL_SHELL_WRAPPER_NAME = haddock-$(ProjectVersion)
+utils/haddock_dist_INSTALL_SHELL_WRAPPER_NAME = haddock-ghc-$(ProjectVersion)
 utils/haddock_dist_PROG = haddock$(exeext)
 
 ifneq "$(BINDIST)" "YES"
@@ -40,20 +40,20 @@ endif
 
 .PHONY: install_utils/haddock_html
 install_utils/haddock_html:
-	$(INSTALL_DIR) "$(DESTDIR)$(docdir)/html"
+	$(call INSTALL_DIR,"$(DESTDIR)$(docdir)/html")
 	"$(CP)" -R utils/haddock/html "$(DESTDIR)$(docdir)/html"
 
 .PHONY: install_utils/haddock_data
 install_utils/haddock_data:
 	$(foreach i,$(sort $(dir $(utils/haddock_dist_DATA_FILES))), \
-	    $(call make-command,$(INSTALL_DIR) "$(DESTDIR)$(ghclibdir)/$i"))
+	    $(call make-command,$(call INSTALL_DIR,"$(DESTDIR)$(ghclibdir)/$i")))
 	$(foreach i,$(utils/haddock_dist_DATA_FILES), \
-	    $(call make-command,$(INSTALL_DATA) $(INSTALL_OPTS) utils/haddock/$i "$(DESTDIR)$(ghclibdir)/$(dir $i)"))
+	    $(call make-command,$(call INSTALL_DATA,$(INSTALL_OPTS),utils/haddock/$i,"$(DESTDIR)$(ghclibdir)/$(dir $i)")))
 
 .PHONY: install_utils/haddock_link
 install_utils/haddock_link:
 	"$(RM)" $(RM_OPTS) "$(DESTDIR)$(bindir)/haddock"
-	$(LN_S) haddock-$(ProjectVersion) "$(DESTDIR)$(bindir)/haddock"
+	$(LN_S) $(utils/haddock_dist_INSTALL_SHELL_WRAPPER_NAME) "$(DESTDIR)$(bindir)/haddock"
 
 BINDIST_EXTRAS += $(addprefix utils/haddock/,$(utils/haddock_dist_DATA_FILES))
 

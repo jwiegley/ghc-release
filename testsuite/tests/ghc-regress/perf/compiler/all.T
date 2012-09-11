@@ -6,7 +6,7 @@ test('T1969',
                              #                 15 (x86/OS X)
                              #                 19 (x86/OS X)
       if_wordsize(64,
-          compiler_stats_num_field('peak_megabytes_allocated', 26,
+          compiler_stats_num_field('peak_megabytes_allocated', 24,
                                                                32)),
                                              # expected value: 28 (amd64/Linux)
                                              # expected value: 32 (amd64/Linux)
@@ -72,20 +72,49 @@ test('T3294',
      compile,
      [''])
 
+test('T4801',
+     [# expected value: 11 (x86/OSX):
+      if_wordsize(32,
+          compiler_stats_num_field('peak_megabytes_allocated', 70, 80)),
+      # expected value: 18 (amd64/Linux):
+      if_wordsize(64,
+          compiler_stats_num_field('peak_megabytes_allocated', 70, 80)),
+      # expected value: 76579788 (x86/OSX):
+      if_wordsize(32,
+          compiler_stats_num_field('bytes allocated', 70000000,
+                                                      80000000)),
+      # expected value: 145038576 (amd64/Linux):
+      if_wordsize(64,
+          compiler_stats_num_field('bytes allocated', 600000000,
+                                                      750000000)),
+      # expected value: 3404504 (x86/OSX):
+      if_wordsize(32,
+          compiler_stats_num_field('max_bytes_used', 3000000,
+                                                     4000000)),
+      # expected value: 7001696 (amd64/Linux, bindist)
+      # expected value: 7189848 (amd64/Linux, intree):
+      if_wordsize(64,
+          compiler_stats_num_field('max_bytes_used', 20000000,
+                                                     30000000)),
+       only_ways(['normal'])
+      ],
+     compile,
+     [''])
+
 test('T3064',
      [# expected value: 15 (x86/OSX):
       if_wordsize(32,
           compiler_stats_num_field('peak_megabytes_allocated', 14, 16)),
       # expected value: 17 (amd64/Linux):
       if_wordsize(64,
-          compiler_stats_num_field('peak_megabytes_allocated', 17, 17)),
+          compiler_stats_num_field('peak_megabytes_allocated', 14, 18)),
       # expected value: 158390428 (x86/OSX):
       if_wordsize(32,
           compiler_stats_num_field('bytes allocated', 150000000,
                                                       170000000)),
       # expected value: 134019408 (amd64/Linux):
       if_wordsize(64,
-          compiler_stats_num_field('bytes allocated', 130000000,
+          compiler_stats_num_field('bytes allocated', 120000000,
                                                       140000000)),
       # expected value: 6705040 (x86/OSX):
       if_wordsize(32,
@@ -94,10 +123,15 @@ test('T3064',
       # expected value: 7001696 (amd64/Linux, bindist)
       # expected value: 7189848 (amd64/Linux, intree):
       if_wordsize(64,
-          compiler_stats_num_field('max_bytes_used', 7000000,
+          compiler_stats_num_field('max_bytes_used', 5000000,
                                                      7300000)),
        only_ways(['normal'])
       ],
      compile,
      [''])
+
+test('T4007',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T4007'])
 

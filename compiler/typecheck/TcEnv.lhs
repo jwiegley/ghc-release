@@ -203,6 +203,7 @@ tcLookupFamInst tycon tys
   = do { env <- getGblEnv
        ; eps <- getEps
        ; let instEnv = (eps_fam_inst_env eps, tcg_fam_inst_env env)
+       ; traceTc "lookupFamInst" ((ppr tycon <+> ppr tys) $$ ppr instEnv)
        ; case lookupFamInstEnv instEnv tycon tys of
 	   []                      -> return Nothing
 	   ((fam_inst, rep_tys):_) 
@@ -606,8 +607,8 @@ as well as explicit user written ones.
 \begin{code}
 data InstInfo a
   = InstInfo {
-      iSpec  :: Instance,		-- Includes the dfun id.  Its forall'd type 
-      iBinds :: InstBindings a		-- variables scope over the stuff in InstBindings!
+      iSpec   :: Instance,        -- Includes the dfun id.  Its forall'd type
+      iBinds  :: InstBindings a   -- variables scope over the stuff in InstBindings!
     }
 
 iDFunId :: InstInfo a -> DFunId
@@ -637,7 +638,13 @@ data InstBindings a
                         -- in TcDeriv
 
 pprInstInfo :: InstInfo a -> SDoc
-pprInstInfo info = vcat [ptext (sLit "InstInfo:") <+> ppr (idType (iDFunId info))]
+pprInstInfo info = hang (ptext (sLit "instance"))
+                      2 (sep [ ifPprDebug (pprForAll tvs)
+                             , pprThetaArrow theta, ppr tau
+                             , ptext (sLit "where")])
+  where
+    (tvs, theta, tau) = tcSplitSigmaTy (idType (iDFunId info))
+
 
 pprInstInfoDetails :: OutputableBndr a => InstInfo a -> SDoc
 pprInstInfoDetails info = pprInstInfo info $$ nest 2 (details (iBinds info))

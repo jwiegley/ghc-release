@@ -37,7 +37,7 @@ import ErrUtils
 import Util
 import FastString
 import ListSetOps
-import Data.List        ( partition, (\\), delete )
+import Data.List        ( partition, (\\), delete, find )
 import qualified Data.Set as Set
 import System.IO
 import Control.Monad
@@ -108,16 +108,14 @@ rnImportDecl this_mod implicit_prelude
 	imp_mod_name = unLoc loc_imp_mod_name
 	doc = ppr imp_mod_name <+> ptext (sLit "is directly imported")
 
-    let isExplicit lie = case unLoc lie of
-                         IEThingAll _ -> False
-                         _ -> True
+	-- Check for a missing import list
+	-- (Opt_WarnMissingImportList also checks for T(..) items
+	--  but that is done in checkDodgyImport below)
     case imp_details of
-        Just (False, lies)
-         | all isExplicit lies ->
-            return ()
-        _ ->
-            unless implicit_prelude $
-            ifDOptM Opt_WarnMissingImportList (addWarn (missingImportListWarn imp_mod_name))
+        Just (False, _)       -> return ()
+        _  | implicit_prelude -> return ()
+           | otherwise        -> ifDOptM Opt_WarnMissingImportList $
+                                 addWarn (missingImportListWarn imp_mod_name)
 
     iface <- loadSrcInterface doc imp_mod_name want_boot mb_pkg
 
@@ -449,7 +447,7 @@ get_local_binders gbl_env (HsGroup {hs_valds  = ValBindsIn _ val_sigs,
 				    hs_fords  = foreign_decls })
   = do	{   -- separate out the family instance declarations
           let (tyinst_decls1, tycl_decls_noinsts) 
-                           = partition (isFamInstDecl . unLoc) tycl_decls
+                           = partition (isFamInstDecl . unLoc) (concat tycl_decls)
               tyinst_decls = tyinst_decls1 ++ instDeclATs inst_decls
 
             -- process all type/class decls except family instances
@@ -588,6 +586,9 @@ filterImports iface decl_spec (Just (want_hiding, import_items)) all_avails
                 | IEThingAll n <- ieRdr, (_, AvailTC _ [_]):_ <- stuff
                 = ifDOptM Opt_WarnDodgyImports (addWarn (dodgyImportWarn n))
                 -- NB. use the RdrName for reporting the warning
+		| IEThingAll {} <- ieRdr
+                = ifDOptM Opt_WarnMissingImportList $
+                  addWarn (missingImportListItem ieRdr)
             checkDodgyImport _
                 = return ()
 
@@ -604,7 +605,7 @@ filterImports iface decl_spec (Just (want_hiding, import_items)) all_avails
     lookup_ie :: Bool -> IE RdrName -> MaybeErr Message [(IE Name,AvailInfo)]
     lookup_ie opt_typeFamilies ie 
       = let bad_ie :: MaybeErr Message a
-            bad_ie = Failed (badImportItemErr iface decl_spec ie)
+            bad_ie = Failed (badImportItemErr iface decl_spec ie all_avails)
 
             lookup_name rdr 
 	      | isQual rdr = Failed (qualImportItemErr rdr)
@@ -1450,13 +1451,50 @@ qualImportItemErr rdr
   = hang (ptext (sLit "Illegal qualified name in import item:"))
        2 (ppr rdr)
 
-badImportItemErr :: ModIface -> ImpDeclSpec -> IE RdrName -> SDoc
-badImportItemErr iface decl_spec ie
+badImportItemErrStd :: ModIface -> ImpDeclSpec -> IE RdrName -> SDoc
+badImportItemErrStd iface decl_spec ie
   = sep [ptext (sLit "Module"), quotes (ppr (is_mod decl_spec)), source_import,
 	 ptext (sLit "does not export"), quotes (ppr ie)]
   where
     source_import | mi_boot iface = ptext (sLit "(hi-boot interface)")
 		  | otherwise     = empty
+
+badImportItemErrDataCon :: OccName -> ModIface -> ImpDeclSpec -> IE RdrName -> SDoc
+badImportItemErrDataCon dataType iface decl_spec ie
+  = vcat [ ptext (sLit "In module")
+             <+> quotes (ppr (is_mod decl_spec))
+             <+> source_import <> colon
+         , nest 2 $ quotes datacon
+             <+> ptext (sLit "is a data constructor of")
+             <+> quotes (ppr dataType)
+         , ptext (sLit "To import it use")
+         , nest 2 $ quotes (ptext (sLit "import")
+             <+> ppr (is_mod decl_spec)
+             <+> parens (ppr dataType <+> parens datacon))
+         , ptext (sLit "or")
+         , nest 2 $ quotes (ptext (sLit "import")
+             <+> ppr (is_mod decl_spec)
+             <+> parens (ppr dataType <+> parens (ptext $ sLit "..")))
+         ]
+  where
+    datacon = ppr . rdrNameOcc $ ieName ie
+    source_import | mi_boot iface = ptext (sLit "(hi-boot interface)")
+                  | otherwise     = empty
+
+badImportItemErr :: ModIface -> ImpDeclSpec -> IE RdrName -> [AvailInfo] -> SDoc
+badImportItemErr iface decl_spec ie avails
+  = case find checkIfDataCon avails of
+      Just con -> badImportItemErrDataCon (availOccName con) iface decl_spec ie
+      Nothing  -> badImportItemErrStd iface decl_spec ie
+  where
+    checkIfDataCon (AvailTC _ ns) =
+      case find (\n -> importedFS == nameOccNameFS n) ns of
+        Just n  -> isDataConName n
+        Nothing -> False
+    checkIfDataCon _ = False
+    availOccName = nameOccName . availName
+    nameOccNameFS = occNameFS . nameOccName
+    importedFS = occNameFS . rdrNameOcc $ ieName ie
 
 illegalImportItemErr :: SDoc
 illegalImportItemErr = ptext (sLit "Illegal import item")
@@ -1539,6 +1577,10 @@ nullModuleExport mod
 missingImportListWarn :: ModuleName -> SDoc
 missingImportListWarn mod
   = ptext (sLit "The module") <+> quotes (ppr mod) <+> ptext (sLit "does not have an explicit import list")
+
+missingImportListItem :: IE RdrName -> SDoc
+missingImportListItem ie
+  = ptext (sLit "The import item") <+> quotes (ppr ie) <+> ptext (sLit "does not have an explicit import list")
 
 moduleWarn :: ModuleName -> WarningTxt -> SDoc
 moduleWarn mod (WarningTxt txt)

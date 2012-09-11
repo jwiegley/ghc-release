@@ -9,7 +9,7 @@
 -- | Arit and eta expansion
 module CoreArity (
 	manifestArity, exprArity, exprBotStrictness_maybe,
-	exprEtaExpandArity, etaExpand
+	exprEtaExpandArity, CheapFun, etaExpand
     ) where
 
 #include "HsVersions.h"
@@ -24,12 +24,10 @@ import VarEnv
 import Id
 import Type
 import TyCon	( isRecursiveTyCon, isClassTyCon )
-import TcType	( isDictLikeTy )
 import Coercion
 import BasicTypes
 import Unique
 import Outputable
-import DynFlags
 import FastString
 \end{code}
 
@@ -63,6 +61,70 @@ And in any case it seems more robust to have exprArity be a bit more intelligent
 But note that 	(\x y z -> f x y z)
 should have arity 3, regardless of f's arity.
 
+\begin{code}
+manifestArity :: CoreExpr -> Arity
+-- ^ manifestArity sees how many leading value lambdas there are
+manifestArity (Lam v e) | isId v    	= 1 + manifestArity e
+			| otherwise 	= manifestArity e
+manifestArity (Note n e) | notSccNote n	= manifestArity e
+manifestArity (Cast e _)            	= manifestArity e
+manifestArity _                     	= 0
+
+---------------
+exprArity :: CoreExpr -> Arity
+-- ^ An approximate, fast, version of 'exprEtaExpandArity'
+exprArity e = go e
+  where
+    go (Var v) 	       	           = idArity v
+    go (Lam x e) | isId x    	   = go e + 1
+    		 | otherwise 	   = go e
+    go (Note n e) | notSccNote n   = go e
+    go (Cast e co)                 = go e `min` length (typeArity (snd (coercionKind co)))
+       	       			     	-- Note [exprArity invariant]
+    go (App e (Type _))            = go e
+    go (App f a) | exprIsTrivial a = (go f - 1) `max` 0
+        -- See Note [exprArity for applications]
+    go _		       	   = 0
+
+
+---------------
+typeArity :: Type -> [OneShot]
+-- How many value arrows are visible in the type?
+-- We look through foralls, and newtypes
+-- See Note [exprArity invariant]
+typeArity ty 
+  | Just (_, ty')  <- splitForAllTy_maybe ty 
+  = typeArity ty'
+
+  | Just (arg,res) <- splitFunTy_maybe ty    
+  = isStateHackType arg : typeArity res
+
+  | Just (tc,tys) <- splitTyConApp_maybe ty 
+  , Just (ty', _) <- instNewTyCon_maybe tc tys
+  , not (isRecursiveTyCon tc)
+  , not (isClassTyCon tc)	-- Do not eta-expand through newtype classes
+    		      		-- See Note [Newtype classes and eta expansion]
+  = typeArity ty'
+  	-- Important to look through non-recursive newtypes, so that, eg 
+  	--	(f x)   where f has arity 2, f :: Int -> IO ()
+  	-- Here we want to get arity 1 for the result!
+
+  | otherwise
+  = []
+
+---------------
+exprBotStrictness_maybe :: CoreExpr -> Maybe (Arity, StrictSig)
+-- A cheap and cheerful function that identifies bottoming functions
+-- and gives them a suitable strictness signatures.  It's used during
+-- float-out
+exprBotStrictness_maybe e
+  = case getBotArity (arityType is_cheap e) of
+	Nothing -> Nothing
+	Just ar -> Just (ar, mkStrictSig (mkTopDmdType (replicate ar topDmd) BotRes))
+  where
+    is_cheap _ _ = False  -- Irrelevant for this purpose
+\end{code}
+
 Note [exprArity invariant]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 exprArity has the following invariant:
@@ -90,57 +152,6 @@ Why is this important?  Because
 An alternative would be to do the eta-expansion in TidyPgm, at least
 for top-level bindings, in which case we would not need the trim_arity
 in exprArity.  That is a less local change, so I'm going to leave it for today!
-
-
-\begin{code}
-manifestArity :: CoreExpr -> Arity
--- ^ manifestArity sees how many leading value lambdas there are
-manifestArity (Lam v e) | isId v    	= 1 + manifestArity e
-			| otherwise 	= manifestArity e
-manifestArity (Note n e) | notSccNote n	= manifestArity e
-manifestArity (Cast e _)            	= manifestArity e
-manifestArity _                     	= 0
-
-exprArity :: CoreExpr -> Arity
--- ^ An approximate, fast, version of 'exprEtaExpandArity'
-exprArity e = go e
-  where
-    go (Var v) 	       	           = idArity v
-    go (Lam x e) | isId x    	   = go e + 1
-    		 | otherwise 	   = go e
-    go (Note n e) | notSccNote n   = go e
-    go (Cast e co)                 = go e `min` length (typeArity (snd (coercionKind co)))
-       	       			     	-- Note [exprArity invariant]
-    go (App e (Type _))            = go e
-    go (App f a) | exprIsTrivial a = (go f - 1) `max` 0
-        -- See Note [exprArity for applications]
-    go _		       	   = 0
-
-
-typeArity :: Type -> [OneShot]
--- How many value arrows are visible in the type?
--- We look through foralls, and newtypes
--- See Note [exprArity invariant]
-typeArity ty 
-  | Just (_, ty')  <- splitForAllTy_maybe ty 
-  = typeArity ty'
-
-  | Just (arg,res) <- splitFunTy_maybe ty    
-  = isStateHackType arg : typeArity res
-
-  | Just (tc,tys) <- splitTyConApp_maybe ty 
-  , Just (ty', _) <- instNewTyCon_maybe tc tys
-  , not (isRecursiveTyCon tc)
-  , not (isClassTyCon tc)	-- Do not eta-expand through newtype classes
-    		      		-- See Note [Newtype classes and eta expansion]
-  = typeArity ty'
-  	-- Important to look through non-recursive newtypes, so that, eg 
-  	--	(f x)   where f has arity 2, f :: Int -> IO ()
-  	-- Here we want to get arity 1 for the result!
-
-  | otherwise
-  = []
-\end{code}
 
 Note [Newtype classes and eta expansion]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -204,20 +215,9 @@ When we come to an application we check that the arg is trivial.
 
 %************************************************************************
 %*									*
-	   Eta expansion
+	   Computing the "arity" of an expression
 %*									*
 %************************************************************************
-
-\begin{code}
-exprBotStrictness_maybe :: CoreExpr -> Maybe (Arity, StrictSig)
--- A cheap and cheerful function that identifies bottoming functions
--- and gives them a suitable strictness signatures.  It's used during
--- float-out
-exprBotStrictness_maybe e
-  = case getBotArity (arityType False e) of
-	Nothing -> Nothing
-	Just ar -> Just (ar, mkStrictSig (mkTopDmdType (replicate ar topDmd) BotRes))
-\end{code}	
 
 Note [Definition of arity]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -376,51 +376,54 @@ Note [ArityType]
 ~~~~~~~~~~~~~~~~
 ArityType is the result of a compositional analysis on expressions,
 from which we can decide the real arity of the expression (extracted
-with function getArity).
+with function exprEtaExpandArity).
 
-Here is what the fields mean. If e has ArityType 
-     (AT as r), where n = length as, 
-then
+Here is what the fields mean. If an arbitrary expression 'f' has 
+ArityType 'at', then
 
- * If r is ABot then (e x1..xn) definitely diverges
-   Partial applications may or may not diverge
+ * If at = ABot n, then (f x1..xn) definitely diverges. Partial
+   applications to fewer than n args may *or may not* diverge.
 
- * If r is ACheap then (e x1..x(n-1)) is cheap,
-   including any nested sub-expressions inside e
-   (say e is (f e1 e2) then e1,e2 are cheap too)
+   We allow ourselves to eta-expand bottoming functions, even
+   if doing so may lose some `seq` sharing, 
+       let x = <expensive> in \y. error (g x y)
+       ==> \y. let x = <expensive> in error (g x y)
 
- * e, (e x1), ... (e x1 ... x(n-1)) are definitely really 
-   functions, or bottom, not casts from a data type
-   So eta expansion is dynamically ok; 
-    see Note [State hack and bottoming functions], 
-    the part about catch#
+ * If at = ATop as, and n=length as, 
+   then expanding 'f' to (\x1..xn. f x1 .. xn) loses no sharing, 
+   assuming the calls of f respect the one-shot-ness of of
+   its definition.  
 
-We regard ABot as stronger than ACheap; ie if ABot holds
-we don't bother about ACheap
+   NB 'f' is an arbitary expression, eg (f = g e1 e2).  This 'f'
+   can have ArityType as ATop, with length as > 0, only if e1 e2 are 
+   themselves.
+
+ * In both cases, f, (f x1), ... (f x1 ... f(n-1)) are definitely
+   really functions, or bottom, but *not* casts from a data type, in
+   at least one case branch.  (If it's a function in one case branch but
+   an unsafe cast from a data type in another, the program is bogus.)
+   So eta expansion is dynamically ok; see Note [State hack and
+   bottoming functions], the part about catch#
+
+Example: 
+      f = \x\y. let v = <expensive> in 
+          \s(one-shot) \t(one-shot). blah
+      'f' has ArityType [ManyShot,ManyShot,OneShot,OneShot]
+      The one-shot-ness means we can, in effect, push that
+      'let' inside the \st.
+
 
 Suppose f = \xy. x+y
-Then  f             :: AT [False,False] ACheap
-      f v           :: AT [False] 	ACheap
-      f <expensive> :: AT [False] 	ATop
-Note the ArityRes flag tells whether the whole expression is cheap.
-Note also that having a non-empty 'as' doesn't mean it has that
-arity; see (f <expensive>) which does not have arity 1!
-
-The key function getArity extracts the arity (which in turn guides
-eta-expansion) from ArityType. 
-  * If the term is cheap or diverges we can certainly eta expand it
-      e.g.   (f x)   where x has arity 2
-  
-  * If its a function whose first arg is one-shot (probably via the
-    state hack) we can eta expand it
-      e.g.   (getChar <expensive>)  
+Then  f             :: AT [False,False] ATop
+      f v           :: AT [False] 	ATop
+      f <expensive> :: AT [] 	        ATop
 
 -------------------- Main arity code ----------------------------
 \begin{code}
 -- See Note [ArityType]
-data ArityType = AT [OneShot] ArityRes
+data ArityType = ATop [OneShot] | ABot Arity
      -- There is always an explicit lambda
-     -- to justify the [OneShot]
+     -- to justify the [OneShot], or the Arity
 
 type OneShot = Bool    -- False <=> Know nothing
                        -- True  <=> Can definitely float inside this lambda
@@ -428,93 +431,129 @@ type OneShot = Bool    -- False <=> Know nothing
 		       -- is marked one-shot, or because it's a state lambda
 		       -- and we have the state hack on
 
-data ArityRes  = ATop | ACheap | ABot
-
 vanillaArityType :: ArityType
-vanillaArityType = AT [] ATop	-- Totally uninformative
+vanillaArityType = ATop []	-- Totally uninformative
 
 -- ^ The Arity returned is the number of value args the [_$_]
 -- expression can be applied to without doing much work
-exprEtaExpandArity :: DynFlags -> CoreExpr -> Arity
+exprEtaExpandArity :: CheapFun -> CoreExpr -> Arity
 -- exprEtaExpandArity is used when eta expanding
 -- 	e  ==>  \xy -> e x y
-exprEtaExpandArity dflags e
-  = case (arityType dicts_cheap e) of
-      AT (a:as) res | want_eta a res -> 1 + length as
-      _                              -> 0
+exprEtaExpandArity cheap_fun e
+  = case (arityType cheap_fun e) of
+      ATop (os:oss) 
+        | os || has_lam e -> 1 + length oss	-- Note [Eta expanding thunks]
+        | otherwise       -> 0
+      ATop []             -> 0
+      ABot n              -> n
   where
-    want_eta one_shot ATop   = one_shot
-    want_eta _        _      = True
-
-    dicts_cheap = dopt Opt_DictsCheap dflags
+    has_lam (Note _ e) = has_lam e
+    has_lam (Lam b e)  = isId b || has_lam e
+    has_lam _          = False
 
 getBotArity :: ArityType -> Maybe Arity
 -- Arity of a divergent function
-getBotArity (AT as ABot) = Just (length as)
-getBotArity _            = Nothing
+getBotArity (ABot n) = Just n
+getBotArity _        = Nothing
+\end{code}
 
+Note [Eta expanding thunks]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When we see
+     f = case y of p -> \x -> blah
+should we eta-expand it? Well, if 'x' is a one-shot state token 
+then 'yes' because 'f' will only be applied once.  But otherwise
+we (conservatively) say no.  My main reason is to avoid expanding
+PAPSs
+	f = g d  ==>  f = \x. g d x
+because that might in turn make g inline (if it has an inline pragma), 
+which we might not want.  After all, INLINE pragmas say "inline only
+when saturate" so we don't want to be too gung-ho about saturating!
+
+\begin{code}
 arityLam :: Id -> ArityType -> ArityType
-arityLam id (AT as r) = AT (isOneShotBndr id : as) r
+arityLam id (ATop as) = ATop (isOneShotBndr id : as)
+arityLam _  (ABot n)  = ABot (n+1)
 
 floatIn :: Bool -> ArityType -> ArityType
 -- We have something like (let x = E in b), 
 -- where b has the given arity type.  
-floatIn c (AT as r) = AT as (extendArityRes r c)
+floatIn _     (ABot n)  = ABot n
+floatIn True  (ATop as) = ATop as
+floatIn False (ATop as) = ATop (takeWhile id as)
+   -- If E is not cheap, keep arity only for one-shots
 
-arityApp :: ArityType -> CoreExpr -> ArityType
+arityApp :: ArityType -> Bool -> ArityType
 -- Processing (fun arg) where at is the ArityType of fun,
-arityApp (AT [] r)     arg = AT [] (extendArityRes r (exprIsCheap arg))
-arityApp (AT (_:as) r) arg = AT as (extendArityRes r (exprIsCheap arg))
-
-extendArityRes :: ArityRes -> Bool -> ArityRes
-extendArityRes ABot   _    = ABot
-extendArityRes ACheap True = ACheap
-extendArityRes _      _    = ATop
+-- Knock off an argument and behave like 'let'
+arityApp (ABot 0)      _     = ABot 0
+arityApp (ABot n)      _     = ABot (n-1)
+arityApp (ATop [])     _     = ATop []
+arityApp (ATop (_:as)) cheap = floatIn cheap (ATop as)
 
 andArityType :: ArityType -> ArityType -> ArityType   -- Used for branches of a 'case'
-andArityType (AT as1 r1) (AT as2 r2) 
-  = AT (go_as as1 as2) (go_r r1 r2)
-  where
-    go_r ABot ABot     = ABot
-    go_r ABot ACheap   = ACheap
-    go_r ACheap ABot   = ACheap
-    go_r ACheap ACheap = ACheap
-    go_r _    _        = ATop
+andArityType (ABot n1) (ABot n2) 
+  = ABot (n1 `min` n2)
+andArityType (ATop as)  (ABot _)  = ATop as
+andArityType (ABot _)   (ATop bs) = ATop bs
+andArityType (ATop as)  (ATop bs) = ATop (as `combine` bs)
+  where	     -- See Note [Combining case branches]
+    combine (a:as) (b:bs) = (a && b) : combine as bs
+    combine []     bs     = take_one_shots bs
+    combine as     []     = take_one_shots as
 
-    go_as (os1:as1) (os2:as2) = (os1 || os2) : go_as as1 as2
-    go_as []        as2       = as2 
-    go_as as1       []        = as1
+    take_one_shots [] = []
+    take_one_shots (one_shot : as) 
+      | one_shot  = True : take_one_shots as
+      | otherwise = [] 
 \end{code}
+
+Note [Combining case branches]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider    
+  go = \x. let z = go e0
+               go2 = \x. case x of
+                           True  -> z
+                           False -> \s(one-shot). e1
+           in go2 x
+We *really* want to eta-expand go and go2.  
+When combining the barnches of the case we have
+     ATop [] `andAT` ATop [True]
+and we want to get ATop [True].  But if the inner
+lambda wasn't one-shot we don't want to do this.
+(We need a proper arity analysis to justify that.)
 
 
 \begin{code}
 ---------------------------
-arityType :: Bool -> CoreExpr -> ArityType
+type CheapFun = CoreExpr -> Maybe Type -> Bool
+     	-- How to decide if an expression is cheap
+	-- If the Maybe is Just, the type is the type
+	-- of the expression; Nothing means "don't know"
+
+arityType :: CheapFun -> CoreExpr -> ArityType
 arityType _ (Var v)
   | Just strict_sig <- idStrictness_maybe v
   , (ds, res) <- splitStrictSig strict_sig
-  = mk_arity (length ds) res
+  , let arity = length ds
+  = if isBotRes res then ABot arity
+                    else ATop (take arity one_shots)
   | otherwise
-  = mk_arity (idArity v) TopRes
-
+  = ATop (take (idArity v) one_shots)
   where
-    mk_arity id_arity res 
-      | isBotRes res = AT (take id_arity one_shots) ABot
-      | id_arity>0   = AT (take id_arity one_shots) ACheap
-      | otherwise    = AT []                        ATop
-
+    one_shots :: [Bool]	    -- One-shot-ness derived from the type
     one_shots = typeArity (idType v)
 
 	-- Lambdas; increase arity
-arityType dicts_cheap (Lam x e)
-  | isId x    = arityLam x (arityType dicts_cheap e)
-  | otherwise = arityType dicts_cheap e
+arityType cheap_fn (Lam x e)
+  | isId x    = arityLam x (arityType cheap_fn e)
+  | otherwise = arityType cheap_fn e
 
 	-- Applications; decrease arity
-arityType dicts_cheap (App fun (Type _))
-   = arityType dicts_cheap fun
-arityType dicts_cheap (App fun arg )
-   = arityApp (arityType dicts_cheap fun) arg 
+arityType cheap_fn (App fun (Type _))
+   = arityType cheap_fn fun
+arityType cheap_fn (App fun arg )
+   = arityApp (arityType cheap_fn fun) (cheap_fn arg Nothing) 
 
 	-- Case/Let; keep arity if either the expression is cheap
 	-- or it's a 1-shot lambda
@@ -523,41 +562,21 @@ arityType dicts_cheap (App fun arg )
 	--  ===>
 	--	f x y = case x of { (a,b) -> e }
 	-- The difference is observable using 'seq'
-arityType dicts_cheap (Case scrut _ _ alts)
-  = floatIn (exprIsCheap scrut)
-	      (foldr1 andArityType [arityType dicts_cheap rhs | (_,_,rhs) <- alts])
+arityType cheap_fn (Case scrut bndr _ alts)
+  = floatIn (cheap_fn scrut (Just (idType bndr)))
+	    (foldr1 andArityType [arityType cheap_fn rhs | (_,_,rhs) <- alts])
 
-arityType dicts_cheap (Let b e) 
-  = floatIn (cheap_bind b) (arityType dicts_cheap e)
+arityType cheap_fn (Let b e) 
+  = floatIn (cheap_bind b) (arityType cheap_fn e)
   where
     cheap_bind (NonRec b e) = is_cheap (b,e)
     cheap_bind (Rec prs)    = all is_cheap prs
-    is_cheap (b,e) = (dicts_cheap && isDictLikeTy (idType b))
-		   || exprIsCheap e
-	-- If the experimental -fdicts-cheap flag is on, we eta-expand through
-	-- dictionary bindings.  This improves arities. Thereby, it also
-	-- means that full laziness is less prone to floating out the
-  	-- application of a function to its dictionary arguments, which
-	-- can thereby lose opportunities for fusion.  Example:
-	-- 	foo :: Ord a => a -> ...
-	--	foo = /\a \(d:Ord a). let d' = ...d... in \(x:a). ....
-	--		-- So foo has arity 1
-	--
-	--	f = \x. foo dInt $ bar x
-	--
-	-- The (foo DInt) is floated out, and makes ineffective a RULE 
-	--	foo (bar x) = ...
-  	--
-	-- One could go further and make exprIsCheap reply True to any
-	-- dictionary-typed expression, but that's more work.
-	-- 
-	-- See Note [Dictionary-like types] in TcType.lhs for why we use
-	-- isDictLikeTy here rather than isDictTy
+    is_cheap (b,e) = cheap_fn e (Just (idType b))
 
-arityType dicts_cheap (Note n e) 
-  | notSccNote n                 = arityType dicts_cheap e
-arityType dicts_cheap (Cast e _) = arityType dicts_cheap e
-arityType _           _          = vanillaArityType
+arityType cheap_fn (Note n e) 
+  | notSccNote n              = arityType cheap_fn e
+arityType cheap_fn (Cast e _) = arityType cheap_fn e
+arityType _           _       = vanillaArityType
 \end{code}
   
   
@@ -567,10 +586,41 @@ arityType _           _          = vanillaArityType
 %*									*
 %************************************************************************
 
-IMPORTANT NOTE: The eta expander is careful not to introduce "crap".
-In particular, given a CoreExpr satisfying the 'CpeRhs' invariant (in
-CorePrep), it returns a CoreExpr satisfying the same invariant. See
-Note [Eta expansion and the CorePrep invariants] in CorePrep.
+We go for:
+   f = \x1..xn -> N  ==>   f = \x1..xn y1..ym -> N y1..ym
+				 (n >= 0)
+
+where (in both cases) 
+
+	* The xi can include type variables
+
+	* The yi are all value variables
+
+	* N is a NORMAL FORM (i.e. no redexes anywhere)
+	  wanting a suitable number of extra args.
+
+The biggest reason for doing this is for cases like
+
+	f = \x -> case x of
+		    True  -> \y -> e1
+		    False -> \y -> e2
+
+Here we want to get the lambdas together.  A good exmaple is the nofib
+program fibheaps, which gets 25% more allocation if you don't do this
+eta-expansion.
+
+We may have to sandwich some coerces between the lambdas
+to make the types work.   exprEtaExpandArity looks through coerces
+when computing arity; and etaExpand adds the coerces as necessary when
+actually computing the expansion.
+
+
+Note [No crap in eta-expanded code]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The eta expander is careful not to introduce "crap".  In particular,
+given a CoreExpr satisfying the 'CpeRhs' invariant (in CorePrep), it
+returns a CoreExpr satisfying the same invariant. See Note [Eta
+expansion and the CorePrep invariants] in CorePrep.
 
 This means the eta-expander has to do a bit of on-the-fly
 simplification but it's not too hard.  The alernative, of relying on 
@@ -614,7 +664,7 @@ etaExpand n orig_expr
       -- Note [Eta expansion and SCCs]
     go 0 expr = expr
     go n (Lam v body) | isTyCoVar v = Lam v (go n     body)
-       	              | otherwise = Lam v (go (n-1) body)
+       	              | otherwise   = Lam v (go (n-1) body)
     go n (Cast expr co) = Cast (go n expr) co
     go n expr           = -- pprTrace "ee" (vcat [ppr orig_expr, ppr expr, ppr etas]) $
        	 		  etaInfoAbs etas (etaInfoApp subst' expr etas)

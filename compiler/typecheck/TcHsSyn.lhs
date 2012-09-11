@@ -1039,7 +1039,7 @@ zonkEvTerm env (EvCast v co)      = ASSERT( isId v)
                                     do { co' <- zonkTcTypeToType env co
                                        ; return (EvCast (zonkIdOcc env v) co') }
 zonkEvTerm env (EvSuperClass d n) = return (EvSuperClass (zonkIdOcc env d) n)
-zonkEvTerm env (EvDFunApp df tys tms) 
+zonkEvTerm env (EvDFunApp df tys tms)
   = do { tys' <- zonkTcTypeToTypes env tys
        ; let tms' = map (zonkEvVarOcc env) tms
        ; return (EvDFunApp (zonkIdOcc env df) tys' tms') }
@@ -1074,7 +1074,7 @@ zonkEvBind env (EvBind var term)
 
 %************************************************************************
 %*									*
-\subsection[BackSubst-Foreign]{Foreign exports}
+                         Zonking types
 %*									*
 %************************************************************************
 
@@ -1091,7 +1091,7 @@ zonkTypeCollecting unbound_tv_set
   = zonkType (mkZonkTcTyVar zonk_unbound_tyvar)
   where
     zonk_unbound_tyvar tv 
-	= do { tv' <- zonkQuantifiedTyVar tv
+        = do { tv' <- zonkQuantifiedTyVar tv
 	     ; tv_set <- readMutVar unbound_tv_set
 	     ; writeMutVar unbound_tv_set (extendVarSet tv_set tv')
 	     ; return (mkTyVarTy tv') }

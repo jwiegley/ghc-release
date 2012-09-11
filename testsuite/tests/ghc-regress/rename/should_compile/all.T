@@ -162,3 +162,7 @@ test('T4240',
      run_command,
      ['$MAKE -s --no-print-directory T4240'])
 
+test('T4489', normal, compile, [''])
+test('T4478', if_compiler_lt('ghc', '7.1', expect_fail), compile, [''])
+test('T4534', normal, compile, [''])
+

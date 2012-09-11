@@ -222,12 +222,15 @@ test('tc207', normal, compile, [''])
 test('tc208', normal, compile, [''])
 test('tc209', normal, compile, [''])
 test('tc210', normal, compile, [''])
-test('tc211', if_compiler_lt('ghc', '6.11', expect_fail), compile_fail, [''])
+test('tc211', normal, compile_fail, [''])
 test('tc212', normal, compile, [''])
 test('tc213', normal, compile, [''])
-test('tc214', if_compiler_lt('ghc', '6.11', expect_fail), compile, [''])
+test('tc214', normal, compile, [''])
 test('tc215', normal, compile, [''])
-test('tc216', normal, compile_fail, [''])
+
+# This one is very delicate, but I don't think the result really matters
+test('tc216', normal, compile, [''])
+
 test('tc217', reqlib('mtl'), compile, [''])
 test('tc218', normal, compile, [''])
 test('tc219', normal, compile, [''])
@@ -258,10 +261,9 @@ test('tc240', normal, compile, [''])
 test('tc241', normal, compile, [''])
 test('tc242', normal, compile, [''])
 test('tc243', normal, compile, [''])
-test('tc244', if_compiler_lt('ghc', '6.11', expect_fail), compile, [''])
+test('tc244', normal, compile, [''])
 test('tc245',
-     [extra_clean(['Tc245_A.hi', 'Tc245_A.o', 'tc245.hi', 'tc245.o']),
-      if_compiler_lt('ghc', '6.11', expect_fail)],
+     extra_clean(['Tc245_A.hi', 'Tc245_A.o', 'tc245.hi', 'tc245.o']),
      run_command,
      ['$MAKE -s --no-print-directory tc245'])
 test('tc246', normal, compile, [''])
@@ -331,4 +333,12 @@ test('T4404', expect_broken(4404), compile, ['-Wall'])
 test('HasKey', normal, compile, [''])
 test('T4418', normal, compile, [''])
 test('T4444', normal, compile, [''])
-     
+test('T4498', normal, compile, [''])
+test('T4524', normal, compile, [''])
+test('T4917', normal, compile, [''])
+
+test('T4912', extra_clean(['T4912a.hi', 'T4912a.o']), 
+     multimod_compile, ['T4912', '-v0'])
+
+test('T4952', normal, compile, [''])
+test('T4969', normal, compile, [''])

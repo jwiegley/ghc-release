@@ -1,5 +1,6 @@
-{-# OPTIONS_GHC -XNoImplicitPrelude -XRecordWildCards #-}
 {-# OPTIONS_GHC -fno-warn-unused-matches #-}
+{-# LANGUAGE NoImplicitPrelude, RecordWildCards #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.IO.Handle
@@ -81,14 +82,11 @@ hClose h@(FileHandle _ m)     = do
   mb_exc <- hClose' h m
   hClose_maybethrow mb_exc h
 hClose h@(DuplexHandle _ r w) = do
-  mb_exc1 <- hClose' h w
-  mb_exc2 <- hClose' h r
-  case mb_exc1 of
-    Nothing -> return ()
-    Just e  -> hClose_maybethrow mb_exc2 h
+  excs <- mapM (hClose' h) [r,w]
+  hClose_maybethrow (listToMaybe (catMaybes excs)) h
 
 hClose_maybethrow :: Maybe SomeException -> Handle -> IO ()
-hClose_maybethrow Nothing  h  = return ()
+hClose_maybethrow Nothing  h = return ()
 hClose_maybethrow (Just e) h = hClose_rethrow e h
 
 hClose_rethrow :: SomeException -> Handle -> IO ()
@@ -205,32 +203,12 @@ hSetBuffering handle mode =
     _ -> do
          if mode == haBufferMode then return handle_ else do
 
-         {- Note:
-            - we flush the old buffer regardless of whether
-              the new buffer could fit the contents of the old buffer 
-              or not.
-            - allow a handle's buffering to change even if IO has
-              occurred (ANSI C spec. does not allow this, nor did
-              the previous implementation of IO.hSetBuffering).
-            - a non-standard extension is to allow the buffering
-              of semi-closed handles to change [sof 6/98]
-          -}
-          flushCharBuffer handle_
+         -- See [note Buffer Sizing] in GHC.IO.Handle.Types
 
-          let state = initBufferState haType
-              reading = not (isWritableHandleType haType)
-
-          new_buf <-
-            case mode of
-                --  See [note Buffer Sizing], GHC.IO.Handle.Types
-              NoBuffering | reading   -> newCharBuffer dEFAULT_CHAR_BUFFER_SIZE state
-                          | otherwise -> newCharBuffer 1 state
-              LineBuffering          -> newCharBuffer dEFAULT_CHAR_BUFFER_SIZE state
-              BlockBuffering Nothing -> newCharBuffer dEFAULT_CHAR_BUFFER_SIZE state
+          -- check for errors:
+          case mode of
               BlockBuffering (Just n) | n <= 0    -> ioe_bufsiz n
-                                      | otherwise -> newCharBuffer n state
-
-          writeIORef haCharBuffer new_buf
+              _ -> return ()
 
           -- for input terminals we need to put the terminal into
           -- cooked or raw mode depending on the type of buffering.
@@ -436,14 +414,17 @@ hTell handle =
 
       posn <- IODevice.tell haDevice
 
-      cbuf <- readIORef haCharBuffer
+      -- we can't tell the real byte offset if there are buffered
+      -- Chars, so must flush first:
+      flushCharBuffer handle_
+
       bbuf <- readIORef haByteBuffer
 
-      let real_posn 
-           | isWriteBuffer cbuf = posn + fromIntegral (bufR cbuf)
-           | otherwise = posn - fromIntegral (bufR cbuf - bufL cbuf)
-                              - fromIntegral (bufR bbuf - bufL bbuf)
+      let real_posn
+           | isWriteBuffer bbuf = posn + fromIntegral (bufferElems bbuf)
+           | otherwise          = posn - fromIntegral (bufferElems bbuf)
 
+      cbuf <- readIORef haCharBuffer
       debugIO ("\nhGetPosn: (posn, real_posn) = " ++ show (posn, real_posn))
       debugIO ("   cbuf: " ++ summaryBuffer cbuf ++
             "   bbuf: " ++ summaryBuffer bbuf)

@@ -168,10 +168,9 @@ tcClassDecl2 (L loc (ClassDecl {tcdLName = class_name, tcdSigs = sigs,
 	-- default methods.  Better to make separate AbsBinds for each
 	; let
 	      (tyvars, _, _, op_items) = classBigSig clas
-	      rigid_info  = ClsSkol clas
-	      prag_fn	  = mkPragFun sigs default_binds
+              prag_fn     = mkPragFun sigs default_binds
 	      sig_fn	  = mkSigFun sigs
-	      clas_tyvars = tcSkolSigTyVars rigid_info tyvars
+              clas_tyvars = tcSuperSkolTyVars tyvars
 	      pred  	  = mkClassPred clas (mkTyVarTys clas_tyvars)
 	; this_dict <- newEvVar pred
 
@@ -229,45 +228,35 @@ tcDefMeth clas tyvars this_dict binds_in sig_fn prag_fn (sel_id, dm_info)
           tcInstanceMethodBody (ClsSkol clas)
                                tyvars 
                                [this_dict]
-                               Nothing
                                dm_id_w_inline local_dm_id
                                dm_sig_fn IsDefaultMethod meth_bind }
 
 ---------------
 tcInstanceMethodBody :: SkolemInfo -> [TcTyVar] -> [EvVar]
-		     -> Maybe EvBind
                      -> Id -> Id
           	     -> SigFun -> TcSpecPrags -> LHsBind Name 
           	     -> TcM (LHsBind Id)
 tcInstanceMethodBody skol_info tyvars dfun_ev_vars
-		     this_dict meth_id local_meth_id
+                     meth_id local_meth_id
 		     meth_sig_fn specs 
                      (L loc bind)
   = do	{       -- Typecheck the binding, first extending the envt
 		-- so that when tcInstSig looks up the local_meth_id to find
 		-- its signature, we'll find it in the environment
-	  let full_given = case this_dict of
-                             Nothing -> dfun_ev_vars
-			     Just (EvBind dict _) -> dict : dfun_ev_vars
-              lm_bind = L loc (bind { fun_id = L loc (idName local_meth_id) })
-			     -- Substitue the local_meth_name for the binder
+          let lm_bind = L loc (bind { fun_id = L loc (idName local_meth_id) })
+                             -- Substitute the local_meth_name for the binder
 			     -- NB: the binding is always a FunBind
 
 	; (ev_binds, (tc_bind, _)) 
-               <- checkConstraints skol_info tyvars full_given $
+               <- checkConstraints skol_info tyvars dfun_ev_vars $
 		  tcExtendIdEnv [local_meth_id] $
 	          tcPolyBinds TopLevel meth_sig_fn no_prag_fn 
 		  	     NonRecursive NonRecursive
 		  	     [lm_bind]
 
-        -- Add the binding for this_dict, if we have one
-        ; ev_binds' <- case this_dict of
-                         Nothing                -> return ev_binds
-                         Just (EvBind self rhs) -> extendTcEvBinds ev_binds self rhs
-
-	; let full_bind = AbsBinds { abs_tvs = tyvars, abs_ev_vars = dfun_ev_vars
+        ; let full_bind = AbsBinds { abs_tvs = tyvars, abs_ev_vars = dfun_ev_vars
                                    , abs_exports = [(tyvars, meth_id, local_meth_id, specs)]
-				   , abs_ev_binds = ev_binds'
+                                   , abs_ev_binds = ev_binds
                                    , abs_binds = tc_bind }
 
         ; return (L loc full_bind) } 
@@ -418,9 +407,8 @@ getGenericInstances class_decls
 	  else do 
 
 	-- Otherwise print it out
-	{ dflags <- getDOpts
-	; liftIO (dumpIfSet_dyn dflags Opt_D_dump_deriv "Generic instances"
-	         (vcat (map pprInstInfoDetails gen_inst_info)))	
+        { dumpDerivingInfo $ hang (ptext (sLit "Generic instances"))
+                                2 (vcat (map pprInstInfoDetails gen_inst_info))
 	; return gen_inst_info }}
 
 get_generics :: TyClDecl Name -> TcM [InstInfo Name]
@@ -538,7 +526,7 @@ mkGenericInstance clas (hs_ty, binds) = do
     let
 	inst_theta = [mkClassPred clas [mkTyVarTy tv] | tv <- tyvars]
 	dfun_id    = mkDictFunId dfun_name tyvars inst_theta clas [inst_ty]
-	ispec	   = mkLocalInstance dfun_id overlap_flag
+        ispec      = mkLocalInstance dfun_id overlap_flag
 
     return (InstInfo { iSpec = ispec, iBinds = VanillaInst binds [] False })
 \end{code}

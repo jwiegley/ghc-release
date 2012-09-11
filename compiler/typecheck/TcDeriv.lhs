@@ -317,15 +317,16 @@ tcDeriving tycl_decls inst_decls deriv_decls
 	; gen_binds <- mkGenericBinds is_boot tycl_decls
 	; (inst_info, rn_binds, rn_dus) <- renameDeriv is_boot gen_binds (insts1 ++ insts2)
 
-	; dflags <- getDOpts
-	; liftIO (dumpIfSet_dyn dflags Opt_D_dump_deriv "Derived instances"
-	         (ddump_deriving inst_info rn_binds))
+        ; when (not (null inst_info)) $
+          dumpDerivingInfo (ddump_deriving inst_info rn_binds)
 
 	; return (inst_info, rn_binds, rn_dus) }
   where
     ddump_deriving :: [InstInfo Name] -> HsValBinds Name -> SDoc
     ddump_deriving inst_infos extra_binds
-      = vcat (map pprInstInfoDetails inst_infos) $$ ppr extra_binds
+      = hang (ptext (sLit "Derived instances"))
+           2 (vcat (map (\i -> pprInstInfoDetails i $$ text "") inst_infos)
+              $$ ppr extra_binds)
 
 renameDeriv :: Bool -> LHsBinds RdrName
 	    -> [(InstInfo RdrName, DerivAuxBinds)]
@@ -373,14 +374,14 @@ renameDeriv is_boot gen_binds insts
                  , mkFVs (map dataConName (tyConDataCons tc)))
 	  -- See Note [Newtype deriving and unused constructors]
 
-    rn_inst_info (InstInfo { iSpec = inst, iBinds = VanillaInst binds sigs standalone_deriv })
+    rn_inst_info inst_info@(InstInfo { iSpec = inst, iBinds = VanillaInst binds sigs standalone_deriv })
 	= 	-- Bring the right type variables into 
 		-- scope (yuk), and rename the method binds
 	   ASSERT( null sigs )
 	   bindLocalNames (map Var.varName tyvars) $
  	   do { (rn_binds, fvs) <- rnMethodBinds clas_nm (\_ -> []) [] binds
 	      ; let binds' = VanillaInst rn_binds [] standalone_deriv
-	      ; return (InstInfo { iSpec = inst, iBinds = binds' }, fvs) }
+              ; return (inst_info { iBinds = binds' }, fvs) }
 	where
 	  (tyvars,_, clas,_) = instanceHead inst
 	  clas_nm            = className clas
@@ -467,12 +468,13 @@ deriveStandalone (L loc (DerivDecl deriv_ty))
   = setSrcSpan loc                   $
     addErrCtxt (standaloneCtxt deriv_ty)  $
     do { traceTc "Standalone deriving decl for" (ppr deriv_ty)
-       ; (tvs, theta, tau) <- tcHsInstHead deriv_ty
+       ; (tvs, theta, cls, inst_tys) <- tcHsInstHead deriv_ty
        ; traceTc "Standalone deriving;" $ vcat
               [ text "tvs:" <+> ppr tvs
               , text "theta:" <+> ppr theta
-              , text "tau:" <+> ppr tau ]
-       ; (cls, inst_tys) <- checkValidInstance deriv_ty tvs theta tau
+              , text "cls:" <+> ppr cls
+              , text "tys:" <+> ppr inst_tys ]
+       ; checkValidInstance deriv_ty tvs theta cls inst_tys
 		-- C.f. TcInstDcls.tcLocalInstDecl1
 
        ; let cls_tys = take (length inst_tys - 1) inst_tys
@@ -735,7 +737,7 @@ inferConstraints _ cls inst_tys rep_tc rep_tc_args
 
     get_constrained_tys :: [Type] -> [Type]
     get_constrained_tys tys 
-    	| is_functor_like = concatMap (deepSubtypesContaining last_tv) tys
+        | is_functor_like = concatMap (deepSubtypesContaining last_tv) tys
     	| otherwise	  = tys
 
     rep_tc_tvs = tyConTyVars rep_tc
@@ -885,7 +887,7 @@ cond_isEnumeration (_, rep_tc)
   where
     why = sep [ quotes (pprSourceTyCon rep_tc) <+> 
 	          ptext (sLit "is not an enumeration type")
-              , nest 2 $ ptext (sLit "(an enumeration consists of one or more nullary constructors)") ]
+              , ptext (sLit "(an enumeration consists of one or more nullary, non-GADT constructors)") ]
 		  -- See Note [Enumeration types] in TyCon
 
 cond_isProduct :: Condition
@@ -925,10 +927,7 @@ cond_functorOK :: Bool -> Condition
 --            (c) don't use argument in the wrong place, e.g. data T a = T (X a a)
 --            (d) optionally: don't use function types
 --            (e) no "stupid context" on data type
-cond_functorOK allowFunctions (dflags, rep_tc) 
-  | not (xopt Opt_DeriveFunctor dflags)
-  = Just (ptext (sLit "You need -XDeriveFunctor to derive an instance for this class"))
-
+cond_functorOK allowFunctions (_, rep_tc)
   | null tc_tvs
   = Just (ptext (sLit "Data type") <+> quotes (ppr rep_tc) 
           <+> ptext (sLit "has no parameters"))
@@ -1392,26 +1391,26 @@ the renamer.  What a great hack!
 genInst :: Bool 	-- True <=> standalone deriving
 	-> OverlapFlag
         -> DerivSpec -> TcM (InstInfo RdrName, DerivAuxBinds)
-genInst standalone_deriv oflag spec
-  | ds_newtype spec
-  = return (InstInfo { iSpec  = mkInstance oflag (ds_theta spec) spec
-		     , iBinds = NewTypeDerived co rep_tycon }, [])
+genInst standalone_deriv oflag
+        spec@(DS { ds_tc = rep_tycon, ds_tc_args = rep_tc_args
+                 , ds_theta = theta, ds_newtype = is_newtype
+                 , ds_name = name, ds_cls = clas })
+  | is_newtype
+  = return (InstInfo { iSpec   = inst_spec
+                     , iBinds  = NewTypeDerived co rep_tycon }, [])
 
   | otherwise
-  = do	{ let loc  = getSrcSpan (ds_name spec)
-	      inst = mkInstance oflag (ds_theta spec) spec
-   	      clas = ds_cls spec
+  = do  { fix_env <- getFixityEnv
+        ; let loc   = getSrcSpan name
+              (meth_binds, aux_binds) = genDerivBinds loc fix_env clas rep_tycon
+                   -- In case of a family instance, we need to use the representation
+                   -- tycon (after all, it has the data constructors)
 
-          -- In case of a family instance, we need to use the representation
-          -- tycon (after all, it has the data constructors)
-	; fix_env <- getFixityEnv
-	; let (meth_binds, aux_binds) = genDerivBinds loc fix_env clas rep_tycon
-	      binds = VanillaInst meth_binds [] standalone_deriv
-	; return (InstInfo { iSpec = inst, iBinds = binds }, aux_binds)
-        }
+        ; return (InstInfo { iSpec   = inst_spec
+                           , iBinds  = VanillaInst meth_binds [] standalone_deriv }
+                 , aux_binds) }
   where
-    rep_tycon   = ds_tc spec
-    rep_tc_args = ds_tc_args spec
+    inst_spec = mkInstance oflag theta spec
     co1 = case tyConFamilyCoercion_maybe rep_tycon of
 	      Just co_con -> ACo (mkTyConApp co_con rep_tc_args)
     	      Nothing     -> id_co

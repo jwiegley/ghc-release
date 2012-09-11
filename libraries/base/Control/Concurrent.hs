@@ -450,6 +450,11 @@ runInUnboundThread action = do
 
 -- | Block the current thread until data is available to read on the
 -- given file descriptor (GHC only).
+--
+-- This will throw an 'IOError' if the file descriptor was closed
+-- while this thread was blocked.  To safely close a file descriptor
+-- that has been used with 'threadWaitRead', use
+-- 'GHC.Conc.closeFdWith'.
 threadWaitRead :: Fd -> IO ()
 threadWaitRead fd
 #ifdef mingw32_HOST_OS
@@ -470,6 +475,11 @@ threadWaitRead fd
 
 -- | Block the current thread until data can be written to the
 -- given file descriptor (GHC only).
+--
+-- This will throw an 'IOError' if the file descriptor was closed
+-- while this thread was blocked.  To safely close a file descriptor
+-- that has been used with 'threadWaitWrite', use
+-- 'GHC.Conc.closeFdWith'.
 threadWaitWrite :: Fd -> IO ()
 threadWaitWrite fd
 #ifdef mingw32_HOST_OS

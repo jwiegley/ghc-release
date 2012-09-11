@@ -25,7 +25,8 @@ module CoreUtils (
 
 	-- * Properties of expressions
 	exprType, coreAltType, coreAltsType,
-	exprIsDupable, exprIsTrivial, exprIsCheap, exprIsExpandable,
+	exprIsDupable, exprIsTrivial, 
+        exprIsCheap, exprIsExpandable, exprIsCheap', CheapAppFun,
 	exprIsHNF, exprOkForSpeculation, exprIsBig, exprIsConLike,
 	rhsIsStatic, isCheapApp, isExpandableApp,
 
@@ -516,8 +517,8 @@ exprIsCheap = exprIsCheap' isCheapApp
 exprIsExpandable :: CoreExpr -> Bool
 exprIsExpandable = exprIsCheap' isExpandableApp	-- See Note [CONLIKE pragma] in BasicTypes
 
-
-exprIsCheap' :: (Id -> Int -> Bool) -> CoreExpr -> Bool
+type CheapAppFun = Id -> Int -> Bool
+exprIsCheap' :: CheapAppFun -> CoreExpr -> Bool
 exprIsCheap' _          (Lit _)   = True
 exprIsCheap' _          (Type _)  = True
 exprIsCheap' _          (Var _)   = True
@@ -545,6 +546,7 @@ exprIsCheap' good_app other_expr 	-- Applications and variables
   = go other_expr []
   where
 	-- Accumulate value arguments, then decide
+    go (Cast e _) val_args                 = go e val_args
     go (App f a) val_args | isRuntimeArg a = go f (a:val_args)
 			  | otherwise      = go f val_args
 
@@ -585,12 +587,12 @@ exprIsCheap' good_app other_expr 	-- Applications and variables
   		-- BUT: Take care with (sel d x)!  The (sel d) might be cheap, but
   		--	there's no guarantee that (sel d x) will be too.  Hence (n_val_args == 1)
 
-isCheapApp :: Id -> Int -> Bool
+isCheapApp :: CheapAppFun
 isCheapApp fn n_val_args
   = isDataConWorkId fn 
   || n_val_args < idArity fn
 
-isExpandableApp :: Id -> Int -> Bool
+isExpandableApp :: CheapAppFun
 isExpandableApp fn n_val_args
   =  isConLikeId fn
   || n_val_args < idArity fn
@@ -695,7 +697,7 @@ exprOkForSpeculation other_expr
 				-- A bit conservative: we don't really need
 				-- to care about lazy arguments, but this is easy
 
-    spec_ok (DFunId new_type) _ = not new_type 
+    spec_ok (DFunId _ new_type) _ = not new_type
          -- DFuns terminate, unless the dict is implemented with a newtype
 	 -- in which case they may not
 

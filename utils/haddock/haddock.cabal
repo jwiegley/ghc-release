@@ -1,6 +1,6 @@
 name:                 haddock
-version:              2.8.0
-cabal-version:        >= 1.6
+version:              2.9.2
+cabal-version:        >= 1.10
 license:              BSD3
 build-type:           Simple
 license-file:         LICENSE
@@ -73,20 +73,20 @@ flag test
   manual: True
 
 executable haddock
+  default-language:     Haskell2010
   build-depends:
-    base >= 4.0.0.0 && < 4.4.0.0,
+    base == 4.3.*,
     filepath,
     directory,
     pretty,
     containers,
     array,
     xhtml >= 3000.2 && < 3000.3,
-    Cabal >= 1.5,
-    ghc >= 6.12 && < 7.1
+    Cabal >= 1.10,
+    ghc >= 7.0 && < 7.2
 
   if flag(in-ghc-tree)
     cpp-options: -DIN_GHC_TREE
-    extensions: ForeignFunctionInterface
   else
     build-depends: ghc-paths
 
@@ -96,7 +96,7 @@ executable haddock
 
   main-is:              Main.hs
   hs-source-dirs:       src
-  extensions:           CPP, PatternGuards, DeriveDataTypeable,
+  default-extensions:   CPP, DeriveDataTypeable,
                         ScopedTypeVariables, MagicHash
   ghc-options:          -funbox-strict-fields -O2 -Wall -fwarn-tabs
 
@@ -133,20 +133,20 @@ executable haddock
     Haddock.Convert
    
 library
+  default-language:     Haskell2010
   build-depends:
-    base >= 4.0.0.0 && < 4.4.0.0,
+    base == 4.3.*,
     filepath,
     directory,
     pretty,
     containers,
     array,
     xhtml >= 3000.2 && < 3000.3,
-    Cabal >= 1.5,
-    ghc >= 6.12 && < 7.1
+    Cabal >= 1.10,
+    ghc >= 7.0 && < 7.2
 
   if flag(in-ghc-tree)
     cpp-options: -DIN_GHC_TREE
-    extensions: ForeignFunctionInterface
   else
     build-depends: ghc-paths
 
@@ -155,7 +155,7 @@ library
     build-depends: QuickCheck >= 2.1 && < 3
 
   hs-source-dirs:       src
-  extensions:           CPP, PatternGuards, DeriveDataTypeable,
+  default-extensions:   CPP, DeriveDataTypeable,
                         ScopedTypeVariables, MagicHash
   ghc-options:          -funbox-strict-fields -O2 -Wall -fwarn-tabs
 

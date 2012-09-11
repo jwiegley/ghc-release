@@ -26,10 +26,9 @@ module Documentation.Haddock (
   DocForDecl,
   FnArgsDoc,
 
-  -- * Hyperlinking
+  -- * Cross-referencing
   LinkEnv,
   DocName(..),
-  docNameOcc,
 
   -- * Instances
   DocInstance,
@@ -43,7 +42,6 @@ module Documentation.Haddock (
   markup,
 
   -- * Interface files
-  -- | (.haddock files)
   InterfaceFile(..),
   readInterfaceFile,
   nameCacheFromGhc,

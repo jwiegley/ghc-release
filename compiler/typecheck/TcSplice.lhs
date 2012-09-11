@@ -343,16 +343,29 @@ tcBracket brack res_ty
        ; lie_var <- getConstraintVar
        ; let brack_stage = Brack cur_stage pending_splices lie_var
 
-       ; (meta_ty, lie) <- setStage brack_stage $
-                           captureConstraints $
-                           tc_bracket cur_stage brack
+          -- We want to check that there aren't any constraints that
+          -- can't be satisfied (e.g. Show Foo, where Foo has no Show
+          -- instance), but we aren't otherwise interested in the
+          -- results. Nor do we care about ambiguous dictionaries etc.
+          -- We will type check this bracket again at its usage site.
+	  --
+	  -- We build a single implication constraint with a BracketSkol;
+	  -- that in turn tells simplifyCheck to report only definite
+	  -- errors
+       ; (_,lie) <- captureConstraints $
+              	    newImplication BracketSkol [] [] $
+              	    setStage brack_stage $
+              	    do { meta_ty <- tc_bracket cur_stage brack
+              	       ; unifyType meta_ty res_ty }
 
-       ; simplifyBracket lie
+          -- It's best to simplify the constraint now, even though in 
+	  -- principle some later unification might be useful for it,
+	  -- because we don't want these essentially-junk TH implication
+	  -- contraints floating around nested inside other constraints
+	  -- See for example Trac #4949
+       ; _ <- simplifyTop lie
 
-	-- Make the expected type have the right shape
-       ; _ <- unifyType meta_ty res_ty
-
-	-- Return the original expression, not the type-decorated one
+        -- Return the original expression, not the type-decorated one
        ; pendings <- readMutVar pending_splices
        ; return (noLoc (HsBracketOut brack pendings)) }
 
@@ -664,7 +677,17 @@ runQuasiQuote :: Outputable hs_syn
               -> MetaOps th_syn hs_syn 
               -> RnM hs_syn
 runQuasiQuote (HsQuasiQuote quoter q_span quote) quote_selector meta_ty meta_ops
-  = do	{ quoter' <- lookupOccRn quoter
+  = do  {     -- Drop the leading "$" from the quoter name, if present
+              -- This is old-style syntax, now deprecated
+              -- NB: when removing this backward-compat, remove
+              --     the matching code in Lexer.x (around line 310)
+          let occ_str = occNameString (rdrNameOcc quoter)
+        ; quoter <- ASSERT( not (null occ_str) )  -- Lexer ensures this
+                    if head occ_str /= '$' then return quoter
+                    else do { addWarn (deprecatedDollar quoter)
+                            ; return (mkRdrUnqual (mkVarOcc (tail occ_str))) }
+
+        ; quoter' <- lookupOccRn quoter
 		-- We use lookupOcc rather than lookupGlobalOcc because in the
 		-- erroneous case of \x -> [x| ...|] we get a better error message
 		-- (stage restriction rather than out of scope).
@@ -709,6 +732,12 @@ quoteStageError :: Name -> SDoc
 quoteStageError quoter
   = sep [ptext (sLit "GHC stage restriction:") <+> ppr quoter,
          nest 2 (ptext (sLit "is used in a quasiquote, and must be imported, not defined locally"))]
+
+deprecatedDollar :: RdrName -> SDoc
+deprecatedDollar quoter
+  = hang (ptext (sLit "Deprecated syntax:"))
+       2 (ptext (sLit "quasiquotes no longer need a dollar sign:")
+          <+> ppr quoter)
 \end{code}
 
 

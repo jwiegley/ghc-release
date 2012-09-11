@@ -15,6 +15,15 @@ test('3586',
      compile_and_run,
      ['-O'])
 
+test('T4830',
+     [stats_num_field('bytes allocated', 60000,
+                                         200000),
+                                     # expected value: 127,000 (amd64/Linux)
+      only_ways(['normal'])
+      ],
+     compile_and_run,
+     ['-O2'])
+
 test('T3245', normal, compile_and_run, ['-O'])
 
 # Test that bytestring reading/writing isn't over-allocating.  We had
@@ -41,17 +50,44 @@ if config.arch == 'i386':
 else:
    sse2_opts = ''
 
-test('T4321', omit_ways(['ghci']), compile_and_run, ['-O ' + sse2_opts])
+# I don't understand why optc and profc are giving slightly different results
+# on x86 here --SDM.
+test('T4321', [ omit_ways(['ghci']),
+                if_arch('i386', expect_fail_for(['optc','profc'])) ],
+                              compile_and_run, ['-O ' + sse2_opts])
+
 test('T3736', normal, run_command, ['$MAKE -s --no-print-directory T3736'])
 test('T3738',
      [stats_num_field('peak_megabytes_allocated', 1,
                                                   1),
                                      # expected value: 1 (amd64/Linux)
-      stats_num_field('bytes allocated', 60000,
-                                         61000),
-                                     # expected value: 60368 (amd64/Linux)
+      # expected value: 12800 (x86/OS X):
+      if_wordsize(32,
+          stats_num_field('bytes allocated', 12700,
+                                             14000)),
+      if_wordsize(64,
+          stats_num_field('bytes allocated', 60000,
+                                             80000)),
+                                     # expected value: 72608 (amd64/Linux)
       only_ways(['normal'])
       ],
      compile_and_run,
      ['-O'])
 
+test('MethSharing',
+     [stats_num_field('peak_megabytes_allocated', 1,
+                                                  1),
+                                     # expected value: 1 (amd64/Linux)
+      # expected value: 2685858140 (x86/OS X):
+      if_wordsize(32,
+          stats_num_field('bytes allocated', 300000000,
+                                             400000000)),
+                                  # expected: 360940756 (x86/Linux)
+      if_wordsize(64,
+          stats_num_field('bytes allocated', 600000000,
+                                             700000000)),
+                                  # expected: 640067672 (amd64/Linux)
+      only_ways(['normal'])
+      ],
+     compile_and_run,
+     ['-O'])

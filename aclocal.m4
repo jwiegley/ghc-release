@@ -4,11 +4,94 @@
 # ensure we don't clash with any pre-supplied autoconf ones.
 
 
+# FPTOOLS_SET_PLATFORM_VARS
+# ----------------------------------
+# Set the platform variables
+AC_DEFUN([FPTOOLS_SET_PLATFORM_VARS],
+[
+    # If no argument was given for a configuration variable, then discard
+    # the guessed canonical system and use the configuration of the
+    # bootstrapping ghc. If an argument was given, map it from gnu format
+    # to ghc format.
+    #
+    # For why we do it this way, see: #3637, #1717, #2951
+    #
+    # In bindists, we haven't called AC_CANONICAL_{BUILD,HOST,TARGET}
+    # so this justs uses $bootstrap_target.
+
+    if test "$build_alias" = ""
+    then
+        if test "$bootstrap_target" != ""
+        then
+            build=$bootstrap_target
+            echo "Build platform inferred as: $build"
+        else
+            echo "Can't work out build platform"
+            exit 1
+        fi
+
+        BuildArch=`echo "$build" | sed 's/-.*//'`
+        BuildVendor=`echo "$build" | sed -e 's/.*-\(.*\)-.*/\1/'`
+        BuildOS=`echo "$build" | sed 's/.*-//'`
+    else
+        GHC_CONVERT_CPU([$build_cpu], [BuildArch])
+        GHC_CONVERT_VENDOR([$build_vendor], [BuildVendor])
+        GHC_CONVERT_OS([$build_os], [BuildOS])
+    fi
+
+    if test "$host_alias" = ""
+    then
+        if test "$bootstrap_target" != ""
+        then
+            host=$bootstrap_target
+            echo "Host platform inferred as: $host"
+        else
+            echo "Can't work out host platform"
+            exit 1
+        fi
+
+        HostArch=`echo "$host" | sed 's/-.*//'`
+        HostVendor=`echo "$host" | sed -e 's/.*-\(.*\)-.*/\1/'`
+        HostOS=`echo "$host" | sed 's/.*-//'`
+    else
+        GHC_CONVERT_CPU([$host_cpu], [HostArch])
+        GHC_CONVERT_VENDOR([$host_vendor], [HostVendor])
+        GHC_CONVERT_OS([$host_os], [HostOS])
+    fi
+
+    if test "$target_alias" = ""
+    then
+        if test "$bootstrap_target" != ""
+        then
+            target=$bootstrap_target
+            echo "Target platform inferred as: $target"
+        else
+            echo "Can't work out target platform"
+            exit 1
+        fi
+
+        TargetArch=`echo "$target" | sed 's/-.*//'`
+        TargetVendor=`echo "$target" | sed -e 's/.*-\(.*\)-.*/\1/'`
+        TargetOS=`echo "$target" | sed 's/.*-//'`
+    else
+        GHC_CONVERT_CPU([$target_cpu], [TargetArch])
+        GHC_CONVERT_VENDOR([$target_vendor], [TargetVendor])
+        GHC_CONVERT_OS([$target_os], [TargetOS])
+    fi
+])
+
+
 # FPTOOLS_SET_C_LD_FLAGS
 # ----------------------------------
-# Set the C and LD flags for a given platform
+# Set the C, LD and CPP flags for a given platform
+# $1 is the platform
+# $2 is the name of the CC flags variable
+# $3 is the name of the linker flags variable when linking with gcc
+# $4 is the name of the linker flags variable when linking with ld
+# $5 is the name of the CPP flags variable
 AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
 [
+    AC_MSG_CHECKING([Setting up $2, $3, $4 and $5])
     case $$1 in
     i386-apple-darwin)
         # By default, gcc on OS X will generate SSE
@@ -17,10 +100,24 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
         # back to generic i686 compatibility. Trac #2983.
         $2="$$2 -march=i686 -m32"
         $3="$$3 -march=i686 -m32"
+        $4="$$4 -arch i386"
+        $5="$$5 -march=i686 -m32"
         ;;
     x86_64-apple-darwin)
         $2="$$2 -m64"
         $3="$$3 -m64"
+        $4="$$4 -arch x86_64"
+        $5="$$5 -m64"
+        ;;
+    esac
+
+    case $$1 in
+    i386-apple-darwin|x86_64-apple-darwin)
+        # We support back to OS X 10.5
+        $2="$$2 -isysroot /Developer/SDKs/MacOSX10.5.sdk -mmacosx-version-min=10.5"
+        $3="$$3 -isysroot /Developer/SDKs/MacOSX10.5.sdk -mmacosx-version-min=10.5"
+        $4="$$4  -macosx_version_min 10.5"
+        $5="$$5 -isysroot /Developer/SDKs/MacOSX10.5.sdk -mmacosx-version-min=10.5"
         ;;
     esac
 
@@ -31,7 +128,8 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
     then
         $2="$$2 -fno-stack-protector"
     fi
-    rm conftest.c conftest.o
+    rm -f conftest.c conftest.o
+    AC_MSG_RESULT([done])
 ])
 
 
@@ -755,7 +853,7 @@ AS_VAR_POPDEF([fp_func])dnl
 
 # FP_GEN_DOCBOOK_XML
 # ------------------
-# Generates a DocBook XML V4.2 document in conftest.xml.
+# Generates a DocBook XML V4.5 document in conftest.xml.
 #
 # It took a lot of experimentation to find a document that will cause
 # xsltproc to fail with an error code when the relevant
@@ -767,8 +865,8 @@ AC_DEFUN([FP_GEN_DOCBOOK_XML],
 [rm -f conftest.xml conftest-book.xml
 cat > conftest.xml << EOF
 <?xml version="1.0" encoding="iso-8859-1"?>
-<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd" [[
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+   "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd" [[
 <!ENTITY conftest-book SYSTEM "conftest-book.xml">
 ]]>
 <book id="test">
@@ -862,7 +960,7 @@ if test -n "$XmllintCmd"; then
     AC_MSG_RESULT([ok])
   else
     AC_MSG_RESULT([failed])
-    AC_MSG_WARN([cannot find a DTD for DocBook XML V4.2, you will not be able to validate your documentation])
+    AC_MSG_WARN([cannot find a DTD for DocBook XML V4.5, you will not be able to validate your documentation])
     AC_MSG_WARN([check your XML_CATALOG_FILES environment variable and/or /etc/xml/catalog])
   fi
   rm -rf conftest*
@@ -1199,27 +1297,53 @@ case $fptools_cv_timer_create_works in
 esac
 ])
 
-# FP_ARG_GMP
+# FP_ICONV
 # -------------
-AC_DEFUN([FP_ARG_GMP],
+AC_DEFUN([FP_ICONV],
 [
-AC_ARG_WITH([gmp-includes],
-  [AC_HELP_STRING([--with-gmp-includes],
-    [directory containing gmp.h])],
-    [gmp_includes=$withval],
-    [gmp_includes=NONE])
+  dnl--------------------------------------------------------------------
+  dnl * Deal with arguments telling us iconv is somewhere odd
+  dnl--------------------------------------------------------------------
 
-AC_ARG_WITH([gmp-libraries],
-  [AC_HELP_STRING([--with-gmp-libraries],
-    [directory containing gmp library])],
-    [gmp_libraries=$withval],
-    [gmp_libraries=NONE])
-])# FP_ARG_GMP
+  dnl Note: ICONV_LIB_DIRS and ICONV_INCLUDE_DIRS are not predefined
+  dnl to the empty string to allow them to be overridden from the
+  dnl environment.
 
-AC_DEFUN([CHECK_GMP],
-[AC_REQUIRE([AC_PROG_CPP])
-AC_REQUIRE([AC_PROG_CC])
-])
+  AC_ARG_WITH([iconv-includes],
+    [AC_HELP_STRING([--with-iconv-includes],
+      [directory containing iconv.h])],
+      [ICONV_INCLUDE_DIRS=$withval])
+
+  AC_ARG_WITH([iconv-libraries],
+    [AC_HELP_STRING([--with-iconv-libraries],
+      [directory containing iconv library])],
+      [ICONV_LIB_DIRS=$withval])
+
+  AC_SUBST(ICONV_INCLUDE_DIRS)
+  AC_SUBST(ICONV_LIB_DIRS)
+])# FP_ICONV
+
+# FP_GMP
+# -------------
+AC_DEFUN([FP_GMP],
+[
+  dnl--------------------------------------------------------------------
+  dnl * Deal with arguments telling us gmp is somewhere odd
+  dnl--------------------------------------------------------------------
+
+  AC_ARG_WITH([gmp-includes],
+    [AC_HELP_STRING([--with-gmp-includes],
+      [directory containing gmp.h])],
+      [GMP_INCLUDE_DIRS=$withval])
+
+  AC_ARG_WITH([gmp-libraries],
+    [AC_HELP_STRING([--with-gmp-libraries],
+      [directory containing gmp library])],
+      [GMP_LIB_DIRS=$withval])
+
+  AC_SUBST(GMP_INCLUDE_DIRS)
+  AC_SUBST(GMP_LIB_DIRS)
+])# FP_GMP
 
 # FP_CHECK_MACOSX_DEPLOYMENT_TARGET
 # ---------------------------------
@@ -1254,43 +1378,49 @@ fi
 # Calculate absolute path to build tree
 # --------------------------------------------------------------
 
+AC_DEFUN([FP_INTREE_GHC_PWD],[
+AC_MSG_NOTICE(Building in-tree ghc-pwd)
+    dnl This would be
+    dnl     make -C utils/ghc-pwd clean && make -C utils/ghc-pwd
+    dnl except we don't want to have to know what make is called. Sigh.
+    rm -rf utils/ghc-pwd/dist-boot
+    mkdir  utils/ghc-pwd/dist-boot
+    if ! "$WithGhc" -v0 -no-user-package-conf -hidir utils/ghc-pwd/dist-boot -odir utils/ghc-pwd/dist-boot -stubdir utils/ghc-pwd/dist-boot --make utils/ghc-pwd/Main.hs -o utils/ghc-pwd/dist-boot/ghc-pwd
+    then
+        AC_MSG_ERROR([Building ghc-pwd failed])
+    fi
+
+    GHC_PWD=utils/ghc-pwd/dist-boot/ghc-pwd
+])
+
+AC_DEFUN([FP_BINDIST_GHC_PWD],[
+    GHC_PWD=utils/ghc-pwd/dist/build/tmp/ghc-pwd
+])
+
 AC_DEFUN([FP_FIND_ROOT],[
 AC_MSG_CHECKING(for path to top of build tree)
+    hardtop=`$GHC_PWD`
 
-dnl This would be
-dnl     make -C utils/ghc-pwd clean && make -C utils/ghc-pwd
-dnl except we don't want to have to know what make is called. Sigh.
-if test ! -f utils/ghc-pwd/ghc-pwd && test ! -f utils/ghc-pwd/ghc-pwd.exe; then
-  cd utils/ghc-pwd
-  rm -f *.o
-  rm -f *.hi
-  rm -f ghc-pwd
-  rm -f ghc-pwd.exe
-  "$WithGhc" -v0 -no-user-package-conf --make ghc-pwd -o ghc-pwd
-  cd ../..
-fi
+    dnl Remove common automounter nonsense
+    hardtop=`echo $hardtop | sed 's|^/tmp_mnt.*\(/local/.*\)$|\1|' | sed 's|^/tmp_mnt/|/|'`
 
-hardtop=`utils/ghc-pwd/ghc-pwd`
+    if ! test -d "$hardtop"; then
+        AC_MSG_ERROR([cannot determine current directory])
+    fi
 
-if ! test -d "$hardtop"; then
-  AC_MSG_ERROR([cannot determine current directory])
-fi   
+    dnl We don't support building in directories with spaces.
+    case "$hardtop" in
+    *' '*)
+        AC_MSG_ERROR([
+        The build system does not support building in a directory
+        containing space characters.
+        Suggestion: move the build tree somewhere else.])
+        ;;
+    esac
 
-dnl Remove common automounter nonsense
-dnl
-hardtop=`echo $hardtop | sed 's|^/tmp_mnt.*\(/local/.*\)$|\1|' | sed 's|^/tmp_mnt/|/|'`
+    AC_SUBST(hardtop)
 
-AC_SUBST(hardtop)
-
-AC_MSG_RESULT(${hardtop})
-
-# We don't support building in directories with spaces.
-case "$hardtop" in
-  *' '*) AC_MSG_ERROR([
-   The build system does not support building in a directory containing
-   space characters.  Suggestion: move the build tree somewhere else.])
- ;;
-esac
+    AC_MSG_RESULT($hardtop)
 ])
 
 # GHC_CONVERT_CPU(cpu, target_var)

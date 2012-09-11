@@ -123,13 +123,17 @@ $1_$2_LINK_WITH_GCC = NO
 ifeq "$$(BootingFromHc)" "YES"
 $1_$2_LINK_WITH_GCC = YES
 endif
+
 ifeq "$$($1_$2_v_HS_OBJS)" ""
-$1_$2_LINK_WITH_GCC = YES
+# We don't want to link the GHC RTS into C-only programs. There's no
+# point, and it confuses the test that all GHC-compiled programs
+# were compiled with the right GHC.
+$1_$2_GHC_LD_OPTS = -no-auto-link-packages -no-hs-main
 endif
 
 ifeq "$$($1_$2_LINK_WITH_GCC)" "NO"
 $1/$2/build/tmp/$$($1_$2_PROG) : $$($1_$2_v_HS_OBJS) $$($1_$2_v_C_OBJS) $$($1_$2_v_S_OBJS) $$($1_$2_OTHER_OBJS) | $$$$(dir $$$$@)/.
-	"$$($1_$2_HC)" -o $$@ $$($1_$2_v_ALL_HC_OPTS) $$(LD_OPTS) $$($1_$2_v_HS_OBJS) $$($1_$2_v_C_OBJS) $$($1_$2_v_S_OBJS) $$($1_$2_OTHER_OBJS) $$(addprefix -l,$$($1_$2_EXTRA_LIBRARIES))
+	"$$($1_$2_HC)" -o $$@ $$($1_$2_v_ALL_HC_OPTS) $$(LD_OPTS) $$($1_$2_GHC_LD_OPTS) $$($1_$2_v_HS_OBJS) $$($1_$2_v_C_OBJS) $$($1_$2_v_S_OBJS) $$($1_$2_OTHER_OBJS) $$(addprefix -l,$$($1_$2_EXTRA_LIBRARIES))
 else
 $1/$2/build/tmp/$$($1_$2_PROG) : $$($1_$2_v_HS_OBJS) $$($1_$2_v_C_OBJS) $$($1_$2_v_S_OBJS) $$($1_$2_OTHER_OBJS) | $$$$(dir $$$$@)/.
 	"$$(CC)" -o $$@ $$($1_$2_v_ALL_CC_OPTS) $$(LD_OPTS) $$($1_$2_v_HS_OBJS) $$($1_$2_v_C_OBJS) $$($1_$2_v_S_OBJS) $$($1_$2_OTHER_OBJS) $$($1_$2_v_EXTRA_CC_OPTS) $$(addprefix -l,$$($1_$2_EXTRA_LIBRARIES))
@@ -139,11 +143,15 @@ endif
 # need to depend on the libraries too.  NB. since $(ALL_STAGE1_LIBS) and
 # $(ALL_RTS_LIBS) are not defined until after libraries/*/ghc.mk have
 # been included, this introduces an ordering dependency.
+ifneq "$$(CLEANING)" "YES"
 ifneq "$3" "0"
-ifeq "$$(ALL_STAGE1_LIBS)" ""
-$$(error ordering failure in $1: $$(ALL_STAGE1_LIBS) is empty)
+ifneq "$$($1_$2_HS_SRCS)" ""
+ifeq "$$(strip $$(ALL_STAGE1_LIBS))" ""
+$$(error ordering failure in $1 ($2): ALL_STAGE1_LIBS is empty)
+endif
 endif
 $1/$2/build/tmp/$$($1_$2_PROG) : $$(ALL_STAGE1_LIBS) $$(ALL_RTS_LIBS) $$(OTHER_LIBS)
+endif
 endif
 endif
 

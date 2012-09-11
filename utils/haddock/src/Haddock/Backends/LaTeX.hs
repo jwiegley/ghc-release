@@ -577,11 +577,7 @@ ppDataDecl instances subdocs _loc mbDoc dataDecl unicode
 
 
 -- ppConstrHdr is for (non-GADT) existentials constructors' syntax
-#if __GLASGOW_HASKELL__ == 612
-ppConstrHdr :: HsExplicitForAll -> [Name] -> HsContext DocName -> Bool -> LaTeX
-#else
 ppConstrHdr :: HsExplicitFlag -> [Name] -> HsContext DocName -> Bool -> LaTeX
-#endif
 ppConstrHdr forall tvs ctxt unicode
  = (if null tvs then empty else ppForall)
    <+>
@@ -635,7 +631,7 @@ ppSideBySideConstr subdocs unicode leader (L _ con) =
 
 
     header_ = ppConstrHdr forall tyVars context
-    occ     = docNameOcc . unLoc . con_name $ con
+    occ     = nameOccName . getName . unLoc . con_name $ con
     ltvs    = con_qvars con
     tyVars  = tyvarNames (con_qvars con)
     context = unLoc (con_cxt con)
@@ -649,7 +645,7 @@ ppSideBySideConstr subdocs unicode leader (L _ con) =
 
 ppSideBySideField :: [(DocName, DocForDecl DocName)] -> Bool -> ConDeclField DocName ->  LaTeX
 ppSideBySideField subdocs unicode (ConDeclField (L _ name) ltype _) =
-  decltt (ppBinder (docNameOcc name)
+  decltt (ppBinder (nameOccName . getName $ name)
     <+> dcolon unicode <+> ppLType unicode ltype) <-> rDoc mbDoc
   where
     -- don't use cd_fld_doc for same reason we don't use con_doc above
@@ -740,7 +736,7 @@ ppAppNameTypes n ts unicode = ppTypeApp n ts ppDocName (ppParendType unicode)
 -- | Print an application of a DocName and a list of Names 
 ppAppDocNameNames :: Bool -> DocName -> [Name] -> LaTeX
 ppAppDocNameNames _summ n ns =
-  ppTypeApp n ns (ppBinder . docNameOcc) ppSymName
+  ppTypeApp n ns (ppBinder . nameOccName . getName) ppSymName
 
 
 -- | General printing of type applications
@@ -850,11 +846,7 @@ ppFunLhType  unicode ty = ppr_mono_ty pREC_FUN ty unicode
 -- Drop top-level for-all type variables in user style
 -- since they are implicit in Haskell
 
-#if __GLASGOW_HASKELL__ == 612
-ppForAll :: HsExplicitForAll -> [Located (HsTyVarBndr DocName)]
-#else
 ppForAll :: HsExplicitFlag -> [Located (HsTyVarBndr DocName)]
-#endif
          -> Located (HsContext DocName) -> Bool -> LaTeX
 ppForAll expl tvs cxt unicode
   | show_forall = forall_part <+> ppLContext cxt unicode
@@ -884,11 +876,7 @@ ppr_mono_ty _         (HsPArrTy ty)       u = pabrackets (ppr_mono_lty pREC_TOP 
 ppr_mono_ty _         (HsPredTy p)        u = parens (ppPred u p)
 ppr_mono_ty _         (HsNumTy n)         _ = text (show n) -- generics only
 ppr_mono_ty _         (HsSpliceTy {})     _ = error "ppr_mono_ty HsSpliceTy"
-#if __GLASGOW_HASKELL__ == 612
-ppr_mono_ty _         (HsSpliceTyOut {})  _ = error "ppr_mono_ty HsQuasiQuoteTy"
-#else
 ppr_mono_ty _         (HsQuasiQuoteTy {}) _ = error "ppr_mono_ty HsQuasiQuoteTy"
-#endif
 ppr_mono_ty _         (HsRecTy {})        _ = error "ppr_mono_ty HsRecTy"
 ppr_mono_ty _         (HsCoreTy {})       _ = error "ppr_mono_ty HsCoreTy"
 
@@ -901,7 +889,7 @@ ppr_mono_ty ctxt_prec (HsOpTy ty1 op ty2) unicode
     ppr_mono_lty pREC_OP ty1 unicode <+> ppr_op <+> ppr_mono_lty pREC_OP ty2 unicode
   where
     ppr_op = if not (isSymOcc occName) then char '`' <> ppLDocName op <> char '`' else ppLDocName op
-    occName = docNameOcc . unLoc $ op
+    occName = nameOccName . getName . unLoc $ op
 
 ppr_mono_ty ctxt_prec (HsParTy ty) unicode
 --  = parens (ppr_mono_lty pREC_TOP ty)
@@ -946,7 +934,7 @@ ppOccName = text . occNameString
 
 
 ppVerbDocName :: DocName -> LaTeX
-ppVerbDocName = ppVerbOccName . docNameOcc
+ppVerbDocName = ppVerbOccName . nameOccName . getName
 
 
 ppVerbRdrName :: RdrName -> LaTeX
@@ -954,7 +942,7 @@ ppVerbRdrName = ppVerbOccName . rdrNameOcc
 
 
 ppDocName :: DocName -> LaTeX
-ppDocName = ppOccName . docNameOcc
+ppDocName = ppOccName . nameOccName . getName
 
 
 ppLDocName :: Located DocName -> LaTeX
@@ -962,7 +950,7 @@ ppLDocName (L _ d) = ppDocName d
 
 
 ppDocBinder :: DocName -> LaTeX
-ppDocBinder = ppBinder . docNameOcc
+ppDocBinder = ppBinder . nameOccName . getName
 
 
 ppName :: Name -> LaTeX

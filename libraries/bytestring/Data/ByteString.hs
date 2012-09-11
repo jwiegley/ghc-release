@@ -251,6 +251,7 @@ import Data.Monoid              (Monoid, mempty, mappend, mconcat)
 import System.IO.Unsafe
 import qualified System.Environment
 import qualified System.IO      (hGetLine)
+import System.IO                (hIsEOF)
 #endif
 
 #if defined(__GLASGOW_HASKELL__)
@@ -259,6 +260,8 @@ import System.IO                (hGetBufNonBlocking)
 
 #if MIN_VERSION_base(4,3,0)
 import System.IO                (hGetBufSome)
+#else
+import System.IO                (hWaitForInput, hIsEOF)
 #endif
 
 #if __GLASGOW_HASKELL__ >= 611
@@ -286,10 +289,17 @@ import GHC.ST                   (ST(..))
 
 -- An alternative to Control.Exception (assert) for nhc98
 #ifdef __NHC__
+
+import System.IO (Handle)
+
 #define assert  assertS "__FILE__ : __LINE__"
 assertS :: String -> Bool -> a -> a
 assertS _ True  = id
 assertS s False = error ("assertion failed at "++s)
+
+-- An alternative to hWaitForInput
+hWaitForInput :: Handle -> Int -> IO ()
+hWaitForInput _ _ = return ()
 #endif
 
 -- -----------------------------------------------------------------------------
@@ -1955,12 +1965,12 @@ hGetSome hh i
 #else
     | i >  0    = let
                    loop = do
-                     s <- hGetNonBlocking h i
+                     s <- hGetNonBlocking hh i
                      if not (null s)
                         then return s
-                        else eof <- hIsEOF h
-                             if eof then return s
-                                    else hWaitForInput h (-1) >> loop
+                        else do eof <- hIsEOF hh
+                                if eof then return s
+                                       else hWaitForInput hh (-1) >> loop
                                          -- for this to work correctly, the
                                          -- Handle should be in binary mode
                                          -- (see GHC ticket #3808)

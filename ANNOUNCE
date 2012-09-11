@@ -1,54 +1,15 @@
 
    =============================================================
-    The (Interactive) Glasgow Haskell Compiler -- version 7.0.1
+    The (Interactive) Glasgow Haskell Compiler -- version 7.0.2
    =============================================================
 
-The GHC Team is pleased to announce a new major release of GHC. Since
-the 6.12 branch we are delighted that more than 60 people have
-contributed patches to GHC or the accompanying libraries and utilities.
+The GHC Team is pleased to announce a new patchlevel release of GHC.
+This release contains a number of bugfixes relative to 7.0.1, so we
+recommend upgrading.
 
-There have been a number of significant changes since the last major
-release, including:
+The release notes are here:
 
- * GHC now defaults to the Haskell 2010 language standard
-
- * -fglasgow-exts is now deprecated, in favour of the individual
-   extension flags
-
- * On POSIX platforms, there is a new I/O manager based on
-   epoll/kqueue/poll, which allows multithreaded I/O code to scale to a
-   much larger number (100k+) of threads
-
- * GHC now includes an LLVM code generator which, for certain code, can
-   bring some nice performance improvements
-
- * The type checker has been overhauled, which means it is now able to
-   correctly handle interactions between the type systemextensions
-
- * The inliner has been overhauled, which should in general give better
-   performance while reducing unnecessary code-size explosion
-
- * Large parts of the runtime system have been overhauled, including
-   fixing several instances of pathological performance when there
-   are large numbers of threads
-
- * Due to changes in the runtime system, if you are using
-   Control.Parallel.Strategies from the parallel package, please upgrade
-   to at least version 2 (preferably version 3)
-
- * The full Haskell import syntax can now been used to bring modules
-   into scope in GHCi
-
- * GHC now comes with a more recent mingw bundled on Windows, which
-   includes a fix for windres on Windows 7
-
- * There is a new -fno-ghci-sandbox flag, which stops GHCi running
-   computations in a separate thread; in particular, this works around
-   an issue running GLUT from GHCi on OS X
-
-The full release notes are here:
-
-  http://www.haskell.org/ghc/docs/7.0.1/html/users_guide/release-7-0-1.html
+  http://www.haskell.org/ghc/docs/7.0.2/html/users_guide/release-7-0-2.html
 
 How to get it
 ~~~~~~~~~~~~~
@@ -68,9 +29,7 @@ system isn't available yet, please try again later.
 Background
 ~~~~~~~~~~
 
-Haskell is a standard lazy functional programming language; the
-current language version is Haskell 98, agreed in December 1998 and
-revised December 2002.
+Haskell is a standard lazy functional programming language.
 
 GHC is a state-of-the-art programming suite for Haskell.  Included is
 an optimising compiler generating good code for a variety of

@@ -11,7 +11,7 @@ lower levels it is preserved with @let@/@letrec@s).
 
 \begin{code}
 module DsBinds ( dsTopLHsBinds, dsLHsBinds, decomposeRuleLhs, dsSpec,
-		 dsHsWrapper, dsTcEvBinds, dsEvBinds, wrapDsEvBinds, 
+                 dsHsWrapper, dsTcEvBinds, dsEvBinds, wrapDsEvBinds,
 		 DsEvBind(..), AutoScc(..)
   ) where
 
@@ -90,7 +90,7 @@ dsLHsBind auto_scc (L loc bind)
 dsHsBind :: AutoScc -> HsBind Id -> DsM (OrdList (Id,CoreExpr))
 
 dsHsBind _ (VarBind { var_id = var, var_rhs = expr, var_inline = inline_regardless })
-  = do	{ core_expr <- dsLExpr expr
+  = do  { core_expr <- dsLExpr expr
 
 	        -- Dictionary bindings are always VarBinds,
 	        -- so we only need do this here
@@ -261,8 +261,8 @@ dsEvGroup (CyclicSCC bs)
     ds_pair (EvBind v r) = (v, dsEvTerm r)
 
 dsEvTerm :: EvTerm -> CoreExpr
-dsEvTerm (EvId v)      		 = Var v
-dsEvTerm (EvCast v co) 		 = Cast (Var v) co 
+dsEvTerm (EvId v)                = Var v
+dsEvTerm (EvCast v co)           = Cast (Var v) co
 dsEvTerm (EvDFunApp df tys vars) = Var df `mkTyApps` tys `mkVarApps` vars
 dsEvTerm (EvCoercion co)         = Type co
 dsEvTerm (EvSuperClass d n)
@@ -527,40 +527,27 @@ dsSpec mb_poly_rhs (L loc (SpecPrag poly_id spec_co spec_inl))
   where
     is_local_id = isJust mb_poly_rhs
     poly_rhs | Just rhs <-  mb_poly_rhs
-             = rhs
-             | Just unfolding <- maybeUnfoldingTemplate (idUnfolding poly_id)
-             = unfolding
+             = rhs  	    -- Local Id; this is its rhs
+             | Just unfolding <- maybeUnfoldingTemplate (realIdUnfolding poly_id)
+             = unfolding    -- Imported Id; this is its unfolding
+	       		    -- Use realIdUnfolding so we get the unfolding 
+			    -- even when it is a loop breaker. 
+			    -- We want to specialise recursive functions!
              | otherwise = pprPanic "dsImpSpecs" (ppr poly_id)
-	-- In the Nothing case the specialisation is for an imported Id
-	-- whose unfolding gives the RHS to be specialised
-        -- The type checker has checked that it has an unfolding
+	                    -- The type checker has checked that it *has* an unfolding
 
 specUnfolding :: (CoreExpr -> CoreExpr) -> Type 
               -> Unfolding -> DsM (Unfolding, OrdList (Id,CoreExpr))
+{-   [Dec 10: TEMPORARILY commented out, until we can straighten out how to
+              generate unfoldings for specialised DFuns
+
 specUnfolding wrap_fn spec_ty (DFunUnfolding _ _ ops)
   = do { let spec_rhss = map wrap_fn ops
        ; spec_ids <- mapM (mkSysLocalM (fsLit "spec") . exprType) spec_rhss
        ; return (mkDFunUnfolding spec_ty (map Var spec_ids), toOL (spec_ids `zip` spec_rhss)) }
+-}
 specUnfolding _ _ _
   = return (noUnfolding, nilOL)
-
-{-
-mkArbitraryTypeEnv :: [TyVar] -> [([TyVar], a, b, c)] -> TyVarEnv Type
--- If any of the tyvars is missing from any of the lists in 
--- the second arg, return a binding in the result
-mkArbitraryTypeEnv tyvars exports
-  = go emptyVarEnv exports
-  where
-    go env [] = env
-    go env ((ltvs, _, _, _) : exports)
-	= go env' exports
-        where
-          env' = foldl extend env [tv | tv <- tyvars
-			              , not (tv `elem` ltvs)
-				      , not (tv `elemVarEnv` env)]
-
-    extend env tv = extendVarEnv env tv (dsMkArbitraryType tv)
--}
 
 dsMkArbitraryType :: TcTyVar -> Type
 dsMkArbitraryType tv = anyTypeOfKind (tyVarKind tv)

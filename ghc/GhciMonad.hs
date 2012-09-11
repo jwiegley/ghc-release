@@ -201,7 +201,7 @@ instance WarnLogMonad GHCi where
   getWarnings = liftGhc $ getWarnings
 
 instance MonadIO GHCi where
-  liftIO = io
+  liftIO = MonadUtils.liftIO
 
 instance Haskeline.MonadException GHCi where
   catch = gcatch
@@ -243,9 +243,6 @@ unsetOption opt
  = do st <- getGHCiState
       setGHCiState (st{ options = filter (/= opt) (options st) })
 
-io :: IO a -> GHCi a
-io = MonadUtils.liftIO
-
 printForUser :: GhcMonad m => SDoc -> m ()
 printForUser doc = do
   unqual <- GHC.getPrintUnqual
@@ -254,7 +251,7 @@ printForUser doc = do
 printForUserPartWay :: SDoc -> GHCi ()
 printForUserPartWay doc = do
   unqual <- GHC.getPrintUnqual
-  io $ Outputable.printForUserPartWay stdout opt_PprUserLength unqual doc
+  liftIO $ Outputable.printForUserPartWay stdout opt_PprUserLength unqual doc
 
 runStmt :: String -> GHC.SingleStep -> GHCi GHC.RunResult
 runStmt expr step = do
@@ -309,9 +306,9 @@ printTimes allocs psecs
 	
 revertCAFs :: GHCi ()
 revertCAFs = do
-  io $ rts_revertCAFs
+  liftIO rts_revertCAFs
   s <- getGHCiState
-  when (not (ghc_e s)) $ io turnOffBuffering
+  when (not (ghc_e s)) $ liftIO turnOffBuffering
 	-- Have to turn off buffering again, because we just 
 	-- reverted stdout, stderr & stdin to their defaults.
 
@@ -360,8 +357,8 @@ initInterpBuffering = do -- make sure these are linked
 
 flushInterpBuffers :: GHCi ()
 flushInterpBuffers
- = io $ do getHandle stdout_ptr >>= hFlush
-           getHandle stderr_ptr >>= hFlush
+ = liftIO $ do getHandle stdout_ptr >>= hFlush
+               getHandle stderr_ptr >>= hFlush
 
 turnOffBuffering :: IO ()
 turnOffBuffering

@@ -69,7 +69,7 @@ rts/dist/build/sm/Scav_thr.c : rts/sm/Scav.c | $$(dir $$@)/.
 
 rts_H_FILES = $(wildcard includes/*.h) $(wildcard rts/*.h)
 
-ifeq "$(HaveDtrace)" "YES"
+ifeq "$(USE_DTRACE)" "YES"
 DTRACEPROBES_H = rts/dist/build/RtsProbes.h
 rts_H_FILES += $(DTRACEPROBES_H)
 endif
@@ -157,7 +157,20 @@ rts_$1_CMM_OBJS = $$(patsubst rts/%.cmm,rts/dist/build/%.$$($1_osuf),$$(rts_CMM_
 
 rts_$1_OBJS = $$(rts_$1_C_OBJS) $$(rts_$1_S_OBJS) $$(rts_$1_CMM_OBJS)
 
-rts_dist_$1_CC_OPTS += -DRtsWay=$$(DQ)rts_$1$$(DQ)
+ifeq "$(USE_DTRACE)" "YES"
+ifeq "$(TargetOS_CPP)" "solaris2"
+# On Darwin we don't need to generate binary containing probes defined
+# in DTrace script, but DTrace on Solaris expects generation of binary
+# from the DTrace probes definitions
+rts_$1_DTRACE_OBJS = rts/dist/build/RtsProbes.$$($1_osuf)
+
+rts/dist/build/RtsProbes.$$($1_osuf) : $$(rts_$1_OBJS)
+	$(DTRACE) -G -C -Iincludes -DDTRACE -s rts/RtsProbes.d -o \
+		$$@ $$(rts_$1_OBJS)
+endif
+endif
+
+rts_dist_$1_CC_OPTS += -DRtsWay=\"rts_$1\"
 
 # Making a shared library for the RTS.
 ifneq "$$(findstring dyn, $1)" ""
@@ -167,19 +180,21 @@ $$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) rts/libs.depend
 	"$$(rts_dist_HC)" -package-name rts -shared -dynamic -dynload deploy \
 	  -no-auto-link-packages `cat rts/libs.depend` $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) -o $$@
 else
-$$(rts_$1_LIB) : $$(rts_$1_OBJS) rts/libs.depend
+$$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) rts/libs.depend
 	"$$(RM)" $$(RM_OPTS) $$@
 	"$$(rts_dist_HC)" -package-name rts -shared -dynamic -dynload deploy \
-	  -no-auto-link-packages `cat rts/libs.depend` $$(rts_$1_OBJS) -o $$@
+	  -no-auto-link-packages `cat rts/libs.depend` $$(rts_$1_OBJS) \
+	  $$(rts_$1_DTRACE_OBJS) -o $$@
 ifeq "$$(darwin_HOST_OS)" "1"
 	# Ensure library's install name is correct before anyone links with it.
 	install_name_tool -id $(ghclibdir)/$$(rts_$1_LIB_NAME) $$@
 endif
 endif
 else
-$$(rts_$1_LIB) : $$(rts_$1_OBJS)
+$$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS)
 	"$$(RM)" $$(RM_OPTS) $$@
-	echo $$(rts_$1_OBJS) | "$$(XARGS)" $$(XARGS_OPTS) "$$(AR)" $$(AR_OPTS) $$(EXTRA_AR_ARGS) $$@
+	echo $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) | "$$(XARGS)" $$(XARGS_OPTS) "$$(AR)" \
+		$$(AR_OPTS) $$(EXTRA_AR_ARGS) $$@
 endif
 
 endif
@@ -246,10 +261,6 @@ ifeq "$(UseLibFFIForAdjustors)" "YES"
 rts_CC_OPTS += -DUSE_LIBFFI_FOR_ADJUSTORS
 endif
 
-ifeq "$(UseArchivesForGhci)" "YES"
-rts_CC_OPTS += -DUSE_ARCHIVES_FOR_GHCI
-endif
-
 # Mac OS X: make sure we compile for the right OS version
 rts_CC_OPTS += $(MACOSX_DEPLOYMENT_CC_OPTS)
 rts_HC_OPTS += $(addprefix -optc, $(MACOSX_DEPLOYMENT_CC_OPTS))
@@ -275,35 +286,32 @@ endif
 #-----------------------------------------------------------------------------
 # Flags for compiling specific files
 
-# XXX DQ is now the same on all platforms, so get rid of it
-DQ = \"
-
 # If RtsMain.c is built with optimisation then the SEH exception stuff on
 # Windows gets confused.
 # This has to be in HC rather than CC opts, as otherwise there's a
 # -optc-O2 that comes after it.
 rts/RtsMain_HC_OPTS += -optc-O0
 
-rts/RtsMessages_CC_OPTS += -DProjectVersion=$(DQ)$(ProjectVersion)$(DQ)
-rts/RtsUtils_CC_OPTS += -DProjectVersion=$(DQ)$(ProjectVersion)$(DQ)
+rts/RtsMessages_CC_OPTS += -DProjectVersion=\"$(ProjectVersion)\"
+rts/RtsUtils_CC_OPTS += -DProjectVersion=\"$(ProjectVersion)\"
 #
-rts/RtsUtils_CC_OPTS += -DHostPlatform=$(DQ)$(HOSTPLATFORM)$(DQ)
-rts/RtsUtils_CC_OPTS += -DHostArch=$(DQ)$(HostArch_CPP)$(DQ)
-rts/RtsUtils_CC_OPTS += -DHostOS=$(DQ)$(HostOS_CPP)$(DQ)
-rts/RtsUtils_CC_OPTS += -DHostVendor=$(DQ)$(HostVendor_CPP)$(DQ)
+rts/RtsUtils_CC_OPTS += -DHostPlatform=\"$(HOSTPLATFORM)\"
+rts/RtsUtils_CC_OPTS += -DHostArch=\"$(HostArch_CPP)\"
+rts/RtsUtils_CC_OPTS += -DHostOS=\"$(HostOS_CPP)\"
+rts/RtsUtils_CC_OPTS += -DHostVendor=\"$(HostVendor_CPP)\"
 #
-rts/RtsUtils_CC_OPTS += -DBuildPlatform=$(DQ)$(BUILDPLATFORM)$(DQ)
-rts/RtsUtils_CC_OPTS += -DBuildArch=$(DQ)$(BuildArch_CPP)$(DQ)
-rts/RtsUtils_CC_OPTS += -DBuildOS=$(DQ)$(BuildOS_CPP)$(DQ)
-rts/RtsUtils_CC_OPTS += -DBuildVendor=$(DQ)$(BuildVendor_CPP)$(DQ)
+rts/RtsUtils_CC_OPTS += -DBuildPlatform=\"$(BUILDPLATFORM)\"
+rts/RtsUtils_CC_OPTS += -DBuildArch=\"$(BuildArch_CPP)\"
+rts/RtsUtils_CC_OPTS += -DBuildOS=\"$(BuildOS_CPP)\"
+rts/RtsUtils_CC_OPTS += -DBuildVendor=\"$(BuildVendor_CPP)\"
 #
-rts/RtsUtils_CC_OPTS += -DTargetPlatform=$(DQ)$(TARGETPLATFORM)$(DQ)
-rts/RtsUtils_CC_OPTS += -DTargetArch=$(DQ)$(TargetArch_CPP)$(DQ)
-rts/RtsUtils_CC_OPTS += -DTargetOS=$(DQ)$(TargetOS_CPP)$(DQ)
-rts/RtsUtils_CC_OPTS += -DTargetVendor=$(DQ)$(TargetVendor_CPP)$(DQ)
+rts/RtsUtils_CC_OPTS += -DTargetPlatform=\"$(TARGETPLATFORM)\"
+rts/RtsUtils_CC_OPTS += -DTargetArch=\"$(TargetArch_CPP)\"
+rts/RtsUtils_CC_OPTS += -DTargetOS=\"$(TargetOS_CPP)\"
+rts/RtsUtils_CC_OPTS += -DTargetVendor=\"$(TargetVendor_CPP)\"
 #
-rts/RtsUtils_CC_OPTS += -DGhcUnregisterised=$(DQ)$(GhcUnregisterised)$(DQ)
-rts/RtsUtils_CC_OPTS += -DGhcEnableTablesNextToCode=$(DQ)$(GhcEnableTablesNextToCode)$(DQ)
+rts/RtsUtils_CC_OPTS += -DGhcUnregisterised=\"$(GhcUnregisterised)\"
+rts/RtsUtils_CC_OPTS += -DGhcEnableTablesNextToCode=\"$(GhcEnableTablesNextToCode)\"
 
 # Compile various performance-critical pieces *without* -fPIC -dynamic
 # even when building a shared library.  If we don't do this, then the
@@ -316,8 +324,8 @@ rts/RtsUtils_CC_OPTS += -DGhcEnableTablesNextToCode=$(DQ)$(GhcEnableTablesNextTo
 # by the default small memory can't be resolved at runtime).  So we
 # only do this on i386.
 #
-# This apparently doesn't work on OS X (Darwin) where we get errors of
-# the form
+# This apparently doesn't work on OS X (Darwin) nor on Solaris.
+# On Darwin we get errors of the form
 #
 #  ld: absolute addressing (perhaps -mdynamic-no-pic) used in _stg_ap_0_fast from rts/dist/build/Apply.dyn_o not allowed in slidable image
 #
@@ -325,8 +333,27 @@ rts/RtsUtils_CC_OPTS += -DGhcEnableTablesNextToCode=$(DQ)$(GhcEnableTablesNextTo
 #
 #  ld: warning codegen in _stg_ap_pppv_fast (offset 0x0000005E) prevents image from loading in dyld shared cache
 #
+# On Solaris we get errors like:
+#
+# Text relocation remains                         referenced
+#     against symbol                  offset      in file
+# .rodata (section)                   0x11        rts/dist/build/Apply.dyn_o
+#   ...
+# ld: fatal: relocations remain against allocatable but non-writable sections
+# collect2: ld returned 1 exit status
+
 ifeq "$(TargetArch_CPP)" "i386"
-ifneq "$(TargetOS_CPP)" "darwin"
+i386_SPEED_HACK := "YES"
+ifeq "$(TargetOS_CPP)" "darwin"
+i386_SPEED_HACK := "NO"
+endif
+ifeq "$(TargetOS_CPP)" "solaris2"
+i386_SPEED_HACK := "NO"
+endif
+endif
+
+ifeq "$(TargetArch_CPP)" "i386"
+ifeq "$(i386_SPEED_HACK)" "YES"
 rts/sm/Evac_HC_OPTS           += -fno-PIC
 rts/sm/Evac_thr_HC_OPTS       += -fno-PIC
 rts/sm/Scav_HC_OPTS           += -fno-PIC
@@ -422,7 +449,7 @@ rts_dist_C_FILES = $(rts_C_SRCS) $(rts_thr_EXTRA_C_SRCS) $(rts_S_SRCS)
 # TICKY_TICKY can't be used together, so we omit TICKY_TICKY for now.
 rts_dist_MKDEPENDC_OPTS += -DPROFILING -DTHREADED_RTS -DDEBUG
 
-ifeq "$(HaveDtrace)" "YES"
+ifeq "$(USE_DTRACE)" "YES"
 
 rts_dist_MKDEPENDC_OPTS += -Irts/dist/build
 
@@ -443,15 +470,26 @@ rts_LD_OPTS     += -Llibffi/build/include
 # -----------------------------------------------------------------------------
 # compile dtrace probes if dtrace is supported
 
-ifeq "$(HaveDtrace)" "YES"
+ifeq "$(USE_DTRACE)" "YES"
 
 rts_CC_OPTS		+= -DDTRACE
 rts_HC_OPTS		+= -DDTRACE
 
-DTRACEPROBES_SRC = rts/RtsProbes.d
-$(DTRACEPROBES_H): $(DTRACEPROBES_SRC) includes/ghcplatform.h | $(dir $@)/.
-	"$(DTRACE)" $(filter -I%,$(rts_CC_OPTS)) -C -h -o $@ -s $<
+# Apple's dtrace (the only one supported by ghc at the moment) uses
+# gcc as its preprocessor. If gcc isn't at /usr/bin/gcc, or we need
+# to force it to use a different gcc, we need to give the path in
+# the option cpppath.
 
+ifeq "$(TargetOS_CPP)" "darwin"
+# Darwin has a flag to tell dtrace which cpp to use.
+# Unfortunately, this isn't supported on Solaris (See Solaris Dynamic Tracing
+# Guide, Chapter 16, for the configuration variables available on Solaris)
+DTRACE_FLAGS = -x cpppath=$(WhatGccIsCalled)
+endif
+
+DTRACEPROBES_SRC = rts/RtsProbes.d
+$(DTRACEPROBES_H): $(DTRACEPROBES_SRC) includes/ghcplatform.h | $$(dir $$@)/.
+	"$(DTRACE)" $(filter -I%,$(rts_CC_OPTS)) -C $(DTRACE_FLAGS) -h -o $@ -s $<
 endif
 
 # -----------------------------------------------------------------------------

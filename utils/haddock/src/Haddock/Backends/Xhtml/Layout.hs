@@ -112,25 +112,26 @@ divSubDecls cssClass captionName = maybe noHtml wrap
     subCaption = paragraph ! [theclass "caption"] << captionName
 
 
-subDlist :: [SubDecl] -> Maybe Html
-subDlist [] = Nothing
-subDlist decls = Just $ dlist << map subEntry decls +++ clearDiv
+subDlist :: Qualification -> [SubDecl] -> Maybe Html
+subDlist _ [] = Nothing
+subDlist qual decls = Just $ dlist << map subEntry decls +++ clearDiv
   where
     subEntry (decl, mdoc, subs) =
       dterm ! [theclass "src"] << decl
       +++
-      docElement ddef << (fmap docToHtml mdoc +++ subs)
+      docElement ddef << (fmap (docToHtml qual) mdoc +++ subs)
+
     clearDiv = thediv ! [ theclass "clear" ] << noHtml
 
 
-subTable :: [SubDecl] -> Maybe Html
-subTable [] = Nothing
-subTable decls = Just $ table << aboves (concatMap subRow decls)
+subTable :: Qualification -> [SubDecl] -> Maybe Html
+subTable _ [] = Nothing
+subTable qual decls = Just $ table << aboves (concatMap subRow decls)
   where
     subRow (decl, mdoc, subs) =
       (td ! [theclass "src"] << decl
        <->
-       docElement td << fmap docToHtml mdoc)
+       docElement td << fmap (docToHtml qual) mdoc)
       : map (cell . (td <<)) subs
 
 
@@ -139,28 +140,28 @@ subBlock [] = Nothing
 subBlock hs = Just $ toHtml hs
 
 
-subArguments :: [SubDecl] -> Html
-subArguments = divSubDecls "arguments" "Arguments" . subTable
+subArguments :: Qualification -> [SubDecl] -> Html
+subArguments qual = divSubDecls "arguments" "Arguments" . subTable qual
 
 
 subAssociatedTypes :: [Html] -> Html
 subAssociatedTypes = divSubDecls "associated-types" "Associated Types" . subBlock
 
 
-subConstructors :: [SubDecl] -> Html
-subConstructors = divSubDecls "constructors" "Constructors" . subTable
+subConstructors :: Qualification -> [SubDecl] -> Html
+subConstructors qual = divSubDecls "constructors" "Constructors" . subTable qual
 
 
-subFields :: [SubDecl] -> Html
-subFields = divSubDecls "fields" "Fields" . subDlist
+subFields :: Qualification -> [SubDecl] -> Html
+subFields qual = divSubDecls "fields" "Fields" . subDlist qual
 
 
-subInstances :: String -> [SubDecl] -> Html
-subInstances nm = maybe noHtml wrap . instTable
+subInstances :: Qualification -> String -> [SubDecl] -> Html
+subInstances qual nm = maybe noHtml wrap . instTable
   where
     wrap = (subSection <<) . (subCaption +++)
-    instTable = fmap (thediv ! collapseSection id_ True [] <<) . subTable
-    subSection = thediv ! [theclass $ "subs instances"]
+    instTable = fmap (thediv ! collapseSection id_ True [] <<) . subTable qual
+    subSection = thediv ! [theclass "subs instances"]
     subCaption = paragraph ! collapseControl id_ True "caption" << "Instances"
     id_ = makeAnchorId $ "i:" ++ nm
 

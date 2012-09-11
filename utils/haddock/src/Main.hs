@@ -1,5 +1,5 @@
 {-# OPTIONS_GHC -Wwarn #-}
-{-# LANGUAGE ForeignFunctionInterface, ScopedTypeVariables #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Main
@@ -30,7 +30,7 @@ import Haddock.Version
 import Haddock.InterfaceFile
 import Haddock.Options
 import Haddock.Utils
-import Haddock.GhcUtils
+import Haddock.GhcUtils hiding (pretty)
 
 import Control.Monad
 import Control.Exception
@@ -78,11 +78,18 @@ handleNormalExceptions inner =
   (inner `onException` hFlush stdout)
   `catches`
   [  Handler (\(code :: ExitCode) -> exitWith code)
-  ,  Handler (\(StackOverflow) -> do
-        putStrLn "stack overflow: use -g +RTS -K<size> to increase it"
-        exitFailure)
+
+  ,  Handler (\(ex :: AsyncException) ->
+       case ex of
+         StackOverflow -> do
+           putStrLn "stack overflow: use -g +RTS -K<size> to increase it"
+           exitFailure
+         _ -> do
+           putStrLn ("haddock: " ++ show ex)
+           exitFailure)
+
   ,  Handler (\(ex :: SomeException) -> do
-        putStrLn ("haddock: internal Haddock or GHC error: " ++ show ex)
+        putStrLn ("haddock: internal error: " ++ show ex)
         exitFailure)
   ]
 
@@ -103,9 +110,6 @@ handleGhcExceptions =
     hFlush stdout
     case e of
       PhaseFailed _ code -> exitWith code
-#if ! MIN_VERSION_ghc(6,13,0)
-      Interrupted -> exitFailure
-#endif
       _ -> do
         print (e :: GhcException)
         exitFailure
@@ -124,27 +128,26 @@ main = handleTopExceptions $ do
   (flags, files) <- parseHaddockOpts args
   shortcutFlags flags
 
-  if not (null files)
-    then do
-      (packages, ifaces, homeLinks) <- readPackagesAndProcessModules flags files
+  if not (null files) then do
+    (packages, ifaces, homeLinks) <- readPackagesAndProcessModules flags files
 
-      -- Dump an "interface file" (.haddock file), if requested.
-      case optDumpInterfaceFile flags of
-        Just f -> dumpInterfaceFile f (map toInstalledIface ifaces) homeLinks
-        Nothing -> return ()
+    -- Dump an "interface file" (.haddock file), if requested.
+    case optDumpInterfaceFile flags of
+      Just f -> dumpInterfaceFile f (map toInstalledIface ifaces) homeLinks
+      Nothing -> return ()
 
-      -- Render the interfaces.
-      renderStep flags packages ifaces
+    -- Render the interfaces.
+    renderStep flags packages ifaces
 
-    else do
-      when (any (`elem` [Flag_Html, Flag_Hoogle, Flag_LaTeX]) flags) $
-        throwE "No input file(s)."
+  else do
+    when (any (`elem` [Flag_Html, Flag_Hoogle, Flag_LaTeX]) flags) $
+      throwE "No input file(s)."
 
-      -- Get packages supplied with --read-interface.
-      packages <- readInterfaceFiles freshNameCache (readIfaceArgs flags)
+    -- Get packages supplied with --read-interface.
+    packages <- readInterfaceFiles freshNameCache (readIfaceArgs flags)
 
-      -- Render even though there are no input files (usually contents/index).
-      renderStep flags packages []
+    -- Render even though there are no input files (usually contents/index).
+    renderStep flags packages []
 
 
 readPackagesAndProcessModules :: [Flag] -> [String]
@@ -187,11 +190,13 @@ render flags ifaces installedIfaces srcMap = do
   let
     title                = fromMaybe "" (optTitle flags)
     unicode              = Flag_UseUnicode `elem` flags
+    pretty               = Flag_PrettyHtml `elem` flags
     opt_wiki_urls        = wikiUrls          flags
     opt_contents_url     = optContentsUrl    flags
     opt_index_url        = optIndexUrl       flags
     odir                 = outputDir         flags
     opt_latex_style      = optLaTeXStyle     flags
+    opt_qualification    = qualification     flags
 
     visibleIfaces    = [ i | i <- ifaces, OptHide `notElem` ifaceOptions i ]
 
@@ -210,25 +215,26 @@ render flags ifaces installedIfaces srcMap = do
 
   libDir   <- getHaddockLibDir flags
   prologue <- getPrologue flags
-  themes <- getThemes libDir flags >>= either bye return
+  themes   <- getThemes libDir flags >>= either bye return
 
   when (Flag_GenIndex `elem` flags) $ do
     ppHtmlIndex odir title pkgStr
                 themes opt_contents_url sourceUrls' opt_wiki_urls
-                allVisibleIfaces
+                allVisibleIfaces pretty
     copyHtmlBits odir libDir themes
 
   when (Flag_GenContents `elem` flags) $ do
     ppHtmlContents odir title pkgStr
                    themes opt_index_url sourceUrls' opt_wiki_urls
-                   allVisibleIfaces True prologue
+                   allVisibleIfaces True prologue pretty
     copyHtmlBits odir libDir themes
 
   when (Flag_Html `elem` flags) $ do
     ppHtml title pkgStr visibleIfaces odir
                 prologue
                 themes sourceUrls' opt_wiki_urls
-                opt_contents_url opt_index_url unicode
+                opt_contents_url opt_index_url unicode opt_qualification
+                pretty
     copyHtmlBits odir libDir themes
 
   when (Flag_Hoogle `elem` flags) $ do
@@ -238,6 +244,7 @@ render flags ifaces installedIfaces srcMap = do
   when (Flag_LaTeX `elem` flags) $ do
     ppLaTeX title pkgStr visibleIfaces odir prologue opt_latex_style
                   libDir
+
 
 -------------------------------------------------------------------------------
 -- * Reading and dumping interface files
@@ -396,25 +403,26 @@ getPrologue flags =
 #ifdef IN_GHC_TREE
 
 getInTreeLibDir :: IO String
-getInTreeLibDir =
-      do m <- getExecDir
-         case m of
-             Nothing -> error "No GhcLibDir found"
+getInTreeLibDir = do
+  m <- getExecDir
+  case m of
+    Nothing -> error "No GhcLibDir found"
 #ifdef NEW_GHC_LAYOUT
-             Just d -> return (d </> ".." </> "lib")
+    Just d -> return (d </> ".." </> "lib")
 #else
-             Just d -> return (d </> "..")
+    Just d -> return (d </> "..")
 #endif
 
 
 getExecDir :: IO (Maybe String)
 #if defined(mingw32_HOST_OS)
 getExecDir = allocaArray len $ \buf -> do
-    ret <- getModuleFileName nullPtr buf len
-    if ret == 0
-        then return Nothing
-        else do s <- peekCString buf
-                return (Just (dropFileName s))
+  ret <- getModuleFileName nullPtr buf len
+  if ret == 0 then
+    return Nothing
+  else do
+    s <- peekCString buf
+    return (Just (dropFileName s))
   where len = 2048 -- Plenty, PATH_MAX is 512 under Win32.
 
 

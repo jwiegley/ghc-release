@@ -79,11 +79,18 @@ createInterface tm flags modMap instIfaceMap = do
 
   let visibleNames = mkVisibleNames exportItems opts
 
+  -- measure haddock documentation coverage.
+  let
+    prunedExportItems0 = pruneExportItems exportItems
+    haddockable = 1 + length exportItems -- module + exports
+    haddocked = (if isJust mbDoc then 1 else 0) + length prunedExportItems0
+    coverage = (haddockable, haddocked)
+
   -- prune the export list to just those declarations that have
   -- documentation, if the 'prune' option is on.
   let
     prunedExportItems
-      | OptPrune `elem` opts = pruneExportItems exportItems
+      | OptPrune `elem` opts = prunedExportItems0
       | otherwise = exportItems
 
   return Interface {
@@ -101,7 +108,8 @@ createInterface tm flags modMap instIfaceMap = do
     ifaceDeclMap         = declMap,
     ifaceSubMap          = mkSubMap declMap exportedNames,
     ifaceInstances       = instances,
-    ifaceInstanceDocMap  = instanceDocMap
+    ifaceInstanceDocMap  = instanceDocMap,
+    ifaceHaddockCoverage = coverage
   }
 
 
@@ -271,13 +279,13 @@ filterOutInstances = filter (\(L _ d, _, _) -> not (isInstD d))
 -- bindings from an 'HsGroup'.
 declsFromGroup :: HsGroup Name -> [Decl]
 declsFromGroup group_ =
-  mkDecls hs_tyclds  TyClD    group_ ++
-  mkDecls hs_derivds DerivD   group_ ++
-  mkDecls hs_defds   DefD     group_ ++
-  mkDecls hs_fords   ForD     group_ ++
-  mkDecls hs_docs    DocD     group_ ++
-  mkDecls hs_instds  InstD    group_ ++
-  mkDecls (typesigs . hs_valds) SigD group_
+  mkDecls (concat . hs_tyclds)  TyClD  group_ ++
+  mkDecls hs_derivds            DerivD group_ ++
+  mkDecls hs_defds              DefD   group_ ++
+  mkDecls hs_fords              ForD   group_ ++
+  mkDecls hs_docs               DocD   group_ ++
+  mkDecls hs_instds             InstD  group_ ++
+  mkDecls (typesigs . hs_valds) SigD   group_
   where
     typesigs (ValBindsOut _ sigs) = filter isVanillaLSig sigs
     typesigs _ = error "expected ValBindsOut"
@@ -565,53 +573,52 @@ mkExportItems modMap this_mod gre exported_names decls declMap
               -- those exported type-inferenced values.
               isLocalAndTypeInferenced <- liftGhcToErrMsgGhc $ do
                     let mdl = nameModule t
-                    if modulePackageId mdl == thisPackage dflags
-                       then isLoaded (moduleName mdl)
-                       else return False
+                    if modulePackageId mdl == thisPackage dflags then
+                      isLoaded (moduleName mdl)
+                    else return False
 
-              if isLocalAndTypeInferenced
-               then do
-                   -- I don't think there can be any subs in this case,
-                   -- currently?  But better not to rely on it.
-                   let subs = subordinatesWithNoDocs (unLoc hsdecl)
-                   return [ mkExportDecl t (hsdecl, noDocForDecl, subs) ]
-               else
-              -- We try to get the subs and docs
-              -- from the installed interface of that package.
-               case Map.lookup (nameModule t) instIfaceMap of
-                -- It's Nothing in the cases where I thought
-                -- Haddock has already warned the user: "Warning: The
-                -- documentation for the following packages are not
-                -- installed. No links will be generated to these packages:
-                -- ..."
-                -- But I guess it was Cabal creating that warning. Anyway,
-                -- this is more serious than links: it's exported decls where
-                -- we don't have the docs that they deserve!
+              if isLocalAndTypeInferenced then do
+                -- I don't think there can be any subs in this case,
+                -- currently?  But better not to rely on it.
+                let subs = subordinatesWithNoDocs (unLoc hsdecl)
+                return [ mkExportDecl t (hsdecl, noDocForDecl, subs) ]
+              else
+                -- We try to get the subs and docs
+                -- from the installed interface of that package.
+                case Map.lookup (nameModule t) instIfaceMap of
+                  -- It's Nothing in the cases where I thought
+                  -- Haddock has already warned the user: "Warning: The
+                  -- documentation for the following packages are not
+                  -- installed. No links will be generated to these packages:
+                  -- ..."
+                  -- But I guess it was Cabal creating that warning. Anyway,
+                  -- this is more serious than links: it's exported decls where
+                  -- we don't have the docs that they deserve!
 
-                -- We could use 'subordinates' to find the Names of the subs
-                -- (with no docs). Is that necessary? Yes it is, otherwise
-                -- e.g. classes will be shown without their exported subs.
-                Nothing -> do
-                   liftErrMsg $ tell
-                      ["Warning: Couldn't find .haddock for exported "
-                      ++ exportInfoString]
-                   let subs = subordinatesWithNoDocs (unLoc hsdecl)
-                   return [ mkExportDecl t (hsdecl, noDocForDecl, subs) ]
-                Just iface -> do
-                   let subs = case Map.lookup t (instSubMap iface) of
-                           Nothing -> []
-                           Just x -> x
-                   return [ mkExportDecl t
-                     ( hsdecl
-                     , fromMaybe noDocForDecl $
-                          Map.lookup t (instDocMap iface)
-                     , map (\subt ->
-                              ( subt ,
-                                fromMaybe noDocForDecl $
-                                   Map.lookup subt (instDocMap iface)
-                              )
-                           ) subs
-                     )]
+                  -- We could use 'subordinates' to find the Names of the subs
+                  -- (with no docs). Is that necessary? Yes it is, otherwise
+                  -- e.g. classes will be shown without their exported subs.
+                  Nothing -> do
+                     liftErrMsg $ tell
+                        ["Warning: Couldn't find .haddock for exported "
+                        ++ exportInfoString]
+                     let subs = subordinatesWithNoDocs (unLoc hsdecl)
+                     return [ mkExportDecl t (hsdecl, noDocForDecl, subs) ]
+                  Just iface -> do
+                     let subs = case Map.lookup t (instSubMap iface) of
+                             Nothing -> []
+                             Just x -> x
+                     return [ mkExportDecl t
+                       ( hsdecl
+                       , fromMaybe noDocForDecl $
+                            Map.lookup t (instDocMap iface)
+                       , map (\subt ->
+                                ( subt ,
+                                  fromMaybe noDocForDecl $
+                                     Map.lookup subt (instDocMap iface)
+                                )
+                             ) subs
+                       )]
 
 
     mkExportDecl :: Name -> DeclInfo -> ExportItem Name

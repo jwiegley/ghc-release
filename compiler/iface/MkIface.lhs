@@ -153,7 +153,7 @@ mkIfaceTc hsc_env maybe_old_fingerprint mod_details
                       tcg_hpc = other_hpc_info
                     }
   = do
-          used_names <- mkUsedNames tc_result
+          let used_names = mkUsedNames tc_result
           deps <- mkDependencies tc_result
           let hpc_info = emptyHpcInfo other_hpc_info
           mkIface_ hsc_env maybe_old_fingerprint
@@ -161,13 +161,8 @@ mkIfaceTc hsc_env maybe_old_fingerprint mod_details
                    fix_env warns hpc_info (imp_mods imports) mod_details
         
 
-mkUsedNames :: TcGblEnv -> IO NameSet
-mkUsedNames 
-          TcGblEnv{ tcg_inst_uses = dfun_uses_var,
-                    tcg_dus = dus
-                  }
- = do { dfun_uses <- readIORef dfun_uses_var		-- What dfuns are used
-      ; return (allUses dus `unionNameSets` dfun_uses) }
+mkUsedNames :: TcGblEnv -> NameSet
+mkUsedNames TcGblEnv{ tcg_dus = dus } = allUses dus
         
 mkDependencies :: TcGblEnv -> IO Dependencies
 mkDependencies
@@ -439,7 +434,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
           | isWiredInName name  =  putNameLiterally bh name 
            -- wired-in names don't have fingerprints
           | otherwise
-          = ASSERT( isExternalName name )
+          = ASSERT2( isExternalName name, ppr name )
 	    let hash | nameModule name /= this_mod =  global_hash_fn name
                      | otherwise = 
                         snd (lookupOccEnv local_env (getOccName name)
@@ -515,7 +510,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
    dep_orphan_hashes <- getOrphanHashes hsc_env orph_mods
 
    orphan_hash <- computeFingerprint dflags (mk_put_name local_env)
-                      (map IfaceInstABI orph_insts, orph_rules, fam_insts)
+                      (map ifDFun orph_insts, orph_rules, fam_insts)
 
    -- the export list hash doesn't depend on the fingerprints of
    -- the Names it mentions, only the Names themselves, hence putNameLiterally.
@@ -630,8 +625,8 @@ The ABI of a declaration consists of:
 
 Items (c)-(f) are not stored in the IfaceDecl, but instead appear
 elsewhere in the interface file.  But they are *fingerprinted* with
-the Id itself. This is done by grouping (c)-(f) in IfaceDeclExtras,
-and fingerprinting that as part of the Id.
+the declaration itself. This is done by grouping (c)-(f) in IfaceDeclExtras,
+and fingerprinting that as part of the declaration.
 
 \begin{code}
 type IfaceDeclABI = (Module, IfaceDecl, IfaceDeclExtras)
@@ -657,10 +652,10 @@ freeNamesDeclABI (_mod, decl, extras) =
 freeNamesDeclExtras :: IfaceDeclExtras -> NameSet
 freeNamesDeclExtras (IfaceIdExtras    _ rules)
   = unionManyNameSets (map freeNamesIfRule rules)
-freeNamesDeclExtras (IfaceDataExtras  _ _insts subs)
-  = unionManyNameSets (map freeNamesSub subs)
-freeNamesDeclExtras (IfaceClassExtras _ _insts subs)
-  = unionManyNameSets (map freeNamesSub subs)
+freeNamesDeclExtras (IfaceDataExtras  _ insts subs)
+  = unionManyNameSets (mkNameSet insts : map freeNamesSub subs)
+freeNamesDeclExtras (IfaceClassExtras _ insts subs)
+  = unionManyNameSets (mkNameSet insts : map freeNamesSub subs)
 freeNamesDeclExtras (IfaceSynExtras _)
   = emptyNameSet
 freeNamesDeclExtras IfaceOtherDeclExtras
@@ -713,11 +708,11 @@ declExtras fix_fn rule_env inst_env decl
                         (lookupOccEnvL rule_env n)
       IfaceData{ifCons=cons} -> 
                      IfaceDataExtras (fix_fn n)
-                        (map IfaceInstABI $ lookupOccEnvL inst_env n)
+                        (map ifDFun $ lookupOccEnvL inst_env n)
                         (map (id_extras . ifConOcc) (visibleIfConDecls cons))
       IfaceClass{ifSigs=sigs} -> 
                      IfaceClassExtras (fix_fn n)
-                        (map IfaceInstABI $ lookupOccEnvL inst_env n)
+                        (map ifDFun $ lookupOccEnvL inst_env n)
                         [id_extras op | IfaceClassOp op _ _ <- sigs]
       IfaceSyn{} -> IfaceSynExtras (fix_fn n)
       _other -> IfaceOtherDeclExtras
@@ -726,19 +721,10 @@ declExtras fix_fn rule_env inst_env decl
         id_extras occ = (fix_fn occ, lookupOccEnvL rule_env occ)
 
 --
--- When hashing an instance, we hash only its structure, not the
--- fingerprints of the things it mentions.  See the section on instances
--- in the commentary,
---    http://hackage.haskell.org/trac/ghc/wiki/Commentary/Compiler/RecompilationAvoidance
+-- When hashing an instance, we hash only the DFunId, because that
+-- depends on all the information about the instance.
 --
-newtype IfaceInstABI = IfaceInstABI IfaceInst
-
-instance Binary IfaceInstABI where
-  get = panic "no get for IfaceInstABI"
-  put_ bh (IfaceInstABI inst) = do
-    let ud  = getUserData bh
-        bh' = setUserData bh (ud{ ud_put_name = putNameLiterally })
-    put_ bh' inst
+type IfaceInstABI = IfExtName
 
 lookupOccEnvL :: OccEnv [v] -> OccName -> [v]
 lookupOccEnvL env k = lookupOccEnv env k `orElse` []
@@ -1322,11 +1308,7 @@ tyThingToIfaceDecl (AnId id)
   = IfaceId { ifName      = getOccName id,
 	      ifType      = toIfaceType (idType id),
 	      ifIdDetails = toIfaceIdDetails (idDetails id),
-	      ifIdInfo    = info }
-  where
-    info = case toIfaceIdInfo (idInfo id) of
-		[]    -> NoInfo
-		items -> HasInfo items
+	      ifIdInfo    = toIfaceIdInfo (idInfo id) }
 
 tyThingToIfaceDecl (AClass clas)
   = IfaceClass { ifCtxt	  = toIfaceContext sc_theta,
@@ -1449,7 +1431,7 @@ instanceToIfaceInst (Instance { is_dfun = dfun_id, is_flag = oflag,
     (_, cls, tys) = tcSplitDFunTy (idType dfun_id)
 		-- Slightly awkward: we need the Class to get the fundeps
     (tvs, fds) = classTvsFds cls
-    arg_names = [filterNameSet is_local (tyClsNamesOfType ty) | ty <- tys]
+    arg_names = [filterNameSet is_local (orphNamesOfType ty) | ty <- tys]
     orph | is_local cls_name = Just (nameOccName cls_name)
 	 | all isJust mb_ns  = ASSERT( not (null mb_ns) ) head mb_ns
 	 | otherwise	     = Nothing
@@ -1482,33 +1464,26 @@ famInstToIfaceFamInst (FamInst { fi_tycon = tycon,
 toIfaceLetBndr :: Id -> IfaceLetBndr
 toIfaceLetBndr id  = IfLetBndr (occNameFS (getOccName id))
 			       (toIfaceType (idType id)) 
-			       prag_info
-  where
-	-- Stripped-down version of tcIfaceIdInfo
-	-- Change this if you want to export more IdInfo for
-	-- non-top-level Ids.  Don't forget to change
-	-- CoreTidy.tidyLetBndr too!
-	--
-	-- See Note [IdInfo on nested let-bindings] in IfaceSyn
-    id_info = idInfo id
-    inline_prag = inlinePragInfo id_info
-    prag_info | isDefaultInlinePragma inline_prag = NoInfo
-	      | otherwise		          = HasInfo [HsInline inline_prag]
+			       (toIfaceIdInfo (idInfo id))
+  -- Put into the interface file any IdInfo that CoreTidy.tidyLetBndr 
+  -- has left on the Id.  See Note [IdInfo on nested let-bindings] in IfaceSyn
 
 --------------------------
 toIfaceIdDetails :: IdDetails -> IfaceIdDetails
 toIfaceIdDetails VanillaId 		        = IfVanillaId
-toIfaceIdDetails (DFunId {})   		        = IfDFunId
+toIfaceIdDetails (DFunId ns _)                  = IfDFunId ns
 toIfaceIdDetails (RecSelId { sel_naughty = n
 		 	   , sel_tycon = tc })  = IfRecSelId (toIfaceTyCon tc) n
 toIfaceIdDetails other	     		        = pprTrace "toIfaceIdDetails" (ppr other) 
                                                   IfVanillaId   -- Unexpected
 
-toIfaceIdInfo :: IdInfo -> [IfaceInfoItem]
+toIfaceIdInfo :: IdInfo -> IfaceIdInfo
 toIfaceIdInfo id_info
-  = catMaybes [arity_hsinfo, caf_hsinfo, strict_hsinfo, 
-	       inline_hsinfo,  unfold_hsinfo] 
-	       -- NB: strictness must be before unfolding
+  = case catMaybes [arity_hsinfo, caf_hsinfo, strict_hsinfo, 
+	            inline_hsinfo,  unfold_hsinfo] of
+       []    -> NoInfo
+       infos -> HasInfo infos
+	       -- NB: strictness must appear in the list before unfolding
 	       -- See TcIface.tcUnfolding
   where
     ------------  Arity  --------------
@@ -1547,7 +1522,10 @@ toIfUnfolding lb (CoreUnfolding { uf_tmpl = rhs, uf_arity = arity
           -> case guidance of
                UnfWhen unsat_ok boring_ok -> IfInlineRule arity unsat_ok boring_ok if_rhs
                _other                     -> IfCoreUnfold True if_rhs
-	InlineWrapper w  -> IfWrapper arity (idName w)
+	InlineWrapper w | isExternalName n -> IfExtWrapper arity n
+	                | otherwise        -> IfLclWrapper arity (getFS n)
+			where
+                          n = idName w
         InlineCompulsory -> IfCompulsory if_rhs
         InlineRhs        -> IfCoreUnfold False if_rhs
 	-- Yes, even if guidance is UnfNever, expose the unfolding
@@ -1558,7 +1536,7 @@ toIfUnfolding lb (CoreUnfolding { uf_tmpl = rhs, uf_arity = arity
     if_rhs = toIfaceExpr rhs
 
 toIfUnfolding lb (DFunUnfolding _ar _con ops)
-  = Just (HsUnfold lb (IfDFunUnfold (map toIfaceExpr ops)))
+  = Just (HsUnfold lb (IfDFunUnfold (map (fmap toIfaceExpr) ops)))
       -- No need to serialise the data constructor; 
       -- we can recover it from the type of the dfun
 
@@ -1571,10 +1549,10 @@ coreRuleToIfaceRule _ (BuiltinRule { ru_fn = fn})
   = pprTrace "toHsRule: builtin" (ppr fn) $
     bogusIfaceRule fn
 
-coreRuleToIfaceRule mod (Rule { ru_name = name, ru_fn = fn, 
-                                ru_act = act, ru_bndrs = bndrs,
-	                        ru_args = args, ru_rhs = rhs, 
-                                ru_auto = auto })
+coreRuleToIfaceRule mod rule@(Rule { ru_name = name, ru_fn = fn, 
+                                     ru_act = act, ru_bndrs = bndrs,
+	                             ru_args = args, ru_rhs = rhs, 
+                                     ru_auto = auto })
   = IfaceRule { ifRuleName  = name, ifActivation = act, 
 		ifRuleBndrs = map toIfaceBndr bndrs,
 		ifRuleHead  = fn, 
@@ -1593,9 +1571,7 @@ coreRuleToIfaceRule mod (Rule { ru_name = name, ru_fn = fn,
 	-- Compute orphanhood.  See Note [Orphans] in IfaceSyn
 	-- A rule is an orphan only if none of the variables
 	-- mentioned on its left-hand side are locally defined
-    lhs_names = fn : nameSetToList (exprsFreeNames args)
-		-- No need to delete bndrs, because
-		-- exprsFreeNames finds only External names
+    lhs_names = nameSetToList (ruleLhsOrphNames rule)
 
     orph = case filter (nameIsLocalOrFrom mod) lhs_names of
 			(n : _) -> Just (nameOccName n)

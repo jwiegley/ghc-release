@@ -39,8 +39,8 @@ import TyCon
 import DataCon
 import TysWiredIn
 import TysPrim		( anyTyConOfKind )
-import Var              ( TyVar )
-import BasicTypes	( nonRuleLoopBreaker )
+import Var              ( Var, TyVar )
+import BasicTypes	( Arity, nonRuleLoopBreaker )
 import qualified Var
 import VarEnv
 import Name
@@ -871,20 +871,32 @@ tcIfaceExpr (IfaceCase scrut case_bndr ty alts)  = do
      ty' <- tcIfaceType ty
      return (Case scrut' case_bndr' ty' alts')
 
-tcIfaceExpr (IfaceLet (IfaceNonRec bndr rhs) body) = do
-    rhs' <- tcIfaceExpr rhs
-    id   <- tcIfaceLetBndr bndr
-    body' <- extendIfaceIdEnv [id] (tcIfaceExpr body)
-    return (Let (NonRec id rhs') body')
+tcIfaceExpr (IfaceLet (IfaceNonRec (IfLetBndr fs ty info) rhs) body)
+  = do	{ name 	  <- newIfaceName (mkVarOccFS fs)
+	; ty'  	  <- tcIfaceType ty
+        ; id_info <- tcIdInfo False {- Don't ignore prags; we are inside one! -}
+                              name ty' info
+	; let id = mkLocalIdWithInfo name ty' id_info
+        ; rhs' <- tcIfaceExpr rhs
+        ; body' <- extendIfaceIdEnv [id] (tcIfaceExpr body)
+        ; return (Let (NonRec id rhs') body') }
 
-tcIfaceExpr (IfaceLet (IfaceRec pairs) body) = do
-    ids <- mapM tcIfaceLetBndr bndrs
-    extendIfaceIdEnv ids $ do
-     rhss' <- mapM tcIfaceExpr rhss
-     body' <- tcIfaceExpr body
-     return (Let (Rec (ids `zip` rhss')) body')
-  where
-    (bndrs, rhss) = unzip pairs
+tcIfaceExpr (IfaceLet (IfaceRec pairs) body)
+  = do { ids <- mapM tc_rec_bndr (map fst pairs)
+       ; extendIfaceIdEnv ids $ do
+       { pairs' <- zipWithM tc_pair pairs ids
+       ; body' <- tcIfaceExpr body
+       ; return (Let (Rec pairs') body') } }
+ where
+   tc_rec_bndr (IfLetBndr fs ty _) 
+     = do { name <- newIfaceName (mkVarOccFS fs)  
+          ; ty'  <- tcIfaceType ty
+          ; return (mkLocalId name ty') }
+   tc_pair (IfLetBndr _ _ info, rhs) id
+     = do { rhs' <- tcIfaceExpr rhs
+          ; id_info <- tcIdInfo False {- Don't ignore prags; we are inside one! -}
+                                (idName id) (idType id) info
+          ; return (setIdInfo id id_info, rhs') }
 
 tcIfaceExpr (IfaceCast expr co) = do
     expr' <- tcIfaceExpr expr
@@ -974,8 +986,8 @@ do_one (IfaceRec pairs) thing_inside
 \begin{code}
 tcIdDetails :: Type -> IfaceIdDetails -> IfL IdDetails
 tcIdDetails _  IfVanillaId = return VanillaId
-tcIdDetails ty IfDFunId
-  = return (DFunId (isNewTyCon (classTyCon cls)))
+tcIdDetails ty (IfDFunId ns)
+  = return (DFunId ns (isNewTyCon (classTyCon cls)))
   where
     (_, cls, _) = tcSplitDFunTy ty
 
@@ -1038,8 +1050,26 @@ tcUnfolding name _ _ (IfInlineRule arity unsat_ok boring_ok if_expr)
                                                  (UnfWhen unsat_ok boring_ok))
     }
 
-tcUnfolding name ty info (IfWrapper arity wkr)
-  = do 	{ mb_wkr_id <- forkM_maybe doc (tcIfaceExtId wkr)
+tcUnfolding name dfun_ty _ (IfDFunUnfold ops)
+  = do { mb_ops1 <- forkM_maybe doc $ mapM tc_arg ops
+       ; return (case mb_ops1 of
+       	 	    Nothing   -> noUnfolding
+                    Just ops1 -> mkDFunUnfolding dfun_ty ops1) }
+  where
+    doc = text "Class ops for dfun" <+> ppr name
+    tc_arg (DFunPolyArg  e) = do { e' <- tcIfaceExpr e; return (DFunPolyArg e') }
+    tc_arg (DFunConstArg e) = do { e' <- tcIfaceExpr e; return (DFunConstArg e') }
+    tc_arg (DFunLamArg i)   = return (DFunLamArg i)
+
+tcUnfolding name ty info (IfExtWrapper arity wkr)
+  = tcIfaceWrapper name ty info arity (tcIfaceExtId wkr)
+tcUnfolding name ty info (IfLclWrapper arity wkr)
+  = tcIfaceWrapper name ty info arity (tcIfaceLclId wkr)
+
+-------------
+tcIfaceWrapper :: Name -> Type -> IdInfo -> Arity -> IfL Id -> IfL Unfolding
+tcIfaceWrapper name ty info arity get_worker
+  = do 	{ mb_wkr_id <- forkM_maybe doc get_worker
 	; us <- newUniqueSupply
 	; return (case mb_wkr_id of
 		     Nothing     -> noUnfolding
@@ -1056,15 +1086,7 @@ tcUnfolding name ty info (IfWrapper arity wkr)
 	-- before unfolding
     strict_sig = case strictnessInfo info of
 		   Just sig -> sig
-		   Nothing  -> pprPanic "Worker info but no strictness for" (ppr wkr)
-
-tcUnfolding name dfun_ty _ (IfDFunUnfold ops)
-  = do { mb_ops1 <- forkM_maybe doc $ mapM tcIfaceExpr ops
-       ; return (case mb_ops1 of
-       	 	    Nothing   -> noUnfolding
-                    Just ops1 -> mkDFunUnfolding dfun_ty ops1) }
-  where
-    doc = text "Class ops for dfun" <+> ppr name
+		   Nothing  -> pprPanic "Worker info but no strictness for" (ppr name)
 \end{code}
 
 For unfoldings we try to do the job lazily, so that we never type check
@@ -1078,22 +1100,30 @@ tcPragExpr name expr
 
                 -- Check for type consistency in the unfolding
     ifDOptM Opt_DoCoreLinting $ do
-        in_scope <- get_in_scope_ids
+        in_scope <- get_in_scope
         case lintUnfolding noSrcLoc in_scope core_expr' of
           Nothing       -> return ()
-          Just fail_msg -> pprPanic "Iface Lint failure" (hang doc 2 fail_msg)
-
+          Just fail_msg -> do { mod <- getIfModule 
+                              ; pprPanic "Iface Lint failure" 
+                                  (vcat [ ptext (sLit "In interface for") <+> ppr mod
+                                        , hang doc 2 fail_msg
+                                        , ppr name <+> equals <+> ppr core_expr'
+                                        , ptext (sLit "Iface expr =") <+> ppr expr ]) }
     return core_expr'
   where
     doc = text "Unfolding of" <+> ppr name
-    get_in_scope_ids 	-- Urgh; but just for linting
-	= setLclEnv () $ 
-	  do	{ env <- getGblEnv 
-		; case if_rec_types env of {
-			  Nothing -> return [] ;
-			  Just (_, get_env) -> do
-		{ type_env <- get_env
-		; return (typeEnvIds type_env) }}}
+
+    get_in_scope :: IfL [Var] -- Totally disgusting; but just for linting
+    get_in_scope 	
+	= do { (gbl_env, lcl_env) <- getEnvs
+             ; rec_ids <- case if_rec_types gbl_env of
+                            Nothing -> return []
+                            Just (_, get_env) -> do
+                               { type_env <- setLclEnv () get_env
+                               ; return (typeEnvIds type_env) }
+             ; return (varEnvElts (if_tv_env lcl_env) ++
+                       varEnvElts (if_id_env lcl_env) ++
+                       rec_ids) }
 \end{code}
 
 
@@ -1222,24 +1252,6 @@ bindIfaceBndrs (b:bs) thing_inside
   = bindIfaceBndr b	$ \ b' ->
     bindIfaceBndrs bs	$ \ bs' ->
     thing_inside (b':bs')
-
-
------------------------
-tcIfaceLetBndr :: IfaceLetBndr -> IfL Id
-tcIfaceLetBndr (IfLetBndr fs ty info)
-  = do	{ name <- newIfaceName (mkVarOccFS fs)
-	; ty' <- tcIfaceType ty
-	; case info of
-		NoInfo    -> return (mkLocalId name ty')
-		HasInfo i -> return (mkLocalIdWithInfo name ty' (tc_info i)) } 
-  where
-	-- Similar to tcIdInfo, but much simpler
-    tc_info [] = vanillaIdInfo
-    tc_info (HsInline p     : i) = tc_info i `setInlinePragInfo` p 
-    tc_info (HsArity a      : i) = tc_info i `setArityInfo` a 
-    tc_info (HsStrictness s : i) = tc_info i `setStrictnessInfo` Just s 
-    tc_info (other          : i) = pprTrace "tcIfaceLetBndr: discarding unexpected IdInfo" 
-					    (ppr other) (tc_info i)
 
 -----------------------
 newExtCoreBndr :: IfaceLetBndr -> IfL Id

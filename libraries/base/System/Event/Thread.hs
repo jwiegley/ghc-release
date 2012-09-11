@@ -5,20 +5,26 @@ module System.Event.Thread
       ensureIOManagerIsRunning
     , threadWaitRead
     , threadWaitWrite
+    , closeFdWith
     , threadDelay
     , registerDelay
     ) where
 
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (Maybe(..))
+import Foreign.C.Error (eBADF, errnoToIOError)
 import Foreign.Ptr (Ptr)
 import GHC.Base
 import GHC.Conc.Sync (TVar, ThreadId, ThreadStatus(..), atomically, forkIO,
                       labelThread, modifyMVar_, newTVar, sharedCAF,
                       threadStatus, writeTVar)
+import GHC.IO (mask_, onException)
+import GHC.IO.Exception (ioError)
 import GHC.MVar (MVar, newEmptyMVar, newMVar, putMVar, takeMVar)
+import System.Event.Internal (eventIs, evtClose)
 import System.Event.Manager (Event, EventManager, evtRead, evtWrite, loop,
                              new, registerFd, unregisterFd_, registerTimeout)
+import qualified System.Event.Manager as M
 import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.Types (Fd)
 
@@ -29,11 +35,11 @@ import System.Posix.Types (Fd)
 -- when the delay has expired, but the thread will never continue to
 -- run /earlier/ than specified.
 threadDelay :: Int -> IO ()
-threadDelay usecs = do
+threadDelay usecs = mask_ $ do
   Just mgr <- readIORef eventManager
   m <- newEmptyMVar
-  _ <- registerTimeout mgr usecs (putMVar m ())
-  takeMVar m
+  reg <- registerTimeout mgr usecs (putMVar m ())
+  takeMVar m `onException` M.unregisterTimeout mgr reg
 
 -- | Set the value of returned TVar to True after a given number of
 -- microseconds. The caveats associated with threadDelay also apply.
@@ -47,22 +53,45 @@ registerDelay usecs = do
 
 -- | Block the current thread until data is available to read from the
 -- given file descriptor.
+--
+-- This will throw an 'IOError' if the file descriptor was closed
+-- while this thread was blocked.  To safely close a file descriptor
+-- that has been used with 'threadWaitRead', use 'closeFdWith'.
 threadWaitRead :: Fd -> IO ()
 threadWaitRead = threadWait evtRead
 {-# INLINE threadWaitRead #-}
 
 -- | Block the current thread until the given file descriptor can
 -- accept data to write.
+--
+-- This will throw an 'IOError' if the file descriptor was closed
+-- while this thread was blocked.  To safely close a file descriptor
+-- that has been used with 'threadWaitWrite', use 'closeFdWith'.
 threadWaitWrite :: Fd -> IO ()
 threadWaitWrite = threadWait evtWrite
 {-# INLINE threadWaitWrite #-}
 
+-- | Close a file descriptor in a concurrency-safe way.
+--
+-- Any threads that are blocked on the file descriptor via
+-- 'threadWaitRead' or 'threadWaitWrite' will be unblocked by having
+-- IO exceptions thrown.
+closeFdWith :: (Fd -> IO ())        -- ^ Action that performs the close.
+            -> Fd                   -- ^ File descriptor to close.
+            -> IO ()
+closeFdWith close fd = do
+  Just mgr <- readIORef eventManager
+  M.closeFd mgr close fd
+
 threadWait :: Event -> Fd -> IO ()
-threadWait evt fd = do
+threadWait evt fd = mask_ $ do
   m <- newEmptyMVar
   Just mgr <- readIORef eventManager
-  _ <- registerFd mgr (\reg _ -> unregisterFd_ mgr reg >> putMVar m ()) fd evt
-  takeMVar m
+  reg <- registerFd mgr (\reg e -> unregisterFd_ mgr reg >> putMVar m e) fd evt
+  evt' <- takeMVar m `onException` unregisterFd_ mgr reg
+  if evt' `eventIs` evtClose
+    then ioError $ errnoToIOError "threadWait" eBADF Nothing Nothing
+    else return ()
 
 foreign import ccall unsafe "getOrSetSystemEventThreadEventManagerStore"
     getOrSetSystemEventThreadEventManagerStore :: Ptr a -> IO (Ptr a)
@@ -98,7 +127,17 @@ ensureIOManagerIsRunning
       s <- threadStatus t
       case s of
         ThreadFinished -> create
-        ThreadDied     -> create
+        ThreadDied     -> do 
+          -- Sanity check: if the thread has died, there is a chance
+          -- that event manager is still alive. This could happend during
+          -- the fork, for example. In this case we should clean up
+          -- open pipes and everything else related to the event manager.
+          -- See #4449
+          mem <- readIORef eventManager
+          _ <- case mem of
+                 Nothing -> return ()
+                 Just em -> M.cleanup em
+          create
         _other         -> return st
 
 foreign import ccall unsafe "rtsSupportsBoundThreads" threaded :: Bool

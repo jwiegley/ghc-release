@@ -56,6 +56,9 @@
 #include <errno.h>
 #endif
 
+#ifdef TRACING
+#include "eventlog/EventLog.h"
+#endif
 /* -----------------------------------------------------------------------------
  * Global variables
  * -------------------------------------------------------------------------- */
@@ -1022,6 +1025,10 @@ scheduleHandleHeapOverflow( Capability *cap, StgTSO *t )
 	
 	blocks = (lnat)BLOCK_ROUND_UP(cap->r.rHpAlloc) / BLOCK_SIZE;
 	
+        if (blocks > BLOCKS_PER_MBLOCK) {
+            barf("allocation of %ld bytes too large (GHC should have complained at compile-time)", (long)cap->r.rHpAlloc);
+        }
+
 	debugTrace(DEBUG_sched,
 		   "--<< thread %ld (%s) stopped: requesting a large block (size %ld)\n", 
 		   (long)t->id, what_next_strs[t->what_next], blocks);
@@ -1535,6 +1542,10 @@ forkProcess(HsStablePtr *entry
 
     stopTimer(); // See #4074
 
+#if defined(TRACING)
+    flushEventLog(); // so that child won't inherit dirty file buffers
+#endif
+
     pid = fork();
     
     if (pid) { // parent
@@ -1557,7 +1568,11 @@ forkProcess(HsStablePtr *entry
         initMutex(&cap->running_task->lock);
 #endif
 
-	// Now, all OS threads except the thread that forked are
+#ifdef TRACING
+        resetTracing();
+#endif
+
+        // Now, all OS threads except the thread that forked are
 	// stopped.  We need to stop all Haskell threads, including
 	// those involved in foreign calls.  Also we need to delete
 	// all Tasks, because they correspond to OS threads that are

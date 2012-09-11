@@ -73,7 +73,7 @@ module Distribution.Simple.Setup (
   TestFlags(..),     emptyTestFlags,     defaultTestFlags,     testCommand,
   TestShowDetails(..),
   CopyDest(..),
-  configureArgs, configureOptions,
+  configureArgs, configureOptions, configureCCompiler, configureLinker,
   installDirsOptions,
 
   defaultDistPref,
@@ -103,9 +103,11 @@ import Distribution.Simple.Compiler
 import Distribution.Simple.Utils
          ( wrapLine, lowercase, intercalate )
 import Distribution.Simple.Program (Program(..), ProgramConfiguration,
+                             requireProgram,
+                             programInvocation, progInvokePath, progInvokeArgs,
                              knownPrograms,
                              addKnownProgram, emptyProgramConfiguration,
-                             haddockProgram, ghcProgram)
+                             haddockProgram, ghcProgram, gccProgram, ldProgram)
 import Distribution.Simple.InstallDirs
          ( InstallDirs(..), CopyDest(..),
            PathTemplate, toPathTemplate, fromPathTemplate )
@@ -966,6 +968,7 @@ data HaddockFlags = HaddockFlags {
     haddockProgramPaths :: [(String, FilePath)],
     haddockProgramArgs  :: [(String, [String])],
     haddockHoogle       :: Flag Bool,
+    haddockHtml         :: Flag Bool,
     haddockHtmlLocation :: Flag String,
     haddockExecutables  :: Flag Bool,
     haddockInternal     :: Flag Bool,
@@ -982,6 +985,7 @@ defaultHaddockFlags  = HaddockFlags {
     haddockProgramPaths = mempty,
     haddockProgramArgs  = [],
     haddockHoogle       = Flag False,
+    haddockHtml         = Flag False,
     haddockHtmlLocation = NoFlag,
     haddockExecutables  = Flag False,
     haddockInternal     = Flag False,
@@ -1007,6 +1011,11 @@ haddockCommand = makeCommand name shortDesc longDesc defaultHaddockFlags options
       ,option "" ["hoogle"]
          "Generate a hoogle database"
          haddockHoogle (\v flags -> flags { haddockHoogle = v })
+         trueArg
+
+      ,option "" ["html"]
+         "Generate HTML documentation (the default)"
+         haddockHtml (\v flags -> flags { haddockHtml = v })
          trueArg
 
       ,option "" ["html-location"]
@@ -1055,6 +1064,7 @@ instance Monoid HaddockFlags where
     haddockProgramPaths = mempty,
     haddockProgramArgs  = mempty,
     haddockHoogle       = mempty,
+    haddockHtml         = mempty,
     haddockHtmlLocation = mempty,
     haddockExecutables  = mempty,
     haddockInternal     = mempty,
@@ -1068,6 +1078,7 @@ instance Monoid HaddockFlags where
     haddockProgramPaths = combine haddockProgramPaths,
     haddockProgramArgs  = combine haddockProgramArgs,
     haddockHoogle       = combine haddockHoogle,
+    haddockHtml         = combine haddockHoogle,
     haddockHtmlLocation = combine haddockHtmlLocation,
     haddockExecutables  = combine haddockExecutables,
     haddockInternal     = combine haddockInternal,
@@ -1226,7 +1237,7 @@ data TestFlags = TestFlags {
     --TODO: eliminate the test list and pass it directly as positional args to the testHook
     testList :: Flag [String],
     -- TODO: think about if/how options are passed to test exes
-    testOptions :: Flag [String]
+    testOptions :: Flag [PathTemplate]
   }
 
 defaultTestFlags :: TestFlags
@@ -1277,14 +1288,20 @@ testCommand = makeCommand name shortDesc longDesc defaultTestFlags options
                             (fmap toFlag parse))
                 (flagToList . fmap display))
       , option [] ["test-options"]
-            "give extra options to test executables"
+            ("give extra options to test executables "
+             ++ "(name templates can use $pkgid, $compiler, "
+             ++ "$os, $arch, $test-suite)")
             testOptions (\v flags -> flags { testOptions = v })
-            (reqArg' "OPTS" (toFlag . splitArgs) (fromFlagOrDefault []))
+            (reqArg' "TEMPLATES" (toFlag . map toPathTemplate . splitArgs)
+                (map fromPathTemplate . fromFlagOrDefault []))
       , option [] ["test-option"]
             ("give extra option to test executables "
-            ++ "(no need to quote options containing spaces)")
+             ++ "(no need to quote options containing spaces, "
+             ++ "name template can use $pkgid, $compiler, "
+             ++ "$os, $arch, $test-suite)")
             testOptions (\v flags -> flags { testOptions = v })
-            (reqArg' "OPT" (\x -> toFlag [x]) (fromFlagOrDefault []))
+            (reqArg' "TEMPLATE" (\x -> toFlag [toPathTemplate x])
+                (map fromPathTemplate . fromFlagOrDefault []))
       ]
 
 emptyTestFlags :: TestFlags
@@ -1445,6 +1462,18 @@ configureArgs bcHack flags
         optFlag' name config_field = optFlag name (fmap fromPathTemplate
                                                  . config_field
                                                  . configInstallDirs)
+
+configureCCompiler :: Verbosity -> ProgramConfiguration -> IO (FilePath, [String])
+configureCCompiler verbosity lbi = configureProg verbosity lbi gccProgram
+
+configureLinker :: Verbosity -> ProgramConfiguration -> IO (FilePath, [String])
+configureLinker verbosity lbi = configureProg verbosity lbi ldProgram
+
+configureProg :: Verbosity -> ProgramConfiguration -> Program -> IO (FilePath, [String])
+configureProg verbosity programConfig prog = do
+    (p, _) <- requireProgram verbosity prog programConfig
+    let pInv = programInvocation p []
+    return (progInvokePath pInv, progInvokeArgs pInv)
 
 -- | Helper function to split a string into a list of arguments.
 -- It's supposed to handle quoted things sensibly, eg:

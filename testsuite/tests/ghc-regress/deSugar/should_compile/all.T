@@ -69,10 +69,17 @@ test('ds062', normal, compile, [''])
 test('ds063', normal, compile, [''])
 
 test('T2409', normal, compile, [''])
-test('T3263-1', if_compiler_lt('ghc', '6.11', expect_fail), compile, ['-fwarn-unused-do-bind -XRecursiveDo'])
-test('T3263-2', if_compiler_lt('ghc', '6.11', expect_fail), compile, ['-fwarn-wrong-do-bind -XScopedTypeVariables -XRecursiveDo'])
+test('T3263-1', normal, compile, ['-fwarn-unused-do-bind -XRecursiveDo'])
+test('T3263-2', normal, compile, ['-fwarn-wrong-do-bind -XScopedTypeVariables -XRecursiveDo'])
 
 test('GadtOverlap', normal, compile, ['-Wall'])
 test('T2395', normal, compile, [''])
 test('T4371', normal, compile, [''])
 test('T4439', normal, compile, [''])
+test('T4488', if_compiler_lt('ghc', '7.1', expect_fail), compile, [''])
+test('T4870',
+     [only_ways(['optc','optasm']),
+      only_compiler_types(['ghc']),
+      extra_clean(['T4870a.hi', 'T4870a.o'])],
+     multimod_compile,
+     ['T4870', '-v0'])

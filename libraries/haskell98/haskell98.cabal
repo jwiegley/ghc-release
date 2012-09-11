@@ -1,5 +1,5 @@
 name:		haskell98
-version:	1.1.0.0
+version:	1.1.0.1
 license:	BSD3
 license-file:	LICENSE
 maintainer:	libraries@haskell.org
@@ -17,8 +17,13 @@ build-type:     Simple
 Cabal-Version: >= 1.6
 
 Library
-    build-depends:	base >= 3 && < 5,
-                    directory, random, old-time, old-locale, process, array
+    build-depends:	base        >= 3   && < 5,
+                    directory   >= 1.1 && < 1.2,
+                    random      >= 1.0 && < 1.1,
+                    old-time    >= 1.0 && < 1.1,
+                    old-locale  >= 1.0 && < 1.1,
+                    process     >= 1.0 && < 1.1,
+                    array       >= 0.3 && < 0.4
     exposed-modules:
         -- Haskell 98 (Prelude and Numeric are in the base package)
         Array, CPUTime, Char, Complex, Directory, IO, Ix, List, Locale,

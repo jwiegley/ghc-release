@@ -14,6 +14,7 @@ module System.Event.Manager
     , loop
     , step
     , shutdown
+    , cleanup
     , wakeManager
 
       -- * Registering interest in I/O events
@@ -26,7 +27,7 @@ module System.Event.Manager
     , registerFd
     , unregisterFd_
     , unregisterFd
-    , fdWasClosed
+    , closeFd
 
       -- * Registering interest in timeout events
     , TimeoutCallback
@@ -41,14 +42,13 @@ module System.Event.Manager
 ------------------------------------------------------------------------
 -- Imports
 
-import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar,
-                                readMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, readMVar)
 import Control.Exception (finally)
 import Control.Monad ((=<<), forM_, liftM, sequence_, when)
 import Data.IORef (IORef, atomicModifyIORef, mkWeakIORef, newIORef, readIORef,
                    writeIORef)
 import Data.Maybe (Maybe(..))
-import Data.Monoid (mconcat, mempty)
+import Data.Monoid (mappend, mconcat, mempty)
 import GHC.Base
 import GHC.Conc.Signal (runHandlers)
 import GHC.List (filter)
@@ -57,7 +57,8 @@ import GHC.Real ((/), fromIntegral )
 import GHC.Show (Show(..))
 import System.Event.Clock (getCurrentTime)
 import System.Event.Control
-import System.Event.Internal (Backend, Event, evtRead, evtWrite, Timeout(..))
+import System.Event.Internal (Backend, Event, evtClose, evtRead, evtWrite,
+                              Timeout(..))
 import System.Event.Unique (Unique, UniqueSource, newSource, newUnique)
 import System.Posix.Types (Fd)
 
@@ -96,6 +97,7 @@ type IOCallback = FdKey -> Event -> IO ()
 instance Show IOCallback where
     show _ = "IOCallback"
 
+-- | A timeout registration cookie.
 newtype TimeoutKey   = TK Unique
     deriving (Eq)
 
@@ -217,7 +219,8 @@ cleanup EventManager{..} = do
 ------------------------------------------------------------------------
 -- Event loop
 
--- | Start handling events.  This function loops until told to stop.
+-- | Start handling events.  This function loops until told to stop,
+-- using 'shutdown'.
 --
 -- /Note/: This loop can only be run once per 'EventManager', as it
 -- closes all of its control resources when it finishes.
@@ -331,20 +334,25 @@ unregisterFd mgr reg = do
   wake <- unregisterFd_ mgr reg
   when wake $ wakeManager mgr
 
--- | Notify the event manager that a file descriptor has been closed.
-fdWasClosed :: EventManager -> Fd -> IO ()
-fdWasClosed mgr fd =
-  modifyMVar_ (emFds mgr) $ \oldMap ->
+-- | Close a file descriptor in a race-safe way.
+closeFd :: EventManager -> (Fd -> IO ()) -> Fd -> IO ()
+closeFd mgr close fd = do
+  fds <- modifyMVar (emFds mgr) $ \oldMap -> do
+    close fd
     case IM.delete (fromIntegral fd) oldMap of
-      (Nothing,  _)       -> return oldMap
+      (Nothing,  _)       -> return (oldMap, [])
       (Just fds, !newMap) -> do
         when (eventsOf fds /= mempty) $ wakeManager mgr
-        return newMap
+        return (newMap, fds)
+  forM_ fds $ \(FdData reg ev cb) -> cb reg (ev `mappend` evtClose)
 
 ------------------------------------------------------------------------
 -- Registering interest in timeout events
 
--- | Register a timeout in the given number of microseconds.
+-- | Register a timeout in the given number of microseconds.  The
+-- returned 'TimeoutKey' can be used to later unregister or update the
+-- timeout.  The timeout is automatically unregistered after the given
+-- time has passed.
 registerTimeout :: EventManager -> Int -> TimeoutCallback -> IO TimeoutKey
 registerTimeout mgr us cb = do
   !key <- newUnique (emUniqueSource mgr)
@@ -363,12 +371,15 @@ registerTimeout mgr us cb = do
       wakeManager mgr
   return $ TK key
 
+-- | Unregister an active timeout.
 unregisterTimeout :: EventManager -> TimeoutKey -> IO ()
 unregisterTimeout mgr (TK key) = do
   atomicModifyIORef (emTimeouts mgr) $ \f ->
       let f' = (Q.delete key) . f in (f', ())
   wakeManager mgr
 
+-- | Update an active timeout to fire in the given number of
+-- microseconds.
 updateTimeout :: EventManager -> TimeoutKey -> Int -> IO ()
 updateTimeout mgr (TK key) us = do
   now <- getCurrentTime

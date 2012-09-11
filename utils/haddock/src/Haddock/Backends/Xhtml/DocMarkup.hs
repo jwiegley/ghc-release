@@ -64,20 +64,20 @@ parHtmlMarkup ppId isTyCon = Markup {
       | isTyCon x = x
       | otherwise = y
 
-    examplesToHtml l = (pre $ concatHtml $ map exampleToHtml l) ! [theclass "screen"]
+    examplesToHtml l = pre (concatHtml $ map exampleToHtml l) ! [theclass "screen"]
 
     exampleToHtml (Example expression result) = htmlExample
       where
-        htmlExample = htmlPrompt +++ htmlExpression +++ (toHtml $ unlines result)
+        htmlExample = htmlPrompt +++ htmlExpression +++ toHtml (unlines result)
         htmlPrompt = (thecode . toHtml $ ">>> ") ! [theclass "prompt"]
         htmlExpression = (strong . thecode . toHtml $ expression ++ "\n") ! [theclass "userinput"]
 
 
 -- If the doc is a single paragraph, don't surround it with <P> (this causes
 -- ugly extra whitespace with some browsers).  FIXME: Does this still apply?
-docToHtml :: Doc DocName -> Html
-docToHtml = markup fmt . cleanup
-  where fmt = parHtmlMarkup ppDocName (isTyConName . getName)
+docToHtml :: Qualification -> Doc DocName -> Html
+docToHtml qual = markup fmt . cleanup
+  where fmt = parHtmlMarkup (ppDocName qual) (isTyConName . getName)
 
 
 origDocToHtml :: Doc Name -> Html
@@ -97,12 +97,12 @@ docElement el content_ =
     else el ! [theclass "doc"] << content_
 
 
-docSection :: Doc DocName -> Html
-docSection = (docElement thediv <<) . docToHtml
+docSection :: Qualification -> Doc DocName -> Html
+docSection qual = (docElement thediv <<) . docToHtml qual
 
 
-maybeDocSection :: Maybe (Doc DocName) -> Html
-maybeDocSection = maybe noHtml docSection
+maybeDocSection :: Qualification -> Maybe (Doc DocName) -> Html
+maybeDocSection qual = maybe noHtml (docSection qual)
 
 
 cleanup :: Doc a -> Doc a

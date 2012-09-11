@@ -34,9 +34,7 @@ test('spec002', normal, compile, [''])
 test('spec003', normal, compile, [''])
 
 test('rule1', normal, compile, [''])
-test('rule2', [only_ways(['optc','optasm']),
-               if_compiler_lt('ghc', '6.13', expect_fail)],
-              compile, ['-dsuppress-uniques'])
+test('rule2', only_ways(['optc','optasm']), compile, ['-dsuppress-uniques'])
 
 test('dfun-loop', normal, compile, [''])
 test('strict-float', normal, compile, [''])
@@ -61,10 +59,17 @@ test('T3717', only_ways(['optc','optasm']),
 test('spec-inline', only_ways(['optc','optasm']), 
               	    compile, 
               	    ['-O2 -ddump-simpl -dsuppress-uniques'])
+test('T4908', only_ways(['optc','optasm']), 
+              compile, 
+              ['-O2 -ddump-simpl -dsuppress-uniques'])
+
+test('T4930', [if_compiler_lt('ghc', '7.1', expect_fail),
+               only_ways(['optc','optasm'])],
+              compile, 
+              ['-O -ddump-simpl -dsuppress-uniques'])
 
 test('T3055',
-     [extra_clean(['T3055.hi', 'T3055.o', 'T3055.simpl']),
-      if_compiler_lt('ghc', '6.11', expect_fail)],
+     extra_clean(['T3055.hi', 'T3055.o', 'T3055.simpl']),
      run_command,
      ['$MAKE -s --no-print-directory T3055'])
 
@@ -83,6 +88,26 @@ test('T3772',
      extra_clean(['T3772_A.hi', 'T3772_A.o']),
      run_command, ['$MAKE -s --no-print-directory T3772'])
 
+test('EvalTest',
+     normal,
+     run_command, 
+     ['$MAKE -s --no-print-directory EvalTest'])
+
 test('T3831', normal, compile, [''])
 test('T4345', normal, compile, [''])
 test('T4398', normal, compile, [''])
+
+test('T4903',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T4903'])
+
+test('T4918',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T4918'])
+
+test('T4945',
+     if_compiler_lt('ghc', '7.1', expect_fail),
+     run_command,
+     ['$MAKE -s --no-print-directory T4945'])

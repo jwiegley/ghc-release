@@ -59,13 +59,15 @@ module BasicTypes(
 
 	DefMethSpec(..),
 
-	CompilerPhase, 
-	Activation(..), isActive, isNeverActive, isAlwaysActive, isEarlyActive,
+        CompilerPhase(..), PhaseNum,
+        Activation(..), isActive, isActiveIn,
+        isNeverActive, isAlwaysActive, isEarlyActive,
         RuleMatchInfo(..), isConLike, isFunLike, 
         InlineSpec(..), 
         InlinePragma(..), defaultInlinePragma, alwaysInlinePragma, 
         neverInlinePragma, dfunInlinePragma, 
-	isDefaultInlinePragma, isInlinePragma, isInlinablePragma,
+	isDefaultInlinePragma, 
+        isInlinePragma, isInlinablePragma, isAnyInlinePragma,
         inlinePragmaSpec, inlinePragmaSat,
         inlinePragmaActivation, inlinePragmaRuleMatchInfo,
         setInlinePragmaActivation, setInlinePragmaRuleMatchInfo,
@@ -636,14 +638,22 @@ failed Failed    = True
 When a rule or inlining is active
 
 \begin{code}
-type CompilerPhase = Int	-- Compilation phase
-				-- Phases decrease towards zero
-				-- Zero is the last phase
+type PhaseNum = Int  -- Compilation phase
+                     -- Phases decrease towards zero
+                     -- Zero is the last phase
+
+data CompilerPhase
+  = Phase PhaseNum
+  | InitialPhase    -- The first phase -- number = infinity!
+
+instance Outputable CompilerPhase where
+   ppr (Phase n)    = int n
+   ppr InitialPhase = ptext (sLit "InitialPhase")
 
 data Activation = NeverActive
 		| AlwaysActive
-		| ActiveBefore CompilerPhase	-- Active only *before* this phase
-		| ActiveAfter CompilerPhase	-- Active in this phase and later
+                | ActiveBefore PhaseNum -- Active only *before* this phase
+                | ActiveAfter PhaseNum  -- Active in this phase and later
 		deriving( Eq, Data, Typeable )	-- Eq used in comparing rules in HsDecls
 
 data RuleMatchInfo = ConLike 			-- See Note [CONLIKE pragma]
@@ -736,11 +746,6 @@ isFunLike :: RuleMatchInfo -> Bool
 isFunLike FunLike = True
 isFunLike _            = False
 
-isInlineSpec :: InlineSpec -> Bool
-isInlineSpec Inline    = True
-isInlineSpec Inlinable = True
-isInlineSpec _         = False
-
 isEmptyInlineSpec :: InlineSpec -> Bool
 isEmptyInlineSpec EmptyInlineSpec = True
 isEmptyInlineSpec _               = False
@@ -772,13 +777,22 @@ isDefaultInlinePragma (InlinePragma { inl_act = activation
   = isEmptyInlineSpec inline && isAlwaysActive activation && isFunLike match_info
 
 isInlinePragma :: InlinePragma -> Bool
-isInlinePragma prag = isInlineSpec (inl_inline prag)
+isInlinePragma prag = case inl_inline prag of
+                        Inline -> True
+                        _      -> False
 
 isInlinablePragma :: InlinePragma -> Bool
 isInlinablePragma prag = case inl_inline prag of
                            Inlinable -> True
                            _         -> False
 
+isAnyInlinePragma :: InlinePragma -> Bool
+-- INLINE or INLINABLE
+isAnyInlinePragma prag = case inl_inline prag of
+                        Inline    -> True
+                        Inlinable -> True
+                        _         -> False
+ 
 inlinePragmaSat :: InlinePragma -> Maybe Arity
 inlinePragmaSat = inl_sat
 
@@ -825,10 +839,16 @@ instance Outputable InlinePragma where
               | otherwise      = ppr info
 
 isActive :: CompilerPhase -> Activation -> Bool
-isActive _ NeverActive      = False
-isActive _ AlwaysActive     = True
-isActive p (ActiveAfter n)  = p <= n
-isActive p (ActiveBefore n) = p >  n
+isActive InitialPhase AlwaysActive      = True
+isActive InitialPhase (ActiveBefore {}) = True
+isActive InitialPhase _                 = False
+isActive (Phase p)    act               = isActiveIn p act
+
+isActiveIn :: PhaseNum -> Activation -> Bool
+isActiveIn _ NeverActive      = False
+isActiveIn _ AlwaysActive     = True
+isActiveIn p (ActiveAfter n)  = p <= n
+isActiveIn p (ActiveBefore n) = p >  n
 
 isNeverActive, isAlwaysActive, isEarlyActive :: Activation -> Bool
 isNeverActive NeverActive = True

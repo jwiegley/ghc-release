@@ -446,7 +446,7 @@ data EvTerm
   | EvCast EvVar Coercion      -- d |> co
 
   | EvDFunApp DFunId           -- Dictionary instance application
-       [Type] [EvVar]  
+       [Type] [EvVar] 
 
   | EvSuperClass DictId Int    -- n'th superclass. Used for both equalities and
                                -- dictionaries, even though the former have no
@@ -573,8 +573,7 @@ instance Outputable EvTerm where
   ppr (EvCast v co)   	 = ppr v <+> (ptext (sLit "`cast`")) <+> pprParendType co
   ppr (EvCoercion co)    = ppr co
   ppr (EvSuperClass d n) = ptext (sLit "sc") <> parens (ppr (d,n))
-  ppr (EvDFunApp df tys ts) = ppr df <+> sep [ char '@' <> ppr tys
-                                             , ppr ts ]
+  ppr (EvDFunApp df tys ts) = ppr df <+> sep [ char '@' <> ppr tys, ppr ts ]
 \end{code}
 
 %************************************************************************

@@ -155,7 +155,7 @@ include rules/clean-target.mk
 # -----------------------------------------------------------------------------
 # The inplace tree
 
-$(eval $(call clean-target,inplace,,inplace))
+$(eval $(call clean-target,inplace,,inplace/bin inplace/lib))
 
 # -----------------------------------------------------------------------------
 # Whether to build dependencies or not
@@ -428,6 +428,8 @@ ghc/stage2/package-data.mk: compiler/stage2/package-data.mk
 # package-data.mk is sufficient, as that in turn depends on all the
 # libraries
 utils/haddock/dist/package-data.mk: compiler/stage2/package-data.mk
+utils/ghc-pwd/dist/package-data.mk: compiler/stage2/package-data.mk
+utils/ghc-cabal/dist-install/package-data.mk: compiler/stage2/package-data.mk
 
 utils/ghc-pkg/dist-install/package-data.mk: compiler/stage2/package-data.mk
 utils/hsc2hs/dist-install/package-data.mk: compiler/stage2/package-data.mk
@@ -588,13 +590,8 @@ BUILD_DIRS += \
 ifneq "$(BINDIST)" "YES"
 BUILD_DIRS += \
    bindisttest \
-   $(GHC_CABAL_DIR) \
    $(GHC_GENAPPLY_DIR)
 endif
-
-BUILD_DIRS += \
-   utils/haddock \
-   utils/haddock/doc
 
 ifneq "$(CLEANING)" "YES"
 BUILD_DIRS += \
@@ -606,11 +603,16 @@ BUILD_DIRS += libraries/integer-gmp/gmp
 endif
 
 BUILD_DIRS += \
+   utils/haddock \
+   utils/haddock/doc \
    compiler \
    $(GHC_HSC2HS_DIR) \
    $(GHC_PKG_DIR) \
    utils/testremove \
    utils/ghctags \
+   utils/ghc-pwd \
+   utils/dummy-ghc \
+   $(GHC_CABAL_DIR) \
    utils/hpc \
    utils/runghc \
    ghc
@@ -657,7 +659,9 @@ utils/runghc_dist_DISABLE = YES
 utils/ghctags_dist_DISABLE = YES
 utils/hpc_dist_DISABLE = YES
 utils/hsc2hs_dist-install_DISABLE = YES
+utils/ghc-cabal_dist-install_DISABLE = YES
 utils/ghc-pkg_dist-install_DISABLE = YES
+utils/ghc-pwd_dist_DISABLE = YES
 utils/mkUserGuidePart_dist_DISABLE = YES
 utils/compare_sizes_dist_DISABLE = YES
 compiler_stage2_DISABLE = YES
@@ -826,26 +830,26 @@ install: install_docs
 endif
 
 install_bins: $(INSTALL_BINS)
-	$(INSTALL_DIR) "$(DESTDIR)$(bindir)"
+	$(call INSTALL_DIR,"$(DESTDIR)$(bindir)")
 	for i in $(INSTALL_BINS); do \
-		$(INSTALL_PROGRAM) $(INSTALL_BIN_OPTS) $$i "$(DESTDIR)$(bindir)" ;  \
+		$(call INSTALL_PROGRAM,$(INSTALL_BIN_OPTS),$$i,"$(DESTDIR)$(bindir)") ;  \
 	done
 
 install_libs: $(INSTALL_LIBS)
-	$(INSTALL_DIR) "$(DESTDIR)$(ghclibdir)"
+	$(call INSTALL_DIR,"$(DESTDIR)$(ghclibdir)")
 	for i in $(INSTALL_LIBS); do \
 		case $$i in \
 		  *.a) \
-		    $(INSTALL_DATA) $(INSTALL_OPTS) $$i "$(DESTDIR)$(ghclibdir)"; \
+		    $(call INSTALL_DATA,$(INSTALL_OPTS),$$i,"$(DESTDIR)$(ghclibdir)"); \
 		    $(RANLIB) $(DESTDIR)$(ghclibdir)/`basename $$i` ;; \
 		  *.dll) \
-		    $(INSTALL_DATA) -s $(INSTALL_OPTS) $$i "$(DESTDIR)$(ghclibdir)" ;; \
+		    $(call INSTALL_DATA,-s $(INSTALL_OPTS),$$i,"$(DESTDIR)$(ghclibdir)") ;; \
 		  *.so) \
-		    $(INSTALL_SHLIB) $(INSTALL_OPTS) $$i "$(DESTDIR)$(ghclibdir)" ;; \
+		    $(call INSTALL_SHLIB,$(INSTALL_OPTS),$$i,"$(DESTDIR)$(ghclibdir)") ;; \
 		  *.dylib) \
-		    $(INSTALL_SHLIB) $(INSTALL_OPTS) $$i "$(DESTDIR)$(ghclibdir)";; \
+		    $(call INSTALL_SHLIB,$(INSTALL_OPTS),$$i,"$(DESTDIR)$(ghclibdir)");; \
 		  *) \
-		    $(INSTALL_DATA) $(INSTALL_OPTS) $$i "$(DESTDIR)$(ghclibdir)"; \
+		    $(call INSTALL_DATA,$(INSTALL_OPTS),$$i,"$(DESTDIR)$(ghclibdir)"); \
 		esac; \
 	done
 
@@ -853,9 +857,9 @@ install_libexec_scripts: $(INSTALL_LIBEXEC_SCRIPTS)
 ifeq "$(INSTALL_LIBEXEC_SCRIPTS)" ""
 	@:
 else
-	$(INSTALL_DIR) "$(DESTDIR)$(ghclibexecdir)"
+	$(call INSTALL_DIR,"$(DESTDIR)$(ghclibexecdir)")
 	for i in $(INSTALL_LIBEXEC_SCRIPTS); do \
-		$(INSTALL_SCRIPT) $(INSTALL_OPTS) $$i "$(DESTDIR)$(ghclibexecdir)"; \
+		$(call INSTALL_SCRIPT,$(INSTALL_OPTS),$$i,"$(DESTDIR)$(ghclibexecdir)"); \
 	done
 endif
 
@@ -863,9 +867,9 @@ install_libexecs:  $(INSTALL_LIBEXECS)
 ifeq "$(INSTALL_LIBEXECS)" ""
 	@:
 else
-	$(INSTALL_DIR) "$(DESTDIR)$(ghclibexecdir)"
+	$(call INSTALL_DIR,"$(DESTDIR)$(ghclibexecdir)")
 	for i in $(INSTALL_LIBEXECS); do \
-		$(INSTALL_PROGRAM) $(INSTALL_BIN_OPTS) $$i "$(DESTDIR)$(ghclibexecdir)"; \
+		$(call INSTALL_PROGRAM,$(INSTALL_BIN_OPTS),$$i,"$(DESTDIR)$(ghclibexecdir)"); \
 	done
 # We rename ghc-stage2, so that the right program name is used in error
 # messages etc.
@@ -873,38 +877,38 @@ else
 endif
 
 install_topdirs: $(INSTALL_TOPDIRS)
-	$(INSTALL_DIR) "$(DESTDIR)$(topdir)"
+	$(call INSTALL_DIR,"$(DESTDIR)$(topdir)")
 	for i in $(INSTALL_TOPDIRS); do \
-		$(INSTALL_PROGRAM) $(INSTALL_BIN_OPTS) $$i "$(DESTDIR)$(topdir)"; \
+		$(call INSTALL_PROGRAM,$(INSTALL_BIN_OPTS),$$i,"$(DESTDIR)$(topdir)"); \
 	done
 
 install_headers: $(INSTALL_HEADERS)
-	$(INSTALL_DIR) "$(DESTDIR)$(ghcheaderdir)"
+	$(call INSTALL_DIR,"$(DESTDIR)$(ghcheaderdir)")
 	for i in $(INSTALL_HEADERS); do \
-		$(INSTALL_HEADER) $(INSTALL_OPTS) $$i "$(DESTDIR)$(ghcheaderdir)"; \
+		$(call INSTALL_HEADER,$(INSTALL_OPTS),$$i,"$(DESTDIR)$(ghcheaderdir)"); \
 	done
 
 install_docs: $(INSTALL_DOCS)
-	$(INSTALL_DIR) "$(DESTDIR)$(docdir)"
+	$(call INSTALL_DIR,"$(DESTDIR)$(docdir)")
 ifneq "$(INSTALL_DOCS)" ""
 	for i in $(INSTALL_DOCS); do \
-		$(INSTALL_DOC) $(INSTALL_OPTS) $$i "$(DESTDIR)$(docdir)"; \
+		$(call INSTALL_DOC,$(INSTALL_OPTS),$$i,"$(DESTDIR)$(docdir)"); \
 	done
 endif
-	$(INSTALL_DIR) $(INSTALL_OPTS) "$(DESTDIR)$(docdir)/html"
-	$(INSTALL_DOC) $(INSTALL_OPTS) docs/index.html "$(DESTDIR)$(docdir)/html"
+	$(call INSTALL_DIR,"$(DESTDIR)$(docdir)/html")
+	$(call INSTALL_DOC,$(INSTALL_OPTS),docs/index.html,"$(DESTDIR)$(docdir)/html")
 ifneq "$(INSTALL_LIBRARY_DOCS)" ""
-	$(INSTALL_DIR) $(INSTALL_OPTS) "$(DESTDIR)$(docdir)/html/libraries"
+	$(call INSTALL_DIR,"$(DESTDIR)$(docdir)/html/libraries")
 	for i in $(INSTALL_LIBRARY_DOCS); do \
-		$(INSTALL_DOC) $(INSTALL_OPTS) $$i "$(DESTDIR)$(docdir)/html/libraries/"; \
+		$(call INSTALL_DOC,$(INSTALL_OPTS),$$i,"$(DESTDIR)$(docdir)/html/libraries/"); \
 	done
-	$(INSTALL_DATA) $(INSTALL_OPTS) libraries/prologue.txt "$(DESTDIR)$(docdir)/html/libraries/"
-	$(INSTALL_SCRIPT) $(INSTALL_OPTS) libraries/gen_contents_index "$(DESTDIR)$(docdir)/html/libraries/"
+	$(call INSTALL_DATA,$(INSTALL_OPTS),libraries/prologue.txt,"$(DESTDIR)$(docdir)/html/libraries/")
+	$(call INSTALL_SCRIPT,$(INSTALL_OPTS),libraries/gen_contents_index,"$(DESTDIR)$(docdir)/html/libraries/")
 endif
 ifneq "$(INSTALL_HTML_DOC_DIRS)" ""
 	for i in $(INSTALL_HTML_DOC_DIRS); do \
-		$(INSTALL_DIR) $(INSTALL_OPTS) "$(DESTDIR)$(docdir)/html/`basename $$i`"; \
-		$(INSTALL_DOC) $(INSTALL_OPTS) $$i/* "$(DESTDIR)$(docdir)/html/`basename $$i`"; \
+		$(call INSTALL_DIR,"$(DESTDIR)$(docdir)/html/`basename $$i`"); \
+		$(call INSTALL_DOC,$(INSTALL_OPTS),$$i/*,"$(DESTDIR)$(docdir)/html/`basename $$i`"); \
 	done
 endif
 
@@ -938,9 +942,9 @@ INSTALL_DISTDIR_compiler = stage2
 # Now we can do the installation
 install_packages: install_libexecs
 install_packages: libffi/package.conf.install rts/package.conf.install
-	$(INSTALL_DIR) "$(DESTDIR)$(topdir)"
+	$(call INSTALL_DIR,"$(DESTDIR)$(topdir)")
 	"$(RM)" $(RM_OPTS_REC) "$(INSTALLED_PACKAGE_CONF)"
-	$(INSTALL_DIR) "$(INSTALLED_PACKAGE_CONF)"
+	$(call INSTALL_DIR,"$(INSTALLED_PACKAGE_CONF)")
 	"$(INSTALLED_GHC_PKG_REAL)" --force --global-conf "$(INSTALLED_PACKAGE_CONF)" update libffi/package.conf.install
 	"$(INSTALLED_GHC_PKG_REAL)" --force --global-conf "$(INSTALLED_PACKAGE_CONF)" update rts/package.conf.install
 	$(foreach p, $(INSTALLED_PKG_DIRS),                           \
@@ -978,8 +982,8 @@ $(eval $(call bindist,.,\
     Makefile \
     mk/config.mk.in \
     $(INPLACE_BIN)/mkdirhier \
-    $(INPLACE_BIN)/ghc-cabal \
-    utils/ghc-pwd/ghc-pwd \
+    utils/ghc-cabal/dist-install/build/tmp/ghc-cabal \
+    utils/ghc-pwd/dist/build/tmp/ghc-pwd \
     $(BINDIST_WRAPPERS) \
     $(BINDIST_PERL_SOURCES) \
     $(BINDIST_LIBS) \
@@ -1031,6 +1035,7 @@ unix-binary-dist-prep:
 	echo "BUILD_DOCBOOK_PS   = $(BUILD_DOCBOOK_PS)"   >> $(BIN_DIST_MK)
 	echo "BUILD_DOCBOOK_PDF  = $(BUILD_DOCBOOK_PDF)"  >> $(BIN_DIST_MK)
 	echo "BUILD_MAN          = $(BUILD_MAN)"          >> $(BIN_DIST_MK)
+	echo "GHC_CABAL_INPLACE  = utils/ghc-cabal/dist-install/build/tmp/ghc-cabal" >> $(BIN_DIST_MK)
 	cd $(BIN_DIST_PREP_DIR) && autoreconf
 	"$(RM)" $(RM_OPTS) $(BIN_DIST_PREP_TAR)
 # h means "follow symlinks", e.g. if aclocal.m4 is a symlink to a source
@@ -1097,7 +1102,7 @@ publish-docs:
 # Directory in which we're going to build the src dist
 #
 SRC_DIST_NAME=ghc-$(ProjectVersion)
-SRC_DIST_DIR=$(shell pwd)/$(SRC_DIST_NAME)
+SRC_DIST_DIR=$(TOP)/$(SRC_DIST_NAME)
 
 #
 # Files to include in source distributions
@@ -1187,10 +1192,6 @@ sdist_%:
 
 .PHONY: clean
 
-CLEAN_FILES += utils/ghc-pwd/ghc-pwd
-CLEAN_FILES += utils/ghc-pwd/ghc-pwd.exe
-CLEAN_FILES += utils/ghc-pwd/ghc-pwd.hi
-CLEAN_FILES += utils/ghc-pwd/ghc-pwd.o
 CLEAN_FILES += libraries/bootstrapping.conf
 CLEAN_FILES += libraries/integer-gmp/cbits/GmpDerivedConstants.h
 CLEAN_FILES += libraries/integer-gmp/cbits/mkGmpDerivedConstants
@@ -1244,6 +1245,8 @@ distclean : clean
 	"$(RM)" $(RM_OPTS) libraries/process/include/HsProcessConfig.h
 	"$(RM)" $(RM_OPTS) libraries/unix/include/HsUnixConfig.h
 	"$(RM)" $(RM_OPTS) libraries/old-time/include/HsTimeConfig.h
+	"$(RM)" $(RM_OPTS_REC) utils/ghc-pwd/dist
+	"$(RM)" $(RM_OPTS_REC) inplace
 
 	"$(RM)" $(RM_OPTS) $(patsubst %, libraries/%/config.log, $(PACKAGES) $(PACKAGES_STAGE2))
 	"$(RM)" $(RM_OPTS) $(patsubst %, libraries/%/config.status, $(PACKAGES) $(PACKAGES_STAGE2))

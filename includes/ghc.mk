@@ -18,9 +18,15 @@ includes_H_CONFIG   = includes/ghcautoconf.h
 includes_H_PLATFORM = includes/ghcplatform.h
 
 #
-# All header files
+# All header files are in includes/{one of these subdirectories}
 #
-includes_H_FILES = $(filter-out $(includes_H_CONFIG) $(includes_H_PLATFORM),$(wildcard includes/*.h includes/*/*.h includes/*/*/*.h))
+includes_H_SUBDIRS += .
+includes_H_SUBDIRS += rts
+includes_H_SUBDIRS += rts/prof
+includes_H_SUBDIRS += rts/storage
+includes_H_SUBDIRS += stg
+
+includes_H_FILES := $(wildcard $(patsubst %,includes/%/*.h,$(includes_H_SUBDIRS)))
 
 #
 # Options
@@ -127,7 +133,7 @@ else
 includes_dist-derivedconstants_C_SRCS = mkDerivedConstants.c
 includes_dist-derivedconstants_PROG   = mkDerivedConstants$(exeext)
 
-$(eval $(call build-prog,includes,dist-derivedconstants,1))
+$(eval $(call build-prog,includes,dist-derivedconstants,0))
 
 $(includes_dist-derivedconstants_depfile_c_asm) : $(includes_H_CONFIG) $(includes_H_PLATFORM) $(wildcard includes/*.h) $(wildcard rts/*.h)
 includes/dist-derivedconstants/build/mkDerivedConstants.o : $(includes_H_CONFIG) $(includes_H_PLATFORM)
@@ -156,7 +162,7 @@ includes_dist-ghcconstants_C_SRCS = mkDerivedConstants.c
 includes_dist-ghcconstants_PROG   = mkGHCConstants$(exeext)
 includes_dist-ghcconstants_CC_OPTS = -DGEN_HASKELL
 
-$(eval $(call build-prog,includes,dist-ghcconstants,1))
+$(eval $(call build-prog,includes,dist-ghcconstants,0))
 
 ifneq "$(BINDIST)" "YES"
 $(includes_dist-ghcconstants_depfile_c_asm) : $(includes_H_CONFIG) $(includes_H_PLATFORM) $(wildcard includes/*.h) $(wildcard rts/*.h)
@@ -180,16 +186,14 @@ $(eval $(call all-target,includes,,\
   $(includes_H_CONFIG) $(includes_H_PLATFORM) \
   $(includes_GHCCONSTANTS) $(includes_DERIVEDCONSTANTS)))
 
-includes_subdirs = $(sort $(subst includes/,,$(foreach d,$(includes_H_FILES),$(dir $(d)))))
-
 install: install_includes
 
 .PHONY: install_includes
 install_includes :
-	$(INSTALL_DIR) "$(DESTDIR)$(ghcheaderdir)"
-	for d in $(includes_subdirs); do \
-		$(INSTALL_DIR) "$(DESTDIR)$(ghcheaderdir)/$$d"; \
-	done
-	for i in $(subst includes/,,$(includes_H_FILES) $(includes_H_CONFIG) $(includes_H_PLATFORM)); do \
-		$(INSTALL_HEADER) $(INSTALL_OPTS) includes/$$i "$(DESTDIR)$(ghcheaderdir)/$$i"; \
-	done
+	$(call INSTALL_DIR,"$(DESTDIR)$(ghcheaderdir)")
+	$(foreach d,$(includes_H_SUBDIRS), \
+	    $(call INSTALL_DIR,"$(DESTDIR)$(ghcheaderdir)/$d") && \
+	    $(call INSTALL_HEADER,$(INSTALL_OPTS),includes/$d/*.h,"$(DESTDIR)$(ghcheaderdir)/$d/") && \
+	) true
+	$(call INSTALL_HEADER,$(INSTALL_OPTS),$(includes_H_CONFIG) $(includes_H_PLATFORM),"$(DESTDIR)$(ghcheaderdir)/")
+

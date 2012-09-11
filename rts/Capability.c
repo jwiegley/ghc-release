@@ -455,12 +455,16 @@ releaseCapabilityAndQueueWorker (Capability* cap USED_IF_THREADS)
 
     task = cap->running_task;
 
+    // If the Task is stopped, we shouldn't be yielding, we should
+    // be just exiting.
+    ASSERT(!task->stopped);
+
     // If the current task is a worker, save it on the spare_workers
     // list of this Capability.  A worker can mark itself as stopped,
     // in which case it is not replaced on the spare_worker queue.
     // This happens when the system is shutting down (see
     // Schedule.c:workerStart()).
-    if (!isBoundTask(task) && !task->stopped) {
+    if (!isBoundTask(task)) {
 	task->next = cap->spare_workers;
 	cap->spare_workers = task;
     }

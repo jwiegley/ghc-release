@@ -563,7 +563,7 @@ bindLocalsAtBreakpoint hsc_env apStack Nothing = do
        exn_name  = mkInternalName (getUnique exn_fs) (mkVarOccFS exn_fs) span
        e_fs      = fsLit "e"
        e_name    = mkInternalName (getUnique e_fs) (mkTyVarOccFS e_fs) span
-       e_tyvar   = mkTcTyVar e_name liftedTypeKind (SkolemTv RuntimeUnkSkol)
+       e_tyvar   = mkRuntimeUnkTyVar e_name liftedTypeKind
        exn_id    = Id.mkVanillaGlobal exn_name (mkTyVarTy e_tyvar)
 
        ictxt0 = hsc_IC hsc_env
@@ -589,12 +589,16 @@ bindLocalsAtBreakpoint hsc_env apStack (Just info) = do
        occs      = modBreaks_vars breaks ! index
        span      = modBreaks_locs breaks ! index
 
-   -- filter out any unboxed ids; we can't bind these at the prompt
-   let pointers = filter (\(id,_) -> isPointer id) vars
+           -- Filter out any unboxed ids;
+           -- we can't bind these at the prompt
+       pointers = filter (\(id,_) -> isPointer id) vars
        isPointer id | PtrRep <- idPrimRep id = True
                     | otherwise              = False
 
-   let (ids, offsets) = unzip pointers
+       (ids, offsets) = unzip pointers
+
+       free_tvs = foldr (unionVarSet . tyVarsOfType . idType)
+                        (tyVarsOfType result_ty) ids
 
    -- It might be that getIdValFromApStack fails, because the AP_STACK
    -- has been accidentally evaluated, or something else has gone wrong.
@@ -606,15 +610,18 @@ bindLocalsAtBreakpoint hsc_env apStack (Just info) = do
       debugTraceMsg (hsc_dflags hsc_env) 1 $
 	  text "Warning: _result has been evaluated, some bindings have been lost"
 
-   new_ids <- zipWithM mkNewId occs filtered_ids
-   let names = map idName new_ids
+   us <- mkSplitUniqSupply 'I'
+   let (us1, us2) = splitUniqSupply us
+       tv_subst   = newTyVars us1 free_tvs
+       new_ids    = zipWith3 (mkNewId tv_subst) occs filtered_ids (uniqsFromSupply us2)
+       names      = map idName new_ids
 
    -- make an Id for _result.  We use the Unique of the FastString "_result";
    -- we don't care about uniqueness here, because there will only be one
    -- _result in scope at any time.
    let result_name = mkInternalName (getUnique result_fs)
                           (mkVarOccFS result_fs) span
-       result_id   = Id.mkVanillaGlobal result_name result_ty 
+       result_id   = Id.mkVanillaGlobal result_name (substTy tv_subst result_ty)
 
    -- for each Id we're about to bind in the local envt:
    --    - tidy the type variables
@@ -636,20 +643,25 @@ bindLocalsAtBreakpoint hsc_env apStack (Just info) = do
    hsc_env1 <- rttiEnvironment hsc_env{ hsc_IC = ictxt1 }
    return (hsc_env1, if result_ok then result_name:names else names, span)
   where
-   mkNewId :: OccName -> Id -> IO Id
-   mkNewId occ id = do
-     us <- mkSplitUniqSupply 'I'
-        -- we need a fresh Unique for each Id we bind, because the linker
+        -- We need a fresh Unique for each Id we bind, because the linker
         -- state is single-threaded and otherwise we'd spam old bindings
         -- whenever we stop at a breakpoint.  The InteractveContext is properly
         -- saved/restored, but not the linker state.  See #1743, test break026.
-     let 
-         uniq = uniqFromSupply us
-         loc = nameSrcSpan (idName id)
-         name = mkInternalName uniq occ loc
-         ty = idType id
-         new_id = Id.mkVanillaGlobalWithInfo name ty (idInfo id)
-     return new_id
+   mkNewId :: TvSubst -> OccName -> Id -> Unique -> Id
+   mkNewId tv_subst occ id uniq
+     = Id.mkVanillaGlobalWithInfo name ty (idInfo id)
+     where
+         loc    = nameSrcSpan (idName id)
+         name   = mkInternalName uniq occ loc
+         ty     = substTy tv_subst (idType id)
+
+   newTyVars :: UniqSupply -> TcTyVarSet -> TvSubst
+     -- Similarly, clone the type variables mentioned in the types
+     -- we have here, *and* make them all RuntimeUnk tyars
+   newTyVars us tvs
+     = mkTopTvSubst [ (tv, mkTyVarTy (mkRuntimeUnkTyVar name (tyVarKind tv)))
+                    | (tv, uniq) <- varSetElems tvs `zip` uniqsFromSupply us
+                    , let name = setNameUnique (tyVarName tv) uniq ]
 
 rttiEnvironment :: HscEnv -> IO HscEnv 
 rttiEnvironment hsc_env@HscEnv{hsc_IC=ic} = do
@@ -867,7 +879,7 @@ getInfo name
            return (Just (thing, fixity, filter (plausible rdr_env) ispecs))
   where
     plausible rdr_env ispec	-- Dfun involving only names that are in ic_rn_glb_env
-	= all ok $ nameSetToList $ tyClsNamesOfType $ idType $ instanceDFunId ispec
+	= all ok $ nameSetToList $ orphNamesOfType $ idType $ instanceDFunId ispec
 	where	-- A name is ok if it's in the rdr_env, 
 		-- whether qualified or not
 	  ok n | n == name	   = True	-- The one we looked for in the first place!
@@ -997,5 +1009,7 @@ reconstructType hsc_env bound id = do
               hv <- Linker.getHValue hsc_env (varName id) 
               cvReconstructType hsc_env bound (idType id) hv
 
+mkRuntimeUnkTyVar :: Name -> Kind -> TyVar
+mkRuntimeUnkTyVar name kind = mkTcTyVar name kind RuntimeUnk
 #endif /* GHCI */
 

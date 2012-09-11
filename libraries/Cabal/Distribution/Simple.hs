@@ -119,7 +119,7 @@ import Distribution.Simple.Haddock (haddock, hscolour)
 import Distribution.Simple.Utils
          (die, notice, info, warn, setupMessage, chattyTry,
           defaultPackageDesc, defaultHookedPackageDesc,
-          rawSystemExit, cabalVersion, topHandler )
+          rawSystemExitWithEnv, cabalVersion, topHandler )
 import Distribution.System
          ( OS(..), buildOS )
 import Distribution.Verbosity
@@ -130,7 +130,7 @@ import Distribution.Text
          ( display )
 
 -- Base
-import System.Environment(getArgs,getProgName)
+import System.Environment(getArgs, getProgName, getEnvironment)
 import System.Directory(removeFile, doesFileExist,
                         doesDirectoryExist, removeDirectoryRecursive)
 import System.Exit
@@ -521,7 +521,7 @@ defaultUserHooks = autoconfUserHooks {
                    confExists <- doesFileExist "configure"
                    when confExists $
                        runConfigureScript verbosity
-                         backwardsCompatHack flags
+                         backwardsCompatHack flags lbi
 
                    pbi <- getHookedBuildInfo verbosity
                    let pkg_descr' = updatePackageDescription pbi pkg_descr
@@ -550,7 +550,7 @@ autoconfUserHooks
                    confExists <- doesFileExist "configure"
                    if confExists
                      then runConfigureScript verbosity
-                            backwardsCompatHack flags
+                            backwardsCompatHack flags lbi
                      else die "configure script not found."
 
                    pbi <- getHookedBuildInfo verbosity
@@ -566,14 +566,32 @@ autoconfUserHooks
             where
               verbosity = fromFlag (get_verbosity flags)
 
-runConfigureScript :: Verbosity -> Bool -> ConfigFlags -> IO ()
-runConfigureScript verbosity backwardsCompatHack flags =
+runConfigureScript :: Verbosity -> Bool -> ConfigFlags -> LocalBuildInfo
+                   -> IO ()
+runConfigureScript verbosity backwardsCompatHack flags lbi = do
 
+  env <- getEnvironment
+  let programConfig = withPrograms lbi
+  (ccProg, ccFlags) <- configureCCompiler verbosity programConfig
+  -- The C compiler's compilation and linker flags (e.g.
+  -- "C compiler flags" and "Gcc Linker flags" from GHC) have already
+  -- been merged into ccFlags, so we set both CFLAGS and LDFLAGS
+  -- to ccFlags
+  -- We don't try and tell configure which ld to use, as we don't have
+  -- a way to pass its flags too
+  let env' = appendToEnvironment ("CFLAGS",  unwords ccFlags)
+             env
+      args' = args ++ ["--with-gcc=" ++ ccProg]
   handleNoWindowsSH $
-    rawSystemExit verbosity "sh" args
+    rawSystemExitWithEnv verbosity "sh" args' env'
 
   where
     args = "configure" : configureArgs backwardsCompatHack flags
+
+    appendToEnvironment (key, val) [] = [(key, val)]
+    appendToEnvironment (key, val) (kv@(k, v) : rest)
+     | key == k  = (key, v ++ " " ++ val) : rest
+     | otherwise = kv : appendToEnvironment (key, val) rest
 
     handleNoWindowsSH action
       | buildOS /= Windows

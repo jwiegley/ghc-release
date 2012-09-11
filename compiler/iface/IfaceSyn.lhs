@@ -27,7 +27,8 @@ module IfaceSyn (
 #include "HsVersions.h"
 
 import IfaceType
-
+import CoreSyn( DFunArg, dfunArgExprs )
+import PprCore()            -- Printing DFunArgs
 import Demand
 import Annotations
 import Class
@@ -137,9 +138,9 @@ data IfaceConDecl
 						-- or 1-1 corresp with arg tys
 
 data IfaceInst 
-  = IfaceInst { ifInstCls  :: Name,     		-- See comments with
+  = IfaceInst { ifInstCls  :: IfExtName,     		-- See comments with
 		ifInstTys  :: [Maybe IfaceTyCon],	-- the defn of Instance
-		ifDFun     :: Name,     		-- The dfun
+		ifDFun     :: IfExtName,     		-- The dfun
 		ifOFlag    :: OverlapFlag,		-- Overlap flag
 		ifInstOrph :: Maybe OccName }		-- See Note [Orphans]
 	-- There's always a separate IfaceDecl for the DFun, which gives 
@@ -150,7 +151,7 @@ data IfaceInst
 	-- and if the head does not change it won't be used if it wasn't before
 
 data IfaceFamInst
-  = IfaceFamInst { ifFamInstFam   :: Name                -- Family tycon
+  = IfaceFamInst { ifFamInstFam   :: IfExtName                -- Family tycon
 		 , ifFamInstTys   :: [Maybe IfaceTyCon]  -- Rough match types
 		 , ifFamInstTyCon :: IfaceTyCon		 -- Instance decl
 		 }
@@ -160,7 +161,7 @@ data IfaceRule
 	ifRuleName   :: RuleName,
 	ifActivation :: Activation,
 	ifRuleBndrs  :: [IfaceBndr],	-- Tyvars and term vars
-	ifRuleHead   :: Name,   	-- Head of lhs
+	ifRuleHead   :: IfExtName,   	-- Head of lhs
 	ifRuleArgs   :: [IfaceExpr],	-- Args of LHS
 	ifRuleRhs    :: IfaceExpr,
 	ifRuleAuto   :: Bool,
@@ -183,7 +184,7 @@ type IfaceAnnTarget = AnnTarget OccName
 data IfaceIdDetails
   = IfVanillaId
   | IfRecSelId IfaceTyCon Bool
-  | IfDFunId
+  | IfDFunId Int          -- Number of silent args
 
 data IfaceIdInfo
   = NoInfo			-- When writing interface file without -O
@@ -222,20 +223,21 @@ data IfaceUnfolding
 		 Bool		-- OK to inline even if context is boring
                  IfaceExpr 
 
-  | IfWrapper    Arity Name	  -- NB: we need a Name (not just OccName) because the worker
-				  --     can simplify to a function in another module.
+  | IfExtWrapper Arity IfExtName  -- NB: sometimes we need a IfExtName (not just IfLclName) 
+  | IfLclWrapper Arity IfLclName  --     because the worker can simplify to a function in 
+    		       		  --     another module.
 
-  | IfDFunUnfold [IfaceExpr]
+  | IfDFunUnfold [DFunArg IfaceExpr]
 
 --------------------------------
 data IfaceExpr
-  = IfaceLcl 	FastString
-  | IfaceExt    Name
+  = IfaceLcl 	IfLclName
+  | IfaceExt    IfExtName
   | IfaceType   IfaceType
   | IfaceTuple 	Boxity [IfaceExpr]		-- Saturated; type arguments omitted
   | IfaceLam 	IfaceBndr IfaceExpr
   | IfaceApp 	IfaceExpr IfaceExpr
-  | IfaceCase	IfaceExpr FastString IfaceType [IfaceAlt]
+  | IfaceCase	IfaceExpr IfLclName IfaceType [IfaceAlt]
   | IfaceLet	IfaceBinding  IfaceExpr
   | IfaceNote	IfaceNote IfaceExpr
   | IfaceCast   IfaceExpr IfaceCoercion
@@ -246,13 +248,13 @@ data IfaceExpr
 data IfaceNote = IfaceSCC CostCentre
                | IfaceCoreNote String
 
-type IfaceAlt = (IfaceConAlt, [FastString], IfaceExpr)
-	-- Note: FastString, not IfaceBndr (and same with the case binder)
+type IfaceAlt = (IfaceConAlt, [IfLclName], IfaceExpr)
+	-- Note: IfLclName, not IfaceBndr (and same with the case binder)
 	-- We reconstruct the kind/type of the thing from the context
 	-- thus saving bulk in interface files
 
 data IfaceConAlt = IfaceDefault
- 		 | IfaceDataAlt Name
+ 		 | IfaceDataAlt IfExtName
 		 | IfaceTupleAlt Boxity
 		 | IfaceLitAlt Literal
 
@@ -263,7 +265,7 @@ data IfaceBinding
 -- IfaceLetBndr is like IfaceIdBndr, but has IdInfo too
 -- It's used for *non-top-level* let/rec binders
 -- See Note [IdInfo on nested let-bindings]
-data IfaceLetBndr = IfLetBndr FastString IfaceType IfaceIdInfo
+data IfaceLetBndr = IfLetBndr IfLclName IfaceType IfaceIdInfo
 \end{code}
 
 Note [Expose recursive functions]
@@ -280,10 +282,8 @@ that came up was a NOINLINE pragma on a let-binding inside an INLINE
 function.  The user (Duncan Coutts) really wanted the NOINLINE control
 to cross the separate compilation boundary.
 
-So a IfaceLetBndr keeps a trimmed-down list of IfaceIdInfo stuff.
-Currently we only actually retain InlinePragInfo, but in principle we could
-add strictness etc.
-
+In general we retain all info that is left by CoreTidy.tidyLetBndr, since
+that is what is seen by importing module with --make
 
 Note [Orphans]: the ifInstOrph and ifRuleOrph fields
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -640,11 +640,11 @@ pprIfaceExpr add_par (IfaceLet (IfaceRec pairs) body)
 
 pprIfaceExpr add_par (IfaceNote note body) = add_par (ppr note <+> pprParendIfaceExpr body)
 
-ppr_alt :: (IfaceConAlt, [FastString], IfaceExpr) -> SDoc
+ppr_alt :: (IfaceConAlt, [IfLclName], IfaceExpr) -> SDoc
 ppr_alt (con, bs, rhs) = sep [ppr_con_bs con bs, 
 			      arrow <+> pprIfaceExpr noParens rhs]
 
-ppr_con_bs :: IfaceConAlt -> [FastString] -> SDoc
+ppr_con_bs :: IfaceConAlt -> [IfLclName] -> SDoc
 ppr_con_bs (IfaceTupleAlt tup_con) bs = tupleParens tup_con (interpp'SP bs)
 ppr_con_bs con bs		      = ppr con <+> hsep (map ppr bs)
   
@@ -676,7 +676,7 @@ instance Outputable IfaceIdDetails where
   ppr IfVanillaId    = empty
   ppr (IfRecSelId tc b) = ptext (sLit "RecSel") <+> ppr tc
       		          <+> if b then ptext (sLit "<naughty>") else empty
-  ppr IfDFunId       = ptext (sLit "DFunId")
+  ppr (IfDFunId ns)     = ptext (sLit "DFunId") <> brackets (int ns)
 
 instance Outputable IfaceIdInfo where
   ppr NoInfo       = empty
@@ -695,11 +695,12 @@ instance Outputable IfaceUnfolding where
   ppr (IfCoreUnfold s e)   = (if s then ptext (sLit "<stable>") else empty) <+> parens (ppr e)
   ppr (IfInlineRule a uok bok e) = sep [ptext (sLit "InlineRule") <+> ppr (a,uok,bok),
       		           	        pprParendIfaceExpr e]
-  ppr (IfWrapper a wkr)    = ptext (sLit "Worker:") <+> ppr wkr
+  ppr (IfLclWrapper a wkr) = ptext (sLit "Worker(lcl):") <+> ppr wkr
+                             <+> parens (ptext (sLit "arity") <+> int a)
+  ppr (IfExtWrapper a wkr) = ptext (sLit "Worker(ext0:") <+> ppr wkr
                              <+> parens (ptext (sLit "arity") <+> int a)
   ppr (IfDFunUnfold ns)    = ptext (sLit "DFun:")
-                             <+> brackets (pprWithCommas pprParendIfaceExpr ns)
-
+                             <+> brackets (pprWithCommas ppr ns)
 
 -- -----------------------------------------------------------------------------
 -- Finding the Names in IfaceSyn
@@ -797,8 +798,10 @@ freeNamesIfBndr (IfaceTvBndr b) = freeNamesIfTvBndr b
 
 freeNamesIfLetBndr :: IfaceLetBndr -> NameSet
 -- Remember IfaceLetBndr is used only for *nested* bindings
--- The cut-down IdInfo never contains any Names, but the type may!
-freeNamesIfLetBndr (IfLetBndr _name ty _info) = freeNamesIfType ty
+-- The IdInfo can contain an unfolding (in the case of 
+-- local INLINE pragmas), so look there too
+freeNamesIfLetBndr (IfLetBndr _name ty info) = freeNamesIfType ty
+                                             &&& freeNamesIfIdInfo info
 
 freeNamesIfTvBndr :: IfaceTvBndr -> NameSet
 freeNamesIfTvBndr (_fs,k) = freeNamesIfType k
@@ -819,8 +822,9 @@ freeNamesIfUnfold :: IfaceUnfolding -> NameSet
 freeNamesIfUnfold (IfCoreUnfold _ e)     = freeNamesIfExpr e
 freeNamesIfUnfold (IfCompulsory e)       = freeNamesIfExpr e
 freeNamesIfUnfold (IfInlineRule _ _ _ e) = freeNamesIfExpr e
-freeNamesIfUnfold (IfWrapper _ v)        = unitNameSet v
-freeNamesIfUnfold (IfDFunUnfold vs)      = fnList freeNamesIfExpr vs
+freeNamesIfUnfold (IfExtWrapper _ v)     = unitNameSet v
+freeNamesIfUnfold (IfLclWrapper {})      = emptyNameSet
+freeNamesIfUnfold (IfDFunUnfold vs)      = fnList freeNamesIfExpr (dfunArgExprs vs)
 
 freeNamesIfExpr :: IfaceExpr -> NameSet
 freeNamesIfExpr (IfaceExt v)	  = unitNameSet v
@@ -855,7 +859,6 @@ freeNamesIfExpr (IfaceLet (IfaceRec as) x)
     fn_pair (bndr, rhs) = freeNamesIfLetBndr bndr &&& freeNamesIfExpr rhs
 
 freeNamesIfExpr _ = emptyNameSet
-
 
 freeNamesIfTc :: IfaceTyCon -> NameSet
 freeNamesIfTc (IfaceTc tc) = unitNameSet tc

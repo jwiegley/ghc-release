@@ -572,8 +572,12 @@ specProgram guts
 	     -- Specialise imported functions 
        ; (new_rules, spec_binds) <- specImports emptyVarSet rule_base uds
 
-       ; return (guts { mg_binds = spec_binds ++ binds'
-                      , mg_rules = local_rules ++ new_rules }) }
+       ; let final_binds | null spec_binds = binds'
+                         | otherwise       = Rec (flattenBinds spec_binds) : binds'
+    	   	   -- Note [Glom the bindings if imported functions are specialised]
+
+       ; return (guts { mg_binds = final_binds
+                      , mg_rules = new_rules ++ local_rules }) }
   where
 	-- We need to start with a Subst that knows all the things
 	-- that are in scope, so that the substitution engine doesn't
@@ -595,6 +599,7 @@ specImports :: VarSet	 	-- Don't specialise these ones
             -> UsageDetails	-- Calls for imported things, and floating bindings
             -> CoreM ( [CoreRule]   -- New rules
                      , [CoreBind] ) -- Specialised bindings and floating bindings
+-- See Note [Specialise imported INLINABLE things]
 specImports done rb uds
   = do { let import_calls = varEnvElts (ud_calls uds)
        ; (rules, spec_binds) <- go rb import_calls
@@ -613,8 +618,13 @@ specImport :: VarSet	    	    -- Don't specialise these
            -> CoreM ( [CoreRule]    -- New rules
                     , [CoreBind] )  -- Specialised bindings
 specImport done rb fn calls_for_fn
-  | not (fn `elemVarSet` done)
-  , isInlinablePragma (idInlinePragma fn)
+  | fn `elemVarSet` done
+  = return ([], [])     -- No warning.  This actually happens all the time
+    	   		-- when specialising a recursive function, becuase
+			-- the RHS of the specialised function contains a recursive
+			-- call to the original function
+
+  | isInlinablePragma (idInlinePragma fn)
   , Just rhs <- maybeUnfoldingTemplate (realIdUnfolding fn)
   = do {     -- Get rules from the external package state
        	     -- We keep doing this in case we "page-fault in" 
@@ -629,6 +639,7 @@ specImport done rb fn calls_for_fn
        ; let spec_binds1 = [NonRec b r | (b,r) <- spec_pairs]
        	     -- After the rules kick in we may get recursion, but 
 	     -- we rely on a global GlomBinds to sort that out later
+             -- See Note [Glom the bindings if imported functions are specialised]
        
 	      -- Now specialise any cascaded calls
        ; (rules2, spec_binds2) <- specImports (extendVarSet done fn) 
@@ -642,8 +653,35 @@ specImport done rb fn calls_for_fn
     return ([], [])    
 \end{code}
 
-Avoiding recursive specialisation
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Specialise imported INLINABLE things]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We specialise INLINABLE things but not INLINE things.  The latter
+should be inlined bodily, so not much point in specialising them.
+Moreover, we risk lots of orphan modules from vigorous specialisation.
+
+Note [Glom the bindings if imported functions are specialised]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we have an imported, *recursive*, INLINABLE function 
+   f :: Eq a => a -> a
+   f = /\a \d x. ...(f a d)...
+In the module being compiled we have
+   g x = f (x::Int)
+Now we'll make a specialised function
+   f_spec :: Int -> Int
+   f_spec = \x -> ...(f Int dInt)...
+   {-# RULE  f Int _ = f_spec #-}
+   g = \x. f Int dInt x
+Note that f_spec doesn't look recursive
+After rewriting with the RULE, we get
+   f_spec = \x -> ...(f_spec)...
+BUT since f_spec was non-recursive before it'll *stay* non-recursive.
+The occurrence analyser never turns a NonRec into a Rec.  So we must
+make sure that f_spec is recursive.  Easiest thing is to make all
+the specialisations for imported bindings recursive.
+
+
+Note [Avoiding recursive specialisation]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When we specialise 'f' we may find new overloaded calls to 'g', 'h' in
 'f's RHS.  So we want to specialise g,h.  But we don't want to
 specialise f any more!  It's possible that f's RHS might have a
@@ -963,7 +1001,7 @@ specCalls :: Subst
 	    	    UsageDetails)	-- New usage details from the specialised RHSs
 
 -- This function checks existing rules, and does not create
--- duplicate ones. So the caller does not nneed to do this filtering.
+-- duplicate ones. So the caller does not need to do this filtering.
 -- See 'already_covered'
 
 specCalls subst rules_for_me calls_for_me fn rhs
@@ -985,12 +1023,16 @@ specCalls subst rules_for_me calls_for_me fn rhs
        ; return (spec_rules, spec_defns, plusUDList spec_uds) }
 
   | otherwise	-- No calls or RHS doesn't fit our preconceptions
-  = WARN( notNull calls_for_me, ptext (sLit "Missed specialisation opportunity for") <+> ppr fn )
+  = WARN( notNull calls_for_me, ptext (sLit "Missed specialisation opportunity for") 
+                                 <+> ppr fn $$ _trace_doc )
 	  -- Note [Specialisation shape]
     -- pprTrace "specDefn: none" (ppr fn $$ ppr calls_for_me) $
     return ([], [], emptyUDs)
-  
   where
+    _trace_doc = vcat [ ppr rhs_tyvars, ppr n_tyvars
+                      , ppr rhs_ids, ppr n_dicts
+                      , ppr (idInlineActivation fn) ]
+
     fn_type	       = idType fn
     fn_arity	       = idArity fn
     fn_unf             = realIdUnfolding fn	-- Ignore loop-breaker-ness here
@@ -1091,20 +1133,28 @@ specCalls subst rules_for_me calls_for_me fn rhs
 		-- Add the { d1' = dx1; d2' = dx2 } usage stuff
 	   	final_uds = foldr consDictBind rhs_uds dx_binds
 
-		-- Add an InlineRule if the parent has one
+		--------------------------------------
+		-- Add a suitable unfolding if the spec_inl_prag says so
 		-- See Note [Inline specialisations]
+		spec_inl_prag 
+		  = case inl_prag of
+                       InlinePragma { inl_inline = Inlinable } 
+                          -> inl_prag { inl_inline = EmptyInlineSpec }
+		       _  -> inl_prag
+
 		spec_unf
-                  = case inlinePragmaSpec inl_prag of
+                  = case inlinePragmaSpec spec_inl_prag of
                       Inline    -> mkInlineUnfolding (Just spec_arity) spec_rhs
                       Inlinable -> mkInlinableUnfolding spec_rhs
                       _         -> NoUnfolding
 
+		--------------------------------------
 		-- Adding arity information just propagates it a bit faster
 		-- 	See Note [Arity decrease] in Simplify
 		-- Copy InlinePragma information from the parent Id.
 		-- So if f has INLINE[1] so does spec_f
-  	        spec_f_w_arity = spec_f `setIdArity`          max 0 (fn_arity - n_dicts)
-                                        `setInlinePragma` inl_prag
+  	        spec_f_w_arity = spec_f `setIdArity`      max 0 (fn_arity - n_dicts)
+                                        `setInlinePragma` spec_inl_prag
                                         `setIdUnfolding`  spec_unf
 
 	   ; return (Just ((spec_f_w_arity, spec_rhs), final_uds, spec_env_rule)) } }
@@ -1347,27 +1397,48 @@ tried to fix this (wait till there's a real example).
 
 Note [Inline specialisations]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We transfer to the specialised function any INLINE stuff from the
-original.  This means 
-   (a) the Activation for its inlining (from its InlinePragma)
-   (b) any InlineRule
+Here is what we do with the InlinePragma of the original function
+  * Activation/RuleMatchInfo: both transferred to the
+                              specialised function
+  * InlineSpec:
+       (a) An INLINE pragma is transferred
+       (b) An INLINABLE pragma is *not* transferred
 
-This is a change (Jun06).  Previously the idea is that the point of
-inlining was precisely to specialise the function at its call site,
-and that's not so important for the specialised copies.  But
-*pragma-directed* specialisation now takes place in the
-typechecker/desugarer, with manually specified INLINEs.  The
-specialiation here is automatic.  It'd be very odd if a function
-marked INLINE was specialised (because of some local use), and then
-forever after (including importing modules) the specialised version
-wasn't INLINEd.  After all, the programmer said INLINE!
+Why (a)? Previously the idea is that the point of INLINE was
+precisely to specialise the function at its call site, and that's not
+so important for the specialised copies.  But *pragma-directed*
+specialisation now takes place in the typechecker/desugarer, with
+manually specified INLINEs.  The specialiation here is automatic.
+It'd be very odd if a function marked INLINE was specialised (because
+of some local use), and then forever after (including importing
+modules) the specialised version wasn't INLINEd.  After all, the
+programmer said INLINE!
 
-You might wonder why we don't just not specialise INLINE functions.
+You might wonder why we don't just not-specialise INLINE functions.
 It's because even INLINE functions are sometimes not inlined, when 
 they aren't applied to interesting arguments.  But perhaps the type
 arguments alone are enough to specialise (even though the args are too
 boring to trigger inlining), and it's certainly better to call the 
 specialised version.
+
+Why (b)? See Trac #4874 for persuasive examples.  Suppose we have
+    {-# INLINABLE f #-}
+    f :: Ord a => [a] -> Int
+    f xs = letrec f' = ...f'... in f'
+Then, when f is specialised and optimised we might get
+    wgo :: [Int] -> Int#
+    wgo = ...wgo...
+    f_spec :: [Int] -> Int
+    f_spec xs = case wgo xs of { r -> I# r }
+and we clearly want to inline f_spec at call sites.  But if we still
+have the big, un-optimised of f (albeit specialised) captured in an
+INLINABLE pragma for f_spec, we won't get that optimisation.
+
+So we simply drop INLINABLE pragmas when specialising. It's not really
+a complete solution; ignoring specalisation for now, INLINABLE functions
+don't get properly strictness analysed, for example. But it works well
+for examples involving specialisation, which is the dominant use of
+INLINABLE.  See Trac #4874.
 
 
 %************************************************************************
@@ -1486,13 +1557,15 @@ mkCallUDs f args
   || not ( dicts   `lengthIs` n_dicts)
   || not (any interestingDict dicts)	-- Note [Interesting dictionary arguments]
   -- See also Note [Specialisations already covered]
-  = -- pprTrace "mkCallUDs: discarding" (vcat [ppr f, ppr args, ppr n_tyvars, ppr n_dicts, ppr (map interestingDict dicts)]) 
+  = -- pprTrace "mkCallUDs: discarding" _trace_doc
     emptyUDs	-- Not overloaded, or no specialisation wanted
 
   | otherwise
-  = -- pprTrace "mkCallUDs: keeping" (vcat [ppr f, ppr args, ppr n_tyvars, ppr n_dicts, ppr (map interestingDict dicts)]) 
+  = -- pprTrace "mkCallUDs: keeping" _trace_doc
     singleCall f spec_tys dicts
   where
+    _trace_doc = vcat [ppr f, ppr args, ppr n_tyvars, ppr n_dicts
+                      , ppr (map interestingDict dicts)]
     (tyvars, theta, _) = tcSplitSigmaTy (idType f)
     constrained_tyvars = tyVarsOfTheta theta 
     n_tyvars	       = length tyvars

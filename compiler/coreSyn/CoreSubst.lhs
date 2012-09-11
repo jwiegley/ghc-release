@@ -20,15 +20,16 @@ module CoreSubst (
 	emptySubst, mkEmptySubst, mkSubst, mkOpenSubst, substInScope, isEmptySubst, 
  	extendIdSubst, extendIdSubstList, extendTvSubst, extendTvSubstList,
 	extendSubst, extendSubstList, zapSubstEnv,
-	extendInScope, extendInScopeList, extendInScopeIds, 
-	isInScope,
+        addInScopeSet, extendInScope, extendInScopeList, extendInScopeIds,
+        isInScope, setInScope,
+        delBndr, delBndrs,
 
 	-- ** Substituting and cloning binders
 	substBndr, substBndrs, substRecBndrs,
 	cloneIdBndr, cloneIdBndrs, cloneRecIdBndrs,
 
 	-- ** Simple expression optimiser
-	simpleOptPgm, simpleOptExpr
+        simpleOptPgm, simpleOptExpr, simpleOptExprWith
     ) where
 
 #include "HsVersions.h"
@@ -232,6 +233,17 @@ lookupIdSubst doc (Subst in_scope ids _) v
 lookupTvSubst :: Subst -> TyVar -> Type
 lookupTvSubst (Subst _ _ tvs) v = lookupVarEnv tvs v `orElse` Type.mkTyVarTy v
 
+delBndr :: Subst -> Var -> Subst
+delBndr (Subst in_scope tvs ids) v
+  | isId v    = Subst in_scope tvs (delVarEnv ids v)
+  | otherwise = Subst in_scope (delVarEnv tvs v) ids
+
+delBndrs :: Subst -> [Var] -> Subst
+delBndrs (Subst in_scope tvs ids) vs
+  = Subst in_scope (delVarEnvList tvs vs_tv) (delVarEnvList ids vs_id)
+  where
+    (vs_id, vs_tv) = partition isId vs
+
 -- | Simultaneously substitute for a bunch of variables
 --   No left-right shadowing
 --   ie the substitution for   (\x \y. e) a1 a2
@@ -245,7 +257,14 @@ mkOpenSubst in_scope pairs = Subst in_scope
 isInScope :: Var -> Subst -> Bool
 isInScope v (Subst in_scope _ _) = v `elemInScopeSet` in_scope
 
--- | Add the 'Var' to the in-scope set: as a side effect, removes any existing substitutions for it
+-- | Add the 'Var' to the in-scope set, but do not remove
+-- any existing substitutions for it
+addInScopeSet :: Subst -> VarSet -> Subst
+addInScopeSet (Subst in_scope ids tvs) vs
+  = Subst (in_scope `extendInScopeSetSet` vs) ids tvs
+
+-- | Add the 'Var' to the in-scope set: as a side effect,
+-- and remove any existing substitutions for it
 extendInScope :: Subst -> Var -> Subst
 extendInScope (Subst in_scope ids tvs) v
   = Subst (in_scope `extendInScopeSet` v) 
@@ -263,6 +282,9 @@ extendInScopeIds :: Subst -> [Id] -> Subst
 extendInScopeIds (Subst in_scope ids tvs) vs 
   = Subst (in_scope `extendInScopeSetList` vs) 
 	  (ids `delVarEnvList` vs) tvs
+
+setInScope :: Subst -> InScopeSet -> Subst
+setInScope (Subst _ ids tvs) in_scope = Subst in_scope ids tvs
 \end{code}
 
 Pretty printing, for debugging only
@@ -307,13 +329,12 @@ subst_expr subst expr
     go (Lit lit)       = Lit lit
     go (App fun arg)   = App (go fun) (go arg)
     go (Note note e)   = Note (go_note note) (go e)
-    go (Cast e co) 
-      | isIdentityCoercion co' = go e
-      | otherwise              = Cast (go e) co'
-      where
-        co' = optCoercion (getTvSubst subst) co
-	-- Optimise coercions as we go; this is good, for example
-	-- in the RHS of rules, which are only substituted in
+    go (Cast e co)     = Cast (go e) (optCoercion (getTvSubst subst) co)
+       -- Do not optimise even identity coercions
+       -- Reason: substitution applies to the LHS of RULES, and
+       --         if you "optimise" an identity coercion, you may
+       --         lose a binder. We optimise the LHS of rules at
+       --         construction time
 
     go (Lam bndr body) = Lam bndr' (subst_expr subst' body)
 		       where
@@ -553,7 +574,9 @@ substUnfoldingSC subst unf 	 -- Short-cut version
   | otherwise          = substUnfolding subst unf
 
 substUnfolding subst (DFunUnfolding ar con args)
-  = DFunUnfolding ar con (map (substExpr (text "dfun-unf") subst) args)
+  = DFunUnfolding ar con (map subst_arg args)
+  where
+    subst_arg = fmap (substExpr (text "dfun-unf") subst)
 
 substUnfolding subst unf@(CoreUnfolding { uf_tmpl = tmpl, uf_src = src })
 	-- Retain an InlineRule!
@@ -633,7 +656,9 @@ substRule subst subst_ru_fn rule@(Rule { ru_bndrs = bndrs, ru_args = args
                       	then subst_ru_fn fn_name 
                       	else fn_name,
 	   ru_args  = map (substExpr (text "subst-rule" <+> ppr fn_name) subst') args,
-	   ru_rhs   = substExpr (text "subst-rule" <+> ppr fn_name) subst' rhs }
+           ru_rhs   = simpleOptExprWith subst' rhs }
+           -- Do simple optimisation on RHS, in case substitution lets
+           -- you improve it.  The real simplifier never gets to look at it.
   where
     (subst', bndrs') = substBndrs subst bndrs
 
@@ -678,7 +703,7 @@ simpleOptExpr :: CoreExpr -> CoreExpr
 
 simpleOptExpr expr
   = -- pprTrace "simpleOptExpr" (ppr init_subst $$ ppr expr)
-    simple_opt_expr init_subst (occurAnalyseExpr expr)
+    simpleOptExprWith init_subst expr
   where
     init_subst = mkEmptySubst (mkInScopeSet (exprFreeVars expr))
 	-- It's potentially important to make a proper in-scope set
@@ -691,6 +716,9 @@ simpleOptExpr expr
 	-- It's a bit painful to call exprFreeVars, because it makes
 	-- three passes instead of two (occ-anal, and go)
 
+simpleOptExprWith :: Subst -> InExpr -> OutExpr
+simpleOptExprWith subst expr = simple_opt_expr subst (occurAnalyseExpr expr)
+
 ----------------------
 simpleOptPgm :: DynFlags -> [CoreBind] -> [CoreRule] -> IO ([CoreBind], [CoreRule])
 simpleOptPgm dflags binds rules
@@ -699,7 +727,8 @@ simpleOptPgm dflags binds rules
 
        ; return (reverse binds', substRulesForImportedIds subst' rules) }
   where
-    occ_anald_binds  = occurAnalysePgm binds rules
+    occ_anald_binds  = occurAnalysePgm Nothing {- No rules active -}
+                                       rules binds
     (subst', binds') = foldl do_one (emptySubst, []) occ_anald_binds
                        
     do_one (subst, binds') bind 

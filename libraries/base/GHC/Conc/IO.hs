@@ -31,6 +31,7 @@ module GHC.Conc.IO
         , registerDelay         -- :: Int -> IO (TVar Bool)
         , threadWaitRead        -- :: Int -> IO ()
         , threadWaitWrite       -- :: Int -> IO ()
+        , closeFdWith           -- :: (Fd -> IO ()) -> Fd -> IO ()
 
 #ifdef mingw32_HOST_OS
         , asyncRead     -- :: Int -> Int -> Int -> Ptr a -> IO (Int, Int)
@@ -70,6 +71,10 @@ ensureIOManagerIsRunning = Windows.ensureIOManagerIsRunning
 
 -- | Block the current thread until data is available to read on the
 -- given file descriptor (GHC only).
+--
+-- This will throw an 'IOError' if the file descriptor was closed
+-- while this thread was blocked.  To safely close a file descriptor
+-- that has been used with 'threadWaitRead', use 'closeFdWith'.
 threadWaitRead :: Fd -> IO ()
 threadWaitRead fd
 #ifndef mingw32_HOST_OS
@@ -82,6 +87,10 @@ threadWaitRead fd
 
 -- | Block the current thread until data can be written to the
 -- given file descriptor (GHC only).
+--
+-- This will throw an 'IOError' if the file descriptor was closed
+-- while this thread was blocked.  To safely close a file descriptor
+-- that has been used with 'threadWaitWrite', use 'closeFdWith'.
 threadWaitWrite :: Fd -> IO ()
 threadWaitWrite fd
 #ifndef mingw32_HOST_OS
@@ -91,6 +100,23 @@ threadWaitWrite fd
         case fromIntegral fd of { I# fd# ->
         case waitWrite# fd# s of { s' -> (# s', () #)
         }}
+
+-- | Close a file descriptor in a concurrency-safe way (GHC only).  If
+-- you are using 'threadWaitRead' or 'threadWaitWrite' to perform
+-- blocking I\/O, you /must/ use this function to close file
+-- descriptors, or blocked threads may not be woken.
+--
+-- Any threads that are blocked on the file descriptor via
+-- 'threadWaitRead' or 'threadWaitWrite' will be unblocked by having
+-- IO exceptions thrown.
+closeFdWith :: (Fd -> IO ()) -- ^ Low-level action that performs the real close.
+            -> Fd            -- ^ File descriptor to close.
+            -> IO ()
+closeFdWith close fd
+#ifndef mingw32_HOST_OS
+  | threaded  = Event.closeFdWith close fd
+#endif
+  | otherwise = close fd
 
 -- | Suspends the current thread for a given number of microseconds
 -- (GHC only).
@@ -107,7 +133,7 @@ threadDelay time
   | threaded  = Event.threadDelay time
 #endif
   | otherwise = IO $ \s ->
-        case fromIntegral time of { I# time# ->
+        case time of { I# time# ->
         case delay# time# s of { s' -> (# s', () #)
         }}
 

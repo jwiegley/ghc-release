@@ -24,6 +24,7 @@ import Haddock.Types
 import Haddock.Utils
 
 import Text.XHtml hiding ( name, title, p, quote )
+import qualified Data.List as List
 
 import GHC
 import Name
@@ -38,15 +39,45 @@ ppRdrName :: RdrName -> Html
 ppRdrName = ppOccName . rdrNameOcc
 
 
-ppLDocName :: Located DocName -> Html
-ppLDocName (L _ d) = ppDocName d
+ppLDocName :: Qualification -> Located DocName -> Html
+ppLDocName qual (L _ d) = ppDocName qual d
 
 
-ppDocName :: DocName -> Html
-ppDocName (Documented name mdl) =
-  linkIdOcc mdl (Just occName) << ppOccName occName
-    where occName = nameOccName name
-ppDocName (Undocumented name) = toHtml (getOccString name)
+ppDocName :: Qualification -> DocName -> Html
+ppDocName qual docName =
+  case docName of
+    Documented name mdl ->
+      linkIdOcc mdl (Just (nameOccName name)) << ppQualifyName qual name mdl
+    Undocumented name -> ppQualifyName qual name (nameModule name)
+
+
+-- | Render a name depending on the selected qualification mode
+ppQualifyName :: Qualification -> Name -> Module -> Html
+ppQualifyName qual name mdl =
+  case qual of
+    NoQual   -> ppName name
+    FullQual -> ppFullQualName mdl name
+    -- this is just in case, it should never happen
+    LocalQual Nothing -> ppQualifyName FullQual name mdl
+    LocalQual (Just localmdl)
+      | moduleString mdl == moduleString localmdl -> ppName name
+      | otherwise -> ppFullQualName mdl name
+    -- again, this never happens
+    RelativeQual Nothing -> ppQualifyName FullQual name mdl
+    RelativeQual (Just localmdl) ->
+      case List.stripPrefix (moduleString localmdl) (moduleString mdl) of
+        -- local, A.x -> x
+        Just []      -> ppQualifyName NoQual name mdl
+        -- sub-module, A.B.x -> B.x
+        Just ('.':m) -> toHtml $ m ++ '.' : getOccString name
+        -- some module with same prefix, ABC.x -> ABC.x
+        Just _       -> ppQualifyName FullQual name mdl
+        -- some other module, D.x -> D.x
+        Nothing      -> ppQualifyName FullQual name mdl
+
+
+ppFullQualName :: Module -> Name -> Html
+ppFullQualName mdl name = toHtml $ moduleString mdl ++ '.' : getOccString name
 
 
 ppName :: Name -> Html

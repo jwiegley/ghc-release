@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.0.1], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.0.2], [glasgow-haskell-bugs@haskell.org], [ghc])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=YES}
@@ -175,40 +175,8 @@ AC_SUBST([WithGhc])
 dnl ** Without optimization some INLINE trickery fails for GHCi
 SRC_CC_OPTS="-O"
 
-dnl Allow to specify iconv options to the toplevel configure script
-dnl so they can be properly passed to sub-builds.
-dnl Note: ICONV_LIB_DIRS and ICONV_INCLUDE_DIRS are not predefined
-dnl to the empty string to allow them to be overridden from the
-dnl environment.
-
-AC_ARG_WITH([iconv-includes],
-  [AC_HELP_STRING([--with-iconv-includes],
-    [directory containing iconv.h])],
-    [ICONV_INCLUDE_DIRS=$withval])
-
-AC_ARG_WITH([iconv-libraries],
-  [AC_HELP_STRING([--with-iconv-libraries],
-    [directory containing iconv library])],
-    [ICONV_LIB_DIRS=$withval])
-
-AC_SUBST(ICONV_INCLUDE_DIRS)
-AC_SUBST(ICONV_LIB_DIRS)
-
-dnl Allow to specify gmp options to the toplevel configure script
-dnl so they can be properly passed to sub-builds.
-
-AC_ARG_WITH([gmp-includes],
-  [AC_HELP_STRING([--with-gmp-includes],
-    [directory containing gmp.h])],
-    [GMP_INCLUDE_DIRS=$withval])
-
-AC_ARG_WITH([gmp-libraries],
-  [AC_HELP_STRING([--with-gmp-libraries],
-    [directory containing gmp library])],
-    [GMP_LIB_DIRS=$withval])
-
-AC_SUBST(GMP_INCLUDE_DIRS)
-AC_SUBST(GMP_LIB_DIRS)
+FP_ICONV
+FP_GMP
 
 dnl--------------------------------------------------------------------
 dnl * Choose host(/target/build) platform
@@ -232,72 +200,7 @@ AC_CANONICAL_BUILD
 AC_CANONICAL_HOST
 AC_CANONICAL_TARGET
 
-# If no argument was given for a configuration variable, then discard
-# the guessed canonical system and use the configuration of the
-# bootstrapping ghc. If an argument was given, map it from gnu format
-# to ghc format.
-#
-# For why we do it this way, see: #3637, #1717, #2951
-
-if test "$build_alias" = ""
-then
-    if test "${WithGhc}" != ""
-    then
-        build=$bootstrap_target
-        echo "Build platform inferred as: $build"
-    else
-        echo "Can't work out build platform"
-        exit 1
-    fi
-
-    BuildArch=`echo "$build" | sed 's/-.*//'`
-    BuildVendor=`echo "$build" | sed -e 's/.*-\(.*\)-.*/\1/'`
-    BuildOS=`echo "$build" | sed 's/.*-//'`
-else
-    GHC_CONVERT_CPU([$build_cpu], [BuildArch])
-    GHC_CONVERT_VENDOR([$build_vendor], [BuildVendor])
-    GHC_CONVERT_OS([$build_os], [BuildOS])
-fi
-
-if test "$host_alias" = ""
-then
-    if test "${WithGhc}" != ""
-    then
-        host=$bootstrap_target
-        echo "Host platform inferred as: $host"
-    else
-        echo "Can't work out host platform"
-        exit 1
-    fi
-
-    HostArch=`echo "$host" | sed 's/-.*//'`
-    HostVendor=`echo "$host" | sed -e 's/.*-\(.*\)-.*/\1/'`
-    HostOS=`echo "$host" | sed 's/.*-//'`
-else
-    GHC_CONVERT_CPU([$host_cpu], [HostArch])
-    GHC_CONVERT_VENDOR([$host_vendor], [HostVendor])
-    GHC_CONVERT_OS([$host_os], [HostOS])
-fi
-
-if test "$target_alias" = ""
-then
-    if test "${WithGhc}" != ""
-    then
-        target=$bootstrap_target
-        echo "Target platform inferred as: $target"
-    else
-        echo "Can't work out target platform"
-        exit 1
-    fi
-
-    TargetArch=`echo "$target" | sed 's/-.*//'`
-    TargetVendor=`echo "$target" | sed -e 's/.*-\(.*\)-.*/\1/'`
-    TargetOS=`echo "$target" | sed 's/.*-//'`
-else
-    GHC_CONVERT_CPU([$target_cpu], [TargetArch])
-    GHC_CONVERT_VENDOR([$target_vendor], [TargetVendor])
-    GHC_CONVERT_OS([$target_os], [TargetOS])
-fi
+FPTOOLS_SET_PLATFORM_VARS
 
 exeext=''
 soext='.so'
@@ -382,6 +285,16 @@ checkArch "$TargetArch"
 checkVendor "$TargetVendor"
 checkOS "$TargetOS"
 
+# Verify that the installed (bootstrap) GHC is capable of generating
+# code for the requested build platform.
+if test "$build" != "$bootstrap_target"
+then
+    echo "This GHC (${WithGhc}) does not generate code for the build platform"
+    echo "   GHC target platform    : $bootstrap_target"
+    echo "   Desired build platform : $BuildPlatform"
+    exit 1
+fi
+
 AC_SUBST(BuildPlatform)
 AC_SUBST(HostPlatform)
 AC_SUBST(TargetPlatform)
@@ -417,14 +330,20 @@ AC_PATH_PROGS(NHC,nhc nhc98)
 AC_PATH_PROG(HBC,hbc)
 
 # This uses GHC, so put it after the "GHC is required" check above:
+FP_INTREE_GHC_PWD
 FP_FIND_ROOT
 
 if test "$HostOS" = "mingw32"
 then
+    test -d inplace || mkdir inplace
+
     CC="$hardtop/inplace/mingw/bin/gcc.exe"
     LD="$hardtop/inplace/mingw/bin/ld.exe"
     NM="$hardtop/inplace/mingw/bin/nm.exe"
     fp_prog_ar_raw="$hardtop/inplace/mingw/bin/ar.exe"
+
+    # NB. If you update the tarbballs to a new version of gcc, don't
+    # forget to tweak the paths in driver/gcc/gcc.c.
     if ! test -d inplace/mingw ||
          test inplace/mingw -ot ghc-tarballs/mingw/binutils*.tar.lzma  ||
          test inplace/mingw -ot ghc-tarballs/mingw/gcc-core*.tar.lzma  ||
@@ -432,13 +351,13 @@ then
          test inplace/mingw -ot ghc-tarballs/mingw/libgmp*.tar.gz      ||
          test inplace/mingw -ot ghc-tarballs/mingw/libmpc*.tar.gz      ||
          test inplace/mingw -ot ghc-tarballs/mingw/libmpfr*.tar.gz     ||
+         test inplace/mingw -ot ghc-tarballs/mingw/libstdc*.tar.lzma   ||
          test inplace/mingw -ot ghc-tarballs/mingw/mingwrt*-dev.tar.gz ||
          test inplace/mingw -ot ghc-tarballs/mingw/mingwrt*-dll.tar.gz ||
          test inplace/mingw -ot ghc-tarballs/mingw/w32api*.tar.lzma
     then
         AC_MSG_NOTICE([Making in-tree mingw tree])
         rm -rf inplace/mingw
-        test -d inplace || mkdir inplace
         mkdir inplace/mingw
         (
             cd inplace/mingw &&
@@ -448,6 +367,7 @@ then
             tar --lzma -xf ../../ghc-tarballs/mingw/libgmp*.tar.lzma    &&
             tar --lzma -xf ../../ghc-tarballs/mingw/libmpc*.tar.lzma    &&
             tar --lzma -xf ../../ghc-tarballs/mingw/libmpfr*.tar.lzma   &&
+            tar --lzma -xf ../../ghc-tarballs/mingw/libstdc*.tar.lzma   &&
             tar -z     -xf ../../ghc-tarballs/mingw/mingwrt*-dev.tar.gz &&
             tar -z     -xf ../../ghc-tarballs/mingw/mingwrt*-dll.tar.gz &&
             tar --lzma -xf ../../ghc-tarballs/mingw/w32api*.tar.lzma    &&
@@ -533,26 +453,22 @@ AC_SUBST([GhcLibsWithUnix])
 dnl ** does #! work?
 AC_SYS_INTERPRETER()
 
-dnl ** look for `perl', but only in /bin on Windows
+dnl ** look for `perl'
 case $HostOS_CPP in
 cygwin32|mingw32)
-      AC_CHECK_PROG(PerlCmd,perl,/bin/perl,,/bin)
-      if test -z "$PerlCmd"; then
-         echo "You must install the version of Perl shipped with GHC"
-         echo "(or a compatible one) in /bin."
-         exit 1
-      fi
-   ;;
+    PerlCmd=$hardtop/inplace/perl/perl
+    ;;
 *)
-   AC_PATH_PROG(PerlCmd,perl)
-   if test -z "$PerlCmd"; then
-      echo "You must install perl before you can continue"
-      echo "Perhaps it is already installed, but not in your PATH?"
-      exit 1
-   else
-   FPTOOLS_CHECK_PERL_VERSION
-   fi
-   ;;
+    AC_PATH_PROG(PerlCmd,perl)
+    if test -z "$PerlCmd"
+    then
+        echo "You must install perl before you can continue"
+        echo "Perhaps it is already installed, but not in your PATH?"
+        exit 1
+    else
+        FPTOOLS_CHECK_PERL_VERSION
+    fi
+    ;;
 esac
 
 dnl ** does #! path/to/perl work? (sometimes it's too long...)
@@ -567,11 +483,11 @@ dnl     If gcc, make sure it's at least 2.1
 dnl
 FP_HAVE_GCC
 
-FPTOOLS_SET_C_LD_FLAGS([target],[CFLAGS],[LDFLAGS])
-FPTOOLS_SET_C_LD_FLAGS([build],[CONF_CC_OPTS_STAGE0],[CONF_LD_OPTS_STAGE0])
-FPTOOLS_SET_C_LD_FLAGS([target],[CONF_CC_OPTS_STAGE1],[CONF_LD_OPTS_STAGE1])
+FPTOOLS_SET_C_LD_FLAGS([target],[CFLAGS],[LDFLAGS],[IGNORE_LINKER_LD_FLAGS],[CPPFLAGS])
+FPTOOLS_SET_C_LD_FLAGS([build],[CONF_CC_OPTS_STAGE0],[CONF_GCC_LINKER_OPTS_STAGE0],[CONF_LD_LINKER_OPTS_STAGE0],[CONF_CPP_OPTS_STAGE0])
+FPTOOLS_SET_C_LD_FLAGS([target],[CONF_CC_OPTS_STAGE1],[CONF_GCC_LINKER_OPTS_STAGE1],[CONF_LD_LINKER_OPTS_STAGE1],[CONF_CPP_OPTS_STAGE1])
 # Stage 3 won't be supported by cross-compilation
-FPTOOLS_SET_C_LD_FLAGS([target],[CONF_CC_OPTS_STAGE2],[CONF_LD_OPTS_STAGE2])
+FPTOOLS_SET_C_LD_FLAGS([target],[CONF_CC_OPTS_STAGE2],[CONF_GCC_LINKER_OPTS_STAGE2],[CONF_LD_LINKER_OPTS_STAGE2],[CONF_CPP_OPTS_STAGE2])
 
 FP_GCC_EXTRA_FLAGS
 
@@ -581,9 +497,15 @@ AC_PROG_CPP
 AC_SUBST(CONF_CC_OPTS_STAGE0)
 AC_SUBST(CONF_CC_OPTS_STAGE1)
 AC_SUBST(CONF_CC_OPTS_STAGE2)
-AC_SUBST(CONF_LD_OPTS_STAGE0)
-AC_SUBST(CONF_LD_OPTS_STAGE1)
-AC_SUBST(CONF_LD_OPTS_STAGE2)
+AC_SUBST(CONF_GCC_LINKER_OPTS_STAGE0)
+AC_SUBST(CONF_GCC_LINKER_OPTS_STAGE1)
+AC_SUBST(CONF_GCC_LINKER_OPTS_STAGE2)
+AC_SUBST(CONF_LD_LINKER_OPTS_STAGE0)
+AC_SUBST(CONF_LD_LINKER_OPTS_STAGE1)
+AC_SUBST(CONF_LD_LINKER_OPTS_STAGE2)
+AC_SUBST(CONF_CPP_OPTS_STAGE0)
+AC_SUBST(CONF_CPP_OPTS_STAGE1)
+AC_SUBST(CONF_CPP_OPTS_STAGE2)
 
 dnl ** figure out how to do context diffs
 FP_PROG_CONTEXT_DIFF
@@ -625,7 +547,7 @@ dnl ** check for dtrace (currently only implemented for Mac OS X)
 HaveDtrace=NO
 AC_PATH_PROG(DtraceCmd,dtrace)
 if test -n "$DtraceCmd"; then
-  if test "x$TargetOS_CPP-$TargetVendor_CPP" == "xdarwin-apple"; then
+  if test "x$TargetOS_CPP-$TargetVendor_CPP" == "xdarwin-apple" -o "x$TargetOS_CPP-$TargetVendor_CPP" == "xsolaris2-unknown"; then
     HaveDtrace=YES
   fi
 fi
@@ -950,7 +872,7 @@ if grep '	' compiler/ghc.cabal.in 2>&1 >/dev/null; then
    AC_MSG_ERROR([compiler/ghc.cabal.in contains tab characters; please remove them])
 fi
 
-AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal ghc.spec extra-gcc-opts docs/users_guide/ug-book.xml docs/users_guide/ug-ent.xml docs/index.html libraries/prologue.txt distrib/ghc.iss distrib/configure.ac distrib/MacOS/installer-scripts/create-links distrib/MacOS/installer-scripts/Uninstaller distrib/MacOS/GHC-system.pmdoc/index.xml])
+AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal ghc.spec extra-gcc-opts docs/users_guide/ug-book.xml docs/users_guide/ug-ent.xml docs/index.html libraries/prologue.txt distrib/ghc.iss distrib/configure.ac])
 AC_CONFIG_COMMANDS([mk/stamp-h],[echo timestamp > mk/stamp-h])
 AC_OUTPUT
 

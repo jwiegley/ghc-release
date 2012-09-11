@@ -1,4 +1,3 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Haddock.Utils
@@ -204,10 +203,10 @@ mainFrameName = "main"
 synopsisFrameName = "synopsis"
 
 
-subIndexHtmlFile :: Char -> String
-subIndexHtmlFile a = "doc-index-" ++ b ++ ".html"
-   where b | isAlpha a = [a]
-           | otherwise = show (ord a)
+subIndexHtmlFile :: String -> String
+subIndexHtmlFile ls = "doc-index-" ++ b ++ ".html"
+   where b | all isAlpha ls = ls
+           | otherwise = concatMap (show . ord) ls
 
 
 -------------------------------------------------------------------------------
@@ -245,7 +244,7 @@ makeAnchorId [] = []
 makeAnchorId (f:r) = escape isAlpha f ++ concatMap (escape isLegal) r
   where
     escape p c | p c = [c]
-               | otherwise = '-' : (show (ord c)) ++ "-"
+               | otherwise = '-' : show (ord c) ++ "-"
     isLegal ':' = True
     isLegal '_' = True
     isLegal '.' = True

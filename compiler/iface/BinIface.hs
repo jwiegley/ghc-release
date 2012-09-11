@@ -19,6 +19,7 @@ import HscTypes
 import BasicTypes
 import Demand
 import Annotations
+import CoreSyn
 import IfaceSyn
 import Module
 import Name
@@ -1147,7 +1148,7 @@ instance Binary IfaceBinding where
 instance Binary IfaceIdDetails where
     put_ bh IfVanillaId      = putByte bh 0
     put_ bh (IfRecSelId a b) = do { putByte bh 1; put_ bh a; put_ bh b }
-    put_ bh IfDFunId         = putByte bh 2
+    put_ bh (IfDFunId n)     = do { putByte bh 2; put_ bh n }
     get bh = do
 	    h <- getByte bh
 	    case h of
@@ -1155,7 +1156,7 @@ instance Binary IfaceIdDetails where
 	      1 -> do a <- get bh
 		      b <- get bh
 		      return (IfRecSelId a b)
-	      _ -> return IfDFunId
+              _ -> do { n <- get bh; return (IfDFunId n) }
 
 instance Binary IfaceIdInfo where
     put_ bh NoInfo = putByte bh 0
@@ -1211,15 +1212,19 @@ instance Binary IfaceUnfolding where
 	put_ bh b
 	put_ bh c
 	put_ bh d
-    put_ bh (IfWrapper a n) = do
+    put_ bh (IfLclWrapper a n) = do
 	putByte bh 2
 	put_ bh a
 	put_ bh n
-    put_ bh (IfDFunUnfold as) = do
+    put_ bh (IfExtWrapper a n) = do
 	putByte bh 3
+	put_ bh a
+	put_ bh n
+    put_ bh (IfDFunUnfold as) = do
+	putByte bh 4
 	put_ bh as
     put_ bh (IfCompulsory e) = do
-	putByte bh 4
+	putByte bh 5
 	put_ bh e
     get bh = do
 	h <- getByte bh
@@ -1234,11 +1239,24 @@ instance Binary IfaceUnfolding where
 		  return (IfInlineRule a b c d)
 	  2 -> do a <- get bh
 		  n <- get bh
-		  return (IfWrapper a n)
-	  3 -> do as <- get bh
+		  return (IfLclWrapper a n)
+	  3 -> do a <- get bh
+		  n <- get bh
+		  return (IfExtWrapper a n)
+	  4 -> do as <- get bh
 		  return (IfDFunUnfold as)
 	  _ -> do e <- get bh
 		  return (IfCompulsory e)
+
+instance Binary (DFunArg IfaceExpr) where
+    put_ bh (DFunPolyArg  e) = putByte bh 0 >> put_ bh e
+    put_ bh (DFunConstArg e) = putByte bh 1 >> put_ bh e
+    put_ bh (DFunLamArg i)   = putByte bh 2 >> put_ bh i
+    get bh = do { h <- getByte bh
+                ; case h of
+                    0 -> do { a <- get bh; return (DFunPolyArg a) }
+                    1 -> do { a <- get bh; return (DFunConstArg a) }
+                    _ -> do { a <- get bh; return (DFunLamArg a) } }
 
 instance Binary IfaceNote where
     put_ bh (IfaceSCC aa) = do

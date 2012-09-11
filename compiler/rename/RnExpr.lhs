@@ -131,8 +131,8 @@ rnExpr (HsApp fun arg)
     rnLExpr arg		`thenM` \ (arg',fvArg) ->
     return (HsApp fun' arg', fvFun `plusFV` fvArg)
 
-rnExpr (OpApp e1 (L op_loc (HsVar op_rdr)) _ e2) 
-  = do	{ (e1', fv_e1) <- rnLExpr e1
+rnExpr (OpApp e1 (L op_loc (HsVar op_rdr)) _ e2)
+  = do  { (e1', fv_e1) <- rnLExpr e1
 	; (e2', fv_e2) <- rnLExpr e2
 	; op_name <- setSrcSpan op_loc (lookupOccRn op_rdr)
   	; (op', fv_op) <- finishHsVar op_name
@@ -146,6 +146,10 @@ rnExpr (OpApp e1 (L op_loc (HsVar op_rdr)) _ e2)
 	; fixity <- lookupFixityRn op_name
 	; final_e <- mkOpAppRn e1' (L op_loc op') fixity e2'
 	; return (final_e, fv_e1 `plusFV` fv_op `plusFV` fv_e2) }
+rnExpr (OpApp _ other_op _ _)
+  = failWith (vcat [ hang (ptext (sLit "Operator application with a non-variable operator:"))
+                        2 (ppr other_op)
+                   , ptext (sLit "(Probably resulting from a Template Haskell splice)") ])
 
 rnExpr (NegApp e _)
   = rnLExpr e			`thenM` \ (e', fv_e) ->
@@ -759,7 +763,9 @@ rnStmt ctxt (L loc (TransformStmt stmts _ using by)) thing_inside
                                         Just e  -> do { (e', fvs) <- rnLExpr e; return (Just e', fvs) }
                    ; (thing, fvs_thing) <- thing_inside bndrs
                    ; let fvs        = fvs_by `plusFV` fvs_thing
-                         used_bndrs = filter (`elemNameSet` fvs_thing) bndrs
+                         used_bndrs = filter (`elemNameSet` fvs) bndrs
+                         -- The paper (Fig 5) has a bug here; we must treat any free varaible of
+                         -- the "thing inside", **or of the by-expression**, as used
                    ; return ((by', used_bndrs, thing), fvs) }
 
        ; return (([L loc (TransformStmt stmts' used_bndrs using' by')], thing), 

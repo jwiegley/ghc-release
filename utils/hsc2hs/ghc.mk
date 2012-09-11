@@ -24,10 +24,10 @@ utils/hsc2hs_dist-install_HC_OPTS += -DNEW_GHC_LAYOUT
 utils/hsc2hs_template=$(INPLACE_TOPDIR)/template-hsc.h
 
 define utils/hsc2hs_dist_SHELL_WRAPPER_EXTRA
-echo 'HSC2HS_EXTRA="$(addprefix --cflag=,$(CONF_CC_OPTS_STAGE0)) $(addprefix --lflag=,$(CONF_LD_OPTS_STAGE0)) -I$(TOP)/includes"' >> "$(WRAPPER)"
+echo 'HSC2HS_EXTRA="$(addprefix --cflag=,$(CONF_CC_OPTS_STAGE0)) $(addprefix --lflag=,$(CONF_GCC_LINKER_OPTS_STAGE0)) -I$(TOP)/includes"' >> "$(WRAPPER)"
 endef
 define utils/hsc2hs_dist-install_SHELL_WRAPPER_EXTRA
-echo 'HSC2HS_EXTRA="$(addprefix --cflag=,$(CONF_CC_OPTS_STAGE1)) $(addprefix --lflag=,$(CONF_LD_OPTS_STAGE1))"' >> "$(WRAPPER)"
+echo 'HSC2HS_EXTRA="$(addprefix --cflag=,$(CONF_CC_OPTS_STAGE1)) $(addprefix --lflag=,$(CONF_GCC_LINKER_OPTS_STAGE1))"' >> "$(WRAPPER)"
 endef
 
 ifneq "$(BINDIST)" "YES"
@@ -54,7 +54,7 @@ install: install_utils/hsc2hs_dist_install
 
 .PHONY: install_utils/hsc2hs_dist_install
 install_utils/hsc2hs_dist_install: utils/hsc2hs/template-hsc.h
-	$(INSTALL_HEADER) $(INSTALL_OPTS) $< "$(DESTDIR)$(topdir)"
+	$(call INSTALL_HEADER,$(INSTALL_OPTS),$<,"$(DESTDIR)$(topdir)")
 
 BINDIST_EXTRAS += utils/hsc2hs/template-hsc.h
 

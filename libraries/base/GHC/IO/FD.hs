@@ -1,4 +1,5 @@
 {-# OPTIONS_GHC -XNoImplicitPrelude -XBangPatterns #-}
+-- Whether there are identities depends on the platform
 {-# OPTIONS_HADDOCK hide #-}
 -----------------------------------------------------------------------------
 -- |
@@ -98,8 +99,15 @@ instance GHC.IO.Device.IODevice FD where
   dup           = dup
   dup2          = dup2
 
+-- We used to use System.Posix.Internals.dEFAULT_BUFFER_SIZE, which is
+-- taken from the value of BUFSIZ on the current platform.  This value
+-- varies too much though: it is 512 on Windows, 1024 on OS X and 8192
+-- on Linux.  So let's just use a decent size on every platform:
+dEFAULT_FD_BUFFER_SIZE :: Int
+dEFAULT_FD_BUFFER_SIZE = 8096
+
 instance BufferedIO FD where
-  newBuffer _dev state = newByteBuffer dEFAULT_BUFFER_SIZE state
+  newBuffer _dev state = newByteBuffer dEFAULT_FD_BUFFER_SIZE state
   fillReadBuffer    fd buf = readBuf' fd buf
   fillReadBuffer0   fd buf = readBufNonBlocking fd buf
   flushWriteBuffer  fd buf = writeBuf' fd buf
@@ -156,7 +164,7 @@ openFile filepath iomode =
     -- always returns EISDIR if the file is a directory and was opened
     -- for writing, so I think we're ok with a single open() here...
     fd <- throwErrnoIfMinus1Retry "openFile"
-                (c_open f (fromIntegral oflags) 0o666)
+                (c_open f oflags 0o666)
 
     (fD,fd_type) <- mkFD fd iomode Nothing{-no stat-}
                             False{-not a socket-} 
@@ -278,15 +286,17 @@ stderr = stdFD 2
 close :: FD -> IO ()
 close fd =
 #ifndef mingw32_HOST_OS
-  (flip finally) (release fd) $ do
+  (flip finally) (release fd) $
 #endif
-  throwErrnoIfMinus1Retry_ "GHC.IO.FD.close" $
+  do let closer realFd =
+           throwErrnoIfMinus1Retry_ "GHC.IO.FD.close" $
 #ifdef mingw32_HOST_OS
-    if fdIsSocket fd then
-       c_closesocket (fdFD fd)
-    else
+           if fdIsSocket fd then
+             c_closesocket (fromIntegral realFd)
+           else
 #endif
-       c_close (fdFD fd)
+             c_close (fromIntegral realFd)
+     closeFdWith closer (fromIntegral (fdFD fd))
 
 release :: FD -> IO ()
 #ifdef mingw32_HOST_OS
@@ -394,17 +404,17 @@ setRaw fd raw = System.Posix.Internals.setCooked (fdFD fd) (not raw)
 -- Reading and Writing
 
 fdRead :: FD -> Ptr Word8 -> Int -> IO Int
-fdRead fd ptr bytes = do
-  r <- readRawBufferPtr "GHC.IO.FD.fdRead" fd ptr 0 (fromIntegral bytes)
-  return (fromIntegral r)
+fdRead fd ptr bytes
+  = do { r <- readRawBufferPtr "GHC.IO.FD.fdRead" fd ptr 0 (fromIntegral bytes)
+       ; return (fromIntegral r) }
 
 fdReadNonBlocking :: FD -> Ptr Word8 -> Int -> IO (Maybe Int)
 fdReadNonBlocking fd ptr bytes = do
   r <- readRawBufferPtrNoBlock "GHC.IO.FD.fdReadNonBlocking" fd ptr 
            0 (fromIntegral bytes)
-  case r of
+  case fromIntegral r of
     (-1) -> return (Nothing)
-    n    -> return (Just (fromIntegral n))
+    n    -> return (Just n)
 
 
 fdWrite :: FD -> Ptr Word8 -> Int -> IO ()

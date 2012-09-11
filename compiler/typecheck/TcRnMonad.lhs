@@ -71,11 +71,10 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
  = do { errs_var     <- newIORef (emptyBag, emptyBag) ;
         meta_var     <- newIORef initTyVarUnique ;
       	tvs_var      <- newIORef emptyVarSet ;
-	dfuns_var    <- newIORef emptyNameSet ;
-	keep_var     <- newIORef emptyNameSet ;
+        keep_var     <- newIORef emptyNameSet ;
         used_rdr_var <- newIORef Set.empty ;
 	th_var	     <- newIORef False ;
-	lie_var	     <- newIORef emptyBag ;
+        lie_var      <- newIORef emptyWC ;
 	dfun_n_var   <- newIORef emptyOccSet ;
 	type_env_var <- case hsc_type_env_var hsc_env of {
                            Just (_mod, te_var) -> return te_var ;
@@ -97,8 +96,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
 		tcg_type_env_var = type_env_var,
 		tcg_inst_env  = emptyInstEnv,
 		tcg_fam_inst_env  = emptyFamInstEnv,
-		tcg_inst_uses = dfuns_var,
-		tcg_th_used   = th_var,
+                tcg_th_used   = th_var,
 		tcg_exports  = [],
 		tcg_imports  = emptyImportAvails,
                 tcg_used_rdrnames = used_rdr_var,
@@ -148,7 +146,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
 
         -- Check for unsolved constraints
 	lie <- readIORef lie_var ;
-        if isEmptyBag lie 
+        if isEmptyWC lie
            then return ()
            else pprPanic "initTc: unsolved constraints" 
                          (pprWantedsWithLocs lie) ;
@@ -611,6 +609,14 @@ addLongErrAt loc msg extra
 	 let { err = mkLongErrMsg loc (mkPrintUnqualified dflags rdr_env) msg extra } ;
 	 (warns, errs) <- readTcRef errs_var ;
   	 writeTcRef errs_var (warns, errs `snocBag` err) }
+
+dumpDerivingInfo :: SDoc -> TcM ()
+dumpDerivingInfo doc
+  = do { dflags <- getDOpts
+       ; when (dopt Opt_D_dump_deriv dflags) $ do
+       { rdr_env <- getGlobalRdrEnv
+       ; let unqual = mkPrintUnqualified dflags rdr_env
+       ; liftIO (putMsgWith dflags unqual doc) } }
 \end{code}
 
 
@@ -956,17 +962,32 @@ setConstraintVar lie_var = updLclEnv (\ env -> env { tcl_lie = lie_var })
 emitConstraints :: WantedConstraints -> TcM ()
 emitConstraints ct
   = do { lie_var <- getConstraintVar ;
-	 updTcRef lie_var (`andWanteds` ct) }
+         updTcRef lie_var (`andWC` ct) }
 
-emitConstraint :: WantedConstraint -> TcM ()
-emitConstraint ct
+emitFlat :: WantedEvVar -> TcM ()
+emitFlat ct
   = do { lie_var <- getConstraintVar ;
-	 updTcRef lie_var (`extendWanteds` ct) }
+         updTcRef lie_var (`addFlats` unitBag ct) }
+
+emitFlats :: Bag WantedEvVar -> TcM ()
+emitFlats ct
+  = do { lie_var <- getConstraintVar ;
+         updTcRef lie_var (`addFlats` ct) }
+
+emitImplication :: Implication -> TcM ()
+emitImplication ct
+  = do { lie_var <- getConstraintVar ;
+         updTcRef lie_var (`addImplics` unitBag ct) }
+
+emitImplications :: Bag Implication -> TcM ()
+emitImplications ct
+  = do { lie_var <- getConstraintVar ;
+         updTcRef lie_var (`addImplics` ct) }
 
 captureConstraints :: TcM a -> TcM (a, WantedConstraints)
 -- (captureConstraints m) runs m, and returns the type constraints it generates
 captureConstraints thing_inside
-  = do { lie_var <- newTcRef emptyWanteds ;
+  = do { lie_var <- newTcRef emptyWC ;
 	 res <- updLclEnv (\ env -> env { tcl_lie = lie_var }) 
 			  thing_inside ;
 	 lie <- readTcRef lie_var ;

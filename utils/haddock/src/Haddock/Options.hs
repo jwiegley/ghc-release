@@ -24,6 +24,7 @@ module Haddock.Options (
   wikiUrls,
   optDumpInterfaceFile,
   optLaTeXStyle,
+  qualification,
   verbosity,
   ghcFlags,
   readIfaceArgs
@@ -35,12 +36,12 @@ import Distribution.Verbosity
 import Haddock.Utils
 import Haddock.Types
 import System.Console.GetOpt
+import qualified Data.Char as Char
 
 
 data Flag
   = Flag_BuiltInThemes
   | Flag_CSS String
-  | Flag_Debug
 --  | Flag_DocBook
   | Flag_ReadInterface String
   | Flag_DumpInterface String
@@ -74,6 +75,8 @@ data Flag
   | Flag_NoWarnings
   | Flag_UseUnicode
   | Flag_NoTmpCompDir
+  | Flag_Qualification String
+  | Flag_PrettyHtml
   deriving (Eq)
 
 
@@ -120,8 +123,8 @@ options backwardsCompat =
       "file containing prologue text",
     Option ['t']  ["title"]    (ReqArg Flag_Heading "TITLE")
       "page heading",
-    Option ['d']  ["debug"]  (NoArg Flag_Debug)
-      "extra debugging output",
+    Option ['q']  ["qual"] (ReqArg Flag_Qualification "QUAL")
+      "qualification of names, one of \n'none' (default), 'full', 'local'\nor 'relative'",
     Option ['?']  ["help"]  (NoArg Flag_Help)
       "display this help and exit",
     Option ['V']  ["version"]  (NoArg Flag_Version)
@@ -148,7 +151,9 @@ options backwardsCompat =
       "output GHC lib dir",
     Option ['w'] ["no-warnings"] (NoArg Flag_NoWarnings) "turn off all warnings",
     Option [] ["no-tmp-comp-dir"] (NoArg Flag_NoTmpCompDir)
-      "do not re-direct compilation output to a temporary directory"
+      "do not re-direct compilation output to a temporary directory",
+    Option [] ["pretty-html"] (NoArg Flag_PrettyHtml)
+      "generate html with newlines and indenting (for use with --html)"
   ]
 
 
@@ -216,6 +221,15 @@ optDumpInterfaceFile flags = optLast [ str | Flag_DumpInterface str <- flags ]
 
 optLaTeXStyle :: [Flag] -> Maybe String
 optLaTeXStyle flags = optLast [ str | Flag_LaTeXStyle str <- flags ]
+
+
+qualification :: [Flag] -> Qualification
+qualification flags =
+  case map (map Char.toLower) [ str | Flag_Qualification str <- flags ] of
+      "full":_     -> FullQual
+      "local":_    -> LocalQual Nothing
+      "relative":_ -> RelativeQual Nothing
+      _            -> NoQual
 
 
 verbosity :: [Flag] -> Verbosity

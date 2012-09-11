@@ -64,8 +64,8 @@ test('tcrun038',
 
 test('tcrun039', only_compiler_types(['ghc']), compile_and_run, [''])
 test('tcrun040', normal, compile_and_run, [''])
-test('tcrun041', compose(omit_ways(['ghci']), if_compiler_lt('ghc', '6.11', expect_fail)), compile_and_run, [''])
-test('tcrun042', if_compiler_lt('ghc', '6.11', expect_fail), compile_and_run, [''])
+test('tcrun041', omit_ways(['ghci']), compile_and_run, [''])
+test('tcrun042', normal, compile_and_run, [''])
 
 test('church', normal, compile_and_run, [''])
 test('testeq2', normal, compile_and_run, [''])
@@ -76,5 +76,8 @@ test('IPRun', normal, compile_and_run, [''])
 test('T1735', if_compiler_lt('ghc', '7.1', expect_broken_for(4395, ['ghci'])), multimod_compile_and_run, ['T1735',''])
 
 test('T3731', normal, compile_and_run, [''])
+test('T3731-short', normal, compile_and_run, [''])
 test('T3500a', normal, compile_and_run, [''])
 test('T3500b', normal, compile_and_run, [''])
+test('T4809', normal, compile_and_run, [''])
+test('T2722', normal, compile_and_run, [''])

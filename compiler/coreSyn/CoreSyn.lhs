@@ -37,9 +37,9 @@ module CoreSyn (
 	notSccNote,
 
 	-- * Unfolding data types
-	Unfolding(..),	UnfoldingGuidance(..), UnfoldingSource(..),
-		-- Abstract everywhere but in CoreUnfold.lhs
-	
+        Unfolding(..),  UnfoldingGuidance(..), UnfoldingSource(..),
+        DFunArg(..), dfunArgExprs,
+
 	-- ** Constructing 'Unfolding's
 	noUnfolding, evaldUnfolding, mkOtherCon,
         unSaturatedOk, needSaturated, boringCxtOk, boringCxtNotOk,
@@ -49,7 +49,7 @@ module CoreSyn (
 	maybeUnfoldingTemplate, otherCons, unfoldingArity,
 	isValueUnfolding, isEvaldUnfolding, isCheapUnfolding,
         isExpandableUnfolding, isConLikeUnfolding, isCompulsoryUnfolding,
-	isStableUnfolding, isStableUnfolding_maybe, 
+        isStableUnfolding, isStableCoreUnfolding_maybe,
         isClosedUnfolding, hasSomeUnfolding, 
 	canUnfold, neverUnfoldGuidance, isStableSource,
 
@@ -70,7 +70,7 @@ module CoreSyn (
 	RuleName, IdUnfoldingFun,
 	
 	-- ** Operations on 'CoreRule's 
-	seqRules, ruleArity, ruleName, ruleIdName, ruleActivation_maybe,
+	seqRules, ruleArity, ruleName, ruleIdName, ruleActivation,
 	setRuleIdName,
 	isBuiltinRule, isLocalRule
     ) where
@@ -384,9 +384,9 @@ ruleArity (Rule {ru_args = args})      = length args
 ruleName :: CoreRule -> RuleName
 ruleName = ru_name
 
-ruleActivation_maybe :: CoreRule -> Maybe Activation
-ruleActivation_maybe (BuiltinRule { })       = Nothing
-ruleActivation_maybe (Rule { ru_act = act }) = Just act
+ruleActivation :: CoreRule -> Activation
+ruleActivation (BuiltinRule { })       = AlwaysActive
+ruleActivation (Rule { ru_act = act }) = act
 
 -- | The 'Name' of the 'Id.Id' at the head of the rule left hand side
 ruleIdName :: CoreRule -> Name
@@ -437,10 +437,7 @@ data Unfolding
 
         DataCon 	-- The dictionary data constructor (possibly a newtype datacon)
 
-        [CoreExpr]	-- The [CoreExpr] are the superclasses and methods [op1,op2], 
-			-- in positional order.
-			-- They are usually variables, but can be trivial expressions
-			-- instead (e.g. a type application).  
+        [DFunArg CoreExpr]  -- Specification of superclasses and methods, in positional order
 
   | CoreUnfolding {		-- An unfolding for an Id with no pragma, 
                                 -- or perhaps a NOINLINE pragma
@@ -478,7 +475,28 @@ data Unfolding
   --  uf_guidance:  Tells us about the /size/ of the unfolding template
 
 ------------------------------------------------
-data UnfoldingSource 
+data DFunArg e   -- Given (df a b d1 d2 d3)
+  = DFunPolyArg  e      -- Arg is (e a b d1 d2 d3)
+  | DFunConstArg e      -- Arg is e, which is constant
+  | DFunLamArg   Int    -- Arg is one of [a,b,d1,d2,d3], zero indexed
+
+instance Functor DFunArg where
+    fmap f (DFunPolyArg x) = DFunPolyArg (f x)
+    fmap f (DFunConstArg x) = DFunConstArg (f x)
+    fmap _ (DFunLamArg i) = (DFunLamArg i)
+
+  -- 'e' is often CoreExpr, which are usually variables, but can
+  -- be trivial expressions instead (e.g. a type application).
+
+dfunArgExprs :: [DFunArg e] -> [e]
+dfunArgExprs [] = []
+dfunArgExprs (DFunPolyArg  e : as) = e : dfunArgExprs as
+dfunArgExprs (DFunConstArg e : as) = e : dfunArgExprs as
+dfunArgExprs (DFunLamArg {}  : as) =     dfunArgExprs as
+
+
+------------------------------------------------
+data UnfoldingSource
   = InlineRhs          -- The current rhs of the function
     		       -- Replace uf_tmpl each time around
 
@@ -669,15 +687,10 @@ expandUnfolding_maybe :: Unfolding -> Maybe CoreExpr
 expandUnfolding_maybe (CoreUnfolding { uf_expandable = True, uf_tmpl = rhs }) = Just rhs
 expandUnfolding_maybe _                                                       = Nothing
 
-isStableUnfolding_maybe :: Unfolding -> Maybe (UnfoldingSource, Bool)
-isStableUnfolding_maybe (CoreUnfolding { uf_src = src, uf_guidance = guide }) 
-   | isStableSource src
-   = Just (src, unsat_ok)
-   where
-     unsat_ok = case guide of
-     	      	  UnfWhen unsat_ok _ -> unsat_ok
-                  _                  -> needSaturated
-isStableUnfolding_maybe _ = Nothing
+isStableCoreUnfolding_maybe :: Unfolding -> Maybe UnfoldingSource
+isStableCoreUnfolding_maybe (CoreUnfolding { uf_src = src })
+   | isStableSource src   = Just src
+isStableCoreUnfolding_maybe _ = Nothing
 
 isCompulsoryUnfolding :: Unfolding -> Bool
 isCompulsoryUnfolding (CoreUnfolding { uf_src = InlineCompulsory }) = True

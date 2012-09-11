@@ -155,29 +155,36 @@ tcHsSigTypeNC ctxt hs_ty
 	; checkValidType ctxt ty	
 	; return ty }
 
-tcHsInstHead :: LHsType Name -> TcM ([TyVar], ThetaType, Type)
+tcHsInstHead :: LHsType Name -> TcM ([TyVar], ThetaType, Class, [Type])
 -- Typecheck an instance head.  We can't use 
 -- tcHsSigType, because it's not a valid user type.
-tcHsInstHead (L loc ty)
+tcHsInstHead (L loc hs_ty)
   = setSrcSpan loc   $	-- No need for an "In the type..." context
-    tc_inst_head ty     -- because that comes from the caller
+                        -- because that comes from the caller
+    do { kinded_ty <- kc_inst_head hs_ty
+       ; ds_inst_head kinded_ty }
   where
-    -- tc_inst_head expects HsPredTy, which isn't usually even allowed
-    tc_inst_head (HsPredTy pred)
-      = do { pred'  <- kcHsPred pred
-    	   ; pred'' <- dsHsPred pred'
-           ; return ([], [], mkPredTy pred'') }
+    kc_inst_head ty@(HsPredTy pred@(HsClassP {}))
+      = do { (pred', kind) <- kc_pred pred
+           ; checkExpectedKind ty kind ekLifted
+           ; return (HsPredTy pred') }
+    kc_inst_head (HsForAllTy exp tv_names context (L loc ty))
+      = kcHsTyVars tv_names         $ \ tv_names' ->
+        do { ctxt' <- kcHsContext context
+           ; ty'   <- kc_inst_head ty
+           ; return (HsForAllTy exp tv_names' ctxt' (L loc ty')) }
+    kc_inst_head _ = failWithTc (ptext (sLit "Malformed instance type"))
 
-    tc_inst_head (HsForAllTy _ tvs ctxt (L _ (HsPredTy pred)))
-      = kcHsTyVars tvs    $ \ tvs' ->
-    	do { ctxt' <- kcHsContext ctxt
-    	   ; pred' <- kcHsPred    pred
-    	   ; tcTyVarBndrs tvs'  $ \ tvs'' ->
-    	do { ctxt'' <- mapM dsHsLPred (unLoc ctxt')
-    	   ; pred'' <- dsHsPred pred'
-    	   ; return (tvs'', ctxt'', mkPredTy pred'') } }
-
-    tc_inst_head _ = failWithTc (ptext (sLit "Malformed instance type"))
+    ds_inst_head (HsPredTy (HsClassP cls_name tys))
+      = do { clas <- tcLookupClass cls_name
+           ; arg_tys <- dsHsTypes tys
+           ; return ([], [], clas, arg_tys) }
+    ds_inst_head (HsForAllTy _ tvs ctxt (L _ tau))
+      = tcTyVarBndrs tvs  $ \ tvs' ->
+        do { ctxt' <- mapM dsHsLPred (unLoc ctxt)
+           ; (tvs_r, ctxt_r, cls, tys) <- ds_inst_head tau
+           ; return (tvs' ++ tvs_r, ctxt' ++ ctxt_r , cls, tys) }
+    ds_inst_head _ = panic "ds_inst_head"
 
 tcHsQuantifiedType :: [LHsTyVarBndr Name] -> LHsType Name -> TcM ([TyVar], Type)
 -- Behave very like type-checking (HsForAllTy sig_tvs hs_ty),
@@ -491,9 +498,9 @@ kcHsLPred :: LHsPred Name -> TcM (LHsPred Name)
 kcHsLPred = wrapLocM kcHsPred
 
 kcHsPred :: HsPred Name -> TcM (HsPred Name)
-kcHsPred pred = do	-- Checks that the result is of kind liftedType
+kcHsPred pred = do      -- Checks that the result is a type kind
     (pred', kind) <- kc_pred pred
-    checkExpectedKind pred kind ekLifted
+    checkExpectedKind pred kind ekOpen
     return pred'
     
 ---------------------------
@@ -502,21 +509,16 @@ kc_pred :: HsPred Name -> TcM (HsPred Name, TcKind)
 	-- application (reason: used from TcDeriv)
 kc_pred (HsIParam name ty)
   = do { (ty', kind) <- kc_lhs_type ty
-       ; return (HsIParam name ty', kind)
-       }
+       ; return (HsIParam name ty', kind) }
 kc_pred (HsClassP cls tys)
   = do { kind <- kcClass cls
        ; (tys', res_kind) <- kcApps cls kind tys
-       ; return (HsClassP cls tys', res_kind)
-       }
+       ; return (HsClassP cls tys', res_kind) }
 kc_pred (HsEqualP ty1 ty2)
   = do { (ty1', kind1) <- kc_lhs_type ty1
---       ; checkExpectedKind ty1 kind1 liftedTypeKind
        ; (ty2', kind2) <- kc_lhs_type ty2
---       ; checkExpectedKind ty2 kind2 liftedTypeKind
        ; checkExpectedKind ty2 kind2 (EK kind1 EkEqPred)
-       ; return (HsEqualP ty1' ty2', liftedTypeKind)
-       }
+       ; return (HsEqualP ty1' ty2', unliftedTypeKind) }
 
 ---------------------------
 kcTyVar :: Name -> TcM TcKind
@@ -865,7 +867,7 @@ tcPatSig ctxt sig res_ty
 	; if null sig_tvs then do {
 		-- The type signature binds no type variables, 
 		-- and hence is rigid, so use it to zap the res_ty
-         	  wrap <- tcSubType PatSigOrigin (SigSkol ctxt) res_ty sig_ty
+                  wrap <- tcSubType PatSigOrigin ctxt res_ty sig_ty
 		; return (sig_ty, [], wrap)
 
 	} else do {
@@ -894,7 +896,7 @@ tcPatSig ctxt sig res_ty
 	; sig_tvs' <- tcInstSigTyVars sig_tvs
         ; let sig_ty' = substTyWith sig_tvs sig_tv_tys' sig_ty
               sig_tv_tys' = mkTyVarTys sig_tvs'
-	; wrap <- tcSubType PatSigOrigin (SigSkol ctxt) res_ty sig_ty'
+        ; wrap <- tcSubType PatSigOrigin ctxt res_ty sig_ty'
 
 	-- Check that each is bound to a distinct type variable,
 	-- and one that is not already in scope

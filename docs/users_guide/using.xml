@@ -1206,14 +1206,15 @@ foreign import "&amp;f" f :: FunPtr t
 	  <indexterm><primary>incomplete patterns, warning</primary></indexterm>
 	  <indexterm><primary>patterns, incomplete</primary></indexterm>
 
-	  <para>Similarly for incomplete patterns, the function
-          <function>g</function> below will fail when applied to
+          <para>Similarly for incomplete patterns, the functions
+          <function>g</function> and <function>h</function> below will fail when applied to
           non-empty lists, so the compiler will emit a warning about
           this when <option>-fwarn-incomplete-patterns</option> is
           enabled.</para>
 
 <programlisting>
 g [] = 2
+h = \[] -> 2
 </programlisting>
 
 	  <para>This option isn't enabled by default because it can be
@@ -2219,9 +2220,8 @@ statements or clauses.
   <filename>.hcr</filename>. The Core format is described in <ulink url="../../core.pdf">
   <citetitle>An External Representation for the GHC Core Language</citetitle></ulink>, 
   and sample tools
-  for manipulating Core files (in Haskell) are in the GHC source distribution 
-  directory under <literal>utils/ext-core</literal>.  
-  Note that the format of <literal>.hcr</literal> 
+  for manipulating Core files (in Haskell) are available in the
+  <ulink url="http://hackage.haskell.org/package/extcore">extcore package on Hackage</ulink>.  Note that the format of <literal>.hcr</literal>
   files is <emphasis>different</emphasis> from the Core output format that GHC generates 
   for debugging purposes (<xref linkend="options-debugging"/>), though the two formats appear somewhat similar.</para>
 

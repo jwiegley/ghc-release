@@ -22,3 +22,23 @@ T4201:
 	'$(TEST_HC)' -c -O T4201.hs 
 	'$(TEST_HC)' --show-iface T4201.hi | grep 'Unfolding.*sym'
 
+# This one looped as a result of bogus specialisation
+T4903:
+	$(RM) -f T4903a.o T4903.o
+	'$(TEST_HC)' -c -O T4903a.hs -dcore-lint
+	'$(TEST_HC)' -c -O T4903.hs -dcore-lint
+
+T4918:
+	$(RM) -f T4918.hi T4918.o T4918a.hi T4918a.o
+	'$(TEST_HC)' -c -O T4918a.hs 
+	'$(TEST_HC)' -c -O T4918.hs 
+	'$(TEST_HC)' --show-iface T4918.hi | grep 'C#'
+
+EvalTest:
+	'$(TEST_HC)' -c -O EvalTest.hs -ddump-simpl -dsuppress-uniques | grep 'rght.*Dmd'
+
+# When SpecConstr works there are no STUArrays at all
+# The "-(...)" ignores the (expected) non-zero exit code from grep
+# when there are (as expected) no matches
+T4945:
+	-('$(TEST_HC)' -c -O2 -fno-liberate-case T4945.hs -ddump-simpl -dsuppress-uniques | grep 'STUArray')

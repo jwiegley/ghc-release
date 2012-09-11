@@ -15,6 +15,7 @@ module Haddock.Backends.Xhtml.Utils (
 
   namedAnchor, linkedAnchor,
   spliceURL,
+  groupId,
 
   (<+>), char, nonEmpty,
   keyword, punctuate,
@@ -66,7 +67,7 @@ spliceURL maybe_file maybe_mod maybe_name maybe_loc url = run url
   run ('%':'N':rest) = name ++ run rest
   run ('%':'K':rest) = kind ++ run rest
   run ('%':'L':rest) = line ++ run rest
-  run ('%':'%':rest) = "%" ++ run rest
+  run ('%':'%':rest) = "%"  ++ run rest
 
   run ('%':'{':'M':'O':'D':'U':'L':'E':'}':rest) = mdl  ++ run rest
   run ('%':'{':'F':'I':'L':'E':'}':rest)         = file ++ run rest
@@ -84,9 +85,10 @@ spliceURL maybe_file maybe_mod maybe_name maybe_loc url = run url
   run (c:rest) = c : run rest
 
 
-renderToString :: Html -> String
-renderToString = showHtml     -- for production
---renderToString = prettyHtml   -- for debugging
+renderToString :: Bool -> Html -> String
+renderToString debug html
+  | debug = renderHtml html
+  | otherwise = showHtml html
 
 
 hsep :: [Html] -> Html
@@ -171,6 +173,10 @@ namedAnchor n = anchor ! [XHtml.name n]
 linkedAnchor :: String -> Html -> Html
 linkedAnchor n = anchor ! [href ('#':n)]
 
+
+-- | generate an anchor identifier for a group
+groupId :: String -> String
+groupId g = makeAnchorId ("g:" ++ g)
 
 --
 -- A section of HTML which is collapsible.

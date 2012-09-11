@@ -1,3 +1,7 @@
+-- | This module provides scalable event notification for file
+-- descriptors and timeouts.
+--
+-- This module should be considered GHC internal.
 module System.Event
     ( -- * Types
       EventManager
@@ -22,7 +26,7 @@ module System.Event
     , registerFd_
     , unregisterFd
     , unregisterFd_
-    , fdWasClosed
+    , closeFd
 
       -- * Registering interest in timeout events
     , TimeoutCallback

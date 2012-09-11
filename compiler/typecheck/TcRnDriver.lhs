@@ -72,7 +72,7 @@ import Outputable
 import DataCon
 import Type
 import Class
-import TcType   ( tyClsNamesOfDFunHead )
+import TcType   ( orphNamesOfDFunHead )
 import Inst	( tcGetInstEnvs )
 import Data.List ( sortBy )
 
@@ -290,7 +290,7 @@ tcRnExtCore hsc_env (HsExtCore this_mod decls src_binds)
 
    setEnvs tc_envs $ do {
 
-   rn_decls <- checkNoErrs $ rnTyClDecls ldecls ;
+   (rn_decls, _fvs) <- checkNoErrs $ rnTyClDecls [ldecls] ;
 
 	-- Dump trace of renaming part
    rnDump (ppr rn_decls) ;
@@ -348,7 +348,7 @@ tcRnExtCore hsc_env (HsExtCore this_mod decls src_binds)
 
 mkFakeGroup :: [LTyClDecl a] -> HsGroup a
 mkFakeGroup decls -- Rather clumsy; lots of unused fields
-  = emptyRdrGroup { hs_tyclds = decls }
+  = emptyRdrGroup { hs_tyclds = [decls] }
 \end{code}
 
 
@@ -504,7 +504,8 @@ tcRnHsBootDecls decls
 		-- Family instance declarations are rejected here
 	; traceTc "Tc3" empty
 	; (tcg_env, inst_infos, _deriv_binds) 
-            <- tcInstDecls1 tycl_decls inst_decls deriv_decls
+            <- tcInstDecls1 (concat tycl_decls) inst_decls deriv_decls
+
 	; setGblEnv tcg_env	$ do {
 
 		-- Typecheck value declarations
@@ -639,7 +640,11 @@ checkHiBootIface
 	= case [dfun | inst <- local_insts, 
 		       let dfun = instanceDFunId inst,
 		       idType dfun `tcEqType` boot_inst_ty ] of
-	    [] -> do { addErrTc (instMisMatch boot_inst); return Nothing }
+	    [] -> do { traceTc "check_inst" (vcat [ text "local_insts" <+> vcat (map (ppr . idType . instanceDFunId) local_insts)
+                                                  , text "boot_inst"   <+> ppr boot_inst
+                                                  , text "boot_inst_ty" <+> ppr boot_inst_ty
+                                                  ]) 
+                     ; addErrTc (instMisMatch boot_inst); return Nothing }
 	    (dfun:_) -> return (Just (local_boot_dfun, dfun))
 	where
 	  boot_dfun = instanceDFunId boot_inst
@@ -846,7 +851,7 @@ tcTopSrcDecls boot_details
 		-- and import the supporting declarations
         traceTc "Tc3" empty ;
 	(tcg_env, inst_infos, deriv_binds) 
-            <- tcInstDecls1 tycl_decls inst_decls deriv_decls;
+            <- tcInstDecls1 (concat tycl_decls) inst_decls deriv_decls;
 	setGblEnv tcg_env	$ do {
 
 	        -- Foreign import declarations next. 
@@ -875,7 +880,7 @@ tcTopSrcDecls boot_details
 
 	     	-- Second pass over class and instance declarations, 
         traceTc "Tc6" empty ;
-	inst_binds <- tcInstDecls2 tycl_decls inst_infos ;
+	inst_binds <- tcInstDecls2 (concat tycl_decls) inst_infos ;
 
 		-- Foreign exports
         traceTc "Tc7" empty ;
@@ -1307,9 +1312,16 @@ tcRnExpr hsc_env ictxt rdr_expr
 
 	-- Now typecheck the expression; 
 	-- it might have a rank-2 type (e.g. :t runST)
-    ((_tc_expr, res_ty), lie)	<- captureConstraints (tcInferRho rn_expr) ;
-    ((qtvs, dicts, _), lie_top) <- captureConstraints (simplifyInfer False {- No MR for now -}
-                                                      (tyVarsOfType res_ty) lie)  ;
+
+    uniq <- newUnique ;
+    let { fresh_it  = itName uniq } ;
+    ((_tc_expr, res_ty), lie)   <- captureConstraints (tcInferRho rn_expr) ;
+    ((qtvs, dicts, _), lie_top) <- captureConstraints $
+                                   simplifyInfer TopLevel
+                                                 False {- No MR for now -}
+                                                 [(fresh_it, res_ty)]
+                                                 lie  ;
+
     _ <- simplifyInteractive lie_top ;       -- Ignore the dicionary bindings
 
     let { all_expr_ty = mkForAllTys qtvs (mkPiTypes dicts res_ty) } ;
@@ -1486,7 +1498,7 @@ lookupInsts (ATyCon tc)
 		 , let dfun = instanceDFunId ispec
 		 , relevant dfun ] } 
   where
-    relevant df = tc_name `elemNameSet` tyClsNamesOfDFunHead (idType df)
+    relevant df = tc_name `elemNameSet` orphNamesOfDFunHead (idType df)
     tc_name     = tyConName tc		  
 
 lookupInsts _ = return []

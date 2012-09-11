@@ -42,7 +42,6 @@ import Name
 import SrcLoc
 
 -- Other random utilities
-import CmdLineParser
 import Digraph
 import BasicTypes hiding (isTopLevel)
 import Panic      hiding (showException)
@@ -294,6 +293,14 @@ findEditor = do
 
 foreign import ccall unsafe "rts_isProfiled" isProfiled :: IO CInt
 
+default_progname, default_prompt, default_stop :: String
+default_progname = "<interactive>"
+default_prompt = "%s> "
+default_stop = ""
+
+default_args :: [String]
+default_args = []
+
 interactiveUI :: [(FilePath, Maybe Phase)] -> Maybe [String]
               -> Ghc ()
 interactiveUI srcs maybe_exprs = do
@@ -344,10 +351,10 @@ interactiveUI srcs maybe_exprs = do
    default_editor <- liftIO $ findEditor
 
    startGHCi (runGHCi srcs maybe_exprs)
-        GHCiState{ progname = "<interactive>",
-                   args = [],
-                   prompt = "%s> ",
-                   stop = "",
+        GHCiState{ progname = default_progname,
+                   args = default_args,
+                   prompt = default_prompt,
+                   stop = default_stop,
                    editor = default_editor,
 --                   session = session,
                    options = [],
@@ -365,24 +372,26 @@ interactiveUI srcs maybe_exprs = do
 
 withGhcAppData :: (FilePath -> IO a) -> IO a -> IO a
 withGhcAppData right left = do
-   either_dir <- IO.try (getAppUserDataDirectory "ghc")
-   case either_dir of
-      Right dir -> right dir
-      _ -> left
+    either_dir <- IO.try (getAppUserDataDirectory "ghc")
+    case either_dir of
+        Right dir ->
+            do createDirectoryIfMissing False dir `catchIO` \_ -> return ()
+               right dir
+        _ -> left
 
 runGHCi :: [(FilePath, Maybe Phase)] -> Maybe [String] -> GHCi ()
 runGHCi paths maybe_exprs = do
-  let 
+  let
    read_dot_files = not opt_IgnoreDotGhci
 
    current_dir = return (Just ".ghci")
 
-   app_user_dir = io $ withGhcAppData 
+   app_user_dir = liftIO $ withGhcAppData
                     (\dir -> return (Just (dir </> "ghci.conf")))
                     (return Nothing)
 
    home_dir = do
-    either_dir <- io $ IO.try (getEnv "HOME")
+    either_dir <- liftIO $ IO.try (getEnv "HOME")
     case either_dir of
       Right home -> return (Just (home </> ".ghci"))
       _ -> return Nothing
@@ -393,25 +402,27 @@ runGHCi paths maybe_exprs = do
 
    sourceConfigFile :: FilePath -> GHCi ()
    sourceConfigFile file = do
-     exists <- io $ doesFileExist file
+     exists <- liftIO $ doesFileExist file
      when exists $ do
-       dir_ok  <- io $ checkPerms (getDirectory file)
-       file_ok <- io $ checkPerms file
+       dir_ok  <- liftIO $ checkPerms (getDirectory file)
+       file_ok <- liftIO $ checkPerms file
        when (dir_ok && file_ok) $ do
-         either_hdl <- io $ IO.try (openFile file ReadMode)
+         either_hdl <- liftIO $ IO.try (openFile file ReadMode)
          case either_hdl of
            Left _e   -> return ()
            -- NOTE: this assumes that runInputT won't affect the terminal;
            -- can we assume this will always be the case?
            -- This would be a good place for runFileInputT.
-           Right hdl -> runInputTWithPrefs defaultPrefs defaultSettings $ do
+           Right hdl ->
+               do runInputTWithPrefs defaultPrefs defaultSettings $
                             runCommands $ fileLoop hdl
+                  liftIO (hClose hdl `IO.catch` \_ -> return ())
      where
       getDirectory f = case takeDirectory f of "" -> "."; d -> d
 
   when (read_dot_files) $ do
     mcfgs0 <- sequence [ current_dir, app_user_dir, home_dir ]
-    mcfgs <- io $ mapM canonicalizePath' (catMaybes mcfgs0)
+    mcfgs <- liftIO $ mapM canonicalizePath' (catMaybes mcfgs0)
     mapM_ sourceConfigFile $ nub $ catMaybes mcfgs
         -- nub, because we don't want to read .ghci twice if the
         -- CWD is $HOME.
@@ -427,11 +438,11 @@ runGHCi paths maybe_exprs = do
                     filePaths' <- mapM (Encoding.decode . BS.pack) filePaths
                     loadModule (zip filePaths' phases)
      when (isJust maybe_exprs && failed ok) $
-        io (exitWith (ExitFailure 1))
+        liftIO (exitWith (ExitFailure 1))
 
   -- if verbosity is greater than 0, or we are connected to a
   -- terminal, display the prompt in the interactive loop.
-  is_tty <- io (hIsTerminalDevice stdin)
+  is_tty <- liftIO (hIsTerminalDevice stdin)
   dflags <- getDynFlags
   let show_prompt = verbosity dflags > 0 || is_tty
 
@@ -449,19 +460,19 @@ runGHCi paths maybe_exprs = do
                                    -- Jump through some hoops to get the
                                    -- current progname in the exception text:
                                    -- <progname>: <exception>
-                              io $ withProgName (progname st)
+                              liftIO $ withProgName (progname st)
                                    -- this used to be topHandlerFastExit, see #2228
-                                 $ topHandler e
+                                     $ topHandler e
             runInputTWithPrefs defaultPrefs defaultSettings $ do
                 runCommands' handle (return Nothing)
 
   -- and finally, exit
-  io $ do when (verbosity dflags > 0) $ putStrLn "Leaving GHCi."
+  liftIO $ when (verbosity dflags > 0) $ putStrLn "Leaving GHCi."
 
 runGHCiInput :: InputT GHCi a -> GHCi a
 runGHCiInput f = do
-    histFile <- io $ withGhcAppData (\dir -> return (Just (dir </> "ghci_history")))
-                        (return Nothing)
+    histFile <- liftIO $ withGhcAppData (\dir -> return (Just (dir </> "ghci_history")))
+                                        (return Nothing)
     let settings = setComplete ghciCompleteWord
                     $ defaultSettings {historyFile = histFile}
     runInputT settings f
@@ -687,7 +698,7 @@ afterRunStmt step_here run_result = do
      _ -> return ()
 
   flushInterpBuffers
-  io installSignalHandlers
+  liftIO installSignalHandlers
   b <- isOptionSet RevertCAFs
   when b revertCAFs
 
@@ -755,7 +766,7 @@ lookupCommand "" = do
       Just c -> return $ GotCommand c
       Nothing -> return NoLastCommand
 lookupCommand str = do
-  mc <- io $ lookupCommand' str
+  mc <- liftIO $ lookupCommand' str
   st <- getGHCiState
   setGHCiState st{ last_command = mc }
   return $ case mc of
@@ -808,10 +819,10 @@ getCurrentBreakModule = do
 
 noArgs :: GHCi () -> String -> GHCi ()
 noArgs m "" = m
-noArgs _ _  = io $ putStrLn "This command takes no arguments"
+noArgs _ _  = liftIO $ putStrLn "This command takes no arguments"
 
 help :: String -> GHCi ()
-help _ = io (putStr helpText)
+help _ = liftIO (putStr helpText)
 
 info :: String -> InputT GHCi ()
 info "" = ghcError (CmdLineError "syntax: ':i <thing-you-want-info-about>'")
@@ -855,7 +866,7 @@ pprInfo pefas (thing, fixity, insts)
 
 runMain :: String -> GHCi ()
 runMain s = case toArgs s of
-            Left err   -> io (hPutStrLn stderr err)
+            Left err   -> liftIO (hPutStrLn stderr err)
             Right args ->
                 withFlattenedDynflags $ do
                    dflags <- getDynFlags
@@ -865,7 +876,7 @@ runMain s = case toArgs s of
 
 runRun :: String -> GHCi ()
 runRun s = case toCmdArgs s of
-           Left err          -> io (hPutStrLn stderr err)
+           Left err          -> liftIO (hPutStrLn stderr err)
            Right (cmd, args) -> doWithArgs args cmd
 
 doWithArgs :: [String] -> String -> GHCi ()
@@ -917,7 +928,7 @@ editFile str =
      let cmd = editor st
      when (null cmd) 
        $ ghcError (CmdLineError "editor not set, use :set editor")
-     _ <- io $ system (cmd ++ ' ':file)
+     _ <- liftIO $ system (cmd ++ ' ':file)
      return ()
 
 -- The user didn't specify a file so we pick one for them.
@@ -954,16 +965,16 @@ chooseEditFile =
 
 defineMacro :: Bool{-overwrite-} -> String -> GHCi ()
 defineMacro _ (':':_) =
-  io $ putStrLn "macro name cannot start with a colon"
+  liftIO $ putStrLn "macro name cannot start with a colon"
 defineMacro overwrite s = do
   let (macro_name, definition) = break isSpace s
-  macros <- io (readIORef macros_ref)
+  macros <- liftIO (readIORef macros_ref)
   let defined = map cmdName macros
   if (null macro_name) 
 	then if null defined
-                then io $ putStrLn "no macros defined"
-                else io $ putStr ("the following macros are defined:\n" ++
-                                  unlines defined)
+                then liftIO $ putStrLn "no macros defined"
+                else liftIO $ putStr ("the following macros are defined:\n" ++
+                                      unlines defined)
 	else do
   if (not overwrite && macro_name `elem` defined)
 	then ghcError (CmdLineError 
@@ -980,12 +991,12 @@ defineMacro overwrite s = do
   handleSourceError (\e -> GHC.printExceptionAndWarnings e) $
    withFlattenedDynflags $ do
     hv <- GHC.compileExpr new_expr
-    io (writeIORef macros_ref --
-	(filtered ++ [(macro_name, lift . runMacro hv, noCompletion)]))
+    liftIO (writeIORef macros_ref --
+            (filtered ++ [(macro_name, lift . runMacro hv, noCompletion)]))
 
 runMacro :: GHC.HValue{-String -> IO String-} -> String -> GHCi Bool
 runMacro fun s = do
-  str <- io ((unsafeCoerce# fun :: String -> IO String) s)
+  str <- liftIO ((unsafeCoerce# fun :: String -> IO String) s)
   -- make sure we force any exceptions in the result, while we are still
   -- inside the exception handler for commands:
   seqList str (return ())
@@ -995,12 +1006,12 @@ runMacro fun s = do
 undefineMacro :: String -> GHCi ()
 undefineMacro str = mapM_ undef (words str) 
  where undef macro_name = do
-        cmds <- io (readIORef macros_ref)
+        cmds <- liftIO (readIORef macros_ref)
         if (macro_name `notElem` map cmdName cmds) 
       	   then ghcError (CmdLineError 
       		("macro '" ++ macro_name ++ "' is not defined"))
       	   else do
-            io (writeIORef macros_ref (filter ((/= macro_name) . cmdName) cmds))
+            liftIO (writeIORef macros_ref (filter ((/= macro_name) . cmdName) cmds))
 
 cmdCmd :: String -> GHCi ()
 cmdCmd str = do
@@ -1008,7 +1019,7 @@ cmdCmd str = do
   handleSourceError (\e -> GHC.printExceptionAndWarnings e) $
    withFlattenedDynflags $ do
     hv <- GHC.compileExpr expr
-    cmds <- io $ (unsafeCoerce# hv :: IO String)
+    cmds <- liftIO $ (unsafeCoerce# hv :: IO String)
     enqueueCommands (lines cmds)
     return ()
 
@@ -1189,7 +1200,7 @@ quit :: String -> InputT GHCi Bool
 quit _ = return True
 
 shellEscape :: String -> GHCi Bool
-shellEscape str = io (system str >> return False)
+shellEscape str = liftIO (system str >> return False)
 
 withFlattenedDynflags :: GHC.GhcMonad m => m a -> m a
 withFlattenedDynflags m
@@ -1407,18 +1418,18 @@ setCmd :: String -> GHCi ()
 setCmd ""
   = do st <- getGHCiState
        let opts = options st
-       io $ putStrLn (showSDoc (
+       liftIO $ putStrLn (showSDoc (
    	      text "options currently set: " <> 
    	      if null opts
    		   then text "none."
    		   else hsep (map (\o -> char '+' <> text (optToStr o)) opts)
    	   ))
        dflags <- getDynFlags
-       io $ putStrLn (showSDoc (
+       liftIO $ putStrLn (showSDoc (
           vcat (text "GHCi-specific dynamic flag settings:" 
                :map (flagSetting dflags) ghciFlags)
           ))
-       io $ putStrLn (showSDoc (
+       liftIO $ putStrLn (showSDoc (
           vcat (text "other dynamic, non-language, flag settings:" 
                :map (flagSetting dflags) others)
           ))
@@ -1437,17 +1448,17 @@ setCmd str
   = case getCmd str of
     Right ("args",   rest) ->
         case toArgs rest of
-            Left err -> io (hPutStrLn stderr err)
+            Left err -> liftIO (hPutStrLn stderr err)
             Right args -> setArgs args
     Right ("prog",   rest) ->
         case toArgs rest of
             Right [prog] -> setProg prog
-            _ -> io (hPutStrLn stderr "syntax: :set prog <progname>")
+            _ -> liftIO (hPutStrLn stderr "syntax: :set prog <progname>")
     Right ("prompt", rest) -> setPrompt $ dropWhile isSpace rest
     Right ("editor", rest) -> setEditor $ dropWhile isSpace rest
     Right ("stop",   rest) -> setStop   $ dropWhile isSpace rest
     _ -> case toArgs str of
-         Left err -> io (hPutStrLn stderr err)
+         Left err -> liftIO (hPutStrLn stderr err)
          Right wds -> setOptions wds
 
 setArgs, setOptions :: [String] -> GHCi ()
@@ -1485,13 +1496,13 @@ setStop cmd = do
 setPrompt value = do
   st <- getGHCiState
   if null value
-      then io $ hPutStrLn stderr $ "syntax: :set prompt <prompt>, currently \"" ++ prompt st ++ "\""
+      then liftIO $ hPutStrLn stderr $ "syntax: :set prompt <prompt>, currently \"" ++ prompt st ++ "\""
       else case value of
            '\"' : _ -> case reads value of
                        [(value', xs)] | all isSpace xs ->
                            setGHCiState (st { prompt = value' })
                        _ ->
-                           io $ hPutStrLn stderr "Can't parse prompt string. Use Haskell syntax."
+                           liftIO $ hPutStrLn stderr "Can't parse prompt string. Use Haskell syntax."
            _ -> setGHCiState (st { prompt = value })
 
 setOptions wds =
@@ -1505,11 +1516,13 @@ newDynFlags :: [String] -> GHCi ()
 newDynFlags minus_opts = do
       dflags <- getDynFlags
       let pkg_flags = packageFlags dflags
-      (dflags', leftovers, warns) <- io $ GHC.parseDynamicFlags dflags $ map noLoc minus_opts
+      (dflags', leftovers, warns) <- liftIO $ GHC.parseDynamicFlags dflags $ map noLoc minus_opts
       handleFlagWarnings dflags' warns
 
       if (not (null leftovers))
-        then ghcError $ errorsToGhcException leftovers
+        then ghcError . CmdLineError
+           $ "Some flags have not been recognized: "
+          ++ (concat . intersperse ", " $ map unLoc leftovers)
         else return ()
 
       new_pkgs <- setDynFlags dflags'
@@ -1518,10 +1531,10 @@ newDynFlags minus_opts = do
       -- and link the new packages.
       dflags <- getDynFlags
       when (packageFlags dflags /= pkg_flags) $ do
-        io $ hPutStrLn stderr "package flags have changed, resetting and loading new packages..."
+        liftIO $ hPutStrLn stderr "package flags have changed, resetting and loading new packages..."
         GHC.setTargets []
         _ <- GHC.load LoadAllTargets
-        io (linkPackages dflags new_pkgs)
+        liftIO (linkPackages dflags new_pkgs)
         -- package flags changed, we can't re-use any of the old context
         setContextAfterLoad ([],[]) False []
       return ()
@@ -1529,22 +1542,32 @@ newDynFlags minus_opts = do
 
 unsetOptions :: String -> GHCi ()
 unsetOptions str
-  = do -- first, deal with the GHCi opts (+s, +t, etc.)
-       let opts = words str
-	   (minus_opts, rest1) = partition isMinus opts
-	   (plus_opts, rest2)  = partitionWith isPlus rest1
+  =   -- first, deal with the GHCi opts (+s, +t, etc.)
+     let opts = words str
+         (minus_opts, rest1) = partition isMinus opts
+         (plus_opts, rest2)  = partitionWith isPlus rest1
+         (other_opts, rest3) = partition (`elem` map fst defaulters) rest2
 
-       if (not (null rest2)) 
-	  then io (putStrLn ("unknown option: '" ++ head rest2 ++ "'"))
-	  else do
+         defaulters = 
+           [ ("args"  , setArgs default_args)
+           , ("prog"  , setProg default_progname)
+           , ("prompt", setPrompt default_prompt)
+           , ("editor", liftIO findEditor >>= setEditor)
+           , ("stop"  , setStop default_stop)
+           ]
 
-       mapM_ unsetOpt plus_opts
- 
-       let no_flag ('-':'f':rest) = return ("-fno-" ++ rest)
-           no_flag f = ghcError (ProgramError ("don't know how to reverse " ++ f))
+         no_flag ('-':'f':rest) = return ("-fno-" ++ rest)
+         no_flag f = ghcError (ProgramError ("don't know how to reverse " ++ f))
 
-       no_flags <- mapM no_flag minus_opts
-       newDynFlags no_flags
+     in if (not (null rest3))
+           then liftIO (putStrLn ("unknown option: '" ++ head rest3 ++ "'"))
+           else do
+             mapM_ (fromJust.flip lookup defaulters) other_opts
+
+             mapM_ unsetOpt plus_opts
+
+             no_flags <- mapM no_flag minus_opts
+             newDynFlags no_flags
 
 isMinus :: String -> Bool
 isMinus ('-':_) = True
@@ -1558,12 +1581,12 @@ setOpt, unsetOpt :: String -> GHCi ()
 
 setOpt str
   = case strToGHCiOpt str of
-	Nothing -> io (putStrLn ("unknown option: '" ++ str ++ "'"))
+	Nothing -> liftIO (putStrLn ("unknown option: '" ++ str ++ "'"))
 	Just o  -> setOption o
 
 unsetOpt str
   = case strToGHCiOpt str of
-	Nothing -> io (putStrLn ("unknown option: '" ++ str ++ "'"))
+	Nothing -> liftIO (putStrLn ("unknown option: '" ++ str ++ "'"))
 	Just o  -> unsetOption o
 
 strToGHCiOpt :: String -> (Maybe GHCiOption)
@@ -1584,14 +1607,14 @@ showCmd :: String -> GHCi ()
 showCmd str = withFlattenedDynflags $ do
   st <- getGHCiState
   case words str of
-        ["args"]     -> io $ putStrLn (show (args st))
-        ["prog"]     -> io $ putStrLn (show (progname st))
-        ["prompt"]   -> io $ putStrLn (show (prompt st))
-        ["editor"]   -> io $ putStrLn (show (editor st))
-        ["stop"]     -> io $ putStrLn (show (stop st))
+        ["args"]     -> liftIO $ putStrLn (show (args st))
+        ["prog"]     -> liftIO $ putStrLn (show (progname st))
+        ["prompt"]   -> liftIO $ putStrLn (show (prompt st))
+        ["editor"]   -> liftIO $ putStrLn (show (editor st))
+        ["stop"]     -> liftIO $ putStrLn (show (stop st))
 	["modules" ] -> showModules
 	["bindings"] -> showBindings
-	["linker"]   -> io showLinkerState
+	["linker"]   -> liftIO showLinkerState
         ["breaks"]   -> showBkptTable
         ["context"]  -> showContext
         ["packages"]  -> showPackages
@@ -1603,7 +1626,7 @@ showModules :: GHCi ()
 showModules = do
   loaded_mods <- getLoadedModules
         -- we want *loaded* modules only, see #1734
-  let show_one ms = do m <- GHC.showModule ms; io (putStrLn m)
+  let show_one ms = do m <- GHC.showModule ms; liftIO (putStrLn m)
   mapM_ show_one loaded_mods
 
 getLoadedModules :: GHC.GhcMonad m => m [GHC.ModSummary]
@@ -1643,7 +1666,7 @@ showContext = do
 showPackages :: GHCi ()
 showPackages = do
   pkg_flags <- fmap packageFlags getDynFlags
-  io $ putStrLn $ showSDoc $ vcat $
+  liftIO $ putStrLn $ showSDoc $ vcat $
     text ("active package flags:"++if null pkg_flags then " none" else "")
     : map showFlag pkg_flags
   where showFlag (ExposePackage p) = text $ "  -package " ++ p
@@ -1654,7 +1677,7 @@ showPackages = do
 showLanguages :: GHCi ()
 showLanguages = do
    dflags <- getDynFlags
-   io $ putStrLn $ showSDoc $ vcat $
+   liftIO $ putStrLn $ showSDoc $ vcat $
       text "active language flags:" :
       [text ("  -X" ++ str) | (str, f, _) <- DynFlags.xFlags, xopt f dflags]
 
@@ -1789,21 +1812,21 @@ handler :: SomeException -> GHCi Bool
 
 handler exception = do
   flushInterpBuffers
-  io installSignalHandlers
+  liftIO installSignalHandlers
   ghciHandle handler (showException exception >> return False)
 
 showException :: SomeException -> GHCi ()
 showException se =
-  io $ case fromException se of
-       -- omit the location for CmdLineError:
-       Just (CmdLineError s)    -> putStrLn s
-       -- ditto:
-       Just ph@(PhaseFailed {}) -> putStrLn (showGhcException ph "")
-       Just other_ghc_ex        -> print other_ghc_ex
-       Nothing                  -> 
-         case fromException se of
-           Just UserInterrupt -> putStrLn "Interrupted."
-           _other             -> putStrLn ("*** Exception: " ++ show se)
+  liftIO $ case fromException se of
+           -- omit the location for CmdLineError:
+           Just (CmdLineError s)    -> putStrLn s
+           -- ditto:
+           Just ph@(PhaseFailed {}) -> putStrLn (showGhcException ph "")
+           Just other_ghc_ex        -> print other_ghc_ex
+           Nothing                  ->
+               case fromException se of
+               Just UserInterrupt -> putStrLn "Interrupted."
+               _                  -> putStrLn ("*** Exception: " ++ show se)
 
 -----------------------------------------------------------------------------
 -- recursive exception handlers
@@ -1938,16 +1961,15 @@ doContinue pred step = do
 abandonCmd :: String -> GHCi ()
 abandonCmd = noArgs $ do
   b <- GHC.abandon -- the prompt will change to indicate the new context
-  when (not b) $ io $ putStrLn "There is no computation running."
-  return ()
+  when (not b) $ liftIO $ putStrLn "There is no computation running."
 
 deleteCmd :: String -> GHCi ()
 deleteCmd argLine = do
    deleteSwitch $ words argLine
    where
    deleteSwitch :: [String] -> GHCi ()
-   deleteSwitch [] = 
-      io $ putStrLn "The delete command requires at least one argument."
+   deleteSwitch [] =
+      liftIO $ putStrLn "The delete command requires at least one argument."
    -- delete all break points
    deleteSwitch ("*":_rest) = discardActiveBreakPoints
    deleteSwitch idents = do
@@ -1962,17 +1984,17 @@ historyCmd :: String -> GHCi ()
 historyCmd arg
   | null arg        = history 20
   | all isDigit arg = history (read arg)
-  | otherwise       = io $ putStrLn "Syntax:  :history [num]"
+  | otherwise       = liftIO $ putStrLn "Syntax:  :history [num]"
   where
   history num = do
     resumes <- GHC.getResumeContext
     case resumes of
-      [] -> io $ putStrLn "Not stopped at a breakpoint"
+      [] -> liftIO $ putStrLn "Not stopped at a breakpoint"
       (r:_) -> do
         let hist = GHC.resumeHistory r
             (took,rest) = splitAt num hist
         case hist of
-          [] -> io $ putStrLn $ 
+          [] -> liftIO $ putStrLn $
                    "Empty history. Perhaps you forgot to use :trace?"
           _  -> do
                  spans <- mapM GHC.getHistorySpan took
@@ -1983,7 +2005,7 @@ historyCmd arg
                                  (map text nums) 
                                  (map (bold . ppr) names)
                                  (map (parens . ppr) spans)))
-                 io $ putStrLn $ if null rest then "<end of history>" else "..."
+                 liftIO $ putStrLn $ if null rest then "<end of history>" else "..."
 
 bold :: SDoc -> SDoc
 bold c | do_bold   = text start_bold <> c <> text end_bold
@@ -2016,7 +2038,7 @@ breakCmd argLine = do
 
 breakSwitch :: [String] -> GHCi ()
 breakSwitch [] = do
-   io $ putStrLn "The break command requires at least one argument."
+   liftIO $ putStrLn "The break command requires at least one argument."
 breakSwitch (arg1:rest)
    | looksLikeModuleName arg1 && not (null rest) = do
         mod <- wantInterpretedModule arg1
@@ -2026,8 +2048,8 @@ breakSwitch (arg1:rest)
         case toplevel of
            (mod : _) -> breakByModuleLine mod (read arg1) rest
            [] -> do 
-              io $ putStrLn "Cannot find default module for breakpoint." 
-              io $ putStrLn "Perhaps no modules are loaded for debugging?"
+              liftIO $ putStrLn "Cannot find default module for breakpoint." 
+              liftIO $ putStrLn "Perhaps no modules are loaded for debugging?"
    | otherwise = do -- try parsing it as an identifier
         wantNameFromInterpretedModule noCanDo arg1 $ \name -> do
         let loc = GHC.srcSpanStart (GHC.nameSrcSpan name)
@@ -2064,9 +2086,9 @@ findBreakAndSet mod lookupTickTree = do
    tickArray <- getTickArray mod
    (breakArray, _) <- getModBreak mod
    case lookupTickTree tickArray of 
-      Nothing  -> io $ putStrLn $ "No breakpoints found at that location."
+      Nothing  -> liftIO $ putStrLn $ "No breakpoints found at that location."
       Just (tick, span) -> do
-         success <- io $ setBreakFlag True breakArray tick 
+         success <- liftIO $ setBreakFlag True breakArray tick
          if success 
             then do
                (alreadySet, nm) <- 
@@ -2339,7 +2361,7 @@ deleteBreak identity = do
 turnOffBreak :: BreakLocation -> GHCi Bool
 turnOffBreak loc = do
   (arr, _) <- getModBreak (breakModule loc)
-  io $ setBreakFlag False arr (breakTick loc)
+  liftIO $ setBreakFlag False arr (breakTick loc)
 
 getModBreak :: Module -> GHCi (GHC.BreakArray, Array Int SrcSpan)
 getModBreak mod = do
