@@ -119,7 +119,7 @@ import qualified Data.Set as Set
 
 #if __GLASGOW_HASKELL__
 import Text.Read
-import Data.Data (Data(..), mkNorepType)
+import Data.Data (Data(..), mkNoRepType)
 #endif
 
 #if __GLASGOW_HASKELL__ >= 503
@@ -197,7 +197,7 @@ instance Data IntSet where
   gfoldl f z is = z fromList `f` (toList is)
   toConstr _    = error "toConstr"
   gunfold _ _   = error "gunfold"
-  dataTypeOf _  = mkNorepType "Data.IntSet.IntSet"
+  dataTypeOf _  = mkNoRepType "Data.IntSet.IntSet"
 
 #endif
 
@@ -591,13 +591,29 @@ deleteFindMin = fromMaybe (error "deleteFindMin: empty set has no minimal elemen
 deleteFindMax :: IntSet -> (Int, IntSet)
 deleteFindMax = fromMaybe (error "deleteFindMax: empty set has no maximal element") . maxView
 
--- | /O(min(n,W))/. The minimal element of a set.
+
+-- | /O(min(n,W))/. The minimal element of the set.
 findMin :: IntSet -> Int
-findMin = maybe (error "findMin: empty set has no minimal element") fst . minView
+findMin Nil = error "findMin: empty set has no minimal element"
+findMin (Tip x) = x
+findMin (Bin _ m l r)
+  |   m < 0   = find r
+  | otherwise = find l
+    where find (Tip x)        = x
+          find (Bin _ _ l' _) = find l'
+          find Nil            = error "findMin Nil"
 
 -- | /O(min(n,W))/. The maximal element of a set.
 findMax :: IntSet -> Int
-findMax = maybe (error "findMax: empty set has no maximal element") fst . maxView
+findMax Nil = error "findMax: empty set has no maximal element"
+findMax (Tip x) = x
+findMax (Bin _ m l r)
+  |   m < 0   = find l
+  | otherwise = find r
+    where find (Tip x)        = x
+          find (Bin _ _ _ r') = find r'
+          find Nil            = error "findMax Nil"
+
 
 -- | /O(min(n,W))/. Delete the minimal element.
 deleteMin :: IntSet -> IntSet
@@ -670,15 +686,40 @@ fromList xs
   where
     ins t x  = insert x t
 
--- | /O(n*min(n,W))/. Build a set from an ascending list of elements.
+-- | /O(n)/. Build a set from an ascending list of elements.
+-- /The precondition (input list is ascending) is not checked./
 fromAscList :: [Int] -> IntSet 
-fromAscList xs
-  = fromList xs
+fromAscList [] = Nil
+fromAscList (x0 : xs0) = fromDistinctAscList (combineEq x0 xs0)
+  where 
+    combineEq x' [] = [x']
+    combineEq x' (x:xs) 
+      | x==x'     = combineEq x' xs
+      | otherwise = x' : combineEq x xs
 
--- | /O(n*min(n,W))/. Build a set from an ascending list of distinct elements.
+-- | /O(n)/. Build a set from an ascending list of distinct elements.
+-- /The precondition (input list is strictly ascending) is not checked./
 fromDistinctAscList :: [Int] -> IntSet
-fromDistinctAscList xs
-  = fromList xs
+fromDistinctAscList []         = Nil
+fromDistinctAscList (z0 : zs0) = work z0 zs0 Nada
+  where
+    work x []     stk = finish x (Tip x) stk
+    work x (z:zs) stk = reduce z zs (branchMask z x) x (Tip x) stk
+
+    reduce z zs _ px tx Nada = work z zs (Push px tx Nada)
+    reduce z zs m px tx stk@(Push py ty stk') =
+        let mxy = branchMask px py
+            pxy = mask px mxy
+        in  if shorter m mxy
+                 then reduce z zs m pxy (Bin pxy mxy ty tx) stk'
+                 else work z zs (Push px tx stk)
+
+    finish _  t  Nada = t
+    finish px tx (Push py ty stk) = finish p (join py ty px tx) stk
+        where m = branchMask px py
+              p = mask px m
+
+data Stack = Push {-# UNPACK #-} !Prefix !IntSet !Stack | Nada
 
 
 {--------------------------------------------------------------------
@@ -1024,7 +1065,7 @@ prop_Int xs ys
 --------------------------------------------------------------------}
 prop_Ordered
   = forAll (choose (5,100)) $ \n ->
-    let xs = [0..n::Int]
+    let xs = concat [[i-n,i-n]|i<-[0..2*n :: Int]]
     in fromAscList xs == fromList xs
 
 prop_List :: [Int] -> Bool

@@ -1,20 +1,15 @@
-TOP=../..
-include $(TOP)/mk/boilerplate.mk
+# -----------------------------------------------------------------------------
+#
+# (c) 2009 The University of Glasgow
+#
+# This file is part of the GHC build system.
+#
+# To understand how the build system works and how to modify it, see
+#      http://hackage.haskell.org/trac/ghc/wiki/Building/Architecture
+#      http://hackage.haskell.org/trac/ghc/wiki/Building/Modifying
+#
+# -----------------------------------------------------------------------------
 
-SRC_CC_OPTS += $(MACOSX_DEPLOYMENT_CC_OPTS)
-SRC_LD_OPTS += $(MACOSX_DEPLOYMENT_LD_OPTS)
-
-C_PROG 	= hp2ps
-
-SRC_CC_OPTS += -I$(GHC_INCLUDE_DIR) -Wall
-
-INSTALL_PROGS += $(C_PROG)
-
-LIBS	     = $(LIBM)
-
-CLEAN_FILES += $(C_OBJS) $(C_PROG)
-
-BINDIST_EXTRAS += $(C_PROG)
-include $(TOP)/mk/bindist.mk
-
-include $(TOP)/mk/target.mk
+dir = utils/hp2ps
+TOP = ../..
+include $(TOP)/mk/sub-makefile.mk

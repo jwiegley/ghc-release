@@ -1,18 +1,22 @@
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Haddock.ModuleTree
+-- Copyright   :  (c) Simon Marlow 2003-2006,
+--                    David Waern  2006
+-- License     :  BSD-like
 --
--- Haddock - A Haskell Documentation Tool
---
--- (c) Simon Marlow 2003
---
+-- Maintainer  :  haddock@projects.haskell.org
+-- Stability   :  experimental
+-- Portability :  portable
+-----------------------------------------------------------------------------
 
 module Haddock.ModuleTree ( ModuleTree(..), mkModuleTree ) where
 
-import GHC           ( HsDoc, Name )
+import Haddock.Types ( HsDoc )
+
+import GHC           ( Name )
 import Module        ( Module, moduleNameString, moduleName, modulePackageId )
-#if __GLASGOW_HASKELL__ >= 609
 import Module (packageIdString)
-#else
-import PackageConfig (packageIdString)
-#endif
 
 data ModuleTree = Node String Bool (Maybe String) (Maybe (HsDoc Name)) [ModuleTree]
 

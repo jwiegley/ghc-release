@@ -18,12 +18,11 @@ import IfaceEnv
 import HscTypes
 import BasicTypes
 import NewDemand
+import Annotations
 import IfaceSyn
 import Module
 import Name
-import OccName
 import VarEnv
-import InstEnv
 import Class
 import DynFlags
 import UniqFM
@@ -39,6 +38,7 @@ import FastMutInt
 import Unique
 import Outputable
 import FastString
+import Constants
 
 import Data.List
 import Data.Word
@@ -58,15 +58,14 @@ data TraceBinIFaceReading = TraceBinIFaceReading | QuietBinIFaceReading
 readBinIface :: CheckHiWay -> TraceBinIFaceReading -> FilePath
              -> TcRnIf a b ModIface
 readBinIface checkHiWay traceBinIFaceReading hi_path = do
-  nc <- getNameCache
-  (new_nc, iface) <- liftIO $
-    readBinIface_ checkHiWay traceBinIFaceReading hi_path nc
-  setNameCache new_nc
-  return iface
+  update_nc <- mkNameCacheUpdater
+  dflags <- getDOpts
+  liftIO $ readBinIface_ dflags checkHiWay traceBinIFaceReading hi_path update_nc
 
-readBinIface_ :: CheckHiWay -> TraceBinIFaceReading -> FilePath -> NameCache
-              -> IO (NameCache, ModIface)
-readBinIface_ checkHiWay traceBinIFaceReading hi_path nc = do
+readBinIface_ :: DynFlags -> CheckHiWay -> TraceBinIFaceReading -> FilePath
+              -> NameCacheUpdater (Array Int Name)
+              -> IO ModIface
+readBinIface_ dflags checkHiWay traceBinIFaceReading hi_path update_nc = do
   let printer :: SDoc -> IO ()
       printer = case traceBinIFaceReading of
                 TraceBinIFaceReading -> \sd -> printSDoc sd defaultDumpStyle
@@ -94,12 +93,17 @@ readBinIface_ checkHiWay traceBinIFaceReading hi_path nc = do
   errorOnMismatch "magic number mismatch: old/corrupt interface file?"
       binaryInterfaceMagic magic
 
-        -- Get the dictionary pointer.  We won't attempt to actually
-        -- read the dictionary until we've done the version checks below,
-        -- just in case this isn't a valid interface.  In retrospect the
-        -- version should have come before the dictionary pointer, but this
-        -- is the way it was done originally, and we can't change it now.
-  dict_p <- Binary.get bh       -- Get the dictionary ptr
+        -- Note [dummy iface field]
+        -- read a dummy 32/64 bit value.  This field used to hold the
+        -- dictionary pointer in old interface file formats, but now
+        -- the dictionary pointer is after the version (where it
+        -- should be).  Also, the serialisation of value of type "Bin
+        -- a" used to depend on the word size of the machine, now they
+        -- are always 32 bits.
+        --
+  if wORD_SIZE == 4
+     then do _ <- Binary.get bh :: IO Word32; return ()
+     else do _ <- Binary.get bh :: IO Word64; return ()
 
         -- Check the interface file version and ways.
   check_ver  <- get bh
@@ -108,7 +112,7 @@ readBinIface_ checkHiWay traceBinIFaceReading hi_path nc = do
   errorOnMismatch "mismatched interface file versions" our_ver check_ver
 
   check_way <- get bh
-  way_descr <- getWayDescr
+  let way_descr = getWayDescr dflags
   wantedGot "Way" way_descr check_way
   when (checkHiWay == CheckHiWay) $
        errorOnMismatch "mismatched interface file ways" way_descr check_way
@@ -116,6 +120,7 @@ readBinIface_ checkHiWay traceBinIFaceReading hi_path nc = do
         -- Read the dictionary
         -- The next word in the file is a pointer to where the dictionary is
         -- (probably at the end of the file)
+  dict_p <- Binary.get bh
   data_p <- tellBin bh          -- Remember where we are now
   seekBin bh dict_p
   dict <- getDictionary bh
@@ -128,12 +133,12 @@ readBinIface_ checkHiWay traceBinIFaceReading hi_path nc = do
   symtab_p <- Binary.get bh     -- Get the symtab ptr
   data_p <- tellBin bh          -- Remember where we are now
   seekBin bh symtab_p
-  (nc', symtab) <- getSymbolTable bh nc
+  symtab <- getSymbolTable bh update_nc
   seekBin bh data_p             -- Back to where we were before
   let ud = getUserData bh
   bh <- return $! setUserData bh ud{ud_symtab = symtab}
   iface <- get bh
-  return (nc', iface)
+  return iface
 
 
 writeBinIface :: DynFlags -> FilePath -> ModIface -> IO ()
@@ -141,14 +146,21 @@ writeBinIface dflags hi_path mod_iface = do
   bh <- openBinMem initBinMemSize
   put_ bh binaryInterfaceMagic
 
-	-- Remember where the dictionary pointer will go
-  dict_p_p <- tellBin bh
-  put_ bh dict_p_p	-- Placeholder for ptr to dictionary
+       -- dummy 32/64-bit field before the version/way for
+       -- compatibility with older interface file formats.
+       -- See Note [dummy iface field] above.
+  if wORD_SIZE == 4
+     then Binary.put_ bh (0 :: Word32)
+     else Binary.put_ bh (0 :: Word64)
 
         -- The version and way descriptor go next
   put_ bh (show opt_HiVersion)
-  way_descr <- getWayDescr
-  put  bh way_descr
+  let way_descr = getWayDescr dflags
+  put_  bh way_descr
+
+	-- Remember where the dictionary pointer will go
+  dict_p_p <- tellBin bh
+  put_ bh dict_p_p	-- Placeholder for ptr to dictionary
 
         -- Remember where the symbol table pointer will go
   symtab_p_p <- tellBin bh
@@ -207,7 +219,7 @@ initBinMemSize :: Int
 initBinMemSize = 1024 * 1024
 
 -- The *host* architecture version:
-#include "MachDeps.h"
+#include "../includes/MachDeps.h"
 
 binaryInterfaceMagic :: Word32
 #if   WORD_SIZE_IN_BITS == 32
@@ -225,16 +237,17 @@ putSymbolTable bh next_off symtab = do
   let names = elems (array (0,next_off-1) (eltsUFM symtab))
   mapM_ (\n -> serialiseName bh n symtab) names
 
-getSymbolTable :: BinHandle -> NameCache -> IO (NameCache, Array Int Name)
-getSymbolTable bh namecache = do
+getSymbolTable :: BinHandle -> NameCacheUpdater (Array Int Name)
+               -> IO (Array Int Name)
+getSymbolTable bh update_namecache = do
   sz <- get bh
   od_names <- sequence (replicate sz (get bh))
-  let 
+  update_namecache $ \namecache ->
+    let
         arr = listArray (0,sz-1) names
         (namecache', names) =    
                 mapAccumR (fromOnDiskName arr) namecache od_names
-  --
-  return (namecache', arr)
+    in (namecache', arr)
 
 type OnDiskName = (PackageId, ModuleName, OccName)
 
@@ -263,7 +276,7 @@ fromOnDiskName _ nc (pid, mod_name, occ) =
 
 serialiseName :: BinHandle -> Name -> UniqFM (Int,Name) -> IO ()
 serialiseName bh name _ = do
-  let mod = nameModule name
+  let mod = ASSERT2( isExternalName name, ppr name ) nameModule name
   put_ bh (modulePackageId mod, moduleName mod, nameOccName name)
 
 
@@ -274,13 +287,13 @@ putName BinSymbolTable{
   = do
     symtab_map <- readIORef symtab_map_ref
     case lookupUFM symtab_map name of
-      Just (off,_) -> put_ bh off
+      Just (off,_) -> put_ bh (fromIntegral off :: Word32)
       Nothing -> do
          off <- readFastMutInt symtab_next
          writeFastMutInt symtab_next (off+1)
          writeIORef symtab_map_ref
              $! addToUFM symtab_map name (off,name)
-         put_ bh off          
+         put_ bh (fromIntegral off :: Word32)
 
 
 data BinSymbolTable = BinSymbolTable {
@@ -297,10 +310,10 @@ putFastString BinDictionary { bin_dict_next = j_r,
     out <- readIORef out_r
     let uniq = getUnique f
     case lookupUFM out uniq of
-        Just (j, _)  -> put_ bh j
+        Just (j, _)  -> put_ bh (fromIntegral j :: Word32)
         Nothing -> do
            j <- readFastMutInt j_r
-           put_ bh j
+           put_ bh (fromIntegral j :: Word32)
            writeFastMutInt j_r (j + 1)
            writeIORef out_r $! addToUFM out uniq (j, f)
 
@@ -373,6 +386,7 @@ instance Binary ModIface where
 		 mi_exp_hash  = exp_hash,
 		 mi_fixities  = fixities,
 		 mi_warns     = warns,
+		 mi_anns      = anns,
 		 mi_decls     = decls,
 		 mi_insts     = insts,
 		 mi_fam_insts = fam_insts,
@@ -392,6 +406,7 @@ instance Binary ModIface where
 	put_ bh exp_hash
 	put_ bh fixities
 	lazyPut bh warns
+	lazyPut bh anns
         put_ bh decls
 	put_ bh insts
 	put_ bh fam_insts
@@ -413,6 +428,7 @@ instance Binary ModIface where
 	exp_hash  <- get bh
 	fixities  <- {-# SCC "bin_fixities" #-} get bh
 	warns     <- {-# SCC "bin_warns" #-} lazyGet bh
+	anns      <- {-# SCC "bin_anns" #-} lazyGet bh
         decls 	  <- {-# SCC "bin_tycldecls" #-} get bh
 	insts     <- {-# SCC "bin_insts" #-} get bh
 	fam_insts <- {-# SCC "bin_fam_insts" #-} get bh
@@ -431,6 +447,7 @@ instance Binary ModIface where
 		 mi_usages    = usages,
 		 mi_exports   = exports,
 		 mi_exp_hash  = exp_hash,
+		 mi_anns      = anns,
 		 mi_fixities  = fixities,
 		 mi_warns     = warns,
 		 mi_decls     = decls,
@@ -446,10 +463,11 @@ instance Binary ModIface where
 		 mi_fix_fn    = mkIfaceFixCache fixities,
 		 mi_hash_fn   = mkIfaceHashCache decls })
 
-getWayDescr :: IO String
-getWayDescr = do
-  tag <- readIORef v_Build_tag
-  if cGhcUnregisterised == "YES" then return ('u':tag) else return tag
+getWayDescr :: DynFlags -> String
+getWayDescr dflags
+  | cGhcUnregisterised == "YES" = 'u':tag
+  | otherwise                   = tag
+  where tag = buildTag dflags
 	-- if this is an unregisterised build, make sure our interfaces
 	-- can't be used by a registerised build.
 
@@ -573,13 +591,28 @@ instance Binary Activation where
 	      _ -> do ab <- get bh
 		      return (ActiveAfter ab)
 
+instance Binary RuleMatchInfo where
+    put_ bh FunLike = putByte bh 0
+    put_ bh ConLike = putByte bh 1
+    get bh = do
+            h <- getByte bh
+            if h == 1 then return ConLike
+                      else return FunLike
+
+instance Binary InlinePragma where
+    put_ bh (InlinePragma activation match_info) = do
+            put_ bh activation
+            put_ bh match_info
+
+    get bh = do
+           act  <- get bh
+           info <- get bh
+           return (InlinePragma act info)
+
 instance Binary StrictnessMark where
-    put_ bh MarkedStrict = do
-	    putByte bh 0
-    put_ bh MarkedUnboxed = do
-	    putByte bh 1
-    put_ bh NotMarkedStrict = do
-	    putByte bh 2
+    put_ bh MarkedStrict    = putByte bh 0
+    put_ bh MarkedUnboxed   = putByte bh 1
+    put_ bh NotMarkedStrict = putByte bh 2
     get bh = do
 	    h <- getByte bh
 	    case h of
@@ -588,10 +621,8 @@ instance Binary StrictnessMark where
 	      _ -> do return NotMarkedStrict
 
 instance Binary Boxity where
-    put_ bh Boxed = do
-	    putByte bh 0
-    put_ bh Unboxed = do
-	    putByte bh 1
+    put_ bh Boxed   = putByte bh 0
+    put_ bh Unboxed = putByte bh 1
     get bh = do
 	    h <- getByte bh
 	    case h of
@@ -663,7 +694,7 @@ instance (Binary name) => Binary (IPName name) where
 
 instance Binary DmdType where
 	-- Ignore DmdEnv when spitting out the DmdType
-  put bh (DmdType _ ds dr) = do p <- put bh ds; put bh dr; return (castBin p)
+  put bh (DmdType _ ds dr) = do p <- put bh ds; put_ bh dr; return (castBin p)
   get bh = do ds <- get bh; dr <- get bh; return (DmdType emptyVarEnv ds dr)
 
 instance Binary Demand where
@@ -1091,6 +1122,19 @@ instance Binary IfaceBinding where
 	      _ -> do ac <- get bh
 		      return (IfaceRec ac)
 
+instance Binary IfaceIdDetails where
+    put_ bh IfVanillaId      = putByte bh 0
+    put_ bh (IfRecSelId a b) = do { putByte bh 1; put_ bh a; put_ bh b }
+    put_ bh IfDFunId         = putByte bh 2
+    get bh = do
+	    h <- getByte bh
+	    case h of
+	      0 -> return IfVanillaId
+	      1 -> do a <- get bh
+		      b <- get bh
+		      return (IfRecSelId a b)
+	      _ -> return IfDFunId
+
 instance Binary IfaceIdInfo where
     put_ bh NoInfo = putByte bh 0
     put_ bh (HasInfo i) = do
@@ -1169,10 +1213,11 @@ instance Binary IfaceNote where
 -- when de-serialising.
 
 instance Binary IfaceDecl where
-    put_ bh (IfaceId name ty idinfo) = do
+    put_ bh (IfaceId name ty details idinfo) = do
 	    putByte bh 0
 	    put_ bh (occNameFS name)
 	    put_ bh ty
+	    put_ bh details
 	    put_ bh idinfo
     put_ _ (IfaceForeign _ _) = 
 	error "Binary.put_(IfaceDecl): IfaceForeign"
@@ -1205,11 +1250,12 @@ instance Binary IfaceDecl where
     get bh = do
 	    h <- getByte bh
 	    case h of
-	      0 -> do name   <- get bh
-		      ty     <- get bh
-		      idinfo <- get bh
+	      0 -> do name    <- get bh
+		      ty      <- get bh
+		      details <- get bh
+		      idinfo  <- get bh
                       occ <- return $! mkOccNameFS varName name
-		      return (IfaceId occ ty idinfo)
+		      return (IfaceId occ ty details idinfo)
 	      1 -> error "Binary.get(TyClDecl): ForeignType"
 	      2 -> do
 		    a1 <- get bh
@@ -1294,7 +1340,7 @@ instance Binary IfaceConDecls where
 		      return (IfNewTyCon aa)
 
 instance Binary IfaceConDecl where
-    put_ bh (IfCon a1 a2 a3 a4 a5 a6 a7 a8 a9) = do
+    put_ bh (IfCon a1 a2 a3 a4 a5 a6 a7 a8 a9 a10) = do
 	    put_ bh a1
 	    put_ bh a2
 	    put_ bh a3
@@ -1304,6 +1350,7 @@ instance Binary IfaceConDecl where
 	    put_ bh a7
 	    put_ bh a8
 	    put_ bh a9
+	    put_ bh a10
     get bh = do a1 <- get bh
 		a2 <- get bh
 		a3 <- get bh	      
@@ -1313,7 +1360,8 @@ instance Binary IfaceConDecl where
 		a7 <- get bh
 		a8 <- get bh
 		a9 <- get bh
-	        return (IfCon a1 a2 a3 a4 a5 a6 a7 a8 a9)
+		a10 <- get bh
+	        return (IfCon a1 a2 a3 a4 a5 a6 a7 a8 a9 a10)
 
 instance Binary IfaceClassOp where
    put_ bh (IfaceClassOp n def ty) = do	
@@ -1345,6 +1393,30 @@ instance Binary IfaceRule where
 	    a6 <- get bh
 	    a7 <- get bh
 	    return (IfaceRule a1 a2 a3 a4 a5 a6 a7)
+
+instance Binary IfaceAnnotation where
+    put_ bh (IfaceAnnotation a1 a2) = do
+        put_ bh a1
+        put_ bh a2
+    get bh = do
+        a1 <- get bh
+        a2 <- get bh
+        return (IfaceAnnotation a1 a2)
+
+instance Binary name => Binary (AnnTarget name) where
+    put_ bh (NamedTarget a) = do
+        putByte bh 0
+        put_ bh a
+    put_ bh (ModuleTarget a) = do
+        putByte bh 1
+        put_ bh a
+    get bh = do
+        h <- getByte bh
+        case h of
+          0 -> do a <- get bh
+                  return (NamedTarget a)
+          _ -> do a <- get bh
+                  return (ModuleTarget a)
 
 instance Binary IfaceVectInfo where
     put_ bh (IfaceVectInfo a1 a2 a3) = do

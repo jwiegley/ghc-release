@@ -306,9 +306,6 @@
 /* Define to 1 if you have the <ctype.h> header file. */
 #undef HAVE_CTYPE_H
 
-/* Define to 1 if you have the <dirent.h> header file. */
-#undef HAVE_DIRENT_H
-
 /* Define to 1 if you have the <errno.h> header file. */
 #undef HAVE_ERRNO_H
 
@@ -330,6 +327,9 @@
 /* Define to 1 if you have the `iswspace' function. */
 #undef HAVE_ISWSPACE
 
+/* Define to 1 if you have the <langinfo.h> header file. */
+#undef HAVE_LANGINFO_H
+
 /* Define to 1 if you have the <limits.h> header file. */
 #undef HAVE_LIMITS_H
 
@@ -341,9 +341,6 @@
 
 /* Define to 1 if you have the <memory.h> header file. */
 #undef HAVE_MEMORY_H
-
-/* Define to 1 if you have the `readdir_r' function. */
-#undef HAVE_READDIR_R
 
 /* Define to 1 if you have the <signal.h> header file. */
 #undef HAVE_SIGNAL_H
@@ -546,9 +543,6 @@
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION
 
-/* readdir() sets errno to this upon EOF */
-#undef READDIR_ERRNO_EOF
-
 /* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS
 
@@ -557,6 +551,3 @@
 
 /* Define for large files, on AIX-style hosts. */
 #undef _LARGE_FILES
-
-/* Define to empty if `const' does not conform to ANSI C. */
-#undef const

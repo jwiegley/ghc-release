@@ -21,6 +21,7 @@ type DecQ           = Q Dec
 type ConQ           = Q Con
 type TypeQ          = Q Type
 type CxtQ           = Q Cxt
+type PredQ          = Q Pred
 type MatchQ         = Q Match
 type ClauseQ        = Q Clause
 type BodyQ          = Q Body
@@ -30,6 +31,7 @@ type RangeQ         = Q Range
 type StrictTypeQ    = Q StrictType
 type VarStrictTypeQ = Q VarStrictType
 type FieldExpQ      = Q FieldExp
+type InlineSpecQ    = Q InlineSpec
 
 ----------------------------------------------------------
 -- Lowercase pattern syntax functions
@@ -68,6 +70,9 @@ infixP p1 n p2 = do p1' <- p1
 tildeP :: PatQ -> PatQ
 tildeP p = do p' <- p
               return (TildeP p')
+bangP :: PatQ -> PatQ
+bangP p = do p' <- p
+             return (BangP p')
 asP :: Name -> PatQ -> PatQ
 asP n p = do p' <- p
              return (AsP n p')
@@ -277,24 +282,24 @@ funD nm cs =
     ; return (FunD nm cs1)
     }
 
-tySynD :: Name -> [Name] -> TypeQ -> DecQ
+tySynD :: Name -> [TyVarBndr] -> TypeQ -> DecQ
 tySynD tc tvs rhs = do { rhs1 <- rhs; return (TySynD tc tvs rhs1) }
 
-dataD :: CxtQ -> Name -> [Name] -> [ConQ] -> [Name] -> DecQ
+dataD :: CxtQ -> Name -> [TyVarBndr] -> [ConQ] -> [Name] -> DecQ
 dataD ctxt tc tvs cons derivs =
   do
     ctxt1 <- ctxt
     cons1 <- sequence cons
     return (DataD ctxt1 tc tvs cons1 derivs)
 
-newtypeD :: CxtQ -> Name -> [Name] -> ConQ -> [Name] -> DecQ
+newtypeD :: CxtQ -> Name -> [TyVarBndr] -> ConQ -> [Name] -> DecQ
 newtypeD ctxt tc tvs con derivs =
   do
     ctxt1 <- ctxt
     con1 <- con
     return (NewtypeD ctxt1 tc tvs con1 derivs)
 
-classD :: CxtQ -> Name -> [Name] -> [FunDep] -> [DecQ] -> DecQ
+classD :: CxtQ -> Name -> [TyVarBndr] -> [FunDep] -> [DecQ] -> DecQ
 classD ctxt cls tvs fds decs =
   do 
     decs1 <- sequence decs
@@ -317,8 +322,69 @@ forImpD cc s str n ty
  = do ty' <- ty
       return $ ForeignD (ImportF cc s str n ty')
 
-cxt :: [TypeQ] -> CxtQ
+pragInlD :: Name -> InlineSpecQ -> DecQ
+pragInlD n ispec 
+  = do
+      ispec1 <- ispec 
+      return $ PragmaD (InlineP n ispec1)
+
+pragSpecD :: Name -> TypeQ -> DecQ
+pragSpecD n ty
+  = do
+      ty1    <- ty
+      return $ PragmaD (SpecialiseP n ty1 Nothing)
+
+pragSpecInlD :: Name -> TypeQ -> InlineSpecQ -> DecQ
+pragSpecInlD n ty ispec 
+  = do
+      ty1    <- ty
+      ispec1 <- ispec
+      return $ PragmaD (SpecialiseP n ty1 (Just ispec1))
+
+familyNoKindD :: FamFlavour -> Name -> [TyVarBndr] -> DecQ
+familyNoKindD flav tc tvs = return $ FamilyD flav tc tvs Nothing
+
+familyKindD :: FamFlavour -> Name -> [TyVarBndr] -> Kind -> DecQ
+familyKindD flav tc tvs k = return $ FamilyD flav tc tvs (Just k)
+
+dataInstD :: CxtQ -> Name -> [TypeQ] -> [ConQ] -> [Name] -> DecQ
+dataInstD ctxt tc tys cons derivs =
+  do
+    ctxt1 <- ctxt
+    tys1  <- sequence tys
+    cons1 <- sequence cons
+    return (DataInstD ctxt1 tc tys1 cons1 derivs)
+
+newtypeInstD :: CxtQ -> Name -> [TypeQ] -> ConQ -> [Name] -> DecQ
+newtypeInstD ctxt tc tys con derivs =
+  do
+    ctxt1 <- ctxt
+    tys1  <- sequence tys
+    con1  <- con
+    return (NewtypeInstD ctxt1 tc tys1 con1 derivs)
+
+tySynInstD :: Name -> [TypeQ] -> TypeQ -> DecQ
+tySynInstD tc tys rhs = 
+  do 
+    tys1 <- sequence tys
+    rhs1 <- rhs
+    return (TySynInstD tc tys1 rhs1)
+
+cxt :: [PredQ] -> CxtQ
 cxt = sequence
+
+classP :: Name -> [TypeQ] -> PredQ
+classP cla tys
+  = do
+      tys1 <- sequence tys
+      return (ClassP cla tys1)
+
+equalP :: TypeQ -> TypeQ -> PredQ
+equalP tleft tright
+  = do
+      tleft1  <- tleft
+      tright1 <- tright
+      return (EqualP tleft1 tright1)
 
 normalC :: Name -> [StrictTypeQ] -> ConQ
 normalC con strtys = liftM (NormalC con) $ sequence strtys
@@ -331,14 +397,14 @@ infixC st1 con st2 = do st1' <- st1
                         st2' <- st2
                         return $ InfixC st1' con st2'
 
-forallC :: [Name] -> CxtQ -> ConQ -> ConQ
+forallC :: [TyVarBndr] -> CxtQ -> ConQ -> ConQ
 forallC ns ctxt con = liftM2 (ForallC ns) ctxt con
 
 
 -------------------------------------------------------------------------------
 --     Type
 
-forallT :: [Name] -> CxtQ -> TypeQ -> TypeQ
+forallT :: [TyVarBndr] -> CxtQ -> TypeQ -> TypeQ
 forallT tvars ctxt ty = do
     ctxt1 <- ctxt
     ty1   <- ty
@@ -365,6 +431,12 @@ listT = return ListT
 tupleT :: Int -> TypeQ
 tupleT i = return (TupleT i)
 
+sigT :: TypeQ -> Kind -> TypeQ
+sigT t k
+  = do
+      t' <- t
+      return $ SigT t' k
+
 isStrict, notStrict :: Q Strict
 isStrict = return $ IsStrict
 notStrict = return $ NotStrict
@@ -375,6 +447,21 @@ strictType = liftM2 (,)
 varStrictType :: Name -> StrictTypeQ -> VarStrictTypeQ
 varStrictType v st = do (s, t) <- st
                         return (v, s, t)
+
+-------------------------------------------------------------------------------
+--     Kind
+
+plainTV :: Name -> TyVarBndr
+plainTV = PlainTV
+
+kindedTV :: Name -> Kind -> TyVarBndr
+kindedTV = KindedTV
+
+starK :: Kind
+starK = StarK
+
+arrowK :: Kind -> Kind -> Kind
+arrowK = ArrowK
 
 -------------------------------------------------------------------------------
 --     Callconv
@@ -392,10 +479,28 @@ safe = Safe
 threadsafe = Threadsafe
 
 -------------------------------------------------------------------------------
+--     InlineSpec
+
+inlineSpecNoPhase :: Bool -> Bool -> InlineSpecQ
+inlineSpecNoPhase inline conlike
+  = return $ InlineSpec inline conlike Nothing
+
+inlineSpecPhase :: Bool -> Bool -> Bool -> Int -> InlineSpecQ
+inlineSpecPhase inline conlike beforeFrom phase
+  = return $ InlineSpec inline conlike (Just (beforeFrom, phase))
+
+-------------------------------------------------------------------------------
 --     FunDep
 
 funDep :: [Name] -> [Name] -> FunDep
 funDep = FunDep
+
+-------------------------------------------------------------------------------
+--     FamFlavour
+
+typeFam, dataFam :: FamFlavour
+typeFam = TypeFam
+dataFam = DataFam
 
 --------------------------------------------------------------
 -- Useful helper functions
@@ -416,6 +521,7 @@ rename (InfixP p1 n p2) = do { r1 <- rename p1;
                                let {(env, [p1', p2']) = combine [r1, r2]};
                                return (env, InfixP p1' n p2') }
 rename (TildeP p) = do { (env,p2) <- rename p; return(env,TildeP p2) }   
+rename (BangP p) = do { (env,p2) <- rename p; return(env,BangP p2) }   
 rename (AsP s p) = 
    do { s1 <- newName (nameBase s); (env,p2) <- rename p; return((s,s1):env,AsP s1 p2) }
 rename WildP = return([],WildP)

@@ -9,16 +9,10 @@ module LiberateCase ( liberateCase ) where
 #include "HsVersions.h"
 
 import DynFlags
-import HscTypes
-import CoreLint		( showPass, endPass )
 import CoreSyn
 import CoreUnfold	( couldBeSmallEnoughToInline )
-import Rules		( RuleBase )
-import UniqSupply	( UniqSupply )
-import SimplMonad	( SimplCount, zeroSimplCount )
 import Id
 import VarEnv
-import Name		( localiseName )
 import Util             ( notNull )
 \end{code}
 
@@ -123,17 +117,8 @@ and the level of @h@ is zero (NB not one).
 %************************************************************************
 
 \begin{code}
-liberateCase :: HscEnv -> UniqSupply -> RuleBase -> ModGuts
-	     -> IO (SimplCount, ModGuts)
-liberateCase hsc_env _ _ guts
-  = do	{ let dflags = hsc_dflags hsc_env
-
-	; showPass dflags "Liberate case"
-	; let { env = initEnv dflags
-	      ; binds' = do_prog env (mg_binds guts) }
-	; endPass dflags "Liberate case" Opt_D_verbose_core2core binds'
-			{- no specific flag for dumping -} 
-	; return (zeroSimplCount dflags, guts { mg_binds = binds' }) }
+liberateCase :: DynFlags -> [CoreBind] -> [CoreBind]
+liberateCase dflags binds = do_prog (initEnv dflags) binds
   where
     do_prog _   [] = []
     do_prog env (bind:binds) = bind' : do_prog env' binds
@@ -159,39 +144,49 @@ libCaseBind env (NonRec binder rhs)
 libCaseBind env (Rec pairs)
   = (env_body, Rec pairs')
   where
-    (binders, _rhss) = unzip pairs
+    binders = map fst pairs
 
     env_body = addBinders env binders
 
     pairs' = [(binder, libCase env_rhs rhs) | (binder,rhs) <- pairs]
 
-    env_rhs = if all rhs_small_enough pairs then extended_env else env
-
 	-- We extend the rec-env by binding each Id to its rhs, first
 	-- processing the rhs with an *un-extended* environment, so
 	-- that the same process doesn't occur for ever!
-	--
-    extended_env = addRecBinds env [ (adjust binder, libCase env_body rhs)
-				   | (binder, rhs) <- pairs ]
+    env_rhs = addRecBinds env [ (localiseId binder, libCase env_body rhs)
+			      | (binder, rhs) <- pairs
+ 			      , rhs_small_enough binder rhs ]
+	-- localiseID : see Note [Need to localiseId in libCaseBind]
+		 
 
-	-- Two subtle things: 
-	-- (a)  Reset the export flags on the binders so
-	-- 	that we don't get name clashes on exported things if the 
-	-- 	local binding floats out to top level.  This is most unlikely
-	-- 	to happen, since the whole point concerns free variables. 
-	-- 	But resetting the export flag is right regardless.
-	-- 
-	-- (b)  Make the name an Internal one.  External Names should never be
-	--	nested; if it were floated to the top level, we'd get a name
-	-- 	clash at code generation time.
-    adjust bndr = setIdNotExported (setIdName bndr (localiseName (idName bndr)))
-
-    rhs_small_enough (id,rhs)
+    rhs_small_enough id rhs	-- Note [Small enough]
 	=  idArity id > 0	-- Note [Only functions!]
 	&& maybe True (\size -> couldBeSmallEnoughToInline size rhs)
                       (bombOutSize env)
 \end{code}
 
+Note [Need to localiseId in libCaseBind]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The call to localiseId is needed for two subtle reasons
+(a)  Reset the export flags on the binders so
+	that we don't get name clashes on exported things if the 
+	local binding floats out to top level.  This is most unlikely
+	to happen, since the whole point concerns free variables. 
+	But resetting the export flag is right regardless.
+
+(b)  Make the name an Internal one.  External Names should never be
+	nested; if it were floated to the top level, we'd get a name
+	clash at code generation time.
+
+Note [Small enough]
+~~~~~~~~~~~~~~~~~~~
+Consider
+  \fv. letrec
+     	 f = \x. BIG...(case fv of { (a,b) -> ...g.. })...
+     	 g = \y. SMALL...f...
+Then we *can* do liberate-case on g (small RHS) but not for f (too big).
+But we can choose on a item-by-item basis, and that's what the
+rhs_small_enough call in the comprehension for env_rhs does.
 
 Expressions
 ~~~~~~~~~~~
@@ -251,9 +246,11 @@ freeScruts :: LibCaseEnv
 	   -> [Id]		-- Ids that are scrutinised between the binding
 				-- of the recursive Id and here
 freeScruts env rec_bind_lvl
-  = [v | (v,scrut_bind_lvl) <- lc_scruts env
-       , scrut_bind_lvl <= rec_bind_lvl]
+  = [v | (v, scrut_bind_lvl, scrut_at_lvl) <- lc_scruts env
+       , scrut_bind_lvl <= rec_bind_lvl
+       , scrut_at_lvl > rec_bind_lvl]
 	-- Note [When to specialise]
+	-- Note [Avoiding fruitless liberate-case]
 \end{code}
 
 Note [When to specialise]
@@ -277,6 +274,22 @@ in 'f'.  So here the bind-level of 'x' (=1) is not <= the bind-level of 'f' (=0)
 
 We *do* want to specialise the call to 'g', because 'x' is free in g.
 Here the bind-level of 'x' (=1) is <= the bind-level of 'g' (=1).
+
+Note [Avoiding fruitless liberate-case]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider also:
+  f = \x. case top_lvl_thing of
+                I# _ -> let g = \y. ... g ...
+                        in ...
+
+Here, top_lvl_thing is scrutinised at a level (1) deeper than its
+binding site (0).  Nevertheless, we do NOT want to specialise the call
+to 'g' because all the structure in its free variables is already
+visible at the definition site for g.  Hence, when considering specialising
+an occurrence of 'g', we want to check that there's a scruted-var v st
+
+   a) v's binding site is *outside* g
+   b) v's scrutinisation site is *inside* g
 
 
 %************************************************************************
@@ -314,7 +327,7 @@ addScrutedVar env@(LibCaseEnv { lc_lvl = lvl, lc_lvl_env = lvl_env,
 
   | otherwise = env
   where
-    scruts'  = (scrut_var, bind_lvl) : scruts
+    scruts'  = (scrut_var, bind_lvl, lvl) : scruts
     bind_lvl = case lookupVarEnv lvl_env scrut_var of
 		 Just lvl -> lvl
 		 Nothing  -> topLevel
@@ -362,13 +375,24 @@ data LibCaseEnv
 		-- Binds *only* recursively defined ids, to their own
 		-- binding group, and *only* in their own RHSs
 
-	lc_scruts :: [(Id,LibCaseLevel)]
+	lc_scruts :: [(Id, LibCaseLevel, LibCaseLevel)]
      		-- Each of these Ids was scrutinised by an enclosing
 		-- case expression, at a level deeper than its binding
-		-- level.  The LibCaseLevel recorded here is the *binding
-		-- level* of the scrutinised Id.
+		-- level.
+		-- 
+ 		-- The first LibCaseLevel is the *binding level* of
+ 		--   the scrutinised Id, 
+		-- The second is the level *at which it was scrutinised*.
+		--   (see Note [Avoiding fruitless liberate-case])
+		-- The former is a bit redundant, since you could always
+		-- look it up in lc_lvl_env, but it's just cached here
 		-- 
 		-- The order is insignificant; it's a bag really
+		-- 
+		-- There's one element per scrutinisation;
+		--    in principle the same Id may appear multiple times,
+		--    although that'd be unusual:
+		--       case x of { (a,b) -> ....(case x of ...) .. }
 	}
 
 initEnv :: DynFlags -> LibCaseEnv
@@ -382,5 +406,4 @@ initEnv dflags
 bombOutSize :: LibCaseEnv -> Maybe Int
 bombOutSize = lc_size
 \end{code}
-
 

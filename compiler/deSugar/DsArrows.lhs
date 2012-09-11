@@ -217,16 +217,11 @@ matchVarStack env_id (stack_id:stack_ids) body = do
 \end{code}
 
 \begin{code}
-mkHsTupleExpr :: [HsExpr Id] -> HsExpr Id
-mkHsTupleExpr [e] = e
-mkHsTupleExpr es = ExplicitTuple (map noLoc es) Boxed
-
-mkHsPairExpr :: HsExpr Id -> HsExpr Id -> HsExpr Id
-mkHsPairExpr e1 e2 = mkHsTupleExpr [e1, e2]
-
-mkHsEnvStackExpr :: [Id] -> [Id] -> HsExpr Id
+mkHsEnvStackExpr :: [Id] -> [Id] -> LHsExpr Id
 mkHsEnvStackExpr env_ids stack_ids
-  = foldl mkHsPairExpr (mkHsTupleExpr (map HsVar env_ids)) (map HsVar stack_ids)
+  = foldl (\a b -> mkLHsTupleExpr [a,b]) 
+	  (mkLHsVarTuple env_ids) 
+	  (map nlHsVar stack_ids)
 \end{code}
 
 Translation of arrow abstraction
@@ -479,7 +474,7 @@ dsCmd ids local_vars env_ids stack res_ty (HsCase exp (MatchGroup matches match_
             (core_leaf, fvs, leaf_ids) <-
                   dsfixCmd ids (local_vars `unionVarSet` bound_vars) stack res_ty leaf
             return (fvs `minusVarSet` bound_vars,
-                    [noLoc $ mkHsEnvStackExpr leaf_ids stack_ids],
+                    [mkHsEnvStackExpr leaf_ids stack_ids],
                     envStackType leaf_ids stack,
                     core_leaf)
     
@@ -784,7 +779,9 @@ dsCmdStmt ids local_vars env_ids out_ids (LetStmt binds) = do
 --			first (loop (arr (\((ys1),~(ys2)) -> (ys)) >>> ss)) >>>
 --			arr (\((xs1),(xs2)) -> (xs')) >>> ss'
 
-dsCmdStmt ids local_vars env_ids out_ids (RecStmt stmts later_ids rec_ids rhss _binds) = do
+dsCmdStmt ids local_vars env_ids out_ids 
+          (RecStmt { recS_stmts = stmts, recS_later_ids = later_ids, recS_rec_ids = rec_ids
+                   , recS_rec_rets = rhss, recS_dicts = _binds }) = do
     let         -- ToDo: ****** binds not desugared; ROSS PLEASE FIX ********
         env2_id_set = mkVarSet out_ids `minusVarSet` mkVarSet later_ids
         env2_ids = varSetElems env2_id_set

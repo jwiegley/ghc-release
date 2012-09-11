@@ -22,8 +22,8 @@ import CoreSyn
 import DsMonad
 
 import CoreUtils
+import MkCore
 import Var
-import Id
 import MkId
 import Maybes
 import ForeignCall
@@ -88,7 +88,7 @@ dsCCall :: CLabelString	-- C routine to invoke
 
 dsCCall lbl args may_gc result_ty
   = do (unboxed_args, arg_wrappers) <- mapAndUnzipM unboxArg args
-       (ccall_result_ty, res_wrapper) <- boxResult id Nothing result_ty
+       (ccall_result_ty, res_wrapper) <- boxResult result_ty
        uniq <- newUnique
        let
            target = StaticTarget lbl
@@ -142,7 +142,7 @@ unboxArg arg
     tc `hasKey` boolTyConKey
   = do prim_arg <- newSysLocalDs intPrimTy
        return (Var prim_arg,
-              \ body -> Case (Case arg (mkWildId arg_ty) intPrimTy
+              \ body -> Case (mkWildCase arg arg_ty intPrimTy
                                        [(DataAlt falseDataCon,[],mkIntLit 0),
                                         (DataAlt trueDataCon, [],mkIntLit 1)])
                                         -- In increasing tag order!
@@ -231,10 +231,7 @@ unboxArg arg
 
 
 \begin{code}
-boxResult :: ((Maybe Type, CoreExpr -> CoreExpr)
-		 -> (Maybe Type, CoreExpr -> CoreExpr))
-	  -> Maybe Id
-	  -> Type
+boxResult :: Type
 	  -> DsM (Type, CoreExpr -> CoreExpr)
 
 -- Takes the result of the user-level ccall: 
@@ -247,11 +244,8 @@ boxResult :: ((Maybe Type, CoreExpr -> CoreExpr)
 -- where t' is the unwrapped form of t.  If t is simply (), then
 -- the result type will be 
 --	State# RealWorld -> (# State# RealWorld #)
---
--- The gruesome 'augment' and 'mbTopCon' are to do with .NET foreign calls
--- It looks a mess: I wonder if it could be refactored.
 
-boxResult augment mbTopCon result_ty
+boxResult result_ty
   | Just (io_tycon, io_res_ty, co) <- tcSplitIOType_maybe result_ty
 	-- isIOType_maybe handles the case where the type is a 
 	-- simple wrapping of IO.  E.g.
@@ -261,9 +255,8 @@ boxResult augment mbTopCon result_ty
 	-- another case, and a coercion.)
    	-- The result is IO t, so wrap the result in an IO constructor
   = do	{ res <- resultWrapper io_res_ty
-	; let aug_res = augment res
-	      extra_result_tys 
-		= case aug_res of
+	; let extra_result_tys 
+		= case res of
 		     (Just ty,_) 
 		       | isUnboxedTupleType ty 
 		       -> let (Just (_, ls)) = splitTyConApp_maybe ty in tail ls
@@ -274,34 +267,34 @@ boxResult augment mbTopCon result_ty
 	         	   (map Type (realWorldStatePrimTy : io_res_ty : extra_result_tys)
 			      ++ (state : anss)) 
 
-	; (ccall_res_ty, the_alt) <- mk_alt return_result aug_res
+	; (ccall_res_ty, the_alt) <- mk_alt return_result res
 
 	; state_id <- newSysLocalDs realWorldStatePrimTy
 	; let io_data_con = head (tyConDataCons io_tycon)
-	      toIOCon     = mbTopCon `orElse` dataConWrapId io_data_con
+	      toIOCon     = dataConWrapId io_data_con
 
 	      wrap the_call = mkCoerceI (mkSymCoI co) $
 			      mkApps (Var toIOCon)
 			    	     [ Type io_res_ty, 
 			    	       Lam state_id $
-			    	       Case (App the_call (Var state_id))
-			    	     	     (mkWildId ccall_res_ty)
+			    	       mkWildCase (App the_call (Var state_id))
+			    	     	     ccall_res_ty
 			                     (coreAltType the_alt) 
 			    	     	     [the_alt]
 			    	     ]
 
 	; return (realWorldStatePrimTy `mkFunTy` ccall_res_ty, wrap) }
 
-boxResult augment _mbTopCon result_ty
+boxResult result_ty
   = do -- It isn't IO, so do unsafePerformIO
        -- It's not conveniently available, so we inline it
        res <- resultWrapper result_ty
-       (ccall_res_ty, the_alt) <- mk_alt return_result (augment res)
+       (ccall_res_ty, the_alt) <- mk_alt return_result res
        let
-           wrap = \ the_call -> Case (App the_call (Var realWorldPrimId)) 
-                                     (mkWildId ccall_res_ty)
-                                     (coreAltType the_alt)
-                                     [the_alt]
+           wrap = \ the_call -> mkWildCase (App the_call (Var realWorldPrimId)) 
+                                     	   ccall_res_ty
+                                     	   (coreAltType the_alt)
+                                     	   [the_alt]
        return (realWorldStatePrimTy `mkFunTy` ccall_res_ty, wrap)
   where
     return_result _ [ans] = ans
@@ -371,7 +364,7 @@ resultWrapper result_ty
   -- Base case 3: the boolean type
   | Just (tc,_) <- maybe_tc_app, tc `hasKey` boolTyConKey
   = return
-     (Just intPrimTy, \e -> Case e (mkWildId intPrimTy)
+     (Just intPrimTy, \e -> mkWildCase e intPrimTy
                                    boolTy
                                    [(DEFAULT             ,[],Var trueDataConId ),
                                     (LitAlt (mkMachInt 0),[],Var falseDataConId)])

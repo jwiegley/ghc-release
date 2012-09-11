@@ -9,23 +9,23 @@ module MonadUtils
         , MonadFix(..)
         , MonadIO(..)
         
+        , liftIO1, liftIO2, liftIO3, liftIO4
+
+        , zipWith3M        
         , mapAndUnzipM, mapAndUnzip3M, mapAndUnzip4M
         , mapAccumLM
         , mapSndM
         , concatMapM
+        , mapMaybeM
         , anyM, allM
-        , foldlM, foldrM
+        , foldlM, foldlM_, foldrM
+        , maybeMapM
         ) where
 
 ----------------------------------------------------------------------------------------
 -- Detection of available libraries
 ----------------------------------------------------------------------------------------
 
-#if __GLASGOW_HASKELL__ >= 606
-#define HAVE_APPLICATIVE 1
-#else
-#define HAVE_APPLICATIVE 0
-#endif
 -- we don't depend on MTL for now
 #define HAVE_MTL 0
 
@@ -33,36 +33,14 @@ module MonadUtils
 -- Imports
 ----------------------------------------------------------------------------------------
 
-#if HAVE_APPLICATIVE
+import Maybes
+
 import Control.Applicative
-#endif
 #if HAVE_MTL
 import Control.Monad.Trans
 #endif
 import Control.Monad
 import Control.Monad.Fix
-
-----------------------------------------------------------------------------------------
--- Applicative
-----------------------------------------------------------------------------------------
-
-#if !HAVE_APPLICATIVE
-
-class Functor f => Applicative f where
-    pure  :: a -> f a
-    (<*>) :: f (a -> b) -> f a -> f b
-
-(<$>) :: Functor f => (a -> b) -> (f a -> f b)
-(<$>) = fmap
-
-infixl 4 <$>
-infixl 4 <*>
-
-instance Applicative IO where
-	pure = return
-	(<*>) = ap
-
-#endif
 
 ----------------------------------------------------------------------------------------
 -- MTL
@@ -77,9 +55,40 @@ instance MonadIO IO where liftIO = id
 #endif
 
 ----------------------------------------------------------------------------------------
--- Common functions
---  These are used throught the compiler
+-- Lift combinators
+--  These are used throughout the compiler
 ----------------------------------------------------------------------------------------
+
+-- | Lift an 'IO' operation with 1 argument into another monad
+liftIO1 :: MonadIO m => (a -> IO b) -> a -> m b
+liftIO1 = (.) liftIO
+
+-- | Lift an 'IO' operation with 2 arguments into another monad
+liftIO2 :: MonadIO m => (a -> b -> IO c) -> a -> b -> m c
+liftIO2 = ((.).(.)) liftIO
+
+-- | Lift an 'IO' operation with 3 arguments into another monad
+liftIO3 :: MonadIO m => (a -> b -> c -> IO d) -> a -> b -> c -> m d
+liftIO3 = ((.).((.).(.))) liftIO
+
+-- | Lift an 'IO' operation with 4 arguments into another monad
+liftIO4 :: MonadIO m => (a -> b -> c -> d -> IO e) -> a -> b -> c -> d -> m e
+liftIO4 = (((.).(.)).((.).(.))) liftIO
+
+----------------------------------------------------------------------------------------
+-- Common functions
+--  These are used throughout the compiler
+----------------------------------------------------------------------------------------
+
+zipWith3M :: Monad m => (a -> b -> c -> m d) -> [a] -> [b] -> [c] -> m [d]
+zipWith3M _ []     _      _      = return []
+zipWith3M _ _      []     _      = return []
+zipWith3M _ _      _      []     = return []
+zipWith3M f (x:xs) (y:ys) (z:zs) 
+  = do { r  <- f x y z
+       ; rs <- zipWith3M f xs ys zs
+       ; return $ r:rs
+       }
 
 -- | mapAndUnzipM for triples
 mapAndUnzip3M :: Monad m => (a -> m (b,c,d)) -> [a] -> m ([b],[c],[d])
@@ -117,6 +126,10 @@ mapSndM f ((a,b):xs) = do { c <- f b; rs <- mapSndM f xs; return ((a,c):rs) }
 concatMapM :: Monad m => (a -> m [b]) -> [a] -> m [b]
 concatMapM f xs = liftM concat (mapM f xs)
 
+-- | Monadic version of mapMaybe
+mapMaybeM :: (Monad m) => (a -> m (Maybe b)) -> [a] -> m [b]
+mapMaybeM f = liftM catMaybes . mapM f
+
 -- | Monadic version of 'any', aborts the computation at the first @True@ value
 anyM :: Monad m => (a -> m Bool) -> [a] -> m Bool
 anyM _ []     = return False
@@ -133,8 +146,16 @@ allM f (b:bs) = (f b) >>= (\bv -> if bv then allM f bs else return False)
 foldlM :: (Monad m) => (a -> b -> m a) -> a -> [b] -> m a
 foldlM = foldM
 
+-- | Monadic version of foldl that discards its result
+foldlM_ :: (Monad m) => (a -> b -> m a) -> a -> [b] -> m ()
+foldlM_ = foldM_
+
 -- | Monadic version of foldr
 foldrM        :: (Monad m) => (b -> a -> m a) -> a -> [b] -> m a
 foldrM _ z []     = return z
 foldrM k z (x:xs) = do { r <- foldrM k z xs; k x r }
 
+-- | Monadic version of fmap specialised for Maybe
+maybeMapM :: Monad m => (a -> m b) -> (Maybe a -> m (Maybe b))
+maybeMapM _ Nothing  = return Nothing
+maybeMapM m (Just x) = liftM Just $ m x

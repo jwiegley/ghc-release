@@ -13,6 +13,9 @@
 #define THROWTO_BLOCKED   1
 
 #ifndef CMINUSMINUS
+
+BEGIN_RTS_PRIVATE
+
 void throwToSingleThreaded (Capability *cap,
 			    StgTSO *tso,
 			    StgClosure *exception);
@@ -63,6 +66,8 @@ interruptible(StgTSO *t)
     return 0;
   }
 }
+
+END_RTS_PRIVATE
 
 #endif /* CMINUSMINUS */
 

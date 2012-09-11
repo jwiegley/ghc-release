@@ -8,9 +8,10 @@ import re
 #
 config.compiler_type         = 'ghc'
 config.compiler              = 'ghc'
-config.compiler_always_flags = ['-fforce-recomp', '-dcore-lint', '-dcmm-lint']
+config.compiler_always_flags = ['-fforce-recomp', '-dcore-lint', '-dcmm-lint', '-no-user-package-conf']
 
 config.hp2ps		     = 'hp2ps'
+config.hpc		     = 'hpc'
 config.gs		     = 'gs'
 config.confdir               = '.'
 
@@ -23,7 +24,8 @@ config.run_ways		     = ['normal', 'optc', 'hpc']
 # ways that are not enabled by default, but can always be invoked explicitly
 config.other_ways            = ['extcore','optextcore',
                                 'prof_hc_hb','prof_hb',
-                                'prof_hd','prof_hy','prof_hr', 'dyn']
+                                'prof_hd','prof_hy','prof_hr',
+                                'threaded2_qw']
 
 if (ghc_with_native_codegen == 1):
 	config.compile_ways.append('optasm')
@@ -47,6 +49,10 @@ if (ghc_with_threaded_rts == 1):
 	if (ghc_with_smp == 1):
 		config.run_ways.append('threaded2')
 
+if (ghc_with_dynamic_rts == 1):
+        config.have_shared_libs = True
+	config.run_ways.append('dyn')
+
 if (ghc_with_profiling == 1 and ghc_with_threaded_rts == 1):
         config.run_ways.append('profthreaded')
 
@@ -57,11 +63,12 @@ config.way_flags = {
 	'profc'      : ['-O -prof -auto-all -fvia-C'],
 	'profasm'    : ['-O -prof -auto-all -fasm'],
 	'profthreaded' : ['-O -prof -auto-all -fasm -threaded'],
-	'ghci'       : ['--interactive', '-v0', '-ignore-dot-ghci'],
+	'ghci'       : ['--interactive', '-v0', '-ignore-dot-ghci', '+RTS', '-I0.1', '-RTS'],
 	'extcore'    : ['-fext-core'],
 	'optextcore' : ['-O -fext-core'],
 	'threaded1'  : ['-threaded', '-debug'],
-	'threaded2'  : ['-O', '-threaded'],
+	'threaded2'  : ['-O', '-threaded', '-eventlog'],
+	'threaded2_qw'  : ['-O', '-threaded'],
 	'hpc'	     : ['-O', '-fhpc' ],
         'prof_hc_hb' : ['-O -prof -auto-all'],
         'prof_hb'    : ['-O -prof -auto-all'],
@@ -82,7 +89,8 @@ config.way_rts_flags = {
 	'extcore'    : [],
 	'optextcore' : [],
 	'threaded1'  : [],
-	'threaded2'  : ['-N2'],
+	'threaded2'  : ['-N2 -ls'],
+	'threaded2_qw'  : ['-N2', '-qw'],
 	'hpc'	     : [],
         'prof_hc_hb' : ['-hc -hbvoid'],
         'prof_hb'    : ['-hb'],
@@ -92,8 +100,17 @@ config.way_rts_flags = {
         'dyn'        : []
     	}
 
+# Useful classes of ways:
+
+prof_ways = filter(lambda x: x in config.run_ways, 
+                   ['profc','profasm','profthreaded'])
+
+threaded_ways = filter(lambda x: x in config.run_ways, 
+                       ['threaded1','threaded2','ghci','profthreaded'])
+
 def get_compiler_info():
-    h = os.popen(config.compiler + ' --numeric-version', 'r')
+    # This should really not go through the shell
+    h = os.popen('"' + config.compiler + '" --numeric-version', 'r')
     v = h.read()
     h.close()
     v = re.sub('[\r\n]', '', v)

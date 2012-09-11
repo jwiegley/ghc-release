@@ -1,0 +1,34 @@
+Name:           dph-prim-interface
+Version:        0.4.0
+License:        BSD3
+License-File:   LICENSE
+Author:         Roman Leshchinskiy
+Maintainer:     Roman Leshchinskiy <rl@cse.unsw.edu.au>
+Homepage:       http://www.cse.unsw.edu.au/~chak/project/dph/
+Category:       Data Structures
+Synopsis:       Backend Interface for Data Parallel Haskell
+
+Cabal-Version:  >= 1.2
+Build-Type:     Simple
+
+Library
+  Exposed-Modules:
+        Data.Array.Parallel.Unlifted
+
+  Include-Dirs:
+        interface
+
+  Install-Includes:
+        DPH_Header.h
+        DPH_Interface.h
+
+  Exposed: False
+
+  GHC-Options: -funbox-strict-fields -haddock -fcpr-off
+  if impl(ghc >= 6.9)
+    GHC-Options: -Odph
+  else
+    GHC-Options: -O2 -fdicts-cheap -fno-method-sharing
+
+  Build-Depends:  base >= 3 && < 5, random, dph-base
+

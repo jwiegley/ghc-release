@@ -202,7 +202,7 @@ test('tc187', normal, compile, [''])
 test('tc188', only_compiler_types(['ghc']), compile, [''])
 test('tc189', normal, compile, [''])
 test('tc190', only_compiler_types(['ghc']), compile, [''])
-test('tc191', only_compiler_types(['ghc']), compile, [''])
+test('tc191', [only_compiler_types(['ghc']), reqlib('syb')], compile, [''])
 test('tc192', only_compiler_types(['ghc']), compile, [''])
 test('tc193', only_compiler_types(['ghc']), compile, [''])
 test('tc194', only_compiler_types(['ghc']), compile, [''])
@@ -226,12 +226,12 @@ test('tc211', if_compiler_lt('ghc', '6.11', expect_fail), compile, [''])
 test('tc212', normal, compile, [''])
 test('tc213', normal, compile, [''])
 test('tc214', if_compiler_lt('ghc', '6.11', expect_fail), compile, [''])
-test('tc215', expect_broken(366), compile, [''])
+test('tc215', normal, compile, [''])
 test('tc216', normal, compile, [''])
 test('tc217', reqlib('mtl'), compile, [''])
 test('tc218', normal, compile, [''])
 test('tc219', normal, compile, [''])
-test('tc220', reqlib('mtl'), compile, [''])
+test('tc220', [reqlib('mtl'), reqlib('syb')], compile, [''])
 test('tc221', normal, compile, [''])
 test('tc222', normal, compile, [''])
 test('tc223', reqlib('mtl'), compile, [''])
@@ -265,6 +265,8 @@ test('tc245',
      run_command,
      ['$MAKE -s --no-print-directory tc245'])
 test('tc246', normal, compile, [''])
+test('tc247', normal, compile, [''])
+test('tc248', normal, compile, [''])
 
 test('FD1', normal, compile_fail, [''])
 test('FD2', normal, compile_fail, [''])
@@ -295,6 +297,13 @@ test('T2572', normal, compile, [''])
 test('T2573', normal, compile, [''])
 test('T2735', normal, compile, [''])
 test('T2799', normal, compile, [''])
+test('T3219', normal, compile, [''])
+test('T3342', normal, compile, [''])
+test('T3346', normal, compile, [''])
+# This is a TH test, which would require extra magic to make it work with
+# profiling (see th/all.T).
+test('T3391', omit_ways(['profc','profasm']), compile, [''])
+test('T3409', normal, compile, [''])
 
 test('T2412',
      extra_clean(['T2412.hi-boot', 'T2412.o-boot',
@@ -303,3 +312,4 @@ test('T2412',
      run_command,
      ['$MAKE --no-print-directory -s T2412'])
 
+     

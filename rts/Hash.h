@@ -9,6 +9,8 @@
 #ifndef HASH_H
 #define HASH_H
 
+BEGIN_RTS_PRIVATE
+
 typedef struct hashtable HashTable; /* abstract */
 
 /* Hash table access where the keys are StgWords */
@@ -44,6 +46,8 @@ int hashStr(HashTable *table, char *key);
 void freeHashTable ( HashTable *table, void (*freeDataFun)(void *) );
 
 void exitHashTable ( void );
+
+END_RTS_PRIVATE
 
 #endif /* HASH_H */
 

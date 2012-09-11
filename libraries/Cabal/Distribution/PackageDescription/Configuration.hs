@@ -58,32 +58,34 @@ module Distribution.PackageDescription.Configuration (
   ) where
 
 import Distribution.Package
-         ( PackageName, Package, Dependency(..) )
+         ( PackageName, Dependency(..) )
 import Distribution.PackageDescription
          ( GenericPackageDescription(..), PackageDescription(..)
          , Library(..), Executable(..), BuildInfo(..)
          , Flag(..), FlagName(..), FlagAssignment
          , CondTree(..), ConfVar(..), Condition(..) )
-import Distribution.Simple.PackageIndex (PackageIndex)
-import qualified Distribution.Simple.PackageIndex as PackageIndex
 import Distribution.Version
-         ( VersionRange(..), withinRange )
+         ( VersionRange, anyVersion, intersectVersionRanges, withinRange
+         , toVersionIntervals, intersectVersionIntervals
+         , fromVersionIntervals )
 import Distribution.Compiler
          ( CompilerId(CompilerId) )
 import Distribution.System
-         ( OS, Arch )
-import Distribution.Simple.Utils (currentDir, lowercase)
+         ( Platform(..), OS, Arch )
+import Distribution.Simple.Utils
+         ( currentDir, lowercase )
 
 import Distribution.Text
          ( Text(parse) )
 import Distribution.Compat.ReadP as ReadP hiding ( char )
+import Control.Arrow (first)
 import qualified Distribution.Compat.ReadP as ReadP ( char )
 
+import Control.Exception (assert)
 import Data.Char ( isAlphaNum )
 import Data.Maybe ( catMaybes, maybeToList )
-import Data.List  ( nub )
 import Data.Map ( Map, fromListWith, toList )
-import qualified Data.Map as M
+import qualified Data.Map as Map
 import Data.Monoid
 
 #if defined(__GLASGOW_HASKELL__) && (__GLASGOW_HASKELL__ < 606)
@@ -179,7 +181,7 @@ parseCondition = condOr
     oper s        = sp >> string s >> sp
     sp            = skipSpaces
     implIdent     = do i <- parse
-                       vr <- sp >> option AnyVersion parse
+                       vr <- sp >> option anyVersion parse
                        return $ Impl i vr
 
 ------------------------------------------------------------------------------
@@ -244,9 +246,9 @@ resolveWithFlags :: Monoid a =>
   -> [Dependency]  -- ^ Additional constraints
   -> [CondTree ConfVar [Dependency] a]
   -> ([Dependency] -> DepTestRslt [Dependency])  -- ^ Dependency test function.
-  -> Either [Dependency] -- missing dependencies
-       ([a], [Dependency], FlagAssignment)
-       -- ^ In the returned dependencies, there will be no duplicates by name
+  -> Either [Dependency] (TargetSet a, FlagAssignment)
+       -- ^ Either the missing dependencies (error case), or a pair of
+       -- (set of build targets with dependencies, chosen flag assignments)
 resolveWithFlags dom os arch impl constrs trees checkDeps =
     case try dom [] of
       Right r -> Right r
@@ -260,32 +262,20 @@ resolveWithFlags dom os arch impl constrs trees checkDeps =
                           . mapTreeConds (fst . simplifyWithSysParams os arch impl))
                           trees
 
-    -- version to combine dependencies where the result will only contain keys
-    -- from the left (first) map.  If a key also exists in the right map, both
-    -- constraints will be intersected.
-    leftJoin :: DependencyMap -> DependencyMap -> DependencyMap
-    leftJoin left extra =
-        DependencyMap $
-          M.foldWithKey tightenConstraint (unDependencyMap left)
-                                          (unDependencyMap extra)
-      where tightenConstraint n c l =
-                case M.lookup n l of
-                  Nothing -> l
-                  Just vr -> M.insert n (IntersectVersionRanges vr c) l
-
     -- @try@ recursively tries all possible flag assignments in the domain and
     -- either succeeds or returns a binary tree with the missing dependencies
     -- encountered in each run.  Since the tree is constructed lazily, we
     -- avoid some computation overhead in the successful case.
     try [] flags =
-        let (depss, as) = unzip
-                         . map (simplifyCondTree (env flags))
-                         $ simplifiedTrees
-            deps = fromDepMap $ leftJoin (mconcat depss)
-                                         extraConstrs
-        in case (checkDeps deps, deps) of
-             (DepOk, ds) -> Right (as, ds, flags)
-             (MissingDeps mds, _) -> Left (BTN mds)
+        let targetSet = TargetSet $ flip map simplifiedTrees $
+                -- apply additional constraints to all dependencies
+                first (`constrainBy` extraConstrs) .
+                simplifyCondTree (env flags)
+            deps = overallDependencies targetSet
+        in case checkDeps (fromDepMap deps) of
+             DepOk           -> Right (targetSet, flags)
+             MissingDeps mds -> Left (BTN mds)
+
     try ((n, vals):rest) flags =
         tryAll $ map (\v -> try rest ((n, v):flags)) vals
 
@@ -320,7 +310,7 @@ resolveWithFlags dom os arch impl constrs trees checkDeps =
     lazyLengthCmp (_:xs) (_:ys) = lazyLengthCmp xs ys
 
 -- | A map of dependencies.  Newtyped since the default monoid instance is not
---   appropriate.  The monoid instance uses 'IntersectVersionRanges'.
+--   appropriate.  The monoid instance uses 'intersectVersionRanges'.
 newtype DependencyMap = DependencyMap { unDependencyMap :: Map PackageName VersionRange }
 #if !defined(__GLASGOW_HASKELL__) || (__GLASGOW_HASKELL__ >= 606)
   deriving (Show, Read)
@@ -352,13 +342,13 @@ instance Read DependencyMap where
 #endif
 
 instance Monoid DependencyMap where
-    mempty = DependencyMap M.empty
+    mempty = DependencyMap Map.empty
     (DependencyMap a) `mappend` (DependencyMap b) =
-        DependencyMap (M.unionWith IntersectVersionRanges a b)
+        DependencyMap (Map.unionWith intersectVersionRanges a b)
 
 toDepMap :: [Dependency] -> DependencyMap
 toDepMap ds =
-  DependencyMap $ fromListWith IntersectVersionRanges [ (p,vr) | Dependency p vr <- ds ]
+  DependencyMap $ fromListWith intersectVersionRanges [ (p,vr) | Dependency p vr <- ds ]
 
 fromDepMap :: DependencyMap -> [Dependency]
 fromDepMap m = [ Dependency p vr | (p,vr) <- toList (unDependencyMap m) ]
@@ -396,6 +386,56 @@ freeVars t = [ f | Flag f <- freeVars' t ]
       COr c1 c2  -> condfv c1 ++ condfv c2
       CAnd c1 c2 -> condfv c1 ++ condfv c2
 
+
+------------------------------------------------------------------------------
+
+-- | A set of targets with their package dependencies
+newtype TargetSet a = TargetSet [(DependencyMap, a)]
+
+-- | Combine the target-specific dependencies in a TargetSet to give the
+-- dependencies for the package as a whole.
+overallDependencies :: Monoid a => TargetSet a -> DependencyMap
+overallDependencies (TargetSet targets) = mconcat depss
+  where
+    (depss, _) = unzip targets
+
+-- Apply extra constraints to a dependency map.
+-- Combines dependencies where the result will only contain keys from the left
+-- (first) map.  If a key also exists in the right map, both constraints will
+-- be intersected.
+constrainBy :: DependencyMap  -- ^ Input map
+            -> DependencyMap  -- ^ Extra constraints
+            -> DependencyMap
+constrainBy left extra =
+    DependencyMap $
+      Map.foldWithKey tightenConstraint (unDependencyMap left)
+                                        (unDependencyMap extra)
+  where tightenConstraint n c l =
+            case Map.lookup n l of
+              Nothing -> l
+              Just vr -> Map.insert n (intersectVersionRanges vr c) l
+
+-- | Collect up the targets in a TargetSet of tagged targets, storing the
+-- dependencies as we go.
+flattenTaggedTargets :: TargetSet PDTagged -> (Maybe Library, [(String, Executable)])
+flattenTaggedTargets (TargetSet targets) = foldr untag (Nothing, []) targets
+  where
+    untag (_, Lib _) (Just _, _) = bug "Only one library expected"
+    untag (deps, Lib l) (Nothing, exes) = (Just l', exes)
+      where
+        l' = l {
+                libBuildInfo = (libBuildInfo l) { targetBuildDepends = fromDepMap deps }
+            }
+    untag (deps, Exe n e) (mlib, exes)
+        | any ((== n) . fst) exes = bug "Exe with same name found"
+        | otherwise = (mlib, exes ++ [(n, e')])
+      where
+        e' = e {
+                buildInfo = (buildInfo e) { targetBuildDepends = fromDepMap deps }
+            }
+    untag (_, PDNull) x = x  -- actually this should not happen, but let's be liberal
+
+
 ------------------------------------------------------------------------------
 -- Convert GenericPackageDescription to PackageDescription
 --
@@ -432,50 +472,60 @@ instance Monoid PDTagged where
 -- return the package description and the full flag assignment chosen.
 --
 finalizePackageDescription ::
-     Package pkg
-  => FlagAssignment  -- ^ Explicitly specified flag assignments
-  -> Maybe (PackageIndex pkg) -- ^ Available dependencies. Pass 'Nothing' if
-                              -- this is unknown.
-  -> OS     -- ^ OS-name
-  -> Arch   -- ^ Arch-name
-  -> CompilerId -- ^ Compiler + Version
+     FlagAssignment  -- ^ Explicitly specified flag assignments
+  -> (Dependency -> Bool) -- ^ Is a given depenency satisfiable from the set of available packages?
+                          -- If this is unknown then use True.
+  -> Platform      -- ^ The 'Arch' and 'OS'
+  -> CompilerId    -- ^ Compiler + Version
   -> [Dependency]  -- ^ Additional constraints
   -> GenericPackageDescription
   -> Either [Dependency]
             (PackageDescription, FlagAssignment)
              -- ^ Either missing dependencies or the resolved package
              -- description along with the flag assignments chosen.
-finalizePackageDescription userflags mpkgs os arch impl constraints
+finalizePackageDescription userflags satisfyDep (Platform arch os) impl constraints
         (GenericPackageDescription pkg flags mlib0 exes0) =
     case resolveFlags of
-      Right ((mlib, exes'), deps, flagVals) ->
+      Right ((mlib, exes'), targetSet, flagVals) ->
         Right ( pkg { library = mlib
                     , executables = exes'
-                    , buildDepends = nub deps
+                    , buildDepends = assert sanity overallDeps
                     }
               , flagVals )
-      Left missing -> Left $ nub missing
+        where
+          -- Note that we exclude non-buildable components. This means your tools and
+          -- test progs to not contribute to the overall package dependencies.
+          --
+          overallDeps = canonicalise
+                      . concatMap targetBuildDepends
+                      . filter buildable
+                      $ buildInfos
+          buildInfos  = map libBuildInfo (maybeToList mlib) ++ map buildInfo exes'
+
+          -- as a sanity check, check that the overall deps from the target set
+          -- matches those from the (unfiltered for being buildable) components
+          sanity        = canonicalise overallDeps' == canonicalise overallDeps''
+          overallDeps'  = concatMap targetBuildDepends buildInfos
+          overallDeps'' = fromDepMap (overallDependencies targetSet)
+          canonicalise  =
+              map (\(name, vi) -> Dependency name (fromVersionIntervals vi))
+            . Map.toList
+            . Map.fromListWith intersectVersionIntervals
+            . map (\(Dependency name vr) -> (name, toVersionIntervals vr))
+
+      Left missing -> Left missing
   where
     -- Combine lib and exes into one list of @CondTree@s with tagged data
     condTrees = maybeToList (fmap (mapTreeData Lib) mlib0 )
                 ++ map (\(name,tree) -> mapTreeData (Exe name) tree) exes0
 
-    untagRslts = foldr untag (Nothing, [])
-      where
-        untag (Lib _) (Just _, _) = bug "Only one library expected"
-        untag (Lib l) (Nothing, exes) = (Just l, exes)
-        untag (Exe n e) (mlib, exes)
-         | any ((== n) . fst) exes = bug "Exe with same name found"
-         | otherwise = (mlib, exes ++ [(n, e)])
-        untag PDNull x = x  -- actually this should not happen, but let's be liberal
-
     resolveFlags =
         case resolveWithFlags flagChoices os arch impl constraints condTrees check of
-          Right (as, ds, fs) ->
-              let (mlib, exes) = untagRslts as in
+          Right (targetSet, fs) ->
+              let (mlib, exes) = flattenTaggedTargets targetSet in
               Right ( (fmap libFillInDefaults mlib,
                        map (\(n,e) -> (exeFillInDefaults e) { exeName = n }) exes),
-                     ds, fs)
+                     targetSet, fs)
           Left missing      -> Left missing
 
     flagChoices    = map (\(MkFlag n _ d manual) -> (n, d2c manual n d)) flags
@@ -488,11 +538,6 @@ finalizePackageDescription userflags mpkgs os arch impl constraints
     check ds     = if all satisfyDep ds
                    then DepOk
                    else MissingDeps $ filter (not . satisfyDep) ds
-    -- if we don't know which packages are present, we just accept any
-    -- dependency
-    satisfyDep   = maybe (const True)
-                         (\pkgs -> not . null . PackageIndex.lookupDependency pkgs)
-                         mpkgs
 
 {-
 let tst_p = (CondNode [1::Int] [Distribution.Package.Dependency "a" AnyVersion] [])
@@ -521,7 +566,7 @@ flattenPackageDescription :: GenericPackageDescription -> PackageDescription
 flattenPackageDescription (GenericPackageDescription pkg _ mlib0 exes0) =
     pkg { library = mlib
         , executables = reverse exes
-        , buildDepends = nub $ ldeps ++ reverse edeps
+        , buildDepends = ldeps ++ reverse edeps
         }
   where
     (mlib, ldeps) = case mlib0 of

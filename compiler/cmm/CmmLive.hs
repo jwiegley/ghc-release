@@ -1,10 +1,3 @@
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module CmmLive (
         CmmLive,
         BlockEntryLiveness,
@@ -20,7 +13,6 @@ import Dataflow
 
 import Maybes
 import Panic
-import UniqFM
 import UniqSet
 
 -----------------------------------------------------------------------------
@@ -47,13 +39,13 @@ cmmLiveness blocks =
     fixedpoint (cmmBlockDependants sources)
                (cmmBlockUpdate blocks')
                (map blockId blocks)
-               (listToUFM [(blockId b, emptyUniqSet) | b <- blocks])
+               (mkBlockEnv [(blockId b, emptyUniqSet) | b <- blocks])
     where
       sources :: BlockSources
       sources = cmmBlockSources blocks
 
       blocks' :: BlockStmts
-      blocks' = listToUFM $ map block_name blocks
+      blocks' = mkBlockEnv $ map block_name blocks
 
       block_name :: CmmBasicBlock -> (BlockId, [CmmStmt])
       block_name b = (blockId b, blockStmts b)
@@ -75,7 +67,7 @@ cmmLivenessComment live (BasicBlock ident stmts) =
 -- need updating after a given block is updated in the liveness analysis
 -----------------------------------------------------------------------------
 cmmBlockSources :: [CmmBasicBlock] -> BlockSources
-cmmBlockSources blocks = foldr aux emptyUFM blocks
+cmmBlockSources blocks = foldr aux emptyBlockEnv blocks
     where
       aux :: CmmBasicBlock
           -> BlockSources
@@ -89,7 +81,7 @@ cmmBlockSources blocks = foldr aux emptyUFM blocks
                        -> BlockSources
                        -> BlockSources
       add_source_edges source target ufm =
-          addToUFM_Acc (flip addOneToUniqSet) unitUniqSet ufm target source
+          addToBEnv_Acc (flip addOneToUniqSet) unitUniqSet ufm target source
 
       branch_targets :: [CmmStmt] -> UniqSet BlockId
       branch_targets stmts =
@@ -107,7 +99,7 @@ cmmBlockSources blocks = foldr aux emptyUFM blocks
 -----------------------------------------------------------------------------
 cmmBlockDependants :: BlockSources -> BlockId -> [BlockId]
 cmmBlockDependants sources ident =
-    uniqSetToList $ lookupWithDefaultUFM sources emptyUniqSet ident
+    uniqSetToList $ lookupWithDefaultBEnv sources emptyUniqSet ident
 
 -----------------------------------------------------------------------------
 -- | Given the table of type 'BlockStmts' and a block that was updated,
@@ -122,14 +114,14 @@ cmmBlockUpdate ::
 cmmBlockUpdate blocks node _ state =
     if (sizeUniqSet old_live) == (sizeUniqSet new_live)
       then Nothing
-      else Just $ addToUFM state node new_live
+      else Just $ extendBlockEnv state node new_live
     where
       new_live, old_live :: CmmLive
       new_live = cmmStmtListLive state block_stmts
-      old_live = lookupWithDefaultUFM state missing_live node
+      old_live = lookupWithDefaultBEnv state missing_live node
 
       block_stmts :: [CmmStmt]
-      block_stmts = lookupWithDefaultUFM blocks missing_block node
+      block_stmts = lookupWithDefaultBEnv blocks missing_block node
 
       missing_live = panic "unknown block id during liveness analysis"
       missing_block = panic "unknown block id during liveness analysis"
@@ -164,8 +156,8 @@ addKilled new_killed live = live `minusUniqSet` new_killed
 --------------------------------
 -- Liveness of a CmmStmt
 --------------------------------
-cmmFormalsToLiveLocals :: CmmFormals -> [LocalReg]
-cmmFormalsToLiveLocals formals = map kindlessCmm formals
+cmmFormalsToLiveLocals :: HintedCmmFormals -> [LocalReg]
+cmmFormalsToLiveLocals formals = map hintlessCmm formals
 
 cmmStmtLive :: BlockEntryLiveness -> CmmStmt -> CmmLivenessTransformer
 cmmStmtLive _ (CmmNop) = id
@@ -180,27 +172,27 @@ cmmStmtLive _ (CmmStore expr1 expr2) =
     cmmExprLive expr2 . cmmExprLive expr1
 cmmStmtLive _ (CmmCall target results arguments _ _) =
     target_liveness .
-    foldr ((.) . cmmExprLive) id (map kindlessCmm arguments) .
+    foldr ((.) . cmmExprLive) id (map hintlessCmm arguments) .
     addKilled (mkUniqSet $ cmmFormalsToLiveLocals results) where
         target_liveness =
             case target of
               (CmmCallee target _) -> cmmExprLive target
               (CmmPrim _) -> id
 cmmStmtLive other_live (CmmBranch target) =
-    addLive (lookupWithDefaultUFM other_live emptyUniqSet target)
+    addLive (lookupWithDefaultBEnv other_live emptyUniqSet target)
 cmmStmtLive other_live (CmmCondBranch expr target) =
     cmmExprLive expr .
-    addLive (lookupWithDefaultUFM other_live emptyUniqSet target)
+    addLive (lookupWithDefaultBEnv other_live emptyUniqSet target)
 cmmStmtLive other_live (CmmSwitch expr targets) =
     cmmExprLive expr .
     (foldr ((.) . (addLive .
-                   lookupWithDefaultUFM other_live emptyUniqSet))
+                   lookupWithDefaultBEnv other_live emptyUniqSet))
            id
            (mapCatMaybes id targets))
 cmmStmtLive _ (CmmJump expr params) =
-    const (cmmExprLive expr $ foldr ((.) . cmmExprLive) id (map kindlessCmm params) $ emptyUniqSet)
+    const (cmmExprLive expr $ foldr ((.) . cmmExprLive) id (map hintlessCmm params) $ emptyUniqSet)
 cmmStmtLive _ (CmmReturn params) =
-    const (foldr ((.) . cmmExprLive) id (map kindlessCmm params) $ emptyUniqSet)
+    const (foldr ((.) . cmmExprLive) id (map hintlessCmm params) $ emptyUniqSet)
 
 --------------------------------
 -- Liveness of a CmmExpr
@@ -213,6 +205,7 @@ cmmExprLive expr = addLive (mkUniqSet $ expr_liveness expr) where
     expr_liveness (CmmReg reg) = reg_liveness reg
     expr_liveness (CmmMachOp _ exprs) = concatMap expr_liveness exprs
     expr_liveness (CmmRegOff reg _) = reg_liveness reg
+    expr_liveness (CmmStackSlot _ _) = panic "cmmExprLive CmmStackSlot"
 
     reg_liveness :: CmmReg -> [LocalReg]
     reg_liveness (CmmLocal reg) = [reg]

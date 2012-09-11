@@ -1,152 +1,158 @@
 module System.Console.Haskeline.Command(
                         -- * Commands
                         Effect(..),
-                        KeyMap(), 
-                        lookupKM,
-                        KeyAction(..),
-                        CmdAction(..),
-                        (>=>),
-                        Command(),
-                        runCommand,
-                        continue,
+                        KeyMap(..), 
+                        CmdM(..),
+                        Command,
+                        KeyCommand,
+                        KeyConsumed(..),
+                        withoutConsuming,
+                        keyCommand,
                         (>|>),
                         (>+>),
-                        acceptKey,
-                        acceptKeyM,
-                        acceptKeyOrFail,
-                        loopUntil,
                         try,
+                        effect,
+                        clearScreenCmd,
                         finish,
                         failCmd,
                         simpleCommand,
                         charCommand,
+                        setState,
                         change,
                         changeFromChar,
-                        changeWithoutKey,
-                        clearScreenCmd,
                         (+>),
+                        useChar,
                         choiceCmd,
-                        withState
+                        keyChoiceCmd,
+                        keyChoiceCmdM,
+                        doBefore
                         ) where
 
 import Data.Char(isPrint)
-import Control.Monad(mplus)
+import Control.Monad(mplus, liftM)
+import Control.Monad.Trans
 import System.Console.Haskeline.LineState
 import System.Console.Haskeline.Key
 
+data Effect = LineChange (String -> LineChars)
+              | PrintLines [String]
+              | ClearScreen
+              | RingBell
 
-data Effect s = Change {effectState :: s} 
-              | PrintLines {linesToPrint :: [String], effectState :: s}
-              | Redraw {shouldClearScreen :: Bool, effectState :: s}
-              | RingBell {effectState :: s}
+lineChange :: LineState s => s -> Effect
+lineChange = LineChange . flip lineChars
 
-newtype KeyMap m s = KeyMap {lookupKM :: Key -> Maybe 
-            (s -> Either (Maybe String) (m (KeyAction m)))}
+data KeyMap a = KeyMap {lookupKM :: Key -> Maybe (KeyConsumed a)}
 
-useKey :: Key -> (s -> Either (Maybe String) (m (KeyAction m))) -> KeyMap m s
-useKey k f = KeyMap $ \k' -> if k==k' then Just f else Nothing
+data KeyConsumed a = NotConsumed a | Consumed a
 
-data KeyAction m = forall t . LineState t => KeyAction (Effect t) (KeyMap m t)
+instance Functor KeyMap where
+    fmap f km = KeyMap $ fmap (fmap f) . lookupKM km
 
-nullKM :: KeyMap m s
-nullKM = KeyMap $ const Nothing
+instance Functor KeyConsumed where
+    fmap f (NotConsumed x) = NotConsumed (f x)
+    fmap f (Consumed x) = Consumed (f x)
 
-orKM :: KeyMap m s -> KeyMap m s -> KeyMap m s
-orKM (KeyMap m) (KeyMap n) = KeyMap $ \k -> m k `mplus` n k
 
-choiceKM :: [KeyMap m s] -> KeyMap m s
-choiceKM = foldl orKM nullKM
+data CmdM m a   = GetKey (KeyMap (CmdM m a))
+                | DoEffect Effect (CmdM m a)
+                | CmdM (m (CmdM m a))
+                | Result a
 
-newtype Command m s t = Command (KeyMap m t -> KeyMap m s)
+type Command m s t = s -> CmdM m t
 
-runCommand :: Command m s s -> KeyMap m s
-runCommand (Command f) = let m = f m in m
+instance Monad m => Monad (CmdM m) where
+    return = Result
 
-continue :: Command m s s
-continue = Command id
+    GetKey km >>= g = GetKey $ fmap (>>= g) km
+    DoEffect e f >>= g = DoEffect e (f >>= g)
+    CmdM f >>= g = CmdM $ liftM (>>= g) f
+    Result x >>= g = g x
 
-infixl 6 >|>
-(>|>) :: Command m s t -> Command m t u -> Command m s u
-Command f >|> Command g = Command (f . g)
+type KeyCommand m s t = KeyMap (Command m s t)
 
-infixl 6 >+>
-(>+>) :: (Monad m, LineState s) => Key -> Command m s t -> Command m s t
-k >+> f = k +> change id >|> f
+instance MonadTrans CmdM where
+    lift m = CmdM $ do
+        x <- m
+        return $ Result x
 
-data CmdAction m s = forall t . LineState t => CmdAction (Effect t) (Command m t s)
+keyCommand :: KeyCommand m s t -> Command m s t
+keyCommand km = \s -> GetKey $ fmap ($ s) km
 
-(>=>) :: LineState t => Effect t -> Command m t s -> CmdAction m s
-(>=>) = CmdAction
+useKey :: Key -> a -> KeyMap a
+useKey k x = KeyMap $ \k' -> if k==k' then Just (Consumed x) else Nothing
 
-acceptKey :: (Monad m) => (s -> CmdAction m t) -> Key -> Command m s t
-acceptKey f = acceptKeyFull (Just . return . f)
-
-acceptKeyM :: Monad m => (s -> m (CmdAction m t)) -> Key -> Command m s t
-acceptKeyM f = acceptKeyFull (Just . f)
-
-acceptKeyFull :: Monad m => (s -> Maybe (m (CmdAction m t)))
-                            -> Key -> Command m s t
-acceptKeyFull f k = Command $ \next -> useKey k $ \s -> case f s of
-                Nothing -> Left Nothing
-                Just act -> Right $ do
-                    CmdAction effect (Command g) <- act
-                    return (KeyAction effect (g next))
-
-acceptKeyOrFail :: Monad m => (s -> Maybe (CmdAction m t)) -> Key
-            -> Command m s t
-acceptKeyOrFail f = acceptKeyFull (fmap return . f)
-                         
-loopUntil :: Command m s s -> Command m s t -> Command m s t
-loopUntil f g = choiceCmd [g, f >|> loopUntil f g]
-
-try :: Command m s s -> Command m s s
-try (Command f) = Command $ \next -> f next `orKM` next
-
-finish :: forall s m t . (Result s, Monad m) => Key -> Command m s t
-finish k = Command $ \_-> useKey k (Left . Just . toResult)
-
-failCmd :: forall s m t . (LineState s, Monad m) => Key -> Command m s t
-failCmd k = Command $ \_-> useKey k (const $ Left Nothing)
-
-simpleCommand :: (LineState t, Monad m) => (s -> m (Effect t)) 
-                    -> Key -> Command m s t
-simpleCommand f = acceptKeyM $ \s -> do
-            act <- f s
-            return (act >=> continue)
-
-charCommand :: (LineState t, Monad m) => (Char -> s -> m (Effect t))
-                    -> Command m s t
-charCommand f = Command $ \next -> KeyMap $ \k -> case k of
-                    Key m (KeyChar c) | isPrint c && m==noModifier-> Just $ \s -> Right $ do
-                                    effect <- f c s
-                                    return (KeyAction effect next)
+-- TODO: could just be a monadic action that returns a Char.
+useChar :: (Char -> Command m s t) -> KeyCommand m s t
+useChar act = KeyMap $ \k -> case k of
+                    Key m (KeyChar c) | isPrint c && m==noModifier
+                        -> Just $ Consumed (act c)
                     _ -> Nothing
-                    
 
-change :: (LineState t, Monad m) => (s -> t) -> Key -> Command m s t
-change f = simpleCommand (return . Change . f)
+withoutConsuming :: Command m s t -> KeyCommand m s t
+withoutConsuming = KeyMap . const . Just . NotConsumed
 
-changeFromChar :: (Monad m, LineState t) => (Char -> s -> t) -> Command m s t
-changeFromChar f = charCommand (\c s -> return $ Change (f c s))
+choiceCmd :: [KeyMap a] -> KeyMap a
+choiceCmd = foldl orKM nullKM
+    where
+        nullKM = KeyMap $ const Nothing
+        orKM (KeyMap f) (KeyMap g) = KeyMap $ \k -> f k `mplus` g k
 
-changeWithoutKey :: (s -> t) -> Command m s t
-changeWithoutKey f = Command $ \(KeyMap next) -> KeyMap $ fmap (. f) . next
+keyChoiceCmd :: [KeyCommand m s t] -> Command m s t
+keyChoiceCmd = keyCommand . choiceCmd
 
-clearScreenCmd :: (LineState s, Monad m) => Key -> Command m s s
-clearScreenCmd k = k +> simpleCommand (\s -> return (Redraw True s))
+keyChoiceCmdM :: [KeyMap (CmdM m a)] -> CmdM m a
+keyChoiceCmdM = GetKey . choiceCmd
 
-infixl 7 +>
-(+>) :: Key -> (Key -> a) -> a 
-k +> f = f k
+infixr 6 >|>
+(>|>) :: Monad m => Command m s t -> Command m t u -> Command m s u
+f >|> g = \x -> f x >>= g
 
-choiceCmd :: [Command m s t] -> Command m s t
-choiceCmd cmds = Command $ \next -> 
-    choiceKM $ map (\(Command f) -> f next) cmds
+infixr 6 >+>
+(>+>) :: Monad m => KeyCommand m s t -> Command m t u -> KeyCommand m s u
+km >+> g = fmap (>|> g) km
 
-withState :: Monad m => (s -> m a) -> Command m s t -> Command m s t
-withState act (Command thisCmd) = Command $ \next -> KeyMap $ \k -> 
-    case lookupKM (thisCmd next) k of
-        Nothing -> Nothing
-        Just f -> Just $ \s -> case f s of
-            Left r -> Left r
-            Right effect -> Right $ act s >> effect
+-- attempt to run the command (predicated on getting a valid key); but if it fails, just keep
+-- going.
+try :: Monad m => KeyCommand m s s -> Command m s s
+try f = keyChoiceCmd [f,withoutConsuming return]
+
+infixr 6 +>
+(+>) :: Key -> a -> KeyMap a
+(+>) = useKey
+
+finish :: (Monad m, Result s) => Command m s (Maybe String)
+finish = return . Just . toResult
+
+failCmd :: Monad m => Command m s (Maybe a)
+failCmd _ = return Nothing
+
+effect :: Effect -> CmdM m ()
+effect e = DoEffect e $ Result ()
+
+clearScreenCmd :: Command m s s
+clearScreenCmd = DoEffect ClearScreen . Result
+
+simpleCommand :: (LineState s, Monad m) => (s -> m (Either Effect s))
+        -> Command m s s
+simpleCommand f = \s -> do
+    et <- lift (f s)
+    case et of
+        Left e -> effect e >> return s
+        Right t -> setState t
+
+charCommand :: (LineState s, Monad m) => (Char -> s -> m (Either Effect s))
+                    -> KeyCommand m s s
+charCommand f = useChar $ simpleCommand . f
+
+setState :: (Monad m, LineState s) => Command m s s
+setState s = effect (lineChange s) >> return s
+
+change :: (LineState t, Monad m) => (s -> t) -> Command m s t
+change = (setState .)
+
+changeFromChar :: (LineState t, Monad m) => (Char -> s -> t) -> KeyCommand m s t
+changeFromChar f = useChar $ change . f
+
+doBefore :: Monad m => Command m s t -> KeyCommand m t u -> KeyCommand m s u
+doBefore cmd = fmap (cmd >|>)

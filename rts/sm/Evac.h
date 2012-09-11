@@ -11,6 +11,11 @@
  *
  * ---------------------------------------------------------------------------*/
 
+#ifndef SM_EVAC_H
+#define SM_EVAC_H
+
+BEGIN_RTS_PRIVATE
+
 // Use a register argument for evacuate, if available.
 // Earlier, the regparm attribute was used whenever __GNUC__ >= 2, but this
 // generated warnings on PPC. So the use is restricted further.
@@ -31,3 +36,8 @@ REGPARM1 void evacuate  (StgClosure **p);
 REGPARM1 void evacuate1 (StgClosure **p);
 
 extern lnat thunk_selector_depth;
+
+END_RTS_PRIVATE
+
+#endif /* SM_EVAC_H */
+

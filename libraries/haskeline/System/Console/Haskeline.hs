@@ -69,11 +69,11 @@ import System.Console.Haskeline.InputT
 import System.Console.Haskeline.Completion
 import System.Console.Haskeline.Term
 import System.Console.Haskeline.Key
+import System.Console.Haskeline.RunCommand
 
 import System.IO
-import Data.Char (isSpace)
+import Data.Char (isSpace, isPrint)
 import Control.Monad
-import Data.Char(isPrint)
 import qualified Data.ByteString.Char8 as B
 import System.IO.Error (isEOFError)
 
@@ -105,7 +105,7 @@ outputStr xs = do
 
 -- | Write a string to the standard output, followed by a newline.
 outputStrLn :: MonadIO m => String -> InputT m ()
-outputStrLn xs = outputStr (xs++"\n")
+outputStrLn = outputStr . (++ "\n")
 
 
 {- $inputfncs
@@ -143,52 +143,26 @@ getInputLine prefix = do
 
 getInputCmdLine :: MonadException m => TermOps -> String -> InputT m (Maybe String)
 getInputCmdLine tops prefix = do
-    -- Load the necessary settings/prefs
-    -- TODO: Cache the actions
-    emode <- asks (\prefs -> case editMode prefs of
-                    Vi -> viActions
-                    Emacs -> emacsCommands)
-    -- Run the main event processing loop
-    result <- runInputCmdT tops $ runTerm tops
-                    $ \getEvent -> do
-                            let ls = emptyIM
-                            drawLine prefix ls 
-                            repeatTillFinish tops getEvent prefix ls emode
+    emode <- asks editMode
+    result <- runInputCmdT tops $ case emode of
+                Emacs -> runCommandLoop tops prefix emacsCommands
+                Vi -> evalStateT' emptyViState $
+                        runCommandLoop tops prefix viKeyCommands
     maybeAddHistory result
     return result
 
 maybeAddHistory :: forall m . Monad m => Maybe String -> InputT m ()
 maybeAddHistory result = do
     settings :: Settings m <- ask
+    histDupes <- asks historyDuplicates
     case result of
         Just line | autoAddHistory settings && not (all isSpace line) 
-            -> modify (addHistory line)
+            -> let adder = case histDupes of
+                        AlwaysAdd -> addHistory
+                        IgnoreConsecutive -> addHistoryUnlessConsecutiveDupe
+                        IgnoreAll -> addHistoryRemovingAllDupes
+               in modify (adder line)
         _ -> return ()
-
-repeatTillFinish :: forall m s d 
-    . (MonadTrans d, Term (d m), LineState s, MonadReader Prefs m)
-            => TermOps -> d m Event -> String -> s -> KeyMap m s 
-            -> d m (Maybe String)
-repeatTillFinish tops getEvent prefix = loop []
-    where 
-        loop :: forall t . LineState t
-                    => [Key] -> t -> KeyMap m t -> d m (Maybe String)
-        loop [] s processor = do
-                event <- handle (\(e::SomeException) -> movePast prefix s >> throwIO e) getEvent
-                case event of
-                    ErrorEvent e -> movePast prefix s >> throwIO e
-                    WindowResize -> withReposition tops prefix s $ loop [] s processor
-                    KeyInput k -> do
-                        ks <- lift $ asks $ lookupKeyBinding k
-                        loop ks s processor
-        loop (k:ks) s processor = case lookupKM processor k of
-                        Nothing -> actBell >> loop [] s processor
-                        Just g -> case g s of
-                            Left r -> movePast prefix s >> return r
-                            Right f -> do
-                                        KeyAction effect next <- lift f
-                                        drawEffect prefix s effect
-                                        loop ks (effectState effect) next
 
 simpleFileLoop :: MonadIO m => String -> RunTerm -> m (Maybe String)
 simpleFileLoop prefix rterm = liftIO $ do
@@ -201,56 +175,12 @@ simpleFileLoop prefix rterm = liftIO $ do
             -- error if stdin is set to NoBuffering.
             buff <- hGetBuffering stdin
             line <- case buff of
-                        NoBuffering -> fmap B.pack System.IO.getLine
+                        NoBuffering -> hWithBinaryMode stdin
+                                $ fmap B.pack System.IO.getLine
                         _ -> B.getLine
             fmap Just $ decodeForTerm rterm line
 
-drawEffect :: (LineState s, LineState t, Term (d m), 
-                MonadTrans d, MonadReader Prefs m) 
-    => String -> s -> Effect t -> d m ()
-drawEffect prefix s (Redraw shouldClear t) = if shouldClear
-    then clearLayout >> drawLine prefix t
-    else clearLine prefix s >> drawLine prefix t
-drawEffect prefix s (Change t) = drawLineStateDiff prefix s t
-drawEffect prefix s (PrintLines ls t) = do
-    if isTemporary s
-        then clearLine prefix s
-        else movePast prefix s
-    printLines ls
-    drawLine prefix t
-drawEffect prefix s (RingBell t) = drawLineStateDiff prefix s t >> actBell
 
-drawLine :: (LineState s, Term m) => String -> s -> m ()
-drawLine prefix s = drawLineStateDiff prefix Cleared s
-
-drawLineStateDiff :: (LineState s, LineState t, Term m) 
-                        => String -> s -> t -> m ()
-drawLineStateDiff prefix s t = drawLineDiff (lineChars prefix s) 
-                                        (lineChars prefix t)
-
-clearLine :: (LineState s, Term m) => String -> s -> m ()
-clearLine prefix s = drawLineStateDiff prefix s Cleared
-        
-actBell :: (Term (d m), MonadTrans d, MonadReader Prefs m) => d m ()
-actBell = do
-    style <- lift (asks bellStyle)
-    case style of
-        NoBell -> return ()
-        VisualBell -> ringBell False
-        AudibleBell -> ringBell True
-
-movePast :: (LineState s, Term m) => String -> s -> m ()
-movePast prefix s = moveToNextLine (lineChars prefix s)
-
-withReposition :: (LineState s, Term m) => TermOps -> String -> s -> m a -> m a
-withReposition tops prefix s f = do
-    oldLayout <- ask
-    newLayout <- liftIO $ getLayout tops
-    if oldLayout == newLayout
-        then f
-        else local newLayout $ do
-                reposition oldLayout (lineChars prefix s)
-                f
 ----------
 
 {- | Reads one character of input.  Ignores non-printable characters.
@@ -305,34 +235,16 @@ returnOnEOF x = handle $ \e -> if isEOFError e
                                 then return x
                                 else throwIO e
 
--- TODO: it might be possible to unify this function with getInputCmdLine,
--- maybe by calling repeatTillFinish here...
--- It shouldn't be too hard to make Commands parametrized over a return
--- value (which would be Maybe Char in this case).
--- My primary obstacle is that there's currently no way to have a
--- single character input cause a character to be printed and then
--- immediately exit without waiting for Return to be pressed.
 getInputCmdChar :: MonadException m => TermOps -> String -> InputT m (Maybe Char)
-getInputCmdChar tops prefix = runInputCmdT tops $ runTerm tops $ \getEvent -> do
-                                                drawLine prefix emptyIM
-                                                loop getEvent
-    where
-        s = emptyIM
-        loop :: Term m => m Event -> m (Maybe Char)
-        loop getEvent = do
-            event <- handle (\(e::SomeException) -> movePast prefix emptyIM >> throwIO e) getEvent
-            case event of
-                KeyInput (Key m (KeyChar c))
-                    | m /= noModifier -> loop getEvent
-                    | c == '\EOT'     -> movePast prefix s >> return Nothing
-                    | isPrint c -> do
-                            let s' = insertChar c s
-                            drawLineStateDiff prefix s s'
-                            movePast prefix s'
-                            return (Just c)
-                WindowResize -> withReposition tops prefix emptyIM $ loop getEvent
-                _ -> loop getEvent
+getInputCmdChar tops prefix = runInputCmdT tops 
+        $ runCommandLoop tops prefix acceptOneChar
 
+acceptOneChar :: Monad m => KeyCommand m InsertMode (Maybe Char)
+acceptOneChar = choiceCmd [useChar $ \c s -> change (insertChar c) s
+                                                >> return (Just c)
+                          , ctrlChar 'l' +> clearScreenCmd >|>
+                                        keyCommand acceptOneChar
+                          , ctrlChar 'd' +> failCmd]
 
 ------------
 -- Interrupt

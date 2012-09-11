@@ -8,13 +8,6 @@ Stack-twiddling operations, which are pretty low-down and grimy.
 (This is the module that knows all about stack layouts, etc.)
 
 \begin{code}
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module CgStackery (
 	spRel, getVirtSp, getRealSp, setRealSp,
 	setRealAndVirtualSp, getSpRelOffset,
@@ -38,7 +31,6 @@ import CmmUtils
 import CLabel
 import Constants
 import Util
-import FastString
 import OrdList
 import Outputable
 
@@ -125,7 +117,7 @@ mkVirtStkOffsets init_Sp_offset things
     = loop init_Sp_offset [] (reverse things)
   where
     loop offset offs [] = (offset,offs)
-    loop offset offs ((VoidArg,t):things) = loop offset offs things
+    loop offset offs ((VoidArg,_):things) = loop offset offs things
 	-- ignore Void arguments
     loop offset offs ((rep,t):things)
 	= loop thing_slot ((t,thing_slot):offs) things
@@ -206,25 +198,23 @@ allocPrimStack rep
 Allocate a chunk ON TOP OF the stack.  
 
 \begin{code}
-allocStackTop :: WordOff -> FCode VirtualSpOffset
+allocStackTop :: WordOff -> FCode ()
 allocStackTop size
   = do	{ stk_usg <- getStkUsage
 	; let push_virt_sp = virtSp stk_usg + size
 	; setStkUsage (stk_usg { virtSp = push_virt_sp,
-				 hwSp   = hwSp stk_usg `max` push_virt_sp })
-	; return push_virt_sp }
+				 hwSp   = hwSp stk_usg `max` push_virt_sp }) }
 \end{code}
 
 Pop some words from the current top of stack.  This is used for
 de-allocating the return address in a case alternative.
 
 \begin{code}
-deAllocStackTop :: WordOff -> FCode VirtualSpOffset
+deAllocStackTop :: WordOff -> FCode ()
 deAllocStackTop size
   = do	{ stk_usg <- getStkUsage
 	; let pop_virt_sp = virtSp stk_usg - size
-	; setStkUsage (stk_usg { virtSp = pop_virt_sp })
-	; return pop_virt_sp }
+	; setStkUsage (stk_usg { virtSp = pop_virt_sp }) }
 \end{code}
 
 \begin{code}
@@ -239,7 +229,7 @@ A knot-tying beast.
 \begin{code}
 getFinalStackHW :: (VirtualSpOffset -> Code) -> Code
 getFinalStackHW fcode
-  = do	{ fixC (\hw_sp -> do
+  = do	{ fixC_ (\hw_sp -> do
 		{ fcode hw_sp
 		; stk_usg <- getStkUsage
 		; return (hwSp stk_usg) })
@@ -274,7 +264,6 @@ to reflect the frame pushed.
 
 \begin{code}
 pushUpdateFrame :: CmmExpr -> Code -> Code
-
 pushUpdateFrame updatee code
   = do	{
       when debugIsOn $ do

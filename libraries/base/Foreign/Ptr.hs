@@ -50,7 +50,6 @@ module Foreign.Ptr (
 
 #ifdef __GLASGOW_HASKELL__
 import GHC.Ptr
-import GHC.IOBase
 import GHC.Base
 import GHC.Num
 import GHC.Read
@@ -59,7 +58,7 @@ import GHC.Show
 import GHC.Enum
 import GHC.Word         ( Word(..) )
 
-import Data.Int
+-- import Data.Int
 import Data.Word
 #else
 import Control.Monad    ( liftM )

@@ -29,19 +29,21 @@ module Outputable (
 	($$), ($+$), vcat,
 	sep, cat, 
 	fsep, fcat, 
-	hang, punctuate,
+	hang, punctuate, ppWhen, ppUnless,
 	speakNth, speakNTimes, speakN, speakNOf, plural,
 
         -- * Converting 'SDoc' into strings and outputing it
 	printSDoc, printErrs, hPrintDump, printDump,
 	printForC, printForAsm, printForUser, printForUserPartWay,
 	pprCode, mkCodeStyle,
-	showSDoc, showSDocForUser, showSDocDebug, showSDocDump,
+	showSDoc, showSDocOneLine,
+        showSDocForUser, showSDocDebug, showSDocDump, showSDocDumpOneLine,
+        showPpr,
 	showSDocUnqual, showsPrecSDoc,
 
 	pprInfixVar, pprPrefixVar,
 	pprHsChar, pprHsString, pprHsInfix, pprHsVar,
-    pprFastFilePath,
+        pprFastFilePath,
 
         -- * Controlling the style in which output is printed
 	BindingSite(..),
@@ -69,12 +71,11 @@ import FastString
 import FastTypes
 import qualified Pretty
 import Pretty		( Doc, Mode(..) )
-import Char		( isAlpha )
 import Panic
 
-import Data.Word	( Word32 )
+import Data.Char
+import Data.Word
 import System.IO	( Handle, stderr, stdout, hFlush )
-import Data.Char        ( ord )
 import System.FilePath
 \end{code}
 
@@ -127,6 +128,7 @@ data Depth = AllTheWay
 -- in source code, names are qualified by ModuleNames.
 type QueryQualifyName = Module -> OccName -> QualifyName
 
+-- See Note [Printing original names] in HscTypes
 data QualifyName                        -- given P:M.T
         = NameUnqual                    -- refer to it as "T"
         | NameQual ModuleName           -- refer to it as "X.T" for the supplied X
@@ -226,9 +228,9 @@ pprDeeperList f ds (PprUser q (PartWay n))
 pprDeeperList f ds other_sty
   = f ds other_sty
 
-pprSetDepth :: Int -> SDoc -> SDoc
-pprSetDepth  n d (PprUser q _) = d (PprUser q (PartWay n))
-pprSetDepth _n d other_sty     = d other_sty
+pprSetDepth :: Depth -> SDoc -> SDoc
+pprSetDepth depth  doc (PprUser q _) = doc (PprUser q depth)
+pprSetDepth _depth doc other_sty     = doc other_sty
 
 getPprStyle :: (PprStyle -> SDoc) -> SDoc
 getPprStyle df sty = df sty sty
@@ -316,7 +318,13 @@ mkCodeStyle = PprCode
 -- However, Doc *is* an instance of Show
 -- showSDoc just blasts it out as a string
 showSDoc :: SDoc -> String
-showSDoc d = show (d defaultUserStyle)
+showSDoc d = Pretty.showDocWith PageMode (d defaultUserStyle)
+
+-- This shows an SDoc, but on one line only. It's cheaper than a full
+-- showSDoc, designed for when we're getting results like "Foo.bar"
+-- and "foo{uniq strictness}" so we don't want fancy layout anyway.
+showSDocOneLine :: SDoc -> String
+showSDocOneLine d = Pretty.showDocWith PageMode (d defaultUserStyle)
 
 showSDocForUser :: PrintUnqualified -> SDoc -> String
 showSDocForUser unqual doc = show (doc (mkUserStyle unqual AllTheWay))
@@ -329,10 +337,16 @@ showsPrecSDoc :: Int -> SDoc -> ShowS
 showsPrecSDoc p d = showsPrec p (d defaultUserStyle)
 
 showSDocDump :: SDoc -> String
-showSDocDump d = show (d PprDump)
+showSDocDump d = Pretty.showDocWith PageMode (d PprDump)
+
+showSDocDumpOneLine :: SDoc -> String
+showSDocDumpOneLine d = Pretty.showDocWith OneLineMode (d PprDump)
 
 showSDocDebug :: SDoc -> String
 showSDocDebug d = show (d PprDebug)
+
+showPpr :: Outputable a => a -> String
+showPpr = showSDoc . ppr
 \end{code}
 
 \begin{code}
@@ -458,6 +472,13 @@ punctuate p (d:ds) = go d ds
 		   where
 		     go d [] = [d]
 		     go d (e:es) = (d <> p) : go e es
+
+ppWhen, ppUnless :: Bool -> SDoc -> SDoc
+ppWhen True  doc = doc
+ppWhen False _   = empty
+
+ppUnless True  _   = empty
+ppUnless False doc = doc
 \end{code}
 
 
@@ -481,7 +502,13 @@ instance Outputable Bool where
 instance Outputable Int where
    ppr n = int n
 
+instance Outputable Word16 where
+   ppr n = integer $ fromIntegral n
+
 instance Outputable Word32 where
+   ppr n = integer $ fromIntegral n
+
+instance Outputable Word where
    ppr n = integer $ fromIntegral n
 
 instance Outputable () where

@@ -8,12 +8,12 @@
 
 #include "PosixSource.h"
 #include "Rts.h"
+
+#include "sm/Storage.h"
 #include "Threads.h"
 #include "Trace.h"
 #include "RaiseAsync.h"
-#include "SMP.h"
 #include "Schedule.h"
-#include "LdvProfile.h"
 #include "Updates.h"
 #include "STM.h"
 #include "Sanity.h"
@@ -161,11 +161,7 @@ throwTo (Capability *cap,	// the Capability we hold
 	       (unsigned long)source->id, (unsigned long)target->id);
 
 #ifdef DEBUG
-    if (traceClass(DEBUG_sched)) {
-	debugTraceBegin("throwTo: target");
-	printThreadStatus(target);
-	debugTraceEnd();
-    }
+    traceThreadStatus(DEBUG_sched, target);
 #endif
 
     goto check_target;
@@ -605,158 +601,6 @@ performBlockedException (Capability *cap, StgTSO *source, StgTSO *target)
    of conditions as throwToSingleThreaded() (c.f.).
    -------------------------------------------------------------------------- */
 
-#if defined(GRAN) || defined(PARALLEL_HASKELL)
-/*
-  NB: only the type of the blocking queue is different in GranSim and GUM
-      the operations on the queue-elements are the same
-      long live polymorphism!
-
-  Locks: sched_mutex is held upon entry and exit.
-
-*/
-static void
-removeFromQueues(Capability *cap, StgTSO *tso)
-{
-  StgBlockingQueueElement *t, **last;
-
-  switch (tso->why_blocked) {
-
-  case NotBlocked:
-    return;  /* not blocked */
-
-  case BlockedOnSTM:
-    // Be careful: nothing to do here!  We tell the scheduler that the thread
-    // is runnable and we leave it to the stack-walking code to abort the 
-    // transaction while unwinding the stack.  We should perhaps have a debugging
-    // test to make sure that this really happens and that the 'zombie' transaction
-    // does not get committed.
-    goto done;
-
-  case BlockedOnMVar:
-    ASSERT(get_itbl(tso->block_info.closure)->type == MVAR);
-    {
-      StgBlockingQueueElement *last_tso = END_BQ_QUEUE;
-      StgMVar *mvar = (StgMVar *)(tso->block_info.closure);
-
-      last = (StgBlockingQueueElement **)&mvar->head;
-      for (t = (StgBlockingQueueElement *)mvar->head; 
-	   t != END_BQ_QUEUE; 
-	   last = &t->link, last_tso = t, t = t->link) {
-	if (t == (StgBlockingQueueElement *)tso) {
-	  *last = (StgBlockingQueueElement *)tso->link;
-	  if (mvar->tail == tso) {
-	    mvar->tail = (StgTSO *)last_tso;
-	  }
-	  goto done;
-	}
-      }
-      barf("removeFromQueues (MVAR): TSO not found");
-    }
-
-  case BlockedOnBlackHole:
-    ASSERT(get_itbl(tso->block_info.closure)->type == BLACKHOLE_BQ);
-    {
-      StgBlockingQueue *bq = (StgBlockingQueue *)(tso->block_info.closure);
-
-      last = &bq->blocking_queue;
-      for (t = bq->blocking_queue; 
-	   t != END_BQ_QUEUE; 
-	   last = &t->link, t = t->link) {
-	if (t == (StgBlockingQueueElement *)tso) {
-	  *last = (StgBlockingQueueElement *)tso->link;
-	  goto done;
-	}
-      }
-      barf("removeFromQueues (BLACKHOLE): TSO not found");
-    }
-
-  case BlockedOnException:
-    {
-      StgTSO *target  = tso->block_info.tso;
-
-      ASSERT(get_itbl(target)->type == TSO);
-
-      while (target->what_next == ThreadRelocated) {
-	  target = target2->link;
-	  ASSERT(get_itbl(target)->type == TSO);
-      }
-
-      last = (StgBlockingQueueElement **)&target->blocked_exceptions;
-      for (t = (StgBlockingQueueElement *)target->blocked_exceptions; 
-	   t != END_BQ_QUEUE; 
-	   last = &t->link, t = t->link) {
-	ASSERT(get_itbl(t)->type == TSO);
-	if (t == (StgBlockingQueueElement *)tso) {
-	  *last = (StgBlockingQueueElement *)tso->link;
-	  goto done;
-	}
-      }
-      barf("removeFromQueues (Exception): TSO not found");
-    }
-
-  case BlockedOnRead:
-  case BlockedOnWrite:
-#if defined(mingw32_HOST_OS)
-  case BlockedOnDoProc:
-#endif
-    {
-      /* take TSO off blocked_queue */
-      StgBlockingQueueElement *prev = NULL;
-      for (t = (StgBlockingQueueElement *)blocked_queue_hd; t != END_BQ_QUEUE; 
-	   prev = t, t = t->link) {
-	if (t == (StgBlockingQueueElement *)tso) {
-	  if (prev == NULL) {
-	    blocked_queue_hd = (StgTSO *)t->link;
-	    if ((StgBlockingQueueElement *)blocked_queue_tl == t) {
-	      blocked_queue_tl = END_TSO_QUEUE;
-	    }
-	  } else {
-	    prev->link = t->link;
-	    if ((StgBlockingQueueElement *)blocked_queue_tl == t) {
-	      blocked_queue_tl = (StgTSO *)prev;
-	    }
-	  }
-#if defined(mingw32_HOST_OS)
-	  /* (Cooperatively) signal that the worker thread should abort
-	   * the request.
-	   */
-	  abandonWorkRequest(tso->block_info.async_result->reqID);
-#endif
-	  goto done;
-	}
-      }
-      barf("removeFromQueues (I/O): TSO not found");
-    }
-
-  case BlockedOnDelay:
-    {
-      /* take TSO off sleeping_queue */
-      StgBlockingQueueElement *prev = NULL;
-      for (t = (StgBlockingQueueElement *)sleeping_queue; t != END_BQ_QUEUE; 
-	   prev = t, t = t->link) {
-	if (t == (StgBlockingQueueElement *)tso) {
-	  if (prev == NULL) {
-	    sleeping_queue = (StgTSO *)t->link;
-	  } else {
-	    prev->link = t->link;
-	  }
-	  goto done;
-	}
-      }
-      barf("removeFromQueues (delay): TSO not found");
-    }
-
-  default:
-    barf("removeFromQueues: %d", tso->why_blocked);
-  }
-
- done:
-  tso->link = END_TSO_QUEUE;
-  tso->why_blocked = NotBlocked;
-  tso->block_info.closure = NULL;
-  pushOnRunQueue(cap,tso);
-}
-#else
 static void
 removeFromQueues(Capability *cap, StgTSO *tso)
 {
@@ -824,18 +668,8 @@ removeFromQueues(Capability *cap, StgTSO *tso)
   }
 
  done:
-  tso->_link = END_TSO_QUEUE; // no write barrier reqd
-  tso->why_blocked = NotBlocked;
-  tso->block_info.closure = NULL;
-  appendToRunQueue(cap,tso);
-
-  // We might have just migrated this TSO to our Capability:
-  if (tso->bound) {
-      tso->bound->cap = cap;
-  }
-  tso->cap = cap;
+  unblockOne(cap, tso);
 }
-#endif
 
 /* -----------------------------------------------------------------------------
  * raiseAsync()
@@ -889,7 +723,7 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
 #if defined(PROFILING)
     /* 
      * Debugging tool: on raising an  exception, show where we are.
-     * See also Exception.cmm:raisezh_fast.
+     * See also Exception.cmm:stg_raisezh.
      * This wasn't done for asynchronous exceptions originally; see #1450 
      */
     if (RtsFlags.ProfFlags.showCCSOnException)
@@ -989,8 +823,7 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
                 // Perform the update
                 // TODO: this may waste some work, if the thunk has
                 // already been updated by another thread.
-                UPD_IND_NOLOCK(((StgUpdateFrame *)frame)->updatee,
-                               (StgClosure *)ap);
+                UPD_IND(((StgUpdateFrame *)frame)->updatee, (StgClosure *)ap);
             }
 
 	    sp += sizeofW(StgUpdateFrame) - 1;
@@ -1051,9 +884,19 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
 	    
 	case ATOMICALLY_FRAME:
 	    if (stop_at_atomically) {
-		ASSERT(stmGetEnclosingTRec(tso->trec) == NO_TREC);
+		ASSERT(tso->trec->enclosing_trec == NO_TREC);
 		stmCondemnTransaction(cap, tso -> trec);
-		tso->sp = frame;
+		tso->sp = frame - 2;
+                // The ATOMICALLY_FRAME expects to be returned a
+                // result from the transaction, which it stores in the
+                // stack frame.  Hence we arrange to return a dummy
+                // result, so that the GC doesn't get upset (#3578).
+                // Perhaps a better way would be to have a different
+                // ATOMICALLY_FRAME instance for condemned
+                // transactions, but I don't fully understand the
+                // interaction with STM invariants.
+                tso->sp[1] = (W_)&stg_NO_TREC_closure;
+                tso->sp[0] = (W_)&stg_gc_unpt_r1_info;
 		tso->what_next = ThreadRunGHC;
 		return;
 	    }
@@ -1071,7 +914,7 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
 
 		{
             StgTRecHeader *trec = tso -> trec;
-            StgTRecHeader *outer = stmGetEnclosingTRec(trec);
+            StgTRecHeader *outer = trec -> enclosing_trec;
 	    debugTrace(DEBUG_stm, 
 		       "found atomically block delivering async exception");
             stmAbortTransaction(cap, trec);

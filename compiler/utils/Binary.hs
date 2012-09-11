@@ -59,7 +59,7 @@ module Binary
 #include "HsVersions.h"
 
 -- The *host* architecture version:
-#include "MachDeps.h"
+#include "../includes/MachDeps.h"
 
 import {-# SOURCE #-} Name (Name)
 import FastString
@@ -71,20 +71,22 @@ import BasicTypes
 
 import Foreign
 import Data.Array
-import Data.Bits
-import Data.Int
-import Data.Word
 import Data.IORef
 import Data.Char                ( ord, chr )
+import Data.Typeable
 import Control.Monad            ( when )
 import System.IO as IO
 import System.IO.Unsafe         ( unsafeInterleaveIO )
 import System.IO.Error          ( mkIOError, eofErrorType )
 import GHC.Real                 ( Ratio(..) )
 import GHC.Exts
-import GHC.IOBase               ( IO(..) )
 import GHC.Word                 ( Word8(..) )
-import System.IO                ( openBinaryFile )
+
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO ( IO(..) )
+#else
+import GHC.IOBase ( IO(..) )
+#endif
 
 type BinArray = ForeignPtr Word8
 
@@ -140,11 +142,11 @@ class Binary a where
     -- define one of put_, put.  Use of put_ is recommended because it
     -- is more likely that tail-calls can kick in, and we rarely need the
     -- position return value.
-    put_ bh a = do put bh a; return ()
+    put_ bh a = do _ <- put bh a; return ()
     put bh a  = do p <- tellBin bh; put_ bh a; return p
 
 putAt  :: Binary a => BinHandle -> Bin a -> a -> IO ()
-putAt bh p x = do seekBin bh p; put bh x; return ()
+putAt bh p x = do seekBin bh p; put_ bh x; return ()
 
 getAt  :: Binary a => BinHandle -> Bin a -> IO a
 getAt bh p = do seekBin bh p; get bh
@@ -386,33 +388,20 @@ instance Binary Int64 where
 instance Binary () where
     put_ _ () = return ()
     get  _    = return ()
---    getF bh p  = case getBitsF bh 0 p of (_,b) -> ((),b)
 
 instance Binary Bool where
     put_ bh b = putByte bh (fromIntegral (fromEnum b))
     get  bh   = do x <- getWord8 bh; return $! (toEnum (fromIntegral x))
---    getF bh p = case getBitsF bh 1 p of (x,b) -> (toEnum x,b)
 
 instance Binary Char where
     put_  bh c = put_ bh (fromIntegral (ord c) :: Word32)
     get  bh   = do x <- get bh; return $! (chr (fromIntegral (x :: Word32)))
---    getF bh p = case getBitsF bh 8 p of (x,b) -> (toEnum x,b)
 
 instance Binary Int where
-#if SIZEOF_HSINT == 4
-    put_ bh i = put_ bh (fromIntegral i :: Int32)
-    get  bh = do
-        x <- get bh
-        return $! (fromIntegral (x :: Int32))
-#elif SIZEOF_HSINT == 8
     put_ bh i = put_ bh (fromIntegral i :: Int64)
     get  bh = do
         x <- get bh
         return $! (fromIntegral (x :: Int64))
-#else
-#error "unsupported sizeof(HsInt)"
-#endif
---    getF bh   = getBitsF bh 32
 
 instance Binary a => Binary [a] where
     put_ bh l = do
@@ -562,8 +551,29 @@ instance (Integral a, Binary a) => Binary (Ratio a) where
 #endif
 
 instance Binary (Bin a) where
-  put_ bh (BinPtr i) = put_ bh i
-  get bh = do i <- get bh; return (BinPtr i)
+  put_ bh (BinPtr i) = put_ bh (fromIntegral i :: Int32)
+  get bh = do i <- get bh; return (BinPtr (fromIntegral (i :: Int32)))
+
+-- -----------------------------------------------------------------------------
+-- Instances for Data.Typeable stuff
+
+instance Binary TyCon where
+    put_ bh ty_con = do
+        let s = tyConString ty_con
+        put_ bh s
+    get bh = do
+        s <- get bh
+        return (mkTyCon s)
+
+instance Binary TypeRep where
+    put_ bh type_rep = do
+        let (ty_con, child_type_reps) = splitTyConApp type_rep
+        put_ bh ty_con
+        put_ bh child_type_reps
+    get bh = do
+        ty_con <- get bh
+        child_type_reps <- get bh
+        return (mkTyConApp ty_con child_type_reps)
 
 -- -----------------------------------------------------------------------------
 -- Lazy reading/writing
@@ -697,7 +707,7 @@ instance Binary FastString where
 
   get bh = do
         j <- get bh
-        return $! (ud_dict (getUserData bh) ! j)
+        return $! (ud_dict (getUserData bh) ! (fromIntegral (j :: Word32)))
 
 -- Here to avoid loop
 

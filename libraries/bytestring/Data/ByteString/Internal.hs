@@ -1,17 +1,24 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -XUnliftedFFITypes -XMagicHash -XUnboxedTuples -XDeriveDataTypeable #-}
+-- We cannot actually specify all the language pragmas, see ghc ticket #
+-- If we could, these are what they would be:
+{- LANGUAGE UnliftedFFITypes, MagicHash,
+            UnboxedTuples, DeriveDataTypeable -}
+{-# OPTIONS_HADDOCK hide #-}
+
 -- |
 -- Module      : Data.ByteString.Internal
 -- License     : BSD-style
 -- Maintainer  : Don Stewart <dons@galois.com>
 -- Stability   : experimental
 -- Portability : portable
--- 
--- A module containing semi-public 'ByteString' internals. This exposes
--- the 'ByteString' representation and low level construction functions.
--- Modules which extend the 'ByteString' system will need to use this module
--- while ideally most users will be able to make do with the public interface
--- modules.
+--
+-- A module containing semi-public 'ByteString' internals. This exposes the
+-- 'ByteString' representation and low level construction functions. As such
+-- all the functions in this module are unsafe. The API is also not stable.
+--
+-- Where possible application should instead use the functions from the normal
+-- public interface modules, such as "Data.ByteString.Unsafe". Packages that
+-- extend the ByteString system at a low level will need to use this module.
 --
 module Data.ByteString.Internal (
 
@@ -48,8 +55,7 @@ module Data.ByteString.Internal (
         c_maximum,              -- :: Ptr Word8 -> CInt -> IO Word8
         c_minimum,              -- :: Ptr Word8 -> CInt -> IO Word8
         c_count,                -- :: Ptr Word8 -> CInt -> Word8 -> IO CInt
-
-#if defined(__GLASGOW_HASKELL__)
+#if defined(__GLASGOW_HASKELL__) && __GLASGOW_HASKELL__ < 611
         -- * Internal GHC magic
         memcpy_ptr_baoff,       -- :: Ptr a -> RawBuffer -> CInt -> CSize -> IO (Ptr ())
 #endif
@@ -79,10 +85,15 @@ import Data.Data                (Data)
 #else
 import Data.Generics            (Data)
 #endif
-import GHC.Ptr                  (Ptr(..))
 import GHC.Base                 (realWorld#,unsafeChr)
-import GHC.IOBase               (IO(IO), RawBuffer)
-#if __GLASGOW_HASKELL__ >= 608
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO                   (IO(IO))
+#else
+import GHC.IOBase               (IO(IO),RawBuffer)
+#endif
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO                   (unsafeDupablePerformIO)
+#elif __GLASGOW_HASKELL__ >= 608
 import GHC.IOBase               (unsafeDupablePerformIO)
 #else
 import GHC.IOBase               (unsafePerformIO)
@@ -191,7 +202,12 @@ nullForeignPtr = unsafePerformIO $ newForeignPtr_ nullPtr
 -- ---------------------------------------------------------------------
 -- Low level constructors
 
--- | /O(1)/ Build a ByteString from a ForeignPtr
+-- | /O(1)/ Build a ByteString from a ForeignPtr.
+--
+-- If you do not need the offset parameter then you do should be using
+-- 'Data.ByteString.Unsafe.unsafePackCStringLen' or
+-- 'Data.ByteString.Unsafe.unsafePackCStringFinalizer' instead.
+--
 fromForeignPtr :: ForeignPtr Word8
                -> Int -- ^ Offset
                -> Int -- ^ Length
@@ -388,7 +404,7 @@ foreign import ccall unsafe "static fpstring.h fps_count" c_count
 -- ---------------------------------------------------------------------
 -- Internal GHC Haskell magic
 
-#if defined(__GLASGOW_HASKELL__)
+#if defined(__GLASGOW_HASKELL__) && __GLASGOW_HASKELL__ < 611
 foreign import ccall unsafe "__hscore_memcpy_src_off"
    memcpy_ptr_baoff :: Ptr a -> RawBuffer -> CInt -> CSize -> IO (Ptr ())
 #endif

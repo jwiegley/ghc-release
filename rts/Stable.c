@@ -6,18 +6,12 @@
  *
  * ---------------------------------------------------------------------------*/
 
-// Make static versions of inline functions in Stable.h:
-#define RTS_STABLE_C
-
 #include "PosixSource.h"
 #include "Rts.h"
+#include "RtsAPI.h"
+
 #include "Hash.h"
 #include "RtsUtils.h"
-#include "OSThreads.h"
-#include "Storage.h"
-#include "RtsAPI.h"
-#include "RtsFlags.h"
-#include "OSThreads.h"
 #include "Trace.h"
 #include "Stable.h"
 
@@ -85,6 +79,8 @@ static unsigned int SPT_size = 0;
 #ifdef THREADED_RTS
 static Mutex stable_mutex;
 #endif
+
+static void enlargeStablePtrTable(void);
 
 /* This hash table maps Haskell objects to stable names, so that every
  * call to lookupStableName on a given object will return the same
@@ -303,7 +299,7 @@ freeStablePtr(StgStablePtr sp)
     RELEASE_LOCK(&stable_mutex);
 }
 
-void
+static void
 enlargeStablePtrTable(void)
 {
   nat old_SPT_size = SPT_size;
@@ -316,6 +312,23 @@ enlargeStablePtrTable(void)
 		      "enlargeStablePtrTable");
 
   initFreeList(stable_ptr_table + old_SPT_size, old_SPT_size, NULL);
+}
+
+/* -----------------------------------------------------------------------------
+ * We must lock the StablePtr table during GC, to prevent simultaneous
+ * calls to freeStablePtr().
+ * -------------------------------------------------------------------------- */
+
+void
+stablePtrPreGC(void)
+{
+    ACQUIRE_LOCK(&stable_mutex);
+}
+
+void
+stablePtrPostGC(void)
+{
+    RELEASE_LOCK(&stable_mutex);
 }
 
 /* -----------------------------------------------------------------------------

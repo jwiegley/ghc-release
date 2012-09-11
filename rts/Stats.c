@@ -6,17 +6,16 @@
  *
  * ---------------------------------------------------------------------------*/
 
+#include "PosixSource.h"
 #include "Rts.h"
-#include "RtsFlags.h"
+
 #include "RtsUtils.h"
-#include "MBlock.h"
-#include "Storage.h"
 #include "Schedule.h"
 #include "Stats.h"
-#include "ParTicky.h"                       /* ToDo: move into Rts.h */
 #include "Profiling.h"
 #include "GetTime.h"
-#include "GC.h"
+#include "sm/Storage.h"
+#include "sm/GC.h" // gc_alloc_block_sync, whitehole_spin
 
 #if USE_PAPI
 #include "Papi.h"
@@ -506,20 +505,10 @@ stat_endHeapCensus(void)
    -------------------------------------------------------------------------- */
 
 #ifdef DEBUG
-#define TICK_VAR(arity) \
-  extern StgInt SLOW_CALLS_##arity; \
-  extern StgInt RIGHT_ARITY_##arity; \
-  extern StgInt TAGGED_PTR_##arity;
-
 #define TICK_VAR_INI(arity) \
   StgInt SLOW_CALLS_##arity = 1; \
   StgInt RIGHT_ARITY_##arity = 1; \
   StgInt TAGGED_PTR_##arity = 0;
-
-extern StgInt TOTAL_CALLS;
-
-TICK_VAR(1)
-TICK_VAR(2)
 
 TICK_VAR_INI(1)
 TICK_VAR_INI(2)
@@ -613,11 +602,11 @@ stat_exit(int alloc)
 	    }
 
 #if defined(THREADED_RTS)
-            if (RtsFlags.ParFlags.gcThreads > 1) {
+            if (RtsFlags.ParFlags.parGcEnabled) {
                 statsPrintf("\n  Parallel GC work balance: %.2f (%ld / %ld, ideal %d)\n", 
                             (double)GC_par_avg_copied / (double)GC_par_max_copied,
                             (lnat)GC_par_avg_copied, (lnat)GC_par_max_copied,
-                            RtsFlags.ParFlags.gcThreads
+                            RtsFlags.ParFlags.nNodes
                     );
             }
 #endif
@@ -628,11 +617,11 @@ stat_exit(int alloc)
 	    {
 		nat i;
 		Task *task;
+                statsPrintf("                        MUT time (elapsed)       GC time  (elapsed)\n");
 		for (i = 0, task = all_tasks; 
 		     task != NULL; 
 		     i++, task = task->all_link) {
-		    statsPrintf("  Task %2d %-8s :  MUT time: %6.2fs  (%6.2fs elapsed)\n"
-			    "                      GC  time: %6.2fs  (%6.2fs elapsed)\n\n", 
+		    statsPrintf("  Task %2d %-8s :  %6.2fs    (%6.2fs)     %6.2fs    (%6.2fs)\n",
 				i,
 				(task->tso == NULL) ? "(worker)" : "(bound)",
 				TICK_TO_DBL(task->mut_time),
@@ -641,6 +630,23 @@ stat_exit(int alloc)
 				TICK_TO_DBL(task->gc_etime));
 		}
 	    }
+
+	    statsPrintf("\n");
+
+            {
+                nat i;
+                lnat sparks_created   = 0;
+                lnat sparks_converted = 0;
+                lnat sparks_pruned    = 0;
+                for (i = 0; i < n_capabilities; i++) {
+                    sparks_created   += capabilities[i].sparks_created;
+                    sparks_converted += capabilities[i].sparks_converted;
+                    sparks_pruned    += capabilities[i].sparks_pruned;
+                }
+
+                statsPrintf("  SPARKS: %ld (%ld converted, %ld pruned)\n\n",
+                            sparks_created, sparks_converted, sparks_pruned);
+            }
 #endif
 
 	    statsPrintf("  INIT  time  %6.2fs  (%6.2fs elapsed)\n",
@@ -697,12 +703,10 @@ stat_exit(int alloc)
             {
                 nat g, s;
                 
-                statsPrintf("recordMutableGen_sync: %"FMT_Word64"\n", recordMutableGen_sync.spin);
                 statsPrintf("gc_alloc_block_sync: %"FMT_Word64"\n", gc_alloc_block_sync.spin);
                 statsPrintf("whitehole_spin: %"FMT_Word64"\n", whitehole_spin);
                 for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
                     for (s = 0; s < generations[g].n_steps; s++) {
-                        statsPrintf("gen[%d].steps[%d].sync_todo: %"FMT_Word64"\n", g, s, generations[g].steps[s].sync_todo.spin);
                         statsPrintf("gen[%d].steps[%d].sync_large_objects: %"FMT_Word64"\n", g, s, generations[g].steps[s].sync_large_objects.spin);
                     }
                 }

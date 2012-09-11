@@ -14,6 +14,8 @@
 
 #ifdef PROFILING
 
+BEGIN_RTS_PRIVATE
+
 /*
   Type 'retainer' defines the retainer identity.
 
@@ -196,6 +198,8 @@ void outputAllRetainerSet(FILE *);
 // Note: This function is not part of retainerSet interface, but this is
 //       the best place to define it.
 void printRetainer(FILE *, retainer);
+
+END_RTS_PRIVATE
 
 #endif /* PROFILING */
 #endif /* RETAINERSET_H */

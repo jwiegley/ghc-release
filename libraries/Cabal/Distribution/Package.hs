@@ -47,10 +47,14 @@ module Distribution.Package (
         PackageIdentifier(..),
         PackageId,
 
-        -- * Package dependencies
+        -- * Installed package identifiers
+        InstalledPackageId(..),
+
+        -- * Package source dependencies
         Dependency(..),
         thisPackageVersion,
         notThisPackageVersion,
+        simplifyDependency,
 
         -- * Package classes
         Package(..), packageName, packageVersion,
@@ -58,13 +62,14 @@ module Distribution.Package (
   ) where
 
 import Distribution.Version
-         ( Version(..), VersionRange(AnyVersion,ThisVersion), notThisVersion )
+         ( Version(..), VersionRange, anyVersion, thisVersion
+         , notThisVersion, simplifyVersionRange )
 
 import Distribution.Text (Text(..))
 import qualified Distribution.Compat.ReadP as Parse
 import Distribution.Compat.ReadP ((<++))
 import qualified Text.PrettyPrint as Disp
-import Text.PrettyPrint ((<>), (<+>))
+import Text.PrettyPrint ((<>), (<+>), text)
 import qualified Data.Char as Char ( isDigit, isAlphaNum )
 import Data.List ( intersperse )
 
@@ -105,9 +110,28 @@ instance Text PackageIdentifier where
     return (PackageIdentifier n v)
 
 -- ------------------------------------------------------------
--- * Package dependencies
+-- * Installed Package Ids
 -- ------------------------------------------------------------
 
+-- | An InstalledPackageId uniquely identifies an instance of an installed package.
+-- There can be at most one package with a given 'InstalledPackageId'
+-- in a package database, or overlay of databases.
+--
+newtype InstalledPackageId = InstalledPackageId String
+ deriving (Read,Show,Eq,Ord)
+
+instance Text InstalledPackageId where
+  disp (InstalledPackageId str) = text str
+
+  parse = InstalledPackageId `fmap` Parse.munch1 abi_char
+   where abi_char c = Char.isAlphaNum c || c `elem` ":-_."
+
+-- ------------------------------------------------------------
+-- * Package source dependencies
+-- ------------------------------------------------------------
+
+-- | Describes a dependency on a source package (API)
+--
 data Dependency = Dependency PackageName VersionRange
                   deriving (Read, Show, Eq)
 
@@ -117,23 +141,34 @@ instance Text Dependency where
 
   parse = do name <- parse
              Parse.skipSpaces
-             ver <- parse <++ return AnyVersion
+             ver <- parse <++ return anyVersion
              Parse.skipSpaces
              return (Dependency name ver)
 
 thisPackageVersion :: PackageIdentifier -> Dependency
 thisPackageVersion (PackageIdentifier n v) =
-  Dependency n (ThisVersion v)
+  Dependency n (thisVersion v)
 
 notThisPackageVersion :: PackageIdentifier -> Dependency
 notThisPackageVersion (PackageIdentifier n v) =
   Dependency n (notThisVersion v)
 
--- | Class of things that can be identified by a 'PackageIdentifier'
+-- | Simplify the 'VersionRange' expression in a 'Dependency'.
+-- See 'simplifyVersionRange'.
+--
+simplifyDependency :: Dependency -> Dependency
+simplifyDependency (Dependency name range) =
+  Dependency name (simplifyVersionRange range)
+
+-- | Class of things that have a 'PackageIdentifier'
 --
 -- Types in this class are all notions of a package. This allows us to have
 -- different types for the different phases that packages go though, from
 -- simple name\/id, package description, configured or installed packages.
+--
+-- Not all kinds of packages can be uniquely identified by a
+-- 'PackageIdentifier'. In particular, installed packages cannot, there may be
+-- many installed instances of the same source package.
 --
 class Package pkg where
   packageId :: pkg -> PackageIdentifier

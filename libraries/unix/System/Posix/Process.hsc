@@ -71,9 +71,7 @@ import Foreign.Marshal.Utils ( withMany )
 import Foreign.Ptr ( Ptr, nullPtr )
 import Foreign.StablePtr ( StablePtr, newStablePtr, freeStablePtr )
 import Foreign.Storable ( Storable(..) )
-import System.IO
 import System.Exit
-import System.Posix.Error
 import System.Posix.Process.Internals
 import System.Posix.Types
 import Control.Monad
@@ -175,7 +173,7 @@ getProcessTimes = do
 
 type CTms = ()
 
-foreign import ccall unsafe "times"
+foreign import ccall unsafe "__hsunix_times"
   c_times :: Ptr CTms -> IO CClock
 
 -- -----------------------------------------------------------------------------
@@ -276,7 +274,7 @@ executeFile :: FilePath			    -- ^ Command
             -> Bool			    -- ^ Search PATH?
             -> [String]			    -- ^ Arguments
             -> Maybe [(String, String)]	    -- ^ Environment
-            -> IO ()
+            -> IO a
 executeFile path search args Nothing = do
   withCString path $ \s ->
     withMany withCString (path:args) $ \cstrs ->
@@ -285,6 +283,7 @@ executeFile path search args Nothing = do
 	if search 
 	   then throwErrnoPathIfMinus1_ "executeFile" path (c_execvp s arr)
 	   else throwErrnoPathIfMinus1_ "executeFile" path (c_execv s arr)
+        return undefined -- never reached
 
 executeFile path search args (Just env) = do
   withCString path $ \s ->
@@ -299,6 +298,7 @@ executeFile path search args (Just env) = do
 		   (c_execvpe s arg_arr env_arr)
 	   else throwErrnoPathIfMinus1_ "executeFile" path
 		   (c_execve s arg_arr env_arr)
+        return undefined -- never reached
 
 foreign import ccall unsafe "execvp"
   c_execvp :: CString -> Ptr CString -> IO CInt

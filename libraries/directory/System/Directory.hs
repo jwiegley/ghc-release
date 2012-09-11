@@ -63,6 +63,7 @@ module System.Directory
 
     , getPermissions            -- :: FilePath -> IO Permissions
     , setPermissions	        -- :: FilePath -> Permissions -> IO ()
+    , copyPermissions
 
     -- * Timestamps
 
@@ -81,7 +82,9 @@ import Control.Monad           ( when, unless )
 import Control.Exception.Base
 
 #ifdef __NHC__
-import Directory
+import Directory hiding ( getDirectoryContents
+                        , doesDirectoryExist, doesFileExist
+                        , getModificationTime )
 import System (system)
 #endif /* __NHC__ */
 
@@ -94,17 +97,22 @@ import Foreign.C
 
 {-# CFILES cbits/directory.c #-}
 
-#ifdef __GLASGOW_HASKELL__
-import System.Posix.Types
-import System.Posix.Internals
 import System.Time             ( ClockTime(..) )
 
+#ifdef __GLASGOW_HASKELL__
+
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO.Exception	( IOException(..), IOErrorType(..), ioException )
+#else
 import GHC.IOBase	( IOException(..), IOErrorType(..), ioException )
+#endif
 
 #ifdef mingw32_HOST_OS
-import qualified System.Win32
+import System.Posix.Types
+import System.Posix.Internals
+import qualified System.Win32 as Win32
 #else
-import qualified System.Posix
+import qualified System.Posix as Posix
 #endif
 
 {- $intro
@@ -165,8 +173,8 @@ The operation may fail with:
 
 getPermissions :: FilePath -> IO Permissions
 getPermissions name = do
-  withCString name $ \s -> do
 #ifdef mingw32_HOST_OS
+  withFilePath name $ \s -> do
   -- stat() does a better job of guessing the permissions on Windows
   -- than access() does.  e.g. for execute permission, it looks at the
   -- filename extension :-)
@@ -189,17 +197,17 @@ getPermissions name = do
     }
    )
 #else
-  read_ok  <- c_access s r_OK
-  write_ok <- c_access s w_OK
-  exec_ok  <- c_access s x_OK
-  withFileStatus "getPermissions" name $ \st -> do
-  is_dir <- isDirectory st
+  read_ok  <- Posix.fileAccess name True  False False
+  write_ok <- Posix.fileAccess name False True  False
+  exec_ok  <- Posix.fileAccess name False False True
+  stat <- Posix.getFileStatus name
+  let is_dir = Posix.fileMode stat .&. Posix.directoryMode /= 0
   return (
     Permissions {
-      readable   = read_ok  == 0,
-      writable   = write_ok == 0,
-      executable = not is_dir && exec_ok == 0,
-      searchable = is_dir && exec_ok == 0
+      readable   = read_ok,
+      writable   = write_ok,
+      executable = not is_dir && exec_ok,
+      searchable = is_dir && exec_ok
     }
    )
 #endif
@@ -218,30 +226,52 @@ The operation may fail with:
 
 setPermissions :: FilePath -> Permissions -> IO ()
 setPermissions name (Permissions r w e s) = do
+#ifdef mingw32_HOST_OS
   allocaBytes sizeof_stat $ \ p_stat -> do
-  withCString name $ \p_name -> do
+  withFilePath name $ \p_name -> do
     throwErrnoIfMinus1_ "setPermissions" $ do
       c_stat p_name p_stat
       mode <- st_mode p_stat
       let mode1 = modifyBit r mode s_IRUSR
       let mode2 = modifyBit w mode1 s_IWUSR
       let mode3 = modifyBit (e || s) mode2 s_IXUSR
-      c_chmod p_name mode3
-
+      c_wchmod p_name mode3
  where
    modifyBit :: Bool -> CMode -> CMode -> CMode
    modifyBit False m b = m .&. (complement b)
    modifyBit True  m b = m .|. b
+#else
+      stat <- Posix.getFileStatus name
+      let mode = Posix.fileMode stat
+      let mode1 = modifyBit r mode  Posix.ownerReadMode
+      let mode2 = modifyBit w mode1 Posix.ownerWriteMode
+      let mode3 = modifyBit (e || s) mode2 Posix.ownerExecuteMode
+      Posix.setFileMode name mode3
+ where
+   modifyBit :: Bool -> Posix.FileMode -> Posix.FileMode -> Posix.FileMode
+   modifyBit False m b = m .&. (complement b)
+   modifyBit True  m b = m .|. b
+#endif
 
+#ifdef mingw32_HOST_OS
+foreign import ccall unsafe "_wchmod"
+   c_wchmod :: CWString -> CMode -> IO CInt
+#endif
 
 copyPermissions :: FilePath -> FilePath -> IO ()
 copyPermissions source dest = do
+#ifdef mingw32_HOST_OS
   allocaBytes sizeof_stat $ \ p_stat -> do
-  withCString source $ \p_source -> do
-  withCString dest $ \p_dest -> do
+  withFilePath source $ \p_source -> do
+  withFilePath dest $ \p_dest -> do
     throwErrnoIfMinus1_ "copyPermissions" $ c_stat p_source p_stat
     mode <- st_mode p_stat
-    throwErrnoIfMinus1_ "copyPermissions" $ c_chmod p_dest mode
+    throwErrnoIfMinus1_ "copyPermissions" $ c_wchmod p_dest mode
+#else
+  stat <- Posix.getFileStatus source
+  let mode = Posix.fileMode stat
+  Posix.setFileMode dest mode
+#endif
 
 -----------------------------------------------------------------------------
 -- Implementation
@@ -286,9 +316,9 @@ The path refers to an existing non-directory object.
 createDirectory :: FilePath -> IO ()
 createDirectory path = do
 #ifdef mingw32_HOST_OS
-  System.Win32.createDirectory path Nothing
+  Win32.createDirectory path Nothing
 #else
-  System.Posix.createDirectory path 0o777
+  Posix.createDirectory path 0o777
 #endif
 
 #else /* !__GLASGOW_HASKELL__ */
@@ -332,11 +362,18 @@ createDirectoryIfMissing create_parents path0
           -- the case that the dir did exist but another process deletes the
           -- directory and creates a file in its place before we can check
           -- that the directory did indeed exist.
-          | isAlreadyExistsError e ->
-              (withFileStatus "createDirectoryIfMissing" dir $ \st -> do
+          | isAlreadyExistsError e -> (do
+#ifdef mingw32_HOST_OS
+              withFileStatus "createDirectoryIfMissing" dir $ \st -> do
                  isDir <- isDirectory st
                  if isDir then return ()
                           else throw e
+#else
+              stat <- Posix.getFileStatus dir
+              if Posix.fileMode stat .&. Posix.directoryMode /= 0 
+                 then return ()
+                 else throw e
+#endif
               ) `catch` ((\_ -> return ()) :: IOException -> IO ())
           | otherwise              -> throw e
 
@@ -385,9 +422,9 @@ The operand refers to an existing non-directory object.
 removeDirectory :: FilePath -> IO ()
 removeDirectory path =
 #ifdef mingw32_HOST_OS
-  System.Win32.removeDirectory path
+  Win32.removeDirectory path
 #else
-  System.Posix.removeDirectory path
+  Posix.removeDirectory path
 #endif
 
 #endif
@@ -448,9 +485,9 @@ The operand refers to an existing directory.
 removeFile :: FilePath -> IO ()
 removeFile path =
 #if mingw32_HOST_OS
-  System.Win32.deleteFile path
+  Win32.deleteFile path
 #else
-  System.Posix.removeLink path
+  Posix.removeLink path
 #endif
 
 {- |@'renameDirectory' old new@ changes the name of an existing
@@ -503,18 +540,25 @@ Either path refers to an existing non-directory object.
 -}
 
 renameDirectory :: FilePath -> FilePath -> IO ()
-renameDirectory opath npath =
+renameDirectory opath npath = do
    -- XXX this test isn't performed atomically with the following rename
+#ifdef mingw32_HOST_OS
+   -- ToDo: use Win32 API
    withFileStatus "renameDirectory" opath $ \st -> do
    is_dir <- isDirectory st
+#else
+   stat <- Posix.getFileStatus opath
+   let is_dir = Posix.fileMode stat .&. Posix.directoryMode /= 0
+#endif
    if (not is_dir)
-	then ioException (IOError Nothing InappropriateType "renameDirectory"
-			    ("not a directory") (Just opath))
+	then ioException (ioeSetErrorString
+                          (mkIOError InappropriateType "renameDirectory" Nothing (Just opath))
+                          "not a directory")
 	else do
 #ifdef mingw32_HOST_OS
-   System.Win32.moveFileEx opath npath System.Win32.mOVEFILE_REPLACE_EXISTING
+   Win32.moveFileEx opath npath Win32.mOVEFILE_REPLACE_EXISTING
 #else
-   System.Posix.rename opath npath
+   Posix.rename opath npath
 #endif
 
 {- |@'renameFile' old new@ changes the name of an existing file system
@@ -562,18 +606,25 @@ Either path refers to an existing directory.
 -}
 
 renameFile :: FilePath -> FilePath -> IO ()
-renameFile opath npath =
+renameFile opath npath = do
    -- XXX this test isn't performed atomically with the following rename
+#ifdef mingw32_HOST_OS
+   -- ToDo: use Win32 API
    withFileOrSymlinkStatus "renameFile" opath $ \st -> do
    is_dir <- isDirectory st
+#else
+   stat <- Posix.getSymbolicLinkStatus opath
+   let is_dir = Posix.fileMode stat .&. Posix.directoryMode /= 0
+#endif
    if is_dir
-	then ioException (IOError Nothing InappropriateType "renameFile"
-			   "is a directory" (Just opath))
+	then ioException (ioeSetErrorString
+			  (mkIOError InappropriateType "renameFile" Nothing (Just opath))
+			  "is a directory")
 	else do
 #ifdef mingw32_HOST_OS
-   System.Win32.moveFileEx opath npath System.Win32.mOVEFILE_REPLACE_EXISTING
+   Win32.moveFileEx opath npath Win32.mOVEFILE_REPLACE_EXISTING
 #else
-   System.Posix.rename opath npath
+   Posix.rename opath npath
 #endif
 
 #endif /* __GLASGOW_HASKELL__ */
@@ -625,26 +676,18 @@ copyFile fromFPath toFPath =
 -- attempt.
 canonicalizePath :: FilePath -> IO FilePath
 canonicalizePath fpath =
+#if defined(mingw32_HOST_OS)
+    do path <- Win32.getFullPathName fpath
+#else
   withCString fpath $ \pInPath ->
   allocaBytes long_path_size $ \pOutPath ->
-#if defined(mingw32_HOST_OS)
-  alloca $ \ppFilePart ->
-    do c_GetFullPathName pInPath (fromIntegral long_path_size) pOutPath ppFilePart
-#else
     do c_realpath pInPath pOutPath
-#endif
        path <- peekCString pOutPath
+#endif
        return (normalise path)
         -- normalise does more stuff, like upper-casing the drive letter
 
-#if defined(mingw32_HOST_OS)
-foreign import stdcall unsafe "GetFullPathNameA"
-            c_GetFullPathName :: CString
-                              -> CInt
-                              -> CString
-                              -> Ptr CString
-                              -> IO CInt
-#else
+#if !defined(mingw32_HOST_OS)
 foreign import ccall unsafe "realpath"
                    c_realpath :: CString
                               -> CString
@@ -657,32 +700,28 @@ makeRelativeToCurrentDirectory x = do
     cur <- getCurrentDirectory
     return $ makeRelative cur x
 
--- | Given an executable file name, searches for such file
--- in the directories listed in system PATH. The returned value 
--- is the path to the found executable or Nothing if there isn't
--- such executable. For example (findExecutable \"ghc\")
--- gives you the path to GHC.
+-- | Given an executable file name, searches for such file in the
+-- directories listed in system PATH. The returned value is the path
+-- to the found executable or Nothing if an executable with the given
+-- name was not found. For example (findExecutable \"ghc\") gives you
+-- the path to GHC.
+--
+-- The path returned by 'findExecutable' corresponds to the
+-- program that would be executed by 'System.Process.createProcess'
+-- when passed the same string (as a RawCommand, not a ShellCommand).
+--
+-- On Windows, 'findExecutable' calls the Win32 function 'SearchPath',
+-- which may search other places before checking the directories in
+-- @PATH@.  Where it actually searches depends on registry settings,
+-- but notably includes the directory containing the current
+-- executable. See
+-- <http://msdn.microsoft.com/en-us/library/aa365527.aspx> for more
+-- details.  
+--
 findExecutable :: String -> IO (Maybe FilePath)
 findExecutable binary =
 #if defined(mingw32_HOST_OS)
-  withCString binary $ \c_binary ->
-  withCString ('.':exeExtension) $ \c_ext ->
-  allocaBytes long_path_size $ \pOutPath ->
-  alloca $ \ppFilePart -> do
-    res <- c_SearchPath nullPtr c_binary c_ext (fromIntegral long_path_size) pOutPath ppFilePart
-    if res > 0 && res < fromIntegral long_path_size
-      then do fpath <- peekCString pOutPath
-              return (Just fpath)
-      else return Nothing
-
-foreign import stdcall unsafe "SearchPathA"
-            c_SearchPath :: CString
-                         -> CString
-                         -> CString
-                         -> CInt
-                         -> CString
-                         -> Ptr CString
-                         -> IO CInt
+  Win32.searchPath Nothing binary ('.':exeExtension)
 #else
  do
   path <- getEnv "PATH"
@@ -700,7 +739,7 @@ foreign import stdcall unsafe "SearchPathA"
 #endif
 
 
-#ifdef __GLASGOW_HASKELL__
+#ifndef __HUGS__
 {- |@'getDirectoryContents' dir@ returns a list of /all/ entries
 in /dir/. 
 
@@ -733,38 +772,39 @@ The path refers to an existing non-directory object.
 -}
 
 getDirectoryContents :: FilePath -> IO [FilePath]
-getDirectoryContents path = do
-  modifyIOError (`ioeSetFileName` path) $
-   alloca $ \ ptr_dEnt ->
-     bracket
-	(withCString path $ \s -> 
-	   throwErrnoIfNullRetry desc (c_opendir s))
-	(\p -> throwErrnoIfMinus1_ desc (c_closedir p))
-	(\p -> loop ptr_dEnt p)
+getDirectoryContents path =
+  modifyIOError ((`ioeSetFileName` path) . 
+                 (`ioeSetLocation` "getDirectoryContents")) $ do
+#ifndef mingw32_HOST_OS
+  bracket
+    (Posix.openDirStream path)
+    Posix.closeDirStream
+    loop
+ where
+  loop dirp = do
+     e <- Posix.readDirStream dirp
+     if null e then return [] else do
+     es <- loop dirp
+     return (e:es)
+#else
+  bracket
+     (Win32.findFirstFile (path </> "*"))
+     (\(h,_) -> Win32.findClose h)
+     (\(h,fdat) -> loop h fdat [])
   where
-    desc = "getDirectoryContents"
+        -- we needn't worry about empty directories: adirectory always
+        -- has at least "." and ".." entries
+    loop :: Win32.HANDLE -> Win32.FindData -> [FilePath] -> IO [FilePath]
+    loop h fdat acc = do
+       filename <- Win32.getFindDataFileName fdat
+       more <- Win32.findNextFile h fdat
+       if more
+          then loop h fdat (filename:acc)
+          else return (filename:acc)
+                 -- no need to reverse, ordering is undefined
+#endif /* mingw32 */
 
-    loop :: Ptr (Ptr CDirent) -> Ptr CDir -> IO [String]
-    loop ptr_dEnt dir = do
-      resetErrno
-      r <- readdir dir ptr_dEnt
-      if (r == 0)
-	 then do
-	         dEnt    <- peek ptr_dEnt
-		 if (dEnt == nullPtr)
-		   then return []
-		   else do
-	 	    entry   <- (d_name dEnt >>= peekCString)
-		    freeDirEnt dEnt
-		    entries <- loop ptr_dEnt dir
-		    return (entry:entries)
-	 else do errno <- getErrno
-		 if (errno == eINTR) then loop ptr_dEnt dir else do
-		 let (Errno eo) = errno
-		 if (eo == end_of_dir)
-		    then return []
-		    else throwErrno desc
-
+#endif /* !__HUGS__ */
 
 
 {- |If the operating system has a notion of current directories,
@@ -792,17 +832,13 @@ Insufficient resources are available to perform the operation.
 The operating system has no notion of current directory.
 
 -}
-
+#ifdef __GLASGOW_HASKELL__
 getCurrentDirectory :: IO FilePath
 getCurrentDirectory = do
 #ifdef mingw32_HOST_OS
-  System.Win32.try "GetCurrentDirectory" (flip c_getCurrentDirectory) 512
-
-foreign import stdcall unsafe "GetCurrentDirectoryW"
-  c_getCurrentDirectory :: System.Win32.DWORD -> System.Win32.LPTSTR
-                        -> IO System.Win32.UINT
+  Win32.getCurrentDirectory
 #else
-  System.Posix.getWorkingDirectory
+  Posix.getWorkingDirectory
 #endif
 
 {- |If the operating system has a notion of current directories,
@@ -840,18 +876,26 @@ The path refers to an existing non-directory object.
 setCurrentDirectory :: FilePath -> IO ()
 setCurrentDirectory path =
 #ifdef mingw32_HOST_OS
-  System.Win32.setCurrentDirectory path
+  Win32.setCurrentDirectory path
 #else
-  System.Posix.changeWorkingDirectory path
+  Posix.changeWorkingDirectory path
 #endif
 
+#endif /* __GLASGOW_HASKELL__ */
+
+#ifndef __HUGS__
 {- |The operation 'doesDirectoryExist' returns 'True' if the argument file
 exists and is a directory, and 'False' otherwise.
 -}
 
 doesDirectoryExist :: FilePath -> IO Bool
 doesDirectoryExist name =
+#ifdef mingw32_HOST_OS
    (withFileStatus "doesDirectoryExist" name $ \st -> isDirectory st)
+#else
+   (do stat <- Posix.getFileStatus name
+       return (Posix.fileMode stat .&. Posix.directoryMode /= 0))
+#endif
    `catch` ((\ _ -> return False) :: IOException -> IO Bool)
 
 {- |The operation 'doesFileExist' returns 'True'
@@ -860,7 +904,12 @@ if the argument file exists and is not a directory, and 'False' otherwise.
 
 doesFileExist :: FilePath -> IO Bool
 doesFileExist name =
+#ifdef mingw32_HOST_OS
    (withFileStatus "doesFileExist" name $ \st -> do b <- isDirectory st; return (not b))
+#else
+   (do stat <- Posix.getFileStatus name
+       return (Posix.fileMode stat .&. Posix.directoryMode == 0))
+#endif
    `catch` ((\ _ -> return False) :: IOException -> IO Bool)
 
 {- |The 'getModificationTime' operation returns the
@@ -876,15 +925,26 @@ The operation may fail with:
 -}
 
 getModificationTime :: FilePath -> IO ClockTime
-getModificationTime name =
- withFileStatus "getModificationTime" name $ \ st ->
+getModificationTime name = do
+#ifdef mingw32_HOST_OS
+ -- ToDo: use Win32 API
+ withFileStatus "getModificationTime" name $ \ st -> do
  modificationTime st
+#else
+  stat <- Posix.getFileStatus name
+  let realToInteger = round . realToFrac :: Real a => a -> Integer
+  return (TOD (realToInteger (Posix.modificationTime stat)) 0)
+#endif
 
+
+#endif /* !__HUGS__ */
+
+#ifdef mingw32_HOST_OS
 withFileStatus :: String -> FilePath -> (Ptr CStat -> IO a) -> IO a
 withFileStatus loc name f = do
   modifyIOError (`ioeSetFileName` name) $
     allocaBytes sizeof_stat $ \p ->
-      withCString (fileNameEndClean name) $ \s -> do
+      withFilePath (fileNameEndClean name) $ \s -> do
         throwErrnoIfMinus1Retry_ loc (c_stat s p)
 	f p
 
@@ -892,7 +952,7 @@ withFileOrSymlinkStatus :: String -> FilePath -> (Ptr CStat -> IO a) -> IO a
 withFileOrSymlinkStatus loc name f = do
   modifyIOError (`ioeSetFileName` name) $
     allocaBytes sizeof_stat $ \p ->
-      withCString name $ \s -> do
+      withFilePath name $ \s -> do
         throwErrnoIfMinus1Retry_ loc (lstat s p)
 	f p
 
@@ -911,24 +971,19 @@ fileNameEndClean :: String -> String
 fileNameEndClean name = if isDrive name then addTrailingPathSeparator name
                                         else dropTrailingPathSeparator name
 
-foreign import ccall unsafe "__hscore_R_OK" r_OK :: CInt
-foreign import ccall unsafe "__hscore_W_OK" w_OK :: CInt
-foreign import ccall unsafe "__hscore_X_OK" x_OK :: CInt
-
-foreign import ccall unsafe "__hscore_S_IRUSR" s_IRUSR :: CMode
-foreign import ccall unsafe "__hscore_S_IWUSR" s_IWUSR :: CMode
-foreign import ccall unsafe "__hscore_S_IXUSR" s_IXUSR :: CMode
-#ifdef mingw32_HOST_OS
+foreign import ccall unsafe "HsDirectory.h __hscore_S_IRUSR" s_IRUSR :: CMode
+foreign import ccall unsafe "HsDirectory.h __hscore_S_IWUSR" s_IWUSR :: CMode
+foreign import ccall unsafe "HsDirectory.h __hscore_S_IXUSR" s_IXUSR :: CMode
 foreign import ccall unsafe "__hscore_S_IFDIR" s_IFDIR :: CMode
 #endif
 
+
+#ifdef __GLASGOW_HASKELL__
 foreign import ccall unsafe "__hscore_long_path_size"
   long_path_size :: Int
-
 #else
 long_path_size :: Int
 long_path_size = 2048	--  // guess?
-
 #endif /* __GLASGOW_HASKELL__ */
 
 {- | Returns the current user's home directory.
@@ -954,15 +1009,16 @@ cannot be found.
 -}
 getHomeDirectory :: IO FilePath
 getHomeDirectory =
+  modifyIOError ((`ioeSetLocation` "getHomeDirectory")) $ do
 #if defined(mingw32_HOST_OS)
-  allocaBytes long_path_size $ \pPath -> do
-     r0 <- c_SHGetFolderPath nullPtr csidl_PROFILE nullPtr 0 pPath
-     if (r0 < 0)
-       then do
-          r1 <- c_SHGetFolderPath nullPtr csidl_WINDOWS nullPtr 0 pPath
-	  when (r1 < 0) (raiseUnsupported "System.Directory.getHomeDirectory")
-       else return ()
-     peekCString pPath
+  r <- try $ Win32.sHGetFolderPath nullPtr Win32.cSIDL_PROFILE nullPtr 0
+  case (r :: Either IOException String) of
+    Right s -> return s
+    Left  _ -> do
+      r1 <- try $ Win32.sHGetFolderPath nullPtr Win32.cSIDL_WINDOWS nullPtr 0
+      case r1 of
+        Right s -> return s
+        Left  e -> ioError (e :: IOException)
 #else
   getEnv "HOME"
 #endif
@@ -996,12 +1052,10 @@ cannot be found.
 -}
 getAppUserDataDirectory :: String -> IO FilePath
 getAppUserDataDirectory appName = do
+  modifyIOError ((`ioeSetLocation` "getAppUserDataDirectory")) $ do
 #if defined(mingw32_HOST_OS)
-  allocaBytes long_path_size $ \pPath -> do
-     r <- c_SHGetFolderPath nullPtr csidl_APPDATA nullPtr 0 pPath
-     when (r<0) (raiseUnsupported "System.Directory.getAppUserDataDirectory")
-     s <- peekCString pPath
-     return (s++'\\':appName)
+  s <- Win32.sHGetFolderPath nullPtr Win32.cSIDL_APPDATA nullPtr 0
+  return (s++'\\':appName)
 #else
   path <- getEnv "HOME"
   return (path++'/':'.':appName)
@@ -1030,11 +1084,9 @@ cannot be found.
 -}
 getUserDocumentsDirectory :: IO FilePath
 getUserDocumentsDirectory = do
+  modifyIOError ((`ioeSetLocation` "getUserDocumentsDirectory")) $ do
 #if defined(mingw32_HOST_OS)
-  allocaBytes long_path_size $ \pPath -> do
-     r <- c_SHGetFolderPath nullPtr csidl_PERSONAL nullPtr 0 pPath
-     when (r<0) (raiseUnsupported "System.Directory.getUserDocumentsDirectory")
-     peekCString pPath
+  Win32.sHGetFolderPath nullPtr Win32.cSIDL_PERSONAL nullPtr 0
 #else
   getEnv "HOME"
 #endif
@@ -1068,11 +1120,7 @@ The function doesn\'t verify whether the path exists.
 getTemporaryDirectory :: IO FilePath
 getTemporaryDirectory = do
 #if defined(mingw32_HOST_OS)
-  System.Win32.try "GetTempPath" (flip c_getTempPath) 512
-
-foreign import stdcall unsafe "GetTempPathW"
-  c_getTempPath :: System.Win32.DWORD -> System.Win32.LPTSTR
-                -> IO System.Win32.UINT
+  Win32.getTemporaryDirectory
 #else
   getEnv "TMPDIR"
 #if !__NHC__
@@ -1081,25 +1129,6 @@ foreign import stdcall unsafe "GetTempPathW"
 #else
     `Prelude.catch` (\ex -> return "/tmp")
 #endif
-#endif
-
-#if defined(mingw32_HOST_OS)
-foreign import ccall unsafe "__hscore_getFolderPath"
-            c_SHGetFolderPath :: Ptr () 
-                              -> CInt 
-                              -> Ptr () 
-                              -> CInt 
-                              -> CString 
-                              -> IO CInt
-foreign import ccall unsafe "__hscore_CSIDL_PROFILE"  csidl_PROFILE  :: CInt
-foreign import ccall unsafe "__hscore_CSIDL_APPDATA"  csidl_APPDATA  :: CInt
-foreign import ccall unsafe "__hscore_CSIDL_WINDOWS"  csidl_WINDOWS  :: CInt
-foreign import ccall unsafe "__hscore_CSIDL_PERSONAL" csidl_PERSONAL :: CInt
-
-raiseUnsupported :: String -> IO ()
-raiseUnsupported loc = 
-   ioException (IOError Nothing UnsupportedOperation loc "unsupported operation" Nothing)
-
 #endif
 
 -- ToDo: This should be determined via autoconf (AC_EXEEXT)
@@ -1111,4 +1140,3 @@ exeExtension = "exe"
 #else
 exeExtension = ""
 #endif
-

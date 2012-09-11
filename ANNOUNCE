@@ -1,15 +1,71 @@
 
    ==============================================================
-    The (Interactive) Glasgow Haskell Compiler -- version 6.10.4
+    The (Interactive) Glasgow Haskell Compiler -- version 6.12.1
    ==============================================================
 
-The GHC Team is pleased to announce a new patchlevel release of GHC.
-This release contains a number of bugfixes relative to 6.10.3, so we
-recommend upgrading.
+The GHC Team is pleased to announce a new major release of GHC. There
+have been a number of significant changes since the last major release,
+including:
 
-Release notes are here:
+* Considerably improved support for parallel execution. GHC 6.10 would
+  execute parallel Haskell programs, but performance was often not very
+  good. Simon Marlow has done lots of performance tuning in 6.12,
+  removing many of the accidental (and largely invisible) gotchas that
+  made parallel programs run slowly.
 
-  http://haskell.org/ghc/docs/6.10.4/html/users_guide/release-6-10-4.html
+* As part of this parallel-performance tuning, Satnam Singh and Simon
+  Marlow have developed ThreadScope, a GUI that lets you see what is
+  going on inside your parallel program. It's a huge step forward from
+  "It takes 4 seconds with 1 processor, and 3 seconds with 8 processors;
+  now what?". ThreadScope will be released separately from GHC, but at
+  more or less the same time as GHC 6.12.
+
+* Dynamic linking is now supported on Linux, and support for other
+  platforms will follow. Thanks for this most recently go to the
+  Industrial Haskell Group who pushed it into a fully-working state;
+  dynamic linking is the culmination of the work of several people over
+  recent years. One effect of dynamic linking is that binaries shrink
+  dramatically, because the run-time system and libraries are shared.
+  Perhaps more importantly, it is possible to make dynamic plugins from
+  Haskell code that can be used from other applications.
+
+* The I/O libraries are now Unicode-aware, so your Haskell programs
+  should now handle text files containing non-ascii characters, without
+  special effort.
+
+* The package system has been made more robust, by associating each
+  installed package with a unique identifier based on its exposed ABI.
+  Now, cases where the user re-installs a package without recompiling
+  packages that depend on it will be detected, and the packages with
+  broken dependencies will be disabled. Previously, this would lead to
+  obscure compilation errors, or worse, segfaulting programs.
+
+  This change involved a lot of internal restructuring, but it paves the
+  way for future improvements to the way packages are handled. For
+  instance, in the future we expect to track profiled packages
+  independently of non-profiled ones, and we hope to make it possible to
+  upgrade a package in an ABI-compatible way, without recompiling the
+  packages that depend on it. This latter facility will be especially
+  important as we move towards using more shared libraries.
+
+* There are a variety of small language changes, including
+  * Some improvements to data types: record punning, declaring
+    constructors with class constraints, GADT syntax for type families
+    etc.
+  * You can omit the "$" in a top-level Template Haskell splice, which
+    makes the TH call look more like an ordinary top-level declaration
+    with a new keyword.
+  * We're are deprecating mdo for recursive do-notation, in favour of
+    the more expressive rec statement.
+  * We've concluded that the implementation of impredicative polymorphism
+    is unsustainably complicated, so we are re-trenching. It'll be
+    deprecated in 6.12 (but will still work), and will be either removed
+    or replaced with something simpler in 6.14.
+
+
+The full release notes are here:
+
+  http://haskell.org/ghc/docs/6.12.1/html/users_guide/release-6-12-1.html
 
 How to get it
 ~~~~~~~~~~~~~

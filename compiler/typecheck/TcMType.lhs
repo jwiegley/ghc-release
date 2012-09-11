@@ -35,16 +35,17 @@ module TcMType (
   tcInstTyVar, tcInstType, tcInstTyVars, tcInstBoxyTyVar,
   tcInstSigType,
   tcInstSkolTyVars, tcInstSkolType, 
-  tcSkolSigType, tcSkolSigTyVars, occurCheckErr,
+  tcSkolSigType, tcSkolSigTyVars, occurCheckErr, execTcTyVarBinds,
 
   --------------------------------
   -- Checking type validity
   Rank, UserTypeCtxt(..), checkValidType, checkValidMonoType,
   SourceTyCtxt(..), checkValidTheta, checkFreeness,
   checkValidInstHead, checkValidInstance, 
-  checkInstTermination, checkValidTypeInst, checkTyFamFreeness,
+  checkInstTermination, checkValidTypeInst, checkTyFamFreeness, checkKinds,
   checkUpdateMeta, updateMeta, checkTauTvUpdate, fillBoxWithTau, unifyKindCtxt,
   unifyKindMisMatch, validDerivPred, arityErr, notMonoType, notMonoArgs,
+  growPredTyVars, growTyVars, growThetaTyVars,
 
   --------------------------------
   -- Zonking
@@ -77,6 +78,7 @@ import VarSet
 import ErrUtils
 import DynFlags
 import Util
+import Bag
 import Maybes
 import ListSetOps
 import UniqSupply
@@ -336,6 +338,27 @@ Rather, we should bind t to () (= non_var_ty2).
 
 --------------
 
+Execute a bag of type variable bindings.
+
+\begin{code}
+execTcTyVarBinds :: TcTyVarBinds -> TcM ()
+execTcTyVarBinds = mapM_ execTcTyVarBind . bagToList
+  where
+    execTcTyVarBind (TcTyVarBind tv ty)
+      = do { ASSERTM2( do { details <- readMetaTyVar tv
+                          ; return (isFlexi details) }, ppr tv )
+           ; ty' <- if isCoVar tv 
+                    then return ty 
+                    else do { maybe_ty <- checkTauTvUpdate tv ty
+                            ; case maybe_ty of
+                                Nothing -> pprPanic "TcRnMonad.execTcTyBind"
+                                             (ppr tv <+> text ":=" <+> ppr ty)
+                                Just ty' -> return ty'
+                            }
+           ; writeMetaTyVar tv ty'
+           }
+\end{code}
+
 Error mesages in case of kind mismatch.
 
 \begin{code}
@@ -392,7 +415,7 @@ occurCheckErr ty containingTy
 newCoVars :: [(TcType,TcType)] -> TcM [CoVar]
 newCoVars spec
   = do	{ us <- newUniqueSupply 
-	; return [ mkCoVar (mkSysTvName uniq (fsLit "co"))
+	; return [ mkCoVar (mkSysTvName uniq (fsLit "co_kv"))
 			   (mkCoKind ty1 ty2)
 		 | ((ty1,ty2), uniq) <- spec `zip` uniqsFromSupply us] }
 
@@ -521,14 +544,17 @@ writeMetaTyVar tyvar ty
     return ()
   | otherwise
   = ASSERT( isMetaTyVar tyvar )
-    -- TOM: It should also work for coercions
-    -- ASSERT2( k2 `isSubKind` k1, (ppr tyvar <+> ppr k1) $$ (ppr ty <+> ppr k2) )
-    do	{ ASSERTM2( do { details <- readMetaTyVar tyvar; return (isFlexi details) }, ppr tyvar )
+    ASSERT2( isCoVar tyvar || typeKind ty `isSubKind` tyVarKind tyvar, 
+             (ppr tyvar <+> ppr (tyVarKind tyvar)) 
+             $$ (ppr ty <+> ppr (typeKind ty)) )
+    do	{ if debugIsOn then do { details <- readMetaTyVar tyvar; 
+-- FIXME   	     	       	       ; ASSERT2( not (isFlexi details), ppr tyvar )
+    	     	       	       ; WARN( not (isFlexi details), ppr tyvar )
+			       	 return () }
+			else return () 
+
 	; traceTc (text "writeMetaTyVar" <+> ppr tyvar <+> text ":=" <+> ppr ty)
 	; writeMutVar (metaTvRef tyvar) (Indirect ty) }
-  where
-    _k1 = tyVarKind tyvar
-    _k2 = typeKind ty
 \end{code}
 
 
@@ -1033,11 +1059,13 @@ checkValidType ctxt ty = do
 
 		 ForSigCtxt _	-> gen_rank 1
 		 SpecInstCtxt   -> gen_rank 1
+		 ThBrackCtxt    -> gen_rank 1
 
 	actual_kind = typeKind ty
 
 	kind_ok = case ctxt of
 			TySynCtxt _  -> True -- Any kind will do
+			ThBrackCtxt  -> True -- Any kind will do
 			ResSigCtxt   -> isSubOpenTypeKind actual_kind
 			ExprSigCtxt  -> isSubOpenTypeKind actual_kind
 			GenPatCtxt   -> isLiftedTypeKind actual_kind
@@ -1047,13 +1075,16 @@ checkValidType ctxt ty = do
 	ubx_tup = case ctxt of
 	              TySynCtxt _ | unboxed -> UT_Ok
 	              ExprSigCtxt | unboxed -> UT_Ok
+	              ThBrackCtxt | unboxed -> UT_Ok
 	              _                     -> UT_NotOk
-
-	-- Check that the thing has kind Type, and is lifted if necessary
-    checkTc kind_ok (kindErr actual_kind)
 
 	-- Check the internal validity of the type itself
     check_type rank ubx_tup ty
+
+	-- Check that the thing has kind Type, and is lifted if necessary
+	-- Do this second, becuase we can't usefully take the kind of an 
+	-- ill-formed type such as (a~Int)
+    checkTc kind_ok (kindErr actual_kind)
 
     traceTc (text "checkValidType done" <+> ppr ty)
 
@@ -1066,6 +1097,7 @@ checkValidMonoType ty = check_mono_type MustBeMonoType ty
 data Rank = ArbitraryRank	  -- Any rank ok
           | MustBeMonoType  	  -- Monotype regardless of flags
 	  | TyConArgMonoType	  -- Monotype but could be poly if -XImpredicativeTypes
+	  | SynArgMonoType	  -- Monotype but could be poly if -XLiberalTypeSynonyms
           | Rank Int		  -- Rank n, but could be more with -XRankNTypes
 
 decRank :: Rank -> Rank		  -- Function arguments
@@ -1108,15 +1140,12 @@ check_type rank ubx_tup ty
   where
     (tvs, theta, tau) = tcSplitSigmaTy ty
    
--- Naked PredTys don't usually show up, but they can as a result of
---	{-# SPECIALISE instance Ord Char #-}
--- The Right Thing would be to fix the way that SPECIALISE instance pragmas
--- are handled, but the quick thing is just to permit PredTys here.
-check_type _ _ (PredTy sty)
-  = do	{ dflags <- getDOpts
-	; check_pred_ty dflags TypeCtxt sty }
+-- Naked PredTys should, I think, have been rejected before now
+check_type _ _ ty@(PredTy {})
+  = failWithTc (text "Predicate used as a type:" <+> ppr ty)
 
 check_type _ _ (TyVarTy _) = return ()
+
 check_type rank _ (FunTy arg_ty res_ty)
   = do	{ check_type (decRank rank) UT_NotOk arg_ty
 	; check_type rank 	    UT_Ok    res_ty }
@@ -1139,7 +1168,7 @@ check_type rank ubx_tup ty@(TyConApp tc tys)
 	; liberal <- doptM Opt_LiberalTypeSynonyms
 	; if not liberal || isOpenSynTyCon tc then
 		-- For H98 and synonym families, do check the type args
-		mapM_ (check_mono_type TyConArgMonoType) tys
+		mapM_ (check_mono_type SynArgMonoType) tys
 
 	  else	-- In the liberal case (only for closed syns), expand then check
 	  case tcView ty of   
@@ -1196,13 +1225,14 @@ check_arg_type :: Rank -> Type -> TcM ()
 
 check_arg_type rank ty 
   = do	{ impred <- doptM Opt_ImpredicativeTypes
-	; let rank' = if impred then ArbitraryRank  -- Arg of tycon can have arby rank, regardless
-	              else case rank of 	    -- Predictive => must be monotype
-	      	        MustBeMonoType -> MustBeMonoType 
-			_	       -> TyConArgMonoType
+	; let rank' = case rank of 	    -- Predictive => must be monotype
+	      	        MustBeMonoType     -> MustBeMonoType  -- Monotype, regardless
+			_other | impred    -> ArbitraryRank
+			       | otherwise -> TyConArgMonoType
 			-- Make sure that MustBeMonoType is propagated, 
 			-- so that we don't suggest -XImpredicativeTypes in
 			--    (Ord (forall a.a)) => a -> a
+			-- and so that if it Must be a monotype, we check that it is!
 
 	; check_type rank' UT_NotOk ty
 	; checkTc (not (isUnLiftedType ty)) (unliftedArgErr ty) }
@@ -1216,6 +1246,7 @@ forAllTyErr rank ty
     suggestion = case rank of
     	       	   Rank _ -> ptext (sLit "Perhaps you intended to use -XRankNTypes or -XRank2Types")
     	       	   TyConArgMonoType -> ptext (sLit "Perhaps you intended to use -XImpredicativeTypes")
+    	       	   SynArgMonoType -> ptext (sLit "Perhaps you intended to use -XLiberalTypeSynonyms")
 		   _ -> empty      -- Polytype is always illegal
 
 unliftedArgErr, ubxArgTyErr :: Type -> SDoc
@@ -1414,7 +1445,7 @@ checkAmbiguity forall_tyvars theta tau_tyvars
   = mapM_ complain (filter is_ambig theta)
   where
     complain pred     = addErrTc (ambigErr pred)
-    extended_tau_vars = grow theta tau_tyvars
+    extended_tau_vars = growThetaTyVars theta tau_tyvars
 
 	-- See Note [Implicit parameters and ambiguity] in TcSimplify
     is_ambig pred     = isClassPred  pred &&
@@ -1428,6 +1459,28 @@ ambigErr pred
   = sep [ptext (sLit "Ambiguous constraint") <+> quotes (pprPred pred),
 	 nest 4 (ptext (sLit "At least one of the forall'd type variables mentioned by the constraint") $$
 		 ptext (sLit "must be reachable from the type after the '=>'"))]
+
+--------------------------
+-- For this 'grow' stuff see Note [Growing the tau-tvs using constraints] in Inst
+
+growThetaTyVars :: TcThetaType -> TyVarSet -> TyVarSet
+-- Finds a fixpoint
+growThetaTyVars theta tvs
+  | null theta = tvs
+  | otherwise  = fixVarSet mk_next tvs
+  where
+    mk_next tvs = foldr growPredTyVars tvs theta
+
+
+growPredTyVars :: TcPredType -> TyVarSet -> TyVarSet
+-- Here is where the special case for inplicit parameters happens
+growPredTyVars (IParam _ ty) tvs = tvs `unionVarSet` tyVarsOfType ty
+growPredTyVars pred          tvs = growTyVars (tyVarsOfPred pred) tvs
+
+growTyVars :: TyVarSet -> TyVarSet -> TyVarSet
+growTyVars new_tvs tvs 
+  | new_tvs `intersectsVarSet` tvs = tvs `unionVarSet` new_tvs
+  | otherwise			   = tvs
 \end{code}
     
 In addition, GHC insists that at least one type variable
@@ -1838,8 +1891,16 @@ sizeType (ForAllTy _ ty)   = sizeType ty
 sizeTypes :: [Type] -> Int
 sizeTypes xs               = sum (map sizeType xs)
 
+-- Size of a predicate
+--
+-- Equalities are a special case.  The equality itself doesn't contribute to the
+-- size and as we do not count class predicates, we have to start with one less.
+-- This is easy to see considering that, given
+--   class C a b | a -> b
+--   type family F a
+-- constraints (C a b) and (F a ~ b) are equivalent in size.
 sizePred :: PredType -> Int
 sizePred (ClassP _ tys')   = sizeTypes tys'
 sizePred (IParam _ ty)     = sizeType ty
-sizePred (EqPred ty1 ty2)  = sizeType ty1 + sizeType ty2
+sizePred (EqPred ty1 ty2)  = sizeType ty1 + sizeType ty2 - 1
 \end{code}

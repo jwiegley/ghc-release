@@ -10,6 +10,7 @@ module Finder (
     findImportedModule,
     findExactModule,
     findHomeModule,
+    findExposedPackageModule,
     mkHomeModLocation,
     mkHomeModLocation2,
     mkHiOnlyModLocation,
@@ -31,18 +32,17 @@ import Packages
 import FastString
 import Util
 import PrelNames        ( gHC_PRIM )
-import DynFlags		( DynFlags(..), isOneShot, GhcMode(..) )
+import DynFlags
 import Outputable
-import FiniteMap
 import LazyUniqFM
 import Maybes		( expectJust )
+import Exception        ( evaluate )
 
+import Distribution.Text
 import Distribution.Package hiding (PackageId)
-import Data.IORef	( IORef, writeIORef, readIORef, modifyIORef )
-import Data.List
+import Data.IORef	( IORef, writeIORef, readIORef, atomicModifyIORef )
 import System.Directory
 import System.FilePath
-import System.IO
 import Control.Monad
 import System.Time	( ClockTime )
 
@@ -67,6 +67,7 @@ type BaseName = String	-- Basename of file
 -- assumed to not move around during a session.
 flushFinderCaches :: HscEnv -> IO ()
 flushFinderCaches hsc_env = do
+  -- Ideally the update to both caches be a single atomic operation.
   writeIORef fc_ref emptyUFM
   flushModLocationCache this_pkg mlc_ref
  where
@@ -76,23 +77,27 @@ flushFinderCaches hsc_env = do
 
 flushModLocationCache :: PackageId -> IORef ModLocationCache -> IO ()
 flushModLocationCache this_pkg ref = do
-  fm <- readIORef ref
-  writeIORef ref $! filterFM is_ext fm
+  atomicModifyIORef ref $ \fm -> (filterModuleEnv is_ext fm, ())
+  _ <- evaluate =<< readIORef ref
   return ()
   where is_ext mod _ | modulePackageId mod /= this_pkg = True
 		     | otherwise = False
 
 addToFinderCache :: IORef FinderCache -> ModuleName -> FindResult -> IO ()
-addToFinderCache       ref key val = modifyIORef ref $ \c -> addToUFM c key val
+addToFinderCache ref key val =
+  atomicModifyIORef ref $ \c -> (addToUFM c key val, ())
 
 addToModLocationCache :: IORef ModLocationCache -> Module -> ModLocation -> IO ()
-addToModLocationCache  ref key val = modifyIORef ref $ \c -> addToFM c key val
+addToModLocationCache ref key val =
+  atomicModifyIORef ref $ \c -> (extendModuleEnv c key val, ())
 
 removeFromFinderCache :: IORef FinderCache -> ModuleName -> IO ()
-removeFromFinderCache      ref key = modifyIORef ref $ \c -> delFromUFM c key
+removeFromFinderCache ref key =
+  atomicModifyIORef ref $ \c -> (delFromUFM c key, ())
 
 removeFromModLocationCache :: IORef ModLocationCache -> Module -> IO ()
-removeFromModLocationCache ref key = modifyIORef ref $ \c -> delFromFM c key
+removeFromModLocationCache ref key =
+  atomicModifyIORef ref $ \c -> (delModuleEnv c key, ())
 
 lookupFinderCache :: IORef FinderCache -> ModuleName -> IO (Maybe FindResult)
 lookupFinderCache ref key = do 
@@ -103,7 +108,7 @@ lookupModLocationCache :: IORef ModLocationCache -> Module
                        -> IO (Maybe ModLocation)
 lookupModLocationCache ref key = do
    c <- readIORef ref
-   return $! lookupFM c key
+   return $! lookupModuleEnv c key
 
 -- -----------------------------------------------------------------------------
 -- The two external entry points
@@ -181,10 +186,10 @@ findExposedPackageModule hsc_env mod_name mb_pkg
   | null found_exposed = return (NotFound [] Nothing mod_hiddens pkg_hiddens)
         -- found in just one exposed package:
   | [(pkg_conf, _)] <- found_exposed
-        = let pkgid = mkPackageId (package pkg_conf) in      
+        = let pkgid = packageConfigId pkg_conf in
           findPackageModule_ hsc_env (mkModule pkgid mod_name) pkg_conf
   | otherwise
-        = return (FoundMultiple (map (mkPackageId.package.fst) found_exposed))
+        = return (FoundMultiple (map (packageConfigId.fst) found_exposed))
   where
 	dflags = hsc_dflags hsc_env
         found = lookupModuleInAllPackages dflags mod_name
@@ -197,10 +202,10 @@ findExposedPackageModule hsc_env mod_name mb_pkg
 
         is_exposed (pkg_conf,exposed_mod) = exposed pkg_conf && exposed_mod
 
-        mod_hiddens = [ mkPackageId (package pkg_conf)
+        mod_hiddens = [ packageConfigId pkg_conf
                       | (pkg_conf,False) <- found ]
 
-        pkg_hiddens = [ mkPackageId (package pkg_conf)
+        pkg_hiddens = [ packageConfigId pkg_conf
                       | (pkg_conf,_) <- found, not (exposed pkg_conf) ]
 
         _pkg_conf `matches` Nothing  = True
@@ -534,17 +539,20 @@ findObjectLinkable mod obj_fn obj_time = do
 
 cannotFindModule :: DynFlags -> ModuleName -> FindResult -> SDoc
 cannotFindModule = cantFindErr (sLit "Could not find module")
+                               (sLit "Ambiguous module name")
 
 cannotFindInterface  :: DynFlags -> ModuleName -> FindResult -> SDoc
 cannotFindInterface = cantFindErr (sLit "Failed to load interface for")
+                                  (sLit "Ambiguous interface for")
 
-cantFindErr :: LitString -> DynFlags -> ModuleName -> FindResult -> SDoc
-cantFindErr cannot_find _dflags mod_name (FoundMultiple pkgs)
-  = hang (ptext cannot_find <+> quotes (ppr mod_name) <> colon) 2 (
+cantFindErr :: LitString -> LitString -> DynFlags -> ModuleName -> FindResult
+            -> SDoc
+cantFindErr _ multiple_found _ mod_name (FoundMultiple pkgs)
+  = hang (ptext multiple_found <+> quotes (ppr mod_name) <> colon) 2 (
        sep [ptext (sLit "it was found in multiple packages:"),
 		hsep (map (text.packageIdString) pkgs)]
     )
-cantFindErr cannot_find dflags mod_name find_result
+cantFindErr cannot_find _ dflags mod_name find_result
   = hang (ptext cannot_find <+> quotes (ppr mod_name) <> colon)
        2 more_info
   where
@@ -597,7 +605,17 @@ cantFindErr cannot_find dflags mod_name find_result
                hang (ptext (sLit "locations searched:")) 2 $ vcat (map text files)
         
     pkg_hidden pkg =
-        ptext (sLit "it is a member of the hidden package") <+> quotes (ppr pkg)
+        ptext (sLit "It is a member of the hidden package") <+> quotes (ppr pkg)
+        <> dot $$ cabal_pkg_hidden_hint pkg
+    cabal_pkg_hidden_hint pkg
+     | dopt Opt_BuildingCabalPackage dflags
+        = case simpleParse (packageIdString pkg) of
+          Just pid ->
+              ptext (sLit "Perhaps you need to add") <+>
+              quotes (text (display (pkgName pid))) <+>
+              ptext (sLit "to the build-depends in your .cabal file.")
+          Nothing -> empty
+     | otherwise = empty
 
     mod_hidden pkg =
         ptext (sLit "it is a hidden module in the package") <+> quotes (ppr pkg)

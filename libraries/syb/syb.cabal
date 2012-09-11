@@ -1,5 +1,5 @@
 name:           syb
-version:        0.1.0.1
+version:        0.1.0.2
 license:        BSD3
 license-file:   LICENSE
 maintainer:     libraries@haskell.org
@@ -10,11 +10,11 @@ description:
     It defines the @Data@ class of types permitting folding and unfolding
     of constructor applications, instances of this class for primitive
     types, and a variety of traversals.
-cabal-version:  >=1.2
+cabal-version:  >=1.2.3
 build-type: Simple
 
 Library {
-    build-depends: base
+    build-depends: base >= 4.1 && < 4.3
     Extensions: CPP, Rank2Types, ScopedTypeVariables
     exposed-modules:
             Data.Generics
@@ -24,9 +24,6 @@ Library {
             Data.Generics.Schemes
             Data.Generics.Text
             Data.Generics.Twins
-    -- We need to set the package name to syb (without a version number)
-    -- as it's magic.
-    ghc-options: -package-name syb
 
     if impl(ghc < 6.10) 
        -- PatternSignatures was deprecated in 6.10

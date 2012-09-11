@@ -27,6 +27,11 @@ test('TH_spliceE5',
 
 test('TH_spliceE6', normal, compile, ['-v0'])
 
+test('TH_NestedSplices',
+     extra_clean(['TH_NestedSplices_Lib.hi', 'TH_NestedSplices_Lib.o']),
+     multimod_compile,
+     ['TH_NestedSplices.hs', '-v0'])
+
 # Testing profiling with TH is a bit tricky; we've already disabled
 # the prof way above, and also we want to add options specifically for
 # profiling (-osuf p_o) because this is necessary when mixing
@@ -142,4 +147,14 @@ test('TH_pragma',
      if_compiler_lt('ghc', '6.11', expect_fail),
      compile,
      ['-v0 -ddump-splices -dsuppress-uniques -S'])
+test('T3177', normal, compile, ['-v0'])
+test('T3177a', normal, compile_fail, ['-v0'])
 
+test('T3319', normal, compile, ['-ddump-splices -v0'])
+test('T3395', normal, compile_fail, ['-v0'])
+test('T3467', normal, compile, [''])
+test('T3572', normal, compile_and_run, [''])
+test('T3100', normal, compile, ['-v0'])
+
+test('T3600', extra_clean(['T3600a.hi','T3600a.o']), 
+              multimod_compile, ['T3600','-v0'])

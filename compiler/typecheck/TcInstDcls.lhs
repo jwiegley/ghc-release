@@ -22,13 +22,13 @@ import FamInstEnv
 import TcDeriv
 import TcEnv
 import RnEnv	( lookupGlobalOccRn )
+import RnSource ( addTcgDUs )
 import TcHsType
 import TcUnify
 import TcSimplify
 import Type
 import Coercion
 import TyCon
-import TypeRep
 import DataCon
 import Class
 import Var
@@ -138,7 +138,7 @@ Running example:
   inline df_i in it, and that in turn means that (since it'll be a
   loop-breaker because df_i isn't), op1_i will ironically never be 
   inlined.  We need to fix this somehow -- perhaps allowing inlining
-  of INLINE funcitons inside other INLINE functions.
+  of INLINE functions inside other INLINE functions.
 
 Note [Subtle interaction of recursion and overlap]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -321,14 +321,15 @@ tcInstDecls1 tycl_decls inst_decls deriv_decls
 
        ; let { (local_info,
                 at_tycons_s)   = unzip local_info_tycons
-             ; at_idx_tycon    = concat at_tycons_s ++ idx_tycons
+             ; at_idx_tycons   = concat at_tycons_s ++ idx_tycons
              ; clas_decls      = filter (isClassDecl.unLoc) tycl_decls
-             ; implicit_things = concatMap implicitTyThings at_idx_tycon
+             ; implicit_things = concatMap implicitTyThings at_idx_tycons
+	     ; aux_binds       = mkAuxBinds at_idx_tycons
              }
 
                 -- (2) Add the tycons of indexed types and their implicit
                 --     tythings to the global environment
-       ; tcExtendGlobalEnv (at_idx_tycon ++ implicit_things) $ do {
+       ; tcExtendGlobalEnv (at_idx_tycons ++ implicit_things) $ do {
 
                 -- (3) Instances from generic class declarations
        ; generic_inst_info <- getGenericInstances clas_decls
@@ -338,9 +339,9 @@ tcInstDecls1 tycl_decls inst_decls deriv_decls
                 --   a) local instance decls
                 --   b) generic instances
                 --   c) local family instance decls
-       ; addInsts local_info         $ do {
-       ; addInsts generic_inst_info  $ do {
-       ; addFamInsts at_idx_tycon    $ do {
+       ; addInsts local_info         $
+         addInsts generic_inst_info  $
+         addFamInsts at_idx_tycons   $ do {
 
                 -- (4) Compute instances from "deriving" clauses;
                 -- This stuff computes a context for the derived instance
@@ -350,15 +351,13 @@ tcInstDecls1 tycl_decls inst_decls deriv_decls
 	 failIfErrsM		-- If the addInsts stuff gave any errors, don't
 				-- try the deriving stuff, becuase that may give
 				-- more errors still
-       ; (deriv_inst_info, deriv_binds) <- tcDeriving tycl_decls inst_decls
-                                                      deriv_decls
-       ; addInsts deriv_inst_info   $ do {
-
-       ; gbl_env <- getGblEnv
-       ; return (gbl_env,
+       ; (deriv_inst_info, deriv_binds, deriv_dus) 
+              <- tcDeriving tycl_decls inst_decls deriv_decls
+       ; gbl_env <- addInsts deriv_inst_info getGblEnv
+       ; return ( addTcgDUs gbl_env deriv_dus,
                   generic_inst_info ++ deriv_inst_info ++ local_info,
-                  deriv_binds)
-    }}}}}}
+                  aux_binds `plusHsValBinds` deriv_binds)
+    }}}
   where
     -- Make sure that toplevel type instance are not for associated types.
     -- !!!TODO: Need to perform this check for the TyThing of type functions,
@@ -433,7 +432,7 @@ tcLocalInstDecl1 (L loc (InstDecl poly_ty binds uprags ats))
               ispec          = mkLocalInstance dfun overlap_flag
 
         ; return (InstInfo { iSpec  = ispec,
-                              iBinds = VanillaInst binds uprags },
+                             iBinds = VanillaInst binds uprags False },
                   idx_tycons)
         }
   where
@@ -569,7 +568,7 @@ tcInstDecl2 :: InstInfo Name -> TcM (LHsBinds Id)
 tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = ibinds })
   = recoverM (return emptyLHsBinds)             $
     setSrcSpan loc                              $
-    addErrCtxt (instDeclCtxt2 (idType dfun_id)) $
+    addErrCtxt (instDeclCtxt2 (idType dfun_id)) $ 
     tc_inst_decl2 dfun_id ibinds
  where
         dfun_id    = instanceDFunId ispec
@@ -601,9 +600,10 @@ tc_inst_decl2 :: Id -> InstBindings Name -> TcM (LHsBinds Id)
 -- see Note [Newtype deriving superclasses] in TcDeriv.lhs
 
 tc_inst_decl2 dfun_id (NewTypeDerived coi)
-  = do  { let rigid_info   = InstSkol
-              origin       = SigOrigin rigid_info
-              inst_ty      = idType dfun_id
+  = do  { let rigid_info = InstSkol
+              origin     = SigOrigin rigid_info
+              inst_ty    = idType dfun_id
+	      inst_tvs   = fst (tcSplitForAllTys inst_ty)
         ; (inst_tvs', theta, inst_head_ty) <- tcSkolSigType rigid_info inst_ty
                 -- inst_head_ty is a PredType
 
@@ -616,7 +616,13 @@ tc_inst_decl2 dfun_id (NewTypeDerived coi)
               (rep_ty, wrapper) 
 	         = case coi of
 	      	     IdCo   -> (last_ty, idHsWrapper)
-		     ACo co -> (snd (coercionKind co), WpCast (mk_full_coercion co))
+		     ACo co -> (snd (coercionKind co'), WpCast (mk_full_coercion co'))
+			    where
+			       co' = substTyWith inst_tvs (mkTyVarTys inst_tvs') co
+				-- NB: the free variable of coi are bound by the
+				-- universally quantified variables of the dfun_id
+				-- This is weird, and maybe we should make NewTypeDerived
+				-- carry a type-variable list too; but it works fine
 
 		 -----------------------
 		 --        mk_full_coercion
@@ -638,8 +644,8 @@ tc_inst_decl2 dfun_id (NewTypeDerived coi)
         ; sc_dicts   <- newDictBndrs sc_loc sc_theta'
         ; inst_loc   <- getInstLoc origin
         ; dfun_dicts <- newDictBndrs inst_loc theta
-        ; this_dict  <- newDictBndr inst_loc (mkClassPred cls cls_inst_tys)
         ; rep_dict   <- newDictBndr inst_loc rep_pred
+        ; this_dict  <- newDictBndr inst_loc (mkClassPred cls cls_inst_tys)
 
         -- Figure out bindings for the superclass context from dfun_dicts
         -- Don't include this_dict in the 'givens', else
@@ -699,97 +705,96 @@ tc_inst_decl2 dfun_id (NewTypeDerived coi)
 ------------------------
 -- Ordinary instances
 
-tc_inst_decl2 dfun_id (VanillaInst monobinds uprags)
+tc_inst_decl2 dfun_id (VanillaInst monobinds uprags standalone_deriv)
   = do { let rigid_info = InstSkol
              inst_ty    = idType dfun_id
 
         -- Instantiate the instance decl with skolem constants
-    ; (inst_tyvars', dfun_theta', inst_head') <- tcSkolSigType rigid_info inst_ty
+       ; (inst_tyvars', dfun_theta', inst_head') <- tcSkolSigType rigid_info inst_ty
                 -- These inst_tyvars' scope over the 'where' part
                 -- Those tyvars are inside the dfun_id's type, which is a bit
                 -- bizarre, but OK so long as you realise it!
-    ; let
-        (clas, inst_tys') = tcSplitDFunHead inst_head'
-        (class_tyvars, sc_theta, _, op_items) = classBigSig clas
+       ; let
+            (clas, inst_tys') = tcSplitDFunHead inst_head'
+            (class_tyvars, sc_theta, _, op_items) = classBigSig clas
 
-        -- Instantiate the super-class context with inst_tys
-        sc_theta' = substTheta (zipOpenTvSubst class_tyvars inst_tys') sc_theta
-        origin    = SigOrigin rigid_info
+             -- Instantiate the super-class context with inst_tys
+            sc_theta' = substTheta (zipOpenTvSubst class_tyvars inst_tys') sc_theta
+            origin    = SigOrigin rigid_info
 
          -- Create dictionary Ids from the specified instance contexts.
-  ; sc_loc      <- getInstLoc InstScOrigin
-  ; sc_dicts    <- newDictOccs sc_loc sc_theta'		-- These are wanted
-  ; inst_loc    <- getInstLoc origin
-  ; dfun_dicts  <- newDictBndrs inst_loc dfun_theta'	-- Includes equalities
-  ; this_dict   <- newDictBndr inst_loc (mkClassPred clas inst_tys')
+       ; sc_loc     <- getInstLoc InstScOrigin
+       ; sc_dicts   <- newDictOccs sc_loc sc_theta'		-- These are wanted
+       ; inst_loc   <- getInstLoc origin
+       ; dfun_dicts <- newDictBndrs inst_loc dfun_theta'	-- Includes equalities
+       ; this_dict  <- newDictBndr inst_loc (mkClassPred clas inst_tys')
+
                 -- Default-method Ids may be mentioned in synthesised RHSs,
                 -- but they'll already be in the environment.
 
         -- Typecheck the methods
-  ; let this_dict_id  	= instToId this_dict
-	dfun_lam_vars   = map instToVar dfun_dicts	-- Includes equalities
-	prag_fn	= mkPragFun uprags 
-	loc        = getSrcSpan dfun_id
-	tc_meth = tcInstanceMethod loc clas inst_tyvars'
-			  	   dfun_dicts
-                   	  	   dfun_theta' inst_tys'
-				   this_dict dfun_id
-                        	   prag_fn monobinds
-  ; (meth_exprs, meth_binds) <- tcExtendTyVarEnv inst_tyvars'  $
-				mapAndUnzipM tc_meth op_items 
+       ; let this_dict_id  = instToId this_dict
+	     dfun_lam_vars = map instToVar dfun_dicts	-- Includes equalities
+	     prag_fn	= mkPragFun uprags 
+             loc        = getSrcSpan dfun_id
+	     tc_meth    = tcInstanceMethod loc standalone_deriv 
+                                 clas inst_tyvars' dfun_dicts
+                        	 dfun_theta' inst_tys'
+	     			 this_dict dfun_id
+                             	 prag_fn monobinds
+       ; (meth_exprs, meth_binds) <- tcExtendTyVarEnv inst_tyvars'  $
+				     mapAndUnzipM tc_meth op_items 
 
-    -- Figure out bindings for the superclass context
-    -- Don't include this_dict in the 'givens', else
-    -- sc_dicts get bound by just selecting  from this_dict!!
-  ; sc_binds <- addErrCtxt superClassCtxt $
-                tcSimplifySuperClasses inst_loc this_dict dfun_dicts sc_dicts
+         -- Figure out bindings for the superclass context
+         -- Don't include this_dict in the 'givens', else
+         -- sc_dicts get bound by just selecting  from this_dict!!
+       ; sc_binds <- addErrCtxt superClassCtxt $
+                     tcSimplifySuperClasses inst_loc this_dict dfun_dicts sc_dicts
 		-- Note [Recursive superclasses]
 
 	-- It's possible that the superclass stuff might unified something
 	-- in the envt with one of the inst_tyvars'
-  ; checkSigTyVars inst_tyvars'
+       ; checkSigTyVars inst_tyvars'
 
-    -- Deal with 'SPECIALISE instance' pragmas
-  ; prags <- tcPrags dfun_id (filter isSpecInstLSig uprags)
+       -- Deal with 'SPECIALISE instance' pragmas
+       ;  prags <- tcPrags dfun_id (filter isSpecInstLSig uprags)
 
-    -- Create the result bindings
-  ; let
-        dict_constr   = classDataCon clas
-        inline_prag | null dfun_dicts  = []
-                    | otherwise        = [L loc (InlinePrag (Inline AlwaysActive True))]
-                -- Always inline the dfun; this is an experimental decision
-                -- because it makes a big performance difference sometimes.
-                -- Often it means we can do the method selection, and then
-                -- inline the method as well.  Marcin's idea; see comments below.
-                --
-                -- BUT: don't inline it if it's a constant dictionary;
-                -- we'll get all the benefit without inlining, and we get
-                -- a **lot** of code duplication if we inline it
-                --
-                --      See Note [Inline dfuns] below
+       -- Create the result bindings
+       ; let dict_constr   = classDataCon clas
+             inline_prag | null dfun_dicts  = []
+                         | otherwise        = [L loc (InlinePrag (alwaysInlineSpec FunLike))]
+                     -- Always inline the dfun; this is an experimental decision
+                     -- because it makes a big performance difference sometimes.
+                     -- Often it means we can do the method selection, and then
+                     -- inline the method as well.  Marcin's idea; see comments below.
+                     --
+                     -- BUT: don't inline it if it's a constant dictionary;
+                     -- we'll get all the benefit without inlining, and we get
+                     -- a **lot** of code duplication if we inline it
+                     --
+                     --      See Note [Inline dfuns] below
 
-        sc_dict_vars  = map instToVar sc_dicts
-        dict_bind     = L loc (VarBind this_dict_id dict_rhs)
-        dict_rhs      = foldl (\ f a -> L loc (HsApp f (L loc a))) inst_constr meth_exprs
- 	inst_constr   = L loc $ wrapId (mkWpApps sc_dict_vars <.> mkWpTyApps inst_tys')
-				       (dataConWrapId dict_constr)
-                -- We don't produce a binding for the dict_constr; instead we
-                -- rely on the simplifier to unfold this saturated application
-                -- We do this rather than generate an HsCon directly, because
-                -- it means that the special cases (e.g. dictionary with only one
-                -- member) are dealt with by the common MkId.mkDataConWrapId code rather
-                -- than needing to be repeated here.
+             sc_dict_vars  = map instToVar sc_dicts
+             dict_bind     = L loc (VarBind this_dict_id dict_rhs)
+             dict_rhs      = foldl (\ f a -> L loc (HsApp f (L loc a))) inst_constr meth_exprs
+ 	     inst_constr   = L loc $ wrapId (mkWpApps sc_dict_vars <.> mkWpTyApps inst_tys')
+	     			       (dataConWrapId dict_constr)
+                     -- We don't produce a binding for the dict_constr; instead we
+                     -- rely on the simplifier to unfold this saturated application
+                     -- We do this rather than generate an HsCon directly, because
+                     -- it means that the special cases (e.g. dictionary with only one
+                     -- member) are dealt with by the common MkId.mkDataConWrapId code rather
+                     -- than needing to be repeated here.
 
 
-        main_bind = noLoc $ AbsBinds
-                            inst_tyvars'
-                            dfun_lam_vars
-                            [(inst_tyvars', dfun_id, this_dict_id, inline_prag ++ prags)]
-                            (dict_bind `consBag` sc_binds)
+             main_bind = noLoc $ AbsBinds
+                                 inst_tyvars'
+                                 dfun_lam_vars
+                                 [(inst_tyvars', dfun_id, this_dict_id, inline_prag ++ prags)]
+                                 (dict_bind `consBag` sc_binds)
 
-  ; showLIE (text "instance")
-  ; return (main_bind `consBag` unionManyBags meth_binds)
-  }
+       ; showLIE (text "instance")
+       ; return (main_bind `consBag` unionManyBags meth_binds) }
 \end{code}
 
 Note [Recursive superclasses]
@@ -816,7 +821,7 @@ tcInstanceMethod
 - Use tcValBinds to do the checking
 
 \begin{code}
-tcInstanceMethod :: SrcSpan -> Class -> [TcTyVar] -> [Inst]
+tcInstanceMethod :: SrcSpan -> Bool -> Class -> [TcTyVar] -> [Inst]
 	 	 -> TcThetaType -> [TcType]
 		 -> Inst -> Id
           	 -> TcPragFun -> LHsBinds Name 
@@ -825,7 +830,7 @@ tcInstanceMethod :: SrcSpan -> Class -> [TcTyVar] -> [Inst]
 	-- The returned inst_meth_ids all have types starting
 	--	forall tvs. theta => ...
 
-tcInstanceMethod loc clas tyvars dfun_dicts theta inst_tys 
+tcInstanceMethod loc standalone_deriv clas tyvars dfun_dicts theta inst_tys 
 		 this_dict dfun_id prag_fn binds_in (sel_id, dm_info)
   = do	{ cloned_this <- cloneDict this_dict
 		-- Need to clone the dict in case it is floated out, and
@@ -840,12 +845,14 @@ tcInstanceMethod loc clas tyvars dfun_dicts theta inst_tys
 		-- involved; otherwise overlap is not possible
 		-- See Note [Subtle interaction of recursion and overlap]	
 
-	      tc_body rn_bind = do { (meth_id, tc_binds) <- tcInstanceMethodBody 
+	      tc_body rn_bind 
+                = add_meth_ctxt rn_bind $
+                  do { (meth_id, tc_binds) <- tcInstanceMethodBody 
 						InstSkol clas tyvars dfun_dicts theta inst_tys
 						mb_this_bind sel_id 
 						local_meth_name
 						meth_sig_fn meth_prag_fn rn_bind
-				   ; return (wrapId meth_wrapper meth_id, tc_binds) }
+		     ; return (wrapId meth_wrapper meth_id, tc_binds) }
 
 	; case (findMethodBind sel_name local_meth_name binds_in, dm_info) of
 		-- There is a user-supplied method binding, so use it
@@ -861,7 +868,7 @@ tcInstanceMethod loc clas tyvars dfun_dicts theta inst_tys
 	    (Nothing, NoDefMeth) -> do		-- No default method in the class
 			{ warn <- doptM Opt_WarnMissingMethods		
                         ; warnTc (warn  -- Warn only if -fwarn-missing-methods
-				  && reportIfUnused (getOccName sel_id))
+				  && not (startsWithUnderscore (getOccName sel_id)))
 					-- Don't warn about _foo methods
 			         omitted_meth_warn
 			; return (error_rhs, emptyBag) }
@@ -903,9 +910,21 @@ tcInstanceMethod loc clas tyvars dfun_dicts theta inst_tys
     dfun_lam_vars = map instToVar dfun_dicts
     meth_wrapper = mkWpApps dfun_lam_vars <.> mkWpTyApps (mkTyVarTys tyvars)
 
+	-- For instance decls that come from standalone deriving clauses
+	-- we want to print out the full source code if there's an error
+	-- because otherwise the user won't see the code at all
+    add_meth_ctxt rn_bind thing 
+      | standalone_deriv = addLandmarkErrCtxt (derivBindCtxt clas inst_tys rn_bind) thing
+      | otherwise        = thing
 
 wrapId :: HsWrapper -> id -> HsExpr id
 wrapId wrapper id = mkHsWrap wrapper (HsVar id)
+
+derivBindCtxt :: Class -> [Type ] -> LHsBind Name -> SDoc
+derivBindCtxt clas tys bind
+   = vcat [ ptext (sLit "When typechecking a standalone-derived method for")
+	    <+> quotes (pprClassPred clas tys) <> colon
+	  , nest 2 $ pprSetDepth AllTheWay $ ppr bind ]
 \end{code}
 
 Note [Default methods in instances]

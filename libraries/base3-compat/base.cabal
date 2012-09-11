@@ -1,21 +1,27 @@
 name:           base
-version:        3.0.3.1
+version:        3.0.3.2
 license:        BSD3
 license-file:   LICENSE
 maintainer:     libraries@haskell.org
+bug-reports: http://hackage.haskell.org/trac/ghc/newticket?component=libraries/base
 synopsis:       Basic libraries (backwards-compatibility version)
 description:
     This is a backwards-compatible version of the base package.
     It depends on a later version of base, and was probably supplied
     with your compiler when it was installed.
     
-cabal-version:  >=1.2
+cabal-version:  >=1.6
 build-type: Simple
 
+source-repository head
+    type:     darcs
+    location: http://darcs.haskell.org/packages/base3-compat
+
 Library {
-    build-depends: base       >= 4.0 && < 4.2,
+    build-depends: base       >= 4.0 && < 4.3,
                    syb        >= 0.1 && < 0.2
-    extensions: PackageImports
+    extensions: PackageImports,CPP
+    ghc-options: -fno-warn-deprecations
 
     if impl(ghc < 6.9) {
         buildable: False

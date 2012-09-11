@@ -3,10 +3,7 @@
 % (c) The GRASP/AQUA Project, Glasgow University, 1992-1998
 %
 
-HsDecls: Abstract syntax: global declarations
 
-Definitions for: @TyDecl@ and @oCnDecl@, @ClassDecl@,
-@InstDecl@, @DefaultDecl@ and @ForeignDecl@.
 
 \begin{code}
 {-# OPTIONS -fno-warn-incomplete-patterns #-}
@@ -16,25 +13,46 @@ Definitions for: @TyDecl@ and @oCnDecl@, @ClassDecl@,
 --     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
 -- for details
 
+-- | Abstract syntax of global declarations.
+--
+-- Definitions for: @TyDecl@ and @ConDecl@, @ClassDecl@,
+-- @InstDecl@, @DefaultDecl@ and @ForeignDecl@.
 module HsDecls (
-	HsDecl(..), LHsDecl, TyClDecl(..), LTyClDecl, 
-	InstDecl(..), LInstDecl, DerivDecl(..), LDerivDecl, NewOrData(..),
-	FamilyFlavour(..),
-	RuleDecl(..), LRuleDecl, RuleBndr(..),
-	DefaultDecl(..), LDefaultDecl, SpliceDecl(..),
-	ForeignDecl(..), LForeignDecl, ForeignImport(..), ForeignExport(..),
-	CImportSpec(..), FoType(..),
-	ConDecl(..), ResType(..), ConDeclField(..), LConDecl,	
-	HsConDeclDetails, hsConDeclArgTys,
-	DocDecl(..), LDocDecl, docDeclDoc,
-	WarnDecl(..),  LWarnDecl,
-	HsGroup(..),  emptyRdrGroup, emptyRnGroup, appendGroups,
-	tcdName, tyClDeclNames, tyClDeclTyVars,
-	isClassDecl, isSynDecl, isDataDecl, isTypeDecl, isFamilyDecl,
-	isFamInstDecl, 
-	countTyClDecls,
-	instDeclATs,
-	collectRuleBndrSigTys, 
+  -- * Toplevel declarations
+  HsDecl(..), LHsDecl,
+  -- ** Class or type declarations
+  TyClDecl(..), LTyClDecl,
+  isClassDecl, isSynDecl, isDataDecl, isTypeDecl, isFamilyDecl,
+  isFamInstDecl, tcdName, tyClDeclNames, tyClDeclTyVars,
+  countTyClDecls,
+  -- ** Instance declarations
+  InstDecl(..), LInstDecl, NewOrData(..), FamilyFlavour(..),
+  instDeclATs,
+  -- ** Standalone deriving declarations
+  DerivDecl(..), LDerivDecl,
+  -- ** @RULE@ declarations
+  RuleDecl(..), LRuleDecl, RuleBndr(..),
+  collectRuleBndrSigTys,
+  -- ** @default@ declarations
+  DefaultDecl(..), LDefaultDecl,
+  -- ** Top-level template haskell splice
+  SpliceDecl(..),
+  -- ** Foreign function interface declarations
+  ForeignDecl(..), LForeignDecl, ForeignImport(..), ForeignExport(..),
+  CImportSpec(..),
+  -- ** Data-constructor declarations
+  ConDecl(..), LConDecl, ResType(..), 
+  HsConDeclDetails, hsConDeclArgTys, hsConDeclsNames,
+  -- ** Document comments
+  DocDecl(..), LDocDecl, docDeclDoc,
+  -- ** Deprecations
+  WarnDecl(..),  LWarnDecl,
+  -- ** Annotations
+  AnnDecl(..), LAnnDecl, 
+  AnnProvenance(..), annProvenanceName_maybe, modifyAnnProvenanceNameM,
+
+  -- * Grouping
+  HsGroup(..),  emptyRdrGroup, emptyRnGroup, appendGroups
     ) where
 
 -- friends:
@@ -57,6 +75,7 @@ import Util
 import SrcLoc
 import FastString
 
+import Control.Monad    ( liftM )
 import Data.Maybe       ( isJust )
 \end{code}
 
@@ -69,18 +88,20 @@ import Data.Maybe       ( isJust )
 \begin{code}
 type LHsDecl id = Located (HsDecl id)
 
+-- | A Haskell Declaration
 data HsDecl id
-  = TyClD	(TyClDecl id)
-  | InstD	(InstDecl  id)
+  = TyClD	(TyClDecl id)     -- ^ A type or class declaration.
+  | InstD	(InstDecl  id)    -- ^ An instance declaration.
   | DerivD      (DerivDecl id)
   | ValD	(HsBind id)
   | SigD	(Sig id)
   | DefD	(DefaultDecl id)
   | ForD        (ForeignDecl id)
   | WarningD	(WarnDecl id)
+  | AnnD	(AnnDecl id)
   | RuleD	(RuleDecl id)
   | SpliceD	(SpliceDecl id)
-  | DocD	(DocDecl id)
+  | DocD	(DocDecl)
 
 
 -- NB: all top-level fixity decls are contained EITHER
@@ -96,7 +117,7 @@ data HsDecl id
 --
 -- The latter is for class methods only
 
--- A [HsDecl] is categorised into a HsGroup before being 
+-- | A 'HsDecl' is categorised into a 'HsGroup' before being
 -- fed to the renamer.
 data HsGroup id
   = HsGroup {
@@ -112,9 +133,10 @@ data HsGroup id
 	hs_defds  :: [LDefaultDecl id],
 	hs_fords  :: [LForeignDecl id],
 	hs_warnds :: [LWarnDecl id],
+	hs_annds   :: [LAnnDecl id],
 	hs_ruleds :: [LRuleDecl id],
 
-	hs_docs   :: [LDocDecl id]
+	hs_docs   :: [LDocDecl]
   }
 
 emptyGroup, emptyRdrGroup, emptyRnGroup :: HsGroup a
@@ -122,8 +144,8 @@ emptyRdrGroup = emptyGroup { hs_valds = emptyValBindsIn }
 emptyRnGroup  = emptyGroup { hs_valds = emptyValBindsOut }
 
 emptyGroup = HsGroup { hs_tyclds = [], hs_instds = [], hs_derivds = [],
-		       hs_fixds = [], hs_defds = [], hs_fords = [], 
-		       hs_warnds = [], hs_ruleds = [],
+		       hs_fixds = [], hs_defds = [], hs_annds = [],
+		       hs_fords = [], hs_warnds = [], hs_ruleds = [],
 		       hs_valds = error "emptyGroup hs_valds: Can't happen",
                        hs_docs = [] }
 
@@ -136,6 +158,7 @@ appendGroups
         hs_derivds = derivds1,
 	hs_fixds  = fixds1, 
 	hs_defds  = defds1,
+	hs_annds  = annds1,
 	hs_fords  = fords1, 
 	hs_warnds = warnds1,
 	hs_ruleds = rulds1,
@@ -147,6 +170,7 @@ appendGroups
         hs_derivds = derivds2,
 	hs_fixds  = fixds2, 
 	hs_defds  = defds2,
+	hs_annds  = annds2,
 	hs_fords  = fords2, 
 	hs_warnds = warnds2,
 	hs_ruleds = rulds2,
@@ -157,7 +181,8 @@ appendGroups
 	hs_tyclds = tyclds1 ++ tyclds2, 
 	hs_instds = instds1 ++ instds2,
         hs_derivds = derivds1 ++ derivds2,
-	hs_fixds  = fixds1 ++ fixds2, 
+	hs_fixds  = fixds1 ++ fixds2,
+	hs_annds  = annds1 ++ annds2,
 	hs_defds  = defds1 ++ defds2,
 	hs_fords  = fords1 ++ fords2, 
 	hs_warnds = warnds1 ++ warnds2,
@@ -176,6 +201,7 @@ instance OutputableBndr name => Outputable (HsDecl name) where
     ppr (SigD sd)               = ppr sd
     ppr (RuleD rd)              = ppr rd
     ppr (WarningD wd)           = ppr wd
+    ppr (AnnD ad)               = ppr ad
     ppr (SpliceD dd)            = ppr dd
     ppr (DocD doc)              = ppr doc
 
@@ -186,11 +212,13 @@ instance OutputableBndr name => Outputable (HsGroup name) where
                    hs_derivds = deriv_decls,
 		   hs_fixds  = fix_decls,
 		   hs_warnds = deprec_decls,
+		   hs_annds  = ann_decls,
 		   hs_fords  = foreign_decls,
 		   hs_defds  = default_decls,
 		   hs_ruleds = rule_decls })
 	= vcat [ppr_ds fix_decls, ppr_ds default_decls, 
-		ppr_ds deprec_decls, ppr_ds rule_decls,
+		ppr_ds deprec_decls, ppr_ds ann_decls,
+		ppr_ds rule_decls,
 		ppr val_decls,
 		ppr_ds tycl_decls, ppr_ds inst_decls,
                 ppr_ds deriv_decls,
@@ -369,112 +397,129 @@ Interface file code:
 
 type LTyClDecl name = Located (TyClDecl name)
 
+-- | A type or class declaration.
 data TyClDecl name
   = ForeignType { 
 		tcdLName    :: Located name,
-		tcdExtName  :: Maybe FastString,
-		tcdFoType   :: FoType
+		tcdExtName  :: Maybe FastString
     }
 
-	-- type/data/newtype family T :: *->*
-  | TyFamily {  tcdFlavour:: FamilyFlavour,	        -- type, new, or data
+
+  | -- | @type/data family T :: *->*@
+    TyFamily {  tcdFlavour:: FamilyFlavour,	        -- type or data
 		tcdLName  :: Located name,	        -- type constructor
 		tcdTyVars :: [LHsTyVarBndr name],	-- type variables
 		tcdKind   :: Maybe Kind			-- result kind
     }
 
-	-- Declares a data type or newtype, giving its construcors
-	-- 	data/newtype T a = <constrs>
-	--	data/newtype instance T [a] = <constrs>
-  | TyData {	tcdND     :: NewOrData,
-		tcdCtxt   :: LHsContext name,	 	-- Context
-		tcdLName  :: Located name,	 	-- Type constructor
 
-		tcdTyVars :: [LHsTyVarBndr name], 	-- Type variables
+  | -- | Declares a data type or newtype, giving its construcors
+    -- @
+    -- 	data/newtype T a = <constrs>
+    --	data/newtype instance T [a] = <constrs>
+    -- @
+    TyData {	tcdND     :: NewOrData,
+		tcdCtxt   :: LHsContext name,	 	-- ^ Context
+		tcdLName  :: Located name,	 	-- ^ Type constructor
+
+		tcdTyVars :: [LHsTyVarBndr name], 	-- ^ Type variables
 			
-		tcdTyPats :: Maybe [LHsType name],	-- Type patterns
-			-- Just [t1..tn] for data instance T t1..tn = ...
-			--	in this case tcdTyVars = fv( tcdTyPats )
-			-- Nothing for everything else
+		tcdTyPats :: Maybe [LHsType name],
+                        -- ^ Type patterns.
+                        --
+			-- @Just [t1..tn]@ for @data instance T t1..tn = ...@
+			--	in this case @tcdTyVars = fv( tcdTyPats )@.
+			-- @Nothing@ for everything else.
 
-		tcdKindSig:: Maybe Kind,		-- Optional kind sig 
-			-- (Just k) for a GADT-style 'data', or 'data
-			-- instance' decl with explicit kind sig
+		tcdKindSig:: Maybe Kind,
+                        -- ^ Optional kind signature.
+                        --
+			-- @(Just k)@ for a GADT-style @data@, or @data
+			-- instance@ decl with explicit kind sig
 
-		tcdCons	  :: [LConDecl name],	 	-- Data constructors
-			-- For data T a = T1 | T2 a          
-                        --   the LConDecls all have ResTyH98
-			-- For data T a where { T1 :: T a }  
-                        --   the LConDecls all have ResTyGADT
+		tcdCons	  :: [LConDecl name],
+                        -- ^ Data constructors
+                        --
+			-- For @data T a = T1 | T2 a@
+                        --   the 'LConDecl's all have 'ResTyH98'.
+			-- For @data T a where { T1 :: T a }@
+                        --   the 'LConDecls' all have 'ResTyGADT'.
 
 		tcdDerivs :: Maybe [LHsType name]
-			-- Derivings; Nothing => not specified
-			-- 	      Just [] => derive exactly what is asked
+			-- ^ Derivings; @Nothing@ => not specified,
+			-- 	        @Just []@ => derive exactly what is asked
+                        --
 			-- These "types" must be of form
+                        -- @
 			--	forall ab. C ty1 ty2
+                        -- @
 			-- Typically the foralls and ty args are empty, but they
 			-- are non-empty for the newtype-deriving case
     }
 
-  | TySynonym {	tcdLName  :: Located name,	        -- type constructor
-		tcdTyVars :: [LHsTyVarBndr name],	-- type variables
-		tcdTyPats :: Maybe [LHsType name],	-- Type patterns
+  | TySynonym {	tcdLName  :: Located name,	        -- ^ type constructor
+		tcdTyVars :: [LHsTyVarBndr name],	-- ^ type variables
+		tcdTyPats :: Maybe [LHsType name],	-- ^ Type patterns
 			-- See comments for tcdTyPats in TyData
 			-- 'Nothing' => vanilla type synonym
 
-		tcdSynRhs :: LHsType name	        -- synonym expansion
+		tcdSynRhs :: LHsType name	        -- ^ synonym expansion
     }
 
-  | ClassDecl {	tcdCtxt    :: LHsContext name, 	 	-- Context...
-		tcdLName   :: Located name,	    	-- Name of the class
-		tcdTyVars  :: [LHsTyVarBndr name],	-- Class type variables
-		tcdFDs     :: [Located (FunDep name)],	-- Functional deps
-		tcdSigs    :: [LSig name],		-- Methods' signatures
-		tcdMeths   :: LHsBinds name,		-- Default methods
-		tcdATs	   :: [LTyClDecl name],		-- Associated types; ie
+  | ClassDecl {	tcdCtxt    :: LHsContext name, 	 	-- ^ Context...
+		tcdLName   :: Located name,	    	-- ^ Name of the class
+		tcdTyVars  :: [LHsTyVarBndr name],	-- ^ Class type variables
+		tcdFDs     :: [Located (FunDep name)],	-- ^ Functional deps
+		tcdSigs    :: [LSig name],		-- ^ Methods' signatures
+		tcdMeths   :: LHsBinds name,		-- ^ Default methods
+		tcdATs	   :: [LTyClDecl name],		-- ^ Associated types; ie
 							--   only 'TyFamily' and
 							--   'TySynonym'; the
                                                         --   latter for defaults
-		tcdDocs    :: [LDocDecl name]		-- Haddock docs
+		tcdDocs    :: [LDocDecl]		-- ^ Haddock docs
     }
 
 data NewOrData
-  = NewType			-- "newtype Blah ..."
-  | DataType			-- "data Blah ..."
+  = NewType			-- ^ @newtype Blah ...@
+  | DataType			-- ^ @data Blah ...@
   deriving( Eq )		-- Needed because Demand derives Eq
 
 data FamilyFlavour
-  = TypeFamily			-- "type family ..."
-  | DataFamily	                -- "data family ..."
+  = TypeFamily			-- ^ @type family ...@
+  | DataFamily	                -- ^ @data family ...@
 \end{code}
 
 Simple classifiers
 
 \begin{code}
-isDataDecl, isTypeDecl, isSynDecl, isClassDecl, isFamilyDecl, isFamInstDecl :: 
-  TyClDecl name -> Bool
-
--- data/newtype or data/newtype instance declaration
+-- | @True@ <=> argument is a @data@\/@newtype@ or @data@\/@newtype instance@
+-- declaration.
+isDataDecl :: TyClDecl name -> Bool
 isDataDecl (TyData {}) = True
 isDataDecl _other      = False
 
--- type or type instance declaration
+-- | type or type instance declaration
+isTypeDecl :: TyClDecl name -> Bool
 isTypeDecl (TySynonym {}) = True
 isTypeDecl _other	  = False
 
--- vanilla Haskell type synonym (ie, not a type instance)
+-- | vanilla Haskell type synonym (ie, not a type instance)
+isSynDecl :: TyClDecl name -> Bool
 isSynDecl (TySynonym {tcdTyPats = Nothing}) = True
 isSynDecl _other	                    = False
 
--- type class
+-- | type class
+isClassDecl :: TyClDecl name -> Bool
 isClassDecl (ClassDecl {}) = True
 isClassDecl _              = False
 
--- type family declaration
+-- | type family declaration
+isFamilyDecl :: TyClDecl name -> Bool
 isFamilyDecl (TyFamily {}) = True
 isFamilyDecl _other        = False
 
--- family instance (types, newtypes, and data types)
+-- | family instance (types, newtypes, and data types)
+isFamInstDecl :: TyClDecl name -> Bool
 isFamInstDecl tydecl
    | isTypeDecl tydecl
      || isDataDecl tydecl = isJust (tcdTyPats tydecl)
@@ -488,10 +533,10 @@ tcdName :: TyClDecl name -> name
 tcdName decl = unLoc (tcdLName decl)
 
 tyClDeclNames :: Eq name => TyClDecl name -> [Located name]
--- Returns all the *binding* names of the decl, along with their SrcLocs
--- The first one is guaranteed to be the name of the decl
--- For record fields, the first one counts as the SrcLoc
--- We use the equality to filter out duplicate field names
+-- ^ Returns all the /binding/ names of the decl, along with their SrcLocs.
+-- The first one is guaranteed to be the name of the decl. For record fields
+-- mentioned in multiple constructors, the SrcLoc will be from the first
+-- occurence.  We use the equality to filter out duplicate field names
 
 tyClDeclNames (TyFamily    {tcdLName = name})    = [name]
 tyClDeclNames (TySynonym   {tcdLName = name})    = [name]
@@ -502,7 +547,7 @@ tyClDeclNames (ClassDecl {tcdLName = cls_name, tcdSigs = sigs, tcdATs = ats})
     concatMap (tyClDeclNames . unLoc) ats ++ [n | L _ (TypeSig n _) <- sigs]
 
 tyClDeclNames (TyData {tcdLName = tc_name, tcdCons = cons})
-  = tc_name : conDeclsNames (map unLoc cons)
+  = tc_name : hsConDeclsNames cons
 
 tyClDeclTyVars :: TyClDecl name -> [LHsTyVarBndr name]
 tyClDeclTyVars (TyFamily    {tcdTyVars = tvs}) = tvs
@@ -647,22 +692,38 @@ type LConDecl name = Located (ConDecl name)
 
 data ConDecl name
   = ConDecl
-    { con_name      :: Located name	    -- Constructor name; this is used for the
-                                            -- DataCon itself, and for the user-callable wrapper Id
+    { con_name      :: Located name
+        -- ^ Constructor name.  This is used for the DataCon itself, and for
+        -- the user-callable wrapper Id.
 
-    , con_explicit  :: HsExplicitForAll     -- Is there an user-written forall? (cf. HStypes.HsForAllTy)
+    , con_explicit  :: HsExplicitForAll
+        -- ^ Is there an user-written forall? (cf. 'HsTypes.HsForAllTy')
 
-    , con_qvars     :: [LHsTyVarBndr name]  -- ResTyH98: the constructor's existential type variables
-					    -- ResTyGADT:    all the constructor's quantified type variables
+    , con_qvars     :: [LHsTyVarBndr name]
+        -- ^ Type variables.  Depending on 'con_res' this describes the
+	-- follewing entities
+        --
+        --  - ResTyH98:  the constructor's *existential* type variables
+        --  - ResTyGADT: *all* the constructor's quantified type variables
 
-    , con_cxt       :: LHsContext name      -- The context.  This *does not* include the
-					    -- "stupid theta" which lives only in the TyData decl
+    , con_cxt       :: LHsContext name
+        -- ^ The context.  This /does not/ include the \"stupid theta\" which
+	-- lives only in the 'TyData' decl.
 
-    , con_details   :: HsConDeclDetails name	-- The main payload
+    , con_details   :: HsConDeclDetails name
+        -- ^ The main payload
 
-    , con_res       :: ResType name         -- Result type of the constructor
+    , con_res       :: ResType name
+        -- ^ Result type of the constructor
 
-    , con_doc       :: Maybe (LHsDoc name)  -- A possible Haddock comment
+    , con_doc       :: Maybe LHsDocString
+        -- ^ A possible Haddock comment.
+
+    , con_old_rec :: Bool   
+        -- ^ TEMPORARY field; True <=> user has employed now-deprecated syntax for
+	--   	       	               GADT-style record decl   C { blah } :: T a b
+	-- Remove this when we no longer parse this stuff, and hence do not
+	-- need to report decprecated use
     }
 
 type HsConDeclDetails name = HsConDetails (LBangType name) [ConDeclField name]
@@ -672,33 +733,33 @@ hsConDeclArgTys (PrefixCon tys)    = tys
 hsConDeclArgTys (InfixCon ty1 ty2) = [ty1,ty2]
 hsConDeclArgTys (RecCon flds)      = map cd_fld_type flds
 
-data ConDeclField name	-- Record fields have Haddoc docs on them
-  = ConDeclField { cd_fld_name :: Located name,
-		   cd_fld_type :: LBangType name, 
-		   cd_fld_doc  :: Maybe (LHsDoc name) }
-
 data ResType name
    = ResTyH98		-- Constructor was declared using Haskell 98 syntax
    | ResTyGADT (LHsType name)	-- Constructor was declared using GADT-style syntax,
 				--	and here is its result type
+
+instance OutputableBndr name => Outputable (ResType name) where
+	 -- Debugging only
+   ppr ResTyH98 = ptext (sLit "ResTyH98")
+   ppr (ResTyGADT ty) = ptext (sLit "ResTyGADT") <+> pprParendHsType (unLoc ty)
 \end{code}
 
 \begin{code}
-conDeclsNames :: (Eq name) => [ConDecl name] -> [Located name]
+hsConDeclsNames :: (Eq name) => [LConDecl name] -> [Located name]
   -- See tyClDeclNames for what this does
   -- The function is boringly complicated because of the records
   -- And since we only have equality, we have to be a little careful
-conDeclsNames cons
+hsConDeclsNames cons
   = snd (foldl do_one ([], []) cons)
   where
-    do_one (flds_seen, acc) (ConDecl { con_name = lname, con_details = RecCon flds })
+    do_one (flds_seen, acc) (L _ (ConDecl { con_name = lname, con_details = RecCon flds }))
 	= (map unLoc new_flds ++ flds_seen, lname : new_flds ++ acc)
 	where
 	  new_flds = filterOut (\f -> unLoc f `elem` flds_seen) 
 			       (map cd_fld_name flds)
 
-    do_one (flds_seen, acc) c
-	= (flds_seen, (con_name c):acc)
+    do_one (flds_seen, acc) (L _ (ConDecl { con_name = lname }))
+	= (flds_seen, lname:acc)
 \end{code}
   
 
@@ -707,33 +768,31 @@ instance (OutputableBndr name) => Outputable (ConDecl name) where
     ppr = pprConDecl
 
 pprConDecl :: OutputableBndr name => ConDecl name -> SDoc
-pprConDecl (ConDecl con expl tvs cxt details ResTyH98 doc)
+pprConDecl (ConDecl { con_name =con, con_explicit = expl, con_qvars = tvs
+                    , con_cxt = cxt, con_details = details
+                    , con_res = ResTyH98, con_doc = doc })
   = sep [ppr_mbDoc doc, pprHsForAll expl tvs cxt, ppr_details con details]
   where
     ppr_details con (InfixCon t1 t2) = hsep [ppr t1, pprHsInfix con, ppr t2]
     ppr_details con (PrefixCon tys)  = hsep (pprHsVar con : map ppr tys)
-    ppr_details con (RecCon fields)  = ppr con <+> ppr_fields fields
+    ppr_details con (RecCon fields)  = ppr con <+> pprConDeclFields fields
 
-pprConDecl (ConDecl con expl tvs cxt (PrefixCon arg_tys) (ResTyGADT res_ty) _)
+pprConDecl (ConDecl { con_name = con, con_explicit = expl, con_qvars = tvs
+                    , con_cxt = cxt, con_details = PrefixCon arg_tys
+                    , con_res = ResTyGADT res_ty })
   = ppr con <+> dcolon <+> 
     sep [pprHsForAll expl tvs cxt, ppr (foldr mk_fun_ty res_ty arg_tys)]
   where
     mk_fun_ty a b = noLoc (HsFunTy a b)
 
-pprConDecl (ConDecl con expl tvs cxt (RecCon fields) (ResTyGADT res_ty) _)
-  = sep [pprHsForAll expl tvs cxt, ppr con <+> ppr_fields fields <+> dcolon <+> ppr res_ty]
+pprConDecl (ConDecl { con_name = con, con_explicit = expl, con_qvars = tvs
+                    , con_cxt = cxt, con_details = RecCon fields, con_res = ResTyGADT res_ty })
+  = sep [ppr con <+> dcolon <+> pprHsForAll expl tvs cxt, 
+         pprConDeclFields fields <+> arrow <+> ppr res_ty]
 
-pprConDecl (ConDecl con _expl _tvs _cxt (InfixCon _ _) (ResTyGADT _res_ty) _)
+pprConDecl (ConDecl {con_name = con, con_details = InfixCon {}, con_res = ResTyGADT {} })
   = pprPanic "pprConDecl" (ppr con)
 	-- In GADT syntax we don't allow infix constructors
-
-
-ppr_fields :: OutputableBndr name => [ConDeclField name] -> SDoc
-ppr_fields fields = braces (sep (punctuate comma (map ppr_fld fields)))
-  where
-    ppr_fld (ConDeclField { cd_fld_name = n, cd_fld_type = ty, 
-			    cd_fld_doc = doc })
-  	= ppr n <+> dcolon <+> ppr ty <+> ppr_mbDoc doc
 \end{code}
 
 %************************************************************************
@@ -781,7 +840,7 @@ data DerivDecl name = DerivDecl (LHsType name)
 
 instance (OutputableBndr name) => Outputable (DerivDecl name) where
     ppr (DerivDecl ty) 
-        = hsep [ptext (sLit "derived instance"), ppr ty]
+        = hsep [ptext (sLit "deriving instance"), ppr ty]
 \end{code}
 
 %************************************************************************
@@ -847,12 +906,7 @@ data ForeignImport = -- import of a C entity
 		     CImport  CCallConv	      -- ccall or stdcall
 			      Safety	      -- safe or unsafe
 			      FastString      -- name of C header
-			      FastString      -- name of library object
 			      CImportSpec     -- details of the C entity
-
-                     -- import of a .NET function
-		     --
-		   | DNImport DNCallSpec
 
 -- details of an external C entity
 --
@@ -865,13 +919,6 @@ data CImportSpec = CLabel    CLabelString     -- import address of a C label
 -- convention
 --
 data ForeignExport = CExport  CExportSpec    -- contains the calling convention
-		   | DNExport		     -- presently unused
-
--- abstract type imported from .NET
---
-data FoType = DNType 		-- In due course we'll add subtype stuff
-	    deriving (Eq)	-- Used for equality instance for TyClDecl
-
 
 -- pretty printing of foreign declarations
 --
@@ -885,33 +932,23 @@ instance OutputableBndr name => Outputable (ForeignDecl name) where
        2 (dcolon <+> ppr ty)
 
 instance Outputable ForeignImport where
-  ppr (DNImport			        spec) = 
-    ptext (sLit "dotnet") <+> ppr spec
-  ppr (CImport  cconv safety header lib spec) =
+  ppr (CImport  cconv safety header spec) =
     ppr cconv <+> ppr safety <+> 
-    char '"' <> pprCEntity header lib spec <> char '"'
+    char '"' <> pprCEntity spec <> char '"'
     where
-      pprCEntity header lib (CLabel lbl) = 
-        ptext (sLit "static") <+> ftext header <+> char '&' <>
-	pprLib lib <> ppr lbl
-      pprCEntity header lib (CFunction (StaticTarget lbl)) = 
-        ptext (sLit "static") <+> ftext header <+> char '&' <>
-	pprLib lib <> ppr lbl
-      pprCEntity _      _   (CFunction (DynamicTarget)) =
+      pp_hdr = if nullFS header then empty else ftext header
+
+      pprCEntity (CLabel lbl) = 
+        ptext (sLit "static") <+> pp_hdr <+> char '&' <> ppr lbl
+      pprCEntity (CFunction (StaticTarget lbl)) = 
+        ptext (sLit "static") <+> pp_hdr <+> ppr lbl
+      pprCEntity (CFunction (DynamicTarget)) =
         ptext (sLit "dynamic")
-      pprCEntity _      _   (CWrapper) = ptext (sLit "wrapper")
-      --
-      pprLib lib | nullFS lib = empty
-		 | otherwise  = char '[' <> ppr lib <> char ']'
+      pprCEntity (CWrapper) = ptext (sLit "wrapper")
 
 instance Outputable ForeignExport where
   ppr (CExport  (CExportStatic lbl cconv)) = 
     ppr cconv <+> char '"' <> ppr lbl <> char '"'
-  ppr (DNExport                          ) = 
-    ptext (sLit "dotnet") <+> ptext (sLit "\"<unused>\"")
-
-instance Outputable FoType where
-  ppr DNType = ptext (sLit "type dotnet")
 \end{code}
 
 
@@ -963,19 +1000,19 @@ instance OutputableBndr name => Outputable (RuleBndr name) where
 
 \begin{code}
 
-type LDocDecl name = Located (DocDecl name)
+type LDocDecl = Located (DocDecl)
 
-data DocDecl name
-  = DocCommentNext (HsDoc name)
-  | DocCommentPrev (HsDoc name)
-  | DocCommentNamed String (HsDoc name)
-  | DocGroup Int (HsDoc name)
+data DocDecl
+  = DocCommentNext HsDocString
+  | DocCommentPrev HsDocString
+  | DocCommentNamed String HsDocString
+  | DocGroup Int HsDocString
  
 -- Okay, I need to reconstruct the document comments, but for now:
-instance Outputable (DocDecl name) where
+instance Outputable DocDecl where
   ppr _ = text "<document comment>"
 
-docDeclDoc :: DocDecl name -> HsDoc name
+docDeclDoc :: DocDecl -> HsDocString
 docDeclDoc (DocCommentNext d) = d
 docDeclDoc (DocCommentPrev d) = d
 docDeclDoc (DocCommentNamed _ d) = d
@@ -999,4 +1036,43 @@ data WarnDecl name = Warning name WarningTxt
 instance OutputableBndr name => Outputable (WarnDecl name) where
     ppr (Warning thing txt)
       = hsep [text "{-# DEPRECATED", ppr thing, doubleQuotes (ppr txt), text "#-}"]
+\end{code}
+
+%************************************************************************
+%*									*
+\subsection[AnnDecl]{Annotations}
+%*									*
+%************************************************************************
+
+\begin{code}
+type LAnnDecl name = Located (AnnDecl name)
+
+data AnnDecl name = HsAnnotation (AnnProvenance name) (Located (HsExpr name))
+
+instance (OutputableBndr name) => Outputable (AnnDecl name) where
+    ppr (HsAnnotation provenance expr) 
+      = hsep [text "{-#", pprAnnProvenance provenance, pprExpr (unLoc expr), text "#-}"]
+
+
+data AnnProvenance name = ValueAnnProvenance name
+                        | TypeAnnProvenance name
+                        | ModuleAnnProvenance
+
+annProvenanceName_maybe :: AnnProvenance name -> Maybe name
+annProvenanceName_maybe (ValueAnnProvenance name) = Just name
+annProvenanceName_maybe (TypeAnnProvenance name)  = Just name
+annProvenanceName_maybe ModuleAnnProvenance       = Nothing
+
+-- TODO: Replace with Traversable instance when GHC bootstrap version rises high enough
+modifyAnnProvenanceNameM :: Monad m => (before -> m after) -> AnnProvenance before -> m (AnnProvenance after)
+modifyAnnProvenanceNameM fm prov =
+    case prov of
+            ValueAnnProvenance name -> liftM ValueAnnProvenance (fm name)
+            TypeAnnProvenance name -> liftM TypeAnnProvenance (fm name)
+            ModuleAnnProvenance -> return ModuleAnnProvenance
+
+pprAnnProvenance :: OutputableBndr name => AnnProvenance name -> SDoc
+pprAnnProvenance ModuleAnnProvenance       = ptext (sLit "ANN module")
+pprAnnProvenance (ValueAnnProvenance name) = ptext (sLit "ANN") <+> ppr name
+pprAnnProvenance (TypeAnnProvenance name)  = ptext (sLit "ANN type") <+> ppr name
 \end{code}

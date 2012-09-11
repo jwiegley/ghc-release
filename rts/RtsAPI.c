@@ -8,17 +8,15 @@
 
 #include "PosixSource.h"
 #include "Rts.h"
-#include "OSThreads.h"
 #include "RtsAPI.h"
-#include "SchedAPI.h"
-#include "RtsFlags.h"
+#include "HsFFI.h"
+
 #include "RtsUtils.h"
 #include "Prelude.h"
 #include "Schedule.h"
 #include "Capability.h"
 #include "Stable.h"
-
-#include <stdlib.h>
+#include "Weak.h"
 
 /* ----------------------------------------------------------------------------
    Building Haskell objects from C datatypes.
@@ -77,11 +75,9 @@ rts_mkInt32 (Capability *cap, HsInt32 i)
 HaskellObj
 rts_mkInt64 (Capability *cap, HsInt64 i)
 {
-  llong *tmp;
   StgClosure *p = (StgClosure *)allocateLocal(cap,CONSTR_sizeW(0,2));
   SET_HDR(p, I64zh_con_info, CCS_SYSTEM);
-  tmp  = (llong*)&(p->payload[0]);
-  *tmp = (StgInt64)i;
+  ASSIGN_Int64((P_)&(p->payload[0]), i);
   return p;
 }
 
@@ -127,15 +123,13 @@ rts_mkWord32 (Capability *cap, HsWord32 w)
 HaskellObj
 rts_mkWord64 (Capability *cap, HsWord64 w)
 {
-  ullong *tmp;
-
   StgClosure *p = (StgClosure *)allocateLocal(cap,CONSTR_sizeW(0,2));
   /* see mk_Int8 comment */
   SET_HDR(p, W64zh_con_info, CCS_SYSTEM);
-  tmp  = (ullong*)&(p->payload[0]);
-  *tmp = (StgWord64)w;
+  ASSIGN_Word64((P_)&(p->payload[0]), w);
   return p;
 }
+
 
 HaskellObj
 rts_mkFloat (Capability *cap, HsFloat f)
@@ -267,13 +261,12 @@ rts_getInt32 (HaskellObj p)
 HsInt64
 rts_getInt64 (HaskellObj p)
 {
-    HsInt64* tmp;
     // See comment above:
     // ASSERT(p->header.info == I64zh_con_info ||
     //        p->header.info == I64zh_static_info);
-    tmp = (HsInt64*)&(UNTAG_CLOSURE(p)->payload[0]);
-    return *tmp;
+    return PK_Int64((P_)&(UNTAG_CLOSURE(p)->payload[0]));
 }
+
 HsWord
 rts_getWord (HaskellObj p)
 {
@@ -310,16 +303,13 @@ rts_getWord32 (HaskellObj p)
     return (HsWord32)(HsWord)(UNTAG_CLOSURE(p)->payload[0]);
 }
 
-
 HsWord64
 rts_getWord64 (HaskellObj p)
 {
-    HsWord64* tmp;
     // See comment above:
     // ASSERT(p->header.info == W64zh_con_info ||
     //        p->header.info == W64zh_static_info);
-    tmp = (HsWord64*)&(UNTAG_CLOSURE(p)->payload[0]);
-    return *tmp;
+    return PK_Word64((P_)&(UNTAG_CLOSURE(p)->payload[0]));
 }
 
 HsFloat
@@ -393,11 +383,7 @@ StgTSO *
 createGenThread (Capability *cap, nat stack_size,  StgClosure *closure)
 {
   StgTSO *t;
-#if defined(GRAN)
-  t = createThread (cap, stack_size, NO_PRI);
-#else
   t = createThread (cap, stack_size);
-#endif
   pushClosure(t, (W_)closure);
   pushClosure(t, (W_)&stg_enter_info);
   return t;
@@ -407,11 +393,7 @@ StgTSO *
 createIOThread (Capability *cap, nat stack_size,  StgClosure *closure)
 {
   StgTSO *t;
-#if defined(GRAN)
-  t = createThread (cap, stack_size, NO_PRI);
-#else
   t = createThread (cap, stack_size);
-#endif
   pushClosure(t, (W_)&stg_noforceIO_info);
   pushClosure(t, (W_)&stg_ap_v_info);
   pushClosure(t, (W_)closure);
@@ -428,11 +410,7 @@ StgTSO *
 createStrictIOThread(Capability *cap, nat stack_size,  StgClosure *closure)
 {
   StgTSO *t;
-#if defined(GRAN)
-  t = createThread(cap, stack_size, NO_PRI);
-#else
   t = createThread(cap, stack_size);
-#endif
   pushClosure(t, (W_)&stg_forceIO_info);
   pushClosure(t, (W_)&stg_ap_v_info);
   pushClosure(t, (W_)closure);
@@ -560,13 +538,15 @@ rts_lock (void)
     Capability *cap;
     Task *task;
 
-    // ToDo: get rid of this lock in the common case.  We could store
-    // a free Task in thread-local storage, for example.  That would
-    // leave just one lock on the path into the RTS: cap->lock when
-    // acquiring the Capability.
-    ACQUIRE_LOCK(&sched_mutex);
+    if (running_finalizers) {
+        errorBelch("error: a C finalizer called back into Haskell.\n"
+                   "   This was previously allowed, but is disallowed in GHC 6.10.2 and later.\n"
+                   "   To create finalizers that may call back into Haskll, use\n"
+                   "   Foreign.Concurrent.newForeignPtr instead of Foreign.newForeignPtr.");
+        stg_exit(EXIT_FAILURE);
+    }
+
     task = newBoundTask();
-    RELEASE_LOCK(&sched_mutex);
 
     cap = NULL;
     waitForReturnCapability(&cap, task);
@@ -598,7 +578,7 @@ rts_unlock (Capability *cap)
     // random point in the future, which causes problems for
     // freeTaskManager().
     ACQUIRE_LOCK(&cap->lock);
-    releaseCapability_(cap);
+    releaseCapability_(cap,rtsFalse);
 
     // Finally, we can release the Task to the free list.
     boundTaskExiting(task);

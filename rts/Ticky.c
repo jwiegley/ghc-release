@@ -6,13 +6,29 @@
  * Ticky-ticky profiling
  *-------------------------------------------------------------------------- */
 
-#if defined(TICKY_TICKY)
-
 #define TICKY_C			/* define those variables */
 #include "PosixSource.h"
 #include "Rts.h"
-#include "TickyCounters.h"
-#include "RtsFlags.h"
+
+/* Catch-all top-level counter struct.  Allocations from CAFs will go
+ * here.
+ */
+StgEntCounter top_ct
+        = { 0, 0, 0,
+	    "TOP", "",
+	    0, 0, NULL };
+
+/* Data structure used in ``registering'' one of these counters. */
+
+StgEntCounter *ticky_entry_ctrs = NULL; /* root of list of them */
+
+/* We want Haskell code compiled with -ticky to be linkable with any
+ * version of the RTS, so we have to make sure all the symbols that
+ * ticky-compiled code may refer to are defined by every RTS. (#3439)
+ * Hence the #ifdef is here, rather than up above.
+ */
+#if defined(TICKY_TICKY)
+
 #include "Ticky.h"
 
 /* -----------------------------------------------------------------------------
@@ -38,33 +54,21 @@ PrintTickyInfo(void)
   unsigned long tot_allocs = /* total number of things allocated */
 	ALLOC_FUN_ctr + ALLOC_SE_THK_ctr + ALLOC_UP_THK_ctr + ALLOC_CON_ctr + ALLOC_TUP_ctr +
     	+ ALLOC_TSO_ctr + ALLOC_BH_ctr  + ALLOC_PAP_ctr + ALLOC_PRIM_ctr
-#ifdef PAR
-	+ ALLOC_FMBQ_ctr + ALLOC_FME_ctr + ALLOC_BF_ctr
-#endif
       ;	
 
   unsigned long tot_adm_wds = /* total number of admin words allocated */
 	ALLOC_FUN_adm + ALLOC_THK_adm + ALLOC_CON_adm + ALLOC_TUP_adm
     	+ ALLOC_TSO_adm + ALLOC_BH_adm  + ALLOC_PAP_adm + ALLOC_PRIM_adm
-#ifdef PAR
-	+ ALLOC_FMBQ_adm + ALLOC_FME_adm + ALLOC_BF_adm
-#endif
       ;
 
   unsigned long tot_gds_wds = /* total number of words of ``good stuff'' allocated */
 	ALLOC_FUN_gds + ALLOC_THK_gds + ALLOC_CON_gds + ALLOC_TUP_gds
     	+ ALLOC_TSO_gds + ALLOC_BH_gds  + ALLOC_PAP_gds + ALLOC_PRIM_gds
-#ifdef PAR
-	+ ALLOC_FMBQ_gds + ALLOC_FME_gds + ALLOC_BF_gds
-#endif
       ;
 
   unsigned long tot_slp_wds = /* total number of ``slop'' words allocated */
 	ALLOC_FUN_slp + ALLOC_THK_slp + ALLOC_CON_slp + ALLOC_TUP_slp
     	+ ALLOC_TSO_slp + ALLOC_BH_slp  + ALLOC_PAP_slp + ALLOC_PRIM_slp
-#ifdef PAR
-	+ ALLOC_FMBQ_slp + ALLOC_FME_slp + ALLOC_BF_slp
-#endif
       ;
 
   unsigned long tot_wds = /* total words */
@@ -190,23 +194,6 @@ PrintTickyInfo(void)
 	PC(INTAVG(ALLOC_TSO_ctr, tot_allocs)));
   if (ALLOC_TSO_ctr != 0)
       fprintf(tf,"\t\t%5.1f %5.1f %5.1f %5.1f %5.1f", ALLOC_HISTO_MAGIC(TSO));
-#ifdef PAR
-  fprintf(tf,"\n%7ld (%5.1f%%) thread state objects",
-	ALLOC_FMBQ_ctr,
-	PC(INTAVG(ALLOC_FMBQ_ctr, tot_allocs)));
-  if (ALLOC_FMBQ_ctr != 0)
-      fprintf(tf,"\t\t%5.1f %5.1f %5.1f %5.1f %5.1f", ALLOC_HISTO_MAGIC(FMBQ));
-  fprintf(tf,"\n%7ld (%5.1f%%) thread state objects",
-	ALLOC_FME_ctr,
-	PC(INTAVG(ALLOC_FME_ctr, tot_allocs)));
-  if (ALLOC_FME_ctr != 0)
-      fprintf(tf,"\t\t%5.1f %5.1f %5.1f %5.1f %5.1f", ALLOC_HISTO_MAGIC(FME));
-  fprintf(tf,"\n%7ld (%5.1f%%) thread state objects",
-	ALLOC_BF_ctr,
-	PC(INTAVG(ALLOC_BF_ctr, tot_allocs)));
-  if (ALLOC_BF_ctr != 0)
-      fprintf(tf,"\t\t%5.1f %5.1f %5.1f %5.1f %5.1f", ALLOC_HISTO_MAGIC(BF));
-#endif
 
   fprintf(tf,"\n");
 
@@ -419,36 +406,6 @@ PrintTickyInfo(void)
   PR_HST(ALLOC_TSO_hst,2);
   PR_HST(ALLOC_TSO_hst,3);
   PR_HST(ALLOC_TSO_hst,4);
-
-#ifdef PAR
-  PR_CTR(ALLOC_FMBQ_ctr);
-  PR_CTR(ALLOC_FMBQ_adm);
-  PR_CTR(ALLOC_FMBQ_gds);
-  PR_CTR(ALLOC_FMBQ_slp);
-  PR_HST(ALLOC_FMBQ_hst,0);
-  PR_HST(ALLOC_FMBQ_hst,1);
-  PR_HST(ALLOC_FMBQ_hst,2);
-  PR_HST(ALLOC_FMBQ_hst,3);
-  PR_HST(ALLOC_FMBQ_hst,4);
-  PR_CTR(ALLOC_FME_ctr);
-  PR_CTR(ALLOC_FME_adm);
-  PR_CTR(ALLOC_FME_gds);
-  PR_CTR(ALLOC_FME_slp);
-  PR_HST(ALLOC_FME_hst,0);
-  PR_HST(ALLOC_FME_hst,1);
-  PR_HST(ALLOC_FME_hst,2);
-  PR_HST(ALLOC_FME_hst,3);
-  PR_HST(ALLOC_FME_hst,4);
-  PR_CTR(ALLOC_BF_ctr);
-  PR_CTR(ALLOC_BF_adm);
-  PR_CTR(ALLOC_BF_gds);
-  PR_CTR(ALLOC_BF_slp);
-  PR_HST(ALLOC_BF_hst,0);
-  PR_HST(ALLOC_BF_hst,1);
-  PR_HST(ALLOC_BF_hst,2);
-  PR_HST(ALLOC_BF_hst,3);
-  PR_HST(ALLOC_BF_hst,4);
-#endif
   */
 
   PR_CTR(ENT_VIA_NODE_ctr);
@@ -613,10 +570,6 @@ PrintTickyInfo(void)
   PR_CTR(GC_WORDS_COPIED_ctr);
 }
 
-/* Data structure used in ``registering'' one of these counters. */
-
-StgEntCounter *ticky_entry_ctrs = NULL; /* root of list of them */
-
 /* To print out all the registered-counter info: */
 
 static void
@@ -633,11 +586,11 @@ printRegisteredCounterInfo (FILE *tf)
     /* Function name at the end so it doesn't mess up the tabulation */
 
     for (p = ticky_entry_ctrs; p != NULL; p = p->link) {
-	fprintf(tf, "%11ld%11ld %6zu%6zu    %-11s%-30s",
+	fprintf(tf, "%11ld%11ld %6lu%6lu    %-11s%-30s",
 		p->entry_count,
 		p->allocs,
-		p->arity,
-		p->stk_args,
+		(unsigned long)p->arity,
+		(unsigned long)p->stk_args,
 		p->arg_kinds,
 		p->str);
 
@@ -645,14 +598,5 @@ printRegisteredCounterInfo (FILE *tf)
 
     }
 }
-
-/* Catch-all top-level counter struct.  Allocations from CAFs will go
- * here.
- */
-StgEntCounter top_ct
-        = { 0, 0, 0,
-	    "TOP", "",
-	    0, 0, NULL };
-
 #endif /* TICKY_TICKY */
 

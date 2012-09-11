@@ -20,7 +20,8 @@ module PrelRules ( primOpRules, builtinRules ) where
 #include "HsVersions.h"
 
 import CoreSyn
-import Id		( mkWildId, idUnfolding )
+import MkCore		( mkWildCase )
+import Id		( idUnfolding )
 import Literal		( Literal(..), mkMachInt, mkMachWord
 			, literalType
 			, word2IntLit, int2WordLit
@@ -44,6 +45,8 @@ import Name		( Name, nameOccName )
 import Outputable
 import FastString
 import StaticFlags      ( opt_SimplExcessPrecision )
+import Constants
+
 import Data.Bits as Bits
 import Data.Word	( Word )
 \end{code}
@@ -340,7 +343,7 @@ litEq op_name is_eq
     rule_fn _    	    = Nothing
     
     do_lit_eq lit expr
-      = Just (Case expr (mkWildId (literalType lit)) boolTy
+      = Just (mkWildCase expr (literalType lit) boolTy
 		    [(DEFAULT,    [], val_if_neq),
 		     (LitAlt lit, [], val_if_eq)])
     val_if_eq  | is_eq     = trueVal
@@ -352,14 +355,14 @@ litEq op_name is_eq
 -- runtime either, and compilation of completely harmless things like
 --    ((124076834 :: Word32) + (2147483647 :: Word32))
 -- would yield a warning. Instead we simply squash the value into the
--- Int range, but not in a way suitable for cross-compiling... :-(
+-- *target* Int/Word range.
 intResult :: Integer -> Maybe CoreExpr
 intResult result
-  = Just (mkIntVal (toInteger (fromInteger result :: Int)))
+  = Just (mkIntVal (toInteger (fromInteger result :: TargetInt)))
 
 wordResult :: Integer -> Maybe CoreExpr
 wordResult result
-  = Just (mkWordVal (toInteger (fromInteger result :: Word)))
+  = Just (mkWordVal (toInteger (fromInteger result :: TargetWord)))
 \end{code}
 
 

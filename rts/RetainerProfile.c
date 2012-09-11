@@ -16,19 +16,21 @@
 #define INLINE inline
 #endif
 
+#include "PosixSource.h"
 #include "Rts.h"
+
 #include "RtsUtils.h"
 #include "RetainerProfile.h"
 #include "RetainerSet.h"
 #include "Schedule.h"
 #include "Printer.h"
-#include "RtsFlags.h"
 #include "Weak.h"
 #include "Sanity.h"
 #include "Profiling.h"
 #include "Stats.h"
 #include "ProfHeap.h"
 #include "Apply.h"
+#include "sm/Storage.h" // for END_OF_STATIC_LIST
 
 /*
   Note: what to change in order to plug-in a new retainer profiling scheme?
@@ -453,8 +455,6 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
     case CONSTR_0_2:
     case CAF_BLACKHOLE:
     case BLACKHOLE:
-    case SE_BLACKHOLE:
-    case SE_CAF_BLACKHOLE:
     case ARR_WORDS:
 	*first_child = NULL;
 	return;
@@ -621,11 +621,6 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
     case RET_BIG:
 	// invalid objects
     case IND:
-    case BLOCKED_FETCH:
-    case FETCH_ME:
-    case FETCH_ME_BQ:
-    case RBH:
-    case REMOTE_REF:
     case INVALID_OBJECT:
     default:
 	barf("Invalid object *c in push()");
@@ -958,8 +953,6 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
 	case CONSTR_0_2:
 	case CAF_BLACKHOLE:
 	case BLACKHOLE:
-	case SE_BLACKHOLE:
-	case SE_CAF_BLACKHOLE:
 	case ARR_WORDS:
 	    // one child (fixed), no SRT
 	case MUT_VAR_CLEAN:
@@ -986,11 +979,6 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
 	case RET_BIG:
 	    // invalid objects
 	case IND:
-	case BLOCKED_FETCH:
-	case FETCH_ME:
-	case FETCH_ME_BQ:
-	case RBH:
-	case REMOTE_REF:
 	case INVALID_OBJECT:
 	default:
 	    barf("Invalid object *c in pop()");
@@ -1112,8 +1100,6 @@ isRetainer( StgClosure *c )
 	// blackholes
     case CAF_BLACKHOLE:
     case BLACKHOLE:
-    case SE_BLACKHOLE:
-    case SE_CAF_BLACKHOLE:
 	// indirection
     case IND_PERM:
     case IND_OLDGEN_PERM:
@@ -1150,11 +1136,6 @@ isRetainer( StgClosure *c )
     case RET_BIG:
 	// other cases
     case IND:
-    case BLOCKED_FETCH:
-    case FETCH_ME:
-    case FETCH_ME_BQ:
-    case RBH:
-    case REMOTE_REF:
     case INVALID_OBJECT:
     default:
 	barf("Invalid object in isRetainer(): %d", get_itbl(c)->type);

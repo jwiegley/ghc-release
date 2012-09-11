@@ -27,13 +27,11 @@ import TyCon
 import DataCon
 import TcHsSyn	( shortCutLit )
 import TcType
-import Type
 import PrelNames
 import TysWiredIn
-import Unique
 import Literal
 import SrcLoc
-import Ratio
+import Data.Ratio
 import Outputable
 import Util
 import FastString
@@ -156,39 +154,44 @@ tidyLitPat lit = LitPat lit
 ----------------
 tidyNPat :: HsOverLit Id -> Maybe (SyntaxExpr Id) -> SyntaxExpr Id -> Pat Id
 tidyNPat (OverLit val False _ ty) mb_neg _
-	-- Take short cuts only if the literal is not using rebindable syntax
-  | isIntTy    ty = mk_con_pat intDataCon    (HsIntPrim int_val)
-  | isWordTy   ty = mk_con_pat wordDataCon   (HsWordPrim int_val)
-  | isFloatTy  ty = mk_con_pat floatDataCon  (HsFloatPrim  rat_val)
-  | isDoubleTy ty = mk_con_pat doubleDataCon (HsDoublePrim rat_val)
---  | isStringTy lit_ty = mk_con_pat stringDataCon (HsStringPrim str_val)
+	-- False: Take short cuts only if the literal is not using rebindable syntax
+	-- 
+	-- Once that is settled, look for cases where the type of the 
+	-- entire overloaded literal matches the type of the underlying literal,
+	-- and in that case take the short cut
+	-- NB: Watch out for wierd cases like Trac #3382
+	-- 	  f :: Int -> Int
+	--	  f "blah" = 4
+	--     which might be ok if we hvae 'instance IsString Int'
+	--    
+
+  | isIntTy ty,    Just int_lit <- mb_int_lit = mk_con_pat intDataCon    (HsIntPrim    int_lit)
+  | isWordTy ty,   Just int_lit <- mb_int_lit = mk_con_pat wordDataCon   (HsWordPrim   int_lit)
+  | isFloatTy ty,  Just rat_lit <- mb_rat_lit = mk_con_pat floatDataCon  (HsFloatPrim  rat_lit)
+  | isDoubleTy ty, Just rat_lit <- mb_rat_lit = mk_con_pat doubleDataCon (HsDoublePrim rat_lit)
+  | isStringTy ty, Just str_lit <- mb_str_lit = tidyLitPat (HsString str_lit)
   where
     mk_con_pat :: DataCon -> HsLit -> Pat Id
     mk_con_pat con lit = unLoc (mkPrefixConPat con [noLoc $ LitPat lit] ty)
 
-    neg_val = case (mb_neg, val) of
-		(Nothing, 	       _) -> val
-		(Just _,  HsIntegral   i) -> HsIntegral   (-i)
-		(Just _,  HsFractional f) -> HsFractional (-f)
-		(Just _,  HsIsString _)	  -> panic "tidyNPat"
-			     
-    int_val :: Integer
-    int_val = case neg_val of
-		HsIntegral i -> i
-		_ -> panic "tidyNPat"
+    mb_int_lit :: Maybe Integer
+    mb_int_lit = case (mb_neg, val) of
+		   (Nothing, HsIntegral i) -> Just i
+		   (Just _,  HsIntegral i) -> Just (-i)
+		   _ -> Nothing
 	
-    rat_val :: Rational
-    rat_val = case neg_val of
-		HsIntegral   i -> fromInteger i
-		HsFractional f -> f
-		_ -> panic "tidyNPat"
+    mb_rat_lit :: Maybe Rational
+    mb_rat_lit = case (mb_neg, val) of
+		   (Nothing, HsIntegral   i) -> Just (fromInteger i)
+		   (Just _,  HsIntegral   i) -> Just (fromInteger (-i))
+		   (Nothing, HsFractional f) -> Just f
+		   (Just _, HsFractional f)  -> Just (-f)
+		   _ -> Nothing
 	
-{-
-    str_val :: FastString
-    str_val = case val of
-		HsIsString s -> s
-		_ -> panic "tidyNPat"
--}
+    mb_str_lit :: Maybe FastString
+    mb_str_lit = case (mb_neg, val) of
+		   (Nothing, HsIsString s) -> Just s
+		   _ -> Nothing
 
 tidyNPat over_lit mb_neg eq 
   = NPat over_lit mb_neg eq
@@ -248,14 +251,8 @@ matchLiterals [] _ _ = panic "matchLiterals []"
 %************************************************************************
 
 \begin{code}
-matchNPats :: [Id] -> Type -> [[EquationInfo]] -> DsM MatchResult
-	-- All NPats, but perhaps for different literals
-matchNPats vars ty groups
-  = do {  match_results <- mapM (matchOneNPat vars ty) groups
-	; return (foldr1 combineMatchResults match_results) }
-
-matchOneNPat :: [Id] -> Type -> [EquationInfo] -> DsM MatchResult
-matchOneNPat (var:vars) ty (eqn1:eqns)	-- All for the same literal
+matchNPats :: [Id] -> Type -> [EquationInfo] -> DsM MatchResult
+matchNPats (var:vars) ty (eqn1:eqns)	-- All for the same literal
   = do	{ let NPat lit mb_neg eq_chk = firstPat eqn1
 	; lit_expr <- dsOverLit lit
 	; neg_lit <- case mb_neg of
@@ -266,7 +263,7 @@ matchOneNPat (var:vars) ty (eqn1:eqns)	-- All for the same literal
 	; let pred_expr = mkApps eq_expr [Var var, neg_lit]
 	; match_result <- match vars ty (shiftEqns (eqn1:eqns))
 	; return (mkGuardedMatchResult pred_expr match_result) }
-matchOneNPat vars _ eqns = pprPanic "matchOneNPat" (ppr (vars, eqns))
+matchNPats vars _ eqns = pprPanic "matchOneNPat" (ppr (vars, eqns))
 \end{code}
 
 

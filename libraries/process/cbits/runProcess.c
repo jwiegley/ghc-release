@@ -4,6 +4,10 @@
    Support for System.Process
    ------------------------------------------------------------------------- */
 
+#if defined(_MSC_VER) || defined(__MINGW32__) || defined(_WIN32)
+#define UNICODE
+#endif
+
 /* XXX This is a nasty hack; should put everything necessary in this package */
 #include "HsBase.h"
 #include "Rts.h"
@@ -45,16 +49,30 @@ runInteractiveProcess (char *const args[],
 {
     int pid;
     int fdStdInput[2], fdStdOutput[2], fdStdError[2];
+    int r;
     struct sigaction dfl;
 
     if (fdStdIn == -1) {
-        pipe(fdStdInput);
+        r = pipe(fdStdInput);
+        if (r == -1) { 
+            sysErrorBelch("runInteractiveProcess: pipe");
+            return -1;
+        }
+        
     }
     if (fdStdOut == -1) {
-        pipe(fdStdOutput);
+        r = pipe(fdStdOutput);
+        if (r == -1) { 
+            sysErrorBelch("runInteractiveProcess: pipe");
+            return -1;
+        }
     }
     if (fdStdErr == -1) {
-        pipe(fdStdError);
+        r = pipe(fdStdError);
+        if (r == -1) { 
+            sysErrorBelch("runInteractiveProcess: pipe");
+            return -1;
+        }
     }
 
     // Block signals with Haskell handlers.  The danger here is that
@@ -281,16 +299,9 @@ mkAnonPipe (HANDLE* pHandleIn, BOOL isInheritableIn,
 {
 	HANDLE hTemporaryIn  = NULL;
 	HANDLE hTemporaryOut = NULL;
-	BOOL status;
-	SECURITY_ATTRIBUTES sec_attrs;
-
-	/* Create inheritable security attributes */
-	sec_attrs.nLength = sizeof(SECURITY_ATTRIBUTES);
-	sec_attrs.lpSecurityDescriptor = NULL;
-	sec_attrs.bInheritHandle = TRUE;
 
 	/* Create the anon pipe with both ends inheritable */
-	if (!CreatePipe(&hTemporaryIn, &hTemporaryOut, &sec_attrs, 0))
+	if (!CreatePipe(&hTemporaryIn, &hTemporaryOut, NULL, 0))
 	{
 		maperrno();
 		*pHandleIn  = NULL;
@@ -298,53 +309,43 @@ mkAnonPipe (HANDLE* pHandleIn, BOOL isInheritableIn,
 		return FALSE;
 	}
 
-	if (isInheritableIn)
-		*pHandleIn = hTemporaryIn;
-	else
-	{
-		/* Make the read end non-inheritable */
-		status = DuplicateHandle(GetCurrentProcess(), hTemporaryIn,
-			      GetCurrentProcess(), pHandleIn,
-			      0,
-			      FALSE, /* non-inheritable */
-			      DUPLICATE_SAME_ACCESS);
-		CloseHandle(hTemporaryIn);
-		if (!status)
-		{
-			maperrno();
-			*pHandleIn  = NULL;
-			*pHandleOut = NULL;
-			CloseHandle(hTemporaryOut);
-			return FALSE;
-		}
+	if (isInheritableIn) {
+            // SetHandleInformation requires at least Win2k
+            if (!SetHandleInformation(hTemporaryIn,
+                                      HANDLE_FLAG_INHERIT, 
+                                      HANDLE_FLAG_INHERIT))
+            {
+                maperrno();
+                *pHandleIn  = NULL;
+                *pHandleOut = NULL;
+                CloseHandle(hTemporaryIn);
+                CloseHandle(hTemporaryOut);
+                return FALSE;
+            }
 	}
+        *pHandleIn = hTemporaryIn;
 
-	if (isInheritableOut)
-		*pHandleOut = hTemporaryOut;
-	else
-	{
-		/* Make the write end non-inheritable */
-		status = DuplicateHandle(GetCurrentProcess(), hTemporaryOut,
-			      GetCurrentProcess(), pHandleOut,
-			      0,
-			      FALSE, /* non-inheritable */
-			      DUPLICATE_SAME_ACCESS);
-		CloseHandle(hTemporaryOut);
-		if (!status)
-		{
-			maperrno();
-			*pHandleIn  = NULL;
-			*pHandleOut = NULL;
-			CloseHandle(*pHandleIn);
-      		return FALSE;
-    	}
-	}
-
+	if (isInheritableOut) {
+            if (!SetHandleInformation(hTemporaryOut,
+                                      HANDLE_FLAG_INHERIT, 
+                                      HANDLE_FLAG_INHERIT))
+            {
+                maperrno();
+                *pHandleIn  = NULL;
+                *pHandleOut = NULL;
+                CloseHandle(hTemporaryIn);
+                CloseHandle(hTemporaryOut);
+                return FALSE;
+            }
+        }
+        *pHandleOut = hTemporaryOut;
+        
 	return TRUE;
 }
 
 ProcHandle
-runInteractiveProcess (char *cmd, char *workingDirectory, void *environment,
+runInteractiveProcess (wchar_t *cmd, wchar_t *workingDirectory, 
+                       void *environment,
                        int fdStdIn, int fdStdOut, int fdStdErr,
 		       int *pfdStdInput, int *pfdStdOutput, int *pfdStdError,
                        int close_fds)

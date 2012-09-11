@@ -139,7 +139,9 @@ mkGroupByUsingStmt :: [LStmt idL] -> LHsExpr idR -> LHsExpr idR -> StmtLR idL id
 
 mkExprStmt :: LHsExpr idR -> StmtLR idL idR
 mkBindStmt :: LPat idL -> LHsExpr idR -> StmtLR idL idR
-mkRecStmt  :: [LStmtLR idL idR] -> StmtLR idL idR
+
+emptyRecStmt :: StmtLR idL idR
+mkRecStmt    :: [LStmtLR idL idR] -> StmtLR idL idR
 
 
 mkHsIntegral   i       = OverLit (HsIntegral   i)  noRebindableInfo noSyntaxExpr
@@ -163,7 +165,13 @@ mkGroupByUsingStmt stmts byExpr usingExpr = GroupStmt (stmts, []) (GroupBySometh
 
 mkExprStmt expr	    = ExprStmt expr noSyntaxExpr placeHolderType
 mkBindStmt pat expr = BindStmt pat expr noSyntaxExpr noSyntaxExpr
-mkRecStmt stmts	    = RecStmt stmts [] [] [] emptyLHsBinds
+
+emptyRecStmt = RecStmt { recS_stmts = [], recS_later_ids = [], recS_rec_ids = []
+                       , recS_ret_fn = noSyntaxExpr, recS_mfix_fn = noSyntaxExpr
+		       , recS_bind_fn = noSyntaxExpr
+                       , recS_rec_rets = [], recS_dicts = emptyLHsBinds }
+
+mkRecStmt stmts = emptyRecStmt { recS_stmts = stmts }
 
 -------------------------------
 --- A useful function for building @OpApps@.  The operator is always a
@@ -245,9 +253,6 @@ nlWildConPat :: DataCon -> LPat RdrName
 nlWildConPat con = noLoc (ConPatIn (noLoc (getRdrName con))
 				   (PrefixCon (nOfThem (dataConSourceArity con) nlWildPat)))
 
-nlTuplePat :: [LPat id] -> Boxity -> LPat id
-nlTuplePat pats box = noLoc (TuplePat pats box placeHolderType)
-
 nlWildPat :: LPat id
 nlWildPat  = noLoc (WildPat placeHolderType)	-- Pre-typechecking
 
@@ -261,14 +266,12 @@ nlHsLam  :: LMatch id -> LHsExpr id
 nlHsPar  :: LHsExpr id -> LHsExpr id
 nlHsIf   :: LHsExpr id -> LHsExpr id -> LHsExpr id -> LHsExpr id
 nlHsCase :: LHsExpr id -> [LMatch id] -> LHsExpr id
-nlTuple  :: [LHsExpr id] -> Boxity -> LHsExpr id
 nlList   :: [LHsExpr id] -> LHsExpr id
 
 nlHsLam	match		= noLoc (HsLam (mkMatchGroup [match]))
 nlHsPar e		= noLoc (HsPar e)
 nlHsIf cond true false	= noLoc (HsIf cond true false)
 nlHsCase expr matches	= noLoc (HsCase expr (mkMatchGroup matches))
-nlTuple exprs box	= noLoc (ExplicitTuple exprs box)
 nlList exprs		= noLoc (ExplicitList placeHolderType exprs)
 
 nlHsAppTy :: LHsType name -> LHsType name -> LHsType name
@@ -283,7 +286,24 @@ nlHsTyConApp :: name -> [LHsType name] -> LHsType name
 nlHsTyConApp tycon tys  = foldl nlHsAppTy (nlHsTyVar tycon) tys
 \end{code}
 
+Tuples.  All these functions are *pre-typechecker* because they lack
+types on the tuple.
 
+\begin{code}
+mkLHsTupleExpr :: [LHsExpr a] -> LHsExpr a
+-- Makes a pre-typechecker boxed tuple, deals with 1 case
+mkLHsTupleExpr [e] = e
+mkLHsTupleExpr es  = noLoc $ ExplicitTuple (map Present es) Boxed
+
+mkLHsVarTuple :: [a] -> LHsExpr a
+mkLHsVarTuple ids  = mkLHsTupleExpr (map nlHsVar ids)
+
+nlTuplePat :: [LPat id] -> Boxity -> LPat id
+nlTuplePat pats box = noLoc (TuplePat pats box placeHolderType)
+
+missingTupArg :: HsTupArg a
+missingTupArg = Missing placeHolderType
+\end{code}
 
 %************************************************************************
 %*									*
@@ -326,9 +346,8 @@ mkMatch pats expr binds
   = noLoc (Match (map paren pats) Nothing 
 		 (GRHSs (unguardedRHS expr) binds))
   where
-    paren p = case p of
-		L _ (VarPat _) -> p
-		L l _	       -> L l (ParPat p)
+    paren lp@(L l p) | hsPatNeedsParens p = L l (ParPat lp) 
+		     | otherwise          = lp
 \end{code}
 
 
@@ -403,8 +422,8 @@ collectStmtBinders (ExprStmt _ _ _)     = []
 collectStmtBinders (ParStmt xs)         = collectLStmtsBinders
                                         $ concatMap fst xs
 collectStmtBinders (TransformStmt (stmts, _) _ _) = collectLStmtsBinders stmts
-collectStmtBinders (GroupStmt (stmts, _) _)     = collectLStmtsBinders stmts
-collectStmtBinders (RecStmt ss _ _ _ _) = collectLStmtsBinders ss
+collectStmtBinders (GroupStmt (stmts, _) _)       = collectLStmtsBinders stmts
+collectStmtBinders (RecStmt { recS_stmts = ss })  = collectLStmtsBinders ss
 \end{code}
 
 

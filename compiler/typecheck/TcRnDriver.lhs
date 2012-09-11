@@ -25,7 +25,7 @@ module TcRnDriver (
 	tcRnExtCore
     ) where
 
-import IO
+import System.IO
 #ifdef GHCI
 import {-# SOURCE #-} TcSplice ( tcSpliceDecls )
 #endif
@@ -34,7 +34,6 @@ import DynFlags
 import StaticFlags
 import HsSyn
 import RdrHsSyn
-
 import PrelNames
 import RdrName
 import TcHsSyn
@@ -45,6 +44,7 @@ import Inst
 import FamInst
 import InstEnv
 import FamInstEnv
+import TcAnnotations
 import TcBinds
 import TcDefaults
 import TcEnv
@@ -97,6 +97,7 @@ import IdInfo
 import {- Kind parts of -} Type
 import BasicTypes
 import Foreign.Ptr( Ptr )
+import TidyPgm	( globaliseAndTidyId )
 #endif
 
 import FastString
@@ -109,8 +110,6 @@ import Data.Maybe	( isJust )
 
 #include "HsVersions.h"
 \end{code}
-
-
 
 %************************************************************************
 %*									*
@@ -129,7 +128,7 @@ tcRnModule :: HscEnv
 tcRnModule hsc_env hsc_src save_rn_syntax
 	 (L loc (HsModule maybe_mod export_ies 
 			  import_decls local_decls mod_deprec
-			  module_info maybe_doc))
+			  maybe_doc_hdr))
  = do { showPass (hsc_dflags hsc_env) "Renamer/typechecker" ;
 
    let { this_pkg = thisPackage (hsc_dflags hsc_env) ;
@@ -187,8 +186,9 @@ tcRnModule hsc_env hsc_src save_rn_syntax
 	-- because the latter might add new bindings for boot_dfuns, 
 	-- which may be mentioned in imported unfoldings
 
-		-- Rename the Haddock documentation 
-	tcg_env <- rnHaddock module_info maybe_doc tcg_env ;
+		-- Don't need to rename the Haddock documentation,
+		-- it's not parsed by GHC anymore.
+	tcg_env <- return (tcg_env { tcg_doc_hdr = maybe_doc_hdr }) ;
 
 		-- Report unused names
  	reportUnusedNames export_ies tcg_env ;
@@ -235,7 +235,7 @@ tcRnImports hsc_env this_mod import_decls
 	    gbl { 
               tcg_rdr_env      = plusOccEnv (tcg_rdr_env gbl) rdr_env,
 	      tcg_imports      = tcg_imports gbl `plusImportAvails` imports,
-              tcg_rn_imports   = fmap (const rn_imports) (tcg_rn_imports gbl),
+              tcg_rn_imports   = rn_imports,
 	      tcg_inst_env     = extendInstEnvList (tcg_inst_env gbl) home_insts,
 	      tcg_fam_inst_env = extendFamInstEnvList (tcg_fam_inst_env gbl) 
                                                       home_fam_insts,
@@ -305,10 +305,12 @@ tcRnExtCore hsc_env (HsExtCore this_mod decls src_binds)
 
 	-- Typecheck them all together so that
 	-- any mutually recursive types are done right
-   tcg_env <- tcTyAndClassDecls emptyModDetails rn_decls ;
-	-- Make the new type env available to stuff slurped from interface files
+	-- Just discard the auxiliary bindings; they are generated 
+	-- only for Haskell source code, and should already be in Core
+   (tcg_env, _aux_binds) <- tcTyAndClassDecls emptyModDetails rn_decls ;
 
    setGblEnv tcg_env $ do {
+	-- Make the new type env available to stuff slurped from interface files
    
 	-- Now the core bindings
    core_binds <- initIfaceExtCore (tcExtCoreBindings src_binds) ;
@@ -319,7 +321,8 @@ tcRnExtCore hsc_env (HsExtCore this_mod decls src_binds)
 	my_exports = map (Avail . idName) bndrs ;
 		-- ToDo: export the data types also?
 
-	final_type_env = extendTypeEnvWithIds (tcg_type_env tcg_env) bndrs ;
+	final_type_env = 
+             extendTypeEnvWithIds (tcg_type_env tcg_env) bndrs ;
 
 	mod_guts = ModGuts {	mg_module    = this_mod,
 				mg_boot	     = False,
@@ -390,8 +393,10 @@ tcRnSrcDecls boot_iface decls
 	    -- Even tcSimplifyTop may do some unification.
         traceTc (text "Tc9") ;
 	let { (tcg_env, _) = tc_envs
-	    ; TcGblEnv { tcg_type_env = type_env, tcg_binds = binds, 
-		         tcg_rules = rules, tcg_fords = fords } = tcg_env
+	    ; TcGblEnv { tcg_type_env = type_env,
+		         tcg_binds = binds,
+		         tcg_rules = rules,
+		         tcg_fords = fords } = tcg_env
 	    ; all_binds = binds `unionBags` inst_binds } ;
 
 	failIfErrsM ;	-- Don't zonk if there have been errors
@@ -468,26 +473,32 @@ tcRnHsBootDecls decls
 	     Nothing    -> return ()
 
 		-- Rename the declarations
-	; (tcg_env, rn_group) <- rnTopSrcDecls first_group
+	; (tcg_env, HsGroup { 
+		   hs_tyclds = tycl_decls, 
+		   hs_instds = inst_decls,
+		   hs_derivds = deriv_decls,
+		   hs_fords  = _,
+		   hs_defds  = _, -- Todo: check no foreign decls, no rules,
+		   hs_ruleds = _, -- no default decls and no annotation decls
+		   hs_annds  = _,
+		   hs_valds  = val_binds }) <- rnTopSrcDecls first_group
 	; setGblEnv tcg_env $ do {
 
-	-- Todo: check no foreign decls, no rules, no default decls
 
 		-- Typecheck type/class decls
 	; traceTc (text "Tc2")
-	; let tycl_decls = hs_tyclds rn_group
-	; tcg_env <- tcTyAndClassDecls emptyModDetails tycl_decls
+	; (tcg_env, aux_binds) <- tcTyAndClassDecls emptyModDetails tycl_decls
 	; setGblEnv tcg_env	$ do {
 
 		-- Typecheck instance decls
 	; traceTc (text "Tc3")
 	; (tcg_env, inst_infos, _deriv_binds) 
-            <- tcInstDecls1 tycl_decls (hs_instds rn_group) (hs_derivds rn_group)
+            <- tcInstDecls1 tycl_decls inst_decls deriv_decls
 	; setGblEnv tcg_env	$ do {
 
 		-- Typecheck value declarations
 	; traceTc (text "Tc5") 
-	; val_ids <- tcHsBootSigs (hs_valds rn_group)
+	; val_ids <- tcHsBootSigs val_binds
 
 		-- Wrap up
 		-- No simplification or zonking to do
@@ -496,11 +507,18 @@ tcRnHsBootDecls decls
 	
 		-- Make the final type-env
 		-- Include the dfun_ids so that their type sigs
-		-- are written into the interface file
+		-- are written into the interface file. 
+		-- And similarly the aux_ids from aux_binds
 	; let { type_env0 = tcg_type_env gbl_env
 	      ; type_env1 = extendTypeEnvWithIds type_env0 val_ids
 	      ; type_env2 = extendTypeEnvWithIds type_env1 dfun_ids 
-	      ; dfun_ids = map iDFunId inst_infos }
+	      ; type_env3 = extendTypeEnvWithIds type_env1 aux_ids 
+	      ; dfun_ids = map iDFunId inst_infos
+	      ; aux_ids  = case aux_binds of
+	      		     ValBindsOut _ sigs -> [id | L _ (IdSig id) <- sigs]
+			     _		   	-> panic "tcRnHsBoodDecls"
+	      }
+
 	; setGlobalTypeEnv gbl_env type_env2  
    }}}}
 
@@ -625,6 +643,53 @@ checkBootDecl (AnId id1) (AnId id2)
     (idType id1 `tcEqType` idType id2)
 
 checkBootDecl (ATyCon tc1) (ATyCon tc2)
+  = checkBootTyCon tc1 tc2
+
+checkBootDecl (AClass c1)  (AClass c2)
+  = let 
+       (clas_tyvars1, clas_fds1, sc_theta1, _, ats1, op_stuff1) 
+          = classExtraBigSig c1
+       (clas_tyvars2, clas_fds2, sc_theta2, _, ats2, op_stuff2) 
+          = classExtraBigSig c2
+
+       env0 = mkRnEnv2 emptyInScopeSet
+       env = rnBndrs2 env0 clas_tyvars1 clas_tyvars2
+
+       eqSig (id1, def_meth1) (id2, def_meth2)
+         = idName id1 == idName id2 &&
+           tcEqTypeX env op_ty1 op_ty2
+         where
+	  (_, rho_ty1) = splitForAllTys (idType id1)
+	  op_ty1 = funResultTy rho_ty1
+	  (_, rho_ty2) = splitForAllTys (idType id2)
+          op_ty2 = funResultTy rho_ty2
+
+       eqFD (as1,bs1) (as2,bs2) = 
+         eqListBy (tcEqTypeX env) (mkTyVarTys as1) (mkTyVarTys as2) &&
+         eqListBy (tcEqTypeX env) (mkTyVarTys bs1) (mkTyVarTys bs2)
+
+       same_kind tv1 tv2 = eqKind (tyVarKind tv1) (tyVarKind tv2)
+    in
+       eqListBy same_kind clas_tyvars1 clas_tyvars2 &&
+       	     -- Checks kind of class
+       eqListBy eqFD clas_fds1 clas_fds2 &&
+       (null sc_theta1 && null op_stuff1 && null ats1
+        ||   -- Above tests for an "abstract" class
+        eqListBy (tcEqPredX env) sc_theta1 sc_theta2 &&
+        eqListBy eqSig op_stuff1 op_stuff2 &&
+        eqListBy checkBootTyCon ats1 ats2)
+
+checkBootDecl (ADataCon dc1) (ADataCon dc2)
+  = pprPanic "checkBootDecl" (ppr dc1)
+
+checkBootDecl _ _ = False -- probably shouldn't happen
+
+----------------
+checkBootTyCon :: TyCon -> TyCon -> Bool
+checkBootTyCon tc1 tc2
+  | not (eqKind (tyConKind tc1) (tyConKind tc2))
+  = False	-- First off, check the kind
+
   | isSynTyCon tc1 && isSynTyCon tc2
   = ASSERT(tc1 == tc2)
     let tvs1 = tyConTyVars tc1; tvs2 = tyConTyVars tc2
@@ -640,11 +705,13 @@ checkBootDecl (ATyCon tc1) (ATyCon tc2)
 
   | isAlgTyCon tc1 && isAlgTyCon tc2
   = ASSERT(tc1 == tc2)
-    eqListBy tcEqPred (tyConStupidTheta tc1) (tyConStupidTheta tc2)
-    && eqAlgRhs (algTyConRhs tc1) (algTyConRhs tc2)
+    eqKind (tyConKind tc1) (tyConKind tc2) &&
+    eqListBy tcEqPred (tyConStupidTheta tc1) (tyConStupidTheta tc2) &&
+    eqAlgRhs (algTyConRhs tc1) (algTyConRhs tc2)
 
   | isForeignTyCon tc1 && isForeignTyCon tc2
-  = tyConExtName tc1 == tyConExtName tc2
+  = eqKind (tyConKind tc1) (tyConKind tc2) &&
+    tyConExtName tc1 == tyConExtName tc2
   where 
         env0 = mkRnEnv2 emptyInScopeSet
 
@@ -672,41 +739,6 @@ checkBootDecl (ATyCon tc1) (ATyCon tc2)
               eqListBy (tcEqTypeX env)
                         (dataConOrigArgTys c1)
                         (dataConOrigArgTys c2)
-
-checkBootDecl (AClass c1)  (AClass c2)
-  = let 
-       (clas_tyvars1, clas_fds1, sc_theta1, _, _, op_stuff1) 
-          = classExtraBigSig c1
-       (clas_tyvars2, clas_fds2, sc_theta2, _, _, op_stuff2) 
-          = classExtraBigSig c2
-
-       env0 = mkRnEnv2 emptyInScopeSet
-       env = rnBndrs2 env0 clas_tyvars1 clas_tyvars2
-
-       eqSig (id1, def_meth1) (id2, def_meth2)
-         = idName id1 == idName id2 &&
-           tcEqTypeX env op_ty1 op_ty2
-         where
-	  (_, rho_ty1) = splitForAllTys (idType id1)
-	  op_ty1 = funResultTy rho_ty1
-	  (_, rho_ty2) = splitForAllTys (idType id2)
-          op_ty2 = funResultTy rho_ty2
-
-       eqFD (as1,bs1) (as2,bs2) = 
-         eqListBy (tcEqTypeX env) (mkTyVarTys as1) (mkTyVarTys as2) &&
-         eqListBy (tcEqTypeX env) (mkTyVarTys bs1) (mkTyVarTys bs2)
-    in
-       equalLength clas_tyvars1 clas_tyvars2 &&
-       eqListBy eqFD clas_fds1 clas_fds2 &&
-       (null sc_theta1 && null op_stuff1
-        ||
-        eqListBy (tcEqPredX env) sc_theta1 sc_theta2 &&
-        eqListBy eqSig op_stuff1 op_stuff2)
-
-checkBootDecl (ADataCon dc1) (ADataCon dc2)
-  = pprPanic "checkBootDecl" (ppr dc1)
-
-checkBootDecl _ _ = False -- probably shouldn't happen
 
 ----------------
 missingBootThing thing what
@@ -770,13 +802,14 @@ tcTopSrcDecls boot_details
                    hs_derivds = deriv_decls,
 		   hs_fords  = foreign_decls,
 		   hs_defds  = default_decls,
+		   hs_annds  = annotation_decls,
 		   hs_ruleds = rule_decls,
 		   hs_valds  = val_binds })
  = do {		-- Type-check the type and class decls, and all imported decls
 		-- The latter come in via tycl_decls
         traceTc (text "Tc2") ;
 
-	tcg_env <- tcTyAndClassDecls boot_details tycl_decls ;
+	(tcg_env, aux_binds) <- tcTyAndClassDecls boot_details tycl_decls ;
 		-- If there are any errors, tcTyAndClassDecls fails here
 	
 	setGblEnv tcg_env	$ do {
@@ -787,8 +820,7 @@ tcTopSrcDecls boot_details
             <- tcInstDecls1 tycl_decls inst_decls deriv_decls;
 	setGblEnv tcg_env	$ do {
 
-	        -- Foreign import declarations next.  No zonking necessary
-		-- here; we can tuck them straight into the global environment.
+	        -- Foreign import declarations next. 
         traceTc (text "Tc4") ;
 	(fi_ids, fi_decls) <- tcForeignImports foreign_decls ;
 	tcExtendGlobalValEnv fi_ids	$ do {
@@ -798,27 +830,32 @@ tcTopSrcDecls boot_details
 	default_tys <- tcDefaults default_decls ;
 	updGblEnv (\gbl -> gbl { tcg_default = default_tys }) $ do {
 	
-		-- Value declarations next
-		-- We also typecheck any extra binds that came out 
-		-- of the "deriving" process (deriv_binds)
-        traceTc (text "Tc5") ;
-	(tc_val_binds,   tcl_env) <- tcTopBinds val_binds ;
-	setLclTypeEnv tcl_env 	$ do {
+		-- Now GHC-generated derived bindings, generics, and selectors
+		-- Do not generate warnings from compiler-generated code;
+		-- hence the use of discardWarnings
+	(tc_aux_binds,   tcl_env) <- discardWarnings (tcTopBinds aux_binds) ;
+	(tc_deriv_binds, tcl_env) <- setLclTypeEnv tcl_env $ 
+			 	     discardWarnings (tcTopBinds deriv_binds) ;
 
-		-- Now GHC-generated derived bindings and generics.
-		-- Do not generate warnings from compiler-generated code.
-	(tc_deriv_binds, tcl_env) <- discardWarnings $
-                                 tcTopBinds deriv_binds ;
+		-- Value declarations next
+        traceTc (text "Tc5") ;
+	(tc_val_binds, tcl_env) <- setLclTypeEnv tcl_env $
+			 	   tcTopBinds val_binds;
 
 	     	-- Second pass over class and instance declarations, 
         traceTc (text "Tc6") ;
-	(inst_binds, tcl_env)     <- setLclTypeEnv tcl_env $ tcInstDecls2 tycl_decls inst_infos ;
-	showLIE (text "after instDecls2") ;
+	(inst_binds, tcl_env) <- setLclTypeEnv tcl_env $ 
+                                 tcInstDecls2 tycl_decls inst_infos ;
+                                 	showLIE (text "after instDecls2") ;
+
+        setLclTypeEnv tcl_env $ do {	-- Environment doesn't change now
 
 		-- Foreign exports
-		-- They need to be zonked, so we return them
         traceTc (text "Tc7") ;
 	(foe_binds, foe_decls) <- tcForeignExports foreign_decls ;
+
+                -- Annotations
+	annotations <- tcAnnotations annotation_decls ;
 
 		-- Rules
 	rules <- tcRules rule_decls ;
@@ -828,13 +865,15 @@ tcTopSrcDecls boot_details
 	tcg_env <- getGblEnv ;
 	let { all_binds = tc_val_binds	 `unionBags`
 			  tc_deriv_binds `unionBags`
+			  tc_aux_binds   `unionBags`
 			  inst_binds	 `unionBags`
-			  foe_binds  ;
+			  foe_binds;
 
 		-- Extend the GblEnv with the (as yet un-zonked) 
 		-- bindings, rules, foreign decls
 	      tcg_env' = tcg_env {  tcg_binds = tcg_binds tcg_env `unionBags` all_binds,
 				    tcg_rules = tcg_rules tcg_env ++ rules,
+				    tcg_anns  = tcg_anns tcg_env ++ annotations,
 				    tcg_fords = tcg_fords tcg_env ++ foe_decls ++ fi_decls } } ;
   	return (tcg_env', tcl_env)
     }}}}}}
@@ -917,6 +956,12 @@ check_main dflags tcg_env
     pp_main_fn | main_fn == main_RDR_Unqual = ptext (sLit "function") <+> quotes (ppr main_fn)
 	       | otherwise                  = ptext (sLit "main function") <+> quotes (ppr main_fn)
 	       
+-- | Get the unqualified name of the function to use as the \"main\" for the main module.
+-- Either returns the default name or the one configured on the command line with -main-is
+getMainFun :: DynFlags -> RdrName
+getMainFun dflags = case (mainFunIs dflags) of
+    Just fn -> mkRdrUnqual (mkVarOccFS (mkFastString fn))
+    Nothing -> main_RDR_Unqual
 \end{code}
 
 Note [Root-main Id]
@@ -1001,8 +1046,9 @@ tcRnStmt hsc_env ictxt rdr_stmt
     mapM bad_unboxed (filter (isUnLiftedType . idType) zonked_ids) ;
 
     traceTc (text "tcs 1") ;
-    let { global_ids = map globaliseAndTidy zonked_ids } ;
-    
+    let { global_ids = map globaliseAndTidyId zonked_ids } ;
+        -- Note [Interactively-bound Ids in GHCi]
+
 {- ---------------------------------------------
    At one stage I removed any shadowed bindings from the type_env;
    they are inaccessible but might, I suppose, cause a space leak if we leave them there.
@@ -1031,12 +1077,6 @@ tcRnStmt hsc_env ictxt rdr_stmt
   where
     bad_unboxed id = addErr (sep [ptext (sLit "GHCi can't bind a variable of unlifted type:"),
 				  nest 2 (ppr id <+> dcolon <+> ppr (idType id))])
-
-globaliseAndTidy :: Id -> Id
-globaliseAndTidy id	-- Note [Interactively-bound Ids in GHCi]
-  = Id.setIdType (globaliseId VanillaGlobal id) tidy_type
-  where
-    tidy_type = tidyTopType (idType id)
 \end{code}
 
 Note [Interactively-bound Ids in GHCi]
@@ -1244,7 +1284,7 @@ tcRnType hsc_env ictxt rdr_type
     failIfErrsM ;
 
 	-- Now kind-check the type
-    (ty', kind) <- kcHsType rn_type ;
+    (ty', kind) <- kcLHsType rn_type ;
     return kind
     }
   where
@@ -1352,7 +1392,7 @@ tcRnGetInfo :: HscEnv
 	    -> Name
 	    -> IO (Messages, Maybe (TyThing, Fixity, [Instance]))
 
--- Used to implemnent :info in GHCi
+-- Used to implement :info in GHCi
 --
 -- Look up a RdrName and return all the TyThings it might be
 -- A capitalised RdrName is given to us in the DataName namespace,

@@ -1,13 +1,8 @@
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module CmmInfo (
+  emptyContInfoTable,
   cmmToRawCmm,
-  mkInfoTable
+  mkInfoTable,
+  mkBareInfoTable
 ) where
 
 #include "HsVersions.h"
@@ -16,7 +11,6 @@ import Cmm
 import CmmUtils
 
 import CLabel
-import MachOp
 
 import Bitmap
 import ClosureInfo
@@ -24,14 +18,22 @@ import CgInfoTbls
 import CgCallConv
 import CgUtils
 import SMRep
+import ZipCfgCmmRep
 
 import Constants
+import Panic
 import StaticFlags
 import Unique
 import UniqSupply
-import Panic
 
 import Data.Bits
+
+-- When we split at proc points, we need an empty info table.
+emptyContInfoTable :: CmmInfo
+emptyContInfoTable =
+  CmmInfo Nothing Nothing (CmmInfoTable False (ProfilingInfo zero zero) rET_SMALL
+                                              (ContInfo [] NoC_SRT))
+    where zero = CmmInt 0 wordWidth
 
 cmmToRawCmm :: [Cmm] -> IO [RawCmm]
 cmmToRawCmm cmm = do
@@ -56,7 +58,7 @@ cmmToRawCmm cmm = do
 --	<normal forward rest of StgInfoTable>
 --	<forward variable part>
 --
---	See includes/InfoTables.h
+--	See includes/rts/storage/InfoTables.h
 --
 -- For return-points these are as follows
 --
@@ -75,22 +77,23 @@ cmmToRawCmm cmm = do
 --  * The SRT slot is only there if there is SRT info to record
 
 mkInfoTable :: Unique -> CmmTop -> [RawCmmTop]
-mkInfoTable uniq (CmmData sec dat) = [CmmData sec dat]
+mkInfoTable _    (CmmData sec dat) = [CmmData sec dat]
 mkInfoTable uniq (CmmProc (CmmInfo _ _ info) entry_label arguments blocks) =
     case info of
       -- Code without an info table.  Easy.
       CmmNonInfoTable -> [CmmProc [] entry_label arguments blocks]
 
-      CmmInfoTable (ProfilingInfo ty_prof cl_prof) type_tag type_info ->
+      CmmInfoTable _ (ProfilingInfo ty_prof cl_prof) type_tag type_info ->
           let info_label = entryLblToInfoLbl entry_label
-              ty_prof' = makeRelativeRefTo info_label ty_prof
-              cl_prof' = makeRelativeRefTo info_label cl_prof
+              ty_prof'   = makeRelativeRefTo info_label ty_prof
+              cl_prof'   = makeRelativeRefTo info_label cl_prof
           in case type_info of
           -- A function entry point.
-          FunInfo (ptrs, nptrs) srt fun_type fun_arity pap_bitmap slow_entry ->
+          FunInfo (ptrs, nptrs) srt fun_arity pap_bitmap slow_entry ->
               mkInfoTableAndCode info_label std_info fun_extra_bits entry_label
                                  arguments blocks
             where
+              fun_type = argDescrType pap_bitmap
               fun_extra_bits =
                  [packHalfWordsCLit fun_type fun_arity] ++
                  case pap_bitmap of
@@ -112,7 +115,6 @@ mkInfoTable uniq (CmmProc (CmmInfo _ _ info) entry_label arguments blocks) =
                 std_info = mkStdInfoTable ty_prof' cl_prof' type_tag con_tag layout
                 con_name = makeRelativeRefTo info_label descr
                 layout = packHalfWordsCLit ptrs nptrs
-
           -- A thunk.
           ThunkInfo (ptrs, nptrs) srt ->
               mkInfoTableAndCode info_label std_info srt_label entry_label
@@ -123,7 +125,7 @@ mkInfoTable uniq (CmmProc (CmmInfo _ _ info) entry_label arguments blocks) =
                 layout = packHalfWordsCLit ptrs nptrs
 
           -- A selector thunk.
-          ThunkSelectorInfo offset srt ->
+          ThunkSelectorInfo offset _srt ->
               mkInfoTableAndCode info_label std_info [{- no SRT -}] entry_label
                                  arguments blocks
               where
@@ -144,13 +146,24 @@ mkInfoTable uniq (CmmProc (CmmInfo _ _ info) entry_label arguments blocks) =
                                      else type_tag
                 (srt_label, srt_bitmap) = mkSRTLit info_label srt
 
+-- Generate a bare info table, not attached to any procedure.
+mkBareInfoTable :: CLabel -> Unique -> CmmInfoTable -> [CmmTopZ]
+mkBareInfoTable lbl uniq info =
+  case mkInfoTable uniq (CmmProc (CmmInfo Nothing Nothing info) lbl [] (ListGraph [])) of
+    [CmmProc d _ _ _] ->
+      ASSERT (tablesNextToCode)
+      [CmmData Data (d ++ [CmmDataLabel (entryLblToInfoLbl lbl)])]
+    [CmmData d s]     -> [CmmData d s]
+    _ -> panic "mkBareInfoTable expected to produce only data"
+
+
 -- Handle the differences between tables-next-to-code
 -- and not tables-next-to-code
 mkInfoTableAndCode :: CLabel
                    -> [CmmLit]
                    -> [CmmLit]
                    -> CLabel
-                   -> CmmFormalsWithoutKinds
+                   -> CmmFormals
                    -> ListGraph CmmStmt
                    -> [RawCmmTop]
 mkInfoTableAndCode info_lbl std_info extra_bits entry_lbl args blocks
@@ -172,7 +185,7 @@ mkSRTLit :: CLabel
          -> C_SRT
          -> ([CmmLit],    -- srt_label
              StgHalfWord) -- srt_bitmap
-mkSRTLit info_label NoC_SRT = ([], 0)
+mkSRTLit _          NoC_SRT = ([], 0)
 mkSRTLit info_label (C_SRT lbl off bitmap) =
     ([makeRelativeRefTo info_label (cmmLabelOffW lbl off)], bitmap)
 
@@ -210,22 +223,19 @@ mkLiveness uniq live =
     -- does not fit in one word
     then (CmmLabel big_liveness, [data_lits], rET_BIG)
     -- fits in one word
-    else (mkWordCLit small_liveness, [], rET_SMALL)
+    else (mkWordCLit  small_liveness, [], rET_SMALL)
   where
     mkBits [] = []
     mkBits (reg:regs) = take sizeW bits ++ mkBits regs where
         sizeW = case reg of
                   Nothing -> 1
-                  Just r -> (machRepByteWidth (localRegRep r) + wORD_SIZE - 1)
+                  Just r -> (widthInBytes (typeWidth (localRegType r)) + wORD_SIZE - 1)
                             `quot` wORD_SIZE
                             -- number of words, rounded up
         bits = repeat $ is_non_ptr reg -- True <=> Non Ptr
 
-    is_non_ptr Nothing = True
-    is_non_ptr (Just reg) =
-        case localRegGCFollow reg of
-          GCKindNonPtr -> True
-          GCKindPtr -> False
+    is_non_ptr Nothing    = True
+    is_non_ptr (Just reg) = not $ isGcPtrType (localRegType reg)
 
     bits :: [Bool]
     bits = mkBits live

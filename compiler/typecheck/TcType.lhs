@@ -71,9 +71,10 @@ module TcType (
   getClassPredTys_maybe, getClassPredTys, 
   isClassPred, isTyVarClassPred, isEqPred, 
   mkDictTy, tcSplitPredTy_maybe, 
-  isPredTy, isDictTy, tcSplitDFunTy, tcSplitDFunHead, predTyUnique, 
+  isPredTy, isDictTy, isDictLikeTy,
+  tcSplitDFunTy, tcSplitDFunHead, predTyUnique, 
   mkClassPred, isInheritablePred, isIPPred, 
-  dataConsStupidTheta, isRefineableTy, isRefineablePred,
+  isRefineableTy, isRefineablePred,
 
   ---------------------------------
   -- Foreign import and export
@@ -83,13 +84,14 @@ module TcType (
   isFFIExternalTy,     -- :: Type -> Bool
   isFFIDynArgumentTy,  -- :: Type -> Bool
   isFFIDynResultTy,    -- :: Type -> Bool
+  isFFIPrimArgumentTy, -- :: DynFlags -> Type -> Bool
+  isFFIPrimResultTy,   -- :: DynFlags -> Type -> Bool
   isFFILabelTy,        -- :: Type -> Bool
   isFFIDotnetTy,       -- :: DynFlags -> Type -> Bool
   isFFIDotnetObjTy,    -- :: Type -> Bool
   isFFITy,	       -- :: Type -> Bool
   isFunPtrTy,          -- :: Type -> Bool
   tcSplitIOType_maybe, -- :: Type -> Maybe Type  
-  toDNType,            -- :: Type -> DNType
 
   --------------------------------
   -- Rexported from Type
@@ -97,7 +99,7 @@ module TcType (
   unliftedTypeKind, liftedTypeKind, argTypeKind,
   openTypeKind, mkArrowKind, mkArrowKinds, 
   isLiftedTypeKind, isUnliftedTypeKind, isSubOpenTypeKind, 
-  isSubArgTypeKind, isSubKind, defaultKind,
+  isSubArgTypeKind, isSubKind, splitKindFunTys, defaultKind,
   kindVarRef, mkKindVar,  
 
   Type, PredType(..), ThetaType, 
@@ -123,7 +125,8 @@ module TcType (
   typeKind, tidyKind,
 
   tyVarsOfType, tyVarsOfTypes, tyVarsOfPred, tyVarsOfTheta,
-  tcTyVarsOfType, tcTyVarsOfTypes, exactTyVarsOfType, exactTyVarsOfTypes,
+  tcTyVarsOfType, tcTyVarsOfTypes, tcTyVarsOfPred, exactTyVarsOfType,
+  exactTyVarsOfTypes, 
 
   pprKind, pprParendKind,
   pprType, pprParendType, pprTypeApp, pprTyThingCategory,
@@ -139,7 +142,6 @@ import DataCon
 import Class
 import Var
 import ForeignCall
-import Unify
 import VarSet
 import Type
 import Coercion
@@ -150,7 +152,6 @@ import DynFlags
 import Name
 import NameSet
 import VarEnv
-import OccName
 import PrelNames
 import TysWiredIn
 import BasicTypes
@@ -160,7 +161,6 @@ import ListSetOps
 import Outputable
 import FastString
 
-import Data.List
 import Data.IORef
 \end{code}
 
@@ -352,6 +352,7 @@ data UserTypeCtxt
   | ForSigCtxt Name	-- Foreign inport or export signature
   | DefaultDeclCtxt	-- Types in a default declaration
   | SpecInstCtxt	-- SPECIALISE instance pragma
+  | ThBrackCtxt		-- Template Haskell type brackets [t| ... |]
 
 -- Notes re TySynCtxt
 -- We allow type synonyms that aren't types; e.g.  type List = []
@@ -409,6 +410,7 @@ pprUserTypeCtxt ExprSigCtxt     = ptext (sLit "an expression type signature")
 pprUserTypeCtxt (ConArgCtxt c)  = ptext (sLit "the type of the constructor") <+> quotes (ppr c)
 pprUserTypeCtxt (TySynCtxt c)   = ptext (sLit "the RHS of the type synonym") <+> quotes (ppr c)
 pprUserTypeCtxt GenPatCtxt      = ptext (sLit "the type pattern of a generic definition")
+pprUserTypeCtxt ThBrackCtxt     = ptext (sLit "a Template Haskell quotation [t|...|]")
 pprUserTypeCtxt LamPatSigCtxt   = ptext (sLit "a pattern type signature")
 pprUserTypeCtxt BindPatSigCtxt  = ptext (sLit "a pattern type signature")
 pprUserTypeCtxt ResSigCtxt      = ptext (sLit "a result type signature")
@@ -894,7 +896,44 @@ isDictTy :: Type -> Bool
 isDictTy ty | Just ty' <- tcView ty = isDictTy ty'
 isDictTy (PredTy p) = isClassPred p
 isDictTy _          = False
+
+isDictLikeTy :: Type -> Bool
+-- Note [Dictionary-like types]
+isDictLikeTy ty | Just ty' <- tcView ty = isDictTy ty'
+isDictLikeTy (PredTy p) = isClassPred p
+isDictLikeTy (TyConApp tc tys) 
+  | isTupleTyCon tc     = all isDictLikeTy tys
+isDictLikeTy _          = False
 \end{code}
+
+Note [Dictionary-like types]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Being "dictionary-like" means either a dictionary type or a tuple thereof.
+In GHC 6.10 we build implication constraints which construct such tuples,
+and if we land up with a binding
+    t :: (C [a], Eq [a])
+    t = blah
+then we want to treat t as cheap under "-fdicts-cheap" for example.
+(Implication constraints are normally inlined, but sadly not if the
+occurrence is itself inside an INLINE function!  Until we revise the 
+handling of implication constraints, that is.)  This turned out to
+be important in getting good arities in DPH code.  Example:
+
+    class C a
+    class D a where { foo :: a -> a }
+    instance C a => D (Maybe a) where { foo x = x }
+
+    bar :: (C a, C b) => a -> b -> (Maybe a, Maybe b)
+    {-# INLINE bar #-}
+    bar x y = (foo (Just x), foo (Just y))
+
+Then 'bar' should jolly well have arity 4 (two dicts, two args), but
+we ended up with something like
+   bar = __inline_me__ (\d1,d2. let t :: (D (Maybe a), D (Maybe b)) = ...
+                                in \x,y. <blah>)
+
+This is all a bit ad-hoc; eg it relies on knowing that implication
+constraints build tuples.
 
 --------------------- Implicit parameters ---------------------------------
 
@@ -922,28 +961,6 @@ isInheritablePred _            = False
 substEqSpec :: TvSubst -> [(TyVar,Type)] -> [(TcType,TcType)]
 substEqSpec subst eq_spec = [ (substTyVar subst tv, substTy subst ty)
 			    | (tv,ty) <- eq_spec]
-\end{code}
-
---------------------- The stupid theta (sigh) ---------------------------------
-
-\begin{code}
-dataConsStupidTheta :: [DataCon] -> ThetaType
--- Union the stupid thetas from all the specified constructors (non-empty)
--- All the constructors should have the same result type, modulo alpha conversion
--- The resulting ThetaType uses type variables from the *first* constructor in the list
---
--- It's here because it's used in MkId.mkRecordSelId, and in TcExpr
-dataConsStupidTheta (con1:cons)
-  = nubBy tcEqPred all_preds
-  where
-    all_preds 	  = dataConStupidTheta con1 ++ other_stupids
-    res_ty1       = dataConOrigResTy con1
-    other_stupids = [ substPred subst pred
-		    | con <- cons
-		    , let (tvs, _, _, res_ty) = dataConSig con
-			  Just subst = tcMatchTy (mkVarSet tvs) res_ty res_ty1
-		    , pred <- dataConStupidTheta con ]
-dataConsStupidTheta [] = panic "dataConsStupidTheta"
 \end{code}
 
 
@@ -1210,6 +1227,18 @@ isFFILabelTy :: Type -> Bool
 -- or a newtype of either.
 isFFILabelTy = checkRepTyConKey [ptrTyConKey, funPtrTyConKey]
 
+isFFIPrimArgumentTy :: DynFlags -> Type -> Bool
+-- Checks for valid argument type for a 'foreign import prim'
+-- Currently they must all be simple unlifted types.
+isFFIPrimArgumentTy dflags ty
+   = checkRepTyCon (legalFIPrimArgTyCon dflags) ty
+
+isFFIPrimResultTy :: DynFlags -> Type -> Bool
+-- Checks for valid result type for a 'foreign import prim'
+-- Currently it must be an unlifted type, including unboxed tuples.
+isFFIPrimResultTy dflags ty
+   = checkRepTyCon (legalFIPrimResultTyCon dflags) ty
+
 isFFIDotnetTy :: DynFlags -> Type -> Bool
 isFFIDotnetTy dflags ty
   = checkRepTyCon (\ tc -> (legalFIResultTyCon dflags tc || 
@@ -1227,39 +1256,6 @@ isFFIDotnetObjTy ty
 
 isFunPtrTy :: Type -> Bool
 isFunPtrTy = checkRepTyConKey [funPtrTyConKey]
-
-toDNType :: Type -> DNType
-toDNType ty
-  | isStringTy ty = DNString
-  | isFFIDotnetObjTy ty = DNObject
-  | Just (tc,argTys) <- tcSplitTyConApp_maybe ty 
-  =  case lookup (getUnique tc) dn_assoc of
-       Just x  -> x
-       Nothing 
-         | tc `hasKey` ioTyConKey -> toDNType (head argTys)
-	 | otherwise -> pprPanic ("toDNType: unsupported .NET type") 
-			  (pprType ty <+> parens (hcat (map pprType argTys)) <+> ppr tc)
-  | otherwise = panic "toDNType"	-- Is this right?
-    where
-      dn_assoc :: [ (Unique, DNType) ]
-      dn_assoc = [ (unitTyConKey,   DNUnit)
-      		 , (intTyConKey,    DNInt)
-      	         , (int8TyConKey,   DNInt8)
-		 , (int16TyConKey,  DNInt16)
-		 , (int32TyConKey,  DNInt32)
-		 , (int64TyConKey,  DNInt64)
-		 , (wordTyConKey,   DNInt)
-		 , (word8TyConKey,  DNWord8)
-		 , (word16TyConKey, DNWord16)
-		 , (word32TyConKey, DNWord32)
-		 , (word64TyConKey, DNWord64)
-		 , (floatTyConKey,  DNFloat)
-		 , (doubleTyConKey, DNDouble)
-		 , (ptrTyConKey,    DNPtr)
-		 , (funPtrTyConKey, DNPtr)
-		 , (charTyConKey,   DNChar)
-		 , (boolTyConKey,   DNBool)
-		 ]
 
 checkRepTyCon :: (TyCon -> Bool) -> Type -> Bool
 -- Look through newtypes, but *not* foralls
@@ -1335,6 +1331,26 @@ boxedMarshalableTyCon tc
 			 , stablePtrTyConKey
 			 , boolTyConKey
 			 ]
+
+legalFIPrimArgTyCon :: DynFlags -> TyCon -> Bool
+-- Check args of 'foreign import prim', only allow simple unlifted types.
+-- Strictly speaking it is unnecessary to ban unboxed tuples here since
+-- currently they're of the wrong kind to use in function args anyway.
+legalFIPrimArgTyCon dflags tc
+  = dopt Opt_UnliftedFFITypes dflags
+    && isUnLiftedTyCon tc
+    && not (isUnboxedTupleTyCon tc)
+
+legalFIPrimResultTyCon :: DynFlags -> TyCon -> Bool
+-- Check result type of 'foreign import prim'. Allow simple unlifted
+-- types and also unboxed tuple result types '... -> (# , , #)'
+legalFIPrimResultTyCon dflags tc
+  = dopt Opt_UnliftedFFITypes dflags
+    && isUnLiftedTyCon tc
+    && (isUnboxedTupleTyCon tc
+        || case tyConPrimRep tc of	-- Note [Marshalling VoidRep]
+	   VoidRep -> False
+	   _       -> True)
 \end{code}
 
 Note [Marshalling VoidRep]

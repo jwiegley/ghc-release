@@ -56,6 +56,8 @@ module TysWiredIn (
 	parrTyCon_RDR, parrTyConName
     ) where
 
+#include "HsVersions.h"
+
 import {-# SOURCE #-} MkId( mkDataConIds )
 
 -- friends:
@@ -66,10 +68,7 @@ import TysPrim
 import Constants	( mAX_TUPLE_SIZE )
 import Module		( Module )
 import RdrName
-import Name		( Name, BuiltInSyntax(..), nameUnique, nameOccName, 
-			  nameModule, mkWiredInName )
-import OccName		( mkTcOccFS, mkDataOccFS, mkTupleOcc, mkDataConWorkerOcc,
-			  tcName, dataName )
+import Name
 import DataCon		( DataCon, mkDataCon, dataConWorkId, dataConSourceArity )
 import Var
 import TyCon		( TyCon, AlgTyConRhs(DataTyCon), tyConDataCons,
@@ -87,7 +86,7 @@ import Coercion         ( unsafeCoercionTyCon, symCoercionTyCon,
 import TypeRep          ( mkArrowKinds, liftedTypeKind, ubxTupleKind )
 import Unique		( incrUnique, mkTupleTyConUnique,
 			  mkTupleDataConUnique, mkPArrDataConUnique )
-import Array
+import Data.Array
 import FastString
 import Outputable
 
@@ -222,7 +221,6 @@ pcTyCon is_enum is_rec name tyvars cons
                 tyvars
                 []		-- No stupid theta
 		(DataTyCon cons is_enum)
-		[] 		-- No record selectors
 		NoParentTyCon
                 is_rec
 		True		-- All the wired-in tycons have generics
@@ -249,12 +247,14 @@ pcDataConWithFixity declared_infix dc_name tyvars arg_tys tycon
 		[] 	-- No existential type variables
 		[]	-- No equality spec
 		[]	-- No theta
-		arg_tys tycon
+		arg_tys (mkTyConApp tycon (mkTyVarTys tyvars)) 
+		tycon
 		[]	-- No stupid theta
 		(mkDataConIds bogus_wrap_name wrk_name data_con)
 		
 
-    modu      = nameModule dc_name
+    modu     = ASSERT( isExternalName dc_name ) 
+	       nameModule dc_name
     wrk_occ  = mkDataConWorkerOcc (nameOccName dc_name)
     wrk_key  = incrUnique (nameUnique dc_name)
     wrk_name = mkWiredInName modu wrk_occ wrk_key

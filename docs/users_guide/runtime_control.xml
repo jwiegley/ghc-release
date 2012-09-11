@@ -182,7 +182,7 @@
           <indexterm><primary>allocation area, size</primary></indexterm>
         </term>
 	<listitem>
-	  <para>&lsqb;Default: 256k&rsqb; Set the allocation area size
+	  <para>&lsqb;Default: 512k&rsqb; Set the allocation area size
           used by the garbage collector.  The allocation area
           (actually generation 0 step 0) is fixed and is never resized
           (unless you use <option>-H</option>, below).</para>
@@ -298,38 +298,59 @@
 
       <varlistentry>
         <term>
-          <option>-g</option><replaceable>threads</replaceable>
-          <indexterm><primary><option>-g</option></primary><secondary>RTS option</secondary></indexterm>
+          <option>-qg<optional><replaceable>gen</replaceable></optional></option>
+          <indexterm><primary><option>-qg</option><secondary>RTS
+          option</secondary></primary></indexterm>
         </term>
         <listitem>
-          <para>&lsqb;Default: 1&rsqb; &lsqb;new in GHC 6.10&rsqb; Set the number
-            of threads to use for garbage collection.  This option is
-            only accepted when the program was linked with the
-            <option>-threaded</option> option; see <xref
-            linkend="options-linker" />.</para>
+          <para>&lsqb;New in GHC 6.12.1&rsqb; &lsqb;Default: 0&rsqb;
+            Use parallel GC in
+            generation <replaceable>gen</replaceable> and higher.
+            Omitting <replaceable>gen</replaceable> turns off the
+            parallel GC completely, reverting to sequential GC.</para>
+          
+          <para>The default parallel GC settings are usually suitable
+            for parallel programs (i.e. those
+            using <literal>par</literal>, Strategies, or with multiple
+            threads).  However, it is sometimes beneficial to enable
+            the parallel GC for a single-threaded sequential program
+            too, especially if the program has a large amount of heap
+            data and GC is a significant fraction of runtime.  To use
+            the parallel GC in a sequential program, enable the
+            parallel runtime with a suitable <literal>-N</literal>
+            option, and additionally it might be beneficial to
+            restrict parallel GC to the old generation
+            with <literal>-qg1</literal>.</para>
+        </listitem>
+      </varlistentry>        
 
-          <para>The garbage collector is able to work in parallel when
-            given more than one OS thread.  Experiments have shown
-            that this usually results in a performance improvement
-            given 3 cores or more; with 2 cores it may or may not be
-            beneficial, depending on the workload.  Bigger heaps work
-            better with parallel GC, so set your <option>-H</option>
-            value high (3 or more times the maximum residency).  Look
-            at the timing stats with <option>+RTS -s</option> to
-            see whether you're getting any benefit from parallel GC or
-            not.  If you find parallel GC is
-            significantly <emphasis>slower</emphasis> (in elapsed
-            time) than sequential GC, please report it as a
-            bug.</para>
-
-          <para>This value is set automatically when the
-            <option>-N</option> option is used, so the only reason to
-            use <option>-g</option> would be if you wanted to use a
-            different number of threads for GC than for execution.
-            For example, if your program is strictly single-threaded
-            but you still want to benefit from parallel GC, then it
-            might make sense to use <option>-g</option> rather than
-            <option>-N</option>.</para>
+      <varlistentry>
+        <term>
+          <option>-qb<optional><replaceable>gen</replaceable></optional></option>
+          <indexterm><primary><option>-qb</option><secondary>RTS
+          option</secondary></primary></indexterm>
+        </term>
+        <listitem>
+          <para>
+            &lsqb;New in GHC 6.12.1&rsqb; &lsqb;Default: 1&rsqb; Use
+            load-balancing in the parallel GC in
+            generation <replaceable>gen</replaceable> and higher.
+            Omitting <replaceable>gen</replaceable> disables
+            load-balancing entirely.</para>
+          
+          <para>
+            Load-balancing shares out the work of GC between the
+            available cores.  This is a good idea when the heap is
+            large and we need to parallelise the GC work, however it
+            is also pessimal for the short young-generation
+            collections in a parallel program, because it can harm
+            locality by moving data from the cache of the CPU where is
+            it being used to the cache of another CPU.  Hence the
+            default is to do load-balancing only in the
+            old-generation.  In fact, for a parallel program it is
+            sometimes beneficial to disable load-balancing entirely
+            with <literal>-qb</literal>.
+          </para>
         </listitem>
       </varlistentry>
 
@@ -515,21 +536,25 @@
     <itemizedlist>
       <listitem>
         <para>
-          The total bytes allocated by the program. This may be less
-          than the peak memory use, as some may be freed. 
+          The total number of bytes allocated by the program over the
+          whole run.
         </para>
       </listitem>
       <listitem>
         <para>
-          The total number of garbage collections that occurred.
+          The total number of garbage collections performed.
         </para>
       </listitem>
       <listitem>
         <para>
-          The average and maximum space used by your program.
-          This is only checked during major garbage collections, so it
-          is only an approximation; the number of samples tells you how
-          many times it is checked.
+          The average and maximum "residency", which is the amount of
+          live data in bytes.  The runtime can only determine the
+          amount of live data during a major GC, which is why the
+          number of samples corresponds to the number of major GCs
+          (and is usually relatively small).  To get a better picture
+          of the heap profile of your program, use
+          the <option>-hT</option> RTS option
+          (<xref linkend="rts-profiling" />).
         </para>
       </listitem>
       <listitem>
@@ -585,6 +610,8 @@
   Generation 0:    67 collections,     0 parallel,  0.04s,  0.03s elapsed
   Generation 1:     2 collections,     0 parallel,  0.03s,  0.04s elapsed
 
+  SPARKS: 359207 (557 converted, 149591 pruned)
+
   INIT  time    0.00s  (  0.00s elapsed)
   MUT   time    0.01s  (  0.02s elapsed)
   GC    time    0.07s  (  0.07s elapsed)
@@ -602,14 +629,14 @@
       <listitem>
         <para>
         The "bytes allocated in the heap" is the total bytes allocated
-        by the program. This may be less than the peak memory use, as
-        some may be freed.
+        by the program over the whole run.
         </para>
       </listitem>
       <listitem>
         <para>
-        GHC uses a copying garbage collector. "bytes copied during GC" 
-        tells you how many bytes it had to copy during garbage collection.
+        GHC uses a copying garbage collector by default. "bytes copied
+        during GC" tells you how many bytes it had to copy during
+        garbage collection.
         </para>
       </listitem>
       <listitem>
@@ -623,7 +650,10 @@
       <listitem>
         <para>
         The "bytes maximum slop" tells you the most space that is ever
-        wasted due to the way GHC packs data into so-called "megablocks".
+        wasted due to the way GHC allocates memory in blocks.  Slop is
+        memory at the end of a block that was wasted.  There's no way
+        to control this; we just like to see how much memory is being
+        lost this way.
         </para>
       </listitem>
       <listitem>
@@ -636,16 +666,27 @@
         <para>
         Next there is information about the garbage collections done.
         For each generation it says how many garbage collections were
-        done, how many of those collections used multiple threads,
+        done, how many of those collections were done in parallel,
         the total CPU time used for garbage collecting that generation,
         and the total wall clock time elapsed while garbage collecting
         that generation.
         </para>
       </listitem>
       <listitem>
+        <para>The <literal>SPARKS</literal> statistic refers to the
+          use of <literal>Control.Parallel.par</literal> and related
+          functionality in the program.  Each spark represents a call
+          to <literal>par</literal>; a spark is "converted" when it is
+          executed in parallel; and a spark is "pruned" when it is
+          found to be already evaluated and is discarded from the pool
+          by the garbage collector.  Any remaining sparks are
+          discarded at the end of execution, so "converted" plus
+          "pruned" does not necessarily add up to the total.</para>
+      </listitem>
+      <listitem>
         <para>
-        Next there is the CPU time and wall clock time elapsedm broken
-        down by what the runtiem system was doing at the time.
+        Next there is the CPU time and wall clock time elapsed broken
+        down by what the runtime system was doing at the time.
         INIT is the runtime system initialisation.
         MUT is the mutator time, i.e. the time spent actually running
         your code.
@@ -776,6 +817,92 @@
     </variablelist>
   </sect2>
 
+  <sect2 id="rts-eventlog">
+    <title>Tracing</title>
+
+    <indexterm><primary>tracing</primary></indexterm>
+    <indexterm><primary>events</primary></indexterm>
+    <indexterm><primary>eventlog files</primary></indexterm>
+
+    <para>
+      When the program is linked with the <option>-eventlog</option>
+      option (<xref linkend="options-linker" />), runtime events can
+      be logged in two ways:
+    </para>
+
+    <itemizedlist>
+      <listitem>
+        <para>
+          In binary format to a file for later analysis by a
+          variety of tools.  One such tool
+          is <ulink url="http://hackage.haskell.org/package/ThreadScope">ThreadScope</ulink><indexterm><primary>ThreadScope</primary></indexterm>,
+          which interprets the event log to produce a visual parallel
+          execution profile of the program.
+        </para>
+      </listitem>
+      <listitem>
+        <para>
+          As text to standard output, for debugging purposes.
+        </para>
+      </listitem>
+    </itemizedlist>
+
+    <variablelist>
+      <varlistentry>
+        <term>
+          <option>-l<optional><replaceable>type</replaceable></optional></option>
+          <indexterm><primary><option>-l</option></primary><secondary>RTS option</secondary></indexterm>
+        </term>
+        <listitem>
+          <para>
+            Log events in binary format to the
+            file <filename><replaceable>program</replaceable>.eventlog</filename>,
+            where <replaceable>type</replaceable> indicates the type
+            of events to log.  Currently there is only one type
+            supported: <literal>-ls</literal>, for scheduler events.
+          </para>
+
+          <para>
+            The format of the log file is described by the header
+            <filename>EventLogFormat.h</filename> that comes with
+            GHC, and it can be parsed in Haskell using
+            the <ulink url="http://hackage.haskell.org/package/ghc-events">ghc-events</ulink>
+            library.  To dump the contents of
+            a <literal>.eventlog</literal> file as text, use the
+            tool <literal>show-ghc-events</literal> that comes with
+            the <ulink url="http://hackage.haskell.org/package/ghc-events">ghc-events</ulink>
+            package.
+          </para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term>
+          <option>-v</option>
+          <indexterm><primary><option>-v</option></primary><secondary>RTS option</secondary></indexterm>
+        </term>
+        <listitem>
+          <para>
+            Log events as text to standard output, instead of to
+            the <literal>.eventlog</literal> file.
+          </para>
+        </listitem>
+      </varlistentry>
+
+    </variablelist>
+
+    <para>
+      The debugging
+      options <option>-D<replaceable>x</replaceable></option> also
+      generate events which are logged using the tracing framework.
+      By default those events are dumped as text to stdout
+      (<option>-D<replaceable>x</replaceable></option>
+      implies <option>-v</option>), but they may instead be stored in
+      the binary eventlog file by using the <option>-l</option>
+      option.
+    </para>
+  </sect2>
+
   <sect2 id="rts-options-debugging">
     <title>RTS options for hackers, debuggers, and over-interested
     souls</title>
@@ -812,14 +939,28 @@
 
       <varlistentry>
 	<term>
-          <option>-D</option><replaceable>num</replaceable>
+          <option>-D</option><replaceable>x</replaceable>
           <indexterm><primary>-D</primary><secondary>RTS option</secondary></indexterm>
         </term>
 	<listitem>
-	  <para>An RTS debugging flag; varying quantities of output
-          depending on which bits are set in
-          <replaceable>num</replaceable>.  Only works if the RTS was
-          compiled with the <option>DEBUG</option> option.</para>
+	  <para>
+            An RTS debugging flag; only availble if the program was
+	    linked with the <option>-debug</option> option.  Various
+	    values of <replaceable>x</replaceable> are provided to
+	    enable debug messages and additional runtime sanity checks
+	    in different subsystems in the RTS, for
+	    example <literal>+RTS -Ds -RTS</literal> enables debug
+	    messages from the scheduler.
+	    Use <literal>+RTS&nbsp;-?</literal> to find out which
+	    debug flags are supported.
+          </para>
+
+          <para>
+            Debug messages will be sent to the binary event log file
+            instead of stdout if the <option>-l</option> option is
+            added.  This might be useful for reducing the overhead of
+            debug tracing.
+          </para>
 	</listitem>
       </varlistentry>
 
@@ -832,20 +973,13 @@
         </term>
 	<listitem>
 	  <para>Produce &ldquo;ticky-ticky&rdquo; statistics at the
-          end of the program run.  The <replaceable>file</replaceable>
-          business works just like on the <option>-S</option> RTS
-          option (above).</para>
+          end of the program run (only available if the program was
+          linked with <option>-debug</option>).
+          The <replaceable>file</replaceable> business works just like
+          on the <option>-S</option> RTS option, above.</para>
 
-	  <para>&ldquo;Ticky-ticky&rdquo; statistics are counts of
-          various program actions (updates, enters, etc.)  The program
-          must have been compiled using
-          <option>-ticky</option><indexterm><primary><option>-ticky</option></primary></indexterm>
-          (a.k.a. &ldquo;ticky-ticky profiling&rdquo;), and, for it to
-          be really useful, linked with suitable system libraries.
-          Not a trivial undertaking: consult the installation guide on
-          how to set things up for easy &ldquo;ticky-ticky&rdquo;
-          profiling.  For more information, see <xref
-          linkend="ticky-ticky"/>.</para>
+          <para>For more information on ticky-ticky profiling, see
+          <xref linkend="ticky-ticky"/>.</para>
 	</listitem>
       </varlistentry>
 

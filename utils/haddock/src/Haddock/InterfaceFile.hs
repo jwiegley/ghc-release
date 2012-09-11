@@ -1,11 +1,16 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Haddock.InterfaceFile
+-- Copyright   :  (c) David Waern 2006-2009
+-- License     :  BSD-like
 --
--- Haddock - A Haskell Documentation Tool
+-- Maintainer  :  haddock@projects.haskell.org
+-- Stability   :  experimental
+-- Portability :  portable
 --
--- (c) Simon Marlow 2003
---
-
+-- Reading and writing the .haddock interface file
+-----------------------------------------------------------------------------
 
 module Haddock.InterfaceFile (
   InterfaceFile(..),
@@ -14,33 +19,26 @@ module Haddock.InterfaceFile (
 ) where
 
 
-import Haddock.DocName ()
 import Haddock.Types
-import Haddock.Utils
+import Haddock.Utils hiding (out)
 
 import Data.List
 import Data.Word
 import Data.Array
 import Data.IORef
 import qualified Data.Map as Map
-import System.IO
-import Control.Monad
+import Data.Map (Map)
 
 import GHC hiding (NoLink)
-import SrcLoc   (noSrcSpan) -- tmp, GHC now exports this
 import Binary
 import Name
 import UniqSupply
 import UniqFM
 import IfaceEnv
-import Module
 import HscTypes
 import FastMutInt
-import HsDoc
-#if __GLASGOW_HASKELL__ >= 609 
 import FastString
 import Unique
-#endif
 
 data InterfaceFile = InterfaceFile {
   ifLinkEnv         :: LinkEnv,
@@ -52,27 +50,20 @@ binaryInterfaceMagic :: Word32
 binaryInterfaceMagic = 0xD0Cface
 
 
--- Since datatypes in GHC might change between patchlevel versions,
--- and because we store GHC datatypes in our interface files,
--- we need to make sure we version our interface files accordingly.
---
--- Instead of adding one, we add five to all version numbers
--- when one of our own (stored) datatypes is changed. 
+-- Since datatypes in the GHC API might change between major versions, and
+-- because we store GHC datatypes in our interface files, we need to make sure
+-- we version our interface files accordingly.
 binaryInterfaceVersion :: Word16
-#if __GLASGOW_HASKELL__ == 608 && __GHC_PATCHLEVEL__ == 2
-binaryInterfaceVersion = 9
-#endif         
-#if __GLASGOW_HASKELL__ == 608 && __GHC_PATCHLEVEL__ == 3
-binaryInterfaceVersion = 10
-#endif           
-#if __GLASGOW_HASKELL__ == 610 && __GHC_PATCHLEVEL__ == 1
-binaryInterfaceVersion = 11
-#endif
-#if __GLASGOW_HASKELL__ == 610 && __GHC_PATCHLEVEL__ == 2
-binaryInterfaceVersion = 12
-#endif
-#if __GLASGOW_HASKELL__ == 611
-binaryInterfaceVersion = 13
+#if __GLASGOW_HASKELL__ == 610
+binaryInterfaceVersion = 14
+#elif __GLASGOW_HASKELL__ == 611
+binaryInterfaceVersion = 15
+#elif __GLASGOW_HASKELL__ == 612
+binaryInterfaceVersion = 15
+#elif __GLASGOW_HASKELL__ == 613
+binaryInterfaceVersion = 15
+#else
+#error Unknown GHC version
 #endif
 
 
@@ -95,7 +86,6 @@ writeInterfaceFile filename iface = do
   put_ bh0 symtab_p_p
 
   -- Make some intial state
-#if __GLASGOW_HASKELL__ >= 609
   symtab_next <- newFastMutInt
   writeFastMutInt symtab_next 0
   symtab_map <- newIORef emptyUFM
@@ -109,9 +99,6 @@ writeInterfaceFile filename iface = do
                       bin_dict_next = dict_next_ref,
                       bin_dict_map  = dict_map_ref }
   ud <- newWriteState (putName bin_symtab) (putFastString bin_dict)
-#else
-  ud <- newWriteState
-#endif
 
   -- put the main thing
   bh <- return $ setUserData bh0 ud
@@ -123,13 +110,8 @@ writeInterfaceFile filename iface = do
   seekBin bh symtab_p		
 
   -- write the symbol table itself
-#if __GLASGOW_HASKELL__ >= 609
   symtab_next' <- readFastMutInt symtab_next
   symtab_map'  <- readIORef symtab_map
-#else
-  symtab_next' <- readFastMutInt (ud_symtab_next ud)
-  symtab_map'  <- readIORef (ud_symtab_map ud)
-#endif
   putSymbolTable bh symtab_next' symtab_map'
 
   -- write the dictionary pointer at the fornt of the file
@@ -138,13 +120,8 @@ writeInterfaceFile filename iface = do
   seekBin bh dict_p
 
   -- write the dictionary itself
-#if __GLASGOW_HASKELL__ >= 609
   dict_next <- readFastMutInt dict_next_ref
   dict_map  <- readIORef dict_map_ref
-#else
-  dict_next <- readFastMutInt (ud_dict_next ud)
-  dict_map  <- readIORef (ud_dict_map ud)
-#endif
   putDictionary bh dict_next dict_map
 
   -- and send the result to the file
@@ -154,7 +131,6 @@ writeInterfaceFile filename iface = do
 type NameCacheAccessor m = (m NameCache, NameCache -> m ())
 
 
-#if __GLASGOW_HASKELL__ >= 609
 nameCacheFromGhc :: NameCacheAccessor Ghc
 nameCacheFromGhc = ( read_from_session , write_to_session )
   where
@@ -164,15 +140,6 @@ nameCacheFromGhc = ( read_from_session , write_to_session )
     write_to_session nc' = do
        ref <- withSession (return . hsc_NC)
        liftIO $ writeIORef ref nc'
-#else
-nameCacheFromGhc :: Session -> NameCacheAccessor IO
-nameCacheFromGhc session = ( read_from_session , write_to_session )
-  where
-    read_from_session = readIORef . hsc_NC =<< sessionHscEnv session
-    write_to_session nc' = do
-      ref <- liftM hsc_NC $ sessionHscEnv session
-      writeIORef ref nc'
-#endif
 
 
 freshNameCache :: NameCacheAccessor IO
@@ -247,7 +214,6 @@ readInterfaceFile (get_name_cache, set_name_cache) filename = do
 -------------------------------------------------------------------------------
 
 
-#if __GLASGOW_HASKELL__ >= 609
 putName :: BinSymbolTable -> BinHandle -> Name -> IO ()
 putName BinSymbolTable{
             bin_symtab_map = symtab_map_ref,
@@ -255,13 +221,13 @@ putName BinSymbolTable{
   = do
     symtab_map <- readIORef symtab_map_ref
     case lookupUFM symtab_map name of
-      Just (off,_) -> put_ bh off
+      Just (off,_) -> put_ bh (fromIntegral off :: Word32)
       Nothing -> do
          off <- readFastMutInt symtab_next
          writeFastMutInt symtab_next (off+1)
          writeIORef symtab_map_ref
              $! addToUFM symtab_map name (off,name)
-         put_ bh off
+         put_ bh (fromIntegral off :: Word32)
 
 
 data BinSymbolTable = BinSymbolTable {
@@ -278,10 +244,10 @@ putFastString BinDictionary { bin_dict_next = j_r,
     out <- readIORef out_r
     let unique = getUnique f
     case lookupUFM out unique of
-        Just (j, _)  -> put_ bh j
+        Just (j, _)  -> put_ bh (fromIntegral j :: Word32)
         Nothing -> do
            j <- readFastMutInt j_r
-           put_ bh j
+           put_ bh (fromIntegral j :: Word32)
            writeFastMutInt j_r (j + 1)
            writeIORef out_r $! addToUFM out unique (j, f)
 
@@ -291,7 +257,6 @@ data BinDictionary = BinDictionary {
         bin_dict_map  :: !(IORef (UniqFM (Int,FastString)))
                                 -- indexed by FastString
   }
-#endif
 
 
 putSymbolTable :: BinHandle -> Int -> UniqFM (Int,Name) -> IO ()
@@ -346,27 +311,33 @@ serialiseName bh name _ = do
 -- GhcBinary instances
 -------------------------------------------------------------------------------
 
+-- Hmm, why didn't we dare to make this instance already? It makes things
+-- much easier.
+instance (Ord k, Binary k, Binary v) => Binary (Map k v) where
+  put_ bh m = put_ bh (Map.toList m)
+  get bh = fmap (Map.fromList) (get bh)
+
 
 instance Binary InterfaceFile where
   put_ bh (InterfaceFile env ifaces) = do
-    put_ bh (Map.toList env)
+    put_ bh env
     put_ bh ifaces
 
   get bh = do
     env    <- get bh
     ifaces <- get bh
-    return (InterfaceFile (Map.fromList env) ifaces)
+    return (InterfaceFile env ifaces)
 
 
 instance Binary InstalledInterface where
   put_ bh (InstalledInterface modu info docMap exps visExps opts subMap) = do
     put_ bh modu
     put_ bh info
-    put_ bh (Map.toList docMap)
+    put_ bh docMap
     put_ bh exps
     put_ bh visExps
     put_ bh opts
-    put_ bh (Map.toList subMap)
+    put_ bh subMap
 
   get bh = do
     modu    <- get bh
@@ -377,8 +348,8 @@ instance Binary InstalledInterface where
     opts    <- get bh
     subMap  <- get bh
     
-    return (InstalledInterface modu info (Map.fromList docMap)
-            exps visExps opts (Map.fromList subMap))
+    return (InstalledInterface modu info docMap
+            exps visExps opts subMap)
 
 
 instance Binary DocOption where
@@ -515,3 +486,26 @@ instance Binary name => Binary (HaddockModInfo name) where
     stabi <- get bh
     maint <- get bh
     return (HaddockModInfo descr porta stabi maint)
+
+
+instance Binary DocName where
+  put_ bh (Documented name modu) = do
+    putByte bh 0
+    put_ bh name
+    put_ bh modu
+  put_ bh (Undocumented name) = do
+    putByte bh 1
+    put_ bh name
+
+  get bh = do
+    h <- getByte bh
+    case h of
+      0 -> do
+        name <- get bh
+        modu <- get bh
+        return (Documented name modu)
+      1 -> do
+        name <- get bh
+        return (Undocumented name)
+      _ -> error "get DocName: Bad h"
+

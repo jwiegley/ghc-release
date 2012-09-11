@@ -9,6 +9,8 @@
 #ifndef GETTIME_H
 #define GETTIME_H
 
+BEGIN_RTS_PRIVATE
+
 // We'll use a fixed resolution of usec for now.  The machine
 // dependent implementation may have a different resolution, but we'll
 // normalise to this for the machine independent interface.
@@ -22,5 +24,7 @@ void  getProcessTimes       (Ticks *user, Ticks *elapsed);
 
 // Not strictly timing, but related
 nat   getPageFaults         (void);
+
+END_RTS_PRIVATE
 
 #endif /* GETTIME_H */

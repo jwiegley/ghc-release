@@ -20,34 +20,33 @@ import CoreSyn
 import CoreSubst
 import CoreUtils
 import CoreUnfold	( couldBeSmallEnoughToInline )
-import CoreLint		( showPass, endPass )
 import CoreFVs 		( exprsFreeVars )
 import WwLib		( mkWorkerArgs )
 import DataCon		( dataConRepArity, dataConUnivTyVars )
 import Coercion	
 import Rules
 import Type		hiding( substTy )
-import Id		( Id, idName, idType, isDataConWorkId_maybe, idArity,
-			  mkUserLocal, mkSysLocal, idUnfolding, isLocalId )
+import Id
+import MkId		( mkImpossibleExpr )
 import Var
 import VarEnv
 import VarSet
 import Name
-import OccName		( mkSpecOcc )
-import ErrUtils		( dumpIfSet_dyn )
-import DynFlags		( DynFlags(..), DynFlag(..) )
+import DynFlags		( DynFlags(..) )
 import StaticFlags	( opt_PprStyle_Debug )
 import StaticFlags	( opt_SpecInlineJoinPoints )
 import BasicTypes	( Activation(..) )
 import Maybes		( orElse, catMaybes, isJust, isNothing )
+import NewDemand
+import DmdAnal		( both )
 import Util
-import List		( nubBy, partition )
 import UniqSupply
 import Outputable
 import FastString
 import UniqFM
 import MonadUtils
 import Control.Monad	( zipWithM )
+import Data.List
 \end{code}
 
 -----------------------------------------------------
@@ -368,6 +367,19 @@ specialising the loops arising from stream fusion, for example in NDP where
 we were getting literally hundreds of (mostly unused) specialisations of
 a local function.
 
+Note [Do not specialise diverging functions]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Specialising a function that just diverges is a waste of code.
+Furthermore, it broke GHC (simpl014) thus:
+   {-# STR Sb #-}
+   f = \x. case x of (a,b) -> f x
+If we specialise f we get
+   f = \x. case x of (a,b) -> fspec a b
+But fspec doesn't have decent strictnes info.  As it happened,
+(f x) :: IO t, so the state hack applied and we eta expanded fspec,
+and hence f.  But now f's strictness is less than its arity, which
+breaks an invariant.
+
 -----------------------------------------------------
 		Stuff not yet handled
 -----------------------------------------------------
@@ -452,19 +464,8 @@ unbox the strict fields, becuase T is polymorphic!)
 %************************************************************************
 
 \begin{code}
-specConstrProgram :: DynFlags -> UniqSupply -> [CoreBind] -> IO [CoreBind]
-specConstrProgram dflags us binds
-  = do
-	showPass dflags "SpecConstr"
-
-	let (binds', _) = initUs us (go (initScEnv dflags) binds)
-
-	endPass dflags "SpecConstr" Opt_D_dump_spec binds'
-
-	dumpIfSet_dyn dflags Opt_D_dump_rules "Top-level specialisations"
-		      (pprRulesForUser (rulesOfBinds binds'))
-
-	return binds'
+specConstrProgram :: DynFlags -> UniqSupply -> [CoreBind] -> [CoreBind]
+specConstrProgram dflags us binds = fst $ initUs us (go (initScEnv dflags) binds)
   where
     go _   []	        = return []
     go env (bind:binds) = do (env', bind') <- scTopBind env bind
@@ -591,17 +592,28 @@ extendValEnv :: ScEnv -> Id -> Maybe Value -> ScEnv
 extendValEnv env _  Nothing   = env
 extendValEnv env id (Just cv) = env { sc_vals = extendVarEnv (sc_vals env) id cv }
 
-extendCaseBndrs :: ScEnv -> CoreExpr -> Id -> AltCon -> [Var] -> ScEnv
+extendCaseBndrs :: ScEnv -> Id -> AltCon -> [Var] -> (ScEnv, [Var])
 -- When we encounter
 --	case scrut of b
 --	    C x y -> ...
--- we want to bind b, and perhaps scrut too, to (C x y)
--- NB: Extends only the sc_vals part of the envt
-extendCaseBndrs env scrut case_bndr con alt_bndrs
-  = case scrut of
-	Var v  -> extendValEnv env1 v cval
-	_other -> env1
+-- we want to bind b, to (C x y)
+-- NB1: Extends only the sc_vals part of the envt
+-- NB2: Kill the dead-ness info on the pattern binders x,y, since
+--      they are potentially made alive by the [b -> C x y] binding
+extendCaseBndrs env case_bndr con alt_bndrs
+  | isDeadBinder case_bndr
+  = (env, alt_bndrs)
+  | otherwise
+  = (env1, map zap alt_bndrs)
+	-- NB: We used to bind v too, if scrut = (Var v); but
+        --     the simplifer has already done this so it seems
+        --     redundant to do so here
+ 	-- case scrut of
+  	--	Var v  -> extendValEnv env1 v cval
+	--	_other -> env1
  where
+   zap v | isTyVar v = v		-- See NB2 above
+         | otherwise = zapIdOccInfo v
    env1 = extendValEnv env case_bndr cval
    cval = case con of
 		DEFAULT    -> Nothing
@@ -768,7 +780,8 @@ scExpr' env (Case scrut b ty alts)
   where
     sc_con_app con args scrut' 	-- Known constructor; simplify
 	= do { let (_, bs, rhs) = findAlt con alts
-		   alt_env' = extendScSubstList env ((b,scrut') : bs `zip` trimConArgs con args)
+	       	   	          `orElse` (DEFAULT, [], mkImpossibleExpr (coreAltsType alts))
+		   alt_env'  = extendScSubstList env ((b,scrut') : bs `zip` trimConArgs con args)
 	     ; scExpr alt_env' rhs }
 				
     sc_vanilla scrut_usg scrut'	-- Normal case
@@ -788,15 +801,15 @@ scExpr' env (Case scrut b ty alts)
 	  ; return (alt_usg `combineUsage` scrut_usg',
 	  	    Case scrut' b' (scSubstTy env ty) alts') }
 
-    sc_alt env scrut' b' (con,bs,rhs)
-      = do { let (env1, bs') = extendBndrsWith RecArg env bs
-		 env2        = extendCaseBndrs env1 scrut' b' con bs'
+    sc_alt env _scrut' b' (con,bs,rhs)
+      = do { let (env1, bs1)  = extendBndrsWith RecArg env bs
+		 (env2, bs2) = extendCaseBndrs env1 b' con bs1
 	   ; (usg,rhs') <- scExpr env2 rhs
-	   ; let (usg', arg_occs) = lookupOccs usg bs'
+	   ; let (usg', arg_occs) = lookupOccs usg bs2
 		 scrut_occ = case con of
 				DataAlt dc -> ScrutOcc (unitUFM dc arg_occs)
 				_      	   -> ScrutOcc emptyUFM
-	   ; return (usg', scrut_occ, (con,bs',rhs')) }
+	   ; return (usg', scrut_occ, (con, bs2, rhs')) }
 
 scExpr' env (Let (NonRec bndr rhs) body)
   | isTyVar bndr	-- Type-lets may be created by doBeta
@@ -1009,8 +1022,9 @@ specialise
 
 specialise env bind_calls (fn, arg_bndrs, body, arg_occs) 
 			  spec_info@(SI specs spec_count mb_unspec)
-  | notNull arg_bndrs,	-- Only specialise functions
-    Just all_calls <- lookupVarEnv bind_calls fn
+  | not (isBottomingId fn)      -- Note [Do not specialise diverging functions]
+  , notNull arg_bndrs		-- Only specialise functions
+  , Just all_calls <- lookupVarEnv bind_calls fn
   = do	{ (boring_call, pats) <- callsToPats env specs arg_occs all_calls
 --	; pprTrace "specialise" (vcat [ppr fn <+> ppr arg_occs,
 --	  				text "calls" <+> ppr all_calls,
@@ -1098,11 +1112,36 @@ spec_one env fn arg_bndrs body (call_pat@(qvars, pats), rule_number)
 	      spec_occ  = mkSpecOcc (nameOccName fn_name)
 	      rule_name = mkFastString ("SC:" ++ showSDoc (ppr fn <> int rule_number))
 	      spec_rhs  = mkLams spec_lam_args spec_body
+	      spec_str  = calcSpecStrictness fn spec_lam_args pats
 	      spec_id   = mkUserLocal spec_occ spec_uniq (mkPiTypes spec_lam_args body_ty) fn_loc
+	      		    `setIdNewStrictness` spec_str    	-- See Note [Transfer strictness]
+			    `setIdArity` count isId spec_lam_args
 	      body_ty   = exprType spec_body
 	      rule_rhs  = mkVarApps (Var spec_id) spec_call_args
 	      rule      = mkLocalRule rule_name specConstrActivation fn_name qvars pats rule_rhs
 	; return (spec_usg, OS call_pat rule spec_id spec_rhs) }
+
+calcSpecStrictness :: Id 		     -- The original function
+                   -> [Var] -> [CoreExpr]    -- Call pattern
+		   -> StrictSig              -- Strictness of specialised thing
+-- See Note [Transfer strictness]
+calcSpecStrictness fn qvars pats
+  = StrictSig (mkTopDmdType spec_dmds TopRes)
+  where
+    spec_dmds = [ lookupVarEnv dmd_env qv `orElse` lazyDmd | qv <- qvars, isId qv ]
+    StrictSig (DmdType _ dmds _) = idNewStrictness fn
+
+    dmd_env = go emptyVarEnv dmds pats
+
+    go env ds (Type {} : pats) = go env ds pats
+    go env (d:ds) (pat : pats) = go (go_one env d pat) ds pats
+    go env _      _            = env
+
+    go_one env d   (Var v) = extendVarEnv_C both env v d
+    go_one env (Box d)   e = go_one env d e
+    go_one env (Eval (Prod ds)) e 
+    	   | (Var _, args) <- collectArgs e = go env ds args
+    go_one env _         _ = env
 
 -- In which phase should the specialise-constructor rules be active?
 -- Originally I made them always-active, but Manuel found that
@@ -1115,6 +1154,23 @@ spec_one env fn arg_bndrs body (call_pat@(qvars, pats), rule_number)
 specConstrActivation :: Activation
 specConstrActivation = ActiveAfter 0	-- Baked in; see comments above
 \end{code}
+
+Note [Transfer strictness]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+We must transfer strictness information from the original function to
+the specialised one.  Suppose, for example
+
+  f has strictness     SS
+        and a RULE     f (a:as) b = f_spec a as b
+
+Now we want f_spec to have strictess  LLS, otherwise we'll use call-by-need
+when calling f_spec instead of call-by-value.  And that can result in 
+unbounded worsening in space (cf the classic foldl vs foldl')
+
+See Trac #3437 for a good example.
+
+The function calcSpecStrictness performs the calculation.
+
 
 %************************************************************************
 %*									*

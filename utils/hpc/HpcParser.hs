@@ -1,6 +1,6 @@
 {-# OPTIONS_GHC -fno-warn-overlapping-patterns #-}
 {-# OPTIONS -fglasgow-exts -cpp #-}
-{-# OPTIONS -w #-}
+{-# OPTIONS -Wwarn #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
 -- any warnings in the module. See
@@ -356,7 +356,7 @@ happyError' = HappyIdentity . happyError
 parser tks = happyRunIdentity happySomeParser where
   happySomeParser = happyThen (happyParse 0# tks) (\x -> happyReturn (happyOut4 x))
 
-happySeq = happyDontSeq
+happySeq = happyDoSeq
 
 
 type L a = [a] -> [a]

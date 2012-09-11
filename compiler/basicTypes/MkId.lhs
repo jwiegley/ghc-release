@@ -24,7 +24,6 @@ module MkId (
         mkDictSelId, 
 
         mkDataConIds,
-        mkRecordSelId, 
         mkPrimOpId, mkFCallId, mkTickBoxOpId, mkBreakPointOpId,
 
         mkReboxingAlt, wrapNewTypeBody, unwrapNewTypeBody,
@@ -34,12 +33,12 @@ module MkId (
         -- And some particular Ids; see below for why they are wired in
         wiredInIds, ghcPrimIds,
         unsafeCoerceId, realWorldPrimId, voidArgId, nullAddrId, seqId,
-        lazyId, lazyIdUnfolding, lazyIdKey,
+        lazyId, lazyIdKey,
 
-        mkRuntimeErrorApp,
+        mkRuntimeErrorApp, mkImpossibleExpr,
         rEC_CON_ERROR_ID, iRREFUT_PAT_ERROR_ID, rUNTIME_ERROR_ID,
         nON_EXHAUSTIVE_GUARDS_ERROR_ID, nO_METHOD_BINDING_ERROR_ID,
-        pAT_ERROR_ID, eRROR_ID,
+        pAT_ERROR_ID, eRROR_ID, rEC_SEL_ERROR_ID,
 
         unsafeCoerceName
     ) where
@@ -50,30 +49,25 @@ import Rules
 import TysPrim
 import TysWiredIn
 import PrelRules
-import Unify
 import Type
-import TypeRep
 import Coercion
 import TcType
-import CoreUtils
+import CoreUtils	( exprType, mkCoerce )
 import CoreUnfold
 import Literal
 import TyCon
 import Class
 import VarSet
 import Name
-import OccName
 import PrimOp
 import ForeignCall
 import DataCon
 import Id
-import Var              ( Var, TyVar, mkCoVar)
+import Var              ( Var, TyVar, mkCoVar, mkExportedLocalVar )
 import IdInfo
 import NewDemand
-import DmdAnal
 import CoreSyn
 import Unique
-import Maybes
 import PrelNames
 import BasicTypes       hiding ( SuccessFlag(..) )
 import Util
@@ -89,17 +83,42 @@ import Module
 %*                                                                      *
 %************************************************************************
 
+Note [Wired-in Ids]
+~~~~~~~~~~~~~~~~~~~
+There are several reasons why an Id might appear in the wiredInIds:
+
+(1) The ghcPrimIds are wired in because they can't be defined in
+    Haskell at all, although the can be defined in Core.  They have
+    compulsory unfoldings, so they are always inlined and they  have
+    no definition site.  Their home module is GHC.Prim, so they
+    also have a description in primops.txt.pp, where they are called
+    'pseudoops'.
+
+(2) The 'error' function, eRROR_ID, is wired in because we don't yet have
+    a way to express in an interface file that the result type variable
+    is 'open'; that is can be unified with an unboxed type
+
+    [The interface file format now carry such information, but there's
+    no way yet of expressing at the definition site for these 
+    error-reporting functions that they have an 'open' 
+    result type. -- sof 1/99]
+
+(3) Other error functions (rUNTIME_ERROR_ID) are wired in (a) because
+    the desugarer generates code that mentiones them directly, and
+    (b) for the same reason as eRROR_ID
+
+(4) lazyId is wired in because the wired-in version overrides the
+    strictness of the version defined in GHC.Base
+
+In cases (2-4), the function has a definition in a library module, and
+can be called; but the wired-in version means that the details are 
+never read from that module's interface file; instead, the full definition
+is right here.
+
 \begin{code}
 wiredInIds :: [Id]
 wiredInIds
-  = [   -- These error-y things are wired in because we don't yet have
-        -- a way to express in an interface file that the result type variable
-        -- is 'open'; that is can be unified with an unboxed type
-        -- 
-        -- [The interface file format now carry such information, but there's
-        -- no way yet of expressing at the definition site for these 
-        -- error-reporting functions that they have an 'open' 
-        -- result type. -- sof 1/99]
+  = [   
 
     eRROR_ID,   -- This one isn't used anywhere else in the compiler
                 -- But we still need it in wiredInIds so that when GHC
@@ -113,6 +132,7 @@ wiredInIds
     nO_METHOD_BINDING_ERROR_ID,
     pAT_ERROR_ID,
     rEC_CON_ERROR_ID,
+    rEC_SEL_ERROR_ID,
 
     lazyId
     ] ++ ghcPrimIds
@@ -280,23 +300,14 @@ mkDataConIds wrap_name wkr_name data_con
     nt_work_info = noCafIdInfo          -- The NoCaf-ness is set by noCafIdInfo
                   `setArityInfo` 1      -- Arity 1
                   `setUnfoldingInfo`     newtype_unf
-    newtype_unf  = -- The assertion below is no longer correct:
-                   --   there may be a dict theta rather than a singleton orig_arg_ty
-                   -- ASSERT( isVanillaDataCon data_con &&
-                   --      isSingleton orig_arg_tys )
-                   --
-                   -- No existentials on a newtype, but it can have a context
-                   -- e.g.      newtype Eq a => T a = MkT (...)
+    id_arg1      = mkTemplateLocal 1 (head orig_arg_tys)
+    newtype_unf  = ASSERT2( isVanillaDataCon data_con &&
+                            isSingleton orig_arg_tys, ppr data_con  )
+			      -- Note [Newtype datacons]
                    mkCompulsoryUnfolding $ 
                    mkLams wrap_tvs $ Lam id_arg1 $ 
-                   wrapNewTypeBody tycon res_ty_args
-                       (Var id_arg1)
+                   wrapNewTypeBody tycon res_ty_args (Var id_arg1)
 
-    id_arg1 = mkTemplateLocal 1 
-                (if null orig_arg_tys
-                    then ASSERT(not (null $ dataConDictTheta data_con)) mkPredTy $ head (dataConDictTheta data_con)
-                    else head orig_arg_tys
-                )
 
         ----------- Wrapper --------------
         -- We used to include the stupid theta in the wrapper's args
@@ -335,12 +346,12 @@ mkDataConIds wrap_name wkr_name data_con
         -- we want to see that w is strict in its two arguments
 
     wrap_unf = mkImplicitUnfolding $ Note InlineMe $
-              mkLams wrap_tvs $ 
-              mkLams eq_args $
-              mkLams dict_args $ mkLams id_args $
-              foldr mk_case con_app 
-                    (zip (dict_args ++ id_args) all_strict_marks)
-                    i3 []
+               mkLams wrap_tvs $ 
+               mkLams eq_args $
+               mkLams dict_args $ mkLams id_args $
+               foldr mk_case con_app 
+                     (zip (dict_args ++ id_args) all_strict_marks)
+                     i3 []
 
     con_app _ rep_ids = wrapFamInstBody tycon res_ty_args $
                           Var wrk_id `mkTyApps`  res_ty_args
@@ -395,301 +406,106 @@ mkLocals i tys = (zipWith mkTemplateLocal [i..i+n-1] tys, i+n)
                  n = length tys
 \end{code}
 
+Note [Newtype datacons]
+~~~~~~~~~~~~~~~~~~~~~~~
+The "data constructor" for a newtype should always be vanilla.  At one
+point this wasn't true, because the newtype arising from
+     class C a => D a
+looked like
+       newtype T:D a = D:D (C a)
+so the data constructor for T:C had a single argument, namely the
+predicate (C a).  But now we treat that as an ordinary argument, not
+part of the theta-type, so all is well.
+
 
 %************************************************************************
 %*                                                                      *
-\subsection{Record selectors}
+\subsection{Dictionary selectors}
 %*                                                                      *
 %************************************************************************
 
-We're going to build a record selector unfolding that looks like this:
+Selecting a field for a dictionary.  If there is just one field, then
+there's nothing to do.  
 
-        data T a b c = T1 { ..., op :: a, ...}
-                     | T2 { ..., op :: a, ...}
-                     | T3
+Dictionary selectors may get nested forall-types.  Thus:
 
-        sel = /\ a b c -> \ d -> case d of
-                                    T1 ... x ... -> x
-                                    T2 ... x ... -> x
-                                    other        -> error "..."
+        class Foo a where
+          op :: forall b. Ord b => a -> b -> b
 
-Similarly for newtypes
+Then the top-level type for op is
 
-        newtype N a = MkN { unN :: a->a }
+        op :: forall a. Foo a => 
+              forall b. Ord b => 
+              a -> b -> b
 
-        unN :: N a -> a -> a
-        unN n = coerce (a->a) n
-        
-We need to take a little care if the field has a polymorphic type:
-
-        data R = R { f :: forall a. a->a }
-
-Then we want
-
-        f :: forall a. R -> a -> a
-        f = /\ a \ r = case r of
-                          R f -> f a
-
-(not f :: R -> forall a. a->a, which gives the type inference mechanism 
-problems at call sites)
-
-Similarly for (recursive) newtypes
-
-        newtype N = MkN { unN :: forall a. a->a }
-
-        unN :: forall b. N -> b -> b
-        unN = /\b -> \n:N -> (coerce (forall a. a->a) n)
-
-
-Note [Naughty record selectors]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-A "naughty" field is one for which we can't define a record 
-selector, because an existential type variable would escape.  For example:
-        data T = forall a. MkT { x,y::a }
-We obviously can't define       
-        x (MkT v _) = v
-Nevertheless we *do* put a RecordSelId into the type environment
-so that if the user tries to use 'x' as a selector we can bleat
-helpfully, rather than saying unhelpfully that 'x' is not in scope.
-Hence the sel_naughty flag, to identify record selectors that don't really exist.
-
-In general, a field is naughty if its type mentions a type variable that
-isn't in the result type of the constructor.
-
-Note [GADT record selectors]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-For GADTs, we require that all constructors with a common field 'f' have the same
-result type (modulo alpha conversion).  [Checked in TcTyClsDecls.checkValidTyCon]
-E.g. 
-        data T where
-          T1 { f :: Maybe a } :: T [a]
-          T2 { f :: Maybe a, y :: b  } :: T [a]
-
-and now the selector takes that result type as its argument:
-   f :: forall a. T [a] -> Maybe a
-
-Details: the "real" types of T1,T2 are:
-   T1 :: forall r a.   (r~[a]) => a -> T r
-   T2 :: forall r a b. (r~[a]) => a -> b -> T r
-
-So the selector loooks like this:
-   f :: forall a. T [a] -> Maybe a
-   f (a:*) (t:T [a])
-     = case t of
-	 T1 c   (g:[a]~[c]) (v:Maybe c)       -> v `cast` Maybe (right (sym g))
-         T2 c d (g:[a]~[c]) (v:Maybe c) (w:d) -> v `cast` Maybe (right (sym g))
-
-Note the forall'd tyvars of the selector are just the free tyvars
-of the result type; there may be other tyvars in the constructor's
-type (e.g. 'b' in T2).
-
-Note the need for casts in the result!
-
-Note [Selector running example]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-It's OK to combine GADTs and type families.  Here's a running example:
-
-        data instance T [a] where 
-          T1 { fld :: b } :: T [Maybe b]
-
-The representation type looks like this
-        data :R7T a where
-          T1 { fld :: b } :: :R7T (Maybe b)
-
-and there's coercion from the family type to the representation type
-        :CoR7T a :: T [a] ~ :R7T a
-
-The selector we want for fld looks like this:
-
-        fld :: forall b. T [Maybe b] -> b
-        fld = /\b. \(d::T [Maybe b]).
-              case d `cast` :CoR7T (Maybe b) of 
-                T1 (x::b) -> x
-
-The scrutinee of the case has type :R7T (Maybe b), which can be
-gotten by appying the eq_spec to the univ_tvs of the data con.
+This is unlike ordinary record selectors, which have all the for-alls
+at the outside.  When dealing with classes it's very convenient to
+recover the original type signature from the class op selector.
 
 \begin{code}
-mkRecordSelId :: TyCon -> FieldLabel -> Id
-mkRecordSelId tycon field_label
-    -- Assumes that all fields with the same field label have the same type
-  = sel_id
+mkDictSelId :: Bool	-- True <=> don't include the unfolding
+			-- Little point on imports without -O, because the
+			-- dictionary itself won't be visible
+ 	    -> Name -> Class -> Id
+mkDictSelId no_unf name clas
+  = mkGlobalId (ClassOpId clas) name sel_ty info
   where
-    -- Because this function gets called by implicitTyThings, we need to
-    -- produce the OccName of the Id without doing any suspend type checks.
-    -- (see the note [Tricky iface loop]).
-    -- A suspended type-check is sometimes necessary to compute field_ty,
-    -- so we need to make sure that we suspend anything that depends on field_ty.
-
-    -- the overall result
-    sel_id = mkGlobalId sel_id_details field_label theType theInfo
-                             
-    -- check whether the type is naughty: this thunk does not get forced
-    -- until the type is actually needed
-    field_ty   = dataConFieldType con1 field_label
-    is_naughty = not (tyVarsOfType field_ty `subVarSet` data_tv_set)  
-
-    -- it's important that this doesn't force the if
-    (theType, theInfo) = if is_naughty 
-                         -- Escapist case here for naughty constructors
-                         -- We give it no IdInfo, and a type of
-                         -- forall a.a (never looked at)
-                         then (forall_a_a, noCafIdInfo) 
-                         -- otherwise do the real case
-                         else (selector_ty, info)
-
-    sel_id_details = RecordSelId { sel_tycon = tycon,
-                                   sel_label = field_label,
-                                   sel_naughty = is_naughty }
-    -- For a data type family, the tycon is the *instance* TyCon
-
-    -- for naughty case
-    forall_a_a = mkForAllTy alphaTyVar (mkTyVarTy alphaTyVar)
-
-    -- real case starts here:
-    data_cons         = tyConDataCons tycon     
-    data_cons_w_field = filter has_field data_cons      -- Can't be empty!
-    has_field con     = field_label `elem` dataConFieldLabels con
-
-    con1        = ASSERT( not (null data_cons_w_field) ) head data_cons_w_field
-    (univ_tvs, _, eq_spec, _, _, _, data_ty) = dataConFullSig con1
-        -- For a data type family, the data_ty (and hence selector_ty) mentions
-        -- only the family TyCon, not the instance TyCon
-    data_tv_set = tyVarsOfType data_ty
-    data_tvs    = varSetElems data_tv_set
-    
-        -- _Very_ tiresomely, the selectors are (unnecessarily!) overloaded over
-        -- just the dictionaries in the types of the constructors that contain
-        -- the relevant field.  [The Report says that pattern matching on a
-        -- constructor gives the same constraints as applying it.]  Urgh.  
-        --
-        -- However, not all data cons have all constraints (because of
-        -- BuildTyCl.mkDataConStupidTheta).  So we need to find all the data cons 
-        -- involved in the pattern match and take the union of their constraints.
-    stupid_dict_tys = mkPredTys (dataConsStupidTheta data_cons_w_field)
-    n_stupid_dicts  = length stupid_dict_tys
-
-    (field_tyvars,pre_field_theta,field_tau) = tcSplitSigmaTy field_ty
-    field_theta       = filter (not . isEqPred) pre_field_theta
-    field_dict_tys    = mkPredTys field_theta
-    n_field_dict_tys  = length field_dict_tys
-        -- If the field has a universally quantified type we have to 
-        -- be a bit careful.  Suppose we have
-        --      data R = R { op :: forall a. Foo a => a -> a }
-        -- Then we can't give op the type
-        --      op :: R -> forall a. Foo a => a -> a
-        -- because the typechecker doesn't understand foralls to the
-        -- right of an arrow.  The "right" type to give it is
-        --      op :: forall a. Foo a => R -> a -> a
-        -- But then we must generate the right unfolding too:
-        --      op = /\a -> \dfoo -> \ r ->
-        --           case r of
-        --              R op -> op a dfoo
-        -- Note that this is exactly the type we'd infer from a user defn
-        --      op (R op) = op
-
-    selector_ty :: Type
-    selector_ty  = mkForAllTys data_tvs $ mkForAllTys field_tyvars $
-                   mkFunTys stupid_dict_tys  $  mkFunTys field_dict_tys $
-                   mkFunTy data_ty field_tau
-      
-    arity = 1 + n_stupid_dicts + n_field_dict_tys
-
-    (strict_sig, rhs_w_str) = dmdAnalTopRhs sel_rhs
-        -- Use the demand analyser to work out strictness.
-        -- With all this unpackery it's not easy!
+    sel_ty = mkForAllTys tyvars (mkFunTy (idType dict_id) (idType the_arg_id))
+        -- We can't just say (exprType rhs), because that would give a type
+        --      C a -> C a
+        -- for a single-op class (after all, the selector is the identity)
+        -- But it's type must expose the representation of the dictionary
+        -- to get (say)         C a -> (a -> a)
 
     info = noCafIdInfo
-           `setCafInfo`           caf_info
-           `setArityInfo`         arity
-           `setUnfoldingInfo`     unfolding
-           `setAllStrictnessInfo` Just strict_sig
+                `setArityInfo`          1
+                `setAllStrictnessInfo`  Just strict_sig
+                `setUnfoldingInfo`      (if no_unf then noUnfolding
+						   else mkImplicitUnfolding rhs)
 
-    unfolding = mkImplicitUnfolding rhs_w_str
+        -- We no longer use 'must-inline' on record selectors.  They'll
+        -- inline like crazy if they scrutinise a constructor
 
-        -- Allocate Ids.  We do it a funny way round because field_dict_tys is
-        -- almost always empty.  Also note that we use max_dict_tys
-        -- rather than n_dict_tys, because the latter gives an infinite loop:
-        -- n_dict tys depends on the_alts, which depens on arg_ids, which 
-        -- depends on arity, which depends on n_dict tys.  Sigh!  Mega sigh!
-    stupid_dict_ids  = mkTemplateLocalsNum 1 stupid_dict_tys
-    max_stupid_dicts = length (tyConStupidTheta tycon)
-    field_dict_base  = max_stupid_dicts + 1
-    field_dict_ids   = mkTemplateLocalsNum field_dict_base field_dict_tys
-    dict_id_base     = field_dict_base + n_field_dict_tys
-    data_id          = mkTemplateLocal dict_id_base data_ty
-    scrut_id         = mkTemplateLocal (dict_id_base+1) scrut_ty
-    arg_base         = dict_id_base + 2
+        -- The strictness signature is of the form U(AAAVAAAA) -> T
+        -- where the V depends on which item we are selecting
+        -- It's worth giving one, so that absence info etc is generated
+        -- even if the selector isn't inlined
+    strict_sig = mkStrictSig (mkTopDmdType [arg_dmd] TopRes)
+    arg_dmd | isNewTyCon tycon = evalDmd
+            | otherwise        = Eval (Prod [ if the_arg_id == id then evalDmd else Abs
+                                            | id <- arg_ids ])
 
-    the_alts :: [CoreAlt]
-    the_alts   = map mk_alt data_cons_w_field   -- Already sorted by data-con
-    no_default = length data_cons == length data_cons_w_field   -- No default needed
+    tycon      = classTyCon clas
+    [data_con] = tyConDataCons tycon
+    tyvars     = dataConUnivTyVars data_con
+    arg_tys    = {- ASSERT( isVanillaDataCon data_con ) -} dataConRepArgTys data_con
+    eq_theta   = dataConEqTheta data_con
+    the_arg_id = assoc "MkId.mkDictSelId" (map idName (classSelIds clas) `zip` arg_ids) name
 
-    default_alt | no_default = []
-                | otherwise  = [(DEFAULT, [], error_expr)]
+    pred       = mkClassPred clas (mkTyVarTys tyvars)
+    dict_id    = mkTemplateLocal     1 $ mkPredTy pred
+    (eq_ids,n) = mkCoVarLocals 2 $ mkPredTys eq_theta
+    arg_ids    = mkTemplateLocalsNum n arg_tys
 
-    -- The default branch may have CAF refs, because it calls recSelError etc.
-    caf_info    | no_default = NoCafRefs
-                | otherwise  = MayHaveCafRefs
+    mkCoVarLocals i []     = ([],i)
+    mkCoVarLocals i (x:xs) = let (ys,j) = mkCoVarLocals (i+1) xs
+                                 y      = mkCoVar (mkSysTvName (mkBuiltinUnique i) (fsLit "dc_co")) x
+                             in (y:ys,j)
 
-    sel_rhs = mkLams data_tvs $ mkLams field_tyvars $ 
-              mkLams stupid_dict_ids $ mkLams field_dict_ids $
-              Lam data_id $ mk_result sel_body
+    rhs = mkLams tyvars  (Lam dict_id   rhs_body)
+    rhs_body | isNewTyCon tycon = unwrapNewTypeBody tycon (map mkTyVarTy tyvars) (Var dict_id)
+             | otherwise        = Case (Var dict_id) dict_id (idType the_arg_id)
+                                       [(DataAlt data_con, eq_ids ++ arg_ids, Var the_arg_id)]
+\end{code}
 
-    scrut_ty_args = substTyVars (mkTopTvSubst eq_spec) univ_tvs
-    scrut_ty      = mkTyConApp tycon scrut_ty_args
-    scrut = unwrapFamInstScrut tycon scrut_ty_args (Var data_id)
-        -- First coerce from the type family to the representation type
 
-        -- NB: A newtype always has a vanilla DataCon; no existentials etc
-        --     data_tys will simply be the dataConUnivTyVars
-    sel_body | isNewTyCon tycon = unwrapNewTypeBody tycon scrut_ty_args scrut
-             | otherwise        = Case scrut scrut_id field_ty (default_alt ++ the_alts)
+%************************************************************************
+%*                                                                      *
+        Boxing and unboxing
+%*                                                                      *
+%************************************************************************
 
-    mk_result poly_result = mkVarApps (mkVarApps poly_result field_tyvars) field_dict_ids
-        -- We pull the field lambdas to the top, so we need to 
-        -- apply them in the body.  For example:
-        --      data T = MkT { foo :: forall a. a->a }
-        --
-        --      foo :: forall a. T -> a -> a
-        --      foo = /\a. \t:T. case t of { MkT f -> f a }
-
-    mk_alt data_con
-      = mkReboxingAlt rebox_uniqs data_con (ex_tvs ++ co_tvs ++ arg_vs) rhs
-      where
-           -- get pattern binders with types appropriately instantiated
-        arg_uniqs = map mkBuiltinUnique [arg_base..]
-        (ex_tvs, co_tvs, arg_vs) = dataConOrigInstPat arg_uniqs data_con 
-                                                      scrut_ty_args
-
-        rebox_base  = arg_base + length ex_tvs + length co_tvs + length arg_vs
-        rebox_uniqs = map mkBuiltinUnique [rebox_base..]
-
-        -- data T :: *->* where T1 { fld :: Maybe b } -> T [b]
-        --      Hence T1 :: forall a b. (a~[b]) => b -> T a
-        -- fld :: forall b. T [b] -> Maybe b
-        -- fld = /\b.\(t:T[b]). case t of 
-        --              T1 b' (c : [b]=[b']) (x:Maybe b') 
-        --                      -> x `cast` Maybe (sym (right c))
-
-                -- Generate the cast for the result
-		-- See Note [GADT record selectors] for why a cast is needed
-	in_scope_tvs = ex_tvs ++ co_tvs ++ data_tvs
-        reft         = matchRefine in_scope_tvs (map (mkSymCoercion . mkTyVarTy) co_tvs)
-        rhs = case refineType reft (idType the_arg_id) of
-                Nothing            -> Var the_arg_id
-                Just (co, data_ty) -> ASSERT2( data_ty `tcEqType` field_ty, 
-	    	                        ppr data_con $$ ppr data_ty $$ ppr field_ty )
-          	       		      Cast (Var the_arg_id) co
-
-        field_vs    = filter (not . isPredTy . idType) arg_vs 
-        the_arg_id  = assoc "mkRecordSelId:mk_alt" 
-                            (field_lbls `zip` field_vs) field_label
-        field_lbls  = dataConFieldLabels data_con
-
-    error_expr = mkRuntimeErrorApp rEC_SEL_ERROR_ID field_ty full_msg
-    full_msg   = showSDoc (sep [text "No match in record selector", ppr sel_id])
-
+\begin{code}
 -- unbox a product type...
 -- we will recurse into newtypes, casting along the way, and unbox at the
 -- first product data constructor we find. e.g.
@@ -818,87 +634,6 @@ mkReboxingAlt us con args rhs
       = let (binds, args') = go args stricts us
         in  (binds, arg:args')
     go (_ : _) [] _ = panic "mkReboxingAlt"
-\end{code}
-
-
-%************************************************************************
-%*                                                                      *
-\subsection{Dictionary selectors}
-%*                                                                      *
-%************************************************************************
-
-Selecting a field for a dictionary.  If there is just one field, then
-there's nothing to do.  
-
-Dictionary selectors may get nested forall-types.  Thus:
-
-        class Foo a where
-          op :: forall b. Ord b => a -> b -> b
-
-Then the top-level type for op is
-
-        op :: forall a. Foo a => 
-              forall b. Ord b => 
-              a -> b -> b
-
-This is unlike ordinary record selectors, which have all the for-alls
-at the outside.  When dealing with classes it's very convenient to
-recover the original type signature from the class op selector.
-
-\begin{code}
-mkDictSelId :: Bool	-- True <=> don't include the unfolding
-			-- Little point on imports without -O, because the
-			-- dictionary itself won't be visible
- 	    -> Name -> Class -> Id
-mkDictSelId no_unf name clas
-  = mkGlobalId (ClassOpId clas) name sel_ty info
-  where
-    sel_ty = mkForAllTys tyvars (mkFunTy (idType dict_id) (idType the_arg_id))
-        -- We can't just say (exprType rhs), because that would give a type
-        --      C a -> C a
-        -- for a single-op class (after all, the selector is the identity)
-        -- But it's type must expose the representation of the dictionary
-        -- to get (say)         C a -> (a -> a)
-
-    info = noCafIdInfo
-                `setArityInfo`          1
-                `setAllStrictnessInfo`  Just strict_sig
-                `setUnfoldingInfo`      (if no_unf then noUnfolding
-						   else mkImplicitUnfolding rhs)
-
-        -- We no longer use 'must-inline' on record selectors.  They'll
-        -- inline like crazy if they scrutinise a constructor
-
-        -- The strictness signature is of the form U(AAAVAAAA) -> T
-        -- where the V depends on which item we are selecting
-        -- It's worth giving one, so that absence info etc is generated
-        -- even if the selector isn't inlined
-    strict_sig = mkStrictSig (mkTopDmdType [arg_dmd] TopRes)
-    arg_dmd | isNewTyCon tycon = evalDmd
-            | otherwise        = Eval (Prod [ if the_arg_id == id then evalDmd else Abs
-                                            | id <- arg_ids ])
-
-    tycon      = classTyCon clas
-    [data_con] = tyConDataCons tycon
-    tyvars     = dataConUnivTyVars data_con
-    arg_tys    = {- ASSERT( isVanillaDataCon data_con ) -} dataConRepArgTys data_con
-    eq_theta   = dataConEqTheta data_con
-    the_arg_id = assoc "MkId.mkDictSelId" (map idName (classSelIds clas) `zip` arg_ids) name
-
-    pred       = mkClassPred clas (mkTyVarTys tyvars)
-    dict_id    = mkTemplateLocal     1 $ mkPredTy pred
-    (eq_ids,n) = mkCoVarLocals 2 $ mkPredTys eq_theta
-    arg_ids    = mkTemplateLocalsNum n arg_tys
-
-    mkCoVarLocals i []     = ([],i)
-    mkCoVarLocals i (x:xs) = let (ys,j) = mkCoVarLocals (i+1) xs
-                                 y      = mkCoVar (mkSysTvName (mkBuiltinUnique i) (fsLit "dc_co")) x
-                             in (y:ys,j)
-
-    rhs = mkLams tyvars  (Lam dict_id   rhs_body)
-    rhs_body | isNewTyCon tycon = unwrapNewTypeBody tycon (map mkTyVarTy tyvars) (Var dict_id)
-             | otherwise        = Case (Var dict_id) dict_id (idType the_arg_id)
-                                       [(DataAlt data_con, eq_ids ++ arg_ids, Var the_arg_id)]
 \end{code}
 
 
@@ -1090,37 +825,9 @@ mkDictFunId :: Name      -- Name to use for the dict fun;
             -> Id
 
 mkDictFunId dfun_name inst_tyvars dfun_theta clas inst_tys
-  = mkExportedLocalId dfun_name dfun_ty
+  = mkExportedLocalVar DFunId dfun_name dfun_ty vanillaIdInfo
   where
     dfun_ty = mkSigmaTy inst_tyvars dfun_theta (mkDictTy clas inst_tys)
-
-{-  1 dec 99: disable the Mark Jones optimisation for the sake
-    of compatibility with Hugs.
-    See `types/InstEnv' for a discussion related to this.
-
-    (class_tyvars, sc_theta, _, _) = classBigSig clas
-    not_const (clas, tys) = not (isEmptyVarSet (tyVarsOfTypes tys))
-    sc_theta' = substClasses (zipTopTvSubst class_tyvars inst_tys) sc_theta
-    dfun_theta = case inst_decl_theta of
-                   []    -> []  -- If inst_decl_theta is empty, then we don't
-                                -- want to have any dict arguments, so that we can
-                                -- expose the constant methods.
-
-                   other -> nub (inst_decl_theta ++ filter not_const sc_theta')
-                                -- Otherwise we pass the superclass dictionaries to
-                                -- the dictionary function; the Mark Jones optimisation.
-                                --
-                                -- NOTE the "nub".  I got caught by this one:
-                                --   class Monad m => MonadT t m where ...
-                                --   instance Monad m => MonadT (EnvT env) m where ...
-                                -- Here, the inst_decl_theta has (Monad m); but so
-                                -- does the sc_theta'!
-                                --
-                                -- NOTE the "not_const".  I got caught by this one too:
-                                --   class Foo a => Baz a b where ...
-                                --   instance Wob b => Baz T b where..
-                                -- Now sc_theta' has Foo T
--}
 \end{code}
 
 
@@ -1194,11 +901,7 @@ nullAddrId = pcMiscPrelId nullAddrName addrPrimTy info
            mkCompulsoryUnfolding (Lit nullAddrLit)
 
 ------------------------------------------------
-seqId :: Id
--- 'seq' is very special.  See notes with
---	See DsUtils.lhs Note [Desugaring seq (1)] and
---			Note [Desugaring seq (2)] and
--- Fixity is set in LoadIface.ghcPrimIface
+seqId :: Id	-- See Note [seqId magic]
 seqId = pcMiscPrelId seqName ty info
   where
     info = noCafIdInfo `setUnfoldingInfo` mkCompulsoryUnfolding rhs
@@ -1210,29 +913,72 @@ seqId = pcMiscPrelId seqName ty info
     rhs = mkLams [alphaTyVar,openBetaTyVar,x,y] (Case (Var x) x openBetaTy [(DEFAULT, [], Var y)])
 
 ------------------------------------------------
-lazyId :: Id
--- lazy :: forall a?. a? -> a?   (i.e. works for unboxed types too)
--- Used to lazify pseq:         pseq a b = a `seq` lazy b
--- 
--- Also, no strictness: by being a built-in Id, all the info about lazyId comes from here,
--- not from GHC.Base.hi.   This is important, because the strictness
--- analyser will spot it as strict!
---
--- Also no unfolding in lazyId: it gets "inlined" by a HACK in the worker/wrapperpass
---      (see WorkWrap.wwExpr)   
--- We could use inline phases to do this, but that would be vulnerable to changes in 
--- phase numbering....we must inline precisely after strictness analysis.
+lazyId :: Id	-- See Note [lazyId magic]
 lazyId = pcMiscPrelId lazyIdName ty info
   where
     info = noCafIdInfo
     ty  = mkForAllTys [alphaTyVar] (mkFunTy alphaTy alphaTy)
-
-lazyIdUnfolding :: CoreExpr     -- Used to expand 'lazyId' after strictness anal
-lazyIdUnfolding = mkLams [openAlphaTyVar,x] (Var x)
-                where
-                  [x] = mkTemplateLocals [openAlphaTy]
 \end{code}
 
+Note [seqId magic]
+~~~~~~~~~~~~~~~~~~
+'seq' is special in several ways.  
+
+a) Its second arg can have an unboxed type
+      x `seq` (v +# w)
+
+b) Its fixity is set in LoadIface.ghcPrimIface
+
+c) It has quite a bit of desugaring magic. 
+   See DsUtils.lhs Note [Desugaring seq (1)] and (2) and (3)
+
+d) There is some special rule handing: Note [RULES for seq]
+
+Note [Rules for seq]
+~~~~~~~~~~~~~~~~~~~~
+Roman found situations where he had
+      case (f n) of _ -> e
+where he knew that f (which was strict in n) would terminate if n did.
+Notice that the result of (f n) is discarded. So it makes sense to
+transform to
+      case n of _ -> e
+
+Rather than attempt some general analysis to support this, I've added
+enough support that you can do this using a rewrite rule:
+
+  RULE "f/seq" forall n.  seq (f n) e = seq n e
+
+You write that rule.  When GHC sees a case expression that discards
+its result, it mentally transforms it to a call to 'seq' and looks for
+a RULE.  (This is done in Simplify.rebuildCase.)  As usual, the
+correctness of the rule is up to you.
+
+To make this work, we need to be careful that the magical desugaring
+done in Note [seqId magic] item (c) is *not* done on the LHS of a rule.
+Or rather, we arrange to un-do it, in DsBinds.decomposeRuleLhs.
+
+
+Note [lazyId magic]
+~~~~~~~~~~~~~~~~~~~
+    lazy :: forall a?. a? -> a?   (i.e. works for unboxed types too)
+
+Used to lazify pseq:   pseq a b = a `seq` lazy b
+
+Also, no strictness: by being a built-in Id, all the info about lazyId comes from here,
+not from GHC.Base.hi.   This is important, because the strictness
+analyser will spot it as strict!
+
+Also no unfolding in lazyId: it gets "inlined" by a HACK in CorePrep.
+It's very important to do this inlining *after* unfoldings are exposed 
+in the interface file.  Otherwise, the unfolding for (say) pseq in the
+interface file will not mention 'lazy', so if we inline 'pseq' we'll totally
+miss the very thing that 'lazy' was there for in the first place.
+See Trac #3259 for a real world example.
+
+lazyId is defined in GHC.Base, so we don't *have* to inline it.  If it
+appears un-applied, we'll end up just calling it.
+
+-------------------------------------------------------------
 @realWorld#@ used to be a magic literal, \tr{void#}.  If things get
 nasty as-is, change it back to a literal (@Literal@).
 
@@ -1292,6 +1038,10 @@ mkRuntimeErrorApp err_id res_ty err_msg
   where
     err_string = Lit (mkMachString err_msg)
 
+mkImpossibleExpr :: Type -> CoreExpr
+mkImpossibleExpr res_ty
+  = mkRuntimeErrorApp rUNTIME_ERROR_ID res_ty "Impossible case alternative"
+
 rEC_SEL_ERROR_ID                = mkRuntimeErrorId recSelErrorName
 rUNTIME_ERROR_ID                = mkRuntimeErrorId runtimeErrorName
 iRREFUT_PAT_ERROR_ID            = mkRuntimeErrorId irrefutPatErrorName
@@ -1306,7 +1056,7 @@ mkRuntimeErrorId :: Name -> Id
 mkRuntimeErrorId name = pc_bottoming_Id name runtimeErrorTy
 
 runtimeErrorTy :: Type
-runtimeErrorTy        = mkSigmaTy [openAlphaTyVar] [] (mkFunTy addrPrimTy openAlphaTy)
+runtimeErrorTy = mkSigmaTy [openAlphaTyVar] [] (mkFunTy addrPrimTy openAlphaTy)
 \end{code}
 
 \begin{code}

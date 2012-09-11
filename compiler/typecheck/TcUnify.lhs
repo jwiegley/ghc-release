@@ -14,7 +14,6 @@ module TcUnify (
         -- Various unifications
   unifyType, unifyTypeList, unifyTheta,
   unifyKind, unifyKinds, unifyFunKind,
-  checkExpectedKind,
   preSubType, boxyMatchTypes,
 
   --------------------------------
@@ -579,9 +578,10 @@ boxy_match tmpl_tvs orig_tmpl_ty boxy_tvs orig_boxy_ty subst
 
     go ty1 ty2          -- C.f. the isSigmaTy case for boxySubMatchType
         | isSigmaTy ty1
-        , (tvs1, _, tau1) <- tcSplitSigmaTy ty1
-        , (tvs2, _, tau2) <- tcSplitSigmaTy ty2
+        , (tvs1, ps1, tau1) <- tcSplitSigmaTy ty1
+        , (tvs2, ps2, tau2) <- tcSplitSigmaTy ty2
         , equalLength tvs1 tvs2
+        , equalLength ps1  ps2
         = boxy_match (tmpl_tvs `delVarSetList` tvs1)    tau1
                      (boxy_tvs `extendVarSetList` tvs2) tau2 subst
 
@@ -1040,8 +1040,8 @@ lists, when all the elts should be of the same type.
 unifyTypeList :: [TcTauType] -> TcM ()
 unifyTypeList []                 = return ()
 unifyTypeList [_]                = return ()
-unifyTypeList (ty1:tys@(ty2:_)) = do { unifyType ty1 ty2
-                                      ; unifyTypeList tys }
+unifyTypeList (ty1:tys@(ty2:_)) = do { _ <- unifyType ty1 ty2
+                                     ; unifyTypeList tys }
 \end{code}
 
 %************************************************************************
@@ -1682,7 +1682,7 @@ zapToMonotype :: BoxySigmaType -> TcM TcTauType
 -- with that type.
 zapToMonotype res_ty
   = do  { res_tau <- newFlexiTyVarTy liftedTypeKind
-        ; boxyUnify res_tau res_ty
+        ; _ <- boxyUnify res_tau res_ty
         ; return res_tau }
 
 unBox :: BoxyType -> TcM TcType
@@ -1917,75 +1917,6 @@ unifyFunKind (TyVarTy kvar) = do
 
 unifyFunKind (FunTy arg_kind res_kind) = return (Just (arg_kind,res_kind))
 unifyFunKind _                         = return Nothing
-\end{code}
-
-%************************************************************************
-%*                                                                      *
-        Checking kinds
-%*                                                                      *
-%************************************************************************
-
----------------------------
--- We would like to get a decent error message from
---   (a) Under-applied type constructors
---              f :: (Maybe, Maybe)
---   (b) Over-applied type constructors
---              f :: Int x -> Int x
---
-
-\begin{code}
-checkExpectedKind :: Outputable a => a -> TcKind -> TcKind -> TcM ()
--- A fancy wrapper for 'unifyKind', which tries
--- to give decent error messages.
---      (checkExpectedKind ty act_kind exp_kind)
--- checks that the actual kind act_kind is compatible
---      with the expected kind exp_kind
--- The first argument, ty, is used only in the error message generation
-checkExpectedKind ty act_kind exp_kind
-  | act_kind `isSubKind` exp_kind -- Short cut for a very common case
-  = return ()
-  | otherwise = do
-    (_errs, mb_r) <- tryTc (unifyKind exp_kind act_kind)
-    case mb_r of
-        Just _  -> return ()  -- Unification succeeded
-        Nothing -> do
-
-        -- So there's definitely an error
-        -- Now to find out what sort
-           exp_kind <- zonkTcKind exp_kind
-           act_kind <- zonkTcKind act_kind
-
-           env0 <- tcInitTidyEnv
-           let (exp_as, _) = splitKindFunTys exp_kind
-               (act_as, _) = splitKindFunTys act_kind
-               n_exp_as = length exp_as
-               n_act_as = length act_as
-
-               (env1, tidy_exp_kind) = tidyKind env0 exp_kind
-               (env2, tidy_act_kind) = tidyKind env1 act_kind
-
-               err | n_exp_as < n_act_as     -- E.g. [Maybe]
-                   = quotes (ppr ty) <+> ptext (sLit "is not applied to enough type arguments")
-
-                     -- Now n_exp_as >= n_act_as. In the next two cases,
-                     -- n_exp_as == 0, and hence so is n_act_as
-                   | isLiftedTypeKind exp_kind && isUnliftedTypeKind act_kind
-                   = ptext (sLit "Expecting a lifted type, but") <+> quotes (ppr ty)
-                       <+> ptext (sLit "is unlifted")
-
-                   | isUnliftedTypeKind exp_kind && isLiftedTypeKind act_kind
-                   = ptext (sLit "Expecting an unlifted type, but") <+> quotes (ppr ty)
-                       <+> ptext (sLit "is lifted")
-
-                   | otherwise               -- E.g. Monad [Int]
-                   = ptext (sLit "Kind mis-match")
-
-               more_info = sep [ ptext (sLit "Expected kind") <+>
-                                     quotes (pprKind tidy_exp_kind) <> comma,
-                                 ptext (sLit "but") <+> quotes (ppr ty) <+>
-                                     ptext (sLit "has kind") <+> quotes (pprKind tidy_act_kind)]
-
-           failWithTcM (env2, err $$ more_info)
 \end{code}
 
 %************************************************************************

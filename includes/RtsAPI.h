@@ -4,6 +4,9 @@
  *
  * API for invoking Haskell functions via the RTS
  *
+ * To understand the structure of the RTS headers, see the wiki:
+ *   http://hackage.haskell.org/trac/ghc/wiki/Commentary/SourceTree/Includes
+ *
  * --------------------------------------------------------------------------*/
 
 #ifndef RTSAPI_H
@@ -22,11 +25,11 @@ typedef enum {
     NoStatus,    /* not finished yet */
     Success,	 /* completed successfully */
     Killed,	 /* uncaught exception */
-    Interrupted,  /* stopped in response to a call to interruptStgRts */
+    Interrupted, /* stopped in response to a call to interruptStgRts */
     HeapExhausted /* out of memory */
 } SchedulerStatus;
 
-typedef StgClosure *HaskellObj;
+typedef struct StgClosure_ *HaskellObj;
 
 /*
  * An abstract type representing the token returned by rts_lock() and
@@ -65,6 +68,15 @@ Capability *rts_lock (void);
 
 // releases the token acquired with rts_lock().
 void rts_unlock (Capability *token);
+
+// If you are in a context where you know you have a current capability but
+// do not know what it is, then use this to get it. Basically this only
+// applies to "unsafe" foreign calls (as unsafe foreign calls are made with
+// the capability held).
+//
+// WARNING: There is *no* guarantee this returns anything sensible (eg NULL)
+// when there is no current capability.
+Capability *rts_unsafeGetMyCapability (void);
 
 /* ----------------------------------------------------------------------------
    Building Haskell objects from C datatypes.

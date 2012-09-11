@@ -10,6 +10,7 @@ test('IOError002',      normal, compile_and_run, [''])
 test('finalization001', normal, compile_and_run, [''])
 test('hClose001',       extra_clean(['hClose001.tmp']), compile_and_run, [''])
 test('hClose002',       extra_clean(['hClose002.tmp']), compile_and_run, [''])
+test('hClose003',       reqlib('unix'), compile_and_run, ['-package unix'])
 test('hFileSize001',    normal, compile_and_run, [''])
 test('hFileSize002',
      [omit_ways(['ghci']),
@@ -45,6 +46,8 @@ test('hSetBuffering002', set_stdin('hSetBuffering002.hs'), compile_and_run, ['']
 test('hSetBuffering003', compose(omit_ways(['ghci']), 
 				 set_stdin('hSetBuffering003.hs')), 
 	compile_and_run, [''])
+
+test('hSetBuffering004', set_stdin('hSetBuffering004.hs'), compile_and_run, [''])
 
 test('ioeGetErrorString001', normal, compile_and_run, ['-cpp'])
 test('ioeGetFileName001',    normal, compile_and_run, ['-cpp'])
@@ -88,6 +91,8 @@ test('readwrite002',
       extra_clean(['readwrite002.inout'])],
      compile_and_run, ['-cpp'])
 
+test('readwrite003', extra_clean(['readwrite003.txt']), compile_and_run, [''])
+
 test('hGetBuf001', compose(only_compiler_types(['ghc']),
 		   compose(skip_if_fast,
 		     expect_fail_if_windows)), compile_and_run, ['-package unix'])
@@ -104,3 +109,37 @@ test('concio001.thr', skip, run_command, ['$MAKE -s --no-print-directory test.co
 test('concio002', reqlib('process'), compile_and_run, [''])
 
 test('2122', extra_clean(['2122-test']), compile_and_run, [''])
+
+test('hSetEncoding001',extra_run_opts('hSetEncoding001.in'), compile_and_run, [''])
+test('decodingerror001',normal, compile_and_run, [''])
+
+test('encoding001',
+     extra_clean([
+           'encoding001.utf16', 'encoding001.utf16.utf16be',
+           'encoding001.utf16.utf16le', 'encoding001.utf16.utf32',
+           'encoding001.utf16.utf32be', 'encoding001.utf16.utf32le',
+           'encoding001.utf16.utf8', 'encoding001.utf16be',
+           'encoding001.utf16be.utf16', 'encoding001.utf16be.utf16le',
+           'encoding001.utf16be.utf32', 'encoding001.utf16be.utf32be',
+           'encoding001.utf16be.utf32le', 'encoding001.utf16be.utf8',
+           'encoding001.utf16le', 'encoding001.utf16le.utf16',
+           'encoding001.utf16le.utf16be', 'encoding001.utf16le.utf32',
+           'encoding001.utf16le.utf32be', 'encoding001.utf16le.utf32le',
+           'encoding001.utf16le.utf8', 'encoding001.utf32',
+           'encoding001.utf32.utf16', 'encoding001.utf32.utf16be',
+           'encoding001.utf32.utf16le', 'encoding001.utf32.utf32be',
+           'encoding001.utf32.utf32le', 'encoding001.utf32.utf8',
+           'encoding001.utf32be', 'encoding001.utf32be.utf16',
+           'encoding001.utf32be.utf16be', 'encoding001.utf32be.utf16le',
+           'encoding001.utf32be.utf32', 'encoding001.utf32be.utf32le',
+           'encoding001.utf32be.utf8', 'encoding001.utf32le',
+           'encoding001.utf32le.utf16', 'encoding001.utf32le.utf16be',
+           'encoding001.utf32le.utf16le', 'encoding001.utf32le.utf32',
+           'encoding001.utf32le.utf32be', 'encoding001.utf32le.utf8',
+           'encoding001.utf8', 'encoding001.utf8.utf16',
+           'encoding001.utf8.utf16be', 'encoding001.utf8.utf16le',
+           'encoding001.utf8.utf32', 'encoding001.utf8.utf32be',
+           'encoding001.utf8.utf32le']), 
+     compile_and_run, [''])
+
+test('newline001', extra_clean(['newline001.out']), compile_and_run, [''])

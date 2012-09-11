@@ -34,6 +34,7 @@ import qualified CoreSubst
 import PprCore
 import CoreFVs
 import CoreUtils
+import CoreArity	( etaExpand, exprEtaExpandArity )
 import CoreUnfold
 import Name
 import Id
@@ -51,7 +52,7 @@ import MonadUtils
 import Outputable
 import FastString
 
-import List( nub )
+import Data.List
 \end{code}
 
 
@@ -112,7 +113,7 @@ data SimplCont
 	SimplCont	
 
   | StrictArg 		-- e C
-	OutExpr			-- e 
+	OutExpr			-- e; *always* of form (Var v `App1` e1 .. `App` en)
 	CallCtxt		-- Whether *this* argument position is interesting
  	ArgInfo			-- Whether the function at the head of e has rules, etc
 	SimplCont		--     plus strictness flags for *further* args
@@ -230,47 +231,23 @@ splitInlineCont (ApplyTo dup (Type ty) se c)
   | Just (c1, c2) <- splitInlineCont c = Just (ApplyTo dup (Type ty) se c1, c2)
 splitInlineCont cont@(Stop {})         = Just (mkBoringStop, cont)
 splitInlineCont cont@(StrictBind {})   = Just (mkBoringStop, cont)
-splitInlineCont cont@(StrictArg  {})   = Just (mkBoringStop, cont)
 splitInlineCont _                      = Nothing
+	-- NB: we dissolve an InlineMe in any strict context, 
+	--     not just function aplication.  
+	-- E.g.  foldr k z (__inline_me (case x of p -> build ...))
+	--     Here we want to get rid of the __inline_me__ so we
+	--     can float the case, and see foldr/build
+	--
+	-- However *not* in a strict RHS, else we get
+	-- 	   let f = __inline_me__ (\x. e) in ...f...
+	-- Now if f is guaranteed to be called, hence a strict binding
+	-- we don't thereby want to dissolve the __inline_me__; for
+	-- example, 'f' might be a  wrapper, so we'd inline the worker
 \end{code}
 
 
-\begin{code}
-interestingArg :: OutExpr -> Bool
-	-- An argument is interesting if it has *some* structure
-	-- We are here trying to avoid unfolding a function that
-	-- is applied only to variables that have no unfolding
-	-- (i.e. they are probably lambda bound): f x y z
-	-- There is little point in inlining f here.
-interestingArg (Var v)	         = hasSomeUnfolding (idUnfolding v)
-					-- Was: isValueUnfolding (idUnfolding v')
-					-- But that seems over-pessimistic
-				 || isDataConWorkId v
-					-- This accounts for an argument like
-					-- () or [], which is definitely interesting
-interestingArg (Type _)	         = False
-interestingArg (App fn (Type _)) = interestingArg fn
-interestingArg (Note _ a)	 = interestingArg a
-
--- Idea (from Sam B); I'm not sure if it's a good idea, so commented out for now
--- interestingArg expr | isUnLiftedType (exprType expr)
---        -- Unlifted args are only ever interesting if we know what they are
---  =                  case expr of
---                        Lit lit -> True
---                        _       -> False
-
-interestingArg _                 = True
-	-- Consider 	let x = 3 in f x
-	-- The substitution will contain (x -> ContEx 3), and we want to
-	-- to say that x is an interesting argument.
-	-- But consider also (\x. f x y) y
-	-- The substitution will contain (x -> ContEx y), and we want to say
-	-- that x is not interesting (assuming y has no unfolding)
-\end{code}
-
-
-Comment about interestingCallContext
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Interesting call context]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We want to avoid inlining an expression where there can't possibly be
 any gain, such as in an argument position.  Hence, if the continuation
 is interesting (eg. a case scrutinee, application etc.) then we
@@ -305,20 +282,21 @@ default case.
 
 \begin{code}
 interestingCallContext :: SimplCont -> CallCtxt
+-- See Note [Interesting call context]
 interestingCallContext cont
   = interesting cont
   where
-    interestingCtxt = ArgCtxt False 2	-- Give *some* incentive!
-
     interesting (Select _ bndr _ _ _)
-	| isDeadBinder bndr       = CaseCtxt
-	| otherwise	          = interestingCtxt
+	| isDeadBinder bndr = CaseCtxt
+	| otherwise	    = ArgCtxt False 2	-- If the binder is used, this
+						-- is like a strict let
 		
-    interesting (ApplyTo {})      = interestingCtxt
-				-- Can happen if we have (coerce t (f x)) y
-				-- Perhaps interestingCtxt is a bit over-keen, but I've
-				-- seen (coerce f) x, where f has an INLINE prag,
-				-- So we have to give some motivation for inlining it
+    interesting (ApplyTo _ arg _ cont)
+	| isTypeArg arg = interesting cont
+	| otherwise     = ValAppCtxt 	-- Can happen if we have (f Int |> co) y
+					-- If f has an INLINE prag we need to give it some
+					-- motivation to inline. See Note [Cast then apply]
+					-- in CoreUnfold
 
     interesting (StrictArg _ cci _ _)	= cci
     interesting (StrictBind {})	  	= BoringCtxt
@@ -343,7 +321,7 @@ interestingCallContext cont
 -------------------
 mkArgInfo :: Id
 	  -> Int	-- Number of value args
-	  -> SimplCont	-- Context of the cal
+	  -> SimplCont	-- Context of the call
 	  -> ArgInfo
 
 mkArgInfo fun n_val_args call_cont
@@ -359,7 +337,7 @@ mkArgInfo fun n_val_args call_cont
     vanilla_discounts, arg_discounts :: [Int]
     vanilla_discounts = repeat 0
     arg_discounts = case idUnfolding fun of
-			CoreUnfolding _ _ _ _ (UnfoldIfGoodArgs _ discounts _ _)
+			CoreUnfolding _ _ _ _ _ (UnfoldIfGoodArgs _ discounts _ _)
 			      -> discounts ++ vanilla_discounts
 			_     -> vanilla_discounts
 
@@ -611,9 +589,9 @@ preInlineUnconditionally env top_lvl bndr rhs
   where
     phase = getMode env
     active = case phase of
-		   SimplGently    -> isAlwaysActive prag
-		   SimplPhase n _ -> isActive n prag
-    prag = idInlinePragma bndr
+		   SimplGently    -> isAlwaysActive act
+		   SimplPhase n _ -> isActive n act
+    act = idInlineActivation bndr
 
     try_once in_lam int_cxt	-- There's one textual occurrence
 	| not in_lam = isNotTopLevel top_lvl || early_phase
@@ -767,9 +745,9 @@ postInlineUnconditionally env top_lvl bndr occ_info rhs unfolding
 
   where
     active = case getMode env of
-		   SimplGently    -> isAlwaysActive prag
-		   SimplPhase n _ -> isActive n prag
-    prag = idInlinePragma bndr
+		   SimplGently    -> isAlwaysActive act
+		   SimplPhase n _ -> isActive n act
+    act = idInlineActivation bndr
 
 activeInline :: SimplEnv -> OutId -> Bool
 activeInline env id
@@ -790,9 +768,9 @@ activeInline env id
 	-- and they are now constructed as Compulsory unfoldings (in MkId)
 	-- so they'll happen anyway.
 
-      SimplPhase n _ -> isActive n prag
+      SimplPhase n _ -> isActive n act
   where
-    prag = idInlinePragma id
+    act = idInlineActivation id
 
 activeRule :: DynFlags -> SimplEnv -> Maybe (Activation -> Bool)
 -- Nothing => No rules at all
@@ -818,14 +796,14 @@ activeRule dflags env
 %************************************************************************
 
 \begin{code}
-mkLam :: [OutBndr] -> OutExpr -> SimplM OutExpr
+mkLam :: SimplEnv -> [OutBndr] -> OutExpr -> SimplM OutExpr
 -- mkLam tries three things
 --	a) eta reduction, if that gives a trivial expression
 --	b) eta expansion [only if there are some value lambdas]
 
-mkLam [] body 
+mkLam _b [] body 
   = return body
-mkLam bndrs body
+mkLam _env bndrs body
   = do	{ dflags <- getDOptsSmpl
 	; mkLam' dflags bndrs body }
   where
@@ -847,7 +825,7 @@ mkLam bndrs body
 
       | dopt Opt_DoLambdaEtaExpansion dflags,
    	any isRuntimeVar bndrs
-      = do { body' <- tryEtaExpansion dflags body
+      = do { let body' = tryEtaExpansion dflags body
  	   ; return (mkLams bndrs body') }
    
       | otherwise 
@@ -1032,11 +1010,10 @@ when computing arity; and etaExpand adds the coerces as necessary when
 actually computing the expansion.
 
 \begin{code}
-tryEtaExpansion :: DynFlags -> OutExpr -> SimplM OutExpr
+tryEtaExpansion :: DynFlags -> OutExpr -> OutExpr
 -- There is at least one runtime binder in the binders
-tryEtaExpansion dflags body = do
-    us <- getUniquesM
-    return (etaExpand fun_arity us body (exprType body))
+tryEtaExpansion dflags body
+  = etaExpand fun_arity body
   where
     fun_arity = exprEtaExpandArity dflags body
 \end{code}
@@ -1189,7 +1166,7 @@ abstractFloats main_tvs body_env body
       = do { uniq <- getUniqueM
 	   ; let  poly_name = setNameUnique (idName var) uniq		-- Keep same name
 		  poly_ty   = mkForAllTys tvs_here (idType var)	-- But new type of course
-		  poly_id   = transferPolyIdInfo var $ 	-- Note [transferPolyIdInfo] in Id.lhs
+		  poly_id   = transferPolyIdInfo var tvs_here $ -- Note [transferPolyIdInfo] in Id.lhs
 			      mkLocalId poly_name poly_ty 
 	   ; return (poly_id, mkTyApps (Var poly_id) (mkTyVarTys tvs_here)) }
 		-- In the olden days, it was crucial to copy the occInfo of the original var, 

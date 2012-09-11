@@ -14,13 +14,14 @@
 
 #include "RetainerSet.h"
 
-extern void  initRetainerProfiling ( void );
-extern void  endRetainerProfiling  ( void );
-extern void  printRetainer         ( FILE *, retainer );
-extern void  retainerProfile       ( void );
-extern void resetStaticObjectForRetainerProfiling( StgClosure *static_objects );
+BEGIN_RTS_PRIVATE
 
-extern StgWord RTS_VAR(flip);
+void initRetainerProfiling ( void );
+void endRetainerProfiling  ( void );
+void retainerProfile       ( void );
+void resetStaticObjectForRetainerProfiling( StgClosure *static_objects );
+
+extern StgWord flip;
 
 // extract the retainer set field from c
 #define RSET(c)   ((c)->header.prof.hp.rs)
@@ -41,6 +42,8 @@ retainerSetOf( StgClosure *c )
 #ifdef DEBUG
 extern lnat retainerStackBlocks ( void );
 #endif
+
+END_RTS_PRIVATE
 
 #endif /* PROFILING */
 

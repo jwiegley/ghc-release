@@ -5,13 +5,6 @@
 \section[CgHeapery]{Heap management functions}
 
 \begin{code}
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module CgHeapery (
 	initHeapUsage, getVirtHp, setVirtHp, setRealHp, 
 	getHpRelOffset,	hpRel,
@@ -42,7 +35,6 @@ import ClosureInfo
 import SMRep
 
 import Cmm
-import MachOp
 import CmmUtils
 import Id
 import DataCon
@@ -50,7 +42,6 @@ import TyCon
 import CostCentre
 import Util
 import Constants
-import PackageConfig
 import Outputable
 import FastString
 
@@ -87,7 +78,7 @@ initHeapUsage :: (VirtualHpOffset -> Code) -> Code
 initHeapUsage fcode
   = do	{ orig_hp_usage <- getHpUsage
 	; setHpUsage initHpUsage
-	; fixC (\heap_usage2 -> do
+	; fixC_(\heap_usage2 -> do
 		{ fcode (heapHWM heap_usage2)
 		; getHpUsage })
 	; setHpUsage orig_hp_usage }
@@ -130,6 +121,8 @@ layOutDynConstr, layOutStaticConstr
 layOutDynConstr    = layOutConstr False
 layOutStaticConstr = layOutConstr True
 
+layOutConstr :: Bool -> DataCon -> [(CgRep, a)]
+             -> (ClosureInfo, [(a, VirtualHpOffset)])
 layOutConstr is_static data_con args
    = (mkConInfo is_static data_con tot_wds ptr_wds,
       things_w_offsets)
@@ -191,7 +184,7 @@ mkStaticClosureFields cl_info ccs caf_refs payload
   = mkStaticClosure info_lbl ccs payload padding_wds 
 	static_link_field saved_info_field
   where
-    info_lbl = infoTableLabelFromCI cl_info
+    info_lbl = infoTableLabelFromCI cl_info $ clHasCafRefs cl_info
 
     -- CAFs must have consistent layout, regardless of whether they
     -- are actually updatable or not.  The layout of a CAF is:
@@ -226,7 +219,6 @@ mkStaticClosureFields cl_info ccs caf_refs payload
 	| caf_refs	= mkIntCLit 0
 	| otherwise	= mkIntCLit 1
 
-
 mkStaticClosure :: CLabel -> CostCentreStack -> [CmmLit]
   -> [CmmLit] -> [CmmLit] -> [CmmLit] -> [CmmLit]
 mkStaticClosure info_lbl ccs payload padding_wds static_link_field saved_info_field
@@ -245,14 +237,14 @@ mkStaticClosure info_lbl ccs payload padding_wds static_link_field saved_info_fi
 
 padLitToWord :: CmmLit -> [CmmLit]
 padLitToWord lit = lit : padding pad_length
-  where rep = cmmLitRep lit
-        pad_length = wORD_SIZE - machRepByteWidth rep :: Int
+  where width = typeWidth (cmmLitType lit)
+        pad_length = wORD_SIZE - widthInBytes width :: Int
 
         padding n | n <= 0 = []
-                  | n `rem` 2 /= 0 = CmmInt 0 I8  : padding (n-1)
-                  | n `rem` 4 /= 0 = CmmInt 0 I16 : padding (n-2)
-                  | n `rem` 8 /= 0 = CmmInt 0 I32 : padding (n-4)
-                  | otherwise      = CmmInt 0 I64 : padding (n-8)
+                  | n `rem` 2 /= 0 = CmmInt 0 W8  : padding (n-1)
+                  | n `rem` 4 /= 0 = CmmInt 0 W16 : padding (n-2)
+                  | n `rem` 8 /= 0 = CmmInt 0 W32 : padding (n-4)
+                  | otherwise      = CmmInt 0 W64 : padding (n-8)
 \end{code}
 
 %************************************************************************
@@ -309,7 +301,7 @@ hpStkCheck cl_info is_fun reg_save_code code
         -- Strictly speaking, we should tag node here.  But if
         -- node doesn't point to the closure, the code for the closure
         -- cannot depend on the value of R1 anyway, so we're safe.
-    closure_lbl = closureLabelFromCI cl_info
+    closure_lbl = closureLabelFromCI cl_info (clHasCafRefs cl_info)
 
     full_save_code = node_asst `plusStmts` reg_save_code
 
@@ -362,7 +354,7 @@ altHeapCheck alt_type code
 	--
 	-- However R1 is guaranteed to be a pointer
 
-    rts_label (AlgAlt tc) = stg_gc_enter1
+    rts_label (AlgAlt _) = stg_gc_enter1
 	-- Enter R1 after the heap check; it's a pointer
  	
     rts_label (PrimAlt tc)
@@ -410,7 +402,7 @@ unbxTupleHeapCheck regs ptrs nptrs fail_code code
 	; code }
   where
     full_fail_code  = fail_code `plusStmts` oneStmt assign_liveness
-    assign_liveness = CmmAssign (CmmGlobal (VanillaReg 9)) 	-- Ho ho ho!
+    assign_liveness = CmmAssign (CmmGlobal (VanillaReg 9 VNonGcPtr)) 	-- Ho ho ho!
 				(CmmLit (mkWordCLit liveness))
     liveness 	    = mkRegLiveness regs ptrs nptrs
     rts_label	    = CmmLit (CmmLabel (mkRtsCodeLabel (sLit "stg_gc_ut")))
@@ -446,6 +438,7 @@ do_checks stk hp reg_save_code rts_lbl
 	 (stk /= 0) (hp /= 0) reg_save_code rts_lbl
 
 -- The offsets are now in *bytes*
+do_checks' :: CmmExpr -> CmmExpr -> Bool -> Bool -> CmmStmts -> CmmExpr -> Code
 do_checks' stk_expr hp_expr stk_nonzero hp_nonzero reg_save_code rts_lbl
   = do	{ doGranAllocate hp_expr
 
@@ -495,10 +488,8 @@ hpChkGen :: CmmExpr -> CmmExpr -> CmmExpr -> Code
 hpChkGen bytes liveness reentry
   = do_checks' (CmmLit (mkIntCLit 0)) bytes False True assigns stg_gc_gen
   where
-    assigns = mkStmts [
-    		CmmAssign (CmmGlobal (VanillaReg 9))  liveness,
-    		CmmAssign (CmmGlobal (VanillaReg 10)) reentry
-		]
+    assigns = mkStmts [ mk_vanilla_assignment 9 liveness,
+	    		mk_vanilla_assignment 10 reentry ]
 
 -- a heap check where R1 points to the closure to enter on return, and
 -- we want to assign to Sp[0] on failure (used in AutoApply.cmm:BUILD_PAP).
@@ -511,16 +502,20 @@ stkChkGen :: CmmExpr -> CmmExpr -> CmmExpr -> Code
 stkChkGen bytes liveness reentry
   = do_checks' bytes (CmmLit (mkIntCLit 0)) True False assigns stg_gc_gen
   where
-    assigns = mkStmts [
-    		CmmAssign (CmmGlobal (VanillaReg 9))  liveness,
-    		CmmAssign (CmmGlobal (VanillaReg 10)) reentry
-		]
+    assigns = mkStmts [ mk_vanilla_assignment 9 liveness,
+	    		mk_vanilla_assignment 10 reentry ]
+
+mk_vanilla_assignment :: Int -> CmmExpr -> CmmStmt
+mk_vanilla_assignment n e
+  = CmmAssign (CmmGlobal (VanillaReg n (vgcFlag (cmmExprType e)))) e
 
 stkChkNodePoints :: CmmExpr -> Code
 stkChkNodePoints bytes
   = do_checks' bytes (CmmLit (mkIntCLit 0)) True False noStmts stg_gc_enter1
 
+stg_gc_gen :: CmmExpr
 stg_gc_gen = CmmLit (CmmLabel (mkRtsCodeLabel (sLit "stg_gc_gen")))
+stg_gc_enter1 :: CmmExpr
 stg_gc_enter1 = CmmReg (CmmGlobal GCEnter1)
 \end{code}
 
@@ -544,7 +539,7 @@ allocDynClosure
 					-- ie Info ptr has offset zero.
 	-> FCode VirtualHpOffset	-- Returns virt offset of object
 
-allocDynClosure cl_info use_cc blame_cc amodes_with_offsets
+allocDynClosure cl_info use_cc _blame_cc amodes_with_offsets
   = do	{ virt_hp <- getVirtHp
 
 	-- FIND THE OFFSET OF THE INFO-PTR WORD
@@ -554,7 +549,8 @@ allocDynClosure cl_info use_cc blame_cc amodes_with_offsets
 		-- Remember, virtHp points to last allocated word, 
 		-- ie 1 *before* the info-ptr word of new object.
 
-		info_ptr = CmmLit (CmmLabel (infoTableLabelFromCI cl_info))
+		info_ptr = CmmLit (CmmLabel (infoTableLabelFromCI cl_info
+                                                   (clHasCafRefs cl_info)))
 		hdr_w_offsets = initDynHdr info_ptr use_cc `zip` [0..]
 
 	-- SAY WHAT WE ARE ABOUT TO DO

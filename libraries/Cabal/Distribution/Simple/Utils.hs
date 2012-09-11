@@ -1,7 +1,4 @@
-{-# OPTIONS -cpp -fffi #-}
--- OPTIONS required for ghc-6.4.x compat, and must appear first
 {-# LANGUAGE CPP, ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -cpp -fffi #-}
 {-# OPTIONS_NHC98 -cpp #-}
 {-# OPTIONS_JHC -fcpp -fffi #-}
 -----------------------------------------------------------------------------
@@ -56,15 +53,18 @@ module Distribution.Simple.Utils (
         -- * logging and errors
         die,
         dieWithLocation,
+        topHandler,
         warn, notice, setupMessage, info, debug,
         chattyTry,
 
         -- * running programs
         rawSystemExit,
         rawSystemStdout,
-        rawSystemStdout',
+        rawSystemStdInOut,
         maybeExit,
         xargs,
+        findProgramLocation,
+        findProgramVersion,
 
         -- * copying files
         smartCopySources,
@@ -73,6 +73,12 @@ module Distribution.Simple.Utils (
         copyDirectoryRecursiveVerbose,
         copyFiles,
 
+        -- * installing files
+        installOrdinaryFile,
+        installExecutableFile,
+        installOrdinaryFiles,
+        installDirectoryContents,
+
         -- * file names
         currentDir,
 
@@ -80,10 +86,15 @@ module Distribution.Simple.Utils (
         findFile,
         findFileWithExtension,
         findFileWithExtension',
+        findModuleFile,
+        findModuleFiles,
+        getDirectoryContentsRecursive,
 
         -- * simple file globbing
         matchFileGlob,
         matchDirFileGlob,
+        parseFileGlob,
+        FileGlob(..),
 
         -- * temp files and dirs
         withTempFile,
@@ -106,6 +117,7 @@ module Distribution.Simple.Utils (
         readUTF8File,
         withUTF8FileContents,
         writeUTF8File,
+        normaliseLineEndings,
 
         -- * generic utils
         equating,
@@ -119,6 +131,10 @@ module Distribution.Simple.Utils (
 
 import Control.Monad
     ( when, unless, filterM )
+#ifdef __GLASGOW_HASKELL__
+import Control.Concurrent.MVar
+    ( newEmptyMVar, putMVar, takeMVar )
+#endif
 import Data.List
     ( nub, unfoldr, isPrefixOf, tails, intersperse )
 import Data.Char as Char
@@ -128,7 +144,7 @@ import Data.Bits
 
 import System.Directory
     ( getDirectoryContents, doesDirectoryExist, doesFileExist, removeFile
-    , copyFile )
+    , findExecutable )
 import System.Environment
     ( getProgName )
 import System.Cmd
@@ -144,11 +160,17 @@ import System.IO
     ( Handle, openFile, openBinaryFile, IOMode(ReadMode), hSetBinaryMode
     , hGetContents, stderr, stdout, hPutStr, hFlush, hClose )
 import System.IO.Error as IO.Error
-    ( try, isDoesNotExistError )
+    ( isDoesNotExistError, ioeSetFileName, ioeGetFileName, ioeGetErrorString )
+#if !defined(__GLASGOW_HASKELL__) || (__GLASGOW_HASKELL__ >= 608)
+import System.IO.Error
+    ( ioeSetLocation, ioeGetLocation )
+#endif
+import System.IO.Unsafe
+    ( unsafeInterleaveIO )
 import qualified Control.Exception as Exception
 
 import Distribution.Text
-    ( display )
+    ( display, simpleParse )
 import Distribution.Package
     ( PackageIdentifier )
 import Distribution.ModuleName (ModuleName)
@@ -167,13 +189,11 @@ import System.Directory (getTemporaryDirectory)
 #endif
 
 import Distribution.Compat.CopyFile
-         ( copyOrdinaryFile )
-import Distribution.Compat.TempFile (openTempFile,
-                                     openNewBinaryFile)
-import Distribution.Compat.Exception (catchIO, onException)
-#if mingw32_HOST_OS || mingw32_TARGET_OS
-import Distribution.Compat.Exception (throwIOIO)
-#endif
+         ( copyFile, copyOrdinaryFile, copyExecutableFile )
+import Distribution.Compat.TempFile
+         ( openTempFile, openNewBinaryFile, createTempDirectory )
+import Distribution.Compat.Exception
+         ( catchIO, catchExit, onException )
 import Distribution.Verbosity
 
 -- We only get our own version number when we're building with ourselves
@@ -191,20 +211,46 @@ cabalBootstrapping = False
 cabalBootstrapping = True
 #endif
 
--- ------------------------------------------------------------------------------- Utils for setup
+-- ----------------------------------------------------------------------------
+-- Exception and logging utils
 
 dieWithLocation :: FilePath -> Maybe Int -> String -> IO a
 dieWithLocation filename lineno msg =
-  die $ normalise filename
-     ++ maybe "" (\n -> ":" ++ show n) lineno
-     ++ ": " ++ msg
+  ioError . setLocation lineno
+          . flip ioeSetFileName (normalise filename)
+          $ userError msg
+  where
+#if defined(__GLASGOW_HASKELL__) && (__GLASGOW_HASKELL__ < 608)
+    setLocation _        err = err
+#else
+    setLocation Nothing  err = err
+    setLocation (Just n) err = ioeSetLocation err (show n)
+#endif
 
 die :: String -> IO a
-die msg = do
-  hFlush stdout
-  pname <- getProgName
-  hPutStr stderr (wrapText (pname ++ ": " ++ msg))
-  exitWith (ExitFailure 1)
+die msg = ioError (userError msg)
+
+topHandler :: IO a -> IO a
+topHandler prog = catch prog handle
+  where
+    handle ioe = do
+      hFlush stdout
+      pname <- getProgName
+      hPutStr stderr (mesage pname)
+      exitWith (ExitFailure 1)
+      where
+        mesage pname = wrapText (pname ++ ": " ++ file ++ detail)
+        file         = case ioeGetFileName ioe of
+                         Nothing   -> ""
+                         Just path -> path ++ location ++ ": "
+#if defined(__GLASGOW_HASKELL__) && (__GLASGOW_HASKELL__ < 608)
+        location     = ""
+#else
+        location     = case ioeGetLocation ioe of
+                         l@(n:_) | n >= '0' && n <= '9' -> ':' : l
+                         _                              -> ""
+#endif
+        detail       = ioeGetErrorString ioe
 
 -- | Non fatal conditions that may be indicative of an error or problem.
 --
@@ -312,38 +358,66 @@ rawSystemExit verbosity path args = do
 
 -- | Run a command and return its output.
 --
--- The output is assumed to be encoded as UTF8.
+-- The output is assumed to be text in the locale encoding.
 --
 rawSystemStdout :: Verbosity -> FilePath -> [String] -> IO String
 rawSystemStdout verbosity path args = do
-  (output, exitCode) <- rawSystemStdout' verbosity path args
-  unless (exitCode == ExitSuccess) $ exitWith exitCode
+  (output, errors, exitCode) <- rawSystemStdInOut verbosity path args
+                                                  Nothing False
+  when (exitCode /= ExitSuccess) $
+    die errors
   return output
 
-rawSystemStdout' :: Verbosity -> FilePath -> [String] -> IO (String, ExitCode)
-rawSystemStdout' verbosity path args = do
+-- | Run a command and return its output, errors and exit status. Optionally
+-- also supply some input. Also provides control over whether the binary/text
+-- mode of the input and output.
+--
+rawSystemStdInOut :: Verbosity
+                  -> FilePath -> [String]
+                  -> Maybe (String, Bool) -- ^ input text and binary mode
+                  -> Bool                 -- ^ output in binary mode
+                  -> IO (String, String, ExitCode) -- ^ output, errors, exit
+rawSystemStdInOut verbosity path args input outputBinary = do
   printRawCommandAndArgs verbosity path args
 
 #ifdef __GLASGOW_HASKELL__
   Exception.bracket
      (runInteractiveProcess path args Nothing Nothing)
      (\(inh,outh,errh,_) -> hClose inh >> hClose outh >> hClose errh)
-    $ \(_,outh,errh,pid) -> do
+    $ \(inh,outh,errh,pid) -> do
 
-      -- We want to process the output as text.
-      hSetBinaryMode outh False
+      -- output mode depends on what the caller wants
+      hSetBinaryMode outh outputBinary
+      -- but the errors are always assumed to be text (in the current locale)
+      hSetBinaryMode errh False
 
-      -- fork off a thread to pull on (and discard) the stderr
+      -- fork off a couple threads to pull on the stderr and stdout
       -- so if the process writes to stderr we do not block.
-      -- NB. do the hGetContents synchronously, otherwise the outer
-      -- bracket can exit before this thread has run, and hGetContents
-      -- will fail.
-      err <- hGetContents errh
-      forkIO $ do evaluate (length err); return ()
 
-      -- wait for all the output
-      output <- hGetContents outh
-      evaluate (length output)
+      err <- hGetContents errh
+      out <- hGetContents outh
+
+      mv <- newEmptyMVar
+      let force str = (evaluate (length str) >> return ())
+            `Exception.finally` putMVar mv ()
+          --TODO: handle exceptions like text decoding.
+      _ <- forkIO $ force out
+      _ <- forkIO $ force err
+
+      -- push all the input, if any
+      case input of
+        Nothing -> return ()
+        Just (inputStr, inputBinary) -> do
+                -- input mode depends on what the caller wants
+          hSetBinaryMode inh inputBinary
+          hPutStr inh inputStr
+          hClose inh
+          --TODO: this probably fails if the process refuses to consume
+          -- or if it closes stdin (eg if it exits)
+
+      -- wait for both to finish, in either order
+      takeMVar mv
+      takeMVar mv
 
       -- wait for the program to terminate
       exitcode <- waitForProcess pid
@@ -352,18 +426,69 @@ rawSystemStdout' verbosity path args = do
                        ++ if null err then "" else
                           " with error message:\n" ++ err
 
-      return (output, exitcode)
+      return (out, err, exitcode)
 #else
   tmpDir <- getTemporaryDirectory
-  withTempFile tmpDir ".cmd.stdout" $ \tmpName tmpHandle -> do
-    hClose tmpHandle
+  withTempFile tmpDir ".cmd.stdout" $ \outName outHandle ->
+   withTempFile tmpDir ".cmd.stdin" $ \inName inHandle -> do
+    hClose outHandle
+
+    case input of
+      Nothing -> return ()
+      Just (inputStr, inputBinary) -> do
+        hSetBinaryMode inHandle inputBinary
+        hPutStr inHandle inputStr
+    hClose inHandle
+
     let quote name = "'" ++ name ++ "'"
-    exitcode <- system $ unwords (map quote (path:args)) ++ " >" ++ quote tmpName
+        cmd = unwords (map quote (path:args))
+           ++ " <" ++ quote inName
+           ++ " >" ++ quote outName
+    exitcode <- system cmd
+
     unless (exitcode == ExitSuccess) $
       debug verbosity $ path ++ " returned " ++ show exitcode
-    withFileContents tmpName $ \output ->
-      length output `seq` return (output, exitcode)
+
+    Exception.bracket (openFile outName ReadMode) hClose $ \hnd -> do
+      hSetBinaryMode hnd outputBinary
+      output <- hGetContents hnd
+      length output `seq` return (output, "", exitcode)
 #endif
+
+
+-- | Look for a program on the path.
+findProgramLocation :: Verbosity -> FilePath -> IO (Maybe FilePath)
+findProgramLocation verbosity prog = do
+  debug verbosity $ "searching for " ++ prog ++ " in path."
+  res <- findExecutable prog
+  case res of
+      Nothing   -> debug verbosity ("Cannot find " ++ prog ++ " on the path")
+      Just path -> debug verbosity ("found " ++ prog ++ " at "++ path)
+  return res
+
+
+-- | Look for a program and try to find it's version number. It can accept
+-- either an absolute path or the name of a program binary, in which case we
+-- will look for the program on the path.
+--
+findProgramVersion :: String             -- ^ version args
+                   -> (String -> String) -- ^ function to select version
+                                         --   number from program output
+                   -> Verbosity
+                   -> FilePath           -- ^ location
+                   -> IO (Maybe Version)
+findProgramVersion versionArg selectVersion verbosity path = do
+  str <- rawSystemStdout verbosity path [versionArg]
+         `catchIO`   (\_ -> return "")
+         `catchExit` (\_ -> return "")
+  let version :: Maybe Version
+      version = simpleParse (selectVersion str)
+  case version of
+      Nothing -> warn verbosity $ "cannot determine version of " ++ path
+                               ++ " :\n" ++ show str
+      Just v  -> debug verbosity $ path ++ " is version " ++ display v
+  return version
+
 
 -- | Like the unix xargs program. Useful for when we've got very long command
 -- lines that might overflow an OS limit on command line length and so you
@@ -394,6 +519,11 @@ xargs maxSize rawSystemFun fixedArgs bigArgs =
 -- * File Utilities
 -- ------------------------------------------------------------
 
+----------------
+-- Finding files
+
+-- | Find a file by looking in a search path. The file path must match exactly.
+--
 findFile :: [FilePath]    -- ^search locations
          -> FilePath      -- ^File Name
          -> IO FilePath
@@ -403,6 +533,10 @@ findFile searchPath fileName =
     | path <- nub searchPath]
   >>= maybe (die $ fileName ++ " doesn't exist") return
 
+-- | Find a file by looking in a search path with one of a list of possible
+-- file extensions. The file base name should be given and it will be tried
+-- with each of the extensions in each element of the search path.
+--
 findFileWithExtension :: [String]
                       -> [FilePath]
                       -> FilePath
@@ -413,6 +547,9 @@ findFileWithExtension extensions searchPath baseName =
     | path <- nub searchPath
     , ext <- nub extensions ]
 
+-- | Like 'findFileWithExtension' but returns which element of the search path
+-- the file was found in, and the file path relative to that base directory.
+--
 findFileWithExtension' :: [String]
                        -> [FilePath]
                        -> FilePath
@@ -430,6 +567,69 @@ findFirstFile file = findFirst
                               if exists
                                 then return (Just x)
                                 else findFirst xs
+
+-- | Finds the files corresponding to a list of Haskell module names.
+--
+-- As 'findModuleFile' but for a list of module names.
+--
+findModuleFiles :: [FilePath]   -- ^ build prefix (location of objects)
+                -> [String]     -- ^ search suffixes
+                -> [ModuleName] -- ^ modules
+                -> IO [(FilePath, FilePath)]
+findModuleFiles searchPath extensions moduleNames =
+  mapM (findModuleFile searchPath extensions) moduleNames
+
+-- | Find the file corresponding to a Haskell module name.
+--
+-- This is similar to 'findFileWithExtension'' but specialised to a module
+-- name. The function fails if the file corresponding to the module is missing.
+--
+findModuleFile :: [FilePath]  -- ^ build prefix (location of objects)
+               -> [String]    -- ^ search suffixes
+               -> ModuleName  -- ^ module
+               -> IO (FilePath, FilePath)
+findModuleFile searchPath extensions moduleName =
+      maybe notFound return
+  =<< findFileWithExtension' extensions searchPath
+                             (ModuleName.toFilePath moduleName)
+  where
+    notFound = die $ "Error: Could not find module: " ++ display moduleName
+                  ++ " with any suffix: " ++ show extensions
+                  ++ " in the search path: " ++ show searchPath
+
+-- | List all the files in a directory and all subdirectories.
+--
+-- The order places files in sub-directories after all the files in their
+-- parent directories. The list is generated lazily so is not well defined if
+-- the source directory structure changes before the list is used.
+--
+getDirectoryContentsRecursive :: FilePath -> IO [FilePath]
+getDirectoryContentsRecursive topdir = recurseDirectories [""]
+  where
+    recurseDirectories :: [FilePath] -> IO [FilePath]
+    recurseDirectories []         = return []
+    recurseDirectories (dir:dirs) = unsafeInterleaveIO $ do
+      (files, dirs') <- collect [] [] =<< getDirectoryContents (topdir </> dir)
+      files' <- recurseDirectories (dirs' ++ dirs)
+      return (files ++ files')
+
+      where
+        collect files dirs' []              = return (reverse files, reverse dirs')
+        collect files dirs' (entry:entries) | ignore entry
+                                            = collect files dirs' entries
+        collect files dirs' (entry:entries) = do
+          let dirEntry = dir </> entry
+          isDirectory <- doesDirectoryExist (topdir </> dirEntry)
+          if isDirectory
+            then collect files (dirEntry:dirs') entries
+            else collect (dirEntry:files) dirs' entries
+
+        ignore ['.']      = True
+        ignore ['.', '.'] = True
+        ignore _          = False
+
+----------------
+-- File globbing
 
 data FileGlob
    -- | No glob at all, just an ordinary file
@@ -470,36 +670,44 @@ matchDirFileGlob dir filepath = case parseFileGlob filepath of
                     ++ "' does not match any files."
       matches -> return matches
 
--- |Copy the source files into the right directory.  Looks in the
--- build prefix for files that look like the input modules, based on
--- the input search suffixes.  It copies the files into the target
--- directory.
+----------------------------------------
+-- Copying and installing files and dirs
 
-smartCopySources :: Verbosity -- ^verbosity
-            -> [FilePath] -- ^build prefix (location of objects)
-            -> FilePath -- ^Target directory
-            -> [ModuleName] -- ^Modules
-            -> [String] -- ^search suffixes
-            -> IO ()
-smartCopySources verbosity srcDirs targetDir sources searchSuffixes
-    = mapM moduleToFPErr sources >>= copyFiles verbosity targetDir
-
-    where moduleToFPErr m
-              = findFileWithExtension' searchSuffixes srcDirs (ModuleName.toFilePath m)
-            >>= maybe notFound return
-            where notFound = die $ "Error: Could not find module: " ++ display m
-                                ++ " with any suffix: " ++ show searchSuffixes
-
+-- | Same as 'createDirectoryIfMissing' but logs at higher verbosity levels.
+--
 createDirectoryIfMissingVerbose :: Verbosity -> Bool -> FilePath -> IO ()
 createDirectoryIfMissingVerbose verbosity parentsToo dir = do
   let msgParents = if parentsToo then " (and its parents)" else ""
   info verbosity ("Creating " ++ dir ++ msgParents)
   createDirectoryIfMissing parentsToo dir
 
+-- | Copies a file without copying file permissions. The target file is created
+-- with default permissions. Any existing target file is replaced.
+--
+-- At higher verbosity levels it logs an info message.
+--
 copyFileVerbose :: Verbosity -> FilePath -> FilePath -> IO ()
 copyFileVerbose verbosity src dest = do
   info verbosity ("copy " ++ src ++ " to " ++ dest)
+  copyFile src dest
+
+-- | Install an ordinary file. This is like a file copy but the permissions
+-- are set appropriately for an installed file. On Unix it is \"-rw-r--r--\"
+-- while on Windows it uses the default permissions for the target directory.
+--
+installOrdinaryFile :: Verbosity -> FilePath -> FilePath -> IO ()
+installOrdinaryFile verbosity src dest = do
+  info verbosity ("Installing " ++ src ++ " to " ++ dest)
   copyOrdinaryFile src dest
+
+-- | Install an executable file. This is like a file copy but the permissions
+-- are set appropriately for an installed file. On Unix it is \"-rwxr-xr-x\"
+-- while on Windows it uses the default permissions for the target directory.
+--
+installExecutableFile :: Verbosity -> FilePath -> FilePath -> IO ()
+installExecutableFile verbosity src dest = do
+  info verbosity ("Installing executable " ++ src ++ " to " ++ dest)
+  copyExecutableFile src dest
 
 -- | Copies a bunch of files to a target directory, preserving the directory
 -- structure in the target location. The target directories are created if they
@@ -532,32 +740,55 @@ copyFiles verbosity targetDir srcFiles = do
   -- Copy all the files
   sequence_ [ let src  = srcBase   </> srcFile
                   dest = targetDir </> srcFile
-               in info verbosity ("copy " ++ src ++ " to " ++ dest)
-               >> copyFile src dest
+               in copyFileVerbose verbosity src dest
             | (srcBase, srcFile) <- srcFiles ]
 
--- adaptation of removeDirectoryRecursive
+-- | This is like 'copyFiles' but uses 'installOrdinaryFile'.
+--
+installOrdinaryFiles :: Verbosity -> FilePath -> [(FilePath, FilePath)] -> IO ()
+installOrdinaryFiles verbosity targetDir srcFiles = do
+
+  -- Create parent directories for everything
+  let dirs = map (targetDir </>) . nub . map (takeDirectory . snd) $ srcFiles
+  mapM_ (createDirectoryIfMissingVerbose verbosity True) dirs
+
+  -- Copy all the files
+  sequence_ [ let src  = srcBase   </> srcFile
+                  dest = targetDir </> srcFile
+               in installOrdinaryFile verbosity src dest
+            | (srcBase, srcFile) <- srcFiles ]
+
+-- | This installs all the files in a directory to a target location,
+-- preserving the directory layout. All the files are assumed to be ordinary
+-- rather than executable files.
+--
+installDirectoryContents :: Verbosity -> FilePath -> FilePath -> IO ()
+installDirectoryContents verbosity srcDir destDir = do
+  info verbosity ("copy directory '" ++ srcDir ++ "' to '" ++ destDir ++ "'.")
+  srcFiles <- getDirectoryContentsRecursive srcDir
+  installOrdinaryFiles verbosity destDir [ (srcDir, f) | f <- srcFiles ]
+
+---------------------------------
+-- Deprecated file copy functions
+
+{-# DEPRECATED smartCopySources
+      "Use findModuleFiles and copyFiles or installOrdinaryFiles" #-}
+smartCopySources :: Verbosity -> [FilePath] -> FilePath
+                 -> [ModuleName] -> [String] -> IO ()
+smartCopySources verbosity searchPath targetDir moduleNames extensions =
+      findModuleFiles searchPath extensions moduleNames
+  >>= copyFiles verbosity targetDir
+
+{-# DEPRECATED copyDirectoryRecursiveVerbose
+      "You probably want installDirectoryContents instead" #-}
 copyDirectoryRecursiveVerbose :: Verbosity -> FilePath -> FilePath -> IO ()
 copyDirectoryRecursiveVerbose verbosity srcDir destDir = do
   info verbosity ("copy directory '" ++ srcDir ++ "' to '" ++ destDir ++ "'.")
-  let aux src dest =
-         let cp :: FilePath -> IO ()
-             cp f = let srcFile  = src  </> f
-                        destFile = dest </> f
-                    in  do success <- try (copyFileVerbose verbosity srcFile destFile)
-                           case success of
-                              Left e  -> do isDir <- doesDirectoryExist srcFile
-                                            -- If f is not a directory, re-throw the error
-                                            unless isDir $ ioError e
-                                            aux srcFile destFile
-                              Right _ -> return ()
-         in  do createDirectoryIfMissingVerbose verbosity False dest
-                getDirectoryContentsWithoutSpecial src >>= mapM_ cp
-   in aux srcDir destDir
+  srcFiles <- getDirectoryContentsRecursive srcDir
+  copyFiles verbosity destDir [ (srcDir, f) | f <- srcFiles ]
 
-  where getDirectoryContentsWithoutSpecial =
-            fmap (filter (not . flip elem [".", ".."]))
-          . getDirectoryContents
+---------------------------
+-- Temporary files and dirs
 
 -- | Use a temporary filename that doesn't already exist.
 --
@@ -570,15 +801,24 @@ withTempFile tmpDir template action =
     (\(name, handle) -> hClose handle >> removeFile name)
     (uncurry action)
 
--- | Use a temporary directory.
+-- | Create and use a temporary directory.
 --
--- Use this exact given dir which must not already exist.
+-- Creates a new temporary directory inside the given directory, making use
+-- of the template. The temp directory is deleted after use. For example:
 --
-withTempDirectory :: Verbosity -> FilePath -> IO a -> IO a
-withTempDirectory verbosity tmpDir =
-  Exception.bracket_
-    (createDirectoryIfMissingVerbose verbosity True tmpDir)
-    (removeDirectoryRecursive tmpDir)
+-- > withTempDirectory verbosity "src" "sdist." $ \tmpDir -> do ...
+--
+-- The @tmpDir@ will be a new subdirectory of the given directory, e.g.
+-- @src/sdist.342@.
+--
+withTempDirectory :: Verbosity -> FilePath -> String -> (FilePath -> IO a) -> IO a
+withTempDirectory _verbosity targetDir template =
+  Exception.bracket
+    (createTempDirectory targetDir template)
+    (removeDirectoryRecursive)
+
+-----------------------------------
+-- Safely reading and writing files
 
 -- | Gets the contents of a file, but guarantee that it gets closed.
 --
@@ -595,20 +835,6 @@ withFileContents name action =
 -- The file is either written sucessfully or an IO exception is raised and
 -- the original file is left unchanged.
 --
--- * Warning: On Windows this operation is very nearly but not quite atomic.
---   See below.
---
--- On Posix it works by writing a temporary file and atomically renaming over
--- the top any pre-existing target file with the temporary one.
---
--- On Windows it is not possible to rename over an existing file so the target
--- file has to be deleted before the temporary file is renamed to the target.
--- Therefore there is a race condition between the existing file being removed
--- and the temporary file being renamed. Another thread could write to the
--- target or change the permission on the target directory between the deleting
--- and renaming steps. An exception would be raised but the target file would
--- either no longer exist or have the content as written by the other thread.
---
 -- On windows it is not possible to delete a file that is open by a process.
 -- This case will give an IO exception but the atomic property is not affected.
 --
@@ -617,21 +843,7 @@ writeFileAtomic targetFile content = do
   (tmpFile, tmpHandle) <- openNewBinaryFile targetDir template
   do  hPutStr tmpHandle content
       hClose tmpHandle
-#if mingw32_HOST_OS || mingw32_TARGET_OS
       renameFile tmpFile targetFile
-        -- If the targetFile exists then renameFile will fail
-        `catchIO` \err -> do
-          exists <- doesFileExist targetFile
-          if exists
-            then do removeFile targetFile
-                    -- Big fat hairy race condition
-                    renameFile tmpFile targetFile
-                    -- If the removeFile succeeds and the renameFile fails
-                    -- then we've lost the atomic property.
-            else throwIOIO err
-#else
-      renameFile tmpFile targetFile
-#endif
    `onException` do hClose tmpHandle
                     removeFile tmpFile
   where
@@ -650,7 +862,7 @@ rewriteFile :: FilePath -> String -> IO ()
 rewriteFile path newContent =
   flip catch mightNotExist $ do
     existingContent <- readFile path
-    evaluate (length existingContent)
+    _ <- evaluate (length existingContent)
     unless (existingContent == newContent) $
       writeFileAtomic path newContent
   where
@@ -790,12 +1002,19 @@ toUTF8 (c:cs)
                  : toUTF8 cs
   where w = ord c
 
+-- | Ignore a Unicode byte order mark (BOM) at the beginning of the input
+--
+ignoreBOM :: String -> String
+ignoreBOM ('\xFEFF':string) = string
+ignoreBOM string            = string
+
 -- | Reads a UTF8 encoded text file as a Unicode String
 --
 -- Reads lazily using ordinary 'readFile'.
 --
 readUTF8File :: FilePath -> IO String
-readUTF8File f = fmap fromUTF8 . hGetContents =<< openBinaryFile f ReadMode
+readUTF8File f = fmap (ignoreBOM . fromUTF8)
+               . hGetContents =<< openBinaryFile f ReadMode
 
 -- | Reads a UTF8 encoded text file as a Unicode String
 --
@@ -803,8 +1022,10 @@ readUTF8File f = fmap fromUTF8 . hGetContents =<< openBinaryFile f ReadMode
 --
 withUTF8FileContents :: FilePath -> (String -> IO a) -> IO a
 withUTF8FileContents name action =
-  Exception.bracket (openBinaryFile name ReadMode) hClose
-                    (\hnd -> hGetContents hnd >>= action . fromUTF8)
+  Exception.bracket
+    (openBinaryFile name ReadMode)
+    hClose
+    (\hnd -> hGetContents hnd >>= action . ignoreBOM . fromUTF8)
 
 -- | Writes a Unicode String as a UTF8 encoded text file.
 --
@@ -812,6 +1033,13 @@ withUTF8FileContents name action =
 --
 writeUTF8File :: FilePath -> String -> IO ()
 writeUTF8File path = writeFileAtomic path . toUTF8
+
+-- | Fix different systems silly line ending conventions
+normaliseLineEndings :: String -> String
+normaliseLineEndings [] = []
+normaliseLineEndings ('\r':'\n':s) = '\n' : normaliseLineEndings s -- windows
+normaliseLineEndings ('\r':s)      = '\n' : normaliseLineEndings s -- old osx
+normaliseLineEndings (  c :s)      =   c  : normaliseLineEndings s
 
 -- ------------------------------------------------------------
 -- * Common utils

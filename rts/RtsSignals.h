@@ -6,10 +6,10 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef RTS_SIGNALS_H
-#define RTS_SIGNALS_H
+#ifndef RTSSIGNALS_H
+#define RTSSIGNALS_H
 
-#if !defined(PAR) && !defined(mingw32_HOST_OS)
+#if !defined(mingw32_HOST_OS)
 
 #include "posix/Signals.h"
 
@@ -17,21 +17,22 @@
 
 #include "win32/ConsoleHandler.h"
 
-#else /* PAR */
+#else
 
 #define signals_pending() (rtsFalse)
 
-#endif /* PAR */
-
+#endif
 
 #if RTS_USER_SIGNALS
+
+BEGIN_RTS_PRIVATE
 
 /*
  * Function: initUserSignals()
  *
  * Initialize the console handling substrate.
  */
-extern void initUserSignals(void);
+void initUserSignals(void);
 
 /*
  * Function: initDefaultHandlers()
@@ -39,34 +40,17 @@ extern void initUserSignals(void);
  * Install any default signal/console handlers. Currently we install a
  * Ctrl+C handler that shuts down the RTS in an orderly manner.
  */
-extern void initDefaultHandlers(void);
-extern void resetDefaultHandlers(void);
+void initDefaultHandlers(void);
+void resetDefaultHandlers(void);
 
-extern void freeSignalHandlers(void);
-
-/*
- * Function: blockUserSignals()
- *
- * Temporarily block the delivery of further console events. Needed to
- * avoid race conditions when GCing the queue of outstanding handlers or
- * when emptying the queue by running the handlers.
- * 
- */
-extern void blockUserSignals(void);
-
-/*
- * Function: unblockUserSignals()
- *
- * The inverse of blockUserSignals(); re-enable the deliver of console events.
- */
-extern void unblockUserSignals(void);
+void freeSignalHandlers(void);
 
 /*
  * Function: awaitUserSignals()
  *
  * Wait for the next console event. Currently a NOP (returns immediately.)
  */
-extern void awaitUserSignals(void);
+void awaitUserSignals(void);
 
 /*
  * Function: markSignalHandlers()
@@ -74,8 +58,10 @@ extern void awaitUserSignals(void);
  * Evacuate the handler queue. _Assumes_ that console event delivery
  * has already been blocked.
  */
-extern void markSignalHandlers (evac_fn evac, void *user);
+void markSignalHandlers (evac_fn evac, void *user);
+
+END_RTS_PRIVATE
 
 #endif /* RTS_USER_SIGNALS */
 
-#endif /* RTS_SIGNALS_H */
+#endif /* RTSSIGNALS_H */

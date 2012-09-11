@@ -11,10 +11,12 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef GCTHREAD_H
-#define GCTHREAD_H
+#ifndef SM_GCTHREAD_H
+#define SM_GCTHREAD_H
 
-#include "OSThreads.h"
+#include "WSDeque.h"
+
+BEGIN_RTS_PRIVATE
 
 /* -----------------------------------------------------------------------------
    General scheme
@@ -74,20 +76,21 @@
 
 typedef struct step_workspace_ {
     step * step;		// the step for this workspace 
-    struct gc_thread_ * gct;    // the gc_thread that contains this workspace
+    struct gc_thread_ * my_gct; // the gc_thread that contains this workspace
 
     // where objects to be scavenged go
     bdescr *     todo_bd;
     StgPtr       todo_free;            // free ptr for todo_bd
     StgPtr       todo_lim;             // lim for todo_bd
 
-    bdescr *     buffer_todo_bd;     // buffer to reduce contention
-                                     // on the step's todos list
+    WSDeque *    todo_q;
+    bdescr *     todo_overflow;
+    nat          n_todo_overflow;
 
     // where large objects to be scavenged go
     bdescr *     todo_large_objects;
 
-    // Objects that have already been, scavenged.
+    // Objects that have already been scavenged.
     bdescr *     scavd_list;
     nat          n_scavd_blocks;     // count of blocks in this list
 
@@ -95,7 +98,7 @@ typedef struct step_workspace_ {
     bdescr *     part_list;
     unsigned int n_part_blocks;      // count of above
 
-    StgWord pad[5];
+    StgWord pad[3];
 
 } step_workspace ATTRIBUTE_ALIGNED(64);
 // align so that computing gct->steps[n] is a shift, not a multiply
@@ -113,10 +116,9 @@ typedef struct step_workspace_ {
 typedef struct gc_thread_ {
 #ifdef THREADED_RTS
     OSThreadId id;                 // The OS thread that this struct belongs to
-    Mutex      wake_mutex;
-    Condition  wake_cond;          // So we can go to sleep between GCs
-    rtsBool    wakeup;
-    rtsBool    exit;
+    SpinLock   gc_spin;
+    SpinLock   mut_spin;
+    volatile rtsBool wakeup;
 #endif
     nat thread_index;              // a zero based index identifying the thread
 
@@ -131,6 +133,14 @@ typedef struct gc_thread_ {
 
     // block that is currently being scanned
     bdescr *     scan_bd;
+
+    // Remembered sets on this CPU.  Each GC thread has its own
+    // private per-generation remembered sets, so it can add an item
+    // to the remembered set without taking a lock.  The mut_lists
+    // array on a gc_thread is the same as the one on the
+    // corresponding Capability; we stash it here too for easy access
+    // during GC; see recordMutableGen_GC().
+    bdescr **    mut_lists;
 
     // --------------------
     // evacuate flags
@@ -180,8 +190,6 @@ typedef struct gc_thread_ {
 
 extern nat n_gc_threads;
 
-extern gc_thread **gc_threads;
-
 /* -----------------------------------------------------------------------------
    The gct variable is thread-local and points to the current thread's
    gc_thread structure.  It is heavily accessed, so we try to put gct
@@ -194,14 +202,43 @@ extern gc_thread **gc_threads;
    __thread version.
    -------------------------------------------------------------------------- */
 
+extern gc_thread **gc_threads;
+
+#if defined(THREADED_RTS)
+
 #define GLOBAL_REG_DECL(type,name,reg) register type name REG(reg);
 
-#if defined(sparc_HOST_ARCH)
-// Don't use REG_base or R1 for gct on SPARC because they're getting clobbered 
-//	by something else. Not sure what yet. -- BL 2009/01/03
+#define SET_GCT(to) gct = (to)
+
+
+
+#if (defined(i386_HOST_ARCH) && defined(linux_HOST_OS))
+// Using __thread is better than stealing a register on x86/Linux, because
+// we have too few registers available.  In my tests it was worth
+// about 5% in GC performance, but of course that might change as gcc
+// improves. -- SDM 2009/04/03
+//
+// We ought to do the same on MacOS X, but __thread is not
+// supported there yet (gcc 4.0.1).
 
 extern __thread gc_thread* gct;
 #define DECLARE_GCT __thread gc_thread* gct;
+
+
+#elif defined(sparc_TARGET_ARCH)
+// On SPARC we can't pin gct to a register. Names like %l1 are just offsets
+//	into the register window, which change on each function call.
+//	
+//	There are eight global (non-window) registers, but they're used for other purposes.
+//	%g0     -- always zero
+//	%g1     -- volatile over function calls, used by the linker
+//	%g2-%g3 -- used as scratch regs by the C compiler (caller saves)
+//	%g4	-- volatile over function calls, used by the linker
+//	%g5-%g7	-- reserved by the OS
+
+extern __thread gc_thread* gct;
+#define DECLARE_GCT __thread gc_thread* gct;
+
 
 #elif defined(REG_Base) && !defined(i386_HOST_ARCH)
 // on i386, REG_Base is %ebx which is also used for PIC, so we don't
@@ -210,10 +247,12 @@ extern __thread gc_thread* gct;
 GLOBAL_REG_DECL(gc_thread*, gct, REG_Base)
 #define DECLARE_GCT /* nothing */
 
+
 #elif defined(REG_R1)
 
 GLOBAL_REG_DECL(gc_thread*, gct, REG_R1)
 #define DECLARE_GCT /* nothing */
+
 
 #elif defined(__GNUC__)
 
@@ -226,5 +265,17 @@ extern __thread gc_thread* gct;
 
 #endif
 
-#endif // GCTHREAD_H
+#else  // not the threaded RTS
+
+extern StgWord8 the_gc_thread[];
+
+#define gct ((gc_thread*)&the_gc_thread)
+#define SET_GCT(to) /*nothing*/
+#define DECLARE_GCT /*nothing*/
+
+#endif
+
+END_RTS_PRIVATE
+
+#endif // SM_GCTHREAD_H
 

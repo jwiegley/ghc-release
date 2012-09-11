@@ -36,10 +36,11 @@ module GHC.Integer (
     eqInteger, neqInteger, absInteger, signumInteger,
     leInteger, gtInteger, ltInteger, geInteger, compareInteger,
     divModInteger, quotRemInteger, quotInteger, remInteger,
-    encodeFloatInteger, decodeFloatInteger, floatFromInteger,
+    encodeFloatInteger, floatFromInteger,
     encodeDoubleInteger, decodeDoubleInteger, doubleFromInteger,
     gcdInteger, lcmInteger,
     andInteger, orInteger, xorInteger, complementInteger,
+    shiftLInteger, shiftRInteger,
     hashInteger,
  ) where
 
@@ -51,29 +52,34 @@ import GHC.Prim (
     -- Operations on Int# that we use for operations on S#
     quotInt#, remInt#, negateInt#,
     (==#), (/=#), (<=#), (>=#), (<#), (>#), (*#), (-#), (+#),
-    mulIntMayOflo#, addIntC#, subIntC#, gcdInt#,
+    mulIntMayOflo#, addIntC#, subIntC#,
     and#, or#, xor#,
     indexIntArray#,
-    -- GMP-related primitives in the RTS
+ )
+
+import GHC.Integer.GMP.Internals (
+    Integer(..),
+
+    -- GMP-related primitives
     cmpInteger#, cmpIntegerInt#,
     plusInteger#, minusInteger#, timesInteger#,
     quotRemInteger#, quotInteger#, remInteger#, divModInteger#,
-    gcdInteger#, gcdIntegerInt#, divExactInteger#,
-    decodeDouble#, decodeFloat#,
+    gcdInteger#, gcdIntegerInt#, gcdInt#, divExactInteger#,
+    decodeDouble#,
     int2Integer#, integer2Int#, word2Integer#, integer2Word#,
     andInteger#, orInteger#, xorInteger#, complementInteger#,
+    mul2ExpInteger#, fdivQ2ExpInteger#,
 #if WORD_SIZE_IN_BITS < 64
-    int64ToInteger#, word64ToInteger#,
+    int64ToInteger#,  integerToInt64#,
+    word64ToInteger#, integerToWord64#,
 #endif
  )
-
-import GHC.Integer.Internals (Integer(..))
 
 #if WORD_SIZE_IN_BITS < 64
 import GHC.IntWord64 (
             Int64#, Word64#,
-            int64ToWord64#, intToInt64#, integerToWord64#,
-            int64ToInt#, word64ToInt64#, integerToInt64#,
+            int64ToWord64#, intToInt64#,
+            int64ToInt#, word64ToInt64#,
             geInt64#, leInt64#, leWord64#,
        )
 #endif
@@ -166,8 +172,8 @@ quotRemInteger (S# i) (S# j) = (# S# q, S# r #)
       -- (# let q = i `quotInt#` j in S# q, ... #) which builds a
       -- useless thunk.  Placing the bindings here means they'll be
       -- evaluated strictly.
-      q = i `quotInt#` j
-      r = i `remInt#`  j
+      !q = i `quotInt#` j
+      !r = i `remInt#`  j
 quotRemInteger i1@(J# _ _) i2@(S# _) = quotRemInteger i1 (toBig i2)
 quotRemInteger i1@(S# _) i2@(J# _ _) = quotRemInteger (toBig i1) i2
 quotRemInteger (J# s1 d1) (J# s2 d2)
@@ -180,8 +186,8 @@ divModInteger a@(S# INT_MINBOUND) b = divModInteger (toBig a) b
 divModInteger (S# i) (S# j) = (# S# d, S# m #)
     where
       -- NB. don't inline these.  See quotRemInteger above.
-      d = i `divInt#` j
-      m = i `modInt#` j
+      !d = i `divInt#` j
+      !m = i `modInt#` j
 
       -- XXX Copied from GHC.Base
       divInt# :: Int# -> Int# -> Int#
@@ -196,7 +202,7 @@ divModInteger (S# i) (S# j) = (# S# d, S# m #)
             ((x# <# 0#) && (y# ># 0#))
          then if r# /=# 0# then r# +# y# else 0#
          else r#
-          where r# = x# `remInt#` y#
+          where !r# = x# `remInt#` y#
 
       (&&) :: Bool -> Bool -> Bool
       True  && x = x
@@ -258,19 +264,12 @@ gcdInteger :: Integer -> Integer -> Integer
 gcdInteger a@(S# INT_MINBOUND) b = gcdInteger (toBig a) b
 gcdInteger a b@(S# INT_MINBOUND) = gcdInteger a (toBig b)
 gcdInteger (S# a) (S# b) = S# (gcdInt a b)
-    where -- XXX Copied from GHC.Base
-          gcdInt :: Int# -> Int# -> Int#
-          gcdInt 0# y  = absInt y
-          gcdInt x  0# = absInt x
-          gcdInt x  y  = gcdInt# (absInt x) (absInt y)
-
-          absInt x = if x <# 0# then negateInt# x else x
 gcdInteger ia@(S# a)  ib@(J# sb b)
  =      if a  ==# 0# then absInteger ib
    else if sb ==# 0# then absInteger ia
    else                   S# (gcdIntegerInt# absSb b absA)
-       where absA  = if a  <# 0# then negateInt# a  else a
-             absSb = if sb <# 0# then negateInt# sb else sb
+       where !absA  = if a  <# 0# then negateInt# a  else a
+             !absSb = if sb <# 0# then negateInt# sb else sb
 gcdInteger ia@(J# _ _) ib@(S# _) = gcdInteger ib ia
 gcdInteger (J# sa a) (J# sb b)
   = case gcdInteger# sa a sb b of (# sg, g #) -> J# sg g
@@ -281,6 +280,17 @@ lcmInteger a b =      if a `eqInteger` S# 0# then S# 0#
                  else (divExact aa (gcdInteger aa ab)) `timesInteger` ab
   where aa = absInteger a
         ab = absInteger b
+
+{-# RULES "gcdInteger/Int" forall a b.
+            gcdInteger (S# a) (S# b) = S# (gcdInt a b)
+  #-}
+gcdInt :: Int# -> Int# -> Int#
+gcdInt 0# y  = absInt y
+gcdInt x  0# = absInt x
+gcdInt x  y  = gcdInt# (absInt x) (absInt y)
+
+absInt :: Int# -> Int#
+absInt x = if x <# 0# then negateInt# x else x
 
 divExact :: Integer -> Integer -> Integer
 divExact a@(S# INT_MINBOUND) b = divExact (toBig a) b
@@ -383,7 +393,7 @@ signumInteger (S# i) = if i <# 0# then S# -1#
                        else S# 1#
 signumInteger (J# s d)
   = let
-        cmp = cmpIntegerInt# s d 0#
+        !cmp = cmpIntegerInt# s d 0#
     in
     if      cmp >#  0# then S# 1#
     else if cmp ==# 0# then S# 0#
@@ -438,10 +448,6 @@ encodeFloatInteger :: Integer -> Int# -> Float#
 encodeFloatInteger (S# i) j     = int_encodeFloat# i j
 encodeFloatInteger (J# s# d#) e = encodeFloat# s# d# e
 
-decodeFloatInteger :: Float# -> (# Integer, Int# #)
-decodeFloatInteger d = case decodeFloat# d of
-                       (# exp#, s#, d# #) -> (# J# s# d#, exp# #)
-
 encodeDoubleInteger :: Integer -> Int# -> Double#
 encodeDoubleInteger (S# i) j     = int_encodeDouble# i j
 encodeDoubleInteger (J# s# d#) e = encodeDouble# s# d# e
@@ -464,12 +470,12 @@ floatFromInteger :: Integer -> Float#
 floatFromInteger (S# i#) = int2Float# i#
 floatFromInteger (J# s# d#) = encodeFloat# s# d# 0#
 
-foreign import ccall unsafe "__encodeFloat"
+foreign import ccall unsafe "integer_cbits_encodeFloat"
         encodeFloat# :: Int# -> ByteArray# -> Int# -> Float#
 foreign import ccall unsafe "__int_encodeFloat"
         int_encodeFloat# :: Int# -> Int# -> Float#
 
-foreign import ccall unsafe "__encodeDouble"
+foreign import ccall unsafe "integer_cbits_encodeDouble"
         encodeDouble# :: Int# -> ByteArray# -> Int# -> Double#
 foreign import ccall unsafe "__int_encodeDouble"
         int_encodeDouble# :: Int# -> Int# -> Double#
@@ -511,6 +517,16 @@ complementInteger (S# x)
     = S# (word2Int# (int2Word# x `xor#` int2Word# (0# -# 1#)))
 complementInteger (J# s d)
     = case complementInteger# s d of (# s', d' #) -> J# s' d'
+
+shiftLInteger :: Integer -> Int# -> Integer
+shiftLInteger j@(S# _) i = shiftLInteger (toBig j) i
+shiftLInteger (J# s d) i = case mul2ExpInteger# s d i of
+                           (# s', d' #) -> J# s' d'
+
+shiftRInteger :: Integer -> Int# -> Integer
+shiftRInteger j@(S# _) i = shiftRInteger (toBig j) i
+shiftRInteger (J# s d) i = case fdivQ2ExpInteger# s d i of
+                           (# s', d' #) -> J# s' d'
 \end{code}
 
 %*********************************************************

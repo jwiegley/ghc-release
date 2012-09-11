@@ -16,7 +16,6 @@ import qualified Data.Map as Map
 import System.Posix.Terminal hiding (Interrupt)
 import Control.Monad
 import Control.Concurrent hiding (throwTo)
-import Control.Concurrent.Chan
 import Data.Maybe (catMaybes)
 import System.Posix.Signals.Exts
 import System.Posix.IO(stdInput)
@@ -33,8 +32,18 @@ import System.Console.Haskeline.Prefs
 
 import System.Console.Haskeline.Backend.IConv
 
-import GHC.IOBase (haFD,FD)
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO.FD (fdFD)
+import Data.Dynamic (cast)
+import System.IO.Error
+import GHC.IO.Exception
+import GHC.IO.Handle.Types hiding (getState)
+import GHC.IO.Handle.Internals
+import System.Posix.Internals (FD)
+#else
+import GHC.IOBase(haFD,FD)
 import GHC.Handle (withHandle_)
+#endif
 
 #ifdef USE_TERMIOS_H
 #include <termios.h>
@@ -60,7 +69,17 @@ ioctlLayout h = allocaBytes (#size struct winsize) $ \ws -> do
                     else return Nothing
 
 unsafeHandleToFD :: Handle -> IO FD
+#if __GLASGOW_HASKELL__ >= 611
+unsafeHandleToFD h =
+  withHandle_ "unsafeHandleToFd" h $ \Handle__{haDevice=dev} -> do
+  case cast dev of
+    Nothing -> ioError (ioeSetErrorString (mkIOError IllegalOperation
+                                           "unsafeHandleToFd" (Just h) Nothing)
+                        "handle is not a file descriptor")
+    Just fd -> return (fdFD fd)
+#else
 unsafeHandleToFD h = withHandle_ "unsafeHandleToFd" h (return . haFD)
+#endif
 
 envLayout :: IO (Maybe Layout)
 envLayout = handle (\(_::IOException) -> return Nothing) $ do
@@ -163,10 +182,11 @@ lookupChars (TreeMap tm) (c:cs) = case Map.lookup c tm of
 
 -----------------------------
 
-withPosixGetEvent :: (MonadTrans t, MonadIO m, MonadException (t m), MonadReader Prefs m) 
-                        => Chan Event -> Encoders -> [(String,Key)] -> (t m Event -> t m a) -> t m a
-withPosixGetEvent eventChan enc termKeys f = do
-    baseMap <- lift $ getKeySequences termKeys
+withPosixGetEvent :: (MonadException m, MonadReader Prefs m) 
+        => Chan Event -> Handle -> Encoders -> [(String,Key)]
+                -> (m Event -> m a) -> m a
+withPosixGetEvent eventChan h enc termKeys f = wrapTerminalOps h $ do
+    baseMap <- getKeySequences termKeys
     withWindowHandler eventChan
         $ f $ liftIO $ getEvent enc baseMap eventChan
 
@@ -194,11 +214,22 @@ getEvent enc baseMap = keyEventLoop readKeyEvents
         -- Read at least one character of input, and more if available.
         -- In particular, the characters making up a control sequence will all
         -- be available at once, so we can process them together with lexKeys.
-        threadWaitRead stdInput -- hWaitForInput doesn't work with -threaded on
-                                -- ghc < 6.10 (#2363 in ghc's trac)
+        blockUntilInput
         bs <- B.hGetNonBlocking stdin bufferSize
         cs <- convert (localeToUnicode enc) bs
         return $ map KeyInput $ lexKeys baseMap cs
+
+-- Different versions of ghc work better using different functions.
+blockUntilInput :: IO ()
+#if __GLASGOW_HASKELL__ >= 611
+-- threadWaitRead doesn't work with the new ghc IO library,
+-- because it keeps a buffer even when NoBuffering is set.
+blockUntilInput = hWaitForInput stdin (-1) >> return ()
+#else
+-- hWaitForInput doesn't work with -threaded on ghc < 6.10
+-- (#2363 in ghc's trac)
+blockUntilInput = threadWaitRead stdInput
+#endif
 
 -- try to convert to the locale encoding using iconv.
 -- if the buffer has an incomplete shift sequence,
@@ -215,9 +246,8 @@ convert decoder bs = do
         Invalid rest -> fmap ((cs ++) . ('?':)) $ convert decoder (B.drop 1 rest)
         _ -> return cs
 
--- NOTE: relys on getChar reading only 8 bytes.
 getMultiByteChar :: (B.ByteString -> IO (String,Result)) -> IO Char
-getMultiByteChar decoder = do
+getMultiByteChar decoder = hWithBinaryMode stdin $ do
     b <- getChar
     cs <- convert decoder (Char8.pack [b])
     case cs of
@@ -231,7 +261,9 @@ openTTY = do
     inIsTerm <- hIsTerminalDevice stdin
     if inIsTerm
         then handle (\(_::IOException) -> return Nothing) $ do
-                h <- openFile "/dev/tty" WriteMode
+            -- NB: we open the tty as a binary file since otherwise the terminfo
+            -- backend, which writes output as Chars, would double-encode on ghc-6.12.
+                h <- openBinaryFile "/dev/tty" WriteMode
                 return (Just h)
         else return Nothing
 
@@ -246,7 +278,7 @@ posixRunTerm tOps = do
         Just h -> return fileRT {
                     closeTerm = closeTerm fileRT >> hClose h,
                     -- NOTE: could also alloc Encoders once for each call to wrapRunTerm
-                    termOps = Just (wrapRunTerm (wrapTerminalOps h) (tOps encoders h))
+                    termOps = Just $ tOps encoders h
                 }
 
 type PosixT m = ReaderT Encoders (ReaderT Handle m)
@@ -289,10 +321,6 @@ wrapTerminalOps outH =
     bracketSet (hGetBuffering stdin) (hSetBuffering stdin) NoBuffering
     . bracketSet (hGetBuffering outH) (hSetBuffering outH) LineBuffering
     . bracketSet (hGetEcho stdin) (hSetEcho stdin) False
-
-wrapRunTerm :: (forall m a . MonadException m => m a -> m a) -> TermOps -> TermOps
-wrapRunTerm wrap tops = tops {runTerm = \getE -> wrap (runTerm tops getE)
-                                }
 
 bracketSet :: (Eq a, MonadException m) => IO a -> (a -> IO ()) -> a -> m b -> m b
 bracketSet getState set newState f = bracket (liftIO getState)

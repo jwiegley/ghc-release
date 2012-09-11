@@ -1,17 +1,20 @@
 {-# LANGUAGE CPP #-}
-{-# OPTIONS_GHC -XMagicHash #-}
+-- We cannot actually specify all the language pragmas, see ghc ticket #
+-- If we could, these are what they would be:
+{- LANGUAGE MagicHash -}
+
 -- |
 -- Module      : Data.ByteString.Unsafe
 -- License     : BSD-style
 -- Maintainer  : dons@cse.unsw.edu.au, duncan@haskell.org
 -- Stability   : experimental
 -- Portability : portable
--- 
--- A module containing unsafe 'ByteString' operations. This exposes
--- the 'ByteString' representation and low level construction functions.
--- Modules which extend the 'ByteString' system will need to use this module
--- while ideally most users will be able to make do with the public interface
--- modules.
+--
+-- A module containing unsafe 'ByteString' operations.
+--
+-- While these functions have a stable API and you may use these functions in
+-- applications, do carefully consider the documented pre-conditions;
+-- incorrect use can break referential transparency or worse.
 --
 module Data.ByteString.Unsafe (
 
@@ -158,9 +161,9 @@ unsafePackAddress addr# = do
 {-# INLINE unsafePackAddress #-}
 
 -- | /O(1)/ 'unsafePackAddressLen' provides constant-time construction of
--- 'ByteStrings' which is ideal for string literals. It packs a
--- null-terminated sequence of bytes into a 'ByteString', given a raw
--- 'Addr\#' to the string, and the length of the string.
+-- 'ByteStrings' which is ideal for string literals. It packs a sequence
+-- of bytes into a 'ByteString', given a raw 'Addr#' to the string, and
+-- the length of the string.
 --
 -- This function is /unsafe/ in two ways:
 --

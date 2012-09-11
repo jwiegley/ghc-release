@@ -11,7 +11,7 @@ import HsSyn
 import Module
 import Outputable
 import DynFlags
-import Monad		
+import Control.Monad
 import SrcLoc
 import ErrUtils
 import Name
@@ -24,10 +24,9 @@ import HscTypes
 import StaticFlags
 import TyCon
 import FiniteMap
+import Maybes
 
 import Data.Array
-import Data.Maybe
-import System.IO   (FilePath)
 import System.Directory ( createDirectoryIfMissing )
 
 import Trace.Hpc.Mix
@@ -279,6 +278,10 @@ addTickHsExpr (SectionR e1 e2) =
 	liftM2 SectionR
 		(addTickLHsExpr e1)
 		(addTickLHsExpr e2)
+addTickHsExpr (ExplicitTuple es boxity) =
+        liftM2 ExplicitTuple
+                (mapM addTickTupArg es)
+                (return boxity)
 addTickHsExpr (HsCase e mgs) = 
 	liftM2 HsCase
 		(addTickLHsExpr e) 
@@ -302,17 +305,13 @@ addTickHsExpr (HsDo cxt stmts last_exp srcloc) = do
 		    ListComp -> Just $ BinBox QualBinBox
 		    _        -> Nothing
 addTickHsExpr (ExplicitList ty es) = 
-	liftM2 ExplicitList 
+	liftM2 ExplicitList
 		(return ty)
 		(mapM (addTickLHsExpr) es)
 addTickHsExpr (ExplicitPArr ty es) =
 	liftM2 ExplicitPArr
 		(return ty)
 		(mapM (addTickLHsExpr) es)
-addTickHsExpr (ExplicitTuple es box) =
-	liftM2 ExplicitTuple
-		(mapM (addTickLHsExpr) es)
-		(return box)
 addTickHsExpr (RecordCon id ty rec_binds) = 
 	liftM3 RecordCon
 		(return id)
@@ -377,6 +376,10 @@ addTickHsExpr e@(HsType _) = return e
 
 -- Others dhould never happen in expression content.
 addTickHsExpr e  = pprPanic "addTickHsExpr" (ppr e)
+
+addTickTupArg :: HsTupArg Id -> TM (HsTupArg Id)
+addTickTupArg (Present e)  = do { e' <- addTickLHsExpr e; return (Present e') }
+addTickTupArg (Missing ty) = return (Missing ty)
 
 addTickMatchGroup :: MatchGroup Id -> TM (MatchGroup Id)
 addTickMatchGroup (MatchGroup matches ty) = do
@@ -458,13 +461,15 @@ addTickStmt isGuard (GroupStmt (stmts, binderMap) groupByClause) = do
           case x of
             Left a -> f a >>= (return . Left)
             Right b -> g b >>= (return . Right)
-addTickStmt isGuard (RecStmt stmts ids1 ids2 tys dictbinds) = do
-  	liftM5 RecStmt 
-		(addTickLStmts isGuard stmts)
-		(return ids1)
-		(return ids2)
-		(return tys)
-		(addTickDictBinds dictbinds)
+addTickStmt isGuard stmt@(RecStmt {})
+  = do { stmts' <- addTickLStmts isGuard (recS_stmts stmt)
+       ; ret'   <- addTickSyntaxExpr hpcSrcSpan (recS_ret_fn stmt)
+       ; mfix'  <- addTickSyntaxExpr hpcSrcSpan (recS_mfix_fn stmt)
+       ; bind'  <- addTickSyntaxExpr hpcSrcSpan (recS_bind_fn stmt)
+       ; dicts' <- addTickDictBinds (recS_dicts stmt)
+       ; return (stmt { recS_stmts = stmts', recS_ret_fn = ret'
+                      , recS_mfix_fn = mfix', recS_bind_fn = bind'
+                      , recS_dicts = dicts' }) }
 
 addTick :: Maybe (Bool -> BoxLabel) -> LHsExpr Id -> TM (LHsExpr Id)
 addTick isGuard e | Just fn <- isGuard = addBinTickLHsExpr fn e

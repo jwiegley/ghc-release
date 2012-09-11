@@ -18,7 +18,6 @@
 module GHC.ConsoleHandler
 #if !defined(mingw32_HOST_OS) && !defined(__HADDOCK__)
         where
-import Prelude -- necessary to get dependencies right
 #else /* whole file */
         ( Handler(..)
         , installHandler
@@ -27,17 +26,25 @@ import Prelude -- necessary to get dependencies right
         ) where
 
 {-
-#include "Signals.h"
+#include "rts/Signals.h"
 -}
-
-import Prelude -- necessary to get dependencies right
 
 import Foreign
 import Foreign.C
-import GHC.IOBase
+import GHC.IO.FD
+import GHC.IO.Exception
+import GHC.IO.Handle.Types
+import GHC.IO.Handle.Internals
 import GHC.Conc
-import GHC.Handle
-import Control.Exception (onException)
+import Control.Concurrent.MVar
+import Data.Typeable
+
+#ifdef mingw32_HOST_OS
+import Data.Maybe
+import GHC.Base
+import GHC.Num
+import GHC.Real
+#endif
 
 data Handler
  = Default
@@ -134,19 +141,16 @@ foreign import ccall unsafe "RtsExternal.h rts_ConsoleHandlerDone"
 
 flushConsole :: Handle -> IO ()
 flushConsole h =
-  wantReadableHandle "flushConsole" h $ \ h_ ->
-     throwErrnoIfMinus1Retry_ "flushConsole"
-      (flush_console_fd (fromIntegral (haFD h_)))
+  wantReadableHandle_ "flushConsole" h $ \ Handle__{haDevice=dev} ->
+    case cast dev of
+      Nothing -> ioException $
+                    IOError (Just h) IllegalOperation "flushConsole"
+                        "handle is not a file descriptor" Nothing Nothing
+      Just fd -> do
+        throwErrnoIfMinus1Retry_ "flushConsole" $
+           flush_console_fd (fromIntegral (fdFD fd))
 
 foreign import ccall unsafe "consUtils.h flush_input_console__"
         flush_console_fd :: CInt -> IO CInt
 
--- XXX Copied from Control.Concurrent.MVar
-modifyMVar :: MVar a -> (a -> IO (a,b)) -> IO b
-modifyMVar m io =
-  block $ do
-    a      <- takeMVar m
-    (a',b) <- unblock (io a) `onException` putMVar m a
-    putMVar m a'
-    return b
 #endif /* mingw32_HOST_OS */

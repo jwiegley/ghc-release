@@ -26,16 +26,20 @@ module  Data.Array
       module Data.Ix		-- export all of Ix 
     , Array 			-- Array type is abstract
 
+    -- * Array construction
     , array	    -- :: (Ix a) => (a,a) -> [(a,b)] -> Array a b
     , listArray     -- :: (Ix a) => (a,a) -> [b] -> Array a b
     , accumArray    -- :: (Ix a) => (b -> c -> b) -> b -> (a,a) -> [(a,c)] -> Array a b
+    -- * Accessing arrays
     , (!)           -- :: (Ix a) => Array a b -> a -> b
     , bounds        -- :: (Ix a) => Array a b -> (a,a)
     , indices       -- :: (Ix a) => Array a b -> [a]
     , elems         -- :: (Ix a) => Array a b -> [b]
     , assocs        -- :: (Ix a) => Array a b -> [(a,b)]
+    -- * Incremental array updates
     , (//)          -- :: (Ix a) => Array a b -> [(a,b)] -> Array a b
     , accum         -- :: (Ix a) => (b -> c -> b) -> Array a b -> [(a,c)] -> Array a b
+    -- * Derived arrays
     , ixmap         -- :: (Ix a, Ix b) => (a,a) -> (a -> b) -> Array b c -> Array a b
 
     -- Array instances:
@@ -55,8 +59,6 @@ import Data.Ix
 
 #ifdef __GLASGOW_HASKELL__
 import GHC.Arr                    -- Most of the hard work is done here
---import Data.Generics.Instances () -- To provide a Data instance
---import Data.Generics.Basics    () -- because the Data instance is an orphan
 #endif
 
 #ifdef __HUGS__
@@ -81,9 +83,5 @@ arrays are treated as data, not as general functions.
 Since most array functions involve the class 'Ix', this module is exported
 from "Data.Array" so that modules need not import both "Data.Array" and
 "Data.Ix".
-
-Unfortunately, due to technical limitations, there are no docs here
-currently, but you can find them in the @GHC.Arr@ module in the @base@
-packages (which provides the actual implementations).
 -}
 

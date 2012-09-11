@@ -135,15 +135,17 @@ AC_RUN_IFELSE([AC_LANG_SOURCE([[#include <stdio.h>
 # include <sys/resource.h>
 #endif
 
+#include <stdlib.h>
+
 typedef $1 testing;
 
-main() {
+int main(void) {
   FILE *f=fopen("conftestval", "w");
   if (!f) exit(1);
   if (((testing)((int)((testing)1.4))) == ((testing)1.4)) {
     fprintf(f, "%s%d\n",
            ((testing)(-1) < (testing)0) ? "Int" : "Word",
-           sizeof(testing)*8);
+           (int)(sizeof(testing)*8));
   } else {
     fprintf(f,"%s\n",
            (sizeof(testing) >  sizeof(double)) ? "LDouble" :
@@ -167,60 +169,37 @@ undefine([AC_CV_NAME_supported])dnl
 ])
 
 
-# FP_READDIR_EOF_ERRNO
-# --------------------
-# Defines READDIR_ERRNO_EOF to what readdir() sets 'errno' to upon reaching end
-# of directory (not set => 0); not setting it is the correct thing to do, but
-# MinGW based versions have set it to ENOENT until recently (summer 2004).
-AC_DEFUN([FP_READDIR_EOF_ERRNO],
-[AC_CACHE_CHECK([what readdir sets errno to upon EOF], [fptools_cv_readdir_eof_errno],
-[AC_RUN_IFELSE([AC_LANG_SOURCE([[#include <dirent.h>
-#include <stdio.h>
-#include <errno.h>
-int
-main(argc, argv)
-int argc;
-char **argv;
-{
-  FILE *f=fopen("conftestval", "w");
-#if defined(__MINGW32__)
-  int fd = mkdir("testdir");
-#else
-  int fd = mkdir("testdir", 0666);
-#endif
-  DIR* dp;
-  struct dirent* de;
-  int err = 0;
-
-  if (!f) return 1;
-  if (fd == -1) { 
-     fprintf(stderr,"unable to create directory; quitting.\n");
-     return 1;
-  }
-  close(fd);
-  dp = opendir("testdir");
-  if (!dp) { 
-     fprintf(stderr,"unable to browse directory; quitting.\n");
-     rmdir("testdir");
-     return 1;
-  }
-
-  /* the assumption here is that readdir() will only return NULL
-   * due to reaching the end of the directory.
-   */
-  while (de = readdir(dp)) {
-  	;
-  }
-  err = errno;
-  fprintf(f,"%d", err);
-  fclose(f);
-  closedir(dp);
-  rmdir("testdir");
-  return 0;
-}]])],
-[fptools_cv_readdir_eof_errno=`cat conftestval`],
-[AC_MSG_WARN([failed to determine the errno value])
- fptools_cv_readdir_eof_errno=0],
-[fptools_cv_readdir_eof_errno=0])])
-AC_DEFINE_UNQUOTED([READDIR_ERRNO_EOF], [$fptools_cv_readdir_eof_errno], [readdir() sets errno to this upon EOF])
-])# FP_READDIR_EOF_ERRNO
+# FP_SEARCH_LIBS_PROTO(WHAT, PROTOTYPE, FUNCTION, SEARCH-LIBS,
+#                [ACTION-IF-FOUND], [ACTION-IF-NOT-FOUND],
+#                [OTHER-LIBRARIES])
+# --------------------------------------------------------
+# Search for a library defining FUNC, if it's not already available.
+# This is a copy of the AC_SEARCH_LIBS definition, but extended to take
+# the name of the thing we are looking for as its first argument, and
+# prototype text as its second argument. It also calls AC_LANG_PROGRAM
+# instead of AC_LANG_CALL
+AC_DEFUN([FP_SEARCH_LIBS_PROTO],
+[AS_VAR_PUSHDEF([ac_Search], [ac_cv_search_$3])dnl
+AC_CACHE_CHECK([for library containing $1], [ac_Search],
+[ac_func_search_save_LIBS=$LIBS
+AC_LANG_CONFTEST([AC_LANG_PROGRAM([$2], [$3])])
+for ac_lib in '' $4; do
+  if test -z "$ac_lib"; then
+    ac_res="none required"
+  else
+    ac_res=-l$ac_lib
+    LIBS="-l$ac_lib $7 $ac_func_search_save_LIBS"
+  fi
+  AC_LINK_IFELSE([], [AS_VAR_SET([ac_Search], [$ac_res])])
+  AS_VAR_SET_IF([ac_Search], [break])
+done
+AS_VAR_SET_IF([ac_Search], , [AS_VAR_SET([ac_Search], [no])])
+rm conftest.$ac_ext
+LIBS=$ac_func_search_save_LIBS])
+ac_res=AS_VAR_GET([ac_Search])
+AS_IF([test "$ac_res" != no],
+  [test "$ac_res" = "none required" || LIBS="$ac_res $LIBS"
+  $5],
+      [$6])dnl
+AS_VAR_POPDEF([ac_Search])dnl
+])

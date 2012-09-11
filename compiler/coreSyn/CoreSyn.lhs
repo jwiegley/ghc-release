@@ -25,7 +25,7 @@ module CoreSyn (
 	mkConApp, mkTyBind,
 	varToCoreExpr, varsToCoreExprs,
 
-        isTyVar, isIdVar, cmpAltCon, cmpAlt, ltAlt,
+        isTyVar, isId, cmpAltCon, cmpAlt, ltAlt,
 	
 	-- ** Simple 'Expr' access functions and predicates
 	bindersOf, bindersOfBinds, rhssOfBind, rhssOfAlts, 
@@ -42,7 +42,8 @@ module CoreSyn (
 	
 	-- ** Predicates and deconstruction on 'Unfolding'
 	unfoldingTemplate, maybeUnfoldingTemplate, otherCons, 
-	isValueUnfolding, isEvaldUnfolding, isCheapUnfolding, isCompulsoryUnfolding,
+	isValueUnfolding, isEvaldUnfolding, isCheapUnfolding,
+        isExpandableUnfolding, isCompulsoryUnfolding,
 	hasUnfolding, hasSomeUnfolding, neverUnfold,
 
 	-- * Strictness
@@ -412,6 +413,7 @@ data Unfolding
 		Bool
 		Bool
 		Bool
+                Bool
 		UnfoldingGuidance
   -- ^ An unfolding with redundant cached information. Parameters:
   --
@@ -455,8 +457,8 @@ mkOtherCon :: [AltCon] -> Unfolding
 mkOtherCon = OtherCon
 
 seqUnfolding :: Unfolding -> ()
-seqUnfolding (CoreUnfolding e top b1 b2 g)
-  = seqExpr e `seq` top `seq` b1 `seq` b2 `seq` seqGuidance g
+seqUnfolding (CoreUnfolding e top b1 b2 b3 g)
+  = seqExpr e `seq` top `seq` b1 `seq` b2 `seq` b3 `seq` seqGuidance g
 seqUnfolding _ = ()
 
 seqGuidance :: UnfoldingGuidance -> ()
@@ -467,15 +469,15 @@ seqGuidance _                           = ()
 \begin{code}
 -- | Retrieves the template of an unfolding: panics if none is known
 unfoldingTemplate :: Unfolding -> CoreExpr
-unfoldingTemplate (CoreUnfolding expr _ _ _ _) = expr
-unfoldingTemplate (CompulsoryUnfolding expr)   = expr
+unfoldingTemplate (CoreUnfolding expr _ _ _ _ _) = expr
+unfoldingTemplate (CompulsoryUnfolding expr)     = expr
 unfoldingTemplate _ = panic "getUnfoldingTemplate"
 
 -- | Retrieves the template of an unfolding if possible
 maybeUnfoldingTemplate :: Unfolding -> Maybe CoreExpr
-maybeUnfoldingTemplate (CoreUnfolding expr _ _ _ _) = Just expr
-maybeUnfoldingTemplate (CompulsoryUnfolding expr)   = Just expr
-maybeUnfoldingTemplate _                            = Nothing
+maybeUnfoldingTemplate (CoreUnfolding expr _ _ _ _ _) = Just expr
+maybeUnfoldingTemplate (CompulsoryUnfolding expr)     = Just expr
+maybeUnfoldingTemplate _                              = Nothing
 
 -- | The constructors that the unfolding could never be: 
 -- returns @[]@ if no information is available
@@ -486,21 +488,25 @@ otherCons _               = []
 -- | Determines if it is certainly the case that the unfolding will
 -- yield a value (something in HNF): returns @False@ if unsure
 isValueUnfolding :: Unfolding -> Bool
-isValueUnfolding (CoreUnfolding _ _ is_evald _ _) = is_evald
-isValueUnfolding _                                = False
+isValueUnfolding (CoreUnfolding _ _ is_evald _ _ _) = is_evald
+isValueUnfolding _                                  = False
 
 -- | Determines if it possibly the case that the unfolding will
 -- yield a value. Unlike 'isValueUnfolding' it returns @True@
 -- for 'OtherCon'
 isEvaldUnfolding :: Unfolding -> Bool
-isEvaldUnfolding (OtherCon _)		          = True
-isEvaldUnfolding (CoreUnfolding _ _ is_evald _ _) = is_evald
-isEvaldUnfolding _                                = False
+isEvaldUnfolding (OtherCon _)		            = True
+isEvaldUnfolding (CoreUnfolding _ _ is_evald _ _ _) = is_evald
+isEvaldUnfolding _                                  = False
 
 -- | Is the thing we will unfold into certainly cheap?
 isCheapUnfolding :: Unfolding -> Bool
-isCheapUnfolding (CoreUnfolding _ _ _ is_cheap _) = is_cheap
-isCheapUnfolding _                                = False
+isCheapUnfolding (CoreUnfolding _ _ _ is_cheap _ _) = is_cheap
+isCheapUnfolding _                                  = False
+
+isExpandableUnfolding :: Unfolding -> Bool
+isExpandableUnfolding (CoreUnfolding _ _ _ _ is_expable _) = is_expable
+isExpandableUnfolding _                                    = False
 
 -- | Must this unfolding happen for the code to be executable?
 isCompulsoryUnfolding :: Unfolding -> Bool
@@ -509,9 +515,9 @@ isCompulsoryUnfolding _                       = False
 
 -- | Do we have an available or compulsory unfolding?
 hasUnfolding :: Unfolding -> Bool
-hasUnfolding (CoreUnfolding _ _ _ _ _) = True
-hasUnfolding (CompulsoryUnfolding _)   = True
-hasUnfolding _                         = False
+hasUnfolding (CoreUnfolding _ _ _ _ _ _) = True
+hasUnfolding (CompulsoryUnfolding _)     = True
+hasUnfolding _                           = False
 
 -- | Only returns False if there is no unfolding information available at all
 hasSomeUnfolding :: Unfolding -> Bool
@@ -521,10 +527,10 @@ hasSomeUnfolding _           = True
 -- | Similar to @not . hasUnfolding@, but also returns @True@
 -- if it has an unfolding that says it should never occur
 neverUnfold :: Unfolding -> Bool
-neverUnfold NoUnfolding				= True
-neverUnfold (OtherCon _)			= True
-neverUnfold (CoreUnfolding _ _ _ _ UnfoldNever) = True
-neverUnfold _                                   = False
+neverUnfold NoUnfolding				  = True
+neverUnfold (OtherCon _)			  = True
+neverUnfold (CoreUnfolding _ _ _ _ _ UnfoldNever) = True
+neverUnfold _                                     = False
 \end{code}
 
 
@@ -704,7 +710,7 @@ mkTyBind tv ty      = NonRec tv (Type ty)
 
 -- | Convert a binder into either a 'Var' or 'Type' 'Expr' appropriately
 varToCoreExpr :: CoreBndr -> Expr b
-varToCoreExpr v | isIdVar v = Var v
+varToCoreExpr v | isId v = Var v
                 | otherwise = Type (mkTyVarTy v)
 
 varsToCoreExprs :: [CoreBndr] -> [Expr b]
@@ -777,8 +783,8 @@ collectTyBinders expr
 collectValBinders expr
   = go [] expr
   where
-    go ids (Lam b e) | isIdVar b = go (b:ids) e
-    go ids body		         = (reverse ids, body)
+    go ids (Lam b e) | isId b = go (b:ids) e
+    go ids body		      = (reverse ids, body)
 \end{code}
 
 \begin{code}
@@ -816,7 +822,7 @@ at runtime.  Similarly isRuntimeArg.
 \begin{code}
 -- | Will this variable exist at runtime?
 isRuntimeVar :: Var -> Bool
-isRuntimeVar = isIdVar 
+isRuntimeVar = isId 
 
 -- | Will this argument expression exist at runtime?
 isRuntimeArg :: CoreExpr -> Bool
@@ -834,7 +840,7 @@ isTypeArg _        = False
 
 -- | The number of binders that bind values rather than types
 valBndrCount :: [CoreBndr] -> Int
-valBndrCount = count isIdVar
+valBndrCount = count isId
 
 -- | The number of argument expressions that are values rather than types at their top level
 valArgCount :: [Arg b] -> Int

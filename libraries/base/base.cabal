@@ -1,14 +1,15 @@
 name:           base
-version:        4.1.0.0
+version:        4.2.0.0
 license:        BSD3
 license-file:   LICENSE
 maintainer:     libraries@haskell.org
+bug-reports: http://hackage.haskell.org/trac/ghc/newticket?component=libraries/base
 synopsis:       Basic libraries
 description:
     This package contains the Prelude and its support libraries,
     and a large collection of useful libraries ranging from data
     structures to parsing combinators and debugging utilities.
-cabal-version:  >=1.2
+cabal-version:  >=1.6
 build-type: Configure
 extra-tmp-files:
                 config.log config.status autom4te.cache
@@ -18,9 +19,21 @@ extra-source-files:
                 aclocal.m4 configure.ac configure
                 include/CTypes.h
 
+source-repository head
+    type:     darcs
+    location: http://darcs.haskell.org/packages/base/
+
+Flag integer-simple
+    Description: Use integer-simple
+
 Library {
     if impl(ghc) {
-        build-depends: rts, ghc-prim, integer
+        if flag(integer-simple)
+            build-depends: integer-simple
+        else
+            build-depends: integer-gmp
+            cpp-options: -DOPTIMISE_INTEGER_GCD_LCM
+        build-depends: rts, ghc-prim
         exposed-modules:
             Foreign.Concurrent,
             GHC.Arr,
@@ -28,6 +41,7 @@ Library {
             GHC.Classes,
             GHC.Conc,
             GHC.ConsoleHandler,
+            GHC.Constants,
             GHC.Desugar,
             GHC.Enum,
             GHC.Environment,
@@ -36,9 +50,31 @@ Library {
             GHC.Exts,
             GHC.Float,
             GHC.ForeignPtr,
-            GHC.Handle,
+            GHC.MVar,
             GHC.IO,
+            GHC.IO.IOMode,
+            GHC.IO.Buffer,
+            GHC.IO.Device,
+            GHC.IO.BufferedIO,
+            GHC.IO.FD,
+            GHC.IO.Exception,
+            GHC.IO.Encoding,
+            GHC.IO.Encoding.Latin1,
+            GHC.IO.Encoding.UTF8,
+            GHC.IO.Encoding.UTF16,
+            GHC.IO.Encoding.UTF32,
+            GHC.IO.Encoding.Types,
+            GHC.IO.Encoding.Iconv,
+            GHC.IO.Encoding.CodePage,
+            GHC.IO.Handle,
+            GHC.IO.Handle.Types,
+            GHC.IO.Handle.Internals,
+            GHC.IO.Handle.FD,
+            GHC.IO.Handle.Text,
             GHC.IOBase,
+            GHC.Handle,
+            GHC.IORef,
+            GHC.IOArray,
             GHC.Int,
             GHC.List,
             GHC.Num,
@@ -57,12 +93,14 @@ Library {
             GHC.Weak,
             GHC.Word,
             System.Timeout
+        if os(windows)
+            exposed-modules: GHC.IO.Encoding.CodePage.Table
         extensions: MagicHash, ExistentialQuantification, Rank2Types,
                     ScopedTypeVariables, UnboxedTuples,
                     ForeignFunctionInterface, UnliftedFFITypes,
                     DeriveDataTypeable, GeneralizedNewtypeDeriving,
                     FlexibleInstances, StandaloneDeriving,
-                    PatternGuards, EmptyDataDecls
+                    PatternGuards, EmptyDataDecls, NoImplicitPrelude
 
         if impl(ghc < 6.10) 
            -- PatternSignatures was deprecated in 6.10
@@ -98,6 +136,7 @@ Library {
         Data.Fixed,
         Data.Foldable
         Data.Function,
+        Data.Functor,
         Data.HashTable,
         Data.IORef,
         Data.Int,
@@ -161,12 +200,13 @@ Library {
         cbits/WCsubst.c
         cbits/Win32Utils.c
         cbits/consUtils.c
-        cbits/dirUtils.c
+        cbits/iconv.c
         cbits/inputReady.c
         cbits/selectUtils.c
+        cbits/primFloat.c
     include-dirs: include
     includes:    HsBase.h
-    install-includes:    HsBase.h HsBaseConfig.h WCsubst.h dirUtils.h consUtils.h Typeable.h
+    install-includes:    HsBase.h HsBaseConfig.h WCsubst.h consUtils.h Typeable.h
     if os(windows) {
         extra-libraries: wsock32, user32, shell32
     }

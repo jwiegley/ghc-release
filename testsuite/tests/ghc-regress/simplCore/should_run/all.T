@@ -27,3 +27,9 @@ test('simplrun010', composes([extra_run_opts('24 16 8'),
 # the output of -ddump-rules can be compared
 test('T2486', normal, compile, [''])
 test('T2756', normal, compile_and_run, [''])
+test('T3437', extra_run_opts('+RTS -M10m'), compile_and_run, [''])
+
+test('SeqRule', only_ways(['optc','optasm']), compile_and_run, [''])
+
+test('T3403', normal, compile_and_run, ['-package containers'])
+test('T3591', normal, compile_and_run, [''])

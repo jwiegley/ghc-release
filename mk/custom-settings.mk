@@ -1,9 +1,14 @@
 
--include $(TOP)/mk/are-validating.mk
+-include mk/are-validating.mk
 
 ifeq "$(Validating)" "YES"
-include $(TOP)/mk/validate-settings.mk
--include $(TOP)/mk/validate.mk
+include mk/validate-settings.mk
+-include mk/validate.mk
 else
--include $(TOP)/mk/build.mk
+-include mk/build.mk
 endif
+
+ifeq "$(BINDIST)" "YES"
+-include bindist.mk
+endif
+

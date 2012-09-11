@@ -1,29 +1,45 @@
 module System.Console.Haskeline.Emacs where
 
 import System.Console.Haskeline.Command
+import System.Console.Haskeline.Monads
 import System.Console.Haskeline.Key
 import System.Console.Haskeline.Command.Completion
 import System.Console.Haskeline.Command.History
 import System.Console.Haskeline.Command.Undo
+import System.Console.Haskeline.Command.KillRing
 import System.Console.Haskeline.LineState
 import System.Console.Haskeline.InputT
 
 import Data.Char
 
 type InputCmd s t = forall m . Monad m => Command (InputCmdT m) s t
+type InputKeyCmd s t = forall m . Monad m => KeyCommand (InputCmdT m) s t
 
-emacsCommands :: Monad m => KeyMap (InputCmdT m) InsertMode
-emacsCommands = runCommand $ choiceCmd [simpleActions, controlActions]
+emacsCommands :: InputKeyCmd InsertMode (Maybe String)
+emacsCommands = choiceCmd [
+                    choiceCmd [simpleActions, controlActions] >+> 
+                        keyCommand emacsCommands
+                    , enders]
 
-simpleActions, controlActions :: InputCmd InsertMode InsertMode
+enders :: InputKeyCmd InsertMode (Maybe String)
+enders = choiceCmd [simpleChar '\n' +> finish, eotKey +> deleteCharOrEOF]
+    where
+        eotKey = ctrlChar 'd'
+        deleteCharOrEOF s
+            | s == emptyIM  = return Nothing
+            | otherwise = change deleteNext s >>= justDelete
+        justDelete = keyChoiceCmd [eotKey +> change deleteNext >|> justDelete
+                            , emacsCommands]
+
+
+simpleActions, controlActions :: InputKeyCmd InsertMode InsertMode
 simpleActions = choiceCmd 
-            [ simpleChar '\n' +> finish
-            , simpleKey LeftKey +> change goLeft
+            [ simpleKey LeftKey +> change goLeft
             , simpleKey RightKey +> change goRight
             , simpleKey Backspace +> change deletePrev
             , simpleKey Delete +> change deleteNext 
             , changeFromChar insertChar
-            , saveForUndo $ simpleChar '\t' +> completionCmd
+            , completionCmd (simpleChar '\t')
             , simpleKey UpKey +> historyBack
             , simpleKey DownKey +> historyForward
             , searchHistory
@@ -34,33 +50,51 @@ controlActions = choiceCmd
             , ctrlChar 'e' +> change moveToEnd
             , ctrlChar 'b' +> change goLeft
             , ctrlChar 'f' +> change goRight
-            , ctrlChar 'd' +> deleteCharOrEOF
             , ctrlChar 'l' +> clearScreenCmd
             , metaChar 'f' +> change wordRight
             , metaChar 'b' +> change wordLeft
+            , metaChar 'c' +> change (modifyWord capitalize)
+            , metaChar 'l' +> change (modifyWord (mapBaseChars toLower))
+            , metaChar 'u' +> change (modifyWord (mapBaseChars toUpper))
             , ctrlChar '_' +> commandUndo
-            , ctrlChar 'x' +> change id 
+            , ctrlChar 'x' +> try (ctrlChar 'u' +> commandUndo)
+            , ctrlChar 't' +> change transposeChars
+            , ctrlChar 'p' +> historyBack
+            , ctrlChar 'n' +> historyForward
+            , metaChar '<' +> historyStart
+            , metaChar '>' +> historyEnd
             , simpleKey Home +> change moveToStart
             , simpleKey End +> change moveToEnd
-                >|> choiceCmd [ctrlChar 'u' +> commandUndo
-                              , continue]
-            , saveForUndo $ choiceCmd
-                [ ctrlChar 'w' +> change (deleteFromMove bigWordLeft)
-                , metaKey (simpleKey Backspace) +> change (deleteFromMove wordLeft)
-                , metaChar 'd' +> change (deleteFromMove wordRight)
-                , ctrlChar 'k' +> change (deleteFromMove moveToEnd)
-                , simpleKey KillLine +> change (deleteFromMove moveToStart)
+            , choiceCmd
+                [ ctrlChar 'w' +> killFromHelper (SimpleMove bigWordLeft)
+                , metaKey (simpleKey Backspace) +> killFromHelper (SimpleMove wordLeft)
+                , metaChar 'd' +> killFromHelper (SimpleMove wordRight)
+                , ctrlChar 'k' +> killFromHelper (SimpleMove moveToEnd)
+                , simpleKey KillLine +> killFromHelper (SimpleMove moveToStart)
                 ]
+            , ctrlChar 'y' +> rotatePaste
             ]
 
-deleteCharOrEOF :: Key -> InputCmd InsertMode InsertMode
-deleteCharOrEOF k = k +> acceptKeyOrFail (\s -> if s == emptyIM
-            then Nothing
-            else Just $ Change (deleteNext s) >=> justDelete)
-    where
-        justDelete = try (change deleteNext k >|> justDelete)
+rotatePaste :: InputCmd InsertMode InsertMode
+rotatePaste im = get >>= loop
+  where
+    loop kr = case peek kr of
+                    Nothing -> return im
+                    Just s -> setState (insertGraphemes s im)
+                            >>= try (metaChar 'y' +> \_ -> loop (rotate kr))
+
 
 wordRight, wordLeft, bigWordLeft :: InsertMode -> InsertMode
-wordRight = skipRight isAlphaNum . skipRight (not . isAlphaNum)
-wordLeft = skipLeft isAlphaNum . skipLeft (not . isAlphaNum)
-bigWordLeft = skipLeft (not . isSpace) . skipLeft isSpace
+wordRight = goRightUntil (atStart (not . isAlphaNum))
+wordLeft = goLeftUntil (atStart isAlphaNum)
+bigWordLeft = goLeftUntil (atStart isSpace)
+
+modifyWord :: ([Grapheme] -> [Grapheme]) -> InsertMode -> InsertMode
+modifyWord f im = IMode (reverse (f ys1) ++ xs) ys2
+    where
+        IMode xs ys = skipRight (not . isAlphaNum) im
+        (ys1,ys2) = span (isAlphaNum . baseChar) ys
+
+capitalize :: [Grapheme] -> [Grapheme]
+capitalize [] = []
+capitalize (c:cs) = modifyBaseChar toUpper c : cs

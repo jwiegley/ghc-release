@@ -1,0 +1,59 @@
+/* -----------------------------------------------------------------------------
+ *
+ * (c) The GHC Team 1998-2009
+ *
+ * External API for the scheduler.  For most uses, the functions in
+ * RtsAPI.h should be enough.
+ *
+ * Do not #include this file directly: #include "Rts.h" instead.
+ *
+ * To understand the structure of the RTS headers, see the wiki:
+ *   http://hackage.haskell.org/trac/ghc/wiki/Commentary/SourceTree/Includes
+ *
+ * ---------------------------------------------------------------------------*/
+
+#ifndef RTS_THREADS_H
+#define RTS_THREADS_H
+
+// 
+// Creating threads
+//
+StgTSO *createThread (Capability *cap, nat stack_size);
+
+Capability *scheduleWaitThread (StgTSO *tso, /*out*/HaskellObj* ret,
+				Capability *cap);
+
+StgTSO *createGenThread       (Capability *cap, nat stack_size,  
+			       StgClosure *closure);
+StgTSO *createIOThread        (Capability *cap, nat stack_size,  
+			       StgClosure *closure);
+StgTSO *createStrictIOThread  (Capability *cap, nat stack_size,  
+			       StgClosure *closure);
+
+// Suspending/resuming threads around foreign calls
+void *        suspendThread (StgRegTable *);
+StgRegTable * resumeThread  (void *);
+
+//
+// Thread operations from Threads.c
+//
+int    cmp_thread      (StgPtr tso1, StgPtr tso2);
+int    rts_getThreadId (StgPtr tso);
+
+#if !defined(mingw32_HOST_OS)
+pid_t  forkProcess     (HsStablePtr *entry);
+#else
+pid_t  forkProcess     (HsStablePtr *entry)
+    GNU_ATTRIBUTE(__noreturn__);
+#endif
+
+HsBool rtsSupportsBoundThreads (void);
+
+// The number of Capabilities
+extern unsigned int n_capabilities;
+
+#if !IN_STG_CODE
+extern Capability MainCapability;
+#endif
+
+#endif /* RTS_THREADS_H */

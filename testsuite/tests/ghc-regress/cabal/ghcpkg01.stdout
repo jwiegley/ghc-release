@@ -1,8 +1,9 @@
 local01.package.conf:
+
 Reading package info from "test.pkg" ... done.
-Writing new package config file... done.
 name: testpkg
 version: 1.2.3.4
+id: testpkg-1.2.3.4-XXX
 license: BSD3
 copyright: (c) The Univsersity of Glasgow 2004
 maintainer: glasgow-haskell-users@haskell.org
@@ -30,8 +31,10 @@ framework-dirs:
 frameworks:
 haddock-interfaces:
 haddock-html:
+
 name: testpkg
 version: 1.2.3.4
+id: testpkg-1.2.3.4-XXX
 license: BSD3
 copyright: (c) The Univsersity of Glasgow 2004
 maintainer: glasgow-haskell-users@haskell.org
@@ -59,13 +62,16 @@ framework-dirs:
 frameworks:
 haddock-interfaces:
 haddock-html:
+
 import-dirs: /usr/local/lib/testpkg "c:/Program Files/testpkg"
 Reading package info from "test2.pkg" ... done.
-Writing new package config file... done.
 local01.package.conf:
-    testpkg-1.2.3.4, (testpkg-2.0)
+    testpkg-1.2.3.4
+    (testpkg-2.0)
+
 name: testpkg
 version: 2.0
+id: testpkg-2.0-XXX
 license: BSD3
 copyright: (c) The Univsersity of Glasgow 2004
 maintainer: glasgow-haskell-users@haskell.org
@@ -93,8 +99,42 @@ framework-dirs:
 frameworks:
 haddock-interfaces:
 haddock-html:
+
+name: testpkg
+version: 2.0
+id: testpkg-2.0-XXX
+license: BSD3
+copyright: (c) The Univsersity of Glasgow 2004
+maintainer: glasgow-haskell-users@haskell.org
+stability: unstable
+homepage: http://www.haskell.org/ghc
+package-url: http://www.haskell.org/ghc
+description: A Test Package (new version)
+category: none
+author: simonmar@microsoft.com
+exposed: False
+exposed-modules: A
+hidden-modules: B C.D C.E
+import-dirs: /usr/local/lib/testpkg "c:/Program Files/testpkg"
+library-dirs: /usr/local/lib/testpkg "c:/Program Files/testpkg"
+hs-libraries: testpkg-2.0
+extra-libraries:
+extra-ghci-libraries:
+include-dirs:
+includes:
+depends:
+hugs-options:
+cc-options:
+ld-options:
+framework-dirs:
+frameworks:
+haddock-interfaces:
+haddock-html:
+
+---
 name: testpkg
 version: 1.2.3.4
+id: testpkg-1.2.3.4-XXX
 license: BSD3
 copyright: (c) The Univsersity of Glasgow 2004
 maintainer: glasgow-haskell-users@haskell.org
@@ -122,51 +162,17 @@ framework-dirs:
 frameworks:
 haddock-interfaces:
 haddock-html:
----
-name: testpkg
+
 version: 2.0
-license: BSD3
-copyright: (c) The Univsersity of Glasgow 2004
-maintainer: glasgow-haskell-users@haskell.org
-stability: unstable
-homepage: http://www.haskell.org/ghc
-package-url: http://www.haskell.org/ghc
-description: A Test Package (new version)
-category: none
-author: simonmar@microsoft.com
-exposed: False
-exposed-modules: A
-hidden-modules: B C.D C.E
-import-dirs: /usr/local/lib/testpkg "c:/Program Files/testpkg"
-library-dirs: /usr/local/lib/testpkg "c:/Program Files/testpkg"
-hs-libraries: testpkg-2.0
-extra-libraries:
-extra-ghci-libraries:
-include-dirs:
-includes:
-depends:
-hugs-options:
-cc-options:
-ld-options:
-framework-dirs:
-frameworks:
-haddock-interfaces:
-haddock-html:
 version: 1.2.3.4
-version: 2.0
-Writing new package config file... done.
 exposed: False
-Writing new package config file... done.
 exposed: True
-Writing new package config file... done.
 exposed: False
 exposed: False
 Reading package info from "test3.pkg" ... done.
-Writing new package config file... done.
-Writing new package config file... done.
-Writing new package config file... done.
 name: testpkg
 version: 1.2.3.4
+id: testpkg-1.2.3.4-XXX
 license: BSD3
 copyright: (c) The Univsersity of Glasgow 2004
 maintainer: glasgow-haskell-users@haskell.org
@@ -194,6 +200,7 @@ framework-dirs:
 frameworks:
 haddock-interfaces:
 haddock-html:
-Writing new package config file... done.
+
 local01.package.conf:
+
 Reading package info from "test3.pkg" ... done.

@@ -13,7 +13,7 @@ module TcHsSyn (
 	mkHsConApp, mkHsDictLet, mkHsApp,
 	hsLitType, hsLPatType, hsPatType, 
 	mkHsAppTy, mkSimpleHsAlt,
-	nlHsIntLit, mkVanillaTuplePat, 
+	nlHsIntLit, 
 	shortCutLit, hsOverLitName,
 	
 	mkArbitraryType,	-- Put this elsewhere?
@@ -35,7 +35,6 @@ import Id
 
 import TcRnMonad
 import PrelNames
-import Type
 import TcType
 import TcMType
 import TysPrim
@@ -49,7 +48,6 @@ import VarEnv
 import Literal
 import BasicTypes
 import Maybes
-import Unique
 import SrcLoc
 import Util
 import Bag
@@ -82,11 +80,6 @@ mappM = mapM
 Note: If @hsLPatType@ doesn't bear a strong resemblance to @exprType@,
 then something is wrong.
 \begin{code}
-mkVanillaTuplePat :: [OutPat Id] -> Boxity -> Pat Id
--- A vanilla tuple pattern simply gets its type from its sub-patterns
-mkVanillaTuplePat pats box 
-  = TuplePat pats box (mkTupleTy box (length pats) (map hsLPatType pats))
-
 hsLPatType :: OutPat Id -> Type
 hsLPatType (L _ pat) = hsPatType pat
 
@@ -492,6 +485,13 @@ zonkExpr env (SectionR op expr)
     zonkLExpr env expr		`thenM` \ new_expr ->
     returnM (SectionR new_op new_expr)
 
+zonkExpr env (ExplicitTuple tup_args boxed)
+  = do { new_tup_args <- mapM zonk_tup_arg tup_args
+       ; return (ExplicitTuple new_tup_args boxed) }
+  where
+    zonk_tup_arg (Present e) = do { e' <- zonkLExpr env e; return (Present e') }
+    zonk_tup_arg (Missing t) = do { t' <- zonkTcTypeToType env t; return (Missing t') }
+
 zonkExpr env (HsCase expr ms)
   = zonkLExpr env expr    	`thenM` \ new_expr ->
     zonkMatchGroup env ms	`thenM` \ new_ms ->
@@ -524,10 +524,6 @@ zonkExpr env (ExplicitPArr ty exprs)
   = zonkTcTypeToType env ty	`thenM` \ new_ty ->
     zonkLExprs env exprs	`thenM` \ new_exprs ->
     returnM (ExplicitPArr new_ty new_exprs)
-
-zonkExpr env (ExplicitTuple exprs boxed)
-  = zonkLExprs env exprs  	`thenM` \ new_exprs ->
-    returnM (ExplicitTuple new_exprs boxed)
 
 zonkExpr env (RecordCon data_con con_expr rbinds)
   = do	{ new_con_expr <- zonkExpr env con_expr
@@ -690,21 +686,26 @@ zonkStmt env (ParStmt stmts_w_bndrs)
     zonk_branch (stmts, bndrs) = zonkStmts env stmts	`thenM` \ (env1, new_stmts) ->
 				 returnM (new_stmts, zonkIdOccs env1 bndrs)
 
-zonkStmt env (RecStmt segStmts lvs rvs rets binds)
-  = zonkIdBndrs env rvs		`thenM` \ new_rvs ->
-    let
-	env1 = extendZonkEnv env new_rvs
-    in
-    zonkStmts env1 segStmts	`thenM` \ (env2, new_segStmts) ->
+zonkStmt env (RecStmt { recS_stmts = segStmts, recS_later_ids = lvs, recS_rec_ids = rvs
+                      , recS_ret_fn = ret_id, recS_mfix_fn = mfix_id, recS_bind_fn = bind_id
+                      , recS_rec_rets = rets, recS_dicts = binds })
+  = do { new_rvs <- zonkIdBndrs env rvs
+       ; new_lvs <- zonkIdBndrs env lvs
+       ; new_ret_id  <- zonkExpr env ret_id
+       ; new_mfix_id <- zonkExpr env mfix_id
+       ; new_bind_id <- zonkExpr env bind_id
+       ; let env1 = extendZonkEnv env new_rvs
+       ; (env2, new_segStmts) <- zonkStmts env1 segStmts
 	-- Zonk the ret-expressions in an envt that 
 	-- has the polymorphic bindings in the envt
-    mapM (zonkExpr env2) rets	`thenM` \ new_rets ->
-    let
-	new_lvs = zonkIdOccs env2 lvs
-	env3 = extendZonkEnv env new_lvs	-- Only the lvs are needed
-    in
-    zonkRecMonoBinds env3 binds	`thenM` \ (env4, new_binds) ->
-    returnM (env4, RecStmt new_segStmts new_lvs new_rvs new_rets new_binds)
+       ; new_rets <- mapM (zonkExpr env2) rets
+       ; let env3 = extendZonkEnv env new_lvs	-- Only the lvs are needed
+       ; (env4, new_binds) <- zonkRecMonoBinds env3 binds
+       ; return (env4,
+                 RecStmt { recS_stmts = new_segStmts, recS_later_ids = new_lvs
+                         , recS_rec_ids = new_rvs, recS_ret_fn = new_ret_id
+                         , recS_mfix_fn = new_mfix_id, recS_bind_fn = new_bind_id
+                         , recS_rec_rets = new_rets, recS_dicts = new_binds }) }
 
 zonkStmt env (ExprStmt expr then_op ty)
   = zonkLExpr env expr		`thenM` \ new_expr ->
@@ -766,9 +767,9 @@ zonkRecFields env (HsRecFields flds dd)
 	; return (HsRecFields flds' dd) }
   where
     zonk_rbind fld
-      = do { new_expr <- zonkLExpr env (hsRecFieldArg fld)
-	   ; return (fld { hsRecFieldArg = new_expr }) }
-	-- Field selectors have declared types; hence no zonking
+      = do { new_id   <- wrapLocM (zonkIdBndr env) (hsRecFieldId fld)
+	   ; new_expr <- zonkLExpr env (hsRecFieldArg fld)
+	   ; return (fld { hsRecFieldId = new_id, hsRecFieldArg = new_expr }) }
 
 -------------------------------------------------------------------------
 mapIPNameTc :: (a -> TcM b) -> IPName a -> TcM (IPName b)
@@ -1072,7 +1073,7 @@ mkArbitraryType warn tv
   , isLiftedTypeKind res			--    Horrible hack to make less use 
   = return (mkTyConApp tup_tc [])		--    of mkAnyPrimTyCon
   | otherwise
-  = do	{ warn (getSrcSpan tv) msg
+  = do	{ _ <- warn (getSrcSpan tv) msg
 	; return (mkTyConApp (mkAnyPrimTyCon (getUnique tv) kind) []) }
 		-- Same name as the tyvar, apart from making it start with a colon (sigh)
 		-- I dread to think what will happen if this gets out into an 

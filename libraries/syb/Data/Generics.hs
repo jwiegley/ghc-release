@@ -2,7 +2,7 @@
 -- |
 -- Module      :  Data.Generics
 -- Copyright   :  (c) The University of Glasgow, CWI 2001--2004
--- License     :  BSD-style (see the file libraries/base/LICENSE)
+-- License     :  BSD-style (see the LICENSE file)
 -- 
 -- Maintainer  :  generics@haskell.org
 -- Stability   :  experimental
@@ -36,8 +36,6 @@ module Data.Generics (
  ) where
 
 ------------------------------------------------------------------------------
-
-import Prelude  -- So that 'make depend' works
 
 #ifdef __GLASGOW_HASKELL__
 #ifndef __HADDOCK__

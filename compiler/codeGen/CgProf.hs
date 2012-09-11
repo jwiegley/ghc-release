@@ -1,10 +1,3 @@
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 -----------------------------------------------------------------------------
 --
 -- Code generation for profiling
@@ -31,9 +24,9 @@ module CgProf (
   ) where
 
 #include "HsVersions.h"
-#include "MachDeps.h"
+#include "../includes/MachDeps.h"
  -- For WORD_SIZE_IN_BITS only.
-#include "../includes/Constants.h"
+#include "../includes/rts/Constants.h"
 	-- For LDV_CREATE_MASK, LDV_STATE_USE
 	-- which are StgWords
 #include "../includes/DerivedConstants.h"
@@ -45,7 +38,6 @@ import CgMonad
 import SMRep
 
 import Cmm
-import MachOp
 import CmmUtils
 import CLabel
 
@@ -58,7 +50,6 @@ import FastString
 import Constants	-- Lots of field offsets
 import Outputable
 
-import Data.Maybe
 import Data.Char
 import Control.Monad
 
@@ -70,7 +61,7 @@ import Control.Monad
 
 -- Expression representing the current cost centre stack
 curCCS :: CmmExpr
-curCCS = CmmLoad curCCSAddr wordRep
+curCCS = CmmLoad curCCSAddr bWord
 
 -- Address of current CCS variable, for storing into
 curCCSAddr :: CmmExpr
@@ -84,7 +75,7 @@ mkCCostCentreStack ccs = CmmLabel (mkCCSLabel ccs)
 
 costCentreFrom :: CmmExpr 	-- A closure pointer
 	       -> CmmExpr	-- The cost centre from that closure
-costCentreFrom cl = CmmLoad (cmmOffsetB cl oFFSET_StgHeader_ccs) wordRep
+costCentreFrom cl = CmmLoad (cmmOffsetB cl oFFSET_StgHeader_ccs) bWord
 
 staticProfHdr :: CostCentreStack -> [CmmLit]
 -- The profiling header words in a static closure
@@ -122,13 +113,13 @@ profAlloc words ccs
   = ifProfiling $
     stmtC (addToMemE alloc_rep
 		(cmmOffsetB ccs oFFSET_CostCentreStack_mem_alloc)
-	  	(CmmMachOp (MO_U_Conv wordRep alloc_rep) $
+	  	(CmmMachOp (MO_UU_Conv wordWidth alloc_rep) $
 		  [CmmMachOp mo_wordSub [words, 
 					 CmmLit (mkIntCLit profHdrSize)]]))
 		-- subtract the "profiling overhead", which is the
 		-- profiling header in a closure.
  where 
-	alloc_rep =  REP_CostCentreStack_mem_alloc
+   alloc_rep = typeWidth REP_CostCentreStack_mem_alloc
 
 -- ----------------------------------------------------------------------
 -- Setting the cost centre in a new closure
@@ -162,7 +153,7 @@ emitCCS ccs = push_em (ccsExpr ccs') (reverse cc's)
 
 	push_em ccs [] = return ccs
 	push_em ccs (cc:rest) = do
-  	  tmp <- newNonPtrTemp wordRep -- TODO FIXME NOW
+  	  tmp <- newTemp bWord -- TODO FIXME NOW
 	  pushCostCentre tmp ccs cc
 	  push_em (CmmReg (CmmLocal tmp)) rest
 
@@ -177,8 +168,8 @@ isBox :: StgExpr -> Bool
 -- one introduced by boxHigherOrderArgs for profiling,
 -- so we charge it to "OVERHEAD".
 -- This looks like a GROSS HACK to me --SDM
-isBox (StgApp fun []) = True
-isBox other	      = False
+isBox (StgApp _ []) = True
+isBox _             = False
 
 
 -- -----------------------------------------------------------------------
@@ -209,6 +200,7 @@ enterCostCentre closure_info ccs body
     ASSERT2(not (noCCSAttached ccs), ppr (closureName closure_info) <+> ppr ccs)
     enter_cost_centre closure_info ccs body
 
+enter_cost_centre :: ClosureInfo -> CostCentreStack -> StgExpr -> Code
 enter_cost_centre closure_info ccs body
   | isSubsumedCCS ccs
   = ASSERT(isToplevClosure closure_info)
@@ -267,9 +259,11 @@ enterCostCentreThunk closure =
   ifProfiling $ do 
     stmtC $ CmmStore curCCSAddr (costCentreFrom closure)
 
-enter_ccs_fun stack = emitRtsCall (sLit "EnterFunCCS") [CmmKinded stack PtrHint] False
+enter_ccs_fun :: CmmExpr -> Code
+enter_ccs_fun stack = emitRtsCall (sLit "EnterFunCCS") [CmmHinted stack AddrHint] False
 			-- ToDo: vols
 
+enter_ccs_fsub :: Code
 enter_ccs_fsub = enteringPAP 0
 
 -- When entering a PAP, EnterFunCCS is called by both the PAP entry
@@ -280,7 +274,7 @@ enter_ccs_fsub = enteringPAP 0
 enteringPAP :: Integer -> Code
 enteringPAP n
   = stmtC (CmmStore (CmmLit (CmmLabel (mkRtsDataLabel (sLit "entering_PAP"))))
-		(CmmLit (CmmInt n cIntRep)))
+		(CmmLit (CmmInt n cIntWidth)))
 
 ifProfiling :: Code -> Code
 ifProfiling code
@@ -339,8 +333,10 @@ emitCostCentreStackDecl ccs
   }
   | otherwise = pprPanic "emitCostCentreStackDecl" (ppr ccs)
 
+zero :: CmmLit
 zero = mkIntCLit 0
-zero64 = CmmInt 0 I64
+zero64 :: CmmLit
+zero64 = CmmInt 0 W64
 
 sizeof_ccs_words :: Int
 sizeof_ccs_words 
@@ -359,12 +355,12 @@ sizeof_ccs_words
 
 emitRegisterCC :: CostCentre -> Code
 emitRegisterCC cc = do
-  { tmp <- newNonPtrTemp cIntRep
+  { tmp <- newTemp cInt
   ; stmtsC [
      CmmStore (cmmOffsetB cc_lit oFFSET_CostCentre_link)
-		 (CmmLoad cC_LIST wordRep),
+		 (CmmLoad cC_LIST bWord),
      CmmStore cC_LIST cc_lit,
-     CmmAssign (CmmLocal tmp) (CmmLoad cC_ID cIntRep),
+     CmmAssign (CmmLocal tmp) (CmmLoad cC_ID cInt),
      CmmStore (cmmOffsetB cc_lit oFFSET_CostCentre_ccID) (CmmReg (CmmLocal tmp)),
      CmmStore cC_ID (cmmRegOffB (CmmLocal tmp) 1)
    ]
@@ -378,12 +374,12 @@ emitRegisterCC cc = do
 
 emitRegisterCCS :: CostCentreStack -> Code
 emitRegisterCCS ccs = do
-  { tmp <- newNonPtrTemp cIntRep
+  { tmp <- newTemp cInt
   ; stmtsC [
      CmmStore (cmmOffsetB ccs_lit oFFSET_CostCentreStack_prevStack) 
-			(CmmLoad cCS_LIST wordRep),
+			(CmmLoad cCS_LIST bWord),
      CmmStore cCS_LIST ccs_lit,
-     CmmAssign (CmmLocal tmp) (CmmLoad cCS_ID cIntRep),
+     CmmAssign (CmmLocal tmp) (CmmLoad cCS_ID cInt),
      CmmStore (cmmOffsetB ccs_lit oFFSET_CostCentreStack_ccsID) (CmmReg (CmmLocal tmp)),
      CmmStore cCS_ID (cmmRegOffB (CmmLocal tmp) 1)
    ]
@@ -392,9 +388,11 @@ emitRegisterCCS ccs = do
     ccs_lit = CmmLit (CmmLabel (mkCCSLabel ccs))
 
 
+cC_LIST, cC_ID :: CmmExpr
 cC_LIST = CmmLit (CmmLabel (mkRtsDataLabel (sLit "CC_LIST")))
 cC_ID   = CmmLit (CmmLabel (mkRtsDataLabel (sLit "CC_ID")))
 
+cCS_LIST, cCS_ID :: CmmExpr
 cCS_LIST = CmmLit (CmmLabel (mkRtsDataLabel (sLit "CCS_LIST")))
 cCS_ID   = CmmLit (CmmLabel (mkRtsDataLabel (sLit "CCS_ID")))
 
@@ -405,7 +403,7 @@ emitSetCCC :: CostCentre -> Code
 emitSetCCC cc
   | not opt_SccProfilingOn = nopC
   | otherwise = do 
-    tmp <- newNonPtrTemp wordRep -- TODO FIXME NOW
+    tmp <- newTemp bWord -- TODO FIXME NOW
     ASSERT( sccAbleCostCentre cc )
       pushCostCentre tmp curCCS cc
     stmtC (CmmStore curCCSAddr (CmmReg (CmmLocal tmp)))
@@ -414,14 +412,14 @@ emitSetCCC cc
 
 pushCostCentre :: LocalReg -> CmmExpr -> CostCentre -> Code
 pushCostCentre result ccs cc
-  = emitRtsCallWithResult result PtrHint
-	(sLit "PushCostCentre") [CmmKinded ccs PtrHint, 
-				CmmKinded (CmmLit (mkCCostCentre cc)) PtrHint]
+  = emitRtsCallWithResult result AddrHint
+	(sLit "PushCostCentre") [CmmHinted ccs AddrHint, 
+				 CmmHinted (CmmLit (mkCCostCentre cc)) AddrHint]
         False
 
 bumpSccCount :: CmmExpr -> CmmStmt
 bumpSccCount ccs
-  = addToMem REP_CostCentreStack_scc_count
+  = addToMem (typeWidth REP_CostCentreStack_scc_count)
 	 (cmmOffsetB ccs oFFSET_CostCentreStack_scc_count) 1
 
 -----------------------------------------------------------------------------
@@ -475,13 +473,13 @@ ldvEnter cl_ptr
   where
         -- don't forget to substract node's tag
     ldv_wd = ldvWord cl_ptr
-    new_ldv_wd = cmmOrWord (cmmAndWord (CmmLoad ldv_wd wordRep)
+    new_ldv_wd = cmmOrWord (cmmAndWord (CmmLoad ldv_wd bWord)
 				       (CmmLit (mkWordCLit lDV_CREATE_MASK)))
 		 (cmmOrWord loadEra (CmmLit (mkWordCLit lDV_STATE_USE)))
 
 loadEra :: CmmExpr 
-loadEra = CmmMachOp (MO_U_Conv cIntRep wordRep)
-	  [CmmLoad (mkLblExpr (mkRtsDataLabel (sLit "era"))) cIntRep]
+loadEra = CmmMachOp (MO_UU_Conv cIntWidth wordWidth)
+	  [CmmLoad (mkLblExpr (mkRtsDataLabel $ sLit("era"))) cInt]
 
 ldvWord :: CmmExpr -> CmmExpr
 -- Takes the address of a closure, and returns 
@@ -489,10 +487,16 @@ ldvWord :: CmmExpr -> CmmExpr
 ldvWord closure_ptr = cmmOffsetB closure_ptr oFFSET_StgHeader_ldvw
 
 -- LDV constants, from ghc/includes/Constants.h
-lDV_SHIFT	 = (LDV_SHIFT :: Int)
---lDV_STATE_MASK   = (LDV_STATE_MASK :: StgWord)
-lDV_CREATE_MASK  = (LDV_CREATE_MASK :: StgWord)
---lDV_LAST_MASK    = (LDV_LAST_MASK :: StgWord)
-lDV_STATE_CREATE = (LDV_STATE_CREATE :: StgWord)
-lDV_STATE_USE    = (LDV_STATE_USE :: StgWord)
+lDV_SHIFT :: Int
+lDV_SHIFT = LDV_SHIFT
+--lDV_STATE_MASK :: StgWord
+--lDV_STATE_MASK   = LDV_STATE_MASK
+lDV_CREATE_MASK :: StgWord
+lDV_CREATE_MASK  = LDV_CREATE_MASK
+--lDV_LAST_MASK    :: StgWord
+--lDV_LAST_MASK    = LDV_LAST_MASK
+lDV_STATE_CREATE :: StgWord
+lDV_STATE_CREATE = LDV_STATE_CREATE
+lDV_STATE_USE    :: StgWord
+lDV_STATE_USE    = LDV_STATE_USE
 

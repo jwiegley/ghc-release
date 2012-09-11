@@ -2,7 +2,7 @@
 -- |
 -- Module      :  Data.Generics.Text
 -- Copyright   :  (c) The University of Glasgow, CWI 2001--2003
--- License     :  BSD-style (see the file libraries/base/LICENSE)
+-- License     :  BSD-style (see the LICENSE file)
 -- 
 -- Maintainer  :  generics@haskell.org
 -- Stability   :  experimental
@@ -27,7 +27,6 @@ module Data.Generics.Text (
 import Prelude
 #endif
 import Control.Monad
-import Data.Maybe
 import Data.Data
 import Data.Generics.Aliases
 import Text.ParserCombinators.ReadP
@@ -88,7 +87,7 @@ gread = readP_to_S gread'
       do
                 -- Drop "  (  "
          skipSpaces                     -- Discard leading space
-         char '('                       -- Parse '('
+         _ <- char '('                  -- Parse '('
          skipSpaces                     -- Discard following space
 
                 -- Do the real work
@@ -98,7 +97,7 @@ gread = readP_to_S gread'
 
                 -- Drop "  )  "
          skipSpaces                     -- Discard leading space
-         char ')'                       -- Parse ')'
+         _ <- char ')'                  -- Parse ')'
          skipSpaces                     -- Discard following space
 
          return x

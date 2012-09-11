@@ -18,21 +18,17 @@ module CoreUtils (
 	-- * Constructing expressions
 	mkInlineMe, mkSCC, mkCoerce, mkCoerceI,
 	bindNonRec, needsCaseBinding,
-	mkIfThenElse, mkAltExpr, mkPiType, mkPiTypes,
+	mkAltExpr, mkPiType, mkPiTypes,
 
 	-- * Taking expressions apart
 	findDefault, findAlt, isDefaultAlt, mergeAlts, trimConArgs,
 
 	-- * Properties of expressions
 	exprType, coreAltType, coreAltsType,
-	exprIsDupable, exprIsTrivial, exprIsCheap, 
+	exprIsDupable, exprIsTrivial, exprIsCheap, exprIsExpandable,
 	exprIsHNF,exprOkForSpeculation, exprIsBig, 
 	exprIsConApp_maybe, exprIsBottom,
 	rhsIsStatic,
-
-	-- * Arity and eta expansion
-	manifestArity, exprArity, 
-	exprEtaExpandArity, etaExpand, 
 
 	-- * Expression and bindings size
 	coreBindsSize, exprSize,
@@ -41,7 +37,7 @@ module CoreUtils (
 	hashExpr,
 
 	-- * Equality
-	cheapEqExpr, tcEqExpr, tcEqExprX,
+	cheapEqExpr, 
 
 	-- * Manipulating data constructors and types
 	applyTypeToArgs, applyTypeToArg,
@@ -51,12 +47,11 @@ module CoreUtils (
 #include "HsVersions.h"
 
 import CoreSyn
-import CoreFVs
 import PprCore
 import Var
 import SrcLoc
-import VarSet
 import VarEnv
+import VarSet
 import Name
 import Module
 #if mingw32_TARGET_OS
@@ -71,20 +66,15 @@ import NewDemand
 import Type
 import Coercion
 import TyCon
-import TysWiredIn
 import CostCentre
-import BasicTypes
 import Unique
 import Outputable
-import DynFlags
 import TysPrim
 import FastString
 import Maybes
 import Util
 import Data.Word
 import Data.Bits
-
-import GHC.Exts		-- For `xori` 
 \end{code}
 
 
@@ -114,13 +104,43 @@ exprType other = pprTrace "exprType" (pprCoreExpr other) alphaTy
 
 coreAltType :: CoreAlt -> Type
 -- ^ Returns the type of the alternatives right hand side
-coreAltType (_,_,rhs) = exprType rhs
+coreAltType (_,bs,rhs) 
+  | any bad_binder bs = expandTypeSynonyms ty
+  | otherwise         = ty    -- Note [Existential variables and silly type synonyms]
+  where
+    ty           = exprType rhs
+    free_tvs     = tyVarsOfType ty
+    bad_binder b = isTyVar b && b `elemVarSet` free_tvs
 
 coreAltsType :: [CoreAlt] -> Type
 -- ^ Returns the type of the first alternative, which should be the same as for all alternatives
 coreAltsType (alt:_) = coreAltType alt
 coreAltsType []	     = panic "corAltsType"
 \end{code}
+
+Note [Existential variables and silly type synonyms]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+	data T = forall a. T (Funny a)
+	type Funny a = Bool
+	f :: T -> Bool
+	f (T x) = x
+
+Now, the type of 'x' is (Funny a), where 'a' is existentially quantified.
+That means that 'exprType' and 'coreAltsType' may give a result that *appears*
+to mention an out-of-scope type variable.  See Trac #3409 for a more real-world
+example.
+
+Various possibilities suggest themselves:
+
+ - Ignore the problem, and make Lint not complain about such variables
+
+ - Expand all type synonyms (or at least all those that discard arguments)
+      This is tricky, because at least for top-level things we want to
+      retain the type the user originally specified.
+
+ - Expand synonyms on the fly, when the problem arises. That is what
+   we are doing here.  It's not too expensive, I think.
 
 \begin{code}
 mkPiType  :: Var   -> Type -> Type
@@ -209,8 +229,9 @@ But it hardly seems worth it, so I don't bother.
 -- | Wraps the given expression in an inlining hint unless the expression
 -- is trivial in some sense, so that doing so would usually hurt us
 mkInlineMe :: CoreExpr -> CoreExpr
-mkInlineMe (Var v) = Var v
-mkInlineMe e	   = Note InlineMe e
+mkInlineMe e@(Var _)           = e
+mkInlineMe e@(Note InlineMe _) = e
+mkInlineMe e	               = Note InlineMe e
 \end{code}
 
 \begin{code}
@@ -299,13 +320,6 @@ mkAltExpr (LitAlt lit) [] []
   = Lit lit
 mkAltExpr (LitAlt _) _ _ = panic "mkAltExpr LitAlt"
 mkAltExpr DEFAULT _ _ = panic "mkAltExpr DEFAULT"
-
-mkIfThenElse :: CoreExpr -> CoreExpr -> CoreExpr -> CoreExpr
-mkIfThenElse guard then_expr else_expr
--- Not going to be refining, so okay to take the type of the "then" clause
-  = Case guard (mkWildId boolTy) (exprType then_expr) 
-	 [ (DataAlt falseDataCon, [], else_expr),	-- Increasing order of tag!
-    	   (DataAlt trueDataCon,  [], then_expr) ]
 \end{code}
 
 
@@ -324,26 +338,27 @@ findDefault :: [CoreAlt] -> ([CoreAlt], Maybe CoreExpr)
 findDefault ((DEFAULT,args,rhs) : alts) = ASSERT( null args ) (alts, Just rhs)
 findDefault alts			= 		      (alts, Nothing)
 
--- | Find the case alternative corresponding to a particular 
--- constructor: panics if no such constructor exists
-findAlt :: AltCon -> [CoreAlt] -> CoreAlt
-findAlt con alts
-  = case alts of
-	(deflt@(DEFAULT,_,_):alts) -> go alts deflt
-        _                          -> go alts panic_deflt
-  where
-    panic_deflt = pprPanic "Missing alternative" (ppr con $$ vcat (map ppr alts))
-
-    go []	 	       deflt = deflt
-    go (alt@(con1,_,_) : alts) deflt
-      =	case con `cmpAltCon` con1 of
-	  LT -> deflt	-- Missed it already; the alts are in increasing order
-	  EQ -> alt
-	  GT -> ASSERT( not (con1 == DEFAULT) ) go alts deflt
-
 isDefaultAlt :: CoreAlt -> Bool
 isDefaultAlt (DEFAULT, _, _) = True
 isDefaultAlt _               = False
+
+
+-- | Find the case alternative corresponding to a particular 
+-- constructor: panics if no such constructor exists
+findAlt :: AltCon -> [CoreAlt] -> Maybe CoreAlt
+    -- A "Nothing" result *is* legitmiate
+    -- See Note [Unreachable code]
+findAlt con alts
+  = case alts of
+	(deflt@(DEFAULT,_,_):alts) -> go alts (Just deflt)
+        _                          -> go alts Nothing
+  where
+    go []	 	      deflt = deflt
+    go (alt@(con1,_,_) : alts) deflt
+      =	case con `cmpAltCon` con1 of
+	  LT -> deflt	-- Missed it already; the alts are in increasing order
+	  EQ -> Just alt
+	  GT -> ASSERT( not (con1 == DEFAULT) ) go alts deflt
 
 ---------------------------------
 mergeAlts :: [CoreAlt] -> [CoreAlt] -> [CoreAlt]
@@ -373,6 +388,36 @@ trimConArgs (LitAlt _)   args = ASSERT( null args ) []
 trimConArgs (DataAlt dc) args = dropList (dataConUnivTyVars dc) args
 \end{code}
 
+Note [Unreachable code]
+~~~~~~~~~~~~~~~~~~~~~~~
+It is possible (although unusual) for GHC to find a case expression
+that cannot match.  For example: 
+
+     data Col = Red | Green | Blue
+     x = Red
+     f v = case x of 
+              Red -> ...
+	      _ -> ...(case x of { Green -> e1; Blue -> e2 })...
+
+Suppose that for some silly reason, x isn't substituted in the case
+expression.  (Perhaps there's a NOINLINE on it, or profiling SCC stuff
+gets in the way; cf Trac #3118.)  Then the full-lazines pass might produce
+this
+
+     x = Red
+     lvl = case x of { Green -> e1; Blue -> e2 })
+     f v = case x of 
+             Red -> ...
+	     _ -> ...lvl...
+
+Now if x gets inlined, we won't be able to find a matching alternative
+for 'Red'.  That's because 'lvl' is unreachable.  So rather than crashing
+we generate (error "Inaccessible alternative").
+
+Similar things can happen (augmented by GADTs) when the Simplifier
+filters down the matching alternatives in Simplify.rebuildCase.
+
+
 
 %************************************************************************
 %*									*
@@ -385,6 +430,8 @@ trimConArgs (DataAlt dc) args = dropList (dataConUnivTyVars dc) args
 		applications.  Note that primop Ids aren't considered
 		trivial unless 
 
+Note [Variable are trivial]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 There used to be a gruesome test for (hasNoBinding v) in the
 Var case:
 	exprIsTrivial (Var v) | hasNoBinding v = idArity v == 0
@@ -396,19 +443,22 @@ completely un-applied primops and foreign-call Ids are sufficiently
 rare that I plan to allow them to be duplicated and put up with
 saturating them.
 
-SCC notes.  We do not treat (_scc_ "foo" x) as trivial, because 
-  a) it really generates code, (and a heap object when it's 
-     a function arg) to capture the cost centre
-  b) see the note [SCC-and-exprIsTrivial] in Simplify.simplLazyBind
+Note [SCCs are trivial]
+~~~~~~~~~~~~~~~~~~~~~~~
+We used not to treat (_scc_ "foo" x) as trivial, because it really
+generates code, (and a heap object when it's a function arg) to
+capture the cost centre.  However, the profiling system discounts the
+allocation costs for such "boxing thunks" whereas the extra costs of
+*not* inlining otherwise-trivial bindings can be high, and are hard to
+discount.
 
 \begin{code}
 exprIsTrivial :: CoreExpr -> Bool
-exprIsTrivial (Var _)          = True        -- See notes above
+exprIsTrivial (Var _)          = True        -- See Note [Variables are trivial]
 exprIsTrivial (Type _)         = True
 exprIsTrivial (Lit lit)        = litIsTrivial lit
 exprIsTrivial (App e arg)      = not (isRuntimeArg arg) && exprIsTrivial e
-exprIsTrivial (Note (SCC _) _) = False       -- See notes above
-exprIsTrivial (Note _       e) = exprIsTrivial e
+exprIsTrivial (Note _       e) = exprIsTrivial e  -- See Note [SCCs are trivial]
 exprIsTrivial (Cast e _)       = exprIsTrivial e
 exprIsTrivial (Lam b body)     = not (isRuntimeVar b) && exprIsTrivial body
 exprIsTrivial _                = False
@@ -476,27 +526,28 @@ Notice that a variable is considered 'cheap': we can push it inside a lambda,
 because sharing will make sure it is only evaluated once.
 
 \begin{code}
-exprIsCheap :: CoreExpr -> Bool
-exprIsCheap (Lit _)           = True
-exprIsCheap (Type _)          = True
-exprIsCheap (Var _)           = True
-exprIsCheap (Note InlineMe _) = True
-exprIsCheap (Note _ e)        = exprIsCheap e
-exprIsCheap (Cast e _)        = exprIsCheap e
-exprIsCheap (Lam x e)         = isRuntimeVar x || exprIsCheap e
-exprIsCheap (Case e _ _ alts) = exprIsCheap e && 
-				and [exprIsCheap rhs | (_,_,rhs) <- alts]
+exprIsCheap' :: (Id -> Bool) -> CoreExpr -> Bool
+exprIsCheap' _          (Lit _)           = True
+exprIsCheap' _          (Type _)          = True
+exprIsCheap' _          (Var _)           = True
+exprIsCheap' _          (Note InlineMe _) = True
+exprIsCheap' is_conlike (Note _ e)        = exprIsCheap' is_conlike e
+exprIsCheap' is_conlike (Cast e _)        = exprIsCheap' is_conlike e
+exprIsCheap' is_conlike (Lam x e)         = isRuntimeVar x
+                                            || exprIsCheap' is_conlike e
+exprIsCheap' is_conlike (Case e _ _ alts) = exprIsCheap' is_conlike e && 
+				and [exprIsCheap' is_conlike rhs | (_,_,rhs) <- alts]
 	-- Experimentally, treat (case x of ...) as cheap
 	-- (and case __coerce x etc.)
 	-- This improves arities of overloaded functions where
 	-- there is only dictionary selection (no construction) involved
-exprIsCheap (Let (NonRec x _) e)  
-      | isUnLiftedType (idType x) = exprIsCheap e
+exprIsCheap' is_conlike (Let (NonRec x _) e)  
+      | isUnLiftedType (idType x) = exprIsCheap' is_conlike e
       | otherwise		  = False
 	-- strict lets always have cheap right hand sides,
 	-- and do no allocation.
 
-exprIsCheap other_expr 	-- Applications and variables
+exprIsCheap' is_conlike other_expr 	-- Applications and variables
   = go other_expr []
   where
 	-- Accumulate value arguments, then decide
@@ -506,13 +557,13 @@ exprIsCheap other_expr 	-- Applications and variables
     go (Var _) [] = True	-- Just a type application of a variable
 				-- (f t1 t2 t3) counts as WHNF
     go (Var f) args
- 	= case globalIdDetails f of
-		RecordSelId {} -> go_sel args
-		ClassOpId _    -> go_sel args
-		PrimOpId op    -> go_primop op args
+ 	= case idDetails f of
+		RecSelId {}  -> go_sel args
+		ClassOpId _  -> go_sel args
+		PrimOpId op  -> go_primop op args
 
-		DataConWorkId _ -> go_pap args
-		_ | length args < idArity f -> go_pap args
+		_ | is_conlike f -> go_pap args
+                  | length args < idArity f -> go_pap args
 
 	        _ -> isBottomingId f
 			-- Application of a function which
@@ -529,18 +580,24 @@ exprIsCheap other_expr 	-- Applications and variables
  	-- We'll put up with one constructor application, but not dozens
  	
     --------------
-    go_primop op args = primOpIsCheap op && all exprIsCheap args
+    go_primop op args = primOpIsCheap op && all (exprIsCheap' is_conlike) args
  	-- In principle we should worry about primops
  	-- that return a type variable, since the result
  	-- might be applied to something, but I'm not going
  	-- to bother to check the number of args
  
     --------------
-    go_sel [arg] = exprIsCheap arg	-- I'm experimenting with making record selection
+    go_sel [arg] = exprIsCheap' is_conlike arg	-- I'm experimenting with making record selection
     go_sel _     = False		-- look cheap, so we will substitute it inside a
  					-- lambda.  Particularly for dictionary field selection.
   		-- BUT: Take care with (sel d x)!  The (sel d) might be cheap, but
   		--	there's no guarantee that (sel d x) will be too.  Hence (n_val_args == 1)
+
+exprIsCheap :: CoreExpr -> Bool
+exprIsCheap = exprIsCheap' isDataConWorkId
+
+exprIsExpandable :: CoreExpr -> Bool
+exprIsExpandable = exprIsCheap' isConLikeId
 \end{code}
 
 \begin{code}
@@ -586,7 +643,7 @@ exprOkForSpeculation (Note _ e)  = exprOkForSpeculation e
 exprOkForSpeculation (Cast e _)  = exprOkForSpeculation e
 exprOkForSpeculation other_expr
   = case collectArgs other_expr of
-	(Var f, args) -> spec_ok (globalIdDetails f) args
+	(Var f, args) -> spec_ok (idDetails f) args
         _             -> False
  
   where
@@ -619,8 +676,6 @@ isDivOp IntQuotOp	 = True
 isDivOp IntRemOp	 = True
 isDivOp WordQuotOp	 = True
 isDivOp WordRemOp	 = True
-isDivOp IntegerQuotRemOp = True
-isDivOp IntegerDivModOp  = True
 isDivOp FloatDivOp       = True
 isDivOp DoubleDivOp      = True
 isDivOp _                = False
@@ -870,7 +925,7 @@ exprIsConApp_maybe (Cast expr co)
 
     in
     ASSERT( length univ_args == tc_arity )
-    ASSERT( from_tc == dataConTyCon dc )
+    ASSERT2( from_tc == dataConTyCon dc, ppr expr $$ ppr co $$ ppr from_tc $$ ppr dc $$ ppr (dataConTyCon dc) )
     ASSERT( and (zipWith coreEqType [t | Type t <- univ_args] from_tc_arg_tys) )
     ASSERT( all isTypeArg (univ_args ++ ex_args) )
     ASSERT2( equalLength val_args arg_tys, ppr dc $$ ppr dc_tyvars $$ ppr dc_ex_tyvars $$ ppr arg_tys $$ ppr dc_args $$ ppr univ_args $$ ppr ex_args $$ ppr val_args $$ ppr arg_tys  )
@@ -905,423 +960,20 @@ exprIsConApp_maybe expr = analyse (collectArgs expr)
   where
     analyse (Var fun, args)
 	| Just con <- isDataConWorkId_maybe fun,
-	  args `lengthAtLeast` dataConRepArity con
-		-- Might be > because the arity excludes type args
+	  count isValArg args == dataConRepArity con
 	= Just (con,args)
 
 	-- Look through unfoldings, but only cheap ones, because
 	-- we are effectively duplicating the unfolding
     analyse (Var fun, [])
 	| let unf = idUnfolding fun,
-	  isCheapUnfolding unf
+	  isExpandableUnfolding unf
 	= exprIsConApp_maybe (unfoldingTemplate unf)
 
     analyse _ = Nothing
 \end{code}
 
 
-
-%************************************************************************
-%*									*
-\subsection{Eta reduction and expansion}
-%*									*
-%************************************************************************
-
-\begin{code}
--- ^ The Arity returned is the number of value args the 
--- expression can be applied to without doing much work
-exprEtaExpandArity :: DynFlags -> CoreExpr -> Arity
-{- 
-exprEtaExpandArity is used when eta expanding
-	e  ==>  \xy -> e x y
-
-It returns 1 (or more) to:
-	case x of p -> \s -> ...
-because for I/O ish things we really want to get that \s to the top.
-We are prepared to evaluate x each time round the loop in order to get that
-
-It's all a bit more subtle than it looks:
-
-1.  One-shot lambdas
-
-Consider one-shot lambdas
-		let x = expensive in \y z -> E
-We want this to have arity 2 if the \y-abstraction is a 1-shot lambda
-Hence the ArityType returned by arityType
-
-2.  The state-transformer hack
-
-The one-shot lambda special cause is particularly important/useful for
-IO state transformers, where we often get
-	let x = E in \ s -> ...
-
-and the \s is a real-world state token abstraction.  Such abstractions
-are almost invariably 1-shot, so we want to pull the \s out, past the
-let x=E, even if E is expensive.  So we treat state-token lambdas as 
-one-shot even if they aren't really.  The hack is in Id.isOneShotBndr.
-
-3.  Dealing with bottom
-
-Consider also 
-	f = \x -> error "foo"
-Here, arity 1 is fine.  But if it is
-	f = \x -> case x of 
-			True  -> error "foo"
-			False -> \y -> x+y
-then we want to get arity 2.  Tecnically, this isn't quite right, because
-	(f True) `seq` 1
-should diverge, but it'll converge if we eta-expand f.  Nevertheless, we
-do so; it improves some programs significantly, and increasing convergence
-isn't a bad thing.  Hence the ABot/ATop in ArityType.
-
-Actually, the situation is worse.  Consider
-	f = \x -> case x of
-			True  -> \y -> x+y
-			False -> \y -> x-y
-Can we eta-expand here?  At first the answer looks like "yes of course", but
-consider
-	(f bot) `seq` 1
-This should diverge!  But if we eta-expand, it won't.   Again, we ignore this
-"problem", because being scrupulous would lose an important transformation for
-many programs.
-
-
-4. Newtypes
-
-Non-recursive newtypes are transparent, and should not get in the way.
-We do (currently) eta-expand recursive newtypes too.  So if we have, say
-
-	newtype T = MkT ([T] -> Int)
-
-Suppose we have
-	e = coerce T f
-where f has arity 1.  Then: etaExpandArity e = 1; 
-that is, etaExpandArity looks through the coerce.
-
-When we eta-expand e to arity 1: eta_expand 1 e T
-we want to get: 		 coerce T (\x::[T] -> (coerce ([T]->Int) e) x)
-
-HOWEVER, note that if you use coerce bogusly you can ge
-	coerce Int negate
-And since negate has arity 2, you might try to eta expand.  But you can't
-decopose Int to a function type.   Hence the final case in eta_expand.
--}
-
-
-exprEtaExpandArity dflags e = arityDepth (arityType dflags e)
-
--- A limited sort of function type
-data ArityType = AFun Bool ArityType	-- True <=> one-shot
-	       | ATop			-- Know nothing
-	       | ABot			-- Diverges
-
-arityDepth :: ArityType -> Arity
-arityDepth (AFun _ ty) = 1 + arityDepth ty
-arityDepth _           = 0
-
-andArityType :: ArityType -> ArityType -> ArityType
-andArityType ABot           at2           = at2
-andArityType ATop           _             = ATop
-andArityType (AFun t1 at1)  (AFun t2 at2) = AFun (t1 && t2) (andArityType at1 at2)
-andArityType at1            at2           = andArityType at2 at1
-
-arityType :: DynFlags -> CoreExpr -> ArityType
-	-- (go1 e) = [b1,..,bn]
-	-- means expression can be rewritten \x_b1 -> ... \x_bn -> body
-	-- where bi is True <=> the lambda is one-shot
-
-arityType dflags (Note _ e) = arityType dflags e
---	Not needed any more: etaExpand is cleverer
--- removed: | ok_note n = arityType dflags e
--- removed: | otherwise = ATop
-
-arityType dflags (Cast e _) = arityType dflags e
-
-arityType _ (Var v)
-  = mk (idArity v) (arg_tys (idType v))
-  where
-    mk :: Arity -> [Type] -> ArityType
-	-- The argument types are only to steer the "state hack"
-	-- Consider case x of
-	--		True  -> foo
-	--		False -> \(s:RealWorld) -> e
-	-- where foo has arity 1.  Then we want the state hack to
-	-- apply to foo too, so we can eta expand the case.
-    mk 0 tys | isBottomingId v                   = ABot
-             | (ty:_) <- tys, isStateHackType ty = AFun True ATop
-             | otherwise                         = ATop
-    mk n (ty:tys) = AFun (isStateHackType ty) (mk (n-1) tys)
-    mk n []       = AFun False		      (mk (n-1) [])
-
-    arg_tys :: Type -> [Type]	-- Ignore for-alls
-    arg_tys ty 
-	| Just (_, ty')  <- splitForAllTy_maybe ty = arg_tys ty'
-	| Just (arg,res) <- splitFunTy_maybe ty    = arg : arg_tys res
-	| otherwise				   = []
-
-	-- Lambdas; increase arity
-arityType dflags (Lam x e)
-  | isId x    = AFun (isOneShotBndr x) (arityType dflags e)
-  | otherwise = arityType dflags e
-
-	-- Applications; decrease arity
-arityType dflags (App f (Type _)) = arityType dflags f
-arityType dflags (App f a)
-   = case arityType dflags f of
-	ABot -> ABot	-- If function diverges, ignore argument
-	ATop -> ATop	-- No no info about function
-	AFun _ xs
-		| exprIsCheap a -> xs
-		| otherwise	-> ATop
-							   
-	-- Case/Let; keep arity if either the expression is cheap
-	-- or it's a 1-shot lambda
-	-- The former is not really right for Haskell
-	--	f x = case x of { (a,b) -> \y. e }
-	--  ===>
-	--	f x y = case x of { (a,b) -> e }
-	-- The difference is observable using 'seq'
-arityType dflags (Case scrut _ _ alts)
-  = case foldr1 andArityType [arityType dflags rhs | (_,_,rhs) <- alts] of
-        xs | exprIsCheap scrut     -> xs
-        AFun one_shot _ | one_shot -> AFun True ATop
-        _                          -> ATop
-
-arityType dflags (Let b e) 
-  = case arityType dflags e of
-        xs              | cheap_bind b -> xs
-        AFun one_shot _ | one_shot     -> AFun True ATop
-        _                              -> ATop
-  where
-    cheap_bind (NonRec b e) = is_cheap (b,e)
-    cheap_bind (Rec prs)    = all is_cheap prs
-    is_cheap (b,e) = (dopt Opt_DictsCheap dflags && isDictId b)
-		   || exprIsCheap e
-	-- If the experimental -fdicts-cheap flag is on, we eta-expand through
-	-- dictionary bindings.  This improves arities. Thereby, it also
-	-- means that full laziness is less prone to floating out the
-	-- application of a function to its dictionary arguments, which
-	-- can thereby lose opportunities for fusion.  Example:
-	-- 	foo :: Ord a => a -> ...
-	--	foo = /\a \(d:Ord a). let d' = ...d... in \(x:a). ....
-	--		-- So foo has arity 1
-	--
-	--	f = \x. foo dInt $ bar x
-	--
-	-- The (foo DInt) is floated out, and makes ineffective a RULE 
-	--	foo (bar x) = ...
-	--
-	-- One could go further and make exprIsCheap reply True to any
-	-- dictionary-typed expression, but that's more work.
-
-arityType _ _ = ATop
-
-{- NOT NEEDED ANY MORE: etaExpand is cleverer
-ok_note InlineMe = False
-ok_note other    = True
-    -- Notice that we do not look through __inline_me__
-    -- This may seem surprising, but consider
-    --		f = _inline_me (\x -> e)
-    -- We DO NOT want to eta expand this to
-    --		f = \x -> (_inline_me (\x -> e)) x
-    -- because the _inline_me gets dropped now it is applied, 
-    -- giving just
-    --		f = \x -> e
-    -- A Bad Idea
--}
-\end{code}
-
-
-\begin{code}
--- | @etaExpand n us e ty@ returns an expression with
--- the same meaning as @e@, but with arity @n@.
---
--- Given:
---
--- > e' = etaExpand n us e ty
---
--- We should have that:
---
--- > ty = exprType e = exprType e'
-etaExpand :: Arity	  	-- ^ Result should have this number of value args
-	  -> [Unique]           -- ^ Uniques to assign to the new binders
-	  -> CoreExpr	        -- ^ Expression to expand
-	  -> Type               -- ^ Type of expression to expand
-	  -> CoreExpr
--- Note that SCCs are not treated specially.  If we have
---	etaExpand 2 (\x -> scc "foo" e)
---	= (\xy -> (scc "foo" e) y)
--- So the costs of evaluating 'e' (not 'e y') are attributed to "foo"
-
-etaExpand n us expr ty
-  | manifestArity expr >= n = expr		-- The no-op case
-  | otherwise 		    
-  = eta_expand n us expr ty
-
--- manifestArity sees how many leading value lambdas there are
-manifestArity :: CoreExpr -> Arity
-manifestArity (Lam v e) | isId v    = 1 + manifestArity e
-			| otherwise = manifestArity e
-manifestArity (Note _ e)	    = manifestArity e
-manifestArity (Cast e _)            = manifestArity e
-manifestArity _                     = 0
-
--- etaExpand deals with for-alls. For example:
---		etaExpand 1 E
--- where  E :: forall a. a -> a
--- would return
---	(/\b. \y::a -> E b y)
---
--- It deals with coerces too, though they are now rare
--- so perhaps the extra code isn't worth it
-eta_expand :: Int -> [Unique] -> CoreExpr -> Type -> CoreExpr
-
-eta_expand n _ expr ty
-  | n == 0 && 
-    -- The ILX code generator requires eta expansion for type arguments
-    -- too, but alas the 'n' doesn't tell us how many of them there 
-    -- may be.  So we eagerly eta expand any big lambdas, and just
-    -- cross our fingers about possible loss of sharing in the ILX case. 
-    -- The Right Thing is probably to make 'arity' include
-    -- type variables throughout the compiler.  (ToDo.)
-    not (isForAllTy ty)	
-    -- Saturated, so nothing to do
-  = expr
-
-	-- Short cut for the case where there already
-	-- is a lambda; no point in gratuitously adding more
-eta_expand n us (Lam v body) ty
-  | isTyVar v
-  = Lam v (eta_expand n us body (applyTy ty (mkTyVarTy v)))
-
-  | otherwise
-  = Lam v (eta_expand (n-1) us body (funResultTy ty))
-
--- We used to have a special case that stepped inside Coerces here,
--- thus:  eta_expand n us (Note note@(Coerce _ ty) e) _  
---		= Note note (eta_expand n us e ty)
--- BUT this led to an infinite loop
--- Example: 	newtype T = MkT (Int -> Int)
---	eta_expand 1 (coerce (Int->Int) e)
---	--> coerce (Int->Int) (eta_expand 1 T e)
---		by the bogus eqn
---	--> coerce (Int->Int) (coerce T 
---		(\x::Int -> eta_expand 1 (coerce (Int->Int) e)))
---		by the splitNewType_maybe case below
---	and round we go
-
-eta_expand n us expr ty
-  = ASSERT2 (exprType expr `coreEqType` ty, ppr (exprType expr) $$ ppr ty)
-    case splitForAllTy_maybe ty of { 
- 	  Just (tv,ty') -> 
-
-              Lam lam_tv (eta_expand n us2 (App expr (Type (mkTyVarTy lam_tv))) (substTyWith [tv] [mkTyVarTy lam_tv] ty'))
-                  where 
-                    lam_tv = setVarName tv (mkSysTvName uniq (fsLit "etaT"))
-			-- Using tv as a base retains its tyvar/covar-ness
-                    (uniq:us2) = us 
- 	; Nothing ->
-  
-    	case splitFunTy_maybe ty of {
- 	  Just (arg_ty, res_ty) -> Lam arg1 (eta_expand (n-1) us2 (App expr (Var arg1)) res_ty)
-				where
-				   arg1	      = mkSysLocal (fsLit "eta") uniq arg_ty
- 				   (uniq:us2) = us
-				   
-	; Nothing ->
-
-		-- Given this:
-		-- 	newtype T = MkT ([T] -> Int)
-		-- Consider eta-expanding this
-		--  	eta_expand 1 e T
-		-- We want to get
-		--	coerce T (\x::[T] -> (coerce ([T]->Int) e) x)
-
-    	case splitNewTypeRepCo_maybe ty of {
- 	  Just(ty1,co) -> mkCoerce (mkSymCoercion co) 
-				   (eta_expand n us (mkCoerce co expr) ty1) ;
- 	  Nothing  -> 
-
-	-- We have an expression of arity > 0, but its type isn't a function
-	-- This *can* legitmately happen: e.g. 	coerce Int (\x. x)
-	-- Essentially the programmer is playing fast and loose with types
-	-- (Happy does this a lot).  So we simply decline to eta-expand.
-	-- Otherwise we'd end up with an explicit lambda having a non-function type
-	expr
-    	}}}
-\end{code}
-
-exprArity is a cheap-and-cheerful version of exprEtaExpandArity.
-It tells how many things the expression can be applied to before doing
-any work.  It doesn't look inside cases, lets, etc.  The idea is that
-exprEtaExpandArity will do the hard work, leaving something that's easy
-for exprArity to grapple with.  In particular, Simplify uses exprArity to
-compute the ArityInfo for the Id. 
-
-Originally I thought that it was enough just to look for top-level lambdas, but
-it isn't.  I've seen this
-
-	foo = PrelBase.timesInt
-
-We want foo to get arity 2 even though the eta-expander will leave it
-unchanged, in the expectation that it'll be inlined.  But occasionally it
-isn't, because foo is blacklisted (used in a rule).  
-
-Similarly, see the ok_note check in exprEtaExpandArity.  So 
-	f = __inline_me (\x -> e)
-won't be eta-expanded.
-
-And in any case it seems more robust to have exprArity be a bit more intelligent.
-But note that 	(\x y z -> f x y z)
-should have arity 3, regardless of f's arity.
-
-Note [exprArity invariant]
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-exprArity has the following invariant:
-	(exprArity e) = n, then manifestArity (etaExpand e n) = n
-
-That is, if exprArity says "the arity is n" then etaExpand really can get
-"n" manifest lambdas to the top.
-
-Why is this important?  Because 
-  - In TidyPgm we use exprArity to fix the *final arity* of 
-    each top-level Id, and in
-  - In CorePrep we use etaExpand on each rhs, so that the visible lambdas
-    actually match that arity, which in turn means
-    that the StgRhs has the right number of lambdas
-
-An alternative would be to do the eta-expansion in TidyPgm, at least
-for top-level bindings, in which case we would not need the trim_arity
-in exprArity.  That is a less local change, so I'm going to leave it for today!
-
-
-\begin{code}
--- | An approximate, fast, version of 'exprEtaExpandArity'
-exprArity :: CoreExpr -> Arity
-exprArity e = go e
-  where
-    go (Var v) 	       	         = idArity v
-    go (Lam x e) | isId x    	 = go e + 1
-    		 | otherwise 	 = go e
-    go (Note _ e)                = go e
-    go (Cast e co)               = trim_arity (go e) 0 (snd (coercionKind co))
-    go (App e (Type _))          = go e
-    go (App f a) | exprIsCheap a = (go f - 1) `max` 0
-    	-- NB: exprIsCheap a!  
-    	--	f (fac x) does not have arity 2, 
-    	-- 	even if f has arity 3!
-    	-- NB: `max 0`!  (\x y -> f x) has arity 2, even if f is
-    	--		 unknown, hence arity 0
-    go _		       	   = 0
-
-	-- Note [exprArity invariant]
-    trim_arity n a ty
-	| n==a					      = a
-	| Just (_, ty') <- splitForAllTy_maybe ty     = trim_arity n a     ty'
-	| Just (_, ty') <- splitFunTy_maybe ty        = trim_arity n (a+1) ty'
-	| Just (ty',_)  <- splitNewTypeRepCo_maybe ty = trim_arity n a     ty'
-	| otherwise				      = a
-\end{code}
 
 %************************************************************************
 %*									*
@@ -1359,53 +1011,6 @@ exprIsBig (Cast e _)   = exprIsBig e	-- Hopefully coercions are not too big!
 exprIsBig _            = True
 \end{code}
 
-
-\begin{code}
-tcEqExpr :: CoreExpr -> CoreExpr -> Bool
--- ^ A kind of shallow equality used in rule matching, so does 
--- /not/ look through newtypes or predicate types
-
-tcEqExpr e1 e2 = tcEqExprX rn_env e1 e2
-  where
-    rn_env = mkRnEnv2 (mkInScopeSet (exprFreeVars e1 `unionVarSet` exprFreeVars e2))
-
-tcEqExprX :: RnEnv2 -> CoreExpr -> CoreExpr -> Bool
-tcEqExprX env (Var v1)	   (Var v2)	= rnOccL env v1 == rnOccR env v2
-tcEqExprX _   (Lit lit1)   (Lit lit2)   = lit1 == lit2
-tcEqExprX env (App f1 a1)  (App f2 a2)  = tcEqExprX env f1 f2 && tcEqExprX env a1 a2
-tcEqExprX env (Lam v1 e1)  (Lam v2 e2)  = tcEqExprX (rnBndr2 env v1 v2) e1 e2
-tcEqExprX env (Let (NonRec v1 r1) e1)
-	      (Let (NonRec v2 r2) e2)   = tcEqExprX env r1 r2 
-				       && tcEqExprX (rnBndr2 env v1 v2) e1 e2
-tcEqExprX env (Let (Rec ps1) e1)
-	      (Let (Rec ps2) e2)        =  equalLength ps1 ps2
-				        && and (zipWith eq_rhs ps1 ps2)
-				        && tcEqExprX env' e1 e2
-				     where
-				       env' = foldl2 rn_bndr2 env ps2 ps2
-				       rn_bndr2 env (b1,_) (b2,_) = rnBndr2 env b1 b2
-				       eq_rhs       (_,r1) (_,r2) = tcEqExprX env' r1 r2
-tcEqExprX env (Case e1 v1 t1 a1)
-	      (Case e2 v2 t2 a2)     =  tcEqExprX env e1 e2
-                                     && tcEqTypeX env t1 t2                      
-				     && equalLength a1 a2
-				     && and (zipWith (eq_alt env') a1 a2)
-				     where
-				       env' = rnBndr2 env v1 v2
-
-tcEqExprX env (Note n1 e1)  (Note n2 e2)  = eq_note env n1 n2 && tcEqExprX env e1 e2
-tcEqExprX env (Cast e1 co1) (Cast e2 co2) = tcEqTypeX env co1 co2 && tcEqExprX env e1 e2
-tcEqExprX env (Type t1)     (Type t2)     = tcEqTypeX env t1 t2
-tcEqExprX _   _             _             = False
-
-eq_alt :: RnEnv2 -> CoreAlt -> CoreAlt -> Bool
-eq_alt env (c1,vs1,r1) (c2,vs2,r2) = c1==c2 && tcEqExprX (rnBndrs2 env vs1  vs2) r1 r2
-
-eq_note :: RnEnv2 -> Note -> Note -> Bool
-eq_note _ (SCC cc1)     (SCC cc2)      = cc1 == cc2
-eq_note _ (CoreNote s1) (CoreNote s2)  = s1 == s2
-eq_note _ _             _              = False
-\end{code}
 
 
 %************************************************************************

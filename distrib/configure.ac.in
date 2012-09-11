@@ -1,0 +1,87 @@
+dnl
+dnl Binary distribution configure script
+dnl
+#!/bin/sh
+#
+
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [@ProjectVersion@], [glasgow-haskell-bugs@haskell.org], [ghc])
+
+FP_FIND_ROOT
+
+BootingFromHc=NO
+AC_SUBST(BootingFromHc)
+
+dnl--------------------------------------------------------------------
+dnl * Deal with arguments telling us gmp is somewhere odd
+dnl--------------------------------------------------------------------
+
+FP_ARG_GMP
+
+GMP_INCLUDE_DIRS=
+GMP_LIB_DIRS=
+if test "x$gmp_libraries" != "xNONE"; then
+  LDFLAGS="-L$gmp_libraries $LDFLAGS"
+  GMP_LIB_DIRS=$gmp_libraries
+fi
+if test "x$gmp_includes" != "xNONE"; then
+  CPPFLAGS="-I$gmp_includes $CPPFLAGS"
+  GMP_INCLUDE_DIRS=$gmp_includes
+fi
+AC_SUBST(GMP_INCLUDE_DIRS)
+AC_SUBST(GMP_LIB_DIRS)
+
+#
+dnl ** Check Perl installation **
+#
+AC_PATH_PROG(PerlCmd,perl)
+if test -z "$PerlCmd"; then
+   echo "You must install perl before you can continue"
+   echo "Perhaps it is already installed, but not in your PATH?"
+   exit 1
+fi
+FPTOOLS_SHEBANG_PERL
+
+#
+dnl ** figure out how to do a BSD-ish install **
+#
+AC_PROG_INSTALL
+
+#
+dnl ** how to do symlinks **
+#
+AC_PROG_LN_S()
+
+#
+dnl ** how to invoke `ar' and `ranlib'
+#
+FP_PROG_AR_NEEDS_RANLIB
+
+#
+dnl ** Find the path to sed **
+#
+AC_PATH_PROG(SedCmd,sed)
+
+#
+dnl ** How to invoke cpp directly **
+#
+FP_HAVE_GCC
+AC_PROG_CPP
+
+#
+dnl ** Check gcc version and flags we need to pass it **
+#
+FP_GCC_EXTRA_FLAGS
+
+CONF_CC_OPTS="@CONF_CC_OPTS@"
+CONF_LD_OPTS="@CONF_LD_OPTS@"
+AC_SUBST(CONF_CC_OPTS)
+AC_SUBST(CONF_LD_OPTS)
+
+#
+AC_CONFIG_FILES(extra-gcc-opts mk/config.mk mk/install.mk)
+AC_OUTPUT
+
+echo "****************************************************"
+echo "Configuration done, ready to 'make install'"
+echo "(see README and INSTALL files for more info.)"
+echo "****************************************************"

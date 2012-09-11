@@ -4,43 +4,30 @@
 \section[WorkWrap]{Worker/wrapper-generating back-end of strictness analyser}
 
 \begin{code}
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module WorkWrap ( wwTopBinds, mkWrapper ) where
-
-#include "HsVersions.h"
 
 import CoreSyn
 import CoreUnfold	( certainlyWillInline )
-import CoreLint		( showPass, endPass )
-import CoreUtils	( exprType, exprIsHNF, exprArity )
-import Id		( Id, idType, isOneShotLambda, 
-			  setIdNewStrictness, mkWorkerId,
-			  setIdWorkerInfo, setInlinePragma,
-			  setIdArity, idInfo )
-import MkId		( lazyIdKey, lazyIdUnfolding )
+import CoreUtils	( exprType, exprIsHNF, mkInlineMe )
+import CoreArity	( exprArity )
+import Var
+import Id
 import Type		( Type )
-import IdInfo		( WorkerInfo(..), arityInfo,
-			  newDemandInfo, newStrictnessInfo, unfoldingInfo, inlinePragInfo
-			)
+import IdInfo
 import NewDemand        ( Demand(..), StrictSig(..), DmdType(..), DmdResult(..), 
 			  Demands(..), mkTopDmdType, isBotRes, returnsCPR, topSig, isAbsent
 			)
 import UniqSupply
-import Unique		( hasKey )
-import BasicTypes	( RecFlag(..), isNonRec, isNeverActive )
+import BasicTypes	( RecFlag(..), isNonRec, isNeverActive,
+                          Activation, inlinePragmaActivation )
 import VarEnv		( isEmptyVarEnv )
 import Maybes		( orElse )
-import DynFlags
 import WwLib
 import Util		( lengthIs, notNull )
 import Outputable
 import MonadUtils
+
+#include "HsVersions.h"
 \end{code}
 
 We take Core bindings whose binders have:
@@ -70,30 +57,9 @@ info for exported values).
 \end{enumerate}
 
 \begin{code}
+wwTopBinds :: UniqSupply -> [CoreBind] -> [CoreBind]
 
-wwTopBinds :: DynFlags 
-	   -> UniqSupply
-	   -> [CoreBind]
-	   -> IO [CoreBind]
-
-wwTopBinds dflags us binds
-  = do {
-	showPass dflags "Worker Wrapper binds";
-
-	-- Create worker/wrappers, and mark binders with their
-	-- "strictness info" [which encodes their worker/wrapper-ness]
-	let { binds' = workersAndWrappers us binds };
-
-	endPass dflags "Worker Wrapper binds" 
-		Opt_D_dump_worker_wrapper binds'
-    }
-\end{code}
-
-
-\begin{code}
-workersAndWrappers :: UniqSupply -> [CoreBind] -> [CoreBind]
-
-workersAndWrappers us top_binds
+wwTopBinds us top_binds
   = initUs_ us $ do
     top_binds' <- mapM wwBind top_binds
     return (concat top_binds')
@@ -136,16 +102,11 @@ matching by looking for strict arguments of the correct type.
 \begin{code}
 wwExpr :: CoreExpr -> UniqSM CoreExpr
 
-wwExpr e@(Type _)             = return e
-wwExpr e@(Lit _)              = return e
-wwExpr e@(Note InlineMe expr) = return e
+wwExpr e@(Type {})         = return e
+wwExpr e@(Lit  {})         = return e
+wwExpr e@(Var  {})         = return e
+wwExpr e@(Note InlineMe _) = return e
 	-- Don't w/w inside InlineMe's
-
-wwExpr e@(Var v)
-  | v `hasKey` lazyIdKey = return lazyIdUnfolding
-  | otherwise            = return e
-	-- HACK alert: Inline 'lazy' after strictness analysis
-	-- (but not inside InlineMe's)
 
 wwExpr (Lam binder expr)
   = Lam binder <$> wwExpr expr
@@ -191,7 +152,7 @@ reason), then we don't w-w it.
 
 The only reason this is monadised is for the unique supply.
 
-Note [Don't w/w inline things]
+Note [Don't w/w inline things (a)]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 It's very important to refrain from w/w-ing an INLINE function
 If we do so by mistake we transform
@@ -212,6 +173,21 @@ Notice that we refrain from w/w'ing an INLINE function even if it is
 in a recursive group.  It might not be the loop breaker.  (We could
 test for loop-breaker-hood, but I'm not sure that ever matters.)
 
+Note [Don't w/w inline things (b)]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In general, therefore, we refrain from w/w-ing *small* functions,
+because they'll inline anyway.  But we must take care: it may look
+small now, but get to be big later after other inling has happened.
+So we take the precaution of adding an INLINE pragma to any such
+functions.  
+
+I made this change when I observed a big function at the end of
+compilation with a useful strictness signature but no w-w.  When 
+I measured it on nofib, it didn't make much difference; just a few
+percent improved allocation on one benchmark (bspt/Euclid.space).  
+But nothing got worse.
+
+
 \begin{code}
 tryWW	:: RecFlag
 	-> Id				-- The fn binder
@@ -223,21 +199,22 @@ tryWW	:: RecFlag
 					-- if two, then a worker and a
 					-- wrapper.
 tryWW is_rec fn_id rhs
-  |  -- isNonRec is_rec && 	-- Now omitted: see Note [Don't w/w inline things]
-     certainlyWillInline unfolding
-
-  || isNeverActive inline_prag
+  | isNeverActive inline_act
 	-- No point in worker/wrappering if the thing is never inlined!
 	-- Because the no-inline prag will prevent the wrapper ever
 	-- being inlined at a call site. 
-  = return [ (new_fn_id, rhs) ]
+	-- 
+	-- Furthermore, don't even expose strictness info
+  = return [ (fn_id, rhs) ]
 
   | is_thunk && worthSplittingThunk maybe_fn_dmd res_info
   = ASSERT2( isNonRec is_rec, ppr new_fn_id )	-- The thunk must be non-recursive
+    checkSize new_fn_id rhs $ 
     splitThunk new_fn_id rhs
 
   | is_fun && worthSplittingFun wrap_dmds res_info
-  = splitFun new_fn_id fn_info wrap_dmds res_info inline_prag rhs
+  = checkSize new_fn_id rhs $
+    splitFun new_fn_id fn_info wrap_dmds res_info inline_act rhs
 
   | otherwise
   = return [ (new_fn_id, rhs) ]
@@ -245,8 +222,7 @@ tryWW is_rec fn_id rhs
   where
     fn_info   	 = idInfo fn_id
     maybe_fn_dmd = newDemandInfo fn_info
-    unfolding 	 = unfoldingInfo fn_info
-    inline_prag  = inlinePragInfo fn_info
+    inline_act   = inlinePragmaActivation (inlinePragInfo fn_info)
 
 	-- In practice it always will have a strictness 
 	-- signature, even if it's a uninformative one
@@ -266,7 +242,19 @@ tryWW is_rec fn_id rhs
     is_thunk  = not is_fun && not (exprIsHNF rhs)
 
 ---------------------
-splitFun fn_id fn_info wrap_dmds res_info inline_prag rhs
+checkSize :: Id -> CoreExpr -> UniqSM [(Id,CoreExpr)] -> UniqSM [(Id,CoreExpr)]
+ -- See Note [Don't w/w inline things (a) and (b)]
+checkSize fn_id rhs thing_inside
+  | certainlyWillInline unfolding = return [ (fn_id, mkInlineMe rhs) ]
+		-- Note [Don't w/w inline things (b)]
+  | otherwise = thing_inside
+  where
+    unfolding = idUnfolding fn_id
+
+---------------------
+splitFun :: Id -> IdInfo -> [Demand] -> DmdResult -> Activation -> Expr Var
+         -> UniqSM [(Id, CoreExpr)]
+splitFun fn_id fn_info wrap_dmds res_info inline_act rhs
   = WARN( not (wrap_dmds `lengthIs` arity), ppr fn_id <+> (ppr arity $$ ppr wrap_dmds $$ ppr res_info) ) 
     (do {
 	-- The arity should match the signature
@@ -275,13 +263,14 @@ splitFun fn_id fn_info wrap_dmds res_info inline_prag rhs
     ; let
 	work_rhs = work_fn rhs
 	work_id  = mkWorkerId work_uniq fn_id (exprType work_rhs) 
-			`setInlinePragma` inline_prag
-				-- Any inline pragma (which sets when inlining is active) 
+			`setInlineActivation` inline_act
+				-- Any inline activation (which sets when inlining is active) 
 				-- on the original function is duplicated on the worker and wrapper
 				-- It *matters* that the pragma stays on the wrapper
 				-- It seems sensible to have it on the worker too, although we
 				-- can't think of a compelling reason. (In ptic, INLINE things are 
-				-- not w/wd)
+				-- not w/wd). However, the RuleMatchInfo is not transferred since
+                                -- it does not make sense for workers to be constructorlike.
 			`setIdNewStrictness` StrictSig (mkTopDmdType work_demands work_res_info)
 				-- Even though we may not be at top level, 
 				-- it's ok to give it an empty DmdEnv
@@ -310,11 +299,12 @@ splitFun fn_id fn_info wrap_dmds res_info inline_prag rhs
 -- make the wrapper and worker have corresponding one-shot arguments too.
 -- Otherwise we spuriously float stuff out of case-expression join points,
 -- which is very annoying.
+get_one_shots :: Expr Var -> [Bool]
 get_one_shots (Lam b e)
-  | isIdVar b = isOneShotLambda b : get_one_shots e
+  | isId b    = isOneShotLambda b : get_one_shots e
   | otherwise = get_one_shots e
 get_one_shots (Note _ e) = get_one_shots e
-get_one_shots other	 = noOneShotInfo
+get_one_shots _    	 = noOneShotInfo
 \end{code}
 
 Thunk splitting
@@ -360,6 +350,7 @@ then the splitting will go deeper too.
 --		 I# y -> let x = I# y in x }
 -- See comments above. Is it not beautifully short?
 
+splitThunk :: Var -> Expr Var -> UniqSM [(Var, Expr Var)]
 splitThunk fn_id rhs = do
     (_, wrap_fn, work_fn) <- mkWWstr [fn_id]
     return [ (fn_id, Let (NonRec fn_id rhs) (wrap_fn (work_fn (Var fn_id)))) ]
@@ -382,8 +373,8 @@ worthSplittingFun ds res
   -- See Note [Worker-wrapper for bottoming functions]
   where
     worth_it Abs	      = True	-- Absent arg
-    worth_it (Eval (Prod ds)) = True	-- Product arg to evaluate
-    worth_it other	      = False
+    worth_it (Eval (Prod _)) = True	-- Product arg to evaluate
+    worth_it _    	      = False
 
 worthSplittingThunk :: Maybe Demand	-- Demand on the thunk
 		    -> DmdResult	-- CPR info for the thunk
@@ -393,7 +384,7 @@ worthSplittingThunk maybe_dmd res
   where
 	-- Split if the thing is unpacked
     worth_it (Just (Eval (Prod ds))) = not (all isAbsent ds)
-    worth_it other	   	     = False
+    worth_it _    	   	     = False
 \end{code}
 
 Note [Worker-wrapper for bottoming functions]
@@ -429,5 +420,6 @@ mkWrapper fun_ty (StrictSig (DmdType _ demands res_info)) = do
     (_, wrap_fn, _) <- mkWwBodies fun_ty demands res_info noOneShotInfo
     return wrap_fn
 
+noOneShotInfo :: [Bool]
 noOneShotInfo = repeat False
 \end{code}

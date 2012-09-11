@@ -14,7 +14,7 @@ module DsMonad (
 
 	newLocalName,
 	duplicateLocalDs, newSysLocalDs, newSysLocalsDs, newUniqueId,
-	newFailLocalDs,
+	newFailLocalDs, newPredVarDs,
 	getSrcSpanDs, putSrcSpanDs,
 	getModuleDs,
 	newUnique, 
@@ -53,10 +53,8 @@ import Type
 import UniqSupply
 import Name
 import NameEnv
-import OccName
 import DynFlags
 import ErrUtils
-import MonadUtils
 import FastString
 
 import Data.IORef
@@ -224,12 +222,22 @@ newUniqueId :: Name -> Type -> DsM Id
 newUniqueId id = mkSysLocalM (occNameFS (nameOccName id))
 
 duplicateLocalDs :: Id -> DsM Id
-duplicateLocalDs old_local = do
-    uniq <- newUnique
-    return (setIdUnique old_local uniq)
+duplicateLocalDs old_local 
+  = do	{ uniq <- newUnique
+	; return (setIdUnique old_local uniq) }
 
+newPredVarDs :: PredType -> DsM Var
+newPredVarDs pred
+ | isEqPred pred
+ = do { uniq <- newUnique; 
+      ; let name = mkSystemName uniq (mkOccNameFS tcName (fsLit "co_pv"))
+	    kind = mkPredTy pred
+      ; return (mkCoVar name kind) }
+ | otherwise
+ = newSysLocalDs (mkPredTy pred)
+ 
 newSysLocalDs, newFailLocalDs :: Type -> DsM Id
-newSysLocalDs = mkSysLocalM (fsLit "ds")
+newSysLocalDs  = mkSysLocalM (fsLit "ds")
 newFailLocalDs = mkSysLocalM (fsLit "fail")
 
 newSysLocalsDs :: [Type] -> DsM [Id]

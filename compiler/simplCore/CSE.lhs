@@ -10,14 +10,12 @@ module CSE (
 
 #include "HsVersions.h"
 
-import DynFlags	( DynFlag(..), DynFlags )
-import Id		( Id, idType, idInlinePragma )
+import Id		( Id, idType, idInlineActivation, zapIdOccInfo )
 import CoreUtils	( hashExpr, cheapEqExpr, exprIsBig, mkAltExpr, exprIsCheap )
 import DataCon		( isUnboxedTupleCon )
 import Type		( tyConAppArgs )
 import CoreSyn
 import VarEnv	
-import CoreLint		( showPass, endPass )
 import Outputable
 import StaticFlags	( opt_PprStyle_Debug )
 import BasicTypes	( isAlwaysActive )
@@ -51,8 +49,8 @@ So we carry an extra var->var substitution which we apply *before* looking up in
 reverse mapping.
 
 
-[Note: SHADOWING]
-~~~~~~~~~~~~~~~~~
+Note [Shadowing]
+~~~~~~~~~~~~~~~~
 We have to be careful about shadowing.
 For example, consider
 	f = \x -> let y = x+x in
@@ -69,7 +67,7 @@ to run the substitution over types and IdInfo.  No no no.  Instead, we just thro
 (In fact, I think the simplifier does guarantee no-shadowing for type variables.)
 
 
-[Note: case binders 1]
+Note [Case binders 1]
 ~~~~~~~~~~~~~~~~~~~~~~
 Consider
 
@@ -83,9 +81,9 @@ but for CSE purpose that's a bad idea.
 
 So we add the binding (wild1 -> a) to the extra var->var mapping.
 Notice this is exactly backwards to what the simplifier does, which is
-to try to replaces uses of a with uses of wild1
+to try to replaces uses of 'a' with uses of 'wild1'
 
-[Note: case binders 2]
+Note [Case binders 2]
 ~~~~~~~~~~~~~~~~~~~~~~
 Consider
 	case (h x) of y -> ...(h x)...
@@ -98,7 +96,7 @@ to the reverse CSE mapping if the scrutinee is a non-trivial expression.
 	case binder -> scrutinee 
 to the substitution
 
-[Note: unboxed tuple case binders]
+Note [Unboxed tuple case binders]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Consider
 	case f x of t { (# a,b #) -> 
@@ -178,14 +176,8 @@ happen now that we don't look inside INLINEs (which wrappers are).
 %************************************************************************
 
 \begin{code}
-cseProgram :: DynFlags -> [CoreBind] -> IO [CoreBind]
-
-cseProgram dflags binds
-  = do {
-	showPass dflags "Common sub-expression";
-	let { binds' = cseBinds emptyCSEnv binds };
-	endPass dflags "Common sub-expression" 	Opt_D_dump_cse binds'	
-    }
+cseProgram :: [CoreBind] -> [CoreBind]
+cseProgram binds = cseBinds emptyCSEnv binds
 
 cseBinds :: CSEnv -> [CoreBind] -> [CoreBind]
 cseBinds _   []     = []
@@ -209,8 +201,8 @@ do_one env (id, rhs)
 	Nothing             -> (addCSEnvItem env' rhs' (Var id'), (id', rhs'))
   where
     (env', id') = addBinder env id
-    rhs' | isAlwaysActive (idInlinePragma id) = cseExpr env' rhs
-	 | otherwise			      = rhs
+    rhs' | isAlwaysActive (idInlineActivation id) = cseExpr env' rhs
+	 | otherwise			          = rhs
 		-- See Note [CSE for INLINE and NOINLINE]
 
 tryForCSE :: CSEnv -> CoreExpr -> CoreExpr
@@ -233,34 +225,40 @@ cseExpr env (Lam b e)	     	   = let (env', b') = addBinder env b
 				     in Lam b' (cseExpr env' e)
 cseExpr env (Let bind e)    	   = let (env', bind') = cseBind env bind
 				     in Let bind' (cseExpr env' e)
-cseExpr env (Case scrut bndr ty alts) = Case scrut' bndr' ty (cseAlts env' scrut' bndr bndr' alts)
+cseExpr env (Case scrut bndr ty alts) = Case scrut' bndr'' ty (cseAlts env' scrut' bndr bndr'' alts)
 				   where
 				     scrut' = tryForCSE env scrut
 				     (env', bndr') = addBinder env bndr
-
+				     bndr'' = zapIdOccInfo bndr'
+					-- The swizzling from Note [Case binders 2] may
+					-- cause a dead case binder to be alive, so we
+					-- play safe here and bring them all to life
 
 cseAlts :: CSEnv -> CoreExpr -> CoreBndr -> CoreBndr -> [CoreAlt] -> [CoreAlt]
 
 cseAlts env scrut' bndr _bndr' [(DataAlt con, args, rhs)]
   | isUnboxedTupleCon con
 	-- Unboxed tuples are special because the case binder isn't
-	-- a real values.  See [Note: unboxed tuple case binders]
-  = [(DataAlt con, args', tryForCSE new_env rhs)]
+	-- a real value.  See Note [Unboxed tuple case binders]
+  = [(DataAlt con, args'', tryForCSE new_env rhs)]
   where
     (env', args') = addBinders env args
+    args'' = map zapIdOccInfo args'	-- They should all be ids
+	-- Same motivation for zapping as [Case binders 2] only this time
+	-- it's Note [Unboxed tuple case binders]
     new_env | exprIsCheap scrut' = env'
 	    | otherwise 	 = extendCSEnv env' scrut' tup_value
-    tup_value = mkAltExpr (DataAlt con) args' (tyConAppArgs (idType bndr))
+    tup_value = mkAltExpr (DataAlt con) args'' (tyConAppArgs (idType bndr))
 
 cseAlts env scrut' bndr bndr' alts
   = map cse_alt alts
   where
     (con_target, alt_env)
 	= case scrut' of
-		Var v' -> (v',    extendSubst env bndr v')	-- See [Note: case binder 1]
+		Var v' -> (v',     extendSubst env bndr v')	-- See Note [Case binders 1]
 								-- map: bndr -> v'
 
-		_      ->  (bndr', extendCSEnv env scrut' (Var  bndr'))	-- See [Note: case binder 2]
+		_      ->  (bndr', extendCSEnv env scrut' (Var  bndr'))	-- See Note [Case binders 2]
 									-- map: scrut' -> bndr'
 
     arg_tys = tyConAppArgs (idType bndr)
@@ -344,12 +342,12 @@ extendSubst (CS cs in_scope sub) x y = CS cs in_scope (extendVarEnv sub x y)
 addBinder :: CSEnv -> Id -> (CSEnv, Id)
 addBinder (CS cs in_scope sub) v
   | not (v `elemInScopeSet` in_scope) = (CS cs (extendInScopeSet in_scope v)  sub,		       v)
-  | isIdVar v			      = (CS cs (extendInScopeSet in_scope v') (extendVarEnv sub v v'), v')
+  | isId v			      = (CS cs (extendInScopeSet in_scope v') (extendVarEnv sub v v'), v')
   | otherwise			      = WARN( True, ppr v )
 				        (CS emptyUFM in_scope		      sub,		       v)
 	-- This last case is the unusual situation where we have shadowing of
 	-- a type variable; we have to discard the CSE mapping
-	-- See "IMPORTANT NOTE" at the top 
+	-- See Note [Shadowing]
   where
     v' = uniqAway in_scope v
 

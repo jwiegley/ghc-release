@@ -1,6 +1,6 @@
 Name:           haskeline
 Cabal-Version:  >=1.6
-Version:        0.6.1.5
+Version:        0.6.2.1
 Category:       User Interfaces
 License:        BSD3
 License-File:   LICENSE
@@ -19,10 +19,9 @@ Description:
 Homepage:       http://trac.haskell.org/haskeline
 Stability:      Experimental
 Build-Type:     Custom
-extra-source-files: configure examples/Test.hs
-extra-tmp-files: haskeline.buildinfo
+extra-source-files: examples/Test.hs CHANGES
 
-flag old-base
+flag base2
     Description: Use the base packages from before version 6.8
 
 flag terminfo
@@ -34,20 +33,29 @@ flag libiconv
     Default: False
 
 Library
-    if flag(old-base)
+    if flag(base2) {
         Build-depends: base == 2.*
         cpp-options:    -DOLD_BASE
-    else
-        Build-depends: base>=3 && <5 , containers>=0.1, directory>=1.0,
-                        bytestring==0.9.*
-    Build-depends:  filepath==1.1.*, ghc-mtl==1.1.*,
+    }
+    else {
+        if impl(ghc>=6.11) {
+            Build-depends: base >=4.1 && < 4.3, containers>=0.1 && < 0.4, directory==1.0.*,
+                           bytestring==0.9.*
+        }
+        else {
+            Build-depends: base>=3 && <4.1 , containers>=0.1 && < 0.3, directory==1.0.*,
+                           bytestring==0.9.*
+        }
+    }
+    Build-depends:  filepath==1.1.*, mtl==1.1.*,
                     utf8-string==0.3.* && >=0.3.1.1,
                     extensible-exceptions==0.1.* && >=0.1.1.0
-    Extensions:     ForeignFunctionInterface, RankNTypes, FlexibleInstances,
+    Extensions:     ForeignFunctionInterface, Rank2Types, FlexibleInstances,
                 TypeSynonymInstances
                 FlexibleContexts, ExistentialQuantification
                 ScopedTypeVariables, GeneralizedNewtypeDeriving
                 MultiParamTypeClasses, OverlappingInstances
+                UndecidableInstances
                 PatternSignatures, CPP, DeriveDataTypeable,
                 PatternGuards
     Exposed-Modules:
@@ -62,6 +70,7 @@ Library
                 System.Console.Haskeline.Command
                 System.Console.Haskeline.Command.Completion
                 System.Console.Haskeline.Command.History
+                System.Console.Haskeline.Command.KillRing
                 System.Console.Haskeline.Directory
                 System.Console.Haskeline.Emacs
                 System.Console.Haskeline.InputT
@@ -69,6 +78,7 @@ Library
                 System.Console.Haskeline.LineState
                 System.Console.Haskeline.Monads
                 System.Console.Haskeline.Prefs
+                System.Console.Haskeline.RunCommand
                 System.Console.Haskeline.Term
                 System.Console.Haskeline.Command.Undo
                 System.Console.Haskeline.Vi
@@ -81,7 +91,7 @@ Library
         install-includes: win_console.h
         cpp-options: -DMINGW
     } else {
-        Build-depends: unix>=2.0 && < 2.4
+        Build-depends: unix>=2.0 && < 2.5
                         -- unix-2.3 doesn't build on ghc-6.8.1 or earlier
         c-sources: cbits/h_iconv.c
         includes: h_iconv.h
@@ -91,7 +101,7 @@ Library
                 System.Console.Haskeline.Backend.IConv
                 System.Console.Haskeline.Backend.DumbTerm
         if flag(terminfo) {
-            Build-depends: terminfo==0.3.*
+            Build-depends: terminfo>=0.3.1.1 && <0.4
             Other-modules: System.Console.Haskeline.Backend.Terminfo
             cpp-options: -DTERMINFO
         }

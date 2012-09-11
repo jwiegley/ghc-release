@@ -7,72 +7,56 @@
  * ---------------------------------------------------------------------------*/
 
 // PAPI uses caddr_t, which is not POSIX
-// #include "PosixSource.h"
+#ifndef USE_PAPI
+#include "PosixSource.h"
+#endif
 
 #include "Rts.h"
 #include "RtsAPI.h"
+#include "HsFFI.h"
+
+#include "sm/Storage.h"
 #include "RtsUtils.h"
-#include "RtsFlags.h"  
-#include "OSThreads.h"
 #include "Schedule.h"   /* initScheduler */
 #include "Stats.h"      /* initStats */
 #include "STM.h"        /* initSTM */
-#include "Signals.h"
 #include "RtsSignals.h"
-#include "ThrIOManager.h"
-#include "Timer.h"      /* startTimer, stopTimer */
 #include "Weak.h"
 #include "Ticky.h"
 #include "StgRun.h"
 #include "Prelude.h"		/* fixupRTStoPreludeRefs */
-#include "HsFFI.h"
-#include "Linker.h"
 #include "ThreadLabels.h"
-#include "BlockAlloc.h"
+#include "sm/BlockAlloc.h"
 #include "Trace.h"
-#include "RtsGlobals.h"
 #include "Stable.h"
-#include "Hpc.h"
-#include "FileLock.h"
+#include "Hash.h"
+#include "Profiling.h"
+#include "Timer.h"
+#include "Globals.h"
 
 #if defined(RTS_GTK_FRONTPANEL)
 #include "FrontPanel.h"
 #endif
-
-# include "Profiling.h"
 
 #if defined(PROFILING)
 # include "ProfHeap.h"
 # include "RetainerProfile.h"
 #endif
 
-#if defined(GRAN)
-# include "GranSimRts.h"
-#endif
-
-#if defined(GRAN) || defined(PAR)
-# include "ParallelRts.h"
-#endif
-
-#if defined(PAR)
-# include "Parallel.h"
-# include "LLC.h"
-#endif
-
 #if defined(mingw32_HOST_OS) && !defined(THREADED_RTS)
 #include "win32/AsyncIO.h"
 #endif
 
-#include <stdlib.h>
+#if !defined(mingw32_HOST_OS)
+#include "posix/TTY.h"
+#include "posix/FileLock.h"
+#endif
 
-#ifdef HAVE_TERMIOS_H
-#include <termios.h>
-#endif
-#ifdef HAVE_SIGNAL_H
-#include <signal.h>
-#endif
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
+#endif
+#ifdef HAVE_LOCALE_H
+#include <locale.h>
 #endif
 
 #if USE_PAPI
@@ -81,26 +65,6 @@
 
 // Count of how many outstanding hs_init()s there have been.
 static int hs_init_count = 0;
-
-// Here we save the terminal settings on the standard file
-// descriptors, if we need to change them (eg. to support NoBuffering
-// input).
-static void *saved_termios[3] = {NULL,NULL,NULL};
-
-void*
-__hscore_get_saved_termios(int fd)
-{
-  return (0 <= fd && fd < (int)(sizeof(saved_termios) / sizeof(*saved_termios))) ?
-    saved_termios[fd] : NULL;
-}
-
-void
-__hscore_set_saved_termios(int fd, void* ts)
-{
-  if (0 <= fd && fd < (int)(sizeof(saved_termios) / sizeof(*saved_termios))) {
-    saved_termios[fd] = ts;
-  }
-}
 
 /* -----------------------------------------------------------------------------
    Initialise floating point unit on x86 (currently disabled. why?)
@@ -143,6 +107,8 @@ hs_init(int *argc, char **argv[])
 	return;
     }
 
+    setlocale(LC_CTYPE,"");
+
     /* Initialise the stats department, phase 0 */
     initStats0();
 
@@ -155,22 +121,6 @@ hs_init(int *argc, char **argv[])
     /* Start off by initialising the allocator debugging so we can
      * use it anywhere */
     initAllocator();
-#endif
-
-#ifdef PAR
-    /*
-     * The parallel system needs to be initialised and synchronised before
-     * the program is run.  
-     */ 
-    startupParallelSystem(argv);
-     
-    if (*argv[0] == '-') { /* Strip off mainPE flag argument */
-      argv++; 
-      argc--;			
-    }
-
-    argv[1] = argv[0];   /* ignore the nPEs argument */
-    argv++; argc--;
 #endif
 
     /* Set the RTS flags to default values. */
@@ -195,29 +145,14 @@ hs_init(int *argc, char **argv[])
 #endif
 
     /* initTracing must be after setupRtsFlags() */
+#ifdef TRACING
     initTracing();
-
-#if defined(PAR)
-    /* NB: this really must be done after processing the RTS flags */
-    IF_PAR_DEBUG(verbose,
-                 debugBelch("==== Synchronising system (%d PEs)\n", nPEs));
-    synchroniseSystem();             // calls initParallelSystem etc
-#endif	/* PAR */
+#endif
 
     /* initialise scheduler data structures (needs to be done before
      * initStorage()).
      */
     initScheduler();
-
-#if defined(GRAN)
-    /* And start GranSim profiling if required: */
-    if (RtsFlags.GranFlags.GranSimStats.Full)
-      init_gr_simulation(rts_argc, rts_argv, prog_argc, prog_argv);
-#elif defined(PAR)
-    /* And start GUM profiling if required: */
-    if (RtsFlags.ParFlags.ParStats.Full)
-      init_gr_simulation(rts_argc, rts_argv, prog_argc, prog_argv);
-#endif	/* PAR || GRAN */
 
     /* initialize the storage manager */
     initStorage();
@@ -235,9 +170,9 @@ hs_init(int *argc, char **argv[])
     getStablePtr((StgPtr)heapOverflow_closure);
     getStablePtr((StgPtr)runFinalizerBatch_closure);
     getStablePtr((StgPtr)unpackCString_closure);
-    getStablePtr((StgPtr)blockedOnDeadMVar_closure);
+    getStablePtr((StgPtr)blockedIndefinitelyOnMVar_closure);
     getStablePtr((StgPtr)nonTermination_closure);
-    getStablePtr((StgPtr)blockedIndefinitely_closure);
+    getStablePtr((StgPtr)blockedIndefinitelyOnSTM_closure);
 
     /* initialise the shared Typeable store */
     initGlobalStore();
@@ -323,7 +258,7 @@ startupHaskell(int argc, char *argv[], void (*init_root)(void))
 /* The init functions use an explicit stack... 
  */
 #define INIT_STACK_BLOCKS  4
-static F_ *init_stack = NULL;
+static StgFunPtr *init_stack = NULL;
 
 void
 hs_add_root(void (*init_root)(void))
@@ -342,10 +277,10 @@ hs_add_root(void (*init_root)(void))
        to the last occupied word */
     init_sp = INIT_STACK_BLOCKS*BLOCK_SIZE_W;
     bd = allocGroup_lock(INIT_STACK_BLOCKS);
-    init_stack = (F_ *)bd->start;
-    init_stack[--init_sp] = (F_)stg_init_finish;
+    init_stack = (StgFunPtr *)bd->start;
+    init_stack[--init_sp] = (StgFunPtr)stg_init_finish;
     if (init_root != NULL) {
-	init_stack[--init_sp] = (F_)init_root;
+	init_stack[--init_sp] = (StgFunPtr)init_root;
     }
     
     cap->r.rSp = (P_)(init_stack + init_sp);
@@ -411,55 +346,20 @@ hs_exit_(rtsBool wait_foreign)
 
     /* run C finalizers for all active weak pointers */
     runAllCFinalizers(weak_ptr_list);
-
+    
 #if defined(RTS_USER_SIGNALS)
     if (RtsFlags.MiscFlags.install_signal_handlers) {
         freeSignalHandlers();
     }
 #endif
 
-#if defined(GRAN)
-    /* end_gr_simulation prints global stats if requested -- HWL */
-    if (!RtsFlags.GranFlags.GranSimStats.Suppressed)
-	end_gr_simulation();
-#endif
-    
     /* stop the ticker */
     stopTimer();
     exitTimer();
 
-    /* reset the standard file descriptors to blocking mode */
-    resetNonBlockingFd(0);
-    resetNonBlockingFd(1);
-    resetNonBlockingFd(2);
-
-#if HAVE_TERMIOS_H
-    // Reset the terminal settings on the standard file descriptors,
-    // if we changed them.  See System.Posix.Internals.tcSetAttr for
-    // more details, including the reason we termporarily disable
-    // SIGTTOU here.
-    { 
-	int fd;
-	sigset_t sigset, old_sigset;
-	sigemptyset(&sigset);
-	sigaddset(&sigset, SIGTTOU);
-	sigprocmask(SIG_BLOCK, &sigset, &old_sigset);
-	for (fd = 0; fd <= 2; fd++) {
-	    struct termios* ts = (struct termios*)__hscore_get_saved_termios(fd);
-	    if (ts != NULL) {
-		tcsetattr(fd,TCSANOW,ts);
-	    }
-	}
-	sigprocmask(SIG_SETMASK, &old_sigset, NULL);
-    }
-#endif
-
-#if defined(PAR)
-    /* controlled exit; good thread! */
-    shutdownParallelSystem(0);
-    
-    /* global statistics in parallel system */
-    PAR_TICKY_PAR_END();
+    // set the terminal settings back to what they were
+#if !defined(mingw32_HOST_OS)    
+    resetTerminalSettings();
 #endif
 
     // uninstall signal handlers
@@ -478,6 +378,7 @@ hs_exit_(rtsBool wait_foreign)
     /* free the tasks */
     freeScheduler();
 
+    /* free shared Typeable store */
     exitGlobalStore();
 
     /* free file locking tables, if necessary */
@@ -511,6 +412,11 @@ hs_exit_(rtsBool wait_foreign)
     // profiling might tack some extra stuff on to the end of this file
     // during endProfiling().
     if (prof_file != NULL) fclose(prof_file);
+#endif
+
+#ifdef TRACING
+    endTracing();
+    freeTracing();
 #endif
 
 #if defined(TICKY_TICKY)
@@ -556,12 +462,7 @@ shutdownHaskellAndExit(int n)
     hs_exit_(rtsFalse);
 
     if (hs_init_count == 0) {
-#if defined(PAR)
-	/* really exit (stg_exit() would call shutdownParallelSystem() again) */
-	exit(n);
-#else
 	stg_exit(n);
-#endif
     }
 }
 
@@ -578,24 +479,11 @@ shutdownHaskellAndSignal(int sig)
  * called from STG-land to exit the program
  */
 
-#ifdef PAR
-static int exit_started=rtsFalse;
-#endif
-
 void (*exitFn)(int) = 0;
 
 void  
 stg_exit(int n)
 { 
-#ifdef PAR
-  /* HACK: avoid a loop when exiting due to a stupid error */
-  if (exit_started) 
-    return;
-  exit_started=rtsTrue;
-
-  IF_PAR_DEBUG(verbose, debugBelch("==-- stg_exit %d on [%x]...", n, mytid));
-  shutdownParallelSystem(n);
-#endif
   if (exitFn)
     (*exitFn)(n);
   exit(n);

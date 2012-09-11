@@ -607,7 +607,9 @@
     <sect2>
       <title>Language options</title>
 
-      <para><xref linkend="options-language"/></para>
+      <para>Language options can be enabled either by a command-line option 
+      <option>-Xblah</option>, or by a <literal>{-# LANGUAGE blah #-}</literal>
+      pragma in the file itself.  See <xref linkend="options-language"/></para>
 
       <informaltable>
 	<tgroup cols="4" align="left" colsep="1" rowsep="1">
@@ -704,6 +706,12 @@
 	      <entry><option>-XMonomorphismRrestriction</option></entry>
 	    </row>
 	    <row>
+	      <entry><option>-XNoNPlusKPatterns</option></entry>
+	      <entry>Disable support for <literal>n+k</literal> patterns</entry>
+	      <entry>dynamic</entry>
+	      <entry><option>-XNPlusKPatterns</option></entry>
+	    </row>
+	    <row>
 	      <entry><option>-XNoMonoPatBinds</option></entry>
 	      <entry>Make <link linkend="monomorphism">pattern bindings polymorphic</link></entry>
 	      <entry>dynamic</entry>
@@ -749,6 +757,13 @@
 	      <entry><option>-XNoScopedTypeVariables</option></entry>
 	    </row>
 	    <row>
+	      <entry><option>-XMonoLocalBinds</option></entry>
+	      <entry>Enable <link linkend="mono-local-binds">do not generalise local bindings</link>.
+	      </entry>
+	      <entry>dynamic</entry>
+	      <entry><option>-XNoMonoLocalBinds</option></entry>
+	    </row>
+	    <row>
 	      <entry><option>-XTemplateHaskell</option></entry>
 	      <entry>Enable <link linkend="template-haskell">Template Haskell</link>. 
 		No longer implied by <option>-fglasgow-exts</option>.</entry>
@@ -787,7 +802,7 @@
 	    </row>
 	    <row>
 	      <entry><option>-XUnicodeSyntax</option></entry>
-	      <entry>Enable unicode syntax.</entry>
+	      <entry>Enable <link linkend="unicode-syntax">unicode syntax</link>.</entry>
 	      <entry>dynamic</entry>
 	      <entry><option>-XNoUnicodeSyntax</option></entry>
 	    </row>
@@ -803,6 +818,19 @@
 	      qualified operator syntax</link></entry>
 	      <entry>dynamic</entry>
 	      <entry><option>-XNoNewQualifiedOperators</option></entry>
+	    </row>
+	    <row>
+	      <entry><option>-XExplicitForALl</option></entry>
+	      <entry>Enable <link linkend="explicit-foralls">explicit universal quantification</link>.
+              Implied by <option>-XScopedTypeVariables</option>,
+	    <option>-XLiberalTypeSynonyms</option>,
+	    <option>-XRank2Types</option>,
+	    <option>-XRankNTypes</option>,
+	    <option>-XPolymorphicComponents</option>,
+	    <option>-XExistentialQuantification</option>
+              </entry>
+	      <entry>dynamic</entry>
+	      <entry><option>-XNoExplicitForAll</option></entry>
 	    </row>
 	    <row>
 	      <entry><option>-XPolymorphicComponents</option></entry>
@@ -854,7 +882,7 @@
 	    </row>
 	    <row>
 	      <entry><option>-XTransformListComp</option></entry>
-	      <entry>Enable <link linkend="generalised-list-comprehensions">transform list comprehensions</link>.</entry>
+	      <entry>Enable <link linkend="generalised-list-comprehensions">generalised list comprehensions</link>.</entry>
 	      <entry>dynamic</entry>
 	      <entry><option>-XNoTransformListComp</option></entry>
 	    </row>
@@ -932,7 +960,7 @@
 	    </row>
 	    <row>
 	      <entry><option>-XTypeSynonymInstances</option></entry>
-	      <entry>Enable <link linkend="type-synonyms">type synonyms</link>.</entry>
+	      <entry>Enable <link linkend="flexible-instance-head">type synonyms in instance heads</link>.</entry>
 	      <entry>dynamic</entry>
 	      <entry><option>-XNoTypeSynonymInstances</option></entry>
 	    </row>
@@ -1171,6 +1199,20 @@
 	    <entry>warn about variables in patterns that aren't used</entry>
 	    <entry>dynamic</entry>
 	    <entry><option>-fno-warn-unused-matches</option></entry>
+	  </row>
+
+	  <row>
+	    <entry><option>-fwarn-unused-do-bind</option></entry>
+	    <entry>warn about do bindings that appear to throw away values of types other than <literal>()</literal></entry>
+	    <entry>dynamic</entry>
+	    <entry><option>-fno-warn-unused-do-bind</option></entry>
+	  </row>
+
+	  <row>
+	    <entry><option>-fwarn-wrong-do-bind</option></entry>
+	    <entry>warn about do bindings that appear to throw away monadic values that you should have bound instead</entry>
+	    <entry>dynamic</entry>
+	    <entry><option>-fno-warn-wrong-do-bind</option></entry>
 	  </row>
 
 	  </tbody>
@@ -1436,6 +1478,13 @@
 	      <entry>static</entry>
 	      <entry>-</entry>
 	    </row>
+
+	    <row>
+	      <entry><option>-feager-blackholing</option></entry>
+	      <entry>Turn on <link linkend="parallel-compile-options">eager blackholing</link></entry>
+	      <entry>dynamic</entry>
+	      <entry>-</entry>
+	    </row>
 	  </tbody>
 	</tgroup>
       </informaltable>
@@ -1461,20 +1510,20 @@
 	      <entry><option>-auto</option></entry>
 	      <entry>Auto-add <literal>_scc_</literal>s to all
 	      exported functions</entry>
-	      <entry>static</entry>
+	      <entry>dynamic</entry>
 	      <entry><option>-no-auto</option></entry>
 	    </row>
 	    <row>
 	      <entry><option>-auto-all</option></entry>
 	      <entry>Auto-add <literal>_scc_</literal>s to all
 	      top-level functions</entry>
-	      <entry>static</entry>
+	      <entry>dynamic</entry>
 	      <entry><option>-no-auto-all</option></entry>
 	    </row>
 	    <row>
 	      <entry><option>-caf-all</option></entry>
 	      <entry>Auto-add <literal>_scc_</literal>s to all CAFs</entry>
-	      <entry>static</entry>
+	      <entry>dynamic</entry>
 	      <entry><option>-no-caf-all</option></entry>
 	    </row>
 	    <row>
@@ -1485,7 +1534,7 @@
 	    </row>
 	    <row>
 	      <entry><option>-ticky</option></entry>
-	      <entry>Turn on ticky-ticky profiling</entry>
+	      <entry><link linkend="ticky-ticky">Turn on ticky-ticky profiling</link></entry>
 	      <entry>static</entry>
 	      <entry>-</entry>
 	    </row>
@@ -1604,33 +1653,6 @@
     </sect2>
 
     <sect2>
-      <title>C compiler options</title>
-
-      <para><xref linkend="options-C-compiler"/></para>
-      <informaltable>
-	<tgroup cols="4" align="left" colsep="1" rowsep="1">
-	  <thead>
-	    <row>
-	      <entry>Flag</entry>
-	      <entry>Description</entry>
-	      <entry>Static/Dynamic</entry>
-	      <entry>Reverse</entry>
-	    </row>
-	  </thead>
-	  <tbody>
-	    <row>
-	      <entry><option>-#include</option> <replaceable>file</replaceable></entry>
-	      <entry>Include <replaceable>file</replaceable> when
-	      compiling the <filename>.hc</filename> file</entry>
-	      <entry>dynamic</entry>
-	      <entry>-</entry>
-	    </row>
-	  </tbody>
-	</tgroup>
-      </informaltable>
-    </sect2>
-
-    <sect2>
       <title>Code generation options</title>
 
       <para><xref linkend="options-codegen"/></para>
@@ -1698,6 +1720,12 @@
 	  </thead>
 	  <tbody>
 	    <row>
+  	      <entry><option>-shared</option></entry>
+	      <entry>Generate a shared library (as opposed to an executable)</entry>
+	      <entry>dynamic</entry>
+	      <entry>-</entry>
+	    </row>
+	    <row>
 	      <entry><option>-fPIC</option></entry>
 	      <entry>Generate position-independent code (where available)</entry>
 	      <entry>static</entry>
@@ -1706,6 +1734,13 @@
 	    <row>
 	      <entry><option>-dynamic</option></entry>
 	      <entry>Use dynamic Haskell libraries (if available)</entry>
+	      <entry>static</entry>
+	      <entry>-</entry>
+	    </row>
+	    <row>
+	      <entry><option>-dynload</option></entry>
+	      <entry>Selects one of a number of modes for finding shared
+	        libraries at runtime.</entry>
 	      <entry>static</entry>
 	      <entry>-</entry>
 	    </row>
@@ -1786,6 +1821,12 @@
 	      <entry>-</entry>
 	    </row>
 	    <row>
+	      <entry><option>-eventlog</option></entry>
+	      <entry>Enable runtime event tracing</entry>
+	      <entry>static</entry>
+	      <entry>-</entry>
+	    </row>
+	    <row>
 	      <entry><option>-fno-gen-manifest</option></entry>
 	      <entry>Do not generate a manifest file (Windows only)</entry>
 	      <entry>dynamic</entry>
@@ -1794,6 +1835,12 @@
 	    <row>
 	      <entry><option>-fno-embed-manifest</option></entry>
 	      <entry>Do not embed the manifest in the executable (Windows only)</entry>
+	      <entry>dynamic</entry>
+	      <entry>-</entry>
+	    </row>
+	    <row>
+	      <entry><option>-fno-shared-implib</option></entry>
+	      <entry>Don't generate an import library for a DLL (Windows only)</entry>
 	      <entry>dynamic</entry>
 	      <entry>-</entry>
 	    </row>
@@ -2018,7 +2065,7 @@
 	    <row>
 	      <entry><option>-fext-core</option></entry>
 	      <entry>Generate <filename>.hcr</filename> external Core files</entry>
-	      <entry>static</entry>
+	      <entry>dynamic</entry>
 	      <entry>-</entry>
 	    </row>
 	  </tbody>

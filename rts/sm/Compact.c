@@ -13,16 +13,18 @@
 
 #include "PosixSource.h"
 #include "Rts.h"
+
+#include "Storage.h"
 #include "RtsUtils.h"
-#include "RtsFlags.h"
-#include "OSThreads.h"
 #include "BlockAlloc.h"
-#include "MBlock.h"
 #include "GC.h"
 #include "Compact.h"
 #include "Schedule.h"
 #include "Apply.h"
 #include "Trace.h"
+#include "Weak.h"
+#include "MarkWeak.h"
+#include "Stable.h"
 
 // Turn off inlining when debugging - it obfuscates things
 #ifdef DEBUG
@@ -166,7 +168,7 @@ loop:
     case 1:
     {
         StgWord r = *(StgPtr)(q-1);
-        ASSERT(LOOKS_LIKE_INFO_PTR(UNTAG_CLOSURE((StgClosure *)r)));
+        ASSERT(LOOKS_LIKE_INFO_PTR((StgWord)UNTAG_CLOSURE((StgClosure *)r)));
         return r;
     }
     case 2:
@@ -625,8 +627,6 @@ thread_obj (StgInfoTable *info, StgPtr p)
     case MUT_VAR_CLEAN:
     case MUT_VAR_DIRTY:
     case CAF_BLACKHOLE:
-    case SE_CAF_BLACKHOLE:
-    case SE_BLACKHOLE:
     case BLACKHOLE:
     {
 	StgPtr end;
@@ -931,7 +931,7 @@ update_bkwd_compact( step *stp )
 
             iptr = get_threaded_info(p);
 	    unthread(p, (StgWord)free + GET_CLOSURE_TAG((StgClosure *)iptr));
-	    ASSERT(LOOKS_LIKE_INFO_PTR(((StgClosure *)p)->header.info));
+	    ASSERT(LOOKS_LIKE_INFO_PTR((StgWord)((StgClosure *)p)->header.info));
 	    info = get_itbl((StgClosure *)p);
 	    size = closure_sizeW_((StgClosure *)p,info);
 
@@ -983,11 +983,20 @@ compact(StgClosure *static_objects)
     for (g = 1; g < RtsFlags.GcFlags.generations; g++) {
 	bdescr *bd;
 	StgPtr p;
+        nat n;
 	for (bd = generations[g].mut_list; bd != NULL; bd = bd->link) {
 	    for (p = bd->start; p < bd->free; p++) {
 		thread((StgClosure **)p);
 	    }
 	}
+        for (n = 0; n < n_capabilities; n++) {
+            for (bd = capabilities[n].mut_lists[g]; 
+                 bd != NULL; bd = bd->link) {
+                for (p = bd->start; p < bd->free; p++) {
+                    thread((StgClosure **)p);
+                }
+            }
+        }
     }
 
     // the global thread list

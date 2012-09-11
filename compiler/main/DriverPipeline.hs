@@ -19,8 +19,7 @@ module DriverPipeline (
 
 	-- Interfaces for the compilation manager (interpreted/batch-mode)
    preprocess, 
-   compile,
-   compile', -- internal
+   compile, compile',
    link, 
 
   ) where
@@ -49,12 +48,12 @@ import Maybes		( expectJust )
 import ParserCoreUtils	( getCoreModuleName )
 import SrcLoc
 import FastString
-import MonadUtils
+-- import MonadUtils
 
-import Data.Either
+-- import Data.Either
 import Exception
-import Data.IORef	( readIORef, writeIORef, IORef )
-import GHC.Exts		( Int(..) )
+import Data.IORef	( readIORef )
+-- import GHC.Exts		( Int(..) )
 import System.Directory
 import System.FilePath
 import System.IO
@@ -106,20 +105,24 @@ compile :: GhcMonad m =>
 
 compile = compile' (hscCompileNothing, hscCompileInteractive, hscCompileBatch)
 
-compile' :: 
-     GhcMonad m =>
-     (Compiler' m (HscStatus, ModIface, ModDetails),
-      Compiler' m (InteractiveStatus, ModIface, ModDetails),
-      Compiler' m (HscStatus, ModIface, ModDetails))
-  -> HscEnv
-  -> ModSummary      -- ^ summary for module being compiled
-  -> Int             -- ^ module N ...
-  -> Int             -- ^ ... of M
-  -> Maybe ModIface  -- ^ old interface, if we have one
-  -> Maybe Linkable  -- ^ old linkable, if we have one
-  -> m HomeModInfo   -- ^ the complete HomeModInfo, if successful
+type Compiler m a = HscEnv -> ModSummary -> Bool
+                  -> Maybe ModIface -> Maybe (Int, Int)
+                  -> m a
+
+compile' :: GhcMonad m =>
+           (Compiler m (HscStatus, ModIface, ModDetails),
+            Compiler m (InteractiveStatus, ModIface, ModDetails),
+            Compiler m (HscStatus, ModIface, ModDetails))
+        -> HscEnv
+        -> ModSummary      -- ^ summary for module being compiled
+        -> Int             -- ^ module N ...
+        -> Int             -- ^ ... of M
+        -> Maybe ModIface  -- ^ old interface, if we have one
+        -> Maybe Linkable  -- ^ old linkable, if we have one
+        -> m HomeModInfo   -- ^ the complete HomeModInfo, if successful
+
 compile' (nothingCompiler, interactiveCompiler, batchCompiler)
-         hsc_env0 summary mod_index nmods mb_old_iface maybe_old_linkable
+        hsc_env0 summary mod_index nmods mb_old_iface maybe_old_linkable
  = do
    let dflags0     = ms_hspp_opts summary
        this_mod    = ms_mod summary
@@ -169,7 +172,7 @@ compile' (nothingCompiler, interactiveCompiler, batchCompiler)
            = ASSERT (isJust maybe_old_linkable)
              return maybe_old_linkable
 
-       handleBatch (HscRecomp hasStub)
+       handleBatch (HscRecomp hasStub _)
            | isHsBoot src_flavour
                = do when (isObjectTarget hsc_lang) $ -- interpreted reaches here too
                        liftIO $ SysTools.touch dflags' "Touching object file"
@@ -184,7 +187,7 @@ compile' (nothingCompiler, interactiveCompiler, batchCompiler)
                             -> return ([], ms_hs_date summary)
                           -- We're in --make mode: finish the compilation pipeline.
                           _other
-                            -> do runPipeline StopLn hsc_env' (output_fn,Nothing)
+                            -> do _ <- runPipeline StopLn hsc_env' (output_fn,Nothing)
                                               (Just basename)
                                               Persistent
                                               (Just location)
@@ -195,10 +198,13 @@ compile' (nothingCompiler, interactiveCompiler, batchCompiler)
 			           (hs_unlinked ++ stub_unlinked)
                     return (Just linkable)
 
-       handleInterpreted InteractiveNoRecomp
+       handleInterpreted HscNoRecomp
            = ASSERT (isJust maybe_old_linkable)
              return maybe_old_linkable
-       handleInterpreted (InteractiveRecomp hasStub comp_bc modBreaks)
+       handleInterpreted (HscRecomp _hasStub Nothing)
+           = ASSERT (isHsBoot src_flavour)
+             return maybe_old_linkable
+       handleInterpreted (HscRecomp hasStub (Just (comp_bc, modBreaks)))
            = do stub_unlinked <- getStubLinkable hasStub
                 let hs_unlinked = [BCOs comp_bc modBreaks]
                     unlinked_time = ms_hs_date summary
@@ -224,15 +230,13 @@ compile' (nothingCompiler, interactiveCompiler, batchCompiler)
                                      hm_linkable = linkable })
    -- run the compiler
    case hsc_lang of
-      HscInterpreted
-        | isHsBoot src_flavour -> 
-                runCompiler nothingCompiler handleBatch
-        | otherwise -> 
+      HscInterpreted ->
                 runCompiler interactiveCompiler handleInterpreted
       HscNothing -> 
                 runCompiler nothingCompiler handleBatch
       _other -> 
                 runCompiler batchCompiler handleBatch
+
 
 -----------------------------------------------------------------------------
 -- stub .h and .c files (for foreign export support)
@@ -260,7 +264,7 @@ compileStub hsc_env mod location = do
 	let (stub_c,_,stub_o) = mkStubPaths (hsc_dflags hsc_env) 
                                    (moduleName mod) location
 
-	runPipeline StopLn hsc_env (stub_c,Nothing)  Nothing
+	_ <- runPipeline StopLn hsc_env (stub_c,Nothing)  Nothing
 		(SpecificFile stub_o) Nothing{-no ModLocation-}
 
 	return stub_o
@@ -292,6 +296,26 @@ link NoLink _ _ _
    = return Succeeded
 
 link LinkBinary dflags batch_attempt_linking hpt
+   = link' dflags batch_attempt_linking hpt
+
+link LinkDynLib dflags batch_attempt_linking hpt
+   = link' dflags batch_attempt_linking hpt
+
+#ifndef GHCI
+-- warning suppression
+link other _ _ _ = panicBadLink other
+#endif
+
+panicBadLink :: GhcLink -> a
+panicBadLink other = panic ("link: GHC not built to link this way: " ++
+                            show other)
+
+link' :: DynFlags                -- dynamic flags
+      -> Bool                    -- attempt linking in batch mode?
+      -> HomePackageTable        -- what to link
+      -> IO SuccessFlag
+
+link' dflags batch_attempt_linking hpt
    | batch_attempt_linking
    = do
         let
@@ -342,13 +366,6 @@ link LinkBinary dflags batch_attempt_linking hpt
    = do debugTraceMsg dflags 3 (text "link(batch): upsweep (partially) failed OR" $$
                                 text "   Main.main not exported; not linking.")
         return Succeeded
-
--- warning suppression
-link other _ _ _ = panicBadLink other
-
-panicBadLink :: GhcLink -> a
-panicBadLink other = panic ("link: GHC not built to link this way: " ++
-                            show other)
 
 
 linkingNeeded :: DynFlags -> [Linkable] -> [PackageId] -> IO Bool
@@ -474,7 +491,7 @@ data PipelineOutput
 -- at which stage to stop.
 --
 -- The DynFlags can be modified by phases in the pipeline (eg. by
--- GHC_OPTIONS pragmas), and the changes affect later phases in the
+-- OPTIONS_GHC pragmas), and the changes affect later phases in the
 -- pipeline.
 runPipeline
   :: GhcMonad m =>
@@ -681,8 +698,8 @@ runPhase (Cpp sf) _stop hsc_env _basename _suff input_fn get_output_fn maybe_loc
        src_opts <- liftIO $ getOptionsFromFile dflags0 input_fn
        (dflags, unhandled_flags, warns)
            <- liftIO $ parseDynamicNoPackageFlags dflags0 src_opts
-       liftIO $ handleFlagWarnings dflags warns  -- XXX: may exit the program
-       liftIO $ checkProcessArgsResult unhandled_flags -- XXX: may throw program error
+       handleFlagWarnings dflags warns
+       checkProcessArgsResult unhandled_flags
 
        if not (dopt Opt_Cpp dflags) then
            -- no need to preprocess CPP, just pass input file along
@@ -741,8 +758,8 @@ runPhase (Hsc src_flavour) stop hsc_env basename suff input_fn get_output_fn _ma
                     m <- liftIO $ getCoreModuleName input_fn
                     return (Nothing, mkModuleName m, [], [])
 
-                _           -> liftIO $ do
-                    buf <- hGetStringBuffer input_fn
+                _           -> do
+                    buf <- liftIO $ hGetStringBuffer input_fn
                     (src_imps,imps,L _ mod_name) <- getImports dflags buf input_fn (basename <.> suff)
                     return (Just buf, mod_name, imps, src_imps)
 
@@ -845,7 +862,7 @@ runPhase (Hsc src_flavour) stop hsc_env basename suff input_fn get_output_fn _ma
                     -- than the source file (else we wouldn't be in HscNoRecomp)
                     -- but we touch it anyway, to keep 'make' happy (we think).
                     return (StopLn, dflags', Just location4, o_file)
-          (HscRecomp hasStub)
+          (HscRecomp hasStub _)
               -> do when hasStub $
                          do stub_o <- compileStub hsc_env' mod location4
                             liftIO $ consIORef v_Ld_inputs stub_o
@@ -971,7 +988,8 @@ runPhase cc_phase _stop hsc_env _basename _suff input_fn get_output_fn maybe_loc
 		-- Also useful for plain .c files, just in case GHC saw a 
 		-- -x c option.
 			[ SysTools.Option "-x", if cc_phase `eqPhase` Ccpp
-                                                then SysTools.Option "c++" else SysTools.Option "c"] ++
+                                                then SysTools.Option "c++" 
+                                                else SysTools.Option "c"] ++
 			[ SysTools.FileOption "" input_fn
 			, SysTools.Option "-o"
 			, SysTools.FileOption "" output_fn
@@ -987,13 +1005,6 @@ runPhase cc_phase _stop hsc_env _basename _suff input_fn get_output_fn maybe_loc
         --
         -- This is a temporary hack.
                        ++ ["-mcpu=v9"]
-#endif
-#if defined(darwin_TARGET_OS) && defined(i386_TARGET_ARCH)
-                          -- By default, gcc on OS X will generate SSE
-                          -- instructions, which need things 16-byte aligned,
-                          -- but we don't 16-byte align things. Thus drop
-                          -- back to generic i686 compatibility. Trac #2983.
-                       ++ ["-march=i686"]
 #endif
 		       ++ (if hcc && mangle
 		  	     then md_regd_c_flags
@@ -1070,13 +1081,13 @@ runPhase SplitMangle _stop hsc_env _basename _suff input_fn _get_output_fn maybe
 	-- Save the number of split files for future references
 	s <- readFile n_files_fn
 	let n_files = read s :: Int
-	writeIORef v_Split_info (split_s_prefix, n_files)
+	    dflags' = dflags { splitInfo = Just (split_s_prefix, n_files) }
 
 	-- Remember to delete all these files
-	addFilesToClean [ split_s_prefix ++ "__" ++ show n ++ ".s"
-			| n <- [1..n_files]]
+	addFilesToClean dflags' [ split_s_prefix ++ "__" ++ show n ++ ".s"
+	                        | n <- [1..n_files]]
 
-	return (SplitAs, dflags, maybe_loc, "**splitmangle**")
+	return (SplitAs, dflags', maybe_loc, "**splitmangle**")
 	  -- we don't use the filename
 
 -----------------------------------------------------------------------------
@@ -1094,6 +1105,7 @@ runPhase As _stop hsc_env _basename _suff input_fn get_output_fn maybe_loc
 	-- might be a hierarchical module.
 	createDirectoryHierarchy (takeDirectory output_fn)
 
+	let (md_c_flags, _) = machdepCCOpts dflags
 	SysTools.runAs dflags	
 		       (map SysTools.Option as_opts
 		       ++ [ SysTools.Option ("-I" ++ p) | p <- cmdline_include_paths ]
@@ -1111,7 +1123,8 @@ runPhase As _stop hsc_env _basename _suff input_fn get_output_fn maybe_loc
 		          , SysTools.FileOption "" input_fn
 			  , SysTools.Option "-o"
 			  , SysTools.FileOption "" output_fn
-			  ])
+			  ]
+		       ++ map SysTools.Option md_c_flags)
 
 	return (StopLn, dflags, maybe_loc, output_fn)
 
@@ -1122,8 +1135,8 @@ runPhase SplitAs _stop hsc_env _basename _suff _input_fn get_output_fn maybe_loc
         output_fn <- get_output_fn dflags StopLn maybe_loc
 
         let base_o = dropExtension output_fn
-            split_odir  = base_o ++ "_split"
             osuf = objectSuf dflags
+            split_odir  = base_o ++ "_" ++ osuf ++ "_split"
 
         createDirectoryHierarchy split_odir
 
@@ -1134,12 +1147,15 @@ runPhase SplitAs _stop hsc_env _basename _suff _input_fn get_output_fn maybe_loc
 
         let as_opts = getOpts dflags opt_a
 
-        (split_s_prefix, n) <- readIORef v_Split_info
+        let (split_s_prefix, n) = case splitInfo dflags of
+                                  Nothing -> panic "No split info"
+                                  Just x -> x
 
         let split_s   n = split_s_prefix ++ "__" ++ show n <.> "s"
             split_obj n = split_odir </>
                           takeFileName base_o ++ "__" ++ show n <.> osuf
 
+        let (md_c_flags, _) = machdepCCOpts dflags
         let assemble_file n
               = SysTools.runAs dflags
                          (map SysTools.Option as_opts ++
@@ -1157,7 +1173,8 @@ runPhase SplitAs _stop hsc_env _basename _suff _input_fn get_output_fn maybe_loc
                           , SysTools.Option "-o"
                           , SysTools.FileOption "" (split_obj n)
                           , SysTools.FileOption "" (split_s n)
-                          ])
+                          ]
+                       ++ map SysTools.Option md_c_flags)
 
         mapM_ assemble_file [1..n]
 
@@ -1168,7 +1185,9 @@ runPhase SplitAs _stop hsc_env _basename _suff _input_fn get_output_fn maybe_loc
                             SysTools.Option "-Wl,-r",
                             SysTools.Option ld_x_flag,
                             SysTools.Option "-o",
-                            SysTools.FileOption "" output_fn ] ++ args)
+                            SysTools.FileOption "" output_fn ]
+                         ++ map SysTools.Option md_c_flags
+                         ++ args)
             ld_x_flag | null cLD_X = ""
                       | otherwise  = "-Wl,-x"
 
@@ -1209,7 +1228,7 @@ runPhase_MoveBinary dflags input_fn dep_packages
            pvm_executable_base = "=" ++ input_fn
            pvm_executable = pvm_root ++ "/bin/" ++ pvm_arch ++ "/" ++ pvm_executable_base
         -- nuke old binary; maybe use configur'ed names for cp and rm?
-        tryIO (removeFile pvm_executable)
+        _ <- tryIO (removeFile pvm_executable)
         -- move the newly created binary into PVM land
         copy dflags "copying PVM executable" input_fn pvm_executable
         -- generate a wrapper script for running a parallel prg under PVM
@@ -1220,8 +1239,8 @@ runPhase_MoveBinary dflags input_fn dep_packages
 	  Wrapped wrapmode ->
 	      do
 		let (o_base, o_ext) = splitExtension input_fn
-		let wrapped_executable | o_ext == "exe" = (o_base ++ "_real") <.> o_ext
-				       | otherwise = input_fn ++ "_real"
+		let wrapped_executable | o_ext == "exe" = (o_base ++ ".dyn") <.> o_ext
+				       | otherwise = input_fn ++ ".dyn"
 		behaviour <- wrapper_behaviour dflags wrapmode dep_packages
 
                 -- THINKME isn't this possible to do a bit nicer?
@@ -1354,6 +1373,13 @@ linkBinary dflags o_files dep_packages = do
     let lib_paths = libraryPaths dflags
     let lib_path_opts = map ("-L"++) lib_paths
 
+    -- The C "main" function is not in the rts but in a separate static
+    -- library libHSrtsmain.a that sits next to the rts lib files. Assuming
+    -- we're using a Haskell main function then we need to link it in.
+    let no_hs_main = dopt Opt_NoHsMain dflags
+    let main_lib | no_hs_main = []
+                 | otherwise  = [ "-lHSrtsmain" ]
+
     pkg_link_opts <- getPackageLinkOpts dflags dep_packages
 
 #ifdef darwin_TARGET_OS
@@ -1369,12 +1395,6 @@ linkBinary dflags o_files dep_packages = do
     let frameworks = cmdlineFrameworks dflags
         framework_opts = concat [ ["-framework", fw] | fw <- reverse frameworks ]
 	 -- reverse because they're added in reverse order from the cmd line
-#endif
-#ifdef mingw32_TARGET_OS
-    let dynMain = if not opt_Static then
-		      (head (libraryDirs (getPackageDetails (pkgState dflags) rtsPackageId))) ++ "/Main.dyn_o"
-		  else
-		      ""
 #endif
 	-- probably _stub.o files
     extra_ld_inputs <- readIORef v_Ld_inputs
@@ -1417,9 +1437,6 @@ linkBinary dflags o_files dep_packages = do
 		      ++ map SysTools.Option (
 		         md_c_flags
 	 	      ++ o_files
-#ifdef mingw32_TARGET_OS
-	 	      ++ [dynMain]
-#endif
 		      ++ extra_ld_inputs
 	 	      ++ lib_path_opts
 	 	      ++ extra_ld_opts
@@ -1429,6 +1446,7 @@ linkBinary dflags o_files dep_packages = do
 	 	      ++ framework_opts
 #endif
 	 	      ++ pkg_lib_path_opts
+                      ++ main_lib
 	 	      ++ pkg_link_opts
 #ifdef darwin_TARGET_OS
 	 	      ++ pkg_framework_path_opts
@@ -1537,7 +1555,13 @@ linkDynLib dflags o_files dep_packages = do
     let pkgs_no_rts = pkgs
 #endif
     let pkg_lib_paths = collectLibraryPaths pkgs_no_rts
-    let pkg_lib_path_opts = map ("-L"++) pkg_lib_paths
+    let pkg_lib_path_opts = concatMap get_pkg_lib_path_opts pkg_lib_paths
+#ifdef linux_TARGET_OS
+        get_pkg_lib_path_opts l | (dynLibLoader dflags)==SystemDependent && not opt_Static = ["-L" ++ l, "-Wl,-rpath", "-Wl," ++ l]
+                                | otherwise = ["-L" ++ l]
+#else
+        get_pkg_lib_path_opts l = ["-L" ++ l]
+#endif
 
     let lib_paths = libraryPaths dflags
     let lib_path_opts = map ("-L"++) lib_paths
@@ -1560,7 +1584,9 @@ linkDynLib dflags o_files dep_packages = do
 	  , SysTools.Option "-o"
 	  , SysTools.FileOption "" output_fn
 	  , SysTools.Option "-shared"
-	  , SysTools.FileOption "-Wl,--out-implib=" (output_fn ++ ".a")
+	  ] ++
+	  [ SysTools.FileOption "-Wl,--out-implib=" (output_fn ++ ".a")
+	  | dopt Opt_SharedImplib dflags
 	  ]
 	 ++ map (SysTools.FileOption "") o_files
 	 ++ map SysTools.Option (
@@ -1614,7 +1640,7 @@ linkDynLib dflags o_files dep_packages = do
 	 ++ map SysTools.Option (
 	    md_c_flags
 	 ++ o_files
-	 ++ [ "-undefined", "dynamic_lookup", "-single_module", "-Wl,-macosx_version_min","-Wl,10.3", "-install_name " ++ (pwd </> output_fn) ]
+	 ++ [ "-undefined", "dynamic_lookup", "-single_module", "-Wl,-macosx_version_min","-Wl,10.5", "-install_name " ++ (pwd </> output_fn) ]
 	 ++ extra_ld_inputs
 	 ++ lib_path_opts
 	 ++ extra_ld_opts
@@ -1637,6 +1663,7 @@ linkDynLib dflags o_files dep_packages = do
 	    md_c_flags
 	 ++ o_files
 	 ++ [ "-shared", "-Wl,-Bsymbolic" ] -- we need symbolic linking to resolve non-PIC intra-package-relocations
+         ++ [ "-Wl,-soname," ++ takeFileName output_fn ] -- set the library soname
 	 ++ extra_ld_inputs
 	 ++ lib_path_opts
 	 ++ extra_ld_opts
@@ -1740,5 +1767,3 @@ hscMaybeAdjustTarget dflags stop _ current_hsc_lang
 		-- otherwise, stick to the plan
 		 | otherwise = current_hsc_lang
 
-GLOBAL_VAR(v_Split_info, ("",0), (String,Int))
-	-- The split prefix and number of files

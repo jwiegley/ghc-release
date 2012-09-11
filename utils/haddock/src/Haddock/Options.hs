@@ -1,8 +1,16 @@
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Haddock.Options
+-- Copyright   :  (c) Simon Marlow 2003-2006,
+--                    David Waern  2006-2009
+-- License     :  BSD-like
 --
--- Haddock - A Haskell Documentation Tool
+-- Maintainer  :  haddock@projects.haskell.org
+-- Stability   :  experimental
+-- Portability :  portable
 --
--- (c) Simon Marlow 2003
---
+-- Definition of the command line interface of Haddock
+-----------------------------------------------------------------------------
 
 
 module Haddock.Options (
@@ -15,7 +23,7 @@ module Haddock.Options (
 
 
 import Haddock.Utils
-import Haddock.Exception
+import Haddock.Types
 import System.Console.GetOpt 
 
 
@@ -72,7 +80,7 @@ data Flag
   | Flag_WikiModuleURL String
   | Flag_WikiEntityURL String
   | Flag_Help
-  | Flag_Verbose
+  | Flag_Verbosity String
   | Flag_Version
   | Flag_UseContents String
   | Flag_GenContents
@@ -83,7 +91,9 @@ data Flag
   | Flag_OptGhc String
   | Flag_GhcLibDir String
   | Flag_GhcVersion
+  | Flag_PrintGhcLibDir
   | Flag_NoWarnings
+  | Flag_UseUnicode
   deriving (Eq)
 
 
@@ -104,6 +114,7 @@ options backwardsCompat =
 --	"output in DocBook XML",
     Option ['h']  ["html"]     (NoArg Flag_Html)
 	"output in HTML",
+    Option ['U'] ["use-unicode"] (NoArg Flag_UseUnicode) "use Unicode in HTML output",
     Option []  ["hoogle"]     (NoArg Flag_Hoogle)
     "output for Hoogle",
     Option []  ["html-help"]    (ReqArg Flag_HtmlHelp "format")
@@ -133,8 +144,8 @@ options backwardsCompat =
 	"display this help and exit",
     Option ['V']  ["version"]  (NoArg Flag_Version)
 	"output version information and exit",
-    Option ['v']  ["verbose"]  (NoArg Flag_Verbose)
-        "increase verbosity",
+    Option ['v']  ["verbosity"]  (ReqArg Flag_Verbosity "VERBOSITY")
+        "set verbosity level",
     Option [] ["use-contents"] (ReqArg Flag_UseContents "URL")
 	"use a separately-generated HTML contents page",
     Option [] ["gen-contents"] (NoArg Flag_GenContents)
@@ -151,5 +162,7 @@ options backwardsCompat =
  	"option to be forwarded to GHC",
     Option []  ["ghc-version"]  (NoArg Flag_GhcVersion)
 	"output GHC version in numeric format",
+    Option []  ["print-ghc-libdir"]  (NoArg Flag_PrintGhcLibDir)
+	"output GHC lib dir",
     Option ['w'] ["no-warnings"] (NoArg Flag_NoWarnings) "turn off all warnings"
    ]

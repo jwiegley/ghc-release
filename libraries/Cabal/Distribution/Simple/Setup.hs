@@ -67,7 +67,6 @@ module Distribution.Simple.Setup (
   BuildFlags(..),    emptyBuildFlags,    defaultBuildFlags,    buildCommand,
   buildVerbose,
   CleanFlags(..),    emptyCleanFlags,    defaultCleanFlags,    cleanCommand,
-  MakefileFlags(..), emptyMakefileFlags, defaultMakefileFlags, makefileCommand,
   RegisterFlags(..), emptyRegisterFlags, defaultRegisterFlags, registerCommand,
                                                                unregisterCommand,
   SDistFlags(..),    emptySDistFlags,    defaultSDistFlags,    sdistCommand,
@@ -102,7 +101,7 @@ import Distribution.Simple.Utils
 import Distribution.Simple.Program (Program(..), ProgramConfiguration,
                              knownPrograms,
                              addKnownProgram, emptyProgramConfiguration,
-                             haddockProgram)
+                             haddockProgram, ghcProgram)
 import Distribution.Simple.InstallDirs
          ( InstallDirs(..), CopyDest(..),
            PathTemplate, toPathTemplate, fromPathTemplate )
@@ -333,6 +332,7 @@ configureOptions showOrParseArgs =
          (choiceOpt [ (Flag GHC, ("g", ["ghc"]), "compile with GHC")
                     , (Flag NHC, ([] , ["nhc98"]), "compile with NHC")
                     , (Flag JHC, ([] , ["jhc"]), "compile with JHC")
+                    , (Flag LHC, ([] , ["lhc"]), "compile with LHC")
                     , (Flag Hugs,([] , ["hugs"]), "compile with Hugs")])
 
       ,option "w" ["with-compiler"]
@@ -347,7 +347,7 @@ configureOptions showOrParseArgs =
       ]
    ++ map liftInstallDirs installDirsOptions
    ++ [option "b" ["scratchdir"]
-         "directory to receive the built package [dist/scratch]"
+         "directory to receive the built package (hugs-only)"
          configScratchDir (\v flags -> flags { configScratchDir = v })
          (reqArgFlag "DIR")
 
@@ -600,8 +600,6 @@ instance Monoid ConfigFlags where
 data CopyFlags = CopyFlags {
     copyDest      :: Flag CopyDest,
     copyDistPref  :: Flag FilePath,
-    copyUseWrapper :: Flag Bool,
-    copyInPlace    :: Flag Bool,
     copyVerbosity :: Flag Verbosity
   }
   deriving Show
@@ -610,8 +608,6 @@ defaultCopyFlags :: CopyFlags
 defaultCopyFlags  = CopyFlags {
     copyDest      = Flag NoCopyDest,
     copyDistPref  = Flag defaultDistPref,
-    copyUseWrapper = Flag False,
-    copyInPlace    = Flag False,
     copyVerbosity = Flag normal
   }
 
@@ -626,19 +622,9 @@ copyCommand = makeCommand name shortDesc longDesc defaultCopyFlags options
     options showOrParseArgs =
       [optionVerbosity copyVerbosity (\v flags -> flags { copyVerbosity = v })
 
-      ,option "" ["shell-wrappers"]
-         "using shell script wrappers around executables"
-         copyUseWrapper (\v flags -> flags { copyUseWrapper = v })
-         (boolOpt [] [])
-
       ,optionDistPref
          copyDistPref (\d flags -> flags { copyDistPref = d })
          showOrParseArgs
-
-      ,option "" ["inplace"]
-         "copy the package in the install subdirectory of the dist prefix, so it can be used without being installed"
-         copyInPlace (\v flags -> flags { copyInPlace = v })
-         trueArg
 
       ,option "" ["destdir"]
          "directory to copy files to, prepended to installation directories"
@@ -661,15 +647,11 @@ instance Monoid CopyFlags where
   mempty = CopyFlags {
     copyDest      = mempty,
     copyDistPref  = mempty,
-    copyUseWrapper = mempty,
-    copyInPlace    = mempty,
     copyVerbosity = mempty
   }
   mappend a b = CopyFlags {
     copyDest      = combine copyDest,
     copyDistPref  = combine copyDistPref,
-    copyUseWrapper = combine copyUseWrapper,
-    copyInPlace    = combine copyInPlace,
     copyVerbosity = combine copyVerbosity
   }
     where combine field = field a `mappend` field b
@@ -1058,7 +1040,8 @@ haddockCommand = makeCommand name shortDesc longDesc defaultHaddockFlags options
       ++ programConfigurationOptions progConf ParseArgs
              haddockProgramArgs  (\v flags -> flags { haddockProgramArgs = v})
     progConf = addKnownProgram haddockProgram
-               emptyProgramConfiguration
+             $ addKnownProgram ghcProgram
+             $ emptyProgramConfiguration
 
 emptyHaddockFlags :: HaddockFlags
 emptyHaddockFlags = mempty
@@ -1201,58 +1184,6 @@ instance Monoid BuildFlags where
     buildProgramArgs = combine buildProgramArgs,
     buildVerbosity   = combine buildVerbosity,
     buildDistPref    = combine buildDistPref
-  }
-    where combine field = field a `mappend` field b
-
--- ------------------------------------------------------------
--- * Makefile flags
--- ------------------------------------------------------------
-
-data MakefileFlags = MakefileFlags {
-    makefileFile      :: Flag FilePath,
-    makefileDistPref  :: Flag FilePath,
-    makefileVerbosity :: Flag Verbosity
-  }
-  deriving Show
-
-defaultMakefileFlags :: MakefileFlags
-defaultMakefileFlags  = MakefileFlags {
-    makefileFile      = NoFlag,
-    makefileDistPref  = Flag defaultDistPref,
-    makefileVerbosity = Flag normal
-  }
-
-makefileCommand :: CommandUI MakefileFlags
-makefileCommand = makeCommand name shortDesc longDesc defaultMakefileFlags options
-  where
-    name       = "makefile"
-    shortDesc  = "Generate a makefile (only for GHC libraries)."
-    longDesc   = Nothing
-    options showOrParseArgs =
-      [optionVerbosity makefileVerbosity (\v flags -> flags { makefileVerbosity = v })
-      ,optionDistPref
-         makefileDistPref (\d flags -> flags { makefileDistPref = d })
-         showOrParseArgs
-
-      ,option "f" ["file"]
-         "Filename to use (default: Makefile)."
-         makefileFile (\f flags -> flags { makefileFile = f })
-         (reqArgFlag "PATH")
-      ]
-
-emptyMakefileFlags :: MakefileFlags
-emptyMakefileFlags  = mempty
-
-instance Monoid MakefileFlags where
-  mempty = MakefileFlags {
-    makefileFile      = mempty,
-    makefileDistPref  = mempty,
-    makefileVerbosity = mempty
-  }
-  mappend a b = MakefileFlags {
-    makefileFile      = combine makefileFile,
-    makefileDistPref  = combine makefileDistPref,
-    makefileVerbosity = combine makefileVerbosity
   }
     where combine field = field a `mappend` field b
 

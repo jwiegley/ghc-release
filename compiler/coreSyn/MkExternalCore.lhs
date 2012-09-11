@@ -26,15 +26,14 @@ import Outputable
 import Encoding
 import ForeignCall
 import DynFlags
-import StaticFlags
 import FastString
 
-import IO
 import Data.Char
+import System.IO
 
 emitExternalCore :: DynFlags -> CgGuts -> IO ()
 emitExternalCore dflags cg_guts
- | opt_EmitExternalCore 
+ | dopt Opt_EmitExternalCore dflags
  = (do handle <- openFile corename WriteMode
        hPutStrLn handle (show (mkExternalCore cg_guts))      
        hClose handle)
@@ -65,16 +64,9 @@ mkExternalCore :: CgGuts -> C.Module
 -- implicit in the data type declaration itself
 mkExternalCore (CgGuts {cg_module=this_mod, cg_tycons = tycons, 
                         cg_binds = binds})
- -- Note that we flatten binds at the top level:
- -- every module is just a single recursive bag of declarations.
- -- Rationale: since modules can be mutually recursive, 
- -- there's not much reason to preserve dependency info within a module.
-  = C.Module mname tdefs (case flattenBinds binds of
-                          -- check for empty list so we don't create an
-                          -- empty Rec group
-                            [] -> []
-                            bs  -> [(runCoreM (make_vdef True
-                                      (Rec bs)) this_mod)])
+{- Note that modules can be mutually recursive, but even so, we
+   print out dependency information within each module. -}
+  = C.Module mname tdefs (runCoreM (mapM (make_vdef True) binds) this_mod)
   where
     mname  = make_mid this_mod
     tdefs  = foldr collect_tdefs [] tycons
@@ -136,14 +128,11 @@ make_exp (Var v) = do
   let vName = Var.varName v
   isLocal <- isALocal vName
   return $
-     case globalIdVarDetails v of
+     case idDetails v of
        FCallId (CCall (CCallSpec (StaticTarget nm) callconv _)) 
            -> C.External (unpackFS nm) (showSDoc (ppr callconv)) (make_ty (varType v))
        FCallId (CCall (CCallSpec DynamicTarget     callconv _)) 
            -> C.DynExternal            (showSDoc (ppr callconv)) (make_ty (varType v))
-       FCallId _ 
-           -> pprPanic "MkExternalCore died: can't handle non-{static,dynamic}-C foreign call"
-                    (ppr v)
        -- Constructors are always exported, so make sure to declare them
        -- with qualified names
        DataConWorkId _ -> C.Var (make_var_qid False vName)

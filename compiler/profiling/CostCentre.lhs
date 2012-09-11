@@ -21,7 +21,7 @@ module CostCentre (
 	noCostCentre, noCCAttached,
 	noCCSAttached, isCurrentCCS,  isSubsumedCCS, currentOrSubsumedCCS,
 	isDerivedFromCurrentCCS, maybeSingletonCCS,
-	decomposeCCS,
+	decomposeCCS, pushCCisNop,
 
 	mkUserCC, mkAutoCC, mkAllCafsCC, 
 	mkSingletonCCS, dupifyCC, pushCCOnCCS,
@@ -209,6 +209,13 @@ currentOrSubsumedCCS _			= False
 maybeSingletonCCS :: CostCentreStack -> Maybe CostCentre
 maybeSingletonCCS (PushCC cc NoCCS)	= Just cc
 maybeSingletonCCS _			= Nothing
+
+pushCCisNop :: CostCentre -> CostCentreStack -> Bool
+-- (pushCCisNop cc ccs) = True => pushing cc on ccs is a no-op
+-- It's safe to return False, but the optimiser can remove
+-- redundant pushes if this function returns True.
+pushCCisNop cc (PushCC cc' _) = cc == cc'
+pushCCisNop _ _ = False
 \end{code}
 
 Building cost centres
@@ -300,8 +307,8 @@ cmpCostCentre (NormalCC {cc_name = n1, cc_mod =  m1, cc_is_caf = c1})
 
 cmpCostCentre other_1 other_2
   = let
-	tag1 = tag_CC other_1
-	tag2 = tag_CC other_2
+	!tag1 = tag_CC other_1
+	!tag2 = tag_CC other_2
     in
     if tag1 <# tag2 then LT else GT
   where

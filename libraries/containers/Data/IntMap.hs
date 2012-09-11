@@ -96,6 +96,7 @@ module Data.IntMap  (
             , mapWithKey
             , mapAccum
             , mapAccumWithKey
+            , mapAccumRWithKey
             
             -- ** Fold
             , fold
@@ -168,18 +169,20 @@ import Data.Monoid (Monoid(..))
 import Data.Maybe (fromMaybe)
 import Data.Typeable
 import Data.Foldable (Foldable(foldMap))
+import Data.Traversable (Traversable(traverse))
+import Control.Applicative (Applicative(pure,(<*>)),(<$>))
 import Control.Monad ( liftM )
 {-
 -- just for testing
 import qualified Prelude
-import Debug.QuickCheck 
+import Test.QuickCheck 
 import List (nub,sort)
 import qualified List
 -}  
 
 #if __GLASGOW_HASKELL__
 import Text.Read
-import Data.Data (Data(..), mkNorepType)
+import Data.Data (Data(..), mkNoRepType)
 #endif
 
 #if __GLASGOW_HASKELL__ >= 503
@@ -252,6 +255,11 @@ instance Foldable IntMap where
     foldMap f (Tip _k v) = f v
     foldMap f (Bin _ _ l r) = foldMap f l `mappend` foldMap f r
 
+instance Traversable IntMap where
+    traverse _ Nil = pure Nil
+    traverse f (Tip k v) = Tip k <$> f v
+    traverse f (Bin p m l r) = Bin p m <$> traverse f l <*> traverse f r
+
 #if __GLASGOW_HASKELL__
 
 {--------------------------------------------------------------------
@@ -265,7 +273,7 @@ instance Data a => Data (IntMap a) where
   gfoldl f z im = z fromList `f` (toList im)
   toConstr _    = error "toConstr"
   gunfold _ _   = error "gunfold"
-  dataTypeOf _  = mkNorepType "Data.IntMap.IntMap"
+  dataTypeOf _  = mkNoRepType "Data.IntMap.IntMap"
   dataCast1 f   = gcast1 f
 
 #endif
@@ -787,7 +795,7 @@ intersection _ Nil = Nil
 --
 -- > intersectionWith (++) (fromList [(5, "a"), (3, "b")]) (fromList [(5, "A"), (7, "C")]) == singleton 5 "aA"
 
-intersectionWith :: (a -> b -> a) -> IntMap a -> IntMap b -> IntMap a
+intersectionWith :: (a -> b -> c) -> IntMap a -> IntMap b -> IntMap c
 intersectionWith f m1 m2
   = intersectionWithKey (\_ x y -> f x y) m1 m2
 
@@ -796,7 +804,7 @@ intersectionWith f m1 m2
 -- > let f k al ar = (show k) ++ ":" ++ al ++ "|" ++ ar
 -- > intersectionWithKey f (fromList [(5, "a"), (3, "b")]) (fromList [(5, "A"), (7, "C")]) == singleton 5 "5:a|A"
 
-intersectionWithKey :: (Key -> a -> b -> a) -> IntMap a -> IntMap b -> IntMap a
+intersectionWithKey :: (Key -> a -> b -> c) -> IntMap a -> IntMap b -> IntMap c
 intersectionWithKey f t1@(Bin p1 m1 l1 r1) t2@(Bin p2 m2 l2 r2)
   | shorter m1 m2  = intersection1
   | shorter m2 m1  = intersection2
@@ -950,12 +958,26 @@ deleteFindMin :: IntMap a -> (a, IntMap a)
 deleteFindMin = fromMaybe (error "deleteFindMin: empty map has no minimal element") . minView
 
 -- | /O(log n)/. The minimal key of the map.
-findMin :: IntMap a -> a
-findMin = maybe (error "findMin: empty map has no minimal element") fst . minView
+findMin :: IntMap a -> (Int,a)
+findMin Nil = error $ "findMin: empty map has no minimal element"
+findMin (Tip k v) = (k,v)
+findMin (Bin _ m l r)
+  |   m < 0   = find r
+  | otherwise = find l
+    where find (Tip k v)      = (k,v)
+          find (Bin _ _ l' _) = find l'
+          find Nil            = error "findMax Nil"
 
 -- | /O(log n)/. The maximal key of the map.
-findMax :: IntMap a -> a
-findMax = maybe (error "findMax: empty map has no maximal element") fst . maxView
+findMax :: IntMap a -> (Int,a)
+findMax Nil = error $ "findMax: empty map has no maximal element"
+findMax (Tip k v) = (k,v)
+findMax (Bin _ m l r) 
+  |   m < 0   = find l
+  | otherwise = find r
+    where find (Tip k v)      = (k,v)
+          find (Bin _ _ _ r') = find r'
+          find Nil            = error "findMax Nil"
 
 -- | /O(log n)/. Delete the minimal key.
 deleteMin :: IntMap a -> IntMap a
@@ -1112,20 +1134,16 @@ mapAccumL f a t
       Tip k x     -> let (a',x') = f a k x in (a',Tip k x')
       Nil         -> (a,Nil)
 
-{-
-XXX unused code
-
 -- | /O(n)/. The function @'mapAccumR'@ threads an accumulating
--- argument throught the map in descending order of keys.
-mapAccumR :: (a -> Key -> b -> (a,c)) -> a -> IntMap b -> (a,IntMap c)
-mapAccumR f a t
+-- argument through the map in descending order of keys.
+mapAccumRWithKey :: (a -> Key -> b -> (a,c)) -> a -> IntMap b -> (a,IntMap c)
+mapAccumRWithKey f a t
   = case t of
-      Bin p m l r -> let (a1,r') = mapAccumR f a r
-                         (a2,l') = mapAccumR f a1 l
+      Bin p m l r -> let (a1,r') = mapAccumRWithKey f a r
+                         (a2,l') = mapAccumRWithKey f a1 l
                      in (a2,Bin p m l' r')
       Tip k x     -> let (a',x') = f a k x in (a',Tip k x')
       Nil         -> (a,Nil)
--}
 
 {--------------------------------------------------------------------
   Filter
@@ -1455,7 +1473,7 @@ fromListWithKey f xs
   where
     ins t (k,x) = insertWithKey f k x t
 
--- | /O(n*min(n,W))/. Build a map from a list of key\/value pairs where
+-- | /O(n)/. Build a map from a list of key\/value pairs where
 -- the keys are in ascending order.
 --
 -- > fromAscList [(3,"b"), (5,"a")]          == fromList [(3, "b"), (5, "a")]
@@ -1463,34 +1481,62 @@ fromListWithKey f xs
 
 fromAscList :: [(Key,a)] -> IntMap a
 fromAscList xs
-  = fromList xs
+  = fromAscListWithKey (\_ x _ -> x) xs
 
--- | /O(n*min(n,W))/. Build a map from a list of key\/value pairs where
+-- | /O(n)/. Build a map from a list of key\/value pairs where
 -- the keys are in ascending order, with a combining function on equal keys.
+-- /The precondition (input list is ascending) is not checked./
 --
 -- > fromAscListWith (++) [(3,"b"), (5,"a"), (5,"b")] == fromList [(3, "b"), (5, "ba")]
 
 fromAscListWith :: (a -> a -> a) -> [(Key,a)] -> IntMap a
 fromAscListWith f xs
-  = fromListWith f xs
+  = fromAscListWithKey (\_ x y -> f x y) xs
 
--- | /O(n*min(n,W))/. Build a map from a list of key\/value pairs where
+-- | /O(n)/. Build a map from a list of key\/value pairs where
 -- the keys are in ascending order, with a combining function on equal keys.
+-- /The precondition (input list is ascending) is not checked./
 --
 -- > fromAscListWith (++) [(3,"b"), (5,"a"), (5,"b")] == fromList [(3, "b"), (5, "ba")]
 
 fromAscListWithKey :: (Key -> a -> a -> a) -> [(Key,a)] -> IntMap a
-fromAscListWithKey f xs
-  = fromListWithKey f xs
+fromAscListWithKey _ []         = Nil
+fromAscListWithKey f (x0 : xs0) = fromDistinctAscList (combineEq x0 xs0)
+  where
+    -- [combineEq f xs] combines equal elements with function [f] in an ordered list [xs]
+    combineEq z [] = [z]
+    combineEq z@(kz,zz) (x@(kx,xx):xs)
+      | kx==kz    = let yy = f kx xx zz in combineEq (kx,yy) xs
+      | otherwise = z:combineEq x xs
 
--- | /O(n*min(n,W))/. Build a map from a list of key\/value pairs where
+-- | /O(n)/. Build a map from a list of key\/value pairs where
 -- the keys are in ascending order and all distinct.
+-- /The precondition (input list is strictly ascending) is not checked./
 --
 -- > fromDistinctAscList [(3,"b"), (5,"a")] == fromList [(3, "b"), (5, "a")]
 
 fromDistinctAscList :: [(Key,a)] -> IntMap a
-fromDistinctAscList xs
-  = fromList xs
+fromDistinctAscList []         = Nil
+fromDistinctAscList (z0 : zs0) = work z0 zs0 Nada
+  where
+    work (kx,vx) []            stk = finish kx (Tip kx vx) stk
+    work (kx,vx) (z@(kz,_):zs) stk = reduce z zs (branchMask kx kz) kx (Tip kx vx) stk
+
+    reduce :: (Key,a) -> [(Key,a)] -> Mask -> Prefix -> IntMap a -> Stack a -> IntMap a
+    reduce z zs _ px tx Nada = work z zs (Push px tx Nada)
+    reduce z zs m px tx stk@(Push py ty stk') =
+        let mxy = branchMask px py
+            pxy = mask px mxy
+        in  if shorter m mxy
+                 then reduce z zs m pxy (Bin pxy mxy ty tx) stk'
+                 else work z zs (Push px tx stk)
+
+    finish _  t  Nada = t
+    finish px tx (Push py ty stk) = finish p (join py ty px tx) stk
+        where m = branchMask px py
+              p = mask px m
+
+data Stack a = Push {-# UNPACK #-} !Prefix !(IntMap a) !(Stack a) | Nada
 
 
 {--------------------------------------------------------------------
@@ -1850,7 +1896,7 @@ prop_Int xs ys
 --------------------------------------------------------------------}
 prop_Ordered
   = forAll (choose (5,100)) $ \n ->
-    let xs = [(x,()) | x <- [0..n::Int]] 
+    let xs = concat [[(x-n,()),(x-n,())] | x <- [0..2*n::Int]] 
     in fromAscList xs == fromList xs
 
 prop_List :: [Key] -> Bool

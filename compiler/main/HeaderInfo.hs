@@ -15,6 +15,7 @@ module HeaderInfo ( getImports
 
 #include "HsVersions.h"
 
+import RdrName
 import HscTypes
 import Parser		( parseHeader )
 import Lexer
@@ -29,63 +30,68 @@ import ErrUtils
 import Util
 import Outputable
 import Pretty           ()
-import Panic
 import Maybes
-import Bag		( emptyBag, listToBag )
+import Bag		( emptyBag, listToBag, unitBag )
 
+import MonadUtils       ( MonadIO )
 import Exception
 import Control.Monad
-import System.Exit
 import System.IO
 import System.IO.Unsafe
 import Data.List
 
-getImports :: DynFlags -> StringBuffer -> FilePath -> FilePath
-    -> IO ([Located ModuleName], [Located ModuleName], Located ModuleName)
+------------------------------------------------------------------------------
+
+-- | Parse the imports of a source file.
+--
+-- Throws a 'SourceError' if parsing fails.
+getImports :: GhcMonad m =>
+              DynFlags
+           -> StringBuffer -- ^ Parse this.
+           -> FilePath     -- ^ Filename the buffer came from.  Used for
+                           --   reporting parse error locations.
+           -> FilePath     -- ^ The original source filename (used for locations
+                           --   in the function result)
+           -> m ([Located (ImportDecl RdrName)], [Located (ImportDecl RdrName)], Located ModuleName)
+              -- ^ The source imports, normal imports, and the module name.
 getImports dflags buf filename source_filename = do
   let loc  = mkSrcLoc (mkFastString filename) 1 0
   case unP parseHeader (mkPState buf loc dflags) of
-	PFailed span err -> parseError span err
-	POk pst rdr_module -> do
-          let ms = getMessages pst
-          printErrorsAndWarnings dflags ms
-          when (errorsFound dflags ms) $ exitWith (ExitFailure 1)
+    PFailed span err -> parseError span err
+    POk pst rdr_module -> do
+      let _ms@(_warns, errs) = getMessages pst
+      -- don't log warnings: they'll be reported when we parse the file
+      -- for real.  See #2500.
+          ms = (emptyBag, errs)
+      -- logWarnings warns
+      if errorsFound dflags ms
+        then liftIO $ throwIO $ mkSrcErr errs
+        else
 	  case rdr_module of
-	    L _ (HsModule mb_mod _ imps _ _ _ _) ->
+	    L _ (HsModule mb_mod _ imps _ _ _) ->
 	      let
                 main_loc = mkSrcLoc (mkFastString source_filename) 1 0
 		mod = mb_mod `orElse` L (srcLocSpan main_loc) mAIN_NAME
-                imps' = filter isHomeImp (map unLoc imps)
-	        (src_idecls, ord_idecls) = partition isSourceIdecl imps'
-		source_imps   = map getImpMod src_idecls
-		ordinary_imps = filter ((/= moduleName gHC_PRIM) . unLoc) 
-					(map getImpMod ord_idecls)
+	        (src_idecls, ord_idecls) = partition (ideclSource.unLoc) imps
+		ordinary_imps = filter ((/= moduleName gHC_PRIM) . unLoc . ideclName . unLoc) 
+					ord_idecls
 		     -- GHC.Prim doesn't exist physically, so don't go looking for it.
 	      in
-	      return (source_imps, ordinary_imps, mod)
+	      return (src_idecls, ordinary_imps, mod)
   
-parseError :: SrcSpan -> Message -> IO a
+parseError :: GhcMonad m => SrcSpan -> Message -> m a
 parseError span err = throwOneError $ mkPlainErrMsg span err
-
--- we aren't interested in package imports here, filter them out
-isHomeImp :: ImportDecl name -> Bool
-isHomeImp (ImportDecl _ (Just p) _ _ _ _) = p == fsLit "this"
-isHomeImp (ImportDecl _ Nothing  _ _ _ _) = True
-
-isSourceIdecl :: ImportDecl name -> Bool
-isSourceIdecl (ImportDecl _ _ s _ _ _) = s
-
-getImpMod :: ImportDecl name -> Located ModuleName
-getImpMod (ImportDecl located_mod _ _ _ _ _) = located_mod
 
 --------------------------------------------------------------
 -- Get options
 --------------------------------------------------------------
 
-
+-- | Parse OPTIONS and LANGUAGE pragmas of the source file.
+--
+-- Throws a 'SourceError' if flag parsing fails (including unsupported flags.)
 getOptionsFromFile :: DynFlags
-                   -> FilePath            -- input file
-                   -> IO [Located String] -- options, if any
+                   -> FilePath            -- ^ Input file
+                   -> IO [Located String] -- ^ Parsed options, if any.
 getOptionsFromFile dflags filename
     = Exception.bracket
 	      (openBinaryFile filename ReadMode)
@@ -120,8 +126,9 @@ lazyGetToks dflags filename handle = do
                   _other    -> do rest <- lazyLexBuf handle state' eof
                                   return (t : rest)
       _ | not eof   -> getMore handle state
-        | otherwise -> return []
-  
+        | otherwise -> return [L (last_loc state) ITeof]
+                         -- parser assumes an ITeof sentinel at the end
+
   getMore :: Handle -> PState -> IO [Located Token]
   getMore handle state = do
      -- pprTrace "getMore" (text (show (buffer state))) (return ())
@@ -142,7 +149,13 @@ getToks dflags filename buf = lexAll (pragState dflags buf loc)
                    _ -> [L (last_loc state) ITeof]
 
 
-getOptions :: DynFlags -> StringBuffer -> FilePath -> [Located String]
+-- | Parse OPTIONS and LANGUAGE pragmas of the source file.
+--
+-- Throws a 'SourceError' if flag parsing fails (including unsupported flags.)
+getOptions :: DynFlags
+           -> StringBuffer -- ^ Input Buffer
+           -> FilePath     -- ^ Source filename.  Used for location info.
+           -> [Located String] -- ^ Parsed options.
 getOptions dflags buf filename
     = getOptions' (getToks dflags filename buf)
 
@@ -194,16 +207,19 @@ getOptions' toks
               = panic "getOptions'.parseLanguage(2) went past eof token"
 
 -----------------------------------------------------------------------------
--- Complain about non-dynamic flags in OPTIONS pragmas
 
-checkProcessArgsResult :: [Located String] -> IO ()
+-- | Complain about non-dynamic flags in OPTIONS pragmas.
+--
+-- Throws a 'SourceError' if the input list is non-empty claiming that the
+-- input flags are unknown.
+checkProcessArgsResult :: MonadIO m => [Located String] -> m ()
 checkProcessArgsResult flags
   = when (notNull flags) $
-        ghcError $ ProgramError $ showSDoc $ vcat $ map f flags
-    where f (L loc flag)
-              = hang (ppr loc <> char ':') 4
-                     (text "unknown flag in  {-# OPTIONS #-} pragma:" <+>
-                      text flag)
+      liftIO $ throwIO $ mkSrcErr $ listToBag $ map mkMsg flags
+    where mkMsg (L loc flag)
+              = mkPlainErrMsg loc $
+                  (text "unknown flag in  {-# OPTIONS #-} pragma:" <+>
+                   text flag)
 
 -----------------------------------------------------------------------------
 
@@ -219,15 +235,18 @@ checkExtension (L l ext)
 
 languagePragParseError :: SrcSpan -> a
 languagePragParseError loc =
-  pgmError 
-   (showSDoc (mkLocMessage loc (
-     text "cannot parse LANGUAGE pragma: comma-separated list expected")))
+  throw $ mkSrcErr $ unitBag $
+     (mkPlainErrMsg loc $
+       vcat [ text "Cannot parse LANGUAGE pragma"
+            , text "Expecting comma-separated list of language options,"
+            , text "each starting with a capital letter"
+            , nest 2 (text "E.g. {-# LANGUAGE RecordPuns, Generics #-}") ])
 
 unsupportedExtnError :: SrcSpan -> String -> a
 unsupportedExtnError loc unsup =
-  pgmError (showSDoc (mkLocMessage loc (
-                text "unsupported extension: " <>
-                text unsup)))
+  throw $ mkSrcErr $ unitBag $
+    mkPlainErrMsg loc $
+        text "Unsupported extension: " <> text unsup
 
 
 optionsErrorMsgs :: [String] -> [Located String] -> FilePath -> Messages

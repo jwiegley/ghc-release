@@ -1,18 +1,12 @@
 %
 % (c) The University of Glasgow 2005-2006
 %
-
--- --------------------------------------
--- 	The dynamic linker for GHCi      
--- --------------------------------------
-
-This module deals with the top-level issues of dynamic linking,
-calling the object-code linker and the byte-code linker where
-necessary.
-
-
 \begin{code}
-{-# OPTIONS -optc-DNON_POSIX_SOURCE -#include "Linker.h" #-}
+-- | The dynamic linker for GHCi.
+--
+-- This module deals with the top-level issues of dynamic linking,
+-- calling the object-code linker and the byte-code linker where
+-- necessary.
 
 {-# OPTIONS -fno-cse #-}
 -- -fno-cse is needed for GLOBAL_VAR's to behave properly
@@ -50,15 +44,14 @@ import ListSetOps
 import DynFlags
 import BasicTypes
 import Outputable
-import PackageConfig
 import Panic
 import Util
 import StaticFlags
 import ErrUtils
-import DriverPhases
 import SrcLoc
 import qualified Maybes
 import UniqSet
+import FiniteMap
 import Constants
 import FastString
 import Config		( cProjectVersion )
@@ -70,6 +63,7 @@ import Data.Char
 import Data.IORef
 import Data.List
 import Foreign
+import Control.Concurrent.MVar
 
 import System.FilePath
 import System.IO
@@ -78,7 +72,6 @@ import System.Directory
 import Distribution.Package hiding (depends, PackageId)
 
 import Exception
-import Data.Maybe
 \end{code}
 
 
@@ -96,7 +89,7 @@ The PersistentLinkerState maps Names to actual closures (for
 interpreted code only), for use during linking.
 
 \begin{code}
-GLOBAL_VAR(v_PersistentLinkerState, panic "Dynamic linker not initialised", PersistentLinkerState)
+GLOBAL_MVAR(v_PersistentLinkerState, panic "Dynamic linker not initialised", PersistentLinkerState)
 GLOBAL_VAR(v_InitLinkerDone, False, Bool)	-- Set True when dynamic linker is initialised
 
 data PersistentLinkerState
@@ -142,34 +135,33 @@ emptyPLS _ = PersistentLinkerState {
 
 \begin{code}
 extendLoadedPkgs :: [PackageId] -> IO ()
-extendLoadedPkgs pkgs
-    = modifyIORef v_PersistentLinkerState (\s -> s{pkgs_loaded = pkgs ++ pkgs_loaded s})
+extendLoadedPkgs pkgs =
+  modifyMVar_ v_PersistentLinkerState $ \s ->
+      return s{ pkgs_loaded = pkgs ++ pkgs_loaded s }
 
 extendLinkEnv :: [(Name,HValue)] -> IO ()
 -- Automatically discards shadowed bindings
-extendLinkEnv new_bindings
-  = do	pls <- readIORef v_PersistentLinkerState
-	let new_closure_env = extendClosureEnv (closure_env pls) new_bindings
-	    new_pls = pls { closure_env = new_closure_env }
-	writeIORef v_PersistentLinkerState new_pls
+extendLinkEnv new_bindings =
+  modifyMVar_ v_PersistentLinkerState $ \pls ->
+    let new_closure_env = extendClosureEnv (closure_env pls) new_bindings
+    in return pls{ closure_env = new_closure_env }
 
 deleteFromLinkEnv :: [Name] -> IO ()
-deleteFromLinkEnv to_remove
-  = do	pls <- readIORef v_PersistentLinkerState
-	let new_closure_env = delListFromNameEnv (closure_env pls) to_remove
-	    new_pls = pls { closure_env = new_closure_env }
-	writeIORef v_PersistentLinkerState new_pls
+deleteFromLinkEnv to_remove =
+  modifyMVar_ v_PersistentLinkerState $ \pls ->
+    let new_closure_env = delListFromNameEnv (closure_env pls) to_remove
+    in return pls{ closure_env = new_closure_env }
 
 -- | Given a data constructor in the heap, find its Name.
 --   The info tables for data constructors have a field which records
 --   the source name of the constructor as a Ptr Word8 (UTF-8 encoded
 --   string). The format is:
 --
---    Package:Module.Name
+--   > Package:Module.Name
 --
 --   We use this string to lookup the interpreter's internal representation of the name
 --   using the lookupOrig.    
-
+--
 dataConInfoPtrToName :: Ptr () -> TcM (Either String Name)
 dataConInfoPtrToName x = do 
    theString <- liftIO $ do
@@ -258,17 +250,26 @@ dataConInfoPtrToName x = do
               (top, []) -> (acc, top)
               (top, _:bot) -> parseModOcc (top : acc) bot
        
-
+-- | Get the 'HValue' associated with the given name.
+--
+-- May cause loading the module that contains the name.
+--
+-- Throws a 'ProgramError' if loading fails or the name cannot be found.
 getHValue :: HscEnv -> Name -> IO HValue
 getHValue hsc_env name = do
-   when (isExternalName name) $ do
-        ok <- linkDependencies hsc_env noSrcSpan [nameModule name]
-        when (failed ok) $ ghcError (ProgramError "")
-   pls <- readIORef v_PersistentLinkerState
-   lookupName (closure_env pls) name
+  pls <- modifyMVar v_PersistentLinkerState $ \pls -> do
+           if (isExternalName name) then do
+             (pls', ok) <- linkDependencies hsc_env pls noSrcSpan [nameModule name]
+             if (failed ok) then ghcError (ProgramError "")
+                            else return (pls', pls')
+            else
+             return (pls, pls)
+  lookupName (closure_env pls) name
         
-linkDependencies :: HscEnv -> SrcSpan -> [Module] -> IO SuccessFlag
-linkDependencies hsc_env span needed_mods = do
+linkDependencies :: HscEnv -> PersistentLinkerState
+                 -> SrcSpan -> [Module]
+                 -> IO (PersistentLinkerState, SuccessFlag)
+linkDependencies hsc_env pls span needed_mods = do
    let hpt = hsc_HPT hsc_env
        dflags = hsc_dflags hsc_env
 	-- The interpreter and dynamic linker can only handle object code built
@@ -278,13 +279,12 @@ linkDependencies hsc_env span needed_mods = do
    maybe_normal_osuf <- checkNonStdWay dflags span
 
 	-- Find what packages and linkables are required
-   eps <- readIORef (hsc_EPS hsc_env)
-   (lnks, pkgs) <- getLinkDeps hsc_env hpt (eps_PIT eps) 
+   (lnks, pkgs) <- getLinkDeps hsc_env hpt pls
 				maybe_normal_osuf span needed_mods
 
 	-- Link the packages and modules required
-   linkPackages dflags pkgs
-   linkModules dflags lnks
+   pls1 <- linkPackages' dflags pkgs pls
+   linkModules dflags pls1 lnks
 
 
 -- | Temporarily extend the linker state.
@@ -292,27 +292,20 @@ linkDependencies hsc_env span needed_mods = do
 withExtendedLinkEnv :: (MonadIO m, ExceptionMonad m) =>
                        [(Name,HValue)] -> m a -> m a
 withExtendedLinkEnv new_env action
-    = gbracket set_new_env
+    = gbracket (liftIO $ extendLinkEnv new_env)
                (\_ -> reset_old_env)
                (\_ -> action)
-    where set_new_env = do 
-            pls <- liftIO $ readIORef v_PersistentLinkerState
-            let new_closure_env = extendClosureEnv (closure_env pls) new_env
-                new_pls = pls { closure_env = new_closure_env }
-            liftIO $ writeIORef v_PersistentLinkerState new_pls
-            return ()
-
+    where
         -- Remember that the linker state might be side-effected
         -- during the execution of the IO action, and we don't want to
         -- lose those changes (we might have linked a new module or
         -- package), so the reset action only removes the names we
         -- added earlier.
           reset_old_env = liftIO $ do
-            modifyIORef v_PersistentLinkerState $ \pls ->
+            modifyMVar_ v_PersistentLinkerState $ \pls ->
                 let cur = closure_env pls
                     new = delListFromNameEnv cur (map fst new_env)
-                in
-                pls{ closure_env = new }
+                in return pls{ closure_env = new }
 
 -- filterNameMap removes from the environment all entries except 
 -- 	those for a given set of modules;
@@ -330,10 +323,10 @@ filterNameMap mods env
 
 
 \begin{code}
+-- | Display the persistent linker state.
 showLinkerState :: IO ()
--- Display the persistent linker state
 showLinkerState
-  = do pls <- readIORef v_PersistentLinkerState
+  = do pls <- readMVar v_PersistentLinkerState
        printDump (vcat [text "----- Linker state -----",
 			text "Pkgs:" <+> ppr (pkgs_loaded pls),
 			text "Objs:" <+> ppr (objs_loaded pls),
@@ -349,41 +342,43 @@ showLinkerState
 %*									*
 %************************************************************************
 
-We initialise the dynamic linker by
-
-a) calling the C initialisation procedure
-
-b) Loading any packages specified on the command line,
-
-c) Loading any packages specified on the command line,
-   now held in the -l options in v_Opt_l
-
-d) Loading any .o/.dll files specified on the command line,
-   now held in v_Ld_inputs
-
-e) Loading any MacOS frameworks
-
 \begin{code}
+-- | Initialise the dynamic linker.  This entails
+--
+--  a) Calling the C initialisation procedure,
+--
+--  b) Loading any packages specified on the command line,
+--
+--  c) Loading any packages specified on the command line, now held in the
+--     @-l@ options in @v_Opt_l@,
+--
+--  d) Loading any @.o\/.dll@ files specified on the command line, now held
+--     in @v_Ld_inputs@,
+--
+--  e) Loading any MacOS frameworks.
+--
+-- NOTE: This function is idempotent; if called more than once, it does
+-- nothing.  This is useful in Template Haskell, where we call it before
+-- trying to link.
+--
 initDynLinker :: DynFlags -> IO ()
--- This function is idempotent; if called more than once, it does nothing
--- This is useful in Template Haskell, where we call it before trying to link
-initDynLinker dflags
-  = do	{ done <- readIORef v_InitLinkerDone
-	; if done then return () 
-		  else do { writeIORef v_InitLinkerDone True
-			  ; reallyInitDynLinker dflags }
-	}
+initDynLinker dflags =
+  modifyMVar_ v_PersistentLinkerState $ \pls0 -> do
+    done <- readIORef v_InitLinkerDone
+    if done then return pls0
+            else do writeIORef v_InitLinkerDone True
+                    reallyInitDynLinker dflags
 
-reallyInitDynLinker :: DynFlags -> IO ()
-reallyInitDynLinker dflags
-  = do  {  -- Initialise the linker state
-	; writeIORef v_PersistentLinkerState (emptyPLS dflags)
+reallyInitDynLinker :: DynFlags -> IO PersistentLinkerState
+reallyInitDynLinker dflags =
+    do  {  -- Initialise the linker state
+	  let pls0 = emptyPLS dflags
 
 	 	-- (a) initialise the C dynamic linker
 	; initObjLinker 
 
 		-- (b) Load packages from the command-line
-	; linkPackages dflags (preloadPackages (pkgState dflags))
+	; pls <- linkPackages' dflags (preloadPackages (pkgState dflags)) pls0
 
 	   	-- (c) Link libraries from the command-line
 	; let optl = getOpts dflags opt_l
@@ -406,7 +401,7 @@ reallyInitDynLinker dflags
         ; let cmdline_lib_specs = [ l | Just l <- classified_ld_inputs ]
 			       ++ map DLL       minus_ls 
 			       ++ map Framework frameworks
-	; if null cmdline_lib_specs then return ()
+	; if null cmdline_lib_specs then return pls
 				    else do
 
  	{ mapM_ (preloadLib dflags lib_paths framework_paths) cmdline_lib_specs
@@ -415,6 +410,8 @@ reallyInitDynLinker dflags
 
 	; if succeeded ok then maybePutStrLn dflags "done"
 	  else ghcError (ProgramError "linking extra libraries/objects failed")
+
+        ; return pls
 	}}
 
 classifyLdInput :: FilePath -> IO (Maybe LibrarySpec)
@@ -481,37 +478,36 @@ preloadLib dflags lib_paths framework_paths lib_spec
 %************************************************************************
 
 \begin{code}
-linkExpr :: HscEnv -> SrcSpan -> UnlinkedBCO -> IO HValue
-
--- Link a single expression, *including* first linking packages and 
+-- | Link a single expression, /including/ first linking packages and
 -- modules that this expression depends on.
 --
--- Raises an IO exception if it can't find a compiled version of the
--- dependents to link.
+-- Raises an IO exception ('ProgramError') if it can't find a compiled
+-- version of the dependents to link.
 --
--- Note: This function side-effects the linker state (Pepe)
-
+linkExpr :: HscEnv -> SrcSpan -> UnlinkedBCO -> IO HValue
 linkExpr hsc_env span root_ul_bco
   = do {  
 	-- Initialise the linker (if it's not been done already)
      let dflags = hsc_dflags hsc_env
    ; initDynLinker dflags
 
+        -- Take lock for the actual work.
+   ; modifyMVar v_PersistentLinkerState $ \pls0 -> do {
+
 	-- Link the packages and modules required
-   ; ok <- linkDependencies hsc_env span needed_mods
+   ; (pls, ok) <- linkDependencies hsc_env pls0 span needed_mods
    ; if failed ok then
 	ghcError (ProgramError "")
      else do {
 
 	-- Link the expression itself
-     pls <- readIORef v_PersistentLinkerState
-   ; let ie = itbl_env pls
+     let ie = itbl_env pls
 	 ce = closure_env pls
 
 	-- Link the necessary packages and linkables
    ; (_, (root_hval:_)) <- linkSomeBCOs False ie ce [root_ul_bco]
-   ; return root_hval
-   }}
+   ; return (pls, root_hval)
+   }}}
    where
      free_names = nameSetToList (bcoFreeNames root_ul_bco)
 
@@ -531,8 +527,17 @@ dieWith span msg = ghcError (ProgramError (showSDoc (mkLocMessage span msg)))
 
 checkNonStdWay :: DynFlags -> SrcSpan -> IO (Maybe String)
 checkNonStdWay dflags srcspan = do
-  tag <- readIORef v_Build_tag
-  if null tag then return Nothing else do
+  let tag = buildTag dflags
+  if null tag {-  || tag == "dyn" -} then return Nothing else do
+    -- see #3604: object files compiled for way "dyn" need to link to the
+    -- dynamic packages, so we can't load them into a statically-linked GHCi.
+    -- we have to treat "dyn" in the same way as "prof".
+    --
+    -- In the future when GHCi is dynamically linked we should be able to relax
+    -- this, but they we may have to make it possible to load either ordinary
+    -- .o files or -dynamic .o files into GHCi (currently that's not possible
+    -- because the dynamic objects contain refs to e.g. __stginit_base_Prelude_dyn
+    -- whereas we have __stginit_base_Prelude_.
   let default_osuf = phaseInputExt StopLn
   if objectSuf dflags == default_osuf
 	then failNonStd srcspan
@@ -545,16 +550,17 @@ failNonStd srcspan = dieWith srcspan $
   ptext (sLit "in the desired way using -osuf to set the object file suffix.")
   
 
-getLinkDeps :: HscEnv -> HomePackageTable -> PackageIfaceTable
+getLinkDeps :: HscEnv -> HomePackageTable
+            -> PersistentLinkerState
 	    -> Maybe String			-- the "normal" object suffix
 	    -> SrcSpan				-- for error messages
 	    -> [Module]				-- If you need these
 	    -> IO ([Linkable], [PackageId])	-- ... then link these first
 -- Fails with an IO exception if it can't find enough files
 
-getLinkDeps hsc_env hpt _ maybe_normal_osuf span mods
+getLinkDeps hsc_env hpt pls maybe_normal_osuf span mods
 -- Find all the packages and linkables that a set of modules depends on
- = do {	pls <- readIORef v_PersistentLinkerState ;
+ = do {
 	-- 1.  Find the dependent home-pkg-modules/packages from each iface
         (mods_s, pkgs_s) <- follow_deps mods emptyUniqSet emptyUniqSet;
 
@@ -638,8 +644,7 @@ getLinkDeps hsc_env hpt _ maybe_normal_osuf span mods
 
     get_linkable maybe_normal_osuf mod_name	-- A home-package module
 	| Just mod_info <- lookupUFM hpt mod_name 
-	= ASSERT(isJust (hm_linkable mod_info))
-	  adjust_linkable (fromJust (hm_linkable mod_info))
+	= adjust_linkable (Maybes.expectJust "getLinkDeps" (hm_linkable mod_info))
 	| otherwise	
 	= do	-- It's not in the HPT because we are in one shot mode, 
 		-- so use the Finder to get a ModLocation...
@@ -684,21 +689,22 @@ getLinkDeps hsc_env hpt _ maybe_normal_osuf span mods
 %************************************************************************
 
 \begin{code}
-linkModules :: DynFlags -> [Linkable] -> IO SuccessFlag
-linkModules dflags linkables
+linkModules :: DynFlags -> PersistentLinkerState -> [Linkable]
+            -> IO (PersistentLinkerState, SuccessFlag)
+linkModules dflags pls linkables
   = block $ do  -- don't want to be interrupted by ^C in here
 	
 	let (objs, bcos) = partition isObjectLinkable 
                               (concatMap partitionLinkable linkables)
 
 		-- Load objects first; they can't depend on BCOs
-	ok_flag <- dynLinkObjs dflags objs
+	(pls1, ok_flag) <- dynLinkObjs dflags pls objs
 
 	if failed ok_flag then 
-		return Failed
+		return (pls1, Failed)
 	  else do
-		dynLinkBCOs bcos
-		return Succeeded
+		pls2 <- dynLinkBCOs pls1 bcos
+		return (pls2, Succeeded)
 		
 
 -- HACK to support f-x-dynamic in the interpreter; no other purpose
@@ -735,18 +741,15 @@ linkableInSet l objs_loaded =
 %************************************************************************
 
 \begin{code}
-dynLinkObjs :: DynFlags -> [Linkable] -> IO SuccessFlag
-	-- Side-effects the PersistentLinkerState
-
-dynLinkObjs dflags objs
-  = do	pls <- readIORef v_PersistentLinkerState
-
+dynLinkObjs :: DynFlags -> PersistentLinkerState -> [Linkable]
+            -> IO (PersistentLinkerState, SuccessFlag)
+dynLinkObjs dflags pls objs = do
 	-- Load the object files and link them
 	let (objs_loaded', new_objs) = rmDupLinkables (objs_loaded pls) objs
 	    pls1 		     = pls { objs_loaded = objs_loaded' }
 	    unlinkeds 		     = concatMap linkableUnlinked new_objs
 
-	mapM loadObj (map nameOfObject unlinkeds)
+	mapM_ loadObj (map nameOfObject unlinkeds)
 
 	-- Link the all together
 	ok <- resolveObjs
@@ -754,12 +757,10 @@ dynLinkObjs dflags objs
 	-- If resolving failed, unload all our 
 	-- object modules and carry on
 	if succeeded ok then do
-		writeIORef v_PersistentLinkerState pls1
-		return Succeeded
+		return (pls1, Succeeded)
 	  else do
 		pls2 <- unload_wkr dflags [] pls1
-		writeIORef v_PersistentLinkerState pls2
-		return Failed
+                return (pls2, Failed)
 
 
 rmDupLinkables :: [Linkable] 	-- Already loaded
@@ -782,10 +783,8 @@ rmDupLinkables already ls
 %************************************************************************
 
 \begin{code}
-dynLinkBCOs :: [Linkable] -> IO ()
-	-- Side-effects the persistent linker state
-dynLinkBCOs bcos
-  = do	pls <- readIORef v_PersistentLinkerState
+dynLinkBCOs :: PersistentLinkerState -> [Linkable] -> IO PersistentLinkerState
+dynLinkBCOs pls bcos = do
 
 	let (bcos_loaded', new_bcos) = rmDupLinkables (bcos_loaded pls) bcos
 	    pls1 		     = pls { bcos_loaded = bcos_loaded' }
@@ -807,8 +806,7 @@ dynLinkBCOs bcos
 	let pls2 = pls1 { closure_env = final_gce,
 			  itbl_env    = final_ie }
 
-	writeIORef v_PersistentLinkerState pls2
-	return ()
+	return pls2
 
 -- Link a bunch of BCOs and return them + updated closure env.
 linkSomeBCOs :: Bool 	-- False <=> add _all_ BCOs to returned closure env
@@ -847,31 +845,32 @@ linkSomeBCOs toplevs_only ie ce_in ul_bcos
 
 \begin{code}
 -- ---------------------------------------------------------------------------
--- Unloading old objects ready for a new compilation sweep.
+-- | Unloading old objects ready for a new compilation sweep.
 --
 -- The compilation manager provides us with a list of linkables that it
--- considers "stable", i.e. won't be recompiled this time around.  For
+-- considers \"stable\", i.e. won't be recompiled this time around.  For
 -- each of the modules current linked in memory,
 --
---	* if the linkable is stable (and it's the same one - the
---	  user may have recompiled the module on the side), we keep it,
+--   * if the linkable is stable (and it's the same one -- the user may have
+--     recompiled the module on the side), we keep it,
 --
---	* otherwise, we unload it.
+--   * otherwise, we unload it.
 --
---      * we also implicitly unload all temporary bindings at this point.
-
-unload :: DynFlags -> [Linkable] -> IO ()
--- The 'linkables' are the ones to *keep*
-
+--   * we also implicitly unload all temporary bindings at this point.
+--
+unload :: DynFlags
+       -> [Linkable] -- ^ The linkables to *keep*.
+       -> IO ()
 unload dflags linkables
   = block $ do -- block, so we're safe from Ctrl-C in here
   
 	-- Initialise the linker (if it's not been done already)
 	initDynLinker dflags
 
-	pls	<- readIORef v_PersistentLinkerState
-	new_pls <- unload_wkr dflags linkables pls
-	writeIORef v_PersistentLinkerState new_pls
+	new_pls
+            <- modifyMVar v_PersistentLinkerState $ \pls -> do
+	         pls1 <- unload_wkr dflags linkables pls
+                 return (pls1, pls1)
 
 	debugTraceMsg dflags 3 (text "unload: retaining objs" <+> ppr (objs_loaded new_pls))
 	debugTraceMsg dflags 3 (text "unload: retaining bcos" <+> ppr (bcos_loaded new_pls))
@@ -961,39 +960,48 @@ showLS (DLL nm)       = "(dynamic) " ++ nm
 showLS (DLLPath nm)   = "(dynamic) " ++ nm
 showLS (Framework nm) = "(framework) " ++ nm
 
-linkPackages :: DynFlags -> [PackageId] -> IO ()
--- Link exactly the specified packages, and their dependents
--- (unless of course they are already linked)
--- The dependents are linked automatically, and it doesn't matter
--- what order you specify the input packages.
+-- | Link exactly the specified packages, and their dependents (unless of
+-- course they are already linked).  The dependents are linked
+-- automatically, and it doesn't matter what order you specify the input
+-- packages.
 --
+linkPackages :: DynFlags -> [PackageId] -> IO ()
 -- NOTE: in fact, since each module tracks all the packages it depends on,
---	 we don't really need to use the package-config dependencies.
+--       we don't really need to use the package-config dependencies.
+--
 -- However we do need the package-config stuff (to find aux libs etc),
 -- and following them lets us load libraries in the right order, which 
 -- perhaps makes the error message a bit more localised if we get a link
 -- failure.  So the dependency walking code is still here.
 
-linkPackages dflags new_pkgs
-   = do	{ pls 	  <- readIORef v_PersistentLinkerState
-	; let pkg_map = pkgIdMap (pkgState dflags)
+linkPackages dflags new_pkgs = do
+  -- It's probably not safe to try to load packages concurrently, so we take
+  -- a lock.
+  modifyMVar_ v_PersistentLinkerState $ \pls -> do
+    linkPackages' dflags new_pkgs pls
 
-	; pkgs' <- link pkg_map (pkgs_loaded pls) new_pkgs
+linkPackages' :: DynFlags -> [PackageId] -> PersistentLinkerState
+             -> IO PersistentLinkerState
+linkPackages' dflags new_pks pls = do
+    pkgs' <- link (pkgs_loaded pls) new_pks
+    return $! pls { pkgs_loaded = pkgs' }
+  where
+     pkg_map = pkgIdMap (pkgState dflags)
+     ipid_map = installedPackageIdMap (pkgState dflags)
 
-	; writeIORef v_PersistentLinkerState (pls { pkgs_loaded = pkgs' })
-	}
-   where
-     link :: PackageConfigMap -> [PackageId] -> [PackageId] -> IO [PackageId]
-     link pkg_map pkgs new_pkgs 
-	= foldM (link_one pkg_map) pkgs new_pkgs
+     link :: [PackageId] -> [PackageId] -> IO [PackageId]
+     link pkgs new_pkgs =
+         foldM link_one pkgs new_pkgs
 
-     link_one pkg_map pkgs new_pkg
+     link_one pkgs new_pkg
 	| new_pkg `elem` pkgs	-- Already linked
 	= return pkgs
 
 	| Just pkg_cfg <- lookupPackage pkg_map new_pkg
 	= do { 	-- Link dependents first
-	       pkgs' <- link pkg_map pkgs (map mkPackageId (depends pkg_cfg))
+               pkgs' <- link pkgs [ Maybes.expectJust "link_one" $
+                                    lookupFM ipid_map ipid
+                                  | ipid <- depends pkg_cfg ]
 		-- Now link the package itself
 	     ; linkPackage dflags pkg_cfg
 	     ; return (new_pkg : pkgs') }
@@ -1025,7 +1033,7 @@ linkPackage dflags pkg
 	let dlls = [ dll | DLL dll    <- classifieds ]
 	    objs = [ obj | Object obj <- classifieds ]
 
-	maybePutStr dflags ("Loading package " ++ display (package pkg) ++ " ... ")
+	maybePutStr dflags ("Loading package " ++ display (sourcePackageId pkg) ++ " ... ")
 
 	-- See comments with partOfGHCi
 	when (packageName pkg `notElem` partOfGHCi) $ do
@@ -1049,7 +1057,7 @@ linkPackage dflags pkg
         maybePutStr dflags "linking ... "
         ok <- resolveObjs
 	if succeeded ok then maybePutStrLn dflags "done."
-	      else ghcError (InstallationError ("unable to load package `" ++ display (package pkg) ++ "'"))
+	      else ghcError (InstallationError ("unable to load package `" ++ display (sourcePackageId pkg) ++ "'"))
 
 load_dyn :: [FilePath] -> FilePath -> IO ()
 load_dyn dirs dll = do r <- loadDynamic dirs dll

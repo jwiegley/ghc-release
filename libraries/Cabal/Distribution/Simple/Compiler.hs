@@ -55,6 +55,8 @@ module Distribution.Simple.Compiler (
 
         -- * Support for package databases
         PackageDB(..),
+        PackageDBStack,
+        registrationPackageDB,
 
         -- * Support for optimisation levels
         OptimisationLevel(..),
@@ -99,10 +101,36 @@ compilerVersion = (\(CompilerId _ v) -> v) . compilerId
 -- the file system. This can be used to build isloated environments of
 -- packages, for example to build a collection of related packages
 -- without installing them globally.
+--
 data PackageDB = GlobalPackageDB
                | UserPackageDB
                | SpecificPackageDB FilePath
     deriving (Eq, Show, Read)
+
+-- | We typically get packages from several databases, and stack them
+-- together. This type lets us be explicit about that stacking. For example
+-- typical stacks include:
+--
+-- > [GlobalPackageDB]
+-- > [GlobalPackageDB, UserPackageDB]
+-- > [GlobalPackageDB, SpecificPackageDB "package.conf.inplace"]
+--
+-- Note that the 'GlobalPackageDB' is invariably at the bottom since it
+-- contains the rts, base and other special compiler-specific packages.
+--
+-- We are not restricted to using just the above combinations. In particular
+-- we can use several custom package dbs and the user package db together.
+--
+-- When it comes to writing, the top most (last) package is used.
+--
+type PackageDBStack = [PackageDB]
+
+-- | Return the package that we should register into. This is the package db at
+-- the top of the stack.
+--
+registrationPackageDB :: PackageDBStack -> PackageDB
+registrationPackageDB []  = error "internal error: empty package db set"
+registrationPackageDB dbs = last dbs
 
 -- ------------------------------------------------------------
 -- * Optimisation levels
@@ -136,13 +164,14 @@ flagToOptimisationLevel (Just s) = case reads s of
 unsupportedExtensions :: Compiler -> [Extension] -> [Extension]
 unsupportedExtensions comp exts =
   [ ext | ext <- exts
-        , isNothing $ lookup ext (compilerExtensions comp) ]
+        , isNothing (extensionToFlag comp ext) ]
 
 type Flag = String
 
 -- |For the given compiler, return the flags for the supported extensions.
 extensionsToFlags :: Compiler -> [Extension] -> [Flag]
-extensionsToFlags comp exts =
-  nub $ filter (not . null) $ catMaybes
-  [ lookup ext (compilerExtensions comp)
-  | ext <- exts ]
+extensionsToFlags comp = nub . filter (not . null)
+                       . catMaybes . map (extensionToFlag comp)
+
+extensionToFlag :: Compiler -> Extension -> Maybe Flag
+extensionToFlag comp ext = lookup ext (compilerExtensions comp)

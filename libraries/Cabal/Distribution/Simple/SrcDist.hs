@@ -75,13 +75,13 @@ import Distribution.Package
 import Distribution.ModuleName (ModuleName)
 import qualified Distribution.ModuleName as ModuleName
 import Distribution.Version
-         ( Version(versionBranch), VersionRange(AnyVersion) )
+         ( Version(versionBranch) )
 import Distribution.Simple.Utils
          ( createDirectoryIfMissingVerbose, withUTF8FileContents, writeUTF8File
-         , copyFiles
+         , copyFiles, copyFileVerbose
          , findFile, findFileWithExtension, matchFileGlob
          , withTempDirectory, defaultPackageDesc
-         , die, warn, notice, setupMessage, info )
+         , die, warn, notice, setupMessage )
 import Distribution.Simple.Setup (SDistFlags(..), fromFlag)
 import Distribution.Simple.PreProcess (PPSuffixHandler, ppSuffixes, preprocessSources)
 import Distribution.Simple.LocalBuildInfo ( LocalBuildInfo(..) )
@@ -96,7 +96,7 @@ import Data.Char (toLower)
 import Data.List (partition, isPrefixOf)
 import Data.Maybe (isNothing, catMaybes)
 import System.Time (getClockTime, toCalendarTime, CalendarTime(..))
-import System.Directory (doesFileExist, doesDirectoryExist, copyFile)
+import System.Directory (doesFileExist)
 import Distribution.Verbosity (Verbosity)
 import System.FilePath
          ( (</>), (<.>), takeDirectory, dropExtension, isAbsolute )
@@ -111,27 +111,25 @@ sdist :: PackageDescription -- ^information from the tarball
 sdist pkg mb_lbi flags mkTmpDir pps = do
   let distPref = fromFlag $ sDistDistPref flags
       targetPref = distPref
-      tmpDir = mkTmpDir distPref
+      tmpTargetDir = mkTmpDir distPref
 
   -- do some QA
   printPackageProblems verbosity pkg
 
-  exists <- doesDirectoryExist tmpDir
-  when exists $
-    die $ "Source distribution already in place. please move or remove: "
-       ++ tmpDir
-
   when (isNothing mb_lbi) $
     warn verbosity "Cannot run preprocessors. Run 'configure' command first."
 
-  withTempDirectory verbosity tmpDir $ do
+  createDirectoryIfMissingVerbose verbosity True tmpTargetDir
+  withTempDirectory verbosity tmpTargetDir "sdist." $ \tmpDir -> do
 
     date <- toCalendarTime =<< getClockTime
     let pkg' | snapshot  = snapshotPackage date pkg
              | otherwise = pkg
     setupMessage verbosity "Building source dist for" (packageId pkg')
 
-    if snapshot
+    -- XXX This looks a bit suspicious. Should createArchive be passed
+    -- the result of prepareSnapshotTree/prepareTree?
+    _ <- if snapshot
       then prepareSnapshotTree verbosity pkg' mb_lbi distPref tmpDir pps
       else prepareTree         verbosity pkg' mb_lbi distPref tmpDir pps
     targzFile <- createArchive verbosity pkg' mb_lbi tmpDir targetPref
@@ -298,7 +296,7 @@ createArchive :: Verbosity            -- ^verbosity
 createArchive verbosity pkg_descr mb_lbi tmpDir targetPref = do
   let tarBallFilePath = targetPref </> tarBallName pkg_descr <.> "tar.gz"
 
-  (tarProg, _) <- requireProgram verbosity tarProgram AnyVersion
+  (tarProg, _) <- requireProgram verbosity tarProgram
                     (maybe defaultProgramConfiguration withPrograms mb_lbi)
 
    -- Hmm: I could well be skating on thinner ice here by using the -C option (=> GNU tar-specific?)
@@ -326,7 +324,8 @@ prepareDir verbosity _pkg _distPref inPref pps modules bi
            | module_ <- modules ++ otherModules bi ]
          bootFiles <- sequence
            [ let file = ModuleName.toFilePath module_
-              in findFileWithExtension ["hs-boot"] (hsSourceDirs bi) file
+                 fileExts = ["hs-boot", "lhs-boot"]
+              in findFileWithExtension fileExts (hsSourceDirs bi) file
            | module_ <- modules ++ otherModules bi ]
 
          let allSources = sources ++ catMaybes bootFiles ++ cSources bi
@@ -341,14 +340,6 @@ copyFileTo verbosity dir file = do
   let targetFile = dir </> file
   createDirectoryIfMissingVerbose verbosity True (takeDirectory targetFile)
   copyFileVerbose verbosity file targetFile
-
-copyFileVerbose :: Verbosity -> FilePath -> FilePath -> IO ()
-copyFileVerbose verbosity src dest = do
-  info verbosity ("copy " ++ src ++ " to " ++ dest)
-  --Note: This is the standard copyFile that *does* copy file permissions.
-  --      In particular it will copy executable permissions which we need
-  --      eg to copy ./configure scripts into the tarball src tree.
-  copyFile src dest
 
 printPackageProblems :: Verbosity -> PackageDescription -> IO ()
 printPackageProblems verbosity pkg_descr = do

@@ -63,7 +63,7 @@ module Distribution.PackageDescription.Check (
   ) where
 
 import Data.Maybe (isNothing, catMaybes, fromMaybe)
-import Data.List  (sort, group, isPrefixOf)
+import Data.List  (sort, group, isPrefixOf, nub, find)
 import Control.Monad
          ( filterM, liftM )
 import qualified System.Directory as System
@@ -71,22 +71,29 @@ import qualified System.Directory as System
 
 import Distribution.PackageDescription
 import Distribution.PackageDescription.Configuration
-         ( flattenPackageDescription )
+         ( flattenPackageDescription, finalizePackageDescription )
 import Distribution.Compiler
-         ( CompilerFlavor(..) )
+         ( CompilerFlavor(..), buildCompilerFlavor, CompilerId(..) )
 import Distribution.System
-         ( OS(..), Arch(..) )
+         ( OS(..), Arch(..), buildPlatform )
 import Distribution.License
-         ( License(..) )
+         ( License(..), knownLicenses )
 import Distribution.Simple.Utils
-         ( cabalVersion, intercalate )
+         ( cabalVersion, intercalate, parseFileGlob, FileGlob(..), lowercase )
 
 import Distribution.Version
-         ( Version(..), withinRange )
+         ( Version(..)
+         , VersionRange, withinRange, foldVersionRange'
+         , anyVersion, noVersion, thisVersion, laterVersion, earlierVersion
+         , orLaterVersion, orEarlierVersion
+         , unionVersionRanges, intersectVersionRanges
+         , asVersionIntervals, LowerBound(..), UpperBound(..) )
 import Distribution.Package
-         ( PackageName(PackageName), packageName, packageVersion )
+         ( PackageName(PackageName), packageName, packageVersion
+         , Dependency(..) )
 import Distribution.Text
-         ( display, simpleParse )
+         ( display )
+import qualified Language.Haskell.Extension as Extension
 import Language.Haskell.Extension (Extension(..))
 import System.FilePath
          ( (</>), takeExtension, isRelative, isAbsolute
@@ -136,11 +143,6 @@ check True  pc = Just pc
 -- * Standard checks
 -- ------------------------------------------------------------
 
--- TODO:
---
---  * check for unknown 'OS's and 'Arch's. This requires checking the
---    'GenericPackageDescription' which we do not currently get passed.
-
 -- | Check for common mistakes and problems in package descriptions.
 --
 -- This is the standard collection of checks covering all apsects except
@@ -157,6 +159,7 @@ checkPackage :: GenericPackageDescription
 checkPackage gpkg mpkg =
      checkConfiguredPackage pkg
   ++ checkConditionals gpkg
+  ++ checkPackageVersions gpkg
   where
     pkg = fromMaybe (flattenPackageDescription gpkg) mpkg
 
@@ -171,6 +174,7 @@ checkConfiguredPackage pkg =
  ++ checkGhcOptions pkg
  ++ checkCCOptions pkg
  ++ checkPaths pkg
+ ++ checkCabalVersion pkg
 
 
 -- ------------------------------------------------------------
@@ -270,17 +274,26 @@ checkFields pkg =
         PackageBuildWarning $
              quote unknown ++ " is not a known 'build-type'. "
           ++ "The known build types are: "
-          ++ intercalate ", " (map display knownBuildTypes)
+          ++ commaSep (map display knownBuildTypes)
       _ -> Nothing
 
   , check (not (null unknownCompilers)) $
       PackageBuildWarning $
-        "Unknown compiler " ++ intercalate ", " (map quote unknownCompilers)
+        "Unknown compiler " ++ commaSep (map quote unknownCompilers)
                             ++ " in 'tested-with' field."
 
   , check (not (null unknownExtensions)) $
       PackageBuildWarning $
-        "Unknown extensions: " ++ intercalate ", " unknownExtensions
+        "Unknown extensions: " ++ commaSep unknownExtensions
+
+  , check (not (null deprecatedExtensions)) $
+      PackageDistSuspicious $
+           "Deprecated extensions: "
+        ++ commaSep (map (quote . display . fst) deprecatedExtensions)
+        ++ ". " ++ intercalate " "
+             [ "Instead of '" ++ display ext
+            ++ "' use '" ++ display replacement ++ "'."
+             | (ext, Just replacement) <- deprecatedExtensions ]
 
   , check (null (category pkg)) $
       PackageDistSuspicious "No 'category' field."
@@ -305,6 +318,10 @@ checkFields pkg =
     unknownCompilers  = [ name | (OtherCompiler name, _) <- testedWith pkg ]
     unknownExtensions = [ name | bi <- allBuildInfo pkg
                                , UnknownExtension name <- extensions bi ]
+    deprecatedExtensions = nub $ catMaybes
+      [ find ((==ext) . fst) Extension.deprecatedExtensions
+      | bi <- allBuildInfo pkg
+      , ext <- extensions bi ]
 
 checkLicense :: PackageDescription -> [PackageCheck]
 checkLicense pkg =
@@ -317,7 +334,9 @@ checkLicense pkg =
   , case license pkg of
       UnknownLicense l -> Just $
         PackageBuildWarning $
-          quote ("license: " ++ l) ++ " is not a recognised license."
+             quote ("license: " ++ l) ++ " is not a recognised license. The "
+          ++ "known licenses are: "
+          ++ commaSep (map display knownLicenses)
       _ -> Nothing
 
   , check (license pkg == BSD4) $
@@ -326,12 +345,30 @@ checkLicense pkg =
         ++ "refers to the old 4-clause BSD license with the advertising "
         ++ "clause. 'BSD3' refers the new 3-clause BSD license."
 
+  , case unknownLicenseVersion (license pkg) of
+      Just knownVersions -> Just $
+        PackageDistSuspicious $
+             "'license: " ++ display (license pkg) ++ "' is not a known "
+          ++ "version of that license. The known versions are "
+          ++ commaSep (map display knownVersions)
+          ++ ". If this is not a mistake and you think it should be a known "
+          ++ "version then please file a ticket."
+      _ -> Nothing
+
   , check (license pkg `notElem` [AllRightsReserved, PublicDomain]
            -- AllRightsReserved and PublicDomain are not strictly
            -- licenses so don't need license files.
         && null (licenseFile pkg)) $
       PackageDistSuspicious "A 'license-file' is not specified."
   ]
+  where
+    unknownLicenseVersion (GPL  (Just v))
+      | v `notElem` knownVersions = Just knownVersions
+      where knownVersions = [ v' | GPL  (Just v') <- knownLicenses ]
+    unknownLicenseVersion (LGPL (Just v))
+      | v `notElem` knownVersions = Just knownVersions
+      where knownVersions = [ v' | LGPL (Just v') <- knownLicenses ]
+    unknownLicenseVersion _ = Nothing
 
 checkSourceRepos :: PackageDescription -> [PackageCheck]
 checkSourceRepos pkg =
@@ -465,13 +502,7 @@ checkGhcOptions pkg =
                                   , Just extension <- [ghcExtension flag] ]
 
   , checkAlternatives "ghc-options" "extensions"
-      [ (flag, extension) | flag@('-':'X':extension) <- all_ghc_options
-                          , case simpleParse extension of
-                              Just (UnknownExtension _) -> True
-                              Just ext -> ext `elem` compatExtensions
-                                       || not (Version [1,1,6] []
-                                 `withinRange` descCabalVersion pkg)
-                              Nothing  -> False ]
+      [ (flag, extension) | flag@('-':'X':extension) <- all_ghc_options ]
 
   , checkAlternatives "ghc-options" "cpp-options" $
          [ (flag, flag) | flag@('-':'D':_) <- all_ghc_options ]
@@ -521,23 +552,6 @@ checkGhcOptions pkg =
     ghcExtension ('-':'c':"pp")     = Just CPP
     ghcExtension _                  = Nothing
 
-    -- the known extensions in Cabal-1.1.6 that came with ghc-6.6:
-    -- we can drop this test when Cabal-1.4+ is widely deployed because
-    -- from that point on we can add new extensions without worrying about
-    -- breaking old versions of cabal.
-    compatExtensions =
-      [ OverlappingInstances, UndecidableInstances, IncoherentInstances
-      , RecursiveDo, ParallelListComp, MultiParamTypeClasses
-      , NoMonomorphismRestriction, FunctionalDependencies, Rank2Types
-      , RankNTypes, PolymorphicComponents, ExistentialQuantification
-      , ScopedTypeVariables, ImplicitParams, FlexibleContexts
-      , FlexibleInstances, EmptyDataDecls, CPP, BangPatterns
-      , TypeSynonymInstances, TemplateHaskell, ForeignFunctionInterface
-      , Arrows, Generics, NoImplicitPrelude, NamedFieldPuns, PatternGuards
-      , GeneralizedNewtypeDeriving, ExtensibleRecords, RestrictedTypeSynonyms
-      , HereDocuments
-      ]
-
 checkCCOptions :: PackageDescription -> [PackageCheck]
 checkCCOptions pkg =
   catMaybes [
@@ -556,12 +570,22 @@ checkCCOptions pkg =
 
   , checkAlternatives "ld-options" "extra-lib-dirs"
       [ (flag, dir) | flag@('-':'L':dir) <- all_ldOptions ]
+
+  , checkCCFlags [ "-O", "-Os", "-O0", "-O1", "-O2", "-O3" ] $
+      PackageDistSuspicious $
+           "'cc-options: -O[n]' is generally not needed. When building with "
+        ++ " optimisations Cabal automatically adds '-O2' for C code. "
+        ++ "Setting it yourself interferes with the --disable-optimization "
+        ++ "flag."
   ]
 
   where all_ccOptions = [ opts | bi <- allBuildInfo pkg
                               , opts <- ccOptions bi ]
         all_ldOptions = [ opts | bi <- allBuildInfo pkg
                                , opts <- ldOptions bi ]
+
+        checkCCFlags :: [String] -> PackageCheck -> Maybe PackageCheck
+        checkCCFlags flags = check (any (`elem` flags) all_ccOptions)
 
 checkAlternatives :: String -> String -> [(String, String)] -> Maybe PackageCheck
 checkAlternatives badField goodField flags =
@@ -574,26 +598,298 @@ checkAlternatives badField goodField flags =
 
 checkPaths :: PackageDescription -> [PackageCheck]
 checkPaths pkg =
-  [ PackageBuildWarning {
-     explanation = quote (kind ++ ": " ++ dir)
-                ++ " is a relative path outside of the source tree. "
-                ++ "This will not work when generating a tarball with 'sdist'."
-   }
+  [ PackageBuildWarning $
+         quote (kind ++ ": " ++ path)
+      ++ " is a relative path outside of the source tree. "
+      ++ "This will not work when generating a tarball with 'sdist'."
+  | (path, kind) <- relPaths ++ absPaths
+  , isOutsideTree path ]
+  ++
+  [ PackageDistInexcusable $
+      quote (kind ++ ": " ++ path) ++ " is an absolute directory."
+  | (path, kind) <- relPaths
+  , isAbsolute path ]
+  ++
+  [ PackageDistInexcusable $
+         quote (kind ++ ": " ++ path) ++ " points inside the 'dist' "
+      ++ "directory. This is not reliable because the location of this "
+      ++ "directory is configurable by the user (or package manager). In "
+      ++ "addition the layout of the 'dist' directory is subject to change "
+      ++ "in future versions of Cabal."
+  | (path, kind) <- relPaths ++ absPaths
+  , isInsideDist path ]
+  ++
+  [ PackageDistInexcusable $
+         "The 'ghc-options' contains the path '" ++ path ++ "' which points "
+      ++ "inside the 'dist' directory. This is not reliable because the "
+      ++ "location of this directory is configurable by the user (or package "
+      ++ "manager). In addition the layout of the 'dist' directory is subject "
+      ++ "to change in future versions of Cabal."
   | bi <- allBuildInfo pkg
-  , (dir, kind) <- [ (dir, "extra-lib-dirs") | dir <- extraLibDirs bi ]
-                ++ [ (dir, "include-dirs")   | dir <- includeDirs  bi ]
-                ++ [ (dir, "hs-source-dirs") | dir <- hsSourceDirs bi ]
-  , isOutsideTree dir ]
-  where isOutsideTree dir = case splitDirectories dir of
-                              "..":_ -> True
-                              _      -> False
+  , (GHC, flags) <- options bi
+  , path <- flags
+  , isInsideDist path ]
+  where
+    isOutsideTree path = case splitDirectories path of
+      "..":_     -> True
+      ".":"..":_ -> True
+      _          -> False
+    isInsideDist path = case map lowercase (splitDirectories path) of
+      "dist"    :_ -> True
+      ".":"dist":_ -> True
+      _            -> False
+    -- paths that must be relative
+    relPaths =
+         [ (path, "extra-src-files") | path <- extraSrcFiles pkg ]
+      ++ [ (path, "extra-tmp-files") | path <- extraTmpFiles pkg ]
+      ++ [ (path, "data-files")      | path <- dataFiles     pkg ]
+      ++ [ (path, "data-dir")        | path <- [dataDir      pkg]]
+      ++ concat
+         [    [ (path, "c-sources")        | path <- cSources        bi ]
+           ++ [ (path, "install-includes") | path <- installIncludes bi ]
+           ++ [ (path, "hs-source-dirs")   | path <- hsSourceDirs    bi ]
+         | bi <- allBuildInfo pkg ]
+    -- paths that are allowed to be absolute
+    absPaths = concat
+      [    [ (path, "includes")         | path <- includes        bi ]
+        ++ [ (path, "include-dirs")     | path <- includeDirs     bi ]
+        ++ [ (path, "extra-lib-dirs")   | path <- extraLibDirs    bi ]
+      | bi <- allBuildInfo pkg ]
 
---TODO: check for absolute and outside-of-tree paths in extra-src-files,
--- data-files, hs-src-dirs, etc.
+--TODO: check sets of paths that would be interpreted differently between unix
+-- and windows, ie case-sensitive or insensitive. Things that might clash, or
+-- conversely be distinguished.
+
+--TODO: use the tar path checks on all the above paths
+
+-- | Check that if the package uses new syntax that it declares the
+-- @\"cabal-version: >= x.y\"@ version correctly.
+--
+checkCabalVersion :: PackageDescription -> [PackageCheck]
+checkCabalVersion pkg =
+  catMaybes [
+
+    -- check use of "foo (>= 1.0 && < 1.4) || >=1.8 " version-range syntax
+    checkVersion [1,8] (not (null versionRangeExpressions)) $
+      PackageDistInexcusable $
+           "The package uses full version-range expressions "
+        ++ "in a 'build-depends' field: "
+        ++ commaSep (map display versionRangeExpressions)
+        ++ ". To use this new syntax the package needs to specify at least "
+        ++ "'cabal-version: >= 1.8'. Alternatively, if broader compatibility "
+        ++ "is important, then convert to conjunctive normal form, and use "
+        ++ "multiple 'build-depends:' lines, one conjunct per line."
+
+    -- check use of "build-depends: foo == 1.*" syntax
+  , checkVersion [1,6] (not (null depsUsingWildcardSyntax)) $
+      PackageDistInexcusable $
+           "The package uses wildcard syntax in the 'build-depends' field: "
+        ++ commaSep (map display depsUsingWildcardSyntax)
+        ++ ". To use this new syntax the package need to specify at least "
+        ++ "'cabal-version: >= 1.6'. Alternatively, if broader compatability "
+        ++ "is important then use: " ++ commaSep
+           [ display (Dependency name (eliminateWildcardSyntax versionRange))
+           | Dependency name versionRange <- depsUsingWildcardSyntax ]
+
+    -- check use of "data-files: data/*.txt" syntax
+  , checkVersion [1,6] (not (null dataFilesUsingGlobSyntax)) $
+      PackageDistInexcusable $
+           "Using wildcards like "
+        ++ commaSep (map quote $ take 3 dataFilesUsingGlobSyntax)
+        ++ " in the 'data-files' field requires 'cabal-version: >= 1.6'. "
+        ++ "Alternatively if you require compatability with earlier Cabal "
+        ++ "versions then list all the files explicitly."
+
+    -- check use of "extra-source-files: mk/*.in" syntax
+  , checkVersion [1,6] (not (null extraSrcFilesUsingGlobSyntax)) $
+      PackageDistInexcusable $
+           "Using wildcards like "
+        ++ commaSep (map quote $ take 3 extraSrcFilesUsingGlobSyntax)
+        ++ " in the 'extra-source-files' field requires "
+        ++ "'cabal-version: >= 1.6'. Alternatively if you require "
+        ++ "compatability with earlier Cabal versions then list all the files "
+        ++ "explicitly."
+
+    -- check use of "source-repository" section
+  , checkVersion [1,6] (not (null (sourceRepos pkg))) $
+      PackageDistInexcusable $
+           "The 'source-repository' section is new in Cabal-1.6. "
+        ++ "Unfortunately it messes up the parser in earlier Cabal versions "
+        ++ "so you need to specify 'cabal-version: >= 1.6'."
+
+    -- check for new licenses
+  , checkVersion [1,4] (license pkg `notElem` compatLicenses) $
+      PackageDistInexcusable $
+           "Unfortunately the license " ++ quote (display (license pkg))
+        ++ " messes up the parser in earlier Cabal versions so you need to "
+        ++ "specify 'cabal-version: >= 1.4'. Alternatively if you require "
+        ++ "compatability with earlier Cabal versions then use 'OtherLicense'."
+
+    -- check for new language extensions
+  , checkVersion [1,2,3] (not (null usedExtensionsThatNeedCabal12)) $
+      PackageDistInexcusable $
+           "Unfortunately the language extensions "
+        ++ commaSep (map (quote . display) usedExtensionsThatNeedCabal12)
+        ++ " break the parser in earlier Cabal versions so you need to "
+        ++ "specify 'cabal-version: >= 1.2.3'. Alternatively if you require "
+        ++ "compatability with earlier Cabal versions then you may be able to "
+        ++ "use an equivalent compiler-specific flag."
+
+  , checkVersion [1,4] (not (null usedExtensionsThatNeedCabal14)) $
+      PackageDistInexcusable $
+           "Unfortunately the language extensions "
+        ++ commaSep (map (quote . display) usedExtensionsThatNeedCabal14)
+        ++ " break the parser in earlier Cabal versions so you need to "
+        ++ "specify 'cabal-version: >= 1.4'. Alternatively if you require "
+        ++ "compatability with earlier Cabal versions then you may be able to "
+        ++ "use an equivalent compiler-specific flag."
+  ]
+  where
+    checkVersion :: [Int] -> Bool -> PackageCheck -> Maybe PackageCheck
+    checkVersion ver cond pc
+      | packageName pkg == PackageName "Cabal" = Nothing
+      | requiresAtLeast (Version ver []) = Nothing
+      | not cond  = Nothing
+      | otherwise = Just pc
+
+    requiresAtLeast :: Version -> Bool
+    requiresAtLeast = case cabalVersionIntervals of
+      (LowerBound ver' _,_):_ -> (ver' >=)
+      _                       -> const False
+      where cabalVersionIntervals = asVersionIntervals (descCabalVersion pkg)
+
+    dataFilesUsingGlobSyntax     = filter usesGlobSyntax (dataFiles pkg)
+    extraSrcFilesUsingGlobSyntax = filter usesGlobSyntax (extraSrcFiles pkg)
+    usesGlobSyntax str = case parseFileGlob str of
+      Just (FileGlob _ _) -> True
+      _                   -> False
+
+    versionRangeExpressions =
+        [ dep | dep@(Dependency _ vr) <- buildDepends pkg
+              , depth vr > (2::Int) ]
+        where depth = foldVersionRange'
+                        1 (const 1)
+                        (const 1) (const 1)
+                        (const 1) (const 1)
+                        (const (const 1))
+                        (+) (+)
+
+    depsUsingWildcardSyntax = [ dep | dep@(Dependency _ vr) <- buildDepends pkg
+                                    , usesWildcardSyntax vr ]
+
+    usesWildcardSyntax :: VersionRange -> Bool
+    usesWildcardSyntax =
+      foldVersionRange'
+        False (const False)
+        (const False) (const False)
+        (const False) (const False)
+        (\_ _ -> True) -- the wildcard case
+        (||) (||)
+
+    eliminateWildcardSyntax =
+      foldVersionRange'
+        anyVersion thisVersion
+        laterVersion earlierVersion
+        orLaterVersion orEarlierVersion
+        (\v v' -> intersectVersionRanges (orLaterVersion v) (earlierVersion v'))
+        intersectVersionRanges unionVersionRanges
+
+    compatLicenses = [ GPL Nothing, LGPL Nothing, BSD3, BSD4
+                     , PublicDomain, AllRightsReserved, OtherLicense ]
+
+    usedExtensions = [ ext | bi <- allBuildInfo pkg, ext <- extensions bi ]
+    usedExtensionsThatNeedCabal12 =
+      nub (filter (`elem` compatExtensionsExtra) usedExtensions)
+
+    -- As of Cabal-1.4 we can add new extensions without worrying about
+    -- breaking old versions of cabal.
+    usedExtensionsThatNeedCabal14 =
+      nub (filter (`notElem` compatExtensions) usedExtensions)
+
+    -- The known extensions in Cabal-1.2.3
+    compatExtensions =
+      [ OverlappingInstances, UndecidableInstances, IncoherentInstances
+      , RecursiveDo, ParallelListComp, MultiParamTypeClasses
+      , NoMonomorphismRestriction, FunctionalDependencies, Rank2Types
+      , RankNTypes, PolymorphicComponents, ExistentialQuantification
+      , ScopedTypeVariables, ImplicitParams, FlexibleContexts
+      , FlexibleInstances, EmptyDataDecls, CPP, BangPatterns
+      , TypeSynonymInstances, TemplateHaskell, ForeignFunctionInterface
+      , Arrows, Generics, NoImplicitPrelude, NamedFieldPuns, PatternGuards
+      , GeneralizedNewtypeDeriving, ExtensibleRecords, RestrictedTypeSynonyms
+      , HereDocuments
+      ] ++ compatExtensionsExtra
+
+    -- The extra known extensions in Cabal-1.2.3 vs Cabal-1.1.6
+    -- (Cabal-1.1.6 came with ghc-6.6. Cabal-1.2 came with ghc-6.8)
+    compatExtensionsExtra =
+      [ KindSignatures, MagicHash, TypeFamilies, StandaloneDeriving
+      , UnicodeSyntax, PatternSignatures, UnliftedFFITypes, LiberalTypeSynonyms
+      , TypeOperators, RecordWildCards, RecordPuns, DisambiguateRecordFields
+      , OverloadedStrings, GADTs, NoMonoPatBinds, RelaxedPolyRec
+      , ExtendedDefaultRules, UnboxedTuples, DeriveDataTypeable
+      , ConstrainedClassMethods
+      ]
 
 -- ------------------------------------------------------------
 -- * Checks on the GenericPackageDescription
 -- ------------------------------------------------------------
+
+-- | Check the build-depends fields for any weirdness or bad practise.
+--
+checkPackageVersions :: GenericPackageDescription -> [PackageCheck]
+checkPackageVersions pkg =
+  catMaybes [
+
+    -- Check that the version of base is bounded above.
+    -- For example this bans "build-depends: base >= 3".
+    -- It should probably be "build-depends: base >= 3 && < 4"
+    -- which is the same as  "build-depends: base == 3.*"
+    check (not (boundedAbove baseDependency)) $
+      PackageDistInexcusable $
+           "The dependency 'build-depends: base' does not specify an upper "
+        ++ "bound on the version number. Each major release of the 'base' "
+        ++ "package changes the API in various ways and most packages will "
+        ++ "need some changes to compile with it. The recommended practise "
+        ++ "is to specify an upper bound on the version of the 'base' "
+        ++ "package. This ensures your package will continue to build when a "
+        ++ "new major version of the 'base' package is released. If you are "
+        ++ "not sure what upper bound to use then use the next  major "
+        ++ "version. For example if you have tested your package with 'base' "
+        ++ "version 2 and 3 then use 'build-depends: base >= 2 && < 4'."
+
+  ]
+  where
+    -- TODO: What we really want to do is test if there exists any
+    -- configuration in which the base version is unboudned above.
+    -- However that's a bit tricky because there are many possible
+    -- configurations. As a cheap easy and safe approximation we will
+    -- pick a single "typical" configuration and check if that has an
+    -- open upper bound. To get a typical configuration we finalise
+    -- using no package index and the current platform.
+    finalised = finalizePackageDescription
+                              [] (const True) buildPlatform
+                              (CompilerId buildCompilerFlavor (Version [] []))
+                              [] pkg
+    baseDependency = case finalised of
+      Right (pkg', _) | not (null baseDeps) ->
+          foldr intersectVersionRanges anyVersion baseDeps
+        where
+          baseDeps =
+            [ vr | Dependency (PackageName "base") vr <- buildDepends pkg' ]
+
+      -- Just in case finalizePackageDescription fails for any reason,
+      -- or if the package doesn't depend on the base package at all,
+      -- then we will just skip the check, since boundedAbove noVersion = True
+      _          -> noVersion
+
+    boundedAbove :: VersionRange -> Bool
+    boundedAbove vr = case asVersionIntervals vr of
+      []        -> True -- this is the inconsistent version range.
+      intervals -> case last intervals of
+        (_,   UpperBound _ _) -> True
+        (_, NoUpperBound    ) -> False
+
 
 checkConditionals :: GenericPackageDescription -> [PackageCheck]
 checkConditionals pkg =
@@ -602,17 +898,17 @@ checkConditionals pkg =
     check (not $ null unknownOSs) $
       PackageDistInexcusable $
            "Unknown operating system name "
-        ++ intercalate ", " (map quote unknownOSs)
+        ++ commaSep (map quote unknownOSs)
 
   , check (not $ null unknownArches) $
       PackageDistInexcusable $
            "Unknown architecture name "
-        ++ intercalate ", " (map quote unknownArches)
+        ++ commaSep (map quote unknownArches)
 
   , check (not $ null unknownImpls) $
       PackageDistInexcusable $
            "Unknown compiler name "
-        ++ intercalate ", " (map quote unknownImpls)
+        ++ commaSep (map quote unknownImpls)
   ]
   where
     unknownOSs    = [ os   | OS   (OtherOS os)           <- conditions ]
@@ -824,4 +1120,4 @@ quote :: String -> String
 quote s = "'" ++ s ++ "'"
 
 commaSep :: [String] -> String
-commaSep = intercalate ","
+commaSep = intercalate ", "

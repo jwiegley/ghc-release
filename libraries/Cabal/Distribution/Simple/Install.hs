@@ -54,8 +54,8 @@ import Distribution.Simple.LocalBuildInfo (
         substPathTemplate)
 import Distribution.Simple.BuildPaths (haddockName, haddockPref)
 import Distribution.Simple.Utils
-         ( createDirectoryIfMissingVerbose, copyDirectoryRecursiveVerbose
-         , copyFileVerbose, die, info, notice, matchDirFileGlob )
+         ( createDirectoryIfMissingVerbose, installDirectoryContents
+         , installOrdinaryFile, die, info, notice, matchDirFileGlob )
 import Distribution.Simple.Compiler
          ( CompilerFlavor(..), compilerFlavor )
 import Distribution.Simple.Setup (CopyFlags(..), CopyDest(..), fromFlag)
@@ -63,11 +63,12 @@ import Distribution.Simple.Setup (CopyFlags(..), CopyDest(..), fromFlag)
 import qualified Distribution.Simple.GHC  as GHC
 import qualified Distribution.Simple.NHC  as NHC
 import qualified Distribution.Simple.JHC  as JHC
+import qualified Distribution.Simple.LHC  as LHC
 import qualified Distribution.Simple.Hugs as Hugs
 
 import Control.Monad (when, unless)
-import System.Directory (doesDirectoryExist, doesFileExist,
-                         getCurrentDirectory)
+import System.Directory
+         ( doesDirectoryExist, doesFileExist )
 import System.FilePath
          ( takeFileName, takeDirectory, (</>), isAbsolute )
 
@@ -82,47 +83,38 @@ install :: PackageDescription -- ^information from the .cabal file
         -> CopyFlags -- ^flags sent to copy or install
         -> IO ()
 install pkg_descr lbi flags = do
-  thisDir <- getCurrentDirectory
   let distPref  = fromFlag (copyDistPref flags)
       verbosity = fromFlag (copyVerbosity flags)
-      inPlace   = fromFlag (copyInPlace flags)
       copydest  = fromFlag (copyDest flags)
-      copyTo    = if inPlace
-                  then CopyTo (thisDir </> distPref </> "install")
-                  else copydest
-      pretendCopyTo = if inPlace
-                      then copyTo
-                      else NoCopyDest
       installDirs@(InstallDirs {
          bindir     = binPref,
          libdir     = libPref,
-         dynlibdir  = dynlibPref,
+--         dynlibdir  = dynlibPref, --see TODO below
          datadir    = dataPref,
          progdir    = progPref,
          docdir     = docPref,
          htmldir    = htmlPref,
          haddockdir = interfacePref,
          includedir = incPref})
-             = absoluteInstallDirs pkg_descr lbi copyTo
-      pretendInstallDirs = absoluteInstallDirs pkg_descr lbi pretendCopyTo
+             = absoluteInstallDirs pkg_descr lbi copydest
 
-      progPrefixPref = substPathTemplate pkg_descr lbi (progPrefix lbi)
-      progSuffixPref = substPathTemplate pkg_descr lbi (progSuffix lbi)
+      --TODO: decide if we need the user to be able to control the libdir
+      -- for shared libs independently of the one for static libs. If so
+      -- it should also have a flag in the command line UI
+      -- For the moment use dynlibdir = libdir
+      dynlibPref = libPref
+      progPrefixPref = substPathTemplate (packageId pkg_descr) lbi (progPrefix lbi)
+      progSuffixPref = substPathTemplate (packageId pkg_descr) lbi (progSuffix lbi)
 
   docExists <- doesDirectoryExist $ haddockPref distPref pkg_descr
   info verbosity ("directory " ++ haddockPref distPref pkg_descr ++
                   " does exist: " ++ show docExists)
-  flip mapM_ (dataFiles pkg_descr) $ \ file -> do
-      let srcDataDir = dataDir pkg_descr
-      files <- matchDirFileGlob srcDataDir file
-      let dir = takeDirectory file
-      createDirectoryIfMissingVerbose verbosity True (dataPref </> dir)
-      sequence_ [ copyFileVerbose verbosity (srcDataDir </> file')
-                                            (dataPref </> file')
-                | file' <- files ]
+
+  installDataFiles verbosity pkg_descr dataPref
+
   when docExists $ do
       createDirectoryIfMissingVerbose verbosity True htmlPref
-      copyDirectoryRecursiveVerbose verbosity
+      installDirectoryContents verbosity
           (haddockPref distPref pkg_descr) htmlPref
       -- setPermissionsRecursive [Read] htmlPref
       -- The haddock interface file actually already got installed
@@ -137,13 +129,13 @@ install pkg_descr lbi flags = do
       exists <- doesFileExist haddockInterfaceFileSrc
       when exists $ do
         createDirectoryIfMissingVerbose verbosity True interfacePref
-        copyFileVerbose verbosity haddockInterfaceFileSrc
-                                  haddockInterfaceFileDest
+        installOrdinaryFile verbosity haddockInterfaceFileSrc
+                                      haddockInterfaceFileDest
 
   let lfile = licenseFile pkg_descr
   unless (null lfile) $ do
     createDirectoryIfMissingVerbose verbosity True docPref
-    copyFileVerbose verbosity lfile (docPref </> takeFileName lfile)
+    installOrdinaryFile verbosity lfile (docPref </> takeFileName lfile)
 
   let buildPref = buildDir lbi
   when (hasLibs pkg_descr) $
@@ -156,21 +148,38 @@ install pkg_descr lbi flags = do
   when (hasLibs pkg_descr) $ installIncludeFiles verbosity pkg_descr incPref
 
   case compilerFlavor (compiler lbi) of
-     GHC  -> do withLib pkg_descr () $ \_ ->
+     GHC  -> do withLib pkg_descr $ \_ ->
                   GHC.installLib flags lbi libPref dynlibPref buildPref pkg_descr
-                when (hasExes pkg_descr) $
-                  GHC.installExe flags lbi installDirs pretendInstallDirs buildPref (progPrefixPref, progSuffixPref) pkg_descr
-     JHC  -> do withLib pkg_descr () $ JHC.installLib verbosity libPref buildPref pkg_descr
+                withExe pkg_descr $ \_ ->
+                  GHC.installExe flags lbi installDirs buildPref (progPrefixPref, progSuffixPref) pkg_descr
+     LHC  -> do withLib pkg_descr $ \_ ->
+                  LHC.installLib flags lbi libPref dynlibPref buildPref pkg_descr
+                withExe pkg_descr $ \_ ->
+                  LHC.installExe flags lbi installDirs buildPref (progPrefixPref, progSuffixPref) pkg_descr
+     JHC  -> do withLib pkg_descr $ JHC.installLib verbosity libPref buildPref pkg_descr
                 withExe pkg_descr $ JHC.installExe verbosity binPref buildPref (progPrefixPref, progSuffixPref) pkg_descr
      Hugs -> do
        let targetProgPref = progdir (absoluteInstallDirs pkg_descr lbi NoCopyDest)
        let scratchPref = scratchDir lbi
        Hugs.install verbosity libPref progPref binPref targetProgPref scratchPref (progPrefixPref, progSuffixPref) pkg_descr
-     NHC  -> do withLib pkg_descr () $ NHC.installLib verbosity libPref buildPref (packageId pkg_descr)
+     NHC  -> do withLib pkg_descr $ NHC.installLib verbosity libPref buildPref (packageId pkg_descr)
                 withExe pkg_descr $ NHC.installExe verbosity binPref buildPref (progPrefixPref, progSuffixPref)
      _    -> die ("only installing with GHC, JHC, Hugs or nhc98 is implemented")
   return ()
   -- register step should be performed by caller.
+
+-- | Install the files listed in data-files
+--
+installDataFiles :: Verbosity -> PackageDescription -> FilePath -> IO ()
+installDataFiles verbosity pkg_descr destDataDir =
+  flip mapM_ (dataFiles pkg_descr) $ \ file -> do
+    let srcDataDir = dataDir pkg_descr
+    files <- matchDirFileGlob srcDataDir file
+    let dir = takeDirectory file
+    createDirectoryIfMissingVerbose verbosity True (destDataDir </> dir)
+    sequence_ [ installOrdinaryFile verbosity (srcDataDir  </> file')
+                                              (destDataDir </> file')
+              | file' <- files ]
 
 -- | Install the files listed in install-includes
 --
@@ -181,7 +190,7 @@ installIncludeFiles verbosity
   incs <- mapM (findInc relincdirs) (installIncludes lbi)
   sequence_
     [ do createDirectoryIfMissingVerbose verbosity True destDir
-         copyFileVerbose verbosity srcFile destFile
+         installOrdinaryFile verbosity srcFile destFile
     | (relFile, srcFile) <- incs
     , let destFile = destIncludeDir </> relFile
           destDir  = takeDirectory destFile ]

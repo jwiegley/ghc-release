@@ -16,7 +16,7 @@ module TcSimplify (
 
 	tcSimplifyDeriv, tcSimplifyDefault,
 	bindInstsOfLocalFuns, 
-
+	
         misMatchMsg
     ) where
 
@@ -43,7 +43,6 @@ import Class
 import FunDeps
 import PrelInfo
 import PrelNames
-import Type
 import TysWiredIn
 import ErrUtils
 import BasicTypes
@@ -52,12 +51,12 @@ import VarEnv
 import FiniteMap
 import Bag
 import Outputable
-import Maybes
 import ListSetOps
 import Util
 import SrcLoc
 import DynFlags
 import FastString
+
 import Control.Monad
 import Data.List
 \end{code}
@@ -656,7 +655,7 @@ tcSimplifyInfer doc tau_tvs wanted
 	; gbl_tvs  <- tcGetGlobalTyVars
 	; let preds1   = fdPredsOfInsts wanted'
 	      gbl_tvs1 = oclose preds1 gbl_tvs
-	      qtvs     = grow preds1 tau_tvs1 `minusVarSet` gbl_tvs1
+	      qtvs     = growInstsTyVars wanted' tau_tvs1 `minusVarSet` gbl_tvs1
 			-- See Note [Choosing which variables to quantify]
 
 		-- To maximise sharing, remove from consideration any 
@@ -665,7 +664,7 @@ tcSimplifyInfer doc tau_tvs wanted
 	; extendLIEs free
 
 		-- To make types simple, reduce as much as possible
-	; traceTc (text "infer" <+> (ppr preds1 $$ ppr (grow preds1 tau_tvs1) $$ ppr gbl_tvs $$ 
+	; traceTc (text "infer" <+> (ppr preds1 $$ ppr (growInstsTyVars wanted' tau_tvs1) $$ ppr gbl_tvs $$ 
 		   ppr gbl_tvs1 $$ ppr free $$ ppr bound))
 	; (irreds1, binds1) <- tryHardCheckLoop doc bound
 
@@ -706,7 +705,13 @@ tcSimplifyInfer doc tau_tvs wanted
 		-- Then b is fixed by gbl_tvs, so (C a b) will be in free, and
 		-- irreds2 will be empty.  But we don't want to generalise over b!
 	; let preds2 = fdPredsOfInsts irreds2	-- irreds2 is zonked
-	      qtvs   = grow preds2 tau_tvs2 `minusVarSet` oclose preds2 gbl_tvs2
+	      qtvs   = growInstsTyVars irreds2 tau_tvs2 `minusVarSet` oclose preds2 gbl_tvs2
+		---------------------------------------------------
+		-- BUG WARNING: there's a nasty bug lurking here
+		-- fdPredsOfInsts may return preds that mention variables quantified in
+		-- one of the implication constraints in irreds2; and that is clearly wrong:
+		-- we might quantify over too many variables through accidental capture
+		---------------------------------------------------
 	; let (free, irreds3) = partition (isFreeWhenInferring qtvs) irreds2
 	; extendLIEs free
 
@@ -977,7 +982,7 @@ makeImplicationBind :: InstLoc -> [TcTyVar]
 --	(ir1, .., irn) = f qtvs givens
 -- where f is (evidence for) the new implication constraint
 --	f :: forall qtvs. givens => (ir1, .., irn)
--- qtvs includes coercion variables.
+-- qtvs includes coercion variables
 --
 -- This binding must line up the 'rhs' in reduceImplication
 makeImplicationBind loc all_tvs
@@ -997,7 +1002,7 @@ makeImplicationBind loc all_tvs
 	      name = mkInternalName uniq (mkVarOcc "ic") span
 	      implic_inst = ImplicInst { tci_name = name,
 					 tci_tyvars = all_tvs, 
-					 tci_given = (eq_givens ++ dict_givens),
+					 tci_given = eq_givens ++ dict_givens,
                                                        -- same order as binders
 					 tci_wanted = irreds, 
                                          tci_loc = loc }
@@ -1106,7 +1111,9 @@ checkLoop env wanteds
                 ; env'     <- zonkRedEnv env
 		; wanteds' <- zonkInsts  wanteds
 	
-		; (improved, binds, irreds) <- reduceContext env' wanteds'
+		; (improved, tybinds, binds, irreds) 
+                    <- reduceContext env' wanteds'
+                ; execTcTyVarBinds tybinds
 
 		; if null irreds || not improved then
 	 	    return (irreds, binds)
@@ -1441,7 +1448,8 @@ tcSimplifyRestricted doc top_lvl bndrs tau_tvs wanteds
 	-- HOWEVER, some unification may take place, if we instantiate
 	-- 	    a method Inst with an equality constraint
 	; let env = mkNoImproveRedEnv doc (\_ -> ReduceMe)
-	; (_imp, _binds, constrained_dicts) <- reduceContext env wanteds_z
+	; (_imp, _tybinds, _binds, constrained_dicts) 
+            <- reduceContext env wanteds_z
 
 	-- Next, figure out the tyvars we will quantify over
 	; tau_tvs' <- zonkTcTyVarsAndFV (varSetElems tau_tvs)
@@ -1469,13 +1477,6 @@ tcSimplifyRestricted doc top_lvl bndrs tau_tvs wanteds
 		ppr _binds,
 		ppr constrained_tvs', ppr tau_tvs', ppr qtvs ])
 
-          -- Zonk wanteds again!  The first call to reduceContext may have
-          -- instantiated some variables. 
-          -- FIXME: If red_improve would work, we could propagate that into
-          --        the equality solver, too, to prevent instantating any
-          --        variables.
-	; wanteds_zz <- zonkInsts wanteds_z
-
 	-- The first step may have squashed more methods than
 	-- necessary, so try again, this time more gently, knowing the exact
 	-- set of type variables to quantify over.
@@ -1497,7 +1498,8 @@ tcSimplifyRestricted doc top_lvl bndrs tau_tvs wanteds
 			   (is_nested_group || isDict inst) = Stop
 		          | otherwise  	                    = ReduceMe 
 	      env = mkNoImproveRedEnv doc try_me
-	; (_imp, binds, irreds) <- reduceContext env wanteds_zz
+	; (_imp, tybinds, binds, irreds) <- reduceContext env wanteds_z
+        ; execTcTyVarBinds tybinds
 
 	-- See "Notes on implicit parameters, Question 4: top level"
 	; ASSERT( all (isFreeWrtTyVars qtvs) irreds )	-- None should be captured
@@ -1583,13 +1585,23 @@ Simpler, maybe, but alas not simple (see Trac #2494)
 tcSimplifyRuleLhs :: [Inst] -> TcM ([Inst], TcDictBinds)
 tcSimplifyRuleLhs wanteds
   = do	{ wanteds' <- zonkInsts wanteds
-	; (irreds, binds) <- go [] emptyBag wanteds'
+    	
+		-- Simplify equalities  
+		-- It's important to do this: Trac #3346 for example
+        ; (_, wanteds'', tybinds, binds1) <- tcReduceEqs [] wanteds'
+        ; execTcTyVarBinds tybinds
+
+	  	-- Simplify other constraints
+	; (irreds, binds2) <- go [] emptyBag wanteds''
+
+	  	-- Report anything that is left
 	; let (dicts, bad_irreds) = partition isDict irreds
 	; traceTc (text "tcSimplifyrulelhs" <+> pprInsts bad_irreds)
 	; addNoInstanceErrs (nub bad_irreds)
 		-- The nub removes duplicates, which has
 		-- not happened otherwise (see notes above)
-	; return (dicts, binds) }
+
+	; return (dicts, binds1 `unionBags` binds2) }
   where
     go :: [Inst] -> TcDictBinds -> [Inst] -> TcM ([Inst], TcDictBinds)
     go irreds binds []
@@ -1631,7 +1643,7 @@ this bracket again at its usage site.
 \begin{code}
 tcSimplifyBracket :: [Inst] -> TcM ()
 tcSimplifyBracket wanteds
-  = do	{ tryHardCheckLoop doc wanteds
+  = do	{ _ <- tryHardCheckLoop doc wanteds
 	; return () }
   where
     doc = text "tcSimplifyBracket"
@@ -1674,7 +1686,8 @@ tcSimplifyIPs given_ips wanteds
 		-- Unusually for checking, we *must* zonk the given_ips
 
 	; let env = mkRedEnv doc try_me given_ips'
-	; (improved, binds, irreds) <- reduceContext env wanteds'
+	; (improved, tybinds, binds, irreds) <- reduceContext env wanteds'
+        ; execTcTyVarBinds tybinds
 
 	; if null irreds || not improved then 
 		ASSERT( all is_free irreds )
@@ -1863,6 +1876,7 @@ discharge with the explicit instance.
 reduceContext :: RedEnv
 	      -> [Inst]			-- Wanted
 	      -> TcM (ImprovementDone,
+                      TcTyVarBinds,     -- Type variable bindings
 		      TcDictBinds,	-- Dictionary bindings
 		      [Inst])		-- Irreducible
 
@@ -1889,10 +1903,11 @@ reduceContext env wanteds0
               givens  = red_givens env
         ; (givens', 
            wanteds', 
-           normalise_binds,
-           eq_improved)     <- tcReduceEqs givens wanteds
+           tybinds,
+           normalise_binds) <- tcReduceEqs givens wanteds
 	; traceTc $ text "reduceContext: tcReduceEqs result" <+> vcat
-		      [ppr givens', ppr wanteds', ppr normalise_binds]
+		      [ppr givens', ppr wanteds', ppr tybinds, 
+                       ppr normalise_binds]
 
           -- Build the Avail mapping from "given_dicts"
 	; (init_state, _) <- getLIE $ do 
@@ -1906,6 +1921,8 @@ reduceContext env wanteds0
           -- involved unifications gets deferred.
 	; let (wanted_implics, wanted_dicts) = partition isImplicInst wanteds'
 	; (avails, extra_eqs) <- getLIE (reduceList env wanted_dicts init_state)
+	  	   -- The getLIE is reqd because reduceList does improvement
+		   -- (via extendAvails) which may in turn do unification
 	; (dict_binds, 
            bound_dicts, 
            dict_irreds)       <- extractResults avails wanted_dicts
@@ -1930,7 +1947,7 @@ reduceContext env wanteds0
           -- Collect all irreducible instances, and determine whether we should
           -- go round again.  We do so in either of two cases:
           -- (1) If dictionary reduction or equality solving led to
-          --     improvement (i.e., instantiated type variables).
+          --     improvement (i.e., bindings for type variables).
           -- (2) If we reduced dictionaries (i.e., got dictionary bindings),
           --     they may have exposed further opportunities to normalise
           --     family applications.  See Note [Dictionary Improvement]
@@ -1943,6 +1960,7 @@ reduceContext env wanteds0
 
 	; let all_irreds       = dict_irreds ++ implic_irreds ++ extra_eqs
       	      avails_improved  = availsImproved avails
+              eq_improved      = anyBag (not . isCoVarBind) tybinds
               improvedFlexible = avails_improved || eq_improved
               reduced_dicts    = not (isEmptyBag dict_binds)
               improved         = improvedFlexible || reduced_dicts
@@ -1956,6 +1974,7 @@ reduceContext env wanteds0
 	     text "given" <+> ppr givens,
 	     text "wanted" <+> ppr wanteds0,
 	     text "----",
+	     text "tybinds" <+> ppr tybinds,
 	     text "avails" <+> pprAvails avails,
 	     text "improved =" <+> ppr improved <+> text improvedHint,
 	     text "(all) irreds = " <+> ppr all_irreds,
@@ -1965,10 +1984,13 @@ reduceContext env wanteds0
 	     ]))
 
 	; return (improved, 
+                  tybinds,
                   normalise_binds `unionBags` dict_binds 
                                   `unionBags` implic_binds, 
                   all_irreds) 
         }
+  where
+    isCoVarBind (TcTyVarBind tv _) = isCoVar tv
 
 tcImproveOne :: Avails -> Inst -> TcM ImprovementDone
 tcImproveOne avails inst
@@ -2840,6 +2862,7 @@ disambiguate doc interactive dflags insts
 
   where
    extended_defaulting = interactive || dopt Opt_ExtendedDefaultRules dflags
+   		       -- See also Trac #1974
    ovl_strings = dopt Opt_OverloadedStrings dflags
 
    unaries :: [(Inst, Class, TcTyVar)]  -- (C tv) constraints
@@ -2886,12 +2909,16 @@ disambigGroup :: [Type]			-- The default types
 	      -> TcM ()	-- Just does unification, to fix the default types
 
 disambigGroup default_tys dicts
-  = try_default default_tys
+  = do { mb_chosen_ty <- try_default default_tys
+       ; case mb_chosen_ty of
+            Nothing        -> return ()
+            Just chosen_ty -> do { _ <- unifyType chosen_ty (mkTyVarTy tyvar) 
+	    	 	         ; warnDefault dicts chosen_ty } }
   where
     (_,_,tyvar) = ASSERT(not (null dicts)) head dicts	-- Should be non-empty
     classes = [c | (_,c,_) <- dicts]
 
-    try_default [] = return ()
+    try_default [] = return Nothing
     try_default (default_ty : default_tys)
       = tryTcLIE_ (try_default default_tys) $
     	do { tcSimplifyDefault [mkClassPred clas [default_ty] | clas <- classes]
@@ -2901,10 +2928,7 @@ disambigGroup default_tys dicts
 		-- For example, if Real a is reqd, but the only type in the
 		-- default list is Int.
 
-		-- After this we can't fail
-	   ; warnDefault dicts default_ty
-	   ; unifyType default_ty (mkTyVarTy tyvar) 
-	   ; return () -- TOMDO: do something with the coercion
+	   ; return (Just default_ty) -- TOMDO: do something with the coercion
 	   }
 
 
@@ -2991,7 +3015,7 @@ tcSimplifyDeriv orig tyvars theta
 	; (irreds, _) <- tryHardCheckLoop doc wanteds
 
 	; let (tv_dicts, others) = partition ok irreds
-              (tidy_env, tidy_insts) = tidyInsts others
+	      (tidy_env, tidy_insts) = tidyInsts others
         ; reportNoInstances tidy_env Nothing [alt_fix] tidy_insts
 	-- See Note [Exotic derived instance contexts] in TcMType
 
@@ -3032,6 +3056,7 @@ tcSimplifyDefault theta = do
 \end{code}
 
 
+
 %************************************************************************
 %*									*
 \section{Errors and contexts}
@@ -3061,7 +3086,7 @@ groupErrs report_err (inst:insts)
    (friends, others) = partition is_friend insts
    loc_msg	     = showSDoc (pprInstLoc (instLoc inst))
    is_friend friend  = showSDoc (pprInstLoc (instLoc friend)) == loc_msg
-   do_one insts = addInstCtxt (instLoc (head insts)) (report_err insts)
+   do_one insts = setInstCtxt (instLoc (head insts)) (report_err insts)
 		-- Add location and context information derived from the Insts
 
 -- Add the "arising from..." part to a message about bunch of dicts
@@ -3106,7 +3131,7 @@ reportNoInstances
 			-- Nothing => top level
 			-- Just (d,g) => d describes the construct
 			--		 with givens g
-        -> [SDoc]      -- Alternative fix for no-such-instance
+        -> [SDoc]	-- Alternative fix for no-such-instance
 	-> [Inst]	-- What is wanted (can include implications)
 	-> TcM ()	
 
@@ -3270,7 +3295,7 @@ monomorphism_fix dflags
 warnDefault :: [(Inst, Class, Var)] -> Type -> TcM ()
 warnDefault ups default_ty = do
     warn_flag <- doptM Opt_WarnTypeDefaults
-    addInstCtxt (instLoc (head (dicts))) (warnTc warn_flag warn_msg)
+    setInstCtxt (instLoc (head (dicts))) (warnTc warn_flag warn_msg)
   where
     dicts = [d | (d,_,_) <- ups]
 

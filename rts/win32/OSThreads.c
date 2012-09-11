@@ -11,7 +11,6 @@
 
 #include "Rts.h"
 #if defined(THREADED_RTS)
-#include "OSThreads.h"
 #include "RtsUtils.h"
 #include <windows.h>
 
@@ -95,6 +94,7 @@ void
 shutdownThread()
 {
   _endthreadex(0);
+  barf("_endthreadex returned"); // avoid gcc warning
 }
 
 int
@@ -230,6 +230,26 @@ forkOS_createThread ( HsStablePtr entry )
 			   (void*)entry,
 			   0,
 			   (unsigned*)&pId) == 0);
+}
+
+nat
+getNumberOfProcessors (void)
+{
+    static nat nproc = 0;
+
+    if (nproc == 0) {
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        nproc = si.dwNumberOfProcessors;
+    }
+
+    return nproc;
+}
+
+void
+setThreadAffinity (nat n STG_UNUSED, nat m STG_UNUSED)
+{
+    /* ToDo */
 }
 
 #else /* !defined(THREADED_RTS) */

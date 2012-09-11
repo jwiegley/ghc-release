@@ -53,7 +53,7 @@ parseStaticFlags args = do
 
     -- deal with the way flags: the way (eg. prof) gives rise to
     -- further flags, some of which might be static.
-  way_flags <- findBuildTag
+  way_flags <- getWayFlags
   let way_flags' = map (mkGeneralLocated "in way flags") way_flags
 
     -- if we're unregisterised, add some more flags
@@ -106,7 +106,7 @@ static_flags = [
 
         ------- ways --------------------------------------------------------
   , Flag "prof"           (NoArg (addWay WayProf)) Supported
-  , Flag "ticky"          (NoArg (addWay WayTicky)) Supported
+  , Flag "eventlog"       (NoArg (addWay WayEventLog)) Supported
   , Flag "parallel"       (NoArg (addWay WayPar)) Supported
   , Flag "gransim"        (NoArg (addWay WayGran)) Supported
   , Flag "smp"            (NoArg (addWay WayThreaded))
@@ -114,7 +114,10 @@ static_flags = [
   , Flag "debug"          (NoArg (addWay WayDebug)) Supported
   , Flag "ndp"            (NoArg (addWay WayNDP)) Supported
   , Flag "threaded"       (NoArg (addWay WayThreaded)) Supported
-        -- ToDo: user ways
+
+  , Flag "ticky"          (PassFlag (\f -> do addOpt f; addWay WayDebug)) Supported
+    -- -ticky enables ticky-ticky code generation, and also implies -debug which
+    -- is required to get the RTS ticky support.
 
         ------ Debugging ----------------------------------------------------
   , Flag "dppr-debug"        (PassFlag addOpt) Supported
@@ -122,27 +125,12 @@ static_flags = [
   , Flag "dppr-user-length"  (AnySuffix addOpt) Supported
   , Flag "dopt-fuel"         (AnySuffix addOpt) Supported
   , Flag "dno-debug-output"  (PassFlag addOpt) Supported
+  , Flag "dstub-dead-values" (PassFlag addOpt) Supported
       -- rest of the debugging flags are dynamic
-
-        --------- Profiling --------------------------------------------------
-  , Flag "auto-all"       (NoArg (addOpt "-fauto-sccs-on-all-toplevs"))
-         Supported
-  , Flag "auto"           (NoArg (addOpt "-fauto-sccs-on-exported-toplevs"))
-         Supported
-  , Flag "caf-all"        (NoArg (addOpt "-fauto-sccs-on-individual-cafs"))
-         Supported
-         -- "ignore-sccs"  doesn't work  (ToDo)
-
-  , Flag "no-auto-all"    (NoArg (removeOpt "-fauto-sccs-on-all-toplevs"))
-         Supported
-  , Flag "no-auto"        (NoArg (removeOpt "-fauto-sccs-on-exported-toplevs"))
-         Supported
-  , Flag "no-caf-all"     (NoArg (removeOpt "-fauto-sccs-on-individual-cafs"))
-         Supported
 
         ----- Linker --------------------------------------------------------
   , Flag "static"         (PassFlag addOpt) Supported
-  , Flag "dynamic"        (NoArg (removeOpt "-static")) Supported
+  , Flag "dynamic"        (NoArg (removeOpt "-static" >> addWay WayDyn)) Supported
     -- ignored for compat w/ gcc:
   , Flag "rdynamic"       (NoArg (return ())) Supported
 
@@ -152,22 +140,29 @@ static_flags = [
   , Flag "Rghc-timing"    (NoArg  (enableTimingStats)) Supported
 
         ------ Compiler flags -----------------------------------------------
+
+        -- -fPIC requires extra checking: only the NCG supports it.
+        -- See also DynFlags.parseDynamicFlags.
+  , Flag "fPIC" (PassFlag setPIC) Supported
+
         -- All other "-fno-<blah>" options cancel out "-f<blah>" on the hsc cmdline
   , Flag "fno-"
          (PrefixPred (\s -> isStaticFlag ("f"++s)) (\s -> removeOpt ("-f"++s)))
          Supported
 
         -- Pass all remaining "-f<blah>" options to hsc
-  , Flag "f"                      (AnySuffixPred (isStaticFlag) addOpt)
-         Supported
+  , Flag "f" (AnySuffixPred isStaticFlag addOpt) Supported
   ]
+
+setPIC :: String -> IO ()
+setPIC | cGhcWithNativeCodeGen == "YES" || cGhcUnregisterised == "YES"
+       = addOpt
+       | otherwise
+       = ghcError $ CmdLineError "-fPIC is not supported on this platform"
 
 isStaticFlag :: String -> Bool
 isStaticFlag f =
   f `elem` [
-    "fauto-sccs-on-all-toplevs",
-    "fauto-sccs-on-exported-toplevs",
-    "fauto-sccs-on-individual-cafs",
     "fscc-profiling",
     "fdicts-strict",
     "fspec-inline-join-points",
@@ -177,6 +172,7 @@ isStaticFlag f =
     "fno-hi-version-check",
     "dno-black-holing",
     "fno-state-hack",
+    "fsimple-list-literals",
     "fno-ds-multi-tyvar",
     "fruntime-types",
     "fno-pre-inlining",
@@ -184,7 +180,6 @@ isStaticFlag f =
     "static",
     "fhardwire-lib-paths",
     "funregisterised",
-    "fext-core",
     "fcpr-off",
     "ferror-spans",
     "fPIC",

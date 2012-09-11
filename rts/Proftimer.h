@@ -9,14 +9,21 @@
 #ifndef PROFTIMER_H
 #define PROFTIMER_H
 
-extern void initProfTimer      ( void );
-extern void handleProfTick     ( void );
+BEGIN_RTS_PRIVATE
 
-extern void stopProfTimer      ( void );
-extern void startProfTimer     ( void );
-extern void stopHeapProfTimer  ( void );
-extern void startHeapProfTimer ( void );
+void initProfTimer      ( void );
+void handleProfTick     ( void );
+
+#ifdef PROFILING
+void stopProfTimer      ( void );
+void startProfTimer     ( void );
+#endif
+
+void stopHeapProfTimer  ( void );
+void startHeapProfTimer ( void );
 
 extern rtsBool performHeapProfile;
+
+END_RTS_PRIVATE
 
 #endif /* PROFTIMER_H */

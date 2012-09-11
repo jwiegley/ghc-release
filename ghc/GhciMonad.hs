@@ -16,7 +16,6 @@ module GhciMonad where
 import qualified GHC
 import Outputable       hiding (printForUser, printForUserPartWay)
 import qualified Outputable
-import qualified Pretty
 import Panic            hiding (showException)
 import Util
 import DynFlags
@@ -26,17 +25,16 @@ import Module
 import ObjLink
 import Linker
 import StaticFlags
-import qualified MonadUtils as MonadUtils
-import qualified ErrUtils as ErrUtils
+import qualified MonadUtils
 
 import Exception
-import Data.Maybe
+-- import Data.Maybe
 import Numeric
 import Data.Array
-import Data.Char
+-- import Data.Char
 import Data.Int         ( Int64 )
 import Data.IORef
-import Data.List
+-- import Data.List
 import System.CPUTime
 import System.Environment
 import System.IO
@@ -45,9 +43,7 @@ import GHC.Exts
 
 import System.Console.Haskeline (CompletionFunc, InputT)
 import qualified System.Console.Haskeline as Haskeline
-import System.Console.Haskeline.Encoding
 import Control.Monad.Trans as Trans
-import qualified Data.ByteString as B
 
 -----------------------------------------------------------------------------
 -- GHCi monad
@@ -240,41 +236,15 @@ unsetOption opt
 io :: IO a -> GHCi a
 io = MonadUtils.liftIO
 
-printForUser :: SDoc -> GHCi ()
+printForUser :: GhcMonad m => SDoc -> m ()
 printForUser doc = do
   unqual <- GHC.getPrintUnqual
-  io $ Outputable.printForUser stdout unqual doc
-
-printForUser' :: SDoc -> InputT GHCi ()
-printForUser' doc = do
-    unqual <- GHC.getPrintUnqual
-    Haskeline.outputStrLn $ showSDocForUser unqual doc
+  MonadUtils.liftIO $ Outputable.printForUser stdout unqual doc
 
 printForUserPartWay :: SDoc -> GHCi ()
 printForUserPartWay doc = do
   unqual <- GHC.getPrintUnqual
   io $ Outputable.printForUserPartWay stdout opt_PprUserLength unqual doc
-
--- We set log_action to write encoded output.
--- This fails whenever GHC tries to mention an (already encoded) filename,
--- but I don't know how to work around that.
-setLogAction :: InputT GHCi ()
-setLogAction = do
-    encoder <- getEncoder
-    dflags <- GHC.getSessionDynFlags
-    GHC.setSessionDynFlags dflags {log_action = logAction encoder}
-    return ()
-  where
-    logAction encoder severity srcSpan style msg = case severity of
-        GHC.SevInfo -> printEncErrs encoder (msg style)
-        GHC.SevFatal -> printEncErrs encoder (msg style)
-        _ -> do
-            hPutChar stderr '\n'
-            printEncErrs encoder (ErrUtils.mkLocMessage srcSpan msg style)
-    printEncErrs encoder doc = do
-        str <- encoder (Pretty.showDocWith Pretty.PageMode doc)
-        B.hPutStrLn stderr str
-        hFlush stderr
 
 runStmt :: String -> GHC.SingleStep -> GHCi GHC.RunResult
 runStmt expr step = do
@@ -287,8 +257,14 @@ runStmt expr step = do
                                         return GHC.RunFailed) $ do
           GHC.runStmt expr step
 
-resume :: (GHC.SrcSpan -> Bool) -> GHC.SingleStep -> GHCi GHC.RunResult
-resume canLogSpan step = GHC.resume canLogSpan step
+resume :: (SrcSpan -> Bool) -> GHC.SingleStep -> GHCi GHC.RunResult
+resume canLogSpan step = do
+  st <- getGHCiState
+  reifyGHCi $ \x ->
+    withProgName (progname st) $
+    withArgs (args st) $
+      reflectGHCi x $ do
+        GHC.resume canLogSpan step
 
 -- --------------------------------------------------------------------------
 -- timing & statistics
@@ -363,15 +339,14 @@ initInterpBuffering = do -- make sure these are linked
         -- ToDo: we should really look up these names properly, but
         -- it's a fiddle and not all the bits are exposed via the GHC
         -- interface.
-      mb_stdin_ptr  <- ObjLink.lookupSymbol "base_GHCziHandle_stdin_closure"
-      mb_stdout_ptr <- ObjLink.lookupSymbol "base_GHCziHandle_stdout_closure"
-      mb_stderr_ptr <- ObjLink.lookupSymbol "base_GHCziHandle_stderr_closure"
+      mb_stdin_ptr  <- ObjLink.lookupSymbol "base_GHCziIOziHandleziFD_stdin_closure"
+      mb_stdout_ptr <- ObjLink.lookupSymbol "base_GHCziIOziHandleziFD_stdout_closure"
+      mb_stderr_ptr <- ObjLink.lookupSymbol "base_GHCziIOziHandleziFD_stderr_closure"
 
       let f ref (Just ptr) = writeIORef ref ptr
           f _   Nothing    = panic "interactiveUI:setBuffering2"
-      zipWithM f [stdin_ptr,stdout_ptr,stderr_ptr]
-                 [mb_stdin_ptr,mb_stdout_ptr,mb_stderr_ptr]
-      return ()
+      zipWithM_ f [stdin_ptr,stdout_ptr,stderr_ptr]
+                  [mb_stdin_ptr,mb_stdout_ptr,mb_stderr_ptr]
 
 flushInterpBuffers :: GHCi ()
 flushInterpBuffers

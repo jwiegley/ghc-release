@@ -33,25 +33,31 @@
 --
 
 module PprCmm
-    ( writeCmms, pprCmms, pprCmm, pprStmt, pprExpr, pprSection, pprStatic, pprLit
+    ( writeCmms, pprCmms, pprCmm, pprStmt, pprExpr, 
+      pprSection, pprStatic, pprLit
     )
 where
 
 import BlockId
 import Cmm
 import CmmUtils
-import MachOp
 import CLabel
 import BasicTypes
 
+
 import ForeignCall
-import Unique
 import Outputable
 import FastString
 
 import Data.List
 import System.IO
 import Data.Maybe
+
+-- Temp Jan08
+import SMRep
+import ClosureInfo
+#include "../includes/rts/storage/FunTypes.h"
+
 
 pprCmms :: (Outputable info, Outputable g) => [GenCmm CmmStatic info g] -> SDoc
 pprCmms cmms = pprCode CStyle (vcat (intersperse separator $ map ppr cmms))
@@ -119,7 +125,7 @@ pprTop 	:: (Outputable d, Outputable info, Outputable i)
 
 pprTop (CmmProc info lbl params graph )
 
-  = vcat [ pprCLabel lbl <> parens (commafy $ map ppr params) <+> lbrace
+  = vcat [ pprCLabel lbl <> parens (commafy $ map ppr params)
          , nest 8 $ lbrace <+> ppr info $$ rbrace
          , nest 4 $ ppr graph
          , rbrace ]
@@ -148,13 +154,14 @@ instance Outputable CmmSafety where
 pprInfo :: CmmInfo -> SDoc
 pprInfo (CmmInfo _gc_target update_frame CmmNonInfoTable) =
     vcat [{-ptext (sLit "gc_target: ") <>
-                maybe (ptext (sLit "<none>")) pprBlockId gc_target,-}
+                maybe (ptext (sLit "<none>")) ppr gc_target,-}
           ptext (sLit "update_frame: ") <>
                 maybe (ptext (sLit "<none>")) pprUpdateFrame update_frame]
 pprInfo (CmmInfo _gc_target update_frame
-         (CmmInfoTable (ProfilingInfo closure_type closure_desc) tag info)) =
+         (CmmInfoTable stat_clos (ProfilingInfo closure_type closure_desc) tag info)) =
     vcat [{-ptext (sLit "gc_target: ") <>
-                maybe (ptext (sLit "<none>")) pprBlockId gc_target,-}
+                maybe (ptext (sLit "<none>")) ppr gc_target,-}
+          ptext (sLit "has static closure: ") <> ppr stat_clos <+>
           ptext (sLit "update_frame: ") <>
                 maybe (ptext (sLit "<none>")) pprUpdateFrame update_frame,
           ptext (sLit "type: ") <> pprLit closure_type,
@@ -168,11 +175,13 @@ pprTypeInfo (ConstrInfo layout constr descr) =
           ptext (sLit "nptrs: ") <> integer (toInteger (snd layout)),
           ptext (sLit "constructor: ") <> integer (toInteger constr),
           pprLit descr]
-pprTypeInfo (FunInfo layout srt fun_type arity _args slow_entry) =
+pprTypeInfo (FunInfo layout srt arity _args slow_entry) =
     vcat [ptext (sLit "ptrs: ") <> integer (toInteger (fst layout)),
           ptext (sLit "nptrs: ") <> integer (toInteger (snd layout)),
           ptext (sLit "srt: ") <> ppr srt,
-          ptext (sLit "fun_type: ") <> integer (toInteger fun_type),
+-- Temp Jan08
+          ptext (sLit ("fun_type: ")) <> integer (toInteger (argDescrType _args)),
+
           ptext (sLit "arity: ") <> integer (toInteger arity),
           --ptext (sLit "args: ") <> ppr args, -- TODO: needs to be printed
           ptext (sLit "slow: ") <> pprLit slow_entry
@@ -187,6 +196,20 @@ pprTypeInfo (ThunkSelectorInfo offset srt) =
 pprTypeInfo (ContInfo stack srt) =
     vcat [ptext (sLit "stack: ") <> ppr stack,
           ptext (sLit "srt: ") <> ppr srt]
+
+-- Temp Jan08
+argDescrType :: ArgDescr -> StgHalfWord
+-- The "argument type" RTS field type
+argDescrType (ArgSpec n) = n
+argDescrType (ArgGen liveness)
+  | isBigLiveness liveness = ARG_GEN_BIG
+  | otherwise		   = ARG_GEN
+
+-- Temp Jan08
+isBigLiveness :: Liveness -> Bool
+isBigLiveness (BigLiveness _)   = True
+isBigLiveness (SmallLiveness _) = False
+
 
 pprUpdateFrame :: UpdateFrame -> SDoc
 pprUpdateFrame (UpdateFrame expr args) = 
@@ -206,7 +229,7 @@ pprUpdateFrame (UpdateFrame expr args) =
 --      lbl: stmt ; stmt ; .. 
 pprBBlock :: Outputable stmt => GenBasicBlock stmt -> SDoc
 pprBBlock (BasicBlock ident stmts) =
-    hang (pprBlockId ident <> colon) 4 (vcat (map ppr stmts))
+    hang (ppr ident <> colon) 4 (vcat (map ppr stmts))
 
 -- --------------------------------------------------------------------------
 -- Statements. C-- usually, exceptions to this should be obvious.
@@ -226,39 +249,28 @@ pprStmt stmt = case stmt of
     -- rep[lv] = expr;
     CmmStore lv expr -> rep <> brackets(ppr lv) <+> equals <+> ppr expr <> semi
         where
-          rep = ppr ( cmmExprRep expr )
+          rep = ppr ( cmmExprType expr )
 
     -- call "ccall" foo(x, y)[r1, r2];
     -- ToDo ppr volatile
     CmmCall (CmmCallee fn cconv) results args safety ret ->
-        hcat [ if null results
-                  then empty
-                  else parens (commafy $ map ppr results) <>
-                       ptext (sLit " = "),
-               ptext (sLit "foreign"), space, 
-               doubleQuotes(ppr cconv), space,
-               target fn, parens  ( commafy $ map ppr args ),
-               brackets (ppr safety), 
-               case ret of CmmMayReturn -> empty
-                           CmmNeverReturns -> ptext (sLit " never returns"),
-               semi ]
+        sep  [ pp_lhs <+> pp_conv
+	     , nest 2 (pprExpr9 fn <> 
+		       parens (commafy (map ppr_ar args)))
+               <> brackets (ppr safety)
+             , case ret of CmmMayReturn -> empty
+                           CmmNeverReturns -> ptext $ sLit (" never returns")
+             ] <> semi
         where
-          ---- With the following three functions, I was going somewhere
-          ---- useful, but I don't remember where.  Probably making 
-          ---- emitted Cmm output look better. ---NR, 2 May 2008
-	  _pp_lhs | null results = empty
-		  | otherwise    = commafy (map ppr_ar results) <+> equals
+	  pp_lhs | null results = empty
+		 | otherwise    = commafy (map ppr_ar results) <+> equals
 		-- Don't print the hints on a native C-- call
-	  ppr_ar arg = case cconv of
-			    CmmCallConv -> ppr (kindlessCmm arg)
-			    _   	-> doubleQuotes (ppr $ cmmKind arg) <+>
-                                           ppr (kindlessCmm arg)
-	  _pp_conv = case cconv of
+	  ppr_ar (CmmHinted ar k) = case cconv of
+			    CmmCallConv -> ppr ar
+			    _           -> ppr (ar,k)
+	  pp_conv = case cconv of
 		      CmmCallConv -> empty
-		      _ -> ptext (sLit "foreign") <+> doubleQuotes (ppr cconv)
-
-          target (CmmLit lit) = pprLit lit
-          target fn'          = parens (ppr fn')
+		      _           -> ptext (sLit("foreign")) <+> doubleQuotes (ppr cconv)
 
     CmmCall (CmmPrim op) results args safety ret ->
         pprStmt (CmmCall (CmmCallee (CmmLit lbl) CCallConv)
@@ -272,6 +284,18 @@ pprStmt stmt = case stmt of
     CmmReturn params         -> genReturn params
     CmmSwitch arg ids        -> genSwitch arg ids
 
+instance Outputable ForeignHint where
+  ppr NoHint     = empty
+  ppr SignedHint = quotes(text "signed")
+--  ppr AddrHint   = quotes(text "address")
+-- Temp Jan08
+  ppr AddrHint   = (text "PtrHint")
+
+-- Just look like a tuple, since it was a tuple before
+-- ... is that a good idea? --Isaac Dupree
+instance (Outputable a) => Outputable (CmmHinted a) where
+  ppr (CmmHinted a k) = ppr (a, k)
+
 -- --------------------------------------------------------------------------
 -- goto local label. [1], section 6.6
 --
@@ -279,7 +303,7 @@ pprStmt stmt = case stmt of
 --
 genBranch :: BlockId -> SDoc
 genBranch ident = 
-    ptext (sLit "goto") <+> pprBlockId ident <> semi
+    ptext (sLit "goto") <+> ppr ident <> semi
 
 -- --------------------------------------------------------------------------
 -- Conditional. [1], section 6.4
@@ -291,16 +315,15 @@ genCondBranch expr ident =
     hsep [ ptext (sLit "if")
          , parens(ppr expr)
          , ptext (sLit "goto")
-         , pprBlockId ident <> semi ]
+         , ppr ident <> semi ]
 
 -- --------------------------------------------------------------------------
 -- A tail call. [1], Section 6.9
 --
 --     jump foo(a, b, c);
 --
-genJump :: CmmExpr -> [CmmKinded CmmExpr] -> SDoc
+genJump :: CmmExpr -> [CmmHinted CmmExpr] -> SDoc
 genJump expr args = 
-
     hcat [ ptext (sLit "jump")
          , space
          , if isTrivialCmmExpr expr
@@ -309,23 +332,17 @@ genJump expr args =
                     CmmLoad (CmmReg _) _ -> pprExpr expr 
                     _ -> parens (pprExpr expr)
          , space
-         , parens  ( commafy $ map pprKinded args )
+         , parens  ( commafy $ map ppr args )
          , semi ]
 
-pprKinded :: Outputable a => (CmmKinded a) -> SDoc
-pprKinded (CmmKinded a NoHint)     = ppr a
-pprKinded (CmmKinded a PtrHint)    = quotes(text "address") <+> ppr a
-pprKinded (CmmKinded a SignedHint) = quotes(text "signed")  <+> ppr a
-pprKinded (CmmKinded a FloatHint)  = quotes(text "float")   <+> ppr a
 
 -- --------------------------------------------------------------------------
 -- Return from a function. [1], Section 6.8.2 of version 1.128
 --
 --     return (a, b, c);
 --
-genReturn :: [CmmKinded CmmExpr] -> SDoc
+genReturn :: [CmmHinted CmmExpr] -> SDoc
 genReturn args = 
-
     hcat [ ptext (sLit "return")
          , space
          , parens  ( commafy $ map ppr args )
@@ -365,7 +382,7 @@ genSwitch expr maybe_ids
           in hsep [ ptext (sLit "case")
                   , hcat (punctuate comma (map int is))
                   , ptext (sLit ": goto")
-                  , pprBlockId (head [ id | Just id <- ids]) <> semi ]
+                  , ppr (head [ id | Just id <- ids]) <> semi ]
 
 -- --------------------------------------------------------------------------
 -- Expressions
@@ -377,7 +394,7 @@ pprExpr e
         CmmRegOff reg i -> 
 		pprExpr (CmmMachOp (MO_Add rep)
 			   [CmmReg reg, CmmLit (CmmInt (fromIntegral i) rep)])
-		where rep = cmmRegRep reg	
+		where rep = typeWidth (cmmRegType reg)
 	CmmLit lit -> pprLit lit
 	_other     -> pprExpr1 e
 
@@ -489,7 +506,7 @@ pprLit :: CmmLit -> SDoc
 pprLit lit = case lit of
     CmmInt i rep ->
         hcat [ (if i < 0 then parens else id)(integer i)
-             , (if rep == wordRep 
+             , (if rep == wordWidth
                     then empty 
                     else space <> dcolon <+> ppr rep) ]
 
@@ -498,6 +515,8 @@ pprLit lit = case lit of
     CmmLabelOff clbl i -> pprCLabel clbl <> ppr_offset i
     CmmLabelDiffOff clbl1 clbl2 i -> pprCLabel clbl1 <> char '-'  
                                   <> pprCLabel clbl2 <> ppr_offset i
+    CmmBlock id        -> ppr id
+    CmmHighStackMark -> text "<highSp>"
 
 pprLit1 :: CmmLit -> SDoc
 pprLit1 lit@(CmmLabelOff {}) = parens (pprLit lit)
@@ -535,27 +554,37 @@ pprReg r
 -- We only print the type of the local reg if it isn't wordRep
 --
 pprLocalReg :: LocalReg -> SDoc
-pprLocalReg (LocalReg uniq rep follow) 
-    = hcat [ char '_', ppr uniq, ty ] where
-  ty = if rep == wordRep && follow == GCKindNonPtr
-                then empty
-                else dcolon <> ptr <> ppr rep
-  ptr = if follow == GCKindNonPtr
-                then empty
-                else doubleQuotes (text "ptr")
+pprLocalReg (LocalReg uniq rep) 
+--   = ppr rep <> char '_' <> ppr uniq
+-- Temp Jan08
+   = char '_' <> ppr uniq <> 
+       (if isWord32 rep -- && not (isGcPtrType rep) -- Temp Jan08		-- sigh
+                    then dcolon <> ptr <> ppr rep
+                    else dcolon <> ptr <> ppr rep)
+   where
+     ptr = empty
+	 --if isGcPtrType rep
+	 --      then doubleQuotes (text "ptr")
+         --      else empty
 
 -- Stack areas
 pprArea :: Area -> SDoc
-pprArea (RegSlot r)    = hcat [ text "slot<", ppr r, text ">" ]
-pprArea (CallArea id n n') =
-  hcat [ text "callslot<", ppr id, char '+', ppr n, char '/', ppr n', text ">" ]
+pprArea (RegSlot r)   = hcat [ text "slot<", ppr r, text ">" ]
+pprArea (CallArea id) = pprAreaId id
+
+pprAreaId :: AreaId -> SDoc
+pprAreaId Old        = text "old"
+pprAreaId (Young id) = hcat [ text "young<", ppr id, text ">" ]
 
 -- needs to be kept in syn with Cmm.hs.GlobalReg
 --
 pprGlobalReg :: GlobalReg -> SDoc
 pprGlobalReg gr 
     = case gr of
-        VanillaReg n   -> char 'R' <> int n
+        VanillaReg n _ -> char 'R' <> int n
+-- Temp Jan08
+--        VanillaReg n VNonGcPtr -> char 'R' <> int n
+--        VanillaReg n VGcPtr    -> char 'P' <> int n
         FloatReg   n   -> char 'F' <> int n
         DoubleReg  n   -> char 'D' <> int n
         LongReg    n   -> char 'L' <> int n
@@ -566,6 +595,7 @@ pprGlobalReg gr
         CurrentTSO     -> ptext (sLit "CurrentTSO")
         CurrentNursery -> ptext (sLit "CurrentNursery")
         HpAlloc        -> ptext (sLit "HpAlloc")
+        EagerBlackholeInfo -> ptext (sLit "stg_EAGER_BLACKHOLE_info")
         GCEnter1       -> ptext (sLit "stg_gc_enter_1")
         GCFun          -> ptext (sLit "stg_gc_fun")
         BaseReg        -> ptext (sLit "BaseReg")
@@ -586,12 +616,6 @@ pprSection s = case s of
     OtherSection s'   -> section <+> doubleQuotes (text s')
  where
     section = ptext (sLit "section")
-
--- --------------------------------------------------------------------------
--- Basic block ids
---
-pprBlockId :: BlockId -> SDoc
-pprBlockId b = ppr $ getUnique b
 
 -----------------------------------------------------------------------------
 

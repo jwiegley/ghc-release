@@ -3,13 +3,15 @@ import System.IO
 import Foreign
 import CForeign
 
-main = do
+main = do test True; test False
+
+test blocking = do
   h <- openBinaryFile "hGetBuf002.hs" ReadMode
 
   let sz = 42
       loop = do
   	 b <- allocaBytes sz $ \ptr -> do
-                r <- hGetBuf h ptr sz
+                r <- (if blocking then hGetBuf else hGetBufNonBlocking) h ptr sz
          	if (r == 0)
 		   then return True
 		   else do s <- peekCStringLen (ptr,r)

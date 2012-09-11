@@ -1,10 +1,11 @@
 /* The RTS is just another package! */
 
 #include "ghcconfig.h"
-#include "RtsConfig.h"
+#include "rts/Config.h"
 
-name:		PACKAGE
+name:		rts
 version:	1.0
+id:             builtin_rts
 license:	BSD3
 maintainer:	glasgow-haskell-users@haskell.org
 exposed:	True
@@ -15,37 +16,26 @@ hidden-modules:
 import-dirs:
 
 #ifdef INSTALLING
-library-dirs:		LIB_DIR GMP_LIB_DIRS PAPI_LIB_DIR
+library-dirs:		LIB_DIR PAPI_LIB_DIR
 # ifdef mingw32_HOST_OS
 			, LIB_DIR"/gcc-lib"
 			/* force the dist-provided gcc-lib/ into scope. */
 # endif
 #else /* !INSTALLING */
-library-dirs:		FPTOOLS_TOP_ABS"/rts" GMP_LIB_DIRS PAPI_LIB_DIR
-# if !defined(HAVE_LIB_GMP) && !defined(HAVE_FRAMEWORK_GMP)
-			, FPTOOLS_TOP_ABS"/gmp"
-# endif
-                        , FPTOOLS_TOP_ABS"/libffi"
+library-dirs:		TOP"/rts/dist/build" PAPI_LIB_DIR
 #endif
 
 hs-libraries:   "HSrts"
 
 extra-libraries:		"m"		/* for ldexp() */
-			      , "ffi"
-#ifndef HAVE_FRAMEWORK_GMP
-			      , "gmp"
-#ifdef HAVE_LIBDL
-			      , "dl"
-#endif
-#endif
 #ifdef HAVE_LIBRT
 			      , "rt"
 #endif
+#ifdef HAVE_LIBDL
+			      , "dl"
+#endif
 #ifdef mingw32_HOST_OS
 			      ,"wsock32"	/* for the linker */
-#endif
-#ifdef WANT_DOTNET_SUPPORT
-			      , "oleaut32", "ole32", "uuid"
 #endif
 #if defined(DEBUG) && defined(HAVE_LIBBFD)
 			      ,"bfd", "iberty"	/* for debugging */
@@ -60,18 +50,13 @@ extra-libraries:		"m"		/* for ldexp() */
 #endif
 
 #ifdef INSTALLING
-include-dirs:		INCLUDE_DIR GMP_INCLUDE_DIRS PAPI_INCLUDE_DIR
+include-dirs:		INCLUDE_DIR PAPI_INCLUDE_DIR
 #else /* !INSTALLING */
-include-dirs:		FPTOOLS_TOP_ABS"/includes"
-             		FPTOOLS_TOP_ABS"/rts"
-# if !defined(HAVE_LIB_GMP) && !defined(HAVE_FRAMEWORK_GMP)
-             		FPTOOLS_TOP_ABS"/gmp/gmpbuild"
-# endif
-             		GMP_INCLUDE_DIRS
+include-dirs:		TOP"/includes"
 #endif
 
 includes:		Stg.h
-depends:	 	
+depends:	 	builtin_ffi
 hugs-options:
 cc-options:
 
@@ -102,16 +87,18 @@ ld-options:
          , "-u", "_ghczmprim_GHCziBool_False_closure"
          , "-u", "_ghczmprim_GHCziBool_True_closure"
          , "-u", "_base_GHCziPack_unpackCString_closure"
-         , "-u", "_base_GHCziIOBase_stackOverflow_closure"
-         , "-u", "_base_GHCziIOBase_heapOverflow_closure"
+         , "-u", "_base_GHCziIOziException_stackOverflow_closure"
+         , "-u", "_base_GHCziIOziException_heapOverflow_closure"
          , "-u", "_base_ControlziExceptionziBase_nonTermination_closure"
-         , "-u", "_base_GHCziIOBase_blockedOnDeadMVar_closure"
-         , "-u", "_base_GHCziIOBase_blockedIndefinitely_closure"
+         , "-u", "_base_GHCziIOziException_blockedIndefinitelyOnMVar_closure"
+         , "-u", "_base_GHCziIOziException_blockedIndefinitelyOnSTM_closure"
          , "-u", "_base_ControlziExceptionziBase_nestedAtomically_closure"
          , "-u", "_base_GHCziWeak_runFinalizzerBatch_closure"
          , "-u", "_base_GHCziTopHandler_runIO_closure"
          , "-u", "_base_GHCziTopHandler_runNonIO_closure"
-         , "-u", "_base_GHCziConc_runHandlers_closure"
+	 , "-u", "_base_GHCziConc_ensureIOManagerIsRunning_closure"
+	 , "-u", "_base_GHCziConc_runSparks_closure"
+	 , "-u", "_base_GHCziConc_runHandlers_closure"
 #else
            "-u", "ghczmprim_GHCziTypes_Izh_static_info"
          , "-u", "ghczmprim_GHCziTypes_Czh_static_info"
@@ -138,22 +125,18 @@ ld-options:
          , "-u", "ghczmprim_GHCziBool_False_closure"
          , "-u", "ghczmprim_GHCziBool_True_closure"
          , "-u", "base_GHCziPack_unpackCString_closure"
-         , "-u", "base_GHCziIOBase_stackOverflow_closure"
-         , "-u", "base_GHCziIOBase_heapOverflow_closure"
+         , "-u", "base_GHCziIOziException_stackOverflow_closure"
+         , "-u", "base_GHCziIOziException_heapOverflow_closure"
          , "-u", "base_ControlziExceptionziBase_nonTermination_closure"
-         , "-u", "base_GHCziIOBase_blockedOnDeadMVar_closure"
-         , "-u", "base_GHCziIOBase_blockedIndefinitely_closure"
+         , "-u", "base_GHCziIOziException_blockedIndefinitelyOnMVar_closure"
+         , "-u", "base_GHCziIOziException_blockedIndefinitelyOnSTM_closure"
          , "-u", "base_ControlziExceptionziBase_nestedAtomically_closure"
          , "-u", "base_GHCziWeak_runFinalizzerBatch_closure"
          , "-u", "base_GHCziTopHandler_runIO_closure"
          , "-u", "base_GHCziTopHandler_runNonIO_closure"
-         , "-u", "base_GHCziConc_runHandlers_closure"
-#endif
-
-#ifdef LEADING_UNDERSCORE
-	 , "-u", "_base_GHCziConc_ensureIOManagerIsRunning_closure"
-#else
 	 , "-u", "base_GHCziConc_ensureIOManagerIsRunning_closure"
+	 , "-u", "base_GHCziConc_runSparks_closure"
+	 , "-u", "base_GHCziConc_runHandlers_closure"
 #endif
 
 /*  Pick up static libraries in preference over dynamic if in earlier search
@@ -169,12 +152,6 @@ ld-options:
 #endif
 
 framework-dirs:
-
-#ifdef HAVE_FRAMEWORK_GMP
-frameworks:	"GMP"
-#else
-frameworks:
-#endif
 
 haddock-interfaces:
 haddock-html:

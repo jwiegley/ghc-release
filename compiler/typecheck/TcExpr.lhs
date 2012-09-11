@@ -12,7 +12,9 @@
 --     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
 -- for details
 
-module TcExpr ( tcPolyExpr, tcPolyExprNC, tcMonoExpr, tcInferRho, tcInferRhoNC, tcSyntaxOp ) where
+module TcExpr ( tcPolyExpr, tcPolyExprNC, tcMonoExpr, tcMonoExprNC, 
+                tcInferRho, tcInferRhoNC, tcSyntaxOp, 
+                addExprErrCtxt ) where
 
 #include "HsVersions.h"
 
@@ -58,6 +60,7 @@ import Maybes
 import Outputable
 import FastString
 
+import Data.List( partition )
 import Control.Monad
 \end{code}
 
@@ -79,7 +82,7 @@ tcPolyExpr, tcPolyExprNC
 -- to do so himself.
 
 tcPolyExpr expr res_ty 	
-  = addErrCtxt (exprCtxt expr) $
+  = addExprErrCtxt expr $
     (do {traceTc (text "tcPolyExpr") ; tcPolyExprNC expr res_ty })
 
 tcPolyExprNC expr res_ty 
@@ -244,41 +247,73 @@ tcExpr in_expr@(OpApp arg1 lop@(L loc op) fix arg2) res_ty
 -- but it's less work and kind of useful.
 
 tcExpr in_expr@(SectionL arg1 lop@(L loc op)) res_ty
-  = do dflags <- getDOpts
-       if dopt Opt_PostfixOperators dflags
-           then do (op', [arg1']) <- tcApp op 1 (tcArgs lop [arg1]) res_ty
-                   return (SectionL arg1' (L loc op'))
-           else do (co_fn, (op', arg1'))
-                       <- subFunTys doc 1 res_ty Nothing
-                        $ \ [arg2_ty'] res_ty' ->
-                              tcApp op 2 (tc_args arg2_ty') res_ty'
-                   return (mkHsWrap co_fn (SectionL arg1' (L loc op')))
+  = do { dflags <- getDOpts
+       ; if dopt Opt_PostfixOperators dflags
+         then do { (op', [arg1']) <- tcApp op 1 (tcArgs lop [arg1]) res_ty
+                 ; return (SectionL arg1' (L loc op')) }
+         else do 
+       { (co_fn, expr')
+             <- subFunTys doc 1 res_ty Nothing $ \ [arg2_ty'] res_ty' ->
+                do { (op', (arg1', co_arg2)) <- tcApp op 2 (tc_args arg2_ty') res_ty'
+		   ; let coi = mkFunTyCoI arg2_ty' co_arg2 res_ty' IdCo
+                   ; return (mkHsWrapCoI coi (SectionL arg1' (L loc op'))) }
+       ; return (mkHsWrap co_fn expr') } }
   where
     doc = ptext (sLit "The section") <+> quotes (ppr in_expr)
 		<+> ptext (sLit "takes one argument")
     tc_args arg2_ty' qtvs qtys [arg1_ty, arg2_ty] 
-	= do { boxyUnify arg2_ty' (substTyWith qtvs qtys arg2_ty)
-	     ; arg1' <- tcArg lop 2 arg1 qtvs qtys arg1_ty 
-	     ; qtys' <- mapM refineBox qtys	-- c.f. tcArgs 
-	     ; return (qtys', arg1') }
+	= do { co_arg2 <- boxyUnify (substTyWith qtvs qtys arg2_ty) arg2_ty' 
+	     ; arg1'   <- tcArg lop 1 arg1 qtvs qtys arg1_ty
+	     ; qtys'   <- mapM refineBox qtys	-- c.f. tcArgs 
+	     ; return (qtys', (arg1', co_arg2)) }
     tc_args _ _ _ _ = panic "tcExpr SectionL"
 
 -- Right sections, equivalent to \ x -> x `op` expr, or
 --	\ x -> op x expr
  
 tcExpr in_expr@(SectionR lop@(L loc op) arg2) res_ty
-  = do	{ (co_fn, (op', arg2')) <- subFunTys doc 1 res_ty Nothing $ \ [arg1_ty'] res_ty' ->
-				   tcApp op 2 (tc_args arg1_ty') res_ty'
-	; return (mkHsWrap co_fn (SectionR (L loc op') arg2')) }
+  = do	{ (co_fn, expr') 
+              <- subFunTys doc 1 res_ty Nothing $ \ [arg1_ty'] res_ty' ->
+		 do { (op', (co_arg1, arg2')) <- tcApp op 2 (tc_args arg1_ty') res_ty'
+		    ; let coi = mkFunTyCoI arg1_ty' co_arg1 res_ty' IdCo
+                    ; return (mkHsWrapCoI coi $ SectionR (L loc op') arg2') }
+	; return (mkHsWrap co_fn expr') }
   where
     doc = ptext (sLit "The section") <+> quotes (ppr in_expr)
 		<+> ptext (sLit "takes one argument")
     tc_args arg1_ty' qtvs qtys [arg1_ty, arg2_ty] 
-	= do { boxyUnify arg1_ty' (substTyWith qtvs qtys arg1_ty)
-	     ; arg2' <- tcArg lop 2 arg2 qtvs qtys arg2_ty 
-	     ; qtys' <- mapM refineBox qtys	-- c.f. tcArgs 
-	     ; return (qtys', arg2') }
+	= do { co_arg1 <- boxyUnify (substTyWith qtvs qtys arg1_ty) arg1_ty'
+	     ; arg2'   <- tcArg lop 2 arg2 qtvs qtys arg2_ty 
+	     ; qtys'   <- mapM refineBox qtys	-- c.f. tcArgs 
+	     ; return (qtys', (co_arg1, arg2')) }
     tc_args arg1_ty' _ _ _ = panic "tcExpr SectionR"
+
+-- For tuples, take care to preserve rigidity
+-- E.g. 	case (x,y) of ....
+-- 	   The scrutinee should have a rigid type if x,y do
+-- The general scheme is the same as in tcIdApp
+tcExpr in_expr@(ExplicitTuple tup_args boxity) res_ty
+  = do { let kind = case boxity of { Boxed   -> liftedTypeKind
+                                   ; Unboxed -> argTypeKind }
+             arity = length tup_args
+             tup_tc = tupleTyCon boxity arity
+             mk_tup_res_ty arg_tys 
+                 = mkFunTys [ty | (ty, Missing _) <- arg_tys `zip` tup_args]
+                            (mkTyConApp tup_tc arg_tys)
+
+       ; checkWiredInTyCon tup_tc       -- Ensure instances are available
+       ; tvs <- newBoxyTyVars (replicate arity kind)
+       ; let arg_tys1 = map mkTyVarTy tvs
+       ; arg_tys2 <- preSubType tvs (mkVarSet tvs) (mk_tup_res_ty arg_tys1) res_ty
+       
+       ; let go (Missing _,    arg_ty) = return (Missing arg_ty)
+             go (Present expr, arg_ty) = do { expr' <- tcPolyExpr expr arg_ty
+			                    ; return (Present expr') }
+       ; tup_args' <- mapM go (tup_args `zip` arg_tys2)
+       
+       ; arg_tys3 <- mapM refineBox arg_tys2
+       ; co_fn <- tcSubExp TupleOrigin (mk_tup_res_ty arg_tys3) res_ty
+       ; return (mkHsWrap co_fn (ExplicitTuple tup_args' boxity)) }
 \end{code}
 
 \begin{code}
@@ -343,23 +378,6 @@ tcExpr in_expr@(ExplicitPArr _ exprs) res_ty	-- maybe empty
   where
     tc_elt elt_ty expr = tcPolyExpr expr elt_ty
 
--- For tuples, take care to preserve rigidity
--- E.g. 	case (x,y) of ....
--- 	   The scrutinee should have a rigid type if x,y do
--- The general scheme is the same as in tcIdApp
-tcExpr (ExplicitTuple exprs boxity) res_ty
-  = do	{ let kind = case boxity of { Boxed   -> liftedTypeKind
-				    ; Unboxed -> argTypeKind }
-	; tvs <- newBoxyTyVars [kind | e <- exprs]
-	; let tup_tc     = tupleTyCon boxity (length exprs)
-	      tup_res_ty = mkTyConApp tup_tc (mkTyVarTys tvs)
-	; checkWiredInTyCon tup_tc	-- Ensure instances are available
-	; arg_tys  <- preSubType tvs (mkVarSet tvs) tup_res_ty res_ty
-	; exprs'   <- tcPolyExprs exprs arg_tys
-	; arg_tys' <- mapM refineBox arg_tys
-	; co_fn    <- tcSubExp TupleOrigin (mkTyConApp tup_tc arg_tys') res_ty
-	; return (mkHsWrap co_fn (ExplicitTuple exprs' boxity)) }
-
 tcExpr (HsProc pat cmd) res_ty
   = do	{ (pat', cmd', coi) <- tcProc pat cmd res_ty
 	; return $ mkHsWrapCoI coi (HsProc pat' cmd') }
@@ -400,148 +418,226 @@ tcExpr expr@(RecordCon (L loc con_name) _ rbinds) res_ty
 	; (con_expr, rbinds') <- tcIdApp con_name arity check_fields res_ty
 
 	; return (RecordCon (L loc (dataConWrapId data_con)) con_expr rbinds') }
+\end{code}
 
--- The main complication with RecordUpd is that we need to explicitly
--- handle the *non-updated* fields.  Consider:
---
---	data T a b = MkT1 { fa :: a, fb :: b }
---		   | MkT2 { fa :: a, fc :: Int -> Int }
---		   | MkT3 { fd :: a }
---	
---	upd :: T a b -> c -> T a c
---	upd t x = t { fb = x}
---
--- The type signature on upd is correct (i.e. the result should not be (T a b))
--- because upd should be equivalent to:
---
---	upd t x = case t of 
---			MkT1 p q -> MkT1 p x
---			MkT2 a b -> MkT2 p b
---			MkT3 d   -> error ...
---
--- So we need to give a completely fresh type to the result record,
--- and then constrain it by the fields that are *not* updated ("p" above).
---
--- Note that because MkT3 doesn't contain all the fields being updated,
--- its RHS is simply an error, so it doesn't impose any type constraints
---
--- All this is done in STEP 4 below.
---
--- Note about GADTs
--- ~~~~~~~~~~~~~~~~
--- For record update we require that every constructor involved in the
--- update (i.e. that has all the specified fields) is "vanilla".  I
--- don't know how to do the update otherwise.
+Note [Type of a record update]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The main complication with RecordUpd is that we need to explicitly
+handle the *non-updated* fields.  Consider:
 
+	data T a b c = MkT1 { fa :: a, fb :: (b,c) }
+		     | MkT2 { fa :: a, fb :: (b,c), fc :: c -> c }
+		     | MkT3 { fd :: a }
+	
+	upd :: T a b c -> (b',c) -> T a b' c
+	upd t x = t { fb = x}
 
-tcExpr expr@(RecordUpd record_expr rbinds _ _ _) res_ty = do
+The result type should be (T a b' c)
+not (T a b c),   because 'b' *is not* mentioned in a non-updated field
+not (T a b' c'), becuase 'c' *is*     mentioned in a non-updated field
+NB that it's not good enough to look at just one constructor; we must
+look at them all; cf Trac #3219
+
+After all, upd should be equivalent to:
+	upd t x = case t of 
+			MkT1 p q -> MkT1 p x
+			MkT2 a b -> MkT2 p b
+			MkT3 d   -> error ...
+
+So we need to give a completely fresh type to the result record,
+and then constrain it by the fields that are *not* updated ("p" above).
+We call these the "fixed" type variables, and compute them in getFixedTyVars.
+
+Note that because MkT3 doesn't contain all the fields being updated,
+its RHS is simply an error, so it doesn't impose any type constraints.
+Hence the use of 'relevant_cont'.
+
+Note [Implict type sharing]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We also take into account any "implicit" non-update fields.  For example
+	data T a b where { MkT { f::a } :: T a a; ... }
+So the "real" type of MkT is: forall ab. (a~b) => a -> T a b
+
+Then consider
+	upd t x = t { f=x }
+We infer the type
+	upd :: T a b -> a -> T a b
+	upd (t::T a b) (x::a)
+	   = case t of { MkT (co:a~b) (_:a) -> MkT co x }
+We can't give it the more general type
+	upd :: T a b -> c -> T c b
+
+Note [Criteria for update]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+We want to allow update for existentials etc, provided the updated
+field isn't part of the existential. For example, this should be ok.
+  data T a where { MkT { f1::a, f2::b->b } :: T a }
+  f :: T a -> b -> T b
+  f t b = t { f1=b }
+
+The criterion we use is this:
+
+  The types of the updated fields
+  mention only the universally-quantified type variables
+  of the data constructor
+
+NB: this is not (quite) the same as being a "naughty" record selector
+(See Note [Naughty record selectors]) in TcTyClsDecls), at least 
+in the case of GADTs. Consider
+   data T a where { MkT :: { f :: a } :: T [a] }
+Then f is not "naughty" because it has a well-typed record selector.
+But we don't allow updates for 'f'.  (One could consider trying to
+allow this, but it makes my head hurt.  Badly.  And no one has asked
+for it.)
+
+In principle one could go further, and allow
+  g :: T a -> T a
+  g t = t { f2 = \x -> x }
+because the expression is polymorphic...but that seems a bridge too far.
+
+Note [Data family example]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+    data instance T (a,b) = MkT { x::a, y::b }
+  --->
+    data :TP a b = MkT { a::a, y::b }
+    coTP a b :: T (a,b) ~ :TP a b
+
+Suppose r :: T (t1,t2), e :: t3
+Then  r { x=e } :: T (t3,t1)
+  --->
+      case r |> co1 of
+	MkT x y -> MkT e y |> co2
+      where co1 :: T (t1,t2) ~ :TP t1 t2
+	    co2 :: :TP t3 t2 ~ T (t3,t2)
+The wrapping with co2 is done by the constructor wrapper for MkT
+
+Outgoing invariants
+~~~~~~~~~~~~~~~~~~~
+In the outgoing (HsRecordUpd scrut binds cons in_inst_tys out_inst_tys):
+
+  * cons are the data constructors to be updated
+
+  * in_inst_tys, out_inst_tys have same length, and instantiate the
+	*representation* tycon of the data cons.  In Note [Data 
+	family example], in_inst_tys = [t1,t2], out_inst_tys = [t3,t2]
+	
+\begin{code}
+tcExpr expr@(RecordUpd record_expr rbinds _ _ _) res_ty
+  = ASSERT( notNull upd_fld_names )
+    do	{
 	-- STEP 0
 	-- Check that the field names are really field names
-    let 
-	field_names = hsRecFields rbinds
-
-    MASSERT( notNull field_names )
-    sel_ids <- mapM tcLookupField field_names
-	-- The renamer has already checked that they
-	-- are all in scope
-    let
-	bad_guys = [ setSrcSpan loc $ addErrTc (notSelector field_name) 
-		   | (fld, sel_id) <- rec_flds rbinds `zip` sel_ids,
-		     not (isRecordSelector sel_id), 	-- Excludes class ops
-		     let L loc field_name = hsRecFieldId fld
-		   ]
-
-    unless (null bad_guys) (sequence bad_guys >> failM)
+	; sel_ids <- mapM tcLookupField upd_fld_names
+			-- The renamer has already checked that
+			-- selectors are all in scope
+	; let bad_guys = [ setSrcSpan loc $ addErrTc (notSelector fld_name) 
+		       	 | (fld, sel_id) <- rec_flds rbinds `zip` sel_ids,
+		       	   not (isRecordSelector sel_id), 	-- Excludes class ops
+		       	   let L loc fld_name = hsRecFieldId fld ]
+	; unless (null bad_guys) (sequence bad_guys >> failM)
     
 	-- STEP 1
 	-- Figure out the tycon and data cons from the first field name
-    let
-		-- It's OK to use the non-tc splitters here (for a selector)
-	sel_id : _   	= sel_ids
-	(tycon, _)   	= recordSelectorFieldLabel sel_id	-- We've failed already if
-	data_cons    	= tyConDataCons tycon			-- it's not a field label
-		-- NB: for a data type family, the tycon is the instance tycon
+	; let	-- It's OK to use the non-tc splitters here (for a selector)
+	      sel_id : _  = sel_ids
+	      (tycon, _)  = recordSelectorFieldLabel sel_id	-- We've failed already if
+	      data_cons   = tyConDataCons tycon			-- it's not a field label
+	      	-- NB: for a data type family, the tycon is the instance tycon
 
-	relevant_cons   = filter is_relevant data_cons
-	is_relevant con = all (`elem` dataConFieldLabels con) field_names
-
-	-- STEP 2
-	-- Check that at least one constructor has all the named fields
-	-- i.e. has an empty set of bad fields returned by badFields
-    checkTc (not (null relevant_cons))
-	    (badFieldsUpd rbinds)
-
-	-- Check that all relevant data cons are vanilla.  Doing record updates on 
-	-- GADTs and/or existentials is more than my tiny brain can cope with today
-    checkTc (all isVanillaDataCon relevant_cons)
-	    (nonVanillaUpd tycon)
-
-	-- STEP 4
-	-- Use the un-updated fields to find a vector of booleans saying
-	-- which type arguments must be the same in updatee and result.
-	--
-	-- WARNING: this code assumes that all data_cons in a common tycon
-	-- have FieldLabels abstracted over the same tyvars.
-    let
+	      relevant_cons   = filter is_relevant data_cons
+	      is_relevant con = all (`elem` dataConFieldLabels con) upd_fld_names
 		-- A constructor is only relevant to this process if
 		-- it contains *all* the fields that are being updated
-	con1 = ASSERT( not (null relevant_cons) ) head relevant_cons	-- A representative constructor
-	(con1_tyvars, theta, con1_arg_tys, con1_res_ty) = dataConSig con1
-	con1_flds     = dataConFieldLabels con1
-	common_tyvars = exactTyVarsOfTypes [ty | (fld,ty) <- con1_flds `zip` con1_arg_tys
-					       , not (fld `elem` field_names) ]
+		-- Other ones will cause a runtime error if they occur
 
- 	is_common_tv tv = tv `elemVarSet` common_tyvars
+		-- Take apart a representative constructor
+	      con1 = ASSERT( not (null relevant_cons) ) head relevant_cons
+	      (con1_tvs, _, _, _, _, con1_arg_tys, _) = dataConFullSig con1
+	      con1_flds = dataConFieldLabels con1
+	      con1_res_ty = mkFamilyTyConApp tycon (mkTyVarTys con1_tvs)
+   	      
+	-- Step 2
+	-- Check that at least one constructor has all the named fields
+	-- i.e. has an empty set of bad fields returned by badFields
+	; checkTc (not (null relevant_cons)) (badFieldsUpd rbinds)
 
-	mk_inst_ty tv result_inst_ty 
-	  | is_common_tv tv = return result_inst_ty		-- Same as result type
-	  | otherwise	    = newFlexiTyVarTy (tyVarKind tv)	-- Fresh type, of correct kind
+	-- STEP 3    Note [Criteria for update]
+	-- Check that each updated field is polymorphic; that is, its type
+	-- mentions only the universally-quantified variables of the data con
+	; let flds1_w_tys = zipEqual "tcExpr:RecConUpd" con1_flds con1_arg_tys
+	      (upd_flds1_w_tys, fixed_flds1_w_tys) = partition is_updated flds1_w_tys
+	      is_updated (fld,ty) = fld `elem` upd_fld_names
 
-    MASSERT( null theta )	-- Vanilla datacon
-    (_, result_inst_tys, result_inst_env) <- tcInstTyVars con1_tyvars
-    scrut_inst_tys <- zipWithM mk_inst_ty con1_tyvars result_inst_tys
+	      bad_upd_flds = filter bad_fld upd_flds1_w_tys
+	      con1_tv_set = mkVarSet con1_tvs
+	      bad_fld (fld, ty) = fld `elem` upd_fld_names &&
+				      not (tyVarsOfType ty `subVarSet` con1_tv_set)
+	; checkTc (null bad_upd_flds) (badFieldTypes bad_upd_flds)
 
-	-- STEP 3: Typecheck the update bindings.
-	-- Do this after checking for bad fields in case 
-	-- there's a field that doesn't match the constructor.
-    let
-	result_ty     = substTy result_inst_env con1_res_ty
-	con1_arg_tys' = map (substTy result_inst_env) con1_arg_tys
-	origin 	      = RecordUpdOrigin
+	-- STEP 4  Note [Type of a record update]
+	-- Figure out types for the scrutinee and result
+	-- Both are of form (T a b c), with fresh type variables, but with
+	-- common variables where the scrutinee and result must have the same type
+	-- These are variables that appear in *any* arg of *any* of the
+	-- relevant constructors *except* in the updated fields
+	-- 
+	; let fixed_tvs = getFixedTyVars con1_tvs relevant_cons
+	      is_fixed_tv tv = tv `elemVarSet` fixed_tvs
+	      mk_inst_ty tv result_inst_ty 
+	        | is_fixed_tv tv = return result_inst_ty	    -- Same as result type
+	        | otherwise      = newFlexiTyVarTy (tyVarKind tv)  -- Fresh type, of correct kind
 
-    co_fn   <- tcSubExp origin result_ty res_ty
-    rbinds' <- tcRecordBinds con1 con1_arg_tys' rbinds
+	; (_, result_inst_tys, result_inst_env) <- tcInstTyVars con1_tvs
+	; scrut_inst_tys <- zipWithM mk_inst_ty con1_tvs result_inst_tys
 
-	-- STEP 5: Typecheck the expression to be updated
-    let
-	scrut_inst_env = zipTopTvSubst con1_tyvars scrut_inst_tys
-	scrut_ty = substTy scrut_inst_env con1_res_ty
-	-- This is one place where the isVanilla check is important
-	-- So that inst_tys matches the con1_tyvars
+	; let result_ty     = substTy result_inst_env con1_res_ty
+	      con1_arg_tys' = map (substTy result_inst_env) con1_arg_tys
+	      scrut_subst   = zipTopTvSubst con1_tvs scrut_inst_tys
+	      scrut_ty      = substTy scrut_subst con1_res_ty
 
-    record_expr' <- tcMonoExpr record_expr scrut_ty
+	-- STEP 5
+	-- Typecheck the thing to be updated, and the bindings
+	; record_expr' <- tcMonoExpr record_expr scrut_ty
+	; rbinds'      <- tcRecordBinds con1 con1_arg_tys' rbinds
+	
+	; let origin = RecordUpdOrigin
+	; co_fn <- tcSubExp origin result_ty res_ty
 
-	-- STEP 6: Figure out the LIE we need.  
-	-- We have to generate some dictionaries for the data type context, 
-	-- since we are going to do pattern matching over the data cons.
-	--
-	-- What dictionaries do we need?  The dataConStupidTheta tells us.
-    let
-	theta' = substTheta scrut_inst_env (dataConStupidTheta con1)
-
-    instStupidTheta origin theta'
+	-- STEP 6: Deal with the stupid theta
+	; let theta' = substTheta scrut_subst (dataConStupidTheta con1)
+	; instStupidTheta origin theta'
 
 	-- Step 7: make a cast for the scrutinee, in the case that it's from a type family
-    let scrut_co | Just co_con <- tyConFamilyCoercion_maybe tycon 
-		 = WpCast $ mkTyConApp co_con scrut_inst_tys
-		 | otherwise
-		 = idHsWrapper
+	; let scrut_co | Just co_con <- tyConFamilyCoercion_maybe tycon 
+		       = WpCast $ mkTyConApp co_con scrut_inst_tys
+		       | otherwise
+		       = idHsWrapper
 
 	-- Phew!
-    return (mkHsWrap co_fn (RecordUpd (mkLHsWrap scrut_co record_expr') rbinds'
-				       relevant_cons scrut_inst_tys result_inst_tys))
-\end{code}
+	; return (mkHsWrap co_fn (RecordUpd (mkLHsWrap scrut_co record_expr') rbinds'
+				        relevant_cons scrut_inst_tys result_inst_tys)) }
+  where
+    upd_fld_names = hsRecFields rbinds
 
+    getFixedTyVars :: [TyVar] -> [DataCon] -> TyVarSet
+    -- These tyvars must not change across the updates
+    getFixedTyVars tvs1 cons
+      = mkVarSet [tv1 | con <- cons
+    		      , let (tvs, theta, arg_tys, _) = dataConSig con
+		      	    flds = dataConFieldLabels con
+    			    fixed_tvs = exactTyVarsOfTypes fixed_tys
+			    	    -- fixed_tys: See Note [Type of a record update]
+			    	        `unionVarSet` tyVarsOfTheta theta 
+				    -- Universally-quantified tyvars that
+				    -- appear in any of the *implicit*
+				    -- arguments to the constructor are fixed
+			    	    -- See Note [Implict type sharing]
+			    	        
+		            fixed_tys = [ty | (fld,ty) <- zip flds arg_tys
+                                            , not (fld `elem` upd_fld_names)]
+                      , (tv1,tv) <- tvs1 `zip` tvs	-- Discards existentials in tvs
+        	      , tv `elemVarSet` fixed_tvs ]
+\end{code}
 
 %************************************************************************
 %*									*
@@ -801,9 +897,10 @@ tcId orig fun_name res_ty
 tcSyntaxOp :: InstOrigin -> HsExpr Name -> TcType -> TcM (HsExpr TcId)
 -- Typecheck a syntax operator, checking that it has the specified type
 -- The operator is always a variable at this stage (i.e. renamer output)
+-- This version assumes ty is a monotype
 tcSyntaxOp orig (HsVar op) ty = tcId orig op ty
-tcSyntaxOp orig other 	   ty = pprPanic "tcSyntaxOp" (ppr other)
-
+tcSyntaxOp orig other 	   ty = pprPanic "tcSyntaxOp" (ppr other) 
+                        
 ---------------------------
 instFun :: InstOrigin
 	-> HsExpr TcId
@@ -917,7 +1014,7 @@ tcArgs :: LHsExpr Name				-- The function (for error messages)
 type ArgChecker results
    = [TyVar] -> [TcSigmaType] 		-- Current instantiation
    -> [TcSigmaType]			-- Expected arg types (**before** applying the instantiation)
-   -> TcM ([TcSigmaType], results)	-- Resulting instaniation and args
+   -> TcM ([TcSigmaType], results)	-- Resulting instantiation and args
 
 tcArgs fun args qtvs qtys arg_tys
   = go 1 qtys args arg_tys
@@ -1014,6 +1111,9 @@ lookupFun orig id_name
 	    	-- nor does it need the 'lifting' treatment
 
     	    ATcId { tct_id = id, tct_type = ty, tct_co = mb_co, tct_level = lvl }
+	    	| isNaughtyRecordSelector id -> failWithTc (naughtyRecordSel id)
+		  			  -- Note [Local record selectors]
+		| otherwise
 		-> do { thLocalId orig id ty lvl
 		      ; case mb_co of
 			  Unrefineable    -> return (HsVar id, ty)
@@ -1027,22 +1127,31 @@ lookupFun orig id_name
 
 #ifndef GHCI  /* GHCI and TH is off */
 --------------------------------------
--- thLocalId : Check for cross-stage lifting
-thLocalId orig id id_ty th_bind_lvl
+thLocalId :: InstOrigin -> Id -> TcType -> ThLevel -> TcM ()
+-- Check for cross-stage lifting
+thLocalId orig id id_ty bind_lvl
   = return ()
 
 #else	      /* GHCI and TH is on */
-thLocalId orig id id_ty th_bind_lvl 
+thLocalId orig id id_ty bind_lvl 
   = do	{ use_stage <- getStage	-- TH case
-	; case use_stage of
-	    Brack use_lvl ps_var lie_var | use_lvl > th_bind_lvl
-		  -> thBrackId orig id ps_var lie_var
-	    other -> do { checkWellStaged (quotes (ppr id)) th_bind_lvl use_stage
-			; return id }
-	}
+	; let use_lvl = thLevel use_stage
+	; checkWellStaged (quotes (ppr id)) bind_lvl use_lvl
+	; traceTc (text "thLocalId" <+> ppr id <+> ppr bind_lvl <+> ppr use_stage <+> ppr use_lvl)
+	; when (use_lvl > bind_lvl) $
+          checkCrossStageLifting orig id id_ty bind_lvl use_stage }
 
 --------------------------------------
-thBrackId orig id ps_var lie_var
+checkCrossStageLifting :: InstOrigin -> Id -> TcType -> ThLevel -> ThStage -> TcM ()
+-- We are inside brackets, and (use_lvl > bind_lvl)
+-- Now we must check whether there's a cross-stage lift to do
+-- Examples   \x -> [| x |]  
+--            [| map |]
+
+checkCrossStageLifting _ _ _ _ Comp   = return ()
+checkCrossStageLifting _ _ _ _ Splice = return ()
+
+checkCrossStageLifting orig id id_ty bind_lvl (Brack _ ps_var lie_var) 
   | thTopLevelId id
   =	-- Top-level identifiers in this module,
 	-- (which have External Names)
@@ -1054,9 +1163,10 @@ thBrackId orig id ps_var lie_var
 	-- But we do need to put f into the keep-alive
 	-- set, because after desugaring the code will
 	-- only mention f's *name*, not f itself.
-    do	{ keepAliveTc id; return id }
+    keepAliveTc id
 
-  | otherwise
+  | otherwise	-- bind_lvl = outerLevel presumably,
+		-- but the Id is not bound at top level
   = 	-- Nested identifiers, such as 'x' in
 	-- E.g. \x -> [| h x |]
 	-- We must behave as if the reference to x was
@@ -1066,8 +1176,7 @@ thBrackId orig id ps_var lie_var
 	-- If 'x' occurs many times we may get many identical
 	-- bindings of the same splice proxy, but that doesn't
 	-- matter, although it's a mite untidy.
-    do 	{ let id_ty = idType id
-	; checkTc (isTauTy id_ty) (polySpliceErr id)
+    do 	{ checkTc (isTauTy id_ty) (polySpliceErr id)
 	       -- If x is polymorphic, its occurrence sites might
 	       -- have different instantiations, so we can't use plain
 	       -- 'x' as the splice proxy name.  I don't know how to 
@@ -1080,17 +1189,38 @@ thBrackId orig id ps_var lie_var
 		-- so we zap it to a LiftedTypeKind monotype
 		-- C.f. the call in TcPat.newLitInst
 
-	; setLIEVar lie_var	$ do
-	{ lift <- newMethodFromName orig id_ty' DsMeta.liftName
-		   -- Put the 'lift' constraint into the right LIE
+	; lift <- if isStringTy id_ty' then
+	       	     tcLookupId DsMeta.liftStringName
+		     -- See Note [Lifting strings]
+	          else
+                     setLIEVar lie_var	$ do  -- Put the 'lift' constraint into the right LIE
+                     newMethodFromName orig id_ty' DsMeta.liftName
 	   
 		   -- Update the pending splices
 	; ps <- readMutVar ps_var
 	; writeMutVar ps_var ((idName id, nlHsApp (nlHsVar lift) (nlHsVar id)) : ps)
 
-	; return id } }
+	; return () }
 #endif /* GHCI */
 \end{code}
+
+Note [Lifting strings]
+~~~~~~~~~~~~~~~~~~~~~~
+If we see $(... [| s |] ...) where s::String, we don't want to
+generate a mass of Cons (CharL 'x') (Cons (CharL 'y') ...)) etc.
+So this conditional short-circuits the lifting mechanism to generate
+(liftString "xy") in that case.  I didn't want to use overlapping instances
+for the Lift class in TH.Syntax, because that can lead to overlapping-instance
+errors in a polymorphic situation.  
+
+If this check fails (which isn't impossible) we get another chance; see
+Note [Converting strings] in Convert.lhs 
+
+Local record selectors
+~~~~~~~~~~~~~~~~~~~~~~
+Record selectors for TyCons in this module are ordinary local bindings,
+which show up as ATcIds rather than AGlobals.  So we need to check for
+naughtiness in both branches.  c.f. TcTyClsBindings.mkAuxBinds.
 
 
 %************************************************************************
@@ -1131,10 +1261,15 @@ tcRecordBinds data_con arg_tys (HsRecFields rbinds dd)
     do_bind fld@(HsRecField { hsRecFieldId = L loc field_lbl, hsRecFieldArg = rhs })
       | Just field_ty <- assocMaybe flds_w_tys field_lbl
       = addErrCtxt (fieldCtxt field_lbl)	$
-	do { rhs'   <- tcPolyExprNC rhs field_ty
-	   ; sel_id <- tcLookupField field_lbl
-	   ; ASSERT( isRecordSelector sel_id )
-	     return (Just (fld { hsRecFieldId = L loc sel_id, hsRecFieldArg = rhs' })) }
+	do { rhs' <- tcPolyExprNC rhs field_ty
+	   ; let field_id = mkUserLocal (nameOccName field_lbl)
+				        (nameUnique field_lbl)
+					field_ty loc 
+		-- Yuk: the field_id has the *unique* of the selector Id
+		-- 	    (so we can find it easily)
+		--      but is a LocalId with the appropriate type of the RHS
+		--	    (so the desugarer knows the type of local binder to make)
+	   ; return (Just (fld { hsRecFieldId = L loc field_id, hsRecFieldArg = rhs' })) }
       | otherwise
       = do { addErrTc (badFieldCon data_con field_lbl)
 	   ; return Nothing }
@@ -1187,7 +1322,10 @@ checkMissingFields data_con rbinds
 
 Boring and alphabetical:
 \begin{code}
-exprCtxt (L _ expr)
+addExprErrCtxt :: OutputableBndr id => LHsExpr id -> TcM a -> TcM a
+addExprErrCtxt expr = addErrCtxt (exprCtxt (unLoc expr))
+
+exprCtxt expr
   = hang (ptext (sLit "In the expression:")) 4 (ppr expr)
 
 fieldCtxt field_name
@@ -1198,11 +1336,11 @@ funAppCtxt fun arg arg_no
 		    quotes (ppr fun) <> text ", namely"])
 	 4 (quotes (ppr arg))
 
-nonVanillaUpd tycon
-  = vcat [ptext (sLit "Record update for the non-Haskell-98 data type") 
-		<+> quotes (pprSourceTyCon tycon)
-		<+> ptext (sLit "is not (yet) supported"),
-	  ptext (sLit "Use pattern-matching instead")]
+badFieldTypes prs
+  = hang (ptext (sLit "Record update for insufficiently polymorphic field")
+			 <> plural prs <> colon)
+       2 (vcat [ ppr f <+> dcolon <+> ppr ty | (f,ty) <- prs ])
+
 badFieldsUpd rbinds
   = hang (ptext (sLit "No constructor has all these fields:"))
 	 4 (pprQuotedList (hsRecFields rbinds))

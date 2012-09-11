@@ -30,30 +30,27 @@ import TcRnMonad
 import Generics
 import Class
 import TyCon
-import Type
 import MkId
 import Id
 import Name
 import Var
 import NameEnv
 import NameSet
-import OccName
 import RdrName
 import Outputable
 import PrelNames
 import DynFlags
 import ErrUtils
 import Util
-import Unique
 import ListSetOps
 import SrcLoc
 import Maybes
-import List
 import BasicTypes
 import Bag
 import FastString
 
 import Control.Monad
+import Data.List
 \end{code}
 
 
@@ -452,7 +449,7 @@ get_generics decl@(ClassDecl {tcdLName = class_name, tcdMeths = def_methods})
 			      group `lengthExceeds` 1]
 	get_uniq (tc,_) = getUnique tc
 
-    mapM (addErrTc . dupGenericInsts) bad_groups
+    mapM_ (addErrTc . dupGenericInsts) bad_groups
 
 	-- Check that there is an InstInfo for each generic type constructor
     let
@@ -536,7 +533,7 @@ mkGenericInstance clas (hs_ty, binds) = do
 	dfun_id    = mkDictFunId dfun_name tyvars inst_theta clas [inst_ty]
 	ispec	   = mkLocalInstance dfun_id overlap_flag
 
-    return (InstInfo { iSpec = ispec, iBinds = VanillaInst binds [] })
+    return (InstInfo { iSpec = ispec, iBinds = VanillaInst binds [] False })
 \end{code}
 
 

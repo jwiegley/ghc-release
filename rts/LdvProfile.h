@@ -14,9 +14,8 @@
 
 #include "ProfHeap.h"
 
-extern void LDV_recordDead_FILL_SLOP_DYNAMIC( StgClosure *p );
-extern void LdvCensusForDead ( nat );
-extern void LdvCensusKillAll ( void );
+RTS_PRIVATE void LdvCensusForDead ( nat );
+RTS_PRIVATE void LdvCensusKillAll ( void );
 
 // Creates a 0-filled slop of size 'howManyBackwards' backwards from the
 // address 'from'. 
@@ -24,11 +23,11 @@ extern void LdvCensusKillAll ( void );
 // Invoked when: 
 //   1) Hp is incremented and exceeds HpLim (in Updates.hc).
 //   2) copypart() is called (in GC.c).
-#define LDV_FILL_SLOP(from, howManyBackwards)	\
+#define LDV_FILL_SLOP(from, howMany)	\
   if (era > 0) {				\
     int i;					\
-    for (i = 1;i <= (howManyBackwards); i++)	\
-      ((StgWord *)(from))[-i] = 0;		\
+    for (i = 0;i < (howMany); i++)	\
+      ((StgWord *)(from))[i] = 0;		\
   }
 
 // Informs the LDV profiler that closure c has just been evacuated.

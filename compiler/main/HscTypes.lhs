@@ -15,13 +15,16 @@ module HscTypes (
         SourceError, GhcApiError, mkSrcErr, srcErrorMessages, mkApiErr,
         throwOneError, handleSourceError,
         reflectGhc, reifyGhc,
+        handleFlagWarnings,
 
 	-- * Sessions and compilation state
-	Session(..), withSession, modifySession,
+	Session(..), withSession, modifySession, withTempSession,
         HscEnv(..), hscEPS,
 	FinderCache, FindResult(..), ModLocationCache,
 	Target(..), TargetId(..), pprTarget, pprTargetId,
 	ModuleGraph, emptyMG,
+        -- ** Callbacks
+        GhcApiCallbacks(..), withLocalCallbacks,
 
         -- * Information about modules
 	ModDetails(..),	emptyModDetails,
@@ -45,10 +48,15 @@ module HscTypes (
 	
 	PackageInstEnv, PackageRuleBase,
 
+
+        -- * Annotations
+        prepareAnnotations,
+
         -- * Interactive context
 	InteractiveContext(..), emptyInteractiveContext, 
-	icPrintUnqual, mkPrintUnqualified, extendInteractiveContext,
+	icPrintUnqual, extendInteractiveContext,
         substInteractiveContext,
+        mkPrintUnqualified, pprModulePrefix,
 
 	-- * Interfaces
 	ModIface(..), mkIfaceWarnCache, mkIfaceHashCache, mkIfaceFixCache,
@@ -104,12 +112,11 @@ import ByteCodeAsm	( CompiledByteCode )
 import {-# SOURCE #-}  InteractiveEval ( Resume )
 #endif
 
+import HsSyn
 import RdrName
-import Name		( Name, NamedThing, getName, nameOccName, nameModule )
+import Name
 import NameEnv
 import NameSet	
-import OccName		( OccName, OccEnv, lookupOccEnv, mkOccEnv, emptyOccEnv, 
-			  extendOccEnv )
 import Module
 import InstEnv		( InstEnv, Instance )
 import FamInstEnv	( FamInstEnv, FamInst )
@@ -121,14 +128,16 @@ import Var
 import Id
 import Type		
 
+import Annotations
 import Class		( Class, classSelIds, classATs, classTyCon )
 import TyCon
 import DataCon		( DataCon, dataConImplicitIds, dataConWrapId )
 import PrelNames	( gHC_PRIM )
 import Packages hiding ( Version(..) )
-import DynFlags		( DynFlags(..), isOneShot, HscTarget (..) )
+import DynFlags		( DynFlags(..), isOneShot, HscTarget (..), dopt,
+                          DynFlag(..) )
 import DriverPhases	( HscSource(..), isHsBoot, hscSourceString, Phase )
-import BasicTypes	( IPName, Fixity, defaultFixity, WarningTxt(..) )
+import BasicTypes	( IPName, defaultFixity, WarningTxt(..) )
 import OptimizationFuel	( OptFuelState )
 import IfaceSyn
 import FiniteMap	( FiniteMap )
@@ -136,7 +145,7 @@ import CoreSyn		( CoreRule )
 import Maybes		( orElse, expectJust, catMaybes )
 import Outputable
 import BreakArray
-import SrcLoc		( SrcSpan, Located )
+import SrcLoc		( SrcSpan, Located(..) )
 import LazyUniqFM		( lookupUFM, eltsUFM, emptyUFM )
 import UniqSupply	( UniqSupply )
 import FastString
@@ -153,7 +162,7 @@ import System.Time	( ClockTime )
 import Data.IORef
 import Data.Array       ( Array, array )
 import Data.List
-import Control.Monad    ( mplus, guard, liftM )
+import Control.Monad    ( mplus, guard, liftM, when )
 import Exception
 \end{code}
 
@@ -286,6 +295,16 @@ modifySession :: GhcMonad m => (HscEnv -> HscEnv) -> m ()
 modifySession f = do h <- getSession
                      setSession $! f h
 
+withSavedSession :: GhcMonad m => m a -> m a
+withSavedSession m = do
+  saved_session <- getSession
+  m `gfinally` setSession saved_session
+
+-- | Call an action with a temporarily modified Session.
+withTempSession :: GhcMonad m => (HscEnv -> HscEnv) -> m a -> m a
+withTempSession f m =
+  withSavedSession $ modifySession f >> m
+
 -- | A minimal implementation of a 'GhcMonad'.  If you need a custom monad,
 -- e.g., to maintain additional state consider wrapping this monad or using
 -- 'GhcT'.
@@ -404,10 +423,71 @@ reflectGhc m = unGhc m
 -- > Dual to 'reflectGhc'.  See its documentation.
 reifyGhc :: (Session -> IO a) -> Ghc a
 reifyGhc act = Ghc $ act
+
+handleFlagWarnings :: GhcMonad m => DynFlags -> [Located String] -> m ()
+handleFlagWarnings dflags warns
+ = when (dopt Opt_WarnDeprecatedFlags dflags)
+        (handleFlagWarnings' dflags warns)
+
+handleFlagWarnings' :: GhcMonad m => DynFlags -> [Located String] -> m ()
+handleFlagWarnings' _ [] = return ()
+handleFlagWarnings' dflags warns
+ = do -- It would be nicer if warns :: [Located Message], but that has circular
+      -- import problems.
+      logWarnings $ listToBag (map mkFlagWarning warns)
+      when (dopt Opt_WarnIsError dflags) $
+        liftIO $ throwIO $ mkSrcErr emptyBag
+
+mkFlagWarning :: Located String -> WarnMsg
+mkFlagWarning (L loc warn)
+ = mkPlainWarnMsg loc (text warn)
 \end{code}
 
 \begin{code}
--- | HscEnv is like 'Session', except that some of the fields are immutable.
+-- | These functions are called in various places of the GHC API.
+--
+-- API clients can override any of these callbacks to change GHC's default
+-- behaviour.
+data GhcApiCallbacks
+  = GhcApiCallbacks {
+
+    -- | Called by 'load' after the compilating of each module.
+    --
+    -- The default implementation simply prints all warnings and errors to
+    -- @stderr@.  Don't forget to call 'clearWarnings' when implementing your
+    -- own call.
+    --
+    -- The first argument is the module that was compiled.
+    --
+    -- The second argument is @Nothing@ if no errors occured, but there may
+    -- have been warnings.  If it is @Just err@ at least one error has
+    -- occured.  If 'srcErrorMessages' is empty, compilation failed due to
+    -- @-Werror@.
+    reportModuleCompilationResult :: GhcMonad m =>
+                                     ModSummary -> Maybe SourceError
+                                  -> m ()
+  }
+
+-- | Temporarily modify the callbacks.  After the action is executed all
+-- callbacks are reset (not, however, any other modifications to the session
+-- state.)
+withLocalCallbacks :: GhcMonad m =>
+                      (GhcApiCallbacks -> GhcApiCallbacks)
+                   -> m a -> m a
+withLocalCallbacks f m = do
+  hsc_env <- getSession
+  let cb0 = hsc_callbacks hsc_env
+  let cb' = f cb0
+  setSession (hsc_env { hsc_callbacks = cb' `seq` cb' })
+  r <- m
+  hsc_env' <- getSession
+  setSession (hsc_env' { hsc_callbacks = cb0 })
+  return r
+
+\end{code}
+
+\begin{code}
+-- | Hscenv is like 'Session', except that some of the fields are immutable.
 -- An HscEnv is used to compile a single module from plain Haskell source
 -- code (after preprocessing) to either C, assembly or C--.  Things like
 -- the module graph don't change during a single compilation.
@@ -421,6 +501,9 @@ data HscEnv
   = HscEnv { 
 	hsc_dflags :: DynFlags,
 		-- ^ The dynamic flag settings
+
+        hsc_callbacks :: GhcApiCallbacks,
+                -- ^ Callbacks for the GHC API.
 
 	hsc_targets :: [Target],
 		-- ^ The targets (or roots) of the current session
@@ -546,30 +629,31 @@ emptyPackageIfaceTable = emptyModuleEnv
 
 -- | Information about modules in the package being compiled
 data HomeModInfo 
-  = HomeModInfo { hm_iface    :: !ModIface,     -- ^ The basic loaded interface file: every
-                                                -- loaded module has one of these, even if
-                                                -- it is imported from another package
-		  hm_details  :: !ModDetails,   -- ^ Extra information that has been created
-		                                -- from the 'ModIface' for the module,
-		                                -- typically during typechecking
-		  hm_linkable :: !(Maybe Linkable)
-		-- ^ The actual artifact we would like to link to access
-		-- things in this module.
-		--
-		-- 'hm_linkable' might be Nothing:
-		--
-		--   1. If this is an .hs-boot module
-		--
-		--   2. Temporarily during compilation if we pruned away
-		--      the old linkable because it was out of date.
-		--
-		-- After a complete compilation ('GHC.load'), all 'hm_linkable'
-		-- fields in the 'HomePackageTable' will be @Just@.
-		--
-		-- When re-linking a module ('HscMain.HscNoRecomp'), we construct
-		-- the 'HomeModInfo' by building a new 'ModDetails' from the
-		-- old 'ModIface' (only).
-        }
+  = HomeModInfo {
+      hm_iface    :: !ModIface,
+        -- ^ The basic loaded interface file: every loaded module has one of
+        -- these, even if it is imported from another package
+      hm_details  :: !ModDetails,
+        -- ^ Extra information that has been created from the 'ModIface' for
+	-- the module, typically during typechecking
+      hm_linkable :: !(Maybe Linkable)
+        -- ^ The actual artifact we would like to link to access things in
+	-- this module.
+	--
+	-- 'hm_linkable' might be Nothing:
+	--
+	--   1. If this is an .hs-boot module
+	--
+	--   2. Temporarily during compilation if we pruned away
+	--      the old linkable because it was out of date.
+	--
+	-- After a complete compilation ('GHC.load'), all 'hm_linkable' fields
+	-- in the 'HomePackageTable' will be @Just@.
+	--
+	-- When re-linking a module ('HscMain.HscNoRecomp'), we construct the
+	-- 'HomeModInfo' by building a new 'ModDetails' from the old
+	-- 'ModIface' (only).
+    }
 
 -- | Find the 'ModIface' for a 'Module', searching in both the loaded home
 -- and external package module information
@@ -622,6 +706,12 @@ hptRules :: HscEnv -> [(ModuleName, IsBootInterface)] -> [CoreRule]
 -- ^ Get rules from modules \"below\" this one (in the dependency sense)
 hptRules = hptSomeThingsBelowUs (md_rules . hm_details) False
 
+
+hptAnns :: HscEnv -> Maybe [(ModuleName, IsBootInterface)] -> [Annotation]
+-- ^ Get annotations from modules \"below\" this one (in the dependency sense)
+hptAnns hsc_env (Just deps) = hptSomeThingsBelowUs (md_anns . hm_details) False hsc_env deps
+hptAnns hsc_env Nothing = hptAllThings (md_anns . hm_details) hsc_env
+
 hptAllThings :: (HomeModInfo -> [a]) -> HscEnv -> [a]
 hptAllThings extract hsc_env = concatMap extract (eltsUFM (hsc_HPT hsc_env))
 
@@ -656,7 +746,32 @@ hptSomeThingsBelowUs extract include_hi_boot hsc_env deps
 
 	-- And get its dfuns
     , thing <- things ]
+\end{code}
 
+%************************************************************************
+%*									*
+\subsection{Dealing with Annotations}
+%*									*
+%************************************************************************
+
+\begin{code}
+prepareAnnotations :: HscEnv -> Maybe ModGuts -> IO AnnEnv
+-- ^ Deal with gathering annotations in from all possible places 
+--   and combining them into a single 'AnnEnv'
+prepareAnnotations hsc_env mb_guts
+  = do { eps <- hscEPS hsc_env
+       ; let -- Extract annotations from the module being compiled if supplied one
+            mb_this_module_anns = fmap (mkAnnEnv . mg_anns) mb_guts
+        -- Extract dependencies of the module if we are supplied one,
+        -- otherwise load annotations from all home package table
+        -- entries regardless of dependency ordering.
+            home_pkg_anns  = (mkAnnEnv . hptAnns hsc_env) $ fmap (dep_mods . mg_deps) mb_guts
+            other_pkg_anns = eps_ann_env eps
+            ann_env        = foldl1' plusAnnEnv $ catMaybes [mb_this_module_anns, 
+                                                             Just home_pkg_anns, 
+                                                             Just other_pkg_anns]
+
+       ; return ann_env }
 \end{code}
 
 %************************************************************************
@@ -756,6 +871,11 @@ data ModIface
 		
 		-- NOT STRICT!  we read this field lazily from the interface file
 
+	mi_anns  :: [IfaceAnnotation],
+	        -- ^ Annotations
+	
+		-- NOT STRICT!  we read this field lazily from the interface file
+
 		-- Type, class and variable declarations
 		-- The hash of an Id changes if its fixity or deprecations change
 		--	(as well as its type of course)
@@ -814,6 +934,8 @@ data ModDetails
         md_insts     :: ![Instance],    -- ^ 'DFunId's for the instances in this module
         md_fam_insts :: ![FamInst],
         md_rules     :: ![CoreRule],    -- ^ Domain may include 'Id's from other modules
+        md_anns      :: ![Annotation],  -- ^ Annotations present in this module: currently 
+                                        -- they only annotate things also declared in this module
         md_vect_info :: !VectInfo       -- ^ Module vectorisation information
      }
 
@@ -823,6 +945,7 @@ emptyModDetails = ModDetails { md_types = emptyTypeEnv,
 			       md_insts     = [],
 			       md_rules     = [],
 			       md_fam_insts = [],
+                               md_anns      = [],
                                md_vect_info = noVectInfo
                              } 
 
@@ -861,6 +984,7 @@ data ModGuts
 	mg_binds     :: ![CoreBind],	 -- ^ Bindings for this module
 	mg_foreign   :: !ForeignStubs,   -- ^ Foreign exports declared in this module
 	mg_warns     :: !Warnings,	 -- ^ Warnings declared in the module
+	mg_anns      :: [Annotation],    -- ^ Annotations declared in this module
 	mg_hpc_info  :: !HpcInfo,        -- ^ Coverage tick boxes in the module
         mg_modBreaks :: !ModBreaks,      -- ^ Breakpoints for the module
         mg_vect_info :: !VectInfo,       -- ^ Pool of vectorised declarations in the module
@@ -974,6 +1098,7 @@ emptyModIface mod
 	       mi_exp_hash = fingerprint0,
 	       mi_fixities = [],
 	       mi_warns    = NoWarnings,
+	       mi_anns     = [],
 	       mi_insts     = [],
 	       mi_fam_insts = [],
 	       mi_rules     = [],
@@ -1076,6 +1201,8 @@ substInteractiveContext ictxt@InteractiveContext{ic_tmp_ids=ids} subst =
 %*									*
 %************************************************************************
 
+Note [Printing original names]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Deciding how to print names is pretty tricky.  We are given a name
 P:M.T, where P is the package name, M is the defining module, and T is
 the occurrence name, and we have to decide in which form to display
@@ -1085,19 +1212,24 @@ Ideally we want to display the name in the form in which it is in
 scope.  However, the name might not be in scope at all, and that's
 where it gets tricky.  Here are the cases:
 
- 1. T   uniquely maps to  P:M.T                         --->  "T"
- 2. there is an X for which X.T uniquely maps to  P:M.T --->  "X.T"
- 3. there is no binding for "M.T"                       --->  "M.T"
- 4. otherwise                                           --->  "P:M.T"
+ 1. T uniquely maps to  P:M.T      --->  "T"      NameUnqual
+ 2. There is an X for which X.T 
+       uniquely maps to  P:M.T     --->  "X.T"    NameQual X
+ 3. There is no binding for "M.T"  --->  "M.T"    NameNotInScope1
+ 4. Otherwise                      --->  "P:M.T"  NameNotInScope2
 
-3 and 4 apply when P:M.T is not in scope.  In these cases we want to
-refer to the name as "M.T", but "M.T" might mean something else in the
-current scope (e.g. if there's an "import X as M"), so to avoid
-confusion we avoid using "M.T" if there's already a binding for it.
+(3) and (4) apply when the entity P:M.T is not in the GlobalRdrEnv at
+all. In these cases we still want to refer to the name as "M.T", *but*
+"M.T" might mean something else in the current scope (e.g. if there's
+an "import X as M"), so to avoid confusion we avoid using "M.T" if
+there's already a binding for it.  Instead we write P:M.T.
 
-There's one further subtlety: if the module M cannot be imported
-because it is not exposed by any package, then we must refer to it as
-"P:M".  This is handled by the qual_mod component of PrintUnqualified.
+There's one further subtlety: in case (3), what if there are two
+things around, P1:M.T and P2:M.T?  Then we don't want to print both of
+them as M.T!  However only one of the modules P1:M and P2:M can be
+exposed (say P2), so we use M.T for that, and P1:M.T for the other one.
+This is handled by the qual_mod component of PrintUnqualified, inside
+the (ppr mod) of case (3), in Name.pprModulePrefix
 
 \begin{code}
 -- | Creates some functions that work out the best ways to format
@@ -1119,7 +1251,7 @@ mkPrintUnqualified dflags env = (qual_name, qual_mod)
 
 	| otherwise = panic "mkPrintUnqualified"
       where
-	right_name gre = nameModule (gre_name gre) == mod
+	right_name gre = nameModule_maybe (gre_name gre) == Just mod
 
         unqual_gres = lookupGRE_RdrName (mkRdrUnqual occ) env
         qual_gres   = filter right_name (lookupGlobalRdrEnv env occ)
@@ -1167,14 +1299,13 @@ mkPrintUnqualified dflags env = (qual_name, qual_mod)
 implicitTyThings :: TyThing -> [TyThing]
 
 -- For data and newtype declarations:
-implicitTyThings (ATyCon tc) = 
-    -- fields (names of selectors)
-    map AnId (tyConSelIds tc) ++ 
-    -- (possibly) implicit coercion and family coercion
-    --   depending on whether it's a newtype or a family instance or both
+implicitTyThings (ATyCon tc)
+  =   -- fields (names of selectors)
+      -- (possibly) implicit coercion and family coercion
+      --   depending on whether it's a newtype or a family instance or both
     implicitCoTyCon tc ++
-    -- for each data constructor in order,
-    --   the contructor, worker, and (possibly) wrapper
+      -- for each data constructor in order,
+      --   the contructor, worker, and (possibly) wrapper
     concatMap (extras_plus . ADataCon) (tyConDataCons tc)
 		     
 implicitTyThings (AClass cl) 
@@ -1289,7 +1420,7 @@ lookupType dflags hpt pte name
        lookupNameEnv (md_types (hm_details hm)) name
   | otherwise
   = lookupNameEnv pte name
-  where mod = nameModule name
+  where mod = ASSERT( isExternalName name ) nameModule name
 	this_pkg = thisPackage dflags
 
 -- | As 'lookupType', but with a marginally easier-to-use interface
@@ -1297,7 +1428,7 @@ lookupType dflags hpt pte name
 lookupTypeHscEnv :: HscEnv -> Name -> IO (Maybe TyThing)
 lookupTypeHscEnv hsc_env name = do
     eps <- readIORef (hsc_EPS hsc_env)
-    return $ lookupType dflags hpt (eps_PTE eps) name
+    return $! lookupType dflags hpt (eps_PTE eps) name
   where 
     dflags = hsc_dflags hsc_env
     hpt = hsc_HPT hsc_env
@@ -1607,6 +1738,7 @@ type PackageRuleBase   = RuleBase
 type PackageInstEnv    = InstEnv
 type PackageFamInstEnv = FamInstEnv
 type PackageVectInfo   = VectInfo
+type PackageAnnEnv     = AnnEnv
 
 -- | Information about other packages that we have slurped in by reading
 -- their interface files
@@ -1657,6 +1789,8 @@ data ExternalPackageState
 	eps_rule_base    :: !PackageRuleBase,  -- ^ The total 'RuleEnv' accumulated
 					       -- from all the external-package modules
 	eps_vect_info    :: !PackageVectInfo,  -- ^ The total 'VectInfo' accumulated
+					       -- from all the external-package modules
+        eps_ann_env      :: !PackageAnnEnv,    -- ^ The total 'AnnEnv' accumulated
 					       -- from all the external-package modules
 
         eps_mod_fam_inst_env :: !(ModuleEnv FamInstEnv), -- ^ The family instances accumulated from external
@@ -1725,7 +1859,8 @@ type OrigIParamCache = FiniteMap (IPName OccName) (IPName Name)
 -- There will be a node for each source module, plus a node for each hi-boot
 -- module.
 --
--- The graph is not necessarily stored in topologically-sorted order.
+-- The graph is not necessarily stored in topologically-sorted order.  Use
+-- 'GHC.topSortModuleGraph' and 'Digraph.flattenSCC' to achieve this.
 type ModuleGraph = [ModSummary]
 
 emptyMG :: ModuleGraph
@@ -1745,8 +1880,8 @@ data ModSummary
         ms_location  :: ModLocation,		-- ^ Location of the various files belonging to the module
         ms_hs_date   :: ClockTime,		-- ^ Timestamp of source file
 	ms_obj_date  :: Maybe ClockTime,	-- ^ Timestamp of object, if we have one
-        ms_srcimps   :: [Located ModuleName],	-- ^ Source imports of the module
-        ms_imps      :: [Located ModuleName],	-- ^ Non-source imports of the module
+        ms_srcimps   :: [Located (ImportDecl RdrName)],	-- ^ Source imports of the module
+        ms_imps      :: [Located (ImportDecl RdrName)],	-- ^ Non-source imports of the module
         ms_hspp_file :: FilePath,		-- ^ Filename of preprocessed source file
         ms_hspp_opts :: DynFlags,               -- ^ Cached flags from @OPTIONS@, @INCLUDE@
                                                 -- and @LANGUAGE@ pragmas in the modules source code

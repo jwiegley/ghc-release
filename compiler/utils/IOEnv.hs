@@ -3,6 +3,7 @@
 --
 -- The IO Monad with an environment
 --
+{-# LANGUAGE UndecidableInstances #-}
 
 module IOEnv (
         IOEnv, -- Instance of Monad
@@ -21,16 +22,19 @@ module IOEnv (
         tryM, tryAllM, tryMostM, fixM,
 
         -- I/O operations
-        IORef, newMutVar, readMutVar, writeMutVar, updMutVar
+        IORef, newMutVar, readMutVar, writeMutVar, updMutVar,
+        atomicUpdMutVar, atomicUpdMutVar'
   ) where
 
 import Exception
 import Panic
 
-import Data.IORef       ( IORef, newIORef, readIORef, writeIORef, modifyIORef )
+import Data.IORef       ( IORef, newIORef, readIORef, writeIORef, modifyIORef,
+                          atomicModifyIORef )
 import Data.Typeable
 import System.IO.Unsafe ( unsafeInterleaveIO )
 import System.IO        ( fixIO )
+import Control.Monad
 import MonadUtils
 
 ----------------------------------------------------------------------
@@ -64,7 +68,7 @@ thenM (IOEnv m) f = IOEnv (\ env -> do { r <- m env ;
                                          unIOEnv (f r) env })
 
 thenM_ :: IOEnv env a -> IOEnv env b -> IOEnv env b
-thenM_ (IOEnv m) f = IOEnv (\ env -> do { m env ; unIOEnv f env })
+thenM_ (IOEnv m) f = IOEnv (\ env -> do { _ <- m env ; unIOEnv f env })
 
 failM :: IOEnv env a
 failM = IOEnv (\ _ -> throwIO IOEnvFailure)
@@ -132,6 +136,16 @@ unsafeInterleaveM (IOEnv m) = IOEnv (\ env -> unsafeInterleaveIO (m env))
 
 
 ----------------------------------------------------------------------
+-- MonadPlus
+----------------------------------------------------------------------
+
+-- For use if the user has imported Control.Monad.Error from MTL
+-- Requires UndecidableInstances
+instance MonadPlus IO => MonadPlus (IOEnv env) where
+    mzero = IOEnv (const mzero)
+    m `mplus` n = IOEnv (\env -> unIOEnv m env `mplus` unIOEnv n env)
+
+----------------------------------------------------------------------
 -- Accessing input/output
 ----------------------------------------------------------------------
 
@@ -150,6 +164,17 @@ readMutVar var = liftIO (readIORef var)
 updMutVar :: IORef a -> (a -> a) -> IOEnv env ()
 updMutVar var upd = liftIO (modifyIORef var upd)
 
+-- | Atomically update the reference.  Does not force the evaluation of the
+-- new variable contents.  For strict update, use 'atomicUpdMutVar''.
+atomicUpdMutVar :: IORef a -> (a -> (a, b)) -> IOEnv env b
+atomicUpdMutVar var upd = liftIO (atomicModifyIORef var upd)
+
+-- | Strict variant of 'atomicUpdMutVar'.
+atomicUpdMutVar' :: IORef a -> (a -> (a, b)) -> IOEnv env b
+atomicUpdMutVar' var upd = do
+  r <- atomicUpdMutVar var upd
+  _ <- liftIO . evaluate =<< readMutVar var
+  return r
 
 ----------------------------------------------------------------------
 -- Accessing the environment

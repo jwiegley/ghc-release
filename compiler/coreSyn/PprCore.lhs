@@ -248,15 +248,23 @@ instance OutputableBndr Var where
 
 pprCoreBinder :: BindingSite -> Var -> SDoc
 pprCoreBinder LetBind binder
-  | isTyVar binder = pprTypedBinder binder
+  | isTyVar binder = pprKindedTyVarBndr binder
   | otherwise
-  = vcat [sig, pprIdDetails binder, pragmas]
+  = vcat [sig, pprIdExtras binder, pragmas]
   where
     sig     = pprTypedBinder binder
     pragmas = ppIdInfo binder (idInfo binder)
 
 -- Lambda bound type variables are preceded by "@"
-pprCoreBinder LambdaBind bndr = parens (pprTypedBinder bndr)
+pprCoreBinder LambdaBind bndr 
+  | isDeadBinder bndr
+  = getPprStyle $ \ sty ->
+    if debugStyle sty then
+	parens (pprTypedBinder bndr)
+    else
+	char '_'
+  | otherwise
+  = parens (pprTypedBinder bndr)
 
 -- Case bound things don't get a signature or a herald, unless we have debug on
 pprCoreBinder CaseBind bndr 
@@ -264,7 +272,8 @@ pprCoreBinder CaseBind bndr
     if debugStyle sty then
 	parens (pprTypedBinder bndr)
     else
-	pprUntypedBinder bndr
+	if isDeadBinder bndr then char '_'
+	else pprUntypedBinder bndr
 
 pprUntypedBinder :: Var -> SDoc
 pprUntypedBinder binder
@@ -272,19 +281,19 @@ pprUntypedBinder binder
   | otherwise      = pprIdBndr binder
 
 pprTypedBinder :: Var -> SDoc
+-- Print binder with a type or kind signature (not paren'd)
 pprTypedBinder binder
-  | isTyVar binder  = ptext (sLit "@") <+> pprTyVarBndr binder
+  | isTyVar binder  = pprKindedTyVarBndr binder
   | otherwise	    = pprIdBndr binder <+> dcolon <+> pprType (idType binder)
 
-pprTyVarBndr :: TyVar -> SDoc
-pprTyVarBndr tyvar
-  = getPprStyle $ \ sty ->
-    if debugStyle sty then
-        hsep [ppr tyvar, dcolon, pprParendKind kind]
-		-- See comments with ppDcolon in PprCore.lhs
-    else
-        ppr tyvar
+pprKindedTyVarBndr :: TyVar -> SDoc
+-- Print a type variable binder with its kind (but not if *)
+pprKindedTyVarBndr tyvar
+  = ptext (sLit "@") <+> ppr tyvar <> opt_kind
   where
+    opt_kind 	-- Print the kind if not *
+	| isLiftedTypeKind kind = empty
+	| otherwise = dcolon <> pprKind kind
     kind = tyVarKind tyvar
 
 -- pprIdBndr does *not* print the type
@@ -301,7 +310,7 @@ pprIdBndrInfo info
     dmd_info  = newDemandInfo info
     lbv_info  = lbvarInfo info
 
-    no_info = isAlwaysActive prag_info && isNoOcc occ_info && 
+    no_info = isDefaultInlinePragma prag_info && isNoOcc occ_info && 
 	      (case dmd_info of { Nothing -> True; Just d -> isTop d }) &&
 	      hasNoLBVarInfo lbv_info
 
@@ -317,10 +326,12 @@ pprIdBndrInfo info
 
 
 \begin{code}
-pprIdDetails :: Id -> SDoc
-pprIdDetails id | isGlobalId id     = ppr (globalIdDetails id)
-		| isExportedId id   = ptext (sLit "[Exported]")
-		| otherwise	    = empty
+pprIdExtras :: Id -> SDoc
+pprIdExtras id = pp_scope <> ppr (idDetails id)
+  where
+    pp_scope | isGlobalId id   = ptext (sLit "GblId")
+    	     | isExportedId id = ptext (sLit "LclIdX")
+    	     | otherwise       = ptext (sLit "LclId")
 
 ppIdInfo :: Id -> IdInfo -> SDoc
 ppIdInfo _ info

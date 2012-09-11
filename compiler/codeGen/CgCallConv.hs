@@ -1,10 +1,3 @@
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 -----------------------------------------------------------------------------
 --
 -- (c) The University of Glasgow 2004-2006
@@ -39,7 +32,6 @@ import CgUtils
 import CgMonad
 import SMRep
 
-import MachOp
 import Cmm
 import CLabel
 
@@ -72,7 +64,7 @@ import Data.Bits
 -------------------------------------------------------------------------
 
 -- bring in ARG_P, ARG_N, etc.
-#include "../includes/StgFun.h"
+#include "../includes/rts/storage/FunTypes.h"
 
 -------------------------
 argDescrType :: ArgDescr -> StgHalfWord
@@ -128,7 +120,7 @@ stdPattern [PtrArg,PtrArg,PtrArg]	   = Just ARG_PPP
 stdPattern [PtrArg,PtrArg,PtrArg,PtrArg]	       = Just ARG_PPPP
 stdPattern [PtrArg,PtrArg,PtrArg,PtrArg,PtrArg]        = Just ARG_PPPPP
 stdPattern [PtrArg,PtrArg,PtrArg,PtrArg,PtrArg,PtrArg] = Just ARG_PPPPPP
-stdPattern other = Nothing
+stdPattern _ = Nothing
 
 
 -------------------------------------------------------------------------
@@ -149,7 +141,7 @@ mkLiveness :: Name -> Int -> Bitmap -> FCode Liveness
 mkLiveness name size bits
   | size > mAX_SMALL_BITMAP_SIZE		-- Bitmap does not fit in one word
   = do	{ let lbl = mkBitmapLabel (getUnique name)
-	; emitRODataLits lbl ( mkWordCLit (fromIntegral size)
+	; emitRODataLits "mkLiveness" lbl ( mkWordCLit (fromIntegral size)
 		             : map mkWordCLit bits)
 	; return (BigLiveness lbl) }
   
@@ -196,7 +188,7 @@ mkRegLiveness regs ptrs nptrs
     all_non_ptrs = 0xff
 
     reg_bits [] = 0
-    reg_bits ((id, VanillaReg i) : regs) | isFollowableArg (idCgRep id)
+    reg_bits ((id, VanillaReg i _) : regs) | isFollowableArg (idCgRep id)
   	= (1 `shiftL` (i - 1)) .|. reg_bits regs
     reg_bits (_ : regs)
 	= reg_bits regs
@@ -241,6 +233,7 @@ matchSlowPattern amodes = (arg_pat, these, rest)
 	(these, rest) = splitAt n amodes
 
 -- These cases were found to cover about 99% of all slow calls:
+slowCallPattern :: [CgRep] -> (LitString, Int)
 slowCallPattern (PtrArg: PtrArg: PtrArg: PtrArg: PtrArg: PtrArg: _) = (sLit "stg_ap_pppppp", 6)
 slowCallPattern (PtrArg: PtrArg: PtrArg: PtrArg: PtrArg: _) 	= (sLit "stg_ap_ppppp", 5)
 slowCallPattern (PtrArg: PtrArg: PtrArg: PtrArg: _) 	= (sLit "stg_ap_pppp", 4)
@@ -264,8 +257,8 @@ slowCallPattern _  = panic "CgStackery.slowCallPattern"
 -------------------------------------------------------------------------
 
 dataReturnConvPrim :: CgRep -> CmmReg
-dataReturnConvPrim PtrArg    = CmmGlobal (VanillaReg 1)
-dataReturnConvPrim NonPtrArg = CmmGlobal (VanillaReg 1)
+dataReturnConvPrim PtrArg    = CmmGlobal (VanillaReg 1 VGcPtr)
+dataReturnConvPrim NonPtrArg = CmmGlobal (VanillaReg 1 VNonGcPtr)
 dataReturnConvPrim LongArg   = CmmGlobal (LongReg 1)
 dataReturnConvPrim FloatArg  = CmmGlobal (FloatReg 1)
 dataReturnConvPrim DoubleArg = CmmGlobal (DoubleReg 1)
@@ -288,7 +281,7 @@ getSequelAmode
   = do	{ EndOfBlockInfo virt_sp sequel <- getEndOfBlockInfo
 	; case sequel of
 	    OnStack -> do { sp_rel <- getSpRelOffset virt_sp
-			  ; returnFC (CmmLoad sp_rel wordRep) }
+			  ; returnFC (CmmLoad sp_rel bWord) }
 
 	    UpdateCode 	      -> returnFC (CmmLit (CmmLabel mkUpdInfoLabel))
 	    CaseAlts lbl _ _  -> returnFC (CmmLit (CmmLabel lbl))
@@ -359,9 +352,9 @@ assign_regs :: [(CgRep,a)]     	-- Arg or result values to assign
 assign_regs args supply
   = go args [] supply
   where
-    go [] acc supply = (acc, [])	-- Return the results reversed (doesn't matter)
+    go [] acc _ = (acc, [])	-- Return the results reversed (doesn't matter)
     go ((VoidArg,_) : args) acc supply 	-- Skip void arguments; they aren't passed, and
-	= go args acc supply		-- there's nothign to bind them to
+	= go args acc supply		-- there's nothing to bind them to
     go ((rep,arg) : args) acc supply 
 	= case assign_reg rep supply of
 		Just (reg, supply') -> go args ((arg,reg):acc) supply'
@@ -371,10 +364,10 @@ assign_reg :: CgRep -> AvailRegs -> Maybe (GlobalReg, AvailRegs)
 assign_reg FloatArg  (vs, f:fs, ds, ls) = Just (FloatReg f,   (vs, fs, ds, ls))
 assign_reg DoubleArg (vs, fs, d:ds, ls) = Just (DoubleReg d,  (vs, fs, ds, ls))
 assign_reg LongArg   (vs, fs, ds, l:ls) = Just (LongReg l,    (vs, fs, ds, ls))
-assign_reg PtrArg    (v:vs, fs, ds, ls) = Just (VanillaReg v, (vs, fs, ds, ls))
-assign_reg NonPtrArg (v:vs, fs, ds, ls) = Just (VanillaReg v, (vs, fs, ds, ls))
+assign_reg PtrArg    (v:vs, fs, ds, ls) = Just (VanillaReg v VGcPtr, (vs, fs, ds, ls))
+assign_reg NonPtrArg (v:vs, fs, ds, ls) = Just (VanillaReg v VNonGcPtr, (vs, fs, ds, ls))
     -- PtrArg and NonPtrArg both go in a vanilla register
-assign_reg other     not_enough_regs    = Nothing
+assign_reg _         _                  = Nothing
 
 
 -------------------------------------------------------------------------
@@ -389,12 +382,16 @@ assign_reg other     not_enough_regs    = Nothing
 -- We take these register supplies from the *real* registers, i.e. those
 -- that are guaranteed to map to machine registers.
 
+useVanillaRegs :: Int
 useVanillaRegs | opt_Unregisterised = 0
 	       | otherwise          = mAX_Real_Vanilla_REG
+useFloatRegs :: Int
 useFloatRegs   | opt_Unregisterised = 0
 	       | otherwise          = mAX_Real_Float_REG
+useDoubleRegs :: Int
 useDoubleRegs  | opt_Unregisterised = 0
 	       | otherwise          = mAX_Real_Double_REG
+useLongRegs :: Int
 useLongRegs    | opt_Unregisterised = 0
 	       | otherwise          = mAX_Real_Long_REG
 
@@ -410,7 +407,7 @@ allFloatRegNos	 = regList mAX_Float_REG
 allDoubleRegNos	 = regList mAX_Double_REG
 allLongRegNos	 = regList mAX_Long_REG
 
-regList 0 = []
+regList :: Int -> [Int]
 regList n = [1 .. n]
 
 type AvailRegs = ( [Int]   -- available vanilla regs.
@@ -427,14 +424,16 @@ mkRegTbl_allRegs :: [GlobalReg] -> AvailRegs
 mkRegTbl_allRegs regs_in_use
   = mkRegTbl' regs_in_use allVanillaRegNos allFloatRegNos allDoubleRegNos allLongRegNos
 
+mkRegTbl' :: [GlobalReg] -> [Int] -> [Int] -> [Int] -> [Int]
+          -> ([Int], [Int], [Int], [Int])
 mkRegTbl' regs_in_use vanillas floats doubles longs
   = (ok_vanilla, ok_float, ok_double, ok_long)
   where
-    ok_vanilla = mapCatMaybes (select VanillaReg) vanillas
+    ok_vanilla = mapCatMaybes (select (\i -> VanillaReg i VNonGcPtr)) vanillas
+		    -- ptrhood isn't looked at, hence we can use any old rep.
     ok_float   = mapCatMaybes (select FloatReg)	  floats
     ok_double  = mapCatMaybes (select DoubleReg)  doubles
     ok_long    = mapCatMaybes (select LongReg)    longs   
-				    -- rep isn't looked at, hence we can use any old rep.
 
     select :: (Int -> GlobalReg) -> Int{-cand-} -> Maybe Int
 	-- one we've unboxed the Int, we make a GlobalReg

@@ -18,19 +18,21 @@ module Language.Haskell.TH(
 	tupleTypeName, tupleDataName,	-- Int -> Name
 	
 	-- The algebraic data types
-	Dec(..), Exp(..), Con(..), Type(..), Cxt, Match(..), 
-	Clause(..), Body(..), Guard(..), Stmt(..), Range(..),
-	Lit(..), Pat(..), FieldExp, FieldPat, 
-	Strict(..), Foreign(..), Callconv(..), Safety(..), FunDep(..),
-	Info(..), Loc(..),
+	Dec(..), Exp(..), Con(..), Type(..), TyVarBndr(..), Kind(..), Cxt,
+	Pred(..), Match(..), Clause(..), Body(..), Guard(..), Stmt(..),
+	Range(..), Lit(..), Pat(..), FieldExp, FieldPat, 
+	Strict(..), Foreign(..), Callconv(..), Safety(..), Pragma(..),
+	InlineSpec(..), FunDep(..), FamFlavour(..), Info(..), Loc(..),
 	Fixity(..), FixityDirection(..), defaultFixity, maxPrecedence,
 
 	-- Library functions
-	InfoQ, ExpQ, DecQ, ConQ, TypeQ, CxtQ, MatchQ, ClauseQ, BodyQ, GuardQ,
-	StmtQ, RangeQ, StrictTypeQ, VarStrictTypeQ, PatQ, FieldPatQ,
+	InfoQ, ExpQ, DecQ, ConQ, TypeQ, CxtQ, PredQ, MatchQ, ClauseQ, BodyQ,
+	GuardQ, StmtQ, RangeQ, StrictTypeQ, VarStrictTypeQ, PatQ, FieldPatQ,
+        InlineSpecQ,
 	intPrimL, wordPrimL, floatPrimL, doublePrimL, integerL, rationalL,
 	charL, stringL,
-	litP, varP, tupP, conP, infixP, tildeP, asP, wildP, recP, listP, sigP,
+	litP, varP, tupP, conP, infixP, tildeP, bangP, asP, wildP, recP,
+	listP, sigP, 
 	fieldPat,
 	bindS, letS, noBindS, parS, 
 	fromR, fromThenR, fromToR, fromThenToR, 
@@ -40,10 +42,13 @@ module Language.Haskell.TH(
 	fromE, fromThenE, fromToE, fromThenToE,
 	listE, sigE, recConE, recUpdE, stringE, fieldExp,
 	valD, funD, tySynD, dataD, newtypeD, classD, instanceD, sigD, forImpD,
-	cxt, normalC, recC, infixC,
-	forallT, varT, conT, appT, arrowT, listT, tupleT,
+        pragInlD, pragSpecD, familyNoKindD, familyKindD, dataInstD,
+        newtypeInstD, tySynInstD, 
+	cxt, classP, equalP, normalC, recC, infixC,
+	forallT, varT, conT, appT, arrowT, listT, tupleT, sigT,
 	isStrict, notStrict, strictType, varStrictType,
-	cCall, stdCall, unsafe, safe, threadsafe,
+	cCall, stdCall, unsafe, safe, threadsafe, 
+        inlineSpecNoPhase, inlineSpecPhase, typeFam, dataFam,
 
 	-- Pretty-printer
 	Ppr(..), pprint, pprExp, pprLit, pprPat, pprParendType

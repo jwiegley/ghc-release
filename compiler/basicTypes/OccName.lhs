@@ -9,7 +9,7 @@
 -- GHC uses several kinds of name internally:
 --
 -- * 'OccName.OccName' represents names as strings with just a little more information:
---   the "namespace" that the name came from, e.g. the namespace of value, type constructors or
+--   the \"namespace\" that the name came from, e.g. the namespace of value, type constructors or
 --   data constructors
 --
 -- * 'RdrName.RdrName': see "RdrName#name_types"
@@ -57,7 +57,7 @@ module OccName (
 	mkSuperDictSelOcc, mkLocalOcc, mkMethodOcc, mkInstTyTcOcc,
 	mkInstTyCoOcc, mkEqPredCoOcc,
         mkVectOcc, mkVectTyConOcc, mkVectDataConOcc, mkVectIsoOcc,
-        mkPArrayTyConOcc, mkPArrayDataConOcc,
+        mkPDataTyConOcc, mkPDataDataConOcc,
         mkPReprTyConOcc,
         mkPADFunOcc,
 
@@ -65,7 +65,7 @@ module OccName (
 	occNameFS, occNameString, occNameSpace, 
 
 	isVarOcc, isTvOcc, isTcOcc, isDataOcc, isDataSymOcc, isSymOcc, isValOcc,
-	parenSymOcc, reportIfUnused, 
+	parenSymOcc, startsWithUnderscore, 
 	
 	isTcClsNameSpace, isTvNameSpace, isDataConNameSpace, isVarNameSpace, isValNameSpace,
 
@@ -95,15 +95,12 @@ module OccName (
 import Util
 import Unique
 import BasicTypes
-import StaticFlags
 import UniqFM
 import UniqSet
 import FastString
 import FastTypes
 import Outputable
 import Binary
-
-import GHC.Exts
 import Data.Char
 \end{code}
 
@@ -463,13 +460,12 @@ parenSymOcc occ doc | isSymOcc occ = parens doc
 
 
 \begin{code}
-reportIfUnused :: OccName -> Bool
--- ^ Haskell 98 encourages compilers to suppress warnings about
--- unused names in a pattern if they start with @_@: this implements
--- that test
-reportIfUnused occ = case occNameString occ of
-			('_' : _) -> False
-			_other    -> True
+startsWithUnderscore :: OccName -> Bool
+-- ^ Haskell 98 encourages compilers to suppress warnings about unsed
+-- names in a pattern if they start with @_@: this implements that test
+startsWithUnderscore occ = case occNameString occ of
+			     ('_' : _) -> True
+			     _other    -> False
 \end{code}
 
 
@@ -481,19 +477,24 @@ reportIfUnused occ = case occNameString occ of
 
 Here's our convention for splitting up the interface file name space:
 
-	d...		dictionary identifiers
-			(local variables, so no name-clash worries)
+   d...		dictionary identifiers
+   		(local variables, so no name-clash worries)
 
-	\$f...		dict-fun identifiers (from inst decls)
-	\$dm...		default methods
-	\$p...		superclass selectors
-	\$w...		workers
-	:T...		compiler-generated tycons for dictionaries
-	:D...		...ditto data cons
-        :Co...          ...ditto coercions
-	\$sf..		specialised version of f
+All of these other OccNames contain a mixture of alphabetic
+and symbolic characters, and hence cannot possibly clash with
+a user-written type or function name
 
-	in encoded form these appear as Zdfxxx etc
+   $f...	Dict-fun identifiers (from inst decls)
+   $dmop	Default method for 'op'
+   $pnC		n'th superclass selector for class C
+   $wf		Worker for functtoin 'f'
+   $sf..	Specialised version of f
+   T:C		Tycon for dictionary for class C
+   D:C		Data constructor for dictionary for class C
+   NTCo:T       Coercion connecting newtype T with its representation type
+   TFCo:R       Coercion connecting a data family to its respresentation type R
+
+In encoded form these appear as Zdfxxx etc
 
 	:...		keywords (export:, letrec: etc.)
 --- I THINK THIS IS WRONG!
@@ -527,7 +528,7 @@ mkDataConWrapperOcc, mkWorkerOcc, mkDefaultMethodOcc, mkDerivedTyConOcc,
 	mkInstTyCoOcc, mkEqPredCoOcc, 
         mkCon2TagOcc, mkTag2ConOcc, mkMaxTagOcc,
 	mkVectOcc, mkVectTyConOcc, mkVectDataConOcc, mkVectIsoOcc,
-	mkPArrayTyConOcc, mkPArrayDataConOcc, mkPReprTyConOcc, mkPADFunOcc
+	mkPDataTyConOcc, mkPDataDataConOcc, mkPReprTyConOcc, mkPADFunOcc
    :: OccName -> OccName
 
 -- These derived variables have a prefix that no Haskell value could have
@@ -535,15 +536,15 @@ mkDataConWrapperOcc = mk_simple_deriv varName  "$W"
 mkWorkerOcc         = mk_simple_deriv varName  "$w"
 mkDefaultMethodOcc  = mk_simple_deriv varName  "$dm"
 mkDerivedTyConOcc   = mk_simple_deriv tcName   ":"	-- The : prefix makes sure it classifies
-mkClassTyConOcc     = mk_simple_deriv tcName   ":T"	-- as a tycon/datacon
-mkClassDataConOcc   = mk_simple_deriv dataName ":D"	-- We go straight to the "real" data con
+mkClassTyConOcc     = mk_simple_deriv tcName   "T:"	-- as a tycon/datacon
+mkClassDataConOcc   = mk_simple_deriv dataName "D:"	-- We go straight to the "real" data con
 							-- for datacons from classes
 mkDictOcc	    = mk_simple_deriv varName  "$d"
 mkIPOcc		    = mk_simple_deriv varName  "$i"
 mkSpecOcc	    = mk_simple_deriv varName  "$s"
 mkForeignExportOcc  = mk_simple_deriv varName  "$f"
-mkNewTyCoOcc        = mk_simple_deriv tcName  ":Co"
-mkInstTyCoOcc       = mk_simple_deriv tcName  ":CoF"     -- derived from rep ty
+mkNewTyCoOcc        = mk_simple_deriv tcName  "NTCo:"	-- Coercion for newtypes
+mkInstTyCoOcc       = mk_simple_deriv tcName  "TFCo:"   -- Coercion for type functions
 mkEqPredCoOcc	    = mk_simple_deriv tcName  "$co"
 
 -- used in derived instances
@@ -566,8 +567,8 @@ mkVectOcc          = mk_simple_deriv varName  "$v_"
 mkVectTyConOcc     = mk_simple_deriv tcName   ":V_"
 mkVectDataConOcc   = mk_simple_deriv dataName ":VD_"
 mkVectIsoOcc       = mk_simple_deriv varName  "$VI_"
-mkPArrayTyConOcc   = mk_simple_deriv tcName   ":VP_"
-mkPArrayDataConOcc = mk_simple_deriv dataName ":VPD_"
+mkPDataTyConOcc    = mk_simple_deriv tcName   ":VP_"
+mkPDataDataConOcc  = mk_simple_deriv dataName ":VPD_"
 mkPReprTyConOcc    = mk_simple_deriv tcName   ":VR_"
 mkPADFunOcc        = mk_simple_deriv varName  "$PA_"
 
@@ -599,31 +600,41 @@ mkLocalOcc uniq occ
 \begin{code}
 -- | Derive a name for the representation type constructor of a
 -- @data@\/@newtype@ instance.
-mkInstTyTcOcc :: Int			-- ^ DFun Index
-	      -> OccName		-- ^ Family name, e.g. @Map@
-	      -> OccName		-- ^ Nice unique version, e.g. @:R23Map@
-mkInstTyTcOcc index occ
-   = mk_deriv tcName (":R" ++ show index) (occNameString occ)
+mkInstTyTcOcc :: String 		-- ^ Family name, e.g. @Map@
+              -> OccSet                 -- ^ avoid these Occs
+	      -> OccName		-- ^ @R:Map@
+mkInstTyTcOcc str set =
+  chooseUniqueOcc tcName ('R' : ':' : str) set
 \end{code}
 
 \begin{code}
 mkDFunOcc :: String		-- ^ Typically the class and type glommed together e.g. @OrdMaybe@.
 				-- Only used in debug mode, for extra clarity
 	  -> Bool		-- ^ Is this a hs-boot instance DFun?
-	  -> Int		-- ^ Unique index
+          -> OccSet             -- ^ avoid these Occs
 	  -> OccName		-- ^ E.g. @$f3OrdMaybe@
 
 -- In hs-boot files we make dict funs like $fx7ClsTy, which get bound to the real
 -- thing when we compile the mother module. Reason: we don't know exactly
 -- what the  mother module will call it.
 
-mkDFunOcc info_str is_boot index 
-  = mk_deriv VarName prefix string
+mkDFunOcc info_str is_boot set
+  = chooseUniqueOcc VarName (prefix ++ info_str) set
   where
     prefix | is_boot   = "$fx"
 	   | otherwise = "$f"
-    string | opt_PprStyle_Debug = show index ++ info_str
-	   | otherwise		= show index
+\end{code}
+
+Sometimes we need to pick an OccName that has not already been used,
+given a set of in-use OccNames.
+
+\begin{code}
+chooseUniqueOcc :: NameSpace -> String -> OccSet -> OccName
+chooseUniqueOcc ns str set = loop (mkOccName ns str) (0::Int)
+  where
+  loop occ n
+   | occ `elemOccSet` set = loop (mkOccName ns (str ++ show n)) (n+1)
+   | otherwise            = occ
 \end{code}
 
 We used to add a '$m' to indicate a method, but that gives rise to bad

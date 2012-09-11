@@ -1,9 +1,10 @@
 {-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
--- The above warning supression flag is a temporary kludge.
+-- The -fno-warn-warnings-deprecations flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
 -- any warnings in the module. See
 --     http://hackage.haskell.org/trac/ghc/wiki/WorkingConventions#Warnings
 -- for details
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Language.Haskell.Syntax
@@ -19,7 +20,7 @@
 -----------------------------------------------------------------------------
 
 module Language.Haskell.TH.Syntax(
-	Quasi(..), Lift(..), 
+	Quasi(..), Lift(..), liftString,
 
 	Q, runQ, 
 	report,	recover, reify,
@@ -30,11 +31,11 @@ module Language.Haskell.TH.Syntax(
         showName, showName', NameIs(..),
 
 	-- The algebraic data types
-	Dec(..), Exp(..), Con(..), Type(..), Cxt, Match(..), 
-	Clause(..), Body(..), Guard(..), Stmt(..), Range(..),
-	Lit(..), Pat(..), FieldExp, FieldPat, 
-	Strict(..), Foreign(..), Callconv(..), Safety(..),
-	StrictType, VarStrictType, FunDep(..),
+	Dec(..), Exp(..), Con(..), Type(..), TyVarBndr(..), Kind(..),Cxt,
+	Pred(..), Match(..),  Clause(..), Body(..), Guard(..), Stmt(..),
+	Range(..), Lit(..), Pat(..), FieldExp, FieldPat, 
+	Strict(..), Foreign(..), Callconv(..), Safety(..), Pragma(..),
+	InlineSpec(..),	StrictType, VarStrictType, FunDep(..), FamFlavour(..),
 	Info(..), Loc(..), CharPos,
 	Fixity(..), FixityDirection(..), defaultFixity, maxPrecedence,
 
@@ -48,13 +49,13 @@ module Language.Haskell.TH.Syntax(
 	PkgName, mkPkgName, pkgString
     ) where
 
-import Data.PackedString
 import GHC.Base		( Int(..), Int#, (<#), (==#) )
 
-import Data.Data (Data(..), Typeable, mkConstr, mkDataType)
+import Language.Haskell.TH.Syntax.Internals
+import Data.Data (Data(..), Typeable, mkConstr, mkDataType, constrIndex)
 import qualified Data.Data as Data
 import Data.IORef
-import GHC.IOBase	( unsafePerformIO )
+import System.IO.Unsafe	( unsafePerformIO )
 import Control.Monad (liftM)
 import System.IO	( hPutStrLn, stderr )
 import Data.Char        ( isAlpha )
@@ -224,6 +225,10 @@ instance (Lift a, Lift b) => Lift (Either a b) where
 instance Lift a => Lift [a] where
   lift xs = do { xs' <- mapM lift xs; return (ListE xs') }
 
+liftString :: String -> Q Exp
+-- Used in TcExpr to short-circuit the lifting for strings
+liftString s = return (LitE (StringL s))
+
 instance (Lift a, Lift b) => Lift (a, b) where
   lift (a, b)
     = liftM TupE $ sequence [lift a, lift b]
@@ -277,35 +282,29 @@ rightName = mkNameG DataName "base" "Data.Either" "Right"
 --		Names and uniques 
 -----------------------------------------------------
 
-type ModName = PackedString	-- Module name
-
 mkModName :: String -> ModName
-mkModName s = packString s
+mkModName s = ModName s
 
 modString :: ModName -> String
-modString m = unpackPS m
+modString (ModName m) = m
 
-
-type PkgName = PackedString	-- package name
 
 mkPkgName :: String -> PkgName
-mkPkgName s = packString s
+mkPkgName s = PkgName s
 
 pkgString :: PkgName -> String
-pkgString m = unpackPS m
+pkgString (PkgName m) = m
 
 
 -----------------------------------------------------
 --		OccName
 -----------------------------------------------------
 
-type OccName = PackedString
-
 mkOccName :: String -> OccName
-mkOccName s = packString s
+mkOccName s = OccName s
 
 occString :: OccName -> String
-occString occ = unpackPS occ
+occString (OccName occ) = occ
 
 
 -----------------------------------------------------
@@ -345,8 +344,29 @@ data NameFlavour
 				-- thing we are naming
   deriving ( Typeable )
 
+-- Although the NameFlavour type is abstract, the Data instance is not. The reason for this
+-- is that currently we use Data to serialize values in annotations, and in order for that to
+-- work for Template Haskell names introduced via the 'x syntax we need gunfold on NameFlavour
+-- to work. Bleh!
+--
+-- The long term solution to this is to use the binary package for annotation serialization and
+-- then remove this instance. However, to do _that_ we need to wait on binary to become stable, since
+-- boot libraries cannot be upgraded seperately from GHC itself.
+--
+-- This instance cannot be derived automatically due to bug #2701
 instance Data NameFlavour where
-     gunfold = error "gunfold"
+     gfoldl _ z NameS          = z NameS
+     gfoldl k z (NameQ mn)     = z NameQ `k` mn
+     gfoldl k z (NameU i)      = z (\(I# i') -> NameU i') `k` (I# i)
+     gfoldl k z (NameL i)      = z (\(I# i') -> NameL i') `k` (I# i)
+     gfoldl k z (NameG ns p m) = z NameG `k` ns `k` p `k` m
+     gunfold k z c = case constrIndex c of
+         1 -> z NameS
+         2 -> k $ z NameQ
+         3 -> k $ z (\(I# i) -> NameU i)
+         4 -> k $ z (\(I# i) -> NameL i)
+         5 -> k $ k $ k $ z NameG
+         _ -> error "gunfold: NameFlavour"
      toConstr NameS = con_NameS
      toConstr (NameQ _) = con_NameQ
      toConstr (NameU _) = con_NameU
@@ -618,16 +638,17 @@ data Lit = CharL Char
 
 data Pat 
   = LitP Lit                      -- { 5 or 'c' }
-  | VarP Name                   -- { x }
+  | VarP Name                     -- { x }
   | TupP [Pat]                    -- { (p1,p2) }
-  | ConP Name [Pat]             -- data T1 = C1 t1 t2; {C1 p1 p1} = e 
+  | ConP Name [Pat]               -- data T1 = C1 t1 t2; {C1 p1 p1} = e 
   | InfixP Pat Name Pat           -- foo ({x :+ y}) = e 
   | TildeP Pat                    -- { ~p }
-  | AsP Name Pat                -- { x @ p }
+  | BangP Pat                     -- { !p }
+  | AsP Name Pat                  -- { x @ p }
   | WildP                         -- { _ }
-  | RecP Name [FieldPat]        -- f (Pt { pointx = x }) = g x
+  | RecP Name [FieldPat]          -- f (Pt { pointx = x }) = g x
   | ListP [ Pat ]                 -- { [1,2,3] }
-  | SigP Pat Type                 -- p :: t
+  | SigP Pat Type                 -- { p :: t }
   deriving( Show, Eq, Data, Typeable )
 
 type FieldPat = (Name,Pat)
@@ -639,9 +660,14 @@ data Clause = Clause [Pat] Body [Dec]
                                     -- f { p1 p2 = body where decs }
     deriving( Show, Eq, Data, Typeable )
  
+-- | The 'CompE' constructor represents a list comprehension, and 
+-- takes a ['Stmt'].  The result expression of the comprehension is
+-- the *last* of these, and should be a 'NoBindS'.
+-- E.g. [ f x | x <- xs ] is represented by
+--   CompE [BindS (VarP x) (VarE xs), NoBindS (AppE (VarE f) (VarE x))]
 data Exp 
-  = VarE Name                        -- { x }
-  | ConE Name                        -- data T1 = C1 t1 t2; p = {C1} e1 e2  
+  = VarE Name                          -- { x }
+  | ConE Name                          -- data T1 = C1 t1 t2; p = {C1} e1 e2  
   | LitE Lit                           -- { 5 or 'c'}
   | AppE Exp Exp                       -- { f x }
 
@@ -661,7 +687,7 @@ data Exp
   | CompE [Stmt]                       -- { [ (x,y) | x <- xs, y <- ys ] }
   | ArithSeqE Range                    -- { [ 1 ,2 .. 10 ] }
   | ListE [ Exp ]                      -- { [1,2,3] }
-  | SigE Exp Type                      -- e :: t
+  | SigE Exp Type                      -- { e :: t }
   | RecConE Name [FieldExp]            -- { T { x = y, z = w } }
   | RecUpdE Exp [FieldExp]             -- { (f x) { z = w } }
   deriving( Show, Eq, Data, Typeable )
@@ -694,22 +720,39 @@ data Range = FromR Exp | FromThenR Exp Exp
 data Dec 
   = FunD Name [Clause]            -- { f p1 p2 = b where decs }
   | ValD Pat Body [Dec]           -- { p = b where decs }
-  | DataD Cxt Name [Name] 
+  | DataD Cxt Name [TyVarBndr] 
          [Con] [Name]             -- { data Cxt x => T x = A x | B (T x)
                                   --       deriving (Z,W)}
-  | NewtypeD Cxt Name [Name] 
+  | NewtypeD Cxt Name [TyVarBndr] 
          Con [Name]               -- { newtype Cxt x => T x = A (B x)
                                   --       deriving (Z,W)}
-  | TySynD Name [Name] Type       -- { type T x = (x,x) }
-  | ClassD Cxt Name [Name] [FunDep] [Dec]
-                                  -- { class Eq a => Ord a where ds }
+  | TySynD Name [TyVarBndr] Type  -- { type T x = (x,x) }
+  | ClassD Cxt Name [TyVarBndr] 
+         [FunDep] [Dec]           -- { class Eq a => Ord a where ds }
   | InstanceD Cxt Type [Dec]      -- { instance Show w => Show [w]
                                   --       where ds }
   | SigD Name Type                -- { length :: [a] -> Int }
   | ForeignD Foreign
+  -- pragmas
+  | PragmaD Pragma                -- { {-# INLINE [1] foo #-} }
+  -- type families (may also appear in [Dec] of 'ClassD' and 'InstanceD')
+  | FamilyD FamFlavour Name 
+         [TyVarBndr] (Maybe Kind) -- { type family T a b c :: * }
+                                 
+  | DataInstD Cxt Name [Type]
+         [Con] [Name]             -- { data instance Cxt x => T [x] = A x 
+                                  --                                | B (T x)
+                                  --       deriving (Z,W)}
+  | NewtypeInstD Cxt Name [Type]
+         Con [Name]               -- { newtype instance Cxt x => T [x] = A (B x)
+                                  --       deriving (Z,W)}
+  | TySynInstD Name [Type] Type   -- { type instance T (Maybe x) = (x,x) }
   deriving( Show, Eq, Data, Typeable )
 
 data FunDep = FunDep [Name] [Name]
+  deriving( Show, Eq, Data, Typeable )
+
+data FamFlavour = TypeFam | DataFam
   deriving( Show, Eq, Data, Typeable )
 
 data Foreign = ImportF Callconv Safety String Name Type
@@ -722,29 +765,50 @@ data Callconv = CCall | StdCall
 data Safety = Unsafe | Safe | Threadsafe
         deriving( Show, Eq, Data, Typeable )
 
-type Cxt = [Type]    -- (Eq a, Ord b)
+data Pragma = InlineP     Name InlineSpec
+            | SpecialiseP Name Type (Maybe InlineSpec)
+        deriving( Show, Eq, Data, Typeable )
+
+data InlineSpec 
+  = InlineSpec Bool                 -- False: no inline; True: inline 
+               Bool                 -- False: fun-like; True: constructor-like
+               (Maybe (Bool, Int))  -- False: before phase; True: from phase
+  deriving( Show, Eq, Data, Typeable )
+
+type Cxt = [Pred]                 -- (Eq a, Ord b)
+
+data Pred = ClassP Name [Type]    -- Eq (Int, a)
+          | EqualP Type Type      -- F a ~ Bool
+          deriving( Show, Eq, Data, Typeable )
 
 data Strict = IsStrict | NotStrict
          deriving( Show, Eq, Data, Typeable )
 
-data Con = NormalC Name [StrictType]
-         | RecC Name [VarStrictType]
-         | InfixC StrictType Name StrictType
-         | ForallC [Name] Cxt Con
+data Con = NormalC Name [StrictType]          -- C Int a
+         | RecC Name [VarStrictType]          -- C { v :: Int, w :: a }
+         | InfixC StrictType Name StrictType  -- Int :+ a
+         | ForallC [TyVarBndr] Cxt Con        -- forall a. Eq a => C [a]
          deriving( Show, Eq, Data, Typeable )
 
 type StrictType = (Strict, Type)
 type VarStrictType = (Name, Strict, Type)
 
--- FIXME: Why this special status for "List" (even tuples might be handled
---      differently)? -=chak
-data Type = ForallT [Name] Cxt Type   -- forall <vars>. <ctxt> -> <type>
-          | VarT Name                 -- a
-          | ConT Name                 -- T
-          | TupleT Int                -- (,), (,,), etc.
-          | ArrowT                    -- ->
-          | ListT                     -- []
-          | AppT Type Type            -- T a b
+data Type = ForallT [TyVarBndr] Cxt Type  -- forall <vars>. <ctxt> -> <type>
+          | VarT Name                     -- a
+          | ConT Name                     -- T
+          | TupleT Int                    -- (,), (,,), etc.
+          | ArrowT                        -- ->
+          | ListT                         -- []
+          | AppT Type Type                -- T a b
+          | SigT Type Kind                -- t :: k
+      deriving( Show, Eq, Data, Typeable )
+
+data TyVarBndr = PlainTV  Name            -- a
+               | KindedTV Name Kind       -- (a :: k)
+      deriving( Show, Eq, Data, Typeable )
+
+data Kind = StarK                         -- '*'
+          | ArrowK Kind Kind              -- k1 -> k2
       deriving( Show, Eq, Data, Typeable )
 
 -----------------------------------------------------

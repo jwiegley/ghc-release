@@ -135,7 +135,7 @@ main = do
     -- there's a wrapper script which specifies an explicit template flag.
     flags_w_tpl0 <-
         if any template_flag flags then return flags
-        else do mb_path <- getExecDir "/bin/hsc2hs.exe"
+        else do mb_path <- getLibDir
                 mb_templ1 <-
                    case mb_path of
                    Nothing   -> return Nothing
@@ -143,7 +143,12 @@ main = do
                    -- Euch, this is horrible. Unfortunately
                    -- Paths_hsc2hs isn't too useful for a
                    -- relocatable binary, though.
-                     let templ1 = path ++ "/hsc2hs-" ++ showVersion Main.version ++ "/template-hsc.h"
+                     let 
+#if defined(NEW_GHC_LAYOUT)
+                         templ1 = path ++ "/template-hsc.h"
+#else
+                         templ1 = path ++ "/hsc2hs-" ++ showVersion Main.version ++ "/template-hsc.h"
+#endif
                          incl = path ++ "/include/"
                      exists1 <- doesFileExist templ1
                      if exists1
@@ -262,15 +267,16 @@ satisfy p =
         c:cs | p c -> Success (updatePos pos c) [c] cs c
         _          -> Failure pos "Bad character"
 
+satisfy_ :: (Char -> Bool) -> Parser ()
+satisfy_ p = satisfy p >> return ()
+
 char_ :: Char -> Parser ()
 char_ c = do
-    satisfy (== c) `message` (show c++" expected")
-    return ()
+    satisfy_ (== c) `message` (show c++" expected")
 
 anyChar_ :: Parser ()
 anyChar_ = do
-    satisfy (const True) `message` "Unexpected end of file"
-    return ()
+    satisfy_ (const True) `message` "Unexpected end of file"
 
 any2Chars_ :: Parser ()
 any2Chars_ = anyChar_ >> anyChar_
@@ -365,10 +371,10 @@ linePragma :: Parser ()
 linePragma = do
     char_ '#'
     manySatisfy_ isSpace
-    satisfy (\c -> c == 'L' || c == 'l')
-    satisfy (\c -> c == 'I' || c == 'i')
-    satisfy (\c -> c == 'N' || c == 'n')
-    satisfy (\c -> c == 'E' || c == 'e')
+    satisfy_ (\c -> c == 'L' || c == 'l')
+    satisfy_ (\c -> c == 'I' || c == 'i')
+    satisfy_ (\c -> c == 'N' || c == 'n')
+    satisfy_ (\c -> c == 'E' || c == 'e')
     manySatisfy1_ isSpace
     line <- liftM read $ manySatisfy1 isDigit
     manySatisfy1_ isSpace
@@ -410,15 +416,14 @@ satisfyC p = do
         '\\':'\n':_ -> do any2Chars_ `fakeOutput` []; satisfyC p
         _           -> satisfy p
 
+satisfyC_ :: (Char -> Bool) -> Parser ()
+satisfyC_ p = satisfyC p >> return ()
+
 charC_ :: Char -> Parser ()
-charC_ c = do
-    satisfyC (== c) `message` (show c++" expected")
-    return ()
+charC_ c = satisfyC_ (== c) `message` (show c++" expected")
 
 anyCharC_ :: Parser ()
-anyCharC_ = do
-    satisfyC (const True) `message` "Unexpected end of file"
-    return ()
+anyCharC_ = satisfyC_ (const True) `message` "Unexpected end of file"
 
 any2CharsC_ :: Parser ()
 any2CharsC_ = anyCharC_ >> anyCharC_
@@ -740,7 +745,7 @@ outHeaderHs flags inH toks =
 	"#if __GLASGOW_HASKELL__ && __GLASGOW_HASKELL__ < 603\n" ++
 	"    printf (\"{-# OPTIONS -#include %s #-}\\n\", \""++
                   showCString s++"\");\n"++
-	"#else\n"++
+	"#elif __GLASGOW_HASKELL__ < 610\n"++
 	"    printf (\"{-# INCLUDE %s #-}\\n\", \""++
                   showCString s++"\");\n"++
 	"#endif\n"
@@ -889,6 +894,13 @@ subst _ _ = id
 dosifyPath :: String -> String
 dosifyPath = subst '/' '\\'
 
+getLibDir :: IO (Maybe String)
+#if defined(NEW_GHC_LAYOUT)
+getLibDir = fmap (fmap (++ "/lib")) $ getExecDir "/bin/hsc2hs.exe"
+#else
+getLibDir = getExecDir "/bin/hsc2hs.exe"
+#endif
+
 -- (getExecDir cmd) returns the directory in which the current
 --                  executable, which should be called 'cmd', is running
 -- So if the full path is /a/b/c/d/e, and you pass "d/e" as cmd,
@@ -914,4 +926,3 @@ foreign import stdcall unsafe "GetModuleFileNameA"
 #else
 getExecPath = return Nothing
 #endif
-

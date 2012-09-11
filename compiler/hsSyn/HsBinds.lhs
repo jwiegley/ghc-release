@@ -271,26 +271,36 @@ ppr_monobind (PatBind { pat_lhs = pat, pat_rhs = grhss })      = pprPatBind pat 
 ppr_monobind (VarBind { var_id = var, var_rhs = rhs })         = pprBndr CaseBind var <+> equals <+> pprExpr (unLoc rhs)
 ppr_monobind (FunBind { fun_id = fun, fun_infix = inf,
 			fun_matches = matches,
-		        fun_tick = tick }) = 
-		           (case tick of 
-			      Nothing -> empty
-			      Just t  -> text "-- tick id = " <> ppr t
-			   ) $$ pprFunBind (unLoc fun) inf matches
+		        fun_tick = tick })
+  = pprTicks empty (case tick of 
+			Nothing -> empty
+			Just t  -> text "-- tick id = " <> ppr t)
+    $$  pprFunBind (unLoc fun) inf matches
 
 ppr_monobind (AbsBinds { abs_tvs = tyvars, abs_dicts = dictvars, 
 			 abs_exports = exports, abs_binds = val_binds })
-     = sep [ptext (sLit "AbsBinds"),
-	    brackets (interpp'SP tyvars),
-	    brackets (interpp'SP dictvars),
-	    brackets (sep (punctuate comma (map ppr_exp exports)))]
-       $$
-       nest 2 ( vcat [pprBndr LetBind x | (_,x,_,_) <- exports]
-			-- Print type signatures
-		$$ pprLHsBinds val_binds )
+  = sep [ptext (sLit "AbsBinds"),
+  	 brackets (interpp'SP tyvars),
+  	 brackets (interpp'SP dictvars),
+  	 brackets (sep (punctuate comma (map ppr_exp exports)))]
+    $$
+    nest 2 ( vcat [pprBndr LetBind x | (_,x,_,_) <- exports]
+  			-- Print type signatures
+  	     $$ pprLHsBinds val_binds )
   where
     ppr_exp (tvs, gbl, lcl, prags)
 	= vcat [ppr gbl <+> ptext (sLit "<=") <+> ppr tvs <+> ppr lcl,
 	  	nest 2 (vcat (map (pprPrag gbl) prags))]
+\end{code}
+
+
+\begin{code}
+pprTicks :: SDoc -> SDoc -> SDoc
+-- Print stuff about ticks only when -dppr-debug is on, to avoid
+-- them appearing in error messages (from the desugarer); see Trac # 3263
+pprTicks pp_no_debug pp_when_debug
+  = getPprStyle (\ sty -> if debugStyle sty then pp_when_debug 
+                                            else pp_no_debug)
 \end{code}
 
 %************************************************************************
@@ -426,12 +436,18 @@ type LSig name = Located (Sig name)
 data Sig name	-- Signatures and pragmas
   = 	-- An ordinary type signature
 	-- f :: Num a => a -> a
-    TypeSig	(Located name)	-- A bog-std type signature
-		(LHsType name)
+    TypeSig (Located name) (LHsType name)
+
+	-- A type signature in generated code, notably the code
+	-- generated for record selectors.  We simply record
+	-- the desired Id itself, replete with its name, type
+	-- and IdDetails.  Otherwise it's just like a type 
+	-- signature: there should be an accompanying binding
+  | IdSig Id
 
 	-- An ordinary fixity declaration
 	--	infixl *** 8
-  | FixSig	(FixitySig name)	-- Fixity declaration
+  | FixSig (FixitySig name)
 
 	-- An inline pragma
 	-- {#- INLINE f #-}
@@ -511,9 +527,16 @@ isFixityLSig :: LSig name -> Bool
 isFixityLSig (L _ (FixSig {})) = True
 isFixityLSig _	               = False
 
-isVanillaLSig :: LSig name -> Bool
+isVanillaLSig :: LSig name -> Bool	 -- User type signatures
+-- A badly-named function, but it's part of the GHCi (used
+-- by Haddock) so I don't want to change it gratuitously.
 isVanillaLSig (L _(TypeSig {})) = True
 isVanillaLSig _                 = False
+
+isTypeLSig :: LSig name -> Bool	 -- Type signatures
+isTypeLSig (L _(TypeSig {})) = True
+isTypeLSig (L _(IdSig {}))   = True
+isTypeLSig _                 = False
 
 isSpecLSig :: LSig name -> Bool
 isSpecLSig (L _(SpecSig {})) = True
@@ -536,6 +559,7 @@ isInlineLSig _                    = False
 
 hsSigDoc :: Sig name -> SDoc
 hsSigDoc (TypeSig {}) 		= ptext (sLit "type signature")
+hsSigDoc (IdSig {}) 		= ptext (sLit "id signature")
 hsSigDoc (SpecSig {})	 	= ptext (sLit "SPECIALISE pragma")
 hsSigDoc (InlineSig {})         = ptext (sLit "INLINE pragma")
 hsSigDoc (SpecInstSig {})	= ptext (sLit "SPECIALISE instance pragma")
@@ -547,6 +571,7 @@ Signature equality is used when checking for duplicate signatures
 \begin{code}
 eqHsSig :: Eq a => LSig a -> LSig a -> Bool
 eqHsSig (L _ (FixSig (FixitySig n1 _))) (L _ (FixSig (FixitySig n2 _))) = unLoc n1 == unLoc n2
+eqHsSig (L _ (IdSig n1))         	(L _ (IdSig n2))                = n1 == n2
 eqHsSig (L _ (TypeSig n1 _))         	(L _ (TypeSig n2 _))            = unLoc n1 == unLoc n2
 eqHsSig (L _ (InlineSig n1 _))          (L _ (InlineSig n2 _))          = unLoc n1 == unLoc n2
  	-- For specialisations, we don't have equality over
@@ -561,6 +586,7 @@ instance (OutputableBndr name) => Outputable (Sig name) where
 
 ppr_sig :: OutputableBndr name => Sig name -> SDoc
 ppr_sig (TypeSig var ty)	  = pprVarSig (unLoc var) ty
+ppr_sig (IdSig id)	          = pprVarSig id (varType id)
 ppr_sig (FixSig fix_sig) 	  = ppr fix_sig
 ppr_sig (SpecSig var ty inl) 	  = pragBrackets (pprSpec var ty inl)
 ppr_sig (InlineSig var inl)       = pragBrackets (ppr inl <+> ppr var)

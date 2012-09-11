@@ -190,8 +190,8 @@ installSignalHandlers = do
 	   (thread:_) -> throwTo thread interrupt_exn
   --
 #if !defined(mingw32_HOST_OS)
-  installHandler sigQUIT (Catch interrupt) Nothing 
-  installHandler sigINT  (Catch interrupt) Nothing
+  _ <- installHandler sigQUIT (Catch interrupt) Nothing 
+  _ <- installHandler sigINT  (Catch interrupt) Nothing
   return ()
 #else
   -- GHC 6.3+ has support for console events on Windows
@@ -203,7 +203,7 @@ installSignalHandlers = do
       sig_handler Break    = interrupt
       sig_handler _        = return ()
 
-  installHandler (Catch sig_handler)
+  _ <- installHandler (Catch sig_handler)
   return ()
 #endif
 

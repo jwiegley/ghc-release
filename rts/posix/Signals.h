@@ -13,7 +13,9 @@
 # include <signal.h>
 #endif
 
-extern rtsBool anyUserHandlers(void);
+BEGIN_RTS_PRIVATE
+
+rtsBool anyUserHandlers(void);
 
 #if !defined(THREADED_RTS)
 extern siginfo_t pending_handler_buf[];
@@ -22,7 +24,11 @@ extern siginfo_t *next_pending_handler;
 void startSignalHandlers(Capability *cap);
 #endif
 
+Capability *ioManagerStartCap (Capability *cap);
+
 extern StgInt *signal_handlers;
+
+END_RTS_PRIVATE
 
 #endif /* POSIX_SIGNALS_H */
 

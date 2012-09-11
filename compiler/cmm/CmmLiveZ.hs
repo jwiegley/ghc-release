@@ -3,7 +3,7 @@ module CmmLiveZ
     ( CmmLive
     , cmmLivenessZ
     , liveLattice
-    , middleLiveness, lastLiveness
+    , middleLiveness, noLiveOnEntry
     ) 
 where
 
@@ -11,7 +11,7 @@ import BlockId
 import CmmExpr
 import CmmTx
 import DFMonad
-import Monad
+import Control.Monad
 import PprCmm()
 import PprCmmZ()
 import ZipCfg
@@ -19,6 +19,7 @@ import ZipDataflow
 import ZipCfgCmmRep
 
 import Maybes
+import Outputable
 import UniqSet
 
 -----------------------------------------------------------------------------
@@ -42,36 +43,42 @@ type BlockEntryLiveness = BlockEnv CmmLive
 -- | Calculated liveness info for a CmmGraph
 -----------------------------------------------------------------------------
 cmmLivenessZ :: CmmGraph -> FuelMonad BlockEntryLiveness
-cmmLivenessZ g = liftM zdfFpFacts $ (res :: FuelMonad (CmmBackwardFixedPoint CmmLive))
+cmmLivenessZ g@(LGraph entry _) =
+  liftM (check . zdfFpFacts) (res :: FuelMonad (CmmBackwardFixedPoint CmmLive))
   where res = zdfSolveFrom emptyBlockEnv "liveness analysis" liveLattice transfers
                            emptyUniqSet (graphOfLGraph g)
-        transfers = BackwardTransfers first middle last
-        first live _ = live
-        middle       = flip middleLiveness
-        last         = flip lastLiveness
+        transfers = BackwardTransfers (flip const) mid last
+        mid  m = gen_kill m . midLive  m
+        last l = gen_kill l . lastLive l 
+        check facts   =
+          noLiveOnEntry entry (expectJust "check" $ lookupBlockEnv facts entry) facts
+
+gen_kill :: (DefinerOfLocalRegs a, UserOfLocalRegs a) => a -> CmmLive -> CmmLive
+gen_kill a = gen a . kill a
+
+middleLiveness :: Middle -> CmmLive -> CmmLive
+middleLiveness = gen_kill
+
+-- | On entry to the procedure, there had better not be any LocalReg's live-in.
+noLiveOnEntry :: BlockId -> CmmLive -> a -> a
+noLiveOnEntry bid in_fact x =
+  if isEmptyUniqSet in_fact then x
+  else pprPanic "LocalReg's live-in to graph" (ppr bid <+> ppr in_fact)
 
 -- | The transfer equations use the traditional 'gen' and 'kill'
 -- notations, which should be familiar from the dragon book.
-gen, kill :: UserOfLocalRegs a => a -> RegSet -> RegSet
-gen  a live = foldRegsUsed extendRegSet      live a
-kill a live = foldRegsUsed delOneFromUniqSet live a
+gen  :: UserOfLocalRegs    a => a -> RegSet -> RegSet
+gen  a live = foldRegsUsed    extendRegSet      live a
+kill :: DefinerOfLocalRegs a => a -> RegSet -> RegSet
+kill a live = foldRegsDefd delOneFromUniqSet live a
 
-middleLiveness :: Middle -> CmmLive -> CmmLive
-middleLiveness m = middle m
-  where middle (MidComment {})               = id
-        middle (MidAssign lhs expr)          = gen expr . kill lhs
-        middle (MidStore addr rval)          = gen addr . gen rval
-        middle (MidUnsafeCall tgt ress args) = gen tgt . gen args . kill ress
-        middle (MidAddToContext ra args)     = gen ra . gen args
-        middle (CopyIn _ formals _)          = kill formals
-        middle (CopyOut _ actuals)           = gen actuals
+midLive :: Middle -> CmmLive -> CmmLive
+midLive (MidForeignCall {}) _ = emptyUniqSet
+midLive _                live = live
 
-lastLiveness :: Last -> (BlockId -> CmmLive) -> CmmLive
-lastLiveness l env = last l
-  where last (LastReturn)            = emptyUniqSet
-        last (LastJump e)            = gen e $ emptyUniqSet
-        last (LastBranch id)         = env id
-        last (LastCall tgt (Just k)) = gen tgt $ env k
-        last (LastCall tgt Nothing)  = gen tgt $ emptyUniqSet
-        last (LastCondBranch e t f)  = gen e $ unionUniqSets (env t) (env f)
-        last (LastSwitch e tbl) = gen e $ unionManyUniqSets $ map env (catMaybes tbl)
+lastLive :: Last -> (BlockId -> CmmLive) -> CmmLive
+lastLive l env = last l
+  where last (LastBranch id)        = env id
+        last (LastCall _ _  _ _ _)  = emptyUniqSet
+        last (LastCondBranch _ t f) = unionUniqSets (env t) (env f)
+        last (LastSwitch _ tbl)     = unionManyUniqSets $ map env (catMaybes tbl)

@@ -7,8 +7,11 @@
  * ---------------------------------------------------------------------------*/
 
 #ifndef SANITY_H
+#define SANITY_H
 
 #ifdef DEBUG
+
+BEGIN_RTS_PRIVATE
 
 # if defined(PAR)
 # define PVM_PE_MASK    0xfffc0000
@@ -18,40 +21,23 @@
 # endif
 
 /* debugging routines */
-extern void checkHeap      ( bdescr *bd );
-extern void checkHeapChunk ( StgPtr start, StgPtr end );
-extern void checkLargeObjects ( bdescr *bd );
-extern void checkTSO       ( StgTSO* tso );
-extern void checkGlobalTSOList ( rtsBool checkTSOs );
-extern void checkStaticObjects ( StgClosure* static_objects );
-extern void checkStackChunk    ( StgPtr sp, StgPtr stack_end );
-extern StgOffset checkStackFrame ( StgPtr sp );
-extern StgOffset checkClosure  ( StgClosure* p );
+void checkHeap      ( bdescr *bd );
+void checkHeapChunk ( StgPtr start, StgPtr end );
+void checkLargeObjects ( bdescr *bd );
+void checkTSO       ( StgTSO* tso );
+void checkGlobalTSOList ( rtsBool checkTSOs );
+void checkStaticObjects ( StgClosure* static_objects );
+void checkStackChunk    ( StgPtr sp, StgPtr stack_end );
+StgOffset checkStackFrame ( StgPtr sp );
+StgOffset checkClosure  ( StgClosure* p );
 
-extern void checkMutableList   ( bdescr *bd, nat gen );
-extern void checkMutableLists ( rtsBool checkTSOs );
+void checkMutableList   ( bdescr *bd, nat gen );
+void checkMutableLists ( rtsBool checkTSOs );
 
-#if defined(GRAN)
-extern void checkTSOsSanity(void);
-extern rtsBool checkThreadQSanity (PEs proc, rtsBool check_TSO_too);
-extern rtsBool checkThreadQsSanity (rtsBool check_TSO_too);
-#endif
+void checkBQ (StgTSO *bqe, StgClosure *closure);
 
-#if defined(PAR)
-extern void checkBQ (StgBlockingQueueElement *bqe, StgClosure *closure);
-#else
-extern void checkBQ (StgTSO *bqe, StgClosure *closure);
-#endif
-
-#if defined(PAR)
-extern void checkLAGAtable(rtsBool check_closures);
-extern void checkHeapChunk(StgPtr start, StgPtr end);
-#endif
-
-/* test whether an object is already on update list */
-extern rtsBool isBlackhole( StgTSO* tso, StgClosure* p );
+END_RTS_PRIVATE
 
 #endif /* DEBUG */
  
 #endif /* SANITY_H */
-

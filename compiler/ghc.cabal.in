@@ -1,3 +1,6 @@
+-- WARNING: ghc.cabal is automatically generated from ghc.cabal.in by
+-- ./configure.  Make sure you are editing ghc.cabal.in, not ghc.cabal.
+
 Name: ghc
 Version: @ProjectVersion@
 License: BSD3
@@ -15,7 +18,7 @@ Description:
     through this package.
 Category: Development
 Build-Type: Simple
-Cabal-Version: >= 1.2
+Cabal-Version: >= 1.2.3
 
 Flag base4
     Description: Choose the even newer, even smaller, split-up base package.
@@ -40,6 +43,15 @@ Flag ncg
 
 Flag stage1
     Description: Is this stage 1?
+    Default: False
+
+Flag stage2
+    Description: Is this stage 2?
+    Default: False
+
+Flag stage3
+    Description: Is this stage 3?
+    Default: False
 
 Library
     Exposed: False
@@ -56,11 +68,11 @@ Library
                        process    >= 1   && < 1.1,
                        bytestring >= 0.9 && < 0.10,
                        old-time   >= 1   && < 1.1,
-                       containers >= 0.1 && < 0.3,
-                       array      >= 0.1 && < 0.3
+                       containers >= 0.1 && < 0.4,
+                       array      >= 0.1 && < 0.4
 
     Build-Depends: filepath >= 1 && < 1.2
-    Build-Depends: haskell98, Cabal, hpc
+    Build-Depends: Cabal, hpc
     if os(windows)
         Build-Depends: Win32
     else
@@ -76,6 +88,8 @@ Library
     if !flag(ncg)
         CPP-Options: -DOMIT_NATIVE_CODEGEN
 
+    Build-Depends: bin-package-db
+
     -- GHC 6.4.2 needs to be able to find WCsubst.c, which needs to be
     -- able to find WCsubst.h
     Include-Dirs: ../libraries/base/cbits, ../libraries/base/include
@@ -84,7 +98,7 @@ Library
                 ForeignFunctionInterface, EmptyDataDecls,
                 TypeSynonymInstances, MultiParamTypeClasses,
                 FlexibleInstances, Rank2Types, ScopedTypeVariables,
-                DeriveDataTypeable
+                DeriveDataTypeable, RelaxedPolyRec
 
     Include-Dirs: . parser utils
 
@@ -94,14 +108,17 @@ Library
             Build-Depends: extensible-exceptions
             Extensions: PatternSignatures
     else
-        Include-Dirs: stage2plus
+        if flag(stage2)
+            Include-Dirs: stage2
+        else
+            if flag(stage3)
+                Include-Dirs: stage2
+
     Install-Includes: HsVersions.h, ghc_boot_platform.h
 
     c-sources:
         parser/cutils.c
         utils/md5.c
-        -- For GHC < 6.5:
-        cbits/unicode.c
 
     if flag(dynlibs)
         c-sources:
@@ -158,6 +175,7 @@ Library
         CLabel
         Cmm
         CmmBrokenBlock
+        CmmBuildInfoTables
         CmmCPS
         CmmCPSGen
         CmmCPSZ
@@ -176,12 +194,12 @@ Library
         CmmProcPoint
         CmmProcPointZ
         CmmSpillReload
+        CmmStackLayout
         CmmTx
         CmmUtils
         CmmZipUtil
         DFMonad
         Dataflow
-        MachOp
         MkZipCfg
         MkZipCfgCmm
         OptimizationFuel
@@ -214,9 +232,26 @@ Library
         CgTailCall
         CgTicky
         CgUtils
+        StgCmm
+        StgCmmBind
+        StgCmmClosure
+        StgCmmCon
+        StgCmmEnv
+        StgCmmExpr
+        StgCmmForeign
+        StgCmmGran
+        StgCmmHeap
+        StgCmmHpc
+        StgCmmLayout
+        StgCmmMonad
+        StgCmmPrim
+        StgCmmProf
+        StgCmmTicky
+        StgCmmUtils
         ClosureInfo
         CodeGen
         SMRep
+        CoreArity
         CoreFVs
         CoreLint
         CorePrep
@@ -264,6 +299,7 @@ Library
         LoadIface
         MkIface
         TcIface
+        Annotations
         BreakArray
         CmdLineParser
         CodeOutput
@@ -283,15 +319,12 @@ Library
         InteractiveEval
         PackageConfig
         Packages
-        ParsePkgConf
         PprTyThing
         StaticFlags
         StaticFlagParser
         SysTools
         TidyPgm
         Ctype
-        HaddockLex
-        HaddockParse
         HaddockUtils
         LexCore
         Lexer
@@ -317,6 +350,7 @@ Library
         RnPat
         RnSource
         RnTypes
+        CoreMonad
         CSE
         FloatIn
         FloatOut
@@ -346,6 +380,7 @@ Library
         WwLib
         FamInst
         Inst
+        TcAnnotations
         TcArrows
         TcBinds
         TcClassDcl
@@ -407,9 +442,9 @@ Library
         Outputable
         Panic
         Pretty
+        Serialized
         State
         StringBuffer
-        Unicode
         UniqFM
         UniqSet
         Util
@@ -426,23 +461,70 @@ Library
 
         Exposed-Modules:
             AsmCodeGen
-            MachCodeGen
-            MachInstrs
-            MachRegs
+            TargetReg
             NCGMonad
-            PositionIndependentCode
-            PprMach
-            RegAllocColor
-            RegAllocInfo
-            RegAllocLinear
-            RegAllocStats
-            RegArchBase
-            RegArchX86
-            RegCoalesce
-            RegLiveness
-            RegSpill
-            RegSpillClean
-            RegSpillCost
+            Instruction
+            Size
+            Reg
+            RegClass
+            PprBase
+            PIC
+            Platform
+            Alpha.Regs
+            Alpha.RegInfo
+            Alpha.Instr
+            Alpha.CodeGen
+            X86.Regs
+            X86.RegInfo
+            X86.Instr
+            X86.Cond
+            X86.Ppr
+            X86.CodeGen
+            PPC.Regs
+            PPC.RegInfo
+            PPC.Instr
+            PPC.Cond
+            PPC.Ppr
+            PPC.CodeGen
+            SPARC.Base
+            SPARC.Regs
+            SPARC.RegPlate
+            SPARC.Imm
+            SPARC.AddrMode
+            SPARC.Cond
+            SPARC.Instr
+            SPARC.Stack
+            SPARC.ShortcutJump
+            SPARC.Ppr
+            SPARC.CodeGen
+            SPARC.CodeGen.Amode
+            SPARC.CodeGen.Base
+            SPARC.CodeGen.CCall
+            SPARC.CodeGen.CondCode
+            SPARC.CodeGen.Gen32
+            SPARC.CodeGen.Gen64
+            SPARC.CodeGen.Sanity
+            SPARC.CodeGen.Expand
+            RegAlloc.Liveness
+            RegAlloc.Graph.Main
+            RegAlloc.Graph.Stats
+            RegAlloc.Graph.ArchBase
+            RegAlloc.Graph.ArchX86
+            RegAlloc.Graph.Coalesce
+            RegAlloc.Graph.Spill
+            RegAlloc.Graph.SpillClean
+            RegAlloc.Graph.SpillCost
+            RegAlloc.Graph.TrivColorable
+            RegAlloc.Linear.Main
+            RegAlloc.Linear.JoinToTargets
+            RegAlloc.Linear.State
+            RegAlloc.Linear.Stats
+            RegAlloc.Linear.FreeRegs
+            RegAlloc.Linear.StackMap
+            RegAlloc.Linear.Base
+            RegAlloc.Linear.X86.FreeRegs
+            RegAlloc.Linear.PPC.FreeRegs
+            RegAlloc.Linear.SPARC.FreeRegs
 
     if flag(ghci)
         Exposed-Modules:

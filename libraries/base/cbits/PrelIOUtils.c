@@ -13,7 +13,6 @@
 #include "HsBase.h"
 
 #ifdef __GLASGOW_HASKELL__
-# include "RtsMessages.h"
 
 void errorBelch2(const char*s, char *t)
 {
@@ -24,4 +23,14 @@ void debugBelch2(const char*s, char *t)
 {
     debugBelch(s,t);
 }
+
+// Use a C wrapper for this because we avoid hsc2hs in base
+#if HAVE_LANGINFO_H
+#include <langinfo.h>
+char *localeEncoding (void)
+{
+    return nl_langinfo(CODESET);
+}
+#endif
+
 #endif /* __GLASGOW_HASKELL__ */

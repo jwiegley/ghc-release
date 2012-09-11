@@ -43,6 +43,7 @@ import SrcLoc
 import Maybes
 import Util
 import Name
+import FiniteMap
 import Outputable
 import FastString
 \end{code}
@@ -289,8 +290,7 @@ match vars@(v:_) ty eqns
 	  (aux_binds, tidy_eqns) <- mapAndUnzipM (tidyEqnInfo v) eqns
 
 		-- Group the equations and match each group in turn
-
-       ; let grouped = (groupEquations tidy_eqns)
+       ; let grouped = groupEquations tidy_eqns
 
          -- print the view patterns that are commoned up to help debug
        ; ifOptM Opt_D_dump_view_pattern_commoning (debug grouped)
@@ -305,10 +305,11 @@ match vars@(v:_) ty eqns
     match_group :: [(PatGroup,EquationInfo)] -> DsM MatchResult
     match_group eqns@((group,_) : _)
         = case group of
+            PgCon _    -> matchConFamily  vars ty (subGroup [(c,e) | (PgCon c, e) <- eqns])
+            PgLit _    -> matchLiterals   vars ty (subGroup [(l,e) | (PgLit l, e) <- eqns])
+
             PgAny      -> matchVariables  vars ty (dropGroup eqns)
-            PgCon _    -> matchConFamily  vars ty (subGroups eqns)
-            PgLit _    -> matchLiterals   vars ty (subGroups eqns)
-            PgN _      -> matchNPats      vars ty (subGroups eqns)
+            PgN _      -> matchNPats      vars ty (dropGroup eqns)
             PgNpK _    -> matchNPlusKPats vars ty (dropGroup eqns)
             PgBang     -> matchBangs      vars ty (dropGroup eqns)
             PgCo _     -> matchCoercion   vars ty (dropGroup eqns)
@@ -518,6 +519,21 @@ tidy1 _ (LitPat lit)
 tidy1 _ (NPat lit mb_neg eq)
   = return (idDsWrapper, tidyNPat lit mb_neg eq)
 
+-- BangPatterns: Pattern matching is already strict in constructors,
+-- tuples etc, so the last case strips off the bang for thoses patterns.
+tidy1 v (BangPat (L _ (LazyPat p)))       = tidy1 v (BangPat p)
+tidy1 v (BangPat (L _ (ParPat p)))        = tidy1 v (BangPat p)
+tidy1 _ p@(BangPat (L _(VarPat _)))       = return (idDsWrapper, p)
+tidy1 _ p@(BangPat (L _(VarPatOut _ _)))  = return (idDsWrapper, p)
+tidy1 _ p@(BangPat (L _ (WildPat _)))     = return (idDsWrapper, p)
+tidy1 _ p@(BangPat (L _ (CoPat _ _ _)))   = return (idDsWrapper, p)
+tidy1 _ p@(BangPat (L _ (SigPatIn _ _)))  = return (idDsWrapper, p)
+tidy1 _ p@(BangPat (L _ (SigPatOut _ _))) = return (idDsWrapper, p)
+tidy1 v (BangPat (L _ (AsPat (L _ var) pat)))
+  = do	{ (wrap, pat') <- tidy1 v (BangPat pat)
+        ; return (wrapBind var v . wrap, pat') }
+tidy1 v (BangPat (L _ p))                   = tidy1 v p
+
 -- Everything else goes through unchanged...
 
 tidy1 _ non_interesting_pat
@@ -686,11 +702,11 @@ matchEquations ctxt vars eqns_info rhs_ty
   = do	{ dflags <- getDOptsDs
 	; locn   <- getSrcSpanDs
 	; let   ds_ctxt      = DsMatchContext ctxt locn
-		error_string = matchContextErrString ctxt
+		error_doc = matchContextErrString ctxt
 
 	; match_result <- match_fun dflags ds_ctxt vars rhs_ty eqns_info
 
-	; fail_expr <- mkErrorAppDs pAT_ERROR_ID rhs_ty error_string
+	; fail_expr <- mkErrorAppDs pAT_ERROR_ID rhs_ty error_doc
 	; extractMatchResult match_result fail_expr }
   where 
     match_fun dflags ds_ctxt
@@ -772,24 +788,39 @@ groupEquations :: [EquationInfo] -> [[(PatGroup, EquationInfo)]]
 -- If the result is of form [g1, g2, g3], 
 -- (a) all the (pg,eq) pairs in g1 have the same pg
 -- (b) none of the gi are empty
+-- The ordering of equations is unchanged
 groupEquations eqns
   = runs same_gp [(patGroup (firstPat eqn), eqn) | eqn <- eqns]
   where
     same_gp :: (PatGroup,EquationInfo) -> (PatGroup,EquationInfo) -> Bool
     (pg1,_) `same_gp` (pg2,_) = pg1 `sameGroup` pg2
 
-subGroups :: [(PatGroup, EquationInfo)] -> [[EquationInfo]]
+subGroup :: Ord a => [(a, EquationInfo)] -> [[EquationInfo]]
 -- Input is a particular group.  The result sub-groups the 
 -- equations by with particular constructor, literal etc they match.
--- The order may be swizzled, so the matching should be order-independent
-subGroups groups = map (map snd) (equivClasses cmp groups)
+-- Each sub-list in the result has the same PatGroup
+-- See Note [Take care with pattern order]
+subGroup group 
+    = map reverse $ eltsFM $ foldl accumulate emptyFM group
   where
-    (pg1, _) `cmp` (pg2, _) = pg1 `cmp_pg` pg2
-    (PgCon c1) `cmp_pg` (PgCon c2) = c1 `compare` c2
-    (PgLit l1) `cmp_pg` (PgLit l2) = l1 `compare` l2
-    (PgN   l1) `cmp_pg` (PgN   l2) = l1 `compare` l2
-	-- These are the only cases that are every sub-grouped
+    accumulate pg_map (pg, eqn)
+      = case lookupFM pg_map pg of
+          Just eqns -> addToFM pg_map pg (eqn:eqns)
+          Nothing   -> addToFM pg_map pg [eqn]
 
+    -- pg_map :: FiniteMap a [EquationInfo]
+    -- Equations seen so far in reverse order of appearance
+\end{code}
+
+Note [Take care with pattern order]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In the subGroup function we must be very careful about pattern re-ordering,
+Consider the patterns [ (True, Nothing), (False, x), (True, y) ]
+Then in bringing together the patterns for True, we must not 
+swap the Nothing and y!
+
+
+\begin{code}
 sameGroup :: PatGroup -> PatGroup -> Bool
 -- Same group means that a single case expression 
 -- or test will suffice to match both, *and* the order
@@ -798,9 +829,8 @@ sameGroup PgAny      PgAny      = True
 sameGroup PgBang     PgBang     = True
 sameGroup (PgCon _)  (PgCon _)  = True		-- One case expression
 sameGroup (PgLit _)  (PgLit _)  = True		-- One case expression
-sameGroup (PgN _)    (PgN _)    = True		-- Needs conditionals
-sameGroup (PgNpK l1) (PgNpK l2) = l1==l2	-- Order is significant
-						-- See Note [Order of n+k]
+sameGroup (PgN l1)   (PgN l2)   = l1==l2	-- Order is significant
+sameGroup (PgNpK l1) (PgNpK l2) = l1==l2	-- See Note [Grouping overloaded literal patterns]
 sameGroup (PgCo	t1)  (PgCo t2)  = t1 `coreEqType` t2
 	-- CoPats are in the same goup only if the type of the
 	-- enclosed pattern is the same. The patterns outside the CoPat
@@ -811,12 +841,12 @@ sameGroup (PgView e1 t1) (PgView e2 t2) = viewLExprEq (e1,t1) (e2,t2)
        -- are "equal"---conservatively, we use syntactic equality
 sameGroup _          _          = False
 
--- an approximation of syntactic equality used for determining when view
+-- An approximation of syntactic equality used for determining when view
 -- exprs are in the same group.
--- this function can always safely return false;
+-- This function can always safely return false;
 -- but doing so will result in the application of the view function being repeated.
 --
--- currently: compare applications of literals and variables
+-- Currently: compare applications of literals and variables
 --            and anything else that we can do without involving other
 --            HsSyn types in the recursion
 --
@@ -829,12 +859,11 @@ viewLExprEq (e1,_) (e2,_) =
         -- short name for recursive call on unLoc
         lexp e e' = exp (unLoc e) (unLoc e')
 
-        -- check that two lists have the same length
-        -- and that they match up pairwise
-        lexps [] [] = True
-        lexps [] (_:_) = False
-        lexps (_:_) [] = False
-        lexps (x:xs) (y:ys) = lexp x y && lexps xs ys
+	eq_list :: (a->a->Bool) -> [a] -> [a] -> Bool
+        eq_list _  []     []     = True
+        eq_list _  []     (_:_)  = False
+        eq_list _  (_:_)  []     = False
+        eq_list eq (x:xs) (y:ys) = eq x y && eq_list eq xs ys
 
         -- conservative, in that it demands that wrappers be
         -- syntactically identical and doesn't look under binders
@@ -863,15 +892,13 @@ viewLExprEq (e1,_) (e2,_) =
         -- above does
         exp (HsIPVar i) (HsIPVar i') = i == i' 
         exp (HsOverLit l) (HsOverLit l') = 
-            -- overloaded lits are equal if they have the same type
+            -- Overloaded lits are equal if they have the same type
             -- and the data is the same.
             -- this is coarser than comparing the SyntaxExpr's in l and l',
             -- which resolve the overloading (e.g., fromInteger 1),
             -- because these expressions get written as a bunch of different variables
             -- (presumably to improve sharing)
             tcEqType (overLitType l) (overLitType l') && l == l'
-        -- comparing the constants seems right
-        exp (HsLit l) (HsLit l') = l == l'
         exp (HsApp e1 e2) (HsApp e1' e2') = lexp e1 e1' && lexp e2 e2'
         -- the fixities have been straightened out by now, so it's safe
         -- to ignore them?
@@ -882,14 +909,20 @@ viewLExprEq (e1,_) (e2,_) =
             lexp e1 e1' && lexp e2 e2'
         exp (SectionR e1 e2) (SectionR e1' e2') = 
             lexp e1 e1' && lexp e2 e2'
+        exp (ExplicitTuple es1 _) (ExplicitTuple es2 _) =
+            eq_list tup_arg es1 es2
         exp (HsIf e e1 e2) (HsIf e' e1' e2') =
             lexp e e' && lexp e1 e1' && lexp e2 e2'
-        exp (ExplicitList _ ls) (ExplicitList _ ls') = lexps ls ls'
-        exp (ExplicitPArr _ ls) (ExplicitPArr _ ls') = lexps ls ls'
-        exp (ExplicitTuple ls _) (ExplicitTuple ls' _) = lexps ls ls'
+
         -- Enhancement: could implement equality for more expressions
         --   if it seems useful
+	-- But no need for HsLit, ExplicitList, ExplicitTuple, 
+	-- because they cannot be functions
         exp _ _  = False
+
+        tup_arg (Present e1) (Present e2) = lexp e1 e2
+        tup_arg (Missing t1) (Missing t2) = tcEqType t1 t2
+        tup_arg _ _ = False
     in
       lexp e1 e2
 
@@ -905,8 +938,8 @@ patGroup (ViewPat expr p _)               = PgView expr (hsPatType (unLoc p))
 patGroup pat = pprPanic "patGroup" (ppr pat)
 \end{code}
 
-Note [Order of n+k]
-~~~~~~~~~~~~~~~~~~~
+Note [Grouping overloaded literal patterns]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 WATCH OUT!  Consider
 
 	f (n+1) = ...
@@ -914,9 +947,11 @@ WATCH OUT!  Consider
 	f (n+1) = ...
 
 We can't group the first and third together, because the second may match 
-the same thing as the first.  Contrast
-	f 1 = ...
-	f 2 = ...
-	f 1 = ...
-where we can group the first and third.  Hence we don't regard (n+1) and
-(n+2) as part of the same group.
+the same thing as the first.  Same goes for *overloaded* literal patterns
+	f 1 True = ...
+	f 2 False = ...
+	f 1 False = ...
+If the first arg matches '1' but the second does not match 'True', we
+cannot jump to the third equation!  Because the same argument might
+match '2'!
+Hence we don't regard 1 and 2, or (n+1) and (n+2), as part of the same group.

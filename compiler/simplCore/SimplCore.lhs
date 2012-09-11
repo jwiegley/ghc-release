@@ -22,27 +22,27 @@ import CoreSyn
 import HscTypes
 import CSE		( cseProgram )
 import Rules		( RuleBase, emptyRuleBase, mkRuleBase, unionRuleBase,
-			  extendRuleBaseList, pprRuleBase, ruleCheckProgram,
+			  extendRuleBaseList, pprRuleBase, pprRulesForUser,
+			  ruleCheckProgram, rulesOfBinds,
 			  addSpecInfo, addIdSpecialisations )
 import PprCore		( pprCoreBindings, pprCoreExpr, pprRules )
 import OccurAnal	( occurAnalysePgm, occurAnalyseExpr )
-import IdInfo		( setNewStrictnessInfo, newStrictnessInfo, 
-			  setWorkerInfo, workerInfo, setSpecInfoHead,
-			  setInlinePragInfo, inlinePragInfo,
-			  setSpecInfo, specInfo, specInfoRules )
+import IdInfo
 import CoreUtils	( coreBindsSize )
 import Simplify		( simplTopBinds, simplExpr )
 import SimplEnv		( SimplEnv, simplBinders, mkSimplEnv, setInScopeSet )
 import SimplMonad
-import ErrUtils		( dumpIfSet, dumpIfSet_dyn, showPass )
-import CoreLint		( endPassIf, endIteration )
+import CoreMonad
+import qualified ErrUtils as Err        ( dumpIfSet_dyn, dumpIfSet, showPass )
+import CoreLint		( showPass, endPass, endPassIf, endIteration )
 import FloatIn		( floatInwards )
 import FloatOut		( floatOutwards )
 import FamInstEnv
 import Id
 import DataCon
-import TyCon		( tyConSelIds, tyConDataCons )
+import TyCon		( tyConDataCons )
 import Class		( classSelIds )
+import BasicTypes       ( CompilerPhase, isActive, isDefaultInlinePragma )
 import VarSet
 import VarEnv
 import NameEnv		( lookupNameEnv )
@@ -57,13 +57,14 @@ import StrictAnal	( saBinds )
 import CprAnalyse       ( cprAnalyse )
 #endif
 import Vectorise        ( vectorise )
+import FastString
 import Util
 
 import UniqSupply	( UniqSupply, mkSplitUniqSupply, splitUniqSupply )
-import IO		( hPutStr, stderr )
 import Outputable
 import Control.Monad
-import List		( partition, intersperse )
+import Data.List
+import System.IO
 import Maybes
 \end{code}
 
@@ -78,28 +79,39 @@ core2core :: HscEnv
 	  -> ModGuts
 	  -> IO ModGuts
 
-core2core hsc_env guts
-  = do	{
-	; let dflags = hsc_dflags hsc_env
-	      core_todos = getCoreToDo dflags
+core2core hsc_env guts = do
+    let dflags = hsc_dflags hsc_env
 
-	; us <- mkSplitUniqSupply 's'
-	; let (cp_us, ru_us) = splitUniqSupply us
+    us <- mkSplitUniqSupply 's'
+    let (cp_us, ru_us) = splitUniqSupply us
 
-		-- COMPUTE THE RULE BASE TO USE
-	; (imp_rule_base, guts') <- prepareRules hsc_env guts ru_us
+    -- COMPUTE THE ANNOTATIONS TO USE
+    ann_env <- prepareAnnotations hsc_env (Just guts)
 
-		-- DO THE BUSINESS
-	; (stats, guts'') <- doCorePasses hsc_env imp_rule_base cp_us
-			 		 (zeroSimplCount dflags) 
-				 	 guts' core_todos
+    -- COMPUTE THE RULE BASE TO USE
+    (imp_rule_base, guts1) <- prepareRules hsc_env guts ru_us
 
-	; dumpIfSet_dyn dflags Opt_D_dump_simpl_stats
-		  "Grand total simplifier statistics"
-		  (pprSimplCount stats)
+    -- Get the module out of the current HscEnv so we can retrieve it from the monad.
+    -- This is very convienent for the users of the monad (e.g. plugins do not have to
+    -- consume the ModGuts to find the module) but somewhat ugly because mg_module may
+    -- _theoretically_ be changed during the Core pipeline (it's part of ModGuts), which
+    -- would mean our cached value would go out of date.
+    let mod = mg_module guts
+    (guts2, stats) <- runCoreM hsc_env ann_env imp_rule_base cp_us mod $ do
+        -- FIND BUILT-IN PASSES
+        let builtin_core_todos = getCoreToDo dflags
 
-	; return guts'' }
+        -- DO THE BUSINESS
+        doCorePasses builtin_core_todos guts1
 
+    Err.dumpIfSet_dyn dflags Opt_D_dump_simpl_stats
+        "Grand total simplifier statistics"
+        (pprSimplCount stats)
+
+    return guts2
+
+
+type CorePass = CoreToDo
 
 simplifyExpr :: DynFlags -- includes spec of what core-to-core passes to do
 	     -> CoreExpr
@@ -108,14 +120,14 @@ simplifyExpr :: DynFlags -- includes spec of what core-to-core passes to do
 -- expression typed in at the interactive prompt
 simplifyExpr dflags expr
   = do	{
-	; showPass dflags "Simplify"
+	; Err.showPass dflags "Simplify"
 
 	; us <-  mkSplitUniqSupply 's'
 
 	; let (expr', _counts) = initSmpl dflags emptyRuleBase emptyFamInstEnvs us $
 				 simplExprGently gentleSimplEnv expr
 
-	; dumpIfSet_dyn dflags Opt_D_dump_simpl "Simplified expression"
+	; Err.dumpIfSet_dyn dflags Opt_D_dump_simpl "Simplified expression"
 			(pprCoreExpr expr')
 
 	; return expr'
@@ -124,94 +136,167 @@ simplifyExpr dflags expr
 gentleSimplEnv :: SimplEnv
 gentleSimplEnv = mkSimplEnv SimplGently  (isAmongSimpl [])
 
-doCorePasses :: HscEnv
-             -> RuleBase        -- the imported main rule base
-             -> UniqSupply      -- uniques
-	     -> SimplCount      -- simplifier stats
-             -> ModGuts	        -- local binds in (with rules attached)
-             -> [CoreToDo]      -- which passes to do
-             -> IO (SimplCount, ModGuts)
+doCorePasses :: [CorePass] -> ModGuts -> CoreM ModGuts
+doCorePasses passes guts = foldM (flip doCorePass) guts passes
 
-doCorePasses hsc_env rb us stats guts []
-  = return (stats, guts)
+doCorePass :: CorePass -> ModGuts -> CoreM ModGuts
+doCorePass (CoreDoSimplify mode sws) = {-# SCC "Simplify" #-}
+                                       simplifyPgm mode sws
 
-doCorePasses hsc_env rb us stats guts (CoreDoPasses to_dos1 : to_dos2) 
-  = doCorePasses hsc_env rb us stats guts (to_dos1 ++ to_dos2) 
+doCorePass CoreCSE                   = {-# SCC "CommonSubExpr" #-}   
+	   			       describePass "Common sub-expression" Opt_D_dump_cse $ 
+				       doPass cseProgram
 
-doCorePasses hsc_env rb us stats guts (to_do : to_dos) 
-  = do
-	let (us1, us2) = splitUniqSupply us
-	(stats1, guts1) <- doCorePass to_do hsc_env us1 rb guts
-	doCorePasses hsc_env rb us2 (stats `plusSimplCount` stats1) guts1 to_dos
+doCorePass CoreLiberateCase          = {-# SCC "LiberateCase" #-}
+	   			       describePass "Liberate case" Opt_D_verbose_core2core $ 
+                                       doPassD liberateCase
 
-doCorePass :: CoreToDo -> HscEnv -> UniqSupply -> RuleBase
-	   -> ModGuts -> IO (SimplCount, ModGuts)
-doCorePass (CoreDoSimplify mode sws)   = {-# SCC "Simplify" #-}      simplifyPgm mode sws
-doCorePass CoreCSE		       = {-# SCC "CommonSubExpr" #-} trBinds  cseProgram
-doCorePass CoreLiberateCase	       = {-# SCC "LiberateCase" #-}  liberateCase
-doCorePass CoreDoFloatInwards          = {-# SCC "FloatInwards" #-}  trBinds  floatInwards
-doCorePass (CoreDoFloatOutwards f)     = {-# SCC "FloatOutwards" #-} trBindsU (floatOutwards f)
-doCorePass CoreDoStaticArgs	       = {-# SCC "StaticArgs" #-}    trBindsU  doStaticArgs
-doCorePass CoreDoStrictness	       = {-# SCC "Stranal" #-}       trBinds  dmdAnalPgm
-doCorePass CoreDoWorkerWrapper         = {-# SCC "WorkWrap" #-}      trBindsU wwTopBinds
-doCorePass CoreDoSpecialising          = {-# SCC "Specialise" #-}    trBindsU specProgram
-doCorePass CoreDoSpecConstr	       = {-# SCC "SpecConstr" #-}    trBindsU specConstrProgram
-doCorePass CoreDoGlomBinds	       = trBinds glomBinds
-doCorePass (CoreDoVectorisation be)    = {-# SCC "Vectorise" #-}     vectorise be
-doCorePass CoreDoPrintCore	       = observe printCore
-doCorePass (CoreDoRuleCheck phase pat) = ruleCheck phase pat
-doCorePass CoreDoNothing	       = observe (\ _ _ -> return ())
-#ifdef OLD_STRICTNESS		       
-doCorePass CoreDoOldStrictness	       = {-# SCC "OldStrictness" #-} trBinds doOldStrictness
-#else
-doCorePass CoreDoOldStrictness	       = panic "CoreDoOldStrictness"
-#endif
-doCorePass (CoreDoPasses _) = panic "CoreDoPasses"
+doCorePass CoreDoFloatInwards        = {-# SCC "FloatInwards" #-}
+                                       describePass "Float inwards" Opt_D_verbose_core2core $ 
+                                       doPass floatInwards
+
+doCorePass (CoreDoFloatOutwards f)   = {-# SCC "FloatOutwards" #-}
+                                       describePassD (text "Float out" <+> parens (ppr f)) 
+                                                     Opt_D_verbose_core2core $ 
+                                       doPassDUM (floatOutwards f)
+
+doCorePass CoreDoStaticArgs          = {-# SCC "StaticArgs" #-}
+                                       describePass "Static argument" Opt_D_verbose_core2core $ 
+                                       doPassU doStaticArgs
+
+doCorePass CoreDoStrictness          = {-# SCC "Stranal" #-}
+                                       describePass "Demand analysis" Opt_D_dump_stranal $
+                                       doPassDM dmdAnalPgm
+
+doCorePass CoreDoWorkerWrapper       = {-# SCC "WorkWrap" #-}
+                                       describePass "Worker Wrapper binds" Opt_D_dump_worker_wrapper $
+                                       doPassU wwTopBinds
+
+doCorePass CoreDoSpecialising        = {-# SCC "Specialise" #-}
+                                       describePassR "Specialise" Opt_D_dump_spec $ 
+                                       doPassU specProgram
+
+doCorePass CoreDoSpecConstr          = {-# SCC "SpecConstr" #-}
+                                       describePassR "SpecConstr" Opt_D_dump_spec $
+                                       doPassDU  specConstrProgram
+
+doCorePass (CoreDoVectorisation be)  = {-# SCC "Vectorise" #-}
+                                       describePass "Vectorisation" Opt_D_dump_vect $ 
+                                       vectorise be
+
+doCorePass CoreDoGlomBinds              = dontDescribePass $ doPassDM  glomBinds
+doCorePass CoreDoPrintCore              = dontDescribePass $ observe   printCore
+doCorePass (CoreDoRuleCheck phase pat)  = dontDescribePass $ ruleCheck phase pat
 
 #ifdef OLD_STRICTNESS
-doOldStrictness dfs binds
-  = do binds1 <- saBinds dfs binds
-       binds2 <- cprAnalyse dfs binds1
-       return binds2
+doCorePass CoreDoOldStrictness          = {-# SCC "OldStrictness" #-} doOldStrictness
 #endif
 
-printCore _ binds = dumpIfSet True "Print Core" (pprCoreBindings binds)
+doCorePass CoreDoNothing                = return
+doCorePass (CoreDoPasses passes)        = doCorePasses passes
 
-ruleCheck phase pat hsc_env us rb guts 
-  =  do let dflags = hsc_dflags hsc_env
-	showPass dflags "RuleCheck"
-        printDump (ruleCheckProgram phase pat rb (mg_binds guts))
-	return (zeroSimplCount dflags, guts)
+#ifdef OLD_STRICTNESS
+doOldStrictness :: ModGuts -> CoreM ModGuts
+doOldStrictness guts
+  = do dfs <- getDynFlags
+       guts'  <- describePass "Strictness analysis" Opt_D_dump_stranal $ 
+                 doPassM (saBinds dfs) guts
+       guts'' <- describePass "Constructed Product analysis" Opt_D_dump_cpranal $ 
+                 doPass cprAnalyse guts'
+       return guts''
+#endif
 
--- Most passes return no stats and don't change rules
-trBinds :: (DynFlags -> [CoreBind] -> IO [CoreBind])
-	-> HscEnv -> UniqSupply -> RuleBase -> ModGuts
-	-> IO (SimplCount, ModGuts)
-trBinds do_pass hsc_env us rb guts
-  = do	{ binds' <- do_pass dflags (mg_binds guts)
-	; return (zeroSimplCount dflags, guts { mg_binds = binds' }) }
-  where
-    dflags = hsc_dflags hsc_env
+\end{code}
 
-trBindsU :: (DynFlags -> UniqSupply -> [CoreBind] -> IO [CoreBind])
-	-> HscEnv -> UniqSupply -> RuleBase -> ModGuts
-	-> IO (SimplCount, ModGuts)
-trBindsU do_pass hsc_env us rb guts
-  = do	{ binds' <- do_pass dflags us (mg_binds guts)
-	; return (zeroSimplCount dflags, guts { mg_binds = binds' }) }
-  where
-    dflags = hsc_dflags hsc_env
+%************************************************************************
+%*									*
+\subsection{Core pass combinators}
+%*									*
+%************************************************************************
+
+\begin{code}
+
+dontDescribePass :: (ModGuts -> CoreM ModGuts) -> ModGuts -> CoreM ModGuts
+dontDescribePass = ($)
+
+describePass :: String -> DynFlag -> (ModGuts -> CoreM ModGuts) -> ModGuts -> CoreM ModGuts
+describePass name dflag pass guts = do
+    dflags <- getDynFlags
+    
+    liftIO $ showPass dflags name
+    guts' <- pass guts
+    liftIO $ endPass dflags name dflag (mg_binds guts')
+    
+    return guts'
+
+describePassD :: SDoc -> DynFlag -> (ModGuts -> CoreM ModGuts) -> ModGuts -> CoreM ModGuts
+describePassD doc = describePass (showSDoc doc)
+
+describePassR :: String -> DynFlag -> (ModGuts -> CoreM ModGuts) -> ModGuts -> CoreM ModGuts
+describePassR name dflag pass guts = do
+    guts' <- describePass name dflag pass guts
+    dumpIfSet_dyn Opt_D_dump_rules "Top-level specialisations"
+                (pprRulesForUser (rulesOfBinds (mg_binds guts')))
+    return guts'
+
+printCore _ binds = Err.dumpIfSet True "Print Core" (pprCoreBindings binds)
+
+ruleCheck :: CompilerPhase -> String -> ModGuts -> CoreM ModGuts
+ruleCheck current_phase pat guts = do
+    let is_active = isActive current_phase
+    rb <- getRuleBase
+    dflags <- getDynFlags
+    liftIO $ Err.showPass dflags "RuleCheck"
+    liftIO $ printDump (ruleCheckProgram is_active pat rb (mg_binds guts))
+    return guts
+
+
+doPassDMS :: (DynFlags -> [CoreBind] -> IO (SimplCount, [CoreBind])) -> ModGuts -> CoreM ModGuts
+doPassDMS do_pass = doPassM $ \binds -> do
+    dflags <- getDynFlags
+    liftIOWithCount $ do_pass dflags binds
+
+doPassDUM :: (DynFlags -> UniqSupply -> [CoreBind] -> IO [CoreBind]) -> ModGuts -> CoreM ModGuts
+doPassDUM do_pass = doPassM $ \binds -> do
+    dflags <- getDynFlags
+    us     <- getUniqueSupplyM
+    liftIO $ do_pass dflags us binds
+
+doPassDM :: (DynFlags -> [CoreBind] -> IO [CoreBind]) -> ModGuts -> CoreM ModGuts
+doPassDM do_pass = doPassDUM (\dflags -> const (do_pass dflags))
+
+doPassD :: (DynFlags -> [CoreBind] -> [CoreBind]) -> ModGuts -> CoreM ModGuts
+doPassD do_pass = doPassDM (\dflags -> return . do_pass dflags)
+
+doPassDU :: (DynFlags -> UniqSupply -> [CoreBind] -> [CoreBind]) -> ModGuts -> CoreM ModGuts
+doPassDU do_pass = doPassDUM (\dflags us -> return . do_pass dflags us)
+
+doPassU :: (UniqSupply -> [CoreBind] -> [CoreBind]) -> ModGuts -> CoreM ModGuts
+doPassU do_pass = doPassDU (const do_pass)
+
+-- Most passes return no stats and don't change rules: these combinators
+-- let us lift them to the full blown ModGuts+CoreM world
+doPassM :: Monad m => ([CoreBind] -> m [CoreBind]) -> ModGuts -> m ModGuts
+doPassM bind_f guts = do
+    binds' <- bind_f (mg_binds guts)
+    return (guts { mg_binds = binds' })
+
+doPassMG :: Monad m => (ModGuts -> m [CoreBind]) -> ModGuts -> m ModGuts
+doPassMG bind_f guts = do
+    binds' <- bind_f guts
+    return (guts { mg_binds = binds' })
+
+doPass :: ([CoreBind] -> [CoreBind]) -> ModGuts -> CoreM ModGuts
+doPass bind_f guts = return $ guts { mg_binds = bind_f (mg_binds guts) }
 
 -- Observer passes just peek; don't modify the bindings at all
-observe :: (DynFlags -> [CoreBind] -> IO a)
-	-> HscEnv -> UniqSupply -> RuleBase -> ModGuts
-	-> IO (SimplCount, ModGuts)
-observe do_pass hsc_env us rb guts 
-  = do	{ binds <- do_pass dflags (mg_binds guts)
-	; return (zeroSimplCount dflags, guts) }
-  where
-    dflags = hsc_dflags hsc_env
+observe :: (DynFlags -> [CoreBind] -> IO a) -> ModGuts -> CoreM ModGuts
+observe do_pass = doPassM $ \binds -> do
+    dflags <- getDynFlags
+    liftIO $ do_pass dflags binds
+    return binds
 \end{code}
+
 
 %************************************************************************
 %*									*
@@ -270,7 +355,7 @@ prepareRules hsc_env@(HscEnv { hsc_dflags = dflags, hsc_HPT = hpt })
 	      hpt_rule_base = mkRuleBase home_pkg_rules
 	      imp_rule_base = extendRuleBaseList hpt_rule_base rules_for_imps
 
-	; dumpIfSet_dyn dflags Opt_D_dump_rules "Transformation rules"
+	; Err.dumpIfSet_dyn dflags Opt_D_dump_rules "Transformation rules"
 		(withPprStyle (mkUserStyle (mkPrintUnqualified dflags rdr_env) AllTheWay) $
 		 vcat [text "Local rules", pprRules better_rules,
 		       text "",
@@ -388,7 +473,7 @@ glomBinds :: DynFlags -> [CoreBind] -> IO [CoreBind]
 -- analyser as free in f.
 
 glomBinds dflags binds
-  = do { showPass dflags "GlomBinds" ;
+  = do { Err.showPass dflags "GlomBinds" ;
 	 let { recd_binds = [Rec (flattenBinds binds)] } ;
 	 return recd_binds }
 	-- Not much point in printing the result... 
@@ -403,43 +488,46 @@ glomBinds dflags binds
 %************************************************************************
 
 \begin{code}
-simplifyPgm :: SimplifierMode
+simplifyPgm :: SimplifierMode -> [SimplifierSwitch] -> ModGuts -> CoreM ModGuts
+simplifyPgm mode switches
+  = describePassD doc Opt_D_dump_simpl_phases $ \guts -> 
+    do { hsc_env <- getHscEnv
+       ; us <- getUniqueSupplyM
+       ; rb <- getRuleBase
+       ; let fam_inst_env = mg_fam_inst_env guts
+             dump_phase = shouldDumpSimplPhase (hsc_dflags hsc_env) mode
+	     simplify_pgm = simplifyPgmIO dump_phase mode switches 
+                                          hsc_env us rb fam_inst_env
+
+       ; doPassM (liftIOWithCount . simplify_pgm) guts }
+  where
+    doc = ptext (sLit "Simplifier Phase") <+> text (showPpr mode) 
+
+simplifyPgmIO :: Bool
+            -> SimplifierMode
 	    -> [SimplifierSwitch]
 	    -> HscEnv
 	    -> UniqSupply
 	    -> RuleBase
-	    -> ModGuts
-	    -> IO (SimplCount, ModGuts)  -- New bindings
+	    -> FamInstEnv
+	    -> [CoreBind]
+	    -> IO (SimplCount, [CoreBind])  -- New bindings
 
-simplifyPgm mode switches hsc_env us imp_rule_base guts
+simplifyPgmIO dump_phase mode switches hsc_env us imp_rule_base fam_inst_env binds
   = do {
-	showPass dflags "Simplify";
-
 	(termination_msg, it_count, counts_out, binds') 
-	   <- do_iteration us 1 (zeroSimplCount dflags) (mg_binds guts) ;
+	   <- do_iteration us 1 (zeroSimplCount dflags) binds ;
 
-	dumpIfSet (dump_phase && dopt Opt_D_dump_simpl_stats dflags)
-		  "Simplifier statistics"
+	Err.dumpIfSet (dump_phase && dopt Opt_D_dump_simpl_stats dflags)
+		  "Simplifier statistics for following pass"
 		  (vcat [text termination_msg <+> text "after" <+> ppr it_count <+> text "iterations",
 			 text "",
 			 pprSimplCount counts_out]);
 
-	endPassIf dump_phase dflags
-                  ("Simplify phase " ++ phase_info ++ " done")
-                  Opt_D_dump_simpl_phases binds';
-
-	return (counts_out, guts { mg_binds = binds' })
+	return (counts_out, binds')
     }
   where
     dflags 	   = hsc_dflags hsc_env
-    phase_info	   = case mode of
-		   	  SimplGently     -> "gentle"
-		   	  SimplPhase n ss -> shows n
-                                           . showString " ["
-                                           . showString (concat $ intersperse "," ss)
-                                           $ "]"
-
-    dump_phase     = shouldDumpSimplPhase dflags mode
 		   
     sw_chkr	   = isAmongSimpl switches
     max_iterations = intSwitchSet sw_chkr MaxSimplifierIterations `orElse` 2
@@ -462,7 +550,7 @@ simplifyPgm mode switches hsc_env us imp_rule_base guts
       = do {
 		-- Occurrence analysis
 	   let { tagged_binds = {-# SCC "OccAnal" #-} occurAnalysePgm binds } ;
-	   dumpIfSet_dyn dflags Opt_D_dump_occur_anal "Occurrence analysis"
+	   Err.dumpIfSet_dyn dflags Opt_D_dump_occur_anal "Occurrence analysis"
 		     (pprCoreBindings tagged_binds);
 
 	   	-- Get any new rules, and extend the rule base
@@ -475,7 +563,7 @@ simplifyPgm mode switches hsc_env us imp_rule_base guts
 		; simpl_env  = mkSimplEnv mode sw_chkr 
 		; simpl_binds = {-# SCC "SimplTopBinds" #-} 
 				simplTopBinds simpl_env tagged_binds
-		; fam_envs = (eps_fam_inst_env eps, mg_fam_inst_env guts) } ;
+		; fam_envs = (eps_fam_inst_env eps, fam_inst_env) } ;
 	   
 		-- Simplify the program
 		-- We do this with a *case* not a *let* because lazy pattern
@@ -492,7 +580,7 @@ simplifyPgm mode switches hsc_env us imp_rule_base guts
 	  	(binds', counts') -> do {
 
 	   let	{ all_counts = counts `plusSimplCount` counts'
-		; herald     = "Simplifier phase " ++ phase_info ++ 
+		; herald     = "Simplifier mode " ++ showPpr mode ++ 
 			      ", iteration " ++ show iteration_no ++
 			      " out of " ++ show max_iterations
 	        } ;
@@ -513,7 +601,7 @@ simplifyPgm mode switches hsc_env us imp_rule_base guts
 	   let { binds'' = {-# SCC "ZapInd" #-} shortOutIndirections binds' } ;
 
 		-- Dump the result of this iteration
-	   dumpIfSet_dyn dflags Opt_D_dump_simpl_iterations herald
+	   Err.dumpIfSet_dyn dflags Opt_D_dump_simpl_iterations herald
 		         (pprSimplCount counts') ;
 	   endIteration dflags herald Opt_D_dump_simpl_iterations binds'' ;
 
@@ -548,22 +636,20 @@ save a gratuitous jump (from \tr{x_exported} to \tr{x_local}), and
 makes strictness information propagate better.  This used to happen in
 the final phase, but it's tidier to do it here.
 
+Note [Transferring IdInfo]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+We want to propagage any useful IdInfo on x_local to x_exported.
+
 STRICTNESS: if we have done strictness analysis, we want the strictness info on
 x_local to transfer to x_exported.  Hence the copyIdInfo call.
 
 RULES: we want to *add* any RULES for x_local to x_exported.
 
-Note [Rules and indirection-zapping]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Problem: what if x_exported has a RULE that mentions something in ...bindings...?
-Then the things mentioned can be out of scope!  Solution
- a) Make sure that in this pass the usage-info from x_exported is 
-	available for ...bindings...
- b) If there are any such RULES, rec-ify the entire top-level. 
-    It'll get sorted out next time round
 
-Messing up the rules
-~~~~~~~~~~~~~~~~~~~~
+Note [Messing up the exported Id's IdInfo]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We must be careful about discarding the IdInfo on the old Id
+
 The example that went bad on me at one stage was this one:
 	
     iterate :: (a -> a) -> a -> [a]
@@ -597,13 +683,28 @@ And now we get an infinite loop in the rule system
 		    -> iterateFB (:) f x
 		    -> iterate f x
 
-Tiresome old solution: 
-	don't do shorting out if f has rewrite rules (see shortableIdInfo)
-
-New solution (I think): 
+Old "solution": 
 	use rule switching-off pragmas to get rid 
 	of iterateList in the first place
 
+But in principle the user *might* want rules that only apply to the Id
+he says.  And inline pragmas are similar
+   {-# NOINLINE f #-}
+   f = local
+   local = <stuff>
+Then we do not want to get rid of the NOINLINE.
+
+Hence hasShortableIdinfo.
+
+
+Note [Rules and indirection-zapping]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Problem: what if x_exported has a RULE that mentions something in ...bindings...?
+Then the things mentioned can be out of scope!  Solution
+ a) Make sure that in this pass the usage-info from x_exported is 
+	available for ...bindings...
+ b) If there are any such RULES, rec-ify the entire top-level. 
+    It'll get sorted out next time round
 
 Other remarks
 ~~~~~~~~~~~~~
@@ -674,6 +775,7 @@ makeIndEnv binds
     add_pair (exported_id, rhs) env
 	= env
 			
+-----------------
 shortMeOut ind_env exported_id local_id
 -- The if-then-else stuff is just so I can get a pprTrace to see
 -- how often I don't get shorting out becuase of IdInfo stuff
@@ -688,23 +790,27 @@ shortMeOut ind_env exported_id local_id
    
        not (local_id `elemVarEnv` ind_env)	-- Only if not already substituted for
     then
-	True
-
-{- No longer needed
-	if isEmptySpecInfo (specInfo (idInfo exported_id)) 	-- Only if no rules
-	then True	-- See note on "Messing up rules"
-	else 
-#ifdef DEBUG 
-          pprTrace "shortMeOut:" (ppr exported_id)
-#endif
-                                                False
--}
+	if hasShortableIdInfo exported_id
+	then True	-- See Note [Messing up the exported Id's IdInfo]
+	else WARN( True, ptext (sLit "Not shorting out:") <+> ppr exported_id )
+             False
     else
-	False
+        False
 
+-----------------
+hasShortableIdInfo :: Id -> Bool
+-- True if there is no user-attached IdInfo on exported_id,
+-- so we can safely discard it
+-- See Note [Messing up the exported Id's IdInfo]
+hasShortableIdInfo id
+  =  isEmptySpecInfo (specInfo info)
+  && isDefaultInlinePragma (inlinePragInfo info)
+  where
+     info = idInfo id
 
 -----------------
 transferIdInfo :: Id -> Id -> Id
+-- See Note [Transferring IdInfo]
 -- If we have
 --	lcl_id = e; exp_id = lcl_id
 -- and lcl_id has useful IdInfo, we don't want to discard it by going

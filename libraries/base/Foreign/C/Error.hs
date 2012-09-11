@@ -108,7 +108,9 @@ import Foreign.Marshal.Error    ( void )
 import Data.Maybe
 
 #if __GLASGOW_HASKELL__
-import GHC.IOBase
+import GHC.IO
+import GHC.IO.Exception
+import GHC.IO.Handle.Types
 import GHC.Num
 import GHC.Base
 #elif __HUGS__
@@ -356,8 +358,9 @@ throwErrnoIfRetry pred loc f  =
           else throwErrno loc
       else return res
 
--- | as 'throwErrnoIfRetry', but checks for operations that would block and
--- executes an alternative action before retrying in that case.
+-- | as 'throwErrnoIfRetry', but additionlly if the operation 
+-- yields the error code 'eAGAIN' or 'eWOULDBLOCK', an alternative
+-- action is executed before retrying.
 --
 throwErrnoIfRetryMayBlock
                 :: (a -> Bool)  -- ^ predicate to apply to the result value
@@ -376,7 +379,8 @@ throwErrnoIfRetryMayBlock pred loc f on_block  =
         if err == eINTR
           then throwErrnoIfRetryMayBlock pred loc f on_block
           else if err == eWOULDBLOCK || err == eAGAIN
-                 then do on_block; throwErrnoIfRetryMayBlock pred loc f on_block
+                 then do _ <- on_block
+                         throwErrnoIfRetryMayBlock pred loc f on_block
                  else throwErrno loc
       else return res
 
@@ -498,8 +502,9 @@ errnoToIOError  :: String       -- ^ the location where the error occurred
 errnoToIOError loc errno maybeHdl maybeName = unsafePerformIO $ do
     str <- strerror errno >>= peekCString
 #if __GLASGOW_HASKELL__
-    return (IOError maybeHdl errType loc str maybeName)
+    return (IOError maybeHdl errType loc str (Just errno') maybeName)
     where
+    Errno errno' = errno
     errType
         | errno == eOK             = OtherError
         | errno == e2BIG           = ResourceExhausted

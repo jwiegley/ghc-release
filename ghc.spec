@@ -1,3 +1,6 @@
+# WARNING: ghc.spec is automatically generated from ghc.spec.in by
+# ./configure.  Make sure you are editing ghc.spec.in, not ghc.spec.
+#
 # RPM spec file for GHC					         -*-rpm-spec-*-
 #
 # Copyright [1998..2007] The GHC Team
@@ -8,7 +11,7 @@
 # This file is subject to the same free software license as GHC.
 
 %define name    ghc
-%define version 6.10.4
+%define version 6.12.1
 %define release 1
 
 Name:           %{name}

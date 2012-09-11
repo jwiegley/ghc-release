@@ -7,18 +7,23 @@
 module RnTypes ( 
 	-- Type related stuff
 	rnHsType, rnLHsType, rnLHsTypes, rnContext,
-	rnHsSigType, rnHsTypeFVs,
+	rnHsSigType, rnHsTypeFVs, rnConDeclFields,
 
 	-- Precence related stuff
 	mkOpAppRn, mkNegAppRn, mkOpFormRn, mkConOpPatRn,
-	checkPrecMatch, checkSectionPrec
+	checkPrecMatch, checkSectionPrec,
+
+	-- Splice related stuff
+	rnSplice, checkTH
   ) where
+
+import {-# SOURCE #-} RnExpr( rnLExpr )
 
 import DynFlags
 import HsSyn
 import RdrHsSyn		( extractHsRhoRdrTyVars )
 import RnHsSyn		( extractHsTyNames )
-import RnHsDoc          ( rnLHsDoc )
+import RnHsDoc          ( rnLHsDoc, rnMbLHsDoc )
 import RnEnv
 import TcRnMonad
 import RdrName
@@ -123,9 +128,13 @@ rnHsType doc (HsParTy ty) = do
     ty' <- rnLHsType doc ty
     return (HsParTy ty')
 
-rnHsType doc (HsBangTy b ty) = do
-    ty' <- rnLHsType doc ty
-    return (HsBangTy b ty')
+rnHsType doc (HsBangTy b ty)
+  = do { ty' <- rnLHsType doc ty
+       ; return (HsBangTy b ty') }
+
+rnHsType doc (HsRecTy flds)
+  = do { flds' <- rnConDeclFields doc flds
+       ; return (HsRecTy flds') }
 
 rnHsType _ (HsNumTy i)
   | i == 1    = return (HsNumTy i)
@@ -148,9 +157,11 @@ rnHsType doc (HsListTy ty) = do
     ty' <- rnLHsType doc ty
     return (HsListTy ty')
 
-rnHsType doc (HsKindSig ty k) = do
-    ty' <- rnLHsType doc ty
-    return (HsKindSig ty' k)
+rnHsType doc (HsKindSig ty k)
+  = do { kind_sigs_ok <- doptM Opt_KindSignatures
+       ; unless kind_sigs_ok (addErr (kindSigErr ty))
+       ; ty' <- rnLHsType doc ty
+       ; return (HsKindSig ty' k) }
 
 rnHsType doc (HsPArrTy ty) = do
     ty' <- rnLHsType doc ty
@@ -171,13 +182,16 @@ rnHsType doc (HsPredTy pred) = do
     pred' <- rnPred doc pred
     return (HsPredTy pred')
 
-rnHsType _ (HsSpliceTy _) =
-    failWith (ptext (sLit "Type splices are not yet implemented"))
+rnHsType _ (HsSpliceTy sp)
+  = do { (sp', _fvs) <- rnSplice sp	-- ToDo: deal with fvs
+       ; return (HsSpliceTy sp') }
 
 rnHsType doc (HsDocTy ty haddock_doc) = do
     ty' <- rnLHsType doc ty
     haddock_doc' <- rnLHsDoc haddock_doc
     return (HsDocTy ty' haddock_doc')
+
+rnHsType _ (HsSpliceTyOut {}) = panic "rnHsType"
 
 rnLHsTypes :: SDoc -> [LHsType RdrName]
            -> IOEnv (Env TcGblEnv TcLclEnv) [LHsType Name]
@@ -199,12 +213,22 @@ rnForAll doc _ [] (L _ []) (L _ ty) = rnHsType doc ty
 	-- of kind *.
 
 rnForAll doc exp forall_tyvars ctxt ty
-  = bindTyVarsRn doc forall_tyvars $ \ new_tyvars -> do
+  = bindTyVarsRn forall_tyvars $ \ new_tyvars -> do
     new_ctxt <- rnContext doc ctxt
     new_ty <- rnLHsType doc ty
     return (HsForAllTy exp new_tyvars new_ctxt new_ty)
 	-- Retain the same implicit/explicit flag as before
 	-- so that we can later print it correctly
+
+rnConDeclFields :: SDoc -> [ConDeclField RdrName] -> RnM [ConDeclField Name]
+rnConDeclFields doc fields = mapM (rnField doc) fields
+
+rnField :: SDoc -> ConDeclField RdrName -> RnM (ConDeclField Name)
+rnField doc (ConDeclField name ty haddock_doc)
+  = do { new_name <- lookupLocatedTopBndrRn name
+       ; new_ty <- rnLHsType doc ty
+       ; new_haddock_doc <- rnMbLHsDoc haddock_doc
+       ; return (ConDeclField new_name new_ty new_haddock_doc) }
 \end{code}
 
 %*********************************************************
@@ -556,4 +580,57 @@ opTyErr op ty@(HsOpTy ty1 _ _)
     forall_head (L _ (HsAppTy ty _)) = forall_head ty
     forall_head _other		     = False
 opTyErr _ ty = pprPanic "opTyErr: Not an op" (ppr ty)
+\end{code}
+
+%*********************************************************
+%*							*
+		Splices
+%*							*
+%*********************************************************
+
+Note [Splices]
+~~~~~~~~~~~~~~
+Consider
+	f = ...
+	h = ...$(thing "f")...
+
+The splice can expand into literally anything, so when we do dependency
+analysis we must assume that it might mention 'f'.  So we simply treat
+all locally-defined names as mentioned by any splice.  This is terribly
+brutal, but I don't see what else to do.  For example, it'll mean
+that every locally-defined thing will appear to be used, so no unused-binding
+warnings.  But if we miss the dependency, then we might typecheck 'h' before 'f',
+and that will crash the type checker because 'f' isn't in scope.
+
+Currently, I'm not treating a splice as also mentioning every import,
+which is a bit inconsistent -- but there are a lot of them.  We might
+thereby get some bogus unused-import warnings, but we won't crash the
+type checker.  Not very satisfactory really.
+
+\begin{code}
+rnSplice :: HsSplice RdrName -> RnM (HsSplice Name, FreeVars)
+rnSplice (HsSplice n expr)
+  = do	{ checkTH expr "splice"
+	; loc  <- getSrcSpanM
+	; n' <- newLocalBndrRn (L loc n)
+	; (expr', fvs) <- rnLExpr expr
+
+	-- Ugh!  See Note [Splices] above
+	; lcl_rdr <- getLocalRdrEnv
+	; gbl_rdr <- getGlobalRdrEnv
+	; let gbl_names = mkNameSet [gre_name gre | gre <- globalRdrEnvElts gbl_rdr, 
+						    isLocalGRE gre]
+	      lcl_names = mkNameSet (occEnvElts lcl_rdr)
+
+	; return (HsSplice n' expr', fvs `plusFV` lcl_names `plusFV` gbl_names) }
+
+checkTH :: Outputable a => a -> String -> RnM ()
+#ifdef GHCI 
+checkTH _ _ = return ()	-- OK
+#else
+checkTH e what 	-- Raise an error in a stage-1 compiler
+  = addErr (vcat [ptext (sLit "Template Haskell") <+> text what <+>  
+	          ptext (sLit "illegal in a stage-1 compiler"),
+	          nest 2 (ppr e)])
+#endif   
 \end{code}

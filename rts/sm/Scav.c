@@ -11,10 +11,10 @@
  *
  * ---------------------------------------------------------------------------*/
 
+#include "PosixSource.h"
 #include "Rts.h"
-#include "RtsFlags.h"
+
 #include "Storage.h"
-#include "MBlock.h"
 #include "GC.h"
 #include "GCThread.h"
 #include "GCUtils.h"
@@ -23,8 +23,9 @@
 #include "Scav.h"
 #include "Apply.h"
 #include "Trace.h"
-#include "LdvProfile.h"
 #include "Sanity.h"
+#include "Capability.h"
+#include "LdvProfile.h"
 
 static void scavenge_stack (StgPtr p, StgPtr stack_end);
 
@@ -36,7 +37,8 @@ static void scavenge_large_bitmap (StgPtr p,
 # define evacuate(a) evacuate1(a)
 # define recordMutableGen_GC(a,b) recordMutableGen(a,b)
 # define scavenge_loop(a) scavenge_loop1(a)
-# define scavenge_mutable_list(g) scavenge_mutable_list1(g)
+# define scavenge_mutable_list(bd,g) scavenge_mutable_list1(bd,g)
+# define scavenge_capability_mut_lists(cap) scavenge_capability_mut_Lists1(cap)
 #endif
 
 /* -----------------------------------------------------------------------------
@@ -67,6 +69,8 @@ scavengeTSO (StgTSO *tso)
         return;
     }
 
+    debugTrace(DEBUG_gc,"scavenging thread %d",(int)tso->id);
+
     saved_eager = gct->eager_promotion;
     gct->eager_promotion = rtsFalse;
 
@@ -85,10 +89,10 @@ scavengeTSO (StgTSO *tso)
     scavenge_stack(tso->sp, &(tso->stack[tso->stack_size]));
 
     if (gct->failed_to_evac) {
-        tso->flags |= TSO_DIRTY;
+        tso->dirty = 1;
         scavenge_TSO_link(tso);
     } else {
-        tso->flags &= ~TSO_DIRTY;
+        tso->dirty = 0;
         scavenge_TSO_link(tso);
         if (gct->failed_to_evac) {
             tso->flags |= TSO_LINK_DIRTY;
@@ -331,6 +335,7 @@ scavenge_block (bdescr *bd)
   // time around the loop.
   while (p < bd->free || (bd == ws->todo_bd && p < ws->todo_free)) {
 
+      ASSERT(bd->link == NULL);
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(p));
     info = get_itbl((StgClosure *)p);
     
@@ -504,8 +509,6 @@ scavenge_block (bdescr *bd)
 	break;
 
     case CAF_BLACKHOLE:
-    case SE_CAF_BLACKHOLE:
-    case SE_BLACKHOLE:
     case BLACKHOLE:
 	p += BLACKHOLE_sizeW();
 	break;
@@ -694,7 +697,7 @@ scavenge_block (bdescr *bd)
     if (gct->failed_to_evac) {
 	gct->failed_to_evac = rtsFalse;
 	if (bd->gen_no > 0) {
-	    recordMutableGen_GC((StgClosure *)q, &generations[bd->gen_no]);
+	    recordMutableGen_GC((StgClosure *)q, bd->gen_no);
 	}
     }
   }
@@ -881,8 +884,6 @@ linear_scan:
 	}
 
 	case CAF_BLACKHOLE:
-	case SE_CAF_BLACKHOLE:
-	case SE_BLACKHOLE:
 	case BLACKHOLE:
 	case ARR_WORDS:
 	    break;
@@ -1051,7 +1052,7 @@ linear_scan:
 	if (gct->failed_to_evac) {
 	    gct->failed_to_evac = rtsFalse;
 	    if (gct->evac_step) {
-		recordMutableGen_GC((StgClosure *)q, gct->evac_step->gen);
+		recordMutableGen_GC((StgClosure *)q, gct->evac_step->gen_no);
 	    }
 	}
 	
@@ -1197,8 +1198,6 @@ scavenge_one(StgPtr p)
     }
 
     case CAF_BLACKHOLE:
-    case SE_CAF_BLACKHOLE:
-    case SE_BLACKHOLE:
     case BLACKHOLE:
 	break;
 	
@@ -1362,6 +1361,10 @@ scavenge_one(StgPtr p)
       break;
     }
 
+    case IND:
+        // IND can happen, for example, when the interpreter allocates
+        // a gigantic AP closure (more than one block), which ends up
+        // on the large-object list and then gets updated.  See #3424.
     case IND_OLDGEN:
     case IND_OLDGEN_PERM:
     case IND_STATIC:
@@ -1412,12 +1415,9 @@ scavenge_one(StgPtr p)
    -------------------------------------------------------------------------- */
 
 void
-scavenge_mutable_list(generation *gen)
+scavenge_mutable_list(bdescr *bd, generation *gen)
 {
-    bdescr *bd;
     StgPtr p, q;
-
-    bd = gen->saved_mut_list;
 
     gct->evac_step = &gen->steps[0];
     for (; bd != NULL; bd = bd->link) {
@@ -1449,23 +1449,23 @@ scavenge_mutable_list(generation *gen)
 	    // definitely doesn't point into a young generation.
 	    // Clean objects don't need to be scavenged.  Some clean
 	    // objects (MUT_VAR_CLEAN) are not kept on the mutable
-	    // list at all; others, such as MUT_ARR_PTRS_CLEAN and
-	    // TSO, are always on the mutable list.
+	    // list at all; others, such as MUT_ARR_PTRS_CLEAN
+	    // are always on the mutable list.
 	    //
 	    switch (get_itbl((StgClosure *)p)->type) {
 	    case MUT_ARR_PTRS_CLEAN:
-		recordMutableGen_GC((StgClosure *)p,gen);
+		recordMutableGen_GC((StgClosure *)p,gen->no);
 		continue;
 	    case TSO: {
 		StgTSO *tso = (StgTSO *)p;
-		if ((tso->flags & TSO_DIRTY) == 0) {
+		if (tso->dirty == 0) {
                     // Must be on the mutable list because its link
                     // field is dirty.
                     ASSERT(tso->flags & TSO_LINK_DIRTY);
 
                     scavenge_TSO_link(tso);
                     if (gct->failed_to_evac) {
-                        recordMutableGen_GC((StgClosure *)p,gen);
+                        recordMutableGen_GC((StgClosure *)p,gen->no);
                         gct->failed_to_evac = rtsFalse;
                     } else {
                         tso->flags &= ~TSO_LINK_DIRTY;
@@ -1480,14 +1480,28 @@ scavenge_mutable_list(generation *gen)
 	    if (scavenge_one(p)) {
 		// didn't manage to promote everything, so put the
 		// object back on the list.
-		recordMutableGen_GC((StgClosure *)p,gen);
+		recordMutableGen_GC((StgClosure *)p,gen->no);
 	    }
 	}
     }
+}
 
-    // free the old mut_list
-    freeChain_sync(gen->saved_mut_list);
-    gen->saved_mut_list = NULL;
+void
+scavenge_capability_mut_lists (Capability *cap)
+{
+    nat g;
+
+    /* Mutable lists from each generation > N
+     * we want to *scavenge* these roots, not evacuate them: they're not
+     * going to move in this GC.
+     * Also do them in reverse generation order, for the usual reason:
+     * namely to reduce the likelihood of spurious old->new pointers.
+     */
+    for (g = RtsFlags.GcFlags.generations-1; g > N; g--) {
+        scavenge_mutable_list(cap->saved_mut_lists[g], &generations[g]);
+        freeChain_sync(cap->saved_mut_lists[g]);
+        cap->saved_mut_lists[g] = NULL;
+    }
 }
 
 /* -----------------------------------------------------------------------------
@@ -1553,7 +1567,7 @@ scavenge_static(void)
 	 */
 	if (gct->failed_to_evac) {
 	  gct->failed_to_evac = rtsFalse;
-	  recordMutableGen_GC((StgClosure *)p,oldest_gen);
+	  recordMutableGen_GC((StgClosure *)p,oldest_gen->no);
 	}
 	break;
       }
@@ -1673,24 +1687,34 @@ scavenge_stack(StgPtr p, StgPtr stack_end)
 	// the indirection into an IND_PERM, so that evacuate will
 	// copy the indirection into the old generation instead of
 	// discarding it.
+        //
+        // Note [upd-black-hole]
+        // One slight hiccup is that the THUNK_SELECTOR machinery can
+        // overwrite the updatee with an IND.  In parallel GC, this
+        // could even be happening concurrently, so we can't check for
+        // the IND.  Fortunately if we assume that blackholing is
+        // happening (either lazy or eager), then we can be sure that
+        // the updatee is never a THUNK_SELECTOR and we're ok.
+        // NB. this is a new invariant: blackholing is not optional.
     {
         nat type;
         const StgInfoTable *i;
+        StgClosure *updatee;
 
-        i = ((StgUpdateFrame *)p)->updatee->header.info;
+        updatee = ((StgUpdateFrame *)p)->updatee;
+        i = updatee->header.info;
         if (!IS_FORWARDING_PTR(i)) {
-            type = get_itbl(((StgUpdateFrame *)p)->updatee)->type;
+            type = get_itbl(updatee)->type;
             if (type == IND) {
-                ((StgUpdateFrame *)p)->updatee->header.info = 
-                    (StgInfoTable *)&stg_IND_PERM_info;
+                updatee->header.info = &stg_IND_PERM_info;
             } else if (type == IND_OLDGEN) {
-                ((StgUpdateFrame *)p)->updatee->header.info = 
-                    (StgInfoTable *)&stg_IND_OLDGEN_PERM_info;
+                updatee->header.info = &stg_IND_OLDGEN_PERM_info;
             }            
-            evacuate(&((StgUpdateFrame *)p)->updatee);
-            p += sizeofW(StgUpdateFrame);
-            continue;
         }
+        evacuate(&((StgUpdateFrame *)p)->updatee);
+        ASSERT(GET_CLOSURE_TAG(((StgUpdateFrame *)p)->updatee) == 0);
+        p += sizeofW(StgUpdateFrame);
+        continue;
     }
 
       // small bitmap (< 32 entries, or 64 on a 64-bit machine) 
@@ -1817,7 +1841,7 @@ scavenge_large (step_workspace *ws)
 	p = bd->start;
 	if (scavenge_one(p)) {
 	    if (ws->step->gen_no > 0) {
-		recordMutableGen_GC((StgClosure *)p, ws->step->gen);
+		recordMutableGen_GC((StgClosure *)p, ws->step->gen_no);
 	    }
 	}
 
@@ -1883,7 +1907,7 @@ loop:
             break;
         }
 
-        if ((bd = grab_todo_block(ws)) != NULL) {
+        if ((bd = grab_local_todo_block(ws)) != NULL) {
             scavenge_block(bd);
             did_something = rtsTrue;
             break;
@@ -1894,6 +1918,28 @@ loop:
         did_anything = rtsTrue;
         goto loop;
     }
+
+#if defined(THREADED_RTS)
+    if (work_stealing) {
+        // look for work to steal
+        for (s = total_steps-1; s >= 0; s--) {
+            if (s == 0 && RtsFlags.GcFlags.generations > 1) { 
+                continue; 
+            }
+            if ((bd = steal_todo_block(s)) != NULL) {
+                scavenge_block(bd);
+                did_something = rtsTrue;
+                break;
+            }
+        }
+
+        if (did_something) {
+            did_anything = rtsTrue;
+            goto loop;
+        }
+    }
+#endif
+
     // only return when there is no more work to do
 
     return did_anything;

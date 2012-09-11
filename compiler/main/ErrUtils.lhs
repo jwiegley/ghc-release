@@ -9,13 +9,12 @@ module ErrUtils (
 	Severity(..),
 
 	ErrMsg, WarnMsg,
-    ErrorMessages, WarningMessages,
-	errMsgSpans, errMsgContext, errMsgShortDoc, errMsgExtraInfo,
+        ErrorMessages, WarningMessages,
+        errMsgSpans, errMsgContext, errMsgShortDoc, errMsgExtraInfo,
 	Messages, errorsFound, emptyMessages,
 	mkErrMsg, mkPlainErrMsg, mkLongErrMsg, mkWarnMsg, mkPlainWarnMsg,
 	printErrorsAndWarnings, printBagOfErrors, printBagOfWarnings,
-    handleFlagWarnings,
-	warnIsErrorMsg,
+	warnIsErrorMsg, mkLongWarnMsg,
 
 	ghcExit,
 	doIfSet, doIfSet_dyn, 
@@ -78,8 +77,6 @@ data ErrMsg = ErrMsg {
 	errMsgExtraInfo :: Message
 	}
 	-- The SrcSpan is used for sorting errors into line-number order
-	-- NB  Pretty.Doc not SDoc: we deal with the printing style (in ptic 
-	-- whether to qualify an External Name) at the error occurrence
 
 instance Show ErrMsg where
     show em = showSDoc (errMsgShortDoc em)
@@ -90,21 +87,27 @@ type WarnMsg = ErrMsg
 -- to qualify names in the message or not.
 mkErrMsg :: SrcSpan -> PrintUnqualified -> Message -> ErrMsg
 mkErrMsg locn print_unqual msg
-  = ErrMsg [locn] print_unqual msg empty
+  = ErrMsg { errMsgSpans = [locn], errMsgContext = print_unqual
+           , errMsgShortDoc = msg, errMsgExtraInfo = empty }
 
 -- Variant that doesn't care about qualified/unqualified names
 mkPlainErrMsg :: SrcSpan -> Message -> ErrMsg
 mkPlainErrMsg locn msg
-  = ErrMsg [locn] alwaysQualify msg empty
+  = ErrMsg { errMsgSpans = [locn], errMsgContext = alwaysQualify
+           , errMsgShortDoc = msg, errMsgExtraInfo = empty }
 
 -- A long (multi-line) error message, with context to tell us whether
 -- to qualify names in the message or not.
 mkLongErrMsg :: SrcSpan -> PrintUnqualified -> Message -> Message -> ErrMsg
 mkLongErrMsg locn print_unqual msg extra 
- = ErrMsg [locn] print_unqual msg extra
+ = ErrMsg { errMsgSpans = [locn], errMsgContext = print_unqual
+          , errMsgShortDoc = msg, errMsgExtraInfo = extra }
 
 mkWarnMsg :: SrcSpan -> PrintUnqualified -> Message -> WarnMsg
 mkWarnMsg = mkErrMsg
+
+mkLongWarnMsg :: SrcSpan -> PrintUnqualified -> Message -> Message -> ErrMsg
+mkLongWarnMsg = mkLongErrMsg
 
 -- Variant that doesn't care about qualified/unqualified names
 mkPlainWarnMsg :: SrcSpan -> Message -> ErrMsg
@@ -176,25 +179,6 @@ printBagOfWarnings dflags bag_of_warns
 		LT -> True
 		EQ -> True
 		GT -> False
-
-handleFlagWarnings :: DynFlags -> [Located String] -> IO ()
-handleFlagWarnings dflags warns
- = when (dopt Opt_WarnDeprecatedFlags dflags)
-        (handleFlagWarnings' dflags warns)
-
-handleFlagWarnings' :: DynFlags -> [Located String] -> IO ()
-handleFlagWarnings' _ [] = return ()
-handleFlagWarnings' dflags warns
- = do -- It would be nicer if warns :: [Located Message], but that has circular
-      -- import problems.
-      mapM_ (handleFlagWarning dflags) warns
-      when (dopt Opt_WarnIsError dflags) $
-          do errorMsg dflags $ text "\nFailing due to -Werror.\n"
-             exitWith (ExitFailure 1)
-
-handleFlagWarning :: DynFlags -> Located String -> IO ()
-handleFlagWarning dflags (L loc warn)
- = log_action dflags SevWarning loc defaultUserStyle (text warn)
 
 ghcExit :: DynFlags -> Int -> IO ()
 ghcExit dflags val

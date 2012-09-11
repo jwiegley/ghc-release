@@ -1,7 +1,8 @@
 {-# LANGUAGE CPP #-}
-{-# OPTIONS_GHC -XMagicHash -XUnboxedTuples -fno-warn-orphans #-}
-
--- #prune
+-- We cannot actually specify all the language pragmas, see ghc ticket #
+-- If we could, these are what they would be:
+{- LANGUAGE MagicHash, UnboxedTuples -}
+{-# OPTIONS_HADDOCK prune #-}
 
 -- |
 -- Module      : Data.ByteString.Char8
@@ -245,10 +246,6 @@ import Data.ByteString (empty,null,length,tail,init,append
 import Data.ByteString.Internal (ByteString(PS), c2w, w2c, isSpaceWord8
                                 ,inlinePerformIO)
 
-#if defined(__GLASGOW_HASKELL__)
-import Data.ByteString.Unsafe (unsafePackAddress) -- for the rule
-#endif
-
 import Data.Char    ( isSpace )
 import qualified Data.List as List (intersperse)
 
@@ -262,7 +259,11 @@ import Foreign
 
 #if defined(__GLASGOW_HASKELL__)
 import GHC.Base                 (Char(..),unpackCString#,ord#,int2Word#)
-import GHC.IOBase               (IO(..),stToIO)
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO                   (stToIO)
+#else
+import GHC.IOBase               (stToIO)
+#endif
 import GHC.Prim                 (Addr#,writeWord8OffAddr#,plusAddr#)
 import GHC.Ptr                  (Ptr(..))
 import GHC.ST                   (ST(..))
@@ -543,12 +544,15 @@ break f = B.break (f . w2c)
 {-# INLINE [1] break #-}
 #endif
 
+#if __GLASGOW_HASKELL__ >= 606
+-- This RULE LHS is not allowed by ghc-6.4
 {-# RULES
 "ByteString specialise break (x==)" forall x.
     break ((==) x) = breakChar x
 "ByteString specialise break (==x)" forall x.
     break (==x) = breakChar x
   #-}
+#endif
 
 -- INTERNAL:
 
@@ -901,7 +905,6 @@ lines ps
              Nothing -> [ps]
              Just n  -> take n ps : lines (drop (n+1) ps)
     where search = elemIndex '\n'
-{-# INLINE lines #-}
 
 {-
 -- Just as fast, but more complex. Should be much faster, I thought.

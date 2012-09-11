@@ -4,20 +4,20 @@ module VectCore (
   vectorised, lifted,
   mapVect,
 
+  vVarType,
+
   vNonRec, vRec,
 
   vVar, vType, vNote, vLet,
   vLams, vLamsWithoutLC, vVarApps,
-  vCaseDEFAULT, vCaseProd
+  vCaseDEFAULT, vInlineMe
 ) where
 
 #include "HsVersions.h"
 
 import CoreSyn
-import CoreUtils      ( exprType )
-import DataCon        ( DataCon )
+import CoreUtils      ( mkInlineMe )
 import Type           ( Type )
-import Id             ( mkWildId )
 import Var
 
 type Vect a = (a,a)
@@ -36,6 +36,9 @@ mapVect f (x,y) = (f x, f y)
 
 zipWithVect :: (a -> b -> c) -> Vect a -> Vect b -> Vect c
 zipWithVect f (x1,y1) (x2,y2) = (f x1 x2, f y1 y2)
+
+vVarType :: VVar -> Type
+vVarType = varType . vectorised
 
 vVar :: VVar -> VExpr
 vVar = mapVect Var
@@ -80,13 +83,6 @@ vCaseDEFAULT (vscrut, lscrut) (vbndr, lbndr) vty lty (vbody, lbody)
   where
     mkDEFAULT e = [(DEFAULT, [], e)]
 
-vCaseProd :: VExpr -> Type -> Type
-          -> DataCon -> DataCon -> [Var] -> [VVar] -> VExpr -> VExpr
-vCaseProd (vscrut, lscrut) vty lty vdc ldc sh_bndrs bndrs
-          (vbody,lbody)
-  = (Case vscrut (mkWildId $ exprType vscrut) vty
-          [(DataAlt vdc, vbndrs, vbody)],
-     Case lscrut (mkWildId $ exprType lscrut) lty
-          [(DataAlt ldc, sh_bndrs ++ lbndrs, lbody)])
-  where
-    (vbndrs, lbndrs) = unzip bndrs
+vInlineMe :: VExpr -> VExpr
+vInlineMe (vexpr, lexpr) = (mkInlineMe vexpr, mkInlineMe lexpr)
+

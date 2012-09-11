@@ -9,14 +9,9 @@
 #define NEW_EXCEPTION
 #endif
 
-module Distribution.Compat.Exception (
-    onException, catchIO, catchExit, throwIOIO,
-#if __GLASGOW_HASKELL__ <= 604
-    bracketOnError
-#else
-    Exception.bracketOnError
-#endif
-  ) where
+module Distribution.Compat.Exception
+    (onException, catchIO, catchExit, throwIOIO)
+    where
 
 import System.Exit
 import qualified Control.Exception as Exception
@@ -33,31 +28,22 @@ throwIOIO :: Exception.IOException -> IO a
 #ifdef NEW_EXCEPTION
 throwIOIO = Exception.throwIO
 #else
-throwIOIO ioe = Exception.throwIO (Exception.IOException ioe)
+throwIOIO = Exception.throwIO . Exception.IOException
 #endif
 
 catchIO :: IO a -> (Exception.IOException -> IO a) -> IO a
 #ifdef NEW_EXCEPTION
 catchIO = Exception.catch
 #else
-catchIO io handler = io `Exception.catch` handler'
-    where handler' (Exception.IOException ioe) = handler ioe
-          handler' e                           = Exception.throw e
+catchIO = Exception.catchJust Exception.ioErrors
 #endif
 
 catchExit :: IO a -> (ExitCode -> IO a) -> IO a
 #ifdef NEW_EXCEPTION
 catchExit = Exception.catch
 #else
-catchExit io handler = io `Exception.catch` handler'
-    where handler' (Exception.ExitException ee) = handler ee
-          handler' e                            = Exception.throw e
+catchExit = Exception.catchJust exitExceptions
+    where exitExceptions (Exception.ExitException ee) = Just ee
+          exitExceptions _                            = Nothing
 #endif
 
-#if __GLASGOW_HASKELL__ <= 604
-bracketOnError :: IO a -> (a -> IO b) -> (a -> IO c) -> IO c
-bracketOnError before after thing =
-  Exception.block $ do
-    a <- before
-    Exception.unblock (thing a) `onException` after a
-#endif

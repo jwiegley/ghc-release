@@ -8,8 +8,8 @@
 module Main(main) where
 
 #include "../../includes/ghcconfig.h"
-#include "../../includes/MachRegs.h"
-#include "../../includes/Constants.h"
+#include "../../includes/stg/MachRegs.h"
+#include "../../includes/rts/Constants.h"
 
 -- Needed for TAG_BITS
 #include "../../includes/MachDeps.h"
@@ -426,12 +426,12 @@ formalParam V _ = empty
 formalParam arg n =
     formalParamType arg <> space <>
     text "arg" <> int n <> text ", "
-formalParamType arg | isPtr arg = text "\"ptr\"" <> space <> argRep arg
-                    | otherwise = argRep arg
+formalParamType arg = argRep arg
 
 argRep F = text "F_"
 argRep D = text "D_"
 argRep L = text "L_"
+argRep P = text "gcptr"
 argRep _ = text "W_"
 
 genApply regstatus args =
@@ -566,8 +566,6 @@ genApply regstatus args =
 	text "     AP_STACK,",
 	text "     CAF_BLACKHOLE,",
 	text "     BLACKHOLE,",
-	text "     SE_BLACKHOLE,",
-	text "     SE_CAF_BLACKHOLE,",
         text "     THUNK,",
         text "     THUNK_1_0,",
         text "     THUNK_0_1,",

@@ -43,8 +43,14 @@ import GHC.Float	( Float(..), Double(..) )
 import GHC.Stable	( StablePtr(..) )
 import GHC.Int		( Int8(..),  Int16(..),  Int32(..),  Int64(..) )
 import GHC.Word		( Word8(..), Word16(..), Word32(..), Word64(..) )
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO           ( IO(..), stToIO )
+import GHC.IOArray      ( IOArray(..),
+                          newIOArray, unsafeReadIOArray, unsafeWriteIOArray )
+#else
 import GHC.IOBase       ( IO(..), IOArray(..), stToIO,
                           newIOArray, unsafeReadIOArray, unsafeWriteIOArray )
+#endif
 #else
 import Data.Int
 import Data.Word
@@ -102,10 +108,11 @@ safeRangeSize (l,u) = let r = rangeSize (l, u)
 
 {-# INLINE safeIndex #-}
 safeIndex :: Ix i => (i, i) -> Int -> i -> Int
-safeIndex (l,u) n i = let i' = unsafeIndex (l,u) i
+safeIndex (l,u) n i = let i' = index (l,u) i
                       in if (0 <= i') && (i' < n)
                          then i'
-                         else error "Error in array index"
+                         else error ("Error in array index; " ++ show i' ++
+                                     " not in range [0.." ++ show n ++ ")")
 
 {-# INLINE unsafeReplaceST #-}
 unsafeReplaceST :: (IArray a e, Ix i) => a i e -> [(Int, e)] -> ST s (STArray s i e)
@@ -352,8 +359,8 @@ Other implementations will also do this for unboxed arrays, but Haskell
 98 requires that for 'Array' the value at such indices is bottom.)
 
 For most array types, this operation is O(/n/) where /n/ is the size
-of the array.  However, the 'Data.Array.Diff.DiffArray' type provides
-this operation with complexity linear in the number of updates.
+of the array.  However, the diffarray package provides an array type
+for which this operation has complexity linear in the number of updates.
 -}
 (//) :: (IArray a e, Ix i) => a i e -> [(i, e)] -> a i e
 arr // ies = case bounds arr of
@@ -956,15 +963,11 @@ class (Monad m) => MArray a e m where
     unsafeRead  :: Ix i => a i e -> Int -> m e
     unsafeWrite :: Ix i => a i e -> Int -> e -> m ()
 
-    {-# INLINE newArray #-}
+    {- INLINE newArray #-}
 	-- The INLINE is crucial, because until we know at least which monad 	
 	-- we are in, the code below allocates like crazy.  So inline it,
 	-- in the hope that the context will know the monad.
-    newArray (l,u) initialValue = do
-        let n = safeRangeSize (l,u)
-        marr <- unsafeNewArray_ (l,u)
-        sequence_ [unsafeWrite marr i initialValue | i <- [0 .. n - 1]]
-        return marr
+    newArray = newArrayImpl
 
     {-# INLINE unsafeNewArray_ #-}
     unsafeNewArray_ (l,u) = newArray (l,u) arrEleBottom
@@ -986,6 +989,17 @@ class (Monad m) => MArray a e m where
     -- why not omit newArray?  Because in the boxed case, we can omit the
     -- default initialisation with undefined values if we *do* know the
     -- initial value and it is constant for all elements.
+
+-- Workaround for performance bug #3586, GHC 6.12 only (not 6.13 and
+-- later, which fixed the underlying problem).
+{-# INLINE newArrayImpl #-}
+newArrayImpl :: (Ix i, MArray a e m) => (i, i) -> e -> m (a i e)
+newArrayImpl (l,u) initialValue = do
+        let n = safeRangeSize (l,u)
+        marr <- unsafeNewArray_ (l,u)
+        sequence_ [unsafeWrite marr i initialValue | i <- [0 .. n - 1]]
+        return marr
+
 
 instance MArray IOArray e IO where
 #if defined(__HUGS__)
@@ -1174,7 +1188,7 @@ instance MArray (STUArray s) Bool (ST s) where
         case loop 0# s2#                of { s3# ->
         (# s3#, STUArray l u n marr# #) }}}}
       where
-        W# e# = if initialValue then maxBound else 0
+        !(W# e#) = if initialValue then maxBound else 0
     {-# INLINE unsafeNewArray_ #-}
     unsafeNewArray_ (l,u) = unsafeNewArraySTUArray_ (l,u) bOOL_SCALE
     {-# INLINE newArray_ #-}
@@ -1486,12 +1500,12 @@ instance MArray (STUArray s) Word64 (ST s) where
 bOOL_SCALE, bOOL_WORD_SCALE,
   wORD_SCALE, dOUBLE_SCALE, fLOAT_SCALE :: Int# -> Int#
 bOOL_SCALE n# = (n# +# last#) `uncheckedIShiftRA#` 3#
-  where I# last# = SIZEOF_HSWORD * 8 - 1
+  where !(I# last#) = SIZEOF_HSWORD * 8 - 1
 bOOL_WORD_SCALE n# = bOOL_INDEX (n# +# last#)
-  where I# last# = SIZEOF_HSWORD * 8 - 1
-wORD_SCALE   n# = scale# *# n# where I# scale# = SIZEOF_HSWORD
-dOUBLE_SCALE n# = scale# *# n# where I# scale# = SIZEOF_HSDOUBLE
-fLOAT_SCALE  n# = scale# *# n# where I# scale# = SIZEOF_HSFLOAT
+  where !(I# last#) = SIZEOF_HSWORD * 8 - 1
+wORD_SCALE   n# = scale# *# n# where !(I# scale#) = SIZEOF_HSWORD
+dOUBLE_SCALE n# = scale# *# n# where !(I# scale#) = SIZEOF_HSDOUBLE
+fLOAT_SCALE  n# = scale# *# n# where !(I# scale#) = SIZEOF_HSFLOAT
 
 bOOL_INDEX :: Int# -> Int#
 #if SIZEOF_HSWORD == 4
@@ -1502,8 +1516,9 @@ bOOL_INDEX i# = i# `uncheckedIShiftRA#` 6#
 
 bOOL_BIT, bOOL_NOT_BIT :: Int# -> Word#
 bOOL_BIT     n# = int2Word# 1# `uncheckedShiftL#` (word2Int# (int2Word# n# `and#` mask#))
-  where W# mask# = SIZEOF_HSWORD * 8 - 1
-bOOL_NOT_BIT n# = bOOL_BIT n# `xor#` mb# where W# mb# = maxBound
+    where !(W# mask#) = SIZEOF_HSWORD * 8 - 1
+bOOL_NOT_BIT n# = bOOL_BIT n# `xor#` mb#
+    where !(W# mb#) = maxBound
 #endif /* __GLASGOW_HASKELL__ */
 
 #ifdef __HUGS__

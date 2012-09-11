@@ -1,5 +1,11 @@
+-- | Optimisation fuel is used to control the amount of work the optimiser does.
+--
+-- Every optimisation step consumes a certain amount of fuel and stops when
+-- it runs out of fuel.  This can be used e.g. to debug optimiser bugs: Run
+-- the optimiser with varying amount of fuel to find out the exact number of
+-- steps where a bug is introduced in the output.
 module OptimizationFuel
-    ( OptimizationFuel ,  canRewriteWithFuel, maybeRewriteWithFuel, oneLessFuel
+    ( OptimizationFuel,  canRewriteWithFuel, maybeRewriteWithFuel, oneLessFuel
     , OptFuelState, initOptFuelState --, setTotalFuel
     , tankFilledTo, diffFuel
     , FuelConsumer
@@ -17,7 +23,7 @@ import ZipCfg
 --import GHC.Exts (State#)
 import Panic
 import Data.IORef
-import Monad
+import Control.Monad
 import StaticFlags (opt_Fuel)
 import UniqSupply
 
@@ -59,7 +65,7 @@ diffFuel (OptimizationFuel f) (OptimizationFuel f') = f - f'
 -- type OptimizationFuel = State# () -- would like this, but it won't work
 data OptimizationFuel = OptimizationFuel
   deriving Show
-tankFilledTo _ = undefined -- should be impossible to evaluate
+tankFilledTo _ = panic "tankFilledTo" -- should be impossible to evaluate
   -- realWorld# might come in handy, too...
 canRewriteWithFuel OptimizationFuel = True
 maybeRewriteWithFuel _ ma = ma

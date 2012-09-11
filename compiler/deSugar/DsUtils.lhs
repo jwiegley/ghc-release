@@ -8,7 +8,6 @@ Utilities for desugaring
 This module exports some utility functions of no great interest.
 
 \begin{code}
-
 -- | Utility functions for constructing Core syntax, principally for desugaring
 module DsUtils (
 	EquationInfo(..), 
@@ -23,12 +22,12 @@ module DsUtils (
 	mkCoPrimCaseMatchResult, mkCoAlgCaseMatchResult,
 	wrapBind, wrapBinds,
 
-	mkErrorAppDs,
+	mkErrorAppDs, mkCoreAppDs, mkCoreAppsDs,
 
         seqVar,
 
         -- LHs tuples
-        mkLHsVarTup, mkLHsTup, mkLHsVarPatTup, mkLHsPatTup,
+        mkLHsVarPatTup, mkLHsPatTup, mkVanillaTuplePat,
         mkBigLHsVarTup, mkBigLHsTup, mkBigLHsVarPatTup, mkBigLHsPatTup,
 
         mkSelectorBinds,
@@ -73,8 +72,6 @@ import Util
 import ListSetOps
 import FastString
 import StaticFlags
-
-import Data.Char
 \end{code}
 
 
@@ -144,12 +141,12 @@ selectMatchVars :: [Pat Id] -> DsM [Id]
 selectMatchVars ps = mapM selectMatchVar ps
 
 selectMatchVar :: Pat Id -> DsM Id
-selectMatchVar (BangPat pat)   = selectMatchVar (unLoc pat)
-selectMatchVar (LazyPat pat)   = selectMatchVar (unLoc pat)
-selectMatchVar (ParPat pat)    = selectMatchVar (unLoc pat)
-selectMatchVar (VarPat var)    = return var
+selectMatchVar (BangPat pat) = selectMatchVar (unLoc pat)
+selectMatchVar (LazyPat pat) = selectMatchVar (unLoc pat)
+selectMatchVar (ParPat pat)  = selectMatchVar (unLoc pat)
+selectMatchVar (VarPat var)  = return var
 selectMatchVar (AsPat var _) = return (unLoc var)
-selectMatchVar other_pat       = newSysLocalDs (hsPatType other_pat)
+selectMatchVar other_pat     = newSysLocalDs (hsPatType other_pat)
 				  -- OK, better make up one...
 \end{code}
 
@@ -238,7 +235,7 @@ mkCoLetMatchResult bind = adjustMatchResult (mkCoreLet bind)
 -- let var' = viewExpr var in mr
 mkViewMatchResult :: Id -> CoreExpr -> Id -> MatchResult -> MatchResult
 mkViewMatchResult var' viewExpr var = 
-    adjustMatchResult (mkCoreLet (NonRec var' (mkCoreApp viewExpr (Var var))))
+    adjustMatchResult (mkCoreLet (NonRec var' (mkCoreAppDs viewExpr (Var var))))
 
 mkEvalMatchResult :: Id -> Type -> MatchResult -> MatchResult
 mkEvalMatchResult var ty
@@ -301,11 +298,10 @@ mkCoAlgCaseMatchResult var ty match_alts
 	      | otherwise
 	      = CanFail
 
-    wild_var = mkWildId (idType var)
     sorted_alts  = sortWith get_tag match_alts
     get_tag (con, _, _) = dataConTag con
     mk_case fail = do alts <- mapM (mk_alt fail) sorted_alts
-                      return (Case (Var var) wild_var ty (mk_default fail ++ alts))
+                      return (mkWildCase (Var var) (idType var) ty (mk_default fail ++ alts))
 
     mk_alt fail (con, args, MatchResult _ body_fn) = do
           body <- body_fn fail
@@ -352,7 +348,7 @@ mkCoAlgCaseMatchResult var ty match_alts
     mk_parrCase fail = do
       lengthP <- dsLookupGlobalId lengthPName
       alt <- unboxAlt
-      return (Case (len lengthP) (mkWildId intTy) ty [alt])
+      return (mkWildCase (len lengthP) intTy ty [alt])
       where
 	elemTy      = case splitTyConApp (idType var) of
 		        (_, [elemTy]) -> elemTy
@@ -364,9 +360,8 @@ mkCoAlgCaseMatchResult var ty match_alts
 	  l      <- newSysLocalDs intPrimTy
 	  indexP <- dsLookupGlobalId indexPName
 	  alts   <- mapM (mkAlt indexP) sorted_alts
-	  return (DataAlt intDataCon, [l], (Case (Var l) wild ty (dft : alts)))
+	  return (DataAlt intDataCon, [l], mkWildCase (Var l) intPrimTy ty (dft : alts))
           where
-	    wild = mkWildId intPrimTy
 	    dft  = (DEFAULT, [], fail)
 	--
 	-- each alternative matches one array length (corresponding to one
@@ -394,17 +389,96 @@ mkCoAlgCaseMatchResult var ty match_alts
 \begin{code}
 mkErrorAppDs :: Id 		-- The error function
 	     -> Type		-- Type to which it should be applied
-	     -> String		-- The error message string to pass
+	     -> SDoc		-- The error message string to pass
 	     -> DsM CoreExpr
 
 mkErrorAppDs err_id ty msg = do
     src_loc <- getSrcSpanDs
     let
-        full_msg = showSDoc (hcat [ppr src_loc, text "|", text msg])
+        full_msg = showSDoc (hcat [ppr src_loc, text "|", msg])
         core_msg = Lit (mkMachString full_msg)
         -- mkMachString returns a result of type String#
     return (mkApps (Var err_id) [Type ty, core_msg])
 \end{code}
+
+'mkCoreAppDs' and 'mkCoreAppsDs' hand the special-case desugaring of 'seq'.
+
+Note [Desugaring seq (1)]  cf Trac #1031
+~~~~~~~~~~~~~~~~~~~~~~~~~
+   f x y = x `seq` (y `seq` (# x,y #))
+
+The [CoreSyn let/app invariant] means that, other things being equal, because 
+the argument to the outer 'seq' has an unlifted type, we'll use call-by-value thus:
+
+   f x y = case (y `seq` (# x,y #)) of v -> x `seq` v
+
+But that is bad for two reasons: 
+  (a) we now evaluate y before x, and 
+  (b) we can't bind v to an unboxed pair
+
+Seq is very, very special!  So we recognise it right here, and desugar to
+        case x of _ -> case y of _ -> (# x,y #)
+
+Note [Desugaring seq (2)]  cf Trac #2231
+~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+   let chp = case b of { True -> fst x; False -> 0 }
+   in chp `seq` ...chp...
+Here the seq is designed to plug the space leak of retaining (snd x)
+for too long.
+
+If we rely on the ordinary inlining of seq, we'll get
+   let chp = case b of { True -> fst x; False -> 0 }
+   case chp of _ { I# -> ...chp... }
+
+But since chp is cheap, and the case is an alluring contet, we'll
+inline chp into the case scrutinee.  Now there is only one use of chp,
+so we'll inline a second copy.  Alas, we've now ruined the purpose of
+the seq, by re-introducing the space leak:
+    case (case b of {True -> fst x; False -> 0}) of
+      I# _ -> ...case b of {True -> fst x; False -> 0}...
+
+We can try to avoid doing this by ensuring that the binder-swap in the
+case happens, so we get his at an early stage:
+   case chp of chp2 { I# -> ...chp2... }
+But this is fragile.  The real culprit is the source program.  Perhaps we
+should have said explicitly
+   let !chp2 = chp in ...chp2...
+
+But that's painful.  So the code here does a little hack to make seq
+more robust: a saturated application of 'seq' is turned *directly* into
+the case expression. So we desugar to:
+   let chp = case b of { True -> fst x; False -> 0 }
+   case chp of chp { I# -> ...chp... }
+Notice the shadowing of the case binder! And now all is well.
+
+The reason it's a hack is because if you define mySeq=seq, the hack
+won't work on mySeq.  
+
+Note [Desugaring seq (3)] cf Trac #2409
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The isLocalId ensures that we don't turn 
+        True `seq` e
+into
+        case True of True { ... }
+which stupidly tries to bind the datacon 'True'. 
+
+\begin{code}
+mkCoreAppDs  :: CoreExpr -> CoreExpr -> CoreExpr
+mkCoreAppDs (Var f `App` Type ty1 `App` Type ty2 `App` arg1) arg2
+  | f `hasKey` seqIdKey            -- Note [Desugaring seq (1), (2)]
+  = Case arg1 case_bndr ty2 [(DEFAULT,[],arg2)]
+  where
+    case_bndr = case arg1 of
+                   Var v1 | isLocalId v1 -> v1        -- Note [Desugaring seq (2) and (3)]
+                   _                     -> mkWildBinder ty1
+
+mkCoreAppDs fun arg = mkCoreApp fun arg	 -- The rest is done in MkCore
+
+mkCoreAppsDs :: CoreExpr -> [CoreExpr] -> CoreExpr
+mkCoreAppsDs fun args = foldl mkCoreAppDs fun args
+\end{code}
+
 
 %************************************************************************
 %*									*
@@ -460,7 +534,7 @@ mkSelectorBinds pat val_expr
 
         -- For the error message we make one error-app, to avoid duplication.
         -- But we need it at different types... so we use coerce for that
-      err_expr <- mkErrorAppDs iRREFUT_PAT_ERROR_ID  unitTy (showSDoc (ppr pat))
+      err_expr <- mkErrorAppDs iRREFUT_PAT_ERROR_ID  unitTy (ppr pat)
       err_var <- newSysLocalDs unitTy
       binds <- mapM (mk_bind val_var err_var) binders
       return ( (val_var, val_expr) : 
@@ -469,7 +543,7 @@ mkSelectorBinds pat val_expr
 
 
   | otherwise = do
-      error_expr <- mkErrorAppDs iRREFUT_PAT_ERROR_ID   tuple_ty (showSDoc (ppr pat))
+      error_expr <- mkErrorAppDs iRREFUT_PAT_ERROR_ID   tuple_ty (ppr pat)
       tuple_expr <- matchSimply val_expr PatBindRhs pat local_tuple error_expr
       tuple_var <- newSysLocalDs tuple_ty
       let
@@ -509,37 +583,31 @@ mkSelectorBinds pat val_expr
 
 \end{code}
 
-Creating tuples and their types for full Haskell expressions
+Creating big tuples and their types for full Haskell expressions.
+They work over *Ids*, and create tuples replete with their types,
+which is whey they are not in HsUtils.
 
 \begin{code}
-
--- Smart constructors for source tuple expressions
-mkLHsVarTup :: [Id] -> LHsExpr Id
-mkLHsVarTup ids  = mkLHsTup (map nlHsVar ids)
-
-mkLHsTup :: [LHsExpr Id] -> LHsExpr Id
-mkLHsTup []     = nlHsVar unitDataConId
-mkLHsTup [lexp] = lexp
-mkLHsTup lexps  = L (getLoc (head lexps)) $ 
-		  ExplicitTuple lexps Boxed
-
--- Smart constructors for source tuple patterns
-mkLHsVarPatTup :: [Id] -> LPat Id
-mkLHsVarPatTup bs  = mkLHsPatTup (map nlVarPat bs)
-
 mkLHsPatTup :: [LPat Id] -> LPat Id
 mkLHsPatTup []     = noLoc $ mkVanillaTuplePat [] Boxed
 mkLHsPatTup [lpat] = lpat
 mkLHsPatTup lpats  = L (getLoc (head lpats)) $ 
 		     mkVanillaTuplePat lpats Boxed
 
+mkLHsVarPatTup :: [Id] -> LPat Id
+mkLHsVarPatTup bs  = mkLHsPatTup (map nlVarPat bs)
+
+mkVanillaTuplePat :: [OutPat Id] -> Boxity -> Pat Id
+-- A vanilla tuple pattern simply gets its type from its sub-patterns
+mkVanillaTuplePat pats box 
+  = TuplePat pats box (mkTupleTy box (length pats) (map hsLPatType pats))
+
 -- The Big equivalents for the source tuple expressions
 mkBigLHsVarTup :: [Id] -> LHsExpr Id
 mkBigLHsVarTup ids = mkBigLHsTup (map nlHsVar ids)
 
 mkBigLHsTup :: [LHsExpr Id] -> LHsExpr Id
-mkBigLHsTup = mkChunkified mkLHsTup
-
+mkBigLHsTup = mkChunkified mkLHsTupleExpr
 
 -- The Big equivalents for the source tuple patterns
 mkBigLHsVarPatTup :: [Id] -> LPat Id
@@ -606,22 +674,35 @@ Now @fail.33@ is a function, so it can be let-bound.
 \begin{code}
 mkFailurePair :: CoreExpr	-- Result type of the whole case expression
 	      -> DsM (CoreBind,	-- Binds the newly-created fail variable
-				-- to either the expression or \ _ -> expression
-		      CoreExpr)	-- Either the fail variable, or fail variable
-				-- applied to unit tuple
+				-- to \ _ -> expression
+		      CoreExpr)	-- Fail variable applied to realWorld#
+-- See Note [Failure thunks and CPR]
 mkFailurePair expr
-  | isUnLiftedType ty = do
-     fail_fun_var <- newFailLocalDs (unitTy `mkFunTy` ty)
-     fail_fun_arg <- newSysLocalDs unitTy
-     return (NonRec fail_fun_var (Lam fail_fun_arg expr),
-             App (Var fail_fun_var) (Var unitDataConId))
-
-  | otherwise = do
-     fail_var <- newFailLocalDs ty
-     return (NonRec fail_var expr, Var fail_var)
+  = do { fail_fun_var <- newFailLocalDs (realWorldStatePrimTy `mkFunTy` ty)
+       ; fail_fun_arg <- newSysLocalDs realWorldStatePrimTy
+       ; return (NonRec fail_fun_var (Lam fail_fun_arg expr),
+                 App (Var fail_fun_var) (Var realWorldPrimId)) }
   where
     ty = exprType expr
 \end{code}
+
+Note [Failure thunks and CPR]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When we make a failure point we ensure that it
+does not look like a thunk. Example:
+
+   let fail = \rw -> error "urk"
+   in case x of 
+        [] -> fail realWorld#
+        (y:ys) -> case ys of
+                    [] -> fail realWorld#  
+                    (z:zs) -> (y,z)
+
+Reason: we know that a failure point is always a "join point" and is
+entered at most once.  Adding a dummy 'realWorld' token argument makes
+it clear that sharing is not an issue.  And that in turn makes it more
+CPR-friendly.  This matters a lot: if you don't get it right, you lose
+the tail call property.  For example, see Trac #3403.
 
 \begin{code}
 mkOptTickBox :: Maybe (Int,[Id]) -> CoreExpr -> DsM CoreExpr

@@ -1,10 +1,3 @@
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 -----------------------------------------------------------------------------
 --
 -- Building info tables.
@@ -40,17 +33,13 @@ import CgMonad
 
 import CmmUtils
 import Cmm
-import MachOp
 import CLabel
-import StgSyn
 import Name
 import DataCon
 import Unique
 import StaticFlags
 
-import Maybes
 import Constants
-import Panic
 import Util
 import Outputable
 
@@ -64,13 +53,13 @@ import Outputable
 -- representation as a list of 'CmmAddr' is handled later
 -- in the pipeline by 'cmmToRawCmm'.
 
-emitClosureCodeAndInfoTable :: ClosureInfo -> CmmFormalsWithoutKinds -> CgStmts -> Code
+emitClosureCodeAndInfoTable :: ClosureInfo -> CmmFormals -> CgStmts -> Code
 emitClosureCodeAndInfoTable cl_info args body
  = do	{ blks <- cgStmtsToBlocks body
         ; info <- mkCmmInfo cl_info
         ; emitInfoTableAndCode (infoLblToEntryLbl info_lbl) info args blks }
   where
-    info_lbl  = infoTableLabelFromCI cl_info
+    info_lbl  = infoTableLabelFromCI cl_info $ clHasCafRefs cl_info
 
 -- We keep the *zero-indexed* tag in the srt_len field of the info
 -- table of a data constructor.
@@ -95,29 +84,29 @@ mkCmmInfo cl_info = do
            info = ConstrInfo (ptrs, nptrs)
                              (fromIntegral (dataConTagZ con))
                              conName
-       return $ CmmInfo gc_target Nothing (CmmInfoTable prof cl_type info)
+       return $ CmmInfo gc_target Nothing (CmmInfoTable False prof cl_type info)
 
     ClosureInfo { closureName   = name,
                   closureLFInfo = lf_info,
                   closureSRT    = srt } ->
-       return $ CmmInfo gc_target Nothing (CmmInfoTable prof cl_type info)
+       return $ CmmInfo gc_target Nothing (CmmInfoTable False prof cl_type info)
        where
          info =
              case lf_info of
                LFReEntrant _ arity _ arg_descr ->
                    FunInfo (ptrs, nptrs)
                            srt 
-                           (argDescrType arg_descr)
                            (fromIntegral arity)
                            arg_descr 
-                           (CmmLabel (mkSlowEntryLabel name))
+                           (CmmLabel (mkSlowEntryLabel name has_caf_refs))
                LFThunk _ _ _ (SelectorThunk offset) _ ->
                    ThunkSelectorInfo (fromIntegral offset) srt
                LFThunk _ _ _ _ _ ->
                    ThunkInfo (ptrs, nptrs) srt
                _ -> panic "unexpected lambda form in mkCmmInfo"
   where
-    info_lbl = infoTableLabelFromCI cl_info
+    info_lbl = infoTableLabelFromCI cl_info has_caf_refs
+    has_caf_refs = clHasCafRefs cl_info
 
     cl_type  = smRepClosureTypeInt (closureSMRep cl_info)
 
@@ -153,7 +142,7 @@ emitReturnTarget name stmts
         ; let info = CmmInfo
                        gc_target
                        Nothing
-                       (CmmInfoTable
+                       (CmmInfoTable False
                         (ProfilingInfo zeroCLit zeroCLit)
                         rET_SMALL -- cmmToRawCmm may convert it to rET_BIG
                         (ContInfo frame srt_info))
@@ -235,13 +224,10 @@ stack_layout ((off, bind):binds) sizeW | off == sizeW - 1 =
   (Just stack_bind) : (stack_layout binds (sizeW - rep_size))
   where
     rep_size = cgRepSizeW (cgIdInfoArgRep bind)
-    stack_bind = LocalReg unique machRep kind
+    stack_bind = LocalReg unique machRep
     unique = getUnique (cgIdInfoId bind)
     machRep = argMachRep (cgIdInfoArgRep bind)
-    kind = if isFollowableArg (cgIdInfoArgRep bind)
-           then GCKindPtr
-           else GCKindNonPtr
-stack_layout binds@((off, _):_) sizeW | otherwise =
+stack_layout binds@(_:_) sizeW | otherwise =
   Nothing : (stack_layout binds (sizeW - 1))
 
 {- Another way to write the function that might be less error prone (untested)
@@ -295,8 +281,6 @@ emitAlgReturnTarget name branches mb_deflt fam_sz
 	; return (lbl, Nothing) }
 		-- Nothing: the internal branches in the switch don't have
 		-- global labels, so we can't use them at the 'call site'
-  where
-    uniq = getUnique name 
 
 --------------------------------
 emitReturnInstr :: Code
@@ -321,7 +305,8 @@ stdInfoTableSizeW
     size_prof | opt_SccProfilingOn = 2
 	      | otherwise	   = 0
 
-stdInfoTableSizeB = stdInfoTableSizeW * wORD_SIZE :: ByteOff
+stdInfoTableSizeB :: ByteOff
+stdInfoTableSizeB = stdInfoTableSizeW * wORD_SIZE
 
 stdSrtBitmapOffset :: ByteOff
 -- Byte offset of the SRT bitmap half-word which is 
@@ -344,13 +329,13 @@ stdNonPtrsOffset = stdInfoTableSizeB - 2*wORD_SIZE + hALF_WORD_SIZE
 
 closureInfoPtr :: CmmExpr -> CmmExpr
 -- Takes a closure pointer and returns the info table pointer
-closureInfoPtr e = CmmLoad e wordRep
+closureInfoPtr e = CmmLoad e bWord
 
 entryCode :: CmmExpr -> CmmExpr
 -- Takes an info pointer (the first word of a closure)
 -- and returns its entry code
 entryCode e | tablesNextToCode = e
-	    | otherwise	       = CmmLoad e wordRep
+	    | otherwise	       = CmmLoad e bWord
 
 getConstrTag :: CmmExpr -> CmmExpr
 -- Takes a closure pointer, and return the *zero-indexed*
@@ -358,7 +343,7 @@ getConstrTag :: CmmExpr -> CmmExpr
 -- This lives in the SRT field of the info table
 -- (constructors don't need SRTs).
 getConstrTag closure_ptr 
-  = CmmMachOp (MO_U_Conv halfWordRep wordRep) [infoTableConstrTag info_table]
+  = CmmMachOp (MO_UU_Conv halfWordWidth wordWidth) [infoTableConstrTag info_table]
   where
     info_table = infoTable (closureInfoPtr closure_ptr)
 
@@ -366,7 +351,7 @@ cmmGetClosureType :: CmmExpr -> CmmExpr
 -- Takes a closure pointer, and return the closure type
 -- obtained from the info table
 cmmGetClosureType closure_ptr 
-  = CmmMachOp (MO_U_Conv halfWordRep wordRep) [infoTableClosureType info_table]
+  = CmmMachOp (MO_UU_Conv halfWordWidth wordWidth) [infoTableClosureType info_table]
   where
     info_table = infoTable (closureInfoPtr closure_ptr)
 
@@ -387,21 +372,21 @@ infoTableSrtBitmap :: CmmExpr -> CmmExpr
 -- Takes an info table pointer (from infoTable) and returns the srt_bitmap
 -- field of the info table
 infoTableSrtBitmap info_tbl
-  = CmmLoad (cmmOffsetB info_tbl stdSrtBitmapOffset) halfWordRep
+  = CmmLoad (cmmOffsetB info_tbl stdSrtBitmapOffset) bHalfWord
 
 infoTableClosureType :: CmmExpr -> CmmExpr
 -- Takes an info table pointer (from infoTable) and returns the closure type
 -- field of the info table.
 infoTableClosureType info_tbl 
-  = CmmLoad (cmmOffsetB info_tbl stdClosureTypeOffset) halfWordRep
+  = CmmLoad (cmmOffsetB info_tbl stdClosureTypeOffset) bHalfWord
 
 infoTablePtrs :: CmmExpr -> CmmExpr
 infoTablePtrs info_tbl 
-  = CmmLoad (cmmOffsetB info_tbl stdPtrsOffset) halfWordRep
+  = CmmLoad (cmmOffsetB info_tbl stdPtrsOffset) bHalfWord
 
 infoTableNonPtrs :: CmmExpr -> CmmExpr
 infoTableNonPtrs info_tbl 
-  = CmmLoad (cmmOffsetB info_tbl stdNonPtrsOffset) halfWordRep
+  = CmmLoad (cmmOffsetB info_tbl stdNonPtrsOffset) bHalfWord
 
 funInfoTable :: CmmExpr -> CmmExpr
 -- Takes the info pointer of a function,
@@ -427,24 +412,12 @@ funInfoTable info_ptr
 emitInfoTableAndCode 
 	:: CLabel 		-- Label of entry or ret
 	-> CmmInfo 		-- ...the info table
-	-> CmmFormalsWithoutKinds		-- ...args
+	-> CmmFormals	-- ...args
 	-> [CmmBasicBlock]	-- ...and body
 	-> Code
 
 emitInfoTableAndCode entry_ret_lbl info args blocks
   = emitProc info entry_ret_lbl args blocks
-
--------------------------------------------------------------------------
---
---	Static reference tables
---
--------------------------------------------------------------------------
-
-srtLabelAndLength :: C_SRT -> CLabel -> (CmmLit, StgHalfWord)
-srtLabelAndLength NoC_SRT _		
-  = (zeroCLit, 0)
-srtLabelAndLength (C_SRT lbl off bitmap) info_lbl
-  = (makeRelativeRefTo info_lbl $ cmmLabelOffW lbl off, bitmap)
 
 -------------------------------------------------------------------------
 --

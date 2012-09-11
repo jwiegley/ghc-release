@@ -22,6 +22,28 @@ from testglobals import *
 # value.
 os.environ['TERM'] = 'vt100'
 
+# Try and find a utf8 locale to use
+# First see if we already have a UTF8 locale
+h = os.popen('locale | grep LC_CTYPE | grep -i utf', 'r')
+v = h.read()
+h.close()
+if v == '':
+    # We don't, so now see if 'locale -a' works
+    h = os.popen('locale -a', 'r')
+    v = h.read()
+    h.close()
+    if v != '':
+        # If it does then use the first utf8 locale that is available
+        h = os.popen('locale -a | grep -i "utf8\|utf-8" 2>/dev/null', 'r')
+        v = h.readline().strip()
+        h.close()
+        if v != '':
+            os.environ['LC_ALL'] = v
+            print "setting LC_ALL to", v
+        else:
+            print 'WARNING: No UTF8 locale found.'
+            print 'You may get some spurious test failures.'
+
 global config
 config = getConfig() # get it from testglobals
 
@@ -81,21 +103,28 @@ for opt,arg in opts:
         config.compile_ways = filter(neq(arg), config.compile_ways)
 
     if opt == '--threads':
-        # Trac #1558 says threads don't work in python 2.4.4, but do
-        # in 2.5.2. Probably >= 2.5 is sufficient, but let's be
-        # conservative here.
-        # Some versions of python have things like '1c1' for some of
-        # these components (see trac #3091), but int() chokes on the
-        # 'c1', so we drop it.
-        (maj, min, pat) = platform.python_version_tuple()
-        maj = int(re.sub('[^0-9].*', '', maj))
-        min = int(re.sub('[^0-9].*', '', min))
-        pat = int(re.sub('[^0-9].*', '', pat))
-        if (maj, min, pat) >= (2, 5, 2):
-            config.threads = int(arg)
-            config.use_threads = 1
-        else:
-            print "Warning: Ignoring request to use threads as python version < 2.5.2"
+        config.threads = int(arg)
+        config.use_threads = 1
+
+if config.use_threads == 1:
+    # Trac #1558 says threads don't work in python 2.4.4, but do
+    # in 2.5.2. Probably >= 2.5 is sufficient, but let's be
+    # conservative here.
+    # Some versions of python have things like '1c1' for some of
+    # these components (see trac #3091), but int() chokes on the
+    # 'c1', so we drop it.
+    (maj, min, pat) = platform.python_version_tuple()
+    # We wrap maj, min, and pat in str() to work around a bug in python
+    # 2.6.1
+    maj = int(re.sub('[^0-9].*', '', str(maj)))
+    min = int(re.sub('[^0-9].*', '', str(min)))
+    pat = int(re.sub('[^0-9].*', '', str(pat)))
+    if (maj, min, pat) < (2, 5, 2):
+        print "Warning: Ignoring request to use threads as python version < 2.5.2"
+        config.use_threads = 0
+    if windows:
+        print "Warning: Ignoring request to use threads as running on Windows"
+        config.use_threads = 0
 
 # This has to come after arg parsing as the args can change the compiler
 get_compiler_info()

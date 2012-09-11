@@ -9,15 +9,15 @@
 
 #ifdef PROFILING
 
+#include "PosixSource.h"
 #include "Rts.h"
-#include "RtsFlags.h"
+
 #include "Stats.h"
 #include "RtsUtils.h"
 #include "RetainerSet.h"
 #include "Arena.h"
 #include "Profiling.h"
 
-#include <stdlib.h>
 #include <string.h>
 
 #define HASH_TABLE_SIZE 255
@@ -345,7 +345,7 @@ printRetainerSetShort(FILE *f, RetainerSet *rs)
 	    // size = strlen(tmp);
 	}
     }
-    fprintf(f, tmp);
+    fputs(tmp, f);
 }
 #elif defined(RETAINER_SCHEME_CC)
 // Retainer scheme 3: retainer = cost centre

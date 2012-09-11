@@ -49,8 +49,7 @@ module TysPrim(
 import Var		( TyVar, mkTyVar )
 import Name		( Name, BuiltInSyntax(..), mkInternalName, mkWiredInName )
 import OccName		( mkTyVarOccFS, mkTcOccFS )
-import TyCon		( TyCon, mkPrimTyCon, mkLiftedPrimTyCon,
-			  PrimRep(..) )
+import TyCon		( TyCon, mkPrimTyCon, mkLiftedPrimTyCon )
 import Type
 import SrcLoc
 import Unique		( mkAlphaTyVarUnique, pprUnique )
@@ -59,7 +58,7 @@ import StaticFlags
 import FastString
 import Outputable
 
-import Char 		( ord, chr )
+import Data.Char
 \end{code}
 
 %************************************************************************
@@ -131,7 +130,7 @@ bcoPrimTyConName 	      = mkPrimTc (fsLit "BCO#") bcoPrimTyConKey bcoPrimTyCon
 weakPrimTyConName  	      = mkPrimTc (fsLit "Weak#") weakPrimTyConKey weakPrimTyCon
 threadIdPrimTyConName  	      = mkPrimTc (fsLit "ThreadId#") threadIdPrimTyConKey threadIdPrimTyCon
 anyPrimTyConName	      = mkPrimTc (fsLit "Any") anyPrimTyConKey anyPrimTyCon
-anyPrimTyCon1Name	      = mkPrimTc (fsLit "Any1") anyPrimTyCon1Key anyPrimTyCon
+anyPrimTyCon1Name	      = mkPrimTc (fsLit "Any1") anyPrimTyCon1Key anyPrimTyCon1
 \end{code}
 
 %************************************************************************

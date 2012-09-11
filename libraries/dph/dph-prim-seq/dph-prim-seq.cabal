@@ -1,0 +1,52 @@
+Name:           dph-prim-seq
+Version:        0.4.0
+License:        BSD3
+License-File:   LICENSE
+Author:         Manuel M T Chakravarty, Gabriele Keller, Roman Leshchinskiy
+Maintainer:     Roman Leshchinskiy <rl@cse.unsw.edu.au>
+Homepage:       http://www.cse.unsw.edu.au/~chak/project/dph/
+Category:       Data Structures
+Synopsis:       Sequential Primitives for Data-Parallel Haskell.
+
+Cabal-Version:  >= 1.2.3
+Build-Type:     Simple
+
+Library
+  Exposed-Modules:
+        Data.Array.Parallel.Unlifted.Sequential
+        Data.Array.Parallel.Unlifted
+  Other-Modules:
+        Data.Array.Parallel.Unlifted.Sequential.Flat.UArr
+        Data.Array.Parallel.Unlifted.Sequential.Flat.Stream
+        Data.Array.Parallel.Unlifted.Sequential.Flat.Basics
+        Data.Array.Parallel.Unlifted.Sequential.Flat.Enum
+        Data.Array.Parallel.Unlifted.Sequential.Flat.Subarrays
+        Data.Array.Parallel.Unlifted.Sequential.Flat.Combinators
+        Data.Array.Parallel.Unlifted.Sequential.Flat.Sums
+        Data.Array.Parallel.Unlifted.Sequential.Flat.Permute
+        Data.Array.Parallel.Unlifted.Sequential.Flat.Text
+        Data.Array.Parallel.Unlifted.Sequential.Flat.Random
+        Data.Array.Parallel.Unlifted.Sequential.Flat.Search
+        Data.Array.Parallel.Unlifted.Sequential.Flat
+        Data.Array.Parallel.Unlifted.Sequential.Segmented.USegd
+        Data.Array.Parallel.Unlifted.Sequential.Segmented.Basics
+        Data.Array.Parallel.Unlifted.Sequential.Segmented.Combinators
+        Data.Array.Parallel.Unlifted.Sequential.Segmented.Sums
+        Data.Array.Parallel.Unlifted.Sequential.Segmented.Text
+        Data.Array.Parallel.Unlifted.Sequential.Segmented
+
+  Exposed: False
+
+  Extensions: TypeFamilies, GADTs, RankNTypes,
+              BangPatterns, MagicHash, UnboxedTuples, TypeOperators
+  GHC-Options: -funbox-strict-fields -haddock -fcpr-off
+  if impl(ghc >= 6.9)
+    GHC-Options: -Odph
+  else
+    GHC-Options: -O2 -fdicts-cheap -fno-method-sharing
+
+  Build-Depends:  base >= 3 && < 5, array, random
+  if impl(ghc >= 6.9)
+    Build-Depends: ghc-prim
+  Build-Depends: dph-base, dph-prim-interface
+

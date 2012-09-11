@@ -21,10 +21,8 @@
 #define THREADED_RTS
 
 #include "Rts.h"
-#include "RtsFlags.h"
-#include "Storage.h"
+
 #include "Stable.h"
-#include "OSThreads.h"
 #include "Capability.h"
 
 #include <stdio.h>
@@ -52,15 +50,24 @@
 #define ctype(type) /* nothing */
 #else
 #define ctype(type) \
-    printf("#define SIZEOF_" #type " %d\n", sizeof(type)); 
+    printf("#define SIZEOF_" #type " %lu\n", (unsigned long)sizeof(type));
 #endif
 
 #if defined(GEN_HASKELL)
 #define field_type_(str, s_type, field) /* nothing */
+#define field_type_gcptr_(str, s_type, field) /* nothing */
 #else
+/* Defining REP_x to be b32 etc
+   These are both the C-- types used in a load
+      e.g.  b32[addr]
+   and the names of the CmmTypes in the compiler
+      b32 :: CmmType
+*/
 #define field_type_(str, s_type, field) \
-    printf("#define REP_" str " I"); \
-    printf("%d\n", sizeof (__typeof__(((((s_type*)0)->field)))) * 8);
+    printf("#define REP_" str " b"); \
+    printf("%lu\n", (unsigned long)sizeof (__typeof__(((((s_type*)0)->field)))) * 8);
+#define field_type_gcptr_(str, s_type, field) \
+    printf("#define REP_" str " gcptr\n");
 #endif
 
 #define field_type(s_type, field) \
@@ -90,17 +97,17 @@
 #if defined(GEN_HASKELL)
 #define def_size(str, size)                \
     printf("sIZEOF_" str " :: Int\n");     \
-    printf("sIZEOF_" str " = %d\n", size);
+    printf("sIZEOF_" str " = %lu\n", (unsigned long)size);
 #else
 #define def_size(str, size) \
-    printf("#define SIZEOF_" str " %d\n", size);
+    printf("#define SIZEOF_" str " %lu\n", (unsigned long)size);
 #endif
 
 #if defined(GEN_HASKELL)
 #define def_closure_size(str, size) /* nothing */
 #else
 #define def_closure_size(str, size) \
-    printf("#define SIZEOF_" str " (SIZEOF_StgHeader+%d)\n", size);
+    printf("#define SIZEOF_" str " (SIZEOF_StgHeader+%lu)\n", (unsigned long)size);
 #endif
 
 #define struct_size(s_type) \
@@ -136,16 +143,22 @@
     closure_payload_macro(str(s_type,field));
 
 /* Byte offset and MachRep for a closure field, minus the header */
-#define closure_field(s_type, field) \
-    closure_field_offset(s_type,field) \
-    field_type(s_type, field); \
-    closure_field_macro(str(s_type,field))
-
-/* Byte offset and MachRep for a closure field, minus the header */
 #define closure_field_(str, s_type, field) \
     closure_field_offset_(str,s_type,field) \
     field_type_(str, s_type, field); \
     closure_field_macro(str)
+
+#define closure_field(s_type, field) \
+    closure_field_(str(s_type,field),s_type,field)
+
+/* Byte offset and MachRep for a closure field, minus the header */
+#define closure_field_gcptr_(str, s_type, field) \
+    closure_field_offset_(str,s_type,field) \
+    field_type_gcptr_(str, s_type, field); \
+    closure_field_macro(str)
+
+#define closure_field_gcptr(s_type, field) \
+    closure_field_gcptr_(str(s_type,field),s_type,field)
 
 /* Byte offset for a TSO field, minus the header and variable prof bit. */
 #define tso_payload_offset(s_type, field) \
@@ -153,7 +166,7 @@
 
 /* Full byte offset for a TSO field, for use from Cmm */
 #define tso_field_offset_macro(str) \
-    printf("#define TSO_OFFSET_" str " (SIZEOF_StgHeader+SIZEOF_OPT_StgTSOProfInfo+SIZEOF_OPT_StgTSOParInfo+SIZEOF_OPT_StgTSOGranInfo+SIZEOF_OPT_StgTSODistInfo+OFFSET_" str ")\n");
+    printf("#define TSO_OFFSET_" str " (SIZEOF_StgHeader+SIZEOF_OPT_StgTSOProfInfo+OFFSET_" str ")\n");
 
 #define tso_field_offset(s_type, field) \
     tso_payload_offset(s_type, field);  	\
@@ -182,13 +195,12 @@ main(int argc, char *argv[])
 #ifndef GEN_HASKELL
     printf("/* This file is created automatically.  Do not edit by hand.*/\n\n");
 
-    printf("#define STD_HDR_SIZE   %d\n", sizeofW(StgHeader) - sizeofW(StgProfHeader));
+    printf("#define STD_HDR_SIZE   %lu\n", (unsigned long)sizeofW(StgHeader) - sizeofW(StgProfHeader));
     /* grrr.. PROFILING is on so we need to subtract sizeofW(StgProfHeader) */
-    printf("#define PROF_HDR_SIZE  %d\n", sizeofW(StgProfHeader));
-    printf("#define GRAN_HDR_SIZE  %d\n", sizeofW(StgGranHeader));
+    printf("#define PROF_HDR_SIZE  %lu\n", (unsigned long)sizeofW(StgProfHeader));
 
-    printf("#define BLOCK_SIZE   %d\n", BLOCK_SIZE);
-    printf("#define MBLOCK_SIZE   %d\n", MBLOCK_SIZE);  
+    printf("#define BLOCK_SIZE   %u\n", BLOCK_SIZE);
+    printf("#define MBLOCK_SIZE   %u\n", MBLOCK_SIZE);
 
     printf("\n\n");
 #endif
@@ -219,13 +231,7 @@ main(int argc, char *argv[])
     field_offset(StgRegTable, rHpAlloc);
     struct_field(StgRegTable, rRet);
 
-    // Needed for SMP builds
-    field_offset(StgRegTable, rmp_tmp_w);
-    field_offset(StgRegTable, rmp_tmp1);
-    field_offset(StgRegTable, rmp_tmp2);
-    field_offset(StgRegTable, rmp_result1);
-    field_offset(StgRegTable, rmp_result2);
-
+    def_offset("stgEagerBlackholeInfo", FUN_OFFSET(stgEagerBlackholeInfo));
     def_offset("stgGCEnter1", FUN_OFFSET(stgGCEnter1));
     def_offset("stgGCFun", FUN_OFFSET(stgGCFun));
 
@@ -287,20 +293,15 @@ main(int argc, char *argv[])
     closure_field(StgTSO, saved_errno);
     closure_field(StgTSO, trec);
     closure_field(StgTSO, flags);
+    closure_field(StgTSO, dirty);
     closure_field_("StgTSO_CCCS", StgTSO, prof.CCCS);
     tso_field(StgTSO, sp);
     tso_field_offset(StgTSO, stack);
     tso_field(StgTSO, stack_size);
 
     struct_size(StgTSOProfInfo);
-    struct_size(StgTSOParInfo);
-    struct_size(StgTSOGranInfo);
-    struct_size(StgTSODistInfo);
 
     opt_struct_size(StgTSOProfInfo,PROFILING);
-    opt_struct_size(StgTSOParInfo,PAR);
-    opt_struct_size(StgTSOGranInfo,GRAN);
-    opt_struct_size(StgTSODistInfo,DIST);
 
     closure_field(StgUpdateFrame, updatee);
 
@@ -309,23 +310,23 @@ main(int argc, char *argv[])
 
     closure_size(StgPAP);
     closure_field(StgPAP, n_args);
-    closure_field(StgPAP, fun);
+    closure_field_gcptr(StgPAP, fun);
     closure_field(StgPAP, arity);
     closure_payload(StgPAP, payload);
 
     thunk_size(StgAP);
     closure_field(StgAP, n_args);
-    closure_field(StgAP, fun);
+    closure_field_gcptr(StgAP, fun);
     closure_payload(StgAP, payload);
 
     thunk_size(StgAP_STACK);
     closure_field(StgAP_STACK, size);
-    closure_field(StgAP_STACK, fun);
+    closure_field_gcptr(StgAP_STACK, fun);
     closure_payload(StgAP_STACK, payload);
 
     thunk_size(StgSelector);
 
-    closure_field(StgInd, indirectee);
+    closure_field_gcptr(StgInd, indirectee);
 
     closure_size(StgMutVar);
     closure_field(StgMutVar, var);
@@ -333,12 +334,15 @@ main(int argc, char *argv[])
     closure_size(StgAtomicallyFrame);
     closure_field(StgAtomicallyFrame, code);
     closure_field(StgAtomicallyFrame, next_invariant_to_check);
+    closure_field(StgAtomicallyFrame, result);
 
     closure_field(StgInvariantCheckQueue, invariant);
     closure_field(StgInvariantCheckQueue, my_execution);
     closure_field(StgInvariantCheckQueue, next_queue_entry);
 
     closure_field(StgAtomicInvariant, code);
+
+    closure_field(StgTRecHeader, enclosing_trec);
 
     closure_size(StgCatchSTMFrame);
     closure_field(StgCatchSTMFrame, handler);
@@ -352,6 +356,8 @@ main(int argc, char *argv[])
     closure_field(StgTVarWatchQueue, closure);
     closure_field(StgTVarWatchQueue, next_queue_entry);
     closure_field(StgTVarWatchQueue, prev_queue_entry);
+
+    closure_field(StgTVar, current_value);
 
     closure_size(StgWeak);
     closure_field(StgWeak,link);
@@ -418,11 +424,5 @@ main(int argc, char *argv[])
     struct_field(StgAsyncIOResult, errCode);
 #endif
 
-    struct_size(MP_INT);
-    struct_field(MP_INT,_mp_alloc);
-    struct_field(MP_INT,_mp_size);
-    struct_field(MP_INT,_mp_d);
-
-    ctype(mp_limb_t);
     return 0;
 }

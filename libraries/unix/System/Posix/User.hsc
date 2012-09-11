@@ -167,13 +167,13 @@ getGroupEntryForID :: GroupID -> IO GroupEntry
 #ifdef HAVE_GETGRGID_R
 getGroupEntryForID gid = do
   allocaBytes (#const sizeof(struct group)) $ \pgr ->
-    allocaBytes grBufSize $ \pbuf ->
-      alloca $ \ ppgr -> do
-        throwErrorIfNonZero_ "getGroupEntryForID" $
-	     c_getgrgid_r gid pgr pbuf (fromIntegral grBufSize) ppgr
-	throwErrnoIfNull "getGroupEntryForID" $
-	     peekElemOff ppgr 0
-	unpackGroupEntry pgr
+    alloca $ \ ppgr -> do
+      throwErrorIfNonZero_ "getGroupEntryForID" $
+	   doubleAllocWhile isERANGE grBufSize $ \s b ->
+	     c_getgrgid_r gid pgr b (fromIntegral s) ppgr
+      _ <- throwErrnoIfNull "getGroupEntryForID" $
+	   peekElemOff ppgr 0
+      unpackGroupEntry pgr
 
 
 foreign import ccall unsafe "getgrgid_r"
@@ -190,19 +190,19 @@ getGroupEntryForName :: String -> IO GroupEntry
 #ifdef HAVE_GETGRNAM_R
 getGroupEntryForName name = do
   allocaBytes (#const sizeof(struct group)) $ \pgr ->
-    allocaBytes grBufSize $ \pbuf ->
-      alloca $ \ ppgr ->
-        withCString name $ \ pstr -> do
-          throwErrorIfNonZero_ "getGroupEntryForName" $
-            c_getgrnam_r pstr pgr pbuf (fromIntegral grBufSize) ppgr
-          r <- peekElemOff ppgr 0
-          when (r == nullPtr) $
-            ioError $ flip ioeSetErrorString "no group name"
-                    $ mkIOError doesNotExistErrorType
-                                "getGroupEntryForName"
-                                Nothing
-                                (Just name)
-          unpackGroupEntry pgr
+    alloca $ \ ppgr ->
+      withCString name $ \ pstr -> do
+	throwErrorIfNonZero_ "getGroupEntryForName" $
+	  doubleAllocWhile isERANGE grBufSize $ \s b ->
+	    c_getgrnam_r pstr pgr b (fromIntegral s) ppgr
+	r <- peekElemOff ppgr 0
+	when (r == nullPtr) $
+	  ioError $ flip ioeSetErrorString "no group name"
+		  $ mkIOError doesNotExistErrorType
+			      "getGroupEntryForName"
+			      Nothing
+			      (Just name)
+	unpackGroupEntry pgr
 
 foreign import ccall unsafe "getgrnam_r"
   c_getgrnam_r :: CString -> Ptr CGroup -> CString
@@ -213,6 +213,12 @@ getGroupEntryForName = error "System.Posix.User.getGroupEntryForName: not suppor
 
 -- | @getAllGroupEntries@ returns all group entries on the system by
 --   repeatedly calling @getgrent@
+
+--
+-- getAllGroupEntries may fail with isDoesNotExistError on Linux due to
+-- this bug in glibc:
+--   http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=466647
+--
 getAllGroupEntries :: IO [GroupEntry]
 #ifdef HAVE_GETGRENT
 getAllGroupEntries =
@@ -235,9 +241,9 @@ getAllGroupEntries = error "System.Posix.User.getAllGroupEntries: not supported"
 #if defined(HAVE_GETGRGID_R) || defined(HAVE_GETGRNAM_R)
 grBufSize :: Int
 #if defined(HAVE_SYSCONF) && defined(HAVE_SC_GETGR_R_SIZE_MAX)
-grBufSize = sysconfWithDefault 2048 (#const _SC_GETGR_R_SIZE_MAX)
+grBufSize = sysconfWithDefault 1024 (#const _SC_GETGR_R_SIZE_MAX)
 #else
-grBufSize = 2048	-- just assume some value (1024 is too small on OpenBSD)
+grBufSize = 1024
 #endif
 #endif
 
@@ -284,15 +290,15 @@ getUserEntryForID :: UserID -> IO UserEntry
 #ifdef HAVE_GETPWUID_R
 getUserEntryForID uid = do
   allocaBytes (#const sizeof(struct passwd)) $ \ppw ->
-    allocaBytes pwBufSize $ \pbuf ->
-      alloca $ \ pppw -> do
-        throwErrorIfNonZero_ "getUserEntryForID" $
-	     c_getpwuid_r uid ppw pbuf (fromIntegral pwBufSize) pppw
-	throwErrnoIfNull "getUserEntryForID" $
-	     peekElemOff pppw 0
-	unpackUserEntry ppw
+    alloca $ \ pppw -> do
+      throwErrorIfNonZero_ "getUserEntryForID" $
+	   doubleAllocWhile isERANGE pwBufSize $ \s b ->
+	     c_getpwuid_r uid ppw b (fromIntegral s) pppw
+      _ <- throwErrnoIfNull "getUserEntryForID" $
+	   peekElemOff pppw 0
+      unpackUserEntry ppw
 
-foreign import ccall unsafe "getpwuid_r"
+foreign import ccall unsafe "__hsunix_getpwuid_r"
   c_getpwuid_r :: CUid -> Ptr CPasswd -> 
 			CString -> CSize -> Ptr (Ptr CPasswd) -> IO CInt
 #elif HAVE_GETPWUID
@@ -314,21 +320,21 @@ getUserEntryForName :: String -> IO UserEntry
 #if HAVE_GETPWNAM_R
 getUserEntryForName name = do
   allocaBytes (#const sizeof(struct passwd)) $ \ppw ->
-    allocaBytes pwBufSize $ \pbuf ->
-      alloca $ \ pppw ->
-        withCString name $ \ pstr -> do
-          throwErrorIfNonZero_ "getUserEntryForName" $
-            c_getpwnam_r pstr ppw pbuf (fromIntegral pwBufSize) pppw
-          r <- peekElemOff pppw 0
-          when (r == nullPtr) $
-            ioError $ flip ioeSetErrorString "no user name"
-                    $ mkIOError doesNotExistErrorType
-                                "getUserEntryForName"
-                                Nothing
-                                (Just name)
-          unpackUserEntry ppw
+    alloca $ \ pppw ->
+      withCString name $ \ pstr -> do
+	throwErrorIfNonZero_ "getUserEntryForName" $
+	  doubleAllocWhile isERANGE pwBufSize $ \s b ->
+	    c_getpwnam_r pstr ppw b (fromIntegral s) pppw
+	r <- peekElemOff pppw 0
+	when (r == nullPtr) $
+	  ioError $ flip ioeSetErrorString "no user name"
+		  $ mkIOError doesNotExistErrorType
+			      "getUserEntryForName"
+			      Nothing
+			      (Just name)
+	unpackUserEntry ppw
 
-foreign import ccall unsafe "getpwnam_r"
+foreign import ccall unsafe "__hsunix_getpwnam_r"
   c_getpwnam_r :: CString -> Ptr CPasswd
                -> CString -> CSize -> Ptr (Ptr CPasswd) -> IO CInt
 #elif HAVE_GETPWNAM
@@ -359,7 +365,7 @@ getAllUserEntries =
                      else do thisentry <- unpackUserEntry ppw
                              worker (thisentry : accum)
 
-foreign import ccall unsafe "getpwent"
+foreign import ccall unsafe "__hsunix_getpwent"
   c_getpwent :: IO (Ptr CPasswd)
 foreign import ccall unsafe "setpwent"
   c_setpwent :: IO ()
@@ -391,6 +397,14 @@ sysconfWithDefault def sc =
     unsafePerformIO $ do v <- fmap fromIntegral $ c_sysconf sc
                          return $ if v == (-1) then def else v
 #endif
+
+isERANGE :: Integral a => a -> Bool
+isERANGE = (== eRANGE) . Errno . fromIntegral
+
+doubleAllocWhile :: (a -> Bool) -> Int -> (Int -> Ptr b -> IO a) -> IO a
+doubleAllocWhile p s m = do
+  r <- allocaBytes s (m s)
+  if p r then doubleAllocWhile p (2 * s) m else return r
 
 unpackUserEntry :: Ptr CPasswd -> IO UserEntry
 unpackUserEntry ptr = do

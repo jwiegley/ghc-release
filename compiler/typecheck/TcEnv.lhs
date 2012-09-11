@@ -38,7 +38,7 @@ module TcEnv(
 	tcGetGlobalTyVars,
 
 	-- Template Haskell stuff
-	checkWellStaged, spliceOK, bracketOK, tcMetaTy, thLevel, 
+	checkWellStaged, tcMetaTy, thLevel, 
 	topIdLvl, thTopLevelId, thRnBrack, isBrackStage,
 
 	-- New Ids
@@ -70,11 +70,9 @@ import TypeRep
 import Class
 import Name
 import NameEnv
-import OccName
 import HscTypes
 import SrcLoc
 import Outputable
-import Maybes
 import Unique
 import FastString
 \end{code}
@@ -126,11 +124,8 @@ tcLookupGlobal name
 	}}}}}
 
 tcLookupField :: Name -> TcM Id		-- Returns the selector Id
-tcLookupField name = do
-    thing <- tcLookup name	-- Note [Record field lookup]
-    case thing of
-	AGlobal (AnId id) -> return id
-	thing -> wrongThingErr "field name" thing name
+tcLookupField name 
+  = tcLookupId name	-- Note [Record field lookup]
 
 {- Note [Record field lookup]
    ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -176,9 +171,13 @@ tcLookupLocatedTyCon = addLocM tcLookupTyCon
 
 -- Look up the instance tycon of a family instance.
 --
--- The match must be unique - ie, match exactly one instance - but the 
--- type arguments used for matching may be more specific than those of 
--- the family instance declaration.
+-- The match may be ambiguous (as we know that overlapping instances have
+-- identical right-hand sides under overlapping substitutions - see
+-- 'FamInstEnv.lookupFamInstEnvConflicts').  However, the type arguments used
+-- for matching must be equal to or be more specific than those of the family
+-- instance declaration.  We pick one of the matches in case of ambiguity; as
+-- the right-hand sides are identical under the match substitution, the choice
+-- does not matter.
 --
 -- Return the instance tycon and its type instance.  For example, if we have
 --
@@ -199,10 +198,15 @@ tcLookupFamInst tycon tys
        ; eps <- getEps
        ; let instEnv = (eps_fam_inst_env eps, tcg_fam_inst_env env)
        ; case lookupFamInstEnv instEnv tycon tys of
-	   [(fam_inst, rep_tys)] -> return $ Just (famInstTyCon fam_inst, 
-                                                   rep_tys)
-	   _                     -> return Nothing
+	   []                      -> return Nothing
+	   ((fam_inst, rep_tys):_) 
+             -> return $ Just (famInstTyCon fam_inst, rep_tys)
        }
+\end{code}
+
+\begin{code}
+instance MonadThings (IOEnv (Env TcGblEnv TcLclEnv)) where
+    lookupThing = tcLookupGlobal
 \end{code}
 
 %************************************************************************
@@ -333,7 +337,7 @@ tcExtendTyVarEnv2 binds thing_inside = do
                    tcl_tyvars = gtvs,
                    tcl_rdr = rdr_env}) <- getLclEnv
     let
-	rdr_env'   = extendLocalRdrEnv rdr_env (map fst binds)
+	rdr_env'   = extendLocalRdrEnvList rdr_env (map fst binds)
 	new_tv_set = tcTyVarsOfTypes (map snd binds)
  	le'        = extendNameEnvList le [(name, ATyVar name ty) | (name, ty) <- binds]
 
@@ -404,7 +408,7 @@ tc_extend_local_id_env env th_lvl names_w_ids thing_inside
 						  _        -> Wobbly})
     		      | (name,id) <- names_w_ids, let id_ty = idType id]
     le'		    = extendNameEnvList (tcl_env env) extra_env
-    rdr_env'	    = extendLocalRdrEnv (tcl_rdr env) [name | (name,_) <- names_w_ids]
+    rdr_env'	    = extendLocalRdrEnvList (tcl_rdr env) [name | (name,_) <- names_w_ids]
 \end{code}
 
 
@@ -522,39 +526,25 @@ tcExtendRules lcl_rules thing_inside
 %************************************************************************
 
 \begin{code}
-instance Outputable ThStage where
-   ppr Comp	     = text "Comp"
-   ppr (Brack l _ _) = text "Brack" <+> int l
-   ppr (Splice l)    = text "Splice" <+> int l
-
-
-thLevel :: ThStage -> ThLevel
-thLevel Comp	      = topLevel
-thLevel (Splice l)    = l
-thLevel (Brack l _ _) = l
-
-
 checkWellStaged :: SDoc		-- What the stage check is for
 		-> ThLevel 	-- Binding level (increases inside brackets)
-	        -> ThStage	-- Use stage
+	        -> ThLevel	-- Use stage
 		-> TcM ()	-- Fail if badly staged, adding an error
-checkWellStaged pp_thing bind_lvl use_stage
+checkWellStaged pp_thing bind_lvl use_lvl
   | use_lvl >= bind_lvl 	-- OK! Used later than bound
   = return ()			-- E.g.  \x -> [| $(f x) |]
 
-  | bind_lvl == topLevel	-- GHC restriction on top level splices
+  | bind_lvl == outerLevel	-- GHC restriction on top level splices
   = failWithTc $ 
     sep [ptext (sLit "GHC stage restriction:") <+>  pp_thing,
-	 nest 2 (ptext (sLit "is used in a top-level splice, and must be imported, not defined locally"))]
+	 nest 2 (vcat [ ptext (sLit "is used in a top-level splice or annotation,")
+                      , ptext (sLit "and must be imported, not defined locally")])]
 
   | otherwise			-- Badly staged
   = failWithTc $ 		-- E.g.  \x -> $(f x)
     ptext (sLit "Stage error:") <+> pp_thing <+> 
 	hsep   [ptext (sLit "is bound at stage") <+> ppr bind_lvl,
 		ptext (sLit "but used at stage") <+> ppr use_lvl]
-  where
-    use_lvl = thLevel use_stage
-
 
 topIdLvl :: Id -> ThLevel
 -- Globals may either be imported, or may be from an earlier "chunk" 
@@ -566,18 +556,8 @@ topIdLvl :: Id -> ThLevel
 --	$( f x )
 -- By the time we are prcessing the $(f x), the binding for "x" 
 -- will be in the global env, not the local one.
-topIdLvl id | isLocalId id = topLevel
+topIdLvl id | isLocalId id = outerLevel
 	    | otherwise    = impLevel
-
--- Indicates the legal transitions on bracket( [| |] ).
-bracketOK :: ThStage -> Maybe ThLevel
-bracketOK (Brack _ _ _) = Nothing	-- Bracket illegal inside a bracket
-bracketOK stage         = Just (thLevel stage + 1)
-
--- Indicates the legal transitions on splice($).
-spliceOK :: ThStage -> Maybe ThLevel
-spliceOK (Splice _) = Nothing	-- Splice illegal inside splice
-spliceOK stage      = Just (thLevel stage - 1)
 
 tcMetaTy :: Name -> TcM Type
 -- Given the name of a Template Haskell data type, 
@@ -634,6 +614,7 @@ data InstBindings a
 	(LHsBinds a)		-- Bindings for the instance methods
 	[LSig a]		-- User pragmas recorded for generating 
 				-- specialised instances
+	Bool			-- True <=> This code came from a standalone deriving clause
 
   | NewTypeDerived              -- Used for deriving instances of newtypes, where the
 	CoercionI		-- witness dictionary is identical to the argument 
@@ -649,8 +630,8 @@ pprInstInfo info = vcat [ptext (sLit "InstInfo:") <+> ppr (idType (iDFunId info)
 pprInstInfoDetails :: OutputableBndr a => InstInfo a -> SDoc
 pprInstInfoDetails info = pprInstInfo info $$ nest 2 (details (iBinds info))
   where
-    details (VanillaInst b _)  = pprLHsBinds b
-    details (NewTypeDerived _) = text "Derived from the representation type"
+    details (VanillaInst b _ _) = pprLHsBinds b
+    details (NewTypeDerived _)  = text "Derived from the representation type"
 
 simpleInstInfoClsTy :: InstInfo a -> (Class, Type)
 simpleInstInfoClsTy info = case instanceHead (iSpec info) of
@@ -671,17 +652,13 @@ name, like otber top-level names, and hence must be made with newGlobalBinder.
 
 \begin{code}
 newDFunName :: Class -> [Type] -> SrcSpan -> TcM Name
-newDFunName clas (ty:_) loc
-  = do	{ index   <- nextDFunIndex
-	; is_boot <- tcIsHsBoot
+newDFunName clas tys loc
+  = do	{ is_boot <- tcIsHsBoot
 	; mod     <- getModule
 	; let info_string = occNameString (getOccName clas) ++ 
-			    occNameString (getDFunTyKey ty)
-	      dfun_occ = mkDFunOcc info_string is_boot index
-
+			    concatMap (occNameString.getDFunTyKey) tys
+        ; dfun_occ <- chooseUniqueOccTc (mkDFunOcc info_string is_boot)
 	; newGlobalBinder mod dfun_occ loc }
-
-newDFunName clas [] loc = pprPanic "newDFunName" (ppr clas <+> ppr loc)
 \end{code}
 
 Make a name for the representation tycon of a family instance.  It's an
@@ -689,12 +666,13 @@ Make a name for the representation tycon of a family instance.  It's an
 newGlobalBinder.
 
 \begin{code}
-newFamInstTyConName :: Name -> SrcSpan -> TcM Name
-newFamInstTyConName tc_name loc
-  = do	{ index <- nextDFunIndex
-	; mod   <- getModule
-	; let occ = nameOccName tc_name
-	; newGlobalBinder mod (mkInstTyTcOcc index occ) loc }
+newFamInstTyConName :: Name -> [Type] -> SrcSpan -> TcM Name
+newFamInstTyConName tc_name tys loc
+  = do	{ mod   <- getModule
+	; let info_string = occNameString (getOccName tc_name) ++ 
+			    concatMap (occNameString.getDFunTyKey) tys
+        ; occ   <- chooseUniqueOccTc (mkInstTyTcOcc info_string)
+	; newGlobalBinder mod occ loc }
 \end{code}
 
 Stable names used for foreign exports and annotations.

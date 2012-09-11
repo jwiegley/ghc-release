@@ -8,8 +8,8 @@
 
 #include "PosixSource.h"
 #include "Rts.h"
+
 #include "RtsUtils.h"
-#include "RtsFlags.h"
 #include "Profiling.h"
 #include "ProfHeap.h"
 #include "Stats.h"
@@ -20,8 +20,6 @@
 #include "Printer.h"
 
 #include <string.h>
-#include <stdlib.h>
-#include <math.h>
 
 /* -----------------------------------------------------------------------------
  * era stores the current time period.  It is the same as the
@@ -95,87 +93,7 @@ static void aggregateCensusInfo( void );
 
 static void dumpCensus( Census *census );
 
-/* ----------------------------------------------------------------------------
-   Closure Type Profiling;
-   ------------------------------------------------------------------------- */
-
-#ifndef PROFILING
-static char *type_names[] = {
-    "INVALID_OBJECT",
-    "CONSTR",
-    "CONSTR_1_0",
-    "CONSTR_0_1",
-    "CONSTR_2_0",
-    "CONSTR_1_1",
-    "CONSTR_0_2",
-    "CONSTR_STATIC",
-    "CONSTR_NOCAF_STATIC",
-    "FUN",
-    "FUN_1_0",
-    "FUN_0_1",
-    "FUN_2_0",
-    "FUN_1_1",
-    "FUN_0_2",
-    "FUN_STATIC",
-    "THUNK",
-    "THUNK_1_0",
-    "THUNK_0_1",
-    "THUNK_2_0",
-    "THUNK_1_1",
-    "THUNK_0_2",
-    "THUNK_STATIC",
-    "THUNK_SELECTOR",
-    "BCO",
-    "AP",
-    "PAP",
-    "AP_STACK",
-    "IND",
-    "IND_OLDGEN",
-    "IND_PERM",
-    "IND_OLDGEN_PERM",
-    "IND_STATIC",
-    "RET_BCO",
-    "RET_SMALL",
-    "RET_BIG",
-    "RET_DYN",
-    "RET_FUN",
-    "UPDATE_FRAME",
-    "CATCH_FRAME",
-    "STOP_FRAME",
-    "CAF_BLACKHOLE",
-    "BLACKHOLE",
-    "SE_BLACKHOLE",
-    "SE_CAF_BLACKHOLE",
-    "MVAR_CLEAN",
-    "MVAR_DIRTY",
-    "ARR_WORDS",
-    "MUT_ARR_PTRS_CLEAN",
-    "MUT_ARR_PTRS_DIRTY",
-    "MUT_ARR_PTRS_FROZEN0",
-    "MUT_ARR_PTRS_FROZEN",
-    "MUT_VAR_CLEAN",
-    "MUT_VAR_DIRTY",
-    "WEAK",
-    "STABLE_NAME",
-    "TSO",
-    "BLOCKED_FETCH",
-    "FETCH_ME",
-    "FETCH_ME_BQ",
-    "RBH",
-    "EVACUATED",
-    "REMOTE_REF",
-    "TVAR_WATCH_QUEUE",
-    "INVARIANT_CHECK_QUEUE",
-    "ATOMIC_INVARIANT",
-    "TVAR",
-    "TREC_CHUNK",
-    "TREC_HEADER",
-    "ATOMICALLY_FRAME",
-    "CATCH_RETRY_FRAME",
-    "CATCH_STM_FRAME",
-    "N_CLOSURE_TYPES"
-  };
-#endif
+static rtsBool closureSatisfiesConstraints( StgClosure* p );
 
 /* ----------------------------------------------------------------------------
  * Find the "closure identity", which is a unique pointer reresenting
@@ -220,7 +138,7 @@ closureIdentity( StgClosure *p )
         case CONSTR_NOCAF_STATIC:
             return GET_CON_DESC(itbl_to_con_itbl(info));
         default:
-            return type_names[info->type];
+            return closure_type_names[info->type];
         }
     }
 
@@ -617,7 +535,6 @@ fprint_ccs(FILE *fp, CostCentreStack *ccs, nat max_length)
     }
     fprintf(fp, "%s", buf);
 }
-#endif /* PROFILING */
 
 rtsBool
 strMatchesSelector( char* str, char* sel )
@@ -643,11 +560,13 @@ strMatchesSelector( char* str, char* sel )
    }
 }
 
+#endif /* PROFILING */
+
 /* -----------------------------------------------------------------------------
  * Figure out whether a closure should be counted in this census, by
  * testing against all the specified constraints.
  * -------------------------------------------------------------------------- */
-rtsBool
+static rtsBool
 closureSatisfiesConstraints( StgClosure* p )
 {
 #if !defined(PROFILING)
@@ -960,8 +879,6 @@ heapCensusChain( Census *census, bdescr *bd )
 	    case IND_OLDGEN:
 	    case IND_OLDGEN_PERM:
 	    case CAF_BLACKHOLE:
-	    case SE_CAF_BLACKHOLE:
-	    case SE_BLACKHOLE:
 	    case BLACKHOLE:
 	    case FUN_1_0:
 	    case FUN_0_1:
@@ -1016,7 +933,7 @@ heapCensusChain( Census *census, bdescr *bd )
 		
 	    case ARR_WORDS:
 		prim = rtsTrue;
-		size = arr_words_sizeW(stgCast(StgArrWords*,p));
+		size = arr_words_sizeW((StgArrWords*)p);
 		break;
 		
 	    case MUT_ARR_PTRS_CLEAN:

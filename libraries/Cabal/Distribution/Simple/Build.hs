@@ -13,11 +13,6 @@
 -- compiler-specific actions. It does do some non-compiler specific bits like
 -- running pre-processors.
 --
--- There's some stuff to do with generating @makefiles@ which is a well hidden
--- feature that's used to build libraries inside the GHC build system but which
--- we'd like to kill off and replace with something better (doing our own
--- dependency analysis properly).
---
 
 {- Copyright (c) 2003-2005, Isaac Jones
 All rights reserved.
@@ -52,7 +47,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -}
 
 module Distribution.Simple.Build (
     build,
-    makefile,
 
     initialBuildSteps,
     writeAutogenFiles,
@@ -60,6 +54,7 @@ module Distribution.Simple.Build (
 
 import qualified Distribution.Simple.GHC  as GHC
 import qualified Distribution.Simple.JHC  as JHC
+import qualified Distribution.Simple.LHC  as LHC
 import qualified Distribution.Simple.NHC  as NHC
 import qualified Distribution.Simple.Hugs as Hugs
 
@@ -69,22 +64,26 @@ import qualified Distribution.Simple.Build.PathsModule as Build.PathsModule
 import Distribution.Package
          ( Package(..) )
 import Distribution.Simple.Compiler
-         ( CompilerFlavor(..), compilerFlavor )
+         ( CompilerFlavor(..), compilerFlavor, PackageDB(..) )
 import Distribution.PackageDescription
          ( PackageDescription(..), BuildInfo(..)
-         , Executable(..), Library(..), hasLibs )
+         , Library(..), Executable(..) )
 import qualified Distribution.ModuleName as ModuleName
 
 import Distribution.Simple.Setup
-         ( BuildFlags(..), MakefileFlags(..), fromFlag )
+         ( BuildFlags(..), fromFlag )
 import Distribution.Simple.PreProcess
          ( preprocessSources, PPSuffixHandler )
 import Distribution.Simple.LocalBuildInfo
-         ( LocalBuildInfo(compiler, buildDir) )
+         ( LocalBuildInfo(compiler, buildDir, withPackageDB)
+         , ComponentLocalBuildInfo, withLibLBI, withExeLBI )
 import Distribution.Simple.BuildPaths
          ( autogenModulesDir, autogenModuleName, cppHeaderName )
+import Distribution.Simple.Register
+         ( registerPackage, generateRegistrationInfo )
 import Distribution.Simple.Utils
-         ( createDirectoryIfMissingVerbose, die, setupMessage, rewriteFile )
+         ( createDirectoryIfMissingVerbose, rewriteFile
+         , die, info, setupMessage )
 
 import Distribution.Verbosity
          ( Verbosity )
@@ -94,7 +93,7 @@ import Distribution.Text
 import Data.Maybe
          ( maybeToList )
 import Control.Monad
-         ( unless, when )
+         ( unless )
 import System.FilePath
          ( (</>), (<.>) )
 
@@ -111,29 +110,58 @@ build pkg_descr lbi flags suffixes = do
       verbosity = fromFlag (buildVerbosity flags)
   initialBuildSteps distPref pkg_descr lbi verbosity suffixes
   setupMessage verbosity "Building" (packageId pkg_descr)
-  case compilerFlavor (compiler lbi) of
-    GHC  -> GHC.build  pkg_descr lbi verbosity
-    JHC  -> JHC.build  pkg_descr lbi verbosity
-    Hugs -> Hugs.build pkg_descr lbi verbosity
-    NHC  -> NHC.build  pkg_descr lbi verbosity
-    _    -> die ("Building is not supported with this compiler.")
 
-makefile :: PackageDescription  -- ^mostly information from the .cabal file
-         -> LocalBuildInfo -- ^Configuration information
-         -> MakefileFlags -- ^Flags that the user passed to makefile
-         -> [ PPSuffixHandler ] -- ^preprocessors to run before compiling
-         -> IO ()
-makefile pkg_descr lbi flags suffixes = do
-  let distPref  = fromFlag (makefileDistPref flags)
-      verbosity = fromFlag (makefileVerbosity flags)
-  initialBuildSteps distPref pkg_descr lbi verbosity suffixes
-  when (not (hasLibs pkg_descr)) $
-      die ("Makefile is only supported for libraries, currently.")
-  setupMessage verbosity "Generating Makefile" (packageId pkg_descr)
-  case compilerFlavor (compiler lbi) of
-    GHC  -> GHC.makefile  pkg_descr lbi flags
-    _    -> die ("Generating a Makefile is not supported for this compiler.")
+  internalPackageDB <- createInternalPackageDB distPref
 
+  withLibLBI pkg_descr lbi $ \lib clbi -> do
+    info verbosity "Building library..."
+    buildLib verbosity pkg_descr lbi lib clbi
+
+    installedPkgInfo <- generateRegistrationInfo verbosity pkg_descr lib
+                               lbi clbi True{-inplace-} distPref
+
+    -- Register the library in-place, so exes can depend
+    -- on internally defined libraries.
+    registerPackage verbosity
+      installedPkgInfo pkg_descr lbi True{-inplace-} internalPackageDB
+
+  -- Use the internal package db for the exes.
+  let lbi' = lbi { withPackageDB = withPackageDB lbi ++ [internalPackageDB] }
+
+  withExeLBI pkg_descr lbi' $ \exe clbi -> do
+    info verbosity $ "Building executable " ++ exeName exe ++ "..."
+    buildExe verbosity pkg_descr lbi' exe clbi
+
+-- | Initialize a new package db file for libraries defined
+-- internally to the package.
+createInternalPackageDB :: FilePath -> IO PackageDB
+createInternalPackageDB distPref = do
+    let dbFile = distPref </> "package.conf.inplace"
+        packageDB = SpecificPackageDB dbFile
+    writeFile dbFile "[]"
+    return packageDB
+
+buildLib :: Verbosity -> PackageDescription -> LocalBuildInfo
+                      -> Library            -> ComponentLocalBuildInfo -> IO ()
+buildLib verbosity pkg_descr lbi lib clbi =
+  case compilerFlavor (compiler lbi) of
+    GHC  -> GHC.buildLib  verbosity pkg_descr lbi lib clbi
+    JHC  -> JHC.buildLib  verbosity pkg_descr lbi lib clbi
+    LHC  -> LHC.buildLib  verbosity pkg_descr lbi lib clbi
+    Hugs -> Hugs.buildLib verbosity pkg_descr lbi lib clbi
+    NHC  -> NHC.buildLib  verbosity pkg_descr lbi lib clbi
+    _    -> die "Building is not supported with this compiler."
+
+buildExe :: Verbosity -> PackageDescription -> LocalBuildInfo
+                      -> Executable         -> ComponentLocalBuildInfo -> IO ()
+buildExe verbosity pkg_descr lbi exe clbi =
+  case compilerFlavor (compiler lbi) of
+    GHC  -> GHC.buildExe  verbosity pkg_descr lbi exe clbi
+    JHC  -> JHC.buildExe  verbosity pkg_descr lbi exe clbi
+    LHC  -> LHC.buildExe  verbosity pkg_descr lbi exe clbi
+    Hugs -> Hugs.buildExe verbosity pkg_descr lbi exe clbi
+    NHC  -> NHC.buildExe  verbosity pkg_descr lbi exe clbi
+    _    -> die "Building is not supported with this compiler."
 
 initialBuildSteps :: FilePath -- ^"dist" prefix
                   -> PackageDescription  -- ^mostly information from the .cabal file

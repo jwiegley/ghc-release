@@ -116,7 +116,16 @@ test('T2205', normal, compile, [''])
 test('2334', normal, compile, [''])
 test('T2506', normal, compile, [''])
 test('T2914', normal, compile, [''])
+test('T3221', normal, compile, [''])
+test('T3262', normal, compile, [''])
+test('T3371', normal, compile, [''])
+test('T1074', normal, compile, ['-Wall'])
+test('T3640', normal, compile, [''])
 
 test('timing001', normal, compile, [''])
 test('timing002', normal, compile, [''])
 test('timing003', normal, compile, [''])
+
+test('T1792_imports', extra_clean(['T1792_imports.imports']), run_command,
+     ['$MAKE -s --no-print-directory T1792_imports'])
+

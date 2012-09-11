@@ -543,31 +543,6 @@ $ cat foo.hspp</screen>
     </variablelist>
   </sect2>
 
-  <sect2 id="options-C-compiler">
-    <title>Options affecting the C compiler (if applicable)</title>
-
-    <indexterm><primary>include-file options</primary></indexterm>
-    <indexterm><primary>C compiler options</primary></indexterm>
-    <indexterm><primary>GCC options</primary></indexterm>
-
-    <para>If you are compiling with lots of foreign calls, you may
-    need to tell the C&nbsp;compiler about some
-    <literal>&num;include</literal> files.  The Right Way to do this is to
-      add an <literal>INCLUDE</literal> pragma to the top of your source file
-      (<xref linkend="include-pragma" />):</para>
-
-<programlisting>{-# INCLUDE &lt;X/Xlib.h&gt; #-}</programlisting>
-      
-    <para>Sometimes this isn't convenient.  In those cases there's an
-      equivalent command-line option:</para>
-
-<screen>% ghc -c '-#include &lt;X/Xlib.h&gt;' Xstuff.lhs</screen>
-
-    <indexterm><primary><option>-#include</option></primary>
-    </indexterm>
-
-  </sect2>
-
   <sect2 id="options-codegen">
     <title>Options affecting code generation</title>
 
@@ -642,12 +617,10 @@ $ cat foo.hspp</screen>
         </term>
         <listitem>
           <para>Generate position-independent code (code that can be put into
-          shared libraries). This currently works on Mac OS X; it works on
-          PowerPC Linux when using the native code generator (-fasm).
-          It is not quite ready to be used yet for x86 Linux.
-          On Windows, position-independent code is never used,
-          and on PowerPC64 Linux, position-independent code is always used,
-          so the flag is a no-op on those platforms.</para>
+          shared libraries). This currently works on Linux x86 and x86-64 when
+          using the native code generator (-fasm).
+          On Windows, position-independent code is never used
+          so the flag is a no-op on that platform.</para>
         </listitem>
       </varlistentry>
 
@@ -659,8 +632,8 @@ $ cat foo.hspp</screen>
           <para>When generating code, assume that entities imported from a
           different package will reside in a different shared library or
           binary.</para>
-          <para>Note that this option also causes GHC to use shared libraries
-          when linking.</para>
+          <para>Note that using this option when linking causes GHC to link
+	  against shared libraries.</para>
         </listitem>
       </varlistentry>
     </variablelist>
@@ -825,8 +798,10 @@ $ cat foo.hspp</screen>
           <indexterm><primary><option>-dynamic</option></primary></indexterm>
         </term>
         <listitem>
-          <para>This flag switches to shared Haskell libraries for
-          linking. See <xref linkend="building-packages" /> on how to
+          <para>This flag tells GHC to link against shared Haskell libraries.
+	  This flag only affects the selection of dependent libraries, not
+	  the form of the current target (see -shared).
+	  See <xref linkend="using-shared-libs" /> on how to
           create them.</para>
 
           <para>Note that this option also has an effect on
@@ -863,6 +838,19 @@ $ cat foo.hspp</screen>
         </listitem>
       </varlistentry>
 
+      <varlistentry>
+        <term>
+          <option>-dynload</option>
+          <indexterm><primary><option>-dynload</option></primary></indexterm>
+        </term>
+        <listitem>
+          <para>
+	    This flag selects one of a number of modes for finding shared
+	    libraries at runtime. See <xref linkend="finding-shared-libs"/> for
+	    a description of each mode.
+          </para>
+        </listitem>
+      </varlistentry>
 
       <varlistentry>
         <term>
@@ -966,23 +954,34 @@ $ cat foo.hspp</screen>
               machine.  See <xref linkend="using-smp" />.</para>
 
               <para>The ability to make a foreign call that does not
-              block all other Haskell threads.</para>
-
-              <para>The ability to invoke foreign exported Haskell
-              functions from multiple OS threads.</para>
+              block all other Haskell threads, and to invoke
+              foreign-exported Haskell functions from multiple OS
+              threads. See <xref linkend="ffi-threads" />.</para>
             </listitem>
           </itemizedlist>
+        </listitem>
+      </varlistentry>
 
-          <para>With <option>-threaded</option>, calls to foreign
-          functions are made using the same OS thread that created the
-          Haskell thread (if it was created by a call to a foreign
-          exported Haskell function), or an arbitrary OS thread
-          otherwise (if the Haskell thread was created by
-          <literal>forkIO</literal>).</para>
-
-          <para>More details on the use of "bound threads" in the
-          threaded runtime can be found in the <ulink
-          url="../libraries/base/Control-Concurrent.html"><literal>Control.Concurrent</literal></ulink> module.</para>
+      <varlistentry>
+        <term>
+          <option>-eventlog</option>
+          <indexterm><primary><option>-eventlog</option></primary></indexterm>
+        </term>
+        <listitem>
+          <para>
+            Link the program with the "eventlog" version of the
+            runtime system.  A program linked in this way can generate
+            a runtime trace of events (such as thread start/stop) to a
+            binary file
+            <literal><replaceable>program</replaceable>.eventlog</literal>,
+            which can then be interpreted later by various tools.  See
+            <xref linkend="rts-eventlog" /> for more information.
+          </para>
+          <para>
+            <option>-eventlog</option> can be used
+            with <option>-threaded</option>.  It is implied
+            by <option>-debug</option>.
+          </para>
         </listitem>
       </varlistentry>
 
@@ -1049,6 +1048,28 @@ $ cat foo.hspp</screen>
             <option>-optwindres</option> (<xref
                                             linkend="forcing-options-through"
               />).</para>
+        </listitem>
+      </varlistentry>
+          
+      <varlistentry>
+        <term>
+          <option>-fno-shared-implib</option>
+          <indexterm><primary><option>-fno-shared-implib</option></primary>
+          </indexterm>
+        </term>
+        <listitem>
+          <para>DLLs on Windows are typically linked to by linking to a corresponding
+            <literal>.lib</literal> or <literal>.dll.a</literal> - the so-called import library.
+            GHC will typically generate such a file for every DLL you create by compiling in
+            <literal>-shared</literal> mode. However, sometimes you don't want to pay the
+            disk-space cost of creating this import library, which can be substantial - it
+            might require as much space as the code itself, as Haskell DLLs tend to export
+            lots of symbols.</para>
+            
+          <para>As long as you are happy to only be able to link to the DLL using
+            <literal>GetProcAddress</literal> and friends, you can supply the
+            <option>-fno-shared-implib</option> flag to disable the creation of the import
+            library entirely.</para>
         </listitem>
       </varlistentry>
     </variablelist>

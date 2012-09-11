@@ -44,6 +44,40 @@ AC_DEFUN([FP_EVAL_STDERR],
 ])# FP_EVAL_STDERR
 
 
+# FP_ARG_WITH_PATH_GNU_PROG
+# --------------------
+# XXX
+#
+# $1 = the command to look for
+# $2 = the variable to set
+#
+AC_DEFUN([FP_ARG_WITH_PATH_GNU_PROG],
+[
+AC_ARG_WITH($2,
+[AC_HELP_STRING([--with-$2=ARG],
+        [Use ARG as the path to $2 [default=autodetect]])],
+[
+    if test "$HostOS" = "mingw32"
+    then
+        AC_MSG_WARN([Request to use $withval will be ignored])
+    else
+        $1=$withval
+    fi
+],
+[
+    if test "$HostOS" != "mingw32"
+    then
+        AC_PATH_PROG([$1], [$2])
+        if test -z "$$1"
+        then
+            AC_MSG_ERROR([cannot find $2 in your PATH, no idea how to link])
+        fi
+    fi
+]
+)
+]) # FP_ARG_WITH_PATH_GNU_PROG
+
+
 # FP_PROG_CONTEXT_DIFF
 # --------------------
 # Figure out how to do context diffs. Sets the output variable ContextDiffCmd.
@@ -237,17 +271,17 @@ fi
 AC_CACHE_CHECK([for version of happy], fptools_cv_happy_version,
 changequote(, )dnl
 [if test x"$HappyCmd" != x; then
-   fptools_cv_happy_version="`$HappyCmd -v |
-			  grep 'Happy Version' | sed -e 's/Happy Version \([^ ]*\).*/\1/g'`" ;
+   fptools_cv_happy_version=`"$HappyCmd" -v |
+			  grep 'Happy Version' | sed -e 's/Happy Version \([^ ]*\).*/\1/g'` ;
 else
    fptools_cv_happy_version="";
 fi;
 changequote([, ])dnl
 ])
-if test ! -f compiler/parser/Parser.hs || test ! -f compiler/main/ParsePkgConf.hs || test ! -f compiler/cmm/CmmParse.hs || test ! -f compiler/parser/ParserCore.hs
+if test ! -f compiler/parser/Parser.hs || test ! -f compiler/cmm/CmmParse.hs || test ! -f compiler/parser/ParserCore.hs
 then
-    FP_COMPARE_VERSIONS([$fptools_cv_happy_version],[-lt],[1.15],
-      [AC_MSG_ERROR([Happy version 1.15 or later is required to compile GHC.])])[]dnl
+    FP_COMPARE_VERSIONS([$fptools_cv_happy_version],[-lt],[1.16],
+      [AC_MSG_ERROR([Happy version 1.16 or later is required to compile GHC.])])[]
 fi
 HappyVersion=$fptools_cv_happy_version;
 AC_SUBST(HappyVersion)
@@ -272,8 +306,8 @@ fi
 AC_CACHE_CHECK([for version of alex], fptools_cv_alex_version,
 changequote(, )dnl
 [if test x"$AlexCmd" != x; then
-   fptools_cv_alex_version="`$AlexCmd -v |
-			  grep 'Alex [Vv]ersion' | sed -e 's/Alex [Vv]ersion \([0-9\.]*\).*/\1/g'`" ;
+   fptools_cv_alex_version=`"$AlexCmd" -v |
+			  grep 'Alex [Vv]ersion' | sed -e 's/Alex [Vv]ersion \([0-9\.]*\).*/\1/g'` ;
 else
    fptools_cv_alex_version="";
 fi;
@@ -282,44 +316,11 @@ changequote([, ])dnl
 if test ! -f compiler/cmm/CmmLex.hs || test ! -f compiler/parser/Lexer.hs
 then
     FP_COMPARE_VERSIONS([$fptools_cv_alex_version],[-lt],[2.1.0],
-      [AC_MSG_ERROR([Alex version 2.1.0 or later is required to compile GHC.])])[]dnl
+      [AC_MSG_ERROR([Alex version 2.1.0 or later is required to compile GHC.])])[]
 fi
 AlexVersion=$fptools_cv_alex_version;
 AC_SUBST(AlexVersion)
 ])
-
-
-# FP_PROG_LD
-# ----------
-# Sets the output variable LdCmd to the (non-Cygwin version of the) full path
-# of ld. Exits if no ld can be found
-AC_DEFUN([FP_PROG_LD],
-[
-if test -z "$1"
-then
-  AC_PATH_PROG([fp_prog_ld_raw], [ld])
-  if test -z "$fp_prog_ld_raw"; then
-    AC_MSG_ERROR([cannot find ld in your PATH, no idea how to link])
-  fi
-  LdCmd=$fp_prog_ld_raw
-  case $HostPlatform in
-    *mingw32) if test x${OSTYPE} != xmsys; then
-   	      LdCmd="`cygpath -w ${fp_prog_ld_raw} | sed -e 's@\\\\@/@g'`"
-                AC_MSG_NOTICE([normalized ld command to $LdCmd])
-              fi
-  	    # Insist on >= ld-2.15.x, since earlier versions doesn't handle
-  	    # the generation of relocatable object files with large amounts
-  	    # of relocations correctly. (cf. HSbase.o splittage-hack)
-  	    fp_prog_ld_version=`${LdCmd} --version | sed -n '/GNU ld/p' | tr -cd 0-9 | cut -b1-3`
-  	    FP_COMPARE_VERSIONS([$fp_prog_ld_version],[-lt],[214],
-                                  [AC_MSG_ERROR([GNU ld version later than 2.14 required to compile GHC on Windows.])])[]dnl
-              ;;
-  esac
-else
-  LdCmd="$1"
-fi
-AC_SUBST([LdCmd])
-])# FP_PROG_LD
 
 
 # FP_PROG_LD_X
@@ -327,7 +328,7 @@ AC_SUBST([LdCmd])
 # Sets the output variable LdXFlag to -x if ld supports this flag, otherwise the
 # variable's value is empty.
 AC_DEFUN([FP_PROG_LD_X],
-[AC_REQUIRE([FP_PROG_LD])
+[
 AC_CACHE_CHECK([whether ld understands -x], [fp_cv_ld_x],
 [echo 'foo() {}' > conftest.c
 ${CC-cc} -c conftest.c
@@ -351,7 +352,7 @@ AC_SUBST([LdXFlag])
 # Sets the output variable LdIsGNULd to YES or NO, depending on whether it is
 # GNU ld or not.
 AC_DEFUN([FP_PROG_LD_IS_GNU],
-[AC_REQUIRE([FP_PROG_LD])
+[
 AC_CACHE_CHECK([whether ld is GNU ld], [fp_cv_gnu_ld],
 [if ${LdCmd} --version 2> /dev/null | grep "GNU" > /dev/null 2>&1; then
   fp_cv_gnu_ld=yes
@@ -414,7 +415,7 @@ else
   touch conftest.dummy
   for fp_var in clqsZ clqs cqs clq cq ; do
      rm -f conftest.a
-     if $fp_prog_ar_raw $fp_var conftest.a conftest.dummy > /dev/null 2> /dev/null; then
+     if "$fp_prog_ar_raw" $fp_var conftest.a conftest.dummy > /dev/null 2> /dev/null; then
         fp_cv_prog_ar_args=$fp_var
         break
      fi
@@ -425,7 +426,8 @@ else
   fi
 fi])
 fp_prog_ar_args=$fp_cv_prog_ar_args
-AC_SUBST([ArCmd], ["$fp_prog_ar $fp_prog_ar_args"])
+AC_SUBST([ArCmd], ["$fp_prog_ar"])
+AC_SUBST([ArArgs], ["$fp_prog_ar_args"])
 
 ])# FP_PROG_AR_ARGS
 
@@ -518,32 +520,24 @@ fi
 if test "$fp_have_gcc" = "NO" -a -d $srcdir/ghc; then
   AC_MSG_ERROR([gcc is required])
 fi
-AC_CACHE_CHECK([version of gcc], [fp_gcc_version],
+GccLT34=
+AC_CACHE_CHECK([version of gcc], [fp_cv_gcc_version],
 [if test "$fp_have_gcc" = "YES"; then
-   fp_gcc_version="`$CC -v 2>&1 | grep 'version ' | sed -e 's/.*version [[^0-9]]*\([[0-9.]]*\).*/\1/g'`"
-   FP_COMPARE_VERSIONS([$fp_gcc_version], [-lt], [2.0],
-     [AC_MSG_ERROR([Need at least gcc version 2.0 (3.4+ recommended)])])
+   fp_cv_gcc_version="`$CC -v 2>&1 | grep 'version ' | sed -e 's/.*version [[^0-9]]*\([[0-9.]]*\).*/\1/g'`"
+   FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [3.0],
+     [AC_MSG_ERROR([Need at least gcc version 3.0 (3.4+ recommended)])])
+   # See #2770: gcc 2.95 doesn't work any more, apparently.  There probably
+   # isn't a very good reason for that, but for now just make configure
+   # fail.
+   FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [3.4], GccLT34=YES)
  else
-   fp_gcc_version="not-installed"
+   fp_cv_gcc_version="not-installed"
  fi
 ])
 AC_SUBST([HaveGcc], [$fp_have_gcc])
-AC_SUBST([GccVersion], [$fp_gcc_version])
+AC_SUBST([GccVersion], [$fp_cv_gcc_version])
+AC_SUBST(GccLT34)
 ])# FP_HAVE_GCC
-
-AC_DEFUN([FP_MINGW_GCC],
-[
-  case $HostOS_CPP in
-    mingw*)  AC_MSG_CHECKING([whether $CC is a mingw gcc])
-	     if $CC -v 2>&1 | grep mingw >/dev/null; then
-		AC_MSG_RESULT([yes])
-	     else
-		AC_MSG_RESULT([no])
-		AC_MSG_ERROR([Please use --with-gcc to specify a mingw gcc])
-	     fi;;
-    *) ;;	
-  esac
-])
 
 dnl Small feature test for perl version. Assumes PerlCmd
 dnl contains path to perl binary.
@@ -704,14 +698,28 @@ AS_VAR_POPDEF([fp_func])dnl
 # FP_GEN_DOCBOOK_XML
 # ------------------
 # Generates a DocBook XML V4.2 document in conftest.xml.
+#
+# It took a lot of experimentation to find a document that will cause
+# xsltproc to fail with an error code when the relevant
+# stylesheets/DTDs are not found.  I couldn't make xsltproc fail with
+# a single-file document, it seems a multi-file document is needed.
+# -- SDM 2009-06-03
+#
 AC_DEFUN([FP_GEN_DOCBOOK_XML],
-[rm -f conftest.xml
+[rm -f conftest.xml conftest-book.xml
 cat > conftest.xml << EOF
 <?xml version="1.0" encoding="iso-8859-1"?>
 <!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
-   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd" [[
+<!ENTITY conftest-book SYSTEM "conftest-book.xml">
+]]>
 <book id="test">
-  <title>A DocBook Test Document</title>
+&conftest-book;
+</book>
+EOF
+cat >conftest-book.xml << EOF
+<?xml version="1.0" encoding="iso-8859-1"?>
+  <title>A DocBook &ldquo;Test Document&rdquo;</title>
   <chapter id="id-one">
     <title>A Chapter Title</title>
     <para>This is a paragraph, referencing <xref linkend="id-two"/>.</para>
@@ -720,9 +728,21 @@ cat > conftest.xml << EOF
     <title>Another Chapter Title</title>
     <para>This is another paragraph, referencing <xref linkend="id-one"/>.</para>
   </chapter>
-</book>
 EOF
 ]) # FP_GEN_DOCBOOK_XML
+
+
+# FP_PROG_DBLATEX
+# ----------------
+# Sets the output variable DblatexCmd to the full path of dblatex,
+# which we use for building PDF and PS docs.
+# DblatexCmd is empty if dblatex could not be found.
+AC_DEFUN([FP_PROG_DBLATEX],
+[AC_PATH_PROG([DblatexCmd], [dblatex])
+if test -z "$DblatexCmd"; then
+  AC_MSG_WARN([cannot find dblatex in your PATH, you will not be able to build the PDF and PS documentation])
+fi
+])# FP_PROG_DBLATEX
 
 
 # FP_PROG_XSLTPROC
@@ -732,38 +752,33 @@ EOF
 AC_DEFUN([FP_PROG_XSLTPROC],
 [AC_PATH_PROG([XsltprocCmd], [xsltproc])
 if test -z "$XsltprocCmd"; then
-  AC_MSG_WARN([cannot find xsltproc in your PATH, you will not be able to build the documentation])
+  AC_MSG_WARN([cannot find xsltproc in your PATH, you will not be able to build the HTML documentation])
 fi
 ])# FP_PROG_XSLTPROC
 
 
-# FP_DIR_DOCBOOK_XSL(XSL-DIRS)
+# FP_DOCBOOK_XSL
 # ----------------------------
-# Check which of the directories XSL-DIRS contains DocBook XSL stylesheets. The
-# output variable DIR_DOCBOOK_XSL will contain the first usable directory or
-# will be empty if none could be found.
-AC_DEFUN([FP_DIR_DOCBOOK_XSL],
+# Check that we can process a DocBook XML document to HTML using xsltproc.
+AC_DEFUN([FP_DOCBOOK_XSL],
 [AC_REQUIRE([FP_PROG_XSLTPROC])dnl
 if test -n "$XsltprocCmd"; then
-  AC_CACHE_CHECK([for DocBook XSL stylesheet directory], fp_cv_dir_docbook_xsl,
+  AC_CACHE_CHECK([for DocBook XSL stylesheet], fp_cv_dir_docbook_xsl,
   [FP_GEN_DOCBOOK_XML
   fp_cv_dir_docbook_xsl=no
-  for fp_var in $1; do
-     if $XsltprocCmd ${fp_var}/html/docbook.xsl conftest.xml > /dev/null 2>&1; then
-        fp_cv_dir_docbook_xsl=$fp_var
-        break
-     fi
-  done
+  if $XsltprocCmd --nonet http://docbook.sourceforge.net/release/xsl/current/html/chunk.xsl conftest.xml > /dev/null 2>&1; then
+     fp_cv_dir_docbook_xsl=yes
+  fi
   rm -rf conftest*])
 fi
 if test x"$fp_cv_dir_docbook_xsl" = xno; then
   AC_MSG_WARN([cannot find DocBook XSL stylesheets, you will not be able to build the documentation])
-  DIR_DOCBOOK_XSL=
+  HAVE_DOCBOOK_XSL=NO
 else
-  DIR_DOCBOOK_XSL=$fp_cv_dir_docbook_xsl
+  HAVE_DOCBOOK_XSL=YES
 fi
-AC_SUBST([DIR_DOCBOOK_XSL])
-])# FP_DIR_DOCBOOK_XSL
+AC_SUBST([HAVE_DOCBOOK_XSL])
+])# FP_DOCBOOK_XSL
 
 
 # FP_PROG_XMLLINT
@@ -785,7 +800,7 @@ AC_DEFUN([FP_CHECK_DOCBOOK_DTD],
 if test -n "$XmllintCmd"; then
   AC_MSG_CHECKING([for DocBook DTD])
   FP_GEN_DOCBOOK_XML
-  if $XmllintCmd --valid --noout conftest.xml > /dev/null 2>&1; then
+  if $XmllintCmd --nonet --valid --noout conftest.xml ; then
     AC_MSG_RESULT([ok])
   else
     AC_MSG_RESULT([failed])
@@ -795,6 +810,71 @@ if test -n "$XmllintCmd"; then
   rm -rf conftest*
 fi
 ])# FP_CHECK_DOCBOOK_DTD
+
+
+# FP_GEN_FO
+# ------------------
+# Generates a formatting objects document in conftest.fo.
+AC_DEFUN([FP_GEN_FO],
+[rm -f conftest.fo
+cat > conftest.fo << EOF
+<?xml version="1.0"?>
+<fo:root xmlns:fo="http://www.w3.org/1999/XSL/Format">
+  <fo:layout-master-set>
+    <fo:simple-page-master master-name="blank">
+      <fo:region-body/>
+    </fo:simple-page-master>
+  </fo:layout-master-set>
+  <fo:page-sequence master-reference="blank">
+    <fo:flow flow-name="xsl-region-body">
+      <fo:block>
+        Test!
+      </fo:block>
+    </fo:flow>
+  </fo:page-sequence>
+</fo:root>
+EOF
+]) # FP_GEN_FO
+
+
+# FP_PROG_FOP
+# -----------
+# Set the output variable 'FopCmd' to the first working 'fop' in the current
+# 'PATH'. Note that /usr/bin/fop is broken in SuSE 9.1 (unpatched), so try
+# /usr/share/fop/fop.sh in that case (or no 'fop'), too.
+AC_DEFUN([FP_PROG_FOP],
+[AC_PATH_PROGS([FopCmd1], [fop fop.sh])
+if test -n "$FopCmd1"; then
+  AC_CACHE_CHECK([for $FopCmd1 usability], [fp_cv_fop_usability],
+    [FP_GEN_FO
+    if "$FopCmd1" -fo conftest.fo -ps conftest.ps > /dev/null 2>&1; then
+      fp_cv_fop_usability=yes
+    else
+      fp_cv_fop_usability=no
+    fi
+    rm -rf conftest*])
+  if test x"$fp_cv_fop_usability" = xyes; then
+     FopCmd=$FopCmd1
+  fi
+fi
+if test -z "$FopCmd"; then
+  AC_PATH_PROGS([FopCmd2], [fop.sh], , [/usr/share/fop])
+  FopCmd=$FopCmd2
+fi
+AC_SUBST([FopCmd])
+])# FP_PROG_FOP
+
+
+# FP_PROG_HSTAGS
+# ----------------
+# Sets the output variable HstagsCmd to the full Haskell tags program path.
+# HstagsCmd is empty if no such program could be found.
+AC_DEFUN([FP_PROG_HSTAGS],
+[AC_PATH_PROG([HstagsCmd], [hasktags])
+if test -z "$HstagsCmd"; then
+  AC_MSG_WARN([cannot find hasktags in your PATH, you will not be able to build the tags])
+fi
+])# FP_PROG_HSTAGS
 
 
 # FP_PROG_GHC_PKG
@@ -841,23 +921,23 @@ AC_DEFUN([FP_GCC_EXTRA_FLAGS],
 [AC_REQUIRE([FP_HAVE_GCC])
 AC_CACHE_CHECK([for extra options to pass gcc when compiling via C], [fp_cv_gcc_extra_opts],
 [fp_cv_gcc_extra_opts=
- FP_COMPARE_VERSIONS([$fp_gcc_version], [-ge], [3.4],
+ FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-ge], [3.4],
   [fp_cv_gcc_extra_opts="$fp_cv_gcc_extra_opts -fwrapv"],
   [])
  case $TargetPlatform in
   i386-*|x86_64-*) 
-     FP_COMPARE_VERSIONS([$fp_gcc_version], [-ge], [3.2],
+     FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-ge], [3.2],
       [fp_cv_gcc_extra_opts="$fp_cv_gcc_extra_opts -mno-omit-leaf-frame-pointer"],
       [])
-    FP_COMPARE_VERSIONS([$fp_gcc_version], [-ge], [3.4],
-     [FP_COMPARE_VERSIONS([$fp_gcc_version], [-ge], [4.2],
+    FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-ge], [3.4],
+     [FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-ge], [4.2],
        [fp_cv_gcc_extra_opts="$fp_cv_gcc_extra_opts -fno-toplevel-reorder"],
        [fp_cv_gcc_extra_opts="$fp_cv_gcc_extra_opts -fno-unit-at-a-time"]
      )],
      [])
   ;;
   sparc-*-solaris2) 
-    FP_COMPARE_VERSIONS([$fp_gcc_version], [-ge], [4.2],
+    FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-ge], [4.2],
       [fp_cv_gcc_extra_opts="$fp_cv_gcc_extra_opts -fno-toplevel-reorder"],
       [])
   ;;
@@ -888,7 +968,7 @@ if test "$RELEASE" = "NO"; then
     elif test -d _darcs; then
         # TODO: Remove this branch after conversion to Git
         changequote(, )dnl
-        ver_date=`darcs changes --quiet --no-summary --xml | head -500 | grep 'date=' | sed "s/^.*date='\([0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]\).*$/\1/g" | sort -n | tail -1`
+        ver_date=`darcs changes --quiet --no-summary --xml | head -500 | grep 'date=' | sed "s/^.*date='\([0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]\).*$/\1/g" | ${SortCmd} -n | tail -1`
         if echo $ver_date | grep '^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$' 2>&1 >/dev/null; then true; else
         changequote([, ])dnl
                 AC_MSG_ERROR([failed to detect version date: check that darcs is in your path])
@@ -1120,19 +1200,19 @@ AC_DEFUN([FP_FIND_ROOT],[
 AC_MSG_CHECKING(for path to top of build tree)
 
 dnl This would be
-dnl     make -C utils/pwd clean && make -C utils/pwd
+dnl     make -C utils/ghc-pwd clean && make -C utils/ghc-pwd
 dnl except we don't want to have to know what make is called. Sigh.
-if test ! -f utils/pwd/pwd && test ! -f utils/pwd/pwd.exe; then
-  cd utils/pwd
+if test ! -f utils/ghc-pwd/ghc-pwd && test ! -f utils/ghc-pwd/ghc-pwd.exe; then
+  cd utils/ghc-pwd
   rm -f *.o
   rm -f *.hi
-  rm -f pwd
-  rm -f pwd.exe
-  $WithGhc -v0 --make pwd -o pwd
+  rm -f ghc-pwd
+  rm -f ghc-pwd.exe
+  "$WithGhc" -v0 --make ghc-pwd -o ghc-pwd
   cd ../..
 fi
 
-hardtop=`utils/pwd/pwd forwardslash`
+hardtop=`utils/ghc-pwd/ghc-pwd`
 
 if ! test -d "$hardtop"; then
   AC_MSG_ERROR([cannot determine current directory])

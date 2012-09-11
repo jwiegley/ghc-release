@@ -6,7 +6,7 @@
 TcPat: Typechecking patterns
 
 \begin{code}
-module TcPat ( tcLetPat, tcLamPat, tcLamPats, tcProcPat, tcOverloadedLit,
+module TcPat ( tcLetPat, tcPat, tcPats, tcOverloadedLit,
 	       addDataConStupidTheta, badFieldCon, polyPatSig ) where
 
 #include "HsVersions.h"
@@ -30,20 +30,19 @@ import VarSet
 import TcUnify
 import TcHsType
 import TysWiredIn
-import Type
 import Coercion
 import StaticFlags
 import TyCon
 import DataCon
 import PrelNames
 import BasicTypes hiding (SuccessFlag(..))
+import DynFlags	( DynFlag( Opt_GADTs ) )
 import SrcLoc
 import ErrUtils
 import Util
-import Maybes
 import Outputable
 import FastString
-import Monad
+import Control.Monad
 \end{code}
 
 
@@ -70,11 +69,12 @@ tcLetPat sig_fn pat pat_ty thing_inside
 	; return (pat', res) }
 
 -----------------
-tcLamPats :: [LPat Name]		-- Patterns,
-	  -> [BoxySigmaType]		--   and their types
-	  -> BoxyRhoType 		-- Result type,
-	  -> (BoxyRhoType -> TcM a)	--   and the checker for the body
-	  -> TcM ([LPat TcId], a)
+tcPats :: HsMatchContext Name
+       -> [LPat Name]		 -- Patterns,
+       -> [BoxySigmaType]	 --   and their types
+       -> BoxyRhoType 		 -- Result type,
+       -> (BoxyRhoType -> TcM a) --   and the checker for the body
+       -> TcM ([LPat TcId], a)
 
 -- This is the externally-callable wrapper function
 -- Typecheck the patterns, extend the environment to bind the variables,
@@ -87,17 +87,17 @@ tcLamPats :: [LPat Name]		-- Patterns,
 --   3. Check the body
 --   4. Check that no existentials escape
 
-tcLamPats pats tys res_ty thing_inside
-  = tc_lam_pats LamPat (zipEqual "tcLamPats" pats tys)
+tcPats ctxt pats tys res_ty thing_inside
+  = tc_lam_pats (APat ctxt) (zipEqual "tcLamPats" pats tys)
 	        res_ty thing_inside
 
-tcLamPat, tcProcPat :: LPat Name -> BoxySigmaType 
-                    -> BoxyRhoType             -- Result type
-                    -> (BoxyRhoType -> TcM a)  -- Checker for body, given
-                                               -- its result type
-                    -> TcM (LPat TcId, a)
-tcLamPat  = tc_lam_pat LamPat
-tcProcPat = tc_lam_pat ProcPat
+tcPat :: HsMatchContext Name
+      -> LPat Name -> BoxySigmaType 
+      -> BoxyRhoType             -- Result type
+      -> (BoxyRhoType -> TcM a)  -- Checker for body, given
+                                 -- its result type
+      -> TcM (LPat TcId, a)
+tcPat ctxt = tc_lam_pat (APat ctxt)
 
 tc_lam_pat :: PatCtxt -> LPat Name -> BoxySigmaType -> BoxyRhoType
            -> (BoxyRhoType -> TcM a) -> TcM (LPat TcId, a)
@@ -117,7 +117,7 @@ tc_lam_pats ctxt pat_ty_prs res_ty thing_inside
 	; (pats', ex_tvs, res) <- do { traceTc (text "tc_lam_pats" <+> (ppr pat_ty_prs $$ ppr res_ty)) 
 				  ; tcMultiple tc_lpat_pr pat_ty_prs init_state $ \ pstate' ->
 				    if (pat_eqs pstate' && (not $ isRigidTy res_ty))
-				     then nonRigidResult res_ty
+				     then nonRigidResult ctxt res_ty
 	     			     else thing_inside res_ty }
 
 	; let tys = map snd pat_ty_prs
@@ -154,10 +154,12 @@ data PatState = PS {
   }
 
 data PatCtxt 
-  = LamPat 
-  | ProcPat				-- The pattern in (proc pat -> ...)
-					--	see Note [Arrows and patterns]
+  = APat (HsMatchContext Name)
   | LetPat (Name -> Maybe TcRhoType)	-- Used for let(rec) bindings
+
+notProcPat :: PatCtxt -> Bool
+notProcPat (APat ProcExpr) = False
+notProcPat _	  	   = True
 
 patSigCtxt :: PatState -> UserTypeCtxt
 patSigCtxt (PS { pat_ctxt = LetPat _ }) = BindPatSigCtxt
@@ -177,7 +179,7 @@ tcPatBndr :: PatState -> Name -> BoxySigmaType -> TcM TcId
 tcPatBndr (PS { pat_ctxt = LetPat lookup_sig }) bndr_name pat_ty
   | Just mono_ty <- lookup_sig bndr_name
   = do	{ mono_name <- newLocalName bndr_name
-	; boxyUnify mono_ty pat_ty
+	; _ <- boxyUnify mono_ty pat_ty
 	; return (Id.mkLocalId mono_name mono_ty) }
 
   | otherwise
@@ -234,7 +236,7 @@ unBoxArgType ty pp_this
 		return ty'
 	  else do 	-- OpenTypeKind, so constrain it
 	{ ty2 <- newFlexiTyVarTy argTypeKind
-	; unifyType ty' ty2
+	; _ <- unifyType ty' ty2
 	; return ty' }}
   where
     msg = pp_this <+> ptext (sLit "cannot be bound to an unboxed tuple")
@@ -361,12 +363,15 @@ tc_pat pstate lpat@(LazyPat pat) pat_ty thing_inside
 	-- getLIE/extendLIEs: see Note [Hopping the LIE in lazy patterns]
 
 	-- Check no existentials
-	; if (null pat_tvs) then return ()
-	  else lazyPatErr lpat pat_tvs
+	; unless (null pat_tvs) $ lazyPatErr lpat pat_tvs
+
+	-- Check there are no unlifted types under the lazy pattern
+	; when (any (isUnLiftedType . idType) $ collectPatBinders pat') $
+               lazyUnliftedPatErr lpat
 
 	-- Check that the pattern has a lifted type
 	; pat_tv <- newBoxyTyVar liftedTypeKind
-	; boxyUnify pat_ty (mkTyVarTy pat_tv)
+	; _ <- boxyUnify pat_ty (mkTyVarTy pat_tv)
 
 	; return (LazyPat pat', [], res) }
 
@@ -424,7 +429,7 @@ tc_pat pstate (orig@(ViewPat expr pat _)) overall_pat_ty thing_inside
 tc_pat pstate (SigPatIn pat sig_ty) pat_ty thing_inside
   = do	{ (inner_ty, tv_binds, coi) <- tcPatSig (patSigCtxt pstate) sig_ty 
                                                                     pat_ty
-        ; unless (isIdentityCoercion coi) $ 
+        ; unless (isIdentityCoI coi) $ 
             failWithTc (badSigPat pat_ty)
 	; (pat', tvs, res) <- tcExtendTyVarEnv2 tv_binds $
 			      tc_lpat pat inner_ty pstate thing_inside
@@ -623,7 +628,7 @@ tcConPat pstate con_span data_con tycon pat_ty arg_pats thing_inside
                                                    unwrap_ty res_pat
 
 	  -- Add the stupid theta
-	; addDataConStupidTheta data_con ctxt_res_tys
+	; setSrcSpan con_span $ addDataConStupidTheta data_con ctxt_res_tys
 
 	; ex_tvs' <- tcInstSkolTyVars skol_info ex_tvs	
                      -- Get location from monad, not from ex_tvs
@@ -647,8 +652,9 @@ tcConPat pstate con_span data_con tycon pat_ty arg_pats thing_inside
 
 	  else do   -- The general case, with existential, and local equality 
                     -- constraints
-	{ checkTc (case pat_ctxt pstate of { ProcPat -> False; _ -> True })
+	{ checkTc (notProcPat (pat_ctxt pstate))
 		  (existentialProcPat data_con)
+		  -- See Note [Arrows and patterns]
 
           -- Need to test for rigidity if *any* constraints in theta as class
           -- constraints may have superclass equality constraints.  However,
@@ -666,8 +672,14 @@ tcConPat pstate con_span data_con tycon pat_ty arg_pats thing_inside
 	      pstate' | no_equalities = pstate
 		      | otherwise     = pstate { pat_eqs = True }
 
-	; unless no_equalities $ 
-            checkTc (isRigidTy pat_ty) (nonRigidMatch data_con)
+        ; gadts_on <- doptM Opt_GADTs
+	; checkTc (no_equalities || gadts_on)
+	  	  (ptext (sLit "A pattern match on a GADT requires -XGADTs"))
+		  -- Trac #2905 decided that a *pattern-match* of a GADT
+		  -- should require the GADT language flag
+
+	; unless no_equalities $ checkTc (isRigidTy pat_ty) $
+                                 nonRigidMatch (pat_ctxt pstate) data_con
 
 	; ((arg_pats', inner_tvs, res), lie_req) <- getLIE $
 		tcConArgs data_con arg_tys' arg_pats pstate' thing_inside
@@ -698,7 +710,7 @@ tcConPat pstate con_span data_con tycon pat_ty arg_pats thing_inside
 	     ; (_, freshTvs, subst) <- tcInstTyVars (tyConTyVars tycon)
              ; let instTys' = substTys subst instTys
 	     ; cois <- boxyUnifyList instTys' scrutinee_arg_tys
-             ; let coi = if isIdentityCoercion coi1
+             ; let coi = if isIdentityCoI coi1
                          then  -- pat_ty was splittable
                                -- => boxyUnifyList had real work to do
                            mkTyConAppCoI fam_tycon instTys' cois
@@ -1029,17 +1041,36 @@ lazyPatErr _ tvs
     hang (ptext (sLit "A lazy (~) pattern cannot match existential or GADT data constructors"))
        2 (vcat (map pprSkolTvBinding tvs))
 
-nonRigidMatch :: DataCon -> SDoc
-nonRigidMatch con
-  =  hang (ptext (sLit "GADT pattern match in non-rigid context for") <+> quotes (ppr con))
-	2 (ptext (sLit "Solution: add a type signature"))
+lazyUnliftedPatErr :: OutputableBndr name => Pat name -> TcM ()
+lazyUnliftedPatErr pat
+  = failWithTc $
+    hang (ptext (sLit "A lazy (~) pattern cannot contain unlifted types"))
+       2 (ppr pat)
 
-nonRigidResult :: Type -> TcM a
-nonRigidResult res_ty
+nonRigidMatch :: PatCtxt -> DataCon -> SDoc
+nonRigidMatch ctxt con
+  =  hang (ptext (sLit "GADT pattern match in non-rigid context for") <+> quotes (ppr con))
+	2 (ptext (sLit "Probable solution: add a type signature for") <+> what ctxt)
+  where
+     what (APat (FunRhs f _)) = quotes (ppr f)
+     what (APat CaseAlt)      = ptext (sLit "the scrutinee of the case expression")
+     what (APat LambdaExpr )  = ptext (sLit "the lambda expression")
+     what (APat (StmtCtxt _)) = ptext (sLit "the right hand side of a do/comprehension binding")
+     what _other	      = ptext (sLit "something")
+
+nonRigidResult :: PatCtxt -> Type -> TcM a
+nonRigidResult ctxt res_ty
   = do	{ env0 <- tcInitTidyEnv
 	; let (env1, res_ty') = tidyOpenType env0 res_ty
 	      msg = hang (ptext (sLit "GADT pattern match with non-rigid result type")
 				<+> quotes (ppr res_ty'))
-		  	 2 (ptext (sLit "Solution: add a type signature"))
+		  	 2 (ptext (sLit "Solution: add a type signature for")
+			   	  <+> what ctxt )
 	; failWithTcM (env1, msg) }
+  where
+     what (APat (FunRhs f _)) = quotes (ppr f)
+     what (APat CaseAlt)      = ptext (sLit "the entire case expression")
+     what (APat LambdaExpr)   = ptext (sLit "the lambda exression")
+     what (APat (StmtCtxt _)) = ptext (sLit "the entire do/comprehension expression")
+     what _other              = ptext (sLit "something")
 \end{code}

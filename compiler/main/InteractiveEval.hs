@@ -47,7 +47,6 @@ import TcType           hiding (typeKind)
 import InstEnv
 import Var
 import Id
-import IdInfo
 import Name             hiding ( varName )
 import NameSet
 import RdrName
@@ -83,7 +82,7 @@ import Data.Array
 import Exception
 import Control.Concurrent
 import Data.List (sortBy)
-import Foreign.StablePtr
+-- import Foreign.StablePtr
 import System.IO
 
 -- -----------------------------------------------------------------------------
@@ -309,7 +308,7 @@ traceRunStatus expr bindings final_ids
              let history' = mkHistory hsc_env apStack info `consBL` history
                 -- probably better make history strict here, otherwise
                 -- our BoundedList will be pointless.
-             liftIO $ evaluate history'
+             _ <- liftIO $ evaluate history'
              status <-
                  withBreakAction True (hsc_dflags hsc_env)
                                       breakMVar statusMVar $ do
@@ -550,8 +549,7 @@ bindLocalsAtBreakpoint hsc_env apStack Nothing = do
        e_fs      = fsLit "e"
        e_name    = mkInternalName (getUnique e_fs) (mkTyVarOccFS e_fs) span
        e_tyvar   = mkTcTyVar e_name liftedTypeKind (SkolemTv RuntimeUnkSkol)
-       exn_id    = Id.mkGlobalId VanillaGlobal exn_name (mkTyVarTy e_tyvar)
-                                vanillaIdInfo
+       exn_id    = Id.mkVanillaGlobal exn_name (mkTyVarTy e_tyvar)
        new_tyvars = unitVarSet e_tyvar
 
        ictxt0 = hsc_IC hsc_env
@@ -588,7 +586,7 @@ bindLocalsAtBreakpoint hsc_env apStack (Just info) = do
    -- has been accidentally evaluated, or something else has gone wrong.
    -- So that we don't fall over in a heap when this happens, just don't
    -- bind any free variables instead, and we emit a warning.
-   mb_hValues <- mapM (getIdValFromApStack apStack) offsets
+   mb_hValues <- mapM (getIdValFromApStack apStack) (map fromIntegral offsets)
    let filtered_ids = [ id | (id, Just _hv) <- zip ids mb_hValues ]
    when (any isNothing mb_hValues) $
       debugTraceMsg (hsc_dflags hsc_env) 1 $
@@ -602,8 +600,7 @@ bindLocalsAtBreakpoint hsc_env apStack (Just info) = do
    -- _result in scope at any time.
    let result_name = mkInternalName (getUnique result_fs)
                           (mkVarOccFS result_fs) span
-       result_id   = Id.mkGlobalId VanillaGlobal result_name result_ty 
-                                   vanillaIdInfo
+       result_id   = Id.mkVanillaGlobal result_name result_ty 
 
    -- for each Id we're about to bind in the local envt:
    --    - skolemise the type variables in its type, so they can't
@@ -612,18 +609,22 @@ bindLocalsAtBreakpoint hsc_env apStack (Just info) = do
    --    - tidy the type variables
    --    - globalise the Id (Ids are supposed to be Global, apparently).
    --
-   let all_ids | isPointer result_id = result_id : new_ids
-               | otherwise           = new_ids
+   let result_ok = isPointer result_id
+                    && not (isUnboxedTupleType (idType result_id))
+
+       all_ids | result_ok = result_id : new_ids
+               | otherwise = new_ids
        (id_tys, tyvarss) = mapAndUnzip (skolemiseTy.idType) all_ids
        (_,tidy_tys) = tidyOpenTypes emptyTidyEnv id_tys
        new_tyvars = unionVarSets tyvarss             
-   let final_ids = zipWith setIdType all_ids tidy_tys
+       final_ids = zipWith setIdType all_ids tidy_tys
        ictxt0 = hsc_IC hsc_env
        ictxt1 = extendInteractiveContext ictxt0 final_ids new_tyvars
+
    Linker.extendLinkEnv [ (name,hval) | (name, Just hval) <- zip names mb_hValues ]
-   Linker.extendLinkEnv [(result_name, unsafeCoerce# apStack)]
+   when result_ok $ Linker.extendLinkEnv [(result_name, unsafeCoerce# apStack)]
    hsc_env1 <- rttiEnvironment hsc_env{ hsc_IC = ictxt1 }
-   return (hsc_env1, result_name:names, span)
+   return (hsc_env1, if result_ok then result_name:names else names, span)
   where
    mkNewId :: OccName -> Id -> IO Id
    mkNewId occ id = do
@@ -637,7 +638,7 @@ bindLocalsAtBreakpoint hsc_env apStack (Just info) = do
          loc = nameSrcSpan (idName id)
          name = mkInternalName uniq occ loc
          ty = idType id
-         new_id = Id.mkGlobalId VanillaGlobal name ty (idInfo id)
+         new_id = Id.mkVanillaGlobalWithInfo name ty (idInfo id)
      return new_id
 
 rttiEnvironment :: HscEnv -> IO HscEnv 

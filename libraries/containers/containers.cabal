@@ -1,8 +1,9 @@
 name:       containers
-version:    0.2.0.1
+version:    0.3.0.0
 license:    BSD3
 license-file:    LICENSE
 maintainer:    libraries@haskell.org
+bug-reports: http://hackage.haskell.org/trac/ghc/newticket?component=libraries%20%28other%29
 synopsis:   Assorted concrete container types
 category:   Data Structures
 description:
@@ -11,11 +12,15 @@ description:
         each operation is either worst-case or amortized, but remains
         valid even if structures are shared.
 build-type: Simple
-cabal-version:  >=1.2
+cabal-version:  >=1.6
 extra-source-files: include/Typeable.h
 
+source-repository head
+    type:     darcs
+    location: http://darcs.haskell.org/packages/containers/
+
 Library {
-    build-depends: base, array
+    build-depends: base >= 4.2 && < 6, array
     exposed-modules:
         Data.Graph
         Data.IntMap

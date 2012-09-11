@@ -403,6 +403,23 @@ Executable program2
               or underscores.</para>
           </listitem>
         </varlistentry>
+
+	<varlistentry>
+	  <term>
+	    <replaceable>compiler</replaceable>
+	  </term>
+	  <listitem>
+	    <para>A compiler flavor (one
+              of: <literal>GHC</literal>, <literal>NHC</literal>,
+	          <literal>YHC</literal>, <literal>Hugs</literal>,
+	          <literal>HBC</literal>, <literal>Helium</literal>,
+                  <literal>JHC</literal>, or <literal>LHC</literal>)
+              followed by a version range.  For example,
+              <literal>GHC ==6.10.3</literal>,
+	      or <literal>LHC &gt;=0.6 &amp;&amp; &lt;0.8</literal>.
+            </para>
+	  </listitem>
+	</varlistentry>
       </variablelist>
 
       <note>
@@ -1773,17 +1790,20 @@ source-repository this
         a slightly longer <filename>Setup.hs</filename>:</para>
       <programlisting>
 import Distribution.Simple
-main = defaultMainWithHooks defaultUserHooks</programlisting>
+main = defaultMainWithHooks autoconfUserHooks</programlisting>
+
+      <para>Most packages, however, would probably do better with
+        configurations (see <xref linkend="configurations"/>).</para>
 
       <para>This program differs from <literal>defaultMain</literal>
         in two ways:</para>
       <orderedlist>
         <listitem>
-          <para>If the package root directory contains a file called
-            <filename>configure</filename>, the configure step will
-            run that.  This <filename>configure</filename> program may
-            be a script produced by the &Autoconf;
-            system, or may be hand-written.  This program typically
+          <para>The package root directory must contain a shell script called
+	    <filename>configure</filename>. The configure step will run the
+	    script. This <filename>configure</filename> script may
+            be produced by &Autoconf; or may be hand-written. The
+	    <filename>configure</filename> script typically
             discovers information about the system and records it for
             later steps, e.g. by generating system-dependent header files
             for inclusion in C source files and preprocessed Haskell
@@ -2911,7 +2931,7 @@ runhaskell Setup.hs unregister --gen-script</screen>
 	  <varlistentry>
 	    <term><option>--disable-library-vanilla</option></term>
 	    <listitem>
-	      <para>(default) Do not build ordinary libraries. This is useful
+	      <para>Do not build ordinary libraries. This is useful
                 in conjunction with <option>--enable-library-profiling</option>
                 to build only profiling libraries, rather than profiling and
                 ordinary libraries.</para>

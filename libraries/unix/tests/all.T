@@ -10,6 +10,11 @@ test('fileexist01', conf, compile_and_run, ['-package unix'])
 test('forkprocess01', compose(only_compiler_types(['ghc']), 
 		      compose(expect_fail_for(['threaded2']), conf)),
 	compile_and_run, ['-package unix'])
+
+#
+# user001 may fail due to this bug in glibc:
+#   http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=466647
+#
 test('user001', conf, compile_and_run, ['-package unix'])
 test('resourceLimit', conf, compile_and_run, ['-package unix'])
 
@@ -26,3 +31,21 @@ test('getUserEntryForName', compose(conf, expect_fail), compile_and_run,
 
 
 test('signals004', normal, compile_and_run, ['-package unix'])
+
+test('fdReadBuf001', only_ways(['threaded1','threaded2','ghci']), compile_and_run, ['-package unix'])
+
+test('fileStatus',
+     extra_clean(['dir', 'regular', 'link-dir', 'link-regular']),
+     compile_and_run,
+     ['-package unix'])
+
+
+# Omit GHCi way because in GHCi there are two IO manager threads, one
+# for GHCi itself and one for the user program.  This is a consequence
+# of the fact that we aren't sharing the base package between GHCi and
+# the user program, and it will change when we switch to shared
+# libraries.  Unfortunately the test hangs if we try to run it under
+# GHCi right now, so we can't just make it an expected failure.
+#
+test('1185', [ omit_ways(['ghci']), expect_fail_for(['threaded2']) ], 
+             compile_and_run, ['-package unix'])

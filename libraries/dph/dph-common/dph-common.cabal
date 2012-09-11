@@ -1,0 +1,66 @@
+Name:           dph-DPHWAY
+Version:        0.4.0
+License:        BSD3
+License-File:   LICENSE
+Author:         Manuel M T Chakravarty, Gabriele Keller, Roman Leshchinskiy
+Maintainer:     Roman Leshchinskiy <rl@cse.unsw.edu.au>
+Homepage:       http://www.cse.unsw.edu.au/~chak/project/dph/
+Category:       Data Structures
+Synopsis:       Data structures for Nested Data-Parallel Haskell.
+
+Cabal-Version:  >= 1.2.3
+Build-Type:     Simple
+
+Library
+  -- This Cabal file gets CPPed, then put in ../dhp_par and ../dph_seq
+  -- We therefore need to point back at the original location for
+  -- where to find the sources
+  HS-Source-Dirs: ../dph-common
+
+  Exposed-Modules:
+        Data.Array.Parallel
+        Data.Array.Parallel.Lifted
+        Data.Array.Parallel.Prelude
+        Data.Array.Parallel.Prelude.Int
+        Data.Array.Parallel.Prelude.Word8
+        Data.Array.Parallel.Prelude.Double
+        Data.Array.Parallel.PArray
+
+  Other-Modules:
+        Data.Array.Parallel.Lifted.PArray
+        Data.Array.Parallel.Lifted.Unboxed
+        Data.Array.Parallel.Lifted.Scalar
+        Data.Array.Parallel.Lifted.Repr
+        Data.Array.Parallel.Lifted.Closure
+        Data.Array.Parallel.Lifted.Instances
+        Data.Array.Parallel.Lifted.Combinators
+        Data.Array.Parallel.Lifted.Selector
+        Data.Array.Parallel.Prelude.Base.Int
+        Data.Array.Parallel.Prelude.Base.Word8
+        Data.Array.Parallel.Prelude.Base.Double
+        Data.Array.Parallel.Prelude.Base.Bool
+        Data.Array.Parallel.Prelude.Base.PArr
+        Data.Array.Parallel.Prelude.Base.Tuple
+        Data.Array.Parallel.Prelude.Base
+        Data.Array.Parallel.Prelude.Bool
+
+  Exposed: False
+
+  Extensions: TypeFamilies, GADTs, RankNTypes,
+              BangPatterns, MagicHash, UnboxedTuples, TypeOperators
+  GHC-Options: -funbox-strict-fields -haddock -fcpr-off
+  if impl(ghc >= 6.9)
+    GHC-Options: -Odph
+  else
+    GHC-Options: -O2 -fdicts-cheap -fno-method-sharing
+
+  Build-Depends:  base >= 3 && < 5, array, random
+  if impl(ghc >= 6.9)
+    Build-Depends: ghc-prim
+  Build-Depends: dph-base
+
+  GHC-Options: -fdph-this
+
+  Build-Depends: dph-prim-DPHWAY
+  GHC-Options: -package-name dph-DPHWAY
+

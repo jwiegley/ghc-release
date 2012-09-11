@@ -8,19 +8,12 @@ See the beginning of the top-level @CodeGen@ module, to see how this
 monadic stuff fits into the Big Picture.
 
 \begin{code}
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module CgMonad (
 	Code,	-- type
 	FCode,	-- type
 
 	initC, thenC, thenFC, listCs, listFCs, mapCs, mapFCs,
-	returnFC, fixC, checkedAbsC, 
+	returnFC, fixC, fixC_, checkedAbsC, 
 	stmtC, stmtsC, labelC, emitStmts, nopC, whenC, newLabelC,
 	newUnique, newUniqSupply, 
 
@@ -69,7 +62,6 @@ module CgMonad (
 import {-# SOURCE #-} CgBindery ( CgBindings, nukeVolatileBinds )
 
 import DynFlags
-import PackageConfig
 import BlockId
 import Cmm
 import CmmUtils
@@ -166,6 +158,7 @@ data EndOfBlockInfo
 			  -- by a case alternative.
 	Sequel
 
+initEobInfo :: EndOfBlockInfo
 initEobInfo = EndOfBlockInfo 0 OnStack
 \end{code}
 
@@ -253,12 +246,14 @@ flattenCgStmts id stmts =
 		where (fork_block, fork_blocks) = flatten (fromOL stmts)
     where (block,blocks) = flatten ss
 
+isJump :: CmmStmt -> Bool
 isJump (CmmJump _ _) = True
 isJump (CmmBranch _) = True
 isJump (CmmSwitch _ _) = True
 isJump (CmmReturn _) = True
 isJump _ = False
 
+isOrdinaryStmt :: CgStmt -> Bool
 isOrdinaryStmt (CgStmt _) = True
 isOrdinaryStmt _ = False
 \end{code}
@@ -399,7 +394,7 @@ initC dflags mod (FCode code)
 	}
 
 returnFC :: a -> FCode a
-returnFC val = FCode (\info_down state -> (val, state))
+returnFC val = FCode (\_ state -> (val, state))
 \end{code}
 
 \begin{code}
@@ -448,6 +443,9 @@ fixC fcode = FCode (
 		in
 			result
 	)
+
+fixC_ :: (a -> FCode a) -> FCode ()
+fixC_ fcode = fixC fcode >> return ()
 \end{code}
 
 %************************************************************************
@@ -459,10 +457,10 @@ fixC fcode = FCode (
 
 \begin{code}
 getState :: FCode CgState
-getState = FCode $ \info_down state -> (state,state)
+getState = FCode $ \_ state -> (state,state)
 
 setState :: CgState -> FCode ()
-setState state = FCode $ \info_down _ -> ((),state)
+setState state = FCode $ \_ _ -> ((),state)
 
 getStkUsage :: FCode StackUsage
 getStkUsage = do
@@ -704,7 +702,7 @@ nopC = return ()
 
 whenC :: Bool -> Code -> Code
 whenC True  code = code
-whenC False code = nopC
+whenC False _    = nopC
 
 stmtC :: CmmStmt -> Code
 stmtC stmt = emitCgStmt (CgStmt stmt)
@@ -746,7 +744,7 @@ emitData sect lits
   where
     data_block = CmmData sect lits
 
-emitProc :: CmmInfo -> CLabel -> CmmFormalsWithoutKinds -> [CmmBasicBlock] -> Code
+emitProc :: CmmInfo -> CLabel -> CmmFormals -> [CmmBasicBlock] -> Code
 emitProc info lbl args blocks
   = do  { let proc_block = CmmProc info lbl args (ListGraph blocks)
 	; state <- getState
@@ -767,7 +765,8 @@ getCmm code
   = do	{ state1 <- getState
 	; ((), state2) <- withState code (state1 { cgs_tops  = nilOL })
 	; setState $ state2 { cgs_tops = cgs_tops state1 } 
-	; return (Cmm (fromOL (cgs_tops state2))) }
+	; return (Cmm (fromOL (cgs_tops state2))) 
+        }
 
 -- ----------------------------------------------------------------------------
 -- CgStmts

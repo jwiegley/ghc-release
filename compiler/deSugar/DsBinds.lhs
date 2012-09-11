@@ -36,12 +36,11 @@ import TcType
 import CostCentre
 import Module
 import Id
-import Name	( localiseName )
+import MkId	( seqId )
 import Var	( Var, TyVar )
 import VarSet
 import Rules
 import VarEnv
-import Type
 import Outputable
 import SrcLoc
 import Maybes
@@ -164,14 +163,16 @@ dsHsBind auto_scc rest (AbsBinds [] [] exports binds)
   where B is the *non-recursive* binding
 	fl = fg a b
 	gl = gg b
-	h  = h a b 
+	h  = h a b    -- See (b); note shadowing!
   
   Notice (a) g has a different number of type variables to f, so we must
 	     use the mkArbitraryType thing to fill in the gaps.  
 	     We use a type-let to do that.
 
 	 (b) The local variable h isn't in the exports, and rather than
-	     clone a fresh copy we simply replace h by (h a b).  
+	     clone a fresh copy we simply replace h by (h a b), where
+	     the two h's have different types!  Shadowing happens here,
+	     which looks confusing but works fine.
 
 	 (c) The result is *still* quadratic-sized if there are a lot of
 	     small bindings.  So if there are more than some small
@@ -261,22 +262,22 @@ dsHsBind auto_scc rest (AbsBinds all_tyvars dicts exports binds)
 
 	; poly_tup_id <- newSysLocalDs (exprType poly_tup_expr)
 
-	; let dict_args = map Var dicts
-
-	      mk_bind ((tyvars, global, local, prags), n)	-- locals !! n == local
-	        = 	-- Need to make fresh locals to bind in the selector, because
-		      	-- some of the tyvars will be bound to 'Any'
+	; let mk_bind ((tyvars, global, local, prags), n)  -- locals!!n == local
+	        = 	-- Need to make fresh locals to bind in the selector,
+		      	-- because some of the tyvars will be bound to 'Any'
 		  do { ty_args <- mapM mk_ty_arg all_tyvars
 		     ; let substitute = substTyWith all_tyvars ty_args
 		     ; locals' <- newSysLocalsDs (map substitute local_tys)
 		     ; tup_id  <- newSysLocalDs  (substitute tup_ty)
-		     ; mb_specs <- mapM (dsSpec all_tyvars dicts tyvars global local core_bind) 
+		     ; mb_specs <- mapM (dsSpec all_tyvars dicts tyvars global
+		 			 local core_bind) 
 				      	 prags
 		     ; let (spec_binds, rules) = unzip (catMaybes mb_specs)
 			   global' = addIdSpecialisations global rules
 	                   rhs = mkLams tyvars $ mkLams dicts $
 	      	     		 mkTupleSelector locals' (locals' !! n) tup_id $
-			         mkApps (mkTyApps (Var poly_tup_id) ty_args) dict_args
+			         mkVarApps (mkTyApps (Var poly_tup_id) ty_args)
+			 		   dicts
 		     ; return ((global', rhs) : spec_binds) }
 	        where
 	          mk_ty_arg all_tyvar
@@ -352,7 +353,7 @@ dsSpec all_tvs dicts tvs poly_id mono_id mono_bind
 		  spec_rhs    = Let (NonRec local_poly poly_f_body) ds_spec_expr
 		  poly_f_body = mkLams (tvs ++ dicts) f_body
 			   	
-		  extra_dict_bndrs = [localise d 
+		  extra_dict_bndrs = [localiseId d  -- See Note [Constant rule dicts]
 		  		     | d <- varSetElems (exprFreeVars ds_spec_expr)
 		  		     , isDictId d]
 			-- Note [Const rule dicts]
@@ -380,9 +381,7 @@ dsSpec all_tvs dicts tvs poly_id mono_id mono_bind
 
     decomp_msg = hang (ptext (sLit "Specialisation too complicated to desugar; ignored"))
 		    2 (ppr spec_expr)
-
-    localise d = mkLocalId (localiseName (idName d)) (idType d)
-    	     -- See Note [Constant rule dicts]
+    	     
 
 mkArbitraryTypeEnv :: [TyVar] -> [([TyVar], a, b, c)] -> DsM (TyVarEnv Type)
 -- If any of the tyvars is missing from any of the lists in 
@@ -443,7 +442,7 @@ And from that we want the rule
 
 But be careful!  That dInt might be GHC.Base.$fOrdInt, which is an External
 Name, and you can't bind them in a lambda or forall without getting things
-confused. Hence the use of 'localise' to make it Internal.
+confused. Hence the use of 'localiseId' to make it Internal.
 
 
 %************************************************************************
@@ -477,6 +476,12 @@ decomposeRuleLhs lhs
         -- a LHS:       let f71 = M.f Int in f71
     decomp env (Let (NonRec dict rhs) body) 
         = decomp (extendVarEnv env dict (simpleSubst env rhs)) body
+
+    decomp env (Case scrut bndr ty [(DEFAULT, _, body)])
+        | isDeadBinder bndr	-- Note [Matching seqId]
+        = Just (seqId, [Type (idType bndr), Type ty, 
+                        simpleSubst env scrut, simpleSubst env body])
+
     decomp env body 
         = case collectArgs (simpleSubst env body) of
             (Var fn, args) -> Just (fn, args)
@@ -517,16 +522,22 @@ addInlinePrags prags bndr rhs
 	(inl:_) -> addInlineInfo inl bndr rhs
 
 addInlineInfo :: InlineSpec -> Id -> CoreExpr -> (Id,CoreExpr)
-addInlineInfo (Inline phase is_inline) bndr rhs
-  = (attach_phase bndr phase, wrap_inline is_inline rhs)
+addInlineInfo (Inline prag is_inline) bndr rhs
+  = (attach_pragma bndr prag, wrap_inline is_inline rhs)
   where
-    attach_phase bndr phase 
-	| isAlwaysActive phase = bndr	-- Default phase
-	| otherwise  	       = bndr `setInlinePragma` phase
+    attach_pragma bndr prag
+        | isDefaultInlinePragma prag = bndr
+        | otherwise                  = bndr `setInlinePragma` prag
 
     wrap_inline True  body = mkInlineMe body
     wrap_inline False body = body
 \end{code}
+
+Note [Matching seq]
+~~~~~~~~~~~~~~~~~~~
+The desugarer turns (seq e r) into (case e of _ -> r), via a special-case hack
+and this code turns it back into an application of seq!  
+See Note [Rules for seq] in MkId for the details.
 
 
 %************************************************************************

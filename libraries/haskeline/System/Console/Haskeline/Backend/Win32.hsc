@@ -10,8 +10,6 @@ import System.Win32 hiding (multiByteToWideChar)
 import Graphics.Win32.Misc(getStdHandle, sTD_INPUT_HANDLE, sTD_OUTPUT_HANDLE)
 import Data.List(intercalate)
 import Control.Concurrent hiding (throwTo)
-import Control.Concurrent.Chan
-import Data.Bits
 import Data.Char(isPrint)
 import Data.Maybe(mapMaybe)
 import Control.Monad
@@ -93,6 +91,8 @@ keyFromCode (#const VK_DOWN) = Just DownKey
 keyFromCode (#const VK_DELETE) = Just Delete
 keyFromCode (#const VK_HOME) = Just Home
 keyFromCode (#const VK_END) = Just End
+keyFromCode (#const VK_PRIOR) = Just PageUp
+keyFromCode (#const VK_NEXT) = Just PageDown
 -- The Windows console will return '\r' when return is pressed.
 keyFromCode (#const VK_RETURN) = Just (KeyChar '\n')
 -- TODO: KillLine?
@@ -232,12 +232,10 @@ withWindowMode f = do
 newtype Draw m a = Draw {runDraw :: ReaderT HANDLE m a}
     deriving (Monad,MonadIO,MonadException, MonadReader HANDLE)
 
+type DrawM a = (MonadIO m, MonadReader Layout m) => Draw m ()
+
 instance MonadTrans Draw where
     lift = Draw . lift
-
-instance MonadReader Layout m => MonadReader Layout (Draw m) where
-    ask = lift ask
-    local r = Draw . local r . runDraw
 
 getPos :: MonadIO m => Draw m Coord
 getPos = ask >>= liftIO . getPosition
@@ -252,12 +250,12 @@ printText txt = do
     h <- ask
     liftIO (writeConsole h txt)
     
-printAfter :: MonadLayout m => String -> Draw m ()
+printAfter :: String -> DrawM ()
 printAfter str = do
     printText str
     movePos $ negate $ length str
     
-drawLineDiffWin :: MonadLayout m => LineChars -> LineChars -> Draw m ()
+drawLineDiffWin :: LineChars -> LineChars -> DrawM ()
 drawLineDiffWin (xs1,ys1) (xs2,ys2) = case matchInit xs1 xs2 of
     ([],[])     | ys1 == ys2            -> return ()
     (xs1',[])   | xs1' ++ ys1 == ys2    -> movePos $ negate $ length xs1'
@@ -266,10 +264,10 @@ drawLineDiffWin (xs1,ys1) (xs2,ys2) = case matchInit xs1 xs2 of
         movePos (negate $ length xs1')
         let m = length xs1' + length ys1 - (length xs2' + length ys2)
         let deadText = replicate m ' '
-        printText xs2'
-        printAfter (ys2 ++ deadText)
+        printText (graphemesToString xs2')
+        printAfter (graphemesToString ys2 ++ deadText)
 
-movePos :: MonadLayout m => Int -> Draw m ()
+movePos :: Int -> DrawM ()
 movePos n = do
     Coord {coordX = x, coordY = y} <- getPos
     w <- asks width
@@ -279,7 +277,7 @@ movePos n = do
 crlf :: String
 crlf = "\r\n"
 
-instance (MonadException m, MonadLayout m) => Term (Draw m) where
+instance (MonadException m, MonadReader Layout m) => Term (Draw m) where
     drawLineDiff = drawLineDiffWin
     -- TODO now that we capture resize events.
     -- first, looks like the cursor stays on the same line but jumps
@@ -317,14 +315,17 @@ win32Term = do
                         return fileRT {
                             wrapInterrupt = withWindowMode . withCtrlCHandler,
                             termOps = Just TermOps {
-                                            getLayout = getBufferSize h,
-                                            runTerm = consoleRunTerm h ch},
+                                getLayout = getBufferSize h
+                                , withGetEvent = win32WithEvent ch
+                                , runTerm = \(RunTermType f) ->
+                                        runReaderT' h $ runDraw f
+                                },
                             closeTerm = closeHandle h}
 
-consoleRunTerm :: HANDLE -> Chan Event -> RunTermType
-consoleRunTerm conOut eventChan f = do
+win32WithEvent :: MonadException m => Chan Event -> (m Event -> m a) -> m a
+win32WithEvent eventChan f = do
     inH <- liftIO $ getStdHandle sTD_INPUT_HANDLE
-    runReaderT' conOut $ runDraw $ f $ liftIO $ getEvent inH eventChan
+    f $ liftIO $ getEvent inH eventChan
 
 -- stdin is not a terminal, but we still need to check the right way to output unicode to stdout.
 fileRunTerm :: IO RunTerm
@@ -366,7 +367,9 @@ withCtrlCHandler :: MonadException m => m a -> m a
 withCtrlCHandler f = bracket (liftIO $ do
                                     tid <- myThreadId
                                     fp <- wrapHandler (handler tid)
-                                    c_SetConsoleCtrlHandler fp True
+                                -- don't fail if we can't set the ctrl-c handler
+                                -- for example, we might not be attached to a console?
+                                    _ <- c_SetConsoleCtrlHandler fp True
                                     return fp)
                                 (\fp -> liftIO $ c_SetConsoleCtrlHandler fp False)
                                 (const f)
@@ -418,7 +421,7 @@ foreign import stdcall "IsDBCSLeadByteEx" c_IsDBCSLeadByteEx
         :: CodePage -> BYTE -> BOOL
 
 getMultiByteChar :: CodePage -> IO Char
-getMultiByteChar cp = do
+getMultiByteChar cp = hWithBinaryMode stdin $ do
     b1 <- getByte
     bs <- if c_IsDBCSLeadByteEx cp b1
             then getByte >>= \b2 -> return [b1,b2]

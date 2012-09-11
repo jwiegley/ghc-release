@@ -11,17 +11,18 @@
  *
  * ---------------------------------------------------------------------------*/
 
+#include "PosixSource.h"
 #include "Rts.h"
-#include "Storage.h"
-#include "MBlock.h"
+
 #include "Evac.h"
+#include "Storage.h"
 #include "GC.h"
 #include "GCThread.h"
 #include "GCUtils.h"
 #include "Compact.h"
 #include "Prelude.h"
-#include "LdvProfile.h"
 #include "Trace.h"
+#include "LdvProfile.h"
 
 #if defined(PROF_SPIN) && defined(THREADED_RTS) && defined(PARALLEL_GC)
 StgWord64 whitehole_spin = 0;
@@ -74,10 +75,10 @@ alloc_for_copy (nat size, step *stp)
      * necessary.
      */
     to = ws->todo_free;
-    if (to + size > ws->todo_lim) {
+    ws->todo_free += size;
+    if (ws->todo_free > ws->todo_lim) {
 	to = todo_block_full(size, ws);
     }
-    ws->todo_free = to + size;
     ASSERT(ws->todo_free >= ws->todo_bd->free && ws->todo_free <= ws->todo_lim);
 
     return to;
@@ -213,7 +214,7 @@ spin:
     SET_EVACUAEE_FOR_LDV(from, size_to_reserve);
     // fill the slop
     if (size_to_reserve - size_to_copy > 0)
-	LDV_FILL_SLOP(to + size_to_reserve, (int)(size_to_reserve - size_to_copy));
+	LDV_FILL_SLOP(to + size_to_copy, (int)(size_to_reserve - size_to_copy));
 #endif
 
     return rtsTrue;
@@ -637,8 +638,6 @@ loop:
       return;
 
   case CAF_BLACKHOLE:
-  case SE_CAF_BLACKHOLE:
-  case SE_BLACKHOLE:
   case BLACKHOLE:
       copyPart(p,q,BLACKHOLE_sizeW(),sizeofW(StgHeader),stp);
       return;
@@ -704,8 +703,7 @@ loop:
 	goto loop;
       }
 
-      /* To evacuate a small TSO, we need to relocate the update frame
-       * list it contains.  
+      /* To evacuate a small TSO, we need to adjust the stack pointer
        */
       {
 	  StgTSO *new_tso;
@@ -956,7 +954,11 @@ selector_loop:
               // the original selector thunk, p.
               SET_INFO(p, (StgInfoTable *)info_ptr);
               LDV_RECORD_DEAD_FILL_SLOP_DYNAMIC((StgClosure *)p);
+#if defined(THREADED_RTS)
+              SET_INFO(p, &stg_WHITEHOLE_info);
+#else
               SET_INFO(p, &stg_BLACKHOLE_info);
+#endif
 #endif
 
               // the closure in val is now the "value" of the
@@ -1049,8 +1051,6 @@ selector_loop:
       case THUNK_0_2:
       case THUNK_STATIC:
       case CAF_BLACKHOLE:
-      case SE_CAF_BLACKHOLE:
-      case SE_BLACKHOLE:
       case BLACKHOLE:
 	  // not evaluated yet 
 	  goto bale_out;

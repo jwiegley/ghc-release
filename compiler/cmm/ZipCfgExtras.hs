@@ -24,7 +24,7 @@ exit    :: LGraph m l -> FGraph m l         -- focus on edge into default exit n
                                             -- (fails if there isn't one)
 focusp  :: (Block m l -> Bool) -> LGraph m l -> Maybe (FGraph m l)
                                       -- focus on start of block satisfying predicate
-unfocus :: FGraph m l -> LGraph m l            -- lose focus 
+-- unfocus :: FGraph m l -> LGraph m l            -- lose focus 
 
 -- | We can insert a single-entry, single-exit subgraph at
 -- the current focus.
@@ -37,11 +37,11 @@ splice_focus_exit  :: FGraph m l -> LGraph m l -> FGraph m l
 
 _unused :: ()
 _unused = all `seq` ()
-    where all = ( exit, focusp, unfocus {- , splice_focus_entry, splice_focus_exit -}
+    where all = ( exit, focusp --, unfocus {- , splice_focus_entry, splice_focus_exit -}
                 , foldM_fwd_block (\_ a -> Just a)
                 )
 
-unfocus (FGraph e bz bs) = LGraph e (insertBlock (zip bz) bs)
+--unfocus (FGraph e bz bs) = LGraph e (insertBlock (zip bz) bs)
 
 focusp p (LGraph entry blocks) =
     fmap (\(b, bs) -> FGraph entry (unzip b) bs) (splitp_blocks p blocks)
@@ -71,6 +71,6 @@ foldM_fwd_block first middle last (Block id t) z = do { z <- first id z; tail t 
 
 splitp_blocks :: (Block m l -> Bool) -> BlockEnv (Block m l) ->
                  Maybe (Block m l, BlockEnv (Block m l))
-splitp_blocks = undefined -- implemented in ZipCfg but not exported
+splitp_blocks = panic "splitp_blocks" -- implemented in ZipCfg but not exported
 is_exit :: Block m l -> Bool
-is_exit = undefined -- implemented in ZipCfg but not exported
+is_exit = panic "is_exit" -- implemented in ZipCfg but not exported

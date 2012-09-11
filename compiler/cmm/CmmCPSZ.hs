@@ -5,42 +5,60 @@ module CmmCPSZ (
   protoCmmCPSZ
 ) where
 
-import BlockId
+import CLabel
 import Cmm
+import CmmBuildInfoTables
 import CmmCommonBlockElimZ
-import CmmContFlowOpt
 import CmmProcPointZ
 import CmmSpillReload
-import CmmTx
+import CmmStackLayout
 import DFMonad
 import PprCmmZ()
-import ZipCfg hiding (zip, unzip)
 import ZipCfgCmmRep
 
 import DynFlags
 import ErrUtils
 import FiniteMap
 import HscTypes
-import Monad
+import Data.Maybe
+import Control.Monad
 import Outputable
-import UniqSupply
+import StaticFlags
 
 -----------------------------------------------------------------------------
 -- |Top level driver for the CPS pass
 -----------------------------------------------------------------------------
+-- There are two complications here:
+-- 1. We need to compile the procedures in two stages because we need
+--    an analysis of the procedures to tell us what CAFs they use.
+--    The first stage returns a map from procedure labels to CAFs,
+--    along with a closure that will compute SRTs and attach them to
+--    the compiled procedures.
+--    The second stage is to combine the CAF information into a top-level
+--    CAF environment mapping non-static closures to the CAFs they keep live,
+--    then pass that environment to the closures returned in the first
+--    stage of compilation.
+-- 2. We need to thread the module's SRT around when the SRT tables
+--    are computed for each procedure.
+--    The SRT needs to be threaded because it is grown lazily.
 protoCmmCPSZ :: HscEnv -- Compilation env including
                        -- dynamic flags: -dcmm-lint -ddump-cps-cmm
-             -> CmmZ     -- Input C-- with Proceedures
-             -> IO CmmZ  -- Output CPS transformed C--
-protoCmmCPSZ hsc_env (Cmm tops)
-  | not (dopt Opt_RunCPSZ (hsc_dflags hsc_env))
-  = return (Cmm tops)                -- Only if -frun-cps
+             -> (TopSRT, [CmmZ])  -- SRT table and accumulating list of compiled procs
+             -> CmmZ              -- Input C-- with Procedures
+             -> IO (TopSRT, [CmmZ]) -- Output CPS transformed C--
+protoCmmCPSZ hsc_env (topSRT, rst) (Cmm tops)
+  | not (dopt Opt_TryNewCodeGen (hsc_dflags hsc_env))
+  = return (topSRT, Cmm tops : rst)                -- Only if -fnew-codegen
   | otherwise
   = do	let dflags = hsc_dflags hsc_env
         showPass dflags "CPSZ"
-        tops <- mapM (cpsTop hsc_env) tops
-        dumpIfSet_dyn dflags Opt_D_dump_cps_cmm "Post CPS Cmm" (ppr (Cmm tops))
-        return $ Cmm tops
+        (cafEnvs, tops) <- liftM unzip $ mapM (cpsTop hsc_env) tops
+        let topCAFEnv = mkTopCAFInfo (concat cafEnvs)
+        (topSRT, tops) <- foldM (toTops hsc_env topCAFEnv) (topSRT, []) tops
+        -- (topSRT, tops) <- foldM (\ z f -> f topCAFEnv z) (topSRT, []) toTops 
+        let cmms = Cmm (reverse (concat tops))
+        dumpIfSet_dyn dflags Opt_D_dump_cps_cmm "Post CPS Cmm" (ppr cmms)
+        return (topSRT, cmms : rst)
 
 {- [Note global fuel]
 ~~~~~~~~~~~~~~~~~~~~~
@@ -49,44 +67,110 @@ mutable reference cells in an 'HscEnv' and are
 global to one compiler session.
 -}
 
-cpsTop :: HscEnv -> CmmTopZ -> IO CmmTopZ
-cpsTop _ p@(CmmData {}) = return p
-cpsTop hsc_env (CmmProc h l args g) =
-    do dump Opt_D_dump_cmmz "Pre Proc Points Added"  g
+cpsTop :: HscEnv -> CmmTopZ ->
+          IO ([(CLabel, CAFSet)],
+              [(CAFSet, CmmTopForInfoTables)])
+cpsTop _ p@(CmmData {}) = return ([], [(emptyFM, NoInfoTable p)])
+cpsTop hsc_env (CmmProc h l args (stackInfo@(entry_off, _), g)) =
+    do 
+       dump Opt_D_dump_cmmz "Pre Proc Points Added"  g
        let callPPs = callProcPoints g
-       g <- return $ map_nodes id NotSpillOrReload id g
-               -- Change types of middle nodes to allow spill/reload
-       g     <- dual_rewrite Opt_D_dump_cmmz "spills and reloads"
-                             (dualLivenessWithInsertion callPPs) g
-       (varSlots, g) <- trim g >>= return . elimSpillAndReload emptyFM
-       procPoints <- run $ minimalProcPointSet callPPs (runTx cmmCfgOptsZ g)
+       -- Why bother doing it this early?
+       -- g <- dual_rewrite Opt_D_dump_cmmz "spills and reloads"
+       --                       (dualLivenessWithInsertion callPPs) g
+       -- g <- run $ insertLateReloads g -- Duplicate reloads just before uses
+       -- g <- dual_rewrite Opt_D_dump_cmmz "Dead Assignment Elimination"
+       --                   (removeDeadAssignmentsAndReloads callPPs) g
+       dump Opt_D_dump_cmmz "Pre common block elimination" g
+       g <- return $ elimCommonBlocks g
+       dump Opt_D_dump_cmmz "Post common block elimination" g
+
+       ----------- Proc points -------------------
+       procPoints <- run $ minimalProcPointSet callPPs g
        g <- run $ addProcPointProtocols callPPs procPoints g
        dump Opt_D_dump_cmmz "Post Proc Points Added" g
-       g <- return $ map_nodes id NotSpillOrReload id g
-               -- Change types of middle nodes to allow spill/reload
-       g     <- dual_rewrite Opt_D_dump_cmmz "spills and reloads"
+
+       ----------- Spills and reloads -------------------
+       g     <- 
+              -- pprTrace "pre Spills" (ppr g) $
+                dual_rewrite Opt_D_dump_cmmz "spills and reloads"
                              (dualLivenessWithInsertion procPoints) g
                     -- Insert spills at defns; reloads at return points
-       g     <- run $ insertLateReloads' g -- Duplicate reloads just before uses
+       g     <-
+              -- pprTrace "pre insertLateReloads" (ppr g) $
+                run $ insertLateReloads g -- Duplicate reloads just before uses
        dump Opt_D_dump_cmmz "Post late reloads" g
-       g     <- trim g >>= dual_rewrite Opt_D_dump_cmmz "Dead Assignment Elimination"
-                                        (removeDeadAssignmentsAndReloads procPoints)
+       g     <-
+               -- pprTrace "post insertLateReloads" (ppr g) $
+                dual_rewrite Opt_D_dump_cmmz "Dead Assignment Elimination"
+                                        (removeDeadAssignmentsAndReloads procPoints) g
                     -- Remove redundant reloads (and any other redundant asst)
-       (_, g) <- trim g >>= return . elimSpillAndReload varSlots
-       gs    <- run $ splitAtProcPoints args l procPoints g
-       gs `seq` dump Opt_D_dump_cmmz "Pre common block elimination" g
-       g     <- return $ elimCommonBlocks g
-       dump Opt_D_dump_cmmz "Post common block elimination" g
-       return $ CmmProc h l args (runTx cmmCfgOptsZ g)
+
+       ----------- Debug only: add code to put zero in dead stack slots----
+       -- Debugging: stubbing slots on death can cause crashes early
+       g <-  
+           -- trace "post dead-assign elim" $
+            if opt_StubDeadValues then run $ stubSlotsOnDeath g else return g
+
+
+       --------------- Stack layout ----------------
+       slotEnv <- run $ liveSlotAnal g
+       mbpprTrace "live slot analysis results: " (ppr slotEnv) $ return ()
+       cafEnv <- 
+                -- trace "post liveSlotAnal" $
+                 run $ cafAnal g
+       (cafEnv, slotEnv) <-
+        -- trace "post print cafAnal" $
+          return $ extendEnvsForSafeForeignCalls cafEnv slotEnv g
+       mbpprTrace "slotEnv extended for safe foreign calls: " (ppr slotEnv) $ return ()
+       let areaMap = layout procPoints slotEnv entry_off g
+       mbpprTrace "areaMap" (ppr areaMap) $ return ()
+
+       ------------  Manifest the the stack pointer --------
+       g  <- run $ manifestSP areaMap entry_off g
+       dump Opt_D_dump_cmmz "after manifestSP" g
+       -- UGH... manifestSP can require updates to the procPointMap.
+       -- We can probably do something quicker here for the update...
+
+       ------------- Split into separate procedures ------------
+       procPointMap  <- run $ procPointAnalysis procPoints g
+       dump Opt_D_dump_cmmz "procpoint map" procPointMap
+       gs <- run $ splitAtProcPoints l callPPs procPoints procPointMap
+                                       (CmmProc h l args (stackInfo, g))
+       mapM_ (dump Opt_D_dump_cmmz "after splitting") gs
+
+       ------------- More CAFs and foreign calls ------------
+       let localCAFs = catMaybes $ map (localCAFInfo cafEnv) gs
+       mbpprTrace "localCAFs" (ppr localCAFs) $ return ()
+       gs <- liftM concat $ run $ foldM lowerSafeForeignCalls [] gs
+       mapM_ (dump Opt_D_dump_cmmz "after lowerSafeForeignCalls") gs
+
+       -- NO MORE GRAPH TRANSFORMATION AFTER HERE -- JUST MAKING INFOTABLES
+       let gs' = map (setInfoTableStackMap slotEnv areaMap) gs
+       mapM_ (dump Opt_D_dump_cmmz "after setInfoTableStackMap") gs'
+       let gs'' = map (bundleCAFs cafEnv) gs'
+       mapM_ (dump Opt_D_dump_cmmz "after bundleCAFs") gs''
+       return (localCAFs, gs'')
   where dflags = hsc_dflags hsc_env
+        mbpprTrace x y z = if dopt Opt_D_dump_cmmz dflags then pprTrace x y z else z
         dump f txt g = dumpIfSet_dyn dflags f txt (ppr g)
         run = runFuelIO (hsc_OptFuel hsc_env)
         dual_rewrite flag txt pass g =
           do dump flag ("Pre " ++ txt)  g
-             g <- run $ pass (graphOfLGraph g) >>= lGraphOfGraph
+             g <- run $ pass g
              dump flag ("Post " ++ txt) $ g
-             return $ graphOfLGraph g
-        trim (Graph (ZLast (LastOther (LastBranch id))) blocks) = return $ LGraph id blocks
-        trim (Graph tail blocks) =
-          do entry <- liftM BlockId $ run $ getUniqueM
-             return $ LGraph entry (insertBlock (Block entry tail) blocks)
+             return g
+
+-- This probably belongs in CmmBuildInfoTables?
+-- We're just finishing the job here: once we know what CAFs are defined
+-- in non-static closures, we can build the SRTs.
+toTops :: HscEnv -> FiniteMap CLabel CAFSet -> (TopSRT, [[CmmTopZ]])
+                 -> [(CAFSet, CmmTopForInfoTables)] -> IO (TopSRT, [[CmmTopZ]])
+
+toTops hsc_env topCAFEnv (topSRT, tops) gs =
+  do let setSRT (topSRT, rst) g =
+           do (topSRT, gs) <- setInfoTableSRT topCAFEnv topSRT g
+              return (topSRT, gs : rst)
+     (topSRT, gs') <- runFuelIO (hsc_OptFuel hsc_env) $ foldM setSRT (topSRT, []) gs
+     gs' <- mapM finishInfoTables (concat gs')
+     return (topSRT, concat gs' : tops)

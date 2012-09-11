@@ -2,13 +2,14 @@ THISPKG	= base
 SEARCH	= -I$(TOPDIR)/targets/$(MACHINE) -Iinclude \
 	  -I../../prelude/PreludeIO -I../../prelude/`$(LOCAL)harch`
 EXTRA_H_FLAGS   = -H4M -K3M
+EXTRA_C_FLAGS   = -D__NHC__
 EXTRA_HBC_FLAGS = -H16M -A1M
 
 DIRS	= \
 	Data Debug Control Control/Monad System System/IO System/Console \
 	Text Text/Html Text/Show Text/ParserCombinators Text/Regex \
 	Foreign Foreign/Marshal Foreign/C NHC Unsafe System/Posix \
-	Control/Exception
+	Control/Exception GHC GHC/IO
 
 SRCS	= \
 	Data/Bits.hs Data/Bool.hs Data/Char.hs Data/Complex.hs \
@@ -39,8 +40,9 @@ SRCS	= \
 	Text/Read.hs Text/Show.hs Text/Show/Functions.hs \
 	Text/ParserCombinators/ReadP.hs Data/Version.hs \
 	Unsafe/Coerce.hs \
-	WCsubst.c \
-	System/Posix/Types.hs \
+	WCsubst.c dirUtils.c \
+	GHC/IO/Device.hs \
+	System/Posix/Types.hs System/Posix/Internals.hs \
 
 #	Data/String.hs
 #	Text/ParserCombinators/ReadPrec.hs
@@ -70,9 +72,12 @@ extra:
 	if [ -f Prelude.hs ]; then mv Prelude.hs Prelude.hs.unused; fi
 	if [ -f Numeric.hs ]; then mv Numeric.hs Numeric.hs.unused; fi
 	$(INSTALL) include/Typeable.h $(INCDIR)/packages/$(THISPKG)
+	$(INSTALL) include/Nhc98BaseConfig.h $(INCDIR)/packages/$(THISPKG)
 extracfiles:
 	if [ -f Prelude.hs ]; then mv Prelude.hs Prelude.hs.unused; fi
 	if [ -f Numeric.hs ]; then mv Numeric.hs Numeric.hs.unused; fi
+	$(INSTALL) include/Typeable.h $(INCDIR)/packages/$(THISPKG)
+	$(INSTALL) include/Nhc98BaseConfig.h $(INCDIR)/packages/$(THISPKG)
 
 # Here are any extra dependencies.
 

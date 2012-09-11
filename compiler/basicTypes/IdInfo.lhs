@@ -9,8 +9,8 @@ Haskell. [WDP 94/11])
 
 \begin{code}
 module IdInfo (
-        -- * The GlobalIdDetails type
-	GlobalIdDetails(..), notGlobalId, 	-- Not abstract
+        -- * The IdDetails type
+	IdDetails(..), pprIdDetails,
 
         -- * The IdInfo type
 	IdInfo,		-- Abstract
@@ -234,31 +234,23 @@ seqNewDemandInfo (Just dmd) = seqDemand dmd
 
 %************************************************************************
 %*									*
-\subsection{GlobalIdDetails}
+                     IdDetails
 %*									*
 %************************************************************************
 
-This type is here (rather than in Id.lhs) mainly because there's 
-an IdInfo.hi-boot, but no Id.hi-boot, and GlobalIdDetails is imported
-(recursively) by Var.lhs.
-
 \begin{code}
--- | Information pertaining to global 'Id's. See "Var#globalvslocal" for the distinction 
--- between global and local in this context
-data GlobalIdDetails
-  = VanillaGlobal		-- ^ The 'Id' is imported from elsewhere or is a default method 'Id'
+-- | The 'IdDetails' of an 'Id' give stable, and necessary, 
+-- information about the Id. 
+data IdDetails
+  = VanillaId	
 
   -- | The 'Id' for a record selector
-  | RecordSelId                 
+  | RecSelId                 
     { sel_tycon   :: TyCon	-- ^ For a data type family, this is the /instance/ 'TyCon'
 				--   not the family 'TyCon'
-    , sel_label   :: FieldLabel
     , sel_naughty :: Bool       -- True <=> a "naughty" selector which can't actually exist, for example @x@ in:
-                                -- 
-                                -- > data T = forall a. MkT { x :: a }
-    }				
-				-- See Note [Naughty record selectors]
-				-- with MkId.mkRecordSelectorId
+                                --    data T = forall a. MkT { x :: a }
+    }				-- See Note [Naughty record selectors] in TcTyClsDecls
 
   | DataConWorkId DataCon	-- ^ The 'Id' is for a data constructor /worker/
   | DataConWrapId DataCon	-- ^ The 'Id' is for a data constructor /wrapper/
@@ -275,22 +267,28 @@ data GlobalIdDetails
 
   | TickBoxOpId TickBoxOp	-- ^ The 'Id' is for a HPC tick box (both traditional and binary)
 
-  | NotGlobalId			-- ^ Used as a convenient extra return value from 'globalIdDetails'
+  | DFunId			-- ^ A dictionary function.  We don't use this in an essential way,
+    				-- currently, but it's kind of nice that we can keep track of
+				-- which Ids are DFuns, across module boundaries too
 
--- | An entirely unhelpful 'GlobalIdDetails'
-notGlobalId :: GlobalIdDetails
-notGlobalId = NotGlobalId
 
-instance Outputable GlobalIdDetails where
-    ppr NotGlobalId       = ptext (sLit "[***NotGlobalId***]")
-    ppr VanillaGlobal     = ptext (sLit "[GlobalId]")
-    ppr (DataConWorkId _) = ptext (sLit "[DataCon]")
-    ppr (DataConWrapId _) = ptext (sLit "[DataConWrapper]")
-    ppr (ClassOpId _)     = ptext (sLit "[ClassOp]")
-    ppr (PrimOpId _)      = ptext (sLit "[PrimOp]")
-    ppr (FCallId _)       = ptext (sLit "[ForeignCall]")
-    ppr (TickBoxOpId _)   = ptext (sLit "[TickBoxOp]")
-    ppr (RecordSelId {})  = ptext (sLit "[RecSel]")
+instance Outputable IdDetails where
+    ppr = pprIdDetails
+
+pprIdDetails :: IdDetails -> SDoc
+pprIdDetails VanillaId         = empty
+pprIdDetails (DataConWorkId _) = ptext (sLit "[DataCon]")
+pprIdDetails (DataConWrapId _) = ptext (sLit "[DataConWrapper]")
+pprIdDetails (ClassOpId _)     = ptext (sLit "[ClassOp]")
+pprIdDetails (PrimOpId _)      = ptext (sLit "[PrimOp]")
+pprIdDetails (FCallId _)       = ptext (sLit "[ForeignCall]")
+pprIdDetails (TickBoxOpId _)   = ptext (sLit "[TickBoxOp]")
+pprIdDetails DFunId            = ptext (sLit "[DFunId]")
+pprIdDetails (RecSelId { sel_naughty = is_naughty })
+  = brackets $ ptext (sLit "RecSel") <> pp_naughty
+  where
+    pp_naughty | is_naughty = ptext (sLit "(naughty)")
+	       | otherwise  = empty
 \end{code}
 
 
@@ -333,7 +331,7 @@ data IdInfo
 	unfoldingInfo	:: Unfolding,		-- ^ The 'Id's unfolding
 	cafInfo		:: CafInfo,		-- ^ 'Id' CAF info
         lbvarInfo	:: LBVarInfo,		-- ^ Info about a lambda-bound variable, if the 'Id' is one
-	inlinePragInfo	:: InlinePragInfo,	-- ^ Any inline pragma atached to the 'Id'
+	inlinePragInfo	:: InlinePragma,	-- ^ Any inline pragma atached to the 'Id'
 	occInfo		:: OccInfo,		-- ^ How the 'Id' occurs in the program
 
 	newStrictnessInfo :: Maybe StrictSig,	-- ^ Id strictness information. Reason for Maybe: 
@@ -382,7 +380,7 @@ setWorkerInfo :: IdInfo -> WorkerInfo -> IdInfo
 setWorkerInfo     info wk = wk `seq` info { workerInfo = wk }
 setSpecInfo :: IdInfo -> SpecInfo -> IdInfo
 setSpecInfo 	  info sp = sp `seq` info { specInfo = sp }
-setInlinePragInfo :: IdInfo -> InlinePragInfo -> IdInfo
+setInlinePragInfo :: IdInfo -> InlinePragma -> IdInfo
 setInlinePragInfo info pr = pr `seq` info { inlinePragInfo = pr }
 setOccInfo :: IdInfo -> OccInfo -> IdInfo
 setOccInfo	  info oc = oc `seq` info { occInfo = oc }
@@ -438,7 +436,7 @@ vanillaIdInfo
 	    workerInfo		= NoWorker,
 	    unfoldingInfo	= noUnfolding,
 	    lbvarInfo		= NoLBVarInfo,
-	    inlinePragInfo 	= AlwaysActive,
+	    inlinePragInfo 	= defaultInlinePragma,
 	    occInfo		= NoOccInfo,
 	    newDemandInfo	= Nothing,
 	    newStrictnessInfo   = Nothing
@@ -497,7 +495,7 @@ ppArityInfo n = hsep [ptext (sLit "Arity"), int n]
 --
 -- The default 'InlinePragInfo' is 'AlwaysActive', so the info serves
 -- entirely as a way to inhibit inlining until we want it
-type InlinePragInfo = Activation
+type InlinePragInfo = InlinePragma
 \end{code}
 
 
@@ -623,6 +621,7 @@ data CafInfo
 
 	| NoCafRefs			-- ^ A function or static constructor
 				        -- that refers to no CAFs.
+        deriving (Eq, Ord)
 
 -- | Assumes that the 'Id' has CAF references: definitely safe
 vanillaCafInfo :: CafInfo

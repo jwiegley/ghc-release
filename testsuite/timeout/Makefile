@@ -16,10 +16,13 @@ PREFIX := $(abspath install-inplace)
 $(eval $(call canonicalise,PREFIX))
 
 ifneq "$(GCC)" ""
-WITH_GCC = --with-gcc=$(GCC)
+WITH_GCC = --with-gcc='$(GCC)'
 endif
 
-ifeq "$(filter thr, $(GhcRTSWays))" ""
+ifeq "$(WINDOWS)" "NO"
+# Use a python timeout program, so that we don't have to worry about
+# whether or not the compiler we're testing has built the timeout
+# program correctly
 $(TIMEOUT_PROGRAM): timeout.py
 	rm -rf install-inplace
 	mkdir install-inplace
@@ -27,13 +30,16 @@ $(TIMEOUT_PROGRAM): timeout.py
 	cp $< $@
 	chmod +x $@
 else
+# The python timeout program doesn't work on mingw, so we still use the
+# Haskell program on Windows
 $(TIMEOUT_PROGRAM): timeout.hs
 	rm -rf install-inplace
-	$(TEST_HC) --make Setup
-	./Setup configure --with-compiler=$(TEST_HC) \
-	                  --with-hc-pkg=$(GHC_PKG) \
+	'$(TEST_HC)' --make Setup
+	./Setup configure --with-compiler='$(TEST_HC)' \
+	                  --with-hc-pkg='$(GHC_PKG)' \
+	                  --with-hsc2hs='$(HSC2HS)' \
 	                  $(WITH_GCC) \
-	                  --ghc-option=-threaded --prefix=$(PREFIX)
+	                  --ghc-option=-threaded --prefix='$(PREFIX)'
 	./Setup build
 	./Setup install
 endif
@@ -42,7 +48,7 @@ boot all :: calibrate.out $(TIMEOUT_PROGRAM)
 
 calibrate.out:
 	$(RM) -f TimeMe.o TimeMe.hi TimeMe TimeMe.exe
-	$(PYTHON) calibrate "$(GHC_STAGE1)" > $@
+	$(PYTHON) calibrate '$(GHC_STAGE1)' > $@
 # We use stage 1 to do the calibration, as stage 2 may not exist.
 # This isn't necessarily the compiler we'll be running the testsuite
 # with, but it's really the performance of the machine that we're
@@ -51,7 +57,7 @@ calibrate.out:
 endif
 endif
 
-clean distclean:
+clean distclean maintainer-clean:
 	-./Setup clean
 	$(RM) -rf install-inplace
 	$(RM) -f calibrate.out

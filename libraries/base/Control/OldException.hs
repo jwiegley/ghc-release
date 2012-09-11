@@ -29,7 +29,7 @@
 --
 -----------------------------------------------------------------------------
 
-module Control.OldException (
+module Control.OldException {-# DEPRECATED "Future versions of base will not support the old exceptions style. Please switch to extensible exceptions." #-} (
 
         -- * The Exception type
         Exception(..),          -- instance Eq, Ord, Show, Typeable
@@ -134,13 +134,15 @@ module Control.OldException (
 import GHC.Base
 import GHC.Num
 import GHC.Show
-import GHC.IOBase ( IO )
-import qualified GHC.IOBase as New
+-- import GHC.IO ( IO )
+import GHC.IO.Handle.FD ( stdout )
+import qualified GHC.IO as New
+import qualified GHC.IO.Exception as New
 import GHC.Conc hiding (setUncaughtExceptionHandler,
                         getUncaughtExceptionHandler)
 import Data.IORef       ( IORef, newIORef, readIORef, writeIORef )
 import Foreign.C.String ( CString, withCString )
-import GHC.Handle       ( stdout, hFlush )
+import GHC.IO.Handle ( hFlush )
 #endif
 
 #ifdef __HUGS__
@@ -454,8 +456,8 @@ bracket before after thing =
     a <- before 
     r <- catch 
            (unblock (thing a))
-           (\e -> do { after a; throw e })
-    after a
+           (\e -> do { _ <- after a; throw e })
+    _ <- after a
     return r
  )
 #endif
@@ -471,8 +473,8 @@ a `finally` sequel =
   block (do
     r <- catch 
              (unblock a)
-             (\e -> do { sequel; throw e })
-    sequel
+             (\e -> do { _ <- sequel; throw e })
+    _ <- sequel
     return r
   )
 
@@ -493,7 +495,7 @@ bracketOnError before after thing =
     a <- before 
     catch 
         (unblock (thing a))
-        (\e -> do { after a; throw e })
+        (\e -> do { _ <- after a; throw e })
  )
 
 -- -----------------------------------------------------------------------------
@@ -714,8 +716,8 @@ instance New.Exception Exception where
        Caster (\exc -> ArrayException exc),
        Caster (\(New.AssertionFailed err) -> AssertionFailed err),
        Caster (\exc -> AsyncException exc),
-       Caster (\New.BlockedOnDeadMVar -> BlockedOnDeadMVar),
-       Caster (\New.BlockedIndefinitely -> BlockedIndefinitely),
+       Caster (\New.BlockedIndefinitelyOnMVar -> BlockedOnDeadMVar),
+       Caster (\New.BlockedIndefinitelyOnSTM -> BlockedIndefinitely),
        Caster (\New.NestedAtomically -> NestedAtomically),
        Caster (\New.Deadlock -> Deadlock),
        Caster (\exc -> DynException exc),
@@ -739,8 +741,8 @@ instance New.Exception Exception where
   toException (ArrayException exc)   = toException exc
   toException (AssertionFailed err)  = toException (New.AssertionFailed err)
   toException (AsyncException exc)   = toException exc
-  toException BlockedOnDeadMVar      = toException New.BlockedOnDeadMVar
-  toException BlockedIndefinitely    = toException New.BlockedIndefinitely
+  toException BlockedOnDeadMVar      = toException New.BlockedIndefinitelyOnMVar
+  toException BlockedIndefinitely    = toException New.BlockedIndefinitelyOnSTM
   toException NestedAtomically       = toException New.NestedAtomically
   toException Deadlock               = toException New.Deadlock
   -- If a dynamic exception is a SomeException then resurrect it, so
@@ -774,8 +776,8 @@ instance Show Exception where
   showsPrec _ (AssertionFailed err)      = showString err
   showsPrec _ (DynException err)         = showString "exception :: " . showsTypeRep (dynTypeRep err)
   showsPrec _ (AsyncException e)         = shows e
-  showsPrec p BlockedOnDeadMVar          = showsPrec p New.BlockedOnDeadMVar
-  showsPrec p BlockedIndefinitely        = showsPrec p New.BlockedIndefinitely
+  showsPrec p BlockedOnDeadMVar          = showsPrec p New.BlockedIndefinitelyOnMVar
+  showsPrec p BlockedIndefinitely        = showsPrec p New.BlockedIndefinitelyOnSTM
   showsPrec p NestedAtomically           = showsPrec p New.NestedAtomically
   showsPrec p NonTermination             = showsPrec p New.NonTermination
   showsPrec p Deadlock                   = showsPrec p New.Deadlock

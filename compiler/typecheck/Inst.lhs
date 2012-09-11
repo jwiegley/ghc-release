@@ -20,11 +20,11 @@ module Inst (
 	cloneDict, mkOverLit,
 	newIPDict, newMethod, newMethodFromName, newMethodWithGivenTy, 
 	tcInstClassOp, 
-	tcSyntaxName, isHsVar,
+	tcSyntaxName, 
 
-	tyVarsOfInst, tyVarsOfInsts, tyVarsOfLIE, 
-	ipNamesOfInst, ipNamesOfInsts, fdPredsOfInst, fdPredsOfInsts,
-	getDictClassTys, dictPred,
+	tyVarsOfInst, tyVarsOfInsts, tyVarsOfLIE, tcTyVarsOfInst,
+	tcTyVarsOfInsts, ipNamesOfInst, ipNamesOfInsts, fdPredsOfInst,
+	fdPredsOfInsts, growInstsTyVars, getDictClassTys, dictPred,
 
 	lookupSimpleInst, LookupInstResult(..), 
 	tcExtendLocalInstEnv, tcGetInstEnvs, getOverlapFlag,
@@ -42,6 +42,7 @@ module Inst (
 
 	mkWantedCo, mkGivenCo, isWantedCo, eqInstCoType, mkIdEqInstCo, 
         mkSymEqInstCo, mkLeftTransEqInstCo, mkRightTransEqInstCo, mkAppEqInstCo,
+        mkTyConEqInstCo, mkFunEqInstCo,
         wantedEqInstIsUnsolved, eitherEqInst, mkEqInst, mkWantedEqInst,
         wantedToLocalEqInst, finalizeEqInst, eqInstType, eqInstCoercion,
         eqInstTys
@@ -61,7 +62,8 @@ import InstEnv
 import FunDeps
 import TcMType
 import TcType
-import MkCore
+import MkCore ( mkBigCoreTupTy )
+import TyCon
 import Type
 import TypeRep
 import Class
@@ -152,6 +154,7 @@ getDictClassTys :: Inst -> (Class, [Type])
 getDictClassTys (Dict {tci_pred = pred}) = getClassPredTys pred
 getDictClassTys inst		         = pprPanic "getDictClassTys" (ppr inst)
 
+--------------------------------
 -- fdPredsOfInst is used to get predicates that contain functional 
 -- dependencies *or* might do so.  The "might do" part is because
 -- a constraint (C a b) might have a superclass with FDs
@@ -161,14 +164,16 @@ getDictClassTys inst		         = pprPanic "getDictClassTys" (ppr inst)
 fdPredsOfInst :: Inst -> [TcPredType]
 fdPredsOfInst (Dict {tci_pred = pred}) 	     = [pred]
 fdPredsOfInst (Method {tci_theta = theta})   = theta
-fdPredsOfInst (ImplicInst {tci_given = gs, 
-			   tci_wanted = ws}) = fdPredsOfInsts (gs ++ ws)
+fdPredsOfInst (ImplicInst {tci_wanted = ws}) = fdPredsOfInsts ws
+   -- The ImplicInst case doesn't look right;
+   -- what if ws mentions skolem variables?
 fdPredsOfInst (LitInst {})		     = []
 fdPredsOfInst (EqInst {})		     = []
 
 fdPredsOfInsts :: [Inst] -> [PredType]
 fdPredsOfInsts insts = concatMap fdPredsOfInst insts
 
+---------------------------------
 isInheritableInst :: Inst -> Bool
 isInheritableInst (Dict {tci_pred = pred})     = isInheritablePred pred
 isInheritableInst (Method {tci_theta = theta}) = all isInheritablePred theta
@@ -188,22 +193,53 @@ ipNamesOfInst (Method {tci_theta = theta})   = [ipNameName n | IParam n _ <- the
 ipNamesOfInst _                              = []
 
 ---------------------------------
-tyVarsOfInst :: Inst -> TcTyVarSet
+
+-- |All free type variables (not including the coercion variables of
+-- equalities)
+--
+tyVarsOfInst :: Inst -> TyVarSet
 tyVarsOfInst (LitInst {tci_ty = ty})  = tyVarsOfType  ty
 tyVarsOfInst (Dict {tci_pred = pred}) = tyVarsOfPred pred
-tyVarsOfInst (Method {tci_oid = id, tci_tys = tys}) = tyVarsOfTypes tys `unionVarSet` varTypeTyVars id
-				 -- The id might have free type variables; in the case of
-				 -- locally-overloaded class methods, for example
-tyVarsOfInst (ImplicInst {tci_tyvars = tvs, tci_given = givens, tci_wanted = wanteds})
+tyVarsOfInst (Method {tci_oid = id, tci_tys = tys}) 
+  = tyVarsOfTypes tys `unionVarSet` varTypeTyVars id
+    -- The id might have free type variables; in the case of
+    -- locally-overloaded class methods, for example
+tyVarsOfInst (ImplicInst {tci_tyvars = tvs, tci_given = givens, 
+                          tci_wanted = wanteds})
   = (tyVarsOfInsts givens `unionVarSet` tyVarsOfInsts wanteds) 
     `minusVarSet` mkVarSet tvs
     `unionVarSet` unionVarSets (map varTypeTyVars tvs)
 		-- Remember the free tyvars of a coercion
-tyVarsOfInst (EqInst {tci_left = ty1, tci_right = ty2}) = tyVarsOfType ty1 `unionVarSet` tyVarsOfType ty2
+tyVarsOfInst (EqInst {tci_left = ty1, tci_right = ty2}) 
+  = tyVarsOfType ty1 `unionVarSet` tyVarsOfType ty2
 
-tyVarsOfInsts :: [Inst] -> VarSet
+-- |All free meta type variables *including* the coercion variables of
+-- equalities
+--
+tcTyVarsOfInst :: Inst -> TyVarSet
+tcTyVarsOfInst (LitInst {tci_ty = ty})  = tcTyVarsOfType  ty
+tcTyVarsOfInst (Dict {tci_pred = pred}) = tcTyVarsOfPred pred
+tcTyVarsOfInst (Method {tci_oid = id, tci_tys = tys}) 
+  = tcTyVarsOfTypes tys `unionVarSet` varTypeTcTyVars id
+    -- The id might have free type variables; in the case of
+    -- locally-overloaded class methods, for example
+tcTyVarsOfInst (ImplicInst {tci_tyvars = tvs, tci_given = givens, 
+                            tci_wanted = wanteds})
+  = (tcTyVarsOfInsts givens `unionVarSet` tcTyVarsOfInsts wanteds) 
+    `minusVarSet` mkVarSet tvs
+    `unionVarSet` unionVarSets (map varTypeTcTyVars tvs)
+		-- Remember the free tyvars of a coercion
+tcTyVarsOfInst (EqInst {tci_co = co, tci_left = ty1, tci_right = ty2}) 
+  = either unitVarSet tcTyVarsOfType co `unionVarSet`   -- include covars
+    tcTyVarsOfType ty1 `unionVarSet` tcTyVarsOfType ty2
+
+tyVarsOfInsts :: [Inst] -> TyVarSet
 tyVarsOfInsts insts = foldr (unionVarSet . tyVarsOfInst) emptyVarSet insts
-tyVarsOfLIE :: Bag Inst -> VarSet
+
+tcTyVarsOfInsts :: [Inst] -> TcTyVarSet
+tcTyVarsOfInsts insts = foldr (unionVarSet . tcTyVarsOfInst) emptyVarSet insts
+
+tyVarsOfLIE :: Bag Inst -> TyVarSet
 tyVarsOfLIE   lie   = tyVarsOfInsts (lieToList lie)
 
 
@@ -216,8 +252,45 @@ addInstToDictBind :: TcDictBinds -> Inst -> LHsExpr TcId -> TcDictBinds
 addInstToDictBind binds inst rhs = binds `unionBags` instToDictBind inst rhs
 \end{code}
 
-Predicates
-~~~~~~~~~~
+Note [Growing the tau-tvs using constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+(growInstsTyVars insts tvs) is the result of extending the set 
+    of tyvars tvs using all conceivable links from pred
+
+E.g. tvs = {a}, preds = {H [a] b, K (b,Int) c, Eq e}
+Then grow precs tvs = {a,b,c}
+
+All the type variables from an implicit parameter are added, whether or
+not they are mentioned in tvs; see Note [Implicit parameters and ambiguity] 
+in TcSimplify.
+
+See also Note [Ambiguity] in TcSimplify
+
+\begin{code}
+growInstsTyVars :: [Inst] -> TyVarSet -> TyVarSet
+growInstsTyVars insts tvs
+  | null insts = tvs
+  | otherwise  = fixVarSet mk_next tvs
+  where
+    mk_next tvs = foldr grow_inst_tvs tvs insts
+
+grow_inst_tvs :: Inst -> TyVarSet -> TyVarSet
+grow_inst_tvs (Dict {tci_pred = pred})     tvs = growPredTyVars pred tvs
+grow_inst_tvs (Method {tci_theta = theta}) tvs = foldr growPredTyVars tvs theta
+grow_inst_tvs (ImplicInst {tci_tyvars = tvs1, tci_wanted = ws}) tvs
+  = tvs `unionVarSet` (foldr grow_inst_tvs (tvs `delVarSetList` tvs1) ws
+    		          `delVarSetList` tvs1)
+grow_inst_tvs inst tvs   -- EqInst, LitInst
+  = growTyVars (tyVarsOfInst inst) tvs
+\end{code}
+
+
+%************************************************************************
+%*									*
+		Predicates
+%*									*
+%************************************************************************
+
 \begin{code}
 
 isAbstractableInst :: Inst -> Bool
@@ -497,10 +570,6 @@ mkOverLit (HsFractional r)
 	; return (HsRat r rat_ty) }
 
 mkOverLit (HsIsString s) = return (HsString s)
-
-isHsVar :: HsExpr Name -> Name -> Bool
-isHsVar (HsVar f) g = f == g
-isHsVar _     	  _ = False
 \end{code}
 
 
@@ -798,7 +867,7 @@ lookupSimpleInst (Dict {tci_pred = pred, tci_loc = loc})
 
     { use_stage <- getStage
     ; checkWellStaged (ptext (sLit "instance for") <+> quotes (ppr pred))
-    		      (topIdLvl dfun_id) use_stage
+    		      (topIdLvl dfun_id) (thLevel use_stage)
 
  	-- It's possible that not all the tyvars are in
 	-- the substitution, tenv. For example:
@@ -859,7 +928,8 @@ record_dfun_usage :: Id -> TcRn ()
 record_dfun_usage dfun_id 
   = do	{ hsc_env <- getTopEnv
 	; let  dfun_name = idName dfun_id
-	       dfun_mod  = nameModule dfun_name
+	       dfun_mod  = ASSERT( isExternalName dfun_name ) 
+	         	   nameModule dfun_name
 	; if isInternalName dfun_name ||    -- Internal name => defined in this module
 	     modulePackageId dfun_mod /= thisPackage (hsc_dflags hsc_env)
 	  then return () -- internal, or in another package
@@ -986,7 +1056,7 @@ depending on whether a EqInstCo is for a wanted or local equality:
 --
 mkIdEqInstCo :: EqInstCo -> Type -> TcM ()
 mkIdEqInstCo (Left cotv) t
-  = writeMetaTyVar cotv t
+  = bindMetaTyVar cotv t
 mkIdEqInstCo (Right _) _
   = return ()
 
@@ -995,7 +1065,7 @@ mkIdEqInstCo (Right _) _
 mkSymEqInstCo :: EqInstCo -> (Type, Type) -> TcM EqInstCo
 mkSymEqInstCo (Left cotv) (ty1, ty2)
   = do { cotv' <- newMetaCoVar ty1 ty2
-       ; writeMetaTyVar cotv (mkSymCoercion (TyVarTy cotv'))
+       ; bindMetaTyVar cotv (mkSymCoercion (TyVarTy cotv'))
        ; return $ Left cotv'
        }
 mkSymEqInstCo (Right co) _ 
@@ -1006,7 +1076,7 @@ mkSymEqInstCo (Right co) _
 mkLeftTransEqInstCo :: EqInstCo -> Coercion -> (Type, Type) -> TcM EqInstCo
 mkLeftTransEqInstCo (Left cotv) given_co (ty1, ty2)
   = do { cotv' <- newMetaCoVar ty1 ty2
-       ; writeMetaTyVar cotv (TyVarTy cotv' `mkTransCoercion` given_co)
+       ; bindMetaTyVar cotv (TyVarTy cotv' `mkTransCoercion` given_co)
        ; return $ Left cotv'
        }
 mkLeftTransEqInstCo (Right co) given_co _ 
@@ -1017,7 +1087,7 @@ mkLeftTransEqInstCo (Right co) given_co _
 mkRightTransEqInstCo :: EqInstCo -> Coercion -> (Type, Type) -> TcM EqInstCo
 mkRightTransEqInstCo (Left cotv) given_co (ty1, ty2)
   = do { cotv' <- newMetaCoVar ty1 ty2
-       ; writeMetaTyVar cotv (given_co `mkTransCoercion` TyVarTy cotv')
+       ; bindMetaTyVar cotv (given_co `mkTransCoercion` TyVarTy cotv')
        ; return $ Left cotv'
        }
 mkRightTransEqInstCo (Right co) given_co _ 
@@ -1030,11 +1100,41 @@ mkAppEqInstCo :: EqInstCo -> (Type, Type) -> (Type, Type)
 mkAppEqInstCo (Left cotv) (ty1_l, ty2_l) (ty1_r, ty2_r)
   = do { cotv_l <- newMetaCoVar ty1_l ty2_l
        ; cotv_r <- newMetaCoVar ty1_r ty2_r
-       ; writeMetaTyVar cotv (mkAppCoercion (TyVarTy cotv_l) (TyVarTy cotv_r))
+       ; bindMetaTyVar cotv (mkAppCoercion (TyVarTy cotv_l) (TyVarTy cotv_r))
        ; return (Left cotv_l, Left cotv_r)
        }
 mkAppEqInstCo (Right co) _ _
   = return (Right $ mkLeftCoercion co, Right $ mkRightCoercion co)
+
+-- Coercion transformation: co = con col -> cor
+--
+mkTyConEqInstCo :: EqInstCo -> TyCon -> [(Type, Type)] -> TcM ([EqInstCo])
+mkTyConEqInstCo (Left cotv) con ty12s
+  = do { cotvs <- mapM (uncurry newMetaCoVar) ty12s
+       ; bindMetaTyVar cotv (mkTyConCoercion con (mkTyVarTys cotvs))
+       ; return (map Left cotvs)
+       }
+mkTyConEqInstCo (Right co) _ args
+  = return $ map (\mkCoes -> Right $ foldl (.) id mkCoes co) mkCoes
+    -- make cascades of the form 
+    --   mkRightCoercion (mkLeftCoercion .. (mkLeftCoercion co)..)
+  where
+    n      = length args
+    mkCoes = [mkRightCoercion : replicate i mkLeftCoercion | i <- [n-1, n-2..0]]
+
+-- Coercion transformation: co = col -> cor
+--
+mkFunEqInstCo :: EqInstCo -> (Type, Type) -> (Type, Type)
+              -> TcM (EqInstCo, EqInstCo)
+mkFunEqInstCo (Left cotv) (ty1_l, ty2_l) (ty1_r, ty2_r)
+  = do { cotv_l <- newMetaCoVar ty1_l ty2_l
+       ; cotv_r <- newMetaCoVar ty1_r ty2_r
+       ; bindMetaTyVar cotv (mkFunCoercion (TyVarTy cotv_l) (TyVarTy cotv_r))
+       ; return (Left cotv_l, Left cotv_r)
+       }
+mkFunEqInstCo (Right co) _ _
+  = return (Right $ mkRightCoercion (mkLeftCoercion co), 
+            Right $ mkRightCoercion co)
 \end{code}
 
 Operations on entire EqInst.
@@ -1073,7 +1173,7 @@ mkEqInst (EqPred ty1 ty2) co
 	     ; return inst
 	     }
 	where 
-          mkName uniq src_span = mkInternalName uniq (mkVarOcc "co") src_span
+          mkName uniq src_span = mkInternalName uniq (mkVarOcc "co_ei") src_span
 mkEqInst pred _ = pprPanic "mkEqInst" (ppr pred)
 
 mkWantedEqInst :: PredType -> TcM Inst

@@ -7,21 +7,20 @@
 #include "PosixSource.h"
 #include "Rts.h"
 #include "RtsAPI.h"
+#include "rts/Bytecodes.h"
+
+// internal headers
+#include "sm/Storage.h"
 #include "RtsUtils.h"
-#include "Closures.h"
-#include "TSO.h"
 #include "Schedule.h"
-#include "RtsFlags.h"
-#include "LdvProfile.h"
 #include "Updates.h"
 #include "Sanity.h"
-#include "Liveness.h"
 #include "Prelude.h"
-
-#include "Bytecodes.h"
+#include "Stable.h"
 #include "Printer.h"
 #include "Disassembler.h"
 #include "Interpreter.h"
+#include "ThreadPaused.h"
 
 #include <string.h>     /* for memcpy */
 #ifdef HAVE_ERRNO_H
@@ -81,9 +80,9 @@
 
 
 STATIC_INLINE StgPtr
-allocate_NONUPD (int n_words)
+allocate_NONUPD (Capability *cap, int n_words)
 {
-    return allocate(stg_max(sizeofW(StgHeader)+MIN_PAYLOAD_SIZE, n_words));
+    return allocateLocal(cap, stg_max(sizeofW(StgHeader)+MIN_PAYLOAD_SIZE, n_words));
 }
 
 int rts_stop_next_breakpoint = 0;
@@ -195,6 +194,9 @@ interpretBCO (Capability* cap)
     nat n, m;
 
     LOAD_STACK_POINTERS;
+
+    cap->r.rHpLim = (P_)1; // HpLim is the context-switch flag; when it
+                           // goes to zero we must return to the scheduler.
 
     // ------------------------------------------------------------------------
     // Case 1:
@@ -595,7 +597,7 @@ do_apply:
 	    else /* arity > n */ {
 		// build a new PAP and return it.
 		StgPAP *new_pap;
-		new_pap = (StgPAP *)allocate(PAP_sizeW(pap->n_args + m));
+		new_pap = (StgPAP *)allocateLocal(cap, PAP_sizeW(pap->n_args + m));
 		SET_HDR(new_pap,&stg_PAP_info,CCCS);
 		new_pap->arity = pap->arity - n;
 		new_pap->n_args = pap->n_args + m;
@@ -640,7 +642,7 @@ do_apply:
 		// build a PAP and return it.
 		StgPAP *pap;
 		nat i;
-		pap = (StgPAP *)allocate(PAP_sizeW(m));
+		pap = (StgPAP *)allocateLocal(cap, PAP_sizeW(m));
 		SET_HDR(pap, &stg_PAP_info,CCCS);
 		pap->arity = arity - n;
 		pap->fun = obj;
@@ -760,19 +762,22 @@ run_BCO_fun:
 run_BCO:
     INTERP_TICK(it_BCO_entries);
     {
-	register int       bciPtr     = 1; /* instruction pointer */
+	register int       bciPtr = 0; /* instruction pointer */
         register StgWord16 bci;
 	register StgBCO*   bco        = (StgBCO*)obj;
 	register StgWord16* instrs    = (StgWord16*)(bco->instrs->payload);
 	register StgWord*  literals   = (StgWord*)(&bco->literals->payload[0]);
 	register StgPtr*   ptrs       = (StgPtr*)(&bco->ptrs->payload[0]);
+	int bcoSize;
+    bcoSize = BCO_NEXT_WORD;
+	IF_DEBUG(interpreter,debugBelch("bcoSize = %d\n", bcoSize));
 
 #ifdef INTERP_STATS
 	it_lastopc = 0; /* no opcode */
 #endif
 
     nextInsn:
-	ASSERT(bciPtr <= instrs[0]);
+	ASSERT(bciPtr < bcoSize);
 	IF_DEBUG(interpreter,
 		 //if (do_print_stack) {
 		 //debugBelch("\n-- BEGIN stack\n");
@@ -851,7 +856,7 @@ run_BCO:
                   // stg_apply_interp_info pointer and a pointer to
                   // the BCO
                   size_words = BCO_BITMAP_SIZE(obj) + 2;
-                  new_aps = (StgAP_STACK *) allocate (AP_STACK_sizeW(size_words));
+                  new_aps = (StgAP_STACK *) allocateLocal(cap, AP_STACK_sizeW(size_words));
                   SET_HDR(new_aps,&stg_AP_STACK_info,CCS_SYSTEM); 
                   new_aps->size = size_words;
                   new_aps->fun = &stg_dummy_ret_closure; 
@@ -1070,7 +1075,7 @@ run_BCO:
 	case bci_ALLOC_AP: {
 	    StgAP* ap; 
 	    int n_payload = BCO_NEXT;
-	    ap = (StgAP*)allocate(AP_sizeW(n_payload));
+	    ap = (StgAP*)allocateLocal(cap, AP_sizeW(n_payload));
 	    Sp[-1] = (W_)ap;
 	    ap->n_args = n_payload;
 	    SET_HDR(ap, &stg_AP_info, CCS_SYSTEM/*ToDo*/)
@@ -1081,7 +1086,7 @@ run_BCO:
 	case bci_ALLOC_AP_NOUPD: {
 	    StgAP* ap; 
 	    int n_payload = BCO_NEXT;
-	    ap = (StgAP*)allocate(AP_sizeW(n_payload));
+	    ap = (StgAP*)allocateLocal(cap, AP_sizeW(n_payload));
 	    Sp[-1] = (W_)ap;
 	    ap->n_args = n_payload;
 	    SET_HDR(ap, &stg_AP_NOUPD_info, CCS_SYSTEM/*ToDo*/)
@@ -1093,7 +1098,7 @@ run_BCO:
 	    StgPAP* pap; 
 	    int arity = BCO_NEXT;
 	    int n_payload = BCO_NEXT;
-	    pap = (StgPAP*)allocate(PAP_sizeW(n_payload));
+	    pap = (StgPAP*)allocateLocal(cap, PAP_sizeW(n_payload));
 	    Sp[-1] = (W_)pap;
 	    pap->n_args = n_payload;
 	    pap->arity = arity;
@@ -1165,7 +1170,7 @@ run_BCO:
 	    StgInfoTable* itbl = INFO_PTR_TO_STRUCT(BCO_LIT(o_itbl));
 	    int request        = CONSTR_sizeW( itbl->layout.payload.ptrs, 
 					       itbl->layout.payload.nptrs );
-	    StgClosure* con = (StgClosure*)allocate_NONUPD(request);
+	    StgClosure* con = (StgClosure*)allocate_NONUPD(cap,request);
 	    ASSERT( itbl->layout.payload.ptrs + itbl->layout.payload.nptrs > 0);
 	    SET_HDR(con, (StgInfoTable*)BCO_LIT(o_itbl), CCS_SYSTEM/*ToDo*/);
 	    for (i = 0; i < n_words; i++) {
@@ -1183,7 +1188,7 @@ run_BCO:
 
 	case bci_TESTLT_P: {
 	    unsigned int discr  = BCO_NEXT;
-	    int failto = BCO_NEXT;
+	    int failto = BCO_GET_LARGE_ARG;
 	    StgClosure* con = (StgClosure*)Sp[0];
 	    if (GET_TAG(con) >= discr) {
 		bciPtr = failto;
@@ -1193,7 +1198,7 @@ run_BCO:
 
 	case bci_TESTEQ_P: {
 	    unsigned int discr  = BCO_NEXT;
-	    int failto = BCO_NEXT;
+	    int failto = BCO_GET_LARGE_ARG;
 	    StgClosure* con = (StgClosure*)Sp[0];
 	    if (GET_TAG(con) != discr) {
 		bciPtr = failto;
@@ -1204,7 +1209,7 @@ run_BCO:
 	case bci_TESTLT_I: {
 	    // There should be an Int at Sp[1], and an info table at Sp[0].
 	    int discr   = BCO_NEXT;
-	    int failto  = BCO_NEXT;
+	    int failto  = BCO_GET_LARGE_ARG;
 	    I_ stackInt = (I_)Sp[1];
 	    if (stackInt >= (I_)BCO_LIT(discr))
 		bciPtr = failto;
@@ -1214,9 +1219,30 @@ run_BCO:
 	case bci_TESTEQ_I: {
 	    // There should be an Int at Sp[1], and an info table at Sp[0].
 	    int discr   = BCO_NEXT;
-	    int failto  = BCO_NEXT;
+	    int failto  = BCO_GET_LARGE_ARG;
 	    I_ stackInt = (I_)Sp[1];
 	    if (stackInt != (I_)BCO_LIT(discr)) {
+		bciPtr = failto;
+	    }
+	    goto nextInsn;
+	}
+
+	case bci_TESTLT_W: {
+	    // There should be an Int at Sp[1], and an info table at Sp[0].
+	    int discr   = BCO_NEXT;
+	    int failto  = BCO_GET_LARGE_ARG;
+	    W_ stackWord = (W_)Sp[1];
+	    if (stackWord >= (W_)BCO_LIT(discr))
+		bciPtr = failto;
+	    goto nextInsn;
+	}
+
+	case bci_TESTEQ_W: {
+	    // There should be an Int at Sp[1], and an info table at Sp[0].
+	    int discr   = BCO_NEXT;
+	    int failto  = BCO_GET_LARGE_ARG;
+	    W_ stackWord = (W_)Sp[1];
+	    if (stackWord != (W_)BCO_LIT(discr)) {
 		bciPtr = failto;
 	    }
 	    goto nextInsn;
@@ -1225,7 +1251,7 @@ run_BCO:
 	case bci_TESTLT_D: {
 	    // There should be a Double at Sp[1], and an info table at Sp[0].
 	    int discr   = BCO_NEXT;
-	    int failto  = BCO_NEXT;
+	    int failto  = BCO_GET_LARGE_ARG;
 	    StgDouble stackDbl, discrDbl;
 	    stackDbl = PK_DBL( & Sp[1] );
 	    discrDbl = PK_DBL( & BCO_LIT(discr) );
@@ -1238,7 +1264,7 @@ run_BCO:
 	case bci_TESTEQ_D: {
 	    // There should be a Double at Sp[1], and an info table at Sp[0].
 	    int discr   = BCO_NEXT;
-	    int failto  = BCO_NEXT;
+	    int failto  = BCO_GET_LARGE_ARG;
 	    StgDouble stackDbl, discrDbl;
 	    stackDbl = PK_DBL( & Sp[1] );
 	    discrDbl = PK_DBL( & BCO_LIT(discr) );
@@ -1251,7 +1277,7 @@ run_BCO:
 	case bci_TESTLT_F: {
 	    // There should be a Float at Sp[1], and an info table at Sp[0].
 	    int discr   = BCO_NEXT;
-	    int failto  = BCO_NEXT;
+	    int failto  = BCO_GET_LARGE_ARG;
 	    StgFloat stackFlt, discrFlt;
 	    stackFlt = PK_FLT( & Sp[1] );
 	    discrFlt = PK_FLT( & BCO_LIT(discr) );
@@ -1264,7 +1290,7 @@ run_BCO:
 	case bci_TESTEQ_F: {
 	    // There should be a Float at Sp[1], and an info table at Sp[0].
 	    int discr   = BCO_NEXT;
-	    int failto  = BCO_NEXT;
+	    int failto  = BCO_GET_LARGE_ARG;
 	    StgFloat stackFlt, discrFlt;
 	    stackFlt = PK_FLT( & Sp[1] );
 	    discrFlt = PK_FLT( & BCO_LIT(discr) );
@@ -1281,7 +1307,7 @@ run_BCO:
 	    // context switching: sometimes the scheduler can invoke
 	    // the interpreter with context_switch == 1, particularly
 	    // if the -C0 flag has been given on the cmd line.
-	    if (cap->context_switch) {
+	    if (cap->r.rHpLim == NULL) {
 		Sp--; Sp[0] = (W_)&stg_enter_info;
 		RETURN_TO_SCHEDULER(ThreadInterpret, ThreadYielding);
 	    }
@@ -1422,7 +1448,7 @@ run_BCO:
             ffi_call(cif, fn, ret, argptrs);
 
 	    // And restart the thread again, popping the RET_DYN frame.
-	    cap = (Capability *)((void *)((unsigned char*)resumeThread(tok) - sizeof(StgFunTable)));
+	    cap = (Capability *)((void *)((unsigned char*)resumeThread(tok) - STG_FIELD_OFFSET(Capability,r)));
 	    LOAD_STACK_POINTERS;
 
             // Re-load the pointer to the BCO from the RET_DYN frame,
@@ -1448,7 +1474,7 @@ run_BCO:
 
 	case bci_JMP: {
 	    /* BCO_NEXT modifies bciPtr, so be conservative. */
-	    int nextpc = BCO_NEXT;
+	    int nextpc = BCO_GET_LARGE_ARG;
 	    bciPtr     = nextpc;
 	    goto nextInsn;
 	}

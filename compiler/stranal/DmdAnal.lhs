@@ -25,10 +25,11 @@ import StaticFlags	( opt_MaxWorkerArgs )
 import NewDemand	-- All of it
 import CoreSyn
 import PprCore	
-import CoreUtils	( exprIsHNF, exprIsTrivial, exprArity )
+import CoreUtils	( exprIsHNF, exprIsTrivial )
+import CoreArity	( exprArity )
 import DataCon		( dataConTyCon )
 import TyCon		( isProductTyCon, isRecursiveTyCon )
-import Id		( Id, idType, idInlinePragma,
+import Id		( Id, idType, idInlineActivation,
 			  isDataConWorkId, isGlobalId, idArity,
 #ifdef OLD_STRICTNESS
 			  idDemandInfo,  idStrictness, idCprInfo, idName,
@@ -77,11 +78,7 @@ To think about
 dmdAnalPgm :: DynFlags -> [CoreBind] -> IO [CoreBind]
 dmdAnalPgm dflags binds
   = do {
-	showPass dflags "Demand analysis" ;
 	let { binds_plus_dmds = do_prog binds } ;
-
-	endPass dflags "Demand analysis" 
-	 	Opt_D_dump_stranal binds_plus_dmds ;
 #ifdef OLD_STRICTNESS
 	-- Only if OLD_STRICTNESS is on, because only then is the old
 	-- strictness analyser run
@@ -271,7 +268,7 @@ dmdAnal sigs dmd (Case scrut case_bndr ty [alt@(DataAlt dc,bndrs,rhs)])
 	-- The insight is, of course, that a demand on y is a demand on the
 	-- scrutinee, so we need to `both` it with the scrut demand
 
-	alt_dmd 	   = Eval (Prod [idNewDemandInfo b | b <- bndrs', isIdVar b])
+	alt_dmd 	   = Eval (Prod [idNewDemandInfo b | b <- bndrs', isId b])
         scrut_dmd 	   = alt_dmd `both`
 			     idNewDemandInfo case_bndr'
 
@@ -466,7 +463,7 @@ mkSigTy :: TopLevelFlag -> RecFlag -> Id -> CoreExpr -> DmdType -> (DmdEnv, Stri
 mkSigTy top_lvl rec_flag id rhs dmd_ty 
   = mk_sig_ty never_inline thunk_cpr_ok rhs dmd_ty
   where
-    never_inline = isNeverActive (idInlinePragma id)
+    never_inline = isNeverActive (idInlineActivation id)
     maybe_id_dmd = idNewDemandInfo_maybe id
 	-- Is Nothing the first time round
 
@@ -751,7 +748,7 @@ annotateLamIdBndr :: DmdType 	-- Demand type of body
 annotateLamIdBndr dmd_ty@(DmdType fv ds res) id
 -- For lambdas we add the demand to the argument demands
 -- Only called for Ids
-  = ASSERT( isIdVar id )
+  = ASSERT( isId id )
     (DmdType fv' (hacked_dmd:ds) res, setIdNewDemandInfo id hacked_dmd)
   where
     (fv', dmd) = removeFV fv id res

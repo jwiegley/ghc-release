@@ -7,9 +7,8 @@
  * ---------------------------------------------------------------------------*/
 
 #include "Rts.h"
-#include "OSMem.h"
+#include "sm/OSMem.h"
 #include "RtsUtils.h"
-#include "RtsMessages.h"
 
 #if HAVE_WINDOWS_H
 #include <windows.h>
@@ -255,7 +254,7 @@ void setExecutable (void *p, lnat len, rtsBool exec)
 			exec ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE, 
 			&dwOldProtect) == 0)
     {
-	sysErrorBelch("makeExecutable: failed to protect 0x%p; old protection: %lu\n",
+	sysErrorBelch("setExecutable: failed to protect 0x%p; old protection: %lu\n",
                       p, (unsigned long)dwOldProtect);
         stg_exit(EXIT_FAILURE);
     }

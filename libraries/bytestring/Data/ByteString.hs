@@ -1,7 +1,9 @@
 {-# LANGUAGE CPP #-}
-{-# OPTIONS_GHC -XMagicHash -XUnboxedTuples -fno-warn-orphans #-}
-
--- #prune
+-- We cannot actually specify all the language pragmas, see ghc ticket #
+-- If we could, these are what they would be:
+{- LANGUAGE MagicHash, UnboxedTuples,
+            NamedFieldPuns, BangPatterns, RecordWildCards -}
+{-# OPTIONS_HADDOCK prune #-}
 
 -- |
 -- Module      : Data.ByteString
@@ -226,7 +228,6 @@ import Control.Exception        (finally, bracket, assert)
 #else
 import Control.Exception	(bracket, finally)
 #endif
-import qualified Control.Exception as Exception
 import Control.Monad            (when)
 
 import Foreign.C.String         (CString, CStringLen)
@@ -240,7 +241,8 @@ import Foreign.Storable         (Storable(..))
 -- hGetBuf and hPutBuf not available in yhc or nhc
 import System.IO                (stdin,stdout,hClose,hFileSize
                                 ,hGetBuf,hPutBuf,openBinaryFile
-                                ,Handle,IOMode(..))
+                                ,IOMode(..))
+import System.IO.Error          (mkIOError, illegalOperationErrorType)
 
 import Data.Monoid              (Monoid, mempty, mappend, mconcat)
 
@@ -253,15 +255,27 @@ import qualified System.IO      (hGetLine)
 #if defined(__GLASGOW_HASKELL__)
 
 import System.IO                (hGetBufNonBlocking)
-import System.IO.Error          (isEOFError)
 
+#if __GLASGOW_HASKELL__ >= 611
+import Data.IORef
+import GHC.IO.Handle.Internals
+import GHC.IO.Handle.Types
+import GHC.IO.Buffer
+import GHC.IO.BufferedIO as Buffered
+import GHC.IO hiding (finally)
+import Data.Char                (ord)
+import Foreign.Marshal.Utils    (copyBytes)
+#else
+import System.IO.Error          (isEOFError)
+import GHC.IOBase
 import GHC.Handle
+#endif
+
 import GHC.Prim                 (Word#, (+#), writeWord8OffAddr#)
 import GHC.Base                 (build)
 import GHC.Word hiding (Word8)
 import GHC.Ptr                  (Ptr(..))
 import GHC.ST                   (ST(..))
-import GHC.IOBase
 
 #endif
 
@@ -960,12 +974,15 @@ break p ps = case findIndexOrEnd p ps of n -> (unsafeTake n ps, unsafeDrop n ps)
 {-# INLINE [1] break #-}
 #endif
 
+#if __GLASGOW_HASKELL__ >= 606
+-- This RULE LHS is not allowed by ghc-6.4
 {-# RULES
 "ByteString specialise break (x==)" forall x.
     break ((==) x) = breakByte x
 "ByteString specialise break (==x)" forall x.
     break (==x) = breakByte x
   #-}
+#endif
 
 -- INTERNAL:
 
@@ -1013,12 +1030,15 @@ spanByte c ps@(PS x s l) = inlinePerformIO $ withForeignPtr x $ \p ->
                                 else go p (i+1)
 {-# INLINE spanByte #-}
 
+#if __GLASGOW_HASKELL__ >= 606
+-- This RULE LHS is not allowed by ghc-6.4
 {-# RULES
 "ByteString specialise span (x==)" forall x.
     span ((==) x) = spanByte x
 "ByteString specialise span (==x)" forall x.
     span (==x) = spanByte x
   #-}
+#endif
 
 -- | 'spanEnd' behaves like 'span' but from the end of the 'ByteString'.
 -- We have
@@ -1097,18 +1117,19 @@ splitWith p ps = loop p ps
 --
 split :: Word8 -> ByteString -> [ByteString]
 split _ (PS _ _ 0) = []
-split w (PS x s l) = inlinePerformIO $ withForeignPtr x $ \p -> do
-    let ptr = p `plusPtr` s
-
+split w (PS x s l) = loop 0
+    where
         STRICT1(loop)
         loop n =
-            let q = inlinePerformIO $ memchr (ptr `plusPtr` n)
-                                           w (fromIntegral (l-n))
+            let q = inlinePerformIO $ withForeignPtr x $ \p ->
+                      memchr (p `plusPtr` (s+n))
+                             w (fromIntegral (l-n))
             in if q == nullPtr
                 then [PS x (s+n) (l-n)]
-                else let i = q `minusPtr` ptr in PS x (s+n) (i-n) : loop (i+1)
+                else let i = inlinePerformIO $ withForeignPtr x $ \p ->
+                               return (q `minusPtr` (p `plusPtr` s))
+                      in PS x (s+n) (i-n) : loop (i+1)
 
-    return (loop 0)
 {-# INLINE split #-}
 
 {-
@@ -1244,17 +1265,17 @@ elemIndexEnd ch (PS x s l) = inlinePerformIO $ withForeignPtr x $ \p ->
 -- the indices of all elements equal to the query element, in ascending order.
 -- This implementation uses memchr(3).
 elemIndices :: Word8 -> ByteString -> [Int]
-elemIndices w (PS x s l) = inlinePerformIO $ withForeignPtr x $ \p -> do
-    let ptr = p `plusPtr` s
-
+elemIndices w (PS x s l) = loop 0
+    where
         STRICT1(loop)
-        loop n = let q = inlinePerformIO $ memchr (ptr `plusPtr` n)
+        loop n = let q = inlinePerformIO $ withForeignPtr x $ \p ->
+                           memchr (p `plusPtr` (n+s))
                                                 w (fromIntegral (l - n))
                  in if q == nullPtr
                         then []
-                        else let i = q `minusPtr` ptr
+                        else let i = inlinePerformIO $ withForeignPtr x $ \p ->
+                                       return (q `minusPtr` (p `plusPtr` s))
                              in i : loop (i+1)
-    return $! loop 0
 {-# INLINE elemIndices #-}
 
 {-
@@ -1566,9 +1587,6 @@ zipWith :: (Word8 -> Word8 -> a) -> ByteString -> ByteString -> [a]
 zipWith f ps qs
     | null ps || null qs = []
     | otherwise = f (unsafeHead ps) (unsafeHead qs) : zipWith f (unsafeTail ps) (unsafeTail qs)
-#if defined(__GLASGOW_HASKELL__)
-{-# INLINE [1] zipWith #-}
-#endif
 
 --
 -- | A specialised version of zipWith for the common case of a
@@ -1627,7 +1645,7 @@ tails p | null p    = [empty]
 sort :: ByteString -> ByteString
 sort (PS input s l) = unsafeCreate l $ \p -> allocaArray 256 $ \arr -> do
 
-    memset (castPtr arr) 0 (256 * fromIntegral (sizeOf (undefined :: CSize)))
+    _ <- memset (castPtr arr) 0 (256 * fromIntegral (sizeOf (undefined :: CSize)))
     withForeignPtr input (\x -> countOccurrences arr (x `plusPtr` s) l)
 
     let STRICT2(go)
@@ -1701,8 +1719,10 @@ packCString cstr = do
 -- The @ByteString@ is a normal Haskell value and will be managed on the
 -- Haskell heap.
 packCStringLen :: CStringLen -> IO ByteString
-packCStringLen (cstr, len) = create len $ \p ->
+packCStringLen (cstr, len) | len >= 0 = create len $ \p ->
     memcpy p (castPtr cstr) (fromIntegral len)
+packCStringLen (_, len) =
+    moduleError "packCStringLen" ("negative length: " ++ show len)
 
 ------------------------------------------------------------------------
 
@@ -1726,9 +1746,71 @@ getLine = hGetLine stdin
 -- | Read a line from a handle
 
 hGetLine :: Handle -> IO ByteString
+
 #if !defined(__GLASGOW_HASKELL__)
+
 hGetLine h = System.IO.hGetLine h >>= return . pack . P.map c2w
+
+#elif __GLASGOW_HASKELL__ >= 611
+
+hGetLine h =
+  wantReadableHandle_ "Data.ByteString.hGetLine" h $
+    \ h_@Handle__{haByteBuffer} -> do
+      flushCharReadBuffer h_
+      buf <- readIORef haByteBuffer
+      if isEmptyBuffer buf
+         then fill h_ buf 0 []
+         else haveBuf h_ buf 0 []
+ where
+
+  fill h_@Handle__{haByteBuffer,haDevice} buf len xss =
+    len `seq` do
+    (r,buf') <- Buffered.fillReadBuffer haDevice buf
+    if r == 0
+       then do writeIORef haByteBuffer buf{ bufR=0, bufL=0 }
+               if len > 0
+                  then mkBigPS len xss
+                  else ioe_EOF
+       else haveBuf h_ buf' len xss
+
+  haveBuf h_@Handle__{haByteBuffer}
+          buf@Buffer{ bufRaw=raw, bufR=w, bufL=r }
+          len xss =
+    do
+        off <- findEOL r w raw
+        let new_len = len + off - r
+        xs <- mkPS raw r off
+
+      -- if eol == True, then off is the offset of the '\n'
+      -- otherwise off == w and the buffer is now empty.
+        if off /= w
+            then do if (w == off + 1)
+                            then writeIORef haByteBuffer buf{ bufL=0, bufR=0 }
+                            else writeIORef haByteBuffer buf{ bufL = off + 1 }
+                    mkBigPS new_len (xs:xss)
+            else do
+                 fill h_ buf{ bufL=0, bufR=0 } new_len (xs:xss)
+
+  -- find the end-of-line character, if there is one
+  findEOL r w raw
+        | r == w = return w
+        | otherwise =  do
+            c <- readWord8Buf raw r
+            if c == fromIntegral (ord '\n')
+                then return r -- NB. not r+1: don't include the '\n'
+                else findEOL (r+1) w raw
+
+mkPS :: RawBuffer Word8 -> Int -> Int -> IO ByteString
+mkPS buf start end =
+ create len $ \p ->
+   withRawBuffer buf $ \pbuf -> do
+   copyBytes p (pbuf `plusPtr` start) len
+ where
+   len = end - start
+
 #else
+-- GHC 6.10 and older, pre-Unicode IO library
+
 hGetLine h = wantReadableHandle "Data.ByteString.hGetLine" h $ \ handle_ -> do
     case haBufferMode handle_ of
        NoBuffering -> error "no buffering"
@@ -1790,11 +1872,11 @@ mkPS buf start end =
         memcpy_ptr_baoff p buf (fromIntegral start) (fromIntegral len)
         return ()
 
+#endif
+
 mkBigPS :: Int -> [ByteString] -> IO ByteString
 mkBigPS _ [ps] = return ps
 mkBigPS _ pss = return $! concat (P.reverse pss)
-
-#endif
 
 -- ---------------------------------------------------------------------
 -- Block IO
@@ -1837,8 +1919,10 @@ putStrLn = hPutStrLn stdout
 -- is closed, 'hGet' will behave as if EOF was reached.
 --
 hGet :: Handle -> Int -> IO ByteString
-hGet _ 0 = return empty
-hGet h i = createAndTrim i $ \p -> hGetBuf h p i
+hGet h i
+    | i >  0    = createAndTrim i $ \p -> hGetBuf h p i
+    | i == 0    = return empty
+    | otherwise = illegalBufferSize h "hGet" i
 
 -- | hGetNonBlocking is identical to 'hGet', except that it will never block
 -- waiting for data to become available, instead it returns only whatever data
@@ -1846,11 +1930,21 @@ hGet h i = createAndTrim i $ \p -> hGetBuf h p i
 --
 hGetNonBlocking :: Handle -> Int -> IO ByteString
 #if defined(__GLASGOW_HASKELL__)
-hGetNonBlocking _ 0 = return empty
-hGetNonBlocking h i = createAndTrim i $ \p -> hGetBufNonBlocking h p i
+hGetNonBlocking h i
+    | i >  0    = createAndTrim i $ \p -> hGetBufNonBlocking h p i
+    | i == 0    = return empty
+    | otherwise = illegalBufferSize h "hGetNonBlocking" i
 #else
 hGetNonBlocking = hGet
 #endif
+
+illegalBufferSize :: Handle -> String -> Int -> IO a
+illegalBufferSize handle fn sz =
+    ioError (mkIOError illegalOperationErrorType msg (Just handle) Nothing)
+    --TODO: System.IO uses InvalidArgument here, but it's not exported :-(
+    where
+      msg = fn ++ ": illegal ByteString size " ++ showsPrec 9 sz []
+
 
 -- | Read entire handle contents strictly into a 'ByteString'.
 --

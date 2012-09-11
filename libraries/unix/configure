@@ -5185,6 +5185,100 @@ fi
 done
 
 
+for ac_func in readdir_r
+do
+as_ac_var=`echo "ac_cv_func_$ac_func" | $as_tr_sh`
+{ echo "$as_me:$LINENO: checking for $ac_func" >&5
+echo $ECHO_N "checking for $ac_func... $ECHO_C" >&6; }
+if { as_var=$as_ac_var; eval "test \"\${$as_var+set}\" = set"; }; then
+  echo $ECHO_N "(cached) $ECHO_C" >&6
+else
+  cat >conftest.$ac_ext <<_ACEOF
+/* confdefs.h.  */
+_ACEOF
+cat confdefs.h >>conftest.$ac_ext
+cat >>conftest.$ac_ext <<_ACEOF
+/* end confdefs.h.  */
+/* Define $ac_func to an innocuous variant, in case <limits.h> declares $ac_func.
+   For example, HP-UX 11i <limits.h> declares gettimeofday.  */
+#define $ac_func innocuous_$ac_func
+
+/* System header to define __stub macros and hopefully few prototypes,
+    which can conflict with char $ac_func (); below.
+    Prefer <limits.h> to <assert.h> if __STDC__ is defined, since
+    <limits.h> exists even on freestanding compilers.  */
+
+#ifdef __STDC__
+# include <limits.h>
+#else
+# include <assert.h>
+#endif
+
+#undef $ac_func
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char $ac_func ();
+/* The GNU C library defines this for functions which it implements
+    to always fail with ENOSYS.  Some functions are actually named
+    something starting with __ and the normal name is an alias.  */
+#if defined __stub_$ac_func || defined __stub___$ac_func
+choke me
+#endif
+
+int
+main ()
+{
+return $ac_func ();
+  ;
+  return 0;
+}
+_ACEOF
+rm -f conftest.$ac_objext conftest$ac_exeext
+if { (ac_try="$ac_link"
+case "(($ac_try" in
+  *\"* | *\`* | *\\*) ac_try_echo=\$ac_try;;
+  *) ac_try_echo=$ac_try;;
+esac
+eval "echo \"\$as_me:$LINENO: $ac_try_echo\"") >&5
+  (eval "$ac_link") 2>conftest.er1
+  ac_status=$?
+  grep -v '^ *+' conftest.er1 >conftest.err
+  rm -f conftest.er1
+  cat conftest.err >&5
+  echo "$as_me:$LINENO: \$? = $ac_status" >&5
+  (exit $ac_status); } && {
+	 test -z "$ac_c_werror_flag" ||
+	 test ! -s conftest.err
+       } && test -s conftest$ac_exeext &&
+       $as_test_x conftest$ac_exeext; then
+  eval "$as_ac_var=yes"
+else
+  echo "$as_me: failed program was:" >&5
+sed 's/^/| /' conftest.$ac_ext >&5
+
+	eval "$as_ac_var=no"
+fi
+
+rm -f core conftest.err conftest.$ac_objext conftest_ipa8_conftest.oo \
+      conftest$ac_exeext conftest.$ac_ext
+fi
+ac_res=`eval echo '${'$as_ac_var'}'`
+	       { echo "$as_me:$LINENO: result: $ac_res" >&5
+echo "${ECHO_T}$ac_res" >&6; }
+if test `eval echo '${'$as_ac_var'}'` = yes; then
+  cat >>confdefs.h <<_ACEOF
+#define `echo "HAVE_$ac_func" | $as_tr_cpp` 1
+_ACEOF
+
+fi
+done
+
+
 # Avoid adding rt if absent or unneeded
 { echo "$as_me:$LINENO: checking for shm_open in -lrt" >&5
 echo $ECHO_N "checking for shm_open in -lrt... $ECHO_C" >&6; }
@@ -5801,7 +5895,7 @@ rm -f conftest*
 ### we'd like to return it; otherwise, we'll fake it.
 { echo "$as_me:$LINENO: checking return type of usleep" >&5
 echo $ECHO_N "checking return type of usleep... $ECHO_C" >&6; }
-if test "${cv_func_usleep_return_type+set}" = set; then
+if test "${fptools_cv_func_usleep_return_type+set}" = set; then
   echo $ECHO_N "(cached) $ECHO_C" >&6
 else
   cat >conftest.$ac_ext <<_ACEOF
@@ -5815,16 +5909,16 @@ cat >>conftest.$ac_ext <<_ACEOF
 _ACEOF
 if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
   $EGREP "void[      ]+usleep" >/dev/null 2>&1; then
-  cv_func_usleep_return_type=void
+  fptools_cv_func_usleep_return_type=void
 else
-  cv_func_usleep_return_type=int
+  fptools_cv_func_usleep_return_type=int
 fi
 rm -f conftest*
 
 fi
-{ echo "$as_me:$LINENO: result: $cv_func_usleep_return_type" >&5
-echo "${ECHO_T}$cv_func_usleep_return_type" >&6; }
-case "$cv_func_usleep_return_type" in
+{ echo "$as_me:$LINENO: result: $fptools_cv_func_usleep_return_type" >&5
+echo "${ECHO_T}$fptools_cv_func_usleep_return_type" >&6; }
+case "$fptools_cv_func_usleep_return_type" in
   "void" )
 
 cat >>confdefs.h <<\_ACEOF
@@ -5838,7 +5932,7 @@ esac
 ###  in common use return void.
 { echo "$as_me:$LINENO: checking return type of unsetenv" >&5
 echo $ECHO_N "checking return type of unsetenv... $ECHO_C" >&6; }
-if test "${cv_func_unsetenv_return_type+set}" = set; then
+if test "${fptools_cv_func_unsetenv_return_type+set}" = set; then
   echo $ECHO_N "(cached) $ECHO_C" >&6
 else
   cat >conftest.$ac_ext <<_ACEOF
@@ -5852,16 +5946,16 @@ cat >>conftest.$ac_ext <<_ACEOF
 _ACEOF
 if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
   $EGREP "void[      ]+unsetenv" >/dev/null 2>&1; then
-  cv_func_unsetenv_return_type=void
+  fptools_cv_func_unsetenv_return_type=void
 else
-  cv_func_unsetenv_return_type=int
+  fptools_cv_func_unsetenv_return_type=int
 fi
 rm -f conftest*
 
 fi
-{ echo "$as_me:$LINENO: result: $cv_func_unsetenv_return_type" >&5
-echo "${ECHO_T}$cv_func_unsetenv_return_type" >&6; }
-case "$cv_func_unsetenv_return_type" in
+{ echo "$as_me:$LINENO: result: $fptools_cv_func_unsetenv_return_type" >&5
+echo "${ECHO_T}$fptools_cv_func_unsetenv_return_type" >&6; }
+case "$fptools_cv_func_unsetenv_return_type" in
   "void" )
 
 cat >>confdefs.h <<\_ACEOF

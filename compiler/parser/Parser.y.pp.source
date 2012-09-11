@@ -8,7 +8,7 @@
 -- ---------------------------------------------------------------------------
 
 {
-{-# OPTIONS -w #-}
+{-# OPTIONS -Wwarn -w #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
 -- any warnings in the module. See
@@ -46,12 +46,11 @@ import SrcLoc		( Located(..), unLoc, getLoc, noLoc, combineSrcSpans,
 import Module
 import StaticFlags	( opt_SccProfilingOn, opt_Hpc )
 import Type		( Kind, mkArrowKind, liftedTypeKind, unliftedTypeKind )
+import Class		( FunDep )
 import BasicTypes	( Boxity(..), Fixity(..), FixityDirection(..), IPName(..),
-			  Activation(..), defaultInlineSpec )
+			  Activation(..), RuleMatchInfo(..), defaultInlineSpec )
 import DynFlags
 import OrdList
-import HaddockParse
-import {-# SOURCE #-} HaddockLex hiding ( Token )
 import HaddockUtils
 
 import FastString
@@ -240,13 +239,13 @@ incorrect.
  'label'	{ L _ ITlabel } 
  'dynamic'	{ L _ ITdynamic }
  'safe'		{ L _ ITsafe }
- 'threadsafe'	{ L _ ITthreadsafe }
+ 'threadsafe'	{ L _ ITthreadsafe }  -- ToDo: remove deprecated alias
  'unsafe'	{ L _ ITunsafe }
  'mdo'		{ L _ ITmdo }
  'family'	{ L _ ITfamily }
  'stdcall'      { L _ ITstdcallconv }
  'ccall'        { L _ ITccallconv }
- 'dotnet'       { L _ ITdotnet }
+ 'prim'         { L _ ITprimcallconv }
  'proc'		{ L _ ITproc }		-- for arrow notation extension
  'rec'		{ L _ ITrec }		-- for arrow notation extension
  'group'    { L _ ITgroup }     -- for list transform extension
@@ -254,6 +253,7 @@ incorrect.
  'using'    { L _ ITusing }     -- for list transform extension
 
  '{-# INLINE'      	  { L _ (ITinline_prag _) }
+ '{-# INLINE_CONLIKE'     { L _ (ITinline_conlike_prag _) }
  '{-# SPECIALISE'  	  { L _ ITspec_prag }
  '{-# SPECIALISE_INLINE'  { L _ (ITspec_inline_prag _) }
  '{-# SOURCE'	   { L _ ITsource_prag }
@@ -262,8 +262,9 @@ incorrect.
  '{-# SCC'	   { L _ ITscc_prag }
  '{-# GENERATED'   { L _ ITgenerated_prag }
  '{-# DEPRECATED'  { L _ ITdeprecated_prag }
- '{-# WARNING'  { L _ ITwarning_prag }
+ '{-# WARNING'     { L _ ITwarning_prag }
  '{-# UNPACK'      { L _ ITunpack_prag }
+ '{-# ANN'         { L _ ITann_prag }
  '#-}'		   { L _ ITclose_prag }
 
  '..'		{ L _ ITdotdot }  			-- reserved symbols
@@ -379,25 +380,25 @@ identifier :: { Located RdrName }
 
 module 	:: { Located (HsModule RdrName) }
  	: maybedocheader 'module' modid maybemodwarning maybeexports 'where' body
-		{% fileSrcSpan >>= \ loc -> case $1 of { (info, doc) ->
-		   return (L loc (HsModule (Just $3) $5 (fst $7) (snd $7) $4
-                          info doc) )}}
+		{% fileSrcSpan >>= \ loc ->
+		   return (L loc (HsModule (Just $3) $5 (fst $7) (snd $7) $4 $1
+                          ) )}
         | body2
 		{% fileSrcSpan >>= \ loc ->
 		   return (L loc (HsModule Nothing Nothing
-                          (fst $1) (snd $1) Nothing emptyHaddockModInfo
-                          Nothing)) }
+                          (fst $1) (snd $1) Nothing Nothing
+                          )) }
 
-maybedocheader :: { (HaddockModInfo RdrName, Maybe (HsDoc RdrName)) }
+maybedocheader :: { Maybe LHsDocString }
         : moduleheader            { $1 }
-        | {- empty -}             { (emptyHaddockModInfo, Nothing) }
+        | {- empty -}             { Nothing }
 
 missing_module_keyword :: { () }
 	: {- empty -}				{% pushCurrentContext }
 
 maybemodwarning :: { Maybe WarningTxt }
-    : '{-# DEPRECATED' STRING '#-}' { Just (DeprecatedTxt (getSTRING $2)) }
-    | '{-# WARNING' STRING '#-}'    { Just (WarningTxt (getSTRING $2)) }
+    : '{-# DEPRECATED' strings '#-}' { Just (DeprecatedTxt $ unLoc $2) }
+    | '{-# WARNING' strings '#-}'    { Just (WarningTxt $ unLoc $2) }
     |  {- empty -}                  { Nothing }
 
 body 	:: { ([LImportDecl RdrName], [LHsDecl RdrName]) }
@@ -421,13 +422,13 @@ cvtopdecls :: { [LHsDecl RdrName] }
 
 header 	:: { Located (HsModule RdrName) }
  	: maybedocheader 'module' modid maybemodwarning maybeexports 'where' header_body
-		{% fileSrcSpan >>= \ loc -> case $1 of { (info, doc) ->
-		   return (L loc (HsModule (Just $3) $5 $7 [] $4
-                   info doc))}}
+		{% fileSrcSpan >>= \ loc ->
+		   return (L loc (HsModule (Just $3) $5 $7 [] $4 $1
+                          ))}
 	| missing_module_keyword importdecls
 		{% fileSrcSpan >>= \ loc ->
 		   return (L loc (HsModule Nothing Nothing $2 [] Nothing
-                   emptyHaddockModInfo Nothing)) }
+                          Nothing)) }
 
 header_body :: { [LImportDecl RdrName] }
 	:  '{'            importdecls		{ $2 }
@@ -558,35 +559,28 @@ topdecl :: { OrdList (LHsDecl RdrName) }
         | stand_alone_deriving                  { unitOL (LL (DerivD (unLoc $1))) }
 	| 'default' '(' comma_types0 ')'	{ unitOL (LL $ DefD (DefaultDecl $3)) }
 	| 'foreign' fdecl			{ unitOL (LL (unLoc $2)) }
-    | '{-# DEPRECATED' deprecations '#-}' { $2 }
-    | '{-# WARNING' warnings '#-}'        { $2 }
+        | '{-# DEPRECATED' deprecations '#-}' { $2 }
+        | '{-# WARNING' warnings '#-}'        { $2 }
 	| '{-# RULES' rules '#-}'		{ $2 }
+	| annotation { unitOL $1 }
       	| decl					{ unLoc $1 }
 
 	-- Template Haskell Extension
-	| '$(' exp ')'				{ unitOL (LL $ SpliceD (SpliceDecl $2)) }
-	| TH_ID_SPLICE				{ unitOL (LL $ SpliceD (SpliceDecl $
-							L1 $ HsVar (mkUnqual varName (getTH_ID_SPLICE $1))
-						  )) }
+	-- The $(..) form is one possible form of infixexp
+	-- but we treat an arbitrary expression just as if 
+	-- it had a $(..) wrapped around it
+	| infixexp 				{ unitOL (LL $ mkTopSpliceDecl $1) } 
 
 -- Type classes
 --
 cl_decl :: { LTyClDecl RdrName }
-	: 'class' tycl_hdr fds where_cls
-		{% do { let { (binds, sigs, ats, docs)           = 
-			        cvBindsAndSigs (unLoc $4)
-		            ; (ctxt, tc, tvs, tparms) = unLoc $2}
-                      ; checkTyVars tparms      -- only type vars allowed
-		      ; checkKindSigs ats
-		      ; return $ L (comb4 $1 $2 $3 $4) 
-				   (mkClassDecl (ctxt, tc, tvs) 
-					        (unLoc $3) sigs binds ats docs) } }
+	: 'class' tycl_hdr fds where_cls	{% mkClassDecl (comb4 $1 $2 $3 $4) $2 $3 $4 }
 
 -- Type declarations (toplevel)
 --
 ty_decl :: { LTyClDecl RdrName }
            -- ordinary type synonyms
-        : 'type' type '=' ctype
+        : 'type' type '=' ctypedoc
 		-- Note ctype, not sigtype, on the right of '='
 		-- We allow an explicit for-all but we don't insert one
 		-- in 	type Foo a = (b,b)
@@ -594,87 +588,53 @@ ty_decl :: { LTyClDecl RdrName }
 	        --
 		-- Note the use of type for the head; this allows
 		-- infix type constructors to be declared 
- 		{% do { (tc, tvs, _) <- checkSynHdr $2 False
-		      ; return (L (comb2 $1 $4) 
-				  (TySynonym tc tvs Nothing $4))
-                      } }
+ 		{% mkTySynonym (comb2 $1 $4) False $2 $4 }
 
            -- type family declarations
         | 'type' 'family' type opt_kind_sig 
 		-- Note the use of type for the head; this allows
 		-- infix type constructors to be declared
-		--
- 		{% do { (tc, tvs, _) <- checkSynHdr $3 False
-		      ; return (L (comb3 $1 $3 $4) 
-				  (TyFamily TypeFamily tc tvs (unLoc $4)))
-		      } }
+ 		{% mkTyFamily (comb3 $1 $3 $4) TypeFamily $3 (unLoc $4) }
 
            -- type instance declarations
         | 'type' 'instance' type '=' ctype
 		-- Note the use of type for the head; this allows
 		-- infix type constructors and type patterns
-		--
- 		{% do { (tc, tvs, typats) <- checkSynHdr $3 True
-		      ; return (L (comb2 $1 $5) 
-				  (TySynonym tc tvs (Just typats) $5)) 
-                      } }
+ 		{% mkTySynonym (comb2 $1 $5) True $3 $5 }
 
           -- ordinary data type or newtype declaration
 	| data_or_newtype tycl_hdr constrs deriving
-		{% do { let {(ctxt, tc, tvs, tparms) = unLoc $2}
-                      ; checkTyVars tparms    -- no type pattern
-		      ; return $!
-			  sL (comb4 $1 $2 $3 $4)
+		{% mkTyData (comb4 $1 $2 $3 $4) (unLoc $1) False $2 
+                            Nothing (reverse (unLoc $3)) (unLoc $4) }
 			           -- We need the location on tycl_hdr in case 
 				   -- constrs and deriving are both empty
-			    (mkTyData (unLoc $1) (ctxt, tc, tvs, Nothing) 
-			       Nothing (reverse (unLoc $3)) (unLoc $4)) } }
 
           -- ordinary GADT declaration
         | data_or_newtype tycl_hdr opt_kind_sig 
-		 'where' gadt_constrlist
+		 gadt_constrlist
 		 deriving
-		{% do { let {(ctxt, tc, tvs, tparms) = unLoc $2}
-                      ; checkTyVars tparms    -- can have type pats
-		      ; return $!
-			  sL (comb4 $1 $2 $4 $5)
-			    (mkTyData (unLoc $1) (ctxt, tc, tvs, Nothing) 
-			      (unLoc $3) (reverse (unLoc $5)) (unLoc $6)) } }
+		{% mkTyData (comb4 $1 $2 $4 $5) (unLoc $1) False $2 
+                            (unLoc $3) (unLoc $4) (unLoc $5) }
+			           -- We need the location on tycl_hdr in case 
+				   -- constrs and deriving are both empty
 
           -- data/newtype family
-        | 'data' 'family' tycl_hdr opt_kind_sig
-		{% do { let {(ctxt, tc, tvs, tparms) = unLoc $3}
-                      ; checkTyVars tparms            -- no type pattern
-		      ; unless (null (unLoc ctxt)) $  -- and no context
-			  parseError (getLoc ctxt) 
-			    "A family declaration cannot have a context"
-		      ; return $
-			  L (comb3 $1 $2 $4)
-			    (TyFamily DataFamily tc tvs (unLoc $4)) } }
+        | 'data' 'family' type opt_kind_sig
+		{% mkTyFamily (comb3 $1 $2 $4) DataFamily $3 (unLoc $4) }
 
           -- data/newtype instance declaration
 	| data_or_newtype 'instance' tycl_hdr constrs deriving
-		{% do { let {(ctxt, tc, tvs, tparms) = unLoc $3}
-                                             -- can have type pats
-		      ; return $
-			  L (comb4 $1 $3 $4 $5)
-			           -- We need the location on tycl_hdr in case 
-				   -- constrs and deriving are both empty
-			    (mkTyData (unLoc $1) (ctxt, tc, tvs, Just tparms) 
-			      Nothing (reverse (unLoc $4)) (unLoc $5)) } }
+		{% mkTyData (comb4 $1 $3 $4 $5) (unLoc $1) True $3
+			    Nothing (reverse (unLoc $4)) (unLoc $5) }
 
           -- GADT instance declaration
         | data_or_newtype 'instance' tycl_hdr opt_kind_sig 
-		 'where' gadt_constrlist
+	         gadt_constrlist
 		 deriving
-		{% do { let {(ctxt, tc, tvs, tparms) = unLoc $3}
-                                             -- can have type pats
-		      ; return $
-			  L (comb4 $1 $3 $6 $7)
-			    (mkTyData (unLoc $1) (ctxt, tc, tvs, Just tparms) 
-			       (unLoc $4) (reverse (unLoc $6)) (unLoc $7)) } }
+		{% mkTyData (comb4 $1 $3 $5 $6) (unLoc $1) True $3
+			    (unLoc $4) (unLoc $5) (unLoc $6) }
 
--- Associate type family declarations
+-- Associated type family declarations
 --
 -- * They have a different syntax than on the toplevel (no family special
 --   identifier).
@@ -688,68 +648,38 @@ at_decl_cls :: { LTyClDecl RdrName }
         : 'type' type opt_kind_sig
 		-- Note the use of type for the head; this allows
 		-- infix type constructors to be declared
-		--
- 		{% do { (tc, tvs, _) <- checkSynHdr $2 False
-		      ; return (L (comb3 $1 $2 $3) 
-				  (TyFamily TypeFamily tc tvs (unLoc $3)))
-		      } }
+ 		{% mkTyFamily (comb3 $1 $2 $3) TypeFamily $2 (unLoc $3) }
 
            -- default type instance
         | 'type' type '=' ctype
 		-- Note the use of type for the head; this allows
 		-- infix type constructors and type patterns
-		--
- 		{% do { (tc, tvs, typats) <- checkSynHdr $2 True
-		      ; return (L (comb2 $1 $4) 
-				  (TySynonym tc tvs (Just typats) $4)) 
-                      } }
+ 		{% mkTySynonym (comb2 $1 $4) True $2 $4 }
 
           -- data/newtype family declaration
-        | 'data' tycl_hdr opt_kind_sig
-		{% do { let {(ctxt, tc, tvs, tparms) = unLoc $2}
-                      ; checkTyVars tparms            -- no type pattern
-		      ; unless (null (unLoc ctxt)) $  -- and no context
-			  parseError (getLoc ctxt) 
-			    "A family declaration cannot have a context"
-		      ; return $
-			  L (comb3 $1 $2 $3)
-			    (TyFamily DataFamily tc tvs (unLoc $3)) 
-                      } }
+        | 'data' type opt_kind_sig
+		{% mkTyFamily (comb3 $1 $2 $3) DataFamily $2 (unLoc $3) }
 
--- Associate type instances
+-- Associated type instances
 --
 at_decl_inst :: { LTyClDecl RdrName }
            -- type instance declarations
         : 'type' type '=' ctype
 		-- Note the use of type for the head; this allows
 		-- infix type constructors and type patterns
-		--
- 		{% do { (tc, tvs, typats) <- checkSynHdr $2 True
-		      ; return (L (comb2 $1 $4) 
-				  (TySynonym tc tvs (Just typats) $4)) 
-                      } }
+ 		{% mkTySynonym (comb2 $1 $4) True $2 $4 }
 
         -- data/newtype instance declaration
 	| data_or_newtype tycl_hdr constrs deriving
-		{% do { let {(ctxt, tc, tvs, tparms) = unLoc $2}
-                                             -- can have type pats
-		      ; return $
-			  L (comb4 $1 $2 $3 $4)
-			           -- We need the location on tycl_hdr in case 
-				   -- constrs and deriving are both empty
-			    (mkTyData (unLoc $1) (ctxt, tc, tvs, Just tparms) 
-			      Nothing (reverse (unLoc $3)) (unLoc $4)) } }
+		{% mkTyData (comb4 $1 $2 $3 $4) (unLoc $1) True $2 
+                            Nothing (reverse (unLoc $3)) (unLoc $4) }
 
         -- GADT instance declaration
         | data_or_newtype tycl_hdr opt_kind_sig 
-		 'where' gadt_constrlist
+		 gadt_constrlist
 		 deriving
-		{% do { let {(ctxt, tc, tvs, tparms) = unLoc $2}
-                                             -- can have type pats
-		      ; return $
-			  L (comb4 $1 $2 $5 $6)
-			    (mkTyData (unLoc $1) (ctxt, tc, tvs, Just tparms) 
-			     (unLoc $3) (reverse (unLoc $5)) (unLoc $6)) } }
+		{% mkTyData (comb4 $1 $2 $4 $5) (unLoc $1) True $2 
+		   	    (unLoc $3) (unLoc $4) (unLoc $5) }
 
 data_or_newtype :: { Located NewOrData }
 	: 'data'	{ L1 DataType }
@@ -766,19 +696,16 @@ opt_kind_sig :: { Located (Maybe Kind) }
 --	(Eq a, Ord b) => T a b
 --      T Int [a]			-- for associated types
 -- Rather a lot of inlining here, else we get reduce/reduce errors
-tycl_hdr :: { Located (LHsContext RdrName, 
-		       Located RdrName, 
-		       [LHsTyVarBndr RdrName],
-		       [LHsType RdrName]) }
-	: context '=>' type		{% checkTyClHdr $1         $3 >>= return.LL }
-	| type				{% checkTyClHdr (noLoc []) $1 >>= return.L1 }
+tycl_hdr :: { Located (LHsContext RdrName, LHsType RdrName) }
+	: context '=>' type		{ LL ($1, $3) }
+	| type                          { L1 (noLoc [], $1) }
 
 -----------------------------------------------------------------------------
 -- Stand-alone deriving
 
 -- Glasgow extension: stand-alone deriving declarations
 stand_alone_deriving :: { LDerivDecl RdrName }
-  	: 'deriving' 'instance' inst_type {% checkDerivDecl (LL (DerivDecl $3)) }
+  	: 'deriving' 'instance' inst_type { LL (DerivDecl $3) }
 
 -----------------------------------------------------------------------------
 -- Nested declarations
@@ -910,8 +837,8 @@ warnings :: { OrdList (LHsDecl RdrName) }
 
 -- SUP: TEMPORARY HACK, not checking for `module Foo'
 warning :: { OrdList (LHsDecl RdrName) }
-	: namelist STRING
-		{ toOL [ LL $ WarningD (Warning n (WarningTxt (getSTRING $2)))
+	: namelist strings
+		{ toOL [ LL $ WarningD (Warning n (WarningTxt $ unLoc $2))
 		       | n <- unLoc $1 ] }
 
 deprecations :: { OrdList (LHsDecl RdrName) }
@@ -922,9 +849,24 @@ deprecations :: { OrdList (LHsDecl RdrName) }
 
 -- SUP: TEMPORARY HACK, not checking for `module Foo'
 deprecation :: { OrdList (LHsDecl RdrName) }
-	: namelist STRING
-		{ toOL [ LL $ WarningD (Warning n (DeprecatedTxt (getSTRING $2)))
+	: namelist strings
+		{ toOL [ LL $ WarningD (Warning n (DeprecatedTxt $ unLoc $2))
 		       | n <- unLoc $1 ] }
+
+strings :: { Located [FastString] }
+    : STRING { L1 [getSTRING $1] }
+    | '[' stringlist ']' { LL $ fromOL (unLoc $2) }
+
+stringlist :: { Located (OrdList FastString) }
+    : stringlist ',' STRING { LL (unLoc $1 `snocOL` getSTRING $3) }
+    | STRING                { LL (unitOL (getSTRING $1)) }
+
+-----------------------------------------------------------------------------
+-- Annotations
+annotation :: { LHsDecl RdrName }
+    : '{-# ANN' name_var aexp '#-}'      { LL (AnnD $ HsAnnotation (ValueAnnProvenance (unLoc $2)) $3) }
+    | '{-# ANN' 'type' tycon aexp '#-}'  { LL (AnnD $ HsAnnotation (TypeAnnProvenance (unLoc $3)) $4) }
+    | '{-# ANN' 'module' aexp '#-}'      { LL (AnnD $ HsAnnotation ModuleAnnProvenance $3) }
 
 
 -----------------------------------------------------------------------------
@@ -939,15 +881,15 @@ fdecl : 'import' callconv safety fspec
       | 'export' callconv fspec
 		{% mkExport $2 (unLoc $3) >>= return.LL }
 
-callconv :: { CallConv }
-	  : 'stdcall'			{ CCall  StdCallConv }
-	  | 'ccall'			{ CCall  CCallConv   }
-	  | 'dotnet'			{ DNCall	     }
+callconv :: { CCallConv }
+	  : 'stdcall'			{ StdCallConv }
+	  | 'ccall'			{ CCallConv   }
+	  | 'prim'			{ PrimCallConv}
 
 safety :: { Safety }
 	: 'unsafe'			{ PlayRisky }
 	| 'safe'			{ PlaySafe  False }
-	| 'threadsafe'			{ PlaySafe  True }
+	| 'threadsafe'			{ PlaySafe  True } -- deprecated alias
 
 fspec :: { Located (Located FastString, Located RdrName, LHsType RdrName) }
        : STRING var '::' sigtypedoc     { LL (L (getLoc $1) (getSTRING $1), $2, $4) }
@@ -967,15 +909,12 @@ opt_asig :: { Maybe (LHsType RdrName) }
 	: {- empty -}			{ Nothing }
 	| '::' atype			{ Just $2 }
 
-sigtypes1 :: { [LHsType RdrName] }
-	: sigtype			{ [ $1 ] }
-	| sigtype ',' sigtypes1		{ $1 : $3 }
-
-sigtype :: { LHsType RdrName }
+sigtype :: { LHsType RdrName }		-- Always a HsForAllTy,
+                                        -- to tell the renamer where to generalise
 	: ctype				{ L1 (mkImplicitHsForAllTy (noLoc []) $1) }
 	-- Wrap an Implicit forall if there isn't one there already
 
-sigtypedoc :: { LHsType RdrName }
+sigtypedoc :: { LHsType RdrName }       -- Always a HsForAllTy
 	: ctypedoc			{ L1 (mkImplicitHsForAllTy (noLoc []) $1) }
 	-- Wrap an Implicit forall if there isn't one there already
 
@@ -983,30 +922,17 @@ sig_vars :: { Located [Located RdrName] }
 	 : sig_vars ',' var		{ LL ($3 : unLoc $1) }
 	 | var				{ L1 [$1] }
 
+sigtypes1 :: { [LHsType RdrName] }	-- Always HsForAllTys
+	: sigtype			{ [ $1 ] }
+	| sigtype ',' sigtypes1		{ $1 : $3 }
+
 -----------------------------------------------------------------------------
 -- Types
 
 infixtype :: { LHsType RdrName }
-	: btype qtyconop gentype         { LL $ HsOpTy $1 $2 $3 }
-        | btype tyvarop  gentype  	 { LL $ HsOpTy $1 $2 $3 }
+	: btype qtyconop type         { LL $ HsOpTy $1 $2 $3 }
+        | btype tyvarop  type  	 { LL $ HsOpTy $1 $2 $3 }
 
-infixtypedoc :: { LHsType RdrName }
-        : infixtype                      { $1 }
-	| infixtype docprev              { LL $ HsDocTy $1 $2 }
-
-gentypedoc :: { LHsType RdrName }
-        : btype                          { $1 }
-        | btypedoc                       { $1 }
-        | infixtypedoc                   { $1 }
-        | btype '->' ctypedoc            { LL $ HsFunTy $1 $3 }
-        | btypedoc '->' ctypedoc         { LL $ HsFunTy $1 $3 }
-
-ctypedoc  :: { LHsType RdrName }
-        : 'forall' tv_bndrs '.' ctypedoc { LL $ mkExplicitHsForAllTy $2 (noLoc []) $4 }
-        | context '=>' ctypedoc          { LL $ mkImplicitHsForAllTy   $1 $3 }
-	-- A type of form (context => type) is an *implicit* HsForAllTy
-	| gentypedoc			 { $1 }
-	
 strict_mark :: { Located HsBang }
 	: '!'				{ L1 HsStrict }
 	| '{-# UNPACK' '#-}' '!'	{ LL HsUnbox }
@@ -1014,51 +940,82 @@ strict_mark :: { Located HsBang }
 -- A ctype is a for-all type
 ctype	:: { LHsType RdrName }
 	: 'forall' tv_bndrs '.' ctype	{ LL $ mkExplicitHsForAllTy $2 (noLoc []) $4 }
-	| context '=>' type		{ LL $ mkImplicitHsForAllTy   $1 $3 }
+	| context '=>' ctype		{ LL $ mkImplicitHsForAllTy   $1 $3 }
 	-- A type of form (context => type) is an *implicit* HsForAllTy
-	| type				{ $1 }
+	| ipvar '::' type		{ LL (HsPredTy (HsIParam (unLoc $1) $3)) }
+	| type  			{ $1 }
 
+----------------------
+-- Notes for 'ctypedoc'
+-- It would have been nice to simplify the grammar by unifying `ctype` and 
+-- ctypedoc` into one production, allowing comments on types everywhere (and
+-- rejecting them after parsing, where necessary).  This is however not possible
+-- since it leads to ambiguity. The reason is the support for comments on record
+-- fields: 
+--         data R = R { field :: Int -- ^ comment on the field }
+-- If we allow comments on types here, it's not clear if the comment applies
+-- to 'field' or to 'Int'. So we must use `ctype` to describe the type.
+
+ctypedoc :: { LHsType RdrName }
+	: 'forall' tv_bndrs '.' ctypedoc	{ LL $ mkExplicitHsForAllTy $2 (noLoc []) $4 }
+	| context '=>' ctypedoc		{ LL $ mkImplicitHsForAllTy   $1 $3 }
+	-- A type of form (context => type) is an *implicit* HsForAllTy
+	| ipvar '::' type		{ LL (HsPredTy (HsIParam (unLoc $1) $3)) }
+	| typedoc			{ $1 }
+
+----------------------
+-- Notes for 'context'
 -- We parse a context as a btype so that we don't get reduce/reduce
 -- errors in ctype.  The basic problem is that
 --	(Eq a, Ord a)
 -- looks so much like a tuple type.  We can't tell until we find the =>
---
--- We have the t1 ~ t2 form here and in gentype, to permit an individual
--- equational constraint without parenthesis.
+
+-- We have the t1 ~ t2 form both in 'context' and in type, 
+-- to permit an individual equational constraint without parenthesis.
+-- Thus for some reason we allow    f :: a~b => blah
+-- but not 	                    f :: ?x::Int => blah
 context :: { LHsContext RdrName }
         : btype '~'      btype  	{% checkContext
 					     (LL $ HsPredTy (HsEqualP $1 $3)) }
 	| btype 			{% checkContext $1 }
 
 type :: { LHsType RdrName }
-	: ipvar '::' gentype		{ LL (HsPredTy (HsIParam (unLoc $1) $3)) }
-	| gentype			{ $1 }
-
-gentype :: { LHsType RdrName }
         : btype                         { $1 }
-        | btype qtyconop gentype        { LL $ HsOpTy $1 $2 $3 }
-        | btype tyvarop  gentype  	{ LL $ HsOpTy $1 $2 $3 }
+        | btype qtyconop type        { LL $ HsOpTy $1 $2 $3 }
+        | btype tyvarop  type     	{ LL $ HsOpTy $1 $2 $3 }
  	| btype '->'     ctype		{ LL $ HsFunTy $1 $3 }
         | btype '~'      btype  	{ LL $ HsPredTy (HsEqualP $1 $3) }
+
+typedoc :: { LHsType RdrName }
+        : btype                          { $1 }
+        | btype docprev                  { LL $ HsDocTy $1 $2 }
+        | btype qtyconop type            { LL $ HsOpTy $1 $2 $3 }
+        | btype qtyconop type docprev    { LL $ HsDocTy (L (comb3 $1 $2 $3) (HsOpTy $1 $2 $3)) $4 }
+        | btype tyvarop  type            { LL $ HsOpTy $1 $2 $3 }
+        | btype tyvarop  type docprev    { LL $ HsDocTy (L (comb3 $1 $2 $3) (HsOpTy $1 $2 $3)) $4 }
+        | btype '->'     ctypedoc        { LL $ HsFunTy $1 $3 }
+        | btype docprev '->' ctypedoc    { LL $ HsFunTy (L (comb2 $1 $2) (HsDocTy $1 $2)) $4 }
+        | btype '~'      btype           { LL $ HsPredTy (HsEqualP $1 $3) }
 
 btype :: { LHsType RdrName }
 	: btype atype			{ LL $ HsAppTy $1 $2 }
 	| atype				{ $1 }
 
-btypedoc :: { LHsType RdrName }
-	: btype atype docprev		{ LL $ HsDocTy (L (comb2 $1 $2) (HsAppTy $1 $2)) $3 }
-        | atype docprev                 { LL $ HsDocTy $1 $2 }
-
 atype :: { LHsType RdrName }
 	: gtycon			{ L1 (HsTyVar (unLoc $1)) }
 	| tyvar				{ L1 (HsTyVar (unLoc $1)) }
-	| strict_mark atype		{ LL (HsBangTy (unLoc $1) $2) }
+	| strict_mark atype		{ LL (HsBangTy (unLoc $1) $2) }  -- Constructor sigs only
+	| '{' fielddecls '}'		{ LL $ HsRecTy $2 }              -- Constructor sigs only
 	| '(' ctype ',' comma_types1 ')'  { LL $ HsTupleTy Boxed  ($2:$4) }
 	| '(#' comma_types1 '#)'	{ LL $ HsTupleTy Unboxed $2     }
 	| '[' ctype ']'			{ LL $ HsListTy  $2 }
 	| '[:' ctype ':]'		{ LL $ HsPArrTy  $2 }
 	| '(' ctype ')'		        { LL $ HsParTy   $2 }
 	| '(' ctype '::' kind ')'	{ LL $ HsKindSig $2 (unLoc $4) }
+	| '$(' exp ')'	      		{ LL $ HsSpliceTy (mkHsSplice $2 ) }
+	| TH_ID_SPLICE	      		{ LL $ HsSpliceTy (mkHsSplice 
+					         (L1 $ HsVar (mkUnqual varName 
+							        (getTH_ID_SPLICE $1)))) } -- $x
 -- Generics
         | INTEGER                       { L1 (HsNumTy (getINTEGER $1)) }
 
@@ -1090,15 +1047,15 @@ tv_bndr :: { LHsTyVarBndr RdrName }
 	| '(' tyvar '::' kind ')'	{ LL (KindedTyVar (unLoc $2) 
 							  (unLoc $4)) }
 
-fds :: { Located [Located ([RdrName], [RdrName])] }
+fds :: { Located [Located (FunDep RdrName)] }
 	: {- empty -}			{ noLoc [] }
 	| '|' fds1			{ LL (reverse (unLoc $2)) }
 
-fds1 :: { Located [Located ([RdrName], [RdrName])] }
+fds1 :: { Located [Located (FunDep RdrName)] }
 	: fds1 ',' fd			{ LL ($3 : unLoc $1) }
 	| fd				{ L1 [$1] }
 
-fd :: { Located ([RdrName], [RdrName]) }
+fd :: { Located (FunDep RdrName) }
 	: varids0 '->' varids0		{ L (comb3 $1 $2 $3)
 					   (reverse (unLoc $1), reverse (unLoc $3)) }
 
@@ -1122,14 +1079,15 @@ akind	:: { Located Kind }
 -----------------------------------------------------------------------------
 -- Datatype declarations
 
-gadt_constrlist :: { Located [LConDecl RdrName] }
-	: '{'            gadt_constrs '}'	{ LL (unLoc $2) }
-	|     vocurly    gadt_constrs close	{ $2 }
+gadt_constrlist :: { Located [LConDecl RdrName] }	-- Returned in order
+	: 'where' '{'        gadt_constrs '}'      { L (comb2 $1 $3) (unLoc $3) }
+	| 'where' vocurly    gadt_constrs close	   { L (comb2 $1 $3) (unLoc $3) }
+	| {- empty -}                              { noLoc [] }
 
 gadt_constrs :: { Located [LConDecl RdrName] }
-        : gadt_constrs ';' gadt_constr  { LL ($3 : unLoc $1) }
-        | gadt_constrs ';' 		{ $1 }
-        | gadt_constr                   { L1 [$1] } 
+        : gadt_constr ';' gadt_constrs  { L (comb2 (head $1) $3) ($1 ++ unLoc $3) }
+        | gadt_constr                   { L (getLoc (head $1)) $1 }
+        | {- empty -}	 		{ noLoc [] }
 
 -- We allow the following forms:
 --	C :: Eq a => a -> T a
@@ -1137,28 +1095,17 @@ gadt_constrs :: { Located [LConDecl RdrName] }
 --	D { x,y :: a } :: T a
 --	forall a. Eq a => D { x,y :: a } :: T a
 
-gadt_constr :: { LConDecl RdrName }
-        : con '::' sigtype
-              { LL (mkGadtDecl $1 $3) } 
-        -- Syntax: Maybe merge the record stuff with the single-case above?
-        --         (to kill the mostly harmless reduce/reduce error)
-        -- XXX revisit audreyt
-	| constr_stuff_record '::' sigtype
-		{ let (con,details) = unLoc $1 in 
-		  LL (ConDecl con Implicit [] (noLoc []) details (ResTyGADT $3) Nothing) }
-{-
-	| forall context '=>' constr_stuff_record '::' sigtype
-		{ let (con,details) = unLoc $4 in 
-		  LL (ConDecl con Implicit (unLoc $1) $2 details (ResTyGADT $6) Nothing ) }
-	| forall constr_stuff_record '::' sigtype
-		{ let (con,details) = unLoc $2 in 
-		  LL (ConDecl con Implicit (unLoc $1) (noLoc []) details (ResTyGADT $4) Nothing) }
--}
+gadt_constr :: { [LConDecl RdrName] }	-- Returns a list because of:   C,D :: ty
+        : con_list '::' sigtype
+                { map (sL (comb2 $1 $3)) (mkGadtDecl (unLoc $1) $3) } 
 
+		-- Deprecated syntax for GADT record declarations
+	| oqtycon '{' fielddecls '}' '::' sigtype
+		{% do { cd <- mkDeprecatedGadtRecordDecl (comb2 $1 $6) $1 $3 $6
+                      ; return [cd] } }
 
 constrs :: { Located [LConDecl RdrName] }
-        : {- empty; a GHC extension -}  { noLoc [] }
-        | maybe_docnext '=' constrs1    { L (comb2 $2 $3) (addConDocs (unLoc $3) $1) }
+        : maybe_docnext '=' constrs1    { L (comb2 $2 $3) (addConDocs (unLoc $3) $1) }
 
 constrs1 :: { Located [LConDecl RdrName] }
 	: constrs1 maybe_docnext '|' maybe_docprev constr { LL (addConDoc $5 $2 : addConDocFirst (unLoc $1) $4) }
@@ -1167,10 +1114,12 @@ constrs1 :: { Located [LConDecl RdrName] }
 constr :: { LConDecl RdrName }
 	: maybe_docnext forall context '=>' constr_stuff maybe_docprev	
 		{ let (con,details) = unLoc $5 in 
-		  L (comb4 $2 $3 $4 $5) (ConDecl con Explicit (unLoc $2) $3 details ResTyH98 ($1 `mplus` $6)) }
+		  addConDoc (L (comb4 $2 $3 $4 $5) (mkSimpleConDecl con (unLoc $2) $3 details))
+                            ($1 `mplus` $6) }
 	| maybe_docnext forall constr_stuff maybe_docprev
 		{ let (con,details) = unLoc $3 in 
-		  L (comb2 $2 $3) (ConDecl con Explicit (unLoc $2) (noLoc []) details ResTyH98 ($1 `mplus` $4)) }
+		  addConDoc (L (comb2 $2 $3) (mkSimpleConDecl con (unLoc $2) (noLoc []) details))
+                            ($1 `mplus` $4) }
 
 forall :: { Located [LHsTyVarBndr RdrName] }
 	: 'forall' tv_bndrs '.'		{ LL $2 }
@@ -1184,21 +1133,22 @@ constr_stuff :: { Located (Located RdrName, HsConDeclDetails RdrName) }
 --	C t1 t2 %: D Int
 -- in which case C really would be a type constructor.  We can't resolve this
 -- ambiguity till we come across the constructor oprerator :% (or not, more usually)
-	: btype				{% mkPrefixCon $1 [] >>= return.LL }
-	| oqtycon '{' '}' 		{% mkRecCon $1 [] >>= return.LL }
-	| oqtycon '{' fielddecls '}' 	{% mkRecCon $1 $3 >>= return.LL }
-	| btype conop btype		{ LL ($2, InfixCon $1 $3) }
+	: btype				{% splitCon $1 >>= return.LL }
+	| btype conop btype		{  LL ($2, InfixCon $1 $3) }
 
-constr_stuff_record :: { Located (Located RdrName, HsConDeclDetails RdrName) }
-	: oqtycon '{' '}' 		{% mkRecCon $1 [] >>= return.sL (comb2 $1 $>) }
-	| oqtycon '{' fielddecls '}' 	{% mkRecCon $1 $3 >>= return.sL (comb2 $1 $>) }
+fielddecls :: { [ConDeclField RdrName] }
+        : {- empty -}     { [] }
+        | fielddecls1     { $1 }
 
-fielddecls :: { [([Located RdrName], LBangType RdrName, Maybe (LHsDoc RdrName))] }
-	: fielddecl maybe_docnext ',' maybe_docprev fielddecls { addFieldDoc (unLoc $1) $4 : addFieldDocs $5 $2 }
-	| fielddecl			                       { [unLoc $1] }
+fielddecls1 :: { [ConDeclField RdrName] }
+	: fielddecl maybe_docnext ',' maybe_docprev fielddecls1
+                      { [ addFieldDoc f $4 | f <- $1 ] ++ addFieldDocs $5 $2 }
+                             -- This adds the doc $4 to each field separately
+	| fielddecl   { $1 }
 
-fielddecl :: { Located ([Located RdrName], LBangType RdrName, Maybe (LHsDoc RdrName)) }
-	: maybe_docnext sig_vars '::' ctype maybe_docprev      { L (comb3 $2 $3 $4) (reverse (unLoc $2), $4, $1 `mplus` $5) }
+fielddecl :: { [ConDeclField RdrName] }    -- A list because of   f,g :: Int
+	: maybe_docnext sig_vars '::' ctype maybe_docprev      { [ ConDeclField fld $4 ($1 `mplus` $5) 
+                                                                 | fld <- reverse (unLoc $2) ] }
 
 -- We allow the odd-looking 'inst_type' in a deriving clause, so that
 -- we can do deriving( forall a. C [a] ) in a newtype (GHC extension).
@@ -1240,7 +1190,7 @@ deriving :: { Located (Maybe [LHsType RdrName]) }
 docdecl :: { LHsDecl RdrName }
         : docdecld { L1 (DocD (unLoc $1)) }
 
-docdecld :: { LDocDecl RdrName }
+docdecld :: { LDocDecl }
         : docnext                               { L1 (DocCommentNext (unLoc $1)) }
         | docprev                               { L1 (DocCommentPrev (unLoc $1)) }
         | docnamed                              { L1 (case (unLoc $1) of (n, doc) -> DocCommentNamed n doc) }
@@ -1278,12 +1228,14 @@ sigdecl :: { Located (OrdList (LHsDecl RdrName)) }
 	| infix prec ops	{ LL $ toOL [ LL $ SigD (FixSig (FixitySig n (Fixity $2 (unLoc $1))))
 					     | n <- unLoc $3 ] }
 	| '{-# INLINE'   activation qvar '#-}'	      
-				{ LL $ unitOL (LL $ SigD (InlineSig $3 (mkInlineSpec $2 (getINLINE $1)))) }
+				{ LL $ unitOL (LL $ SigD (InlineSig $3 (mkInlineSpec $2 FunLike (getINLINE $1)))) }
+        | '{-# INLINE_CONLIKE' activation qvar '#-}'
+                                { LL $ unitOL (LL $ SigD (InlineSig $3 (mkInlineSpec $2 ConLike (getINLINE_CONLIKE $1)))) }
 	| '{-# SPECIALISE' qvar '::' sigtypes1 '#-}'
 			 	{ LL $ toOL [ LL $ SigD (SpecSig $2 t defaultInlineSpec) 
 					    | t <- $4] }
 	| '{-# SPECIALISE_INLINE' activation qvar '::' sigtypes1 '#-}'
-			 	{ LL $ toOL [ LL $ SigD (SpecSig $3 t (mkInlineSpec $2 (getSPEC_INLINE $1)))
+			 	{ LL $ toOL [ LL $ SigD (SpecSig $3 t (mkInlineSpec $2 FunLike (getSPEC_INLINE $1)))
 					    | t <- $5] }
 	| '{-# SPECIALISE' 'instance' inst_type '#-}'
 				{ LL $ unitOL (LL $ SigD (SpecInstSig $3)) }
@@ -1372,7 +1324,7 @@ aexp1	:: { LHsExpr RdrName }
 -- so it's not enabled yet.
 -- But this case *is* used for the left hand side of a generic definition,
 -- which is parsed as an expression before being munged into a pattern
- 	| qcname '{|' gentype '|}'      { LL $ HsApp (sL (getLoc $1) (HsVar (unLoc $1)))
+ 	| qcname '{|' type '|}'         { LL $ HsApp (sL (getLoc $1) (HsVar (unLoc $1)))
 						     (sL (getLoc $3) (HsType $3)) }
 
 aexp2	:: { LHsExpr RdrName }
@@ -1384,13 +1336,17 @@ aexp2	:: { LHsExpr RdrName }
 --	| STRING			{ sL (getLoc $1) (HsOverLit $! mkHsIsString (getSTRING $1) placeHolderType) }
 	| INTEGER			{ sL (getLoc $1) (HsOverLit $! mkHsIntegral (getINTEGER $1) placeHolderType) }
 	| RATIONAL			{ sL (getLoc $1) (HsOverLit $! mkHsFractional (getRATIONAL $1) placeHolderType) }
+
         -- N.B.: sections get parsed by these next two productions.
         -- This allows you to write, e.g., '(+ 3, 4 -)', which isn't correct Haskell98
         -- (you'd have to write '((+ 3), (4 -))')
         -- but the less cluttered version fell out of having texps.
 	| '(' texp ')'			{ LL (HsPar $2) }
-	| '(' texp ',' texps ')'	{ LL $ ExplicitTuple ($2 : reverse $4) Boxed }
-	| '(#' texps '#)'		{ LL $ ExplicitTuple (reverse $2)      Unboxed }
+	| '(' tup_exprs ')'             { LL (ExplicitTuple $2 Boxed) }
+
+	| '(#' texp '#)'		{ LL (ExplicitTuple [Present $2] Unboxed) }
+	| '(#' tup_exprs '#)'		{ LL (ExplicitTuple $2 Unboxed) }
+
 	| '[' list ']'                  { LL (unLoc $2) }
 	| '[:' parr ':]'                { LL (unLoc $2) }
 	| '_'				{ L1 EWildPat }
@@ -1435,6 +1391,9 @@ cvtopdecls0 :: { [LHsDecl RdrName] }
 	: {- empty -}		{ [] }
 	| cvtopdecls		{ $1 }
 
+-----------------------------------------------------------------------------
+-- Tuple expressions
+
 -- "texp" is short for tuple expressions: 
 -- things that can appear unparenthesized as long as they're
 -- inside parens or delimitted by commas
@@ -1458,10 +1417,20 @@ texp :: { LHsExpr RdrName }
        -- View patterns get parenthesized above
 	| exp '->' exp   { LL $ EViewPat $1 $3 }
 
-texps :: { [LHsExpr RdrName] }
-	: texps ',' texp		{ $3 : $1 }
-	| texp				{ [$1] }
+-- Always at least one comma
+tup_exprs :: { [HsTupArg RdrName] }
+           : texp commas_tup_tail  { Present $1 : $2 }
+           | commas tup_tail	   { replicate $1 missingTupArg ++ $2 }
 
+-- Always starts with commas; always follows an expr
+commas_tup_tail :: { [HsTupArg RdrName] }
+commas_tup_tail : commas tup_tail  { replicate ($1-1) missingTupArg ++ $2 }
+
+-- Always follows a comma
+tup_tail :: { [HsTupArg RdrName] }
+          : texp commas_tup_tail	{ Present $1 : $2 }
+	  | texp			{ [Present $1] }
+          | {- empty -}		        { [missingTupArg] }
 
 -----------------------------------------------------------------------------
 -- List expressions
@@ -1487,35 +1456,27 @@ lexps :: { Located [LHsExpr RdrName] }
 
 flattenedpquals :: { Located [LStmt RdrName] }
     : pquals   { case (unLoc $1) of
-                    ParStmt [(qs, _)] -> L1 qs
+                    [qs] -> L1 qs
                     -- We just had one thing in our "parallel" list so 
                     -- we simply return that thing directly
                     
-                    _ -> L1 [$1]
+                    qss -> L1 [L1 $ ParStmt [(qs, undefined) | qs <- qss]]
                     -- We actually found some actual parallel lists so
-                    -- we leave them into as a ParStmt
+                    -- we wrap them into as a ParStmt
                 }
 
-pquals :: { LStmt RdrName }
-    : pquals1   { L1 (ParStmt [(qs, undefined) | qs <- (reverse (unLoc $1))]) }
+pquals :: { Located [[LStmt RdrName]] }
+    : squals '|' pquals     { L (getLoc $2) (reverse (unLoc $1) : unLoc $3) }
+    | squals                { L (getLoc $1) [reverse (unLoc $1)] }
 
-pquals1 :: { Located [[LStmt RdrName]] }
-    : pquals1 '|' squals    { LL (unLoc $3 : unLoc $1) }
-    | squals                { L (getLoc $1) [unLoc $1] }
-
-squals :: { Located [LStmt RdrName] }
-    : squals1               { L (getLoc $1) (reverse (unLoc $1)) }
-
-squals1 :: { Located [LStmt RdrName] }
-    : transformquals1       { LL (unLoc $1) }
-
-transformquals1 :: { Located [LStmt RdrName] }
-    : transformquals1 ',' transformqual         { LL $ [LL ((unLoc $3) (unLoc $1))] }
-    | transformquals1 ',' qual                  { LL ($3 : unLoc $1) }
---  | transformquals1 ',' '{|' pquals '|}'      { LL ($4 : unLoc $1) }
-    | transformqual                             { LL $ [LL ((unLoc $1) [])] }
-    | qual                                      { L1 [$1] }
---  | '{|' pquals '|}'                          { L1 [$2] }
+squals :: { Located [LStmt RdrName] }	-- In reverse order, because the last 
+					-- one can "grab" the earlier ones
+    : squals ',' transformqual         	     { LL [L (getLoc $3) ((unLoc $3) (reverse (unLoc $1)))] }
+    | squals ',' qual                  	     { LL ($3 : unLoc $1) }
+    | transformqual                          { LL [L (getLoc $1) ((unLoc $1) [])] }
+    | qual                                   { L1 [$1] }
+--  | transformquals1 ',' '{|' pquals '|}'   { LL ($4 : unLoc $1) }
+--  | '{|' pquals '|}'                       { L1 [$2] }
 
 
 -- It is possible to enable bracketing (associating) qualifier lists by uncommenting the lines with {| |}
@@ -1524,11 +1485,22 @@ transformquals1 :: { Located [LStmt RdrName] }
 -- a program that makes use of this temporary syntax you must supply that flag to GHC
 
 transformqual :: { Located ([LStmt RdrName] -> Stmt RdrName) }
-    : 'then' exp                { LL $ \leftStmts -> (mkTransformStmt (reverse leftStmts) $2) }
-    | 'then' exp 'by' exp       { LL $ \leftStmts -> (mkTransformByStmt (reverse leftStmts) $2 $4) }
-    | 'then' 'group' 'by' exp              { LL $ \leftStmts -> (mkGroupByStmt (reverse leftStmts) $4) }
-    | 'then' 'group' 'using' exp           { LL $ \leftStmts -> (mkGroupUsingStmt (reverse leftStmts) $4) }
-    | 'then' 'group' 'by' exp 'using' exp  { LL $ \leftStmts -> (mkGroupByUsingStmt (reverse leftStmts) $4 $6) }
+			-- Function is applied to a list of stmts *in order*
+    : 'then' exp                { LL $ \leftStmts -> (mkTransformStmt leftStmts $2) }
+    -- >>>
+    | 'then' exp 'by' exp       { LL $ \leftStmts -> (mkTransformByStmt leftStmts $2 $4) }
+    | 'then' 'group' 'by' exp   { LL $ \leftStmts -> (mkGroupByStmt leftStmts $4) }
+    -- <<<
+    -- These two productions deliberately have a shift-reduce conflict. I have made 'group' into a special_id,
+    -- which means you can enable TransformListComp while still using Data.List.group. However, this makes the two
+    -- productions ambiguous. I've set things up so that Happy chooses to resolve the conflict in that case by
+    -- choosing the "group by" variant, which is what we want.
+    --
+    -- This is rather dubious: the user might be confused as to how to parse this statement. However, it is a good
+    -- practical choice. NB: Data.List.group :: [a] -> [[a]], so using the first production would not even type check
+    -- if /that/ is the group function we conflict with.
+    | 'then' 'group' 'using' exp           { LL $ \leftStmts -> (mkGroupUsingStmt leftStmts $4) }
+    | 'then' 'group' 'by' exp 'using' exp  { LL $ \leftStmts -> (mkGroupByUsingStmt leftStmts $4 $6) }
 
 -----------------------------------------------------------------------------
 -- Parallel array expressions
@@ -1658,7 +1630,7 @@ fbinds1	:: { ([HsRecField RdrName (LHsExpr RdrName)], Bool) }
   
 fbind	:: { HsRecField RdrName (LHsExpr RdrName) }
 	: qvar '=' exp	{ HsRecField $1 $3 False }
-	| qvar 		{ HsRecField $1 (L (getLoc $1) (HsVar (unLoc $1))) True }
+        | qvar          { HsRecField $1 (L (getLoc $1) placeHolderPunRhs) True }
 			-- Here's where we say that plain 'x'
 			-- means exactly 'x = x'.  The pun-flag boolean is
 			-- there so we can still print it right
@@ -1703,11 +1675,15 @@ con	:: { Located RdrName }
 	| '(' consym ')'	{ LL (unLoc $2) }
 	| sysdcon		{ L1 $ nameRdrName (dataConName (unLoc $1)) }
 
+con_list :: { Located [Located RdrName] }
+con_list : con                  { L1 [$1] }
+         | con ',' con_list     { LL ($1 : unLoc $3) }
+
 sysdcon	:: { Located DataCon }	-- Wired in data constructors
 	: '(' ')'		{ LL unitDataCon }
-	| '(' commas ')'	{ LL $ tupleCon Boxed $2 }
+	| '(' commas ')'	{ LL $ tupleCon Boxed ($2 + 1) }
 	| '(#' '#)'		{ LL $ unboxedSingletonDataCon }
-	| '(#' commas '#)'	{ LL $ tupleCon Unboxed $2 }
+	| '(#' commas '#)'	{ LL $ tupleCon Unboxed ($2 + 1) }
 	| '[' ']'		{ LL nilDataCon }
 
 conop :: { Located RdrName }
@@ -1724,9 +1700,9 @@ qconop :: { Located RdrName }
 gtycon 	:: { Located RdrName }	-- A "general" qualified tycon
 	: oqtycon			{ $1 }
 	| '(' ')'			{ LL $ getRdrName unitTyCon }
-	| '(' commas ')'		{ LL $ getRdrName (tupleTyCon Boxed $2) }
+	| '(' commas ')'		{ LL $ getRdrName (tupleTyCon Boxed ($2 + 1)) }
 	| '(#' '#)'			{ LL $ getRdrName unboxedSingletonTyCon }
-	| '(#' commas '#)'		{ LL $ getRdrName (tupleTyCon Unboxed $2) }
+	| '(#' commas '#)'		{ LL $ getRdrName (tupleTyCon Unboxed ($2 + 1)) }
 	| '(' '->' ')'			{ LL $ getRdrName funTyCon }
 	| '[' ']'			{ LL $ listTyCon_RDR }
 	| '[:' ':]'			{ LL $ parrTyCon_RDR }
@@ -1791,6 +1767,11 @@ tyvar   : tyvarid		{ $1 }
 tyvarop :: { Located RdrName }
 tyvarop : '`' tyvarid '`'	{ LL (unLoc $2) }
 	| tyvarsym		{ $1 }
+	| '.'			{% parseErrorSDoc (getLoc $1) 
+	  			      (vcat [ptext (sLit "Illegal symbol '.' in type"), 
+				             ptext (sLit "Perhaps you intended -XRankNTypes or similar flag"),
+					     ptext (sLit "to enable explicit-forall syntax: forall <tvs>. <type>")])
+	                        }
 
 tyvarid	:: { Located RdrName }
 	: VARID			{ L1 $! mkUnqual tvName (getVARID $1) }
@@ -1868,6 +1849,8 @@ special_id
 	| 'dynamic'		{ L1 (fsLit "dynamic") }
 	| 'stdcall'             { L1 (fsLit "stdcall") }
 	| 'ccall'               { L1 (fsLit "ccall") }
+	| 'prim'                { L1 (fsLit "prim") }
+	| 'group'               { L1 (fsLit "group") }
 
 special_sym :: { Located FastString }
 special_sym : '!'	{ L1 (fsLit "!") }
@@ -1929,51 +1912,36 @@ modid 	:: { Located ModuleName }
 
 commas :: { Int }
 	: commas ','			{ $1 + 1 }
-	| ','				{ 2 }
+	| ','				{ 1 }
 
 -----------------------------------------------------------------------------
 -- Documentation comments
 
-docnext :: { LHsDoc RdrName }
-  : DOCNEXT {% case parseHaddockParagraphs (tokenise (getDOCNEXT $1)) of {
-      MyLeft  err -> parseError (getLoc $1) err;
-      MyRight doc -> return (L1 doc) } }
+docnext :: { LHsDocString }
+  : DOCNEXT {% return (L1 (HsDocString (mkFastString (getDOCNEXT $1)))) }
 
-docprev :: { LHsDoc RdrName }
-  : DOCPREV {% case parseHaddockParagraphs (tokenise (getDOCPREV $1)) of {
-      MyLeft  err -> parseError (getLoc $1) err;
-      MyRight doc -> return (L1 doc) } }
+docprev :: { LHsDocString }
+  : DOCPREV {% return (L1 (HsDocString (mkFastString (getDOCPREV $1)))) }
 
-docnamed :: { Located (String, (HsDoc RdrName)) }
+docnamed :: { Located (String, HsDocString) }
   : DOCNAMED {%
       let string = getDOCNAMED $1 
           (name, rest) = break isSpace string
-      in case parseHaddockParagraphs (tokenise rest) of {
-        MyLeft  err -> parseError (getLoc $1) err;
-        MyRight doc -> return (L1 (name, doc)) } }
+      in return (L1 (name, HsDocString (mkFastString rest))) }
 
-docsection :: { Located (Int, HsDoc RdrName) }
+docsection :: { Located (Int, HsDocString) }
   : DOCSECTION {% let (n, doc) = getDOCSECTION $1 in
-        case parseHaddockString (tokenise doc) of {
-      MyLeft  err -> parseError (getLoc $1) err;
-      MyRight doc -> return (L1 (n, doc)) } }
+        return (L1 (n, HsDocString (mkFastString doc))) }
 
-moduleheader :: { (HaddockModInfo RdrName, Maybe (HsDoc RdrName)) }                                    
+moduleheader :: { Maybe LHsDocString }
         : DOCNEXT {% let string = getDOCNEXT $1 in
-               case parseModuleHeader string of {                       
-                 Right (str, info) ->                                  
-                   case parseHaddockParagraphs (tokenise str) of {               
-                     MyLeft err -> parseError (getLoc $1) err;                    
-                     MyRight doc -> return (info, Just doc);          
-                   };                                             
-                 Left err -> parseError (getLoc $1) err
-            }  }                                                  
+                     return (Just (L1 (HsDocString (mkFastString string)))) }
 
-maybe_docprev :: { Maybe (LHsDoc RdrName) }
+maybe_docprev :: { Maybe LHsDocString }
 	: docprev                       { Just $1 }
 	| {- empty -}                   { Nothing }
 
-maybe_docnext :: { Maybe (LHsDoc RdrName) }
+maybe_docnext :: { Maybe LHsDocString }
 	: docnext                       { Just $1 }
 	| {- empty -}                   { Nothing }
 
@@ -2004,6 +1972,7 @@ getPRIMFLOAT	(L _ (ITprimfloat  x)) = x
 getPRIMDOUBLE	(L _ (ITprimdouble x)) = x
 getTH_ID_SPLICE (L _ (ITidEscape x)) = x
 getINLINE	(L _ (ITinline_prag b)) = b
+getINLINE_CONLIKE (L _ (ITinline_conlike_prag b)) = b
 getSPEC_INLINE	(L _ (ITspec_inline_prag b)) = b
 
 getDOCNEXT (L _ (ITdocCommentNext x)) = x

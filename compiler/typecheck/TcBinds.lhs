@@ -7,7 +7,7 @@
 \begin{code}
 module TcBinds ( tcLocalBinds, tcTopBinds, 
                  tcHsBootSigs, tcMonoBinds, tcPolyBinds,
-                 TcPragFun, tcSpecPrag, tcPrags, mkPragFun, 
+                 TcPragFun, tcPrags, mkPragFun, 
                  TcSigInfo(..), TcSigFun, mkTcSigFun,
                  badBootDeclErr ) where
 
@@ -26,7 +26,6 @@ import TcHsType
 import TcPat
 import TcMType
 import TcType
-import {- Kind parts of -} Type
 import Coercion
 import VarEnv
 import TysPrim
@@ -41,7 +40,6 @@ import Bag
 import ErrUtils
 import Digraph
 import Maybes
-import List
 import Util
 import BasicTypes
 import Outputable
@@ -98,7 +96,7 @@ tcHsBootSigs :: HsValBinds Name -> TcM [Id]
 -- signatures in it.  The renamer checked all this
 tcHsBootSigs (ValBindsOut binds sigs)
   = do  { checkTc (null binds) badBootDeclErr
-        ; mapM (addLocM tc_boot_sig) (filter isVanillaLSig sigs) }
+        ; mapM (addLocM tc_boot_sig) (filter isTypeLSig sigs) }
   where
     tc_boot_sig (TypeSig (L _ name) ty)
       = do { sigma_ty <- tcHsSigType (FunSigCtxt name) ty
@@ -151,7 +149,7 @@ tcValBinds _ (ValBindsIn binds _) _
 tcValBinds top_lvl (ValBindsOut binds sigs) thing_inside
   = do  {       -- Typecheck the signature
         ; let { prag_fn = mkPragFun sigs
-              ; ty_sigs = filter isVanillaLSig sigs
+              ; ty_sigs = filter isTypeLSig sigs
               ; sig_fn  = mkTcSigFun ty_sigs }
 
         ; poly_ids <- checkNoErrs (mapAndRecoverM tcTySig ty_sigs)
@@ -425,22 +423,24 @@ pragSigCtxt prag = hang (ptext (sLit "In the pragma")) 2 (ppr prag)
 tcPrag :: TcId -> Sig Name -> TcM Prag
 -- Pre-condition: the poly_id is zonked
 -- Reason: required by tcSubExp
-tcPrag poly_id (SpecSig _ hs_ty inl) = tcSpecPrag poly_id hs_ty inl
-tcPrag poly_id (SpecInstSig hs_ty)   = tcSpecPrag poly_id hs_ty defaultInlineSpec
-tcPrag _       (InlineSig _ inl)     = return (InlinePrag inl)
-tcPrag _       (FixSig {})           = panic "tcPrag FixSig"
-tcPrag _       (TypeSig {})          = panic "tcPrag TypeSig"
-
-
-tcSpecPrag :: TcId -> LHsType Name -> InlineSpec -> TcM Prag
-tcSpecPrag poly_id hs_ty inl
+-- Most of the work of specialisation is done by 
+-- the desugarer, guided by the SpecPrag
+tcPrag poly_id (SpecSig _ hs_ty inl) 
   = do  { let name = idName poly_id
         ; spec_ty <- tcHsSigType (FunSigCtxt name) hs_ty
         ; co_fn <- tcSubExp (SpecPragOrigin name) (idType poly_id) spec_ty
         ; return (SpecPrag (mkHsWrap co_fn (HsVar poly_id)) spec_ty inl) }
-        -- Most of the work of specialisation is done by 
-        -- the desugarer, guided by the SpecPrag
-  
+tcPrag poly_id (SpecInstSig hs_ty)
+  = do  { let name = idName poly_id
+        ; (tyvars, theta, tau) <- tcHsInstHead hs_ty	
+        ; let spec_ty = mkSigmaTy tyvars theta tau
+        ; co_fn <- tcSubExp (SpecPragOrigin name) (idType poly_id) spec_ty
+        ; return (SpecPrag (mkHsWrap co_fn (HsVar poly_id)) spec_ty defaultInlineSpec) }
+
+tcPrag _  (InlineSig _ inl) = return (InlinePrag inl)
+tcPrag _  sig	            = pprPanic "tcPrag" (ppr sig)
+
+
 --------------
 -- If typechecking the binds fails, then return with each
 -- signature-less binder given type (forall a.a), to minimise 
@@ -476,6 +476,12 @@ checkStrictBinds top_lvl rec_group mbind mono_tys infos
                   (strictBindErr "Recursive" unlifted mbind)
         ; checkTc (isSingletonBag mbind)
                   (strictBindErr "Multiple" unlifted mbind) 
+        -- This should be a checkTc, not a warnTc, but as of GHC 6.11
+        -- the versions of alex and happy available have non-conforming
+        -- templates, so the GHC build fails if it's an error:
+        ; warnUnlifted <- doptM Opt_WarnLazyUnliftedBindings
+        ; warnTc (warnUnlifted && not bang_pat)
+                 (unliftedMustBeBang mbind)
         ; mapM_ check_sig infos
         ; return True }
   | otherwise
@@ -486,6 +492,12 @@ checkStrictBinds top_lvl rec_group mbind mono_tys infos
     check_sig (_, Just sig, _) = checkTc (null (sig_tvs sig) && null (sig_theta sig))
                                          (badStrictSig unlifted sig)
     check_sig _                = return ()
+
+unliftedMustBeBang :: LHsBindsLR Var Var -> SDoc
+unliftedMustBeBang mbind
+  = hang (text "Bindings containing unlifted types must use an outermost bang pattern:")
+         4 (pprLHsBinds mbind)
+ $$ text "*** This will be an error in GHC 6.14! Fix your code now!"
 
 strictBindErr :: String -> Bool -> LHsBindsLR Var Var -> SDoc
 strictBindErr flavour unlifted mbind
@@ -725,7 +737,7 @@ generalise :: DynFlags -> TopLevelFlag
 -- The returned [TyVar] are all ready to quantify
 
 generalise dflags top_lvl bind_list sig_fn mono_infos lie_req
-  | isMonoGroup dflags bind_list
+  | isMonoGroup dflags top_lvl bind_list sigs
   = do  { extendLIEs lie_req
         ; return ([], [], emptyBag) }
 
@@ -796,7 +808,8 @@ unifyCtxts :: [TcSigInfo] -> TcM [Inst]
 -- Post-condition: the returned Insts are full zonked
 unifyCtxts [] = panic "unifyCtxts []"
 unifyCtxts (sig1 : sigs)        -- Argument is always non-empty
-  = do  { mapM unify_ctxt sigs
+  = do  { traceTc $ text "unifyCtxts" <+> ppr (sig1 : sigs)
+	; mapM_ unify_ctxt sigs
         ; theta <- zonkTcThetaType (sig_theta sig1)
         ; newDictBndrs (sig_loc sig1) theta }
   where
@@ -813,7 +826,7 @@ unifyCtxts (sig1 : sigs)        -- Argument is always non-empty
                -- where F is a type function and (F a ~ [a])
                -- Then unification might succeed with a coercion.  But it's much
                -- much simpler to require that such signatures have identical contexts
-               checkTc (all isIdentityCoercion cois)
+               checkTc (all isIdentityCoI cois)
                        (ptext (sLit "Mutually dependent functions have syntactically distinct contexts"))
              }
 
@@ -855,7 +868,7 @@ checkDistinctTyVars :: [TcTyVar] -> TcM [TcTyVar]
 
 checkDistinctTyVars sig_tvs
   = do  { zonked_tvs <- mapM zonkSigTyVar sig_tvs
-        ; foldlM check_dup emptyVarEnv (sig_tvs `zip` zonked_tvs)
+        ; foldlM_ check_dup emptyVarEnv (sig_tvs `zip` zonked_tvs)
         ; return zonked_tvs }
   where
     check_dup :: TyVarEnv TcTyVar -> (TcTyVar, TcTyVar) -> TcM (TyVarEnv TcTyVar)
@@ -1045,8 +1058,10 @@ mkTcSigFun :: [LSig Name] -> TcSigFun
 -- Precondition: no duplicates
 mkTcSigFun sigs = lookupNameEnv env
   where
-    env = mkNameEnv [(name, hsExplicitTvs lhs_ty)
-                    | L _ (TypeSig (L _ name) lhs_ty) <- sigs]
+    env = mkNameEnv (mapCatMaybes mk_pair sigs)
+    mk_pair (L _ (TypeSig (L _ name) lhs_ty)) = Just (name, hsExplicitTvs lhs_ty)
+    mk_pair (L _ (IdSig id))                  = Just (idName id, [])
+    mk_pair _                                 = Nothing    
         -- The scoped names are the ones explicitly mentioned
         -- in the HsForAll.  (There may be more in sigma_ty, because
         -- of nested type synonyms.  See Note [More instantiated than scoped].)
@@ -1100,6 +1115,8 @@ tcTySig (L span (TypeSig (L _ name) ty))
   = setSrcSpan span             $
     do  { sigma_ty <- tcHsSigType (FunSigCtxt name) ty
         ; return (mkLocalId name sigma_ty) }
+tcTySig (L _ (IdSig id))
+  = return id
 tcTySig s = pprPanic "tcTySig" (ppr s)
 
 -------------------
@@ -1144,10 +1161,12 @@ tcInstSig use_skols name
                               sig_loc = loc }) }
 
 -------------------
-isMonoGroup :: DynFlags -> [LHsBind Name] -> Bool
+isMonoGroup :: DynFlags -> TopLevelFlag -> [LHsBind Name]
+            -> [TcSigInfo] ->  Bool
 -- No generalisation at all
-isMonoGroup dflags binds
-  = dopt Opt_MonoPatBinds dflags && any is_pat_bind binds
+isMonoGroup dflags top_lvl binds sigs
+  =  (dopt Opt_MonoPatBinds dflags && any is_pat_bind binds)
+  || (dopt Opt_MonoLocalBinds dflags && null sigs && not (isTopLevel top_lvl))
   where
     is_pat_bind (L _ (PatBind {})) = True
     is_pat_bind _                  = False

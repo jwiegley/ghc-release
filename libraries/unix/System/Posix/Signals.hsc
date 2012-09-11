@@ -103,14 +103,17 @@ import Foreign
 import Foreign.C
 import System.Posix.Types
 import System.Posix.Internals
-import System.Posix.Process.Internals
 import System.Posix.Process
-import Control.Monad
+import System.Posix.Process.Internals
 import Data.Dynamic
 
 #ifdef __GLASGOW_HASKELL__
+#if __GLASGOW_HASKELL__ >= 611
+##include "rts/Signals.h"
+#else
 ##include "Signals.h"
-import GHC.IOBase
+#endif
+
 import GHC.Conc hiding (Signal)
 #endif
 
@@ -571,10 +574,12 @@ awaitSignal maybe_sigset = do
     	  Nothing -> do SignalSet fp <- getSignalMask; return fp
     	  Just (SignalSet fp) -> return fp
   withForeignPtr fp $ \p -> do
-  c_sigsuspend p
+  _ <- c_sigsuspend p
   return ()
   -- ignore the return value; according to the docs it can only ever be
   -- (-1) with errno set to EINTR.
+  -- XXX My manpage says it can also return EFAULT. And why is ignoring
+  -- EINTR the right thing to do?
  
 foreign import ccall unsafe "sigsuspend"
   c_sigsuspend :: Ptr CSigset -> IO CInt

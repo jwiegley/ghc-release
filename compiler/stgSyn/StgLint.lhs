@@ -20,7 +20,7 @@ import Name             ( getSrcLoc )
 import ErrUtils         ( Message, mkLocMessage )
 import TypeRep
 import Type             ( mkFunTys, splitFunTys, splitTyConApp_maybe,
-                          isUnLiftedType, isTyVarTy, dropForAlls, Type
+                          isUnLiftedType, isTyVarTy, dropForAlls
                         )
 import TyCon            ( isAlgTyCon, isNewTyCon, tyConDataCons )
 import Util             ( zipEqual, equalLength )
@@ -191,7 +191,7 @@ lintStgExpr (StgLetNoEscape _ _ binds body) = do
 lintStgExpr (StgSCC _ expr) = lintStgExpr expr
 
 lintStgExpr e@(StgCase scrut _ _ bndr _ alts_type alts) = runMaybeT $ do
-    MaybeT $ lintStgExpr scrut
+    _ <- MaybeT $ lintStgExpr scrut
 
     MaybeT $ liftM Just $
      case alts_type of

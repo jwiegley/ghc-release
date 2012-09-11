@@ -11,8 +11,17 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef GC_H
-#define GC_H
+#ifndef SM_GC_H
+#define SM_GC_H
+
+BEGIN_RTS_PRIVATE
+
+void GarbageCollect(rtsBool force_major_gc, nat gc_type, Capability *cap);
+
+typedef void (*evac_fn)(void *user, StgClosure **root);
+
+StgClosure * isAlive      ( StgClosure *p );
+void         markCAFs     ( evac_fn evac, void *user );
 
 extern nat N;
 extern rtsBool major_gc;
@@ -28,20 +37,27 @@ extern StgPtr  oldgen_scan;
 
 extern long copied;
 
+extern rtsBool work_stealing;
+
 #ifdef DEBUG
 extern nat mutlist_MUTVARS, mutlist_MUTARRS, mutlist_MVARS, mutlist_OTHERS;
-#endif
-
-extern void markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta);
-
-#ifdef THREADED_RTS
-extern SpinLock gc_alloc_block_sync;
 #endif
 
 #if defined(PROF_SPIN) && defined(THREADED_RTS)
 extern StgWord64 whitehole_spin;
 #endif
 
+void gcWorkerThread (Capability *cap);
+void initGcThreads (void);
+void freeGcThreads (void);
+
+#if defined(THREADED_RTS)
+void waitForGcThreads (Capability *cap);
+void releaseGCThreads (Capability *cap);
+#endif
+
 #define WORK_UNIT_WORDS 128
 
-#endif /* GC_H */
+END_RTS_PRIVATE
+
+#endif /* SM_GC_H */

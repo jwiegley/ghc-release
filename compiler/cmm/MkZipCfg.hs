@@ -1,20 +1,20 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module MkZipCfg
     ( AGraph, (<*>), catAGraphs
+    , freshBlockId
     , emptyAGraph, withFreshLabel, withUnique
     , mkMiddle, mkMiddles, mkLast, mkZTail, mkBranch, mkLabel, mkIfThenElse, mkWhileDo
     , outOfLine
     , emptyGraph, graphOfMiddles, graphOfZTail
-    , lgraphOfAGraph, graphOfAGraph, labelAGraph
+    , lgraphOfAGraph, graphOfAGraph, labelAGraph, pprAGraph
     )
 where
 
-import BlockId (BlockId(..), emptyBlockEnv)
+import BlockId (BlockId(..), emptyBlockEnv, plusBlockEnv)
 import ZipCfg
 
 import Outputable
 import Unique
-import UniqFM
 import UniqSupply
 import Util
 
@@ -165,8 +165,7 @@ catAGraphs :: [AGraph m l] -> AGraph m l
 -- splicing operation <*>, are constant-time operations.
 
 emptyAGraph :: AGraph m l
-mkLabel     :: (LastNode l) =>
-               BlockId -> AGraph m l              -- graph contains the label
+mkLabel     :: (LastNode l) => BlockId -> AGraph m l -- graph contains the label
 mkMiddle    :: m -> AGraph m l   -- graph contains the node
 mkLast      :: (Outputable m, Outputable l, LastNode l) =>
                l       -> AGraph m l              -- graph contains the node
@@ -290,12 +289,12 @@ graphOfZTail   t  = Graph t emptyBlockEnv
 
 mkLast l = AGraph f
     where f (Graph tail blocks) =
-            do note_this_code_becomes_unreachable tail
+            do note_this_code_becomes_unreachable "mkLast" (ppr l <+> ppr blocks) tail
                return $ Graph (ZLast (LastOther l)) blocks
 
 mkZTail tail = AGraph f
     where f (Graph utail blocks) =
-            do note_this_code_becomes_unreachable utail
+            do note_this_code_becomes_unreachable "mkZTail" (ppr tail) utail
                return $ Graph tail blocks
 
 withFreshLabel name ofId = AGraph f
@@ -311,9 +310,8 @@ withUnique ofU = AGraph f
 outOfLine (AGraph f) = AGraph f'
     where f' (Graph tail' blocks') =
             do Graph emptyEntrance blocks <- f emptyGraph
-               note_this_code_becomes_unreachable emptyEntrance
-               return $ Graph tail' (blocks `plusUFM` blocks')
-                                                       
+               note_this_code_becomes_unreachable "outOfLine" (ppr tail') emptyEntrance
+               return $ Graph tail' (blocks `plusBlockEnv` blocks')
 
 mkIfThenElse cbranch tbranch fbranch = 
     withFreshLabel "end of if"     $ \endif ->
@@ -321,27 +319,43 @@ mkIfThenElse cbranch tbranch fbranch =
     withFreshLabel "start of else" $ \fid ->
         cbranch tid fid <*>
         mkLabel tid <*> tbranch <*> mkBranch endif <*>
-        mkLabel fid <*> fbranch <*> mkLabel endif
-
+        mkLabel fid <*> fbranch <*>
+        mkLabel endif
 
 mkWhileDo cbranch body = 
   withFreshLabel "loop test" $ \test ->
   withFreshLabel "loop head" $ \head ->
   withFreshLabel "end while" $ \endwhile ->
      -- Forrest Baskett's while-loop layout
-     mkBranch test <*> mkLabel head <*> body <*> mkLabel test
-                   <*> cbranch head endwhile <*> mkLabel endwhile
-
+     mkBranch test <*> mkLabel head <*> body
+                   <*> mkLabel test <*> cbranch head endwhile
+                   <*> mkLabel endwhile
 
 -- | Bleat if the insertion of a last node will create unreachable code
 note_this_code_becomes_unreachable ::
-    (Monad m, LastNode l, Outputable middle, Outputable l) => ZTail middle l -> m ()
+    (Monad m, LastNode l, Outputable middle, Outputable l) =>
+       String -> SDoc -> ZTail middle l -> m ()
 
-note_this_code_becomes_unreachable = if debugIsOn then u else \_ -> return ()
+note_this_code_becomes_unreachable str old = if debugIsOn then u else \_ -> return ()
     where u (ZLast LastExit)                       = return ()
           u (ZLast (LastOther l)) | isBranchNode l = return ()
                                     -- Note [Branch follows branch]
-          u tail = fail ("unreachable code: " ++ showSDoc (ppr tail))
+          u tail = fail ("unreachable code in " ++ str ++ ": " ++
+                         (showSDoc ((ppr tail) <+> old)))
+
+-- | The string argument to 'freshBlockId' was originally helpful in debugging
+-- the Quick C-- compiler, so I have kept it here even though at present it is
+-- thrown away at this spot---there's no reason a BlockId couldn't one day carry
+-- a string.  
+
+freshBlockId :: MonadUnique m => String -> m BlockId
+freshBlockId _s = getUniqueM >>= return . BlockId
+
+-------------------------------------
+-- Debugging
+
+pprAGraph :: (Outputable m, LastNode l, Outputable l) => AGraph m l -> UniqSM SDoc
+pprAGraph g = graphOfAGraph g >>= return . ppr
 
 {-
 Note [Branch follows branch]
@@ -354,12 +368,4 @@ Emitting a Branch at this point is fine:
        goto L1; L2: ...stuff... 
 -}
 
-
--- | The string argument to 'freshBlockId' was originally helpful in debugging
--- the Quick C-- compiler, so I have kept it here even though at present it is
--- thrown away at this spot---there's no reason a BlockId couldn't one day carry
--- a string.  
-
-freshBlockId :: String -> UniqSM BlockId
-freshBlockId _ = do { u <- getUniqueM; return $ BlockId u }
 

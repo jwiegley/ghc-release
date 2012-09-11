@@ -1,10 +1,3 @@
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module CmmCPS (
   -- | Converts C-- with full proceedures and parameters
   -- to a CPS transformed C-- with the stack made manifest.
@@ -26,7 +19,6 @@ import CmmCPSGen
 import CmmUtils
 
 import ClosureInfo
-import MachOp
 import CLabel
 import SMRep
 import Constants
@@ -36,13 +28,10 @@ import ErrUtils
 import Maybes
 import Outputable
 import UniqSupply
-import UniqFM
 import UniqSet
 import Unique
 
-import Monad
-import IO
-import Data.List
+import Control.Monad
 
 -----------------------------------------------------------------------------
 -- |Top level driver for the CPS pass
@@ -90,11 +79,11 @@ cpsProc :: UniqSupply
 		      --   multiple output procedures
 
 -- Data blocks don't need to be CPS transformed
-cpsProc uniqSupply proc@(CmmData _ _) = [proc]
+cpsProc _ proc@(CmmData _ _) = [proc]
 
 -- Empty functions just don't work with the CPS algorithm, but
 -- they don't need the transformation anyway so just output them directly
-cpsProc uniqSupply proc@(CmmProc _ _ _ (ListGraph []))
+cpsProc _ proc@(CmmProc _ _ _ (ListGraph []))
   = pprTrace "cpsProc: unexpected empty proc" (ppr proc) [proc]
 
 -- CPS transform for those procs that actually need it
@@ -118,7 +107,7 @@ cpsProc uniqSupply (CmmProc info ident params (ListGraph blocks)) = cps_procs
        block_uniques = uniques
       proc_uniques = map (map (map uniqsFromSupply . listSplitUniqSupply) . listSplitUniqSupply) $ listSplitUniqSupply uniqSupply2
 
-      stack_use = CmmLocal (LocalReg stack_use_unique (cmmRegRep spReg) GCKindPtr)
+      stack_use = CmmLocal (LocalReg stack_use_unique (cmmRegType spReg))
       stack_check_block_id = BlockId stack_check_block_unique
       stack_check_block = make_stack_check stack_check_block_id info stack_use (blockId $ head blocks)
 
@@ -171,7 +160,7 @@ cpsProc uniqSupply (CmmProc info ident params (ListGraph blocks)) = cps_procs
       -- This is an association list instead of a UniqFM because
       -- CLabel's don't have a 'Uniqueable' instance.
       formats :: [(CLabel,              -- key
-                   (CmmFormalsWithoutKinds,         -- arguments
+                   (CmmFormals,         -- arguments
                     Maybe CLabel,       -- label in top slot
                     [Maybe LocalReg]))] -- slots
       formats = selectContinuationFormat live continuations
@@ -190,6 +179,8 @@ cpsProc uniqSupply (CmmProc info ident params (ListGraph blocks)) = cps_procs
       cps_procs :: [CmmTop]
       cps_procs = zipWith (continuationToProc formats' stack_use) proc_uniques continuations'
 
+make_stack_check :: BlockId -> CmmInfo -> CmmReg -> BlockId
+                 -> GenBasicBlock CmmStmt
 make_stack_check stack_check_block_id info stack_use next_block_id =
     BasicBlock stack_check_block_id $
                    check_stmts ++ [CmmBranch next_block_id]
@@ -200,7 +191,7 @@ make_stack_check stack_check_block_id info stack_use next_block_id =
             -- then great, well check the stack.
             CmmInfo (Just gc_block) _ _
                 -> [CmmCondBranch
-                    (CmmMachOp (MO_U_Lt $ cmmRegRep spReg)
+                    (CmmMachOp (MO_U_Lt (typeWidth (cmmRegType spReg)))
                      [CmmReg stack_use, CmmReg spLimReg])
                     gc_block]
             -- If we aren't given a stack check handler,
@@ -220,7 +211,7 @@ collectNonProcPointTargets proc_points blocks current_targets new_blocks =
                 new_targets
                 (map (:[]) targets)
     where
-      blocks' = map (lookupWithDefaultUFM blocks (panic "TODO")) new_blocks
+      blocks' = map (lookupWithDefaultBEnv blocks (panic "TODO")) new_blocks
       targets =
         -- Note the subtlety that since the extra branch after a call
         -- will always be to a block that is a proc-point,
@@ -242,8 +233,8 @@ gatherBlocksIntoContinuation live proc_points blocks start =
   Continuation info_table clabel params is_gc_cont body
     where
       children = (collectNonProcPointTargets proc_points blocks (unitUniqSet start) [start]) `minusUniqSet` (unitUniqSet start)
-      start_block = lookupWithDefaultUFM blocks unknown_block start
-      children_blocks = map (lookupWithDefaultUFM blocks unknown_block) (uniqSetToList children)
+      start_block = lookupWithDefaultBEnv blocks unknown_block start
+      children_blocks = map (lookupWithDefaultBEnv blocks unknown_block) (uniqSetToList children)
       unknown_block = panic "unknown block in gatherBlocksIntoContinuation"
       body = start_block : children_blocks
 
@@ -269,7 +260,7 @@ gatherBlocksIntoContinuation live proc_points blocks start =
                  ContinuationEntry args _ _ -> args
                  ControlEntry ->
                      uniqSetToList $
-                     lookupWithDefaultUFM live unknown_block start
+                     lookupWithDefaultBEnv live unknown_block start
                      -- it's a proc-point, pass lives in parameter registers
 
 --------------------------------------------------------------------------------
@@ -277,13 +268,13 @@ gatherBlocksIntoContinuation live proc_points blocks start =
 
 selectContinuationFormat :: BlockEnv CmmLive
                   -> [Continuation (Either C_SRT CmmInfo)]
-                  -> [(CLabel, (CmmFormalsWithoutKinds, Maybe CLabel, [Maybe LocalReg]))]
+                  -> [(CLabel, (CmmFormals, Maybe CLabel, [Maybe LocalReg]))]
 selectContinuationFormat live continuations =
     map (\c -> (continuationLabel c, selectContinuationFormat' c)) continuations
     where
       -- User written continuations
       selectContinuationFormat' (Continuation
-                          (Right (CmmInfo _ _ (CmmInfoTable _ _ (ContInfo format srt))))
+                          (Right (CmmInfo _ _ (CmmInfoTable _ _ _ (ContInfo format _))))
                           label formals _ _) =
           (formals, Just label, format)
       -- Either user written non-continuation code
@@ -291,17 +282,17 @@ selectContinuationFormat live continuations =
       selectContinuationFormat' (Continuation (Right _) _ formals _ _) =
           (formals, Nothing, [])
       -- CPS generated continuations
-      selectContinuationFormat' (Continuation (Left srt) label formals _ blocks) =
+      selectContinuationFormat' (Continuation (Left _) label formals _ blocks) =
           -- TODO: assumes the first block is the entry block
           let ident = brokenBlockId $ head blocks -- TODO: CLabel isn't a uniquable, but we need a better way than this
           in (formals,
               Just label,
               map Just $ uniqSetToList $
-              lookupWithDefaultUFM live unknown_block ident)
+              lookupWithDefaultBEnv live unknown_block ident)
 
       unknown_block = panic "unknown BlockId in selectContinuationFormat"
 
-processFormats :: [(CLabel, (CmmFormalsWithoutKinds, Maybe CLabel, [Maybe LocalReg]))]
+processFormats :: [(CLabel, (CmmFormals, Maybe CLabel, [Maybe LocalReg]))]
                -> Maybe UpdateFrame
                -> [Continuation (Either C_SRT CmmInfo)]
                -> (WordOff, WordOff, [(CLabel, ContinuationFormat)])
@@ -330,7 +321,7 @@ processFormats formats update_frame continuations =
       update_size [] = 0
       update_size (expr:exprs) = width + update_size exprs
           where
-            width = machRepByteWidth (cmmExprRep expr) `quot` wORD_SIZE
+            width = (widthInBytes $ typeWidth $ cmmExprType expr) `quot` wORD_SIZE
             -- TODO: it would be better if we had a machRepWordWidth
 
       -- TODO: get rid of "+ 1" etc.
@@ -340,7 +331,7 @@ processFormats formats update_frame continuations =
       stack_size (Nothing:formats) = 1 + stack_size formats -- one dead word
       stack_size (Just reg:formats) = width + stack_size formats
           where
-            width = machRepByteWidth (localRegRep reg) `quot` wORD_SIZE
+            width = (widthInBytes $ typeWidth $ localRegType reg) `quot` wORD_SIZE
             -- TODO: it would be better if we had a machRepWordWidth
 
 continuationMaxStack :: [(CLabel, ContinuationFormat)]
@@ -360,14 +351,14 @@ continuationMaxStack formats (Continuation _ label _ False blocks) =
                    map stmt_arg_size (brokenBlockStmts block))
 
       final_arg_size (FinalReturn args) =
-          argumentsSize (cmmExprRep . kindlessCmm) args
+          argumentsSize (cmmExprType . hintlessCmm) args
       final_arg_size (FinalJump _ args) =
-          argumentsSize (cmmExprRep . kindlessCmm) args
-      final_arg_size (FinalCall next _ _ args _ _ True) = 0
+          argumentsSize (cmmExprType . hintlessCmm) args
+      final_arg_size (FinalCall _    _ _ _    _ _ True) = 0
       final_arg_size (FinalCall next _ _ args _ _ False) =
           -- We have to account for the stack used when we build a frame
           -- for the *next* continuation from *this* continuation
-          argumentsSize (cmmExprRep . kindlessCmm) args +
+          argumentsSize (cmmExprType . hintlessCmm) args +
           continuation_frame_size next_format
           where 
             next_format = maybe unknown_format id $ lookup next' formats
@@ -376,7 +367,7 @@ continuationMaxStack formats (Continuation _ label _ False blocks) =
       final_arg_size _ = 0
 
       stmt_arg_size (CmmJump _ args) =
-          argumentsSize (cmmExprRep . kindlessCmm) args
+          argumentsSize (cmmExprType . hintlessCmm) args
       stmt_arg_size (CmmCall _ _ _ (CmmSafe _) _) =
           panic "Safe call in processFormats"
       stmt_arg_size (CmmReturn _) =
@@ -389,24 +380,25 @@ applyContinuationFormat :: [(CLabel, ContinuationFormat)]
                  -> Continuation CmmInfo
 
 -- User written continuations
-applyContinuationFormat formats (Continuation
-                          (Right (CmmInfo gc update_frame (CmmInfoTable prof tag (ContInfo _ srt))))
-                          label formals is_gc blocks) =
-    Continuation (CmmInfo gc update_frame (CmmInfoTable prof tag (ContInfo format srt)))
+applyContinuationFormat formats
+   (Continuation (Right (CmmInfo gc update_frame
+                             (CmmInfoTable clos prof tag (ContInfo _ srt))))
+                 label formals is_gc blocks) =
+    Continuation (CmmInfo gc update_frame (CmmInfoTable clos prof tag (ContInfo format srt)))
                  label formals is_gc blocks
     where
       format = continuation_stack $ maybe unknown_block id $ lookup label formats
       unknown_block = panic "unknown BlockId in applyContinuationFormat"
 
 -- Either user written non-continuation code or CPS generated proc-point
-applyContinuationFormat formats (Continuation
+applyContinuationFormat _ (Continuation
                           (Right info) label formals is_gc blocks) =
     Continuation info label formals is_gc blocks
 
 -- CPS generated continuations
 applyContinuationFormat formats (Continuation
                           (Left srt) label formals is_gc blocks) =
-    Continuation (CmmInfo gc Nothing (CmmInfoTable prof tag (ContInfo (continuation_stack $ format) srt)))
+    Continuation (CmmInfo gc Nothing (CmmInfoTable undefined prof tag (ContInfo (continuation_stack $ format) srt)))
                  label formals is_gc blocks
     where
       gc = Nothing -- Generated continuations never need a stack check

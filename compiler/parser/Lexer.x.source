@@ -12,7 +12,6 @@
 -----------------------------------------------------------------------------
 
 --   ToDo / known bugs:
---    - Unicode
 --    - parsing integers is a bit slow
 --    - readRational is a bit slow
 --
@@ -32,7 +31,7 @@
 --       qualified varids.
 
 {
-{-# OPTIONS -w #-}
+{-# OPTIONS -Wwarn -w #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
 -- any warnings in the module. See
@@ -47,6 +46,7 @@
 module Lexer (
    Token(..), lexer, pragState, mkPState, PState(..),
    P(..), ParseResult(..), getSrcLoc, 
+   getPState,
    failLocMsgP, failSpanMsgP, srcParseFail,
    getMessages,
    popContext, pushCurrentContext, setLastToken, setSrcLoc,
@@ -61,20 +61,20 @@ import ErrUtils
 import Outputable
 import StringBuffer
 import FastString
-import FastTypes
 import SrcLoc
 import UniqFM
 import DynFlags
 import Ctype
-import Util		( maybePrefixMatch, readRational )
+import Util		( readRational )
 
 import Control.Monad
 import Data.Bits
 import Data.Char
+import Data.List
+import Data.Maybe
+import Data.Map (Map)
+import qualified Data.Map as Map
 import Data.Ratio
-import Debug.Trace
-
-import Unicode ( GeneralCategory(..), generalCategory, isPrint, isUpper )
 }
 
 $unispace    = \x05 -- Trick Alex into handling Unicode. See alexGetChar.
@@ -108,6 +108,8 @@ $hexit     = [$decdigit A-F a-f]
 $symchar   = [$symbol \:]
 $nl        = [\n\r]
 $idchar    = [$small $large $digit \']
+
+$pragmachar = [$small $large $digit]
 
 $docsym    = [\| \^ \* \$]
 
@@ -223,7 +225,8 @@ $tab+         { warn Opt_WarnTabs (text "Tab character") }
 
 <0,option_prags> \n				{ begin bol }
 
-"{-#" $whitechar* (line|LINE) 		{ begin line_prag2 }
+"{-#" $whitechar* $pragmachar+ / { known_pragma linePrags }
+                                { dispatch_pragmas linePrags }
 
 -- single-line line pragmas, of the form
 --    # <line> "<file>" <extra-stuff> \n
@@ -240,52 +243,31 @@ $tab+         { warn Opt_WarnTabs (text "Tab character") }
    -- with older versions of GHC which generated these.
 
 <0,option_prags> {
-  "{-#" $whitechar* (RULES|rules)       { rulePrag }
-  "{-#" $whitechar* (INLINE|inline)	{ token (ITinline_prag True) }
-  "{-#" $whitechar* (NO(T?)INLINE|no(t?)inline)
-  					{ token (ITinline_prag False) }
-  "{-#" $whitechar* (SPECIALI[SZ]E|speciali[sz]e)
-  					{ token ITspec_prag }
-  "{-#" $whitechar* (SPECIALI[SZ]E|speciali[sz]e)
-	$whitechar* (INLINE|inline)	{ token (ITspec_inline_prag True) }
-  "{-#" $whitechar* (SPECIALI[SZ]E|speciali[sz]e)
-	$whitechar* (NO(T?)INLINE|no(t?)inline)
-					{ token (ITspec_inline_prag False) }
-  "{-#" $whitechar* (SOURCE|source)	{ token ITsource_prag }
-  "{-#" $whitechar* (WARNING|warning)
-  					{ token ITwarning_prag }
-  "{-#" $whitechar* (DEPRECATED|deprecated)
-  					{ token ITdeprecated_prag }
-  "{-#" $whitechar* (SCC|scc)		{ token ITscc_prag }
-  "{-#" $whitechar* (GENERATED|generated)
-  					{ token ITgenerated_prag }
-  "{-#" $whitechar* (CORE|core)		{ token ITcore_prag }
-  "{-#" $whitechar* (UNPACK|unpack)	{ token ITunpack_prag }
+  "{-#" $whitechar* $pragmachar+ 
+        $whitechar+ $pragmachar+ / { known_pragma twoWordPrags }
+                                 { dispatch_pragmas twoWordPrags }
+
+  "{-#" $whitechar* $pragmachar+ / { known_pragma oneWordPrags }
+                                 { dispatch_pragmas oneWordPrags }
 
   -- We ignore all these pragmas, but don't generate a warning for them
-  -- CFILES is a hugs-only thing.
-  "{-#" $whitechar* (OPTIONS_(HUGS|hugs|NHC98|nhc98|JHC|jhc|YHC|yhc|CATCH|catch|DERIVE|derive)|CFILES|cfiles)
-                    { nested_comment lexToken }
+  "{-#" $whitechar* $pragmachar+ / { known_pragma ignoredPrags }
+                                 { dispatch_pragmas ignoredPrags }
 
   -- ToDo: should only be valid inside a pragma:
   "#-}" 				{ endPrag }
 }
 
 <option_prags> {
-  "{-#"  $whitechar* (OPTIONS|options) / { notFollowedByPragmaChar }
-                                        { lex_string_prag IToptions_prag }
-  "{-#"  $whitechar* (OPTIONS_GHC|options_ghc)
-                                        { lex_string_prag IToptions_prag }
-  "{-#"  $whitechar* (OPTIONS_HADDOCK|options_haddock)
-                                         { lex_string_prag ITdocOptions }
+  "{-#"  $whitechar* $pragmachar+ / { known_pragma fileHeaderPrags }
+                                   { dispatch_pragmas fileHeaderPrags }
+
   "-- #"                                 { multiline_doc_comment }
-  "{-#"  $whitechar* (LANGUAGE|language) { token ITlanguage_prag }
-  "{-#"  $whitechar* (INCLUDE|include)   { lex_string_prag ITinclude_prag }
 }
 
 <0> {
   -- In the "0" mode we ignore these pragmas
-  "{-#"  $whitechar* (OPTIONS|options|OPTIONS_GHC|options_ghc|OPTIONS_HADDOCK|options_haddock|LANGUAGE|language|INCLUDE|include) / { notFollowedByPragmaChar }
+  "{-#"  $whitechar* $pragmachar+ / { known_pragma fileHeaderPrags }
                      { nested_comment lexToken }
 }
 
@@ -471,7 +453,7 @@ data Token
   | ITunsafe
   | ITstdcallconv
   | ITccallconv
-  | ITdotnet
+  | ITprimcallconv
   | ITmdo
   | ITfamily
   | ITgroup
@@ -480,6 +462,7 @@ data Token
 
 	-- Pragmas
   | ITinline_prag Bool		-- True <=> INLINE, False <=> NOINLINE
+  | ITinline_conlike_prag Bool  -- same
   | ITspec_prag			-- SPECIALISE	
   | ITspec_inline_prag Bool	-- SPECIALISE INLINE (or NOINLINE)
   | ITsource_prag
@@ -491,6 +474,7 @@ data Token
   | ITgenerated_prag
   | ITcore_prag                 -- hdaume: core annotations
   | ITunpack_prag
+  | ITann_prag
   | ITclose_prag
   | IToptions_prag String
   | ITinclude_prag String
@@ -546,8 +530,6 @@ data Token
 
   | ITdupipvarid   FastString	-- GHC extension: implicit param: ?x
 
-  | ITpragma StringBuffer
-
   | ITchar       Char
   | ITstring     FastString
   | ITinteger    Integer
@@ -560,7 +542,7 @@ data Token
   | ITprimfloat  Rational
   | ITprimdouble Rational
 
-  -- MetaHaskell extension tokens
+  -- Template Haskell extension tokens
   | ITopenExpQuote  		--  [| or [e|
   | ITopenPatQuote		--  [p|
   | ITopenDecQuote		--  [d|
@@ -616,6 +598,7 @@ isSpecial ITthreadsafe 	= True
 isSpecial ITunsafe    	= True
 isSpecial ITccallconv   = True
 isSpecial ITstdcallconv = True
+isSpecial ITprimcallconv = True
 isSpecial ITmdo		= True
 isSpecial ITfamily	= True
 isSpecial ITgroup   = True
@@ -631,6 +614,7 @@ isSpecial _             = False
 -- facilitates using a keyword in two different extensions that can be
 -- activated independently)
 --
+reservedWordsFM :: UniqFM (Token, Int)
 reservedWordsFM = listToUFM $
 	map (\(x, y, z) -> (mkFastString x, (y, z)))
        [( "_",		ITunderscore, 	0 ),
@@ -672,13 +656,13 @@ reservedWordsFM = listToUFM $
 	( "label",	ITlabel,	 bit ffiBit),
 	( "dynamic",	ITdynamic,	 bit ffiBit),
 	( "safe",	ITsafe,		 bit ffiBit),
-	( "threadsafe",	ITthreadsafe,	 bit ffiBit),
+	( "threadsafe",	ITthreadsafe,	 bit ffiBit),  -- ToDo: remove
 	( "unsafe",	ITunsafe,	 bit ffiBit),
 	( "stdcall",    ITstdcallconv,	 bit ffiBit),
 	( "ccall",      ITccallconv,	 bit ffiBit),
-	( "dotnet",     ITdotnet,	 bit ffiBit),
+	( "prim",       ITprimcallconv,	 bit ffiBit),
 
-	( "rec",	ITrec,		 bit arrowsBit),
+	( "rec",	ITrec,		 bit recBit),
 	( "proc",	ITproc,		 bit arrowsBit)
      ]
 
@@ -701,16 +685,15 @@ reservedSymsFM = listToUFM $
        ,("!",   ITbang,     always)
 
         -- For data T (a::*) = MkT
-       ,("*", ITstar, \i -> kindSigsEnabled i || tyFamEnabled i)
+       ,("*", ITstar, always) -- \i -> kindSigsEnabled i || tyFamEnabled i)
         -- For 'forall a . t'
-       ,(".", ITdot, \i -> explicitForallEnabled i || inRulePrag i)
+       ,(".", ITdot,  always) -- \i -> explicitForallEnabled i || inRulePrag i)
 
        ,("-<",  ITlarrowtail, arrowsEnabled)
        ,(">-",  ITrarrowtail, arrowsEnabled)
        ,("-<<", ITLarrowtail, arrowsEnabled)
        ,(">>-", ITRarrowtail, arrowsEnabled)
 
-#if __GLASGOW_HASKELL__ >= 605
        ,("∷",   ITdcolon, unicodeSyntaxEnabled)
        ,("⇒",   ITdarrow, unicodeSyntaxEnabled)
        ,("∀",   ITforall, \i -> unicodeSyntaxEnabled i &&
@@ -721,7 +704,6 @@ reservedSymsFM = listToUFM $
         -- ToDo: ideally, → and ∷ should be "specials", so that they cannot
         -- form part of a large operator.  This would let us have a better
         -- syntax for kinds: ɑ∷*→* would be a legal kind signature. (maybe).
-#endif
        ]
 
 -- -----------------------------------------------------------------------------
@@ -762,22 +744,23 @@ pop_and :: Action -> Action
 pop_and act span buf len = do popLexState; act span buf len
 
 {-# INLINE nextCharIs #-}
+nextCharIs :: StringBuffer -> (Char -> Bool) -> Bool
 nextCharIs buf p = not (atEnd buf) && p (currentChar buf)
 
+notFollowedBy :: Char -> AlexAccPred Int
 notFollowedBy char _ _ _ (AI _ _ buf) 
   = nextCharIs buf (/=char)
 
+notFollowedBySymbol :: AlexAccPred Int
 notFollowedBySymbol _ _ _ (AI _ _ buf)
   = nextCharIs buf (`notElem` "!#$%&*+./<=>?@\\^|-~")
-
-notFollowedByPragmaChar _ _ _ (AI _ _ buf)
-  = nextCharIs buf (\c -> not (isAlphaNum c || c == '_'))
 
 -- We must reject doc comments as being ordinary comments everywhere.
 -- In some cases the doc comment will be selected as the lexeme due to
 -- maximal munch, but not always, because the nested comment rule is
 -- valid in all states, but the doc-comment rules are only valid in
 -- the non-layout states.
+isNormalComment :: AlexAccPred Int
 isNormalComment bits _ _ (AI _ _ buf)
   | haddockEnabled bits = notFollowedByDocOrPragma
   | otherwise           = nextCharIs buf (/='#')
@@ -785,6 +768,7 @@ isNormalComment bits _ _ (AI _ _ buf)
     notFollowedByDocOrPragma
        = not $ spaceAndP buf (`nextCharIs` (`elem` "|^*$#"))
 
+spaceAndP :: StringBuffer -> (StringBuffer -> Bool) -> Bool
 spaceAndP buf p = p buf || nextCharIs buf (==' ') && p (snd (nextChar buf))
 
 {-
@@ -792,8 +776,10 @@ haddockDisabledAnd p bits _ _ (AI _ _ buf)
   = if haddockEnabled bits then False else (p buf)
 -}
 
+atEOL :: AlexAccPred Int
 atEOL _ _ _ (AI _ _ buf) = atEnd buf || currentChar buf == '\n'
 
+ifExtension :: (Int -> Bool) -> AlexAccPred Int
 ifExtension pred bits _ _ _ = pred bits
 
 multiline_doc_comment :: Action
@@ -874,6 +860,8 @@ nested_doc_comment span buf _len = withLexedDocType (go "")
         Just (_,_) -> go ('\123':commentAcc) input docType False
       Just (c,input) -> go (c:commentAcc) input docType False
 
+withLexedDocType :: (AlexInput -> (String -> Token) -> Bool -> P (Located Token))
+                 -> P (Located Token)
 withLexedDocType lexDocComment = do
   input@(AI _ _ buf) <- getInput
   case prevChar buf ' ' of
@@ -882,6 +870,7 @@ withLexedDocType lexDocComment = do
     '$' -> lexDocComment input ITdocCommentNamed False
     '*' -> lexDocSection 1 input
     '#' -> lexDocComment input ITdocOptionsOld False
+    _ -> panic "withLexedDocType: Bad doc type"
  where 
     lexDocSection n input = case alexGetChar input of 
       Just ('*', input) -> lexDocSection (n+1) input
@@ -891,12 +880,12 @@ withLexedDocType lexDocComment = do
 -- RULES pragmas turn on the forall and '.' keywords, and we turn them
 -- off again at the end of the pragma.
 rulePrag :: Action
-rulePrag span buf len = do
+rulePrag span _ _ = do
   setExts (.|. bit inRulePragBit)
   return (L span ITrules_prag)
 
 endPrag :: Action
-endPrag span buf len = do
+endPrag span _ _ = do
   setExts (.&. complement (bit inRulePragBit))
   return (L span ITclose_prag)
 
@@ -932,8 +921,9 @@ docCommentEnd input commentAcc docType buf span = do
   span `seq` setLastToken span' last_len last_line_len
   return (L span' (docType comment))
  
+errBrace :: AlexInput -> SrcSpan -> P a
 errBrace (AI end _ _) span = failLocMsgP (srcSpanStart span) end "unterminated `{-'"
- 
+
 open_brace, close_brace :: Action
 open_brace span _str _len = do 
   ctx <- getContext
@@ -943,6 +933,7 @@ close_brace span _str _len = do
   popContext
   return (L span ITccurly)
 
+qvarid, qconid :: StringBuffer -> Int -> Token
 qvarid buf len = ITqvarid $! splitQualName buf len False
 qconid buf len = ITqconid $! splitQualName buf len False
 
@@ -976,7 +967,8 @@ splitQualName orig_buf len parens = split orig_buf orig_buf
       where
 	qual_size = orig_buf `byteDiff` dot_buf
 
-varid span buf len = 
+varid :: Action
+varid span buf len =
   fs `seq`
   case lookupUFM reservedWordsFM fs of
 	Just (keyword,0)    -> do
@@ -991,17 +983,22 @@ varid span buf len =
   where
 	fs = lexemeToFastString buf len
 
+conid :: StringBuffer -> Int -> Token
 conid buf len = ITconid fs
   where fs = lexemeToFastString buf len
 
+qvarsym, qconsym, prefixqvarsym, prefixqconsym :: StringBuffer -> Int -> Token
 qvarsym buf len = ITqvarsym $! splitQualName buf len False
 qconsym buf len = ITqconsym $! splitQualName buf len False
 prefixqvarsym buf len = ITprefixqvarsym $! splitQualName buf len True
 prefixqconsym buf len = ITprefixqconsym $! splitQualName buf len True
 
+varsym, consym :: Action
 varsym = sym ITvarsym
 consym = sym ITconsym
 
+sym :: (FastString -> Token) -> SrcSpan -> StringBuffer -> Int
+    -> P (Located Token)
 sym con span buf len = 
   case lookupUFM reservedSymsFM fs of
 	Just (keyword,exts) -> do
@@ -1023,16 +1020,27 @@ tok_integral itint transint transbuf translen (radix,char_to_int) span buf len =
      (offsetBytes transbuf buf) (subtract translen len) radix char_to_int
 
 -- some conveniences for use with tok_integral
+tok_num :: (Integer -> Integer)
+        -> Int -> Int
+        -> (Integer, (Char->Int)) -> Action
 tok_num = tok_integral ITinteger
+tok_primint :: (Integer -> Integer)
+            -> Int -> Int
+            -> (Integer, (Char->Int)) -> Action
 tok_primint = tok_integral ITprimint
+tok_primword :: Int -> Int
+             -> (Integer, (Char->Int)) -> Action
 tok_primword = tok_integral ITprimword positive
+positive, negative :: (Integer -> Integer)
 positive = id
 negative = negate
+decimal, octal, hexadecimal :: (Integer, Char -> Int)
 decimal = (10,octDecDigit)
 octal = (8,octDecDigit)
 hexadecimal = (16,hexDigit)
 
 -- readRational can understand negative rationals, exponents, everything.
+tok_float, tok_primfloat, tok_primdouble :: String -> Token
 tok_float        str = ITrational   $! readRational str
 tok_primfloat    str = ITprimfloat  $! readRational str
 tok_primdouble   str = ITprimdouble $! readRational str
@@ -1060,6 +1068,7 @@ do_bol span _str _len = do
 
 -- certain keywords put us in the "layout" state, where we might
 -- add an opening curly brace.
+maybe_layout :: Token -> P ()
 maybe_layout ITdo	= pushLexState layout_do
 maybe_layout ITmdo	= pushLexState layout_do
 maybe_layout ITof	= pushLexState layout
@@ -1077,6 +1086,7 @@ maybe_layout _	        = return ()
 -- by a 'do', then we allow the new context to be at the same indentation as
 -- the previous context.  This is what the 'strict' argument is for.
 --
+new_layout_context :: Bool -> Action
 new_layout_context strict span _buf _len = do
     popLexState
     (AI _ offset _) <- getInput
@@ -1093,6 +1103,7 @@ new_layout_context strict span _buf _len = do
 		setContext (Layout offset : ctx)
 		return (L span ITvocurly)
 
+do_layout_left :: Action
 do_layout_left span _buf _len = do
     popLexState
     pushLexState bol  -- we must be at the start of a line
@@ -1192,6 +1203,7 @@ lex_string s = do
 	c' <- lex_char c i
 	lex_string (c':s)
 
+lex_stringgap :: String -> P Token
 lex_stringgap s = do
   c <- getCharOrFail
   case c of
@@ -1204,7 +1216,7 @@ lex_char_tok :: Action
 -- Here we are basically parsing character literals, such as 'x' or '\n'
 -- but, when Template Haskell is on, we additionally spot
 -- 'x and ''T, returning ITvarQuote and ITtyQuote respectively, 
--- but WIHTOUT CONSUMING the x or T part  (the parser does that).
+-- but WITHOUT CONSUMING the x or T part  (the parser does that).
 -- So we have to do two characters of lookahead: when we see 'x we need to
 -- see if there's a trailing quote
 lex_char_tok span _buf _len = do	-- We've seen '
@@ -1267,6 +1279,7 @@ lex_char c inp = do
       c | isAny c -> do setInput inp; return c
       _other -> lit_error
 
+isAny :: Char -> Bool
 isAny c | c > '\x7f' = isPrint c
 	| otherwise  = is_any c
 
@@ -1303,7 +1316,7 @@ lex_escape = do
 		Just (c3,i3) -> 
 		   let str = [c1,c2,c3] in
 		   case [ (c,rest) | (p,c) <- silly_escape_chars,
-			      	     Just rest <- [maybePrefixMatch p str] ] of
+			      	     Just rest <- [stripPrefix p str] ] of
 			  (escape_char,[]):_ -> do
 				setInput i3
 				return escape_char
@@ -1320,6 +1333,7 @@ readNum is_digit base conv = do
 	then readNum2 is_digit base conv (conv c)
 	else do setInput i; lit_error
 
+readNum2 :: (Char -> Bool) -> Int -> (Char -> Int) -> Int -> P Char
 readNum2 is_digit base conv i = do
   input <- getInput
   read i input
@@ -1332,6 +1346,7 @@ readNum2 is_digit base conv i = do
 		   then do setInput input; return (chr i)
 		   else lit_error
 
+silly_escape_chars :: [(String, Char)]
 silly_escape_chars = [
 	("NUL", '\NUL'),
 	("SOH", '\SOH'),
@@ -1373,6 +1388,7 @@ silly_escape_chars = [
 -- the position of the error in the buffer.  This is so that we can report
 -- a correct location to the user, but also so we can detect UTF-8 decoding
 -- errors if they occur.
+lit_error :: P a
 lit_error = lexError "lexical error in string/character literal"
 
 getCharOrFail :: P Char
@@ -1449,14 +1465,14 @@ data ParseResult a
 
 data PState = PState { 
 	buffer	   :: StringBuffer,
-    dflags     :: DynFlags,
-    messages   :: Messages,
+        dflags     :: DynFlags,
+        messages   :: Messages,
         last_loc   :: SrcSpan,	-- pos of previous token
         last_offs  :: !Int, 	-- offset of the previous token from the
 				-- beginning of  the current line.
 				-- \t is equal to 8 spaces.
 	last_len   :: !Int,	-- len of previous token
-  last_line_len :: !Int,
+        last_line_len :: !Int,
         loc        :: SrcLoc,   -- current loc (end of prev token + 1)
 	extsBitmap :: !Int,	-- bitmap that determines permitted extensions
 	context	   :: [LayoutContext],
@@ -1495,6 +1511,9 @@ failLocMsgP loc1 loc2 str = P $ \_ -> PFailed (mkSrcSpan loc1 loc2) (text str)
 
 failSpanMsgP :: SrcSpan -> SDoc -> P a
 failSpanMsgP span msg = P $ \_ -> PFailed span msg
+
+getPState :: P PState
+getPState = P $ \s -> POk s s
 
 extension :: (Int -> Bool) -> P Bool
 extension p = P $ \s -> POk s (p $! extsBitmap s)
@@ -1545,7 +1564,7 @@ alexGetChar (AI loc ofs s)
 	  | c <= '\x06' = non_graphic
 	  | c <= '\x7f' = c
           -- Alex doesn't handle Unicode, so when Unicode
-          -- character is encoutered we output these values
+          -- character is encountered we output these values
           -- with the actual character value hidden in the state.
 	  | otherwise = 
 		case generalCategory c of
@@ -1610,53 +1629,91 @@ getLexState = P $ \s@PState{ lex_state=ls:_ } -> POk s ls
 -- -fglasgow-exts or -XParr) are represented by a bitmap stored in an unboxed
 -- integer
 
-genericsBit, ffiBit, parrBit :: Int
+genericsBit :: Int
 genericsBit = 0 -- {| and |}
+ffiBit :: Int
 ffiBit	   = 1
+parrBit :: Int
 parrBit	   = 2
+arrowsBit :: Int
 arrowsBit  = 4
+thBit :: Int
 thBit	   = 5
+ipBit :: Int
 ipBit      = 6
+explicitForallBit :: Int
 explicitForallBit = 7 -- the 'forall' keyword and '.' symbol
+bangPatBit :: Int
 bangPatBit = 8	-- Tells the parser to understand bang-patterns
 		-- (doesn't affect the lexer)
+tyFamBit :: Int
 tyFamBit   = 9	-- indexed type families: 'family' keyword and kind sigs
+haddockBit :: Int
 haddockBit = 10 -- Lex and parse Haddock comments
+magicHashBit :: Int
 magicHashBit = 11 -- "#" in both functions and operators
+kindSigsBit :: Int
 kindSigsBit = 12 -- Kind signatures on type variables
+recursiveDoBit :: Int
 recursiveDoBit = 13 -- mdo
+unicodeSyntaxBit :: Int
 unicodeSyntaxBit = 14 -- the forall symbol, arrow symbols, etc
+unboxedTuplesBit :: Int
 unboxedTuplesBit = 15 -- (# and #)
+standaloneDerivingBit :: Int
 standaloneDerivingBit = 16 -- standalone instance deriving declarations
+transformComprehensionsBit :: Int
 transformComprehensionsBit = 17
+qqBit :: Int
 qqBit	   = 18 -- enable quasiquoting
+inRulePragBit :: Int
 inRulePragBit = 19
+rawTokenStreamBit :: Int
 rawTokenStreamBit = 20 -- producing a token stream with all comments included
+newQualOpsBit :: Int
 newQualOpsBit = 21 -- Haskell' qualified operator syntax, e.g. Prelude.(+)
+recBit :: Int
+recBit = 22 -- rec
 
-genericsEnabled, ffiEnabled, parrEnabled :: Int -> Bool
+always :: Int -> Bool
 always           _     = True
+genericsEnabled :: Int -> Bool
 genericsEnabled  flags = testBit flags genericsBit
-ffiEnabled       flags = testBit flags ffiBit
+parrEnabled :: Int -> Bool
 parrEnabled      flags = testBit flags parrBit
+arrowsEnabled :: Int -> Bool
 arrowsEnabled    flags = testBit flags arrowsBit
+thEnabled :: Int -> Bool
 thEnabled        flags = testBit flags thBit
+ipEnabled :: Int -> Bool
 ipEnabled        flags = testBit flags ipBit
+explicitForallEnabled :: Int -> Bool
 explicitForallEnabled flags = testBit flags explicitForallBit
+bangPatEnabled :: Int -> Bool
 bangPatEnabled   flags = testBit flags bangPatBit
-tyFamEnabled     flags = testBit flags tyFamBit
+-- tyFamEnabled :: Int -> Bool
+-- tyFamEnabled     flags = testBit flags tyFamBit
+haddockEnabled :: Int -> Bool
 haddockEnabled   flags = testBit flags haddockBit
+magicHashEnabled :: Int -> Bool
 magicHashEnabled flags = testBit flags magicHashBit
-kindSigsEnabled  flags = testBit flags kindSigsBit
-recursiveDoEnabled flags = testBit flags recursiveDoBit
+-- kindSigsEnabled :: Int -> Bool
+-- kindSigsEnabled  flags = testBit flags kindSigsBit
+unicodeSyntaxEnabled :: Int -> Bool
 unicodeSyntaxEnabled flags = testBit flags unicodeSyntaxBit
+unboxedTuplesEnabled :: Int -> Bool
 unboxedTuplesEnabled flags = testBit flags unboxedTuplesBit
+standaloneDerivingEnabled :: Int -> Bool
 standaloneDerivingEnabled flags = testBit flags standaloneDerivingBit
-transformComprehensionsEnabled flags = testBit flags transformComprehensionsBit
+qqEnabled :: Int -> Bool
 qqEnabled        flags = testBit flags qqBit
-inRulePrag       flags = testBit flags inRulePragBit
+-- inRulePrag :: Int -> Bool
+-- inRulePrag       flags = testBit flags inRulePragBit
+rawTokenStreamEnabled :: Int -> Bool
 rawTokenStreamEnabled flags = testBit flags rawTokenStreamBit
+newQualOps :: Int -> Bool
 newQualOps       flags = testBit flags newQualOpsBit
+oldQualOps :: Int -> Bool
 oldQualOps flags = not (newQualOps flags)
 
 -- PState for parsing options pragmas
@@ -1698,26 +1755,23 @@ mkPState buf loc flags  =
     }
     where
       bitmap = genericsBit `setBitIf` dopt Opt_Generics flags
-	       .|. ffiBit       `setBitIf` dopt Opt_ForeignFunctionInterface flags
-	       .|. parrBit      `setBitIf` dopt Opt_PArr         flags
-	       .|. arrowsBit    `setBitIf` dopt Opt_Arrows       flags
-	       .|. thBit        `setBitIf` dopt Opt_TemplateHaskell flags
-	       .|. qqBit        `setBitIf` dopt Opt_QuasiQuotes flags
-	       .|. ipBit        `setBitIf` dopt Opt_ImplicitParams flags
-	       .|. explicitForallBit `setBitIf` dopt Opt_ScopedTypeVariables flags
-	       .|. explicitForallBit `setBitIf` dopt Opt_LiberalTypeSynonyms flags
-	       .|. explicitForallBit `setBitIf` dopt Opt_PolymorphicComponents flags
-	       .|. explicitForallBit `setBitIf` dopt Opt_ExistentialQuantification flags
-	       .|. explicitForallBit `setBitIf` dopt Opt_Rank2Types flags
-	       .|. explicitForallBit `setBitIf` dopt Opt_RankNTypes flags
-	       .|. bangPatBit   `setBitIf` dopt Opt_BangPatterns flags
-	       .|. tyFamBit     `setBitIf` dopt Opt_TypeFamilies flags
-	       .|. haddockBit   `setBitIf` dopt Opt_Haddock      flags
-	       .|. magicHashBit `setBitIf` dopt Opt_MagicHash    flags
-	       .|. kindSigsBit  `setBitIf` dopt Opt_KindSignatures flags
-	       .|. recursiveDoBit `setBitIf` dopt Opt_RecursiveDo flags
-	       .|. unicodeSyntaxBit `setBitIf` dopt Opt_UnicodeSyntax flags
-	       .|. unboxedTuplesBit `setBitIf` dopt Opt_UnboxedTuples flags
+	       .|. ffiBit            `setBitIf` dopt Opt_ForeignFunctionInterface flags
+	       .|. parrBit           `setBitIf` dopt Opt_PArr         flags
+	       .|. arrowsBit         `setBitIf` dopt Opt_Arrows       flags
+	       .|. thBit             `setBitIf` dopt Opt_TemplateHaskell flags
+	       .|. qqBit             `setBitIf` dopt Opt_QuasiQuotes flags
+	       .|. ipBit             `setBitIf` dopt Opt_ImplicitParams flags
+	       .|. explicitForallBit `setBitIf` dopt Opt_ExplicitForAll flags
+	       .|. bangPatBit        `setBitIf` dopt Opt_BangPatterns flags
+	       .|. tyFamBit          `setBitIf` dopt Opt_TypeFamilies flags
+	       .|. haddockBit        `setBitIf` dopt Opt_Haddock      flags
+	       .|. magicHashBit      `setBitIf` dopt Opt_MagicHash    flags
+	       .|. kindSigsBit       `setBitIf` dopt Opt_KindSignatures flags
+	       .|. recursiveDoBit    `setBitIf` dopt Opt_RecursiveDo flags
+	       .|. recBit 	     `setBitIf` dopt Opt_DoRec  flags
+	       .|. recBit 	     `setBitIf` dopt Opt_Arrows flags
+	       .|. unicodeSyntaxBit  `setBitIf` dopt Opt_UnicodeSyntax flags
+	       .|. unboxedTuplesBit  `setBitIf` dopt Opt_UnboxedTuples flags
 	       .|. standaloneDerivingBit `setBitIf` dopt Opt_StandaloneDeriving flags
                .|. transformComprehensionsBit `setBitIf` dopt Opt_TransformListComp flags
                .|. rawTokenStreamBit `setBitIf` dopt Opt_KeepRawTokenStream flags
@@ -1828,6 +1882,7 @@ lexToken = do
         span `seq` setLastToken span bytes bytes
         t span buf bytes
 
+reportLexError :: SrcLoc -> SrcLoc -> StringBuffer -> [Char] -> P a
 reportLexError loc1 loc2 buf str
   | atEnd buf = failLocMsgP loc1 loc2 (str ++ " at end of input")
   | otherwise =
@@ -1846,4 +1901,59 @@ lexTokenStream buf loc dflags = unP go initState
             case ltok of
               L _ ITeof -> return []
               _ -> liftM (ltok:) go
+
+linePrags = Map.singleton "line" (begin line_prag2)
+
+fileHeaderPrags = Map.fromList([("options", lex_string_prag IToptions_prag),
+                                 ("options_ghc", lex_string_prag IToptions_prag),
+                                 ("options_haddock", lex_string_prag ITdocOptions),
+                                 ("language", token ITlanguage_prag),
+                                 ("include", lex_string_prag ITinclude_prag)])
+
+ignoredPrags = Map.fromList (map ignored pragmas)
+               where ignored opt = (opt, nested_comment lexToken)
+                     impls = ["hugs", "nhc98", "jhc", "yhc", "catch", "derive"]
+                     options_pragmas = map ("options_" ++) impls
+                     -- CFILES is a hugs-only thing.
+                     pragmas = options_pragmas ++ ["cfiles", "contract"]
+
+oneWordPrags = Map.fromList([("rules", rulePrag),
+                           ("inline", token (ITinline_prag True)),
+                           ("notinline", token (ITinline_prag False)),
+                           ("specialize", token ITspec_prag),
+                           ("source", token ITsource_prag),
+                           ("warning", token ITwarning_prag),
+                           ("deprecated", token ITdeprecated_prag),
+                           ("scc", token ITscc_prag),
+                           ("generated", token ITgenerated_prag),
+                           ("core", token ITcore_prag),
+                           ("unpack", token ITunpack_prag),
+                           ("ann", token ITann_prag)])
+
+twoWordPrags = Map.fromList([("inline conlike", token (ITinline_conlike_prag True)),
+                             ("notinline conlike", token (ITinline_conlike_prag False)),
+                             ("specialize inline", token (ITspec_inline_prag True)),
+                             ("specialize notinline", token (ITspec_inline_prag False))])
+
+
+dispatch_pragmas :: Map String Action -> Action
+dispatch_pragmas prags span buf len = case Map.lookup (clean_pragma (lexemeToString buf len)) prags of
+                                       Just found -> found span buf len
+                                       Nothing -> lexError "unknown pragma"
+
+known_pragma :: Map String Action -> AlexAccPred Int
+known_pragma prags _ _ len (AI _ _ buf) = (isJust $ Map.lookup (clean_pragma (lexemeToString (offsetBytes (- len) buf) len)) prags)
+                                          && (nextCharIs buf (\c -> not (isAlphaNum c || c == '_')))
+
+clean_pragma :: String -> String
+clean_pragma prag = canon_ws (map toLower (unprefix prag))
+                    where unprefix prag' = case stripPrefix "{-#" prag' of
+                                             Just rest -> rest
+                                             Nothing -> prag'
+                          canonical prag' = case prag' of
+                                              "noinline" -> "notinline"
+                                              "specialise" -> "specialize"
+                                              "constructorlike" -> "conlike"
+                                              otherwise -> prag'
+                          canon_ws s = unwords (map canonical (words s))
 }

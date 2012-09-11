@@ -9,7 +9,11 @@
 #ifndef __HSBASE_H__
 #define __HSBASE_H__
 
+#ifdef __NHC__
+# include "Nhc98BaseConfig.h"
+#else
 #include "HsBaseConfig.h"
+#endif
 
 /* ultra-evil... */
 #undef PACKAGE_BUGREPORT
@@ -57,9 +61,6 @@
 #endif
 #if HAVE_STRING_H
 #include <string.h>
-#endif
-#if HAVE_DIRENT_H
-#include <dirent.h>
 #endif
 #if HAVE_UTIME_H
 #include <utime.h>
@@ -125,7 +126,6 @@
 #if HAVE_VFORK_H
 #include <vfork.h>
 #endif
-#include "dirUtils.h"
 #include "WCsubst.h"
 
 #if defined(__MINGW32__)
@@ -150,59 +150,6 @@ extern int fdReady(int fd, int write, int msecs, int isSock);
 
 /* in Signals.c */
 extern HsInt nocldstop;
-
-/* -----------------------------------------------------------------------------
-   64-bit operations, defined in longlong.c
-   -------------------------------------------------------------------------- */
-
-#ifdef SUPPORT_LONG_LONGS
-
-HsBool hs_gtWord64 (HsWord64, HsWord64);
-HsBool hs_geWord64 (HsWord64, HsWord64);
-HsBool hs_eqWord64 (HsWord64, HsWord64);
-HsBool hs_neWord64 (HsWord64, HsWord64);
-HsBool hs_ltWord64 (HsWord64, HsWord64);
-HsBool hs_leWord64 (HsWord64, HsWord64);
-
-HsBool hs_gtInt64 (HsInt64, HsInt64);
-HsBool hs_geInt64 (HsInt64, HsInt64);
-HsBool hs_eqInt64 (HsInt64, HsInt64);
-HsBool hs_neInt64 (HsInt64, HsInt64);
-HsBool hs_ltInt64 (HsInt64, HsInt64);
-HsBool hs_leInt64 (HsInt64, HsInt64);
-
-HsWord64 hs_remWord64  (HsWord64, HsWord64);
-HsWord64 hs_quotWord64 (HsWord64, HsWord64);
-
-HsInt64 hs_remInt64    (HsInt64, HsInt64);
-HsInt64 hs_quotInt64   (HsInt64, HsInt64);
-HsInt64 hs_negateInt64 (HsInt64);
-HsInt64 hs_plusInt64   (HsInt64, HsInt64);
-HsInt64 hs_minusInt64  (HsInt64, HsInt64);
-HsInt64 hs_timesInt64  (HsInt64, HsInt64);
-
-HsWord64 hs_and64  (HsWord64, HsWord64);
-HsWord64 hs_or64   (HsWord64, HsWord64);
-HsWord64 hs_xor64  (HsWord64, HsWord64);
-HsWord64 hs_not64  (HsWord64);
-
-HsWord64 hs_uncheckedShiftL64   (HsWord64, HsInt);
-HsWord64 hs_uncheckedShiftRL64  (HsWord64, HsInt);
-HsInt64  hs_uncheckedIShiftL64  (HsInt64, HsInt);
-HsInt64  hs_uncheckedIShiftRA64 (HsInt64, HsInt);
-HsInt64  hs_uncheckedIShiftRL64 (HsInt64, HsInt);
-
-HsInt64  hs_intToInt64    (HsInt);
-HsInt    hs_int64ToInt    (HsInt64);
-HsWord64 hs_int64ToWord64 (HsInt64);
-HsWord64 hs_wordToWord64  (HsWord);
-HsWord   hs_word64ToWord  (HsWord64);
-HsInt64  hs_word64ToInt64 (HsWord64);
-
-HsWord64 hs_integerToWord64 (HsInt sa, StgByteArray /* Really: mp_limb_t* */ da);
-HsInt64  hs_integerToInt64 (HsInt sa, StgByteArray /* Really: mp_limb_t* */ da);
-
-#endif /* SUPPORT_LONG_LONGS */
 
 /* -----------------------------------------------------------------------------
    INLINE functions.
@@ -254,8 +201,13 @@ __hscore_sigdelset( sigset_t * set, int s )
 INLINE int
 __hscore_sigismember( sigset_t * set, int s )
 { return sigismember(set,s); }
+
+INLINE int
+__hscore_utime( const char *file, const struct utimbuf *timep )
+{ return utime(file,timep); }
 #endif
 
+// This is used by dph:Data.Array.Parallel.Arr.BUArr, and shouldn't be
 INLINE void *
 __hscore_memcpy_dst_off( char *dst, int dst_off, char *src, size_t sz )
 { return memcpy(dst+dst_off, src, sz); }
@@ -263,16 +215,6 @@ __hscore_memcpy_dst_off( char *dst, int dst_off, char *src, size_t sz )
 INLINE void *
 __hscore_memcpy_src_off( char *dst, char *src, int src_off, size_t sz )
 { return memcpy(dst, src+src_off, sz); }
-
-INLINE HsBool
-__hscore_supportsTextMode()
-{
-#if defined(_MSC_VER) || defined(__MINGW32__) || defined(_WIN32)
-  return HS_BOOL_FALSE;
-#else
-  return HS_BOOL_TRUE;
-#endif
-}
 
 INLINE HsInt
 __hscore_bufsiz()
@@ -425,82 +367,13 @@ __hscore_setmode( int fd, HsBool toBin )
 
 #if __GLASGOW_HASKELL__
 
-INLINE int
-__hscore_PrelHandle_write( int fd, void *ptr, HsInt off, int sz )
-{
-  return write(fd,(char *)ptr + off, sz);
-}
-
-INLINE int
-__hscore_PrelHandle_read( int fd, void *ptr, HsInt off, int sz )
-{
-  return read(fd,(char *)ptr + off, sz);
-
-}
-
-#if defined(_MSC_VER) || defined(__MINGW32__) || defined(_WIN32)
-INLINE int
-__hscore_PrelHandle_send( int fd, void *ptr, HsInt off, int sz )
-{
-    return send(fd,(char *)ptr + off, sz, 0);
-}
-
-INLINE int
-__hscore_PrelHandle_recv( int fd, void *ptr, HsInt off, int sz )
-{
-    return recv(fd,(char *)ptr + off, sz, 0);
-}
-#endif
-
 #endif /* __GLASGOW_HASKELL__ */
-
-INLINE int
-__hscore_mkdir( char *pathName, int mode )
-{
-#if defined(_MSC_VER) || defined(__MINGW32__) || defined(_WIN32)
-  return mkdir(pathName);
-#else
-  return mkdir(pathName,mode);
-#endif
-}
-
-INLINE int
-__hscore_lstat( const char *fname, struct stat *st )
-{
-#if HAVE_LSTAT
-  return lstat(fname, st);
-#else
-  return stat(fname, st);
-#endif
-}
-
-INLINE char *
-__hscore_d_name( struct dirent* d )
-{
-  return (d->d_name);
-}
-
-INLINE int
-__hscore_end_of_dir( void )
-{
-  return READDIR_ERRNO_EOF;
-}
-
-INLINE void
-__hscore_free_dirent(struct dirent *dEnt)
-{
-#if HAVE_READDIR_R
-  free(dEnt);
-#endif
-}
 
 #if defined(__MINGW32__)
 // We want the versions of stat/fstat/lseek that use 64-bit offsets,
 // and you have to ask for those explicitly.  Unfortunately there
 // doesn't seem to be a 64-bit version of truncate/ftruncate, so while
 // hFileSize and hSeek will work with large files, hSetFileSize will not.
-#define stat(file,buf)       _stati64(file,buf)
-#define fstat(fd,buf)        _fstati64(fd,buf)
 typedef struct _stati64 struct_stat;
 typedef off64_t stsize_t;
 #else
@@ -520,6 +393,37 @@ INLINE stsize_t __hscore_st_size  ( struct_stat* st ) { return st->st_size; }
 INLINE mode_t __hscore_st_mode  ( struct_stat* st ) { return st->st_mode; }
 INLINE dev_t  __hscore_st_dev  ( struct_stat* st ) { return st->st_dev; }
 INLINE ino_t  __hscore_st_ino  ( struct_stat* st ) { return st->st_ino; }
+#endif
+
+#if defined(__MINGW32__)
+INLINE int __hscore_stat(wchar_t *file, struct_stat *buf) {
+	return _wstati64(file,buf);
+}
+
+INLINE int __hscore_fstat(int fd, struct_stat *buf) {
+	return _fstati64(fd,buf);
+}
+INLINE int __hscore_lstat(wchar_t *fname, struct_stat *buf )
+{
+	return _wstati64(fname,buf);
+}
+#else
+INLINE int __hscore_stat(char *file, struct_stat *buf) {
+	return stat(file,buf);
+}
+
+INLINE int __hscore_fstat(int fd, struct_stat *buf) {
+	return fstat(fd,buf);
+}
+
+INLINE int __hscore_lstat( const char *fname, struct stat *buf )
+{
+#if HAVE_LSTAT
+  return lstat(fname, buf);
+#else
+  return stat(fname, buf);
+#endif
+}
 #endif
 
 #if HAVE_TERMIOS_H
@@ -681,18 +585,20 @@ extern void __hscore_set_saved_termios(int fd, void* ts);
 
 INLINE int __hscore_hs_fileno (FILE *f) { return fileno (f); }
 
-INLINE int __hscore_open(char *file, int how, mode_t mode) {
 #ifdef __MINGW32__
+INLINE int __hscore_open(wchar_t *file, int how, mode_t mode) {
 	if ((how & O_WRONLY) || (how & O_RDWR) || (how & O_APPEND))
-	  return _sopen(file,how | _O_NOINHERIT,_SH_DENYRW,mode);
+	  return _wsopen(file,how | _O_NOINHERIT,_SH_DENYRW,mode);
           // _O_NOINHERIT: see #2650
 	else
-	  return _sopen(file,how | _O_NOINHERIT,_SH_DENYWR,mode);
+	  return _wsopen(file,how | _O_NOINHERIT,_SH_DENYWR,mode);
           // _O_NOINHERIT: see #2650
-#else
-	return open(file,how,mode);
-#endif
 }
+#else
+INLINE int __hscore_open(char *file, int how, mode_t mode) {
+	return open(file,how,mode);
+}
+#endif
 
 // These are wrapped because on some OSs (eg. Linux) they are
 // macros which redirect to the 64-bit-off_t versions when large file
@@ -708,14 +614,6 @@ INLINE off_t __hscore_lseek(int fd, off_t off, int whence) {
 }
 #endif
 
-INLINE int __hscore_stat(char *file, struct_stat *buf) {
-	return (stat(file,buf));
-}
-
-INLINE int __hscore_fstat(int fd, struct_stat *buf) {
-	return (fstat(fd,buf));
-}
-
 // select-related stuff
 
 #if !defined(__MINGW32__)
@@ -725,6 +623,11 @@ INLINE void hsFD_SET(int fd, fd_set *fds) { FD_SET(fd, fds); }
 INLINE HsInt sizeof_fd_set(void) { return sizeof(fd_set); }
 extern void hsFD_ZERO(fd_set *fds);
 #endif
+
+INLINE int __hscore_select(int nfds, fd_set *readfds, fd_set *writefds,
+                           fd_set *exceptfds, struct timeval *timeout) {
+	return (select(nfds,readfds,writefds,exceptfds,timeout));
+}
 
 // gettimeofday()-related
 
@@ -762,6 +665,20 @@ INLINE intptr_t  __hscore_to_intptr   (void *p)     { return (intptr_t)p; }
 
 void errorBelch2(const char*s, char *t);
 void debugBelch2(const char*s, char *t);
+
+#if !defined(mingw32_HOST_OS) && !defined(__MINGW32__)
+
+INLINE int fcntl_read(int fd, int cmd) {
+    return fcntl(fd, cmd);
+}
+INLINE int fcntl_write(int fd, int cmd, long arg) {
+    return fcntl(fd, cmd, arg);
+}
+INLINE int fcntl_lock(int fd, int cmd, struct flock *lock) {
+    return fcntl(fd, cmd, lock);
+}
+
+#endif
 
 #endif /* __HSBASE_H__ */
 

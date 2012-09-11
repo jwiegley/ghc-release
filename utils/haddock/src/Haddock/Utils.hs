@@ -1,11 +1,15 @@
-{-# LANGUAGE PatternSignatures #-}
-
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Haddock.Utils
+-- Copyright   :  (c) The University of Glasgow 2001-2002,
+--                    Simon Marlow 2003-2006,
+--                    David Waern  2006-2009
+-- License     :  BSD-like
 --
--- Haddock - A Haskell Documentation Tool
---
--- (c) The University of Glasgow 2001-2002
--- (c) Simon Marlow 2003
---
+-- Maintainer  :  haddock@projects.haskell.org
+-- Stability   :  experimental
+-- Portability :  portable
+-----------------------------------------------------------------------------
 
 
 module Haddock.Utils (
@@ -15,7 +19,6 @@ module Haddock.Utils (
   toDescription, toInstalledDescription,
 
   -- * Filename utilities
-  basename, dirname, splitFilename3, 
   moduleHtmlFile, nameHtmlRef,
   contentsHtmlFile, indexHtmlFile,
   frameIndexHtmlFile,
@@ -41,18 +44,19 @@ module Haddock.Utils (
 --  FormatVersion, mkFormatVersion  
   
   -- * MTL stuff
-  MonadIO(..)
+  MonadIO(..),
+  
+  -- * Logging
+  parseVerbosity,
+  out
  ) where
 
 import Haddock.Types
-import Haddock.GHC.Utils
+import Haddock.GhcUtils
 
 import GHC
-import SrcLoc
 import Name
-import OccName
 import Binary
-import Module
 
 import Control.Monad ( liftM )
 import Data.Char ( isAlpha, ord, chr )
@@ -68,14 +72,30 @@ import System.Environment ( getProgName )
 import System.Exit ( exitWith, ExitCode(..) )
 import System.IO ( hPutStr, stderr )
 import System.IO.Unsafe	 ( unsafePerformIO )
+import System.FilePath
+import Distribution.Verbosity
+import Distribution.ReadE
 
-#if __GLASGOW_HASKELL__ >= 609
 import MonadUtils ( MonadIO(..) )
-#else
-class Monad m => MonadIO m where
-    liftIO :: IO a -> m a                                              
-instance MonadIO IO where liftIO = id
-#endif
+
+
+-- -----------------------------------------------------------------------------
+-- Logging
+
+
+parseVerbosity :: String -> Either String Verbosity
+parseVerbosity = runReadE flagToVerbosity
+
+
+-- | Print a message to stdout, if it is not too verbose
+out :: MonadIO m
+    => Verbosity -- ^ program verbosity
+    -> Verbosity -- ^ message verbosity
+    -> String -> m ()
+out progVerbosity msgVerbosity msg
+  | msgVerbosity <= progVerbosity = liftIO $ putStrLn msg
+  | otherwise = return ()
+
 
 -- -----------------------------------------------------------------------------
 -- Some Utilities
@@ -122,7 +142,7 @@ restrictCons names decls = [ L p d | L p (Just d) <- map (fmap keep) decls ]
           -- it's the best we can do.
         InfixCon _ _ -> Just d
       where
-        field_avail (ConDeclField n _ _) = (unLoc n) `elem` names
+        field_avail (ConDeclField n _ _) = unLoc n `elem` names
         field_types flds = [ t | ConDeclField _ t _ <- flds ] 
       
     keep _ | otherwise = Nothing
@@ -139,48 +159,6 @@ restrictATs names ats = [ at | at <- ats , tcdName (unL at) `elem` names ]
 
 -- -----------------------------------------------------------------------------
 -- Filename mangling functions stolen from s main/DriverUtil.lhs.
-
-type Suffix = String
-
-splitFilename :: String -> (String,Suffix)
-splitFilename f = split_longest_prefix f (=='.')
-
-basename :: String -> String
-basename f = base where (_dir, base, _suff) = splitFilename3 f
-
-dirname :: String -> String
-dirname f = dir where (dir, _base, _suff) = splitFilename3 f
-
--- "foo/bar/xyzzy.ext" -> ("foo/bar", "xyzzy", ".ext")
-splitFilename3 :: String -> (String,String,Suffix)
-splitFilename3 str
-   = let (dir, rest) = split_longest_prefix str isPathSeparator
-	 (name, ext) = splitFilename rest
-	 real_dir | null dir  = "."
-		  | otherwise = dir
-     in  (real_dir, name, ext)
-
-split_longest_prefix :: String -> (Char -> Bool) -> (String,String)
-split_longest_prefix s pred0
-  = case pre0 of
-	[]      -> ([], reverse suf)
-	(_:pre) -> (reverse pre, reverse suf)
-  where (suf,pre0) = break pred0 (reverse s)
-
-pathSeparator :: Char
-#ifdef __WIN32__
-pathSeparator = '\\'
-#else
-pathSeparator = '/'
-#endif
-
-isPathSeparator :: Char -> Bool
-isPathSeparator ch =
-#ifdef mingw32_TARGET_OS
-  ch == '/' || ch == '\\'
-#else
-  ch == '/'
-#endif
 
 moduleHtmlFile :: Module -> FilePath
 moduleHtmlFile mdl =
@@ -265,7 +243,7 @@ mapSnd f ((x,y):xs) = (x,f y) : mapSnd f xs
 
 mapMaybeM :: Monad m => (a -> m b) -> Maybe a -> m (Maybe b)
 mapMaybeM _ Nothing = return Nothing
-mapMaybeM f (Just a) = f a >>= return . Just
+mapMaybeM f (Just a) = liftM Just (f a)
 
 escapeStr :: String -> String
 escapeStr = escapeURIString isUnreserved
@@ -281,7 +259,7 @@ escapeURIChar p c
     | otherwise = '%' : myShowHex (ord c) ""
     where
         myShowHex :: Int -> ShowS
-        myShowHex n r =  case showIntAtBase 16 (toChrHex) n r of
+        myShowHex n r =  case showIntAtBase 16 toChrHex n r of
             []  -> "00"
             [a] -> ['0',a]
             cs  -> cs
@@ -290,7 +268,7 @@ escapeURIChar p c
             | otherwise = chr (ord 'A' + fromIntegral (d - 10))
 
 escapeURIString :: (Char -> Bool) -> String -> String
-escapeURIString p s = concatMap (escapeURIChar p) s
+escapeURIString = concatMap . escapeURIChar
 
 isUnreserved :: Char -> Bool
 isUnreserved c = isAlphaNumChar c || (c `elem` "-_.~")
@@ -298,7 +276,7 @@ isUnreserved c = isAlphaNumChar c || (c `elem` "-_.~")
 
 isAlphaChar, isDigitChar, isAlphaNumChar :: Char -> Bool
 isAlphaChar c    = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-isDigitChar c    = (c >= '0' && c <= '9')
+isDigitChar c    = c >= '0' && c <= '9'
 isAlphaNumChar c = isAlphaChar c || isDigitChar c
 
 
@@ -327,7 +305,7 @@ html_xrefs = unsafePerformIO (readIORef html_xrefs_ref)
 
 
 replace :: Eq a => a -> a -> [a] -> [a]
-replace a b xs = map (\x -> if x == a then b else x) xs 
+replace a b = map (\x -> if x == a then b else x) 
 
 
 -----------------------------------------------------------------------------
@@ -383,7 +361,7 @@ nullFormatVersion :: FormatVersion
 nullFormatVersion = mkFormatVersion 0
 
 mkFormatVersion :: Int -> FormatVersion
-mkFormatVersion i = FormatVersion i
+mkFormatVersion = FormatVersion
 
 instance Binary FormatVersion where
    put_ bh (FormatVersion i) =

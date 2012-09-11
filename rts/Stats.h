@@ -11,6 +11,8 @@
 
 #include "GetTime.h"
 
+BEGIN_RTS_PRIVATE
+
 void      stat_startInit(void);
 void      stat_endInit(void);
 
@@ -51,7 +53,6 @@ double    mut_user_time_during_heap_census(void);
 #endif /* PROFILING */
 
 void      statDescribeGens( void );
-HsInt64   getAllocations( void );
 
 Ticks stat_getElapsedGCTime(void);
 Ticks stat_getElapsedTime(void);
@@ -60,5 +61,6 @@ Ticks stat_getElapsedTime(void);
 void statsPrintf( char *s, ... ) 
     GNUC3_ATTRIBUTE(format (printf, 1, 2));
 
+END_RTS_PRIVATE
 
 #endif /* STATS_H */

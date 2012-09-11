@@ -11,7 +11,6 @@ import TcMType
 import TcType
 import TcRnMonad
 import TyCon
-import Type
 import Name
 import Module
 import SrcLoc
@@ -20,8 +19,8 @@ import LazyUniqFM
 import FiniteMap
 import FastString
 
-import Maybe
-import Monad
+import Maybes
+import Control.Monad
 \end{code}
 
 
@@ -35,6 +34,16 @@ For any two family instance modules that we import directly or indirectly, we
 check whether the instances in the two modules are consistent, *unless* we can
 be certain that the instances of the two modules have already been checked for
 consistency during the compilation of modules that we import.
+
+Why do we need to check?  Consider 
+   module X1 where	  	  module X2 where
+    data T1			    data T2
+    type instance F T1 b = Int	    type instance F a T2 = Char
+    f1 :: F T1 a -> Int		    f2 :: Char -> F a T2
+    f1 x = x			    f2 x = x
+
+Now if we import both X1 and X2 we could make (f2 . f1) :: Int -> Char.
+Notice that neither instance is an orphan.
 
 How do we know which pairs of modules have already been checked?  Any pair of
 modules where both modules occur in the `HscTypes.dep_finsts' set (of the
@@ -107,8 +116,8 @@ checkFamInstConsistency famInstMods directlyImpMods
     -- already loaded in the EPS or they are in the HPT.
     --
     check modInstsEnv (ModulePair m1 m2)
-      = let { instEnv1 = fromJust . lookupModuleEnv modInstsEnv $ m1
-	    ; instEnv2 = fromJust . lookupModuleEnv modInstsEnv $ m2
+      = let { instEnv1 = (expectJust "checkFamInstConsistency") . lookupModuleEnv modInstsEnv $ m1
+	    ; instEnv2 = (expectJust "checkFamInstConsistency") . lookupModuleEnv modInstsEnv $ m2
 	    ; insts1   = famInstEnvElts instEnv1
 	    }
         in
@@ -168,38 +177,14 @@ checkForConflicts inst_envs famInst
 		-- (since we do unification).  
 		-- We use tcInstSkolType because we don't want to allocate
 		-- fresh *meta* type variables.  
-       ; let { tycon = famInstTyCon famInst
-	     ; ty    = case tyConFamInst_maybe tycon of
-		         Nothing        -> panic "FamInst.checkForConflicts"
-		         Just (tc, tys) -> tc `mkTyConApp` tys
-             }
-       ; (_, _, tau') <- tcInstSkolType FamInstSkol ty
 
-       ; let (fam, tys') = tcSplitTyConApp tau'
-
-       ; let { matches   = lookupFamInstEnvUnify inst_envs fam tys'
-	     ; conflicts = [ conflictingFamInst
-			   | match@((conflictingFamInst, _), _) <- matches
-			   , conflicting tycon match 
-			   ]
-	     }
+       ; skol_tvs <- tcInstSkolTyVars FamInstSkol 
+                                      (tyConTyVars (famInstTyCon famInst))
+       ; let conflicts = lookupFamInstEnvConflicts inst_envs famInst skol_tvs
        ; unless (null conflicts) $
-	   conflictInstErr famInst (head conflicts)
+	   conflictInstErr famInst (fst (head conflicts))
        }
   where
-      -- - In the case of data family instances, any overlap is fundamentally a
-      --   conflict (as these instances imply injective type mappings).
-      -- - In the case of type family instances, overlap is admitted as long as
-      --   the right-hand sides of the overlapping rules coincide under the
-      --   overlap substitution.  We require that they are syntactically equal;
-      --   anything else would be difficult to test for at this stage.
-    conflicting tycon1 ((famInst2, _), subst) 
-      | isAlgTyCon tycon1 = True
-      | otherwise         = not (rhs1 `tcEqType` rhs2)
-      where
-        tycon2 = famInstTyCon famInst2
-        rhs1   = substTy subst $ synTyConType tycon1
-        rhs2   = substTy subst $ synTyConType tycon2
 
 conflictInstErr :: FamInst -> FamInst -> TcRn ()
 conflictInstErr famInst conflictingFamInst

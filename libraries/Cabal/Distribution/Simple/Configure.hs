@@ -55,10 +55,8 @@ module Distribution.Simple.Configure (configure,
                                       getPersistBuildConfig,
                                       checkPersistBuildConfig,
                                       maybeGetPersistBuildConfig,
---                                      getConfiguredPkgDescr,
                                       localBuildInfoFile,
                                       getInstalledPackages,
-                                      configDependency,
                                       configCompiler, configCompilerAux,
                                       ccLdOptionsBuildInfo,
                                       tryGetConfigStateFile,
@@ -68,14 +66,15 @@ module Distribution.Simple.Configure (configure,
 
 import Distribution.Simple.Compiler
     ( CompilerFlavor(..), Compiler(compilerId), compilerFlavor, compilerVersion
-    , showCompilerId, unsupportedExtensions, PackageDB(..) )
+    , showCompilerId, unsupportedExtensions, PackageDB(..), PackageDBStack )
 import Distribution.Package
-    ( PackageName(PackageName), PackageIdentifier(PackageIdentifier)
-    , packageVersion, Package(..), Dependency(Dependency) )
-import Distribution.InstalledPackageInfo
-    ( InstalledPackageInfo, emptyInstalledPackageInfo )
-import qualified Distribution.InstalledPackageInfo as Installed
-    ( InstalledPackageInfo_(..) )
+    ( PackageName(PackageName), PackageIdentifier(PackageIdentifier), PackageId
+    , packageName, packageVersion, Package(..)
+    , Dependency(Dependency), simplifyDependency
+    , InstalledPackageId(..) )
+import Distribution.InstalledPackageInfo as Installed
+    ( InstalledPackageInfo, InstalledPackageInfo_(..)
+    , emptyInstalledPackageInfo )
 import qualified Distribution.Simple.PackageIndex as PackageIndex
 import Distribution.Simple.PackageIndex (PackageIndex)
 import Distribution.PackageDescription as PD
@@ -86,45 +85,45 @@ import Distribution.PackageDescription as PD
 import Distribution.PackageDescription.Configuration
     ( finalizePackageDescription )
 import Distribution.PackageDescription.Check
-    ( PackageCheck(..)
-    , checkPackage, checkConfiguredPackage, checkPackageFiles )
+    ( PackageCheck(..), checkPackage, checkPackageFiles )
 import Distribution.Simple.Program
     ( Program(..), ProgramLocation(..), ConfiguredProgram(..)
     , ProgramConfiguration, defaultProgramConfiguration
     , configureAllKnownPrograms, knownPrograms, lookupKnownProgram
     , userSpecifyArgss, userSpecifyPaths
-    , lookupProgram, requireProgram, pkgConfigProgram, gccProgram
-    , rawSystemProgramStdoutConf )
+    , lookupProgram, requireProgram, requireProgramVersion
+    , pkgConfigProgram, gccProgram, rawSystemProgramStdoutConf )
 import Distribution.Simple.Setup
     ( ConfigFlags(..), CopyDest(..), fromFlag, fromFlagOrDefault, flagToMaybe )
 import Distribution.Simple.InstallDirs
     ( InstallDirs(..), defaultInstallDirs, combineInstallDirs )
 import Distribution.Simple.LocalBuildInfo
-    ( LocalBuildInfo(..), absoluteInstallDirs
-    , prefixRelativeInstallDirs )
+    ( LocalBuildInfo(..), ComponentLocalBuildInfo(..)
+    , absoluteInstallDirs, prefixRelativeInstallDirs )
 import Distribution.Simple.Utils
     ( die, warn, info, setupMessage, createDirectoryIfMissingVerbose
-    , intercalate, comparing, cabalVersion, cabalBootstrapping
+    , intercalate, cabalVersion, cabalBootstrapping
     , withFileContents, writeFileAtomic 
     , withTempFile )
-import Distribution.Simple.Register
-    ( removeInstalledConfig )
 import Distribution.System
-    ( OS(..), buildOS, buildArch )
+    ( OS(..), buildOS, buildPlatform )
 import Distribution.Version
-    ( Version(..), VersionRange(..), orLaterVersion, withinRange )
+    ( Version(..), anyVersion, orLaterVersion, withinRange
+    , isSpecificVersion, isAnyVersion
+    , LowerBound(..), asVersionIntervals )
 import Distribution.Verbosity
     ( Verbosity, lessVerbose )
 
 import qualified Distribution.Simple.GHC  as GHC
 import qualified Distribution.Simple.JHC  as JHC
+import qualified Distribution.Simple.LHC  as LHC
 import qualified Distribution.Simple.NHC  as NHC
 import qualified Distribution.Simple.Hugs as Hugs
 
 import Control.Monad
     ( when, unless, foldM, filterM )
 import Data.List
-    ( nub, partition, isPrefixOf, maximumBy, inits )
+    ( nub, partition, isPrefixOf, inits )
 import Data.Maybe
     ( fromMaybe, isNothing )
 import Data.Monoid
@@ -262,15 +261,13 @@ localBuildInfoFile distPref = distPref </> "setup-config"
 
 -- |Perform the \"@.\/setup configure@\" action.
 -- Returns the @.setup-config@ file.
-configure :: ( Either GenericPackageDescription PackageDescription
-             , HookedBuildInfo)
+configure :: (GenericPackageDescription, HookedBuildInfo)
           -> ConfigFlags -> IO LocalBuildInfo
 configure (pkg_descr0, pbi) cfg
   = do  let distPref = fromFlag (configDistPref cfg)
             verbosity = fromFlag (configVerbosity cfg)
 
-        setupMessage verbosity "Configuring"
-                     (packageId (either packageDescription id pkg_descr0))
+        setupMessage verbosity "Configuring" (packageId pkg_descr0)
 
         createDirectoryIfMissingVerbose (lessVerbose verbosity) True distPref
 
@@ -278,10 +275,8 @@ configure (pkg_descr0, pbi) cfg
                            . userSpecifyPaths (configProgramPaths cfg)
                            $ configPrograms cfg
             userInstall = fromFlag (configUserInstall cfg)
-            defaultPackageDB | userInstall = UserPackageDB
-                             | otherwise   = GlobalPackageDB
-            packageDb   = fromFlagOrDefault defaultPackageDB
-                                            (configPackageDB cfg)
+            packageDbs = implicitPackageDbStack userInstall
+                           (flagToMaybe $ configPackageDB cfg)
 
         -- detect compiler
         (comp, programsConfig') <- configCompiler
@@ -291,26 +286,56 @@ configure (pkg_descr0, pbi) cfg
         let version = compilerVersion comp
             flavor  = compilerFlavor comp
 
-        -- FIXME: currently only GHC has hc-pkg
-        maybePackageSet <- getInstalledPackages (lessVerbose verbosity) comp
-                               packageDb programsConfig'
+        -- Create a PackageIndex that makes *any libraries that might be*
+        -- defined internally to this package look like installed packages, in
+        -- case an executable should refer to any of them as dependencies.
+        --
+        -- It must be *any libraries that might be* defined rather than the
+        -- actual definitions, because these depend on conditionals in the .cabal
+        -- file, and we haven't resolved them yet.  finalizePackageDescription
+        -- does the resolution of conditionals, and it takes internalPackageSet
+        -- as part of its input.
+        --
+        -- Currently a package can define no more than one library (which has
+        -- the same name as the package) but we could extend this later.
+        -- If we later allowed private internal libraries, then here we would
+        -- need to pre-scan the conditional data to make a list of all private
+        -- libraries that could possibly be defined by the .cabal file.
+        let pid = packageId pkg_descr0
+            internalPackage = emptyInstalledPackageInfo {
+                --TODO: should use a per-compiler method to map the source
+                --      package ID into an installed package id we can use
+                --      for the internal package set. The open-codes use of
+                --      InstalledPackageId . display here is a hack.
+                Installed.installedPackageId = InstalledPackageId $ display $ pid,
+                Installed.sourcePackageId = pid
+              }
+            internalPackageSet = PackageIndex.fromList [internalPackage]
+        maybeInstalledPackageSet <- getInstalledPackages (lessVerbose verbosity) comp
+                                      packageDbs programsConfig'
 
-        (pkg_descr0', flags) <- case pkg_descr0 of
-            Left ppd ->
+        let -- Constraint test function for the solver
+            dependencySatisfiable = case maybeInstalledPackageSet of
+              Nothing   -> const True -- we do not know what is available so
+                                      -- we pretend everything is available
+              Just pkgs -> not . null . PackageIndex.lookupDependency pkgs'
+                where
+                  pkgs' = PackageIndex.insert internalPackage pkgs
+
+        (pkg_descr0', flags) <-
                 case finalizePackageDescription
                        (configConfigurationsFlags cfg)
-                       maybePackageSet
-                       Distribution.System.buildOS
-                       Distribution.System.buildArch
+                       dependencySatisfiable
+                       Distribution.System.buildPlatform
                        (compilerId comp)
                        (configConstraints cfg)
-                       ppd
+                       pkg_descr0
                 of Right r -> return r
                    Left missing ->
                        die $ "At least the following dependencies are missing:\n"
-                         ++ (render . nest 4 . sep . punctuate comma $
-                             map disp missing)
-            Right pd -> return (pd,[])
+                         ++ (render . nest 4 . sep . punctuate comma
+                                    . map (disp . simplifyDependency)
+                                    $ missing)
 
         -- add extra include/lib dirs as specified in cfg
         -- we do it here so that those get checked too
@@ -321,31 +346,51 @@ configure (pkg_descr0, pbi) cfg
                         ++ intercalate ", " [ name ++ "=" ++ display value
                                             | (FlagName name, value) <- flags ]
 
-        checkPackageProblems verbosity
-          (either Just (\_->Nothing) pkg_descr0) --TODO: make the Either go away
+        checkPackageProblems verbosity pkg_descr0
           (updatePackageDescription pbi pkg_descr)
 
-        let packageSet = fromMaybe bogusPackageSet maybePackageSet
+        let installedPackageSet = fromMaybe bogusPackageSet maybeInstalledPackageSet
             -- FIXME: For Hugs, nhc98 and other compilers we do not know what
             -- packages are already installed, so we just make some up, pretend
             -- that they do exist and just hope for the best. We make them up
             -- based on what other package the package we're currently building
-            -- happens to depend on. See 'inventBogusPackageId' below.
+            -- happens to depend on. See 'inventBogusPackageInfo' below.
             -- Let's hope they really are installed... :-)
-            bogusDependencies = map inventBogusPackageId (buildDepends pkg_descr)
-            bogusPackageSet = PackageIndex.fromList
-              [ emptyInstalledPackageInfo {
-                  Installed.package = bogusPackageId
-                  -- note that these bogus packages have no other dependencies
-                }
-              | bogusPackageId <- bogusDependencies ]
-        dep_pkgs <- case flavor of
-          GHC -> mapM (configDependency verbosity packageSet) (buildDepends pkg_descr)
-          JHC -> mapM (configDependency verbosity packageSet) (buildDepends pkg_descr)
-          _   -> return bogusDependencies
+            bogusDependencies = map inventBogusPackageInfo
+                                    (buildDepends pkg_descr)
+            bogusPackageSet = PackageIndex.fromList bogusDependencies
+
+            selectDependencies =
+                (\xs -> ([ x | Left x <- xs ], [ x | Right x <- xs ]))
+              . map (selectDependency internalPackageSet installedPackageSet)
+
+            (failedDeps, allPkgDeps) = case flavor of
+              GHC -> selectDependencies (buildDepends pkg_descr)
+              JHC -> selectDependencies (buildDepends pkg_descr)
+              LHC -> selectDependencies (buildDepends pkg_descr)
+              _   -> ([], bogusSelection)
+                where
+                  bogusSelection :: [ResolvedDependency]
+                  bogusSelection = zipWith ExternalDependency
+                                           (buildDepends pkg_descr)
+                                           bogusDependencies
+
+            internalPkgDeps = [ pkgid | InternalDependency _ pkgid <- allPkgDeps ]
+            externalPkgDeps = [ pkg   | ExternalDependency _ pkg   <- allPkgDeps ]
+
+        when (not (null internalPkgDeps) && not (newPackageDepsBehaviour pkg_descr)) $
+            die $ "The field 'build-depends: "
+               ++ intercalate ", " (map (display . packageName) internalPkgDeps)
+               ++ "' refers to a library which is defined within the same "
+               ++ "package. To use this feature the package must specify at "
+               ++ "least 'cabal-version: >= 1.8'."
+
+        reportFailedDependencies failedDeps
+        reportSelectedDependencies verbosity allPkgDeps
 
         packageDependsIndex <-
-          case PackageIndex.dependencyClosure packageSet dep_pkgs of
+          case PackageIndex.dependencyClosure installedPackageSet
+                  (map Installed.installedPackageId externalPkgDeps) of
             Left packageDependsIndex -> return packageDependsIndex
             Right broken ->
               die $ "The following installed packages are broken because other"
@@ -358,8 +403,9 @@ configure (pkg_descr0, pbi) cfg
                             | (pkg, deps) <- broken ]
 
         let pseudoTopPkg = emptyInstalledPackageInfo {
-                Installed.package = packageId pkg_descr,
-                Installed.depends = dep_pkgs
+                Installed.installedPackageId = InstalledPackageId (display (packageId pkg_descr)),
+                Installed.sourcePackageId = packageId pkg_descr,
+                Installed.depends = map Installed.installedPackageId externalPkgDeps
               }
         case PackageIndex.dependencyInconsistencies
            . PackageIndex.insert pseudoTopPkg
@@ -373,8 +419,6 @@ configure (pkg_descr0, pbi) cfg
                         ++ display (PackageIdentifier name ver)
                          | (name, uses) <- inconsistencies
                          , (pkg, ver) <- uses ]
-
-        removeInstalledConfig distPref
 
         -- installation directories
         defaultDirs <- defaultInstallDirs flavor userInstall (hasLibs pkg_descr)
@@ -406,6 +450,29 @@ configure (pkg_descr0, pbi) cfg
                                           "--enable-split-objs; ignoring")
                                     return False
 
+        -- The allPkgDeps contains all the package deps for the whole package
+        -- but we need to select the subset for this specific component.
+        -- we just take the subset for the package names this component
+        -- needs. Note, this only works because we cannot yet depend on two
+        -- versions of the same package.
+        let configLib lib = configComponent (libBuildInfo lib)
+            configExe exe = (exeName exe, configComponent(buildInfo exe))
+            configComponent bi = ComponentLocalBuildInfo {
+              componentPackageDeps =
+                if newPackageDepsBehaviour pkg_descr'
+                  then [ (installedPackageId pkg, packageId pkg)
+                       | pkg <- selectSubset bi externalPkgDeps ]
+                    ++ [ (InstalledPackageId (display pkgid), pkgid)
+                       | pkgid <- selectSubset bi internalPkgDeps ]
+                  else [ (installedPackageId pkg, packageId pkg)
+                       | pkg <- externalPkgDeps ]
+            }
+            selectSubset :: Package pkg => BuildInfo -> [pkg] -> [pkg]
+            selectSubset bi pkgs =
+                [ pkg | pkg <- pkgs, packageName pkg `elem` names ]
+              where
+                names = [ name | Dependency name _ <- targetBuildDepends bi ]
+
         let lbi = LocalBuildInfo{
                     installDirTemplates = installDirs,
                     compiler            = comp,
@@ -413,7 +480,8 @@ configure (pkg_descr0, pbi) cfg
                     scratchDir          = fromFlagOrDefault
                                             (distPref </> "scratch")
                                             (configScratchDir cfg),
-                    packageDeps         = dep_pkgs,
+                    libraryConfig       = configLib `fmap` library pkg_descr',
+                    executableConfigs   = configExe `fmap` executables pkg_descr',
                     installedPkgs       = packageDependsIndex,
                     pkgDescrFile        = Nothing,
                     localPkgDescr       = pkg_descr',
@@ -426,13 +494,13 @@ configure (pkg_descr0, pbi) cfg
                     withGHCiLib         = fromFlag $ configGHCiLib cfg,
                     splitObjs           = split_objs,
                     stripExes           = fromFlag $ configStripExes cfg,
-                    withPackageDB       = packageDb,
+                    withPackageDB       = packageDbs,
                     progPrefix          = fromFlag $ configProgPrefix cfg,
                     progSuffix          = fromFlag $ configProgSuffix cfg
                   }
 
         let dirs = absoluteInstallDirs pkg_descr lbi NoCopyDest
-            relative = prefixRelativeInstallDirs pkg_descr lbi
+            relative = prefixRelativeInstallDirs (packageId pkg_descr) lbi
 
         unless (isAbsolute (prefix dirs)) $ die $
             "expected an absolute directory name for --prefix: " ++ prefix dirs
@@ -469,18 +537,21 @@ configure (pkg_descr0, pbi) cfg
               modifyExecutable e = e{ buildInfo    = buildInfo e    `mappend` extraBi}
           in pkg_descr{ library     = modifyLib        `fmap` library pkg_descr
                       , executables = modifyExecutable  `map` executables pkg_descr}
+
 -- -----------------------------------------------------------------------------
 -- Configuring package dependencies
 
 -- |Converts build dependencies to a versioned dependency.  only sets
 -- version information for exact versioned dependencies.
-inventBogusPackageId :: Dependency -> PackageIdentifier
-
--- if they specify the exact version, use that:
-inventBogusPackageId (Dependency s (ThisVersion v)) = PackageIdentifier s v
-
--- otherwise, just set it to empty
-inventBogusPackageId (Dependency s _) = PackageIdentifier s (Version [] [])
+inventBogusPackageInfo :: Dependency -> InstalledPackageInfo
+inventBogusPackageInfo (Dependency s vr) =
+  emptyInstalledPackageInfo {
+    Installed.sourcePackageId = case isSpecificVersion vr of
+      -- if they specify the exact version, use that:
+      Just v -> PackageIdentifier s v
+      -- otherwise, just set it to empty
+      Nothing -> PackageIdentifier s (Version [] [])
+  }
 
 reportProgram :: Verbosity -> Program -> Maybe ConfiguredProgram -> IO ()
 reportProgram verbosity prog Nothing
@@ -495,29 +566,112 @@ reportProgram verbosity prog (Just configuredProg)
             Just v  -> " version " ++ display v
 
 hackageUrl :: String
-hackageUrl = "http://hackage.haskell.org/cgi-bin/hackage-scripts/package/"
+hackageUrl = "http://hackage.haskell.org/package/"
+
+data ResolvedDependency = ExternalDependency Dependency InstalledPackageInfo
+                        | InternalDependency Dependency PackageId -- should be a lib name
+
+data FailedDependency = DependencyNotExists PackageName
+                      | DependencyNoVersion Dependency
 
 -- | Test for a package dependency and record the version we have installed.
-configDependency :: Verbosity -> PackageIndex InstalledPackageInfo -> Dependency -> IO PackageIdentifier
-configDependency verbosity index dep@(Dependency pkgname _) =
-  case PackageIndex.lookupDependency index dep of
-        [] -> die $ "cannot satisfy dependency "
-                      ++ display dep ++ "\n"
-                      ++ "Perhaps you need to download and install it from\n"
-                      ++ hackageUrl ++ display pkgname ++ "?"
-        pkgs -> do let pkgid = maximumBy (comparing packageVersion) (map packageId pkgs)
-                   info verbosity $ "Dependency " ++ display dep
-                                ++ ": using " ++ display pkgid
-                   return pkgid
+selectDependency :: PackageIndex  -- ^ Internally defined packages
+                 -> PackageIndex  -- ^ Installed packages
+                 -> Dependency
+                 -> Either FailedDependency ResolvedDependency
+selectDependency internalIndex installedIndex
+  dep@(Dependency pkgname vr) =
+  -- If the dependency specification matches anything in the internal package
+  -- index, then we prefer that match to anything in the second.
+  -- For example:
+  --
+  -- Name: MyLibrary
+  -- Version: 0.1
+  -- Library
+  --     ..
+  -- Executable my-exec
+  --     build-depends: MyLibrary
+  --
+  -- We want "build-depends: MyLibrary" always to match the internal library
+  -- even if there is a newer installed library "MyLibrary-0.2".
+  -- However, "build-depends: MyLibrary >= 0.2" should match the installed one.
+  case PackageIndex.lookupPackageName internalIndex pkgname of
+    [(_,[pkg])] | packageVersion pkg `withinRange` vr
+           -> Right $ InternalDependency dep (packageId pkg)
 
-getInstalledPackages :: Verbosity -> Compiler -> PackageDB -> ProgramConfiguration
-                     -> IO (Maybe (PackageIndex InstalledPackageInfo))
-getInstalledPackages verbosity comp packageDb progconf = do
+    _      -> case PackageIndex.lookupDependency installedIndex dep of
+      []   -> Left  $ DependencyNotExists pkgname
+      pkgs -> Right $ ExternalDependency dep $
+                -- by default we just pick the latest
+                case last pkgs of
+                  (_ver, instances) -> head instances -- the first preference
+
+reportSelectedDependencies :: Verbosity
+                           -> [ResolvedDependency] -> IO ()
+reportSelectedDependencies verbosity deps =
+  info verbosity $ unlines
+    [ "Dependency " ++ display (simplifyDependency dep)
+                    ++ ": using " ++ display pkgid
+    | resolved <- deps
+    , let (dep, pkgid) = case resolved of
+            ExternalDependency dep' pkg'   -> (dep', packageId pkg')
+            InternalDependency dep' pkgid' -> (dep', pkgid') ]
+
+reportFailedDependencies :: [FailedDependency] -> IO ()
+reportFailedDependencies []     = return ()
+reportFailedDependencies failed =
+    die (intercalate "\n\n" (map reportFailedDependency failed))
+
+  where
+    reportFailedDependency (DependencyNotExists pkgname) =
+         "there is no version of " ++ display pkgname ++ " installed.\n"
+      ++ "Perhaps you need to download and install it from\n"
+      ++ hackageUrl ++ display pkgname ++ "?"
+
+    reportFailedDependency (DependencyNoVersion dep) =
+        "cannot satisfy dependency " ++ display (simplifyDependency dep) ++ "\n"
+
+getInstalledPackages :: Verbosity -> Compiler
+                     -> PackageDBStack -> ProgramConfiguration
+                     -> IO (Maybe PackageIndex)
+getInstalledPackages verbosity comp packageDBs progconf = do
   info verbosity "Reading installed packages..."
   case compilerFlavor comp of
-    GHC -> Just `fmap` GHC.getInstalledPackages verbosity packageDb progconf
-    JHC -> Just `fmap` JHC.getInstalledPackages verbosity packageDb progconf
+    GHC -> Just `fmap` GHC.getInstalledPackages verbosity packageDBs progconf
+    JHC -> Just `fmap` JHC.getInstalledPackages verbosity packageDBs progconf
+    LHC -> Just `fmap` LHC.getInstalledPackages verbosity packageDBs progconf
     _   -> return Nothing
+
+-- | Currently the user interface specifies the package dbs to use with just a
+-- single valued option, a 'PackageDB'. However internally we represent the
+-- stack of 'PackageDB's explictly as a list. This function converts encodes
+-- the package db stack implicit in a single packagedb.
+--
+implicitPackageDbStack :: Bool -> Maybe PackageDB -> PackageDBStack
+implicitPackageDbStack userInstall maybePackageDB
+  | userInstall = GlobalPackageDB : UserPackageDB : extra
+  | otherwise   = GlobalPackageDB : extra
+  where
+    extra = case maybePackageDB of
+      Just (SpecificPackageDB db) -> [SpecificPackageDB db]
+      _                           -> []
+
+newPackageDepsBehaviourMinVersion :: Version
+newPackageDepsBehaviourMinVersion = Version { versionBranch = [1,7,1], versionTags = [] }
+
+-- In older cabal versions, there was only one set of package dependencies for
+-- the whole package. In this version, we can have separate dependencies per
+-- target, but we only enable this behaviour if the minimum cabal version
+-- specified is >= a certain minimum. Otherwise, for compatibility we use the
+-- old behaviour.
+newPackageDepsBehaviour :: PackageDescription -> Bool
+newPackageDepsBehaviour pkg_descr =
+   minVersionRequired >= newPackageDepsBehaviourMinVersion
+  where
+    minVersionRequired =
+      case asVersionIntervals (descCabalVersion pkg_descr) of
+        []                      -> Version [0] []
+        ((LowerBound v _, _):_) -> v
 
 -- -----------------------------------------------------------------------------
 -- Configuring program dependencies
@@ -530,7 +684,16 @@ configureRequiredProgram :: Verbosity -> ProgramConfiguration -> Dependency -> I
 configureRequiredProgram verbosity conf (Dependency (PackageName progName) verRange) =
   case lookupKnownProgram progName conf of
     Nothing -> die ("Unknown build tool " ++ progName)
-    Just prog -> snd `fmap` requireProgram verbosity prog verRange conf
+    Just prog
+      -- requireProgramVersion always requires the program have a version
+      -- but if the user says "build-depends: foo" ie no version constraint
+      -- then we should not fail if we cannot discover the program version.
+      | verRange == anyVersion -> do
+          (_, conf') <- requireProgram verbosity prog conf
+          return conf'
+      | otherwise -> do
+          (_, _, conf') <- requireProgramVersion verbosity prog verRange conf
+          return conf'
 
 -- -----------------------------------------------------------------------------
 -- Configuring pkg-config package dependencies
@@ -541,8 +704,9 @@ configurePkgconfigPackages :: Verbosity -> PackageDescription
 configurePkgconfigPackages verbosity pkg_descr conf
   | null allpkgs = return (pkg_descr, conf)
   | otherwise    = do
-    (_, conf') <- requireProgram (lessVerbose verbosity) pkgConfigProgram
-                    (orLaterVersion $ Version [0,9,0] []) conf
+    (_, _, conf') <- requireProgramVersion
+                       (lessVerbose verbosity) pkgConfigProgram
+                       (orLaterVersion $ Version [0,9,0] []) conf
     mapM_ requirePkg allpkgs
     lib'  <- updateLibrary (library pkg_descr)
     exes' <- mapM updateExecutable (executables pkg_descr)
@@ -572,8 +736,8 @@ configurePkgconfigPackages verbosity pkg_descr conf
                       ++ ": using version " ++ display v
 
         versionRequirement
-          | range == AnyVersion = ""
-          | otherwise           = " version " ++ display range
+          | isAnyVersion range = ""
+          | otherwise          = " version " ++ display range
 
     updateLibrary Nothing    = return Nothing
     updateLibrary (Just lib) = do
@@ -637,6 +801,8 @@ configCompiler (Just hcFlavor) hcPath hcPkg conf verbosity = do
   case hcFlavor of
       GHC  -> GHC.configure  verbosity hcPath hcPkg conf
       JHC  -> JHC.configure  verbosity hcPath hcPkg conf
+      LHC  -> do (_,ghcConf) <- GHC.configure  verbosity Nothing hcPkg conf
+                 LHC.configure  verbosity hcPath Nothing ghcConf
       Hugs -> Hugs.configure verbosity hcPath hcPkg conf
       NHC  -> NHC.configure  verbosity hcPath hcPkg conf
       _    -> die "Unknown compiler"
@@ -695,6 +861,9 @@ checkForeignDeps pkg lbi verbosity = do
 
         commonLdArgs  = [ "-L" ++ dir | dir <- collectField PD.extraLibDirs ]
                      ++ collectField PD.ldOptions
+                     ++ [ "-L" ++ dir
+                        | dep <- deps
+                        , dir <- Installed.libraryDirs dep ]
                      --TODO: do we also need dependent packages' ld options?
         makeLdArgs libs = [ "-l"++lib | lib <- libs ] ++ commonLdArgs
 
@@ -714,7 +883,7 @@ checkForeignDeps pkg lbi verbosity = do
                 hPutStrLn cHnd program
                 hClose cHnd
                 hClose oHnd
-                rawSystemProgramStdoutConf verbosity
+                _ <- rawSystemProgramStdoutConf verbosity
                   gccProgram (withPrograms lbi) (cName:"-o":oNname:args)
                 return True
            `catchIO`   (\_ -> return False)
@@ -778,38 +947,15 @@ checkForeignDeps pkg lbi verbosity = do
 
 -- | Output package check warnings and errors. Exit if any errors.
 checkPackageProblems :: Verbosity
-                     -> Maybe GenericPackageDescription
+                     -> GenericPackageDescription
                      -> PackageDescription
                      -> IO ()
-checkPackageProblems verbosity mgpkg pkg = do
+checkPackageProblems verbosity gpkg pkg = do
   ioChecks      <- checkPackageFiles pkg "."
-  let pureChecks = case mgpkg of
-                     Just gpkg -> checkPackage gpkg (Just pkg)
-                     Nothing   -> checkConfiguredPackage pkg
+  let pureChecks = checkPackage gpkg (Just pkg)
       errors   = [ e | PackageBuildImpossible e <- pureChecks ++ ioChecks ]
       warnings = [ w | PackageBuildWarning    w <- pureChecks ++ ioChecks ]
   if null errors
     then mapM_ (warn verbosity) warnings
     else do mapM_ (hPutStrLn stderr . ("Error: " ++)) errors
             exitWith (ExitFailure 1)
-
--- -----------------------------------------------------------------------------
--- Tests
-
-{- Too specific:
-hunitTests :: [Test]
-hunitTests = []
-packageID = PackageIdentifier "Foo" (Version [1] [])
-    = [TestCase $
-       do let simonMarGHCLoc = "/usr/bin/ghc"
-          simonMarGHC <- configure emptyPackageDescription {package=packageID}
-                                       (Just GHC,
-                                       Just simonMarGHCLoc,
-                                       Nothing, Nothing)
-          assertEqual "finding ghc, etc on simonMar's machine failed"
-             (LocalBuildInfo "/usr" (Compiler GHC
-                            (Version [6,2,2] []) simonMarGHCLoc
-                            (simonMarGHCLoc ++ "-pkg")) [] [])
-             simonMarGHC
-      ]
--}

@@ -33,10 +33,8 @@ import Id
 #if alpha_TARGET_ARCH
 import Type
 import SMRep
-import MachOp
 #endif
 import Name
-import OccName
 import TcType
 import DynFlags
 import Outputable
@@ -70,22 +68,22 @@ tcForeignImports decls
 
 tcFImport :: ForeignDecl Name -> TcM (Id, ForeignDecl Id)
 tcFImport fo@(ForeignImport (L loc nm) hs_ty imp_decl)
- = addErrCtxt (foreignDeclCtxt fo)  $ do
-   sig_ty <- tcHsSigType (ForSigCtxt nm) hs_ty
-   let 
-      -- drop the foralls before inspecting the structure
-      -- of the foreign type.
-	(_, t_ty)	  = tcSplitForAllTys sig_ty
-	(arg_tys, res_ty) = tcSplitFunTys t_ty
-	id		  = mkLocalId nm sig_ty
+ = addErrCtxt (foreignDeclCtxt fo)  $ 
+   do { sig_ty <- tcHsSigType (ForSigCtxt nm) hs_ty
+      ; let 
+          -- Drop the foralls before inspecting the
+          -- structure of the foreign type.
+	    (_, t_ty)	      = tcSplitForAllTys sig_ty
+	    (arg_tys, res_ty) = tcSplitFunTys t_ty
+	    id  	      = mkLocalId nm sig_ty
  		-- Use a LocalId to obey the invariant that locally-defined 
 		-- things are LocalIds.  However, it does not need zonking,
 		-- (so TcHsSyn.zonkForeignExports ignores it).
    
-   imp_decl' <- tcCheckFIType sig_ty arg_tys res_ty imp_decl
-   -- can't use sig_ty here because it :: Type and we need HsType Id
-   -- hence the undefined
-   return (id, ForeignImport (L loc id) undefined imp_decl')
+      ; imp_decl' <- tcCheckFIType sig_ty arg_tys res_ty imp_decl
+         -- Can't use sig_ty here because sig_ty :: Type and 
+	 -- we need HsType Id hence the undefined
+      ; return (id, ForeignImport (L loc id) undefined imp_decl') }
 tcFImport d = pprPanic "tcFImport" (ppr d)
 \end{code}
 
@@ -93,30 +91,16 @@ tcFImport d = pprPanic "tcFImport" (ppr d)
 ------------ Checking types for foreign import ----------------------
 \begin{code}
 tcCheckFIType :: Type -> [Type] -> Type -> ForeignImport -> TcM ForeignImport
-tcCheckFIType _ arg_tys res_ty (DNImport spec) = do
-    checkCg checkDotnet
-    dflags <- getDOpts
-    checkForeignArgs (isFFIDotnetTy dflags) arg_tys
-    checkForeignRes nonIOok (isFFIDotnetTy dflags) res_ty
-    let (DNCallSpec isStatic kind _ _ _ _) = spec
-    case kind of
-       DNMethod | not isStatic ->
-         case arg_tys of
-	   [] -> addErrTc illegalDNMethodSig
-	   _  
-	    | not (isFFIDotnetObjTy (last arg_tys)) -> addErrTc illegalDNMethodSig
-	    | otherwise -> return ()
-       _ -> return ()
-    return (DNImport (withDNTypes spec (map toDNType arg_tys) (toDNType res_ty)))
 
-tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport _ _ _ _ (CLabel _)) 
+tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport _ safety _ (CLabel _))
   = ASSERT( null arg_tys )
-    do { checkCg checkCOrAsm
+    do { checkCg checkCOrAsmOrInterp
+       ; checkSafety safety
        ; check (isFFILabelTy res_ty) (illegalForeignTyErr empty sig_ty)
        ; return idecl }	     -- NB check res_ty not sig_ty!
        	 	      	     --    In case sig_ty is (forall a. ForeignPtr a)
 
-tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv _ _ _ CWrapper) = do
+tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety _ CWrapper) = do
    	-- Foreign wrapper (former f.e.d.)
    	-- The type must be of the form ft -> IO (FunPtr ft), where ft is a
    	-- valid foreign type.  For legacy reasons ft -> IO (Ptr ft) as well
@@ -124,6 +108,7 @@ tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv _ _ _ CWrapper) = do
    	-- is DEPRECATED, though.
     checkCg checkCOrAsmOrInterp
     checkCConv cconv
+    checkSafety safety
     case arg_tys of
         [arg1_ty] -> do checkForeignArgs isFFIExternalTy arg1_tys
                         checkForeignRes nonIOok  isFFIExportResultTy res1_ty
@@ -134,10 +119,11 @@ tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv _ _ _ CWrapper) = do
         _ -> addErrTc (illegalForeignTyErr empty sig_ty)
     return idecl
 
-tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety _ _ (CFunction target))
+tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety _ (CFunction target))
   | isDynamicTarget target = do -- Foreign import dynamic
       checkCg checkCOrAsmOrInterp
       checkCConv cconv
+      checkSafety safety
       case arg_tys of           -- The first arg must be Ptr, FunPtr, or Addr
         []                -> do
           check False (illegalForeignTyErr empty sig_ty)
@@ -149,9 +135,22 @@ tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety _ _ (CFunction t
           checkForeignArgs (isFFIArgumentTy dflags safety) arg_tys
           checkForeignRes nonIOok (isFFIImportResultTy dflags) res_ty
           return idecl
+  | cconv == PrimCallConv = do
+      dflags <- getDOpts
+      check (dopt Opt_GHCForeignImportPrim dflags)
+            (text "Use -XGHCForeignImportPrim to allow `foreign import prim'.")
+      checkCg (checkCOrAsmOrDotNetOrInterp)
+      checkCTarget target
+      check (playSafe safety)
+            (text "The safe/unsafe annotation should not be used with `foreign import prim'.")
+      checkForeignArgs (isFFIPrimArgumentTy dflags) arg_tys
+      -- prim import result is more liberal, allows (#,,#)
+      checkForeignRes nonIOok (isFFIPrimResultTy dflags) res_ty
+      return idecl
   | otherwise = do              -- Normal foreign import
       checkCg (checkCOrAsmOrDotNetOrInterp)
       checkCConv cconv
+      checkSafety safety
       checkCTarget target
       dflags <- getDOpts
       checkForeignArgs (isFFIArgumentTy dflags safety) arg_tys
@@ -191,7 +190,7 @@ checkFEDArgs :: [Type] -> TcM ()
 checkFEDArgs arg_tys
   = check (integral_args <= 32) err
   where
-    integral_args = sum [ (machRepByteWidth . argMachRep . primRepToCgRep) prim_rep
+    integral_args = sum [ (widthInBytes . argMachRep . primRepToCgRep) prim_rep
 			| prim_rep <- map typePrimRep arg_tys,
 			  primRepHint prim_rep /= FloatHint ]
     err = ptext (sLit "On Alpha, I can only handle 32 bytes of non-floating-point arguments to foreign export dynamic")
@@ -244,8 +243,10 @@ tcFExport d = pprPanic "tcFExport" (ppr d)
 
 \begin{code}
 tcCheckFEType :: Type -> ForeignExport -> TcM ()
-tcCheckFEType sig_ty (CExport (CExportStatic str _)) = do
+tcCheckFEType sig_ty (CExport (CExportStatic str cconv)) = do
+    checkCg checkCOrAsm
     check (isCLabelString str) (badCName str)
+    checkCConv cconv
     checkForeignArgs isFFIExternalTy arg_tys
     checkForeignRes nonIOok isFFIExportResultTy res_ty
   where
@@ -253,7 +254,6 @@ tcCheckFEType sig_ty (CExport (CExportStatic str _)) = do
       -- the structure of the foreign type.
     (_, t_ty) = tcSplitForAllTys sig_ty
     (arg_tys, res_ty) = tcSplitFunTys t_ty
-tcCheckFEType _ d = pprPanic "tcCheckFEType" (ppr d)
 \end{code}
 
 
@@ -294,14 +294,6 @@ checkForeignRes non_io_result_ok pred_res_ty ty
 \end{code}
 
 \begin{code}
-checkDotnet :: HscTarget -> Maybe SDoc
-#if defined(mingw32_TARGET_OS)
-checkDotnet HscC   = Nothing
-checkDotnet _      = Just (text "requires C code generation (-fvia-C)")
-#else
-checkDotnet _      = Just (text "requires .NET support (-filx or win32)")
-#endif
-
 checkCOrAsm :: HscTarget -> Maybe SDoc
 checkCOrAsm HscC   = Nothing
 checkCOrAsm HscAsm = Nothing
@@ -342,9 +334,18 @@ checkCConv CCallConv  = return ()
 #if i386_TARGET_ARCH
 checkCConv StdCallConv = return ()
 #else
-checkCConv StdCallConv = addErrTc (text "calling convention not supported on this architecture: stdcall")
+checkCConv StdCallConv = addErrTc (text "calling convention not supported on this platform: stdcall")
 #endif
+checkCConv PrimCallConv = addErrTc (text "The `prim' calling convention can only be used with `foreign import'")
 checkCConv CmmCallConv = panic "checkCConv CmmCallConv"
+\end{code}
+
+Deprecated "threadsafe" calls
+
+\begin{code}
+checkSafety :: Safety -> TcM ()
+checkSafety (PlaySafe True) = addWarn (text "The `threadsafe' foreign import style is deprecated. Use `safe' instead.")
+checkSafety _               = return ()
 \end{code}
 
 Warnings
@@ -373,10 +374,5 @@ foreignDeclCtxt :: ForeignDecl Name -> SDoc
 foreignDeclCtxt fo
   = hang (ptext (sLit "When checking declaration:"))
          4 (ppr fo)
-
-illegalDNMethodSig :: SDoc
-illegalDNMethodSig
-  = ptext (sLit "'This pointer' expected as last argument")
-
 \end{code}
 

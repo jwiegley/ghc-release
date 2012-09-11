@@ -9,13 +9,6 @@ with {\em closures} on the RHSs of let(rec)s.  See also
 @CgCon@, which deals with constructors.
 
 \begin{code}
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module CgClosure ( cgTopRhsClosure, 
 		   cgStdRhsClosure, 
 		   cgRhsClosure,
@@ -38,7 +31,6 @@ import CgCallConv
 import CgUtils
 import ClosureInfo
 import SMRep
-import MachOp
 import Cmm
 import CmmUtils
 import CLabel
@@ -50,6 +42,8 @@ import Module
 import ListSetOps
 import Util
 import BasicTypes
+import StaticFlags
+import DynFlags
 import Constants
 import Outputable
 import FastString
@@ -83,7 +77,7 @@ cgTopRhsClosure id ccs binder_info upd_flag args body = do
   ; mod_name <- getModuleName
   ; let descr         = closureDescription mod_name name
 	closure_info  = mkClosureInfo True id lf_info 0 0 srt_info descr
-	closure_label = mkLocalClosureLabel name
+	closure_label = mkLocalClosureLabel name $ idCafInfo id
     	cg_id_info    = stableIdInfo id (mkLblExpr closure_label) lf_info
 	closure_rep   = mkStaticClosureFields closure_info ccs True []
 
@@ -115,7 +109,7 @@ cgStdRhsClosure
 	-> [StgArg]		-- payload
 	-> FCode (Id, CgIdInfo)
 
-cgStdRhsClosure bndr cc bndr_info fvs args body lf_info payload 
+cgStdRhsClosure bndr cc _bndr_info _fvs args body lf_info payload 
   = do	-- AHA!  A STANDARD-FORM THUNK
   {	-- LAY OUT THE OBJECT
     amodes <- getArgAmodes payload
@@ -247,7 +241,7 @@ So it should set up an update frame (if it is shared).
 NB: Thunks cannot have a primitive type!
 
 \begin{code}
-closureCodeBody binder_info cl_info cc [{- No args i.e. thunk -}] body = do
+closureCodeBody _binder_info cl_info cc [{- No args i.e. thunk -}] body = do
   { body_absC <- getCgStmts $ do
 	{ tickyEnterThunk cl_info
 	; ldvEnterClosure cl_info  -- NB: Node always points when profiling
@@ -257,6 +251,7 @@ closureCodeBody binder_info cl_info cc [{- No args i.e. thunk -}] body = do
 		-- in update frame CAF/DICT functions will be
 		-- subsumed by this enclosing cc
 	    { enterCostCentre cl_info cc body
+            ; stmtsC [CmmComment $ mkFastString $ showSDoc $ ppr body]
 	    ; cgExpr body }
 	}
     
@@ -271,7 +266,7 @@ argSatisfactionCheck (by calling fetchAndReschedule).  There info if
 Node points to closure is available. -- HWL
 
 \begin{code}
-closureCodeBody binder_info cl_info cc args body 
+closureCodeBody _binder_info cl_info cc args body 
   = ASSERT( length args > 0 )
   do { 	-- Get the current virtual Sp (it might not be zero, 
 	-- eg. if we're compiling a let-no-escape).
@@ -280,7 +275,7 @@ closureCodeBody binder_info cl_info cc args body
 	(sp_top, stk_args)     = mkVirtStkOffsets vSp other_args
 
 	-- Allocate the global ticky counter
-  ; let ticky_ctr_lbl = mkRednCountsLabel (closureName cl_info)
+  ; let ticky_ctr_lbl = mkRednCountsLabel (closureName cl_info) (clHasCafRefs cl_info)
   ; emitTickyCounter cl_info args sp_top
 
    	-- ...and establish the ticky-counter 
@@ -353,7 +348,8 @@ mkSlowEntryCode cl_info reg_args
   | otherwise = return noStmts
   where
      name = closureName cl_info
-     slow_lbl = mkSlowEntryLabel name
+     has_caf_refs = clHasCafRefs cl_info
+     slow_lbl = mkSlowEntryLabel name has_caf_refs
 
      load_stmts = mkStmts load_assts `plusStmts` mkStmts [stk_adj_pop, jump_to_entry]
      save_stmts = oneStmt stk_adj_push `plusStmts`  mkStmts save_assts
@@ -370,13 +366,13 @@ mkSlowEntryCode cl_info reg_args
 						   (argMachRep rep))
 
      save_assts = zipWithEqual "mk_save" mk_save reps_w_regs stk_offsets
-     mk_save (rep,reg) offset = ASSERT( argMachRep rep == globalRegRep reg )
+     mk_save (rep,reg) offset = ASSERT( argMachRep rep `cmmEqType` globalRegType reg )
 				CmmStore (cmmRegOffW spReg offset) 
 					 (CmmReg (CmmGlobal reg))
 
      stk_adj_pop   = CmmAssign spReg (cmmRegOffW spReg final_stk_offset)
      stk_adj_push  = CmmAssign spReg (cmmRegOffW spReg (- final_stk_offset))
-     jump_to_entry = CmmJump (mkLblExpr (enterLocalIdLabel name)) []
+     jump_to_entry = CmmJump (mkLblExpr (enterLocalIdLabel name has_caf_refs)) []
 \end{code}
 
 
@@ -399,8 +395,10 @@ thunkWrapper closure_info thunk_code = do
 
         -- Stack and/or heap checks
   ; thunkEntryChecks closure_info $ do
-      	{	-- Overwrite with black hole if necessary
-	  whenC (blackHoleOnEntry closure_info && node_points)
+      	{
+          dflags <- getDynFlags
+          -- Overwrite with black hole if necessary
+	; whenC (blackHoleOnEntry dflags closure_info && node_points)
  	        (blackHoleIt closure_info)
 	; setupUpdate closure_info thunk_code }
 		-- setupUpdate *encloses* the thunk_code
@@ -452,15 +450,9 @@ blackHoleIt :: ClosureInfo -> Code
 blackHoleIt closure_info = emitBlackHoleCode (closureSingleEntry closure_info)
 
 emitBlackHoleCode :: Bool -> Code
-emitBlackHoleCode is_single_entry 
-  | eager_blackholing = do 
-	tickyBlackHole (not is_single_entry)
-	stmtC (CmmStore (CmmReg nodeReg) (CmmLit (CmmLabel bh_lbl)))
-  | otherwise = 
-	nopC
-  where
-    bh_lbl | is_single_entry = mkRtsDataLabel (sLit "stg_SE_BLACKHOLE_info")
-	   | otherwise	     = mkRtsDataLabel (sLit "stg_BLACKHOLE_info")
+emitBlackHoleCode is_single_entry = do
+
+  dflags <- getDynFlags
 
 	-- If we wanted to do eager blackholing with slop filling,
 	-- we'd need to do it at the *end* of a basic block, otherwise
@@ -476,7 +468,16 @@ emitBlackHoleCode is_single_entry
         -- to bring back minimal ticky-ticky, so now EAGER_BLACKHOLING 
         -- is unconditionally disabled. -- krc 1/2007
 
-    eager_blackholing = False 
+  let eager_blackholing =  not opt_SccProfilingOn
+                        && dopt Opt_EagerBlackHoling dflags
+
+  if eager_blackholing
+     then do
+          tickyBlackHole (not is_single_entry)
+          let bh_info = CmmReg (CmmGlobal EagerBlackholeInfo)
+	  stmtC (CmmStore (CmmReg nodeReg) bh_info)
+     else
+          nopC
 \end{code}
 
 \begin{code}
@@ -549,7 +550,7 @@ link_caf :: ClosureInfo
 -- updated with the new value when available.  The reason for all of this
 -- is that we only want to update dynamic heap objects, not static ones,
 -- so that generational GC is easier.
-link_caf cl_info is_upd = do
+link_caf cl_info _is_upd = do
   { 	-- Alloc black hole specifying CC_HDR(Node) as the cost centre
   ; let	use_cc   = costCentreFrom (CmmReg nodeReg)
         blame_cc = use_cc
@@ -560,7 +561,7 @@ link_caf cl_info is_upd = do
 	-- so that the garbage collector can find them
 	-- This must be done *before* the info table pointer is overwritten, 
 	-- because the old info table ptr is needed for reversion
-  ; emitRtsCallWithVols (sLit "newCAF") [CmmKinded (CmmReg nodeReg) PtrHint] [node] False
+  ; emitRtsCallWithVols (sLit "newCAF") [CmmHinted (CmmReg nodeReg) AddrHint] [node] False
 	-- node is live, so save it.
 
 	-- Overwrite the closure with a (static) indirection 
@@ -571,8 +572,7 @@ link_caf cl_info is_upd = do
   ; returnFC hp_rel }
   where
     bh_cl_info :: ClosureInfo
-    bh_cl_info | is_upd    = cafBlackHoleClosureInfo   cl_info
-	       | otherwise = seCafBlackHoleClosureInfo cl_info
+    bh_cl_info = cafBlackHoleClosureInfo cl_info
 
     ind_static_info :: CmmExpr
     ind_static_info = mkLblExpr mkIndStaticInfoLabel
@@ -599,11 +599,11 @@ closureDescription :: Module		-- Module
 	-- Not called for StgRhsCon which have global info tables built in
 	-- CgConTbls.lhs with a description generated from the data constructor
 closureDescription mod_name name
-  = showSDocDump (char '<' <>
+  = showSDocDumpOneLine (char '<' <>
 		    (if isExternalName name
 		      then ppr name -- ppr will include the module name prefix
 		      else pprModule mod_name <> char '.' <> ppr name) <>
 		    char '>')
-   -- showSDocDump, because we want to see the unique on the Name.
+   -- showSDocDumpOneLine, because we want to see the unique on the Name.
 \end{code}
   

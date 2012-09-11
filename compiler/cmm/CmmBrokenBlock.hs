@@ -1,9 +1,3 @@
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
 
 module CmmBrokenBlock (
   BrokenBlock(..),
@@ -15,7 +9,7 @@ module CmmBrokenBlock (
   adaptBlockToFormat,
   selectContinuations,
   ContFormat,
-  makeContinuationEntries,
+  makeContinuationEntries
   ) where
 
 #include "HsVersions.h"
@@ -24,17 +18,14 @@ import BlockId
 import Cmm
 import CmmUtils
 import CLabel
-import MachOp (MachHint(..))
 
 import CgUtils (callerSaveVolatileRegs)
 import ClosureInfo
 
 import Maybes
-import List
+import Data.List
 import Panic
-import UniqSupply
 import Unique
-import UniqFM
 
 -- This module takes a 'CmmBasicBlock' which might have 'CmmCall'
 -- statements in it with 'CmmSafe' set and breaks it up at each such call.
@@ -69,14 +60,14 @@ data BrokenBlock
 -- | How a block could be entered
 -- See Note [An example of CPS conversion]
 data BlockEntryInfo
-  = FunctionEntry CmmInfo CLabel CmmFormalsWithoutKinds
+  = FunctionEntry CmmInfo CLabel CmmFormals
       -- ^ Block is the beginning of a function, parameters are:
       --   1. Function header info
       --   2. The function name
       --   3. Aguments to function
       -- Only the formal parameters are live
 
-  | ContinuationEntry CmmFormalsWithoutKinds C_SRT Bool
+  | ContinuationEntry CmmFormals C_SRT Bool
       -- ^ Return point of a function call, parameters are:
       --   1. return values (argument to continuation)
       --   2. SRT for the continuation's info table
@@ -124,7 +115,7 @@ f2(x, y) { // ProcPointEntry
 
 -}
 
-data ContFormat = ContFormat CmmFormals C_SRT Bool
+data ContFormat = ContFormat HintedCmmFormals C_SRT Bool
       -- ^ Arguments
       --   1. return values (argument to continuation)
       --   2. SRT for the continuation's info table
@@ -138,15 +129,15 @@ data FinalStmt
   = FinalBranch BlockId
     -- ^ Same as 'CmmBranch'.  Target must be a ControlEntry
 
-  | FinalReturn CmmActuals
+  | FinalReturn HintedCmmActuals
     -- ^ Same as 'CmmReturn'. Parameter is the return values.
 
-  | FinalJump CmmExpr CmmActuals
+  | FinalJump CmmExpr HintedCmmActuals
     -- ^ Same as 'CmmJump'.  Parameters:
     --   1. The function to call,
     --   2. Arguments of the call
 
-  | FinalCall BlockId CmmCallTarget CmmFormals CmmActuals
+  | FinalCall BlockId CmmCallTarget HintedCmmFormals HintedCmmActuals
               C_SRT   CmmReturnInfo Bool
       -- ^ Same as 'CmmCallee' followed by 'CmmGoto'.  Parameters:
       --   1. Target of the 'CmmGoto' (must be a 'ContinuationEntry')
@@ -189,13 +180,16 @@ data FinalStmt
 -- the 'adaptBlockToFormat' function.
 -- could be 
 
+{-
+UNUSED: 2008-12-29
+
 breakProc ::
     [BlockId]                   -- ^ Any GC blocks that should be special
     -> [[Unique]]               -- ^ An infinite list of uniques
                                 -- to create names of the new blocks with
     -> CmmInfo                  -- ^ Info table for the procedure
     -> CLabel                   -- ^ Name of the procedure
-    -> CmmFormalsWithoutKinds   -- ^ Parameters of the procedure
+    -> CmmFormals               -- ^ Parameters of the procedure
     -> [CmmBasicBlock]          -- ^ Blocks of the procecure
                                 -- (First block is the entry block)
     -> [BrokenBlock]
@@ -221,6 +215,7 @@ breakProc gc_block_idents uniques info ident params blocks =
        zipWith (adaptBlockToFormat selected)
                adaptor_uniques
                (snd broken_blocks)
+-}
 
 -----------------------------------------------------------------------------
 -- | Takes a 'CmmBasicBlock' and breaks it up into a list of 'BrokenBlock'
@@ -348,12 +343,14 @@ selectContinuations needed_continuations = formats
               -- sort so the most votes goes *first*
               -- (thus the order of x and y is reversed)
 
+makeContinuationEntries :: [(BlockId, ContFormat)]
+                        -> BrokenBlock -> BrokenBlock
 makeContinuationEntries formats
-                        block@(BrokenBlock ident entry stmts targets exit) =
+                        block@(BrokenBlock ident _entry stmts targets exit) =
     case lookup ident formats of
       Nothing -> block
       Just (ContFormat formals srt is_gc) ->
-          BrokenBlock ident (ContinuationEntry (map kindlessCmm formals) srt is_gc)
+          BrokenBlock ident (ContinuationEntry (map hintlessCmm formals) srt is_gc)
                       stmts targets exit
 
 adaptBlockToFormat :: [(BlockId, ContFormat)]
@@ -362,8 +359,8 @@ adaptBlockToFormat :: [(BlockId, ContFormat)]
                    -> [BrokenBlock]
 adaptBlockToFormat formats unique
                    block@(BrokenBlock ident entry stmts targets
-                                      exit@(FinalCall next target formals
-                                                      actuals srt ret is_gc)) =
+                                      (FinalCall next target formals
+                                                 actuals srt ret is_gc)) =
     if format_formals == formals &&
        format_srt == srt &&
        format_is_gc == is_gc
@@ -383,20 +380,19 @@ adaptBlockToFormat formats unique
                        target formals actuals srt ret is_gc
 
       adaptor_block = mk_adaptor_block adaptor_ident
-                  (ContinuationEntry (map kindlessCmm formals) srt is_gc)
-                  next format_formals
+                  (ContinuationEntry (map hintlessCmm formals) srt is_gc) next
       adaptor_ident = BlockId unique
 
-      mk_adaptor_block :: BlockId -> BlockEntryInfo -> BlockId -> CmmFormals -> BrokenBlock
-      mk_adaptor_block ident entry next formals =
+      mk_adaptor_block :: BlockId -> BlockEntryInfo -> BlockId -> BrokenBlock
+      mk_adaptor_block ident entry next =
           BrokenBlock ident entry [] [next] exit
               where
                 exit = FinalJump
                          (CmmLit (CmmLabel (mkReturnPtLabel (getUnique next))))
                          (map formal_to_actual format_formals)
 
-                formal_to_actual (CmmKinded reg hint)
-                     = (CmmKinded (CmmReg (CmmLocal reg)) hint)
+                formal_to_actual (CmmHinted reg hint)
+                     = (CmmHinted (CmmReg (CmmLocal reg)) hint)
                 -- TODO: Check if NoHint is right.  We're
                 -- jumping to a C-- function not a foreign one
                 -- so it might always be right.
@@ -422,4 +418,4 @@ cmmBlockFromBrokenBlock (BrokenBlock ident _ stmts _ exit) =
 -----------------------------------------------------------------------------
 -- | Build a mapping so we can lookup a 'BrokenBlock' by its 'BlockId'
 blocksToBlockEnv :: [BrokenBlock] -> BlockEnv BrokenBlock
-blocksToBlockEnv blocks = listToUFM $ map (\b -> (brokenBlockId b, b)) blocks
+blocksToBlockEnv blocks = mkBlockEnv $ map (\b -> (brokenBlockId b, b)) blocks

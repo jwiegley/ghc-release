@@ -6,13 +6,14 @@
  *
  * ---------------------------------------------------------------------------*/
 
+// #include "PosixSource.h"
 #include "Rts.h"
-#include "Storage.h"
-#include "LdvProfile.h"
+
+#include "ThreadPaused.h"
+#include "sm/Storage.h"
 #include "Updates.h"
 #include "RaiseAsync.h"
 #include "Trace.h"
-#include "RtsFlags.h"
 
 #include <string.h> // for memmove()
 
@@ -74,7 +75,7 @@ stackSqueeze(StgTSO *tso, StgPtr bottom)
 		 * screw us up if we don't check.
 		 */
 		if (upd->updatee != updatee && !closure_IND(upd->updatee)) {
-		    UPD_IND_NOLOCK(upd->updatee, updatee);
+		    UPD_IND(upd->updatee, updatee);
 		}
 
 		// now mark this update frame as a stack gap.  The gap
@@ -141,23 +142,23 @@ stackSqueeze(StgTSO *tso, StgPtr bottom)
     // <empty> indicates unused
     //
     {
-	void *sp;
-	void *gap_start, *next_gap_start, *gap_end;
+	StgWord8 *sp;
+	StgWord8 *gap_start, *next_gap_start, *gap_end;
 	nat chunk_size;
 
-	next_gap_start = (void *)((unsigned char*)gap + sizeof(StgUpdateFrame));
+	next_gap_start = (StgWord8*)gap + sizeof(StgUpdateFrame);
 	sp = next_gap_start;
 
 	while ((StgPtr)gap > tso->sp) {
 
 	    // we're working in *bytes* now...
 	    gap_start = next_gap_start;
-	    gap_end = (void*) ((unsigned char*)gap_start - gap->gap_size * sizeof(W_));
+	    gap_end = gap_start - gap->gap_size * sizeof(W_);
 
 	    gap = gap->next_gap;
-	    next_gap_start = (void *)((unsigned char*)gap + sizeof(StgUpdateFrame));
+	    next_gap_start = (StgWord8*)gap + sizeof(StgUpdateFrame);
 
-	    chunk_size = (unsigned char*)gap_end - (unsigned char*)next_gap_start;
+	    chunk_size = gap_end - next_gap_start;
 	    sp -= chunk_size;
 	    memmove(sp, next_gap_start, chunk_size);
 	}
@@ -194,6 +195,10 @@ threadPaused(Capability *cap, StgTSO *tso)
     // place we ensure that the blocked_exceptions get a chance.
     maybePerformBlockedException (cap, tso);
     if (tso->what_next == ThreadKilled) { return; }
+
+    // NB. Blackholing is *not* optional, we must either do lazy
+    // blackholing, or eager blackholing consistently.  See Note
+    // [upd-black-hole] in sm/Scav.c.
 
     stack_end = &tso->stack[tso->stack_size];
     
@@ -250,9 +255,6 @@ threadPaused(Capability *cap, StgTSO *tso)
 	    }
 
 	    if (bh->header.info != &stg_CAF_BLACKHOLE_info) {
-#if (!defined(LAZY_BLACKHOLING)) && defined(DEBUG)
-		debugBelch("Unexpected lazy BHing required at 0x%04lx\n",(long)bh);
-#endif
 		// zero out the slop so that the sanity checker can tell
 		// where the next closure is.
 		DEBUG_FILL_SLOP(bh);
@@ -261,7 +263,7 @@ threadPaused(Capability *cap, StgTSO *tso)
 		// We pretend that bh is now dead.
 		LDV_recordDead_FILL_SLOP_DYNAMIC((StgClosure *)bh);
 #endif
-
+                // an EAGER_BLACKHOLE gets turned into a BLACKHOLE here.
 #ifdef THREADED_RTS
                 cur_bh_info = (const StgInfoTable *)
                     cas((StgVolatilePtr)&bh->header.info, 
@@ -315,5 +317,10 @@ end:
     if (RtsFlags.GcFlags.squeezeUpdFrames == rtsTrue &&
 	((weight <= 5 && words_to_squeeze > 0) || weight < words_to_squeeze)) {
 	stackSqueeze(tso, (StgPtr)frame);
+        tso->flags |= TSO_SQUEEZED;
+        // This flag tells threadStackOverflow() that the stack was
+        // squeezed, because it may not need to be expanded.
+    } else {
+        tso->flags &= ~TSO_SQUEEZED;
     }
 }

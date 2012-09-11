@@ -216,13 +216,17 @@ def _extra_clean( opts, v ):
 
 # -----
 
-def space( field, min, max ):
-    return lambda opts, f=field, n=min, x=max: _space(opts, f, n, x);
+def stats_num_field( field, min, max ):
+    return lambda opts, f=field, x=min, y=max: _stats_num_field(opts, f, x, y);
 
-def _space( opts, f, n, x ):
-    opts.space_field = f
-    opts.space_min = n
-    opts.space_max = x
+def _stats_num_field( opts, f, x, y ):
+    opts.stats_num_fields = opts.stats_num_fields + [(f, x, y)]
+
+def compiler_stats_num_field( field, min, max ):
+    return lambda opts, f=field, x=min, y=max: _compiler_stats_num_field(opts, f, x, y);
+
+def _compiler_stats_num_field( opts, f, x, y ):
+    opts.compiler_stats_num_fields = opts.compiler_stats_num_fields + [(f, x, y)]
 
 # -----
 
@@ -244,8 +248,26 @@ def if_platform( plat, f ):
     else:
         return normal
 
+def if_not_platform( plat, f ):
+    if config.platform != plat:
+        return f
+    else:
+        return normal
+
 def if_os( os, f ):
     if config.os == os:
+        return f
+    else:
+        return normal
+
+def if_arch( arch, f ):
+    if config.arch == arch:
+        return f
+    else:
+        return normal
+
+def if_wordsize( ws, f ):
+    if config.wordsize == str(ws):
         return f
     else:
         return normal
@@ -618,12 +640,8 @@ def do_compile( name, way, should_fail, top_mod, extra_hc_opts ):
     pretest_cleanup(name)
     result = simple_build( name, way, extra_hc_opts, should_fail, top_mod, 0 )
     
-    if should_fail:
-        if result == 0:
-            return 'fail'
-    else:
-        if result != 0:
-            return 'fail'
+    if result == 'fail':
+        return result
 
     # the actual stderr should always match the expected, regardless
     # of whether we expected the compilation to fail or not (successful
@@ -657,9 +675,8 @@ def compile_and_run__( name, way, extra_hc_opts, top_mod ):
         return extcore_run( name, way, extra_hc_opts, 0, top_mod )
     else: # compiled...
         result = simple_build( name, way, extra_hc_opts, 0, top_mod, 1 )
-        
-        if result != 0:
-            return 'fail'
+        if result == 'fail':
+            return result
 
         cmd = './' + name;
         if getTestOpts().cmd_prefix != '':
@@ -671,44 +688,43 @@ def compile_and_run__( name, way, extra_hc_opts, top_mod ):
 def compile_and_run( name, way, extra_hc_opts ):
     return compile_and_run__( name, way, extra_hc_opts, '')
 
-def compile_and_run_space( name, way, extra_hc_opts ):
-    stats_file = name + '.stats'
-    opts = getTestOpts()
-    opts.extra_run_opts += ' +RTS -t' + stats_file + " --machine-readable -RTS"
-    setLocalTestOpts(opts)
-
-    result = compile_and_run__( name, way, extra_hc_opts, '')
-    if result != 'pass':
-        return 'fail'
-
-    f = open(in_testdir(stats_file))
-    contents = f.read()
-    f.close()
-
-    m = re.search('\("' + opts.space_field + '", "([0-9]+)"\)', contents)
-    if m == None:
-        print "Failed to find space field: ", opts.space_field
-        return 'fail'
-    val = int(m.group(1))
-
-    if val < opts.space_min:
-        print 'Space usage ', val, \
-              ' less than minimum allowed ', opts.space_min
-        return 'fail'
-    if val > opts.space_max:
-        print 'Space usage ', val, \
-              ' more than maximum allowed ', opts.space_max
-        return 'fail'
-    else:
-        return 'pass';
-
 def multimod_compile_and_run( name, way, top_mod, extra_hc_opts ):
     return compile_and_run__( name, way, extra_hc_opts, top_mod)
+
+# -----------------------------------------------------------------------------
+# Check -t stats info
+
+def checkStats(stats_file, num_fields):
+    if num_fields != []:
+        num_field_fail = False
+        f = open(in_testdir(stats_file))
+        contents = f.read()
+        f.close()
+
+        for (field, min, max) in num_fields:
+            m = re.search('\("' + field + '", "([0-9]+)"\)', contents)
+            if m == None:
+                print 'Failed to find field: ', field
+                return 'fail'
+            val = int(m.group(1))
+
+            if val < min:
+                print field, val, 'is less than minimum allowed', min
+                print 'If this is because you have improved GHC, please'
+                print 'update the test so that GHC doesn\'t regress again'
+                num_field_fail = True
+            if val > max:
+                print field, val, 'is more than maximum allowed', max
+                num_field_fail = True
+
+        if num_field_fail:
+            return 'fail'
 
 # -----------------------------------------------------------------------------
 # Build a single-module program
 
 def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link ):
+    opts = getTestOpts()
     errname = add_suffix(name, 'comp.stderr')
     rm_no_fail( errname )
     rm_no_fail( name )
@@ -723,11 +739,14 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link ):
         to_do = '--make -o ' + name
     elif link:
         to_do = '-o ' + name
-    elif getTestOpts().compile_to_hc:
+    elif opts.compile_to_hc:
         to_do = '-C'
     else:
         to_do = '-c' # just compile
 
+    stats_file = name + '.comp.stats'
+    if opts.compiler_stats_num_fields != []:
+        extra_hc_opts += ' +RTS -V0 -t' + stats_file + ' --machine-readable -RTS'
 
     cmd = 'cd ' + testdir + " && '" \
           + config.compiler + "' " \
@@ -735,7 +754,7 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link ):
           + to_do + ' ' + srcname + ' ' \
           + join(config.way_flags[way],' ') + ' ' \
           + extra_hc_opts + ' ' \
-          + getTestOpts().extra_hc_opts + ' ' \
+          + opts.extra_hc_opts + ' ' \
           + '>' + errname + ' 2>&1'
 
     result = runCmd(cmd)
@@ -747,7 +766,19 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link ):
 
     # ToDo: if the sub-shell was killed by ^C, then exit
 
-    return result
+    num_field_fail = checkStats(stats_file, opts.compiler_stats_num_fields)
+
+    if num_field_fail:
+        return 'fail'
+
+    if should_fail:
+        if result == 0:
+            return 'fail'
+    else:
+        if result != 0:
+            return 'fail'
+
+    return 'pass'
 
 # -----------------------------------------------------------------------------
 # Run a program and check its output
@@ -757,63 +788,77 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link ):
 # testname.run.stderr.  Returns the exit code of the run.
 
 def simple_run( name, way, prog, args ):
-   # figure out what to use for stdin
-   if getTestOpts().stdin != '':
-       use_stdin = getTestOpts().stdin
-   else:
-       stdin_file = add_suffix(name, 'stdin')
-       if os.path.exists(in_testdir(stdin_file)):
-           use_stdin = stdin_file
-       else:
-           use_stdin = '/dev/null'
+    opts = getTestOpts()
 
-   run_stdout = add_suffix(name,'run.stdout')
-   run_stderr = add_suffix(name,'run.stderr')
+    # figure out what to use for stdin
+    if opts.stdin != '':
+        use_stdin = opts.stdin
+    else:
+        stdin_file = add_suffix(name, 'stdin')
+        if os.path.exists(in_testdir(stdin_file)):
+            use_stdin = stdin_file
+        else:
+            use_stdin = '/dev/null'
 
-   rm_no_fail(qualify(name,'run.stdout'))
-   rm_no_fail(qualify(name,'run.stderr'))
-   rm_no_fail(qualify(name, 'hp'))
-   rm_no_fail(qualify(name,'ps'))
-   rm_no_fail(qualify(name, 'prof'))
+    run_stdout = add_suffix(name,'run.stdout')
+    run_stderr = add_suffix(name,'run.stderr')
+
+    rm_no_fail(qualify(name,'run.stdout'))
+    rm_no_fail(qualify(name,'run.stderr'))
+    rm_no_fail(qualify(name, 'hp'))
+    rm_no_fail(qualify(name,'ps'))
+    rm_no_fail(qualify(name, 'prof'))
    
-   my_rts_flags = rts_flags(way)
+    my_rts_flags = rts_flags(way)
 
-   if getTestOpts().no_stdin:
-     stdin_comes_from = ''
-   else:
-     stdin_comes_from = ' <' + use_stdin
-   cmd = 'cd ' + testdir + ' && ' \
-	  + prog + ' ' + args + ' ' \
-          + my_rts_flags + ' ' \
-          + stdin_comes_from \
-          + ' >' + run_stdout \
-          + ' 2>' + run_stderr
+    stats_file = name + '.stats'
+    if opts.stats_num_fields != []:
+        args += ' +RTS -V0 -t' + stats_file + ' --machine-readable -RTS'
 
-   # run the command
-   result = runCmd(cmd)
+    if opts.no_stdin:
+        stdin_comes_from = ''
+    else:
+        stdin_comes_from = ' <' + use_stdin
+    cmd = 'cd ' + testdir + ' && ' \
+	    + prog + ' ' + args + ' '  \
+        + my_rts_flags + ' '       \
+        + stdin_comes_from         \
+        + ' >' + run_stdout        \
+        + ' 2>' + run_stderr
 
-   exit_code = result >> 8
-   signal    = result & 0xff
+    # run the command
+    result = runCmd(cmd)
 
-   # check the exit code
-   if exit_code != getTestOpts().exit_code:
-       print 'Wrong exit code (expected', getTestOpts().exit_code, ', actual', exit_code, ')'
-       dump_stdout(name)
-       dump_stderr(name)
-       return 'fail'
+    exit_code = result >> 8
+    signal    = result & 0xff
 
-   check_hp = my_rts_flags.find("-h") != -1
-   check_prof = my_rts_flags.find("-p") != -1
+    # check the exit code
+    if exit_code != opts.exit_code:
+        print 'Wrong exit code (expected', opts.exit_code, ', actual', exit_code, ')'
+        dump_stdout(name)
+        dump_stderr(name)
+        return 'fail'
 
-   if getTestOpts().ignore_output or \
-      (check_stderr_ok(name) and
-       check_stdout_ok(name) and
-       (not check_hp or (exit_code > 127 and exit_code != 251) or check_hp_ok(name)) and
-       (not check_prof or check_prof_ok(name))):
-       # exit_code > 127 probably indicates a crash, so don't try to run hp2ps.
-       return 'pass'
-   else:
-       return 'fail'
+    check_hp = my_rts_flags.find("-h") != -1
+    check_prof = my_rts_flags.find("-p") != -1
+
+    if not opts.ignore_output:
+        if not check_stderr_ok(name):
+            return 'fail'
+        if not check_stdout_ok(name):
+            return 'fail'
+        # exit_code > 127 probably indicates a crash, so don't try to run hp2ps.
+        if check_hp and (exit_code <= 127 or exit_code == 251) and not check_hp_ok(name):
+            return 'fail'
+        if check_prof and not check_prof_ok(name):
+            return 'fail'
+
+    num_field_fail = checkStats(stats_file, opts.stats_num_fields)
+
+    if num_field_fail:
+        return 'fail'
+
+    return 'pass'
 
 def rts_flags(way):
     if (way == ''):
@@ -1189,7 +1234,15 @@ def normalise_errmsg( str ):
     str = re.sub('([^\\s])\\.exe', '\\1', str)
     # The inplace ghc's are called ghc-bin-stage[123] to avoid filename
     # collisions, so we need to normalise that to just "ghc"
+    # (this is for the old build system, I think, so should be removable)
     str = re.sub('ghc-bin-stage[123]', 'ghc', str)
+    # The inplace ghc's are called ghc-stage[123] to avoid filename
+    # collisions, so we need to normalise that to just "ghc"
+    str = re.sub('ghc-stage[123]', 'ghc', str)
+    # We sometimes see the name of the integer-gmp package on stderr,
+    # but this can change (either the implementation name or the
+    # version number), so we canonicalise it here
+    str = re.sub('integer-[a-z]+', 'integer-impl', str)
     return str
 
 def normalise_slashes_( str ):
@@ -1209,7 +1262,7 @@ def if_verbose( n, str ):
 # Guess flags suitable for the compiler.
 def guess_compiler_flags():
    if config.compiler_type == 'ghc':
-       return ['-fforce-recomp', '-dcore-lint']
+       return ['-fforce-recomp', '-dcore-lint', '-no-user-package-conf']
    elif config.compiler_type == 'nhc':
        return ['-an-nhc-specific-flag']
    else:
@@ -1305,7 +1358,7 @@ def add_hs_lhs_suffix(name):
         return add_suffix(name, 'hs')
 
 def in_testdir( name ):
-    return os.path.join(testdir, name)
+    return (testdir + '/' + name)
 
 def qualify( name, suff ):
     return in_testdir(add_suffix(name, suff))
@@ -1336,6 +1389,7 @@ def platform_wordsize_qualify( name, suff ):
     plat_paths = map (lambda x: x + '-' + config.platform, paths)
 
     dir = glob.glob(basepath + '*')
+    dir = map (lambda d: normalise_slashes_(d), dir)
 
     for f in plat_paths:
        if f in dir:

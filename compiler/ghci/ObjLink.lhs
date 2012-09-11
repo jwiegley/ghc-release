@@ -9,8 +9,6 @@
 Primarily, this module consists of an interface to the C-land dynamic linker.
 
 \begin{code}
-{-# OPTIONS -#include "Linker.h" #-}
-
 module ObjLink ( 
    initObjLinker,	 -- :: IO ()
    loadDLL,		 -- :: String -> IO (Maybe String)
@@ -28,7 +26,7 @@ import Config		( cLeadingUnderscore )
 import Control.Monad    ( when )
 import Foreign.C
 import Foreign		( nullPtr )
-import GHC.Exts         ( Ptr(..), unsafeCoerce# )
+import GHC.Exts         ( Ptr(..) )
 
 
 

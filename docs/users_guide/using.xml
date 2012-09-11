@@ -46,26 +46,25 @@ ghc [argument...]
 
       <para>Sometimes it is useful to make the connection between a
       source file and the command-line options it requires quite
-      tight. For instance, if a Haskell source file uses GHC
-      extensions, it will always need to be compiled with the
-      <option>-fglasgow-exts</option> option.  Rather than maintaining
+      tight. For instance, if a Haskell source file deliberately
+	uses name shadowing, it should be compiled with  the
+      <option>-fno-warn-name-shadowing</option> option.  Rather than maintaining
       the list of per-file options in a <filename>Makefile</filename>,
       it is possible to do this directly in the source file using the
       <literal>OPTIONS_GHC</literal> pragma <indexterm><primary>OPTIONS_GHC
       pragma</primary></indexterm>:</para>
 
 <programlisting>
-{-# OPTIONS_GHC -fglasgow-exts #-}
+{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 module X where
 ...
 </programlisting>
       
-      <para><literal>OPTIONS_GHC</literal> pragmas are only looked for at
-      the top of your source files, upto the first
-      (non-literate,non-empty) line not containing
-      <literal>OPTIONS_GHC</literal>. Multiple <literal>OPTIONS_GHC</literal>
-      pragmas are recognised.  Do not put comments before, or on the same line
-	as, the <literal>OPTIONS_GHC</literal> pragma.</para>
+      <para><literal>OPTIONS_GHC</literal> is a <emphasis>file-header pragma</emphasis>
+      (see <xref linkend="pragmas"/>).</para>
+
+      <para>Only <emphasis>dynamic</emphasis> flags can be used in an <literal>OPTIONS_GHC</literal> pragma
+      (see <xref linkend="static-dynamic-flags"/>).</para>
 
       <para>Note that your command shell does not
       get to the source file options, they are just included literally
@@ -121,7 +120,7 @@ module X where
 	<listitem>
 	  <para>Most non-mode flags fall into this category.  A dynamic flag
 	    may be used on the command line, in a
-	    <literal>GHC_OPTIONS</literal> pragma in a source file, or set
+	    <literal>OPTIONS_GHC</literal> pragma in a source file, or set
 	    using <literal>:set</literal> in GHCi.</para>
 	</listitem>
       </varlistentry>
@@ -845,7 +844,9 @@ ghc -c Foo.hs</screen>
     <option>-fwarn-deprecated-flags</option>,
     <option>-fwarn-duplicate-exports</option>,
     <option>-fwarn-missing-fields</option>,
-    <option>-fwarn-missing-methods</option>, and
+    <option>-fwarn-missing-methods</option>,
+    <option>-fwarn-lazy-unlifted-bindings</option>,
+    <option>-fwarn-wrong-do-bind</option>, and
     <option>-fwarn-dodgy-foreign-imports</option>.  The following
     flags are
     simple ways to select standard &ldquo;packages&rdquo; of warnings:
@@ -859,6 +860,7 @@ ghc -c Foo.hs</screen>
 	  <indexterm><primary>-W option</primary></indexterm>
 	  <para>Provides the standard warnings plus
 	  <option>-fwarn-incomplete-patterns</option>,
+	  <option>-fwarn-dodgy-exports</option>,
 	  <option>-fwarn-dodgy-imports</option>,
 	  <option>-fwarn-unused-matches</option>,
 	  <option>-fwarn-unused-imports</option>, and
@@ -877,7 +879,8 @@ ghc -c Foo.hs</screen>
             <option>-fwarn-simple-patterns</option>,
             <option>-fwarn-tabs</option>,
             <option>-fwarn-incomplete-record-updates</option>,
-            <option>-fwarn-monomorphism-restriction</option>, and
+            <option>-fwarn-monomorphism-restriction</option>,
+            <option>-fwarn-unused-do-bind</option>, and
             <option>-fwarn-implicit-prelude</option>.</para>
 	</listitem>
       </varlistentry>
@@ -989,14 +992,42 @@ foreign import "&amp;f" f :: FunPtr t
       </varlistentry>
 
       <varlistentry>
+	<term><option>-fwarn-dodgy-exports</option>:</term>
+	<listitem>
+	  <indexterm><primary><option>-fwarn-dodgy-exports</option></primary>
+	  </indexterm>
+	  <para>Causes a warning to be emitted when a datatype
+      <literal>T</literal> is exported
+      with all constructors, i.e. <literal>T(..)</literal>, but is it
+      just a type synonym.</para>
+	  <para>Also causes a warning to be emitted when a module is
+      re-exported, but that module exports nothing.</para>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry>
 	<term><option>-fwarn-dodgy-imports</option>:</term>
 	<listitem>
 	  <indexterm><primary><option>-fwarn-dodgy-imports</option></primary>
 	  </indexterm>
-	  <para>Causes a warning to be emitted when a a datatype
+	  <para>Causes a warning to be emitted when a datatype
       <literal>T</literal> is imported
       with all constructors, i.e. <literal>T(..)</literal>, but has been
       exported abstractly, i.e. <literal>T</literal>.</para>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry>
+	<term><option>-fwarn-lazy-unlifted-bindings</option>:</term>
+	<listitem>
+	  <indexterm><primary><option>-fwarn-lazy-unlifted-bindings</option></primary>
+	  </indexterm>
+	  <para>Causes a warning to be emitted when an unlifted type
+      is bound in a way that looks lazy, e.g.
+      <literal>where (I# x) = ...</literal>. Use
+      <literal>where !(I# x) = ...</literal> instead. This will be an
+      error, rather than a warning, in GHC 6.14.
+      </para>
 	</listitem>
       </varlistentry>
 
@@ -1176,6 +1207,11 @@ f foo = foo { x = 6 }
           typographical errors that turn into hard-to-find bugs, e.g.,
           in the inadvertent capture of what would be a recursive call in
           <literal>f = ... let f = id in ... f ...</literal>.</para>
+          <para>The warning is suppressed for names beginning with an underscore.  For example
+          <programlisting>
+             f x = do { _ignore &lt;- this; _ignore &lt;- that; return (the other) }
+          </programlisting>
+         </para>
 	</listitem>
       </varlistentry>
 
@@ -1341,6 +1377,56 @@ f "2"    = 2
           warning is suppressed if the variable name begins with an underscore, thus:
 	    <programlisting>
 	       f _x = True
+	    </programlisting>
+          </para>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry>
+	<term><option>-fwarn-unused-do-bind</option>:</term>
+	<listitem>
+	  <indexterm><primary><option>-fwarn-unused-do-bind</option></primary></indexterm>
+	  <indexterm><primary>unused do binding, warning</primary></indexterm>
+	  <indexterm><primary>do binding, unused</primary></indexterm>
+
+	  <para>Report expressions occuring in <literal>do</literal> and <literal>mdo</literal> blocks
+	  that appear to silently throw information away.
+          For instance <literal>do { mapM popInt xs ; return 10 }</literal> would report
+          the first statement in the <literal>do</literal> block as suspicious,
+          as it has the type <literal>StackM [Int]</literal> and not <literal>StackM ()</literal>, but that
+          <literal>[Int]</literal> value is not bound to anything.  The warning is suppressed by
+          explicitly mentioning in the source code that your program is throwing something away:
+	    <programlisting>
+	       do { _ &lt;- mapM popInt xs ; return 10 }
+	    </programlisting>
+	  Of course, in this particular situation you can do even better:
+	    <programlisting>
+	       do { mapM_ popInt xs ; return 10 }
+	    </programlisting>
+          </para>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry>
+	<term><option>-fwarn-wrong-do-bind</option>:</term>
+	<listitem>
+	  <indexterm><primary><option>-fwarn-wrong-do-bind</option></primary></indexterm>
+	  <indexterm><primary>apparently erroneous do binding, warning</primary></indexterm>
+	  <indexterm><primary>do binding, apparently erroneous</primary></indexterm>
+
+	  <para>Report expressions occuring in <literal>do</literal> and <literal>mdo</literal> blocks
+	  that appear to lack a binding.
+          For instance <literal>do { return (popInt 10) ; return 10 }</literal> would report
+          the first statement in the <literal>do</literal> block as suspicious,
+          as it has the type <literal>StackM (StackM Int)</literal> (which consists of two nested applications
+          of the same monad constructor), but which is not then &quot;unpacked&quot; by binding the result.
+          The warning is suppressed by explicitly mentioning in the source code that your program is throwing something away:
+	    <programlisting>
+	       do { _ &lt;- return (popInt 10) ; return 10 }
+	    </programlisting>
+	  For almost all sensible programs this will indicate a bug, and you probably intended to write:
+	    <programlisting>
+	       do { popInt 10 ; return 10 }
 	    </programlisting>
           </para>
 	</listitem>
@@ -1724,7 +1810,9 @@ f "2"    = 2
   </sect1>
   
   &phases;  
-  
+
+  &shared_libs;
+
   <sect1 id="using-concurrent">
     <title>Using Concurrent Haskell</title>
     <indexterm><primary>Concurrent Haskell</primary><secondary>using</secondary></indexterm>
@@ -1782,17 +1870,60 @@ f "2"    = 2
 	linkend="lang-parallel" /> we describe the language features that affect
     parallelism.</para>
     
-    <sect2 id="parallel-options">
-      <title>Options for SMP parallelism</title>
+    <sect2 id="parallel-compile-options">
+      <title>Compile-time options for SMP parallelism</title>
 
       <para>In order to make use of multiple CPUs, your program must be
 	linked with the <option>-threaded</option> option (see <xref
-	  linkend="options-linker" />).  Then, to run a program on multiple
-	CPUs, use the RTS <option>-N</option> option:</para>
+	  linkend="options-linker" />).  Additionally, the following
+	compiler options affect parallelism:</para>
       
       <variablelist>
+        <varlistentry>
+          <term><option>-feager-blackholing</option></term>
+          <indexterm><primary><option>-feager-blackholing</option></primary></indexterm>
+          <listitem>
+          <para>
+            Blackholing is the act of marking a thunk (lazy
+            computuation) as being under evaluation.  It is useful for
+            three reasons: firstly it lets us detect certain kinds of
+            infinite loop (the <literal>NonTermination</literal>
+            exception), secondly it avoids certain kinds of space
+            leak, and thirdly it avoids repeating a computation in a
+            parallel program, because we can tell when a computation
+            is already in progress.</para>
+
+          <para>
+            The option <option>-feager-blackholing</option> causes
+            each thunk to be blackholed as soon as evaluation begins.
+            The default is "lazy blackholing", whereby thunks are only
+            marked as being under evaluation when a thread is paused
+            for some reason.  Lazy blackholing is typically more
+            efficient (by 1-2&percnt; or so), because most thunks don't
+            need to be blackholed.  However, eager blackholing can
+            avoid more repeated computation in a parallel program, and
+            this often turns out to be important for parallelism.
+          </para>
+
+          <para>
+            We recommend compiling any code that is intended to be run
+            in parallel with the <option>-feager-blackholing</option>
+            flag.
+          </para>
+          </listitem>
+        </varlistentry>
+      </variablelist>
+    </sect2>
+
+    <sect2 id="parallel-options">
+      <title>RTS options for SMP parallelism</title>
+
+      <para>To run a program on multiple CPUs, use the
+	RTS <option>-N</option> option:</para>
+
+      <variablelist>
 	<varlistentry>
-	  <term><option>-N<replaceable>x</replaceable></option></term>
+	  <term><option>-N<optional><replaceable>x</replaceable></optional></option></term>
 	  <listitem>
 	    <para><indexterm><primary><option>-N<replaceable>x</replaceable></option></primary><secondary>RTS option</secondary></indexterm>
 	      Use <replaceable>x</replaceable> simultaneous threads when
@@ -1804,12 +1935,26 @@ f "2"    = 2
 	      on a dual-core machine we would probably use
 	      <literal>+RTS -N2 -RTS</literal>.</para>
 	    
+            <para>Omitting <replaceable>x</replaceable>,
+              i.e. <literal>+RTS -N -RTS</literal>, lets the runtime
+              choose the value of <replaceable>x</replaceable> itself
+              based on how many processors are in your machine.</para>
+
+            <para>Be careful when using all the processors in your
+              machine: if some of your processors are in use by other
+              programs, this can actually harm performance rather than
+              improve it.</para>
+
             <para>Setting <option>-N</option> also has the effect of
-	      setting <option>-g</option> (the number of OS threads to
-	      use for garbage collection) to the same value.</para>
+              enabling the parallel garbage collector (see
+              <xref linkend="rts-options-gc" />).</para>
 
             <para>There is no means (currently) by which this value
 	      may vary after the program has started.</para>
+
+            <para>The current value of the <option>-N</option> option
+              is available to the Haskell program
+              via <literal>GHC.Conc.numCapabilities</literal>.</para>
 	  </listitem>
 	</varlistentry>
       </variablelist>
@@ -1819,6 +1964,17 @@ f "2"    = 2
 
       <variablelist>
 	<varlistentry>
+	  <term><option>-qa</option></term>
+          <indexterm><primary><option>-qa</option></primary><secondary>RTS
+          option</secondary></indexterm>
+	  <listitem>
+            <para>Use the OS's affinity facilities to try to pin OS
+              threads to CPU cores.  This is an experimental feature,
+              and may or may not be useful.  Please let us know
+              whether it helps for you!</para>
+          </listitem>
+        </varlistentry>
+	<varlistentry>
 	  <term><option>-qm</option></term>
           <indexterm><primary><option>-qm</option></primary><secondary>RTS
           option</secondary></indexterm>
@@ -1826,9 +1982,16 @@ f "2"    = 2
             <para>Disable automatic migration for load balancing.
             Normally the runtime will automatically try to schedule
             threads across the available CPUs to make use of idle
-            CPUs; this option disables that behaviour.  It is probably
-            only of use if you are explicitly scheduling threads onto
-            CPUs with <literal>GHC.Conc.forkOnIO</literal>.</para>
+            CPUs; this option disables that behaviour.  Note that
+              migration only applies to threads; sparks created
+              by <literal>par</literal> are load-balanced separately
+              by work-stealing.</para>
+
+            <para>
+              This option is probably only of use for concurrent
+              programs that explicitly schedule threads onto CPUs
+              with <literal>GHC.Conc.forkOnIO</literal>.
+            </para>
           </listitem>
         </varlistentry>
 	<varlistentry>
@@ -1861,19 +2024,20 @@ f "2"    = 2
 	whether your program got faster by using more CPUs or not.  If the user
 	time is greater than
 	the elapsed time, then the program used more than one CPU.  You should
-	also run the program without <literal>-N</literal> for comparison.</para>
+	also run the program without <literal>-N</literal> for
+	comparison.</para>
 
-      <para>GHC's parallelism support is new and experimental.  It may make your
-	program go faster, or it might slow it down - either way, we'd be
-	interested to hear from you.</para>
-      
-      <para>One significant limitation with the current implementation is that
-	the garbage collector is still single-threaded, and all execution must
-	stop when GC takes place.  This can be a significant bottleneck in a
-	parallel program, especially if your program does a lot of GC.  If this
-	happens to you, then try reducing the cost of GC by tweaking the GC
-	settings (<xref linkend="rts-options-gc" />): enlarging the heap or the
-	allocation area size is a good start.</para>
+      <para>The output of <literal>+RTS -s</literal> tells you how
+        many &ldquo;sparks&rdquo; were created and executed during the
+        run of the program (see <xref linkend="rts-options-gc" />), which
+        will give you an idea how well your <literal>par</literal>
+        annotations are working.</para>
+
+      <para>GHC's parallelism support has improved in 6.12.1 as a
+        result of much experimentation and tuning in the runtime
+        system.  We'd still be interested to hear how well it works
+        for you, and we're also interested in collecting parallel
+        programs to add to our benchmarking suite.</para>
     </sect2>
   </sect1>
 

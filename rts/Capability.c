@@ -18,30 +18,45 @@
 
 #include "PosixSource.h"
 #include "Rts.h"
-#include "RtsUtils.h"
-#include "RtsFlags.h"
-#include "STM.h"
-#include "OSThreads.h"
+
 #include "Capability.h"
 #include "Schedule.h"
 #include "Sparks.h"
 #include "Trace.h"
+#include "sm/GC.h" // for gcWorkerThread()
+#include "STM.h"
+#include "RtsUtils.h"
 
 // one global capability, this is the Capability for non-threaded
 // builds, and for +RTS -N1
 Capability MainCapability;
 
-nat n_capabilities;
+nat n_capabilities = 0;
 Capability *capabilities = NULL;
 
 // Holds the Capability which last became free.  This is used so that
 // an in-call has a chance of quickly finding a free Capability.
 // Maintaining a global free list of Capabilities would require global
 // locking, so we don't do that.
-Capability *last_free_capability;
+Capability *last_free_capability = NULL;
 
 /* GC indicator, in scope for the scheduler, init'ed to false */
 volatile StgWord waiting_for_gc = 0;
+
+/* Let foreign code get the current Capability -- assuming there is one!
+ * This is useful for unsafe foreign calls because they are called with
+ * the current Capability held, but they are not passed it. For example,
+ * see see the integer-gmp package which calls allocateLocal() in its
+ * stgAllocForGMP() function (which gets called by gmp functions).
+ * */
+Capability * rts_unsafeGetMyCapability (void)
+{
+#if defined(THREADED_RTS)
+  return myTask()->cap;
+#else
+  return &MainCapability;
+#endif
+}
 
 #if defined(THREADED_RTS)
 STATIC_INLINE rtsBool
@@ -54,29 +69,94 @@ globalWorkToDo (void)
 #endif
 
 #if defined(THREADED_RTS)
-STATIC_INLINE rtsBool
-anyWorkForMe( Capability *cap, Task *task )
+StgClosure *
+findSpark (Capability *cap)
 {
-    if (task->tso != NULL) {
-	// A bound task only runs if its thread is on the run queue of
-	// the capability on which it was woken up.  Otherwise, we
-	// can't be sure that we have the right capability: the thread
-	// might be woken up on some other capability, and task->cap
-	// could change under our feet.
-	return !emptyRunQueue(cap) && cap->run_queue_hd->bound == task;
-    } else {
-	// A vanilla worker task runs if either there is a lightweight
-	// thread at the head of the run queue, or the run queue is
-	// empty and (there are sparks to execute, or there is some
-	// other global condition to check, such as threads blocked on
-	// blackholes).
-	if (emptyRunQueue(cap)) {
-	    return !emptySparkPoolCap(cap)
-		|| !emptyWakeupQueue(cap)
-		|| globalWorkToDo();
-	} else
-	    return cap->run_queue_hd->bound == NULL;
+  Capability *robbed;
+  StgClosurePtr spark;
+  rtsBool retry;
+  nat i = 0;
+
+  if (!emptyRunQueue(cap) || cap->returning_tasks_hd != NULL) {
+      // If there are other threads, don't try to run any new
+      // sparks: sparks might be speculative, we don't want to take
+      // resources away from the main computation.
+      return 0;
+  }
+
+  // first try to get a spark from our own pool.
+  // We should be using reclaimSpark(), because it works without
+  // needing any atomic instructions:
+  //   spark = reclaimSpark(cap->sparks);
+  // However, measurements show that this makes at least one benchmark
+  // slower (prsa) and doesn't affect the others.
+  spark = tryStealSpark(cap);
+  if (spark != NULL) {
+      cap->sparks_converted++;
+
+      // Post event for running a spark from capability's own pool.
+      traceSchedEvent(cap, EVENT_RUN_SPARK, cap->r.rCurrentTSO, 0);
+
+      return spark;
+  }
+
+  if (n_capabilities == 1) { return NULL; } // makes no sense...
+
+  debugTrace(DEBUG_sched,
+	     "cap %d: Trying to steal work from other capabilities", 
+	     cap->no);
+
+  do {
+      retry = rtsFalse;
+
+      /* visit cap.s 0..n-1 in sequence until a theft succeeds. We could
+      start at a random place instead of 0 as well.  */
+      for ( i=0 ; i < n_capabilities ; i++ ) {
+          robbed = &capabilities[i];
+          if (cap == robbed)  // ourselves...
+              continue;
+
+          if (emptySparkPoolCap(robbed)) // nothing to steal here
+              continue;
+
+          spark = tryStealSpark(robbed);
+          if (spark == NULL && !emptySparkPoolCap(robbed)) {
+              // we conflicted with another thread while trying to steal;
+              // try again later.
+              retry = rtsTrue;
+          }
+
+          if (spark != NULL) {
+              cap->sparks_converted++;
+
+              traceSchedEvent(cap, EVENT_STEAL_SPARK, 
+                              cap->r.rCurrentTSO, robbed->no);
+              
+              return spark;
+          }
+          // otherwise: no success, try next one
+      }
+  } while (retry);
+
+  debugTrace(DEBUG_sched, "No sparks stolen");
+  return NULL;
+}
+
+// Returns True if any spark pool is non-empty at this moment in time
+// The result is only valid for an instant, of course, so in a sense
+// is immediately invalid, and should not be relied upon for
+// correctness.
+rtsBool
+anySparks (void)
+{
+    nat i;
+
+    for (i=0; i < n_capabilities; i++) {
+        if (!emptySparkPoolCap(&capabilities[i])) {
+            return rtsTrue;
+        }
     }
+    return rtsFalse;
 }
 #endif
 
@@ -130,6 +210,7 @@ initCapability( Capability *cap, nat i )
 
     cap->no = i;
     cap->in_haskell        = rtsFalse;
+    cap->in_gc             = rtsFalse;
 
     cap->run_queue_hd      = END_TSO_QUEUE;
     cap->run_queue_tl      = END_TSO_QUEUE;
@@ -143,14 +224,21 @@ initCapability( Capability *cap, nat i )
     cap->returning_tasks_tl = NULL;
     cap->wakeup_queue_hd    = END_TSO_QUEUE;
     cap->wakeup_queue_tl    = END_TSO_QUEUE;
+    cap->sparks_created     = 0;
+    cap->sparks_converted   = 0;
+    cap->sparks_pruned      = 0;
 #endif
 
-    cap->f.stgGCEnter1     = (F_)__stg_gc_enter_1;
-    cap->f.stgGCFun        = (F_)__stg_gc_fun;
+    cap->f.stgEagerBlackholeInfo = (W_)&__stg_EAGER_BLACKHOLE_info;
+    cap->f.stgGCEnter1     = (StgFunPtr)__stg_gc_enter_1;
+    cap->f.stgGCFun        = (StgFunPtr)__stg_gc_fun;
 
     cap->mut_lists  = stgMallocBytes(sizeof(bdescr *) *
 				     RtsFlags.GcFlags.generations,
 				     "initCapability");
+    cap->saved_mut_lists = stgMallocBytes(sizeof(bdescr *) *
+                                          RtsFlags.GcFlags.generations,
+                                          "initCapability");
 
     for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
 	cap->mut_lists[g] = NULL;
@@ -225,10 +313,10 @@ initCapabilities( void )
 
 void setContextSwitches(void)
 {
-  nat i;
-  for (i=0; i < n_capabilities; i++) {
-    capabilities[i].context_switch = 1;
-  }
+    nat i;
+    for (i=0; i < n_capabilities; i++) {
+        contextSwitchCapability(&capabilities[i]);
+    }
 }
 
 /* ----------------------------------------------------------------------------
@@ -251,10 +339,9 @@ giveCapabilityToTask (Capability *cap USED_IF_DEBUG, Task *task)
 {
     ASSERT_LOCK_HELD(&cap->lock);
     ASSERT(task->cap == cap);
-    trace(TRACE_sched | DEBUG_sched,
-	  "passing capability %d to %s %p",
-	  cap->no, task->tso ? "bound task" : "worker",
-	  (void *)task->id);
+    debugTrace(DEBUG_sched, "passing capability %d to %s %p",
+               cap->no, task->tso ? "bound task" : "worker",
+               (void *)task->id);
     ACQUIRE_LOCK(&task->lock);
     task->wakeup = rtsTrue;
     // the wakeup flag is needed because signalCondition() doesn't
@@ -275,7 +362,8 @@ giveCapabilityToTask (Capability *cap USED_IF_DEBUG, Task *task)
 
 #if defined(THREADED_RTS)
 void
-releaseCapability_ (Capability* cap)
+releaseCapability_ (Capability* cap, 
+                    rtsBool always_wakeup)
 {
     Task *task;
 
@@ -293,17 +381,9 @@ releaseCapability_ (Capability* cap)
 	return;
     }
 
-    /* if waiting_for_gc was the reason to release the cap: thread
-       comes from yieldCap->releaseAndQueueWorker. Unconditionally set
-       cap. free and return (see default after the if-protected other
-       special cases). Thread will wait on cond.var and re-acquire the
-       same cap after GC (GC-triggering cap. calls releaseCap and
-       enters the spare_workers case)
-    */
-    if (waiting_for_gc) {
+    if (waiting_for_gc == PENDING_GC_SEQ) {
       last_free_capability = cap; // needed?
-      trace(TRACE_sched | DEBUG_sched, 
-	    "GC pending, set capability %d free", cap->no);
+      debugTrace(DEBUG_sched, "GC pending, set capability %d free", cap->no);
       return;
     } 
 
@@ -333,8 +413,9 @@ releaseCapability_ (Capability* cap)
 
     // If we have an unbound thread on the run queue, or if there's
     // anything else to do, give the Capability to a worker thread.
-    if (!emptyRunQueue(cap) || !emptyWakeupQueue(cap)
-	      || !emptySparkPoolCap(cap) || globalWorkToDo()) {
+    if (always_wakeup || 
+        !emptyRunQueue(cap) || !emptyWakeupQueue(cap) ||
+        !emptySparkPoolCap(cap) || globalWorkToDo()) {
 	if (cap->spare_workers) {
 	    giveCapabilityToTask(cap,cap->spare_workers);
 	    // The worker Task pops itself from the queue;
@@ -343,14 +424,22 @@ releaseCapability_ (Capability* cap)
     }
 
     last_free_capability = cap;
-    trace(TRACE_sched | DEBUG_sched, "freeing capability %d", cap->no);
+    debugTrace(DEBUG_sched, "freeing capability %d", cap->no);
 }
 
 void
 releaseCapability (Capability* cap USED_IF_THREADS)
 {
     ACQUIRE_LOCK(&cap->lock);
-    releaseCapability_(cap);
+    releaseCapability_(cap, rtsFalse);
+    RELEASE_LOCK(&cap->lock);
+}
+
+void
+releaseAndWakeupCapability (Capability* cap USED_IF_THREADS)
+{
+    ACQUIRE_LOCK(&cap->lock);
+    releaseCapability_(cap, rtsTrue);
     RELEASE_LOCK(&cap->lock);
 }
 
@@ -376,7 +465,7 @@ releaseCapabilityAndQueueWorker (Capability* cap USED_IF_THREADS)
     }
     // Bound tasks just float around attached to their TSOs.
 
-    releaseCapability_(cap);
+    releaseCapability_(cap,rtsFalse);
 
     RELEASE_LOCK(&cap->lock);
 }
@@ -407,17 +496,20 @@ waitForReturnCapability (Capability **pCap, Task *task)
     if (cap == NULL) {
 	// Try last_free_capability first
 	cap = last_free_capability;
-	if (!cap->running_task) {
+	if (cap->running_task) {
 	    nat i;
 	    // otherwise, search for a free capability
+            cap = NULL;
 	    for (i = 0; i < n_capabilities; i++) {
-		cap = &capabilities[i];
-		if (!cap->running_task) {
+		if (!capabilities[i].running_task) {
+                    cap = &capabilities[i];
 		    break;
 		}
 	    }
-	    // Can't find a free one, use last_free_capability.
-	    cap = last_free_capability;
+            if (cap == NULL) {
+                // Can't find a free one, use last_free_capability.
+                cap = last_free_capability;
+            }
 	}
 
 	// record the Capability as the one this Task is now assocated with.
@@ -467,7 +559,7 @@ waitForReturnCapability (Capability **pCap, Task *task)
 
     ASSERT_FULL_CAPABILITY_INVARIANTS(cap,task);
 
-    trace(TRACE_sched | DEBUG_sched, "resuming capability %d", cap->no);
+    debugTrace(DEBUG_sched, "resuming capability %d", cap->no);
 
     *pCap = cap;
 #endif
@@ -483,16 +575,13 @@ yieldCapability (Capability** pCap, Task *task)
 {
     Capability *cap = *pCap;
 
-    // The fast path has no locking, if we don't enter this while loop
+    if (waiting_for_gc == PENDING_GC_PAR) {
+        traceSchedEvent(cap, EVENT_GC_START, 0, 0);
+        gcWorkerThread(cap);
+        traceSchedEvent(cap, EVENT_GC_END, 0, 0);
+        return;
+    }
 
-    while ( waiting_for_gc
-	    /* i.e. another capability triggered HeapOverflow, is busy
-	       getting capabilities (stopping their owning tasks) */
-	    || cap->returning_tasks_hd != NULL 
-	        /* cap reserved for another task */
-	    || !anyWorkForMe(cap,task) 
-	        /* cap/task have no work */
-	    ) {
 	debugTrace(DEBUG_sched, "giving up capability %d", cap->no);
 
 	// We must now release the capability and wait to be woken up
@@ -535,9 +624,8 @@ yieldCapability (Capability** pCap, Task *task)
 	    break;
 	}
 
-	trace(TRACE_sched | DEBUG_sched, "resuming capability %d", cap->no);
+	debugTrace(DEBUG_sched, "resuming capability %d", cap->no);
 	ASSERT(cap->running_task == task);
-    }
 
     *pCap = cap;
 
@@ -578,8 +666,7 @@ wakeupThreadOnCapability (Capability *my_cap,
 
 	appendToRunQueue(other_cap,tso);
 
-	trace(TRACE_sched, "resuming capability %d", other_cap->no);
-	releaseCapability_(other_cap);
+	releaseCapability_(other_cap,rtsFalse);
     } else {
 	appendToWakeupQueue(my_cap,other_cap,tso);
         other_cap->context_switch = 1;
@@ -592,58 +679,21 @@ wakeupThreadOnCapability (Capability *my_cap,
 }
 
 /* ----------------------------------------------------------------------------
- * prodCapabilities
+ * prodCapability
  *
- * Used to indicate that the interrupted flag is now set, or some
- * other global condition that might require waking up a Task on each
- * Capability.
+ * If a Capability is currently idle, wake up a Task on it.  Used to 
+ * get every Capability into the GC.
  * ------------------------------------------------------------------------- */
 
-static void
-prodCapabilities(rtsBool all)
+void
+prodCapability (Capability *cap, Task *task)
 {
-    nat i;
-    Capability *cap;
-    Task *task;
-
-    for (i=0; i < n_capabilities; i++) {
-	cap = &capabilities[i];
-	ACQUIRE_LOCK(&cap->lock);
-	if (!cap->running_task) {
-	    if (cap->spare_workers) {
-		trace(TRACE_sched, "resuming capability %d", cap->no);
-		task = cap->spare_workers;
-		ASSERT(!task->stopped);
-		giveCapabilityToTask(cap,task);
-		if (!all) {
-		    RELEASE_LOCK(&cap->lock);
-		    return;
-		}
-	    }
-	}
-	RELEASE_LOCK(&cap->lock);
+    ACQUIRE_LOCK(&cap->lock);
+    if (!cap->running_task) {
+        cap->running_task = task;
+        releaseCapability_(cap,rtsTrue);
     }
-    return;
-}
-
-void
-prodAllCapabilities (void)
-{
-    prodCapabilities(rtsTrue);
-}
-
-/* ----------------------------------------------------------------------------
- * prodOneCapability
- *
- * Like prodAllCapabilities, but we only require a single Task to wake
- * up in order to service some global event, such as checking for
- * deadlock after some idle time has passed.
- * ------------------------------------------------------------------------- */
-
-void
-prodOneCapability (void)
-{
-    prodCapabilities(rtsFalse);
+    RELEASE_LOCK(&cap->lock);
 }
 
 /* ----------------------------------------------------------------------------
@@ -666,8 +716,6 @@ shutdownCapability (Capability *cap, Task *task, rtsBool safe)
 {
     nat i;
 
-    ASSERT(sched_state == SCHED_SHUTTING_DOWN);
-
     task->cap = cap;
 
     // Loop indefinitely until all the workers have exited and there
@@ -677,6 +725,8 @@ shutdownCapability (Capability *cap, Task *task, rtsBool safe)
     // isn't safe, for one thing).
 
     for (i = 0; /* i < 50 */; i++) {
+        ASSERT(sched_state == SCHED_SHUTTING_DOWN);
+
 	debugTrace(DEBUG_sched, 
 		   "shutting down capability %d, attempt %d", cap->no, i);
 	ACQUIRE_LOCK(&cap->lock);
@@ -714,7 +764,7 @@ shutdownCapability (Capability *cap, Task *task, rtsBool safe)
 	if (!emptyRunQueue(cap) || cap->spare_workers) {
 	    debugTrace(DEBUG_sched, 
 		       "runnable threads or workers still alive, yielding");
-	    releaseCapability_(cap); // this will wake up a worker
+	    releaseCapability_(cap,rtsFalse); // this will wake up a worker
 	    RELEASE_LOCK(&cap->lock);
 	    yieldThread();
 	    continue;
@@ -735,7 +785,7 @@ shutdownCapability (Capability *cap, Task *task, rtsBool safe)
             continue;
         }
             
-	debugTrace(DEBUG_sched, "capability %d is stopped.", cap->no);
+        traceSchedEvent(cap, EVENT_SHUTDOWN, 0, 0);
 	RELEASE_LOCK(&cap->lock);
 	break;
     }
@@ -777,8 +827,8 @@ static void
 freeCapability (Capability *cap)
 {
     stgFree(cap->mut_lists);
-#if defined(THREADED_RTS) || defined(PARALLEL_HASKELL)
-    freeSparkPool(&cap->r.rSparks);
+#if defined(THREADED_RTS)
+    freeSparkPool(cap->sparks);
 #endif
 }
 
@@ -802,7 +852,8 @@ freeCapabilities (void)
    ------------------------------------------------------------------------ */
 
 void
-markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta)
+markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta, 
+                      rtsBool prune_sparks USED_IF_THREADS)
 {
     nat i;
     Capability *cap;
@@ -823,13 +874,15 @@ markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta)
 #endif
 	for (task = cap->suspended_ccalling_tasks; task != NULL; 
 	     task=task->next) {
-	    debugTrace(DEBUG_sched,
-		       "evac'ing suspended TSO %lu", (unsigned long)task->suspended_tso->id);
 	    evac(user, (StgClosure **)(void *)&task->suspended_tso);
 	}
 
 #if defined(THREADED_RTS)
-        traverseSparkQueue (evac, user, cap);
+        if (prune_sparks) {
+            pruneSparkQueue (evac, user, cap);
+        } else {
+            traverseSparkQueue (evac, user, cap);
+        }
 #endif
     }
 
@@ -840,22 +893,8 @@ markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta)
 #endif 
 }
 
-// This function is used by the compacting GC to thread all the
-// pointers from spark queues.
-void
-traverseSparkQueues (evac_fn evac USED_IF_THREADS, void *user USED_IF_THREADS)
-{
-#if defined(THREADED_RTS)
-    nat i;
-    for (i = 0; i < n_capabilities; i++) {
-        traverseSparkQueue (evac, user, &capabilities[i]);
-    }
-#endif // THREADED_RTS
-
-}
-
 void
 markCapabilities (evac_fn evac, void *user)
 {
-    markSomeCapabilities(evac, user, 0, 1);
+    markSomeCapabilities(evac, user, 0, 1, rtsFalse);
 }

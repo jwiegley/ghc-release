@@ -48,6 +48,7 @@ import Data.IORef
 %************************************************************************
 
 \begin{code}
+-- | Main entry point to the desugarer.
 deSugar :: HscEnv -> ModLocation -> TcGblEnv -> IO (Messages, Maybe ModGuts)
 -- Can modify PCS by faulting in more declarations
 
@@ -63,7 +64,8 @@ deSugar hsc_env
 		    	    tcg_fix_env      = fix_env,
 		    	    tcg_inst_env     = inst_env,
 		    	    tcg_fam_inst_env = fam_inst_env,
-	    	    	    tcg_warns      = warns,
+	    	    	    tcg_warns        = warns,
+	    	    	    tcg_anns         = anns,
 			    tcg_binds        = binds,
 			    tcg_fords        = fords,
 			    tcg_rules        = rules,
@@ -76,7 +78,7 @@ deSugar hsc_env
 
 	-- Desugar the program
         ; let export_set = availsToNameSet exports
-	; let auto_scc = mkAutoScc mod export_set
+	; let auto_scc = mkAutoScc dflags mod export_set
         ; let target = hscTarget dflags
         ; let hpcInfo = emptyHpcInfo other_hpc_info
 	; (msgs, mb_res)
@@ -133,6 +135,7 @@ deSugar hsc_env
 	        mg_rdr_env   	= rdr_env,
 		mg_fix_env   	= fix_env,
 		mg_warns   	= warns,
+		mg_anns      	= anns,
 		mg_types     	= type_env,
 		mg_insts     	= insts,
 		mg_fam_insts 	= fam_insts,
@@ -148,16 +151,18 @@ deSugar hsc_env
         ; return (msgs, Just mod_guts)
 	}}}
 
-mkAutoScc :: Module -> NameSet -> AutoScc
-mkAutoScc mod exports
+mkAutoScc :: DynFlags -> Module -> NameSet -> AutoScc
+mkAutoScc dflags mod exports
   | not opt_SccProfilingOn 	-- No profiling
   = NoSccs		
-  | opt_AutoSccsOnAllToplevs 	-- Add auto-scc on all top-level things
+    -- Add auto-scc on all top-level things
+  | dopt Opt_AutoSccsOnAllToplevs dflags
   = AddSccs mod (\id -> not $ isDerivedOccName $ getOccName id)
     -- See #1641.  This is pretty yucky, but I can't see a better way
     -- to identify compiler-generated Ids, and at least this should
     -- catch them all.
-  | opt_AutoSccsOnExportedToplevs	-- Only on exported things
+    -- Only on exported things
+  | dopt Opt_AutoSccsOnExportedToplevs dflags
   = AddSccs mod (\id -> idName id `elemNameSet` exports)
   | otherwise
   = NoSccs

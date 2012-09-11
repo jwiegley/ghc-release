@@ -46,6 +46,7 @@ import TyCon
 import Name
 import VarEnv
 import Util
+import ListSetOps
 import VarSet
 import TysPrim
 import PrelNames
@@ -53,13 +54,18 @@ import TysWiredIn
 import DynFlags
 import Outputable
 import FastString
-import Panic
+-- import Panic
 
 import Constants        ( wORD_SIZE )
 
 import GHC.Arr          ( Array(..) )
 import GHC.Exts
-import GHC.IOBase ( IO(IO) )
+
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO ( IO(..) )
+#else
+import GHC.IOBase ( IO(..) )
+#endif
 
 import Control.Monad
 import Data.Maybe
@@ -68,11 +74,10 @@ import Data.Ix
 import Data.List
 import qualified Data.Sequence as Seq
 import Data.Monoid
-import Data.Sequence hiding (null, length, index, take, drop, splitAt, reverse)
+import Data.Sequence (viewl, ViewL(..))
 import Foreign
-import System.IO.Unsafe
+-- import System.IO.Unsafe
 
-import System.IO
 ---------------------------------------------
 -- * A representation of semi evaluated Terms
 ---------------------------------------------
@@ -160,7 +165,7 @@ data Closure = Closure { tipe         :: ClosureType
 instance Outputable ClosureType where
   ppr = text . show 
 
-#include "../includes/ClosureTypes.h"
+#include "../includes/rts/storage/ClosureTypes.h"
 
 aP_CODE, pAP_CODE :: Int
 aP_CODE = AP
@@ -376,12 +381,12 @@ ppr_termM1 Term{}        = panic "ppr_termM1 - Term"
 ppr_termM1 RefWrap{}     = panic "ppr_termM1 - RefWrap"
 ppr_termM1 NewtypeWrap{} = panic "ppr_termM1 - NewtypeWrap"
 
-pprNewtypeWrap y p NewtypeWrap{ty=ty, wrapped_term=t} 
+pprNewtypeWrap y p NewtypeWrap{ty=ty, wrapped_term=t}
   | Just (tc,_) <- tcSplitTyConApp_maybe ty
   , ASSERT(isNewTyCon tc) True
   , Just new_dc <- tyConSingleDataCon_maybe tc = do 
-         real_term <- y max_prec t
-         return$ cparen (p >= app_prec) (ppr new_dc <+> real_term)
+             real_term <- y max_prec t
+             return $ cparen (p >= app_prec) (ppr new_dc <+> real_term)
 pprNewtypeWrap _ _ _ = panic "pprNewtypeWrap"
 
 -------------------------------------------------------
@@ -432,10 +437,6 @@ cPprTermBase y =
                | pred t    = Just `liftM` f prec t
            ifTerm _ _ _ _  = return Nothing
 
-           isIntegerTy ty  = fromMaybe False $ do
-             (tc,_) <- tcSplitTyConApp_maybe ty 
-             return (tyConName tc == integerTyConName)
-
            isTupleTy ty    = fromMaybe False $ do 
              (tc,_) <- tcSplitTyConApp_maybe ty 
              return (isBoxedTupleTyCon tc)
@@ -443,6 +444,10 @@ cPprTermBase y =
            isTyCon a_tc ty = fromMaybe False $ do 
              (tc,_) <- tcSplitTyConApp_maybe ty
              return (a_tc == tc)
+
+           isIntegerTy ty = fromMaybe False $ do
+             (tc,_) <- tcSplitTyConApp_maybe ty
+             return (tyConName tc == integerTyConName)
 
            coerceShow f _p = return . text . show . f . unsafeCoerce# . val
 
@@ -581,7 +586,7 @@ instScheme ty = liftTcM$ do
 -- do its magic.
 addConstraint :: TcType -> TcType -> TR ()
 addConstraint actual expected = do
-    traceTR $ fsep [text "add constraint:", ppr actual, equals, ppr expected]
+    traceTR (text "add constraint:" <+> fsep [ppr actual, equals, ppr expected])
     recoverTR (traceTR $ fsep [text "Failed to unify", ppr actual,
                                     text "with", ppr expected])
               (congruenceNewtypes actual expected >>=
@@ -630,15 +635,19 @@ cvObtainTerm hsc_env max_depth force old_ty hval = runTR hsc_env $ do
                                            _   -> return ty)
                                  zterm
                       zonkTerm zterm'
-   traceTR (text "Term reconstruction completed. Term obtained: " <> ppr term)
+   traceTR (text "Term reconstruction completed." $$
+            text "Term obtained: " <> ppr term $$
+            text "Type obtained: " <> ppr (termType term))
    return term
     where 
   go :: Int -> Type -> Type -> HValue -> TcM Term
   go max_depth _ _ _ | seq max_depth False = undefined
   go 0 my_ty _old_ty a = do
+    traceTR (text "Gave up reconstructing a term after" <>
+                  int max_depth <> text " steps")
     clos <- trIO $ getClosureData a
     return (Suspension (tipe clos) my_ty a Nothing)
-  go max_depth my_ty old_ty a = do 
+  go max_depth my_ty old_ty a = do
     let monomorphic = not(isTyVarTy my_ty)   
     -- This ^^^ is a convention. The ancestor tests for
     -- monomorphism and passes a type instead of a tv
@@ -672,7 +681,10 @@ cvObtainTerm hsc_env max_depth force old_ty hval = runTR hsc_env $ do
 
  -- The interesting case
       Constr -> do
-        traceTR (text "entering a constructor")
+        traceTR (text "entering a constructor " <>
+                      if monomorphic
+                        then parens (text "already monomorphic: " <> ppr my_ty)
+                        else Outputable.empty)
         Right dcname <- dataConInfoPtrToName (infoPtr clos)
         (_,mb_dc)    <- tryTcErrs (tcLookupDataCon dcname)
         case mb_dc of
@@ -689,25 +701,29 @@ cvObtainTerm hsc_env max_depth force old_ty hval = runTR hsc_env $ do
                        return (Term my_ty (Left ('<' : tag ++ ">")) a subTerms)
           Just dc -> do
             let subTtypes  = matchSubTypes dc old_ty
-                (subTtypesP, subTtypesNP) = partition (isLifted |.| isRefType) subTtypes
             subTermTvs    <- mapMif (not . isMonomorphic)
                                     (\t -> newVar (typeKind t))
                                     subTtypes
+            let (subTermsP, subTermsNP) = partition (\(ty,_) -> isLifted ty
+                                                             || isRefType ty)
+                                                    (zip subTtypes subTermTvs)
+                (subTtypesP,   subTermTvsP ) = unzip subTermsP
+                (subTtypesNP, _subTermTvsNP) = unzip subTermsNP
+
+            -- When we already have all the information, avoid solving
+            -- unnecessary constraints. Propagation of type information
+            -- to subterms is already being done via matching.
+            when (not monomorphic) $ do
+               let myType = mkFunTys subTermTvs my_ty
+               (signatureType,_) <- instScheme (mydataConType dc)
             -- It is vital for newtype reconstruction that the unification step
             -- is done right here, _before_ the subterms are RTTI reconstructed
-            when (not monomorphic) $ do
-
-                       -- When we already have all the information, avoid solving
-                       -- unnecessary constraints. Propagation of type information
-                       -- to subterms is already being done via matching.
-               let myType = mkFunTys subTermTvs my_ty
-               (signatureType,_) <- instScheme (rttiView $ dataConUserType dc)
                addConstraint myType signatureType
             subTermsP <- sequence
                   [ appArr (go (pred max_depth) tv t) (ptrs clos) i
-                   | (i,tv,t) <- zip3 [0..] subTermTvs subTtypesP]
+                   | (i,tv,t) <- zip3 [0..] subTermTvsP subTtypesP]
             let unboxeds   = extractUnboxed subTtypesNP clos
-                subTermsNP = map (uncurry Prim) (zip subTtypesNP unboxeds)      
+                subTermsNP = map (uncurry Prim) (zip subTtypesNP unboxeds)
                 subTerms   = reOrderTerms subTermsP subTermsNP subTtypes
             return (Term my_ty (Right dc) a subTerms)
 -- The otherwise case: can be a Thunk,AP,PAP,etc.
@@ -734,7 +750,7 @@ cvObtainTerm hsc_env max_depth force old_ty hval = runTR hsc_env $ do
                                         (ppr pointed $$ ppr unpointed))
                     let (t:tt) = pointed in t : reOrderTerms tt unpointed tys
    | otherwise    = ASSERT2(not(null unpointed)
-                           , ptext (sLit "Reorderterms") $$ 
+                           , ptext (sLit "reOrderTerms") $$ 
                                        (ppr pointed $$ ppr unpointed))
                     let (t:tt) = unpointed in t : reOrderTerms pointed tt tys
 
@@ -826,7 +842,7 @@ cvReconstructType hsc_env max_depth old_ty hval = runTR_maybe hsc_env $ do
             -- It is vital for newtype reconstruction that the unification step
             -- is done right here, _before_ the subterms are RTTI reconstructed
             let myType         = mkFunTys subTtypes my_ty
-            (signatureType,_) <- instScheme(rttiView $ dataConUserType dc)
+            (signatureType,_) <- instScheme(mydataConType dc)
             addConstraint myType signatureType
             return $ [ appArr (\e->(t,e)) (ptrs clos) i
                        | (i,t) <- zip [0..] (filter (isLifted |.| isRefType) subTtypes)]
@@ -838,11 +854,11 @@ cvReconstructType hsc_env max_depth old_ty hval = runTR_maybe hsc_env $ do
 -- In particular, we want them to unify with things.
 improveRTTIType :: HscEnv -> RttiType -> RttiType -> IO (Maybe TvSubst)
 improveRTTIType hsc_env _ty rtti_ty = runTR_maybe hsc_env $ do
-    traceTR $ fsep [text "improveRttiType", ppr _ty, ppr rtti_ty]
+    traceTR (text "improveRttiType" <+> fsep [ppr _ty, ppr rtti_ty])
     (ty_tvs,  _, _)   <- tcInstType return ty
     (ty_tvs', _, ty') <- tcInstType (mapM tcInstTyVar) ty
     (_, _, rtti_ty')  <- tcInstType (mapM tcInstTyVar) (sigmaType rtti_ty)
-    getLIE(boxyUnify rtti_ty' ty')
+    _ <- getLIE(boxyUnify rtti_ty' ty')
     tvs1_contents     <- zonkTcTyVars ty_tvs'
     let subst = (uncurry zipTopTvSubst . unzip)
                  [(tv,ty) | (tv,ty) <- zip ty_tvs tvs1_contents
@@ -856,6 +872,24 @@ myDataConInstArgTys :: DataCon -> [Type] -> [Type]
 myDataConInstArgTys dc args
     | null (dataConExTyVars dc) && null (dataConEqTheta dc) = dataConInstArgTys dc args
     | otherwise = dataConRepArgTys dc
+
+mydataConType :: DataCon -> Type
+-- ^ Custom version of DataCon.dataConUserType where we
+--    - remove the equality constraints
+--    - use the representation types for arguments, including dictionaries
+--    - keep the original result type
+mydataConType  dc
+  = mkForAllTys ((univ_tvs `minusList` map fst eq_spec) ++ ex_tvs) $
+    mkFunTys arg_tys $
+    res_ty
+  where univ_tvs   = dataConUnivTyVars dc
+        ex_tvs     = dataConExTyVars dc
+        eq_spec    = dataConEqSpec dc
+        arg_tys    = [case a of
+                        PredTy p -> predTypeRep p
+                        _        -> a
+                     | a <- dataConRepArgTys dc]
+        res_ty     = dataConOrigResTy dc
 
 isRefType :: Type -> Bool
 isRefType ty
@@ -965,7 +999,7 @@ If that is not the case, then we consider two conditions.
 2. To prevent the class of unsoundness shown by row 6,
    the rtti type should be structurally more
    defined than the old type we are comparing it to.
-  check2 :: OldType -> NewTy            pe -> Bool
+  check2 :: NewType -> OldType -> Bool
   check2 a  _        = True
   check2 [a] a       = True
   check2 [a] (t Int) = False
@@ -1064,7 +1098,7 @@ congruenceNewtypes lhs rhs = go lhs rhs >>= \rhs' -> return (lhs,rhs')
                         text " in presence of newtype evidence " <> ppr new_tycon)
                vars <- mapM (newVar . tyVarKind) (tyConTyVars new_tycon)
                let ty' = mkTyConApp new_tycon vars
-               liftTcM (boxyUnify ty (repType ty'))
+               _ <- liftTcM (boxyUnify ty (repType ty'))
         -- assumes that reptype doesn't ^^^^ touch tyconApp args 
                return ty'
 
@@ -1083,13 +1117,6 @@ zonkTerm = foldTermM TermFoldM{
              }
 
 --------------------------------------------------------------------------------
--- representation types for thetas
-rttiView :: Type -> Type
-rttiView ty | Just ty' <- coreView ty  = rttiView ty'
-rttiView ty
-  | (tvs, theta, tau) <- tcSplitSigmaTy ty
-  =  mkForAllTys tvs (mkFunTys [predTypeRep p | p <- theta, isClassPred p] tau)
-
 -- Restore Class predicates out of a representation type
 dictsView :: Type -> Type
 -- dictsView ty = ty

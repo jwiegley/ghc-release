@@ -16,15 +16,17 @@ module DriverMkDepend (
 #include "HsVersions.h"
 
 import qualified GHC
-import GHC              ( ModSummary(..), GhcMonad )
+-- import GHC              ( ModSummary(..), GhcMonad )
+import HsSyn            ( ImportDecl(..) )
+import PrelNames
 import DynFlags
 import Util
-import HscTypes         ( HscEnv, IsBootInterface, msObjFilePath, msHsFilePath, getSession )
+import HscTypes
 import SysTools         ( newTempName )
 import qualified SysTools
 import Module
 import Digraph          ( SCC(..) )
-import Finder           ( findImportedModule, FindResult(..) )
+import Finder
 import Outputable
 import Panic
 import SrcLoc
@@ -32,8 +34,8 @@ import Data.List
 import FastString
 
 import Exception
-import ErrUtils         ( debugTraceMsg, putMsg )
-import MonadUtils       ( liftIO )
+import ErrUtils
+-- import MonadUtils       ( liftIO )
 
 import System.Directory
 import System.FilePath
@@ -70,7 +72,8 @@ doMkDependHS srcs = do
     -- Prcess them one by one, dumping results into makefile
     -- and complaining about cycles
     hsc_env <- getSession
-    mapM (liftIO . processDeps dflags hsc_env excl_mods (mkd_tmp_hdl files)) sorted
+    root <- liftIO getCurrentDirectory
+    mapM_ (liftIO . processDeps dflags hsc_env excl_mods root (mkd_tmp_hdl files)) sorted
 
     -- If -ddump-mod-cycles, show cycles in the module graph
     liftIO $ dumpModCycles dflags mod_summaries
@@ -156,6 +159,7 @@ beginMkDependHS dflags = do
 processDeps :: DynFlags
             -> HscEnv
             -> [ModuleName]
+            -> FilePath
             -> Handle           -- Write dependencies to here
             -> SCC ModSummary
             -> IO ()
@@ -174,25 +178,25 @@ processDeps :: DynFlags
 --
 -- For {-# SOURCE #-} imports the "hi" will be "hi-boot".
 
-processDeps _ _ _ _ (CyclicSCC nodes)
+processDeps _ _ _ _ _ (CyclicSCC nodes)
   =     -- There shouldn't be any cycles; report them
     ghcError (ProgramError (showSDoc $ GHC.cyclicModuleErr nodes))
 
-processDeps dflags hsc_env excl_mods hdl (AcyclicSCC node)
+processDeps dflags hsc_env excl_mods root hdl (AcyclicSCC node)
   = do  { let extra_suffixes = depSuffixes dflags
               include_pkg_deps = depIncludePkgDeps dflags
               src_file  = msHsFilePath node
               obj_file  = msObjFilePath node
               obj_files = insertSuffixes obj_file extra_suffixes
 
-              do_imp is_boot imp_mod
-                = do { mb_hi <- findDependency hsc_env src_file imp_mod
+              do_imp loc is_boot pkg_qual imp_mod
+                = do { mb_hi <- findDependency hsc_env loc pkg_qual imp_mod
                                                is_boot include_pkg_deps
                      ; case mb_hi of {
                            Nothing      -> return () ;
                            Just hi_file -> do
                      { let hi_files = insertSuffixes hi_file extra_suffixes
-                           write_dep (obj,hi) = writeDependency hdl [obj] hi
+                           write_dep (obj,hi) = writeDependency root hdl [obj] hi
 
                         -- Add one dependency for each suffix;
                         -- e.g.         A.o   : B.hi
@@ -202,50 +206,62 @@ processDeps dflags hsc_env excl_mods hdl (AcyclicSCC node)
 
                 -- Emit std dependency of the object(s) on the source file
                 -- Something like       A.o : A.hs
-        ; writeDependency hdl obj_files src_file
+        ; writeDependency root hdl obj_files src_file
 
                 -- Emit a dependency for each import
 
-        -- SOURCE imports
-        ; mapM_ (do_imp True)
-                (filter (`notElem` excl_mods) (map unLoc (ms_srcimps node)))
+        ; let do_imps is_boot idecls = sequence_
+                    [ do_imp loc is_boot (ideclPkgQual i) mod
+                    | L loc i <- idecls,
+                      let mod = unLoc (ideclName i),
+                      mod `notElem` excl_mods ]
 
-        -- regular imports
-        ; mapM_ (do_imp False)
-                (filter (`notElem` excl_mods) (map unLoc (ms_imps node)))
+        ; do_imps True  (ms_srcimps node)
+        ; do_imps False (ms_imps node)
+
+        ; when (dopt Opt_ImplicitPrelude (ms_hspp_opts node)) $
+            do_imp noSrcSpan False Nothing pRELUDE_NAME
         }
 
 
 findDependency  :: HscEnv
-                -> FilePath             -- Importing module: used only for error msg
+                -> SrcSpan
+                -> Maybe FastString     -- package qualifier, if any
                 -> ModuleName           -- Imported module
                 -> IsBootInterface      -- Source import
                 -> Bool                 -- Record dependency on package modules
                 -> IO (Maybe FilePath)  -- Interface file file
-findDependency hsc_env _ imp is_boot _include_pkg_deps
+findDependency hsc_env srcloc pkg imp is_boot include_pkg_deps
   = do  {       -- Find the module; this will be fast because
                 -- we've done it once during downsweep
-          r <- findImportedModule hsc_env imp Nothing
+          r <- findImportedModule hsc_env imp pkg
         ; case r of
             Found loc _
                 -- Home package: just depend on the .hi or hi-boot file
-                | isJust (ml_hs_file loc)
+                | isJust (ml_hs_file loc) || include_pkg_deps
                 -> return (Just (addBootSuffix_maybe is_boot (ml_hi_file loc)))
 
                 -- Not in this package: we don't need a dependency
                 | otherwise
                 -> return Nothing
 
-            _ -> panic "findDependency"
+            fail -> throwOneError $ mkPlainErrMsg srcloc $
+                        cannotFindModule (hsc_dflags hsc_env) imp fail
         }
 
 -----------------------------
-writeDependency :: Handle -> [FilePath] -> FilePath -> IO ()
--- (writeDependency h [t1,t2] dep) writes to handle h the dependency
+writeDependency :: FilePath -> Handle -> [FilePath] -> FilePath -> IO ()
+-- (writeDependency r h [t1,t2] dep) writes to handle h the dependency
 --      t1 t2 : dep
-writeDependency hdl targets dep
-  = hPutStrLn hdl (unwords (map forOutput targets) ++ " : " ++ forOutput dep)
-    where forOutput = escapeSpaces . reslash Forwards . normalise
+writeDependency root hdl targets dep
+  = do let -- We need to avoid making deps on
+           --     c:/foo/...
+           -- on cygwin as make gets confused by the :
+           -- Making relative deps avoids some instances of this.
+           dep' = makeRelative root dep
+           forOutput = escapeSpaces . reslash Forwards . normalise
+           output = unwords (map forOutput targets) ++ " : " ++ forOutput dep'
+       hPutStrLn hdl output
 
 -----------------------------
 insertSuffixes
@@ -355,7 +371,7 @@ pprCycle summaries = pp_group (CyclicSCC summaries)
           pp_ms loop_breaker $$ vcat (map pp_group groups)
         where
           (boot_only, others) = partition is_boot_only mss
-          is_boot_only ms = not (any in_group (ms_imps ms))
+          is_boot_only ms = not (any in_group (map (ideclName.unLoc) (ms_imps ms)))
           in_group (L _ m) = m `elem` group_mods
           group_mods = map (moduleName . ms_mod) mss
 
@@ -364,8 +380,8 @@ pprCycle summaries = pp_group (CyclicSCC summaries)
           groups = GHC.topSortModuleGraph True all_others Nothing
 
     pp_ms summary = text mod_str <> text (take (20 - length mod_str) (repeat ' '))
-                       <+> (pp_imps empty (ms_imps summary) $$
-                            pp_imps (ptext (sLit "{-# SOURCE #-}")) (ms_srcimps summary))
+                       <+> (pp_imps empty (map (ideclName.unLoc) (ms_imps summary)) $$
+                            pp_imps (ptext (sLit "{-# SOURCE #-}")) (map (ideclName.unLoc) (ms_srcimps summary)))
         where
           mod_str = moduleNameString (moduleName (ms_mod summary))
 

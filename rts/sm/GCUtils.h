@@ -11,15 +11,22 @@
  *
  * --------------------------------------------------------------------------*/
 
-#include "SMP.h"
+#ifndef SM_GCUTILS_H
+#define SM_GCUTILS_H
+
+BEGIN_RTS_PRIVATE
 
 bdescr *allocBlock_sync(void);
 void    freeChain_sync(bdescr *bd);
 
 void    push_scanned_block   (bdescr *bd, step_workspace *ws);
-bdescr *grab_todo_block      (step_workspace *ws);
 StgPtr  todo_block_full      (nat size, step_workspace *ws);
 StgPtr  alloc_todo_block     (step_workspace *ws, nat size);
+
+bdescr *grab_local_todo_block  (step_workspace *ws);
+#if defined(THREADED_RTS)
+bdescr *steal_todo_block       (nat s);
+#endif
 
 // Returns true if a block is partially full.  This predicate is used to try
 // to re-use partial blocks wherever possible, and to reduce wastage.
@@ -34,3 +41,26 @@ isPartiallyFull(bdescr *bd)
 #if DEBUG
 void printMutableList (generation *gen);
 #endif
+
+// Version of recordMutableGen for use during GC.  This uses the
+// mutable lists attached to the current gc_thread structure, which
+// are the same as the mutable lists on the Capability.
+INLINE_HEADER void
+recordMutableGen_GC (StgClosure *p, nat gen_no)
+{
+    bdescr *bd;
+
+    bd = gct->mut_lists[gen_no];
+    if (bd->free >= bd->start + BLOCK_SIZE_W) {
+	bdescr *new_bd;
+	new_bd = allocBlock_sync();
+	new_bd->link = bd;
+	bd = new_bd;
+	gct->mut_lists[gen_no] = bd;
+    }
+    *bd->free++ = (StgWord)p;
+}
+
+END_RTS_PRIVATE
+
+#endif /* SM_GCUTILS_H */

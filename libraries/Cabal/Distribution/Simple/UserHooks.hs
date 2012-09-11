@@ -64,7 +64,7 @@ import Distribution.Simple.Program    (Program)
 import Distribution.Simple.Command    (noExtraFlags)
 import Distribution.Simple.PreProcess (PPSuffixHandler)
 import Distribution.Simple.Setup
-         (ConfigFlags, BuildFlags, MakefileFlags, CleanFlags, CopyFlags,
+         (ConfigFlags, BuildFlags, CleanFlags, CopyFlags,
           InstallFlags, SDistFlags, RegisterFlags, HscolourFlags,
           HaddockFlags)
 import Distribution.Simple.LocalBuildInfo (LocalBuildInfo)
@@ -82,7 +82,7 @@ data UserHooks = UserHooks {
     -- | Used for @.\/setup test@
     runTests :: Args -> Bool -> PackageDescription -> LocalBuildInfo -> IO (),
     -- | Read the description file
-    readDesc :: IO (Maybe PackageDescription),
+    readDesc :: IO (Maybe GenericPackageDescription),
     -- | Custom preprocessors in addition to and overriding 'knownSuffixHandlers'.
     hookedPreProcessors :: [ PPSuffixHandler ],
     -- | These programs are detected at configure time.  Arguments for them are
@@ -92,8 +92,7 @@ data UserHooks = UserHooks {
     -- |Hook to run before configure command
     preConf  :: Args -> ConfigFlags -> IO HookedBuildInfo,
     -- |Over-ride this hook to get different behavior during configure.
-    confHook :: ( Either GenericPackageDescription PackageDescription
-               , HookedBuildInfo)
+    confHook :: (GenericPackageDescription, HookedBuildInfo)
             -> ConfigFlags -> IO LocalBuildInfo,
     -- |Hook to run after configure command
     postConf :: Args -> ConfigFlags -> PackageDescription -> LocalBuildInfo -> IO (),
@@ -106,20 +105,12 @@ data UserHooks = UserHooks {
     -- |Hook to run after build command.  Second arg indicates verbosity level.
     postBuild :: Args -> BuildFlags -> PackageDescription -> LocalBuildInfo -> IO (),
 
-    -- |Hook to run before makefile command.  Second arg indicates verbosity level.
-    preMakefile  :: Args -> MakefileFlags -> IO HookedBuildInfo,
-
-    -- |Over-ride this hook to get different behavior during makefile.
-    makefileHook :: PackageDescription -> LocalBuildInfo -> UserHooks -> MakefileFlags -> IO (),
-    -- |Hook to run after makefile command.  Second arg indicates verbosity level.
-    postMakefile :: Args -> MakefileFlags -> PackageDescription -> LocalBuildInfo -> IO (),
-
     -- |Hook to run before clean command.  Second arg indicates verbosity level.
     preClean  :: Args -> CleanFlags -> IO HookedBuildInfo,
     -- |Over-ride this hook to get different behavior during clean.
-    cleanHook :: PackageDescription -> Maybe LocalBuildInfo -> UserHooks -> CleanFlags -> IO (),
+    cleanHook :: PackageDescription -> () -> UserHooks -> CleanFlags -> IO (),
     -- |Hook to run after clean command.  Second arg indicates verbosity level.
-    postClean :: Args -> CleanFlags -> PackageDescription -> Maybe LocalBuildInfo -> IO (),
+    postClean :: Args -> CleanFlags -> PackageDescription -> () -> IO (),
 
     -- |Hook to run before copy command
     preCopy  :: Args -> CopyFlags -> IO HookedBuildInfo,
@@ -187,9 +178,6 @@ emptyUserHooks
       preBuild  = rn,
       buildHook = ru,
       postBuild = ru,
-      preMakefile = rn,
-      makefileHook = ru,
-      postMakefile = ru,
       preClean  = rn,
       cleanHook = ru,
       postClean = ru,

@@ -1,12 +1,15 @@
+# -----------------------------------------------------------------------------
+#
+# (c) 2009 The University of Glasgow
+#
+# This file is part of the GHC build system.
+#
+# To understand how the build system works and how to modify it, see
+#      http://hackage.haskell.org/trac/ghc/wiki/Building/Architecture
+#      http://hackage.haskell.org/trac/ghc/wiki/Building/Modifying
+#
+# -----------------------------------------------------------------------------
 
-TOP=../..
-ENABLE_SHELL_WRAPPERS = YES
-
-include $(TOP)/mk/boilerplate.mk
-include $(TOP)/mk/cabal.mk
-
-distclean maintainer-clean:
-	$(RM) -f runghc.cabal
-
-# XXX Need to make runhaskell somehow
-
+dir = utils/runghc
+TOP = ../..
+include $(TOP)/mk/sub-makefile.mk

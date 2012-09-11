@@ -66,7 +66,6 @@
 #define CMINUSMINUS 1
 
 #include "ghcconfig.h"
-#include "RtsConfig.h"
 
 /* -----------------------------------------------------------------------------
    Types 
@@ -88,6 +87,7 @@
 #define I16 bits16
 #define I32 bits32
 #define I64 bits64
+#define P_  gcptr
 
 #if SIZEOF_VOID_P == 4
 #define W_ bits32
@@ -142,6 +142,18 @@
   section "rodata" {				\
 	name : bits8[] str;			\
   }						\
+
+#ifdef TABLES_NEXT_TO_CODE
+#define RET_LBL(f) f##_info
+#else
+#define RET_LBL(f) f##_ret
+#endif
+
+#ifdef TABLES_NEXT_TO_CODE
+#define ENTRY_LBL(f) f##_info
+#else
+#define ENTRY_LBL(f) f##_entry
+#endif
 
 /* -----------------------------------------------------------------------------
    Byte/word macros
@@ -258,18 +270,18 @@
 // "used".
 
 #define LOAD_INFO \
-    info = %INFO_PTR(UNTAG(R1));
+    info = %INFO_PTR(UNTAG(P1));
 
 #define UNTAG_R1 \
-    R1 = UNTAG(R1);
+    P1 = UNTAG(P1);
 
 #else
 
 #define LOAD_INFO                               \
-  if (GETTAG(R1) != 0) {                        \
+  if (GETTAG(P1) != 0) {                        \
       jump %ENTRY_CODE(Sp(0));                  \
   }                                             \
-  info = %INFO_PTR(R1);
+  info = %INFO_PTR(P1);
 
 #define UNTAG_R1 /* nothing */
 
@@ -288,7 +300,7 @@
     IND_OLDGEN_PERM,					\
     IND_STATIC:						\
    {							\
-      R1 = StgInd_indirectee(R1);			\
+      P1 = StgInd_indirectee(P1);			\
       goto again;					\
    }							\
   case							\
@@ -306,7 +318,7 @@
    }							\
   default:						\
    {							\
-      UNTAG_R1               				\
+      UNTAG_R1                                          \
       jump %ENTRY_CODE(info);				\
    }							\
   }
@@ -319,32 +331,27 @@
    Constants.
    -------------------------------------------------------------------------- */
 
-#include "Constants.h"
+#include "rts/Constants.h"
 #include "DerivedConstants.h"
-#include "ClosureTypes.h"
-#include "StgFun.h"
-#include "OSThreads.h"
-#include "SMP.h"
+#include "rts/storage/ClosureTypes.h"
+#include "rts/storage/FunTypes.h"
+#include "rts/storage/SMPClosureOps.h"
+#include "rts/OSThreads.h"
 
 /*
  * Need MachRegs, because some of the RTS code is conditionally
  * compiled based on REG_R1, REG_R2, etc.
  */
 #define STOLEN_X86_REGS 4
-#include "MachRegs.h"
+#include "stg/MachRegs.h"
 
-#include "Liveness.h"
-#include "StgLdvProf.h"
+#include "rts/storage/Liveness.h"
+#include "rts/prof/LDV.h"
 
 #undef BLOCK_SIZE
 #undef MBLOCK_SIZE
-#include "Block.h"  /* For Bdescr() */
+#include "rts/storage/Block.h"  /* For Bdescr() */
 
-
-/* Can't think of a better place to put this. */
-#if SIZEOF_mp_limb_t != SIZEOF_VOID_P
-#error mp_limb_t != StgWord: assumptions in PrimOps.cmm are now false
-#endif
 
 #define MyCapability()  (BaseReg - OFFSET_Capability_r)
 
@@ -585,7 +592,7 @@
   bdescr_free(__bd) = free + WDS(1);
 
 #define recordMutable(p, regs)                                  \
-      W_ __p;                                                   \
+      P_ __p;                                                   \
       W_ __bd;                                                  \
       W_ __gen;                                                 \
       __p = p;                                                  \

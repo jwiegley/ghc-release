@@ -42,7 +42,8 @@ import Data.Typeable
 import GHC.Show
 import GHC.List         ( null )
 import GHC.Base
-import GHC.IOBase
+-- import GHC.IO
+import GHC.IORef
 import GHC.STRef        ( STRef(..) )
 import GHC.Ptr          ( Ptr(..), FunPtr(..) )
 import GHC.Err
@@ -156,8 +157,8 @@ mallocForeignPtr = doMalloc undefined
              (# s', ForeignPtr (byteArrayContents# (unsafeCoerce# mbarr#))
                                (MallocPtr mbarr# r) #)
             }
-            where (I# size)  = sizeOf a
-                  (I# align) = alignment a
+            where !(I# size)  = sizeOf a
+                  !(I# align) = alignment a
 
 -- | This function is similar to 'mallocForeignPtr', except that the
 -- size of the memory required is given explicitly as a number of bytes.
@@ -191,8 +192,8 @@ mallocPlainForeignPtr = doMalloc undefined
              (# s', ForeignPtr (byteArrayContents# (unsafeCoerce# mbarr#))
                                (PlainPtr mbarr#) #)
             }
-            where (I# size)  = sizeOf a
-                  (I# align) = alignment a
+            where !(I# size)  = sizeOf a
+                  !(I# align) = alignment a
 
 -- | This function is similar to 'mallocForeignPtrBytes', except that
 -- the internally an optimised ForeignPtr representation with no

@@ -24,7 +24,6 @@ module Literal
 	, mkMachChar, mkMachString
 	
 	-- ** Operations on Literals
-	, litSize
 	, literalType
 	, hashLiteral
 
@@ -50,39 +49,14 @@ import FastTypes
 import FastString
 import BasicTypes
 import Binary
-import Ratio
+import Constants
 
 import Data.Int
+import Data.Ratio
 import Data.Word
 import Data.Char
 \end{code}
 
-
-%************************************************************************
-%*									*
-\subsection{Sizes}
-%*									*
-%************************************************************************
-
-If we're compiling with GHC (and we're not cross-compiling), then we
-know that minBound and maxBound :: Int are the right values for the
-target architecture.  Otherwise, we assume -2^31 and 2^31-1
-respectively (which will be wrong on a 64-bit machine).
-
-\begin{code}
-tARGET_MIN_INT, tARGET_MAX_INT, tARGET_MAX_WORD :: Integer
-#ifdef __GLASGOW_HASKELL__
-tARGET_MIN_INT  = toInteger (minBound :: Int)
-tARGET_MAX_INT  = toInteger (maxBound :: Int)
-#else
-tARGET_MIN_INT = -2147483648
-tARGET_MAX_INT =  2147483647
-#endif
-tARGET_MAX_WORD = (tARGET_MAX_INT * 2) + 1
-
-tARGET_MAX_CHAR :: Int
-tARGET_MAX_CHAR = 0x10ffff
-\end{code}
 
 %************************************************************************
 %*									*
@@ -332,15 +306,6 @@ litFitsInChar (MachInt i)
     		         = fromInteger i <= ord minBound 
                         && fromInteger i >= ord maxBound 
 litFitsInChar _         = False
-
--- | Finds a nominal size of a string literal. Every literal has size at least 1
-litSize :: Literal -> Int
--- Used by CoreUnfold.sizeExpr
-litSize (MachStr str) = 1 + ((lengthFS str + 3) `div` 4)
-	-- If size could be 0 then @f "x"@ might be too small
-	-- [Sept03: make literal strings a bit bigger to avoid fruitless 
-	--  duplication of little strings]
-litSize _other	      = 1
 \end{code}
 
 	Types

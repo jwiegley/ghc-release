@@ -1,5 +1,9 @@
-{-# LANGUAGE CPP #-}
-{-# OPTIONS_GHC -XDeriveDataTypeable #-}
+{-# LANGUAGE CPP, ForeignFunctionInterface #-}
+-- We cannot actually specify all the language pragmas, see ghc ticket #
+-- If we could, these are what they would be:
+{- LANGUAGE DeriveDataTypeable -}
+{-# OPTIONS_HADDOCK hide #-}
+
 -- |
 -- Module      : Data.ByteString.Lazy.Internal
 -- License     : BSD-style

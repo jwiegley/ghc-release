@@ -11,6 +11,11 @@
  *
  * ---------------------------------------------------------------------------*/
 
+#ifndef SM_MARKWEAK_H
+#define SM_MARKWEAK_H
+
+BEGIN_RTS_PRIVATE
+
 extern StgWeak *old_weak_ptr_list;
 extern StgTSO *resurrected_threads;
 extern StgTSO *exception_threads;
@@ -19,3 +24,7 @@ void    initWeakForGC          ( void );
 rtsBool traverseWeakPtrList    ( void );
 void    markWeakPtrList        ( void );
 rtsBool traverseBlackholeQueue ( void );
+
+END_RTS_PRIVATE
+
+#endif /* SM_MARKWEAK_H */

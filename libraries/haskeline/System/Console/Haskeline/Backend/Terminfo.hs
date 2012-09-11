@@ -10,7 +10,7 @@ import Data.List(intersperse)
 import System.IO
 import qualified Control.Exception.Extensible as Exception
 import qualified Data.ByteString.Char8 as B
-import Data.Maybe (fromMaybe, catMaybes)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Control.Concurrent.Chan
 
 import System.Console.Haskeline.Monads as Monads
@@ -66,12 +66,12 @@ getWrapLine nl' left1 = (autoRightMargin >>= guard >> withAutoMargin)
 type TermAction = Actions -> TermOutput
     
 left,right,up :: Int -> TermAction
-left n = flip leftA n
-right n = flip rightA n
-up n = flip upA n
+left = flip leftA
+right = flip rightA
+up = flip upA
 
 clearAll :: LinesAffected -> TermAction
-clearAll la = flip clearAllA la
+clearAll = flip clearAllA
 
 --------
 
@@ -99,9 +99,7 @@ newtype Draw m a = Draw {unDraw :: (ReaderT Actions
               MonadReader Actions, MonadReader Terminal, MonadState TermPos,
               MonadReader Handle, MonadReader Encoders)
 
-instance MonadReader Layout m => MonadReader Layout (Draw m) where
-    ask = lift ask
-    local r = Draw . local r . unDraw
+type DrawM a = forall m . (MonadReader Layout m, MonadIO m) => Draw m a
 
 instance MonadTrans Draw where
     lift = Draw . lift . lift . lift . lift . lift
@@ -119,15 +117,16 @@ runTerminfoDraw = do
             Just actions -> fmap Just $ posixRunTerm $ \enc h ->
                 TermOps {
                     getLayout = tryGetLayouts (posixLayouts h
-                                                ++ [tinfoLayout term]),
-                    runTerm = \f ->
+                                                ++ [tinfoLayout term])
+                    , withGetEvent = wrapKeypad h term
+                                        . withPosixGetEvent ch h enc
+                                            (terminfoKeys term)
+                    , runTerm = \(RunTermType f) -> 
                              runPosixT enc h
                               $ evalStateT' initTermPos
                               $ runReaderT' term
                               $ runReaderT' actions
-                              $ unDraw
-                              $ wrapKeypad h term
-                              $ withPosixGetEvent ch enc (terminfoKeys term) f
+                              $ unDraw f
                     }
 
 -- If the keypad on/off capabilities are defined, wrap the computation with them.
@@ -135,8 +134,8 @@ wrapKeypad :: MonadException m => Handle -> Terminal -> m a -> m a
 wrapKeypad h term f = (maybeOutput keypadOn >> f)
                             `finally` maybeOutput keypadOff
   where
-    maybeOutput cap = liftIO $ hRunTermOutput h term $
-                            fromMaybe mempty (getCapability term cap)
+    maybeOutput = liftIO . hRunTermOutput h term .
+                            fromMaybe mempty . getCapability term
 
 tinfoLayout :: Terminal -> IO (Maybe Layout)
 tinfoLayout term = return $ getCapability term $ do
@@ -145,7 +144,7 @@ tinfoLayout term = return $ getCapability term $ do
                         return Layout {height=r,width=c}
 
 terminfoKeys :: Terminal -> [(String,Key)]
-terminfoKeys term = catMaybes $ map getSequence keyCapabilities
+terminfoKeys term = mapMaybe getSequence keyCapabilities
     where
         getSequence (cap,x) = do
                             keys <- getCapability term cap
@@ -159,6 +158,8 @@ terminfoKeys term = catMaybes $ map getSequence keyCapabilities
                 ,(keyDeleteChar, simpleKey Delete)
                 ,(keyHome,       simpleKey Home)
                 ,(keyEnd,        simpleKey End)
+                ,(keyPageDown,   simpleKey PageDown)
+                ,(keyPageUp,     simpleKey PageUp)
                 ]
 
     
@@ -171,7 +172,7 @@ output f = do
 
 
 
-changeRight, changeLeft :: MonadLayout m => Int -> Draw m ()
+changeRight, changeLeft :: Int -> DrawM ()
 changeRight n = do
     w <- asks width
     TermPos {termRow=r,termCol=c} <- get
@@ -201,30 +202,30 @@ changeLeft n = do
                 output $ cr <#> up linesUp <#> right newCol
                 
 -- TODO: I think if we wrap this all up in one call to output, it'll be faster...
-printText :: MonadLayout m => String -> Draw m ()
-printText "" = return ()
+printText :: [Grapheme] -> DrawM ()
+printText [] = return ()
 printText xs = fillLine xs >>= printText
 
 -- Draws as much of the string as possible in the line, and returns the rest.
 -- If we fill up the line completely, wrap to the next row.
-fillLine :: MonadLayout m => String -> Draw m String
+fillLine :: [Grapheme] -> DrawM [Grapheme]
 fillLine str = do
     w <- asks width
     TermPos {termRow=r,termCol=c} <- get
     let roomLeft = w - c
     if length str < roomLeft
         then do
-                posixEncode str >>= output . text
+                posixEncode (graphemesToString str) >>= output . text
                 put TermPos{termRow=r, termCol=c+length str}
-                return ""
+                return []
         else do
                 let (thisLine,rest) = splitAt roomLeft str
-                bstr <- posixEncode thisLine
+                bstr <- posixEncode (graphemesToString thisLine)
                 output (text bstr <#> wrapLine)
                 put TermPos {termRow=r+1,termCol=0}
                 return rest
 
-drawLineDiffT :: MonadLayout m => LineChars -> LineChars -> Draw m ()
+drawLineDiffT :: LineChars -> LineChars -> DrawM ()
 drawLineDiffT (xs1,ys1) (xs2,ys2) = case matchInit xs1 xs2 of
     ([],[])     | ys1 == ys2            -> return ()
     (xs1',[])   | xs1' ++ ys1 == ys2    -> changeLeft (length xs1')
@@ -242,9 +243,9 @@ linesLeft Layout {width=w} TermPos {termCol = c} n
     | otherwise = 1 + div (c+n) w
 
 lsLinesLeft :: Layout -> TermPos -> LineChars -> Int
-lsLinesLeft layout pos s = linesLeft layout pos (lengthToEnd s)
+lsLinesLeft layout pos = linesLeft layout pos . lengthToEnd
 
-clearDeadText :: MonadLayout m => Int -> Draw m ()
+clearDeadText :: Int -> DrawM ()
 clearDeadText n
     | n <= 0    = return ()
     | otherwise = do
@@ -258,30 +259,29 @@ clearDeadText n
                     , up (numLinesToClear - 1)
                     , right (termCol pos)]
 
-clearLayoutT :: MonadLayout m => Draw m ()
+clearLayoutT :: DrawM ()
 clearLayoutT = do
     h <- asks height
     output (clearAll h)
     put initTermPos
 
-moveToNextLineT :: MonadLayout m => LineChars -> Draw m ()
+moveToNextLineT :: LineChars -> DrawM ()
 moveToNextLineT s = do
     pos <- get
     layout <- ask
     output $ mreplicate (lsLinesLeft layout pos s) nl
     put initTermPos
 
-repositionT :: (MonadLayout m, MonadException m) =>
-                Layout -> LineChars -> Draw m ()
+repositionT :: Layout -> LineChars -> DrawM ()
 repositionT oldLayout s = do
     oldPos <- get
     let l = lsLinesLeft oldLayout oldPos s - 1
     output $ cr <#> mreplicate l nl
             <#> mreplicate (l + termRow oldPos) (clearToLineEnd <#> up 1)
     put initTermPos
-    drawLineDiffT ("","") s
+    drawLineDiffT ([],[]) s
 
-instance (MonadException m, MonadLayout m) => Term (Draw m) where
+instance (MonadException m, MonadReader Layout m) => Term (Draw m) where
     drawLineDiff = drawLineDiffT
     reposition = repositionT
     

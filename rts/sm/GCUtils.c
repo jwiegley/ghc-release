@@ -11,14 +11,18 @@
  *
  * ---------------------------------------------------------------------------*/
 
+#include "PosixSource.h"
 #include "Rts.h"
-#include "RtsFlags.h"
+
 #include "Storage.h"
 #include "GC.h"
 #include "GCThread.h"
 #include "GCUtils.h"
 #include "Printer.h"
 #include "Trace.h"
+#ifdef THREADED_RTS
+#include "WSDeque.h"
+#endif
 
 #ifdef THREADED_RTS
 SpinLock gc_alloc_block_sync;
@@ -30,6 +34,16 @@ allocBlock_sync(void)
     bdescr *bd;
     ACQUIRE_SPIN_LOCK(&gc_alloc_block_sync);
     bd = allocBlock();
+    RELEASE_SPIN_LOCK(&gc_alloc_block_sync);
+    return bd;
+}
+
+static bdescr *
+allocGroup_sync(nat n)
+{
+    bdescr *bd;
+    ACQUIRE_SPIN_LOCK(&gc_alloc_block_sync);
+    bd = allocGroup(n);
     RELEASE_SPIN_LOCK(&gc_alloc_block_sync);
     return bd;
 }
@@ -72,35 +86,50 @@ freeChain_sync(bdescr *bd)
    -------------------------------------------------------------------------- */
 
 bdescr *
-grab_todo_block (step_workspace *ws)
+grab_local_todo_block (step_workspace *ws)
 {
     bdescr *bd;
     step *stp;
 
     stp = ws->step;
-    bd = NULL;
 
-    if (ws->buffer_todo_bd)
+    bd = ws->todo_overflow;
+    if (bd != NULL)
     {
-	bd = ws->buffer_todo_bd;
-	ASSERT(bd->link == NULL);
-	ws->buffer_todo_bd = NULL;
+        ws->todo_overflow = bd->link;
+        bd->link = NULL;
+        ws->n_todo_overflow--;
 	return bd;
     }
 
-    ACQUIRE_SPIN_LOCK(&stp->sync_todo);
-    if (stp->todos) {
-	bd = stp->todos;
-        if (stp->todos == stp->todos_last) {
-            stp->todos_last = NULL;
-        }
-	stp->todos = bd->link;
-        stp->n_todos--;
-	bd->link = NULL;
-    }	
-    RELEASE_SPIN_LOCK(&stp->sync_todo);
-    return bd;
+    bd = popWSDeque(ws->todo_q);
+    if (bd != NULL)
+    {
+	ASSERT(bd->link == NULL);
+	return bd;
+    }
+
+    return NULL;
 }
+
+#if defined(THREADED_RTS)
+bdescr *
+steal_todo_block (nat s)
+{
+    nat n;
+    bdescr *bd;
+
+    // look for work to steal
+    for (n = 0; n < n_gc_threads; n++) {
+        if (n == gct->thread_index) continue;
+        bd = stealWSDeque(gc_threads[n]->steps[s].todo_q);
+        if (bd) {
+            return bd;
+        }
+    }
+    return NULL;
+}
+#endif
 
 void
 push_scanned_block (bdescr *bd, step_workspace *ws)
@@ -110,12 +139,12 @@ push_scanned_block (bdescr *bd, step_workspace *ws)
     ASSERT(bd->step == ws->step);
     ASSERT(bd->u.scan == bd->free);
 
-    if (bd->start + BLOCK_SIZE_W - bd->free > WORK_UNIT_WORDS)
+    if (bd->start + bd->blocks * BLOCK_SIZE_W - bd->free > WORK_UNIT_WORDS)
     {
         // a partially full block: put it on the part_list list.
         bd->link = ws->part_list;
         ws->part_list = bd;
-        ws->n_part_blocks++;
+        ws->n_part_blocks += bd->blocks;
         IF_DEBUG(sanity, 
                  ASSERT(countBlocks(ws->part_list) == ws->n_part_blocks));
     }
@@ -124,7 +153,7 @@ push_scanned_block (bdescr *bd, step_workspace *ws)
         // put the scan block on the ws->scavd_list.
         bd->link = ws->scavd_list;
         ws->scavd_list = bd;
-        ws->n_scavd_blocks ++;
+        ws->n_scavd_blocks += bd->blocks;
         IF_DEBUG(sanity, 
                  ASSERT(countBlocks(ws->scavd_list) == ws->n_scavd_blocks));
     }
@@ -133,7 +162,12 @@ push_scanned_block (bdescr *bd, step_workspace *ws)
 StgPtr
 todo_block_full (nat size, step_workspace *ws)
 {
+    StgPtr p;
     bdescr *bd;
+
+    // todo_free has been pre-incremented by Evac.c:alloc_for_copy().  We
+    // are expected to leave it bumped when we've finished here.
+    ws->todo_free -= size;
 
     bd = ws->todo_bd;
 
@@ -145,13 +179,15 @@ todo_block_full (nat size, step_workspace *ws)
     // this block to push, and there's enough room in
     // this block to evacuate the current object, then just increase
     // the limit.
-    if (ws->step->todos != NULL || 
+    if (!looksEmptyWSDeque(ws->todo_q) || 
         (ws->todo_free - bd->u.scan < WORK_UNIT_WORDS / 2)) {
-        if (ws->todo_free + size < bd->start + BLOCK_SIZE_W) {
-            ws->todo_lim = stg_min(bd->start + BLOCK_SIZE_W,
+        if (ws->todo_free + size < bd->start + bd->blocks * BLOCK_SIZE_W) {
+            ws->todo_lim = stg_min(bd->start + bd->blocks * BLOCK_SIZE_W,
                                    ws->todo_lim + stg_max(WORK_UNIT_WORDS,size));
             debugTrace(DEBUG_gc, "increasing limit for %p to %p", bd->start, ws->todo_lim);
-            return ws->todo_free;
+            p = ws->todo_free;
+            ws->todo_free += size;
+            return p;
         }
     }
     
@@ -178,20 +214,15 @@ todo_block_full (nat size, step_workspace *ws)
         {
             step *stp;
             stp = ws->step;
-            trace(TRACE_gc|DEBUG_gc, "push todo block %p (%ld words), step %d, n_todos: %d", 
+            debugTrace(DEBUG_gc, "push todo block %p (%ld words), step %d, todo_q: %ld", 
                   bd->start, (unsigned long)(bd->free - bd->u.scan),
-                  stp->abs_no, stp->n_todos);
-            // ToDo: use buffer_todo
-            ACQUIRE_SPIN_LOCK(&stp->sync_todo);
-            if (stp->todos_last == NULL) {
-                stp->todos_last = bd;
-                stp->todos = bd;
-            } else {
-                stp->todos_last->link = bd;
-                stp->todos_last = bd;
+                  stp->abs_no, dequeElements(ws->todo_q));
+
+            if (!pushWSDeque(ws->todo_q, bd)) {
+                bd->link = ws->todo_overflow;
+                ws->todo_overflow = bd;
+                ws->n_todo_overflow++;
             }
-            stp->n_todos++;
-            RELEASE_SPIN_LOCK(&stp->sync_todo);
         }
     }
 
@@ -201,36 +232,43 @@ todo_block_full (nat size, step_workspace *ws)
 
     alloc_todo_block(ws, size);
 
-    return ws->todo_free;
+    p = ws->todo_free;
+    ws->todo_free += size;
+    return p;
 }
 
 StgPtr
 alloc_todo_block (step_workspace *ws, nat size)
 {
-    bdescr *bd/*, *hd, *tl*/;
+    bdescr *bd/*, *hd, *tl */;
 
     // Grab a part block if we have one, and it has enough room
-    if (ws->part_list != NULL && 
-        ws->part_list->start + BLOCK_SIZE_W - ws->part_list->free > (int)size)
+    bd = ws->part_list;
+    if (bd != NULL &&
+        bd->start + bd->blocks * BLOCK_SIZE_W - bd->free > (int)size)
     {
-        bd = ws->part_list;
         ws->part_list = bd->link;
-        ws->n_part_blocks--;
+        ws->n_part_blocks -= bd->blocks;
     }
     else
     {
         // blocks in to-space get the BF_EVACUATED flag.
 
-//        allocBlocks_sync(4, &hd, &tl, 
+//        allocBlocks_sync(16, &hd, &tl, 
 //                         ws->step->gen_no, ws->step, BF_EVACUATED);
 //
 //        tl->link = ws->part_list;
 //        ws->part_list = hd->link;
-//        ws->n_part_blocks += 3;
+//        ws->n_part_blocks += 15;
 //
 //        bd = hd;
 
-        bd = allocBlock_sync();
+        if (size > BLOCK_SIZE_W) {
+            bd = allocGroup_sync((lnat)BLOCK_ROUND_UP(size*sizeof(W_))
+                                 / BLOCK_SIZE);
+        } else {
+            bd = allocBlock_sync();
+        }
         bd->step = ws->step;
         bd->gen_no = ws->step->gen_no;
         bd->flags = BF_EVACUATED;
@@ -241,7 +279,7 @@ alloc_todo_block (step_workspace *ws, nat size)
 
     ws->todo_bd = bd;
     ws->todo_free = bd->free;
-    ws->todo_lim  = stg_min(bd->start + BLOCK_SIZE_W,
+    ws->todo_lim  = stg_min(bd->start + bd->blocks * BLOCK_SIZE_W,
                             bd->free + stg_max(WORK_UNIT_WORDS,size));
 
     debugTrace(DEBUG_gc, "alloc new todo block %p for step %d", 

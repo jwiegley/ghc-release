@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, ForeignFunctionInterface #-}
+{-# LANGUAGE CPP, ForeignFunctionInterface, RecordWildCards #-}
 {-# OPTIONS_HADDOCK hide #-}
 {-# OPTIONS_GHC -w #-}
 -- XXX We get some warnings on Windows
@@ -58,18 +58,41 @@ import Data.IORef
 import System.IO 	( Handle )
 import System.Exit	( ExitCode )
 import Control.Concurrent
-import Control.Exception.Base ( catchJust, handle )
+import Control.Exception
 import Foreign.C
 import Foreign
 
 # ifdef __GLASGOW_HASKELL__
+
 import System.Posix.Internals
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO.Exception
+import GHC.IO.Encoding
+import qualified GHC.IO.FD as FD
+import GHC.IO.Device
+import GHC.IO.Handle
+import GHC.IO.Handle.FD
+import GHC.IO.Handle.Internals
+import GHC.IO.Handle.Types
+import System.IO.Error
+import Data.Typeable
+#if defined(mingw32_HOST_OS)
+import GHC.IO.IOMode
+#endif
+#else
 import GHC.IOBase	( haFD, FD, IOException(..) )
 import GHC.Handle
+#endif
+
 # elif __HUGS__
+
 import Hugs.Exception	( IOException(..) )
+
 # endif
 
+#ifdef base4
+import System.IO.Error		( ioeSetFileName )
+#endif
 #if defined(mingw32_HOST_OS)
 import Control.Monad		( when )
 import System.Directory		( doesFileExist )
@@ -288,14 +311,25 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
    alloca $ \ pfdStdOutput ->
    alloca $ \ pfdStdError  ->
    maybeWith withCEnvironment mb_env $ \pEnv ->
-   maybeWith withCString mb_cwd $ \pWorkDir -> do
-   withCString cmdline $ \pcmdline -> do
+   maybeWith withCWString mb_cwd $ \pWorkDir -> do
+   withCWString cmdline $ \pcmdline -> do
      
      fdin  <- mbFd fun fd_stdin  mb_stdin
      fdout <- mbFd fun fd_stdout mb_stdout
      fderr <- mbFd fun fd_stderr mb_stderr
 
-     proc_handle <- throwErrnoIfMinus1 fun $
+     -- #2650: we must ensure mutual exclusion of c_runInteractiveProcess,
+     -- because otherwise there is a race condition whereby one thread
+     -- has created some pipes, and another thread spawns a process which
+     -- accidentally inherits some of the pipe handles that the first
+     -- thread has created.
+     -- 
+     -- An MVar in Haskell is the best way to do this, because there
+     -- is no way to do one-time thread-safe initialisation of a mutex
+     -- the C code.  Also the MVar will be cheaper when not running
+     -- the threaded RTS.
+     proc_handle <- withMVar runInteractiveProcess_lock $ \_ ->
+                    throwErrnoIfMinus1 fun $
 	                 c_runInteractiveProcess pcmdline pWorkDir pEnv 
                                 fdin fdout fderr
 				pfdStdInput pfdStdOutput pfdStdError
@@ -308,11 +342,14 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
      ph <- mkProcessHandle proc_handle
      return (hndStdInput, hndStdOutput, hndStdError, ph)
 
+{-# NOINLINE runInteractiveProcess_lock #-}
+runInteractiveProcess_lock :: MVar ()
+runInteractiveProcess_lock = unsafePerformIO $ newMVar ()
 
 foreign import ccall unsafe "runInteractiveProcess" 
   c_runInteractiveProcess
-        :: CString
-        -> CString
+        :: CWString
+        -> CWString
         -> Ptr ()
         -> FD
         -> FD
@@ -401,9 +438,24 @@ fd_stdout = 1
 fd_stderr = 2
 
 mbFd :: String -> FD -> StdStream -> IO FD
-mbFd _fun std Inherit         = return std
-mbFd fun _std (UseHandle hdl) = withHandle_ fun hdl $ return . haFD
 mbFd _   _std CreatePipe      = return (-1)
+mbFd _fun std Inherit         = return std
+mbFd fun _std (UseHandle hdl) = 
+#if __GLASGOW_HASKELL__ < 611
+  withHandle_ fun hdl $ return . haFD
+#else
+  withHandle fun hdl $ \h@Handle__{haDevice=dev,..} ->
+    case cast dev of
+      Just fd -> do
+         -- clear the O_NONBLOCK flag on this FD, if it is set, since
+         -- we're exposing it externally (see #3316)
+         fd <- FD.setNonBlockingMode fd False
+         return (Handle__{haDevice=fd,..}, FD.fdFD fd)
+      Nothing ->
+          ioError (mkIOError illegalOperationErrorType
+		      "createProcess" (Just hdl) Nothing
+                   `ioeSetErrorString` "handle is not a file descriptor")
+#endif
 
 mbPipe :: StdStream -> Ptr FD -> IOMode -> IO (Maybe Handle)
 mbPipe CreatePipe pfd  mode = fmap Just (pfdToHandle pfd mode)
@@ -412,9 +464,20 @@ mbPipe _std      _pfd _mode = return Nothing
 pfdToHandle :: Ptr FD -> IOMode -> IO Handle
 pfdToHandle pfd mode = do
   fd <- peek pfd
+  let filepath = "fd:" ++ show fd
+#if __GLASGOW_HASKELL__ >= 611
+  (fD,fd_type) <- FD.mkFD (fromIntegral fd) mode 
+                       (Just (Stream,0,0)) -- avoid calling fstat()
+                       False {-is_socket-}
+                       False {-non-blocking-}
+  fD <- FD.setNonBlockingMode fD True -- see #3316
+  mkHandleFromFD fD fd_type filepath mode False{-is_socket-}
+                       (Just localeEncoding)
+#else
   fdToHandle' fd (Just Stream)
      False{-Windows: not a socket,  Unix: don't set non-blocking-}
-     ("fd:" ++ show fd) mode True{-binary-}
+     filepath mode True{-binary-}
+#endif
 
 #ifndef __HUGS__
 -- ----------------------------------------------------------------------------
@@ -462,7 +525,13 @@ commandToProcess (RawCommand cmd args) = do
 findCommandInterpreter :: IO FilePath
 findCommandInterpreter = do
   -- try COMSPEC first
+#ifdef base3
+  catchJust (\e -> case e of 
+                     IOException e | isDoesNotExistError e -> Just e
+                     _otherwise -> Nothing)
+#else
   catchJust (\e -> if isDoesNotExistError e then Just e else Nothing)
+#endif
             (getEnv "COMSPEC") $ \e -> do
 
     -- try to find CMD.EXE or COMMAND.COM
@@ -505,7 +574,11 @@ findCommandInterpreter = do
 withFilePathException :: FilePath -> IO a -> IO a
 withFilePathException fpath act = handle mapEx act
   where
-    mapEx (IOError h iot fun str _) = ioError (IOError h iot fun str (Just fpath))
+#ifdef base4
+    mapEx ex = ioError (ioeSetFileName ex fpath)
+#else
+    mapEx (IOException (IOError h iot fun str _)) = ioError (IOError h iot fun str (Just fpath))
+#endif
 
 #if !defined(mingw32_HOST_OS) && !defined(__MINGW32__)
 withCEnvironment :: [(String,String)] -> (Ptr CString  -> IO a) -> IO a

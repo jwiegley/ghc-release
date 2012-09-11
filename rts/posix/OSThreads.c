@@ -7,14 +7,16 @@
  *
  * --------------------------------------------------------------------------*/
 
-#if defined(DEBUG) && defined(__linux__)
+#if defined(__linux__)
 /* We want GNU extensions in DEBUG mode for mutex error checking */
+/* We also want the affinity API, which requires _GNU_SOURCE */
 #define _GNU_SOURCE
 #endif
 
+#include "PosixSource.h"
 #include "Rts.h"
+
 #if defined(THREADED_RTS)
-#include "OSThreads.h"
 #include "RtsUtils.h"
 #include "Task.h"
 
@@ -22,8 +24,25 @@
 #include <string.h>
 #endif
 
+#if defined(darwin_HOST_OS)
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#endif
+
 #if !defined(HAVE_PTHREAD_H)
 #error pthreads.h is required for the threaded RTS on Posix platforms
+#endif
+
+#if defined(HAVE_SCHED_H)
+#include <sched.h>
+#endif
+
+#ifdef HAVE_UNISTD_H
+#include <unistd.h>
+#endif
+
+#if defined(darwin_HOST_OS)
+#include <mach/mach.h>
 #endif
 
 /*
@@ -104,10 +123,10 @@ osThreadIsAlive(OSThreadId id STG_UNUSED)
 void
 initMutex(Mutex* pMut)
 {
-#if defined(DEBUG) && defined(linux_HOST_OS)
+#if defined(DEBUG)
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
-    pthread_mutexattr_settype(&attr,PTHREAD_MUTEX_ERRORCHECK_NP);
+    pthread_mutexattr_settype(&attr,PTHREAD_MUTEX_ERRORCHECK);
     pthread_mutex_init(pMut,&attr);
 #else
     pthread_mutex_init(pMut,NULL);
@@ -178,6 +197,69 @@ forkOS_createThread ( HsStablePtr entry )
         pthread_detach(tid);
     return result;
 }
+
+nat
+getNumberOfProcessors (void)
+{
+    static nat nproc = 0;
+
+    if (nproc == 0) {
+#if defined(HAVE_SYSCONF) && defined(_SC_NPROCESSORS_ONLN)
+        nproc = sysconf(_SC_NPROCESSORS_ONLN);
+#elif defined(HAVE_SYSCONF) && defined(_SC_NPROCESSORS_CONF)
+        nproc = sysconf(_SC_NPROCESSORS_CONF);
+#elif defined(darwin_HOST_OS)
+        size_t size = sizeof(nat);
+        if(0 != sysctlbyname("hw.ncpu",&nproc,&size,NULL,0))
+            nproc = 1;
+#else
+        nproc = 1;
+#endif
+    }
+
+    return nproc;
+}
+
+#if defined(HAVE_SCHED_H) && defined(HAVE_SCHED_SETAFFINITY)
+// Schedules the thread to run on CPU n of m.  m may be less than the
+// number of physical CPUs, in which case, the thread will be allowed
+// to run on CPU n, n+m, n+2m etc.
+void
+setThreadAffinity (nat n, nat m)
+{
+    nat nproc;
+    cpu_set_t cs;
+    nat i;
+
+    nproc = getNumberOfProcessors();
+    CPU_ZERO(&cs);
+    for (i = n; i < nproc; i+=m) {
+        CPU_SET(i, &cs);
+    }
+    sched_setaffinity(0, sizeof(cpu_set_t), &cs);
+}
+
+#elif defined(darwin_HOST_OS) && defined(THREAD_AFFINITY_POLICY)
+// Schedules the current thread in the affinity set identified by tag n.
+void
+setThreadAffinity (nat n, nat m GNUC3_ATTRIBUTE(__unused__))
+{
+    thread_affinity_policy_data_t policy;
+
+    policy.affinity_tag = n;
+    thread_policy_set(mach_thread_self(), 
+		      THREAD_AFFINITY_POLICY,
+		      (thread_policy_t) &policy,
+		      THREAD_AFFINITY_POLICY_COUNT);
+}
+
+#else
+void
+setThreadAffinity (nat n GNUC3_ATTRIBUTE(__unused__), 
+		   nat m GNUC3_ATTRIBUTE(__unused__))
+{
+}
+#endif
 
 #else /* !defined(THREADED_RTS) */
 

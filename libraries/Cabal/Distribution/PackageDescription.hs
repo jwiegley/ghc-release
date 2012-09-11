@@ -100,7 +100,7 @@ import Distribution.Package
          ( PackageName(PackageName), PackageIdentifier(PackageIdentifier)
          , Dependency, Package(..) )
 import Distribution.ModuleName (ModuleName)
-import Distribution.Version  (Version(Version), VersionRange(AnyVersion))
+import Distribution.Version  (Version(Version), VersionRange, anyVersion)
 import Distribution.License  (License(AllRightsReserved))
 import Distribution.Compiler (CompilerFlavor)
 import Distribution.System   (OS, Arch)
@@ -161,7 +161,7 @@ emptyPackageDescription
                                                        (Version [] []),
                       license      = AllRightsReserved,
                       licenseFile  = "",
-                      descCabalVersion = AnyVersion,
+                      descCabalVersion = anyVersion,
                       buildType    = Nothing,
                       copyright    = "",
                       maintainer   = "",
@@ -255,15 +255,14 @@ maybeHasLibs p =
 
 -- |If the package description has a library section, call the given
 --  function with the library build info as argument.
-withLib :: PackageDescription -> a -> (Library -> IO a) -> IO a
-withLib pkg_descr a f =
-   maybe (return a) f (maybeHasLibs pkg_descr)
+withLib :: PackageDescription -> (Library -> IO ()) -> IO ()
+withLib pkg_descr f =
+   maybe (return ()) f (maybeHasLibs pkg_descr)
 
--- |Get all the module names from the libraries in this package
-libModules :: PackageDescription -> [ModuleName]
-libModules PackageDescription{library=lib}
-    = maybe [] exposedModules lib
-       ++ maybe [] (otherModules . libBuildInfo) lib
+-- | Get all the module names from the library (exposed and internal modules)
+libModules :: Library -> [ModuleName]
+libModules lib = exposedModules lib
+              ++ otherModules (libBuildInfo lib)
 
 -- ---------------------------------------------------------------------------
 -- The Executable type
@@ -303,14 +302,13 @@ hasExes p = any (buildable . buildInfo) (executables p)
 
 -- | Perform the action on each buildable 'Executable' in the package
 -- description.
-withExe :: PackageDescription -> (Executable -> IO a) -> IO ()
+withExe :: PackageDescription -> (Executable -> IO ()) -> IO ()
 withExe pkg_descr f =
   sequence_ [f exe | exe <- executables pkg_descr, buildable (buildInfo exe)]
 
--- |Get all the module names from the exes in this package
-exeModules :: PackageDescription -> [ModuleName]
-exeModules PackageDescription{executables=execs}
-    = concatMap (otherModules . buildInfo) execs
+-- | Get all the module names from an exe
+exeModules :: Executable -> [ModuleName]
+exeModules exe = otherModules (buildInfo exe)
 
 -- ---------------------------------------------------------------------------
 -- The BuildInfo type
@@ -336,9 +334,10 @@ data BuildInfo = BuildInfo {
         options           :: [(CompilerFlavor,[String])],
         ghcProfOptions    :: [String],
         ghcSharedOptions  :: [String],
-        customFieldsBI    :: [(String,String)]  -- ^Custom fields starting
+        customFieldsBI    :: [(String,String)], -- ^Custom fields starting
                                                 -- with x-, stored in a
                                                 -- simple assoc-list.
+        targetBuildDepends :: [Dependency] -- ^ Dependencies specific to a library or executable target
     }
     deriving (Show,Read,Eq)
 
@@ -363,15 +362,16 @@ instance Monoid BuildInfo where
     options           = [],
     ghcProfOptions    = [],
     ghcSharedOptions  = [],
-    customFieldsBI    = []
+    customFieldsBI    = [],
+    targetBuildDepends = []
   }
   mappend a b = BuildInfo {
     buildable         = buildable a && buildable b,
-    buildTools        = combineNub buildTools,
+    buildTools        = combine    buildTools,
     cppOptions        = combine    cppOptions,
     ccOptions         = combine    ccOptions,
     ldOptions         = combine    ldOptions,
-    pkgconfigDepends  = combineNub pkgconfigDepends,
+    pkgconfigDepends  = combine    pkgconfigDepends,
     frameworks        = combineNub frameworks,
     cSources          = combineNub cSources,
     hsSourceDirs      = combineNub hsSourceDirs,
@@ -385,7 +385,8 @@ instance Monoid BuildInfo where
     options           = combine    options,
     ghcProfOptions    = combine    ghcProfOptions,
     ghcSharedOptions  = combine    ghcSharedOptions,
-    customFieldsBI    = combine    customFieldsBI
+    customFieldsBI    = combine    customFieldsBI,
+    targetBuildDepends = combineNub targetBuildDepends
   }
     where
       combine    field = field a `mappend` field b

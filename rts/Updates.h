@@ -9,6 +9,10 @@
 #ifndef UPDATES_H
 #define UPDATES_H
 
+#ifndef CMINUSMINUS
+BEGIN_RTS_PRIVATE
+#endif
+
 /* -----------------------------------------------------------------------------
    Updates
 
@@ -35,19 +39,13 @@
 #ifdef CMINUSMINUS
 #define BLOCK_BEGIN
 #define BLOCK_END
-#define DECLARE_IPTR(info)  W_ info
-#define FCALL               foreign "C"
 #define INFO_PTR(info)      info
-#define ARG_PTR             "ptr"
 #else
 #define BLOCK_BEGIN         {
 #define BLOCK_END           }
-#define DECLARE_IPTR(info)  const StgInfoTable *(info)
-#define FCALL               /* nothing */
 #define INFO_PTR(info)      &info
 #define StgBlockingQueue_blocking_queue(closure) \
     (((StgBlockingQueue *)closure)->blocking_queue)
-#define ARG_PTR             /* nothing */
 #endif
 
 /* krc: there used to be an UPD_REAL_IND and an
@@ -56,85 +54,15 @@
    for now, we just have UPD_REAL_IND. */
 #define UPD_REAL_IND(updclosure, ind_info, heapptr, and_then)	\
         BLOCK_BEGIN						\
-	DECLARE_IPTR(info);					\
-	info = GET_INFO(updclosure);				\
 	updateWithIndirection(ind_info,				\
 			      updclosure,			\
 			      heapptr,				\
 			      and_then);			\
 	BLOCK_END
 
-#if defined(RTS_SUPPORTS_THREADS)
-
-#  define UPD_IND_NOLOCK(updclosure, heapptr)			\
-        BLOCK_BEGIN						\
-	updateWithIndirection(INFO_PTR(stg_IND_info),		\
-			      updclosure,			\
-			      heapptr,); 			\
-	BLOCK_END
-
-#else
-#define UPD_IND_NOLOCK(updclosure,heapptr) UPD_IND(updclosure,heapptr)
-#endif /* RTS_SUPPORTS_THREADS */
-
 /* -----------------------------------------------------------------------------
    Awaken any threads waiting on a blocking queue (BLACKHOLE_BQ).
    -------------------------------------------------------------------------- */
-
-#if defined(PAR) 
-
-/* 
-   In a parallel setup several types of closures might have a blocking queue:
-     BLACKHOLE_BQ ... same as in the default concurrent setup; it will be
-                      reawakened via calling UPD_IND on that closure after
-		      having finished the computation of the graph
-     FETCH_ME_BQ  ... a global indirection (FETCH_ME) may be entered by a 
-                      local TSO, turning it into a FETCH_ME_BQ; it will be
-		      reawakened via calling processResume
-     RBH          ... a revertible black hole may be entered by another 
-                      local TSO, putting it onto its blocking queue; since
-		      RBHs only exist while the corresponding closure is in 
-		      transit, they will be reawakened via calling 
-		      convertToFetchMe (upon processing an ACK message)
-
-   In a parallel setup a blocking queue may contain 3 types of closures:
-     TSO           ... as in the default concurrent setup
-     BLOCKED_FETCH ... indicating that a TSO on another PE is waiting for
-                       the result of the current computation
-     CONSTR        ... an RBHSave closure (which contains data ripped out of
-                       the closure to make room for a blocking queue; since
-		       it only contains data we use the exisiting type of
-		       a CONSTR closure); this closure is the end of a 
-		       blocking queue for an RBH closure; it only exists in
-		       this kind of blocking queue and must be at the end
-		       of the queue
-*/		      
-extern void awakenBlockedQueue(StgBlockingQueueElement *q, StgClosure *node);
-#define DO_AWAKEN_BQ(bqe, node)  STGCALL2(awakenBlockedQueue, bqe, node);
-
-#define AWAKEN_BQ(info,closure)						\
-     	if (info == &stg_BLACKHOLE_BQ_info ||               \
-	    info == &stg_FETCH_ME_BQ_info ||                \
-	    get_itbl(closure)->type == RBH) {		                \
-		DO_AWAKEN_BQ(((StgBlockingQueue *)closure)->blocking_queue, closure);     	                \
-	}
-
-#elif defined(GRAN)
-
-extern void awakenBlockedQueue(StgBlockingQueueElement *q, StgClosure *node);
-#define DO_AWAKEN_BQ(bq, node)  STGCALL2(awakenBlockedQueue, bq, node);
-
-/* In GranSim we don't have FETCH_ME or FETCH_ME_BQ closures, so they are
-   not checked. The rest of the code is the same as for GUM.
-*/
-#define AWAKEN_BQ(info,closure)						\
-     	if (info == &stg_BLACKHOLE_BQ_info ||               \
-	    get_itbl(closure)->type == RBH) {		                \
-		DO_AWAKEN_BQ(((StgBlockingQueue *)closure)->blocking_queue, closure);     	                \
-	}
-
-#endif /* GRAN || PAR */
-
 
 /* -----------------------------------------------------------------------------
    Updates: lower-level macros which update a closure with an
@@ -289,7 +217,7 @@ no_slop:
     write_barrier();						\
     bd = Bdescr((P_)p1);					\
     if (bd->gen_no != 0) {					\
-      recordMutableGenLock(p1, &generations[bd->gen_no]);	\
+      recordMutableGenLock(p1, bd->gen_no);			\
       SET_INFO(p1, &stg_IND_OLDGEN_info);			\
       TICK_UPD_OLD_IND();					\
       and_then;							\
@@ -301,4 +229,9 @@ no_slop:
     }								\
   }
 #endif /* CMINUSMINUS */
+
+#ifndef CMINUSMINUS
+END_RTS_PRIVATE
+#endif
+
 #endif /* UPDATES_H */

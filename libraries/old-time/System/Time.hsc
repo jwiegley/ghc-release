@@ -233,6 +233,11 @@ noTimeDiff = TimeDiff 0 0 0 0 0 0 0
 -- -----------------------------------------------------------------------------
 -- | returns the current time in its internal representation.
 
+realToInteger :: Real a => a -> Integer
+realToInteger ct = round (realToFrac ct :: Double)
+  -- CTime, CClock, CUShort etc are in Real but not Fractional, 
+  -- so we must convert to Double before we can round it
+
 getClockTime :: IO ClockTime
 #ifdef __HUGS__
 getClockTime = do
@@ -241,7 +246,6 @@ getClockTime = do
 
 #elif HAVE_GETTIMEOFDAY
 getClockTime = do
-  let realToInteger = round . realToFrac :: Real a => a -> Integer
   allocaBytes (#const sizeof(struct timeval)) $ \ p_timeval -> do
     throwErrnoIfMinus1_ "getClockTime" $ gettimeofday p_timeval nullPtr
     sec  <- (#peek struct timeval,tv_sec)  p_timeval :: IO CTime
@@ -250,7 +254,6 @@ getClockTime = do
  
 #elif HAVE_FTIME
 getClockTime = do
-  let realToInteger = round . realToFrac :: Real a => a -> Integer
   allocaBytes (#const sizeof(struct timeb)) $ \ p_timeb -> do
   ftime p_timeb
   sec  <- (#peek struct timeb,time) p_timeb :: IO CTime
@@ -260,7 +263,6 @@ getClockTime = do
 #else /* use POSIX time() */
 getClockTime = do
     secs <- time nullPtr -- can't fail, according to POSIX
-    let realToInteger = round . realToFrac :: Real a => a -> Integer
     return (TOD (realToInteger secs) 0)
 
 #endif
@@ -385,7 +387,6 @@ foreign import ccall "&timezone" timezone :: Ptr CTime
 gmtoff x = do 
   dst <- (#peek struct tm,tm_isdst) x
   tz <- if dst then peek altzone else peek timezone
-  let realToInteger = round . realToFrac :: Real a => a -> Integer
   return (-fromIntegral (realToInteger tz))
 # else /* ! HAVE_DECL_ALTZONE */
 
@@ -567,8 +568,7 @@ toClockTime (CalendarTime year mon mday hour minute sec psec
         -- result.
         -- 
         gmtoffset <- gmtoff p_tm
-        let realToInteger = round . realToFrac :: Real a => a -> Integer
-	    res = realToInteger t - fromIntegral tz + fromIntegral gmtoffset
+        let res = realToInteger t - fromIntegral tz + fromIntegral gmtoffset
 	return (TOD res psec)
 #endif /* ! __HUGS__ */
 
@@ -731,14 +731,14 @@ formatTimeDiff l fmt (TimeDiff year month day hour minute sec _)
 type CTm = () -- struct tm
 
 #if HAVE_LOCALTIME_R
-foreign import ccall unsafe "time.h localtime_r"
+foreign import ccall unsafe "HsTime.h __hscore_localtime_r"
     localtime_r :: Ptr CTime -> Ptr CTm -> IO (Ptr CTm)
 #else
 foreign import ccall unsafe "time.h localtime"
     localtime   :: Ptr CTime -> IO (Ptr CTm)
 #endif
 #if HAVE_GMTIME_R
-foreign import ccall unsafe "time.h gmtime_r"
+foreign import ccall unsafe "HsTime.h __hscore_gmtime_r"
     gmtime_r    :: Ptr CTime -> Ptr CTm -> IO (Ptr CTm)
 #else
 foreign import ccall unsafe "time.h gmtime"
@@ -750,7 +750,7 @@ foreign import ccall unsafe "time.h mktime"
 #if HAVE_GETTIMEOFDAY
 type CTimeVal = ()
 type CTimeZone = ()
-foreign import ccall unsafe "time.h gettimeofday"
+foreign import ccall unsafe "HsTime.h __hscore_gettimeofday"
     gettimeofday :: Ptr CTimeVal -> Ptr CTimeZone -> IO CInt
 #elif HAVE_FTIME
 type CTimeB = ()

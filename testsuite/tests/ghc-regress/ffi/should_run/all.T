@@ -26,9 +26,16 @@ test('ffi003', normal, compile_and_run, [''])
 # calling varargs functions is deprecated).  It stopped working in GHC 6.9.
 test('ffi004', skip, compile_and_run, [''])
 
-# skip this test for now: it is non-portable due to the use of literal values
-# instead of CPP symbols for the flag arguments to open().
-test('ffi005', compose(skip, exit_code(3)), compile_and_run, [''])
+# omit prof ways, because this test exits before the RTS has a chance to
+# generate profiling info.
+#
+# On x86, the test suffers from floating-point differences due to the
+# use of 80-bit internal precision when using the native code generator.
+#
+test('ffi005', [ omit_ways(prof_ways), 
+                 if_arch('i386', only_ways(['optc'])),
+                 exit_code(3) ],
+               compile_and_run, [''])
 
 # ffi[006-009] don't work with External Core due to non-static-C foreign calls
 
@@ -137,3 +144,10 @@ test('fptrfail01', [ compose(omit_ways(['ghci']), exit_code(1)),
 
 test('2917a', normal, compile_and_run, [''])
 
+# omit prof ways, because this test causes the RTS to exit (correctly)
+# without generating profiling information.
+test('ffi020', [ omit_ways(prof_ways),
+                 exit_code(1) ], compile_and_run, [''])
+
+
+test('ffi021', normal, compile_and_run, [''])

@@ -37,6 +37,7 @@ import PrelNames
 import PrelInfo
 import SrcLoc
 import Outputable
+import FastString
 
 import Control.Monad ( liftM2 )
 \end{code}
@@ -510,10 +511,32 @@ dsPArrComp :: [Stmt Id]
             -> DsM CoreExpr
 dsPArrComp [ParStmt qss] body _  =  -- parallel comprehension
   dePArrParComp qss body
+
+-- Special case for simple generators:
+--
+--  <<[:e' | p <- e, qs:]>> = <<[: e' | qs :]>> p e
+--
+-- if matching again p cannot fail, or else
+--
+--  <<[:e' | p <- e, qs:]>> = 
+--    <<[:e' | qs:]>> p (filterP (\x -> case x of {p -> True; _ -> False}) e)
+--
+dsPArrComp (BindStmt p e _ _ : qs) body _ = do
+    filterP <- dsLookupGlobalId filterPName
+    ce <- dsLExpr e
+    let ety'ce  = parrElemType ce
+        false   = Var falseDataConId
+        true    = Var trueDataConId
+    v <- newSysLocalDs ety'ce
+    pred <- matchSimply (Var v) (StmtCtxt PArrComp) p true false
+    let gen | isIrrefutableHsPat p = ce
+            | otherwise            = mkApps (Var filterP) [Type ety'ce, mkLams [v] pred, ce]
+    dePArrComp qs body p gen
+
 dsPArrComp qs            body _  = do -- no ParStmt in `qs'
     sglP <- dsLookupGlobalId singletonPName
     let unitArray = mkApps (Var sglP) [Type unitTy, mkCoreTup []]
-    dePArrComp qs body (mkLHsPatTup []) unitArray
+    dePArrComp qs body (noLoc $ WildPat unitTy) unitArray
 
 
 
@@ -589,7 +612,7 @@ dePArrComp (LetStmt ds : qs) body pa cea = do
     let projBody = mkCoreLet (NonRec let'v clet) $ 
                    mkCoreTup [Var v, Var let'v]
         errTy    = exprType projBody
-        errMsg   = "DsListComp.dePArrComp: internal error!"
+        errMsg   = ptext (sLit "DsListComp.dePArrComp: internal error!")
     cerr <- mkErrorAppDs pAT_ERROR_ID errTy errMsg
     ccase <- matchSimply (Var v) (StmtCtxt PArrComp) pa projBody cerr
     let pa'    = mkLHsPatTup [pa, mkLHsPatTup (map nlVarPat xs)]
@@ -619,7 +642,7 @@ dePArrParComp qss body = do
       -- empty parallel statement lists have no source representation
       panic "DsListComp.dePArrComp: Empty parallel list comprehension"
     deParStmt ((qs, xs):qss) = do        -- first statement
-      let res_expr = mkLHsVarTup xs
+      let res_expr = mkLHsVarTuple xs
       cqs <- dsPArrComp (map unLoc qs) res_expr undefined
       parStmts qss (mkLHsVarPatTup xs) cqs
     ---
@@ -628,7 +651,7 @@ dePArrParComp qss body = do
       zipP <- dsLookupGlobalId zipPName
       let pa'      = mkLHsPatTup [pa, mkLHsVarPatTup xs]
           ty'cea   = parrElemType cea
-          res_expr = mkLHsVarTup xs
+          res_expr = mkLHsVarTuple xs
       cqs <- dsPArrComp (map unLoc qs) res_expr undefined
       let ty'cqs = parrElemType cqs
           cea'   = mkApps (Var zipP) [Type ty'cea, Type ty'cqs, cea, cqs]
@@ -651,7 +674,7 @@ mkLambda :: Type			-- type of the argument
 	 -> DsM (CoreExpr, Type)
 mkLambda ty p ce = do
     v <- newSysLocalDs ty
-    let errMsg = do "DsListComp.deLambda: internal error!"
+    let errMsg = ptext (sLit "DsListComp.deLambda: internal error!")
         ce'ty  = exprType ce
     cerr <- mkErrorAppDs pAT_ERROR_ID ce'ty errMsg
     res <- matchSimply (Var v) (StmtCtxt PArrComp) p ce cerr

@@ -1,6 +1,6 @@
 /* -----------------------------------------------------------------------------
  *
- * (c) The GHC Team 2008 
+ * (c) The GHC Team 2008
  *
  * Simple mark/sweep, collecting whole blocks.
  *
@@ -11,4 +11,9 @@
  *
  * ---------------------------------------------------------------------------*/
 
-void sweep(step *gen);
+#ifndef SM_SWEEP_H
+#define SM_SWEEP_H
+
+RTS_PRIVATE void sweep(step *gen);
+
+#endif /* SM_SWEEP_H */

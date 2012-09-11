@@ -12,13 +12,6 @@ Much of the rationale for these things is in the ``details'' part of
 the STG paper.
 
 \begin{code}
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module ClosureInfo (
 	ClosureInfo(..), LambdaFormInfo(..),	-- would be abstract but
 	StandardFormInfo(..),			-- mkCmmInfo looks inside
@@ -36,9 +29,9 @@ module ClosureInfo (
 	closureGoodStuffSize, closurePtrsSize,
 	slopSize, 
 
-	closureName, infoTableLabelFromCI,
-	closureLabelFromCI, closureSRT,
-	closureLFInfo, isLFThunk,closureSMRep, closureUpdReqd, 
+	infoTableLabelFromCI,
+	closureLabelFromCI,
+	isLFThunk, closureUpdReqd,
 	closureNeedsUpdSpace, closureIsThunk,
 	closureSingleEntry, closureReEntrant, isConstrClosure_maybe,
 	closureFunInfo,	isStandardFormThunk, isKnownFun,
@@ -58,7 +51,7 @@ module ClosureInfo (
 	closureValDescr, closureTypeDescr,	-- profiling
 
 	isStaticClosure,
-	cafBlackHoleClosureInfo, seCafBlackHoleClosureInfo,
+	cafBlackHoleClosureInfo,
 
 	staticClosureNeedsLink,
     ) where
@@ -72,13 +65,13 @@ import SMRep
 
 import CLabel
 
-import Packages
-import PackageConfig
+import Unique
 import StaticFlags
+import Var
 import Id
+import IdInfo
 import DataCon
 import Name
-import OccName
 import Type
 import TypeRep
 import TcType
@@ -87,6 +80,7 @@ import BasicTypes
 import FastString
 import Outputable
 import Constants
+import DynFlags
 \end{code}
 
 
@@ -263,8 +257,9 @@ mkLFReEntrant :: TopLevelFlag	-- True of top level
 mkLFReEntrant top fvs args arg_descr 
   = LFReEntrant top (length args) (null fvs) arg_descr
 
+mkLFThunk :: Type -> TopLevelFlag -> [Var] -> UpdateFlag -> LambdaFormInfo
 mkLFThunk thunk_ty top fvs upd_flag
-  = ASSERT( not (isUpdatable upd_flag) || not (isUnLiftedType thunk_ty) )
+  = ASSERT2( not (isUpdatable upd_flag) || not (isUnLiftedType thunk_ty), ppr thunk_ty $$ ppr fvs )
     LFThunk top (null fvs) 
 	    (isUpdatable upd_flag)
 	    NonStandardThunk 
@@ -289,10 +284,12 @@ maybeIsLFCon :: LambdaFormInfo -> Maybe DataCon
 maybeIsLFCon (LFCon con) = Just con
 maybeIsLFCon _ = Nothing
 
+mkSelectorLFInfo :: Id -> WordOff -> Bool -> LambdaFormInfo
 mkSelectorLFInfo id offset updatable
   = LFThunk NotTopLevel False updatable (SelectorThunk offset) 
 	(might_be_a_function (idType id))
 
+mkApLFInfo :: Id -> UpdateFlag -> Int -> LambdaFormInfo
 mkApLFInfo id upd_flag arity
   = LFThunk NotTopLevel (arity == 0) (isUpdatable upd_flag) (ApThunk arity)
 	(might_be_a_function (idType id))
@@ -301,15 +298,17 @@ mkApLFInfo id upd_flag arity
 Miscellaneous LF-infos.
 
 \begin{code}
+mkLFArgument :: Id -> LambdaFormInfo
 mkLFArgument id = LFUnknown (might_be_a_function (idType id))
 
+mkLFLetNoEscape :: Int -> LambdaFormInfo
 mkLFLetNoEscape = LFLetNoEscape
 
 mkLFImported :: Id -> LambdaFormInfo
 mkLFImported id
   = case idArity id of
       n | n > 0 -> LFReEntrant TopLevel n True (panic "arg_descr")  -- n > 0
-      other -> mkLFArgument id -- Not sure of exact arity
+      _ -> mkLFArgument id -- Not sure of exact arity
 \end{code}
 
 \begin{code}
@@ -405,6 +404,7 @@ Slop Requirements: every thunk gets an extra padding word in the
 header, which takes the the updated value.
 
 \begin{code}
+slopSize :: ClosureInfo -> WordOff
 slopSize cl_info = computeSlopSize payload_size cl_info
   where payload_size = closureGoodStuffSize cl_info
 
@@ -419,6 +419,7 @@ computeSlopSize payload_size cl_info
 -- or (b) it is a static thunk.  This is because a static thunk needs
 -- a static link field in a predictable place (after the slop), regardless
 -- of whether it is updatable or not.
+closureNeedsUpdSpace :: ClosureInfo -> Bool
 closureNeedsUpdSpace (ClosureInfo { closureLFInfo = 
 					LFThunk TopLevel _ _ _ _ }) = True
 closureNeedsUpdSpace cl_info = closureUpdReqd cl_info
@@ -467,7 +468,7 @@ chooseSMRep is_static lf_info tot_wds ptr_wds
 getClosureType :: Bool -> WordOff -> LambdaFormInfo -> ClosureType
 getClosureType is_static ptr_wds lf_info
   = case lf_info of
-	LFCon con | is_static && ptr_wds == 0	-> ConstrNoCaf
+	LFCon _ | is_static && ptr_wds == 0	-> ConstrNoCaf
 		  | otherwise			-> Constr
   	LFReEntrant _ _ _ _ 			-> Fun
 	LFThunk _ _ _ (SelectorThunk _) _ 	-> ThunkSelector
@@ -519,7 +520,7 @@ nodeMustPointToIt (LFThunk _ no_fvs updatable NonStandardThunk _)
 	  -- or profiling (in which case we need to recover the cost centre
 	  --		 from inside it)
 
-nodeMustPointToIt (LFThunk _ no_fvs updatable some_standard_form_thunk _)
+nodeMustPointToIt (LFThunk _ _ _ _ _)
   = True  -- Node must point to any standard-form thunk
 
 nodeMustPointToIt (LFUnknown _)     = True
@@ -575,25 +576,27 @@ data CallMethod
 	CLabel 				--   The code label
 	Int 				--   Its arity
 
-getCallMethod :: Name		-- Function being applied
+getCallMethod :: DynFlags
+              -> Name		-- Function being applied
+              -> CafInfo        -- Can it refer to CAF's?
 	      -> LambdaFormInfo	-- Its info
 	      -> Int		-- Number of available arguments
 	      -> CallMethod
 
-getCallMethod name lf_info n_args
+getCallMethod _ _ _ lf_info _
   | nodeMustPointToIt lf_info && opt_Parallel
   =	-- If we're parallel, then we must always enter via node.  
 	-- The reason is that the closure may have been 	
 	-- fetched since we allocated it.
     EnterIt
 
-getCallMethod name (LFReEntrant _ arity _ _) n_args
+getCallMethod _ name caf (LFReEntrant _ arity _ _) n_args
   | n_args == 0    = ASSERT( arity /= 0 )
 		     ReturnIt	-- No args at all
   | n_args < arity = SlowCall	-- Not enough args
-  | otherwise      = DirectEntry (enterIdLabel name) arity
+  | otherwise      = DirectEntry (enterIdLabel name caf) arity
 
-getCallMethod name (LFCon con) n_args
+getCallMethod _ _ _ (LFCon con) n_args
   | opt_SccProfilingOn     -- when profiling, we must always enter
   = EnterIt                -- a closure when we use it, so that the closure
                            -- can be recorded as used for LDV profiling.
@@ -601,14 +604,14 @@ getCallMethod name (LFCon con) n_args
   = ASSERT( n_args == 0 )
     ReturnCon con
 
-getCallMethod name (LFThunk _ _ updatable std_form_info is_fun) n_args
+getCallMethod dflags name caf (LFThunk _ _ updatable std_form_info is_fun) n_args
   | is_fun 	-- it *might* be a function, so we must "call" it (which is
                 -- always safe)
   = SlowCall	-- We cannot just enter it [in eval/apply, the entry code
 		-- is the fast-entry code]
 
   -- Since is_fun is False, we are *definitely* looking at a data value
-  | updatable || opt_DoTickyProfiling  -- to catch double entry
+  | updatable || doingTickyProfiling dflags -- to catch double entry
       {- OLD: || opt_SMP
 	 I decided to remove this, because in SMP mode it doesn't matter
 	 if we enter the same thunk multiple times, so the optimisation
@@ -624,12 +627,12 @@ getCallMethod name (LFThunk _ _ updatable std_form_info is_fun) n_args
 
   | otherwise	-- Jump direct to code for single-entry thunks
   = ASSERT( n_args == 0 )
-    JumpToIt (thunkEntryLabel name std_form_info updatable)
+    JumpToIt (thunkEntryLabel name caf std_form_info updatable)
 
-getCallMethod name (LFUnknown True) n_args
+getCallMethod _ _ _ (LFUnknown True) _
   = SlowCall -- Might be a function
 
-getCallMethod name (LFUnknown False) n_args
+getCallMethod _ name _ (LFUnknown False) n_args
   | n_args > 0 
   = WARN( True, ppr name <+> ppr n_args ) 
     SlowCall	-- Note [Unsafe coerce complications]
@@ -637,27 +640,27 @@ getCallMethod name (LFUnknown False) n_args
   | otherwise
   = EnterIt -- Not a function
 
-getCallMethod name (LFBlackHole _) n_args
+getCallMethod _ _ _ (LFBlackHole _) _
   = SlowCall	-- Presumably the black hole has by now
 		-- been updated, but we don't know with
 		-- what, so we slow call it
 
-getCallMethod name (LFLetNoEscape 0) n_args
+getCallMethod _ name _ (LFLetNoEscape 0) _
   = JumpToIt (enterReturnPtLabel (nameUnique name))
 
-getCallMethod name (LFLetNoEscape arity) n_args
+getCallMethod _ name _ (LFLetNoEscape arity) n_args
   | n_args == arity = DirectEntry (enterReturnPtLabel (nameUnique name)) arity
   | otherwise = pprPanic "let-no-escape: " (ppr name <+> ppr arity)
 
-blackHoleOnEntry :: ClosureInfo -> Bool
+blackHoleOnEntry :: DynFlags -> ClosureInfo -> Bool
 -- Static closures are never themselves black-holed.
 -- Updatable ones will be overwritten with a CAFList cell, which points to a 
 -- black hole;
 -- Single-entry ones have no fvs to plug, and we trust they don't form part 
 -- of a loop.
 
-blackHoleOnEntry ConInfo{} = False
-blackHoleOnEntry (ClosureInfo { closureLFInfo = lf_info, closureSMRep = rep })
+blackHoleOnEntry _ ConInfo{} = False
+blackHoleOnEntry dflags (ClosureInfo { closureLFInfo = lf_info, closureSMRep = rep })
   | isStaticRep rep
   = False	-- Never black-hole a static closure
 
@@ -668,16 +671,16 @@ blackHoleOnEntry (ClosureInfo { closureLFInfo = lf_info, closureSMRep = rep })
 	LFThunk _ no_fvs updatable _ _
 	  -> if updatable
 	     then not opt_OmitBlackHoling
-	     else opt_DoTickyProfiling || not no_fvs
+	     else doingTickyProfiling dflags || not no_fvs
                   -- the former to catch double entry,
                   -- and the latter to plug space-leaks.  KSW/SDM 1999-04.
 
-	other -> panic "blackHoleOnEntry"	-- Should never happen
+	_ -> panic "blackHoleOnEntry"	-- Should never happen
 
 isStandardFormThunk :: LambdaFormInfo -> Bool
 isStandardFormThunk (LFThunk _ _ _ (SelectorThunk _) _) = True
 isStandardFormThunk (LFThunk _ _ _ (ApThunk _) _)	= True
-isStandardFormThunk other_lf_info 			= False
+isStandardFormThunk _ 			= False
 
 isKnownFun :: LambdaFormInfo -> Bool
 isKnownFun (LFReEntrant _ _ _ _) = True
@@ -729,6 +732,30 @@ staticClosureNeedsLink (ConInfo { closureSMRep = sm_rep, closureCon = con })
 	   GenericRep _ _ _ ConstrNoCaf -> False
 	   _other			-> True
 \end{code}
+
+Note [Entering error thunks]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider this
+
+	fail :: Int
+	fail = error Int "Urk"
+
+	foo :: Bool -> Bool 
+	foo True  y = (fail `cast` Bool -> Bool) y
+	foo False y = False
+
+This looks silly, but it can arise from case-of-error.  Even if it
+does, we'd usually see that 'fail' is a bottoming function and would
+discard the extra argument 'y'.  But even if that does not occur,
+this program is still OK.  We will enter 'fail', which never returns.
+
+The WARN is just to alert me to the fact that we aren't spotting that
+'fail' is bottoming.
+
+(We are careful never to make a funtion value look like a data type,
+because we can't enter a function closure -- but that is not the 
+problem here.)
+
 
 Avoiding generating entries and info tables
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -797,13 +824,13 @@ staticClosureRequired
 	-> StgBinderInfo
 	-> LambdaFormInfo
 	-> Bool
-staticClosureRequired binder bndr_info
+staticClosureRequired _ bndr_info
 		      (LFReEntrant top_level _ _ _)	-- It's a function
   = ASSERT( isTopLevel top_level )
 	-- Assumption: it's a top-level, no-free-var binding
 	not (satCallsOnly bndr_info)
 
-staticClosureRequired binder other_binder_info other_lf_info = True
+staticClosureRequired _ _ _ = True
 \end{code}
 
 %************************************************************************
@@ -834,11 +861,11 @@ closureIsThunk ConInfo{} = False
 
 closureSingleEntry :: ClosureInfo -> Bool
 closureSingleEntry (ClosureInfo { closureLFInfo = LFThunk _ _ upd _ _}) = not upd
-closureSingleEntry other_closure = False
+closureSingleEntry _ = False
 
 closureReEntrant :: ClosureInfo -> Bool
 closureReEntrant (ClosureInfo { closureLFInfo = LFReEntrant _ _ _ _ }) = True
-closureReEntrant other_closure = False
+closureReEntrant _ = False
 
 isConstrClosure_maybe :: ClosureInfo -> Maybe DataCon
 isConstrClosure_maybe (ConInfo { closureCon = data_con }) = Just data_con
@@ -879,17 +906,16 @@ isToplevClosure (ClosureInfo { closureLFInfo = lf_info })
   = case lf_info of
       LFReEntrant TopLevel _ _ _ -> True
       LFThunk TopLevel _ _ _ _   -> True
-      other -> False
+      _ -> False
 isToplevClosure _ = False
 \end{code}
 
 Label generation.
 
 \begin{code}
-infoTableLabelFromCI :: ClosureInfo -> CLabel
+infoTableLabelFromCI :: ClosureInfo -> CafInfo -> CLabel
 infoTableLabelFromCI (ClosureInfo { closureName = name,
-				    closureLFInfo = lf_info, 
-				    closureSMRep = rep })
+				    closureLFInfo = lf_info }) caf
   = case lf_info of
 	LFBlackHole info -> info
 
@@ -899,49 +925,56 @@ infoTableLabelFromCI (ClosureInfo { closureName = name,
 	LFThunk _ _ upd_flag (ApThunk arity) _ -> 
 		mkApInfoTableLabel upd_flag arity
 
-	LFThunk{}      -> mkLocalInfoTableLabel name
+	LFThunk{}      -> mkLocalInfoTableLabel name caf
 
-	LFReEntrant _ _ _ _ -> mkLocalInfoTableLabel name
+	LFReEntrant _ _ _ _ -> mkLocalInfoTableLabel name caf
 
-	other -> panic "infoTableLabelFromCI"
+	_ -> panic "infoTableLabelFromCI"
 
 infoTableLabelFromCI (ConInfo { closureCon = con, 
-				closureSMRep = rep })
-  | isStaticRep rep = mkStaticInfoTableLabel  name
-  | otherwise	    = mkConInfoTableLabel     name
+				closureSMRep = rep }) caf
+  | isStaticRep rep = mkStaticInfoTableLabel  name caf
+  | otherwise	    = mkConInfoTableLabel     name caf
   where
     name = dataConName con
 
 -- ClosureInfo for a closure (as opposed to a constructor) is always local
-closureLabelFromCI (ClosureInfo { closureName = nm }) = mkLocalClosureLabel nm
-closureLabelFromCI _ = panic "closureLabelFromCI"
+closureLabelFromCI :: ClosureInfo -> CafInfo -> CLabel
+closureLabelFromCI (ClosureInfo { closureName = nm }) caf = mkLocalClosureLabel nm caf
+closureLabelFromCI _ _ = panic "closureLabelFromCI"
 
 -- thunkEntryLabel is a local help function, not exported.  It's used from both
 -- entryLabelFromCI and getCallMethod.
 
-thunkEntryLabel thunk_id (ApThunk arity) is_updatable
+thunkEntryLabel :: Name -> CafInfo -> StandardFormInfo -> Bool -> CLabel
+thunkEntryLabel _thunk_id _ (ApThunk arity) is_updatable
   = enterApLabel is_updatable arity
-thunkEntryLabel thunk_id (SelectorThunk offset) upd_flag
+thunkEntryLabel _thunk_id _ (SelectorThunk offset) upd_flag
   = enterSelectorLabel upd_flag offset
-thunkEntryLabel thunk_id _ is_updatable
-  = enterIdLabel thunk_id
+thunkEntryLabel thunk_id caf _ _is_updatable
+  = enterIdLabel thunk_id caf
 
+enterApLabel :: Bool -> Int -> CLabel
 enterApLabel is_updatable arity
   | tablesNextToCode = mkApInfoTableLabel is_updatable arity
   | otherwise        = mkApEntryLabel is_updatable arity
 
+enterSelectorLabel :: Bool -> Int -> CLabel
 enterSelectorLabel upd_flag offset
   | tablesNextToCode = mkSelectorInfoLabel upd_flag offset
   | otherwise        = mkSelectorEntryLabel upd_flag offset
 
+enterIdLabel :: Name -> CafInfo -> CLabel
 enterIdLabel id
   | tablesNextToCode = mkInfoTableLabel id
   | otherwise        = mkEntryLabel id
 
+enterLocalIdLabel :: Name -> CafInfo -> CLabel
 enterLocalIdLabel id
   | tablesNextToCode = mkLocalInfoTableLabel id
   | otherwise        = mkLocalEntryLabel id
 
+enterReturnPtLabel :: Unique -> CLabel
 enterReturnPtLabel name
   | tablesNextToCode = mkReturnInfoLabel name
   | otherwise        = mkReturnPtLabel name
@@ -954,6 +987,7 @@ ways to build an LFBlackHole, maintaining the invariant that it really
 is a black hole and not something else.
 
 \begin{code}
+cafBlackHoleClosureInfo :: ClosureInfo -> ClosureInfo
 cafBlackHoleClosureInfo (ClosureInfo { closureName = nm,
 				       closureType = ty })
   = ClosureInfo { closureName   = nm,
@@ -963,16 +997,6 @@ cafBlackHoleClosureInfo (ClosureInfo { closureName = nm,
 		  closureType   = ty,
 		  closureDescr  = "" }
 cafBlackHoleClosureInfo _ = panic "cafBlackHoleClosureInfo"
-
-seCafBlackHoleClosureInfo (ClosureInfo { closureName = nm,
-				         closureType = ty })
-  = ClosureInfo { closureName   = nm,
-		  closureLFInfo = LFBlackHole mkSECAFBlackHoleInfoTableLabel,
-		  closureSMRep  = BlackHoleRep,
-		  closureSRT    = NoC_SRT,
-		  closureType   = ty,
-		  closureDescr  = ""  }
-seCafBlackHoleClosureInfo _ = panic "seCafBlackHoleClosureInfo"
 \end{code}
 
 %************************************************************************
@@ -1017,6 +1041,8 @@ getTyDescription ty
     fun_result (FunTy _ res) = '>' : fun_result res
     fun_result other	     = getTyDescription other
 
-getPredTyDescription (ClassP cl tys) = getOccString cl
-getPredTyDescription (IParam ip ty)  = getOccString (ipNameName ip)
+getPredTyDescription :: PredType -> String
+getPredTyDescription (ClassP cl _) = getOccString cl
+getPredTyDescription (IParam ip _) = getOccString (ipNameName ip)
+getPredTyDescription (EqPred _ _) = panic "getPredTyDescription EqPred"
 \end{code}

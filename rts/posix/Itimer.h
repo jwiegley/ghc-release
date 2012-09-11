@@ -9,11 +9,6 @@
 #ifndef ITIMER_H
 #define ITIMER_H
 
-extern lnat getourtimeofday   ( void );
-#if 0
-/* unused */
-extern void block_vtalrm_signal       ( void );
-extern void unblock_vtalrm_signal     ( void );
-#endif
+RTS_PRIVATE lnat getourtimeofday ( void );
 
 #endif /* ITIMER_H */

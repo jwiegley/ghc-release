@@ -4,12 +4,17 @@ import System.Console.Haskeline.Monads
 import System.Console.Haskeline.LineState
 import System.Console.Haskeline.Key
 import System.Console.Haskeline.Prefs(Prefs)
+import System.Console.Haskeline.Completion(Completion)
 
 import Control.Concurrent
-import Control.Concurrent.Chan
 import Data.Typeable
 import Data.ByteString (ByteString)
 import Control.Exception.Extensible (fromException, AsyncException(..),bracket_)
+import System.IO(Handle)
+
+#if __GLASGOW_HASKELL__ >= 611
+import System.IO (hGetEncoding, hSetEncoding, hSetBinaryMode)
+#endif
 
 class (MonadReader Layout m, MonadException m) => Term m where
     reposition :: Layout -> LineChars -> m ()
@@ -18,6 +23,11 @@ class (MonadReader Layout m, MonadException m) => Term m where
     drawLineDiff :: LineChars -> LineChars -> m ()
     clearLayout :: m ()
     ringBell :: Bool -> m ()
+
+drawLine, clearLine :: Term m => LineChars -> m ()
+drawLine = drawLineDiff ([],[])
+
+clearLine = flip drawLineDiff ([],[])
     
 -- putStrOut is the right way to send unicode chars to stdout.
 -- termOps being Nothing means we should read the input as a UTF-8 file.
@@ -31,13 +41,27 @@ data RunTerm = RunTerm {
             closeTerm :: IO ()
     }
 
-data TermOps = TermOps {runTerm :: RunTermType,
-                        getLayout :: IO Layout}
+data TermOps = TermOps {
+            getLayout :: IO Layout
+            , withGetEvent :: (MonadException m, CommandMonad m)
+                                => (m Event -> m a) -> m a
+            , runTerm :: (MonadException m, CommandMonad m) => RunTermType m a -> m a
+        }
 
-type RunTermType = forall m a . (MonadLayout m, MonadException m, MonadReader Prefs m) 
-                    => (forall t . (MonadTrans t, Term (t m), MonadException (t m)) 
-                            => (t m Event -> t m a)) -> m a
+-- Generic terminal actions which are independent of the Term being used.
+-- Wrapped in a newtype so that we don't need RankNTypes.
+newtype RunTermType m a = RunTermType (forall t . 
+            (MonadTrans t, Term (t m), MonadException (t m), CommandMonad (t m))
+                            => t m a)
 
+class (MonadReader Prefs m , MonadReader Layout m)
+        => CommandMonad m where
+    runCompletion :: (String,String) -> m (String,[Completion])
+
+instance (MonadTrans t, CommandMonad m, MonadReader Prefs (t m),
+        MonadReader Layout (t m))
+            => CommandMonad (t m) where
+    runCompletion = lift . runCompletion
 
 -- Utility function for drawLineDiff instances.
 matchInit :: Eq a => [a] -> [a] -> ([a],[a])
@@ -75,7 +99,6 @@ keyEventLoop readEvents eventChan = do
                                 Just ThreadKilled -> return ()
                                 _ -> writeChan eventChan (ErrorEvent e)
 
-class (MonadReader Layout m, MonadIO m) => MonadLayout m where
 
 data Interrupt = Interrupt
                 deriving (Show,Typeable,Eq)
@@ -85,3 +108,13 @@ instance Exception Interrupt where
 data Layout = Layout {width, height :: Int}
                     deriving (Show,Eq)
 
+--------
+-- Utility function since we're not using the new IO library yet.
+hWithBinaryMode :: MonadException m => Handle -> m a -> m a
+#if __GLASGOW_HASKELL__ >= 611
+hWithBinaryMode h = bracket (liftIO $ hGetEncoding h)
+                        (maybe (return ()) (liftIO . hSetEncoding h))
+                        . const . (liftIO (hSetBinaryMode h True) >>)
+#else
+hWithBinaryMode _ = id
+#endif

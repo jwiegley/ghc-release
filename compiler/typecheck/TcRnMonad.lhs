@@ -9,6 +9,8 @@ module TcRnMonad(
 	module IOEnv
   ) where
 
+#include "HsVersions.h"
+
 import TcRnTypes	-- Re-export all
 import IOEnv		-- Re-export all
 
@@ -29,7 +31,6 @@ import ErrUtils
 import SrcLoc
 import NameEnv
 import NameSet
-import OccName
 import Bag
 import Outputable
 import UniqSupply
@@ -43,6 +44,7 @@ import Util
 
 import System.IO
 import Data.IORef
+import qualified Data.Set as Set
 import Control.Monad
 \end{code}
 
@@ -70,8 +72,9 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
       	tvs_var      <- newIORef emptyVarSet ;
 	dfuns_var    <- newIORef emptyNameSet ;
 	keep_var     <- newIORef emptyNameSet ;
+    used_rdrnames_var <- newIORef Set.empty ;
 	th_var	     <- newIORef False ;
-	dfun_n_var   <- newIORef 1 ;
+	dfun_n_var   <- newIORef emptyOccSet ;
 	type_env_var <- case hsc_type_env_var hsc_env of {
                            Just (_mod, te_var) -> return te_var ;
                            Nothing             -> newIORef emptyNameEnv } ;
@@ -95,22 +98,23 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
 		tcg_th_used   = th_var,
 		tcg_exports  = [],
 		tcg_imports  = emptyImportAvails,
+        tcg_used_rdrnames = used_rdrnames_var,
 		tcg_dus      = emptyDUs,
 
-                tcg_rn_imports = maybe_rn_syntax [],
+                tcg_rn_imports = [],
                 tcg_rn_exports = maybe_rn_syntax [],
 		tcg_rn_decls   = maybe_rn_syntax emptyRnGroup,
 
 		tcg_binds    = emptyLHsBinds,
-		tcg_warns  = NoWarnings,
+		tcg_warns    = NoWarnings,
+		tcg_anns     = [],
 		tcg_insts    = [],
 		tcg_fam_insts= [],
 		tcg_rules    = [],
 		tcg_fords    = [],
 		tcg_dfun_n   = dfun_n_var,
 		tcg_keep     = keep_var,
-		tcg_doc      = Nothing,
-		tcg_hmi      = HaddockModInfo Nothing Nothing Nothing Nothing,
+		tcg_doc_hdr  = Nothing,
                 tcg_hpc      = False
 	     } ;
 	     lcl_env = TcLclEnv {
@@ -122,7 +126,9 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
 		tcl_arrow_ctxt = NoArrowCtxt,
 		tcl_env        = emptyNameEnv,
 		tcl_tyvars     = tvs_var,
-		tcl_lie	       = panic "initTc:LIE"	-- LIE only valid inside a getLIE
+		tcl_lie	       = panic "initTc:LIE", -- only valid inside getLIE
+		tcl_tybinds    = panic "initTc:tybinds"	
+                                               -- only valid inside a getTyBinds
 	     } ;
 	} ;
    
@@ -250,29 +256,28 @@ getEpsVar = do { env <- getTopEnv; return (hsc_EPS env) }
 getEps :: TcRnIf gbl lcl ExternalPackageState
 getEps = do { env <- getTopEnv; readMutVar (hsc_EPS env) }
 
--- Updating the EPS.  This should be an atomic operation.
--- Note the delicate 'seq' which forces the EPS before putting it in the
--- variable.  Otherwise what happens is that we get
---	write eps_var (....(unsafeRead eps_var)....)
--- and if the .... is strict, that's obviously bottom.  By forcing it beforehand
--- we make the unsafeRead happen before we update the variable.
-
+-- | Update the external package state.  Returns the second result of the
+-- modifier function.
+--
+-- This is an atomic operation and forces evaluation of the modified EPS in
+-- order to avoid space leaks.
 updateEps :: (ExternalPackageState -> (ExternalPackageState, a))
 	  -> TcRnIf gbl lcl a
-updateEps upd_fn = do	{ traceIf (text "updating EPS")
-			; eps_var <- getEpsVar
-			; eps <- readMutVar eps_var
-			; let { (eps', val) = upd_fn eps }
-			; seq eps' (writeMutVar eps_var eps')
-			; return val }
+updateEps upd_fn = do
+  traceIf (text "updating EPS")
+  eps_var <- getEpsVar
+  atomicUpdMutVar' eps_var upd_fn
 
+-- | Update the external package state.
+--
+-- This is an atomic operation and forces evaluation of the modified EPS in
+-- order to avoid space leaks.
 updateEps_ :: (ExternalPackageState -> ExternalPackageState)
 	   -> TcRnIf gbl lcl ()
-updateEps_ upd_fn = do	{ traceIf (text "updating EPS_")
-			; eps_var <- getEpsVar
-			; eps <- readMutVar eps_var
-			; let { eps' = upd_fn eps }
-			; seq eps' (writeMutVar eps_var eps') }
+updateEps_ upd_fn = do
+  traceIf (text "updating EPS_")
+  eps_var <- getEpsVar
+  atomicUpdMutVar' eps_var (\eps -> (upd_fn eps, ()))
 
 getHpt :: TcRnIf gbl lcl HomePackageTable
 getHpt = do { env <- getTopEnv; return (hsc_HPT env) }
@@ -356,14 +361,14 @@ traceOptTcRn flag doc = ifOptM flag $ do
 			{ ctxt <- getErrCtxt
 			; loc  <- getSrcSpanM
 			; env0 <- tcInitTidyEnv
-			; ctxt_msgs <- do_ctxt env0 ctxt 
-			; let real_doc = mkLocMessage loc (vcat (doc : ctxt_to_use ctxt_msgs))
+			; err_info <- mkErrInfo env0 ctxt 
+			; let real_doc = mkLocMessage loc (doc $$ err_info)
 			; dumpTcRn real_doc }
 
 dumpTcRn :: SDoc -> TcRn ()
-dumpTcRn doc = do { rdr_env <- getGlobalRdrEnv ;
-                    dflags <- getDOpts ;
-                        liftIO (printForUser stderr (mkPrintUnqualified dflags rdr_env) doc) }
+dumpTcRn doc = do { rdr_env <- getGlobalRdrEnv 
+                  ; dflags <- getDOpts 
+                  ; liftIO (printForUser stderr (mkPrintUnqualified dflags rdr_env) doc) }
 
 debugDumpTcRn :: SDoc -> TcRn ()
 debugDumpTcRn doc | opt_NoDebugOutput = return ()
@@ -449,6 +454,7 @@ wrapLocSndM fn (L loc a) =
     return (b, L loc c)
 \end{code}
 
+Reporting errors
 
 \begin{code}
 getErrsVar :: TcRn (TcRef Messages)
@@ -463,47 +469,25 @@ addErr msg = do { loc <- getSrcSpanM ; addErrAt loc msg }
 failWith :: Message -> TcRn a
 failWith msg = addErr msg >> failM
 
-addLocErr :: Located e -> (e -> Message) -> TcRn ()
-addLocErr (L loc e) fn = addErrAt loc (fn e)
-
 addErrAt :: SrcSpan -> Message -> TcRn ()
-addErrAt loc msg = addLongErrAt loc msg empty
-
-addLongErrAt :: SrcSpan -> Message -> Message -> TcRn ()
-addLongErrAt loc msg extra
-  = do { traceTc (ptext (sLit "Adding error:") <+> (mkLocMessage loc (msg $$ extra))) ;	
-	 errs_var <- getErrsVar ;
-	 rdr_env <- getGlobalRdrEnv ;
-         dflags <- getDOpts ;
-	 let { err = mkLongErrMsg loc (mkPrintUnqualified dflags rdr_env) msg extra } ;
-	 (warns, errs) <- readMutVar errs_var ;
-  	 writeMutVar errs_var (warns, errs `snocBag` err) }
+-- addErrAt is mainly (exclusively?) used by the renamer, where
+-- tidying is not an issue, but it's all lazy so the extra
+-- work doesn't matter
+addErrAt loc msg = do { ctxt <- getErrCtxt 
+	     	      ; tidy_env <- tcInitTidyEnv
+                      ; err_info <- mkErrInfo tidy_env ctxt
+	              ; addLongErrAt loc msg err_info }
 
 addErrs :: [(SrcSpan,Message)] -> TcRn ()
 addErrs msgs = mapM_ add msgs
 	     where
 	       add (loc,msg) = addErrAt loc msg
 
-addReport :: Message -> TcRn ()
-addReport msg = do loc <- getSrcSpanM; addReportAt loc msg
-
-addReportAt :: SrcSpan -> Message -> TcRn ()
-addReportAt loc msg
-  = do { errs_var <- getErrsVar ;
-	 rdr_env <- getGlobalRdrEnv ;
-         dflags <- getDOpts ;
-	 let { warn = mkWarnMsg loc (mkPrintUnqualified dflags rdr_env) msg } ;
-	 (warns, errs) <- readMutVar errs_var ;
-  	 writeMutVar errs_var (warns `snocBag` warn, errs) }
-
 addWarn :: Message -> TcRn ()
-addWarn msg = addReport (ptext (sLit "Warning:") <+> msg)
+addWarn msg = addReport (ptext (sLit "Warning:") <+> msg) empty
 
 addWarnAt :: SrcSpan -> Message -> TcRn ()
-addWarnAt loc msg = addReportAt loc (ptext (sLit "Warning:") <+> msg)
-
-addLocWarn :: Located e -> (e -> Message) -> TcRn ()
-addLocWarn (L loc e) fn = addReportAt loc (fn e)
+addWarnAt loc msg = addReportAt loc (ptext (sLit "Warning:") <+> msg) empty
 
 checkErr :: Bool -> Message -> TcRn ()
 -- Add the error if the bool is False
@@ -533,6 +517,38 @@ discardWarnings thing_inside
 	; (_warns, errs) <- readMutVar errs_var
 	; addMessages (emptyBag, errs)
 	; return result }
+\end{code}
+
+
+%************************************************************************
+%*									*
+	Shared error message stuff: renamer and typechecker
+%*									*
+%************************************************************************
+
+\begin{code}
+addReport :: Message -> Message -> TcRn ()
+addReport msg extra_info = do loc <- getSrcSpanM; addReportAt loc msg extra_info
+
+addReportAt :: SrcSpan -> Message -> Message -> TcRn ()
+addReportAt loc msg extra_info
+  = do { errs_var <- getErrsVar ;
+	 rdr_env <- getGlobalRdrEnv ;
+         dflags <- getDOpts ;
+	 let { warn = mkLongWarnMsg loc (mkPrintUnqualified dflags rdr_env)
+	                            msg extra_info } ;
+	 (warns, errs) <- readMutVar errs_var ;
+  	 writeMutVar errs_var (warns `snocBag` warn, errs) }
+
+addLongErrAt :: SrcSpan -> Message -> Message -> TcRn ()
+addLongErrAt loc msg extra
+  = do { traceTc (ptext (sLit "Adding error:") <+> (mkLocMessage loc (msg $$ extra))) ;	
+	 errs_var <- getErrsVar ;
+	 rdr_env <- getGlobalRdrEnv ;
+         dflags <- getDOpts ;
+	 let { err = mkLongErrMsg loc (mkPrintUnqualified dflags rdr_env) msg extra } ;
+	 (warns, errs) <- readMutVar errs_var ;
+  	 writeMutVar errs_var (warns, errs `snocBag` err) }
 \end{code}
 
 
@@ -668,26 +684,28 @@ failIfErrsM = ifErrsM failM (return ())
 
 %************************************************************************
 %*									*
-	Context management and error message generation
-	  	    for the type checker
+	Context management for the type checker
 %*									*
 %************************************************************************
 
 \begin{code}
-getErrCtxt :: TcM ErrCtxt
+getErrCtxt :: TcM [ErrCtxt]
 getErrCtxt = do { env <- getLclEnv; return (tcl_ctxt env) }
 
-setErrCtxt :: ErrCtxt -> TcM a -> TcM a
+setErrCtxt :: [ErrCtxt] -> TcM a -> TcM a
 setErrCtxt ctxt = updLclEnv (\ env -> env { tcl_ctxt = ctxt })
 
 addErrCtxt :: Message -> TcM a -> TcM a
 addErrCtxt msg = addErrCtxtM (\env -> return (env, msg))
 
 addErrCtxtM :: (TidyEnv -> TcM (TidyEnv, Message)) -> TcM a -> TcM a
-addErrCtxtM msg = updCtxt (\ msgs -> msg : msgs)
+addErrCtxtM ctxt = updCtxt (\ ctxts -> (False, ctxt) : ctxts)
+
+addLandmarkErrCtxt :: Message -> TcM a -> TcM a
+addLandmarkErrCtxt msg = updCtxt (\ctxts -> (True, \env -> return (env,msg)) : ctxts)
 
 -- Helper function for the above
-updCtxt :: (ErrCtxt -> ErrCtxt) -> TcM a -> TcM a
+updCtxt :: ([ErrCtxt] -> [ErrCtxt]) -> TcM a -> TcM a
 updCtxt upd = updLclEnv (\ env@(TcLclEnv { tcl_ctxt = ctxt }) -> 
 			   env { tcl_ctxt = upd ctxt })
 
@@ -704,12 +722,18 @@ getInstLoc origin
   = do { loc <- getSrcSpanM ; env <- getLclEnv ;
 	 return (InstLoc origin loc (tcl_ctxt env)) }
 
-addInstCtxt :: InstLoc -> TcM a -> TcM a
+setInstCtxt :: InstLoc -> TcM a -> TcM a
 -- Add the SrcSpan and context from the first Inst in the list
 -- 	(they all have similar locations)
-addInstCtxt (InstLoc _ src_loc ctxt) thing_inside
-  = setSrcSpan src_loc (updCtxt (\_ -> ctxt) thing_inside)
+setInstCtxt (InstLoc _ src_loc ctxt) thing_inside
+  = setSrcSpan src_loc (setErrCtxt ctxt thing_inside)
 \end{code}
+
+%************************************************************************
+%*									*
+	     Error message generation (type checker)
+%*									*
+%************************************************************************
 
     The addErrTc functions add an error message, but do not cause failure.
     The 'M' variants pass a TidyEnv that has already been used to
@@ -756,8 +780,8 @@ addWarnTc msg = do { env0 <- tcInitTidyEnv
 addWarnTcM :: (TidyEnv, Message) -> TcM ()
 addWarnTcM (env0, msg)
  = do { ctxt <- getErrCtxt ;
-	ctxt_msgs <- do_ctxt env0 ctxt ;
-	addReport (vcat (ptext (sLit "Warning:") <+> msg : ctxt_to_use ctxt_msgs)) }
+	err_info <- mkErrInfo env0 ctxt ;
+	addReport (ptext (sLit "Warning:") <+> msg) err_info }
 
 warnTc :: Bool -> Message -> TcM ()
 warnTc warn_if_true warn_msg
@@ -794,23 +818,30 @@ tcInitTidyEnv
 
 \begin{code}
 add_err_tcm :: TidyEnv -> Message -> SrcSpan
-            -> [TidyEnv -> TcM (TidyEnv, SDoc)]
+            -> [ErrCtxt]
             -> TcM ()
 add_err_tcm tidy_env err_msg loc ctxt
- = do { ctxt_msgs <- do_ctxt tidy_env ctxt ;
-	addLongErrAt loc err_msg (vcat (ctxt_to_use ctxt_msgs)) }
+ = do { err_info <- mkErrInfo tidy_env ctxt ;
+	addLongErrAt loc err_msg err_info }
 
-do_ctxt :: TidyEnv -> [TidyEnv -> TcM (TidyEnv, SDoc)] -> TcM [SDoc]
-do_ctxt _ []
- = return []
-do_ctxt tidy_env (c:cs)
- = do {	(tidy_env', m) <- c tidy_env  ;
-	ms	       <- do_ctxt tidy_env' cs  ;
-	return (m:ms) }
+mkErrInfo :: TidyEnv -> [ErrCtxt] -> TcM SDoc
+-- Tidy the error info, trimming excessive contexts
+mkErrInfo env ctxts
+ = go 0 env ctxts
+ where
+   go :: Int -> TidyEnv -> [ErrCtxt] -> TcM SDoc
+   go _ _   [] = return empty
+   go n env ((is_landmark, ctxt) : ctxts)
+     | is_landmark || opt_PprStyle_Debug || n < mAX_CONTEXTS
+     = do { (env', msg) <- ctxt env
+	  ; let n' = if is_landmark then n else n+1
+          ; rest <- go n' env' ctxts
+	  ; return (msg $$ rest) }
+     | otherwise
+     = go n env ctxts
 
-ctxt_to_use :: [SDoc] -> [SDoc]
-ctxt_to_use ctxt | opt_PprStyle_Debug = ctxt
-		 | otherwise	      = take 3 ctxt
+mAX_CONTEXTS :: Int	-- No more than this number of non-landmark contexts
+mAX_CONTEXTS = 3
 \end{code}
 
 debugTc is useful for monadic debugging code
@@ -822,19 +853,22 @@ debugTc thing
  | otherwise = return ()
 \end{code}
 
- %************************************************************************
+%************************************************************************
 %*									*
 	     Type constraints (the so-called LIE)
 %*									*
 %************************************************************************
 
 \begin{code}
-nextDFunIndex :: TcM Int	-- Get the next dfun index
-nextDFunIndex = do { env <- getGblEnv
-		   ; let dfun_n_var = tcg_dfun_n env
-		   ; n <- readMutVar dfun_n_var
-		   ; writeMutVar dfun_n_var (n+1)
-		   ; return n }
+chooseUniqueOccTc :: (OccSet -> OccName) -> TcM OccName
+chooseUniqueOccTc fn =
+  do { env <- getGblEnv
+     ; let dfun_n_var = tcg_dfun_n env
+     ; set <- readMutVar dfun_n_var
+     ; let occ = fn set
+     ; writeMutVar dfun_n_var (extendOccSet set occ)
+     ; return occ
+     }
 
 getLIEVar :: TcM (TcRef LIE)
 getLIEVar = do { env <- getLclEnv; return (tcl_lie env) }
@@ -877,6 +911,44 @@ setLclTypeEnv lcl_env thing_inside
 		    tcl_tyvars = tcl_tyvars lcl_env }
 \end{code}
 
+
+%************************************************************************
+%*									*
+	     Meta type variable bindings
+%*									*
+%************************************************************************
+
+\begin{code}
+getTcTyVarBindsVar :: TcM (TcRef TcTyVarBinds)
+getTcTyVarBindsVar = do { env <- getLclEnv; return (tcl_tybinds env) }
+
+getTcTyVarBinds :: TcM a -> TcM (a, TcTyVarBinds)
+getTcTyVarBinds thing_inside
+  = do { tybinds_var <- newMutVar emptyBag
+       ; res <- updLclEnv (\ env -> env { tcl_tybinds = tybinds_var }) 
+			  thing_inside
+       ; tybinds <- readMutVar tybinds_var
+       ; return (res, tybinds) 
+       }
+
+bindMetaTyVar :: TcTyVar -> TcType -> TcM ()
+bindMetaTyVar tv ty
+  = do { ASSERTM2( do { details <- readMutVar (metaTvRef tv)
+                      ; return (isFlexi details) }, ppr tv )
+       ; tybinds_var <- getTcTyVarBindsVar
+       ; tybinds <- readMutVar tybinds_var
+       ; writeMutVar tybinds_var (tybinds `snocBag` TcTyVarBind tv ty) 
+       }
+
+getTcTyVarBindsRelation :: TcM [(TcTyVar, TcTyVarSet)]
+getTcTyVarBindsRelation
+  = do { tybinds_var <- getTcTyVarBindsVar
+       ; tybinds <- readMutVar tybinds_var
+       ; return $ map freeTvs (bagToList tybinds)
+       }
+  where
+    freeTvs (TcTyVarBind tv ty) = (tv, tyVarsOfType ty)
+\end{code}
 
 %************************************************************************
 %*									*

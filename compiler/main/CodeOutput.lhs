@@ -33,11 +33,11 @@ import Outputable
 import Module
 import Maybes		( firstJust )
 
-import Distribution.Text
-import Directory	( doesFileExist )
-import Monad		( when )
-import IO
+import Control.Exception
+import Control.Monad
+import System.Directory
 import System.FilePath
+import System.IO
 \end{code}
 
 %************************************************************************
@@ -127,7 +127,7 @@ outputC dflags filenm flat_absC packages
        	       _          -> "#include \""++h_file++"\""
 
        pkg_configs <- getPreloadPackagesAnd dflags packages
-       let pkg_names = map (display.package) pkg_configs
+       let pkg_names = map (display.sourcePackageId) pkg_configs
 
        doOutput filenm $ \ h -> do
 	  hPutStr h ("/* GHC_PACKAGES " ++ unwords pkg_names ++ "\n*/\n")
@@ -144,10 +144,10 @@ outputC dflags filenm flat_absC packages
 
 \begin{code}
 outputAsm :: DynFlags -> FilePath -> [RawCmm] -> IO ()
-outputAsm dflags filenm flat_absC
 
 #ifndef OMIT_NATIVE_CODEGEN
 
+outputAsm dflags filenm flat_absC
   = do ncg_uniqs <- mkSplitUniqSupply 'n'
 
        {-# SCC "OutputAsm" #-} doOutput filenm $
@@ -157,6 +157,7 @@ outputAsm dflags filenm flat_absC
 
 #else /* OMIT_NATIVE_CODEGEN */
 
+outputAsm _ _ _
   = pprPanic "This compiler was built without a native code generator"
 	     (text "Use -fvia-C instead")
 

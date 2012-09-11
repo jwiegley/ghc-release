@@ -67,7 +67,6 @@ import Distribution.PackageDescription as PD
 import qualified Distribution.InstalledPackageInfo as Installed
          ( InstalledPackageInfo_(..) )
 import qualified Distribution.Simple.PackageIndex as PackageIndex
-         ( topologicalOrder, lookupPackageName, insert )
 import Distribution.Simple.Compiler
          ( CompilerFlavor(..), Compiler(..), compilerFlavor, compilerVersion )
 import Distribution.Simple.LocalBuildInfo (LocalBuildInfo(..))
@@ -82,7 +81,7 @@ import Distribution.Simple.Program
          , greencardProgram, cpphsProgram, hsc2hsProgram, c2hsProgram
          , happyProgram, alexProgram, haddockProgram, ghcProgram, gccProgram )
 import Distribution.System
-         ( OS(OSX), buildOS )
+         ( OS(OSX, Windows), buildOS )
 import Distribution.Version (Version(..))
 import Distribution.Verbosity
 import Distribution.Text
@@ -179,13 +178,13 @@ preprocessSources :: PackageDescription
                   -> IO ()
 
 preprocessSources pkg_descr lbi forSDist verbosity handlers = do
-    withLib pkg_descr () $ \ lib -> do
+    withLib pkg_descr $ \ lib -> do
         setupMessage verbosity "Preprocessing library" (packageId pkg_descr)
         let bi = libBuildInfo lib
         let biHandlers = localHandlers bi
         sequence_ [ preprocessModule (hsSourceDirs bi ++ [autogenModulesDir lbi]) (buildDir lbi) forSDist
                                      modu verbosity builtinSuffixes biHandlers
-                  | modu <- libModules pkg_descr]
+                  | modu <- libModules lib ]
     unless (null (executables pkg_descr)) $
         setupMessage verbosity "Preprocessing executables for" (packageId pkg_descr)
     withExe pkg_descr $ \ theExe -> do
@@ -371,12 +370,21 @@ ppHsc2hs bi lbi = standardPP lbi hsc2hsProgram $
     , opt <- PD.frameworks bi ++ concatMap Installed.frameworks pkgs
     , arg <- ["-framework", opt] ]
 
+    -- Note that on ELF systems, wherever we use -L, we must also use -R
+    -- because presumably that -L dir is not on the normal path for the
+    -- system's dynamic linker. This is needed because hsc2hs works by
+    -- compiling a C program and then running it.
+
     -- Options from the current package:
  ++ [ "--cflag="   ++ opt | opt <- hcDefines (compiler lbi) ]
  ++ [ "--cflag=-I" ++ dir | dir <- PD.includeDirs  bi ]
  ++ [ "--cflag="   ++ opt | opt <- PD.ccOptions    bi
                                 ++ PD.cppOptions   bi ]
- ++ [ "--lflag="   ++ opt | opt <-    getLdOptions bi ]
+ ++ [ "--lflag=-L" ++ opt | opt <- PD.extraLibDirs bi ]
+ ++ [ "--lflag=-Wl,-R," ++ opt | isELF
+                          , opt <- PD.extraLibDirs bi ]
+ ++ [ "--lflag=-l" ++ opt | opt <- PD.extraLibs    bi ]
+ ++ [ "--lflag="   ++ opt | opt <- PD.ldOptions    bi ]
 
     -- Options from dependent packages
  ++ [ "--cflag=" ++ opt
@@ -386,12 +394,15 @@ ppHsc2hs bi lbi = standardPP lbi hsc2hsProgram $
  ++ [ "--lflag=" ++ opt
     | pkg <- pkgs
     , opt <- [ "-L" ++ opt | opt <- Installed.libraryDirs    pkg ]
+          ++ [ "-Wl,-R," ++ opt | isELF
+                           , opt <- Installed.libraryDirs    pkg ]
           ++ [ "-l" ++ opt | opt <- Installed.extraLibraries pkg ]
           ++ [         opt | opt <- Installed.ldOptions      pkg ] ]
   where
     pkgs = PackageIndex.topologicalOrder (packageHacks (installedPkgs lbi))
     Just gccProg = lookupProgram  gccProgram (withPrograms lbi)
     isOSX = case buildOS of OSX -> True; _ -> False
+    isELF = case buildOS of OSX -> False; Windows -> False; _ -> True;
     packageHacks = case compilerFlavor (compiler lbi) of
       GHC -> hackRtsPackage
       _   -> id
@@ -401,13 +412,10 @@ ppHsc2hs bi lbi = standardPP lbi hsc2hsProgram $
     -- ldOptions for GHC's rts package:
     hackRtsPackage index =
       case PackageIndex.lookupPackageName index (PackageName "rts") of
-        [rts] -> PackageIndex.insert rts { Installed.ldOptions = [] } index
-        _ -> error "No (or multiple) ghc rts package is registered!!"
+        [(_, [rts])]
+           -> PackageIndex.insert rts { Installed.ldOptions = [] } index
+        _  -> error "No (or multiple) ghc rts package is registered!!"
 
-getLdOptions :: BuildInfo -> [String]
-getLdOptions bi = map ("-L" ++) (extraLibDirs bi)
-               ++ map ("-l" ++) (extraLibs bi)
-               ++ PD.ldOptions bi
 
 ppC2hs :: BuildInfo -> LocalBuildInfo -> PreProcessor
 ppC2hs bi lbi

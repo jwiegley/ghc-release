@@ -20,7 +20,9 @@ module OccurAnal (
 import CoreSyn
 import CoreFVs
 import CoreUtils        ( exprIsTrivial, isDefaultAlt )
+import Coercion		( mkSymCoercion )
 import Id
+import Name		( localiseName )
 import IdInfo
 import BasicTypes
 
@@ -170,8 +172,8 @@ However things are made quite a bit more complicated by RULES.  Remember
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     We avoid infinite inlinings by choosing loop breakers, and
     ensuring that a loop breaker cuts each loop.  But what is a
-    "loop"?  In particular, a RULES is like an equation for 'f' that
-    is *always* inlined if it are applicable.  We do *not* disable
+    "loop"?  In particular, a RULE is like an equation for 'f' that
+    is *always* inlined if it is applicable.  We do *not* disable
     rules for loop-breakers.  It's up to whoever makes the rules to
     make sure that the rules themselves alwasys terminate.  See Note
     [Rules for recursive functions] in Simplify.lhs
@@ -236,8 +238,9 @@ However things are made quite a bit more complicated by RULES.  Remember
   * Note [Rule dependency info]
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~
     The VarSet in a SpecInfo is used for dependency analysis in the
-    occurrence analyser.  We must track free vars in *both* lhs and rhs.  Why both?
-    Consider
+    occurrence analyser.  We must track free vars in *both* lhs and rhs.  
+    Hence use of idRuleVars, rather than idRuleRhsVars in addRuleUsage.  
+    Why both? Consider
         x = y
         RULE f x = 4
     Then if we substitute y for x, we'd better do so in the
@@ -364,8 +367,9 @@ occAnalRec (CyclicSCC nodes) (body_usage, binds)
 
 	----------------------------
 	-- Now reconstruct the cycle
-    pairs | no_rules  = reOrderCycle tagged_nodes
- 	  | otherwise = concatMap reOrderRec (stronglyConnCompFromEdgedVerticesR loop_breaker_edges)
+    pairs | no_rules  = reOrderCycle 0 tagged_nodes []
+ 	  | otherwise = foldr (reOrderRec 0) [] $
+			stronglyConnCompFromEdgedVerticesR loop_breaker_edges
 
 	-- See Note [Choosing loop breakers] for looop_breaker_edges
     loop_breaker_edges = map mk_node tagged_nodes
@@ -456,42 +460,55 @@ data Details = ND Id 		-- Binder
 		  IdSet		-- Other binders from this Rec group mentioned on RHS
 				-- (derivable from UsageDetails but cached here)
 
-reOrderRec :: SCC (Node Details)
-           -> [(Id,CoreExpr)]
+reOrderRec :: Int -> SCC (Node Details)
+           -> [(Id,CoreExpr)] -> [(Id,CoreExpr)]
 -- Sorted into a plausible order.  Enough of the Ids have
 --      IAmALoopBreaker pragmas that there are no loops left.
-reOrderRec (AcyclicSCC (ND bndr rhs _ _, _, _)) = [(bndr, rhs)]
-reOrderRec (CyclicSCC cycle)  		        = reOrderCycle cycle
+reOrderRec _ (AcyclicSCC (ND bndr rhs _ _, _, _)) pairs = (bndr, rhs) : pairs
+reOrderRec depth (CyclicSCC cycle)  		  pairs = reOrderCycle depth cycle pairs
 
-reOrderCycle :: [Node Details] -> [(Id,CoreExpr)]
-reOrderCycle []
+reOrderCycle :: Int -> [Node Details] -> [(Id,CoreExpr)] -> [(Id,CoreExpr)]
+reOrderCycle _ [] _
   = panic "reOrderCycle"
-reOrderCycle [bind]     -- Common case of simple self-recursion
-  = [(makeLoopBreaker False bndr, rhs)]
+reOrderCycle _ [bind] pairs    -- Common case of simple self-recursion
+  = (makeLoopBreaker False bndr, rhs) : pairs
   where
     (ND bndr rhs _ _, _, _) = bind
 
-reOrderCycle (bind : binds)
+reOrderCycle depth (bind : binds) pairs
   =     -- Choose a loop breaker, mark it no-inline,
         -- do SCC analysis on the rest, and recursively sort them out
-    concatMap reOrderRec (stronglyConnCompFromEdgedVerticesR unchosen) ++
-    [(makeLoopBreaker False bndr, rhs)]
-
+--    pprTrace "reOrderCycle" (ppr [b | (ND b _ _ _, _, _) <- bind:binds]) $
+    foldr (reOrderRec new_depth)
+          ([ (makeLoopBreaker False bndr, rhs) 
+           | (ND bndr rhs _ _, _, _) <- chosen_binds] ++ pairs)
+	  (stronglyConnCompFromEdgedVerticesR unchosen) 
   where
-    (chosen_bind, unchosen) = choose_loop_breaker bind (score bind) [] binds
-    ND bndr rhs _ _ = chosen_bind
+    (chosen_binds, unchosen) = choose_loop_breaker [bind] (score bind) [] binds
+
+    approximate_loop_breaker = depth >= 2
+    new_depth | approximate_loop_breaker = 0
+	      | otherwise		 = depth+1
+	-- After two iterations (d=0, d=1) give up
+	-- and approximate, returning to d=0
 
         -- This loop looks for the bind with the lowest score
         -- to pick as the loop  breaker.  The rest accumulate in
-    choose_loop_breaker (details,_,_) _loop_sc acc []
-        = (details, acc)        -- Done
+    choose_loop_breaker loop_binds _loop_sc acc []
+        = (loop_binds, acc)        -- Done
 
-    choose_loop_breaker loop_bind loop_sc acc (bind : binds)
+	-- If approximate_loop_breaker is True, we pick *all*
+	-- nodes with lowest score, else just one
+	-- See Note [Complexity of loop breaking]
+    choose_loop_breaker loop_binds loop_sc acc (bind : binds)
         | sc < loop_sc  -- Lower score so pick this new one
-        = choose_loop_breaker bind sc (loop_bind : acc) binds
+        = choose_loop_breaker [bind] sc (loop_binds ++ acc) binds
 
-        | otherwise     -- No lower so don't pick it
-        = choose_loop_breaker loop_bind loop_sc (bind : acc) binds
+	| approximate_loop_breaker && sc == loop_sc
+	= choose_loop_breaker (bind : loop_binds) loop_sc acc binds
+	
+        | otherwise     -- Higher score so don't pick it
+        = choose_loop_breaker loop_binds loop_sc (bind : acc) binds
         where
           sc = score bind
 
@@ -508,7 +525,7 @@ reOrderCycle (bind : binds)
                 -- bad choice for loop breaker
 
         | is_con_app rhs = 3    -- Data types help with cases
-                -- Note [conapp]
+                -- Note [Constructor applictions]
 
 -- If an Id is marked "never inline" then it makes a great loop breaker
 -- The only reason for not checking that here is that it is rare
@@ -559,22 +576,59 @@ reOrderCycle (bind : binds)
     is_con_app _          = False
 
 makeLoopBreaker :: Bool -> Id -> Id
--- Set the loop-breaker flag
--- See Note [Weak loop breakers]
+-- Set the loop-breaker flag: see Note [Weak loop breakers]
 makeLoopBreaker weak bndr = setIdOccInfo bndr (IAmALoopBreaker weak)
 \end{code}
 
-Note [Worker inline loop]
-~~~~~~~~~~~~~~~~~~~~~~~~
-Never choose a wrapper as the loop breaker!  Because
-wrappers get auto-generated inlinings when importing, and
-that can lead to an infinite inlining loop.  For example:
+Note [Complexity of loop breaking]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The loop-breaking algorithm knocks out one binder at a time, and 
+performs a new SCC analysis on the remaining binders.  That can
+behave very badly in tightly-coupled groups of bindings; in the
+worst case it can be (N**2)*log N, because it does a full SCC
+on N, then N-1, then N-2 and so on.
+
+To avoid this, we switch plans after 2 (or whatever) attempts:
+  Plan A: pick one binder with the lowest score, make it
+	  a loop breaker, and try again
+  Plan B: pick *all* binders with the lowest score, make them
+	  all loop breakers, and try again 
+Since there are only a small finite number of scores, this will
+terminate in a constant number of iterations, rather than O(N)
+iterations.
+
+You might thing that it's very unlikely, but RULES make it much
+more likely.  Here's a real example from Trac #1969:
+  Rec { $dm = \d.\x. op d
+	{-# RULES forall d. $dm Int d  = $s$dm1
+		  forall d. $dm Bool d = $s$dm2 #-}
+	
+	dInt = MkD .... opInt ...
+	dInt = MkD .... opBool ...
+	opInt  = $dm dInt
+	opBool = $dm dBool
+
+	$s$dm1 = \x. op dInt
+	$s$dm2 = \x. op dBool }
+The RULES stuff means that we can't choose $dm as a loop breaker
+(Note [Choosing loop breakers]), so we must choose at least (say)
+opInt *and* opBool, and so on.  The number of loop breakders is
+linear in the number of instance declarations.
+
+Note [INLINE pragmas]
+~~~~~~~~~~~~~~~~~~~~~
+Never choose a function with an INLINE pramga as the loop breaker!  
+If such a function is mutually-recursive with a non-INLINE thing,
+then the latter should be the loop-breaker.
+
+A particular case is wrappers generated by the demand analyser.
+If you make then into a loop breaker you may get an infinite 
+inlining loop.  For example:
   rec {
         $wfoo x = ....foo x....
 
         {-loop brk-} foo x = ...$wfoo x...
   }
-
 The interface file sees the unfolding for $wfoo, and sees that foo is
 strict (and hence it gets an auto-generated wrapper).  Result: an
 infinite inlining in the importing scope.  So be a bit careful if you
@@ -582,6 +636,22 @@ change this.  A good example is Tree.repTree in
 nofib/spectral/minimax. If the repTree wrapper is chosen as the loop
 breaker then compiling Game.hs goes into an infinite loop (this
 happened when we gave is_con_app a lower score than inline candidates).
+
+Note [Constructor applications]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+It's really really important to inline dictionaries.  Real
+example (the Enum Ordering instance from GHC.Base):
+
+     rec     f = \ x -> case d of (p,q,r) -> p x
+             g = \ x -> case d of (p,q,r) -> q x
+             d = (v, f, g)
+
+Here, f and g occur just once; but we can't inline them into d.
+On the other hand we *could* simplify those case expressions if
+we didn't stupidly choose d as the loop breaker.
+But we won't because constructor args are marked "Many".
+Inlining dictionaries is really essential to unravelling
+the loops in static numeric dictionaries, see GHC.Float.
 
 Note [Closure conversion]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -628,7 +698,7 @@ occAnalRhs env id rhs
   = occAnal ctxt rhs
   where
     ctxt | certainly_inline id = env
-         | otherwise           = rhsCtxt
+         | otherwise           = rhsCtxt env
         -- Note that we generally use an rhsCtxt.  This tells the occ anal n
         -- that it's looking at an RHS, which has an effect in occAnalApp
         --
@@ -656,10 +726,14 @@ addRuleUsage :: UsageDetails -> Id -> UsageDetails
 -- Add the usage from RULES in Id to the usage
 addRuleUsage usage id
   = foldVarSet add usage (idRuleVars id)
+        -- idRuleVars here: see Note [Rule dependency info]
   where
-    add v u = addOneOcc u v NoOccInfo           -- Give a non-committal binder info
-                                                -- (i.e manyOcc) because many copies
-                                                -- of the specialised thing can appear
+    add v u = addOneOcc u v NoOccInfo
+	-- Give a non-committal binder info (i.e manyOcc) because
+	--   a) Many copies of the specialised thing can appear
+	--   b) We don't want to substitute a BIG expression inside a RULE
+	--	even if that's the only occurrence of the thing
+	--	(Same goes for INLINE.)
 \end{code}
 
 Expressions
@@ -762,15 +836,15 @@ occAnal env expr@(Lam _ _)
     (really_final_usage,
      mkLams tagged_binders body') }
   where
-    env_body        = vanillaCtxt                       -- Body is (no longer) an RhsContext
+    env_body        = vanillaCtxt env        -- Body is (no longer) an RhsContext
     (binders, body) = collectBinders expr
     binders'        = oneShotGroup env binders
     linear          = all is_one_shot binders'
     is_one_shot b   = isId b && isOneShotBndr b
 
 occAnal env (Case scrut bndr ty alts)
-  = case occ_anal_scrut scrut alts                  of { (scrut_usage, scrut') ->
-    case mapAndUnzip (occAnalAlt alt_env bndr) alts of { (alts_usage_s, alts')   ->
+  = case occ_anal_scrut scrut alts     of { (scrut_usage, scrut') ->
+    case mapAndUnzip occ_anal_alt alts of { (alts_usage_s, alts')   ->
     let
         alts_usage  = foldr1 combineAltsUsageDetails alts_usage_s
         alts_usage' = addCaseBndrUsage alts_usage
@@ -779,6 +853,8 @@ occAnal env (Case scrut bndr ty alts)
     in
     total_usage `seq` (total_usage, Case scrut' tagged_bndr ty alts') }}
   where
+	-- Note [Case binder usage]	
+	-- ~~~~~~~~~~~~~~~~~~~~~~~~
         -- The case binder gets a usage of either "many" or "dead", never "one".
         -- Reason: we like to inline single occurrences, to eliminate a binding,
         -- but inlining a case binder *doesn't* eliminate a binding.
@@ -787,18 +863,27 @@ occAnal env (Case scrut bndr ty alts)
         -- into
         --      case x of w { (p,q) -> f (p,q) }
     addCaseBndrUsage usage = case lookupVarEnv usage bndr of
-                                Nothing  -> usage
-                                Just occ -> extendVarEnv usage bndr (markMany occ)
+                                Nothing -> usage
+                                Just _  -> extendVarEnv usage bndr NoOccInfo
 
-    alt_env = setVanillaCtxt env
+    alt_env = mkAltEnv env bndr_swap
         -- Consider     x = case v of { True -> (p,q); ... }
         -- Then it's fine to inline p and q
 
+    bndr_swap = case scrut of
+		  Var v           -> Just (v, Var bndr)
+		  Cast (Var v) co -> Just (v, Cast (Var bndr) (mkSymCoercion co))
+		  _other          -> Nothing
+
+    occ_anal_alt = occAnalAlt alt_env bndr bndr_swap
+
     occ_anal_scrut (Var v) (alt1 : other_alts)
-                                | not (null other_alts) || not (isDefaultAlt alt1)
-                                = (mkOneOcc env v True, Var v)
-    occ_anal_scrut scrut _alts  = occAnal vanillaCtxt scrut
-                                        -- No need for rhsCtxt
+        | not (null other_alts) || not (isDefaultAlt alt1)
+        = (mkOneOcc env v True, Var v)	-- The 'True' says that the variable occurs
+					-- in an interesting context; the case has
+					-- at least one non-default alternative
+    occ_anal_scrut scrut _alts  
+	= occAnal (vanillaCtxt env) scrut    -- No need for rhsCtxt
 
 occAnal env (Let bind body)
   = case occAnal env body                of { (body_usage, body') ->
@@ -806,11 +891,11 @@ occAnal env (Let bind body)
        (final_usage, mkLets new_binds body') }}
 
 occAnalArgs :: OccEnv -> [CoreExpr] -> (UsageDetails, [CoreExpr])
-occAnalArgs _env args
+occAnalArgs env args
   = case mapAndUnzip (occAnal arg_env) args of  { (arg_uds_s, args') ->
     (foldr (+++) emptyDetails arg_uds_s, args')}
   where
-    arg_env = vanillaCtxt
+    arg_env = vanillaCtxt env
 \end{code}
 
 Applications are dealt with specially because we want
@@ -829,7 +914,7 @@ occAnalApp env (Var fun, args)
   where
     fun_uniq = idUnique fun
     fun_uds  = mkOneOcc env fun (valArgCount args > 0)
-    is_pap = isDataConWorkId fun || valArgCount args < idArity fun
+    is_pap = isConLikeId fun || valArgCount args < idArity fun
 
                 -- Hack for build, fold, runST
     args_stuff  | fun_uniq == buildIdKey    = appSpecial env 2 [True,True]  args
@@ -884,12 +969,12 @@ appSpecial :: OccEnv
 appSpecial env n ctxt args
   = go n args
   where
-    arg_env = vanillaCtxt
+    arg_env = vanillaCtxt env
 
     go _ [] = (emptyDetails, [])        -- Too few args
 
     go 1 (arg:args)                     -- The magic arg
-      = case occAnal (setCtxt arg_env ctxt) arg of      { (arg_uds, arg') ->
+      = case occAnal (setCtxtTy arg_env ctxt) arg of    { (arg_uds, arg') ->
         case occAnalArgs env args of                    { (args_uds, args') ->
         (arg_uds +++ args_uds, arg':args') }}
 
@@ -900,38 +985,188 @@ appSpecial env n ctxt args
 \end{code}
 
 
-Case alternatives
-~~~~~~~~~~~~~~~~~
-If the case binder occurs at all, the other binders effectively do too.
-For example
-        case e of x { (a,b) -> rhs }
-is rather like
-        let x = (a,b) in rhs
-If e turns out to be (e1,e2) we indeed get something like
-        let a = e1; b = e2; x = (a,b) in rhs
+Note [Binder swap]
+~~~~~~~~~~~~~~~~~~
+We do these two transformations right here:
 
-Note [Aug 06]: I don't think this is necessary any more, and it helpe
-               to know when binders are unused.  See esp the call to
-               isDeadBinder in Simplify.mkDupableAlt
+ (1)   case x of b { pi -> ri }
+    ==>
+      case x of b { pi -> let x=b in ri }
+
+ (2)  case (x |> co) of b { pi -> ri }
+    ==>
+      case (x |> co) of b { pi -> let x = b |> sym co in ri }
+
+    Why (2)?  See Note [Case of cast]
+
+In both cases, in a particular alternative (pi -> ri), we only 
+add the binding if
+  (a) x occurs free in (pi -> ri)
+	(ie it occurs in ri, but is not bound in pi)
+  (b) the pi does not bind b (or the free vars of co)
+We need (a) and (b) for the inserted binding to be correct.
+
+For the alternatives where we inject the binding, we can transfer
+all x's OccInfo to b.  And that is the point.
+
+Notice that 
+  * The deliberate shadowing of 'x'. 
+  * That (a) rapidly becomes false, so no bindings are injected.
+
+The reason for doing these transformations here is because it allows
+us to adjust the OccInfo for 'x' and 'b' as we go.
+
+  * Suppose the only occurrences of 'x' are the scrutinee and in the
+    ri; then this transformation makes it occur just once, and hence
+    get inlined right away.
+
+  * If we do this in the Simplifier, we don't know whether 'x' is used
+    in ri, so we are forced to pessimistically zap b's OccInfo even
+    though it is typically dead (ie neither it nor x appear in the
+    ri).  There's nothing actually wrong with zapping it, except that
+    it's kind of nice to know which variables are dead.  My nose
+    tells me to keep this information as robustly as possible.
+
+The Maybe (Id,CoreExpr) passed to occAnalAlt is the extra let-binding
+{x=b}; it's Nothing if the binder-swap doesn't happen.
+
+There is a danger though.  Consider
+      let v = x +# y
+      in case (f v) of w -> ...v...v...
+And suppose that (f v) expands to just v.  Then we'd like to
+use 'w' instead of 'v' in the alternative.  But it may be too
+late; we may have substituted the (cheap) x+#y for v in the 
+same simplifier pass that reduced (f v) to v.
+
+I think this is just too bad.  CSE will recover some of it.
+
+Note [Binder swap on GlobalId scrutinees]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When the scrutinee is a GlobalId we must take care in two ways
+
+ i) In order to *know* whether 'x' occurs free in the RHS, we need its
+    occurrence info. BUT, we don't gather occurrence info for
+    GlobalIds.  That's what the (small) occ_scrut_ids set in OccEnv is
+    for: it says "gather occurrence info for these.
+
+ ii) We must call localiseId on 'x' first, in case it's a GlobalId, or
+     has an External Name. See, for example, SimplEnv Note [Global Ids in
+     the substitution].
+
+Historical note [no-case-of-case]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We *used* to suppress the binder-swap in case expressoins when 
+-fno-case-of-case is on.  Old remarks:
+    "This happens in the first simplifier pass,
+    and enhances full laziness.  Here's the bad case:
+            f = \ y -> ...(case x of I# v -> ...(case x of ...) ... )
+    If we eliminate the inner case, we trap it inside the I# v -> arm,
+    which might prevent some full laziness happening.  I've seen this
+    in action in spectral/cichelli/Prog.hs:
+             [(m,n) | m <- [1..max], n <- [1..max]]
+    Hence the check for NoCaseOfCase."
+However, now the full-laziness pass itself reverses the binder-swap, so this
+check is no longer necessary.
+
+Historical note [Suppressing the case binder-swap]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+This old note describes a problem that is also fixed by doing the
+binder-swap in OccAnal:
+
+    There is another situation when it might make sense to suppress the
+    case-expression binde-swap. If we have
+
+        case x of w1 { DEFAULT -> case x of w2 { A -> e1; B -> e2 }
+                       ...other cases .... }
+
+    We'll perform the binder-swap for the outer case, giving
+
+        case x of w1 { DEFAULT -> case w1 of w2 { A -> e1; B -> e2 }
+                       ...other cases .... }
+
+    But there is no point in doing it for the inner case, because w1 can't
+    be inlined anyway.  Furthermore, doing the case-swapping involves
+    zapping w2's occurrence info (see paragraphs that follow), and that
+    forces us to bind w2 when doing case merging.  So we get
+
+        case x of w1 { A -> let w2 = w1 in e1
+                       B -> let w2 = w1 in e2
+                       ...other cases .... }
+
+    This is plain silly in the common case where w2 is dead.
+
+    Even so, I can't see a good way to implement this idea.  I tried
+    not doing the binder-swap if the scrutinee was already evaluated
+    but that failed big-time:
+
+            data T = MkT !Int
+
+            case v of w  { MkT x ->
+            case x of x1 { I# y1 ->
+            case x of x2 { I# y2 -> ...
+
+    Notice that because MkT is strict, x is marked "evaluated".  But to
+    eliminate the last case, we must either make sure that x (as well as
+    x1) has unfolding MkT y1.  THe straightforward thing to do is to do
+    the binder-swap.  So this whole note is a no-op.
+
+It's fixed by doing the binder-swap in OccAnal because we can do the
+binder-swap unconditionally and still get occurrence analysis
+information right.
+
+Note [Case of cast]
+~~~~~~~~~~~~~~~~~~~
+Consider        case (x `cast` co) of b { I# ->
+                ... (case (x `cast` co) of {...}) ...
+We'd like to eliminate the inner case.  That is the motivation for
+equation (2) in Note [Binder swap].  When we get to the inner case, we
+inline x, cancel the casts, and away we go.
+
+Note [Binders in case alternatives]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+    case x of y { (a,b) -> f y }
+We treat 'a', 'b' as dead, because they don't physically occur in the
+case alternative.  (Indeed, a variable is dead iff it doesn't occur in
+its scope in the output of OccAnal.)  This invariant is It really
+helpe to know when binders are unused.  See esp the call to
+isDeadBinder in Simplify.mkDupableAlt
+
+In this example, though, the Simplifier will bring 'a' and 'b' back to
+life, beause it binds 'y' to (a,b) (imagine got inlined and
+scrutinised y).
 
 \begin{code}
 occAnalAlt :: OccEnv
            -> CoreBndr
+	   -> Maybe (Id, CoreExpr)  -- Note [Binder swap]
            -> CoreAlt
            -> (UsageDetails, Alt IdWithOccInfo)
-occAnalAlt env _case_bndr (con, bndrs, rhs)
+occAnalAlt env case_bndr mb_scrut_var (con, bndrs, rhs)
   = case occAnal env rhs of { (rhs_usage, rhs') ->
     let
-        (final_usage, tagged_bndrs) = tagBinders rhs_usage bndrs
-        final_bndrs = tagged_bndrs      -- See Note [Aug06] above
-{-
-        final_bndrs | case_bndr `elemVarEnv` final_usage = bndrs
-                    | otherwise                         = tagged_bndrs
-                -- Leave the binders untagged if the case
-                -- binder occurs at all; see note above
--}
+        (alt_usg, tagged_bndrs) = tagBinders rhs_usage bndrs
+        bndrs' = tagged_bndrs      -- See Note [Binders in case alternatives]
     in
-    (final_usage, (con, final_bndrs, rhs')) }
+    case mb_scrut_var of
+	Just (scrut_var, scrut_rhs)		-- See Note [Binder swap]
+	  | scrut_var `localUsedIn` alt_usg	-- (a) Fast path, usually false
+	  , not (any shadowing bndrs)		-- (b) 
+	  -> (addOneOcc usg_wo_scrut case_bndr NoOccInfo,
+			-- See Note [Case binder usage] for the NoOccInfo
+	      (con, bndrs', Let (NonRec scrut_var2 scrut_rhs) rhs'))
+	  where
+	   scrut_var1 = mkLocalId (localiseName (idName scrut_var)) (idType scrut_var)
+			-- Localise the scrut_var before shadowing it; we're making a 
+			-- new binding for it, and it might have an External Name, or
+			-- even be a GlobalId; Note [Binder swap on GlobalId scrutinees]
+	   	      	-- Also we don't want any INLILNE or NOINLINE pragmas!
+
+	   (usg_wo_scrut, scrut_var2) = tagBinder alt_usg scrut_var1
+	   shadowing bndr = bndr `elemVarSet` rhs_fvs
+	   rhs_fvs = exprFreeVars scrut_rhs
+
+	_other -> (alt_usg, (con, bndrs', rhs')) }
 \end{code}
 
 
@@ -943,8 +1178,15 @@ occAnalAlt env _case_bndr (con, bndrs, rhs)
 
 \begin{code}
 data OccEnv
-  = OccEnv OccEncl      -- Enclosing context information
-           CtxtTy       -- Tells about linearity
+  = OccEnv { occ_encl 	   :: !OccEncl      -- Enclosing context information
+    	   , occ_ctxt 	   :: !CtxtTy       -- Tells about linearity
+	   , occ_scrut_ids :: !GblScrutIds }
+
+type GblScrutIds = IdSet  -- GlobalIds that are scrutinised, and for which
+     		   	  -- we want to gather occurence info; see
+			  -- Note [Binder swap for GlobalId scrutinee]
+			  -- No need to prune this if there's a shadowing binding
+			  -- because it's OK for it to be too big
 
 -- OccEncl is used to control whether to inline into constructor arguments
 -- For example:
@@ -971,24 +1213,36 @@ type CtxtTy = [Bool]
         --                      the CtxtTy inside applies
 
 initOccEnv :: OccEnv
-initOccEnv = OccEnv OccRhs []
+initOccEnv = OccEnv { occ_encl = OccRhs
+	      	    , occ_ctxt = []
+		    , occ_scrut_ids = emptyVarSet }
 
-vanillaCtxt :: OccEnv
-vanillaCtxt = OccEnv OccVanilla []
+vanillaCtxt :: OccEnv -> OccEnv
+vanillaCtxt env = OccEnv { occ_encl = OccVanilla, occ_ctxt = []
+	      	         , occ_scrut_ids = occ_scrut_ids env }
 
-rhsCtxt :: OccEnv
-rhsCtxt     = OccEnv OccRhs     []
+rhsCtxt :: OccEnv -> OccEnv
+rhsCtxt env = OccEnv { occ_encl = OccRhs, occ_ctxt = []
+	      	     , occ_scrut_ids = occ_scrut_ids env }
+
+mkAltEnv :: OccEnv -> Maybe (Id, CoreExpr) -> OccEnv
+-- Does two things: a) makes the occ_ctxt = OccVanilla
+-- 	    	    b) extends the scrut_ids if necessary
+mkAltEnv env (Just (scrut_id, _))
+  | not (isLocalId scrut_id) 
+  = OccEnv { occ_encl      = OccVanilla
+	   , occ_scrut_ids = extendVarSet (occ_scrut_ids env) scrut_id
+	   , occ_ctxt      = occ_ctxt env }
+mkAltEnv env _
+  | isRhsEnv env = env { occ_encl = OccVanilla }
+  | otherwise    = env
+
+setCtxtTy :: OccEnv -> CtxtTy -> OccEnv
+setCtxtTy env ctxt = env { occ_ctxt = ctxt }
 
 isRhsEnv :: OccEnv -> Bool
-isRhsEnv (OccEnv OccRhs     _) = True
-isRhsEnv (OccEnv OccVanilla _) = False
-
-setVanillaCtxt :: OccEnv -> OccEnv
-setVanillaCtxt (OccEnv OccRhs ctxt_ty) = OccEnv OccVanilla ctxt_ty
-setVanillaCtxt other_env               = other_env
-
-setCtxt :: OccEnv -> CtxtTy -> OccEnv
-setCtxt (OccEnv encl _) ctxt = OccEnv encl ctxt
+isRhsEnv (OccEnv { occ_encl = OccRhs })     = True
+isRhsEnv (OccEnv { occ_encl = OccVanilla }) = False
 
 oneShotGroup :: OccEnv -> [CoreBndr] -> [CoreBndr]
         -- The result binders have one-shot-ness set that they might not have had originally.
@@ -996,7 +1250,7 @@ oneShotGroup :: OccEnv -> [CoreBndr] -> [CoreBndr]
         -- linearity context knows that c,n are one-shot, and it records that fact in
         -- the binder. This is useful to guide subsequent float-in/float-out tranformations
 
-oneShotGroup (OccEnv _encl ctxt) bndrs
+oneShotGroup (OccEnv { occ_ctxt = ctxt }) bndrs
   = go ctxt bndrs []
   where
     go _ [] rev_bndrs = reverse rev_bndrs
@@ -1010,8 +1264,8 @@ oneShotGroup (OccEnv _encl ctxt) bndrs
     go ctxt (bndr:bndrs) rev_bndrs = go ctxt bndrs (bndr:rev_bndrs)
 
 addAppCtxt :: OccEnv -> [Arg CoreBndr] -> OccEnv
-addAppCtxt (OccEnv encl ctxt) args
-  = OccEnv encl (replicate (valArgCount args) True ++ ctxt)
+addAppCtxt env@(OccEnv { occ_ctxt = ctxt }) args
+  = env { occ_ctxt = replicate (valArgCount args) True ++ ctxt }
 \end{code}
 
 %************************************************************************
@@ -1022,6 +1276,8 @@ addAppCtxt (OccEnv encl ctxt) args
 
 \begin{code}
 type UsageDetails = IdEnv OccInfo       -- A finite map from ids to their usage
+		-- INVARIANT: never IAmDead
+		-- (Deadness is signalled by not being in the map at all)
 
 (+++), combineAltsUsageDetails
         :: UsageDetails -> UsageDetails -> UsageDetails
@@ -1040,8 +1296,9 @@ addOneOcc usage id info
 emptyDetails :: UsageDetails
 emptyDetails = (emptyVarEnv :: UsageDetails)
 
-usedIn :: Id -> UsageDetails -> Bool
-v `usedIn` details =  isExportedId v || v `elemVarEnv` details
+localUsedIn, usedIn :: Id -> UsageDetails -> Bool
+v `localUsedIn` details = v `elemVarEnv` details
+v `usedIn`      details =  isExportedId v || v `localUsedIn` details
 
 type IdWithOccInfo = Id
 
@@ -1093,14 +1350,14 @@ setBinderOcc usage bndr
 
 \begin{code}
 mkOneOcc :: OccEnv -> Id -> InterestingCxt -> UsageDetails
-mkOneOcc _env id int_cxt
+mkOneOcc env id int_cxt
   | isLocalId id = unitVarEnv id (OneOcc False True int_cxt)
-  | otherwise    = emptyDetails
+  | id `elemVarSet` occ_scrut_ids env = unitVarEnv id NoOccInfo
+  | otherwise       		      = emptyDetails
 
 markMany, markInsideLam, markInsideSCC :: OccInfo -> OccInfo
 
-markMany IAmDead = IAmDead
-markMany _       = NoOccInfo
+markMany _  = NoOccInfo
 
 markInsideSCC occ = markMany occ
 
@@ -1109,19 +1366,18 @@ markInsideLam occ                       = occ
 
 addOccInfo, orOccInfo :: OccInfo -> OccInfo -> OccInfo
 
-addOccInfo IAmDead info2       = info2
-addOccInfo info1 IAmDead       = info1
-addOccInfo _     _             = NoOccInfo
+addOccInfo a1 a2  = ASSERT( not (isDeadOcc a1 || isDeadOcc a2) )
+		    NoOccInfo	-- Both branches are at least One
+				-- (Argument is never IAmDead)
 
 -- (orOccInfo orig new) is used
 -- when combining occurrence info from branches of a case
 
-orOccInfo IAmDead info2 = info2
-orOccInfo info1 IAmDead = info1
 orOccInfo (OneOcc in_lam1 _ int_cxt1)
           (OneOcc in_lam2 _ int_cxt2)
   = OneOcc (in_lam1 || in_lam2)
            False        -- False, because it occurs in both branches
            (int_cxt1 && int_cxt2)
-orOccInfo _     _       = NoOccInfo
+orOccInfo a1 a2 = ASSERT( not (isDeadOcc a1 || isDeadOcc a2) )
+		  NoOccInfo
 \end{code}

@@ -18,8 +18,6 @@ import DsMonad
 
 import HsSyn
 import DataCon
-import MachOp
-import SMRep
 import CoreUtils
 import Id
 import Literal
@@ -31,6 +29,8 @@ import Coercion
 import TcType
 import Var
 
+import CmmExpr
+import CmmUtils
 import HscTypes
 import ForeignCall
 import TysWiredIn
@@ -91,8 +91,6 @@ dsForeigns fos = do
    do_decl (ForeignExport (L _ id) _ (CExport (CExportStatic ext_nm cconv))) = do
       (h, c, _, _) <- dsFExport id (idType id) ext_nm cconv False
       return (h, c, [id], [])
-
-   do_decl d = pprPanic "dsForeigns/do_decl" (ppr d)
 \end{code}
 
 
@@ -124,15 +122,8 @@ because it exposes the boxing to the call site.
 dsFImport :: Id
 	  -> ForeignImport
 	  -> DsM ([Binding], SDoc, SDoc)
-dsFImport id (CImport cconv safety _ _ spec) = do
+dsFImport id (CImport cconv safety _ spec) = do
     (ids, h, c) <- dsCImport id spec cconv safety
-    return (ids, h, c)
-
-  -- FIXME: the `lib' field is needed for .NET ILX generation when invoking
-  --	    routines that are external to the .NET runtime, but GHC doesn't
-  --	    support such calls yet; if `nullFastString lib', the value was not given
-dsFImport id (DNImport spec) = do
-    (ids, h, c) <- dsFCall id (DNCall spec)
     return (ids, h, c)
 
 dsCImport :: Id
@@ -155,6 +146,8 @@ dsCImport id (CLabel cid) cconv _ = do
     in
     return ([(id, rhs)], empty, empty)
 
+dsCImport id (CFunction target) cconv@PrimCallConv safety
+  = dsPrimCall id (CCall (CCallSpec target cconv safety))
 dsCImport id (CFunction target) cconv safety
   = dsFCall id (CCall (CCallSpec target cconv safety))
 dsCImport id CWrapper cconv _
@@ -170,8 +163,7 @@ fun_type_arg_stdcall_info StdCallConv ty
   = let
        (_tvs,sans_foralls)        = tcSplitForAllTys arg_ty
        (fe_arg_tys, _orig_res_ty) = tcSplitFunTys sans_foralls
-    in 
-        Just $ sum (map (machRepByteWidth . typeMachRep . getPrimTyOf) fe_arg_tys)
+    in Just $ sum (map (widthInBytes . typeWidth . typeCmmType . getPrimTyOf) fe_arg_tys)
 fun_type_arg_stdcall_info _other_conv _
   = Nothing
 \end{code}
@@ -199,30 +191,7 @@ dsFCall fn_id fcall = do
     let
         work_arg_ids  = [v | Var v <- val_args] -- All guaranteed to be vars
 
-        forDotnet =
-         case fcall of
-           DNCall{} -> True
-           _        -> False
-
-        topConDs
-          | forDotnet = Just <$> dsLookupGlobalId checkDotnetResName
-          | otherwise = return Nothing
-
-        augmentResultDs
-          | forDotnet = do
-                return (\ (mb_res_ty, resWrap) ->
-                              case mb_res_ty of
-                                Nothing -> (Just (mkTyConApp (tupleTyCon Unboxed 1)
-                                                             [ addrPrimTy ]),
-                                                 resWrap)
-                                Just x  -> (Just (mkTyConApp (tupleTyCon Unboxed 2)
-                                                             [ x, addrPrimTy ]),
-                                                 resWrap))
-          | otherwise = return id
-
-    augment <- augmentResultDs
-    topCon <- topConDs
-    (ccall_result_ty, res_wrapper) <- boxResult augment topCon io_res_ty
+    (ccall_result_ty, res_wrapper) <- boxResult io_res_ty
 
     ccall_uniq <- newUnique
     work_uniq  <- newUnique
@@ -241,6 +210,39 @@ dsFCall fn_id fcall = do
     return ([(work_id, work_rhs), (fn_id, wrap_rhs)], empty, empty)
 \end{code}
 
+
+%************************************************************************
+%*									*
+\subsection{Primitive calls}
+%*									*
+%************************************************************************
+
+This is for `@foreign import prim@' declarations.
+
+Currently, at the core level we pretend that these primitive calls are
+foreign calls. It may make more sense in future to have them as a distinct
+kind of Id, or perhaps to bundle them with PrimOps since semantically and
+for calling convention they are really prim ops.
+
+\begin{code}
+dsPrimCall :: Id -> ForeignCall -> DsM ([(Id, Expr TyVar)], SDoc, SDoc)
+dsPrimCall fn_id fcall = do
+    let
+        ty                   = idType fn_id
+        (tvs, fun_ty)        = tcSplitForAllTys ty
+        (arg_tys, io_res_ty) = tcSplitFunTys fun_ty
+                -- Must use tcSplit* functions because we want to
+                -- see that (IO t) in the corner
+
+    args <- newSysLocalsDs arg_tys
+
+    ccall_uniq <- newUnique
+    let
+        call_app = mkFCall ccall_uniq fcall (map Var args) io_res_ty
+        rhs      = mkLams tvs (mkLams args call_app)
+    return ([(fn_id, rhs)], empty, empty)
+
+\end{code}
 
 %************************************************************************
 %*									*
@@ -388,7 +390,7 @@ dsFExportDynamic id cconv = do
                         , Lam stbl_value ccall_adj
                         ]
 
-        fed = (id `setInlinePragma` NeverActive, io_app)
+        fed = (id `setInlineActivation` NeverActive, io_app)
                -- Never inline the f.e.d. function, because the litlit
                -- might not be in scope in other modules.
 
@@ -430,19 +432,26 @@ mkFExportCBits :: FastString
 		  )
 mkFExportCBits c_nm maybe_target arg_htys res_hty is_IO_res_ty cc 
  = (header_bits, c_bits, type_string,
-    sum [ machRepByteWidth rep | (_,_,_,rep) <- aug_arg_info] -- all the args
+    sum [ widthInBytes (typeWidth rep) | (_,_,_,rep) <- aug_arg_info] -- all the args
+	 -- NB. the calculation here isn't strictly speaking correct.
+	 -- We have a primitive Haskell type (eg. Int#, Double#), and
+	 -- we want to know the size, when passed on the C stack, of
+	 -- the associated C type (eg. HsInt, HsDouble).  We don't have
+	 -- this information to hand, but we know what GHC's conventions
+	 -- are for passing around the primitive Haskell types, so we
+	 -- use that instead.  I hope the two coincide --SDM
     )
  where
   -- list the arguments to the C function
   arg_info :: [(SDoc, 		-- arg name
 		SDoc,		-- C type
 	        Type,		-- Haskell type
-		MachRep)]	-- the MachRep
+		CmmType)]	-- the CmmType
   arg_info  = [ let stg_type = showStgType ty in
                 (arg_cname n stg_type,
                  stg_type,
                  ty, 
-		 typeMachRep (getPrimTyOf ty))
+		 typeCmmType (getPrimTyOf ty))
 	      | (ty,n) <- zip arg_htys [1::Int ..] ]
 
   arg_cname n stg_ty
@@ -469,7 +478,7 @@ mkFExportCBits c_nm maybe_target arg_htys res_hty is_IO_res_ty cc
 
   stable_ptr_arg = 
 	(text "the_stableptr", text "StgStablePtr", undefined,
-	 typeMachRep (mkStablePtrPrimTy alphaTy))
+	 typeCmmType (mkStablePtrPrimTy alphaTy))
 
   -- stuff to do with the return type of the C function
   res_hty_is_unit = res_hty `coreEqType` unitTy	-- Look through any newtypes
@@ -481,7 +490,7 @@ mkFExportCBits c_nm maybe_target arg_htys res_hty is_IO_res_ty cc
   pprCconv = case cc of
 		CCallConv   -> empty
 		StdCallConv -> text (ccallConvAttribute cc)
-                CmmCallConv -> panic "mkFExportCBits/pprCconv CmmCallConv"
+                _           -> panic ("mkFExportCBits/pprCconv " ++ showPpr cc)
 
   header_bits = ptext (sLit "extern") <+> fun_proto <> semi
 
@@ -587,16 +596,6 @@ foreignExportInitialiser hs_fn =
     ]
 
 
--- NB. the calculation here isn't strictly speaking correct.
--- We have a primitive Haskell type (eg. Int#, Double#), and
--- we want to know the size, when passed on the C stack, of
--- the associated C type (eg. HsInt, HsDouble).  We don't have
--- this information to hand, but we know what GHC's conventions
--- are for passing around the primitive Haskell types, so we
--- use that instead.  I hope the two coincide --SDM
-typeMachRep :: Type -> MachRep
-typeMachRep ty = argMachRep (typeCgRep ty)
-
 mkHObj :: Type -> SDoc
 mkHObj t = text "rts_mk" <> text (showFFIType t)
 
@@ -613,8 +612,8 @@ showFFIType t = getOccString (getName tc)
 	    Just (tc,_) -> tc
 	    Nothing	-> pprPanic "showFFIType" (ppr t)
 
-insertRetAddr :: CCallConv -> [(SDoc, SDoc, Type, MachRep)]
-                           -> [(SDoc, SDoc, Type, MachRep)]
+insertRetAddr :: CCallConv -> [(SDoc, SDoc, Type, CmmType)]
+                           -> [(SDoc, SDoc, Type, CmmType)]
 #if !defined(x86_64_TARGET_ARCH)
 insertRetAddr CCallConv args = ret_addr_arg : args
 insertRetAddr _ args = args
@@ -624,19 +623,19 @@ insertRetAddr _ args = args
 -- need to flush a register argument to the stack (See rts/Adjustor.c for
 -- details).
 insertRetAddr CCallConv args = go 0 args
-  where  go :: Int -> [(SDoc, SDoc, Type, MachRep)]
-                   -> [(SDoc, SDoc, Type, MachRep)]
+  where  go :: Int -> [(SDoc, SDoc, Type, CmmType)]
+                   -> [(SDoc, SDoc, Type, CmmType)]
          go 6 args = ret_addr_arg : args
 	 go n (arg@(_,_,_,rep):args)
-	  | I64 <- rep = arg : go (n+1) args
+	  | cmmEqType_ignoring_ptrhood rep b64 = arg : go (n+1) args
 	  | otherwise  = arg : go n     args
 	 go _ [] = []
 insertRetAddr _ args = args
 #endif
 
-ret_addr_arg :: (SDoc, SDoc, Type, MachRep)
+ret_addr_arg :: (SDoc, SDoc, Type, CmmType)
 ret_addr_arg = (text "original_return_addr", text "void*", undefined, 
-		typeMachRep addrPrimTy)
+		typeCmmType addrPrimTy)
 
 -- This function returns the primitive type associated with the boxed
 -- type argument to a foreign export (eg. Int ==> Int#).

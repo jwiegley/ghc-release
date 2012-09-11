@@ -8,7 +8,7 @@ module GraphOps (
 	union,
 	addConflict,	delConflict,	addConflicts,
 	addCoalesce,	delCoalesce,	
-	addExclusion,	
+	addExclusion,	addExclusions,
 	addPreference,
 	coalesceNodes,	coalesceGraph,
 	freezeNode,	freezeOneInGraph, freezeAllInGraph,
@@ -213,6 +213,14 @@ addExclusion u getClass color
 		(newNode u (getClass u))  	{ nodeExclusions = unitUniqSet color }
 		u
 
+addExclusions
+	:: (Uniquable k, Uniquable color)
+	=> k -> (k -> cls) -> [color]
+	-> Graph k cls color -> Graph k cls color
+
+addExclusions u getClass colors graph
+	= foldr (addExclusion u getClass) graph colors
+
 
 -- | Add a coalescence edge to the graph, creating nodes if requried.
 --	It is considered adventageous to assign the same color to nodes in a coalesence.
@@ -335,6 +343,9 @@ coalesceNodes aggressive triv graph (k1, k2)
 	, not $ elementOfUniqSet kMin (nodeConflicts nMax)
 	, not $ elementOfUniqSet kMax (nodeConflicts nMin)
 
+	-- can't coalesce the same node
+	, nodeId nMin /= nodeId nMax
+
 	= coalesceNodes_merge aggressive triv graph kMin kMax nMin nMax
 
 	-- don't do the coalescing after all
@@ -349,9 +360,6 @@ coalesceNodes_merge aggressive triv graph kMin kMax nMin nMax
 
 	| not (isNothing (nodeColor nMin) && isNothing (nodeColor nMax))
 	= error "GraphOps.coalesceNodes: can't coalesce colored nodes."
-
-	| nodeId nMin == nodeId nMax
-	= error "GraphOps.coalesceNodes: can't coalesce the same node."
 
 	---
 	| otherwise

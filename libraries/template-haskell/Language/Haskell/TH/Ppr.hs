@@ -181,6 +181,7 @@ pprPat i (InfixP p1 n p2)
                                                pprName' Infix n <+>
                                                pprPat opPrec p2)
 pprPat i (TildeP p)   = parensIf (i > noPrec) $ char '~' <> pprPat appPrec p
+pprPat i (BangP p)    = parensIf (i > noPrec) $ char '!' <> pprPat appPrec p
 pprPat i (AsP v p)    = parensIf (i > noPrec) $ ppr v <> text "@"
                                                       <> pprPat appPrec p
 pprPat _ WildP        = text "_"
@@ -193,47 +194,94 @@ pprPat i (SigP p t) = parensIf (i > noPrec) $ ppr p <+> text "::" <+> ppr t
 
 ------------------------------
 instance Ppr Dec where
-    ppr (FunD f cs)   = vcat $ map (\c -> ppr f <+> ppr c) cs
-    ppr (ValD p r ds) = ppr p <+> pprBody True r
-                     $$ where_clause ds
-    ppr (TySynD t xs rhs) = text "type" <+> ppr t <+> hsep (map ppr xs) 
-                        <+> text "=" <+> ppr rhs
-    ppr (DataD ctxt t xs cs decs)
-        = text "data"
-      <+> pprCxt ctxt
-      <+> ppr t <+> hsep (map ppr xs)
-      <+> sep (pref $ map ppr cs)
-       $$ if null decs
-          then empty
-          else nest nestDepth
-             $ text "deriving"
-           <+> parens (hsep $ punctuate comma $ map ppr decs)
-        where pref :: [Doc] -> [Doc]
-              pref [] = [char '='] -- Can't happen in H98
-              pref (d:ds) = (char '=' <+> d):map (char '|' <+>) ds
-    ppr (NewtypeD ctxt t xs c decs)
-        = text "newtype"
-      <+> pprCxt ctxt
-      <+> ppr t <+> hsep (map ppr xs)
-      <+> char '=' <+> ppr c
-       $$ if null decs
-          then empty
-          else nest nestDepth
-             $ text "deriving"
-           <+> parens (hsep $ punctuate comma $ map ppr decs)
-    ppr (ClassD ctxt c xs fds ds) = text "class" <+> pprCxt ctxt
-                                <+> ppr c <+> hsep (map ppr xs) <+> ppr fds
-                                 $$ where_clause ds
-    ppr (InstanceD ctxt i ds) = text "instance" <+> pprCxt ctxt <+> ppr i
-                             $$ where_clause ds
-    ppr (SigD f t) = ppr f <+> text "::" <+> ppr t
-    ppr (ForeignD f) = ppr f
+    ppr = ppr_dec True
+
+ppr_dec :: Bool     -- declaration on the toplevel?
+        -> Dec 
+        -> Doc
+ppr_dec _ (FunD f cs)   = vcat $ map (\c -> ppr f <+> ppr c) cs
+ppr_dec _ (ValD p r ds) = ppr p <+> pprBody True r
+                          $$ where_clause ds
+ppr_dec _ (TySynD t xs rhs) 
+  = ppr_tySyn empty t (hsep (map ppr xs)) rhs
+ppr_dec _ (DataD ctxt t xs cs decs) 
+  = ppr_data empty ctxt t (hsep (map ppr xs)) cs decs
+ppr_dec _ (NewtypeD ctxt t xs c decs)
+  = ppr_newtype empty ctxt t (sep (map ppr xs)) c decs
+ppr_dec _  (ClassD ctxt c xs fds ds) 
+  = text "class" <+> pprCxt ctxt <+> ppr c <+> hsep (map ppr xs) <+> ppr fds
+    $$ where_clause ds
+ppr_dec _ (InstanceD ctxt i ds) = text "instance" <+> pprCxt ctxt <+> ppr i
+                                  $$ where_clause ds
+ppr_dec _ (SigD f t) = ppr f <+> text "::" <+> ppr t
+ppr_dec _ (ForeignD f) = ppr f
+ppr_dec _ (PragmaD p) = ppr p
+ppr_dec isTop (FamilyD flav tc tvs k) 
+  = ppr flav <+> maybeFamily <+> ppr tc <+> hsep (map ppr tvs) <+> maybeKind
+  where
+    maybeFamily | isTop     = text "family"
+                | otherwise = empty
+
+    maybeKind | (Just k') <- k = text "::" <+> ppr k'
+              | otherwise      = empty
+ppr_dec isTop (DataInstD ctxt tc tys cs decs) 
+  = ppr_data maybeInst ctxt tc (sep (map pprParendType tys)) cs decs
+  where
+    maybeInst | isTop     = text "instance"
+              | otherwise = empty
+ppr_dec isTop (NewtypeInstD ctxt tc tys c decs) 
+  = ppr_newtype maybeInst ctxt tc (sep (map pprParendType tys)) c decs
+  where
+    maybeInst | isTop     = text "instance"
+              | otherwise = empty
+ppr_dec isTop (TySynInstD tc tys rhs) 
+  = ppr_tySyn maybeInst tc (sep (map pprParendType tys)) rhs
+  where
+    maybeInst | isTop     = text "instance"
+              | otherwise = empty
+
+ppr_data :: Doc -> Cxt -> Name -> Doc -> [Con] -> [Name] -> Doc
+ppr_data maybeInst ctxt t argsDoc cs decs
+  = text "data" <+> maybeInst
+    <+> pprCxt ctxt
+    <+> ppr t <+> argsDoc
+    <+> sep (pref $ map ppr cs)
+    $$ if null decs
+       then empty
+       else nest nestDepth
+            $ text "deriving"
+              <+> parens (hsep $ punctuate comma $ map ppr decs)
+  where 
+    pref :: [Doc] -> [Doc]
+    pref []     = []      -- No constructors; can't happen in H98
+    pref (d:ds) = (char '=' <+> d):map (char '|' <+>) ds
+
+ppr_newtype :: Doc -> Cxt -> Name -> Doc -> Con -> [Name] -> Doc
+ppr_newtype maybeInst ctxt t argsDoc c decs
+  = text "newtype" <+> maybeInst
+    <+> pprCxt ctxt
+    <+> ppr t <+> argsDoc
+    <+> char '=' <+> ppr c
+    $$ if null decs
+       then empty
+       else nest nestDepth
+            $ text "deriving"
+              <+> parens (hsep $ punctuate comma $ map ppr decs)
+
+ppr_tySyn :: Doc -> Name -> Doc -> Type -> Doc
+ppr_tySyn maybeInst t argsDoc rhs
+  = text "type" <+> maybeInst <+> ppr t <+> argsDoc <+> text "=" <+> ppr rhs
 
 ------------------------------
 instance Ppr FunDep where
     ppr (FunDep xs ys) = hsep (map ppr xs) <+> text "->" <+> hsep (map ppr ys)
     ppr_list [] = empty
     ppr_list xs = char '|' <+> sep (punctuate (text ", ") (map ppr xs))
+
+------------------------------
+instance Ppr FamFlavour where
+    ppr DataFam = text "data"
+    ppr TypeFam = text "type"
 
 ------------------------------
 instance Ppr Foreign where
@@ -250,6 +298,36 @@ instance Ppr Foreign where
       <+> text (show expent)
       <+> ppr as
       <+> text "::" <+> ppr typ
+
+------------------------------
+instance Ppr Pragma where
+    ppr (InlineP n (InlineSpec inline conlike activation))
+       = text "{-#"
+     <+> (if inline then text "INLINE" else text "NOINLINE")
+     <+> (if conlike then text "CONLIKE" else empty)
+     <+> ppr_activation activation 
+     <+> ppr n
+     <+> text "#-}"
+    ppr (SpecialiseP n ty Nothing)
+       = sep [ text "{-# SPECIALISE" 
+             , ppr n <+> text "::"
+             , ppr ty
+             , text "#-}"
+             ]
+    ppr (SpecialiseP n ty (Just (InlineSpec inline _conlike activation)))
+       = sep [ text "{-# SPECIALISE" <+> 
+               (if inline then text "INLINE" else text "NOINLINE") <+>
+               ppr_activation activation
+             , ppr n <+> text "::"
+             , ppr ty
+             , text "#-}"
+             ]
+      where
+
+ppr_activation :: Maybe (Bool, Int) -> Doc
+ppr_activation (Just (beforeFrom, i))
+  = brackets $ (if beforeFrom then empty else char '~') <+> int i
+ppr_activation Nothing = empty
 
 ------------------------------
 instance Ppr Clause where
@@ -289,10 +367,11 @@ pprParendType ListT      = text "[]"
 pprParendType other      = parens (ppr other)
 
 instance Ppr Type where
-    ppr (ForallT tvars ctxt ty) = 
-        text "forall" <+> hsep (map ppr tvars) <+> text "."
+    ppr (ForallT tvars ctxt ty)
+      = text "forall" <+> hsep (map ppr tvars) <+> text "."
                       <+> pprCxt ctxt <+> ppr ty
-    ppr ty = pprTyApp (split ty)
+    ppr (SigT ty k) = ppr ty <+> text "::" <+> ppr k
+    ppr ty          = pprTyApp (split ty)
 
 pprTyApp :: (Type, [Type]) -> Doc
 pprTyApp (ArrowT, [arg1,arg2]) = sep [pprFunArgType arg1 <+> text "->", ppr arg2]
@@ -305,6 +384,7 @@ pprFunArgType :: Type -> Doc	-- Should really use a precedence argument
 -- Everything except forall and (->) binds more tightly than (->)
 pprFunArgType ty@(ForallT {})                 = parens (ppr ty)
 pprFunArgType ty@((ArrowT `AppT` _) `AppT` _) = parens (ppr ty)
+pprFunArgType ty@(SigT _ _)                   = parens (ppr ty)
 pprFunArgType ty                              = ppr ty
 
 split :: Type -> (Type, [Type])    -- Split into function and args
@@ -313,10 +393,28 @@ split t = go t []
           go ty           args = (ty, args)
 
 ------------------------------
+instance Ppr TyVarBndr where
+    ppr (PlainTV nm)    = ppr nm
+    ppr (KindedTV nm k) = parens (ppr nm <+> text "::" <+> ppr k)
+
+instance Ppr Kind where
+    ppr StarK          = char '*'
+    ppr (ArrowK k1 k2) = pprArrowArgKind k1 <+> text "->" <+> ppr k2
+
+pprArrowArgKind :: Kind -> Doc
+pprArrowArgKind k@(ArrowK _ _) = parens (ppr k)
+pprArrowArgKind k              = ppr k
+
+------------------------------
 pprCxt :: Cxt -> Doc
 pprCxt [] = empty
 pprCxt [t] = ppr t <+> text "=>"
 pprCxt ts = parens (hsep $ punctuate comma $ map ppr ts) <+> text "=>"
+
+------------------------------
+instance Ppr Pred where
+  ppr (ClassP cla tys) = ppr cla <+> sep (map pprParendType tys)
+  ppr (EqualP ty1 ty2) = pprFunArgType ty1 <+> char '~' <+> pprFunArgType ty2
 
 ------------------------------
 instance Ppr Range where
@@ -333,7 +431,7 @@ instance Ppr Range where
 ------------------------------
 where_clause :: [Dec] -> Doc
 where_clause [] = empty
-where_clause ds = nest nestDepth $ text "where" <+> vcat (map ppr ds)
+where_clause ds = nest nestDepth $ text "where" <+> vcat (map (ppr_dec False) ds)
 
 showtextl :: Show a => a -> Doc
 showtextl = text . map toLower . show

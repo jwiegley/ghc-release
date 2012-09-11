@@ -55,6 +55,10 @@ module BasicTypes(
 
 	CompilerPhase, 
 	Activation(..), isActive, isNeverActive, isAlwaysActive,
+        RuleMatchInfo(..), isConLike, isFunLike,
+        InlinePragma(..), defaultInlinePragma, isDefaultInlinePragma,
+        inlinePragmaActivation, inlinePragmaRuleMatchInfo,
+        setInlinePragmaActivation, setInlinePragmaRuleMatchInfo,
 	InlineSpec(..), defaultInlineSpec, alwaysInlineSpec, neverInlineSpec,
 
 	SuccessFlag(..), succeeded, failed, successIf
@@ -115,13 +119,14 @@ initialVersion = 1
 
 \begin{code}
 -- reason/explanation from a WARNING or DEPRECATED pragma
-data WarningTxt = WarningTxt FastString
-                | DeprecatedTxt FastString
+data WarningTxt = WarningTxt [FastString]
+                | DeprecatedTxt [FastString]
     deriving Eq
 
 instance Outputable WarningTxt where
-    ppr (WarningTxt    w) =                        doubleQuotes (ftext w)
-    ppr (DeprecatedTxt d) = text "Deprecated:" <+> doubleQuotes (ftext d)
+    ppr (WarningTxt    ws) = doubleQuotes (vcat (map ftext ws))
+    ppr (DeprecatedTxt ds) = text "Deprecated:" <+>
+                             doubleQuotes (vcat (map ftext ds))
 \end{code}
 
 %************************************************************************
@@ -580,35 +585,94 @@ data Activation = NeverActive
 		| ActiveAfter CompilerPhase	-- Active in this phase and later
 		deriving( Eq )			-- Eq used in comparing rules in HsDecls
 
-data InlineSpec
-  = Inline 
-	Activation	-- Says during which phases inlining is allowed
-	Bool 		-- True <=> make the RHS look small, so that when inlining
-			--	    is enabled, it will definitely actually happen
+data RuleMatchInfo = ConLike
+                   | FunLike
+                   deriving( Eq )
+
+isConLike :: RuleMatchInfo -> Bool
+isConLike ConLike = True
+isConLike _            = False
+
+isFunLike :: RuleMatchInfo -> Bool
+isFunLike FunLike = True
+isFunLike _            = False
+
+data InlinePragma
+  = InlinePragma
+      Activation        -- Says during which phases inlining is allowed
+      RuleMatchInfo     -- Should the function be treated like a constructor?
   deriving( Eq )
 
-defaultInlineSpec, alwaysInlineSpec, neverInlineSpec :: InlineSpec
+defaultInlinePragma :: InlinePragma
+defaultInlinePragma = InlinePragma AlwaysActive FunLike
 
-defaultInlineSpec = Inline AlwaysActive False	-- Inlining is OK, but not forced
-alwaysInlineSpec  = Inline AlwaysActive True	-- INLINE always
-neverInlineSpec   = Inline NeverActive  False	-- NOINLINE 
+isDefaultInlinePragma :: InlinePragma -> Bool
+isDefaultInlinePragma (InlinePragma activation match_info)
+  = isAlwaysActive activation && isFunLike match_info
+
+inlinePragmaActivation :: InlinePragma -> Activation
+inlinePragmaActivation (InlinePragma activation _) = activation
+
+inlinePragmaRuleMatchInfo :: InlinePragma -> RuleMatchInfo
+inlinePragmaRuleMatchInfo (InlinePragma _ info) = info
+
+setInlinePragmaActivation :: InlinePragma -> Activation -> InlinePragma
+setInlinePragmaActivation (InlinePragma _ info) activation
+  = InlinePragma activation info
+
+setInlinePragmaRuleMatchInfo :: InlinePragma -> RuleMatchInfo -> InlinePragma
+setInlinePragmaRuleMatchInfo (InlinePragma activation _) info
+  = InlinePragma activation info
+
+data InlineSpec
+  = Inline
+        InlinePragma
+	Bool 		-- True  <=> INLINE
+			-- False <=> NOINLINE
+  deriving( Eq )
+
+defaultInlineSpec :: InlineSpec
+alwaysInlineSpec, neverInlineSpec :: RuleMatchInfo -> InlineSpec
+
+defaultInlineSpec = Inline defaultInlinePragma False
+                                                -- Inlining is OK, but not forced
+alwaysInlineSpec match_info
+                = Inline (InlinePragma AlwaysActive match_info) True
+                                                -- INLINE always
+neverInlineSpec match_info
+                = Inline (InlinePragma NeverActive  match_info) False
+                                                -- NOINLINE
 
 instance Outputable Activation where
    ppr NeverActive      = ptext (sLit "NEVER")
    ppr AlwaysActive     = ptext (sLit "ALWAYS")
    ppr (ActiveBefore n) = brackets (char '~' <> int n)
    ppr (ActiveAfter n)  = brackets (int n)
+
+instance Outputable RuleMatchInfo where
+   ppr ConLike = ptext (sLit "CONLIKE")
+   ppr FunLike = ptext (sLit "FUNLIKE")
+
+instance Outputable InlinePragma where
+  ppr (InlinePragma activation FunLike)
+       = ppr activation
+  ppr (InlinePragma activation match_info)
+       = ppr match_info <+> ppr activation
     
 instance Outputable InlineSpec where
-   ppr (Inline act is_inline)  
+   ppr (Inline (InlinePragma act match_info) is_inline)  
 	| is_inline = ptext (sLit "INLINE")
-		      <> case act of
-			    AlwaysActive -> empty
-			    _            -> ppr act
+                      <+> ppr_match_info
+		      <+> case act of
+			     AlwaysActive -> empty
+			     _            -> ppr act
 	| otherwise = ptext (sLit "NOINLINE")
-		      <> case act of
-			    NeverActive  -> empty
-			    _            -> ppr act
+                      <+> ppr_match_info
+		      <+> case act of
+			     NeverActive  -> empty
+			     _            -> ppr act
+     where
+       ppr_match_info = if isFunLike match_info then empty else ppr match_info
 
 isActive :: CompilerPhase -> Activation -> Bool
 isActive _ NeverActive      = False

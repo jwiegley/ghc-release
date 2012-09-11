@@ -131,6 +131,9 @@ basicKnownKeyNames
 	realFloatClassName,		-- numeric
 	dataClassName, 
 	isStringClassName,
+	applicativeClassName,
+	foldableClassName,
+	traversableClassName,
 
 	-- Numeric stuff
 	negateName, minusName, 
@@ -164,7 +167,7 @@ basicKnownKeyNames
 
 	-- Read stuff
 	readClassName, 
-	
+
 	-- Stable pointers
 	newStablePtrName,
 
@@ -203,9 +206,9 @@ basicKnownKeyNames
 	-- Other classes
 	randomClassName, randomGenClassName, monadPlusClassName,
 
-	-- Booleans
-	andName, orName
-	
+        -- Annotation type checking
+        toAnnotationWrapperName
+
 	-- The Either type
 	, eitherTyConName, leftDataConName, rightDataConName
 
@@ -232,14 +235,15 @@ pRELUDE :: Module
 pRELUDE		= mkBaseModule_ pRELUDE_NAME
 
 gHC_PRIM, gHC_TYPES, gHC_BOOL, gHC_UNIT, gHC_ORDERING, gHC_GENERICS, gHC_CLASSES, gHC_BASE, gHC_ENUM,
-    gHC_SHOW, gHC_READ, gHC_NUM, gHC_INTEGER, gHC_INTEGER_INTERNALS, gHC_LIST, gHC_PARR,
-    gHC_TUPLE, dATA_TUPLE, dATA_EITHER, dATA_STRING, gHC_PACK, gHC_CONC, gHC_IO_BASE,
+    gHC_SHOW, gHC_READ, gHC_NUM, gHC_INTEGER, gHC_INTEGER_TYPE, gHC_LIST, gHC_PARR,
+    gHC_TUPLE, dATA_TUPLE, dATA_EITHER, dATA_STRING, dATA_FOLDABLE, dATA_TRAVERSABLE,
+    gHC_PACK, gHC_CONC, gHC_IO, gHC_IO_Exception,
     gHC_ST, gHC_ARR, gHC_STABLE, gHC_ADDR, gHC_PTR, gHC_ERR, gHC_REAL,
     gHC_FLOAT, gHC_TOP_HANDLER, sYSTEM_IO, dYNAMIC, tYPEABLE, gENERICS,
-    dOTNET, rEAD_PREC, lEX, gHC_INT, gHC_WORD, mONAD, mONAD_FIX, aRROW,
+    dOTNET, rEAD_PREC, lEX, gHC_INT, gHC_WORD, mONAD, mONAD_FIX, aRROW, cONTROL_APPLICATIVE,
     gHC_DESUGAR, rANDOM, gHC_EXTS, cONTROL_EXCEPTION_BASE :: Module
 gHC_PRIM	= mkPrimModule (fsLit "GHC.Prim")   -- Primitive types and values
-gHC_TYPES   = mkPrimModule (fsLit "GHC.Types")
+gHC_TYPES       = mkPrimModule (fsLit "GHC.Types")
 gHC_UNIT	= mkPrimModule (fsLit "GHC.Unit")
 gHC_BOOL	= mkPrimModule (fsLit "GHC.Bool")
 gHC_ORDERING	= mkPrimModule (fsLit "GHC.Ordering")
@@ -251,16 +255,19 @@ gHC_SHOW	= mkBaseModule (fsLit "GHC.Show")
 gHC_READ	= mkBaseModule (fsLit "GHC.Read")
 gHC_NUM		= mkBaseModule (fsLit "GHC.Num")
 gHC_INTEGER	= mkIntegerModule (fsLit "GHC.Integer")
-gHC_INTEGER_INTERNALS = mkIntegerModule (fsLit "GHC.Integer.Internals")
+gHC_INTEGER_TYPE	= mkIntegerModule (fsLit "GHC.Integer.Type")
 gHC_LIST	= mkBaseModule (fsLit "GHC.List")
 gHC_PARR	= mkBaseModule (fsLit "GHC.PArr")
 gHC_TUPLE	= mkPrimModule (fsLit "GHC.Tuple")
 dATA_TUPLE	= mkBaseModule (fsLit "Data.Tuple")
 dATA_EITHER	= mkBaseModule (fsLit "Data.Either")
 dATA_STRING	= mkBaseModule (fsLit "Data.String")
+dATA_FOLDABLE	= mkBaseModule (fsLit "Data.Foldable")
+dATA_TRAVERSABLE= mkBaseModule (fsLit "Data.Traversable")
 gHC_PACK	= mkBaseModule (fsLit "GHC.Pack")
 gHC_CONC	= mkBaseModule (fsLit "GHC.Conc")
-gHC_IO_BASE	= mkBaseModule (fsLit "GHC.IOBase")
+gHC_IO    	= mkBaseModule (fsLit "GHC.IO")
+gHC_IO_Exception = mkBaseModule (fsLit "GHC.IO.Exception")
 gHC_ST		= mkBaseModule (fsLit "GHC.ST")
 gHC_ARR		= mkBaseModule (fsLit "GHC.Arr")
 gHC_STABLE	= mkBaseModule (fsLit "GHC.Stable")
@@ -282,6 +289,7 @@ gHC_WORD	= mkBaseModule (fsLit "GHC.Word")
 mONAD		= mkBaseModule (fsLit "Control.Monad")
 mONAD_FIX	= mkBaseModule (fsLit "Control.Monad.Fix")
 aRROW		= mkBaseModule (fsLit "Control.Arrow")
+cONTROL_APPLICATIVE = mkBaseModule (fsLit "Control.Applicative")
 gHC_DESUGAR = mkBaseModule (fsLit "GHC.Desugar")
 rANDOM		= mkBaseModule (fsLit "System.Random")
 gHC_EXTS	= mkBaseModule (fsLit "GHC.Exts")
@@ -313,9 +321,6 @@ mkBaseModule m = mkModule basePackageId (mkModuleNameFS m)
 
 mkBaseModule_ :: ModuleName -> Module
 mkBaseModule_ m = mkModule basePackageId m
-
-mkSybModule :: FastString -> Module
-mkSybModule m = mkModule sybPackageId (mkModuleNameFS m)
 
 mkMainModule :: FastString -> Module
 mkMainModule m = mkModule mainPackageId (mkModuleNameFS m)
@@ -386,9 +391,6 @@ returnM_RDR 		= nameRdrName returnMName
 bindM_RDR 		= nameRdrName bindMName
 failM_RDR 		= nameRdrName failMName
 
-and_RDR :: RdrName
-and_RDR			= nameRdrName andName
-
 left_RDR, right_RDR :: RdrName
 left_RDR		= nameRdrName leftDataConName
 right_RDR		= nameRdrName rightDataConName
@@ -440,8 +442,9 @@ compose_RDR :: RdrName
 compose_RDR		= varQual_RDR gHC_BASE (fsLit ".")
 
 not_RDR, getTag_RDR, succ_RDR, pred_RDR, minBound_RDR, maxBound_RDR,
-    range_RDR, inRange_RDR, index_RDR,
+    and_RDR, range_RDR, inRange_RDR, index_RDR,
     unsafeIndex_RDR, unsafeRangeSize_RDR :: RdrName
+and_RDR			= varQual_RDR gHC_CLASSES (fsLit "&&")
 not_RDR 		= varQual_RDR gHC_CLASSES (fsLit "not")
 getTag_RDR	 	= varQual_RDR gHC_BASE (fsLit "getTag")
 succ_RDR 		= varQual_RDR gHC_ENUM (fsLit "succ")
@@ -498,6 +501,13 @@ crossDataCon_RDR   = dataQual_RDR gHC_GENERICS (fsLit ":*:")
 inlDataCon_RDR     = dataQual_RDR gHC_GENERICS (fsLit "Inl")
 inrDataCon_RDR     = dataQual_RDR gHC_GENERICS (fsLit "Inr")
 genUnitDataCon_RDR = dataQual_RDR gHC_GENERICS (fsLit "Unit")
+
+fmap_RDR, pure_RDR, ap_RDR, foldable_foldr_RDR, traverse_RDR :: RdrName
+fmap_RDR 		= varQual_RDR gHC_BASE (fsLit "fmap")
+pure_RDR 		= varQual_RDR cONTROL_APPLICATIVE (fsLit "pure")
+ap_RDR 			= varQual_RDR cONTROL_APPLICATIVE (fsLit "<*>")
+foldable_foldr_RDR 	= varQual_RDR dATA_FOLDABLE       (fsLit "foldr")
+traverse_RDR 		= varQual_RDR dATA_TRAVERSABLE    (fsLit "traverse")
 
 ----------------------
 varQual_RDR, tcQual_RDR, clsQual_RDR, dataQual_RDR
@@ -570,13 +580,19 @@ bindMName	   = methName gHC_BASE (fsLit ">>=")    bindMClassOpKey
 returnMName	   = methName gHC_BASE (fsLit "return") returnMClassOpKey
 failMName	   = methName gHC_BASE (fsLit "fail")   failMClassOpKey
 
+-- Classes (Applicative, Foldable, Traversable)
+applicativeClassName, foldableClassName, traversableClassName :: Name
+applicativeClassName  = clsQual  cONTROL_APPLICATIVE (fsLit "Applicative") applicativeClassKey
+foldableClassName     = clsQual  dATA_FOLDABLE       (fsLit "Foldable")    foldableClassKey
+traversableClassName  = clsQual  dATA_TRAVERSABLE    (fsLit "Traversable") traversableClassKey
+
 -- Functions for GHC extensions
 groupWithName :: Name
 groupWithName = varQual gHC_EXTS (fsLit "groupWith") groupWithIdKey
 
 -- Random PrelBase functions
 fromStringName, otherwiseIdName, foldrName, buildName, augmentName,
-    mapName, appendName, andName, orName, assertName,
+    mapName, appendName, assertName,
     breakpointName, breakpointCondName, breakpointAutoName,
     opaqueTyConName :: Name
 fromStringName = methName dATA_STRING (fsLit "fromString") fromStringClassOpKey
@@ -586,8 +602,6 @@ buildName	  = varQual gHC_BASE (fsLit "build")      buildIdKey
 augmentName	  = varQual gHC_BASE (fsLit "augment")    augmentIdKey
 mapName       = varQual gHC_BASE (fsLit "map")        mapIdKey
 appendName	  = varQual gHC_BASE (fsLit "++")         appendIdKey
-andName		  = varQual gHC_CLASSES (fsLit "&&")	 andIdKey
-orName		  = varQual gHC_CLASSES (fsLit "||")	 orIdKey
 assertName        = varQual gHC_BASE (fsLit "assert")     assertIdKey
 breakpointName    = varQual gHC_BASE (fsLit "breakpoint") breakpointIdKey
 breakpointCondName= varQual gHC_BASE (fsLit "breakpointCond") breakpointCondIdKey
@@ -620,14 +634,15 @@ sndName		  = varQual dATA_TUPLE (fsLit "snd") sndIdKey
 
 -- Module PrelNum
 numClassName, fromIntegerName, minusName, negateName, plusIntegerName,
-    timesIntegerName, integerTyConName, smallIntegerName :: Name
+    timesIntegerName,
+    integerTyConName, smallIntegerName :: Name
 numClassName	  = clsQual  gHC_NUM (fsLit "Num") numClassKey
 fromIntegerName   = methName gHC_NUM (fsLit "fromInteger") fromIntegerClassOpKey
 minusName	  = methName gHC_NUM (fsLit "-") minusClassOpKey
 negateName	  = methName gHC_NUM (fsLit "negate") negateClassOpKey
 plusIntegerName   = varQual  gHC_INTEGER (fsLit "plusInteger") plusIntegerIdKey
 timesIntegerName  = varQual  gHC_INTEGER (fsLit "timesInteger") timesIntegerIdKey
-integerTyConName  = tcQual   gHC_INTEGER_INTERNALS (fsLit "Integer") integerTyConKey
+integerTyConName  = tcQual   gHC_INTEGER_TYPE (fsLit "Integer") integerTyConKey
 smallIntegerName = varQual gHC_INTEGER (fsLit "smallInteger") smallIntegerIdKey
 
 -- PrelReal types and classes
@@ -676,7 +691,7 @@ dataClassName = clsQual gENERICS (fsLit "Data") dataClassKey
 
 -- Error module
 assertErrorName    :: Name
-assertErrorName	  = varQual gHC_IO_BASE (fsLit "assertError") assertErrorIdKey
+assertErrorName	  = varQual gHC_IO_Exception (fsLit "assertError") assertErrorIdKey
 
 -- Enum module (Enum, Bounded)
 enumClassName, enumFromName, enumFromToName, enumFromThenName,
@@ -722,15 +737,15 @@ toPName	          = varQual gHC_PARR (fsLit "toP")	       	 toPIdKey
 emptyPName        = varQual gHC_PARR (fsLit "emptyP")            emptyPIdKey
 appPName          = varQual gHC_PARR (fsLit "+:+")               appPIdKey
 
--- IOBase things
+-- IO things
 ioTyConName, ioDataConName, thenIOName, bindIOName, returnIOName,
     failIOName :: Name
-ioTyConName	  = tcQual  gHC_IO_BASE (fsLit "IO") ioTyConKey
-ioDataConName     = conName gHC_IO_BASE (fsLit "IO") ioDataConKey
-thenIOName	  = varQual gHC_IO_BASE (fsLit "thenIO") thenIOIdKey
-bindIOName	  = varQual gHC_IO_BASE (fsLit "bindIO") bindIOIdKey
-returnIOName	  = varQual gHC_IO_BASE (fsLit "returnIO") returnIOIdKey
-failIOName	  = varQual gHC_IO_BASE (fsLit "failIO") failIOIdKey
+ioTyConName	  = tcQual  gHC_TYPES (fsLit "IO") ioTyConKey
+ioDataConName     = conName gHC_TYPES (fsLit "IO") ioDataConKey
+thenIOName	  = varQual gHC_BASE (fsLit "thenIO") thenIOIdKey
+bindIOName	  = varQual gHC_BASE (fsLit "bindIO") bindIOIdKey
+returnIOName	  = varQual gHC_BASE (fsLit "returnIO") returnIOIdKey
+failIOName	  = varQual gHC_IO (fsLit "failIO") failIOIdKey
 
 -- IO things
 printName :: Name
@@ -780,6 +795,10 @@ firstAName	   = varQual aRROW (fsLit "first") firstAIdKey
 appAName	   = varQual aRROW (fsLit "app")	  appAIdKey
 choiceAName	   = varQual aRROW (fsLit "|||")	  choiceAIdKey
 loopAName	   = varQual aRROW (fsLit "loop")  loopAIdKey
+
+-- Annotation type checking
+toAnnotationWrapperName :: Name
+toAnnotationWrapperName = varQual gHC_DESUGAR (fsLit "toAnnotationWrapper") toAnnotationWrapperIdKey
 
 -- Other classes, needed for type defaulting
 monadPlusClassName, randomClassName, randomGenClassName,
@@ -882,6 +901,11 @@ randomGenClassKey	= mkPreludeClassUnique 32
 
 isStringClassKey :: Unique
 isStringClassKey	= mkPreludeClassUnique 33
+
+applicativeClassKey, foldableClassKey, traversableClassKey :: Unique
+applicativeClassKey	= mkPreludeClassUnique 34
+foldableClassKey	= mkPreludeClassUnique 35
+traversableClassKey	= mkPreludeClassUnique 36
 \end{code}
 
 %************************************************************************
@@ -1040,7 +1064,7 @@ unitTyConKey = mkTupleTyConUnique Boxed 0
 charDataConKey, consDataConKey, doubleDataConKey, falseDataConKey,
     floatDataConKey, intDataConKey, nilDataConKey, ratioDataConKey,
     stableNameDataConKey, trueDataConKey, wordDataConKey,
-    ioDataConKey :: Unique
+    ioDataConKey, integerDataConKey :: Unique
 charDataConKey				= mkPreludeDataConUnique  1
 consDataConKey				= mkPreludeDataConUnique  2
 doubleDataConKey			= mkPreludeDataConUnique  3
@@ -1053,6 +1077,7 @@ stableNameDataConKey			= mkPreludeDataConUnique 14
 trueDataConKey				= mkPreludeDataConUnique 15
 wordDataConKey				= mkPreludeDataConUnique 16
 ioDataConKey				= mkPreludeDataConUnique 17
+integerDataConKey			= mkPreludeDataConUnique 18
 
 -- Generic data constructors
 crossDataConKey, inlDataConKey, inrDataConKey, genUnitDataConKey :: Unique
@@ -1149,9 +1174,7 @@ rootMainKey, runMainKey :: Unique
 rootMainKey		      = mkPreludeMiscIdUnique 55
 runMainKey		      = mkPreludeMiscIdUnique 56
 
-andIdKey, orIdKey, thenIOIdKey, lazyIdKey, assertErrorIdKey :: Unique
-andIdKey		      = mkPreludeMiscIdUnique 57
-orIdKey			      = mkPreludeMiscIdUnique 58
+thenIOIdKey, lazyIdKey, assertErrorIdKey :: Unique
 thenIOIdKey		      = mkPreludeMiscIdUnique 59
 lazyIdKey		      = mkPreludeMiscIdUnique 60
 assertErrorIdKey	      = mkPreludeMiscIdUnique 61
@@ -1249,6 +1272,11 @@ loopAIdKey	= mkPreludeMiscIdUnique 124
 fromStringClassOpKey :: Unique
 fromStringClassOpKey	      = mkPreludeMiscIdUnique 125
 
+-- Annotation type checking
+toAnnotationWrapperIdKey :: Unique
+toAnnotationWrapperIdKey      = mkPreludeMiscIdUnique 126
+
+
 ---------------- Template Haskell -------------------
 --	USES IdUniques 200-399
 -----------------------------------------------------
@@ -1314,7 +1342,8 @@ standardClassKeys = derivableClassKeys ++ numericClassKeys
 		  ++ [randomClassKey, randomGenClassKey,
 		      functorClassKey, 
 		      monadClassKey, monadPlusClassKey,
-		      isStringClassKey
+		      isStringClassKey,
+		      applicativeClassKey, foldableClassKey, traversableClassKey
 		     ]
 \end{code}
 

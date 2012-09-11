@@ -11,10 +11,11 @@ module HscStats ( ppSourceStats ) where
 import HsSyn
 import Outputable
 import SrcLoc
-import Char
 import Bag
 import Util
 import RdrName
+
+import Data.Char
 \end{code}
 
 %************************************************************************
@@ -25,7 +26,7 @@ import RdrName
 
 \begin{code}
 ppSourceStats :: Bool -> Located (HsModule RdrName) -> SDoc
-ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _ _))
+ppSourceStats short (L _ (HsModule _ exports imports ldecls _ _))
  = (if short then hcat else vcat)
         (map pp_val
 	       [("ExportAll        ", export_all), -- 1 if no export list

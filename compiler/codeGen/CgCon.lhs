@@ -9,13 +9,6 @@ with {\em constructors} on the RHSs of let(rec)s.  See also
 @CgClosure@, which deals with closures.
 
 \begin{code}
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module CgCon (
 	cgTopRhsCon, buildDynCon,
 	bindConArgs, bindUnboxedTupleComponents,
@@ -47,6 +40,7 @@ import Constants
 import TyCon
 import DataCon
 import Id
+import IdInfo
 import Type
 import PrelInfo
 import Outputable
@@ -54,8 +48,6 @@ import ListSetOps
 import Util
 import FastString
 import StaticFlags
-
-import Control.Monad
 \end{code}
 
 
@@ -85,7 +77,7 @@ cgTopRhsCon id con args
 	; let
 	    name          = idName id
 	    lf_info	  = mkConLFInfo con
-    	    closure_label = mkClosureLabel name
+    	    closure_label = mkClosureLabel name $ idCafInfo id
 	    caffy         = any stgArgHasCafRefs args
 	    (closure_info, amodes_w_offsets) = layOutStaticConstr con amodes
 	    closure_rep = mkStaticClosureFields
@@ -143,9 +135,10 @@ which have exclusively size-zero (VoidRep) args, we generate no code
 at all.
 
 \begin{code}
-buildDynCon binder cc con []
+buildDynCon binder _ con []
   = returnFC (taggedStableIdInfo binder
-			   (mkLblExpr (mkClosureLabel (dataConName con)))
+			   (mkLblExpr (mkClosureLabel (dataConName con)
+                                      (idCafInfo binder)))
     			   (mkConLFInfo con)
                            con)
 \end{code}
@@ -172,23 +165,23 @@ which is guaranteed in range.
 Because of this, we use can safely return an addressing mode.
 
 \begin{code}
-buildDynCon binder cc con [arg_amode]
+buildDynCon binder _ con [arg_amode]
   | maybeIntLikeCon con 
   , (_, CmmLit (CmmInt val _)) <- arg_amode
   , let val_int = (fromIntegral val) :: Int
   , val_int <= mAX_INTLIKE && val_int >= mIN_INTLIKE
-  = do 	{ let intlike_lbl   = mkRtsDataLabel (sLit "stg_INTLIKE_closure")
+  = do 	{ let intlike_lbl   = mkRtsGcPtrLabel (sLit "stg_INTLIKE_closure")
 	      offsetW = (val_int - mIN_INTLIKE) * (fixedHdrSize + 1)
 		-- INTLIKE closures consist of a header and one word payload
 	      intlike_amode = CmmLit (cmmLabelOffW intlike_lbl offsetW)
 	; returnFC (taggedStableIdInfo binder intlike_amode (mkConLFInfo con) con) }
 
-buildDynCon binder cc con [arg_amode]
+buildDynCon binder _ con [arg_amode]
   | maybeCharLikeCon con 
   , (_, CmmLit (CmmInt val _)) <- arg_amode
   , let val_int = (fromIntegral val) :: Int
   , val_int <= mAX_CHARLIKE && val_int >= mIN_CHARLIKE
-  = do 	{ let charlike_lbl   = mkRtsDataLabel (sLit "stg_CHARLIKE_closure")
+  = do 	{ let charlike_lbl   = mkRtsGcPtrLabel (sLit "stg_CHARLIKE_closure")
 	      offsetW = (val_int - mIN_CHARLIKE) * (fixedHdrSize + 1)
 		-- CHARLIKE closures consist of a header and one word payload
 	      charlike_amode = CmmLit (cmmLabelOffW charlike_lbl offsetW)
@@ -332,8 +325,8 @@ cgReturnDataCon con amodes
 			| isDeadBinder bndr -> performReturn (jump_to deflt_lbl)
 			| otherwise	    -> build_it_then (jump_to deflt_lbl) }
     
-	    _ -- The usual case
-	      -> build_it_then emitReturnInstr
+	    _otherwise	-- The usual case
+              -> build_it_then emitReturnInstr
 	}
   where
     enter_it    = stmtsC [ CmmAssign nodeReg (cmmUntag (CmmReg nodeReg)),
@@ -410,9 +403,8 @@ cgTyCon tycon
             -- code appears to put it before --- NR 16 Aug 2007
 	; extra <- 
 	   if isEnumerationTyCon tycon then do
-	        tbl <- getCmm (emitRODataLits (mkLocalClosureTableLabel 
-						(tyConName tycon))
-			   [ CmmLabelOff (mkLocalClosureLabel (dataConName con)) (tagForCon con)
+	        tbl <- getCmm (emitRODataLits "cgTyCon" (mkLocalClosureTableLabel (tyConName tycon) NoCafRefs)
+			   [ CmmLabelOff (mkLocalClosureLabel (dataConName con) NoCafRefs) (tagForCon con)
     			   | con <- tyConDataCons tycon])
 		return [tbl]
 	   else
@@ -445,7 +437,7 @@ cgDataCon data_con
 		= do { code_blks <- getCgStmts the_code
 		     ; emitClosureCodeAndInfoTable cl_info [] code_blks }
 		where
-		  the_code = do	{ ticky_code
+		  the_code = do	{ _ <- ticky_code
 				; ldvEnter (CmmReg nodeReg)
 				; body_code }
 

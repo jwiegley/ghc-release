@@ -1,5 +1,4 @@
 #include "Rts.h"
-#include "Storage.h"
 
 // This file is only included when GhcBuildDylibs is set in mk/build.mk.
 // It contains an __attribute__((constructor)) function (run prior to main())
@@ -7,9 +6,11 @@
 // This is required so that GHCi can use dynamic libraries instead of HSxyz.o
 // files.
 
+#ifdef DYNAMIC
 static void keepCAFsForGHCi() __attribute__((constructor));
 
 static void keepCAFsForGHCi()
 {
     keepCAFs = 1;
 }
+#endif

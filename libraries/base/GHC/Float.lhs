@@ -24,6 +24,7 @@ module GHC.Float( module GHC.Float, Float(..), Double(..), Float#, Double# )
 
 import Data.Maybe
 
+import Data.Bits
 import GHC.Base
 import GHC.List
 import GHC.Enum
@@ -199,16 +200,22 @@ instance  RealFrac Float  where
     {-# INLINE floor #-}
     {-# INLINE truncate #-}
 
-    properFraction x
-      = case (decodeFloat x)      of { (m,n) ->
-        let  b = floatRadix x     in
-        if n >= 0 then
-            (fromInteger m * fromInteger b ^ n, 0.0)
-        else
-            case (quotRem m (b^(negate n))) of { (w,r) ->
-            (fromInteger w, encodeFloat r n)
-            }
-        }
+-- We assume that FLT_RADIX is 2 so that we can use more efficient code
+#if FLT_RADIX != 2
+#error FLT_RADIX must be 2
+#endif
+    properFraction (F# x#)
+      = case decodeFloat_Int# x# of
+        (# m#, n# #) ->
+            let m = I# m#
+                n = I# n#
+            in
+            if n >= 0
+            then (fromIntegral m * (2 ^ n), 0.0)
+            else let i = if m >= 0 then                m `shiftR` negate n
+                                   else negate (negate m `shiftR` negate n)
+                     f = m - (i `shiftL` negate n)
+                 in (fromIntegral i, encodeFloat (fromIntegral f) n)
 
     truncate x  = case properFraction x of
                      (n,_) -> n
@@ -255,8 +262,8 @@ instance  RealFloat Float  where
     floatDigits _       =  FLT_MANT_DIG     -- ditto
     floatRange _        =  (FLT_MIN_EXP, FLT_MAX_EXP) -- ditto
 
-    decodeFloat (F# f#) = case decodeFloatInteger f# of
-                          (# i, e #) -> (i, I# e)
+    decodeFloat (F# f#) = case decodeFloat_Int# f# of
+                          (# i, e #) -> (smallInteger i, I# e)
 
     encodeFloat i (I# e) = F# (encodeFloatInteger i e)
 
@@ -618,7 +625,9 @@ floatToDigits base x =
         -- Haskell promises that p-1 <= logBase b f < p.
         (p - 1 + e0) * 3 `div` 10
      else
-        ceiling ((log (fromInteger (f+1)) +
+	-- f :: Integer, log :: Float -> Float, 
+        --               ceiling :: Float -> Int
+        ceiling ((log (fromInteger (f+1) :: Float) +
                  fromIntegral e * log (fromInteger b)) /
                    log (fromInteger base))
 --WAS:            fromInt e * log (fromInteger b))
@@ -896,20 +905,11 @@ powerDouble  (D# x) (D# y) = D# (x **## y)
 \end{code}
 
 \begin{code}
-foreign import ccall unsafe "__encodeFloat"
-        encodeFloat# :: Int# -> ByteArray# -> Int -> Float
-foreign import ccall unsafe "__int_encodeFloat"
-        int_encodeFloat# :: Int# -> Int -> Float
-
-
 foreign import ccall unsafe "isFloatNaN" isFloatNaN :: Float -> Int
 foreign import ccall unsafe "isFloatInfinite" isFloatInfinite :: Float -> Int
 foreign import ccall unsafe "isFloatDenormalized" isFloatDenormalized :: Float -> Int
 foreign import ccall unsafe "isFloatNegativeZero" isFloatNegativeZero :: Float -> Int
 
-
-foreign import ccall unsafe "__encodeDouble"
-        encodeDouble# :: Int# -> ByteArray# -> Int -> Double
 
 foreign import ccall unsafe "isDoubleNaN" isDoubleNaN :: Double -> Int
 foreign import ccall unsafe "isDoubleInfinite" isDoubleInfinite :: Double -> Int

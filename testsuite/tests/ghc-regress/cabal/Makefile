@@ -3,12 +3,12 @@ include $(TOP)/mk/boilerplate.mk
 include $(TOP)/mk/test.mk
 
 PKGCONF01=local01.package.conf
-LOCAL_GHC_PKG01 = $(GHC_PKG) -f $(PKGCONF01)
+LOCAL_GHC_PKG01 = '$(GHC_PKG)' --no-user-package-conf -f $(PKGCONF01)
 
 # a bunch of tests for ghc-pkg
 ghcpkg01 :
-	@rm -f $(PKGCONF01)
-	echo "[]" >$(PKGCONF01)
+	@rm -rf $(PKGCONF01)
+	$(LOCAL_GHC_PKG01) init $(PKGCONF01)
 	$(LOCAL_GHC_PKG01) list
 	$(LOCAL_GHC_PKG01) register --force test.pkg 2>/dev/null
 	$(LOCAL_GHC_PKG01) describe testpkg
@@ -47,11 +47,11 @@ ghcpkg01 :
 	if $(LOCAL_GHC_PKG01) register test3.pkg; then false; else true; fi
 
 PKGCONF03=local03.package.conf
-LOCAL_GHC_PKG03 = $(GHC_PKG) -f $(PKGCONF03)
+LOCAL_GHC_PKG03 = '$(GHC_PKG)' --no-user-package-conf -f $(PKGCONF03)
 
 ghcpkg03 :
-	@rm -f $(PKGCONF03)
-	echo "[]" >$(PKGCONF03)
+	@rm -rf $(PKGCONF03)
+	$(LOCAL_GHC_PKG03) init $(PKGCONF03)
 	@: # update should hide conflicting packages
 	$(LOCAL_GHC_PKG03) register --force test.pkg
 	$(LOCAL_GHC_PKG03) register --force test2.pkg
@@ -65,28 +65,28 @@ ghcpkg03 :
 	$(LOCAL_GHC_PKG03) update --force test.pkg
 
 PKGCONF04=local04.package.conf
-LOCAL_GHC_PKG04 = $(GHC_PKG) -f $(PKGCONF04)
+LOCAL_GHC_PKG04 = '$(GHC_PKG)' --no-user-package-conf -f $(PKGCONF04)
 
 # Test that importing a module exposed by two packages reports a conflict
 ghcpkg04 :
-	rm -f $(PKGCONF04)
-	echo "[]" >$(PKGCONF04)
+	rm -rf $(PKGCONF04)
+	$(LOCAL_GHC_PKG04) init $(PKGCONF04)
 	$(LOCAL_GHC_PKG04) register --force test.pkg >/dev/null 2>&1 
 	$(LOCAL_GHC_PKG04) update --force test5.pkg >/dev/null 2>&1 
 	$(LOCAL_GHC_PKG04) expose testpkg-1.2.3.4  >/dev/null 2>&1
 	@: # testpkg-1.2.3.4 and newtestpkg-2.0 are both exposed now
-	$(TEST_HC) -package-conf $(PKGCONF04) -c ghcpkg04.hs || true
+	'$(TEST_HC)' -package-conf $(PKGCONF04) -c ghcpkg04.hs || true
 
 # Test stacking of package.confs (also #2441)
 PKGCONF05a=local05a.package.conf
 PKGCONF05b=local05b.package.conf
-LOCAL_GHC_PKG05a = $(GHC_PKG) -f $(PKGCONF05a)
-LOCAL_GHC_PKG05b = $(GHC_PKG) -f $(PKGCONF05a) -f $(PKGCONF05b)
+LOCAL_GHC_PKG05a = '$(GHC_PKG)' --no-user-package-conf -f $(PKGCONF05a)
+LOCAL_GHC_PKG05b = '$(GHC_PKG)' --no-user-package-conf -f $(PKGCONF05a) -f $(PKGCONF05b)
 
 ghcpkg05 :
-	rm -f $(PKGCONF05a) $(PKGCONF05b)
-	echo "[]" >$(PKGCONF05a)
-	echo "[]" >$(PKGCONF05b)
+	rm -rf $(PKGCONF05a) $(PKGCONF05b)
+	$(LOCAL_GHC_PKG05a) init $(PKGCONF05a)
+	$(LOCAL_GHC_PKG05b) init $(PKGCONF05b)
 	$(LOCAL_GHC_PKG05a) register --force test2.pkg >/dev/null 2>&1 
 	$(LOCAL_GHC_PKG05b) register --force test3.pkg >/dev/null 2>&1 
 	$(LOCAL_GHC_PKG05b) check || true
@@ -99,29 +99,56 @@ ghcpkg05 :
 
 # Test for #2330: reject duplicate dependencies
 PKGCONF06=local06.package.conf
-LOCAL_GHC_PKG06 = $(GHC_PKG) -f $(PKGCONF06)
+LOCAL_GHC_PKG06 = '$(GHC_PKG)' --no-user-package-conf -f $(PKGCONF06)
 
 ghcpkg06 :
-	rm -f $(PKGCONF06)
-	echo "[]" >$(PKGCONF06)
+	rm -rf $(PKGCONF06)
+	$(LOCAL_GHC_PKG06) init $(PKGCONF06)
 	$(LOCAL_GHC_PKG06) register --force test.pkg >/dev/null 2>&1 
 	if $(LOCAL_GHC_PKG06) register testdup.pkg; then false else true; fi
 	$(LOCAL_GHC_PKG06) register --force testdup.pkg
 
 PKGCONF1750=local1750.package.conf
-LOCAL_GHC_PKG1750 = $(GHC_PKG) -f $(PKGCONF1750)
+LOCAL_GHC_PKG1750 = '$(GHC_PKG)' --no-user-package-conf -f $(PKGCONF1750)
 
 1750:
-	rm -f $(PKGCONF1750) 1750.hs 1750.o 1750.hi 1750.out
-	echo "[]" >$(PKGCONF1750)
+	rm -rf $(PKGCONF1750) 1750.hs 1750.o 1750.hi 1750.out
+	$(LOCAL_GHC_PKG1750) init $(PKGCONF1750)
 	$(LOCAL_GHC_PKG1750) register --force 1750A.pkg >1750.out 2>&1
 	$(LOCAL_GHC_PKG1750) register --force 1750B.pkg >1750.out 2>&1
-	GHC_PACKAGE_PATH=$(PKGCONF1750) $(GHC_PKG) list
+	GHC_PACKAGE_PATH=$(PKGCONF1750) '$(GHC_PKG)' --no-user-package-conf list
 # GHC_PACKAGE_PATH trick is to make this work with 6.8.2 which doesn't have
 # the patch "Change the command-line semantics for query commands" to
 # ghc-pkg
 	echo "main = return ()" >1750.hs
-	$(TEST_HC) -package-conf $(PKGCONF1750) -package 1750A 1750.hs || true
+	'$(TEST_HC)' -package-conf $(PKGCONF1750) -package 1750A 1750.hs || true
+
+PKGCONFSHADOW1=localshadow1.package.conf
+PKGCONFSHADOW2=localshadow2.package.conf
+LOCAL_GHC_PKGSHADOW1 = '$(GHC_PKG)' --no-user-package-conf -f $(PKGCONFSHADOW1)
+LOCAL_GHC_PKGSHADOW2 = '$(GHC_PKG)' --no-user-package-conf -f $(PKGCONFSHADOW2)
+LOCAL_GHC_PKGSHADOW3 = '$(GHC_PKG)' --no-user-package-conf -f $(PKGCONFSHADOW1) -f $(PKGCONFSHADOW2)
+
+# Test package shadowing behaviour.
+#
+#     localshadow1.package.conf:  shadowdep-1-XXX <- shadow-1-XXX
+#     localshadow2.package.conf:                     shadow-1-YYY
+# 
+# shadow-1-XXX will be shadowed by shadow-1-YYY, thus invalidating
+# shadowdep-1-XXX.
+shadow:
+	rm -rf $(PKGCONFSHADOW1) $(PKGCONFSHADOW2) shadow.hs shadow.o shadow.hi shadow.out shadow.hs shadow.hi
+	$(LOCAL_GHC_PKGSHADOW1) init $(PKGCONFSHADOW1)
+	$(LOCAL_GHC_PKGSHADOW2) init $(PKGCONFSHADOW2)
+	$(LOCAL_GHC_PKGSHADOW1) register --force shadow1.pkg >shadow1.out 2>&1
+	$(LOCAL_GHC_PKGSHADOW1) register --force shadow2.pkg >shadow2.out 2>&1
+	$(LOCAL_GHC_PKGSHADOW2) register --force shadow3.pkg >shadow3.out 2>&1
+	$(LOCAL_GHC_PKGSHADOW3) list
+	echo "main = return ()" >shadow.hs
+	'$(TEST_HC)' -package-conf $(PKGCONFSHADOW1) -package-conf $(PKGCONFSHADOW2) -package shadowdep -c shadow.hs -fno-code || true
+	'$(TEST_HC)' -package-conf $(PKGCONFSHADOW1) -package-conf $(PKGCONFSHADOW2) -package-id shadowdep-1-XXX -c shadow.hs -fno-code
+# The second one should succeed, by specifying -package-id we've
+# explicitly overriden the default shadowing behaviour.
 
 # -----------------------------------------------------------------------------
 # Try piping the output of "ghc-pkg describe" into "ghc-pkg update" for
@@ -129,16 +156,17 @@ LOCAL_GHC_PKG1750 = $(GHC_PKG) -f $(PKGCONF1750)
 # of InstalledPackageInfo.
 
 COPY_PACKAGE_CONF = package.conf.copy
-GHC_PKG_COPY = $(GHC_PKG) --global-conf=$(COPY_PACKAGE_CONF)
+GHC_PKG_COPY = '$(GHC_PKG)' --no-user-package-conf --global-conf=$(COPY_PACKAGE_CONF)
 
 # Hack: the testsuite is separate from the build tree now, we don't
 # have a good way to do this.
-INPLACE_DATA_DIR = $(TOP)/../inplace-datadir
+INPLACE_DATA_DIR = $(TOP)/../inplace/lib
 
 ghcpkg02:
-	cp $(INPLACE_DATA_DIR)/package.conf $(COPY_PACKAGE_CONF)
+	rm -rf $(COPY_PACKAGE_CONF)
+	cp -r $(INPLACE_DATA_DIR)/package.conf.d $(COPY_PACKAGE_CONF)
 	set -e; \
-	for i in `$(GHC_PKG_COPY) list --global --simple-output`; do \
+	for i in `$(GHC_PKG_COPY) list --global --simple-output -v0`; do \
 		echo Updating $$i; \
 		$(GHC_PKG_COPY) describe --global $$i | $(GHC_PKG_COPY) update --global --force -; \
 	done

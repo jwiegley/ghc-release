@@ -42,7 +42,7 @@ module Util (
 
         -- * Comparisons
         isEqual, eqListBy,
-        thenCmp, cmpList, maybePrefixMatch,
+        thenCmp, cmpList,
         removeSpaces,
 
         -- * Transitive closures
@@ -65,7 +65,7 @@ module Util (
         doesDirNameExist,
         modificationTimeIfExists,
 
-        global, consIORef,
+        global, consIORef, globalMVar, globalEmptyMVar,
 
         -- * Filenames and paths
         Suffix,
@@ -79,14 +79,13 @@ module Util (
 
 import Panic
 
-import Data.IORef       ( IORef, newIORef )
+import Data.IORef       ( IORef, newIORef, atomicModifyIORef )
 import System.IO.Unsafe ( unsafePerformIO )
-import Data.IORef       ( readIORef, writeIORef )
 import Data.List        hiding (group)
+import Control.Concurrent.MVar ( MVar, newMVar, newEmptyMVar )
 
-import qualified Data.List as List ( elem )
 #ifdef DEBUG
-import qualified Data.List as List ( notElem )
+import qualified Data.List as List ( elem, notElem )
 import FastTypes
 #endif
 
@@ -523,7 +522,7 @@ sortWith get_key xs = sortLe le xs
   where
     x `le` y = get_key x < get_key y
 
-on :: (a -> a -> Ordering) -> (b -> a) -> b -> b -> Ordering
+on :: (a -> a -> c) -> (b -> a) -> b -> b -> c
 on cmp sel = \x y -> sel x `cmp` sel y
 
 \end{code}
@@ -665,15 +664,6 @@ cmpList cmp (a:as) (b:bs)
 \end{code}
 
 \begin{code}
--- This (with a more general type) is Data.List.stripPrefix from GHC 6.8.
--- This definition can be removed once we require at least 6.8 to build.
-maybePrefixMatch :: String -> String -> Maybe String
-maybePrefixMatch []    rest = Just rest
-maybePrefixMatch (_:_) []   = Nothing
-maybePrefixMatch (p:pat) (r:rest)
-  | p == r    = maybePrefixMatch pat rest
-  | otherwise = Nothing
-
 removeSpaces :: String -> String
 removeSpaces = reverse . dropWhile isSpace . reverse . dropWhile isSpace
 \end{code}
@@ -705,8 +695,15 @@ global a = unsafePerformIO (newIORef a)
 \begin{code}
 consIORef :: IORef [a] -> a -> IO ()
 consIORef var x = do
-  xs <- readIORef var
-  writeIORef var (x:xs)
+  atomicModifyIORef var (\xs -> (x:xs,()))
+\end{code}
+
+\begin{code}
+globalMVar :: a -> MVar a
+globalMVar a = unsafePerformIO (newMVar a)
+
+globalEmptyMVar :: MVar a
+globalEmptyMVar = unsafePerformIO newEmptyMVar
 \end{code}
 
 Module names:

@@ -56,17 +56,17 @@ place for them.  They print out stuff before and after core passes,
 and do Core Lint when necessary.
 
 \begin{code}
-endPass :: DynFlags -> String -> DynFlag -> [CoreBind] -> IO [CoreBind]
+endPass :: DynFlags -> String -> DynFlag -> [CoreBind] -> IO ()
 endPass = dumpAndLint dumpIfSet_core
 
-endPassIf :: Bool -> DynFlags -> String -> DynFlag -> [CoreBind] -> IO [CoreBind]
+endPassIf :: Bool -> DynFlags -> String -> DynFlag -> [CoreBind] -> IO ()
 endPassIf cond = dumpAndLint (dumpIf_core cond)
 
-endIteration :: DynFlags -> String -> DynFlag -> [CoreBind] -> IO [CoreBind]
+endIteration :: DynFlags -> String -> DynFlag -> [CoreBind] -> IO ()
 endIteration = dumpAndLint dumpIfSet_dyn
 
 dumpAndLint :: (DynFlags -> DynFlag -> String -> SDoc -> IO ())
-            -> DynFlags -> String -> DynFlag -> [CoreBind] -> IO [CoreBind]
+            -> DynFlags -> String -> DynFlag -> [CoreBind] -> IO ()
 dumpAndLint dump dflags pass_name dump_flag binds
   = do 
 	-- Report result size if required
@@ -79,8 +79,6 @@ dumpAndLint dump dflags pass_name dump_flag binds
 
 	-- Type check
 	lintCoreBindings dflags pass_name binds
-
-	return binds
 \end{code}
 
 
@@ -256,6 +254,8 @@ lintCoreExpr :: CoreExpr -> LintM OutType
 lintCoreExpr (Var var)
   = do	{ checkL (not (var == oneTupleDataConId))
 		 (ptext (sLit "Illegal one-tuple"))
+
+	; checkDeadIdOcc var
 	; var' <- lookupIdInScope var
         ; return (idType var')
         }
@@ -301,7 +301,7 @@ lintCoreExpr (Let (NonRec bndr rhs) body)
 
 lintCoreExpr (Let (Rec pairs) body) 
   = lintAndScopeIds bndrs	$ \_ ->
-    do	{ mapM (lintSingleBinding NotTopLevel Recursive) pairs	
+    do	{ mapM_ (lintSingleBinding NotTopLevel Recursive) pairs	
 	; addLoc (BodyOfLetRec bndrs) (lintCoreExpr body) }
   where
     bndrs = map fst pairs
@@ -351,7 +351,7 @@ lintCoreExpr e@(Case scrut var alt_ty alts) =
                    else lintAndScopeId var
      ; scope $ \_ ->
        do { -- Check the alternatives
-            mapM (lintCoreAlt scrut_ty alt_ty) alts
+            mapM_ (lintCoreAlt scrut_ty alt_ty) alts
           ; checkCaseAlts e scrut_ty alts
           ; return alt_ty } }
   where
@@ -423,6 +423,17 @@ checkKinds tyvar arg_ty
     tyvar_kind = tyVarKind tyvar
     arg_kind | isCoVar tyvar = coercionKindPredTy arg_ty
 	     | otherwise     = typeKind arg_ty
+
+checkDeadIdOcc :: Id -> LintM ()
+-- Occurrences of an Id should never be dead....
+-- except when we are checking a case pattern
+checkDeadIdOcc id
+  | isDeadOcc (idOccInfo id)
+  = do { in_case <- inCasePat
+       ; checkL in_case
+		(ptext (sLit "Occurrence of a dead Id") <+> ppr id) }
+  | otherwise
+  = return ()
 \end{code}
 
 
@@ -539,7 +550,7 @@ lintBinder var linterF
   | isTyVar var = lint_ty_bndr
   | otherwise   = lintIdBndr var linterF
   where
-    lint_ty_bndr = do { lintTy (tyVarKind var)
+    lint_ty_bndr = do { _ <- lintTy (tyVarKind var)
 		      ; subst <- getTvSubst
 		      ; let (subst', tv') = substTyVarBndr subst var
 		      ; updateTvSubst subst' (linterF tv') }
@@ -667,6 +678,12 @@ addLoc :: LintLocInfo -> LintM a -> LintM a
 addLoc extra_loc m =
   LintM (\ loc subst errs -> unLintM m (extra_loc:loc) subst errs)
 
+inCasePat :: LintM Bool		-- A slight hack; see the unique call site
+inCasePat = LintM $ \ loc _ errs -> (Just (is_case_pat loc), errs)
+  where
+    is_case_pat (CasePat {} : _) = True
+    is_case_pat _other           = False
+
 addInScopeVars :: [Var] -> LintM a -> LintM a
 addInScopeVars vars m
   | null dups
@@ -700,7 +717,7 @@ lookupIdInScope id
   = do	{ subst <- getTvSubst
 	; case lookupInScope (getTvInScope subst) id of
 		Just v  -> return v
-		Nothing -> do { addErrL out_of_scope
+		Nothing -> do { _ <- addErrL out_of_scope
 			      ; return id } }
   where
     out_of_scope = ppr id <+> ptext (sLit "is out of scope")

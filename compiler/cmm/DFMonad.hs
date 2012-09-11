@@ -7,7 +7,6 @@ module DFMonad
 
     , DFM, runDFM, liftToDFM
     , markGraphRewritten, graphWasRewritten
-    , freshBlockId
     , module OptimizationFuel
     )
 where
@@ -17,10 +16,8 @@ import CmmTx
 import PprCmm()
 import OptimizationFuel
 
-import Control.Monad
 import Maybes
 import Outputable
-import UniqFM
 import UniqSupply
 
 {-
@@ -47,11 +44,11 @@ conjunction with the join, so we have [[fact_add_to]]:
 -}
 
 data DataflowLattice a = DataflowLattice  { 
-  fact_name    :: String,                 -- documentation
-  fact_bot     :: a,                      -- lattice bottom element
-  fact_add_to  :: a -> a -> TxRes a,      -- lattice join and compare
+  fact_name       :: String,                 -- documentation
+  fact_bot        :: a,                      -- lattice bottom element
+  fact_add_to     :: a -> a -> TxRes a,      -- lattice join and compare
     -- ^ compute join of two args; something changed iff join is greater than 2nd arg
-  fact_do_logging :: Bool  -- log changes
+  fact_do_logging :: Bool                    -- log changes
 }
 
 
@@ -61,21 +58,21 @@ data DataflowLattice a = DataflowLattice  {
 -- case of DFM, parameterized over any monad.
 -- In practice, we apply DFM' to the FuelMonad, which provides optimization fuel and
 -- the unique supply.
-data DFState f = DFState { df_rewritten    :: ChangeFlag
-                         , df_facts        :: BlockEnv f
-                         , df_exit_fact    :: f
-                         , df_last_outs    :: [(BlockId, f)]
-                         , df_facts_change :: ChangeFlag
+data DFState f = DFState { df_rewritten    :: !ChangeFlag
+                         , df_facts        :: !(BlockEnv f)
+                         , df_exit_fact    :: !f
+                         , df_last_outs    :: ![(BlockId, f)]
+                         , df_facts_change :: !ChangeFlag
                          }
 
-newtype DFM' m fact a = DFM' (DataflowLattice fact -> DFState  fact
+newtype DFM' m fact a = DFM' (DataflowLattice fact -> DFState fact
                                                    -> m (a, DFState  fact))
 type DFM fact a = DFM' FuelMonad fact a
 
 
 runDFM :: Monad m => DataflowLattice f -> DFM' m f a -> m a
 runDFM lattice (DFM' f) =
-  (f lattice $ DFState NoChange emptyBlockEnv (fact_bot lattice)[] NoChange)
+  (f lattice $ DFState NoChange emptyBlockEnv (fact_bot lattice) [] NoChange)
   >>= return . fst
 
 class DataflowAnalysis m where
@@ -138,15 +135,11 @@ instance Monad m => DataflowAnalysis (DFM' m) where
   getExitFact = DFM' get
     where get _ s = return (df_exit_fact s, s)
   setExitFact a =
-    do old <- getExitFact
-       DataflowLattice { fact_add_to = add_fact
-                       , fact_name = name, fact_do_logging = log } <- lattice
-       case add_fact a old of
-         TxRes NoChange _ -> return ()
-         TxRes SomeChange join -> DFM' $ \_ s ->
-             let debug = if log then pprTrace else \_ _ a -> a
-             in  debug name (pprSetFact "exit" old a join) $
-                 return ((), s { df_exit_fact = join, df_facts_change = SomeChange })
+    do DataflowLattice { fact_name = name, fact_do_logging = log} <- lattice
+       DFM' $ \_ s ->
+                let debug = if log then pprTrace else \_ _ a -> a
+                in  debug name (pprSetFact "exit" a a a) $
+                    return ((), s { df_exit_fact = a })
   getAllFacts = DFM' f
     where f _ s = return (df_facts s, s)
   setAllFacts env = DFM' f
@@ -154,7 +147,7 @@ instance Monad m => DataflowAnalysis (DFM' m) where
   botFact = DFM' f
     where f lattice s = return (fact_bot lattice, s)
   forgetFact id = DFM' f 
-    where f _ s = return ((), s { df_facts = delFromUFM (df_facts s) id })
+    where f _ s = return ((), s { df_facts = delFromBlockEnv (df_facts s) id })
   addLastOutFact pair = DFM' f
     where f _ s = return ((), s { df_last_outs = pair : df_last_outs s })
   bareLastOutFacts = DFM' f
@@ -173,10 +166,9 @@ instance Monad m => DataflowAnalysis (DFM' m) where
                                     text "changed from", nest 4 (ppr old_a), text "to",
                                     nest 4 (ppr new),
                                     text "after supposedly reaching fixed point;",
-                                    text "env is", pprFacts facts]) 
-                  ; setFact id a }
+                                    text "env is", pprFacts facts]) }
          }
-    where pprFacts env = vcat (map pprFact (ufmToList env))
+    where pprFacts env = vcat (map pprFact (blockEnvToList env))
           pprFact (id, a) = hang (ppr id <> colon) 4 (ppr a)
 
   lattice = DFM' f
@@ -194,13 +186,14 @@ graphWasRewritten :: DFM f ChangeFlag
 graphWasRewritten = DFM' f
     where f _ s = return (df_rewritten s, s)
                     
-freshBlockId :: String -> DFM f BlockId
-freshBlockId _s = getUniqueM >>= return . BlockId
-
 instance Monad m => Monad (DFM' m f) where
   DFM' f >>= k = DFM' (\l s -> do (a, s') <- f l s
-                                  let DFM' f' = k a in f' l s')
+                                  s' `seq` case k a of DFM' f' -> f' l s')
   return a = DFM' (\_ s -> return (a, s))
+ -- The `seq` is essential to ensure that entire passes of the dataflow engine 
+ -- aren't postponed in a thunk. By making the sequence strict in the state,
+ -- we ensure that each action in the monad is executed immediately, preventing
+ -- stack overflows that previously occurred when finally forcing the old state thunks.
 
 instance FuelUsingMonad (DFM' FuelMonad f) where
   fuelRemaining = liftToDFM' fuelRemaining

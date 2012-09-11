@@ -30,6 +30,7 @@ RUNTEST_OPTS =
 $(eval $(call get-ghc-rts-field,WORDSIZE,Word size))
 $(eval $(call get-ghc-rts-field,TARGETPLATFORM,Target platform))
 $(eval $(call get-ghc-rts-field,TargetOS_CPP,Target OS))
+$(eval $(call get-ghc-rts-field,TargetARCH_CPP,Target architecture))
 ifeq "$(filter $(TargetOS_CPP), cygwin32 mingw32)" ""
 exeext =
 else
@@ -43,7 +44,7 @@ else
 RUNTEST_OPTS += -e ghc_with_native_codegen=0
 endif
 
-HAVE_PROFILING:=$(if $(wildcard $(shell $(GHC_PKG) field haskell98 library-dirs | sed 's/^[^:]*: *//')/libHShaskell98-*_p.a),YES,NO)
+HAVE_PROFILING:=$(if $(wildcard $(shell "$(GHC_PKG)" field haskell98 library-dirs | sed 's/^[^:]*: *//')/libHShaskell98-*_p.a),YES,NO)
 
 ifeq "$(HAVE_PROFILING)" "YES"
 RUNTEST_OPTS += -e ghc_with_profiling=1
@@ -55,6 +56,12 @@ ifeq "$(filter thr, $(GhcRTSWays))" "thr"
 RUNTEST_OPTS += -e ghc_with_threaded_rts=1
 else
 RUNTEST_OPTS += -e ghc_with_threaded_rts=0
+endif
+
+ifeq "$(filter dyn, $(GhcRTSWays))" "dyn"
+RUNTEST_OPTS += -e ghc_with_dynamic_rts=1
+else
+RUNTEST_OPTS += -e ghc_with_dynamic_rts=0
 endif
 
 $(eval $(call get-ghc-feature-bool,GhcWithInterpreter,Have interpreter))
@@ -78,6 +85,12 @@ else
 RUNTEST_OPTS += -e ghc_with_smp=0
 endif
 
+ifeq "$(WINDOWS)" "YES"
+RUNTEST_OPTS += -e windows=True
+else
+RUNTEST_OPTS += -e windows=False
+endif
+
 ifneq "$(THREADS)" ""
 RUNTEST_OPTS += --threads=$(THREADS)
 endif
@@ -85,20 +98,22 @@ endif
 RUNTEST_OPTS +=  \
 	--rootdir=. \
 	--config=$(CONFIG) \
-	-e config.confdir=\"$(CONFIGDIR)\" \
-	-e config.compiler=\"$(TEST_HC)\" \
-	-e config.compiler_always_flags.append"(\"$(EXTRA_HC_OPTS)\")" \
-	-e config.ghc_pkg=\"$(GHC_PKG)\" \
-	-e config.hp2ps=\"$(HP2PS_ABS)\" \
-	-e config.gs=\"$(GS)\" \
-	-e config.platform=\"$(TARGETPLATFORM)\" \
-	-e config.os=\"$(TargetOS_CPP)\" \
-	-e config.wordsize=\"$(WORDSIZE)\" \
-	-e default_testopts.cleanup=\"$(CLEANUP)\" \
-	-e config.timeout="int($(TIMEOUT)) or config.timeout" \
-	-e config.timeout_prog=\"$(TIMEOUT_PROGRAM)\" \
-	-e config.exeext=\"$(exeext)\" \
-	-e config.top=\"$(TOP_ABS)\" \
+	-e 'config.confdir="$(CONFIGDIR)"' \
+	-e 'config.compiler="$(TEST_HC)"' \
+	-e 'config.compiler_always_flags.append("$(EXTRA_HC_OPTS)")' \
+	-e 'config.ghc_pkg="$(GHC_PKG)"' \
+	-e 'config.hp2ps="$(HP2PS_ABS)"' \
+	-e 'config.hpc="$(HPC)"' \
+	-e 'config.gs="$(GS)"' \
+	-e 'config.platform="$(TARGETPLATFORM)"' \
+	-e 'config.os="$(TargetOS_CPP)"' \
+	-e 'config.arch="$(TargetARCH_CPP)"' \
+	-e 'config.wordsize="$(WORDSIZE)"' \
+	-e 'default_testopts.cleanup="$(CLEANUP)"' \
+	-e 'config.timeout=int($(TIMEOUT)) or config.timeout' \
+	-e 'config.timeout_prog="$(TIMEOUT_PROGRAM)"' \
+	-e 'config.exeext="$(exeext)"' \
+	-e 'config.top="$(TOP_ABS)"' \
 	$(EXTRA_RUNTEST_OPTS)
 
 ifeq "$(fast)" "YES"

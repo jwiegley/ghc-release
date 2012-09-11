@@ -8,13 +8,12 @@
 
 #include "PosixSource.h"
 #include "Rts.h"
+#include "RtsAPI.h"
+
 #include "RtsUtils.h"
-#include "SchedAPI.h"
-#include "RtsFlags.h"
 #include "Weak.h"
 #include "Schedule.h"
 #include "Prelude.h"
-#include "RtsAPI.h"
 #include "Trace.h"
 
 // ForeignPtrs with C finalizers rely on weak pointers inside weak_ptr_list
@@ -26,12 +25,12 @@ StgWeak *weak_ptr_list;
 rtsBool running_finalizers = rtsFalse;
 
 void
-runCFinalizer(StgVoid *fn, StgVoid *ptr, StgVoid *env, StgWord flag)
+runCFinalizer(void *fn, void *ptr, void *env, StgWord flag)
 {
     if (flag)
-       ((void (*)(void *, void *))fn)(env, ptr);
+	((void (*)(void *, void *))fn)(env, ptr);
     else
-       ((void (*)(void *))fn)(ptr);
+	((void (*)(void *))fn)(ptr);
 }
 
 void
@@ -42,15 +41,15 @@ runAllCFinalizers(StgWeak *list)
     running_finalizers = rtsTrue;
 
     for (w = list; w; w = w->link) {
-       StgArrWords *farr;
+	StgArrWords *farr;
 
-       farr = (StgArrWords *)UNTAG_CLOSURE(w->cfinalizer);
+	farr = (StgArrWords *)UNTAG_CLOSURE(w->cfinalizer);
 
-       if ((StgClosure *)farr != &stg_NO_FINALIZER_closure)
-           runCFinalizer((StgVoid *)farr->payload[0],
-                         (StgVoid *)farr->payload[1],
-                         (StgVoid *)farr->payload[2],
-                         farr->payload[3]);
+	if ((StgClosure *)farr != &stg_NO_FINALIZER_closure)
+	    runCFinalizer((void *)farr->payload[0],
+	                  (void *)farr->payload[1],
+	                  (void *)farr->payload[2],
+	                  farr->payload[3]);
     }
 
     running_finalizers = rtsFalse;
@@ -84,7 +83,7 @@ scheduleFinalizers(Capability *cap, StgWeak *list)
     // count number of finalizers, and kill all the weak pointers first...
     n = 0;
     for (w = list; w; w = w->link) { 
-        StgArrWords *farr;
+	StgArrWords *farr;
 
 	// Better not be a DEAD_WEAK at this stage; the garbage
 	// collector removes DEAD_WEAKs from the weak pointer list.
@@ -94,13 +93,13 @@ scheduleFinalizers(Capability *cap, StgWeak *list)
 	    n++;
 	}
 
-        farr = (StgArrWords *)UNTAG_CLOSURE(w->cfinalizer);
+	farr = (StgArrWords *)UNTAG_CLOSURE(w->cfinalizer);
 
-        if ((StgClosure *)farr != &stg_NO_FINALIZER_closure)
-            runCFinalizer((StgVoid *)farr->payload[0],
-                          (StgVoid *)farr->payload[1],
-                          (StgVoid *)farr->payload[2],
-                          farr->payload[3]);
+	if ((StgClosure *)farr != &stg_NO_FINALIZER_closure)
+	    runCFinalizer((void *)farr->payload[0],
+	                  (void *)farr->payload[1],
+	                  (void *)farr->payload[2],
+	                  farr->payload[3]);
 
 #ifdef PROFILING
         // A weak pointer is inherently used, so we do not need to call
@@ -113,7 +112,7 @@ scheduleFinalizers(Capability *cap, StgWeak *list)
 #endif
 	SET_HDR(w, &stg_DEAD_WEAK_info, w->header.prof.ccs);
     }
-
+	
     running_finalizers = rtsFalse;
 
     // No finalizers to run?

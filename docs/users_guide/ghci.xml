@@ -2331,6 +2331,16 @@ bar
 
       <varlistentry>
 	<term>
+          <literal>:run</literal>
+          <indexterm><primary><literal>:run</literal></primary></indexterm>
+        </term>
+	<listitem>
+	  <para>See <literal>:main</literal>.</para>
+	</listitem>
+      </varlistentry>
+
+      <varlistentry>
+	<term>
           <literal>:set</literal> <optional><replaceable>option</replaceable>...</optional>
           <indexterm><primary><literal>:set</literal></primary></indexterm>
         </term>
@@ -2386,7 +2396,9 @@ bar
 	  Inside <replaceable>prompt</replaceable>, the sequence
 	  <literal>%s</literal> is replaced by the names of the
 	  modules currently in scope, and <literal>%%</literal> is
-	  replaced by <literal>%</literal>.</para>
+	  replaced by <literal>%</literal>. If <replaceable>prompt</replaceable>
+      starts with &quot; then it is parsed as a Haskell String;
+      otherwise it is treated as a literal string.</para>
         </listitem>
       </varlistentry>
 

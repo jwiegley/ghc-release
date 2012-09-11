@@ -22,17 +22,20 @@ import System.IO.Unsafe
 
 import GHC.Exts
 import GHC.Word
-import GHC.IOBase (IO(..))
---why not import it at __GLASGOW_HASKELL__==606 ?
-#if __GLASGOW_HASKELL__ >= 607
+
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO ( IO(..) )
+#else
+import GHC.IOBase ( IO(..) )
+#endif
+
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO (unsafeDupableInterleaveIO)
+#else
 import GHC.IOBase (unsafeDupableInterleaveIO)
 #endif
-import GHC.Base (unsafeChr)
 
-#if __GLASGOW_HASKELL__ < 607
-unsafeDupableInterleaveIO :: IO a -> IO a
-unsafeDupableInterleaveIO = unsafeInterleaveIO
-#endif
+import GHC.Base (unsafeChr)
 
 -- Just like unsafePerformIO, but we inline it.
 {-# INLINE inlinePerformIO #-}

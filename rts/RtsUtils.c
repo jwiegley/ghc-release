@@ -7,10 +7,9 @@
  * ---------------------------------------------------------------------------*/
 
 #include "PosixSource.h"
-
 #include "Rts.h"
 #include "RtsAPI.h"
-#include "RtsFlags.h"
+
 #include "RtsUtils.h"
 #include "Ticky.h"
 #include "Schedule.h"
@@ -110,8 +109,8 @@ shutdownAllocator(void)
         free(prev);
         if (a == NULL) return;
         IF_DEBUG(sanity,
-                 debugBelch("Warning: %p still allocated at shutdown\n",
-                            a->addr);)
+                 debugBelch("Warning: %ld bytes at %p still allocated at shutdown\n",
+                            (long)a->len, a->addr);)
         prev = a;
     }
 }
@@ -284,22 +283,6 @@ heapOverflow(void)
 }
 
 /* -----------------------------------------------------------------------------
-   Out-of-line strlen.
-
-   Used in addr2Integer because the C compiler on x86 chokes on
-   strlen, trying to inline it with not enough registers available.
-   -------------------------------------------------------------------------- */
-
-nat stg_strlen(char *s)
-{
-   char *p = s;
-
-   while (*p) p++;
-   return p-s;
-}
-
-
-/* -----------------------------------------------------------------------------
    genSym stuff, used by GHC itself for its splitting unique supply.
 
    ToDo: put this somewhere sensible.
@@ -341,81 +324,6 @@ time_str(void)
     }
     return nowstr;
 }
-
-/* -----------------------------------------------------------------------------
- * Reset a file handle to blocking mode.  We do this for the standard
- * file descriptors before exiting, because the shell doesn't always
- * clean up for us.
- * -------------------------------------------------------------------------- */
-
-#if !defined(mingw32_HOST_OS)
-void
-resetNonBlockingFd(int fd)
-{
-  long fd_flags;
-
-  /* clear the non-blocking flag on this file descriptor */
-  fd_flags = fcntl(fd, F_GETFL);
-  if (fd_flags & O_NONBLOCK) {
-    fcntl(fd, F_SETFL, fd_flags & ~O_NONBLOCK);
-  }
-}
-
-void
-setNonBlockingFd(int fd)
-{
-  long fd_flags;
-
-  /* clear the non-blocking flag on this file descriptor */
-  fd_flags = fcntl(fd, F_GETFL);
-  if (!(fd_flags & O_NONBLOCK)) {
-    fcntl(fd, F_SETFL, fd_flags | O_NONBLOCK);
-  }
-}
-#else
-/* Stub defns -- async / non-blocking IO is not done 
- * via O_NONBLOCK and select() under Win32. 
- */
-void resetNonBlockingFd(int fd STG_UNUSED) {}
-void setNonBlockingFd(int fd STG_UNUSED) {}
-#endif
-
-#ifdef PAR
-static ullong startTime = 0;
-
-/* used in a parallel setup */
-ullong
-msTime(void)
-{
-# if defined(HAVE_GETCLOCK) && !defined(alpha_HOST_ARCH) && !defined(hppa1_1_HOST_ARCH)
-    struct timespec tv;
-
-    if (getclock(TIMEOFDAY, &tv) != 0) {
-	fflush(stdout);
-	fprintf(stderr, "Clock failed\n");
-	stg_exit(EXIT_FAILURE);
-    }
-    return tv.tv_sec * LL(1000) + tv.tv_nsec / LL(1000000) - startTime;
-# elif HAVE_GETTIMEOFDAY && !defined(alpha_HOST_ARCH)
-    struct timeval tv;
- 
-    if (gettimeofday(&tv, NULL) != 0) {
-	fflush(stdout);
-	fprintf(stderr, "Clock failed\n");
-	stg_exit(EXIT_FAILURE);
-    }
-    return tv.tv_sec * LL(1000) + tv.tv_usec / LL(1000) - startTime;
-# else
-    time_t t;
-    if ((t = time(NULL)) == (time_t) -1) {
-	fflush(stdout);
-	fprintf(stderr, "Clock failed\n");
-	stg_exit(EXIT_FAILURE);
-    }
-    return t * LL(1000) - startTime;
-# endif
-}
-#endif /* PAR */
 
 /* -----------------------------------------------------------------------------
    Print large numbers, with punctuation.
@@ -461,7 +369,7 @@ heapCheckFail( void )
  * genericRaise(), rather than raise(3).
  */
 int genericRaise(int sig) {
-#if defined(THREADED_RTS) && (defined(openbsd_HOST_OS) || defined(freebsd_HOST_OS))
+#if defined(THREADED_RTS) && (defined(openbsd_HOST_OS) || defined(freebsd_HOST_OS) || defined(dragonfly_HOST_OS))
         return pthread_kill(pthread_self(), sig);
 #else
         return raise(sig);
@@ -502,3 +410,13 @@ void printRtsInfo(void) {
     printf(" ]\n");
 }
 
+// Provides a way for Haskell programs to tell whether they're being
+// profiled or not.  GHCi uses it (see #2197).
+int rts_isProfiled(void)
+{
+#ifdef PROFILING
+    return 1;
+#else
+    return 0;
+#endif
+}

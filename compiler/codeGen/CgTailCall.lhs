@@ -5,19 +5,13 @@
 % Code generation for tail calls.
 
 \begin{code}
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module CgTailCall (
 	cgTailCall, performTailCall,
 	performReturn, performPrimReturn,
 	returnUnboxedTuple, ccallReturnUnboxedTuple,
 	pushUnboxedTuple,
 	tailCallPrimOp,
+        tailCallPrimCall,
 
 	pushReturnAddress
     ) where
@@ -115,9 +109,9 @@ performTailCall fun_info arg_amodes pending_assts
 	      opt_node_asst | nodeMustPointToIt lf_info = node_asst
 			    | otherwise		        = noStmts
 	; EndOfBlockInfo sp _ <- getEndOfBlockInfo
-	; this_pkg <- getThisPackage
 
-	; case (getCallMethod fun_name lf_info (length arg_amodes)) of
+	; dflags <- getDynFlags
+	; case (getCallMethod dflags fun_name fun_has_cafs lf_info (length arg_amodes)) of
 
 	    -- Node must always point to things we enter
 	    EnterIt -> do
@@ -142,7 +136,7 @@ performTailCall fun_info arg_amodes pending_assts
 	    -- A real constructor.  Don't bother entering it, 
 	    -- just do the right sort of return instead.
 	    -- As with any return, Node must point to it.
-	    ReturnCon con -> do
+	    ReturnCon _ -> do
 		{ emitSimultaneously (node_asst `plusStmts` pending_assts)
 		; doFinalJump sp False emitReturnInstr }
 
@@ -184,8 +178,10 @@ performTailCall fun_info arg_amodes pending_assts
 	        }
 	}
   where
-    fun_name  = idName (cgIdInfoId fun_info)
+    fun_id    = cgIdInfoId fun_info
+    fun_name  = idName fun_id
     lf_info   = cgIdInfoLF fun_info
+    fun_has_cafs = idCafInfo fun_id
     untag_node = CmmAssign nodeReg (cmmUntag (CmmReg nodeReg))
     -- Test if closure is a constructor
     maybeSwitchOnCons enterClosure eob
@@ -240,7 +236,9 @@ performTailCall fun_info arg_amodes pending_assts
             -- CONSTR_NOCAF_STATIC (from ClosureType.h)
 -}
 
-
+directCall :: VirtualSpOffset -> CLabel -> [(CgRep, CmmExpr)]
+           -> [(CgRep, CmmExpr)] -> CmmStmts
+           -> Code
 directCall sp lbl args extra_args assts = do
   let
 	-- First chunk of args go in registers
@@ -291,7 +289,7 @@ performReturn :: Code	-- The code to execute to actually do the return
 	      -> Code
 
 performReturn finish_code
-  = do  { EndOfBlockInfo args_sp sequel <- getEndOfBlockInfo
+  = do  { EndOfBlockInfo args_sp _sequel <- getEndOfBlockInfo
 	; doFinalJump args_sp False{-not a LNE-} finish_code }
 
 -- ----------------------------------------------------------------------------
@@ -323,7 +321,7 @@ performPrimReturn rep amode
 
 returnUnboxedTuple :: [(CgRep, CmmExpr)] -> Code
 returnUnboxedTuple amodes
-  = do 	{ eob@(EndOfBlockInfo args_sp sequel) <- getEndOfBlockInfo
+  = do 	{ (EndOfBlockInfo args_sp _sequel) <- getEndOfBlockInfo
 	; tickyUnboxedTupleReturn (length amodes)
 	; (final_sp, assts) <- pushUnboxedTuple args_sp amodes
 	; emitSimultaneously assts
@@ -385,13 +383,21 @@ ccallReturnUnboxedTuple amodes before_jump
 -- Calling an out-of-line primop
 
 tailCallPrimOp :: PrimOp -> [StgArg] -> Code
-tailCallPrimOp op args
+tailCallPrimOp op
+ = tailCallPrim (mkRtsPrimOpLabel op)
+
+tailCallPrimCall :: PrimCall -> [StgArg] -> Code
+tailCallPrimCall primcall
+ = tailCallPrim (mkPrimCallLabel primcall)
+
+tailCallPrim :: CLabel -> [StgArg] -> Code
+tailCallPrim lbl args
  = do	{	-- We're going to perform a normal-looking tail call, 
 		-- except that *all* the arguments will be in registers.
 		-- Hence the ASSERT( null leftovers )
 	  arg_amodes <- getArgAmodes args
 	; let (arg_regs, leftovers) = assignPrimOpCallRegs arg_amodes
-	      jump_to_primop = jumpToLbl (mkRtsPrimOpLabel op)
+	      jump_to_primop = jumpToLbl lbl
 
 	; ASSERT(null leftovers) -- no stack-resident args
  	  emitSimultaneously (assignToRegs arg_regs)
@@ -417,7 +423,7 @@ tailCallPrimOp op args
 
 pushReturnAddress :: EndOfBlockInfo -> Code
 
-pushReturnAddress (EndOfBlockInfo args_sp sequel@(CaseAlts lbl _ _))
+pushReturnAddress (EndOfBlockInfo args_sp (CaseAlts lbl _ _))
   = do	{ sp_rel <- getSpRelOffset args_sp
 	; stmtC (CmmStore sp_rel (mkLblExpr lbl)) }
 

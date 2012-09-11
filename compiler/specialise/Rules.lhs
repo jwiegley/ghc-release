@@ -4,13 +4,6 @@
 \section[CoreRules]{Transformation rules}
 
 \begin{code}
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 -- | Functions for collecting together and applying rewrite rules to a module.
 -- The 'CoreRule' datatype itself is declared elsewhere.
 module Rules (
@@ -39,11 +32,9 @@ module Rules (
 import CoreSyn		-- All of it
 import OccurAnal	( occurAnalyseExpr )
 import CoreFVs		( exprFreeVars, exprsFreeVars, bindFreeVars, rulesFreeVars )
-import CoreUnfold	( isCheapUnfolding, unfoldingTemplate )
-import CoreUtils	( tcEqExprX, exprType )
+import CoreUtils	( exprType )
 import PprCore		( pprRules )
-import Type		( Type, TvSubstEnv )
-import Coercion         ( coercionKind )
+import Type		( Type, TvSubstEnv, tcEqTypeX )
 import TcType		( tcSplitTyConApp_maybe )
 import CoreTidy		( tidyRules )
 import Id
@@ -54,7 +45,7 @@ import VarSet
 import Name		( Name, NamedThing(..) )
 import NameEnv
 import Unify 		( ruleMatchTyX, MatchEnv(..) )
-import BasicTypes	( Activation, CompilerPhase, isActive )
+import BasicTypes	( Activation )
 import StaticFlags	( opt_PprStyle_Debug )
 import Outputable
 import FastString
@@ -129,10 +120,10 @@ roughTopName :: CoreExpr -> Maybe Name
 roughTopName (Type ty) = case tcSplitTyConApp_maybe ty of
 			  Just (tc,_) -> Just (getName tc)
 			  Nothing     -> Nothing
-roughTopName (App f a) = roughTopName f
+roughTopName (App f _) = roughTopName f
 roughTopName (Var f) | isGlobalId f = Just (idName f)
 		     | otherwise    = Nothing
-roughTopName other = Nothing
+roughTopName _ = Nothing
 
 ruleCantMatch :: [Maybe Name] -> [Maybe Name] -> Bool
 -- ^ @ruleCantMatch tpl actual@ returns True only if @actual@
@@ -148,8 +139,8 @@ ruleCantMatch :: [Maybe Name] -> [Maybe Name] -> Bool
 --      Reason: a local variable @v@ in the actuals might [_$_]
 
 ruleCantMatch (Just n1 : ts) (Just n2 : as) = n1 /= n2 || ruleCantMatch ts as
-ruleCantMatch (t       : ts) (a       : as) = ruleCantMatch ts as
-ruleCantMatch ts	     as		    = False
+ruleCantMatch (_       : ts) (_       : as) = ruleCantMatch ts as
+ruleCantMatch _ 	     _ 		    = False
 \end{code}
 
 \begin{code}
@@ -184,11 +175,14 @@ mkSpecInfo rules = SpecInfo rules (rulesFreeVars rules)
 extendSpecInfo :: SpecInfo -> [CoreRule] -> SpecInfo
 extendSpecInfo (SpecInfo rs1 fvs1) rs2
   = SpecInfo (rs2 ++ rs1) (rulesFreeVars rs2 `unionVarSet` fvs1)
+
 addSpecInfo :: SpecInfo -> SpecInfo -> SpecInfo
 addSpecInfo (SpecInfo rs1 fvs1) (SpecInfo rs2 fvs2) 
   = SpecInfo (rs1 ++ rs2) (fvs1 `unionVarSet` fvs2)
 
 addIdSpecialisations :: Id -> [CoreRule] -> Id
+addIdSpecialisations id []
+  = id
 addIdSpecialisations id rules
   = setIdSpecialisation id $
     extendSpecInfo (idSpecialisation id) rules
@@ -223,6 +217,7 @@ type RuleBase = NameEnv [CoreRule]
 	-- The rules are are unordered; 
 	-- we sort out any overlaps on lookup
 
+emptyRuleBase :: RuleBase
 emptyRuleBase = emptyNameEnv
 
 mkRuleBase :: [CoreRule] -> RuleBase
@@ -300,7 +295,7 @@ findBest :: (Id, [CoreExpr])
 -- Return the pair the the most specific rule
 -- The (fn,args) is just for overlap reporting
 
-findBest target (rule,ans)   [] = (rule,ans)
+findBest _      (rule,ans)   [] = (rule,ans)
 findBest target (rule1,ans1) ((rule2,ans2):prs)
   | rule1 `isMoreSpecific` rule2 = findBest target (rule1,ans1) prs
   | rule2 `isMoreSpecific` rule1 = findBest target (rule2,ans2) prs
@@ -319,8 +314,8 @@ findBest target (rule1,ans1) ((rule2,ans2):prs)
     (fn,args) = target
 
 isMoreSpecific :: CoreRule -> CoreRule -> Bool
-isMoreSpecific (BuiltinRule {}) r2 = True
-isMoreSpecific r1 (BuiltinRule {}) = False
+isMoreSpecific (BuiltinRule {}) _ = True
+isMoreSpecific _ (BuiltinRule {}) = False
 isMoreSpecific (Rule { ru_bndrs = bndrs1, ru_args = args1 })
 	       (Rule { ru_bndrs = bndrs2, ru_args = args2 })
   = isJust (matchN in_scope bndrs2 args2 args1)
@@ -330,7 +325,7 @@ isMoreSpecific (Rule { ru_bndrs = bndrs1, ru_args = args1 })
 	-- of rule1's args, but I can't be bothered
 
 noBlackList :: Activation -> Bool
-noBlackList act = False		-- Nothing is black listed
+noBlackList _ = False		-- Nothing is black listed
 
 matchRule :: (Activation -> Bool) -> InScopeSet
 	  -> [CoreExpr] -> [Maybe Name]
@@ -358,14 +353,14 @@ matchRule :: (Activation -> Bool) -> InScopeSet
 -- Any 'surplus' arguments in the input are simply put on the end
 -- of the output.
 
-matchRule is_active in_scope args rough_args
-	  (BuiltinRule { ru_name = name, ru_try = match_fn })
+matchRule _is_active _in_scope args _rough_args
+	  (BuiltinRule { ru_try = match_fn })
   = case match_fn args of
 	Just expr -> Just expr
 	Nothing   -> Nothing
 
 matchRule is_active in_scope args rough_args
-          (Rule { ru_name = rn, ru_act = act, ru_rough = tpl_tops,
+          (Rule { ru_act = act, ru_rough = tpl_tops,
 		  ru_bndrs = tpl_vars, ru_args = tpl_args,
 		  ru_rhs = rhs })
   | not (is_active act)		      = Nothing
@@ -402,8 +397,8 @@ matchN in_scope tmpl_vars tmpl_es target_es
 
     init_menv = ME { me_tmpls = mkVarSet tmpl_vars', me_env = init_rn_env }
 		
-    go menv subst []     es 	= Just subst
-    go menv subst ts     [] 	= Nothing	-- Fail if too few actual args
+    go _    subst []     _  	= Just subst
+    go _    _     _      [] 	= Nothing	-- Fail if too few actual args
     go menv subst (t:ts) (e:es) = do { subst1 <- match menv subst t e 
 				     ; go menv subst1 ts es }
 
@@ -414,7 +409,7 @@ matchN in_scope tmpl_vars tmpl_es target_es
 				Nothing 	-> unbound tmpl_var'
 	| otherwise	    = case lookupVarEnv id_subst tmpl_var' of
 				Just e -> e
-				other  -> unbound tmpl_var'
+				_      -> unbound tmpl_var'
  
     unbound var = pprPanic "Template variable unbound in rewrite rule" 
 			(ppr var $$ ppr tmpl_vars $$ ppr tmpl_vars' $$ ppr tmpl_es $$ ppr target_es)
@@ -493,81 +488,26 @@ match menv subst (Var v1) e2
   | Just subst <- match_var menv subst v1 e2
   = Just subst
 
-match menv subst e1 (Note n e2)
-  = match menv subst e1 e2
-	-- Note [Notes in RULE matching]
-	-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-	-- Look through Notes.  In particular, we don't want to
-	-- be confused by InlineMe notes.  Maybe we should be more
-	-- careful about profiling notes, but for now I'm just
-	-- riding roughshod over them.  
-	--- See Note [Notes in call patterns] in SpecConstr
+match menv subst (Note _ e1) e2 = match menv subst e1 e2
+match menv subst e1 (Note _ e2) = match menv subst e1 e2
+      -- Ignore notes in both template and thing to be matched
+      -- See Note [Notes in RULE matching]
 
--- Here is another important rule: if the term being matched is a
--- variable, we expand it so long as its unfolding is a WHNF
--- (Its occurrence information is not necessarily up to date,
---  so we don't use it.)
-match menv subst e1 (Var v2)
-  | isCheapUnfolding unfolding
-  = match menv subst e1 (unfoldingTemplate unfolding)
+match menv subst e1 (Var v2)      -- Note [Expanding variables]
+  | not (locallyBoundR rn_env v2) -- Note [Do not expand locally-bound variables]
+  , Just e2' <- expandId v2'
+  = match (menv { me_env = nukeRnEnvR rn_env }) subst e1 e2'
   where
-    rn_env    = me_env menv
-    unfolding = idUnfolding (lookupRnInScope rn_env (rnOccR rn_env v2))
+    v2'    = lookupRnInScope rn_env v2
+    rn_env = me_env menv
 	-- Notice that we look up v2 in the in-scope set
 	-- See Note [Lookup in-scope]
-	-- Remember to apply any renaming first (hence rnOccR)
+	-- No need to apply any renaming first (hence no rnOccR)
+	-- becuase of the not-locallyBoundR
 
--- Note [Matching lets]
--- ~~~~~~~~~~~~~~~~~~~~
--- Matching a let-expression.  Consider
---	RULE forall x.  f (g x) = <rhs>
--- and target expression
---	f (let { w=R } in g E))
--- Then we'd like the rule to match, to generate
---	let { w=R } in (\x. <rhs>) E
--- In effect, we want to float the let-binding outward, to enable
--- the match to happen.  This is the WHOLE REASON for accumulating
--- bindings in the SubstEnv
---
--- We can only do this if
---	(a) Widening the scope of w does not capture any variables
---	    We use a conservative test: w is not already in scope
---	    If not, we clone the binders, and substitute
---	(b) The free variables of R are not bound by the part of the
---	    target expression outside the let binding; e.g.
---		f (\v. let w = v+1 in g E)
---	    Here we obviously cannot float the let-binding for w.
---
--- You may think rule (a) would never apply, because rule matching is
--- mostly invoked from the simplifier, when we have just run substExpr 
--- over the argument, so there will be no shadowing anyway.
--- The fly in the ointment is that the forall'd variables of the
--- RULE itself are considered in scope.
---
--- I though of various cheapo ways to solve this tiresome problem,
--- but ended up doing the straightforward thing, which is to 
--- clone the binders if they are in scope.  It's tiresome, and
--- potentially inefficient, because of the calls to substExpr,
--- but I don't think it'll happen much in pracice.
-
-{-  Cases to think about
-	(let x=y+1 in \x. (x,x))
-		--> let x=y+1 in (\x1. (x1,x1))
-	(\x. let x = y+1 in (x,x))
-		--> let x1 = y+1 in (\x. (x1,x1)
-	(let x=y+1 in (x,x), let x=y-1 in (x,x))
-		--> let x=y+1 in let x1=y-1 in ((x,x),(x1,x1))
-
-Watch out!
-	(let x=y+1 in let z=x+1 in (z,z)
-		--> matches (p,p) but watch out that the use of 
-			x on z's rhs is OK!
-I'm removing the cloning because that makes the above case
-fail, because the inner let looks as if it has locally-bound vars -}
-
-match menv subst@(tv_subst, id_subst, binds) e1 (Let bind e2)
-  | all freshly_bound bndrs,
-    not (any locally_bound bind_fvs)
+match menv (tv_subst, id_subst, binds) e1 (Let bind e2)
+  | all freshly_bound bndrs	-- See Note [Matching lets]
+  , not (any (locallyBoundR rn_env) bind_fvs)
   = match (menv { me_env = rn_env' }) 
 	  (tv_subst, id_subst, binds `snocOL` bind')
 	  e1 e2'
@@ -575,23 +515,12 @@ match menv subst@(tv_subst, id_subst, binds) e1 (Let bind e2)
     rn_env   = me_env menv
     bndrs    = bindersOf  bind
     bind_fvs = varSetElems (bindFreeVars bind)
-    locally_bound x   = inRnEnvR rn_env x
     freshly_bound x = not (x `rnInScope` rn_env)
-    bind' = bind
-    e2'   = e2
+    bind'   = bind
+    e2'     = e2
     rn_env' = extendRnInScopeList rn_env bndrs
-{-
-    (rn_env', bndrs') = mapAccumL rnBndrR rn_env bndrs
-    s_prs = [(bndr, Var bndr') | (bndr,bndr') <- zip bndrs bndrs', bndr /= bndr']
-    subst = mkSubst (rnInScopeSet rn_env) emptyVarEnv (mkVarEnv s_prs)
-    (bind', e2') | null s_prs = (bind,   e2)
-		 | otherwise  = (s_bind, substExpr subst e2)
-    s_bind = case bind of
-		NonRec {} -> NonRec (head bndrs') (head rhss)
-		Rec {}    -> Rec (bndrs' `zip` map (substExpr subst) rhss)
--}
 
-match menv subst (Lit lit1) (Lit lit2)
+match _ subst (Lit lit1) (Lit lit2)
   | lit1 == lit2
   = Just subst
 
@@ -637,34 +566,8 @@ match menv subst (Cast e1 co1) (Cast e2 co2)
   = do	{ subst1 <- match_ty menv subst co1 co2
 	; match menv subst1 e1 e2 }
 
-{-	REMOVING OLD CODE: I think that the above handling for let is 
-			   better than the stuff here, which looks 
-			   pretty suspicious to me.  SLPJ Sept 06
--- This is an interesting rule: we simply ignore lets in the 
--- term being matched against!  The unfolding inside it is (by assumption)
--- already inside any occurrences of the bound variables, so we'll expand
--- them when we encounter them.  This gives a chance of matching
---	forall x,y.  f (g (x,y))
--- against
---	f (let v = (a,b) in g v)
-
-match menv subst e1 (Let bind e2)
-  = match (menv { me_env = rn_env' }) subst e1 e2
-  where
-    (rn_env', _bndrs') = mapAccumL rnBndrR (me_env menv) (bindersOf bind)
-	-- It's important to do this renaming, so that the bndrs
-	-- are brought into the local scope. For example:
-	-- Matching
-	--	forall f,x,xs. f (x:xs)
-	--   against
-	--	f (let y = e in (y:[]))
-	-- We must not get success with x->y!  So we record that y is
-	-- locally bound (with rnBndrR), and proceed.  The Var case
-	-- will fail when trying to bind x->y
--}
-
 -- Everything else fails
-match menv subst e1 e2 = -- pprTrace "Failing at" ((text "e1:" <+> ppr e1) $$ (text "e2:" <+> ppr e2)) $ 
+match _ _ _e1 _e2 = -- pprTrace "Failing at" ((text "e1:" <+> ppr _e1) $$ (text "e2:" <+> ppr _e2)) $ 
 			 Nothing
 
 ------------------------------------------
@@ -696,7 +599,7 @@ match_var menv subst@(tv_subst, id_subst, binds) v1 e2
 						-- c.f. match_ty below
 			; return (tv_subst', extendVarEnv id_subst v1' e2, binds) }
 
-	Just e1' | tcEqExprX (nukeRnEnvL rn_env) e1' e2 
+	Just e1' | eqExpr (nukeRnEnvL rn_env) e1' e2 
 		 -> Just subst
 
 		 | otherwise
@@ -705,7 +608,7 @@ match_var menv subst@(tv_subst, id_subst, binds) v1 e2
   | otherwise	-- v1 is not a template variable; check for an exact match with e2
   = case e2 of
        Var v2 | v1' == rnOccR rn_env v2 -> Just subst
-       other				-> Nothing
+       _    				-> Nothing
 
   where
     rn_env = me_env menv
@@ -722,7 +625,7 @@ match_alts :: MatchEnv
       -> [CoreAlt]		-- Template
       -> [CoreAlt]		-- Target
       -> Maybe SubstEnv
-match_alts menv subst [] []
+match_alts _ subst [] []
   = return subst
 match_alts menv subst ((c1,vs1,r1):alts1) ((c2,vs2,r2):alts2)
   | c1 == c2
@@ -732,7 +635,7 @@ match_alts menv subst ((c1,vs1,r1):alts1) ((c2,vs2,r2):alts2)
     menv' :: MatchEnv
     menv' = menv { me_env = rnBndrs2 (me_env menv) vs1 vs2 }
 
-match_alts menv subst alts1 alts2 
+match_alts _ _ _ _
   = Nothing
 \end{code}
 
@@ -753,6 +656,85 @@ match_ty menv (tv_subst, id_subst, binds) ty1 ty2
   = do	{ tv_subst' <- Unify.ruleMatchTyX menv tv_subst ty1 ty2
 	; return (tv_subst', id_subst, binds) }
 \end{code}
+
+Note [Expanding variables]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+Here is another Very Important rule: if the term being matched is a
+variable, we expand it so long as its unfolding is "expandable". (Its
+occurrence information is not necessarily up to date, so we don't use
+it.)  By "expandable" we mean a WHNF or a "constructor-like" application.
+This is the key reason for "constructor-like" Ids.  If we have
+     {-# NOINLINE [1] CONLIKE g #-}
+     {-# RULE f (g x) = h x #-}
+then in the term
+   let v = g 3 in ....(f v)....
+we want to make the rule fire, to replace (f v) with (h 3). 
+
+Note [Do not expand locally-bound variables]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Do *not* expand locally-bound variables, else there's a worry that the
+unfolding might mention variables that are themselves renamed.
+Example
+	  case x of y { (p,q) -> ...y... }
+Don't expand 'y' to (p,q) because p,q might themselves have been 
+renamed.  Essentially we only expand unfoldings that are "outside" 
+the entire match.
+
+Hence, (a) the guard (not (isLocallyBoundR v2))
+       (b) when we expand we nuke the renaming envt (nukeRnEnvR).
+
+Note [Notes in RULE matching]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Look through Notes in both template and expression being matched.  In
+particular, we don't want to be confused by InlineMe notes.  Maybe we
+should be more careful about profiling notes, but for now I'm just
+riding roughshod over them.  cf Note [Notes in call patterns] in
+SpecConstr
+
+Note [Matching lets]
+~~~~~~~~~~~~~~~~~~~~
+Matching a let-expression.  Consider
+	RULE forall x.  f (g x) = <rhs>
+and target expression
+	f (let { w=R } in g E))
+Then we'd like the rule to match, to generate
+	let { w=R } in (\x. <rhs>) E
+In effect, we want to float the let-binding outward, to enable
+the match to happen.  This is the WHOLE REASON for accumulating
+bindings in the SubstEnv
+
+We can only do this if
+	(a) Widening the scope of w does not capture any variables
+	    We use a conservative test: w is not already in scope
+	    If not, we clone the binders, and substitute
+	(b) The free variables of R are not bound by the part of the
+	    target expression outside the let binding; e.g.
+		f (\v. let w = v+1 in g E)
+	    Here we obviously cannot float the let-binding for w.
+
+You may think rule (a) would never apply, because rule matching is
+mostly invoked from the simplifier, when we have just run substExpr 
+over the argument, so there will be no shadowing anyway.
+The fly in the ointment is that the forall'd variables of the
+RULE itself are considered in scope.
+
+I though of various ways to solve (a).  One plan was to 
+clone the binders if they are in scope.  But watch out!
+	(let x=y+1 in let z=x+1 in (z,z)
+		--> should match (p,p) but watch out that 
+		    the use of x on z's rhs is OK!
+If we clone x, then the let-binding for 'z' is then caught by (b), 
+at least unless we elaborate the RnEnv stuff a bit.
+
+So for we simply fail to match unless both (a) and (b) hold.
+
+Other cases to think about
+	(let x=y+1 in \x. (x,x))
+		--> let x=y+1 in (\x1. (x1,x1))
+	(\x. let x = y+1 in (x,x))
+		--> let x1 = y+1 in (\x. (x1,x1)
+	(let x=y+1 in (x,x), let x=y-1 in (x,x))
+		--> let x=y+1 in let x1=y-1 in ((x,x),(x1,x1))
 
 
 Note [Lookup in-scope]
@@ -790,29 +772,100 @@ at all.
 That is why the 'lookupRnInScope' call in the (Var v2) case of 'match'
 is so important.
 
+\begin{code}
+eqExpr :: RnEnv2 -> CoreExpr -> CoreExpr -> Bool
+-- ^ A kind of shallow equality used in rule matching, so does 
+-- /not/ look through newtypes or predicate types
+
+eqExpr env (Var v1) (Var v2)
+  | rnOccL env v1 == rnOccR env v2
+  = True
+
+-- The next two rules expand non-local variables
+-- C.f. Note [Expanding variables]
+-- and  Note [Do not expand locally-bound variables]
+eqExpr env (Var v1) e2
+  | not (locallyBoundL env v1)
+  , Just e1' <- expandId (lookupRnInScope env v1)
+  = eqExpr (nukeRnEnvL env) e1' e2
+
+eqExpr env e1 (Var v2)
+  | not (locallyBoundR env v2)
+  , Just e2' <- expandId (lookupRnInScope env v2)
+  = eqExpr (nukeRnEnvR env) e1 e2'
+
+eqExpr _   (Lit lit1)    (Lit lit2)    = lit1 == lit2
+eqExpr env (App f1 a1)   (App f2 a2)   = eqExpr env f1 f2 && eqExpr env a1 a2
+eqExpr env (Lam v1 e1)   (Lam v2 e2)   = eqExpr (rnBndr2 env v1 v2) e1 e2
+eqExpr env (Note n1 e1)  (Note n2 e2)  = eq_note env n1 n2 && eqExpr env e1 e2
+eqExpr env (Cast e1 co1) (Cast e2 co2) = tcEqTypeX env co1 co2 && eqExpr env e1 e2
+eqExpr env (Type t1)     (Type t2)     = tcEqTypeX env t1 t2
+
+eqExpr env (Let (NonRec v1 r1) e1)
+	   (Let (NonRec v2 r2) e2) =  eqExpr env r1 r2 
+				   && eqExpr (rnBndr2 env v1 v2) e1 e2
+eqExpr env (Let (Rec ps1) e1)
+	   (Let (Rec ps2) e2)      =  equalLength ps1 ps2
+				   && and (zipWith eq_rhs ps1 ps2)
+				   && eqExpr env' e1 e2
+				   where
+				      env' = foldl2 rn_bndr2 env ps2 ps2
+				      rn_bndr2 env (b1,_) (b2,_) = rnBndr2 env b1 b2
+				      eq_rhs       (_,r1) (_,r2) = eqExpr env' r1 r2
+eqExpr env (Case e1 v1 t1 a1)
+	   (Case e2 v2 t2 a2) =  eqExpr env e1 e2
+                              && tcEqTypeX env t1 t2                      
+			      && equalLength a1 a2
+			      && and (zipWith (eq_alt env') a1 a2)
+			      where
+				env' = rnBndr2 env v1 v2
+
+eqExpr _   _             _             = False
+
+eq_alt :: RnEnv2 -> CoreAlt -> CoreAlt -> Bool
+eq_alt env (c1,vs1,r1) (c2,vs2,r2) = c1==c2 && eqExpr (rnBndrs2 env vs1  vs2) r1 r2
+
+eq_note :: RnEnv2 -> Note -> Note -> Bool
+eq_note _ (SCC cc1)     (SCC cc2)      = cc1 == cc2
+eq_note _ (CoreNote s1) (CoreNote s2)  = s1 == s2
+eq_note _ (InlineMe)    (InlineMe)     = True
+eq_note _ _             _              = False
+\end{code}
+
+Auxiliary functions
+
+\begin{code}
+locallyBoundL, locallyBoundR :: RnEnv2 -> Var -> Bool
+locallyBoundL rn_env v = inRnEnvL rn_env v
+locallyBoundR rn_env v = inRnEnvR rn_env v
+
+
+expandId :: Id -> Maybe CoreExpr
+expandId id
+  | isExpandableUnfolding unfolding = Just (unfoldingTemplate unfolding)
+  | otherwise		  	    = Nothing
+  where
+    unfolding = idUnfolding id
+\end{code}
 
 %************************************************************************
 %*									*
-\subsection{Checking a program for failing rule applications}
+                   Rule-check the program										
 %*									*
 %************************************************************************
 
------------------------------------------------------
-			Game plan
------------------------------------------------------
-
-We want to know what sites have rules that could have fired but didn't.
-This pass runs over the tree (without changing it) and reports such.
+   We want to know what sites have rules that could have fired but didn't.
+   This pass runs over the tree (without changing it) and reports such.
 
 \begin{code}
 -- | Report partial matches for rules beginning with the specified
 -- string for the purposes of error reporting
-ruleCheckProgram :: CompilerPhase               -- ^ Phase to check in
+ruleCheckProgram :: (Activation -> Bool)    -- ^ Rule activation test
                  -> String                      -- ^ Rule pattern
                  -> RuleBase                    -- ^ Database of rules
                  -> [CoreBind]                  -- ^ Bindings to check in
                  -> SDoc                        -- ^ Resulting check message
-ruleCheckProgram phase rule_pat rule_base binds 
+ruleCheckProgram is_active rule_pat rule_base binds 
   | isEmptyBag results
   = text "Rule check results: no rule application sites"
   | otherwise
@@ -821,31 +874,36 @@ ruleCheckProgram phase rule_pat rule_base binds
 	  vcat [ p $$ line | p <- bagToList results ]
 	 ]
   where
-    results = unionManyBags (map (ruleCheckBind (phase, rule_pat, rule_base)) binds)
+    results = unionManyBags (map (ruleCheckBind (RuleCheckEnv is_active rule_pat rule_base)) binds)
     line = text (replicate 20 '-')
 	  
-type RuleCheckEnv = (CompilerPhase, String, RuleBase) 	-- Phase and Pattern
+data RuleCheckEnv = RuleCheckEnv {
+    rc_is_active :: Activation -> Bool, 
+    rc_pattern :: String, 
+    rc_rule_base :: RuleBase
+}
 
 ruleCheckBind :: RuleCheckEnv -> CoreBind -> Bag SDoc
    -- The Bag returned has one SDoc for each call site found
-ruleCheckBind env (NonRec b r) = ruleCheck env r
-ruleCheckBind env (Rec prs)    = unionManyBags [ruleCheck env r | (b,r) <- prs]
+ruleCheckBind env (NonRec _ r) = ruleCheck env r
+ruleCheckBind env (Rec prs)    = unionManyBags [ruleCheck env r | (_,r) <- prs]
 
 ruleCheck :: RuleCheckEnv -> CoreExpr -> Bag SDoc
-ruleCheck env (Var v) 	    = emptyBag
-ruleCheck env (Lit l) 	    = emptyBag
-ruleCheck env (Type ty)     = emptyBag
+ruleCheck _   (Var _) 	    = emptyBag
+ruleCheck _   (Lit _) 	    = emptyBag
+ruleCheck _   (Type _)      = emptyBag
 ruleCheck env (App f a)     = ruleCheckApp env (App f a) []
-ruleCheck env (Note n e)    = ruleCheck env e
-ruleCheck env (Cast e co)   = ruleCheck env e
+ruleCheck env (Note _ e)    = ruleCheck env e
+ruleCheck env (Cast e _)    = ruleCheck env e
 ruleCheck env (Let bd e)    = ruleCheckBind env bd `unionBags` ruleCheck env e
-ruleCheck env (Lam b e)     = ruleCheck env e
+ruleCheck env (Lam _ e)     = ruleCheck env e
 ruleCheck env (Case e _ _ as) = ruleCheck env e `unionBags` 
 			        unionManyBags [ruleCheck env r | (_,_,r) <- as]
 
+ruleCheckApp :: RuleCheckEnv -> Expr CoreBndr -> [Arg CoreBndr] -> Bag SDoc
 ruleCheckApp env (App f a) as = ruleCheck env a `unionBags` ruleCheckApp env f (a:as)
 ruleCheckApp env (Var f) as   = ruleCheckFun env f as
-ruleCheckApp env other as     = ruleCheck env other
+ruleCheckApp env other _      = ruleCheck env other
 \end{code}
 
 \begin{code}
@@ -853,15 +911,15 @@ ruleCheckFun :: RuleCheckEnv -> Id -> [CoreExpr] -> Bag SDoc
 -- Produce a report for all rules matching the predicate
 -- saying why it doesn't match the specified application
 
-ruleCheckFun (phase, pat, rule_base) fn args
+ruleCheckFun env fn args
   | null name_match_rules = emptyBag
-  | otherwise		  = unitBag (ruleAppCheck_help phase fn args name_match_rules)
+  | otherwise		  = unitBag (ruleAppCheck_help (rc_is_active env) fn args name_match_rules)
   where
-    name_match_rules = filter match (getRules rule_base fn)
-    match rule = pat `isPrefixOf` unpackFS (ruleName rule)
+    name_match_rules = filter match (getRules (rc_rule_base env) fn)
+    match rule = (rc_pattern env) `isPrefixOf` unpackFS (ruleName rule)
 
-ruleAppCheck_help :: CompilerPhase -> Id -> [CoreExpr] -> [CoreRule] -> SDoc
-ruleAppCheck_help phase fn args rules
+ruleAppCheck_help :: (Activation -> Bool) -> Id -> [CoreExpr] -> [CoreRule] -> SDoc
+ruleAppCheck_help is_active fn args rules
   = 	-- The rules match the pattern, so we want to print something
     vcat [text "Expression:" <+> ppr (mkApps (Var fn) args),
 	  vcat (map check_rule rules)]
@@ -883,9 +941,9 @@ ruleAppCheck_help phase fn args rules
 
     rule_info (BuiltinRule {}) = text "does not match"
 
-    rule_info (Rule { ru_name = name, ru_act = act, 
+    rule_info (Rule { ru_act = act, 
 		      ru_bndrs = rule_bndrs, ru_args = rule_args})
-	| not (isActive phase act)    = text "active only in later phase"
+	| not (is_active act)    = text "active only in later phase"
 	| n_args < n_rule_args	      = text "too few arguments"
 	| n_mismatches == n_rule_args = text "no arguments match"
 	| n_mismatches == 0	      = text "all arguments match (considered individually), but rule as a whole does not"

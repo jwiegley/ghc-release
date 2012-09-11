@@ -46,10 +46,17 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -}
 
 module Distribution.Simple.LocalBuildInfo (
         LocalBuildInfo(..),
+        externalPackageDeps,
+        withLibLBI,
+        withExeLBI,
+        ComponentLocalBuildInfo(..),
         -- * Installation directories
         module Distribution.Simple.InstallDirs,
         absoluteInstallDirs, prefixRelativeInstallDirs,
-        substPathTemplate
+        substPathTemplate,
+
+        -- * Deprecated
+        packageDeps
   ) where
 
 
@@ -57,14 +64,20 @@ import Distribution.Simple.InstallDirs hiding (absoluteInstallDirs,
                                                prefixRelativeInstallDirs,
                                                substPathTemplate, )
 import qualified Distribution.Simple.InstallDirs as InstallDirs
-import Distribution.Simple.Setup (CopyDest(..))
 import Distribution.Simple.Program (ProgramConfiguration)
-import Distribution.PackageDescription (PackageDescription(..))
-import Distribution.Package (PackageIdentifier, Package(..))
+import Distribution.PackageDescription
+         ( PackageDescription(..), withLib, Library, withExe
+         , Executable(exeName) )
+import Distribution.Package
+         ( PackageId, Package(..), InstalledPackageId(..) )
 import Distribution.Simple.Compiler
-         ( Compiler(..), PackageDB, OptimisationLevel )
-import Distribution.Simple.PackageIndex (PackageIndex)
-import Distribution.InstalledPackageInfo (InstalledPackageInfo)
+         ( Compiler(..), PackageDBStack, OptimisationLevel )
+import Distribution.Simple.PackageIndex
+         ( PackageIndex )
+import Distribution.Simple.Utils
+         ( die )
+
+import Data.List (nub)
 
 -- |Data cached after configuration step.  See also
 -- 'Distribution.Setup.ConfigFlags'.
@@ -78,14 +91,9 @@ data LocalBuildInfo = LocalBuildInfo {
                 -- ^ Where to build the package.
         scratchDir    :: FilePath,
                 -- ^ Where to put the result of the Hugs build.
-        packageDeps   :: [PackageIdentifier],
-                -- ^ Which packages we depend on, /exactly/.
-                -- The 'Distribution.PackageDescription.PackageDescription'
-                -- specifies a set of build dependencies
-                -- that must be satisfied in terms of version ranges.  This
-                -- field fixes those dependencies to the specific versions
-                -- available on this machine for this compiler.
-        installedPkgs :: PackageIndex InstalledPackageInfo,
+        libraryConfig       :: Maybe ComponentLocalBuildInfo,
+        executableConfigs   :: [(String, ComponentLocalBuildInfo)],
+        installedPkgs :: PackageIndex,
                 -- ^ All the info about all installed packages.
         pkgDescrFile  :: Maybe FilePath,
                 -- ^ the filename containing the .cabal file, if available
@@ -93,7 +101,7 @@ data LocalBuildInfo = LocalBuildInfo {
                 -- ^ The resolved package description, that does not contain
                 -- any conditionals.
         withPrograms  :: ProgramConfiguration, -- ^Location and args for all programs
-        withPackageDB :: PackageDB,  -- ^What package database to use, global\/user
+        withPackageDB :: PackageDBStack,  -- ^What package database to use, global\/user
         withVanillaLib:: Bool,  -- ^Whether to build normal libs.
         withProfLib   :: Bool,  -- ^Whether to build profiling versions of libs.
         withSharedLib :: Bool,  -- ^Whether to build shared versions of libs.
@@ -104,8 +112,52 @@ data LocalBuildInfo = LocalBuildInfo {
         stripExes     :: Bool,  -- ^Whether to strip executables during install
         progPrefix    :: PathTemplate, -- ^Prefix to be prepended to installed executables
         progSuffix    :: PathTemplate -- ^Suffix to be appended to installed executables
-
   } deriving (Read, Show)
+
+data ComponentLocalBuildInfo = ComponentLocalBuildInfo {
+    -- | Resolved internal and external package dependencies for this component.
+    -- The 'BuildInfo' specifies a set of build dependencies that must be
+    -- satisfied in terms of version ranges. This field fixes those dependencies
+    -- to the specific versions available on this machine for this compiler.
+    componentPackageDeps :: [(InstalledPackageId, PackageId)]
+  }
+  deriving (Read, Show)
+
+{-# DEPRECATED packageDeps "use externalPackageDeps or componentPackageDeps" #-}
+packageDeps :: LocalBuildInfo -> [PackageId]
+packageDeps = map snd . externalPackageDeps
+
+-- | External package dependencies for the package as a whole, the union of the
+-- individual 'targetPackageDeps'.
+externalPackageDeps :: LocalBuildInfo -> [(InstalledPackageId, PackageId)]
+externalPackageDeps lbi = nub $
+  -- TODO:  what about non-buildable components?
+     maybe [] componentPackageDeps (libraryConfig lbi)
+  ++ concatMap (componentPackageDeps . snd) (executableConfigs lbi)
+
+-- |If the package description has a library section, call the given
+--  function with the library build info as argument.  Extended version of
+-- 'withLib' that also gives corresponding build info.
+withLibLBI :: PackageDescription -> LocalBuildInfo
+           -> (Library -> ComponentLocalBuildInfo -> IO ()) -> IO ()
+withLibLBI pkg_descr lbi f = withLib pkg_descr $ \lib ->
+  case libraryConfig lbi of
+    Just clbi -> f lib clbi
+    Nothing   -> die $ "internal error: the package contains a library "
+                    ++ "but there is no corresponding configuration data"
+
+-- | Perform the action on each buildable 'Executable' in the package
+-- description.  Extended version of 'withExe' that also gives corresponding
+-- build info.
+withExeLBI :: PackageDescription -> LocalBuildInfo
+           -> (Executable -> ComponentLocalBuildInfo -> IO ()) -> IO ()
+withExeLBI pkg_descr lbi f = withExe pkg_descr $ \exe ->
+  case lookup (exeName exe) (executableConfigs lbi) of
+    Just clbi -> f exe clbi
+    Nothing   -> die $ "internal error: the package contains an executable "
+                    ++ exeName exe ++ " but there is no corresponding "
+                    ++ "configuration data"
+
 
 -- -----------------------------------------------------------------------------
 -- Wrappers for a couple functions from InstallDirs
@@ -113,15 +165,15 @@ data LocalBuildInfo = LocalBuildInfo {
 -- |See 'InstallDirs.absoluteInstallDirs'
 absoluteInstallDirs :: PackageDescription -> LocalBuildInfo -> CopyDest
                     -> InstallDirs FilePath
-absoluteInstallDirs pkg_descr lbi copydest =
+absoluteInstallDirs pkg lbi copydest =
   InstallDirs.absoluteInstallDirs
-    (packageId pkg_descr)
+    (packageId pkg)
     (compilerId (compiler lbi))
     copydest
     (installDirTemplates lbi)
 
 -- |See 'InstallDirs.prefixRelativeInstallDirs'
-prefixRelativeInstallDirs :: PackageDescription -> LocalBuildInfo
+prefixRelativeInstallDirs :: PackageId -> LocalBuildInfo
                           -> InstallDirs (Maybe FilePath)
 prefixRelativeInstallDirs pkg_descr lbi =
   InstallDirs.prefixRelativeInstallDirs
@@ -129,10 +181,10 @@ prefixRelativeInstallDirs pkg_descr lbi =
     (compilerId (compiler lbi))
     (installDirTemplates lbi)
 
-substPathTemplate :: PackageDescription -> LocalBuildInfo
+substPathTemplate :: PackageId -> LocalBuildInfo
                   -> PathTemplate -> FilePath
-substPathTemplate pkg_descr lbi = fromPathTemplate
+substPathTemplate pkgid lbi = fromPathTemplate
                                 . ( InstallDirs.substPathTemplate env )
     where env = initialPathTemplateEnv
-                   (packageId pkg_descr)
+                   pkgid
                    (compilerId (compiler lbi))

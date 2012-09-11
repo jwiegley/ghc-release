@@ -24,9 +24,7 @@ newtype DumbTerm m a = DumbTerm {unDumbTerm :: StateT Window (PosixT m) a}
                           MonadState Window,
                           MonadReader Handle, MonadReader Encoders)
 
-instance MonadReader Layout m => MonadReader Layout (DumbTerm m) where
-    ask = lift ask
-    local r = DumbTerm . local r . unDumbTerm
+type DumbTermM a = forall m . (MonadIO m, MonadReader Layout m) => DumbTerm m a
 
 instance MonadTrans DumbTerm where
     lift = DumbTerm . lift . lift . lift
@@ -36,19 +34,20 @@ runDumbTerm = do
     ch <- newChan
     posixRunTerm $ \enc h ->
                 TermOps {
-                        getLayout = tryGetLayouts (posixLayouts h),
-                        runTerm = \f -> 
-                                runPosixT enc h $ evalStateT' initWindow
-                                $ unDumbTerm
-                                $ withPosixGetEvent ch enc [] f
+                        getLayout = tryGetLayouts (posixLayouts h)
+                        , withGetEvent = withPosixGetEvent ch h enc []
+                        , runTerm = \(RunTermType f) -> 
+                                    runPosixT enc h
+                                    $ evalStateT' initWindow
+                                    $ unDumbTerm f
                         }
                                 
-instance (MonadException m, MonadLayout m) => Term (DumbTerm m) where
+instance (MonadException m, MonadReader Layout m) => Term (DumbTerm m) where
     reposition _ s = refitLine s
     drawLineDiff = drawLineDiff'
     
-    printLines = mapM_ (\s -> printText (s ++ crlf))
-    moveToNextLine = \_ -> printText crlf
+    printLines = mapM_ (printText . (++ crlf))
+    moveToNextLine _ = printText crlf
     clearLayout = clearLayoutD
     ringBell True = printText "\a"
     ringBell False = return ()
@@ -69,16 +68,16 @@ backs n = replicate n '\b'
 spaces n = replicate n ' '
 
 
-clearLayoutD :: MonadLayout m => DumbTerm m ()
+clearLayoutD :: DumbTermM ()
 clearLayoutD = do
     w <- maxWidth
     printText (cr ++ spaces w ++ cr)
 
 -- Don't want to print in the last column, as that may wrap to the next line.
-maxWidth :: MonadLayout m => DumbTerm m Int
+maxWidth :: DumbTermM Int
 maxWidth = asks (\lay -> width lay - 1)
 
-drawLineDiff' :: MonadLayout m => LineChars -> LineChars -> DumbTerm m ()
+drawLineDiff' :: LineChars -> LineChars -> DumbTermM ()
 drawLineDiff' (xs1,ys1) (xs2,ys2) = do
     Window {pos=p} <- get
     w <- maxWidth
@@ -94,15 +93,15 @@ drawLineDiff' (xs1,ys1) (xs2,ys2) = do
                 (_,[]) | xs1' ++ ys1 == ys2 -> -- moved left
                     printText $ backs (length xs1')
                 ([],_) | ys1 == xs2' ++ ys2 -> -- moved right
-                    printText xs2'
+                    printText (graphemesToString xs2')
                 _ -> let
                         extraLength = length xs1' + length ys1
                                     - length xs2' - length ys2
                      in printText $ backs (length xs1')
-                        ++ xs2' ++ ys2' ++ clearDeadText extraLength
+                        ++ graphemesToString (xs2' ++ ys2') ++ clearDeadText extraLength
                         ++ backs (length ys2')
 
-refitLine :: MonadLayout m => (String,String) -> DumbTerm m ()
+refitLine :: ([Grapheme],[Grapheme]) -> DumbTermM ()
 refitLine (xs,ys) = do
     w <- maxWidth
     let xs' = dropFrames w xs
@@ -110,12 +109,12 @@ refitLine (xs,ys) = do
     put Window {pos=p}
     let ys' = take (w - p) ys
     let k = length ys'
-    printText $ cr ++ xs' ++ ys'
+    printText $ cr ++ graphemesToString (xs' ++ ys')
         ++ spaces (w-k-p)
         ++ backs (w-p)
   where
     dropFrames w zs = case splitAt w zs of
-                        (_,"") -> zs
+                        (_,[]) -> zs
                         (_,zs') -> dropFrames w zs'
     
 clearDeadText :: Int -> String

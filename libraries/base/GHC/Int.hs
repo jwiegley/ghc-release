@@ -37,6 +37,7 @@ import GHC.Num
 import GHC.Real
 import GHC.Read
 import GHC.Arr
+import GHC.Err
 import GHC.Word hiding (uncheckedShiftL64#, uncheckedShiftRL64#)
 import GHC.Show
 
@@ -141,8 +142,8 @@ instance Bits Int8 where
         = I8# (narrow8Int# (word2Int# ((x'# `uncheckedShiftL#` i'#) `or#`
                                        (x'# `uncheckedShiftRL#` (8# -# i'#)))))
         where
-        x'# = narrow8Word# (int2Word# x#)
-        i'# = word2Int# (int2Word# i# `and#` int2Word# 7#)
+        !x'# = narrow8Word# (int2Word# x#)
+        !i'# = word2Int# (int2Word# i# `and#` int2Word# 7#)
     bitSize  _                = 8
     isSigned _                = True
 
@@ -257,8 +258,8 @@ instance Bits Int16 where
         = I16# (narrow16Int# (word2Int# ((x'# `uncheckedShiftL#` i'#) `or#`
                                          (x'# `uncheckedShiftRL#` (16# -# i'#)))))
         where
-        x'# = narrow16Word# (int2Word# x#)
-        i'# = word2Int# (int2Word# i# `and#` int2Word# 15#)
+        !x'# = narrow16Word# (int2Word# x#)
+        !i'# = word2Int# (int2Word# i# `and#` int2Word# 15#)
     bitSize  _                 = 16
     isSigned _                 = True
 
@@ -506,8 +507,8 @@ instance Bits Int32 where
         = I32# (narrow32Int# (word2Int# ((x'# `uncheckedShiftL#` i'#) `or#`
                                          (x'# `uncheckedShiftRL#` (32# -# i'#)))))
         where
-        x'# = narrow32Word# (int2Word# x#)
-        i'# = word2Int# (int2Word# i# `and#` int2Word# 31#)
+        !x'# = narrow32Word# (int2Word# x#)
+        !i'# = word2Int# (int2Word# i# `and#` int2Word# 31#)
     bitSize  _                 = 32
     isSigned _                 = True
 
@@ -633,7 +634,7 @@ x# `modInt64#` y#
         = if r# `neInt64#` intToInt64# 0# then r# `plusInt64#` y# else intToInt64# 0#
     | otherwise = r#
     where
-    r# = x# `remInt64#` y#
+    !r# = x# `remInt64#` y#
 
 instance Read Int64 where
     readsPrec p s = [(fromInteger x, r) | (x, r) <- readsPrec p s]
@@ -655,8 +656,8 @@ instance Bits Int64 where
         = I64# (word64ToInt64# ((x'# `uncheckedShiftL64#` i'#) `or64#`
                                 (x'# `uncheckedShiftRL64#` (64# -# i'#))))
         where
-        x'# = int64ToWord64# x#
-        i'# = word2Int# (int2Word# i# `and#` int2Word# 63#)
+        !x'# = int64ToWord64# x#
+        !i'# = word2Int# (int2Word# i# `and#` int2Word# 63#)
     bitSize  _                 = 64
     isSigned _                 = True
 
@@ -773,8 +774,8 @@ instance Bits Int64 where
         = I64# (word2Int# ((x'# `uncheckedShiftL#` i'#) `or#`
                            (x'# `uncheckedShiftRL#` (64# -# i'#))))
         where
-        x'# = int2Word# x#
-        i'# = word2Int# (int2Word# i# `and#` int2Word# 63#)
+        !x'# = int2Word# x#
+        !i'# = word2Int# (int2Word# i# `and#` int2Word# 63#)
     bitSize  _                 = 64
     isSigned _                 = True
 

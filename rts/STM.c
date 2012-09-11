@@ -74,25 +74,24 @@
  * (d) release the locks on the TVars, writing updates to them in the case of a 
  * commit, (e) unlock the STM.
  *
- * Queues of waiting threads hang off the first_watch_queue_entry field of each
- * TVar.  This may only be manipulated when holding that TVar's lock.  In
- * particular, when a thread is putting itself to sleep, it mustn't release
- * the TVar's lock until it has added itself to the wait queue and marked its
- * TSO as BlockedOnSTM -- this makes sure that other threads will know to wake it.
+ * Queues of waiting threads hang off the first_watch_queue_entry
+ * field of each TVar.  This may only be manipulated when holding that
+ * TVar's lock.  In particular, when a thread is putting itself to
+ * sleep, it mustn't release the TVar's lock until it has added itself
+ * to the wait queue and marked its TSO as BlockedOnSTM -- this makes
+ * sure that other threads will know to wake it.
  *
  * ---------------------------------------------------------------------------*/
 
 #include "PosixSource.h"
 #include "Rts.h"
-#include "RtsFlags.h"
+
 #include "RtsUtils.h"
-#include "Storage.h"
 #include "Schedule.h"
-#include "SMP.h"
 #include "STM.h"
 #include "Trace.h"
+#include "Threads.h"
 
-#include <stdlib.h>
 #include <stdio.h>
 
 #define TRUE 1
@@ -306,7 +305,7 @@ static StgClosure *lock_tvar(StgTRecHeader *trec,
   do {
     do {
       result = s -> current_value;
-    } while (GET_INFO(result) == &stg_TREC_HEADER_info);
+    } while (GET_INFO(UNTAG_CLOSURE(result)) == &stg_TREC_HEADER_info);
   } while (cas((void *)&(s -> current_value),
 	       (StgWord)result, (StgWord)trec) != (StgWord)result);
   return result;
@@ -1027,16 +1026,6 @@ void stmCondemnTransaction(Capability *cap,
 
 /*......................................................................*/
 
-StgTRecHeader *stmGetEnclosingTRec(StgTRecHeader *trec) {
-  StgTRecHeader *outer;
-  TRACE("%p : stmGetEnclosingTRec", trec);
-  outer = trec -> enclosing_trec;
-  TRACE("%p : stmGetEnclosingTRec()=%p", trec, outer);
-  return outer;
-}
-
-/*......................................................................*/
-
 StgBool stmValidateNestOfTransactions(StgTRecHeader *trec) {
   StgTRecHeader *t;
   StgBool result;
@@ -1573,7 +1562,7 @@ static StgClosure *read_current_value(StgTRecHeader *trec STG_UNUSED, StgTVar *t
   result = tvar -> current_value;
 
 #if defined(STM_FG_LOCKS)
-  while (GET_INFO(result) == &stg_TREC_HEADER_info) {
+  while (GET_INFO(UNTAG_CLOSURE(result)) == &stg_TREC_HEADER_info) {
     TRACE("%p : read_current_value(%p) saw %p", trec, tvar, result);
     result = tvar -> current_value;
   }

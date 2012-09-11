@@ -36,8 +36,11 @@ import GHC.Base
 import GHC.Conc hiding (throwTo)
 import GHC.Num
 import GHC.Real
-import GHC.Handle
-import GHC.IOBase
+import GHC.MVar
+import GHC.IO
+import GHC.IO.Handle.FD
+import GHC.IO.Handle
+import GHC.IO.Exception
 import GHC.Weak
 import Data.Typeable
 #if defined(mingw32_HOST_OS)
@@ -66,7 +69,7 @@ runMainIO main =
 install_interrupt_handler :: IO () -> IO ()
 #ifdef mingw32_HOST_OS
 install_interrupt_handler handler = do
-  GHC.ConsoleHandler.installHandler $
+  _ <- GHC.ConsoleHandler.installHandler $
      Catch $ \event -> 
         case event of
            ControlC -> handler
@@ -75,13 +78,13 @@ install_interrupt_handler handler = do
            _ -> return ()
   return ()
 #else
-#include "Signals.h"
+#include "rts/Signals.h"
 -- specialised version of System.Posix.Signals.installHandler, which
 -- isn't available here.
 install_interrupt_handler handler = do
    let sig = CONST_SIGINT :: CInt
-   setHandler sig (Just (const handler, toDyn handler))
-   stg_sig_install sig STG_SIG_RST nullPtr
+   _ <- setHandler sig (Just (const handler, toDyn handler))
+   _ <- stg_sig_install sig STG_SIG_RST nullPtr
      -- STG_SIG_RST: the second ^C kills us for real, just in case the
      -- RTS or program is unresponsive.
    return ()
@@ -160,8 +163,14 @@ real_handler exit se@(SomeException exn) =
            Just ExitSuccess     -> exit 0
            Just (ExitFailure n) -> exit n
 
-           _ -> do reportError se
-                   exit 1
+           -- EPIPE errors received for stdout are ignored (#2699)
+           _ -> case cast exn of
+                Just IOError{ ioe_type = ResourceVanished,
+                              ioe_errno = Just ioe,
+                              ioe_handle = Just hdl }
+                   | Errno ioe == ePIPE, hdl == stdout -> exit 0
+                _ -> do reportError se
+                        exit 1
            
 
 -- try to flush stdout/stderr, but don't worry if we fail

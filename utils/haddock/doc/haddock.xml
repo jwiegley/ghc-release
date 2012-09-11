@@ -16,7 +16,7 @@
       <holder>Simon Marlow</holder>
     </copyright>
     <abstract>
-      <para>This document describes Haddock version 2.4.2, a Haskell
+      <para>This document describes Haddock version 2.6.0, a Haskell
       documentation tool.</para>
     </abstract>
   </bookinfo>
@@ -804,9 +804,8 @@
 	    atribute. (<xref linkend="module-attributes" />).</para>
 	</listitem>
       </varlistentry>
-    </variablelist>
       
-<varlistentry>
+      <varlistentry>
         <term>
           <indexterm><primary><option>-w</option></primary></indexterm>
           <option>-w</option>
@@ -819,6 +818,7 @@
 	  <para>Turn off all warnings.</para>
 	</listitem>
       </varlistentry>
+    </variablelist>
 
     <section id="cpp">
       <title>Using literate or pre-processed source</title>
@@ -1367,8 +1367,8 @@ module A where
 
 	<varlistentry>
 	  <term>
-	    <indexterm><primary><literal>not-home</literal></primary>
-	    </indexterm>
+	    <indexterm><primary><literal>not-home</literal></primary></indexterm>
+      <literal>not-home</literal>
 	  </term>
 	  <listitem>
 	    <para>Indicates that the current module should not be considered to

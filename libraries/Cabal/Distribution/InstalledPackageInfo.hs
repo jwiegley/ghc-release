@@ -68,21 +68,20 @@ import Distribution.ParseUtils
          , simpleField, listField, parseLicenseQ
          , showFields, showSingleNamedField, parseFields
          , parseFilePathQ, parseTokenQ, parseModuleNameQ, parsePackageNameQ
-         , showFilePath, showToken, boolField, parseOptVersion, parseQuoted
+         , showFilePath, showToken, boolField, parseOptVersion
          , parseFreeText, showFreeText )
 import Distribution.License     ( License(..) )
 import Distribution.Package
-         ( PackageName(..), PackageIdentifier(..)
+         ( PackageName(..), PackageIdentifier(..), PackageId, InstalledPackageId(..)
          , packageName, packageVersion )
 import qualified Distribution.Package as Package
-         ( Package(..), PackageFixedDeps(..) )
+         ( Package(..) )
 import Distribution.ModuleName
          ( ModuleName )
 import Distribution.Version
          ( Version(..) )
 import Distribution.Text
          ( Text(disp, parse) )
-import qualified Distribution.Compat.ReadP as ReadP
 
 -- -----------------------------------------------------------------------------
 -- The InstalledPackageInfo type
@@ -90,7 +89,8 @@ import qualified Distribution.Compat.ReadP as ReadP
 data InstalledPackageInfo_ m
    = InstalledPackageInfo {
         -- these parts are exactly the same as PackageDescription
-        package           :: PackageIdentifier,
+        installedPackageId :: InstalledPackageId,
+        sourcePackageId    :: PackageId,
         license           :: License,
         copyright         :: String,
         maintainer        :: String,
@@ -111,7 +111,7 @@ data InstalledPackageInfo_ m
         extraGHCiLibraries:: [String],    -- overrides extraLibraries for GHCi
         includeDirs       :: [FilePath],
         includes          :: [String],
-        depends           :: [PackageIdentifier],
+        depends           :: [InstalledPackageId],
         hugsOptions       :: [String],
         ccOptions         :: [String],
         ldOptions         :: [String],
@@ -123,16 +123,15 @@ data InstalledPackageInfo_ m
     deriving (Read, Show)
 
 instance Package.Package          (InstalledPackageInfo_ str) where
-   packageId = package
-instance Package.PackageFixedDeps (InstalledPackageInfo_ str) where
-   depends   = depends
+   packageId = sourcePackageId
 
 type InstalledPackageInfo = InstalledPackageInfo_ ModuleName
 
 emptyInstalledPackageInfo :: InstalledPackageInfo_ m
 emptyInstalledPackageInfo
    = InstalledPackageInfo {
-        package           = PackageIdentifier (PackageName "") noVersion,
+        installedPackageId = InstalledPackageId "",
+        sourcePackageId    = PackageIdentifier (PackageName "") noVersion,
         license           = AllRightsReserved,
         copyright         = "",
         maintainer        = "",
@@ -190,10 +189,13 @@ basicFieldDescrs :: [FieldDescr InstalledPackageInfo]
 basicFieldDescrs =
  [ simpleField "name"
                            disp                   parsePackageNameQ
-                           packageName            (\name pkg -> pkg{package=(package pkg){pkgName=name}})
+                           packageName            (\name pkg -> pkg{sourcePackageId=(sourcePackageId pkg){pkgName=name}})
  , simpleField "version"
                            disp                   parseOptVersion
-                           packageVersion         (\ver pkg -> pkg{package=(package pkg){pkgVersion=ver}})
+                           packageVersion         (\ver pkg -> pkg{sourcePackageId=(sourcePackageId pkg){pkgVersion=ver}})
+ , simpleField "id"
+                           disp                   parse
+                           installedPackageId     (\ipid pkg -> pkg{installedPackageId=ipid})
  , simpleField "license"
                            disp                   parseLicenseQ
                            license                (\l pkg -> pkg{license=l})
@@ -255,7 +257,7 @@ installedFieldDescrs = [
         showFilePath       parseFilePathQ
         includes           (\xs pkg -> pkg{includes=xs})
  , listField   "depends"
-        disp               parsePackageId'
+        disp               parse
         depends            (\xs pkg -> pkg{depends=xs})
  , listField   "hugs-options"
         showToken          parseTokenQ
@@ -279,6 +281,3 @@ installedFieldDescrs = [
         showFilePath       parseFilePathQ
         haddockHTMLs       (\xs pkg -> pkg{haddockHTMLs=xs})
  ]
-
-parsePackageId' :: ReadP.ReadP [PackageIdentifier] PackageIdentifier
-parsePackageId' = parseQuoted parse ReadP.<++ parse

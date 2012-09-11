@@ -1,30 +1,33 @@
---
--- Haddock - A Haskell Documentation Tool
---
--- (c) Simon Marlow 2003
---
-
-
 {-# LANGUAGE MagicHash #-}
-
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Haddock.Interface.AttachInstances
+-- Copyright   :  (c) Simon Marlow 2006,
+--                    David Waern  2006-2009,
+--                    Isaac Dupree 2009
+-- License     :  BSD-like
+--
+-- Maintainer  :  haddock@projects.haskell.org
+-- Stability   :  experimental
+-- Portability :  portable
+-----------------------------------------------------------------------------
 
 module Haddock.Interface.AttachInstances (attachInstances) where
 
 
 import Haddock.Types
-import Haddock.GHC.Utils
+import Haddock.Convert
 
-import qualified Data.Map as Map
-import Data.Map (Map)
 import Data.List
 
 import GHC
 import Name
-import SrcLoc
 import InstEnv
 import Class
+import HscTypes (withSession, ioMsg)
+import TcRnDriver (tcRnGetInfo)
 
-#if __GLASGOW_HASKELL__ >= 610 && __GHC_PATCHLEVEL__ >= 2
+#if __GLASGOW_HASKELL__ > 610 || (__GLASGOW_HASKELL__ == 610 && __GHC_PATCHLEVEL__ >= 2)
 import TypeRep hiding (funTyConName)
 #else
 import TypeRep
@@ -33,29 +36,32 @@ import TypeRep
 import Var hiding (varName)
 import TyCon
 import PrelNames
-import HscTypes
 import FastString
 #define FSLIT(x) (mkFastString# (x#))
 
 
-attachInstances :: [Interface] -> [Name] -> [Interface]
-attachInstances modules filterNames = map attach modules
+attachInstances :: [Interface] -> Ghc [Interface]
+attachInstances = mapM attach
   where
-    instMap =
-      fmap (map toHsInstHead . sortImage instHead) $
-      collectInstances modules filterNames
+    attach iface = do
+      newItems <- mapM attachExport $ ifaceExportItems iface
+      return $ iface { ifaceExportItems = newItems }
 
-    attach mod = mod { ifaceExportItems = newItems }
-      where
-        newItems = map attachExport (ifaceExportItems mod)
+    attachExport export@ExportDecl{expItemDecl = L _ (TyClD d)} = do
+       mb_info <- getAllInfo (unLoc (tcdLName d))
+       return $ export { expItemInstances = case mb_info of
+         Just (_, _, instances) ->
+           map synifyInstHead . sortImage instHead . map instanceHead $ instances
+         Nothing ->
+           []
+        }
+    attachExport export = return export
 
-        attachExport (ExportDecl decl@(L _ (TyClD d)) doc subs _)
-          | isClassDecl d || isDataDecl d || isFamilyDecl d =
-             ExportDecl decl doc subs (case Map.lookup (tcdName d) instMap of
-                                    Nothing -> []
-                                    Just instheads -> instheads)
-        attachExport export = export
 
+-- | Like GHC's getInfo but doesn't cut things out depending on the
+-- interative context, which we don't set sufficiently anyway.
+getAllInfo :: GhcMonad m => Name -> m (Maybe (TyThing,Fixity,[Instance]))
+getAllInfo name = withSession $ \hsc_env -> ioMsg $ tcRnGetInfo hsc_env name
 
 --------------------------------------------------------------------------------
 -- Collecting and sorting instances
@@ -64,24 +70,9 @@ attachInstances modules filterNames = map attach modules
 
 -- | Simplified type for sorting types, ignoring qualification (not visible
 -- in Haddock output) and unifying special tycons with normal ones.
+-- For the benefit of the user (looks nice and predictable) and the
+-- tests (which prefer output to be deterministic).
 data SimpleType = SimpleType Name [SimpleType] deriving (Eq,Ord)
-
-
-collectInstances
-   :: [Interface]
-   -> [Name]
-   -> Map Name [([TyVar], [PredType], Class, [Type])]  -- maps class/type names to instances
-
-collectInstances modules filterNames
-  = Map.fromListWith (flip (++)) tyInstPairs `Map.union`
-    Map.fromListWith (flip (++)) classInstPairs
-  where
-    allInstances = concat (map ifaceInstances modules)
-    classInstPairs = [ (is_cls inst, [instanceHead inst]) | 
-                       inst <- allInstances, Just n <- nub (is_tcs inst) ]
-                    --   n `elem` filterNames ]
-    tyInstPairs = [ (tycon, [instanceHead inst]) | inst <- allInstances, 
-                    Just tycon <- nub (is_tcs inst) ]    
 
 
 -- TODO: should we support PredTy here?
@@ -98,8 +89,8 @@ instHead (_, _, cls, args)
     simplify (ForAllTy _ t) = simplify t
     simplify (FunTy t1 t2) = 
       SimpleType funTyConName [simplify t1, simplify t2]
-    simplify (AppTy t1 t2) = SimpleType s (args ++ [simplify t2])
-      where (SimpleType s args) = simplify t1
+    simplify (AppTy t1 t2) = SimpleType s (ts ++ [simplify t2])
+      where (SimpleType s ts) = simplify t1
     simplify (TyVarTy v) = SimpleType (tyVarName v) []
     simplify (TyConApp tc ts) = SimpleType (tyConName tc) (map simplify ts)
     simplify _ = error "simplify"
@@ -111,48 +102,9 @@ sortImage f xs = map snd $ sortBy cmp_fst [(f x, x) | x <- xs]
  where cmp_fst (x,_) (y,_) = compare x y
 
 
+funTyConName :: Name
 funTyConName = mkWiredInName gHC_PRIM
                         (mkOccNameFS tcName FSLIT("(->)"))
                         funTyConKey
                         (ATyCon funTyCon)       -- Relevant TyCon
                         BuiltInSyntax
-
-
-toHsInstHead :: ([TyVar], [PredType], Class, [Type]) -> InstHead Name
-toHsInstHead (_, preds, cls, ts) = (map toHsPred preds, className cls, map toHsType ts) 
-
-
---------------------------------------------------------------------------------
--- Type -> HsType conversion
---------------------------------------------------------------------------------
-
-
-toHsPred :: PredType -> HsPred Name
-toHsPred (ClassP cls ts) = HsClassP (className cls) (map toLHsType ts)
-toHsPred (IParam n t) = HsIParam n (toLHsType t)
-toHsPred (EqPred t1 t2) = HsEqualP (toLHsType t1) (toLHsType t2)
-
-
-toLHsType = noLoc . toHsType
-
- 
-toHsType :: Type -> HsType Name
-toHsType t = case t of 
-  TyVarTy v -> HsTyVar (tyVarName v) 
-  AppTy a b -> HsAppTy (toLHsType a) (toLHsType b)
-
-  TyConApp tc ts -> case ts of 
-    t1:t2:rest
-      | isSymOcc . nameOccName . tyConName $ tc ->
-          app (HsOpTy (toLHsType t1) (noLoc . tyConName $ tc) (toLHsType t2)) rest
-    _ -> app (tycon tc) ts
-
-  FunTy a b -> HsFunTy (toLHsType a) (toLHsType b)
-  ForAllTy v t -> cvForAll [v] t 
-  PredTy p -> HsPredTy (toHsPred p) 
-  where
-    tycon tc = HsTyVar (tyConName tc)
-    app tc ts = foldl (\a b -> HsAppTy (noLoc a) (noLoc b)) tc (map toHsType ts)
-    cvForAll vs (ForAllTy v t) = cvForAll (v:vs) t
-    cvForAll vs t = mkExplicitHsForAllTy (tyvarbinders vs) (noLoc []) (toLHsType t)
-    tyvarbinders vs = map (noLoc . UserTyVar . tyVarName) vs

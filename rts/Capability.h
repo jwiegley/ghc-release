@@ -4,27 +4,25 @@
  *
  * Capabilities
  *
- * The notion of a capability is used when operating in multi-threaded
- * environments (which the THREADED_RTS build of the RTS does), to
- * hold all the state an OS thread/task needs to run Haskell code:
- * its STG registers, a pointer to its  TSO, a nursery etc. During
- * STG execution, a pointer to the capabilitity is kept in a 
- * register (BaseReg).
+ * A Capability holds all the state an OS thread/task needs to run
+ * Haskell code: its STG registers, a pointer to its TSO, a nursery
+ * etc. During STG execution, a pointer to the Capabilitity is kept in
+ * a register (BaseReg).
  *
- * Only in an THREADED_RTS build will there be multiple capabilities,
- * in the non-threaded builds there is one global capability, namely
+ * Only in a THREADED_RTS build will there be multiple capabilities,
+ * in the non-threaded RTS there is one global capability, called
  * MainCapability.
  *
- * This header file contains the functions for working with capabilities.
- * (the main, and only, consumer of this interface is the scheduler).
- * 
  * --------------------------------------------------------------------------*/
 
 #ifndef CAPABILITY_H
 #define CAPABILITY_H
 
-#include "RtsFlags.h"
+#include "sm/GC.h" // for evac_fn
 #include "Task.h"
+#include "Sparks.h"
+
+BEGIN_RTS_PRIVATE
 
 struct Capability_ {
     // State required by the STG virtual machine when running Haskell
@@ -45,6 +43,9 @@ struct Capability_ {
     // catching unsafe call-ins.
     rtsBool in_haskell;
 
+    // true if this Capability is currently in the GC
+    rtsBool in_gc;
+
     // The run queue.  The Task owning this Capability has exclusive
     // access to its run queue, so can wake up threads without
     // taking a lock, and the common path through the scheduler is
@@ -61,10 +62,12 @@ struct Capability_ {
     Task *suspended_ccalling_tasks;
 
     // One mutable list per generation, so we don't need to take any
-    // locks when updating an old-generation thunk.  These
-    // mini-mut-lists are moved onto the respective gen->mut_list at
-    // each GC.
+    // locks when updating an old-generation thunk.  This also lets us
+    // keep track of which closures this CPU has been mutating, so we
+    // can traverse them using the right thread during GC and avoid
+    // unnecessarily moving the data from one cache to another.
     bdescr **mut_lists;
+    bdescr **saved_mut_lists; // tmp use during GC
 
     // Context switch flag. We used to have one global flag, now one 
     // per capability. Locks required  : none (conflicts are harmless)
@@ -90,6 +93,13 @@ struct Capability_ {
     // woken up by another Capability.
     StgTSO *wakeup_queue_hd;
     StgTSO *wakeup_queue_tl;
+
+    SparkPool *sparks;
+
+    // Stats on spark creation/conversion
+    nat sparks_created;
+    nat sparks_converted;
+    nat sparks_pruned;
 #endif
 
     // Per-capability STM-related data
@@ -98,7 +108,13 @@ struct Capability_ {
     StgTRecChunk *free_trec_chunks;
     StgTRecHeader *free_trec_headers;
     nat transaction_tokens;
-}; // typedef Capability, defined in RtsAPI.h
+} // typedef Capability is defined in RtsAPI.h
+  // Capabilities are stored in an array, so make sure that adjacent
+  // Capabilities don't share any cache-lines:
+#ifndef mingw32_HOST_OS
+  ATTRIBUTE_ALIGNED(64)
+#endif
+  ;
 
 
 #if defined(THREADED_RTS)
@@ -129,7 +145,7 @@ struct Capability_ {
 INLINE_HEADER Capability *
 regTableToCapability (StgRegTable *reg)
 {
-    return (Capability *)((void *)((unsigned char*)reg - sizeof(StgFunTable)));
+    return (Capability *)((void *)((unsigned char*)reg - STG_FIELD_OFFSET(Capability,r)));
 }
 
 // Initialise the available capabilities.
@@ -143,22 +159,26 @@ void initCapabilities (void);
 // ASSUMES: cap->running_task is the current Task.
 //
 #if defined(THREADED_RTS)
-void releaseCapability  (Capability* cap);
-void releaseCapability_ (Capability* cap); // assumes cap->lock is held
+void releaseCapability           (Capability* cap);
+void releaseAndWakeupCapability  (Capability* cap);
+void releaseCapability_ (Capability* cap, rtsBool always_wakeup); 
+// assumes cap->lock is held
 #else
 // releaseCapability() is empty in non-threaded RTS
 INLINE_HEADER void releaseCapability  (Capability* cap STG_UNUSED) {};
-INLINE_HEADER void releaseCapability_ (Capability* cap STG_UNUSED) {};
+INLINE_HEADER void releaseAndWakeupCapability  (Capability* cap STG_UNUSED) {};
+INLINE_HEADER void releaseCapability_ (Capability* cap STG_UNUSED, 
+                                       rtsBool always_wakeup STG_UNUSED) {};
 #endif
 
-#if !IN_STG_CODE
-// one global capability
-extern Capability MainCapability; 
-#endif
+// declared in includes/rts/Threads.h:
+// extern Capability MainCapability; 
+
+// declared in includes/rts/Threads.h:
+// extern nat n_capabilities;
 
 // Array of all the capabilities
 //
-extern nat n_capabilities;
 extern Capability *capabilities;
 
 // The Capability that was last free.  Used as a good guess for where
@@ -167,6 +187,8 @@ extern Capability *capabilities;
 extern Capability *last_free_capability;
 
 // GC indicator, in scope for the scheduler
+#define PENDING_GC_SEQ 1
+#define PENDING_GC_PAR 2
 extern volatile StgWord waiting_for_gc;
 
 // Acquires a capability at a return point.  If *cap is non-NULL, then
@@ -213,6 +235,7 @@ void wakeupThreadOnCapability (Capability *my_cap, Capability *other_cap,
 // need to service some global event.
 //
 void prodOneCapability (void);
+void prodCapability (Capability *cap, Task *task);
 
 // Similar to prodOneCapability(), but prods all of them.
 //
@@ -227,6 +250,18 @@ void shutdownCapability (Capability *cap, Task *task, rtsBool wait_foreign);
 //
 rtsBool tryGrabCapability (Capability *cap, Task *task);
 
+// Try to find a spark to run
+//
+StgClosure *findSpark (Capability *cap);
+
+// True if any capabilities have sparks
+//
+rtsBool anySparks (void);
+
+INLINE_HEADER rtsBool emptySparkPoolCap (Capability *cap);
+INLINE_HEADER nat     sparkPoolSizeCap  (Capability *cap);
+INLINE_HEADER void    discardSparksCap  (Capability *cap);
+
 #else // !THREADED_RTS
 
 // Grab a capability.  (Only in the non-threaded RTS; in the threaded
@@ -238,12 +273,14 @@ extern void grabCapability (Capability **pCap);
 
 // cause all capabilities to context switch as soon as possible.
 void setContextSwitches(void);
+INLINE_HEADER void contextSwitchCapability(Capability *cap);
 
 // Free all capabilities
 void freeCapabilities (void);
 
-// FOr the GC:
-void markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta);
+// For the GC:
+void markSomeCapabilities (evac_fn evac, void *user, nat i0, nat delta, 
+                           rtsBool prune_sparks);
 void markCapabilities (evac_fn evac, void *user);
 void traverseSparkQueues (evac_fn evac, void *user);
 
@@ -268,5 +305,33 @@ recordMutableCap (StgClosure *p, Capability *cap, nat gen)
     }
     *bd->free++ = (StgWord)p;
 }
+
+#if defined(THREADED_RTS)
+INLINE_HEADER rtsBool
+emptySparkPoolCap (Capability *cap) 
+{ return looksEmpty(cap->sparks); }
+
+INLINE_HEADER nat
+sparkPoolSizeCap (Capability *cap) 
+{ return sparkPoolSize(cap->sparks); }
+
+INLINE_HEADER void
+discardSparksCap (Capability *cap) 
+{ return discardSparks(cap->sparks); }
+#endif
+
+INLINE_HEADER void
+contextSwitchCapability (Capability *cap)
+{
+    // setting HpLim to NULL ensures that the next heap check will
+    // fail, and the thread will return to the scheduler.
+    cap->r.rHpLim = NULL;
+    // But just in case it didn't work (the target thread might be
+    // modifying HpLim at the same time), we set the end-of-block
+    // context-switch flag too:
+    cap->context_switch = 1;
+}
+
+END_RTS_PRIVATE
 
 #endif /* CAPABILITY_H */

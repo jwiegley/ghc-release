@@ -92,17 +92,11 @@
 /* Define to 1 if you have the `fork' function. */
 #undef HAVE_FORK
 
-/* Define to 1 if GMP.framework is installed (Mac OS X only). */
-#undef HAVE_FRAMEWORK_GMP
-
 /* Define to 1 if you have the `getclock' function. */
 #undef HAVE_GETCLOCK
 
 /* Define to 1 if you have the `GetModuleFileName' function. */
 #undef HAVE_GETMODULEFILENAME
-
-/* Define to 1 if you have the `getpagesize' function. */
-#undef HAVE_GETPAGESIZE
 
 /* Define to 1 if you have the `getrusage' function. */
 #undef HAVE_GETRUSAGE
@@ -131,9 +125,6 @@
 /* Define to 1 if you have the `rt' library (-lrt). */
 #undef HAVE_LIBRT
 
-/* Define to 1 if GMP library is installed. */
-#undef HAVE_LIB_GMP
-
 /* Define to 1 if you have the <limits.h> header file. */
 #undef HAVE_LIMITS_H
 
@@ -161,11 +152,20 @@
 /* Define to 1 if you have the <pwd.h> header file. */
 #undef HAVE_PWD_H
 
+/* Define to 1 if you have the <sched.h> header file. */
+#undef HAVE_SCHED_H
+
+/* Define to 1 if you have the `sched_setaffinity' function. */
+#undef HAVE_SCHED_SETAFFINITY
+
 /* Define to 1 if you have the `setitimer' function. */
 #undef HAVE_SETITIMER
 
 /* Define to 1 if setitimer accepts ITIMER_VIRTUAL, 0 else. */
 #undef HAVE_SETITIMER_VIRTUAL
+
+/* Define to 1 if you have the `setlocale' function. */
+#undef HAVE_SETLOCALE
 
 /* Define to 1 if you have the `siginterrupt' function. */
 #undef HAVE_SIGINTERRUPT
@@ -263,6 +263,9 @@
 /* Define to 1 if `vfork' works. */
 #undef HAVE_WORKING_VFORK
 
+/* Define to 1 if you have the `__mingw_vfprintf' function. */
+#undef HAVE___MINGW_VFPRINTF
+
 /* Define to 1 if C symbols have a leading underscore added by the compiler.
    */
 #undef LEADING_UNDERSCORE
@@ -344,9 +347,6 @@
 /* Define to 1 if signal handlers have type void (*)(int). Otherwise, they're
    assumed to have type int (*)(void). */
 #undef VOID_INT_SIGNALS
-
-/* Define to 1 if you want to include .NET interop support. */
-#undef WANT_DOTNET_SUPPORT
 
 /* Define to 1 if your processor stores words with the most significant byte
    first (like Motorola and SPARC, unlike Intel and VAX). */

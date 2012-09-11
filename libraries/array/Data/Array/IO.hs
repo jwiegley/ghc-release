@@ -1,4 +1,5 @@
 {-# OPTIONS_GHC -#include "HsBase.h" #-}
+{-# OPTIONS_GHC -w #-} --tmp
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.Array.IO
@@ -32,20 +33,23 @@ module Data.Array.IO (
 import Data.Array.Base
 import Data.Array.IO.Internals
 import Data.Array.MArray
+import System.IO.Error
 
 #ifdef __GLASGOW_HASKELL__
 import Foreign
 import Foreign.C
 
+import GHC.Exts  (MutableByteArray#, RealWorld)
 import GHC.Arr
+import GHC.IORef
+import GHC.IO.Handle
+import GHC.IO.Buffer
+import GHC.IO.Exception
 
-import GHC.IOBase
-import GHC.Handle
 #else
 import Data.Char
 import Data.Word ( Word8 )
 import System.IO
-import System.IO.Error
 #endif
 
 #ifdef __GLASGOW_HASKELL__
@@ -64,46 +68,19 @@ hGetArray
 		-- if the end of file was reached.
 
 hGetArray handle (IOUArray (STUArray _l _u n ptr)) count
-  | count == 0
-  = return 0
-  | count < 0 || count > n
-  = illegalBufferSize handle "hGetArray" count
+  | count == 0              = return 0
+  | count < 0 || count > n  = illegalBufferSize handle "hGetArray" count
   | otherwise = do
-      wantReadableHandle "hGetArray" handle $ 
-	\ Handle__{ haFD=fd, haBuffer=ref, haIsStream=is_stream } -> do
-	buf@Buffer{ bufBuf=raw, bufWPtr=w, bufRPtr=r } <- readIORef ref
-	if bufferEmpty buf
-	   then readChunk fd is_stream ptr 0 count
-	   else do 
-		let avail = w - r
-		copied <- if (count >= avail)
-		       	    then do 
-				memcpy_ba_baoff ptr raw (fromIntegral r) (fromIntegral avail)
-				writeIORef ref buf{ bufWPtr=0, bufRPtr=0 }
-				return avail
-		     	    else do 
-				memcpy_ba_baoff ptr raw (fromIntegral r) (fromIntegral count)
-				writeIORef ref buf{ bufRPtr = r + count }
-				return count
+      -- we would like to read directly into the buffer, but we can't
+      -- be sure that the MutableByteArray# is pinned, so we have to
+      -- allocate a separate area of memory and copy.
+      allocaBytes n $ \p -> do
+        r <- hGetBuf handle p n
+        memcpy_ba_ptr ptr p (fromIntegral r)
+        return r
 
-		let remaining = count - copied
-		if remaining > 0 
-		   then do rest <- readChunk fd is_stream ptr copied remaining
-			   return (rest + copied)
-		   else return count
-
-readChunk :: FD -> Bool -> RawBuffer -> Int -> Int -> IO Int
-readChunk fd is_stream ptr init_off bytes0 = loop init_off bytes0
- where
-  loop :: Int -> Int -> IO Int
-  loop off bytes | bytes <= 0 = return (off - init_off)
-  loop off bytes = do
-    r' <- readRawBuffer "readChunk" (fromIntegral fd) is_stream ptr
-    				    (fromIntegral off) (fromIntegral bytes)
-    let r = fromIntegral r'
-    if r == 0
-	then return (off - init_off)
-	else loop (off + r) (bytes - r)
+foreign import ccall unsafe "memcpy"
+   memcpy_ba_ptr :: MutableByteArray# RealWorld -> Ptr a -> CSize -> IO (Ptr ())
 
 -- ---------------------------------------------------------------------------
 -- hPutArray
@@ -116,48 +93,26 @@ hPutArray
 	-> IO ()
 
 hPutArray handle (IOUArray (STUArray _l _u n raw)) count
-  | count == 0
-  = return ()
-  | count < 0 || count > n
-  = illegalBufferSize handle "hPutArray" count
-  | otherwise
-   = do wantWritableHandle "hPutArray" handle $ 
-          \ Handle__{ haFD=fd, haBuffer=ref, haIsStream=stream } -> do
+  | count == 0              = return ()
+  | count < 0 || count > n  = illegalBufferSize handle "hPutArray" count
+  | otherwise = do
+      -- as in hGetArray, we would like to use the array directly, but
+      -- we can't be sure that the MutableByteArray# is pinned.
+     allocaBytes n $ \p -> do
+       memcpy_ptr_ba p raw (fromIntegral n)
+       hPutBuf handle p n
 
-          old_buf@Buffer{ bufBuf=old_raw, bufWPtr=w, bufSize=size }
-	    <- readIORef ref
-
-          -- enough room in handle buffer?
-          if (size - w > count)
-		-- There's enough room in the buffer:
-		-- just copy the data in and update bufWPtr.
-	    then do memcpy_baoff_ba old_raw (fromIntegral w) raw (fromIntegral count)
-		    writeIORef ref old_buf{ bufWPtr = w + count }
-		    return ()
-
-		-- else, we have to flush
-	    else do flushed_buf <- flushWriteBuffer fd stream old_buf
-		    writeIORef ref flushed_buf
-		    let this_buf = 
-			    Buffer{ bufBuf=raw, bufState=WriteBuffer, 
-				    bufRPtr=0, bufWPtr=count, bufSize=count }
-		    flushWriteBuffer fd stream this_buf
-		    return ()
+foreign import ccall unsafe "memcpy"
+   memcpy_ptr_ba :: Ptr a -> MutableByteArray# RealWorld -> CSize -> IO (Ptr ())
 
 -- ---------------------------------------------------------------------------
 -- Internal Utils
 
-foreign import ccall unsafe "__hscore_memcpy_dst_off"
-   memcpy_baoff_ba :: RawBuffer -> CInt -> RawBuffer -> CSize -> IO (Ptr ())
-foreign import ccall unsafe "__hscore_memcpy_src_off"
-   memcpy_ba_baoff :: RawBuffer -> RawBuffer -> CInt -> CSize -> IO (Ptr ())
-
 illegalBufferSize :: Handle -> String -> Int -> IO a
 illegalBufferSize handle fn sz = 
-	ioException (IOError (Just handle)
-			    InvalidArgument  fn
-			    ("illegal buffer size " ++ showsPrec 9 (sz::Int) [])
-			    Nothing)
+	ioException (ioeSetErrorString
+		     (mkIOError InvalidArgument fn (Just handle) Nothing)
+		     ("illegal buffer size " ++ showsPrec 9 (sz::Int) []))
 
 #else /* !__GLASGOW_HASKELL__ */
 hGetArray :: Handle -> IOUArray Int Word8 -> Int -> IO Int

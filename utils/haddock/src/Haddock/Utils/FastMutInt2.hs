@@ -22,7 +22,6 @@ import GlaExts
 import PrelIOBase
 #else
 import GHC.Base
-import GHC.IOBase
 #endif
 
 #if __GLASGOW_HASKELL__ < 411
@@ -36,7 +35,7 @@ newFastMutInt :: IO FastMutInt
 newFastMutInt = IO $ \s0 ->
   case newByteArray# size s0 of { (# s, arr #) ->
   (# s, FastMutInt arr #) }
-  where I# size = SIZEOF_HSINT
+  where !(I# size) = SIZEOF_HSINT
 
 readFastMutInt :: FastMutInt -> IO Int
 readFastMutInt (FastMutInt arr) = IO $ \s0 ->

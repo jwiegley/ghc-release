@@ -10,8 +10,11 @@
 #ifndef SCHEDULE_H
 #define SCHEDULE_H
 
-#include "OSThreads.h"
+#include "rts/OSThreads.h"
 #include "Capability.h"
+#include "Trace.h"
+
+BEGIN_RTS_PRIVATE
 
 /* initScheduler(), exitScheduler()
  * Called from STG :  no
@@ -29,34 +32,13 @@ void scheduleThread (Capability *cap, StgTSO *tso);
 // the desired Capability).
 void scheduleThreadOn(Capability *cap, StgWord cpu, StgTSO *tso);
 
-/* awakenBlockedQueue()
- *
- * Takes a pointer to the beginning of a blocked TSO queue, and
- * wakes up the entire queue.
- * Called from STG :  yes
- * Locks assumed   :  none
- */
-#if defined(GRAN)
-void awakenBlockedQueue(StgBlockingQueueElement *q, StgClosure *node);
-#elif defined(PAR)
-void awakenBlockedQueue(StgBlockingQueueElement *q, StgClosure *node);
-#else
-void awakenBlockedQueue (Capability *cap, StgTSO *tso);
-#endif
-
 /* wakeUpRts()
  * 
  * Causes an OS thread to wake up and run the scheduler, if necessary.
  */
+#if defined(THREADED_RTS)
 void wakeUpRts(void);
-
-/* unblockOne()
- *
- * Put the specified thread on the run queue of the given Capability.
- * Called from STG :  yes
- * Locks assumed   :  we own the Capability.
- */
-StgTSO * unblockOne (Capability *cap, StgTSO *tso);
+#endif
 
 /* raiseExceptionHelper */
 StgWord raiseExceptionHelper (StgRegTable *reg, StgTSO *tso, StgClosure *exception);
@@ -74,21 +56,6 @@ StgWord findRetryFrameHelper (StgTSO *tso);
 void OSThreadProcAttr workerStart(Task *task);
 #endif
 
-#if defined(GRAN)
-void    awaken_blocked_queue(StgBlockingQueueElement *q, StgClosure *node);
-void    unlink_from_bq(StgTSO* tso, StgClosure* node);
-void    initThread(StgTSO *tso, nat stack_size, StgInt pri);
-#elif defined(PAR)
-nat     run_queue_len(void);
-void    awaken_blocked_queue(StgBlockingQueueElement *q, StgClosure *node);
-void    initThread(StgTSO *tso, nat stack_size);
-#else
-char   *info_type(StgClosure *closure);    // dummy
-char   *info_type_by_ip(StgInfoTable *ip); // dummy
-void    awaken_blocked_queue(StgTSO *q);
-void    initThread(StgTSO *tso, nat stack_size);
-#endif
-
 /* The state of the scheduler.  This is used to control the sequence
  * of events during shutdown, and when the runtime is interrupted
  * using ^C.
@@ -97,7 +64,7 @@ void    initThread(StgTSO *tso, nat stack_size);
 #define SCHED_INTERRUPTING  1  /* ^C detected, before threads are deleted */
 #define SCHED_SHUTTING_DOWN 2  /* final shutdown */
 
-extern volatile StgWord RTS_VAR(sched_state);
+extern volatile StgWord sched_state;
 
 /* 
  * flag that tracks whether we have done any execution in this time slice.
@@ -120,14 +87,10 @@ extern volatile StgWord recent_activity;
  *
  * In GranSim we have one run/blocked_queue per PE.
  */
-#if defined(GRAN)
-// run_queue_hds defined in GranSim.h
-#else
-extern  StgTSO *RTS_VAR(blackhole_queue);
+extern  StgTSO *blackhole_queue;
 #if !defined(THREADED_RTS)
-extern  StgTSO *RTS_VAR(blocked_queue_hd), *RTS_VAR(blocked_queue_tl);
-extern  StgTSO *RTS_VAR(sleeping_queue);
-#endif
+extern  StgTSO *blocked_queue_hd, *blocked_queue_tl;
+extern  StgTSO *sleeping_queue;
 #endif
 
 /* Set to rtsTrue if there are threads on the blackhole_queue, and
@@ -142,29 +105,14 @@ extern rtsBool blackholes_need_checking;
 extern rtsBool heap_overflow;
 
 #if defined(THREADED_RTS)
-extern Mutex RTS_VAR(sched_mutex);
+extern Mutex sched_mutex;
 #endif
-
-SchedulerStatus rts_mainLazyIO(HaskellObj p, /*out*/HaskellObj *ret);
 
 /* Called by shutdown_handler(). */
 void interruptStgRts (void);
 
-nat  run_queue_len (void);
-
 void resurrectThreads (StgTSO *);
 void performPendingThrowTos (StgTSO *);
-
-void printAllThreads(void);
-
-/* debugging only 
- */
-#ifdef DEBUG
-void print_bq (StgClosure *node);
-#endif
-#if defined(PAR)
-void print_bqe (StgBlockingQueueElement *bqe);
-#endif
 
 /* -----------------------------------------------------------------------------
  * Some convenient macros/inline functions...
@@ -188,10 +136,10 @@ appendToRunQueue (Capability *cap, StgTSO *tso)
 	setTSOLink(cap, cap->run_queue_tl, tso);
     }
     cap->run_queue_tl = tso;
+    traceSchedEvent (cap, EVENT_THREAD_RUNNABLE, tso, 0);
 }
 
-/* Push a thread on the beginning of the run queue.  Used for
- * newly awakened threads, so they get run as soon as possible.
+/* Push a thread on the beginning of the run queue.
  * ASSUMES: cap->running_task is the current task.
  */
 INLINE_HEADER void
@@ -292,6 +240,8 @@ emptyThreadQueues(Capability *cap)
 }
 
 #endif /* !IN_STG_CODE */
+
+END_RTS_PRIVATE
 
 #endif /* SCHEDULE_H */
 

@@ -5,7 +5,11 @@ HAVE_EVAL := NO
 $(eval HAVE_EVAL := YES)
 
 ifeq "$(HAVE_EVAL)" "NO"
-$(error Your make does not support eval. You need GNU make >= 3.80)
+$(error Your make does not support eval. You need GNU make >= 3.81)
+endif
+
+ifeq "$(abspath /)" ""
+$(error Your make does not support abspath. You need GNU make >= 3.81)
 endif
 
 show:
@@ -13,7 +17,7 @@ show:
 
 define canonicalise
 # $1 = path variable
-$1_CYGPATH := $$(shell $(SHELL) -c "cygpath -m $$($1)" 2> /dev/null)
+$1_CYGPATH := $$(shell $(SHELL) -c "cygpath -m '$$($1)'" 2> /dev/null)
 ifneq "$$($1_CYGPATH)" ""
 $1 := $$($1_CYGPATH)
 endif
@@ -21,22 +25,22 @@ endef
 
 define canonicaliseExecutable
 # $1 = program path variable
-ifneq "$$(wildcard $$($1).exe)" ""
+ifneq "$$(shell test -e '$$($1).exe' && echo exists)" ""
 $1 := $$($1).exe
 endif
 $(call canonicalise,$1)
 endef
 
 define get-ghc-rts-field # $1 = rseult variable, $2 = field name
-$1 := $$(shell $$(TEST_HC) +RTS --info | grep '^ .("$2",' | sed -e 's/.*", *"//' -e 's/")$$$$//')
+$1 := $$(shell '$$(TEST_HC)' +RTS --info | grep '^ .("$2",' | tr -d '\r' | sed -e 's/.*", *"//' -e 's/")$$$$//')
 endef
 
 define get-ghc-field # $1 = rseult variable, $2 = field name
-$1 := $$(shell $$(TEST_HC) --info | grep '^ .("$2",' | sed -e 's/.*", *"//' -e 's/")$$$$//')
+$1 := $$(shell '$$(TEST_HC)' --info | grep '^ .("$2",' | tr -d '\r' | sed -e 's/.*", *"//' -e 's/")$$$$//')
 endef
 
 define get-ghc-feature-bool # $1 = rseult variable, $2 = field name
-SHELL_RES := $$(shell $$(TEST_HC) --info | grep '^ .("$2",' | sed -e 's/.*", *"//' -e 's/")$$$$//')
+SHELL_RES := $$(shell '$$(TEST_HC)' --info | grep '^ .("$2",' | tr -d '\r' | sed -e 's/.*", *"//' -e 's/")$$$$//')
 $1 := $$(strip \
 	  $$(if $$(SHELL_RES), \
          $$(if $$(subst YES,,$$(SHELL_RES)), \
@@ -49,49 +53,21 @@ endef
 
 ifeq "$(TEST_HC)" ""
 
-OLD_BUILD_SYSTEM_STAGE1_GHC := $(abspath $(TOP)/../ghc/stage1-inplace/ghc)
-OLD_BUILD_SYSTEM_STAGE2_GHC := $(abspath $(TOP)/../ghc/stage2-inplace/ghc)
-OLD_BUILD_SYSTEM_STAGE3_GHC := $(abspath $(TOP)/../ghc/stage3-inplace/ghc)
-OLD_BUILD_SYSTEM_GHC_PKG    := $(abspath $(TOP)/../utils/ghc-pkg/install-inplace/bin/ghc-pkg)
-OLD_BUILD_SYSTEM_HP2PS      := $(abspath $(TOP)/../utils/hp2ps/hp2ps)
-ifneq "$(wildcard $(OLD_BUILD_SYSTEM_STAGE1_GHC) $(OLD_BUILD_SYSTEM_STAGE1_GHC).exe)" ""
+STAGE1_GHC := $(abspath $(TOP)/../inplace/bin/ghc-stage1)
+STAGE2_GHC := $(abspath $(TOP)/../inplace/bin/ghc-stage2)
+STAGE3_GHC := $(abspath $(TOP)/../inplace/bin/ghc-stage3)
 
-ifeq "$(stage)" "1"
-TEST_HC := $(OLD_BUILD_SYSTEM_STAGE1_GHC)
-else
-ifeq "$(stage)" "3"
-TEST_HC := $(OLD_BUILD_SYSTEM_STAGE3_GHC)
+ifneq "$(wildcard $(STAGE1_GHC) $(STAGE1_GHC).exe)" ""
+
+ifeq "$(BINDIST)" "YES"
+TEST_HC := $(abspath $(TOP)/../)/bindisttest/install dir/bin/ghc
+else ifeq "$(stage)" "1"
+TEST_HC := $(STAGE1_GHC)
+else ifeq "$(stage)" "3"
+TEST_HC := $(STAGE3_GHC)
 else
 # use stage2 by default
-TEST_HC := $(OLD_BUILD_SYSTEM_STAGE2_GHC)
-endif
-endif
-GHC_PKG := $(OLD_BUILD_SYSTEM_GHC_PKG)
-HP2PS_ABS := $(OLD_BUILD_SYSTEM_HP2PS)
-# XXX This GCC definition is a hack. Once the in-tree GHC has a gcc in the
-# right place we won't need to do this, as Cabal will be able to find
-# gcc relative to ghc's location.
-GCC := $(shell cd $(TOP)/.. && $(MAKE) --no-print-directory show VALUE=WhatGccIsCalled | sed 's/.*"\(.*\)"/\1/')
-
-else
-NEW_BUILD_SYSTEM_STAGE1_GHC := $(abspath $(TOP)/../inplace/bin/ghc-stage1)
-NEW_BUILD_SYSTEM_STAGE2_GHC := $(abspath $(TOP)/../inplace/bin/ghc-stage2)
-NEW_BUILD_SYSTEM_STAGE3_GHC := $(abspath $(TOP)/../inplace/bin/ghc-stage3)
-ifneq "$(wildcard $(NEW_BUILD_SYSTEM_STAGE1_GHC) $(NEW_BUILD_SYSTEM_STAGE1_GHC).exe)" ""
-
-ifeq "$(stage)" "1"
-TEST_HC := $(NEW_BUILD_SYSTEM_STAGE1_GHC)
-else
-ifeq "$(stage)" "3"
-TEST_HC := $(NEW_BUILD_SYSTEM_STAGE3_GHC)
-else
-# use stage2 by default
-TEST_HC := $(NEW_BUILD_SYSTEM_STAGE2_GHC)
-endif
-# XXX This GCC definition is a hack. Once the in-tree GHC has a gcc in the
-# right place we won't need to do this, as Cabal will be able to find
-# gcc relative to ghc's location.
-GCC := $(shell cd $(TOP)/.. && $(MAKE) --no-print-directory -s show VALUE=WhatGccIsCalled 2> /dev/null | sed 's/.*"\(.*\)"/\1/')
+TEST_HC := $(STAGE2_GHC)
 endif
 
 else
@@ -99,29 +75,50 @@ TEST_HC := $(shell which ghc)
 endif
 
 endif
-endif
+
+# We can't use $(dir ...) here as TEST_HC might be in a path
+# containing spaces
+BIN_ROOT = $(shell dirname '$(TEST_HC)')
 
 ifeq "$(GHC_PKG)" ""
-GHC_PKG := $(dir $(TEST_HC))/ghc-pkg
+GHC_PKG := $(BIN_ROOT)/ghc-pkg
+endif
+
+ifeq "$(HSC2HS)" ""
+HSC2HS := $(BIN_ROOT)/hsc2hs
 endif
 
 ifeq "$(HP2PS_ABS)" ""
-HP2PS_ABS := $(dir $(TEST_HC))/hp2ps
+HP2PS_ABS := $(BIN_ROOT)/hp2ps
+endif
+
+ifeq "$(HPC)" ""
+HPC := $(BIN_ROOT)/hpc
 endif
 
 $(eval $(call canonicaliseExecutable,TEST_HC))
-ifeq "$(wildcard $(TEST_HC))" ""
+ifeq "$(shell test -e '$(TEST_HC)' && echo exists)" ""
 $(error Cannot find ghc: $(TEST_HC))
 endif
 
 $(eval $(call canonicaliseExecutable,GHC_PKG))
-ifeq "$(wildcard $(GHC_PKG))" ""
+ifeq "$(shell test -e '$(GHC_PKG)' && echo exists)" ""
 $(error Cannot find ghc-pkg: $(GHC_PKG))
 endif
 
+$(eval $(call canonicaliseExecutable,HSC2HS))
+ifeq "$(shell test -e '$(HSC2HS)' && echo exists)" ""
+$(error Cannot find hsc2hs: $(HSC2HS))
+endif
+
 $(eval $(call canonicaliseExecutable,HP2PS_ABS))
-ifeq "$(wildcard $(HP2PS_ABS))" ""
+ifeq "$(shell test -e '$(HP2PS_ABS)' && echo exists)" ""
 $(error Cannot find hp2ps: $(HP2PS_ABS))
+endif
+
+$(eval $(call canonicaliseExecutable,HPC))
+ifeq "$(shell test -e '$(HPC)' && echo exists)" ""
+$(error Cannot find hpc: $(HPC))
 endif
 
 $(eval $(call get-ghc-field,GhcRTSWays,RTS ways))
@@ -133,4 +130,11 @@ GS = gs
 CP = cp
 RM = rm -f
 PYTHON = python
+
+$(eval $(call get-ghc-rts-field,HostOS,Host OS))
+ifeq "$(HostOS)" "mingw32"
+WINDOWS = YES
+else
+WINDOWS = NO
+endif
 

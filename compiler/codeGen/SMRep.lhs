@@ -9,13 +9,6 @@ This is here, rather than in ClosureInfo, just to keep nhc happy.
 Other modules should access this info through ClosureInfo.
 
 \begin{code}
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module SMRep (
 	-- Words and bytes
 	StgWord, StgHalfWord, 
@@ -24,14 +17,15 @@ module SMRep (
 
 	-- Argument/return representations
 	CgRep(..), nonVoidArg,
-	argMachRep, primRepToCgRep, primRepHint,
+	argMachRep, primRepToCgRep, 
+-- Temp primRepHint, typeHint,
 	isFollowableArg, isVoidArg, 
 	isFloatingArg, is64BitArg,
 	separateByPtrFollowness,
 	cgRepSizeW, cgRepSizeB,
 	retAddrSizeW,
 
-	typeCgRep, idCgRep, tyConCgRep, typeHint,
+	typeCgRep, idCgRep, tyConCgRep, 
 
 	-- Closure repesentation
 	SMRep(..), ClosureType(..),
@@ -45,10 +39,10 @@ module SMRep (
 
 #include "../includes/MachDeps.h"
 
+import CmmExpr	-- CmmType and friends
 import Id
 import Type
 import TyCon
-import MachOp
 import StaticFlags
 import Constants
 import Outputable
@@ -75,13 +69,17 @@ StgWord is a type representing an StgWord on the target platform.
 #if SIZEOF_HSWORD == 4
 type StgWord     = Word32
 type StgHalfWord = Word16
-hALF_WORD_SIZE = 2 :: ByteOff
-hALF_WORD_SIZE_IN_BITS = 16 :: Int
+hALF_WORD_SIZE :: ByteOff
+hALF_WORD_SIZE = 2
+hALF_WORD_SIZE_IN_BITS :: Int
+hALF_WORD_SIZE_IN_BITS = 16
 #elif SIZEOF_HSWORD == 8
 type StgWord     = Word64
 type StgHalfWord = Word32
-hALF_WORD_SIZE = 4 :: ByteOff
-hALF_WORD_SIZE_IN_BITS = 32 :: Int
+hALF_WORD_SIZE :: ByteOff
+hALF_WORD_SIZE = 4
+hALF_WORD_SIZE_IN_BITS :: Int
+hALF_WORD_SIZE_IN_BITS = 32
 #else
 #error unknown SIZEOF_HSWORD
 #endif
@@ -136,12 +134,12 @@ instance Outputable CgRep where
     ppr FloatArg  = ptext (sLit "F_")
     ppr DoubleArg = ptext (sLit "D_")
 
-argMachRep :: CgRep -> MachRep
-argMachRep PtrArg    = wordRep
-argMachRep NonPtrArg = wordRep
-argMachRep LongArg   = I64
-argMachRep FloatArg  = F32
-argMachRep DoubleArg = F64
+argMachRep :: CgRep -> CmmType
+argMachRep PtrArg    = gcWord
+argMachRep NonPtrArg = bWord
+argMachRep LongArg   = b64
+argMachRep FloatArg  = f32
+argMachRep DoubleArg = f64
 argMachRep VoidArg   = panic "argMachRep:VoidRep"
 
 primRepToCgRep :: PrimRep -> CgRep
@@ -155,17 +153,6 @@ primRepToCgRep AddrRep    = NonPtrArg
 primRepToCgRep FloatRep   = FloatArg
 primRepToCgRep DoubleRep  = DoubleArg
 
-primRepHint :: PrimRep -> MachHint
-primRepHint VoidRep	= panic "primRepHint:VoidRep"
-primRepHint PtrRep	= PtrHint
-primRepHint IntRep	= SignedHint
-primRepHint WordRep	= NoHint
-primRepHint Int64Rep	= SignedHint
-primRepHint Word64Rep	= NoHint
-primRepHint AddrRep     = PtrHint -- NB! PtrHint, but NonPtrArg
-primRepHint FloatRep	= FloatHint
-primRepHint DoubleRep	= FloatHint
-
 idCgRep :: Id -> CgRep
 idCgRep x = typeCgRep . idType $ x
 
@@ -174,9 +161,6 @@ tyConCgRep = primRepToCgRep . tyConPrimRep
 
 typeCgRep :: Type -> CgRep
 typeCgRep = primRepToCgRep . typePrimRep 
-
-typeHint :: Type -> MachHint
-typeHint = primRepHint . typePrimRep
 \end{code}
 
 Whether or not the thing is a pointer that the garbage-collector
@@ -190,15 +174,15 @@ computation of GC liveness info.
 \begin{code}
 isFollowableArg :: CgRep -> Bool  -- True <=> points to a heap object
 isFollowableArg PtrArg  = True
-isFollowableArg other = False
+isFollowableArg _       = False
 
 isVoidArg :: CgRep -> Bool
 isVoidArg VoidArg = True
-isVoidArg other   = False
+isVoidArg _       = False
 
 nonVoidArg :: CgRep -> Bool
 nonVoidArg VoidArg = False
-nonVoidArg other   = True
+nonVoidArg _       = True
 
 -- isFloatingArg is used to distinguish @Double@ and @Float@ which
 -- cause inadvertent numeric conversions if you aren't jolly careful.
@@ -262,7 +246,7 @@ data SMRep
   | BlackHoleRep
 
 data ClosureType	-- Corresponds 1-1 with the varieties of closures
-			-- implemented by the RTS.  Compare with ghc/includes/ClosureTypes.h
+			-- implemented by the RTS.  Compare with includes/rts/storage/ClosureTypes.h
     = Constr
     | ConstrNoCaf
     | Fun
@@ -274,14 +258,10 @@ Size of a closure header.
 
 \begin{code}
 fixedHdrSize :: WordOff
-fixedHdrSize = sTD_HDR_SIZE + profHdrSize + granHdrSize
+fixedHdrSize = sTD_HDR_SIZE + profHdrSize
 
 profHdrSize  :: WordOff
 profHdrSize  | opt_SccProfilingOn   = pROF_HDR_SIZE
-	     | otherwise	    = 0
-
-granHdrSize  :: WordOff
-granHdrSize  | opt_GranMacros	    = gRAN_HDR_SIZE
 	     | otherwise	    = 0
 
 arrWordsHdrSize   :: ByteOff
@@ -304,7 +284,7 @@ isStaticRep BlackHoleRep	         = False
 \end{code}
 
 \begin{code}
-#include "../includes/ClosureTypes.h"
+#include "../includes/rts/storage/ClosureTypes.h"
 -- Defines CONSTR, CONSTR_1_0 etc
 
 -- krc: only called by tickyDynAlloc in CgTicky; return
@@ -344,11 +324,12 @@ smRepClosureTypeInt (GenericRep True _ _ Thunk)       = THUNK_STATIC
 
 smRepClosureTypeInt BlackHoleRep = BLACKHOLE
 
-smRepClosureTypeInt rep = panic "smRepClosuretypeint"
+smRepClosureTypeInt _ = panic "smRepClosuretypeint"
 
 
 -- We export these ones
-rET_SMALL     = (RET_SMALL     :: StgHalfWord)
-rET_BIG       = (RET_BIG       :: StgHalfWord)
+rET_SMALL, rET_BIG :: StgHalfWord
+rET_SMALL     = RET_SMALL
+rET_BIG       = RET_BIG
 \end{code}
 

@@ -15,9 +15,11 @@ module DataCon (
 	
 	-- ** Type deconstruction
 	dataConRepType, dataConSig, dataConFullSig,
-	dataConName, dataConIdentity, dataConTag, dataConTyCon, dataConUserType,
+	dataConName, dataConIdentity, dataConTag, dataConTyCon, 
+        dataConOrigTyCon, dataConUserType,
 	dataConUnivTyVars, dataConExTyVars, dataConAllTyVars, 
-	dataConEqSpec, eqSpecPreds, dataConEqTheta, dataConDictTheta, dataConStupidTheta, 
+	dataConEqSpec, eqSpecPreds, dataConEqTheta, dataConDictTheta,
+	dataConStupidTheta,  
 	dataConInstArgTys, dataConOrigArgTys, dataConOrigResTy,
 	dataConInstOrigArgTys, dataConRepArgTys, 
 	dataConFieldLabels, dataConFieldType,
@@ -49,7 +51,6 @@ import Outputable
 import Unique
 import ListSetOps
 import Util
-import Maybes
 import FastString
 import Module
 
@@ -96,12 +97,12 @@ Note [Data Constructor Naming]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Each data constructor C has two, and possibly up to four, Names associated with it:
 
-			     OccName	Name space	Name of
-  ---------------------------------------------------------------------------
-  * The "data con itself" 	C	DataName	DataCon
-  * The "worker data con"	C	VarName		Id (the worker)
-  * The "wrapper data con"	\$WC	VarName		Id (the wrapper)
-  * The "newtype coercion"      :CoT    TcClsName	TyCon
+		   OccName   Name space	  Name of   Notes
+ ---------------------------------------------------------------------------
+ The "data con itself" 	 C     DataName	  DataCon   In dom( GlobalRdrEnv )
+ The "worker data con"	 C     VarName	  Id        The worker
+ The "wrapper data con"	 $WC   VarName	  Id        The wrapper
+ The "newtype coercion"  :CoT  TcClsName  TyCon
  
 EVERY data constructor (incl for newtypes) has the former two (the
 data con itself, and its worker.  But only some data constructors have a
@@ -269,8 +270,9 @@ data DataCon
 		--	 syntax, provided its type looks like the above.
 		--       The declaration format is held in the TyCon (algTcGadtSyntax)
 
-	dcUnivTyVars :: [TyVar],	-- Universally-quantified type vars 
+	dcUnivTyVars :: [TyVar],	-- Universally-quantified type vars [a,b,c]
 					-- INVARIANT: length matches arity of the dcRepTyCon
+					---           result type of (rep) data con is exactly (T a b c)
 
 	dcExTyVars   :: [TyVar],	-- Existentially-quantified type vars 
 		-- In general, the dcUnivTyVars are NOT NECESSARILY THE SAME AS THE TYVARS
@@ -317,7 +319,7 @@ data DataCon
 
 	dcOrigArgTys :: [Type],		-- Original argument types
 					-- (before unboxing and flattening of strict fields)
-	dcOrigResTy :: Type,		-- Original result type
+	dcOrigResTy :: Type,		-- Original result type, as seen by the user
 		-- NB: for a data instance, the original user result type may 
 		-- differ from the DataCon's representation TyCon.  Example
 		--	data instance T [a] where MkT :: a -> T [a]
@@ -466,14 +468,17 @@ instance Show DataCon where
 mkDataCon :: Name 
 	  -> Bool	        -- ^ Is the constructor declared infix?
 	  -> [StrictnessMark]   -- ^ Strictness annotations written in the source file
-	  -> [FieldLabel]       -- ^ Field labels for the constructor, if it is a record, otherwise empty
+	  -> [FieldLabel]       -- ^ Field labels for the constructor, if it is a record, 
+				--   otherwise empty
 	  -> [TyVar]            -- ^ Universally quantified type variables
 	  -> [TyVar]            -- ^ Existentially quantified type variables
 	  -> [(TyVar,Type)]     -- ^ GADT equalities
 	  -> ThetaType          -- ^ Theta-type occuring before the arguments proper
-	  -> [Type]             -- ^ Argument types
-	  -> TyCon              -- ^ Type constructor we are for
-	  -> ThetaType          -- ^ The "stupid theta", context of the data declaration e.g. @data Eq a => T a ...@
+	  -> [Type]             -- ^ Original argument types
+	  -> Type		-- ^ Original result type
+	  -> TyCon              -- ^ Representation type constructor
+	  -> ThetaType          -- ^ The "stupid theta", context of the data declaration 
+				--   e.g. @data Eq a => T a ...@
 	  -> DataConIds         -- ^ The Ids of the actual builder functions
 	  -> DataCon
   -- Can get the tag from the TyCon
@@ -483,7 +488,7 @@ mkDataCon name declared_infix
 	  fields
 	  univ_tvs ex_tvs 
 	  eq_spec theta
-	  orig_arg_tys tycon
+	  orig_arg_tys orig_res_ty rep_tycon
 	  stupid_theta ids
 -- Warning: mkDataCon is not a good place to check invariants. 
 -- If the programmer writes the wrong result type in the decl, thus:
@@ -506,7 +511,7 @@ mkDataCon name declared_infix
 		  dcStupidTheta = stupid_theta, 
 		  dcEqTheta = eq_theta, dcDictTheta = dict_theta,
 		  dcOrigArgTys = orig_arg_tys, dcOrigResTy = orig_res_ty,
-		  dcRepTyCon = tycon, 
+		  dcRepTyCon = rep_tycon, 
 		  dcRepArgTys = rep_arg_tys,
 		  dcStrictMarks = arg_stricts, 
 		  dcRepStrictness = rep_arg_stricts,
@@ -525,21 +530,11 @@ mkDataCon name declared_infix
     real_arg_tys 	   = dict_tys ++ orig_arg_tys
     real_stricts 	   = map mk_dict_strict_mark dict_theta ++ arg_stricts
 
-	-- Example
-	--   data instance T (b,c) where 
-	--	TI :: forall e. e -> T (e,e)
-	--
-	-- The representation tycon looks like this:
-	--   data :R7T b c where 
-	--	TI :: forall b1 c1. (b1 ~ c1) => b1 -> :R7T b1 c1
-	-- In this case orig_res_ty = T (e,e)
-    orig_res_ty = mkFamilyTyConApp tycon (substTyVars (mkTopTvSubst eq_spec) univ_tvs)
-
 	-- Representation arguments and demands
 	-- To do: eliminate duplication with MkId
     (rep_arg_stricts, rep_arg_tys) = computeRep real_stricts real_arg_tys
 
-    tag = assoc "mkDataCon" (tyConDataCons tycon `zip` [fIRST_TAG..]) con
+    tag = assoc "mkDataCon" (tyConDataCons rep_tycon `zip` [fIRST_TAG..]) con
     ty  = mkForAllTys univ_tvs $ mkForAllTys ex_tvs $ 
 	  mkFunTys (mkPredTys (eqSpecPreds eq_spec)) $
 	  mkFunTys (mkPredTys eq_theta) $
@@ -547,7 +542,7 @@ mkDataCon name declared_infix
 		--	because they might be flattened..
 		--	but the equality predicates are not
 	  mkFunTys rep_arg_tys $
-	  mkTyConApp tycon (mkTyVarTys univ_tvs)
+	  mkTyConApp rep_tycon (mkTyVarTys univ_tvs)
 
 eqSpecPreds :: [(TyVar,Type)] -> ThetaType
 eqSpecPreds spec = [ mkEqPred (mkTyVarTy tv, ty) | (tv,ty) <- spec ]
@@ -569,6 +564,14 @@ dataConTag  = dcTag
 -- | The type constructor that we are building via this data constructor
 dataConTyCon :: DataCon -> TyCon
 dataConTyCon = dcRepTyCon
+
+-- | The original type constructor used in the definition of this data
+-- constructor.  In case of a data family instance, that will be the family
+-- type constructor.
+dataConOrigTyCon :: DataCon -> TyCon
+dataConOrigTyCon dc 
+  | Just (tc, _) <- tyConFamInst_maybe (dcRepTyCon dc) = tc
+  | otherwise                                          = dcRepTyCon dc
 
 -- | The representation type of the data constructor, i.e. the sort
 -- type that will represent values of this type at runtime
@@ -642,8 +645,10 @@ dataConFieldLabels = dcFields
 
 -- | Extract the type for any given labelled field of the 'DataCon'
 dataConFieldType :: DataCon -> FieldLabel -> Type
-dataConFieldType con label = expectJust "unexpected label" $
-    lookup label (dcFields con `zip` dcOrigArgTys con)
+dataConFieldType con label
+  = case lookup label (dcFields con `zip` dcOrigArgTys con) of
+      Just ty -> ty
+      Nothing -> pprPanic "dataConFieldType" (ppr con <+> ppr label)
 
 -- | The strictness markings decided on by the compiler.  Does not include those for
 -- existential dictionaries.  The list is in one-to-one correspondence with the arity of the 'DataCon'
@@ -690,7 +695,8 @@ dataConRepStrictness dc = dcRepStrictness dc
 -- 4) The /original/ result type of the 'DataCon'
 dataConSig :: DataCon -> ([TyVar], ThetaType, [Type], Type)
 dataConSig (MkData {dcUnivTyVars = univ_tvs, dcExTyVars = ex_tvs, dcEqSpec = eq_spec,
-		    dcEqTheta  = eq_theta, dcDictTheta = dict_theta, dcOrigArgTys = arg_tys, dcOrigResTy = res_ty})
+		    dcEqTheta  = eq_theta, dcDictTheta = dict_theta, 
+		    dcOrigArgTys = arg_tys, dcOrigResTy = res_ty})
   = (univ_tvs ++ ex_tvs, eqSpecPreds eq_spec ++ eq_theta ++ dict_theta, arg_tys, res_ty)
 
 -- | The \"full signature\" of the 'DataCon' returns, in order:
@@ -703,13 +709,15 @@ dataConSig (MkData {dcUnivTyVars = univ_tvs, dcExTyVars = ex_tvs, dcEqSpec = eq_
 --
 -- 4) The result of 'dataConDictTheta'
 --
--- 5) The original argument types to the 'DataCon' (i.e. before any change of the representation of the type)
+-- 5) The original argument types to the 'DataCon' (i.e. before 
+--    any change of the representation of the type)
 --
 -- 6) The original result type of the 'DataCon'
 dataConFullSig :: DataCon 
 	       -> ([TyVar], [TyVar], [(TyVar,Type)], ThetaType, ThetaType, [Type], Type)
 dataConFullSig (MkData {dcUnivTyVars = univ_tvs, dcExTyVars = ex_tvs, dcEqSpec = eq_spec,
-			dcEqTheta = eq_theta, dcDictTheta = dict_theta, dcOrigArgTys = arg_tys, dcOrigResTy = res_ty})
+			dcEqTheta = eq_theta, dcDictTheta = dict_theta, 
+			dcOrigArgTys = arg_tys, dcOrigResTy = res_ty})
   = (univ_tvs, ex_tvs, eq_spec, eq_theta, dict_theta, arg_tys, res_ty)
 
 dataConOrigResTy :: DataCon -> Type
@@ -729,7 +737,7 @@ dataConUserType :: DataCon -> Type
 --
 -- rather than:
 --
--- > T :: forall a c. forall b. (c=[a]) => a -> b -> T c
+-- > T :: forall a c. forall b. (c~[a]) => a -> b -> T c
 --
 -- NB: If the constructor is part of a data instance, the result type
 -- mentions the family tycon, not the internal one.
@@ -800,7 +808,7 @@ dataConIdentity dc = bytesFS (packageIdFS (modulePackageId mod)) ++
                   fromIntegral (ord ':') : bytesFS (moduleNameFS (moduleName mod)) ++
                   fromIntegral (ord '.') : bytesFS (occNameFS (nameOccName name))
   where name = dataConName dc
-        mod  = nameModule name
+        mod  = ASSERT( isExternalName name ) nameModule name
 \end{code}
 
 \begin{code}

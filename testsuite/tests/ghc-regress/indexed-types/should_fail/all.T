@@ -28,7 +28,7 @@ test('TyFamArity2', normal, compile_fail, [''])
 test('TyFamUndec', normal, compile_fail, [''])
 
 test('NotRelaxedExamples', normal, compile_fail, [''])
-test('NonLinearSigErr', normal, compile_fail, [''])
+test('NonLinearSigErr', normal, compile, [''])
 
 test('GADTwrong1', normal, compile_fail, [''])
 
@@ -47,5 +47,7 @@ test('T2157', normal, compile_fail, [''])
 test('T2203a', normal, compile_fail, [''])
 test('T2627b', normal, compile_fail, [''])
 test('T2693', normal, compile_fail, [''])
-test('T2888', normal, compile_fail, [''])
+test('T2888', normal, compile, [''])
 test('T3092', normal, compile_fail, [''])
+test('NoMatchErr', normal, compile_fail, [''])
+test('T2677', normal, compile_fail, [''])

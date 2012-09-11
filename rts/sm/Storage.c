@@ -13,18 +13,15 @@
 
 #include "PosixSource.h"
 #include "Rts.h"
+
+#include "Storage.h"
 #include "RtsUtils.h"
-#include "RtsFlags.h"
 #include "Stats.h"
-#include "Hooks.h"
 #include "BlockAlloc.h"
-#include "MBlock.h"
 #include "Weak.h"
 #include "Sanity.h"
 #include "Arena.h"
-#include "OSThreads.h"
 #include "Capability.h"
-#include "Storage.h"
 #include "Schedule.h"
 #include "RetainerProfile.h"	// for counting memory blocks (memInventory)
 #include "OSMem.h"
@@ -32,7 +29,6 @@
 #include "GC.h"
 #include "Evac.h"
 
-#include <stdlib.h>
 #include <string.h>
 
 #include "ffi.h"
@@ -69,19 +65,9 @@ step *nurseries         = NULL; /* array of nurseries, >1 only if THREADED_RTS *
  * simultaneous access by two STG threads.
  */
 Mutex sm_mutex;
-/*
- * This mutex is used by atomicModifyMutVar# only
- */
-Mutex atomic_modify_mutvar_mutex;
 #endif
 
-
-/*
- * Forward references
- */
-static void *stgAllocForGMP   (size_t size_in_bytes);
-static void *stgReallocForGMP (void *ptr, size_t old_size, size_t new_size);
-static void  stgDeallocForGMP (void *ptr, size_t size);
+static void allocNurseries ( void );
 
 static void
 initStep (step *stp, int g, int s)
@@ -104,7 +90,6 @@ initStep (step *stp, int g, int s)
     stp->compact = 0;
     stp->bitmap = NULL;
 #ifdef THREADED_RTS
-    initSpinLock(&stp->sync_todo);
     initSpinLock(&stp->sync_large_objects);
 #endif
     stp->threads = END_TSO_QUEUE;
@@ -149,7 +134,6 @@ initStorage( void )
   
 #if defined(THREADED_RTS)
   initMutex(&sm_mutex);
-  initMutex(&atomic_modify_mutvar_mutex);
 #endif
 
   ACQUIRE_SM_LOCK;
@@ -267,14 +251,14 @@ initStorage( void )
 
   exec_block = NULL;
 
-  /* Tell GNU multi-precision pkg about our custom alloc functions */
-  mp_set_memory_functions(stgAllocForGMP, stgReallocForGMP, stgDeallocForGMP);
-
 #ifdef THREADED_RTS
   initSpinLock(&gc_alloc_block_sync);
-  initSpinLock(&recordMutableGen_sync);
   whitehole_spin = 0;
 #endif
+
+  N = 0;
+
+  initGcThreads();
 
   IF_DEBUG(gc, statDescribeGens());
 
@@ -295,9 +279,9 @@ freeStorage (void)
     freeAllMBlocks();
 #if defined(THREADED_RTS)
     closeMutex(&sm_mutex);
-    closeMutex(&atomic_modify_mutvar_mutex);
 #endif
     stgFree(nurseries);
+    freeGcThreads();
 }
 
 /* -----------------------------------------------------------------------------
@@ -346,6 +330,7 @@ newCAF(StgClosure* caf)
 {
   ACQUIRE_SM_LOCK;
 
+#ifdef DYNAMIC
   if(keepCAFs)
   {
     // HACK:
@@ -363,6 +348,7 @@ newCAF(StgClosure* caf)
     caf_list = caf;
   }
   else
+#endif
   {
     /* Put this CAF on the mutable list for the old generation.
     * This is a HACK - the IND_STATIC closure doesn't really have
@@ -372,7 +358,7 @@ newCAF(StgClosure* caf)
     * any more and can use it as a STATIC_LINK.
     */
     ((StgIndStatic *)caf)->saved_info = NULL;
-    recordMutableGen(caf, oldest_gen);
+    recordMutableGen(caf, oldest_gen->no);
   }
   
   RELEASE_SM_LOCK;
@@ -453,7 +439,7 @@ assignNurseriesToCapabilities (void)
 #endif
 }
 
-void
+static void
 allocNurseries( void )
 { 
     nat i;
@@ -619,7 +605,7 @@ allocateInGen (generation *g, lnat n)
             // Allocating the memory would be bad, because the user
             // has requested that we not exceed maxHeapSize, so we
             // just exit.
-           stg_exit(EXIT_HEAPOVERFLOW);
+	    stg_exit(EXIT_HEAPOVERFLOW);
         }
 
 	bd = allocGroup(req_blocks);
@@ -805,7 +791,7 @@ allocatePinned( lnat n )
     // If the request is for a large object, then allocate()
     // will give us a pinned object anyway.
     if (n >= LARGE_OBJECT_THRESHOLD/sizeof(W_)) {
-        p = allocate(n);
+	p = allocate(n);
         Bdescr(p)->flags |= BF_PINNED;
         return p;
     }
@@ -866,7 +852,7 @@ void
 setTSOLink (Capability *cap, StgTSO *tso, StgTSO *target)
 {
     bdescr *bd;
-    if ((tso->flags & (TSO_DIRTY|TSO_LINK_DIRTY)) == 0) {
+    if (tso->dirty == 0 && (tso->flags & TSO_LINK_DIRTY) == 0) {
         tso->flags |= TSO_LINK_DIRTY;
 	bd = Bdescr((StgPtr)tso);
 	if (bd->gen_no > 0) recordMutableCap((StgClosure*)tso,cap,bd->gen_no);
@@ -878,11 +864,11 @@ void
 dirty_TSO (Capability *cap, StgTSO *tso)
 {
     bdescr *bd;
-    if ((tso->flags & (TSO_DIRTY|TSO_LINK_DIRTY)) == 0) {
+    if (tso->dirty == 0 && (tso->flags & TSO_LINK_DIRTY) == 0) {
 	bd = Bdescr((StgPtr)tso);
 	if (bd->gen_no > 0) recordMutableCap((StgClosure*)tso,cap,bd->gen_no);
     }
-    tso->flags |= TSO_DIRTY;
+    tso->dirty = 1;
 }
 
 /*
@@ -900,63 +886,6 @@ dirty_MVAR(StgRegTable *reg, StgClosure *p)
     bdescr *bd;
     bd = Bdescr((StgPtr)p);
     if (bd->gen_no > 0) recordMutableCap(p,cap,bd->gen_no);
-}
-
-/* -----------------------------------------------------------------------------
-   Allocation functions for GMP.
-
-   These all use the allocate() interface - we can't have any garbage
-   collection going on during a gmp operation, so we use allocate()
-   which always succeeds.  The gmp operations which might need to
-   allocate will ask the storage manager (via doYouWantToGC()) whether
-   a garbage collection is required, in case we get into a loop doing
-   only allocate() style allocation.
-   -------------------------------------------------------------------------- */
-
-static void *
-stgAllocForGMP (size_t size_in_bytes)
-{
-  StgArrWords* arr;
-  nat data_size_in_words, total_size_in_words;
-  
-  /* round up to a whole number of words */
-  data_size_in_words  = (size_in_bytes + sizeof(W_) + 1) / sizeof(W_);
-  total_size_in_words = sizeofW(StgArrWords) + data_size_in_words;
-  
-  /* allocate and fill it in. */
-#if defined(THREADED_RTS)
-  arr = (StgArrWords *)allocateLocal(myTask()->cap, total_size_in_words);
-#else
-  arr = (StgArrWords *)allocateLocal(&MainCapability, total_size_in_words);
-#endif
-  SET_ARR_HDR(arr, &stg_ARR_WORDS_info, CCCS, data_size_in_words);
-  
-  /* and return a ptr to the goods inside the array */
-  return arr->payload;
-}
-
-static void *
-stgReallocForGMP (void *ptr, size_t old_size, size_t new_size)
-{
-    size_t min_size;
-    void *new_stuff_ptr = stgAllocForGMP(new_size);
-    nat i = 0;
-    char *p = (char *) ptr;
-    char *q = (char *) new_stuff_ptr;
-
-    min_size = old_size < new_size ? old_size : new_size;
-    for (; i < min_size; i++, p++, q++) {
-	*q = *p;
-    }
-
-    return(new_stuff_ptr);
-}
-
-static void
-stgDeallocForGMP (void *ptr STG_UNUSED, 
-		  size_t size STG_UNUSED)
-{
-    /* easy for us: the garbage collector does the dealloc'n */
 }
 
 /* -----------------------------------------------------------------------------

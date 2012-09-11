@@ -4,9 +4,9 @@ TH_exn2.hs:1:0:
       Prelude.tail: empty list
       Code: let
               >>= = (>>=)
-              $dMonad = Language.Haskell.TH.Syntax.$f22
+              $dMonad = Language.Haskell.TH.Syntax.$fMonadQ
               return = return
               ....
             in
-              do ds <- [d| |]
-                 return (tail ds)
+              do { ds <- [d| |];
+                   return (tail ds) }

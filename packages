@@ -1,0 +1,34 @@
+# Note that when adding libraries to this file, you also need to add
+# the library to the SUBDIRS variable in libraries/Makefile so that they
+# actually get built
+#
+# The format of the lines in this file is:
+#   localpath    (optional) tag    remotepath    VCS
+# where
+#   * localpath is where to put the repository in a checked out tree,
+#   * remotepath is where the repository is in the central repository,
+#   * VCS is what version control system the repo uses,
+#   * the tag, is present, determines when "darcs-all get" will get the
+#     repo. If there is no tag then it will always get it, but if there
+#     is a tag then a corresponding flag must be given to darcs-all, e.g.
+#     if you want to get the packages with an "extralibs" or "testsuite"
+#     tag then you need to use "darcs-all --extra --testsuite get".
+#     Support for new tags must be manually added to the darcs-all script.
+#
+# Lines that start with a '#' are comments.
+.                                       ghc                             git
+ghc-tarballs                            ghc-tarballs                    darcs
+utils/hsc2hs                            hsc2hs                          darcs
+utils/haddock                           haddock2                        darcs
+libraries/base                          packages/base                   darcs
+libraries/base3-compat                  packages/base3-compat           darcs
+libraries/Cabal                         packages/Cabal                  darcs
+libraries/dph                           packages/dph                    darcs
+libraries/ghc-prim                      packages/ghc-prim               darcs
+libraries/integer-gmp                   packages/integer-gmp            darcs
+libraries/integer-simple                packages/integer-simple         darcs
+libraries/template-haskell              packages/template-haskell       darcs
+libraries/unix                          packages/unix                   darcs
+libraries/Win32                         packages/Win32                  darcs
+testsuite                   testsuite   testsuite                       darcs
+nofib                       nofib       nofib                           darcs

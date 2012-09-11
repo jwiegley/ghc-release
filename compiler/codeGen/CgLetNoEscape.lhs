@@ -9,13 +9,6 @@
 %********************************************************
 
 \begin{code}
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module CgLetNoEscape ( cgLetNoEscapeClosure ) where
 
 #include "HsVersions.h"
@@ -37,7 +30,6 @@ import CLabel
 import ClosureInfo
 import CostCentre
 import Id
-import Var
 import SMRep
 import BasicTypes
 \end{code}
@@ -156,8 +148,8 @@ cgLetNoEscapeClosure
 -- ToDo: deal with the cost-centre issues
 
 cgLetNoEscapeClosure 
-	bndr cc binder_info full_live_in_rhss 
-	rhs_eob_info cc_slot rec args body
+	bndr cc _ full_live_in_rhss 
+	rhs_eob_info cc_slot _ args body
   = let
 	arity   = length args
 	lf_info = mkLFLetNoEscape arity
@@ -175,7 +167,7 @@ cgLetNoEscapeClosure
 
 			-- Ignore the label that comes back from
 			-- mkRetDirectTarget.  It must be conjured up elswhere
-		    ; emitReturnTarget (idName bndr) abs_c
+		    ; _ <- emitReturnTarget (idName bndr) abs_c
 		    ; return () })
 
 	; returnFC (bndr, letNoEscapeIdInfo bndr vSp lf_info) }
@@ -189,7 +181,7 @@ cgLetNoEscapeBody :: Id		-- Name of the joint point
 		  -> StgExpr	-- Body
 		  -> Code
 
-cgLetNoEscapeBody bndr cc cc_slot all_args body = do
+cgLetNoEscapeBody bndr _ cc_slot all_args body = do
   { (arg_regs, ptrs, nptrs, ret_slot) <- bindUnboxedTupleComponents all_args
 
      -- restore the saved cost centre.  BUT: we must not free the stack slot

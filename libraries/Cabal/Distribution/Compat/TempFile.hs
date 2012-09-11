@@ -5,27 +5,54 @@
 {-# OPTIONS_NHC98 -cpp #-}
 {-# OPTIONS_JHC -fcpp #-}
 -- #hide
-module Distribution.Compat.TempFile (openTempFile, openBinaryTempFile,
-                                     openNewBinaryFile) where
+module Distribution.Compat.TempFile (
+  openTempFile,
+  openBinaryTempFile,
+  openNewBinaryFile,
+  createTempDirectory,
+  ) where
+
+
+import System.FilePath        ((</>))
+import Foreign.C              (eEXIST)
 
 #if __NHC__ || __HUGS__
 import System.IO              (openFile, openBinaryFile,
                                Handle, IOMode(ReadWriteMode))
 import System.Directory       (doesFileExist)
-import System.FilePath        ((</>), (<.>), splitExtension)
+import System.FilePath        ((<.>), splitExtension)
+#else
+import System.IO              (Handle, openTempFile, openBinaryTempFile)
+import Data.Bits              ((.|.))
+import System.Posix.Internals (c_open, c_close, o_CREAT, o_EXCL, o_RDWR,
+                               o_BINARY, o_NONBLOCK, o_NOCTTY)
+import System.IO.Error        (try, isAlreadyExistsError)
+#if __GLASGOW_HASKELL__ >= 611
+import System.Posix.Internals (withFilePath)
+#else
+import Foreign.C              (withCString)
+#endif
+import Foreign.C              (CInt)
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO.Handle.FD       (fdToHandle)
+#else
+import GHC.Handle             (fdToHandle)
+#endif
+import Distribution.Compat.Exception (onException)
+#endif
+import Foreign.C              (getErrno, errnoToIOError)
+
 #if __NHC__
-import System.Posix.Types (CPid(..))
+import System.Posix.Types     (CPid(..))
 foreign import ccall unsafe "getpid" c_getpid :: IO CPid
 #else
 import System.Posix.Internals (c_getpid)
 #endif
+
+#ifdef mingw32_HOST_OS
+import System.Directory       ( createDirectory )
 #else
-import System.IO
-import Data.Bits
-import System.Posix.Internals
-import Foreign.C
-import GHC.Handle
-import Distribution.Compat.Exception
+import qualified System.Posix
 #endif
 
 -- ------------------------------------------------------------
@@ -100,8 +127,12 @@ openNewBinaryFile dir template = do
 
     oflags = rw_flags .|. o_EXCL .|. o_BINARY
 
+#if __GLASGOW_HASKELL__ < 611
+    withFilePath = withCString
+#endif
+
     findTempName x = do
-      fd <- withCString filepath $ \ f ->
+      fd <- withFilePath filepath $ \ f ->
               c_open f oflags 0o666
       if fd < 0
        then do
@@ -149,4 +180,24 @@ std_flags, output_flags, rw_flags :: CInt
 std_flags    = o_NONBLOCK   .|. o_NOCTTY
 output_flags = std_flags    .|. o_CREAT
 rw_flags     = output_flags .|. o_RDWR
+#endif
+
+createTempDirectory :: FilePath -> String -> IO FilePath
+createTempDirectory dir template = do
+  pid <- c_getpid
+  findTempName pid
+  where
+    findTempName x = do
+      let dirpath = dir </> template ++ show x
+      r <- try $ mkPrivateDir dirpath
+      case r of
+        Right _ -> return dirpath
+        Left  e | isAlreadyExistsError e -> findTempName (x+1)
+                | otherwise              -> ioError e
+
+mkPrivateDir :: String -> IO ()
+#ifdef mingw32_HOST_OS
+mkPrivateDir s = createDirectory s
+#else
+mkPrivateDir s = System.Posix.createDirectory s 0o700
 #endif

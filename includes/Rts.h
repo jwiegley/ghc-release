@@ -1,8 +1,12 @@
 /* -----------------------------------------------------------------------------
  *
- * (c) The GHC Team, 1998-2004
+ * (c) The GHC Team, 1998-2009
  *
- * Top-level include file for the RTS itself
+ * RTS external APIs.  This file declares everything that the GHC RTS
+ * exposes externally.
+ *
+ * To understand the structure of the RTS headers, see the wiki:
+ *   http://hackage.haskell.org/trac/ghc/wiki/Commentary/SourceTree/Includes
  *
  * ---------------------------------------------------------------------------*/
 
@@ -18,8 +22,8 @@ extern "C" {
 #endif
 #include "Stg.h"
 
-// ToDo: move RtsExternal stuff elsewhere
-#include "RtsExternal.h"
+#include "HsFFI.h"
+#include "RtsAPI.h"
 
 // Turn off inlining when debugging - it obfuscates things
 #ifdef DEBUG
@@ -27,7 +31,7 @@ extern "C" {
 # define STATIC_INLINE static
 #endif
 
-#include "RtsTypes.h"
+#include "rts/Types.h"
 
 #if __GNUC__ >= 3
 /* Assume that a flexible array member at the end of a struct
@@ -44,6 +48,29 @@ extern "C" {
 #define ATTRIBUTE_ALIGNED(n) /*nothing*/
 #endif
 
+// Symbols that are extern, but private to the RTS, are declared
+// with visibility "hidden" to hide them outside the RTS shared
+// library.
+#if !defined(mingw32_HOST_OS)
+#define RTS_PRIVATE  GNUC3_ATTRIBUTE(visibility("hidden"))
+#else
+#define RTS_PRIVATE  /* disabled: RTS_PRIVATE */
+#endif
+
+#if __GNUC__ > 4
+#define BEGIN_RTS_PRIVATE #pragma GCC visibility push(hidden)
+#define END_RTS_PRIVATE   #pragma GCC visibility pop
+#else
+#define BEGIN_RTS_PRIVATE /* disabled: BEGIN_RTS_PRIVATE */
+#define END_RTS_PRIVATE   /* disabled: END_RTS_PRIVATE */
+#endif
+
+#if __GNUC__ > 4
+#define RTS_UNLIKELY(p) __builtin_expect((p),0)
+#else
+#define RTS_UNLIKELY(p) p
+#endif
+
 /* Fix for mingw stat problem (done here so it's early enough) */
 #ifdef mingw32_HOST_OS
 #define __MSVCRT__ 1
@@ -51,7 +78,9 @@ extern "C" {
 
 /* Needed to get the macro version of errno on some OSs, and also to
    get prototypes for the _r versions of C library functions. */
+#ifndef _REENTRANT
 #define _REENTRANT 1
+#endif
 
 /*
  * We often want to know the size of something in units of an
@@ -61,26 +90,26 @@ extern "C" {
 
 #define sizeofW(t) ROUNDUP_BYTES_TO_WDS(sizeof(t))
 
-/* 
- * It's nice to be able to grep for casts
- */
-#define stgCast(ty,e) ((ty)(e))
-
 /* -----------------------------------------------------------------------------
    Assertions and Debuggery
+
+   CHECK(p)   evaluates p and terminates with an error if p is false
+   ASSERT(p)  like CHECK(p) if DEBUG is on, otherwise a no-op
    -------------------------------------------------------------------------- */
 
-#ifndef DEBUG
-#define ASSERT(predicate) /* nothing */
-#else
+void _assertFail(const char *filename, unsigned int linenum)
+   GNUC3_ATTRIBUTE(__noreturn__);
 
-extern void _assertFail (const char *, unsigned int);
-
-#define ASSERT(predicate)			\
+#define CHECK(predicate)			\
 	if (predicate)				\
 	    /*null*/;				\
 	else					\
 	    _assertFail(__FILE__, __LINE__)
+
+#ifndef DEBUG
+#define ASSERT(predicate) /* nothing */
+#else
+#define ASSERT(predicate) CHECK(predicate)
 #endif /* DEBUG */
 
 /* 
@@ -118,29 +147,6 @@ extern void _assertFail (const char *, unsigned int);
 #define FMT_Int64  "lld"
 #endif
 
-/*
- * Macros for untagging and retagging closure pointers
- * For more information look at the comments in Cmm.h
- */
-
-static inline StgWord
-GET_CLOSURE_TAG(StgClosure * p)
-{
-    return (StgWord)p & TAG_MASK;
-}
-
-static inline StgClosure *
-UNTAG_CLOSURE(StgClosure * p)
-{
-    return (StgClosure*)((StgWord)p & ~TAG_MASK);
-}
-
-static inline StgClosure *
-TAG_CLOSURE(StgWord tag,StgClosure * p)
-{
-    return (StgClosure*)((StgWord)p | tag);
-}
-
 /* -----------------------------------------------------------------------------
    Include everything STG-ish
    -------------------------------------------------------------------------- */
@@ -152,79 +158,67 @@ TAG_CLOSURE(StgWord tag,StgClosure * p)
  */
 #include <stdlib.h>
 
+#include "rts/Config.h"
+
 /* Global constaints */
-#include "Constants.h"
+#include "rts/Constants.h"
 
 /* Profiling information */
-#include "StgProf.h"
-#include "StgLdvProf.h"
-
-/* Storage format definitions */
-#include "StgFun.h"
-#include "Closures.h"
-#include "Liveness.h"
-#include "ClosureTypes.h"
-#include "InfoTables.h"
-#include "TSO.h"
-
-/* Info tables, closures & code fragments defined in the RTS */
-#include "StgMiscClosures.h"
-
-/* Simulated-parallel information */
-#include "GranSim.h"
+#include "rts/prof/CCS.h"
+#include "rts/prof/LDV.h"
 
 /* Parallel information */
-#include "Parallel.h"
-#include "OSThreads.h"
-#include "SMPClosureOps.h"
-#include "SpinLock.h"
+#include "rts/OSThreads.h"
+#include "rts/SpinLock.h"
 
-/* GNU mp library */
-#if defined(HAVE_FRAMEWORK_GMP)
-#include <GMP/gmp.h>
-#else
-#include "gmp.h"
-#endif
+#include "rts/Messages.h"
 
-/* Macros for STG/C code */
-#include "Block.h"
-#include "ClosureMacros.h"
+/* Storage format definitions */
+#include "rts/storage/FunTypes.h"
+#include "rts/storage/InfoTables.h"
+#include "rts/storage/Closures.h"
+#include "rts/storage/Liveness.h"
+#include "rts/storage/ClosureTypes.h"
+#include "rts/storage/TSO.h"
+#include "stg/MiscClosures.h" /* InfoTables, closures etc. defined in the RTS */
+#include "rts/storage/SMPClosureOps.h"
+#include "rts/storage/Block.h"
+#include "rts/storage/ClosureMacros.h"
+#include "rts/storage/MBlock.h"
+#include "rts/storage/GC.h"
 
-  /* Ticky-ticky counters */
-#include "TickyCounters.h"
-
-/* Runtime-system hooks */
-#include "Hooks.h"
-#include "RtsMessages.h"
-
-/* for StablePtr/getStablePtr/deRefStablePtr */
-#include "Storage.h"
-#include "Stable.h"
-
-#include "ieee-flpt.h"
-
-#include "Signals.h"
+/* Other RTS external APIs */
+#include "rts/Parallel.h"
+#include "rts/Hooks.h"
+#include "rts/Signals.h"
+#include "rts/BlockSignals.h"
+#include "rts/Hpc.h"
+#include "rts/Flags.h"
+#include "rts/Adjustor.h"
+#include "rts/FileLock.h"
+#include "rts/Globals.h"
+#include "rts/IOManager.h"
+#include "rts/Linker.h"
+#include "rts/Threads.h"
+#include "rts/Ticky.h"
+#include "rts/Timer.h"
+#include "rts/Stable.h"
+#include "rts/TTY.h"
+#include "rts/Utils.h"
+#include "rts/PrimFloat.h"
 
 /* Misc stuff without a home */
 DLL_IMPORT_RTS extern char **prog_argv;	/* so we can get at these from Haskell */
 DLL_IMPORT_RTS extern int    prog_argc;
 DLL_IMPORT_RTS extern char  *prog_name;
 
-extern void stackOverflow(void);
+void stackOverflow(void);
 
-extern void      __decodeDouble (MP_INT *man, I_ *_exp, StgDouble dbl);
-extern void      __decodeFloat  (MP_INT *man, I_ *_exp, StgFloat flt);
-extern void      __decodeDouble_2Int (I_ *man_sign, W_ *man_high, W_ *man_low, I_ *exp, StgDouble dbl);
-extern void      __decodeFloat_Int (I_ *man, I_ *exp, StgFloat flt);
+void stg_exit(int n) GNU_ATTRIBUTE(__noreturn__);
 
-#if defined(WANT_DOTNET_SUPPORT)
-#include "DNInvoke.h"
+#ifndef mingw32_HOST_OS
+int stg_sig_install (int, int, void *);
 #endif
-
-/* Initialising the whole adjustor thunk machinery. */
-extern void initAdjustor(void);
-
-extern void stg_exit(int n) GNU_ATTRIBUTE(__noreturn__);
 
 /* -----------------------------------------------------------------------------
    RTS Exit codes
@@ -250,11 +244,6 @@ extern void stg_exit(int n) GNU_ATTRIBUTE(__noreturn__);
   extern StgInt RIGHT_ARITY_##arity; \
   extern StgInt TAGGED_PTR_##arity;
 
-#define TICK_VAR_INI(arity) \
-  StgInt SLOW_CALLS_##arity = 1; \
-  StgInt RIGHT_ARITY_##arity = 1; \
-  StgInt TAGGED_PTR_##arity = 0;
-
 extern StgInt TOTAL_CALLS;
 
 TICK_VAR(1)
@@ -266,10 +255,6 @@ TICK_VAR(2)
    -------------------------------------------------------------------------- */
 
 #define IF_RTSFLAGS(c,s)  if (RtsFlags.c) { s; }
-
-/* -----------------------------------------------------------------------------
-   Assertions and Debuggery
-   -------------------------------------------------------------------------- */
 
 #ifdef DEBUG
 #if IN_STG_CODE
@@ -285,18 +270,6 @@ TICK_VAR(2)
 #define DEBUG_ONLY(s) s
 #else
 #define DEBUG_ONLY(s) doNothing()
-#endif
-
-#if defined(GRAN) && defined(DEBUG)
-#define IF_GRAN_DEBUG(c,s)  if (RtsFlags.GranFlags.Debug.c) { s; }
-#else
-#define IF_GRAN_DEBUG(c,s)  doNothing()
-#endif
-
-#if defined(PAR) && defined(DEBUG)
-#define IF_PAR_DEBUG(c,s)  if (RtsFlags.ParFlags.Debug.c) { s; }
-#else
-#define IF_PAR_DEBUG(c,s)  doNothing()
 #endif
 
 /* -----------------------------------------------------------------------------
@@ -320,30 +293,5 @@ TICK_VAR(2)
 #ifdef __cplusplus
 }
 #endif
-
-
-/* krc: I put this here because I don't think
-   it needs to be visible externally.
-   It used to be in StgTicky.h, but I got rid
-   of that. */
-
-/* -----------------------------------------------------------------------------
-   The StgEntCounter type - needed regardless of TICKY_TICKY
-   -------------------------------------------------------------------------- */
-
-typedef struct _StgEntCounter {
-  /* Using StgWord for everything, becuase both the C and asm code
-     generators make trouble if you try to pack things tighter */
-    StgWord	registeredp;	/* 0 == no, 1 == yes */
-    StgInt	arity;		/* arity (static info) */
-    StgInt	stk_args;	/* # of args off stack */
-				/* (rest of args are in registers) */
-    char   	*str;		/* name of the thing */
-    char   	*arg_kinds;	/* info about the args types */
-    StgInt	entry_count;	/* Trips to fast entry code */
-    StgInt      allocs;         /* number of allocations by this fun */
-    struct _StgEntCounter *link;/* link to chain them all together */
-} StgEntCounter;
-
 
 #endif /* RTS_H */

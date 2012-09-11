@@ -8,25 +8,17 @@
 
 #include "PosixSource.h"
 #include "Rts.h"
+#include "rts/Bytecodes.h"  /* for InstrPtr */
+
 #include "Printer.h"
 #include "RtsUtils.h"
 
-#ifdef DEBUG
-
-#include "RtsFlags.h"
-#include "MBlock.h"
-#include "Bytecodes.h"  /* for InstrPtr */
-#include "Disassembler.h"
-#include "Apply.h"
-
-#include <stdlib.h>
 #include <string.h>
 
-#if defined(GRAN) || defined(PAR)
-// HWL: explicit fixed header size to make debugging easier
-int fixed_hs = sizeof(StgHeader), itbl_sz = sizeofW(StgInfoTable), 
-    uf_sz=sizeofW(StgUpdateFrame); 
-#endif
+#ifdef DEBUG
+
+#include "Disassembler.h"
+#include "Apply.h"
 
 /* --------------------------------------------------------------------------
  * local function decls
@@ -43,7 +35,6 @@ static rtsBool lookup_name   ( char *name, StgWord *result );
 static void    enZcode       ( char *in, char *out );
 #endif
 static char    unZcode       ( char ch );
-const char *   lookupGHCName ( void *addr );
 static void    printZcoded   ( const char *raw );
 
 /* --------------------------------------------------------------------------
@@ -121,8 +112,9 @@ printThunkObject( StgThunk *obj, char* tag )
 void
 printClosure( StgClosure *obj )
 {
+    obj = UNTAG_CLOSURE(obj);
+
     StgInfoTable *info;
-    
     info = get_itbl(obj);
 
     switch ( info->type ) {
@@ -191,7 +183,7 @@ printClosure( StgClosure *obj )
 
     case AP:
         {
-	    StgAP* ap = stgCast(StgAP*,obj);
+	    StgAP* ap = (StgAP*)obj;
             StgWord i;
             debugBelch("AP("); printPtr((StgPtr)ap->fun);
             for (i = 0; i < ap->n_args; ++i) {
@@ -204,7 +196,7 @@ printClosure( StgClosure *obj )
 
     case PAP:
         {
-	    StgPAP* pap = stgCast(StgPAP*,obj);
+	    StgPAP* pap = (StgPAP*)obj;
             StgWord i;
             debugBelch("PAP/%d(",pap->arity); 
 	    printPtr((StgPtr)pap->fun);
@@ -218,7 +210,7 @@ printClosure( StgClosure *obj )
 
     case AP_STACK:
         {
-	    StgAP_STACK* ap = stgCast(StgAP_STACK*,obj);
+	    StgAP_STACK* ap = (StgAP_STACK*)obj;
             StgWord i;
             debugBelch("AP_STACK("); printPtr((StgPtr)ap->fun);
             for (i = 0; i < ap->size; ++i) {
@@ -231,31 +223,31 @@ printClosure( StgClosure *obj )
 
     case IND:
             debugBelch("IND("); 
-            printPtr((StgPtr)stgCast(StgInd*,obj)->indirectee);
+            printPtr((StgPtr)((StgInd*)obj)->indirectee);
             debugBelch(")\n"); 
             break;
 
     case IND_OLDGEN:
             debugBelch("IND_OLDGEN("); 
-            printPtr((StgPtr)stgCast(StgInd*,obj)->indirectee);
+            printPtr((StgPtr)((StgInd*)obj)->indirectee);
             debugBelch(")\n"); 
             break;
 
     case IND_PERM:
             debugBelch("IND("); 
-            printPtr((StgPtr)stgCast(StgInd*,obj)->indirectee);
+            printPtr((StgPtr)((StgInd*)obj)->indirectee);
             debugBelch(")\n"); 
             break;
 
     case IND_OLDGEN_PERM:
             debugBelch("IND_OLDGEN_PERM("); 
-            printPtr((StgPtr)stgCast(StgInd*,obj)->indirectee);
+            printPtr((StgPtr)((StgInd*)obj)->indirectee);
             debugBelch(")\n"); 
             break;
 
     case IND_STATIC:
             debugBelch("IND_STATIC("); 
-            printPtr((StgPtr)stgCast(StgInd*,obj)->indirectee);
+            printPtr((StgPtr)((StgInd*)obj)->indirectee);
             debugBelch(")\n"); 
             break;
 
@@ -269,7 +261,7 @@ printClosure( StgClosure *obj )
 
     case UPDATE_FRAME:
         {
-            StgUpdateFrame* u = stgCast(StgUpdateFrame*,obj);
+            StgUpdateFrame* u = (StgUpdateFrame*)obj;
             debugBelch("UPDATE_FRAME(");
             printPtr((StgPtr)GET_INFO(u));
             debugBelch(",");
@@ -280,7 +272,7 @@ printClosure( StgClosure *obj )
 
     case CATCH_FRAME:
         {
-            StgCatchFrame* u = stgCast(StgCatchFrame*,obj);
+            StgCatchFrame* u = (StgCatchFrame*)obj;
             debugBelch("CATCH_FRAME(");
             printPtr((StgPtr)GET_INFO(u));
             debugBelch(",");
@@ -291,7 +283,7 @@ printClosure( StgClosure *obj )
 
     case STOP_FRAME:
         {
-            StgStopFrame* u = stgCast(StgStopFrame*,obj);
+            StgStopFrame* u = (StgStopFrame*)obj;
             debugBelch("STOP_FRAME(");
             printPtr((StgPtr)GET_INFO(u));
             debugBelch(")\n"); 
@@ -304,14 +296,6 @@ printClosure( StgClosure *obj )
 
     case BLACKHOLE:
             debugBelch("BH\n"); 
-            break;
-
-    case SE_BLACKHOLE:
-            debugBelch("SE_BH\n"); 
-            break;
-
-    case SE_CAF_BLACKHOLE:
-            debugBelch("SE_CAF_BH\n"); 
             break;
 
     case ARR_WORDS:
@@ -382,50 +366,11 @@ printClosure( StgClosure *obj )
       debugBelch(")\n"); 
       break;
 
-#if defined(PAR)
-    case BLOCKED_FETCH:
-      debugBelch("BLOCKED_FETCH("); 
-      printGA(&(stgCast(StgBlockedFetch*,obj)->ga));
-      printPtr((StgPtr)(stgCast(StgBlockedFetch*,obj)->node));
-      debugBelch(")\n"); 
-      break;
-
-    case FETCH_ME:
-      debugBelch("FETCH_ME("); 
-      printGA((globalAddr *)stgCast(StgFetchMe*,obj)->ga);
-      debugBelch(")\n"); 
-      break;
-
-    case FETCH_ME_BQ:
-      debugBelch("FETCH_ME_BQ("); 
-      // printGA((globalAddr *)stgCast(StgFetchMe*,obj)->ga);
-      printPtr((StgPtr)stgCast(StgFetchMeBlockingQueue*,obj)->blocking_queue);
-      debugBelch(")\n"); 
-      break;
-#endif
-
-#if defined(GRAN) || defined(PAR)
-    case RBH:
-      debugBelch("RBH("); 
-      printPtr((StgPtr)stgCast(StgRBH*,obj)->blocking_queue);
-      debugBelch(")\n"); 
-      break;
-
-#endif
-
 #if 0
       /* Symptomatic of a problem elsewhere, have it fall-through & fail */
     case EVACUATED:
       debugBelch("EVACUATED("); 
       printClosure((StgEvacuated*)obj->evacuee);
-      debugBelch(")\n"); 
-      break;
-#endif
-
-#if defined(PAR) && defined(DIST)
-    case REMOTE_REF:
-      debugBelch("REMOTE_REF("); 
-      printGA((globalAddr *)stgCast(StgFetchMe*,obj)->ga);
       debugBelch(")\n"); 
       break;
 #endif
@@ -636,103 +581,6 @@ printStackChunk( StgPtr sp, StgPtr spBottom )
 void printTSO( StgTSO *tso )
 {
     printStackChunk( tso->sp, tso->stack+tso->stack_size);
-}
-
-/* -----------------------------------------------------------------------------
-   Closure types
-   
-   NOTE: must be kept in sync with the closure types in includes/ClosureTypes.h
-   -------------------------------------------------------------------------- */
-
-static char *closure_type_names[] = {
-    "INVALID_OBJECT",
-    "CONSTR",
-    "CONSTR_1",
-    "CONSTR_0",
-    "CONSTR_2",
-    "CONSTR_1",
-    "CONSTR_0",
-    "CONSTR_STATIC",
-    "CONSTR_NOCAF_STATIC",
-    "FUN",
-    "FUN_1_0",
-    "FUN_0_1",
-    "FUN_2_0",
-    "FUN_1_1",
-    "FUN_0",
-    "FUN_STATIC",
-    "THUNK",
-    "THUNK_1_0",
-    "THUNK_0_1",
-    "THUNK_2_0",
-    "THUNK_1_1",
-    "THUNK_0",
-    "THUNK_STATIC",
-    "THUNK_SELECTOR",
-    "BCO",
-    "AP_UPD",
-    "PAP",
-    "AP_STACK",
-    "IND",
-    "IND_OLDGEN",
-    "IND_PERM",
-    "IND_OLDGEN_PERM",
-    "IND_STATIC",
-    "RET_BCO",
-    "RET_SMALL",
-    "RET_BIG",
-    "RET_DYN",
-    "RET_FUN",
-    "UPDATE_FRAME",
-    "CATCH_FRAME",
-    "STOP_FRAME",
-    "CAF_BLACKHOLE",
-    "BLACKHOLE",
-    "BLACKHOLE_BQ",
-    "SE_BLACKHOLE",
-    "SE_CAF_BLACKHOLE",
-    "MVAR",
-    "ARR_WORDS",
-    "MUT_ARR_PTRS_CLEAN",
-    "MUT_ARR_PTRS_DIRTY",
-    "MUT_ARR_PTRS_FROZEN",
-    "MUT_VAR_CLEAN",
-    "MUT_VAR_DIRTY",
-    "MUT_CONS",
-    "WEAK",
-    "FOREIGN",
-    "STABLE_NAME",
-    "TSO",
-    "BLOCKED_FETCH",
-    "FETCH_ME",
-    "FETCH_ME_BQ",
-    "RBH",
-    "EVACUATED",
-    "REMOTE_REF",
-    "TVAR_WATCH_QUEUE",
-    "INVARIANT_CHECK_QUEUE",
-    "ATOMIC_INVARIANT",
-    "TVAR",
-    "TREC_CHUNK",
-    "TREC_HEADER",
-    "ATOMICALLY_FRAME",
-    "CATCH_RETRY_FRAME"
-};
-
-
-char *
-info_type(StgClosure *closure){ 
-  return closure_type_names[get_itbl(closure)->type];
-}
-
-char *
-info_type_by_ip(StgInfoTable *ip){ 
-  return closure_type_names[ip->type];
-}
-
-void
-info_hdr_type(StgClosure *closure, char *res){ 
-  strcpy(res,closure_type_names[get_itbl(closure)->type]);
 }
 
 /* --------------------------------------------------------------------------
@@ -1203,6 +1051,15 @@ void prettyPrintClosure_ (StgClosure *obj)
     }
 }
 
+char *what_next_strs[] = {
+  [0]               = "(unknown)",
+  [ThreadRunGHC]    = "ThreadRunGHC",
+  [ThreadInterpret] = "ThreadInterpret",
+  [ThreadKilled]    = "ThreadKilled",
+  [ThreadRelocated] = "ThreadRelocated",
+  [ThreadComplete]  = "ThreadComplete"
+};
+
 #else /* DEBUG */
 void printPtr( StgPtr p )
 {
@@ -1216,3 +1073,93 @@ void printObj( StgClosure *obj )
 
 
 #endif /* DEBUG */
+
+/* -----------------------------------------------------------------------------
+   Closure types
+   
+   NOTE: must be kept in sync with the closure types in includes/ClosureTypes.h
+   -------------------------------------------------------------------------- */
+
+char *closure_type_names[] = {
+ [INVALID_OBJECT]        = "INVALID_OBJECT",
+ [CONSTR]                = "CONSTR",
+ [CONSTR_1_0]            = "CONSTR_1_0",
+ [CONSTR_0_1]            = "CONSTR_0_1",
+ [CONSTR_2_0]            = "CONSTR_2_0",
+ [CONSTR_1_1]            = "CONSTR_1_1",
+ [CONSTR_0_2]            = "CONSTR_0_2",
+ [CONSTR_STATIC]         = "CONSTR_STATIC",
+ [CONSTR_NOCAF_STATIC]   = "CONSTR_NOCAF_STATIC",
+ [FUN]                   = "FUN",
+ [FUN_1_0]               = "FUN_1_0",
+ [FUN_0_1]               = "FUN_0_1",
+ [FUN_2_0]               = "FUN_2_0",
+ [FUN_1_1]               = "FUN_1_1",
+ [FUN_0_2]               = "FUN_0_2",
+ [FUN_STATIC]            = "FUN_STATIC",
+ [THUNK]                 = "THUNK",
+ [THUNK_1_0]             = "THUNK_1_0",
+ [THUNK_0_1]             = "THUNK_0_1",
+ [THUNK_2_0]             = "THUNK_2_0",
+ [THUNK_1_1]             = "THUNK_1_1",
+ [THUNK_0_2]             = "THUNK_0_2",
+ [THUNK_STATIC]          = "THUNK_STATIC",
+ [THUNK_SELECTOR]        = "THUNK_SELECTOR",
+ [BCO]                   = "BCO",
+ [AP]                    = "AP",
+ [PAP]                   = "PAP",
+ [AP_STACK]              = "AP_STACK",
+ [IND]                   = "IND",
+ [IND_OLDGEN]            = "IND_OLDGEN",
+ [IND_PERM]              = "IND_PERM",
+ [IND_OLDGEN_PERM]       = "IND_OLDGEN_PERM",
+ [IND_STATIC]            = "IND_STATIC",
+ [RET_BCO]               = "RET_BCO",
+ [RET_SMALL]             = "RET_SMALL",
+ [RET_BIG]               = "RET_BIG",
+ [RET_DYN]               = "RET_DYN",
+ [RET_FUN]               = "RET_FUN",
+ [UPDATE_FRAME]          = "UPDATE_FRAME",
+ [CATCH_FRAME]           = "CATCH_FRAME",
+ [STOP_FRAME]            = "STOP_FRAME",
+ [CAF_BLACKHOLE]         = "CAF_BLACKHOLE",
+ [BLACKHOLE]             = "BLACKHOLE",
+ [MVAR_CLEAN]            = "MVAR_CLEAN",
+ [MVAR_DIRTY]            = "MVAR_DIRTY",
+ [ARR_WORDS]             = "ARR_WORDS",
+ [MUT_ARR_PTRS_CLEAN]    = "MUT_ARR_PTRS_CLEAN",
+ [MUT_ARR_PTRS_DIRTY]    = "MUT_ARR_PTRS_DIRTY",
+ [MUT_ARR_PTRS_FROZEN0]  = "MUT_ARR_PTRS_FROZEN0",
+ [MUT_ARR_PTRS_FROZEN]   = "MUT_ARR_PTRS_FROZEN",
+ [MUT_VAR_CLEAN]         = "MUT_VAR_CLEAN",
+ [MUT_VAR_DIRTY]         = "MUT_VAR_DIRTY",
+ [WEAK]                  = "WEAK",
+ [STABLE_NAME]           = "STABLE_NAME",
+ [TSO]                   = "TSO",
+ [TVAR_WATCH_QUEUE]      = "TVAR_WATCH_QUEUE",
+ [INVARIANT_CHECK_QUEUE] = "INVARIANT_CHECK_QUEUE",
+ [ATOMIC_INVARIANT]      = "ATOMIC_INVARIANT",
+ [TVAR]                  = "TVAR",
+ [TREC_CHUNK]            = "TREC_CHUNK",
+ [TREC_HEADER]           = "TREC_HEADER",
+ [ATOMICALLY_FRAME]      = "ATOMICALLY_FRAME",
+ [CATCH_RETRY_FRAME]     = "CATCH_RETRY_FRAME",
+ [CATCH_STM_FRAME]       = "CATCH_STM_FRAME",
+ [WHITEHOLE]             = "WHITEHOLE"
+};
+
+char *
+info_type(StgClosure *closure){ 
+  return closure_type_names[get_itbl(closure)->type];
+}
+
+char *
+info_type_by_ip(StgInfoTable *ip){ 
+  return closure_type_names[ip->type];
+}
+
+void
+info_hdr_type(StgClosure *closure, char *res){ 
+  strcpy(res,closure_type_names[get_itbl(closure)->type]);
+}
+

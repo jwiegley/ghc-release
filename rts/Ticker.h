@@ -9,11 +9,15 @@
 #ifndef TICKER_H
 #define TICKER_H
 
+BEGIN_RTS_PRIVATE
+
 typedef void (*TickProc)(int);
 
-extern void initTicker  (nat ms, TickProc handle_tick);
-extern void startTicker (void);
-extern void stopTicker  (void);
-extern void exitTicker  (void);
+void initTicker  (nat ms, TickProc handle_tick);
+void startTicker (void);
+void stopTicker  (void);
+void exitTicker  (void);
+
+END_RTS_PRIVATE
 
 #endif /* TICKER_H */

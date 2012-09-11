@@ -176,7 +176,8 @@ module Pretty (
         hang, punctuate,
 
 --      renderStyle,            -- Haskell 1.3 only
-        render, fullRender, printDoc, showDocWith
+        render, fullRender, printDoc, showDocWith,
+        bufLeftRender -- performance hack
   ) where
 
 import BufWrite
@@ -614,7 +615,7 @@ aboveNest (Nest k1 p)         g k q = nest_ k1 (aboveNest p g (k -# k1) q)
 aboveNest (NilAbove p)        g k q = nilAbove_ (aboveNest p g k q)
 aboveNest (TextBeside s sl p) g k q = textBeside_ s sl rest
                                     where
-                                      k1   = k -# sl
+                                      !k1  = k -# sl
                                       rest = case p of
                                                 Empty -> nilAboveNest g k1 q
                                                 _     -> aboveNest  p g k1 q
@@ -774,8 +775,8 @@ fillNB g Empty k (y:ys)    = nilBeside g (fill1 g (oneLiner (reduceDoc y)) k1 ys
                              `mkUnion`
                              nilAboveNest False k (fill g (y:ys))
                            where
-                             k1 | g         = k -# _ILIT(1)
-                                | otherwise = k
+                             !k1 | g         = k -# _ILIT(1)
+                                 | otherwise = k
 
 fillNB g p k ys            = fill1 g p k ys
 \end{code}
@@ -796,7 +797,7 @@ best :: Int             -- Line length
 best w_ r_ p
   = get (iUnbox w_) p
   where
-    r = iUnbox r_
+    !r = iUnbox r_
     get :: FastInt          -- (Remaining) width of line
         -> Doc -> Doc
     get _ Empty               = Empty
@@ -999,10 +1000,6 @@ spaces n | n <=# _ILIT(0) = ""
 pprCols :: Int
 pprCols = 100 -- could make configurable
 
--- NB. printDoc prints FastStrings in UTF-8: hPutFS below does no decoding.
--- This is what we usually want, because the IO library has no encoding
--- functionality, and we're assuming UTF-8 source code so we might as well
--- assume UTF-8 output too.
 printDoc :: Mode -> Handle -> Doc -> IO ()
 printDoc LeftMode hdl doc
   = do { printLeftRender hdl doc; hFlush hdl }
@@ -1012,7 +1009,9 @@ printDoc mode hdl doc
   where
     put (Chr c)  next = hPutChar hdl c >> next
     put (Str s)  next = hPutStr  hdl s >> next
-    put (PStr s) next = hPutFS   hdl s >> next
+    put (PStr s) next = hPutStr  hdl (unpackFS s) >> next
+                        -- NB. not hPutFS, we want this to go through
+                        -- the I/O library's encoding layer. (#3398)
     put (LStr s l) next = hPutLitString hdl s l >> next
 
     done = hPutChar hdl '\n'
@@ -1042,8 +1041,11 @@ hPutLitString handle a l = if l ==# _ILIT(0)
 printLeftRender :: Handle -> Doc -> IO ()
 printLeftRender hdl doc = do
   b <- newBufHandle hdl
-  layLeft b (reduceDoc doc)
+  bufLeftRender b doc
   bFlush b
+
+bufLeftRender :: BufHandle -> Doc -> IO ()
+bufLeftRender b doc = layLeft b (reduceDoc doc)
 
 -- HACK ALERT!  the "return () >>" below convinces GHC to eta-expand
 -- this function with the IO state lambda.  Otherwise we end up with

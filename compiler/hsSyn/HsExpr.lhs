@@ -2,10 +2,9 @@
 % (c) The University of Glasgow 2006
 % (c) The GRASP/AQUA Project, Glasgow University, 1992-1998
 %
-
-HsExpr: Abstract Haskell syntax: expressions
-
 \begin{code}
+
+-- | Abstract Haskell syntax for expressions.
 module HsExpr where
 
 #include "HsVersions.h"
@@ -35,14 +34,16 @@ import FastString
 %************************************************************************
 
 \begin{code}
+-- * Expressions proper
+
 type LHsExpr id = Located (HsExpr id)
 
 -------------------------
--- PostTcExpr is an evidence expression attached to the
--- syntax tree by the type checker (c.f. postTcType)
--- We use a PostTcTable where there are a bunch of pieces of
--- evidence, more than is convenient to keep individually
+-- | PostTcExpr is an evidence expression attached to the syntax tree by the
+-- type checker (c.f. postTcType).
 type PostTcExpr  = HsExpr Id
+-- | We use a PostTcTable where there are a bunch of pieces of evidence, more
+-- than is convenient to keep individually.
 type PostTcTable = [(Name, Id)]
 
 noPostTcExpr :: PostTcExpr
@@ -52,11 +53,12 @@ noPostTcTable :: PostTcTable
 noPostTcTable = []
 
 -------------------------
--- SyntaxExpr is like PostTcExpr, but it's filled in a little earlier,
+-- | SyntaxExpr is like 'PostTcExpr', but it's filled in a little earlier,
 -- by the renamer.  It's used for rebindable syntax.
--- E.g. (>>=) is filled in before the renamer by the appropriate Name
---      for (>>=), and then instantiated by the type checker with its
---      type args tec
+--
+-- E.g. @(>>=)@ is filled in before the renamer by the appropriate 'Name' for
+--      @(>>=)@, and then instantiated by the type checker with its type args
+--      tec
 
 type SyntaxExpr id = HsExpr id
 
@@ -66,29 +68,33 @@ noSyntaxExpr = HsLit (HsString (fsLit "noSyntaxExpr"))
 
 
 type SyntaxTable id = [(Name, SyntaxExpr id)]
--- *** Currently used only for CmdTop (sigh) ***
--- * Before the renamer, this list is noSyntaxTable
+-- ^ Currently used only for 'CmdTop' (sigh)
 --
--- * After the renamer, it takes the form [(std_name, HsVar actual_name)]
+-- * Before the renamer, this list is 'noSyntaxTable'
+--
+-- * After the renamer, it takes the form @[(std_name, HsVar actual_name)]@
 --   For example, for the 'return' op of a monad
---      normal case:            (GHC.Base.return, HsVar GHC.Base.return)
---      with rebindable syntax: (GHC.Base.return, return_22)
---              where return_22 is whatever "return" is in scope
 --
--- * After the type checker, it takes the form [(std_name, <expression>)]
---      where <expression> is the evidence for the method
+--    * normal case:            @(GHC.Base.return, HsVar GHC.Base.return)@
+--
+--    * with rebindable syntax: @(GHC.Base.return, return_22)@
+--              where @return_22@ is whatever @return@ is in scope
+--
+-- * After the type checker, it takes the form @[(std_name, <expression>)]@
+--      where @<expression>@ is the evidence for the method
 
 noSyntaxTable :: SyntaxTable id
 noSyntaxTable = []
 
 
 -------------------------
+-- | A Haskell expression.
 data HsExpr id
-  = HsVar     id                        -- variable
-  | HsIPVar   (IPName id)               -- implicit parameter
-  | HsOverLit (HsOverLit id)            -- Overloaded literals
+  = HsVar     id                        -- ^ variable
+  | HsIPVar   (IPName id)               -- ^ implicit parameter
+  | HsOverLit (HsOverLit id)            -- ^ Overloaded literals
 
-  | HsLit     HsLit                     -- Simple (non-overloaded) literals
+  | HsLit     HsLit                     -- ^ Simple (non-overloaded) literals
 
   | HsLam     (MatchGroup id)           -- Currently always a single match
 
@@ -115,6 +121,10 @@ data HsExpr id
   | SectionR    (LHsExpr id)    -- operator
                 (LHsExpr id)    -- operand
 
+  | ExplicitTuple		-- Used for explicit tuples and sections thereof
+        [HsTupArg id] 
+        Boxity
+
   | HsCase      (LHsExpr id)
                 (MatchGroup id)
 
@@ -140,14 +150,6 @@ data HsExpr id
   | ExplicitPArr                -- syntactic parallel array: [:e1, ..., en:]
                 PostTcType      -- type of elements of the parallel array
                 [LHsExpr id]
-
-  | ExplicitTuple               -- tuple
-                [LHsExpr id]
-                                -- NB: Unit is ExplicitTuple []
-                                -- for tuples, we can get the types
-                                -- direct from the components
-                Boxity
-
 
   -- Record construction
   | RecordCon   (Located id)       -- The constructor.  After type checking
@@ -274,6 +276,17 @@ data HsExpr id
   |  HsWrap     HsWrapper    -- TRANSLATION
                 (HsExpr id)
 
+-- HsTupArg is used for tuple sections
+--  (,a,) is represented by  ExplicitTuple [Mising ty1, Present a, Missing ty3]
+--  Which in turn stands for (\x:ty1 \y:ty2. (x,a,y))
+data HsTupArg id
+  = Present (LHsExpr id)	-- The argument
+  | Missing PostTcType		-- The argument is missing, but this is its type
+
+tupArgPresent :: HsTupArg id -> Bool
+tupArgPresent (Present {}) = True
+tupArgPresent (Missing {}) = False
+
 type PendingSplice = (Name, LHsExpr Id) -- Typechecked splices, waiting to be
                                         -- pasted back in by the desugarer
 \end{code}
@@ -374,6 +387,17 @@ ppr_expr (SectionR op expr)
     pp_infixly v
       = (sep [pprHsInfix v, pp_expr])
 
+ppr_expr (ExplicitTuple exprs boxity)
+  = tupleParens boxity (fcat (ppr_tup_args exprs))
+  where
+    ppr_tup_args []               = []
+    ppr_tup_args (Present e : es) = (ppr_lexpr e <> punc es) : ppr_tup_args es
+    ppr_tup_args (Missing _ : es) = punc es : ppr_tup_args es
+
+    punc (Present {} : _) = comma <> space
+    punc (Missing {} : _) = comma
+    punc []               = empty
+
 --avoid using PatternSignatures for stage1 code portability
 ppr_expr exprType@(HsLam matches)
   = pprMatches (LambdaExpr `asTypeOf` idType exprType) matches
@@ -406,9 +430,6 @@ ppr_expr (ExplicitList _ exprs)
 
 ppr_expr (ExplicitPArr _ exprs)
   = pa_brackets (pprDeeperList fsep (punctuate comma (map ppr_lexpr exprs)))
-
-ppr_expr (ExplicitTuple exprs boxity)
-  = tupleParens boxity (sep (punctuate comma (map ppr_lexpr exprs)))
 
 ppr_expr (RecordCon con_id _ rbinds)
   = hang (ppr con_id) 2 (ppr rbinds)
@@ -448,21 +469,24 @@ ppr_expr (HsProc pat (L _ (HsCmdTop cmd _ _ _)))
   = hsep [ptext (sLit "proc"), ppr pat, ptext (sLit "->"), ppr cmd]
 
 ppr_expr (HsTick tickId vars exp)
-  = hcat [ptext (sLit "tick<"),
-          ppr tickId,
-          ptext (sLit ">("),
-          hsep (map pprHsVar vars),
-          ppr exp,
-          ptext (sLit ")")]
+  = pprTicks (ppr exp) $
+    hcat [ptext (sLit "tick<"),
+    ppr tickId,
+    ptext (sLit ">("),
+    hsep (map pprHsVar vars),
+    ppr exp,
+    ptext (sLit ")")]
 ppr_expr (HsBinTick tickIdTrue tickIdFalse exp)
-  = hcat [ptext (sLit "bintick<"),
+  = pprTicks (ppr exp) $
+    hcat [ptext (sLit "bintick<"),
           ppr tickIdTrue,
           ptext (sLit ","),
           ppr tickIdFalse,
           ptext (sLit ">("),
           ppr exp,ptext (sLit ")")]
 ppr_expr (HsTickPragma externalSrcLoc exp)
-  = hcat [ptext (sLit "tickpragma<"),
+  = pprTicks (ppr exp) $
+    hcat [ptext (sLit "tickpragma<"),
           ppr externalSrcLoc,
           ptext (sLit ">("),
           ppr exp,
@@ -523,16 +547,18 @@ pprParendExpr expr
         -- I think that is usually (always?) right
     in
     case unLoc expr of
-      HsLit _              -> pp_as_was
-      HsOverLit _          -> pp_as_was
-      HsVar _              -> pp_as_was
-      HsIPVar _            -> pp_as_was
-      ExplicitList _ _     -> pp_as_was
-      ExplicitPArr _ _     -> pp_as_was
-      ExplicitTuple _ _    -> pp_as_was
-      HsPar _              -> pp_as_was
-      HsBracket _          -> pp_as_was
-      HsBracketOut _ []    -> pp_as_was
+      ArithSeq {}       -> pp_as_was
+      PArrSeq {}        -> pp_as_was
+      HsLit {}          -> pp_as_was
+      HsOverLit {}      -> pp_as_was
+      HsVar {}          -> pp_as_was
+      HsIPVar {}        -> pp_as_was
+      ExplicitTuple {}  -> pp_as_was
+      ExplicitList {}   -> pp_as_was
+      ExplicitPArr {}   -> pp_as_was
+      HsPar {}          -> pp_as_was
+      HsBracket {}      -> pp_as_was
+      HsBracketOut _ [] -> pp_as_was
       HsDo sc _ _ _
        | isListCompExpr sc -> pp_as_was
       _                    -> parens pp_as_was
@@ -681,13 +707,16 @@ matchGroupArity (MatchGroup (match:matches) _)
 hsLMatchPats :: LMatch id -> [LPat id]
 hsLMatchPats (L _ (Match pats _ _)) = pats
 
--- GRHSs are used both for pattern bindings and for Matches
+-- | GRHSs are used both for pattern bindings and for Matches
 data GRHSs id
-  = GRHSs [LGRHS id]             -- Guarded RHSs
-          (HsLocalBinds id)      -- The where clause
+  = GRHSs {
+      grhssGRHSs :: [LGRHS id],  -- ^ Guarded RHSs
+      grhssLocalBinds :: (HsLocalBinds id) -- ^ The where clause
+    }
 
 type LGRHS id = Located (GRHS id)
 
+-- | Guarded Right Hand Side.
 data GRHS id = GRHS [LStmt id]   -- Guards
                     (LHsExpr id) -- Right hand side
 \end{code}
@@ -818,26 +847,41 @@ data StmtLR idL idR
   -- the names which they group over in statements
 
   -- Recursive statement (see Note [RecStmt] below)
-  | RecStmt  [LStmtLR idL idR]
-             --- The next two fields are only valid after renaming
-             [idR] -- The ids are a subset of the variables bound by the
-                   -- stmts that are used in stmts that follow the RecStmt
+  | RecStmt
+     { recS_stmts :: [LStmtLR idL idR]
 
-             [idR] -- Ditto, but these variables are the "recursive" ones,
-                   -- that are used before they are bound in the stmts of
-                   -- the RecStmt. From a type-checking point of view,
-                   -- these ones have to be monomorphic
+        -- The next two fields are only valid after renaming
+     , recS_later_ids :: [idR] -- The ids are a subset of the variables bound by the
+  		               -- stmts that are used in stmts that follow the RecStmt
 
-             --- These fields are only valid after typechecking
-             [PostTcExpr]       -- These expressions correspond 1-to-1 with
-                                -- the "recursive" [id], and are the
-                                -- expressions that should be returned by
-                                -- the recursion.
-                                -- They may not quite be the Ids themselves,
-                                -- because the Id may be *polymorphic*, but
-                                -- the returned thing has to be *monomorphic*.
-             (DictBinds idR)    -- Method bindings of Ids bound by the
-                                -- RecStmt, and used afterwards
+     , recS_rec_ids :: [idR]   -- Ditto, but these variables are the "recursive" ones,
+                   	       -- that are used before they are bound in the stmts of
+                   	       -- the RecStmt. 
+
+	-- An Id can be in both groups
+	-- Both sets of Ids are (now) treated monomorphically
+	-- The only reason they are separate is becuase the DsArrows 
+	-- code uses them separately, and I don't understand it well
+	-- enough to change it
+
+	-- Rebindable syntax
+     , recS_bind_fn :: SyntaxExpr idR -- The bind function
+     , recS_ret_fn  :: SyntaxExpr idR -- The return function
+     , recS_mfix_fn :: SyntaxExpr idR -- The mfix function
+
+        -- These fields are only valid after typechecking
+     , recS_rec_rets :: [PostTcExpr] -- These expressions correspond 1-to-1 with
+                                     -- recS_rec_ids, and are the
+                                     -- expressions that should be returned by
+                                     -- the recursion.
+                                     -- They may not quite be the Ids themselves,
+                                     -- because the Id may be *polymorphic*, but
+                                     -- the returned thing has to be *monomorphic*, 
+				     -- so they may be type applications
+
+      , recS_dicts :: DictBinds idR  -- Method bindings of Ids bound by the
+                                     -- RecStmt, and used afterwards
+      }
 \end{code}
 
 ExprStmts are a bit tricky, because what they mean
@@ -865,8 +909,8 @@ depends on the context.  Consider the following contexts:
 
 Array comprehensions are handled like list comprehensions -=chak
 
-Note [RecStmt]
-~~~~~~~~~~~~~~
+Note [How RecStmt works]
+~~~~~~~~~~~~~~~~~~~~~~~~
 Example:
         HsDo [ BindStmt x ex
 
@@ -888,6 +932,17 @@ Here, the RecStmt binds a,b,c; but
 Nota Bene: the two a's have different types, even though they
 have the same Name.
 
+Note [Typing a RecStmt]
+~~~~~~~~~~~~~~~~~~~~~~~
+A (RecStmt stmts) types as if you had written
+
+  (v1,..,vn, _, ..., _) <- mfix (\~(_, ..., _, r1, ..., rm) ->
+                        	 do { stmts 
+                        	    ; return (v1,..vn, r1, ..., rm) })
+
+where v1..vn are the later_ids
+      r1..rm are the rec_ids
+
 
 \begin{code}
 instance (OutputableBndr idL, OutputableBndr idR) => Outputable (StmtLR idL idR) where
@@ -905,7 +960,11 @@ pprStmt (TransformStmt (stmts, _) usingExpr maybeByExpr)
         byExprDoc = maybe empty (\byExpr -> hsep [ptext (sLit "by"), ppr byExpr]) maybeByExpr
 pprStmt (GroupStmt (stmts, _) groupByClause) = (hsep [stmtsDoc, ptext (sLit "then group"), pprGroupByClause groupByClause])
   where stmtsDoc = interpp'SP stmts
-pprStmt (RecStmt segment _ _ _ _) = ptext (sLit "rec") <+> braces (vcat (map ppr segment))
+pprStmt (RecStmt { recS_stmts = segment, recS_rec_ids = rec_ids, recS_later_ids = later_ids })
+  = ptext (sLit "rec") <+> 
+    vcat [ braces (vcat (map ppr segment))
+         , ifPprDebug (vcat [ ptext (sLit "rec_ids=") <> ppr rec_ids
+                            , ptext (sLit "later_ids=") <> ppr later_ids])]
 
 pprGroupByClause :: (OutputableBndr id) => GroupByClause id -> SDoc
 pprGroupByClause (GroupByNothing usingExpr) = hsep [ptext (sLit "using"), ppr usingExpr]
@@ -913,11 +972,18 @@ pprGroupByClause (GroupBySomething eitherUsingExpr byExpr) = hsep [ptext (sLit "
   where usingExprDoc = either (\usingExpr -> hsep [ptext (sLit "using"), ppr usingExpr]) (const empty) eitherUsingExpr
 
 pprDo :: OutputableBndr id => HsStmtContext any -> [LStmt id] -> LHsExpr id -> SDoc
-pprDo DoExpr      stmts body = ptext (sLit "do")  <+> pprDeeperList vcat (map ppr stmts ++ [ppr body])
-pprDo (MDoExpr _) stmts body = ptext (sLit "mdo") <+> pprDeeperList vcat (map ppr stmts ++ [ppr body])
+pprDo DoExpr      stmts body = ptext (sLit "do")  <+> ppr_do_stmts stmts body
+pprDo (MDoExpr _) stmts body = ptext (sLit "mdo") <+> ppr_do_stmts stmts body
 pprDo ListComp    stmts body = pprComp brackets    stmts body
 pprDo PArrComp    stmts body = pprComp pa_brackets stmts body
 pprDo _           _     _    = panic "pprDo" -- PatGuard, ParStmtCxt
+
+ppr_do_stmts :: OutputableBndr id => [LStmt id] -> LHsExpr id -> SDoc
+-- Print a bunch of do stmts, with explicit braces and semicolons,
+-- so that we are not vulnerable to layout bugs
+ppr_do_stmts stmts body
+  = lbrace <+> pprDeeperList vcat ([ ppr s <> semi | s <- stmts] ++ [ppr body])
+           <+> rbrace
 
 pprComp :: OutputableBndr id => (SDoc -> SDoc) -> [LStmt id] -> LHsExpr id -> SDoc
 pprComp brack quals body
@@ -1011,10 +1077,10 @@ pp_dotdot = ptext (sLit " .. ")
 \begin{code}
 data HsMatchContext id  -- Context of a Match
   = FunRhs id Bool              -- Function binding for f; True <=> written infix
-  | CaseAlt                     -- Guard on a case alternative
-  | LambdaExpr                  -- Pattern of a lambda
-  | ProcExpr                    -- Pattern of a proc
-  | PatBindRhs                  -- Pattern binding
+  | CaseAlt                     -- Patterns and guards on a case alternative
+  | LambdaExpr                  -- Patterns of a lambda
+  | ProcExpr                    -- Patterns of a proc
+  | PatBindRhs                  -- Patterns in the *guards* of a pattern binding
   | RecUpd                      -- Record update [used only in DsExpr to
                                 --    tell matchWrapper what sort of
                                 --    runtime error message to generate]
@@ -1096,20 +1162,20 @@ pprStmtResultContext other           = ptext (sLit "the result of") <+> pprStmtC
 -}
 
 -- Used to generate the string for a *runtime* error message
-matchContextErrString :: Outputable id => HsMatchContext id -> String
-matchContextErrString (FunRhs fun _)             = "function " ++ showSDoc (ppr fun)
-matchContextErrString CaseAlt                    = "case"
-matchContextErrString PatBindRhs                 = "pattern binding"
-matchContextErrString RecUpd                     = "record update"
-matchContextErrString LambdaExpr                 = "lambda"
-matchContextErrString ProcExpr                   = "proc"
+matchContextErrString :: Outputable id => HsMatchContext id -> SDoc
+matchContextErrString (FunRhs fun _)             = ptext (sLit "function") <+> ppr fun
+matchContextErrString CaseAlt                    = ptext (sLit "case")
+matchContextErrString PatBindRhs                 = ptext (sLit "pattern binding")
+matchContextErrString RecUpd                     = ptext (sLit "record update")
+matchContextErrString LambdaExpr                 = ptext (sLit "lambda")
+matchContextErrString ProcExpr                   = ptext (sLit "proc")
 matchContextErrString (StmtCtxt (ParStmtCtxt c)) = matchContextErrString (StmtCtxt c)
 matchContextErrString (StmtCtxt (TransformStmtCtxt c)) = matchContextErrString (StmtCtxt c)
-matchContextErrString (StmtCtxt (PatGuard _))    = "pattern guard"
-matchContextErrString (StmtCtxt DoExpr)          = "'do' expression"
-matchContextErrString (StmtCtxt (MDoExpr _))     = "'mdo' expression"
-matchContextErrString (StmtCtxt ListComp)        = "list comprehension"
-matchContextErrString (StmtCtxt PArrComp)        = "array comprehension"
+matchContextErrString (StmtCtxt (PatGuard _))    = ptext (sLit "pattern guard")
+matchContextErrString (StmtCtxt DoExpr)          = ptext (sLit "'do' expression")
+matchContextErrString (StmtCtxt (MDoExpr _))     = ptext (sLit "'mdo' expression")
+matchContextErrString (StmtCtxt ListComp)        = ptext (sLit "list comprehension")
+matchContextErrString (StmtCtxt PArrComp)        = ptext (sLit "array comprehension")
 \end{code}
 
 \begin{code}

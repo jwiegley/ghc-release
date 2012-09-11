@@ -183,7 +183,10 @@ test('tcfail186',
      extra_clean(['Tcfail186_Help.hi', 'Tcfail186_Help.o']),
      multimod_compile_fail, ['tcfail186', '-v0'])
 test('tcfail187', normal, compile_fail, [''])
-test('tcfail188', normal, compile_fail, [''])
+
+test('tcfail188', if_compiler_lt('ghc', '6.13', expect_fail), compile, [''])
+# Now that #959 is fixed, tcfail188 should compile
+
 test('tcfail189', normal, compile_fail, [''])
 test('tcfail190', normal, compile_fail, [''])
 test('tcfail191', normal, compile_fail, [''])
@@ -198,6 +201,9 @@ test('tcfail199', normal, compile_fail, [''])
 test('tcfail200', normal, compile_fail, [''])
 test('tcfail201', normal, compile_fail, [''])
 test('tcfail202', normal, compile_fail, [''])
+test('tcfail203', expect_broken(2806), compile_fail, [''])
+test('tcfail204', normal, compile_fail, [''])
+test('tcfail206', if_compiler_lt('ghc', '6.11', expect_fail), compile_fail, [''])
 
 test('T1899', normal, compile_fail, [''])
 test('T2126', normal, compile_fail, [''])
@@ -207,3 +213,16 @@ test('T2538', normal, compile_fail, [''])
 test('T2688', normal, compile_fail, [''])
 test('T2714', normal, compile_fail, [''])
 test('T2994', normal, compile_fail, [''])
+test('T3155', normal, compile_fail, [''])
+test('T3176', normal, compile_fail, [''])
+test('T1633', normal, compile_fail, [''])
+test('T2806', normal, compile_fail, [''])
+test('T3323', normal, compile_fail, [''])
+test('T3406', normal, compile_fail, [''])
+test('T3540', normal, compile_fail, [''])
+test('T3102', normal, compile_fail, [''])
+test('T3613', normal, compile_fail, [''])
+test('fd-loop', normal, compile_fail, [''])
+
+test('T3468', extra_clean(['T3468.hi-boot']), 
+     multimod_compile_fail, ['T3468', '-v0'])

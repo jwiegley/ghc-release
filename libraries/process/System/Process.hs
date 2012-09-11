@@ -75,9 +75,12 @@ import Data.Maybe
 import System.Exit	( ExitCode(..) )
 
 #ifdef __GLASGOW_HASKELL__
-import GHC.IOBase	( ioException, IOException(..), IOErrorType(..) )
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO.Exception	( ioException, IOErrorType(..) )
+#else
+import GHC.IOBase	( ioException, IOErrorType(..) )
+#endif
 #if !defined(mingw32_HOST_OS)
-import System.Process.Internals
 import System.Posix.Signals
 #endif
 #endif
@@ -221,7 +224,7 @@ createProcess
   :: CreateProcess
   -> IO (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)
 createProcess cp = do
-  r <- runGenProcess_ "runGenProcess" cp Nothing Nothing
+  r <- runGenProcess_ "createProcess" cp Nothing Nothing
   maybeCloseStd (std_in  cp)
   maybeCloseStd (std_out cp)
   maybeCloseStd (std_err cp)
@@ -355,7 +358,7 @@ readProcess cmd args input = do
     -- fork off a thread to start consuming the output
     output  <- hGetContents outh
     outMVar <- newEmptyMVar
-    forkIO $ C.evaluate (length output) >> putMVar outMVar ()
+    _ <- forkIO $ C.evaluate (length output) >> putMVar outMVar ()
 
     -- now write and flush any input
     when (not (null input)) $ do hPutStr inh input; hFlush inh
@@ -403,11 +406,11 @@ readProcessWithExitCode cmd args input = do
 
     -- fork off a thread to start consuming stdout
     out  <- hGetContents outh
-    forkIO $ C.evaluate (length out) >> putMVar outMVar ()
+    _ <- forkIO $ C.evaluate (length out) >> putMVar outMVar ()
 
     -- fork off a thread to start consuming stderr
     err  <- hGetContents errh
-    forkIO $ C.evaluate (length err) >> putMVar outMVar ()
+    _ <- forkIO $ C.evaluate (length err) >> putMVar outMVar ()
 
     -- now write and flush any input
     when (not (null input)) $ do hPutStr inh input; hFlush inh
@@ -448,16 +451,17 @@ will not work.
 -}
 #ifdef __GLASGOW_HASKELL__
 system :: String -> IO ExitCode
-system "" = ioException (IOError Nothing InvalidArgument "system" "null command" Nothing)
-system str = syncProcess (shell str)
+system "" = ioException (ioeSetErrorString (mkIOError InvalidArgument "system" Nothing Nothing) "null command")
+system str = syncProcess "system" (shell str)
 
 
-syncProcess :: CreateProcess -> IO ExitCode
-syncProcess c = do
+syncProcess :: String -> CreateProcess -> IO ExitCode
 #if mingw32_HOST_OS
+syncProcess _fun c = do
   (_,_,_,p) <- createProcess c
   waitForProcess p
 #else
+syncProcess fun c = do
   -- The POSIX version of system needs to do some manipulation of signal
   -- handlers.  Since we're going to be synchronously waiting for the child,
   -- we want to ignore ^C in the parent, but handle it the default way
@@ -466,11 +470,11 @@ syncProcess c = do
   -- its own handler and we don't want to use that).
   old_int  <- installHandler sigINT  Ignore Nothing
   old_quit <- installHandler sigQUIT Ignore Nothing
-  (_,_,_,p) <- runGenProcess_ "runCommand" c
+  (_,_,_,p) <- runGenProcess_ fun c
 		(Just defaultSignal) (Just defaultSignal)
   r <- waitForProcess p
-  installHandler sigINT  old_int Nothing
-  installHandler sigQUIT old_quit Nothing
+  _ <- installHandler sigINT  old_int Nothing
+  _ <- installHandler sigQUIT old_quit Nothing
   return r
 #endif  /* mingw32_HOST_OS */
 #endif  /* __GLASGOW_HASKELL__ */
@@ -485,7 +489,7 @@ The return codes and possible failures are the same as for 'system'.
 -}
 rawSystem :: String -> [String] -> IO ExitCode
 #ifdef __GLASGOW_HASKELL__
-rawSystem cmd args = syncProcess (proc cmd args)
+rawSystem cmd args = syncProcess "rawSystem" (proc cmd args)
 
 #elif !mingw32_HOST_OS
 -- crude fallback implementation: could do much better than this under Unix
@@ -523,6 +527,13 @@ translate str = '"' : snd (foldr escape (True,"\"") str)
 -- On Unix systems, 'terminateProcess' sends the process the SIGTERM signal.
 -- On Windows systems, the Win32 @TerminateProcess@ function is called, passing
 -- an exit code of 1.
+--
+-- Note: on Windows, if the process was a shell command created by
+-- 'createProcess' with 'shell', or created by 'runCommand' or
+-- 'runInteractiveCommand', then 'terminateProcess' will only
+-- terminate the shell, not the command itself.  On Unix systems, both
+-- processes are in a process group and will be terminated together.
+
 terminateProcess :: ProcessHandle -> IO ()
 terminateProcess ph = do
   withProcessHandle_ ph $ \p_ ->
@@ -541,8 +552,6 @@ terminateProcess ph = do
 This is a non-blocking version of 'waitForProcess'.  If the process is
 still running, 'Nothing' is returned.  If the process has exited, then
 @'Just' e@ is returned where @e@ is the exit code of the process.
-Subsequent calls to @getProcessExitStatus@ always return @'Just'
-'ExitSuccess'@, regardless of what the original exit code was.
 -}
 getProcessExitCode :: ProcessHandle -> IO (Maybe ExitCode)
 getProcessExitCode ph = do

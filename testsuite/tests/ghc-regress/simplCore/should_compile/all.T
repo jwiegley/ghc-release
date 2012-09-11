@@ -34,6 +34,24 @@ test('spec002', normal, compile, [''])
 test('spec003', normal, compile, [''])
 
 test('rule1', normal, compile, [''])
+test('rule2', [only_ways(['optc','optasm']),
+               if_compiler_lt('ghc', '6.13', expect_fail)],
+              compile, [''])
 
 test('strict-float', normal, compile, [''])
+test('T3118', normal, compile, [''])
+
+# With -prof -fvia-C, this test makes gcc go out to lunch, and the
+# testsuite driver times out.
+test('T3016', [ skip_if_fast, omit_ways(['optc','profc']) ], compile, [''])
+
+test('T3055',
+     [extra_clean(['T3055.hi', 'T3055.o', 'T3055.simpl']),
+      if_compiler_lt('ghc', '6.11', expect_fail)],
+     run_command,
+     ['$MAKE -s --no-print-directory T3055'])
+
+test('T1647', normal, compile, ['-fdicts-strict -dcore-lint'])
+
+test('T3234', only_ways(['optc','optasm']), compile, ['-ddump-simpl-stats'])
 

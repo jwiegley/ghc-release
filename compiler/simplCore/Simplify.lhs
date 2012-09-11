@@ -13,8 +13,9 @@ import SimplMonad
 import Type hiding      ( substTy, extendTvSubst )
 import SimplEnv
 import SimplUtils
-import MkId		( rUNTIME_ERROR_ID )
+import FamInstEnv	( FamInstEnv )
 import Id
+import MkId		( mkImpossibleExpr, seqId )
 import Var
 import IdInfo
 import Coercion
@@ -25,9 +26,10 @@ import NewDemand        ( isStrictDmd, splitStrictSig )
 import PprCore          ( pprParendExpr, pprCoreExpr )
 import CoreUnfold       ( mkUnfolding, callSiteInline, CallCtxt(..) )
 import CoreUtils
+import CoreArity	( exprArity )
 import Rules            ( lookupRule, getRules )
-import BasicTypes       ( isMarkedStrict )
-import CostCentre       ( currentCCS )
+import BasicTypes       ( isMarkedStrict, Arity )
+import CostCentre       ( currentCCS, pushCCisNop )
 import TysPrim          ( realWorldStatePrimTy )
 import PrelInfo         ( realWorldPrimId )
 import BasicTypes       ( TopLevelFlag(..), isTopLevel,
@@ -338,7 +340,7 @@ simplLazyBind env top_lvl is_rec bndr bndr1 rhs rhs_se
         ; (env', rhs')
             <-  if not (doFloatFromRhs top_lvl is_rec False body2 body_env2)
                 then                            -- No floating, just wrap up!
-                     do { rhs' <- mkLam tvs' (wrapFloats body_env2 body2)
+                     do { rhs' <- mkLam env tvs' (wrapFloats body_env2 body2)
                         ; return (env, rhs') }
 
                 else if null tvs then           -- Simple floating
@@ -348,7 +350,7 @@ simplLazyBind env top_lvl is_rec bndr bndr1 rhs rhs_se
                 else                            -- Do type-abstraction first
                      do { tick LetFloatFromLet
                         ; (poly_binds, body3) <- abstractFloats tvs' body_env2 body2
-                        ; rhs' <- mkLam tvs' body3
+                        ; rhs' <- mkLam env tvs' body3
                         ; let env' = foldl (addPolyBind top_lvl) env poly_binds
                         ; return (env', rhs') }
 
@@ -365,6 +367,9 @@ simplNonRecX :: SimplEnv
              -> SimplM SimplEnv
 
 simplNonRecX env bndr new_rhs
+  | isDeadBinder bndr	-- Not uncommon; e.g. case (a,b) of b { (p,q) -> p }
+  = return env		-- 		 Here b is dead, and we avoid creating
+  | otherwise		--		 the binding b = (a,b)
   = do  { (env', bndr') <- simplBinder env bndr
         ; completeNonRecX env' (isStrictId bndr) bndr bndr' new_rhs }
 
@@ -456,7 +461,7 @@ prepareRhs env0 rhs0
         where
           is_val = n_val_args > 0       -- There is at least one arg
                                         -- ...and the fun a constructor or PAP
-                 && (isDataConWorkId fun || n_val_args < idArity fun)
+                 && (isConLikeId fun || n_val_args < idArity fun)
     go _ env other
         = return (False, env, other)
 \end{code}
@@ -573,7 +578,7 @@ completeBind env top_lvl old_bndr new_bndr new_rhs
   = return (addNonRecWithUnf env new_bndr new_rhs unfolding wkr)
   where
     unfolding | omit_unfolding = NoUnfolding
-	      | otherwise      = mkUnfolding  (isTopLevel top_lvl) new_rhs
+	      | otherwise      = mkUnfolding (isTopLevel top_lvl) new_rhs
     old_info    = idInfo old_bndr
     occ_info    = occInfo old_info
     wkr		= substWorker env (workerInfo old_info)
@@ -618,7 +623,9 @@ addNonRecWithUnf :: SimplEnv
 addNonRecWithUnf env new_bndr rhs unfolding wkr
   = ASSERT( isId new_bndr )
     WARN( new_arity < old_arity || new_arity < dmd_arity, 
-          (ppr final_id <+> ppr old_arity <+> ppr new_arity <+> ppr dmd_arity) $$ ppr rhs )
+          (ptext (sLit "Arity decrease:") <+> ppr final_id <+> ppr old_arity
+		<+> ppr new_arity <+> ppr dmd_arity) $$ ppr rhs )
+	-- Note [Arity decrease]
     final_id `seq`      -- This seq forces the Id, and hence its IdInfo,
 	                -- and hence any inner substitutions
     addNonRec env final_id rhs
@@ -661,6 +668,28 @@ addNonRecWithUnf env new_bndr rhs unfolding wkr
         final_id = new_bndr `setIdInfo` final_info
 \end{code}
 
+Note [Arity decrease]
+~~~~~~~~~~~~~~~~~~~~~
+Generally speaking the arity of a binding should not decrease.  But it *can* 
+legitimately happen becuase of RULES.  Eg
+	f = g Int
+where g has arity 2, will have arity 2.  But if there's a rewrite rule
+	g Int --> h
+where h has arity 1, then f's arity will decrease.  Here's a real-life example,
+which is in the output of Specialise:
+
+     Rec {
+	$dm {Arity 2} = \d.\x. op d
+	{-# RULES forall d. $dm Int d = $s$dm #-}
+	
+	dInt = MkD .... opInt ...
+	opInt {Arity 1} = $dm dInt
+
+	$s$dm {Arity 0} = \x. op dInt }
+
+Here opInt has arity 1; but when we apply the rule its arity drops to 0.
+That's why Specialise goes to a little trouble to pin the right arity
+on specialised functions too.
 
 
 %************************************************************************
@@ -842,8 +871,8 @@ simplCast env body co0 cont0
          | (_l1, t1) <- coercionKind co2
 		-- 	e |> (g1 :: S1~L) |> (g2 :: L~T1)
                 -- ==>
-                --      e,                       if T1=T2
-                --      e |> (g1 . g2 :: T1~T2)  otherwise
+                --      e,                       if S1=T1
+                --      e |> (g1 . g2 :: S1~T1)  otherwise
                 --
                 -- For example, in the initial form of a worker
                 -- we may find  (coerce T (coerce S (\x.e))) y
@@ -914,7 +943,7 @@ simplLam env (bndr:bndrs) body (ApplyTo _ arg arg_se cont)
 simplLam env bndrs body cont
   = do  { (env', bndrs') <- simplLamBndrs env bndrs
         ; body' <- simplExpr env' body
-        ; new_lam <- mkLam bndrs' body'
+        ; new_lam <- mkLam env' bndrs' body'
         ; rebuild env' new_lam cont }
 
 ------------------
@@ -975,6 +1004,9 @@ simplNonRecE env bndr (rhs, rhs_se) (bndrs, body) cont
 simplNote :: SimplEnv -> Note -> CoreExpr -> SimplCont
           -> SimplM (SimplEnv, OutExpr)
 simplNote env (SCC cc) e cont
+  | pushCCisNop cc (getEnclosingCC env)  -- scc "f" (...(scc "f" e)...) 
+  = simplExprF env e cont	         -- ==>  scc "f" (...e...)
+  | otherwise
   = do  { e' <- simplExpr (setEnclosingCC env currentCCS) e
         ; rebuild env (mkSCC cc e') cont }
 
@@ -1024,8 +1056,7 @@ simplVar env var cont
 
 completeCall :: SimplEnv -> Id -> SimplCont -> SimplM (SimplEnv, OutExpr)
 completeCall env var cont
-  = do  { dflags <- getDOptsSmpl
-        ; let   (args,call_cont) = contArgs cont
+  = do  { let   (args,call_cont) = contArgs cont
                 -- The args are OutExprs, obtained by *lazily* substituting
                 -- in the args found in cont.  These args are only examined
                 -- to limited depth (unless a rule fires).  But we must do
@@ -1041,45 +1072,18 @@ completeCall env var cont
         -- We used to use the black-listing mechanism to ensure that inlining of
         -- the wrapper didn't occur for things that have specialisations till a
         -- later phase, so but now we just try RULES first
-        --
-        -- Note [Rules for recursive functions]
-        -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        -- You might think that we shouldn't apply rules for a loop breaker:
-        -- doing so might give rise to an infinite loop, because a RULE is
-        -- rather like an extra equation for the function:
-        --      RULE:           f (g x) y = x+y
-        --      Eqn:            f a     y = a-y
-        --
-        -- But it's too drastic to disable rules for loop breakers.
-        -- Even the foldr/build rule would be disabled, because foldr
-        -- is recursive, and hence a loop breaker:
-        --      foldr k z (build g) = g k z
-        -- So it's up to the programmer: rules can cause divergence
-        ; rule_base <- getSimplRules
-        ; let   in_scope   = getInScope env
-	  	rules      = getRules rule_base var
-                maybe_rule = case activeRule dflags env of
-                                Nothing     -> Nothing  -- No rules apply
-                                Just act_fn -> lookupRule act_fn in_scope
-                                                          var args rules 
-        ; case maybe_rule of {
-            Just (rule, rule_rhs) -> do
-                tick (RuleFired (ru_name rule))
-                (if dopt Opt_D_dump_rule_firings dflags then
-                   pprTrace "Rule fired" (vcat [
-                        text "Rule:" <+> ftext (ru_name rule),
-                        text "Before:" <+> ppr var <+> sep (map pprParendExpr args),
-                        text "After: " <+> pprCoreExpr rule_rhs,
-                        text "Cont:  " <+> ppr call_cont])
-                 else
-                        id)             $
-                 simplExprF env rule_rhs (dropArgs (ruleArity rule) cont)
+	-- 
+	-- See also Note [Rules for recursive functions]
+	; mb_rule <- tryRules env var args call_cont
+	; case mb_rule of {
+	     Just (n_args, rule_rhs) -> simplExprF env rule_rhs (dropArgs n_args cont) ;
                  -- The ruleArity says how many args the rule consumed
+           ; Nothing -> do       -- No rules
 
-          ; Nothing -> do       -- No rules
 
         ------------- Next try inlining ----------------
-        { let   arg_infos = [interestingArg arg | arg <- args, isValArg arg]
+        { dflags <- getDOptsSmpl
+        ; let   arg_infos = [interestingArg arg | arg <- args, isValArg arg]
                 n_val_args = length arg_infos
                 interesting_cont = interestingCallContext call_cont
                 active_inline = activeInline env var
@@ -1089,7 +1093,7 @@ completeCall env var cont
             Just unfolding      -- There is an inlining!
               ->  do { tick (UnfoldingDone var)
                      ; (if dopt Opt_D_dump_inlinings dflags then
-                           pprTrace ("Inlining done" ++ showSDoc (ppr var)) (vcat [
+                           pprTrace ("Inlining done: " ++ showSDoc (ppr var)) (vcat [
                                 text "Before:" <+> ppr var <+> sep (map pprParendExpr args),
                                 text "Inlined fn: " <+> nest 2 (ppr unfolding),
                                 text "Cont:  " <+> ppr call_cont])
@@ -1185,240 +1189,63 @@ to get the effect that finding (error "foo") in a strict arg position will
 discard the entire application and replace it with (error "foo").  Getting
 all this at once is TOO HARD!
 
+
+%************************************************************************
+%*                                                                      *
+                Rewrite rules
+%*                                                                      *
+%************************************************************************
+
+\begin{code}
+tryRules :: SimplEnv -> Id -> [OutExpr] -> SimplCont 
+	 -> SimplM (Maybe (Arity, CoreExpr))	     -- The arity is the number of
+	    	   	  	  		     -- args consumed by the rule
+tryRules env fn args call_cont
+  = do {  dflags <- getDOptsSmpl
+        ; rule_base <- getSimplRules
+        ; let   in_scope   = getInScope env
+	  	rules      = getRules rule_base fn
+                maybe_rule = case activeRule dflags env of
+                                Nothing     -> Nothing  -- No rules apply
+                                Just act_fn -> lookupRule act_fn in_scope
+                                                          fn args rules 
+        ; case (rules, maybe_rule) of {
+	    ([], _)      	        -> return Nothing ;
+	    (_,  Nothing) 	        -> return Nothing ;
+            (_,  Just (rule, rule_rhs)) -> do
+
+        { tick (RuleFired (ru_name rule))
+        ; (if dopt Opt_D_dump_rule_firings dflags then
+                   pprTrace "Rule fired" (vcat [
+                        text "Rule:" <+> ftext (ru_name rule),
+                        text "Before:" <+> ppr fn <+> sep (map pprParendExpr args),
+                        text "After: " <+> pprCoreExpr rule_rhs,
+                        text "Cont:  " <+> ppr call_cont])
+                 else
+                        id)             $
+           return (Just (ruleArity rule, rule_rhs)) }}}
+\end{code}
+
+Note [Rules for recursive functions]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+You might think that we shouldn't apply rules for a loop breaker:
+doing so might give rise to an infinite loop, because a RULE is
+rather like an extra equation for the function:
+     RULE:           f (g x) y = x+y
+     Eqn:            f a     y = a-y
+
+But it's too drastic to disable rules for loop breakers.
+Even the foldr/build rule would be disabled, because foldr
+is recursive, and hence a loop breaker:
+     foldr k z (build g) = g k z
+So it's up to the programmer: rules can cause divergence
+
+
 %************************************************************************
 %*                                                                      *
                 Rebuilding a cse expression
 %*                                                                      *
 %************************************************************************
-
-Blob of helper functions for the "case-of-something-else" situation.
-
-\begin{code}
----------------------------------------------------------
---      Eliminate the case if possible
-
-rebuildCase :: SimplEnv
-            -> OutExpr          -- Scrutinee
-            -> InId             -- Case binder
-            -> [InAlt]          -- Alternatives (inceasing order)
-            -> SimplCont
-            -> SimplM (SimplEnv, OutExpr)
-
---------------------------------------------------
---      1. Eliminate the case if there's a known constructor
---------------------------------------------------
-
-rebuildCase env scrut case_bndr alts cont
-  | Just (con,args) <- exprIsConApp_maybe scrut
-        -- Works when the scrutinee is a variable with a known unfolding
-        -- as well as when it's an explicit constructor application
-  = knownCon env scrut (DataAlt con) args case_bndr alts cont
-
-  | Lit lit <- scrut    -- No need for same treatment as constructors
-                        -- because literals are inlined more vigorously
-  = knownCon env scrut (LitAlt lit) [] case_bndr alts cont
-
-
---------------------------------------------------
---      2. Eliminate the case if scrutinee is evaluated
---------------------------------------------------
-
-rebuildCase env scrut case_bndr [(_, bndrs, rhs)] cont
-  -- See if we can get rid of the case altogether
-  -- See the extensive notes on case-elimination above
-  -- mkCase made sure that if all the alternatives are equal,
-  -- then there is now only one (DEFAULT) rhs
- | all isDeadBinder bndrs       -- bndrs are [InId]
-
-        -- Check that the scrutinee can be let-bound instead of case-bound
- , exprOkForSpeculation scrut
-                -- OK not to evaluate it
-                -- This includes things like (==# a# b#)::Bool
-                -- so that we simplify
-                --      case ==# a# b# of { True -> x; False -> x }
-                -- to just
-                --      x
-                -- This particular example shows up in default methods for
-                -- comparision operations (e.g. in (>=) for Int.Int32)
-        || exprIsHNF scrut                      -- It's already evaluated
-        || var_demanded_later scrut             -- It'll be demanded later
-
---      || not opt_SimplPedanticBottoms)        -- Or we don't care!
---      We used to allow improving termination by discarding cases, unless -fpedantic-bottoms was on,
---      but that breaks badly for the dataToTag# primop, which relies on a case to evaluate
---      its argument:  case x of { y -> dataToTag# y }
---      Here we must *not* discard the case, because dataToTag# just fetches the tag from
---      the info pointer.  So we'll be pedantic all the time, and see if that gives any
---      other problems
---      Also we don't want to discard 'seq's
-  = do  { tick (CaseElim case_bndr)
-        ; env' <- simplNonRecX env case_bndr scrut
-        ; simplExprF env' rhs cont }
-  where
-        -- The case binder is going to be evaluated later,
-        -- and the scrutinee is a simple variable
-    var_demanded_later (Var v) = isStrictDmd (idNewDemandInfo case_bndr)
-                                 && not (isTickBoxOp v)
-                                    -- ugly hack; covering this case is what
-                                    -- exprOkForSpeculation was intended for.
-    var_demanded_later _       = False
-
-
---------------------------------------------------
---      3. Catch-all case
---------------------------------------------------
-
-rebuildCase env scrut case_bndr alts cont
-  = do  {       -- Prepare the continuation;
-                -- The new subst_env is in place
-          (env', dup_cont, nodup_cont) <- prepareCaseCont env alts cont
-
-        -- Simplify the alternatives
-        ; (scrut', case_bndr', alts') <- simplAlts env' scrut case_bndr alts dup_cont
-
-	-- Check for empty alternatives
-	; if null alts' then
-		-- This isn't strictly an error, although it is unusual. 
-		-- It's possible that the simplifer might "see" that 
-		-- an inner case has no accessible alternatives before 
-		-- it "sees" that the entire branch of an outer case is 
-		-- inaccessible.  So we simply put an error case here instead.
-	    pprTrace "mkCase: null alts" (ppr case_bndr <+> ppr scrut) $
-	    let res_ty' = contResultType env' (substTy env' (coreAltsType alts)) dup_cont
-		lit = mkStringLit "Impossible alternative"
-	    in return (env', mkApps (Var rUNTIME_ERROR_ID) [Type res_ty', lit])
-
-	  else do
-	{ case_expr <- mkCase scrut' case_bndr' alts'
-
-	-- Notice that rebuild gets the in-scope set from env, not alt_env
-	-- The case binder *not* scope over the whole returned case-expression
-	; rebuild env' case_expr nodup_cont } }
-\end{code}
-
-simplCaseBinder checks whether the scrutinee is a variable, v.  If so,
-try to eliminate uses of v in the RHSs in favour of case_bndr; that
-way, there's a chance that v will now only be used once, and hence
-inlined.
-
-Note [no-case-of-case]
-~~~~~~~~~~~~~~~~~~~~~~
-We *used* to suppress the binder-swap in case expressoins when 
--fno-case-of-case is on.  Old remarks:
-    "This happens in the first simplifier pass,
-    and enhances full laziness.  Here's the bad case:
-            f = \ y -> ...(case x of I# v -> ...(case x of ...) ... )
-    If we eliminate the inner case, we trap it inside the I# v -> arm,
-    which might prevent some full laziness happening.  I've seen this
-    in action in spectral/cichelli/Prog.hs:
-             [(m,n) | m <- [1..max], n <- [1..max]]
-    Hence the check for NoCaseOfCase."
-However, now the full-laziness pass itself reverses the binder-swap, so this
-check is no longer necessary.
-
-Note [Suppressing the case binder-swap]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-There is another situation when it might make sense to suppress the
-case-expression binde-swap. If we have
-
-    case x of w1 { DEFAULT -> case x of w2 { A -> e1; B -> e2 }
-                   ...other cases .... }
-
-We'll perform the binder-swap for the outer case, giving
-
-    case x of w1 { DEFAULT -> case w1 of w2 { A -> e1; B -> e2 }
-                   ...other cases .... }
-
-But there is no point in doing it for the inner case, because w1 can't
-be inlined anyway.  Furthermore, doing the case-swapping involves
-zapping w2's occurrence info (see paragraphs that follow), and that
-forces us to bind w2 when doing case merging.  So we get
-
-    case x of w1 { A -> let w2 = w1 in e1
-                   B -> let w2 = w1 in e2
-                   ...other cases .... }
-
-This is plain silly in the common case where w2 is dead.
-
-Even so, I can't see a good way to implement this idea.  I tried
-not doing the binder-swap if the scrutinee was already evaluated
-but that failed big-time:
-
-        data T = MkT !Int
-
-        case v of w  { MkT x ->
-        case x of x1 { I# y1 ->
-        case x of x2 { I# y2 -> ...
-
-Notice that because MkT is strict, x is marked "evaluated".  But to
-eliminate the last case, we must either make sure that x (as well as
-x1) has unfolding MkT y1.  THe straightforward thing to do is to do
-the binder-swap.  So this whole note is a no-op.
-
-Note [zapOccInfo]
-~~~~~~~~~~~~~~~~~
-If we replace the scrutinee, v, by tbe case binder, then we have to nuke
-any occurrence info (eg IAmDead) in the case binder, because the
-case-binder now effectively occurs whenever v does.  AND we have to do
-the same for the pattern-bound variables!  Example:
-
-        (case x of { (a,b) -> a }) (case x of { (p,q) -> q })
-
-Here, b and p are dead.  But when we move the argment inside the first
-case RHS, and eliminate the second case, we get
-
-        case x of { (a,b) -> a b }
-
-Urk! b is alive!  Reason: the scrutinee was a variable, and case elimination
-happened.
-
-Indeed, this can happen anytime the case binder isn't dead:
-        case <any> of x { (a,b) ->
-        case x of { (p,q) -> p } }
-Here (a,b) both look dead, but come alive after the inner case is eliminated.
-The point is that we bring into the envt a binding
-        let x = (a,b)
-after the outer case, and that makes (a,b) alive.  At least we do unless
-the case binder is guaranteed dead.
-
-Note [Case of cast]
-~~~~~~~~~~~~~~~~~~~
-Consider        case (v `cast` co) of x { I# ->
-                ... (case (v `cast` co) of {...}) ...
-We'd like to eliminate the inner case.  We can get this neatly by
-arranging that inside the outer case we add the unfolding
-        v |-> x `cast` (sym co)
-to v.  Then we should inline v at the inner case, cancel the casts, and away we go
-
-Note [Improving seq]
-~~~~~~~~~~~~~~~~~~~
-Consider
-        type family F :: * -> *
-        type instance F Int = Int
-
-        ... case e of x { DEFAULT -> rhs } ...
-
-where x::F Int.  Then we'd like to rewrite (F Int) to Int, getting
-
-        case e `cast` co of x'::Int
-           I# x# -> let x = x' `cast` sym co
-                    in rhs
-
-so that 'rhs' can take advantage of the form of x'.  Notice that Note
-[Case of cast] may then apply to the result.
-
-This showed up in Roman's experiments.  Example:
-  foo :: F Int -> Int -> Int
-  foo t n = t `seq` bar n
-     where
-       bar 0 = 0
-       bar n = bar (n - case t of TI i -> i)
-Here we'd like to avoid repeated evaluating t inside the loop, by
-taking advantage of the `seq`.
-
-At one point I did transformation in LiberateCase, but it's more robust here.
-(Otherwise, there's a danger that we'll simply drop the 'seq' altogether, before
-LiberateCase gets to see it.)
 
 Note [Case elimination]
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -1506,35 +1333,187 @@ wrong to drop even unnecessary evaluations, and in practice they
 may be a result of 'seq' so we *definitely* don't want to drop those.
 I don't really know how to improve this situation.
 
+\begin{code}
+---------------------------------------------------------
+--      Eliminate the case if possible
+
+rebuildCase, reallyRebuildCase
+   :: SimplEnv
+   -> OutExpr          -- Scrutinee
+   -> InId             -- Case binder
+   -> [InAlt]          -- Alternatives (inceasing order)
+   -> SimplCont
+   -> SimplM (SimplEnv, OutExpr)
+
+--------------------------------------------------
+--      1. Eliminate the case if there's a known constructor
+--------------------------------------------------
+
+rebuildCase env scrut case_bndr alts cont
+  | Just (con,args) <- exprIsConApp_maybe scrut
+        -- Works when the scrutinee is a variable with a known unfolding
+        -- as well as when it's an explicit constructor application
+  = knownCon env scrut (DataAlt con) args case_bndr alts cont
+
+  | Lit lit <- scrut    -- No need for same treatment as constructors
+                        -- because literals are inlined more vigorously
+  = knownCon env scrut (LitAlt lit) [] case_bndr alts cont
+
+
+--------------------------------------------------
+--      2. Eliminate the case if scrutinee is evaluated
+--------------------------------------------------
+
+rebuildCase env scrut case_bndr [(_, bndrs, rhs)] cont
+  -- See if we can get rid of the case altogether
+  -- See Note [Case eliminiation] 
+  -- mkCase made sure that if all the alternatives are equal,
+  -- then there is now only one (DEFAULT) rhs
+ | all isDeadBinder bndrs       -- bndrs are [InId]
+
+        -- Check that the scrutinee can be let-bound instead of case-bound
+ , exprOkForSpeculation scrut
+                -- OK not to evaluate it
+                -- This includes things like (==# a# b#)::Bool
+                -- so that we simplify
+                --      case ==# a# b# of { True -> x; False -> x }
+                -- to just
+                --      x
+                -- This particular example shows up in default methods for
+                -- comparision operations (e.g. in (>=) for Int.Int32)
+        || exprIsHNF scrut                      -- It's already evaluated
+        || var_demanded_later scrut             -- It'll be demanded later
+
+--      || not opt_SimplPedanticBottoms)        -- Or we don't care!
+--      We used to allow improving termination by discarding cases, unless -fpedantic-bottoms was on,
+--      but that breaks badly for the dataToTag# primop, which relies on a case to evaluate
+--      its argument:  case x of { y -> dataToTag# y }
+--      Here we must *not* discard the case, because dataToTag# just fetches the tag from
+--      the info pointer.  So we'll be pedantic all the time, and see if that gives any
+--      other problems
+--      Also we don't want to discard 'seq's
+  = do  { tick (CaseElim case_bndr)
+        ; env' <- simplNonRecX env case_bndr scrut
+        ; simplExprF env' rhs cont }
+  where
+        -- The case binder is going to be evaluated later,
+        -- and the scrutinee is a simple variable
+    var_demanded_later (Var v) = isStrictDmd (idNewDemandInfo case_bndr)
+                                 && not (isTickBoxOp v)
+                                    -- ugly hack; covering this case is what
+                                    -- exprOkForSpeculation was intended for.
+    var_demanded_later _       = False
+
+rebuildCase env scrut case_bndr alts@[(_, bndrs, rhs)] cont
+  | all isDeadBinder (case_bndr : bndrs)  -- So this is just 'seq'
+  = 	-- For this case, see Note [Rules for seq] in MkId
+    do { let rhs' = substExpr env rhs
+             out_args = [Type (substTy env (idType case_bndr)), 
+	     	         Type (exprType rhs'), scrut, rhs']
+	     	      -- Lazily evaluated, so we don't do most of this
+       ; mb_rule <- tryRules env seqId out_args cont
+       ; case mb_rule of 
+           Just (n_args, res) -> simplExprF (zapSubstEnv env) 
+	   	       		    	    (mkApps res (drop n_args out_args))
+                                            cont
+	   Nothing -> reallyRebuildCase env scrut case_bndr alts cont }
+
+rebuildCase env scrut case_bndr alts cont
+  = reallyRebuildCase env scrut case_bndr alts cont
+
+--------------------------------------------------
+--      3. Catch-all case
+--------------------------------------------------
+
+reallyRebuildCase env scrut case_bndr alts cont
+  = do  {       -- Prepare the continuation;
+                -- The new subst_env is in place
+          (env', dup_cont, nodup_cont) <- prepareCaseCont env alts cont
+
+        -- Simplify the alternatives
+        ; (scrut', case_bndr', alts') <- simplAlts env' scrut case_bndr alts dup_cont
+
+	-- Check for empty alternatives
+	; if null alts' then missingAlt env case_bndr alts cont
+	  else do
+	{ case_expr <- mkCase scrut' case_bndr' alts'
+
+	-- Notice that rebuild gets the in-scope set from env, not alt_env
+	-- The case binder *not* scope over the whole returned case-expression
+	; rebuild env' case_expr nodup_cont } }
+\end{code}
+
+simplCaseBinder checks whether the scrutinee is a variable, v.  If so,
+try to eliminate uses of v in the RHSs in favour of case_bndr; that
+way, there's a chance that v will now only be used once, and hence
+inlined.
+
+Historical note: we use to do the "case binder swap" in the Simplifier
+so there were additional complications if the scrutinee was a variable.
+Now the binder-swap stuff is done in the occurrence analyer; see
+OccurAnal Note [Binder swap].
+
+Note [zapOccInfo]
+~~~~~~~~~~~~~~~~~
+If the case binder is not dead, then neither are the pattern bound
+variables:  
+        case <any> of x { (a,b) ->
+        case x of { (p,q) -> p } }
+Here (a,b) both look dead, but come alive after the inner case is eliminated.
+The point is that we bring into the envt a binding
+        let x = (a,b)
+after the outer case, and that makes (a,b) alive.  At least we do unless
+the case binder is guaranteed dead.
+
+Note [Improving seq]
+~~~~~~~~~~~~~~~~~~~
+Consider
+        type family F :: * -> *
+        type instance F Int = Int
+
+        ... case e of x { DEFAULT -> rhs } ...
+
+where x::F Int.  Then we'd like to rewrite (F Int) to Int, getting
+
+        case e `cast` co of x'::Int
+           I# x# -> let x = x' `cast` sym co
+                    in rhs
+
+so that 'rhs' can take advantage of the form of x'.  Notice that Note
+[Case of cast] may then apply to the result.
+
+This showed up in Roman's experiments.  Example:
+  foo :: F Int -> Int -> Int
+  foo t n = t `seq` bar n
+     where
+       bar 0 = 0
+       bar n = bar (n - case t of TI i -> i)
+Here we'd like to avoid repeated evaluating t inside the loop, by
+taking advantage of the `seq`.
+
+At one point I did transformation in LiberateCase, but it's more robust here.
+(Otherwise, there's a danger that we'll simply drop the 'seq' altogether, before
+LiberateCase gets to see it.)
+
+
+
 
 \begin{code}
-simplCaseBinder :: SimplEnv -> OutExpr -> OutId -> [InAlt]
-                -> SimplM (SimplEnv, OutExpr, OutId)
-simplCaseBinder env0 scrut0 case_bndr0 alts
-  = do  { (env1, case_bndr1) <- simplBinder env0 case_bndr0
+improveSeq :: (FamInstEnv, FamInstEnv) -> SimplEnv
+	   -> OutExpr -> InId -> OutId -> [InAlt]
+	   -> SimplM (SimplEnv, OutExpr, OutId)
+-- Note [Improving seq]
+improveSeq fam_envs env scrut case_bndr case_bndr1 [(DEFAULT,_,_)]
+  | Just (co, ty2) <- topNormaliseType fam_envs (idType case_bndr1)
+  =  do { case_bndr2 <- newId (fsLit "nt") ty2
+        ; let rhs  = DoneEx (Var case_bndr2 `Cast` mkSymCoercion co)
+              env2 = extendIdSubst env case_bndr rhs
+        ; return (env2, scrut `Cast` co, case_bndr2) }
 
-        ; fam_envs <- getFamEnvs
-        ; (env2, scrut2, case_bndr2) <- improve_seq fam_envs env1 scrut0
-                                                case_bndr0 case_bndr1 alts
-                        -- Note [Improving seq]
+improveSeq _ env scrut _ case_bndr1 _
+  = return (env, scrut, case_bndr1)
 
-        ; let (env3, case_bndr3) = improve_case_bndr env2 scrut2 case_bndr2
-                        -- Note [Case of cast]
-
-        ; return (env3, scrut2, case_bndr3) }
-  where
-
-    improve_seq fam_envs env scrut case_bndr case_bndr1 [(DEFAULT,_,_)]
-        | Just (co, ty2) <- topNormaliseType fam_envs (idType case_bndr1)
-        =  do { case_bndr2 <- newId (fsLit "nt") ty2
-              ; let rhs  = DoneEx (Var case_bndr2 `Cast` mkSymCoercion co)
-                    env2 = extendIdSubst env case_bndr rhs
-              ; return (env2, scrut `Cast` co, case_bndr2) }
-
-    improve_seq _ env scrut _ case_bndr1 _
-        = return (env, scrut, case_bndr1)
-
-
+{-
     improve_case_bndr env scrut case_bndr
         -- See Note [no-case-of-case]
 	--  | switchIsOn (getSwitchChecker env) NoCaseOfCase
@@ -1555,12 +1534,9 @@ simplCaseBinder env0 scrut0 case_bndr0 alts
 
             _ -> (env, case_bndr)
         where
-          case_bndr' = zapOccInfo case_bndr
+          case_bndr' = zapIdOccInfo case_bndr
           env1       = modifyInScope env case_bndr case_bndr'
-
-
-zapOccInfo :: InId -> InId      -- See Note [zapOccInfo]
-zapOccInfo b = b `setIdOccInfo` NoOccInfo
+-}
 \end{code}
 
 
@@ -1616,10 +1592,15 @@ simplAlts :: SimplEnv
 
 simplAlts env scrut case_bndr alts cont'
   = -- pprTrace "simplAlts" (ppr alts $$ ppr (seIdSubst env)) $
-    do  { let alt_env = zapFloats env
-        ; (alt_env', scrut', case_bndr') <- simplCaseBinder alt_env scrut case_bndr alts
+    do  { let env0 = zapFloats env
 
-        ; (imposs_deflt_cons, in_alts) <- prepareAlts alt_env' scrut case_bndr' alts
+        ; (env1, case_bndr1) <- simplBinder env0 case_bndr
+
+        ; fam_envs <- getFamEnvs
+	; (alt_env', scrut', case_bndr') <- improveSeq fam_envs env1 scrut 
+						       case_bndr case_bndr1 alts
+
+        ; (imposs_deflt_cons, in_alts) <- prepareAlts alt_env' scrut' case_bndr' alts
 
         ; alts' <- mapM (simplAlt alt_env' imposs_deflt_cons case_bndr' cont') in_alts
         ; return (scrut', case_bndr', alts') }
@@ -1685,6 +1666,7 @@ simplAlt env _ case_bndr' cont' (DataAlt con, vs, rhs)
               evald_v  = zapped_v `setIdUnfolding` evaldUnfolding
           go _ _ = pprPanic "cat_evals" (ppr con $$ ppr vs $$ ppr the_strs)
 
+	-- See Note [zapOccInfo]
         -- zap_occ_info: if the case binder is alive, then we add the unfolding
         --      case_bndr = C vs
         -- to the envt; so vs are now very much alive
@@ -1692,16 +1674,23 @@ simplAlt env _ case_bndr' cont' (DataAlt con, vs, rhs)
         --        case e of t { (a,b) -> ...(case t of (p,q) -> p)... }
         --   ==>  case e of t { (a,b) -> ...(a)... }
         -- Look, Ma, a is alive now.
-    zap_occ_info | isDeadBinder case_bndr' = \ident -> ident
-                 | otherwise               = zapOccInfo
+    zap_occ_info = zapCasePatIdOcc case_bndr'
 
 addBinderUnfolding :: SimplEnv -> Id -> CoreExpr -> SimplEnv
 addBinderUnfolding env bndr rhs
-  = modifyInScope env bndr (bndr `setIdUnfolding` mkUnfolding False rhs)
+  = modifyInScope env (bndr `setIdUnfolding` mkUnfolding False rhs)
 
 addBinderOtherCon :: SimplEnv -> Id -> [AltCon] -> SimplEnv
 addBinderOtherCon env bndr cons
-  = modifyInScope env bndr (bndr `setIdUnfolding` mkOtherCon cons)
+  = modifyInScope env (bndr `setIdUnfolding` mkOtherCon cons)
+
+zapCasePatIdOcc :: Id -> Id -> Id
+-- Consider  case e of b { (a,b) -> ... }
+-- Then if we bind b to (a,b) in "...", and b is not dead,
+-- then we must zap the deadness info on a,b
+zapCasePatIdOcc case_bndr
+  | isDeadBinder case_bndr = \ pat_id -> pat_id
+  | otherwise	 	   = \ pat_id -> zapIdOccInfo pat_id
 \end{code}
 
 
@@ -1732,28 +1721,19 @@ knownCon :: SimplEnv -> OutExpr -> AltCon
 
 knownCon env scrut con args bndr alts cont
   = do  { tick (KnownBranch bndr)
-        ; knownAlt env scrut args bndr (findAlt con alts) cont }
+        ; case findAlt con alts of
+	    Nothing  -> missingAlt env bndr alts cont
+	    Just alt -> knownAlt env scrut args bndr alt cont
+	}
 
+-------------------
 knownAlt :: SimplEnv -> OutExpr -> [OutExpr]
-         -> InId -> (AltCon, [CoreBndr], InExpr) -> SimplCont
+         -> InId -> InAlt -> SimplCont
          -> SimplM (SimplEnv, OutExpr)
-knownAlt env scrut _ bndr (DEFAULT, bs, rhs) cont
-  = ASSERT( null bs )
-    do  { env' <- simplNonRecX env bndr scrut
-                -- This might give rise to a binding with non-atomic args
-                -- like x = Node (f x) (g x)
-                -- but simplNonRecX will atomic-ify it
-        ; simplExprF env' rhs cont }
-
-knownAlt env scrut _ bndr (LitAlt _, bs, rhs) cont
-  = ASSERT( null bs )
-    do  { env' <- simplNonRecX env bndr scrut
-        ; simplExprF env' rhs cont }
 
 knownAlt env scrut the_args bndr (DataAlt dc, bs, rhs) cont
-  = do  { let dead_bndr  = isDeadBinder bndr    -- bndr is an InId
-              n_drop_tys = length (dataConUnivTyVars dc)
-        ; env' <- bind_args env dead_bndr bs (drop n_drop_tys the_args)
+  = do  { let n_drop_tys = length (dataConUnivTyVars dc)
+        ; env' <- bind_args env bs (drop n_drop_tys the_args)
         ; let
                 -- It's useful to bind bndr to scrut, rather than to a fresh
                 -- binding      x = Con arg1 .. argn
@@ -1770,30 +1750,50 @@ knownAlt env scrut the_args bndr (DataAlt dc, bs, rhs) cont
                                 -- args are aready OutExprs, but bs are InIds
 
         ; env'' <- simplNonRecX env' bndr bndr_rhs
-        ; -- pprTrace "knownCon2" (ppr bs $$ ppr rhs $$ ppr (seIdSubst env'')) $
-          simplExprF env'' rhs cont }
+        ; simplExprF env'' rhs cont }
   where
-    -- Ugh!
-    bind_args env' _ [] _  = return env'
+    zap_occ = zapCasePatIdOcc bndr    -- bndr is an InId
 
-    bind_args env' dead_bndr (b:bs') (Type ty : args)
+                  -- Ugh!
+    bind_args env' [] _  = return env'
+
+    bind_args env' (b:bs') (Type ty : args)
       = ASSERT( isTyVar b )
-        bind_args (extendTvSubst env' b ty) dead_bndr bs' args
+        bind_args (extendTvSubst env' b ty) bs' args
 
-    bind_args env' dead_bndr (b:bs') (arg : args)
+    bind_args env' (b:bs') (arg : args)
       = ASSERT( isId b )
-        do { let b' = if dead_bndr then b else zapOccInfo b
+        do { let b' = zap_occ b
              -- Note that the binder might be "dead", because it doesn't
              -- occur in the RHS; and simplNonRecX may therefore discard
              -- it via postInlineUnconditionally.
              -- Nevertheless we must keep it if the case-binder is alive,
              -- because it may be used in the con_app.  See Note [zapOccInfo]
            ; env'' <- simplNonRecX env' b' arg
-           ; bind_args env'' dead_bndr bs' args }
+           ; bind_args env'' bs' args }
 
-    bind_args _ _ _ _ =
+    bind_args _ _ _ =
       pprPanic "bind_args" $ ppr dc $$ ppr bs $$ ppr the_args $$
                              text "scrut:" <+> ppr scrut
+
+knownAlt env scrut _ bndr (_, bs, rhs) cont
+  = ASSERT( null bs )	  -- Works for LitAlt and DEFAULT
+    do  { env' <- simplNonRecX env bndr scrut
+        ; simplExprF env' rhs cont }
+
+
+-------------------
+missingAlt :: SimplEnv -> Id -> [InAlt] -> SimplCont -> SimplM (SimplEnv, OutExpr)
+   		-- This isn't strictly an error, although it is unusual. 
+		-- It's possible that the simplifer might "see" that 
+		-- an inner case has no accessible alternatives before 
+		-- it "sees" that the entire branch of an outer case is 
+		-- inaccessible.  So we simply put an error case here instead.
+missingAlt env case_bndr alts cont
+  = WARN( True, ptext (sLit "missingAlt") <+> ppr case_bndr )
+    return (env, mkImpossibleExpr res_ty)
+  where
+    res_ty = contResultType env (substTy env (coreAltsType alts)) cont
 \end{code}
 
 
@@ -1832,11 +1832,20 @@ mkDupableCont env (CoerceIt ty cont)
 
 mkDupableCont env cont@(StrictBind {})
   =  return (env, mkBoringStop, cont)
-        -- See Note [Duplicating strict continuations]
+        -- See Note [Duplicating StrictBind]
 
-mkDupableCont env cont@(StrictArg {})
-  =  return (env, mkBoringStop, cont)
-        -- See Note [Duplicating strict continuations]
+mkDupableCont env (StrictArg fun cci ai cont)
+        -- See Note [Duplicating StrictArg]
+  = do { (env', dup, nodup) <- mkDupableCont env cont
+       ; (env'', fun') <- mk_dupable_call env' fun
+       ; return (env'', StrictArg fun' cci ai dup, nodup) }
+  where
+    mk_dupable_call env (Var v)       = return (env, Var v)
+    mk_dupable_call env (App fun arg) = do { (env', fun') <- mk_dupable_call env fun
+                                           ; (env'', arg') <- makeTrivial env' arg
+                                           ; return (env'', fun' `App` arg') }
+    mk_dupable_call _ other = pprPanic "mk_dupable_call" (ppr other)
+	-- The invariant of StrictArg is that the first arg is always an App chain
 
 mkDupableCont env (ApplyTo _ arg se cont)
   =     -- e.g.         [...hole...] (...arg...)
@@ -1948,7 +1957,7 @@ we'd lose that when zapping the subst-env.  We could have a per-alt subst-env,
 but zapping it (as we do in mkDupableCont, the Select case) is safe, and
 at worst delays the join-point inlining.
 
-Note [Small alterantive rhs]
+Note [Small alternative rhs]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 It is worth checking for a small RHS because otherwise we
 get extra let bindings that may cause an extra iteration of the simplifier to
@@ -2017,32 +2026,71 @@ It's a bit silly to add the realWorld dummy arg in this case, making
            True -> $j s
 (the \v alone is enough to make CPR happy) but I think it's rare
 
-Note [Duplicating strict continuations]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Do *not* duplicate StrictBind and StritArg continuations.  We gain
-nothing by propagating them into the expressions, and we do lose a
-lot.  Here's an example:
-        && (case x of { T -> F; F -> T }) E
+Note [Duplicating StrictArg]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The original plan had (where E is a big argument)
+e.g.    f E [..hole..]
+        ==>     let $j = \a -> f E a
+                in $j [..hole..]
+
+But this is terrible! Here's an example:
+        && E (case x of { T -> F; F -> T })
 Now, && is strict so we end up simplifying the case with
 an ArgOf continuation.  If we let-bind it, we get
-
-        let $j = \v -> && v E
+        let $j = \v -> && E v
         in simplExpr (case x of { T -> F; F -> T })
                      (ArgOf (\r -> $j r)
 And after simplifying more we get
-
-        let $j = \v -> && v E
+        let $j = \v -> && E v
         in case x of { T -> $j F; F -> $j T }
 Which is a Very Bad Thing
+
+What we do now is this
+	f E [..hole..]
+ 	==> 	let a = E
+		in f a [..hole..]
+Now if the thing in the hole is a case expression (which is when
+we'll call mkDupableCont), we'll push the function call into the
+branches, which is what we want.  Now RULES for f may fire, and
+call-pattern specialisation.  Here's an example from Trac #3116
+     go (n+1) (case l of
+           	 1  -> bs'
+           	 _  -> Chunk p fpc (o+1) (l-1) bs')
+If we can push the call for 'go' inside the case, we get
+call-pattern specialisation for 'go', which is *crucial* for 
+this program.
+
+Here is the (&&) example: 
+        && E (case x of { T -> F; F -> T })
+  ==>   let a = E in 
+        case x of { T -> && a F; F -> && a T }
+Much better!
+
+Notice that 
+  * Arguments to f *after* the strict one are handled by 
+    the ApplyTo case of mkDupableCont.  Eg
+	f [..hole..] E
+
+  * We can only do the let-binding of E because the function
+    part of a StrictArg continuation is an explicit syntax
+    tree.  In earlier versions we represented it as a function
+    (CoreExpr -> CoreEpxr) which we couldn't take apart.
+
+Do *not* duplicate StrictBind and StritArg continuations.  We gain
+nothing by propagating them into the expressions, and we do lose a
+lot.  
 
 The desire not to duplicate is the entire reason that
 mkDupableCont returns a pair of continuations.
 
-The original plan had:
-e.g.    (...strict-fn...) [...hole...]
-        ==>
-                let $j = \a -> ...strict-fn...
-                in $j [...hole...]
+Note [Duplicating StrictBind]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Unlike StrictArg, there doesn't seem anything to gain from
+duplicating a StrictBind continuation, so we don't.
+
+The desire not to duplicate is the entire reason that
+mkDupableCont returns a pair of continuations.
+
 
 Note [Single-alternative cases]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

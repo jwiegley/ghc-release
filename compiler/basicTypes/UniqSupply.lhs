@@ -30,13 +30,10 @@ import FastTypes
 
 import MonadUtils
 import Control.Monad
-import Control.Monad.Fix
-#if __GLASGOW_HASKELL__ >= 607
-import GHC.IOBase (unsafeDupableInterleaveIO)
+#if __GLASGOW_HASKELL__ >= 611
+import GHC.IO (unsafeDupableInterleaveIO)
 #else
-import System.IO.Unsafe ( unsafeInterleaveIO )
-unsafeDupableInterleaveIO :: IO a -> IO a
-unsafeDupableInterleaveIO = unsafeInterleaveIO
+import GHC.IOBase (unsafeDupableInterleaveIO)
 #endif
 
 \end{code}

@@ -52,16 +52,12 @@ essential to make this work well!
 
 module SAT ( doStaticArgs ) where
 
-import DynFlags
 import Var
 import CoreSyn
-import CoreLint
 import CoreUtils
 import Type
-import TcType
 import Id
 import Name
-import OccName
 import VarEnv
 import UniqSupply
 import Util
@@ -78,11 +74,8 @@ import FastString
 \end{code}
 
 \begin{code}
-doStaticArgs :: DynFlags -> UniqSupply -> [CoreBind] -> IO [CoreBind]
-doStaticArgs dflags us binds = do
-    showPass dflags "Static argument"
-    let binds' = snd $ mapAccumL sat_bind_threaded_us us binds
-    endPass dflags "Static argument" Opt_D_verbose_core2core binds'
+doStaticArgs :: UniqSupply -> [CoreBind] -> [CoreBind]
+doStaticArgs us binds = snd $ mapAccumL sat_bind_threaded_us us binds
   where
     sat_bind_threaded_us us bind =
         let (us1, us2) = splitUniqSupply us

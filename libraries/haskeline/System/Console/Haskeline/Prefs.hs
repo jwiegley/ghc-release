@@ -5,6 +5,7 @@ module System.Console.Haskeline.Prefs(
                         CompletionType(..),
                         BellStyle(..),
                         EditMode(..),
+                        HistoryDuplicates(..),
                         lookupKeyBinding
                         ) where
 
@@ -31,6 +32,7 @@ unparseable lines are ignored.  For example:
 data Prefs = Prefs { bellStyle :: !BellStyle,
                      editMode :: !EditMode,
                      maxHistorySize :: !(Maybe Int),
+                     historyDuplicates :: HistoryDuplicates,
                      completionType :: !CompletionType,
                      completionPaging :: !Bool, 
                         -- ^ When listing completion alternatives, only display
@@ -59,6 +61,9 @@ data BellStyle = NoBell | VisualBell | AudibleBell
 data EditMode = Vi | Emacs
                     deriving (Show,Read)
 
+data HistoryDuplicates = AlwaysAdd | IgnoreConsecutive | IgnoreAll
+                    deriving (Show,Read)
+
 -- | The default preferences which may be overwritten in the
 -- @.haskeline@ file.
 defaultPrefs :: Prefs
@@ -69,6 +74,7 @@ defaultPrefs = Prefs {bellStyle = AudibleBell,
                       completionPaging = True,
                       completionPromptLimit = Just 100,
                       listCompletionsImmediately = True,
+                      historyDuplicates = AlwaysAdd,
                       customBindings = Map.empty,
                       customKeySequences = []
                     }
@@ -90,17 +96,18 @@ settors = [("bellstyle", mkSettor $ \x p -> p {bellStyle = x})
           ,("completionpaging", mkSettor $ \x p -> p {completionPaging = x})
           ,("completionpromptlimit", mkSettor $ \x p -> p {completionPromptLimit = x})
           ,("listcompletionsimmediately", mkSettor $ \x p -> p {listCompletionsImmediately = x})
+          ,("historyduplicates", mkSettor $ \x p -> p {historyDuplicates = x})
           ,("bind", addCustomBinding)
           ,("keyseq", addCustomKeySequence)
           ]
 
 addCustomBinding :: String -> Prefs -> Prefs
-addCustomBinding str p = case sequence $ map parseKey (words str) of
+addCustomBinding str p = case mapM parseKey (words str) of
     Just (k:ks) -> p {customBindings = Map.insert k ks (customBindings p)}
     _ -> p
 
 addCustomKeySequence :: String -> Prefs -> Prefs
-addCustomKeySequence str = maybe id addKS $ maybeParse
+addCustomKeySequence str = maybe id addKS maybeParse
     where
         maybeParse :: Maybe (Maybe String, String,Key)
         maybeParse = case words str of
@@ -121,7 +128,7 @@ lookupKeyBinding k = Map.findWithDefault [k] k . customBindings
 readPrefs :: FilePath -> IO Prefs
 readPrefs file = handle (\(_::IOException) -> return defaultPrefs) $ do
     ls <- fmap lines $ readFile file
-    return $ foldl' applyField defaultPrefs ls
+    return $! foldl' applyField defaultPrefs ls
   where
     applyField p l = case break (==':') l of
                 (name,val)  -> case lookup (map toLower $ trimSpaces name) settors of

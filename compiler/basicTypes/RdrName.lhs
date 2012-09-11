@@ -40,7 +40,7 @@ module RdrName (
 	showRdrName,
 
 	-- * Local mapping of 'RdrName' to 'Name.Name'
-	LocalRdrEnv, emptyLocalRdrEnv, extendLocalRdrEnv,
+	LocalRdrEnv, emptyLocalRdrEnv, extendLocalRdrEnv, extendLocalRdrEnvList,
 	lookupLocalRdrEnv, lookupLocalRdrOcc, elemLocalRdrEnv,
 
 	-- * Global mapping of 'RdrName' to 'GlobalRdrElt's
@@ -48,7 +48,7 @@ module RdrName (
 	lookupGlobalRdrEnv, extendGlobalRdrEnv,
 	pprGlobalRdrEnv, globalRdrEnvElts,
 	lookupGRE_RdrName, lookupGRE_Name, getGRE_NameQualifier_maybes,
-        hideSomeUnquals, findLocalDupsRdrEnv,
+        hideSomeUnquals, findLocalDupsRdrEnv, pickGREs,
 
 	-- ** Global 'RdrName' mapping elements: 'GlobalRdrElt', 'Provenance', 'ImportSpec'
 	GlobalRdrElt(..), isLocalGRE, unQualOK, qualSpecOK, unQualSpecOK,
@@ -143,7 +143,8 @@ setRdrNameSpace :: RdrName -> NameSpace -> RdrName
 setRdrNameSpace (Unqual occ) ns = Unqual (setOccNameSpace ns occ)
 setRdrNameSpace (Qual m occ) ns = Qual m (setOccNameSpace ns occ)
 setRdrNameSpace (Orig m occ) ns = Orig m (setOccNameSpace ns occ)
-setRdrNameSpace (Exact n)    ns = Orig (nameModule n)
+setRdrNameSpace (Exact n)    ns = ASSERT( isExternalName n ) 
+		       	          Orig (nameModule n)
 				       (setOccNameSpace ns (nameOccName n))
 \end{code}
 
@@ -163,7 +164,8 @@ mkOrig mod occ = Orig mod occ
 -- is derived from that of it's parent using the supplied function
 mkDerivedRdrName :: Name -> (OccName -> OccName) -> RdrName
 mkDerivedRdrName parent mk_occ
-  = mkOrig (nameModule parent) (mk_occ (nameOccName parent))
+  = ASSERT2( isExternalName parent, ppr parent )
+    mkOrig (nameModule parent) (mk_occ (nameOccName parent))
 
 ---------------
 	-- These two are used when parsing source files
@@ -249,7 +251,7 @@ instance Outputable RdrName where
     ppr (Exact name)   = ppr name
     ppr (Unqual occ)   = ppr occ
     ppr (Qual mod occ) = ppr mod <> dot <> ppr occ
-    ppr (Orig mod occ) = ppr mod <> dot <> ppr occ
+    ppr (Orig mod occ) = getPprStyle (\sty -> pprModulePrefix sty mod occ <> ppr occ)
 
 instance OutputableBndr RdrName where
     pprBndr _ n 
@@ -314,8 +316,12 @@ type LocalRdrEnv = OccEnv Name
 emptyLocalRdrEnv :: LocalRdrEnv
 emptyLocalRdrEnv = emptyOccEnv
 
-extendLocalRdrEnv :: LocalRdrEnv -> [Name] -> LocalRdrEnv
-extendLocalRdrEnv env names
+extendLocalRdrEnv :: LocalRdrEnv -> Name -> LocalRdrEnv
+extendLocalRdrEnv env name
+  = extendOccEnv env (nameOccName name) name
+
+extendLocalRdrEnvList :: LocalRdrEnv -> [Name] -> LocalRdrEnv
+extendLocalRdrEnvList env names
   = extendOccEnvList env [(nameOccName n, n) | n <- names]
 
 lookupLocalRdrEnv :: LocalRdrEnv -> RdrName -> Maybe Name
@@ -472,7 +478,7 @@ pickGREs rdr_name gres
     pick :: GlobalRdrElt -> Maybe GlobalRdrElt
     pick gre@(GRE {gre_prov = LocalDef, gre_name = n}) 	-- Local def
 	| rdr_is_unqual		 	   = Just gre
-	| Just (mod,_) <- rdr_is_qual 	      	-- Qualified name
+	| Just (mod,_) <- rdr_is_qual 	     -- Qualified name
 	, Just n_mod <- nameModule_maybe n   -- Binder is External
 	, mod == moduleName n_mod  	   = Just gre
 	| otherwise 			   = Nothing
@@ -569,7 +575,7 @@ hideSomeUnquals rdr_env occs
     qual_gre gre@(GRE { gre_name = name, gre_prov = LocalDef })
 	= gre { gre_prov = Imported [imp_spec] }
 	where	-- Local defs get transfomed to (fake) imported things
-	  mod = moduleName (nameModule name)
+	  mod = ASSERT2( isExternalName name, ppr name) moduleName (nameModule name)
 	  imp_spec = ImpSpec { is_item = ImpAll, is_decl = decl_spec }
 	  decl_spec = ImpDeclSpec { is_mod = mod, is_as = mod, 
 				    is_qual = True, 
@@ -614,7 +620,7 @@ data ImpDeclSpec
                                    -- should be a Maybe PackageId here too.
 	is_as       :: ModuleName, -- ^ Import alias, e.g. from @as M@ (or @Muggle@ if there is no @as@ clause)
 	is_qual     :: Bool,	   -- ^ Was this import qualified?
-	is_dloc     :: SrcSpan	   -- ^ The location of the import declaration
+	is_dloc     :: SrcSpan	   -- ^ The location of the entire import declaration
     }
 
 -- | Describes import info a particular Name

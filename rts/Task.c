@@ -8,14 +8,13 @@
  * 
  * -------------------------------------------------------------------------*/
 
+#include "PosixSource.h"
 #include "Rts.h"
+
 #include "RtsUtils.h"
-#include "OSThreads.h"
 #include "Task.h"
 #include "Capability.h"
 #include "Stats.h"
-#include "RtsFlags.h"
-#include "Storage.h"
 #include "Schedule.h"
 #include "Hash.h"
 #include "Trace.h"
@@ -31,6 +30,7 @@ static Task *task_free_list = NULL; // singly-linked
 static nat taskCount;
 static nat tasksRunning;
 static nat workerCount;
+static int tasksInitialized = 0;
 
 /* -----------------------------------------------------------------------------
  * Remembering the current thread's Task
@@ -51,13 +51,11 @@ Task *my_task;
 void
 initTaskManager (void)
 {
-    static int initialized = 0;
-
-    if (!initialized) {
+    if (!tasksInitialized) {
 	taskCount = 0;
 	workerCount = 0;
 	tasksRunning = 0;
-	initialized = 1;
+	tasksInitialized = 1;
 #if defined(THREADED_RTS)
 	newThreadLocalKey(&currentTaskKey);
 #endif
@@ -94,6 +92,8 @@ freeTaskManager (void)
     freeThreadLocalKey(&currentTaskKey);
 #endif
 
+    tasksInitialized = 0;
+
     return tasksRunning;
 }
 
@@ -106,7 +106,8 @@ newTask (void)
 #endif
     Task *task;
 
-    task = stgMallocBytes(sizeof(Task), "newTask");
+#define ROUND_TO_CACHE_LINE(x) ((((x)+63) / 64) * 64)
+    task = stgMallocBytes(ROUND_TO_CACHE_LINE(sizeof(Task)), "newTask");
     
     task->cap  = NULL;
     task->stopped = rtsFalse;
@@ -149,7 +150,17 @@ newBoundTask (void)
 {
     Task *task;
 
-    ASSERT_LOCK_HELD(&sched_mutex);
+    if (!tasksInitialized) {
+        errorBelch("newBoundTask: RTS is not initialised; call hs_init() first");
+        stg_exit(EXIT_FAILURE);
+    }
+
+    // ToDo: get rid of this lock in the common case.  We could store
+    // a free Task in thread-local storage, for example.  That would
+    // leave just one lock on the path into the RTS: cap->lock when
+    // acquiring the Capability.
+    ACQUIRE_LOCK(&sched_mutex);
+
     if (task_free_list == NULL) {
 	task = newTask();
     } else {
@@ -167,6 +178,8 @@ newBoundTask (void)
     tasksRunning++;
 
     taskEnter(task);
+
+    RELEASE_LOCK(&sched_mutex);
 
     debugTrace(DEBUG_sched, "new task (taskCount: %d)", taskCount);
     return task;
@@ -244,15 +257,15 @@ taskTimeStamp (Task *task USED_IF_THREADS)
 #endif
 }
 
+#if defined(THREADED_RTS)
+
 void
 workerTaskStop (Task *task)
 {
-#if defined(THREADED_RTS)
     OSThreadId id;
     id = osThreadId();
     ASSERT(task->id == id);
     ASSERT(myTask() == task);
-#endif
 
     task->cap = NULL;
     taskTimeStamp(task);
@@ -266,12 +279,7 @@ workerTaskStop (Task *task)
     RELEASE_LOCK(&sched_mutex);
 }
 
-void
-resetTaskManagerAfterFork (void)
-{
-    // TODO!
-    taskCount = 0;
-}
+#endif
 
 #if defined(THREADED_RTS)
 

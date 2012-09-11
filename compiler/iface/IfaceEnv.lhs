@@ -14,7 +14,7 @@ module IfaceEnv (
 
 	-- Name-cache stuff
 	allocateGlobalBinder, initNameCache, 
-        getNameCache, setNameCache
+        getNameCache, mkNameCacheUpdater, NameCacheUpdater
    ) where
 
 #include "HsVersions.h"
@@ -26,7 +26,6 @@ import TyCon
 import DataCon
 import Var
 import Name
-import OccName
 import PrelNames
 import Module
 import LazyUniqFM
@@ -38,6 +37,9 @@ import SrcLoc
 import MkId
 
 import Outputable
+import Exception     ( evaluate )
+
+import Data.IORef    ( atomicModifyIORef, readIORef )
 \end{code}
 
 
@@ -57,14 +59,10 @@ newGlobalBinder :: Module -> OccName -> SrcSpan -> TcRnIf a b Name
 -- moment when we know its Module and SrcLoc in their full glory
 
 newGlobalBinder mod occ loc
-  = do	{ mod `seq` occ `seq` return ()	-- See notes with lookupOrig_help
---	; traceIf (text "newGlobalBinder" <+> ppr mod <+> ppr occ <+> ppr loc)
-    	; name_supply <- getNameCache
-	; let (name_supply', name) = allocateGlobalBinder 
-					name_supply mod occ
-					loc
-	; setNameCache name_supply'
-	; return name }
+  = do mod `seq` occ `seq` return ()	-- See notes with lookupOrig
+--     traceIf (text "newGlobalBinder" <+> ppr mod <+> ppr occ <+> ppr loc)
+       updNameCache $ \name_cache ->
+         allocateGlobalBinder name_cache mod occ loc
 
 allocateGlobalBinder
   :: NameCache 
@@ -156,10 +154,10 @@ lookupOrig mod occ
 		-- This did happen, with tycon_mod in TcIface.tcIfaceAlt (DataAlt..)
 	  mod `seq` occ `seq` return ()	
 --	; traceIf (text "lookup_orig" <+> ppr mod <+> ppr occ)
-    
-	; name_cache <- getNameCache
-    	; case lookupOrigNameCache (nsNames name_cache) mod occ of {
-	      Just name -> return name;
+
+        ; updNameCache $ \name_cache ->
+            case lookupOrigNameCache (nsNames name_cache) mod occ of {
+	      Just name -> (name_cache, name);
 	      Nothing   ->
               let
                 us        = nsUniqs name_cache
@@ -168,27 +166,25 @@ lookupOrig mod occ
                 new_cache = extendNameCache (nsNames name_cache) mod occ name
               in
               case splitUniqSupply us of { (us',_) -> do
-                setNameCache name_cache{ nsUniqs = us', nsNames = new_cache }
-                return name
+                (name_cache{ nsUniqs = us', nsNames = new_cache }, name)
     }}}
 
 newIPName :: IPName OccName -> TcRnIf m n (IPName Name)
-newIPName occ_name_ip = do
-    name_supply <- getNameCache
+newIPName occ_name_ip =
+  updNameCache $ \name_cache ->
     let
-	ipcache = nsIPs name_supply
+	ipcache = nsIPs name_cache
+        key = occ_name_ip  -- Ensures that ?x and %x get distinct Names
+    in
     case lookupFM ipcache key of
-	Just name_ip -> return name_ip
-	Nothing      -> do setNameCache new_ns
-		           return name_ip
-		  where
-		     (us', us1)  = splitUniqSupply (nsUniqs name_supply)
-		     uniq   	 = uniqFromSupply us1
-		     name_ip	 = mapIPName (mkIPName uniq) occ_name_ip
-		     new_ipcache = addToFM ipcache key name_ip
-		     new_ns	 = name_supply {nsUniqs = us', nsIPs = new_ipcache}
-    where 
-	key = occ_name_ip	-- Ensures that ?x and %x get distinct Names
+      Just name_ip -> (name_cache, name_ip)
+      Nothing      -> (new_ns, name_ip)
+	  where
+	    (us', us1)  = splitUniqSupply (nsUniqs name_cache)
+	    uniq        = uniqFromSupply us1
+	    name_ip     = mapIPName (mkIPName uniq) occ_name_ip
+	    new_ipcache = addToFM ipcache key name_ip
+	    new_ns      = name_cache {nsUniqs = us', nsIPs = new_ipcache}
 \end{code}
 
 %************************************************************************
@@ -219,7 +215,8 @@ lookupOrigNameCache nc mod occ	-- The normal case
 
 extendOrigNameCache :: OrigNameCache -> Name -> OrigNameCache
 extendOrigNameCache nc name 
-  = extendNameCache nc (nameModule name) (nameOccName name) name
+  = ASSERT2( isExternalName name, ppr name ) 
+    extendNameCache nc (nameModule name) (nameOccName name) name
 
 extendNameCache :: OrigNameCache -> Module -> OccName -> Name -> OrigNameCache
 extendNameCache nc mod occ name
@@ -231,9 +228,24 @@ getNameCache :: TcRnIf a b NameCache
 getNameCache = do { HscEnv { hsc_NC = nc_var } <- getTopEnv; 
 		    readMutVar nc_var }
 
-setNameCache :: NameCache -> TcRnIf a b ()
-setNameCache nc = do { HscEnv { hsc_NC = nc_var } <- getTopEnv; 
-		       writeMutVar nc_var nc }
+updNameCache :: (NameCache -> (NameCache, c)) -> TcRnIf a b c
+updNameCache upd_fn = do
+  HscEnv { hsc_NC = nc_var } <- getTopEnv
+  atomicUpdMutVar' nc_var upd_fn
+
+-- | A function that atomically updates the name cache given a modifier
+-- function.  The second result of the modifier function will be the result
+-- of the IO action.
+type NameCacheUpdater c = (NameCache -> (NameCache, c)) -> IO c
+
+-- | Return a function to atomically update the name cache.
+mkNameCacheUpdater :: TcRnIf a b (NameCacheUpdater c)
+mkNameCacheUpdater = do
+  nc_var <- hsc_NC `fmap` getTopEnv
+  let update_nc f = do r <- atomicModifyIORef nc_var f
+                       _ <- evaluate =<< readIORef nc_var
+                       return r
+  return update_nc
 \end{code}
 
 

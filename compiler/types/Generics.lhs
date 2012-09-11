@@ -18,13 +18,11 @@ module Generics ( canDoGenerics, mkTyConGenericBinds,
 
 import HsSyn
 import Type
-import TcHsSyn
 import TcType
 import DataCon
 
 import TyCon
 import Name
-import OccName
 import RdrName
 import BasicTypes
 import Var
@@ -398,7 +396,7 @@ mkGenericNames tycon
   where
     tc_name  = tyConName tycon
     tc_occ   = nameOccName tc_name
-    tc_mod   = nameModule tc_name
+    tc_mod   = ASSERT( isExternalName tc_name ) nameModule tc_name
     from_RDR = mkOrig tc_mod (mkGenOcc1 tc_occ)
     to_RDR   = mkOrig tc_mod (mkGenOcc2 tc_occ)
 \end{code}
@@ -545,14 +543,14 @@ bimapArrow [ep1, ep2]
 -- bimapTuple :: [EP a1 b1, ... EP an bn] -> EP (a1,...an) (b1,..bn)
 bimapTuple :: [EP (LHsExpr RdrName)] -> EP (LHsExpr RdrName)
 bimapTuple eps 
-  = EP { fromEP = mkHsLam [noLoc tuple_pat] (noLoc from_body),
-	 toEP   = mkHsLam [noLoc tuple_pat] (noLoc to_body) }
+  = EP { fromEP = mkHsLam [noLoc tuple_pat] from_body,
+	 toEP   = mkHsLam [noLoc tuple_pat] to_body }
   where
     names	= takeList eps gs_RDR
     tuple_pat	= TuplePat (map nlVarPat names) Boxed placeHolderType
     eps_w_names = eps `zip` names
-    to_body     = ExplicitTuple [toEP   ep `mkHsApp` nlHsVar g | (ep,g) <- eps_w_names] Boxed
-    from_body   = ExplicitTuple [fromEP ep `mkHsApp` nlHsVar g | (ep,g) <- eps_w_names] Boxed
+    to_body     = mkLHsTupleExpr [toEP   ep `mkHsApp` nlHsVar g | (ep,g) <- eps_w_names]
+    from_body   = mkLHsTupleExpr [fromEP ep `mkHsApp` nlHsVar g | (ep,g) <- eps_w_names]
 
 -------------------
 -- bimapList :: EP a b -> EP [a] [b]

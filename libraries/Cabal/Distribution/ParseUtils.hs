@@ -69,13 +69,15 @@ module Distribution.ParseUtils (
 import Distribution.Compiler (CompilerFlavor, parseCompilerFlavorCompat)
 import Distribution.License
 import Distribution.Version
+         ( Version(..), VersionRange, anyVersion )
 import Distribution.Package     ( PackageName(..), Dependency(..) )
 import Distribution.ModuleName (ModuleName)
 import Distribution.Compat.ReadP as ReadP hiding (get)
 import Distribution.ReadE
 import Distribution.Text
          ( Text(..) )
-import Distribution.Simple.Utils (intercalate, lowercase)
+import Distribution.Simple.Utils
+         ( intercalate, lowercase, normaliseLineEndings )
 import Language.Haskell.Extension (Extension)
 
 import Text.PrettyPrint.HughesPJ hiding (braces)
@@ -262,7 +264,7 @@ ppField :: String -> Doc -> Doc
 ppField name fielddoc = text name <> colon <+> fielddoc
 
 showFields :: [FieldDescr a] -> a -> String
-showFields fields = render . ppFields fields
+showFields fields = render . ($+$ text "") . ppFields fields
 
 showSingleNamedField :: [FieldDescr a] -> String -> Maybe (a -> String)
 showSingleNamedField fields f =
@@ -427,13 +429,6 @@ trimLeading  = dropWhile isSpace
 trimTrailing = reverse . dropWhile isSpace . reverse
 
 
--- | Fix different systems silly line ending conventions
-normaliseLineEndings :: String -> String
-normaliseLineEndings [] = []
-normaliseLineEndings ('\r':'\n':s) = '\n' : normaliseLineEndings s -- windows
-normaliseLineEndings ('\r':s)      = '\n' : normaliseLineEndings s -- old osx
-normaliseLineEndings (  c :s)      =   c  : normaliseLineEndings s
-
 type SyntaxTree = Tree (LineNo, HasTabs, String)
 
 -- | Parse the stream of tokens into a tree of them, based on indent \/ layout
@@ -569,7 +564,7 @@ parseFilePathQ = parseTokenQ
 parseBuildTool :: ReadP r Dependency
 parseBuildTool = do name <- parseBuildToolNameQ
                     skipSpaces
-                    ver <- parseVersionRangeQ <++ return AnyVersion
+                    ver <- parseVersionRangeQ <++ return anyVersion
                     skipSpaces
                     return $ Dependency name ver
 
@@ -590,7 +585,7 @@ parseBuildToolName = do ns <- sepBy1 component (ReadP.char '-')
 parsePkgconfigDependency :: ReadP r Dependency
 parsePkgconfigDependency = do name <- munch1 (\c -> isAlphaNum c || c `elem` "+-._")
                               skipSpaces
-                              ver <- parseVersionRangeQ <++ return AnyVersion
+                              ver <- parseVersionRangeQ <++ return anyVersion
                               skipSpaces
                               return $ Dependency (PackageName name) ver
 
@@ -609,7 +604,7 @@ parseTestedWithQ :: ReadP r (CompilerFlavor,VersionRange)
 parseTestedWithQ = parseQuoted tw <++ tw
   where tw = do compiler <- parseCompilerFlavorCompat
                 skipSpaces
-                version <- parse <++ return AnyVersion
+                version <- parse <++ return anyVersion
                 skipSpaces
                 return (compiler,version)
 

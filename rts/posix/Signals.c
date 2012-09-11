@@ -6,18 +6,15 @@
  *
  * ---------------------------------------------------------------------------*/
 
-/* This is non-Posix-compliant.
-   #include "PosixSource.h" 
-*/
+#include "PosixSource.h" 
 #include "Rts.h"
-#include "SchedAPI.h"
+
 #include "Schedule.h"
 #include "RtsSignals.h"
-#include "posix/Signals.h"
+#include "Signals.h"
 #include "RtsUtils.h"
-#include "RtsFlags.h"
 #include "Prelude.h"
-#include "ThrIOManager.h"
+#include "Stable.h"
 
 #ifdef alpha_HOST_ARCH
 # if defined(linux_HOST_OS)
@@ -89,38 +86,59 @@ static int io_manager_pipe = -1;
 
 #define IO_MANAGER_WAKEUP 0xff
 #define IO_MANAGER_DIE    0xfe
+#define IO_MANAGER_SYNC   0xfd
 
 void
 setIOManagerPipe (int fd)
 {
     // only called when THREADED_RTS, but unconditionally
     // compiled here because GHC.Conc depends on it.
-    if (io_manager_pipe < 0) {
-        io_manager_pipe = fd;
+    io_manager_pipe = fd;
+}
+
+void
+ioManagerWakeup (void)
+{
+    int r;
+    // Wake up the IO Manager thread by sending a byte down its pipe
+    if (io_manager_pipe >= 0) {
+	StgWord8 byte = (StgWord8)IO_MANAGER_WAKEUP;
+	r = write(io_manager_pipe, &byte, 1);
+        if (r == -1) { sysErrorBelch("ioManagerWakeup: write"); }
+    }
+}
+
+void
+ioManagerSync (void)
+{
+    int r;
+    // Wake up the IO Manager thread by sending a byte down its pipe
+    if (io_manager_pipe >= 0) {
+	StgWord8 byte = (StgWord8)IO_MANAGER_SYNC;
+	r = write(io_manager_pipe, &byte, 1);
+        if (r == -1) { sysErrorBelch("ioManagerSync: write"); }
     }
 }
 
 #if defined(THREADED_RTS)
 void
-ioManagerWakeup (void)
-{
-    // Wake up the IO Manager thread by sending a byte down its pipe
-    if (io_manager_pipe >= 0) {
-	StgWord8 byte = (StgWord8)IO_MANAGER_WAKEUP;
-	write(io_manager_pipe, &byte, 1);
-    }
-}
-
-void
 ioManagerDie (void)
 {
+    int r;
     // Ask the IO Manager thread to exit
     if (io_manager_pipe >= 0) {
 	StgWord8 byte = (StgWord8)IO_MANAGER_DIE;
-	write(io_manager_pipe, &byte, 1);
-    close(io_manager_pipe);
-    io_manager_pipe = -1;
+	r = write(io_manager_pipe, &byte, 1);
+        if (r == -1) { sysErrorBelch("ioManagerDie: write"); }
+        close(io_manager_pipe);
+        io_manager_pipe = -1;
     }
+}
+
+Capability *
+ioManagerStartCap (Capability *cap)
+{
+    return rts_evalIO(cap,&base_GHCziConc_ensureIOManagerIsRunning_closure,NULL);
 }
 
 void
@@ -130,7 +148,7 @@ ioManagerStart (void)
     Capability *cap;
     if (io_manager_pipe < 0) {
 	cap = rts_lock();
-	cap = rts_evalIO(cap,&base_GHCziConc_ensureIOManagerIsRunning_closure,NULL);
+	cap = ioManagerStartCap(cap);
 	rts_unlock(cap);
     }
 }
@@ -157,8 +175,6 @@ generic_handler(int sig USED_IF_THREADS,
                 siginfo_t *info,
                 void *p STG_UNUSED)
 {
-    sigset_t signals;
-
 #if defined(THREADED_RTS)
 
     if (io_manager_pipe != -1)
@@ -168,7 +184,7 @@ generic_handler(int sig USED_IF_THREADS,
 
         buf[0] = sig;
         memcpy(buf+1, info, sizeof(siginfo_t));
-        r = write(io_manager_pipe, buf, sizeof(siginfo_t)+1);
+	r = write(io_manager_pipe, buf, sizeof(siginfo_t)+1);
         if (r == -1 && errno == EAGAIN)
         {
             errorBelch("lost signal due to full pipe: %d\n", sig);
@@ -218,14 +234,9 @@ generic_handler(int sig USED_IF_THREADS,
 	stg_exit(EXIT_FAILURE);
     }
     
-    MainCapability.context_switch = 1;
+    contextSwitchCapability(&MainCapability);
 
 #endif /* THREADED_RTS */
-
-    // re-establish the signal handler, and carry on
-    sigemptyset(&signals);
-    sigaddset(&signals, sig);
-    sigprocmask(SIG_UNBLOCK, &signals, NULL);
 }
 
 /* -----------------------------------------------------------------------------
@@ -240,7 +251,7 @@ initUserSignals(void)
 {
     sigemptyset(&userSignals);
 #ifndef THREADED_RTS
-    getStablePtr((StgPtr)&base_GHCziConc_runHandlers_closure);
+    getStablePtr((StgPtr)&base_GHCziConc_runHandlers_closure); 
     // needed to keep runHandler alive
 #endif
 }
@@ -279,7 +290,7 @@ awaitUserSignals(void)
  * We should really do this in Haskell in GHC.Conc, and share the
  * signal_handlers array with the one there.
  *
-* -------------------------------------------------------------------------- */
+ * -------------------------------------------------------------------------- */
 
 int
 stg_sig_install(int sig, int spi, void *mask)
@@ -314,7 +325,7 @@ stg_sig_install(int sig, int spi, void *mask)
         action.sa_flags |= SA_RESETHAND;
         /* fall through */
     case STG_SIG_HAN:
-        action.sa_sigaction = generic_handler;
+    	action.sa_sigaction = generic_handler;
         action.sa_flags |= SA_SIGINFO;
     	break;
 
@@ -340,14 +351,14 @@ stg_sig_install(int sig, int spi, void *mask)
     switch(spi) {
     case STG_SIG_RST:
     case STG_SIG_HAN:
-       sigaddset(&userSignals, sig);
+	sigaddset(&userSignals, sig);
         if (previous_spi != STG_SIG_HAN && previous_spi != STG_SIG_RST) {
             n_haskell_handlers++;
         }
-       break;
+    	break;
 
     default:
-       sigdelset(&userSignals, sig);
+	sigdelset(&userSignals, sig);
         if (previous_spi == STG_SIG_HAN || previous_spi == STG_SIG_RST) {
             n_haskell_handlers--;
         }
@@ -357,7 +368,7 @@ stg_sig_install(int sig, int spi, void *mask)
     if (sigprocmask(SIG_SETMASK, &osignals, NULL))
     {
         errorBelch("sigprocmask");
-       return STG_SIG_ERR;
+	return STG_SIG_ERR;
     }
 
     return previous_spi;
@@ -385,7 +396,7 @@ startSignalHandlers(Capability *cap)
         continue; // handler has been changed.
     }
 
-    info = stgMallocBytes(sizeof(siginfo_t), "startSignalHandlers");
+    info = stgMallocBytes(sizeof(siginfo_t), "startSignalHandlers"); 
            // freed by runHandler
     memcpy(info, next_pending_handler, sizeof(siginfo_t));
 
@@ -397,7 +408,7 @@ startSignalHandlers(Capability *cap)
                                            &base_GHCziConc_runHandlers_closure,
                                            rts_mkPtr(cap, info)),
                                  rts_mkInt(cap, info->si_signo))));
-}
+  }
 
   unblockUserSignals();
 }

@@ -4,13 +4,6 @@
 %
 
 \begin{code}
-{-# OPTIONS -w #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
--- for details
-
 module CgExpr ( cgExpr ) where
 
 #include "HsVersions.h"
@@ -19,6 +12,7 @@ import Constants
 import StgSyn
 import CgMonad
 
+import CostCentre
 import SMRep
 import CoreSyn
 import CgProf
@@ -28,7 +22,6 @@ import CgCase
 import CgClosure
 import CgCon
 import CgLetNoEscape
-import CgCallConv
 import CgTailCall
 import CgInfoTbls
 import CgForeignCall
@@ -37,7 +30,7 @@ import CgHpc
 import CgUtils
 import ClosureInfo
 import Cmm
-import MachOp
+import CmmUtils
 import VarSet
 import Literal
 import PrimOp
@@ -128,18 +121,15 @@ cgExpr (StgOpApp (StgFCallOp fcall _) stg_args res_ty) = do
 		    | (stg_arg, (rep,expr)) <- stg_args `zip` reps_n_amodes, 
 		      nonVoidArg rep]
 
-    arg_tmps <- sequence [
-                 if isFollowableArg (typeCgRep (stgArgType stg_arg))
-                 then assignPtrTemp arg
-                 else assignNonPtrTemp arg
-                     | (arg, stg_arg) <- arg_exprs]
-    let	arg_hints = zipWith CmmKinded arg_tmps (map (typeHint.stgArgType) stg_args)
+    arg_tmps <- sequence [ assignTemp arg
+                         | (arg, _) <- arg_exprs]
+    let	arg_hints = zipWith CmmHinted arg_tmps (map (typeForeignHint.stgArgType) stg_args)
     {-
 	Now, allocate some result regs.
     -}
     (res_reps,res_regs,res_hints)  <- newUnboxedTupleRegs res_ty
     ccallReturnUnboxedTuple (zip res_reps (map (CmmReg . CmmLocal) res_regs)) $
-	emitForeignCall (zipWith CmmKinded res_regs res_hints) fcall 
+	emitForeignCall (zipWith CmmHinted res_regs res_hints) fcall 
 	   arg_hints emptyVarSet{-no live vars-}
       
 -- tagToEnum# is special: we need to pull the constructor out of the table,
@@ -147,11 +137,8 @@ cgExpr (StgOpApp (StgFCallOp fcall _) stg_args res_ty) = do
 
 cgExpr (StgOpApp (StgPrimOp TagToEnumOp) [arg] res_ty) 
   = ASSERT(isEnumerationTyCon tycon)
-    do	{ (rep,amode) <- getArgAmode arg
-	; amode' <- if isFollowableArg rep
-                    then assignPtrTemp amode
-	            else assignNonPtrTemp amode
-					-- We're going to use it twice,
+    do	{ (_rep,amode) <- getArgAmode arg
+	; amode' <- assignTemp amode	-- We're going to use it twice,
 					-- so save in a temp if non-trivial
 	; stmtC (CmmAssign nodeReg (tagToClosure tycon amode'))
 	; performReturn emitReturnInstr }
@@ -164,7 +151,7 @@ cgExpr (StgOpApp (StgPrimOp TagToEnumOp) [arg] res_ty)
 	tycon = tyConAppTyCon res_ty
 
 
-cgExpr x@(StgOpApp op@(StgPrimOp primop) args res_ty)
+cgExpr (StgOpApp (StgPrimOp primop) args res_ty)
   | primOpOutOfLine primop
 	= tailCallPrimOp primop args
 
@@ -173,9 +160,7 @@ cgExpr x@(StgOpApp op@(StgPrimOp primop) args res_ty)
 	     performReturn emitReturnInstr
 
   | ReturnsPrim rep <- result_info
-	= do res <- if isFollowableArg (typeCgRep res_ty)
-                        then newPtrTemp (argMachRep (typeCgRep res_ty))
-                        else newNonPtrTemp (argMachRep (typeCgRep res_ty))
+	= do res <- newTemp (typeCmmType res_ty)
              cgPrimOp [res] primop args emptyVarSet
 	     performPrimReturn (primRepToCgRep rep) (CmmReg (CmmLocal res))
 
@@ -186,9 +171,7 @@ cgExpr x@(StgOpApp op@(StgPrimOp primop) args res_ty)
 
   | ReturnsAlg tycon <- result_info, isEnumerationTyCon tycon
 	-- c.f. cgExpr (...TagToEnumOp...)
-	= do tag_reg <- if isFollowableArg (typeCgRep res_ty)
-                        then newPtrTemp wordRep
-                        else newNonPtrTemp wordRep
+	= do tag_reg <- newTemp bWord	-- The tag is a word
 	     cgPrimOp [tag_reg] primop args emptyVarSet
 	     stmtC (CmmAssign nodeReg
                     (tagToClosure tycon
@@ -196,6 +179,9 @@ cgExpr x@(StgOpApp op@(StgPrimOp primop) args res_ty)
 	     performReturn emitReturnInstr
   where
 	result_info = getPrimOpResultInfo primop
+
+cgExpr (StgOpApp (StgPrimCallOp primcall) args _res_ty)
+  = tailCallPrimCall primcall args
 \end{code}
 
 %********************************************************
@@ -278,6 +264,16 @@ cgExpr (StgTick m n expr) = do cgTickBox m n; cgExpr expr
 \end{code}
 
 %********************************************************
+%*                                                     *
+%*             Anything else                           *
+%*                                                     *
+%********************************************************
+
+\begin{code}
+cgExpr _ = panic "cgExpr"
+\end{code}
+
+%********************************************************
 %*							*
 %*		Non-top-level bindings			*
 %*							*
@@ -320,14 +316,17 @@ form:
 
 
 \begin{code}
+mkRhsClosure :: Id -> CostCentreStack -> StgBinderInfo
+             -> [Id] -> UpdateFlag -> [Id] -> GenStgExpr Id Id
+             -> FCode (Id, CgIdInfo)
 mkRhsClosure	bndr cc bi
 		[the_fv]   		-- Just one free var
 		upd_flag		-- Updatable thunk
 		[]			-- A thunk
 		body@(StgCase (StgApp scrutinee [{-no args-}])
 		      _ _ _ srt   -- ignore uniq, etc.
-		      (AlgAlt tycon)
-		      [(DataAlt con, params, use_mask,
+		      (AlgAlt _)
+		      [(DataAlt con, params, _use_mask,
 			    (StgApp selectee [{-no args-}]))])
   |  the_fv == scrutinee		-- Scrutinee is the only free variable
   && maybeToBool maybe_offset		-- Selectee is a component of the tuple
@@ -402,6 +401,9 @@ mkRhsClosure bndr cc bi fvs upd_flag args body
 %*							*
 %********************************************************
 \begin{code}
+cgLetNoEscapeBindings :: StgLiveVars -> EndOfBlockInfo
+                      -> Maybe VirtualSpOffset -> GenStgBinding Id Id
+                      -> Code
 cgLetNoEscapeBindings live_in_rhss rhs_eob_info maybe_cc_slot 
 	(StgNonRec binder rhs)
   = do	{ (binder,info) <- cgLetNoEscapeRhs live_in_rhss rhs_eob_info 
@@ -420,7 +422,7 @@ cgLetNoEscapeBindings live_in_rhss rhs_eob_info maybe_cc_slot (StgRec pairs)
   where
     -- We add the binders to the live-in-rhss set so that we don't
     -- delete the bindings for the binder from the environment!
-    full_live_in_rhss = live_in_rhss `unionVarSet` (mkVarSet [b | (b,r) <- pairs])
+    full_live_in_rhss = live_in_rhss `unionVarSet` (mkVarSet [b | (b,_) <- pairs])
 
 cgLetNoEscapeRhs
     :: StgLiveVars	-- Live in rhss
@@ -432,7 +434,7 @@ cgLetNoEscapeRhs
     -> FCode (Id, CgIdInfo)
 
 cgLetNoEscapeRhs full_live_in_rhss rhs_eob_info maybe_cc_slot rec binder
-		 (StgRhsClosure cc bi _ upd_flag srt args body)
+		 (StgRhsClosure cc bi _ _upd_flag srt args body)
   = -- We could check the update flag, but currently we don't switch it off
     -- for let-no-escaped things, so we omit the check too!
     -- case upd_flag of
@@ -455,16 +457,14 @@ cgLetNoEscapeRhs full_live_in_rhss rhs_eob_info maybe_cc_slot rec binder
 Little helper for primitives that return unboxed tuples.
 
 \begin{code}
-newUnboxedTupleRegs :: Type -> FCode ([CgRep], [LocalReg], [MachHint])
+newUnboxedTupleRegs :: Type -> FCode ([CgRep], [LocalReg], [ForeignHint])
 newUnboxedTupleRegs res_ty =
    let
 	ty_args = tyConAppArgs (repType res_ty)
-	(reps,hints) = unzip [ (rep, typeHint ty) | ty <- ty_args,
+	(reps,hints) = unzip [ (rep, typeForeignHint ty) | ty <- ty_args,
 					   	    let rep = typeCgRep ty,
 					 	    nonVoidArg rep ]
-	make_new_temp rep = if isFollowableArg rep
-                            then newPtrTemp (argMachRep rep)
-                            else newNonPtrTemp (argMachRep rep)
+	make_new_temp rep = newTemp (argMachRep rep)
    in do
    regs <- mapM make_new_temp reps
    return (reps,regs,hints)

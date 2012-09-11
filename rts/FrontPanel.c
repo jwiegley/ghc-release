@@ -12,11 +12,10 @@
 /* #include "PosixSource.h" */
 
 #include "Rts.h"
+
 #include "RtsUtils.h"
-#include "MBlock.h"
 #include "FrontPanel.h"
 #include "Stats.h"
-#include "RtsFlags.h"
 #include "Schedule.h"
 
 #include <gtk/gtk.h>
@@ -664,8 +663,7 @@ residencyCensus( void )
 			break;
 
 		    case CAF_BLACKHOLE:
-		    case SE_CAF_BLACKHOLE:
-		    case SE_BLACKHOLE:
+		    case EAGER_BLACKHOLE:
 		    case BLACKHOLE:
 /*		    case BLACKHOLE_BQ: FIXME: case does not exist */
 			size = sizeW_fromITBL(info);

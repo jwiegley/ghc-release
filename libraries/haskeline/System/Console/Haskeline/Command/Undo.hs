@@ -1,29 +1,10 @@
 module System.Console.Haskeline.Command.Undo where
 
 import System.Console.Haskeline.Command
-import System.Console.Haskeline.Key
 import System.Console.Haskeline.LineState
 import System.Console.Haskeline.Monads
 
 import Control.Monad
-
-
-class LineState s => Save s where
-    save :: s -> InsertMode
-    restore :: InsertMode -> s
-
-instance Save InsertMode where
-    save = id
-    restore = id
-
-instance Save CommandMode where
-    save = insertFromCommandMode
-    restore = enterCommandModeRight
-
-instance Save s => Save (ArgMode s) where
-    save = save . argState
-    restore = ArgMode 0 . restore
-
 
 data Undo = Undo {pastUndo, futureRedo :: [InsertMode]}
 
@@ -58,11 +39,12 @@ redoFuture ls u@Undo {futureRedo = (futureLS:lss)}
 
 
 saveForUndo :: (Save s, MonadState Undo m)
-                => Command m s t -> Command m s t
-saveForUndo  = withState $ modify . saveToUndo
+                => Command m s s
+saveForUndo s = do
+    modify (saveToUndo s)
+    return s
 
-commandUndo, commandRedo :: (MonadState Undo m, Save s)
-                => Key -> Command m s s
-commandUndo = simpleCommand $ liftM Change . update . undoPast
-commandRedo = simpleCommand $ liftM Change . update . redoFuture
+commandUndo, commandRedo :: (MonadState Undo m, Save s) => Command m s s
+commandUndo = simpleCommand $ liftM Right . update . undoPast
+commandRedo = simpleCommand $ liftM Right . update . redoFuture
 

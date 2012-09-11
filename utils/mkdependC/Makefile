@@ -1,24 +1,15 @@
+# -----------------------------------------------------------------------------
 #
-# Boilerplate Makefile for building perl script that
-# needs some configured constants prepended to it.
+# (c) 2009 The University of Glasgow
 #
-TOP=../..
-include $(TOP)/mk/boilerplate.mk
+# This file is part of the GHC build system.
+#
+# To understand how the build system works and how to modify it, see
+#      http://hackage.haskell.org/trac/ghc/wiki/Building/Architecture
+#      http://hackage.haskell.org/trac/ghc/wiki/Building/Modifying
+#
+# -----------------------------------------------------------------------------
 
-boot :: all
-
-PROG=mkdependC
-CLEAN_FILES += $(PROG)
-all::
-	$(RM) -f $(PROG)
-	echo '#!$(PERL)'                               >> $(PROG)
-	echo '$$DEFAULT_TMPDIR = "$(DEFAULT_TMPDIR)";' >> $(PROG)
-	echo '$$CPP            = "$(CPP)";'            >> $(PROG)
-	echo '$$BUILDPLATFORM  = "$(BUILDPLATFORM)";'  >> $(PROG)
-	cat $(PROG).prl                                >> $(PROG)
-	$(EXECUTABLE_FILE) $(PROG)
-
-binary-dist:
-	@:
-
-include $(TOP)/mk/target.mk
+dir = utils/mkdependC
+TOP = ../..
+include $(TOP)/mk/sub-makefile.mk

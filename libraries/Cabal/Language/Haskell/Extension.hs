@@ -40,7 +40,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -}
 
 module Language.Haskell.Extension (
         Extension(..),
-        knownExtensions
+        knownExtensions,
+        deprecatedExtensions
   ) where
 
 import Distribution.Text (Text(..))
@@ -59,10 +60,6 @@ import Data.Array (Array, accumArray, bounds, Ix(inRange), (!))
 --   (where X is each compiler: GHC, JHC, Hugs, NHC)
 --
 -- * also to the 'knownExtensions' list below.
---
--- * If the first character of the new extension is outside the range 'A' - 'V'
---   (ie 'W'-'Z' or any non-uppercase-alphabetical char) then update the bounds
---   of the 'extensionTable' below.
 
 -- |This represents language extensions beyond Haskell 98 that are
 -- supported by some implementations, usually in some special mode.
@@ -81,6 +78,8 @@ data Extension
   | PolymorphicComponents
   | ExistentialQuantification
   | ScopedTypeVariables
+  -- | Deprecated, use ScopedTypeVariables instead.
+  | PatternSignatures
   | ImplicitParams
   | FlexibleContexts
   | FlexibleInstances
@@ -107,7 +106,6 @@ data Extension
   | StandaloneDeriving
 
   | UnicodeSyntax
-  | PatternSignatures
   | UnliftedFFITypes
   | LiberalTypeSynonyms
   | TypeOperators
@@ -137,8 +135,29 @@ data Extension
   | TransformListComp
   | ViewPatterns
 
+  -- | Allow concrete XML syntax to be used in expressions and patterns,
+  -- as per the Haskell Server Pages extension language: 
+  -- <http://www.haskell.org/haskellwiki/HSP>. The ideas behind it are 
+  -- discussed in the paper "Haskell Server Pages through Dynamic Loading"
+  -- by Niklas Broberg, from Haskell Workshop '05.
+  | XmlSyntax
+
+  -- | Allow regular pattern matching over lists, as discussed in the
+  -- paper "Regular Expression Patterns" by Niklas Broberg, Andreas Farre
+  -- and Josef Svenningsson, from ICFP '04.
+  | RegularPatterns
+
   | UnknownExtension String
   deriving (Show, Read, Eq)
+
+-- | Extensions that have been deprecated, possibly paired with another
+-- extension that replaces it.
+--
+deprecatedExtensions :: [(Extension, Maybe Extension)]
+deprecatedExtensions =
+  [ (RecordPuns, Just NamedFieldPuns)
+  , (PatternSignatures, Just ScopedTypeVariables)
+  ]
 
 knownExtensions :: [Extension]
 knownExtensions =
@@ -204,6 +223,8 @@ knownExtensions =
   , QuasiQuotes
   , TransformListComp
   , ViewPatterns
+  , XmlSyntax
+  , RegularPatterns
   ]
 
 instance Text Extension where
@@ -216,7 +237,7 @@ instance Text Extension where
 
 -- | 'read' for 'Extension's is really really slow so for the Text instance
 -- what we do is make a simple table indexed off the first letter in the
--- extension name. The extension names actually cover the range @'A'-'U'@
+-- extension name. The extension names actually cover the range @'A'-'Z'@
 -- pretty densely and the biggest bucket is 7 so it's not too bad. We just do
 -- a linear search within each bucket.
 --
@@ -233,7 +254,7 @@ classifyExtension string = UnknownExtension string
 
 extensionTable :: Array Char [(String, Extension)]
 extensionTable =
-  accumArray (flip (:)) [] ('A', 'V')
+  accumArray (flip (:)) [] ('A', 'Z')
     [ (head str, (str, extension))
     | extension <- knownExtensions
     , let str = show extension ]

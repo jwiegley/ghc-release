@@ -9,10 +9,11 @@
 
 #ifdef PROFILING
 
+#include "PosixSource.h"
 #include "Rts.h"
-#include "LdvProfile.h"
-#include "RtsFlags.h"
+
 #include "Profiling.h"
+#include "LdvProfile.h"
 #include "Stats.h"
 #include "RtsUtils.h"
 #include "Schedule.h"
@@ -143,9 +144,7 @@ processHeapClosureForDead( StgClosure *c )
     case FUN_1_1:
     case FUN_0_2:
     case BLACKHOLE:
-    case SE_BLACKHOLE:
     case CAF_BLACKHOLE:
-    case SE_CAF_BLACKHOLE:
     case IND_PERM:
     case IND_OLDGEN_PERM:
 	/*
@@ -181,11 +180,6 @@ processHeapClosureForDead( StgClosure *c )
     case RET_SMALL:
     case RET_BIG:
 	// others
-    case BLOCKED_FETCH:
-    case FETCH_ME:
-    case FETCH_ME_BQ:
-    case RBH:
-    case REMOTE_REF:
     case INVALID_OBJECT:
     default:
 	barf("Invalid object in processHeapClosureForDead(): %d", info->type);

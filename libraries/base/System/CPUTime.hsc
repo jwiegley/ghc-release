@@ -34,7 +34,42 @@ import CPUTime ( getCPUTime, cpuTimePrecision )
 import Foreign
 import Foreign.C
 
-#include "HsBase.h"
+#include "HsBaseConfig.h"
+
+-- For _SC_CLK_TCK
+#if HAVE_UNISTD_H
+#include <unistd.h>
+#endif
+
+-- For struct rusage
+#if !defined(mingw32_HOST_OS) && !defined(irix_HOST_OS)
+# if HAVE_SYS_RESOURCE_H
+#  include <sys/resource.h>
+# endif
+#endif
+
+-- For FILETIME etc. on Windows
+#if HAVE_WINDOWS_H
+#include <windows.h>
+#endif
+
+-- for CLK_TCK
+#if HAVE_TIME_H
+#include <time.h>
+#endif
+
+-- for struct tms
+#if HAVE_SYS_TIMES_H
+#include <sys/times.h>
+#endif
+
+#endif
+
+#if !defined(mingw32_HOST_OS) && !defined(cygwin32_HOST_OS)
+realToInteger :: Real a => a -> Integer
+realToInteger ct = round (realToFrac ct :: Double)
+  -- CTime, CClock, CUShort etc are in Real but not Fractional, 
+  -- so we must convert to Double before we can round it
 #endif
 
 #ifdef __GLASGOW_HASKELL__
@@ -56,7 +91,7 @@ getCPUTime = do
 --
 #if defined(HAVE_GETRUSAGE) && ! irix_HOST_OS && ! solaris2_HOST_OS
     allocaBytes (#const sizeof(struct rusage)) $ \ p_rusage -> do
-    getrusage (#const RUSAGE_SELF) p_rusage
+    throwErrnoIfMinus1_ "getrusage" $ getrusage (#const RUSAGE_SELF) p_rusage
 
     let ru_utime = (#ptr struct rusage, ru_utime) p_rusage
     let ru_stime = (#ptr struct rusage, ru_stime) p_rusage
@@ -64,7 +99,6 @@ getCPUTime = do
     u_usec <- (#peek struct timeval,tv_usec) ru_utime :: IO CTime
     s_sec  <- (#peek struct timeval,tv_sec)  ru_stime :: IO CTime
     s_usec <- (#peek struct timeval,tv_usec) ru_stime :: IO CTime
-    let realToInteger = round . realToFrac :: Real a => a -> Integer
     return ((realToInteger u_sec * 1000000 + realToInteger u_usec + 
              realToInteger s_sec * 1000000 + realToInteger s_usec) 
                 * 1000000)
@@ -77,7 +111,6 @@ foreign import ccall unsafe getrusage :: CInt -> Ptr CRUsage -> IO CInt
     times p_tms
     u_ticks  <- (#peek struct tms,tms_utime) p_tms :: IO CClock
     s_ticks  <- (#peek struct tms,tms_stime) p_tms :: IO CClock
-    let realToInteger = round . realToFrac :: Real a => a -> Integer
     return (( (realToInteger u_ticks + realToInteger s_ticks) * 1000000000000) 
                         `div` fromIntegral clockTicks)
 
@@ -112,7 +145,7 @@ foreign import ccall unsafe times :: Ptr CTms -> IO CClock
           low  <- (#peek FILETIME,dwLowDateTime)  ft :: IO Word32
             -- Convert 100-ns units to picosecs (10^-12) 
             -- => multiply by 10^5.
-          return (((fromIntegral high) * (2^32) + (fromIntegral low)) * 100000)
+          return (((fromIntegral high) * (2^(32::Int)) + (fromIntegral low)) * 100000)
 
     -- ToDo: pin down elapsed times to just the OS thread(s) that
     -- are evaluating/managing Haskell code.

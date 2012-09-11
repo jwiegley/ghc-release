@@ -101,10 +101,19 @@ import GHC.Classes
 import GHC.Generics
 import GHC.Ordering
 import GHC.Prim
+import {-# SOURCE #-} GHC.Show
 import {-# SOURCE #-} GHC.Err
+import {-# SOURCE #-} GHC.IO (failIO)
+
+-- These two are not strictly speaking required by this module, but they are
+-- implicit dependencies whenever () or tuples are mentioned, so adding them
+-- as imports here helps to get the dependencies right in the new build system.
+import GHC.Tuple ()
+import GHC.Unit ()
 
 infixr 9  .
 infixr 5  ++
+infixl 4  <$
 infixl 1  >>, >>=
 infixr 0  $
 
@@ -167,6 +176,12 @@ defined in the "Prelude" satisfy these laws.
 
 class  Functor f  where
     fmap        :: (a -> b) -> f a -> f b
+
+    -- | Replace all locations in the input with the same value.
+    -- The default definition is @'fmap' . 'const'@, but this may be
+    -- overridden with a more efficient version.
+    (<$)        :: a -> f b -> f a
+    (<$)        =  fmap . const
 
 {- | The 'Monad' class defines the basic operations over a /monad/,
 a concept from a branch of mathematics known as /category theory/.
@@ -529,8 +544,10 @@ instance Ord Char where
 
 -- | The 'Prelude.toEnum' method restricted to the type 'Data.Char.Char'.
 chr :: Int -> Char
-chr (I# i#) | int2Word# i# `leWord#` int2Word# 0x10FFFF# = C# (chr# i#)
-            | otherwise                                  = error "Prelude.chr: bad argument"
+chr i@(I# i#)
+ | int2Word# i# `leWord#` int2Word# 0x10FFFF# = C# (chr# i#)
+ | otherwise
+    = error ("Prelude.chr: bad argument: " ++ showSignedInt (I# 9#) i "")
 
 unsafeChr :: Int -> Char
 unsafeChr (I# i#) = C# (chr# i#)
@@ -701,6 +718,38 @@ asTypeOf                =  const
 
 %*********************************************************
 %*                                                      *
+\subsection{@Functor@ and @Monad@ instances for @IO@}
+%*                                                      *
+%*********************************************************
+
+\begin{code}
+instance  Functor IO where
+   fmap f x = x >>= (return . f)
+
+instance  Monad IO  where
+    {-# INLINE return #-}
+    {-# INLINE (>>)   #-}
+    {-# INLINE (>>=)  #-}
+    m >> k    = m >>= \ _ -> k
+    return    = returnIO
+    (>>=)     = bindIO
+    fail s    = GHC.IO.failIO s
+
+returnIO :: a -> IO a
+returnIO x = IO $ \ s -> (# s, x #)
+
+bindIO :: IO a -> (a -> IO b) -> IO b
+bindIO (IO m) k = IO $ \ s -> case m s of (# new_s, a #) -> unIO (k a) new_s
+
+thenIO :: IO a -> IO b -> IO b
+thenIO (IO m) k = IO $ \ s -> case m s of (# new_s, _ #) -> unIO k new_s
+
+unIO :: IO a -> (State# RealWorld -> (# State# RealWorld, a #))
+unIO (IO a) = a
+\end{code}
+
+%*********************************************************
+%*                                                      *
 \subsection{@getTag@}
 %*                                                      *
 %*********************************************************
@@ -747,7 +796,7 @@ x# `modInt#` y#
       (x# <# 0#) && (y# ># 0#)    = if r# /=# 0# then r# +# y# else 0#
     | otherwise                   = r#
     where
-    r# = x# `remInt#` y#
+    !r# = x# `remInt#` y#
 \end{code}
 
 Definitions of the boxed PrimOps; these will be
@@ -767,7 +816,7 @@ used in the case of partial applications, etc.
 {-# INLINE remInt #-}
 {-# INLINE negateInt #-}
 
-plusInt, minusInt, timesInt, quotInt, remInt, divInt, modInt, gcdInt :: Int -> Int -> Int
+plusInt, minusInt, timesInt, quotInt, remInt, divInt, modInt :: Int -> Int -> Int
 (I# x) `plusInt`  (I# y) = I# (x +# y)
 (I# x) `minusInt` (I# y) = I# (x -# y)
 (I# x) `timesInt` (I# y) = I# (x *# y)
@@ -786,17 +835,6 @@ plusInt, minusInt, timesInt, quotInt, remInt, divInt, modInt, gcdInt :: Int -> I
 "x# *# 1#" forall x#. x# *# 1# = x#
 "1# *# x#" forall x#. 1# *# x# = x#
   #-}
-
-gcdInt (I# a) (I# b) = g a b
-   where g 0# 0# = error "GHC.Base.gcdInt: gcd 0 0 is undefined"
-         g 0# _  = I# absB
-         g _  0# = I# absA
-         g _  _  = I# (gcdInt# absA absB)
-
-         absInt x = if x <# 0# then negateInt# x else x
-
-         absA     = absInt a
-         absB     = absInt b
 
 negateInt :: Int -> Int
 negateInt (I# x) = I# (negateInt# x)
@@ -917,7 +955,11 @@ unpacking the strings of error messages.
 
 \begin{code}
 unpackCString# :: Addr# -> [Char]
-{-# NOINLINE [1] unpackCString# #-}
+{-# NOINLINE unpackCString# #-}
+    -- There's really no point in inlining this, ever, cos
+    -- the loop doesn't specialise in an interesting
+    -- But it's pretty small, so there's a danger that
+    -- it'll be inlined at every literal, which is a waste
 unpackCString# addr 
   = unpack 0#
   where
@@ -925,9 +967,11 @@ unpackCString# addr
       | ch `eqChar#` '\0'# = []
       | otherwise          = C# ch : unpack (nh +# 1#)
       where
-        ch = indexCharOffAddr# addr nh
+        !ch = indexCharOffAddr# addr nh
 
 unpackAppendCString# :: Addr# -> [Char] -> [Char]
+{-# NOINLINE unpackAppendCString# #-}
+     -- See the NOINLINE note on unpackCString# 
 unpackAppendCString# addr rest
   = unpack 0#
   where
@@ -935,11 +979,13 @@ unpackAppendCString# addr rest
       | ch `eqChar#` '\0'# = rest
       | otherwise          = C# ch : unpack (nh +# 1#)
       where
-        ch = indexCharOffAddr# addr nh
+        !ch = indexCharOffAddr# addr nh
 
 unpackFoldrCString# :: Addr# -> (Char  -> a -> a) -> a -> a 
 {-# NOINLINE [0] unpackFoldrCString# #-}
--- Don't inline till right at the end;
+-- Unlike unpackCString#, there *is* some point in inlining unpackFoldrCString#, 
+-- because we get better code for the function call.
+-- However, don't inline till right at the end;
 -- usually the unpack-list rule turns it into unpackCStringList
 -- It also has a BuiltInRule in PrelRules.lhs:
 --      unpackFoldrCString# "foo" c (unpackFoldrCString# "baz" c n)
@@ -951,7 +997,7 @@ unpackFoldrCString# addr f z
       | ch `eqChar#` '\0'# = z
       | otherwise          = C# ch `f` unpack (nh +# 1#)
       where
-        ch = indexCharOffAddr# addr nh
+        !ch = indexCharOffAddr# addr nh
 
 unpackCStringUtf8# :: Addr# -> [Char]
 unpackCStringUtf8# addr 
@@ -976,7 +1022,7 @@ unpackCStringUtf8# addr
                      (ord# (indexCharOffAddr# addr (nh +# 3#)) -# 0x80#))) :
           unpack (nh +# 4#)
       where
-        ch = indexCharOffAddr# addr nh
+        !ch = indexCharOffAddr# addr nh
 
 unpackNBytes# :: Addr# -> Int# -> [Char]
 unpackNBytes# _addr 0#   = []
@@ -989,7 +1035,7 @@ unpackNBytes#  addr len# = unpack [] (len# -# 1#)
             ch -> unpack (C# ch : acc) (i# -# 1#)
 
 {-# RULES
-"unpack"       [~1] forall a   . unpackCString# a                  = build (unpackFoldrCString# a)
+"unpack"       [~1] forall a   . unpackCString# a             = build (unpackFoldrCString# a)
 "unpack-list"  [1]  forall a   . unpackFoldrCString# a (:) [] = unpackCString# a
 "unpack-append"     forall a n . unpackFoldrCString# a (:) n  = unpackAppendCString# a n
 

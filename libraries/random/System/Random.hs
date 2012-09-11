@@ -75,7 +75,8 @@ import Foreign.Ptr      ( Ptr, nullPtr )
 import Foreign.C	( CTime, CUInt )
 #else
 import System.CPUTime	( getCPUTime )
-import System.Time	( getClockTime, ClockTime(..) )
+import Data.Time	( getCurrentTime, UTCTime(..) )
+import Data.Ratio       ( numerator, denominator )
 #endif
 import Data.Char	( isSpace, chr, ord )
 import System.IO.Unsafe ( unsafePerformIO )
@@ -86,10 +87,15 @@ import Numeric		( readDec )
 -- the extended one expected in this module, so we lash-up a quick
 -- replacement here.
 #ifdef __NHC__
-data ClockTime = TOD Integer Integer
 foreign import ccall "time.h time" readtime :: Ptr CTime -> IO CTime
-getClockTime :: IO ClockTime
-getClockTime = do CTime t <- readtime nullPtr;  return (TOD (toInteger t) 0)
+getTime :: IO (Integer, Integer)
+getTime = do CTime t <- readtime nullPtr;  return (toInteger t, 0)
+#else
+getTime :: IO (Integer, Integer)
+getTime = do
+  utc <- getCurrentTime
+  let daytime = toRational $ utctDayTime utc
+  return $ quotRem (numerator daytime) (denominator daytime)
 #endif
 
 -- | The class 'RandomGen' provides a common interface to random number
@@ -277,12 +283,14 @@ instance Random Char where
 
 instance Random Bool where
   randomR (a,b) g = 
-      case (randomIvalInteger (toInteger (bool2Int a), toInteger (bool2Int b)) g) of
+      case (randomIvalInteger (bool2Int a, bool2Int b) g) of
         (x, g') -> (int2Bool x, g')
        where
+         bool2Int :: Bool -> Integer
          bool2Int False = 0
          bool2Int True  = 1
 
+	 int2Bool :: Int -> Bool
 	 int2Bool 0	= False
 	 int2Bool _	= True
 
@@ -304,7 +312,7 @@ instance Random Float where
 mkStdRNG :: Integer -> IO StdGen
 mkStdRNG o = do
     ct          <- getCPUTime
-    (TOD sec psec) <- getClockTime
+    (sec, psec) <- getTime
     return (createStdGen (sec * 12345 + psec + ct + o))
 
 randomIvalInteger :: (RandomGen g, Num a) => (Integer, Integer) -> g -> (a, g)
