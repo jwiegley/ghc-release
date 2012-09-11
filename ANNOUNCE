@@ -1,15 +1,15 @@
 
    ==============================================================
-    The (Interactive) Glasgow Haskell Compiler -- version 6.12.2
+    The (Interactive) Glasgow Haskell Compiler -- version 6.12.3
    ==============================================================
 
 The GHC Team is pleased to announce a new patchlevel release of GHC.
-This release contains a number of bugfixes relative to 6.12.1, so we
+This release contains a number of bugfixes relative to 6.12.2, so we
 recommend upgrading.
 
 Release notes are here:
 
-  http://haskell.org/ghc/docs/6.12.1/html/users_guide/release-6-12-2.html
+  http://haskell.org/ghc/docs/6.12.3/html/users_guide/release-6-12-3.html
 
 How to get it
 ~~~~~~~~~~~~~

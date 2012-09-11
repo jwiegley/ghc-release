@@ -1,5 +1,6 @@
 {-# OPTIONS -fglasgow-exts -cpp #-}
 {-# LINE 9 "utils/haddock/src/Haddock/Interface/Lex.x" #-}
+
 {-# OPTIONS -Wwarn -w #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
@@ -25,7 +26,7 @@ import System.IO.Unsafe
 
 #if __GLASGOW_HASKELL__ >= 603
 #include "ghcconfig.h"
-#else
+#elif defined(__GLASGOW_HASKELL__)
 #include "config.h"
 #endif
 #if __GLASGOW_HASKELL__ >= 503
@@ -55,6 +56,7 @@ alex_deflt = AlexA# "\xff\xff\x14\x00\x31\x00\xff\xff\xff\xff\x31\x00\xff\xff\xf
 
 alex_accept = listArray (0::Int,51) [[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_9))],[],[(AlexAcc (alex_action_8))],[(AlexAcc (alex_action_5))],[],[],[(AlexAccSkip)],[],[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_1))],[(AlexAcc (alex_action_2))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_4))],[],[],[(AlexAcc (alex_action_6))],[],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_9))],[(AlexAcc (alex_action_9))],[(AlexAcc (alex_action_10))],[(AlexAcc (alex_action_11))],[(AlexAcc (alex_action_12))],[],[],[(AlexAcc (alex_action_19))],[(AlexAcc (alex_action_12))],[],[(AlexAcc (alex_action_13))],[(AlexAcc (alex_action_19))],[],[(AlexAcc (alex_action_14))],[(AlexAcc (alex_action_19))],[],[(AlexAcc (alex_action_15))],[(AlexAcc (alex_action_15))],[],[(AlexAcc (alex_action_19))],[(AlexAcc (alex_action_16))],[(AlexAcc (alex_action_19))],[(AlexAcc (alex_action_17))],[],[],[(AlexAcc (alex_action_19))],[(AlexAcc (alex_action_18))],[],[],[(AlexAcc (alex_action_20))],[(AlexAcc (alex_action_21))],[(AlexAcc (alex_action_22))],[(AlexAcc (alex_action_23))]]
 {-# LINE 95 "utils/haddock/src/Haddock/Interface/Lex.x" #-}
+
 data Token
   = TokPara
   | TokNumber
@@ -138,33 +140,34 @@ def = 2
 line = 3
 para = 4
 string = 5
-alex_action_1 = begin birdtrack 
-alex_action_2 = token TokBullet `andBegin` string 
-alex_action_3 = token TokDefStart `andBegin` def 
-alex_action_4 = token TokNumber `andBegin` string 
-alex_action_5 = begin string 
-alex_action_6 = begin birdtrack 
-alex_action_7 = token TokPara `andBegin` para 
-alex_action_8 = begin string 
-alex_action_9 = strtokenNL TokBirdTrack `andBegin` line 
-alex_action_10 = strtoken $ \s -> TokSpecial (head s) 
-alex_action_11 = strtoken $ \s -> TokPic (init $ init $ tail $ tail s) 
-alex_action_12 = strtoken $ \s -> TokURL (init (tail s)) 
-alex_action_13 = strtoken $ \s -> TokAName (init (tail s)) 
-alex_action_14 = strtoken $ \s -> TokEmphasis (init (tail s)) 
-alex_action_15 = ident 
-alex_action_16 = strtoken (TokString . tail) 
-alex_action_17 = strtoken $ \s -> TokString [chr (read (init (drop 2 s)))] 
-alex_action_18 = strtoken $ \s -> case readHex (init (drop 3 s)) of [(n,_)] -> TokString [chr n] 
-alex_action_19 = strtoken TokString 
-alex_action_20 = strtokenNL TokString `andBegin` line 
-alex_action_21 = strtoken TokString 
-alex_action_22 = token TokDefEnd `andBegin` string 
-alex_action_23 = strtoken TokString 
-{-# LINE 1 "GenericTemplate.hs" #-}
+alex_action_1 =  begin birdtrack 
+alex_action_2 =  token TokBullet `andBegin` string 
+alex_action_3 =  token TokDefStart `andBegin` def 
+alex_action_4 =  token TokNumber `andBegin` string 
+alex_action_5 =  begin string 
+alex_action_6 =  begin birdtrack 
+alex_action_7 =  token TokPara `andBegin` para 
+alex_action_8 =  begin string 
+alex_action_9 =  strtokenNL TokBirdTrack `andBegin` line 
+alex_action_10 =  strtoken $ \s -> TokSpecial (head s) 
+alex_action_11 =  strtoken $ \s -> TokPic (init $ init $ tail $ tail s) 
+alex_action_12 =  strtoken $ \s -> TokURL (init (tail s)) 
+alex_action_13 =  strtoken $ \s -> TokAName (init (tail s)) 
+alex_action_14 =  strtoken $ \s -> TokEmphasis (init (tail s)) 
+alex_action_15 =  ident 
+alex_action_16 =  strtoken (TokString . tail) 
+alex_action_17 =  strtoken $ \s -> TokString [chr (read (init (drop 2 s)))] 
+alex_action_18 =  strtoken $ \s -> case readHex (init (drop 3 s)) of [(n,_)] -> TokString [chr n] 
+alex_action_19 =  strtoken TokString 
+alex_action_20 =  strtokenNL TokString `andBegin` line 
+alex_action_21 =  strtoken TokString 
+alex_action_22 =  token TokDefEnd `andBegin` string 
+alex_action_23 =  strtoken TokString 
+{-# LINE 1 "templates/GenericTemplate.hs" #-}
+{-# LINE 1 "templates/GenericTemplate.hs" #-}
 {-# LINE 1 "<built-in>" #-}
-{-# LINE 1 "<command line>" #-}
-{-# LINE 1 "GenericTemplate.hs" #-}
+{-# LINE 1 "<command-line>" #-}
+{-# LINE 1 "templates/GenericTemplate.hs" #-}
 -- -----------------------------------------------------------------------------
 -- ALEX TEMPLATE
 --
@@ -174,9 +177,9 @@ alex_action_23 = strtoken TokString
 -- -----------------------------------------------------------------------------
 -- INTERNALS and main scanner engine
 
-{-# LINE 35 "GenericTemplate.hs" #-}
+{-# LINE 37 "templates/GenericTemplate.hs" #-}
 
-{-# LINE 45 "GenericTemplate.hs" #-}
+{-# LINE 47 "templates/GenericTemplate.hs" #-}
 
 
 data AlexAddr = AlexA# Addr#
@@ -290,12 +293,12 @@ alex_scan_tkn user orig_input len input s last_acc =
 
 
 	let
-		base   = alexIndexInt32OffAddr alex_base s
-		(I# (ord_c)) = ord c
-		offset = (base +# ord_c)
-		check  = alexIndexInt16OffAddr alex_check offset
+		!(base) = alexIndexInt32OffAddr alex_base s
+		!((I# (ord_c))) = ord c
+		!(offset) = (base +# ord_c)
+		!(check)  = alexIndexInt16OffAddr alex_check offset
 		
-		new_s = if (offset >=# 0#) && (check ==# ord_c)
+		!(new_s) = if (offset >=# 0#) && (check ==# ord_c)
 			  then alexIndexInt16OffAddr alex_table offset
 			  else alexIndexInt16OffAddr alex_deflt s
 	in

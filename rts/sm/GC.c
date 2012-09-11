@@ -1133,7 +1133,7 @@ waitForGcThreads (Capability *cap USED_IF_THREADS)
                 prodCapability(&capabilities[i], cap->running_task);
             }
         }
-        for (j=0; j < 10000000; j++) {
+        for (j=0; j < 10; j++) {
             retry = rtsFalse;
             for (i=0; i < n_threads; i++) {
                 if (i == me) continue;
@@ -1144,6 +1144,7 @@ waitForGcThreads (Capability *cap USED_IF_THREADS)
                 }
             }
             if (!retry) break;
+            yieldThread();
         }
     }
 }

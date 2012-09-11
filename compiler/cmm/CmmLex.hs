@@ -1,5 +1,6 @@
 {-# OPTIONS -fglasgow-exts -cpp #-}
 {-# LINE 13 "compiler/cmm/CmmLex.x" #-}
+
 {-# OPTIONS -Wwarn -w #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
@@ -26,7 +27,7 @@ import Util
 
 #if __GLASGOW_HASKELL__ >= 603
 #include "ghcconfig.h"
-#else
+#elif defined(__GLASGOW_HASKELL__)
 #include "config.h"
 #endif
 #if __GLASGOW_HASKELL__ >= 503
@@ -56,6 +57,7 @@ alex_deflt = AlexA# "\x6a\x00\xff\xff\xff\xff\x24\x00\xff\xff\xff\xff\x24\x00\xf
 
 alex_accept = listArray (0::Int,130) [[],[],[],[(AlexAcc (alex_action_5))],[],[(AlexAccSkip)],[(AlexAccSkip)],[(AlexAccSkipPred  (alexPrevCharIs '\n'))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[(AlexAccPred  (alex_action_2) (alexPrevCharIs '\n'))],[(AlexAccPred  (alex_action_2) (alexPrevCharIs '\n')),(AlexAcc (alex_action_5))],[(AlexAccPred  (alex_action_2) (alexPrevCharIs '\n'))],[(AlexAccPred  (alex_action_2) (alexPrevCharIs '\n')),(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[],[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_4))],[],[],[(AlexAcc (alex_action_5))],[(AlexAccSkip)],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_8))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_9))],[(AlexAcc (alex_action_10))],[(AlexAcc (alex_action_11))],[(AlexAcc (alex_action_12))],[(AlexAcc (alex_action_13))],[(AlexAcc (alex_action_14))],[(AlexAcc (alex_action_15))],[(AlexAcc (alex_action_16))],[(AlexAcc (alex_action_17))],[(AlexAcc (alex_action_18))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_19))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_20))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_21))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_22))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_23))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_26))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_27))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_28))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_29))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_30))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_33))],[(AlexAcc (alex_action_33))],[(AlexAcc (alex_action_34))],[],[(AlexAcc (alex_action_35))],[(AlexAcc (alex_action_35))],[(AlexAcc (alex_action_35))],[],[],[],[],[],[(AlexAcc (alex_action_36))],[],[],[],[],[],[],[],[],[]]
 {-# LINE 122 "compiler/cmm/CmmLex.x" #-}
+
 data CmmToken
   = CmmT_SpecChar  Char
   | CmmT_DotDot
@@ -276,44 +278,45 @@ line_prag,line_prag1,line_prag2 :: Int
 line_prag = 1
 line_prag1 = 2
 line_prag2 = 3
-alex_action_2 = begin line_prag 
-alex_action_3 = setLine line_prag1 
-alex_action_4 = setFile line_prag2 
-alex_action_5 = pop 
-alex_action_7 = special_char 
-alex_action_8 = kw CmmT_DotDot 
-alex_action_9 = kw CmmT_DoubleColon 
-alex_action_10 = kw CmmT_Shr 
-alex_action_11 = kw CmmT_Shl 
-alex_action_12 = kw CmmT_Ge 
-alex_action_13 = kw CmmT_Le 
-alex_action_14 = kw CmmT_Eq 
-alex_action_15 = kw CmmT_Ne 
-alex_action_16 = kw CmmT_BoolAnd 
-alex_action_17 = kw CmmT_BoolOr 
-alex_action_18 = global_regN (\n -> VanillaReg n VGcPtr) 
-alex_action_19 = global_regN (\n -> VanillaReg n VNonGcPtr) 
-alex_action_20 = global_regN FloatReg 
-alex_action_21 = global_regN DoubleReg 
-alex_action_22 = global_regN LongReg 
-alex_action_23 = global_reg Sp 
-alex_action_24 = global_reg SpLim 
-alex_action_25 = global_reg Hp 
-alex_action_26 = global_reg HpLim 
-alex_action_27 = global_reg CurrentTSO 
-alex_action_28 = global_reg CurrentNursery 
-alex_action_29 = global_reg HpAlloc 
-alex_action_30 = global_reg BaseReg 
-alex_action_31 = name 
-alex_action_32 = tok_octal 
-alex_action_33 = tok_decimal 
-alex_action_34 = tok_hexadecimal 
-alex_action_35 = strtoken tok_float 
-alex_action_36 = strtoken tok_string 
-{-# LINE 1 "GenericTemplate.hs" #-}
+alex_action_2 =  begin line_prag 
+alex_action_3 =  setLine line_prag1 
+alex_action_4 =  setFile line_prag2 
+alex_action_5 =  pop 
+alex_action_7 =  special_char 
+alex_action_8 =  kw CmmT_DotDot 
+alex_action_9 =  kw CmmT_DoubleColon 
+alex_action_10 =  kw CmmT_Shr 
+alex_action_11 =  kw CmmT_Shl 
+alex_action_12 =  kw CmmT_Ge 
+alex_action_13 =  kw CmmT_Le 
+alex_action_14 =  kw CmmT_Eq 
+alex_action_15 =  kw CmmT_Ne 
+alex_action_16 =  kw CmmT_BoolAnd 
+alex_action_17 =  kw CmmT_BoolOr 
+alex_action_18 =  global_regN (\n -> VanillaReg n VGcPtr) 
+alex_action_19 =  global_regN (\n -> VanillaReg n VNonGcPtr) 
+alex_action_20 =  global_regN FloatReg 
+alex_action_21 =  global_regN DoubleReg 
+alex_action_22 =  global_regN LongReg 
+alex_action_23 =  global_reg Sp 
+alex_action_24 =  global_reg SpLim 
+alex_action_25 =  global_reg Hp 
+alex_action_26 =  global_reg HpLim 
+alex_action_27 =  global_reg CurrentTSO 
+alex_action_28 =  global_reg CurrentNursery 
+alex_action_29 =  global_reg HpAlloc 
+alex_action_30 =  global_reg BaseReg 
+alex_action_31 =  name 
+alex_action_32 =  tok_octal 
+alex_action_33 =  tok_decimal 
+alex_action_34 =  tok_hexadecimal 
+alex_action_35 =  strtoken tok_float 
+alex_action_36 =  strtoken tok_string 
+{-# LINE 1 "templates/GenericTemplate.hs" #-}
+{-# LINE 1 "templates/GenericTemplate.hs" #-}
 {-# LINE 1 "<built-in>" #-}
-{-# LINE 1 "<command line>" #-}
-{-# LINE 1 "GenericTemplate.hs" #-}
+{-# LINE 1 "<command-line>" #-}
+{-# LINE 1 "templates/GenericTemplate.hs" #-}
 -- -----------------------------------------------------------------------------
 -- ALEX TEMPLATE
 --
@@ -323,9 +326,9 @@ alex_action_36 = strtoken tok_string
 -- -----------------------------------------------------------------------------
 -- INTERNALS and main scanner engine
 
-{-# LINE 35 "GenericTemplate.hs" #-}
+{-# LINE 37 "templates/GenericTemplate.hs" #-}
 
-{-# LINE 45 "GenericTemplate.hs" #-}
+{-# LINE 47 "templates/GenericTemplate.hs" #-}
 
 
 data AlexAddr = AlexA# Addr#
@@ -439,12 +442,12 @@ alex_scan_tkn user orig_input len input s last_acc =
 
 
 	let
-		base   = alexIndexInt32OffAddr alex_base s
-		(I# (ord_c)) = ord c
-		offset = (base +# ord_c)
-		check  = alexIndexInt16OffAddr alex_check offset
+		!(base) = alexIndexInt32OffAddr alex_base s
+		!((I# (ord_c))) = ord c
+		!(offset) = (base +# ord_c)
+		!(check)  = alexIndexInt16OffAddr alex_check offset
 		
-		new_s = if (offset >=# 0#) && (check ==# ord_c)
+		!(new_s) = if (offset >=# 0#) && (check ==# ord_c)
 			  then alexIndexInt16OffAddr alex_table offset
 			  else alexIndexInt16OffAddr alex_deflt s
 	in

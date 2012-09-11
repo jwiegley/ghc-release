@@ -11,10 +11,16 @@
 # -----------------------------------------------------------------------------
 
 
-define build-dependencies # args: $1 = dir, $2 = distdir
+define build-dependencies
+# $1 = dir
+# $2 = distdir
+# $3 = GHC stage to use (0 == bootstrapping compiler)
 
 ifeq "$$($1_$2_ghc_ge_609)" "YES"
-$1_$2_MKDEPENDHS_FLAGS = -include-pkg-deps -dep-makefile $$($1_$2_depfile) $$(foreach way,$$(filter-out v,$$($1_$2_WAYS)),-dep-suffix $$(way))
+$1_$2_MKDEPENDHS_FLAGS = -dep-makefile $$($1_$2_depfile) $$(foreach way,$$(filter-out v,$$($1_$2_WAYS)),-dep-suffix $$(way))
+ifneq "$3" "0"
+$1_$2_MKDEPENDHS_FLAGS += -include-pkg-deps
+endif
 else
 $1_$2_MKDEPENDHS_FLAGS = -optdep--include-pkg-deps -optdep-f -optdep$$($1_$2_depfile) $$(foreach way,$$(filter-out v,$$($1_$2_WAYS)),-optdep-s -optdep$$(way))
 endif

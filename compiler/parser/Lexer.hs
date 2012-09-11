@@ -1,5 +1,6 @@
 {-# OPTIONS -fglasgow-exts -cpp #-}
 {-# LINE 33 "compiler/parser/Lexer.x" #-}
+
 {-# OPTIONS -Wwarn -w #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
@@ -47,7 +48,7 @@ import Data.Ratio
 
 #if __GLASGOW_HASKELL__ >= 603
 #include "ghcconfig.h"
-#else
+#elif defined(__GLASGOW_HASKELL__)
 #include "config.h"
 #endif
 #if __GLASGOW_HASKELL__ >= 503
@@ -75,8 +76,9 @@ alex_check = AlexA# "\xff\xff\x05\x00\x01\x00\x02\x00\x09\x00\x04\x00\x05\x00\x0
 alex_deflt :: AlexAddr
 alex_deflt = AlexA# "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x69\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x69\x00\xff\xff\x69\x00\xff\xff\x69\x00\xff\xff\xff\xff\xff\xff\xff\xff\x69\x00\xff\xff\xff\xff\x1c\x00\x1d\x00\x1c\x00\x1d\x00\x1a\x00\x1b\x00\x1a\x00\x1a\x00\xff\xff\x69\x00\xff\xff\xff\xff\xff\xff\x2b\x00\x2c\x00\x2b\x00\x2b\x00\x2d\x00\x2e\x00\x2d\x00\x2e\x00\x34\x00\x35\x00\x34\x00\x36\x00\x34\x00\x34\x00\x35\x00\x36\x00\x39\x00\x3a\x00\x39\x00\x3a\x00\x37\x00\x38\x00\x37\x00\x37\x00\x38\x00\x37\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x49\x00\x49\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x51\x00\x51\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x69\x00\xff\xff\xff\xff\xff\xff\x69\x00\xff\xff\xff\xff\xff\xff\x69\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x69\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"#
 
-alex_accept = listArray (0::Int,240) [[],[(AlexAcc (alex_action_13))],[(AlexAcc (alex_action_17))],[(AlexAcc (alex_action_18))],[(AlexAcc (alex_action_19))],[],[],[(AlexAcc (alex_action_24))],[],[],[],[],[],[(AlexAccSkip)],[(AlexAccSkip)],[(AlexAcc (alex_action_1))],[(AlexAcc (alex_action_1))],[(AlexAccPred  (alex_action_2) (isNormalComment ))],[(AlexAccPred  (alex_action_2) (isNormalComment )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_2) (isNormalComment ))],[(AlexAccPred  (alex_action_2) (isNormalComment ))],[(AlexAccPred  (alex_action_14) (notFollowedBy '-' ))],[],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_64))],[(AlexAcc (alex_action_64))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_3))],[(AlexAccPred  (alex_action_8) (atEOL ))],[(AlexAccPred  (alex_action_8) (atEOL )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_8) (atEOL ))],[(AlexAccPred  (alex_action_8) (atEOL ))],[],[(AlexAcc (alex_action_24))],[],[],[(AlexAcc (alex_action_78))],[(AlexAccPred  (alex_action_7) (atEOL ))],[(AlexAccPred  (alex_action_7) (atEOL )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_7) (atEOL ))],[(AlexAccPred  (alex_action_7) (atEOL )),(AlexAcc (alex_action_78))],[(AlexAcc (alex_action_4))],[(AlexAcc (alex_action_4))],[(AlexAcc (alex_action_4))],[(AlexAcc (alex_action_4))],[(AlexAccPred  (alex_action_5) (ifExtension (not . haddockEnabled) ))],[(AlexAccPred  (alex_action_5) (ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_5) (ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_33))],[(AlexAccPred  (alex_action_5) (ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_35))],[(AlexAccPred  (alex_action_5) (ifExtension (not . haddockEnabled) )),(AlexAccPred  (alex_action_37) (ifExtension haddockEnabled ))],[(AlexAccPred  (alex_action_5) (ifExtension (not . haddockEnabled) ))],[(AlexAccPred  (alex_action_5) (ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_5) (ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_35))],[(AlexAcc (alex_action_6))],[(AlexAcc (alex_action_6))],[(AlexAcc (alex_action_6))],[(AlexAcc (alex_action_6))],[(AlexAccPred  (alex_action_7) (atEOL ))],[(AlexAccPred  (alex_action_7) (atEOL )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_7) (atEOL )),(AlexAcc (alex_action_78))],[(AlexAccPred  (alex_action_7) (atEOL ))],[(AlexAccPred  (alex_action_7) (atEOL )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_7) (atEOL )),(AlexAcc (alex_action_78))],[(AlexAccSkip)],[(AlexAccPred  (alex_action_10) (alexPrevCharIs '\n'))],[(AlexAccPred  (alex_action_10) (alexPrevCharIs '\n'))],[],[],[],[(AlexAccSkipPred  (alexPrevCharIs '\n'))],[],[],[],[],[],[],[],[(AlexAccSkipPred  (alexPrevCharIs '\n'))],[],[],[(AlexAccSkip)],[(AlexAccPred  (alex_action_16) (alexPrevCharIs '\n'))],[(AlexAccPred  (alex_action_16) (alexPrevCharIs '\n'))],[],[],[],[(AlexAcc (alex_action_20))],[(AlexAccPred  (alex_action_21) (known_pragma linePrags ))],[(AlexAccPred  (alex_action_21) (known_pragma linePrags )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_21) (known_pragma linePrags )),(AlexAccPred  (alex_action_29) (known_pragma oneWordPrags )),(AlexAccPred  (alex_action_30) (known_pragma ignoredPrags )),(AlexAccPred  (alex_action_32) (known_pragma fileHeaderPrags ))],[(AlexAccPred  (alex_action_21) (known_pragma linePrags )),(AlexAccPred  (alex_action_29) (known_pragma oneWordPrags )),(AlexAccPred  (alex_action_30) (known_pragma ignoredPrags )),(AlexAccPred  (alex_action_34) (known_pragma fileHeaderPrags ))],[],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_36))],[(AlexAcc (alex_action_36))],[],[(AlexAcc (alex_action_24))],[],[],[(AlexAcc (alex_action_22))],[(AlexAcc (alex_action_23))],[],[],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_26))],[],[],[(AlexAcc (alex_action_27))],[(AlexAcc (alex_action_27))],[],[],[(AlexAccPred  (alex_action_28) (known_pragma twoWordPrags ))],[],[(AlexAcc (alex_action_31))],[],[(AlexAcc (alex_action_78))],[],[(AlexAcc (alex_action_78))],[(AlexAccPred  (alex_action_38) (ifExtension haddockEnabled ))],[],[(AlexAccPred  (alex_action_39) (ifExtension parrEnabled ))],[(AlexAcc (alex_action_59))],[(AlexAccPred  (alex_action_40) (ifExtension parrEnabled ))],[(AlexAcc (alex_action_79))],[(AlexAccPred  (alex_action_41) (ifExtension thEnabled ))],[(AlexAccPred  (alex_action_42) (ifExtension thEnabled ))],[],[(AlexAccPred  (alex_action_43) (ifExtension thEnabled ))],[],[(AlexAccPred  (alex_action_44) (ifExtension thEnabled ))],[],[(AlexAccPred  (alex_action_45) (ifExtension thEnabled ))],[],[(AlexAccPred  (alex_action_46) (ifExtension thEnabled ))],[(AlexAcc (alex_action_78))],[(AlexAccPred  (alex_action_47) (ifExtension thEnabled ))],[(AlexAccPred  (alex_action_47) (ifExtension thEnabled ))],[(AlexAcc (alex_action_78))],[(AlexAccPred  (alex_action_48) (ifExtension thEnabled ))],[(AlexAccPred  (alex_action_49) (ifExtension qqEnabled ))],[],[],[],[(AlexAccPred  (alex_action_50) (ifExtension arrowsEnabled `alexAndPred` notFollowedBySymbol ))],[(AlexAcc (alex_action_57))],[(AlexAccPred  (alex_action_51) (ifExtension arrowsEnabled ))],[(AlexAccPred  (alex_action_52) (ifExtension ipEnabled ))],[(AlexAccPred  (alex_action_52) (ifExtension ipEnabled ))],[(AlexAcc (alex_action_78))],[(AlexAccPred  (alex_action_53) (ifExtension unboxedTuplesEnabled `alexAndPred` notFollowedBySymbol ))],[(AlexAccPred  (alex_action_54) (ifExtension unboxedTuplesEnabled ))],[(AlexAccPred  (alex_action_55) (ifExtension genericsEnabled ))],[(AlexAccPred  (alex_action_56) (ifExtension genericsEnabled ))],[(AlexAcc (alex_action_57))],[(AlexAcc (alex_action_58))],[(AlexAcc (alex_action_59))],[(AlexAcc (alex_action_60))],[(AlexAcc (alex_action_61))],[(AlexAcc (alex_action_62))],[(AlexAcc (alex_action_63))],[(AlexAcc (alex_action_65))],[(AlexAcc (alex_action_66))],[(AlexAcc (alex_action_66))],[(AlexAcc (alex_action_66))],[(AlexAcc (alex_action_66))],[],[],[(AlexAcc (alex_action_67))],[(AlexAcc (alex_action_67))],[(AlexAcc (alex_action_69))],[(AlexAcc (alex_action_69))],[(AlexAcc (alex_action_67))],[(AlexAcc (alex_action_67))],[(AlexAcc (alex_action_69))],[(AlexAcc (alex_action_69))],[(AlexAcc (alex_action_68))],[(AlexAcc (alex_action_68))],[(AlexAcc (alex_action_68))],[(AlexAcc (alex_action_68))],[(AlexAccPred  (alex_action_70) (ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_71) (ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_72) (ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_73) (ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_74) (ifExtension oldQualOps ))],[(AlexAccPred  (alex_action_74) (ifExtension oldQualOps ))],[(AlexAccPred  (alex_action_75) (ifExtension oldQualOps ))],[(AlexAccPred  (alex_action_75) (ifExtension oldQualOps ))],[(AlexAccPred  (alex_action_76) (ifExtension newQualOps ))],[],[],[],[(AlexAccPred  (alex_action_77) (ifExtension newQualOps ))],[],[],[(AlexAcc (alex_action_78))],[(AlexAcc (alex_action_78))],[(AlexAcc (alex_action_79))],[(AlexAcc (alex_action_80))],[(AlexAcc (alex_action_80))],[(AlexAcc (alex_action_81))],[],[(AlexAcc (alex_action_82))],[],[(AlexAcc (alex_action_83))],[(AlexAcc (alex_action_83))],[(AlexAcc (alex_action_83))],[],[],[],[],[],[(AlexAccPred  (alex_action_84) (ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_85) (ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_86) (ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_87) (ifExtension magicHashEnabled ))],[],[],[(AlexAccPred  (alex_action_88) (ifExtension magicHashEnabled ))],[],[],[(AlexAccPred  (alex_action_89) (ifExtension magicHashEnabled ))],[],[],[(AlexAccPred  (alex_action_90) (ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_91) (ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_92) (ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_93) (ifExtension magicHashEnabled ))],[],[],[],[],[],[],[],[],[(AlexAccPred  (alex_action_94) (ifExtension magicHashEnabled ))],[(AlexAcc (alex_action_95))],[(AlexAcc (alex_action_96))]]
+alex_accept = listArray (0::Int,240) [[],[(AlexAcc (alex_action_13))],[(AlexAcc (alex_action_17))],[(AlexAcc (alex_action_18))],[(AlexAcc (alex_action_19))],[],[],[(AlexAcc (alex_action_24))],[],[],[],[],[],[(AlexAccSkip)],[(AlexAccSkip)],[(AlexAcc (alex_action_1))],[(AlexAcc (alex_action_1))],[(AlexAccPred  (alex_action_2) ( isNormalComment ))],[(AlexAccPred  (alex_action_2) ( isNormalComment )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_2) ( isNormalComment ))],[(AlexAccPred  (alex_action_2) ( isNormalComment ))],[(AlexAccPred  (alex_action_14) ( notFollowedBy '-' ))],[],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_64))],[(AlexAcc (alex_action_64))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_3))],[(AlexAccPred  (alex_action_8) ( atEOL ))],[(AlexAccPred  (alex_action_8) ( atEOL )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_8) ( atEOL ))],[(AlexAccPred  (alex_action_8) ( atEOL ))],[],[(AlexAcc (alex_action_24))],[],[],[(AlexAcc (alex_action_78))],[(AlexAccPred  (alex_action_7) ( atEOL ))],[(AlexAccPred  (alex_action_7) ( atEOL )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_7) ( atEOL ))],[(AlexAccPred  (alex_action_7) ( atEOL )),(AlexAcc (alex_action_78))],[(AlexAcc (alex_action_4))],[(AlexAcc (alex_action_4))],[(AlexAcc (alex_action_4))],[(AlexAcc (alex_action_4))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) ))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_33))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_35))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) )),(AlexAccPred  (alex_action_37) ( ifExtension haddockEnabled ))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) ))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_5) ( ifExtension (not . haddockEnabled) )),(AlexAcc (alex_action_35))],[(AlexAcc (alex_action_6))],[(AlexAcc (alex_action_6))],[(AlexAcc (alex_action_6))],[(AlexAcc (alex_action_6))],[(AlexAccPred  (alex_action_7) ( atEOL ))],[(AlexAccPred  (alex_action_7) ( atEOL )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_7) ( atEOL )),(AlexAcc (alex_action_78))],[(AlexAccPred  (alex_action_7) ( atEOL ))],[(AlexAccPred  (alex_action_7) ( atEOL )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_7) ( atEOL )),(AlexAcc (alex_action_78))],[(AlexAccSkip)],[(AlexAccPred  (alex_action_10) (alexPrevCharIs '\n'))],[(AlexAccPred  (alex_action_10) (alexPrevCharIs '\n'))],[],[],[],[(AlexAccSkipPred  (alexPrevCharIs '\n'))],[],[],[],[],[],[],[],[(AlexAccSkipPred  (alexPrevCharIs '\n'))],[],[],[(AlexAccSkip)],[(AlexAccPred  (alex_action_16) (alexPrevCharIs '\n'))],[(AlexAccPred  (alex_action_16) (alexPrevCharIs '\n'))],[],[],[],[(AlexAcc (alex_action_20))],[(AlexAccPred  (alex_action_21) ( known_pragma linePrags ))],[(AlexAccPred  (alex_action_21) ( known_pragma linePrags )),(AlexAcc (alex_action_24))],[(AlexAccPred  (alex_action_21) ( known_pragma linePrags )),(AlexAccPred  (alex_action_29) ( known_pragma oneWordPrags )),(AlexAccPred  (alex_action_30) ( known_pragma ignoredPrags )),(AlexAccPred  (alex_action_32) ( known_pragma fileHeaderPrags ))],[(AlexAccPred  (alex_action_21) ( known_pragma linePrags )),(AlexAccPred  (alex_action_29) ( known_pragma oneWordPrags )),(AlexAccPred  (alex_action_30) ( known_pragma ignoredPrags )),(AlexAccPred  (alex_action_34) ( known_pragma fileHeaderPrags ))],[],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_36))],[(AlexAcc (alex_action_36))],[],[(AlexAcc (alex_action_24))],[],[],[(AlexAcc (alex_action_22))],[(AlexAcc (alex_action_23))],[],[],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_26))],[],[],[(AlexAcc (alex_action_27))],[(AlexAcc (alex_action_27))],[],[],[(AlexAccPred  (alex_action_28) ( known_pragma twoWordPrags ))],[],[(AlexAcc (alex_action_31))],[],[(AlexAcc (alex_action_78))],[],[(AlexAcc (alex_action_78))],[(AlexAccPred  (alex_action_38) ( ifExtension haddockEnabled ))],[],[(AlexAccPred  (alex_action_39) ( ifExtension parrEnabled ))],[(AlexAcc (alex_action_59))],[(AlexAccPred  (alex_action_40) ( ifExtension parrEnabled ))],[(AlexAcc (alex_action_79))],[(AlexAccPred  (alex_action_41) ( ifExtension thEnabled ))],[(AlexAccPred  (alex_action_42) ( ifExtension thEnabled ))],[],[(AlexAccPred  (alex_action_43) ( ifExtension thEnabled ))],[],[(AlexAccPred  (alex_action_44) ( ifExtension thEnabled ))],[],[(AlexAccPred  (alex_action_45) ( ifExtension thEnabled ))],[],[(AlexAccPred  (alex_action_46) ( ifExtension thEnabled ))],[(AlexAcc (alex_action_78))],[(AlexAccPred  (alex_action_47) ( ifExtension thEnabled ))],[(AlexAccPred  (alex_action_47) ( ifExtension thEnabled ))],[(AlexAcc (alex_action_78))],[(AlexAccPred  (alex_action_48) ( ifExtension thEnabled ))],[(AlexAccPred  (alex_action_49) ( ifExtension qqEnabled ))],[],[],[],[(AlexAccPred  (alex_action_50) ( ifExtension arrowsEnabled `alexAndPred` notFollowedBySymbol ))],[(AlexAcc (alex_action_57))],[(AlexAccPred  (alex_action_51) ( ifExtension arrowsEnabled ))],[(AlexAccPred  (alex_action_52) ( ifExtension ipEnabled ))],[(AlexAccPred  (alex_action_52) ( ifExtension ipEnabled ))],[(AlexAcc (alex_action_78))],[(AlexAccPred  (alex_action_53) ( ifExtension unboxedTuplesEnabled `alexAndPred` notFollowedBySymbol ))],[(AlexAccPred  (alex_action_54) ( ifExtension unboxedTuplesEnabled ))],[(AlexAccPred  (alex_action_55) ( ifExtension genericsEnabled ))],[(AlexAccPred  (alex_action_56) ( ifExtension genericsEnabled ))],[(AlexAcc (alex_action_57))],[(AlexAcc (alex_action_58))],[(AlexAcc (alex_action_59))],[(AlexAcc (alex_action_60))],[(AlexAcc (alex_action_61))],[(AlexAcc (alex_action_62))],[(AlexAcc (alex_action_63))],[(AlexAcc (alex_action_65))],[(AlexAcc (alex_action_66))],[(AlexAcc (alex_action_66))],[(AlexAcc (alex_action_66))],[(AlexAcc (alex_action_66))],[],[],[(AlexAcc (alex_action_67))],[(AlexAcc (alex_action_67))],[(AlexAcc (alex_action_69))],[(AlexAcc (alex_action_69))],[(AlexAcc (alex_action_67))],[(AlexAcc (alex_action_67))],[(AlexAcc (alex_action_69))],[(AlexAcc (alex_action_69))],[(AlexAcc (alex_action_68))],[(AlexAcc (alex_action_68))],[(AlexAcc (alex_action_68))],[(AlexAcc (alex_action_68))],[(AlexAccPred  (alex_action_70) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_71) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_72) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_73) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_74) ( ifExtension oldQualOps ))],[(AlexAccPred  (alex_action_74) ( ifExtension oldQualOps ))],[(AlexAccPred  (alex_action_75) ( ifExtension oldQualOps ))],[(AlexAccPred  (alex_action_75) ( ifExtension oldQualOps ))],[(AlexAccPred  (alex_action_76) ( ifExtension newQualOps ))],[],[],[],[(AlexAccPred  (alex_action_77) ( ifExtension newQualOps ))],[],[],[(AlexAcc (alex_action_78))],[(AlexAcc (alex_action_78))],[(AlexAcc (alex_action_79))],[(AlexAcc (alex_action_80))],[(AlexAcc (alex_action_80))],[(AlexAcc (alex_action_81))],[],[(AlexAcc (alex_action_82))],[],[(AlexAcc (alex_action_83))],[(AlexAcc (alex_action_83))],[(AlexAcc (alex_action_83))],[],[],[],[],[],[(AlexAccPred  (alex_action_84) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_85) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_86) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_87) ( ifExtension magicHashEnabled ))],[],[],[(AlexAccPred  (alex_action_88) ( ifExtension magicHashEnabled ))],[],[],[(AlexAccPred  (alex_action_89) ( ifExtension magicHashEnabled ))],[],[],[(AlexAccPred  (alex_action_90) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_91) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_92) ( ifExtension magicHashEnabled ))],[(AlexAccPred  (alex_action_93) ( ifExtension magicHashEnabled ))],[],[],[],[],[],[],[],[],[(AlexAccPred  (alex_action_94) ( ifExtension magicHashEnabled ))],[(AlexAcc (alex_action_95))],[(AlexAcc (alex_action_96))]]
 {-# LINE 415 "compiler/parser/Lexer.x" #-}
+
 -- -----------------------------------------------------------------------------
 -- The token type
 
@@ -1632,103 +1634,104 @@ line_prag2 = 8
 line_prag2a = 9
 line_prag2b = 10
 option_prags = 11
-alex_action_1 = warn Opt_WarnTabs (text "Tab character") 
-alex_action_2 = nested_comment lexToken 
-alex_action_3 = lineCommentToken 
-alex_action_4 = lineCommentToken 
-alex_action_5 = lineCommentToken 
-alex_action_6 = lineCommentToken 
-alex_action_7 = lineCommentToken 
-alex_action_8 = lineCommentToken 
-alex_action_10 = begin line_prag1 
-alex_action_13 = do_bol 
-alex_action_14 = pop_and open_brace 
-alex_action_16 = begin line_prag1 
-alex_action_17 = new_layout_context True 
-alex_action_18 = new_layout_context False 
-alex_action_19 = do_layout_left 
-alex_action_20 = begin bol 
-alex_action_21 = dispatch_pragmas linePrags 
-alex_action_22 = setLine line_prag1a 
-alex_action_23 = setFile line_prag1b 
-alex_action_24 = pop 
-alex_action_25 = setLine line_prag2a 
-alex_action_26 = setFile line_prag2b 
-alex_action_27 = pop 
-alex_action_28 = dispatch_pragmas twoWordPrags 
-alex_action_29 = dispatch_pragmas oneWordPrags 
-alex_action_30 = dispatch_pragmas ignoredPrags 
-alex_action_31 = endPrag 
-alex_action_32 = dispatch_pragmas fileHeaderPrags 
-alex_action_33 = multiline_doc_comment 
-alex_action_34 = nested_comment lexToken 
-alex_action_35 = lineCommentToken 
-alex_action_36 = warnThen Opt_WarnUnrecognisedPragmas (text "Unrecognised pragma")
+alex_action_1 =  warn Opt_WarnTabs (text "Tab character") 
+alex_action_2 =  nested_comment lexToken 
+alex_action_3 =  lineCommentToken 
+alex_action_4 =  lineCommentToken 
+alex_action_5 =  lineCommentToken 
+alex_action_6 =  lineCommentToken 
+alex_action_7 =  lineCommentToken 
+alex_action_8 =  lineCommentToken 
+alex_action_10 =  begin line_prag1 
+alex_action_13 =  do_bol 
+alex_action_14 =  pop_and open_brace 
+alex_action_16 =  begin line_prag1 
+alex_action_17 =  new_layout_context True 
+alex_action_18 =  new_layout_context False 
+alex_action_19 =  do_layout_left 
+alex_action_20 =  begin bol 
+alex_action_21 =  dispatch_pragmas linePrags 
+alex_action_22 =  setLine line_prag1a 
+alex_action_23 =  setFile line_prag1b 
+alex_action_24 =  pop 
+alex_action_25 =  setLine line_prag2a 
+alex_action_26 =  setFile line_prag2b 
+alex_action_27 =  pop 
+alex_action_28 =  dispatch_pragmas twoWordPrags 
+alex_action_29 =  dispatch_pragmas oneWordPrags 
+alex_action_30 =  dispatch_pragmas ignoredPrags 
+alex_action_31 =  endPrag 
+alex_action_32 =  dispatch_pragmas fileHeaderPrags 
+alex_action_33 =  multiline_doc_comment 
+alex_action_34 =  nested_comment lexToken 
+alex_action_35 =  lineCommentToken 
+alex_action_36 =  warnThen Opt_WarnUnrecognisedPragmas (text "Unrecognised pragma")
                     (nested_comment lexToken) 
-alex_action_37 = multiline_doc_comment 
-alex_action_38 = nested_doc_comment 
-alex_action_39 = token ITopabrack 
-alex_action_40 = token ITcpabrack 
-alex_action_41 = token ITopenExpQuote 
-alex_action_42 = token ITopenExpQuote 
-alex_action_43 = token ITopenPatQuote 
-alex_action_44 = layout_token ITopenDecQuote 
-alex_action_45 = token ITopenTypQuote 
-alex_action_46 = token ITcloseQuote 
-alex_action_47 = skip_one_varid ITidEscape 
-alex_action_48 = token ITparenEscape 
-alex_action_49 = lex_quasiquote_tok 
-alex_action_50 = special IToparenbar 
-alex_action_51 = special ITcparenbar 
-alex_action_52 = skip_one_varid ITdupipvarid 
-alex_action_53 = token IToubxparen 
-alex_action_54 = token ITcubxparen 
-alex_action_55 = token ITocurlybar 
-alex_action_56 = token ITccurlybar 
-alex_action_57 = special IToparen 
-alex_action_58 = special ITcparen 
-alex_action_59 = special ITobrack 
-alex_action_60 = special ITcbrack 
-alex_action_61 = special ITcomma 
-alex_action_62 = special ITsemi 
-alex_action_63 = special ITbackquote 
-alex_action_64 = open_brace 
-alex_action_65 = close_brace 
-alex_action_66 = idtoken qvarid 
-alex_action_67 = idtoken qconid 
-alex_action_68 = varid 
-alex_action_69 = idtoken conid 
-alex_action_70 = idtoken qvarid 
-alex_action_71 = idtoken qconid 
-alex_action_72 = varid 
-alex_action_73 = idtoken conid 
-alex_action_74 = idtoken qvarsym 
-alex_action_75 = idtoken qconsym 
-alex_action_76 = idtoken prefixqvarsym 
-alex_action_77 = idtoken prefixqconsym 
-alex_action_78 = varsym 
-alex_action_79 = consym 
-alex_action_80 = tok_num positive 0 0 decimal 
-alex_action_81 = tok_num positive 2 2 octal 
-alex_action_82 = tok_num positive 2 2 hexadecimal 
-alex_action_83 = strtoken tok_float 
-alex_action_84 = tok_primint positive 0 1 decimal 
-alex_action_85 = tok_primint positive 2 3 octal 
-alex_action_86 = tok_primint positive 2 3 hexadecimal 
-alex_action_87 = tok_primint negative 1 2 decimal 
-alex_action_88 = tok_primint negative 3 4 octal 
-alex_action_89 = tok_primint negative 3 4 hexadecimal 
-alex_action_90 = tok_primword 0 2 decimal 
-alex_action_91 = tok_primword 2 4 octal 
-alex_action_92 = tok_primword 2 4 hexadecimal 
-alex_action_93 = init_strtoken 1 tok_primfloat 
-alex_action_94 = init_strtoken 2 tok_primdouble 
-alex_action_95 = lex_char_tok 
-alex_action_96 = lex_string_tok 
-{-# LINE 1 "GenericTemplate.hs" #-}
+alex_action_37 =  multiline_doc_comment 
+alex_action_38 =  nested_doc_comment 
+alex_action_39 =  token ITopabrack 
+alex_action_40 =  token ITcpabrack 
+alex_action_41 =  token ITopenExpQuote 
+alex_action_42 =  token ITopenExpQuote 
+alex_action_43 =  token ITopenPatQuote 
+alex_action_44 =  layout_token ITopenDecQuote 
+alex_action_45 =  token ITopenTypQuote 
+alex_action_46 =  token ITcloseQuote 
+alex_action_47 =  skip_one_varid ITidEscape 
+alex_action_48 =  token ITparenEscape 
+alex_action_49 =  lex_quasiquote_tok 
+alex_action_50 =  special IToparenbar 
+alex_action_51 =  special ITcparenbar 
+alex_action_52 =  skip_one_varid ITdupipvarid 
+alex_action_53 =  token IToubxparen 
+alex_action_54 =  token ITcubxparen 
+alex_action_55 =  token ITocurlybar 
+alex_action_56 =  token ITccurlybar 
+alex_action_57 =  special IToparen 
+alex_action_58 =  special ITcparen 
+alex_action_59 =  special ITobrack 
+alex_action_60 =  special ITcbrack 
+alex_action_61 =  special ITcomma 
+alex_action_62 =  special ITsemi 
+alex_action_63 =  special ITbackquote 
+alex_action_64 =  open_brace 
+alex_action_65 =  close_brace 
+alex_action_66 =  idtoken qvarid 
+alex_action_67 =  idtoken qconid 
+alex_action_68 =  varid 
+alex_action_69 =  idtoken conid 
+alex_action_70 =  idtoken qvarid 
+alex_action_71 =  idtoken qconid 
+alex_action_72 =  varid 
+alex_action_73 =  idtoken conid 
+alex_action_74 =  idtoken qvarsym 
+alex_action_75 =  idtoken qconsym 
+alex_action_76 =  idtoken prefixqvarsym 
+alex_action_77 =  idtoken prefixqconsym 
+alex_action_78 =  varsym 
+alex_action_79 =  consym 
+alex_action_80 =  tok_num positive 0 0 decimal 
+alex_action_81 =  tok_num positive 2 2 octal 
+alex_action_82 =  tok_num positive 2 2 hexadecimal 
+alex_action_83 =  strtoken tok_float 
+alex_action_84 =  tok_primint positive 0 1 decimal 
+alex_action_85 =  tok_primint positive 2 3 octal 
+alex_action_86 =  tok_primint positive 2 3 hexadecimal 
+alex_action_87 =  tok_primint negative 1 2 decimal 
+alex_action_88 =  tok_primint negative 3 4 octal 
+alex_action_89 =  tok_primint negative 3 4 hexadecimal 
+alex_action_90 =  tok_primword 0 2 decimal 
+alex_action_91 =  tok_primword 2 4 octal 
+alex_action_92 =  tok_primword 2 4 hexadecimal 
+alex_action_93 =  init_strtoken 1 tok_primfloat 
+alex_action_94 =  init_strtoken 2 tok_primdouble 
+alex_action_95 =  lex_char_tok 
+alex_action_96 =  lex_string_tok 
+{-# LINE 1 "templates/GenericTemplate.hs" #-}
+{-# LINE 1 "templates/GenericTemplate.hs" #-}
 {-# LINE 1 "<built-in>" #-}
-{-# LINE 1 "<command line>" #-}
-{-# LINE 1 "GenericTemplate.hs" #-}
+{-# LINE 1 "<command-line>" #-}
+{-# LINE 1 "templates/GenericTemplate.hs" #-}
 -- -----------------------------------------------------------------------------
 -- ALEX TEMPLATE
 --
@@ -1738,9 +1741,9 @@ alex_action_96 = lex_string_tok
 -- -----------------------------------------------------------------------------
 -- INTERNALS and main scanner engine
 
-{-# LINE 35 "GenericTemplate.hs" #-}
+{-# LINE 37 "templates/GenericTemplate.hs" #-}
 
-{-# LINE 45 "GenericTemplate.hs" #-}
+{-# LINE 47 "templates/GenericTemplate.hs" #-}
 
 
 data AlexAddr = AlexA# Addr#
@@ -1854,12 +1857,12 @@ alex_scan_tkn user orig_input len input s last_acc =
 
 
 	let
-		base   = alexIndexInt32OffAddr alex_base s
-		(I# (ord_c)) = ord c
-		offset = (base +# ord_c)
-		check  = alexIndexInt16OffAddr alex_check offset
+		!(base) = alexIndexInt32OffAddr alex_base s
+		!((I# (ord_c))) = ord c
+		!(offset) = (base +# ord_c)
+		!(check)  = alexIndexInt16OffAddr alex_check offset
 		
-		new_s = if (offset >=# 0#) && (check ==# ord_c)
+		!(new_s) = if (offset >=# 0#) && (check ==# ord_c)
 			  then alexIndexInt16OffAddr alex_table offset
 			  else alexIndexInt16OffAddr alex_deflt s
 	in

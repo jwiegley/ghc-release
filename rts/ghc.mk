@@ -331,7 +331,7 @@ rts_dist_C_SRCS  = $(rts_C_SRCS) $(rts_thr_EXTRA_C_SRCS)
 rts_dist_S_SRCS =  $(rts_S_SRCS)
 rts_dist_C_FILES = $(rts_C_SRCS) $(rts_thr_EXTRA_C_SRCS) $(rts_S_SRCS)
 
-$(eval $(call build-dependencies,rts,dist))
+$(eval $(call build-dependencies,rts,dist,1))
 
 $(rts_dist_depfile) : libffi/dist-install/build/ffi.h
 

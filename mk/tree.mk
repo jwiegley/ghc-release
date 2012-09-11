@@ -48,9 +48,25 @@ INPLACE_TOPDIR          = $(INPLACE)/lib
 INPLACE_MINGW           = $(INPLACE)/mingw
 INPLACE_PERL            = $(INPLACE)/perl
 
+################################################################################
+#
+#    Bindist testing directory
+#
+################################################################################
+
+BIN_DIST_INST_SUBDIR = "install dir"
+BIN_DIST_INST_DIR = bindisttest/$(BIN_DIST_INST_SUBDIR)
+
+################################################################################
+#
+#    rm
+#
+################################################################################
+
 # These are here, rather than in config.mk, as they need to exist in an
 # unconfigured tree so that the various clean targets can be used
 # without configuring:
 RM = rm
 RM_OPTS = -f
+RM_OPTS_REC = -rf
 

@@ -28,8 +28,9 @@ $baseName='';
 $ignore_output='> /dev/null';
 
 if ( ${BUILDPLATFORM} eq "i386-unknown-mingw32" ) {
-    # Assuming the underlying perl uses cmd to exec system() calls.
-    $ignore_output = ">nul";
+    # This used to be ">nul", but we had problems with the nightly
+    # builders getting files called "nul" being created
+    $ignore_output = "";
 }
 
 if ( $ENV{'TMPDIR'} ) { # where to make tmp file names

@@ -510,7 +510,7 @@ rts_evalLazyIO_ (Capability *cap, HaskellObj p, unsigned int stack_size,
 void
 rts_checkSchedStatus (char* site, Capability *cap)
 {
-    SchedulerStatus rc = cap->running_task->stat;
+    SchedulerStatus rc = cap->running_task->incall->stat;
     switch (rc) {
     case Success:
 	return;
@@ -529,7 +529,7 @@ rts_checkSchedStatus (char* site, Capability *cap)
 SchedulerStatus
 rts_getSchedStatus (Capability *cap)
 {
-    return cap->running_task->stat;
+    return cap->running_task->incall->stat;
 }
 
 Capability *
@@ -538,15 +538,15 @@ rts_lock (void)
     Capability *cap;
     Task *task;
 
-    if (running_finalizers) {
+    task = newBoundTask();
+
+    if (task->running_finalizers) {
         errorBelch("error: a C finalizer called back into Haskell.\n"
                    "   This was previously allowed, but is disallowed in GHC 6.10.2 and later.\n"
                    "   To create finalizers that may call back into Haskell, use\n"
                    "   Foreign.Concurrent.newForeignPtr instead of Foreign.newForeignPtr.");
         stg_exit(EXIT_FAILURE);
     }
-
-    task = newBoundTask();
 
     cap = NULL;
     waitForReturnCapability(&cap, task);

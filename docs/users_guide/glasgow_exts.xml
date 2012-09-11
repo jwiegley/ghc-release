@@ -856,7 +856,7 @@ it, you can use the <option>-XNoNPlusKPatterns</option> flag.
 
     <!-- ===================== Recursive do-notation ===================  -->
 
-<sect2 id="mdo-notation">
+<sect2 id="recursive-do-notation">
 <title>The recursive do-notation
 </title>
 
@@ -877,7 +877,7 @@ justOnes = do { rec { xs &lt;- Just (1:xs) }
 As you can guess <literal>justOnes</literal> will evaluate to <literal>Just [-1,-1,-1,...</literal>.
 </para>
 <para>
-The background and motivation for recusrive do-notation is described in
+The background and motivation for recursive do-notation is described in
 <ulink url="http://sites.google.com/site/leventerkok/">A recursive do for Haskell</ulink>,
 by Levent Erkok, John Launchbury,
 Haskell Workshop 2002, pages: 29-37. Pittsburgh, Pennsylvania. 
@@ -992,7 +992,7 @@ It supports rebindable syntax (see <xref linkend="rebindable-syntax"/>).
 </para>
 </sect3>
 
-<sect3> <title> Mdo-notation (deprecated) </title>
+<sect3 id="mdo-notation"> <title> Mdo-notation (deprecated) </title>
 
 <para> GHC used to support the flag <option>-XRecursiveDo</option>,
 which enabled the keyword <literal>mdo</literal>, precisely as described in
@@ -1642,7 +1642,7 @@ and the fixity declaration applies wherever the binding is in scope.
 For example, in a <literal>let</literal>, it applies in the right-hand
 sides of other <literal>let</literal>-bindings and the body of the
 <literal>let</literal>C. Or, in recursive <literal>do</literal>
-expressions (<xref linkend="mdo-notation"/>), the local fixity
+expressions (<xref linkend="recursive-do-notation"/>), the local fixity
 declarations of a <literal>let</literal> statement scope over other
 statements in the group, just as the bound name does.
 </para>

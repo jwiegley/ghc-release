@@ -1,5 +1,6 @@
 {-# OPTIONS -fglasgow-exts -cpp #-}
 {-# LINE 2 "utils/genprimopcode/./Lexer.x" #-}
+
 {-# OPTIONS -w -Wwarn #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
@@ -17,7 +18,7 @@ import ParserM (ParserM (..), mkT, mkTv, Token(..), St, start_code,
 
 #if __GLASGOW_HASKELL__ >= 603
 #include "ghcconfig.h"
-#else
+#elif defined(__GLASGOW_HASKELL__)
 #include "config.h"
 #endif
 #if __GLASGOW_HASKELL__ >= 503
@@ -47,6 +48,7 @@ alex_deflt = AlexA# "\xff\xff\x72\x00\xff\xff\xff\xff\xff\xff\x06\x00\x06\x00\xf
 
 alex_accept = listArray (0::Int,115) [[],[],[],[(AlexAccSkip)],[(AlexAccSkip)],[],[],[],[(AlexAcc (alex_action_2))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_4))],[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_6))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_8))],[(AlexAcc (alex_action_9))],[(AlexAcc (alex_action_10))],[],[(AlexAcc (alex_action_11))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_12))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_13))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_14))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_15))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_16))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_17))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_18))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_19))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_20))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_21))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_22))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_23))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_26))],[],[],[(AlexAcc (alex_action_27))],[(AlexAcc (alex_action_28))]]
 {-# LINE 60 "utils/genprimopcode/./Lexer.x" #-}
+
 get_tok :: ParserM Token
 get_tok = ParserM $ \i st ->
    case alexScan i (start_code st) of
@@ -63,46 +65,47 @@ lex_tok cont = get_tok >>= cont
 
 in_braces :: Int
 in_braces = 1
-alex_action_2 = \i -> do {
+alex_action_2 =  \i -> do {
                                                 set_start_code in_braces;
                                                 inc_brace_depth;
                                                 mkT TOpenBrace i
                                                }
                                     
-alex_action_3 = \i -> do {
+alex_action_3 =  \i -> do {
                                                 dec_brace_depth;
                                                 mkT TCloseBrace i
                                                }
                                     
-alex_action_4 = mkT TArrow 
-alex_action_5 = mkT TEquals 
-alex_action_6 = mkT TComma 
-alex_action_7 = mkT TOpenParen 
-alex_action_8 = mkT TCloseParen 
-alex_action_9 = mkT TOpenParenHash 
-alex_action_10 = mkT THashCloseParen 
-alex_action_11 = mkT TSection 
-alex_action_12 = mkT TPrimop 
-alex_action_13 = mkT TPseudoop 
-alex_action_14 = mkT TPrimtype 
-alex_action_15 = mkT TWith 
-alex_action_16 = mkT TDefaults 
-alex_action_17 = mkT TTrue 
-alex_action_18 = mkT TFalse 
-alex_action_19 = mkT TDyadic 
-alex_action_20 = mkT TMonadic 
-alex_action_21 = mkT TCompare 
-alex_action_22 = mkT TGenPrimOp 
-alex_action_23 = mkT TThatsAllFolks 
-alex_action_24 = mkTv TLowerName 
-alex_action_25 = mkTv TUpperName 
-alex_action_26 = mkTv (TString . tail . init) 
-alex_action_27 = mkTv TNoBraces 
-alex_action_28 = mkTv TNoBraces 
-{-# LINE 1 "GenericTemplate.hs" #-}
+alex_action_4 =  mkT TArrow 
+alex_action_5 =  mkT TEquals 
+alex_action_6 =  mkT TComma 
+alex_action_7 =  mkT TOpenParen 
+alex_action_8 =  mkT TCloseParen 
+alex_action_9 =  mkT TOpenParenHash 
+alex_action_10 =  mkT THashCloseParen 
+alex_action_11 =  mkT TSection 
+alex_action_12 =  mkT TPrimop 
+alex_action_13 =  mkT TPseudoop 
+alex_action_14 =  mkT TPrimtype 
+alex_action_15 =  mkT TWith 
+alex_action_16 =  mkT TDefaults 
+alex_action_17 =  mkT TTrue 
+alex_action_18 =  mkT TFalse 
+alex_action_19 =  mkT TDyadic 
+alex_action_20 =  mkT TMonadic 
+alex_action_21 =  mkT TCompare 
+alex_action_22 =  mkT TGenPrimOp 
+alex_action_23 =  mkT TThatsAllFolks 
+alex_action_24 =  mkTv TLowerName 
+alex_action_25 =  mkTv TUpperName 
+alex_action_26 =  mkTv (TString . tail . init) 
+alex_action_27 =  mkTv TNoBraces 
+alex_action_28 =  mkTv TNoBraces 
+{-# LINE 1 "templates/GenericTemplate.hs" #-}
+{-# LINE 1 "templates/GenericTemplate.hs" #-}
 {-# LINE 1 "<built-in>" #-}
-{-# LINE 1 "<command line>" #-}
-{-# LINE 1 "GenericTemplate.hs" #-}
+{-# LINE 1 "<command-line>" #-}
+{-# LINE 1 "templates/GenericTemplate.hs" #-}
 -- -----------------------------------------------------------------------------
 -- ALEX TEMPLATE
 --
@@ -112,9 +115,9 @@ alex_action_28 = mkTv TNoBraces
 -- -----------------------------------------------------------------------------
 -- INTERNALS and main scanner engine
 
-{-# LINE 35 "GenericTemplate.hs" #-}
+{-# LINE 37 "templates/GenericTemplate.hs" #-}
 
-{-# LINE 45 "GenericTemplate.hs" #-}
+{-# LINE 47 "templates/GenericTemplate.hs" #-}
 
 
 data AlexAddr = AlexA# Addr#
@@ -228,12 +231,12 @@ alex_scan_tkn user orig_input len input s last_acc =
 
 
 	let
-		base   = alexIndexInt32OffAddr alex_base s
-		(I# (ord_c)) = ord c
-		offset = (base +# ord_c)
-		check  = alexIndexInt16OffAddr alex_check offset
+		!(base) = alexIndexInt32OffAddr alex_base s
+		!((I# (ord_c))) = ord c
+		!(offset) = (base +# ord_c)
+		!(check)  = alexIndexInt16OffAddr alex_check offset
 		
-		new_s = if (offset >=# 0#) && (check ==# ord_c)
+		!(new_s) = if (offset >=# 0#) && (check ==# ord_c)
 			  then alexIndexInt16OffAddr alex_table offset
 			  else alexIndexInt16OffAddr alex_deflt s
 	in

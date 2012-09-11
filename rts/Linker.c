@@ -63,15 +63,13 @@
 #include <sys/wait.h>
 #endif
 
-#if defined(ia64_HOST_ARCH) || defined(linux_HOST_OS) || defined(freebsd_HOST_OS) || defined(dragonfly_HOST_OS) || defined(netbsd_HOST_OS) || defined(openbsd_HOST_OS)
+#if defined(linux_HOST_OS) || defined(freebsd_HOST_OS) || defined(dragonfly_HOST_OS) || defined(netbsd_HOST_OS) || defined(openbsd_HOST_OS) || defined(darwin_HOST_OS)
 #define USE_MMAP
 #include <fcntl.h>
 #include <sys/mman.h>
 
-#if defined(linux_HOST_OS) || defined(freebsd_HOST_OS) || defined(dragonfly_HOST_OS) || defined(netbsd_HOST_OS) || defined(openbsd_HOST_OS)
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
-#endif
 #endif
 
 #endif
@@ -125,7 +123,9 @@ static int ocVerifyImage_MachO    ( ObjectCode* oc );
 static int ocGetNames_MachO       ( ObjectCode* oc );
 static int ocResolve_MachO        ( ObjectCode* oc );
 
+#ifndef USE_MMAP
 static int machoGetMisalignment( FILE * );
+#endif
 #if defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
 static int ocAllocateSymbolExtras_MachO ( ObjectCode* oc );
 #endif
@@ -4059,6 +4059,9 @@ static int relocateSection(
                 thing += value;
                 break;
             case X86_64_RELOC_SIGNED:
+            case X86_64_RELOC_SIGNED_1:
+            case X86_64_RELOC_SIGNED_2:
+            case X86_64_RELOC_SIGNED_4:
                 ASSERT(reloc->r_pcrel);
                 thing += value - baseValue;
                 break;
@@ -4640,6 +4643,7 @@ static void machoInitSymbolsWithoutUnderscore()
 }
 #endif
 
+#ifndef USE_MMAP
 /*
  * Figure out by how much to shift the entire Mach-O file in memory
  * when loading so that its single segment ends up 16-byte-aligned
@@ -4665,6 +4669,7 @@ static int machoGetMisalignment( FILE * f )
 
     return misalignment ? (16 - misalignment) : 0;
 }
+#endif
 
 #endif
 

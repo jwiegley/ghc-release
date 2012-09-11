@@ -11,7 +11,7 @@
 # This file is subject to the same free software license as GHC.
 
 %define name    ghc
-%define version 6.12.2
+%define version 6.12.3
 %define release 1
 
 Name:           %{name}
@@ -85,7 +85,7 @@ needed.
 %setup -b1
 
 %build
-test -f configure || sh boot
+test -f configure || perl boot
 ./configure --prefix=%{_prefix} --mandir=%{_mandir}
 
 # Don't install these tools, we'll use update-alternatives below.

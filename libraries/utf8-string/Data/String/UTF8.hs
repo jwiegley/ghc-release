@@ -1,5 +1,14 @@
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# OPTIONS_GHC -fallow-undecidable-instances #-}
+--
+-- |
+-- Module      :  Data.String.UTF8
+-- Copyright   :  (c) Iavor S. Diatchki 2009
+-- License     :  BSD3-style (see LICENSE)
+--
+-- Maintainer  :  emertens@galois.com
+-- Stability   :  experimental
+-- Portability :  portable
+--
+{-# LANGUAGE MultiParamTypeClasses, UndecidableInstances #-}
 module Data.String.UTF8
   ( -- * Representation
     UTF8
@@ -36,7 +45,7 @@ import Prelude hiding (null,take,drop,span,break
 import qualified Codec.Binary.UTF8.Generic as G
 import Codec.Binary.UTF8.Generic (UTF8Bytes)
 
--- | The type of strngs that are represented using tthe UTF8 encoding.
+-- | The type of strngs that are represented using the UTF8 encoding.
 -- The parameters is the type of the container for the representation.
 newtype UTF8 string = Str string deriving (Eq,Ord)   -- XXX: Is this OK?
 

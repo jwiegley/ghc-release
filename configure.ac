@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [6.12.2], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [6.12.3], [glasgow-haskell-bugs@haskell.org], [ghc])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=YES}
@@ -27,7 +27,7 @@ AC_INIT([The Glorious Glasgow Haskell Compilation System], [6.12.2], [glasgow-ha
 # when the source distribution was created.
 
 if test ! -f mk/config.h.in; then
-   echo "mk/config.h.in doesn't exist: perhaps you haven't run 'sh boot'?"
+   echo "mk/config.h.in doesn't exist: perhaps you haven't run 'perl boot'?"
    exit 1
 fi
 
@@ -194,19 +194,27 @@ AC_ARG_WITH([iconv-libraries],
 AC_SUBST(ICONV_INCLUDE_DIRS)
 AC_SUBST(ICONV_LIB_DIRS)
 
+dnl Allow to specify gmp options to the toplevel configure script
+dnl so they can be properly passed to sub-builds.
+
+AC_ARG_WITH([gmp-includes],
+  [AC_HELP_STRING([--with-gmp-includes],
+    [directory containing gmp.h])],
+    [GMP_INCLUDE_DIRS=$withval])
+
+AC_ARG_WITH([gmp-libraries],
+  [AC_HELP_STRING([--with-gmp-libraries],
+    [directory containing gmp library])],
+    [GMP_LIB_DIRS=$withval])
+
+AC_SUBST(GMP_INCLUDE_DIRS)
+AC_SUBST(GMP_LIB_DIRS)
+
 dnl--------------------------------------------------------------------
 dnl * Choose host(/target/build) platform
 dnl--------------------------------------------------------------------
-dnl We don't use the standard autoconf macros for this, but instead
-dnl ask the bootstrapping compiler what platform it is for
-
-dnl Guess host/target/build platform(s) if necessary.
-m4_divert_once([HELP_CANON],
-[[
-System types:
-  --build=BUILD     configure for building on BUILD [guessed]
-  --host=HOST       cross-compile to build programs to run on HOST [guessed]
-  --target=TARGET   configure for building compilers for TARGET [guessed]]])dnl
+dnl If we aren't explicitly told what values to use with configure flags,
+dnl we ask the bootstrapping compiler what platform it is for
 
 if test "${WithGhc}" != ""
 then
@@ -424,6 +432,7 @@ then
     CC="$hardtop/inplace/mingw/bin/gcc.exe"
     LD="$hardtop/inplace/mingw/bin/ld.exe"
     NM="$hardtop/inplace/mingw/bin/nm.exe"
+    fp_prog_ar_raw="$hardtop/inplace/mingw/bin/ar.exe"
     if ! test -d inplace/mingw ||
          test inplace/mingw -ot ghc-tarballs/mingw/binutils*.tar.gz ||
          test inplace/mingw -ot ghc-tarballs/mingw/gcc-core*.tar.gz ||
@@ -822,6 +831,11 @@ AC_COMPILE_IFELSE(
 dnl *** check for GNU non-executable stack note support (ELF only)
 dnl     (.section .note.GNU-stack,"",@progbits)
 
+dnl This test doesn't work with "gcc -g" in gcc 4.4 (GHC trac #3889:
+dnl     Error: can't resolve `.note.GNU-stack' {.note.GNU-stack section} - `.Ltext0' {.text section}
+dnl so we empty CFLAGS while running this test
+CFLAGS2="$CFLAGS"
+CFLAGS=
 AC_MSG_CHECKING(for GNU non-executable stack support)
 AC_COMPILE_IFELSE(
     [AC_LANG_PROGRAM([__asm__ (".section .note.GNU-stack,\"\",@progbits");], [0])],
@@ -830,6 +844,7 @@ AC_COMPILE_IFELSE(
                [Define to 1 if GNU non-executable stack notes are supported.])
     ],
     [AC_MSG_RESULT(no)])
+CFLAGS="$CFLAGS2"
 
 dnl ** check for librt
 AC_CHECK_LIB(rt, clock_gettime)
@@ -907,7 +922,7 @@ if grep '	' compiler/ghc.cabal.in 2>&1 >/dev/null; then
    AC_MSG_ERROR([compiler/ghc.cabal.in contains tab characters; please remove them])
 fi
 
-AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal ghc.spec extra-gcc-opts docs/users_guide/ug-book.xml docs/users_guide/ug-ent.xml libraries/prologue.txt distrib/ghc.iss distrib/configure.ac])
+AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal ghc.spec extra-gcc-opts docs/users_guide/ug-book.xml docs/users_guide/ug-ent.xml docs/index.html libraries/prologue.txt distrib/ghc.iss distrib/configure.ac])
 AC_CONFIG_COMMANDS([mk/stamp-h],[echo timestamp > mk/stamp-h])
 AC_OUTPUT
 

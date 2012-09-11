@@ -430,7 +430,10 @@ runInUnboundThread action = do
     if bound
         then do
             mv <- newEmptyMVar
-            _ <- forkIO (Exception.try action >>= putMVar mv)
+            b <- blocked
+            _ <- block $ forkIO $
+              Exception.try (if b then action else unblock action) >>=
+              putMVar mv
             takeMVar mv >>= \ei -> case ei of
                 Left exception -> Exception.throw (exception :: SomeException)
                 Right result -> return result
@@ -479,7 +482,7 @@ foreign import ccall unsafe "rtsSupportsBoundThreads" threaded :: Bool
 withThread :: IO a -> IO a
 withThread io = do
   m <- newEmptyMVar
-  _ <- forkIO $ try io >>= putMVar m
+  _ <- block $ forkIO $ try io >>= putMVar m
   x <- takeMVar m
   case x of
     Right a -> return a

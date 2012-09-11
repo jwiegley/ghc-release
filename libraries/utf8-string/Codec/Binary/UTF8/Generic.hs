@@ -1,8 +1,14 @@
 {-# LANGUAGE MultiParamTypeClasses, FunctionalDependencies, FlexibleInstances #-}
--- | This module provides fast, validated encoding and decoding functions
---   between 'ByteString's and 'String's. It does not exactly match the
---   output of the Codec.Binary.UTF8.String output for invalid encodings
---   as the number of replacement characters is sometimes longer.
+--
+-- |
+-- Module      :  Codec.Binary.UTF8.Generic
+-- Copyright   :  (c) Iavor S. Diatchki 2009
+-- License     :  BSD3-style (see LICENSE)
+--
+-- Maintainer  :  emertens@galois.com
+-- Stability   :  experimental
+-- Portability :  portable
+--
 module Codec.Binary.UTF8.Generic
   ( UTF8Bytes(..)
   , decode
@@ -152,8 +158,8 @@ decode bs = do (c,cs) <- buncons bs
         case get_follower d1 cs1 of
           Just (d2, cs2) ->
             case get_follower d2 cs2 of
-              Just (d,_) | d >= 0x10000 -> (toEnum d, 4)
-                         | otherwise    -> (replacement_char, 4)
+              Just (d,_) | d >= 0x10000 && d < 0x110000 -> (toEnum d, 4)
+                         | otherwise                    -> (replacement_char, 4)
               _ -> (replacement_char, 3)
           _ -> (replacement_char, 2)
       _ -> (replacement_char, 1)

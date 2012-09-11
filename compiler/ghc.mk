@@ -441,24 +441,24 @@ compiler_stage1_SplitObjs = NO
 compiler_stage2_SplitObjs = NO
 compiler_stage3_SplitObjs = NO
 
-# For now, bindists always use stage 2
-ifneq "$(BINDIST)" "YES"
-# stage 1 is enabled unless $(stage) is set to something other than 1
-ifeq "$(filter-out 1,$(stage))" ""
+# If we "make 1" or "make 2" then we don't want the rules for the stage
+# that we haven't been asked to build
+ifeq "$(stage)" "1"
+compiler_stage2_NOT_NEEDED = YES
+endif
+ifeq "$(stage)" "2"
+compiler_stage1_NOT_NEEDED = YES
+endif
+# We don't want the rules for stage3 unless we have been explicitly
+# asked to build it
+ifneq "$(stage)" "3"
+compiler_stage3_NOT_NEEDED = YES
+endif
 $(eval $(call build-package,compiler,stage1,0))
-endif
-endif
-
-# stage 2 is enabled unless $(stage) is set to something other than 2
-ifeq "$(filter-out 2,$(stage))" ""
 $(eval $(call build-package,compiler,stage2,1))
-endif
+$(eval $(call build-package,compiler,stage3,2))
 
 ifneq "$(BINDIST)" "YES"
-# stage 3 has to be requested explicitly with stage=3
-ifeq "$(stage)" "3"
-$(eval $(call build-package,compiler,stage3,2))
-endif
 
 $(compiler_stage1_depfile) : compiler/stage1/$(PLATFORM_H)
 $(compiler_stage2_depfile) : compiler/stage2/$(PLATFORM_H)

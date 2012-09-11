@@ -35,6 +35,7 @@ test('hIsEOF001',   normal, compile_and_run, [''])
 test('hIsEOF002', extra_clean(['hIsEOF002.out']), compile_and_run, ['-cpp'])
 
 test('hReady001', normal, compile_and_run, ['-cpp'])
+test('hReady002', [ no_stdin, cmd_prefix('sleep 1 |') ], compile_and_run, [''])
 
 test('hSeek001', normal, compile_and_run, [''])
 test('hSeek002', normal, compile_and_run, ['-cpp'])

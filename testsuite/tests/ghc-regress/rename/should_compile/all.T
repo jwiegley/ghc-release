@@ -123,6 +123,7 @@ test('T1074b', normal, compile, ['-Wall'])
 test('T3640', normal, compile, [''])
 test('T3901', expect_fail, compile, [''])
 test('T1954', normal, compile, [''])
+test('T3943', normal, compile, [''])
 
 test('timing001', normal, compile, [''])
 test('timing002', normal, compile, [''])
@@ -136,4 +137,10 @@ test('T3823',
                   'T3823A.o-boot', 'T3823A.o', 'T3823B.o']),
      run_command,
      ['$MAKE -s --no-print-directory T3823'])
+
+test('T4003',
+     extra_clean(['T4003A.hi-boot', 'T4003A.hi', 'T4003B.hi',
+                  'T4003A.o-boot', 'T4003A.o', 'T4003B.o']),
+     run_command,
+     ['$MAKE -s --no-print-directory T4003'])
 
