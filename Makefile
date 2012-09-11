@@ -538,6 +538,12 @@ SRC_DIST_EXTRALIBS_TARBALL = ghc-$(ProjectVersion)-src-extralibs.tar.bz2
 VERSION :
 	echo $(ProjectVersion) >VERSION
 
+# These two rules make the Makefile compatible with the HEAD, so the
+# buildbot scripts can work with either. The dist target does the
+# publishing, so publish-sdist is a no-op.
+sdist: dist
+publish-sdist:
+
 dist :: VERSION
 
 # Use:

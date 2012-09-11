@@ -162,7 +162,7 @@ data CreateProcess = CreateProcess{
   std_in    :: StdStream,               -- ^ How to determine stdin
   std_out   :: StdStream,               -- ^ How to determine stdout
   std_err   :: StdStream,               -- ^ How to determine stderr
-  close_fds :: Bool                     -- ^ Close all file descriptors except stdin, stdout and stderr in the new process
+  close_fds :: Bool                     -- ^ Close all file descriptors except stdin, stdout and stderr in the new process (on Windows, only works if std_in, std_out, and std_err are all Inherit)
  }
 
 data CmdSpec 
@@ -222,7 +222,12 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
 			Nothing   -> (0, 0)
 			Just hand -> (1, hand)
 
-     proc_handle <- throwErrnoIfMinus1 fun $
+     -- runInteractiveProcess() blocks signals around the fork().
+     -- Since blocking/unblocking of signals is a global state
+     -- operation, we better ensure mutual exclusion of calls to
+     -- runInteractiveProcess().
+     proc_handle <- withMVar runInteractiveProcess_lock $ \_ ->
+                    throwErrnoIfMinus1 fun $
 	                 c_runInteractiveProcess pargs pWorkDir pEnv 
                                 fdin fdout fderr
 				pfdStdInput pfdStdOutput pfdStdError
@@ -235,6 +240,10 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
 
      ph <- mkProcessHandle proc_handle
      return (hndStdInput, hndStdOutput, hndStdError, ph)
+
+{-# NOINLINE runInteractiveProcess_lock #-}
+runInteractiveProcess_lock :: MVar ()
+runInteractiveProcess_lock = unsafePerformIO $ newMVar ()
 
 foreign import ccall unsafe "runInteractiveProcess" 
   c_runInteractiveProcess
@@ -270,7 +279,7 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
                                   std_in = mb_stdin,
                                   std_out = mb_stdout,
                                   std_err = mb_stderr,
-                                  close_fds = _ignored_mb_close_fds }
+                                  close_fds = mb_close_fds }
                _ignored_mb_sigint _ignored_mb_sigquit
  = do
   (cmd, cmdline) <- commandToProcess cmdsp
@@ -290,6 +299,7 @@ runGenProcess_ fun CreateProcess{ cmdspec = cmdsp,
 	                 c_runInteractiveProcess pcmdline pWorkDir pEnv 
                                 fdin fdout fderr
 				pfdStdInput pfdStdOutput pfdStdError
+                                (if mb_close_fds then 1 else 0)
 
      hndStdInput  <- mbPipe mb_stdin  pfdStdInput  WriteMode
      hndStdOutput <- mbPipe mb_stdout pfdStdOutput ReadMode
@@ -310,6 +320,7 @@ foreign import ccall unsafe "runInteractiveProcess"
         -> Ptr FD
         -> Ptr FD
         -> Ptr FD
+        -> CInt                         -- close_fds
         -> IO PHANDLE
 
 -- ------------------------------------------------------------------------

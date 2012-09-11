@@ -87,6 +87,9 @@ runInteractiveProcess (char *const args[],
         // WARNING!  we are now in the child of vfork(), so any memory
         // we modify below will also be seen in the parent process.
 
+        disableItimers();
+        unblockUserSignals();
+
 	if (workingDirectory) {
 	    if (chdir (workingDirectory) < 0) {
                 // See #1593.  The convention for the exit code when
@@ -343,7 +346,8 @@ mkAnonPipe (HANDLE* pHandleIn, BOOL isInheritableIn,
 ProcHandle
 runInteractiveProcess (char *cmd, char *workingDirectory, void *environment,
                        int fdStdIn, int fdStdOut, int fdStdErr,
-		       int *pfdStdInput, int *pfdStdOutput, int *pfdStdError)
+		       int *pfdStdInput, int *pfdStdOutput, int *pfdStdError,
+                       int close_fds)
 {
 	STARTUPINFO sInfo;
 	PROCESS_INFORMATION pInfo;
@@ -355,6 +359,7 @@ runInteractiveProcess (char *cmd, char *workingDirectory, void *environment,
         HANDLE hStdErrorWrite  = INVALID_HANDLE_VALUE;
 	DWORD flags;
 	BOOL status;
+        BOOL inherit;
 
 	ZeroMemory(&sInfo, sizeof(sInfo));
 	sInfo.cb = sizeof(sInfo);
@@ -427,7 +432,14 @@ runInteractiveProcess (char *cmd, char *workingDirectory, void *environment,
 	else
 		flags = 0;
 
-	if (!CreateProcess(NULL, cmd, NULL, NULL, TRUE, flags, environment, workingDirectory, &sInfo, &pInfo))
+        // See #3231
+        if (close_fds && fdStdIn == 0 && fdStdOut == 1 && fdStdErr == 2) {
+            inherit = FALSE;
+        } else {
+            inherit = TRUE;
+        }
+
+	if (!CreateProcess(NULL, cmd, NULL, NULL, inherit, flags, environment, workingDirectory, &sInfo, &pInfo))
 	{
                 goto cleanup_err;
 	}

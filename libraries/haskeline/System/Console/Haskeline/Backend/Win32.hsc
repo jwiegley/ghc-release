@@ -41,8 +41,8 @@ getNumberOfEvents h = alloca $ \numEventsPtr -> do
         $ c_GetNumberOfConsoleInputEvents h numEventsPtr
     fmap fromEnum $ peek numEventsPtr
 
-getEvent :: HANDLE -> IO Event
-getEvent h = newChan >>= keyEventLoop (eventReader h)
+getEvent :: HANDLE -> Chan Event -> IO Event
+getEvent h = keyEventLoop (eventReader h)
 
 eventReader :: HANDLE -> IO [Event]
 eventReader h = do
@@ -312,17 +312,19 @@ win32Term = do
             oterm <- getConOut
             case oterm of
                 Nothing -> return fileRT
-                Just h -> return fileRT {
+                Just h -> do
+                        ch <- newChan
+                        return fileRT {
                             wrapInterrupt = withWindowMode . withCtrlCHandler,
                             termOps = Just TermOps {
                                             getLayout = getBufferSize h,
-                                            runTerm = consoleRunTerm h},
+                                            runTerm = consoleRunTerm h ch},
                             closeTerm = closeHandle h}
 
-consoleRunTerm :: HANDLE -> RunTermType
-consoleRunTerm conOut f = do
+consoleRunTerm :: HANDLE -> Chan Event -> RunTermType
+consoleRunTerm conOut eventChan f = do
     inH <- liftIO $ getStdHandle sTD_INPUT_HANDLE
-    runReaderT' conOut $ runDraw $ f $ liftIO $ getEvent inH
+    runReaderT' conOut $ runDraw $ f $ liftIO $ getEvent inH eventChan
 
 -- stdin is not a terminal, but we still need to check the right way to output unicode to stdout.
 fileRunTerm :: IO RunTerm
