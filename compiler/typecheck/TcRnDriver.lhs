@@ -62,6 +62,7 @@ import PprCore
 import CoreSyn
 import ErrUtils
 import Id
+import IdInfo( IdDetails( VanillaId ) )
 import VarEnv
 import Module
 import UniqFM
@@ -84,9 +85,7 @@ import Annotations
 import Data.List ( sortBy )
 import Data.IORef ( readIORef )
 import Data.Ord
-#ifndef GHCI
-import BasicTypes ( Origin(..) )
-#else
+#ifdef GHCI
 import BasicTypes hiding( SuccessFlag(..) )
 import TcType   ( isUnitTy, isTauTy )
 import TcHsType
@@ -673,7 +672,7 @@ checkHiBootIface
         ; mb_dfun_prs <- mapM check_inst boot_insts
         ; let dfun_prs   = catMaybes mb_dfun_prs
               boot_dfuns = map fst dfun_prs
-              dfun_binds = listToBag [ (Generated, mkVarBind boot_dfun (nlHsVar dfun))
+              dfun_binds = listToBag [ mkVarBind boot_dfun (nlHsVar dfun)
                                      | (boot_dfun, dfun) <- dfun_prs ]
               type_env'  = extendTypeEnvWithIds local_type_env boot_dfuns
               tcg_env'   = tcg_env { tcg_binds = binds `unionBags` dfun_binds }
@@ -737,7 +736,7 @@ checkHiBootIface
         where
           boot_dfun = instanceDFunId boot_inst
           boot_inst_ty = idType boot_dfun
-          local_boot_dfun = Id.mkExportedLocalId (idName boot_dfun) boot_inst_ty
+          local_boot_dfun = Id.mkExportedLocalId VanillaId (idName boot_dfun) boot_inst_ty
 
 
 -- This has to compare the TyThing from the .hi-boot file to the TyThing
@@ -1363,7 +1362,7 @@ check_main dflags tcg_env
         ; let { root_main_name =  mkExternalName rootMainKey rOOT_MAIN
                                    (mkVarOccFS (fsLit "main"))
                                    (getSrcSpan main_name)
-              ; root_main_id = Id.mkExportedLocalId root_main_name
+              ; root_main_id = Id.mkExportedLocalId VanillaId root_main_name
                                                     (mkTyConApp ioTyCon [res_ty])
               ; co  = mkWpTyApps [res_ty]
               ; rhs = nlHsApp (mkLHsWrap co (nlHsVar run_main_id)) main_expr
@@ -1371,7 +1370,7 @@ check_main dflags tcg_env
 
         ; return (tcg_env { tcg_main  = Just main_name,
                             tcg_binds = tcg_binds tcg_env
-                                        `snocBag` (Generated, main_bind),
+                                        `snocBag` main_bind,
                             tcg_dus   = tcg_dus tcg_env
                                         `plusDU` usesOnly (unitFV main_name)
                         -- Record the use of 'main', so that we don't
@@ -1606,14 +1605,14 @@ tcUserStmt (L loc (BodyStmt expr _ _ _))
         ; let fresh_it  = itName uniq loc
               matches   = [mkMatch [] rn_expr emptyLocalBinds]
               -- [it = expr]
-              the_bind  = L loc $ (mkTopFunBind (L loc fresh_it) matches) { bind_fvs = fvs }
+              the_bind  = L loc $ (mkTopFunBind FromSource (L loc fresh_it) matches) { bind_fvs = fvs }
                           -- Care here!  In GHCi the expression might have
                           -- free variables, and they in turn may have free type variables
                           -- (if we are at a breakpoint, say).  We must put those free vars
 
               -- [let it = expr]
               let_stmt  = L loc $ LetStmt $ HsValBinds $
-                          ValBindsOut [(NonRecursive,unitBag (FromSource, the_bind))] []
+                          ValBindsOut [(NonRecursive,unitBag the_bind)] []
 
               -- [it <- e]
               bind_stmt = L loc $ BindStmt (L loc (VarPat fresh_it))

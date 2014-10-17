@@ -644,7 +644,7 @@ tcTyClDecl1 _parent rec_info
                ; traceTc "tcClassDecl" (ppr fundeps $$ ppr tvs' $$ ppr fds')
                ; return (clas, tvs', gen_dm_env) }
 
-       ; let { gen_dm_ids = [ AnId (mkExportedLocalId gen_dm_name gen_dm_ty)
+       ; let { gen_dm_ids = [ AnId (mkExportedLocalId VanillaId gen_dm_name gen_dm_ty)
                             | (sel_id, GenDefMeth gen_dm_name) <- classOpItems clas
                             , let gen_dm_tau = expectJust "tcTyClDecl1" $
                                                lookupNameEnv gen_dm_env (idName sel_id)
@@ -878,7 +878,7 @@ tcSynFamInstDecl :: TyCon -> TyFamInstDecl Name -> TcM CoAxBranch
 -- Placed here because type family instances appear as
 -- default decls in class declarations
 tcSynFamInstDecl fam_tc (TyFamInstDecl { tfid_eqn = eqn })
-  = do { checkTc (isSynTyCon fam_tc) (wrongKindOfFamily fam_tc)
+  = do { checkTc (isSynFamilyTyCon fam_tc) (wrongKindOfFamily fam_tc)
        ; tcTyFamInstEqn (tyConName fam_tc) (tyConKind fam_tc) eqn }
 
 -- Checks to make sure that all the names in an instance group are the same
@@ -1464,8 +1464,8 @@ checkValidClosedCoAxiom (CoAxiom { co_ax_branches = branches, co_ax_tc = tc })
                -- ones and hence is inaccessible
      check_accessibility prev_branches cur_branch
        = do { when (cur_branch `isDominatedBy` prev_branches) $
-              setSrcSpan (coAxBranchSpan cur_branch) $
-              addErrTc $ inaccessibleCoAxBranch tc cur_branch
+              addWarnAt (coAxBranchSpan cur_branch) $
+              inaccessibleCoAxBranch tc cur_branch
             ; return (cur_branch : prev_branches) }
 
 checkFieldCompat :: Name -> DataCon -> DataCon -> TyVarSet
@@ -1670,9 +1670,9 @@ checkValidRoleAnnots :: RoleAnnots -> TyThing -> TcM ()
 checkValidRoleAnnots role_annots thing
   = case thing of
     { ATyCon tc
-        | isSynTyCon tc    -> check_no_roles
-        | isFamilyTyCon tc -> check_no_roles
-        | isAlgTyCon tc    -> check_roles
+        | isTypeSynonymTyCon tc -> check_no_roles
+        | isFamilyTyCon tc      -> check_no_roles
+        | isAlgTyCon tc         -> check_roles
         where
           name                   = tyConName tc
 
@@ -1796,7 +1796,7 @@ checkValidRoles tc
 mkDefaultMethodIds :: [TyThing] -> [Id]
 -- See Note [Default method Ids and Template Haskell]
 mkDefaultMethodIds things
-  = [ mkExportedLocalId dm_name (idType sel_id)
+  = [ mkExportedLocalId VanillaId dm_name (idType sel_id)
     | ATyCon tc <- things
     , Just cls <- [tyConClass_maybe tc]
     , (sel_id, DefMeth dm_name) <- classOpItems cls ]
@@ -1833,11 +1833,10 @@ mkRecSelBinds tycons
 
 mkRecSelBind :: (TyCon, FieldLabel) -> (LSig Name, LHsBinds Name)
 mkRecSelBind (tycon, sel_name)
-  = (L loc (IdSig sel_id), unitBag (Generated, L loc sel_bind))
+  = (L loc (IdSig sel_id), unitBag (L loc sel_bind))
   where
     loc    = getSrcSpan sel_name
-    sel_id = Var.mkExportedLocalVar rec_details sel_name
-                                    sel_ty vanillaIdInfo
+    sel_id = mkExportedLocalId rec_details sel_name sel_ty
     rec_details = RecSelId { sel_tycon = tycon, sel_naughty = is_naughty }
 
     -- Find a representative constructor, con1
@@ -1862,8 +1861,10 @@ mkRecSelBind (tycon, sel_name)
     -- Make the binding: sel (C2 { fld = x }) = x
     --                   sel (C7 { fld = x }) = x
     --    where cons_w_field = [C2,C7]
-    sel_bind | is_naughty = mkTopFunBind sel_lname [mkSimpleMatch [] unit_rhs]
-             | otherwise  = mkTopFunBind sel_lname (map mk_match cons_w_field ++ deflt)
+    sel_bind = mkTopFunBind Generated sel_lname alts
+      where
+        alts | is_naughty = [mkSimpleMatch [] unit_rhs]
+             | otherwise =  map mk_match cons_w_field ++ deflt
     mk_match con = mkSimpleMatch [L loc (mk_sel_pat con)]
                                  (L loc (HsVar field_var))
     mk_sel_pat con = ConPatIn (L loc (getName con)) (RecCon rec_fields)
@@ -2161,7 +2162,7 @@ wrongNamesInInstGroup first cur
 
 inaccessibleCoAxBranch :: TyCon -> CoAxBranch -> SDoc
 inaccessibleCoAxBranch tc fi
-  = ptext (sLit "Inaccessible family instance equation:") $$
+  = ptext (sLit "Overlapped type family instance equation:") $$
       (pprCoAxBranch tc fi)
 
 badRoleAnnot :: Name -> Role -> Role -> SDoc
@@ -2202,12 +2203,12 @@ addTyThingCtxt thing
     name = getName thing
     flav = case thing of
              ATyCon tc
-                | isClassTyCon tc      -> ptext (sLit "class")
-                | isSynFamilyTyCon tc  -> ptext (sLit "type family")
-                | isDataFamilyTyCon tc -> ptext (sLit "data family")
-                | isSynTyCon tc        -> ptext (sLit "type")
-                | isNewTyCon tc        -> ptext (sLit "newtype")
-                | isDataTyCon tc       -> ptext (sLit "data")
+                | isClassTyCon tc       -> ptext (sLit "class")
+                | isSynFamilyTyCon tc   -> ptext (sLit "type family")
+                | isDataFamilyTyCon tc  -> ptext (sLit "data family")
+                | isTypeSynonymTyCon tc -> ptext (sLit "type")
+                | isNewTyCon tc         -> ptext (sLit "newtype")
+                | isDataTyCon tc        -> ptext (sLit "data")
 
              _ -> pprTrace "addTyThingCtxt strange" (ppr thing)
                   empty

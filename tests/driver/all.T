@@ -142,6 +142,11 @@ test('driver042',
      run_command,
      ['$MAKE -s --no-print-directory test042'])
 
+test('driver042stub',
+     extra_clean(['B042stub/C.hi', 'obj042stub/B042stub/C.o', 'obj042stub/B042stub/', 'obj042stub/']),
+     run_command,
+     ['$MAKE -s --no-print-directory test042stub'])
+
 test('driver043',
      extra_clean(['B043/C.hi', 'B043/C.o',
                   'hi043/B043/C.hi', 'hi043/B043', 'hi043']),
@@ -389,4 +394,8 @@ test('T2507',
 
 test('T703', normal, run_command, ['$MAKE -s --no-print-directory T703'])
 test('T8101', normal, compile, ['-Wall -fno-code'])
+
+def build_T9050(name, way):
+     return simple_build(name + '.cmm', way, '-outputdir=. ', 0, '', 0, 0, 0)
+test('T9050', normal, build_T9050, [])
 

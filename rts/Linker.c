@@ -1878,6 +1878,7 @@ addDLL( pathchar *dll_name )
             // success -- try to dlopen the first named file
             IF_DEBUG(linker, debugBelch("match%s\n",""));
             line[match[2].rm_eo] = '\0';
+            stgFree((void*)errmsg); // Free old message before creating new one
             errmsg = internal_dlopen(line+match[2].rm_so);
             break;
          }
@@ -2618,6 +2619,7 @@ loadArchive( pathchar *path )
 
             if (0 == loadOc(oc)) {
                 stgFree(fileName);
+                fclose(f);
                 return 0;
             }
         }
@@ -2928,8 +2930,8 @@ unloadObj( pathchar *path )
     IF_DEBUG(linker, debugBelch("unloadObj: %" PATH_FMT "\n", path));
 
     prev = NULL;
-    for (oc = objects; oc; prev = oc, oc = next) {
-        next = oc->next;
+    for (oc = objects; oc; oc = next) {
+        next = oc->next; // oc might be freed
 
         if (!pathcmp(oc->fileName,path)) {
 
@@ -2987,6 +2989,8 @@ unloadObj( pathchar *path )
             /* This could be a member of an archive so continue
              * unloading other members. */
             unloadedAnyObj = HS_BOOL_TRUE;
+        } else {
+            prev = oc;
         }
     }
 
@@ -4049,6 +4053,7 @@ ocGetNames_PEi386 ( ObjectCode* oc )
 
       if (0==strcmp(".text",(char*)secname) ||
           0==strcmp(".text.startup",(char*)secname) ||
+          0==strcmp(".text.unlikely", (char*)secname) ||
           0==strcmp(".rdata",(char*)secname)||
           0==strcmp(".eh_frame", (char*)secname)||
           0==strcmp(".rodata",(char*)secname))

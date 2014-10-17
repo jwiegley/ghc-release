@@ -70,7 +70,7 @@ import Class
 import Inst
 import TyCon
 import CoAxiom
-import PatSyn ( patSynId )
+import PatSyn ( patSynName )
 import ConLike
 import DataCon
 import TcEvidence( TcEvBinds(..) )
@@ -1175,7 +1175,7 @@ reifyThing (AGlobal (AConLike (RealDataCon dc)))
                               (reifyName (dataConOrigTyCon dc)) fix)
         }
 reifyThing (AGlobal (AConLike (PatSynCon ps)))
-  = noTH (sLit "pattern synonyms") (ppr $ patSynId ps)
+  = noTH (sLit "pattern synonyms") (ppr $ patSynName ps)
 
 reifyThing (ATcId {tct_id = id})
   = do  { ty1 <- zonkTcType (idType id) -- Make use of all the info we have, even
@@ -1508,13 +1508,14 @@ lookupThAnnLookup (TH.AnnLookupModule (TH.Module pn mn))
     mkModule (stringToPackageId $ TH.pkgString pn) (mkModuleName $ TH.modString mn)
 
 reifyAnnotations :: Data a => TH.AnnLookup -> TcM [a]
-reifyAnnotations th_nm
-  = do { name <- lookupThAnnLookup th_nm
-       ; eps <- getEps
+reifyAnnotations th_name
+  = do { name <- lookupThAnnLookup th_name
+       ; topEnv <- getTopEnv
+       ; epsHptAnns <- liftIO $ prepareAnnotations topEnv Nothing
        ; tcg <- getGblEnv
-       ; let epsAnns = findAnns deserializeWithData (eps_ann_env eps) name
-       ; let envAnns = findAnns deserializeWithData (tcg_ann_env tcg) name
-       ; return (envAnns ++ epsAnns) }
+       ; let selectedEpsHptAnns = findAnns deserializeWithData epsHptAnns name
+       ; let selectedTcgAnns = findAnns deserializeWithData (tcg_ann_env tcg) name
+       ; return (selectedEpsHptAnns ++ selectedTcgAnns) }
 
 ------------------------------
 modToTHMod :: Module -> TH.Module

@@ -39,8 +39,9 @@ import Unique
 #include "../HsVersions.h"
 import qualified Data.Array as Happy_Data_Array
 import qualified GHC.Exts as Happy_GHC_Exts
+import Control.Applicative(Applicative(..))
 
--- parser produced by Happy Version 1.19.2
+-- parser produced by Happy Version 1.19.3
 
 newtype HappyAbsSyn  = HappyAbsSyn HappyAny
 #if __GLASGOW_HASKELL__ >= 607

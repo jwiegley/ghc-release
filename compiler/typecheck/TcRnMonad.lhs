@@ -24,7 +24,6 @@ import Module
 import RdrName
 import Name
 import Type
-import Kind ( isSuperKind )
 
 import TcType
 import InstEnv
@@ -49,7 +48,7 @@ import FastString
 import Panic
 import Util
 import Annotations
-import BasicTypes( TopLevelFlag, Origin )
+import BasicTypes( TopLevelFlag )
 
 import Control.Exception
 import Data.IORef
@@ -587,11 +586,6 @@ addLocM fn (L loc a) = setSrcSpan loc $ fn a
 
 wrapLocM :: (a -> TcM b) -> Located a -> TcM (Located b)
 wrapLocM fn (L loc a) = setSrcSpan loc $ do b <- fn a; return (L loc b)
-
-wrapOriginLocM :: (a -> TcM r) -> (Origin, Located a) -> TcM (Origin, Located r)
-wrapOriginLocM fn (origin, lbind)
-  = do  { lbind' <- wrapLocM fn lbind
-        ; return (origin, lbind') }
 
 wrapLocFstM :: (a -> TcM (b,c)) -> Located a -> TcM (Located b, c)
 wrapLocFstM fn (L loc a) =
@@ -1136,10 +1130,6 @@ setUntouchables untch thing_inside
 
 isTouchableTcM :: TcTyVar -> TcM Bool
 isTouchableTcM tv
-    -- Kind variables are always touchable
-  | isSuperKind (tyVarKind tv) 
-  = return False
-  | otherwise 
   = do { env <- getLclEnv
        ; return (isTouchableMetaTyVar (tcl_untch env) tv) }
 

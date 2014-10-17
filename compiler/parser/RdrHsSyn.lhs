@@ -315,7 +315,7 @@ cvBindsAndSigs  fb = go (fromOL fb)
     go []                  = (emptyBag, [], [], [], [], [])
     go (L l (SigD s) : ds) = (bs, L l s : ss, ts, tfis, dfis, docs)
                            where (bs, ss, ts, tfis, dfis, docs) = go ds
-    go (L l (ValD b) : ds) = ((FromSource, b') `consBag` bs, ss, ts, tfis, dfis, docs)
+    go (L l (ValD b) : ds) = (b' `consBag` bs, ss, ts, tfis, dfis, docs)
                            where (b', ds')    = getMonoBind (L l b) ds
                                  (bs, ss, ts, tfis, dfis, docs) = go ds'
     go (L l (TyClD (FamDecl t)) : ds) = (bs, ss, L l t : ts, tfis, dfis, docs)
@@ -666,7 +666,7 @@ checkAPat msg loc e0 = do
 
    ExplicitTuple es b
      | all tupArgPresent es  -> do ps <- mapM (checkLPat msg) [e | Present e <- es]
-                                   return (TuplePat ps b placeHolderType)
+                                   return (TuplePat ps b [])
      | otherwise -> parseErrorSDoc loc (text "Illegal tuple section in pattern:" $$ ppr e0)
 
    RecordCon c _ (HsRecFields fs dd)
@@ -735,7 +735,7 @@ checkFunBind msg lhs_loc fun is_infix pats opt_sig (L rhs_span grhss)
 makeFunBind :: Located id -> Bool -> [LMatch id (LHsExpr id)] -> HsBind id
 -- Like HsUtils.mkFunBind, but we need to be able to set the fixity too
 makeFunBind fn is_infix ms
-  = FunBind { fun_id = fn, fun_infix = is_infix, fun_matches = mkMatchGroup ms,
+  = FunBind { fun_id = fn, fun_infix = is_infix, fun_matches = mkMatchGroup FromSource ms,
               fun_co_fn = idHsWrapper, bind_fvs = placeHolderNames, fun_tick = Nothing }
 
 checkPatBind :: SDoc

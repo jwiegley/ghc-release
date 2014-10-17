@@ -60,7 +60,6 @@ import Outputable
 import FastString
 import Bag
 import Pair
-import BasicTypes (Origin(..))
 
 import Control.Monad
 import Data.List
@@ -437,7 +436,7 @@ commonAuxiliaries = foldM snoc ([], emptyBag) where
 
 renameDeriv :: Bool
             -> [InstInfo RdrName]
-            -> Bag ((Origin, LHsBind RdrName), LSig RdrName)
+            -> Bag (LHsBind RdrName, LSig RdrName)
             -> TcM (Bag (InstInfo Name), HsValBinds Name, DefUses)
 renameDeriv is_boot inst_infos bagBinds
   | is_boot     -- If we are compiling a hs-boot file, don't generate any derived bindings
@@ -657,8 +656,9 @@ deriveTyData :: [TyVar] -> TyCon -> [Type]   -- LHS of data or data instance
 -- The deriving clause of a data or newtype declaration
 deriveTyData tvs tc tc_args (L loc deriv_pred)
   = setSrcSpan loc     $        -- Use the location of the 'deriving' item
-    do  { (deriv_tvs, cls, cls_tys) <- tcExtendTyVarEnv tvs $
-                                       tcHsDeriv deriv_pred
+    do  { (deriv_tvs, cls, cls_tys, cls_arg_kind)
+                <- tcExtendTyVarEnv tvs $
+                   tcHsDeriv deriv_pred
                 -- Deriving preds may (now) mention
                 -- the type variables for the type constructor, hence tcExtendTyVarenv
                 -- The "deriv_pred" is a LHsType to take account of the fact that for
@@ -673,11 +673,7 @@ deriveTyData tvs tc tc_args (L loc deriv_pred)
 
         -- Given data T a b c = ... deriving( C d ),
         -- we want to drop type variables from T so that (C d (T a)) is well-kinded
-        ; let cls_tyvars     = classTyVars cls
-        ; checkTc (not (null cls_tyvars)) derivingNullaryErr
-
-        ; let cls_arg_kind    = tyVarKind (last cls_tyvars)
-              (arg_kinds, _)  = splitKindFunTys cls_arg_kind
+          let (arg_kinds, _)  = splitKindFunTys cls_arg_kind
               n_args_to_drop  = length arg_kinds
               n_args_to_keep  = tyConArity tc - n_args_to_drop
               args_to_drop    = drop n_args_to_keep tc_args
@@ -689,9 +685,9 @@ deriveTyData tvs tc tc_args (L loc deriv_pred)
               -- to the types.  See Note [Unify kinds in deriving]
               -- We are assuming the tycon tyvars and the class tyvars are distinct
               mb_match        = tcUnifyTy inst_ty_kind cls_arg_kind
-              Just kind_subst = mb_match 
+              Just kind_subst = mb_match
               (univ_kvs, univ_tvs) = partition isKindVar $ varSetElems $
-                                     mkVarSet deriv_tvs `unionVarSet` 
+                                     mkVarSet deriv_tvs `unionVarSet`
                                      tyVarsOfTypes tc_args_to_keep
               univ_kvs'           = filter (`notElemTvSubst` kind_subst) univ_kvs
               (subst', univ_tvs') = mapAccumL substTyVarBndr kind_subst univ_tvs
@@ -1094,21 +1090,23 @@ inferConstraints cls inst_tys rep_tc rep_tc_args
 
   | otherwise  -- The others are a bit more complicated
   = ASSERT2( equalLength rep_tc_tvs all_rep_tc_args, ppr cls <+> ppr rep_tc )
-    return (stupid_constraints ++ extra_constraints
-            ++ sc_constraints
-            ++ con_arg_constraints cls get_std_constrained_tys)
-
+    do { traceTc "inferConstraints" (vcat [ppr cls <+> ppr inst_tys, ppr arg_constraints])
+       ; return (stupid_constraints ++ extra_constraints
+                 ++ sc_constraints
+                 ++ arg_constraints) }
   where
+    arg_constraints = con_arg_constraints cls get_std_constrained_tys
+
        -- Constraints arising from the arguments of each constructor
     con_arg_constraints cls' get_constrained_tys
-      = [ mkPredOrigin (DerivOriginDC data_con arg_n) (mkClassPred cls' [arg_ty])
-        | data_con <- tyConDataCons rep_tc,
-          (arg_n, arg_ty) <-
-                ASSERT( isVanillaDataCon data_con )
-                zip [1..] $
-                get_constrained_tys $
-                dataConInstOrigArgTys data_con all_rep_tc_args,
-          not (isUnLiftedType arg_ty) ]
+      = [ mkPredOrigin (DerivOriginDC data_con arg_n) (mkClassPred cls' [inner_ty])
+        | data_con <- tyConDataCons rep_tc
+        , (arg_n, arg_ty) <- ASSERT( isVanillaDataCon data_con )
+                             zip [1..] $  -- ASSERT is precondition of dataConInstOrigArgTys
+                             dataConInstOrigArgTys data_con all_rep_tc_args
+        , not (isUnLiftedType arg_ty)
+        , inner_ty <- get_constrained_tys arg_ty ]
+
                 -- No constraints for unlifted types
                 -- See Note [Deriving and unboxed types]
 
@@ -1118,10 +1116,10 @@ inferConstraints cls inst_tys rep_tc rep_tc_args
                 -- (b) The rep_tc_args will be one short
     is_functor_like = getUnique cls `elem` functorLikeClassKeys
 
-    get_std_constrained_tys :: [Type] -> [Type]
-    get_std_constrained_tys tys
-        | is_functor_like = concatMap (deepSubtypesContaining last_tv) tys
-        | otherwise       = tys
+    get_std_constrained_tys :: Type -> [Type]
+    get_std_constrained_tys ty
+        | is_functor_like = deepSubtypesContaining last_tv ty
+        | otherwise       = [ty]
 
     rep_tc_tvs = tyConTyVars rep_tc
     last_tv = last rep_tc_tvs
@@ -1504,7 +1502,8 @@ mkNewTypeEqn :: DynFlags -> [Var] -> Class
 mkNewTypeEqn dflags tvs
              cls cls_tys tycon tc_args rep_tycon rep_tc_args mtheta
 -- Want: instance (...) => cls (cls_tys ++ [tycon tc_args]) where ...
-  | might_derive_via_coercible && (newtype_deriving || std_class_via_coercible cls)
+  | ASSERT( length cls_tys + 1 == classArity cls )
+    might_derive_via_coercible && (newtype_deriving || std_class_via_coercible cls)
   = do traceTc "newtype deriving:" (ppr tycon <+> ppr rep_tys <+> ppr all_preds)
        dfun_name <- new_dfun_name cls tycon
        loc <- getSrcSpanM
@@ -1631,14 +1630,9 @@ mkNewTypeEqn dflags tvs
         -- See Note [Determining whether newtype-deriving is appropriate]
         might_derive_via_coercible
            =  not (non_coercible_class cls)
-           && arity_ok
            && eta_ok
            && ats_ok
 --         && not (isRecursiveTyCon tycon)      -- Note [Recursive newtypes]
-
-        arity_ok = length cls_tys + 1 == classArity cls
-                -- Well kinded; eg not: newtype T ... deriving( ST )
-                --                      because ST needs *2* type params
 
         -- Check that eta reduction is OK
         eta_ok = nt_eta_arity <= length rep_tc_args
@@ -1655,13 +1649,10 @@ mkNewTypeEqn dflags tvs
                -- so for 'data' instance decls
 
         cant_derive_err
-           = vcat [ ppUnless arity_ok arity_msg
-                  , ppUnless eta_ok eta_msg
+           = vcat [ ppUnless eta_ok eta_msg
                   , ppUnless ats_ok ats_msg ]
-        arity_msg = quotes (ppr (mkClassPred cls cls_tys)) <+> ptext (sLit "does not have arity 1")
         eta_msg   = ptext (sLit "cannot eta-reduce the representation type enough")
         ats_msg   = ptext (sLit "the class has associated types")
-
 \end{code}
 
 Note [Recursive newtypes]

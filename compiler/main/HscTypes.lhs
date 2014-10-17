@@ -71,7 +71,7 @@ module HscTypes (
         TypeEnv, lookupType, lookupTypeHscEnv, mkTypeEnv, emptyTypeEnv,
         typeEnvFromEntities, mkTypeEnvWithImplicits,
         extendTypeEnv, extendTypeEnvList,
-        extendTypeEnvWithIds, extendTypeEnvWithPatSyns,
+        extendTypeEnvWithIds, 
         lookupTypeEnv,
         typeEnvElts, typeEnvTyCons, typeEnvIds, typeEnvPatSyns,
         typeEnvDataCons, typeEnvCoAxioms, typeEnvClasses,
@@ -951,7 +951,8 @@ data ModDetails
         -- The next two fields are created by the typechecker
         md_exports   :: [AvailInfo],
         md_types     :: !TypeEnv,       -- ^ Local type environment for this particular module
-        md_insts     :: ![ClsInst],    -- ^ 'DFunId's for the instances in this module
+                                        -- Includes Ids, TyCons, PatSyns
+        md_insts     :: ![ClsInst],     -- ^ 'DFunId's for the instances in this module
         md_fam_insts :: ![FamInst],
         md_rules     :: ![CoreRule],    -- ^ Domain may include 'Id's from other modules
         md_anns      :: ![Annotation],  -- ^ Annotations present in this module: currently
@@ -1504,15 +1505,17 @@ implicitTyThings :: TyThing -> [TyThing]
 implicitTyThings (AnId _)       = []
 implicitTyThings (ACoAxiom _cc) = []
 implicitTyThings (ATyCon tc)    = implicitTyConThings tc
-implicitTyThings (AConLike cl)  = case cl of
-    RealDataCon dc ->
-        -- For data cons add the worker and (possibly) wrapper
-        map AnId (dataConImplicitIds dc)
-    PatSynCon ps ->
-        -- For bidirectional pattern synonyms, add the wrapper
-        case patSynWrapper ps of
-            Nothing -> []
-            Just id -> [AnId id]
+implicitTyThings (AConLike cl)  = implicitConLikeThings cl
+
+implicitConLikeThings :: ConLike -> [TyThing]
+implicitConLikeThings (RealDataCon dc)
+  = map AnId (dataConImplicitIds dc)
+    -- For data cons add the worker and (possibly) wrapper
+
+implicitConLikeThings (PatSynCon {})
+  = []  -- Pattern synonyms have no implicit Ids; the wrapper and matcher
+        -- are not "implicit"; they are simply new top-level bindings,
+        -- and they have their own declaration in an interface fiel
 
 implicitClassThings :: Class -> [TyThing]
 implicitClassThings cl
@@ -1561,8 +1564,8 @@ implicitCoTyCon tc
 -- other declaration.
 isImplicitTyThing :: TyThing -> Bool
 isImplicitTyThing (AConLike cl) = case cl of
-    RealDataCon{}  -> True
-    PatSynCon ps   -> isImplicitId (patSynId ps)
+                                    RealDataCon {} -> True
+                                    PatSynCon {}   -> False
 isImplicitTyThing (AnId id)     = isImplicitId id
 isImplicitTyThing (ATyCon tc)   = isImplicitTyCon tc
 isImplicitTyThing (ACoAxiom ax) = isImplicitCoAxiom ax
@@ -1678,17 +1681,6 @@ extendTypeEnvList env things = foldl extendTypeEnv env things
 extendTypeEnvWithIds :: TypeEnv -> [Id] -> TypeEnv
 extendTypeEnvWithIds env ids
   = extendNameEnvList env [(getName id, AnId id) | id <- ids]
-
-extendTypeEnvWithPatSyns :: TypeEnv -> [PatSyn] -> TypeEnv
-extendTypeEnvWithPatSyns env patsyns
-  = extendNameEnvList env $ concatMap pat_syn_things patsyns
-  where
-    pat_syn_things :: PatSyn -> [(Name, TyThing)]
-    pat_syn_things ps = (getName ps, AConLike (PatSynCon ps)):
-                        case patSynWrapper ps of
-                            Just wrap_id -> [(getName wrap_id, AnId wrap_id)]
-                            Nothing -> []
-
 \end{code}
 
 \begin{code}

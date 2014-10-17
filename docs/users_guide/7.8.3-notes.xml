@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<sect1 id="release-7-8-3">
+  <title>Release notes for version 7.8.3</title>
+
+  <para>
+    The 7.8.3 release is a bugfix release. The major bugfixes relative
+    to 7.8.2 are listed below.
+  </para>
+
+  <sect2>
+    <title>GHC</title>
+
+    <itemizedlist>
+       <listitem>
+          <para>
+            A bug in the register allocator which would cause GHC to
+            crash during compilation has been fixed (issue #9155).
+          </para>
+       </listitem>
+       <listitem>
+          <para>
+            A handful of bugs in the pattern synonyms implementation
+            have been fixed (issues #9161, #8966, #9023, #9175).
+          </para>
+       </listitem>
+       <listitem>
+          <para>
+            A bug in runtime system which would cause
+            <literal>tryReadMVar</literal> to deadlock has been fixed
+            (issue #9148).
+          </para>
+       </listitem>
+       <listitem>
+          <para>
+            A segmentation fault for compiled programs using
+            <literal>makeStableName</literal> has been fixed (issue
+            #9078).
+          </para>
+       </listitem>
+       <listitem>
+          <para>
+            A bugfix in the runtime system that could cause a
+            segmentation fault has now been fixed (issue #9045).
+          </para>
+       </listitem>
+       <listitem>
+          <para>
+            A bug in the code generator that could cause segmentation
+            faults has been fixed (issue #9001).
+          </para>
+       </listitem>
+       <listitem>
+          <para>
+            A bug in the code generator that could cause segmentation
+            faults has been fixed (issue #9045).
+          </para>
+       </listitem>
+       <listitem>
+          <para>
+            A bug which caused <literal>gcc</literal> to error when
+            compiling large assembly source files has been fixed
+            (issue #8768).
+          </para>
+       </listitem>
+       <listitem>
+          <para>
+            A bug which caused a performance regression in the new
+            `Typeable` implementation (due to recomputation of known
+            values) has been fixed (issue #9203).
+          </para>
+       </listitem>
+       <listitem>
+          <para>
+            Several memory leaks and bugs in the runtime system and C
+            libraries have been fixed. These issues were found using
+            Coverity Scan.
+          </para>
+       </listitem>
+       <listitem>
+          <para>
+            A bug which caused the runtime system to uninstall signal
+            handlers when they were not installed was fixed (issue
+            #9068).
+          </para>
+       </listitem>
+       <listitem>
+          <para>
+            A bug which could result in programs using all available
+            memory, due to a regression in the <literal>Read</literal>
+            instance for <literal>Data.Fixed.Pico</literal> has been
+            fixed (issue #9231).
+          </para>
+       </listitem>
+       <listitem>
+          <para>
+            The libraries <literal>haskeline</literal>,
+            <literal>xhtml</literal>, <literal>terminfo</literal>,
+            <literal>transformers</literal>, and
+            <literal>haskeline</literal> are now exported and
+            registered in the package database. They previously
+            shipped with GHC but were not registered, leading to
+            errors where shared objects could be overwritten. (issue
+            #8919).
+          </para>
+       </listitem>
+    </itemizedlist>
+  </sect2>
+</sect1>

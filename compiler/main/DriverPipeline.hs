@@ -498,8 +498,8 @@ compileFile hsc_env stop_phase (src, mb_phase) = do
          | otherwise = Persistent
 
         stop_phase' = case stop_phase of
-                        As | split -> SplitAs
-                        _          -> stop_phase
+                        As _ | split -> SplitAs
+                        _            -> stop_phase
 
    ( _, out_file) <- runPipeline stop_phase' hsc_env
                             (src, fmap RealPhase mb_phase) Nothing output
@@ -730,7 +730,7 @@ getOutputFilename stop_phase output basename dflags next_phase maybe_location
           -- sometimes, we keep output from intermediate stages
           keep_this_output =
                case next_phase of
-                       As      | keep_s     -> True
+                       As _    | keep_s     -> True
                        LlvmOpt | keep_bc    -> True
                        HCc     | keep_hc    -> True
                        _other               -> False
@@ -1045,7 +1045,7 @@ runPhase (RealPhase cc_phase) input_fn dflags
         -- files; this is the Value Add(TM) that using ghc instead of
         -- gcc gives you :)
         pkg_include_dirs <- liftIO $ getPackageIncludePath dflags pkgs
-        let include_paths = foldr (\ x xs -> "-I" : x : xs) []
+        let include_paths = foldr (\ x xs -> ("-I" ++ x) : xs) []
                               (cmdline_include_paths ++ pkg_include_dirs)
 
         let gcc_extra_viac_flags = extraGccViaCFlags dflags
@@ -1078,7 +1078,7 @@ runPhase (RealPhase cc_phase) input_fn dflags
                    | otherwise            = []
 
         -- Decide next phase
-        let next_phase = As
+        let next_phase = As False
         output_fn <- phaseOutputFilename next_phase
 
         let
@@ -1190,7 +1190,7 @@ runPhase (RealPhase Splitter) input_fn dflags
 -- As, SpitAs phase : Assembler
 
 -- This is for calling the assembler on a regular assembly file (not split).
-runPhase (RealPhase As) input_fn dflags
+runPhase (RealPhase (As with_cpp)) input_fn dflags
   = do
         -- LLVM from version 3.0 onwards doesn't support the OS X system
         -- assembler, so we use clang as the assembler instead. (#5636)
@@ -1216,6 +1216,7 @@ runPhase (RealPhase As) input_fn dflags
         -- might be a hierarchical module.
         liftIO $ createDirectoryIfMissing True (takeDirectory output_fn)
 
+        ccInfo <- liftIO $ getCompilerInfo dflags
         let runAssembler inputFilename outputFilename
                 = liftIO $ as_prog dflags
                        ([ SysTools.Option ("-I" ++ p) | p <- cmdline_include_paths ]
@@ -1230,8 +1231,13 @@ runPhase (RealPhase As) input_fn dflags
                        ++ (if platformArch (targetPlatform dflags) == ArchSPARC
                            then [SysTools.Option "-mcpu=v9"]
                            else [])
-
-                       ++ [ SysTools.Option "-x", SysTools.Option "assembler-with-cpp"
+                       ++ (if any (ccInfo ==) [Clang, AppleClang, AppleClang51]
+                            then [SysTools.Option "-Qunused-arguments"]
+                            else [])
+                       ++ [ SysTools.Option "-x"
+                          , if with_cpp
+                              then SysTools.Option "assembler-with-cpp"
+                              else SysTools.Option "assembler"
                           , SysTools.Option "-c"
                           , SysTools.FileOption "" inputFilename
                           , SysTools.Option "-o"
@@ -1256,6 +1262,7 @@ runPhase (RealPhase SplitAs) _input_fn dflags
             osuf = objectSuf dflags
             split_odir  = base_o ++ "_" ++ osuf ++ "_split"
 
+        -- this also creates the hierarchy
         liftIO $ createDirectoryIfMissing True split_odir
 
         -- remove M_split/ *.o, because we're going to archive M_split/ *.o
@@ -1385,7 +1392,7 @@ runPhase (RealPhase LlvmLlc) input_fn dflags
     let next_phase = case gopt Opt_NoLlvmMangler dflags of
                          False                            -> LlvmMangle
                          True | gopt Opt_SplitObjs dflags -> Splitter
-                         True                             -> As
+                         True                             -> As False
                         
     output_fn <- phaseOutputFilename next_phase
 
@@ -1454,7 +1461,7 @@ runPhase (RealPhase LlvmLlc) input_fn dflags
 
 runPhase (RealPhase LlvmMangle) input_fn dflags
   = do
-      let next_phase = if gopt Opt_SplitObjs dflags then Splitter else As
+      let next_phase = if gopt Opt_SplitObjs dflags then Splitter else As False
       output_fn <- phaseOutputFilename next_phase
       liftIO $ llvmFixupAsm dflags input_fn output_fn
       return (RealPhase next_phase, output_fn)
@@ -1466,6 +1473,7 @@ runPhase (RealPhase MergeStub) input_fn dflags
  = do
      PipeState{maybe_stub_o} <- getPipeState
      output_fn <- phaseOutputFilename StopLn
+     liftIO $ createDirectoryIfMissing True (takeDirectory output_fn)
      case maybe_stub_o of
        Nothing ->
          panic "runPhase(MergeStub): no stub"
@@ -2134,26 +2142,27 @@ joinObjectFiles dflags o_files output_fn = do
   let mySettings = settings dflags
       ldIsGnuLd = sLdIsGnuLd mySettings
       osInfo = platformOS (targetPlatform dflags)
-      ld_r args ccInfo = SysTools.runLink dflags ([
-                            SysTools.Option "-nostdlib",
-                            SysTools.Option "-Wl,-r"
-                            ]
-                         ++ (if ccInfo == Clang then []
-                              else [SysTools.Option "-nodefaultlibs"])
-                         ++ (if osInfo == OSFreeBSD
-                              then [SysTools.Option "-L/usr/lib"]
-                              else [])
-                            -- gcc on sparc sets -Wl,--relax implicitly, but
-                            -- -r and --relax are incompatible for ld, so
-                            -- disable --relax explicitly.
-                         ++ (if platformArch (targetPlatform dflags) == ArchSPARC
-                             && ldIsGnuLd
-                                then [SysTools.Option "-Wl,-no-relax"]
-                                else [])
-                         ++ map SysTools.Option ld_build_id
-                         ++ [ SysTools.Option "-o",
-                              SysTools.FileOption "" output_fn ]
-                         ++ args)
+      ld_r args cc = SysTools.runLink dflags ([
+                       SysTools.Option "-nostdlib",
+                       SysTools.Option "-Wl,-r"
+                     ]
+                     ++ (if any (cc ==) [Clang, AppleClang, AppleClang51]
+                          then []
+                          else [SysTools.Option "-nodefaultlibs"])
+                     ++ (if osInfo == OSFreeBSD
+                          then [SysTools.Option "-L/usr/lib"]
+                          else [])
+                        -- gcc on sparc sets -Wl,--relax implicitly, but
+                        -- -r and --relax are incompatible for ld, so
+                        -- disable --relax explicitly.
+                     ++ (if platformArch (targetPlatform dflags) == ArchSPARC
+                         && ldIsGnuLd
+                            then [SysTools.Option "-Wl,-no-relax"]
+                            else [])
+                     ++ map SysTools.Option ld_build_id
+                     ++ [ SysTools.Option "-o",
+                          SysTools.FileOption "" output_fn ]
+                     ++ args)
 
       -- suppress the generation of the .note.gnu.build-id section,
       -- which we don't need and sometimes causes ld to emit a
@@ -2186,7 +2195,7 @@ hscPostBackendPhase dflags _ hsc_lang =
   case hsc_lang of
         HscC -> HCc
         HscAsm | gopt Opt_SplitObjs dflags -> Splitter
-               | otherwise                 -> As
+               | otherwise                 -> As False
         HscLlvm        -> LlvmOpt
         HscNothing     -> StopLn
         HscInterpreted -> StopLn

@@ -85,8 +85,11 @@ encodedChar = "&#" *> c <* ";"
     num = hex <|> decimal
     hex = ("x" <|> "X") *> hexadecimal
 
+-- | List of characters that we use to delimit any special markup.
+-- Once we have checked for any of these and tried to parse the
+-- relevant markup, we can assume they are used as regular text.
 specialChar :: [Char]
-specialChar = "_/<@\"&'`"
+specialChar = "_/<@\"&'`#"
 
 -- | Plain, regular parser for text. Called as one of the last parsers
 -- to ensure that we have already given a chance to more meaningful parsers
@@ -140,7 +143,8 @@ takeWhile1_ = mfilter (not . BS.null) . takeWhile_
 -- >>> parseOnly anchor "#Hello world#"
 -- Right (DocAName "Hello world")
 anchor :: Parser (Doc a)
-anchor = DocAName . decodeUtf8 <$> ("#" *> takeWhile1 (`notElem` "#\n") <* "#")
+anchor = DocAName . decodeUtf8 <$>
+         disallowNewline ("#" *> takeWhile1_ (/= '#') <* "#")
 
 -- | Monospaced strings.
 --
@@ -158,7 +162,8 @@ moduleName = DocModule <$> (char '"' *> modid <* char '"')
       -- NOTE: According to Haskell 2010 we shouldd actually only
       -- accept {small | large | digit | ' } here.  But as we can't
       -- match on unicode characters, this is currently not possible.
-      <*> (decodeUtf8 <$> takeWhile (`notElem` " .&[{}(=*)+]!#|@/;,^?\"\n"))
+      -- Note that we allow ‘#’ to suport anchors.
+      <*> (decodeUtf8 <$> takeWhile (`notElem` " .&[{}(=*)+]!|@/;,^?\"\n"))
 
 -- | Picture parser, surrounded by \<\< and \>\>. It's possible to specify
 -- a title for the picture.
@@ -419,13 +424,21 @@ autoUrl = mkLink <$> url
 -- characters and does no actual validation itself.
 parseValid :: Parser String
 parseValid = do
-  vs <- many' $ satisfy (`elem` "_.!#$%&*+/<=>?@\\|-~:") <|> digit <|> letter_ascii
+  vs' <- many' $ utf8String "⋆" <|> return <$> idChar
+  let vs = concat vs'
   c <- peekChar
   case c of
     Just '`' -> return vs
     Just '\'' -> (\x -> vs ++ "'" ++ x) <$> ("'" *> parseValid)
                  <|> return vs
     _ -> fail "outofvalid"
+  where
+    idChar = satisfy (`elem` "_.!#$%&*+/<=>?@\\|-~:^")
+             <|> digit <|> letter_ascii
+
+-- | Parses UTF8 strings from ByteString streams.
+utf8String :: String -> Parser String
+utf8String x = decodeUtf8 <$> string (encodeUtf8 x)
 
 -- | Parses identifiers with help of 'parseValid'. Asks GHC for 'RdrName' from the
 -- string it deems valid.

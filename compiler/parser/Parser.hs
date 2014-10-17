@@ -45,8 +45,9 @@ import Data.Char
 import Control.Monad    ( mplus )
 import qualified Data.Array as Happy_Data_Array
 import qualified GHC.Exts as Happy_GHC_Exts
+import Control.Applicative(Applicative(..))
 
--- parser produced by Happy Version 1.19.2
+-- parser produced by Happy Version 1.19.3
 
 newtype HappyAbsSyn  = HappyAbsSyn HappyAny
 #if __GLASGOW_HASKELL__ >= 607
@@ -5958,9 +5959,9 @@ happyReduction_401 (happy_x_6 `HappyStk`
 	case happyOut97 happy_x_4 of { happy_var_4 -> 
 	case happyOut148 happy_x_6 of { happy_var_6 -> 
 	happyIn150
-		 (sL (comb2 happy_var_1 happy_var_6) $ HsLam (mkMatchGroup [sL (comb2 happy_var_1 happy_var_6) $ Match (happy_var_2:happy_var_3) happy_var_4
+		 (sL (comb2 happy_var_1 happy_var_6) $ HsLam (mkMatchGroup FromSource [sL (comb2 happy_var_1 happy_var_6) $ Match (happy_var_2:happy_var_3) happy_var_4
                                                                 (unguardedGRHSs happy_var_6)
-                                                            ])
+                                                              ])
 	) `HappyStk` happyRest}}}}}
 
 happyReduce_402 = happyReduce 4# 142# happyReduction_402
@@ -5983,7 +5984,7 @@ happyReduction_403 happy_x_3
 	 =  case happyOutTok happy_x_1 of { happy_var_1 -> 
 	case happyOut176 happy_x_3 of { happy_var_3 -> 
 	happyIn150
-		 (sL (comb2 happy_var_1 happy_var_3) $ HsLamCase placeHolderType (mkMatchGroup (unLoc happy_var_3))
+		 (sL (comb2 happy_var_1 happy_var_3) $ HsLamCase placeHolderType (mkMatchGroup FromSource (unLoc happy_var_3))
 	)}}
 
 happyReduce_404 = happyMonadReduce 8# 142# happyReduction_404
@@ -6026,7 +6027,7 @@ happyReduction_406 (happy_x_4 `HappyStk`
 	case happyOut148 happy_x_2 of { happy_var_2 -> 
 	case happyOut176 happy_x_4 of { happy_var_4 -> 
 	happyIn150
-		 (sL (comb2 happy_var_1 happy_var_4) $ HsCase happy_var_2 (mkMatchGroup (unLoc happy_var_4))
+		 (sL (comb2 happy_var_1 happy_var_4) $ HsCase happy_var_2 (mkMatchGroup FromSource (unLoc happy_var_4))
 	) `HappyStk` happyRest}}}
 
 happyReduce_407 = happySpecReduce_2  142# happyReduction_407

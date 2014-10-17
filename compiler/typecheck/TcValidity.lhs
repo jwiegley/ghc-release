@@ -69,11 +69,16 @@ checkAmbiguity ctxt ty
 
   | otherwise
   = do { traceTc "Ambiguity check for" (ppr ty)
-       ; (subst, _tvs) <- tcInstSkolTyVars (varSetElems (tyVarsOfType ty))
+       ; let free_tkvs = varSetElemsKvsFirst (closeOverKinds (tyVarsOfType ty))
+       ; (subst, _tvs) <- tcInstSkolTyVars free_tkvs
        ; let ty' = substTy subst ty
-              -- The type might have free TyVars,
-              -- so we skolemise them as TcTyVars
+              -- The type might have free TyVars, esp when the ambiguity check
+              -- happens during a call to checkValidType,
+              -- so we skolemise them as TcTyVars.
               -- Tiresome; but the type inference engine expects TcTyVars
+              -- NB: The free tyvar might be (a::k), so k is also free
+              --     and we must skolemise it as well. Hence closeOverKinds.
+              --     (Trac #9222)
 
          -- Solve the constraints eagerly because an ambiguous type
          -- can cause a cascade of further errors.  Since the free
@@ -285,7 +290,7 @@ check_type ctxt rank (AppTy ty1 ty2)
         ; check_arg_type ctxt rank ty2 }
 
 check_type ctxt rank ty@(TyConApp tc tys)
-  | isSynTyCon tc          = check_syn_tc_app ctxt rank ty tc tys
+  | isTypeSynonymTyCon tc  = check_syn_tc_app ctxt rank ty tc tys
   | isUnboxedTupleTyCon tc = check_ubx_tuple  ctxt      ty    tys
   | otherwise              = mapM_ (check_arg_type ctxt rank) tys
 

@@ -21,8 +21,9 @@ module HpcParser where
 import HpcLexer
 import qualified Data.Array as Happy_Data_Array
 import qualified GHC.Exts as Happy_GHC_Exts
+import Control.Applicative(Applicative(..))
 
--- parser produced by Happy Version 1.19.2
+-- parser produced by Happy Version 1.19.3
 
 newtype HappyAbsSyn  = HappyAbsSyn HappyAny
 #if __GLASGOW_HASKELL__ >= 607
@@ -341,6 +342,12 @@ newtype HappyIdentity a = HappyIdentity a
 happyIdentity = HappyIdentity
 happyRunIdentity (HappyIdentity a) = a
 
+instance Functor HappyIdentity where
+    fmap f (HappyIdentity a) = HappyIdentity (f a)
+
+instance Applicative HappyIdentity where
+    pure    = return
+    a <*> b = (fmap id a) <*> b
 instance Monad HappyIdentity where
     return = HappyIdentity
     (HappyIdentity p) >>= q = q p
