@@ -2,11 +2,9 @@
 --
 -- The register liveness determinator
 --
--- (c) The University of Glasgow 2004
+-- (c) The University of Glasgow 2004-2013
 --
 -----------------------------------------------------------------------------
-{-# OPTIONS -Wall -fno-warn-name-shadowing #-}
-
 module RegAlloc.Liveness (
         RegSet,
         RegMap, emptyRegMap,
@@ -35,13 +33,13 @@ import Reg
 import Instruction
 
 import BlockId
-import OldCmm hiding (RegSet)
-import OldPprCmm()
+import Cmm hiding (RegSet)
+import PprCmm()
 
 import Digraph
+import DynFlags
 import Outputable
 import Platform
-import Unique
 import UniqSet
 import UniqFM
 import UniqSupply
@@ -87,9 +85,9 @@ data InstrSR instr
         | RELOAD Int Reg
 
 instance Instruction instr => Instruction (InstrSR instr) where
-        regUsageOfInstr i
+        regUsageOfInstr platform i
          = case i of
-                Instr  instr    -> regUsageOfInstr instr
+                Instr  instr    -> regUsageOfInstr platform instr
                 SPILL  reg _    -> RU [reg] []
                 RELOAD _ reg    -> RU [] [reg]
 
@@ -137,6 +135,11 @@ instance Instruction instr => Instruction (InstrSR instr) where
 
         mkJumpInstr target      = map Instr (mkJumpInstr target)
 
+        mkStackAllocInstr platform amount =
+             Instr (mkStackAllocInstr platform amount)
+
+        mkStackDeallocInstr platform amount =
+             Instr (mkStackDeallocInstr platform amount)
 
 
 -- | An instruction with liveness information.
@@ -160,7 +163,7 @@ data Liveness
 -- | Stash regs live on entry to each basic block in the info part of the cmm code.
 data LiveInfo
         = LiveInfo
-                (Maybe CmmStatics)                      -- cmm info table static stuff
+                (BlockEnv CmmStatics)                   -- cmm info table static stuff
                 (Maybe BlockId)                         -- id of the first block
                 (Maybe (BlockMap RegSet))               -- argument locals live on entry to this block
                 (Map BlockId (Set Int))                 -- stack slots live on entry to this block
@@ -215,7 +218,7 @@ instance Outputable instr
 
 instance Outputable LiveInfo where
     ppr (LiveInfo mb_static firstId liveVRegsOnEntry liveSlotsOnEntry)
-        =  (maybe empty (ppr) mb_static)
+        =  (ppr mb_static)
         $$ text "# firstId          = " <> ppr firstId
         $$ text "# liveVRegsOnEntry = " <> ppr liveVRegsOnEntry
         $$ text "# liveSlotsOnEntry = " <> text (show liveSlotsOnEntry)
@@ -242,9 +245,9 @@ mapBlockTopM
 mapBlockTopM _ cmm@(CmmData{})
         = return cmm
 
-mapBlockTopM f (CmmProc header label sccs)
+mapBlockTopM f (CmmProc header label live sccs)
  = do   sccs'   <- mapM (mapSCCM f) sccs
-        return  $ CmmProc header label sccs'
+        return  $ CmmProc header label live sccs'
 
 mapSCCM :: Monad m => (a -> m b) -> SCC a -> m (SCC b)
 mapSCCM f (AcyclicSCC x)
@@ -274,9 +277,9 @@ mapGenBlockTopM
 mapGenBlockTopM _ cmm@(CmmData{})
         = return cmm
 
-mapGenBlockTopM f (CmmProc header label (ListGraph blocks))
+mapGenBlockTopM f (CmmProc header label live (ListGraph blocks))
  = do   blocks' <- mapM f blocks
-        return  $ CmmProc header label (ListGraph blocks')
+        return  $ CmmProc header label live (ListGraph blocks')
 
 
 -- | Slurp out the list of register conflicts and reg-reg moves from this top level thing.
@@ -292,7 +295,7 @@ slurpConflicts live
         = slurpCmm (emptyBag, emptyBag) live
 
  where  slurpCmm   rs  CmmData{}                = rs
-        slurpCmm   rs (CmmProc info _ sccs)
+        slurpCmm   rs (CmmProc info _ _ sccs)
                 = foldl' (slurpSCC info) rs sccs
 
         slurpSCC  info rs (AcyclicSCC b)
@@ -371,7 +374,7 @@ slurpReloadCoalesce live
                  -> GenCmmDecl t t1 [SCC (LiveBasicBlock instr)]
                  -> Bag (Reg, Reg)
         slurpCmm cs CmmData{}   = cs
-        slurpCmm cs (CmmProc _ _ sccs)
+        slurpCmm cs (CmmProc _ _ _ sccs)
                 = slurpComp cs (flattenSCCs sccs)
 
         slurpComp :: Bag (Reg, Reg)
@@ -419,7 +422,7 @@ slurpReloadCoalesce live
                 , slotMap'                      <- addToUFM slotMap slot reg
                 = return (slotMap', Nothing)
 
-                -- add an edge betwen the this reg and the last one stored into the slot
+                -- add an edge between the this reg and the last one stored into the slot
                 | LiveInstr (RELOAD slot reg) _ <- li
                 = case lookupUFM slotMap slot of
                         Just reg2
@@ -461,17 +464,17 @@ slurpReloadCoalesce live
 -- | Strip away liveness information, yielding NatCmmDecl
 stripLive
         :: (Outputable statics, Outputable instr, Instruction instr)
-        => Platform
+        => DynFlags
         -> LiveCmmDecl statics instr
         -> NatCmmDecl statics instr
 
-stripLive platform live
+stripLive dflags live
         = stripCmm live
 
  where  stripCmm :: (Outputable statics, Outputable instr, Instruction instr)
                  => LiveCmmDecl statics instr -> NatCmmDecl statics instr
         stripCmm (CmmData sec ds)       = CmmData sec ds
-        stripCmm (CmmProc (LiveInfo info (Just first_id) _ _) label sccs)
+        stripCmm (CmmProc (LiveInfo info (Just first_id) _ _) label live sccs)
          = let  final_blocks    = flattenSCCs sccs
 
                 -- make sure the block that was first in the input list
@@ -480,12 +483,12 @@ stripLive platform live
                 ((first':_), rest')
                                 = partition ((== first_id) . blockId) final_blocks
 
-           in   CmmProc info label
-                          (ListGraph $ map (stripLiveBlock platform) $ first' : rest')
+           in   CmmProc info label live
+                          (ListGraph $ map (stripLiveBlock dflags) $ first' : rest')
 
         -- procs used for stg_split_markers don't contain any blocks, and have no first_id.
-        stripCmm (CmmProc (LiveInfo info Nothing _ _) label [])
-         =      CmmProc info label (ListGraph [])
+        stripCmm (CmmProc (LiveInfo info Nothing _ _) label live [])
+         =      CmmProc info label live (ListGraph [])
 
         -- If the proc has blocks but we don't know what the first one was, then we're dead.
         stripCmm proc
@@ -496,11 +499,11 @@ stripLive platform live
 
 stripLiveBlock
         :: Instruction instr
-        => Platform
+        => DynFlags
         -> LiveBasicBlock instr
         -> NatBasicBlock instr
 
-stripLiveBlock platform (BasicBlock i lis)
+stripLiveBlock dflags (BasicBlock i lis)
  =      BasicBlock i instrs'
 
  where  (instrs', _)
@@ -511,11 +514,11 @@ stripLiveBlock platform (BasicBlock i lis)
 
         spillNat acc (LiveInstr (SPILL reg slot) _ : instrs)
          = do   delta   <- get
-                spillNat (mkSpillInstr platform reg delta slot : acc) instrs
+                spillNat (mkSpillInstr dflags reg delta slot : acc) instrs
 
         spillNat acc (LiveInstr (RELOAD slot reg) _ : instrs)
          = do   delta   <- get
-                spillNat (mkLoadInstr platform reg delta slot : acc) instrs
+                spillNat (mkLoadInstr dflags reg delta slot : acc) instrs
 
         spillNat acc (LiveInstr (Instr instr) _ : instrs)
          | Just i <- takeDeltaInstr instr
@@ -555,14 +558,14 @@ patchEraseLive patchF cmm
  where
         patchCmm cmm@CmmData{}  = cmm
 
-        patchCmm (CmmProc info label sccs)
+        patchCmm (CmmProc info label live sccs)
          | LiveInfo static id (Just blockMap) mLiveSlots <- info
          = let
                 patchRegSet set = mkUniqSet $ map patchF $ uniqSetToList set
                 blockMap'       = mapMap patchRegSet blockMap
 
                 info'           = LiveInfo static id (Just blockMap') mLiveSlots
-           in   CmmProc info' label $ map patchSCC sccs
+           in   CmmProc info' label live $ map patchSCC sccs
 
          | otherwise
          = panic "RegAlloc.Liveness.patchEraseLive: no blockMap"
@@ -590,7 +593,7 @@ patchEraseLive patchF cmm
                 -- source and destination regs are the same
                 | r1 == r2      = True
 
-                -- desination reg is never used
+                -- destination reg is never used
                 | elementOfUniqSet r2 (liveBorn live)
                 , elementOfUniqSet r2 (liveDieRead live) || elementOfUniqSet r2 (liveDieWrite live)
                 = True
@@ -631,64 +634,93 @@ natCmmTopToLive
 natCmmTopToLive (CmmData i d)
         = CmmData i d
 
-natCmmTopToLive (CmmProc info lbl (ListGraph []))
-        = CmmProc (LiveInfo info Nothing Nothing Map.empty) lbl []
+natCmmTopToLive (CmmProc info lbl live (ListGraph []))
+        = CmmProc (LiveInfo info Nothing Nothing Map.empty) lbl live []
 
-natCmmTopToLive (CmmProc info lbl (ListGraph blocks@(first : _)))
+natCmmTopToLive proc@(CmmProc info lbl live (ListGraph blocks@(first : _)))
  = let  first_id        = blockId first
-        sccs            = sccBlocks blocks
+        sccs            = sccBlocks blocks (entryBlocks proc)
         sccsLive        = map (fmap (\(BasicBlock l instrs) ->
                                         BasicBlock l (map (\i -> LiveInstr (Instr i) Nothing) instrs)))
                         $ sccs
 
-   in   CmmProc (LiveInfo info (Just first_id) Nothing Map.empty) lbl sccsLive
+   in   CmmProc (LiveInfo info (Just first_id) Nothing Map.empty) lbl live sccsLive
 
 
+--
+-- Compute the liveness graph of the set of basic blocks.  Important:
+-- we also discard any unreachable code here, starting from the entry
+-- points (the first block in the list, and any blocks with info
+-- tables).  Unreachable code arises when code blocks are orphaned in
+-- earlier optimisation passes, and may confuse the register allocator
+-- by referring to registers that are not initialised.  It's easy to
+-- discard the unreachable code as part of the SCC pass, so that's
+-- exactly what we do. (#7574)
+--
 sccBlocks
         :: Instruction instr
         => [NatBasicBlock instr]
+        -> [BlockId]
         -> [SCC (NatBasicBlock instr)]
 
-sccBlocks blocks = stronglyConnCompFromEdgedVertices graph
+sccBlocks blocks entries = map (fmap get_node) sccs
   where
+        sccs = stronglyConnCompFromG graph roots
+
+        graph = graphFromEdgedVertices nodes
+
+        -- nodes :: [(NatBasicBlock instr, Unique, [Unique])]
+        nodes = [ (block, id, getOutEdges instrs)
+                | block@(BasicBlock id instrs) <- blocks ]
+
+        get_node (n, _, _) = n
+
         getOutEdges :: Instruction instr => [instr] -> [BlockId]
         getOutEdges instrs = concat $ map jumpDestsOfInstr instrs
 
-        graph = [ (block, getUnique id, map getUnique (getOutEdges instrs))
-                | block@(BasicBlock id instrs) <- blocks ]
+        -- This is truly ugly, but I don't see a good alternative.
+        -- Digraph just has the wrong API.  We want to identify nodes
+        -- by their keys (BlockId), but Digraph requires the whole
+        -- node: (NatBasicBlock, BlockId, [BlockId]).  This takes
+        -- advantage of the fact that Digraph only looks at the key,
+        -- even though it asks for the whole triple.
+        roots = [(panic "sccBlocks",b,panic "sccBlocks") | b <- entries ]
 
 
----------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
 -- Annotate code with register liveness information
 --
 regLiveness
         :: (Outputable instr, Instruction instr)
-        => LiveCmmDecl statics instr
+        => Platform
+        -> LiveCmmDecl statics instr
         -> UniqSM (LiveCmmDecl statics instr)
 
-regLiveness (CmmData i d)
+regLiveness _ (CmmData i d)
         = return $ CmmData i d
 
-regLiveness (CmmProc info lbl [])
+regLiveness _ (CmmProc info lbl live [])
         | LiveInfo static mFirst _ _    <- info
         = return $ CmmProc
                         (LiveInfo static mFirst (Just mapEmpty) Map.empty)
-                        lbl []
+                        lbl live []
 
-regLiveness (CmmProc info lbl sccs)
+regLiveness platform (CmmProc info lbl live sccs)
         | LiveInfo static mFirst _ liveSlotsOnEntry     <- info
-        = let   (ann_sccs, block_live)  = computeLiveness sccs
+        = let   (ann_sccs, block_live)  = computeLiveness platform sccs
 
           in    return $ CmmProc (LiveInfo static mFirst (Just block_live) liveSlotsOnEntry)
-                           lbl ann_sccs
+                           lbl live ann_sccs
 
 
 -- -----------------------------------------------------------------------------
 -- | Check ordering of Blocks
---   The computeLiveness function requires SCCs to be in reverse dependent order.
---   If they're not the liveness information will be wrong, and we'll get a bad allocation.
---   Better to check for this precondition explicitly or some other poor sucker will
---   waste a day staring at bad assembly code..
+--   The computeLiveness function requires SCCs to be in reverse
+--   dependent order.  If they're not the liveness information will be
+--   wrong, and we'll get a bad allocation.  Better to check for this
+--   precondition explicitly or some other poor sucker will waste a
+--   day staring at bad assembly code..
 --
 checkIsReverseDependent
         :: Instruction instr
@@ -729,7 +761,7 @@ reverseBlocksInTops :: LiveCmmDecl statics instr -> LiveCmmDecl statics instr
 reverseBlocksInTops top
  = case top of
         CmmData{}                       -> top
-        CmmProc info lbl sccs   -> CmmProc info lbl (reverse sccs)
+        CmmProc info lbl live sccs      -> CmmProc info lbl live (reverse sccs)
 
 
 -- | Computing liveness
@@ -742,15 +774,16 @@ reverseBlocksInTops top
 --
 computeLiveness
         :: (Outputable instr, Instruction instr)
-        => [SCC (LiveBasicBlock instr)]
+        => Platform
+        -> [SCC (LiveBasicBlock instr)]
         -> ([SCC (LiveBasicBlock instr)],       -- instructions annotated with list of registers
                                                 -- which are "dead after this instruction".
                BlockMap RegSet)                 -- blocks annontated with set of live registers
                                                 -- on entry to the block.
 
-computeLiveness sccs
+computeLiveness platform sccs
  = case checkIsReverseDependent sccs of
-        Nothing         -> livenessSCCs emptyBlockMap [] sccs
+        Nothing         -> livenessSCCs platform emptyBlockMap [] sccs
         Just bad        -> pprPanic "RegAlloc.Liveness.computeLivenss"
                                 (vcat   [ text "SCCs aren't in reverse dependent order"
                                         , text "bad blockId" <+> ppr bad
@@ -758,22 +791,23 @@ computeLiveness sccs
 
 livenessSCCs
        :: Instruction instr
-       => BlockMap RegSet
+       => Platform
+       -> BlockMap RegSet
        -> [SCC (LiveBasicBlock instr)]          -- accum
        -> [SCC (LiveBasicBlock instr)]
        -> ( [SCC (LiveBasicBlock instr)]
           , BlockMap RegSet)
 
-livenessSCCs blockmap done []
+livenessSCCs _ blockmap done []
         = (done, blockmap)
 
-livenessSCCs blockmap done (AcyclicSCC block : sccs)
- = let  (blockmap', block')     = livenessBlock blockmap block
-   in   livenessSCCs blockmap' (AcyclicSCC block' : done) sccs
+livenessSCCs platform blockmap done (AcyclicSCC block : sccs)
+ = let  (blockmap', block')     = livenessBlock platform blockmap block
+   in   livenessSCCs platform blockmap' (AcyclicSCC block' : done) sccs
 
-livenessSCCs blockmap done
+livenessSCCs platform blockmap done
         (CyclicSCC blocks : sccs) =
-        livenessSCCs blockmap' (CyclicSCC blocks':done) sccs
+        livenessSCCs platform blockmap' (CyclicSCC blocks':done) sccs
  where      (blockmap', blocks')
                 = iterateUntilUnchanged linearLiveness equalBlockMaps
                                       blockmap blocks
@@ -796,7 +830,7 @@ livenessSCCs blockmap done
                 => BlockMap RegSet -> [LiveBasicBlock instr]
                 -> (BlockMap RegSet, [LiveBasicBlock instr])
 
-            linearLiveness = mapAccumL livenessBlock
+            linearLiveness = mapAccumL (livenessBlock platform)
 
                 -- probably the least efficient way to compare two
                 -- BlockMaps for equality.
@@ -812,17 +846,18 @@ livenessSCCs blockmap done
 --
 livenessBlock
         :: Instruction instr
-        => BlockMap RegSet
+        => Platform
+        -> BlockMap RegSet
         -> LiveBasicBlock instr
         -> (BlockMap RegSet, LiveBasicBlock instr)
 
-livenessBlock blockmap (BasicBlock block_id instrs)
+livenessBlock platform blockmap (BasicBlock block_id instrs)
  = let
         (regsLiveOnEntry, instrs1)
-                = livenessBack emptyUniqSet blockmap [] (reverse instrs)
+            = livenessBack platform emptyUniqSet blockmap [] (reverse instrs)
         blockmap'       = mapInsert block_id regsLiveOnEntry blockmap
 
-        instrs2         = livenessForward regsLiveOnEntry instrs1
+        instrs2         = livenessForward platform regsLiveOnEntry instrs1
 
         output          = BasicBlock block_id instrs2
 
@@ -833,16 +868,17 @@ livenessBlock blockmap (BasicBlock block_id instrs)
 
 livenessForward
         :: Instruction instr
-        => RegSet                       -- regs live on this instr
+        => Platform
+        -> RegSet                       -- regs live on this instr
         -> [LiveInstr instr] -> [LiveInstr instr]
 
-livenessForward _           []  = []
-livenessForward rsLiveEntry (li@(LiveInstr instr mLive) : lis)
+livenessForward _        _           []  = []
+livenessForward platform rsLiveEntry (li@(LiveInstr instr mLive) : lis)
         | Nothing               <- mLive
-        = li : livenessForward rsLiveEntry lis
+        = li : livenessForward platform rsLiveEntry lis
 
         | Just live     <- mLive
-        , RU _ written  <- regUsageOfInstr instr
+        , RU _ written  <- regUsageOfInstr platform instr
         = let
                 -- Regs that are written to but weren't live on entry to this instruction
                 --      are recorded as being born here.
@@ -854,9 +890,9 @@ livenessForward rsLiveEntry (li@(LiveInstr instr mLive) : lis)
                                         `minusUniqSet` (liveDieWrite live)
 
         in LiveInstr instr (Just live { liveBorn = rsBorn })
-                : livenessForward rsLiveNext lis
+                : livenessForward platform rsLiveNext lis
 
-livenessForward _ _             = panic "RegLiveness.livenessForward: no match"
+livenessForward _ _ _             = panic "RegLiveness.livenessForward: no match"
 
 
 -- | Calculate liveness going backwards,
@@ -864,32 +900,34 @@ livenessForward _ _             = panic "RegLiveness.livenessForward: no match"
 
 livenessBack
         :: Instruction instr
-        => RegSet                       -- regs live on this instr
+        => Platform
+        -> RegSet                       -- regs live on this instr
         -> BlockMap RegSet              -- regs live on entry to other BBs
         -> [LiveInstr instr]            -- instructions (accum)
         -> [LiveInstr instr]            -- instructions
         -> (RegSet, [LiveInstr instr])
 
-livenessBack liveregs _        done []  = (liveregs, done)
+livenessBack _        liveregs _        done []  = (liveregs, done)
 
-livenessBack liveregs blockmap acc (instr : instrs)
- = let  (liveregs', instr')     = liveness1 liveregs blockmap instr
-   in   livenessBack liveregs' blockmap (instr' : acc) instrs
+livenessBack platform liveregs blockmap acc (instr : instrs)
+ = let  (liveregs', instr')     = liveness1 platform liveregs blockmap instr
+   in   livenessBack platform liveregs' blockmap (instr' : acc) instrs
 
 
 -- don't bother tagging comments or deltas with liveness
 liveness1
         :: Instruction instr
-        => RegSet
+        => Platform
+        -> RegSet
         -> BlockMap RegSet
         -> LiveInstr instr
         -> (RegSet, LiveInstr instr)
 
-liveness1 liveregs _ (LiveInstr instr _)
+liveness1 _ liveregs _ (LiveInstr instr _)
         | isMetaInstr instr
         = (liveregs, LiveInstr instr Nothing)
 
-liveness1 liveregs blockmap (LiveInstr instr _)
+liveness1 platform liveregs blockmap (LiveInstr instr _)
 
         | not_a_branch
         = (liveregs1, LiveInstr instr
@@ -906,7 +944,7 @@ liveness1 liveregs blockmap (LiveInstr instr _)
                         , liveDieWrite  = mkUniqSet w_dying }))
 
         where
-            !(RU read written) = regUsageOfInstr instr
+            !(RU read written) = regUsageOfInstr platform instr
 
             -- registers that were written here are dead going backwards.
             -- registers that were read here are live going backwards.

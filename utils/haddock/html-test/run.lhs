@@ -15,12 +15,11 @@ import Distribution.Simple.Program
 import Distribution.Simple.Utils
 import Distribution.Verbosity
 import System.IO
-import System.Cmd
 import System.Directory
 import System.Environment
 import System.Exit
 import System.FilePath
-import System.Process (ProcessHandle, runProcess, waitForProcess)
+import System.Process (ProcessHandle, runProcess, waitForProcess, system)
 
 
 packageRoot, dataDir, haddockPath, baseDir, testDir, outDir :: FilePath
@@ -71,7 +70,7 @@ test = do
 
   -- TODO: maybe do something more clever here using haddock.cabal
   ghcPath <- fmap init $ rawSystemStdout normal haddockPath ["--print-ghc-path"]
-  (_, conf) <- configure normal (Just ghcPath) Nothing defaultProgramConfiguration
+  (_, _, conf) <- configure normal (Just ghcPath) Nothing defaultProgramConfiguration
   pkgIndex <- getInstalledPackages normal [GlobalPackageDB] conf
   let mkDep pkgName =
         fromMaybe (error "Couldn't find test dependencies") $ do
@@ -88,7 +87,7 @@ test = do
 
   putStrLn "Running tests..."
   handle <- runProcess haddockPath
-                       (["-w", "-o", outDir, "-h", "--pretty-html", "--optghc=-fglasgow-exts"
+                       (["-w", "-o", outDir, "-h", "--pretty-html"
                         , "--optghc=-w", base, process, ghcprim] ++ opts ++ mods')
                        Nothing env Nothing
                        Nothing Nothing
@@ -143,11 +142,25 @@ stripLinks :: String -> String
 stripLinks str =
   let prefix = "<a href=\"" in
   case stripPrefix prefix str of
-    Just str' -> prefix ++ stripLinks (dropWhile (/= '"') str')
+    Just str' -> case dropWhile (/= '>') (dropWhile (/= '"') str') of
+      [] -> []
+      x:xs -> stripLinks (stripHrefEnd xs)
     Nothing ->
       case str of
         [] -> []
         x : xs -> x : stripLinks xs
+
+stripHrefEnd :: String -> String
+stripHrefEnd s =
+  let pref = "</a" in
+  case stripPrefix pref s of
+    Just str' -> case dropWhile (/= '>') str' of
+      [] -> []
+      x:xs -> xs
+    Nothing ->
+      case s of
+        [] -> []
+        x : xs -> x : stripHrefEnd xs
 
 programOnPath :: FilePath -> IO Bool
 programOnPath p = do

@@ -1,6 +1,6 @@
 # coding=utf8
 
-setTestOpts(if_compiler_profiled(skip))
+setTestOpts(when(compiler_profiled(), skip))
 
 test('ghci001', combined_output, ghci_script, ['ghci001.script'])
 test('ghci002', combined_output, ghci_script, ['ghci002.script'])
@@ -28,8 +28,8 @@ test('ghci014', reqlib('QuickCheck'), ghci_script, ['ghci014.script'])
 test('ghci015', ignore_output, ghci_script, ['ghci015.script'])
 
 test('ghci016', expect_broken(552), ghci_script, ['ghci016.script'])
-test('ghci017', extra_run_opts('-hide-package haskell98'), ghci_script, ['ghci017.script'])
-test('ghci018', expect_broken(1201), ghci_script, ['ghci018.script'])
+test('ghci017', [reqlib('haskell98'), extra_run_opts('-hide-package haskell98')], ghci_script, ['ghci017.script'])
+test('ghci018', normal, ghci_script, ['ghci018.script'])
 test('ghci019', normal, ghci_script, ['ghci019.script'])
 test('ghci020', normal, ghci_script, ['ghci020.script'])
 test('ghci021', normal, ghci_script, ['ghci021.script'])
@@ -37,8 +37,7 @@ test('ghci022', normal, ghci_script, ['ghci022.script'])
 
 test('ghci023', normal, ghci_script, ['ghci023.script'])
 test('ghci024',
-     [skip_if_fast,
-      if_platform("powerpc-apple-darwin", expect_broken(1845))],
+     when(fast(), skip),
      run_command,
      ['$MAKE -s --no-print-directory ghci024'])
 test('ghci025', normal, ghci_script, ['ghci025.script'])
@@ -76,27 +75,27 @@ test('ghci055', combined_output, ghci_script, ['ghci055.script'])
 
 test('ghci056',
      [
-       cmd_prefix('$MAKE --no-print-directory ghci056_setup && '),
+       pre_cmd('$MAKE -s --no-print-directory ghci056_setup'),
        extra_run_opts('ghci056_c.o'),
-       extra_clean('ghci056_c.o')
+       extra_clean(['ghci056_c.o'])
      ],
      ghci_script, ['ghci056.script'])
 
 test('ghci057', normal, ghci_script, ['ghci057.script'])
 
-test('2452', normal, ghci_script, ['2452.script'])
+test('T2452', normal, ghci_script, ['T2452.script'])
 test('T2766', normal, ghci_script, ['T2766.script'])
 
-test('1914',
+test('T1914',
      extra_clean(['T1914A.hs', 'T1914B.hs']),
      ghci_script,
-     ['1914.script'])
+     ['T1914.script'])
 
-test('2976', normal, ghci_script, ['2976.script'])
-test('2816', normal, ghci_script, ['2816.script'])
+test('T2976', normal, ghci_script, ['T2976.script'])
+test('T2816', normal, ghci_script, ['T2816.script'])
 test('T789', normal, ghci_script, ['T789.script'])
 test('T3263', normal, ghci_script, ['T3263.script'])
-test('4051', normal, ghci_script, ['4051.script'])
+test('T4051', normal, ghci_script, ['T4051.script'])
 test('T4087', normal, ghci_script, ['T4087.script'])
 test('T4015', normal, ghci_script, ['T4015.script'])
 test('T4127', normal, ghci_script, ['T4127.script'])
@@ -129,9 +128,45 @@ test('T6027ghci', normal, ghci_script, ['T6027ghci.script'])
 test('T6007', normal, ghci_script, ['T6007.script'])
 test('T6091', normal, ghci_script, ['T6091.script'])
 test('T6106',
-     [# This test fails on Windows for unknown reasons
-      if_os('mingw32', expect_fail),
-      extra_clean(['T6106.hs'])],
+     [extra_clean(['T6106.hs',
+                   'T6106_preproc.hi', 'T6106_preproc.o',
+                   'T6106_preproc', 'T6106_preproc.exe']),
+      pre_cmd('$MAKE -s --no-print-directory T6106_prep')],
      ghci_script,
      ['T6106.script'])
 test('T6105', normal, ghci_script, ['T6105.script'])
+test('T7117', normal, ghci_script, ['T7117.script'])
+test('ghci058',
+     [extra_clean(['Ghci058.hs', 'Ghci058.hi', 'Ghci058.o']),
+      cmd_prefix('ghciWayFlags=' + config.ghci_way_flags)],
+     ghci_script,
+     ['ghci058.script'])
+test('T7587', normal, ghci_script, ['T7587.script'])
+test('T7688', normal, ghci_script, ['T7688.script'])
+test('T7627', normal, ghci_script, ['T7627.script'])
+test('T7627b', normal, ghci_script, ['T7627b.script'])
+test('T7586', normal, ghci_script, ['T7586.script'])
+test('T4175', normal, ghci_script, ['T4175.script'])
+test('T7872', normal, ghci_script, ['T7872.script'])
+test('T7873', normal, ghci_script, ['T7873.script'])
+test('T7939', normal, ghci_script, ['T7939.script'])
+test('T7894', normal, ghci_script, ['T7894.script'])
+test('T8116', normal, ghci_script, ['T8116.script'])
+test('T8113', normal, ghci_script, ['T8113.script'])
+test('T8172', normal, ghci_script, ['T8172.script'])
+test('T8215', normal, ghci_script, ['T8215.script'])
+test('T8357', normal, ghci_script, ['T8357.script'])
+test('T8383', normal, ghci_script, ['T8383.script'])
+test('T8469', normal, ghci_script, ['T8469.script'])
+test('T8485', normal, ghci_script, ['T8485.script'])
+test('T8535', normal, ghci_script, ['T8535.script'])
+test('T8639', normal, ghci_script, ['T8639.script'])
+test('T8640', normal, ghci_script, ['T8640.script'])
+test('T8579', normal, ghci_script, ['T8579.script'])
+test('T8649', normal, ghci_script, ['T8649.script'])
+test('T8674', normal, ghci_script, ['T8674.script'])
+test('T8696', normal, ghci_script, ['T8696.script'])
+test('T8776', normal, ghci_script, ['T8776.script'])
+test('T8831', normal, ghci_script, ['T8831.script'])
+test('T8917', normal, ghci_script, ['T8917.script'])
+test('T8931', normal, ghci_script, ['T8931.script'])

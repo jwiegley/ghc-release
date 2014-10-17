@@ -1,6 +1,4 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -fno-warn-unused-imports #-}
-#if __GLASGOW_HASKELL__ >= 701
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 -----------------------------------------------------------------------------
@@ -8,7 +6,7 @@
 -- Module      :  System.Posix.Files
 -- Copyright   :  (c) The University of Glasgow 2002
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  provisional
 -- Portability :  non-portable (requires POSIX)
@@ -62,7 +60,7 @@ module System.Posix.Files (
     isDirectory, isSymbolicLink, isSocket,
 
     -- * Creation
-    createNamedPipe, 
+    createNamedPipe,
     createDevice,
 
     -- * Hard links
@@ -81,7 +79,9 @@ module System.Posix.Files (
 #endif
 
     -- * Changing file timestamps
-    setFileTimes, touchFile,
+    setFileTimes, setFileTimesHiRes,
+    setFdTimesHiRes, setSymbolicLinkTimesHiRes,
+    touchFile, touchFd, touchSymbolicLink,
 
     -- * Setting file sizes
     setFileSize, setFdSize,
@@ -94,31 +94,12 @@ module System.Posix.Files (
 import Foreign
 import Foreign.C
 
-import System.Posix.Error
 import System.Posix.Types
-import System.Posix.Internals
 import System.Posix.Files.Common
+import System.Posix.Error
+import System.Posix.Internals
 
-#if __GLASGOW_HASKELL__ > 700
-import System.Posix.Internals (withFilePath, peekFilePath)
-#elif __GLASGOW_HASKELL__ > 611
-import System.Posix.Internals (withFilePath)
-
-peekFilePath :: CString -> IO FilePath
-peekFilePath = peekCString
-
-peekFilePathLen :: CStringLen -> IO FilePath
-peekFilePathLen = peekCStringLen
-#else
-withFilePath :: FilePath -> (CString -> IO a) -> IO a
-withFilePath = withCString
-
-peekFilePath :: CString -> IO FilePath
-peekFilePath = peekCString
-
-peekFilePathLen :: CStringLen -> IO FilePath
-peekFilePathLen = peekCStringLen
-#endif
+import Data.Time.Clock.POSIX
 
 -- -----------------------------------------------------------------------------
 -- chmod()
@@ -154,26 +135,26 @@ fileAccess name readOK writeOK execOK = access name flags
 --
 -- Note: calls @access@.
 fileExist :: FilePath -> IO Bool
-fileExist name = 
+fileExist name =
   withFilePath name $ \s -> do
     r <- c_access s (#const F_OK)
     if (r == 0)
-	then return True
-	else do err <- getErrno
-	        if (err == eNOENT)
-		   then return False
-		   else throwErrnoPath "fileExist" name
+        then return True
+        else do err <- getErrno
+                if (err == eNOENT)
+                   then return False
+                   else throwErrnoPath "fileExist" name
 
 access :: FilePath -> CMode -> IO Bool
-access name flags = 
+access name flags =
   withFilePath name $ \s -> do
     r <- c_access s (fromIntegral flags)
     if (r == 0)
-	then return True
-	else do err <- getErrno
-	        if (err == eACCES)
-		   then return False
-		   else throwErrnoPath "fileAccess" name
+        then return True
+        else do err <- getErrno
+                if (err == eACCES || err == eROFS || err == eTXTBSY)
+                   then return False
+                   else throwErrnoPath "fileAccess" name
 
 
 -- | @getFileStatus path@ calls gets the @FileStatus@ information (user ID,
@@ -182,10 +163,10 @@ access name flags =
 -- Note: calls @stat@.
 getFileStatus :: FilePath -> IO FileStatus
 getFileStatus path = do
-  fp <- mallocForeignPtrBytes (#const sizeof(struct stat)) 
+  fp <- mallocForeignPtrBytes (#const sizeof(struct stat))
   withForeignPtr fp $ \p ->
-    withFilePath path $ \s -> 
-      throwErrnoPathIfMinus1_ "getFileStatus" path (c_stat s p)
+    withFilePath path $ \s ->
+      throwErrnoPathIfMinus1Retry_ "getFileStatus" path (c_stat s p)
   return (FileStatus fp)
 
 -- | Acts as 'getFileStatus' except when the 'FilePath' refers to a symbolic
@@ -195,9 +176,9 @@ getFileStatus path = do
 -- Note: calls @lstat@.
 getSymbolicLinkStatus :: FilePath -> IO FileStatus
 getSymbolicLinkStatus path = do
-  fp <- mallocForeignPtrBytes (#const sizeof(struct stat)) 
+  fp <- mallocForeignPtrBytes (#const sizeof(struct stat))
   withForeignPtr fp $ \p ->
-    withFilePath path $ \s -> 
+    withFilePath path $ \s ->
       throwErrnoPathIfMinus1_ "getSymbolicLinkStatus" path (c_lstat s p)
   return (FileStatus fp)
 
@@ -213,7 +194,7 @@ foreign import ccall unsafe "__hsunix_lstat"
 -- Note: calls @mkfifo@.
 createNamedPipe :: FilePath -> FileMode -> IO ()
 createNamedPipe name mode = do
-  withFilePath name $ \s -> 
+  withFilePath name $ \s ->
     throwErrnoPathIfMinus1_ "createNamedPipe" name (c_mkfifo s mode)
 
 -- | @createDevice path mode dev@ creates either a regular or a special file
@@ -229,7 +210,7 @@ createDevice path mode dev =
   withFilePath path $ \s ->
     throwErrnoPathIfMinus1_ "createDevice" path (c_mknod s mode dev)
 
-foreign import ccall unsafe "__hsunix_mknod" 
+foreign import ccall unsafe "__hsunix_mknod"
   c_mknod :: CString -> CMode -> CDev -> IO CInt
 
 -- -----------------------------------------------------------------------------
@@ -288,8 +269,8 @@ readSymbolicLink :: FilePath -> IO FilePath
 readSymbolicLink file =
   allocaArray0 (#const PATH_MAX) $ \buf -> do
     withFilePath file $ \s -> do
-      len <- throwErrnoPathIfMinus1 "readSymbolicLink" file $ 
-	c_readlink s buf (#const PATH_MAX)
+      len <- throwErrnoPathIfMinus1 "readSymbolicLink" file $
+        c_readlink s buf (#const PATH_MAX)
       peekFilePathLen (buf,fromIntegral len)
 
 foreign import ccall unsafe "readlink"
@@ -336,14 +317,14 @@ setSymbolicLinkOwnerAndGroup :: FilePath -> UserID -> GroupID -> IO ()
 setSymbolicLinkOwnerAndGroup name uid gid = do
   withFilePath name $ \s ->
     throwErrnoPathIfMinus1_ "setSymbolicLinkOwnerAndGroup" name
-	(c_lchown s uid gid)
+        (c_lchown s uid gid)
 
 foreign import ccall unsafe "lchown"
   c_lchown :: CString -> CUid -> CGid -> IO CInt
 #endif
 
 -- -----------------------------------------------------------------------------
--- utime()
+-- Setting file times
 
 -- | @setFileTimes path atime mtime@ sets the access and modification times
 -- associated with file @path@ to @atime@ and @mtime@, respectively.
@@ -357,6 +338,50 @@ setFileTimes name atime mtime = do
      (#poke struct utimbuf, modtime) p mtime
      throwErrnoPathIfMinus1_ "setFileTimes" name (c_utime s p)
 
+-- | Like 'setFileTimes' but timestamps can have sub-second resolution.
+--
+-- Note: calls @utimensat@ or @utimes@.
+--
+-- /Since: 2.7.0.0/
+setFileTimesHiRes :: FilePath -> POSIXTime -> POSIXTime -> IO ()
+#ifdef HAVE_UTIMENSAT
+setFileTimesHiRes name atime mtime =
+  withFilePath name $ \s ->
+    withArray [toCTimeSpec atime, toCTimeSpec mtime] $ \times ->
+      throwErrnoPathIfMinus1_ "setFileTimesHiRes" name $
+        c_utimensat (#const AT_FDCWD) s times 0
+#else
+setFileTimesHiRes name atime mtime =
+  withFilePath name $ \s ->
+    withArray [toCTimeVal atime, toCTimeVal mtime] $ \times ->
+      throwErrnoPathIfMinus1_ "setFileTimesHiRes" name (c_utimes s times)
+#endif
+
+-- | Like 'setFileTimesHiRes' but does not follow symbolic links.
+-- This operation is not supported on all platforms. On these platforms,
+-- this function will raise an exception.
+--
+-- Note: calls @utimensat@ or @lutimes@.
+--
+-- /Since: 2.7.0.0/
+setSymbolicLinkTimesHiRes :: FilePath -> POSIXTime -> POSIXTime -> IO ()
+#if HAVE_UTIMENSAT
+setSymbolicLinkTimesHiRes name atime mtime =
+  withFilePath name $ \s ->
+    withArray [toCTimeSpec atime, toCTimeSpec mtime] $ \times ->
+      throwErrnoPathIfMinus1_ "setSymbolicLinkTimesHiRes" name $
+        c_utimensat (#const AT_FDCWD) s times (#const AT_SYMLINK_NOFOLLOW)
+#elif HAVE_LUTIMES
+setSymbolicLinkTimesHiRes name atime mtime =
+  withFilePath name $ \s ->
+    withArray [toCTimeVal atime, toCTimeVal mtime] $ \times ->
+      throwErrnoPathIfMinus1_ "setSymbolicLinkTimesHiRes" name $
+        c_lutimes s times
+#else
+setSymbolicLinkTimesHiRes =
+  error "setSymbolicLinkTimesHiRes: not available on this platform"
+#endif
+
 -- | @touchFile path@ sets the access and modification times associated with
 -- file @path@ to the current time.
 --
@@ -366,6 +391,23 @@ touchFile name = do
   withFilePath name $ \s ->
    throwErrnoPathIfMinus1_ "touchFile" name (c_utime s nullPtr)
 
+-- | Like 'touchFile' but does not follow symbolic links.
+-- This operation is not supported on all platforms. On these platforms,
+-- this function will raise an exception.
+--
+-- Note: calls @lutimes@.
+--
+-- /Since: 2.7.0.0/
+touchSymbolicLink :: FilePath -> IO ()
+#if HAVE_LUTIMES
+touchSymbolicLink name =
+  withFilePath name $ \s ->
+    throwErrnoPathIfMinus1_ "touchSymbolicLink" name (c_lutimes s nullPtr)
+#else
+touchSymbolicLink =
+  error "touchSymbolicLink: not available on this platform"
+#endif
+
 -- -----------------------------------------------------------------------------
 -- Setting file sizes
 
@@ -374,7 +416,7 @@ touchFile name = do
 --
 -- Note: calls @truncate@.
 setFileSize :: FilePath -> FileOffset -> IO ()
-setFileSize file off = 
+setFileSize file off =
   withFilePath file $ \s ->
     throwErrnoPathIfMinus1_ "setFileSize" file (c_truncate s off)
 
@@ -393,9 +435,9 @@ foreign import ccall unsafe "truncate"
 -- Note: calls @pathconf@.
 getPathVar :: FilePath -> PathVar -> IO Limit
 getPathVar name v = do
-  withFilePath name $ \ nameP -> 
-    throwErrnoPathIfMinus1 "getPathVar" name $ 
+  withFilePath name $ \ nameP ->
+    throwErrnoPathIfMinus1 "getPathVar" name $
       c_pathconf nameP (pathVarConst v)
 
-foreign import ccall unsafe "pathconf" 
+foreign import ccall unsafe "pathconf"
   c_pathconf :: CString -> CInt -> IO CLong

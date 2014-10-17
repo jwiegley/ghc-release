@@ -1,6 +1,6 @@
-{-# LANGUAGE DeriveDataTypeable, PatternGuards, CApiFFI #-}
+{-# LANGUAGE CApiFFI, CPP, DeriveDataTypeable, NondecreasingIndentation #-}
 {-# OPTIONS_GHC -fno-cse #-} -- global variables
-#if __GLASGOW_HASKELL__ >= 701
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 -----------------------------------------------------------------------------
@@ -8,7 +8,7 @@
 -- Module      :  System.Posix.Signals
 -- Copyright   :  (c) The University of Glasgow 2002
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  provisional
 -- Portability :  non-portable (requires POSIX)
@@ -68,7 +68,8 @@ module System.Posix.Signals (
 
 #ifdef __GLASGOW_HASKELL__
   -- * Handling signals
-  Handler(Default,Ignore,Catch,CatchOnce),
+  Handler(Default,Ignore,Catch,CatchOnce,CatchInfo,CatchInfoOnce),
+  SignalInfo(..), SignalSpecificInfo(..),
   installHandler,
 #endif
 
@@ -102,8 +103,12 @@ module System.Posix.Signals (
   -- siginterrupt
   ) where
 
-import Foreign hiding (unsafePerformIO)
+import Data.Word
 import Foreign.C
+import Foreign.ForeignPtr
+import Foreign.Marshal
+import Foreign.Ptr
+import Foreign.Storable
 import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.Types
 import System.Posix.Internals
@@ -112,11 +117,7 @@ import System.Posix.Process.Internals
 import Data.Dynamic
 
 #ifdef __GLASGOW_HASKELL__
-#if __GLASGOW_HASKELL__ >= 611
 ##include "rts/Signals.h"
-#else
-##include "Signals.h"
-#endif
 
 import GHC.Conc hiding (Signal)
 #endif
@@ -275,27 +276,27 @@ fileSizeLimitExceeded = sigXFSZ
 -- -----------------------------------------------------------------------------
 -- Signal-related functions
 
--- | @signalProcess int pid@ calls @kill@ to signal process @pid@ 
+-- | @signalProcess int pid@ calls @kill@ to signal process @pid@
 --   with interrupt signal @int@.
 signalProcess :: Signal -> ProcessID -> IO ()
-signalProcess sig pid 
+signalProcess sig pid
  = throwErrnoIfMinus1_ "signalProcess" (c_kill pid sig)
 
 foreign import ccall unsafe "kill"
   c_kill :: CPid -> CInt -> IO CInt
 
 
--- | @signalProcessGroup int pgid@ calls @kill@ to signal 
+-- | @signalProcessGroup int pgid@ calls @kill@ to signal
 --  all processes in group @pgid@ with interrupt signal @int@.
 signalProcessGroup :: Signal -> ProcessGroupID -> IO ()
-signalProcessGroup sig pgid 
+signalProcessGroup sig pgid
   = throwErrnoIfMinus1_ "signalProcessGroup" (c_killpg pgid sig)
 
 foreign import ccall unsafe "killpg"
   c_killpg :: CPid -> CInt -> IO CInt
 
 -- | @raiseSignal int@ calls @kill@ to signal the current process
---   with interrupt signal @int@. 
+--   with interrupt signal @int@.
 raiseSignal :: Signal -> IO ()
 raiseSignal sig = throwErrnoIfMinus1_ "raiseSignal" (c_raise sig)
 
@@ -314,14 +315,16 @@ type Signal = CInt
 -- | The actions to perform when a signal is received.
 data Handler = Default
              | Ignore
-	     -- not yet: | Hold 
+             -- not yet: | Hold
              | Catch (IO ())
              | CatchOnce (IO ())
-             | CatchInfo (SignalInfo -> IO ())
-             | CatchInfoOnce (SignalInfo -> IO ())
+             | CatchInfo (SignalInfo -> IO ())     -- ^ /Since: 2.7.0.0/
+             | CatchInfoOnce (SignalInfo -> IO ()) -- ^ /Since: 2.7.0.0/
   deriving (Typeable)
 
 -- | Information about a received signal (derived from @siginfo_t@).
+--
+-- /Since: 2.7.0.0/
 data SignalInfo = SignalInfo {
       siginfoSignal   :: Signal,
       siginfoError    :: Errno,
@@ -330,6 +333,8 @@ data SignalInfo = SignalInfo {
 
 -- | Information specific to a particular type of signal
 -- (derived from @siginfo_t@).
+--
+-- /Since: 2.7.0.0/
 data SignalSpecificInfo
   = NoSignalSpecificInfo
   | SigChldInfo {
@@ -349,11 +354,11 @@ data SignalSpecificInfo
 --   signal handler for @int@ is returned
 installHandler :: Signal
                -> Handler
-               -> Maybe SignalSet	-- ^ other signals to block
-               -> IO Handler		-- ^ old handler
+               -> Maybe SignalSet       -- ^ other signals to block
+               -> IO Handler            -- ^ old handler
 
 #ifdef __PARALLEL_HASKELL__
-installHandler = 
+installHandler =
   error "installHandler: not available for Parallel Haskell"
 #else
 
@@ -387,7 +392,7 @@ installHandler sig handler _maybe_mask = do
             CatchInfo     action -> setHandler sig (Just (getinfo action,dyn))
             CatchInfoOnce action -> setHandler sig (Just (getinfo action,dyn))
             _                    -> error "installHandler"
-            
+
         let action = case handler of
                 Catch _         -> STG_SIG_HAN
                 CatchOnce _     -> STG_SIG_RST
@@ -412,10 +417,10 @@ installHandler sig handler _maybe_mask = do
 
 foreign import ccall unsafe
   stg_sig_install
-	:: CInt				-- sig no.
-	-> CInt				-- action code (STG_SIG_HAN etc.)
-	-> Ptr CSigset			-- (in, out) blocked
-	-> IO CInt			-- (ret) old action code
+        :: CInt                         -- sig no.
+        -> CInt                         -- action code (STG_SIG_HAN etc.)
+        -> Ptr CSigset                  -- (in, out) blocked
+        -> IO CInt                      -- (ret) old action code
 
 getinfo :: (SignalInfo -> IO ()) -> ForeignPtr Word8 -> IO ()
 getinfo handler fp_info = do
@@ -471,7 +476,7 @@ foreign import ccall "&nocldstop" nocldstop :: Ptr Int
 setStoppedChildFlag :: Bool -> IO Bool
 setStoppedChildFlag b = do
     rc <- peek nocldstop
-    poke nocldstop $ fromEnum (not b) 
+    poke nocldstop $ fromEnum (not b)
     return (rc == (0::Int))
 
 -- | Queries the current state of the stopped child flag.
@@ -538,7 +543,7 @@ getSignalMask = do
   withForeignPtr fp $ \p ->
     throwErrnoIfMinus1_ "getSignalMask" (c_sigprocmask 0 nullPtr p)
   return (SignalSet fp)
-   
+
 sigProcMask :: String -> CInt -> SignalSet -> IO ()
 sigProcMask fn how (SignalSet set) =
   withForeignPtr set $ \p_set ->
@@ -557,7 +562,7 @@ blockSignals set = sigProcMask "blockSignals" (CONST_SIG_BLOCK :: CInt) set
 
 -- | @unblockSignals mask@ calls @sigprocmask@ with
 --   @SIG_UNBLOCK@ to remove all interrupts in @mask@ from the
---   set of blocked interrupts. 
+--   set of blocked interrupts.
 unblockSignals :: SignalSet -> IO ()
 unblockSignals set = sigProcMask "unblockSignals" (CONST_SIG_UNBLOCK :: CInt) set
 
@@ -566,7 +571,7 @@ unblockSignals set = sigProcMask "unblockSignals" (CONST_SIG_UNBLOCK :: CInt) se
 getPendingSignals :: IO SignalSet
 getPendingSignals = do
   fp <- mallocForeignPtrBytes sizeof_sigset_t
-  withForeignPtr fp $ \p -> 
+  withForeignPtr fp $ \p ->
    throwErrnoIfMinus1_ "getPendingSignals" (c_sigpending p)
   return (SignalSet fp)
 
@@ -576,7 +581,7 @@ getPendingSignals = do
 -- If @iset@ is @Just s@, @awaitSignal@ calls @sigsuspend@, installing
 -- @s@ as the new signal mask before suspending execution; otherwise, it
 -- calls @sigsuspend@ with current signal mask. Note that RTS
--- scheduler signal (either 'virtualTimerExpired' or 'realTimeAlarm') 
+-- scheduler signal (either 'virtualTimerExpired' or 'realTimeAlarm')
 -- could cause premature termination of this call. It might be necessary to block that
 -- signal before invocation of @awaitSignal@ with 'blockSignals' 'reservedSignals'.
 --
@@ -588,8 +593,8 @@ getPendingSignals = do
 awaitSignal :: Maybe SignalSet -> IO ()
 awaitSignal maybe_sigset = do
   fp <- case maybe_sigset of
-    	  Nothing -> do SignalSet fp <- getSignalMask; return fp
-    	  Just (SignalSet fp) -> return fp
+          Nothing -> do SignalSet fp <- getSignalMask; return fp
+          Just (SignalSet fp) -> return fp
   withForeignPtr fp $ \p -> do
   _ <- c_sigsuspend p
   return ()
@@ -611,6 +616,17 @@ foreign import ccall unsafe "sigfillset"
 
 foreign import ccall unsafe "sigismember"
   c_sigismember :: Ptr CSigset -> CInt -> IO CInt
+#elif defined(darwin_HOST_OS) && __GLASGOW_HASKELL__ < 706
+-- see http://ghc.haskell.org/trac/ghc/ticket/7359#comment:3
+-- To be removed when support for GHC 7.4.x is dropped
+foreign import ccall unsafe "__hscore_sigdelset"
+  c_sigdelset   :: Ptr CSigset -> CInt -> IO CInt
+
+foreign import ccall unsafe "__hscore_sigfillset"
+  c_sigfillset  :: Ptr CSigset -> IO CInt
+
+foreign import ccall unsafe "__hscore_sigismember"
+  c_sigismember :: Ptr CSigset -> CInt -> IO CInt
 #else
 foreign import capi unsafe "signal.h sigdelset"
   c_sigdelset   :: Ptr CSigset -> CInt -> IO CInt
@@ -624,4 +640,3 @@ foreign import capi unsafe "signal.h sigismember"
 
 foreign import ccall unsafe "sigpending"
   c_sigpending :: Ptr CSigset -> IO CInt
-

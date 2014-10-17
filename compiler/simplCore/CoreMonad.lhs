@@ -8,7 +8,7 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 {-# LANGUAGE UndecidableInstances #-}
@@ -34,7 +34,7 @@ module CoreMonad (
     
     -- ** Reading from the monad
     getHscEnv, getRuleBase, getModule,
-    getDynFlags, getOrigNameCache,
+    getDynFlags, getOrigNameCache, getPackageFamInstEnv,
     
     -- ** Writing to the monad
     addSimplCount,
@@ -50,7 +50,8 @@ module CoreMonad (
     getAnnotations, getFirstAnnotations,
     
     -- ** Debug output
-    showPass, endPass, dumpPassResult, lintPassResult, dumpIfSet,
+    showPass, endPass, dumpPassResult, lintPassResult, 
+    lintInteractiveExpr, dumpIfSet,
 
     -- ** Screen output
     putMsg, putMsgS, errorMsg, errorMsgS, 
@@ -70,20 +71,24 @@ import Name( Name )
 import CoreSyn
 import PprCore
 import CoreUtils
-import CoreLint		( lintCoreBindings )
+import CoreLint		( lintCoreBindings, lintExpr )
 import HscTypes
-import Module           ( Module )
+import Module
 import DynFlags
 import StaticFlags	
 import Rules            ( RuleBase )
 import BasicTypes       ( CompilerPhase(..) )
 import Annotations
-import Id		( Id )
 
 import IOEnv hiding     ( liftIO, failM, failWithM )
 import qualified IOEnv  ( liftIO )
 import TcEnv            ( tcLookupGlobal )
 import TcRnMonad        ( initTcForLookup )
+import InstEnv          ( instanceDFunId )
+import Type             ( tyVarsOfType )
+import Id               ( idType )
+import Var
+import VarSet
 
 import Outputable
 import FastString
@@ -104,6 +109,7 @@ import Data.IORef
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Word
+import qualified Control.Applicative as A
 import Control.Monad
 
 import Prelude hiding   ( read )
@@ -136,14 +142,15 @@ stuff before and after core passes, and do Core Lint when necessary.
 showPass :: DynFlags -> CoreToDo -> IO ()
 showPass dflags pass = Err.showPass dflags (showPpr dflags pass)
 
-endPass :: DynFlags -> CoreToDo -> CoreProgram -> [CoreRule] -> IO ()
-endPass dflags pass binds rules
+endPass :: HscEnv -> CoreToDo -> CoreProgram -> [CoreRule] -> IO ()
+endPass hsc_env pass binds rules
   = do { dumpPassResult dflags mb_flag (ppr pass) (pprPassDetails pass) binds rules
-       ; lintPassResult dflags pass binds }      
+       ; lintPassResult hsc_env pass binds }      
   where
+    dflags = hsc_dflags hsc_env 
     mb_flag = case coreDumpFlag pass of
-                Just dflag | dopt dflag dflags                   -> Just dflag
-                           | dopt Opt_D_verbose_core2core dflags -> Just dflag
+                Just flag | dopt flag dflags                    -> Just flag
+                          | dopt Opt_D_verbose_core2core dflags -> Just flag
                 _ -> Nothing
 
 dumpIfSet :: DynFlags -> Bool -> CoreToDo -> SDoc -> SDoc -> IO ()
@@ -151,15 +158,15 @@ dumpIfSet dflags dump_me pass extra_info doc
   = Err.dumpIfSet dflags dump_me (showSDoc dflags (ppr pass <+> extra_info)) doc
 
 dumpPassResult :: DynFlags 
-               -> Maybe DynFlag		-- Just df => show details in a file whose
+               -> Maybe DumpFlag		-- Just df => show details in a file whose
 	       	  			--            name is specified by df
                -> SDoc 			-- Header
                -> SDoc 			-- Extra info to appear after header
                -> CoreProgram -> [CoreRule] 
                -> IO ()
 dumpPassResult dflags mb_flag hdr extra_info binds rules
-  | Just dflag <- mb_flag
-  = Err.dumpSDoc dflags dflag (showSDoc dflags hdr) dump_doc
+  | Just flag <- mb_flag
+  = Err.dumpSDoc dflags flag (showSDoc dflags hdr) dump_doc
 
   | otherwise
   = Err.debugTraceMsg dflags 2 size_doc
@@ -178,12 +185,16 @@ dumpPassResult dflags mb_flag hdr extra_info binds rules
                     , ptext (sLit "------ Local rules for imported ids --------")
                     , pprRules rules ]
 
-lintPassResult :: DynFlags -> CoreToDo -> CoreProgram -> IO ()
-lintPassResult dflags pass binds
-  = when (dopt Opt_DoCoreLinting dflags) $
-    do { let (warns, errs) = lintCoreBindings binds
+lintPassResult :: HscEnv -> CoreToDo -> CoreProgram -> IO ()
+lintPassResult hsc_env pass binds
+  | not (gopt Opt_DoCoreLinting dflags)
+  = return ()
+  | otherwise
+  = do { let (warns, errs) = lintCoreBindings (interactiveInScope hsc_env) binds
        ; Err.showPass dflags ("Core Linted result of " ++ showPpr dflags pass)
        ; displayLintResults dflags pass warns errs binds  }
+  where 
+    dflags = hsc_dflags hsc_env
 
 displayLintResults :: DynFlags -> CoreToDo
                    -> Bag Err.MsgDoc -> Bag Err.MsgDoc -> CoreProgram
@@ -191,7 +202,7 @@ displayLintResults :: DynFlags -> CoreToDo
 displayLintResults dflags pass warns errs binds
   | not (isEmptyBag errs)
   = do { log_action dflags dflags Err.SevDump noSrcSpan defaultDumpStyle
-           (vcat [ banner "errors", Err.pprMessageBag errs
+           (vcat [ lint_banner "errors" (ppr pass), Err.pprMessageBag errs
                  , ptext (sLit "*** Offending Program ***")
                  , pprCoreBindings binds
                  , ptext (sLit "*** End of Offense ***") ])
@@ -206,19 +217,69 @@ displayLintResults dflags pass warns errs binds
   , not opt_NoDebugOutput
   , showLintWarnings pass
   = log_action dflags dflags Err.SevDump noSrcSpan defaultDumpStyle
-        (banner "warnings" $$ Err.pprMessageBag warns)
+        (lint_banner "warnings" (ppr pass) $$ Err.pprMessageBag warns)
 
   | otherwise = return ()
   where
-    banner string = ptext (sLit "*** Core Lint")      <+> text string 
-                    <+> ptext (sLit ": in result of") <+> ppr pass
-                    <+> ptext (sLit "***")
+
+lint_banner :: String -> SDoc -> SDoc
+lint_banner string pass = ptext (sLit "*** Core Lint")      <+> text string 
+                          <+> ptext (sLit ": in result of") <+> pass
+                          <+> ptext (sLit "***")
 
 showLintWarnings :: CoreToDo -> Bool
 -- Disable Lint warnings on the first simplifier pass, because
 -- there may be some INLINE knots still tied, which is tiresomely noisy
 showLintWarnings (CoreDoSimplify _ (SimplMode { sm_phase = InitialPhase })) = False
 showLintWarnings _ = True
+
+lintInteractiveExpr :: String -> HscEnv -> CoreExpr -> IO ()
+lintInteractiveExpr what hsc_env expr
+  | not (gopt Opt_DoCoreLinting dflags)
+  = return ()
+  | Just err <- lintExpr (interactiveInScope hsc_env) expr 
+  = do { display_lint_err err
+       ; Err.ghcExit dflags 1 }
+  | otherwise
+  = return ()
+  where
+    dflags = hsc_dflags hsc_env
+
+    display_lint_err err
+      = do { log_action dflags dflags Err.SevDump noSrcSpan defaultDumpStyle
+               (vcat [ lint_banner "errors" (text what) 
+                     , err
+                     , ptext (sLit "*** Offending Program ***")
+                     , pprCoreExpr expr
+                     , ptext (sLit "*** End of Offense ***") ])
+           ; Err.ghcExit dflags 1 }
+
+interactiveInScope :: HscEnv -> [Var]
+-- In GHCi we may lint expressions, or bindings arising from 'deriving'
+-- clauses, that mention variables bound in the interactive context.
+-- These are Local things (see Note [Interactively-bound Ids in GHCi] in HscTypes).
+-- So we have to tell Lint about them, lest it reports them as out of scope.
+-- 
+-- We do this by find local-named things that may appear free in interactive
+-- context.  This function is pretty revolting and quite possibly not quite right.
+-- When we are not in GHCi, the interactive context (hsc_IC hsc_env) is empty
+-- so this is a (cheap) no-op.
+-- 
+-- See Trac #8215 for an example
+interactiveInScope hsc_env 
+  = varSetElems tyvars ++ ids
+  where
+    -- C.f. TcRnDriver.setInteractiveContext, Desugar.deSugarExpr
+    ictxt                   = hsc_IC hsc_env
+    (cls_insts, _fam_insts) = ic_instances ictxt
+    te1    = mkTypeEnvWithImplicits (ic_tythings ictxt)
+    te     = extendTypeEnvWithIds te1 (map instanceDFunId cls_insts)
+    ids    = typeEnvIds te
+    tyvars = foldr (unionVarSet . tyVarsOfType . idType) emptyVarSet ids
+              -- Why the type variables?  How can the top level envt have free tyvars?
+              -- I think it's because of the GHCi debugger, which can bind variables
+              --   f :: [t] -> [t]
+              -- where t is a RuntimeUnk (see TcType)
 \end{code}
 
 
@@ -265,7 +326,7 @@ data CoreToDo           -- These are diff core-to-core passes,
 \end{code}
 
 \begin{code}
-coreDumpFlag :: CoreToDo -> Maybe DynFlag
+coreDumpFlag :: CoreToDo -> Maybe DumpFlag
 coreDumpFlag (CoreDoSimplify {})      = Just Opt_D_dump_simpl_phases
 coreDumpFlag (CoreDoPluginPass {})    = Just Opt_D_dump_core_pipeline
 coreDumpFlag CoreDoFloatInwards       = Just Opt_D_verbose_core2core
@@ -480,7 +541,8 @@ zeroSimplCount	   :: DynFlags -> SimplCount
 isZeroSimplCount   :: SimplCount -> Bool
 hasDetailedCounts  :: SimplCount -> Bool
 pprSimplCount	   :: SimplCount -> SDoc
-doSimplTick, doFreeSimplTick :: Tick -> SimplCount -> SimplCount
+doSimplTick        :: DynFlags -> Tick -> SimplCount -> SimplCount
+doFreeSimplTick    ::             Tick -> SimplCount -> SimplCount
 plusSimplCount     :: SimplCount -> SimplCount -> SimplCount
 \end{code}
 
@@ -525,13 +587,14 @@ doFreeSimplTick tick sc@SimplCount { details = dts }
   = sc { details = dts `addTick` tick }
 doFreeSimplTick _ sc = sc 
 
-doSimplTick tick sc@SimplCount { ticks = tks, details = dts, n_log = nl, log1 = l1 }
-  | nl >= opt_HistorySize = sc1 { n_log = 1, log1 = [tick], log2 = l1 }
-  | otherwise		  = sc1 { n_log = nl+1, log1 = tick : l1 }
+doSimplTick dflags tick
+    sc@(SimplCount { ticks = tks, details = dts, n_log = nl, log1 = l1 })
+  | nl >= historySize dflags = sc1 { n_log = 1, log1 = [tick], log2 = l1 }
+  | otherwise                = sc1 { n_log = nl+1, log1 = tick : l1 }
   where
     sc1 = sc { ticks = tks+1, details = dts `addTick` tick }
 
-doSimplTick _ (VerySimplCount n) = VerySimplCount (n+1)
+doSimplTick _ _ (VerySimplCount n) = VerySimplCount (n+1)
 
 
 -- Don't use Map.unionWith because that's lazy, and we want to 
@@ -720,16 +783,17 @@ data CoreReader = CoreReader {
         cr_hsc_env :: HscEnv,
         cr_rule_base :: RuleBase,
         cr_module :: Module,
-        cr_globals :: ((Bool, [String], [Way]),
 #ifdef GHCI
-                       (MVar PersistentLinkerState, Bool))
+        cr_globals :: (MVar PersistentLinkerState, Bool)
 #else
-                       ())
+        cr_globals :: ()
 #endif
 }
 
 data CoreWriter = CoreWriter {
-        cw_simpl_count :: SimplCount
+        cw_simpl_count :: !SimplCount  
+        -- Making this strict fixes a nasty space leak
+        -- See Trac #7702
 }
 
 emptyWriter :: DynFlags -> CoreWriter
@@ -758,11 +822,16 @@ instance Monad CoreM where
     mx >>= f = CoreM $ \s -> do
             (x, s', w1) <- unCoreM mx s
             (y, s'', w2) <- unCoreM (f x) s'
-            return (y, s'', w1 `plusWriter` w2)
+            let w = w1 `plusWriter` w2 -- forcing w before returning avoids a space leak (Trac #7702)
+            return $ seq w (y, s'', w)
 
-instance Applicative CoreM where
+instance A.Applicative CoreM where
     pure = return
     (<*>) = ap
+
+instance MonadPlus IO => A.Alternative CoreM where
+    empty = mzero
+    (<|>) = mplus
 
 -- For use if the user has imported Control.Monad.Error from MTL
 -- Requires UndecidableInstances
@@ -777,6 +846,12 @@ instance MonadUnique CoreM where
         modifyS (\s -> s { cs_uniq_supply = us2 })
         return us1
 
+    getUniqueM = do
+        us <- getS cs_uniq_supply
+        let (u,us') = takeUniqFromSupply us
+        modifyS (\s -> s { cs_uniq_supply = us' })
+        return u
+
 runCoreM :: HscEnv
          -> RuleBase
          -> UniqSupply
@@ -784,7 +859,7 @@ runCoreM :: HscEnv
          -> CoreM a
          -> IO (a, SimplCount)
 runCoreM hsc_env rule_base us mod m = do
-        glbls <- liftM2 (,) saveStaticFlagGlobals saveLinkerGlobals
+        glbls <- saveLinkerGlobals
         liftM extract $ runIOEnv (reader glbls) $ unCoreM m state
   where
     reader glbls = CoreReader {
@@ -861,9 +936,6 @@ getHscEnv = read cr_hsc_env
 getRuleBase :: CoreM RuleBase
 getRuleBase = read cr_rule_base
 
-getModule :: CoreM Module
-getModule = read cr_module
-
 addSimplCount :: SimplCount -> CoreM ()
 addSimplCount count = write (CoreWriter { cw_simpl_count = count })
 
@@ -872,12 +944,21 @@ addSimplCount count = write (CoreWriter { cw_simpl_count = count })
 instance HasDynFlags CoreM where
     getDynFlags = fmap hsc_dflags getHscEnv
 
+instance HasModule CoreM where
+    getModule = read cr_module
+
 -- | The original name cache is the current mapping from 'Module' and
 -- 'OccName' to a compiler-wide unique 'Name'
 getOrigNameCache :: CoreM OrigNameCache
 getOrigNameCache = do
     nameCacheRef <- fmap hsc_NC getHscEnv
     liftIO $ fmap nsNames $ readIORef nameCacheRef
+
+getPackageFamInstEnv :: CoreM PackageFamInstEnv
+getPackageFamInstEnv = do
+    hsc_env <- getHscEnv
+    eps <- liftIO $ hscEPS hsc_env
+    return $ eps_fam_inst_env eps
 \end{code}
 
 %************************************************************************
@@ -891,6 +972,14 @@ gets linked against a *newly loaded* copy of the GHC package. This would
 not be a problem, except that the new copy has its own mutable state
 that is not shared with that state that has already been initialized by
 the original GHC package.
+
+(NB This mechanism is sufficient for granting plugins read-only access to
+globals that are guaranteed to be initialized before the plugin is loaded.  If
+any further synchronization is necessary, I would suggest using the more
+sophisticated mechanism involving GHC.Conc.Sync.sharedCAF and rts/Globals.c to
+share a single instance of the global variable among the compiler and the
+plugins.  Perhaps we should migrate all global variables to use that mechanism,
+for robustness... -- NSF July 2013)
 
 This leads to loaded plugins calling GHC code which pokes the static flags,
 and then dying with a panic because the static flags *it* sees are uninitialized.
@@ -919,9 +1008,11 @@ argument to the plugin function so that we can turn this function into
 \begin{code}
 reinitializeGlobals :: CoreM ()
 reinitializeGlobals = do
-    (sf_globals, linker_globals) <- read cr_globals
-    liftIO $ restoreStaticFlagGlobals sf_globals
+    linker_globals <- read cr_globals
+    hsc_env <- getHscEnv
+    let dflags = hsc_dflags hsc_env
     liftIO $ restoreLinkerGlobals linker_globals
+    liftIO $ setUnsafeGlobalDynFlags dflags
 \end{code}
 
 %************************************************************************
@@ -1017,7 +1108,7 @@ debugTraceMsg :: SDoc -> CoreM ()
 debugTraceMsg = msg (flip Err.debugTraceMsg 3)
 
 -- | Show some labelled 'SDoc' if a particular flag is set or at a verbosity level of @-v -ddump-most@ or higher
-dumpIfSet_dyn :: DynFlag -> String -> SDoc -> CoreM ()
+dumpIfSet_dyn :: DumpFlag -> String -> SDoc -> CoreM ()
 dumpIfSet_dyn flag str = msg (\dflags -> Err.dumpIfSet_dyn dflags flag str)
 \end{code}
 

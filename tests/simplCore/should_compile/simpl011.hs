@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, Rank2Types, ScopedTypeVariables, KindSignatures,
+{-# LANGUAGE CPP, RankNTypes, ScopedTypeVariables, KindSignatures,
              MultiParamTypeClasses, FunctionalDependencies #-}
 
 -- This one triggered a bug in the indirection-shorting 
@@ -49,6 +49,7 @@ updateST= update'
 
 update  :: (MutHash arr ref m)
         => HashTable key val arr ref m -> key -> val -> m Bool
+{-# NOINLINE [1] update #-}
 update  = update'
 
 update' :: (MutHash arr ref m)

@@ -1,5 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, ExistentialQuantification #-}
+{-# LANGUAGE NoImplicitPrelude, ExistentialQuantification #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -34,26 +34,18 @@
 module Control.Exception (
 
         -- * The Exception type
-#ifdef __HUGS__
-        SomeException,
-#else
         SomeException(..),
-#endif
         Exception(..),          -- class
         IOException,            -- instance Eq, Ord, Show, Typeable, Exception
         ArithException(..),     -- instance Eq, Ord, Show, Typeable, Exception
         ArrayException(..),     -- instance Eq, Ord, Show, Typeable, Exception
         AssertionFailed(..),
+        SomeAsyncException(..),
         AsyncException(..),     -- instance Eq, Ord, Show, Typeable, Exception
+        asyncExceptionToException, asyncExceptionFromException,
 
-#if __GLASGOW_HASKELL__ || __HUGS__
         NonTermination(..),
         NestedAtomically(..),
-#endif
-#ifdef __NHC__
-        System.ExitCode(), -- instance Exception
-#endif
-
         BlockedIndefinitelyOnMVar(..),
         BlockedIndefinitelyOnSTM(..),
         Deadlock(..),
@@ -68,9 +60,7 @@ module Control.Exception (
         throw,
         throwIO,
         ioError,
-#ifdef __GLASGOW_HASKELL__
         throwTo,
-#endif
 
         -- * Catching Exceptions
 
@@ -109,20 +99,12 @@ module Control.Exception (
         -- asynchronous exceptions during a critical region.
 
         mask,
-#ifndef __NHC__
         mask_,
         uninterruptibleMask,
         uninterruptibleMask_,
         MaskingState(..),
         getMaskingState,
         allowInterrupt,
-#endif
-
-        -- ** (deprecated) Asynchronous exception control
-
-        block,
-        unblock,
-        blocked,
 
         -- *** Applying @mask@ to an exception handler
 
@@ -149,17 +131,9 @@ module Control.Exception (
 
 import Control.Exception.Base
 
-#ifdef __GLASGOW_HASKELL__
 import GHC.Base
 import GHC.IO (unsafeUnmask)
 import Data.Maybe
-#else
-import Prelude hiding (catch)
-#endif
-
-#ifdef __NHC__
-import System (ExitCode())
-#endif
 
 -- | You need this when using 'catches'.
 data Handler a = forall e . Exception e => Handler (e -> IO a)
@@ -244,6 +218,8 @@ A typical use of 'tryJust' for recovery looks like this:
 --
 -- When called outside 'mask', or inside 'uninterruptibleMask', this
 -- function has no effect.
+--
+-- /Since: 4.4.0.0/
 allowInterrupt :: IO ()
 allowInterrupt = unsafeUnmask $ return ()
 
@@ -353,12 +329,19 @@ kind of situation:
 The following operations are guaranteed not to be interruptible:
 
  * operations on 'IORef' from "Data.IORef"
+
  * STM transactions that do not use 'retry'
+
  * everything from the @Foreign@ modules
- * everything from @Control.Exception@
+
+ * everything from @Control.Exception@ except for 'throwTo'
+
  * @tryTakeMVar@, @tryPutMVar@, @isEmptyMVar@
+
  * @takeMVar@ if the @MVar@ is definitely full, and conversely @putMVar@ if the @MVar@ is definitely empty
+
  * @newEmptyMVar@, @newMVar@
+
  * @forkIO@, @forkIOUnmasked@, @myThreadId@
 
 -}

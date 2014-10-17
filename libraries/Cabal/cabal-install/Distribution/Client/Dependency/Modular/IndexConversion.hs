@@ -92,7 +92,7 @@ convSPI os arch cid = mkIndex . convSPI' os arch cid
 
 -- | Convert a single source package into the solver-specific format.
 convSP :: OS -> Arch -> CompilerId -> SourcePackage -> (PN, I, PInfo)
-convSP os arch cid (SourcePackage (PackageIdentifier pn pv) gpd _pl) =
+convSP os arch cid (SourcePackage (PackageIdentifier pn pv) gpd _ _pl) =
   let i = I pv InRepo
   in  (pn, i, convGPD os arch cid (PI pn i) gpd)
 
@@ -114,10 +114,10 @@ convGPD os arch cid pi
     PInfo
       (maybe []    (convCondTree os arch cid pi fds (const True)          ) libs    ++
        concatMap   (convCondTree os arch cid pi fds (const True)     . snd) exes    ++
-      (prefix (Stanza (SN pi TestStanzas))
-        (L.map     (convCondTree os arch cid pi fds (const True)     . snd) tests)) ++
-      (prefix (Stanza (SN pi BenchStanzas))
-        (L.map     (convCondTree os arch cid pi fds (const True)     . snd) benchs)))
+      prefix (Stanza (SN pi TestStanzas))
+        (L.map     (convCondTree os arch cid pi fds (const True)     . snd) tests)  ++
+      prefix (Stanza (SN pi BenchStanzas))
+        (L.map     (convCondTree os arch cid pi fds (const True)     . snd) benchs))
       fds
       [] -- TODO: add encaps
       Nothing

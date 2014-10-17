@@ -23,6 +23,8 @@ module Data.ByteString.Unsafe (
         -- * Unchecked access
         unsafeHead,             -- :: ByteString -> Word8
         unsafeTail,             -- :: ByteString -> ByteString
+        unsafeInit,             -- :: ByteString -> ByteString
+        unsafeLast,             -- :: ByteString -> Word8
         unsafeIndex,            -- :: ByteString -> Int -> Word8
         unsafeTake,             -- :: Int -> ByteString -> ByteString
         unsafeDrop,             -- :: Int -> ByteString -> ByteString
@@ -36,6 +38,7 @@ module Data.ByteString.Unsafe (
         unsafePackCString,      -- :: CString -> IO ByteString
         unsafePackCStringLen,   -- :: CStringLen -> IO ByteString
         unsafePackMallocCString,-- :: CString -> IO ByteString
+        unsafePackMallocCStringLen, -- :: CStringLen -> IO ByteString
 
 #if defined(__GLASGOW_HASKELL__)
         unsafePackAddress,          -- :: Addr# -> IO ByteString
@@ -109,6 +112,21 @@ unsafeTail :: ByteString -> ByteString
 unsafeTail (PS ps s l) = assert (l > 0) $ PS ps (s+1) (l-1)
 {-# INLINE unsafeTail #-}
 
+-- | A variety of 'init' for non-empty ByteStrings. 'unsafeInit' omits the
+-- check for the empty case. As with 'unsafeHead', the programmer must
+-- provide a separate proof that the ByteString is non-empty.
+unsafeInit :: ByteString -> ByteString
+unsafeInit (PS ps s l) = assert (l > 0) $ PS ps s (l-1)
+{-# INLINE unsafeInit #-}
+
+-- | A variety of 'last' for non-empty ByteStrings. 'unsafeLast' omits the
+-- check for the empty case. As with 'unsafeHead', the programmer must
+-- provide a separate proof that the ByteString is non-empty.
+unsafeLast :: ByteString -> Word8
+unsafeLast (PS x s l) = assert (l > 0) $
+    inlinePerformIO $ withForeignPtr x $ \p -> peekByteOff p (s+l-1)
+{-# INLINE unsafeLast #-}
+
 -- | Unsafe 'ByteString' index (subscript) operator, starting from 0, returning a 'Word8'
 -- This omits the bounds check, which means there is an accompanying
 -- obligation on the programmer to ensure the bounds are checked in some
@@ -132,40 +150,9 @@ unsafeDrop n (PS x s l) = assert (0 <= n && n <= l) $ PS x (s+n) (l-n)
 
 
 #if defined(__GLASGOW_HASKELL__)
--- | /O(n)/ Pack a null-terminated sequence of bytes, pointed to by an
--- Addr\# (an arbitrary machine address assumed to point outside the
--- garbage-collected heap) into a @ByteString@. A much faster way to
--- create an Addr\# is with an unboxed string literal, than to pack a
--- boxed string. A unboxed string literal is compiled to a static @char
--- []@ by GHC. Establishing the length of the string requires a call to
--- @strlen(3)@, so the Addr# must point to a null-terminated buffer (as
--- is the case with "string"# literals in GHC). Use 'unsafePackAddressLen'
--- if you know the length of the string statically.
---
--- An example:
---
--- > literalFS = unsafePackAddress "literal"#
---
--- This function is /unsafe/. If you modify the buffer pointed to by the
--- original Addr# this modification will be reflected in the resulting
--- @ByteString@, breaking referential transparency.
---
--- Note this also won't work if you Add# has embedded '\0' characters in
--- the string (strlen will fail).
---
-unsafePackAddress :: Addr# -> IO ByteString
-unsafePackAddress addr# = do
-    p <- newForeignPtr_ (castPtr cstr)
-    l <- c_strlen cstr
-    return $ PS p 0 (fromIntegral l)
-  where
-    cstr :: CString
-    cstr = Ptr addr#
-{-# INLINE unsafePackAddress #-}
-
 -- | /O(1)/ 'unsafePackAddressLen' provides constant-time construction of
--- 'ByteStrings' which is ideal for string literals. It packs a sequence
--- of bytes into a 'ByteString', given a raw 'Addr#' to the string, and
+-- 'ByteString's, which is ideal for string literals. It packs a sequence
+-- of bytes into a @ByteString@, given a raw 'Addr#' to the string, and
 -- the length of the string.
 --
 -- This function is /unsafe/ in two ways:
@@ -178,7 +165,7 @@ unsafePackAddress addr# = do
 -- reflected in resulting @ByteString@, breaking referential
 -- transparency.
 --
--- If in doubt, don't use these functions.
+-- If in doubt, don't use this function.
 --
 unsafePackAddressLen :: Int -> Addr# -> IO ByteString
 unsafePackAddressLen len addr# = do
@@ -263,6 +250,22 @@ unsafePackMallocCString cstr = do
     len <- c_strlen cstr
     return $! PS fp 0 (fromIntegral len)
 
+-- | /O(n)/ Build a @ByteString@ from a malloced @CStringLen@. This
+-- value will have a @free(3)@ finalizer associated to it.
+--
+-- This funtion is /unsafe/. If the original @CString@ is later
+-- modified, this change will be reflected in the resulting @ByteString@,
+-- breaking referential transparency.
+--
+-- This function is also unsafe if you call its finalizer twice,
+-- which will result in a /double free/ error, or if you pass it
+-- a CString not allocated with 'malloc'.
+--
+unsafePackMallocCStringLen :: CStringLen -> IO ByteString
+unsafePackMallocCStringLen (cstr, len) = do
+    fp <- newForeignPtr c_free_finalizer (castPtr cstr)
+    return $! PS fp 0 len
+
 -- ---------------------------------------------------------------------
 
 -- | /O(1) construction/ Use a @ByteString@ with a function requiring a
@@ -291,7 +294,7 @@ unsafeUseAsCString (PS ps s _) ac = withForeignPtr ps $ \p -> ac (castPtr p `plu
 
 -- | /O(1) construction/ Use a @ByteString@ with a function requiring a
 -- @CStringLen@.
--- 
+--
 -- This function does zero copying, and merely unwraps a @ByteString@ to
 -- appear as a @CStringLen@. It is /unsafe/:
 --

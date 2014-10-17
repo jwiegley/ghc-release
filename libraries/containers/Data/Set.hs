@@ -80,6 +80,13 @@ module Data.Set (
             , partition
             , split
             , splitMember
+            , splitRoot
+
+            -- * Indexed
+            , lookupIndex
+            , findIndex
+            , elemAt
+            , deleteAt
 
             -- * Map
             , S.map
@@ -126,7 +133,7 @@ module Data.Set (
             -- Internals (for testing)
             , bin
             , balanced
-            , join
+            , link
             , merge
 #endif
             ) where

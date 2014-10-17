@@ -9,11 +9,7 @@
 #ifndef __HSBASE_H__
 #define __HSBASE_H__
 
-#ifdef __NHC__
-# include "Nhc98BaseConfig.h"
-#else
 #include "HsBaseConfig.h"
-#endif
 
 /* ultra-evil... */
 #undef PACKAGE_BUGREPORT
@@ -141,6 +137,7 @@
 #if defined(__MINGW32__)
 /* in Win32Utils.c */
 extern void maperrno (void);
+extern int maperrno_func(DWORD dwErrorCode);
 extern HsWord64 getMonotonicUSec(void);
 #endif
 
@@ -153,10 +150,6 @@ extern HsWord64 getMonotonicUSec(void);
 
 #if HAVE_SYS_SELECT_H
 #include <sys/select.h>
-#endif
-
-#if HAVE_SYS_EVENT_H
-#include <sys/event.h>
 #endif
 
 /* in inputReady.c */
@@ -311,10 +304,6 @@ __hscore_setmode( int fd, HsBool toBin )
   return 0;
 #endif
 }
-
-#if __GLASGOW_HASKELL__
-
-#endif /* __GLASGOW_HASKELL__ */
 
 #if defined(__MINGW32__)
 // We want the versions of stat/fstat/lseek that use 64-bit offsets,
@@ -544,15 +533,6 @@ INLINE int __hscore_open(char *file, int how, mode_t mode) {
 	return open(file,how,mode);
 }
 #endif
-
-#ifdef HAVE_KEVENT
-INLINE int __hscore_kevent(int kq, const struct kevent *changelist,
-                           size_t nchanges, struct kevent *eventlist,
-                           size_t nevents, const struct timespec *timeout) {
-	return kevent(kq, changelist, nchanges, eventlist, nevents, timeout);
-}
-#endif
-
 
 #if darwin_HOST_OS
 // You should not access _environ directly on Darwin in a bundle/shared library.

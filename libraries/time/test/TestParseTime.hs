@@ -1,115 +1,107 @@
-{-# OPTIONS -Wall -Werror -fno-warn-type-defaults -fno-warn-unused-binds -fno-warn-orphans #-}
+{-# OPTIONS -fno-warn-type-defaults -fno-warn-unused-binds -fno-warn-orphans #-}
 {-# LANGUAGE FlexibleInstances, ExistentialQuantification #-}
+
+module Test.TestParseTime where
 
 import Control.Monad
 import Data.Char
 import Data.Ratio
-import Data.Maybe
 import Data.Time
 import Data.Time.Calendar.OrdinalDate
 import Data.Time.Calendar.WeekDate
 import Data.Time.Clock.POSIX
 import System.Locale
-import System.Exit
-import Test.QuickCheck
-import Test.QuickCheck.Batch
-
-
-class RunTest p where
-    runTest :: p -> IO TestResult
-
-instance RunTest (IO TestResult) where
-    runTest iob = iob
-
-instance RunTest Property where
-    runTest p = run p (TestOptions {no_of_tests = 10000,length_of_tests = 0,debug_tests = False})
-
-data ExhaustiveTest = forall t. (Show t) => MkExhaustiveTest [t] (t -> IO Bool)
-
-instance RunTest ExhaustiveTest where
-    runTest (MkExhaustiveTest cases f) = do
-        results <- mapM (\t -> do {b <- f t;return (b,show t)}) cases
-        let failures = mapMaybe (\(b,n) -> if b then Nothing else Just n) results
-        let fcount = length failures
-        return (if fcount == 0 then TestOk "OK" 0 [] else TestFailed failures fcount)
+import Test.QuickCheck hiding (Result)
+import Test.TestUtil
 
 ntest :: Int
 ntest = 1000
 
-main :: IO ()
-main = do
-    putStrLn "Should work:"
-    good1 <- checkAll extests
-    putStrLn "Should work:"
-    good2 <- checkAll properties
-    putStrLn "Known failures:"
-    _ <- checkAll knownFailures
-    exitWith (if good1 && good2 then ExitSuccess else ExitFailure 1)
+type NamedProperty = (String, Property)
 
-days2011 :: [Day]
-days2011 = [(fromGregorian 2011 1 1) .. (fromGregorian 2011 12 31)]
-
-extests :: [(String,ExhaustiveTest)]
-extests = [
-    ("parse %y",MkExhaustiveTest [0..99] parseYY),
-    ("parse %C %y 1900s",MkExhaustiveTest [0..99] (parseCYY 19)),
-    ("parse %C %y 2000s",MkExhaustiveTest [0..99] (parseCYY 20)),
-    ("parse %C %y 1400s",MkExhaustiveTest [0..99] (parseCYY 14)),
-    ("parse %C %y 700s",MkExhaustiveTest [0..99] (parseCYY 7)),
-    ("parse %Y%m%d",MkExhaustiveTest days2011 parseYMD),
-    ("parse %Y %m %d",MkExhaustiveTest days2011 parseYearDayD),
-    ("parse %Y %-m %e",MkExhaustiveTest days2011 parseYearDayE)
+testParseTime :: Test
+testParseTime = testGroup "testParseTime"
+    [
+    testGroup "extests" extests,
+    testGroup "properties" (fmap (\(n,prop) -> testProperty n prop) properties)
     ]
 
-parseYMD :: Day -> IO Bool
+yearDays :: Integer -> [Day]
+yearDays y = [(fromGregorian y 1 1) .. (fromGregorian y 12 31)]
+
+makeExhaustiveTest :: String -> [t] -> (t -> Test) -> Test
+makeExhaustiveTest name cases f = testGroup name (fmap f cases)
+
+extests :: [Test]
+extests = [
+    makeExhaustiveTest "parse %y" [0..99] parseYY,
+    makeExhaustiveTest "parse %-C %y 1900s" [0,1,50,99] (parseCYY 19),
+    makeExhaustiveTest "parse %-C %y 2000s" [0,1,50,99] (parseCYY 20),
+    makeExhaustiveTest "parse %-C %y 1400s" [0,1,50,99] (parseCYY 14),
+    makeExhaustiveTest "parse %C %y 0700s" [0,1,50,99] (parseCYY2 7),
+    makeExhaustiveTest "parse %-C %y 700s" [0,1,50,99] (parseCYY 7),
+    makeExhaustiveTest "parse %-C %y 10000s" [0,1,50,99] (parseCYY 100),
+    makeExhaustiveTest "parse %-C centuries" [20..100] (parseCentury " "),
+    makeExhaustiveTest "parse %-C century X" [1,10,20,100] (parseCentury "X"),
+    makeExhaustiveTest "parse %-C century 2sp" [1,10,20,100] (parseCentury "  "),
+    makeExhaustiveTest "parse %-C century 5sp" [1,10,20,100] (parseCentury "     ")
+    ] ++
+    (concat $ fmap
+    (\y -> [
+    (makeExhaustiveTest "parse %Y%m%d" (yearDays y) parseYMD),
+    (makeExhaustiveTest "parse %Y %m %d" (yearDays y) parseYearDayD),
+    (makeExhaustiveTest "parse %Y %-m %e" (yearDays y) parseYearDayE)
+    ]) [1,4,20,753,2000,2011,10001])
+
+parseYMD :: Day -> Test
 parseYMD day = case toGregorian day of
-    (y,m,d) -> return $ (parse "%Y%m%d" ((show y) ++ (show2 m) ++ (show2 d))) == Just day
+    (y,m,d) -> parseTest (Just day) "%Y%m%d" ((show y) ++ (show2 m) ++ (show2 d))
 
-parseYearDayD :: Day -> IO Bool
+parseYearDayD :: Day -> Test
 parseYearDayD day = case toGregorian day of
-    (y,m,d) -> return $ (parse "%Y %m %d" ((show y) ++ " " ++ (show2 m) ++ " " ++ (show2 d))) == Just day
+    (y,m,d) -> parseTest (Just day) "%Y %m %d" ((show y) ++ " " ++ (show2 m) ++ " " ++ (show2 d))
 
-parseYearDayE :: Day -> IO Bool
+parseYearDayE :: Day -> Test
 parseYearDayE day = case toGregorian day of
-    (y,m,d) -> return $ (parse "%Y %-m %e" ((show y) ++ " " ++ (show m) ++ " " ++ (show d))) == Just day
+    (y,m,d) -> parseTest (Just day) "%Y %-m %e" ((show y) ++ " " ++ (show m) ++ " " ++ (show d))
 
 -- | 1969 - 2068
 expectedYear :: Integer -> Integer
 expectedYear i | i >= 69 = 1900 + i
 expectedYear i = 2000 + i
 
-show2 :: (Integral n) => n -> String
+show2 :: (Show n,Integral n) => n -> String
 show2 i = (show (div i 10)) ++ (show (mod i 10))
 
-parseYY :: Integer -> IO Bool
-parseYY i = return (parse "%y" (show2 i) == Just (fromGregorian (expectedYear i) 1 1))
+parseYY :: Integer -> Test
+parseYY i = parseTest (Just (fromGregorian (expectedYear i) 1 1)) "%y" (show2 i)
 
-parseCYY :: Integer -> Integer -> IO Bool
-parseCYY c i = return (parse "%C %y" ((show2 c) ++ " " ++ (show2 i)) == Just (fromGregorian ((c * 100) + i) 1 1))
+parseCYY :: Integer -> Integer -> Test
+parseCYY c i = parseTest (Just (fromGregorian ((c * 100) + i) 1 1)) "%-C %y" ((show c) ++ " " ++ (show2 i))
 
-checkAll :: RunTest p => [(String,p)] -> IO Bool
-checkAll ps = fmap and (mapM checkOne ps)
+parseCYY2 :: Integer -> Integer -> Test
+parseCYY2 c i = parseTest (Just (fromGregorian ((c * 100) + i) 1 1)) "%C %y" ((show2 c) ++ " " ++ (show2 i))
 
-trMessage :: TestResult -> String
-trMessage (TestOk s _ _) = s
-trMessage (TestExausted s i ss) = "Exhausted " ++ (show s) ++ " " ++ (show i) ++ " " ++ (show ss)
-trMessage (TestFailed ss i) = "Failed " ++ (show ss) ++ " " ++ (show i)
-trMessage (TestAborted ex) = "Aborted " ++ (show ex)
+parseCentury :: String -> Integer -> Test
+parseCentury int c = parseTest (Just (fromGregorian (c * 100) 1 1)) ("%-C" ++ int ++ "%y") ((show c) ++ int ++ "00")
 
-trGood :: TestResult -> Bool
-trGood (TestOk _ _ _) = True
-trGood _ = False
+parseTest :: (Show t, Eq t, ParseTime t) => Maybe t -> String -> String -> Test
+parseTest expected formatStr target = 
+    let
+        found = parse formatStr target
+        result = diff expected found
+        name = (show formatStr) ++ " of " ++ (show target)
+    in pureTest name result
 
-checkOne :: RunTest p => (String,p) -> IO Bool
-checkOne (n,p) =
-    do
-       putStr (rpad 65 ' ' n)
-       tr <- runTest p
-       putStrLn (trMessage tr)
-       return (trGood tr)
-  where
-    rpad n' c xs = xs ++ replicate (n' - length xs) c
-
+readsTest :: (Show t, Eq t, ParseTime t) => Maybe t -> String -> String -> Test
+readsTest expected formatStr target = 
+    let
+        ff (Just e) = [(e,"")]
+        ff Nothing = []
+        found = readsTime defaultTimeLocale formatStr target
+        result = diff (ff expected) found
+        name = (show formatStr) ++ " of " ++ (show target)
+    in pureTest name result
 
 parse :: ParseTime t => String -> String -> Maybe t
 parse f t = parseTime defaultTimeLocale f t
@@ -117,9 +109,10 @@ parse f t = parseTime defaultTimeLocale f t
 format :: (FormatTime t) => String -> t -> String
 format f t = formatTime defaultTimeLocale f t
 
-
 instance Arbitrary Day where
     arbitrary = liftM ModifiedJulianDay $ choose (-313698, 2973483) -- 1000-01-1 to 9999-12-31
+
+instance CoArbitrary Day where
     coarbitrary (ModifiedJulianDay d) = coarbitrary d
 
 instance Arbitrary DiffTime where
@@ -130,26 +123,38 @@ instance Arbitrary DiffTime where
               secondsToDiffTime' = fromInteger
               picosecondsToDiffTime' :: Integer -> DiffTime
               picosecondsToDiffTime' x = fromRational (x % 10^12)
+
+instance CoArbitrary DiffTime where
     coarbitrary t = coarbitrary (fromEnum t)
 
 instance Arbitrary TimeOfDay where
     arbitrary = liftM timeToTimeOfDay arbitrary
+
+instance CoArbitrary TimeOfDay where
     coarbitrary t = coarbitrary (timeOfDayToTime t)
 
 instance Arbitrary LocalTime where
     arbitrary = liftM2 LocalTime arbitrary arbitrary
+
+instance CoArbitrary LocalTime where
     coarbitrary t = coarbitrary (truncate (utcTimeToPOSIXSeconds (localTimeToUTC utc t)) :: Integer)
 
 instance Arbitrary TimeZone where
     arbitrary = liftM minutesToTimeZone $ choose (-720,720)
+
+instance CoArbitrary TimeZone where
     coarbitrary tz = coarbitrary (timeZoneMinutes tz)
 
 instance Arbitrary ZonedTime where
     arbitrary = liftM2 ZonedTime arbitrary arbitrary
+
+instance CoArbitrary ZonedTime where
     coarbitrary t = coarbitrary (truncate (utcTimeToPOSIXSeconds (zonedTimeToUTC t)) :: Integer)
 
 instance Arbitrary UTCTime where
     arbitrary = liftM2 UTCTime arbitrary arbitrary
+
+instance CoArbitrary UTCTime where
     coarbitrary t = coarbitrary (truncate (utcTimeToPOSIXSeconds t) :: Integer)
 
 -- missing from the time package
@@ -206,7 +211,7 @@ prop_fromSundayStartWeek d =
 -- | Helper for defining named properties.
 prop_named :: (Arbitrary t, Show t, Testable a)
            => String -> (FormatString s -> t -> a) -> String -> FormatString s -> NamedProperty
-prop_named name prop typeName f = (name ++ " " ++ typeName ++ " " ++ show f, property (prop f))
+prop_named n prop typeName f = (n ++ " " ++ typeName ++ " " ++ show f, property (prop f))
 
 prop_parse_format :: (Eq t, FormatTime t, ParseTime t) => FormatString t -> t -> Bool
 prop_parse_format (FormatString f) t = parse f (format f t) == Just t
@@ -252,6 +257,7 @@ instance Arbitrary Input where
     arbitrary = liftM Input $ list cs
       where cs = elements (['0'..'9'] ++ ['-',' ','/'] ++ ['a'..'z'] ++ ['A' .. 'Z'])
             list g = sized (\n -> choose (0,n) >>= \l -> replicateM l g)
+instance CoArbitrary Input where
     coarbitrary (Input s) = coarbitrary (sum (map ord s))
 
 prop_no_crash_bad_input :: (Eq t, ParseTime t) => FormatString t -> Input -> Property
@@ -278,8 +284,6 @@ castFormatString (FormatString f) = FormatString f
 
 instance Show (FormatString a) where
     show (FormatString f) = show f
-
-type NamedProperty = (String, Property)
 
 properties :: [NamedProperty]
 properties = 
@@ -395,10 +399,7 @@ partialTimeOfDayFormats = map FormatString
 
 partialLocalTimeFormats :: [FormatString LocalTime]
 partialLocalTimeFormats = map FormatString 
-    [
-     -- %c does not include second decimals 
-     "%c" 
-    ]
+    [ ]
 
 partialZonedTimeFormats :: [FormatString ZonedTime]
 partialZonedTimeFormats = map FormatString 

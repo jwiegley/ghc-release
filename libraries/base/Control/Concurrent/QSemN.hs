@@ -1,8 +1,6 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP #-}
-#ifdef __GLASGOW_HASKELL__
-{-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
-#endif
+{-# LANGUAGE DeriveDataTypeable, BangPatterns #-}
+{-# OPTIONS_GHC -funbox-strict-fields #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -20,7 +18,6 @@
 -----------------------------------------------------------------------------
 
 module Control.Concurrent.QSemN
-        {-# DEPRECATED "Control.Concurrent.QSemN will be removed in GHC 7.8. Please use an alternative, e.g. the SafeSemaphore package, instead." #-}
         (  -- * General Quantity Semaphores
           QSemN,        -- abstract
           newQSemN,     -- :: Int   -> IO QSemN
@@ -28,55 +25,100 @@ module Control.Concurrent.QSemN
           signalQSemN   -- :: QSemN -> Int -> IO ()
       ) where
 
-import Prelude
-
-import Control.Concurrent.MVar
-import Control.Exception ( mask_ )
+import Control.Concurrent.MVar ( MVar, newEmptyMVar, takeMVar, tryTakeMVar
+                          , putMVar, newMVar
+                          , tryPutMVar, isEmptyMVar)
 import Data.Typeable
+import Control.Exception
+import Data.Maybe
 
-#include "Typeable.h"
+-- | 'QSemN' is a quantity semaphore in which the resource is aqcuired
+-- and released in units of one. It provides guaranteed FIFO ordering
+-- for satisfying blocked `waitQSemN` calls.
+--
+-- The pattern
+--
+-- >   bracket_ (waitQSemN n) (signalQSemN n) (...)
+--
+-- is safe; it never loses any of the resource.
+--
+data QSemN = QSemN !(MVar (Int, [(Int, MVar ())], [(Int, MVar ())]))
+  deriving Typeable
 
--- |A 'QSemN' is a quantity semaphore, in which the available
--- \"quantity\" may be signalled or waited for in arbitrary amounts.
-newtype QSemN = QSemN (MVar (Int,[(Int,MVar ())])) deriving Eq
-
-INSTANCE_TYPEABLE0(QSemN,qSemNTc,"QSemN")
+-- The semaphore state (i, xs, ys):
+--
+--   i is the current resource value
+--
+--   (xs,ys) is the queue of blocked threads, where the queue is
+--           given by xs ++ reverse ys.  We can enqueue new blocked threads
+--           by consing onto ys, and dequeue by removing from the head of xs.
+--
+-- A blocked thread is represented by an empty (MVar ()).  To unblock
+-- the thread, we put () into the MVar.
+--
+-- A thread can dequeue itself by also putting () into the MVar, which
+-- it must do if it receives an exception while blocked in waitQSemN.
+-- This means that when unblocking a thread in signalQSemN we must
+-- first check whether the MVar is already full; the MVar lock on the
+-- semaphore itself resolves race conditions between signalQSemN and a
+-- thread attempting to dequeue itself.
 
 -- |Build a new 'QSemN' with a supplied initial quantity.
 --  The initial quantity must be at least 0.
 newQSemN :: Int -> IO QSemN
-newQSemN initial =
-    if initial < 0
-    then fail "newQSemN: Initial quantity must be non-negative"
-    else do sem <- newMVar (initial, [])
-            return (QSemN sem)
+newQSemN initial
+  | initial < 0 = fail "newQSemN: Initial quantity must be non-negative"
+  | otherwise   = do
+      sem <- newMVar (initial, [], [])
+      return (QSemN sem)
 
 -- |Wait for the specified quantity to become available
 waitQSemN :: QSemN -> Int -> IO ()
-waitQSemN (QSemN sem) sz = mask_ $ do
-  (avail,blocked) <- takeMVar sem   -- gain ex. access
-  let remaining = avail - sz
-  if remaining >= 0 then
-       -- discharging 'sz' still leaves the semaphore
-       -- in an 'unblocked' state.
-     putMVar sem (remaining,blocked)
-   else do
-     b <- newEmptyMVar
-     putMVar sem (avail, blocked++[(sz,b)])
-     takeMVar b
+waitQSemN (QSemN m) sz =
+  mask_ $ do
+    (i,b1,b2) <- takeMVar m
+    let z = i-sz
+    if z < 0
+       then do
+         b <- newEmptyMVar
+         putMVar m (i, b1, (sz,b):b2)
+         wait b
+       else do
+         putMVar m (z, b1, b2)
+         return ()
+  where
+    wait b = do
+        takeMVar b `onException`
+                (uninterruptibleMask_ $ do -- Note [signal uninterruptible]
+                   (i,b1,b2) <- takeMVar m
+                   r <- tryTakeMVar b
+                   r' <- if isJust r
+                            then signal sz (i,b1,b2)
+                            else do putMVar b (); return (i,b1,b2)
+                   putMVar m r')
 
 -- |Signal that a given quantity is now available from the 'QSemN'.
-signalQSemN :: QSemN -> Int  -> IO ()
-signalQSemN (QSemN sem) n = mask_ $ do
-   (avail,blocked)   <- takeMVar sem
-   (avail',blocked') <- free (avail+n) blocked
-   avail' `seq` putMVar sem (avail',blocked')
+signalQSemN :: QSemN -> Int -> IO ()
+signalQSemN (QSemN m) sz = uninterruptibleMask_ $ do
+  r <- takeMVar m
+  r' <- signal sz r
+  putMVar m r'
+
+signal :: Int
+       -> (Int,[(Int,MVar ())],[(Int,MVar ())])
+       -> IO (Int,[(Int,MVar ())],[(Int,MVar ())])
+
+signal sz0 (i,a1,a2) = loop (sz0 + i) a1 a2
  where
-   free avail []    = return (avail,[])
-   free avail ((req,b):blocked)
-     | avail >= req = do
-        putMVar b ()
-        free (avail-req) blocked
-     | otherwise    = do
-        (avail',blocked') <- free avail blocked
-        return (avail',(req,b):blocked')
+   loop 0  bs b2 = return (0,  bs, b2)
+   loop sz [] [] = return (sz, [], [])
+   loop sz [] b2 = loop sz (reverse b2) []
+   loop sz ((j,b):bs) b2
+     | j > sz = do
+       r <- isEmptyMVar b
+       if r then return (sz, (j,b):bs, b2)
+            else loop sz bs b2
+     | otherwise = do
+       r <- tryPutMVar b ()
+       if r then loop (sz-j) bs b2
+            else loop sz bs b2

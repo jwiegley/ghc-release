@@ -18,7 +18,7 @@ module GhcMonad (
         Session(..), withSession, modifySession, withTempSession,
 
         -- ** Warnings
-        logWarnings, printException, printExceptionAndWarnings,
+        logWarnings, printException,
         WarnErrLogger, defaultWarnErrLogger
   ) where
 
@@ -97,6 +97,10 @@ data Session = Session !(IORef HscEnv)
 instance Functor Ghc where
   fmap f m = Ghc $ \s -> f `fmap` unGhc m s
 
+instance Applicative Ghc where
+  pure    = return
+  g <*> m = do f <- g; a <- m; return (f a)
+
 instance Monad Ghc where
   return a = Ghc $ \_ -> return a
   m >>= g  = Ghc $ \s -> do a <- unGhc m s; unGhc (g a) s
@@ -110,8 +114,6 @@ instance MonadFix Ghc where
 instance ExceptionMonad Ghc where
   gcatch act handle =
       Ghc $ \s -> unGhc act s `gcatch` \e -> unGhc (handle e) s
-  gblock (Ghc m)   = Ghc $ \s -> gblock (m s)
-  gunblock (Ghc m) = Ghc $ \s -> gunblock (m s)
   gmask f =
       Ghc $ \s -> gmask $ \io_restore ->
                              let
@@ -159,6 +161,10 @@ liftGhcT m = GhcT $ \_ -> m
 instance Functor m => Functor (GhcT m) where
   fmap f m = GhcT $ \s -> f `fmap` unGhcT m s
 
+instance Applicative m => Applicative (GhcT m) where
+  pure x  = GhcT $ \_ -> pure x
+  g <*> m = GhcT $ \s -> unGhcT g s <*> unGhcT m s
+
 instance Monad m => Monad (GhcT m) where
   return x = GhcT $ \_ -> return x
   m >>= k  = GhcT $ \s -> do a <- unGhcT m s; unGhcT (k a) s
@@ -169,8 +175,6 @@ instance MonadIO m => MonadIO (GhcT m) where
 instance ExceptionMonad m => ExceptionMonad (GhcT m) where
   gcatch act handle =
       GhcT $ \s -> unGhcT act s `gcatch` \e -> unGhcT (handle e) s
-  gblock (GhcT m) = GhcT $ \s -> gblock (m s)
-  gunblock (GhcT m) = GhcT $ \s -> gunblock (m s)
   gmask f =
       GhcT $ \s -> gmask $ \io_restore ->
                            let
@@ -192,10 +196,6 @@ printException :: GhcMonad m => SourceError -> m ()
 printException err = do
   dflags <- getSessionDynFlags
   liftIO $ printBagOfErrors dflags (srcErrorMessages err)
-
-{-# DEPRECATED printExceptionAndWarnings "use printException instead" #-}
-printExceptionAndWarnings :: GhcMonad m => SourceError -> m ()
-printExceptionAndWarnings = printException
 
 -- | A function called to log warnings and errors.
 type WarnErrLogger = GhcMonad m => Maybe SourceError -> m ()

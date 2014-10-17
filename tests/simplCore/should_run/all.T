@@ -4,7 +4,7 @@
 #	expected process return value, if not zero
 
 # Only compile with optimisation
-def f( opts ):
+def f( name, opts ):
   opts.only_ways = ['optasm']
 
 setTestOpts(f)
@@ -18,8 +18,8 @@ test('simplrun005', normal, compile_and_run, [''])
 test('simplrun007', normal, compile_and_run, [''])
 test('simplrun008', normal, compile_and_run, [''])
 test('simplrun009', normal, compile_and_run, [''])
-test('simplrun010', composes([extra_run_opts('24 16 8'),
-                              exit_code(1)])
+test('simplrun010', [extra_run_opts('24 16 8 +RTS -M10m -RTS'),
+                     exit_code(251)]
                   , compile_and_run, [''])
 
 # Really we'd like to run T2486 too, to check that its
@@ -30,6 +30,8 @@ test('T2756', normal, compile_and_run, [''])
 test('T3437', extra_run_opts('+RTS -M10m'), compile_and_run, [''])
 
 test('SeqRule', only_ways(['optasm']), compile_and_run, [''])
+
+test('runST', normal, compile_and_run, [''])
 
 test('T3403', normal, compile_and_run, ['-package containers'])
 test('T3591', normal, compile_and_run, [''])
@@ -56,4 +58,8 @@ test('T5587', [ only_ways(['normal','optasm']), exit_code(1) ], compile_and_run,
 test('T5915', only_ways(['normal','optasm']), compile_and_run, [''])
 test('T5920', only_ways(['normal','optasm']), compile_and_run, [''])
 test('T5997', normal, compile_and_run, [''])
+test('T7101', normal, compile_and_run, [''])
+test('T7924', exit_code(1), compile_and_run, [''])
 
+# Run this test *without* optimisation too
+test('T457', [ only_ways(['normal','optasm']), exit_code(1) ], compile_and_run, [''])

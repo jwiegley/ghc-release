@@ -1,5 +1,6 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE AutoDeriveTypeable #-}
+{-# LANGUAGE DeriveGeneric #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -28,9 +29,9 @@
 -- it admits more sharing than the monadic interface.  The names here are
 -- mostly based on parsing work by Doaitse Swierstra.
 --
--- For more details, see /Applicative Programming with Effects/,
--- by Conor McBride and Ross Paterson, online at
--- <http://www.soi.city.ac.uk/~ross/papers/Applicative.html>.
+-- For more details, see
+-- <http://www.soi.city.ac.uk/~ross/papers/Applicative.html Applicative Programming with Effects>,
+-- by Conor McBride and Ross Paterson.
 
 module Control.Applicative (
     -- * Applicative functors
@@ -50,26 +51,17 @@ import Prelude hiding (id,(.))
 import Control.Category
 import Control.Arrow
 import Control.Monad (liftM, ap, MonadPlus(..))
-#ifndef __NHC__
 import Control.Monad.ST.Safe (ST)
 import qualified Control.Monad.ST.Lazy.Safe as Lazy (ST)
-#endif
 import Data.Functor ((<$>), (<$))
 import Data.Monoid (Monoid(..))
+import Data.Proxy
 
-import Text.ParserCombinators.ReadP
-#ifndef __NHC__
-  (ReadP)
-#else
-  (ReadPN)
-#define ReadP (ReadPN b)
-#endif
-
+import Text.ParserCombinators.ReadP (ReadP)
 import Text.ParserCombinators.ReadPrec (ReadPrec)
 
-#ifdef __GLASGOW_HASKELL__
 import GHC.Conc (STM, retry, orElse)
-#endif
+import GHC.Generics
 
 infixl 3 <|>
 infixl 4 <*>, <*, *>, <**>
@@ -84,34 +76,39 @@ infixl 4 <*>, <*, *>, <**>
 -- functions satisfying the following laws:
 --
 -- [/identity/]
+--
 --      @'pure' 'id' '<*>' v = v@
 --
 -- [/composition/]
+--
 --      @'pure' (.) '<*>' u '<*>' v '<*>' w = u '<*>' (v '<*>' w)@
 --
 -- [/homomorphism/]
+--
 --      @'pure' f '<*>' 'pure' x = 'pure' (f x)@
 --
 -- [/interchange/]
+--
 --      @u '<*>' 'pure' y = 'pure' ('$' y) '<*>' u@
 --
 -- The other methods have the following default definitions, which may
 -- be overridden with equivalent specialized implementations:
 --
--- @
---      u '*>' v = 'pure' ('const' 'id') '<*>' u '<*>' v
---      u '<*' v = 'pure' 'const' '<*>' u '<*>' v
--- @
+--   * @u '*>' v = 'pure' ('const' 'id') '<*>' u '<*>' v@
+--
+--   * @u '<*' v = 'pure' 'const' '<*>' u '<*>' v@
 --
 -- As a consequence of these laws, the 'Functor' instance for @f@ will satisfy
 --
--- @
---      'fmap' f x = 'pure' f '<*>' x
--- @
+--   * @'fmap' f x = 'pure' f '<*>' x@
 --
--- If @f@ is also a 'Monad', it should satisfy @'pure' = 'return'@ and
--- @('<*>') = 'ap'@ (which implies that 'pure' and '<*>' satisfy the
--- applicative functor laws).
+-- If @f@ is also a 'Monad', it should satisfy
+--
+--   * @'pure' = 'return'@
+--
+--   * @('<*>') = 'ap'@
+--
+-- (which implies that 'pure' and '<*>' satisfy the applicative functor laws).
 
 class Functor f => Applicative f where
     -- | Lift a value.
@@ -181,7 +178,6 @@ instance Applicative IO where
     pure = return
     (<*>) = ap
 
-#ifndef __NHC__
 instance Applicative (ST s) where
     pure = return
     (<*>) = ap
@@ -189,9 +185,7 @@ instance Applicative (ST s) where
 instance Applicative (Lazy.ST s) where
     pure = return
     (<*>) = ap
-#endif
 
-#ifdef __GLASGOW_HASKELL__
 instance Applicative STM where
     pure = return
     (<*>) = ap
@@ -199,7 +193,6 @@ instance Applicative STM where
 instance Alternative STM where
     empty = retry
     (<|>) = orElse
-#endif
 
 instance Applicative ((->) a) where
     pure = const
@@ -241,15 +234,22 @@ instance ArrowPlus a => Alternative (ArrowMonad a) where
 -- new instances
 
 newtype Const a b = Const { getConst :: a }
+                  deriving (Generic, Generic1)
 
 instance Functor (Const m) where
     fmap _ (Const v) = Const v
+
+-- Added in base-4.7.0.0
+instance Monoid a => Monoid (Const a b) where
+    mempty = Const mempty
+    mappend (Const a) (Const b) = Const (mappend a b)
 
 instance Monoid m => Applicative (Const m) where
     pure _ = Const mempty
     Const f <*> Const v = Const (f `mappend` v)
 
 newtype WrappedMonad m a = WrapMonad { unwrapMonad :: m a }
+                         deriving (Generic, Generic1)
 
 instance Monad m => Functor (WrappedMonad m) where
     fmap f (WrapMonad v) = WrapMonad (liftM f v)
@@ -258,11 +258,17 @@ instance Monad m => Applicative (WrappedMonad m) where
     pure = WrapMonad . return
     WrapMonad f <*> WrapMonad v = WrapMonad (f `ap` v)
 
+-- Added in base-4.7.0.0 (GHC Trac #8218)
+instance Monad m => Monad (WrappedMonad m) where
+    return = WrapMonad . return
+    a >>= f = WrapMonad (unwrapMonad a >>= unwrapMonad . f)
+
 instance MonadPlus m => Alternative (WrappedMonad m) where
     empty = WrapMonad mzero
     WrapMonad u <|> WrapMonad v = WrapMonad (u `mplus` v)
 
 newtype WrappedArrow a b c = WrapArrow { unwrapArrow :: a b c }
+                           deriving (Generic, Generic1)
 
 instance Arrow a => Functor (WrappedArrow a b) where
     fmap f (WrapArrow a) = WrapArrow (a >>> arr f)
@@ -280,6 +286,7 @@ instance (ArrowZero a, ArrowPlus a) => Alternative (WrappedArrow a b) where
 -- @f '<$>' 'ZipList' xs1 '<*>' ... '<*>' 'ZipList' xsn = 'ZipList' (zipWithn f xs1 ... xsn)@
 --
 newtype ZipList a = ZipList { getZipList :: [a] }
+                  deriving (Show, Eq, Ord, Read, Generic, Generic1)
 
 instance Functor ZipList where
     fmap f (ZipList xs) = ZipList (map f xs)
@@ -287,6 +294,12 @@ instance Functor ZipList where
 instance Applicative ZipList where
     pure x = ZipList (repeat x)
     ZipList fs <*> ZipList xs = ZipList (zipWith id fs xs)
+
+instance Applicative Proxy where
+    pure _ = Proxy
+    {-# INLINE pure #-}
+    _ <*> _ = Proxy
+    {-# INLINE (<*>) #-}
 
 -- extra functions
 

@@ -1,8 +1,6 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP #-}
-#ifdef __GLASGOW_HASKELL__
-{-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
-#endif
+{-# LANGUAGE DeriveDataTypeable, BangPatterns #-}
+{-# OPTIONS_GHC -funbox-strict-fields #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -19,7 +17,6 @@
 -----------------------------------------------------------------------------
 
 module Control.Concurrent.QSem
-        {-# DEPRECATED "Control.Concurrent.QSem will be removed in GHC 7.8. Please use an alternative, e.g. the SafeSemaphore package, instead." #-}
         ( -- * Simple Quantity Semaphores
           QSem,         -- abstract
           newQSem,      -- :: Int  -> IO QSem
@@ -27,64 +24,107 @@ module Control.Concurrent.QSem
           signalQSem    -- :: QSem -> IO ()
         ) where
 
-import Prelude
-import Control.Concurrent.MVar
-import Control.Exception ( mask_ )
-import Data.Typeable
+import Control.Concurrent.MVar ( MVar, newEmptyMVar, takeMVar, tryTakeMVar
+                          , putMVar, newMVar, tryPutMVar)
+import Control.Exception
+import Data.Maybe
 
-#include "Typeable.h"
+-- | 'QSem' is a quantity semaphore in which the resource is aqcuired
+-- and released in units of one. It provides guaranteed FIFO ordering
+-- for satisfying blocked `waitQSem` calls.
+--
+-- The pattern
+--
+-- >   bracket_ waitQSem signalQSem (...)
+--
+-- is safe; it never loses a unit of the resource.
+--
+data QSem = QSem !(MVar (Int, [MVar ()], [MVar ()]))
 
--- General semaphores are also implemented readily in terms of shared
--- @MVar@s, only have to catch the case when the semaphore is tried
--- waited on when it is empty (==0). Implement this in the same way as
--- shared variables are implemented - maintaining a list of @MVar@s
--- representing threads currently waiting. The counter is a shared
--- variable, ensuring the mutual exclusion on its access.
-
--- |A 'QSem' is a simple quantity semaphore, in which the available
--- \"quantity\" is always dealt with in units of one.
-newtype QSem = QSem (MVar (Int, [MVar ()])) deriving Eq
-
-INSTANCE_TYPEABLE0(QSem,qSemTc,"QSem")
+-- The semaphore state (i, xs, ys):
+--
+--   i is the current resource value
+--
+--   (xs,ys) is the queue of blocked threads, where the queue is
+--           given by xs ++ reverse ys.  We can enqueue new blocked threads
+--           by consing onto ys, and dequeue by removing from the head of xs.
+--
+-- A blocked thread is represented by an empty (MVar ()).  To unblock
+-- the thread, we put () into the MVar.
+--
+-- A thread can dequeue itself by also putting () into the MVar, which
+-- it must do if it receives an exception while blocked in waitQSem.
+-- This means that when unblocking a thread in signalQSem we must
+-- first check whether the MVar is already full; the MVar lock on the
+-- semaphore itself resolves race conditions between signalQSem and a
+-- thread attempting to dequeue itself.
 
 -- |Build a new 'QSem' with a supplied initial quantity.
 --  The initial quantity must be at least 0.
 newQSem :: Int -> IO QSem
-newQSem initial =
-    if initial < 0
-    then fail "newQSem: Initial quantity must be non-negative"
-    else do sem <- newMVar (initial, [])
-            return (QSem sem)
+newQSem initial
+  | initial < 0 = fail "newQSem: Initial quantity must be non-negative"
+  | otherwise   = do
+      sem <- newMVar (initial, [], [])
+      return (QSem sem)
 
 -- |Wait for a unit to become available
 waitQSem :: QSem -> IO ()
-waitQSem (QSem sem) = mask_ $ do
-   (avail,blocked) <- takeMVar sem  -- gain ex. access
-   if avail > 0 then
-     let avail' = avail-1
-     in avail' `seq` putMVar sem (avail',[])
-    else do
-     b <- newEmptyMVar
-      {-
-        Stuff the reader at the back of the queue,
-        so as to preserve waiting order. A signalling
-        process then only have to pick the MVar at the
-        front of the blocked list.
-
-        The version of waitQSem given in the paper could
-        lead to starvation.
-      -}
-     putMVar sem (0, blocked++[b])
-     takeMVar b
+waitQSem (QSem m) =
+  mask_ $ do
+    (i,b1,b2) <- takeMVar m
+    if i == 0
+       then do
+         b <- newEmptyMVar
+         putMVar m (i, b1, b:b2)
+         wait b
+       else do
+         let !z = i-1
+         putMVar m (z, b1, b2)
+         return ()
+  where
+    wait b = takeMVar b `onException` do
+                (uninterruptibleMask_ $ do -- Note [signal uninterruptible]
+                   (i,b1,b2) <- takeMVar m
+                   r <- tryTakeMVar b
+                   r' <- if isJust r
+                            then signal (i,b1,b2)
+                            else do putMVar b (); return (i,b1,b2)
+                   putMVar m r')
 
 -- |Signal that a unit of the 'QSem' is available
 signalQSem :: QSem -> IO ()
-signalQSem (QSem sem) = mask_ $ do
-   (avail,blocked) <- takeMVar sem
-   case blocked of
-     [] -> let avail' = avail+1
-           in avail' `seq` putMVar sem (avail',blocked)
+signalQSem (QSem m) =
+  uninterruptibleMask_ $ do -- Note [signal uninterruptible]
+    r <- takeMVar m
+    r' <- signal r
+    putMVar m r'
 
-     (b:blocked') -> do
-           putMVar sem (0,blocked')
-           putMVar b ()
+-- Note [signal uninterruptible]
+--
+--   If we have
+--
+--      bracket waitQSem signalQSem (...)
+--
+--   and an exception arrives at the signalQSem, then we must not lose
+--   the resource.  The signalQSem is masked by bracket, but taking
+--   the MVar might block, and so it would be interruptible.  Hence we
+--   need an uninterruptibleMask here.
+--
+--   This isn't ideal: during high contention, some threads won't be
+--   interruptible.  The QSemSTM implementation has better behaviour
+--   here, but it performs much worse than this one in some
+--   benchmarks.
+
+signal :: (Int,[MVar ()],[MVar ()]) -> IO (Int,[MVar ()],[MVar ()])
+signal (i,a1,a2) =
+ if i == 0
+   then loop a1 a2
+   else let !z = i+1 in return (z, a1, a2)
+ where
+   loop [] [] = return (1, [], [])
+   loop [] b2 = loop (reverse b2) []
+   loop (b:bs) b2 = do
+     r <- tryPutMVar b ()
+     if r then return (0, bs, b2)
+          else loop bs b2

@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP #-}
 #if __GLASGOW_HASKELL__
 {-# LANGUAGE MagicHash, UnboxedTuples,
-            NamedFieldPuns, BangPatterns, RecordWildCards #-}
+            NamedFieldPuns, BangPatterns #-}
 #endif
 {-# OPTIONS_HADDOCK prune #-}
 #if __GLASGOW_HASKELL__ >= 701
@@ -15,7 +15,7 @@
 --               (c) Simon Marlow 2005,
 --               (c) Bjorn Bringert 2006,
 --               (c) Don Stewart 2005-2008,
---               (c) Duncan Coutts 2006-2011
+--               (c) Duncan Coutts 2006-2013
 -- License     : BSD-style
 --
 -- Maintainer  : dons00@gmail.com, duncan@community.haskell.org
@@ -27,6 +27,9 @@
 -- of large data quantities, or high speed requirements. Byte vectors
 -- are encoded as strict 'Word8' arrays of bytes, held in a 'ForeignPtr',
 -- and can be passed between C and Haskell with little effort.
+--
+-- The recomended way to assemble ByteStrings from smaller parts
+-- is to use the builder monoid from "Data.ByteString.Builder".
 --
 -- This module is intended to be imported @qualified@, to avoid name
 -- clashes with "Prelude" functions.  eg.
@@ -56,6 +59,7 @@ module Data.ByteString (
         append,                 -- :: ByteString -> ByteString -> ByteString
         head,                   -- :: ByteString -> Word8
         uncons,                 -- :: ByteString -> Maybe (Word8, ByteString)
+        unsnoc,                 -- :: ByteString -> Maybe (ByteString, Word8)
         last,                   -- :: ByteString -> Word8
         tail,                   -- :: ByteString -> ByteString
         init,                   -- :: ByteString -> ByteString
@@ -233,7 +237,14 @@ import Control.Monad            (when)
 
 import Foreign.C.String         (CString, CStringLen)
 import Foreign.C.Types          (CSize)
-import Foreign.ForeignPtr
+#if MIN_VERSION_base(4,5,0)
+import Foreign.ForeignPtr       (ForeignPtr, newForeignPtr, withForeignPtr
+                                ,touchForeignPtr)
+import Foreign.ForeignPtr.Unsafe(unsafeForeignPtrToPtr)
+#else
+import Foreign.ForeignPtr       (ForeignPtr, newForeignPtr, withForeignPtr
+                                ,touchForeignPtr, unsafeForeignPtrToPtr)
+#endif
 import Foreign.Marshal.Alloc    (allocaBytes, mallocBytes, reallocBytes, finalizerFree)
 import Foreign.Marshal.Array    (allocaArray)
 import Foreign.Ptr
@@ -361,30 +372,19 @@ unpack :: ByteString -> [Word8]
 unpack = unpackBytes
 #else
 
-unpack ps = build (unpackFoldr ps)
+unpack bs = build (unpackFoldr bs)
 {-# INLINE unpack #-}
 
 --
 -- Have unpack fuse with good list consumers
 --
--- critical this isn't strict in the acc
--- as it will break in the presence of list fusion. this is a known
--- issue with seq and build/foldr rewrite rules, which rely on lazy
--- demanding to avoid bottoms in the list.
---
 unpackFoldr :: ByteString -> (Word8 -> a -> a) -> a -> a
-unpackFoldr (PS fp off len) f ch = withPtr fp $ \p -> do
-    let loop q n    _   | q `seq` n `seq` False = undefined -- n.b.
-        loop _ (-1) acc = return acc
-        loop q n    acc = do
-           a <- peekByteOff q n
-           loop q (n-1) (a `f` acc)
-    loop (p `plusPtr` off) (len-1) ch
+unpackFoldr bs k z = foldr k z bs
 {-# INLINE [0] unpackFoldr #-}
 
 {-# RULES
-"ByteString unpack-list" [1]  forall p  .
-    unpackFoldr p (:) [] = unpackBytes p
+"ByteString unpack-list" [1]  forall bs .
+    unpackFoldr bs (:) [] = unpackBytes bs
  #-}
 
 #endif
@@ -409,7 +409,7 @@ infixr 5 `cons` --same as list (:)
 infixl 5 `snoc`
 
 -- | /O(n)/ 'cons' is analogous to (:) for lists, but of different
--- complexity, as it requires a memcpy.
+-- complexity, as it requires making a copy.
 cons :: Word8 -> ByteString -> ByteString
 cons c (PS x s l) = unsafeCreate (l+1) $ \p -> withForeignPtr x $ \f -> do
         poke p c
@@ -467,6 +467,16 @@ init ps@(PS p s l)
     | otherwise = PS p s (l-1)
 {-# INLINE init #-}
 
+-- | /O(1)/ Extract the 'init' and 'last' of a ByteString, returning Nothing
+-- if it is empty.
+unsnoc :: ByteString -> Maybe (ByteString, Word8)
+unsnoc (PS x s l)
+    | l <= 0    = Nothing
+    | otherwise = Just (PS x s (l-1),
+                        inlinePerformIO $ withForeignPtr x
+                                        $ \p -> peekByteOff p (s+l-1))
+{-# INLINE unsnoc #-}
+
 -- | /O(n)/ Append two ByteStrings
 append :: ByteString -> ByteString -> ByteString
 append = mappend
@@ -519,44 +529,59 @@ transpose ps = P.map pack (List.transpose (P.map unpack ps))
 -- ByteString using the binary operator, from left to right.
 --
 foldl :: (a -> Word8 -> a) -> a -> ByteString -> a
-foldl f v (PS x s l) = inlinePerformIO $ withForeignPtr x $ \ptr ->
-        lgo v (ptr `plusPtr` s) (ptr `plusPtr` (s+l))
+foldl f z (PS fp off len) =
+      let p = unsafeForeignPtrToPtr fp
+       in go (p `plusPtr` (off+len-1)) (p `plusPtr` (off-1))
     where
-        STRICT3(lgo)
-        lgo z p q | p == q    = return z
-                  | otherwise = do c <- peek p
-                                   lgo (f z c) (p `plusPtr` 1) q
+      -- not tail recursive; traverses array right to left
+      go !p !q | p == q    = z
+               | otherwise = let !x = inlinePerformIO $ do
+                                        x' <- peek p
+                                        touchForeignPtr fp
+                                        return x'
+                             in f (go (p `plusPtr` (-1)) q) x
 {-# INLINE foldl #-}
 
--- | 'foldl\'' is like 'foldl', but strict in the accumulator.
--- However, for ByteStrings, all left folds are strict in the accumulator.
+-- | 'foldl'' is like 'foldl', but strict in the accumulator.
 --
 foldl' :: (a -> Word8 -> a) -> a -> ByteString -> a
-foldl' = foldl
+foldl' f v (PS fp off len) =
+      inlinePerformIO $ withForeignPtr fp $ \p ->
+        go v (p `plusPtr` off) (p `plusPtr` (off+len))
+    where
+      -- tail recursive; traverses array left to right
+      go !z !p !q | p == q    = return z
+                  | otherwise = do x <- peek p
+                                   go (f z x) (p `plusPtr` 1) q
 {-# INLINE foldl' #-}
 
 -- | 'foldr', applied to a binary operator, a starting value
 -- (typically the right-identity of the operator), and a ByteString,
 -- reduces the ByteString using the binary operator, from right to left.
 foldr :: (Word8 -> a -> a) -> a -> ByteString -> a
-foldr k v (PS x s l) = inlinePerformIO $ withForeignPtr x $ \ptr ->
-        go v (ptr `plusPtr` (s+l-1)) (ptr `plusPtr` (s-1))
+foldr k z (PS fp off len) =
+      let p = unsafeForeignPtrToPtr fp
+       in go (p `plusPtr` off) (p `plusPtr` (off+len))
     where
-        STRICT3(go)
-        go z p q | p == q    = return z
-                 | otherwise = do c  <- peek p
-                                  go (c `k` z) (p `plusPtr` (-1)) q -- tail recursive
+      -- not tail recursive; traverses array left to right
+      go !p !q | p == q    = z
+               | otherwise = let !x = inlinePerformIO $ do
+                                        x' <- peek p
+                                        touchForeignPtr fp
+                                        return x'
+                              in k x (go (p `plusPtr` 1) q)
 {-# INLINE foldr #-}
 
--- | 'foldr\'' is like 'foldr', but strict in the accumulator.
+-- | 'foldr'' is like 'foldr', but strict in the accumulator.
 foldr' :: (Word8 -> a -> a) -> a -> ByteString -> a
-foldr' k v (PS x s l) = inlinePerformIO $ withForeignPtr x $ \ptr ->
-        go v (ptr `plusPtr` (s+l-1)) (ptr `plusPtr` (s-1))
+foldr' k v (PS fp off len) =
+      inlinePerformIO $ withForeignPtr fp $ \p ->
+        go v (p `plusPtr` (off+len-1)) (p `plusPtr` (off-1))
     where
-        STRICT3(go)
-        go z p q | p == q    = return z
-                 | otherwise = do c  <- peek p
-                                  go (c `k` z) (p `plusPtr` (-1)) q -- tail recursive
+      -- tail recursive; traverses array right to left
+      go !z !p !q | p == q    = return z
+                  | otherwise = do x <- peek p
+                                   go (k x z) (p `plusPtr` (-1)) q
 {-# INLINE foldr' #-}
 
 -- | 'foldl1' is a variant of 'foldl' that has no starting value
@@ -582,7 +607,7 @@ foldl1' f ps
 foldr1 :: (Word8 -> Word8 -> Word8) -> ByteString -> Word8
 foldr1 f ps
     | null ps        = errorEmptyList "foldr1"
-    | otherwise      = foldr f (last ps) (init ps)
+    | otherwise      = foldr f (unsafeLast ps) (unsafeInit ps)
 {-# INLINE foldr1 #-}
 
 -- | 'foldr1\'' is a variant of 'foldr1', but is strict in the
@@ -590,7 +615,7 @@ foldr1 f ps
 foldr1' :: (Word8 -> Word8 -> Word8) -> ByteString -> Word8
 foldr1' f ps
     | null ps        = errorEmptyList "foldr1"
-    | otherwise      = foldr' f (last ps) (init ps)
+    | otherwise      = foldr' f (unsafeLast ps) (unsafeInit ps)
 {-# INLINE foldr1' #-}
 
 -- ---------------------------------------------------------------------
@@ -765,7 +790,7 @@ scanr f v (PS fp s len) = unsafeDupablePerformIO $ withForeignPtr fp $ \a ->
 scanr1 :: (Word8 -> Word8 -> Word8) -> ByteString -> ByteString
 scanr1 f ps
     | null ps   = empty
-    | otherwise = scanr f (last ps) (init ps) -- todo, unsafe versions
+    | otherwise = scanr f (unsafeLast ps) (unsafeInit ps)
 {-# INLINE scanr1 #-}
 
 -- ---------------------------------------------------------------------
@@ -1592,8 +1617,8 @@ sort (PS x s l) = unsafeCreate l $ \p -> withForeignPtr x $ \f -> do
 -- Low level constructors
 
 -- | /O(n) construction/ Use a @ByteString@ with a function requiring a
--- null-terminated @CString@.  The @CString@ will be freed
--- automatically. This is a memcpy(3).
+-- null-terminated @CString@.  The @CString@ is a copy and will be freed
+-- automatically.
 useAsCString :: ByteString -> (CString -> IO a) -> IO a
 useAsCString (PS fp o l) action = do
  allocaBytes (l+1) $ \buf ->
@@ -2022,5 +2047,5 @@ findFromEndUntil :: (Word8 -> Bool) -> ByteString -> Int
 STRICT2(findFromEndUntil)
 findFromEndUntil f ps@(PS x s l) =
     if null ps then 0
-    else if f (last ps) then l
+    else if f (unsafeLast ps) then l
          else findFromEndUntil f (PS x s (l-1))

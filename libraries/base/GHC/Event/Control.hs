@@ -1,6 +1,5 @@
 {-# LANGUAGE Unsafe #-}
 {-# LANGUAGE CPP
-           , ForeignFunctionInterface
            , NoImplicitPrelude
            , ScopedTypeVariables
            , BangPatterns
@@ -47,8 +46,8 @@ import System.Posix.Internals (c_close, c_pipe, c_read, c_write,
 import System.Posix.Types (Fd)
 
 #if defined(HAVE_EVENTFD)
-import Data.Word (Word64)
 import Foreign.C.Error (throwErrnoIfMinus1)
+import Foreign.C.Types (CULLong(..))
 #else
 import Foreign.C.Error (eAGAIN, eWOULDBLOCK, getErrno, throwErrno)
 #endif
@@ -77,38 +76,30 @@ wakeupReadFd = controlEventFd
 {-# INLINE wakeupReadFd #-}
 #endif
 
-setNonBlock :: CInt -> IO ()
-setNonBlock fd =
-#if __GLASGOW_HASKELL__ >= 611
-  setNonBlockingFD fd True
-#else
-  setNonBlockingFD fd
-#endif
-
 -- | Create the structure (usually a pipe) used for waking up the IO
 -- manager thread from another thread.
-newControl :: IO Control
-newControl = allocaArray 2 $ \fds -> do
+newControl :: Bool -> IO Control
+newControl shouldRegister = allocaArray 2 $ \fds -> do
   let createPipe = do
         throwErrnoIfMinus1_ "pipe" $ c_pipe fds
         rd <- peekElemOff fds 0
         wr <- peekElemOff fds 1
         -- The write end must be non-blocking, since we may need to
         -- poke the event manager from a signal handler.
-        setNonBlock wr
+        setNonBlockingFD wr True
         setCloseOnExec rd
         setCloseOnExec wr
         return (rd, wr)
   (ctrl_rd, ctrl_wr) <- createPipe
-  c_setIOManagerControlFd ctrl_wr
+  when shouldRegister $ c_setIOManagerControlFd ctrl_wr
 #if defined(HAVE_EVENTFD)
   ev <- throwErrnoIfMinus1 "eventfd" $ c_eventfd 0 0
-  setNonBlock ev
+  setNonBlockingFD ev True
   setCloseOnExec ev
-  c_setIOManagerWakeupFd ev
+  when shouldRegister $ c_setIOManagerWakeupFd ev
 #else
   (wake_rd, wake_wr) <- createPipe
-  c_setIOManagerWakeupFd wake_wr
+  when shouldRegister $ c_setIOManagerWakeupFd wake_wr
 #endif
   return W { controlReadFd  = fromIntegral ctrl_rd
            , controlWriteFd = fromIntegral ctrl_wr
@@ -175,10 +166,9 @@ readControlMessage ctrl fd
 
 sendWakeup :: Control -> IO ()
 #if defined(HAVE_EVENTFD)
-sendWakeup c = alloca $ \p -> do
-  poke p (1 :: Word64)
+sendWakeup c =
   throwErrnoIfMinus1_ "sendWakeup" $
-    c_write (fromIntegral (controlEventFd c)) (castPtr p) 8
+  c_eventfd_write (fromIntegral (controlEventFd c)) 1
 #else
 sendWakeup c = do
   n <- sendMessage (wakeupWriteFd c) CMsgWakeup
@@ -205,6 +195,9 @@ sendMessage fd msg = alloca $ \p -> do
 #if defined(HAVE_EVENTFD)
 foreign import ccall unsafe "sys/eventfd.h eventfd"
    c_eventfd :: CInt -> CInt -> IO CInt
+
+foreign import ccall unsafe "sys/eventfd.h eventfd_write"
+   c_eventfd_write :: CInt -> CULLong -> IO CInt
 #endif
 
 -- Used to tell the RTS how it can send messages to the I/O manager.
@@ -213,4 +206,3 @@ foreign import ccall "setIOManagerControlFd"
 
 foreign import ccall "setIOManagerWakeupFd"
    c_setIOManagerWakeupFd :: CInt -> IO ()
-

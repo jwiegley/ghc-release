@@ -9,8 +9,10 @@ some unnecessary loops in the module dependency graph.
 
 \begin{code}
 module Panic (
-     GhcException(..), showGhcException, throwGhcException, handleGhcException,
-     ghcError, progName,
+     GhcException(..), showGhcException,
+     throwGhcException, throwGhcExceptionIO,
+     handleGhcException,
+     progName,
      pgmError,
 
      panic, sorry, panicFastInt, assertPanic, trace,
@@ -47,9 +49,7 @@ import System.Posix.Signals
 import GHC.ConsoleHandler
 #endif
 
-#if __GLASGOW_HASKELL__ >= 703
 import GHC.Stack
-#endif
 
 #if __GLASGOW_HASKELL__ >= 705
 import System.Mem.Weak  ( Weak, deRefWeak )
@@ -175,12 +175,11 @@ showGhcException exception
                 ExitFailure x -> x
 
 
--- | Alias for `throwGhcException`
-ghcError :: GhcException -> a
-ghcError e = Exception.throw e
-
 throwGhcException :: GhcException -> a
 throwGhcException = Exception.throw
+
+throwGhcExceptionIO :: GhcException -> IO a
+throwGhcExceptionIO = Exception.throwIO
 
 handleGhcException :: ExceptionMonad m => (GhcException -> m a) -> m a -> m a
 handleGhcException = ghandle
@@ -188,15 +187,11 @@ handleGhcException = ghandle
 
 -- | Panics and asserts.
 panic, sorry, pgmError :: String -> a
-#if __GLASGOW_HASKELL__ >= 703
 panic    x = unsafeDupablePerformIO $ do
    stack <- ccsToStrings =<< getCurrentCCS x
    if null stack
       then throwGhcException (Panic x)
       else throwGhcException (Panic (x ++ '\n' : renderStack stack))
-#else
-panic    x = throwGhcException (Panic x)
-#endif
 
 sorry    x = throwGhcException (Sorry x)
 pgmError x = throwGhcException (ProgramError x)

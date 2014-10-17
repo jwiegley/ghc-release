@@ -1,4 +1,5 @@
-#if __GLASGOW_HASKELL__ >= 703
+{-# LANGUAGE CPP #-}
+#if __GLASGOW_HASKELL__ >= 702 && MIN_VERSION_array(0,4,0)
 {-# LANGUAGE Safe #-}
 #endif
 -----------------------------------------------------------------------------
@@ -6,7 +7,7 @@
 -- Module      :  Control.DeepSeq
 -- Copyright   :  (c) The University of Glasgow 2001-2009
 -- License     :  BSD-style (see the file LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  stable
 -- Portability :  portable
@@ -19,7 +20,7 @@
 --
 -- > import System.IO
 -- > import Control.DeepSeq
--- > 
+-- >
 -- > main = do
 -- >     h <- openFile "f" ReadMode
 -- >     s <- hGetContents h
@@ -44,6 +45,7 @@
 -- thread, before passing to another thread (preventing work moving to
 -- the wrong threads).
 --
+-- /Since: 1.1.0.0/
 module Control.DeepSeq (
      deepseq, ($!!), force,
      NFData(..),
@@ -78,11 +80,14 @@ infixr 0 $!!
 -- evaluation, use 'pseq' from "Control.Parallel" in the
 -- @parallel@ package.
 --
+-- /Since: 1.1.0.0/
 deepseq :: NFData a => a -> b -> b
 deepseq a b = rnf a `seq` b
 
 -- | the deep analogue of '$!'.  In the expression @f $!! x@, @x@ is
 -- fully evaluated before the function @f@ is applied to it.
+--
+-- /Since: 1.2.0.0/
 ($!!) :: (NFData a) => (a -> b) -> a -> b
 f $!! x = x `deepseq` f x
 
@@ -94,25 +99,28 @@ f $!! x = x `deepseq` f x
 -- @force x@ only performs evaluation when the value of @force x@
 -- itself is demanded, so essentially it turns shallow evaluation into
 -- deep evaluation.
-
+--
+-- /Since: 1.2.0.0/
 force :: (NFData a) => a -> a
 force x = x `deepseq` x
 
 -- | A class of types that can be fully evaluated.
+--
+-- /Since: 1.1.0.0/
 class NFData a where
     -- | rnf should reduce its argument to normal form (that is, fully
     -- evaluate all sub-components), and then return '()'.
-    -- 
-    -- The default implementation of 'rnf' is 
+    --
+    -- The default implementation of 'rnf' is
     --
     -- > rnf a = a `seq` ()
-    -- 
+    --
     -- which may be convenient when defining instances for data types with
     -- no unevaluated fields (e.g. enumerations).
     rnf :: a -> ()
     rnf a = a `seq` ()
 
-instance NFData Int 
+instance NFData Int
 instance NFData Word
 instance NFData Integer
 instance NFData Float
@@ -132,10 +140,13 @@ instance NFData Word16
 instance NFData Word32
 instance NFData Word64
 
+-- |/Since: 1.3.0.0/
 instance NFData (Fixed a)
 
 -- |This instance is for convenience and consistency with 'seq'.
 -- This assumes that WHNF is equivalent to NF for functions.
+--
+-- /Since: 1.3.0.0/
 instance NFData (a -> b)
 
 --Rational and complex numbers.
@@ -144,7 +155,7 @@ instance (Integral a, NFData a) => NFData (Ratio a) where
   rnf x = rnf (numerator x, denominator x)
 
 instance (RealFloat a, NFData a) => NFData (Complex a) where
-  rnf (x:+y) = rnf x `seq` 
+  rnf (x:+y) = rnf x `seq`
                rnf y `seq`
                ()
 
@@ -156,6 +167,7 @@ instance (NFData a, NFData b) => NFData (Either a b) where
     rnf (Left x)  = rnf x
     rnf (Right y) = rnf y
 
+-- |/Since: 1.3.0.0/
 instance NFData Data.Version.Version where
     rnf (Data.Version.Version branch tags) = rnf branch `seq` rnf tags
 
@@ -170,15 +182,15 @@ instance (NFData a, NFData b) => NFData (a,b) where
   rnf (x,y) = rnf x `seq` rnf y
 
 instance (NFData a, NFData b, NFData c) => NFData (a,b,c) where
-  rnf (x,y,z) = rnf x `seq` rnf y `seq` rnf z 
+  rnf (x,y,z) = rnf x `seq` rnf y `seq` rnf z
 
 instance (NFData a, NFData b, NFData c, NFData d) => NFData (a,b,c,d) where
-  rnf (x1,x2,x3,x4) = rnf x1 `seq` 
-		        rnf x2 `seq` 
-		        rnf x3 `seq` 
-		        rnf x4 
+  rnf (x1,x2,x3,x4) = rnf x1 `seq`
+                      rnf x2 `seq`
+                      rnf x3 `seq`
+                      rnf x4
 
-instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5) => 
+instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5) =>
          NFData (a1, a2, a3, a4, a5) where
   rnf (x1, x2, x3, x4, x5) =
                   rnf x1 `seq`
@@ -187,7 +199,7 @@ instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5) =>
                   rnf x4 `seq`
                   rnf x5
 
-instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5, NFData a6) => 
+instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5, NFData a6) =>
          NFData (a1, a2, a3, a4, a5, a6) where
   rnf (x1, x2, x3, x4, x5, x6) =
                   rnf x1 `seq`
@@ -197,7 +209,7 @@ instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5, NFData a6) =>
                   rnf x5 `seq`
                   rnf x6
 
-instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5, NFData a6, NFData a7) => 
+instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5, NFData a6, NFData a7) =>
          NFData (a1, a2, a3, a4, a5, a6, a7) where
   rnf (x1, x2, x3, x4, x5, x6, x7) =
                   rnf x1 `seq`
@@ -208,7 +220,7 @@ instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5, NFData a6, NFDa
                   rnf x6 `seq`
                   rnf x7
 
-instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5, NFData a6, NFData a7, NFData a8) => 
+instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5, NFData a6, NFData a7, NFData a8) =>
          NFData (a1, a2, a3, a4, a5, a6, a7, a8) where
   rnf (x1, x2, x3, x4, x5, x6, x7, x8) =
                   rnf x1 `seq`
@@ -220,7 +232,7 @@ instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5, NFData a6, NFDa
                   rnf x7 `seq`
                   rnf x8
 
-instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5, NFData a6, NFData a7, NFData a8, NFData a9) => 
+instance (NFData a1, NFData a2, NFData a3, NFData a4, NFData a5, NFData a6, NFData a7, NFData a8, NFData a9) =>
          NFData (a1, a2, a3, a4, a5, a6, a7, a8, a9) where
   rnf (x1, x2, x3, x4, x5, x6, x7, x8, x9) =
                   rnf x1 `seq`

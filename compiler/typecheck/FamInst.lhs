@@ -1,40 +1,80 @@
 The @FamInst@ type: family instance heads
 
 \begin{code}
+{-# LANGUAGE GADTs #-}
 {-# OPTIONS -fno-warn-tabs #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module FamInst ( 
         checkFamInstConsistency, tcExtendLocalFamInstEnv,
-	tcLookupFamInst, tcLookupDataFamInst,
-        tcGetFamInstEnvs
+	tcLookupFamInst, 
+        tcGetFamInstEnvs,
+        newFamInst
     ) where
 
 import HscTypes
 import FamInstEnv
+import InstEnv( roughMatchTcs )
+import Coercion( pprCoAxBranchHdr )
 import LoadIface
 import TypeRep
-import TcMType
 import TcRnMonad
 import TyCon
+import CoAxiom
 import DynFlags
-import Name
 import Module
 import Outputable
 import UniqFM
-import VarSet
 import FastString
 import Util
 import Maybes
+import TcMType
+import TcType
+import Name
+import VarSet
 import Control.Monad
 import Data.Map (Map)
 import qualified Data.Map as Map
 
 #include "HsVersions.h"
+\end{code}
+
+%************************************************************************
+%*									*
+                 Making a FamInst
+%*									*
+%************************************************************************
+
+\begin{code}
+-- All type variables in a FamInst must be fresh. This function
+-- creates the fresh variables and applies the necessary substitution
+-- It is defined here to avoid a dependency from FamInstEnv on the monad
+-- code.
+
+newFamInst :: FamFlavor -> CoAxiom Unbranched -> TcRnIf gbl lcl FamInst
+-- Freshen the type variables of the FamInst branches
+-- Called from the vectoriser monad too, hence the rather general type
+newFamInst flavor axiom@(CoAxiom { co_ax_branches = FirstBranch branch
+                                 , co_ax_tc = fam_tc })
+  = do { (subst, tvs') <- tcInstSigTyVarsLoc loc tvs
+       ; return (FamInst { fi_fam      = fam_tc_name
+                         , fi_flavor   = flavor
+                         , fi_tcs      = roughMatchTcs lhs
+                         , fi_tvs      = tvs'
+                         , fi_tys      = substTys subst lhs
+                         , fi_rhs      = substTy  subst rhs
+                         , fi_axiom    = axiom }) }
+  where
+    fam_tc_name = tyConName fam_tc
+    CoAxBranch { cab_loc = loc
+               , cab_tvs = tvs
+               , cab_lhs = lhs
+               , cab_rhs = rhs } = branch
+
 \end{code}
 
 
@@ -170,63 +210,22 @@ then we have a coercion (ie, type instance of family instance coercion)
 which implies that :R42T was declared as 'data instance T [a]'.
 
 \begin{code}
-tcLookupFamInst :: TyCon -> [Type] -> TcM (Maybe (FamInst, [Type]))
+tcLookupFamInst :: TyCon -> [Type] -> TcM (Maybe FamInstMatch)
 tcLookupFamInst tycon tys
-  | not (isFamilyTyCon tycon)
+  | not (isOpenFamilyTyCon tycon)
   = return Nothing
   | otherwise
   = do { instEnv <- tcGetFamInstEnvs
        ; let mb_match = lookupFamInstEnv instEnv tycon tys 
-       ; traceTc "lookupFamInst" ((ppr tycon <+> ppr tys) $$ pprTvBndrs (varSetElems (tyVarsOfTypes tys)) $$ ppr mb_match $$ ppr instEnv)
+       ; traceTc "lookupFamInst" ((ppr tycon <+> ppr tys) $$ 
+                                  pprTvBndrs (varSetElems (tyVarsOfTypes tys)) $$ 
+                                  ppr mb_match $$ ppr instEnv)
        ; case mb_match of
 	   [] -> return Nothing
-	   ((fam_inst, rep_tys):_) 
-              -> return $ Just (fam_inst, rep_tys)
+	   (match:_) 
+              -> return $ Just match
        }
-
-tcLookupDataFamInst :: TyCon -> [Type] -> TcM (TyCon, [Type])
--- Find the instance of a data family
--- Note [Looking up family instances for deriving]
-tcLookupDataFamInst tycon tys
-  | not (isFamilyTyCon tycon)
-  = return (tycon, tys)
-  | otherwise
-  = ASSERT( isAlgTyCon tycon )
-    do { maybeFamInst <- tcLookupFamInst tycon tys
-       ; case maybeFamInst of
-           Nothing             -> famInstNotFound tycon tys
-           Just (famInst, tys) -> let tycon' = dataFamInstRepTyCon famInst
-                                  in return (tycon', tys) }
-
-famInstNotFound :: TyCon -> [Type] -> TcM a
-famInstNotFound tycon tys 
-  = failWithTc (ptext (sLit "No family instance for")
-			<+> quotes (pprTypeApp tycon tys))
 \end{code}
-
-Note [Looking up family instances for deriving]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-tcLookupFamInstExact is an auxiliary lookup wrapper which requires
-that looked-up family instances exist.  If called with a vanilla
-tycon, the old type application is simply returned.
-
-If we have
-  data instance F () = ... deriving Eq
-  data instance F () = ... deriving Eq
-then tcLookupFamInstExact will be confused by the two matches;
-but that can't happen because tcInstDecls1 doesn't call tcDeriving
-if there are any overlaps.
-
-There are two other things that might go wrong with the lookup.
-First, we might see a standalone deriving clause
-	deriving Eq (F ())
-when there is no data instance F () in scope. 
-
-Note that it's OK to have
-  data instance F [a] = ...
-  deriving Eq (F [(a,b)])
-where the match is not exact; the same holds for ordinary data types
-with standalone deriving declrations.
 
 
 %************************************************************************
@@ -245,22 +244,28 @@ tcExtendLocalFamInstEnv fam_insts thing_inside
                                           fam_insts
       ; let env' = env { tcg_fam_insts    = fam_insts'
 		       , tcg_fam_inst_env = inst_env' }
-      ; setGblEnv env' thing_inside 
+      ; setGblEnv env' thing_inside
       }
 
--- Check that the proposed new instance is OK, 
+-- Check that the proposed new instance is OK,
 -- and then add it to the home inst env
+-- This must be lazy in the fam_inst arguments, see Note [Lazy axiom match]
+-- in FamInstEnv.lhs
 addLocalFamInst :: (FamInstEnv,[FamInst]) -> FamInst -> TcM (FamInstEnv, [FamInst])
-addLocalFamInst (home_fie, my_fis) fam_inst 
+addLocalFamInst (home_fie, my_fis) fam_inst
         -- home_fie includes home package and this module
         -- my_fies is just the ones from this module
   = do { traceTc "addLocalFamInst" (ppr fam_inst)
+
        ; isGHCi <- getIsGHCi
- 
+       ; mod <- getModule
+       ; traceTc "alfi" (ppr mod $$ ppr isGHCi)
+
            -- In GHCi, we *override* any identical instances
            -- that are also defined in the interactive context
-       ; let (home_fie', my_fis') 
-               | isGHCi    = ( deleteFromFamInstEnv home_fie fam_inst 
+           -- Trac #7102
+       ; let (home_fie', my_fis')
+               | isGHCi    = ( deleteFromFamInstEnv home_fie fam_inst
                              , filterOut (identicalFamInst fam_inst) my_fis)
                | otherwise = (home_fie, my_fis)
 
@@ -274,7 +279,7 @@ addLocalFamInst (home_fie, my_fis) fam_inst
        ; no_conflict <- checkForConflicts inst_envs fam_inst
        ; if no_conflict then
             return (home_fie'', fam_inst : my_fis')
-         else 
+         else
             return (home_fie,   my_fis) }
 \end{code}
 
@@ -290,33 +295,33 @@ environments (one for the EPS and one for the HPT).
 \begin{code}
 checkForConflicts :: FamInstEnvs -> FamInst -> TcM Bool
 checkForConflicts inst_envs fam_inst
-  = do { 	-- To instantiate the family instance type, extend the instance
-		-- envt with completely fresh template variables
-		-- This is important because the template variables must
-		-- not overlap with anything in the things being looked up
-		-- (since we do unification).  
-		-- We use tcInstSkolType because we don't want to allocate
-		-- fresh *meta* type variables.  
-
-       ; (_, skol_tvs) <- tcInstSkolTyVars (coAxiomTyVars (famInstAxiom fam_inst))
-       ; let conflicts = lookupFamInstEnvConflicts inst_envs fam_inst skol_tvs
+  = do { let conflicts = lookupFamInstEnvConflicts inst_envs fam_inst
              no_conflicts = null conflicts
-       ; traceTc "checkForConflicts" (ppr conflicts $$ ppr fam_inst $$ ppr inst_envs)
-       ; unless no_conflicts $
-	   conflictInstErr fam_inst (fst (head conflicts))
+       ; traceTc "checkForConflicts" (ppr (map fim_instance conflicts) $$
+                                      ppr fam_inst $$ ppr inst_envs)
+       ; unless no_conflicts $ conflictInstErr fam_inst conflicts
        ; return no_conflicts }
 
-conflictInstErr :: FamInst -> FamInst -> TcRn ()
-conflictInstErr famInst conflictingFamInst
+conflictInstErr :: FamInst -> [FamInstMatch] -> TcRn ()
+conflictInstErr fam_inst conflictingMatch
+  | (FamInstMatch { fim_instance = confInst }) : _ <- conflictingMatch
   = addFamInstsErr (ptext (sLit "Conflicting family instance declarations:"))
-                   [famInst, conflictingFamInst]
+                   [fam_inst, confInst]
+  | otherwise 
+  = panic "conflictInstErr"
 
 addFamInstsErr :: SDoc -> [FamInst] -> TcRn ()
 addFamInstsErr herald insts
-  = setSrcSpan (getSrcSpan (head sorted)) $
-    addErr (hang herald 2 (pprFamInsts sorted))
+  = ASSERT( not (null insts) )
+    setSrcSpan srcSpan $ addErr $
+    hang herald
+       2 (vcat [ pprCoAxBranchHdr (famInstAxiom fi) 0
+               | fi <- sorted ])
  where
-   sorted = sortWith getSrcLoc insts
+   getSpan   = getSrcLoc . famInstAxiom
+   sorted    = sortWith getSpan insts
+   fi1       = head sorted
+   srcSpan   = coAxBranchSpan (coAxiomSingleBranch (famInstAxiom fi1))
    -- The sortWith just arranges that instances are dislayed in order
    -- of source location, which reduced wobbling in error messages,
    -- and is better for users
@@ -328,3 +333,4 @@ tcGetFamInstEnvs
   = do { eps <- getEps; env <- getGblEnv
        ; return (eps_fam_inst_env eps, tcg_fam_inst_env env) }
 \end{code}
+

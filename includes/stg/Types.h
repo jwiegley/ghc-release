@@ -8,7 +8,7 @@
  * Do not #include this file directly: #include "Rts.h" instead.
  *
  * To understand the structure of the RTS headers, see the wiki:
- *   http://hackage.haskell.org/trac/ghc/wiki/Commentary/SourceTree/Includes
+ *   http://ghc.haskell.org/trac/ghc/wiki/Commentary/SourceTree/Includes
  *
  * NOTE: assumes #include "ghcconfig.h"
  * 
@@ -43,9 +43,6 @@
 
 /*
  * First, platform-dependent definitions of size-specific integers.
- * Assume for now that the int type is 32 bits.
- * NOTE: Synch the following definitions with MachDeps.h!
- * ToDo: move these into a platform-dependent file.
  */
 
 typedef signed   char            StgInt8;
@@ -86,15 +83,15 @@ typedef unsigned long long int StgWord64;
 #error cannot find a way to define StgInt64
 #endif
 
+typedef struct { StgWord64 h; StgWord64 l; } StgWord128;
+
+typedef struct { StgWord128 h; StgWord128 l; } StgWord256;
+
+typedef struct { StgWord256 h; StgWord256 l; } StgWord512;
+
 /*
  * Define the standard word size we'll use on this machine: make it
  * big enough to hold a pointer.
- *
- * It's useful if StgInt/StgWord are always the same as long, so that
- * we can use a consistent printf format specifier without warnings on
- * any platform.  Fortunately this works at the moement; if it breaks
- * in the future we'll have to start using macros for format
- * specifiers (c.f. FMT_StgWord64 in Rts.h).
  */
 
 #if SIZEOF_VOID_P == 8
@@ -138,10 +135,11 @@ typedef void*		   StgStablePtr;
 typedef StgWord8*          StgByteArray;
 
 /*
-  Types for the generated C functions
-  take no arguments
-  return a pointer to the next function to be called
-  use: Ptr to Fun that returns a Ptr to Fun which returns Ptr to void
+  Types for generated C functions when compiling via C.
+
+  The C functions take no arguments, and return a pointer to the next
+  function to be called use: Ptr to Fun that returns a Ptr to Fun
+  which returns Ptr to void
 
   Note: Neither StgFunPtr not StgFun is quite right (that is, 
   StgFunPtr != StgFun*).  So, the functions we define all have type

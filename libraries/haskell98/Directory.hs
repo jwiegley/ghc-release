@@ -1,15 +1,16 @@
+{-# LANGUAGE CPP #-}
 #if __GLASGOW_HASKELL__ >= 701
 {-# LANGUAGE Trustworthy #-}
 #endif
 
 module Directory (
-        Permissions( Permissions, readable, writable, executable, searchable ), 
-        createDirectory, removeDirectory, removeFile, 
+        Permissions( Permissions, readable, writable, executable, searchable ),
+        createDirectory, removeDirectory, removeFile,
         renameDirectory, renameFile, getDirectoryContents,
         getCurrentDirectory, setCurrentDirectory,
         doesFileExist, doesDirectoryExist,
         getPermissions, setPermissions,
-        getModificationTime 
+        getModificationTime
     ) where
 
 import System.Directory hiding (Permissions,

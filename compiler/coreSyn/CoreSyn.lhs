@@ -10,7 +10,7 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 -- | CoreSyn holds all the main data types for use by for the Glasgow Haskell Compiler midsection
@@ -18,7 +18,7 @@ module CoreSyn (
 	-- * Main data types
         Expr(..), Alt, Bind(..), AltCon(..), Arg, Tickish(..),
         CoreProgram, CoreExpr, CoreAlt, CoreBind, CoreArg, CoreBndr,
-        TaggedExpr, TaggedAlt, TaggedBind, TaggedArg, TaggedBndr(..),
+        TaggedExpr, TaggedAlt, TaggedBind, TaggedArg, TaggedBndr(..), deTagExpr,
 
         -- ** 'Expr' construction
 	mkLets, mkLams,
@@ -31,7 +31,7 @@ module CoreSyn (
 	mkFloatLit, mkFloatLitFloat,
 	mkDoubleLit, mkDoubleLitDouble,
 	
-	mkConApp, mkTyBind, mkCoBind,
+	mkConApp, mkConApp2, mkTyBind, mkCoBind,
 	varToCoreExpr, varsToCoreExprs,
 
         isId, cmpAltCon, cmpAlt, ltAlt,
@@ -44,12 +44,11 @@ module CoreSyn (
         isValArg, isTypeArg, isTyCoArg, valArgCount, valBndrCount,
         isRuntimeArg, isRuntimeVar,
 
-        tickishCounts, tickishScoped, tickishIsCode, mkNoTick, mkNoScope,
+        tickishCounts, tickishScoped, tickishIsCode, mkNoCount, mkNoScope,
         tickishCanSplit,
 
         -- * Unfolding data types
         Unfolding(..),  UnfoldingGuidance(..), UnfoldingSource(..),
-        DFunArg(..), dfunArgExprs,
 
 	-- ** Constructing 'Unfolding's
 	noUnfolding, evaldUnfolding, mkOtherCon,
@@ -78,7 +77,7 @@ module CoreSyn (
 
 	-- * Core rule data types
 	CoreRule(..),	-- CoreSubst, CoreTidy, CoreFVs, PprCore only
-	RuleName, IdUnfoldingFun,
+	RuleName, RuleFun, IdUnfoldingFun, InScopeEnv,
 	
 	-- ** Operations on 'CoreRule's 
 	seqRules, ruleArity, ruleName, ruleIdName, ruleActivation,
@@ -92,6 +91,7 @@ module CoreSyn (
 #include "HsVersions.h"
 
 import CostCentre
+import VarEnv( InScopeSet )
 import Var
 import Type
 import Coercion
@@ -101,6 +101,7 @@ import DataCon
 import Module
 import TyCon
 import BasicTypes
+import DynFlags
 import FastString
 import Outputable
 import Util
@@ -146,6 +147,7 @@ These data types are the heart of the compiler
 --      f_1 x_2 = let f_3 x_4 = x_4 + 1
 --                in f_3 (x_2 - 2)
 -- @
+--    But see Note [Shadowing] below.
 --
 -- 3. The resulting syntax tree undergoes type checking (which also deals with instantiating
 --    type class arguments) to yield a 'HsExpr.HsExpr' type that has 'Id.Id' as it's names.
@@ -259,6 +261,9 @@ These data types are the heart of the compiler
 -- *  A type: this should only show up at the top level of an Arg
 --
 -- *  A coercion
+
+-- If you edit this type, you may need to update the GHC formalism
+-- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
 data Expr b
   = Var	  Id
   | Lit   Literal
@@ -279,9 +284,15 @@ type Arg b = Expr b
 -- | A case split alternative. Consists of the constructor leading to the alternative,
 -- the variables bound from the constructor, and the expression to be executed given that binding.
 -- The default alternative is @(DEFAULT, [], rhs)@
+
+-- If you edit this type, you may need to update the GHC formalism
+-- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
 type Alt b = (AltCon, [b], Expr b)
 
 -- | A case alternative constructor (i.e. pattern match)
+
+-- If you edit this type, you may need to update the GHC formalism
+-- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
 data AltCon 
   = DataAlt DataCon   --  ^ A plain data constructor: @case e of { Foo x -> ... }@.
                       -- Invariant: the 'DataCon' is always from a @data@ type, and never from a @newtype@
@@ -294,10 +305,33 @@ data AltCon
    deriving (Eq, Ord, Data, Typeable)
 
 -- | Binding, used for top level bindings in a module and local bindings in a @let@.
+
+-- If you edit this type, you may need to update the GHC formalism
+-- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
 data Bind b = NonRec b (Expr b)
 	    | Rec [(b, (Expr b))]
   deriving (Data, Typeable)
 \end{code}
+
+Note [Shadowing]
+~~~~~~~~~~~~~~~~
+While various passes attempt to rename on-the-fly in a manner that
+avoids "shadowing" (thereby simplifying downstream optimizations),
+neither the simplifier nor any other pass GUARANTEES that shadowing is
+avoided. Thus, all passes SHOULD work fine even in the presence of
+arbitrary shadowing in their inputs.
+
+In particular, scrutinee variables `x` in expressions of the form
+`Case e x t` are often renamed to variables with a prefix
+"wild_". These "wild" variables may appear in the body of the
+case-expression, and further, may be shadowed within the body.
+
+So the Unique in an Var is not really unique at all.  Still, it's very
+useful to give a constant-time equality/ordering for Vars, and to give
+a key that can be used to make sets of Vars (VarSet), or mappings from
+Vars to other things (VarEnv).   Moreover, if you do want to eliminate
+shadowing, you can give a new Unique to an Id without changing its
+printable name, which makes debugging easier.
 
 Note [Literal alternatives]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -354,13 +388,13 @@ is fine, and has type Bool.  This is one reason we need a type on
 the case expression: if the alternatives are empty we can't get the type
 from the alternatives!  I'll write this
    case (error Int "Hello") of Bool {}
-with the return type just before the alterantives.
+with the return type just before the alternatives.
 
 Here's another example:
   data T
   f :: T -> Bool
   f = \(x:t). case x of Bool {}
-Since T has no data constructors, the case alterantives are of course
+Since T has no data constructors, the case alternatives are of course
 empty.  However note that 'x' is not bound to a visbily-bottom value;
 it's the *type* that tells us it's going to diverge.  Its a bit of a
 degnerate situation but we do NOT want to replace
@@ -401,6 +435,9 @@ unboxed type.
 
 \begin{code}
 -- | Allows attaching extra information to points in expressions
+
+-- If you edit this type, you may need to update the GHC formalism
+-- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
 data Tickish id =
     -- | An @{-# SCC #-}@ profiling annotation, either automatically
     -- added by the desugarer as a result of -auto-all, or added by
@@ -438,11 +475,12 @@ data Tickish id =
   deriving (Eq, Ord, Data, Typeable)
 
 
--- | A "tick" note is one that counts evaluations in some way.  We
--- cannot discard a tick, and the compiler should preserve the number
--- of ticks as far as possible.
+-- | A "counting tick" (where tickishCounts is True) is one that
+-- counts evaluations in some way.  We cannot discard a counting tick,
+-- and the compiler should preserve the number of counting ticks as
+-- far as possible.
 --
--- Hwever, we stil allow the simplifier to increase or decrease
+-- However, we still allow the simplifier to increase or decrease
 -- sharing, so in practice the actual number of ticks may vary, except
 -- that we never change the value from zero to non-zero or vice versa.
 --
@@ -459,15 +497,15 @@ tickishScoped Breakpoint{} = True
    -- stacks, but also this helps prevent the simplifier from moving
    -- breakpoints around and changing their result type (see #1531).
 
-mkNoTick :: Tickish id -> Tickish id
-mkNoTick n@ProfNote{} = n {profNoteCount = False}
-mkNoTick Breakpoint{} = panic "mkNoTick: Breakpoint" -- cannot split a BP
-mkNoTick t = t
+mkNoCount :: Tickish id -> Tickish id
+mkNoCount n@ProfNote{} = n {profNoteCount = False}
+mkNoCount Breakpoint{} = panic "mkNoCount: Breakpoint" -- cannot split a BP
+mkNoCount HpcTick{}    = panic "mkNoCount: HpcTick"
 
 mkNoScope :: Tickish id -> Tickish id
 mkNoScope n@ProfNote{} = n {profNoteScope = False}
 mkNoScope Breakpoint{} = panic "mkNoScope: Breakpoint" -- cannot split a BP
-mkNoScope t = t
+mkNoScope HpcTick{}    = panic "mkNoScope: HpcTick"
 
 -- | Return True if this source annotation compiles to some code, or will
 -- disappear before the backend.
@@ -475,9 +513,10 @@ tickishIsCode :: Tickish id -> Bool
 tickishIsCode _tickish = True  -- all of them for now
 
 -- | Return True if this Tick can be split into (tick,scope) parts with
--- 'mkNoScope' and 'mkNoTick' respectively.
+-- 'mkNoScope' and 'mkNoCount' respectively.
 tickishCanSplit :: Tickish Id -> Bool
 tickishCanSplit Breakpoint{} = False
+tickishCanSplit HpcTick{}    = False
 tickishCanSplit _ = True
 \end{code}
 
@@ -540,12 +579,15 @@ data CoreRule
 	ru_fn    :: Name,       -- ^ As above
 	ru_nargs :: Int,	-- ^ Number of arguments that 'ru_try' consumes,
 				-- if it fires, including type arguments
-	ru_try  :: Id -> IdUnfoldingFun -> [CoreExpr] -> Maybe CoreExpr
+	ru_try   :: RuleFun
 		-- ^ This function does the rewrite.  It given too many
 		-- arguments, it simply discards them; the returned 'CoreExpr'
 		-- is just the rewrite of 'ru_fn' applied to the first 'ru_nargs' args
     }
 		-- See Note [Extra args in rule matching] in Rules.lhs
+
+type RuleFun = DynFlags -> InScopeEnv -> Id -> [CoreExpr] -> Maybe CoreExpr
+type InScopeEnv = (InScopeSet, IdUnfoldingFun)
 
 type IdUnfoldingFun = Id -> Unfolding
 -- A function that embodies how to unfold an Id if you need
@@ -592,11 +634,11 @@ Representation of desugared vectorisation declarations that are fed to the vecto
 'ModGuts').
 
 \begin{code}
-data CoreVect = Vect      Id   (Maybe CoreExpr)
+data CoreVect = Vect      Id   CoreExpr
               | NoVect    Id
               | VectType  Bool TyCon (Maybe TyCon)
               | VectClass TyCon                     -- class tycon
-              | VectInst  Id                        -- instance dfun (always SCALAR)
+              | VectInst  Id                        -- instance dfun (always SCALAR)  !!!FIXME: should be superfluous now
 \end{code}
 
 
@@ -626,17 +668,15 @@ data Unfolding
 		       --
 		       -- Here, @f@ gets an @OtherCon []@ unfolding.
 
-  | DFunUnfolding       -- The Unfolding of a DFunId  
+  | DFunUnfolding {     -- The Unfolding of a DFunId  
     			-- See Note [DFun unfoldings]
-      		  	--     df = /\a1..am. \d1..dn. MkD (op1 a1..am d1..dn)
+      		  	--     df = /\a1..am. \d1..dn. MkD t1 .. tk
+                        --                                 (op1 a1..am d1..dn)
      		      	--     	    	      	       	   (op2 a1..am d1..dn)
-
-        Arity 		-- Arity = m+n, the *total* number of args 
-			--   (unusually, both type and value) to the dfun
-
-        DataCon 	-- The dictionary data constructor (possibly a newtype datacon)
-
-        [DFunArg CoreExpr]  -- Specification of superclasses and methods, in positional order
+        df_bndrs :: [Var],      -- The bound variables [a1..m],[d1..dn]
+        df_con   :: DataCon,    -- The dictionary data constructor (never a newtype datacon)
+        df_args  :: [CoreExpr]  -- Args of the data con: types, superclasses and methods,
+    }                           -- in positional order
 
   | CoreUnfolding {		-- An unfolding for an Id with no pragma, 
                                 -- or perhaps a NOINLINE pragma
@@ -673,24 +713,12 @@ data Unfolding
   --
   --  uf_guidance:  Tells us about the /size/ of the unfolding template
 
-------------------------------------------------
-data DFunArg e   -- Given (df a b d1 d2 d3)
-  = DFunPolyArg  e      -- Arg is (e a b d1 d2 d3)
-  | DFunLamArg   Int    -- Arg is one of [a,b,d1,d2,d3], zero indexed
-  deriving( Functor )
-
-  -- 'e' is often CoreExpr, which are usually variables, but can
-  -- be trivial expressions instead (e.g. a type application).
-
-dfunArgExprs :: [DFunArg e] -> [e]
-dfunArgExprs []                    = []
-dfunArgExprs (DFunPolyArg  e : as) = e : dfunArgExprs as
-dfunArgExprs (DFunLamArg {}  : as) = dfunArgExprs as
-
 
 ------------------------------------------------
 data UnfoldingSource
-  = InlineRhs          -- The current rhs of the function
+  = -- See also Note [Historical note: unfoldings for wrappers]
+   
+    InlineRhs          -- The current rhs of the function
     		       -- Replace uf_tmpl each time around
 
   | InlineStable       -- From an INLINE or INLINABLE pragma 
@@ -714,13 +742,6 @@ data UnfoldingSource
     		       -- Only a few primop-like things have this property 
                        -- (see MkId.lhs, calls to mkCompulsoryUnfolding).
                        -- Inline absolutely always, however boring the context.
-
-  | InlineWrapper Id   -- This unfolding is a the wrapper in a 
-		       --     worker/wrapper split from the strictness analyser
-	               -- The Id is the worker-id
-		       -- Used to abbreviate the uf_tmpl in interface files
-		       --	which don't need to contain the RHS; 
-		       --	it can be derived from the strictness info
 
 
 
@@ -750,6 +771,25 @@ data UnfoldingGuidance
 
   | UnfNever	    -- The RHS is big, so don't inline it
 \end{code}
+
+Note [Historical note: unfoldings for wrappers]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We used to have a nice clever scheme in interface files for
+wrappers. A wrapper's unfolding can be reconstructed from its worker's
+id and its strictness. This decreased .hi file size (sometimes
+significantly, for modules like GHC.Classes with many high-arity w/w
+splits) and had a slight corresponding effect on compile times.
+
+However, when we added the second demand analysis, this scheme lead to
+some Core lint errors. The second analysis could change the strictness
+signatures, which sometimes resulted in a wrapper's regenerated
+unfolding applying the wrapper to too many arguments.
+
+Instead of repairing the clever .hi scheme, we abandoned it in favor
+of simplicity. The .hi sizes are usually insignificant (excluding the
++1M for base libraries), and compile time barely increases (~+1% for
+nofib). The nicer upshot is that the UnfoldingSource no longer mentions
+an Id, so, eg, substitutions need not traverse them.
 
 
 Note [DFun unfoldings]
@@ -820,9 +860,8 @@ isStableSource :: UnfoldingSource -> Bool
 -- Keep the unfolding template
 isStableSource InlineCompulsory   = True
 isStableSource InlineStable       = True
-isStableSource (InlineWrapper {}) = True
 isStableSource InlineRhs          = False
- 
+
 -- | Retrieves the template of an unfolding: panics if none is known
 unfoldingTemplate :: Unfolding -> CoreExpr
 unfoldingTemplate = uf_tmpl
@@ -953,7 +992,7 @@ See also Note [Inlining an InlineRule] in CoreUnfold.
 Note [OccInfo in unfoldings and rules]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In unfoldings and rules, we guarantee that the template is occ-analysed,
-so that the occurence info on the binders is correct.  This is important,
+so that the occurrence info on the binders is correct.  This is important,
 because the Simplifier does not re-analyse the template when using it. If
 the occurrence info is wrong
   - We may get more simpifier iterations than necessary, because
@@ -1027,6 +1066,9 @@ a list of CoreBind
    chunks.  
 
 \begin{code}
+
+-- If you edit this type, you may need to update the GHC formalism
+-- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
 type CoreProgram = [CoreBind]	-- See Note [CoreProgram]
 
 -- | The common case for the type of binders and variables when
@@ -1064,6 +1106,25 @@ instance Outputable b => OutputableBndr (TaggedBndr b) where
   pprBndr _ b = ppr b	-- Simple
   pprInfixOcc  b = ppr b
   pprPrefixOcc b = ppr b
+
+deTagExpr :: TaggedExpr t -> CoreExpr
+deTagExpr (Var v)                   = Var v
+deTagExpr (Lit l)                   = Lit l
+deTagExpr (Type ty)                 = Type ty
+deTagExpr (Coercion co)             = Coercion co
+deTagExpr (App e1 e2)               = App (deTagExpr e1) (deTagExpr e2)
+deTagExpr (Lam (TB b _) e)          = Lam b (deTagExpr e)
+deTagExpr (Let bind body)           = Let (deTagBind bind) (deTagExpr body)
+deTagExpr (Case e (TB b _) ty alts) = Case (deTagExpr e) b ty (map deTagAlt alts)
+deTagExpr (Tick t e)                = Tick t (deTagExpr e)
+deTagExpr (Cast e co)               = Cast (deTagExpr e) co
+
+deTagBind :: TaggedBind t -> CoreBind
+deTagBind (NonRec (TB b _) rhs) = NonRec b (deTagExpr rhs)
+deTagBind (Rec prs)             = Rec [(b, deTagExpr rhs) | (TB b _, rhs) <- prs]
+
+deTagAlt :: TaggedAlt t -> CoreAlt
+deTagAlt (con, bndrs, rhs) = (con, [b | TB b _ <- bndrs], deTagExpr rhs)
 \end{code}
 
 
@@ -1093,26 +1154,31 @@ mkCoApps  f args = foldl (\ e a -> App e (Coercion a)) f args
 mkVarApps f vars = foldl (\ e a -> App e (varToCoreExpr a)) f vars
 mkConApp con args = mkApps (Var (dataConWorkId con)) args
 
+mkConApp2 :: DataCon -> [Type] -> [Var] -> Expr b
+mkConApp2 con tys arg_ids = Var (dataConWorkId con) 
+                            `mkApps` map Type tys
+                            `mkApps` map varToCoreExpr arg_ids
+
 
 -- | Create a machine integer literal expression of type @Int#@ from an @Integer@.
 -- If you want an expression of type @Int@ use 'MkCore.mkIntExpr'
-mkIntLit      :: Integer -> Expr b
+mkIntLit      :: DynFlags -> Integer -> Expr b
 -- | Create a machine integer literal expression of type @Int#@ from an @Int@.
 -- If you want an expression of type @Int@ use 'MkCore.mkIntExpr'
-mkIntLitInt   :: Int     -> Expr b
+mkIntLitInt   :: DynFlags -> Int     -> Expr b
 
-mkIntLit    n = Lit (mkMachInt n)
-mkIntLitInt n = Lit (mkMachInt (toInteger n))
+mkIntLit    dflags n = Lit (mkMachInt dflags n)
+mkIntLitInt dflags n = Lit (mkMachInt dflags (toInteger n))
 
 -- | Create a machine word literal expression of type  @Word#@ from an @Integer@.
 -- If you want an expression of type @Word@ use 'MkCore.mkWordExpr'
-mkWordLit     :: Integer -> Expr b
+mkWordLit     :: DynFlags -> Integer -> Expr b
 -- | Create a machine word literal expression of type  @Word#@ from a @Word@.
 -- If you want an expression of type @Word@ use 'MkCore.mkWordExpr'
-mkWordLitWord :: Word -> Expr b
+mkWordLitWord :: DynFlags -> Word -> Expr b
 
-mkWordLit     w = Lit (mkMachWord w)
-mkWordLitWord w = Lit (mkMachWord (toInteger w))
+mkWordLit     dflags w = Lit (mkMachWord dflags w)
+mkWordLitWord dflags w = Lit (mkMachWord dflags (toInteger w))
 
 mkWord64LitWord64 :: Word64 -> Expr b
 mkWord64LitWord64 w = Lit (mkMachWord64 (toInteger w))
@@ -1191,6 +1257,8 @@ varsToCoreExprs vs = map varToCoreExpr vs
 \begin{code}
 -- | Extract every variable by this group
 bindersOf  :: Bind b -> [b]
+-- If you edit this function, you may need to update the GHC formalism
+-- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
 bindersOf (NonRec binder _) = [binder]
 bindersOf (Rec pairs)       = [binder | (binder, _) <- pairs]
 
@@ -1282,8 +1350,9 @@ isRuntimeVar = isId
 isRuntimeArg :: CoreExpr -> Bool
 isRuntimeArg = isValArg
 
--- | Returns @False@ iff the expression is a 'Type' or 'Coercion'
--- expression at its top level
+-- | Returns @True@ for value arguments, false for type args
+-- NB: coercions are value arguments (zero width, to be sure,
+-- like State#, but still value args).
 isValArg :: Expr b -> Bool
 isValArg e = not (isTypeArg e)
 

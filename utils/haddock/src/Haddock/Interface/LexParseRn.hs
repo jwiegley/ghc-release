@@ -4,6 +4,7 @@
 -- |
 -- Module      :  Haddock.Interface.LexParseRn
 -- Copyright   :  (c) Isaac Dupree 2009,
+--                    Mateusz Kowalczyk 2013
 -- License     :  BSD-like
 --
 -- Maintainer  :  haddock@projects.haskell.org
@@ -17,10 +18,9 @@ module Haddock.Interface.LexParseRn
   , processModuleHeader
   ) where
 
-
+import qualified Data.IntSet as IS
 import Haddock.Types
-import Haddock.Lex
-import Haddock.Parse
+import Haddock.Parser
 import Haddock.Interface.ParseModuleHeader
 import Haddock.Doc
 
@@ -29,11 +29,10 @@ import Data.List
 import Data.Maybe
 import FastString
 import GHC
+import DynFlags (ExtensionFlag(..), languageExtensions)
 import Name
 import Outputable
 import RdrName
-import RnEnv
-
 
 processDocStrings :: DynFlags -> GlobalRdrEnv -> [HsDocString] -> ErrMsgM (Maybe (Doc Name))
 processDocStrings dflags gre strs = do
@@ -45,25 +44,25 @@ processDocStrings dflags gre strs = do
 
 
 processDocStringParas :: DynFlags -> GlobalRdrEnv -> HsDocString -> ErrMsgM (Maybe (Doc Name))
-processDocStringParas = process parseParas
+processDocStringParas = process parseParasMaybe
 
 
 processDocString :: DynFlags -> GlobalRdrEnv -> HsDocString -> ErrMsgM (Maybe (Doc Name))
-processDocString = process parseString
+processDocString = process parseStringMaybe
 
-process :: ([LToken] -> Maybe (Doc RdrName))
+process :: (DynFlags -> String -> Maybe (Doc RdrName))
         -> DynFlags
         -> GlobalRdrEnv
         -> HsDocString
         -> ErrMsgM (Maybe (Doc Name))
 process parse dflags gre (HsDocString fs) = do
    let str = unpackFS fs
-   let toks = tokenise dflags str (0,0)  -- TODO: real position
-   case parse toks of
+   case parse dflags str of
      Nothing -> do
        tell [ "doc comment parse failed: " ++ str ]
        return Nothing
-     Just doc -> return (Just (rename dflags gre doc))
+     Just doc -> do
+       return (Just (rename dflags gre doc))
 
 
 processModuleHeader :: DynFlags -> GlobalRdrEnv -> SafeHaskellMode -> Maybe LHsDocString
@@ -84,7 +83,14 @@ processModuleHeader dflags gre safety mayStr = do
                 hmi' = hmi { hmi_description = descr }
                 doc' = rename dflags gre doc
             return (hmi', Just doc')
-  return (hmi { hmi_safety = Just $ showPpr dflags safety }, doc)
+
+  let flags :: [ExtensionFlag]
+      -- We remove the flags implied by the language setting and we display the language instead
+      flags = map toEnum (IS.toList $ extensionFlags dflags) \\ languageExtensions (language dflags)
+  return (hmi { hmi_safety = Just $ showPpr dflags safety
+              , hmi_language = language dflags
+              , hmi_extensions = flags
+              } , doc)
   where
     failure = (emptyHaddockModInfo, Nothing)
 
@@ -96,7 +102,7 @@ rename dflags gre = rn
       DocAppend a b -> DocAppend (rn a) (rn b)
       DocParagraph doc -> DocParagraph (rn doc)
       DocIdentifier x -> do
-        let choices = dataTcOccs x
+        let choices = dataTcOccs' x
         let names = concatMap (\c -> map gre_name (lookupGRE_RdrName c gre)) choices
         case names of
           [] ->
@@ -109,8 +115,10 @@ rename dflags gre = rn
           a:b:_ | isTyConName a -> DocIdentifier a | otherwise -> DocIdentifier b
               -- If an id can refer to multiple things, we give precedence to type
               -- constructors.
+
       DocWarning doc -> DocWarning (rn doc)
       DocEmphasis doc -> DocEmphasis (rn doc)
+      DocBold doc -> DocBold (rn doc)
       DocMonospaced doc -> DocMonospaced (rn doc)
       DocUnorderedList docs -> DocUnorderedList (map rn docs)
       DocOrderedList docs -> DocOrderedList (map rn docs)
@@ -125,6 +133,21 @@ rename dflags gre = rn
       DocExamples e -> DocExamples e
       DocEmpty -> DocEmpty
       DocString str -> DocString str
+      DocHeader (Header l t) -> DocHeader $ Header l (rn t)
+
+dataTcOccs' :: RdrName -> [RdrName]
+-- If the input is a data constructor, return both it and a type
+-- constructor.  This is useful when we aren't sure which we are
+-- looking at.
+--
+-- We use this definition instead of the GHC's to provide proper linking to
+-- functions accross modules. See ticket #253 on Haddock Trac.
+dataTcOccs' rdr_name
+  | isDataOcc occ             = [rdr_name, rdr_name_tc]
+  | otherwise                 = [rdr_name]
+  where
+    occ = rdrNameOcc rdr_name
+    rdr_name_tc = setRdrNameSpace rdr_name tcName
 
 
 outOfScope :: DynFlags -> RdrName -> Doc a

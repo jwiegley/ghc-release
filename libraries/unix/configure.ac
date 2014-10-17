@@ -33,6 +33,8 @@ AC_CHECK_FUNCS([nanosleep])
 AC_CHECK_FUNCS([ptsname])
 AC_CHECK_FUNCS([setitimer])
 AC_CHECK_FUNCS([readdir_r])
+dnl not available on android so check for it
+AC_CHECK_FUNCS([telldir seekdir])
 
 AC_CHECK_MEMBERS([struct stat.st_atim])
 AC_CHECK_MEMBERS([struct stat.st_mtim])
@@ -50,14 +52,19 @@ AC_CHECK_MEMBERS([struct stat.st_uatime])
 AC_CHECK_MEMBERS([struct stat.st_umtime])
 AC_CHECK_MEMBERS([struct stat.st_uctime])
 
+AC_CHECK_MEMBER([struct passwd.pw_gecos], [], [AC_DEFINE([HAVE_NO_PASSWD_PW_GECOS],[],[Ignore the pw_gecos member of passwd where it does not exist])], [[#include <pwd.h>]])
+
+# Functions for changing file timestamps
+AC_CHECK_FUNCS([utimensat futimens])
+AC_CHECK_FUNCS([lutimes futimes])
+
 # Additional temp functions
 AC_CHECK_FUNCS([mkstemps mkdtemp])
 
 # Avoid adding rt if absent or unneeded
-AC_CHECK_LIB(rt, shm_open, [EXTRA_LIBS="$EXTRA_LIBS rt" CFLAGS="$CFLAGS -lrt"])
-
-# needs -lrt on linux
-AC_CHECK_FUNCS([shm_open shm_unlink])
+# shm_open needs -lrt on linux
+AC_SEARCH_LIBS(shm_open, rt, [AC_CHECK_FUNCS([shm_open shm_unlink])])
+AS_IF([test "x$ac_cv_search_shm_open" = x-lrt], [EXTRA_LIBS="$EXTRA_LIBS rt"])
 
 FP_CHECK_CONSTS([SIGABRT SIGALRM SIGBUS SIGCHLD SIGCONT SIGFPE SIGHUP SIGILL SIGINT SIGKILL SIGPIPE SIGQUIT SIGSEGV SIGSTOP SIGTERM SIGTSTP SIGTTIN SIGTTOU SIGUSR1 SIGUSR2 SIGPOLL SIGPROF SIGSYS SIGTRAP SIGURG SIGVTALRM SIGXCPU SIGXFSZ SIG_BLOCK SIG_SETMASK SIG_UNBLOCK], [
 #if HAVE_SIGNAL_H
@@ -221,7 +228,6 @@ fi
 
 # Avoid adding dl if absent or unneeded
 AC_CHECK_LIB(dl, dlopen, [EXTRA_LIBS="$EXTRA_LIBS dl"])
-AC_SUBST([EXTRA_LIBS])
 
 # -{l,}pthread goo
 AC_CANONICAL_TARGET
@@ -230,6 +236,7 @@ AC_SEARCH_LIBS(sem_close, pthread,
     [EXTRA_LIBS="$EXTRA_LIBS $ac_lib"],
     [AC_MSG_NOTICE([Not found])])
 
+AC_SUBST([EXTRA_LIBS])
 AC_CONFIG_FILES([unix.buildinfo])
 
 AC_OUTPUT

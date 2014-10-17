@@ -21,17 +21,21 @@ test('conc071', omit_ways(['threaded2']), compile_and_run, [''])
 test('conc072', only_ways(['threaded2']), compile_and_run, [''])
 test('conc073', normal, compile_and_run, [''])
 
-test('1980', normal, compile_and_run, [''])
-test('2910', normal, compile_and_run, [''])
-test('2910a', normal, compile_and_run, [''])
-test('3279', normal, compile_and_run, [''])
+# vector code must get inlined to become non-allocating
+test('T367', [reqlib('vector'), omit_ways(['ghci']), timeout_multiplier(0.001)], compile_and_run, ['-O2 -fno-omit-yields'])
+test('T367_letnoescape', [timeout_multiplier(0.02)], compile_and_run, ['-fno-omit-yields'])
+
+test('T1980', normal, compile_and_run, [''])
+test('T2910', normal, compile_and_run, [''])
+test('T2910a', normal, compile_and_run, [''])
+test('T3279', normal, compile_and_run, [''])
 
 # This test takes a long time with the default context switch interval
-test('3429', extra_run_opts('+RTS -C0.001 -RTS'), compile_and_run, [''])
+test('T3429', extra_run_opts('+RTS -C0.001 -RTS'), compile_and_run, [''])
 
 # without -O, goes into an infinite loop
 # GHCi does not detect the infinite loop.  We should really fix this.
-test('4030', omit_ways('ghci'), compile_and_run, ['-O'])
+test('T4030', omit_ways('ghci'), compile_and_run, ['-O'])
 
 # each of these runs for about a second
 test('throwto001', [reqlib('random'), extra_run_opts('1000 2000')],
@@ -46,34 +50,41 @@ test('async001', normal, compile_and_run, [''])
 
 test('numsparks001', only_ways(['threaded1']), compile_and_run, [''])
 
-test('4262', [ skip, # skip for now, it doesn't give reliable results
-               only_ways(['threaded1']),
-               unless_os('linux',skip),
-               if_compiler_lt('ghc', '7.1', expect_fail) ],
-             compile_and_run, [''])
+test('T4262', [ skip, # skip for now, it doesn't give reliable results
+                only_ways(['threaded1']),
+                unless(opsys('linux'),skip),
+                when(compiler_lt('ghc', '7.1'), expect_fail) ],
+              compile_and_run, [''])
 
-test('4813', normal, compile_and_run, [''])
-test('4811', normal, compile_and_run, [''])
+test('T4813', normal, compile_and_run, [''])
+test('T4811', normal, compile_and_run, [''])
 
 test('allowinterrupt001', normal, compile_and_run, [''])
 
 # try hard to provoke the error by running the test 100 times
-test('5558',
+test('T5558',
      [ only_ways(['threaded2']),
        cmd_wrapper(
          lambda c: "for i in %s; do %s || break; done"  %
            (" ".join(str(i) for i in range(1,101)), c)) ],
      compile_and_run, [''])
 
-test('5421', normal, compile_and_run, [''])
-test('5611', normal, compile_and_run, [''])
-test('5238', normal, compile_and_run, [''])
-test('5866', exit_code(1), compile_and_run, [''])
+test('T5421', normal, compile_and_run, [''])
+test('T5611', normal, compile_and_run, [''])
+test('T5238', normal, compile_and_run, [''])
+test('T5866', exit_code(1), compile_and_run, [''])
+
+test('readMVar1', normal, compile_and_run, [''])
+test('readMVar2', normal, compile_and_run, [''])
+test('readMVar3', normal, compile_and_run, [''])
+test('tryReadMVar1', normal, compile_and_run, [''])
+
+test('T7970', normal, compile_and_run, [''])
 
 # -----------------------------------------------------------------------------
 # These tests we only do for a full run
 
-def f( opts ):
+def f( name, opts ):
   if config.fast:
   	opts.skip = 1
 
@@ -85,16 +96,18 @@ test('conc002', normal, compile_and_run, [''])
 # Omit GHCi way - it blows up to 0.5G.  Something to do with the threaded RTS?
 test('conc004', omit_ways(['ghci']), compile_and_run, [''])
 
-test('conc007', compose(only_compiler_types(['ghc']),
-			extra_run_opts('+RTS -H128M -RTS')),
+test('conc007', [only_compiler_types(['ghc']),
+                 extra_run_opts('+RTS -H128M -RTS')],
 		compile_and_run, [''])
 test('conc008', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc009', compose(only_compiler_types(['ghc']), exit_code(1)),
+test('conc009', [only_compiler_types(['ghc']), exit_code(1)],
 		compile_and_run, [''])
 test('conc010', only_compiler_types(['ghc']), compile_and_run, [''])
 
 # conc012(ghci) needs a smaller stack, or it takes forever
-test('conc012', normal, compile_and_run, ['+RTS -K8m -RTS'])
+test('conc012', [only_compiler_types(['ghc']),
+                 extra_run_opts('+RTS -K8m -RTS')],
+                compile_and_run, [''])
 
 test('conc013', only_compiler_types(['ghc']), compile_and_run, [''])
 
@@ -106,8 +119,8 @@ test('conc016', [ omit_ways(['threaded2']), # see comment in conc016.hs
 test('conc017', only_compiler_types(['ghc']), compile_and_run, [''])
 test('conc017a', only_compiler_types(['ghc']), compile_and_run, [''])
 test('conc018', only_compiler_types(['ghc']), compile_and_run, [''])
-test('conc019', compose(only_compiler_types(['ghc']),
-			extra_run_opts('+RTS -K16m -RTS')),
+test('conc019', [only_compiler_types(['ghc']),
+                 extra_run_opts('+RTS -K16m -RTS')],
 		compile_and_run, [''])
 test('conc020', only_compiler_types(['ghc']), compile_and_run, [''])
 test('conc021', [ omit_ways(['ghci']), exit_code(1) ], compile_and_run, [''])
@@ -123,29 +136,29 @@ if config.platform == 'i386-unknown-mingw32':
 else:
    conc023_ways = normal
 
-test('conc023', composes([skip_if_fast,
-                          only_compiler_types(['ghc']),
-                          reqlib('random'),
-                          conc023_ways]), compile_and_run, [''])
+test('conc023', [when(fast(), skip),
+                 only_compiler_types(['ghc']),
+                 reqlib('random'),
+                 conc023_ways], compile_and_run, [''])
 
 test('conc024', only_compiler_types(['ghc']), compile_and_run, [''])
 test('conc025', normal, compile_and_run, [''])
 test('conc026', only_compiler_types(['ghc']), compile_and_run, [''])
 test('conc028', normal, compile_and_run, [''])
 test('conc029', normal, compile_and_run, [''])
-test('conc030', compose(only_compiler_types(['ghc']),
-			extra_run_opts('+RTS -K4M -RTS')),
+test('conc030',
+     [only_compiler_types(['ghc']), extra_run_opts('+RTS -K4M -RTS')],
 		compile_and_run, [''])
 
-test('conc031', normal, compile_and_run, [''])
+test('conc031', exit_code(1), compile_and_run, [''])
 
 test('conc032', only_compiler_types(['ghc']), compile_and_run, [''])
 test('conc033', normal, compile_and_run, [''])
 
 # Omit for GHCi, because it just sits there waiting for you to press ^C
-test('conc034', compose(only_compiler_types(['ghc']),
-			compose(omit_ways(['ghci']), 
-			extra_run_opts('+RTS -C0 -RTS'))),
+test('conc034', [only_compiler_types(['ghc']),
+                 omit_ways(['ghci']), 
+                 extra_run_opts('+RTS -C0 -RTS')],
 		compile_and_run, [''])
 
 test('conc035', only_compiler_types(['ghc']), compile_and_run, [''])
@@ -166,8 +179,8 @@ test('conc036', skip, compile_and_run, [''])
 
 
 # Interrupting foreign calls only makes sense if we are threaded
-test('foreignInterruptible', [skip_if_fast,
-                              if_os('mingw32',expect_fail),
+test('foreignInterruptible', [when(fast(), skip),
+                              when(opsys('mingw32'),expect_fail),
                               # I don't think we support interrupting Sleep()
                               # on Windows.  --SDM
                               only_threaded_ways,
@@ -183,9 +196,8 @@ test('conc038', only_ways(['threaded1','threaded2']), compile_and_run, [''])
 test('conc039', omit_ways(['ghci','threaded1','threaded2','profthreaded']), compile_and_run, [''])
 
 # Omit for GHCi, uses foreign export
-test('conc040', compose(only_compiler_types(['ghc']),
-			compose(exit_code(1),
-			omit_ways(['ghci']))),
+test('conc040',
+     [only_compiler_types(['ghc']), exit_code(1), omit_ways(['ghci'])],
 		compile_and_run, [''])
 
 # STM-related tests.
@@ -200,9 +212,7 @@ test('conc058', only_compiler_types(['ghc']), compile_and_run, [''])
 test('conc059',
      [only_compiler_types(['ghc']),
       only_ways(['threaded1','threaded2']),
-      # This fails on Windows for unknown reasons
-      if_os('mingw32', expect_fail_for(['threaded2'])),
-      compile_cmd_prefix('$MAKE conc059_setup && '),
+      pre_cmd('$MAKE -s --no-print-directory conc059_setup'),
       extra_clean(['conc059_c.o'])],
      compile_and_run,
      ['conc059_c.c -no-hs-main'])
@@ -232,3 +242,6 @@ test('setnumcapabilities001',
        reqlib('parallel'),
        skip_if_not_smp ],
      compile_and_run, [''])
+
+# omit ghci, which can't handle unboxed tuples:
+test('compareAndSwap', [omit_ways(['ghci','hpc']), reqlib('primitive')], compile_and_run, [''])

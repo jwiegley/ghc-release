@@ -30,22 +30,11 @@ check title expected got
          showProblems "Missing flags" missing
 
 expectedGhcOnlyExtensions :: [String]
-expectedGhcOnlyExtensions = ["ParallelArrays",
-                             "RelaxedLayout",
-                             "DeriveGeneric",
-                             "DefaultSignatures",
-                             "InterruptibleFFI",
+expectedGhcOnlyExtensions = ["RelaxedLayout",
                              "AlternativeLayoutRule",
                              "AlternativeLayoutRuleTransitional",
-                             "MonadComprehensions",
-                             "TraditionalRecordSyntax",
-                             "DataKinds",
-                             "PolyKinds",
-                             "ExplicitNamespaces",
-                             "InstanceSigs",
-                             "CApiFFI",
-                             "LambdaCase",
-                             "MultiWayIf"]
+                             "JavaScriptFFI",
+                             "PatternSynonyms"]
 
 expectedCabalOnlyExtensions :: [String]
 expectedCabalOnlyExtensions = ["Generics",
@@ -57,5 +46,6 @@ expectedCabalOnlyExtensions = ["Generics",
                                "RegularPatterns",
                                "SafeImports",
                                "Safe",
+                               "Unsafe",
                                "Trustworthy"]
 

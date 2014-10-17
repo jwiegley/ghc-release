@@ -1,6 +1,4 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -fno-warn-unused-imports #-}
-#if __GLASGOW_HASKELL__ >= 701
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 -----------------------------------------------------------------------------
@@ -28,9 +26,12 @@ module System.Posix.SharedMem
 #include "HsUnix.h"
 
 import System.Posix.Types
-import System.Posix.Error
+#if defined(HAVE_SHM_OPEN) || defined(HAVE_SHM_UNLINK)
 import Foreign.C
+#endif
+#ifdef HAVE_SHM_OPEN
 import Data.Bits
+#endif
 
 data ShmOpenFlags = ShmOpenFlags 
     { shmReadWrite :: Bool,

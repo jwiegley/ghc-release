@@ -7,8 +7,13 @@
  * even when multiple versions of the library are loaded.  e.g. see
  * Data.Typeable and GHC.Conc.
  *
- * If/when we switch to a dynamically-linked GHCi, this can all go
- * away, because there would be just one copy of each library.
+ * How are multiple versions of a library loaded? Examples:
+ *
+ *   base - a statically-linked ghci has its own copy, so might libraries it
+ *          dynamically loads
+ *
+ *   libHSghc - a statically-linked ghc has its own copy and so will Core
+ *              plugins it dynamically loads (cf CoreMonad.reinitializeGlobals)
  *
  * ---------------------------------------------------------------------------*/
 
@@ -25,6 +30,9 @@ typedef enum {
     GHCConcWindowsProddingStore,
     SystemEventThreadEventManagerStore,
     SystemEventThreadIOManagerThreadStore,
+    SystemTimerThreadEventManagerStore,
+    SystemTimerThreadIOManagerThreadStore,
+    LibHSghcFastStringTable,
     MaxStoreKey
 } StoreKey;
 
@@ -113,4 +121,22 @@ StgStablePtr
 getOrSetSystemEventThreadIOManagerThreadStore(StgStablePtr ptr)
 {
     return getOrSetKey(SystemEventThreadIOManagerThreadStore,ptr);
+}
+
+StgStablePtr
+getOrSetSystemTimerThreadEventManagerStore(StgStablePtr ptr)
+{
+    return getOrSetKey(SystemTimerThreadEventManagerStore,ptr);
+}
+
+StgStablePtr
+getOrSetSystemTimerThreadIOManagerThreadStore(StgStablePtr ptr)
+{
+    return getOrSetKey(SystemTimerThreadIOManagerThreadStore,ptr);
+}
+
+StgStablePtr
+getOrSetLibHSghcFastStringTable(StgStablePtr ptr)
+{
+    return getOrSetKey(LibHSghcFastStringTable,ptr);
 }

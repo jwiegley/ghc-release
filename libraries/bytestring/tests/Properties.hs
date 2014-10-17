@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, BangPatterns #-}
+{-# LANGUAGE CPP, ScopedTypeVariables, BangPatterns #-}
 --
 -- Must have rules off, otherwise the fusion rules will replace the rhs
 -- with the lhs, and we only end up testing lhs == lhs
@@ -41,6 +41,7 @@ import qualified Data.ByteString            as P
 import qualified Data.ByteString.Internal   as P
 import qualified Data.ByteString.Unsafe     as P
 import qualified Data.ByteString.Char8      as C
+import qualified Data.ByteString.Short      as Short
 
 import qualified Data.ByteString.Lazy.Char8 as LC
 import qualified Data.ByteString.Lazy.Char8 as D
@@ -50,7 +51,12 @@ import Prelude hiding (abs)
 
 import Rules
 import QuickCheckUtils
+#if defined(HAVE_TEST_FRAMEWORK)
+import Test.Framework
+import Test.Framework.Providers.QuickCheck2
+#else
 import TestFramework
+#endif
 
 toInt64 :: Int -> Int64
 toInt64 = fromIntegral
@@ -76,6 +82,7 @@ prop_concatMapCC    = adjustSize (min 50) $
 prop_consCC         = D.cons                  `eq2`  C.cons
 prop_consCC'        = D.cons'                 `eq2`  C.cons
 prop_unconsCC       = D.uncons                `eq1`  C.uncons
+prop_unsnocCC       = D.unsnoc                `eq1`  C.unsnoc
 prop_countCC        = D.count                 `eq2`  ((toInt64 .) . C.count)
 prop_dropCC         = (D.drop . toInt64)      `eq2`  C.drop
 prop_dropWhileCC    = D.dropWhile             `eq2`  C.dropWhile
@@ -159,6 +166,7 @@ prop_concatMapBP    = adjustSize (`div` 4) $
 prop_consBP         = L.cons                 `eq2`  P.cons
 prop_consBP'        = L.cons'                `eq2`  P.cons
 prop_unconsBP       = L.uncons               `eq1`  P.uncons
+prop_unsnocBP       = L.unsnoc               `eq1`  P.unsnoc
 prop_countBP        = L.count                `eq2`  ((toInt64 .) . P.count)
 prop_dropBP         = (L.drop. toInt64)      `eq2`  P.drop
 prop_dropWhileBP    = L.dropWhile            `eq2`  P.dropWhile
@@ -918,10 +926,14 @@ prop_tailBB xs     = (not (null xs)) ==> tail xs    == (P.unpack . P.tail . P.pa
 prop_tail1BB xs    = (not (null xs)) ==> tail xs    == (P.unpack . P.unsafeTail. P.pack) xs
 
 prop_lastBB xs     = (not (null xs)) ==> last xs    == (P.last . P.pack) xs
+prop_last1BB xs    = (not (null xs)) ==> last xs    == (P.unsafeLast . P.pack) xs
 
 prop_initBB xs     =
     (not (null xs)) ==>
     init xs    == (P.unpack . P.init . P.pack) xs
+prop_init1BB xs     =
+    (not (null xs)) ==>
+    init xs    == (P.unpack . P.unsafeInit . P.pack) xs
 
 -- prop_null xs = (null xs) ==> null xs == (nullPS (pack xs))
 
@@ -953,7 +965,7 @@ prop_find_findIndexBB p xs =
                                 _      -> Nothing
 
 prop_foldl1BB xs a = ((foldl (\x c -> if c == a then x else c:x) [] xs)) ==
-                   (P.unpack $ P.foldl (\x c -> if c == a then x else c `P.cons` x) P.empty (P.pack xs)) 
+                   (P.unpack $ P.foldl (\x c -> if c == a then x else c `P.cons` x) P.empty (P.pack xs))
 prop_foldl2BB xs = P.foldl (\xs c -> c `P.cons` xs) P.empty (P.pack xs) == P.reverse (P.pack xs)
 
 prop_foldr1BB xs a = ((foldr (\c x -> if c == a then x else c:x) [] xs)) ==
@@ -1719,13 +1731,102 @@ prop_append_file_D x y = unsafePerformIO $ do
         (const $ do z <- D.readFile f
                     return (z==(x `D.append` y)))
 
-prop_packAddress = C.pack "this is a test" 
+prop_packAddress = C.pack "this is a test"
             ==
-                   C.pack "this is a test" 
+                   C.pack "this is a test"
 
 prop_isSpaceWord8 (w :: Word8) = isSpace c == P.isSpaceChar8 c
    where c = chr (fromIntegral w)
- 
+
+
+------------------------------------------------------------------------
+-- ByteString.Short
+--
+
+prop_short_pack_unpack xs =
+    (Short.unpack . Short.pack) xs == xs
+prop_short_toShort_fromShort bs =
+    (Short.fromShort . Short.toShort) bs == bs
+
+prop_short_toShort_unpack bs =
+    (Short.unpack . Short.toShort) bs == P.unpack bs
+prop_short_pack_fromShort xs =
+    (Short.fromShort . Short.pack) xs == P.pack xs
+
+prop_short_empty =
+    Short.empty == Short.toShort P.empty
+ && Short.empty == Short.pack []
+ && Short.null (Short.toShort P.empty)
+ && Short.null (Short.pack [])
+ && Short.null Short.empty
+
+prop_short_null_toShort bs =
+    P.null bs == Short.null (Short.toShort bs)
+prop_short_null_pack xs =
+    null xs == Short.null (Short.pack xs)
+
+prop_short_length_toShort bs =
+    P.length bs == Short.length (Short.toShort bs)
+prop_short_length_pack xs =
+    length xs == Short.length (Short.pack xs)
+
+prop_short_index_pack xs =
+    all (\i -> Short.pack xs `Short.index` i == xs !! i)
+        [0 .. length xs - 1]
+prop_short_index_toShort bs =
+    all (\i -> Short.toShort bs `Short.index` i == bs `P.index` i)
+        [0 .. P.length bs - 1]
+
+prop_short_eq xs ys =
+    (xs == ys) == (Short.pack xs == Short.pack ys)
+prop_short_ord xs ys =
+    (xs `compare` ys) == (Short.pack xs `compare` Short.pack ys)
+
+prop_short_mappend_empty_empty =
+    Short.empty `mappend` Short.empty  == Short.empty
+prop_short_mappend_empty xs =
+    Short.empty `mappend` Short.pack xs == Short.pack xs
+ && Short.pack xs `mappend` Short.empty == Short.pack xs
+prop_short_mappend xs ys =
+    (xs `mappend` ys) == Short.unpack (Short.pack xs `mappend` Short.pack ys)
+prop_short_mconcat xss =
+    mconcat xss == Short.unpack (mconcat (map Short.pack xss))
+
+prop_short_fromString s =
+    fromString s == Short.fromShort (fromString s)
+
+prop_short_show xs =
+    show (Short.pack xs) == show (map P.w2c xs)
+prop_short_show' xs =
+    show (Short.pack xs) == show (P.pack xs)
+
+prop_short_read xs =
+    read (show (Short.pack xs)) == Short.pack xs
+
+
+short_tests =
+    [ testProperty "pack/unpack"              prop_short_pack_unpack
+    , testProperty "toShort/fromShort"        prop_short_toShort_fromShort
+    , testProperty "toShort/unpack"           prop_short_toShort_unpack
+    , testProperty "pack/fromShort"           prop_short_pack_fromShort
+    , testProperty "empty"                    prop_short_empty
+    , testProperty "null/toShort"             prop_short_null_toShort
+    , testProperty "null/pack"                prop_short_null_pack
+    , testProperty "length/toShort"           prop_short_length_toShort
+    , testProperty "length/pack"              prop_short_length_pack
+    , testProperty "index/pack"               prop_short_index_pack
+    , testProperty "index/toShort"            prop_short_index_toShort
+    , testProperty "Eq"                       prop_short_eq
+    , testProperty "Ord"                      prop_short_ord
+    , testProperty "mappend/empty/empty"      prop_short_mappend_empty_empty
+    , testProperty "mappend/empty"            prop_short_mappend_empty
+    , testProperty "mappend"                  prop_short_mappend
+    , testProperty "mconcat"                  prop_short_mconcat
+    , testProperty "fromString"               prop_short_fromString
+    , testProperty "show"                     prop_short_show
+    , testProperty "show'"                    prop_short_show'
+    , testProperty "read"                     prop_short_read
+    ]
 
 ------------------------------------------------------------------------
 -- The entry point
@@ -1745,6 +1846,7 @@ tests = misc_tests
      ++ bb_tests
      ++ ll_tests
      ++ io_tests
+     ++ short_tests
      ++ rules
 
 --
@@ -1902,6 +2004,7 @@ cc_tests =
     , testProperty "prop_consCC"        prop_consCC
     , testProperty "prop_consCC'"       prop_consCC'
     , testProperty "prop_unconsCC"      prop_unconsCC
+    , testProperty "prop_unsnocCC"      prop_unsnocCC
     , testProperty "prop_countCC"       prop_countCC
     , testProperty "prop_dropCC"        prop_dropCC
     , testProperty "prop_dropWhileCC"   prop_dropWhileCC
@@ -1954,6 +2057,7 @@ bp_tests =
     , testProperty "cons"        prop_consBP
     , testProperty "cons'"       prop_consBP'
     , testProperty "uncons"      prop_unconsBP
+    , testProperty "unsnoc"      prop_unsnocBP
     , testProperty "eq"          prop_eqBP
     , testProperty "filter"      prop_filterBP
     , testProperty "find"        prop_findBP
@@ -2136,7 +2240,9 @@ bb_tests =
     , testProperty "tail"           prop_tailBB
     , testProperty "tail 1"         prop_tail1BB
     , testProperty "last"           prop_lastBB
+    , testProperty "last 1"         prop_last1BB
     , testProperty "init"           prop_initBB
+    , testProperty "init 1"         prop_init1BB
     , testProperty "append 1"       prop_append1BB
     , testProperty "append 2"       prop_append2BB
     , testProperty "append 3"       prop_append3BB
@@ -2465,3 +2571,4 @@ ll_tests =
     , testProperty "concatMap"          prop_concatMap
     , testProperty "isSpace"            prop_isSpaceWord8
     ]
+

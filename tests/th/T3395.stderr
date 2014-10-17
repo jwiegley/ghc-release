@@ -4,13 +4,8 @@ T3395.hs:6:9:
       r1 <- undefined
     (It should be an expression.)
     When splicing a TH expression: [r1 <- undefined | undefined]
-    In the expression:
-        $(return
+    In the splice:
+      $(return
         $ CompE
             [NoBindS (VarE $ mkName "undefined"),
              BindS (VarP $ mkName "r1") (VarE $ mkName "undefined")])
-    In an equation for `foo':
-        foo = $(return
-              $ CompE
-                  [NoBindS (VarE $ mkName "undefined"),
-                   BindS (VarP $ mkName "r1") (VarE $ mkName "undefined")])

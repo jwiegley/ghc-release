@@ -12,13 +12,13 @@
 module Haddock.Interface.ParseModuleHeader (parseModuleHeader) where
 
 import Haddock.Types
-import Haddock.Lex
-import Haddock.Parse
+import Haddock.Parser
 
 import RdrName
 import DynFlags
 
 import Data.Char
+import Control.Monad (mplus)
 
 -- -----------------------------------------------------------------------------
 -- Parsing module headers
@@ -36,9 +36,9 @@ parseModuleHeader dflags str0 =
 
       (_moduleOpt,str1) = getKey "Module" str0
       (descriptionOpt,str2) = getKey "Description" str1
-      (_copyrightOpt,str3) = getKey "Copyright" str2
-      (_licenseOpt,str4) = getKey "License" str3
-      (_licenceOpt,str5) = getKey "Licence" str4
+      (copyrightOpt,str3) = getKey "Copyright" str2
+      (licenseOpt,str4) = getKey "License" str3
+      (licenceOpt,str5) = getKey "Licence" str4
       (maintainerOpt,str6) = getKey "Maintainer" str5
       (stabilityOpt,str7) = getKey "Stability" str6
       (portabilityOpt,str8) = getKey "Portability" str7
@@ -46,22 +46,24 @@ parseModuleHeader dflags str0 =
       description1 :: Either String (Maybe (Doc RdrName))
       description1 = case descriptionOpt of
          Nothing -> Right Nothing
-         -- TODO: pass real file position
-         Just description -> case parseString $ tokenise dflags description (0,0) of
+         Just description -> case parseStringMaybe dflags description of
             Nothing -> Left ("Cannot parse Description: " ++ description)
             Just doc -> Right (Just doc)
    in
       case description1 of
          Left mess -> Left mess
-         -- TODO: pass real file position
-         Right docOpt -> case parseParas $ tokenise dflags str8 (0,0) of
+         Right docOpt -> case parseParasMaybe dflags str8 of
            Nothing -> Left "Cannot parse header documentation paragraphs"
            Just doc -> Right (HaddockModInfo {
             hmi_description = docOpt,
-            hmi_portability = portabilityOpt,
-            hmi_stability = stabilityOpt,
+            hmi_copyright = copyrightOpt,
+            hmi_license = licenseOpt `mplus` licenceOpt,
             hmi_maintainer = maintainerOpt,
-            hmi_safety = Nothing
+            hmi_stability = stabilityOpt,
+            hmi_portability = portabilityOpt,
+            hmi_safety = Nothing,
+            hmi_language = Nothing, -- set in LexParseRn
+            hmi_extensions = [] -- also set in LexParseRn
             }, doc)
 
 -- | This function is how we read keys.
@@ -158,4 +160,3 @@ parseKey key toParse0 =
       extractPrefix (c1:cs1) (c2:cs2)
          | toUpper c1 == toUpper c2 = extractPrefix cs1 cs2
          | otherwise = Nothing
-

@@ -2,7 +2,7 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 -- | Sizes on this architecture
@@ -30,7 +30,7 @@ module Size (
 
 where
 
-import OldCmm
+import Cmm
 import Outputable
 
 -- It looks very like the old MachRep, but it's now of purely local

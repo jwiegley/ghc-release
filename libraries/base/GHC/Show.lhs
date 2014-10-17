@@ -32,7 +32,6 @@
 --
 -----------------------------------------------------------------------------
 
--- #hide
 module GHC.Show
         (
         Show(..), ShowS,
@@ -157,6 +156,7 @@ class  Show a  where
     showsPrec _ x s = show x ++ s
     show x          = shows x ""
     showList ls   s = showList__ shows ls s
+    {-# MINIMAL showsPrec | show #-}
 
 showList__ :: (a -> ShowS) ->  [a] -> ShowS
 showList__ _     []     s = "[]" ++ s
@@ -209,7 +209,7 @@ instance Show Word where
 
 showWord :: Word# -> ShowS
 showWord w# cs
- | w# `ltWord#` 10## = C# (chr# (ord# '0'# +# word2Int# w#)) : cs
+ | isTrue# (w# `ltWord#` 10##) = C# (chr# (ord# '0'# +# word2Int# w#)) : cs
  | otherwise = case chr# (ord# '0'# +# word2Int# (w# `remWord#` 10##)) of
                c# ->
                    showWord (w# `quotWord#` 10##) (C# c# : cs)
@@ -366,7 +366,7 @@ showLitChar '\t'           s =  showString "\\t" s
 showLitChar '\v'           s =  showString "\\v" s
 showLitChar '\SO'          s =  protectEsc (== 'H') (showString "\\SO") s
 showLitChar c              s =  showString ('\\' : asciiTab!!ord c) s
-        -- I've done manual eta-expansion here, becuase otherwise it's
+        -- I've done manual eta-expansion here, because otherwise it's
         -- impossible to stop (asciiTab!!ord) getting floated out as an MFE
 
 showLitString :: String -> ShowS
@@ -390,12 +390,12 @@ showMultiLineString :: String -> [String]
 --   * break the string into multiple lines
 --   * wrap the entire thing in double quotes
 -- Example:  @showMultiLineString "hello\ngoodbye\nblah"@
--- returns   @["\"hello\\", "\\goodbye\\", "\\blah\""]@
+-- returns   @["\"hello\\n\\", "\\goodbye\n\\", "\\blah\""]@
 showMultiLineString str
   = go '\"' str
   where
     go ch s = case break (== '\n') s of
-                (l, _:s'@(_:_)) -> (ch : showLitString l "\\") : go '\\' s'
+                (l, _:s'@(_:_)) -> (ch : showLitString l "\\n\\") : go '\\' s'
                 (l, _)          -> [ch : showLitString l "\""]
 
 isDec :: Char -> Bool
@@ -424,20 +424,20 @@ Code specific for Ints.
 -- lower-case hexadecimal digits.
 intToDigit :: Int -> Char
 intToDigit (I# i)
-    | i >=# 0#  && i <=#  9# =  unsafeChr (ord '0' + I# i)
-    | i >=# 10# && i <=# 15# =  unsafeChr (ord 'a' + I# i - 10)
-    | otherwise           =  error ("Char.intToDigit: not a digit " ++ show (I# i))
+    | isTrue# (i >=# 0#)  && isTrue# (i <=#  9#) = unsafeChr (ord '0' + I# i)
+    | isTrue# (i >=# 10#) && isTrue# (i <=# 15#) = unsafeChr (ord 'a' + I# i - 10)
+    | otherwise =  error ("Char.intToDigit: not a digit " ++ show (I# i))
 
 showSignedInt :: Int -> Int -> ShowS
 showSignedInt (I# p) (I# n) r
-    | n <# 0# && p ># 6# = '(' : itos n (')' : r)
-    | otherwise          = itos n r
+    | isTrue# (n <# 0#) && isTrue# (p ># 6#) = '(' : itos n (')' : r)
+    | otherwise                              = itos n r
 
 itos :: Int# -> String -> String
 itos n# cs
-    | n# <# 0# =
+    | isTrue# (n# <# 0#) =
         let !(I# minInt#) = minInt in
-        if n# ==# minInt#
+        if isTrue# (n# ==# minInt#)
                 -- negateInt# minInt overflows, so we can't do that:
            then '-' : (case n# `quotRemInt#` 10# of
                        (# q, r #) ->
@@ -447,7 +447,7 @@ itos n# cs
     where
     itos' :: Int# -> String -> String
     itos' x# cs'
-        | x# <# 10#  = C# (chr# (ord# '0'# +# x#)) : cs'
+        | isTrue# (x# <# 10#) = C# (chr# (ord# '0'# +# x#)) : cs'
         | otherwise = case x# `quotRemInt#` 10# of
                       (# q, r #) ->
                           case chr# (ord# '0'# +# r) of

@@ -14,46 +14,65 @@ module Haddock.Backends.Xhtml.DocMarkup (
   docToHtml,
   rdrDocToHtml,
   origDocToHtml,
+  docToHtmlNoAnchors,
 
   docElement, docSection, docSection_,
 ) where
 
+import Control.Applicative ((<$>))
 
 import Haddock.Backends.Xhtml.Names
 import Haddock.Backends.Xhtml.Utils
 import Haddock.Types
 import Haddock.Utils
+import Haddock.Doc (combineDocumentation)
 
-import Text.XHtml hiding ( name, title, p, quote )
+import Text.XHtml hiding ( name, p, quote )
 import Data.Maybe (fromMaybe)
 
 import GHC
 
-
-parHtmlMarkup :: Qualification -> (a -> Html) -> DocMarkup a Html
-parHtmlMarkup qual ppId = Markup {
+parHtmlMarkup :: Qualification -> Bool
+              -> (Bool -> a -> Html) -> DocMarkup a Html
+parHtmlMarkup qual insertAnchors ppId = Markup {
   markupEmpty                = noHtml,
   markupString               = toHtml,
   markupParagraph            = paragraph,
   markupAppend               = (+++),
-  markupIdentifier           = thecode . ppId,
+  markupIdentifier           = thecode . ppId insertAnchors,
   markupIdentifierUnchecked  = thecode . ppUncheckedLink qual,
   markupModule               = \m -> let (mdl,ref) = break (=='#') m
                                      in ppModuleRef (mkModuleName mdl) ref,
   markupWarning              = thediv ! [theclass "warning"],
   markupEmphasis             = emphasize,
+  markupBold                 = strong,
   markupMonospaced           = thecode,
   markupUnorderedList        = unordList,
   markupOrderedList          = ordList,
   markupDefList              = defList,
   markupCodeBlock            = pre,
-  markupHyperlink            = \(Hyperlink url mLabel) -> anchor ! [href url] << fromMaybe url mLabel,
+  markupHyperlink            = \(Hyperlink url mLabel)
+                               -> if insertAnchors
+                                  then anchor ! [href url]
+                                       << fromMaybe url mLabel
+                                  else toHtml $ fromMaybe url mLabel,
   markupAName                = \aname -> namedAnchor aname << "",
-  markupPic                  = \path -> image ! [src path],
+  markupPic                  = \(Picture uri t) -> image ! ([src uri] ++ fromMaybe [] (return . title <$> t)),
   markupProperty             = pre . toHtml,
-  markupExample              = examplesToHtml
+  markupExample              = examplesToHtml,
+  markupHeader               = \(Header l t) -> makeHeader l t
   }
   where
+    makeHeader :: Int -> Html -> Html
+    makeHeader 1 mkup = h1 mkup
+    makeHeader 2 mkup = h2 mkup
+    makeHeader 3 mkup = h3 mkup
+    makeHeader 4 mkup = h4 mkup
+    makeHeader 5 mkup = h5 mkup
+    makeHeader 6 mkup = h6 mkup
+    makeHeader l _ = error $ "Somehow got a header level `" ++ show l ++ "' in DocMarkup!"
+
+
     examplesToHtml l = pre (concatHtml $ map exampleToHtml l) ! [theclass "screen"]
 
     exampleToHtml (Example expression result) = htmlExample
@@ -67,17 +86,22 @@ parHtmlMarkup qual ppId = Markup {
 -- ugly extra whitespace with some browsers).  FIXME: Does this still apply?
 docToHtml :: Qualification -> Doc DocName -> Html
 docToHtml qual = markup fmt . cleanup
-  where fmt = parHtmlMarkup qual (ppDocName qual)
+  where fmt = parHtmlMarkup qual True (ppDocName qual Raw)
 
+-- | Same as 'docToHtml' but it doesn't insert the 'anchor' element
+-- in links. This is used to generate the Contents box elements.
+docToHtmlNoAnchors :: Qualification -> Doc DocName -> Html
+docToHtmlNoAnchors qual = markup fmt . cleanup
+  where fmt = parHtmlMarkup qual False (ppDocName qual Raw)
 
 origDocToHtml :: Qualification -> Doc Name -> Html
 origDocToHtml qual = markup fmt . cleanup
-  where fmt = parHtmlMarkup qual ppName
+  where fmt = parHtmlMarkup qual True (const $ ppName Raw)
 
 
 rdrDocToHtml :: Qualification -> Doc RdrName -> Html
 rdrDocToHtml qual = markup fmt . cleanup
-  where fmt = parHtmlMarkup qual ppRdrName
+  where fmt = parHtmlMarkup qual True (const ppRdrName)
 
 
 docElement :: (Html -> Html) -> Html -> Html

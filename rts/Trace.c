@@ -179,6 +179,7 @@ static char *thread_stop_reasons[] = {
     [ThreadFinished] = "finished",
     [THREAD_SUSPENDED_FOREIGN_CALL] = "suspended while making a foreign call",
     [6 + BlockedOnMVar]         = "blocked on an MVar",
+    [6 + BlockedOnMVarRead]     = "blocked on an atomic MVar read",
     [6 + BlockedOnBlackHole]    = "blocked on a black hole",
     [6 + BlockedOnRead]         = "blocked on a read operation",
     [6 + BlockedOnWrite]        = "blocked on a write operation",
@@ -574,6 +575,52 @@ void traceSparkCounters_ (Capability *cap,
     }
 }
 
+void traceTaskCreate_ (Task       *task,
+                       Capability *cap)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        /* We currently don't do debug tracing of tasks but we must
+           test for TRACE_STDERR because of the !eventlog_enabled case. */
+    } else
+#endif
+    {
+        EventTaskId         taskid = serialisableTaskId(task);
+        EventKernelThreadId tid    = kernelThreadId();
+        postTaskCreateEvent(taskid, cap->no, tid);
+    }
+}
+
+void traceTaskMigrate_ (Task       *task,
+                        Capability *cap,
+                        Capability *new_cap)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        /* We currently don't do debug tracing of tasks but we must
+           test for TRACE_STDERR because of the !eventlog_enabled case. */
+    } else
+#endif
+    {
+        EventTaskId taskid = serialisableTaskId(task);
+        postTaskMigrateEvent(taskid, cap->no, new_cap->no);
+    }
+}
+
+void traceTaskDelete_ (Task *task)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        /* We currently don't do debug tracing of tasks but we must
+           test for TRACE_STDERR because of the !eventlog_enabled case. */
+    } else
+#endif
+    {
+        EventTaskId taskid = serialisableTaskId(task);
+        postTaskDeleteEvent(taskid);
+    }
+}
+
 #ifdef DEBUG
 static void traceCap_stderr(Capability *cap, char *msg, va_list ap)
 {
@@ -662,6 +709,28 @@ void traceUserMsg(Capability *cap, char *msg)
     traceFormatUserMsg(cap, "%s", msg);
 }
 
+void traceUserMarker(Capability *cap, char *markername)
+{
+    /* Note: traceUserMarker is special since it has no wrapper (it's called
+       from cmm code), so we check eventlog_enabled and TRACE_user here.
+     */
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR && TRACE_user) {
+        ACQUIRE_LOCK(&trace_utx);
+        tracePreface();
+        debugBelch("cap %d: User marker: %s\n", cap->no, markername);
+        RELEASE_LOCK(&trace_utx);
+    } else
+#endif
+    {
+        if (eventlog_enabled && TRACE_user) {
+            postUserMarker(cap, markername);
+        }
+    }
+    dtraceUserMarker(cap->no, markername);
+}
+
+
 void traceThreadLabel_(Capability *cap,
                        StgTSO     *tso,
                        char       *label)
@@ -728,6 +797,11 @@ void traceEnd (void)
 void dtraceUserMsgWrapper(Capability *cap, char *msg)
 {
     dtraceUserMsg(cap->no, msg);
+}
+
+void dtraceUserMarkerWrapper(Capability *cap, char *msg)
+{
+    dtraceUserMarker(cap->no, msg);
 }
 
 #endif /* !defined(DEBUG) && !defined(TRACING) && defined(DTRACE) */

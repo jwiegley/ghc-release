@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP #-}
-#if __GLASGOW_HASKELL__ >= 701
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 
@@ -21,27 +21,10 @@
 --
 -----------------------------------------------------------------------------
 
--- later: {-# DEPRECATED "Use System.Process instead" #-}
-module System.Cmd
+module System.Cmd {-# DEPRECATED "Use \"System.Process\" instead" #-} -- deprecated in 7.8
     ( system,        -- :: String -> IO ExitCode
       rawSystem,     -- :: FilePath -> [String] -> IO ExitCode
     ) where
 
-#ifndef __NHC__
 import System.Process
-#else
-import System
-
-rawSystem :: String -> [String] -> IO ExitCode
-rawSystem cmd args = system (unwords (map translate (cmd:args)))
-
--- copied from System.Process (qv)
-translate :: String -> String
-translate str = '"' : snd (foldr escape (True,"\"") str)
-  where escape '"'  (b,     str) = (True,  '\\' : '"'  : str)
-        escape '\\' (True,  str) = (True,  '\\' : '\\' : str)
-        escape '\\' (False, str) = (False, '\\' : str)
-        escape c    (b,     str) = (False, c : str)
-
-#endif
 

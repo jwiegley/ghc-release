@@ -22,7 +22,6 @@
 --
 -----------------------------------------------------------------------------
 
--- #hide
 module GHC.IO (
         IO(..), unIO, failIO, liftIO,
         unsafePerformIO, unsafeInterleaveIO,
@@ -37,7 +36,7 @@ module GHC.IO (
         catchException, catchAny, throwIO,
         mask, mask_, uninterruptibleMask, uninterruptibleMask_, 
         MaskingState(..), getMaskingState,
-        block, unblock, blocked, unsafeUnmask,
+        unsafeUnmask,
         onException, bracket, finally, evaluate
     ) where
 
@@ -171,7 +170,12 @@ because it omits the check that the IO is only being performed by a
 single thread.  Hence, when you use 'unsafeDupablePerformIO',
 there is a possibility that the IO action may be performed multiple
 times (on a multiprocessor), and you should therefore ensure that
-it gives the same results each time.
+it gives the same results each time. It may even happen that one
+of the duplicated IO actions is only run partially, and then interrupted
+in the middle without an exception being raised. Therefore, functions
+like 'bracket' cannot be used safely within 'unsafeDupablePerformIO'.
+
+/Since: 4.4.0.0/
 -}
 {-# NOINLINE unsafeDupablePerformIO #-}
 unsafeDupablePerformIO  :: IO a -> a
@@ -191,7 +195,7 @@ unsafeDupablePerformIO (IO m) = lazy (case m realWorld# of (# _, r #) -> r)
 --                             case writeIORef v r s of (# s1, _ #) ->
 --                             (# s1, r #)
 -- The strictness analyser will find that the binding for r is strict,
--- (becuase of uPIO's strictness sig), and so it'll evaluate it before 
+-- (because of uPIO's strictness sig), and so it'll evaluate it before 
 -- doing the writeIORef.  This actually makes tests/lib/should_run/memo002
 -- get a deadlock!  
 --
@@ -302,9 +306,6 @@ throwIO e = IO (raiseIO# (toException e))
 -- -----------------------------------------------------------------------------
 -- Controlling asynchronous exception delivery
 
-{-# DEPRECATED block "use Control.Exception.mask instead" #-}
--- | Note: this function is deprecated, please use 'mask' instead.
---
 -- Applying 'block' to a computation will
 -- execute that computation with asynchronous exceptions
 -- /blocked/.  That is, any thread which
@@ -322,9 +323,6 @@ throwIO e = IO (raiseIO# (toException e))
 block :: IO a -> IO a
 block (IO io) = IO $ maskAsyncExceptions# io
 
-{-# DEPRECATED unblock "use Control.Exception.mask instead" #-}
--- | Note: this function is deprecated, please use 'mask' instead.
---
 -- To re-enable asynchronous exceptions inside the scope of
 -- 'block', 'unblock' can be
 -- used.  It scopes in exactly the same way, so on exit from
@@ -357,12 +355,6 @@ getMaskingState  = IO $ \s ->
                              0# -> Unmasked
                              1# -> MaskedUninterruptible
                              _  -> MaskedInterruptible #)
-
-{-# DEPRECATED blocked "use Control.Exception.getMaskingState instead" #-}
--- | returns True if asynchronous exceptions are blocked in the
--- current thread.
-blocked :: IO Bool
-blocked = fmap (/= Unmasked) getMaskingState
 
 onException :: IO a -> IO b -> IO a
 onException io what = io `catchException` \e -> do _ <- what

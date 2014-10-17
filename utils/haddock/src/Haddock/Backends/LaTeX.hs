@@ -2,7 +2,8 @@
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Haddock.Backends.LaTeX
--- Copyright   :  (c) Simon Marlow 2010
+-- Copyright   :  (c) Simon Marlow      2010,
+--                    Mateusz Kowalczyk 2013
 -- License     :  BSD-like
 --
 -- Maintainer  :  haddock@projects.haskell.org
@@ -24,7 +25,7 @@ import GHC
 import OccName
 import Name                 ( nameOccName )
 import RdrName              ( rdrNameOcc )
-import FastString           ( unpackFS, unpackLitString )
+import FastString           ( unpackFS, unpackLitString, zString )
 
 import qualified Data.Map as Map
 import System.Directory
@@ -33,6 +34,9 @@ import Data.Char
 import Control.Monad
 import Data.Maybe
 import Data.List
+
+import Haddock.Doc (combineDocumentation)
+
 -- import Debug.Trace
 
 {- SAMPLE OUTPUT
@@ -128,7 +132,7 @@ ppLaTeXTop doctitle packageStr odir prologue maybe_style ifaces = do
 
       filename = odir </> (fromMaybe "haddock" packageStr <.> "tex")
 
-  writeFile filename (render tex)
+  writeFile filename (show tex)
 
 
 ppLaTeXModule :: String -> FilePath -> Interface -> IO ()
@@ -168,11 +172,12 @@ string_txt :: TextDetails -> String -> String
 string_txt (Chr c)   s  = c:s
 string_txt (Str s1)  s2 = s1 ++ s2
 string_txt (PStr s1) s2 = unpackFS s1 ++ s2
+string_txt (ZStr s1) s2 = zString s1 ++ s2
 string_txt (LStr s1 _) s2 = unpackLitString s1 ++ s2
 
 
 exportListItem :: ExportItem DocName -> LaTeX
-exportListItem (ExportDecl decl _doc subdocs _insts)
+exportListItem ExportDecl { expItemDecl = decl, expItemSubDocs = subdocs }
   = sep (punctuate comma . map ppDocBinder $ declNames decl) <>
      case subdocs of
        [] -> empty
@@ -206,8 +211,8 @@ processExports (e : es) =
 
 
 isSimpleSig :: ExportItem DocName -> Maybe ([DocName], HsType DocName)
-isSimpleSig (ExportDecl (L _ (SigD (TypeSig lnames (L _ t))))
-                        (Documentation Nothing Nothing, argDocs) _ _)
+isSimpleSig ExportDecl { expItemDecl = L _ (SigD (TypeSig lnames (L _ t)))
+                       , expItemMbDoc = (Documentation Nothing Nothing, argDocs) }
   | Map.null argDocs = Just (map unLoc lnames, t)
 isSimpleSig _ = Nothing
 
@@ -220,8 +225,8 @@ isExportModule _ = Nothing
 processExport :: ExportItem DocName -> LaTeX
 processExport (ExportGroup lev _id0 doc)
   = ppDocGroup lev (docToLaTeX doc)
-processExport (ExportDecl decl doc subdocs insts)
-  = ppDecl decl doc insts subdocs
+processExport (ExportDecl decl doc subdocs insts fixities _splice)
+  = ppDecl decl doc insts subdocs fixities
 processExport (ExportNoDecl y [])
   = ppDocName y
 processExport (ExportNoDecl y subs)
@@ -242,8 +247,11 @@ ppDocGroup lev doc = sec lev <> braces doc
 
 declNames :: LHsDecl DocName -> [DocName]
 declNames (L _ decl) = case decl of
-  TyClD d  -> [unLoc $ tcdLName d]
+  TyClD d  -> [tcdName d]
   SigD (TypeSig lnames _) -> map unLoc lnames
+  SigD (PatSynSig lname _ _ _ _) -> [unLoc lname]
+  ForD (ForeignImport (L _ n) _ _ _) -> [n]
+  ForD (ForeignExport (L _ n) _ _ _) -> [n]
   _ -> error "declaration not supported by declNames"
 
 
@@ -271,19 +279,22 @@ ppDecl :: LHsDecl DocName
        -> DocForDecl DocName
        -> [DocInstance DocName]
        -> [(DocName, DocForDecl DocName)]
+       -> [(DocName, Fixity)]
        -> LaTeX
 
-ppDecl (L loc decl) (doc, fnArgsDoc) instances subdocs = case decl of
-  TyClD d@(TyFamily {})          -> ppTyFam False loc doc d unicode
-  TyClD d@(TyDecl{ tcdTyDefn = defn })   
-      | isHsDataDefn defn        -> ppDataDecl instances subdocs loc doc d unicode
-      | otherwise                -> ppTySyn loc (doc, fnArgsDoc) d unicode
+ppDecl (L loc decl) (doc, fnArgsDoc) instances subdocs _fixities = case decl of
+  TyClD d@(FamDecl {})          -> ppTyFam False loc doc d unicode
+  TyClD d@(DataDecl {})
+                                -> ppDataDecl instances subdocs loc (Just doc) d unicode
+  TyClD d@(SynDecl {})          -> ppTySyn loc (doc, fnArgsDoc) d unicode
 -- Family instances happen via FamInst now
---  TyClD d@(TySynonym {})         
+--  TyClD d@(TySynonym {})
 --    | Just _  <- tcdTyPats d    -> ppTyInst False loc doc d unicode
 -- Family instances happen via FamInst now
   TyClD d@(ClassDecl {})         -> ppClassDecl instances loc doc subdocs d unicode
   SigD (TypeSig lnames (L _ t))  -> ppFunSig loc (doc, fnArgsDoc) (map unLoc lnames) t unicode
+  SigD (PatSynSig lname args ty prov req) ->
+      ppLPatSig loc (doc, fnArgsDoc) lname args ty prov req unicode
   ForD d                         -> ppFor loc (doc, fnArgsDoc) d unicode
   InstD _                        -> empty
   _                              -> error "declaration not supported by ppDecl"
@@ -298,8 +309,10 @@ ppTyFam _ _ _ _ _ =
 
 
 ppFor :: SrcSpan -> DocForDecl DocName -> ForeignDecl DocName -> Bool -> LaTeX
-ppFor _ _ _ _ =
-  error "foreign declarations are currently not supported by --latex"
+ppFor loc doc (ForeignImport (L _ name) (L _ typ) _ _) unicode =
+  ppFunSig loc doc [name] typ unicode
+ppFor _ _ _ _ = error "ppFor error in Haddock.Backends.LaTeX"
+--  error "foreign declarations are currently not supported by --latex"
 
 
 -------------------------------------------------------------------------------
@@ -310,8 +323,8 @@ ppFor _ _ _ _ =
 -- we skip type patterns for now
 ppTySyn :: SrcSpan -> DocForDecl DocName -> TyClDecl DocName -> Bool -> LaTeX
 
-ppTySyn loc doc (TyDecl { tcdLName = L _ name, tcdTyVars = ltyvars
-                        , tcdTyDefn = TySynonym { td_synRhs = ltype } }) unicode
+ppTySyn loc doc (SynDecl { tcdLName = L _ name, tcdTyVars = ltyvars
+                         , tcdRhs = ltype }) unicode
   = ppTypeOrFunSig loc [name] (unLoc ltype) doc (full, hdr, char '=') unicode
   where
     hdr  = hsep (keyword "type" : ppDocBinder name : ppTyVars ltyvars)
@@ -336,6 +349,33 @@ ppFunSig loc doc docnames typ unicode =
  where
    names = map getName docnames
 
+ppLPatSig :: SrcSpan -> DocForDecl DocName -> Located DocName
+          -> HsPatSynDetails (LHsType DocName) -> LHsType DocName
+          -> LHsContext DocName -> LHsContext DocName
+          -> Bool -> LaTeX
+ppLPatSig loc doc docname args typ prov req unicode =
+    ppPatSig loc doc (unLoc docname) (fmap unLoc args) (unLoc typ) (unLoc prov) (unLoc req) unicode
+
+ppPatSig :: SrcSpan -> DocForDecl DocName -> DocName
+          -> HsPatSynDetails (HsType DocName) -> HsType DocName
+          -> HsContext DocName -> HsContext DocName
+          -> Bool -> LaTeX
+ppPatSig _loc (doc, _argDocs) docname args typ prov req unicode = declWithDoc pref1 (documentationToLaTeX doc)
+  where
+    pref1 = hsep [ keyword "pattern"
+                 , pp_ctx prov
+                 , pp_head
+                 , dcolon unicode
+                 , pp_ctx req
+                 , ppType unicode typ
+                 ]
+
+    pp_head = case args of
+        PrefixPatSyn typs -> hsep $ ppDocBinder docname : map pp_type typs
+        InfixPatSyn left right -> hsep [pp_type left, ppDocBinderInfix docname, pp_type right]
+
+    pp_type = ppParendType unicode
+    pp_ctx ctx = ppContext ctx unicode
 
 ppTypeOrFunSig :: SrcSpan -> [DocName] -> HsType DocName
                -> DocForDecl DocName -> (LaTeX, LaTeX, LaTeX)
@@ -396,7 +436,7 @@ declWithDoc :: LaTeX -> Maybe LaTeX -> LaTeX
 declWithDoc decl doc =
    text "\\begin{haddockdesc}" $$
    text "\\item[\\begin{tabular}{@{}l}" $$
-   text (latexMonoFilter (render decl)) $$
+   text (latexMonoFilter (show decl)) $$
    text "\\end{tabular}]" <>
        (if isNothing doc then empty else text "\\haddockbegindoc") $$
    maybe empty id doc $$
@@ -411,7 +451,7 @@ multiDecl decls =
    text "\\begin{haddockdesc}" $$
    vcat [
       text "\\item[" $$
-      text (latexMonoFilter (render decl)) $$
+      text (latexMonoFilter (show decl)) $$
       text "]"
       | decl <- decls ] $$
    text "\\end{haddockdesc}"
@@ -460,7 +500,7 @@ ppClassDecl :: [DocInstance DocName] -> SrcSpan
             -> Documentation DocName -> [(DocName, DocForDecl DocName)]
             -> TyClDecl DocName -> Bool -> LaTeX
 ppClassDecl instances loc doc subdocs
-  (ClassDecl { tcdCtxt = lctxt, tcdLName = lname, tcdTyVars = ltyvars, tcdFDs = lfds 
+  (ClassDecl { tcdCtxt = lctxt, tcdLName = lname, tcdTyVars = ltyvars, tcdFDs = lfds
              , tcdSigs = lsigs, tcdATs = ats, tcdATDefs = at_defs }) unicode
   = declWithDoc classheader (if null body then Nothing else Just (vcat body)) $$
     instancesBit
@@ -499,7 +539,7 @@ ppDocInstances unicode (i : rest)
   | Just ihead <- isUndocdInstance i
   = declWithDoc (vcat (map (ppInstDecl unicode) (ihead:is))) Nothing $$
     ppDocInstances unicode rest'
-  | otherwise 
+  | otherwise
   = ppDocInstance unicode i $$ ppDocInstances unicode rest
   where
     (is, rest') = spanWith isUndocdInstance rest
@@ -521,9 +561,12 @@ ppInstDecl unicode instHead = keyword "instance" <+> ppInstHead unicode instHead
 
 
 ppInstHead :: Bool -> InstHead DocName -> LaTeX
-ppInstHead unicode ([],   n, ts) = ppAppNameTypes n ts unicode
-ppInstHead unicode (ctxt, n, ts) = ppContextNoLocs ctxt unicode <+> ppAppNameTypes n ts unicode
-
+ppInstHead unicode (n, ks, ts, ClassInst ctx) = ppContextNoLocs ctx unicode <+> ppAppNameTypes n ks ts unicode
+ppInstHead unicode (n, ks, ts, TypeInst rhs) = keyword "type"
+  <+> ppAppNameTypes n ks ts unicode
+  <+> maybe empty (\t -> equals <+> ppType unicode t) rhs
+ppInstHead _unicode (_n, _ks, _ts, DataInst _dd) =
+  error "data instances not supported by --latex yet"
 
 lookupAnySubdoc :: (Eq name1) =>
                    name1 -> [(name1, DocForDecl name2)] -> DocForDecl name2
@@ -538,8 +581,8 @@ lookupAnySubdoc n subdocs = case lookup n subdocs of
 
 
 ppDataDecl :: [DocInstance DocName] ->
-              [(DocName, DocForDecl DocName)] ->
-              SrcSpan -> Documentation DocName -> TyClDecl DocName -> Bool ->
+              [(DocName, DocForDecl DocName)] -> SrcSpan ->
+              Maybe (Documentation DocName) -> TyClDecl DocName -> Bool ->
               LaTeX
 ppDataDecl instances subdocs _loc doc dataDecl unicode
 
@@ -548,10 +591,10 @@ ppDataDecl instances subdocs _loc doc dataDecl unicode
    $$ instancesBit
 
   where
-    cons      = td_cons (tcdTyDefn dataDecl)
+    cons      = dd_cons (tcdDataDefn dataDecl)
     resTy     = (con_res . unLoc . head) cons
 
-    body = catMaybes [constrBit, documentationToLaTeX doc]
+    body = catMaybes [constrBit, doc >>= documentationToLaTeX]
 
     (whereBit, leaders)
       | null cons = (empty,[])
@@ -645,9 +688,9 @@ ppSideBySideField subdocs unicode (ConDeclField (L _ name) ltype _) =
 
 -- {-
 -- ppHsFullConstr :: HsConDecl -> LaTeX
--- ppHsFullConstr (HsConDecl _ nm tvs ctxt typeList doc) = 
+-- ppHsFullConstr (HsConDecl _ nm tvs ctxt typeList doc) =
 --      declWithDoc False doc (
--- 	hsep ((ppHsConstrHdr tvs ctxt +++ 
+-- 	hsep ((ppHsConstrHdr tvs ctxt +++
 -- 		ppHsBinder False nm) : map ppHsBangType typeList)
 --       )
 -- ppHsFullConstr (HsRecDecl _ nm tvs ctxt fields doc) =
@@ -656,35 +699,35 @@ ppSideBySideField subdocs unicode (ConDeclField (L _ name) ltype _) =
 --        Nothing -> aboves [hdr, fields_html]
 --        Just _  -> aboves [hdr, constr_doc, fields_html]
 --    )
--- 
+--
 --   where hdr = declBox (ppHsConstrHdr tvs ctxt +++ ppHsBinder False nm)
--- 
--- 	constr_doc	
+--
+-- 	constr_doc
 -- 	  | isJust doc = docBox (docToLaTeX (fromJust doc))
 -- 	  | otherwise  = LaTeX.emptyTable
--- 
--- 	fields_html = 
--- 	   td << 
+--
+-- 	fields_html =
+-- 	   td <<
 -- 	      table ! [width "100%", cellpadding 0, cellspacing 8] << (
 -- 		   aboves (map ppFullField (concat (map expandField fields)))
 -- 		)
 -- -}
--- 
+--
 -- ppShortField :: Bool -> Bool -> ConDeclField DocName -> LaTeX
 -- ppShortField summary unicode (ConDeclField (L _ name) ltype _)
 --   = tda [theclass "recfield"] << (
 --       ppBinder summary (docNameOcc name)
 --       <+> dcolon unicode <+> ppLType unicode ltype
 --     )
--- 
+--
 -- {-
 -- ppFullField :: HsFieldDecl -> LaTeX
--- ppFullField (HsFieldDecl [n] ty doc) 
+-- ppFullField (HsFieldDecl [n] ty doc)
 --   = declWithDoc False doc (
 -- 	ppHsBinder False n <+> dcolon <+> ppHsBangType ty
 --     )
 -- ppFullField _ = error "ppFullField"
--- 
+--
 -- expandField :: HsFieldDecl -> [HsFieldDecl]
 -- expandField (HsFieldDecl ns ty doc) = [ HsFieldDecl [n] ty doc | n <- ns ]
 -- -}
@@ -693,8 +736,8 @@ ppSideBySideField subdocs unicode (ConDeclField (L _ name) ltype _) =
 -- | Print the LHS of a data\/newtype declaration.
 -- Currently doesn't handle 'data instance' decls or kind signatures
 ppDataHeader :: TyClDecl DocName -> Bool -> LaTeX
-ppDataHeader (TyDecl { tcdLName = L _ name, tcdTyVars = tyvars
-                     , tcdTyDefn = TyData { td_ND = nd, td_ctxt = ctxt } }) unicode
+ppDataHeader (DataDecl { tcdLName = L _ name, tcdTyVars = tyvars
+                       , tcdDataDefn = HsDataDefn { dd_ND = nd, dd_ctxt = ctxt } }) unicode
   = -- newtype or data
     (case nd of { NewType -> keyword "newtype"; DataType -> keyword "data" }) <+>
     -- context
@@ -708,27 +751,27 @@ ppDataHeader _ _ = error "ppDataHeader: illegal argument"
 --------------------------------------------------------------------------------
 
 
--- | Print an application of a DocName and a list of HsTypes
-ppAppNameTypes :: DocName -> [HsType DocName] -> Bool -> LaTeX
-ppAppNameTypes n ts unicode = ppTypeApp n ts ppDocName (ppParendType unicode)
+-- | Print an application of a DocName and two lists of HsTypes (kinds, types)
+ppAppNameTypes :: DocName -> [HsType DocName] -> [HsType DocName] -> Bool -> LaTeX
+ppAppNameTypes n ks ts unicode = ppTypeApp n ks ts ppDocName (ppParendType unicode)
 
 
--- | Print an application of a DocName and a list of Names 
+-- | Print an application of a DocName and a list of Names
 ppAppDocNameNames :: Bool -> DocName -> [Name] -> LaTeX
 ppAppDocNameNames _summ n ns =
-  ppTypeApp n ns (ppBinder . nameOccName . getName) ppSymName
+  ppTypeApp n [] ns (ppBinder . nameOccName . getName) ppSymName
 
 
 -- | General printing of type applications
-ppTypeApp :: DocName -> [a] -> (DocName -> LaTeX) -> (a -> LaTeX) -> LaTeX
-ppTypeApp n (t1:t2:rest) ppDN ppT
+ppTypeApp :: DocName -> [a] -> [a] -> (DocName -> LaTeX) -> (a -> LaTeX) -> LaTeX
+ppTypeApp n [] (t1:t2:rest) ppDN ppT
   | operator, not . null $ rest = parens opApp <+> hsep (map ppT rest)
   | operator                    = opApp
   where
     operator = isNameSym . getName $ n
     opApp = ppT t1 <+> ppDN n <+> ppT t2
 
-ppTypeApp n ts ppDN ppT = ppDN n <+> hsep (map ppT ts)
+ppTypeApp n ks ts ppDN ppT = ppDN n <+> hsep (map ppT $ ks ++ ts)
 
 
 -------------------------------------------------------------------------------
@@ -905,9 +948,16 @@ ppr_fun_ty ctxt_prec ty1 ty2 unicode
 
 ppBinder :: OccName -> LaTeX
 ppBinder n
-  | isVarSym n = parens $ ppOccName n
-  | otherwise  = ppOccName n
+  | isInfixName n = parens $ ppOccName n
+  | otherwise     = ppOccName n
 
+ppBinderInfix :: OccName -> LaTeX
+ppBinderInfix n
+  | isInfixName n = ppOccName n
+  | otherwise     = quotes $ ppOccName n
+
+isInfixName :: OccName -> Bool
+isInfixName n = isVarSym n || isConSym n
 
 ppSymName :: Name -> LaTeX
 ppSymName name
@@ -943,6 +993,9 @@ ppLDocName (L _ d) = ppDocName d
 
 ppDocBinder :: DocName -> LaTeX
 ppDocBinder = ppBinder . nameOccName . getName
+
+ppDocBinderInfix :: DocName -> LaTeX
+ppDocBinderInfix = ppBinderInfix . nameOccName . getName
 
 
 ppName :: Name -> LaTeX
@@ -995,18 +1048,26 @@ parLatexMarkup ppId = Markup {
   markupModule               = \m _ -> let (mdl,_ref) = break (=='#') m in tt (text mdl),
   markupWarning              = \p v -> emph (p v),
   markupEmphasis             = \p v -> emph (p v),
+  markupBold                 = \p v -> bold (p v),
   markupMonospaced           = \p _ -> tt (p Mono),
   markupUnorderedList        = \p v -> itemizedList (map ($v) p) $$ text "",
-  markupPic                  = \path _ -> parens (text "image: " <> text path),
+  markupPic                  = \p _ -> markupPic p,
   markupOrderedList          = \p v -> enumeratedList (map ($v) p) $$ text "",
   markupDefList              = \l v -> descriptionList (map (\(a,b) -> (a v, b v)) l),
   markupCodeBlock            = \p _ -> quote (verb (p Verb)) $$ text "",
   markupHyperlink            = \l _ -> markupLink l,
   markupAName                = \_ _ -> empty,
   markupProperty             = \p _ -> quote $ verb $ text p,
-  markupExample              = \e _ -> quote $ verb $ text $ unlines $ map exampleToString e
+  markupExample              = \e _ -> quote $ verb $ text $ unlines $ map exampleToString e,
+  markupHeader               = \(Header l h) p -> header l (h p)
   }
   where
+    header 1 d = text "\\section*" <> braces d
+    header 2 d = text "\\subsection*" <> braces d
+    header l d
+      | l > 0 && l <= 6 = text "\\subsubsection*" <> braces d
+    header l _ = error $ "impossible header level in LaTeX generation: " ++ show l
+
     fixString Plain s = latexFilter s
     fixString Verb  s = s
     fixString Mono  s = latexMonoFilter s
@@ -1014,6 +1075,14 @@ parLatexMarkup ppId = Markup {
     markupLink (Hyperlink url mLabel) = case mLabel of
       Just label -> text "\\href" <> braces (text url) <> braces (text label)
       Nothing    -> text "\\url"  <> braces (text url)
+
+    -- Is there a better way of doing this? Just a space is an aribtrary choice.
+    markupPic (Picture uri title) = parens (imageText title)
+      where
+        imageText Nothing = beg
+        imageText (Just t) = beg <> text " " <> text t
+
+        beg = text "image: " <> text uri
 
     markupId ppId_ id v =
       case v of
@@ -1098,6 +1167,8 @@ decltt ltx = text "\\haddockdecltt" <> braces ltx
 emph :: LaTeX -> LaTeX
 emph ltx = text "\\emph" <> braces ltx
 
+bold :: LaTeX -> LaTeX
+bold ltx = text "\\textbf" <> braces ltx
 
 verb :: LaTeX -> LaTeX
 verb doc = text "{\\haddockverb\\begin{verbatim}" $$ doc <> text "\\end{verbatim}}"

@@ -19,17 +19,17 @@ module Data.IORef
   ( 
         -- * IORefs
         IORef,                -- abstract, instance of: Eq, Typeable
-        newIORef,             -- :: a -> IO (IORef a)
-        readIORef,            -- :: IORef a -> IO a
-        writeIORef,           -- :: IORef a -> a -> IO ()
-        modifyIORef,          -- :: IORef a -> (a -> a) -> IO ()
-        modifyIORef',         -- :: IORef a -> (a -> a) -> IO ()
-        atomicModifyIORef,    -- :: IORef a -> (a -> (a,b)) -> IO b
-        atomicModifyIORef',   -- :: IORef a -> (a -> (a,b)) -> IO b
+        newIORef,
+        readIORef,
+        writeIORef,
+        modifyIORef,
+        modifyIORef',
+        atomicModifyIORef,
+        atomicModifyIORef',
         atomicWriteIORef,
 
-#if !defined(__PARALLEL_HASKELL__) && defined(__GLASGOW_HASKELL__)
-        mkWeakIORef,          -- :: IORef a -> IO () -> IO (Weak (IORef a))
+#if !defined(__PARALLEL_HASKELL__)
+        mkWeakIORef,
 #endif
         -- ** Memory Model
 
@@ -37,11 +37,6 @@ module Data.IORef
 
         ) where
 
-#ifdef __HUGS__
-import Hugs.IORef
-#endif
-
-#ifdef __GLASGOW_HASKELL__
 import GHC.Base
 import GHC.STRef
 import GHC.IORef hiding (atomicModifyIORef)
@@ -49,19 +44,8 @@ import qualified GHC.IORef
 #if !defined(__PARALLEL_HASKELL__)
 import GHC.Weak
 #endif
-#endif /* __GLASGOW_HASKELL__ */
 
-#ifdef __NHC__
-import NHC.IOExtras
-    ( IORef
-    , newIORef
-    , readIORef
-    , writeIORef
-    , excludeFinalisers
-    )
-#endif
-
-#if defined(__GLASGOW_HASKELL__) && !defined(__PARALLEL_HASKELL__)
+#if !defined(__PARALLEL_HASKELL__)
 -- |Make a 'Weak' pointer to an 'IORef', using the second argument as a finalizer
 -- to run when 'IORef' is garbage-collected
 mkWeakIORef :: IORef a -> IO () -> IO (Weak (IORef a))
@@ -86,6 +70,8 @@ modifyIORef :: IORef a -> (a -> a) -> IO ()
 modifyIORef ref f = readIORef ref >>= writeIORef ref . f
 
 -- |Strict version of 'modifyIORef'
+--
+-- /Since: 4.6.0.0/
 modifyIORef' :: IORef a -> (a -> a) -> IO ()
 modifyIORef' ref f = do
     x <- readIORef ref
@@ -112,25 +98,12 @@ modifyIORef' ref f = do
 -- Use 'atomicModifyIORef'' or 'atomicWriteIORef' to avoid this problem.
 --
 atomicModifyIORef :: IORef a -> (a -> (a,b)) -> IO b
-#if defined(__GLASGOW_HASKELL__)
 atomicModifyIORef = GHC.IORef.atomicModifyIORef
-
-#elif defined(__HUGS__)
-atomicModifyIORef = plainModifyIORef    -- Hugs has no preemption
-  where plainModifyIORef r f = do
-                a <- readIORef r
-                case f a of (a',b) -> writeIORef r a' >> return b
-#elif defined(__NHC__)
-atomicModifyIORef r f =
-  excludeFinalisers $ do
-    a <- readIORef r
-    let (a',b) = f a
-    writeIORef r a'
-    return b
-#endif
 
 -- | Strict version of 'atomicModifyIORef'.  This forces both the value stored
 -- in the 'IORef' as well as the value returned.
+--
+-- /Since: 4.6.0.0/
 atomicModifyIORef' :: IORef a -> (a -> (a,b)) -> IO b
 atomicModifyIORef' ref f = do
     b <- atomicModifyIORef ref
@@ -140,6 +113,8 @@ atomicModifyIORef' ref f = do
 
 -- | Variant of 'writeIORef' with the \"barrier to reordering\" property that
 -- 'atomicModifyIORef' has.
+--
+-- /Since: 4.6.0.0/
 atomicWriteIORef :: IORef a -> a -> IO ()
 atomicWriteIORef ref a = do
     x <- atomicModifyIORef ref (\_ -> (a, ()))
@@ -175,7 +150,7 @@ atomicWriteIORef ref a = do
   operations cannot cause type-correct code to go wrong.  In
   particular, when inspecting the value read from an 'IORef', the
   memory writes that created that value must have occurred from the
-  point of view of the current therad.
+  point of view of the current thread.
 
   'atomicModifyIORef' acts as a barrier to reordering.  Multiple
   'atomicModifyIORef' operations occur in strict program order.  An

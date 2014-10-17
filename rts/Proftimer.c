@@ -25,21 +25,21 @@ static int ticks_to_heap_profile;
 // Time for a heap profile on the next context switch
 rtsBool performHeapProfile;
 
-#ifdef PROFILING
-
 void
 stopProfTimer( void )
 {
+#ifdef PROFILING
     do_prof_ticks = rtsFalse;
+#endif
 }
 
 void
 startProfTimer( void )
 {
+#ifdef PROFILING
     do_prof_ticks = rtsTrue;
-}
-
 #endif
+}
 
 void
 stopHeapProfTimer( void )
@@ -76,7 +76,7 @@ handleProfTick(void)
     if (do_prof_ticks) {
         nat n;
         for (n=0; n < n_capabilities; n++) {
-            capabilities[n].r.rCCCS->time_ticks++;
+            capabilities[n]->r.rCCCS->time_ticks++;
         }
     }
 #endif

@@ -10,12 +10,12 @@ The bits common to TcInstDcls and TcDeriv.
 module InstEnv (
         DFunId, OverlapFlag(..), InstMatch, ClsInstLookupResult,
         ClsInst(..), DFunInstType, pprInstance, pprInstanceHdr, pprInstances, 
-        instanceHead, mkLocalInstance, mkImportedInstance,
-        instanceDFunId, setInstanceDFunId, instanceRoughTcs,
+        instanceHead, instanceSig, mkLocalInstance, mkImportedInstance,
+        instanceDFunId, tidyClsInstDFun, instanceRoughTcs,
 
         InstEnv, emptyInstEnv, extendInstEnv, overwriteInstEnv, 
         extendInstEnvList, lookupUniqueInstEnv, lookupInstEnv', lookupInstEnv, instEnvElts,
-        classInstances, instanceBindFun,
+        classInstances, orphNamesOfClsInst, instanceBindFun,
         instanceCantMatch, roughMatchTcs
     ) where
 
@@ -25,6 +25,7 @@ import Class
 import Var
 import VarSet
 import Name
+import NameSet
 import TcType
 import TyCon
 import Unify
@@ -48,29 +49,47 @@ import Data.Maybe       ( isJust, isNothing )
 
 \begin{code}
 data ClsInst 
-  = ClsInst { is_cls  :: Name  -- Class name
-
-                -- Used for "rough matching"; see Note [Rough-match field]
+  = ClsInst {   -- Used for "rough matching"; see Note [Rough-match field]
                 -- INVARIANT: is_tcs = roughMatchTcs is_tys
+               is_cls_nm :: Name  -- Class name
              , is_tcs  :: [Maybe Name]  -- Top of type args
 
                 -- Used for "proper matching"; see Note [Proper-match fields]
-             , is_tvs  :: TyVarSet      -- Template tyvars for full match
-             , is_tys  :: [Type]        -- Full arg types
+             , is_tvs  :: [TyVar]       -- Fresh template tyvars for full match
+                                        -- See Note [Template tyvars are fresh]
+             , is_cls  :: Class         -- The real class
+             , is_tys  :: [Type]        -- Full arg types (mentioning is_tvs)
                 -- INVARIANT: is_dfun Id has type 
                 --      forall is_tvs. (...) => is_cls is_tys
+                -- (modulo alpha conversion)
 
              , is_dfun :: DFunId -- See Note [Haddock assumptions]
+                    -- See Note [Silent superclass arguments] in TcInstDcls
+                    -- for how to map the DFun's type back to the source
+                    -- language instance decl
+
              , is_flag :: OverlapFlag   -- See detailed comments with
                                         -- the decl of BasicTypes.OverlapFlag
     }
   deriving (Data, Typeable)
 \end{code}
 
+Note [Template tyvars are fresh]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The is_tvs field of a ClsInst has *completely fresh* tyvars.  
+That is, they are
+  * distinct from any other ClsInst
+  * distinct from any tyvars free in predicates that may
+    be looked up in the class instance environment
+Reason for freshness: we use unification when checking for overlap
+etc, and that requires the tyvars to be distinct.
+
+The invariant is checked by the ASSERT in lookupInstEnv'.
+
 Note [Rough-match field]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The is_cls, is_tcs fields allow a "rough match" to be done
-without poking inside the DFunId.  Poking the DFunId forces
+The is_cls_nm, is_tcs fields allow a "rough match" to be done
+*without* poking inside the DFunId.  Poking the DFunId forces
 us to suck in all the type constructors etc it involves,
 which is a total waste of time if it has no chance of matching
 So the Name, [Maybe Name] fields allow us to say "definitely
@@ -88,18 +107,17 @@ In is_tcs,
 
 Note [Proper-match fields]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
-The is_tvs, is_tys fields are simply cached values, pulled
+The is_tvs, is_cls, is_tys fields are simply cached values, pulled
 out (lazily) from the dfun id. They are cached here simply so 
 that we don't need to decompose the DFunId each time we want 
 to match it.  The hope is that the fast-match fields mean
-that we often never poke th proper-match fields
+that we often never poke the proper-match fields.
 
 However, note that:
  * is_tvs must be a superset of the free vars of is_tys
 
- * The is_dfun must itself be quantified over exactly is_tvs
-   (This is so that we can use the matching substitution to
-    instantiate the dfun's context.)
+ * is_tvs, is_tys may be alpha-renamed compared to the ones in
+   the dfun Id
 
 Note [Haddock assumptions]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -120,19 +138,9 @@ being equal to
 instanceDFunId :: ClsInst -> DFunId
 instanceDFunId = is_dfun
 
-setInstanceDFunId :: ClsInst -> DFunId -> ClsInst
-setInstanceDFunId ispec dfun
-   = ASSERT2( idType dfun `eqType` idType (is_dfun ispec)
-            , ppr dfun $$ ppr (idType dfun) $$ ppr (is_dfun ispec) $$ ppr (idType (is_dfun ispec)) )
-        -- We need to create the cached fields afresh from
-        -- the new dfun id.  In particular, the is_tvs in
-        -- the ClsInst must match those in the dfun!
-        -- We assume that the only thing that changes is
-        -- the quantified type variables, so the other fields
-        -- are ok; hence the assert
-     ispec { is_dfun = dfun, is_tvs = mkVarSet tvs, is_tys = tys }
-   where 
-     (tvs, _, _, tys) = tcSplitDFunTy (idType dfun)
+tidyClsInstDFun :: (DFunId -> DFunId) -> ClsInst -> ClsInst
+tidyClsInstDFun tidy_dfun ispec
+  = ispec { is_dfun = tidy_dfun (is_dfun ispec) }
 
 instanceRoughTcs :: ClsInst -> [Maybe Name]
 instanceRoughTcs = is_tcs
@@ -159,6 +167,7 @@ pprInstanceHdr (ClsInst { is_flag = flag, is_dfun = dfun })
     let theta_to_print
           | debugStyle sty = theta
           | otherwise = drop (dfunNSilent dfun) theta
+          -- See Note [Silent superclass arguments] in TcInstDcls
     in ptext (sLit "instance") <+> ppr flag
        <+> sep [pprThetaArrowTy theta_to_print, ppr res_ty]
   where
@@ -168,34 +177,39 @@ pprInstanceHdr (ClsInst { is_flag = flag, is_dfun = dfun })
 pprInstances :: [ClsInst] -> SDoc
 pprInstances ispecs = vcat (map pprInstance ispecs)
 
-instanceHead :: ClsInst -> ([TyVar], ThetaType, Class, [Type])
-instanceHead ispec = (tvs, theta, cls, tys)
+instanceHead :: ClsInst -> ([TyVar], Class, [Type])
+-- Returns the head, using the fresh tyavs from the ClsInst
+instanceHead (ClsInst { is_tvs = tvs, is_tys = tys, is_dfun = dfun })
+   = (tvs, cls, tys)
    where
-     (tvs, theta, tau) = tcSplitSigmaTy (idType dfun)
-     (cls, tys)        = tcSplitDFunHead tau
-     dfun              = is_dfun ispec
+     (_, _, cls, _) = tcSplitDFunTy (idType dfun)
 
-mkLocalInstance :: DFunId
-                -> OverlapFlag
+instanceSig :: ClsInst -> ([TyVar], [Type], Class, [Type])
+-- Decomposes the DFunId
+instanceSig ispec = tcSplitDFunTy (idType (is_dfun ispec))
+
+mkLocalInstance :: DFunId -> OverlapFlag
+                -> [TyVar] -> Class -> [Type]
                 -> ClsInst
 -- Used for local instances, where we can safely pull on the DFunId
-mkLocalInstance dfun oflag
-  = ClsInst {  is_flag = oflag, is_dfun = dfun,
-                is_tvs = mkVarSet tvs, is_tys = tys,
-                is_cls = className cls, is_tcs = roughMatchTcs tys }
-  where
-    (tvs, _, cls, tys) = tcSplitDFunTy (idType dfun)
+mkLocalInstance dfun oflag tvs cls tys
+  = ClsInst { is_flag = oflag, is_dfun = dfun
+            , is_tvs = tvs
+            , is_cls = cls, is_cls_nm = className cls
+            , is_tys = tys, is_tcs = roughMatchTcs tys }
 
 mkImportedInstance :: Name -> [Maybe Name]
                    -> DFunId -> OverlapFlag -> ClsInst
 -- Used for imported instances, where we get the rough-match stuff
 -- from the interface file
-mkImportedInstance cls mb_tcs dfun oflag
-  = ClsInst {  is_flag = oflag, is_dfun = dfun,
-                is_tvs = mkVarSet tvs, is_tys = tys,
-                is_cls = cls, is_tcs = mb_tcs }
+-- The bound tyvars of the dfun are guaranteed fresh, because
+-- the dfun has been typechecked out of the same interface file
+mkImportedInstance cls_nm mb_tcs dfun oflag
+  = ClsInst { is_flag = oflag, is_dfun = dfun
+            , is_tvs = tvs, is_tys = tys
+            , is_cls_nm = cls_nm, is_cls = cls, is_tcs = mb_tcs }
   where
-    (tvs, _, _, tys) = tcSplitDFunTy (idType dfun)
+    (tvs, _, cls, tys) = tcSplitDFunTy (idType dfun)
 
 roughMatchTcs :: [Type] -> [Maybe Name]
 roughMatchTcs tys = map rough tys
@@ -386,34 +400,42 @@ classInstances (pkg_ie, home_ie) cls
                 Just (ClsIE insts) -> insts
                 Nothing            -> []
 
+-- | Collects the names of concrete types and type constructors that make
+-- up the head of a class instance. For instance, given `class Foo a b`:
+--
+-- `instance Foo (Either (Maybe Int) a) Bool` would yield
+--      [Either, Maybe, Int, Bool]
+--
+-- Used in the implementation of ":info" in GHCi.
+orphNamesOfClsInst :: ClsInst -> NameSet
+orphNamesOfClsInst = orphNamesOfDFunHead . idType . instanceDFunId
+
 extendInstEnvList :: InstEnv -> [ClsInst] -> InstEnv
 extendInstEnvList inst_env ispecs = foldl extendInstEnv inst_env ispecs
 
 extendInstEnv :: InstEnv -> ClsInst -> InstEnv
-extendInstEnv inst_env ins_item@(ClsInst { is_cls = cls_nm })
+extendInstEnv inst_env ins_item@(ClsInst { is_cls_nm = cls_nm })
   = addToUFM_C add inst_env cls_nm (ClsIE [ins_item])
   where
     add (ClsIE cur_insts) _ = ClsIE (ins_item : cur_insts)
 
 overwriteInstEnv :: InstEnv -> ClsInst -> InstEnv
-overwriteInstEnv inst_env ins_item@(ClsInst { is_cls = cls_nm, is_tys = tys })
+overwriteInstEnv inst_env ins_item@(ClsInst { is_cls_nm = cls_nm, is_tys = tys })
   = addToUFM_C add inst_env cls_nm (ClsIE [ins_item])
   where
     add (ClsIE cur_insts) _ = ClsIE (replaceInst cur_insts)
     
     rough_tcs  = roughMatchTcs tys
     replaceInst [] = [ins_item]
-    replaceInst (item@(ClsInst { is_tcs = mb_tcs,  is_tvs = tpl_tvs, 
-                                  is_tys = tpl_tys,
-                                  is_dfun = dfun }) : rest)
+    replaceInst (item@(ClsInst { is_tcs = mb_tcs,  is_tvs = tpl_tvs 
+                               , is_tys = tpl_tys }) : rest)
     -- Fast check for no match, uses the "rough match" fields
       | instanceCantMatch rough_tcs mb_tcs
       = item : replaceInst rest
 
-      | Just _ <- tcMatchTys tpl_tvs tpl_tys tys
-      = let (dfun_tvs, _) = tcSplitForAllTys (idType dfun)
-        in ASSERT( all (`elemVarSet` tpl_tvs) dfun_tvs )        -- Check invariant
-           ins_item : rest
+      | let tpl_tv_set = mkVarSet tpl_tvs
+      , Just _ <- tcMatchTys tpl_tv_set tpl_tys tys
+      = ins_item : rest
 
       | otherwise
       = item : replaceInst rest
@@ -447,7 +469,7 @@ type ClsInstLookupResult
 
 Note [DFunInstType: instantiating types]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-A successful match is an ClsInst, together with the types at which
+A successful match is a ClsInst, together with the types at which
         the dfun_id in the ClsInst should be instantiated
 The instantiating types are (Either TyVar Type)s because the dfun
 might have some tyvars that *only* appear in arguments
@@ -503,35 +525,33 @@ lookupInstEnv' ie cls tys
 
     --------------
     find ms us [] = (ms, us)
-    find ms us (item@(ClsInst { is_tcs = mb_tcs, is_tvs = tpl_tvs, 
-                                 is_tys = tpl_tys, is_flag = oflag,
-                                 is_dfun = dfun }) : rest)
+    find ms us (item@(ClsInst { is_tcs = mb_tcs, is_tvs = tpl_tvs
+                              , is_tys = tpl_tys, is_flag = oflag }) : rest)
         -- Fast check for no match, uses the "rough match" fields
       | instanceCantMatch rough_tcs mb_tcs
       = find ms us rest
 
-      | Just subst <- tcMatchTys tpl_tvs tpl_tys tys
-      = let 
-            (dfun_tvs, _) = tcSplitForAllTys (idType dfun)
-        in 
-        ASSERT( all (`elemVarSet` tpl_tvs) dfun_tvs )   -- Check invariant
-        find ((item, map (lookup_tv subst) dfun_tvs) : ms) us rest
+      | Just subst <- tcMatchTys tpl_tv_set tpl_tys tys
+      = find ((item, map (lookup_tv subst) tpl_tvs) : ms) us rest
 
         -- Does not match, so next check whether the things unify
-        -- See Note [Overlapping instances] above
+        -- See Note [Overlapping instances] and Note [Incoherent Instances]
       | Incoherent _ <- oflag
       = find ms us rest
 
       | otherwise
-      = ASSERT2( tyVarsOfTypes tys `disjointVarSet` tpl_tvs,
+      = ASSERT2( tyVarsOfTypes tys `disjointVarSet` tpl_tv_set,
                  (ppr cls <+> ppr tys <+> ppr all_tvs) $$
-                 (ppr dfun <+> ppr tpl_tvs <+> ppr tpl_tys)
+                 (ppr tpl_tvs <+> ppr tpl_tys)
                 )
                 -- Unification will break badly if the variables overlap
                 -- They shouldn't because we allocate separate uniques for them
+                -- See Note [Template tyvars are fresh]
         case tcUnifyTys instanceBindFun tpl_tys tys of
             Just _   -> find ms (item:us) rest
             Nothing  -> find ms us        rest
+      where
+        tpl_tv_set = mkVarSet tpl_tvs
 
     ----------------
     lookup_tv :: TvSubst -> TyVar -> DFunInstType
@@ -562,14 +582,16 @@ lookupInstEnv (pkg_ie, home_ie) cls tys
         -- misleading (complaining of multiple matches when some should be
         -- overlapped away)
 
-    -- Safe Haskell: We restrict code compiled in 'Safe' mode from 
-    -- overriding code compiled in any other mode. The rational is
-    -- that code compiled in 'Safe' mode is code that is untrusted
-    -- by the ghc user. So we shouldn't let that code change the
-    -- behaviour of code the user didn't compile in 'Safe' mode
-    -- since that's the code they trust. So 'Safe' instances can only
-    -- overlap instances from the same module. A same instance origin
-    -- policy for safe compiled instances.
+    -- NOTE [Safe Haskell isSafeOverlap]
+    -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    -- We restrict code compiled in 'Safe' mode from overriding code
+    -- compiled in any other mode. The rationale is that code compiled
+    -- in 'Safe' mode is code that is untrusted by the ghc user. So
+    -- we shouldn't let that code change the behaviour of code the
+    -- user didn't compile in 'Safe' mode since that's the code they
+    -- trust. So 'Safe' instances can only overlap instances from the
+    -- same module. A same instance origin policy for safe compiled
+    -- instances.
     check_safe match@(inst,_) others
         = case isSafeOverlap (is_flag inst) of
                 -- most specific isn't from a Safe module so OK
@@ -603,15 +625,22 @@ insert_overlapping new_item (item:items)
         -- Keep new one
   | old_beats_new = item : items
         -- Keep old one
+  | incoherent new_item = item : items -- note [Incoherent instances]
+        -- Keep old one
+  | incoherent item = new_item : items
+        -- Keep new one
   | otherwise     = item : insert_overlapping new_item items
         -- Keep both
   where
     new_beats_old = new_item `beats` item
     old_beats_new = item `beats` new_item
 
+    incoherent (inst, _) = case is_flag inst of Incoherent _ -> True
+                                                _            -> False
+
     (instA, _) `beats` (instB, _)
           = overlap_ok && 
-            isJust (tcMatchTys (is_tvs instB) (is_tys instB) (is_tys instA))
+            isJust (tcMatchTys (mkVarSet (is_tvs instB)) (is_tys instB) (is_tys instA))
                     -- A beats B if A is more specific than B,
                     -- (ie. if B can be instantiated to match A)
                     -- and overlap is permitted
@@ -623,6 +652,52 @@ insert_overlapping new_item (item:items)
                               (NoOverlap _, NoOverlap _) -> False
                               _                          -> True
 \end{code}
+
+Note [Incoherent instances]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For some classes, the choise of a particular instance does not matter, any one
+is good. E.g. consider
+
+        class D a b where { opD :: a -> b -> String }
+        instance D Int b where ...
+        instance D a Int where ...
+
+        g (x::Int) = opD x x
+
+For such classes this should work (without having to add an "instance D Int
+Int", and using -XOverlappingInstances, which would then work). This is what
+-XIncoherentInstances is for: Telling GHC "I don't care which instance you use;
+if you can use one, use it."
+
+
+Should this logic only work when all candidates have the incoherent flag, or
+even when all but one have it? The right choice is the latter, which can be
+justified by comparing the behaviour with how -XIncoherentInstances worked when
+it was only about the unify-check (note [Overlapping instances]):
+
+Example:
+        class C a b c where foo :: (a,b,c)
+        instance C [a] b Int
+        instance [incoherent] [Int] b c
+        instance [incoherent] C a Int c
+Thanks to the incoherent flags,
+        foo :: ([a],b,Int)
+works: Only instance one matches, the others just unify, but are marked
+incoherent.
+
+So I can write
+        (foo :: ([a],b,Int)) :: ([Int], Int, Int).
+but if that works then I really want to be able to write
+        foo :: ([Int], Int, Int)
+as well. Now all three instances from above match. None is more specific than
+another, so none is ruled out by the normal overlapping rules. One of them is
+not incoherent, but we still want this to compile. Hence the
+"all-but-one-logic".
+
+The implementation is in insert_overlapping, where we remove matching
+incoherent instances as long as there are are others.
+
 
 
 %************************************************************************

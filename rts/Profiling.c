@@ -66,7 +66,7 @@ Mutex ccs_mutex;
  * Built-in cost centres and cost-centre stacks:
  *
  *    MAIN   is the root of the cost-centre stack tree.  If there are
- *           no _scc_s in the program, all costs will be attributed
+ *           no {-# SCC #-}s in the program, all costs will be attributed
  *           to MAIN.
  *
  *    SYSTEM is the RTS in general (scheduler, etc.).  All costs for
@@ -149,7 +149,7 @@ initProfiling1 (void)
     {
         nat n;
         for (n=0; n < n_capabilities; n++) {
-            capabilities[n].r.rCCCS = CCS_SYSTEM;
+            capabilities[n]->r.rCCCS = CCS_SYSTEM;
         }
     }
 
@@ -1078,8 +1078,10 @@ fprintCCS_stderr (CostCentreStack *ccs, StgClosure *exception, StgTSO *tso)
         case CONSTR_STATIC:
         case CONSTR_NOCAF_STATIC:
             desc = GET_CON_DESC(itbl_to_con_itbl(info));
-        default:
+            break;
+       default:
             desc = closure_type_names[info->type];
+            break;
         }
         fprintf(stderr, "*** Exception (reporting due to +RTS -xc): (%s), stack trace: \n  ", desc);
     }

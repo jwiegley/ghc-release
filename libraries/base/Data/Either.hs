@@ -1,8 +1,7 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude #-}
-#ifdef __GLASGOW_HASKELL__
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
-#endif
+{-# LANGUAGE PolyKinds, DataKinds, TypeFamilies, TypeOperators, UndecidableInstances #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -20,23 +19,21 @@
 
 module Data.Either (
    Either(..),
-   either,           -- :: (a -> c) -> (b -> c) -> Either a b -> c
-   lefts,            -- :: [Either a b] -> [a]
-   rights,           -- :: [Either a b] -> [b]
-   partitionEithers, -- :: [Either a b] -> ([a],[b])
+   either,
+   lefts,
+   rights,
+   isLeft,
+   isRight,
+   partitionEithers,
  ) where
 
-#include "Typeable.h"
-
-#ifdef __GLASGOW_HASKELL__
 import GHC.Base
 import GHC.Show
 import GHC.Read
-#endif
 
 import Data.Typeable
+import Data.Type.Equality
 
-#ifdef __GLASGOW_HASKELL__
 {-
 -- just for testing
 import Test.QuickCheck
@@ -53,7 +50,7 @@ used to hold an error value and the 'Right' constructor is used to
 hold a correct value (mnemonic: \"right\" also means \"correct\").
 -}
 data  Either a b  =  Left a | Right b
-  deriving (Eq, Ord, Read, Show)
+  deriving (Eq, Ord, Read, Show, Typeable)
 
 instance Functor (Either a) where
     fmap _ (Left x) = Left x
@@ -70,9 +67,6 @@ instance Monad (Either e) where
 either                  :: (a -> c) -> (b -> c) -> Either a b -> c
 either f _ (Left x)     =  f x
 either _ g (Right y)    =  g y
-#endif  /* __GLASGOW_HASKELL__ */
-
-INSTANCE_TYPEABLE2(Either,eitherTc,"Either")
 
 -- | Extracts from a list of 'Either' all the 'Left' elements
 -- All the 'Left' elements are extracted in order.
@@ -96,6 +90,27 @@ partitionEithers = foldr (either left right) ([],[])
  where
   left  a ~(l, r) = (a:l, r)
   right a ~(l, r) = (l, a:r)
+
+-- | Return `True` if the given value is a `Left`-value, `False` otherwise.
+--
+-- /Since: 4.7.0.0/
+isLeft :: Either a b -> Bool
+isLeft (Left  _) = True
+isLeft (Right _) = False
+
+-- | Return `True` if the given value is a `Right`-value, `False` otherwise.
+--
+-- /Since: 4.7.0.0/
+isRight :: Either a b -> Bool
+isRight (Left  _) = False
+isRight (Right _) = True
+
+-- instance for the == Boolean type-level equality operator
+type family EqEither a b where
+  EqEither (Left x)  (Left y)  = x == y
+  EqEither (Right x) (Right y) = x == y
+  EqEither a         b         = False
+type instance a == b = EqEither a b
 
 {-
 {--------------------------------------------------------------------

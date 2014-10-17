@@ -9,6 +9,8 @@
 # install settings, you can override these by setting environment vars
 #VERBOSE
 #EXTRA_CONFIGURE_OPTS
+#EXTRA_BUILD_OPTS
+#EXTRA_INSTALL_OPTS
 
 # programs, you can override these by setting environment vars
 GHC=${GHC:-ghc}
@@ -47,17 +49,18 @@ PREFIX=${PREFIX:-${DEFAULT_PREFIX}}
 
 # Versions of the packages to install.
 # The version regex says what existing installed versions are ok.
-PARSEC_VER="3.1.2";    PARSEC_VER_REGEXP="[23]\."  # == 2.* || == 3.*
-DEEPSEQ_VER="1.3.0.0"; DEEPSEQ_VER_REGEXP="1\.[1-9]\." # >= 1.1 && < 2
-TEXT_VER="0.11.2.0";  TEXT_VER_REGEXP="0\.([2-9]|(1[0-1]))\." # >= 0.2 && < 0.12
-NETWORK_VER="2.3.0.13"; NETWORK_VER_REGEXP="2\."    # == 2.*
-CABAL_VER="1.14.0";    CABAL_VER_REGEXP="1\.(13\.3|14\.)"  # >= 1.13.3 && < 1.15
-TRANS_VER="0.3.0.0";   TRANS_VER_REGEXP="0\.[23]\."   # >= 0.2.* && < 0.4.*
-MTL_VER="2.1.1";     MTL_VER_REGEXP="[12]\."     # == 1.* || == 2.*
-HTTP_VER="4000.2.3";   HTTP_VER_REGEXP="4000\.[012]\." # == 4000.0.* || 4000.1.* || 4000.2.*
-ZLIB_VER="0.5.3.3";    ZLIB_VER_REGEXP="0\.[45]\." # == 0.4.* || == 0.5.*
-TIME_VER="1.4"         TIME_VER_REGEXP="1\.[1234]\.?" # >= 1.1 && < 1.5
-RANDOM_VER="1.0.1.1"   RANDOM_VER_REGEXP="1\.0\." # >= 1 && < 1.1
+PARSEC_VER="3.1.5";    PARSEC_VER_REGEXP="[23]\."              # == 2.* || == 3.*
+DEEPSEQ_VER="1.3.0.2"; DEEPSEQ_VER_REGEXP="1\.[1-9]\."         # >= 1.1 && < 2
+TEXT_VER="1.1.0.0";    TEXT_VER_REGEXP="((1\.[01]\.)|(0\.([2-9]|(1[0-1]))\.))" # >= 0.2 && < 1.2
+NETWORK_VER="2.4.2.2"; NETWORK_VER_REGEXP="2\."                # == 2.*
+CABAL_VER="1.18.1.2";  CABAL_VER_REGEXP="1\.1[89]\."           # >= 1.18 && < 1.20
+TRANS_VER="0.3.0.0";   TRANS_VER_REGEXP="0\.[23]\."            # >= 0.2.* && < 0.4.*
+MTL_VER="2.1.2";       MTL_VER_REGEXP="[2]\."                  #  == 2.*
+HTTP_VER="4000.2.10";  HTTP_VER_REGEXP="4000\.[012]\."         # == 4000.0.* || 4000.1.* || 4000.2.*
+ZLIB_VER="0.5.4.1";    ZLIB_VER_REGEXP="0\.[45]\."             # == 0.4.* || == 0.5.*
+TIME_VER="1.4.1"       TIME_VER_REGEXP="1\.[1234]\.?"          # >= 1.1 && < 1.5
+RANDOM_VER="1.0.1.1"   RANDOM_VER_REGEXP="1\.0\."              # >= 1 && < 1.1
+STM_VER="2.4.2";       STM_VER_REGEXP="2\."                    # == 2.*
 
 HACKAGE_URL="http://hackage.haskell.org/packages/archive"
 
@@ -119,13 +122,13 @@ fetch_pkg () {
   URL=${HACKAGE_URL}/${PKG}/${VER}/${PKG}-${VER}.tar.gz
   if which ${CURL} > /dev/null
   then
-    ${CURL} --fail -C - -O ${URL} || die "Failed to download ${PKG}."
+    ${CURL} -L --fail -C - -O ${URL} || die "Failed to download ${PKG}."
   elif which ${WGET} > /dev/null
   then
     ${WGET} -c ${URL} || die "Failed to download ${PKG}."
   elif which ${FETCH} > /dev/null
- 	then
- 	  ${FETCH} ${URL} || die "Failed to download ${PKG}."
+    then
+      ${FETCH} ${URL} || die "Failed to download ${PKG}."
   else
     die "Failed to find a downloader. 'curl', 'wget' or 'fetch' is required."
   fi
@@ -161,10 +164,10 @@ install_pkg () {
     ${EXTRA_CONFIGURE_OPTS} ${VERBOSE} \
     || die "Configuring the ${PKG} package failed"
 
-  ./Setup build ${VERBOSE} \
+  ./Setup build ${EXTRA_BUILD_OPTS} ${VERBOSE} \
     || die "Building the ${PKG} package failed"
 
-  ./Setup install ${VERBOSE} \
+  ./Setup install ${SCOPE_OF_INSTALLATION} ${EXTRA_INSTALL_OPTS} ${VERBOSE} \
     || die "Installing the ${PKG} package failed"
 }
 
@@ -187,29 +190,31 @@ do_pkg () {
 
 # Actually do something!
 
+info_pkg "deepseq"      ${DEEPSEQ_VER} ${DEEPSEQ_VER_REGEXP}
+info_pkg "time"         ${TIME_VER}    ${TIME_VER_REGEXP}
 info_pkg "Cabal"        ${CABAL_VER}   ${CABAL_VER_REGEXP}
 info_pkg "transformers" ${TRANS_VER}   ${TRANS_VER_REGEXP}
 info_pkg "mtl"          ${MTL_VER}     ${MTL_VER_REGEXP}
-info_pkg "deepseq"      ${DEEPSEQ_VER} ${DEEPSEQ_VER_REGEXP}
 info_pkg "text"         ${TEXT_VER}    ${TEXT_VER_REGEXP}
 info_pkg "parsec"       ${PARSEC_VER}  ${PARSEC_VER_REGEXP}
 info_pkg "network"      ${NETWORK_VER} ${NETWORK_VER_REGEXP}
-info_pkg "time"         ${TIME_VER}    ${TIME_VER_REGEXP}
 info_pkg "HTTP"         ${HTTP_VER}    ${HTTP_VER_REGEXP}
 info_pkg "zlib"         ${ZLIB_VER}    ${ZLIB_VER_REGEXP}
 info_pkg "random"       ${RANDOM_VER}  ${RANDOM_VER_REGEXP}
+info_pkg "stm"          ${STM_VER}     ${STM_VER_REGEXP}
 
+do_pkg   "deepseq"      ${DEEPSEQ_VER} ${DEEPSEQ_VER_REGEXP}
+do_pkg   "time"         ${TIME_VER}    ${TIME_VER_REGEXP}
 do_pkg   "Cabal"        ${CABAL_VER}   ${CABAL_VER_REGEXP}
 do_pkg   "transformers" ${TRANS_VER}   ${TRANS_VER_REGEXP}
 do_pkg   "mtl"          ${MTL_VER}     ${MTL_VER_REGEXP}
-do_pkg   "deepseq"      ${DEEPSEQ_VER} ${DEEPSEQ_VER_REGEXP}
 do_pkg   "text"         ${TEXT_VER}    ${TEXT_VER_REGEXP}
 do_pkg   "parsec"       ${PARSEC_VER}  ${PARSEC_VER_REGEXP}
 do_pkg   "network"      ${NETWORK_VER} ${NETWORK_VER_REGEXP}
-do_pkg   "time"         ${TIME_VER}    ${TIME_VER_REGEXP}
 do_pkg   "HTTP"         ${HTTP_VER}    ${HTTP_VER_REGEXP}
 do_pkg   "zlib"         ${ZLIB_VER}    ${ZLIB_VER_REGEXP}
 do_pkg   "random"       ${RANDOM_VER}  ${RANDOM_VER_REGEXP}
+do_pkg   "stm"          ${STM_VER}     ${STM_VER_REGEXP}
 
 install_pkg "cabal-install"
 

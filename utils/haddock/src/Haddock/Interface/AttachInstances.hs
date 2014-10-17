@@ -16,13 +16,17 @@ module Haddock.Interface.AttachInstances (attachInstances) where
 
 import Haddock.Types
 import Haddock.Convert
+import Haddock.GhcUtils
 
 import Control.Arrow
 import Data.List
+import Data.Ord (comparing)
+import Data.Function (on)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 
 import Class
+import FamInstEnv
 import FastString
 import GHC
 import GhcMonad (withSession)
@@ -32,6 +36,7 @@ import MonadUtils (liftIO)
 import Name
 import PrelNames
 import TcRnDriver (tcRnGetInfo)
+import TcType (tcSplitSigmaTy)
 import TyCon
 import TypeRep
 import TysPrim( funTyCon )
@@ -42,6 +47,7 @@ type ExportedNames = Set.Set Name
 type Modules = Set.Set Module
 type ExportInfo = (ExportedNames, Modules)
 
+-- Also attaches fixities
 attachInstances :: ExportInfo -> [Interface] -> InstIfaceMap -> Ghc [Interface]
 attachInstances expInfo ifaces instIfaceMap = mapM attach ifaces
   where
@@ -56,52 +62,60 @@ attachInstances expInfo ifaces instIfaceMap = mapM attach ifaces
 
 attachToExportItem :: ExportInfo -> Interface -> IfaceMap -> InstIfaceMap -> ExportItem Name -> Ghc (ExportItem Name)
 attachToExportItem expInfo iface ifaceMap instIfaceMap export =
-  case export of
-    ExportDecl { expItemDecl = L _ (TyClD d) } -> do
-      mb_info <- getAllInfo (unLoc (tcdLName d))
+  case attachFixities export of
+    e@ExportDecl { expItemDecl = L _ (TyClD d) } -> do
+      mb_info <- getAllInfo (tcdName d)
       let export' =
-            export {
+            e {
               expItemInstances =
                 case mb_info of
-                  Just (_, _, instances) ->
-                    let insts = map (first synifyInstHead) $ sortImage (first instHead) $
-                                filter (\((_,_,cls,tys),_) -> not $ isInstanceHidden expInfo cls tys)
-                                [ (instanceHead' i, getName i) | i <- instances ]
-                    in [ (inst, lookupInstDoc name iface ifaceMap instIfaceMap)
-                       | (inst, name) <- insts ]
+                  Just (_, _, cls_instances, fam_instances) ->
+                    let fam_insts = [ (synifyFamInst i opaque, n)
+                                    | i <- sortBy (comparing instFam) fam_instances
+                                    , let n = instLookup instDocMap (getName i) iface ifaceMap instIfaceMap
+                                    , not $ isNameHidden expInfo (fi_fam i)
+                                    , not $ any (isTypeHidden expInfo) (fi_tys i)
+                                    , let opaque = isTypeHidden expInfo (fi_rhs i)
+                                    ]
+                        cls_insts = [ (synifyInstHead i, instLookup instDocMap n iface ifaceMap instIfaceMap)
+                                    | let is = [ (instanceHead' i, getName i) | i <- cls_instances ]
+                                    , (i@(_,_,cls,tys), n) <- sortBy (comparing $ first instHead) is
+                                    , not $ isInstanceHidden expInfo cls tys
+                                    ]
+                    in cls_insts ++ fam_insts
                   Nothing -> []
             }
       return export'
-    _ -> return export
-
-
-lookupInstDoc :: Name -> Interface -> IfaceMap -> InstIfaceMap -> Maybe (Doc Name)
--- TODO: capture this pattern in a function (when we have streamlined the
--- handling of instances)
-lookupInstDoc name iface ifaceMap instIfaceMap =
-  case Map.lookup name (ifaceDocMap iface) of
-    Just doc -> Just doc
-    Nothing ->
-      case Map.lookup modName ifaceMap of
-        Just iface2 ->
-          case Map.lookup name (ifaceDocMap iface2) of
-            Just doc -> Just doc
-            Nothing -> Nothing
-        Nothing ->
-          case Map.lookup modName instIfaceMap of
-            Just instIface -> Map.lookup name (instDocMap instIface)
-            Nothing -> Nothing
+    e -> return e
   where
-    modName = nameModule name
+    attachFixities e@ExportDecl{ expItemDecl = L _ d } = e { expItemFixities =
+      nubBy ((==) `on` fst) $ expItemFixities e ++
+      [ (n',f) | n <- getMainDeclBinder d
+              , Just subs <- [instLookup instSubMap n iface ifaceMap instIfaceMap]
+              , n' <- n : subs
+              , Just f <- [instLookup instFixMap n' iface ifaceMap instIfaceMap]
+      ] }
 
+    attachFixities e = e
+
+
+instLookup :: (InstalledInterface -> Map.Map Name a) -> Name
+            -> Interface -> IfaceMap -> InstIfaceMap -> Maybe a
+instLookup f name iface ifaceMap instIfaceMap =
+  case Map.lookup name (f $ toInstalledIface iface) of
+    res@(Just _) -> res
+    Nothing -> do
+      let ifaceMaps = Map.union (fmap toInstalledIface ifaceMap) instIfaceMap
+      iface' <- Map.lookup (nameModule name) ifaceMaps
+      Map.lookup name (f iface')
 
 -- | Like GHC's 'instanceHead' but drops "silent" arguments.
 instanceHead' :: ClsInst -> ([TyVar], ThetaType, Class, [Type])
 instanceHead' ispec = (tvs, dropSilentArgs dfun theta, cls, tys)
   where
     dfun = is_dfun ispec
-    (tvs, theta, cls, tys) = instanceHead ispec
-
+    (tvs, cls, tys) = instanceHead ispec
+    (_, theta, _) = tcSplitSigmaTy (idType dfun)
 
 -- | Drop "silent" arguments. See GHC Note [Silent superclass
 -- arguments].
@@ -111,7 +125,7 @@ dropSilentArgs dfun theta = drop (dfunNSilent dfun) theta
 
 -- | Like GHC's getInfo but doesn't cut things out depending on the
 -- interative context, which we don't set sufficiently anyway.
-getAllInfo :: GhcMonad m => Name -> m (Maybe (TyThing,Fixity,[ClsInst]))
+getAllInfo :: GhcMonad m => Name -> m (Maybe (TyThing,Fixity,[ClsInst],[FamInst]))
 getAllInfo name = withSession $ \hsc_env -> do 
    (_msgs, r) <- liftIO $ tcRnGetInfo hsc_env name
    return r
@@ -134,27 +148,27 @@ data SimpleType = SimpleType Name [SimpleType]
 instHead :: ([TyVar], [PredType], Class, [Type]) -> ([Int], Name, [SimpleType])
 instHead (_, _, cls, args)
   = (map argCount args, className cls, map simplify args)
-  where
-    argCount (AppTy t _) = argCount t + 1
-    argCount (TyConApp _ ts) = length ts
-    argCount (FunTy _ _ ) = 2
-    argCount (ForAllTy _ t) = argCount t
-    argCount _ = 0
 
-    simplify (ForAllTy _ t) = simplify t
-    simplify (FunTy t1 t2) = 
-      SimpleType funTyConName [simplify t1, simplify t2]
-    simplify (AppTy t1 t2) = SimpleType s (ts ++ [simplify t2])
-      where (SimpleType s ts) = simplify t1
-    simplify (TyVarTy v) = SimpleType (tyVarName v) []
-    simplify (TyConApp tc ts) = SimpleType (tyConName tc) (map simplify ts)
-    simplify (LitTy l) = SimpleTyLit l
+argCount :: Type -> Int
+argCount (AppTy t _) = argCount t + 1
+argCount (TyConApp _ ts) = length ts
+argCount (FunTy _ _ ) = 2
+argCount (ForAllTy _ t) = argCount t
+argCount _ = 0
 
+simplify :: Type -> SimpleType
+simplify (ForAllTy _ t) = simplify t
+simplify (FunTy t1 t2) = SimpleType funTyConName [simplify t1, simplify t2]
+simplify (AppTy t1 t2) = SimpleType s (ts ++ [simplify t2])
+  where (SimpleType s ts) = simplify t1
+simplify (TyVarTy v) = SimpleType (tyVarName v) []
+simplify (TyConApp tc ts) = SimpleType (tyConName tc) (map simplify ts)
+simplify (LitTy l) = SimpleTyLit l
 
--- sortImage f = sortBy (\x y -> compare (f x) (f y))
-sortImage :: Ord b => (a -> b) -> [a] -> [a]
-sortImage f xs = map snd $ sortBy cmp_fst [(f x, x) | x <- xs]
- where cmp_fst (x,_) (y,_) = compare x y
+-- Used for sorting
+instFam :: FamInst -> ([Int], Name, [SimpleType], Int, SimpleType)
+instFam FamInst { fi_fam = n, fi_tys = ts, fi_rhs = t }
+  = (map argCount ts, n, map simplify ts, argCount t, simplify t)
 
 
 funTyConName :: Name
@@ -188,11 +202,11 @@ isInstanceHidden expInfo cls tys =
     instClassHidden = isNameHidden expInfo $ getName cls
 
     instTypeHidden :: Bool
-    instTypeHidden = any typeHidden tys
+    instTypeHidden = any (isTypeHidden expInfo) tys
 
-    nameHidden :: Name -> Bool
-    nameHidden = isNameHidden expInfo
-
+isTypeHidden :: ExportInfo -> Type -> Bool
+isTypeHidden expInfo = typeHidden
+  where
     typeHidden :: Type -> Bool
     typeHidden t =
       case t of
@@ -202,3 +216,6 @@ isInstanceHidden expInfo cls tys =
         FunTy t1 t2 -> typeHidden t1 || typeHidden t2
         ForAllTy _ ty -> typeHidden ty
         LitTy _ -> False
+
+    nameHidden :: Name -> Bool
+    nameHidden = isNameHidden expInfo

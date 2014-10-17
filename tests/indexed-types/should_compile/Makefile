@@ -25,3 +25,19 @@ T6152:
 	$(RM) T6152.o T6152.hi 
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c T6152.hs
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c T6152.hs -fforce-recomp
+
+T8002:
+	$(RM) T8002a.o T8002a.hi T8002b.o T8002b.hi 
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T8002b.hs
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T8002a.hs
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T8002.hs
+
+T8011:
+	$(RM) T8011a.o T8011a.hi T8011.o T8011.hi
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T8011a.hs
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T8011.hs
+
+T8500:
+	$(RM) T8500a.o T8500a.hi T8500.o T8500.hi
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T8500a.hs
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T8500.hs

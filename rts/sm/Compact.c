@@ -7,7 +7,7 @@
  * Documentation on the architecture of the Garbage Collector can be
  * found in the online commentary:
  * 
- *   http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/GC
+ *   http://ghc.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/GC
  *
  * ---------------------------------------------------------------------------*/
 
@@ -301,37 +301,7 @@ thread_stack(StgPtr p, StgPtr stack_end)
 	
 	switch (info->i.type) {
 	    
-	    // Dynamic bitmap: the mask is stored on the stack 
-	case RET_DYN:
-	{
-	    StgWord dyn;
-	    dyn = ((StgRetDyn *)p)->liveness;
-
-	    // traverse the bitmap first
-	    bitmap = RET_DYN_LIVENESS(dyn);
-	    p      = (P_)&((StgRetDyn *)p)->payload[0];
-	    size   = RET_DYN_BITMAP_SIZE;
-	    while (size > 0) {
-		if ((bitmap & 1) == 0) {
-		    thread((StgClosure **)p);
-		}
-		p++;
-		bitmap = bitmap >> 1;
-		size--;
-	    }
-	    
-	    // skip over the non-ptr words
-	    p += RET_DYN_NONPTRS(dyn) + RET_DYN_NONPTR_REGS_SIZE;
-	    
-	    // follow the ptr words
-	    for (size = RET_DYN_PTRS(dyn); size > 0; size--) {
-		thread((StgClosure **)p);
-		p++;
-	    }
-	    continue;
-	}
-	    
-	    // small bitmap (<= 32 entries, or 64 on a 64-bit machine) 
+            // small bitmap (<= 32 entries, or 64 on a 64-bit machine)
         case CATCH_RETRY_FRAME:
         case CATCH_STM_FRAME:
         case ATOMICALLY_FRAME:
@@ -382,7 +352,7 @@ thread_stack(StgPtr p, StgPtr stack_end)
 	    StgRetFun *ret_fun = (StgRetFun *)p;
 	    StgFunInfoTable *fun_info;
 	    
-	    fun_info = FUN_INFO_PTR_TO_STRUCT(UNTAG_CLOSURE((StgClosure *)
+	    fun_info = FUN_INFO_PTR_TO_STRUCT((StgInfoTable *)UNTAG_CLOSURE((StgClosure *)
                            get_threaded_info((StgPtr)ret_fun->fun)));
 	         // *before* threading it!
 	    thread(&ret_fun->fun);
@@ -404,7 +374,7 @@ thread_PAP_payload (StgClosure *fun, StgClosure **payload, StgWord size)
     StgWord bitmap;
     StgFunInfoTable *fun_info;
 
-    fun_info = FUN_INFO_PTR_TO_STRUCT(UNTAG_CLOSURE((StgClosure *)
+    fun_info = FUN_INFO_PTR_TO_STRUCT((StgInfoTable *)UNTAG_CLOSURE((StgClosure *)
                         get_threaded_info((StgPtr)fun)));
     ASSERT(fun_info->i.type != PAP);
 
@@ -472,6 +442,7 @@ thread_TSO (StgTSO *tso)
     thread_(&tso->global_link);
 
     if (   tso->why_blocked == BlockedOnMVar
+        || tso->why_blocked == BlockedOnMVarRead
 	|| tso->why_blocked == BlockedOnBlackHole
 	|| tso->why_blocked == BlockedOnMsgThrowTo
         || tso->why_blocked == NotBlocked
@@ -633,6 +604,7 @@ thread_obj (StgInfoTable *info, StgPtr p)
     case MUT_PRIM:
     case MUT_VAR_CLEAN:
     case MUT_VAR_DIRTY:
+    case TVAR:
     case BLACKHOLE:
     case BLOCKING_QUEUE:
     {
@@ -649,7 +621,7 @@ thread_obj (StgInfoTable *info, StgPtr p)
     case WEAK:
     {
 	StgWeak *w = (StgWeak *)p;
-	thread(&w->cfinalizer);
+	thread(&w->cfinalizers);
 	thread(&w->key);
 	thread(&w->value);
 	thread(&w->finalizer);
@@ -818,7 +790,7 @@ update_fwd_compact( bdescr *blocks )
             // that if (p&BLOCK_MASK) >= (free&BLOCK_MASK), then we
             // definitely have enough room.  Also see bug #1147.
             iptr = get_threaded_info(p);
-	    info = INFO_PTR_TO_STRUCT(UNTAG_CLOSURE((StgClosure *)iptr));
+	    info = INFO_PTR_TO_STRUCT((StgInfoTable *)UNTAG_CLOSURE((StgClosure *)iptr));
 
 	    q = p;
 
@@ -946,19 +918,22 @@ compact(StgClosure *static_objects)
     markScheduler((evac_fn)thread_root, NULL);
 
     // the weak pointer lists...
-    if (weak_ptr_list != NULL) {
-	thread((void *)&weak_ptr_list);
+    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+        if (generations[g].weak_ptr_list != NULL) {
+            thread((void *)&generations[g].weak_ptr_list);
+        }
     }
-    if (old_weak_ptr_list != NULL) {
-	thread((void *)&old_weak_ptr_list); // tmp
+
+    if (dead_weak_ptr_list != NULL) {
+        thread((void *)&dead_weak_ptr_list); // tmp
     }
 
     // mutable lists
     for (g = 1; g < RtsFlags.GcFlags.generations; g++) {
-	bdescr *bd;
-	StgPtr p;
+        bdescr *bd;
+        StgPtr p;
         for (n = 0; n < n_capabilities; n++) {
-            for (bd = capabilities[n].mut_lists[g]; 
+            for (bd = capabilities[n]->mut_lists[g];
                  bd != NULL; bd = bd->link) {
                 for (p = bd->start; p < bd->free; p++) {
                     thread((StgClosure **)p);
@@ -993,7 +968,7 @@ compact(StgClosure *static_objects)
     thread_static(static_objects /* ToDo: ok? */);
 
     // the stable pointer table
-    threadStablePtrTable((evac_fn)thread_root, NULL);
+    threadStableTables((evac_fn)thread_root, NULL);
 
     // the CAF list (used by GHCi)
     markCAFs((evac_fn)thread_root, NULL);

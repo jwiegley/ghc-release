@@ -1,4 +1,4 @@
-{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleInstances, ViewPatterns #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# OPTIONS_HADDOCK hide #-}
 -----------------------------------------------------------------------------
@@ -35,6 +35,7 @@ import GhcMonad (withSession)
 import HscTypes
 import UniqFM
 import GHC
+import Class
 
 
 moduleString :: Module -> String
@@ -76,6 +77,9 @@ isNameSym = isSymOcc . nameOccName
 isVarSym :: OccName -> Bool
 isVarSym = isLexVarSym . occNameFS
 
+isConSym :: OccName -> Bool
+isConSym = isLexConSym . occNameFS
+
 
 getMainDeclBinder :: HsDecl name -> [name]
 getMainDeclBinder (TyClD d) = [tcdName d]
@@ -88,6 +92,17 @@ getMainDeclBinder (ForD (ForeignImport name _ _ _)) = [unLoc name]
 getMainDeclBinder (ForD (ForeignExport _ _ _ _)) = []
 getMainDeclBinder _ = []
 
+-- Extract the source location where an instance is defined. This is used
+-- to correlate InstDecls with their Instance/CoAxiom Names, via the
+-- instanceMap.
+getInstLoc :: InstDecl name -> SrcSpan
+getInstLoc (ClsInstD (ClsInstDecl { cid_poly_ty = L l _ })) = l
+getInstLoc (DataFamInstD (DataFamInstDecl { dfid_tycon = L l _ })) = l
+getInstLoc (TyFamInstD (TyFamInstDecl
+  -- Since CoAxioms' Names refer to the whole line for type family instances
+  -- in particular, we need to dig a bit deeper to pull out the entire
+  -- equation. This does not happen for data family instances, for some reason.
+  { tfid_eqn = L _ (TyFamInstEqn { tfie_rhs = L l _ })})) = l
 
 -- Useful when there is a signature with multiple names, e.g.
 --   foo, bar :: Types..
@@ -100,6 +115,7 @@ filterSigNames :: (name -> Bool) -> Sig name -> Maybe (Sig name)
 filterSigNames p orig@(SpecSig n _ _)          = ifTrueJust (p $ unLoc n) orig
 filterSigNames p orig@(InlineSig n _)          = ifTrueJust (p $ unLoc n) orig
 filterSigNames p orig@(FixSig (FixitySig n _)) = ifTrueJust (p $ unLoc n) orig
+filterSigNames _ orig@(MinimalSig _)           = Just orig
 filterSigNames p (TypeSig ns ty)               =
   case filter (p . unLoc) ns of
     []       -> Nothing
@@ -115,6 +131,7 @@ sigName (L _ sig) = sigNameNoLoc sig
 
 sigNameNoLoc :: Sig name -> [name]
 sigNameNoLoc (TypeSig   ns _)         = map unLoc ns
+sigNameNoLoc (PatSynSig n _ _ _ _)    = [unLoc n]
 sigNameNoLoc (SpecSig   n _ _)        = [unLoc n]
 sigNameNoLoc (InlineSig n _)          = [unLoc n]
 sigNameNoLoc (FixSig (FixitySig n _)) = [unLoc n]
@@ -147,7 +164,7 @@ isValD _ = False
 
 
 declATs :: HsDecl a -> [a]
-declATs (TyClD d) | isClassDecl d = map (tcdName . unL) $ tcdATs d
+declATs (TyClD d) | isClassDecl d = map (unL . fdLName . unL) $ tcdATs d
 declATs _ = []
 
 
@@ -182,7 +199,7 @@ instance Foldable (GenLocated l) where
 
 instance Traversable (GenLocated l) where
   mapM f (L l x) = (return . L l) =<< f x
-
+  traverse f (L l x) = L l <$> f x
 
 -------------------------------------------------------------------------------
 -- * NamedThing instances
@@ -215,9 +232,9 @@ instance Parent (ConDecl Name) where
 
 instance Parent (TyClDecl Name) where
   children d
-    | isDataDecl  d = map (unL . con_name . unL) . td_cons . tcdTyDefn $ d
+    | isDataDecl  d = map (unL . con_name . unL) . dd_cons . tcdDataDefn $ d
     | isClassDecl d =
-        map (tcdName . unL) (tcdATs d) ++
+        map (unL . fdLName . unL) (tcdATs d) ++
         [ unL n | L _ (TypeSig ns _) <- tcdSigs d, n <- ns ]
     | otherwise = []
 
@@ -231,8 +248,8 @@ family = getName &&& children
 -- child to its grand-children, recursively.
 families :: TyClDecl Name -> [(Name, [Name])]
 families d
-  | isDataDecl  d = family d : map (family . unL) (td_cons (tcdTyDefn d))
-  | isClassDecl d = family d : concatMap (families . unL) (tcdATs d)
+  | isDataDecl  d = family d : map (family . unL) (dd_cons (tcdDataDefn d))
+  | isClassDecl d = [family d]
   | otherwise     = []
 
 
@@ -264,6 +281,13 @@ modifySessionDynFlags f = do
 gbracket_ :: ExceptionMonad m => m a -> m b -> m c -> m c
 gbracket_ before_ after thing = gbracket before_ (const after) (const thing)
 
+-- Extract the minimal complete definition of a Name, if one exists
+minimalDef :: GhcMonad m => Name -> m (Maybe ClassMinimalDef)
+minimalDef n = do
+  mty <- lookupGlobalName n
+  case mty of
+    Just (ATyCon (tyConClass_maybe -> Just c)) -> return . Just $ classMinimalDef c
+    _ -> return Nothing
 
 -------------------------------------------------------------------------------
 -- * DynFlags

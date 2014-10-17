@@ -11,9 +11,9 @@
 -- Stability   :  stable
 -- Portability :  portable
 --
--- The Prelude: a standard module imported by default into all Haskell
--- modules.  For more documentation, see the Haskell 98 Report
--- <http://www.haskell.org/onlinereport/>.
+-- The Prelude: a standard module. The Prelude is imported by default
+-- into all Haskell modules unless either there is an explicit import
+-- statement for it, or the NoImplicitPrelude extension is enabled.
 --
 -----------------------------------------------------------------------------
 
@@ -36,17 +36,6 @@ module Prelude (
 
     -- *** Tuples
     fst, snd, curry, uncurry,
-
-#if defined(__NHC__)
-    []((:), []),        -- Not legal Haskell 98;
-                        -- ... available through built-in syntax
-    module Data.Tuple,  -- Includes tuple types
-    ()(..),             -- Not legal Haskell 98
-    (->),               -- ... available through built-in syntax
-#endif
-#ifdef __HUGS__
-    (:),                -- Not legal Haskell 98
-#endif
 
     -- ** Basic type classes
     Eq((==), (/=)),
@@ -145,7 +134,6 @@ module Prelude (
 
   ) where
 
-#ifndef __HUGS__
 import Control.Monad
 import System.IO
 import System.IO.Error
@@ -153,9 +141,7 @@ import Data.List
 import Data.Either
 import Data.Maybe
 import Data.Tuple
-#endif
 
-#ifdef __GLASGOW_HASKELL__
 import GHC.Base
 import Text.Read
 import GHC.Enum
@@ -163,27 +149,15 @@ import GHC.Num
 import GHC.Real
 import GHC.Float
 import GHC.Show
-import GHC.Err   ( undefined )
-#endif
 
-#ifdef __HUGS__
-import Hugs.Prelude
-#endif
-
-#ifndef __HUGS__
 infixr 0 $!
-#endif
 
 -- -----------------------------------------------------------------------------
 -- Miscellaneous functions
 
 -- | Strict (call-by-value) application, defined in terms of 'seq'.
 ($!)    :: (a -> b) -> a -> b
-#ifdef __GLASGOW_HASKELL__
 f $! x  = let !vx = x in f vx  -- see #2273
-#elif !defined(__HUGS__)
-f $! x  = x `seq` f x
-#endif
 
 #ifdef __HADDOCK__
 -- | The value of @'seq' a b@ is bottom if @a@ is bottom, and otherwise

@@ -1,4 +1,4 @@
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE CPP, TypeFamilies #-}
 #if __GLASGOW_HASKELL__ >= 701
 {-# LANGUAGE Trustworthy #-}
 #endif
@@ -20,6 +20,9 @@ import Compiler.Hoopl.Collections
 
 import qualified Data.IntMap as M
 import qualified Data.IntSet as S
+
+import Control.Applicative (Applicative(..))
+import Control.Monad (ap,liftM)
 
 -----------------------------------------------------------------------------
 --		Unique
@@ -90,6 +93,7 @@ instance IsMap UniqueMap where
   mapMapWithKey f (UM m) = UM (M.mapWithKey (f . intToUnique) m)
   mapFold k z (UM m) = M.fold k z m
   mapFoldWithKey k z (UM m) = M.foldWithKey (k . intToUnique) z m
+  mapFilter f (UM m) = UM (M.filter f m)
 
   mapElems (UM m) = M.elems m
   mapKeys (UM m) = M.keys m
@@ -104,6 +108,13 @@ class Monad m => UniqueMonad m where
   freshUnique :: m Unique
 
 newtype SimpleUniqueMonad a = SUM { unSUM :: [Unique] -> (a, [Unique]) }
+
+instance Functor SimpleUniqueMonad where
+  fmap = liftM
+
+instance Applicative SimpleUniqueMonad where
+  pure  = return
+  (<*>) = ap
 
 instance Monad SimpleUniqueMonad where
   return a = SUM $ \us -> (a, us)
@@ -126,6 +137,13 @@ runSimpleUniqueMonad m = fst (unSUM m allUniques)
 ----------------------------------------------------------------
 
 newtype UniqueMonadT m a = UMT { unUMT :: [Unique] -> m (a, [Unique]) }
+
+instance Monad m => Functor (UniqueMonadT m) where
+  fmap  = liftM
+
+instance Monad m => Applicative (UniqueMonadT m) where
+  pure  = return
+  (<*>) = ap
 
 instance Monad m => Monad (UniqueMonadT m) where
   return a = UMT $ \us -> return (a, us)

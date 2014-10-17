@@ -1,6 +1,5 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -fno-warn-unused-imports -fno-warn-unused-binds #-}
-#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE NondecreasingIndentation #-}
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 -----------------------------------------------------------------------------
@@ -56,7 +55,6 @@ import Foreign.C.Error
 import Foreign.C.String ( peekCString )
 import Foreign.C.Types
 import Foreign
-import System.Posix.Types
 import System.Posix.Internals
 
 -- -----------------------------------------------------------------------------

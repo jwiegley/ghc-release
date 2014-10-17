@@ -80,6 +80,7 @@ char *EventDesc[] = {
   [EVENT_CREATE_SPARK_THREAD] = "Create spark thread",
   [EVENT_LOG_MSG]             = "Log message",
   [EVENT_USER_MSG]            = "User message",
+  [EVENT_USER_MARKER]         = "User marker",
   [EVENT_GC_IDLE]             = "GC idle",
   [EVENT_GC_WORK]             = "GC working",
   [EVENT_GC_DONE]             = "GC done",
@@ -102,6 +103,9 @@ char *EventDesc[] = {
   [EVENT_SPARK_STEAL]         = "Spark steal",
   [EVENT_SPARK_FIZZLE]        = "Spark fizzle",
   [EVENT_SPARK_GC]            = "Spark GC",
+  [EVENT_TASK_CREATE]         = "Task create",
+  [EVENT_TASK_MIGRATE]        = "Task migrate",
+  [EVENT_TASK_DELETE]         = "Task delete",
 };
 
 // Event type. 
@@ -178,6 +182,15 @@ static inline void postCapsetID(EventsBuf *eb, EventCapsetID id)
 static inline void postCapsetType(EventsBuf *eb, EventCapsetType type)
 { postWord16(eb,type); }
 
+static inline void postOSProcessId(EventsBuf *eb, pid_t pid)
+{ postWord32(eb, pid); }
+
+static inline void postKernelThreadId(EventsBuf *eb, EventKernelThreadId tid)
+{ postWord64(eb, tid); }
+
+static inline void postTaskId(EventsBuf *eb, EventTaskId tUniq)
+{ postWord64(eb, tUniq); }
+
 static inline void postPayloadSize(EventsBuf *eb, EventPayloadSize size)
 { postWord16(eb,size); }
 
@@ -185,19 +198,13 @@ static inline void postEventHeader(EventsBuf *eb, EventTypeNum type)
 {
     postEventTypeNum(eb, type);
     postTimestamp(eb);
-}    
+}
 
 static inline void postInt8(EventsBuf *eb, StgInt8 i)
 { postWord8(eb, (StgWord8)i); }
 
-static inline void postInt16(EventsBuf *eb, StgInt16 i)
-{ postWord16(eb, (StgWord16)i); }
-
 static inline void postInt32(EventsBuf *eb, StgInt32 i)
 { postWord32(eb, (StgWord32)i); }
-
-static inline void postInt64(EventsBuf *eb, StgInt64 i)
-{ postWord64(eb, (StgWord64)i); }
 
 
 void
@@ -357,6 +364,7 @@ initEventLogging(void)
 
         case EVENT_LOG_MSG:          // (msg)
         case EVENT_USER_MSG:         // (msg)
+        case EVENT_USER_MARKER:      // (markername)
         case EVENT_RTS_IDENTIFIER:   // (capset, str)
         case EVENT_PROGRAM_ARGS:     // (capset, strvec)
         case EVENT_PROGRAM_ENV:      // (capset, strvec)
@@ -391,6 +399,20 @@ initEventLogging(void)
                                + sizeof(StgWord64) * 3
                                + sizeof(StgWord32)
                                + sizeof(StgWord64) * 2;
+            break;
+
+        case EVENT_TASK_CREATE:   // (taskId, cap, tid)
+            eventTypes[t].size =
+                sizeof(EventTaskId) + sizeof(EventCapNo) + sizeof(EventKernelThreadId);
+            break;
+
+        case EVENT_TASK_MIGRATE:   // (taskId, cap, new_cap)
+            eventTypes[t].size =
+                sizeof(EventTaskId) + sizeof(EventCapNo) + sizeof(EventCapNo);
+            break;
+
+        case EVENT_TASK_DELETE:   // (taskId)
+            eventTypes[t].size = sizeof(EventTaskId);
             break;
 
         case EVENT_BLOCK_MARKER:
@@ -699,7 +721,7 @@ void postCapsetEvent (EventTypeNum tag,
     case EVENT_OSPROCESS_PID:   // (capset, pid)
     case EVENT_OSPROCESS_PPID:  // (capset, parent_pid)
     {
-        postWord32(&eventBuf, info);
+        postOSProcessId(&eventBuf, info);
         break;
     }
     default:
@@ -914,6 +936,62 @@ void postEventGcStats  (Capability    *cap,
     postWord64(eb, par_tot_copied);
 }
 
+void postTaskCreateEvent (EventTaskId taskId,
+                          EventCapNo capno,
+                          EventKernelThreadId tid)
+{
+    ACQUIRE_LOCK(&eventBufMutex);
+
+    if (!hasRoomForEvent(&eventBuf, EVENT_TASK_CREATE)) {
+        // Flush event buffer to make room for new event.
+        printAndClearEventBuf(&eventBuf);
+    }
+
+    postEventHeader(&eventBuf, EVENT_TASK_CREATE);
+    /* EVENT_TASK_CREATE (taskID, cap, tid) */
+    postTaskId(&eventBuf, taskId);
+    postCapNo(&eventBuf, capno);
+    postKernelThreadId(&eventBuf, tid);
+
+    RELEASE_LOCK(&eventBufMutex);
+}
+
+void postTaskMigrateEvent (EventTaskId taskId,
+                           EventCapNo capno,
+                           EventCapNo new_capno)
+{
+    ACQUIRE_LOCK(&eventBufMutex);
+
+    if (!hasRoomForEvent(&eventBuf, EVENT_TASK_MIGRATE)) {
+        // Flush event buffer to make room for new event.
+        printAndClearEventBuf(&eventBuf);
+    }
+
+    postEventHeader(&eventBuf, EVENT_TASK_MIGRATE);
+    /* EVENT_TASK_MIGRATE (taskID, cap, new_cap) */
+    postTaskId(&eventBuf, taskId);
+    postCapNo(&eventBuf, capno);
+    postCapNo(&eventBuf, new_capno);
+
+    RELEASE_LOCK(&eventBufMutex);
+}
+
+void postTaskDeleteEvent (EventTaskId taskId)
+{
+    ACQUIRE_LOCK(&eventBufMutex);
+
+    if (!hasRoomForEvent(&eventBuf, EVENT_TASK_DELETE)) {
+        // Flush event buffer to make room for new event.
+        printAndClearEventBuf(&eventBuf);
+    }
+
+    postEventHeader(&eventBuf, EVENT_TASK_DELETE);
+    /* EVENT_TASK_DELETE (taskID) */
+    postTaskId(&eventBuf, taskId);
+
+    RELEASE_LOCK(&eventBufMutex);
+}
+
 void
 postEvent (Capability *cap, EventTypeNum tag)
 {
@@ -1002,6 +1080,27 @@ void postEventStartup(EventCapNo n_caps)
     postCapNo(&eventBuf, n_caps);
 
     RELEASE_LOCK(&eventBufMutex);
+}
+
+void postUserMarker(Capability *cap, char *markername)
+{
+    EventsBuf *eb;
+    int size = strlen(markername);
+
+    eb = &capEventBuf[cap->no];
+
+    if (!hasRoomForVariableEvent(eb, size)){
+        printAndClearEventBuf(eb);
+
+        if (!hasRoomForVariableEvent(eb, size)){
+            // Event size exceeds buffer size, bail out:
+            return;
+        }
+    }
+
+    postEventHeader(eb, EVENT_USER_MARKER);
+    postPayloadSize(eb, size);
+    postBuf(eb, (StgWord8*) markername, size);
 }
 
 void postThreadLabel(Capability    *cap,

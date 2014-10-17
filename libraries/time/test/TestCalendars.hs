@@ -1,10 +1,10 @@
-{-# OPTIONS -Wall -Werror #-}
-
-module Main where
+module Test.TestCalendars where
 
 import Data.Time.Calendar.Julian
 import Data.Time.Calendar.WeekDate
 import Data.Time.Calendar
+import Test.TestUtil
+import Test.TestCalendarsRef
 
 showers :: [(String,Day -> String)]
 showers = [
@@ -22,8 +22,9 @@ days = [
 	fromGregorian 2005 1 23
 	]
 
-main :: IO ()
-main = mapM_ (\day -> do
-	mapM_ (\(name,shower) -> putStr  (" == " ++ name ++ " " ++ (shower day))) showers
-	putStrLn ""
-	) days
+testCalendars :: Test
+testCalendars = pureTest "testCalendars" $
+    diff testCalendarsRef $ unlines $ map (\d -> showShowers d) days
+  where
+    showShowers day = 
+        concatMap (\(nm,shower) -> unwords [" ==", nm, shower day]) showers

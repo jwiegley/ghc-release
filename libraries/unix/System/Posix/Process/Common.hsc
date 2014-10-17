@@ -1,5 +1,5 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE InterruptibleFFI, RankNTypes #-}
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 -----------------------------------------------------------------------------
@@ -7,7 +7,7 @@
 -- Module      :  System.Posix.Process.Common
 -- Copyright   :  (c) The University of Glasgow 2002
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  provisional
 -- Portability :  non-portable (requires POSIX)
@@ -23,6 +23,7 @@ module System.Posix.Process.Common (
     -- ** Forking and executing
 #ifdef __GLASGOW_HASKELL__
     forkProcess,
+    forkProcessWithUnmask,
 #endif
 
     -- ** Exiting
@@ -81,7 +82,9 @@ import System.Posix.Types
 import Control.Monad
 
 #ifdef __GLASGOW_HASKELL__
-import GHC.TopHandler	( runIO )
+import Control.Exception.Base ( bracket, getMaskingState, MaskingState(..) ) -- used by forkProcess
+import GHC.TopHandler   ( runIO )
+import GHC.IO ( unsafeUnmask, uninterruptibleMask_ )
 #endif
 
 #ifdef __HUGS__
@@ -185,11 +188,11 @@ foreign import ccall unsafe "setsid"
 
 data ProcessTimes
   = ProcessTimes { elapsedTime     :: ClockTick
-  		 , userTime        :: ClockTick
-		 , systemTime      :: ClockTick
-		 , childUserTime   :: ClockTick
-		 , childSystemTime :: ClockTick
-		 }
+                 , userTime        :: ClockTick
+                 , systemTime      :: ClockTick
+                 , childUserTime   :: ClockTick
+                 , childSystemTime :: ClockTick
+                 }
 
 -- | 'getProcessTimes' calls @times@ to obtain time-accounting
 --   information for the current process and its children.
@@ -202,11 +205,11 @@ getProcessTimes = do
      cut <- (#peek struct tms, tms_cutime) p_tms
      cst <- (#peek struct tms, tms_cstime) p_tms
      return (ProcessTimes{ elapsedTime     = elapsed,
-	 		   userTime        = ut,
-	 		   systemTime      = st,
-	 		   childUserTime   = cut,
-	 		   childSystemTime = cst
-			  })
+                           userTime        = ut,
+                           systemTime      = st,
+                           childUserTime   = cut,
+                           childSystemTime = cst
+                          })
 
 type CTms = ()
 
@@ -253,7 +256,7 @@ setProcessPriority      :: ProcessID      -> Int -> IO ()
 setProcessGroupPriority :: ProcessGroupID -> Int -> IO ()
 setUserPriority         :: UserID         -> Int -> IO ()
 
-setProcessPriority pid val = 
+setProcessPriority pid val =
   throwErrnoIfMinus1_ "setProcessPriority" $
     c_setpriority (#const PRIO_PROCESS) (fromIntegral pid) (fromIntegral val)
 
@@ -278,6 +281,9 @@ threads will be copied to the child process.
 On success, 'forkProcess' returns the child's 'ProcessID' to the parent process;
 in case of an error, an exception is thrown.
 
+The exception masking state of the executed action is inherited
+(c.f. 'forkIO'), see also 'forkProcessWithUnmask' (/since: 2.7.0.0/).
+
 'forkProcess' comes with a giant warning: since any other running
 threads are not copied into the child process, it's easy to go wrong:
 e.g. by accessing some shared resource that was held by another thread
@@ -286,12 +292,28 @@ in the parent.
 
 forkProcess :: IO () -> IO ProcessID
 forkProcess action = do
-  stable <- newStablePtr (runIO action)
-  pid <- throwErrnoIfMinus1 "forkProcess" (forkProcessPrim stable)
-  freeStablePtr stable
-  return pid
+  -- wrap action to re-establish caller's masking state, as
+  -- 'forkProcessPrim' starts in 'MaskedInterruptible' state by
+  -- default; see also #1048
+  mstate <- getMaskingState
+  let action' = case mstate of
+          Unmasked              -> unsafeUnmask action
+          MaskedInterruptible   -> action
+          MaskedUninterruptible -> uninterruptibleMask_ action
+
+  bracket
+    (newStablePtr (runIO action'))
+    freeStablePtr
+    (\stable -> throwErrnoIfMinus1 "forkProcess" (forkProcessPrim stable))
 
 foreign import ccall "forkProcess" forkProcessPrim :: StablePtr (IO ()) -> IO CPid
+
+-- | Variant of 'forkProcess' in the style of 'forkIOWithUnmask'.
+--
+-- /Since: 2.7.0.0/
+forkProcessWithUnmask :: ((forall a . IO a -> IO a) -> IO ()) -> IO ProcessID
+forkProcessWithUnmask action = forkProcess (action unsafeUnmask)
+
 #endif /* __GLASGOW_HASKELL__ */
 
 -- -----------------------------------------------------------------------------
@@ -307,14 +329,14 @@ getProcessStatus :: Bool -> Bool -> ProcessID -> IO (Maybe ProcessStatus)
 getProcessStatus block stopped pid =
   alloca $ \wstatp -> do
     pid' <- throwErrnoIfMinus1Retry "getProcessStatus"
-		(c_waitpid pid wstatp (waitOptions block stopped))
+                (c_waitpid pid wstatp (waitOptions block stopped))
     case pid' of
       0  -> return Nothing
       _  -> do ps <- readWaitStatus wstatp
-	       return (Just ps)
+               return (Just ps)
 
--- safe, because this call might block
-foreign import ccall safe "waitpid"
+-- safe/interruptible, because this call might block
+foreign import ccall interruptible "waitpid"
   c_waitpid :: CPid -> Ptr CInt -> CInt -> IO CPid
 
 -- | @'getGroupProcessStatus' blk stopped pgid@ calls @waitpid@,
@@ -334,11 +356,11 @@ getGroupProcessStatus :: Bool
 getGroupProcessStatus block stopped pgid =
   alloca $ \wstatp -> do
     pid <- throwErrnoIfMinus1Retry "getGroupProcessStatus"
-		(c_waitpid (-pgid) wstatp (waitOptions block stopped))
+                (c_waitpid (-pgid) wstatp (waitOptions block stopped))
     case pid of
       0  -> return Nothing
       _  -> do ps <- readWaitStatus wstatp
-	       return (Just (pid, ps))
+               return (Just (pid, ps))
 
 -- | @'getAnyProcessStatus' blk stopped@ calls @waitpid@, returning
 --   @'Just' (pid, tc)@, the 'ProcessID' and 'ProcessStatus' for any
@@ -385,7 +407,7 @@ foreign import ccall unsafe "exit"
 -- -----------------------------------------------------------------------------
 -- Deprecated or subject to change
 
-{-# DEPRECATED createProcessGroup "This function is scheduled to be replaced by something different in the future, we therefore recommend that you do not use this version and use createProcessGroupFor instead." #-}
+{-# DEPRECATED createProcessGroup "This function is scheduled to be replaced by something different in the future, we therefore recommend that you do not use this version and use 'createProcessGroupFor' instead." #-} -- deprecated in 7.2
 -- | @'createProcessGroup' pid@ calls @setpgid@ to make
 --   process @pid@ a new process group leader.
 --   This function is currently deprecated,
@@ -396,7 +418,7 @@ createProcessGroup pid = do
   throwErrnoIfMinus1_ "createProcessGroup" (c_setpgid pid 0)
   return pid
 
-{-# DEPRECATED setProcessGroupID "This function is scheduled to be replaced by something different in the future, we therefore recommend that you do not use this version and use setProcessGroupIdOf instead." #-}
+{-# DEPRECATED setProcessGroupID "This function is scheduled to be replaced by something different in the future, we therefore recommend that you do not use this version and use 'setProcessGroupIDOf' instead." #-} -- deprecated in 7.2
 -- | @'setProcessGroupID' pid pgid@ calls @setpgid@ to set the
 --   'ProcessGroupID' for process @pid@ to @pgid@.
 --   This function is currently deprecated,

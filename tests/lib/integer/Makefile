@@ -30,6 +30,8 @@ integerConstantFolding:
 	$(call CHECK,\<6253\>,shiftRInteger)
 	$(call CHECK,\<641\>,quotInteger)
 	$(call CHECK,\<68\>,remInteger)
+	$(call CHECK,\<642\>,divInteger)
+	$(call CHECK,\<90\>,modInteger)
 	$(call CHECK,\<200131.0\>,doubleFromInteger)
 	$(call CHECK,\<200135.0\>,floatFromInteger)
 	$(call CHECK,\<400276.0\>,encodeIntegerDouble)
@@ -55,10 +57,4 @@ IntegerConversionRules:
 	-grep -q int2Float         $@.simpl || echo "int2Float absent"
 	-grep -q integerToWord     $@.simpl && echo "integerToWord present"
 	-grep -q int2Word          $@.simpl || echo "int2Word absent"
-
-.PHONY: T7041
-T7041:
-	'$(TEST_HC)' -Wall -v0 -O -c $@.hs -fforce-recomp -ddump-simpl > $@.simpl
-	-grep -q gcdInteger        $@.simpl && echo "gcdInteger present"
-	-grep -q "gcdInt\>"        $@.simpl || echo "gcdInt absent"
 

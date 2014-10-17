@@ -1,10 +1,4 @@
 {-# LANGUAGE GADTs, NoMonoLocalBinds #-}
-{-# OPTIONS -fno-warn-tabs #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and
--- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
--- for details
 
 -- Norman likes local bindings
 -- If this module lives on I'd like to get rid of the NoMonoLocalBinds
@@ -14,60 +8,43 @@
 {-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
 module CmmBuildInfoTables
     ( CAFSet, CAFEnv, cafAnal
-    , doSRTs, TopSRT, emptySRT, srtToData )
+    , doSRTs, TopSRT, emptySRT, isEmptySRT, srtToData )
 where
 
 #include "HsVersions.h"
 
--- These should not be imported here!
-import StgCmmUtils
 import Hoopl
-
 import Digraph
-import qualified Prelude as P
-import Prelude hiding (succ)
-
 import BlockId
 import Bitmap
 import CLabel
+import PprCmmDecl ()
 import Cmm
 import CmmUtils
-import IdInfo
+import CmmInfo
 import Data.List
+import DynFlags
 import Maybes
-import Name
 import Outputable
 import SMRep
 import UniqSupply
 import Util
 
+import PprCmm()
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Control.Monad
 
+import qualified Prelude as P
+import Prelude hiding (succ)
+
 foldSet :: (a -> b -> b) -> b -> Set a -> b
-#if __GLASGOW_HASKELL__ < 704
-foldSet = Set.fold
-#else
 foldSet = Set.foldr
-#endif
-
-----------------------------------------------------------------
--- Building InfoTables
-
 
 -----------------------------------------------------------------------
 -- SRTs
-
--- WE NEED AN EXAMPLE HERE.
--- IN PARTICULAR, WE NEED TO POINT OUT THE DISTINCTION BETWEEN
--- FUNCTIONS WITH STATIC CLOSURES AND THOSE THAT MUST BE CONSTRUCTED
--- DYNAMICALLY (AND HENCE CAN'T BE REFERENCED IN AN SRT).
--- IN THE LATTER CASE, WE HAVE TO TAKE ALL THE CAFs REFERENCED BY
--- THE CLOSURE AND INLINE THEM INTO ANY SRT THAT MAY MENTION THE CLOSURE.
--- (I.E. TAKE THE TRANSITIVE CLOSURE, but only for non-static closures).
 
 {- EXAMPLE
 
@@ -104,7 +81,7 @@ h_closure with their contents:
    [ g_entry{c2_closure, c1_closure} ]
    [ h_entry{c2_closure} ]
 
-This is what mkTopCAFInfo is doing.
+This is what flattenCAFSets is doing.
 
 -}
 
@@ -155,8 +132,11 @@ instance Outputable TopSRT where
 
 emptySRT :: MonadUnique m => m TopSRT
 emptySRT =
-  do top_lbl <- getUniqueM >>= \ u -> return $ mkSRTLabel (mkFCallName u "srt") NoCafRefs
+  do top_lbl <- getUniqueM >>= \ u -> return $ mkTopSRTLabel u
      return TopSRT { lbl = top_lbl, next_elt = 0, rev_elts = [], elt_map = Map.empty }
+
+isEmptySRT :: TopSRT -> Bool
+isEmptySRT srt = null (rev_elts srt)
 
 cafMember :: TopSRT -> CLabel -> Bool
 cafMember srt lbl = Map.member lbl (elt_map srt)
@@ -179,21 +159,21 @@ srtToData srt = [CmmData RelocatableReadOnlyData (Statics (lbl srt) tbl)]
 -- 1. Build a table of all the CAFs used in the procedure.
 -- 2. Compute the C_SRT describing the subset of CAFs live at each procpoint.
 --
--- When building the local view of the SRT, we first make sure that all the CAFs are 
+-- When building the local view of the SRT, we first make sure that all the CAFs are
 -- in the SRT. Then, if the number of CAFs is small enough to fit in a bitmap,
 -- we make sure they're all close enough to the bottom of the table that the
 -- bitmap will be able to cover all of them.
-buildSRTs :: TopSRT -> CAFSet -> UniqSM (TopSRT, Maybe CmmDecl, C_SRT)
-buildSRTs topSRT cafs =
+buildSRT :: DynFlags -> TopSRT -> CAFSet -> UniqSM (TopSRT, Maybe CmmDecl, C_SRT)
+buildSRT dflags topSRT cafs =
   do let
          -- For each label referring to a function f without a static closure,
          -- replace it with the CAFs that are reachable from f.
          sub_srt topSRT localCafs =
            let cafs = Set.elems localCafs
                mkSRT topSRT =
-                 do localSRTs <- procpointSRT (lbl topSRT) (elt_map topSRT) cafs
+                 do localSRTs <- procpointSRT dflags (lbl topSRT) (elt_map topSRT) cafs
                     return (topSRT, localSRTs)
-           in if length cafs > maxBmpSize then
+           in if length cafs > maxBmpSize dflags then
                 mkSRT (foldl add_if_missing topSRT cafs)
               else -- make sure all the cafs are near the bottom of the srt
                 mkSRT (add_if_too_far topSRT cafs)
@@ -213,7 +193,7 @@ buildSRTs topSRT cafs =
                add srt [] = srt
                add srt@(TopSRT {next_elt = next}) (caf : rst) =
                  case cafOffset srt caf of
-                   Just ix -> if next - ix > maxBmpSize then
+                   Just ix -> if next - ix > maxBmpSize dflags then
                                 add (addCAF caf srt) rst
                               else srt
                    Nothing -> add (addCAF caf srt) rst
@@ -223,12 +203,12 @@ buildSRTs topSRT cafs =
 
 -- Construct an SRT bitmap.
 -- Adapted from simpleStg/SRT.lhs, which expects Id's.
-procpointSRT :: CLabel -> Map CLabel Int -> [CLabel] ->
+procpointSRT :: DynFlags -> CLabel -> Map CLabel Int -> [CLabel] ->
                 UniqSM (Maybe CmmDecl, C_SRT)
-procpointSRT _ _ [] =
+procpointSRT _ _ _ [] =
  return (Nothing, NoC_SRT)
-procpointSRT top_srt top_table entries =
- do (top, srt) <- bitmap `seq` to_SRT top_srt offset len bitmap
+procpointSRT dflags top_srt top_table entries =
+ do (top, srt) <- bitmap `seq` to_SRT dflags top_srt offset len bitmap
     return (top, srt)
   where
     ints = map (expectJust "constructSRT" . flip Map.lookup top_table) entries
@@ -236,26 +216,26 @@ procpointSRT top_srt top_table entries =
     offset = head sorted_ints
     bitmap_entries = map (subtract offset) sorted_ints
     len = P.last bitmap_entries + 1
-    bitmap = intsToBitmap len bitmap_entries
+    bitmap = intsToBitmap dflags len bitmap_entries
 
-maxBmpSize :: Int
-maxBmpSize = widthInBits wordWidth `div` 2
+maxBmpSize :: DynFlags -> Int
+maxBmpSize dflags = widthInBits (wordWidth dflags) `div` 2
 
 -- Adapted from codeGen/StgCmmUtils, which converts from SRT to C_SRT.
-to_SRT :: CLabel -> Int -> Int -> Bitmap -> UniqSM (Maybe CmmDecl, C_SRT)
-to_SRT top_srt off len bmp
-  | len > maxBmpSize || bmp == [fromIntegral srt_escape]
+to_SRT :: DynFlags -> CLabel -> Int -> Int -> Bitmap -> UniqSM (Maybe CmmDecl, C_SRT)
+to_SRT dflags top_srt off len bmp
+  | len > maxBmpSize dflags || bmp == [toStgWord dflags (fromStgHalfWord (srtEscape dflags))]
   = do id <- getUniqueM
        let srt_desc_lbl = mkLargeSRTLabel id
            tbl = CmmData RelocatableReadOnlyData $
                    Statics srt_desc_lbl $ map CmmStaticLit
-                     ( cmmLabelOffW top_srt off
-                     : mkWordCLit (fromIntegral len)
-                     : map mkWordCLit bmp)
-       return (Just tbl, C_SRT srt_desc_lbl 0 srt_escape)
+                     ( cmmLabelOffW dflags top_srt off
+                     : mkWordCLit dflags (fromIntegral len)
+                     : map (mkStgWordCLit dflags) bmp)
+       return (Just tbl, C_SRT srt_desc_lbl 0 (srtEscape dflags))
   | otherwise
-  = return (Nothing, C_SRT top_srt off (fromIntegral (head bmp)))
-	-- The fromIntegral converts to StgHalfWord
+  = return (Nothing, C_SRT top_srt off (toStgHalfWord dflags (fromStgWord (head bmp))))
+        -- The fromIntegral converts to StgHalfWord
 
 -- Gather CAF info for a procedure, but only if the procedure
 -- doesn't have a static closure.
@@ -265,9 +245,10 @@ to_SRT top_srt off len bmp
 -- any CAF that is reachable from c.
 localCAFInfo :: CAFEnv -> CmmDecl -> (CAFSet, Maybe CLabel)
 localCAFInfo _      (CmmData _ _) = (Set.empty, Nothing)
-localCAFInfo cafEnv (CmmProc top_info top_l (CmmGraph {g_entry=entry})) =
-  case info_tbl top_info of
-    CmmInfoTable { cit_rep = rep } | not (isStaticRep rep)
+localCAFInfo cafEnv proc@(CmmProc _ top_l _ (CmmGraph {g_entry=entry})) =
+  case topInfoTable proc of
+    Just (CmmInfoTable { cit_rep = rep })
+      | not (isStaticRep rep) && not (isStackRep rep)
       -> (cafs, Just (toClosureLbl top_l))
     _other -> (cafs, Nothing)
   where
@@ -308,38 +289,73 @@ flatten env cafset = foldSet (lookup env) Set.empty cafset
 bundle :: Map CLabel CAFSet
        -> (CAFEnv, CmmDecl)
        -> (CAFSet, Maybe CLabel)
-       -> (CAFSet, CmmDecl)
-bundle flatmap (_, decl) (cafs, Nothing)
-  = (flatten flatmap cafs, decl)
-bundle flatmap (_, decl) (_, Just l)
-  = (expectJust "bundle" $ Map.lookup l flatmap, decl)
+       -> (BlockEnv CAFSet, CmmDecl)
+bundle flatmap (env, decl@(CmmProc infos lbl _ g)) (closure_cafs, mb_lbl)
+  = ( mapMapWithKey get_cafs (info_tbls infos), decl )
+ where
+  entry = g_entry g
 
-flattenCAFSets :: [(CAFEnv, [CmmDecl])] -> [(CAFSet, CmmDecl)]
+  entry_cafs
+    | Just l <- mb_lbl = expectJust "bundle" $ Map.lookup l flatmap
+    | otherwise        = flatten flatmap closure_cafs
+
+  get_cafs l _
+    | l == entry = entry_cafs
+    | otherwise  = if not (mapMember l env)
+                      then pprPanic "bundle" (ppr l <+> ppr lbl <+> ppr (info_tbls infos) $$ ppr env $$ ppr decl)
+                      else flatten flatmap $ expectJust "bundle" $ mapLookup l env
+
+bundle _flatmap (_, decl) _
+  = ( mapEmpty, decl )
+
+
+flattenCAFSets :: [(CAFEnv, [CmmDecl])] -> [(BlockEnv CAFSet, CmmDecl)]
 flattenCAFSets cpsdecls = zipWith (bundle flatmap) zipped localCAFs
    where
-     zipped    = [(e,d) | (e,ds) <- cpsdecls, d <- ds ]
+     zipped    = [ (env,decl) | (env,decls) <- cpsdecls, decl <- decls ]
      localCAFs = unzipWith localCAFInfo zipped
      flatmap   = mkTopCAFInfo localCAFs -- transitive closure of localCAFs
 
-doSRTs :: TopSRT
+doSRTs :: DynFlags
+       -> TopSRT
        -> [(CAFEnv, [CmmDecl])]
        -> IO (TopSRT, [CmmDecl])
 
-doSRTs topSRT tops
+doSRTs dflags topSRT tops
   = do
      let caf_decls = flattenCAFSets tops
      us <- mkSplitUniqSupply 'u'
      let (topSRT', gs') = initUs_ us $ foldM setSRT (topSRT, []) caf_decls
      return (topSRT', reverse gs' {- Note [reverse gs] -})
   where
-    setSRT (topSRT, rst) (cafs, decl@(CmmProc{})) = do
-       (topSRT, cafTable, srt) <- buildSRTs topSRT cafs
-       let decl' = updInfo (const srt) decl
-       case cafTable of
-         Just tbl -> return (topSRT, decl': tbl : rst)
-         Nothing  -> return (topSRT, decl' : rst)
+    setSRT (topSRT, rst) (caf_map, decl@(CmmProc{})) = do
+       (topSRT, srt_tables, srt_env) <- buildSRTs dflags topSRT caf_map
+       let decl' = updInfoSRTs srt_env decl
+       return (topSRT, decl': srt_tables ++ rst)
     setSRT (topSRT, rst) (_, decl) =
       return (topSRT, decl : rst)
+
+buildSRTs :: DynFlags -> TopSRT -> BlockEnv CAFSet
+          -> UniqSM (TopSRT, [CmmDecl], BlockEnv C_SRT)
+buildSRTs dflags top_srt caf_map
+  = foldM doOne (top_srt, [], mapEmpty) (mapToList caf_map)
+  where
+  doOne (top_srt, decls, srt_env) (l, cafs)
+    = do (top_srt, mb_decl, srt) <- buildSRT dflags top_srt cafs
+         return ( top_srt, maybeToList mb_decl ++ decls
+                , mapInsert l srt srt_env )
+
+{-
+- In each CmmDecl there is a mapping from BlockId -> CmmInfoTable
+- The one corresponding to g_entry is the closure info table, the
+  rest are continuations.
+- Each one needs an SRT.
+- We get the CAFSet for each one from the CAFEnv
+- flatten gives us
+    [(BlockEnv CAFSet, CmmDecl)]
+-
+-}
+
 
 {- Note [reverse gs]
 
@@ -349,12 +365,9 @@ doSRTs topSRT tops
    instructions for forward refs.  --SDM
 -}
 
-updInfo :: (C_SRT -> C_SRT) -> CmmDecl -> CmmDecl
-updInfo toSrt (CmmProc top_info top_l g) =
-  CmmProc (top_info {info_tbl = updInfoTbl toSrt (info_tbl top_info)}) top_l g
-updInfo _ t = t
-
-updInfoTbl :: (C_SRT -> C_SRT) -> CmmInfoTable -> CmmInfoTable
-updInfoTbl toSrt info_tbl@(CmmInfoTable {})
-  = info_tbl { cit_srt = toSrt (cit_srt info_tbl) }
-updInfoTbl _ t@CmmNonInfoTable = t
+updInfoSRTs :: BlockEnv C_SRT -> CmmDecl -> CmmDecl
+updInfoSRTs srt_env (CmmProc top_info top_l live g) =
+  CmmProc (top_info {info_tbls = mapMapWithKey updInfoTbl (info_tbls top_info)}) top_l live g
+  where updInfoTbl l info_tbl
+             = info_tbl { cit_srt = expectJust "updInfo" $ mapLookup l srt_env }
+updInfoSRTs _ t = t

@@ -20,16 +20,18 @@ import Data.Word (Word8)
 
 import Data.Binary.Builder
 
+#if __GLASGOW_HASKELL__ < 706
 instance NFData S.ByteString
-
-data B = forall a. NFData a => B a
-
-instance NFData B where
-    rnf (B b) = rnf b
+#endif
 
 main :: IO ()
-main = defaultMainWith defaultConfig
-    (liftIO . evaluate $ rnf [B word8s, B smallByteString, B largeByteString])
+main = do
+  evaluate $ rnf
+    [ rnf word8s
+    , rnf smallByteString
+    , rnf largeByteString
+    ]
+  defaultMain
     [ -- Test GHC loop optimization of continuation based code.
       bench "[Word8]" $ whnf (run . fromWord8s) word8s
 

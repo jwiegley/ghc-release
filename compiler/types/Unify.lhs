@@ -7,7 +7,7 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module Unify ( 
@@ -22,8 +22,10 @@ module Unify (
 	typesCantMatch,
 
         -- Side-effect free unification
-        tcUnifyTys, BindFlag(..),
-        niFixTvSubst, niSubstTvSet
+        tcUnifyTy, tcUnifyTys, BindFlag(..),
+        niFixTvSubst, niSubstTvSet,
+
+        UnifyResultM(..), UnifyResult, tcUnifyTysFG
 
    ) where
 
@@ -36,11 +38,10 @@ import Kind
 import Type
 import TyCon
 import TypeRep
-import Outputable
-import ErrUtils
 import Util
-import Maybes
-import FastString
+
+import Control.Monad (liftM, ap)
+import Control.Applicative (Applicative(..))
 \end{code}
 
 
@@ -358,15 +359,98 @@ typesCantMatch prs = any (\(s,t) -> cant_match s t) prs
 %*                                                                      *
 %************************************************************************
 
+Note [Fine-grained unification]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Do the types (x, x) and ([y], y) unify? The answer is seemingly "no" --
+no substitution to finite types makes these match. But, a substitution to
+*infinite* types can unify these two types: [x |-> [[[...]]], y |-> [[[...]]] ].
+Why do we care? Consider these two type family instances:
+
+type instance F x x   = Int
+type instance F [y] y = Bool
+
+If we also have
+
+type instance Looper = [Looper]
+
+then the instances potentially overlap. The solution is to use unification
+over infinite terms. This is possible (see [1] for lots of gory details), but
+a full algorithm is a little more power than we need. Instead, we make a
+conservative approximation and just omit the occurs check.
+
+[1]: http://research.microsoft.com/en-us/um/people/simonpj/papers/ext-f/axioms-extended.pdf
+
+tcUnifyTys considers an occurs-check problem as the same as general unification
+failure.
+
+tcUnifyTysFG ("fine-grained") returns one of three results: success, occurs-check
+failure ("MaybeApart"), or general failure ("SurelyApart").
+
+See also Trac #8162.
+
+It's worth noting that unification in the presence of infinite types is not
+complete. This means that, sometimes, a closed type family does not reduce
+when it should. See test case indexed-types/should_fail/Overlap15 for an
+example.
+
+Note [The substitution in MaybeApart]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The constructor MaybeApart carries data with it, typically a TvSubstEnv. Why?
+Because consider unifying these:
+
+(a, a, Int) ~ (b, [b], Bool)
+
+If we go left-to-right, we start with [a |-> b]. Then, on the middle terms, we
+apply the subst we have so far and discover that we need [b |-> [b]]. Because
+this fails the occurs check, we say that the types are MaybeApart (see above
+Note [Fine-grained unification]). But, we can't stop there! Because if we
+continue, we discover that Int is SurelyApart from Bool, and therefore the
+types are apart. This has practical consequences for the ability for closed
+type family applications to reduce. See test case
+indexed-types/should_compile/Overlap14.
+
+Note [Unifying with skolems]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If we discover that two types unify if and only if a skolem variable is
+substituted, we can't properly unify the types. But, that skolem variable
+may later be instantiated with a unifyable type. So, we return maybeApart
+in these cases.
+
 \begin{code}
+tcUnifyTy :: Type -> Type       -- All tyvars are bindable
+	  -> Maybe TvSubst	-- A regular one-shot (idempotent) substitution
+-- Simple unification of two types; all type variables are bindable
+tcUnifyTy ty1 ty2
+  = case initUM (const BindMe) (unify emptyTvSubstEnv ty1 ty2) of
+      Unifiable subst_env -> Just (niFixTvSubst subst_env)
+      _other              -> Nothing
+
+-----------------
 tcUnifyTys :: (TyVar -> BindFlag)
 	   -> [Type] -> [Type]
 	   -> Maybe TvSubst	-- A regular one-shot (idempotent) substitution
 -- The two types may have common type variables, and indeed do so in the
 -- second call to tcUnifyTys in FunDeps.checkClsFD
---
 tcUnifyTys bind_fn tys1 tys2
-  = maybeErrToMaybe $ initUM bind_fn $
+  = case tcUnifyTysFG bind_fn tys1 tys2 of
+      Unifiable subst -> Just subst
+      _               -> Nothing
+
+-- This type does double-duty. It is used in the UM (unifier monad) and to
+-- return the final result. See Note [Fine-grained unification]
+type UnifyResult = UnifyResultM TvSubst
+data UnifyResultM a = Unifiable a        -- the subst that unifies the types
+                    | MaybeApart a       -- the subst has as much as we know
+                                         -- it must be part of an most general unifier
+                                         -- See Note [The substitution in MaybeApart]
+                    | SurelyApart
+
+-- See Note [Fine-grained unification]
+tcUnifyTysFG :: (TyVar -> BindFlag)
+             -> [Type] -> [Type]
+             -> UnifyResult
+tcUnifyTysFG bind_fn tys1 tys2
+  = initUM bind_fn $
     do { subst <- unifyList emptyTvSubstEnv tys1 tys2
 
 	-- Find the fixed point of the resulting non-idempotent substitution
@@ -437,7 +521,8 @@ unify subst ty1 ty2 | Just ty1' <- tcView ty1 = unify subst ty1' ty2
 unify subst ty1 ty2 | Just ty2' <- tcView ty2 = unify subst ty1 ty2'
 
 unify subst (TyConApp tyc1 tys1) (TyConApp tyc2 tys2) 
-  | tyc1 == tyc2 = unify_tys subst tys1 tys2
+  | tyc1 == tyc2                                   
+  = unify_tys subst tys1 tys2
 
 unify subst (FunTy ty1a ty1b) (FunTy ty2a ty2b) 
   = do	{ subst' <- unify subst ty1a ty2a
@@ -459,7 +544,7 @@ unify subst ty1 (AppTy ty2a ty2b)
 
 unify subst (LitTy x) (LitTy y) | x == y = return subst
 
-unify _ ty1 ty2 = failWith (misMatch ty1 ty2)
+unify _ _ _ = surelyApart
 	-- ForAlls??
 
 ------------------------------
@@ -473,17 +558,13 @@ unifyList subst orig_xs orig_ys
     go subst []     []     = return subst
     go subst (x:xs) (y:ys) = do { subst' <- unify subst x y
 				; go subst' xs ys }
-    go _ _ _ = failWith (lengthMisMatch orig_xs orig_ys)
+    go _ _ _ = surelyApart
 
 ---------------------------------
 uVar :: TvSubstEnv	-- An existing substitution to extend
      -> TyVar           -- Type variable to be unified
      -> Type            -- with this type
      -> UM TvSubstEnv
-
--- PRE-CONDITION: in the call (uVar swap r tv1 ty), we know that
---	if swap=False	(tv1~ty)
---	if swap=True	(ty~tv1)
 
 uVar subst tv1 ty
  = -- Check to see whether tv1 is refined by the substitution
@@ -529,13 +610,14 @@ uUnrefined subst tv1 ty2 (TyVarTy tv2)
        ; b2 <- tvBindFlag tv2
        ; let ty1 = TyVarTy tv1
        ; case (b1, b2) of
-           (Skolem, Skolem) -> failWith (misMatch ty1 ty2)
+           (Skolem, Skolem) -> maybeApart subst' -- See Note [Unification with skolems]
            (BindMe, _)      -> return (extendVarEnv subst' tv1 ty2)
            (_, BindMe)      -> return (extendVarEnv subst' tv2 ty1) }
 
 uUnrefined subst tv1 ty2 ty2'	-- ty2 is not a type variable
   | tv1 `elemVarSet` niSubstTvSet subst (tyVarsOfType ty2')
-  = failWith (occursCheck tv1 ty2)	-- Occurs check
+  = maybeApart subst                    -- Occurs check
+                                        -- See Note [Fine-grained unification]
   | otherwise
   = do { subst' <- unify subst k1 k2
        ; bindTv subst' tv1 ty2 }	-- Bind tyvar to the synonym if poss
@@ -547,7 +629,7 @@ bindTv :: TvSubstEnv -> TyVar -> Type -> UM TvSubstEnv
 bindTv subst tv ty	-- ty is not a type variable
   = do  { b <- tvBindFlag tv
 	; case b of
-	    Skolem -> failWith (misMatch (TyVarTy tv) ty)
+	    Skolem -> maybeApart subst -- See Note [Unification with skolems]
 	    BindMe -> return $ extendVarEnv subst tv ty
 	}
 \end{code}
@@ -575,52 +657,36 @@ data BindFlag
 
 \begin{code}
 newtype UM a = UM { unUM :: (TyVar -> BindFlag)
-		         -> MaybeErr MsgDoc a }
+		         -> UnifyResultM a }
+
+instance Functor UM where
+      fmap = liftM
+
+instance Applicative UM where
+      pure = return
+      (<*>) = ap
 
 instance Monad UM where
-  return a = UM (\_tvs -> Succeeded a)
-  fail s   = UM (\_tvs -> Failed (text s))
+  return a = UM (\_tvs -> Unifiable a)
+  fail _   = UM (\_tvs -> SurelyApart) -- failed pattern match
   m >>= k  = UM (\tvs -> case unUM m tvs of
-			   Failed err -> Failed err
-			   Succeeded v  -> unUM (k v) tvs)
+			   Unifiable v -> unUM (k v) tvs
+                           MaybeApart v ->
+                             case unUM (k v) tvs of
+                               Unifiable v' -> MaybeApart v'
+                               other        -> other
+                           SurelyApart -> SurelyApart)
 
-initUM :: (TyVar -> BindFlag) -> UM a -> MaybeErr MsgDoc a
+initUM :: (TyVar -> BindFlag) -> UM a -> UnifyResultM a
 initUM badtvs um = unUM um badtvs
 
 tvBindFlag :: TyVar -> UM BindFlag
-tvBindFlag tv = UM (\tv_fn -> Succeeded (tv_fn tv))
+tvBindFlag tv = UM (\tv_fn -> Unifiable (tv_fn tv))
 
-failWith :: MsgDoc -> UM a
-failWith msg = UM (\_tv_fn -> Failed msg)
+maybeApart :: TvSubstEnv -> UM TvSubstEnv
+maybeApart subst = UM (\_tv_fn -> MaybeApart subst)
 
-maybeErrToMaybe :: MaybeErr fail succ -> Maybe succ
-maybeErrToMaybe (Succeeded a) = Just a
-maybeErrToMaybe (Failed _)    = Nothing
+surelyApart :: UM a
+surelyApart = UM (\_tv_fn -> SurelyApart)
 \end{code}
 
-
-%************************************************************************
-%*									*
-		Error reporting
-	We go to a lot more trouble to tidy the types
-	in TcUnify.  Maybe we'll end up having to do that
-	here too, but I'll leave it for now.
-%*									*
-%************************************************************************
-
-\begin{code}
-misMatch :: Type -> Type -> SDoc
-misMatch t1 t2
-  = ptext (sLit "Can't match types") <+> quotes (ppr t1) <+> 
-    ptext (sLit "and") <+> quotes (ppr t2)
-
-lengthMisMatch :: [Type] -> [Type] -> SDoc
-lengthMisMatch tys1 tys2
-  = sep [ptext (sLit "Can't match unequal length lists"), 
-	 nest 2 (ppr tys1), nest 2 (ppr tys2) ]
-
-occursCheck :: TyVar -> Type -> SDoc
-occursCheck tv ty
-  = hang (ptext (sLit "Can't construct the infinite type"))
-       2 (ppr tv <+> equals <+> ppr ty)
-\end{code}

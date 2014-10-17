@@ -1,6 +1,4 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -fno-warn-unused-imports #-}
-#if __GLASGOW_HASKELL__ >= 701
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 -----------------------------------------------------------------------------
@@ -8,7 +6,7 @@
 -- Module      :  System.Posix.Files.Common
 -- Copyright   :  (c) The University of Glasgow 2002
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  provisional
 -- Portability :  non-portable (requires POSIX)
@@ -55,6 +53,7 @@ module System.Posix.Files.Common (
     specialDeviceID, fileSize, accessTime, modificationTime,
     statusChangeTime,
     accessTimeHiRes, modificationTimeHiRes, statusChangeTimeHiRes,
+    setFdTimesHiRes, touchFd,
     isBlockDevice, isCharacterDevice, isNamedPipe, isRegularFile,
     isDirectory, isSymbolicLink, isSocket,
 
@@ -66,17 +65,42 @@ module System.Posix.Files.Common (
 
     -- * Find system-specific limits for a file
     PathVar(..), getFdPathVar, pathVarConst,
+
+    -- * Low level types and functions
+#ifdef HAVE_UTIMENSAT
+    CTimeSpec(..),
+    toCTimeSpec,
+    c_utimensat,
+#endif
+    CTimeVal(..),
+    toCTimeVal,
+    c_utimes,
+#ifdef HAVE_LUTIMES
+    c_lutimes,
+#endif
   ) where
 
-import System.Posix.Error
 import System.Posix.Types
 import System.IO.Unsafe
 import Data.Bits
-import Data.Time.Clock.POSIX
+#if defined(HAVE_STRUCT_STAT_ST_CTIM) || \
+    defined(HAVE_STRUCT_STAT_ST_MTIM) || \
+    defined(HAVE_STRUCT_STAT_ST_ATIM) || \
+    defined(HAVE_STRUCT_STAT_ST_ATIMESPEC) || \
+    defined(HAVE_STRUCT_STAT_ST_MTIMESPEC) || \
+    defined(HAVE_STRUCT_STAT_ST_CTIMESPEC)
+import Data.Int
 import Data.Ratio
+#endif
+import Data.Time.Clock.POSIX
 import System.Posix.Internals
-import Foreign hiding (unsafePerformIO)
 import Foreign.C
+import Foreign.ForeignPtr
+#if defined(HAVE_FUTIMES) || defined(HAVE_FUTIMENS)
+import Foreign.Marshal (withArray)
+#endif
+import Foreign.Ptr
+import Foreign.Storable
 
 -- -----------------------------------------------------------------------------
 -- POSIX file modes
@@ -134,8 +158,8 @@ setGroupIDMode = (#const S_ISGID)
 
 -- | Owner, group and others have read and write permission.
 stdFileMode :: FileMode
-stdFileMode = ownerReadMode  .|. ownerWriteMode .|. 
-	      groupReadMode  .|. groupWriteMode .|. 
+stdFileMode = ownerReadMode  .|. ownerWriteMode .|.
+	      groupReadMode  .|. groupWriteMode .|.
 	      otherReadMode  .|. otherWriteMode
 
 -- | Owner has read, write and execute permission.
@@ -196,7 +220,7 @@ setFdMode :: Fd -> FileMode -> IO ()
 setFdMode (Fd fd) m =
   throwErrnoIfMinus1_ "setFdMode" (c_fchmod fd m)
 
-foreign import ccall unsafe "fchmod" 
+foreign import ccall unsafe "fchmod"
   c_fchmod :: CInt -> CMode -> IO CInt
 
 -- | @setFileCreationMask mode@ sets the file mode creation mask to @mode@.
@@ -247,9 +271,9 @@ statusChangeTime :: FileStatus -> EpochTime
 -- | Time of last status change (i.e. owner, group, link count, mode, etc.) in sub-second resolution.
 statusChangeTimeHiRes :: FileStatus -> POSIXTime
 
-deviceID (FileStatus stat) = 
+deviceID (FileStatus stat) =
   unsafePerformIO $ withForeignPtr stat $ (#peek struct stat, st_dev)
-fileID (FileStatus stat) = 
+fileID (FileStatus stat) =
   unsafePerformIO $ withForeignPtr stat $ (#peek struct stat, st_ino)
 fileMode (FileStatus stat) =
   unsafePerformIO $ withForeignPtr stat $ (#peek struct stat, st_mode)
@@ -354,19 +378,19 @@ isSymbolicLink    :: FileStatus -> Bool
 -- | Checks if this file is a socket device.
 isSocket          :: FileStatus -> Bool
 
-isBlockDevice stat = 
+isBlockDevice stat =
   (fileMode stat `intersectFileModes` fileTypeModes) == blockSpecialMode
-isCharacterDevice stat = 
+isCharacterDevice stat =
   (fileMode stat `intersectFileModes` fileTypeModes) == characterSpecialMode
-isNamedPipe stat = 
+isNamedPipe stat =
   (fileMode stat `intersectFileModes` fileTypeModes) == namedPipeMode
-isRegularFile stat = 
+isRegularFile stat =
   (fileMode stat `intersectFileModes` fileTypeModes) == regularFileMode
-isDirectory stat = 
+isDirectory stat =
   (fileMode stat `intersectFileModes` fileTypeModes) == directoryMode
-isSymbolicLink stat = 
+isSymbolicLink stat =
   (fileMode stat `intersectFileModes` fileTypeModes) == symbolicLinkMode
-isSocket stat = 
+isSocket stat =
   (fileMode stat `intersectFileModes` fileTypeModes) == socketMode
 
 -- | @getFdStatus fd@ acts as 'getFileStatus' but uses a file descriptor @fd@.
@@ -374,10 +398,113 @@ isSocket stat =
 -- Note: calls @fstat@.
 getFdStatus :: Fd -> IO FileStatus
 getFdStatus (Fd fd) = do
-  fp <- mallocForeignPtrBytes (#const sizeof(struct stat)) 
+  fp <- mallocForeignPtrBytes (#const sizeof(struct stat))
   withForeignPtr fp $ \p ->
     throwErrnoIfMinus1_ "getFdStatus" (c_fstat fd p)
   return (FileStatus fp)
+
+-- -----------------------------------------------------------------------------
+-- Setting file times
+
+#if HAVE_UTIMENSAT || HAVE_FUTIMENS
+data CTimeSpec = CTimeSpec EpochTime CLong
+
+instance Storable CTimeSpec where
+    sizeOf    _ = #size struct timespec
+    alignment _ = alignment (undefined :: CInt)
+    poke p (CTimeSpec sec nsec) = do
+        (#poke struct timespec, tv_sec ) p sec
+        (#poke struct timespec, tv_nsec) p nsec
+    peek p = do
+        sec  <- #{peek struct timespec, tv_sec } p
+        nsec <- #{peek struct timespec, tv_nsec} p
+        return $ CTimeSpec sec nsec
+
+toCTimeSpec :: POSIXTime -> CTimeSpec
+toCTimeSpec t = CTimeSpec (CTime sec) (truncate $ 10^(9::Int) * frac)
+  where
+    (sec, frac) = if (frac' < 0) then (sec' - 1, frac' + 1) else (sec', frac')
+    (sec', frac') = properFraction $ toRational t
+#endif
+
+#ifdef HAVE_UTIMENSAT
+foreign import ccall unsafe "utimensat"
+    c_utimensat :: CInt -> CString -> Ptr CTimeSpec -> CInt -> IO CInt
+#endif
+
+#if HAVE_FUTIMENS
+foreign import ccall unsafe "futimens"
+    c_futimens :: CInt -> Ptr CTimeSpec -> IO CInt
+#endif
+
+data CTimeVal = CTimeVal CLong CLong
+
+instance Storable CTimeVal where
+    sizeOf    _ = #size struct timeval
+    alignment _ = alignment (undefined :: CInt)
+    poke p (CTimeVal sec usec) = do
+        (#poke struct timeval, tv_sec ) p sec
+        (#poke struct timeval, tv_usec) p usec
+    peek p = do
+        sec  <- #{peek struct timeval, tv_sec } p
+        usec <- #{peek struct timeval, tv_usec} p
+        return $ CTimeVal sec usec
+
+toCTimeVal :: POSIXTime -> CTimeVal
+toCTimeVal t = CTimeVal sec (truncate $ 10^(6::Int) * frac)
+  where
+    (sec, frac) = if (frac' < 0) then (sec' - 1, frac' + 1) else (sec', frac')
+    (sec', frac') = properFraction $ toRational t
+
+foreign import ccall unsafe "utimes"
+    c_utimes :: CString -> Ptr CTimeVal -> IO CInt
+
+#ifdef HAVE_LUTIMES
+foreign import ccall unsafe "lutimes"
+    c_lutimes :: CString -> Ptr CTimeVal -> IO CInt
+#endif
+
+#if HAVE_FUTIMES
+foreign import ccall unsafe "futimes"
+    c_futimes :: CInt -> Ptr CTimeVal -> IO CInt
+#endif
+
+-- | Like 'setFileTimesHiRes' but uses a file descriptor instead of a path.
+-- This operation is not supported on all platforms. On these platforms,
+-- this function will raise an exception.
+--
+-- Note: calls @futimens@ or @futimes@.
+--
+-- /Since: 2.7.0.0/
+setFdTimesHiRes :: Fd -> POSIXTime -> POSIXTime -> IO ()
+#if HAVE_FUTIMENS
+setFdTimesHiRes (Fd fd) atime mtime =
+  withArray [toCTimeSpec atime, toCTimeSpec mtime] $ \times ->
+    throwErrnoIfMinus1_ "setFdTimesHiRes" (c_futimens fd times)
+#elif HAVE_FUTIMES
+setFdTimesHiRes (Fd fd) atime mtime =
+  withArray [toCTimeVal atime, toCTimeVal mtime] $ \times ->
+    throwErrnoIfMinus1_ "setFdTimesHiRes" (c_futimes fd times)
+#else
+setFdTimesHiRes =
+  error "setSymbolicLinkTimesHiRes: not available on this platform"
+#endif
+
+-- | Like 'touchFile' but uses a file descriptor instead of a path.
+-- This operation is not supported on all platforms. On these platforms,
+-- this function will raise an exception.
+--
+-- Note: calls @futimes@.
+--
+-- /Since: 2.7.0.0/
+touchFd :: Fd -> IO ()
+#if HAVE_FUTIMES
+touchFd (Fd fd) =
+  throwErrnoIfMinus1_ "touchFd" (c_futimes fd nullPtr)
+#else
+touchFd =
+  error "touchFd: not available on this platform"
+#endif
 
 -- -----------------------------------------------------------------------------
 -- fchown()
@@ -387,7 +514,7 @@ getFdStatus (Fd fd) = do
 --
 -- Note: calls @fchown@.
 setFdOwnerAndGroup :: Fd -> UserID -> GroupID -> IO ()
-setFdOwnerAndGroup (Fd fd) uid gid = 
+setFdOwnerAndGroup (Fd fd) uid gid =
   throwErrnoIfMinus1_ "setFdOwnerAndGroup" (c_fchown fd uid gid)
 
 foreign import ccall unsafe "fchown"
@@ -479,8 +606,8 @@ pathVarConst v = case v of
 -- Note: calls @fpathconf@.
 getFdPathVar :: Fd -> PathVar -> IO Limit
 getFdPathVar (Fd fd) v =
-    throwErrnoIfMinus1 "getFdPathVar" $ 
+    throwErrnoIfMinus1 "getFdPathVar" $
       c_fpathconf fd (pathVarConst v)
 
-foreign import ccall unsafe "fpathconf" 
+foreign import ccall unsafe "fpathconf"
   c_fpathconf :: CInt -> CInt -> IO CLong

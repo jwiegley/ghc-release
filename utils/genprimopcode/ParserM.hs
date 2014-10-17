@@ -16,12 +16,20 @@ module ParserM (
     -- Other
     happyError
  ) where
-
+import Control.Applicative
+import Control.Monad (ap, liftM)
 import Data.Word (Word8)
 import Data.Char (ord)
 
 -- Parser Monad
 newtype ParserM a = ParserM (AlexInput -> St -> Either String (AlexInput, St, a))
+
+instance Functor ParserM where
+  fmap = liftM
+
+instance Applicative ParserM where
+  pure  = return
+  (<*>) = ap
 
 instance Monad ParserM where
     ParserM m >>= k = ParserM $ \i s -> case m i s of
@@ -58,6 +66,7 @@ init_state = St {
 
 data Token = TEOF
            | TArrow
+           | TDArrow
            | TEquals
            | TComma
            | TOpenParen
@@ -66,10 +75,15 @@ data Token = TEOF
            | THashCloseParen
            | TOpenBrace
            | TCloseBrace
+           | TOpenBracket
+           | TCloseBracket
+           | TOpenAngle
+           | TCloseAngle
            | TSection
            | TPrimop
            | TPseudoop
            | TPrimtype
+           | TPrimclass
            | TWith
            | TDefaults
            | TTrue
@@ -84,6 +98,15 @@ data Token = TEOF
            | TString String
            | TNoBraces String
            | TInteger Int
+           | TFixity
+           | TInfixN
+           | TInfixL
+           | TInfixR
+           | TNothing
+           | TVector
+           | TSCALAR
+           | TVECTOR
+           | TVECTUPLE
     deriving Show
 
 -- Actions

@@ -1,6 +1,5 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -fno-warn-unused-imports #-}
-#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE CApiFFI #-}
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 -----------------------------------------------------------------------------
@@ -70,22 +69,13 @@ module System.Posix.Terminal.Common (
 
 import Data.Bits
 import Data.Char
-import Foreign.C.Error ( errnoToIOError, throwErrnoIfMinus1,
-                         throwErrnoIfMinus1_, throwErrnoIfNull )
-#ifndef HAVE_PTSNAME
-import Foreign.C.Error ( eNOSYS )
-#endif
-import Foreign.C.String ( CString, peekCString, withCString )
+import Foreign.C.Error ( throwErrnoIfMinus1, throwErrnoIfMinus1_ )
 import Foreign.C.Types
 import Foreign.ForeignPtr ( ForeignPtr, withForeignPtr, mallocForeignPtrBytes )
-import Foreign.Marshal.Alloc ( alloca )
 import Foreign.Marshal.Utils ( copyBytes )
-import Foreign.Ptr ( Ptr, nullPtr, plusPtr )
+import Foreign.Ptr ( Ptr, plusPtr )
 import Foreign.Storable ( Storable(..) )
-import System.IO.Error ( ioError )
 import System.IO.Unsafe ( unsafePerformIO )
-import System.Posix.IO ( OpenFileFlags(..), OpenMode(..), defaultFileFlags,
-                         openFd )
 import System.Posix.Types
 
 -- -----------------------------------------------------------------------------
@@ -342,14 +332,14 @@ inputSpeed termios = unsafePerformIO $ do
     w <- c_cfgetispeed p
     return (word2Baud w)
 
-foreign import ccall unsafe "cfgetispeed"
+foreign import capi unsafe "termios.h cfgetispeed"
   c_cfgetispeed :: Ptr CTermios -> IO CSpeed
 
 withInputSpeed :: TerminalAttributes -> BaudRate -> TerminalAttributes
 withInputSpeed termios br = unsafePerformIO $ do
   withNewTermios termios $ \p -> c_cfsetispeed p (baud2Word br)
 
-foreign import ccall unsafe "cfsetispeed"
+foreign import capi unsafe "termios.h cfsetispeed"
   c_cfsetispeed :: Ptr CTermios -> CSpeed -> IO CInt
 
 
@@ -359,14 +349,14 @@ outputSpeed termios = unsafePerformIO $ do
     w <- c_cfgetospeed p
     return (word2Baud w)
 
-foreign import ccall unsafe "cfgetospeed"
+foreign import capi unsafe "termios.h cfgetospeed"
   c_cfgetospeed :: Ptr CTermios -> IO CSpeed
 
 withOutputSpeed :: TerminalAttributes -> BaudRate -> TerminalAttributes
 withOutputSpeed termios br = unsafePerformIO $ do
   withNewTermios termios $ \p -> c_cfsetospeed p (baud2Word br)
 
-foreign import ccall unsafe "cfsetospeed"
+foreign import capi unsafe "termios.h cfsetospeed"
   c_cfsetospeed :: Ptr CTermios -> CSpeed -> IO CInt
 
 -- | @getTerminalAttributes fd@ calls @tcgetattr@ to obtain
@@ -378,7 +368,7 @@ getTerminalAttributes (Fd fd) = do
       throwErrnoIfMinus1_ "getTerminalAttributes" (c_tcgetattr fd p)
   return $ makeTerminalAttributes fp
 
-foreign import ccall unsafe "tcgetattr"
+foreign import capi unsafe "termios.h tcgetattr"
   c_tcgetattr :: CInt -> Ptr CTermios -> IO CInt
 
 data TerminalState
@@ -403,7 +393,7 @@ setTerminalAttributes (Fd fd) termios state = do
     state2Int WhenDrained = (#const TCSADRAIN)
     state2Int WhenFlushed = (#const TCSAFLUSH)
 
-foreign import ccall unsafe "tcsetattr"
+foreign import capi unsafe "termios.h tcsetattr"
    c_tcsetattr :: CInt -> CInt -> Ptr CTermios -> IO CInt
 
 -- | @sendBreak fd duration@ calls @tcsendbreak@ to transmit a
@@ -413,7 +403,7 @@ sendBreak :: Fd -> Int -> IO ()
 sendBreak (Fd fd) duration
   = throwErrnoIfMinus1_ "sendBreak" (c_tcsendbreak fd (fromIntegral duration))
 
-foreign import ccall unsafe "tcsendbreak"
+foreign import capi unsafe "termios.h tcsendbreak"
   c_tcsendbreak :: CInt -> CInt -> IO CInt
 
 -- | @drainOutput fd@ calls @tcdrain@ to block until all output
@@ -421,7 +411,7 @@ foreign import ccall unsafe "tcsendbreak"
 drainOutput :: Fd -> IO ()
 drainOutput (Fd fd) = throwErrnoIfMinus1_ "drainOutput" (c_tcdrain fd)
 
-foreign import ccall unsafe "tcdrain"
+foreign import capi unsafe "termios.h tcdrain"
   c_tcdrain :: CInt -> IO CInt
 
 
@@ -442,7 +432,7 @@ discardData (Fd fd) queue =
     queue2Int OutputQueue = (#const TCOFLUSH)
     queue2Int BothQueues  = (#const TCIOFLUSH)
 
-foreign import ccall unsafe "tcflush"
+foreign import capi unsafe "termios.h tcflush"
   c_tcflush :: CInt -> CInt -> IO CInt
 
 data FlowAction
@@ -464,7 +454,7 @@ controlFlow (Fd fd) action =
     action2Int TransmitStop  = (#const TCIOFF)
     action2Int TransmitStart = (#const TCION)
 
-foreign import ccall unsafe "tcflow"
+foreign import capi unsafe "termios.h tcflow"
   c_tcflow :: CInt -> CInt -> IO CInt
 
 -- | @getTerminalProcessGroupID fd@ calls @tcgetpgrp@ to

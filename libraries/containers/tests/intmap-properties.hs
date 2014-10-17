@@ -27,7 +27,7 @@ import Text.Show.Functions ()
 default (Int)
 
 main :: IO ()
-main = defaultMainWithOpts
+main = defaultMain
          [
                testCase "index"      test_index
              , testCase "size"       test_size
@@ -137,6 +137,7 @@ main = defaultMainWithOpts
              , testProperty "fromList then toList" prop_list
              , testProperty "toDescList"           prop_descList
              , testProperty "toAscList+toDescList" prop_ascDescList
+             , testProperty "fromList"             prop_fromList
              , testProperty "alter"                prop_alter
              , testProperty "index"                prop_index
              , testProperty "null"                 prop_null
@@ -159,19 +160,14 @@ main = defaultMainWithOpts
              , testProperty "fmap"                 prop_fmap
              , testProperty "mapkeys"              prop_mapkeys
              , testProperty "split"                prop_splitModel
+             , testProperty "splitRoot"            prop_splitRoot
              , testProperty "foldr"                prop_foldr
              , testProperty "foldr'"               prop_foldr'
              , testProperty "foldl"                prop_foldl
              , testProperty "foldl'"               prop_foldl'
              , testProperty "keysSet"              prop_keysSet
              , testProperty "fromSet"              prop_fromSet
-             ] opts
-
-  where
-    opts = mempty { ropt_test_options = Just $ mempty { topt_maximum_generated_tests = Just 500
-                                                      , topt_maximum_unsuitable_generated_tests = Just 500
-                                                      }
-                  }
+             ]
 
 {--------------------------------------------------------------------
   Arbitrary, reasonably balanced trees
@@ -853,6 +849,15 @@ prop_ascDescList :: [Int] -> Bool
 prop_ascDescList xs = toAscList m == reverse (toDescList m)
   where m = fromList $ zip xs $ repeat ()
 
+prop_fromList :: [Int] -> Bool
+prop_fromList xs
+  = case fromList (zip xs xs) of
+      t -> t == fromAscList (zip sort_xs sort_xs) &&
+           t == fromDistinctAscList (zip nub_sort_xs nub_sort_xs) &&
+           t == List.foldr (uncurry insert) empty (zip xs xs)
+  where sort_xs = sort xs
+        nub_sort_xs = List.map List.head $ List.group sort_xs
+
 ----------------------------------------------------------------
 
 prop_alter :: UMap -> Int -> Bool
@@ -989,6 +994,16 @@ prop_splitModel n ys = length ys > 0 ==>
       (l, r) = split n $ fromList xs
   in  toAscList l == sort [(k, v) | (k,v) <- xs, k < n] &&
       toAscList r == sort [(k, v) | (k,v) <- xs, k > n]
+
+prop_splitRoot :: IMap -> Bool
+prop_splitRoot s = loop ls && (s == unions ls)
+ where
+  ls = splitRoot s
+  loop [] = True
+  loop (s1:rst) = List.null
+                  [ (x,y) | x <- toList s1
+                          , y <- toList (unions rst)
+                          , x > y ]
 
 prop_foldr :: Int -> [(Int, Int)] -> Property
 prop_foldr n ys = length ys > 0 ==>

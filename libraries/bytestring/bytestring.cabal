@@ -1,5 +1,5 @@
 Name:                bytestring
-Version:             0.10.0.2
+Version:             0.10.4.0
 Synopsis:            Fast, compact, strict and lazy byte strings with a list interface
 Description:
     An efficient compact, immutable byte string type (both strict and lazy)
@@ -7,7 +7,7 @@ Description:
     .
     The 'ByteString' type represents sequences of bytes or 8-bit characters.
     It is suitable for high performance use, both in terms of large data
-    quantities, or high speed requirements. The 'ByteStrin'g functions follow
+    quantities, or high speed requirements. The 'ByteString' functions follow
     the same style as Haskell\'s ordinary lists, so it is easy to convert code
     from using 'String' to 'ByteString'.
     .
@@ -28,6 +28,10 @@ Description:
     in an ad-hoc way by repeated concatenation. This is ideal for fast
     serialisation or pretty printing.
     .
+    There is also a 'ShortByteString' type which has a lower memory overhead
+    and can can be converted to or from a 'ByteString', but supports very few
+    other operations. It is suitable for keeping many short strings in memory.
+    .
     'ByteString's are not designed for Unicode. For Unicode strings you should
     use the 'Text' type from the @text@ package.
     .
@@ -40,25 +44,34 @@ License:             BSD3
 License-file:        LICENSE
 Category:            Data
 Copyright:           Copyright (c) Don Stewart          2005-2009,
-                               (c) Duncan Coutts        2006-2012,
+                               (c) Duncan Coutts        2006-2013,
                                (c) David Roundy         2003-2005,
                                (c) Jasper Van der Jeugt 2010,
-                               (c) Simon Meier          2010-2011.
+                               (c) Simon Meier          2010-2013.
 
 Author:              Don Stewart,
                      Duncan Coutts
 Maintainer:          Don Stewart <dons00@gmail.com>,
                      Duncan Coutts <duncan@community.haskell.org>
-Bug-reports:         dons00@gmail.com,
-                     duncan@community.haskell.org
-Tested-With:         GHC==7.6.1, GHC==7.4.1, GHC==7.0.4, GHC==6.12.3
+Homepage:            https://github.com/haskell/bytestring
+Bug-reports:         https://github.com/haskell/bytestring/issues
+Tested-With:         GHC==7.8.1, GHC==7.6.3, GHC==7.4.2, GHC==7.0.4, GHC==6.12.3
 Build-Type:          Simple
-Cabal-Version:       >= 1.8
+Cabal-Version:       >= 1.10
 extra-source-files:  README TODO
 
 source-repository head
-  type:     darcs
-  location: http://darcs.haskell.org/bytestring/
+  type:     git
+  location: https://github.com/haskell/bytestring
+
+source-repository this
+  type:     git
+  location: https://github.com/haskell/bytestring
+  tag: 0.10.4.0
+
+flag integer-simple
+  description: Use the simple integer library instead of GMP
+  default: False
 
 library
   build-depends:     base >= 4.2 && < 5, ghc-prim, deepseq
@@ -70,26 +83,32 @@ library
                      Data.ByteString.Lazy
                      Data.ByteString.Lazy.Char8
                      Data.ByteString.Lazy.Internal
+                     Data.ByteString.Short
+                     Data.ByteString.Short.Internal
 
+                     Data.ByteString.Builder
+                     Data.ByteString.Builder.Extra
+                     Data.ByteString.Builder.Prim
+
+                     -- perhaps only exposed temporarily
+                     Data.ByteString.Builder.Internal
+                     Data.ByteString.Builder.Prim.Internal
+
+                     -- sigh, we decided to rename shortly after making
+                     -- an initial release, so these are here for compat
                      Data.ByteString.Lazy.Builder
                      Data.ByteString.Lazy.Builder.Extras
                      Data.ByteString.Lazy.Builder.ASCII
-
   other-modules:
-                     -- these three modules should be exposed in a future
-                     -- release once we're confident the API is stable.
-                     Data.ByteString.Lazy.Builder.Internal
-                     Data.ByteString.Lazy.Builder.BasicEncoding
-                     Data.ByteString.Lazy.Builder.BasicEncoding.Extras
-                     Data.ByteString.Lazy.Builder.BasicEncoding.Internal
+                     Data.ByteString.Builder.ASCII
+                     Data.ByteString.Builder.Prim.Binary
+                     Data.ByteString.Builder.Prim.ASCII
+                     Data.ByteString.Builder.Prim.Internal.Floating
+                     Data.ByteString.Builder.Prim.Internal.UncheckedShifts
+                     Data.ByteString.Builder.Prim.Internal.Base16
 
-                     Data.ByteString.Lazy.Builder.BasicEncoding.Binary
-                     Data.ByteString.Lazy.Builder.BasicEncoding.ASCII
-                     Data.ByteString.Lazy.Builder.BasicEncoding.Internal.Floating
-                     Data.ByteString.Lazy.Builder.BasicEncoding.Internal.UncheckedShifts
-                     Data.ByteString.Lazy.Builder.BasicEncoding.Internal.Base16
-
-  extensions:        CPP,
+  default-language:  Haskell98
+  other-extensions:  CPP,
                      ForeignFunctionInterface,
                      BangPatterns
                      UnliftedFFITypes,
@@ -97,8 +116,15 @@ library
                      UnboxedTuples,
                      DeriveDataTypeable
                      ScopedTypeVariables
-                     Rank2Types
+                     RankNTypes
                      NamedFieldPuns
+--  if impl(ghc >= 7.2)
+--    other-extensions: Trustworthy, Unsafe
+  -- older ghc had issues with language pragmas guarded by cpp
+  if impl(ghc < 7)
+    default-extensions: CPP, MagicHash, UnboxedTuples,
+                        DeriveDataTypeable, BangPatterns,
+                        NamedFieldPuns
 
   ghc-options:      -Wall
                     -O2
@@ -111,6 +137,16 @@ library
   include-dirs:      include
   includes:          fpstring.h
   install-includes:  fpstring.h
+
+   -- flags for the decimal integer serialization code
+  if impl(ghc >= 6.11)
+    if !flag(integer-simple)
+      cpp-options: -DINTEGER_GMP
+      build-depends: integer-gmp >= 0.2
+
+  if impl(ghc >= 6.9) && impl(ghc < 6.11)
+    cpp-options: -DINTEGER_GMP
+    build-depends: integer >= 0.1 && < 0.2
 
 
 -- QC properties, with GHC RULES disabled
@@ -127,22 +163,20 @@ test-suite prop-compiled
   include-dirs:     include
   ghc-options:      -fwarn-unused-binds
                     -fno-enable-rewrite-rules
-  extensions:       BangPatterns
-                    UnliftedFFITypes,
-                    MagicHash,
-                    UnboxedTuples,
-                    DeriveDataTypeable
-                    ScopedTypeVariables
-                    NamedFieldPuns
+  default-language: Haskell98
+  -- older ghc had issues with language pragmas guarded by cpp
+  if impl(ghc < 7)
+    default-extensions: CPP, MagicHash, UnboxedTuples,
+                        DeriveDataTypeable, BangPatterns,
+                        NamedFieldPuns
 
 test-suite test-builder
   type:             exitcode-stdio-1.0
   hs-source-dirs:   . tests tests/builder
   main-is:          TestSuite.hs
-  other-modules:    Data.ByteString.Lazy.Builder.Tests
-                    Data.ByteString.Lazy.Builder.BasicEncoding.Tests
-                    Data.ByteString.Lazy.Builder.BasicEncoding.TestUtils
-                    Data.ByteString.Lazy.Builder.BasicEncoding.Extras
+  other-modules:    Data.ByteString.Builder.Tests
+                    Data.ByteString.Builder.Prim.Tests
+                    Data.ByteString.Builder.Prim.TestUtils
                     TestFramework
 
   build-depends:    base, ghc-prim,
@@ -155,15 +189,12 @@ test-suite test-builder
 
   ghc-options:      -Wall -fwarn-tabs
 
-  extensions:       CPP, ForeignFunctionInterface
-                    UnliftedFFITypes,
-                    MagicHash,
-                    UnboxedTuples,
-                    DeriveDataTypeable
-                    ScopedTypeVariables
-                    Rank2Types
-                    BangPatterns
-                    NamedFieldPuns
+  default-language: Haskell98
+  -- older ghc had issues with language pragmas guarded by cpp
+  if impl(ghc < 7)
+    default-extensions: CPP, MagicHash, UnboxedTuples,
+                        DeriveDataTypeable, BangPatterns,
+                        NamedFieldPuns
 
   c-sources:        cbits/fpstring.c
                     cbits/itoa.c
@@ -171,47 +202,3 @@ test-suite test-builder
   includes:         fpstring.h
   install-includes: fpstring.h
 
-benchmark bench-builder-all
-  type:             exitcode-stdio-1.0
-  hs-source-dirs:   . bench
-  main-is:          BenchAll.hs
-  build-depends:    base, deepseq, ghc-prim,
-                    criterion
-  c-sources:        cbits/fpstring.c
-                    cbits/itoa.c
-  include-dirs:     include
-  ghc-options:      -O2
-                    -fmax-simplifier-iterations=10
-                    -fdicts-cheap
-                    -fspec-constr-count=6
-
-benchmark bench-builder-boundscheck
-  type:             exitcode-stdio-1.0
-  hs-source-dirs:   . bench
-  main-is:          BoundsCheckFusion.hs
-  build-depends:    base, deepseq, ghc-prim,
-                    criterion
-  c-sources:        cbits/fpstring.c
-                    cbits/itoa.c
-  include-dirs:     include
-  ghc-options:      -O2
-                    -fmax-simplifier-iterations=10
-                    -fdicts-cheap
-                    -fspec-constr-count=6
-
--- Sadly we cannot use benchmark bench-builder-csv currently because it
--- depends on both text and binary, which both depend on bytestring
--- which gives cabal fits about cyclic dependencies.
---  type:             exitcode-stdio-1.0
---  hs-source-dirs:   . bench
---  main-is:          CSV.hs
---  build-depends:    base, deepseq, ghc-prim,
---                    text, binary,
---                    criterion
---  c-sources:        cbits/fpstring.c
---                    cbits/itoa.c
---  include-dirs:     include
---  ghc-options:      -O2
---                    -fmax-simplifier-iterations=10
---                    -fdicts-cheap
---                    -fspec-constr-count=6

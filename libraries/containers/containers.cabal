@@ -1,5 +1,5 @@
 name: containers
-version: 0.5.0.0
+version: 0.5.5.1
 license: BSD3
 license-file: LICENSE
 maintainer: fox@ucw.cz
@@ -52,6 +52,7 @@ Library
             Data.Sequence
             Data.Tree
     other-modules:
+        Data.BitUtil
         Data.IntMap.Base
         Data.IntSet.Base
         Data.Map.Base
@@ -62,6 +63,8 @@ Library
 
     if impl(ghc<7.0)
         extensions: MagicHash, DeriveDataTypeable, StandaloneDeriving, Rank2Types
+    if impl(ghc >= 7.8)
+        extensions: RoleAnnotations
 
 -------------------
 -- T E S T I N G --
@@ -177,6 +180,21 @@ Test-suite intset-properties
         test-framework-hunit,
         test-framework-quickcheck2
 
+Test-suite deprecated-properties
+    hs-source-dirs: tests, .
+    main-is: deprecated-properties.hs
+    type: exitcode-stdio-1.0
+    cpp-options: -DTESTING
+
+    build-depends: base >= 4.2 && < 5, array, deepseq >= 1.2 && < 1.4, ghc-prim
+    ghc-options: -O2
+    extensions: MagicHash, DeriveDataTypeable, StandaloneDeriving, Rank2Types
+
+    build-depends:
+        QuickCheck,
+        test-framework,
+        test-framework-quickcheck2
+
 Test-suite seq-properties
     hs-source-dirs: tests, .
     main-is: seq-properties.hs
@@ -191,3 +209,33 @@ Test-suite seq-properties
         QuickCheck,
         test-framework,
         test-framework-quickcheck2
+
+test-suite map-strictness-properties
+  hs-source-dirs: tests
+  main-is: MapStrictness.hs
+  type: exitcode-stdio-1.0
+
+  build-depends:
+    base,
+    ChasingBottoms,
+    containers,
+    QuickCheck >= 2.4.0.1,
+    test-framework >= 0.3.3,
+    test-framework-quickcheck2 >= 0.2.9
+
+  ghc-options: -Wall
+
+test-suite intmap-strictness-properties
+  hs-source-dirs: tests
+  main-is: IntMapStrictness.hs
+  type: exitcode-stdio-1.0
+
+  build-depends:
+    base,
+    ChasingBottoms,
+    containers,
+    QuickCheck >= 2.4.0.1,
+    test-framework >= 0.3.3,
+    test-framework-quickcheck2 >= 0.2.9
+
+  ghc-options: -Wall

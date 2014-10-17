@@ -3,10 +3,8 @@
            , NoImplicitPrelude
            , RecordWildCards
            , BangPatterns
-           , PatternGuards
            , NondecreasingIndentation
            , MagicHash
-           , ForeignFunctionInterface
   #-}
 {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 {-# OPTIONS_GHC -fno-warn-unused-matches #-}
@@ -26,7 +24,6 @@
 --
 -----------------------------------------------------------------------------
 
--- #hide
 module GHC.IO.Handle.Text ( 
         hWaitForInput, hGetChar, hGetLine, hGetContents, hPutChar, hPutStr,
         commitBuffer',       -- hack, see below
@@ -87,7 +84,7 @@ import GHC.List
 --    in this Handle's encoding.
 --
 -- NOTE for GHC users: unless you use the @-threaded@ flag,
--- @hWaitForInput t@ where @t >= 0@ will block all other Haskell
+-- @hWaitForInput hdl t@ where @t >= 0@ will block all other Haskell
 -- threads for the duration of the call.  It behaves like a
 -- @safe@ foreign call in this respect.
 --
@@ -878,9 +875,9 @@ hGetBufSome h ptr count
          flushCharReadBuffer h_
          buf@Buffer{ bufSize=sz } <- readIORef haByteBuffer
          if isEmptyBuffer buf
-            then if count > sz  -- large read?
-                    then do RawIO.read (haFD h_) (castPtr ptr) count
-                    else do (r,buf') <- Buffered.fillReadBuffer haDevice buf
+            then case count > sz of  -- large read? optimize it with a little special case:
+                    True | Just fd <- haFD h_ -> do RawIO.read fd (castPtr ptr) count
+                    _ -> do (r,buf') <- Buffered.fillReadBuffer haDevice buf
                             if r == 0
                                then return 0
                                else do writeIORef haByteBuffer buf'
@@ -892,11 +889,8 @@ hGetBufSome h ptr count
               let count' = min count (bufferElems buf)
               in bufReadNBNonEmpty h_ buf (castPtr ptr) 0 count'
 
-haFD :: Handle__ -> FD
-haFD h_@Handle__{..} =
-   case cast haDevice of
-             Nothing -> error "not an FD"
-             Just fd -> fd
+haFD :: Handle__ -> Maybe FD
+haFD h_@Handle__{..} = cast haDevice
 
 -- | 'hGetBufNonBlocking' @hdl buf count@ reads data from the handle @hdl@
 -- into the buffer @buf@ until either EOF is reached, or

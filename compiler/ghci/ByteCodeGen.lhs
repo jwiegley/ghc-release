@@ -9,7 +9,7 @@ ByteCodeGen: Generate bytecode from Core
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module ByteCodeGen ( UnlinkedBCO, byteCodeGen, coreExprToBCOs ) where
@@ -22,7 +22,9 @@ import ByteCodeAsm
 import ByteCodeLink
 import LibFFI
 
+import DynFlags
 import Outputable
+import Platform
 import Name
 import MkId
 import Id
@@ -40,21 +42,20 @@ import TyCon
 import Util
 import VarSet
 import TysPrim
-import DynFlags
 import ErrUtils
 import Unique
 import FastString
 import Panic
+import StgCmmLayout     ( ArgRep(..), toArgRep, argRepSizeW )
 import SMRep
-import ClosureInfo
 import Bitmap
 import OrdList
-import Constants
 
 import Data.List
 import Foreign
 import Foreign.C
 
+import Control.Applicative (Applicative(..))
 import Control.Monad
 import Data.Char
 
@@ -63,6 +64,8 @@ import BreakArray
 import Data.Maybe
 import Module
 
+import qualified Data.ByteString        as BS
+import qualified Data.ByteString.Unsafe as BS
 import Data.Map (Map)
 import qualified Data.Map as Map
 import qualified FiniteMap as Map
@@ -84,8 +87,8 @@ byteCodeGen dflags this_mod binds tycs modBreaks
                         | (bndr, rhs) <- flattenBinds binds]
 
         us <- mkSplitUniqSupply 'y'
-        (BcM_State _us _this_mod _final_ctr mallocd _, proto_bcos)
-           <- runBc us this_mod modBreaks (mapM schemeTopBind flatBinds)
+        (BcM_State _dflags _us _this_mod _final_ctr mallocd _, proto_bcos)
+           <- runBc dflags us this_mod modBreaks (mapM schemeTopBind flatBinds)
 
         when (notNull mallocd)
              (panic "ByteCodeGen.byteCodeGen: missing final emitBc?")
@@ -115,8 +118,8 @@ coreExprToBCOs dflags this_mod expr
       -- the uniques are needed to generate fresh variables when we introduce new
       -- let bindings for ticked expressions
       us <- mkSplitUniqSupply 'y'
-      (BcM_State _us _this_mod _final_ctr mallocd _ , proto_bco)
-         <- runBc us this_mod emptyModBreaks $
+      (BcM_State _dflags _us _this_mod _final_ctr mallocd _ , proto_bco)
+         <- runBc dflags us this_mod emptyModBreaks $
               schemeTopBind (invented_id, freeVars expr)
 
       when (notNull mallocd)
@@ -145,14 +148,15 @@ ppBCEnv p
      $$ nest 4 (vcat (map pp_one (sortBy cmp_snd (Map.toList p))))
      $$ text "end-env"
      where
-        pp_one (var, offset) = int offset <> colon <+> ppr var <+> ppr (idCgRep var)
+        pp_one (var, offset) = int offset <> colon <+> ppr var <+> ppr (bcIdArgRep var)
         cmp_snd x y = compare (snd x) (snd y)
 -}
 
 -- Create a BCO and do a spot of peephole optimisation on the insns
 -- at the same time.
 mkProtoBCO
-   :: name
+   :: DynFlags
+   -> name
    -> BCInstrList
    -> Either  [AnnAlt Id VarSet] (AnnExpr Id VarSet)
    -> Int
@@ -161,7 +165,7 @@ mkProtoBCO
    -> Bool      -- True <=> is a return point, rather than a function
    -> [BcPtr]
    -> ProtoBCO name
-mkProtoBCO nm instrs_ordlist origin arity bitmap_size bitmap is_ret mallocd_blocks
+mkProtoBCO dflags nm instrs_ordlist origin arity bitmap_size bitmap is_ret mallocd_blocks
    = ProtoBCO {
         protoBCOName = nm,
         protoBCOInstrs = maybe_with_stack_check,
@@ -180,7 +184,7 @@ mkProtoBCO nm instrs_ordlist origin arity bitmap_size bitmap is_ret mallocd_bloc
         -- (hopefully rare) cases when the (overestimated) stack use
         -- exceeds iNTERP_STACK_CHECK_THRESH.
         maybe_with_stack_check
-           | is_ret && stack_usage < fromIntegral aP_STACK_SPLIM = peep_d
+           | is_ret && stack_usage < fromIntegral (aP_STACK_SPLIM dflags) = peep_d
                 -- don't do stack checks at return points,
                 -- everything is aggregated up to the top BCO
                 -- (which must be a function).
@@ -206,11 +210,11 @@ mkProtoBCO nm instrs_ordlist origin arity bitmap_size bitmap is_ret mallocd_bloc
         peep []
            = []
 
-argBits :: [CgRep] -> [Bool]
-argBits [] = []
-argBits (rep : args)
-  | isFollowableArg rep = False : argBits args
-  | otherwise = take (cgRepSizeW rep) (repeat True) ++ argBits args
+argBits :: DynFlags -> [ArgRep] -> [Bool]
+argBits _      [] = []
+argBits dflags (rep : args)
+  | isFollowableArg rep  = False : argBits dflags args
+  | otherwise = take (argRepSizeW dflags rep) (repeat True) ++ argBits dflags args
 
 -- -----------------------------------------------------------------------------
 -- schemeTopBind
@@ -223,6 +227,7 @@ schemeTopBind :: (Id, AnnExpr Id VarSet) -> BcM (ProtoBCO Name)
 schemeTopBind (id, rhs)
   | Just data_con <- isDataConWorkId_maybe id,
     isNullaryRepDataCon data_con = do
+    dflags <- getDynFlags
         -- Special case for the worker of a nullary data con.
         -- It'll look like this:        Nil = /\a -> Nil a
         -- If we feed it into schemeR, we'll get
@@ -231,7 +236,7 @@ schemeTopBind (id, rhs)
         -- by just re-using the single top-level definition.  So
         -- for the worker itself, we must allocate it directly.
     -- ioToBc (putStrLn $ "top level BCO")
-    emitBc (mkProtoBCO (getName id) (toOL [PACK data_con 0, ENTER])
+    emitBc (mkProtoBCO dflags (getName id) (toOL [PACK data_con 0, ENTER])
                        (Right rhs) 0 0 [{-no bitmap-}] False{-not alts-})
 
   | otherwise
@@ -281,25 +286,26 @@ collect (_, e) = go [] e
 
 schemeR_wrk :: [Id] -> Id -> AnnExpr Id VarSet -> ([Var], AnnExpr' Var VarSet) -> BcM (ProtoBCO Name)
 schemeR_wrk fvs nm original_body (args, body)
-   = let
+   = do
+     dflags <- getDynFlags
+     let
          all_args  = reverse args ++ fvs
          arity     = length all_args
          -- all_args are the args in reverse order.  We're compiling a function
          -- \fv1..fvn x1..xn -> e
          -- i.e. the fvs come first
 
-         szsw_args = map (fromIntegral . idSizeW) all_args
+         szsw_args = map (fromIntegral . idSizeW dflags) all_args
          szw_args  = sum szsw_args
          p_init    = Map.fromList (zip all_args (mkStackOffsets 0 szsw_args))
 
          -- make the arg bitmap
-         bits = argBits (reverse (map idCgRep all_args))
+         bits = argBits dflags (reverse (map bcIdArgRep all_args))
          bitmap_size = genericLength bits
-         bitmap = mkBitmap bits
-     in do
+         bitmap = mkBitmap dflags bits
      body_code <- schemeER_wrk szw_args p_init body
 
-     emitBc (mkProtoBCO (getName nm) body_code (Right original_body)
+     emitBc (mkProtoBCO dflags (getName nm) body_code (Right original_body)
                  arity bitmap_size bitmap False{-not alts-})
 
 -- introduce break instructions for ticked expressions
@@ -355,7 +361,7 @@ fvsToEnv p fvs = [v | v <- varSetElems fvs,
 -- schemeE
 
 returnUnboxedAtom :: Word -> Sequel -> BCEnv
-                 -> AnnExpr' Id VarSet -> CgRep
+                 -> AnnExpr' Id VarSet -> ArgRep
                  -> BcM BCInstrList
 -- Returning an unlifted value.
 -- Heave it on the stack, SLIDE, and RETURN.
@@ -376,11 +382,11 @@ schemeE d s p e
 -- Delegate tail-calls to schemeT.
 schemeE d s p e@(AnnApp _ _) = schemeT d s p e
 
-schemeE d s p e@(AnnLit lit)     = returnUnboxedAtom d s p e (typeCgRep (literalType lit))
-schemeE d s p e@(AnnCoercion {}) = returnUnboxedAtom d s p e VoidArg
+schemeE d s p e@(AnnLit lit)     = returnUnboxedAtom d s p e (typeArgRep (literalType lit))
+schemeE d s p e@(AnnCoercion {}) = returnUnboxedAtom d s p e V
 
 schemeE d s p e@(AnnVar v)
-    | isUnLiftedType (idType v) = returnUnboxedAtom d s p e (bcIdCgRep v)
+    | isUnLiftedType (idType v) = returnUnboxedAtom d s p e (bcIdArgRep v)
     | otherwise                 = schemeT d s p e
 
 schemeE d s p (AnnLet (AnnNonRec x (_,rhs)) (_,body))
@@ -396,15 +402,16 @@ schemeE d s p (AnnLet (AnnNonRec x (_,rhs)) (_,body))
 
 -- General case for let.  Generates correct, if inefficient, code in
 -- all situations.
-schemeE d s p (AnnLet binds (_,body))
-   = let (xs,rhss) = case binds of AnnNonRec x rhs  -> ([x],[rhs])
+schemeE d s p (AnnLet binds (_,body)) = do
+     dflags <- getDynFlags
+     let (xs,rhss) = case binds of AnnNonRec x rhs  -> ([x],[rhs])
                                    AnnRec xs_n_rhss -> unzip xs_n_rhss
          n_binds = genericLength xs
 
          fvss  = map (fvsToEnv p' . fst) rhss
 
          -- Sizes of free vars
-         sizes = map (\rhs_fvs -> sum (map (fromIntegral . idSizeW) rhs_fvs)) fvss
+         sizes = map (\rhs_fvs -> sum (map (fromIntegral . idSizeW dflags) rhs_fvs)) fvss
 
          -- the arity of each rhs
          arities = map (genericLength . fst . collect) rhss
@@ -447,7 +454,6 @@ schemeE d s p (AnnLet binds (_,body))
             | (fvs, x, rhs, size, arity, n) <-
                 zip6 fvss xs rhss sizes arities [n_binds, n_binds-1 .. 1]
             ]
-     in do
      body_code <- schemeE d' s p' body
      thunk_codes <- sequence compile_binds
      return (alloc_code `appOL` concatOL thunk_codes `appOL` body_code)
@@ -492,7 +498,7 @@ schemeE d s p (AnnCase scrut bndr _ [(DataAlt dc, [bind1, bind2], rhs)])
    | isUnboxedTupleCon dc
    , UnaryRep rep_ty1 <- repType (idType bind1), UnaryRep rep_ty2 <- repType (idType bind2)
         -- Convert
-        --      case .... of x { (# VoidArg'd-thing, a #) -> ... }
+        --      case .... of x { (# V'd-thing, a #) -> ... }
         -- to
         --      case .... of a { DEFAULT -> ... }
         -- becuse the return convention for both are identical.
@@ -566,9 +572,9 @@ schemeE _ _ _ expr
 --
 -- 1.  The fn denotes a ccall.  Defer to generateCCall.
 --
--- 2.  (Another nasty hack).  Spot (# a::VoidArg, b #) and treat
+-- 2.  (Another nasty hack).  Spot (# a::V, b #) and treat
 --     it simply as  b  -- since the representations are identical
---     (the VoidArg takes up zero stack space).  Also, spot
+--     (the V takes up zero stack space).  Also, spot
 --     (# b #) and treat it as  b.
 --
 -- 3.  Application of a constructor, by defn saturated.
@@ -593,12 +599,8 @@ schemeT d s p app
 --   = error "?!?!"
 
    -- Case 0
-   | Just (arg, constr_names) <- maybe_is_tagToEnum_call
-   = do (push, arg_words) <- pushAtom d p arg
-        tagToId_sequence <- implement_tagToId constr_names
-        return (push `appOL`  tagToId_sequence
-                       `appOL`  mkSLIDE 1 (d - s + fromIntegral arg_words)
-                       `snocOL` ENTER)
+   | Just (arg, constr_names) <- maybe_is_tagToEnum_call app
+   = implement_tagToId d s p arg constr_names
 
    -- Case 1
    | Just (CCall ccall_spec) <- isFCallId_maybe fn
@@ -608,9 +610,9 @@ schemeT d s p app
    | Just con <- maybe_saturated_dcon,
      isUnboxedTupleCon con
    = case args_r_to_l of
-        [arg1,arg2] | isVoidArgAtom arg1 ->
+        [arg1,arg2] | isVAtom arg1 ->
                   unboxedTupleReturn d s p arg2
-        [arg1,arg2] | isVoidArgAtom arg2 ->
+        [arg1,arg2] | isVAtom arg2 ->
                   unboxedTupleReturn d s p arg1
         _other -> unboxedTupleException
 
@@ -626,25 +628,6 @@ schemeT d s p app
    = doTailCall d s p fn args_r_to_l
 
    where
-      -- Detect and extract relevant info for the tagToEnum kludge.
-      maybe_is_tagToEnum_call
-         = let extract_constr_Names ty
-                 | UnaryRep rep_ty <- repType ty
-                 , Just tyc <- tyConAppTyCon_maybe rep_ty,
-                   isDataTyCon tyc
-                   = map (getName . dataConWorkId) (tyConDataCons tyc)
-                   -- NOTE: use the worker name, not the source name of
-                   -- the DataCon.  See DataCon.lhs for details.
-                 | otherwise
-                   = pprPanic "maybe_is_tagToEnum_call.extract_constr_Ids" (ppr ty)
-           in
-           case app of
-              (AnnApp (_, AnnApp (_, AnnVar v) (_, AnnType t)) arg)
-                 -> case isPrimOpId_maybe v of
-                       Just TagToEnumOp -> Just (snd arg, extract_constr_Names t)
-                       _                -> Nothing
-              _ -> Nothing
-
         -- Extract the args (R->L) and fn
         -- The function will necessarily be a variable,
         -- because we are compiling a tail call
@@ -735,28 +718,28 @@ doTailCall init_d s p fn args
     return (final_d, push_code `appOL` more_push_code)
 
 -- v. similar to CgStackery.findMatch, ToDo: merge
-findPushSeq :: [CgRep] -> (BCInstr, Int, [CgRep])
-findPushSeq (PtrArg: PtrArg: PtrArg: PtrArg: PtrArg: PtrArg: rest)
+findPushSeq :: [ArgRep] -> (BCInstr, Int, [ArgRep])
+findPushSeq (P: P: P: P: P: P: rest)
   = (PUSH_APPLY_PPPPPP, 6, rest)
-findPushSeq (PtrArg: PtrArg: PtrArg: PtrArg: PtrArg: rest)
+findPushSeq (P: P: P: P: P: rest)
   = (PUSH_APPLY_PPPPP, 5, rest)
-findPushSeq (PtrArg: PtrArg: PtrArg: PtrArg: rest)
+findPushSeq (P: P: P: P: rest)
   = (PUSH_APPLY_PPPP, 4, rest)
-findPushSeq (PtrArg: PtrArg: PtrArg: rest)
+findPushSeq (P: P: P: rest)
   = (PUSH_APPLY_PPP, 3, rest)
-findPushSeq (PtrArg: PtrArg: rest)
+findPushSeq (P: P: rest)
   = (PUSH_APPLY_PP, 2, rest)
-findPushSeq (PtrArg: rest)
+findPushSeq (P: rest)
   = (PUSH_APPLY_P, 1, rest)
-findPushSeq (VoidArg: rest)
+findPushSeq (V: rest)
   = (PUSH_APPLY_V, 1, rest)
-findPushSeq (NonPtrArg: rest)
+findPushSeq (N: rest)
   = (PUSH_APPLY_N, 1, rest)
-findPushSeq (FloatArg: rest)
+findPushSeq (F: rest)
   = (PUSH_APPLY_F, 1, rest)
-findPushSeq (DoubleArg: rest)
+findPushSeq (D: rest)
   = (PUSH_APPLY_D, 1, rest)
-findPushSeq (LongArg: rest)
+findPushSeq (L: rest)
   = (PUSH_APPLY_L, 1, rest)
 findPushSeq _
   = panic "ByteCodeGen.findPushSeq"
@@ -772,7 +755,9 @@ doCase d s p (_,scrut) bndr alts is_unboxed_tuple
   | UbxTupleRep _ <- repType (idType bndr)
   = unboxedTupleException
   | otherwise
-  = let
+  = do
+     dflags <- getDynFlags
+     let
         -- Top of stack is the return itbl, as usual.
         -- underneath it is the pointer to the alt_code BCO.
         -- When an alt is entered, it assumes the returned value is
@@ -787,7 +772,7 @@ doCase d s p (_,scrut) bndr alts is_unboxed_tuple
                             | otherwise = 1
 
         -- depth of stack after the return value has been pushed
-        d_bndr = d + ret_frame_sizeW + fromIntegral (idSizeW bndr)
+        d_bndr = d + ret_frame_sizeW + fromIntegral (idSizeW dflags bndr)
 
         -- depth of stack after the extra info table for an unboxed return
         -- has been pushed, if any.  This is the stack depth at the
@@ -820,9 +805,9 @@ doCase d s p (_,scrut) bndr alts is_unboxed_tuple
            -- algebraic alt with some binders
            | otherwise =
              let
-                 (ptrs,nptrs) = partition (isFollowableArg.idCgRep) real_bndrs
-                 ptr_sizes    = map (fromIntegral . idSizeW) ptrs
-                 nptrs_sizes  = map (fromIntegral . idSizeW) nptrs
+                 (ptrs,nptrs) = partition (isFollowableArg.bcIdArgRep) real_bndrs
+                 ptr_sizes    = map (fromIntegral . idSizeW dflags) ptrs
+                 nptrs_sizes  = map (fromIntegral . idSizeW dflags) nptrs
                  bind_sizes   = ptr_sizes ++ nptrs_sizes
                  size         = sum ptr_sizes + sum nptrs_sizes
                  -- the UNPACK instruction unpacks in reverse order...
@@ -875,24 +860,23 @@ doCase d s p (_,scrut) bndr alts is_unboxed_tuple
         bitmap_size = trunc16 $ d-s
         bitmap_size' :: Int
         bitmap_size' = fromIntegral bitmap_size
-        bitmap = intsToReverseBitmap bitmap_size'{-size-}
+        bitmap = intsToReverseBitmap dflags bitmap_size'{-size-}
                         (sort (filter (< bitmap_size') rel_slots))
           where
           binds = Map.toList p
           -- NB: unboxed tuple cases bind the scrut binder to the same offset
           -- as one of the alt binders, so we have to remove any duplicates here:
           rel_slots = nub $ map fromIntegral $ concat (map spread binds)
-          spread (id, offset) | isFollowableArg (bcIdCgRep id) = [ rel_offset ]
+          spread (id, offset) | isFollowableArg (bcIdArgRep id) = [ rel_offset ]
                               | otherwise                      = []
                 where rel_offset = trunc16 $ d - fromIntegral offset - 1
 
-     in do
      alt_stuff <- mapM codeAlt alts
      alt_final <- mkMultiBranch maybe_ncons alt_stuff
 
      let
          alt_bco_name = getName bndr
-         alt_bco = mkProtoBCO alt_bco_name alt_final (Left alts)
+         alt_bco = mkProtoBCO dflags alt_bco_name alt_final (Left alts)
                        0{-no arity-} bitmap_size bitmap True{-is alts-}
 --     trace ("case: bndr = " ++ showSDocDebug (ppr bndr) ++ "\ndepth = " ++ show d ++ "\nenv = \n" ++ showSDocDebug (ppBCEnv p) ++
 --            "\n      bitmap = " ++ show bitmap) $ do
@@ -902,7 +886,7 @@ doCase d s p (_,scrut) bndr alts is_unboxed_tuple
      alt_bco' <- emitBc alt_bco
      let push_alts
             | isAlgCase = PUSH_ALTS alt_bco'
-            | otherwise = PUSH_ALTS_UNLIFTED alt_bco' (typeCgRep bndr_ty)
+            | otherwise = PUSH_ALTS_UNLIFTED alt_bco' (typeArgRep bndr_ty)
      return (push_alts `consOL` scrut_code)
 
 
@@ -923,15 +907,18 @@ generateCCall :: Word -> Sequel         -- stack and sequel depths
               -> BcM BCInstrList
 
 generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
-   = let
+ = do
+     dflags <- getDynFlags
+
+     let
          -- useful constants
          addr_sizeW :: Word16
-         addr_sizeW = fromIntegral (cgRepSizeW NonPtrArg)
+         addr_sizeW = fromIntegral (argRepSizeW dflags N)
 
          -- Get the args on the stack, with tags and suitably
          -- dereferenced for the CCall.  For each arg, return the
          -- depth to the first word of the bits for that arg, and the
-         -- CgRep of what was actually pushed.
+         -- ArgRep of what was actually pushed.
 
          pargs _ [] = return []
          pargs d (a:az)
@@ -943,12 +930,12 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
                     Just t
                      | t == arrayPrimTyCon || t == mutableArrayPrimTyCon
                        -> do rest <- pargs (d + fromIntegral addr_sizeW) az
-                             code <- parg_ArrayishRep (fromIntegral arrPtrsHdrSize) d p a
+                             code <- parg_ArrayishRep (fromIntegral (arrPtrsHdrSize dflags)) d p a
                              return ((code,AddrRep):rest)
 
                      | t == byteArrayPrimTyCon || t == mutableByteArrayPrimTyCon
                        -> do rest <- pargs (d + fromIntegral addr_sizeW) az
-                             code <- parg_ArrayishRep (fromIntegral arrWordsHdrSize) d p a
+                             code <- parg_ArrayishRep (fromIntegral (arrWordsHdrSize dflags)) d p a
                              return ((code,AddrRep):rest)
 
                     -- Default case: push taggedly, but otherwise intact.
@@ -968,11 +955,10 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
                  -- header and then pretend this is an Addr#.
                  return (push_fo `snocOL` SWIZZLE 0 hdrSize)
 
-     in do
      code_n_reps <- pargs d0 args_r_to_l
      let
          (pushs_arg, a_reps_pushed_r_to_l) = unzip code_n_reps
-         a_reps_sizeW = fromIntegral (sum (map primRepSizeW a_reps_pushed_r_to_l))
+         a_reps_sizeW = fromIntegral (sum (map (primRepSizeW dflags) a_reps_pushed_r_to_l))
 
          push_args    = concatOL pushs_arg
          d_after_args = d0 + a_reps_sizeW
@@ -1027,8 +1013,8 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
             void marshall_code ( StgWord* ptr_to_top_of_stack )
          -}
          -- resolve static address
-         get_target_info
-            = case target of
+         get_target_info = do
+             case target of
                  DynamicTarget
                     -> return (False, panic "ByteCodeGen.generateCCall(dyn)")
 
@@ -1039,11 +1025,10 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
                           return (True, res)
                    where
                       stdcall_adj_target
-#ifdef mingw32_TARGET_OS
-                          | StdCallConv <- cconv
-                          = let size = fromIntegral a_reps_sizeW * wORD_SIZE in
+                          | OSMinGW32 <- platformOS (targetPlatform dflags)
+                          , StdCallConv <- cconv
+                          = let size = fromIntegral a_reps_sizeW * wORD_SIZE dflags in
                             mkFastString (unpackFS target ++ '@':show size)
-#endif
                           | otherwise
                           = target
 
@@ -1066,8 +1051,8 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
             = (nilOL, d_after_args)
 
          -- Push the return placeholder.  For a call returning nothing,
-         -- this is a VoidArg (tag).
-         r_sizeW   = fromIntegral (primRepSizeW r_rep)
+         -- this is a V (tag).
+         r_sizeW   = fromIntegral (primRepSizeW dflags r_rep)
          d_after_r = d_after_Addr + fromIntegral r_sizeW
          r_lit     = mkDummyLiteral r_rep
          push_r    = (if   returns_void
@@ -1085,7 +1070,7 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
      -- the only difference in libffi mode is that we prepare a cif
      -- describing the call type by calling libffi, and we attach the
      -- address of this to the CCALL instruction.
-     token <- ioToBc $ prepForeignCall cconv a_reps r_rep
+     token <- ioToBc $ prepForeignCall dflags cconv a_reps r_rep
      let addr_of_marshaller = castPtrToFunPtr token
 
      recordItblMallocBc (ItblPtr (castFunPtrToPtr addr_of_marshaller))
@@ -1095,8 +1080,8 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
                                  (fromIntegral (fromEnum (playInterruptible safety))))
          -- slide and return
          wrapup       = mkSLIDE r_sizeW (d_after_r - fromIntegral r_sizeW - s)
-                        `snocOL` RETURN_UBX (primRepToCgRep r_rep)
-         --trace (show (arg1_offW, args_offW  ,  (map cgRepSizeW a_reps) )) $
+                        `snocOL` RETURN_UBX (toArgRep r_rep)
+         --trace (show (arg1_offW, args_offW  ,  (map argRepSizeW a_reps) )) $
      return (
          push_args `appOL`
          push_Addr `appOL` push_r `appOL` do_call `appOL` wrapup
@@ -1122,7 +1107,7 @@ mkDummyLiteral pr
 --                   -> (# GHC.Prim.State# GHC.Prim.RealWorld, GHC.Prim.Int# #)
 --
 -- to  Just IntRep
--- and check that an unboxed pair is returned wherein the first arg is VoidArg'd.
+-- and check that an unboxed pair is returned wherein the first arg is V'd.
 --
 -- Alternatively, for call-targets returning nothing, convert
 --
@@ -1155,22 +1140,87 @@ maybe_getCCallReturnRep fn_ty
      --trace (showSDoc (ppr (a_reps, r_reps))) $
      if ok then maybe_r_rep_to_go else blargh
 
--- Compile code which expects an unboxed Int on the top of stack,
--- (call it i), and pushes the i'th closure in the supplied list
--- as a consequence.
-implement_tagToId :: [Name] -> BcM BCInstrList
-implement_tagToId names
-   = ASSERT( notNull names )
-     do labels <- getLabelsBc (genericLength names)
-        label_fail <- getLabelBc
-        label_exit <- getLabelBc
-        let infos = zip4 labels (tail labels ++ [label_fail])
-                                [0 ..] names
-            steps = map (mkStep label_exit) infos
-        return (concatOL steps
-                  `appOL`
-                  toOL [LABEL label_fail, CASEFAIL, LABEL label_exit])
-     where
+maybe_is_tagToEnum_call :: AnnExpr' Id VarSet -> Maybe (AnnExpr' Id VarSet, [Name])
+-- Detect and extract relevant info for the tagToEnum kludge.
+maybe_is_tagToEnum_call app
+  | AnnApp (_, AnnApp (_, AnnVar v) (_, AnnType t)) arg <- app
+  , Just TagToEnumOp <- isPrimOpId_maybe v
+  = Just (snd arg, extract_constr_Names t)
+  | otherwise
+  = Nothing
+  where
+    extract_constr_Names ty
+           | UnaryRep rep_ty <- repType ty
+           , Just tyc <- tyConAppTyCon_maybe rep_ty,
+             isDataTyCon tyc
+             = map (getName . dataConWorkId) (tyConDataCons tyc)
+             -- NOTE: use the worker name, not the source name of
+             -- the DataCon.  See DataCon.lhs for details.
+           | otherwise
+             = pprPanic "maybe_is_tagToEnum_call.extract_constr_Ids" (ppr ty)
+
+{- -----------------------------------------------------------------------------
+Note [Implementing tagToEnum#]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+(implement_tagToId arg names) compiles code which takes an argument
+'arg', (call it i), and enters the i'th closure in the supplied list
+as a consequence.  The [Name] is a list of the constructors of this
+(enumeration) type.
+
+The code we generate is this:
+                push arg
+                push bogus-word
+
+                TESTEQ_I 0 L1
+                  PUSH_G <lbl for first data con>
+                  JMP L_Exit
+
+        L1:     TESTEQ_I 1 L2
+                  PUSH_G <lbl for second data con>
+                  JMP L_Exit
+        ...etc...
+        Ln:     TESTEQ_I n L_fail
+                  PUSH_G <lbl for last data con>
+                  JMP L_Exit
+
+        L_fail: CASEFAIL
+
+        L_exit: SLIDE 1 n
+                ENTER
+
+The 'bogus-word' push is because TESTEQ_I expects the top of the stack
+to have an info-table, and the next word to have the value to be
+tested.  This is very weird, but it's the way it is right now.  See
+Interpreter.c.  We don't acutally need an info-table here; we just
+need to have the argument to be one-from-top on the stack, hence pushing
+a 1-word null. See Trac #8383.
+-}
+
+
+implement_tagToId :: Word -> Sequel -> BCEnv
+                  -> AnnExpr' Id VarSet -> [Name] -> BcM BCInstrList
+-- See Note [Implementing tagToEnum#]
+implement_tagToId d s p arg names
+  = ASSERT( notNull names )
+    do (push_arg, arg_words) <- pushAtom d p arg
+       labels <- getLabelsBc (genericLength names)
+       label_fail <- getLabelBc
+       label_exit <- getLabelBc
+       let infos = zip4 labels (tail labels ++ [label_fail])
+                               [0 ..] names
+           steps = map (mkStep label_exit) infos
+
+       return (push_arg
+               `appOL` unitOL (PUSH_UBX (Left MachNullAddr) 1)
+                   -- Push bogus word (see Note [Implementing tagToEnum#])
+               `appOL` concatOL steps
+               `appOL` toOL [ LABEL label_fail, CASEFAIL,
+                              LABEL label_exit ]
+                `appOL` mkSLIDE 1 (d - s + fromIntegral arg_words + 1)
+                   -- "+1" to account for bogus word
+                   --      (see Note [Implementing tagToEnum#])
+                `appOL` unitOL ENTER)
+  where
         mkStep l_exit (my_label, next_label, n, name_for_n)
            = toOL [LABEL my_label,
                    TESTEQ_I n next_label,
@@ -1198,11 +1248,11 @@ pushAtom d p e
    = pushAtom d p e'
 
 pushAtom _ _ (AnnCoercion {})	-- Coercions are zero-width things, 
-   = return (nilOL, 0)	  	-- treated just like a variable VoidArg
+   = return (nilOL, 0)	  	-- treated just like a variable V
 
 pushAtom d p (AnnVar v)
    | UnaryRep rep_ty <- repType (idType v)
-   , VoidArg <- typeCgRep rep_ty
+   , V <- typeArgRep rep_ty
    = return (nilOL, 0)
 
    | isFCallId v
@@ -1212,8 +1262,11 @@ pushAtom d p (AnnVar v)
    = return (unitOL (PUSH_PRIMOP primop), 1)
 
    | Just d_v <- lookupBCEnv_maybe v p  -- v is a local variable
-   = let l = trunc16 $ d - d_v + fromIntegral sz - 2
-     in return (toOL (genericReplicate sz (PUSH_L l)), sz)
+   = do dflags <- getDynFlags
+        let sz :: Word16
+            sz = fromIntegral (idSizeW dflags v)
+            l = trunc16 $ d - d_v + fromIntegral sz - 2
+        return (toOL (genericReplicate sz (PUSH_L l)), sz)
          -- d - d_v                 the number of words between the TOS
          --                         and the 1st slot of the object
          --
@@ -1225,51 +1278,51 @@ pushAtom d p (AnnVar v)
          -- Having found the last slot, we proceed to copy the right number of
          -- slots on to the top of the stack.
 
-    | otherwise  -- v must be a global variable
-    = ASSERT(sz == 1)
-      return (unitOL (PUSH_G (getName v)), sz)
+   | otherwise  -- v must be a global variable
+   = do dflags <- getDynFlags
+        let sz :: Word16
+            sz = fromIntegral (idSizeW dflags v)
+        MASSERT(sz == 1)
+        return (unitOL (PUSH_G (getName v)), sz)
 
-    where
-         sz :: Word16
-         sz = fromIntegral (idSizeW v)
 
+pushAtom _ _ (AnnLit lit) = do
+     dflags <- getDynFlags
+     let code rep
+             = let size_host_words = fromIntegral (argRepSizeW dflags rep)
+               in  return (unitOL (PUSH_UBX (Left lit) size_host_words),
+                           size_host_words)
 
-pushAtom _ _ (AnnLit lit)
-   = case lit of
-        MachLabel _ _ _ -> code NonPtrArg
-        MachWord _    -> code NonPtrArg
-        MachInt _     -> code NonPtrArg
-        MachWord64 _  -> code LongArg
-        MachInt64 _   -> code LongArg
-        MachFloat _   -> code FloatArg
-        MachDouble _  -> code DoubleArg
-        MachChar _    -> code NonPtrArg
-        MachNullAddr  -> code NonPtrArg
+     case lit of
+        MachLabel _ _ _ -> code N
+        MachWord _    -> code N
+        MachInt _     -> code N
+        MachWord64 _  -> code L
+        MachInt64 _   -> code L
+        MachFloat _   -> code F
+        MachDouble _  -> code D
+        MachChar _    -> code N
+        MachNullAddr  -> code N
         MachStr s     -> pushStr s
         -- No LitInteger's should be left by the time this is called.
         -- CorePrep should have converted them all to a real core
         -- representation.
         LitInteger {} -> panic "pushAtom: LitInteger"
      where
-        code rep
-           = let size_host_words = fromIntegral (cgRepSizeW rep)
-             in  return (unitOL (PUSH_UBX (Left lit) size_host_words),
-                           size_host_words)
-
         pushStr s
            = let getMallocvilleAddr
-                    = case s of
-                         FastString _ n _ fp _ ->
+                    =
                             -- we could grab the Ptr from the ForeignPtr,
                             -- but then we have no way to control its lifetime.
                             -- In reality it'll probably stay alive long enoungh
                             -- by virtue of the global FastString table, but
                             -- to be on the safe side we copy the string into
                             -- a malloc'd area of memory.
-                                do ptr <- ioToBc (mallocBytes (n+1))
+                                do let n = BS.length s
+                                   ptr <- ioToBc (mallocBytes (n+1))
                                    recordMallocBc ptr
                                    ioToBc (
-                                      withForeignPtr fp $ \p -> do
+                                      BS.unsafeUseAsCString s $ \p -> do
                                          memcpy ptr p (fromIntegral n)
                                          pokeByteOff ptr n (fromIntegral (ord '\0') :: Word8)
                                          return ptr
@@ -1428,14 +1481,22 @@ instance Outputable Discr where
 lookupBCEnv_maybe :: Id -> BCEnv -> Maybe Word
 lookupBCEnv_maybe = Map.lookup
 
-idSizeW :: Id -> Int
-idSizeW = cgRepSizeW . bcIdCgRep
+idSizeW :: DynFlags -> Id -> Int
+idSizeW dflags = argRepSizeW dflags . bcIdArgRep
 
-bcIdCgRep :: Id -> CgRep
-bcIdCgRep = primRepToCgRep . bcIdPrimRep
+bcIdArgRep :: Id -> ArgRep
+bcIdArgRep = toArgRep . bcIdPrimRep
 
 bcIdPrimRep :: Id -> PrimRep
 bcIdPrimRep = typePrimRep . bcIdUnaryType
+
+isFollowableArg :: ArgRep -> Bool
+isFollowableArg P = True
+isFollowableArg _ = False
+
+isVoidArg :: ArgRep -> Bool
+isVoidArg V = True
+isVoidArg _ = False
 
 bcIdUnaryType :: Id -> UnaryType
 bcIdUnaryType x = case repType (idType x) of
@@ -1449,7 +1510,7 @@ bcIdUnaryType x = case repType (idType x) of
 -- See bug #1257
 unboxedTupleException :: a
 unboxedTupleException
-   = ghcError
+   = throwGhcException
         (ProgramError
            ("Error: bytecode compiler can't handle unboxed tuples.\n"++
             "  Possibly due to foreign import/export decls in source.\n"++
@@ -1493,11 +1554,11 @@ bcView (AnnTick Breakpoint{} _)      = Nothing
 bcView (AnnTick _other_tick (_,e))   = Just e
 bcView _                             = Nothing
 
-isVoidArgAtom :: AnnExpr' Var ann -> Bool
-isVoidArgAtom e | Just e' <- bcView e = isVoidArgAtom e'
-isVoidArgAtom (AnnVar v)              = bcIdCgRep v == VoidArg
-isVoidArgAtom (AnnCoercion {})        = True
-isVoidArgAtom _ 	              = False
+isVAtom :: AnnExpr' Var ann -> Bool
+isVAtom e | Just e' <- bcView e = isVAtom e'
+isVAtom (AnnVar v)              = isVoidArg (bcIdArgRep v)
+isVAtom (AnnCoercion {})        = True
+isVAtom _ 	              = False
 
 atomPrimRep :: AnnExpr' Id ann -> PrimRep
 atomPrimRep e | Just e' <- bcView e = atomPrimRep e'
@@ -1506,11 +1567,11 @@ atomPrimRep (AnnLit l)    	    = typePrimRep (literalType l)
 atomPrimRep (AnnCoercion {})        = VoidRep
 atomPrimRep other = pprPanic "atomPrimRep" (ppr (deAnnotate (undefined,other)))
 
-atomRep :: AnnExpr' Id ann -> CgRep
-atomRep e = primRepToCgRep (atomPrimRep e)
+atomRep :: AnnExpr' Id ann -> ArgRep
+atomRep e = toArgRep (atomPrimRep e)
 
 isPtrAtom :: AnnExpr' Id ann -> Bool
-isPtrAtom e = atomRep e == PtrArg
+isPtrAtom e = isFollowableArg (atomRep e)
 
 -- Let szsw be the sizes in words of some items pushed onto the stack,
 -- which has initial depth d'.  Return the values which the stack environment
@@ -1519,6 +1580,9 @@ mkStackOffsets :: Word -> [Word] -> [Word]
 mkStackOffsets original_depth szsw
    = map (subtract 1) (tail (scanl (+) original_depth szsw))
 
+typeArgRep :: Type -> ArgRep
+typeArgRep = toArgRep . typePrimRep
+
 -- -----------------------------------------------------------------------------
 -- The bytecode generator's monad
 
@@ -1526,7 +1590,8 @@ type BcPtr = Either ItblPtr (Ptr ())
 
 data BcM_State
    = BcM_State
-        { uniqSupply :: UniqSupply       -- for generating fresh variable names
+        { bcm_dflags :: DynFlags
+        , uniqSupply :: UniqSupply       -- for generating fresh variable names
         , thisModule :: Module           -- current module (for breakpoints)
         , nextlabel :: Word16            -- for generating local labels
         , malloced  :: [BcPtr]           -- thunks malloced for current BCO
@@ -1541,9 +1606,10 @@ ioToBc io = BcM $ \st -> do
   x <- io
   return (st, x)
 
-runBc :: UniqSupply -> Module -> ModBreaks -> BcM r -> IO (BcM_State, r)
-runBc us this_mod modBreaks (BcM m)
-   = m (BcM_State us this_mod 0 [] breakArray)
+runBc :: DynFlags -> UniqSupply -> Module -> ModBreaks -> BcM r
+      -> IO (BcM_State, r)
+runBc dflags us this_mod modBreaks (BcM m)
+   = m (BcM_State dflags us this_mod 0 [] breakArray)
    where
    breakArray = modBreaks_flags modBreaks
 
@@ -1563,10 +1629,20 @@ thenBc_ (BcM expr) (BcM cont) = BcM $ \st0 -> do
 returnBc :: a -> BcM a
 returnBc result = BcM $ \st -> (return (st, result))
 
+instance Functor BcM where
+    fmap = liftM
+
+instance Applicative BcM where
+    pure = return
+    (<*>) = ap
+
 instance Monad BcM where
   (>>=) = thenBc
   (>>)  = thenBc_
   return = returnBc
+
+instance HasDynFlags BcM where
+    getDynFlags = BcM $ \st -> return (st, bcm_dflags st)
 
 emitBc :: ([BcPtr] -> ProtoBCO Name) -> BcM (ProtoBCO Name)
 emitBc bco

@@ -4,7 +4,7 @@ module Data.Time.Clock.CTimeval where
 #ifndef mingw32_HOST_OS
 -- All Unix-specific, this
 
-import Foreign
+import Foreign.Safe
 import Foreign.C
 
 data CTimeval = MkCTimeval CLong CLong
@@ -25,10 +25,8 @@ foreign import ccall unsafe "time.h gettimeofday" gettimeofday :: Ptr CTimeval -
 -- | Get the current POSIX time from the system clock.
 getCTimeval :: IO CTimeval
 getCTimeval = with (MkCTimeval 0 0) (\ptval -> do
-	result <- gettimeofday ptval nullPtr
-	if (result == 0)
-	 then peek ptval
-	 else fail ("error in gettimeofday: " ++ (show result))
+	throwErrnoIfMinus1_ "gettimeofday" $ gettimeofday ptval nullPtr
+	peek ptval
 	)
 
 #endif

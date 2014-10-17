@@ -20,14 +20,30 @@ module System.Win32.Types
 	, nullPtr
 	) where
 
-import Data.Maybe
-import Foreign hiding (unsafePerformIO)
-import Foreign.C
-import Control.Exception
-import System.IO.Error
-import System.IO.Unsafe
-import Data.Char
+import Control.Exception (throwIO)
+import Data.Bits (shiftL, shiftR, (.|.), (.&.))
+import Data.Char (isSpace)
+import Data.Int (Int32, Int64)
+import Data.Maybe (fromMaybe)
+import Data.Word (Word, Word8, Word16, Word32, Word64)
+import Foreign.C.Error (getErrno, errnoToIOError)
+import Foreign.C.String (newCWString, withCWStringLen)
+import Foreign.C.String (peekCWString, peekCWStringLen, withCWString)
+import Foreign.C.Types (CChar, CUChar, CWchar)
+import Foreign.ForeignPtr (ForeignPtr, newForeignPtr, newForeignPtr_)
+import Foreign.Ptr (FunPtr, Ptr, nullPtr)
 import Numeric (showHex)
+import System.IO.Error (ioeSetErrorString)
+import System.IO.Unsafe (unsafePerformIO)
+
+#if MIN_VERSION_base(4,7,0)
+import Data.Bits (finiteBitSize)
+#else
+import Data.Bits (Bits, bitSize)
+
+finiteBitSize :: (Bits a) => a -> Int
+finiteBitSize = bitSize
+#endif
 
 #include "windows_cconv.h"
 
@@ -226,7 +242,7 @@ failWith fn_name err_code = do
   let msg' = reverse $ dropWhile isSpace $ reverse msg -- drop trailing \n
       ioerror = errnoToIOError fn_name errno Nothing Nothing
                   `ioeSetErrorString` msg'
-  throw ioerror
+  throwIO ioerror
 
 
 foreign import ccall unsafe "maperrno" -- in base/cbits/Win32Utils.c
@@ -238,11 +254,11 @@ foreign import ccall unsafe "maperrno" -- in base/cbits/Win32Utils.c
 
 ddwordToDwords :: DDWORD -> (DWORD,DWORD)
 ddwordToDwords n =
-        (fromIntegral (n `shiftR` bitSize (undefined::DWORD))
+        (fromIntegral (n `shiftR` finiteBitSize (undefined :: DWORD))
         ,fromIntegral (n .&. fromIntegral (maxBound :: DWORD)))
 
 dwordsToDdword:: (DWORD,DWORD) -> DDWORD
-dwordsToDdword (hi,low) = (fromIntegral low) .|. (fromIntegral hi `shiftL`bitSize hi)
+dwordsToDdword (hi,low) = (fromIntegral low) .|. (fromIntegral hi `shiftL` finiteBitSize hi)
 
 ----------------------------------------------------------------
 -- Primitives

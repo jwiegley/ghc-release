@@ -1,5 +1,4 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-#if __GLASGOW_HASKELL__ >= 701
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 -----------------------------------------------------------------------------
@@ -38,30 +37,12 @@ import Foreign.Ptr
 import Foreign.Storable
 import Control.Monad
 import Data.Maybe (fromMaybe)
-#ifdef __GLASGOW_HASKELL__
+import System.Posix.Internals
+
+#if !MIN_VERSION_base(4,7,0)
+-- needed for backported local 'newFilePath' binding in 'putEnv'
 import GHC.IO.Encoding (getFileSystemEncoding)
-import qualified GHC.Foreign as GHC
-#endif
-#if __GLASGOW_HASKELL__ > 700
-import System.Posix.Internals (withFilePath, peekFilePath)
-#elif __GLASGOW_HASKELL__ > 611
-import System.Posix.Internals (withFilePath)
-
-peekFilePath :: CString -> IO FilePath
-peekFilePath = peekCString
-#else
-withFilePath :: FilePath -> (CString -> IO a) -> IO a
-withFilePath = withCString
-
-peekFilePath :: CString -> IO FilePath
-peekFilePath = peekCString
-#endif
-
-newFilePath :: String -> IO CString
-#ifdef __GLASGOW_HASKELL__
-newFilePath s = getFileSystemEncoding >>= (`GHC.newCString` s)
-#else
-newFilePath = newCString
+import qualified GHC.Foreign as GHC (newCString)
 #endif
 
 -- |'getEnv' looks up a variable in the environment.
@@ -148,12 +129,16 @@ unsetEnv name = putEnv (name ++ "=")
 -- and is equivalent to @setEnv(key,value,True{-overwrite-})@.
 
 putEnv :: String -> IO ()
-putEnv keyvalue = newFilePath keyvalue >>= \s ->
-  -- IMPORTANT: Do not free `s` after calling putenv!
-  --
-  -- According to SUSv2, the string passed to putenv becomes part of the
-  -- enviroment.
-  throwErrnoIfMinus1_ "putenv" (c_putenv s)
+putEnv keyvalue = do s <- newFilePath keyvalue
+                     -- Do not free `s` after calling putenv.
+                     -- According to SUSv2, the string passed to putenv
+                     -- becomes part of the enviroment. #7342
+                     throwErrnoIfMinus1_ "putenv" (c_putenv s)
+#if !MIN_VERSION_base(4,7,0)
+    where
+      newFilePath :: FilePath -> IO CString
+      newFilePath fp = getFileSystemEncoding >>= \enc -> GHC.newCString enc fp
+#endif
 
 foreign import ccall unsafe "putenv"
    c_putenv :: CString -> IO CInt

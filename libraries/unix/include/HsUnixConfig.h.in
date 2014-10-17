@@ -111,6 +111,12 @@
 /* Define to 1 if you have the <fcntl.h> header file. */
 #undef HAVE_FCNTL_H
 
+/* Define to 1 if you have the `futimens' function. */
+#undef HAVE_FUTIMENS
+
+/* Define to 1 if you have the `futimes' function. */
+#undef HAVE_FUTIMES
+
 /* Define to 1 if you have the `getgrent' function. */
 #undef HAVE_GETGRENT
 
@@ -150,6 +156,9 @@
 /* Define to 1 if you have the <limits.h> header file. */
 #undef HAVE_LIMITS_H
 
+/* Define to 1 if you have the `lutimes' function. */
+#undef HAVE_LUTIMES
+
 /* Define to 1 if you have the <memory.h> header file. */
 #undef HAVE_MEMORY_H
 
@@ -161,6 +170,9 @@
 
 /* Define to 1 if you have the `nanosleep' function. */
 #undef HAVE_NANOSLEEP
+
+/* Ignore the pw_gecos member of passwd where it does not exist */
+#undef HAVE_NO_PASSWD_PW_GECOS
 
 /* Define to 1 if you have the `openpty' function. */
 #undef HAVE_OPENPTY
@@ -197,6 +209,9 @@
 
 /* Define to 1 if <unistd.h> defines _SC_GETPW_R_SIZE_MAX. */
 #undef HAVE_SC_GETPW_R_SIZE_MAX
+
+/* Define to 1 if you have the `seekdir' function. */
+#undef HAVE_SEEKDIR
 
 /* Define to 1 if you have the `setenv' function. */
 #undef HAVE_SETENV
@@ -294,6 +309,9 @@
 /* Define to 1 if you have the <sys/wait.h> header file. */
 #undef HAVE_SYS_WAIT_H
 
+/* Define to 1 if you have the `telldir' function. */
+#undef HAVE_TELLDIR
+
 /* Define to 1 if you have the <termios.h> header file. */
 #undef HAVE_TERMIOS_H
 
@@ -305,6 +323,9 @@
 
 /* Define to 1 if you have the `unsetenv' function. */
 #undef HAVE_UNSETENV
+
+/* Define to 1 if you have the `utimensat' function. */
+#undef HAVE_UTIMENSAT
 
 /* Define to 1 if you have the <utime.h> header file. */
 #undef HAVE_UTIME_H
@@ -338,6 +359,11 @@
 
 /* Define if the system headers declare usleep to return void. */
 #undef USLEEP_RETURNS_VOID
+
+/* Enable large inode numbers on Mac OS X 10.5.  */
+#ifndef _DARWIN_USE_64_BIT_INODE
+# define _DARWIN_USE_64_BIT_INODE 1
+#endif
 
 /* Number of bits in a file offset, on hosts where this is settable. */
 #undef _FILE_OFFSET_BITS

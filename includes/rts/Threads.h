@@ -8,7 +8,7 @@
  * Do not #include this file directly: #include "Rts.h" instead.
  *
  * To understand the structure of the RTS headers, see the wiki:
- *   http://hackage.haskell.org/trac/ghc/wiki/Commentary/SourceTree/Includes
+ *   http://ghc.haskell.org/trac/ghc/wiki/Commentary/SourceTree/Includes
  *
  * ---------------------------------------------------------------------------*/
 
@@ -57,6 +57,9 @@ HsBool rtsSupportsBoundThreads (void);
 // The number of Capabilities
 extern unsigned int n_capabilities;
 
+// The number of Capabilities that are not disabled
+extern nat enabled_capabilities;
+
 #if !IN_STG_CODE
 extern Capability MainCapability;
 #endif
@@ -65,6 +68,6 @@ extern Capability MainCapability;
 // Change the number of capabilities (only supports increasing the
 // current value at the moment).
 //
-extern void setNumCapabilities (nat new);
+extern void setNumCapabilities (nat new_);
 
 #endif /* RTS_THREADS_H */

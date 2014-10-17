@@ -1,8 +1,4 @@
 {-# LANGUAGE Safe #-}
-{-# LANGUAGE CPP #-}
-#ifdef __GLASGOW_HASKELL__
-{-# LANGUAGE ForeignFunctionInterface #-}
-#endif
 
 -----------------------------------------------------------------------------
 -- |
@@ -18,22 +14,23 @@
 --
 -----------------------------------------------------------------------------
 
-module System.Mem (
- 	performGC	-- :: IO ()
-  ) where
- 
+module System.Mem
+       ( performGC
+       , performMajorGC
+       , performMinorGC
+       ) where
 import Prelude
 
-#ifdef __HUGS__
-import Hugs.IOExts
-#endif
+-- | Triggers an immediate garbage collection.
+performGC :: IO ()
+performGC = performMajorGC
 
-#ifdef __GLASGOW_HASKELL__
--- | Triggers an immediate garbage collection
-foreign import ccall {-safe-} "performMajorGC" performGC :: IO ()
-#endif
+-- | Triggers an immediate garbage collection.
+--
+-- /Since: 4.7.0.0/
+foreign import ccall "performMajorGC" performMajorGC :: IO ()
 
-#ifdef __NHC__
-import NHC.IOExtras (performGC)
-#endif
-
+-- | Triggers an immediate minor garbage collection.
+--
+-- /Since: 4.7.0.0/
+foreign import ccall "performGC" performMinorGC :: IO ()

@@ -35,11 +35,19 @@ window.onload = function () {pageLoad();setSynopsis("mini_TypeFamilies.html");};
 	  ><th
 	    >Safe Haskell</th
 	    ><td
-	    >None</td
+	    >Safe-Inferred</td
 	    ></tr
 	  ></table
 	><p class="caption"
 	>TypeFamilies</p
+	></div
+      ><div id="description"
+      ><p class="caption"
+	>Description</p
+	><div class="doc"
+	><p
+	  >Doc for: module TypeFamilies</p
+	  ></div
 	></div
       ><div id="synopsis"
       ><p id="control.syn" class="caption expander" onclick="toggleSection('syn')"
@@ -47,50 +55,104 @@ window.onload = function () {pageLoad();setSynopsis("mini_TypeFamilies.html");};
 	><ul id="section.syn" class="hide" onclick="toggleSection('syn')"
 	><li class="src short"
 	  ><span class="keyword"
+	    >data</span
+	    > <a href=""
+	    >X</a
+	    ><ul class="subs"
+	    ><li
+	      >= <a href=""
+		>X</a
+		></li
+	      ><li
+	      >| <a href=""
+		>XX</a
+		></li
+	      ><li
+	      >| <a href=""
+		>XXX</a
+		></li
+	      ></ul
+	    ></li
+	  ><li class="src short"
+	  ><span class="keyword"
+	    >data</span
+	    > <a href=""
+	    >Y</a
+	    ></li
+	  ><li class="src short"
+	  ><span class="keyword"
+	    >data</span
+	    > <a href=""
+	    >Z</a
+	    ><ul class="subs"
+	    ><li
+	      >= <a href=""
+		>ZA</a
+		></li
+	      ><li
+	      >| <a href=""
+		>ZB</a
+		></li
+	      ></ul
+	    ></li
+	  ><li class="src short"
+	  ><span class="keyword"
+	    >class</span
+	    > <a href=""
+	    >Test</a
+	    > a</li
+	  ><li class="src short"
+	  ><span class="keyword"
 	    >type family</span
 	    > <a href=""
-	    >G</a
+	    >Foo</a
+	    > a :: k</li
+	  ><li class="src short"
+	  ><span class="keyword"
+	    >data family</span
+	    > <a href=""
+	    >Bat</a
 	    > a :: *</li
 	  ><li class="src short"
 	  ><span class="keyword"
 	    >class</span
-	    >  <a href=""
-	    >A</a
-	    > a  <span class="keyword"
+	    > <a href=""
+	    >Assoc</a
+	    > a <span class="keyword"
 	    >where</span
 	    ><ul class="subs"
 	    ><li
 	      ><span class="keyword"
 		>data</span
 		> <a href=""
-		>B</a
-		> a :: * -&gt; *</li
+		>AssocD</a
+		> a :: *</li
 	      ><li
-	      ><a href=""
-		>f</a
-		> :: <a href=""
-		>B</a
-		> a <a href=""
-		>Int</a
-		></li
+	      ><span class="keyword"
+		>type</span
+		> <a href=""
+		>AssocT</a
+		> a :: *</li
 	      ></ul
 	    ></li
 	  ><li class="src short"
 	  ><span class="keyword"
 	    >type family</span
 	    > <a href=""
-	    >F</a
-	    > a </li
+	    >Bar</a
+	    > b</li
 	  ><li class="src short"
-	  ><a href=""
-	    >g</a
-	    > :: <a href=""
-	    >B</a
-	    > <a href=""
-	    >Int</a
-	    > <a href=""
-	    >Integer</a
-	    ></li
+	  ><span class="keyword"
+	    >type family</span
+	    > a <a href=""
+	    >&lt;&gt;</a
+	    > b :: k</li
+	  ><li class="src short"
+	  ><span class="keyword"
+	    >class</span
+	    > a <a href=""
+	    >&gt;&lt;</a
+	    > b</li
 	  ></ul
 	></div
       ><div id="interface"
@@ -99,73 +161,223 @@ window.onload = function () {pageLoad();setSynopsis("mini_TypeFamilies.html");};
 	><div class="top"
 	><p class="src"
 	  ><span class="keyword"
-	    >type family</span
-	    > <a name="t:G" class="def"
-	    >G</a
-	    > a :: *</p
-	  ><div class="doc"
-	  ><p
-	    >Type family G
-</p
-	    ></div
-	  ></div
-	><div class="top"
-	><p class="src"
-	  ><span class="keyword"
-	    >class</span
-	    >  <a name="t:A" class="def"
-	    >A</a
-	    > a  <span class="keyword"
-	    >where</span
+	    >data</span
+	    > <a name="t:X" class="def"
+	    >X</a
 	    ></p
 	  ><div class="doc"
 	  ><p
-	    >A class with an associated type
-</p
+	    >Doc for: data X</p
 	    ></div
-	  ><div class="subs associated-types"
+	  ><div class="subs constructors"
 	  ><p class="caption"
-	    >Associated Types</p
-	    ><p class="src"
-	    ><span class="keyword"
-	      >data</span
-	      > <a name="t:B" class="def"
-	      >B</a
-	      > a :: * -&gt; *</p
-	    ><div class="doc"
-	    ><p
-	      >An associated type
-</p
-	      ></div
-	    ></div
-	  ><div class="subs methods"
-	  ><p class="caption"
-	    >Methods</p
-	    ><p class="src"
-	    ><a name="v:f" class="def"
-	      >f</a
-	      > :: <a href=""
-	      >B</a
-	      > a <a href=""
-	      >Int</a
-	      ></p
-	    ><div class="doc"
-	    ><p
-	      >A method
-</p
-	      ></div
+	    >Constructors</p
+	    ><table
+	    ><tr
+	      ><td class="src"
+		><a name="v:X" class="def"
+		  >X</a
+		  ></td
+		><td class="doc"
+		><p
+		  >Doc for: X</p
+		  ></td
+		></tr
+	      ><tr
+	      ><td class="src"
+		><a name="v:XX" class="def"
+		  >XX</a
+		  ></td
+		><td class="doc"
+		><p
+		  >Doc for: XX</p
+		  ></td
+		></tr
+	      ><tr
+	      ><td class="src"
+		><a name="v:XXX" class="def"
+		  >XXX</a
+		  ></td
+		><td class="doc"
+		><p
+		  >Doc for: XXX</p
+		  ></td
+		></tr
+	      ></table
 	    ></div
 	  ><div class="subs instances"
-	  ><p id="control.i:A" class="caption collapser" onclick="toggleSection('i:A')"
+	  ><p id="control.i:X" class="caption collapser" onclick="toggleSection('i:X')"
 	    >Instances</p
-	    ><div id="section.i:A" class="show"
+	    ><div id="section.i:X" class="show"
 	    ><table
 	      ><tr
 		><td class="src"
 		  ><a href=""
-		    >A</a
+		    >Assoc</a
+		    > * <a href=""
+		    >X</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: instance Assoc X</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><a href=""
+		    >Test</a
+		    > * <a href=""
+		    >X</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: instance Test X</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><a href=""
+		    >(&gt;&lt;)</a
 		    > <a href=""
-		    >Int</a
+		    >X</a
+		    > <a href=""
+		    >XX</a
+		    > <a href=""
+		    >XXX</a
+		    ></td
+		  ><td class="doc empty"
+		  >&nbsp;</td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >type</span
+		    > <a href=""
+		    >Foo</a
+		    > <a href=""
+		    >X</a
+		    > = <a href=""
+		    >Y</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >External instance</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >data</span
+		    > <a href=""
+		    >AssocD</a
+		    > * <a href=""
+		    >X</a
+		    > = <a name="v:AssocX" class="def"
+		    >AssocX</a
+		    ></td
+		  ><td class="doc empty"
+		  >&nbsp;</td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >type</span
+		    > <a href=""
+		    >AssocT</a
+		    > * <a href=""
+		    >X</a
+		    > = <a href=""
+		    >Foo</a
+		    > * <a href=""
+		    >X</a
+		    ></td
+		  ><td class="doc empty"
+		  >&nbsp;</td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >data</span
+		    > <a href=""
+		    >Bat</a
+		    > * <a href=""
+		    >X</a
+		    > <ul class="inst"
+		    ><li class="inst"
+		      >= <a name="v:BatX" class="def"
+			>BatX</a
+			> <a href=""
+			>X</a
+			></li
+		      ><li class="inst"
+		      >| <a name="v:BatXX" class="def"
+			>BatXX</a
+			> { <ul class="subs"
+			><li
+			  ><a name="v:aaa" class="def"
+			    >aaa</a
+			    > :: <a href=""
+			    >X</a
+			    ></li
+			  ><li
+			  ><a name="v:bbb" class="def"
+			    >bbb</a
+			    > :: <a href=""
+			    >Y</a
+			    ></li
+			  ></ul
+			> }</li
+		      ></ul
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: data instance Bat X</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >type</span
+		    > <a href=""
+		    >Foo</a
+		    > * <a href=""
+		    >X</a
+		    > = <a href=""
+		    >Y</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: type instance Foo X = Y</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >type</span
+		    > <a href=""
+		    >(&lt;&gt;)</a
+		    > * <a href=""
+		    >X</a
+		    > a = <a href=""
+		    >X</a
+		    ></td
+		  ><td class="doc empty"
+		  >&nbsp;</td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >type</span
+		    > <a href=""
+		    >(&lt;&gt;)</a
+		    > <a href=""
+		    >X</a
+		    > <a href=""
+		    >XXX</a
+		    > <a href=""
+		    >XX</a
+		    > = <a href=""
+		    >X</a
 		    ></td
 		  ><td class="doc empty"
 		  >&nbsp;</td
@@ -177,27 +389,656 @@ window.onload = function () {pageLoad();setSynopsis("mini_TypeFamilies.html");};
 	><div class="top"
 	><p class="src"
 	  ><span class="keyword"
-	    >type family</span
-	    > <a name="t:F" class="def"
-	    >F</a
-	    > a </p
+	    >data</span
+	    > <a name="t:Y" class="def"
+	    >Y</a
+	    ></p
 	  ><div class="doc"
 	  ><p
-	    >Doc for family
-</p
+	    >Doc for: data Y</p
+	    ></div
+	  ><div class="subs instances"
+	  ><p id="control.i:Y" class="caption collapser" onclick="toggleSection('i:Y')"
+	    >Instances</p
+	    ><div id="section.i:Y" class="show"
+	    ><table
+	      ><tr
+		><td class="src"
+		  ><a href=""
+		    >Assoc</a
+		    > * <a href=""
+		    >Y</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: instance Assoc Y</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><a href=""
+		    >Test</a
+		    > * <a href=""
+		    >Y</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: instance Test Y</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >data</span
+		    > <a href=""
+		    >Bar</a
+		    > <a href=""
+		    >Y</a
+		    ></td
+		  ><td class="doc empty"
+		  >&nbsp;</td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >data</span
+		    > <a href=""
+		    >AssocD</a
+		    > * <a href=""
+		    >Y</a
+		    > = <a name="v:AssocY" class="def"
+		    >AssocY</a
+		    ></td
+		  ><td class="doc empty"
+		  >&nbsp;</td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >type</span
+		    > <a href=""
+		    >AssocT</a
+		    > * <a href=""
+		    >Y</a
+		    > = <a href=""
+		    >Bat</a
+		    > * <a href=""
+		    >Y</a
+		    ></td
+		  ><td class="doc empty"
+		  >&nbsp;</td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >data</span
+		    > <a href=""
+		    >Bat</a
+		    > * <a href=""
+		    >Y</a
+		    > = <a name="v:BatY" class="def"
+		    >BatY</a
+		    > <a href=""
+		    >Y</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: data instance Bat Y</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >type</span
+		    > <a href=""
+		    >Foo</a
+		    > * <a href=""
+		    >Y</a
+		    > = <a href=""
+		    >X</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: type instance Foo Y = X</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >type</span
+		    > <a href=""
+		    >(&lt;&gt;)</a
+		    > * <a href=""
+		    >Y</a
+		    > a = a</td
+		  ><td class="doc empty"
+		  >&nbsp;</td
+		  ></tr
+		></table
+	      ></div
 	    ></div
 	  ></div
 	><div class="top"
 	><p class="src"
-	  ><a name="v:g" class="def"
-	    >g</a
-	    > :: <a href=""
-	    >B</a
-	    > <a href=""
-	    >Int</a
-	    > <a href=""
-	    >Integer</a
+	  ><span class="keyword"
+	    >data</span
+	    > <a name="t:Z" class="def"
+	    >Z</a
 	    ></p
+	  ><div class="doc"
+	  ><p
+	    >Doc for: data Z</p
+	    ></div
+	  ><div class="subs constructors"
+	  ><p class="caption"
+	    >Constructors</p
+	    ><table
+	    ><tr
+	      ><td class="src"
+		><a name="v:ZA" class="def"
+		  >ZA</a
+		  ></td
+		><td class="doc empty"
+		>&nbsp;</td
+		></tr
+	      ><tr
+	      ><td class="src"
+		><a name="v:ZB" class="def"
+		  >ZB</a
+		  ></td
+		><td class="doc empty"
+		>&nbsp;</td
+		></tr
+	      ></table
+	    ></div
+	  ><div class="subs instances"
+	  ><p id="control.i:Z" class="caption collapser" onclick="toggleSection('i:Z')"
+	    >Instances</p
+	    ><div id="section.i:Z" class="show"
+	    ><table
+	      ><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >data</span
+		    > <a href=""
+		    >Bat</a
+		    > <a href=""
+		    >Z</a
+		    > <span class="keyword"
+		    >where</span
+		    ><ul class="inst"
+		    ><li class="inst"
+		      ><a name="v:BatZ1" class="def"
+			>BatZ1</a
+			> ::  <a href=""
+			>Z</a
+			> -&gt; <a href=""
+			>Bat</a
+			> <a href=""
+			>Z</a
+			> <a href=""
+			>ZA</a
+			></li
+		      ><li class="inst"
+		      ><a name="v:BatZ2" class="def"
+			>BatZ2</a
+			> :: { <ul class="subs"
+			><li
+			  ><a name="v:batx" class="def"
+			    >batx</a
+			    > :: <a href=""
+			    >X</a
+			    ></li
+			  ><li
+			  ><a name="v:baty" class="def"
+			    >baty</a
+			    > :: <a href=""
+			    >Y</a
+			    ></li
+			  ></ul
+			> } -&gt; <a href=""
+			>Bat</a
+			> <a href=""
+			>Z</a
+			> <a href=""
+			>ZB</a
+			></li
+		      ></ul
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: data instance Bat Z</p
+		    ></td
+		  ></tr
+		></table
+	      ></div
+	    ></div
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><span class="keyword"
+	    >class</span
+	    > <a name="t:Test" class="def"
+	    >Test</a
+	    > a</p
+	  ><div class="doc"
+	  ><p
+	    >Doc for: class Test a</p
+	    ></div
+	  ><div class="subs instances"
+	  ><p id="control.i:Test" class="caption collapser" onclick="toggleSection('i:Test')"
+	    >Instances</p
+	    ><div id="section.i:Test" class="show"
+	    ><table
+	      ><tr
+		><td class="src"
+		  ><a href=""
+		    >Test</a
+		    > * <a href=""
+		    >Y</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: instance Test Y</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><a href=""
+		    >Test</a
+		    > * <a href=""
+		    >X</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: instance Test X</p
+		    ></td
+		  ></tr
+		></table
+	      ></div
+	    ></div
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><span class="keyword"
+	    >type family</span
+	    > <a name="t:Foo" class="def"
+	    >Foo</a
+	    > a :: k</p
+	  ><div class="doc"
+	  ><p
+	    >Doc for: type family Foo a</p
+	    ></div
+	  ><div class="subs instances"
+	  ><p id="control.i:Foo" class="caption collapser" onclick="toggleSection('i:Foo')"
+	    >Instances</p
+	    ><div id="section.i:Foo" class="show"
+	    ><table
+	      ><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >type</span
+		    > <a href=""
+		    >Foo</a
+		    > * <a href=""
+		    >Y</a
+		    > = <a href=""
+		    >X</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: type instance Foo Y = X</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >type</span
+		    > <a href=""
+		    >Foo</a
+		    > * <a href=""
+		    >X</a
+		    > = <a href=""
+		    >Y</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: type instance Foo X = Y</p
+		    ></td
+		  ></tr
+		></table
+	      ></div
+	    ></div
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><span class="keyword"
+	    >data family</span
+	    > <a name="t:Bat" class="def"
+	    >Bat</a
+	    > a :: *</p
+	  ><div class="doc"
+	  ><p
+	    >Doc for: data family Bat a</p
+	    ></div
+	  ><div class="subs instances"
+	  ><p id="control.i:Bat" class="caption collapser" onclick="toggleSection('i:Bat')"
+	    >Instances</p
+	    ><div id="section.i:Bat" class="show"
+	    ><table
+	      ><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >data</span
+		    > <a href=""
+		    >Bat</a
+		    > <a href=""
+		    >Z</a
+		    > <span class="keyword"
+		    >where</span
+		    ><ul class="inst"
+		    ><li class="inst"
+		      ><a name="v:BatZ1" class="def"
+			>BatZ1</a
+			> ::  <a href=""
+			>Z</a
+			> -&gt; <a href=""
+			>Bat</a
+			> <a href=""
+			>Z</a
+			> <a href=""
+			>ZA</a
+			></li
+		      ><li class="inst"
+		      ><a name="v:BatZ2" class="def"
+			>BatZ2</a
+			> :: { <ul class="subs"
+			><li
+			  ><a name="v:batx" class="def"
+			    >batx</a
+			    > :: <a href=""
+			    >X</a
+			    ></li
+			  ><li
+			  ><a name="v:baty" class="def"
+			    >baty</a
+			    > :: <a href=""
+			    >Y</a
+			    ></li
+			  ></ul
+			> } -&gt; <a href=""
+			>Bat</a
+			> <a href=""
+			>Z</a
+			> <a href=""
+			>ZB</a
+			></li
+		      ></ul
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: data instance Bat Z</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >data</span
+		    > <a href=""
+		    >Bat</a
+		    > * <a href=""
+		    >Y</a
+		    > = <a name="v:BatY" class="def"
+		    >BatY</a
+		    > <a href=""
+		    >Y</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: data instance Bat Y</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >data</span
+		    > <a href=""
+		    >Bat</a
+		    > * <a href=""
+		    >X</a
+		    > <ul class="inst"
+		    ><li class="inst"
+		      >= <a name="v:BatX" class="def"
+			>BatX</a
+			> <a href=""
+			>X</a
+			></li
+		      ><li class="inst"
+		      >| <a name="v:BatXX" class="def"
+			>BatXX</a
+			> { <ul class="subs"
+			><li
+			  ><a name="v:aaa" class="def"
+			    >aaa</a
+			    > :: <a href=""
+			    >X</a
+			    ></li
+			  ><li
+			  ><a name="v:bbb" class="def"
+			    >bbb</a
+			    > :: <a href=""
+			    >Y</a
+			    ></li
+			  ></ul
+			> }</li
+		      ></ul
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: data instance Bat X</p
+		    ></td
+		  ></tr
+		></table
+	      ></div
+	    ></div
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><span class="keyword"
+	    >class</span
+	    > <a name="t:Assoc" class="def"
+	    >Assoc</a
+	    > a</p
+	  ><div class="doc"
+	  ><p
+	    >Doc for: class Assoc a</p
+	    ></div
+	  ><div class="subs associated-types"
+	  ><p class="caption"
+	    >Associated Types</p
+	    ><p class="src"
+	    ><span class="keyword"
+	      >data</span
+	      > <a name="t:AssocD" class="def"
+	      >AssocD</a
+	      > a :: *</p
+	    ><div class="doc"
+	    ><p
+	      >Doc for: data AssocD a</p
+	      ></div
+	    ><p class="src"
+	    ><span class="keyword"
+	      >type</span
+	      > <a name="t:AssocT" class="def"
+	      >AssocT</a
+	      > a :: *</p
+	    ><div class="doc"
+	    ><p
+	      >Doc for: type AssocT a</p
+	      ></div
+	    ></div
+	  ><div class="subs instances"
+	  ><p id="control.i:Assoc" class="caption collapser" onclick="toggleSection('i:Assoc')"
+	    >Instances</p
+	    ><div id="section.i:Assoc" class="show"
+	    ><table
+	      ><tr
+		><td class="src"
+		  ><a href=""
+		    >Assoc</a
+		    > * <a href=""
+		    >Y</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: instance Assoc Y</p
+		    ></td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><a href=""
+		    >Assoc</a
+		    > * <a href=""
+		    >X</a
+		    ></td
+		  ><td class="doc"
+		  ><p
+		    >Doc for: instance Assoc X</p
+		    ></td
+		  ></tr
+		></table
+	      ></div
+	    ></div
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><span class="keyword"
+	    >type family</span
+	    > <a name="t:Bar" class="def"
+	    >Bar</a
+	    > b</p
+	  ><div class="doc"
+	  ><p
+	    >Doc for: type family Bar b</p
+	    ></div
+	  ><div class="subs equations"
+	  ><p class="caption"
+	    >Equations</p
+	    ><table
+	    ><tr
+	      ><td class="src"
+		><a href=""
+		  >Bar</a
+		  > <a href=""
+		  >X</a
+		  > = <a href=""
+		  >X</a
+		  ></td
+		><td class="doc empty"
+		>&nbsp;</td
+		></tr
+	      ><tr
+	      ><td class="src"
+		><a href=""
+		  >Bar</a
+		  > y = <a href=""
+		  >Y</a
+		  ></td
+		><td class="doc empty"
+		>&nbsp;</td
+		></tr
+	      ></table
+	    ></div
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><span class="keyword"
+	    >type family</span
+	    > a <a name="t:-60--62-" class="def"
+	    >&lt;&gt;</a
+	    > b :: k</p
+	  ><div class="subs instances"
+	  ><p id="control.i:-60--62-" class="caption collapser" onclick="toggleSection('i:-60--62-')"
+	    >Instances</p
+	    ><div id="section.i:-60--62-" class="show"
+	    ><table
+	      ><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >type</span
+		    > <a href=""
+		    >(&lt;&gt;)</a
+		    > * <a href=""
+		    >Y</a
+		    > a = a</td
+		  ><td class="doc empty"
+		  >&nbsp;</td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >type</span
+		    > <a href=""
+		    >(&lt;&gt;)</a
+		    > * <a href=""
+		    >X</a
+		    > a = <a href=""
+		    >X</a
+		    ></td
+		  ><td class="doc empty"
+		  >&nbsp;</td
+		  ></tr
+		><tr
+		><td class="src"
+		  ><span class="keyword"
+		    >type</span
+		    > <a href=""
+		    >(&lt;&gt;)</a
+		    > <a href=""
+		    >X</a
+		    > <a href=""
+		    >XXX</a
+		    > <a href=""
+		    >XX</a
+		    > = <a href=""
+		    >X</a
+		    ></td
+		  ><td class="doc empty"
+		  >&nbsp;</td
+		  ></tr
+		></table
+	      ></div
+	    ></div
+	  ></div
+	><div class="top"
+	><p class="src"
+	  ><span class="keyword"
+	    >class</span
+	    > a <a name="t:-62--60-" class="def"
+	    >&gt;&lt;</a
+	    > b</p
+	  ><div class="subs instances"
+	  ><p id="control.i:-62--60-" class="caption collapser" onclick="toggleSection('i:-62--60-')"
+	    >Instances</p
+	    ><div id="section.i:-62--60-" class="show"
+	    ><table
+	      ><tr
+		><td class="src"
+		  ><a href=""
+		    >(&gt;&lt;)</a
+		    > <a href=""
+		    >X</a
+		    > <a href=""
+		    >XX</a
+		    > <a href=""
+		    >XXX</a
+		    ></td
+		  ><td class="doc empty"
+		  >&nbsp;</td
+		  ></tr
+		></table
+	      ></div
+	    ></div
 	  ></div
 	></div
       ></div
@@ -205,7 +1046,7 @@ window.onload = function () {pageLoad();setSynopsis("mini_TypeFamilies.html");};
     ><p
       >Produced by <a href=""
 	>Haddock</a
-	> version 2.13.2</p
+	> version 2.14.2</p
       ></div
     ></body
   ></html

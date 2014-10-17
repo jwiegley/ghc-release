@@ -19,7 +19,9 @@ module Language.Haskell.TH(
 	-- ** Querying the compiler
 	-- *** Reify
 	reify, 		  -- :: Name -> Q Info
-	Info(..),
+	reifyModule,
+	thisModule,
+	Info(..), ModuleInfo(..),
 	InstanceDec,
 	ParentName,
 	Arity,
@@ -30,6 +32,13 @@ module Language.Haskell.TH(
 	-- *** Instance lookup
 	reifyInstances,
 	isInstance,
+        -- *** Roles lookup
+        reifyRoles,
+        -- *** Annotation lookup
+        reifyAnnotations, AnnLookup(..),
+
+	-- * Typed expressions
+	TExp, unType,
 
 	-- * Names
 	Name, NameSpace,	-- Abstract
@@ -51,21 +60,21 @@ module Language.Haskell.TH(
     -- ** Declarations
 	Dec(..), Con(..), Clause(..), 
 	Strict(..), Foreign(..), Callconv(..), Safety(..), Pragma(..),
-	Inline(..), RuleMatch(..), Phases(..), RuleBndr(..),
-	FunDep(..), FamFlavour(..),
+	Inline(..), RuleMatch(..), Phases(..), RuleBndr(..), AnnTarget(..),
+	FunDep(..), FamFlavour(..), TySynEqn(..),
 	Fixity(..), FixityDirection(..), defaultFixity, maxPrecedence,
     -- ** Expressions
         Exp(..), Match(..), Body(..), Guard(..), Stmt(..), Range(..), Lit(..),
     -- ** Patterns
         Pat(..), FieldExp, FieldPat,
     -- ** Types
-        Type(..), TyVarBndr(..), TyLit(..), Kind, Cxt, Pred(..),
+        Type(..), TyVarBndr(..), TyLit(..), Kind, Cxt, Pred(..), Syntax.Role(..),
 
     -- * Library functions
     -- ** Abbreviations
         InfoQ, ExpQ, DecQ, DecsQ, ConQ, TypeQ, TyLitQ, CxtQ, PredQ, MatchQ, ClauseQ,
         BodyQ, GuardQ, StmtQ, RangeQ, StrictTypeQ, VarStrictTypeQ, PatQ, FieldPatQ,
-        RuleBndrQ,
+        RuleBndrQ, TySynEqnQ,
 
     -- ** Constructors lifted to 'Q'
     -- *** Literals
@@ -108,27 +117,33 @@ module Language.Haskell.TH(
     -- *** Kinds
   varK, conK, tupleK, arrowK, listK, appK, starK, constraintK,
 
+    -- *** Roles
+    nominalR, representationalR, phantomR, inferR,
+
     -- *** Top Level Declarations
     -- **** Data
 	valD, funD, tySynD, dataD, newtypeD,
     -- **** Class
     classD, instanceD, sigD,
+    -- **** Role annotations
+    roleAnnotD,
     -- **** Type Family / Data Family
     familyNoKindD, familyKindD, dataInstD,
+    closedTypeFamilyNoKindD, closedTypeFamilyKindD,
     newtypeInstD, tySynInstD,
-    typeFam, dataFam,
+    typeFam, dataFam, tySynEqn,
     -- **** Foreign Function Interface (FFI)
     cCall, stdCall, unsafe, safe, forImpD,
     -- **** Pragmas
     ruleVar, typedRuleVar,
-    pragInlD, pragSpecD, pragSpecInlD, pragSpecInstD, pragRuleD,
+    pragInlD, pragSpecD, pragSpecInlD, pragSpecInstD, pragRuleD, pragAnnD,
 
 	-- * Pretty-printer
     Ppr(..), pprint, pprExp, pprLit, pprPat, pprParendType
 
    ) where
 
-import Language.Haskell.TH.Syntax
+import Language.Haskell.TH.Syntax as Syntax
 import Language.Haskell.TH.Lib
 import Language.Haskell.TH.Ppr
 

@@ -1,1 +1,1 @@
-exists Nothing :: Existential (Maybe *) kp
+exists Nothing :: Floop a mp => Existential mp

@@ -46,7 +46,7 @@ test('ATLoop',
      ['ATLoop.hs','-v0'])
 
 test('Deriving', normal, compile, [''])
-test('DerivingNewType', expect_fail, compile, [''])
+test('DerivingNewType', normal, compile, [''])
 test('Records', normal, compile, [''])
 
 # The point about this test is that it compiles NewTyCo1 and NewTyCo2
@@ -159,7 +159,7 @@ test('T4484', normal, compile, [''])
 test('T4492', normal, compile, [''])
 test('T4494', normal, compile, [''])
 test('DataFamDeriv', normal, compile, [''])
-test('T1769', if_compiler_lt('ghc', '7.1', expect_fail), compile, [''])
+test('T1769', when(compiler_lt('ghc', '7.1'), expect_fail), compile, [''])
 test('T4497', normal, compile, [''])
 test('T3484', normal, compile, [''])
 test('T3460', normal, compile, [''])
@@ -195,3 +195,49 @@ test('T6152',
      ['$MAKE -s --no-print-directory T6152'])
 
 test('T6088', normal, compile, [''])
+test('T7082', normal, compile, [''])
+
+test('Overlap1', normal, compile, [''])
+test('Overlap2', normal, compile, [''])
+test('Overlap12', normal, compile, [''])
+test('Overlap13', normal, compile, [''])
+test('Overlap14', normal, compile, [''])
+test('T7156', normal, compile, [''])
+test('T5591a', normal, compile, [''])
+test('T5591b', normal, compile, [''])
+test('T7280', normal, compile, [''])
+test('T7474', normal, compile, [''])
+test('T7489', normal, compile, [''])
+test('T7585', normal, compile, [''])
+test('T7282', normal, compile, [''])
+test('T7804', normal, compile, [''])
+test('T7837', normal, compile, ['-O -ddump-rule-firings'])
+test('T4185', normal, compile, [''])
+
+# Caused infinite loop in the compiler
+test('T8002',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T8002'])
+
+# Import and export of associated types
+test('T8011',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T8011'])
+
+# Marshalling of associated types
+test('T8500',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T8500'])
+
+test('T8018', normal, compile, [''])
+test('T8020', normal, compile, [''])
+test('ClosedFam1', extra_clean(['ClosedFam1.o-boot', 'ClosedFam1.hi-boot']),
+     multimod_compile, ['ClosedFam1', '-v0'])
+test('ClosedFam2', extra_clean(['ClosedFam2.o-boot', 'ClosedFam2.hi-boot']),
+     multimod_compile, ['ClosedFam2', '-v0'])
+test('T8651', normal, compile, [''])
+test('T8889', normal, compile, [''])
+test('T8913', normal, compile, [''])

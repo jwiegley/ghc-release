@@ -1,6 +1,5 @@
-{-# OPTIONS_GHC -w #-}
--- XXX We get some warnings on Windows
-#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE CPP, NondecreasingIndentation #-}
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 
@@ -9,7 +8,7 @@
 -- Module      :  System.Directory
 -- Copyright   :  (c) The University of Glasgow 2001
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  stable
 -- Portability :  portable
@@ -18,15 +17,13 @@
 --
 -----------------------------------------------------------------------------
 
-module System.Directory 
-   ( 
+module System.Directory
+   (
     -- $intro
 
     -- * Actions on directories
       createDirectory
-#ifndef __NHC__
     , createDirectoryIfMissing
-#endif
     , removeDirectory
     , removeDirectoryRecursive
     , renameDirectory
@@ -45,11 +42,13 @@ module System.Directory
     , removeFile
     , renameFile
     , copyFile
-    
+
     , canonicalizePath
     , makeRelativeToCurrentDirectory
     , findExecutable
     , findFile
+    , findFiles
+    , findFilesWith
 
     -- * Existence tests
     , doesFileExist
@@ -79,20 +78,11 @@ module System.Directory
     , getModificationTime
    ) where
 
-import Control.Monad (guard)
-import System.Environment      ( getEnv )
 import System.FilePath
 import System.IO
 import System.IO.Error
 import Control.Monad           ( when, unless )
 import Control.Exception.Base as E
-
-#ifdef __NHC__
-import Directory -- hiding ( getDirectoryContents
-                 --        , doesDirectoryExist, doesFileExist
-                 --        , getModificationTime )
-import System (system)
-#endif /* __NHC__ */
 
 #ifdef __HUGS__
 import Hugs.Directory
@@ -103,40 +93,24 @@ import Foreign.C
 
 {-# CFILES cbits/directory.c #-}
 
+import Data.Maybe
+
 import Data.Time
 import Data.Time.Clock.POSIX
 
 #ifdef __GLASGOW_HASKELL__
 
-#if __GLASGOW_HASKELL__ >= 611
-import GHC.IO.Exception ( IOException(..), IOErrorType(..), ioException )
-#else
-import GHC.IOBase       ( IOException(..), IOErrorType(..), ioException )
-#endif
-
-#if __GLASGOW_HASKELL__ > 700
-import GHC.IO.Encoding
-import GHC.Foreign as GHC
-#endif
+import GHC.IO.Exception ( IOErrorType(InappropriateType) )
 
 #ifdef mingw32_HOST_OS
 import System.Posix.Types
 import System.Posix.Internals
 import qualified System.Win32 as Win32
 #else
+import GHC.IO.Encoding
+import GHC.Foreign as GHC
+import System.Environment ( getEnv )
 import qualified System.Posix as Posix
-#endif
-
-#if __GLASGOW_HASKELL__ == 702
--- fileSystemEncoding exists only in base-4.4
-getFileSystemEncoding :: IO TextEncoding
-getFileSystemEncoding = return fileSystemEncoding
-#endif
-
-#if __GLASGOW_HASKELL__ < 702
--- just like in base >= 4.4
-catchIOError :: IO a -> (IOError -> IO a) -> IO a
-catchIOError = E.catch
 #endif
 
 #endif /* __GLASGOW_HASKELL__ */
@@ -146,7 +120,7 @@ A directory contains a series of entries, each of which is a named
 reference to a file system object (file, directory etc.).  Some
 entries may be hidden, inaccessible, or have some administrative
 function (e.g. `.' or `..' under POSIX
-<http://www.opengroup.org/onlinepubs/009695399/>), but in 
+<http://www.opengroup.org/onlinepubs/009695399/>), but in
 this standard all such entries are considered to form part of the
 directory contents. Entries in sub-directories are not, however,
 considered to form part of the directory contents.
@@ -168,10 +142,10 @@ are relative to the current directory.
  files and directories. For directories, the executable field will be
  'False', and for files the searchable field will be 'False'. Note that
  directories may be searchable without being readable, if permission has
- been given to use them as part of a path, but not to examine the 
+ been given to use them as part of a path, but not to examine the
  directory contents.
 
-Note that to change some, but not all permissions, a construct on the following lines must be used. 
+Note that to change some, but not all permissions, a construct on the following lines must be used.
 
 >  makeReadable f = do
 >     p <- getPermissions f
@@ -181,8 +155,8 @@ Note that to change some, but not all permissions, a construct on the following 
 
 data Permissions
  = Permissions {
-    readable,   writable, 
-    executable, searchable :: Bool 
+    readable,   writable,
+    executable, searchable :: Bool
    } deriving (Eq, Ord, Read, Show)
 
 emptyPermissions :: Permissions
@@ -277,8 +251,10 @@ setPermissions name (Permissions r w e s) = do
 #ifdef mingw32_HOST_OS
   allocaBytes sizeof_stat $ \ p_stat -> do
   withFilePath name $ \p_name -> do
-    throwErrnoIfMinus1_ "setPermissions" $ do
+    throwErrnoIfMinus1_ "setPermissions" $
       c_stat p_name p_stat
+
+    throwErrnoIfMinus1_ "setPermissions" $ do
       mode <- st_mode p_stat
       let mode1 = modifyBit r mode s_IRUSR
       let mode2 = modifyBit w mode1 s_IWUSR
@@ -335,7 +311,7 @@ The process has insufficient privileges to perform the operation.
 @[EROFS, EACCES]@
 
 * 'isAlreadyExistsError' \/ 'AlreadyExists'
-The operand refers to a directory that already exists.  
+The operand refers to a directory that already exists.
 @ [EEXIST]@
 
 * 'HardwareFault'
@@ -347,7 +323,7 @@ The operand is not a valid directory name.
 @[ENAMETOOLONG, ELOOP]@
 
 * 'NoSuchThing'
-There is no path to the directory. 
+There is no path to the directory.
 @[ENOENT, ENOTDIR]@
 
 * 'ResourceExhausted'
@@ -377,8 +353,7 @@ copyPermissions fromFPath toFPath
 
 #endif
 
-#ifndef __NHC__
--- | @'createDirectoryIfMissing' parents dir@ creates a new directory 
+-- | @'createDirectoryIfMissing' parents dir@ creates a new directory
 -- @dir@ if it doesn\'t exist. If the first argument is 'True'
 -- the function will also create all parent directories if they are missing.
 createDirectoryIfMissing :: Bool     -- ^ Create its parents too?
@@ -411,7 +386,14 @@ createDirectoryIfMissing create_parents path0
           -- the case that the dir did exist but another process deletes the
           -- directory and creates a file in its place before we can check
           -- that the directory did indeed exist.
-          | isAlreadyExistsError e -> (do
+          -- We also follow this path when we get a permissions error, as
+          -- trying to create "." when in the root directory on Windows
+          -- fails with
+          --     CreateDirectory ".": permission denied (Access is denied.)
+          -- This caused GHCi to crash when loading a module in the root
+          -- directory.
+          | isAlreadyExistsError e
+         || isPermissionError e -> (do
 #ifdef mingw32_HOST_OS
               withFileStatus "createDirectoryIfMissing" dir $ \st -> do
                  isDir <- isDirectory st
@@ -425,7 +407,6 @@ createDirectoryIfMissing create_parents path0
 #endif
               ) `E.catch` ((\_ -> return ()) :: IOException -> IO ())
           | otherwise              -> throw e
-#endif  /* !__NHC__ */
 
 #if __GLASGOW_HASKELL__
 {- | @'removeDirectory' dir@ removes an existing directory /dir/.  The
@@ -441,14 +422,14 @@ The operation may fail with:
 
 * 'HardwareFault'
 A physical I\/O error has occurred.
-EIO
+@[EIO]@
 
 * 'InvalidArgument'
 The operand is not a valid directory name.
-[ENAMETOOLONG, ELOOP]
+@[ENAMETOOLONG, ELOOP]@
 
 * 'isDoesNotExistError' \/ 'NoSuchThing'
-The directory does not exist. 
+The directory does not exist.
 @[ENOENT, ENOTDIR]@
 
 * 'isPermissionError' \/ 'PermissionDenied'
@@ -456,7 +437,7 @@ The process has insufficient privileges to perform the operation.
 @[EROFS, EACCES, EPERM]@
 
 * 'UnsatisfiedConstraints'
-Implementation-dependent constraints are not satisfied.  
+Implementation-dependent constraints are not satisfied.
 @[EBUSY, ENOTEMPTY, EEXIST]@
 
 * 'UnsupportedOperation'
@@ -480,7 +461,7 @@ removeDirectory path =
 #endif
 
 -- | @'removeDirectoryRecursive' dir@  removes an existing directory /dir/
--- together with its content and all subdirectories. Be careful, 
+-- together with its content and all subdirectories. Be careful,
 -- if the directory contains symlinks, the function will follow them.
 removeDirectoryRecursive :: FilePath -> IO ()
 removeDirectoryRecursive startLoc = do
@@ -515,7 +496,7 @@ The operand is not a valid file name.
 @[ENAMETOOLONG, ELOOP]@
 
 * 'isDoesNotExistError' \/ 'NoSuchThing'
-The file does not exist. 
+The file does not exist.
 @[ENOENT, ENOTDIR]@
 
 * 'isPermissionError' \/ 'PermissionDenied'
@@ -523,7 +504,7 @@ The process has insufficient privileges to perform the operation.
 @[EROFS, EACCES, EPERM]@
 
 * 'UnsatisfiedConstraints'
-Implementation-dependent constraints are not satisfied.  
+Implementation-dependent constraints are not satisfied.
 @[EBUSY]@
 
 * 'InappropriateType'
@@ -572,7 +553,7 @@ The process has insufficient privileges to perform the operation.
 @[EROFS, EACCES, EPERM]@
 
 * 'ResourceExhausted'
-Insufficient resources are available to perform the operation.  
+Insufficient resources are available to perform the operation.
 @[EDQUOT, ENOSPC, ENOMEM, EMLINK]@
 
 * 'UnsatisfiedConstraints'
@@ -601,7 +582,7 @@ renameDirectory opath npath = do
    let is_dir = Posix.fileMode stat .&. Posix.directoryMode /= 0
 #endif
    if (not is_dir)
-        then ioException (ioeSetErrorString
+        then ioError (ioeSetErrorString
                           (mkIOError InappropriateType "renameDirectory" Nothing (Just opath))
                           "not a directory")
         else do
@@ -638,7 +619,7 @@ The process has insufficient privileges to perform the operation.
 @[EROFS, EACCES, EPERM]@
 
 * 'ResourceExhausted'
-Insufficient resources are available to perform the operation.  
+Insufficient resources are available to perform the operation.
 @[EDQUOT, ENOSPC, ENOMEM, EMLINK]@
 
 * 'UnsatisfiedConstraints'
@@ -667,7 +648,7 @@ renameFile opath npath = do
    let is_dir = Posix.isDirectory stat
 #endif
    if is_dir
-        then ioException (ioeSetErrorString
+        then ioError (ioeSetErrorString
                           (mkIOError InappropriateType "renameFile" Nothing (Just opath))
                           "is a directory")
         else do
@@ -686,12 +667,6 @@ copied to /new/, if possible.
 -}
 
 copyFile :: FilePath -> FilePath -> IO ()
-#ifdef __NHC__
-copyFile fromFPath toFPath =
-    do readFile fromFPath >>= writeFile toFPath
-       catchIOError (copyPermissions fromFPath toFPath)
-                    (\_ -> return ())
-#else
 copyFile fromFPath toFPath =
     copy `catchIOError` (\exc -> throw $ ioeSetLocation exc "copyFile")
     where copy = bracket (openBinaryFile fromFPath ReadMode) hClose $ \hFrom ->
@@ -713,32 +688,33 @@ copyFile fromFPath toFPath =
                           copyContents hFrom hTo buffer
 
           ignoreIOExceptions io = io `catchIOError` (\_ -> return ())
-#endif
 
--- | Given path referring to a file or directory, returns a
--- canonicalized path, with the intent that two paths referring
+-- | Given a path referring to a file or directory, returns a
+-- canonicalized path. The intent is that two paths referring
 -- to the same file\/directory will map to the same canonicalized
--- path. Note that it is impossible to guarantee that the
+-- path.
+--
+-- Note that it is impossible to guarantee that the
 -- implication (same file\/dir \<=\> same canonicalizedPath) holds
 -- in either direction: this function can make only a best-effort
 -- attempt.
+--
+-- The precise behaviour is that of the C realpath function
+-- GetFullPathNameW on Windows). In particular, the behaviour
+-- on paths that do not exist is known to vary from platform
+-- to platform. Some platforms do not alter the input, some
+-- do, and on some an exception will be thrown.
 canonicalizePath :: FilePath -> IO FilePath
 canonicalizePath fpath =
 #if defined(mingw32_HOST_OS)
          do path <- Win32.getFullPathName fpath
 #else
-#if __GLASGOW_HASKELL__ > 700
   do enc <- getFileSystemEncoding
      GHC.withCString enc fpath $ \pInPath ->
        allocaBytes long_path_size $ \pOutPath ->
-         do throwErrnoPathIfNull "canonicalizePath" fpath $ c_realpath pInPath pOutPath
+         do _ <- throwErrnoPathIfNull "canonicalizePath" fpath $ c_realpath pInPath pOutPath
+            -- NB: pOutPath will be passed thru as result pointer by c_realpath
             path <- GHC.peekCString enc pOutPath
-#else
-  withCString fpath $ \pInPath ->
-    allocaBytes long_path_size $ \pOutPath ->
-         do throwErrnoPathIfNull "canonicalizePath" fpath $ c_realpath pInPath pOutPath
-            path <- peekCString pOutPath
-#endif
 #endif
             return (normalise path)
         -- normalise does more stuff, like upper-casing the drive letter
@@ -772,34 +748,63 @@ makeRelativeToCurrentDirectory x = do
 -- but notably includes the directory containing the current
 -- executable. See
 -- <http://msdn.microsoft.com/en-us/library/aa365527.aspx> for more
--- details.  
+-- details.
 --
 findExecutable :: String -> IO (Maybe FilePath)
-findExecutable binary =
+findExecutable fileName = do
+   files <- findExecutables fileName
+   return $ listToMaybe files
+
+-- | Given a file name, searches for the file and returns a list of all
+-- occurences that are executable.
+--
+-- /Since: 1.2.1.0/
+findExecutables :: String -> IO [FilePath]
+findExecutables binary = do
 #if defined(mingw32_HOST_OS)
-  Win32.searchPath Nothing binary ('.':exeExtension)
+    file <- Win32.searchPath Nothing binary ('.':exeExtension)
+    return $ maybeToList file
 #else
- do
-  path <- getEnv "PATH"
-  findFile (splitSearchPath path) (binary <.> exeExtension)
+    path <- getEnv "PATH"
+    findFilesWith isExecutable (splitSearchPath path) (binary <.> exeExtension)
+  where isExecutable file = do
+            perms <- getPermissions file
+            return $ executable perms
 #endif
 
 -- | Search through the given set of directories for the given file.
 -- Used by 'findExecutable' on non-windows platforms.
 findFile :: [FilePath] -> String -> IO (Maybe FilePath)
-findFile paths fileName = search paths
-  where
-    search :: [FilePath] -> IO (Maybe FilePath)
-    search [] = return Nothing
-    search (d:ds) = do
-        let path = d </> fileName
-        b <- doesFileExist path
-        if b then return (Just path)
-             else search ds
+findFile path fileName = do
+    files <- findFiles path fileName
+    return $ listToMaybe files
+
+-- | Search through the given set of directories for the given file and
+-- returns a list of paths where the given file exists.
+--
+-- /Since: 1.2.1.0/
+findFiles :: [FilePath] -> String -> IO [FilePath]
+findFiles = findFilesWith (\_ -> return True)
+
+-- | Search through the given set of directories for the given file and
+-- with the given property (usually permissions) and returns a list of
+-- paths where the given file exists and has the property.
+--
+-- /Since: 1.2.1.0/
+findFilesWith :: (FilePath -> IO Bool) -> [FilePath] -> String -> IO [FilePath]
+findFilesWith _ [] _ = return []
+findFilesWith f (d:ds) fileName = do
+    let file = d </> fileName
+    exist <- doesFileExist file
+    b <- if exist then f file else return False
+    if b then do
+               files <- findFilesWith f ds fileName
+               return $ file : files
+        else findFilesWith f ds fileName
 
 #ifdef __GLASGOW_HASKELL__
 {- |@'getDirectoryContents' dir@ returns a list of /all/ entries
-in /dir/. 
+in /dir/.
 
 The operation may fail with:
 
@@ -831,7 +836,7 @@ The path refers to an existing non-directory object.
 
 getDirectoryContents :: FilePath -> IO [FilePath]
 getDirectoryContents path =
-  modifyIOError ((`ioeSetFileName` path) . 
+  modifyIOError ((`ioeSetFileName` path) .
                  (`ioeSetLocation` "getDirectoryContents")) $ do
 #ifndef mingw32_HOST_OS
     bracket
@@ -953,7 +958,8 @@ setCurrentDirectory path =
 
 #ifdef __GLASGOW_HASKELL__
 {- |The operation 'doesDirectoryExist' returns 'True' if the argument file
-exists and is a directory, and 'False' otherwise.
+exists and is either a directory or a symbolic link to a directory,
+and 'False' otherwise.
 -}
 
 doesDirectoryExist :: FilePath -> IO Bool
@@ -990,19 +996,27 @@ The operation may fail with:
 
 * 'isDoesNotExistError' if the file or directory does not exist.
 
+Note: When linked against @unix-2.6.0.0@ or later the reported time
+supports sub-second precision if provided by the underlying system
+call.
+
 -}
 
 getModificationTime :: FilePath -> IO UTCTime
 getModificationTime name = do
 #ifdef mingw32_HOST_OS
- -- ToDo: use Win32 API
+ -- ToDo: use Win32 API so we can get sub-second resolution
  withFileStatus "getModificationTime" name $ \ st -> do
  modificationTime st
 #else
   stat <- Posix.getFileStatus name
-  let mod_time :: Posix.EpochTime
-      mod_time = Posix.modificationTime stat
-  return $ posixSecondsToUTCTime $ realToFrac mod_time
+  let mod_time :: POSIXTime
+#if MIN_VERSION_unix(2,6,0)
+      mod_time = Posix.modificationTimeHiRes stat
+#else
+      mod_time = realToFrac $ Posix.modificationTime stat
+#endif
+  return $ posixSecondsToUTCTime mod_time
 #endif
 
 #endif /* __GLASGOW_HASKELL__ */
@@ -1044,7 +1058,7 @@ foreign import ccall unsafe "HsDirectory.h __hscore_S_IXUSR" s_IXUSR :: CMode
 foreign import ccall unsafe "__hscore_S_IFDIR" s_IFDIR :: CMode
 #endif
 
-
+#ifndef mingw32_HOST_OS
 #ifdef __GLASGOW_HASKELL__
 foreign import ccall unsafe "__hscore_long_path_size"
   long_path_size :: Int
@@ -1052,6 +1066,7 @@ foreign import ccall unsafe "__hscore_long_path_size"
 long_path_size :: Int
 long_path_size = 2048   --  // guess?
 #endif /* __GLASGOW_HASKELL__ */
+#endif /* !mingw32_HOST_OS */
 
 {- | Returns the current user's home directory.
 
@@ -1062,7 +1077,7 @@ instead.
 
 On Unix, 'getHomeDirectory' returns the value of the @HOME@
 environment variable.  On Windows, the system is queried for a
-suitable path; a typical path might be 
+suitable path; a typical path might be
 @C:\/Documents And Settings\/user@.
 
 The operation may fail with:
@@ -1104,7 +1119,7 @@ first.  It is expected that the parent directory exists and is
 writable.
 
 On Unix, this function returns @$HOME\/.appName@.  On Windows, a
-typical path might be 
+typical path might be
 
 > C:/Documents And Settings/user/Application Data/appName
 
@@ -1137,7 +1152,7 @@ instead.
 
 On Unix, 'getUserDocumentsDirectory' returns the value of the @HOME@
 environment variable.  On Windows, the system is queried for a
-suitable path; a typical path might be 
+suitable path; a typical path might be
 @C:\/Documents And Settings\/user\/My Documents@.
 
 The operation may fail with:
@@ -1162,17 +1177,17 @@ getUserDocumentsDirectory = do
 
 On Unix, 'getTemporaryDirectory' returns the value of the @TMPDIR@
 environment variable or \"\/tmp\" if the variable isn\'t defined.
-On Windows, the function checks for the existence of environment variables in 
+On Windows, the function checks for the existence of environment variables in
 the following order and uses the first path found:
 
-* 
-TMP environment variable. 
+*
+TMP environment variable.
 
 *
-TEMP environment variable. 
+TEMP environment variable.
 
 *
-USERPROFILE environment variable. 
+USERPROFILE environment variable.
 
 *
 The Windows directory
@@ -1190,12 +1205,8 @@ getTemporaryDirectory = do
   Win32.getTemporaryDirectory
 #else
   getEnv "TMPDIR"
-#if !__NHC__
     `catchIOError` \e -> if isDoesNotExistError e then return "/tmp"
                           else throw e
-#else
-    `catchIOError` (\ex -> return "/tmp")
-#endif
 #endif
 
 -- ToDo: This should be determined via autoconf (AC_EXEEXT)

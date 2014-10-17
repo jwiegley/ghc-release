@@ -6,7 +6,6 @@
            , MagicHash
            , UnboxedTuples
            , UnliftedFFITypes
-           , ForeignFunctionInterface
            , DeriveDataTypeable
            , StandaloneDeriving
            , RankNTypes
@@ -33,70 +32,65 @@
 -- bits it exports, we'd rather have Control.Concurrent and the other
 -- higher level modules be the home.  Hence:
 
-#include "Typeable.h"
-
 -- #not-home
 module GHC.Conc.Sync
         ( ThreadId(..)
 
         -- * Forking and suchlike
-        , forkIO        -- :: IO a -> IO ThreadId
-        , forkIOUnmasked
+        , forkIO
         , forkIOWithUnmask
-        , forkOn      -- :: Int -> IO a -> IO ThreadId
-        , forkOnIO    -- DEPRECATED
-        , forkOnIOUnmasked
+        , forkOn
         , forkOnWithUnmask
-        , numCapabilities -- :: Int
-        , getNumCapabilities -- :: IO Int
-        , setNumCapabilities -- :: Int -> IO ()
-        , getNumProcessors   -- :: IO Int
-        , numSparks      -- :: IO Int
-        , childHandler  -- :: Exception -> IO ()
-        , myThreadId    -- :: IO ThreadId
-        , killThread    -- :: ThreadId -> IO ()
-        , throwTo       -- :: ThreadId -> Exception -> IO ()
-        , par           -- :: a -> b -> b
-        , pseq          -- :: a -> b -> b
+        , numCapabilities
+        , getNumCapabilities
+        , setNumCapabilities
+        , getNumProcessors
+        , numSparks
+        , childHandler
+        , myThreadId
+        , killThread
+        , throwTo
+        , par
+        , pseq
         , runSparks
-        , yield         -- :: IO ()
-        , labelThread   -- :: ThreadId -> String -> IO ()
-        , mkWeakThreadId -- :: ThreadId -> IO (Weak ThreadId)
+        , yield
+        , labelThread
+        , mkWeakThreadId
 
         , ThreadStatus(..), BlockReason(..)
-        , threadStatus  -- :: ThreadId -> IO ThreadStatus
+        , threadStatus
         , threadCapability
 
         -- * TVars
         , STM(..)
-        , atomically    -- :: STM a -> IO a
-        , retry         -- :: STM a
-        , orElse        -- :: STM a -> STM a -> STM a
-        , throwSTM      -- :: Exception e => e -> STM a
-        , catchSTM      -- :: Exception e => STM a -> (e -> STM a) -> STM a
-        , alwaysSucceeds -- :: STM a -> STM ()
-        , always        -- :: STM Bool -> STM ()
+        , atomically
+        , retry
+        , orElse
+        , throwSTM
+        , catchSTM
+        , alwaysSucceeds
+        , always
         , TVar(..)
-        , newTVar       -- :: a -> STM (TVar a)
-        , newTVarIO     -- :: a -> STM (TVar a)
-        , readTVar      -- :: TVar a -> STM a
-        , readTVarIO    -- :: TVar a -> IO a
-        , writeTVar     -- :: a -> TVar a -> STM ()
-        , unsafeIOToSTM -- :: IO a -> STM a
+        , newTVar
+        , newTVarIO
+        , readTVar
+        , readTVarIO
+        , writeTVar
+        , unsafeIOToSTM
 
         -- * Miscellaneous
         , withMVar
         , modifyMVar_
 
-        , setUncaughtExceptionHandler      -- :: (Exception -> IO ()) -> IO ()
-        , getUncaughtExceptionHandler      -- :: IO (Exception -> IO ())
+        , setUncaughtExceptionHandler
+        , getUncaughtExceptionHandler
 
         , reportError, reportStackOverflow
 
         , sharedCAF
         ) where
 
-import Foreign hiding (unsafePerformIO)
+import Foreign
 import Foreign.C
 
 #ifdef mingw32_HOST_OS
@@ -152,8 +146,6 @@ a pointer to the thread itself.  This means the thread itself can\'t be
 garbage collected until you drop the 'ThreadId'.
 This misfeature will hopefully be corrected at a later date.
 
-/Note/: Hugs does not provide any operations on other threads;
-it defines 'ThreadId' as a synonym for ().
 -}
 
 instance Show ThreadId where
@@ -207,11 +199,6 @@ forkIO action = IO $ \ s ->
  where
   action_plus = catchException action childHandler
 
-{-# DEPRECATED forkIOUnmasked "use forkIOWithUnmask instead" #-}
--- | This function is deprecated; use 'forkIOWithUnmask' instead
-forkIOUnmasked :: IO () -> IO ThreadId
-forkIOUnmasked io = forkIO (unsafeUnmask io)
-
 -- | Like 'forkIO', but the child thread is passed a function that can
 -- be used to unmask asynchronous exceptions.  This function is
 -- typically used in the following way
@@ -227,6 +214,7 @@ forkIOUnmasked io = forkIO (unsafeUnmask io)
 -- only be used in that thread; the behaviour is undefined if it is
 -- invoked in a different thread.
 --
+-- /Since: 4.4.0.0/
 forkIOWithUnmask :: ((forall a . IO a -> IO a) -> IO ()) -> IO ThreadId
 forkIOWithUnmask io = forkIO (io unsafeUnmask)
 
@@ -248,8 +236,10 @@ GHC note: the number of capabilities is specified by the @+RTS -N@
 option when the program is started.  Capabilities can be fixed to
 actual processor cores with @+RTS -qa@ if the underlying operating
 system supports that, although in practice this is usually unnecessary
-(and may actually degrade perforamnce in some cases - experimentation
+(and may actually degrade performance in some cases - experimentation
 is recommended).
+
+/Since: 4.4.0.0/
 -}
 forkOn :: Int -> IO () -> IO ThreadId
 forkOn (I# cpu) action = IO $ \ s ->
@@ -257,18 +247,10 @@ forkOn (I# cpu) action = IO $ \ s ->
  where
   action_plus = catchException action childHandler
 
-{-# DEPRECATED forkOnIO "renamed to forkOn" #-}
--- | This function is deprecated; use 'forkOn' instead
-forkOnIO :: Int -> IO () -> IO ThreadId
-forkOnIO = forkOn
-
-{-# DEPRECATED forkOnIOUnmasked "use forkOnWithUnmask instead" #-}
--- | This function is deprecated; use 'forkOnWIthUnmask' instead
-forkOnIOUnmasked :: Int -> IO () -> IO ThreadId
-forkOnIOUnmasked cpu io = forkOn cpu (unsafeUnmask io)
-
 -- | Like 'forkIOWithUnmask', but the child thread is pinned to the
 -- given CPU, as with 'forkOn'.
+--
+-- /Since: 4.4.0.0/
 forkOnWithUnmask :: Int -> ((forall a . IO a -> IO a) -> IO ()) -> IO ThreadId
 forkOnWithUnmask cpu io = forkOn cpu (io unsafeUnmask)
 
@@ -287,10 +269,12 @@ numCapabilities = unsafePerformIO $ getNumCapabilities
 Returns the number of Haskell threads that can run truly
 simultaneously (on separate physical processors) at any given time.  To change
 this value, use 'setNumCapabilities'.
+
+/Since: 4.4.0.0/
 -}
 getNumCapabilities :: IO Int
 getNumCapabilities = do
-   n <- peek n_capabilities
+   n <- peek enabled_capabilities
    return (fromIntegral n)
 
 {- |
@@ -304,6 +288,8 @@ garbage collection.  It is strongly recommended that the number of
 capabilities is not set larger than the number of physical processor
 cores, and it may often be beneficial to leave one or more cores free
 to avoid contention with other processes in the machine.
+
+/Since: 4.5.0.0/
 -}
 setNumCapabilities :: Int -> IO ()
 setNumCapabilities i = c_setNumCapabilities (fromIntegral i)
@@ -311,6 +297,9 @@ setNumCapabilities i = c_setNumCapabilities (fromIntegral i)
 foreign import ccall safe "setNumCapabilities"
   c_setNumCapabilities :: CUInt -> IO ()
 
+-- | Returns the number of CPUs that the machine has
+--
+-- /Since: 4.5.0.0/
 getNumProcessors :: IO Int
 getNumProcessors = fmap fromIntegral c_getNumberOfProcessors
 
@@ -321,24 +310,18 @@ foreign import ccall unsafe "getNumberOfProcessors"
 numSparks :: IO Int
 numSparks = IO $ \s -> case numSparks# s of (# s', n #) -> (# s', I# n #)
 
-foreign import ccall "&n_capabilities" n_capabilities :: Ptr CInt
+foreign import ccall "&enabled_capabilities" enabled_capabilities :: Ptr CInt
 
 childHandler :: SomeException -> IO ()
 childHandler err = catchException (real_handler err) childHandler
 
 real_handler :: SomeException -> IO ()
-real_handler se@(SomeException ex) =
-  -- ignore thread GC and killThread exceptions:
-  case cast ex of
-  Just BlockedIndefinitelyOnMVar        -> return ()
-  _ -> case cast ex of
-       Just BlockedIndefinitelyOnSTM    -> return ()
-       _ -> case cast ex of
-            Just ThreadKilled           -> return ()
-            _ -> case cast ex of
-                 -- report all others:
-                 Just StackOverflow     -> reportStackOverflow
-                 _                      -> reportError se
+real_handler se
+  | Just BlockedIndefinitelyOnMVar <- fromException se  =  return ()
+  | Just BlockedIndefinitelyOnSTM  <- fromException se  =  return ()
+  | Just ThreadKilled              <- fromException se  =  return ()
+  | Just StackOverflow             <- fromException se  =  reportStackOverflow
+  | otherwise                                           =  reportError se
 
 {- | 'killThread' raises the 'ThreadKilled' exception in the given
 thread (GHC only).
@@ -351,11 +334,12 @@ killThread tid = throwTo tid ThreadKilled
 
 {- | 'throwTo' raises an arbitrary exception in the target thread (GHC only).
 
+Exception delivery synchronizes between the source and target thread:
 'throwTo' does not return until the exception has been raised in the
-target thread.
-The calling thread can thus be certain that the target
-thread has received the exception.  This is a useful property to know
-when dealing with race conditions: eg. if there are two threads that
+target thread. The calling thread can thus be certain that the target
+thread has received the exception.  Exception delivery is also atomic
+with respect to other exceptions. Atomicity is a useful property to have
+when dealing with race conditions: e.g. if there are two threads that
 can kill each other, it is guaranteed that only one of the threads
 will get to kill the other.
 
@@ -458,8 +442,9 @@ runSparks :: IO ()
 runSparks = IO loop
   where loop s = case getSpark# s of
                    (# s', n, p #) ->
-                      if n ==# 0# then (# s', () #)
-                                  else p `seq` loop s'
+                      if isTrue# (n ==# 0#)
+                      then (# s', () #)
+                      else p `seq` loop s'
 
 data BlockReason
   = BlockedOnMVar
@@ -498,11 +483,13 @@ threadStatus (ThreadId t) = IO $ \s ->
         -- NB. keep these in sync with includes/Constants.h
      mk_stat 0  = ThreadRunning
      mk_stat 1  = ThreadBlocked BlockedOnMVar
-     mk_stat 2  = ThreadBlocked BlockedOnBlackHole
-     mk_stat 6  = ThreadBlocked BlockedOnSTM
-     mk_stat 10 = ThreadBlocked BlockedOnForeignCall
+     mk_stat 2  = ThreadBlocked BlockedOnMVar -- XXX distinguish?
+     mk_stat 3  = ThreadBlocked BlockedOnBlackHole
+     mk_stat 7  = ThreadBlocked BlockedOnSTM
      mk_stat 11 = ThreadBlocked BlockedOnForeignCall
-     mk_stat 12 = ThreadBlocked BlockedOnException
+     mk_stat 12 = ThreadBlocked BlockedOnForeignCall
+     mk_stat 13 = ThreadBlocked BlockedOnException
+     -- NB. these are hardcoded in rts/PrimOps.cmm
      mk_stat 16 = ThreadFinished
      mk_stat 17 = ThreadDied
      mk_stat _  = ThreadBlocked BlockedOnOther
@@ -511,10 +498,12 @@ threadStatus (ThreadId t) = IO $ \s ->
 -- running, and a boolean indicating whether the thread is locked to
 -- that capability or not.  A thread is locked to a capability if it
 -- was created with @forkOn@.
+--
+-- /Since: 4.4.0.0/
 threadCapability :: ThreadId -> IO (Int, Bool)
 threadCapability (ThreadId t) = IO $ \s ->
    case threadStatus# t s of
-     (# s', _, cap#, locked# #) -> (# s', (I# cap#, locked# /=# 0#) #)
+     (# s', _, cap#, locked# #) -> (# s', (I# cap#, isTrue# (locked# /=# 0#)) #)
 
 -- | make a weak pointer to a 'ThreadId'.  It can be important to do
 -- this if you want to hold a reference to a 'ThreadId' while still
@@ -531,6 +520,7 @@ threadCapability (ThreadId t) = IO $ \s ->
 -- caller must use @deRefWeak@ first to determine whether the thread
 -- still exists.
 --
+-- /Since: 4.6.0.0/
 mkWeakThreadId :: ThreadId -> IO (Weak ThreadId)
 mkWeakThreadId t@(ThreadId t#) = IO $ \s ->
    case mkWeakNoFinalizer# t# t s of
@@ -550,11 +540,10 @@ transactions.
 \begin{code}
 -- |A monad supporting atomic memory transactions.
 newtype STM a = STM (State# RealWorld -> (# State# RealWorld, a #))
+                deriving Typeable
 
 unSTM :: STM a -> (State# RealWorld -> (# State# RealWorld, a #))
 unSTM (STM a) = a
-
-INSTANCE_TYPEABLE1(STM,stmTc,"STM")
 
 instance  Functor STM where
    fmap f x = x >>= (return . f)
@@ -693,11 +682,10 @@ always i = alwaysSucceeds ( do v <- i
 
 -- |Shared memory locations that support atomic memory transactions.
 data TVar a = TVar (TVar# RealWorld a)
-
-INSTANCE_TYPEABLE1(TVar,tvarTc,"TVar")
+              deriving Typeable
 
 instance Eq (TVar a) where
-        (TVar tvar1#) == (TVar tvar2#) = sameTVar# tvar1# tvar2#
+        (TVar tvar1#) == (TVar tvar2#) = isTrue# (sameTVar# tvar1# tvar2#)
 
 -- |Create a new TVar holding a value supplied
 newTVar :: a -> STM (TVar a)
@@ -785,7 +773,9 @@ sharedCAF a get_or_set =
                 deRefStablePtr (castPtrToStablePtr (castPtr ref2))
 
 reportStackOverflow :: IO ()
-reportStackOverflow = callStackOverflowHook
+reportStackOverflow = do
+     ThreadId tid <- myThreadId
+     callStackOverflowHook tid
 
 reportError :: SomeException -> IO ()
 reportError ex = do
@@ -795,7 +785,7 @@ reportError ex = do
 -- SUP: Are the hooks allowed to re-enter Haskell land?  If so, remove
 -- the unsafe below.
 foreign import ccall unsafe "stackOverflow"
-        callStackOverflowHook :: IO ()
+        callStackOverflowHook :: ThreadId# -> IO ()
 
 {-# NOINLINE uncaughtExceptionHandler #-}
 uncaughtExceptionHandler :: IORef (SomeException -> IO ())

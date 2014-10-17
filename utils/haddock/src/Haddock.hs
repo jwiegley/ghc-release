@@ -23,8 +23,7 @@ import Haddock.Backends.Xhtml.Themes (getThemes)
 import Haddock.Backends.LaTeX
 import Haddock.Backends.Hoogle
 import Haddock.Interface
-import Haddock.Lex
-import Haddock.Parse
+import Haddock.Parser
 import Haddock.Types
 import Haddock.Version
 import Haddock.InterfaceFile
@@ -34,12 +33,14 @@ import Haddock.GhcUtils hiding (pretty)
 
 import Control.Monad hiding (forM_)
 import Data.Foldable (forM_)
+import Data.List (isPrefixOf)
 import Control.Exception
 import Data.Maybe
 import Data.IORef
 import qualified Data.Map as Map
 import System.IO
 import System.Exit
+import System.Directory
 
 #if defined(mingw32_HOST_OS)
 import Foreign
@@ -54,11 +55,11 @@ import qualified GHC.Paths as GhcPaths
 import Paths_haddock
 #endif
 
-import GHC hiding (flags, verbosity)
+import GHC hiding (verbosity)
 import Config
-import DynFlags hiding (flags, verbosity)
-import StaticFlags (saveStaticFlagGlobals, restoreStaticFlagGlobals)
-import Panic (panic, handleGhcException)
+import DynFlags hiding (verbosity)
+import StaticFlags (discardStaticFlags)
+import Panic (handleGhcException)
 import Module
 
 --------------------------------------------------------------------------------
@@ -136,7 +137,18 @@ haddock args = handleTopExceptions $ do
   shortcutFlags flags
   qual <- case qualification flags of {Left msg -> throwE msg; Right q -> return q}
 
-  withGhc' flags $ do
+  -- inject dynamic-too into flags before we proceed
+  flags' <- withGhc' flags $ do
+        df <- getDynFlags
+        case lookup "GHC Dynamic" (compilerInfo df) of
+          Just "YES" -> return $ Flag_OptGhc "-dynamic-too" : flags
+          _ -> return flags
+
+  unless (Flag_NoWarnings `elem` flags) $ do
+    forM_ (warnings args) $ \warning -> do
+      hPutStrLn stderr warning
+
+  withGhc' flags' $ do
 
     dflags <- getDynFlags
 
@@ -162,6 +174,12 @@ haddock args = handleTopExceptions $ do
 
       -- Render even though there are no input files (usually contents/index).
       liftIO $ renderStep dflags flags qual packages []
+
+-- | Create warnings about potential misuse of -optghc
+warnings :: [String] -> [String]
+warnings = map format . filter (isPrefixOf "-optghc")
+  where
+    format arg = concat ["Warning: `", arg, "' means `-o ", drop 2 arg, "', did you mean `-", arg, "'?"]
 
 
 withGhc' :: [Flag] -> Ghc a -> IO a
@@ -224,12 +242,14 @@ render dflags flags qual ifaces installedIfaces srcMap = do
     pkgStr           = Just (packageIdString pkgId)
     (pkgName,pkgVer) = modulePackageInfo pkgMod
 
-    (srcBase, srcModule, srcEntity) = sourceUrls flags
+    (srcBase, srcModule, srcEntity, srcLEntity) = sourceUrls flags
     srcMap' = maybe srcMap (\path -> Map.insert pkgId path srcMap) srcEntity
-    sourceUrls' = (srcBase, srcModule, srcMap')
+    -- TODO: Get these from the interface files as with srcMap
+    srcLMap' = maybe Map.empty (\path -> Map.singleton pkgId path) srcLEntity
+    sourceUrls' = (srcBase, srcModule, srcMap', srcLMap')
 
   libDir   <- getHaddockLibDir flags
-  prologue <- getPrologue flags
+  prologue <- getPrologue dflags flags
   themes   <- getThemes libDir flags >>= either bye return
 
   when (Flag_GenIndex `elem` flags) $ do
@@ -294,35 +314,38 @@ readInterfaceFiles name_cache_accessor pairs = do
 -- | Start a GHC session with the -haddock flag set. Also turn off
 -- compilation and linking. Then run the given 'Ghc' action.
 withGhc :: String -> [String] -> (DynFlags -> Ghc a) -> IO a
-withGhc libDir flags ghcActs = saveStaticFlagGlobals >>= \savedFlags -> do
-  -- TODO: handle warnings?
-  (restFlags, _) <- parseStaticFlags (map noLoc flags)
-  runGhc (Just libDir) $ do
-    dynflags  <- getSessionDynFlags
-    let dynflags' = dopt_set dynflags Opt_Haddock
-    let dynflags'' = dynflags' {
-        hscTarget = HscNothing,
-        ghcMode   = CompManager,
-        ghcLink   = NoLink
-      }
-    dynflags''' <- parseGhcFlags dynflags'' restFlags flags
-    defaultCleanupHandler dynflags''' $ do
-        -- ignore the following return-value, which is a list of packages
-        -- that may need to be re-linked: Haddock doesn't do any
-        -- dynamic or static linking at all!
-        _ <- setSessionDynFlags dynflags'''
-        ghcActs dynflags'''
-  `finally` restoreStaticFlagGlobals savedFlags
+withGhc libDir flags ghcActs = runGhc (Just libDir) $ do
+  dynflags  <- getSessionDynFlags
+  dynflags' <- parseGhcFlags (gopt_set dynflags Opt_Haddock) {
+    hscTarget = HscNothing,
+    ghcMode   = CompManager,
+    ghcLink   = NoLink
+    }
+  let dynflags'' = gopt_unset dynflags' Opt_SplitObjs
+  defaultCleanupHandler dynflags'' $ do
+      -- ignore the following return-value, which is a list of packages
+      -- that may need to be re-linked: Haddock doesn't do any
+      -- dynamic or static linking at all!
+      _ <- setSessionDynFlags dynflags''
+      ghcActs dynflags''
   where
-    parseGhcFlags :: Monad m => DynFlags -> [Located String]
-                  -> [String] -> m DynFlags
-    parseGhcFlags dynflags flags_ origFlags = do
+    parseGhcFlags :: MonadIO m => DynFlags -> m DynFlags
+    parseGhcFlags dynflags = do
       -- TODO: handle warnings?
-      (dynflags', rest, _) <- parseDynamicFlags dynflags flags_
-      if not (null rest)
-        then throwE ("Couldn't parse GHC options: " ++ unwords origFlags)
-        else return dynflags'
 
+      -- NOTA BENE: We _MUST_ discard any static flags here, because we cannot
+      -- rely on Haddock to parse them, as it only parses the DynFlags. Yet if
+      -- we pass any, Haddock will fail. Since StaticFlags are global to the
+      -- GHC invocation, there's also no way to reparse/save them to set them
+      -- again properly.
+      --
+      -- This is a bit of a hack until we get rid of the rest of the remaining
+      -- StaticFlags. See GHC issue #8276.
+      let flags' = discardStaticFlags flags
+      (dynflags', rest, _) <- parseDynamicFlags dynflags (map noLoc flags')
+      if not (null rest)
+        then throwE ("Couldn't parse GHC options: " ++ unwords flags')
+        else return dynflags'
 
 -------------------------------------------------------------------------------
 -- * Misc
@@ -332,11 +355,19 @@ withGhc libDir flags ghcActs = saveStaticFlagGlobals >>= \savedFlags -> do
 getHaddockLibDir :: [Flag] -> IO String
 getHaddockLibDir flags =
   case [str | Flag_Lib str <- flags] of
-    [] ->
+    [] -> do
 #ifdef IN_GHC_TREE
       getInTreeDir
 #else
-      getDataDir -- provided by Cabal
+      d <- getDataDir -- provided by Cabal
+      doesDirectoryExist d >>= \exists -> case exists of
+        True -> return d
+        False -> do
+          -- If directory does not exist then we are probably invoking from
+          -- ./dist/build/haddock/haddock so we use ./resources as a fallback.
+          doesDirectoryExist "resources" >>= \exists_ -> case exists_ of
+            True -> return "resources"
+            False -> die ("Haddock's resource directory (" ++ d ++ ") does not exist!\n")
 #endif
     fs -> return (last fs)
 
@@ -367,6 +398,8 @@ shortcutFlags flags = do
   when (Flag_Help             `elem` flags) (bye usage)
   when (Flag_Version          `elem` flags) byeVersion
   when (Flag_InterfaceVersion `elem` flags) (bye (show binaryInterfaceVersion ++ "\n"))
+  when (Flag_CompatibleInterfaceVersions `elem` flags)
+    (bye (unwords (map show binaryInterfaceVersionCompatibility) ++ "\n"))
   when (Flag_GhcVersion       `elem` flags) (bye (cProjectVersion ++ "\n"))
 
   when (Flag_PrintGhcPath `elem` flags) $ do
@@ -407,14 +440,13 @@ updateHTMLXRefs packages = do
     mapping' = [ (moduleName m, html) | (m, html) <- mapping ]
 
 
-getPrologue :: [Flag] -> IO (Maybe (Doc RdrName))
-getPrologue flags =
+getPrologue :: DynFlags -> [Flag] -> IO (Maybe (Doc RdrName))
+getPrologue dflags flags =
   case [filename | Flag_Prologue filename <- flags ] of
     [] -> return Nothing
     [filename] -> do
       str <- readFile filename
-      case parseParas (tokenise (defaultDynFlags (panic "No settings")) str
-                      (1,0) {- TODO: real position -}) of
+      case parseParasMaybe dflags str of
         Nothing -> throwE $ "failed to parse haddock prologue from file: " ++ filename
         Just doc -> return (Just doc)
     _otherwise -> throwE "multiple -p/--prologue options"
@@ -448,4 +480,3 @@ getExecDir = return Nothing
 #endif
 
 #endif
-

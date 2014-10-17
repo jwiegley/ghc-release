@@ -20,6 +20,7 @@ import DsArrows
 import DsMonad
 import Name
 import NameEnv
+import FamInstEnv( topNormaliseType )
 
 #ifdef GHCI
         -- Template Haskell stuff iff bootstrapped
@@ -31,6 +32,7 @@ import HsSyn
 -- NB: The desugarer, which straddles the source and Core worlds, sometimes
 --     needs to see source types
 import TcType
+import Coercion ( Role(..) )
 import TcEvidence
 import TcRnMonad
 import Type
@@ -40,15 +42,15 @@ import CoreFVs
 import MkCore
 
 import DynFlags
-import StaticFlags
 import CostCentre
 import Id
+import Module
 import VarSet
 import VarEnv
+import ConLike
 import DataCon
 import TysWiredIn
 import BasicTypes
-import PrelNames
 import Maybes
 import SrcLoc
 import Util
@@ -97,7 +99,7 @@ ds_val_bind :: (RecFlag, LHsBinds Id) -> CoreExpr -> DsM CoreExpr
 -- a tuple and doing selections.
 -- Silently ignore INLINE and SPECIALISE pragmas...
 ds_val_bind (NonRecursive, hsbinds) body
-  | [L loc bind] <- bagToList hsbinds,
+  | [(_, L loc bind)] <- bagToList hsbinds,
         -- Non-recursive, non-overloaded bindings only come in ones
         -- ToDo: in some bizarre case it's conceivable that there
         --       could be dict binds in the 'binds'.  (See the notes
@@ -131,7 +133,7 @@ dsStrictBind (AbsBinds { abs_tvs = [], abs_ev_vars = []
                , abs_binds = binds }) body
   = do { let body1 = foldr bind_export body exports
              bind_export export b = bindNonRec (abe_poly export) (Var (abe_mono export)) b
-       ; body2 <- foldlBagM (\body bind -> dsStrictBind (unLoc bind) body) 
+       ; body2 <- foldlBagM (\body (_, bind) -> dsStrictBind (unLoc bind) body)
                             body1 binds 
        ; ds_binds <- dsTcEvBinds ev_binds
        ; return (mkCoreLets ds_binds body2) }
@@ -162,10 +164,10 @@ dsStrictBind bind body = pprPanic "dsLet: unlifted" (ppr bind $$ ppr body)
 ----------------------
 strictMatchOnly :: HsBind Id -> Bool
 strictMatchOnly (AbsBinds { abs_binds = binds })
-  = anyBag (strictMatchOnly . unLoc) binds
-strictMatchOnly (PatBind { pat_lhs = lpat, pat_rhs_ty = ty })
-  =  isUnLiftedType ty 
-  || isBangLPat lpat   
+  = anyBag (strictMatchOnly . unLoc . snd) binds
+strictMatchOnly (PatBind { pat_lhs = lpat, pat_rhs_ty = rhs_ty })
+  =  isUnLiftedType rhs_ty
+  || isStrictLPat lpat
   || any (isUnLiftedType . idType) (collectPatBinders lpat)
 strictMatchOnly (FunBind { fun_id = L _ id })
   = isUnLiftedType (idType id)
@@ -195,8 +197,8 @@ dsExpr (HsOverLit lit)        = dsOverLit lit
 dsExpr (HsWrap co_fn e)
   = do { e' <- dsExpr e
        ; wrapped_e <- dsHsWrapper co_fn e'
-       ; warn_id <- woptM Opt_WarnIdentities
-       ; when warn_id $ warnAboutIdentities e' wrapped_e
+       ; dflags <- getDynFlags
+       ; warnAboutIdentities dflags e' (exprType wrapped_e)
        ; return wrapped_e }
 
 dsExpr (NegApp expr neg_expr) 
@@ -205,17 +207,15 @@ dsExpr (NegApp expr neg_expr)
 dsExpr (HsLam a_Match)
   = uncurry mkLams <$> matchWrapper LambdaExpr a_Match
 
-dsExpr (HsLamCase arg matches@(MatchGroup _ rhs_ty))
-  | isEmptyMatchGroup matches   -- A Core 'case' is always non-empty
-  =                             -- So desugar empty HsLamCase to error call
-    mkErrorAppDs pAT_ERROR_ID (funResultTy rhs_ty) (ptext (sLit "\\case"))
-  | otherwise
+dsExpr (HsLamCase arg matches)
   = do { arg_var <- newSysLocalDs arg
        ; ([discrim_var], matching_code) <- matchWrapper CaseAlt matches
        ; return $ Lam arg_var $ bindNonRec discrim_var (Var arg_var) matching_code }
 
 dsExpr (HsApp fun arg)
   = mkCoreAppDs <$> dsLExpr fun <*>  dsLExpr arg
+
+dsExpr (HsUnboundVar _) = panic "dsExpr: HsUnboundVar"
 \end{code}
 
 Note [Desugaring vars]
@@ -295,20 +295,15 @@ dsExpr (ExplicitTuple tup_args boxity)
                            (map (Type . exprType) args ++ args) }
 
 dsExpr (HsSCC cc expr@(L loc _)) = do
-    mod_name <- getModuleDs
-    count <- doptM Opt_ProfCountEntries
+    mod_name <- getModule
+    count <- goptM Opt_ProfCountEntries
     uniq <- newUnique
     Tick (ProfNote (mkUserCC cc mod_name loc uniq) count True) <$> dsLExpr expr
 
 dsExpr (HsCoreAnn _ expr)
   = dsLExpr expr
 
-dsExpr (HsCase discrim matches@(MatchGroup _ rhs_ty)) 
-  | isEmptyMatchGroup matches   -- A Core 'case' is always non-empty
-  =                             -- So desugar empty HsCase to error call
-    mkErrorAppDs pAT_ERROR_ID (funResultTy rhs_ty) (ptext (sLit "case"))
-
-  | otherwise
+dsExpr (HsCase discrim matches)
   = do { core_discrim <- dsLExpr discrim
        ; ([discrim_var], matching_code) <- matchWrapper CaseAlt matches
        ; return (bindNonRec discrim_var core_discrim matching_code) }
@@ -322,12 +317,12 @@ dsExpr (HsLet binds body) = do
 -- We need the `ListComp' form to use `deListComp' (rather than the "do" form)
 -- because the interpretation of `stmts' depends on what sort of thing it is.
 --
-dsExpr (HsDo ListComp  stmts res_ty) = dsListComp stmts res_ty
-dsExpr (HsDo PArrComp  stmts _)      = dsPArrComp (map unLoc stmts)
-dsExpr (HsDo DoExpr    stmts _)      = dsDo stmts 
-dsExpr (HsDo GhciStmt  stmts _)      = dsDo stmts 
-dsExpr (HsDo MDoExpr   stmts _)      = dsDo stmts 
-dsExpr (HsDo MonadComp stmts _)      = dsMonadComp stmts
+dsExpr (HsDo ListComp     stmts res_ty) = dsListComp stmts res_ty
+dsExpr (HsDo PArrComp     stmts _)      = dsPArrComp (map unLoc stmts)
+dsExpr (HsDo DoExpr       stmts _)      = dsDo stmts 
+dsExpr (HsDo GhciStmtCtxt stmts _)      = dsDo stmts 
+dsExpr (HsDo MDoExpr      stmts _)      = dsDo stmts 
+dsExpr (HsDo MonadComp    stmts _)      = dsMonadComp stmts
 
 dsExpr (HsIf mb_fun guard_expr then_expr else_expr)
   = do { pred <- dsLExpr guard_expr
@@ -357,8 +352,8 @@ dsExpr (HsMultiIf res_ty alts)
 \underline{\bf Various data construction things}
 %              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 \begin{code}
-dsExpr (ExplicitList elt_ty xs) 
-  = dsExplicitList elt_ty xs
+dsExpr (ExplicitList elt_ty wit xs) 
+  = dsExplicitList elt_ty wit xs
 
 -- We desugar [:x1, ..., xn:] as
 --   singletonP x1 +:+ ... +:+ singletonP xn
@@ -375,17 +370,13 @@ dsExpr (ExplicitPArr ty xs) = do
     unary  fn x   = mkApps (Var fn) [Type ty, x]
     binary fn x y = mkApps (Var fn) [Type ty, x, y]
 
-dsExpr (ArithSeq expr (From from))
-  = App <$> dsExpr expr <*> dsLExpr from
-
-dsExpr (ArithSeq expr (FromTo from to))
-  = mkApps <$> dsExpr expr <*> mapM dsLExpr [from, to]
-
-dsExpr (ArithSeq expr (FromThen from thn))
-  = mkApps <$> dsExpr expr <*> mapM dsLExpr [from, thn]
-
-dsExpr (ArithSeq expr (FromThenTo from thn to))
-  = mkApps <$> dsExpr expr <*> mapM dsLExpr [from, thn, to]
+dsExpr (ArithSeq expr witness seq)
+  = case witness of
+     Nothing -> dsArithSeq expr seq
+     Just fl -> do { 
+       ; fl' <- dsExpr fl
+       ; newArithSeq <- dsArithSeq expr seq
+       ; return (App fl' newArithSeq)}
 
 dsExpr (PArrSeq expr (FromTo from to))
   = mkApps <$> dsExpr expr <*> mapM dsLExpr [from, to]
@@ -497,7 +488,7 @@ dsExpr expr@(RecordUpd record_expr (HsRecFields { rec_flds = fields })
         -- constructor aguments.
         ; alts <- mapM (mk_alt upd_fld_env) cons_to_upd
         ; ([discrim_var], matching_code) 
-                <- matchWrapper RecUpd (MatchGroup alts in_out_ty)
+                <- matchWrapper RecUpd (MG { mg_alts = alts, mg_arg_tys = [in_ty], mg_res_ty = out_ty })
 
         ; return (add_field_binds field_binds' $
                   bindNonRec discrim_var record_expr' matching_code) }
@@ -519,7 +510,7 @@ dsExpr expr@(RecordUpd record_expr (HsRecFields { rec_flds = fields })
         -- from instance type to family type
     tycon     = dataConTyCon (head cons_to_upd)
     in_ty     = mkTyConApp tycon in_inst_tys
-    in_out_ty = mkFunTy in_ty (mkFamilyTyConApp tycon out_inst_tys)
+    out_ty    = mkFamilyTyConApp tycon out_inst_tys
 
     mk_alt upd_fld_env con
       = do { let (univ_tvs, ex_tvs, eq_spec, 
@@ -544,21 +535,23 @@ dsExpr expr@(RecordUpd record_expr (HsRecFields { rec_flds = fields })
 
                         -- Tediously wrap the application in a cast
                         -- Note [Update for GADTs]
-                 wrap_co = mkTcTyConAppCo tycon
+                 wrap_co = mkTcTyConAppCo Nominal tycon
                                 [ lookup tv ty | (tv,ty) <- univ_tvs `zip` out_inst_tys ]
                  lookup univ_tv ty = case lookupVarEnv wrap_subst univ_tv of
                                         Just co' -> co'
-                                        Nothing  -> mkTcReflCo ty
+                                        Nothing  -> mkTcReflCo Nominal ty
                  wrap_subst = mkVarEnv [ (tv, mkTcSymCo (mkTcCoVarCo eq_var))
                                        | ((tv,_),eq_var) <- eq_spec `zip` eqs_vars ]
 
-                 pat = noLoc $ ConPatOut { pat_con = noLoc con, pat_tvs = ex_tvs
+                 pat = noLoc $ ConPatOut { pat_con = noLoc (RealDataCon con)
+                                         , pat_tvs = ex_tvs
                                          , pat_dicts = eqs_vars ++ theta_vars
                                          , pat_binds = emptyTcEvBinds
                                          , pat_args = PrefixCon $ map nlVarPat arg_ids
-                                         , pat_ty = in_ty }
+                                         , pat_ty = in_ty
+                                         , pat_wrap = idHsWrapper }
            ; let wrapped_rhs | null eq_spec = rhs
-                             | otherwise    = mkLHsWrap (WpCast wrap_co) rhs
+                             | otherwise    = mkLHsWrap (mkWpCast (mkTcSubCo wrap_co)) rhs
            ; return (mkSimpleMatch [pat] wrapped_rhs) }
 
 \end{code}
@@ -568,12 +561,13 @@ Here is where we desugar the Template Haskell brackets and escapes
 \begin{code}
 -- Template Haskell stuff
 
+dsExpr (HsRnBracketOut _ _) = panic "dsExpr HsRnBracketOut"
 #ifdef GHCI
-dsExpr (HsBracketOut x ps) = dsBracket x ps
+dsExpr (HsTcBracketOut x ps) = dsBracket x ps
 #else
-dsExpr (HsBracketOut _ _) = panic "dsExpr HsBracketOut"
+dsExpr (HsTcBracketOut _ _) = panic "dsExpr HsBracketOut"
 #endif
-dsExpr (HsSpliceE s)       = pprPanic "dsExpr:splice" (ppr s)
+dsExpr (HsSpliceE _ s)      = pprPanic "dsExpr:splice" (ppr s)
 
 -- Arrow notation extension
 dsExpr (HsProc pat cmd) = dsProcExpr pat cmd
@@ -680,14 +674,14 @@ makes all list literals be generated via the simple route.
 
 
 \begin{code}
-dsExplicitList :: PostTcType -> [LHsExpr Id] -> DsM CoreExpr
+dsExplicitList :: PostTcType -> Maybe (SyntaxExpr Id) -> [LHsExpr Id] -> DsM CoreExpr
 -- See Note [Desugaring explicit lists]
-dsExplicitList elt_ty xs
+dsExplicitList elt_ty Nothing xs
   = do { dflags <- getDynFlags
        ; xs' <- mapM dsLExpr xs
        ; let (dynamic_prefix, static_suffix) = spanTail is_static xs'
-       ; if opt_SimpleListLiterals                      -- -fsimple-list-literals
-         || not (dopt Opt_EnableRewriteRules dflags)    -- Rewrite rules off
+       ; if gopt Opt_SimpleListLiterals dflags        -- -fsimple-list-literals
+         || not (gopt Opt_EnableRewriteRules dflags)  -- Rewrite rules off
                 -- Don't generate a build if there are no rules to eliminate it!
                 -- See Note [Desugaring RULE left hand sides] in Desugar
          || null dynamic_prefix   -- Avoid build (\c n. foldr c n xs)!
@@ -707,9 +701,36 @@ dsExplicitList elt_ty xs
            ; folded_suffix <- mkFoldrExpr elt_ty n_ty (Var c) (Var n) suffix'
            ; return (foldr (App . App (Var c)) folded_suffix prefix) }
 
+dsExplicitList elt_ty (Just fln) xs
+  = do { fln' <- dsExpr fln
+       ; list <- dsExplicitList elt_ty Nothing xs
+       ; dflags <- getDynFlags
+       ; return (App (App fln' (mkIntExprInt dflags (length xs))) list) }
+       
 spanTail :: (a -> Bool) -> [a] -> ([a], [a])
 spanTail f xs = (reverse rejected, reverse satisfying)
     where (satisfying, rejected) = span f $ reverse xs
+    
+dsArithSeq :: PostTcExpr -> (ArithSeqInfo Id) -> DsM CoreExpr
+dsArithSeq expr (From from)
+  = App <$> dsExpr expr <*> dsLExpr from
+dsArithSeq expr (FromTo from to)
+  = do dflags <- getDynFlags
+       warnAboutEmptyEnumerations dflags from Nothing to
+       expr' <- dsExpr expr
+       from' <- dsLExpr from
+       to'   <- dsLExpr to
+       return $ mkApps expr' [from', to']
+dsArithSeq expr (FromThen from thn)
+  = mkApps <$> dsExpr expr <*> mapM dsLExpr [from, thn]
+dsArithSeq expr (FromThenTo from thn to)
+  = do dflags <- getDynFlags
+       warnAboutEmptyEnumerations dflags from (Just thn) to
+       expr' <- dsExpr expr
+       from' <- dsLExpr from
+       thn'  <- dsLExpr thn
+       to'   <- dsLExpr to
+       return $ mkApps expr' [from', thn', to']
 \end{code}
 
 Desugar 'do' and 'mdo' expressions (NOT list comprehensions, they're
@@ -717,7 +738,7 @@ handled in DsListComp).  Basically does the translation given in the
 Haskell 98 report:
 
 \begin{code}
-dsDo :: [LStmt Id] -> DsM CoreExpr
+dsDo :: [ExprLStmt Id] -> DsM CoreExpr
 dsDo stmts
   = goL stmts
   where
@@ -728,7 +749,7 @@ dsDo stmts
       = ASSERT( null stmts ) dsLExpr body
         -- The 'return' op isn't used for 'do' expressions
 
-    go _ (ExprStmt rhs then_expr _ _) stmts
+    go _ (BodyStmt rhs then_expr _ _) stmts
       = do { rhs2 <- dsLExpr rhs
            ; warnDiscardedDoBindings rhs (exprType rhs2) 
            ; then_expr2 <- dsExpr then_expr
@@ -755,8 +776,7 @@ dsDo stmts
                     , recS_rec_ids = rec_ids, recS_ret_fn = return_op
                     , recS_mfix_fn = mfix_op, recS_bind_fn = bind_op
                     , recS_rec_rets = rec_rets, recS_ret_ty = body_ty }) stmts
-      = ASSERT( length rec_ids > 0 )
-        goL (new_bind_stmt : stmts)
+      = goL (new_bind_stmt : stmts)  -- rec_ids can be empty; eg  rec { print 'x' }
       where
         new_bind_stmt = L loc $ BindStmt (mkBigLHsPatTup later_pats)
                                          mfix_app bind_op 
@@ -768,8 +788,8 @@ dsDo stmts
         later_pats   = rec_tup_pats
         rets         = map noLoc rec_rets
         mfix_app     = nlHsApp (noLoc mfix_op) mfix_arg
-        mfix_arg     = noLoc $ HsLam (MatchGroup [mkSimpleMatch [mfix_pat] body]
-                                                 (mkFunTy tup_ty body_ty))
+        mfix_arg     = noLoc $ HsLam (MG { mg_alts = [mkSimpleMatch [mfix_pat] body]
+                                         , mg_arg_tys = [tup_ty], mg_res_ty = body_ty })
         mfix_pat     = noLoc $ LazyPat $ mkBigLHsPatTup rec_tup_pats
         body         = noLoc $ HsDo DoExpr (rec_stmts ++ [ret_stmt]) body_ty
         ret_app      = nlHsApp (noLoc return_op) (mkBigLHsTup rets)
@@ -801,37 +821,6 @@ mk_fail_msg dflags pat = "Pattern match failure in do expression at " ++
 
 %************************************************************************
 %*                                                                      *
-                 Warning about identities
-%*                                                                      *
-%************************************************************************
-
-Warn about functions like toInteger, fromIntegral, that convert
-between one type and another when the to- and from- types are the
-same.  Then it's probably (albeit not definitely) the identity
-
-\begin{code}
-warnAboutIdentities :: CoreExpr -> CoreExpr -> DsM ()
-warnAboutIdentities (Var v) wrapped_fun
-  | idName v `elem` conversionNames
-  , let fun_ty = exprType wrapped_fun
-  , Just (arg_ty, res_ty) <- splitFunTy_maybe fun_ty
-  , arg_ty `eqType` res_ty  -- So we are converting  ty -> ty
-  = warnDs (vcat [ ptext (sLit "Call of") <+> ppr v <+> dcolon <+> ppr fun_ty
-                 , nest 2 $ ptext (sLit "can probably be omitted")
-                 , parens (ptext (sLit "Use -fno-warn-identities to suppress this messsage)"))
-           ])
-warnAboutIdentities _ _ = return ()
-
-conversionNames :: [Name]
-conversionNames
-  = [ toIntegerName, toRationalName
-    , fromIntegralName, realToFracName ]
- -- We can't easily add fromIntegerName, fromRationalName,
- -- becuase they are generated by literals
-\end{code}
-
-%************************************************************************
-%*                                                                      *
 \subsection{Errors and contexts}
 %*                                                                      *
 %************************************************************************
@@ -841,31 +830,36 @@ conversionNames
 warnDiscardedDoBindings :: LHsExpr Id -> Type -> DsM ()
 warnDiscardedDoBindings rhs rhs_ty
   | Just (m_ty, elt_ty) <- tcSplitAppTy_maybe rhs_ty
-  = do {  -- Warn about discarding non-() things in 'monadic' binding
-       ; warn_unused <- woptM Opt_WarnUnusedDoBind
-       ; if warn_unused && not (isUnitTy elt_ty)
-         then warnDs (unusedMonadBind rhs elt_ty)
-         else 
-         -- Warn about discarding m a things in 'monadic' binding of the same type,
-         -- but only if we didn't already warn due to Opt_WarnUnusedDoBind
-    do { warn_wrong <- woptM Opt_WarnWrongDoBind
-       ; case tcSplitAppTy_maybe elt_ty of
-           Just (elt_m_ty, _) | warn_wrong, m_ty `eqType` elt_m_ty
-                              -> warnDs (wrongMonadBind rhs elt_ty)
-           _ -> return () } }
+  = do { warn_unused <- woptM Opt_WarnUnusedDoBind
+       ; warn_wrong <- woptM Opt_WarnWrongDoBind
+       ; when (warn_unused || warn_wrong) $
+    do { fam_inst_envs <- dsGetFamInstEnvs
+       ; let norm_elt_ty = topNormaliseType fam_inst_envs elt_ty
 
-  | otherwise   -- RHS does have type of form (m ty), which is wierd
+           -- Warn about discarding non-() things in 'monadic' binding
+       ; if warn_unused && not (isUnitTy norm_elt_ty)
+         then warnDs (badMonadBind rhs elt_ty
+                           (ptext (sLit "-fno-warn-unused-do-bind")))
+         else
+
+           -- Warn about discarding m a things in 'monadic' binding of the same type,
+           -- but only if we didn't already warn due to Opt_WarnUnusedDoBind
+           when warn_wrong $
+                do { case tcSplitAppTy_maybe norm_elt_ty of
+                         Just (elt_m_ty, _)
+                            | m_ty `eqType` topNormaliseType fam_inst_envs elt_m_ty
+                            -> warnDs (badMonadBind rhs elt_ty
+                                           (ptext (sLit "-fno-warn-wrong-do-bind")))
+                         _ -> return () } } }
+
+  | otherwise   -- RHS does have type of form (m ty), which is weird
   = return ()   -- but at lesat this warning is irrelevant
 
-unusedMonadBind :: LHsExpr Id -> Type -> SDoc
-unusedMonadBind rhs elt_ty
-  = ptext (sLit "A do-notation statement discarded a result of type") <+> ppr elt_ty <> dot $$
-    ptext (sLit "Suppress this warning by saying \"_ <- ") <> ppr rhs <> ptext (sLit "\",") $$
-    ptext (sLit "or by using the flag -fno-warn-unused-do-bind")
-
-wrongMonadBind :: LHsExpr Id -> Type -> SDoc
-wrongMonadBind rhs elt_ty
-  = ptext (sLit "A do-notation statement discarded a result of type") <+> ppr elt_ty <> dot $$
-    ptext (sLit "Suppress this warning by saying \"_ <- ") <> ppr rhs <> ptext (sLit "\",") $$
-    ptext (sLit "or by using the flag -fno-warn-wrong-do-bind")
+badMonadBind :: LHsExpr Id -> Type -> SDoc -> SDoc
+badMonadBind rhs elt_ty flag_doc
+  = vcat [ hang (ptext (sLit "A do-notation statement discarded a result of type"))
+              2 (quotes (ppr elt_ty))
+         , hang (ptext (sLit "Suppress this warning by saying"))
+              2 (quotes $ ptext (sLit "_ <-") <+> ppr rhs)
+         , ptext (sLit "or by using the flag") <+>  flag_doc ]
 \end{code}

@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP,MagicHash,BangPatterns #-}
+{-# LANGUAGE CPP,MagicHash #-}
 {-# LINE 13 "compiler/cmm/CmmLex.x" #-}
 
 {-# LANGUAGE BangPatterns #-}
@@ -6,16 +6,16 @@
 -- The above -Wwarn supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
 -- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
 -- for details
 
 module CmmLex (
    CmmToken(..), cmmlex,
   ) where
 
-import OldCmm
-import Lexer
+import CmmExpr
 
+import Lexer
 import SrcLoc
 import UniqFM
 import StringBuffer
@@ -57,7 +57,7 @@ alex_check = AlexA# "\xff\xff\x00\x00\x01\x00\x02\x00\x65\x00\x61\x00\x05\x00\x0
 alex_deflt :: AlexAddr
 alex_deflt = AlexA# "\x64\x00\xff\xff\xff\xff\x25\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x13\x00\x13\x00\x14\x00\x15\x00\xff\xff\x25\x00\xff\xff\xff\xff\xff\xff\x25\x00\x25\x00\xff\xff\xff\xff\x25\x00\x25\x00\x25\x00\x25\x00\x25\x00\x25\x00\x25\x00\x25\x00\x25\x00\x28\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x64\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\x64\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"#
 
-alex_accept = listArray (0::Int,120) [[],[],[],[(AlexAcc (alex_action_5))],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[(AlexAccSkip)],[(AlexAccSkip)],[(AlexAccSkipPred  (alexPrevCharMatches(\c -> c >= '\n' && c <= '\n' || False)))],[(AlexAccPred  (alex_action_2) (alexPrevCharMatches(\c -> c >= '\n' && c <= '\n' || False)))],[(AlexAccPred  (alex_action_2) (alexPrevCharMatches(\c -> c >= '\n' && c <= '\n' || False)))],[(AlexAccPred  (alex_action_2) (alexPrevCharMatches(\c -> c >= '\n' && c <= '\n' || False))),(AlexAcc (alex_action_5))],[(AlexAccPred  (alex_action_2) (alexPrevCharMatches(\c -> c >= '\n' && c <= '\n' || False))),(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_3))],[(AlexAcc (alex_action_4))],[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_5))],[(AlexAcc (alex_action_5))],[(AlexAccSkip)],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_7))],[(AlexAcc (alex_action_8))],[(AlexAcc (alex_action_9))],[(AlexAcc (alex_action_10))],[(AlexAcc (alex_action_11))],[(AlexAcc (alex_action_12))],[(AlexAcc (alex_action_13))],[(AlexAcc (alex_action_14))],[(AlexAcc (alex_action_15))],[(AlexAcc (alex_action_16))],[(AlexAcc (alex_action_17))],[(AlexAcc (alex_action_18))],[(AlexAcc (alex_action_19))],[(AlexAcc (alex_action_20))],[(AlexAcc (alex_action_21))],[(AlexAcc (alex_action_22))],[(AlexAcc (alex_action_23))],[(AlexAcc (alex_action_24))],[(AlexAcc (alex_action_25))],[(AlexAcc (alex_action_26))],[(AlexAcc (alex_action_27))],[(AlexAcc (alex_action_28))],[(AlexAcc (alex_action_29))],[(AlexAcc (alex_action_30))],[(AlexAcc (alex_action_31))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_32))],[(AlexAcc (alex_action_33))],[(AlexAcc (alex_action_34))],[(AlexAcc (alex_action_34))],[(AlexAcc (alex_action_35))],[(AlexAcc (alex_action_36))],[(AlexAcc (alex_action_36))],[(AlexAcc (alex_action_37))]]
+alex_accept = listArray (0::Int,120) [AlexAccNone,AlexAccNone,AlexAccNone,AlexAcc (alex_action_5),AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccNone,AlexAccSkip,AlexAccSkip,AlexAccSkipPred  (alexPrevCharMatches(\c -> c >= '\n' && c <= '\n' || False))(AlexAccNone),AlexAccPred  (alex_action_2) (alexPrevCharMatches(\c -> c >= '\n' && c <= '\n' || False))(AlexAccNone),AlexAccPred  (alex_action_2) (alexPrevCharMatches(\c -> c >= '\n' && c <= '\n' || False))(AlexAccNone),AlexAccPred  (alex_action_2) (alexPrevCharMatches(\c -> c >= '\n' && c <= '\n' || False))(AlexAcc (alex_action_5)),AlexAccPred  (alex_action_2) (alexPrevCharMatches(\c -> c >= '\n' && c <= '\n' || False))(AlexAcc (alex_action_5)),AlexAcc (alex_action_3),AlexAcc (alex_action_4),AlexAcc (alex_action_5),AlexAcc (alex_action_5),AlexAcc (alex_action_5),AlexAcc (alex_action_5),AlexAcc (alex_action_5),AlexAcc (alex_action_5),AlexAcc (alex_action_5),AlexAcc (alex_action_5),AlexAcc (alex_action_5),AlexAcc (alex_action_5),AlexAccSkip,AlexAcc (alex_action_7),AlexAcc (alex_action_7),AlexAcc (alex_action_7),AlexAcc (alex_action_7),AlexAcc (alex_action_7),AlexAcc (alex_action_7),AlexAcc (alex_action_7),AlexAcc (alex_action_7),AlexAcc (alex_action_8),AlexAcc (alex_action_9),AlexAcc (alex_action_10),AlexAcc (alex_action_11),AlexAcc (alex_action_12),AlexAcc (alex_action_13),AlexAcc (alex_action_14),AlexAcc (alex_action_15),AlexAcc (alex_action_16),AlexAcc (alex_action_17),AlexAcc (alex_action_18),AlexAcc (alex_action_19),AlexAcc (alex_action_20),AlexAcc (alex_action_21),AlexAcc (alex_action_22),AlexAcc (alex_action_23),AlexAcc (alex_action_24),AlexAcc (alex_action_25),AlexAcc (alex_action_26),AlexAcc (alex_action_27),AlexAcc (alex_action_28),AlexAcc (alex_action_29),AlexAcc (alex_action_30),AlexAcc (alex_action_31),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_32),AlexAcc (alex_action_33),AlexAcc (alex_action_34),AlexAcc (alex_action_34),AlexAcc (alex_action_35),AlexAcc (alex_action_36),AlexAcc (alex_action_36),AlexAcc (alex_action_37)]
 {-# LINE 125 "compiler/cmm/CmmLex.x" #-}
 
 data CmmToken
@@ -84,20 +84,26 @@ data CmmToken
   | CmmT_align
   | CmmT_goto
   | CmmT_if
+  | CmmT_call
   | CmmT_jump
   | CmmT_foreign
   | CmmT_never
   | CmmT_prim
+  | CmmT_reserve
   | CmmT_return
   | CmmT_returns
   | CmmT_import
   | CmmT_switch
   | CmmT_case
   | CmmT_default
+  | CmmT_push
   | CmmT_bits8
   | CmmT_bits16
   | CmmT_bits32
   | CmmT_bits64
+  | CmmT_bits128
+  | CmmT_bits256
+  | CmmT_bits512
   | CmmT_float32
   | CmmT_float64
   | CmmT_gcptr
@@ -161,20 +167,26 @@ reservedWordsFM = listToUFM $
 	( "align",		CmmT_align ),
 	( "goto",		CmmT_goto ),
 	( "if",			CmmT_if ),
-	( "jump",		CmmT_jump ),
-	( "foreign",		CmmT_foreign ),
+        ( "call",               CmmT_call ),
+        ( "jump",               CmmT_jump ),
+        ( "foreign",            CmmT_foreign ),
 	( "never",		CmmT_never ),
 	( "prim",		CmmT_prim ),
-	( "return",		CmmT_return ),
+        ( "reserve",            CmmT_reserve ),
+        ( "return",             CmmT_return ),
 	( "returns",		CmmT_returns ),
 	( "import",		CmmT_import ),
 	( "switch",		CmmT_switch ),
 	( "case",		CmmT_case ),
-	( "default",		CmmT_default ),
-	( "bits8",		CmmT_bits8 ),
+        ( "default",            CmmT_default ),
+        ( "push",               CmmT_push ),
+        ( "bits8",              CmmT_bits8 ),
 	( "bits16",		CmmT_bits16 ),
 	( "bits32",		CmmT_bits32 ),
 	( "bits64",		CmmT_bits64 ),
+	( "bits128",		CmmT_bits128 ),
+	( "bits256",		CmmT_bits256 ),
+	( "bits512",		CmmT_bits512 ),
 	( "float32",		CmmT_float32 ),
 	( "float64",		CmmT_float64 ),
 -- New forms
@@ -182,6 +194,9 @@ reservedWordsFM = listToUFM $
 	( "b16",		CmmT_bits16 ),
 	( "b32",		CmmT_bits32 ),
 	( "b64",		CmmT_bits64 ),
+	( "b128",		CmmT_bits128 ),
+	( "b256",		CmmT_bits256 ),
+	( "b512",		CmmT_bits512 ),
 	( "f32",		CmmT_float32 ),
 	( "f64",		CmmT_float64 ),
 	( "gcptr",		CmmT_gcptr )
@@ -323,8 +338,55 @@ alex_action_36 =  strtoken tok_float
 alex_action_37 =  strtoken tok_string 
 {-# LINE 1 "templates/GenericTemplate.hs" #-}
 {-# LINE 1 "templates/GenericTemplate.hs" #-}
-{-# LINE 1 "<built-in>" #-}
 {-# LINE 1 "<command-line>" #-}
+
+
+
+
+
+
+# 1 "/usr/include/stdc-predef.h" 1 3 4
+
+# 17 "/usr/include/stdc-predef.h" 3 4
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# 1 "/usr/include/x86_64-linux-gnu/bits/predefs.h" 1 3 4
+
+# 18 "/usr/include/x86_64-linux-gnu/bits/predefs.h" 3 4
+
+
+
+
+
+
+
+
+
+
+
+
+# 31 "/usr/include/stdc-predef.h" 2 3 4
+
+
+
+
+
+
+
+
+{-# LINE 6 "<command-line>" #-}
 {-# LINE 1 "templates/GenericTemplate.hs" #-}
 -- -----------------------------------------------------------------------------
 -- ALEX TEMPLATE
@@ -335,13 +397,25 @@ alex_action_37 =  strtoken tok_string
 -- -----------------------------------------------------------------------------
 -- INTERNALS and main scanner engine
 
-{-# LINE 37 "templates/GenericTemplate.hs" #-}
+{-# LINE 21 "templates/GenericTemplate.hs" #-}
 
-{-# LINE 47 "templates/GenericTemplate.hs" #-}
+
+
+
+
+-- Do not remove this comment. Required to fix CPP parsing when using GCC and a clang-compiled alex.
+#if __GLASGOW_HASKELL__ > 706
+#define GTE(n,m) (tagToEnum# (n >=# m))
+#define EQ(n,m) (tagToEnum# (n ==# m))
+#else
+#define GTE(n,m) (n >=# m)
+#define EQ(n,m) (n ==# m)
+#endif
+{-# LINE 51 "templates/GenericTemplate.hs" #-}
 
 
 data AlexAddr = AlexA# Addr#
-
+-- Do not remove this comment. Required to fix CPP parsing when using GCC and a clang-compiled alex.
 #if __GLASGOW_HASKELL__ < 503
 uncheckedShiftL# = shiftL#
 #endif
@@ -351,10 +425,10 @@ alexIndexInt16OffAddr (AlexA# arr) off =
 #ifdef WORDS_BIGENDIAN
   narrow16Int# i
   where
-        !i    = word2Int# ((high `uncheckedShiftL#` 8#) `or#` low)
-        !high = int2Word# (ord# (indexCharOffAddr# arr (off' +# 1#)))
-        !low  = int2Word# (ord# (indexCharOffAddr# arr off'))
-        !off' = off *# 2#
+        i    = word2Int# ((high `uncheckedShiftL#` 8#) `or#` low)
+        high = int2Word# (ord# (indexCharOffAddr# arr (off' +# 1#)))
+        low  = int2Word# (ord# (indexCharOffAddr# arr off'))
+        off' = off *# 2#
 #else
   indexInt16OffAddr# arr off
 #endif
@@ -368,17 +442,18 @@ alexIndexInt32OffAddr (AlexA# arr) off =
 #ifdef WORDS_BIGENDIAN
   narrow32Int# i
   where
-   !i    = word2Int# ((b3 `uncheckedShiftL#` 24#) `or#`
+   i    = word2Int# ((b3 `uncheckedShiftL#` 24#) `or#`
 		     (b2 `uncheckedShiftL#` 16#) `or#`
 		     (b1 `uncheckedShiftL#` 8#) `or#` b0)
-   !b3   = int2Word# (ord# (indexCharOffAddr# arr (off' +# 3#)))
-   !b2   = int2Word# (ord# (indexCharOffAddr# arr (off' +# 2#)))
-   !b1   = int2Word# (ord# (indexCharOffAddr# arr (off' +# 1#)))
-   !b0   = int2Word# (ord# (indexCharOffAddr# arr off'))
-   !off' = off *# 4#
+   b3   = int2Word# (ord# (indexCharOffAddr# arr (off' +# 3#)))
+   b2   = int2Word# (ord# (indexCharOffAddr# arr (off' +# 2#)))
+   b1   = int2Word# (ord# (indexCharOffAddr# arr (off' +# 1#)))
+   b0   = int2Word# (ord# (indexCharOffAddr# arr off'))
+   off' = off *# 4#
 #else
   indexInt32OffAddr# arr off
 #endif
+
 
 
 
@@ -450,35 +525,40 @@ alex_scan_tkn user orig_input len input s last_acc =
 
 
 
-	let
-		(!(base)) = alexIndexInt32OffAddr alex_base s
-		(!((I# (ord_c)))) = fromIntegral c
-		(!(offset)) = (base +# ord_c)
-		(!(check))  = alexIndexInt16OffAddr alex_check offset
+      case fromIntegral c of { (I# (ord_c)) ->
+        let
+                base   = alexIndexInt32OffAddr alex_base s
+                offset = (base +# ord_c)
+                check  = alexIndexInt16OffAddr alex_check offset
 		
-		(!(new_s)) = if (offset >=# 0#) && (check ==# ord_c)
+                new_s = if GTE(offset,0#) && EQ(check,ord_c)
 			  then alexIndexInt16OffAddr alex_table offset
 			  else alexIndexInt16OffAddr alex_deflt s
 	in
-	case new_s of 
+        case new_s of
 	    -1# -> (new_acc, input)
 		-- on an error, we want to keep the input *before* the
 		-- character that failed, not after.
     	    _ -> alex_scan_tkn user orig_input (if c < 0x80 || c >= 0xC0 then (len +# 1#) else len)
                                                 -- note that the length is increased ONLY if this is the 1st byte in a char encoding)
 			new_input new_s new_acc
-
+      }
   where
-	check_accs [] = last_acc
-	check_accs (AlexAcc a : _) = AlexLastAcc a input (I# (len))
-	check_accs (AlexAccSkip : _)  = AlexLastSkip  input (I# (len))
-	check_accs (AlexAccPred a predx : rest)
+	check_accs (AlexAccNone) = last_acc
+	check_accs (AlexAcc a  ) = AlexLastAcc a input (I# (len))
+	check_accs (AlexAccSkip) = AlexLastSkip  input (I# (len))
+
+	check_accs (AlexAccPred a predx rest)
 	   | predx user orig_input (I# (len)) input
 	   = AlexLastAcc a input (I# (len))
-	check_accs (AlexAccSkipPred predx : rest)
+	   | otherwise
+	   = check_accs rest
+	check_accs (AlexAccSkipPred predx rest)
 	   | predx user orig_input (I# (len)) input
 	   = AlexLastSkip input (I# (len))
-	check_accs (_ : rest) = check_accs rest
+	   | otherwise
+	   = check_accs rest
+
 
 data AlexLastAcc a
   = AlexNone
@@ -491,10 +571,12 @@ instance Functor AlexLastAcc where
     fmap f (AlexLastSkip x y) = AlexLastSkip x y
 
 data AlexAcc a user
-  = AlexAcc a
+  = AlexAccNone
+  | AlexAcc a
   | AlexAccSkip
-  | AlexAccPred a (AlexAccPred user)
-  | AlexAccSkipPred (AlexAccPred user)
+
+  | AlexAccPred a   (AlexAccPred user) (AlexAcc a user)
+  | AlexAccSkipPred (AlexAccPred user) (AlexAcc a user)
 
 type AlexAccPred user = user -> AlexInput -> Int -> AlexInput -> Bool
 
@@ -520,6 +602,7 @@ alexRightContext (I# (sc)) user _ _ input =
 	-- TODO: there's no need to find the longest
 	-- match when checking the right context, just
 	-- the first match will do.
+
 
 -- used by wrappers
 iUnbox (I# (i)) = i

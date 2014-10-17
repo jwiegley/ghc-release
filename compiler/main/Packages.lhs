@@ -37,7 +37,6 @@ where
 
 import PackageConfig
 import DynFlags
-import StaticFlags
 import Config           ( cProjectVersion )
 import Name             ( Name, nameModule_maybe )
 import UniqFM
@@ -69,7 +68,7 @@ import qualified Data.Set as Set
 -- ---------------------------------------------------------------------------
 -- The Package state
 
--- | Package state is all stored in 'DynFlag's, including the details of
+-- | Package state is all stored in 'DynFlags', including the details of
 -- all packages, which packages are exposed, and which modules they
 -- provide.
 --
@@ -231,14 +230,14 @@ readPackageConfig dflags conf_file = do
        else do
             isfile <- doesFileExist conf_file
             when (not isfile) $
-              ghcError $ InstallationError $
+              throwGhcExceptionIO $ InstallationError $
                 "can't find a package database at " ++ conf_file
             debugTraceMsg dflags 2 (text "Using package config file:" <+> text conf_file)
             str <- readFile conf_file
             case reads str of
                 [(configs, rest)]
                     | all isSpace rest -> return (map installedPackageInfoToPackageConfig configs)
-                _ -> ghcError $ InstallationError $
+                _ -> throwGhcExceptionIO $ InstallationError $
                         "invalid package database file " ++ conf_file
 
   let
@@ -253,11 +252,11 @@ setBatchPackageFlags :: DynFlags -> [PackageConfig] -> [PackageConfig]
 setBatchPackageFlags dflags pkgs = (maybeDistrustAll . maybeHideAll) pkgs
   where
     maybeHideAll pkgs'
-      | dopt Opt_HideAllPackages dflags = map hide pkgs'
+      | gopt Opt_HideAllPackages dflags = map hide pkgs'
       | otherwise                       = pkgs'
 
     maybeDistrustAll pkgs'
-      | dopt Opt_DistrustAllPackages dflags = map distrust pkgs'
+      | gopt Opt_DistrustAllPackages dflags = map distrust pkgs'
       | otherwise                           = pkgs'
 
     hide pkg = pkg{ exposed = False }
@@ -411,12 +410,13 @@ packageFlagErr :: DynFlags
 -- for missing DPH package we emit a more helpful error message, because
 -- this may be the result of using -fdph-par or -fdph-seq.
 packageFlagErr dflags (ExposePackage pkg) [] | is_dph_package pkg
-  = ghcError (CmdLineError (showSDoc dflags $ dph_err))
+  = throwGhcExceptionIO (CmdLineError (showSDoc dflags $ dph_err))
   where dph_err = text "the " <> text pkg <> text " package is not installed."
                   $$ text "To install it: \"cabal install dph\"."
         is_dph_package pkg = "dph" `isPrefixOf` pkg
 
-packageFlagErr dflags flag reasons = ghcError (CmdLineError (showSDoc dflags $ err))
+packageFlagErr dflags flag reasons
+  = throwGhcExceptionIO (CmdLineError (showSDoc dflags $ err))
   where err = text "cannot satisfy " <> ppr_flag <>
                 (if null reasons then empty else text ": ") $$
               nest 4 (ppr_reasons $$
@@ -793,7 +793,7 @@ mkPackageState dflags pkgs0 preload0 this_package = do
   let
       -- add base & rts to the preload packages
       basicLinkedPackages
-       | dopt Opt_AutoLinkPackages dflags
+       | gopt Opt_AutoLinkPackages dflags
           = filter (flip elemUFM pkg_db) [basePackageId, rtsPackageId]
        | otherwise = []
       -- but in any case remove the current package from the set of
@@ -867,37 +867,48 @@ getPackageLibraryPath dflags pkgs =
 collectLibraryPaths :: [PackageConfig] -> [FilePath]
 collectLibraryPaths ps = nub (filter notNull (concatMap libraryDirs ps))
 
--- | Find all the link options in these and the preload packages
-getPackageLinkOpts :: DynFlags -> [PackageId] -> IO [String]
+-- | Find all the link options in these and the preload packages,
+-- returning (package hs lib options, extra library options, other flags)
+getPackageLinkOpts :: DynFlags -> [PackageId] -> IO ([String], [String], [String])
 getPackageLinkOpts dflags pkgs =
   collectLinkOpts dflags `fmap` getPreloadPackagesAnd dflags pkgs
 
-collectLinkOpts :: DynFlags -> [PackageConfig] -> [String]
-collectLinkOpts dflags ps = concat (map all_opts ps)
-  where
-        libs p     = packageHsLibs dflags p ++ extraLibraries p
-        all_opts p = map ("-l" ++) (libs p) ++ ldOptions p
+collectLinkOpts :: DynFlags -> [PackageConfig] -> ([String], [String], [String])
+collectLinkOpts dflags ps =
+    (
+        concatMap (map ("-l" ++) . packageHsLibs dflags) ps,
+        concatMap (map ("-l" ++) . extraLibraries) ps,
+        concatMap ldOptions ps
+    )
 
 packageHsLibs :: DynFlags -> PackageConfig -> [String]
 packageHsLibs dflags p = map (mkDynName . addSuffix) (hsLibraries p)
   where
         ways0 = ways dflags
 
-        ways1 = filter ((/= WayDyn) . wayName) ways0
+        ways1 = filter (/= WayDyn) ways0
         -- the name of a shared library is libHSfoo-ghc<version>.so
         -- we leave out the _dyn, because it is superfluous
 
         -- debug RTS includes support for -eventlog
-        ways2 | WayDebug `elem` map wayName ways1
-              = filter ((/= WayEventLog) . wayName) ways1
+        ways2 | WayDebug `elem` ways1
+              = filter (/= WayEventLog) ways1
               | otherwise
               = ways1
 
         tag     = mkBuildTag (filter (not . wayRTSOnly) ways2)
         rts_tag = mkBuildTag ways2
 
-        mkDynName | opt_Static = id
-                  | otherwise = (++ ("-ghc" ++ cProjectVersion))
+        mkDynName x
+         | gopt Opt_Static dflags       = x
+         | "HS" `isPrefixOf` x          = x ++ "-ghc" ++ cProjectVersion
+           -- For non-Haskell libraries, we use the name "Cfoo". The .a
+           -- file is libCfoo.a, and the .so is libfoo.so. That way the
+           -- linker knows what we mean for the vanilla (-lCfoo) and dyn
+           -- (-lfoo) ways. We therefore need to strip the 'C' off here.
+         | Just x' <- stripPrefix "C" x = x'
+         | otherwise
+            = panic ("Don't understand library name " ++ x)
 
         addSuffix rts@"HSrts"    = rts       ++ (expandTag rts_tag)
         addSuffix other_lib      = other_lib ++ (expandTag tag)
@@ -948,8 +959,9 @@ lookupModuleWithSuggestions dflags m
   where
     pkg_state = pkgState dflags
     suggestions
-      | dopt Opt_HelpfulErrors dflags = fuzzyLookup (moduleNameString m) all_mods
-      | otherwise                     = []
+      | gopt Opt_HelpfulErrors dflags =
+           fuzzyLookup (moduleNameString m) all_mods
+      | otherwise = []
 
     all_mods :: [(String, Module)]     -- All modules
     all_mods = [ (moduleNameString mod_nm, mkModule pkg_id mod_nm)
@@ -984,7 +996,7 @@ closeDeps dflags pkg_map ipid_map ps
 throwErr :: DynFlags -> MaybeErr MsgDoc a -> IO a
 throwErr dflags m
               = case m of
-                Failed e    -> ghcError (CmdLineError (showSDoc dflags e))
+                Failed e    -> throwGhcExceptionIO (CmdLineError (showSDoc dflags e))
                 Succeeded r -> return r
 
 closeDepsErr :: PackageConfigMap
@@ -1018,7 +1030,7 @@ add_package pkg_db ipid_map ps (p, mb_parent)
 
 missingPackageErr :: DynFlags -> String -> IO a
 missingPackageErr dflags p
-    = ghcError (CmdLineError (showSDoc dflags (missingPackageMsg p)))
+    = throwGhcExceptionIO (CmdLineError (showSDoc dflags (missingPackageMsg p)))
 
 missingPackageMsg :: String -> SDoc
 missingPackageMsg p = ptext (sLit "unknown package:") <+> text p
@@ -1031,13 +1043,36 @@ missingDependencyMsg (Just parent)
 -- -----------------------------------------------------------------------------
 
 -- | Will the 'Name' come from a dynamically linked library?
-isDllName :: PackageId -> Name -> Bool
+isDllName :: DynFlags -> PackageId -> Module -> Name -> Bool
 -- Despite the "dll", I think this function just means that
 -- the synbol comes from another dynamically-linked package,
 -- and applies on all platforms, not just Windows
-isDllName this_pkg name
-  | opt_Static = False
-  | Just mod <- nameModule_maybe name = modulePackageId mod /= this_pkg
+isDllName dflags _this_pkg this_mod name
+  | gopt Opt_Static dflags = False
+  | Just mod <- nameModule_maybe name
+    -- Issue #8696 - when GHC is dynamically linked, it will attempt
+    -- to load the dynamic dependencies of object files at compile
+    -- time for things like QuasiQuotes or
+    -- TemplateHaskell. Unfortunately, this interacts badly with
+    -- intra-package linking, because we don't generate indirect
+    -- (dynamic) symbols for intra-package calls. This means that if a
+    -- module with an intra-package call is loaded without its
+    -- dependencies, then GHC fails to link. This is the cause of #
+    --
+    -- In the mean time, always force dynamic indirections to be
+    -- generated: when the module name isn't the module being
+    -- compiled, references are dynamic.
+    = if mod /= this_mod
+      then True
+      else case dllSplit dflags of
+           Nothing -> False
+           Just ss ->
+               let findMod m = let modStr = moduleNameString (moduleName m)
+                               in case find (modStr `Set.member`) ss of
+                                  Just i -> i
+                                  Nothing -> panic ("Can't find " ++ modStr ++ "in DLL split")
+               in findMod mod /= findMod this_mod
+       
   | otherwise = False  -- no, it is not even an external name
 
 -- -----------------------------------------------------------------------------

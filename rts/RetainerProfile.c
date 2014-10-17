@@ -30,6 +30,7 @@
 #include "Stats.h"
 #include "ProfHeap.h"
 #include "Apply.h"
+#include "Stable.h" /* markStableTables */
 #include "sm/Storage.h" // for END_OF_STATIC_LIST
 
 /*
@@ -505,6 +506,7 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
 	break;
 
 	// layout.payload.ptrs, no SRT
+    case TVAR:
     case CONSTR:
     case PRIM:
     case MUT_PRIM:
@@ -605,7 +607,6 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
     case CATCH_FRAME:
     case UNDERFLOW_FRAME:
     case STOP_FRAME:
-    case RET_DYN:
     case RET_BCO:
     case RET_SMALL:
     case RET_BIG:
@@ -845,7 +846,8 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
 	    return;
 	}
 
-	case CONSTR:
+        case TVAR:
+        case CONSTR:
 	case PRIM:
 	case MUT_PRIM:
 	case BCO:
@@ -931,8 +933,7 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
         case IND_STATIC:
 	case CONSTR_NOCAF_STATIC:
 	    // stack objects
-	case RET_DYN:
-	case UPDATE_FRAME:
+        case UPDATE_FRAME:
 	case CATCH_FRAME:
         case UNDERFLOW_FRAME:
         case STOP_FRAME:
@@ -1011,12 +1012,11 @@ isRetainer( StgClosure *c )
     case MUT_PRIM:
     case MVAR_CLEAN:
     case MVAR_DIRTY:
+    case TVAR:
     case MUT_VAR_CLEAN:
     case MUT_VAR_DIRTY:
     case MUT_ARR_PTRS_CLEAN:
     case MUT_ARR_PTRS_DIRTY:
-    case MUT_ARR_PTRS_FROZEN:
-    case MUT_ARR_PTRS_FROZEN0:
 
 	// thunks are retainers.
     case THUNK:
@@ -1073,6 +1073,9 @@ isRetainer( StgClosure *c )
     case ARR_WORDS:
 	// STM
     case TREC_CHUNK:
+        // immutable arrays
+    case MUT_ARR_PTRS_FROZEN:
+    case MUT_ARR_PTRS_FROZEN0:
 	return rtsFalse;
 
 	//
@@ -1087,7 +1090,6 @@ isRetainer( StgClosure *c )
     case CATCH_FRAME:
     case UNDERFLOW_FRAME:
     case STOP_FRAME:
-    case RET_DYN:
     case RET_BCO:
     case RET_SMALL:
     case RET_BIG:
@@ -1349,29 +1351,7 @@ retainStack( StgClosure *c, retainer c_child_r,
 	    // and don't forget to follow the SRT 
 	    goto follow_srt;
 
-	    // Dynamic bitmap: the mask is stored on the stack 
-	case RET_DYN: {
-	    StgWord dyn;
-	    dyn = ((StgRetDyn *)p)->liveness;
-
-	    // traverse the bitmap first
-	    bitmap = RET_DYN_LIVENESS(dyn);
-	    p      = (P_)&((StgRetDyn *)p)->payload[0];
-	    size   = RET_DYN_BITMAP_SIZE;
-	    p = retain_small_bitmap(p, size, bitmap, c, c_child_r);
-	    
-	    // skip over the non-ptr words
-	    p += RET_DYN_NONPTRS(dyn) + RET_DYN_NONPTR_REGS_SIZE;
-	    
-	    // follow the ptr words
-	    for (size = RET_DYN_PTRS(dyn); size > 0; size--) {
-		retainClosure((StgClosure *)*p, c, c_child_r);
-		p++;
-	    }
-	    continue;
-	}
-
-	case RET_FUN: {
+        case RET_FUN: {
 	    StgRetFun *ret_fun = (StgRetFun *)p;
 	    StgFunInfoTable *fun_info;
 	    
@@ -1693,6 +1673,7 @@ inner_loop:
         retainClosure(tso->bq,                 c, c_child_r);
         retainClosure(tso->trec,               c, c_child_r);
         if (   tso->why_blocked == BlockedOnMVar
+               || tso->why_blocked == BlockedOnMVarRead
                || tso->why_blocked == BlockedOnBlackHole
                || tso->why_blocked == BlockedOnMsgThrowTo
             ) {
@@ -1788,12 +1769,15 @@ computeRetainerSet( void )
     //
     // The following code assumes that WEAK objects are considered to be roots
     // for retainer profilng.
-    for (weak = weak_ptr_list; weak != NULL; weak = weak->link)
-	// retainRoot((StgClosure *)weak);
-	retainRoot(NULL, (StgClosure **)&weak);
+    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+        for (weak = generations[g].weak_ptr_list; weak != NULL; weak = weak->link) {
+            // retainRoot((StgClosure *)weak);
+            retainRoot(NULL, (StgClosure **)&weak);
+        }
+    }
 
     // Consider roots from the stable ptr table.
-    markStablePtrTable(retainRoot, NULL);
+    markStableTables(retainRoot, NULL);
 
     // The following code resets the rs field of each unvisited mutable
     // object (computing sumOfNewCostExtra and updating costArray[] when
@@ -1806,7 +1790,7 @@ computeRetainerSet( void )
 	// because we can find MUT_VAR objects which have not been
 	// visited during retainer profiling.
         for (n = 0; n < n_capabilities; n++) {
-          for (bd = capabilities[n].mut_lists[g]; bd != NULL; bd = bd->link) {
+          for (bd = capabilities[n]->mut_lists[g]; bd != NULL; bd = bd->link) {
 	    for (ml = bd->start; ml < bd->free; ml++) {
 
 		maybeInitRetainerSet((StgClosure *)*ml);

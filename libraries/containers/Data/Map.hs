@@ -12,11 +12,15 @@
 -- Stability   :  provisional
 -- Portability :  portable
 --
+-- /Note:/ You should use "Data.Map.Strict" instead of this module if:
+--
+-- * You will eventually need all the values stored.
+--
+-- * The stored values don't represent large virtual data structures
+-- to be lazily computed.
+--
 -- An efficient implementation of ordered maps from keys to values
 -- (dictionaries).
---
--- This module re-exports the value lazy 'Data.Map.Lazy' API, plus
--- several value strict functions from 'Data.Map.Strict'.
 --
 -- These modules are intended to be imported qualified, to avoid name
 -- clashes with Prelude functions, e.g.
@@ -51,50 +55,71 @@ module Data.Map
     , foldWithKey
     ) where
 
+import Prelude hiding (foldr)
 import Data.Map.Lazy
-import qualified Data.Map.Lazy as L
-import qualified Data.Map.Strict as S
+import qualified Data.Map.Strict as Strict
 
--- | /Deprecated./ As of version 0.5, replaced by 'S.insertWith'.
+-- | /Deprecated./ As of version 0.5, replaced by 'Data.Map.Strict.insertWith'.
 --
--- /O(log n)/. Same as 'insertWith', but the combining function is
--- applied strictly.  This is often the most desirable behavior.
+-- /O(log n)/. Same as 'insertWith', but the value being inserted to the map is
+-- evaluated to WHNF beforehand.
 --
 -- For example, to update a counter:
 --
 -- > insertWith' (+) k 1 m
 --
-insertWith' :: Ord k => (a -> a -> a) -> k -> a -> Map k a -> Map k a
-insertWith' = S.insertWith
-{-# INLINABLE insertWith' #-}
 
--- | /Deprecated./ As of version 0.5, replaced by 'S.insertWithKey'.
---
--- /O(log n)/. Same as 'insertWithKey', but the combining function is
--- applied strictly.
-insertWithKey' :: Ord k => (k -> a -> a -> a) -> k -> a -> Map k a -> Map k a
-insertWithKey' = S.insertWithKey
-{-# INLINABLE insertWithKey' #-}
+insertWith' :: Ord k => (a -> a -> a) -> k -> a -> Map k a -> Map k a
+insertWith' = Strict.insertWith
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE insertWith' #-}
+#else
+{-# INLINE insertWith' #-}
+#endif
 
 -- | /Deprecated./ As of version 0.5, replaced by
--- 'S.insertLookupWithKey'.
+-- 'Data.Map.Strict.insertWithKey'.
 --
--- /O(log n)/. A strict version of 'insertLookupWithKey'.
+-- /O(log n)/. Same as 'insertWithKey', but the value being inserted to the map is
+-- evaluated to WHNF beforehand.
+
+insertWithKey' :: Ord k => (k -> a -> a -> a) -> k -> a -> Map k a -> Map k a
+-- We do not reuse Data.Map.Strict.insertWithKey, because it is stricter -- it
+-- forces evaluation of the given value.
+insertWithKey' = Strict.insertWithKey
+#if __GLASGOW_HASKELL__ >= 700
+{-# INLINABLE insertWithKey' #-}
+#else
+{-# INLINE insertWithKey' #-}
+#endif
+
+-- | /Deprecated./ As of version 0.5, replaced by
+-- 'Data.Map.Strict.insertLookupWithKey'.
+--
+-- /O(log n)/. Same as 'insertLookupWithKey', but the value being inserted to
+-- the map is evaluated to WHNF beforehand.
+
 insertLookupWithKey' :: Ord k => (k -> a -> a -> a) -> k -> a -> Map k a
                      -> (Maybe a, Map k a)
-insertLookupWithKey' = S.insertLookupWithKey
+-- We do not reuse Data.Map.Strict.insertLookupWithKey, because it is stricter -- it
+-- forces evaluation of the given value.
+insertLookupWithKey' = Strict.insertLookupWithKey
+#if __GLASGOW_HASKELL__ >= 700
 {-# INLINABLE insertLookupWithKey' #-}
+#else
+{-# INLINE insertLookupWithKey' #-}
+#endif
 
--- | /Deprecated./ As of version 0.5, replaced by 'L.foldr'.
+-- | /Deprecated./ As of version 0.5, replaced by 'foldr'.
 --
 -- /O(n)/. Fold the values in the map using the given right-associative
 -- binary operator. This function is an equivalent of 'foldr' and is present
 -- for compatibility only.
 fold :: (a -> b -> b) -> b -> Map k a -> b
-fold = L.foldr
+fold = foldr
 {-# INLINE fold #-}
 
--- | /Deprecated./ As of version 0.4, replaced by 'L.foldrWithKey'.
+-- | /Deprecated./ As of version 0.4, replaced by 'foldrWithKey'.
 --
 -- /O(n)/. Fold the keys and values in the map using the given right-associative
 -- binary operator. This function is an equivalent of 'foldrWithKey' and is present

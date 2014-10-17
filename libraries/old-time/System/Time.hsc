@@ -1,17 +1,13 @@
-{-# LANGUAGE CPP #-}
-{-# OPTIONS_GHC -fno-warn-unused-binds #-}
 #if __GLASGOW_HASKELL__ >= 701
 {-# LANGUAGE Trustworthy #-}
 #endif
--- XXX with some combinations of #defines we get warnings, e.g.
--- Warning: Defined but not used: `throwAwayReturnPointer'
 
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Time
 -- Copyright   :  (c) The University of Glasgow 2001
 -- License     :  BSD-style (see the file libraries/old-time/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  provisional
 -- Portability :  portable
@@ -79,15 +75,15 @@ TODO:
 
 module System.Time
      (
-	-- * Clock times
+        -- * Clock times
 
         ClockTime(..) -- non-standard, lib. report gives this as abstract
-	-- instance Eq, Ord
-	-- instance Show (non-standard)
+        -- instance Eq, Ord
+        -- instance Show (non-standard)
 
-     ,	getClockTime
+     ,  getClockTime
 
-	-- * Time differences
+        -- * Time differences
 
      ,  TimeDiff(..)
      ,  noTimeDiff      -- non-standard (but useful when constructing TimeDiff vals.)
@@ -98,12 +94,12 @@ module System.Time
      ,  timeDiffToString  -- non-standard
      ,  formatTimeDiff    -- non-standard
 
-	-- * Calendar times
+        -- * Calendar times
 
      ,  CalendarTime(..)
      ,  Month(..)
      ,  Day(..)
-     ,	toCalendarTime
+     ,  toCalendarTime
      ,  toUTCTime
      ,  toClockTime
      ,  calendarTimeToString
@@ -115,21 +111,11 @@ module System.Time
 #include "HsTime.h"
 #endif
 
-#ifdef __NHC__
-#include <time.h>
-#  if defined(__sun) || defined(__CYGWIN32__)
-#    define HAVE_TZNAME 1
-#  else
-#    define HAVE_TM_ZONE 1
-#  endif
-import Ix
-#endif
-
 import Prelude
 
 import Data.Ix
 import System.Locale
-import Foreign hiding (unsafePerformIO)
+import Foreign
 import System.IO.Unsafe (unsafePerformIO)
 
 #ifdef __HUGS__
@@ -150,7 +136,7 @@ data Month
 
 -- | A day of the week.
 
-data Day 
+data Day
  = Sunday   | Monday | Tuesday | Wednesday
  | Thursday | Friday | Saturday
  deriving (Eq, Ord, Enum, Bounded, Ix, Read, Show)
@@ -160,20 +146,20 @@ data Day
 -- external calendar time 'CalendarTime' for I\/O or other manipulations.
 
 data ClockTime = TOD Integer Integer
-		-- ^ Construct a clock time.  The arguments are a number
-		-- of seconds since 00:00:00 (UTC) on 1 January 1970,
-		-- and an additional number of picoseconds.
-		--
-		-- In Haskell 98, the 'ClockTime' type is abstract.
-	       deriving (Eq, Ord)
+                -- ^ Construct a clock time.  The arguments are a number
+                -- of seconds since 00:00:00 (UTC) on 1 January 1970,
+                -- and an additional number of picoseconds.
+                --
+                -- In Haskell 98, the 'ClockTime' type is abstract.
+               deriving (Eq, Ord)
 
 -- When a ClockTime is shown, it is converted to a CalendarTime in the current
 -- timezone and then printed.  FIXME: This is arguably wrong, since we can't
 -- get the current timezone without being in the IO monad.
 
 instance Show ClockTime where
-    showsPrec _ t = showString (calendarTimeToString 
-	  			 (unsafePerformIO (toCalendarTime t)))
+    showsPrec _ t = showString (calendarTimeToString
+                                 (unsafePerformIO (toCalendarTime t)))
 
 {-
 The numeric fields have the following ranges.
@@ -196,23 +182,23 @@ tz       -43200 .. 50400        [Variation from UTC in seconds]
 -- | 'CalendarTime' is a user-readable and manipulable
 -- representation of the internal 'ClockTime' type.
 
-data CalendarTime 
+data CalendarTime
  = CalendarTime  {
-       ctYear    :: Int		-- ^ Year (pre-Gregorian dates are inaccurate)
-     , ctMonth   :: Month	-- ^ Month of the year
-     , ctDay     :: Int		-- ^ Day of the month (1 to 31)
-     , ctHour    :: Int		-- ^ Hour of the day (0 to 23)
-     , ctMin     :: Int		-- ^ Minutes (0 to 59)
-     , ctSec     :: Int		-- ^ Seconds (0 to 61, allowing for up to
-				-- two leap seconds)
-     , ctPicosec :: Integer	-- ^ Picoseconds
-     , ctWDay    :: Day		-- ^ Day of the week
-     , ctYDay    :: Int		-- ^ Day of the year
-				-- (0 to 364, or 365 in leap years)
-     , ctTZName  :: String	-- ^ Name of the time zone
-     , ctTZ      :: Int		-- ^ Variation from UTC in seconds
-     , ctIsDST   :: Bool	-- ^ 'True' if Daylight Savings Time would
-				-- be in effect, and 'False' otherwise
+       ctYear    :: Int         -- ^ Year (pre-Gregorian dates are inaccurate)
+     , ctMonth   :: Month       -- ^ Month of the year
+     , ctDay     :: Int         -- ^ Day of the month (1 to 31)
+     , ctHour    :: Int         -- ^ Hour of the day (0 to 23)
+     , ctMin     :: Int         -- ^ Minutes (0 to 59)
+     , ctSec     :: Int         -- ^ Seconds (0 to 61, allowing for up to
+                                -- two leap seconds)
+     , ctPicosec :: Integer     -- ^ Picoseconds
+     , ctWDay    :: Day         -- ^ Day of the week
+     , ctYDay    :: Int         -- ^ Day of the year
+                                -- (0 to 364, or 365 in leap years)
+     , ctTZName  :: String      -- ^ Name of the time zone
+     , ctTZ      :: Int         -- ^ Variation from UTC in seconds
+     , ctIsDST   :: Bool        -- ^ 'True' if Daylight Savings Time would
+                                -- be in effect, and 'False' otherwise
  }
  deriving (Eq,Ord,Read,Show)
 
@@ -240,7 +226,7 @@ noTimeDiff = TimeDiff 0 0 0 0 0 0 0
 
 realToInteger :: Real a => a -> Integer
 realToInteger ct = round (realToFrac ct :: Double)
-  -- CTime, CClock, CUShort etc are in Real but not Fractional, 
+  -- CTime, CClock, CUShort etc are in Real but not Fractional,
   -- so we must convert to Double before we can round it
 
 getClockTime :: IO ClockTime
@@ -265,7 +251,7 @@ getClockTime = do
     sec  <- (#peek struct timeval,tv_sec)  p_timeval :: IO Timeval_tv_sec
     usec <- (#peek struct timeval,tv_usec) p_timeval :: IO Timeval_tv_usec
     return (TOD (realToInteger sec) ((realToInteger usec) * 1000000))
- 
+
 #elif HAVE_FTIME
 getClockTime = do
   allocaBytes (#const sizeof(struct timeb)) $ \ p_timeb -> do
@@ -288,27 +274,27 @@ getClockTime = do
 
 addToClockTime  :: TimeDiff  -> ClockTime -> ClockTime
 addToClockTime (TimeDiff year mon day hour minute sec psec)
-	       (TOD c_sec c_psec) = 
-	let
-	  sec_diff = toInteger sec +
+               (TOD c_sec c_psec) =
+        let
+          sec_diff = toInteger sec +
                      60 * toInteger minute +
                      3600 * toInteger hour +
                      24 * 3600 * toInteger day
           (d_sec, d_psec) = (c_psec + psec) `quotRem` 1000000000000
           cal      = toUTCTime (TOD (c_sec + sec_diff + d_sec) d_psec)
-          new_mon  = fromEnum (ctMonth cal) + r_mon 
-	  month' = fst tmp
-	  yr_diff = snd tmp
+          new_mon  = fromEnum (ctMonth cal) + r_mon
+          month' = fst tmp
+          yr_diff = snd tmp
           tmp
-	    | new_mon < 0  = (toEnum (12 + new_mon), (-1))
-	    | new_mon > 11 = (toEnum (new_mon `mod` 12), 1)
-	    | otherwise    = (toEnum new_mon, 0)
-	    
-	  (r_yr, r_mon) = mon `quotRem` 12
+            | new_mon < 0  = (toEnum (12 + new_mon), (-1))
+            | new_mon > 11 = (toEnum (new_mon `mod` 12), 1)
+            | otherwise    = (toEnum new_mon, 0)
+
+          (r_yr, r_mon) = mon `quotRem` 12
 
           year' = ctYear cal + year + r_yr + yr_diff
-	in
-	toClockTime cal{ctMonth=month', ctYear=year'}
+        in
+        toClockTime cal{ctMonth=month', ctYear=year'}
 
 -- | @'diffClockTimes' t1 t2@ returns the difference between two clock
 -- times @t1@ and @t2@ as a 'TimeDiff'.
@@ -320,7 +306,7 @@ diffClockTimes  :: ClockTime -> ClockTime -> TimeDiff
 --
 -- CAVEAT: see comment of normalizeTimeDiff
 diffClockTimes (TOD sa pa) (TOD sb pb) =
-    noTimeDiff{ tdSec     = fromIntegral (sa - sb) 
+    noTimeDiff{ tdSec     = fromIntegral (sa - sb)
                 -- FIXME: can handle just 68 years...
               , tdPicosec = pa - pb
               }
@@ -386,7 +372,7 @@ foreign import ccall unsafe "time.h &tzname" tzname :: Ptr CString
 foreign import ccall unsafe "__hscore_timezone" timezone :: Ptr CLong
 foreign import ccall unsafe "__hscore_tzname"   tzname :: Ptr CString
 #  endif
-zone x = do 
+zone x = do
   dst <- (#peek struct tm,tm_isdst) x
   if dst then peekElemOff tzname 1 else peekElemOff tzname 0
 # else /* ! HAVE_TZNAME */
@@ -398,7 +384,7 @@ zone x = do
 # if HAVE_DECL_ALTZONE
 foreign import ccall "&altzone"  altzone  :: Ptr CTime
 foreign import ccall "&timezone" timezone :: Ptr CTime
-gmtoff x = do 
+gmtoff x = do
   dst <- (#peek struct tm,tm_isdst) x
   tz <- if dst then peek altzone else peek timezone
   return (-fromIntegral (realToInteger tz))
@@ -409,10 +395,10 @@ foreign import ccall "time.h &timezone" timezone :: Ptr CLong
 #endif
 
 -- Assume that DST offset is 1 hour ...
-gmtoff x = do 
+gmtoff x = do
   dst <- (#peek struct tm,tm_isdst) x
   tz  <- peek timezone
-   -- According to the documentation for tzset(), 
+   -- According to the documentation for tzset(),
    --   http://www.opengroup.org/onlinepubs/007908799/xsh/tzset.html
    -- timezone offsets are > 0 west of the Prime Meridian.
    --
@@ -433,7 +419,7 @@ toCalendarTime :: ClockTime -> IO CalendarTime
 #ifdef __HUGS__
 toCalendarTime =  toCalTime False
 #elif HAVE_LOCALTIME_R
-toCalendarTime =  clockToCalendarTime_reentrant (throwAwayReturnPointer localtime_r) False
+toCalendarTime =  clockToCalendarTime_reentrant (_throwAwayReturnPointer localtime_r) False
 #else
 toCalendarTime =  clockToCalendarTime_static localtime False
 #endif
@@ -445,7 +431,7 @@ toUTCTime :: ClockTime -> CalendarTime
 #ifdef __HUGS__
 toUTCTime      =  unsafePerformIO . toCalTime True
 #elif HAVE_GMTIME_R
-toUTCTime      =  unsafePerformIO . clockToCalendarTime_reentrant (throwAwayReturnPointer gmtime_r) True
+toUTCTime      =  unsafePerformIO . clockToCalendarTime_reentrant (_throwAwayReturnPointer gmtime_r) True
 #else
 toUTCTime      =  unsafePerformIO . clockToCalendarTime_static gmtime True
 #endif
@@ -453,43 +439,43 @@ toUTCTime      =  unsafePerformIO . clockToCalendarTime_static gmtime True
 #ifdef __HUGS__
 toCalTime :: Bool -> ClockTime -> IO CalendarTime
 toCalTime toUTC (TOD s psecs)
-  | (s > fromIntegral (maxBound :: Int)) || 
+  | (s > fromIntegral (maxBound :: Int)) ||
     (s < fromIntegral (minBound :: Int))
   = error ((if toUTC then "toUTCTime: " else "toCalendarTime: ") ++
            "clock secs out of range")
   | otherwise = do
-    (sec,min,hour,mday,mon,year,wday,yday,isdst,zone,off) <- 
-  		toCalTimePrim (if toUTC then 1 else 0) (fromIntegral s)
+    (sec,min,hour,mday,mon,year,wday,yday,isdst,zone,off) <-
+                toCalTimePrim (if toUTC then 1 else 0) (fromIntegral s)
     return (CalendarTime{ ctYear=1900+year
-  		        , ctMonth=toEnum mon
-		        , ctDay=mday
-		        , ctHour=hour
-		        , ctMin=min
-		        , ctSec=sec
-		        , ctPicosec=psecs
-		        , ctWDay=toEnum wday
-		        , ctYDay=yday
-		        , ctTZName=(if toUTC then "UTC" else zone)
-		        , ctTZ=(if toUTC then 0 else off)
-		        , ctIsDST=not toUTC && (isdst/=0)
-		        })
+                        , ctMonth=toEnum mon
+                        , ctDay=mday
+                        , ctHour=hour
+                        , ctMin=min
+                        , ctSec=sec
+                        , ctPicosec=psecs
+                        , ctWDay=toEnum wday
+                        , ctYDay=yday
+                        , ctTZName=(if toUTC then "UTC" else zone)
+                        , ctTZ=(if toUTC then 0 else off)
+                        , ctIsDST=not toUTC && (isdst/=0)
+                        })
 #else /* ! __HUGS__ */
-throwAwayReturnPointer :: (Ptr CTime -> Ptr CTm -> IO (Ptr CTm))
-                       -> (Ptr CTime -> Ptr CTm -> IO (       ))
-throwAwayReturnPointer fun x y = fun x y >> return ()
+_throwAwayReturnPointer :: (Ptr CTime -> Ptr CTm -> IO (Ptr CTm))
+                        -> (Ptr CTime -> Ptr CTm -> IO (       ))
+_throwAwayReturnPointer fun x y = fun x y >> return ()
 
 #if !HAVE_LOCALTIME_R || !HAVE_GMTIME_R
 clockToCalendarTime_static :: (Ptr CTime -> IO (Ptr CTm)) -> Bool -> ClockTime
-	 -> IO CalendarTime
+         -> IO CalendarTime
 clockToCalendarTime_static fun is_utc (TOD secs psec) = do
   with (fromIntegral secs :: CTime)  $ \ p_timer -> do
-    p_tm <- fun p_timer 	-- can't fail, according to POSIX
+    p_tm <- fun p_timer         -- can't fail, according to POSIX
     clockToCalendarTime_aux is_utc p_tm psec
 #endif
 
 #if HAVE_LOCALTIME_R || HAVE_GMTIME_R
 clockToCalendarTime_reentrant :: (Ptr CTime -> Ptr CTm -> IO ()) -> Bool -> ClockTime
-	 -> IO CalendarTime
+         -> IO CalendarTime
 clockToCalendarTime_reentrant fun is_utc (TOD secs psec) = do
   with (fromIntegral secs :: CTime)  $ \ p_timer -> do
     allocaBytes (#const sizeof(struct tm)) $ \ p_tm -> do
@@ -510,25 +496,25 @@ clockToCalendarTime_aux is_utc p_tm psec = do
     isdst <-  (#peek struct tm,tm_isdst) p_tm :: IO CInt
     zone' <-  zone p_tm
     tz    <-  gmtoff p_tm
-    
+
     tzname' <- peekCString zone'
-    
+
     let month  | mon >= 0 && mon <= 11 = toEnum (fromIntegral mon)
-    	       | otherwise             = error ("toCalendarTime: illegal month value: " ++ show mon)
-    
-    return (CalendarTime 
-		(1900 + fromIntegral year) 
-		month
-		(fromIntegral mday)
-		(fromIntegral hour)
-		(fromIntegral minute)
-		(fromIntegral sec)
-		psec
-            	(toEnum (fromIntegral wday))
-		(fromIntegral yday)
-		(if is_utc then "UTC" else tzname')
-		(if is_utc then 0     else fromIntegral tz)
-		(if is_utc then False else isdst /= 0))
+               | otherwise             = error ("toCalendarTime: illegal month value: " ++ show mon)
+
+    return (CalendarTime
+                (1900 + fromIntegral year)
+                month
+                (fromIntegral mday)
+                (fromIntegral hour)
+                (fromIntegral minute)
+                (fromIntegral sec)
+                psec
+                (toEnum (fromIntegral wday))
+                (fromIntegral yday)
+                (if is_utc then "UTC" else tzname')
+                (if is_utc then 0     else fromIntegral tz)
+                (if is_utc then False else isdst /= 0))
 #endif /* ! __HUGS__ */
 
 -- | converts a 'CalendarTime' into the corresponding internal
@@ -538,17 +524,17 @@ clockToCalendarTime_aux is_utc p_tm psec = do
 toClockTime :: CalendarTime -> ClockTime
 #ifdef __HUGS__
 toClockTime (CalendarTime yr mon mday hour min sec psec
-			  _wday _yday _tzname tz _isdst) =
+                          _wday _yday _tzname tz _isdst) =
   unsafePerformIO $ do
     s <- toClockTimePrim (yr-1900) (fromEnum mon) mday hour min sec tz
     return (TOD (fromIntegral s) psec)
 #else /* ! __HUGS__ */
 toClockTime (CalendarTime year mon mday hour minute sec psec
-			  _wday _yday _tzname tz _isdst) =
+                          _wday _yday _tzname tz _isdst) =
 
      -- `isDst' causes the date to be wrong by one hour...
      -- FIXME: check, whether this works on other arch's than Linux, too...
-     -- 
+     --
      -- so we set it to (-1) (means `unknown') and let `mktime' determine
      -- the real value...
     let isDst = -1 :: CInt in   -- if _isdst then (1::Int) else 0
@@ -560,30 +546,30 @@ toClockTime (CalendarTime year mon mday hour minute sec psec
     else
       unsafePerformIO $ do
       allocaBytes (#const sizeof(struct tm)) $ \ p_tm -> do
-        (#poke struct tm,tm_sec  ) p_tm	(fromIntegral sec  :: CInt)
-        (#poke struct tm,tm_min  ) p_tm	(fromIntegral minute :: CInt)
-        (#poke struct tm,tm_hour ) p_tm	(fromIntegral hour :: CInt)
-        (#poke struct tm,tm_mday ) p_tm	(fromIntegral mday :: CInt)
-        (#poke struct tm,tm_mon  ) p_tm	(fromIntegral (fromEnum mon) :: CInt)
-        (#poke struct tm,tm_year ) p_tm	(fromIntegral year - 1900 :: CInt)
-        (#poke struct tm,tm_isdst) p_tm	isDst
-	t <- throwIf (== -1) (\_ -> "Time.toClockTime: invalid input")
-		(mktime p_tm)
-        -- 
+        (#poke struct tm,tm_sec  ) p_tm (fromIntegral sec  :: CInt)
+        (#poke struct tm,tm_min  ) p_tm (fromIntegral minute :: CInt)
+        (#poke struct tm,tm_hour ) p_tm (fromIntegral hour :: CInt)
+        (#poke struct tm,tm_mday ) p_tm (fromIntegral mday :: CInt)
+        (#poke struct tm,tm_mon  ) p_tm (fromIntegral (fromEnum mon) :: CInt)
+        (#poke struct tm,tm_year ) p_tm (fromIntegral year - 1900 :: CInt)
+        (#poke struct tm,tm_isdst) p_tm isDst
+        t <- throwIf (== -1) (\_ -> "Time.toClockTime: invalid input")
+                (mktime p_tm)
+        --
         -- mktime expects its argument to be in the local timezone, but
         -- toUTCTime makes UTC-encoded CalendarTime's ...
-        -- 
+        --
         -- Since there is no any_tz_struct_tm-to-time_t conversion
         -- function, we have to fake one... :-) If not in all, it works in
         -- most cases (before, it was the other way round...)
-        -- 
+        --
         -- Luckily, mktime tells us, what it *thinks* the timezone is, so,
         -- to compensate, we add the timezone difference to mktime's
         -- result.
-        -- 
+        --
         gmtoffset <- gmtoff p_tm
         let res = realToInteger t - fromIntegral tz + fromIntegral gmtoffset
-	return (TOD res psec)
+        return (TOD res psec)
 #endif /* ! __HUGS__ */
 
 -- -----------------------------------------------------------------------------
@@ -631,7 +617,7 @@ formatCalendarTime l fmt cal@(CalendarTime year mon day hour minute sec _
         decode 'r' = doFmt (time12Fmt l)
         decode 'T' = doFmt "%H:%M:%S"
         decode 't' = "\t"
-        decode 'S' = show2 sec			     -- seconds
+        decode 'S' = show2 sec                       -- seconds
         decode 's' = let TOD esecs _ = toClockTime cal in show esecs
                                                      -- number of secs since Epoch.
         decode 'U' = show2 ((yday + 7 - fromEnum wday) `div` 7) -- week number, starting on Sunday.
@@ -639,14 +625,14 @@ formatCalendarTime l fmt cal@(CalendarTime year mon day hour minute sec _
                            if n == 0 then 7 else n)
         decode 'V' =                                 -- week number (as per ISO-8601.)
             let (week, days) =                       -- [yep, I've always wanted to be able to display that too.]
-                   (yday + 7 - if fromEnum wday > 0 then 
+                   (yday + 7 - if fromEnum wday > 0 then
                                fromEnum wday - 1 else 6) `divMod` 7
             in  show2 (if days >= 4 then
-                          week+1 
+                          week+1
                        else if week == 0 then 53 else week)
 
-        decode 'W' =				     -- week number, weeks starting on monday
-            show2 ((yday + 7 - if fromEnum wday > 0 then 
+        decode 'W' =                                 -- week number, weeks starting on monday
+            show2 ((yday + 7 - if fromEnum wday > 0 then
                                fromEnum wday - 1 else 6) `div` 7)
         decode 'w' = show (fromEnum wday)            -- numeric day of the week, weeks starting on Sunday.
         decode 'X' = doFmt (timeFmt l)               -- locale's preferred way of printing time.
@@ -688,7 +674,7 @@ timeDiffToString = formatTimeDiff defaultTimeLocale "%c"
 formatTimeDiff :: TimeLocale -> String -> TimeDiff -> String
 formatTimeDiff l fmt (TimeDiff year month day hour minute sec _)
  = doFmt fmt
-  where 
+  where
    doFmt ""         = ""
    doFmt ('%':'-':cs) = doFmt ('%':cs) -- padding not implemented
    doFmt ('%':'_':cs) = doFmt ('%':cs) -- padding not implemented
@@ -727,8 +713,8 @@ formatTimeDiff l fmt (TimeDiff year month day hour minute sec _)
       c   -> [c]
 
    defaultTimeDiffFmt =
-       foldr (\ (v,s) rest -> 
-                  (if v /= 0 
+       foldr (\ (v,s) rest ->
+                  (if v /= 0
                      then show v ++ ' ':(addS v s)
                        ++ if null rest then "" else ", "
                      else "") ++ rest

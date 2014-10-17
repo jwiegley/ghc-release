@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, GADTs, TypeSynonymInstances, FlexibleInstances, RankNTypes #-}
+{-# LANGUAGE CPP, ScopedTypeVariables, GADTs, TypeSynonymInstances, FlexibleInstances, RankNTypes #-}
 #if __GLASGOW_HASKELL__ >= 701
 {-# LANGUAGE Safe #-}
 #endif
@@ -18,7 +18,9 @@ import Compiler.Hoopl.Label (Label, uniqueToLbl)
 import Compiler.Hoopl.Block
 import Compiler.Hoopl.Graph as U
 import Compiler.Hoopl.Unique
-import Control.Monad (liftM2)
+
+import Control.Monad (Monad(..),liftM2)
+import Prelude (($),(.),foldr,map) -- for the purpose of 'hiding ((<*>))'
 
 {-|
 As noted in the paper, we can define a single, polymorphic type of 

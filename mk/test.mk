@@ -37,7 +37,17 @@ else
 exeext = .exe
 endif
 
+ifneq "$(filter $(TargetOS_CPP),cygwin32 mingw32)" ""
+dllext = .dll
+else ifeq "$(TargetOS_CPP)" "darwin"
+dllext = .dylib
+else
+dllext = .so
+endif
+
 RUNTEST_OPTS += -e ghc_compiler_always_flags="'$(TEST_HC_OPTS)'"
+
+RUNTEST_OPTS += -e ghc_debugged=$(GhcDebugged)
 
 ifeq "$(GhcWithNativeCodeGen)" "YES"
 RUNTEST_OPTS += -e ghc_with_native_codegen=1
@@ -45,8 +55,22 @@ else
 RUNTEST_OPTS += -e ghc_with_native_codegen=0
 endif
 
-HASKELL98_LIBDIR := $(shell "$(GHC_PKG)" field haskell98 library-dirs | sed 's/^[^:]*: *//')
-HAVE_PROFILING := $(shell if [ -f $(subst \,/,$(HASKELL98_LIBDIR))/libHShaskell98-*_p.a ]; then echo YES; else echo NO; fi)
+GHC_PRIM_LIBDIR := $(shell "$(GHC_PKG)" field ghc-prim library-dirs --simple-output)
+HAVE_VANILLA := $(shell if [ -f $(subst \,/,$(GHC_PRIM_LIBDIR))/GHC/PrimopWrappers.hi ]; then echo YES; else echo NO; fi)
+HAVE_DYNAMIC := $(shell if [ -f $(subst \,/,$(GHC_PRIM_LIBDIR))/GHC/PrimopWrappers.dyn_hi ]; then echo YES; else echo NO; fi)
+HAVE_PROFILING := $(shell if [ -f $(subst \,/,$(GHC_PRIM_LIBDIR))/GHC/PrimopWrappers.p_hi ]; then echo YES; else echo NO; fi)
+
+ifeq "$(HAVE_VANILLA)" "YES"
+RUNTEST_OPTS += -e ghc_with_vanilla=1
+else
+RUNTEST_OPTS += -e ghc_with_vanilla=0
+endif
+
+ifeq "$(HAVE_DYNAMIC)" "YES"
+RUNTEST_OPTS += -e ghc_with_dynamic=1
+else
+RUNTEST_OPTS += -e ghc_with_dynamic=0
+endif
 
 ifeq "$(HAVE_PROFILING)" "YES"
 RUNTEST_OPTS += -e ghc_with_profiling=1
@@ -80,13 +104,34 @@ else
 RUNTEST_OPTS += -e ghc_unregisterised=0
 endif
 
+ifeq "$(GhcDynamicByDefault)" "YES"
+RUNTEST_OPTS += -e ghc_dynamic_by_default=True
+CABAL_MINIMAL_BUILD = --enable-shared --disable-library-vanilla
+else
+RUNTEST_OPTS += -e ghc_dynamic_by_default=False
+CABAL_MINIMAL_BUILD = --enable-library-vanilla --disable-shared
+endif
+
+ifeq "$(GhcDynamic)" "YES"
+RUNTEST_OPTS += -e ghc_dynamic=True
+CABAL_PLUGIN_BUILD = --enable-shared --disable-library-vanilla
+else
+RUNTEST_OPTS += -e ghc_dynamic=False
+CABAL_PLUGIN_BUILD = --enable-library-vanilla --disable-shared
+endif
+
 ifeq "$(GhcWithSMP)" "YES"
 RUNTEST_OPTS += -e ghc_with_smp=1
 else
 RUNTEST_OPTS += -e ghc_with_smp=0
 endif
 
-ifneq "$(shell $(SHELL) -c 'llc --version | grep version' 2> /dev/null)" ""
+ifeq "$(LLC)" ""
+RUNTEST_OPTS += -e ghc_with_llvm=0
+else ifneq "$(LLC)" "llc"
+# If we have a real detected value for LLVM, then it really ought to work
+RUNTEST_OPTS += -e ghc_with_llvm=1
+else ifneq "$(shell $(SHELL) -c 'llc --version | grep version' 2> /dev/null)" ""
 RUNTEST_OPTS += -e ghc_with_llvm=1
 else
 RUNTEST_OPTS += -e ghc_with_llvm=0
@@ -114,6 +159,14 @@ ifneq "$(THREADS)" ""
 RUNTEST_OPTS += --threads=$(THREADS)
 endif
 
+ifneq "$(VERBOSE)" ""
+RUNTEST_OPTS += --verbose=$(VERBOSE)
+endif
+
+ifeq "$(SKIP_PERF_TESTS)" "YES"
+RUNTEST_OPTS += --skip-perf-tests
+endif
+
 ifneq "$(CLEAN_ONLY)" ""
 RUNTEST_OPTS += -e clean_only=True
 else
@@ -129,7 +182,6 @@ RUNTEST_OPTS +=  \
 	--config=$(CONFIG) \
 	-e 'config.confdir="$(CONFIGDIR)"' \
 	-e 'config.compiler="$(TEST_HC)"' \
-	-e 'config.compiler_always_flags.append("$(EXTRA_HC_OPTS)")' \
 	-e 'config.ghc_pkg="$(GHC_PKG)"' \
 	-e 'config.hp2ps="$(HP2PS_ABS)"' \
 	-e 'config.hpc="$(HPC)"' \
@@ -151,6 +203,12 @@ endif
 
 RUNTEST_OPTS +=  \
 	$(EXTRA_RUNTEST_OPTS)
+
+ifeq "$(list_broken)" "YES"
+set_list_broken = -e config.list_broken=True
+else
+set_list_broken = 
+endif
 
 ifeq "$(fast)" "YES"
 setfast = -e config.fast=1
@@ -186,6 +244,7 @@ test: $(TIMEOUT_PROGRAM)
 		$(patsubst %, --only=%, $(TESTS)) \
 		$(patsubst %, --way=%, $(WAY)) \
 		$(patsubst %, --skipway=%, $(SKIPWAY)) \
+		$(set_list_broken) \
 		$(setfast) \
 		$(setaccept)
 
@@ -196,4 +255,7 @@ accept:
 
 fast:
 	$(MAKE) fast=YES
+
+list_broken:
+	$(MAKE) list_broken=YES
 

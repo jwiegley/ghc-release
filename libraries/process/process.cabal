@@ -1,36 +1,56 @@
-name:         process
-version:      1.1.0.2
-license:      BSD3
-license-file: LICENSE
-maintainer:   libraries@haskell.org
-bug-reports: http://hackage.haskell.org/trac/ghc/newticket?component=libraries/process
-synopsis:     Process libraries
-category:     System
+name:          process
+version:       1.2.0.0
+-- GHC 7.6.1 released with 1.1.0.2
+license:       BSD3
+license-file:  LICENSE
+maintainer:    libraries@haskell.org
+bug-reports:   http://ghc.haskell.org/trac/ghc/newticket?component=libraries/process
+synopsis:      Process libraries
+category:      System
+build-type:    Configure
+cabal-version: >=1.10
 description:
     This package contains libraries for dealing with system processes.
+
 extra-source-files:
-    aclocal.m4 configure.ac configure
+    aclocal.m4
+    changelog
+    configure
+    configure.ac
     include/HsProcessConfig.h.in
+    process.buildinfo
+
 extra-tmp-files:
-    config.log config.status autom4te.cache
+    autom4te.cache
+    config.log
+    config.status
     include/HsProcessConfig.h
-build-type:    Configure
-cabal-version: >=1.6
 
 source-repository head
     type:     git
-    location: http://darcs.haskell.org/packages/process.git/
+    location: http://git.haskell.org/packages/process.git
 
-flag base4
+source-repository this
+    type:     git
+    location: http://git.haskell.org/packages/process.git
+    tag:      process-1.2.0.0-release
 
-Library {
-  exposed-modules: System.Cmd
-  if !impl(nhc98) {
+library
+    default-language: Haskell2010
+    other-extensions:
+        BangPatterns
+        CPP
+        InterruptibleFFI
+        RecordWildCards
+        Trustworthy
+
     exposed-modules:
+        System.Cmd
         System.Process
     if impl(ghc)
         exposed-modules:
-          System.Process.Internals
+            System.Process.Internals
+
     c-sources:
         cbits/runProcess.c
     include-dirs: include
@@ -39,27 +59,15 @@ Library {
     install-includes:
         runProcess.h
         processFlags.h
-        HsProcessConfig.h
+
+    ghc-options: -Wall
+
+    build-depends: base      >= 4.4 && < 4.8,
+                   directory >= 1.1 && < 1.3,
+                   filepath  >= 1.2 && < 1.4,
+                   deepseq   >= 1.1 && < 1.4
     if os(windows)
-        build-depends: Win32 >=2.2.0.0
+        build-depends: Win32 >=2.2 && < 2.4
         extra-libraries: kernel32
     else
-        build-depends: unix
-  }
-
-  if (flag(base4)) {
-     build-depends: base >= 4 && < 5
-     cpp-options: -Dbase4
-     -- later, we can use the new MIN_VERSION_base() stuff that
-     -- arrived in Cabal-1.6.
-  } else {
-     build-depends: base >= 3 && < 4
-     cpp-options: -Dbase3
-  }
-
-  build-depends: directory >= 1.0 && < 1.3,
-                 filepath  >= 1.1 && < 1.4,
-                 deepseq   >= 1.1 && < 1.4
-
-  extensions: CPP
-}
+        build-depends: unix >= 2.5 && < 2.8

@@ -23,6 +23,18 @@ T6054:
 	-'$(TEST_HC)' $(TEST_HC_OPTS) -c T6054.hs
 
 T7022:
-	$(RM) -f T7022.hi T7022.o T7022a.hi T7022a.o
-	'$(TEST_HC)' $(TEST_HC_OPTS) -c T7022a.hs
-	-'$(TEST_HC)' $(TEST_HC_OPTS) -c -v0 T7022.hs
+	$(RM) -f T7022.hi T7022.o T7022a.hi T7022a.o T7022b.hi T7022b.o
+	'$(TEST_HC)' $(TEST_HC_OPTS) $(ghcThWayFlags) -c T7022a.hs
+	'$(TEST_HC)' $(TEST_HC_OPTS) $(ghcThWayFlags) -c T7022b.hs -v0
+	-'$(TEST_HC)' $(TEST_HC_OPTS) $(ghcThWayFlags) -c -v0 T7022.hs
+
+T7438:
+	$(RM) -f T7438.hi T7438.o T7438a.hi T7438a.o
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T7438a.hs
+	-'$(TEST_HC)' $(TEST_HC_OPTS) -c T7438.hs
+
+# Need to compile separately so that the interface files get read
+T8449:
+	$(RM) -f T8449.hi T8449.o T8449a.hi T8449a.o
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T8449a.hs
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T8449.hs

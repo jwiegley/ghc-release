@@ -1,4 +1,5 @@
-#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE CPP #-}
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Safe #-}
 #endif
 -----------------------------------------
@@ -21,26 +22,26 @@ import qualified Control.Exception as Exception
 import Data.List(foldl')
 import Data.Char (ord)
 import Data.Bits (xor)
-import Data.Word 
+import Data.Word
 
--- | 'HpcPos' is an Hpc local rendition of a Span. 
+-- | 'HpcPos' is an Hpc local rendition of a Span.
 data HpcPos = P !Int !Int !Int !Int deriving (Eq, Ord)
 
--- | 'fromHpcPos' explodes the HpcPos into line:column-line:colunm
+-- | 'fromHpcPos' explodes the HpcPos into /line:column/-/line:colunm/
 fromHpcPos :: HpcPos -> (Int,Int,Int,Int)
 fromHpcPos (P l1 c1 l2 c2) = (l1,c1,l2,c2)
 
--- | 'toHpcPos' implodes to HpcPos, from line:column-line:colunm
+-- | 'toHpcPos' implodes to HpcPos, from /line:column/-/line:colunm/
 toHpcPos :: (Int,Int,Int,Int) -> HpcPos
 toHpcPos (l1,c1,l2,c2) = P l1 c1 l2 c2
 
--- | asks the question, is the first argument inside the second argument.
+-- | Predicate determining whether the first argument is inside the second argument.
 insideHpcPos :: HpcPos -> HpcPos -> Bool
-insideHpcPos small big = 
-	     sl1 >= bl1 &&
-	     (sl1 /= bl1 || sc1 >= bc1) &&
-	     sl2 <= bl2 &&
-	     (sl2 /= bl2 || sc2 <= bc2)
+insideHpcPos small big =
+             sl1 >= bl1 &&
+             (sl1 /= bl1 || sc1 >= bc1) &&
+             sl2 <= bl2 &&
+             (sl2 /= bl2 || sc2 <= bc2)
   where (sl1,sc1,sl2,sc2) = fromHpcPos small
         (bl1,bc1,bl2,bc2) = fromHpcPos big
 
@@ -52,11 +53,11 @@ instance Read HpcPos where
       where
          (before,after)   = span (/= ',') pos
          (lhs0,rhs0)    = case span (/= '-') before of
-	 		       (lhs,'-':rhs) -> (lhs,rhs)
-			       (lhs,"")      -> (lhs,lhs)
-			       _ -> error "bad parse"
-         (l1,':':c1)	  = span (/= ':') lhs0
-         (l2,':':c2)	  = span (/= ':') rhs0
+                               (lhs,'-':rhs) -> (lhs,rhs)
+                               (lhs,"")      -> (lhs,lhs)
+                               _ -> error "bad parse"
+         (l1,':':c1)      = span (/= ':') lhs0
+         (l2,':':c2)      = span (/= ':') rhs0
 
 ------------------------------------------------------------------------------
 
@@ -68,9 +69,9 @@ class HpcHash a where
 newtype Hash = Hash Word32 deriving (Eq)
 
 instance Read Hash where
-  readsPrec p n = [ (Hash v,rest) 
-  	          | (v,rest) <- readsPrec p n 
-		  ]
+  readsPrec p n = [ (Hash v,rest)
+                  | (v,rest) <- readsPrec p n
+                  ]
 
 instance Show Hash where
   showsPrec p (Hash n) = showsPrec p n
@@ -111,4 +112,3 @@ hxor (Hash x) (Hash y) = Hash $ x `xor` y
 
 catchIO :: IO a -> (Exception.IOException -> IO a) -> IO a
 catchIO = Exception.catch
-

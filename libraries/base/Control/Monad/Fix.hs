@@ -1,5 +1,4 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -19,23 +18,15 @@
 -----------------------------------------------------------------------------
 
 module Control.Monad.Fix (
-        MonadFix(
-           mfix -- :: (a -> m a) -> m a
-         ),
-        fix     -- :: (a -> a) -> a
+        MonadFix(mfix),
+        fix
   ) where
 
 import Prelude
 import System.IO
 import Data.Function (fix)
-#ifdef __HUGS__
-import Hugs.Prelude (MonadFix(mfix))
-#endif
-#if defined(__GLASGOW_HASKELL__)
 import GHC.ST
-#endif
 
-#ifndef __HUGS__
 -- | Monads having fixed points with a \'knot-tying\' semantics.
 -- Instances of 'MonadFix' should satisfy the following laws:
 --
@@ -60,7 +51,6 @@ class (Monad m) => MonadFix m where
         -- output fed back as the input.  Hence @f@ should not be strict,
         -- for then @'mfix' f@ would diverge.
         mfix :: (a -> m a) -> m a
-#endif /* !__HUGS__ */
 
 -- Instances of MonadFix for Prelude monads
 
@@ -85,8 +75,5 @@ instance MonadFix (Either e) where
              where unRight (Right x) = x
                    unRight (Left  _) = error "mfix Either: Left"
 
-#if defined(__GLASGOW_HASKELL__)
 instance MonadFix (ST s) where
         mfix = fixST
-#endif
-

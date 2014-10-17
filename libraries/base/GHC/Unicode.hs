@@ -1,6 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, ForeignFunctionInterface #-}
-{-# OPTIONS -#include "WCsubst.h" #-}
+{-# LANGUAGE CPP, NoImplicitPrelude #-}
 {-# OPTIONS_HADDOCK hide #-}
 
 -----------------------------------------------------------------------------
@@ -19,7 +18,6 @@
 --
 -----------------------------------------------------------------------------
 
--- #hide
 module GHC.Unicode (
         isAscii, isLatin1, isControl,
         isAsciiUpper, isAsciiLower,

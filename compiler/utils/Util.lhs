@@ -9,16 +9,16 @@
 module Util (
         -- * Flags dependent on the compiler build
         ghciSupported, debugIsOn, ncgDebugIsOn,
-        ghciTablesNextToCode, isDynamicGhcLib,
-        isWindowsHost, isWindowsTarget, isDarwinTarget,
+        ghciTablesNextToCode,
+        isWindowsHost, isDarwinHost,
 
         -- * General list processing
         zipEqual, zipWithEqual, zipWith3Equal, zipWith4Equal,
-        zipLazy, stretchZipWith,
+        zipLazy, stretchZipWith, zipWithAndUnzip,
 
         unzipWith,
 
-        mapFst, mapSnd,
+        mapFst, mapSnd, chkAppend,
         mapAndUnzip, mapAndUnzip3, mapAccumL2,
         nOfThem, filterOut, partitionWith, splitEithers,
 
@@ -87,6 +87,7 @@ module Util (
         escapeSpaces,
         parseSearchPath,
         Direction(..), reslash,
+        makeRelativeTo,
 
         -- * Utils for defining Data instances
         abstractConstr, abstractDataType, mkNoRepType,
@@ -178,13 +179,6 @@ ghciTablesNextToCode = True
 ghciTablesNextToCode = False
 #endif
 
-isDynamicGhcLib :: Bool
-#ifdef DYNAMIC
-isDynamicGhcLib = True
-#else
-isDynamicGhcLib = False
-#endif
-
 isWindowsHost :: Bool
 #ifdef mingw32_HOST_OS
 isWindowsHost = True
@@ -192,18 +186,11 @@ isWindowsHost = True
 isWindowsHost = False
 #endif
 
-isWindowsTarget :: Bool
-#ifdef mingw32_TARGET_OS
-isWindowsTarget = True
+isDarwinHost :: Bool
+#ifdef darwin_HOST_OS
+isDarwinHost = True
 #else
-isWindowsTarget = False
-#endif
-
-isDarwinTarget :: Bool
-#ifdef darwin_TARGET_OS
-isDarwinTarget = True
-#else
-isDarwinTarget = False
+isDarwinHost = False
 #endif
 \end{code}
 
@@ -272,6 +259,13 @@ splitEithers (e : es) = case e of
                         Left x -> (x:xs, ys)
                         Right y -> (xs, y:ys)
     where (xs,ys) = splitEithers es
+
+chkAppend :: [a] -> [a] -> [a]
+-- Checks for the second arguemnt being empty
+-- Used in situations where that situation is common
+chkAppend xs ys 
+  | null ys   = xs
+  | otherwise = xs ++ ys
 \end{code}
 
 A paranoid @zip@ (and some @zipWith@ friends) that checks the lists
@@ -356,6 +350,14 @@ mapAndUnzip3 f (x:xs)
         (rs1, rs2, rs3) = mapAndUnzip3 f xs
     in
     (r1:rs1, r2:rs2, r3:rs3)
+
+zipWithAndUnzip :: (a -> b -> (c,d)) -> [a] -> [b] -> ([c],[d])
+zipWithAndUnzip f (a:as) (b:bs)
+  = let (r1,  r2)  = f a b
+        (rs1, rs2) = zipWithAndUnzip f as bs
+    in
+    (r1:rs1, r2:rs2)
+zipWithAndUnzip _ _ _ = ([],[])
 
 mapAccumL2 :: (s1 -> s2 -> a -> (s1, s2, b)) -> s1 -> s2 -> [a] -> (s1, s2, [b])
 mapAccumL2 f s1 s2 xs = (s1', s2', ys)
@@ -572,7 +574,15 @@ splitAtList (_:xs) (y:ys) = (y:ys', ys'')
 
 -- drop from the end of a list
 dropTail :: Int -> [a] -> [a]
-dropTail n = reverse . drop n . reverse
+-- Specification: dropTail n = reverse . drop n . reverse
+-- Better implemention due to Joachim Breitner
+-- http://www.joachim-breitner.de/blog/archives/600-On-taking-the-last-n-elements-of-a-list.html
+dropTail n xs
+  = go (drop n xs) xs
+  where
+    go (_:ys) (x:xs) = x : go ys xs 
+    go _      _      = []  -- Stop when ys runs out
+                           -- It'll always run out before xs does
 
 snocView :: [a] -> Maybe ([a],a)
         -- Split off the last element
@@ -1013,6 +1023,17 @@ reslash d = f
           slash = case d of
                   Forwards -> '/'
                   Backwards -> '\\'
+
+makeRelativeTo :: FilePath -> FilePath -> FilePath
+this `makeRelativeTo` that = directory </> thisFilename
+    where (thisDirectory, thisFilename) = splitFileName this
+          thatDirectory = dropFileName that
+          directory = joinPath $ f (splitPath thisDirectory)
+                                   (splitPath thatDirectory)
+
+          f (x : xs) (y : ys)
+           | x == y = f xs ys
+          f xs ys = replicate (length ys) ".." ++ xs
 \end{code}
 
 %************************************************************************
@@ -1090,7 +1111,7 @@ charToC w =
 hashString :: String -> Int32
 hashString = foldl' f golden
    where f m c = fromIntegral (ord c) * magic + hashInt32 m
-         magic = 0xdeadbeef
+         magic = fromIntegral (0xdeadbeef :: Word32)
 
 golden :: Int32
 golden = 1013904242 -- = round ((sqrt 5 - 1) * 2^32) :: Int32

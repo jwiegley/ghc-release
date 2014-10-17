@@ -1,24 +1,42 @@
 # Just do the normal way, SafeHaskell is all in the frontend
-def f( opts ):
+def f( name, opts ):
   opts.only_ways = ['normal']
+
+def normaliseArrayPackage(str):
+    return re.sub('array-[0-9]+(\.[0-9]+)*', 'array-<VERSION>', str)
 
 def normaliseBytestringPackage(str):
     return re.sub('bytestring-[0-9]+(\.[0-9]+)*', 'bytestring-<VERSION>', str)
 
+def ignoreLdOutput(str):
+    return re.sub('Creating library file: pdb.safePkg01/dist.build.libHSsafePkg01-1.0-ghc[0-9.]*.dll.a\n', '', str)
+
 setTestOpts(f)
+
+if config.have_vanilla:
+    vanilla = '--enable-library-vanilla'
+else:
+    vanilla = '--disable-library-vanilla'
 
 if config.have_profiling:
     prof = '--enable-library-profiling'
 else:
-    prof = ''
+    prof = '--disable-library-profiling'
 
-make_args = 'PROF=' + prof
+if config.have_shared_libs:
+    dyn = '--enable-shared'
+else:
+    dyn = '--disable-shared'
+
+make_args = 'VANILLA=' + vanilla + ' PROF=' + prof + ' DYN=' + dyn
 
 # Test building a package, that trust values are set correctly
 # and can be changed correctly
 test('safePkg01',
      [clean_cmd('$MAKE -s --no-print-directory cleanPackageDatabase.safePkg01'),
-      normalise_fun(normaliseBytestringPackage)],
+      normalise_errmsg_fun(ignoreLdOutput),
+      normalise_fun(two_normalisers(normaliseArrayPackage,
+                                    normaliseBytestringPackage))],
      run_command, 
      ['$MAKE -s --no-print-directory safePkg01 ' + make_args])
 
@@ -31,7 +49,8 @@ test('ImpSafe02', normal, compile, ['-distrust base'])
 test('ImpSafeOnly01',
      [pre_cmd('$MAKE -s --no-print-directory mkPackageDatabase.ImpSafeOnly01 ' + make_args),
       clean_cmd('$MAKE -s --no-print-directory cleanPackageDatabase.ImpSafeOnly01')],
-     compile, ['-fpackage-trust -package-db pdb.ImpSafeOnly01/local.db -trust base'])
+     compile,
+     ['-fpackage-trust -package-db pdb.ImpSafeOnly01/local.db -trust base'])
 
 test('ImpSafeOnly02',
      [pre_cmd('$MAKE -s --no-print-directory mkPackageDatabase.ImpSafeOnly02 ' + make_args),

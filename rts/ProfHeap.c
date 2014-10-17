@@ -97,7 +97,7 @@ static void dumpCensus( Census *census );
 static rtsBool closureSatisfiesConstraints( StgClosure* p );
 
 /* ----------------------------------------------------------------------------
- * Find the "closure identity", which is a unique pointer reresenting
+ * Find the "closure identity", which is a unique pointer representing
  * the band to which this closure's heap space is attributed in the
  * heap profile.
  * ------------------------------------------------------------------------- */
@@ -262,12 +262,8 @@ initEra(Census *census)
 STATIC_INLINE void
 freeEra(Census *census)
 {
-    if (RtsFlags.ProfFlags.bioSelector != NULL)
-        // when bioSelector==NULL, these are freed in heapCensus()
-    {
-        arenaFree(census->arena);
-        freeHashTable(census->hash, NULL);
-    }
+    arenaFree(census->arena);
+    freeHashTable(census->hash, NULL);
 }
 
 /* --------------------------------------------------------------------------
@@ -364,6 +360,9 @@ printSample(rtsBool beginSample, StgDouble sampleValue)
     fprintf(hp_file, "%s %" FMT_Word64 ".%02" FMT_Word64 "\n",
             (beginSample ? "BEGIN_SAMPLE" : "END_SAMPLE"),
             (StgWord64)integralPart, (StgWord64)(fractionalPart * 100));
+    if (!beginSample) {
+        fflush(hp_file);
+    }
 }
 
 /* --------------------------------------------------------------------------
@@ -464,8 +463,12 @@ endHeapProfiling(void)
 #ifdef PROFILING
     if (doingLDVProfiling()) {
         nat t;
-        for (t = 1; t <= era; t++) {
-            freeEra( &censuses[t] );
+        if (RtsFlags.ProfFlags.bioSelector != NULL) {
+            for (t = 1; t <= era; t++) {
+                freeEra( &censuses[t] );
+            }
+        } else {
+            freeEra( &censuses[era] );
         }
     } else {
         freeEra( &censuses[0] );
@@ -988,7 +991,8 @@ heapCensusChain( Census *census, bdescr *bd )
 
             case MVAR_CLEAN:
             case MVAR_DIRTY:
-	    case WEAK:
+            case TVAR:
+            case WEAK:
 	    case PRIM:
 	    case MUT_PRIM:
 	    case MUT_VAR_CLEAN:
@@ -1121,8 +1125,7 @@ void heapCensus (Time t)
 #ifdef PROFILING
   if (RtsFlags.ProfFlags.bioSelector == NULL)
   {
-      freeHashTable( census->hash, NULL/* don't free the elements */ );
-      arenaFree( census->arena );
+      freeEra(census);
       census->hash = NULL;
       census->arena = NULL;
   }

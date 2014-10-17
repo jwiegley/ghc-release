@@ -1,6 +1,10 @@
 {-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE CPP #-}
 
+#if defined(__GLASGOW_HASKELL__) && __GLASGOW_HASKELL__ >= 706
+{-# LANGUAGE PolyKinds, GADTs #-}
+#endif
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Control.Category
@@ -16,6 +20,9 @@
 module Control.Category where
 
 import qualified Prelude
+import Data.Type.Coercion
+import Data.Type.Equality
+import GHC.Prim (coerce)
 
 infixr 9 .
 infixr 1 >>>, <<<
@@ -41,6 +48,14 @@ class Category cat where
 instance Category (->) where
     id = Prelude.id
     (.) = (Prelude..)
+
+instance Category (:~:) where
+  id          = Refl
+  Refl . Refl = Refl
+
+instance Category Coercion where
+  id = Coercion
+  (.) Coercion = coerce
 
 -- | Right-to-left composition
 (<<<) :: Category cat => cat b c -> cat a b -> cat a c

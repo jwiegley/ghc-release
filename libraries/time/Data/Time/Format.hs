@@ -73,25 +73,25 @@ formatChar c locale mpado t = case (formatCharacter c) of
 --
 -- [@%r@] as 'time12Fmt' @locale@ (e.g. @%I:%M:%S %p@)
 --
--- [@%P@] day half from ('amPm' @locale@), converted to lowercase, @am@, @pm@
+-- [@%P@] day-half of day from ('amPm' @locale@), converted to lowercase, @am@, @pm@
 --
--- [@%p@] day half from ('amPm' @locale@), @AM@, @PM@
+-- [@%p@] day-half of day from ('amPm' @locale@), @AM@, @PM@
 --
--- [@%H@] hour, 24-hour, leading 0 as needed, @00@ - @23@
+-- [@%H@] hour of day (24-hour), 0-padded to two chars, @00@ - @23@
 --
--- [@%I@] hour, 12-hour, leading 0 as needed, @01@ - @12@
+-- [@%k@] hour of day (24-hour), space-padded to two chars, @ 0@ - @23@
 --
--- [@%k@] hour, 24-hour, leading space as needed, @ 0@ - @23@
+-- [@%I@] hour of day-half (12-hour), 0-padded to two chars, @01@ - @12@
 --
--- [@%l@] hour, 12-hour, leading space as needed, @ 1@ - @12@
+-- [@%l@] hour of day-half (12-hour), space-padded to two chars, @ 1@ - @12@
 --
--- [@%M@] minute, @00@ - @59@
+-- [@%M@] minute of hour, 0-padded to two chars, @00@ - @59@
 --
--- [@%S@] second, without decimal part, @00@ - @60@
+-- [@%S@] second of minute (without decimal part), 0-padded to two chars, @00@ - @60@
 --
--- [@%q@] picosecond, including trailing zeros, @000000000000@ - @999999999999@.
+-- [@%q@] picosecond of second, 0-padded to twelve chars, @000000000000@ - @999999999999@.
 --
--- [@%Q@] decimal point and up to 12 second decimals, without trailing zeros.
+-- [@%Q@] decimal point and fraction of second, up to 12 second decimals, without trailing zeros.
 -- For a whole number of seconds, @%Q@ produces the empty string.
 --
 -- For 'UTCTime' and 'ZonedTime':
@@ -109,43 +109,43 @@ formatChar c locale mpado t = case (formatCharacter c) of
 --
 -- [@%x@] as 'dateFmt' @locale@ (e.g. @%m\/%d\/%y@)
 --
--- [@%Y@] year
+-- [@%Y@] year, no padding. Note @%0y@ and @%_y@ pad to four chars
 --
--- [@%y@] last two digits of year, @00@ - @99@
+-- [@%y@] year of century, 0-padded to two chars, @00@ - @99@
 --
--- [@%C@] century (being the first two digits of the year), @00@ - @99@
+-- [@%C@] century, no padding. Note @%0C@ and @%_C@ pad to two chars
 --
 -- [@%B@] month name, long form ('fst' from 'months' @locale@), @January@ - @December@
 --
 -- [@%b@, @%h@] month name, short form ('snd' from 'months' @locale@), @Jan@ - @Dec@
 --
--- [@%m@] month of year, leading 0 as needed, @01@ - @12@
+-- [@%m@] month of year, 0-padded to two chars, @01@ - @12@
 --
--- [@%d@] day of month, leading 0 as needed, @01@ - @31@
+-- [@%d@] day of month, 0-padded to two chars, @01@ - @31@
 --
--- [@%e@] day of month, leading space as needed,  @ 1@ - @31@
+-- [@%e@] day of month, space-padded to two chars,  @ 1@ - @31@
 --
--- [@%j@] day of year for Ordinal Date format, @001@ - @366@
+-- [@%j@] day of year, 0-padded to three chars, @001@ - @366@
 --
--- [@%G@] year for Week Date format
+-- [@%G@] year for Week Date format, no padding. Note @%0G@ and @%_G@ pad to four chars
 --
--- [@%g@] last two digits of year for Week Date format, @00@ - @99@
+-- [@%g@] year of century for Week Date format, 0-padded to two chars, @00@ - @99@
 --
--- [@%f@] century (first two digits of year) for Week Date format, @00@ - @99@
+-- [@%f@] century for Week Date format, no padding. Note @%0f@ and @%_f@ pad to two chars
 --
--- [@%V@] week for Week Date format, @01@ - @53@
+-- [@%V@] week of year for Week Date format, 0-padded to two chars, @01@ - @53@
 --
--- [@%u@] day for Week Date format, @1@ - @7@
+-- [@%u@] day of week for Week Date format, @1@ - @7@
 --
 -- [@%a@] day of week, short form ('snd' from 'wDays' @locale@), @Sun@ - @Sat@
 --
 -- [@%A@] day of week, long form ('fst' from 'wDays' @locale@), @Sunday@ - @Saturday@
 --
--- [@%U@] week number of year, where weeks start on Sunday (as 'sundayStartWeek'), @00@ - @53@
+-- [@%U@] week of year where weeks start on Sunday (as 'sundayStartWeek'), 0-padded to two chars, @00@ - @53@
 --
 -- [@%w@] day of week number, @0@ (= Sunday) - @6@ (= Saturday)
 --
--- [@%W@] week number of year, where weeks start on Monday (as 'mondayStartWeek'), @00@ - @53@
+-- [@%W@] week of year where weeks start on Monday (as 'mondayStartWeek'), 0-padded to two chars, @00@ - @53@
 formatTime :: (FormatTime t) => TimeLocale -> String -> t -> String
 formatTime _ [] _ = ""
 formatTime locale ('%':'_':c:cs) t = (formatChar c locale (Just (Just ' ')) t) ++ (formatTime locale cs t)
@@ -211,9 +211,9 @@ instance FormatTime Day where
 	formatCharacter 'x' = Just (\locale _ -> formatTime locale (dateFmt locale))
 
 	-- Year Count
-	formatCharacter 'Y' = Just (\_ _ -> show . fst . toOrdinalDate)
+	formatCharacter 'Y' = Just (\_ opt -> (show4 (fromMaybe Nothing opt)) . fst . toOrdinalDate)
 	formatCharacter 'y' = Just (\_ opt -> (show2 (fromMaybe (Just '0') opt)) . mod100 . fst . toOrdinalDate)
-	formatCharacter 'C' = Just (\_ opt -> (show2 (fromMaybe (Just '0') opt)) . div100 . fst . toOrdinalDate)
+	formatCharacter 'C' = Just (\_ opt -> (show2 (fromMaybe Nothing opt)) . div100 . fst . toOrdinalDate)
 	-- Month of Year
 	formatCharacter 'B' = Just (\locale _ -> fst . (\(_,m,_) -> (months locale) !! (m - 1)) . toGregorian)
 	formatCharacter 'b' = Just (\locale _ -> snd . (\(_,m,_) -> (months locale) !! (m - 1)) . toGregorian)
@@ -226,9 +226,9 @@ instance FormatTime Day where
 	formatCharacter 'j' = Just (\_ opt -> (show3 (fromMaybe (Just '0') opt)) . snd . toOrdinalDate)
 
 	-- ISO 8601 Week Date
-	formatCharacter 'G' = Just (\_ _ -> show . (\(y,_,_) -> y) . toWeekDate)
+	formatCharacter 'G' = Just (\_ opt -> (show4 (fromMaybe Nothing opt)) . (\(y,_,_) -> y) . toWeekDate)
 	formatCharacter 'g' = Just (\_ opt -> (show2 (fromMaybe (Just '0') opt)) . mod100 . (\(y,_,_) -> y) . toWeekDate)
-	formatCharacter 'f' = Just (\_ opt -> (show2 (fromMaybe (Just '0') opt)) . div100 . (\(y,_,_) -> y) . toWeekDate)
+	formatCharacter 'f' = Just (\_ opt -> (show2 (fromMaybe Nothing opt)) . div100 . (\(y,_,_) -> y) . toWeekDate)
 
 	formatCharacter 'V' = Just (\_ opt -> (show2 (fromMaybe (Just '0') opt)) . (\(_,w,_) -> w) . toWeekDate)
 	formatCharacter 'u' = Just (\_ _ -> show . (\(_,_,d) -> d) . toWeekDate)

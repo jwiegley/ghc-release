@@ -1,5 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, FlexibleInstances #-}
+{-# LANGUAGE NoImplicitPrelude, FlexibleInstances #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -26,19 +26,14 @@ module Data.String (
  , unwords
  ) where
 
-#ifdef __GLASGOW_HASKELL__
 import GHC.Base
-#endif
-
 import Data.List (lines, words, unlines, unwords)
 
 -- | Class for string-like datastructures; used by the overloaded string
---   extension (-foverloaded-strings in GHC).
+--   extension (-XOverloadedStrings in GHC).
 class IsString a where
     fromString :: String -> a
 
-#ifndef __NHC__
 instance IsString [Char] where
     fromString xs = xs
-#endif
 

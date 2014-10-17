@@ -29,7 +29,8 @@ import Distribution.Version
 
 import Data.Map (Map)
 import Network.URI (URI)
-import Distribution.Compat.Exception
+import Data.ByteString.Lazy (ByteString)
+import Control.Exception
          ( SomeException )
 
 newtype Username = Username { unUsername :: String }
@@ -94,11 +95,16 @@ instance PackageFixedDeps ConfiguredPackage where
 -- | A package description along with the location of the package sources.
 --
 data SourcePackage = SourcePackage {
-    packageInfoId      :: PackageId,
-    packageDescription :: GenericPackageDescription,
-    packageSource      :: PackageLocation (Maybe FilePath)
+    packageInfoId        :: PackageId,
+    packageDescription   :: GenericPackageDescription,
+    packageSource        :: PackageLocation (Maybe FilePath),
+    packageDescrOverride :: PackageDescriptionOverride
   }
   deriving Show
+
+-- | We sometimes need to override the .cabal file in the tarball with
+-- the newer one from the package index.
+type PackageDescriptionOverride = Maybe ByteString
 
 instance Package SourcePackage where packageId = packageInfoId
 

@@ -5,6 +5,7 @@ module System.Console.Haskeline.Backend.Terminfo(
                              where
 
 import System.Console.Terminfo
+import Control.Applicative
 import Control.Monad
 import Data.List(foldl')
 import System.IO
@@ -103,7 +104,7 @@ newtype Draw m a = Draw {unDraw :: (ReaderT Actions
                                     (StateT TermRows
                                     (StateT TermPos
                                     (PosixT m))))) a}
-    deriving (Monad, MonadIO, MonadException,
+    deriving (Functor, Applicative, Monad, MonadIO, MonadException,
               MonadReader Actions, MonadReader Terminal, MonadState TermPos,
               MonadState TermRows,
               MonadReader Handles, MonadReader Encoder)
@@ -194,7 +195,9 @@ runActionT m = do
     return x
 
 output :: TermAction -> ActionM ()
-output = Writer.tell
+output t = Writer.tell t  -- NB: explicit argument enables build with ghc-6.12.3
+                          -- (Probably related to the monomorphism restriction;
+                          -- see GHC ticket #1749).
 
 outputText :: String -> ActionM ()
 outputText str = do

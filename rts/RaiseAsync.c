@@ -33,9 +33,6 @@ static void removeFromQueues(Capability *cap, StgTSO *tso);
 
 static void removeFromMVarBlockedQueue (StgTSO *tso);
 
-static void blockedThrowTo (Capability *cap, 
-                            StgTSO *target, MessageThrowTo *msg);
-
 static void throwToSendMsg (Capability *cap USED_IF_THREADS,
                             Capability *target_cap USED_IF_THREADS, 
                             MessageThrowTo *msg USED_IF_THREADS);
@@ -294,6 +291,7 @@ check_target:
     }
 
     case BlockedOnMVar:
+    case BlockedOnMVarRead:
     {
 	/*
 	  To establish ownership of this TSO, we need to acquire a
@@ -306,7 +304,7 @@ check_target:
 
 	// ASSUMPTION: tso->block_info must always point to a
 	// closure.  In the threaded RTS it does.
-        switch (get_itbl(mvar)->type) {
+        switch (get_itbl((StgClosure *)mvar)->type) {
         case MVAR_CLEAN:
         case MVAR_DIRTY:
             break;
@@ -318,7 +316,7 @@ check_target:
 
         // we have the MVar, let's check whether the thread
 	// is still blocked on the same MVar.
-	if (target->why_blocked != BlockedOnMVar
+	if ((target->why_blocked != BlockedOnMVar && target->why_blocked != BlockedOnMVarRead)
 	    || (StgMVar *)target->block_info.closure != mvar) {
 	    unlockClosure((StgClosure *)mvar, info);
 	    goto retry;
@@ -466,7 +464,7 @@ throwToSendMsg (Capability *cap STG_UNUSED,
 // Block a throwTo message on the target TSO's blocked_exceptions
 // queue.  The current Capability must own the target TSO in order to
 // modify the blocked_exceptions queue.
-static void
+void
 blockedThrowTo (Capability *cap, StgTSO *target, MessageThrowTo *msg)
 {
     debugTraceCap(DEBUG_sched, cap, "throwTo: blocking on thread %lu",
@@ -637,6 +635,7 @@ removeFromQueues(Capability *cap, StgTSO *tso)
     goto done;
 
   case BlockedOnMVar:
+  case BlockedOnMVarRead:
       removeFromMVarBlockedQueue(tso);
       goto done;
 
@@ -829,7 +828,7 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
 	    
 	    SET_HDR(ap,&stg_AP_STACK_info,
 		    ((StgClosure *)frame)->header.prof.ccs /* ToDo */); 
-	    TICK_ALLOC_UP_THK(words+1,0);
+	    TICK_ALLOC_UP_THK(WDS(words+1),0);
 	    
 	    //IF_DEBUG(scheduler,
 	    //	     debugBelch("sched: Updating ");
@@ -880,7 +879,7 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
 	    
             SET_HDR(ap,&stg_AP_STACK_NOUPD_info,
 		    ((StgClosure *)frame)->header.prof.ccs /* ToDo */); 
-            TICK_ALLOC_SE_THK(words+1,0);
+            TICK_ALLOC_SE_THK(WDS(words+1),0);
 
             stack->sp = sp;
             threadStackUnderflow(cap,tso);
@@ -916,7 +915,7 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
 	    // handler in this frame.
 	    //
 	    raise = (StgThunk *)allocate(cap,sizeofW(StgThunk)+1);
-	    TICK_ALLOC_SE_THK(1,0);
+	    TICK_ALLOC_SE_THK(WDS(1),0);
 	    SET_HDR(raise,&stg_raise_info,cf->header.prof.ccs);
 	    raise->payload[0] = exception;
 	    
@@ -924,7 +923,7 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
 	    //
 	    sp = frame - 1;
 	    
-	    /* Ensure that async excpetions are blocked now, so we don't get
+	    /* Ensure that async exceptions are blocked now, so we don't get
 	     * a surprise exception before we get around to executing the
 	     * handler.
 	     */
@@ -959,7 +958,7 @@ raiseAsync(Capability *cap, StgTSO *tso, StgClosure *exception,
                 // transactions, but I don't fully understand the
                 // interaction with STM invariants.
                 stack->sp[1] = (W_)&stg_NO_TREC_closure;
-                stack->sp[0] = (W_)&stg_gc_unpt_r1_info;
+                stack->sp[0] = (W_)&stg_ret_p_info;
                 tso->what_next = ThreadRunGHC;
                 goto done;
 	    }

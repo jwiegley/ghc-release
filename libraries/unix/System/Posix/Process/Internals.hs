@@ -1,4 +1,5 @@
-#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE CPP #-}
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 
@@ -12,10 +13,17 @@ import System.Exit
 import System.IO.Error
 import GHC.Conc (Signal)
 
-data ProcessStatus = Exited ExitCode
-                   | Terminated Signal
-                   | Stopped Signal
-		   deriving (Eq, Ord, Show)
+-- | The exit status of a process
+data ProcessStatus
+   = Exited ExitCode        -- ^ the process exited by calling
+                            -- @exit()@ or returning from @main@
+   | Terminated Signal Bool -- ^ the process was terminated by a
+                            -- signal, the @Bool@ is @True@ if a core
+                            -- dump was produced
+                            --
+                            -- /Since: 2.7.0.0/
+   | Stopped Signal         -- ^ the process was stopped by a signal
+   deriving (Eq, Ord, Show)
 
 -- this function disables the itimer, which would otherwise cause confusing
 -- signals to be sent to the new process.
@@ -36,8 +44,9 @@ decipherWaitStatus wstat =
       else do
         if c_WIFSIGNALED wstat /= 0
 	   then do
-		let termsig = c_WTERMSIG wstat
-                return (Terminated termsig)
+                let termsig    = c_WTERMSIG wstat
+                let coredumped = c_WCOREDUMP wstat /= 0
+                return (Terminated termsig coredumped)
 	   else do
 		if c_WIFSTOPPED wstat /= 0
 		   then do
@@ -64,4 +73,7 @@ foreign import ccall unsafe "__hsunix_wifstopped"
 
 foreign import ccall unsafe "__hsunix_wstopsig"
   c_WSTOPSIG :: CInt -> CInt
+
+foreign import ccall unsafe "__hsunix_wcoredump"
+  c_WCOREDUMP :: CInt -> CInt
 

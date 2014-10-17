@@ -1,15 +1,17 @@
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Haddock.Backends.Html
--- Copyright   :  (c) Simon Marlow   2003-2006,
---                    David Waern    2006-2009,
---                    Mark Lentczner 2010
+-- Copyright   :  (c) Simon Marlow      2003-2006,
+--                    David Waern       2006-2009,
+--                    Mark Lentczner    2010,
+--                    Mateusz Kowalczyk 2013
 -- License     :  BSD-like
 --
 -- Maintainer  :  haddock@projects.haskell.org
 -- Stability   :  experimental
 -- Portability :  portable
 -----------------------------------------------------------------------------
+{-# LANGUAGE CPP #-}
 module Haddock.Backends.Xhtml (
   ppHtml, copyHtmlBits,
   ppHtmlIndex, ppHtmlContents,
@@ -33,9 +35,12 @@ import Text.XHtml hiding ( name, title, p, quote )
 import Haddock.GhcUtils
 
 import Control.Monad         ( when, unless )
+#if !MIN_VERSION_base(4,7,0)
 import Control.Monad.Instances ( ) -- for Functor Either a
+#endif
 import Data.Char             ( toUpper )
-import Data.List             ( sortBy, groupBy, intercalate )
+import Data.Functor          ( (<$>) )
+import Data.List             ( sortBy, groupBy, intercalate, isPrefixOf )
 import Data.Maybe
 import System.FilePath hiding ( (</>) )
 import System.Directory
@@ -45,10 +50,10 @@ import qualified Data.Set as Set hiding ( Set )
 import Data.Function
 import Data.Ord              ( comparing )
 
+import DynFlags (Language(..))
 import GHC hiding ( NoLink, moduleInfo )
 import Name
 import Module
-
 
 --------------------------------------------------------------------------------
 -- * Generating HTML documentation
@@ -125,9 +130,9 @@ headHtml docTitle miniPage themes =
 
 
 srcButton :: SourceURLs -> Maybe Interface -> Maybe Html
-srcButton (Just src_base_url, _, _) Nothing =
+srcButton (Just src_base_url, _, _, _) Nothing =
   Just (anchor ! [href src_base_url] << "Source")
-srcButton (_, Just src_module_url, _) (Just iface) =
+srcButton (_, Just src_module_url, _, _) (Just iface) =
   let url = spliceURL (Just $ ifaceOrigFilename iface)
                       (Just $ ifaceMod iface) Nothing Nothing src_module_url
    in Just (anchor ! [href url] << "Source")
@@ -171,7 +176,7 @@ bodyHtml doctitle iface
     divPackageHeader << [
       unordList (catMaybes [
         srcButton maybe_source_url iface,
-        wikiButton maybe_wiki_url (ifaceMod `fmap` iface),
+        wikiButton maybe_wiki_url (ifaceMod <$> iface),
         contentsButton maybe_contents_url,
         indexButton maybe_index_url])
             ! [theclass "links", identifier "page-menu"],
@@ -197,11 +202,31 @@ moduleInfo iface =
 
       entries :: [HtmlTable]
       entries = mapMaybe doOneEntry [
-         ("Portability",hmi_portability),
-         ("Stability",hmi_stability),
-         ("Maintainer",hmi_maintainer),
-         ("Safe Haskell",hmi_safety)
-         ]
+          ("Copyright",hmi_copyright),
+          ("License",hmi_license),
+          ("Maintainer",hmi_maintainer),
+          ("Stability",hmi_stability),
+          ("Portability",hmi_portability),
+          ("Safe Haskell",hmi_safety),
+          ("Language", lg)
+          ] ++ extsForm
+        where
+          lg inf = case hmi_language inf of
+            Nothing -> Nothing
+            Just Haskell98 -> Just "Haskell98"
+            Just Haskell2010 -> Just "Haskell2010"
+
+          extsForm
+            | OptShowExtensions `elem` ifaceOptions iface =
+              let fs = map (dropOpt . show) (hmi_extensions info)
+              in case map stringToHtml fs of
+                [] -> []
+                [x] -> extField x -- don't use a list for a single extension
+                xs -> extField $ unordList xs ! [theclass "extension-list"]
+            | otherwise = []
+            where
+              extField x = return $ th << "Extensions" <-> td << x
+              dropOpt x = if "Opt_" `isPrefixOf` x then drop 4 x else x
    in
       case entries of
          [] -> noHtml
@@ -266,7 +291,7 @@ mkNodeList qual ss p ts = case ts of
 
 mkNode :: Qualification -> [String] -> String -> ModuleTree -> Html
 mkNode qual ss p (Node s leaf pkg short ts) =
-  htmlModule +++ shortDescr +++ htmlPkg +++ subtree
+  htmlModule <+> shortDescr +++ htmlPkg +++ subtree
   where
     modAttrs = case (ts, leaf) of
       (_:_, False) -> collapseControl p True "module"
@@ -278,7 +303,7 @@ mkNode qual ss p (Node s leaf pkg short ts) =
       -- We only need an explicit collapser button when the module name
       -- is also a leaf, and so is a link to a module page. Indeed, the
       -- spaceHtml is a minor hack and does upset the layout a fraction.
-      
+
     htmlModule = thespan ! modAttrs << (cBtn +++
       if leaf
         then ppModule (mkModule (stringToPackageId (fromMaybe "" pkg))
@@ -508,7 +533,7 @@ ifaceToHtml maybe_source_url maybe_wiki_url iface unicode qual
 
     -- todo: if something has only sub-docs, or fn-args-docs, should
     -- it be measured here and thus prevent omitting the synopsis?
-    has_doc (ExportDecl _ (Documentation mDoc mWarning, _) _ _) = isJust mDoc || isJust mWarning
+    has_doc ExportDecl { expItemMbDoc = (Documentation mDoc mWarning, _) } = isJust mDoc || isJust mWarning
     has_doc (ExportNoDecl _ _) = False
     has_doc (ExportModule _) = False
     has_doc _ = True
@@ -524,7 +549,7 @@ ifaceToHtml maybe_source_url maybe_wiki_url iface unicode qual
       | no_doc_at_all = noHtml
       | otherwise
       = divSynposis $
-            paragraph ! collapseControl "syn" False "caption" << "Synopsis" +++ 
+            paragraph ! collapseControl "syn" False "caption" << "Synopsis" +++
             shortDeclList (
                 mapMaybe (processExport True linksInfo unicode qual) exports
             ) ! (collapseSection "syn" False "" ++ collapseToggle "syn")
@@ -553,34 +578,34 @@ miniSynopsis mdl iface unicode qual =
 
 processForMiniSynopsis :: Module -> Bool -> Qualification -> ExportItem DocName
                        -> [Html]
-processForMiniSynopsis mdl unicode qual (ExportDecl (L _loc decl0) _doc _ _insts) =
-  ((divTopDecl <<).(declElem <<)) `fmap` case decl0 of
+processForMiniSynopsis mdl unicode qual ExportDecl { expItemDecl = L _loc decl0 } =
+  ((divTopDecl <<).(declElem <<)) <$> case decl0 of
     TyClD d -> let b = ppTyClBinderWithVarsMini mdl d in case d of
-        (TyFamily{}) -> [ppTyFamHeader True False d unicode qual]
-        (TyDecl{ tcdTyDefn = TyData {} }) -> [keyword "data" <+> b]
-        (TyDecl{ tcdTyDefn = TySynonym {} }) -> [keyword "type" <+> b]
-        (ClassDecl {})    -> [keyword "class" <+> b]
+        (FamDecl decl)    -> [ppTyFamHeader True False decl unicode qual]
+        (DataDecl{})   -> [keyword "data" <+> b]
+        (SynDecl{})    -> [keyword "type" <+> b]
+        (ClassDecl {}) -> [keyword "class" <+> b]
         _ -> []
     SigD (TypeSig lnames (L _ _)) ->
-      map (ppNameMini mdl . nameOccName . getName . unLoc) lnames
+      map (ppNameMini Prefix mdl . nameOccName . getName . unLoc) lnames
     _ -> []
 processForMiniSynopsis _ _ qual (ExportGroup lvl _id txt) =
   [groupTag lvl << docToHtml qual txt]
 processForMiniSynopsis _ _ _ _ = []
 
 
-ppNameMini :: Module -> OccName -> Html
-ppNameMini mdl nm =
+ppNameMini :: Notation -> Module -> OccName -> Html
+ppNameMini notation mdl nm =
     anchor ! [ href (moduleNameUrl mdl nm)
              , target mainFrameName ]
-      << ppBinder' nm
+      << ppBinder' notation nm
 
 
 ppTyClBinderWithVarsMini :: Module -> TyClDecl DocName -> Html
 ppTyClBinderWithVarsMini mdl decl =
-  let n = unLoc $ tcdLName decl
-      ns = tyvarNames $ tcdTyVars decl
-  in ppTypeApp n ns (ppNameMini mdl . nameOccName . getName) ppTyName
+  let n = tcdName decl
+      ns = tyvarNames $ tcdTyVars decl -- it's safe to use tcdTyVars, see code above
+  in ppTypeApp n [] ns (\is_infix -> ppNameMini is_infix mdl . nameOccName . getName) ppTyName
 
 
 ppModuleContents :: Qualification -> [ExportItem DocName] -> Html
@@ -600,14 +625,14 @@ ppModuleContents qual exports
     | lev <= n  = ( [], items )
     | otherwise = ( html:secs, rest2 )
     where
-        html = linkedAnchor (groupId id0) << docToHtml qual doc +++ mk_subsections ssecs
+        html = linkedAnchor (groupId id0)
+               << docToHtmlNoAnchors qual doc +++ mk_subsections ssecs
         (ssecs, rest1) = process lev rest
         (secs,  rest2) = process n   rest1
   process n (_ : rest) = process n rest
 
   mk_subsections [] = noHtml
   mk_subsections ss = unordList ss
-
 
 -- we need to assign a unique id to each section heading so we can hyperlink
 -- them from the contents:
@@ -623,15 +648,17 @@ numberSectionHeadings = go 1
 
 processExport :: Bool -> LinksInfo -> Bool -> Qualification
               -> ExportItem DocName -> Maybe Html
+processExport _ _ _ _ ExportDecl { expItemDecl = L _ (InstD _) } = Nothing -- Hide empty instances
 processExport summary _ _ qual (ExportGroup lev id0 doc)
   = nothingIf summary $ groupHeading lev id0 << docToHtml qual doc
-processExport summary links unicode qual (ExportDecl decl doc subdocs insts)
-  = processDecl summary $ ppDecl summary links decl doc insts subdocs unicode qual
+processExport summary links unicode qual (ExportDecl decl doc subdocs insts fixities splice)
+  = processDecl summary $ ppDecl summary links decl doc insts fixities subdocs splice unicode qual
 processExport summary _ _ qual (ExportNoDecl y [])
-  = processDeclOneLiner summary $ ppDocName qual y
+  = processDeclOneLiner summary $ ppDocName qual Prefix True y
 processExport summary _ _ qual (ExportNoDecl y subs)
   = processDeclOneLiner summary $
-      ppDocName qual y +++ parenList (map (ppDocName qual) subs)
+      ppDocName qual Prefix True y
+      +++ parenList (map (ppDocName qual Prefix True) subs)
 processExport summary _ _ qual (ExportDoc doc)
   = nothingIf summary $ docSection_ qual doc
 processExport summary _ _ _ (ExportModule mdl)
@@ -661,5 +688,3 @@ groupTag lev
   | lev == 2  = h2
   | lev == 3  = h3
   | otherwise = h4
-
-

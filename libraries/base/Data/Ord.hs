@@ -1,5 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -22,9 +22,9 @@ module Data.Ord (
    comparing,
  ) where
 
-#if __GLASGOW_HASKELL__
 import GHC.Base
-#endif
+import GHC.Show
+import GHC.Read
 
 -- | 
 -- > comparing p x y = compare (p x) (p y)
@@ -42,7 +42,11 @@ comparing p x y = compare (p x) (p y)
 -- values thus wrapped will give you the opposite of their normal sort order.
 -- This is particularly useful when sorting in generalised list comprehensions,
 -- as in: @then sortWith by 'Down' x@
-newtype Down a = Down a deriving (Eq)
+--
+-- Provides 'Show' and 'Read' instances (/since: 4.7.0.0/).
+--
+-- /Since: 4.6.0.0/
+newtype Down a = Down a deriving (Eq, Show, Read)
 
 instance Ord a => Ord (Down a) where
     compare (Down x) (Down y) = y `compare` x

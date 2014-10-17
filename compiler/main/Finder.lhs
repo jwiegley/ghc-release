@@ -191,12 +191,14 @@ findExposedPackageModule hsc_env mod_name mb_pkg
         -- not found in any package:
   = case lookupModuleWithSuggestions (hsc_dflags hsc_env) mod_name of
        Left suggest -> return (NotFound { fr_paths = [], fr_pkg = Nothing
-                                        , fr_pkgs_hidden = [], fr_mods_hidden = []
+                                        , fr_pkgs_hidden = []
+                                        , fr_mods_hidden = []
                                         , fr_suggestions = suggest })
        Right found
          | null found_exposed   -- Found, but with no exposed copies
           -> return (NotFound { fr_paths = [], fr_pkg = Nothing
-                              , fr_pkgs_hidden = pkg_hiddens, fr_mods_hidden = mod_hiddens
+                              , fr_pkgs_hidden = pkg_hiddens
+                              , fr_mods_hidden = mod_hiddens
                               , fr_suggestions = [] })
 
          | [(pkg_conf,_)] <- found_exposed     -- Found uniquely
@@ -612,7 +614,7 @@ cantFindErr cannot_find _ dflags mod_name find_result
         ptext (sLit "It is a member of the hidden package") <+> quotes (ppr pkg)
         <> dot $$ cabal_pkg_hidden_hint pkg
     cabal_pkg_hidden_hint pkg
-     | dopt Opt_BuildingCabalPackage dflags
+     | gopt Opt_BuildingCabalPackage dflags
         = case simpleParse (packageIdString pkg) of
           Just pid ->
               ptext (sLit "Perhaps you need to add") <+>

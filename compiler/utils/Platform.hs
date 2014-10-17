@@ -10,7 +10,11 @@ module Platform (
         ArmABI(..),
 
         target32Bit,
-        osElfTarget
+        isARM,
+        osElfTarget,
+        osMachOTarget,
+        platformUsesFrameworks,
+        platformBinariesAreStaticLibs,
 )
 
 where
@@ -21,7 +25,10 @@ data Platform
         = Platform {
               platformArch                     :: Arch,
               platformOS                       :: OS,
+              -- Word size in bytes (i.e. normally 4 or 8,
+              -- for 32bit and 64bit platforms respectively)
               platformWordSize                 :: {-# UNPACK #-} !Int,
+              platformUnregisterised           :: Bool,
               platformHasGnuNonexecStack       :: Bool,
               platformHasIdentDirective        :: Bool,
               platformHasSubsectionsViaSymbols :: Bool
@@ -45,8 +52,15 @@ data Arch
           , armISAExt :: [ArmISAExt]
           , armABI    :: ArmABI
           }
+        | ArchAlpha
+        | ArchMipseb
+        | ArchMipsel
+        | ArchJavaScript
         deriving (Read, Show, Eq)
 
+isARM :: Arch -> Bool
+isARM (ArchARM {}) = True
+isARM _ = False
 
 -- | Operating systems that the native code generator knows about.
 --      Having OSUnknown should produce a sensible default, but no promises.
@@ -54,6 +68,7 @@ data OS
         = OSUnknown
         | OSLinux
         | OSDarwin
+        | OSiOS
         | OSSolaris2
         | OSMinGW32
         | OSFreeBSD
@@ -62,6 +77,9 @@ data OS
         | OSNetBSD
         | OSKFreeBSD
         | OSHaiku
+        | OSOsf3
+        | OSQNXNTO
+        | OSAndroid
         deriving (Read, Show, Eq)
 
 -- | ARM Instruction Set Architecture, Extensions and ABI
@@ -98,11 +116,37 @@ osElfTarget OSOpenBSD   = True
 osElfTarget OSNetBSD    = True
 osElfTarget OSSolaris2  = True
 osElfTarget OSDarwin    = False
+osElfTarget OSiOS       = False
 osElfTarget OSMinGW32   = False
 osElfTarget OSKFreeBSD  = True
 osElfTarget OSHaiku     = True
+osElfTarget OSOsf3      = False -- I don't know if this is right, but as
+                                -- per comment below it's safe
+osElfTarget OSQNXNTO    = False
+osElfTarget OSAndroid   = True
 osElfTarget OSUnknown   = False
  -- Defaulting to False is safe; it means don't rely on any
  -- ELF-specific functionality.  It is important to have a default for
  -- portability, otherwise we have to answer this question for every
  -- new platform we compile on (even unreg).
+
+-- | This predicate tells us whether the OS support Mach-O shared libraries.
+osMachOTarget :: OS -> Bool
+osMachOTarget OSDarwin = True
+osMachOTarget _ = False
+
+osUsesFrameworks :: OS -> Bool
+osUsesFrameworks OSDarwin = True
+osUsesFrameworks OSiOS    = True
+osUsesFrameworks _        = False
+
+platformUsesFrameworks :: Platform -> Bool
+platformUsesFrameworks = osUsesFrameworks . platformOS
+
+osBinariesAreStaticLibs :: OS -> Bool
+osBinariesAreStaticLibs OSiOS = True
+osBinariesAreStaticLibs _     = False
+
+platformBinariesAreStaticLibs :: Platform -> Bool
+platformBinariesAreStaticLibs = osBinariesAreStaticLibs . platformOS
+

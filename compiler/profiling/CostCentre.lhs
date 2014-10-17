@@ -3,7 +3,7 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 {-# LANGUAGE BangPatterns, DeriveDataTypeable #-}
@@ -29,6 +29,7 @@ module CostCentre (
 	cmpCostCentre	-- used for removing dups in a list
     ) where
 
+import Binary
 import Var
 import Name
 import Module
@@ -277,7 +278,7 @@ ppCostCentreLbl :: CostCentre -> SDoc
 ppCostCentreLbl (AllCafsCC  {cc_mod = m}) = ppr m <> text "_CAFs_cc"
 ppCostCentreLbl (NormalCC {cc_key = k, cc_name = n, cc_mod = m,
                            cc_is_caf = is_caf})
-  = ppr m <> char '_' <> ftext (zEncodeFS n) <> char '_' <>
+  = ppr m <> char '_' <> ztext (zEncodeFS n) <> char '_' <>
         case is_caf of { CafCC -> ptext (sLit "CAF"); _ -> ppr (mkUniqueGrimily k)} <> text "_cc"
 
 -- This is the name to go in the user-displayed string, 
@@ -294,4 +295,42 @@ costCentreUserNameFS (NormalCC {cc_name = name, cc_is_caf = is_caf})
 
 costCentreSrcSpan :: CostCentre -> SrcSpan
 costCentreSrcSpan = cc_loc
+
+instance Binary IsCafCC where
+    put_ bh CafCC = do
+            putByte bh 0
+    put_ bh NotCafCC = do
+            putByte bh 1
+    get bh = do
+            h <- getByte bh
+            case h of
+              0 -> do return CafCC
+              _ -> do return NotCafCC
+
+instance Binary CostCentre where
+    put_ bh (NormalCC aa ab ac _ad ae) = do
+            putByte bh 0
+            put_ bh aa
+            put_ bh ab
+            put_ bh ac
+            put_ bh ae
+    put_ bh (AllCafsCC ae _af) = do
+            putByte bh 1
+            put_ bh ae
+    get bh = do
+            h <- getByte bh
+            case h of
+              0 -> do aa <- get bh
+                      ab <- get bh
+                      ac <- get bh
+                      ae <- get bh
+                      return (NormalCC aa ab ac noSrcSpan ae)
+              _ -> do ae <- get bh
+                      return (AllCafsCC ae noSrcSpan)
+
+    -- We ignore the SrcSpans in CostCentres when we serialise them,
+    -- and set the SrcSpans to noSrcSpan when deserialising.  This is
+    -- ok, because we only need the SrcSpan when declaring the
+    -- CostCentre in the original module, it is not used by importing
+    -- modules.
 \end{code}

@@ -15,6 +15,7 @@ test('drv014', normal, compile, [''])
 test('drv015', normal, compile, [''])
 test('drv020', normal, compile, [''])
 test('drv021', normal, compile, [''])
+test('drv022', normal, compile, [''])
 test('deriving-1935', normal, compile, [''])
 test('T2378', normal, compile, [''])
 test('T2856', normal, compile, [''])
@@ -31,3 +32,17 @@ test('drv-functor1', normal, compile, [''])
 test('drv-functor2', normal, compile, [''])
 test('drv-foldable-traversable1', normal, compile, [''])
 test('T6031', extra_clean(['T6031a.o', 'T6031a.hi']), multimod_compile, ['T6031', '-v0'])
+test('T1133',
+     extra_clean(['T1133.o-boot', 'T1133.hi-boot']),
+     run_command,
+     ['$MAKE --no-print-directory -s T1133'])
+test('T7704', normal, compile, [''])
+test('T7710', normal, compile, [''])
+
+test('AutoDeriveTypeable', normal, compile, [''])
+
+test('T8138', reqlib('primitive'), compile, ['-O2'])
+test('T8631', normal, compile, [''])
+test('T8758', extra_clean(['T8758a.o', 'T8758a.hi']), multimod_compile, ['T8758a', '-v0'])
+test('T8865', normal, compile, [''])
+test('T8893', normal, compile, [''])

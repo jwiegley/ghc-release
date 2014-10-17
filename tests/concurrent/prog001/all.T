@@ -13,9 +13,7 @@
 # right now. --SDM 1/4/2010
 
 test('concprog001',
-     [skip_if_fast,
-      # This fails on Windows for unknown reasons
-      if_os('mingw32', expect_fail_for(['threaded2'])),
+     [when(fast(), skip),
       only_ways(['threaded2']),
       extra_clean(['Arithmetic.hi', 'Arithmetic.o',
                    'Converter.hi',  'Converter.o',

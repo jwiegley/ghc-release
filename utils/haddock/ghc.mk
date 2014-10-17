@@ -3,23 +3,10 @@ utils/haddock_USES_CABAL = YES
 utils/haddock_PACKAGE = haddock
 utils/haddock_CONFIGURE_OPTS = --flag in-ghc-tree
 utils/haddock_dist_SHELL_WRAPPER = YES
-utils/haddock_dist_INSTALL_SHELL_WRAPPER = YES
+utils/haddock_dist_INSTALL = YES
+utils/haddock_dist_INSTALL_INPLACE = YES
 utils/haddock_dist_INSTALL_SHELL_WRAPPER_NAME = haddock-ghc-$(ProjectVersion)
-utils/haddock_dist_PROG = haddock$(exeext)
-
-ifneq "$(BINDIST)" "YES"
-
-$(INPLACE_BIN)/$(utils/haddock_dist_PROG): $(INPLACE_LIB)/html $(INPLACE_LIB)/latex
-
-$(INPLACE_LIB)/html:
-	$(call removeTrees,$@)
-	"$(CP)" -R utils/haddock/resources/html $@
-
-$(INPLACE_LIB)/latex:
-	$(call removeTrees,$@)
-	"$(CP)" -R utils/haddock/resources/latex $@
-
-endif
+utils/haddock_dist_PROGNAME = haddock
 
 ifeq "$(HADDOCK_DOCS)" "NO"
 utils/haddock_dist_NOT_NEEDED = YES
@@ -27,11 +14,25 @@ endif
 
 $(eval $(call build-prog,utils/haddock,dist,2))
 
+ifneq "$(BINDIST)" "YES"
+
+$(INPLACE_BIN)/$(utils/haddock_dist_PROG): $(INPLACE_LIB)/html $(INPLACE_LIB)/latex
+
+$(INPLACE_LIB)/html:
+	$(call removeTrees,$@)
+	"$(CP)" -RL utils/haddock/resources/html $@
+
+$(INPLACE_LIB)/latex:
+	$(call removeTrees,$@)
+	"$(CP)" -RL utils/haddock/resources/latex $@
+
+endif
+
 utils/haddock_dist_MODULES += Paths_haddock
 
 ifeq "$(HADDOCK_DOCS)" "YES"
 install: install_utils/haddock_data
-ifeq "$(Windows)" "NO"
+ifeq "$(Windows_Host)" "NO"
 install: install_utils/haddock_link
 endif
 endif

@@ -1,3 +1,4 @@
+{-# LANGUAGE RankNTypes #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.Array.ST
@@ -20,7 +21,6 @@ module Data.Array.ST (
    -- * Unboxed arrays
    STUArray,            -- instance of: Eq, MArray
    runSTUArray,
-   castSTUArray,        -- :: STUArray s i a -> ST s (STUArray s i b)
 
    -- * Overloaded mutable array interface
    module Data.Array.MArray,
@@ -28,17 +28,9 @@ module Data.Array.ST (
 
 import Data.Array.Base  ( STUArray, UArray, unsafeFreezeSTUArray )
 import Data.Array.MArray
-import qualified Data.Array.Unsafe as U ( castSTUArray )
 import Control.Monad.ST ( ST, runST )
 
-#ifdef __HUGS__
-import Hugs.Array       ( Array )
-import Hugs.ST          ( STArray, unsafeFreezeSTArray )
-#endif
-
-#ifdef __GLASGOW_HASKELL__
 import GHC.Arr          ( STArray, Array, unsafeFreezeSTArray )
-#endif
 
 -- | A safe way to create and work with a mutable array before returning an
 -- immutable array for later perusal.  This function avoids copying
@@ -73,15 +65,3 @@ runSTUArray st = runST (st >>= unsafeFreezeSTUArray)
 -- unsafeFreezeSTUArray directly in the defn of runSTUArray above, but
 -- this essentially constrains us to a single unsafeFreeze for all STUArrays
 -- (in theory we might have a different one for certain element types).
-
-{-# DEPRECATED castSTUArray
-              "Please import from Data.Array.Unsafe instead; This will be removed in the next release"
- #-}
-
--- | Casts an 'STUArray' with one element type into one with a
--- different element type.  All the elements of the resulting array
--- are undefined (unless you know what you\'re doing...).
-{-# INLINE castSTUArray #-}
-castSTUArray :: STUArray s ix a -> ST s (STUArray s ix b)
-castSTUArray = U.castSTUArray
-

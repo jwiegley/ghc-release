@@ -1,6 +1,6 @@
 {- Baseclasses for Map-like and Set-like collections inspired by containers. -}
 
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE CPP, TypeFamilies #-}
 #if __GLASGOW_HASKELL__ >= 701
 {-# LANGUAGE Safe #-}
 #endif
@@ -72,6 +72,7 @@ class IsMap map where
   mapMapWithKey :: (KeyOf map -> a -> b) -> map a -> map b
   mapFold :: (a -> b -> b) -> b -> map a -> b
   mapFoldWithKey :: (KeyOf map -> a -> b -> b) -> b -> map a -> b
+  mapFilter :: (a -> Bool) -> map a -> map a
 
   mapElems :: map a -> [a]
   mapKeys :: map a -> [KeyOf map]

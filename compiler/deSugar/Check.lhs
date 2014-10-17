@@ -14,7 +14,9 @@ import TcHsSyn
 import DsUtils
 import MatchLit
 import Id
+import ConLike
 import DataCon
+import PatSyn
 import Name
 import TysWiredIn
 import PrelNames
@@ -141,8 +143,9 @@ untidy b (L loc p) = L loc (untidy' b p)
     untidy' _ (LitPat lit)           = LitPat (untidy_lit lit)
     untidy' _ p@(ConPatIn _ (PrefixCon [])) = p
     untidy' b (ConPatIn name ps)     = pars b (L loc (ConPatIn name (untidy_con ps)))
-    untidy' _ (ListPat pats ty)      = ListPat (map untidy_no_pars pats) ty
+    untidy' _ (ListPat pats ty Nothing)     = ListPat (map untidy_no_pars pats) ty Nothing   
     untidy' _ (TuplePat pats box ty) = TuplePat (map untidy_no_pars pats) box ty
+    untidy' _ (ListPat _ _ (Just _)) = panic "Check.untidy: Overloaded ListPat"    
     untidy' _ (PArrPat _ _)          = panic "Check.untidy: Shouldn't get a parallel array here!"
     untidy' _ (SigPatIn _ _)         = panic "Check.untidy: SigPat"
     untidy' _ (LazyPat {})           = panic "Check.untidy: LazyPat"
@@ -151,6 +154,7 @@ untidy b (L loc p) = L loc (untidy' b p)
     untidy' _ (BangPat {})           = panic "Check.untidy: BangPat"
     untidy' _ (ConPatOut {})         = panic "Check.untidy: ConPatOut"
     untidy' _ (ViewPat {})           = panic "Check.untidy: ViewPat"
+    untidy' _ (SplicePat {})         = panic "Check.untidy: SplicePat"
     untidy' _ (QuasiQuotePat {})     = panic "Check.untidy: QuasiQuotePat"
     untidy' _ (NPat {})              = panic "Check.untidy: NPat"
     untidy' _ (NPlusKPat {})         = panic "Check.untidy: NPlusKPat"
@@ -205,7 +209,10 @@ check' :: [(EqnNo, EquationInfo)]
         -> ([ExhaustivePat],    -- Pattern scheme that might not be matched at all
             EqnSet)             -- Eqns that are used (others are overlapped)
 
-check' [] = ([([],[])],emptyUniqSet)
+check' [] = ([],emptyUniqSet)
+  -- Was    ([([],[])], emptyUniqSet)
+  -- But that (a) seems weird, and (b) triggered Trac #7669 
+  -- So now I'm just doing the simple obvious thing
 
 check' ((n, EqnInfo { eqn_pats = ps, eqn_rhs = MatchResult can_fail _ }) : rs)
    | first_eqn_all_vars && case can_fail of { CantFail -> True; CanFail -> False }
@@ -305,6 +312,7 @@ same constructor.
 \begin{code}
 split_by_constructor :: [(EqnNo, EquationInfo)] -> ([ExhaustivePat], EqnSet)
 split_by_constructor qs
+  | null used_cons      = ([], mkUniqSet $ map fst qs)
   | notNull unused_cons = need_default_case used_cons unused_cons qs
   | otherwise           = no_need_default_case used_cons qs
                        where
@@ -405,8 +413,11 @@ make_row_vars_for_constructor (_, EqnInfo { eqn_pats = pats})
   = takeList (tail pats) (repeat nlWildPat)
 
 compare_cons :: Pat Id -> Pat Id -> Bool
-compare_cons (ConPatOut{ pat_con = L _ id1 }) (ConPatOut { pat_con = L _ id2 }) = id1 == id2
-compare_cons _ _ = panic "Check.compare_cons: Not ConPatOut"
+compare_cons (ConPatOut{ pat_con = L _ con1 }) (ConPatOut{ pat_con = L _ con2 })
+  = case (con1, con2) of
+    (RealDataCon id1, RealDataCon id2) -> id1 == id2
+    _ -> False
+compare_cons _ _ = panic "Check.compare_cons: Not ConPatOut with RealDataCon"
 
 remove_dups :: [Pat Id] -> [Pat Id]
 remove_dups []     = []
@@ -418,8 +429,8 @@ get_used_cons qs = remove_dups [pat | q <- qs, let pat = firstPatN q,
                                       isConPatOut pat]
 
 isConPatOut :: Pat Id -> Bool
-isConPatOut (ConPatOut {}) = True
-isConPatOut _              = False
+isConPatOut ConPatOut{ pat_con = L _ RealDataCon{} } = True
+isConPatOut _                                        = False
 
 remove_dups' :: [HsLit] -> [HsLit]
 remove_dups' []                   = []
@@ -445,7 +456,7 @@ get_lit :: Pat id -> Maybe HsLit
 get_lit (LitPat lit)                                      = Just lit
 get_lit (NPat (OverLit { ol_val = HsIntegral i})    mb _) = Just (HsIntPrim   (mb_neg negate              mb i))
 get_lit (NPat (OverLit { ol_val = HsFractional f }) mb _) = Just (HsFloatPrim (mb_neg negateFractionalLit mb f))
-get_lit (NPat (OverLit { ol_val = HsIsString s })   _  _) = Just (HsStringPrim s)
+get_lit (NPat (OverLit { ol_val = HsIsString s })   _  _) = Just (HsStringPrim (fastStringToByteString s))
 get_lit _                                                 = Nothing
 
 mb_neg :: (a -> a) -> Maybe b -> a -> a
@@ -456,7 +467,7 @@ get_unused_cons :: [Pat Id] -> [DataCon]
 get_unused_cons used_cons = ASSERT( not (null used_cons) ) unused_cons
      where
        used_set :: UniqSet DataCon
-       used_set = mkUniqSet [d | ConPatOut{ pat_con = L _ d} <- used_cons]
+       used_set = mkUniqSet [d | ConPatOut{ pat_con = L _ (RealDataCon d) } <- used_cons]
        (ConPatOut { pat_ty = ty }) = head used_cons
        Just (ty_con, inst_tys) = splitTyConApp_maybe ty
        unused_cons = filterOut is_used (tyConDataCons ty_con)
@@ -507,10 +518,10 @@ is_var :: Pat Id -> Bool
 is_var (WildPat _) = True
 is_var _           = False
 
-is_var_con :: DataCon -> Pat Id -> Bool
-is_var_con _   (WildPat _)                                 = True
-is_var_con con (ConPatOut{ pat_con = L _ id }) | id == con = True
-is_var_con _   _                                           = False
+is_var_con :: ConLike -> Pat Id -> Bool
+is_var_con _   (WildPat _)                     = True
+is_var_con con (ConPatOut{ pat_con = L _ id }) = id == con
+is_var_con _   _                               = False
 
 is_var_lit :: HsLit -> Pat Id -> Bool
 is_var_lit _   (WildPat _)   = True
@@ -529,7 +540,7 @@ similar) at the same time that we create the constructors.
 
 You can tell tuple constructors using
 \begin{verbatim}
-        Id.isTupleCon
+        Id.isTupleDataCon
 \end{verbatim}
 You can see if one constructor is infix with this clearer code :-))))))))))
 \begin{verbatim}
@@ -540,7 +551,7 @@ You can see if one constructor is infix with this clearer code :-))))))))))
 
 
 We don't mind the @nilDataCon@ because it doesn't change the way to
-print the messsage, we are searching only for things like: @[1,2,3]@,
+print the message, we are searching only for things like: @[1,2,3]@,
 not @x:xs@ ....
 
 In @reconstruct_pat@ we want to ``undo'' the work
@@ -565,24 +576,24 @@ is_nil (ConPatIn con (PrefixCon [])) = unLoc con == getName nilDataCon
 is_nil _                             = False
 
 is_list :: Pat Name -> Bool
-is_list (ListPat _ _) = True
+is_list (ListPat _ _ Nothing) = True
 is_list _             = False
 
 return_list :: DataCon -> Pat Name -> Bool
 return_list id q = id == consDataCon && (is_nil q || is_list q)
 
 make_list :: LPat Name -> Pat Name -> Pat Name
-make_list p q | is_nil q    = ListPat [p] placeHolderType
-make_list p (ListPat ps ty) = ListPat (p:ps) ty
+make_list p q | is_nil q    = ListPat [p] placeHolderType Nothing
+make_list p (ListPat ps ty Nothing) = ListPat (p:ps) ty Nothing
 make_list _ _               = panic "Check.make_list: Invalid argument"
 
 make_con :: Pat Id -> ExhaustivePat -> ExhaustivePat
-make_con (ConPatOut{ pat_con = L _ id }) (lp:lq:ps, constraints)
+make_con (ConPatOut{ pat_con = L _ (RealDataCon id) }) (lp:lq:ps, constraints)
      | return_list id q = (noLoc (make_list lp q) : ps, constraints)
      | isInfixCon id    = (nlInfixConPat (getName id) lp lq : ps, constraints)
    where q  = unLoc lq
 
-make_con (ConPatOut{ pat_con = L _ id, pat_args = PrefixCon pats, pat_ty = ty }) (ps, constraints)
+make_con (ConPatOut{ pat_con = L _ (RealDataCon id), pat_args = PrefixCon pats, pat_ty = ty }) (ps, constraints)
       | isTupleTyCon tc  = (noLoc (TuplePat pats_con (tupleTyConBoxity tc) ty) : rest_pats, constraints)
       | isPArrFakeCon id = (noLoc (PArrPat pats_con placeHolderType)           : rest_pats, constraints)
       | otherwise        = (nlConPat name pats_con      : rest_pats, constraints)
@@ -635,6 +646,7 @@ might_fail_pat :: Pat Id -> Bool
 -- that is not covered by the checking algorithm.  Specifically:
 --         NPlusKPat
 --         ViewPat (if refutable)
+--         ConPatOut of a PatSynCon
 
 -- First the two special cases
 might_fail_pat (NPlusKPat {})                = True
@@ -644,11 +656,15 @@ might_fail_pat (ViewPat _ p _)               = not (isIrrefutableHsPat p)
 might_fail_pat (ParPat p)                    = might_fail_lpat p
 might_fail_pat (AsPat _ p)                   = might_fail_lpat p
 might_fail_pat (SigPatOut p _ )              = might_fail_lpat p
-might_fail_pat (ListPat ps _)                = any might_fail_lpat ps
+might_fail_pat (ListPat ps _ Nothing)        = any might_fail_lpat ps
+might_fail_pat (ListPat _ _ (Just _))      = True
 might_fail_pat (TuplePat ps _ _)             = any might_fail_lpat ps
 might_fail_pat (PArrPat ps _)                = any might_fail_lpat ps
 might_fail_pat (BangPat p)                   = might_fail_lpat p
-might_fail_pat (ConPatOut { pat_args = ps }) = any might_fail_lpat (hsConPatArgs ps)
+might_fail_pat (ConPatOut { pat_con = con, pat_args = ps })
+  = case unLoc con of
+    RealDataCon _dcon -> any might_fail_lpat (hsConPatArgs ps)
+    PatSynCon _psyn -> True
 
 -- Finally the ones that are sure to succeed, or which are covered by the checking algorithm
 might_fail_pat (LazyPat _)                   = False -- Always succeeds
@@ -679,11 +695,14 @@ tidy_pat (CoPat _ pat _)  = tidy_pat pat
 -- guard says "this equation might fall through".
 tidy_pat (NPlusKPat id _ _ _) = WildPat (idType (unLoc id))
 tidy_pat (ViewPat _ _ ty)     = WildPat ty
+tidy_pat (ListPat _ _ (Just (ty,_))) = WildPat ty
+tidy_pat (ConPatOut { pat_con = L _ PatSynCon{}, pat_ty = ty })
+  = WildPat ty
 
-tidy_pat pat@(ConPatOut { pat_con = L _ id, pat_args = ps })
-  = pat { pat_args = tidy_con id ps }
+tidy_pat pat@(ConPatOut { pat_con = L _ con, pat_args = ps })
+  = pat { pat_args = tidy_con con ps }
 
-tidy_pat (ListPat ps ty)
+tidy_pat (ListPat ps ty Nothing)
   = unLoc $ foldr (\ x y -> mkPrefixConPat consDataCon [x,y] list_ty)
                                   (mkNilPat list_ty)
                                   (map tidy_lpat ps)
@@ -707,6 +726,7 @@ tidy_pat (NPat lit mb_neg eq) = tidyNPat tidy_lit_pat lit mb_neg eq
 tidy_pat (LitPat lit)         = tidy_lit_pat lit
 
 tidy_pat (ConPatIn {})        = panic "Check.tidy_pat: ConPatIn"
+tidy_pat (SplicePat {})       = panic "Check.tidy_pat: SplicePat"
 tidy_pat (QuasiQuotePat {})   = panic "Check.tidy_pat: QuasiQuotePat"
 tidy_pat (SigPatIn {})        = panic "Check.tidy_pat: SigPatIn"
 
@@ -721,16 +741,22 @@ tidy_lit_pat lit
   = tidyLitPat lit
 
 -----------------
-tidy_con :: DataCon -> HsConPatDetails Id -> HsConPatDetails Id
+tidy_con :: ConLike -> HsConPatDetails Id -> HsConPatDetails Id
 tidy_con _   (PrefixCon ps)   = PrefixCon (map tidy_lpat ps)
 tidy_con _   (InfixCon p1 p2) = PrefixCon [tidy_lpat p1, tidy_lpat p2]
 tidy_con con (RecCon (HsRecFields fs _))
-  | null fs   = PrefixCon [nlWildPat | _ <- dataConOrigArgTys con]
+  | null fs   = PrefixCon (replicate arity nlWildPat)
                 -- Special case for null patterns; maybe not a record at all
   | otherwise = PrefixCon (map (tidy_lpat.snd) all_pats)
   where
+    arity = case con of
+        RealDataCon dcon -> dataConSourceArity dcon
+        PatSynCon psyn -> patSynArity psyn
+
      -- pad out all the missing fields with WildPats.
-    field_pats = map (\ f -> (f, nlWildPat)) (dataConFieldLabels con)
+    field_pats = case con of
+        RealDataCon dc -> map (\ f -> (f, nlWildPat)) (dataConFieldLabels dc)
+        PatSynCon{}    -> panic "Check.tidy_con: pattern synonym with record syntax"
     all_pats = foldr (\(HsRecField id p _) acc -> insertNm (getName (unLoc id)) p acc)
                      field_pats fs
 

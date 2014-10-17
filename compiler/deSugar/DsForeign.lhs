@@ -6,7 +6,13 @@
 Desugaring foreign declarations (see also DsCCall).
 
 \begin{code}
-module DsForeign ( dsForeigns ) where
+module DsForeign ( dsForeigns
+                 , dsForeigns'
+                 , dsFImport, dsCImport, dsFCall, dsPrimCall
+                 , dsFExport, dsFExportDynamic, mkFExportCBits
+                 , toCType
+                 , foreignExportInitialiser
+                 ) where
 
 #include "HsVersions.h"
 import TcRnMonad        -- temp
@@ -28,6 +34,7 @@ import Name
 import Type
 import TyCon
 import Coercion
+import TcEnv
 import TcType
 
 import CmmExpr
@@ -44,10 +51,10 @@ import FastString
 import DynFlags
 import Platform
 import Config
-import Constants
 import OrdList
 import Pair
 import Util
+import Hooks
 
 import Data.Maybe
 import Data.List
@@ -72,9 +79,13 @@ type Binding = (Id, CoreExpr)   -- No rec/nonrec structure;
 
 dsForeigns :: [LForeignDecl Id]
            -> DsM (ForeignStubs, OrdList Binding)
-dsForeigns []
+dsForeigns fos = getHooked dsForeignsHook dsForeigns' >>= ($ fos)
+
+dsForeigns' :: [LForeignDecl Id]
+            -> DsM (ForeignStubs, OrdList Binding)
+dsForeigns' []
   = return (NoStubs, nilOL)
-dsForeigns fos = do
+dsForeigns' fos = do
     fives <- mapM do_ldecl fos
     let
         (hs, cs, idss, bindss) = unzip4 fives
@@ -141,6 +152,7 @@ dsCImport :: Id
           -> Maybe Header
           -> DsM ([Binding], SDoc, SDoc)
 dsCImport id co (CLabel cid) cconv _ _ = do
+   dflags <- getDynFlags
    let ty = pFst $ coercionKind co
        fod = case tyConAppTyCon_maybe (dropForAlls ty) of
              Just tycon
@@ -152,7 +164,7 @@ dsCImport id co (CLabel cid) cconv _ _ = do
     let
         rhs = foRhs (Lit (MachLabel cid stdcall_info fod))
         rhs' = Cast rhs co
-        stdcall_info = fun_type_arg_stdcall_info cconv ty
+        stdcall_info = fun_type_arg_stdcall_info dflags cconv ty
     in
     return ([(id, rhs')], empty, empty)
 
@@ -166,15 +178,15 @@ dsCImport id co CWrapper cconv _ _
 -- For stdcall labels, if the type was a FunPtr or newtype thereof,
 -- then we need to calculate the size of the arguments in order to add
 -- the @n suffix to the label.
-fun_type_arg_stdcall_info :: CCallConv -> Type -> Maybe Int
-fun_type_arg_stdcall_info StdCallConv ty
+fun_type_arg_stdcall_info :: DynFlags -> CCallConv -> Type -> Maybe Int
+fun_type_arg_stdcall_info dflags StdCallConv ty
   | Just (tc,[arg_ty]) <- splitTyConApp_maybe ty,
     tyConUnique tc == funPtrTyConKey
   = let
        (_tvs,sans_foralls)        = tcSplitForAllTys arg_ty
        (fe_arg_tys, _orig_res_ty) = tcSplitFunTys sans_foralls
-    in Just $ sum (map (widthInBytes . typeWidth . typeCmmType . getPrimTyOf) fe_arg_tys)
-fun_type_arg_stdcall_info _other_conv _
+    in Just $ sum (map (widthInBytes . typeWidth . typeCmmType dflags . getPrimTyOf) fe_arg_tys)
+fun_type_arg_stdcall_info _ _other_conv _
   = Nothing
 \end{code}
 
@@ -211,12 +223,8 @@ dsFCall fn_id co fcall mDeclHeader = do
     (fcall', cDoc) <-
               case fcall of
               CCall (CCallSpec (StaticTarget cName mPackageId isFun) CApiConv safety) ->
-               do fcall_uniq <- newUnique
-                  let wrapperName = mkFastString "ghc_wrapper_" `appendFS`
-                                    mkFastString (showPpr dflags fcall_uniq) `appendFS`
-                                    mkFastString "_" `appendFS`
-                                    cName
-                      fcall' = CCall (CCallSpec (StaticTarget wrapperName mPackageId True) CApiConv safety)
+               do wrapperName <- mkWrapperName "ghc_wrapper" (unpackFS cName)
+                  let fcall' = CCall (CCallSpec (StaticTarget wrapperName mPackageId True) CApiConv safety)
                       c = includes
                        $$ fun_proto <+> braces (cRet <> semi)
                       includes = vcat [ text "#include <" <> ftext h <> text ">"
@@ -404,11 +412,14 @@ dsFExportDynamic :: Id
                  -> DsM ([Binding], SDoc, SDoc)
 dsFExportDynamic id co0 cconv = do
     fe_id <-  newSysLocalDs ty
-    mod <- getModuleDs
+    mod <- getModule
     dflags <- getDynFlags
     let
         -- hack: need to get at the name of the C stub we're about to generate.
-        fe_nm    = mkFastString (unpackFS (zEncodeFS (moduleNameFS (moduleName mod))) ++ "_" ++ toCName dflags fe_id)
+        -- TODO: There's no real need to go via String with
+        -- (mkFastString . zString). In fact, is there a reason to convert
+        -- to FastString at all now, rather than sticking with FastZString?
+        fe_nm    = mkFastString (zString (zEncodeFS (moduleNameFS (moduleName mod))) ++ "_" ++ toCName dflags fe_id)
 
     cback <- newSysLocalDs arg_ty
     newStablePtrId <- dsLookupGlobalId newStablePtrName
@@ -418,7 +429,7 @@ dsFExportDynamic id co0 cconv = do
         export_ty     = mkFunTy stable_ptr_ty arg_ty
     bindIOId <- dsLookupGlobalId bindIOName
     stbl_value <- newSysLocalDs stable_ptr_ty
-    (h_code, c_code, typestring, args_size) <- dsFExport id (Refl export_ty) fe_nm cconv True
+    (h_code, c_code, typestring, args_size) <- dsFExport id (mkReflCo Representational export_ty) fe_nm cconv True
     let
          {-
           The arguments to the external function which will
@@ -427,7 +438,7 @@ dsFExportDynamic id co0 cconv = do
           to be entered using an external calling convention
           (stdcall, ccall).
          -}
-        adj_args      = [ mkIntLitInt (ccallConvToInt cconv)
+        adj_args      = [ mkIntLitInt dflags (ccallConvToInt cconv)
                         , Var stbl_value
                         , Lit (MachLabel fe_nm mb_sz_args IsFunction)
                         , Lit (mkMachString typestring)
@@ -516,7 +527,7 @@ mkFExportCBits dflags c_nm maybe_target arg_htys res_hty is_IO_res_ty cc
                 (arg_cname n stg_type,
                  stg_type,
                  ty,
-                 typeCmmType (getPrimTyOf ty))
+                 typeCmmType dflags (getPrimTyOf ty))
               | (ty,n) <- zip arg_htys [1::Int ..] ]
 
   arg_cname n stg_ty
@@ -529,10 +540,10 @@ mkFExportCBits dflags c_nm maybe_target arg_htys res_hty is_IO_res_ty cc
 
   type_string
       -- libffi needs to know the result type too:
-      | libffi    = primTyDescChar res_hty : arg_type_string
+      | libffi    = primTyDescChar dflags res_hty : arg_type_string
       | otherwise = arg_type_string
 
-  arg_type_string = [primTyDescChar ty | (_,_,ty,_) <- arg_info]
+  arg_type_string = [primTyDescChar dflags ty | (_,_,ty,_) <- arg_info]
                 -- just the real args
 
   -- add some auxiliary args; the stable ptr in the wrapper case, and
@@ -543,7 +554,7 @@ mkFExportCBits dflags c_nm maybe_target arg_htys res_hty is_IO_res_ty cc
 
   stable_ptr_arg =
         (text "the_stableptr", text "StgStablePtr", undefined,
-         typeCmmType (mkStablePtrPrimTy alphaTy))
+         typeCmmType dflags (mkStablePtrPrimTy alphaTy))
 
   -- stuff to do with the return type of the C function
   res_hty_is_unit = res_hty `eqType` unitTy     -- Look through any newtypes
@@ -665,7 +676,7 @@ foreignExportInitialiser hs_fn =
     [ text "static void stginit_export_" <> ppr hs_fn
          <> text "() __attribute__((constructor));"
     , text "static void stginit_export_" <> ppr hs_fn <> text "()"
-    , braces (text "getStablePtr"
+    , braces (text "foreignExportStablePtr"
        <> parens (text "(StgPtr) &" <> ppr hs_fn <> text "_closure")
        <> semi)
     ]
@@ -732,7 +743,7 @@ insertRetAddr dflags CCallConv args
           -- (See rts/Adjustor.c for details).
           let go :: Int -> [(SDoc, SDoc, Type, CmmType)]
                         -> [(SDoc, SDoc, Type, CmmType)]
-              go 4 args = ret_addr_arg : args
+              go 4 args = ret_addr_arg dflags : args
               go n (arg:args) = arg : go (n+1) args
               go _ [] = []
           in go 0 args
@@ -743,20 +754,20 @@ insertRetAddr dflags CCallConv args
           -- (See rts/Adjustor.c for details).
           let go :: Int -> [(SDoc, SDoc, Type, CmmType)]
                         -> [(SDoc, SDoc, Type, CmmType)]
-              go 6 args = ret_addr_arg : args
+              go 6 args = ret_addr_arg dflags : args
               go n (arg@(_,_,_,rep):args)
                | cmmEqType_ignoring_ptrhood rep b64 = arg : go (n+1) args
                | otherwise  = arg : go n     args
               go _ [] = []
           in go 0 args
       _ ->
-          ret_addr_arg : args
+          ret_addr_arg dflags : args
     where platform = targetPlatform dflags
 insertRetAddr _ _ args = args
 
-ret_addr_arg :: (SDoc, SDoc, Type, CmmType)
-ret_addr_arg = (text "original_return_addr", text "void*", undefined,
-                typeCmmType addrPrimTy)
+ret_addr_arg :: DynFlags -> (SDoc, SDoc, Type, CmmType)
+ret_addr_arg dflags = (text "original_return_addr", text "void*", undefined,
+                       typeCmmType dflags addrPrimTy)
 
 -- This function returns the primitive type associated with the boxed
 -- type argument to a foreign export (eg. Int ==> Int#).
@@ -766,7 +777,7 @@ getPrimTyOf ty
   -- Except for Bool, the types we are interested in have a single constructor
   -- with a single primitive-typed argument (see TcType.legalFEArgTyCon).
   | otherwise =
-  case splitProductType_maybe rep_ty of
+  case splitDataProductType_maybe rep_ty of
      Just (_, _, data_con, [prim_ty]) ->
         ASSERT(dataConSourceArity data_con == 1)
         ASSERT2(isUnLiftedType prim_ty, ppr prim_ty)
@@ -778,8 +789,8 @@ getPrimTyOf ty
 -- represent a primitive type as a Char, for building a string that
 -- described the foreign function type.  The types are size-dependent,
 -- e.g. 'W' is a signed 32-bit integer.
-primTyDescChar :: Type -> Char
-primTyDescChar ty
+primTyDescChar :: DynFlags -> Type -> Char
+primTyDescChar dflags ty
  | ty `eqType` unitTy = 'v'
  | otherwise
  = case typePrimRep (getPrimTyOf ty) of
@@ -793,7 +804,7 @@ primTyDescChar ty
      _           -> pprPanic "primTyDescChar" (ppr ty)
   where
     (signed_word, unsigned_word)
-       | wORD_SIZE == 4  = ('W','w')
-       | wORD_SIZE == 8  = ('L','l')
-       | otherwise       = panic "primTyDescChar"
+       | wORD_SIZE dflags == 4  = ('W','w')
+       | wORD_SIZE dflags == 8  = ('L','l')
+       | otherwise              = panic "primTyDescChar"
 \end{code}

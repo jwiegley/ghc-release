@@ -35,7 +35,13 @@ Capability MainCapability;
 
 nat n_capabilities = 0;
 nat enabled_capabilities = 0;
-Capability *capabilities = NULL;
+
+// The array of Capabilities.  It's important that when we need
+// to allocate more Capabilities we don't have to move the existing
+// Capabilities, because there may be pointers to them in use
+// (e.g. threads in waitForReturnCapability(), see #8209), so this is
+// an array of Capability* rather than an array of Capability.
+Capability **capabilities = NULL;
 
 // Holds the Capability which last became free.  This is used so that
 // an in-call has a chance of quickly finding a free Capability.
@@ -126,7 +132,7 @@ findSpark (Capability *cap)
       /* visit cap.s 0..n-1 in sequence until a theft succeeds. We could
       start at a random place instead of 0 as well.  */
       for ( i=0 ; i < n_capabilities ; i++ ) {
-          robbed = &capabilities[i];
+          robbed = capabilities[i];
           if (cap == robbed)  // ourselves...
               continue;
 
@@ -169,7 +175,7 @@ anySparks (void)
     nat i;
 
     for (i=0; i < n_capabilities; i++) {
-        if (!emptySparkPoolCap(&capabilities[i])) {
+        if (!emptySparkPoolCap(capabilities[i])) {
             return rtsTrue;
         }
     }
@@ -323,7 +329,8 @@ initCapabilities( void )
 #else /* !THREADED_RTS */
 
     n_capabilities = 1;
-    capabilities = &MainCapability;
+    capabilities = stgMallocBytes(sizeof(Capability*), "initCapabilities");
+    capabilities[0] = &MainCapability;
     initCapability(&MainCapability, 0);
 
 #endif
@@ -333,46 +340,43 @@ initCapabilities( void )
     // There are no free capabilities to begin with.  We will start
     // a worker Task to each Capability, which will quickly put the
     // Capability on the free list when it finds nothing to do.
-    last_free_capability = &capabilities[0];
+    last_free_capability = capabilities[0];
 }
 
-Capability *
+void
 moreCapabilities (nat from USED_IF_THREADS, nat to USED_IF_THREADS)
 {
 #if defined(THREADED_RTS)
     nat i;
-    Capability *old_capabilities = capabilities;
+    Capability **old_capabilities = capabilities;
+
+    capabilities = stgMallocBytes(to * sizeof(Capability*), "moreCapabilities");
 
     if (to == 1) {
         // THREADED_RTS must work on builds that don't have a mutable
         // BaseReg (eg. unregisterised), so in this case
 	// capabilities[0] must coincide with &MainCapability.
-        capabilities = &MainCapability;
-    } else {
-        capabilities = stgMallocBytes(to * sizeof(Capability),
-                                      "moreCapabilities");
-
-        if (from > 0) {
-            memcpy(capabilities, old_capabilities, from * sizeof(Capability));
+        capabilities[0] = &MainCapability;
+        initCapability(&MainCapability, 0);
+    }
+    else
+    {
+        for (i = 0; i < to; i++) {
+            if (i < from) {
+                capabilities[i] = old_capabilities[i];
+            } else {
+                capabilities[i] = stgMallocBytes(sizeof(Capability),
+                                                 "moreCapabilities");
+                initCapability(capabilities[i], i);
+            }
         }
     }
 
-    for (i = from; i < to; i++) {
-	initCapability(&capabilities[i], i);
-    }
-
-    last_free_capability = &capabilities[0];
-
     debugTrace(DEBUG_sched, "allocated %d more capabilities", to - from);
 
-    // Return the old array to free later.
-    if (from > 1) {
-        return old_capabilities;
-    } else {
-        return NULL;
+    if (old_capabilities != NULL) {
+        stgFree(old_capabilities);
     }
-#else
-    return NULL;
 #endif
 }
 
@@ -385,7 +389,7 @@ void contextSwitchAllCapabilities(void)
 {
     nat i;
     for (i=0; i < n_capabilities; i++) {
-        contextSwitchCapability(&capabilities[i]);
+        contextSwitchCapability(capabilities[i]);
     }
 }
 
@@ -393,7 +397,7 @@ void interruptAllCapabilities(void)
 {
     nat i;
     for (i=0; i < n_capabilities; i++) {
-        interruptCapability(&capabilities[i]);
+        interruptCapability(capabilities[i]);
     }
 }
 
@@ -417,9 +421,9 @@ giveCapabilityToTask (Capability *cap USED_IF_DEBUG, Task *task)
 {
     ASSERT_LOCK_HELD(&cap->lock);
     ASSERT(task->cap == cap);
-    debugTrace(DEBUG_sched, "passing capability %d to %s %p",
+    debugTrace(DEBUG_sched, "passing capability %d to %s %#" FMT_HexWord64,
                cap->no, task->incall->tso ? "bound task" : "worker",
-               (void *)(size_t)task->id);
+               serialisableTaskId(task));
     ACQUIRE_LOCK(&task->lock);
     if (task->wakeup == rtsFalse) {
         task->wakeup = rtsTrue;
@@ -472,13 +476,13 @@ releaseCapability_ (Capability* cap,
 
     // If the next thread on the run queue is a bound thread,
     // give this Capability to the appropriate Task.
-    if (!emptyRunQueue(cap) && cap->run_queue_hd->bound) {
+    if (!emptyRunQueue(cap) && peekRunQueue(cap)->bound) {
 	// Make sure we're not about to try to wake ourselves up
 	// ASSERT(task != cap->run_queue_hd->bound);
         // assertion is false: in schedule() we force a yield after
 	// ThreadBlocked, but the thread may be back on the run queue
 	// by now.
-	task = cap->run_queue_hd->bound->task;
+	task = peekRunQueue(cap)->bound->task;
 	giveCapabilityToTask(cap, task);
 	return;
     }
@@ -606,8 +610,8 @@ waitForReturnCapability (Capability **pCap, Task *task)
 	    // otherwise, search for a free capability
             cap = NULL;
 	    for (i = 0; i < n_capabilities; i++) {
-		if (!capabilities[i].running_task) {
-                    cap = &capabilities[i];
+                if (!capabilities[i]->running_task) {
+                    cap = capabilities[i];
 		    break;
 		}
 	    }
@@ -842,7 +846,7 @@ tryGrabCapability (Capability *cap, Task *task)
  * allow the workers to stop.
  *
  * This function should be called when interrupted and
- * shutting_down_scheduler = rtsTrue, thus any worker that wakes up
+ * sched_state = SCHED_SHUTTING_DOWN, thus any worker that wakes up
  * will exit the scheduler and call taskStop(), and any bound thread
  * that wakes up will return to its caller.  Runnable threads are
  * killed.
@@ -955,7 +959,7 @@ shutdownCapabilities(Task *task, rtsBool safe)
     nat i;
     for (i=0; i < n_capabilities; i++) {
         ASSERT(task->incall->tso == NULL);
-        shutdownCapability(&capabilities[i], task, safe);
+        shutdownCapability(capabilities[i], task, safe);
     }
 #if defined(THREADED_RTS)
     ASSERT(checkSparkCountInvariant());
@@ -981,11 +985,14 @@ freeCapabilities (void)
 #if defined(THREADED_RTS)
     nat i;
     for (i=0; i < n_capabilities; i++) {
-        freeCapability(&capabilities[i]);
+        freeCapability(capabilities[i]);
+        if (capabilities[i] != &MainCapability)
+            stgFree(capabilities[i]);
     }
 #else
     freeCapability(&MainCapability);
 #endif
+    stgFree(capabilities);
     traceCapsetDelete(CAPSET_OSPROCESS_DEFAULT);
     traceCapsetDelete(CAPSET_CLOCKDOMAIN_DEFAULT);
 }
@@ -1032,7 +1039,7 @@ markCapabilities (evac_fn evac, void *user)
 {
     nat n;
     for (n = 0; n < n_capabilities; n++) {
-        markCapability(evac, user, &capabilities[n], rtsFalse);
+        markCapability(evac, user, capabilities[n], rtsFalse);
     }
 }
 
@@ -1044,13 +1051,13 @@ rtsBool checkSparkCountInvariant (void)
     nat i;
 
     for (i = 0; i < n_capabilities; i++) {
-        sparks.created   += capabilities[i].spark_stats.created;
-        sparks.dud       += capabilities[i].spark_stats.dud;
-        sparks.overflowed+= capabilities[i].spark_stats.overflowed;
-        sparks.converted += capabilities[i].spark_stats.converted;
-        sparks.gcd       += capabilities[i].spark_stats.gcd;
-        sparks.fizzled   += capabilities[i].spark_stats.fizzled;
-        remaining        += sparkPoolSize(capabilities[i].sparks);
+        sparks.created   += capabilities[i]->spark_stats.created;
+        sparks.dud       += capabilities[i]->spark_stats.dud;
+        sparks.overflowed+= capabilities[i]->spark_stats.overflowed;
+        sparks.converted += capabilities[i]->spark_stats.converted;
+        sparks.gcd       += capabilities[i]->spark_stats.gcd;
+        sparks.fizzled   += capabilities[i]->spark_stats.fizzled;
+        remaining        += sparkPoolSize(capabilities[i]->sparks);
     }
     
     /* The invariant is

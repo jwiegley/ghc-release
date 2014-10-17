@@ -6,11 +6,12 @@
 ``Long-distance'' floating of bindings towards the top level.
 
 \begin{code}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# OPTIONS -fno-warn-tabs #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module FloatOut ( floatOutwards ) where
@@ -21,7 +22,7 @@ import MkCore
 import CoreArity	( etaExpand )
 import CoreMonad	( FloatOutSwitches(..) )
 
-import DynFlags		( DynFlags, DynFlag(..) )
+import DynFlags
 import ErrUtils		( dumpIfSet_dyn )
 import Id		( Id, idArity, isBottomingId )
 import Var		( Var )
@@ -289,7 +290,7 @@ floatExpr (Tick tickish expr)
     let
 	-- Annotate bindings floated outwards past an scc expression
 	-- with the cc.  We mark that cc as "duplicated", though.
-        annotated_defns = wrapTick (mkNoTick tickish) floating_defns
+        annotated_defns = wrapTick (mkNoCount tickish) floating_defns
     in
     (fs, annotated_defns, Tick tickish expr') }
 
@@ -358,8 +359,12 @@ Here y is demanded.  If we float it outside the lazy 'x=..' then
 we'd have to zap its demand info, and it may never be restored.
 
 So at a 'let' we leave the binding right where the are unless
-the binding will escape a value lambda.  That's what the 
-partitionByMajorLevel does in the floatExpr (Let ...) case.
+the binding will escape a value lambda, e.g.  
+
+(\x -> let y = fac 100 in y)
+
+That's what the partitionByMajorLevel does in the floatExpr (Let ...)
+case.
 
 Notice, though, that we must take care to drop any bindings
 from the body of the let that depend on the staying-put bindings.
@@ -561,7 +566,7 @@ wrapTick t (FB tops defns)
     wrap_one (FloatLet bind)      = FloatLet (wrap_bind bind)
     wrap_one (FloatCase e b c bs) = FloatCase (maybe_tick e) b c bs
 
-    maybe_tick e | exprIsHNF e = e
+    maybe_tick e | exprIsHNF e = tickHNFArgs t e
                  | otherwise   = mkTick t e
       -- we don't need to wrap a tick around an HNF when we float it
       -- outside a tick: that is an invariant of the tick semantics

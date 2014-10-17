@@ -1,8 +1,6 @@
 {-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE CPP #-}
-#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
-#endif
 
 -------------------------------------------------------------------------------
 -- |
@@ -18,15 +16,19 @@
 --
 -------------------------------------------------------------------------------
 
-#ifdef __GLASGOW_HASKELL__
-#include "Typeable.h"
-#endif
-
 module System.Timeout ( timeout ) where
 
-#ifdef __GLASGOW_HASKELL__
+#ifndef mingw32_HOST_OS
+import Control.Monad
+import GHC.Event           (getSystemTimerManager,
+                            registerTimeout, unregisterTimeout)
+#endif
+
 import Control.Concurrent
-import Control.Exception   (Exception, handleJust, bracket)
+import Control.Exception   (Exception(..), handleJust, bracket,
+                            uninterruptibleMask_,
+                            asyncExceptionToException,
+                            asyncExceptionFromException)
 import Data.Typeable
 import Data.Unique         (Unique, newUnique)
 
@@ -34,14 +36,15 @@ import Data.Unique         (Unique, newUnique)
 -- interrupt the running IO computation when the timeout has
 -- expired.
 
-newtype Timeout = Timeout Unique deriving Eq
-INSTANCE_TYPEABLE0(Timeout,timeoutTc,"Timeout")
+newtype Timeout = Timeout Unique deriving (Eq, Typeable)
 
 instance Show Timeout where
     show _ = "<<timeout>>"
 
-instance Exception Timeout
-#endif /* !__GLASGOW_HASKELL__ */
+-- Timeout is a child of SomeAsyncException
+instance Exception Timeout where
+  toException = asyncExceptionToException
+  fromException = asyncExceptionFromException
 
 -- |Wrap an 'IO' computation to time out and return @Nothing@ in case no result
 -- is available within @n@ microseconds (@1\/10^6@ seconds). In case a result
@@ -73,10 +76,40 @@ instance Exception Timeout
 -- I\/O or file I\/O using this combinator.
 
 timeout :: Int -> IO a -> IO (Maybe a)
-#ifdef __GLASGOW_HASKELL__
 timeout n f
     | n <  0    = fmap Just f
     | n == 0    = return Nothing
+#ifndef mingw32_HOST_OS
+    | rtsSupportsBoundThreads = do
+        -- In the threaded RTS, we use the Timer Manager to delay the
+        -- (fairly expensive) 'forkIO' call until the timeout has expired.
+        --
+        -- An additional thread is required for the actual delivery of
+        -- the Timeout exception because killThread (or another throwTo)
+        -- is the only way to reliably interrupt a throwTo in flight.
+        pid <- myThreadId
+        ex  <- fmap Timeout newUnique
+        tm  <- getSystemTimerManager
+        -- 'lock' synchronizes the timeout handler and the main thread:
+        --  * the main thread can disable the handler by writing to 'lock';
+        --  * the handler communicates the spawned thread's id through 'lock'.
+        -- These two cases are mutually exclusive.
+        lock <- newEmptyMVar
+        let handleTimeout = do
+                v <- isEmptyMVar lock
+                when v $ void $ forkIOWithUnmask $ \unmask -> unmask $ do
+                    v2 <- tryPutMVar lock =<< myThreadId
+                    when v2 $ throwTo pid ex
+            cleanupTimeout key = uninterruptibleMask_ $ do
+                v <- tryPutMVar lock undefined
+                if v then unregisterTimeout tm key
+                     else takeMVar lock >>= killThread
+        handleJust (\e -> if e == ex then Just () else Nothing)
+                   (\_ -> return Nothing)
+                   (bracket (registerTimeout tm n handleTimeout)
+                            cleanupTimeout
+                            (\_ -> fmap Just f))
+#endif
     | otherwise = do
         pid <- myThreadId
         ex  <- fmap Timeout newUnique
@@ -84,9 +117,6 @@ timeout n f
                    (\_ -> return Nothing)
                    (bracket (forkIOWithUnmask $ \unmask ->
                                  unmask $ threadDelay n >> throwTo pid ex)
-                            (killThread)
+                            (uninterruptibleMask_ . killThread)
                             (\_ -> fmap Just f))
-#else
-timeout n f = fmap Just f
-#endif /* !__GLASGOW_HASKELL__ */
-
+        -- #7719 explains why we need uninterruptibleMask_ above.

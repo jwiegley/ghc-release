@@ -1,17 +1,11 @@
-{-# LANGUAGE UnboxedTuples #-}
-{-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
--- The -fno-warn-warnings-deprecations flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and fix
--- any warnings in the module. See
---     http://hackage.haskell.org/trac/ghc/wiki/WorkingConventions#Warnings
--- for details
+{-# LANGUAGE DeriveDataTypeable, MagicHash, PolymorphicComponents, RoleAnnotations, UnboxedTuples #-}
 
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Language.Haskell.Syntax
 -- Copyright   :  (c) The University of Glasgow 2003
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  experimental
 -- Portability :  portable
@@ -22,8 +16,7 @@
 
 module Language.Haskell.TH.Syntax where
 
-import GHC.Base		( Int(..), Int#, (<#), (==#) )
-
+import GHC.Exts
 import Data.Data (Data(..), Typeable, mkConstr, mkDataType, constrIndex)
 import qualified Data.Data as Data
 import Control.Applicative( Applicative(..) )
@@ -31,7 +24,7 @@ import Data.IORef
 import System.IO.Unsafe	( unsafePerformIO )
 import Control.Monad (liftM)
 import System.IO	( hPutStrLn, stderr )
-import Data.Char        ( isAlpha )
+import Data.Char        ( isAlpha, isAlphaNum, isUpper )
 import Data.Word        ( Word8 )
 
 -----------------------------------------------------
@@ -50,16 +43,19 @@ class (Monad m, Applicative m) => Quasi m where
   qRecover :: m a -- ^ the error handler
            -> m a -- ^ action which may fail
            -> m a		-- ^ Recover from the monadic 'fail'
- 
+
 	-- Inspect the type-checker's environment
   qLookupName :: Bool -> String -> m (Maybe Name)
        -- True <=> type namespace, False <=> value namespace
   qReify          :: Name -> m Info
   qReifyInstances :: Name -> [Type] -> m [Dec]
        -- Is (n tys) an instance?
-       -- Returns list of matching instance Decs 
+       -- Returns list of matching instance Decs
        --    (with empty sub-Decs)
        -- Works for classes and type functions
+  qReifyRoles       :: Name -> m [Role]
+  qReifyAnnotations :: Data a => AnnLookup -> m [a]
+  qReifyModule      :: Module -> m ModuleInfo
 
   qLocation :: m Loc
 
@@ -68,9 +64,17 @@ class (Monad m, Applicative m) => Quasi m where
 
   qAddDependentFile :: FilePath -> m ()
 
+  qAddTopDecls :: [Dec] -> m ()
+
+  qAddModFinalizer :: Q () -> m ()
+
+  qGetQ :: Typeable a => m (Maybe a)
+
+  qPutQ :: Typeable a => a -> m ()
+
 -----------------------------------------------------
 --	The IO instance of Quasi
--- 
+--
 --  This instance is used only when running a Q
 --  computation in the IO monad, usually just to
 --  print the result.  There is no interesting
@@ -89,13 +93,20 @@ instance Quasi IO where
 
   qLookupName _ _     = badIO "lookupName"
   qReify _            = badIO "reify"
-  qReifyInstances _ _ = badIO "classInstances"
+  qReifyInstances _ _ = badIO "reifyInstances"
+  qReifyRoles _       = badIO "reifyRoles"
+  qReifyAnnotations _ = badIO "reifyAnnotations"
+  qReifyModule _      = badIO "reifyModule"
   qLocation    	      = badIO "currentLocation"
   qRecover _ _ 	      = badIO "recover" -- Maybe we could fix this?
   qAddDependentFile _ = badIO "addDependentFile"
+  qAddTopDecls _      = badIO "addTopDecls"
+  qAddModFinalizer _  = badIO "addModFinalizer"
+  qGetQ               = badIO "getQ"
+  qPutQ _             = badIO "putQ"
 
   qRunIO m = m
-  
+
 badIO :: String -> IO a
 badIO op = do	{ qReport True ("Can't do `" ++ op ++ "' in the IO monad")
 		; fail "Template Haskell failure" }
@@ -119,7 +130,7 @@ newtype Q a = Q { unQ :: forall m. Quasi m => m a }
 -- are the usual way of running a 'Q' computation.
 --
 -- This function is primarily used in GHC internals, and for debugging
--- splices by running them in 'IO'. 
+-- splices by running them in 'IO'.
 --
 -- Note that many functions in 'Q', such as 'reify' and other compiler
 -- queries, are not supported when running 'Q' in 'IO'; these operations
@@ -137,15 +148,45 @@ instance Monad Q where
 instance Functor Q where
   fmap f (Q x) = Q (fmap f x)
 
-instance Applicative Q where 
-  pure x = Q (pure x) 
-  Q f <*> Q x = Q (f <*> x) 
+instance Applicative Q where
+  pure x = Q (pure x)
+  Q f <*> Q x = Q (f <*> x)
+
+-----------------------------------------------------
+--
+--		The TExp type
+--
+-----------------------------------------------------
+
+type role TExp nominal   -- See Note [Role of TExp]
+newtype TExp a = TExp { unType :: Exp }
+
+unTypeQ :: Q (TExp a) -> Q Exp
+unTypeQ m = do { TExp e <- m
+               ; return e }
+
+unsafeTExpCoerce :: Q Exp -> Q (TExp a)
+unsafeTExpCoerce m = do { e <- m
+                        ; return (TExp e) }
+
+{- Note [Role of TExp]
+~~~~~~~~~~~~~~~~~~~~~~
+TExp's argument must have a nominal role, not phantom as would
+be inferred (Trac #8459).  Consider
+
+  e :: TExp Age
+  e = MkAge 3
+
+  foo = $(coerce e) + 4::Int
+
+The splice will evaluate to (MkAge 3) and you can't add that to
+4::Int. So you can't coerce a (TExp Age) to a (TExp Int). -}
 
 ----------------------------------------------------
 -- Packaged versions for the programmer, hiding the Quasi-ness
 
-{- | 
-Generate a fresh name, which cannot be captured. 
+{- |
+Generate a fresh name, which cannot be captured.
 
 For example, this:
 
@@ -181,11 +222,11 @@ of @x@, namely @VarP nm1@.
 newName :: String -> Q Name
 newName s = Q (qNewName s)
 
--- | Report an error (True) or warning (False), 
+-- | Report an error (True) or warning (False),
 -- but carry on; use 'fail' to stop.
 report  :: Bool -> String -> Q ()
 report b s = Q (qReport b s)
-{-# DEPRECATED report "Use reportError or reportWarning instead" #-}
+{-# DEPRECATED report "Use reportError or reportWarning instead" #-} -- deprecated in 7.6
 
 -- | Report an error to the user, but allow the current splice's computation to carry on. To abort the computation, use 'fail'.
 reportError :: String -> Q ()
@@ -230,7 +271,7 @@ with name @s@ in scope at the current splice's location. If
 there is, the @Name@ of this value is returned;
 if not, then @Nothing@ is returned.
 
-The returned name cannot be \"captured\". 
+The returned name cannot be \"captured\".
 For example:
 
 > f = "global"
@@ -246,7 +287,7 @@ The lookup is performed in the context of the /top-level/ splice
 being run. For example:
 
 > f = "global"
-> g = $( [| let f = "local" in 
+> g = $( [| let f = "local" in
 >            $(do
 >                Just nm <- lookupValueName "f"
 >                varE nm
@@ -286,13 +327,33 @@ and to get information about @D@-the-type, use 'lookupTypeName'.
 reify :: Name -> Q Info
 reify v = Q (qReify v)
 
-{- | @reifyInstances nm tys@ returns a list of visible instances of @nm tys@. That is, 
+{- | @reifyInstances nm tys@ returns a list of visible instances of @nm tys@. That is,
 if @nm@ is the name of a type class, then all instances of this class at the types @tys@
 are returned. Alternatively, if @nm@ is the name of a data family or type family,
 all instances of this family at the types @tys@ are returned.
 -}
 reifyInstances :: Name -> [Type] -> Q [InstanceDec]
 reifyInstances cls tys = Q (qReifyInstances cls tys)
+
+{- | @reifyRoles nm@ returns the list of roles associated with the parameters of
+the tycon @nm@. Fails if @nm@ cannot be found or is not a tycon.
+The returned list should never contain 'InferR'.
+-}
+reifyRoles :: Name -> Q [Role]
+reifyRoles nm = Q (qReifyRoles nm)
+
+-- | @reifyAnnotations target@ returns the list of annotations
+-- associated with @target@.  Only the annotations that are
+-- appropriately typed is returned.  So if you have @Int@ and @String@
+-- annotations for the same target, you have to call this function twice.
+reifyAnnotations :: Data a => AnnLookup -> Q [a]
+reifyAnnotations an = Q (qReifyAnnotations an)
+
+-- | @reifyModule mod@ looks up information about module @mod@.  To
+-- look up the current module, call this function with the return
+-- value of @thisModule@.
+reifyModule :: Module -> Q ModuleInfo
+reifyModule m = Q (qReifyModule m)
 
 -- | Is the list of instances returned by 'reifyInstances' nonempty?
 isInstance :: Name -> [Type] -> Q Bool
@@ -304,10 +365,10 @@ location :: Q Loc
 location = Q qLocation
 
 -- |The 'runIO' function lets you run an I\/O computation in the 'Q' monad.
--- Take care: you are guaranteed the ordering of calls to 'runIO' within 
--- a single 'Q' computation, but not about the order in which splices are run.  
+-- Take care: you are guaranteed the ordering of calls to 'runIO' within
+-- a single 'Q' computation, but not about the order in which splices are run.
 --
--- Note: for various murky reasons, stdout and stderr handles are not 
+-- Note: for various murky reasons, stdout and stderr handles are not
 -- necesarily flushed when the  compiler finishes running, so you should
 -- flush them yourself.
 runIO :: IO a -> Q a
@@ -320,16 +381,41 @@ runIO m = Q (qRunIO m)
 addDependentFile :: FilePath -> Q ()
 addDependentFile fp = Q (qAddDependentFile fp)
 
+-- | Add additional top-level declarations. The added declarations will be type
+-- checked along with the current declaration group.
+addTopDecls :: [Dec] -> Q ()
+addTopDecls ds = Q (qAddTopDecls ds)
+
+-- | Add a finalizer that will run in the Q monad after the current module has
+-- been type checked. This only makes sense when run within a top-level splice.
+addModFinalizer :: Q () -> Q ()
+addModFinalizer act = Q (qAddModFinalizer (unQ act))
+
+-- | Get state from the Q monad.
+getQ :: Typeable a => Q (Maybe a)
+getQ = Q qGetQ
+
+-- | Replace the state in the Q monad.
+putQ :: Typeable a => a -> Q ()
+putQ x = Q (qPutQ x)
+
 instance Quasi Q where
   qNewName  	    = newName
   qReport   	    = report
-  qRecover  	    = recover 
+  qRecover  	    = recover
   qReify    	    = reify
   qReifyInstances   = reifyInstances
+  qReifyRoles       = reifyRoles
+  qReifyAnnotations = reifyAnnotations
+  qReifyModule      = reifyModule
   qLookupName       = lookupName
   qLocation 	    = location
   qRunIO    	    = runIO
   qAddDependentFile = addDependentFile
+  qAddTopDecls      = addTopDecls
+  qAddModFinalizer  = addModFinalizer
+  qGetQ             = getQ
+  qPutQ             = putQ
 
 
 ----------------------------------------------------
@@ -354,7 +440,7 @@ sequenceQ = sequence
 
 class Lift t where
   lift :: t -> Q Exp
-  
+
 instance Lift Integer where
   lift x = return (LitE (IntegerL x))
 
@@ -414,7 +500,7 @@ instance (Lift a, Lift b, Lift c, Lift d, Lift e, Lift f, Lift g)
 -- which we should take advantage of.
 -- NB: the lhs of the rule has no args, so that
 --     the rule will apply to a 'lift' all on its own
---     which happens to be the way the type checker 
+--     which happens to be the way the type checker
 --     creates it.
 {-# RULES "TH:liftString" lift = \s -> return (LitE (StringL s)) #-}
 
@@ -433,17 +519,21 @@ rightName = mkNameG DataName "base" "Data.Either" "Right"
 
 
 -----------------------------------------------------
---		Names and uniques 
+--		Names and uniques
 -----------------------------------------------------
 
 newtype ModName = ModName String	-- Module name
- deriving (Eq,Ord,Typeable,Data)
+ deriving (Show,Eq,Ord,Typeable,Data)
 
 newtype PkgName = PkgName String	-- package name
- deriving (Eq,Ord,Typeable,Data)
+ deriving (Show,Eq,Ord,Typeable,Data)
+
+-- | Obtained from 'reifyModule' and 'thisModule'.
+data Module = Module PkgName ModName -- package qualified module name
+ deriving (Show,Eq,Ord,Typeable,Data)
 
 newtype OccName = OccName String
- deriving (Eq,Ord,Typeable,Data)
+ deriving (Show,Eq,Ord,Typeable,Data)
 
 mkModName :: String -> ModName
 mkModName s = ModName s
@@ -473,7 +563,7 @@ occString (OccName occ) = occ
 -----------------------------------------------------
 --		 Names
 -----------------------------------------------------
--- 
+--
 -- For "global" names ('NameG') we need a totally unique name,
 -- so we must include the name-space of the thing
 --
@@ -522,7 +612,7 @@ What we actually want is for the @x@ in @f@ to be distinct from the
 > g x = let x' = 0 in x
 > h y = let x' = 0 in y
 
-which avoids name capture as desired. 
+which avoids name capture as desired.
 
 In the general case, we say that a @Name@ can be captured if
 the thing it refers to can be changed by adding new declarations.
@@ -535,19 +625,19 @@ An abstract type representing names in the syntax tree.
 name-capture guarantees (see "Language.Haskell.TH.Syntax#namecapture" for
 an explanation of name capture):
 
-  * the built-in syntax @'f@ and @''T@ can be used to construct names, 
-    The expression @'f@ gives a @Name@ which refers to the value @f@ 
+  * the built-in syntax @'f@ and @''T@ can be used to construct names,
+    The expression @'f@ gives a @Name@ which refers to the value @f@
     currently in scope, and @''T@ gives a @Name@ which refers to the
     type @T@ currently in scope. These names can never be captured.
-    
-  * 'lookupValueName' and 'lookupTypeName' are similar to @'f@ and 
+
+  * 'lookupValueName' and 'lookupTypeName' are similar to @'f@ and
      @''T@ respectively, but the @Name@s are looked up at the point
      where the current splice is being run. These names can never be
      captured.
 
   * 'newName' monadically generates a new name, which can never
      be captured.
-     
+
   * 'mkName' generates a capturable name.
 
 Names constructed using @newName@ and @mkName@ may be used in bindings
@@ -563,7 +653,7 @@ data NameFlavour
   | NameL Int#      -- ^ Local name bound outside of the TH AST
   | NameG NameSpace PkgName ModName -- ^ Global name bound outside of the TH AST:
                 -- An original name (occurrences only, not binders)
-		-- Need the namespace too to be sure which 
+		-- Need the namespace too to be sure which
 		-- thing we are naming
   deriving ( Typeable )
 
@@ -575,7 +665,7 @@ data NameFlavour
 --
 -- The long term solution to this is to use the binary package for annotation serialization and
 -- then remove this instance. However, to do _that_ we need to wait on binary to become stable, since
--- boot libraries cannot be upgraded seperately from GHC itself.
+-- boot libraries cannot be upgraded separately from GHC itself.
 --
 -- This instance cannot be derived automatically due to bug #2701
 instance Data NameFlavour where
@@ -611,7 +701,7 @@ ty_NameFlavour = mkDataType "Language.Haskell.TH.Syntax.NameFlavour"
                              con_NameL, con_NameG]
 
 data NameSpace = VarName	-- ^ Variables
-	       | DataName	-- ^ Data constructors 
+	       | DataName	-- ^ Data constructors
 	       | TcClsName	-- ^ Type constructors and classes; Haskell has them
 				-- in the same name space for now.
 	       deriving( Eq, Ord, Data, Typeable )
@@ -628,7 +718,7 @@ nameModule (Name _ (NameQ m))     = Just (modString m)
 nameModule (Name _ (NameG _ _ m)) = Just (modString m)
 nameModule _                      = Nothing
 
-{- | 
+{- |
 Generate a capturable name. Occurrences of such names will be
 resolved according to the Haskell scoping rules at the occurrence
 site.
@@ -659,7 +749,7 @@ mkName :: String -> Name
 --
 -- Parse the string to see if it has a "." in it
 -- so we know whether to generate a qualified or unqualified name
--- It's a bit tricky because we need to parse 
+-- It's a bit tricky because we need to parse
 --
 -- > Foo.Baz.x   as    Qual Foo.Baz x
 --
@@ -668,16 +758,32 @@ mkName str
   = split [] (reverse str)
   where
     split occ []        = Name (mkOccName occ) NameS
-    split occ ('.':rev)	| not (null occ), 
-			  not (null rev), head rev /= '.'
+    split occ ('.':rev)	| not (null occ)
+			, is_rev_mod_name rev
 			= Name (mkOccName occ) (NameQ (mkModName (reverse rev)))
 	-- The 'not (null occ)' guard ensures that
 	-- 	mkName "&." = Name "&." NameS
-	-- The 'rev' guards ensure that
+	-- The 'is_rev_mod' guards ensure that
 	--	mkName ".&" = Name ".&" NameS
+	--	mkName "^.." = Name "^.." NameS      -- Trac #8633
 	--	mkName "Data.Bits..&" = Name ".&" (NameQ "Data.Bits")
 	-- This rather bizarre case actually happened; (.&.) is in Data.Bits
     split occ (c:rev)   = split (c:occ) rev
+
+    -- Recognises a reversed module name xA.yB.C, 
+    -- with at least one component, 
+    -- and each component looks like a module name
+    --   (i.e. non-empty, starts with capital, all alpha)
+    is_rev_mod_name rev_mod_str
+      | (compt, rest) <- break (== '.') rev_mod_str
+      , not (null compt), isUpper (last compt), all is_mod_char compt
+      = case rest of
+          []             -> True
+          (_dot : rest') -> is_rev_mod_name rest'
+      | otherwise
+      = False
+
+    is_mod_char c = isAlphaNum c || c == '_' || c == '\''
 
 -- | Only used internally
 mkNameU :: String -> Uniq -> Name
@@ -718,22 +824,22 @@ instance Ord NameFlavour where
 
   (NameU _)  `compare` NameS      = GT
   (NameU _)  `compare` (NameQ _)  = GT
-  (NameU u1) `compare` (NameU u2) | u1  <# u2 = LT
-				  | u1 ==# u2 = EQ
-				  | otherwise = GT
+  (NameU u1) `compare` (NameU u2) | isTrue# (u1  <# u2) = LT
+				  | isTrue# (u1 ==# u2) = EQ
+				  | otherwise           = GT
   (NameU _)  `compare` _     = LT
 
   (NameL _)  `compare` NameS      = GT
   (NameL _)  `compare` (NameQ _)  = GT
   (NameL _)  `compare` (NameU _)  = GT
-  (NameL u1) `compare` (NameL u2) | u1  <# u2 = LT
-				  | u1 ==# u2 = EQ
-				  | otherwise = GT
+  (NameL u1) `compare` (NameL u2) | isTrue# (u1  <# u2) = LT
+				  | isTrue# (u1 ==# u2) = EQ
+				  | otherwise           = GT
   (NameL _)  `compare` _          = LT
 
   (NameG ns1 p1 m1) `compare` (NameG ns2 p2 m2) = (ns1 `compare` ns2) `thenCmp`
                                             (p1 `compare` p2) `thenCmp`
-					    (m1 `compare` m2) 
+					    (m1 `compare` m2)
   (NameG _ _ _)    `compare` _ = GT
 
 data NameIs = Alone | Applied | Infix
@@ -845,60 +951,61 @@ type CharPos = (Int, Int)	-- ^ Line and character position
 
 -- | Obtained from 'reify' in the 'Q' Monad.
 data Info
-  = 
+  =
   -- | A class, with a list of its visible instances
-  ClassI 
+  ClassI
       Dec
       [InstanceDec]
-  
+
   -- | A class method
   | ClassOpI
        Name
        Type
        ParentName
        Fixity
-  
+
   -- | A \"plain\" type constructor. \"Fancier\" type constructors are returned using 'PrimTyConI' or 'FamilyI' as appropriate
-  | TyConI 
+  | TyConI
         Dec
 
-  -- | A type or data family, with a list of its visible instances
-  | FamilyI 
+  -- | A type or data family, with a list of its visible instances. A closed
+  -- type family is returned with 0 instances.
+  | FamilyI
         Dec
         [InstanceDec]
-  
+
   -- | A \"primitive\" type constructor, which can't be expressed with a 'Dec'. Examples: @(->)@, @Int#@.
-  | PrimTyConI 
+  | PrimTyConI
        Name
        Arity
        Unlifted
-  
+
   -- | A data constructor
-  | DataConI 
+  | DataConI
        Name
        Type
        ParentName
        Fixity
 
-  {- | 
+  {- |
   A \"value\" variable (as opposed to a type variable, see 'TyVarI').
-  
-  The @Maybe Dec@ field contains @Just@ the declaration which 
-  defined the variable -- including the RHS of the declaration -- 
+
+  The @Maybe Dec@ field contains @Just@ the declaration which
+  defined the variable -- including the RHS of the declaration --
   or else @Nothing@, in the case where the RHS is unavailable to
   the compiler. At present, this value is _always_ @Nothing@:
   returning the RHS has not yet been implemented because of
   lack of interest.
   -}
-  | VarI 
+  | VarI
        Name
        Type
        (Maybe Dec)
        Fixity
 
-  {- | 
+  {- |
   A type variable.
-  
+
   The @Type@ field contains the type which underlies the variable.
   At present, this is always @'VarT' theName@, but future changes
   may permit refinement of this.
@@ -908,7 +1015,13 @@ data Info
 	Type	-- What it is bound to
   deriving( Show, Data, Typeable )
 
-{- | 
+-- | Obtained from 'reifyModule' in the 'Q' Monad.
+data ModuleInfo =
+  -- | Contains the import list of the module.
+  ModuleInfo [Module]
+  deriving( Show, Data, Typeable )
+
+{- |
 In 'ClassOpI' and 'DataConI', name of the parent class or type
 -}
 type ParentName = Name
@@ -1012,8 +1125,8 @@ reassociate the tree as necessary.
 --
 -----------------------------------------------------
 
-data Lit = CharL Char 
-         | StringL String 
+data Lit = CharL Char
+         | StringL String
          | IntegerL Integer     -- ^ Used for overloaded and non-overloaded
                                 -- literals. We don't have a good way to
                                 -- represent non-overloaded literals at
@@ -1026,12 +1139,12 @@ data Lit = CharL Char
          | StringPrimL [Word8]	-- ^ A primitive C-style string, type Addr#
     deriving( Show, Eq, Data, Typeable )
 
-    -- We could add Int, Float, Double etc, as we do in HsLit, 
+    -- We could add Int, Float, Double etc, as we do in HsLit,
     -- but that could complicate the
     -- suppposedly-simple TH.Syntax literal type
 
 -- | Pattern in Haskell given in @{}@
-data Pat 
+data Pat
   = LitP Lit                      -- ^ @{ 5 or 'c' }@
   | VarP Name                     -- ^ @{ x }@
   | TupP [Pat]                    -- ^ @{ (p1,p2) }@
@@ -1061,8 +1174,8 @@ data Match = Match Pat Body [Dec] -- ^ @case e of { pat -> body where decs }@
 data Clause = Clause [Pat] Body [Dec]
                                   -- ^ @f { p1 p2 = body where decs }@
     deriving( Show, Eq, Data, Typeable )
- 
-data Exp 
+
+data Exp
   = VarE Name                          -- ^ @{ x }@
   | ConE Name                          -- ^ @data T1 = C1 t1 t2; p = {C1} e1 e2  @
   | LitE Lit                           -- ^ @{ 5 or 'c'}@
@@ -1091,7 +1204,7 @@ data Exp
   | LetE [Dec] Exp                     -- ^ @{ let x=e1;   y=e2 in e3 }@
   | CaseE Exp [Match]                  -- ^ @{ case e of m1; m2 }@
   | DoE [Stmt]                         -- ^ @{ do { p <- e1; e2 }  }@
-  | CompE [Stmt]                       -- ^ @{ [ (x,y) | x <- xs, y <- ys ] }@ 
+  | CompE [Stmt]                       -- ^ @{ [ (x,y) | x <- xs, y <- ys ] }@
       --
       -- The result expression of the comprehension is
       -- the /last/ of the @'Stmt'@s, and should be a 'NoBindS'.
@@ -1114,8 +1227,8 @@ type FieldExp = (Name,Exp)
 -- Omitted: implicit parameters
 
 data Body
-  = GuardedB [(Guard,Exp)]   -- ^ @f p { | e1 = e2 
-                                 --      | e3 = e4 } 
+  = GuardedB [(Guard,Exp)]   -- ^ @f p { | e1 = e2
+                                 --      | e3 = e4 }
                                  -- where ds@
   | NormalB Exp              -- ^ @f p { = e } where ds@
   deriving( Show, Eq, Data, Typeable )
@@ -1135,18 +1248,18 @@ data Stmt
 data Range = FromR Exp | FromThenR Exp Exp
            | FromToR Exp Exp | FromThenToR Exp Exp Exp
           deriving( Show, Eq, Data, Typeable )
-  
-data Dec 
+
+data Dec
   = FunD Name [Clause]            -- ^ @{ f p1 p2 = b where decs }@
   | ValD Pat Body [Dec]           -- ^ @{ p = b where decs }@
-  | DataD Cxt Name [TyVarBndr] 
+  | DataD Cxt Name [TyVarBndr]
          [Con] [Name]             -- ^ @{ data Cxt x => T x = A x | B (T x)
                                   --       deriving (Z,W)}@
-  | NewtypeD Cxt Name [TyVarBndr] 
+  | NewtypeD Cxt Name [TyVarBndr]
          Con [Name]               -- ^ @{ newtype Cxt x => T x = A (B x)
                                   --       deriving (Z,W)}@
   | TySynD Name [TyVarBndr] Type  -- ^ @{ type T x = (x,x) }@
-  | ClassD Cxt Name [TyVarBndr] 
+  | ClassD Cxt Name [TyVarBndr]
          [FunDep] [Dec]           -- ^ @{ class Eq a => Ord a where ds }@
   | InstanceD Cxt Type [Dec]      -- ^ @{ instance Show w => Show [w]
                                   --       where ds }@
@@ -1160,17 +1273,29 @@ data Dec
   | PragmaD Pragma                -- ^ @{ {\-# INLINE [1] foo #-\} }@
 
   -- | type families (may also appear in [Dec] of 'ClassD' and 'InstanceD')
-  | FamilyD FamFlavour Name 
+  | FamilyD FamFlavour Name
          [TyVarBndr] (Maybe Kind) -- ^ @{ type family T a b c :: * }@
-                                 
+
   | DataInstD Cxt Name [Type]
-         [Con] [Name]             -- ^ @{ data instance Cxt x => T [x] = A x 
+         [Con] [Name]             -- ^ @{ data instance Cxt x => T [x] = A x
                                   --                                | B (T x)
                                   --       deriving (Z,W)}@
   | NewtypeInstD Cxt Name [Type]
          Con [Name]               -- ^ @{ newtype instance Cxt x => T [x] = A (B x)
                                   --       deriving (Z,W)}@
-  | TySynInstD Name [Type] Type   -- ^ @{ type instance T (Maybe x) = (x,x) }@
+  | TySynInstD Name TySynEqn      -- ^ @{ type instance ... }@
+
+  | ClosedTypeFamilyD Name
+      [TyVarBndr] (Maybe Kind)
+      [TySynEqn]                  -- ^ @{ type family F a b :: * where ... }@
+
+  | RoleAnnotD Name [Role]        -- ^ @{ type role T nominal representational }@
+  deriving( Show, Eq, Data, Typeable )
+
+-- | One equation of a type family instance or closed type family. The
+-- arguments are the left-hand-side type patterns and the right-hand-side
+-- result.
+data TySynEqn = TySynEqn [Type] Type
   deriving( Show, Eq, Data, Typeable )
 
 data FunDep = FunDep [Name] [Name]
@@ -1193,6 +1318,7 @@ data Pragma = InlineP         Name Inline RuleMatch Phases
             | SpecialiseP     Name Type (Maybe Inline) Phases
             | SpecialiseInstP Type
             | RuleP           String [RuleBndr] Exp Exp Phases
+            | AnnP            AnnTarget Exp
         deriving( Show, Eq, Data, Typeable )
 
 data Inline = NoInline
@@ -1211,6 +1337,11 @@ data Phases = AllPhases
 
 data RuleBndr = RuleVar Name
               | TypedRuleVar Name Type
+              deriving (Show, Eq, Data, Typeable)
+
+data AnnTarget = ModuleAnnotation
+               | TypeAnnotation Name
+               | ValueAnnotation Name
               deriving (Show, Eq, Data, Typeable)
 
 type Cxt = [Pred]                 -- ^ @(Eq a, Ord b)@
@@ -1259,6 +1390,18 @@ data TyLit = NumTyLit Integer             -- ^ @2@
            | StrTyLit String              -- ^ @"Hello"@
   deriving ( Show, Eq, Data, Typeable )
 
+-- | Role annotations
+data Role = NominalR            -- ^ @nominal@
+          | RepresentationalR   -- ^ @representational@
+          | PhantomR            -- ^ @phantom@
+          | InferR              -- ^ @_@
+  deriving( Show, Eq, Data, Typeable )
+
+-- | Annotation target for reifyAnnotations
+data AnnLookup = AnnLookupModule Module
+               | AnnLookupName Name
+               deriving( Show, Eq, Data, Typeable )
+
 -- | To avoid duplication between kinds and types, they
 -- are defined to be the same. Naturally, you would never
 -- have a type be 'StarT' and you would never have a kind
@@ -1267,14 +1410,14 @@ data TyLit = NumTyLit Integer             -- ^ @2@
 -- 'PromotedT'. Similarly, tuple kinds are made with 'TupleT',
 -- not 'PromotedTupleT'.
 
-type Kind = Type     
+type Kind = Type
 
 {- Note [Representing concrete syntax in types]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Haskell has a rich concrete syntax for types, including
   t1 -> t2, (t1,t2), [t], and so on
 In TH we represent all of this using AppT, with a distinguished
-type construtor at the head.  So,
+type constructor at the head.  So,
   Type              TH representation
   -----------------------------------------------
   t1 -> t2          ArrowT `AppT` t2 `AppT` t2
@@ -1295,7 +1438,7 @@ but it's very smelly because there really is no type constructor
 corresponding to PromotedListT. So we encode HsExplicitListTy with
 PromotedConsT and PromotedNilT (which *do* have underlying type
 constructors):
-  '[ Maybe, IO ]    PromotedConsT `AppT` Maybe `AppT` 
+  '[ Maybe, IO ]    PromotedConsT `AppT` Maybe `AppT`
                     (PromotedConsT  `AppT` IO `AppT` PromotedNilT)
 -}
 

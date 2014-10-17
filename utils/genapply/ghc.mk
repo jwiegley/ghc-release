@@ -5,13 +5,14 @@
 # This file is part of the GHC build system.
 #
 # To understand how the build system works and how to modify it, see
-#      http://hackage.haskell.org/trac/ghc/wiki/Building/Architecture
-#      http://hackage.haskell.org/trac/ghc/wiki/Building/Modifying
+#      http://ghc.haskell.org/trac/ghc/wiki/Building/Architecture
+#      http://ghc.haskell.org/trac/ghc/wiki/Building/Modifying
 #
 # -----------------------------------------------------------------------------
 
 utils/genapply_dist_MODULES = GenApply
-utils/genapply_dist_PROG    = $(GHC_GENAPPLY_PGM)
+utils/genapply_dist_PROGNAME = genapply
+utils/genapply_dist_INSTALL_INPLACE = YES
 
 utils/genapply_HC_OPTS += -package pretty
 

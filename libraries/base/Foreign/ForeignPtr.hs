@@ -1,5 +1,5 @@
 {-# LANGUAGE Unsafe #-}
-{-# LANGUAGE CPP, NoImplicitPrelude #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# OPTIONS_HADDOCK hide #-}
 
 -----------------------------------------------------------------------------
@@ -22,22 +22,16 @@ module Foreign.ForeignPtr (
         -- * Finalised data pointers
           ForeignPtr
         , FinalizerPtr
-#if defined(__HUGS__) || defined(__GLASGOW_HASKELL__)
         , FinalizerEnvPtr
-#endif
+
         -- ** Basic operations
         , newForeignPtr
         , newForeignPtr_
         , addForeignPtrFinalizer
-#if defined(__HUGS__) || defined(__GLASGOW_HASKELL__)
         , newForeignPtrEnv
         , addForeignPtrFinalizerEnv
-#endif
         , withForeignPtr
-
-#ifdef __GLASGOW_HASKELL__
         , finalizeForeignPtr
-#endif
 
         -- ** Low-level operations
         , touchForeignPtr
@@ -48,17 +42,7 @@ module Foreign.ForeignPtr (
         , mallocForeignPtrBytes
         , mallocForeignPtrArray
         , mallocForeignPtrArray0
-        -- ** Unsafe low-level operations
-        , unsafeForeignPtrToPtr
     ) where
 
 import Foreign.ForeignPtr.Safe
-
-import Foreign.Ptr ( Ptr )
-import qualified Foreign.ForeignPtr.Unsafe as U
-
-{-# DEPRECATED unsafeForeignPtrToPtr "Use Foreign.ForeignPtr.Unsafe.unsafeForeignPtrToPtr instead; This function will be removed in the next release" #-}
-{-# INLINE unsafeForeignPtrToPtr #-}
-unsafeForeignPtrToPtr :: ForeignPtr a -> Ptr a
-unsafeForeignPtrToPtr = U.unsafeForeignPtrToPtr
 

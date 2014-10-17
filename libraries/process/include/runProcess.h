@@ -29,8 +29,13 @@
 #include <vfork.h>
 #endif
 
-#ifdef HAVE_VFORK
-#define fork vfork
+#if defined(HAVE_WORKING_VFORK)
+#define myfork vfork
+#elif defined(HAVE_WORKING_FORK)
+#define myfork fork
+// We don't need a fork command on Windows
+#elif !(defined(_MSC_VER) || defined(__MINGW32__) || defined(_WIN32))
+#error Cannot find a working fork command
 #endif
 
 #ifdef HAVE_SIGNAL_H
@@ -49,25 +54,29 @@ typedef PHANDLE ProcHandle;
 #if !(defined(_MSC_VER) || defined(__MINGW32__) || defined(_WIN32))
 
 extern ProcHandle runInteractiveProcess( char *const args[], 
-					 char *workingDirectory, 
-					 char **environment, 
-                                         int fdStdIn, int fdStdOut, int fdStdErr,
-					 int *pfdStdInput, 
-					 int *pfdStdOutput, 
-					 int *pfdStdError,
-                                         int set_inthandler, long inthandler, 
-                                         int set_quithandler, long quithandler,
-                                         int flags);
+                                         char *workingDirectory, 
+                                         char **environment, 
+                                         int fdStdIn,
+                                         int fdStdOut,
+                                         int fdStdErr,
+                                         int *pfdStdInput, 
+                                         int *pfdStdOutput, 
+                                         int *pfdStdError,
+                                         int reset_int_quit_handlers,
+                                         int flags,
+                                         char **failed_doing);
 
 #else
 
 extern ProcHandle runInteractiveProcess( wchar_t *cmd,
-					 wchar_t *workingDirectory,
-					 wchar_t *environment,
-                                         int fdStdIn, int fdStdOut, int fdStdErr,
-					 int *pfdStdInput,
-					 int *pfdStdOutput,
-					 int *pfdStdError,
+                                         wchar_t *workingDirectory,
+                                         wchar_t *environment,
+                                         int fdStdIn,
+                                         int fdStdOut,
+                                         int fdStdErr,
+                                         int *pfdStdInput,
+                                         int *pfdStdOutput,
+                                         int *pfdStdError,
                                          int flags);
 
 #endif

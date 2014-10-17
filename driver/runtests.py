@@ -44,6 +44,8 @@ long_options = [
   "skipway=",		# skip this way
   "threads=",           # threads to run simultaneously
   "check-files-written", # check files aren't written by multiple tests
+  "verbose=",          # verbose (0,1,2 so far)
+  "skip-perf-tests",       # skip performance tests
   ]
 
 opts, args = getopt.getopt(sys.argv[1:], "e:", long_options)
@@ -92,6 +94,16 @@ for opt,arg in opts:
     if opt == '--check-files-written':
         config.check_files_written = True
 
+    if opt == '--skip-perf-tests':
+        config.skip_perf_tests = True
+
+    if opt == '--verbose':
+        if arg not in ["0","1","2","3"]:
+            sys.stderr.write("ERROR: requested verbosity %s not supported, use 0,1,2 or 3" % arg)
+            sys.exit(1)
+        config.verbose = int(arg)
+
+
 if config.use_threads == 1:
     # Trac #1558 says threads don't work in python 2.4.4, but do
     # in 2.5.2. Probably >= 2.5 is sufficient, but let's be
@@ -120,13 +132,16 @@ if config.use_threads == 1:
 
 config.cygwin = False
 config.msys = False
+
 if windows:
     h = os.popen('uname -s', 'r')
     v = h.read()
     h.close()
     if v.startswith("CYGWIN"):
         config.cygwin = True
-    elif v.startswith("MINGW32"):
+    elif v.startswith("MINGW"):
+# msys gives "MINGW32"
+# msys2 gives "MINGW_NT-6.2"
         config.msys = True
     else:
         raise Exception("Can't detect Windows terminal type")
@@ -207,9 +222,6 @@ if windows or darwin:
 global testopts_local
 testopts_local.x = TestOptions()
 
-global thisdir_testopts
-thisdir_testopts = getThisDirTestOpts()
-
 if config.use_threads:
     t.lock = threading.Lock()
     t.thread_pool = threading.Condition(t.lock)
@@ -235,12 +247,9 @@ print 'Found', len(t_files), '.T files...'
 t = getTestRun()
 
 # Avoid cmd.exe built-in 'date' command on Windows
-if not windows:
-    t.start_time = chop(os.popen('date').read())
-else:
-    t.start_time = 'now'
+t.start_time = time.localtime()
 
-print 'Beginning test run at', t.start_time
+print 'Beginning test run at', time.strftime("%c %Z",t.start_time)
 
 # set stdout to unbuffered (is this the best way to do it?)
 sys.stdout.flush()
@@ -248,7 +257,7 @@ sys.stdout = os.fdopen(sys.__stdout__.fileno(), "w", 0)
 
 # First collect all the tests to be run
 for file in t_files:
-    print '====> Scanning', file
+    if_verbose(2, '====> Scanning %s' % file)
     newTestDir(os.path.dirname(file))
     try:
         execfile(file)
@@ -257,21 +266,39 @@ for file in t_files:
         t.n_framework_failures = t.n_framework_failures + 1
         traceback.print_exc()
 
-# Now run all the tests
-if config.use_threads:
-    t.running_threads=0
-for oneTest in allTests:
-    oneTest()
-if config.use_threads:
-    t.thread_pool.acquire()
-    while t.running_threads>0:
-        t.thread_pool.wait()
-    t.thread_pool.release()
-        
-summary(t, sys.stdout)
+if config.list_broken:
+    global brokens
+    print ''
+    print 'Broken tests:'
+    print (' '.join(map (lambda (b, d, n) : '#' + str(b) + '(' + d + '/' + n + ')', brokens)))
+    print ''
 
-if config.output_summary != '':
-    summary(t, open(config.output_summary, 'w'))
+    if t.n_framework_failures != 0:
+        print 'WARNING:', str(t.n_framework_failures), 'framework failures!'
+        print ''
+else:
+    # Now run all the tests
+    if config.use_threads:
+        t.running_threads=0
+    for oneTest in parallelTests:
+        if stopping():
+            break
+        oneTest()
+    if config.use_threads:
+        t.thread_pool.acquire()
+        while t.running_threads>0:
+            t.thread_pool.wait()
+        t.thread_pool.release()
+    config.use_threads = False
+    for oneTest in aloneTests:
+        if stopping():
+            break
+        oneTest()
+        
+    summary(t, sys.stdout)
+
+    if config.output_summary != '':
+        summary(t, open(config.output_summary, 'w'))
 
 sys.exit(0)
 

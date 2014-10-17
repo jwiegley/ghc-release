@@ -1,6 +1,6 @@
 {-# OPTIONS -Wall -Werror #-}
 
-module Main where
+module Test.TestEaster where
 
 import Data.Time.Calendar.Easter
 import Data.Time.Calendar
@@ -8,16 +8,31 @@ import Data.Time.Format
 
 import System.Locale
 
+import Test.TestUtil
+import Test.TestEasterRef
+
+--
+
 days :: [Day]
 days = [ModifiedJulianDay 53000 .. ModifiedJulianDay 53014]
 
 showWithWDay :: Day -> String
 showWithWDay = formatTime defaultTimeLocale "%F %A"
 
-main :: IO ()
-main = do
-	mapM_ (\day -> putStrLn ((showWithWDay day) ++ " -> " ++ (showWithWDay (sundayAfter day)))) days
-	mapM_ (\year -> do
-		putStrLn ((show year) ++ ", Gregorian: moon, " ++ (show (gregorianPaschalMoon year)) ++ ": Easter, " ++ (showWithWDay (gregorianEaster year)))
-		putStrLn ((show year) ++ ", Orthodox : moon, " ++ (show (orthodoxPaschalMoon year)) ++ ": Easter, " ++ (showWithWDay (orthodoxEaster year)))
-		) [2000..2020]
+testEaster :: Test
+testEaster = pureTest "testEaster" $ let 
+    ds = unlines $ map (\day ->
+                   unwords [ showWithWDay day, "->"
+                           , showWithWDay (sundayAfter day)]) days
+
+    f y = unwords [ show y ++ ", Gregorian: moon,"
+                          , show (gregorianPaschalMoon y) ++ ": Easter,"
+                          , showWithWDay (gregorianEaster y)]
+                  ++ "\n"
+
+    g y = unwords [ show y ++ ", Orthodox : moon,"
+                          , show (orthodoxPaschalMoon y) ++ ": Easter,"
+                          , showWithWDay (orthodoxEaster y)]
+                  ++ "\n"
+
+    in diff testEasterRef $ ds ++ concatMap (\y -> f y ++ g y) [2000..2020]

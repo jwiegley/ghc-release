@@ -3,7 +3,7 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 -- | Expand out synthetic instructions into single machine instrs.
@@ -21,7 +21,7 @@ import SPARC.Ppr	()
 import Instruction
 import Reg
 import Size
-import OldCmm
+import Cmm
 
 
 import Outputable
@@ -32,8 +32,8 @@ expandTop :: NatCmmDecl CmmStatics Instr -> NatCmmDecl CmmStatics Instr
 expandTop top@(CmmData{})
 	= top
 
-expandTop (CmmProc info lbl (ListGraph blocks))
-	= CmmProc info lbl (ListGraph $ map expandBlock blocks)
+expandTop (CmmProc info lbl live (ListGraph blocks))
+	= CmmProc info lbl live (ListGraph $ map expandBlock blocks)
 
 
 -- | Expand out synthetic instructions in this block

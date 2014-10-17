@@ -1,7 +1,4 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -fno-warn-unused-imports #-}
-{-# OPTIONS_GHC -XRecordWildCards #-}
-#if __GLASGOW_HASKELL__ >= 701
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 -----------------------------------------------------------------------------
@@ -70,16 +67,8 @@ module System.Posix.IO.ByteString (
 
 import System.Posix.Types
 import System.Posix.IO.Common
-import Foreign.C hiding (
-     throwErrnoPath,
-     throwErrnoPathIf,
-     throwErrnoPathIf_,
-     throwErrnoPathIfNull,
-     throwErrnoPathIfMinus1,
-     throwErrnoPathIfMinus1_ )
 
 import System.Posix.ByteString.FilePath
-
 
 -- |Open and optionally create this file.  See 'System.Posix.Files'
 -- for information on how to use the 'FileMode' type.

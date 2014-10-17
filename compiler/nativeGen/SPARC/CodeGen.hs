@@ -2,10 +2,11 @@
 --
 -- Generating machine code (instruction selection)
 --
--- (c) The University of Glasgow 1996-2004
+-- (c) The University of Glasgow 1996-2013
 --
 -----------------------------------------------------------------------------
 
+{-# LANGUAGE GADTs #-}
 module SPARC.CodeGen (
         cmmTopCodeGen,
         generateJumpTableForInstr,
@@ -38,7 +39,9 @@ import NCGMonad
 
 -- Our intermediate code:
 import BlockId
-import OldCmm
+import Cmm
+import CmmUtils
+import Hoopl
 import PIC
 import Reg
 import CLabel
@@ -48,7 +51,6 @@ import CPrim
 import BasicTypes
 import DynFlags
 import FastString
-import StaticFlags      ( opt_PIC )
 import OrdList
 import Outputable
 import Platform
@@ -60,10 +62,11 @@ import Control.Monad    ( mapAndUnzipM )
 cmmTopCodeGen :: RawCmmDecl
               -> NatM [NatCmmDecl CmmStatics Instr]
 
-cmmTopCodeGen (CmmProc info lab (ListGraph blocks))
- = do (nat_blocks,statics) <- mapAndUnzipM basicBlockCodeGen blocks
+cmmTopCodeGen (CmmProc info lab live graph)
+ = do let blocks = toBlockListEntryFirst graph
+      (nat_blocks,statics) <- mapAndUnzipM basicBlockCodeGen blocks
 
-      let proc = CmmProc info lab (ListGraph $ concat nat_blocks)
+      let proc = CmmProc info lab live (ListGraph $ concat nat_blocks)
       let tops = proc : concat statics
 
       return tops
@@ -77,12 +80,16 @@ cmmTopCodeGen (CmmData sec dat) = do
 --      are indicated by the NEWBLOCK instruction.  We must split up the
 --      instruction stream into basic blocks again.  Also, we extract
 --      LDATAs here too.
-basicBlockCodeGen :: CmmBasicBlock
+basicBlockCodeGen :: CmmBlock
                   -> NatM ( [NatBasicBlock Instr]
                           , [NatCmmDecl CmmStatics Instr])
 
-basicBlockCodeGen cmm@(BasicBlock id stmts) = do
-  instrs <- stmtsToInstrs stmts
+basicBlockCodeGen block = do
+  let (CmmEntry id, nodes, tail)  = blockSplit block
+      stmts = blockToList nodes
+  mid_instrs <- stmtsToInstrs stmts
+  tail_instrs <- stmtToInstrs tail
+  let instrs = mid_instrs `appOL` tail_instrs
   let
         (top,other_blocks,statics)
                 = foldrOL mkBlocks ([],[],[]) instrs
@@ -98,48 +105,52 @@ basicBlockCodeGen cmm@(BasicBlock id stmts) = do
 
         -- do intra-block sanity checking
         blocksChecked
-                = map (checkBlock cmm)
+                = map (checkBlock block)
                 $ BasicBlock id top : other_blocks
 
   return (blocksChecked, statics)
 
 
 -- | Convert some Cmm statements to SPARC instructions.
-stmtsToInstrs :: [CmmStmt] -> NatM InstrBlock
+stmtsToInstrs :: [CmmNode e x] -> NatM InstrBlock
 stmtsToInstrs stmts
    = do instrss <- mapM stmtToInstrs stmts
         return (concatOL instrss)
 
 
-stmtToInstrs :: CmmStmt -> NatM InstrBlock
-stmtToInstrs stmt = case stmt of
-    CmmNop         -> return nilOL
+stmtToInstrs :: CmmNode e x -> NatM InstrBlock
+stmtToInstrs stmt = do
+  dflags <- getDynFlags
+  case stmt of
     CmmComment s   -> return (unitOL (COMMENT s))
 
     CmmAssign reg src
       | isFloatType ty  -> assignReg_FltCode size reg src
       | isWord64 ty     -> assignReg_I64Code      reg src
       | otherwise       -> assignReg_IntCode size reg src
-        where ty = cmmRegType reg
+        where ty = cmmRegType dflags reg
               size = cmmTypeSize ty
 
     CmmStore addr src
       | isFloatType ty  -> assignMem_FltCode size addr src
       | isWord64 ty     -> assignMem_I64Code      addr src
       | otherwise       -> assignMem_IntCode size addr src
-        where ty = cmmExprType src
+        where ty = cmmExprType dflags src
               size = cmmTypeSize ty
 
-    CmmCall target result_regs args _
+    CmmUnsafeForeignCall target result_regs args
        -> genCCall target result_regs args
 
     CmmBranch   id              -> genBranch id
-    CmmCondBranch arg id        -> genCondJump id arg
-    CmmSwitch   arg ids         -> genSwitch arg ids
-    CmmJump     arg _           -> genJump arg
+    CmmCondBranch arg true false -> do b1 <- genCondJump true arg
+                                       b2 <- genBranch false
+                                       return (b1 `appOL` b2)
+    CmmSwitch   arg ids         -> do dflags <- getDynFlags
+                                      genSwitch dflags arg ids
+    CmmCall { cml_target = arg } -> genJump arg
 
-    CmmReturn
-     -> panic "stmtToInstrs: return statement should have been cps'd away"
+    _
+     -> panic "stmtToInstrs: statement should have been cps'd away"
 
 
 {-
@@ -163,9 +174,9 @@ temporary, then do the other computation, and then use the temporary:
 
 
 -- | Convert a BlockId to some CmmStatic data
-jumpTableEntry :: Maybe BlockId -> CmmStatic
-jumpTableEntry Nothing = CmmStaticLit (CmmInt 0 wordWidth)
-jumpTableEntry (Just blockid) = CmmStaticLit (CmmLabel blockLabel)
+jumpTableEntry :: DynFlags -> Maybe BlockId -> CmmStatic
+jumpTableEntry dflags Nothing = CmmStaticLit (CmmInt 0 (wordWidth dflags))
+jumpTableEntry _ (Just blockid) = CmmStaticLit (CmmLabel blockLabel)
     where blockLabel = mkAsmTempLabel (getUnique blockid)
 
 
@@ -191,23 +202,24 @@ assignMem_IntCode pk addr src = do
 
 assignReg_IntCode :: Size -> CmmReg  -> CmmExpr -> NatM InstrBlock
 assignReg_IntCode _ reg src = do
+    dflags <- getDynFlags
     r <- getRegister src
+    let dst = getRegisterReg (targetPlatform dflags) reg
     return $ case r of
         Any _ code         -> code dst
         Fixed _ freg fcode -> fcode `snocOL` OR False g0 (RIReg freg) dst
-    where
-      dst = getRegisterReg reg
 
 
 
 -- Floating point assignment to memory
 assignMem_FltCode :: Size -> CmmExpr -> CmmExpr -> NatM InstrBlock
 assignMem_FltCode pk addr src = do
+    dflags <- getDynFlags
     Amode dst__2 code1 <- getAmode addr
     (src__2, code2) <- getSomeReg src
     tmp1 <- getNewRegNat pk
     let
-        pk__2   = cmmExprType src
+        pk__2   = cmmExprType dflags src
         code__2 = code1 `appOL` code2 `appOL`
             if   sizeToWidth pk == typeWidth pk__2
             then unitOL (ST pk src__2 dst__2)
@@ -218,8 +230,10 @@ assignMem_FltCode pk addr src = do
 -- Floating point assignment to a register/temporary
 assignReg_FltCode :: Size -> CmmReg  -> CmmExpr -> NatM InstrBlock
 assignReg_FltCode pk dstCmmReg srcCmmExpr = do
+    dflags <- getDynFlags
+    let platform = targetPlatform dflags
     srcRegister <- getRegister srcCmmExpr
-    let dstReg  = getRegisterReg dstCmmReg
+    let dstReg  = getRegisterReg platform dstCmmReg
 
     return $ case srcRegister of
         Any _ code                  -> code dstReg
@@ -289,9 +303,9 @@ genCondJump bid bool = do
 -- -----------------------------------------------------------------------------
 -- Generating a table-branch
 
-genSwitch :: CmmExpr -> [Maybe BlockId] -> NatM InstrBlock
-genSwitch expr ids
-        | opt_PIC
+genSwitch :: DynFlags -> CmmExpr -> [Maybe BlockId] -> NatM InstrBlock
+genSwitch dflags expr ids
+        | gopt Opt_PIC dflags
         = error "MachCodeGen: sparc genSwitch PIC not finished\n"
 
         | otherwise
@@ -317,11 +331,12 @@ genSwitch expr ids
                         , JMP_TBL (AddrRegImm dst (ImmInt 0)) ids label
                         , NOP ]
 
-generateJumpTableForInstr :: Instr -> Maybe (NatCmmDecl CmmStatics Instr)
-generateJumpTableForInstr (JMP_TBL _ ids label) =
-        let jumpTable = map jumpTableEntry ids
+generateJumpTableForInstr :: DynFlags -> Instr
+                          -> Maybe (NatCmmDecl CmmStatics Instr)
+generateJumpTableForInstr dflags (JMP_TBL _ ids label) =
+        let jumpTable = map (jumpTableEntry dflags) ids
         in Just (CmmData ReadOnlyData (Statics label jumpTable))
-generateJumpTableForInstr _ = Nothing
+generateJumpTableForInstr _ _ = Nothing
 
 
 
@@ -363,9 +378,9 @@ generateJumpTableForInstr _ = Nothing
 -}
 
 genCCall
-    :: CmmCallTarget            -- function to call
-    -> [HintedCmmFormal]        -- where to put the result
-    -> [HintedCmmActual]        -- arguments (of mixed type)
+    :: ForeignTarget            -- function to call
+    -> [CmmFormal]        -- where to put the result
+    -> [CmmActual]        -- arguments (of mixed type)
     -> NatM InstrBlock
 
 
@@ -376,28 +391,23 @@ genCCall
 --
 -- In the SPARC case we don't need a barrier.
 --
-genCCall (CmmPrim (MO_WriteBarrier) _) _ _
- = do   return nilOL
+genCCall (PrimTarget MO_WriteBarrier) _ _
+ = return $ nilOL
 
-genCCall (CmmPrim _ (Just stmts)) _ _
-    = stmtsToInstrs stmts
+genCCall (PrimTarget (MO_Prefetch_Data _)) _ _
+ = return $ nilOL
 
-genCCall target dest_regs argsAndHints
+genCCall target dest_regs args0
  = do
         -- need to remove alignment information
-        let argsAndHints' | CmmPrim mop _ <- target,
+        let args | PrimTarget mop <- target,
                             (mop == MO_Memcpy ||
                              mop == MO_Memset ||
                              mop == MO_Memmove)
-                          = init argsAndHints
+                          = init args0
 
                           | otherwise
-                          = argsAndHints
-
-        -- strip hints from the arg regs
-        let args :: [CmmExpr]
-            args  = map hintlessCmm argsAndHints'
-
+                          = args0
 
         -- work out the arguments, and assign them to integer regs
         argcode_and_vregs       <- mapM arg_to_int_vregs args
@@ -410,14 +420,14 @@ genCCall target dest_regs argsAndHints
 
         -- deal with static vs dynamic call targets
         callinsns <- case target of
-                CmmCallee (CmmLit (CmmLabel lbl)) _ ->
+                ForeignTarget (CmmLit (CmmLabel lbl)) _ ->
                         return (unitOL (CALL (Left (litToImm (CmmLabel lbl))) n_argRegs_used False))
 
-                CmmCallee expr _
+                ForeignTarget expr _
                  -> do  (dyn_c, [dyn_r]) <- arg_to_int_vregs expr
                         return (dyn_c `snocOL` CALL (Right dyn_r) n_argRegs_used False)
 
-                CmmPrim mop _
+                PrimTarget mop
                  -> do  res     <- outOfLineMachOp mop
                         lblOrMopExpr <- case res of
                                 Left lbl -> do
@@ -455,17 +465,21 @@ genCCall target dest_regs argsAndHints
 -- | Generate code to calculate an argument, and move it into one
 --      or two integer vregs.
 arg_to_int_vregs :: CmmExpr -> NatM (OrdList Instr, [Reg])
-arg_to_int_vregs arg
+arg_to_int_vregs arg = do dflags <- getDynFlags
+                          arg_to_int_vregs' dflags arg
+
+arg_to_int_vregs' :: DynFlags -> CmmExpr -> NatM (OrdList Instr, [Reg])
+arg_to_int_vregs' dflags arg
 
         -- If the expr produces a 64 bit int, then we can just use iselExpr64
-        | isWord64 (cmmExprType arg)
+        | isWord64 (cmmExprType dflags arg)
         = do    (ChildCode64 code r_lo) <- iselExpr64 arg
                 let r_hi                = getHiVRegFromLo r_lo
                 return (code, [r_hi, r_lo])
 
         | otherwise
         = do    (src, code)     <- getSomeReg arg
-                let pk          = cmmExprType arg
+                let pk          = cmmExprType dflags arg
 
                 case cmmTypeSize pk of
 
@@ -527,16 +541,16 @@ move_final (v:vs) (a:az) offset
 
 
 -- | Assign results returned from the call into their
---      desination regs.
+--      destination regs.
 --
-assign_code :: Platform -> [CmmHinted LocalReg] -> OrdList Instr
+assign_code :: Platform -> [LocalReg] -> OrdList Instr
 
 assign_code _ [] = nilOL
 
-assign_code platform [CmmHinted dest _hint]
+assign_code platform [dest]
  = let  rep     = localRegType dest
         width   = typeWidth rep
-        r_dest  = getRegisterReg (CmmLocal dest)
+        r_dest  = getRegisterReg platform (CmmLocal dest)
 
         result
                 | isFloatType rep
@@ -577,7 +591,7 @@ outOfLineMachOp mop
                 = outOfLineMachOp_table mop
 
         dflags  <- getDynFlags
-        mopExpr <- cmmMakeDynamicReference dflags addImportNat CallReference
+        mopExpr <- cmmMakeDynamicReference dflags CallReference
                 $  mkForeignLabel functionName Nothing ForeignLabelInExternalPackage IsFunction
 
         let mopLabelOrExpr
@@ -630,10 +644,13 @@ outOfLineMachOp_table mop
         MO_F64_Cosh   -> fsLit "cosh"
         MO_F64_Tanh   -> fsLit "tanh"
 
+        MO_UF_Conv w -> fsLit $ word2FloatLabel w
+
         MO_Memcpy    -> fsLit "memcpy"
         MO_Memset    -> fsLit "memset"
         MO_Memmove   -> fsLit "memmove"
 
+        MO_BSwap w   -> fsLit $ bSwapLabel w
         MO_PopCnt w  -> fsLit $ popCntLabel w
 
         MO_S_QuotRem {}  -> unsupported
@@ -643,6 +660,7 @@ outOfLineMachOp_table mop
         MO_U_Mul2 {}     -> unsupported
         MO_WriteBarrier  -> unsupported
         MO_Touch         -> unsupported
+        (MO_Prefetch_Data _) -> unsupported
     where unsupported = panic ("outOfLineCmmOp: " ++ show mop
                             ++ " not supported here")
 

@@ -1,10 +1,11 @@
-{-# LANGUAGE Rank2Types, ScopedTypeVariables #-}
+{-# LANGUAGE RankNTypes, ScopedTypeVariables #-}
 
 -- Trac #2494, should compile ok
 
 module Foo where
 
 foo :: (forall m. Monad m => Maybe (m a) -> Maybe (m a)) -> Maybe a -> Maybe a
+{-# NOINLINE [1] foo #-}
 foo _ x = x
 
 {-# RULES

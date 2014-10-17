@@ -2,7 +2,7 @@
 module Main where
 
 import Prelude hiding ( mod, id, mapM )
-import GHC hiding (flags)
+import GHC
 --import Packages
 import HscTypes         ( isBootSummary )
 import Digraph          ( flattenSCCs )
@@ -18,13 +18,12 @@ import FastString
 import MonadUtils       ( liftIO )
 import SrcLoc
 
--- Every GHC comes with Cabal anyways, so this is not a bad new dependency
 import Distribution.Simple.GHC ( componentGhcOptions )
 import Distribution.Simple.Configure ( getPersistBuildConfig )
 import Distribution.Simple.Compiler ( compilerVersion )
 import Distribution.Simple.Program.GHC ( renderGhcOptions )
 import Distribution.PackageDescription ( library, libBuildInfo )
-import Distribution.Simple.LocalBuildInfo ( localPkgDescr, buildDir, libraryConfig, compiler )
+import Distribution.Simple.LocalBuildInfo
 import qualified Distribution.Verbosity as V
 
 import Control.Monad hiding (mapM)
@@ -183,7 +182,11 @@ flagsFromCabal :: FilePath -> IO [String]
 flagsFromCabal distPref = do
   lbi <- getPersistBuildConfig distPref
   let pd = localPkgDescr lbi
-  case (library pd, libraryConfig lbi) of
+      findLibraryConfig []                         = Nothing
+      findLibraryConfig ((CLibName, clbi, _) :  _) = Just clbi
+      findLibraryConfig (_                   : xs) = findLibraryConfig xs
+      mLibraryConfig = findLibraryConfig (componentsConfigs lbi)
+  case (library pd, mLibraryConfig) of
     (Just lib, Just clbi) ->
       let bi = libBuildInfo lib
           odir = buildDir lbi
@@ -254,10 +257,10 @@ boundValues mod group =
   let vals = case hs_valds group of
                ValBindsOut nest _sigs ->
                    [ x | (_rec, binds) <- nest
-                       , bind <- bagToList binds
+                       , (_, bind) <- bagToList binds
                        , x <- boundThings mod bind ]
                _other -> error "boundValues"
-      tys = [ n | ns <- map hsLTyClDeclBinders (concat (hs_tyclds group))
+      tys = [ n | ns <- map hsLTyClDeclBinders (tyClGroupConcat (hs_tyclds group))
                 , n <- map found ns ]
       fors = concat $ map forBound (hs_fords group)
              where forBound lford = case unLoc lford of
@@ -281,6 +284,7 @@ boundThings modname lbinding =
     PatBind { pat_lhs = lhs } -> patThings lhs []
     VarBind { var_id = id } -> [FoundThing modname (getOccString id) (startOfLocated lbinding)]
     AbsBinds { } -> [] -- nothing interesting in a type abstraction
+    PatSynBind { patsyn_id = id } -> [thing id]
   where thing = foundOfLName modname
         patThings lpat tl =
           let loc = startOfLocated lpat
@@ -292,11 +296,11 @@ boundThings modname lbinding =
                AsPat id p -> patThings p (thing id : tl)
                ParPat p -> patThings p tl
                BangPat p -> patThings p tl
-               ListPat ps _ -> foldr patThings tl ps
+               ListPat ps _ _ -> foldr patThings tl ps
                TuplePat ps _ _ -> foldr patThings tl ps
                PArrPat ps _ -> foldr patThings tl ps
                ConPatIn _ conargs -> conArgs conargs tl
-               ConPatOut _ _ _ _ conargs _ -> conArgs conargs tl
+               ConPatOut{ pat_args = conargs } -> conArgs conargs tl
                LitPat _ -> tl
                NPat _ _ _ -> tl -- form of literal pattern?
                NPlusKPat id _ _ _ -> thing id : tl

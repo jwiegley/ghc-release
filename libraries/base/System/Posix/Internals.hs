@@ -1,6 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, ForeignFunctionInterface, CApiFFI,
-             EmptyDataDecls #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, CApiFFI #-}
 {-# OPTIONS_HADDOCK hide #-}
 
 -----------------------------------------------------------------------------
@@ -21,14 +20,9 @@
 --
 -----------------------------------------------------------------------------
 
--- #hide
 module System.Posix.Internals where
 
-#ifdef __NHC__
-#define HTYPE_TCFLAG_T
-#else
-# include "HsBaseConfig.h"
-#endif
+#include "HsBaseConfig.h"
 
 #if ! (defined(mingw32_HOST_OS) || defined(__MINGW32__))
 import Control.Monad
@@ -45,7 +39,6 @@ import Data.Maybe
 import System.IO.Error
 #endif
 
-#if __GLASGOW_HASKELL__
 import GHC.Base
 import GHC.Num
 import GHC.Real
@@ -57,20 +50,6 @@ import GHC.IO.Device
 import {-# SOURCE #-} GHC.IO.Encoding (getFileSystemEncoding)
 import qualified GHC.Foreign as GHC
 #endif
-#elif __HUGS__
-import Hugs.Prelude (IOException(..), IOErrorType(..))
-import Hugs.IO (IOMode(..))
-#elif __NHC__
-import GHC.IO.Device	-- yes, I know, but its portable, really!
-import System.IO
-import Control.Exception
-import DIOError
-#endif
-
-#ifdef __HUGS__
-{-# CFILES cbits/PrelIOUtils.c cbits/consUtils.c #-}
-#endif
-
 
 -- ---------------------------------------------------------------------------
 -- Debugging the base package
@@ -152,16 +131,10 @@ statGetType p_stat = do
         | otherwise             -> ioError ioe_unknownfiletype
     
 ioe_unknownfiletype :: IOException
-#ifndef __NHC__
 ioe_unknownfiletype = IOError Nothing UnsupportedOperation "fdType"
                         "unknown file type"
-#  if __GLASGOW_HASKELL__
                         Nothing
-#  endif
                         Nothing
-#else
-ioe_unknownfiletype = UserError "fdType" "unknown file type"
-#endif
 
 fdGetMode :: FD -> IO IOMode
 #if defined(mingw32_HOST_OS) || defined(__MINGW32__)
@@ -191,23 +164,22 @@ fdGetMode fd = do
 withFilePath :: FilePath -> (CWString -> IO a) -> IO a
 withFilePath = withCWString
 
+newFilePath :: FilePath -> IO CWString
+newFilePath = newCWString
+
 peekFilePath :: CWString -> IO FilePath
 peekFilePath = peekCWString
 #else
 
 withFilePath :: FilePath -> (CString -> IO a) -> IO a
+newFilePath :: FilePath -> IO CString
 peekFilePath :: CString -> IO FilePath
 peekFilePathLen :: CStringLen -> IO FilePath
 
-#if __GLASGOW_HASKELL__
 withFilePath fp f = getFileSystemEncoding >>= \enc -> GHC.withCString enc fp f
+newFilePath fp = getFileSystemEncoding >>= \enc -> GHC.newCString enc fp
 peekFilePath fp = getFileSystemEncoding >>= \enc -> GHC.peekCString enc fp
 peekFilePathLen fp = getFileSystemEncoding >>= \enc -> GHC.peekCStringLen enc fp
-#else
-withFilePath = withCString
-peekFilePath = peekCString
-peekFilePathLen = peekCStringLen
-#endif
 
 #endif
 
@@ -255,7 +227,6 @@ tcSetAttr fd fun = do
         throwErrnoIfMinus1Retry_ "tcSetAttr"
            (c_tcgetattr fd p_tios)
 
-#ifdef __GLASGOW_HASKELL__
         -- Save a copy of termios, if this is a standard file descriptor.
         -- These terminal settings are restored in hs_exit().
         when (fd <= 2) $ do
@@ -264,7 +235,6 @@ tcSetAttr fd fun = do
              saved_tios <- mallocBytes sizeof_termios
              copyBytes saved_tios p_tios sizeof_termios
              set_saved_termios fd saved_tios
-#endif
 
         -- tcsetattr() when invoked by a background process causes the process
         -- to be sent SIGTTOU regardless of whether the process has TOSTOP set
@@ -286,13 +256,11 @@ tcSetAttr fd fun = do
                  c_sigprocmask const_sig_setmask p_old_sigset nullPtr
              return r
 
-#ifdef __GLASGOW_HASKELL__
 foreign import ccall unsafe "HsBase.h __hscore_get_saved_termios"
    get_saved_termios :: CInt -> IO (Ptr CTermios)
 
 foreign import ccall unsafe "HsBase.h __hscore_set_saved_termios"
    set_saved_termios :: CInt -> (Ptr CTermios) -> IO ()
-#endif
 
 #else
 
@@ -313,11 +281,7 @@ setCooked fd cooked = do
 
 ioe_unk_error :: String -> String -> IOException
 ioe_unk_error loc msg 
-#ifndef __NHC__
  = ioeSetErrorString (mkIOError OtherError loc Nothing Nothing) msg
-#else
- = UserError loc msg
-#endif
 
 -- Note: echoing goes hand in hand with enabling 'line input' / raw-ness
 -- for Win32 consoles, hence setEcho ends up being the inverse of setCooked.
@@ -482,7 +446,8 @@ foreign import ccall unsafe "HsBase.h fork"
 foreign import ccall unsafe "HsBase.h link"
    c_link :: CString -> CString -> IO CInt
 
-foreign import ccall unsafe "HsBase.h mkfifo"
+-- capi is required at least on Android
+foreign import capi unsafe "HsBase.h mkfifo"
    c_mkfifo :: CString -> CMode -> IO CInt
 
 foreign import ccall unsafe "HsBase.h pipe"
@@ -497,10 +462,12 @@ foreign import capi unsafe "signal.h sigaddset"
 foreign import capi unsafe "signal.h sigprocmask"
    c_sigprocmask :: CInt -> Ptr CSigset -> Ptr CSigset -> IO CInt
 
-foreign import ccall unsafe "HsBase.h tcgetattr"
+-- capi is required at least on Android
+foreign import capi unsafe "HsBase.h tcgetattr"
    c_tcgetattr :: CInt -> Ptr CTermios -> IO CInt
 
-foreign import ccall unsafe "HsBase.h tcsetattr"
+-- capi is required at least on Android
+foreign import capi unsafe "HsBase.h tcsetattr"
    c_tcsetattr :: CInt -> CInt -> Ptr CTermios -> IO CInt
 
 foreign import capi unsafe "HsBase.h utime"

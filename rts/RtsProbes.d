@@ -6,6 +6,12 @@
  *
  * ---------------------------------------------------------------------------*/
 
+#ifdef __APPLE__ && __MACH__
+# if MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_9
+#  define USE_INTTYPES_H_FOR_RTS_PROBES_D
+# endif
+#endif
+
 #include "HsFFI.h"
 #include "rts/EventLogFormat.h"
 
@@ -55,14 +61,13 @@ provider HaskellEvent {
   probe gc__idle (EventCapNo);
   probe gc__work (EventCapNo);
   probe gc__done (EventCapNo);
-  probe gc__sync (EventCapNo);
-/* FIXME: leads to a validate failure on OS X (Lion)
-  probe gc__stats (CapsetID, StgWord, StgWord, StgWord, StgWord, StgWord, StgWord, StgWord);
-  probe heap__info (CapsetID, StgWord, StgWord, StgWord, StgWord, StgWord);
-  probe heap__allocated (EventCapNo, CapsetID, StgWord64);
-  probe heap__size (CapsetID, StgWord);
-  probe heap__live (CapsetID, StgWord);
- */
+  probe gc__global__sync (EventCapNo);
+  probe gc__stats (EventCapsetID, StgWord, StgWord, StgWord, StgWord, StgWord, StgWord, StgWord);
+  probe heap__info (EventCapsetID, StgWord, StgWord, StgWord, StgWord, StgWord);
+  probe heap__allocated (EventCapNo, EventCapsetID, StgWord64);
+  probe heap__size (EventCapsetID, StgWord);
+  probe heap__live (EventCapsetID, StgWord);
+
   /* capability events */
   probe startup (EventCapNo);
   probe cap__create (EventCapNo);
@@ -90,9 +95,15 @@ provider HaskellEvent {
   probe spark__fizzle   (EventCapNo);
   probe spark__gc       (EventCapNo);
 
+  /* task events */
+  probe task__create(EventTaskId, EventCapNo, EventKernelThreadId);
+  probe task__migrate(EventTaskId, EventCapNo, EventCapNo);
+  probe task__delete(EventTaskId);
+
   /* other events */
 /* This one doesn't seem to be used at all at the moment: */
 /*  probe log__msg (char *); */
   /* we don't need EVENT_BLOCK_MARKER with dtrace */
   probe user__msg (EventCapNo, char *);
+  probe user__marker (EventCapNo, char *);
 };

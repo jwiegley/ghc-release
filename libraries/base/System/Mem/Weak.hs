@@ -1,5 +1,4 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -55,29 +54,22 @@ module System.Mem.Weak (
 	Weak,	    		-- abstract
 
 	-- * The general interface
-	mkWeak,      		-- :: k -> v -> Maybe (IO ()) -> IO (Weak v)
-	deRefWeak, 		-- :: Weak v -> IO (Maybe v)
-	finalize,		-- :: Weak v -> IO ()
+	mkWeak,
+	deRefWeak,
+	finalize,
 
 	-- * Specialised versions
-	mkWeakPtr, 		-- :: k -> Maybe (IO ()) -> IO (Weak k)
-	addFinalizer, 		-- :: key -> IO () -> IO ()
-	mkWeakPair, 		-- :: k -> v -> Maybe (IO ()) -> IO (Weak (k,v))
-	-- replaceFinaliser	-- :: Weak v -> IO () -> IO ()
+	mkWeakPtr,
+	addFinalizer,
+	mkWeakPair,
+	-- replaceFinaliser
 
 	-- * A precise semantics
 	
 	-- $precise
    ) where
 
-#ifdef __HUGS__
-import Hugs.Weak
-import Prelude
-#endif
-
-#ifdef __GLASGOW_HASKELL__
 import GHC.Weak
-#endif
 
 -- | A specialised version of 'mkWeak', where the key and the value are
 -- the same object:

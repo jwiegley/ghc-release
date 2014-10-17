@@ -47,7 +47,7 @@ import Distribution.Version
 import Distribution.Simple.Utils as Utils
          ( notice, info, debug, die )
 import Distribution.System
-         ( Platform, buildPlatform )
+         ( Platform )
 import Distribution.Verbosity as Verbosity
          ( Verbosity )
 
@@ -58,18 +58,19 @@ configure :: Verbosity
           -> PackageDBStack
           -> [Repo]
           -> Compiler
+          -> Platform
           -> ProgramConfiguration
           -> ConfigFlags
           -> ConfigExFlags
           -> [String]
           -> IO ()
-configure verbosity packageDBs repos comp conf
+configure verbosity packageDBs repos comp platform conf
   configFlags configExFlags extraArgs = do
 
   installedPkgIndex <- getInstalledPackages verbosity comp packageDBs conf
   sourcePkgDb       <- getSourcePackages    verbosity repos
 
-  progress <- planLocalPackage verbosity comp configFlags configExFlags
+  progress <- planLocalPackage verbosity comp platform configFlags configExFlags
                                installedPkgIndex sourcePkgDb
 
   notice verbosity "Resolving dependencies..."
@@ -82,7 +83,7 @@ configure verbosity packageDBs repos comp conf
         configureCommand (const configFlags) extraArgs
 
     Right installPlan -> case InstallPlan.ready installPlan of
-      [pkg@(ConfiguredPackage (SourcePackage _ _ (LocalUnpackedPackage _)) _ _ _)] ->
+      [pkg@(ConfiguredPackage (SourcePackage _ _ (LocalUnpackedPackage _) _) _ _ _)] ->
         configurePackage verbosity
           (InstallPlan.planPlatform installPlan)
           (InstallPlan.planCompiler installPlan)
@@ -97,6 +98,7 @@ configure verbosity packageDBs repos comp conf
       useCabalVersion  = maybe anyVersion thisVersion
                          (flagToMaybe (configCabalVersion configExFlags)),
       useCompiler      = Just comp,
+      usePlatform      = Just platform,
       usePackageDB     = packageDBs',
       usePackageIndex  = index',
       useProgramConfig = conf,
@@ -125,11 +127,12 @@ configure verbosity packageDBs repos comp conf
 -- and all its dependencies.
 --
 planLocalPackage :: Verbosity -> Compiler
+                 -> Platform
                  -> ConfigFlags -> ConfigExFlags
                  -> PackageIndex
                  -> SourcePackageDb
                  -> IO (Progress String String InstallPlan)
-planLocalPackage verbosity comp configFlags configExFlags installedPkgIndex
+planLocalPackage verbosity comp platform configFlags configExFlags installedPkgIndex
   (SourcePackageDb _ packagePrefs) = do
   pkg <- readPackageDescription verbosity =<< defaultPackageDesc verbosity
   solver <- chooseSolver verbosity (fromFlag $ configSolver configExFlags) (compilerId comp)
@@ -138,7 +141,8 @@ planLocalPackage verbosity comp configFlags configExFlags installedPkgIndex
       localPkg = SourcePackage {
         packageInfoId             = packageId pkg,
         Source.packageDescription = pkg,
-        packageSource             = LocalUnpackedPackage "."
+        packageSource             = LocalUnpackedPackage ".",
+        packageDescrOverride      = Nothing
       }
 
       testsEnabled = fromFlagOrDefault False $ configTests configFlags
@@ -166,10 +170,9 @@ planLocalPackage verbosity comp configFlags configExFlags installedPkgIndex
         . addConstraints
             -- '--enable-tests' and '--enable-benchmarks' constraints from
             -- command line
-            [ PackageConstraintStanzas (packageName pkg) $ concat
-                [ if testsEnabled then [TestStanzas] else []
-                , if benchmarksEnabled then [BenchStanzas] else []
-                ]
+            [ PackageConstraintStanzas (packageName pkg) $
+                [ TestStanzas  | testsEnabled ] ++
+                [ BenchStanzas | benchmarksEnabled ]
             ]
 
         $ standardInstallPolicy
@@ -177,7 +180,7 @@ planLocalPackage verbosity comp configFlags configExFlags installedPkgIndex
             (SourcePackageDb mempty packagePrefs)
             [SpecificSourcePackage localPkg]
 
-  return (resolveDependencies buildPlatform (compilerId comp) solver resolverParams)
+  return (resolveDependencies platform (compilerId comp) solver resolverParams)
 
 
 -- | Call an installer for an 'SourcePackage' but override the configure
@@ -194,7 +197,7 @@ configurePackage :: Verbosity
                  -> [String]
                  -> IO ()
 configurePackage verbosity platform comp scriptOptions configFlags
-  (ConfiguredPackage (SourcePackage _ gpkg _) flags stanzas deps) extraArgs =
+  (ConfiguredPackage (SourcePackage _ gpkg _ _) flags stanzas deps) extraArgs =
 
   setupWrapper verbosity
     scriptOptions (Just pkg) configureCommand configureFlags extraArgs

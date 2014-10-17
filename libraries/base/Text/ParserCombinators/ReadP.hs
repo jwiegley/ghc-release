@@ -1,11 +1,7 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude #-}
-#ifndef __NHC__
-{-# LANGUAGE Rank2Types #-}
-#endif
-#ifdef __GLASGOW_HASKELL__
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE MagicHash #-}
-#endif
 
 -----------------------------------------------------------------------------
 -- |
@@ -28,51 +24,47 @@
 module Text.ParserCombinators.ReadP
   ( 
   -- * The 'ReadP' type
-#ifndef __NHC__
-  ReadP,      -- :: * -> *; instance Functor, Monad, MonadPlus
-#else
-  ReadPN,     -- :: * -> * -> *; instance Functor, Monad, MonadPlus
-#endif
+  ReadP,
   
   -- * Primitive operations
-  get,        -- :: ReadP Char
-  look,       -- :: ReadP String
-  (+++),      -- :: ReadP a -> ReadP a -> ReadP a
-  (<++),      -- :: ReadP a -> ReadP a -> ReadP a
-  gather,     -- :: ReadP a -> ReadP (String, a)
+  get,
+  look,
+  (+++),
+  (<++),
+  gather,
   
   -- * Other operations
-  pfail,      -- :: ReadP a
-  eof,        -- :: ReadP ()
-  satisfy,    -- :: (Char -> Bool) -> ReadP Char
-  char,       -- :: Char -> ReadP Char
-  string,     -- :: String -> ReadP String
-  munch,      -- :: (Char -> Bool) -> ReadP String
-  munch1,     -- :: (Char -> Bool) -> ReadP String
-  skipSpaces, -- :: ReadP ()
-  choice,     -- :: [ReadP a] -> ReadP a
-  count,      -- :: Int -> ReadP a -> ReadP [a]
-  between,    -- :: ReadP open -> ReadP close -> ReadP a -> ReadP a
-  option,     -- :: a -> ReadP a -> ReadP a
-  optional,   -- :: ReadP a -> ReadP ()
-  many,       -- :: ReadP a -> ReadP [a]
-  many1,      -- :: ReadP a -> ReadP [a]
-  skipMany,   -- :: ReadP a -> ReadP ()
-  skipMany1,  -- :: ReadP a -> ReadP ()
-  sepBy,      -- :: ReadP a -> ReadP sep -> ReadP [a]
-  sepBy1,     -- :: ReadP a -> ReadP sep -> ReadP [a]
-  endBy,      -- :: ReadP a -> ReadP sep -> ReadP [a]
-  endBy1,     -- :: ReadP a -> ReadP sep -> ReadP [a]
-  chainr,     -- :: ReadP a -> ReadP (a -> a -> a) -> a -> ReadP a
-  chainl,     -- :: ReadP a -> ReadP (a -> a -> a) -> a -> ReadP a
-  chainl1,    -- :: ReadP a -> ReadP (a -> a -> a) -> ReadP a
-  chainr1,    -- :: ReadP a -> ReadP (a -> a -> a) -> ReadP a
-  manyTill,   -- :: ReadP a -> ReadP end -> ReadP [a]
+  pfail,
+  eof,
+  satisfy,
+  char,
+  string,
+  munch,
+  munch1,
+  skipSpaces,
+  choice,
+  count,
+  between,
+  option,
+  optional,
+  many,
+  many1,
+  skipMany,
+  skipMany1,
+  sepBy,
+  sepBy1,
+  endBy,
+  endBy1,
+  chainr,
+  chainl,
+  chainl1,
+  chainr1,
+  manyTill,
   
   -- * Running a parser
-  ReadS,      -- :: *; = String -> [(a,String)]
-  readP_to_S, -- :: ReadP a -> ReadS a
-  readS_to_P, -- :: ReadS a -> ReadP a
+  ReadS,
+  readP_to_S,
+  readS_to_P,
   
   -- * Properties
   -- $properties
@@ -81,17 +73,12 @@ module Text.ParserCombinators.ReadP
 
 import Control.Monad( MonadPlus(..), sequence, liftM2 )
 
-#ifdef __GLASGOW_HASKELL__
 import {-# SOURCE #-} GHC.Unicode ( isSpace  )
 import GHC.List ( replicate, null )
 import GHC.Base
-#else
-import Data.Char( isSpace )
-#endif
 
 infixr 5 +++, <++
 
-#ifdef __GLASGOW_HASKELL__
 ------------------------------------------------------------------------
 -- ReadS
 
@@ -101,7 +88,6 @@ infixr 5 +++, <++
 -- Note that this kind of backtracking parser is very inefficient;
 -- reading a large structure may be quite slow (cf 'ReadP').
 type ReadS a = String -> [(a,String)]
-#endif
 
 -- ---------------------------------------------------------------------------
 -- The P type
@@ -159,12 +145,7 @@ instance MonadPlus P where
 -- ---------------------------------------------------------------------------
 -- The ReadP type
 
-#ifndef __NHC__
 newtype ReadP a = R (forall b . (a -> P b) -> P b)
-#else
-#define ReadP  (ReadPN b)
-newtype ReadPN b a = R ((a -> P b) -> P b)
-#endif
 
 -- Functor, Monad, MonadPlus
 
@@ -216,15 +197,10 @@ pfail = R (\_ -> Fail)
 -- ^ Symmetric choice.
 R f1 +++ R f2 = R (\k -> f1 k `mplus` f2 k)
 
-#ifndef __NHC__
 (<++) :: ReadP a -> ReadP a -> ReadP a
-#else
-(<++) :: ReadPN a a -> ReadPN a a -> ReadPN a a
-#endif
 -- ^ Local, exclusive, left-biased choice: If left parser
 --   locally produces any result at all, then right parser is
 --   not used.
-#ifdef __GLASGOW_HASKELL__
 R f0 <++ q =
   do s <- look
      probe (f0 return) s 0#
@@ -237,26 +213,8 @@ R f0 <++ q =
 
   discard 0# = return ()
   discard n  = get >> discard (n-#1#)
-#else
-R f <++ q =
-  do s <- look
-     probe (f return) s 0
- where
-  probe (Get f)        (c:s) n = probe (f c) s (n+1)
-  probe (Look f)       s     n = probe (f s) s n
-  probe p@(Result _ _) _     n = discard n >> R (p >>=)
-  probe (Final r)      _     _ = R (Final r >>=)
-  probe _              _     _ = q
 
-  discard 0 = return ()
-  discard n  = get >> discard (n-1)
-#endif
-
-#ifndef __NHC__
 gather :: ReadP a -> ReadP (String, a)
-#else
--- gather :: ReadPN (String->P b) a -> ReadPN (String->P b) (String, a)
-#endif
 -- ^ Transforms a parser into one that does the same, but
 --   in addition returns the exact characters read.
 --   IMPORTANT NOTE: 'gather' gives a runtime error if its first argument
@@ -421,11 +379,7 @@ chainl1 p op = p >>= rest
                     rest (f x y)
                  +++ return x
 
-#ifndef __NHC__
 manyTill :: ReadP a -> ReadP end -> ReadP [a]
-#else
-manyTill :: ReadPN [a] a -> ReadPN [a] end -> ReadPN [a] [a]
-#endif
 -- ^ @manyTill p end@ parses zero or more occurrences of @p@, until @end@
 --   succeeds. Returns a list of values returned by @p@.
 manyTill p end = scan
@@ -434,11 +388,7 @@ manyTill p end = scan
 -- ---------------------------------------------------------------------------
 -- Converting between ReadP and Read
 
-#ifndef __NHC__
 readP_to_S :: ReadP a -> ReadS a
-#else
-readP_to_S :: ReadPN a a -> ReadS a
-#endif
 -- ^ Converts a parser into a Haskell ReadS-style function.
 --   This is the main way in which you can \"run\" a 'ReadP' parser:
 --   the expanded type is

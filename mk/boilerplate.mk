@@ -91,6 +91,10 @@ ifeq "$(GHC_PKG)" ""
 GHC_PKG := $(BIN_ROOT)/ghc-pkg
 endif
 
+ifeq "$(RUNGHC)" ""
+RUNGHC := $(BIN_ROOT)/runghc
+endif
+
 ifeq "$(HSC2HS)" ""
 HSC2HS := $(BIN_ROOT)/hsc2hs
 endif
@@ -138,6 +142,9 @@ GS = gs
 CP = cp
 RM = rm -f
 PYTHON = python
+ifeq "$(shell $(SHELL) -c 'python2 -c 0' 2> /dev/null && echo exists)" "exists"
+PYTHON = python2
+endif
 
 # -----------------------------------------------------------------------------
 # configuration of TEST_HC
@@ -159,6 +166,16 @@ $(ghc-config-mk) : $(TOP)/mk/ghc-config
 
 ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
 include $(ghc-config-mk)
+endif
+
+ifeq "$(GhcDynamic)" "YES"
+ghcThWayFlags     = -dynamic
+ghciWayFlags      = -dynamic
+ghcPluginWayFlags = -dynamic
+else
+ghcThWayFlags     = -static
+ghciWayFlags      = -static
+ghcPluginWayFlags = -static
 endif
 
 # -----------------------------------------------------------------------------

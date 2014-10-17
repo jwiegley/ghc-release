@@ -21,7 +21,7 @@ import Data.List (maximumBy)
 import Control.Monad (guard)
 import System.Directory (createDirectoryIfMissing, doesFileExist,
                          renameFile)
-import System.FilePath ((</>), splitFileName)
+import System.FilePath ((</>), splitFileName, isAbsolute)
 import Distribution.Package
          ( Package(..), packageVersion )
 import Distribution.Simple.Program (haddockProgram, ProgramConfiguration
@@ -96,6 +96,14 @@ haddockPackagePaths pkgs = do
   where
     interfaceAndHtmlPath pkg = do
       interface <- listToMaybe (InstalledPackageInfo.haddockInterfaces pkg)
-      html <- listToMaybe (InstalledPackageInfo.haddockHTMLs pkg)
+      html <- fmap fixFileUrl
+                   (listToMaybe (InstalledPackageInfo.haddockHTMLs pkg))
       guard (not . null $ html)
       return (interface, html)
+    
+    -- the 'haddock-html' field in the hc-pkg output is often set as a
+    -- native path, but we need it as a URL.
+    -- See https://github.com/haskell/cabal/issues/1064
+    fixFileUrl f | isAbsolute f = "file://" ++ f
+                 | otherwise    = f
+

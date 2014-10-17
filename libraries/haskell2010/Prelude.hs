@@ -1,4 +1,4 @@
-{-# LANGUAGE NoImplicitPrelude, BangPatterns #-}
+{-# LANGUAGE BangPatterns, CPP, NoImplicitPrelude, PackageImports #-}
 #if __GLASGOW_HASKELL__ >= 701
 {-# LANGUAGE Trustworthy #-}
 #endif
@@ -27,13 +27,6 @@ module Prelude (
     -- *** Tuples
     fst, snd, curry, uncurry,
 
-#if defined(__NHC__)
-    []((:), []),        -- Not legal Haskell 98;
-                        -- ... available through built-in syntax
-    module Data.Tuple,  -- Includes tuple types
-    ()(..),             -- Not legal Haskell 98
-    (->),               -- ... available through built-in syntax
-#endif
 #ifdef __HUGS__
     (:),                -- Not legal Haskell 98
 #endif
@@ -157,7 +150,6 @@ import GHC.Real hiding ( gcd )
 import qualified GHC.Real ( gcd )
 import GHC.Float
 import GHC.Show
-import GHC.Err   ( undefined )
 #endif
 
 #ifdef __HUGS__

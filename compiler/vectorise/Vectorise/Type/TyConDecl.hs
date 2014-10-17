@@ -5,7 +5,8 @@ module Vectorise.Type.TyConDecl (
 
 import Vectorise.Type.Type
 import Vectorise.Monad
-import BuildTyCl
+import Vectorise.Env( GlobalEnv( global_fam_inst_env ) )
+import BuildTyCl( buildClass, buildDataCon )
 import Class
 import Type
 import TyCon
@@ -61,10 +62,12 @@ vectTyConDecl tycon name'
                      False                      -- include unfoldings on dictionary selectors
                      name'                      -- new name: "V:Class"
                      (tyConTyVars tycon)        -- keep original type vars
+                     (map (const Nominal) (tyConRoles tycon)) -- all role are N for safety
                      theta'                     -- superclasses
                      (snd . classTvsFds $ cls)  -- keep the original functional dependencies
                      []                         -- no associated types (for the moment)
                      methods'                   -- method info
+                     (classMinimalDef cls)      -- Inherit minimal complete definition from cls
                      rec_flag                   -- whether recursive
 
            -- the original dictionary constructor must map to the vectorised one
@@ -99,10 +102,12 @@ vectTyConDecl tycon name'
        ; return $ buildAlgTyCon 
                     name'                   -- new name
                     (tyConTyVars tycon)     -- keep original type vars
+                    (map (const Nominal) (tyConRoles tycon)) -- all roles are N for safety
                     Nothing
                     []                      -- no stupid theta
                     rhs'                    -- new constructor defs
                     rec_flag                -- whether recursive
+                    False                   -- Not promotable
                     gadt_flag               -- whether in GADT syntax
                     NoParentTyCon           
        }
@@ -169,7 +174,8 @@ vectDataCon dc
        ; tycon'  <- vectTyCon tycon
        ; arg_tys <- mapM vectType rep_arg_tys
        ; let ret_ty = mkFamilyTyConApp tycon' (mkTyVarTys univ_tvs)
-       ; liftDs $ buildDataCon
+       ; fam_envs  <- readGEnv global_fam_inst_env
+       ; liftDs $ buildDataCon fam_envs
                     name'
                     (dataConIsInfix dc)            -- infix if the original is
                     (dataConStrictMarks dc)        -- strictness as original constructor

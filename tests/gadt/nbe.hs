@@ -1,6 +1,9 @@
-{-# LANGUAGE GADTs, Rank2Types #-}
+{-# LANGUAGE GADTs, RankNTypes #-}
 
 module Main where
+
+import Control.Applicative (Applicative(..))
+import Control.Monad (liftM, ap)
 
 -- abstract syntax -------------------------------------------------------------
 data Ty t where
@@ -86,6 +89,13 @@ data Tree a = Val a | Choice (Tree a) (Tree a)
 -- doesn't yet force trees to be fully balanced:
 -- 	Val :: a -> Tree a Z
 -- 	Choice :: Tree a n -> Tree a n -> Tree a (S n)
+
+instance Functor Tree where
+    fmap = liftM
+
+instance Applicative Tree where
+    pure = return
+    (<*>) = ap
 
 instance Monad Tree where
   return x = Val x

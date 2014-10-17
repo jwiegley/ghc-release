@@ -25,6 +25,7 @@ import Util
 import SrcLoc
 import Outputable
 import FastString
+import Control.Applicative ( Applicative(..) )
 import Control.Monad
 import Data.Function
 
@@ -232,7 +233,7 @@ lintStgAlts alts scrut_ty = do
         where
           -- check ty = checkTys first_ty ty (mkCaseAltMsg alts)
           -- We can't check that the alternatives have the
-          -- same type, becuase they don't, with unsafeCoerce#
+          -- same type, because they don't, with unsafeCoerce#
 
 lintAlt :: Type -> (AltCon, [Id], [Bool], StgExpr) -> LintM (Maybe Type)
 lintAlt _ (DEFAULT, _, _, rhs)
@@ -318,6 +319,13 @@ initL (LintM m)
     else
         Just (vcat (punctuate blankLine (bagToList errs)))
     }
+
+instance Functor LintM where
+      fmap = liftM
+
+instance Applicative LintM where
+      pure = return
+      (<*>) = ap
 
 instance Monad LintM where
     return a = LintM $ \_loc _scope errs -> (a, errs)

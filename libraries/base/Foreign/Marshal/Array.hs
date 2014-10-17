@@ -1,5 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, MagicHash #-}
+{-# LANGUAGE NoImplicitPrelude, MagicHash #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -21,47 +21,47 @@ module Foreign.Marshal.Array (
 
   -- ** Allocation
   --
-  mallocArray,    -- :: Storable a => Int -> IO (Ptr a)
-  mallocArray0,   -- :: Storable a => Int -> IO (Ptr a)
+  mallocArray,
+  mallocArray0,
 
-  allocaArray,    -- :: Storable a => Int -> (Ptr a -> IO b) -> IO b
-  allocaArray0,   -- :: Storable a => Int -> (Ptr a -> IO b) -> IO b
+  allocaArray,
+  allocaArray0,
 
-  reallocArray,   -- :: Storable a => Ptr a -> Int -> IO (Ptr a)
-  reallocArray0,  -- :: Storable a => Ptr a -> Int -> IO (Ptr a)
+  reallocArray,
+  reallocArray0,
 
   -- ** Marshalling
   --
-  peekArray,      -- :: Storable a =>         Int -> Ptr a -> IO [a]
-  peekArray0,     -- :: (Storable a, Eq a) => a   -> Ptr a -> IO [a]
+  peekArray,
+  peekArray0,
 
-  pokeArray,      -- :: Storable a =>      Ptr a -> [a] -> IO ()
-  pokeArray0,     -- :: Storable a => a -> Ptr a -> [a] -> IO ()
+  pokeArray,
+  pokeArray0,
 
   -- ** Combined allocation and marshalling
   --
-  newArray,       -- :: Storable a =>      [a] -> IO (Ptr a)
-  newArray0,      -- :: Storable a => a -> [a] -> IO (Ptr a)
+  newArray,
+  newArray0,
 
-  withArray,      -- :: Storable a =>      [a] -> (Ptr a -> IO b) -> IO b
-  withArray0,     -- :: Storable a => a -> [a] -> (Ptr a -> IO b) -> IO b
+  withArray,
+  withArray0,
 
-  withArrayLen,   -- :: Storable a =>      [a] -> (Int -> Ptr a -> IO b) -> IO b
-  withArrayLen0,  -- :: Storable a => a -> [a] -> (Int -> Ptr a -> IO b) -> IO b
+  withArrayLen,
+  withArrayLen0,
 
   -- ** Copying
 
   -- | (argument order: destination, source)
-  copyArray,      -- :: Storable a => Ptr a -> Ptr a -> Int -> IO ()
-  moveArray,      -- :: Storable a => Ptr a -> Ptr a -> Int -> IO ()
+  copyArray,
+  moveArray,
 
   -- ** Finding the length
   --
-  lengthArray0,   -- :: (Storable a, Eq a) => a -> Ptr a -> IO Int
+  lengthArray0,
 
   -- ** Indexing
   --
-  advancePtr,     -- :: Storable a => Ptr a -> Int -> Ptr a
+  advancePtr,
 ) where
 
 import Foreign.Ptr      (Ptr, plusPtr)
@@ -69,14 +69,9 @@ import Foreign.Storable (Storable(alignment,sizeOf,peekElemOff,pokeElemOff))
 import Foreign.Marshal.Alloc (mallocBytes, allocaBytesAligned, reallocBytes)
 import Foreign.Marshal.Utils (copyBytes, moveBytes)
 
-#ifdef __GLASGOW_HASKELL__
 import GHC.Num
 import GHC.List
-import GHC.Err
 import GHC.Base
-#else
-import Control.Monad (zipWithM_)
-#endif
 
 -- allocation
 -- ----------
@@ -152,28 +147,17 @@ peekArray0 marker ptr  = do
 -- |Write the list elements consecutive into memory
 --
 pokeArray :: Storable a => Ptr a -> [a] -> IO ()
-#ifndef __GLASGOW_HASKELL__
-pokeArray ptr vals =  zipWithM_ (pokeElemOff ptr) [0..] vals
-#else
 pokeArray ptr vals0 = go vals0 0#
   where go [] _          = return ()
         go (val:vals) n# = do pokeElemOff ptr (I# n#) val; go vals (n# +# 1#)
-#endif
 
 -- |Write the list elements consecutive into memory and terminate them with the
 -- given marker element
 --
 pokeArray0 :: Storable a => a -> Ptr a -> [a] -> IO ()
-#ifndef __GLASGOW_HASKELL__
-pokeArray0 marker ptr vals  = do
-  pokeArray ptr vals
-  pokeElemOff ptr (length vals) marker
-#else
 pokeArray0 marker ptr vals0 = go vals0 0#
   where go [] n#         = pokeElemOff ptr (I# n#) marker
         go (val:vals) n# = do pokeElemOff ptr (I# n#) val; go vals (n# +# 1#)
-#endif
-
 
 -- combined allocation and marshalling
 -- -----------------------------------

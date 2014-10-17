@@ -1,5 +1,4 @@
-{-# OPTIONS_GHC -fno-warn-unused-imports #-}
--- apparent bug in GHC, reports a bogus warning for the Prelude import below
+{-# LANGUAGE CPP, PackageImports #-}
 #if __GLASGOW_HASKELL__ >= 701
 {-# LANGUAGE Safe #-}
 #endif
@@ -20,9 +19,9 @@ module System.IO.Error (
     isAlreadyExistsError,       -- :: IOError -> Bool
     isDoesNotExistError,
     isAlreadyInUseError,
-    isFullError, 
+    isFullError,
     isEOFError,
-    isIllegalOperation, 
+    isIllegalOperation,
     isPermissionError,
     isUserError,
 
@@ -39,7 +38,7 @@ module System.IO.Error (
     alreadyInUseErrorType,
     fullErrorType,
     eofErrorType,
-    illegalOperationErrorType, 
+    illegalOperationErrorType,
     permissionErrorType,
     userErrorType,
 

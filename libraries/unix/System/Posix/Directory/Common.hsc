@@ -1,6 +1,4 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -fno-warn-unused-imports #-}
-#if __GLASGOW_HASKELL__ >= 701
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 
@@ -18,17 +16,21 @@
 --
 -----------------------------------------------------------------------------
 
+#include "HsUnix.h"
+
 module System.Posix.Directory.Common (
        DirStream(..), CDir, CDirent, DirStreamOffset(..),
        rewindDirStream,
        closeDirStream,
+#ifdef HAVE_SEEKDIR
        seekDirStream,
+#endif
+#ifdef HAVE_TELLDIR
        tellDirStream,
+#endif
        changeWorkingDirectoryFd,
   ) where
 
-import System.IO.Error
-import System.Posix.Error
 import System.Posix.Types
 import Foreign
 import Foreign.C
@@ -57,13 +59,16 @@ foreign import ccall unsafe "closedir"
 
 newtype DirStreamOffset = DirStreamOffset COff
 
+#ifdef HAVE_SEEKDIR
 seekDirStream :: DirStream -> DirStreamOffset -> IO ()
 seekDirStream (DirStream dirp) (DirStreamOffset off) =
   c_seekdir dirp off
 
 foreign import ccall unsafe "seekdir"
   c_seekdir :: Ptr CDir -> COff -> IO ()
+#endif
 
+#ifdef HAVE_TELLDIR
 tellDirStream :: DirStream -> IO DirStreamOffset
 tellDirStream (DirStream dirp) = do
   off <- c_telldir dirp
@@ -71,6 +76,7 @@ tellDirStream (DirStream dirp) = do
 
 foreign import ccall unsafe "telldir"
   c_telldir :: Ptr CDir -> IO COff
+#endif
 
 changeWorkingDirectoryFd :: Fd -> IO ()
 changeWorkingDirectoryFd (Fd fd) = 

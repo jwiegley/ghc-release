@@ -1,4 +1,4 @@
-{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, Trustworthy #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Data.Array.MArray.Safe
@@ -15,6 +15,7 @@
 -- .
 -- Safe API only of "Data.Array.MArray".
 --
+-- /Since: 0.4.0.0/
 -----------------------------------------------------------------------------
 
 module Data.Array.MArray.Safe (

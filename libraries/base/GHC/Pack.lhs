@@ -22,15 +22,14 @@
 --
 -----------------------------------------------------------------------------
 
--- #hide
 module GHC.Pack
        (
         -- (**) - emitted by compiler.
 
-        packCString#,      -- :: [Char] -> ByteArray#    (**)
+        packCString#,
         unpackCString,
-        unpackCString#,    -- :: Addr# -> [Char]         (**)
-        unpackNBytes#,     -- :: Addr# -> Int# -> [Char] (**)
+        unpackCString#,
+        unpackNBytes#,
         unpackFoldrCString#,  -- (**)
         unpackAppendCString#,  -- (**)
        ) 

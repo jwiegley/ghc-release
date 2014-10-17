@@ -18,22 +18,28 @@ module Haddock.Convert where
 
 
 import HsSyn
-import TcType ( tcSplitTyConApp_maybe, tcSplitSigmaTy )
+import TcType ( tcSplitSigmaTy )
 import TypeRep
 import Type(isStrLitTy)
-import Kind ( splitKindFunTys, synTyConResKind )
+import Kind ( splitKindFunTys, synTyConResKind, isKind )
 import Name
 import Var
 import Class
 import TyCon
+import CoAxiom
+import ConLike
 import DataCon
+import PatSyn
+import FamInstEnv
 import BasicTypes ( TupleSort(..) )
 import TysPrim ( alphaTyVars )
 import TysWiredIn ( listTyConName, eqTyCon )
 import PrelNames (ipClassName)
 import Bag ( emptyBag )
+import Unique ( getUnique )
 import SrcLoc ( Located, noLoc, unLoc )
 import Data.List( partition )
+import Haddock.Types
 
 
 -- the main function here! yay!
@@ -53,95 +59,137 @@ tyThingToLHsDecl t = noLoc $ case t of
   -- later in the file (also it's used for class associated-types too.)
   ATyCon tc
     | Just cl <- tyConClass_maybe tc -- classes are just a little tedious
-    -> TyClD $ ClassDecl
+    -> let extractFamilyDecl :: TyClDecl a -> LFamilyDecl a
+           extractFamilyDecl (FamDecl d) = noLoc d
+           extractFamilyDecl _           =
+             error "tyThingToLHsDecl: impossible associated tycon"
+
+           atTyClDecls = [synifyTyCon Nothing at_tc | (at_tc, _) <- classATItems cl]
+           atFamDecls  = map extractFamilyDecl atTyClDecls in
+       TyClD $ ClassDecl
          { tcdCtxt = synifyCtx (classSCTheta cl)
          , tcdLName = synifyName cl
          , tcdTyVars = synifyTyVars (classTyVars cl)
          , tcdFDs = map (\ (l,r) -> noLoc
                         (map getName l, map getName r) ) $
                          snd $ classTvsFds cl
-         , tcdSigs = map (noLoc . synifyIdSig DeleteTopLevelQuantification)
-                         (classMethods cl)
+         , tcdSigs = noLoc (MinimalSig . fmap noLoc $ classMinimalDef cl) :
+                      map (noLoc . synifyIdSig DeleteTopLevelQuantification)
+                        (classMethods cl)
          , tcdMeths = emptyBag --ignore default method definitions, they don't affect signature
          -- class associated-types are a subset of TyCon:
-         , tcdATs = [noLoc (synifyTyCon at_tc) | (at_tc, _) <- classATItems cl]
+         , tcdATs = atFamDecls
          , tcdATDefs = [] --ignore associated type defaults
          , tcdDocs = [] --we don't have any docs at this point
          , tcdFVs = placeHolderNames }
     | otherwise
-    -> TyClD (synifyTyCon tc)
+    -> TyClD (synifyTyCon Nothing tc)
 
   -- type-constructors (e.g. Maybe) are complicated, put the definition
   -- later in the file (also it's used for class associated-types too.)
-  ACoAxiom ax -> InstD (FamInstD { lid_inst = synifyAxiom ax })
+  ACoAxiom ax -> synifyAxiom ax
 
   -- a data-constructor alone just gets rendered as a function:
-  ADataCon dc -> SigD (TypeSig [synifyName dc]
+  AConLike (RealDataCon dc) -> SigD (TypeSig [synifyName dc]
     (synifyType ImplicitizeForAll (dataConUserType dc)))
 
-synifyATDefault :: TyCon -> LFamInstDecl Name
-synifyATDefault tc = noLoc (synifyAxiom ax)
-  where Just ax = tyConFamilyCoercion_maybe tc
+  AConLike (PatSynCon ps) ->
+      let (_, _, (req_theta, prov_theta)) = patSynSig ps
+      in SigD $ PatSynSig (synifyName ps)
+                          (fmap (synifyType WithinType) (patSynTyDetails ps))
+                          (synifyType WithinType (patSynType ps))
+                          (synifyCtx req_theta)
+                          (synifyCtx prov_theta)
 
-synifyAxiom :: CoAxiom -> FamInstDecl Name
-synifyAxiom (CoAxiom { co_ax_tvs = tvs, co_ax_lhs = lhs, co_ax_rhs = rhs })
-  | Just (tc, args) <- tcSplitTyConApp_maybe lhs
-  = let name      = synifyName tc
-        typats    = map (synifyType WithinType) args
-        hs_rhs_ty = synifyType WithinType rhs
-    in FamInstDecl { fid_tycon = name 
-                   , fid_pats = HsWB { hswb_cts = typats, hswb_kvs = [], hswb_tvs = map tyVarName tvs }
-                   , fid_defn = TySynonym hs_rhs_ty, fid_fvs = placeHolderNames }
+synifyAxBranch :: TyCon -> CoAxBranch -> TyFamInstEqn Name
+synifyAxBranch tc (CoAxBranch { cab_tvs = tkvs, cab_lhs = args, cab_rhs = rhs })
+  = let name       = synifyName tc
+        typats     = map (synifyType WithinType) args
+        hs_rhs     = synifyType WithinType rhs
+        (kvs, tvs) = partition isKindVar tkvs
+    in TyFamInstEqn { tfie_tycon = name
+                    , tfie_pats  = HsWB { hswb_cts = typats
+                                        , hswb_kvs = map tyVarName kvs
+                                        , hswb_tvs = map tyVarName tvs }
+                    , tfie_rhs   = hs_rhs }
+
+synifyAxiom :: CoAxiom br -> HsDecl Name
+synifyAxiom ax@(CoAxiom { co_ax_tc = tc })
+  | isOpenSynFamilyTyCon tc
+  , Just branch <- coAxiomSingleBranch_maybe ax
+  = InstD (TyFamInstD (TyFamInstDecl { tfid_eqn = noLoc $ synifyAxBranch tc branch
+                                     , tfid_fvs = placeHolderNames }))
+
+  | Just ax' <- isClosedSynFamilyTyCon_maybe tc
+  , getUnique ax' == getUnique ax   -- without the getUniques, type error
+  = TyClD (synifyTyCon (Just ax) tc)
+
   | otherwise
-  = error "synifyAxiom" 
+  = error "synifyAxiom: closed/open family confusion"
 
-synifyTyCon :: TyCon -> TyClDecl Name
-synifyTyCon tc
+synifyTyCon :: Maybe (CoAxiom br) -> TyCon -> TyClDecl Name
+synifyTyCon coax tc
   | isFunTyCon tc || isPrimTyCon tc 
-  = TyDecl { tcdLName = synifyName tc
-           , tcdTyVars =       -- tyConTyVars doesn't work on fun/prim, but we can make them up:
+  = DataDecl { tcdLName = synifyName tc
+             , tcdTyVars =       -- tyConTyVars doesn't work on fun/prim, but we can make them up:
                          let mk_hs_tv realKind fakeTyVar 
                                 = noLoc $ KindedTyVar (getName fakeTyVar) 
                                                       (synifyKindSig realKind)
-                         in HsQTvs { hsq_kvs = []   -- No kind polymorhism
+                         in HsQTvs { hsq_kvs = []   -- No kind polymorphism
                                    , hsq_tvs = zipWith mk_hs_tv (fst (splitKindFunTys (tyConKind tc)))
                                                                 alphaTyVars --a, b, c... which are unfortunately all kind *
                                    }
                             
-           , tcdTyDefn = TyData { td_ND = DataType  -- arbitrary lie, they are neither 
+           , tcdDataDefn = HsDataDefn { dd_ND = DataType  -- arbitrary lie, they are neither 
                                                     -- algebraic data nor newtype:
-                                , td_ctxt = noLoc []
-                                , td_cType = Nothing
-                                , td_kindSig = Just (synifyKindSig (tyConKind tc))
+                                      , dd_ctxt = noLoc []
+                                      , dd_cType = Nothing
+                                      , dd_kindSig = Just (synifyKindSig (tyConKind tc))
                                                -- we have their kind accurately:
-                                , td_cons = []  -- No constructors
-                                , td_derivs = Nothing }
+                                      , dd_cons = []  -- No constructors
+                                      , dd_derivs = Nothing }
            , tcdFVs = placeHolderNames }
+
   | isSynFamilyTyCon tc 
-  = case synTyConRhs tc of
-        SynFamilyTyCon ->
-          TyFamily TypeFamily (synifyName tc) (synifyTyVars (tyConTyVars tc))
-               (Just (synifyKindSig (synTyConResKind tc)))
-        _ -> error "synifyTyCon: impossible open type synonym?"
+  = case synTyConRhs_maybe tc of
+      Just rhs ->
+        let info = case rhs of
+                     OpenSynFamilyTyCon -> OpenTypeFamily
+                     ClosedSynFamilyTyCon (CoAxiom { co_ax_branches = branches }) ->
+                       ClosedTypeFamily (brListMap (noLoc . synifyAxBranch tc) branches)
+                     _ -> error "synifyTyCon: type/data family confusion"
+        in FamDecl (FamilyDecl { fdInfo = info
+                               , fdLName = synifyName tc
+                               , fdTyVars = synifyTyVars (tyConTyVars tc)
+                               , fdKindSig = Just (synifyKindSig (synTyConResKind tc)) })
+      Nothing -> error "synifyTyCon: impossible open type synonym?"
+
   | isDataFamilyTyCon tc 
   = --(why no "isOpenAlgTyCon"?)
     case algTyConRhs tc of
         DataFamilyTyCon ->
-          TyFamily DataFamily (synifyName tc) (synifyTyVars (tyConTyVars tc))
-               Nothing --always kind '*'
-               -- placeHolderKind
+          FamDecl (FamilyDecl DataFamily (synifyName tc) (synifyTyVars (tyConTyVars tc))
+                              Nothing) --always kind '*'
         _ -> error "synifyTyCon: impossible open data type?"
+  | isSynTyCon tc
+  = case synTyConRhs_maybe tc of
+        Just (SynonymTyCon ty) ->
+          SynDecl { tcdLName = synifyName tc
+                  , tcdTyVars = synifyTyVars (tyConTyVars tc)
+                  , tcdRhs = synifyType WithinType ty
+                  , tcdFVs = placeHolderNames }
+        _ -> error "synifyTyCon: impossible synTyCon"
   | otherwise =
-  -- (closed) type, newtype, and data
+  -- (closed) newtype and data
   let
-  -- alg_ only applies to newtype/data
-  -- syn_ only applies to type
-  -- others apply to both
   alg_nd = if isNewTyCon tc then NewType else DataType
   alg_ctx = synifyCtx (tyConStupidTheta tc)
-  name = synifyName tc
+  name = case coax of
+    Just a -> synifyName a -- Data families are named according to their
+                           -- CoAxioms, not their TyCons
+    _ -> synifyName tc
   tyvars = synifyTyVars (tyConTyVars tc)
-  alg_kindSig = Just (tyConKind tc)
+  kindSig = Just (tyConKind tc)
   -- The data constructors.
   --
   -- Any data-constructors not exported from the module that *defines* the
@@ -158,19 +206,18 @@ synifyTyCon tc
   -- That seems like an acceptable compromise (they'll just be documented
   -- in prefix position), since, otherwise, the logic (at best) gets much more
   -- complicated. (would use dataConIsInfix.)
-  alg_use_gadt_syntax = any (not . isVanillaDataCon) (tyConDataCons tc)
-  alg_cons = map (synifyDataCon alg_use_gadt_syntax) (tyConDataCons tc)
+  use_gadt_syntax = any (not . isVanillaDataCon) (tyConDataCons tc)
+  cons = map (synifyDataCon use_gadt_syntax) (tyConDataCons tc)
   -- "deriving" doesn't affect the signature, no need to specify any.
   alg_deriv = Nothing
-  syn_type = synifyType WithinType (synTyConType tc)
-  defn | isSynTyCon tc = TySynonym syn_type
-       | otherwise = TyData { td_ND = alg_nd, td_ctxt = alg_ctx
-                            , td_cType = Nothing
-                            , td_kindSig = fmap synifyKindSig alg_kindSig
-                            , td_cons    = alg_cons 
-                            , td_derivs  = alg_deriv }
- in TyDecl { tcdLName = name, tcdTyVars = tyvars, tcdTyDefn = defn
-           , tcdFVs = placeHolderNames }
+  defn = HsDataDefn { dd_ND      = alg_nd
+                    , dd_ctxt    = alg_ctx
+                    , dd_cType   = Nothing
+                    , dd_kindSig = fmap synifyKindSig kindSig
+                    , dd_cons    = cons 
+                    , dd_derivs  = alg_deriv }
+ in DataDecl { tcdLName = name, tcdTyVars = tyvars, tcdDataDefn = defn
+             , tcdFVs = placeHolderNames }
 
 -- User beware: it is your responsibility to pass True (use_gadt_syntax)
 -- for any constructor that would be misrepresented by omitting its
@@ -197,11 +244,14 @@ synifyDataCon use_gadt_syntax dc = noLoc $
 
   linear_tys = zipWith (\ty bang ->
             let tySyn = synifyType WithinType ty
-            in case bang of
-                 HsUnpackFailed -> noLoc $ HsBangTy HsStrict tySyn
-                 HsNoBang       -> tySyn
-                      -- HsNoBang never appears, it's implied instead.
-                 _              -> noLoc $ HsBangTy bang tySyn
+                src_bang = case bang of
+                             HsUnpack {} -> HsUserBang (Just True) True
+                             HsStrict    -> HsUserBang (Just False) True
+                             _           -> bang
+            in case src_bang of
+                 HsNoBang -> tySyn
+                 _        -> noLoc $ HsBangTy bang tySyn
+            -- HsNoBang never appears, it's implied instead.
           )
           arg_tys (dataConStrictMarks dc)
   field_tys = zipWith (\field synTy -> ConDeclField
@@ -319,12 +369,26 @@ synifyTyLit (NumTyLit n) = HsNumTy n
 synifyTyLit (StrTyLit s) = HsStrTy s
 
 synifyKindSig :: Kind -> LHsKind Name
-synifyKindSig k = synifyType (error "synifyKind") k
+synifyKindSig k = synifyType WithinType k
 
-synifyInstHead :: ([TyVar], [PredType], Class, [Type]) ->
-                  ([HsType Name], Name, [HsType Name])
-synifyInstHead (_, preds, cls, ts) =
-  ( map (unLoc . synifyType WithinType) preds
-  , getName cls
+synifyInstHead :: ([TyVar], [PredType], Class, [Type]) -> InstHead Name
+synifyInstHead (_, preds, cls, types) =
+  ( getName cls
+  , map (unLoc . synifyType WithinType) ks
   , map (unLoc . synifyType WithinType) ts
+  , ClassInst $ map (unLoc . synifyType WithinType) preds
   )
+  where (ks,ts) = break (not . isKind) types
+
+-- Convert a family instance, this could be a type family or data family
+synifyFamInst :: FamInst -> Bool -> InstHead Name
+synifyFamInst fi opaque =
+  ( fi_fam fi
+  , map (unLoc . synifyType WithinType) ks
+  , map (unLoc . synifyType WithinType) ts
+  , case fi_flavor fi of
+      SynFamilyInst | opaque -> TypeInst Nothing
+      SynFamilyInst -> TypeInst . Just . unLoc . synifyType WithinType $ fi_rhs fi
+      DataFamilyInst c -> DataInst $ synifyTyCon (Just $ famInstAxiom fi) c
+  )
+  where (ks,ts) = break (not . isKind) $ fi_tys fi

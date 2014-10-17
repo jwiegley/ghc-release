@@ -1,5 +1,4 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -18,29 +17,15 @@
 module System.Exit
     (
       ExitCode(ExitSuccess,ExitFailure)
-    , exitWith      -- :: ExitCode -> IO a
-    , exitFailure   -- :: IO a
-    , exitSuccess   -- :: IO a
+    , exitWith
+    , exitFailure
+    , exitSuccess
   ) where
 
 import Prelude
 
-#ifdef __GLASGOW_HASKELL__
 import GHC.IO
 import GHC.IO.Exception
-#endif
-
-#ifdef __HUGS__
-import Hugs.Prelude (ExitCode(..))
-import Control.Exception.Base
-#endif
-
-#ifdef __NHC__
-import System
-  ( ExitCode(..)
-  , exitWith
-  )
-#endif
 
 -- ---------------------------------------------------------------------------
 -- exitWith
@@ -71,15 +56,11 @@ import System
 -- thread, 'exitWith' will throw an 'ExitException' as normal, but the
 -- exception will not cause the process itself to exit.
 --
-#ifndef __NHC__
 exitWith :: ExitCode -> IO a
 exitWith ExitSuccess = throwIO ExitSuccess
 exitWith code@(ExitFailure n)
   | n /= 0 = throwIO code
-#ifdef __GLASGOW_HASKELL__
   | otherwise = ioError (IOError Nothing InvalidArgument "exitWith" "ExitFailure 0" Nothing Nothing)
-#endif
-#endif  /* ! __NHC__ */
 
 -- | The computation 'exitFailure' is equivalent to
 -- 'exitWith' @(@'ExitFailure' /exitfail/@)@,

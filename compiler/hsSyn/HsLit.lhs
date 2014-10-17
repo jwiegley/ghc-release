@@ -9,7 +9,7 @@
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 {-# LANGUAGE DeriveDataTypeable #-}
@@ -24,6 +24,7 @@ import Type	( Type, Kind )
 import Outputable
 import FastString
 
+import Data.ByteString (ByteString)
 import Data.Data
 \end{code}
 
@@ -60,7 +61,7 @@ data HsLit
   = HsChar	    Char		-- Character
   | HsCharPrim	    Char		-- Unboxed character
   | HsString	    FastString		-- String
-  | HsStringPrim    FastString		-- Packed string
+  | HsStringPrim    ByteString		-- Packed bytes
   | HsInt	    Integer		-- Genuinely an Int; arises from TcGenDeriv, 
 					--	and from TRANSLATION
   | HsIntPrim       Integer             -- literal Int#
@@ -170,7 +171,7 @@ instance Outputable HsLit where
     ppr (HsChar c)	 = pprHsChar c
     ppr (HsCharPrim c)	 = pprHsChar c <> char '#'
     ppr (HsString s)	 = pprHsString s
-    ppr (HsStringPrim s) = pprHsString s <> char '#'
+    ppr (HsStringPrim s) = pprHsBytes s <> char '#'
     ppr (HsInt i)	 = integer i
     ppr (HsInteger i _)	 = integer i
     ppr (HsRat f _)	 = ppr f

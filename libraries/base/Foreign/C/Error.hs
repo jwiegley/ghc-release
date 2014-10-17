@@ -1,6 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -#include "HsBase.h" #-}
+{-# LANGUAGE CPP, NoImplicitPrelude #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -20,7 +19,7 @@ module Foreign.C.Error (
 
   -- * Haskell representations of @errno@ values
 
-  Errno(..),            -- instance: Eq
+  Errno(..),
 
   -- ** Common @errno@ symbols
   -- | Different operating systems and\/or C libraries often support
@@ -35,7 +34,7 @@ module Foreign.C.Error (
   eMSGSIZE, eMULTIHOP, eNAMETOOLONG, eNETDOWN, eNETRESET, eNETUNREACH, 
   eNFILE, eNOBUFS, eNODATA, eNODEV, eNOENT, eNOEXEC, eNOLCK, eNOLINK, 
   eNOMEM, eNOMSG, eNONET, eNOPROTOOPT, eNOSPC, eNOSR, eNOSTR, eNOSYS, 
-  eNOTBLK, eNOTCONN, eNOTDIR, eNOTEMPTY, eNOTSOCK, eNOTTY, eNXIO, 
+  eNOTBLK, eNOTCONN, eNOTDIR, eNOTEMPTY, eNOTSOCK, eNOTSUP, eNOTTY, eNXIO,
   eOPNOTSUPP, ePERM, ePFNOSUPPORT, ePIPE, ePROCLIM, ePROCUNAVAIL, 
   ePROGMISMATCH, ePROGUNAVAIL, ePROTO, ePROTONOSUPPORT, ePROTOTYPE, 
   eRANGE, eREMCHG, eREMOTE, eROFS, eRPCMISMATCH, eRREMOTE, eSHUTDOWN, 
@@ -43,44 +42,33 @@ module Foreign.C.Error (
   eTOOMANYREFS, eTXTBSY, eUSERS, eWOULDBLOCK, eXDEV,
 
   -- ** 'Errno' functions
-                        -- :: Errno
-  isValidErrno,         -- :: Errno -> Bool
+  isValidErrno,
 
   -- access to the current thread's "errno" value
   --
-  getErrno,             -- :: IO Errno
-  resetErrno,           -- :: IO ()
+  getErrno,
+  resetErrno,
 
   -- conversion of an "errno" value into IO error
   --
-  errnoToIOError,       -- :: String       -- location
-                        -- -> Errno        -- errno
-                        -- -> Maybe Handle -- handle
-                        -- -> Maybe String -- filename
-                        -- -> IOError
+  errnoToIOError,
 
   -- throw current "errno" value
   --
-  throwErrno,           -- ::                String               -> IO a
+  throwErrno,
 
   -- ** Guards for IO operations that may fail
 
-  throwErrnoIf,         -- :: (a -> Bool) -> String -> IO a       -> IO a
-  throwErrnoIf_,        -- :: (a -> Bool) -> String -> IO a       -> IO ()
-  throwErrnoIfRetry,    -- :: (a -> Bool) -> String -> IO a       -> IO a
-  throwErrnoIfRetry_,   -- :: (a -> Bool) -> String -> IO a       -> IO ()
-  throwErrnoIfMinus1,   -- :: Num a 
-                        -- =>                String -> IO a       -> IO a
-  throwErrnoIfMinus1_,  -- :: Num a 
-                        -- =>                String -> IO a       -> IO ()
+  throwErrnoIf,
+  throwErrnoIf_,
+  throwErrnoIfRetry,
+  throwErrnoIfRetry_,
+  throwErrnoIfMinus1,
+  throwErrnoIfMinus1_,
   throwErrnoIfMinus1Retry,
-                        -- :: Num a 
-                        -- =>                String -> IO a       -> IO a
   throwErrnoIfMinus1Retry_,  
-                        -- :: Num a 
-                        -- =>                String -> IO a       -> IO ()
-  throwErrnoIfNull,     -- ::                String -> IO (Ptr a) -> IO (Ptr a)
-  throwErrnoIfNullRetry,-- ::                String -> IO (Ptr a) -> IO (Ptr a)
+  throwErrnoIfNull,
+  throwErrnoIfNullRetry,
 
   throwErrnoIfRetryMayBlock, 
   throwErrnoIfRetryMayBlock_,
@@ -100,9 +88,7 @@ module Foreign.C.Error (
 -- this is were we get the CONST_XXX definitions from that configure
 -- calculated for us
 --
-#ifndef __NHC__
 #include "HsBaseConfig.h"
-#endif
 
 import Foreign.Ptr
 import Foreign.C.Types
@@ -110,26 +96,11 @@ import Foreign.C.String
 import Control.Monad            ( void )
 import Data.Maybe
 
-#if __GLASGOW_HASKELL__
 import GHC.IO
 import GHC.IO.Exception
 import GHC.IO.Handle.Types
 import GHC.Num
 import GHC.Base
-#elif __HUGS__
-import Hugs.Prelude             ( Handle, IOError, ioError )
-import System.IO.Unsafe         ( unsafePerformIO )
-#else
-import System.IO                ( Handle )
-import System.IO.Error          ( IOError, ioError )
-import System.IO.Unsafe         ( unsafePerformIO )
-import Foreign.Storable         ( Storable(poke,peek) )
-#endif
-
-#ifdef __HUGS__
-{-# CFILES cbits/PrelIOUtils.c #-}
-#endif
-
 
 -- "errno" type
 -- ------------
@@ -155,7 +126,7 @@ eOK, e2BIG, eACCES, eADDRINUSE, eADDRNOTAVAIL, eADV, eAFNOSUPPORT, eAGAIN,
   eMSGSIZE, eMULTIHOP, eNAMETOOLONG, eNETDOWN, eNETRESET, eNETUNREACH, 
   eNFILE, eNOBUFS, eNODATA, eNODEV, eNOENT, eNOEXEC, eNOLCK, eNOLINK, 
   eNOMEM, eNOMSG, eNONET, eNOPROTOOPT, eNOSPC, eNOSR, eNOSTR, eNOSYS, 
-  eNOTBLK, eNOTCONN, eNOTDIR, eNOTEMPTY, eNOTSOCK, eNOTTY, eNXIO, 
+  eNOTBLK, eNOTCONN, eNOTDIR, eNOTEMPTY, eNOTSOCK, eNOTSUP, eNOTTY, eNXIO,
   eOPNOTSUPP, ePERM, ePFNOSUPPORT, ePIPE, ePROCLIM, ePROCUNAVAIL, 
   ePROGMISMATCH, ePROGUNAVAIL, ePROTO, ePROTONOSUPPORT, ePROTOTYPE, 
   eRANGE, eREMCHG, eREMOTE, eROFS, eRPCMISMATCH, eRREMOTE, eSHUTDOWN, 
@@ -166,9 +137,6 @@ eOK, e2BIG, eACCES, eADDRINUSE, eADDRNOTAVAIL, eADV, eAFNOSUPPORT, eAGAIN,
 -- configure 
 --
 eOK             = Errno 0
-#ifdef __NHC__
-#include "Errno.hs"
-#else
 e2BIG           = Errno (CONST_E2BIG)
 eACCES          = Errno (CONST_EACCES)
 eADDRINUSE      = Errno (CONST_EADDRINUSE)
@@ -235,6 +203,8 @@ eNOTCONN        = Errno (CONST_ENOTCONN)
 eNOTDIR         = Errno (CONST_ENOTDIR)
 eNOTEMPTY       = Errno (CONST_ENOTEMPTY)
 eNOTSOCK        = Errno (CONST_ENOTSOCK)
+eNOTSUP         = Errno (CONST_ENOTSUP)
+-- ^ /Since: 4.7.0.0/
 eNOTTY          = Errno (CONST_ENOTTY)
 eNXIO           = Errno (CONST_ENXIO)
 eOPNOTSUPP      = Errno (CONST_EOPNOTSUPP)
@@ -267,7 +237,6 @@ eTXTBSY         = Errno (CONST_ETXTBSY)
 eUSERS          = Errno (CONST_EUSERS)
 eWOULDBLOCK     = Errno (CONST_EWOULDBLOCK)
 eXDEV           = Errno (CONST_EXDEV)
-#endif
 
 -- | Yield 'True' if the given 'Errno' value is valid on the system.
 -- This implies that the 'Eq' instance of 'Errno' is also system dependent
@@ -290,25 +259,16 @@ getErrno :: IO Errno
 -- We must call a C function to get the value of errno in general.  On
 -- threaded systems, errno is hidden behind a C macro so that each OS
 -- thread gets its own copy.
-#ifdef __NHC__
-getErrno = do e <- peek _errno; return (Errno e)
-foreign import ccall unsafe "errno.h &errno" _errno :: Ptr CInt
-#else
 getErrno = do e <- get_errno; return (Errno e)
 foreign import ccall unsafe "HsBase.h __hscore_get_errno" get_errno :: IO CInt
-#endif
 
 -- | Reset the current thread\'s @errno@ value to 'eOK'.
 --
 resetErrno :: IO ()
 
 -- Again, setting errno has to be done via a C function.
-#ifdef __NHC__
-resetErrno = poke _errno 0
-#else
 resetErrno = set_errno 0
 foreign import ccall unsafe "HsBase.h __hscore_set_errno" set_errno :: CInt -> IO ()
-#endif
 
 -- throw current "errno" value
 -- ---------------------------
@@ -506,7 +466,6 @@ errnoToIOError  :: String       -- ^ the location where the error occurred
                 -> IOError
 errnoToIOError loc errno maybeHdl maybeName = unsafePerformIO $ do
     str <- strerror errno >>= peekCString
-#if __GLASGOW_HASKELL__
     return (IOError maybeHdl errType loc str (Just errno') maybeName)
     where
     Errno errno' = errno
@@ -611,9 +570,6 @@ errnoToIOError loc errno maybeHdl maybeName = unsafePerformIO $ do
         | errno == eWOULDBLOCK     = OtherError
         | errno == eXDEV           = UnsupportedOperation
         | otherwise                = OtherError
-#else
-    return (userError (loc ++ ": " ++ str ++ maybe "" (": "++) maybeName))
-#endif
 
 foreign import ccall unsafe "string.h" strerror :: Errno -> IO (Ptr CChar)
 

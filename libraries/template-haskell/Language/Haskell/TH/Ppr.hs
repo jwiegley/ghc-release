@@ -10,8 +10,9 @@ import Text.PrettyPrint (render)
 import Language.Haskell.TH.PprLib
 import Language.Haskell.TH.Syntax
 import Data.Word ( Word8 )
-import Data.Char ( toLower, chr )
+import Data.Char ( toLower, chr, ord, isSymbol )
 import GHC.Show  ( showMultiLineString )
+import Data.Ratio ( numerator, denominator )
 
 nestDepth :: Int
 nestDepth = 4
@@ -52,7 +53,7 @@ instance Ppr Info where
     ppr (PrimTyConI name arity is_unlifted) 
       = text "Primitive"
 	<+> (if is_unlifted then text "unlifted" else empty)
-	<+> text "type construtor" <+> quotes (ppr name)
+	<+> text "type constructor" <+> quotes (ppr name)
 	<+> parens (text "arity" <+> int arity)
     ppr (ClassOpI v ty cls fix) 
       = text "Class op from" <+> ppr cls <> colon <+>
@@ -78,13 +79,34 @@ pprFixity v (Fixity i d) = ppr_fix d <+> int i <+> ppr v
 
 
 ------------------------------
+instance Ppr Module where
+  ppr (Module pkg m) = text (pkgString pkg) <+> text (modString m)
+
+instance Ppr ModuleInfo where
+  ppr (ModuleInfo imps) = text "Module" <+> vcat (map ppr imps)
+
+------------------------------
 instance Ppr Exp where
     ppr = pprExp noPrec
+
+pprPrefixOcc :: Name -> Doc
+-- Print operators with parens around them
+pprPrefixOcc n = parensIf (isSymOcc n) (ppr n)
+
+isSymOcc :: Name -> Bool
+isSymOcc n
+  = case nameBase n of 
+      []    -> True  -- Empty name; weird
+      (c:_) -> isSymbolASCII c || (ord c > 0x7f && isSymbol c) 
+                   -- c.f. OccName.startsVarSym in GHC itself
+
+isSymbolASCII :: Char -> Bool
+isSymbolASCII c = c `elem` "!#$%&*+./<=>?@\\^|~-"
 
 pprInfixExp :: Exp -> Doc
 pprInfixExp (VarE v) = pprName' Infix v
 pprInfixExp (ConE v) = pprName' Infix v
-pprInfixExp _        = error "Attempt to pretty-print non-variable or constructor in infix context!"
+pprInfixExp _        = text "<<Non-variable/constructor in infix context>>"
 
 pprExp :: Precedence -> Exp -> Doc
 pprExp _ (VarE v)     = pprName' Applied v
@@ -121,13 +143,23 @@ pprExp i (MultiIfE alts)
         []            -> [text "if {}"]
         (alt : alts') -> text "if" <+> pprGuarded arrow alt
                          : map (nest 3 . pprGuarded arrow) alts'
-pprExp i (LetE ds e) = parensIf (i > noPrec) $ text "let" <+> ppr ds
-                                            $$ text " in" <+> ppr e
+pprExp i (LetE ds_ e) = parensIf (i > noPrec) $ text "let" <+> pprDecs ds_
+                                             $$ text " in" <+> ppr e
+  where
+    pprDecs []  = empty
+    pprDecs [d] = ppr d
+    pprDecs ds  = braces $ sep $ punctuate semi $ map ppr ds
+
 pprExp i (CaseE e ms)
  = parensIf (i > noPrec) $ text "case" <+> ppr e <+> text "of"
                         $$ nest nestDepth (ppr ms)
-pprExp i (DoE ss) = parensIf (i > noPrec) $ text "do" <+> ppr ss
-pprExp _ (CompE []) = error "Can't happen: pprExp (CompExp [])"
+pprExp i (DoE ss_) = parensIf (i > noPrec) $ text "do" <+> pprStms ss_
+  where
+    pprStms []  = empty
+    pprStms [s] = ppr s
+    pprStms ss  = braces $ sep $ punctuate semi $ map ppr ss
+    
+pprExp _ (CompE []) = text "<<Empty CompExp>>"
 -- This will probably break with fixity declarations - would need a ';'
 pprExp _ (CompE ss) = text "[" <> ppr s
                   <+> text "|"
@@ -189,7 +221,9 @@ pprLit i (IntegerL x)    = parensIf (i > noPrec && x < 0) (integer x)
 pprLit _ (CharL c)       = text (show c)
 pprLit _ (StringL s)     = pprString s
 pprLit _ (StringPrimL s) = pprString (bytesToString s) <> char '#'
-pprLit i (RationalL rat) = parensIf (i > noPrec) $ rational rat
+pprLit i (RationalL rat) = parensIf (i > noPrec) $
+                           integer (numerator rat) <+> char '/' 
+                              <+> integer (denominator rat)
 
 bytesToString :: [Word8] -> String
 bytesToString = map (chr . fromIntegral)
@@ -239,7 +273,7 @@ instance Ppr Dec where
 ppr_dec :: Bool     -- declaration on the toplevel?
         -> Dec 
         -> Doc
-ppr_dec _ (FunD f cs)   = vcat $ map (\c -> ppr f <+> ppr c) cs
+ppr_dec _ (FunD f cs)   = vcat $ map (\c -> pprPrefixOcc f <+> ppr c) cs
 ppr_dec _ (ValD p r ds) = ppr p <+> pprBody True r
                           $$ where_clause ds
 ppr_dec _ (TySynD t xs rhs) 
@@ -253,7 +287,7 @@ ppr_dec _  (ClassD ctxt c xs fds ds)
     $$ where_clause ds
 ppr_dec _ (InstanceD ctxt i ds) = text "instance" <+> pprCxt ctxt <+> ppr i
                                   $$ where_clause ds
-ppr_dec _ (SigD f t)    = ppr f <+> text "::" <+> ppr t
+ppr_dec _ (SigD f t)    = pprPrefixOcc f <+> text "::" <+> ppr t
 ppr_dec _ (ForeignD f)  = ppr f
 ppr_dec _ (InfixD fx n) = pprFixity n fx
 ppr_dec _ (PragmaD p)   = ppr p
@@ -275,11 +309,23 @@ ppr_dec isTop (NewtypeInstD ctxt tc tys c decs)
   where
     maybeInst | isTop     = text "instance"
               | otherwise = empty
-ppr_dec isTop (TySynInstD tc tys rhs) 
+ppr_dec isTop (TySynInstD tc (TySynEqn tys rhs))
   = ppr_tySyn maybeInst tc (sep (map pprParendType tys)) rhs
   where
     maybeInst | isTop     = text "instance"
               | otherwise = empty
+ppr_dec _ (ClosedTypeFamilyD tc tvs mkind eqns)
+  = hang (hsep [ text "type family", ppr tc, hsep (map ppr tvs), maybeKind
+               , text "where" ])
+      nestDepth (vcat (map ppr_eqn eqns))
+  where
+    maybeKind | (Just k') <- mkind = text "::" <+> ppr k'
+              | otherwise          = empty
+    ppr_eqn (TySynEqn lhs rhs)
+      = ppr tc <+> sep (map pprParendType lhs) <+> text "=" <+> ppr rhs
+
+ppr_dec _ (RoleAnnotD name roles)
+  = hsep [ text "type role", ppr name ] <+> hsep (map ppr roles)
 
 ppr_data :: Doc -> Cxt -> Name -> Doc -> [Con] -> [Name] -> Doc
 ppr_data maybeInst ctxt t argsDoc cs decs
@@ -366,6 +412,11 @@ instance Ppr Pragma where
                        | otherwise  =   text "forall"
                                     <+> fsep (map ppr bndrs)
                                     <+> char '.'
+    ppr (AnnP tgt expr)
+       = text "{-# ANN" <+> target1 tgt <+> ppr expr <+> text "#-}"
+      where target1 ModuleAnnotation    = text "module"
+            target1 (TypeAnnotation t)  = text "type" <+> ppr t
+            target1 (ValueAnnotation v) = ppr v
 
 ------------------------------
 instance Ppr Inline where
@@ -475,6 +526,12 @@ instance Ppr TyLit where
 instance Ppr TyVarBndr where
     ppr (PlainTV nm)    = ppr nm
     ppr (KindedTV nm k) = parens (ppr nm <+> text "::" <+> ppr k)
+
+instance Ppr Role where
+    ppr NominalR          = text "nominal"
+    ppr RepresentationalR = text "representational"
+    ppr PhantomR          = text "phantom"
+    ppr InferR            = text "_"
 
 ------------------------------
 pprCxt :: Cxt -> Doc

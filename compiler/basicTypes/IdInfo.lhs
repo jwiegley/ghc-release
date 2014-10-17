@@ -12,7 +12,7 @@ Haskell. [WDP 94/11])
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+--     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
 
 module IdInfo (
@@ -24,8 +24,14 @@ module IdInfo (
 	vanillaIdInfo, noCafIdInfo,
 	seqIdInfo, megaSeqIdInfo,
 
+        -- ** The OneShotInfo type
+        OneShotInfo(..),
+        oneShotInfo, noOneShotInfo, hasNoOneShotInfo,
+        setOneShotInfo, 
+
 	-- ** Zapping various forms of Info
-	zapLamInfo, zapDemandInfo, zapFragileInfo,
+	zapLamInfo, zapFragileInfo,
+        zapDemandInfo,
 
 	-- ** The ArityInfo type
 	ArityInfo,
@@ -50,7 +56,7 @@ module IdInfo (
 
 	InsideLam, OneBranch,
 	insideLam, notInsideLam, oneBranch, notOneBranch,
-	
+
 	-- ** The SpecInfo type
 	SpecInfo(..),
 	emptySpecInfo,
@@ -62,11 +68,6 @@ module IdInfo (
 	CafInfo(..),
 	ppCafInfo, mayHaveCafRefs,
 	cafInfo, setCafInfo,
-
-        -- ** The LBVarInfo type
-        LBVarInfo(..),
-        noLBVarInfo, hasNoLBVarInfo,
-        lbvarInfo, setLBVarInfo,
 
         -- ** Tick-box Info
         TickBoxOp(..), TickBoxId,
@@ -82,19 +83,17 @@ import BasicTypes
 import DataCon
 import TyCon
 import ForeignCall
-import Demand
 import Outputable	
 import Module
 import FastString
-
-import Data.Maybe
+import Demand
 
 -- infixl so you can say (id `set` a `set` b)
 infixl 	1 `setSpecInfo`,
 	  `setArityInfo`,
 	  `setInlinePragInfo`,
 	  `setUnfoldingInfo`,
-	  `setLBVarInfo`,
+	  `setOneShotInfo`,
 	  `setOccInfo`,
 	  `setCafInfo`,
 	  `setStrictnessInfo`,
@@ -129,7 +128,7 @@ data IdDetails
 				--  b) when desugaring a RecordCon we can get 
 				--     from the Id back to the data con]
 
-  | ClassOpId Class 		-- ^ The 'Id' is an superclass selector or class operation of a class
+  | ClassOpId Class 		-- ^ The 'Id' is a superclass selector or class operation of a class
 
   | PrimOpId PrimOp		-- ^ The 'Id' is for a primitive operator
   | FCallId ForeignCall		-- ^ The 'Id' is for a foreign call
@@ -142,7 +141,7 @@ data IdDetails
        --             instance C a => C [a]
        --       has is_silent = 1, because the dfun
        --       has type  dfun :: (D a, C a) => C [a]
-       --       See the DFun Superclass Invariant in TcInstDcls
+       --       See Note [Silent superclass arguments] in TcInstDcls
        --
        -- Bool = True <=> the class has only one method, so may be
        --                  implemented with a newtype, so it might be bad
@@ -191,7 +190,7 @@ pprIdDetails other     = brackets (pp other)
 -- 
 -- The 'IdInfo' gives information about the value, or definition, of the
 -- 'Id'.  It does not contain information about the 'Id''s usage,
--- except for 'demandInfo' and 'lbvarInfo'.
+-- except for 'demandInfo' and 'oneShotInfo'.
 data IdInfo
   = IdInfo {
 	arityInfo 	:: !ArityInfo,		-- ^ 'Id' arity
@@ -199,18 +198,14 @@ data IdInfo
 			   			-- See Note [Specialisations and RULES in IdInfo]
 	unfoldingInfo	:: Unfolding,		-- ^ The 'Id's unfolding
 	cafInfo		:: CafInfo,		-- ^ 'Id' CAF info
-        lbvarInfo	:: LBVarInfo,		-- ^ Info about a lambda-bound variable, if the 'Id' is one
+        oneShotInfo	:: OneShotInfo,		-- ^ Info about a lambda-bound variable, if the 'Id' is one
 	inlinePragInfo	:: InlinePragma,	-- ^ Any inline pragma atached to the 'Id'
 	occInfo		:: OccInfo,		-- ^ How the 'Id' occurs in the program
 
-	strictnessInfo :: Maybe StrictSig,	-- ^ Id strictness information. Reason for Maybe: 
-	                                        -- the DmdAnal phase needs to know whether
-						-- this is the first visit, so it can assign botSig.
-						-- Other customers want topSig.  So @Nothing@ is good.
+        strictnessInfo  :: StrictSig,      --  ^ A strictness signature
 
-	demandInfo	  :: Maybe Demand	-- ^ Id demand information. Similarly we want to know 
-	                                        -- if there's no known demand yet, for when we are looking
-						-- for CPR info
+        demandInfo      :: Demand        -- ^ ID demand information
+
     }
 
 -- | Just evaluate the 'IdInfo' to WHNF
@@ -227,20 +222,20 @@ megaSeqIdInfo info
 -- some unfoldings are not calculated at all
 --    seqUnfolding (unfoldingInfo info)		`seq`
 
-    seqDemandInfo (demandInfo info)	`seq`
-    seqStrictnessInfo (strictnessInfo info) `seq`
-
+    seqDemandInfo (demandInfo info)             `seq`
+    seqStrictnessInfo (strictnessInfo info)     `seq`
     seqCaf (cafInfo info)			`seq`
-    seqLBVar (lbvarInfo info)			`seq`
-    seqOccInfo (occInfo info) 
+    seqOneShot (oneShotInfo info)		`seq`
+    seqOccInfo (occInfo info)
 
-seqStrictnessInfo :: Maybe StrictSig -> ()
-seqStrictnessInfo Nothing = ()
-seqStrictnessInfo (Just ty) = seqStrictSig ty
+seqOneShot :: OneShotInfo -> ()
+seqOneShot l = l `seq` ()
 
-seqDemandInfo :: Maybe Demand -> ()
-seqDemandInfo Nothing    = ()
-seqDemandInfo (Just dmd) = seqDemand dmd
+seqStrictnessInfo :: StrictSig -> ()
+seqStrictnessInfo ty = seqStrictSig ty
+
+seqDemandInfo :: Demand -> ()
+seqDemandInfo dmd = seqDemand dmd
 \end{code}
 
 Setters
@@ -272,13 +267,13 @@ setArityInfo	  info ar  = info { arityInfo = ar  }
 setCafInfo :: IdInfo -> CafInfo -> IdInfo
 setCafInfo        info caf = info { cafInfo = caf }
 
-setLBVarInfo :: IdInfo -> LBVarInfo -> IdInfo
-setLBVarInfo      info lb = {-lb `seq`-} info { lbvarInfo = lb }
+setOneShotInfo :: IdInfo -> OneShotInfo -> IdInfo
+setOneShotInfo      info lb = {-lb `seq`-} info { oneShotInfo = lb }
 
-setDemandInfo :: IdInfo -> Maybe Demand -> IdInfo
-setDemandInfo     info dd = dd `seq` info { demandInfo = dd }
+setDemandInfo :: IdInfo -> Demand -> IdInfo
+setDemandInfo info dd = dd `seq` info { demandInfo = dd }
 
-setStrictnessInfo :: IdInfo -> Maybe StrictSig -> IdInfo
+setStrictnessInfo :: IdInfo -> StrictSig -> IdInfo
 setStrictnessInfo info dd = dd `seq` info { strictnessInfo = dd }
 \end{code}
 
@@ -292,11 +287,11 @@ vanillaIdInfo
 	    arityInfo		= unknownArity,
 	    specInfo		= emptySpecInfo,
 	    unfoldingInfo	= noUnfolding,
-	    lbvarInfo		= NoLBVarInfo,
+	    oneShotInfo		= NoOneShotInfo,
 	    inlinePragInfo 	= defaultInlinePragma,
 	    occInfo		= NoOccInfo,
-	    demandInfo	= Nothing,
-	    strictnessInfo   = Nothing
+            demandInfo	        = topDmd,
+	    strictnessInfo      = nopSig
 	   }
 
 -- | More informative 'IdInfo' we can use when we know the 'Id' has no CAF references
@@ -363,9 +358,8 @@ type InlinePragInfo = InlinePragma
 %************************************************************************
 
 \begin{code}
-pprStrictness :: Maybe StrictSig -> SDoc
-pprStrictness Nothing    = empty
-pprStrictness (Just sig) = ppr sig
+pprStrictness :: StrictSig -> SDoc
+pprStrictness sig = ppr sig
 \end{code}
 
 
@@ -472,43 +466,6 @@ ppCafInfo MayHaveCafRefs = empty
 
 %************************************************************************
 %*									*
-\subsection[lbvar-IdInfo]{Lambda-bound var info about an @Id@}
-%*									*
-%************************************************************************
-
-\begin{code}
--- | If the 'Id' is a lambda-bound variable then it may have lambda-bound
--- variable info. Sometimes we know whether the lambda binding this variable
--- is a \"one-shot\" lambda; that is, whether it is applied at most once.
---
--- This information may be useful in optimisation, as computations may
--- safely be floated inside such a lambda without risk of duplicating
--- work.
-data LBVarInfo = NoLBVarInfo            -- ^ No information
-	       | IsOneShotLambda	-- ^ The lambda is applied at most once).
-
--- | It is always safe to assume that an 'Id' has no lambda-bound variable information
-noLBVarInfo :: LBVarInfo
-noLBVarInfo = NoLBVarInfo
-
-hasNoLBVarInfo :: LBVarInfo -> Bool
-hasNoLBVarInfo NoLBVarInfo     = True
-hasNoLBVarInfo IsOneShotLambda = False
-
-seqLBVar :: LBVarInfo -> ()
-seqLBVar l = l `seq` ()
-
-pprLBVarInfo :: LBVarInfo -> SDoc
-pprLBVarInfo NoLBVarInfo     = empty
-pprLBVarInfo IsOneShotLambda = ptext (sLit "OneShot")
-
-instance Outputable LBVarInfo where
-    ppr = pprLBVarInfo
-\end{code}
-
-
-%************************************************************************
-%*									*
 \subsection{Bulk operations on IdInfo}
 %*									*
 %************************************************************************
@@ -524,7 +481,7 @@ zapLamInfo info@(IdInfo {occInfo = occ, demandInfo = demand})
   | is_safe_occ occ && is_safe_dmd demand
   = Nothing
   | otherwise
-  = Just (info {occInfo = safe_occ, demandInfo = Nothing})
+  = Just (info {occInfo = safe_occ, demandInfo = topDmd})
   where
 	-- The "unsafe" occ info is the ones that say I'm not in a lambda
 	-- because that might not be true for an unsaturated lambda
@@ -535,16 +492,13 @@ zapLamInfo info@(IdInfo {occInfo = occ, demandInfo = demand})
 		 OneOcc _ once int_cxt -> OneOcc insideLam once int_cxt
 		 _other	       	       -> occ
 
-    is_safe_dmd Nothing    = True
-    is_safe_dmd (Just dmd) = not (isStrictDmd dmd)
+    is_safe_dmd dmd = not (isStrictDmd dmd)
 \end{code}
 
 \begin{code}
 -- | Remove demand info on the 'IdInfo' if it is present, otherwise return @Nothing@
 zapDemandInfo :: IdInfo -> Maybe IdInfo
-zapDemandInfo info@(IdInfo {demandInfo = dmd})
-  | isJust dmd = Just (info {demandInfo = Nothing})
-  | otherwise  = Nothing
+zapDemandInfo info = Just (info {demandInfo = topDmd})
 \end{code}
 
 \begin{code}

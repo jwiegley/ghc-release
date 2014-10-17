@@ -1,16 +1,23 @@
 % Cabal User Guide
 
-
 # Building and installing packages #
 
 After you've unpacked a Cabal package, you can build it by moving into
-the root directory of the package and using the `Setup.hs` or
-`Setup.lhs` script there:
+the root directory of the package and running the `cabal` tool there:
 
-> `_runhaskell_ Setup.hs` [_command_] [_option_...]
+> `cabal [command] [option...]`
 
-The _command_ argument selects a particular step in the build/install
-process. You can also get a summary of the command syntax with
+The _command_ argument selects a particular step in the build/install process.
+
+You can also get a summary of the command syntax with
+
+> `cabal help`
+
+Alternatively, you can also use the `Setup.hs` or `Setup.lhs` script:
+
+> `runhaskell Setup.hs [command] [option...]`
+
+For the summary of the command syntax, run:
 
 > `runhaskell Setup.hs --help`
 
@@ -37,6 +44,133 @@ runhaskell Setup.hs install
 
 The package is installed under the user's home directory and is
 registered in the user's package database (`--user`).
+
+## Installing packages from Hackage ##
+
+The `cabal` tool also can download, configure, build and install a [Hackage]
+package and all of its dependencies in a single step. To do this, run:
+
+~~~~~~~~~~~~~~~~
+cabal install [PACKAGE...]
+~~~~~~~~~~~~~~~~
+
+To browse the list of available packages, visit the [Hackage] web site.
+
+## Developing with sandboxes ##
+
+By default, any dependencies of the package are installed into the global or
+user package databases (e.g. using `cabal install --only-dependencies`). If
+you're building several different packages that have incompatible dependencies,
+this can cause the build to fail. One way to avoid this problem is to build each
+package in an isolated environment ("sandbox"), with a sandbox-local package
+database. Because sandboxes are per-project, inconsistent dependencies can be
+simply disallowed.
+
+For more on sandboxes, see also
+[this article](http://coldwa.st/e/blog/2013-08-20-Cabal-sandbox.html).
+
+### Sandboxes: basic usage ###
+
+To initialise a fresh sandbox in the current directory, run `cabal sandbox
+init`. All subsequent commands (such as `build` and `install`) from this point
+will use the sandbox.
+
+~~~~~~~~~~~~~~~
+$ cd /path/to/my/haskell/library
+$ cabal sandbox init                   # Initialise the sandbox
+$ cabal install --only-dependencies    # Install dependencies into the sandbox
+$ cabal build                          # Build your package inside the sandbox
+~~~~~~~~~~~~~~~
+
+It can be useful to make a source package available for installation in the
+sandbox - for example, if your package depends on a patched or an unreleased
+version of a library. This can be done with the `cabal sandbox add-source`
+command - think of it as "local [Hackage]". If an add-source dependency is later
+modified, it is reinstalled automatically.
+
+~~~~~~~~~~~~~~~
+$ cabal sandbox add-source /my/patched/library # Add a new add-source dependency
+$ cabal install --dependencies-only            # Install it into the sandbox
+$ cabal build                                  # Build the local package
+$ $EDITOR /my/patched/library/Source.hs        # Modify the add-source dependency
+$ cabal build                                  # Modified dependency is automatically reinstalled
+~~~~~~~~~~~~~~~
+
+Normally, the sandbox settings (such as optimisation level) are inherited from
+the main Cabal config file (`$HOME/cabal/config`). Sometimes, though, you need
+to change some settings specifically for a single sandbox. You can do this by
+creating a `cabal.config` file in the same directory with your
+`cabal.sandbox.config` (which was created by `sandbox init`). This file has the
+same syntax as the main Cabal config file.
+
+~~~~~~~~~~~~~~~
+$ cat cabal.config
+documentation: True
+constraints: foo == 1.0, bar >= 2.0, baz
+$ cabal build                                  # Uses settings from the cabal.config file
+~~~~~~~~~~~~~~~
+
+When you have decided that you no longer want to build your package inside a
+sandbox, just delete it:
+
+~~~~~~~~~~~~~~~
+$ cabal sandbox delete                       # Built-in command
+$ rm -rf .cabal-sandbox cabal.sandbox.config # Alternative manual method
+~~~~~~~~~~~~~~~
+
+### Sandboxes: advanced usage ###
+
+The default behaviour of the `add-source` command is to track modifications done
+to the added dependency and reinstall the sandbox copy of the package when
+needed. Sometimes this is not desirable: in these cases you can use `add-source
+--snapshot`, which disables the change tracking. In addition to `add-source`,
+there are also `list-sources` and `delete-source` commands.
+
+Sometimes one wants to share a single sandbox between multiple packages. This
+can be easily done with the `--sandbox` option:
+
+~~~~~~~~~~~~~~~
+$ mkdir -p /path/to/shared-sandbox
+$ cd /path/to/shared-sandbox
+$ cabal sandbox init --sandbox .
+$ cd /path/to/package-a
+$ cabal sandbox init --sandbox /path/to/shared-sandbox
+$ cd /path/to/package-b
+$ cabal sandbox init --sandbox /path/to/shared-sandbox
+~~~~~~~~~~~~~~~
+
+Note that `cabal sandbox init --sandbox .` puts all sandbox files into the
+current directory. By default, `cabal sandbox init` initialises a new sandbox in
+a newly-created subdirectory of the current working directory
+(`./.cabal-sandbox`).
+
+Using multiple different compiler versions simultaneously is also supported, via
+the `-w` option:
+
+~~~~~~~~~~~~~~~
+$ cabal sandbox init
+$ cabal install --only-dependencies -w /path/to/ghc-1 # Install dependencies for both compilers
+$ cabal install --only-dependencies -w /path/to/ghc-2
+$ cabal configure -w /path/to/ghc-1                   # Build with the first compiler
+$ cabal build
+$ cabal configure -w /path/to/ghc-2                   # Build with the second compiler
+$ cabal build
+~~~~~~~~~~~~~~~
+
+It can be occasionally useful to run the compiler-specific package manager tool
+(e.g. `ghc-pkg`) tool on the sandbox package DB directly (for example, you may
+need to unregister some packages). The `cabal sandbox hc-pkg` command is a
+convenient wrapper that runs the compiler-specific package manager tool with the
+arguments:
+
+~~~~~~~~~~~~~~~
+$ cabal -v sandbox hc-pkg list
+Using a sandbox located at /path/to/.cabal-sandbox
+'ghc-pkg' '--global' '--no-user-package-conf'
+    '--package-conf=/path/to/.cabal-sandbox/i386-linux-ghc-7.4.2-packages.conf.d'
+    'list'
+[...]
+~~~~~~~~~~~~~~~
 
 ## Creating a binary package ##
 
@@ -93,8 +227,8 @@ private file read by later stages.
 If a user-supplied `configure` script is run (see the section on
 [system-dependent parameters](#system-dependent-parameters) or on
 [complex packages](#complex-packages)), it is passed the
-`--with-hc-pkg`, `--prefix`, `--bindir`, `--libdir`, `--datadir` and
-`--libexecdir` options. In addition the value of the `--with-compiler`
+`--with-hc-pkg`, `--prefix`, `--bindir`, `--libdir`, `--datadir`, `--libexecdir`
+and `--sysconfdir` options. In addition the value of the `--with-compiler`
 option is passed in a `--with-hc` option and all options specified with
 `--configure-option=` are passed on.
 
@@ -132,6 +266,8 @@ files of a package:
     name of a program that can be found on the program search path. For
     example: `--with-ghc=ghc-6.6.1` or
     `--with-cpphs=/usr/local/bin/cpphs`.
+    The full list of accepted programs is not enumerated in this user guide.
+    Rather, run `cabal install --help` to view the list.
 
 `--`_`prog`_`-options=`_options_
 :   Specify additional options to the program _prog_. Any program known
@@ -198,6 +334,13 @@ package:
     In the simple build system, _dir_ may contain the following path
     variables: `$prefix`, `$bindir`, `$libdir`, `$libsubdir`, `$pkgid`, `$pkg`,
     `$version`, `$compiler`, `$os`, `$arch`
+
+`--sysconfdir=`_dir_
+:   Installation directory for the configuration files.
+
+    In the simple build system, _dir_ may contain the following path variables:
+    `$prefix`, `$bindir`, `$libdir`, `$libsubdir`, `$pkgid`, `$pkg`, `$version`,
+    `$compiler`, `$os`, `$arch`
 
 In addition the simple build system supports the following installation path options:
 
@@ -318,6 +461,7 @@ Option                     Windows Default                                      
 `--datadir` (library)      `C:\Program Files\Haskell`                                `$prefix/share`
 `--datasubdir`             `$pkgid`                                                  `$pkgid`
 `--docdir`                 `$prefix\doc\$pkgid`                                      `$datadir/doc/$pkgid`
+`--sysconfdir`             `$prefix\etc`                                             `$prefix/etc`
 `--htmldir`                `$docdir\html`                                            `$docdir/html`
 `--program-prefix`         (empty)                                                   (empty)
 `--program-suffix`         (empty)                                                   (empty)
@@ -490,7 +634,7 @@ followingcommand line options.
     itself (such as some linux distributions).
 
 `--enable-shared`
-:   Build shared library. This implies a seperate compiler run to
+:   Build shared library. This implies a separate compiler run to
     generate position independent code as required on most platforms.
 
 `--disable-shared`
@@ -783,7 +927,8 @@ this section will be available.
 The files placed in this distribution are the package description file,
 the setup script, the sources of the modules named in the package
 description file, and files named in the `license-file`, `main-is`,
-`c-sources`, `data-files` and `extra-source-files` fields.
+`c-sources`, `data-files`, `extra-source-files` and `extra-doc-files`
+fields.
 
 This command takes the following option:
 

@@ -1,15 +1,15 @@
-{-# OPTIONS -XForeignFunctionInterface -Wall -Werror #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 
-module Main where
+module Test.TestFormat where
 
 import Data.Time
 import Data.Time.Clock.POSIX
 import Data.Char
-
 import System.Locale
 import Foreign
 import Foreign.C
 import Control.Exception;
+import Test.TestUtil
 
 {-
 	size_t format_time (
@@ -63,21 +63,41 @@ getYearP3 year = localTimeToUTC utc (LocalTime (fromGregorian year 03 04) midnig
 getYearP4 :: Integer -> UTCTime
 getYearP4 year = localTimeToUTC utc (LocalTime (fromGregorian year 12 31) midnight)
 
+years :: [Integer]
+years = [999,1000,1899,1900,1901] ++ [1980..2000] ++ [9999,10000]
+
 times :: [UTCTime]
 times = [baseTime0] ++ (fmap getDay [0..23]) ++ (fmap getDay [0..100]) ++
-	(fmap getYearP1 [1980..2000]) ++ (fmap getYearP2 [1980..2000]) ++ (fmap getYearP3 [1980..2000]) ++ (fmap getYearP4 [1980..2000])
+	(fmap getYearP1 years) ++ (fmap getYearP2 years) ++ (fmap getYearP3 years) ++ (fmap getYearP4 years)
 
-compareFormat :: (String -> String) -> String -> TimeZone -> UTCTime -> IO ()
-compareFormat modUnix fmt zone time = let
-		ctime = utcToZonedTime zone time
-		haskellText = formatTime locale fmt ctime
-	in do
-		unixText <- fmap modUnix (unixFormatTime fmt zone time)
-		if haskellText == unixText then return () else
-			putStrLn ("Mismatch with " ++ fmt ++ " for " ++ (show ctime) ++ ": UNIX=\"" ++ unixText ++ "\", TimeLib=\"" ++ haskellText ++ "\".")
+padN :: Int -> Char -> String -> String
+padN n _ s | n <= (length s) = s
+padN n c s = (replicate (n - length s) c) ++ s
+
+unixWorkarounds :: String -> String -> String
+unixWorkarounds "%_Y" s = padN 4 ' ' s
+unixWorkarounds "%0Y" s = padN 4 '0' s
+unixWorkarounds "%_C" s = padN 2 ' ' s
+unixWorkarounds "%0C" s = padN 2 '0' s
+unixWorkarounds "%_G" s = padN 4 ' ' s
+unixWorkarounds "%0G" s = padN 4 '0' s
+unixWorkarounds "%_f" s = padN 2 ' ' s
+unixWorkarounds "%0f" s = padN 2 '0' s
+unixWorkarounds _ s = s
+
+compareFormat :: String -> (String -> String) -> String -> TimeZone -> UTCTime -> Test
+compareFormat testname modUnix fmt zone time = let
+    ctime = utcToZonedTime zone time 
+    haskellText = formatTime locale fmt ctime
+    in ioTest (testname ++ ": " ++ (show fmt) ++ " of " ++ (show ctime)) $
+    do
+       unixText <- unixFormatTime fmt zone time
+       let expectedText = unixWorkarounds fmt (modUnix unixText)
+       return $ diff expectedText haskellText
 
 -- as found in http://www.opengroup.org/onlinepubs/007908799/xsh/strftime.html
 -- plus FgGklz
+-- f not supported
 -- P not always supported
 -- s time-zone dependent
 chars :: [Char]
@@ -115,18 +135,13 @@ safeString s = do
       return (c:ss)
    [] -> return ""
 
-compareExpected :: (Eq t,Show t,ParseTime t) => String -> String -> String -> Maybe t -> IO ()
-compareExpected ts fmt str expected = let
- found = parseTime defaultTimeLocale fmt str
- in do
-  mex <- getBottom found
-  case mex of
-   Just ex -> putStrLn ("Exception with " ++ fmt ++ " for " ++ ts ++" " ++ (show str) ++ ": expected " ++ (show expected) ++ ", caught " ++ (show ex))
-   Nothing -> if found == expected
-    then return ()
-    else do
-     sf <- safeString (show found)
-     putStrLn ("Mismatch with " ++ fmt ++ " for " ++ ts ++" " ++ (show str) ++ ": expected " ++ (show expected) ++ ", found " ++ sf)
+compareExpected :: (Eq t,Show t,ParseTime t) => String -> String -> String -> Maybe t -> Test
+compareExpected testname fmt str expected = ioTest (testname ++ ": " ++ (show fmt) ++ " on " ++ (show str)) $ do
+    let found = parseTime defaultTimeLocale fmt str
+    mex <- getBottom found
+    case mex of
+        Just ex -> return $ Fail $ unwords [ "Exception: expected" , show expected ++ ", caught", show ex]
+        Nothing -> return $ diff expected found
 
 class (ParseTime t) => TestParse t where
     expectedParse :: String -> String -> Maybe t
@@ -143,17 +158,29 @@ instance TestParse TimeZone
 instance TestParse ZonedTime
 instance TestParse UTCTime
 
-checkParse :: String -> String -> IO ()
-checkParse fmt str = do
- compareExpected "Day" fmt str (expectedParse fmt str :: Maybe Day)
- compareExpected "TimeOfDay" fmt str (expectedParse fmt str :: Maybe TimeOfDay)
- compareExpected "LocalTime" fmt str (expectedParse fmt str :: Maybe LocalTime)
- compareExpected "TimeZone" fmt str (expectedParse fmt str :: Maybe TimeZone)
- compareExpected "UTCTime" fmt str (expectedParse fmt str :: Maybe UTCTime)
+checkParse :: String -> String -> [Test]
+checkParse fmt str
+  =         [ compareExpected "Day" fmt str (expectedParse fmt str :: Maybe Day)
+             , compareExpected "TimeOfDay" fmt str (expectedParse fmt str :: Maybe TimeOfDay)
+             , compareExpected "LocalTime" fmt str (expectedParse fmt str :: Maybe LocalTime)
+             , compareExpected "TimeZone" fmt str (expectedParse fmt str :: Maybe TimeZone)
+             , compareExpected "UTCTime" fmt str (expectedParse fmt str :: Maybe UTCTime) ]
 
-main :: IO ()
-main = do
-	mapM_ (\fmt -> mapM_ (checkParse fmt) somestrings) formats
-	mapM_ (\fmt -> mapM_ (\time -> mapM_ (\zone -> compareFormat id fmt zone time) zones) times) formats
-	mapM_ (\fmt -> mapM_ (\time -> mapM_ (\zone -> compareFormat (fmap toLower) fmt zone time) zones) times) hashformats
+testCheckParse :: [Test]
+testCheckParse = concatMap (\fmt -> concatMap (\str -> checkParse fmt str) somestrings) formats
 
+testCompareFormat :: [Test]
+testCompareFormat = concatMap (\fmt -> concatMap (\time -> fmap (\zone -> compareFormat "compare format" id fmt zone time) zones) times) formats
+
+testCompareHashFormat :: [Test]
+testCompareHashFormat = concatMap (\fmt -> concatMap (\time -> fmap (\zone -> compareFormat "compare hashformat" (fmap toLower) fmt zone time) zones) times) hashformats
+
+testFormats :: [Test]
+testFormats = [
+    testGroup "checkParse" testCheckParse,
+    testGroup "compare format" testCompareFormat,
+    testGroup "compare hashformat" testCompareHashFormat
+    ]
+
+testFormat :: Test
+testFormat = testGroup "testFormat" testFormats

@@ -1,5 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -17,41 +17,22 @@
 
 module Data.Maybe
    (
-     Maybe(Nothing,Just)-- instance of: Eq, Ord, Show, Read,
-                        --              Functor, Monad, MonadPlus
+     Maybe(Nothing,Just)
 
-   , maybe              -- :: b -> (a -> b) -> Maybe a -> b
+   , maybe
 
-   , isJust             -- :: Maybe a -> Bool
-   , isNothing          -- :: Maybe a -> Bool
-   , fromJust           -- :: Maybe a -> a
-   , fromMaybe          -- :: a -> Maybe a -> a
-   , listToMaybe        -- :: [a] -> Maybe a
-   , maybeToList        -- :: Maybe a -> [a]
-   , catMaybes          -- :: [Maybe a] -> [a]
-   , mapMaybe           -- :: (a -> Maybe b) -> [a] -> [b]
+   , isJust
+   , isNothing
+   , fromJust
+   , fromMaybe
+   , listToMaybe
+   , maybeToList
+   , catMaybes
+   , mapMaybe
    ) where
 
-#ifdef __GLASGOW_HASKELL__
 import GHC.Base
-#endif
 
-#ifdef __NHC__
-import Prelude
-import Prelude (Maybe(..), maybe)
-import Maybe
-    ( isJust
-    , isNothing
-    , fromJust
-    , fromMaybe
-    , listToMaybe
-    , maybeToList
-    , catMaybes
-    , mapMaybe
-    )
-#else
-
-#ifndef __HUGS__
 -- ---------------------------------------------------------------------------
 -- The Maybe type, and instances
 
@@ -92,7 +73,6 @@ instance  Monad Maybe  where
 maybe :: b -> (a -> b) -> Maybe a -> b
 maybe n _ Nothing  = n
 maybe _ f (Just x) = f x
-#endif  /* __HUGS__ */
 
 -- | The 'isJust' function returns 'True' iff its argument is of the
 -- form @Just _@.
@@ -146,6 +126,16 @@ mapMaybe f (x:xs) =
  case f x of
   Nothing -> rs
   Just r  -> r:rs
+{-# NOINLINE [1] mapMaybe #-}
 
-#endif /* else not __NHC__ */
+{-# RULES
+"mapMaybe"     [~1] forall f xs. mapMaybe f xs
+                    = build (\c n -> foldr (mapMaybeFB c f) n xs)
+"mapMaybeList" [1]  forall f. foldr (mapMaybeFB (:) f) [] = mapMaybe f
+  #-}
 
+{-# NOINLINE [0] mapMaybeFB #-}
+mapMaybeFB :: (b -> r -> r) -> (a -> Maybe b) -> a -> r -> r
+mapMaybeFB cons f x next = case f x of
+  Nothing -> next
+  Just r -> cons r next

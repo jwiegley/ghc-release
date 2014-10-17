@@ -1,5 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NondecreasingIndentation, ForeignFunctionInterface, CApiFFI #-}
+{-# LANGUAGE CPP, NondecreasingIndentation, CApiFFI #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -28,25 +28,8 @@ import Prelude
 
 import Data.Ratio
 
-#ifdef __HUGS__
-import Hugs.Time ( getCPUTime, clockTicks )
-#endif
-
-#ifdef __NHC__
-import CPUTime ( getCPUTime, cpuTimePrecision )
-#endif
-
-#ifdef __GLASGOW_HASKELL__
 import Foreign.Safe
 import Foreign.C
-#if !defined(CLK_TCK)
-import System.IO.Unsafe (unsafePerformIO)
-#endif
-
--- For _SC_CLK_TCK
-#if HAVE_UNISTD_H
-#include <unistd.h>
-#endif
 
 -- For struct rusage
 #if !defined(mingw32_HOST_OS) && !defined(irix_HOST_OS)
@@ -60,16 +43,9 @@ import System.IO.Unsafe (unsafePerformIO)
 #include <windows.h>
 #endif
 
--- for CLK_TCK
-#if HAVE_TIME_H
-#include <time.h>
-#endif
-
 -- for struct tms
 #if HAVE_SYS_TIMES_H
 #include <sys/times.h>
-#endif
-
 #endif
 
 ##ifdef mingw32_HOST_OS
@@ -90,7 +66,6 @@ realToInteger ct = round (realToFrac ct :: Double)
   -- so we must convert to Double before we can round it
 #endif
 
-#ifdef __GLASGOW_HASKELL__
 -- -----------------------------------------------------------------------------
 -- |Computation 'getCPUTime' returns the number of picoseconds CPU time
 -- used by the current program.  The precision of this result is
@@ -173,25 +148,16 @@ foreign import WINDOWS_CCONV unsafe "GetCurrentProcess" getCurrentProcess :: IO 
 foreign import WINDOWS_CCONV unsafe "GetProcessTimes" getProcessTimes :: Ptr HANDLE -> Ptr FILETIME -> Ptr FILETIME -> Ptr FILETIME -> Ptr FILETIME -> IO CInt
 
 #endif /* not _WIN32 */
-#endif /* __GLASGOW_HASKELL__ */
+
 
 -- |The 'cpuTimePrecision' constant is the smallest measurable difference
 -- in CPU time that the implementation can record, and is given as an
 -- integral number of picoseconds.
 
-#ifndef __NHC__
 cpuTimePrecision :: Integer
 cpuTimePrecision = round ((1000000000000::Integer) % fromIntegral (clockTicks))
-#endif
 
-#ifdef __GLASGOW_HASKELL__
+foreign import ccall unsafe clk_tck :: CLong
+
 clockTicks :: Int
-clockTicks =
-#if defined(CLK_TCK)
-    (#const CLK_TCK)
-#else
-    unsafePerformIO (sysconf (#const _SC_CLK_TCK) >>= return . fromIntegral)
-foreign import ccall unsafe sysconf :: CInt -> IO CLong
-#endif
-#endif /* __GLASGOW_HASKELL__ */
-
+clockTicks = fromIntegral clk_tck

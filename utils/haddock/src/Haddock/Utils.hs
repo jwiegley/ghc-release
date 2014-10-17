@@ -36,7 +36,7 @@ module Haddock.Utils (
   -- * HTML cross reference mapping
   html_xrefs_ref, html_xrefs_ref',
 
-  -- * Doc markup 
+  -- * Doc markup
   markup,
   idMarkup,
 
@@ -126,23 +126,21 @@ toInstalledDescription = hmi_description . instInfo
 
 restrictTo :: [Name] -> LHsDecl Name -> LHsDecl Name
 restrictTo names (L loc decl) = L loc $ case decl of
-  TyClD d | isDataDecl d  -> 
-    TyClD (d { tcdTyDefn = restrictTyDefn names (tcdTyDefn d) })
+  TyClD d | isDataDecl d  ->
+    TyClD (d { tcdDataDefn = restrictDataDefn names (tcdDataDefn d) })
   TyClD d | isClassDecl d ->
     TyClD (d { tcdSigs = restrictDecls names (tcdSigs d),
                tcdATs = restrictATs names (tcdATs d) })
   _ -> decl
 
-restrictTyDefn :: [Name] -> HsTyDefn Name -> HsTyDefn Name
-restrictTyDefn _ defn@(TySynonym {})
-  = defn
-restrictTyDefn names defn@(TyData { td_ND = new_or_data, td_cons = cons })
+restrictDataDefn :: [Name] -> HsDataDefn Name -> HsDataDefn Name
+restrictDataDefn names defn@(HsDataDefn { dd_ND = new_or_data, dd_cons = cons })
   | DataType <- new_or_data
-  = defn { td_cons = restrictCons names cons }
+  = defn { dd_cons = restrictCons names cons }
   | otherwise    -- Newtype
   = case restrictCons names cons of
-      []    -> defn { td_ND = DataType, td_cons = [] }
-      [con] -> defn { td_cons = [con] }
+      []    -> defn { dd_ND = DataType, dd_cons = [] }
+      [con] -> defn { dd_cons = [con] }
       _ -> error "Should not happen"
 
 restrictCons :: [Name] -> [LConDecl Name] -> [LConDecl Name]
@@ -170,8 +168,8 @@ restrictDecls :: [Name] -> [LSig Name] -> [LSig Name]
 restrictDecls names = mapMaybe (filterLSigNames (`elem` names))
 
 
-restrictATs :: [Name] -> [LTyClDecl Name] -> [LTyClDecl Name]
-restrictATs names ats = [ at | at <- ats , tcdName (unL at) `elem` names ]
+restrictATs :: [Name] -> [LFamilyDecl Name] -> [LFamilyDecl Name]
+restrictATs names ats = [ at | at <- ats , unL (fdLName (unL at)) `elem` names ]
 
 emptyHsQTvs :: LHsTyVarBndrs Name
 -- This function is here, rather than in HsTypes, because it *renamed*, but
@@ -241,7 +239,7 @@ subIndexHtmlFile ls = "doc-index-" ++ b ++ ".html"
 -- isn't clear if such fragment identifiers should, or should not be unescaped
 -- before being matched with IDs in the target document.
 -------------------------------------------------------------------------------
- 
+
 
 moduleUrl :: Module -> String
 moduleUrl = moduleHtmlFile
@@ -287,7 +285,7 @@ framesFile = "frames.html"
 
 
 -------------------------------------------------------------------------------
--- * Misc. 
+-- * Misc.
 -------------------------------------------------------------------------------
 
 
@@ -424,6 +422,7 @@ markup m (DocIdentifierUnchecked x)  = markupIdentifierUnchecked m x
 markup m (DocModule mod0)            = markupModule m mod0
 markup m (DocWarning d)              = markupWarning m (markup m d)
 markup m (DocEmphasis d)             = markupEmphasis m (markup m d)
+markup m (DocBold d)                 = markupBold m (markup m d)
 markup m (DocMonospaced d)           = markupMonospaced m (markup m d)
 markup m (DocUnorderedList ds)       = markupUnorderedList m (map (markup m) ds)
 markup m (DocOrderedList ds)         = markupOrderedList m (map (markup m) ds)
@@ -434,6 +433,7 @@ markup m (DocAName ref)              = markupAName m ref
 markup m (DocPic img)                = markupPic m img
 markup m (DocProperty p)             = markupProperty m p
 markup m (DocExamples e)             = markupExample m e
+markup m (DocHeader (Header l t))    = markupHeader m (Header l (markup m t))
 
 
 markupPair :: DocMarkup id a -> (Doc id, Doc id) -> (a, a)
@@ -452,6 +452,7 @@ idMarkup = Markup {
   markupModule               = DocModule,
   markupWarning              = DocWarning,
   markupEmphasis             = DocEmphasis,
+  markupBold                 = DocBold,
   markupMonospaced           = DocMonospaced,
   markupUnorderedList        = DocUnorderedList,
   markupOrderedList          = DocOrderedList,
@@ -461,7 +462,8 @@ idMarkup = Markup {
   markupAName                = DocAName,
   markupPic                  = DocPic,
   markupProperty             = DocProperty,
-  markupExample              = DocExamples
+  markupExample              = DocExamples,
+  markupHeader               = DocHeader
   }
 
 
@@ -476,4 +478,3 @@ foreign import ccall unsafe "_getpid" getProcessID :: IO Int -- relies on Int ==
 getProcessID :: IO Int
 getProcessID = fmap fromIntegral System.Posix.Internals.c_getpid
 #endif
-

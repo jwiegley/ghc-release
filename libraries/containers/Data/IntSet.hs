@@ -56,6 +56,7 @@ module Data.IntSet (
 #else
               IntSet(..)      -- instance Eq,Show
 #endif
+            , Key
 
             -- * Operators
             , (\\)
@@ -89,6 +90,7 @@ module Data.IntSet (
             , partition
             , split
             , splitMember
+            , splitRoot
 
             -- * Map
             , IS.map

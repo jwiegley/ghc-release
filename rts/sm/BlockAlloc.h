@@ -11,7 +11,7 @@
 
 #include "BeginPrivate.h"
 
-bdescr *allocLargeChunk (nat min, nat max);
+bdescr *allocLargeChunk (W_ min, W_ max);
 
 /* Debugging  -------------------------------------------------------------- */
 

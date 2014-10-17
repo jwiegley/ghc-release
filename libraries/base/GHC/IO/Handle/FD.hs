@@ -1,5 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, PatternGuards, ForeignFunctionInterface #-}
+{-# LANGUAGE CPP, NoImplicitPrelude #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -156,6 +156,8 @@ openFile fp im =
 -- This can be useful for opening a FIFO for reading: if we open in
 -- non-blocking mode then the open will fail if there are no writers,
 -- whereas a blocking open will block until a writer appears.
+--
+-- /Since: 4.4.0.0/
 openFileBlocking :: FilePath -> IOMode -> IO Handle
 openFileBlocking fp im =
   catchException
@@ -275,7 +277,7 @@ fdToHandle fdint = do
               --  on Windows we're guessing this is not a socket (XXX)
             False{-is_nonblock-}
               -- file descriptors that we get from external sources are
-              -- not put into non-blocking mode, becuase that would affect
+              -- not put into non-blocking mode, because that would affect
               -- other users of the file descriptor
    let fd_str = "<file descriptor: " ++ show fd ++ ">"
    mkHandleFromFD fd fd_type fd_str iomode False{-non-block-} 

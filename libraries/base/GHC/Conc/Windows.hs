@@ -1,6 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE NoImplicitPrelude, MagicHash, UnboxedTuples, ForeignFunctionInterface,
-             DeriveDataTypeable #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, MagicHash, UnboxedTuples, DeriveDataTypeable #-}
 {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
@@ -27,12 +26,12 @@ module GHC.Conc.Windows
        , registerDelay
 
        -- * Miscellaneous
-       , asyncRead     -- :: Int -> Int -> Int -> Ptr a -> IO (Int, Int)
-       , asyncWrite    -- :: Int -> Int -> Int -> Ptr a -> IO (Int, Int)
-       , asyncDoProc   -- :: FunPtr (Ptr a -> IO Int) -> Ptr a -> IO Int
+       , asyncRead
+       , asyncWrite
+       , asyncDoProc
 
-       , asyncReadBA   -- :: Int -> Int -> Int -> Int -> MutableByteArray# RealWorld -> IO (Int, Int)
-       , asyncWriteBA  -- :: Int -> Int -> Int -> Int -> MutableByteArray# RealWorld -> IO (Int, Int)
+       , asyncReadBA
+       , asyncWriteBA
 
        , ConsoleEvent(..)
        , win32ConsoleHandler

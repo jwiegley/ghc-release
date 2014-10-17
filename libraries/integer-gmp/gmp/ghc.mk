@@ -33,20 +33,27 @@ clean_gmp:
 	$(call removeTrees,libraries/integer-gmp/gmp/gmpbuild)
 endif
 
+ifeq "$(Windows_Host)" "YES"
+# Apparently building on Windows fails when there is a system gmp
+# available, so we never try to use the system gmp on Windows
+libraries/integer-gmp_CONFIGURE_OPTS += --configure-option=--with-intree-gmp
+endif
+
+ifeq "$(GMP_PREFER_FRAMEWORK)" "YES"
+libraries/integer-gmp_CONFIGURE_OPTS += --with-gmp-framework-preferred
+endif
+
 ifeq "$(phase)" "final"
 
 ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
 include libraries/integer-gmp/gmp/config.mk
 endif
 
-libraries/integer-gmp_CC_OPTS += $(addprefix -I,$(GMP_INCLUDE_DIRS))
-libraries/integer-gmp_CC_OPTS += $(addprefix -L,$(GMP_LIB_DIRS))
+libraries/integer-gmp_dist-install_EXTRA_CC_OPTS += -Ilibraries/integer-gmp/mkGmpDerivedConstants/dist
+libraries/integer-gmp_dist-install_EXTRA_HC_OPTS += -Ilibraries/integer-gmp/mkGmpDerivedConstants/dist
 
-libraries/integer-gmp/cbits/mkGmpDerivedConstants$(exeext): libraries/integer-gmp/cbits/mkGmpDerivedConstants.c
-	"$(CC_STAGE1)" $(SRC_CC_OPTS) $(CONF_CC_OPTS_STAGE1) $(libraries/integer-gmp_CC_OPTS) $< -o $@
-
-libraries/integer-gmp/cbits/GmpDerivedConstants.h: libraries/integer-gmp/cbits/mkGmpDerivedConstants$(exeext)
-	$< > $@
+gmp_CC_OPTS += $(addprefix -I,$(GMP_INCLUDE_DIRS))
+gmp_CC_OPTS += $(addprefix -L,$(GMP_LIB_DIRS))
 
 # Compile GMP only if we don't have it already
 #
@@ -71,20 +78,14 @@ HaveFrameworkGMP = NO
 endif
 endif
 
-define GmpDerivedConstants-dependencies # args: $1 = way
-$$(libraries/integer-gmp_dist-install_$1_CMM_OBJS): libraries/integer-gmp/cbits/GmpDerivedConstants.h
-$$(libraries/integer-gmp_dist-install_$1_C_OBJS):   libraries/integer-gmp/cbits/GmpDerivedConstants.h
-endef
-
-$(foreach w,$(GhcLibWays),$(eval $(call GmpDerivedConstants-dependencies,$w)))
+$(libraries/integer-gmp_dist-install_depfile_c_asm): $$(GmpDerivedConstants_HEADER)
 
 ifneq "$(HaveLibGmp)" "YES"
 ifneq "$(HaveFrameworkGMP)" "YES"
 $(libraries/integer-gmp_dist-install_depfile_c_asm): libraries/integer-gmp/gmp/gmp.h
 
-libraries/integer-gmp/cbits/mkGmpDerivedConstants$(exeext): libraries/integer-gmp/gmp/gmp.h
-
-libraries/integer-gmp_CC_OPTS += -I$(TOP)/libraries/integer-gmp/gmp
+gmp_CC_OPTS += -Ilibraries/integer-gmp/gmp
+gmp_CC_OPTS += -Ilibraries/integer-gmp/mkGmpDerivedConstants/dist
 
 libraries/integer-gmp_dist-install_EXTRA_OBJS += libraries/integer-gmp/gmp/objs/*.o
 
@@ -98,6 +99,16 @@ libraries/integer-gmp_dist-install_EXTRA_OBJS += libraries/integer-gmp/gmp/objs/
 #endif
 
 endif
+endif
+
+libraries/integer-gmp_dist-install_EXTRA_CC_OPTS += $(gmp_CC_OPTS)
+
+CLANG = $(findstring clang, $(shell $(CC_STAGE1) --version))
+
+ifeq "$(CLANG)" "clang"
+CCX = $(CLANG)
+else
+CCX = $(CC_STAGE1)
 endif
 
 # 2007-09-26
@@ -135,7 +146,7 @@ libraries/integer-gmp/gmp/libgmp.a libraries/integer-gmp/gmp/gmp.h:
 	    PATH=`pwd`:$$PATH; \
 	    export PATH; \
 	    cd gmpbuild && \
-	    CC=$(CC_STAGE1) NM=$(NM) AR=$(AR_STAGE1) $(SHELL) configure \
+	    CC=$(CCX) NM=$(NM) AR=$(AR_STAGE1) $(SHELL) ./configure \
 	          --enable-shared=no \
 	          --host=$(HOSTPLATFORM) --build=$(BUILDPLATFORM)
 	$(MAKE) -C libraries/integer-gmp/gmp/gmpbuild MAKEFLAGS=
@@ -143,7 +154,7 @@ libraries/integer-gmp/gmp/libgmp.a libraries/integer-gmp/gmp/gmp.h:
 	$(CP) libraries/integer-gmp/gmp/gmpbuild/.libs/libgmp.a libraries/integer-gmp/gmp/
 	$(MKDIRHIER) libraries/integer-gmp/gmp/objs
 	cd libraries/integer-gmp/gmp/objs && $(AR_STAGE1) x ../libgmp.a
-	$(RANLIB) libraries/integer-gmp/gmp/libgmp.a
+	$(RANLIB_CMD) libraries/integer-gmp/gmp/libgmp.a
 
 # XXX TODO:
 #stamp.gmp.shared:
@@ -155,7 +166,7 @@ libraries/integer-gmp/gmp/libgmp.a libraries/integer-gmp/gmp/gmp.h:
 #	    PATH=`pwd`:$$PATH; \
 #	    export PATH; \
 #	    cd gmpbuild-shared && \
-#	    CC=$(CC_STAGE1) $(SHELL) configure \
+#	    CC=$(CC_STAGE1) $(SHELL) ./configure \
 #	          --enable-shared=yes --disable-static \
 #	          --host=$(HOSTPLATFORM) --build=$(BUILDPLATFORM)
 #	"$(TOUCH_CMD)" $@

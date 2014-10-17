@@ -1,11 +1,11 @@
 {-# LANGUAGE CPP #-}
-#if __GLASGOW_HASKELL__ >= 701
+#if __GLASGOW_HASKELL__ >= 704
 {-# LANGUAGE Safe #-}
 #endif
 {- |
 Module      :  System.FilePath
 Copyright   :  (c) Neil Mitchell 2005-2007
-License     :  BSD-style (see the file libraries/base/LICENSE)
+License     :  BSD3
 
 Maintainer  :  libraries@haskell.org
 Stability   :  stable

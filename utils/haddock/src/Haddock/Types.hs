@@ -1,10 +1,11 @@
-{-# LANGUAGE DeriveDataTypeable, DeriveFunctor #-}
+{-# LANGUAGE DeriveDataTypeable, DeriveFunctor, DeriveFoldable, DeriveTraversable, StandaloneDeriving #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Haddock.Types
--- Copyright   :  (c) Simon Marlow 2003-2006,
---                    David Waern  2006-2009
+-- Copyright   :  (c) Simon Marlow      2003-2006,
+--                    David Waern       2006-2009,
+--                    Mateusz Kowalczyk 2013
 -- License     :  BSD-like
 --
 -- Maintainer  :  haddock@projects.haskellorg
@@ -17,20 +18,24 @@
 module Haddock.Types (
   module Haddock.Types
   , HsDocString, LHsDocString
+  , Fixity(..)
  ) where
 
-
+import Data.Foldable
+import Data.Traversable
 import Control.Exception
-import Control.Arrow
+import Control.Arrow hiding ((<+>))
 import Control.DeepSeq
 import Data.Typeable
 import Data.Map (Map)
-import Data.Maybe
 import qualified Data.Map as Map
-import Data.Monoid
+import BasicTypes (Fixity(..))
 import GHC hiding (NoLink)
+import DynFlags (ExtensionFlag, Language)
 import OccName
-
+import Outputable
+import Control.Applicative (Applicative(..))
+import Control.Monad (ap)
 
 -----------------------------------------------------------------------------
 -- * Convenient synonyms
@@ -43,6 +48,8 @@ type DocMap a      = Map Name (Doc a)
 type ArgMap a      = Map Name (Map Int (Doc a))
 type SubMap        = Map Name [Name]
 type DeclMap       = Map Name [LHsDecl Name]
+type InstMap       = Map SrcSpan Name
+type FixMap        = Map Name Fixity
 type SrcMap        = Map PackageId FilePath
 type DocPaths      = (FilePath, Maybe FilePath) -- paths to HTML and sources
 
@@ -93,6 +100,7 @@ data Interface = Interface
   , ifaceRnArgMap        :: !(ArgMap DocName)
 
   , ifaceSubMap          :: !(Map Name [Name])
+  , ifaceFixMap          :: !(Map Name Fixity)
 
   , ifaceExportItems     :: ![ExportItem Name]
   , ifaceRnExportItems   :: ![ExportItem DocName]
@@ -110,6 +118,7 @@ data Interface = Interface
 
     -- | Instances exported by the module.
   , ifaceInstances       :: ![ClsInst]
+  , ifaceFamInstances    :: ![FamInst]
 
     -- | The number of haddockable and haddocked items in the module, as a
     -- tuple. Haddockable items are the exports and the module itself.
@@ -150,6 +159,7 @@ data InstalledInterface = InstalledInterface
   , instOptions        :: [DocOption]
 
   , instSubMap         :: Map Name [Name]
+  , instFixMap         :: Map Name Fixity
   }
 
 
@@ -164,6 +174,7 @@ toInstalledIface interface = InstalledInterface
   , instVisibleExports = ifaceVisibleExports interface
   , instOptions        = ifaceOptions        interface
   , instSubMap         = ifaceSubMap         interface
+  , instFixMap         = ifaceFixMap         interface
   }
 
 
@@ -190,6 +201,13 @@ data ExportItem name
         -- | Instances relevant to this declaration, possibly with
         -- documentation.
       , expItemInstances :: ![DocInstance name]
+
+        -- | Fixity decls relevant to this declaration (including subordinates).
+      , expItemFixities :: ![(name, Fixity)]
+
+        -- | Whether the ExportItem is from a TH splice or not, for generating
+        -- the appropriate type of Source link.
+      , expItemSpliced :: !Bool
       }
 
   -- | An exported entity for which we have no documentation (perhaps because it
@@ -201,7 +219,7 @@ data ExportItem name
       , expItemSubs :: ![name]
       }
 
-  -- | A section heading. 
+  -- | A section heading.
   | ExportGroup
       {
         -- | Section level (1, 2, 3, ...).
@@ -224,11 +242,6 @@ data Documentation name = Documentation
   { documentationDoc :: Maybe (Doc name)
   , documentationWarning :: !(Maybe (Doc name))
   } deriving Functor
-
-
-combineDocumentation :: Documentation name -> Maybe (Doc name)
-combineDocumentation (Documentation Nothing Nothing) = Nothing
-combineDocumentation (Documentation mDoc mWarning)   = Just (fromMaybe mempty mWarning `mappend` fromMaybe mempty mDoc)
 
 
 -- | Arguments and result are indexed by Int, zero-based from the left,
@@ -276,15 +289,23 @@ instance NamedThing DocName where
 -- * Instances
 -----------------------------------------------------------------------------
 
+-- | The three types of instances
+data InstType name
+  = ClassInst [HsType name]         -- ^ Context
+  | TypeInst  (Maybe (HsType name)) -- ^ Body (right-hand side)
+  | DataInst (TyClDecl name)        -- ^ Data constructors
+
+instance OutputableBndr a => Outputable (InstType a) where
+  ppr (ClassInst a) = text "ClassInst" <+> ppr a
+  ppr (TypeInst  a) = text "TypeInst"  <+> ppr a
+  ppr (DataInst  a) = text "DataInst"  <+> ppr a
 
 -- | An instance head that may have documentation.
 type DocInstance name = (InstHead name, Maybe (Doc name))
 
-
--- | The head of an instance. Consists of a context, a class name and a list
--- of instance types.
-type InstHead name = ([HsType name], name, [HsType name])
-
+-- | The head of an instance. Consists of a class name, a list of kind
+-- parameters, a list of type parameters and an instance type
+type InstHead name = (name, [HsType name], [HsType name], InstType name)
 
 -----------------------------------------------------------------------------
 -- * Documentation comments
@@ -305,22 +326,24 @@ data Doc id
   | DocWarning (Doc id)
   | DocEmphasis (Doc id)
   | DocMonospaced (Doc id)
+  | DocBold (Doc id)
   | DocUnorderedList [Doc id]
   | DocOrderedList [Doc id]
   | DocDefList [(Doc id, Doc id)]
   | DocCodeBlock (Doc id)
   | DocHyperlink Hyperlink
-  | DocPic String
+  | DocPic Picture
   | DocAName String
   | DocProperty String
   | DocExamples [Example]
-  deriving (Functor)
+  | DocHeader (Header (Doc id))
+  deriving (Functor, Foldable, Traversable)
 
+instance Foldable Header where
+  foldMap f (Header _ a) = f a
 
-instance Monoid (Doc id) where
-  mempty  = DocEmpty
-  mappend = DocAppend
-
+instance Traversable Header where
+  traverse f (Header l a) = Header l `fmap` f a
 
 instance NFData a => NFData (Doc a) where
   rnf doc = case doc of
@@ -333,6 +356,7 @@ instance NFData a => NFData (Doc a) where
     DocModule a               -> a `deepseq` ()
     DocWarning a              -> a `deepseq` ()
     DocEmphasis a             -> a `deepseq` ()
+    DocBold a                 -> a `deepseq` ()
     DocMonospaced a           -> a `deepseq` ()
     DocUnorderedList a        -> a `deepseq` ()
     DocOrderedList a          -> a `deepseq` ()
@@ -343,6 +367,7 @@ instance NFData a => NFData (Doc a) where
     DocAName a                -> a `deepseq` ()
     DocProperty a             -> a `deepseq` ()
     DocExamples a             -> a `deepseq` ()
+    DocHeader a               -> a `deepseq` ()
 
 
 instance NFData Name
@@ -356,8 +381,24 @@ data Hyperlink = Hyperlink
   } deriving (Eq, Show)
 
 
+data Picture = Picture
+  { pictureUri   :: String
+  , pictureTitle :: Maybe String
+  } deriving (Eq, Show)
+
+data Header id = Header
+  { headerLevel :: Int
+  , headerTitle :: id
+  } deriving Functor
+
+instance NFData id => NFData (Header id) where
+  rnf (Header a b) = a `deepseq` b `deepseq` ()
+
 instance NFData Hyperlink where
   rnf (Hyperlink a b) = a `deepseq` b `deepseq` ()
+
+instance NFData Picture where
+  rnf (Picture a b) = a `deepseq` b `deepseq` ()
 
 
 data Example = Example
@@ -385,6 +426,7 @@ data DocMarkup id a = Markup
   , markupModule               :: String -> a
   , markupWarning              :: a -> a
   , markupEmphasis             :: a -> a
+  , markupBold                 :: a -> a
   , markupMonospaced           :: a -> a
   , markupUnorderedList        :: [a] -> a
   , markupOrderedList          :: [a] -> a
@@ -392,28 +434,37 @@ data DocMarkup id a = Markup
   , markupCodeBlock            :: a -> a
   , markupHyperlink            :: Hyperlink -> a
   , markupAName                :: String -> a
-  , markupPic                  :: String -> a
+  , markupPic                  :: Picture -> a
   , markupProperty             :: String -> a
   , markupExample              :: [Example] -> a
+  , markupHeader               :: Header a -> a
   }
 
 
 data HaddockModInfo name = HaddockModInfo
-  { hmi_description :: (Maybe (Doc name))
-  , hmi_portability :: (Maybe String)
-  , hmi_stability   :: (Maybe String)
-  , hmi_maintainer  :: (Maybe String)
-  , hmi_safety      :: (Maybe String)
+  { hmi_description :: Maybe (Doc name)
+  , hmi_copyright   :: Maybe String
+  , hmi_license     :: Maybe String
+  , hmi_maintainer  :: Maybe String
+  , hmi_stability   :: Maybe String
+  , hmi_portability :: Maybe String
+  , hmi_safety      :: Maybe String
+  , hmi_language    :: Maybe Language
+  , hmi_extensions  :: [ExtensionFlag]
   }
 
 
 emptyHaddockModInfo :: HaddockModInfo a
 emptyHaddockModInfo = HaddockModInfo
   { hmi_description = Nothing
-  , hmi_portability = Nothing
-  , hmi_stability   = Nothing
+  , hmi_copyright   = Nothing
+  , hmi_license     = Nothing
   , hmi_maintainer  = Nothing
+  , hmi_stability   = Nothing
+  , hmi_portability = Nothing
   , hmi_safety      = Nothing
+  , hmi_language    = Nothing
+  , hmi_extensions  = []
   }
 
 
@@ -430,6 +481,7 @@ data DocOption
   | OptIgnoreExports   -- ^ Pretend everything is exported.
   | OptNotHome         -- ^ Not the best place to get docs for things
                        -- exported by this module.
+  | OptShowExtensions  -- ^ Render enabled extensions for this module.
   deriving (Eq, Show)
 
 
@@ -489,6 +541,9 @@ newtype ErrMsgM a = Writer { runWriter :: (a, [ErrMsg]) }
 instance Functor ErrMsgM where
         fmap f (Writer (a, msgs)) = Writer (f a, msgs)
 
+instance Applicative ErrMsgM where
+    pure = return
+    (<*>) = ap
 
 instance Monad ErrMsgM where
         return a = Writer (a, [])
@@ -539,6 +594,9 @@ liftErrMsg = WriterGhc . return . runWriter
 instance Functor ErrMsgGhc where
   fmap f (WriterGhc x) = WriterGhc (fmap (first f) x)
 
+instance Applicative ErrMsgGhc where
+    pure = return
+    (<*>) = ap
 
 instance Monad ErrMsgGhc where
   return a = WriterGhc (return (a, []))

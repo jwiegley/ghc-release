@@ -282,15 +282,15 @@ test('driver200',
      run_command,
      ['$MAKE -s --no-print-directory test200'])
 
-test('2566',
+test('T2566',
      normalise_fun(normalise_errmsg),
      run_command,
-     ['$MAKE -s --no-print-directory 2566'])
+     ['$MAKE -s --no-print-directory T2566'])
 
 test('pragma001', normal, compile, [''])
 test('pragma002', normal, compile, [''])
 
-test('2499', normal, compile_fail, [''])
+test('T2499', normal, compile_fail, [''])
 
 test('mode001', normal, run_command,
      ['$MAKE -s --no-print-directory mode001'])
@@ -306,23 +306,33 @@ test('shared001',
      run_command,
      ['$MAKE -s --no-print-directory shared001'])
 
+if config.os == 'darwin':
+  only_darwin = normal
+else:
+  only_darwin = skip
+
+test('static001',
+     [only_darwin, expect_fail,
+      extra_clean(['Static001.hi', 'Static001.o', 'liba.a', 'Static001_stub.h', 'Static001_stub.o'])],
+     run_command,
+     ['$MAKE -s --no-print-directory static001'])
+
 test('dynHelloWorld',
      only_ways(['dyn']),
      compile_and_run,
      [''])
 
-test('5313',
-     [extra_run_opts('"' + config.libdir + '"'),
-      if_os('mingw32', expect_broken_for(5987, ['dyn']))],
+test('T5313',
+     extra_run_opts('"' + config.libdir + '"'),
      compile_and_run,
      ['-package ghc'])
 
-test('2464', normal, compile, [''])
-test('3674',
+test('T2464', normal, compile, [''])
+test('T3674',
      [ignore_output,
-      extra_clean(['3674_pre.hi', '3674_pre.o', '3674_pre', '3674_pre.exe'])],
+      extra_clean(['T3674_pre.hi', 'T3674_pre.o', 'T3674_pre', 'T3674_pre.exe'])],
      run_command, 
-     ['$MAKE -s --no-print-directory 3674'])
+     ['$MAKE -s --no-print-directory T3674'])
 
 test('rtsopts001',
      extra_clean(['rtsOpts.hi', 'rtsOpts.o', 'rtsOpts', 'rtsOpts.exe']),
@@ -353,8 +363,9 @@ test('spacesInArgs',
      compile_and_run,
      [''])
 
-test('T5584', normal, run_command,
-        ['$MAKE -s --no-print-directory T5584'])
+test('T5584',
+     extra_clean(['T5584_in/A.hi-boot', 'T5584_out/T5584/A.o-boot']),
+     run_command, ['$MAKE -s --no-print-directory T5584'])
 test('T5198', extra_clean(['T5198dump/T5198.dump-simpl', 'T5198dump']),
      run_command,
      ['$MAKE -s --no-print-directory T5198'])
@@ -365,3 +376,17 @@ test('T7060',
                   'T7060dump']),
      run_command,
      ['$MAKE -s --no-print-directory T7060'])
+test('T7130', normal, compile_fail, ['-fflul-laziness'])
+test('T7563', when(unregisterised(), skip), run_command,
+     ['$MAKE -s --no-print-directory T7563'])
+test('T6037', expect_broken(6037), run_command,
+     ['$MAKE -s --no-print-directory T6037'])
+test('T2507',
+     # The testsuite doesn't know how to set a non-Unicode locale on Windows or Mac OS X
+     [when(opsys('mingw32'), expect_fail), when(opsys('darwin'), expect_fail)],
+     run_command,
+     ['$MAKE -s --no-print-directory T2507'])
+
+test('T703', normal, run_command, ['$MAKE -s --no-print-directory T703'])
+test('T8101', normal, compile, ['-Wall -fno-code'])
+

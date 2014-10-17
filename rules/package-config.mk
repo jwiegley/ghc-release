@@ -5,8 +5,8 @@
 # This file is part of the GHC build system.
 #
 # To understand how the build system works and how to modify it, see
-#      http://hackage.haskell.org/trac/ghc/wiki/Building/Architecture
-#      http://hackage.haskell.org/trac/ghc/wiki/Building/Modifying
+#      http://ghc.haskell.org/trac/ghc/wiki/Building/Architecture
+#      http://ghc.haskell.org/trac/ghc/wiki/Building/Modifying
 #
 # -----------------------------------------------------------------------------
 
@@ -43,8 +43,8 @@ else
 $1_$2_HC_PKGCONF = 
 $1_$2_HC_CONFIG = $$(TOP)/$$(GHC_STAGE1)
 $1_$2_HC_CONFIG_DEP = $$(GHC_STAGE1)
-$1_$2_GHC_PKG = $$(TOP)/$$(GHC_PKG_INPLACE)
-$1_$2_GHC_PKG_DEP = $$(GHC_PKG_INPLACE)
+$1_$2_GHC_PKG = $$(TOP)/$$(ghc-pkg_INPLACE)
+$1_$2_GHC_PKG_DEP = $$$$(ghc-pkg_INPLACE)
 $1_$2_GHC_PKG_OPTS =
 # If stage is not 0 then we always use stage1 for making .depend, as later
 # stages aren't available early enough

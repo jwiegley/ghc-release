@@ -42,6 +42,9 @@
 /* The alignment of a `void *'. */
 #undef ALIGNMENT_VOID_P
 
+/* Define to 1 if __thread is supported */
+#undef CC_SUPPORTS_TLS
+
 /* Define to one of `_getb67', `GETB67', `getb67' for Cray-2 and Cray-YMP
    systems. This function is required for `alloca.c' support on those systems.
    */
@@ -98,6 +101,9 @@
 /* Define to 1 if you have the <fcntl.h> header file. */
 #undef HAVE_FCNTL_H
 
+/* Define to 1 if you have the <ffi.h> header file. */
+#undef HAVE_FFI_H
+
 /* Define to 1 if you have the `fork' function. */
 #undef HAVE_FORK
 
@@ -124,6 +130,9 @@
 
 /* Define to 1 if you need -ldl to get dlopen(). */
 #undef HAVE_LIBDL
+
+/* Define to 1 if you have libffi. */
+#undef HAVE_LIBFFI
 
 /* Define to 1 if you have the `iberty' library (-liberty). */
 #undef HAVE_LIBIBERTY
@@ -170,9 +179,6 @@
 /* Define to 1 if you have the `setitimer' function. */
 #undef HAVE_SETITIMER
 
-/* Define to 1 if setitimer accepts ITIMER_VIRTUAL, 0 else. */
-#undef HAVE_SETITIMER_VIRTUAL
-
 /* Define to 1 if you have the `setlocale' function. */
 #undef HAVE_SETLOCALE
 
@@ -209,6 +215,9 @@
 /* Define to 1 if you have the <sys/mman.h> header file. */
 #undef HAVE_SYS_MMAN_H
 
+/* Define to 1 if you have the <sys/param.h> header file. */
+#undef HAVE_SYS_PARAM_H
+
 /* Define to 1 if you have the <sys/resource.h> header file. */
 #undef HAVE_SYS_RESOURCE_H
 
@@ -241,9 +250,6 @@
 
 /* Define to 1 if you have the <termios.h> header file. */
 #undef HAVE_TERMIOS_H
-
-/* Define to 1 if you have the `timer_create' function. */
-#undef HAVE_TIMER_CREATE
 
 /* Define to 1 if you have the `timer_settime' function. */
 #undef HAVE_TIMER_SETTIME
@@ -381,6 +387,11 @@
 # endif
 #endif
 
+/* Enable large inode numbers on Mac OS X 10.5.  */
+#ifndef _DARWIN_USE_64_BIT_INODE
+# define _DARWIN_USE_64_BIT_INODE 1
+#endif
+
 /* Number of bits in a file offset, on hosts where this is settable. */
 #undef _FILE_OFFSET_BITS
 
@@ -398,6 +409,9 @@
 
 /* Define to `int' if <sys/types.h> does not define. */
 #undef pid_t
+
+/* Define to `unsigned int' if <sys/types.h> does not define. */
+#undef size_t
 
 /* Define as `fork' if `vfork' does not work. */
 #undef vfork

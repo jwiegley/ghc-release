@@ -11,7 +11,7 @@
 -- Write out Hoogle compatible documentation
 -- http://www.haskell.org/hoogle/
 -----------------------------------------------------------------------------
-module Haddock.Backends.Hoogle ( 
+module Haddock.Backends.Hoogle (
     ppHoogle
   ) where
 
@@ -110,11 +110,13 @@ operator x = x
 -- How to print each export
 
 ppExport :: DynFlags -> ExportItem Name -> [String]
-ppExport dflags (ExportDecl decl dc subdocs _) = ppDocumentation dflags (fst dc) ++ f (unL decl)
+ppExport dflags ExportDecl { expItemDecl    = L _ decl
+                           , expItemMbDoc   = (dc, _)
+                           , expItemSubDocs = subdocs
+                           } = ppDocumentation dflags dc ++ f decl
     where
-        f (TyClD d@TyDecl{})
-            | isDataDecl d      = ppData dflags d subdocs
-            | otherwise         = ppSynonym dflags d
+        f (TyClD d@DataDecl{})  = ppData dflags d subdocs
+        f (TyClD d@SynDecl{})   = ppSynonym dflags d
         f (TyClD d@ClassDecl{}) = ppClass dflags d
         f (ForD (ForeignImport name typ _ _)) = ppSig dflags $ TypeSig [name] typ
         f (ForD (ForeignExport name typ _ _)) = ppSig dflags $ TypeSig [name] typ
@@ -140,13 +142,14 @@ ppClass dflags x = out dflags x{tcdSigs=[]} :
             concatMap (ppSig dflags . addContext . unL) (tcdSigs x)
     where
         addContext (TypeSig name (L l sig)) = TypeSig name (L l $ f sig)
+        addContext (MinimalSig sig) = MinimalSig sig
         addContext _ = error "expected TypeSig"
 
         f (HsForAllTy a b con d) = HsForAllTy a b (reL (context : unLoc con)) d
         f t = HsForAllTy Implicit emptyHsQTvs (reL [context]) (reL t)
 
-        context = nlHsTyConApp (unL $ tcdLName x)
-            (map (reL . HsTyVar . hsTyVarName . unL) (hsQTvBndrs (tcdTyVars x)))
+        context = nlHsTyConApp (tcdName x)
+            (map (reL . HsTyVar . hsTyVarName . unL) (hsQTvBndrs (tyClDeclTyVars x)))
 
 
 ppInstance :: DynFlags -> ClsInst -> [String]
@@ -157,17 +160,17 @@ ppSynonym :: DynFlags -> TyClDecl Name -> [String]
 ppSynonym dflags x = [out dflags x]
 
 ppData :: DynFlags -> TyClDecl Name -> [(Name, DocForDecl Name)] -> [String]
-ppData dflags decl@(TyDecl { tcdTyDefn = defn }) subdocs
-    = showData decl{ tcdTyDefn = defn { td_cons=[],td_derivs=Nothing }} :
-      concatMap (ppCtor dflags decl subdocs . unL) (td_cons defn)
+ppData dflags decl@(DataDecl { tcdDataDefn = defn }) subdocs
+    = showData decl{ tcdDataDefn = defn { dd_cons=[],dd_derivs=Nothing }} :
+      concatMap (ppCtor dflags decl subdocs . unL) (dd_cons defn)
     where
-        
+
         -- GHC gives out "data Bar =", we want to delete the equals
         -- also writes data : a b, when we want data (:) a b
         showData d = unwords $ map f $ if last xs == "=" then init xs else xs
             where
                 xs = words $ out dflags d
-                nam = out dflags $ tcdLName d
+                nam = out dflags $ tyClDeclLName d
                 f w = if w == nam then operator nam else w
 ppData _ _ _ = panic "ppData"
 
@@ -195,8 +198,8 @@ ppCtor dflags dat subdocs con = lookupCon dflags subdocs (con_name con)
         name = out dflags $ unL $ con_name con
 
         resType = case con_res con of
-            ResTyH98 -> apps $ map (reL . HsTyVar) $ 
-                        unL (tcdLName dat) : [hsTyVarName v | L _ (v@UserTyVar {}) <- hsQTvBndrs $ tcdTyVars dat]
+            ResTyH98 -> apps $ map (reL . HsTyVar) $
+                        (tcdName dat) : [hsTyVarName v | L _ v@(UserTyVar _) <- hsQTvBndrs $ tyClDeclTyVars dat]
             ResTyGADT x -> x
 
 
@@ -248,6 +251,7 @@ markupTag dflags = Markup {
   markupModule               = box (TagInline "a") . str,
   markupWarning              = box (TagInline "i"),
   markupEmphasis             = box (TagInline "i"),
+  markupBold                 = box (TagInline "b"),
   markupMonospaced           = box (TagInline "tt"),
   markupPic                  = const $ str " ",
   markupUnorderedList        = box (TagL 'u'),
@@ -257,7 +261,8 @@ markupTag dflags = Markup {
   markupHyperlink            = \(Hyperlink url mLabel) -> (box (TagInline "a") . str) (fromMaybe url mLabel),
   markupAName                = const $ str "",
   markupProperty             = box TagPre . str,
-  markupExample              = box TagPre . str . unlines . map exampleToString
+  markupExample              = box TagPre . str . unlines . map exampleToString,
+  markupHeader               = \(Header l h) -> box (TagInline $ "h" ++ show l) h
   }
 
 

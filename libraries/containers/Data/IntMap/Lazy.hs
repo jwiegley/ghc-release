@@ -16,7 +16,7 @@
 -- (dictionaries).
 --
 -- API of this module is strict in the keys, but lazy in the values.
--- If you need value-strict maps, use 'Data.IntMap.Strict' instead.
+-- If you need value-strict maps, use "Data.IntMap.Strict" instead.
 -- The 'IntMap' type itself is shared between the lazy and strict modules,
 -- meaning that the same 'IntMap' value can be passed to functions in
 -- both modules (although that is rarely needed).
@@ -50,154 +50,157 @@
 -----------------------------------------------------------------------------
 
 module Data.IntMap.Lazy (
-            -- * Strictness properties
-            -- $strictness
+    -- * Strictness properties
+    -- $strictness
 
-            -- * Map type
+    -- * Map type
 #if !defined(TESTING)
-              IntMap, Key          -- instance Eq,Show
+    IntMap, Key          -- instance Eq,Show
 #else
-              IntMap(..), Key          -- instance Eq,Show
+    IntMap(..), Key          -- instance Eq,Show
 #endif
 
-            -- * Operators
-            , (!), (\\)
+    -- * Operators
+    , (!), (\\)
 
-            -- * Query
-            , IM.null
-            , size
-            , member
-            , notMember
-            , IM.lookup
-            , findWithDefault
-            , lookupLT
-            , lookupGT
-            , lookupLE
-            , lookupGE
+    -- * Query
+    , IM.null
+    , size
+    , member
+    , notMember
+    , IM.lookup
+    , findWithDefault
+    , lookupLT
+    , lookupGT
+    , lookupLE
+    , lookupGE
 
-            -- * Construction
-            , empty
-            , singleton
+    -- * Construction
+    , empty
+    , singleton
 
-            -- ** Insertion
-            , insert
-            , insertWith
-            , insertWithKey
-            , insertLookupWithKey
+    -- ** Insertion
+    , insert
+    , insertWith
+    , insertWithKey
+    , insertLookupWithKey
 
-            -- ** Delete\/Update
-            , delete
-            , adjust
-            , adjustWithKey
-            , update
-            , updateWithKey
-            , updateLookupWithKey
-            , alter
+    -- ** Delete\/Update
+    , delete
+    , adjust
+    , adjustWithKey
+    , update
+    , updateWithKey
+    , updateLookupWithKey
+    , alter
 
-            -- * Combine
+    -- * Combine
 
-            -- ** Union
-            , union
-            , unionWith
-            , unionWithKey
-            , unions
-            , unionsWith
+    -- ** Union
+    , union
+    , unionWith
+    , unionWithKey
+    , unions
+    , unionsWith
 
-            -- ** Difference
-            , difference
-            , differenceWith
-            , differenceWithKey
+    -- ** Difference
+    , difference
+    , differenceWith
+    , differenceWithKey
 
-            -- ** Intersection
-            , intersection
-            , intersectionWith
-            , intersectionWithKey
+    -- ** Intersection
+    , intersection
+    , intersectionWith
+    , intersectionWithKey
 
-            -- ** Universal combining function
-            , mergeWithKey
+    -- ** Universal combining function
+    , mergeWithKey
 
-            -- * Traversal
-            -- ** Map
-            , IM.map
-            , mapWithKey
-            , traverseWithKey
-            , mapAccum
-            , mapAccumWithKey
-            , mapAccumRWithKey
-            , mapKeys
-            , mapKeysWith
-            , mapKeysMonotonic
+    -- * Traversal
+    -- ** Map
+    , IM.map
+    , mapWithKey
+    , traverseWithKey
+    , mapAccum
+    , mapAccumWithKey
+    , mapAccumRWithKey
+    , mapKeys
+    , mapKeysWith
+    , mapKeysMonotonic
 
-            -- * Folds
-            , IM.foldr
-            , IM.foldl
-            , foldrWithKey
-            , foldlWithKey
-            -- ** Strict folds
-            , foldr'
-            , foldl'
-            , foldrWithKey'
-            , foldlWithKey'
+    -- * Folds
+    , IM.foldr
+    , IM.foldl
+    , foldrWithKey
+    , foldlWithKey
+    , foldMapWithKey
 
-            -- * Conversion
-            , elems
-            , keys
-            , assocs
-            , keysSet
-            , fromSet
+    -- ** Strict folds
+    , foldr'
+    , foldl'
+    , foldrWithKey'
+    , foldlWithKey'
 
-            -- ** Lists
-            , toList
-            , fromList
-            , fromListWith
-            , fromListWithKey
+    -- * Conversion
+    , elems
+    , keys
+    , assocs
+    , keysSet
+    , fromSet
 
-            -- ** Ordered lists
-            , toAscList
-            , toDescList
-            , fromAscList
-            , fromAscListWith
-            , fromAscListWithKey
-            , fromDistinctAscList
+    -- ** Lists
+    , toList
+    , fromList
+    , fromListWith
+    , fromListWithKey
 
-            -- * Filter
-            , IM.filter
-            , filterWithKey
-            , partition
-            , partitionWithKey
+    -- ** Ordered lists
+    , toAscList
+    , toDescList
+    , fromAscList
+    , fromAscListWith
+    , fromAscListWithKey
+    , fromDistinctAscList
 
-            , mapMaybe
-            , mapMaybeWithKey
-            , mapEither
-            , mapEitherWithKey
+    -- * Filter
+    , IM.filter
+    , filterWithKey
+    , partition
+    , partitionWithKey
 
-            , split
-            , splitLookup
+    , mapMaybe
+    , mapMaybeWithKey
+    , mapEither
+    , mapEitherWithKey
 
-            -- * Submap
-            , isSubmapOf, isSubmapOfBy
-            , isProperSubmapOf, isProperSubmapOfBy
+    , split
+    , splitLookup
+    , splitRoot
 
-            -- * Min\/Max
-            , findMin
-            , findMax
-            , deleteMin
-            , deleteMax
-            , deleteFindMin
-            , deleteFindMax
-            , updateMin
-            , updateMax
-            , updateMinWithKey
-            , updateMaxWithKey
-            , minView
-            , maxView
-            , minViewWithKey
-            , maxViewWithKey
+    -- * Submap
+    , isSubmapOf, isSubmapOfBy
+    , isProperSubmapOf, isProperSubmapOfBy
 
-            -- * Debugging
-            , showTree
-            , showTreeWith
-            ) where
+    -- * Min\/Max
+    , findMin
+    , findMax
+    , deleteMin
+    , deleteMax
+    , deleteFindMin
+    , deleteFindMax
+    , updateMin
+    , updateMax
+    , updateMinWithKey
+    , updateMaxWithKey
+    , minView
+    , maxView
+    , minViewWithKey
+    , maxViewWithKey
+
+    -- * Debugging
+    , showTree
+    , showTreeWith
+    ) where
 
 import Data.IntMap.Base as IM
 

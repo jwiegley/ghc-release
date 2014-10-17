@@ -17,7 +17,7 @@
 --
 -- A version of the graph algorithms described in:
 --
---   /Lazy Depth-First Search and Linear Graph Algorithms in Haskell/,
+--   /Structuring Depth-First Search Algorithms in Haskell/,
 --   by David King and John Launchbury.
 --
 -----------------------------------------------------------------------------
@@ -72,6 +72,7 @@ import qualified Data.IntSet as Set
 import Data.Tree (Tree(Node), Forest)
 
 -- std interfaces
+import Control.Applicative
 import Control.DeepSeq (NFData(rnf))
 import Data.Maybe
 import Data.Array
@@ -92,6 +93,10 @@ data SCC vertex = AcyclicSCC vertex     -- ^ A single vertex that is not
 instance NFData a => NFData (SCC a) where
     rnf (AcyclicSCC v) = rnf v
     rnf (CyclicSCC vs) = rnf vs
+
+instance Functor SCC where
+    fmap f (AcyclicSCC v) = AcyclicSCC (f v)
+    fmap f (CyclicSCC vs) = CyclicSCC (fmap f vs)
 
 -- | The vertices of a list of strongly connected components.
 flattenSCCs :: [SCC a] -> [a]
@@ -286,7 +291,22 @@ newtype SetM s a = SetM { runSetM :: STArray s Vertex Bool -> ST s a }
 
 instance Monad (SetM s) where
     return x     = SetM $ const (return x)
-    SetM v >>= f = SetM $ \ s -> do { x <- v s; runSetM (f x) s }
+    {-# INLINE return #-}
+    SetM v >>= f = SetM $ \s -> do { x <- v s; runSetM (f x) s }
+    {-# INLINE (>>=) #-}
+
+instance Functor (SetM s) where
+    f `fmap` SetM v = SetM $ \s -> f `fmap` v s
+    {-# INLINE fmap #-}
+
+instance Applicative (SetM s) where
+    pure x = SetM $ const (return x)
+    {-# INLINE pure #-}
+    SetM f <*> SetM v = SetM $ \s -> f s >>= (`fmap` v s)
+    -- We could also use the following definition
+    --   SetM f <*> SetM v = SetM $ \s -> f s <*> v s
+    -- but Applicative (ST s) instance is present only in GHC 7.2+
+    {-# INLINE (<*>) #-}
 
 run          :: Bounds -> (forall s. SetM s a) -> a
 run bnds act  = runST (newArray bnds False >>= runSetM act)
@@ -304,8 +324,18 @@ include v     = SetM $ \ m -> writeArray m v True
 newtype SetM s a = SetM { runSetM :: IntSet -> (a, IntSet) }
 
 instance Monad (SetM s) where
-    return x     = SetM $ \ s -> (x, s)
-    SetM v >>= f = SetM $ \ s -> case v s of (x, s') -> runSetM (f x) s'
+    return x     = SetM $ \s -> (x, s)
+    SetM v >>= f = SetM $ \s -> case v s of (x, s') -> runSetM (f x) s'
+
+instance Functor (SetM s) where
+    f `fmap` SetM v = SetM $ \s -> case v s of (x, s') -> (f x, s')
+    {-# INLINE fmap #-}
+
+instance Applicative (SetM s) where
+    pure x = SetM $ \s -> (x, s)
+    {-# INLINE pure #-}
+    SetM f <*> SetM v = SetM $ \s -> case f s of (k, s') -> case v s' of (x, s'') -> (k x, s'')
+    {-# INLINE (<*>) #-}
 
 run          :: Bounds -> SetM s a -> a
 run _ act     = fst (runSetM act Set.empty)

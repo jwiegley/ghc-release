@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP, PackageImports #-}
 #if __GLASGOW_HASKELL__ >= 701
 {-# LANGUAGE Safe #-}
 #endif
@@ -117,7 +118,7 @@ module System.IO (
 
     interact,                  -- :: (String -> String) -> IO ()
     putChar,                   -- :: Char   -> IO ()
-    putStr,                    -- :: String -> IO () 
+    putStr,                    -- :: String -> IO ()
     putStrLn,                  -- :: String -> IO ()
     print,                     -- :: Show a => a -> IO ()
     getChar,                   -- :: IO Char

@@ -1,5 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -16,68 +16,42 @@
 -- The "Text.Read" library is the canonical library to import for
 -- 'Read'-class facilities.  For GHC only, it offers an extended and much
 -- improved 'Read' class, which constitutes a proposed alternative to the 
--- Haskell 98 'Read'.  In particular, writing parsers is easier, and
+-- Haskell 2010 'Read'.  In particular, writing parsers is easier, and
 -- the parsers are much more efficient.
 --
 -----------------------------------------------------------------------------
 
 module Text.Read (
    -- * The 'Read' class
-   Read(..),            -- The Read class
-   ReadS,               -- String -> Maybe (a,String)
+   Read(..),
+   ReadS,
 
-   -- * Haskell 98 functions
-   reads,               -- :: (Read a) => ReadS a
-   read,                -- :: (Read a) => String -> a
-   readParen,           -- :: Bool -> ReadS a -> ReadS a
-   lex,                 -- :: ReadS String
+   -- * Haskell 2010 functions
+   reads,
+   read,
+   readParen,
+   lex,
 
-#if defined(__GLASGOW_HASKELL__) || defined(__HUGS__)
    -- * New parsing functions
    module Text.ParserCombinators.ReadPrec,
    L.Lexeme(..),
-   lexP,                -- :: ReadPrec Lexeme
-   parens,              -- :: ReadPrec a -> ReadPrec a
-#endif
-#ifdef __GLASGOW_HASKELL__
-   readListDefault,     -- :: Read a => ReadS [a]
-   readListPrecDefault, -- :: Read a => ReadPrec [a]
-   readEither,          -- :: Read a => String -> Either String a
-   readMaybe            -- :: Read a => String -> Maybe a
-#endif
+   lexP,
+   parens,
+   readListDefault,
+   readListPrecDefault,
+   readEither,
+   readMaybe
 
  ) where
 
-#ifdef __GLASGOW_HASKELL__
 import GHC.Base
 import GHC.Read
 import Data.Either
 import Data.Maybe
 import Text.ParserCombinators.ReadP as P
-#endif
-#if defined(__GLASGOW_HASKELL__) || defined(__HUGS__)
 import Text.ParserCombinators.ReadPrec
 import qualified Text.Read.Lex as L
-#endif
 
-#ifdef __HUGS__
--- copied from GHC.Read
-
-lexP :: ReadPrec L.Lexeme
-lexP = lift L.lex
-
-parens :: ReadPrec a -> ReadPrec a
-parens p = optional
- where
-  optional  = p +++ mandatory
-  mandatory = do
-    L.Punc "(" <- lexP
-    x          <- reset optional
-    L.Punc ")" <- lexP
-    return x
-#endif
-
-#ifdef __GLASGOW_HASKELL__
 ------------------------------------------------------------------------
 -- utility functions
 
@@ -88,6 +62,8 @@ reads = readsPrec minPrec
 -- | Parse a string using the 'Read' instance.
 -- Succeeds if there is exactly one valid result.
 -- A 'Left' value indicates a parse error.
+--
+-- /Since: 4.6.0.0/
 readEither :: Read a => String -> Either String a
 readEither s =
   case [ x | (x,"") <- readPrec_to_S read' minPrec s ] of
@@ -102,6 +78,8 @@ readEither s =
 
 -- | Parse a string using the 'Read' instance.
 -- Succeeds if there is exactly one valid result.
+--
+-- /Since: 4.6.0.0/
 readMaybe :: Read a => String -> Maybe a
 readMaybe s = case readEither s of
                 Left _  -> Nothing
@@ -111,5 +89,3 @@ readMaybe s = case readEither s of
 -- completely consumed by the input process.
 read :: Read a => String -> a
 read s = either error id (readEither s)
-#endif
-

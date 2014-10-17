@@ -17,7 +17,7 @@ import Data.Time.Calendar.Private
 import Data.Time.Clock
 import Data.Time.Clock.POSIX
 
-import Foreign
+import Foreign.Safe
 import Foreign.C
 import Control.DeepSeq
 import Data.Typeable
@@ -36,16 +36,13 @@ data TimeZone = TimeZone {
 } deriving (Eq,Ord
 #if LANGUAGE_DeriveDataTypeable
 #if LANGUAGE_Rank2Types
-    ,Data
+    ,Data, Typeable
 #endif
 #endif
     )
 
 instance NFData TimeZone where
 	rnf (TimeZone m so n) = m `deepseq` so `deepseq` n `deepseq` ()
-
-instance Typeable TimeZone where
-	typeOf _ = mkTyConApp (mkTyCon "Data.Time.LocalTime.TimeZone.TimeZone") []
 
 -- | Create a nameless non-summer timezone for this number of minutes
 minutesToTimeZone :: Int -> TimeZone

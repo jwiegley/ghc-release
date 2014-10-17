@@ -1,21 +1,22 @@
 {-# LANGUAGE CPP #-}
-#if __GLASGOW_HASKELL__ >= 701
+#if __GLASGOW_HASKELL__ >= 701 && MIN_VERSION_base(4,4,1)
 {-# LANGUAGE Safe #-}
 #endif
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Locale
 -- Copyright   :  (c) The University of Glasgow 2001
--- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+-- License     :  BSD3 (see LICENSE file)
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  stable
 -- Portability :  portable
 --
 -- This module provides the ability to adapt to local conventions.
+--
 -- At present, it supports only time and date information as used by
--- System.Time.calendarTimeToString from the System.Time module in the
--- old-time package.
+-- @calendarTimeToString@ from the @System.Time@ module in the
+-- @old-time@ package.
 --
 -----------------------------------------------------------------------------
 
@@ -24,7 +25,7 @@ module System.Locale (
     TimeLocale(..)
 
     , defaultTimeLocale
-    
+
     , iso8601DateFormat
     , rfc822DateFormat
     )
@@ -33,23 +34,23 @@ where
 import Prelude
 
 data TimeLocale = TimeLocale {
-	-- |full and abbreviated week days
+        -- |full and abbreviated week days
         wDays  :: [(String, String)],
-	-- |full and abbreviated months
+        -- |full and abbreviated months
         months :: [(String, String)],
         intervals :: [(String, String)],
-	-- |AM\/PM symbols
+        -- |AM\/PM symbols
         amPm   :: (String, String),
-	-- |formatting strings
+        -- |formatting strings
         dateTimeFmt, dateFmt,
-        timeFmt, time12Fmt :: String     
+        timeFmt, time12Fmt :: String
         } deriving (Eq, Ord, Show)
 
-defaultTimeLocale :: TimeLocale 
-defaultTimeLocale =  TimeLocale { 
-        wDays  = [("Sunday",   "Sun"),  ("Monday",    "Mon"),   
-                  ("Tuesday",  "Tue"),  ("Wednesday", "Wed"), 
-                  ("Thursday", "Thu"),  ("Friday",    "Fri"), 
+defaultTimeLocale :: TimeLocale
+defaultTimeLocale =  TimeLocale {
+        wDays  = [("Sunday",   "Sun"),  ("Monday",    "Mon"),
+                  ("Tuesday",  "Tue"),  ("Wednesday", "Wed"),
+                  ("Thursday", "Thu"),  ("Friday",    "Fri"),
                   ("Saturday", "Sat")],
 
         months = [("January",   "Jan"), ("February",  "Feb"),
@@ -76,15 +77,22 @@ defaultTimeLocale =  TimeLocale {
         }
 
 
--- |Normally, ISO-8601 just defines YYYY-MM-DD
--- but we can add a time spec.
+{- | Construct format string according to <http://en.wikipedia.org/wiki/ISO_8601 ISO-8601>.
+
+The @Maybe String@ argument allows to supply an optional time specification. E.g.:
+
+@
+'iso8601DateFormat' Nothing            == "%Y-%m-%d"           -- i.e. @/YYYY-MM-DD/@
+'iso8601DateFormat' (Just "%H:%M:%S")  == "%Y-%m-%dT%H:%M:%S"  -- i.e. @/YYYY-MM-DD/T/HH:MM:SS/@
+@
+-}
 
 iso8601DateFormat :: Maybe String -> String
 iso8601DateFormat mTimeFmt =
     "%Y-%m-%d" ++ case mTimeFmt of
-             Nothing  -> "" 
+             Nothing  -> ""
              Just fmt -> 'T' : fmt
 
-
+-- | Format string according to <http://tools.ietf.org/html/rfc822#section-5 RFC822>.
 rfc822DateFormat :: String
 rfc822DateFormat = "%a, %_d %b %Y %H:%M:%S %Z"

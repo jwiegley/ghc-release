@@ -36,6 +36,9 @@ import FastString
 import SrcLoc
 import Util
 
+import Control.Monad (liftM, ap)
+import Control.Applicative (Applicative(..))
+
 
 stgMassageForProfiling
         :: DynFlags
@@ -51,7 +54,7 @@ stgMassageForProfiling dflags mod_name _us stg_binds
           = initMM mod_name (do_top_bindings stg_binds)
 
         (fixed_ccs, fixed_cc_stacks)
-          = if dopt Opt_AutoSccsOnIndividualCafs dflags
+          = if gopt Opt_AutoSccsOnIndividualCafs dflags
             then ([],[])  -- don't need "all CAFs" CC
             else ([all_cafs_cc], [all_cafs_ccs])
 
@@ -91,7 +94,7 @@ stgMassageForProfiling dflags mod_name _us stg_binds
 
     do_top_rhs _ (StgRhsClosure _ _ _ _ _ []
                      (StgSCC _cc False{-not tick-} _push (StgConApp con args)))
-      | not (isDllConApp dflags con args)
+      | not (isDllConApp dflags mod_name con args)
         -- Trivial _scc_ around nothing but static data
         -- Eliminate _scc_ ... and turn into StgRhsCon
 
@@ -102,7 +105,7 @@ stgMassageForProfiling dflags mod_name _us stg_binds
       = do
         -- Top level CAF without a cost centre attached
         -- Attach CAF cc (collect if individual CAF ccs)
-        caf_ccs <- if dopt Opt_AutoSccsOnIndividualCafs dflags
+        caf_ccs <- if gopt Opt_AutoSccsOnIndividualCafs dflags
                    then let cc = mkAutoCC binder modl CafCC
                             ccs = mkSingletonCCS cc
                                    -- careful: the binder might be :Main.main,
@@ -219,6 +222,13 @@ newtype MassageM result
                  -> CollectedCCs
                  -> (CollectedCCs, result)
     }
+
+instance Functor MassageM where
+      fmap = liftM
+
+instance Applicative MassageM where
+      pure = return
+      (<*>) = ap
 
 instance Monad MassageM where
     return x = MassageM (\_ ccs -> (ccs, x))

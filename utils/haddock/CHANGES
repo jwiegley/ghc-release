@@ -1,6 +1,73 @@
+Changes in version 2.14.2
+
+ * Always drop --split-objs GHC flag for performance reasons (#292)
+
+ * Print kind signatures GADTs (#85)
+
+ * Drop single leading whitespace when reasonable from @-style blocks (#201)
+
+ * Fix crashes associated with exporting data family record selectors (#294)
+
+Changes in version 2.14.1
+
+ * Render * and -> with their UnicodeSyntax equivalents if -U is enabled
+
+ * Display minimal complete definitions for type classes
+
+ * Hide right hand side of TF instances with hidden names on the RHS
+
+Changes in version 2.14.0
+
+ * Print entities with missing documentation (#258)
+
+ * Print a warning message when given `-optghc` instead of `--optghc` (#5)
+
+ * Add `--compatible-interface-versions` (#231)
+
+ * Allow to generate latex documentation for FFI declarations (#247)
+
+ * Add copyright and license information to generated documentation
+
+ * Improved to Unicode support
+
+ * Bold markup support
+
+ * Nested paragraphs
+
+ * Better escaping
+
+ * Header markup
+
+ * Parser should no longer fail to parse any markup
+
+ * {-# OPTIONS_HADDOCK show-extensions #-} pragma will show the GHC extensions
+   enabled in the module.
+
+ * Properly render License field (#271)
+
+ * Print type/data family instances (for exported types only)
+
+ * Fix display of poly-kinded type operators (#189)
+
+ * PatternSynonyms support
+
+ * Fix display of implicit parameters (#260)
+
+ * Fix rendering of Contents when links are present (#276)
+
+ * Fix documentation duplication on record fields (#195)
+
+ * Add `--source-entity-line` for exact line links (eg. things defined
+   inside TH splices) (#79)
+
+ * Display fixity information for names with nonstandard fixities
+
+ * Bird tracks specified like "> code" no longer suffer from an extra leading
+   space in the code output
+
 Changes in version 2.13.2
 
- * Handle HsExplicitListTy in renameer (#213)
+ * Handle HsExplicitListTy in renamer (#213)
 
  * Allow haddock markup in deprecation messages
 
@@ -39,7 +106,7 @@ Changes in version 2.11.0
 
  * Improved --qual option (no crashes, proper error messages)
 
- * A new --qual option "aliased" which qualifies identifers by the module alias
+ * A new --qual option "aliased" which qualifies identifiers by the module alias
    used in the source code
 
  * The Haddock API restores GHC's static flags after invocation
@@ -107,7 +174,7 @@ Changes in version 2.9.0
   * Minor changes to the API
 
 Changes in the version that comes with GHC 7.0.1
-  
+
   [This version claims it is 2.8.0 but is actually based on 2.8.1]
 
   * Fix URL creation on Windows: Use / not \ in URLs.
@@ -218,7 +285,7 @@ Changed in version 2.5.0:
 
   * Add --use-unicode flag for displaying prettier versions of common symbols
 
-  * Mutiple verbosity levels: remove --verbose and add --verbosity=n
+  * Multiple verbosity levels: remove --verbose and add --verbosity=n
 
 -----------------------------------------------------------------------------
 
@@ -247,13 +314,13 @@ Changed in version 2.4.2:
 
   * Do not indicate that a constructor argument is unboxed
 
-  * Fix problem with with non-working links to ghc-prim
+  * Fix problem with non-working links to ghc-prim
 
   * Allow referring to a specific section within a module in a module link
     (#65)
 
   * Fixes to the Hoogle backend
-  
+
   * Improvements to the haddock library
 
   * Many other fixes (including #67, #69, #58, #57)
@@ -343,8 +410,8 @@ Changes in version 2.0.0.0:
   * Haddock can generate documentation for some of the language extensions
     in GHC 6.8.2
 
-  * Format of module attributes has changed. The only way of specifiying
-    module attributes is via a new OPTIONS_HADDOCK pragma. Example: 
+  * Format of module attributes has changed. The only way of specifying
+    module attributes is via a new OPTIONS_HADDOCK pragma. Example:
     {-# OPTIONS_HADDOCK hide, prune #-}
 
   * Haddock understands literate source files
@@ -460,7 +527,7 @@ Changes in version 0.6:
     now turned off by default; Haddock should be a little less noisy
     in general.
 
-  * Markup for definition lists has been added.  See the documentation 
+  * Markup for definition lists has been added.  See the documentation
     for details.
 
   * New option: --package for setting the package name.  The package
@@ -500,7 +567,7 @@ Changes in version 0.4:
     which describe the exports of a set of modules.  This is useful
     for generating documentation which hyperlinks to
     previously-generated documentation.
-    
+
   * Support for generating the extra files required by the Microsoft
     Help compiler.
 
@@ -511,9 +578,9 @@ Changes in version 0.4:
 
 -----------------------------------------------------------------------------
 Changes in version 0.3:
-  
-  * Documentation on individual function arguments is now implemented 
-  
+
+  * Documentation on individual function arguments is now implemented
+
   * Links can be made to identifiers that aren't in scope, by using
     the fully qualified name.
 

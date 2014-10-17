@@ -4,9 +4,7 @@
            , MagicHash
            , GeneralizedNewtypeDeriving
   #-}
-#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE DeriveDataTypeable, StandaloneDeriving #-}
-#endif
 
 -----------------------------------------------------------------------------
 -- |
@@ -22,26 +20,7 @@
 -- @\<sys\/types.h>@ C header on a POSIX system.
 --
 -----------------------------------------------------------------------------
-#ifdef __NHC__
-#define HTYPE_DEV_T
-#define HTYPE_INO_T
-#define HTYPE_MODE_T
-#define HTYPE_OFF_T
-#define HTYPE_PID_T
-#define HTYPE_SSIZE_T
-#define HTYPE_GID_T
-#define HTYPE_NLINK_T
-#define HTYPE_UID_T
-#define HTYPE_CC_T
-#define HTYPE_SPEED_T
-#define HTYPE_TCFLAG_T
-#define HTYPE_RLIM_T
-#define HTYPE_NLINK_T
-#define HTYPE_UID_T
-#define HTYPE_GID_T
-#else
 #include "HsBaseConfig.h"
-#endif
 
 module System.Posix.Types (
 
@@ -111,17 +90,11 @@ module System.Posix.Types (
   Limit
  ) where
 
-#ifdef __NHC__
-import NHC.PosixTypes
-import Foreign.C
-#else
-
 import Foreign
 import Foreign.C
 import Data.Typeable
 -- import Data.Bits
 
-#ifdef __GLASGOW_HASKELL__
 import GHC.Base
 import GHC.Enum
 import GHC.Num
@@ -129,60 +102,57 @@ import GHC.Real
 -- import GHC.Prim
 import GHC.Read
 import GHC.Show
-#else
-import Control.Monad
-#endif
 
 #include "CTypes.h"
 
 #if defined(HTYPE_DEV_T)
-INTEGRAL_TYPE(CDev,tyConCDev,"CDev",HTYPE_DEV_T)
+INTEGRAL_TYPE(CDev,HTYPE_DEV_T)
 #endif
 #if defined(HTYPE_INO_T)
-INTEGRAL_TYPE(CIno,tyConCIno,"CIno",HTYPE_INO_T)
+INTEGRAL_TYPE(CIno,HTYPE_INO_T)
 #endif
 #if defined(HTYPE_MODE_T)
-INTEGRAL_TYPE_WITH_CTYPE(CMode,mode_t,tyConCMode,"CMode",HTYPE_MODE_T)
+INTEGRAL_TYPE_WITH_CTYPE(CMode,mode_t,HTYPE_MODE_T)
 #endif
 #if defined(HTYPE_OFF_T)
-INTEGRAL_TYPE(COff,tyConCOff,"COff",HTYPE_OFF_T)
+INTEGRAL_TYPE(COff,HTYPE_OFF_T)
 #endif
 #if defined(HTYPE_PID_T)
-INTEGRAL_TYPE(CPid,tyConCPid,"CPid",HTYPE_PID_T)
+INTEGRAL_TYPE(CPid,HTYPE_PID_T)
 #endif
 
 #if defined(HTYPE_SSIZE_T)
-INTEGRAL_TYPE(CSsize,tyConCSsize,"CSsize",HTYPE_SSIZE_T)
+INTEGRAL_TYPE(CSsize,HTYPE_SSIZE_T)
 #endif
 
 #if defined(HTYPE_GID_T)
-INTEGRAL_TYPE(CGid,tyConCGid,"CGid",HTYPE_GID_T)
+INTEGRAL_TYPE(CGid,HTYPE_GID_T)
 #endif
 #if defined(HTYPE_NLINK_T)
-INTEGRAL_TYPE(CNlink,tyConCNlink,"CNlink",HTYPE_NLINK_T)
+INTEGRAL_TYPE(CNlink,HTYPE_NLINK_T)
 #endif
 
 #if defined(HTYPE_UID_T)
-INTEGRAL_TYPE(CUid,tyConCUid,"CUid",HTYPE_UID_T)
+INTEGRAL_TYPE(CUid,HTYPE_UID_T)
 #endif
 #if defined(HTYPE_CC_T)
-ARITHMETIC_TYPE(CCc,tyConCCc,"CCc",HTYPE_CC_T)
+ARITHMETIC_TYPE(CCc,HTYPE_CC_T)
 #endif
 #if defined(HTYPE_SPEED_T)
-ARITHMETIC_TYPE(CSpeed,tyConCSpeed,"CSpeed",HTYPE_SPEED_T)
+ARITHMETIC_TYPE(CSpeed,HTYPE_SPEED_T)
 #endif
 #if defined(HTYPE_TCFLAG_T)
-INTEGRAL_TYPE(CTcflag,tyConCTcflag,"CTcflag",HTYPE_TCFLAG_T)
+INTEGRAL_TYPE(CTcflag,HTYPE_TCFLAG_T)
 #endif
 #if defined(HTYPE_RLIM_T)
-INTEGRAL_TYPE(CRLim,tyConCRlim,"CRLim",HTYPE_RLIM_T)
+INTEGRAL_TYPE(CRLim,HTYPE_RLIM_T)
 #endif
 
 -- ToDo: blksize_t, clockid_t, blkcnt_t, fsblkcnt_t, fsfilcnt_t, id_t, key_t
 -- suseconds_t, timer_t, useconds_t
 
 -- Make an Fd type rather than using CInt everywhere
-INTEGRAL_TYPE(Fd,tyConFd,"Fd",CInt)
+INTEGRAL_TYPE(Fd,CInt)
 
 -- nicer names, and backwards compatibility with POSIX library:
 #if defined(HTYPE_NLINK_T)
@@ -194,8 +164,6 @@ type UserID         = CUid
 #if defined(HTYPE_GID_T)
 type GroupID        = CGid
 #endif
-
-#endif /* !__NHC__ */
 
 type ByteCount      = CSize
 type ClockTick      = CClock

@@ -4,30 +4,24 @@
 %
 
 \begin{code}
-{-# OPTIONS -fno-warn-tabs #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and
--- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
--- for details
-
 module Maybes (
         module Data.Maybe,
 
         MaybeErr(..), -- Instance of Monad
         failME, isSuccess,
 
-        fmapM_maybe,
         orElse,
         mapCatMaybes,
         allMaybes,
         firstJust, firstJusts,
+        whenIsJust,
         expectJust,
         maybeToBool,
 
         MaybeT(..)
     ) where
-
+import Control.Applicative
+import Control.Monad
 import Data.Maybe
 
 infixr 4 `orElse`
@@ -76,6 +70,10 @@ mapCatMaybes _ [] = []
 mapCatMaybes f (x:xs) = case f x of
                         Just y  -> y : mapCatMaybes f xs
                         Nothing -> mapCatMaybes f xs
+
+whenIsJust :: Monad m => Maybe a -> (a -> m ()) -> m ()
+whenIsJust (Just x) f = f x
+whenIsJust Nothing  _ = return ()
 \end{code}
 
 \begin{code}
@@ -85,18 +83,10 @@ orElse :: Maybe a -> a -> a
 Nothing  `orElse` y = y
 \end{code}
 
-\begin{code}
-fmapM_maybe :: Monad m => (a -> m b) -> Maybe a -> m (Maybe b)
-fmapM_maybe _ Nothing = return Nothing
-fmapM_maybe f (Just x) = do
-        x' <- f x
-        return $ Just x'
-\end{code}
-
 %************************************************************************
-%*									*
+%*                                                                      *
 \subsection[MaybeT type]{The @MaybeT@ monad transformer}
-%*									*
+%*                                                                      *
 %************************************************************************
 
 \begin{code}
@@ -105,6 +95,10 @@ newtype MaybeT m a = MaybeT {runMaybeT :: m (Maybe a)}
 
 instance Functor m => Functor (MaybeT m) where
   fmap f x = MaybeT $ fmap (fmap f) $ runMaybeT x
+
+instance (Monad m, Functor m) => Applicative (MaybeT m) where
+  pure  = return
+  (<*>) = ap
 
 instance Monad m => Monad (MaybeT m) where
   return = MaybeT . return . Just
@@ -122,6 +116,13 @@ instance Monad m => Monad (MaybeT m) where
 
 \begin{code}
 data MaybeErr err val = Succeeded val | Failed err
+
+instance Functor (MaybeErr err) where
+  fmap = liftM
+
+instance Applicative (MaybeErr err) where
+  pure  = return
+  (<*>) = ap
 
 instance Monad (MaybeErr err) where
   return v = Succeeded v

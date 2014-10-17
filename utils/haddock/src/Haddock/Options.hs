@@ -1,8 +1,9 @@
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Haddock.Options
--- Copyright   :  (c) Simon Marlow 2003-2006,
---                    David Waern  2006-2009
+-- Copyright   :  (c) Simon Marlow      2003-2006,
+--                    David Waern       2006-2009,
+--                    Mateusz Kowalczyk 2013
 -- License     :  BSD-like
 --
 -- Maintainer  :  haddock@projects.haskell.org
@@ -31,7 +32,6 @@ module Haddock.Options (
 ) where
 
 
-import Data.Maybe
 import Distribution.Verbosity
 import Haddock.Utils
 import Haddock.Types
@@ -51,9 +51,10 @@ data Flag
   | Flag_Lib String
   | Flag_OutputDir FilePath
   | Flag_Prologue FilePath
-  | Flag_SourceBaseURL   String
-  | Flag_SourceModuleURL String
-  | Flag_SourceEntityURL String
+  | Flag_SourceBaseURL    String
+  | Flag_SourceModuleURL  String
+  | Flag_SourceEntityURL  String
+  | Flag_SourceLEntityURL String
   | Flag_WikiBaseURL   String
   | Flag_WikiModuleURL String
   | Flag_WikiEntityURL String
@@ -62,6 +63,7 @@ data Flag
   | Flag_Help
   | Flag_Verbosity String
   | Flag_Version
+  | Flag_CompatibleInterfaceVersions
   | Flag_InterfaceVersion
   | Flag_UseContents String
   | Flag_GenContents
@@ -69,6 +71,7 @@ data Flag
   | Flag_GenIndex
   | Flag_IgnoreAllExports
   | Flag_HideModule String
+  | Flag_ShowExtensions String
   | Flag_OptGhc String
   | Flag_GhcLibDir String
   | Flag_GhcVersion
@@ -79,6 +82,7 @@ data Flag
   | Flag_NoTmpCompDir
   | Flag_Qualification String
   | Flag_PrettyHtml
+  | Flag_PrintMissingDocs
   deriving (Eq)
 
 
@@ -111,6 +115,8 @@ options backwardsCompat =
       "URL for a source code link for each module\n(using the %{FILE} or %{MODULE} vars)",
     Option []  ["source-entity"]  (ReqArg Flag_SourceEntityURL "URL")
       "URL for a source code link for each entity\n(using the %{FILE}, %{MODULE}, %{NAME},\n%{KIND} or %{LINE} vars)",
+    Option []  ["source-entity-line"] (ReqArg Flag_SourceLEntityURL "URL")
+      "URL for a source code link for each entity.\nUsed if name links are unavailable, eg. for TH splices.",
     Option []  ["comments-base"]   (ReqArg Flag_WikiBaseURL "URL")
       "URL for a comments link on the contents\nand index pages",
     Option []  ["comments-module"]  (ReqArg Flag_WikiModuleURL "URL")
@@ -131,6 +137,8 @@ options backwardsCompat =
       "display this help and exit",
     Option ['V']  ["version"]  (NoArg Flag_Version)
       "output version information and exit",
+    Option []  ["compatible-interface-versions"]  (NoArg Flag_CompatibleInterfaceVersions)
+      "output compatible interface file versions and exit",
     Option []  ["interface-version"]  (NoArg Flag_InterfaceVersion)
       "output interface file version and exit",
     Option ['v']  ["verbosity"]  (ReqArg Flag_Verbosity "VERBOSITY")
@@ -147,6 +155,8 @@ options backwardsCompat =
       "behave as if all modules have the\nignore-exports atribute",
     Option [] ["hide"] (ReqArg Flag_HideModule "MODULE")
       "behave as if MODULE has the hide attribute",
+    Option [] ["show-extensions"] (ReqArg Flag_ShowExtensions "MODULE")
+      "behave as if MODULE has the show-extensions attribute",
     Option [] ["optghc"] (ReqArg Flag_OptGhc "OPTION")
       "option to be forwarded to GHC",
     Option []  ["ghc-version"]  (NoArg Flag_GhcVersion)
@@ -159,7 +169,9 @@ options backwardsCompat =
     Option [] ["no-tmp-comp-dir"] (NoArg Flag_NoTmpCompDir)
       "do not re-direct compilation output to a temporary directory",
     Option [] ["pretty-html"] (NoArg Flag_PrettyHtml)
-      "generate html with newlines and indenting (for use with --html)"
+      "generate html with newlines and indenting (for use with --html)",
+    Option [] ["print-missing-docs"] (NoArg Flag_PrintMissingDocs)
+      "print information about any undocumented entities"
   ]
 
 
@@ -207,18 +219,19 @@ optCssFile :: [Flag] -> Maybe FilePath
 optCssFile flags = optLast [ str | Flag_CSS str <- flags ]
 
 
-sourceUrls :: [Flag] -> (Maybe String, Maybe String, Maybe String)
+sourceUrls :: [Flag] -> (Maybe String, Maybe String, Maybe String, Maybe String)
 sourceUrls flags =
-  (listToMaybe [str | Flag_SourceBaseURL   str <- flags]
-  ,listToMaybe [str | Flag_SourceModuleURL str <- flags]
-  ,listToMaybe [str | Flag_SourceEntityURL str <- flags])
+  (optLast [str | Flag_SourceBaseURL    str <- flags]
+  ,optLast [str | Flag_SourceModuleURL  str <- flags]
+  ,optLast [str | Flag_SourceEntityURL  str <- flags]
+  ,optLast [str | Flag_SourceLEntityURL str <- flags])
 
 
 wikiUrls :: [Flag] -> (Maybe String, Maybe String, Maybe String)
 wikiUrls flags =
-  (listToMaybe [str | Flag_WikiBaseURL   str <- flags]
-  ,listToMaybe [str | Flag_WikiModuleURL str <- flags]
-  ,listToMaybe [str | Flag_WikiEntityURL str <- flags])
+  (optLast [str | Flag_WikiBaseURL   str <- flags]
+  ,optLast [str | Flag_WikiModuleURL str <- flags]
+  ,optLast [str | Flag_WikiEntityURL str <- flags])
 
 
 optDumpInterfaceFile :: [Flag] -> Maybe FilePath
@@ -272,4 +285,3 @@ readIfaceArgs flags = [ parseIfaceOption s | Flag_ReadInterface s <- flags ]
 optLast :: [a] -> Maybe a
 optLast [] = Nothing
 optLast xs = Just (last xs)
-

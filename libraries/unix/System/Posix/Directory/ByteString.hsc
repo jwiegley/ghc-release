@@ -1,6 +1,5 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-{-# OPTIONS_GHC -fno-warn-unused-imports #-}
-#if __GLASGOW_HASKELL__ >= 701
+{-# LANGUAGE NondecreasingIndentation #-}
+#ifdef __GLASGOW_HASKELL__
 {-# LANGUAGE Trustworthy #-}
 #endif
 
@@ -18,6 +17,8 @@
 --
 -----------------------------------------------------------------------------
 
+#include "HsUnix.h"
+
 module System.Posix.Directory.ByteString (
    -- * Creating and removing directories
    createDirectory, removeDirectory,
@@ -29,8 +30,12 @@ module System.Posix.Directory.ByteString (
    rewindDirStream,   
    closeDirStream,
    DirStreamOffset,
+#ifdef HAVE_TELLDIR
    tellDirStream,
+#endif
+#ifdef HAVE_SEEKDIR
    seekDirStream,
+#endif
 
    -- * The working dirctory
    getWorkingDirectory,

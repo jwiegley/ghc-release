@@ -8,7 +8,6 @@ ByteCodeLink: Bytecode assembler and linker
 {-# OPTIONS -optc-DNON_POSIX_SOURCE #-}
 
 module ByteCodeLink (
-        HValue,
         ClosureEnv, emptyClosureEnv, extendClosureEnv,
         linkBCO, lookupStaticPtr, lookupName
        ,lookupIE
@@ -20,6 +19,8 @@ import ByteCodeItbls
 import ByteCodeAsm
 import ObjLink
 
+import DynFlags
+import BasicTypes
 import Name
 import NameEnv
 import PrimOp
@@ -51,7 +52,6 @@ import GHC.Ptr          ( castPtr )
 
 \begin{code}
 type ClosureEnv = NameEnv (Name, HValue)
-newtype HValue = HValue Any
 
 emptyClosureEnv :: ClosureEnv
 emptyClosureEnv = emptyNameEnv
@@ -76,9 +76,9 @@ data BCO# = BCO# ByteArray#             -- instrs   :: Array Word16#
                  ByteArray#             -- itbls    :: Array Addr#
 -}
 
-linkBCO :: ItblEnv -> ClosureEnv -> UnlinkedBCO -> IO HValue
-linkBCO ie ce ul_bco
-   = do BCO bco# <- linkBCO' ie ce ul_bco
+linkBCO :: DynFlags -> ItblEnv -> ClosureEnv -> UnlinkedBCO -> IO HValue
+linkBCO dflags ie ce ul_bco
+   = do BCO bco# <- linkBCO' dflags ie ce ul_bco
         -- SDM: Why do we need mkApUpd0 here?  I *think* it's because
         -- otherwise top-level interpreted CAFs don't get updated
         -- after evaluation.   A top-level BCO will evaluate itself and
@@ -97,18 +97,18 @@ linkBCO ie ce ul_bco
            else case mkApUpd0# bco# of { (# final_bco #) -> return (HValue final_bco) }
 
 
-linkBCO' :: ItblEnv -> ClosureEnv -> UnlinkedBCO -> IO BCO
-linkBCO' ie ce (UnlinkedBCO _ arity insns_barr bitmap literalsSS ptrsSS)
+linkBCO' :: DynFlags -> ItblEnv -> ClosureEnv -> UnlinkedBCO -> IO BCO
+linkBCO' dflags ie ce (UnlinkedBCO _ arity insns_barr bitmap literalsSS ptrsSS)
    -- Raises an IO exception on failure
    = do let literals = ssElts literalsSS
             ptrs     = ssElts ptrsSS
 
-        linked_literals <- mapM (lookupLiteral ie) literals
+        linked_literals <- mapM (lookupLiteral dflags ie) literals
 
         let n_literals = sizeSS literalsSS
             n_ptrs     = sizeSS ptrsSS
 
-        ptrs_arr <- mkPtrsArray ie ce n_ptrs ptrs
+        ptrs_arr <- mkPtrsArray dflags ie ce n_ptrs ptrs
 
         let
             !ptrs_parr = case ptrs_arr of Array _lo _hi _n parr -> parr
@@ -126,8 +126,8 @@ linkBCO' ie ce (UnlinkedBCO _ arity insns_barr bitmap literalsSS ptrsSS)
 
 
 -- we recursively link any sub-BCOs while making the ptrs array
-mkPtrsArray :: ItblEnv -> ClosureEnv -> Word -> [BCOPtr] -> IO (Array Word HValue)
-mkPtrsArray ie ce n_ptrs ptrs = do
+mkPtrsArray :: DynFlags -> ItblEnv -> ClosureEnv -> Word -> [BCOPtr] -> IO (Array Word HValue)
+mkPtrsArray dflags ie ce n_ptrs ptrs = do
   let ptrRange = if n_ptrs > 0 then (0, n_ptrs-1) else (1, 0)
   marr <- newArray_ ptrRange
   let
@@ -138,7 +138,7 @@ mkPtrsArray ie ce n_ptrs ptrs = do
         ptr <- lookupPrimOp op
         unsafeWrite marr i ptr
     fill (BCOPtrBCO ul_bco) i = do
-        BCO bco# <- linkBCO' ie ce ul_bco
+        BCO bco# <- linkBCO' dflags ie ce ul_bco
         writeArrayBCO marr i bco#
     fill (BCOPtrBreakInfo brkInfo) i =
         unsafeWrite marr i (HValue (unsafeCoerce# brkInfo))
@@ -180,12 +180,12 @@ newBCO instrs lits ptrs arity bitmap
                   (# s1, bco #) -> (# s1, BCO bco #)
 
 
-lookupLiteral :: ItblEnv -> BCONPtr -> IO Word
-lookupLiteral _  (BCONPtrWord lit) = return lit
-lookupLiteral _  (BCONPtrLbl  sym) = do Ptr a# <- lookupStaticPtr sym
-                                        return (W# (int2Word# (addr2Int# a#)))
-lookupLiteral ie (BCONPtrItbl nm)  = do Ptr a# <- lookupIE ie nm
-                                        return (W# (int2Word# (addr2Int# a#)))
+lookupLiteral :: DynFlags -> ItblEnv -> BCONPtr -> IO Word
+lookupLiteral _      _  (BCONPtrWord lit) = return lit
+lookupLiteral _      _  (BCONPtrLbl  sym) = do Ptr a# <- lookupStaticPtr sym
+                                               return (W# (int2Word# (addr2Int# a#)))
+lookupLiteral dflags ie (BCONPtrItbl nm)  = do Ptr a# <- lookupIE dflags ie nm
+                                               return (W# (int2Word# (addr2Int# a#)))
 
 lookupStaticPtr :: FastString -> IO (Ptr ())
 lookupStaticPtr addr_of_label_string
@@ -218,10 +218,10 @@ lookupName ce nm
                                           (# a #) -> return (HValue a)
                     Nothing         -> linkFail "ByteCodeLink.lookupCE" sym_to_find
 
-lookupIE :: ItblEnv -> Name -> IO (Ptr a)
-lookupIE ie con_nm
+lookupIE :: DynFlags -> ItblEnv -> Name -> IO (Ptr a)
+lookupIE dflags ie con_nm
    = case lookupNameEnv ie con_nm of
-        Just (_, a) -> return (castPtr (itblCode a))
+        Just (_, a) -> return (castPtr (itblCode dflags a))
         Nothing
            -> do -- try looking up in the object files.
                  let sym_to_find1 = nameToCLabel con_nm "con_info"
@@ -239,7 +239,7 @@ lookupIE ie con_nm
 
 linkFail :: String -> String -> IO a
 linkFail who what
-   = ghcError (ProgramError $
+   = throwGhcExceptionIO (ProgramError $
         unlines [ "",who
                 , "During interactive linking, GHCi couldn't find the following symbol:"
                 , ' ' : ' ' : what
@@ -261,15 +261,15 @@ nameToCLabel n suffix
   where
         pkgid = modulePackageId mod
         mod = ASSERT( isExternalName n ) nameModule n
-        package_part = unpackFS (zEncodeFS (packageIdFS (modulePackageId mod)))
-        module_part  = unpackFS (zEncodeFS (moduleNameFS (moduleName mod)))
-        occ_part     = unpackFS (zEncodeFS (occNameFS (nameOccName n)))
+        package_part = zString (zEncodeFS (packageIdFS (modulePackageId mod)))
+        module_part  = zString (zEncodeFS (moduleNameFS (moduleName mod)))
+        occ_part     = zString (zEncodeFS (occNameFS (nameOccName n)))
         qual_name = module_part ++ '_':occ_part ++ '_':suffix
 
 
 primopToCLabel :: PrimOp -> String{-suffix-} -> String
 primopToCLabel primop suffix
-   = let str = "ghczmprim_GHCziPrimopWrappers_" ++ unpackFS (zEncodeFS (occNameFS (primOpOcc primop))) ++ '_':suffix
+   = let str = "ghczmprim_GHCziPrimopWrappers_" ++ zString (zEncodeFS (occNameFS (primOpOcc primop))) ++ '_':suffix
      in --trace ("primopToCLabel: " ++ str)
         str
 \end{code}

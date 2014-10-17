@@ -1,5 +1,5 @@
 
-VERSION=1.14.0
+VERSION=1.18.1.3
 
 #KIND=devel
 KIND=rc
@@ -8,6 +8,7 @@ KIND=rc
 PREFIX=/usr/local
 HC=ghc
 GHCFLAGS=-Wall
+SSH_USER=$USER
 
 all: build
 
@@ -71,7 +72,10 @@ PANDOC_HTML_CSS=Cabal.css
 users-guide: $(USERGUIDE_STAMP) doc/*.markdown
 $(USERGUIDE_STAMP): doc/*.markdown
 	mkdir -p $(PANDOC_HTML_OUTDIR)
-	for file in $^; do $(PANDOC) $(PANDOC_OPTIONS) --from=markdown --to=html --output $(PANDOC_HTML_OUTDIR)/$$(basename $${file} .markdown).html $${file}; done
+	for file in $^; do \
+		[ $${file} != doc/index.markdown ] && TOC=--table-of-contents || TOC=; \
+		$(PANDOC) $(PANDOC_OPTIONS) $${TOC} --from=markdown --to=html --output $(PANDOC_HTML_OUTDIR)/$$(basename $${file} .markdown).html $${file}; \
+	done
 	cp doc/$(PANDOC_HTML_CSS) $(PANDOC_HTML_OUTDIR)
 
 docs: haddock users-guide
@@ -112,7 +116,7 @@ $(DIST_STAMP) : $(HADDOCK_STAMP) $(USERGUIDE_STAMP) $(SDIST_STAMP)
 	cp -r dist/doc/html $(DISTLOC)/Cabal-$(VERSION)/doc/API
 	cp -r dist/doc/users-guide $(DISTLOC)/Cabal-$(VERSION)/doc/
 	cp changelog $(DISTLOC)/Cabal-$(VERSION)/
-	tar -C $(DISTLOC) -c Cabal-$(VERSION) -zf $(DISTLOC)/Cabal-$(VERSION).tar.gz
+	tar -C $(DISTLOC) -czf $(DISTLOC)/Cabal-$(VERSION).tar.gz Cabal-$(VERSION)
 	mv $(DISTLOC)/Cabal-$(VERSION)/doc $(DISTLOC)/
 	mv $(DISTLOC)/Cabal-$(VERSION)/changelog $(DISTLOC)/
 	rm -r $(DISTLOC)/Cabal-$(VERSION)/
@@ -120,8 +124,8 @@ $(DIST_STAMP) : $(HADDOCK_STAMP) $(USERGUIDE_STAMP) $(SDIST_STAMP)
 	@echo "Release fileset prepared: $(DISTLOC)/"
 
 release: $(DIST_STAMP)
-	scp -r $(DISTLOC) haskell.org:/srv/web/haskell.org/cabal/release/cabal-$(VERSION)
-	ssh haskell.org 'cd /srv/web/haskell.org/cabal/release && rm -f $(KIND) && ln -s cabal-$(VERSION) $(KIND)'
+	scp -r $(DISTLOC) $(SSH_USER)@haskell.org:/srv/web/haskell.org/cabal/release/cabal-$(VERSION)
+	ssh $(SSH_USER)@haskell.org 'cd /srv/web/haskell.org/cabal/release && rm -f $(KIND) && ln -s cabal-$(VERSION) $(KIND)'
 
 # tags...
 

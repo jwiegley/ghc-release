@@ -10,7 +10,7 @@ Utility functions on @Core@ syntax
 module CoreUtils (
         -- * Constructing expressions
         mkCast,
-        mkTick, mkTickNoHNF,
+        mkTick, mkTickNoHNF, tickHNFArgs,
         bindNonRec, needsCaseBinding,
         mkAltExpr,
 
@@ -30,11 +30,8 @@ module CoreUtils (
         coreBindsSize, exprSize,
         CoreStats(..), coreBindsStats,
 
-        -- * Hashing
-        hashExpr,
-
         -- * Equality
-        cheapEqExpr, eqExpr, eqExprX,
+        cheapEqExpr, eqExpr,
 
         -- * Eta reduction
         tryEtaReduce,
@@ -48,6 +45,7 @@ module CoreUtils (
 
 import CoreSyn
 import PprCore
+import CoreFVs( exprFreeVars )
 import Var
 import SrcLoc
 import VarEnv
@@ -64,12 +62,12 @@ import TyCon
 import Unique
 import Outputable
 import TysPrim
+import DynFlags
 import FastString
 import Maybes
+import Platform
 import Util
 import Pair
-import Data.Word
-import Data.Bits
 import Data.List
 \end{code}
 
@@ -88,7 +86,10 @@ exprType :: CoreExpr -> Type
 exprType (Var var)           = idType var
 exprType (Lit lit)           = literalType lit
 exprType (Coercion co)       = coercionType co
-exprType (Let _ body)        = exprType body
+exprType (Let bind body)     
+  | NonRec tv rhs <- bind    -- See Note [Type bindings]
+  , Type ty <- rhs           = substTyWith [tv] [ty] (exprType body)
+  | otherwise                = exprType body
 exprType (Case _ _ ty _)     = ty
 exprType (Cast _ co)         = pSnd (coercionKind co)
 exprType (Tick _ e)          = exprType e
@@ -114,6 +115,15 @@ coreAltsType :: [CoreAlt] -> Type
 coreAltsType (alt:_) = coreAltType alt
 coreAltsType []      = panic "corAltsType"
 \end{code}
+
+Note [Type bindings]
+~~~~~~~~~~~~~~~~~~~~
+Core does allow type bindings, although such bindings are
+not much used, except in the output of the desuguarer.
+Example:
+     let a = Int in (\x:a. x)
+Given this, exprType must be careful to substitute 'a' in the 
+result type (Trac #8522).
 
 Note [Existential variables and silly type synonyms]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -141,33 +151,33 @@ Various possibilities suggest themselves:
 
 \begin{code}
 applyTypeToArg :: Type -> CoreExpr -> Type
--- ^ Determines the type resulting from applying an expression to a function with the given type
+-- ^ Determines the type resulting from applying an expression with given type
+-- to a given argument expression
 applyTypeToArg fun_ty (Type arg_ty) = applyTy fun_ty arg_ty
 applyTypeToArg fun_ty _             = funResultTy fun_ty
 
 applyTypeToArgs :: CoreExpr -> Type -> [CoreExpr] -> Type
 -- ^ A more efficient version of 'applyTypeToArg' when we have several arguments.
 -- The first argument is just for debugging, and gives some context
-applyTypeToArgs _ op_ty [] = op_ty
-
-applyTypeToArgs e op_ty (Type ty : args)
-  =     -- Accumulate type arguments so we can instantiate all at once
-    go [ty] args
+applyTypeToArgs e op_ty args
+  = go op_ty args
   where
-    go rev_tys (Type ty : args) = go (ty:rev_tys) args
-    go rev_tys rest_args         = applyTypeToArgs e op_ty' rest_args
-                                 where
-                                   op_ty' = applyTysD msg op_ty (reverse rev_tys)
-                                   msg = ptext (sLit "applyTypeToArgs") <+>
-                                         panic_msg e op_ty
+    go op_ty []               = op_ty
+    go op_ty (Type ty : args) = go_ty_args op_ty [ty] args
+    go op_ty (_ : args)       | Just (_, res_ty) <- splitFunTy_maybe op_ty
+                              = go res_ty args
+    go _ _ = pprPanic "applyTypeToArgs" panic_msg
 
-applyTypeToArgs e op_ty (_ : args)
-  = case (splitFunTy_maybe op_ty) of
-        Just (_, res_ty) -> applyTypeToArgs e res_ty args
-        Nothing -> pprPanic "applyTypeToArgs" (panic_msg e op_ty)
-
-panic_msg :: CoreExpr -> Type -> SDoc
-panic_msg e op_ty = pprCoreExpr e $$ ppr op_ty
+    -- go_ty_args: accumulate type arguments so we can instantiate all at once
+    go_ty_args op_ty rev_tys (Type ty : args) 
+       = go_ty_args op_ty (ty:rev_tys) args
+    go_ty_args op_ty rev_tys args
+       = go (applyTysD panic_msg_w_hdr op_ty (reverse rev_tys)) args
+    
+    panic_msg_w_hdr = hang (ptext (sLit "applyTypeToArgs")) 2 panic_msg
+    panic_msg = vcat [ ptext (sLit "Expression:") <+> pprCoreExpr e
+                     , ptext (sLit "Type:") <+> ppr op_ty
+                     , ptext (sLit "Args:") <+> ppr args ]
 \end{code}
 
 %************************************************************************
@@ -180,7 +190,9 @@ panic_msg e op_ty = pprCoreExpr e $$ ppr op_ty
 -- | Wrap the given expression in the coercion safely, dropping
 -- identity coercions and coalescing nested coercions
 mkCast :: CoreExpr -> Coercion -> CoreExpr
-mkCast e co | isReflCo co = e
+mkCast e co | ASSERT2( coercionRole co == Representational
+                     , ptext (sLit "coercion") <+> ppr co <+> ptext (sLit "passed to mkCast") <+> ppr e <+> ptext (sLit "has wrong role") <+> ppr (coercionRole co) )
+              isReflCo co = e
 
 mkCast (Coercion e_co) co 
   | isCoVarType (pSnd (coercionKind co))
@@ -190,9 +202,12 @@ mkCast (Coercion e_co) co
   = Coercion (mkCoCast e_co co)
 
 mkCast (Cast expr co2) co
-  = ASSERT(let { Pair  from_ty  _to_ty  = coercionKind co;
-                 Pair _from_ty2  to_ty2 = coercionKind co2} in
-           from_ty `eqType` to_ty2 )
+  = WARN(let { Pair  from_ty  _to_ty  = coercionKind co;
+               Pair _from_ty2  to_ty2 = coercionKind co2} in
+            not (from_ty `eqType` to_ty2),
+             vcat ([ ptext (sLit "expr:") <+> ppr expr
+                   , ptext (sLit "co2:") <+> ppr co2
+                   , ptext (sLit "co:") <+> ppr co ]) )
     mkCast expr (mkTransCo co2 co)
 
 mkCast expr co
@@ -232,7 +247,7 @@ mkTick t expr@(App f arg)
     = if not (tickishCounts t)
          then tickHNFArgs t expr
          else if tickishScoped t && tickishCanSplit t
-                 then Tick (mkNoScope t) (tickHNFArgs (mkNoTick t) expr)
+                 then Tick (mkNoScope t) (tickHNFArgs (mkNoCount t) expr)
                  else Tick t expr
 
 mkTick t (Lam x e)
@@ -245,7 +260,7 @@ mkTick t (Lam x e)
      -- counting tick can probably be floated, and the lambda may then be
      -- in a position to be beta-reduced.
   | tickishScoped t && tickishCanSplit t
-         = Tick (mkNoScope t) (Lam x (mkTick (mkNoTick t) e))
+         = Tick (mkNoScope t) (Lam x (mkTick (mkNoCount t) e))
      -- just a counting tick: leave it on the outside
   | otherwise        = Tick t (Lam x e)
 
@@ -413,62 +428,65 @@ filterAlts :: [Unique]             -- ^ Supply of uniques used in case we have t
              -- If callers need to preserve the invariant that there is always at least one branch
              -- in a "case" statement then they will need to manually add a dummy case branch that just
              -- calls "error" or similar.
-filterAlts us ty imposs_cons alts = (imposs_deflt_cons, refined_deflt, merged_alts)
+filterAlts us ty imposs_cons alts 
+  | Just (tycon, inst_tys) <- splitTyConApp_maybe ty
+  = filter_alts tycon inst_tys
+  | otherwise
+  = (imposs_cons, False, alts)
   where
     (alts_wo_default, maybe_deflt) = findDefault alts
     alt_cons = [con | (con,_,_) <- alts_wo_default]
-    imposs_deflt_cons = nub (imposs_cons ++ alt_cons)
-      -- "imposs_deflt_cons" are handled 
-      --   EITHER by the context, 
-      --   OR by a non-DEFAULT branch in this case expression.
 
-    trimmed_alts = filterOut impossible_alt alts_wo_default
-    merged_alts  = mergeAlts trimmed_alts (maybeToList maybe_deflt')
-      -- We need the mergeAlts in case the new default_alt 
-      -- has turned into a constructor alternative.
-      -- The merge keeps the inner DEFAULT at the front, if there is one
-      -- and interleaves the alternatives in the right order
+    filter_alts tycon inst_tys 
+      = (imposs_deflt_cons, refined_deflt, merged_alts)
+     where
+       trimmed_alts = filterOut (impossible_alt inst_tys) alts_wo_default
 
-    (refined_deflt, maybe_deflt') = case maybe_deflt of
-      Just deflt_rhs -> case mb_tc_app of
-        Just (tycon, inst_tys)
-          |     -- This branch handles the case where we are 
-                -- scrutinisng an algebraic data type
-            isAlgTyCon tycon            -- It's a data type, tuple, or unboxed tuples.  
-          , not (isNewTyCon tycon)      -- We can have a newtype, if we are just doing an eval:
-                                        --      case x of { DEFAULT -> e }
-                                        -- and we don't want to fill in a default for them!
-          , Just all_cons <- tyConDataCons_maybe tycon
-          , let imposs_data_cons = [con | DataAlt con <- imposs_deflt_cons]   -- We now know it's a data type 
-                impossible con   = con `elem` imposs_data_cons || dataConCannotMatch inst_tys con
-          -> case filterOut impossible all_cons of
-               -- Eliminate the default alternative
-               -- altogether if it can't match:
-               []    -> (False, Nothing)
-               -- It matches exactly one constructor, so fill it in:
-               [con] -> (True, Just (DataAlt con, ex_tvs ++ arg_ids, deflt_rhs))
-                 where (ex_tvs, arg_ids) = dataConRepInstPat us con inst_tys
-               _     -> (False, Just (DEFAULT, [], deflt_rhs))
+       imposs_deflt_cons = nub (imposs_cons ++ alt_cons)
+         -- "imposs_deflt_cons" are handled 
+         --   EITHER by the context, 
+         --   OR by a non-DEFAULT branch in this case expression.
 
-          | debugIsOn, isAlgTyCon tycon
-          , null (tyConDataCons tycon)
-          , not (isFamilyTyCon tycon || isAbstractTyCon tycon)
-                -- Check for no data constructors
-                -- This can legitimately happen for abstract types and type families,
-                -- so don't report that
-          -> pprTrace "prepareDefault" (ppr tycon)
-             (False, Just (DEFAULT, [], deflt_rhs))
+       merged_alts  = mergeAlts trimmed_alts (maybeToList maybe_deflt')
+         -- We need the mergeAlts in case the new default_alt 
+         -- has turned into a constructor alternative.
+         -- The merge keeps the inner DEFAULT at the front, if there is one
+         -- and interleaves the alternatives in the right order
 
-        _ -> (False, Just (DEFAULT, [], deflt_rhs))
-      Nothing -> (False, Nothing)
-  
-    mb_tc_app = splitTyConApp_maybe ty
-    Just (_, inst_tys) = mb_tc_app
+       (refined_deflt, maybe_deflt') = case maybe_deflt of
+          Nothing -> (False, Nothing)
+          Just deflt_rhs 
+             | isAlgTyCon tycon            -- It's a data type, tuple, or unboxed tuples.  
+             , not (isNewTyCon tycon)      -- We can have a newtype, if we are just doing an eval:
+                                           --      case x of { DEFAULT -> e }
+                                           -- and we don't want to fill in a default for them!
+             , Just all_cons <- tyConDataCons_maybe tycon
+             , let imposs_data_cons = [con | DataAlt con <- imposs_deflt_cons]   -- We now know it's a data type 
+                   impossible con   = con `elem` imposs_data_cons || dataConCannotMatch inst_tys con
+             -> case filterOut impossible all_cons of
+                  -- Eliminate the default alternative
+                  -- altogether if it can't match:
+                  []    -> (False, Nothing)
+                  -- It matches exactly one constructor, so fill it in:
+                  [con] -> (True, Just (DataAlt con, ex_tvs ++ arg_ids, deflt_rhs))
+                    where (ex_tvs, arg_ids) = dataConRepInstPat us con inst_tys
+                  _     -> (False, Just (DEFAULT, [], deflt_rhs))
 
-    impossible_alt :: (AltCon, a, b) -> Bool
-    impossible_alt (con, _, _) | con `elem` imposs_cons = True
-    impossible_alt (DataAlt con, _, _) = dataConCannotMatch inst_tys con
-    impossible_alt _                   = False
+             | debugIsOn, isAlgTyCon tycon
+             , null (tyConDataCons tycon)
+             , not (isFamilyTyCon tycon || isAbstractTyCon tycon)
+                   -- Check for no data constructors
+                   -- This can legitimately happen for abstract types and type families,
+                   -- so don't report that
+             -> pprTrace "prepareDefault" (ppr tycon)
+                (False, Just (DEFAULT, [], deflt_rhs))
+
+             | otherwise -> (False, Just (DEFAULT, [], deflt_rhs))
+
+    impossible_alt :: [Type] -> (AltCon, a, b) -> Bool
+    impossible_alt _ (con, _, _) | con `elem` imposs_cons = True
+    impossible_alt inst_tys (DataAlt con, _, _) = dataConCannotMatch inst_tys con
+    impossible_alt _  _                         = False
 \end{code}
 
 Note [Unreachable code]
@@ -520,7 +538,7 @@ There used to be a gruesome test for (hasNoBinding v) in the
 Var case:
         exprIsTrivial (Var v) | hasNoBinding v = idArity v == 0
 The idea here is that a constructor worker, like \$wJust, is
-really short for (\x -> \$wJust x), becuase \$wJust has no binding.
+really short for (\x -> \$wJust x), because \$wJust has no binding.
 So it should be treated like a lambda.  Ditto unsaturated primops.
 But now constructor workers are not "have-no-binding" Ids.  And
 completely un-applied primops and foreign-call Ids are sufficiently
@@ -562,8 +580,8 @@ getIdFromTrivialExpr e = go e
 \end{code}
 
 exprIsBottom is a very cheap and cheerful function; it may return
-False for bottoming expressions, but it never costs much to ask.
-See also CoreArity.exprBotStrictness_maybe, but that's a bit more
+False for bottoming expressions, but it never costs much to ask.  See
+also CoreArity.exprBotStrictness_maybe, but that's a bit more
 expensive.
 
 \begin{code}
@@ -601,8 +619,8 @@ Note [exprIsDupable]
 
 
 \begin{code}
-exprIsDupable :: CoreExpr -> Bool
-exprIsDupable e
+exprIsDupable :: DynFlags -> CoreExpr -> Bool
+exprIsDupable dflags e
   = isJust (go dupAppSize e)
   where
     go :: Int -> CoreExpr -> Maybe Int
@@ -612,7 +630,7 @@ exprIsDupable e
     go n (Tick _ e)    = go n e
     go n (Cast e _)    = go n e
     go n (App f a) | Just n' <- go n a = go n' f
-    go n (Lit lit) | litIsDupable lit = decrement n
+    go n (Lit lit) | litIsDupable dflags lit = decrement n
     go _ _ = Nothing
 
     decrement :: Int -> Maybe Int
@@ -673,7 +691,7 @@ exprIsWorkFree e = go 0 e
                                               [ go n rhs | (_,_,rhs) <- alts ]
          -- See Note [Case expressions are work-free]
     go _ (Let {})                     = False
-    go n (Var v)                      = n==0 || n < idArity v
+    go n (Var v)                      = isCheapApp v n
     go n (Tick t e) | tickishCounts t = False
                     | otherwise       = go n e
     go n (Lam x e)  | isRuntimeVar x = n==0 || go (n-1) e
@@ -691,7 +709,7 @@ Should we inline 'v' at its use site inside the loop?  At the moment
 we do.  I experimented with saying that case are *not* work-free, but
 that increased allocation slightly.  It's a fairly small effect, and at
 the moment we go for the slightly more aggressive version which treats
-(case x of ....) as work-free if the alterantives are.
+(case x of ....) as work-free if the alternatives are.
 
 
 Note [exprIsCheap]   See also Note [Interaction of exprIsCheap and lone variables]
@@ -738,7 +756,6 @@ exprIsCheap = exprIsCheap' isCheapApp
 exprIsExpandable :: CoreExpr -> Bool
 exprIsExpandable = exprIsCheap' isExpandableApp -- See Note [CONLIKE pragma] in BasicTypes
 
-type CheapAppFun = Id -> Int -> Bool
 exprIsCheap' :: CheapAppFun -> CoreExpr -> Bool
 exprIsCheap' _        (Lit _)      = True
 exprIsCheap' _        (Type _)    = True
@@ -761,13 +778,10 @@ exprIsCheap' good_app (Tick t e)
      -- never duplicate ticks.  If we get this wrong, then HPC's entry
      -- counts will be off (check test in libraries/hpc/tests/raytrace)
 
-exprIsCheap' good_app (Let (NonRec x _) e)
-  | isUnLiftedType (idType x) = exprIsCheap' good_app e
-  | otherwise                 = False
-        -- Strict lets always have cheap right hand sides,
-        -- and do no allocation, so just look at the body
-        -- Non-strict lets do allocation so we don't treat them as cheap
-        -- See also
+exprIsCheap' good_app (Let (NonRec _ b) e)
+  = exprIsCheap' good_app b && exprIsCheap' good_app e
+exprIsCheap' good_app (Let (Rec prs) e)
+  = all (exprIsCheap' good_app . snd) prs && exprIsCheap' good_app e
 
 exprIsCheap' good_app other_expr        -- Applications and variables
   = go other_expr []
@@ -777,16 +791,26 @@ exprIsCheap' good_app other_expr        -- Applications and variables
     go (App f a) val_args | isRuntimeArg a = go f (a:val_args)
                           | otherwise      = go f val_args
 
-    go (Var _) [] = True        -- Just a type application of a variable
-                                -- (f t1 t2 t3) counts as WHNF
+    go (Var _) [] = True        
+         -- Just a type application of a variable
+         -- (f t1 t2 t3) counts as WHNF
+         -- This case is probably handeld by the good_app case
+         -- below, which should have a case for n=0, but putting
+         -- it here too is belt and braces; and it's such a common
+         -- case that checking for null directly seems like a 
+         -- good plan
+
     go (Var f) args
+       | good_app f (length args) 
+       = go_pap args
+
+       | otherwise
         = case idDetails f of
-                RecSelId {}                  -> go_sel args
-                ClassOpId {}                 -> go_sel args
-                PrimOpId op                  -> go_primop op args
-                _ | good_app f (length args) -> go_pap args
-                  | isBottomingId f          -> True
-                  | otherwise                -> False
+                RecSelId {}         -> go_sel args
+                ClassOpId {}        -> go_sel args
+                PrimOpId op         -> go_primop op args
+                _ | isBottomingId f -> True
+                  | otherwise       -> False
                         -- Application of a function which
                         -- always gives bottom; we treat this as cheap
                         -- because it certainly doesn't need to be shared!
@@ -818,9 +842,17 @@ exprIsCheap' good_app other_expr        -- Applications and variables
                 -- BUT: Take care with (sel d x)!  The (sel d) might be cheap, but
                 --      there's no guarantee that (sel d x) will be too.  Hence (n_val_args == 1)
 
+-------------------------------------
+type CheapAppFun = Id -> Int -> Bool  
+  -- Is an application of this function to n *value* args 
+  -- always cheap, assuming the arguments are cheap?  
+  -- Mainly true of partial applications, data constructors,
+  -- and of course true if the number of args is zero
+
 isCheapApp :: CheapAppFun
 isCheapApp fn n_val_args
-  = isDataConWorkId fn
+  =  isDataConWorkId fn 
+  || n_val_args == 0 
   || n_val_args < idArity fn
 
 isExpandableApp :: CheapAppFun
@@ -831,6 +863,7 @@ isExpandableApp fn n_val_args
   where
   -- See if all the arguments are PredTys (implicit params or classes)
   -- If so we'll regard it as expandable; see Note [Expandable overloadings]
+  -- This incidentally picks up the (n_val_args = 0) case
      go 0 _ = True
      go n_val_args ty
        | Just (_, ty) <- splitForAllTy_maybe ty   = go n_val_args ty
@@ -962,7 +995,7 @@ app_ok primop_ok fun args
 
 -----------------------------
 altsAreExhaustive :: [Alt b] -> Bool
--- True  <=> the case alterantives are definiely exhaustive
+-- True  <=> the case alternatives are definiely exhaustive
 -- False <=> they may or may not be
 altsAreExhaustive []
   = False    -- Should not happen
@@ -1297,43 +1330,18 @@ exprIsBig _            = True
 eqExpr :: InScopeSet -> CoreExpr -> CoreExpr -> Bool
 -- Compares for equality, modulo alpha
 eqExpr in_scope e1 e2
-  = eqExprX id_unf (mkRnEnv2 in_scope) e1 e2
-  where
-    id_unf _ = noUnfolding      -- Don't expand
-\end{code}
-
-\begin{code}
-eqExprX :: IdUnfoldingFun -> RnEnv2 -> CoreExpr -> CoreExpr -> Bool
--- ^ Compares expressions for equality, modulo alpha.
--- Does /not/ look through newtypes or predicate types
--- Used in rule matching, and also CSE
-
-eqExprX id_unfolding_fun env e1 e2
-  = go env e1 e2
+  = go (mkRnEnv2 in_scope) e1 e2
   where
     go env (Var v1) (Var v2)
       | rnOccL env v1 == rnOccR env v2
       = True
-
-    -- The next two rules expand non-local variables
-    -- C.f. Note [Expanding variables] in Rules.lhs
-    -- and  Note [Do not expand locally-bound variables] in Rules.lhs
-    go env (Var v1) e2
-      | not (locallyBoundL env v1)
-      , Just e1' <- expandUnfolding_maybe (id_unfolding_fun (lookupRnInScope env v1))
-      = go (nukeRnEnvL env) e1' e2
-
-    go env e1 (Var v2)
-      | not (locallyBoundR env v2)
-      , Just e2' <- expandUnfolding_maybe (id_unfolding_fun (lookupRnInScope env v2))
-      = go (nukeRnEnvR env) e1 e2'
 
     go _   (Lit lit1)    (Lit lit2)      = lit1 == lit2
     go env (Type t1)    (Type t2)        = eqTypeX env t1 t2
     go env (Coercion co1) (Coercion co2) = coreEqCoercion2 env co1 co2
     go env (Cast e1 co1) (Cast e2 co2) = coreEqCoercion2 env co1 co2 && go env e1 e2
     go env (App f1 a1)   (App f2 a2)   = go env f1 f2 && go env a1 a2
-    go env (Tick n1 e1)  (Tick n2 e2)  = go_tickish n1 n2 && go env e1 e2
+    go env (Tick n1 e1)  (Tick n2 e2)  = go_tickish env n1 n2 && go env e1 e2
 
     go env (Lam b1 e1)  (Lam b2 e2)
       =  eqTypeX env (varType b1) (varType b2)   -- False for Id/TyVar combination
@@ -1363,19 +1371,10 @@ eqExprX id_unfolding_fun env e1 e2
       = c1 == c2 && go (rnBndrs2 env bs1 bs2) e1 e2
 
     -----------
-    go_tickish (Breakpoint lid lids) (Breakpoint rid rids)
+    go_tickish env (Breakpoint lid lids) (Breakpoint rid rids)
       = lid == rid  &&  map (rnOccL env) lids == map (rnOccR env) rids
-    go_tickish l r = l == r
+    go_tickish _ l r = l == r
 \end{code}
-
-Auxiliary functions
-
-\begin{code}
-locallyBoundL, locallyBoundR :: RnEnv2 -> Var -> Bool
-locallyBoundL rn_env v = inRnEnvL rn_env v
-locallyBoundR rn_env v = inRnEnvR rn_env v
-\end{code}
-
 
 %************************************************************************
 %*                                                                      *
@@ -1433,7 +1432,11 @@ exprStats (Cast e co)     = coStats co `plusCS` exprStats e
 exprStats (Tick _ e)      = exprStats e
 
 altStats :: CoreAlt -> CoreStats
-altStats (_, bs, r) = sumCS bndrStats bs `plusCS` exprStats r
+altStats (_, bs, r) = altBndrStats bs `plusCS` exprStats r
+
+altBndrStats :: [Var] -> CoreStats
+-- Charge one for the alternative, not for each binder
+altBndrStats vs = oneTM `plusCS` sumCS (tyStats . varType) vs
 
 tyStats :: Type -> CoreStats
 tyStats ty = zeroCS { cs_ty = typeSize ty }
@@ -1457,9 +1460,9 @@ exprSize :: CoreExpr -> Int
 exprSize (Var v)         = v `seq` 1
 exprSize (Lit lit)       = lit `seq` 1
 exprSize (App f a)       = exprSize f + exprSize a
-exprSize (Lam b e)       = varSize b + exprSize e
+exprSize (Lam b e)       = bndrSize b + exprSize e
 exprSize (Let b e)       = bindSize b + exprSize e
-exprSize (Case e b t as) = seqType t `seq` exprSize e + varSize b + 1 + foldr ((+) . altSize) 0 as
+exprSize (Case e b t as) = seqType t `seq` exprSize e + bndrSize b + 1 + foldr ((+) . altSize) 0 as
 exprSize (Cast e co)     = (seqCo co `seq` 1) + exprSize e
 exprSize (Tick n e)      = tickSize n + exprSize e
 exprSize (Type t)        = seqType t `seq` 1
@@ -1469,99 +1472,24 @@ tickSize :: Tickish Id -> Int
 tickSize (ProfNote cc _ _) = cc `seq` 1
 tickSize _ = 1 -- the rest are strict
 
-varSize :: Var -> Int
-varSize b  | isTyVar b = 1
+bndrSize :: Var -> Int
+bndrSize b | isTyVar b = seqType (tyVarKind b) `seq` 1
            | otherwise = seqType (idType b)             `seq`
                          megaSeqIdInfo (idInfo b)       `seq`
                          1
 
-varsSize :: [Var] -> Int
-varsSize = sum . map varSize
+bndrsSize :: [Var] -> Int
+bndrsSize = sum . map bndrSize
 
 bindSize :: CoreBind -> Int
-bindSize (NonRec b e) = varSize b + exprSize e
+bindSize (NonRec b e) = bndrSize b + exprSize e
 bindSize (Rec prs)    = foldr ((+) . pairSize) 0 prs
 
 pairSize :: (Var, CoreExpr) -> Int
-pairSize (b,e) = varSize b + exprSize e
+pairSize (b,e) = bndrSize b + exprSize e
 
 altSize :: CoreAlt -> Int
-altSize (c,bs,e) = c `seq` varsSize bs + exprSize e
-\end{code}
-
-
-%************************************************************************
-%*                                                                      *
-\subsection{Hashing}
-%*                                                                      *
-%************************************************************************
-
-\begin{code}
-hashExpr :: CoreExpr -> Int
--- ^ Two expressions that hash to the same @Int@ may be equal (but may not be)
--- Two expressions that hash to the different Ints are definitely unequal.
---
--- The emphasis is on a crude, fast hash, rather than on high precision.
---
--- But unequal here means \"not identical\"; two alpha-equivalent
--- expressions may hash to the different Ints.
---
--- We must be careful that @\\x.x@ and @\\y.y@ map to the same hash code,
--- (at least if we want the above invariant to be true).
-
-hashExpr e = fromIntegral (hash_expr (1,emptyVarEnv) e .&. 0x7fffffff)
-             -- UniqFM doesn't like negative Ints
-
-type HashEnv = (Int, VarEnv Int)  -- Hash code for bound variables
-
-hash_expr :: HashEnv -> CoreExpr -> Word32
--- Word32, because we're expecting overflows here, and overflowing
--- signed types just isn't cool.  In C it's even undefined.
-hash_expr env (Tick _ e)              = hash_expr env e
-hash_expr env (Cast e _)              = hash_expr env e
-hash_expr env (Var v)                 = hashVar env v
-hash_expr _   (Lit lit)               = fromIntegral (hashLiteral lit)
-hash_expr env (App f e)               = hash_expr env f * fast_hash_expr env e
-hash_expr env (Let (NonRec b r) e)    = hash_expr (extend_env env b) e * fast_hash_expr env r
-hash_expr env (Let (Rec ((b,_):_)) e) = hash_expr (extend_env env b) e
-hash_expr _   (Let (Rec []) _)        = panic "hash_expr: Let (Rec []) _"
-hash_expr env (Case e _ _ _)          = hash_expr env e
-hash_expr env (Lam b e)               = hash_expr (extend_env env b) e
-hash_expr env (Coercion co)           = fast_hash_co env co
-hash_expr _   (Type _)                = WARN(True, text "hash_expr: type") 1
--- Shouldn't happen.  Better to use WARN than trace, because trace
--- prevents the CPR optimisation kicking in for hash_expr.
-
-fast_hash_expr :: HashEnv -> CoreExpr -> Word32
-fast_hash_expr env (Var v)       = hashVar env v
-fast_hash_expr env (Type t)      = fast_hash_type env t
-fast_hash_expr env (Coercion co) = fast_hash_co env co
-fast_hash_expr _   (Lit lit)     = fromIntegral (hashLiteral lit)
-fast_hash_expr env (Cast e _)    = fast_hash_expr env e
-fast_hash_expr env (Tick _ e)    = fast_hash_expr env e
-fast_hash_expr env (App _ a)     = fast_hash_expr env a -- A bit idiosyncratic ('a' not 'f')!
-fast_hash_expr _   _             = 1
-
-fast_hash_type :: HashEnv -> Type -> Word32
-fast_hash_type env ty
-  | Just tv <- getTyVar_maybe ty            = hashVar env tv
-  | Just (tc,tys) <- splitTyConApp_maybe ty = let hash_tc = fromIntegral (hashName (tyConName tc))
-                                              in foldr (\t n -> fast_hash_type env t + n) hash_tc tys
-  | otherwise                               = 1
-
-fast_hash_co :: HashEnv -> Coercion -> Word32
-fast_hash_co env co
-  | Just cv <- getCoVar_maybe co              = hashVar env cv
-  | Just (tc,cos) <- splitTyConAppCo_maybe co = let hash_tc = fromIntegral (hashName (tyConName tc))
-                                                in foldr (\c n -> fast_hash_co env c + n) hash_tc cos
-  | otherwise                                 = 1
-
-extend_env :: HashEnv -> Var -> (Int, VarEnv Int)
-extend_env (n,env) b = (n+1, extendVarEnv env b n)
-
-hashVar :: HashEnv -> Var -> Word32
-hashVar (_,env) v
- = fromIntegral (lookupVarEnv env v `orElse` hashName (idName v))
+altSize (c,bs,e) = c `seq` bndrsSize bs + exprSize e
 \end{code}
 
 
@@ -1579,6 +1507,11 @@ are going to avoid allocating this thing altogether.
 
 There are some particularly delicate points here:
 
+* We want to eta-reduce if doing so leaves a trivial expression,
+  *including* a cast.  For example
+       \x. f |> co  -->  f |> co
+  (provided co doesn't mention x)
+
 * Eta reduction is not valid in general:
         \x. bot  /=  bot
   This matters, partly for old-fashioned correctness reasons but,
@@ -1595,7 +1528,7 @@ There are some particularly delicate points here:
   Result: seg-fault because the boolean case actually gets a function value.
   See Trac #1947.
 
-  So it's important to to the right thing.
+  So it's important to do the right thing.
 
 * Note [Arity care]: we need to be careful if we just look at f's
   arity. Currently (Dec07), f's arity is visible in its own RHS (see
@@ -1605,7 +1538,7 @@ There are some particularly delicate points here:
       f = \x. f x
   to
       f = f
-  Which might change a terminiating program (think (f `seq` e)) to a
+  Which might change a terminating program (think (f `seq` e)) to a
   non-terminating one.  So we check for being a loop breaker first.
 
   However for GlobalIds we can look at the arity; and for primops we
@@ -1655,7 +1588,7 @@ need to address that here.
 \begin{code}
 tryEtaReduce :: [Var] -> CoreExpr -> Maybe CoreExpr
 tryEtaReduce bndrs body
-  = go (reverse bndrs) body (mkReflCo (exprType body))
+  = go (reverse bndrs) body (mkReflCo Representational (exprType body))
   where
     incoming_arity = count isId bndrs
 
@@ -1666,7 +1599,11 @@ tryEtaReduce bndrs body
     -- See Note [Eta reduction with casted arguments]
     -- for why we have an accumulating coercion
     go [] fun co
-      | ok_fun fun = Just (mkCast fun co)
+      | ok_fun fun 
+      , let used_vars = exprFreeVars fun `unionVarSet` tyCoVarsOfCo co
+      , not (any (`elemVarSet` used_vars) bndrs)
+      = Just (mkCast fun co)   -- Check for any of the binders free in the result
+                               -- including the accumulated coercion
 
     go (b : bs) (App fun arg) co
       | Just co' <- ok_arg b arg co
@@ -1676,21 +1613,24 @@ tryEtaReduce bndrs body
 
     ---------------
     -- Note [Eta reduction conditions]
-    ok_fun (App fun (Type ty))
-        | not (any (`elemVarSet` tyVarsOfType ty) bndrs)
-        =  ok_fun fun
-    ok_fun (Var fun_id)
-        =  not (fun_id `elem` bndrs)
-        && (ok_fun_id fun_id || all ok_lam bndrs)
-    ok_fun _fun = False
+    ok_fun (App fun (Type {})) = ok_fun fun
+    ok_fun (Cast fun _)        = ok_fun fun
+    ok_fun (Var fun_id)        = ok_fun_id fun_id || all ok_lam bndrs
+    ok_fun _fun                = False
 
     ---------------
     ok_fun_id fun = fun_arity fun >= incoming_arity
 
     ---------------
     fun_arity fun             -- See Note [Arity care]
-       | isLocalId fun && isStrongLoopBreaker (idOccInfo fun) = 0
-       | otherwise = idArity fun
+       | isLocalId fun
+       , isStrongLoopBreaker (idOccInfo fun) = 0
+       | arity > 0                           = arity
+       | isEvaldUnfolding (idUnfolding fun)  = 1  
+            -- See Note [Eta reduction of an eval'd function]
+       | otherwise                           = 0
+       where
+         arity = idArity fun
 
     ---------------
     ok_lam v = isTyVar v || isEvVar v
@@ -1706,13 +1646,28 @@ tryEtaReduce bndrs body
        | Just tv <- getTyVar_maybe ty
        , bndr == tv  = Just (mkForAllCo tv co)
     ok_arg bndr (Var v) co
-       | bndr == v   = Just (mkFunCo (mkReflCo (idType bndr)) co)
+       | bndr == v   = Just (mkFunCo Representational
+                                     (mkReflCo Representational (idType bndr)) co)
     ok_arg bndr (Cast (Var v) co_arg) co
-       | bndr == v  = Just (mkFunCo (mkSymCo co_arg) co)
+       | bndr == v  = Just (mkFunCo Representational (mkSymCo co_arg) co)
        -- The simplifier combines multiple casts into one,
        -- so we can have a simple-minded pattern match here
     ok_arg _ _ _ = Nothing
 \end{code}
+
+Note [Eta reduction of an eval'd function]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In Haskell is is not true that    f = \x. f x
+because f might be bottom, and 'seq' can distinguish them.
+
+But it *is* true that   f = f `seq` \x. f x 
+and we'd like to simplify the latter to the former.  This amounts
+to the rule that 
+  * when there is just *one* value argument,
+  * f is not bottom
+we can eta-reduce    \x. f x  ===>  f
+
+This turned up in Trac #7542.  
 
 
 %************************************************************************
@@ -1733,7 +1688,7 @@ and 'execute' it rather than allocating it statically.
 -- | This function is called only on *top-level* right-hand sides.
 -- Returns @True@ if the RHS can be allocated statically in the output,
 -- with no thunks involved at all.
-rhsIsStatic :: (Name -> Bool) -> CoreExpr -> Bool
+rhsIsStatic :: Platform -> (Name -> Bool) -> CoreExpr -> Bool
 -- It's called (i) in TidyPgm.hasCafRefs to decide if the rhs is, or
 -- refers to, CAFs; (ii) in CoreToStg to decide whether to put an
 -- update flag on it and (iii) in DsExpr to decide how to expand
@@ -1788,7 +1743,7 @@ rhsIsStatic :: (Name -> Bool) -> CoreExpr -> Bool
 --
 --    c) don't look through unfolding of f in (f x).
 
-rhsIsStatic _is_dynamic_name rhs = is_static False rhs
+rhsIsStatic platform is_dynamic_name rhs = is_static False rhs
   where
   is_static :: Bool     -- True <=> in a constructor argument; must be atomic
             -> CoreExpr -> Bool
@@ -1813,9 +1768,8 @@ rhsIsStatic _is_dynamic_name rhs = is_static False rhs
   is_static in_arg other_expr = go other_expr 0
    where
     go (Var f) n_val_args
-#if mingw32_TARGET_OS
-        | not (_is_dynamic_name (idName f))
-#endif
+        | (platformOS platform /= OSMinGW32) ||
+          not (is_dynamic_name (idName f))
         =  saturated_data_con f n_val_args
         || (in_arg && n_val_args == 0)
                 -- A naked un-applied variable is *not* deemed a static RHS

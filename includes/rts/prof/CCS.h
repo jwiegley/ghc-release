@@ -7,15 +7,12 @@
  * Do not #include this file directly: #include "Rts.h" instead.
  *
  * To understand the structure of the RTS headers, see the wiki:
- *   http://hackage.haskell.org/trac/ghc/wiki/Commentary/SourceTree/Includes
+ *   http://ghc.haskell.org/trac/ghc/wiki/Commentary/SourceTree/Includes
  *
  * ---------------------------------------------------------------------------*/
 
 #ifndef RTS_PROF_CCS_H
 #define RTS_PROF_CCS_H
-
-// Returns non-zero if the RTS is a profiling version
-int rts_isProfiled(void);
 
 /* -----------------------------------------------------------------------------
  * Data Structures 
@@ -26,7 +23,7 @@ int rts_isProfiled(void);
  * putting the 8-byte fields on an 8-byte boundary.  Padding can
  * vary between C compilers, and we don't take into account any
  * possible padding when generating CCS and CC decls in the code
- * generator (compiler/codeGen/CgProf.hs).
+ * generator (compiler/codeGen/StgCmmProf.hs).
  */
 
 typedef struct CostCentre_ {
@@ -76,6 +73,15 @@ typedef struct CostCentreStack_ {
                                 // (calculated at the end)
 } CostCentreStack;
 
+
+/* -----------------------------------------------------------------------------
+ * Start and stop the profiling timer.  These can be called from
+ * Haskell to restrict the profile to portion(s) of the execution.
+ * See the module GHC.Profiling.
+ * ---------------------------------------------------------------------------*/
+
+void stopProfTimer      ( void );
+void startProfTimer     ( void );
 
 /* -----------------------------------------------------------------------------
  * The rest is PROFILING only...

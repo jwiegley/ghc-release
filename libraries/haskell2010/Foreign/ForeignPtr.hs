@@ -1,3 +1,5 @@
+{-# LANGUAGE PackageImports #-}
+
 module Foreign.ForeignPtr (
         -- * Finalised data pointers
           ForeignPtr
@@ -27,6 +29,7 @@ module Foreign.ForeignPtr (
 
 import qualified "base" Foreign.ForeignPtr as Base
 import "base" Foreign.ForeignPtr hiding (mallocForeignPtr, touchForeignPtr)
+import "base" Foreign.ForeignPtr.Unsafe
 import "base" Foreign (Storable)
 
 -- SDM: local copy of the docs for mallocForeignPtr, to omit the
@@ -39,7 +42,7 @@ mallocForeignPtr :: Storable a => IO (ForeignPtr a)
 -- 'mallocForeignPtr' is equivalent to
 --
 -- >    do { p <- malloc; newForeignPtr finalizerFree p }
--- 
+--
 -- although it may be implemented differently internally: you may not
 -- assume that the memory returned by 'mallocForeignPtr' has been
 -- allocated with 'Foreign.Marshal.Alloc.malloc'.
@@ -54,7 +57,7 @@ touchForeignPtr :: ForeignPtr a -> IO ()
 -- actions. In particular 'Foreign.ForeignPtr.withForeignPtr'
 -- does a 'touchForeignPtr' after it
 -- executes the user action.
--- 
+--
 -- Note that this function should not be used to express dependencies
 -- between finalizers on 'ForeignPtr's.  For example, if the finalizer
 -- for a 'ForeignPtr' @F1@ calls 'touchForeignPtr' on a second

@@ -14,6 +14,7 @@ int __hsunix_wifsignaled (int stat) { return WIFSIGNALED(stat); }
 int __hsunix_wtermsig    (int stat) { return WTERMSIG(stat); }
 int __hsunix_wifstopped  (int stat) { return WIFSTOPPED(stat); }
 int __hsunix_wstopsig    (int stat) { return WSTOPSIG(stat); }
+int __hsunix_wcoredump   (int stat) { return WCOREDUMP(stat); }
 
 #ifdef HAVE_RTLDNEXT
 void *__hsunix_rtldNext (void) {return RTLD_NEXT;} 
@@ -157,6 +158,7 @@ int __hscore_setrlimit(int resource, struct rlimit *rlim) {
 }
 #endif
 
+#ifdef HAVE_UNSETENV
 int __hsunix_unsetenv(const char *name)
 {
 #ifdef UNSETENV_RETURNS_VOID
@@ -166,6 +168,7 @@ int __hsunix_unsetenv(const char *name)
     return unsetenv(name);
 #endif
 }
+#endif
 
 /* A size that will contain many path names, but not necessarily all
  * (PATH_MAX is not defined on systems with unlimited path length,

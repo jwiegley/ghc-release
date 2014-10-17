@@ -1,10 +1,11 @@
+{-# LANGUAGE CPP #-}
 #if __GLASGOW_HASKELL__ >= 701
 {-# LANGUAGE Safe #-}
 #endif
 
 module Char (
-        isAscii, isLatin1, isControl, isPrint, isSpace, isUpper, isLower, 
-        isAlpha, isDigit, isOctDigit, isHexDigit, isAlphaNum, 
+        isAscii, isLatin1, isControl, isPrint, isSpace, isUpper, isLower,
+        isAlpha, isDigit, isOctDigit, isHexDigit, isAlphaNum,
         digitToInt, intToDigit,
         toUpper, toLower,
         ord, chr,

@@ -19,7 +19,7 @@
  * "Rts.h" instead.
  *
  * To understand the structure of the RTS headers, see the wiki:
- *   http://hackage.haskell.org/trac/ghc/wiki/Commentary/SourceTree/Includes
+ *   http://ghc.haskell.org/trac/ghc/wiki/Commentary/SourceTree/Includes
  *
  * ---------------------------------------------------------------------------*/
 
@@ -217,19 +217,18 @@ typedef StgFunPtr       F_;
 
 /* -----------------------------------------------------------------------------
    Tail calls
-
-   This needs to be up near the top as the register line on alpha needs
-   to be before all procedures (inline & out-of-line).
    -------------------------------------------------------------------------- */
 
-#include "stg/TailCalls.h"
+#define JMP_(cont) return((StgFunPtr)(cont))
+#define FB_
+#define FE_
 
 /* -----------------------------------------------------------------------------
    Other Stg stuff...
    -------------------------------------------------------------------------- */
 
 #include "stg/DLL.h"
-#include "stg/MachRegs.h"
+#include "stg/RtsMachRegs.h"
 #include "stg/Regs.h"
 #include "stg/Ticky.h"
 
@@ -241,6 +240,7 @@ typedef StgFunPtr       F_;
 #include "stg/MiscClosures.h"
 #endif
 
+#include "stg/Prim.h" /* ghc-prim fallbacks */
 #include "stg/SMP.h" // write_barrier() inline is required
 
 /* -----------------------------------------------------------------------------

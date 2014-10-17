@@ -1,5 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, ForeignFunctionInterface #-}
+{-# LANGUAGE CPP, NoImplicitPrelude #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 
 -----------------------------------------------------------------------------
@@ -88,7 +88,7 @@ import Foreign.Storable
 -- the Iconv codec, but there are some pieces that are known to be
 -- broken.  In particular, the built-in codecs
 -- e.g. GHC.IO.Encoding.UTF{8,16,32} need to use isFullCharBuffer or
--- similar in place of the ow >= os comparisions.
+-- similar in place of the ow >= os comparisons.
 
 -- ---------------------------------------------------------------------------
 -- Raw blocks of data
@@ -256,12 +256,12 @@ slideContents :: Buffer Word8 -> IO (Buffer Word8)
 slideContents buf@Buffer{ bufL=l, bufR=r, bufRaw=raw } = do
   let elems = r - l
   withRawBuffer raw $ \p ->
-      do _ <- memcpy p (p `plusPtr` l) (fromIntegral elems)
+      do _ <- memmove p (p `plusPtr` l) (fromIntegral elems)
          return ()
   return buf{ bufL=0, bufR=elems }
 
-foreign import ccall unsafe "memcpy"
-   memcpy :: Ptr a -> Ptr a -> CSize -> IO (Ptr ())
+foreign import ccall unsafe "memmove"
+   memmove :: Ptr a -> Ptr a -> CSize -> IO (Ptr a)
 
 summaryBuffer :: Buffer a -> String
 summaryBuffer buf = "buf" ++ show (bufSize buf) ++ "(" ++ show (bufL buf) ++ "-" ++ show (bufR buf) ++ ")"

@@ -1,12 +1,12 @@
 module PackageTests.BuildDeps.InternalLibrary1.Check where
 
-import Test.HUnit
 import PackageTests.PackageTester
 import System.FilePath
+import Test.HUnit
 
 
-suite :: Test
-suite = TestCase $ do
+suite :: FilePath -> Test
+suite ghcPath = TestCase $ do
     let spec = PackageSpec ("PackageTests" </> "BuildDeps" </> "InternalLibrary1") []
-    result <- cabal_build spec
-    assertEqual "cabal build should succeed - see test-log.txt" True (successful result)
+    result <- cabal_build spec ghcPath
+    assertBuildSucceeded result
