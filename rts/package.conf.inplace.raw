@@ -441,7 +441,7 @@ hidden-modules:
 
 import-dirs:
 
-library-dirs:		"/home/ian/ghc/7.6-branch/mk_7.6.2_sdist""/rts/dist/build" 
+library-dirs:		"/home/ian/zz/ghc""/rts/dist/build" 
 
 hs-libraries:   "HSrts"
 
@@ -450,7 +450,7 @@ extra-libraries:
 			      , "rt"
 			      , "dl"
 
-include-dirs:           "/home/ian/ghc/7.6-branch/mk_7.6.2_sdist""/rts/dist/build" "/home/ian/ghc/7.6-branch/mk_7.6.2_sdist""/includes" "/home/ian/ghc/7.6-branch/mk_7.6.2_sdist""/includes/dist-ghcconstants/header" "/home/ian/ghc/7.6-branch/mk_7.6.2_sdist""/includes/dist-derivedconstants/header"
+include-dirs:           "/home/ian/zz/ghc""/rts/dist/build" "/home/ian/zz/ghc""/includes" "/home/ian/zz/ghc""/includes/dist-ghcconstants/header" "/home/ian/zz/ghc""/includes/dist-derivedconstants/header"
 
 includes:		Stg.h
 hugs-options:

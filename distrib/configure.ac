@@ -4,7 +4,7 @@ dnl
 #!/bin/sh
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.6.2], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.6.3], [glasgow-haskell-bugs@haskell.org], [ghc])
 
 FP_BINDIST_GHC_PWD
 FP_FIND_ROOT
