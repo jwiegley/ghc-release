@@ -530,25 +530,12 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
        -- to assign fingerprints to all the OccNames that it binds, to
        -- use when referencing those OccNames in later declarations.
        --
-       -- We better give each name bound by the declaration a
-       -- different fingerprint!  So we calculate the fingerprint of
-       -- each binder by combining the fingerprint of the whole
-       -- declaration with the name of the binder. (#5614)
        extend_hash_env :: OccEnv (OccName,Fingerprint)
                        -> (Fingerprint,IfaceDecl)
                        -> IO (OccEnv (OccName,Fingerprint))
        extend_hash_env env0 (hash,d) = do
-          let
-            sub_bndrs = ifaceDeclImplicitBndrs d
-            fp_sub_bndr occ = computeFingerprint putNameLiterally (hash,occ)
-          --
-          sub_fps <- mapM fp_sub_bndr sub_bndrs
-          return (foldr (\(b,fp) env -> extendOccEnv env b (b,fp)) env1
-                        (zip sub_bndrs sub_fps))
-        where
-          decl_name = ifName d
-          item = (decl_name, hash)
-          env1 = extendOccEnv env0 decl_name item
+          return (foldr (\(b,fp) env -> extendOccEnv env b (b,fp)) env0
+                 (ifaceDeclFingerprints hash d))
 
    --
    (local_env, decls_w_hashes) <- 
@@ -1521,16 +1508,19 @@ tyConToIfaceDecl env tycon
                     ifConUnivTvs = toIfaceTvBndrs univ_tvs',
                     ifConExTvs   = toIfaceTvBndrs ex_tvs',
                     ifConEqSpec  = to_eq_spec eq_spec,
-                    ifConCtxt    = tidyToIfaceContext env3 theta,
-                    ifConArgTys  = map (tidyToIfaceType env3) arg_tys,
+                    ifConCtxt    = tidyToIfaceContext env2 theta,
+                    ifConArgTys  = map (tidyToIfaceType env2) arg_tys,
                     ifConFields  = map getOccName 
                                        (dataConFieldLabels data_con),
                     ifConStricts = dataConStrictMarks data_con }
         where
           (univ_tvs, ex_tvs, eq_spec, theta, arg_tys, _) = dataConFullSig data_con
-          (env2, univ_tvs') = tidyTyClTyVarBndrs env1 univ_tvs
-          (env3, ex_tvs')   = tidyTyVarBndrs env2 ex_tvs
-          to_eq_spec spec = [ (getOccName (tidyTyVar env3 tv), tidyToIfaceType env3 ty) 
+
+          -- Start with 'emptyTidyEnv' not 'env1', because the type of the
+          -- data constructor is fully standalone
+          (env1, univ_tvs') = tidyTyVarBndrs emptyTidyEnv univ_tvs
+          (env2, ex_tvs')   = tidyTyVarBndrs env1 ex_tvs
+          to_eq_spec spec = [ (getOccName (tidyTyVar env2 tv), tidyToIfaceType env2 ty) 
                             | (tv,ty) <- spec]
 
 

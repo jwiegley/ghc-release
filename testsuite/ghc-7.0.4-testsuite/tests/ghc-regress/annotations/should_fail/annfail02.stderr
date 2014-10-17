@@ -1,4 +1,0 @@
-
-annfail02.hs:6:1: Not in scope: data constructor `Foo'
-
-annfail02.hs:7:1: Not in scope: type constructor or class `Bar'

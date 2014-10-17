@@ -1,8 +1,0 @@
-
-T4272.hs:11:16:
-    Occurs check: cannot construct the infinite type:
-      a0 = TermFamily a0 a0
-    In the first argument of `prune', namely `t'
-    In the expression: prune t (terms (undefined :: TermFamily a a))
-    In an equation for `laws':
-        laws t = prune t (terms (undefined :: TermFamily a a))

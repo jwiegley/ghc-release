@@ -61,22 +61,27 @@ binaryInterfaceMagic :: Word32
 binaryInterfaceMagic = 0xD0Cface
 
 
--- Since datatypes in the GHC API might change between major versions, and
--- because we store GHC datatypes in our interface files, we need to make sure
--- we version our interface files accordingly.
+#if __GLASGOW_HASKELL__ == 706
+-- IMPORTANT: Since datatypes in the GHC API might change between major
+-- versions, and because we store GHC datatypes in our interface files, we need
+-- to make sure we version our interface files accordingly.
+--
+-- If you change the interface file format or adapt Haddock to work with a new
+-- major version of GHC (so that the format changes indirectly) *you* need to
+-- follow these steps:
+--
+-- (1) increase `binaryInterfaceVersion`
+--
+-- (2) set `binaryInterfaceVersionCompatibility` to [binaryInterfaceVersion]
+--
 binaryInterfaceVersion :: Word16
-#if __GLASGOW_HASKELL__ == 702
-binaryInterfaceVersion = 21
-#elif __GLASGOW_HASKELL__ == 703
-binaryInterfaceVersion = 21
-#elif __GLASGOW_HASKELL__ == 704
-binaryInterfaceVersion = 21
-#elif __GLASGOW_HASKELL__ == 705
-binaryInterfaceVersion = 21
-#elif __GLASGOW_HASKELL__ == 706
-binaryInterfaceVersion = 21
+binaryInterfaceVersion = 22
+
+binaryInterfaceVersionCompatibility :: [Word16]
+binaryInterfaceVersionCompatibility = [21, 22]
+
 #else
-#error Unknown GHC version
+#error Unsupported GHC version
 #endif
 
 
@@ -187,7 +192,7 @@ readInterfaceFile (get_name_cache, set_name_cache) filename = do
   case () of
     _ | magic /= binaryInterfaceMagic -> return . Left $
       "Magic number mismatch: couldn't load interface file: " ++ filename
-      | version /= binaryInterfaceVersion -> return . Left $
+      | version `notElem` binaryInterfaceVersionCompatibility -> return . Left $
       "Interface file is of wrong version: " ++ filename
       | otherwise -> with_name_cache $ \update_nc -> do
 
@@ -481,6 +486,9 @@ instance (Binary id) => Binary (Doc id) where
     put_ bh (DocWarning ag) = do
             putByte bh 17
             put_ bh ag
+    put_ bh (DocProperty x) = do
+            putByte bh 18
+            put_ bh x
     get bh = do
             h <- getByte bh
             case h of
@@ -538,6 +546,9 @@ instance (Binary id) => Binary (Doc id) where
               17 -> do
                     ag <- get bh
                     return (DocWarning ag)
+              18 -> do
+                    x <- get bh
+                    return (DocProperty x)
               _ -> fail "invalid binary data found"
 
 

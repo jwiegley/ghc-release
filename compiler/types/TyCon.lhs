@@ -581,8 +581,10 @@ Note [Promoted data constructors]
 A data constructor can be promoted to become a type constructor,
 via the PromotedTyCon alternative in TyCon.
 
-* Only "vanilla" data constructors are promoted; ones with no GADT
-  stuff, no existentials, etc.  We might generalise this later.
+* Only data constructors with  
+     (a) no kind polymorphism
+     (b) no constraints in its type (eg GADTs)
+  are promoted.  Existentials are ok; see Trac #7347.
 
 * The TyCon promoted from a DataCon has the *same* Name and Unique as
   the DataCon.  Eg. If the data constructor Data.Maybe.Just(unique 78,
@@ -595,7 +597,7 @@ via the PromotedTyCon alternative in TyCon.
   kind signature on the forall'd variable; so the tc_kind field of
   PromotedTyCon is not identical to the dataConUserType of the
   DataCon.  But it's the same modulo changing the variable kinds,
-  done by Kind.promoteType.
+  done by DataCon.promoteType.
 
 * Small note: We promote the *user* type of the DataCon.  Eg
      data T = MkT {-# UNPACK #-} !(Bool, Bool)

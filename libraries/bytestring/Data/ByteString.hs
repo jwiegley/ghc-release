@@ -270,7 +270,7 @@ import GHC.IO.Handle.Internals
 import GHC.IO.Handle.Types
 import GHC.IO.Buffer
 import GHC.IO.BufferedIO as Buffered
-import GHC.IO                   (unsafePerformIO)
+import GHC.IO                   (unsafePerformIO, unsafeDupablePerformIO)
 import Data.Char                (ord)
 import Foreign.Marshal.Utils    (copyBytes)
 #else
@@ -298,6 +298,10 @@ assertS s False = error ("assertion failed at "++s)
 -- An alternative to hWaitForInput
 hWaitForInput :: Handle -> Int -> IO ()
 hWaitForInput _ _ = return ()
+#endif
+
+#ifndef __GLASGOW_HASKELL__
+unsafeDupablePerformIO = unsafePerformIO
 #endif
 
 -- -----------------------------------------------------------------------------
@@ -472,9 +476,9 @@ append = mappend
 -- Transformations
 
 -- | /O(n)/ 'map' @f xs@ is the ByteString obtained by applying @f@ to each
--- element of @xs@. This function is subject to array fusion.
+-- element of @xs@.
 map :: (Word8 -> Word8) -> ByteString -> ByteString
-map f (PS fp s len) = inlinePerformIO $ withForeignPtr fp $ \a ->
+map f (PS fp s len) = unsafeDupablePerformIO $ withForeignPtr fp $ \a ->
     create len $ map_ 0 (a `plusPtr` s)
   where
     map_ :: Int -> Ptr Word8 -> Ptr Word8 -> IO ()
@@ -513,8 +517,6 @@ transpose ps = P.map pack (List.transpose (P.map unpack ps))
 -- | 'foldl', applied to a binary operator, a starting value (typically
 -- the left-identity of the operator), and a ByteString, reduces the
 -- ByteString using the binary operator, from left to right.
---
--- This function is subject to array fusion.
 --
 foldl :: (a -> Word8 -> a) -> a -> ByteString -> a
 foldl f v (PS x s l) = inlinePerformIO $ withForeignPtr x $ \ptr ->
@@ -559,7 +561,6 @@ foldr' k v (PS x s l) = inlinePerformIO $ withForeignPtr x $ \ptr ->
 
 -- | 'foldl1' is a variant of 'foldl' that has no starting value
 -- argument, and thus must be applied to non-empty 'ByteStrings'.
--- This function is subject to array fusion. 
 -- An exception will be thrown in the case of an empty ByteString.
 foldl1 :: (Word8 -> Word8 -> Word8) -> ByteString -> Word8
 foldl1 f ps
@@ -665,7 +666,7 @@ minimum xs@(PS x s l)
 -- passing an accumulating parameter from left to right, and returning a
 -- final value of this accumulator together with the new list.
 mapAccumL :: (acc -> Word8 -> (acc, Word8)) -> acc -> ByteString -> (acc, ByteString)
-mapAccumL f acc (PS fp o len) = inlinePerformIO $ withForeignPtr fp $ \a -> do
+mapAccumL f acc (PS fp o len) = unsafeDupablePerformIO $ withForeignPtr fp $ \a -> do
     gp   <- mallocByteString len
     acc' <- withForeignPtr gp $ \p -> mapAccumL_ acc 0 (a `plusPtr` o) p
     return $! (acc', PS gp 0 len)
@@ -685,7 +686,7 @@ mapAccumL f acc (PS fp o len) = inlinePerformIO $ withForeignPtr fp $ \a -> do
 -- passing an accumulating parameter from right to left, and returning a
 -- final value of this accumulator together with the new ByteString.
 mapAccumR :: (acc -> Word8 -> (acc, Word8)) -> acc -> ByteString -> (acc, ByteString)
-mapAccumR f acc (PS fp o len) = inlinePerformIO $ withForeignPtr fp $ \a -> do
+mapAccumR f acc (PS fp o len) = unsafeDupablePerformIO $ withForeignPtr fp $ \a -> do
     gp   <- mallocByteString len
     acc' <- withForeignPtr gp $ \p -> mapAccumR_ acc (len-1) (a `plusPtr` o) p
     return $! (acc', PS gp 0 len)
@@ -714,7 +715,7 @@ mapAccumR f acc (PS fp o len) = inlinePerformIO $ withForeignPtr fp $ \a -> do
 --
 scanl :: (Word8 -> Word8 -> Word8) -> Word8 -> ByteString -> ByteString
 
-scanl f v (PS fp s len) = inlinePerformIO $ withForeignPtr fp $ \a ->
+scanl f v (PS fp s len) = unsafeDupablePerformIO $ withForeignPtr fp $ \a ->
     create (len+1) $ \q -> do
         poke q v
         scanl_ v 0 (a `plusPtr` s) (q `plusPtr` 1)
@@ -745,7 +746,7 @@ scanl1 f ps
 
 -- | scanr is the right-to-left dual of scanl.
 scanr :: (Word8 -> Word8 -> Word8) -> Word8 -> ByteString -> ByteString
-scanr f v (PS fp s len) = inlinePerformIO $ withForeignPtr fp $ \a ->
+scanr f v (PS fp s len) = unsafeDupablePerformIO $ withForeignPtr fp $ \a ->
     create (len+1) $ \q -> do
         poke (q `plusPtr` len) v
         scanr_ v (len-1) (a `plusPtr` s) q
@@ -809,7 +810,7 @@ unfoldr f = concat . unfoldChunk 32 64
 --
 -- The following equation relates 'unfoldrN' and 'unfoldr':
 --
--- > snd (unfoldrN n f s) == take n (unfoldr f s)
+-- > fst (unfoldrN n f s) == take n (unfoldr f s)
 --
 unfoldrN :: Int -> (a -> Maybe (Word8, a)) -> a -> (ByteString, Maybe a)
 unfoldrN i f x0
@@ -1256,7 +1257,7 @@ notElem c ps = not (elem c ps)
 
 -- | /O(n)/ 'filter', applied to a predicate and a ByteString,
 -- returns a ByteString containing those characters that satisfy the
--- predicate. This function is subject to array fusion.
+-- predicate.
 filter :: (Word8 -> Bool) -> ByteString -> ByteString
 filter k ps@(PS x s l)
     | null ps   = ps
@@ -1489,6 +1490,7 @@ zipWith :: (Word8 -> Word8 -> a) -> ByteString -> ByteString -> [a]
 zipWith f ps qs
     | null ps || null qs = []
     | otherwise = f (unsafeHead ps) (unsafeHead qs) : zipWith f (unsafeTail ps) (unsafeTail qs)
+{-# NOINLINE [1] zipWith #-}
 
 --
 -- | A specialised version of zipWith for the common case of a
@@ -1497,7 +1499,7 @@ zipWith f ps qs
 -- performed on the result of zipWith.
 --
 zipWith' :: (Word8 -> Word8 -> Word8) -> ByteString -> ByteString -> ByteString
-zipWith' f (PS fp s l) (PS fq t m) = inlinePerformIO $
+zipWith' f (PS fp s l) (PS fq t m) = unsafeDupablePerformIO $
     withForeignPtr fp $ \a ->
     withForeignPtr fq $ \b ->
     create len $ zipWith_ 0 (a `plusPtr` s) (b `plusPtr` t)
@@ -1774,6 +1776,7 @@ mkPS buf start end =
         memcpy_ptr_baoff p buf (fromIntegral start) (fromIntegral len)
         return ()
 
+memcpy_ptr_baoff dst src src_off sz = memcpy dst (src+src_off) sz
 #endif
 
 mkBigPS :: Int -> [ByteString] -> IO ByteString
@@ -1796,13 +1799,12 @@ hPut h (PS ps s l) = withForeignPtr ps $ \p-> hPutBuf h (p `plusPtr` s) l
 -- Note: on Windows and with Haskell implementation other than GHC, this
 -- function does not work correctly; it behaves identically to 'hPut'.
 --
-#if defined(__GLASGOW_HASKELL__)
 hPutNonBlocking :: Handle -> ByteString -> IO ByteString
+#if defined(__GLASGOW_HASKELL__)
 hPutNonBlocking h bs@(PS ps s l) = do
   bytesWritten <- withForeignPtr ps $ \p-> hPutBufNonBlocking h (p `plusPtr` s) l
   return $! drop bytesWritten bs
 #else
-hPutNonBlocking :: Handle -> B.ByteString -> IO Int
 hPutNonBlocking h bs = hPut h bs >> return empty
 #endif
 
@@ -1956,8 +1958,7 @@ interact transformer = putStr . transformer =<< getContents
 -- | Read an entire file strictly into a 'ByteString'.  This is far more
 -- efficient than reading the characters into a 'String' and then using
 -- 'pack'.  It also may be more efficient than opening the file and
--- reading it using hGet. Files are read using 'binary mode' on Windows,
--- for 'text mode' use the Char8 version of this function.
+-- reading it using 'hGet'.
 --
 readFile :: FilePath -> IO ByteString
 readFile f = bracket (openBinaryFile f ReadMode) hClose

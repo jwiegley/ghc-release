@@ -1,3 +1,0 @@
-:set -XScopedTypeVariables
-(\(x :: a, y :: a) -> [x, "hi"])
-

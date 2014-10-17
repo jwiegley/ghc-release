@@ -42,7 +42,7 @@ unsigned int CCS_ID = 1;
 /* figures for the profiling report.
  */
 static StgWord64 total_alloc;
-static lnat      total_prof_ticks;
+static W_      total_prof_ticks;
 
 /* Globals for opening the profiling log file(s)
  */
@@ -1067,7 +1067,7 @@ fprintCCS_stderr (CostCentreStack *ccs, StgClosure *exception, StgTSO *tso)
     {
         char *desc;
         StgInfoTable *info;
-        info = get_itbl(exception);
+        info = get_itbl(UNTAG_CLOSURE(exception));
         switch (info->type) {
         case CONSTR:
         case CONSTR_1_0:

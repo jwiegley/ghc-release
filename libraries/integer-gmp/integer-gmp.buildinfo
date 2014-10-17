@@ -1,4 +1,0 @@
-include-dirs: 
-extra-lib-dirs: 
-extra-libraries: gmp
-frameworks: 

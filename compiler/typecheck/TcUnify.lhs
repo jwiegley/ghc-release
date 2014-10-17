@@ -43,7 +43,6 @@ module TcUnify (
 import HsSyn
 import TypeRep
 import TcMType
-import TcIface
 import TcRnMonad
 import TcType
 import Type
@@ -198,53 +197,53 @@ matchExpectedPArrTy exp_ty
 ----------------------
 matchExpectedTyConApp :: TyCon                -- T :: forall kv1 ... kvm. k1 -> ... -> kn -> *
                       -> TcRhoType 	      -- orig_ty
-                      -> TcM (TcCoercion,      -- T k1 k2 k3 a b c ~ orig_ty
+                      -> TcM (TcCoercion,     -- T k1 k2 k3 a b c ~ orig_ty
                               [TcSigmaType])  -- Element types, k1 k2 k3 a b c
-                              
+
 -- It's used for wired-in tycons, so we call checkWiredInTyCon
 -- Precondition: never called with FunTyCon
 -- Precondition: input type :: *
+-- Postcondition: (T k1 k2 k3 a b c) is well-kinded
 
 matchExpectedTyConApp tc orig_ty
-  = do  { checkWiredInTyCon tc
-        ; go (tyConArity tc) orig_ty [] }
+  = go orig_ty
   where
-    go :: Int -> TcRhoType -> [TcSigmaType] -> TcM (TcCoercion, [TcSigmaType])
-    -- If     go n ty tys = (co, [t1..tn] ++ tys)
-    -- then   co : T t1..tn ~ ty
+    go ty 
+       | Just ty' <- tcView ty 
+       = go ty'
 
-    go n_req ty tys
-      | Just ty' <- tcView ty = go n_req ty' tys
+    go ty@(TyConApp tycon args) 
+       | tc == tycon  -- Common case
+       = return (mkTcReflCo ty, args)
 
-    go n_req ty@(TyVarTy tv) tys
-      | ASSERT( isTcTyVar tv) isMetaTyVar tv
-      = do { cts <- readMetaTyVar tv
-           ; case cts of
-               Indirect ty -> go n_req ty tys
-               Flexi       -> defer n_req ty tys }
+    go (TyVarTy tv)
+       | ASSERT( isTcTyVar tv) isMetaTyVar tv
+       = do { cts <- readMetaTyVar tv
+            ; case cts of
+                Indirect ty -> go ty
+                Flexi       -> defer }
+   
+    go _ = defer
 
-    go n_req ty@(TyConApp tycon args) tys
-      | tc == tycon
-      = ASSERT( n_req == length args)   -- ty::*
-        return (mkTcReflCo ty, args ++ tys)
+    -- If the common case does not occur, instantiate a template
+    -- T k1 .. kn t1 .. tm, and unify with the original type
+    -- Doing it this way ensures that the types we return are
+    -- kind-compatible with T.  For example, suppose we have
+    --       matchExpectedTyConApp T (f Maybe)
+    -- where data T a = MkT a  
+    -- Then we don't want to instantate T's data constructors with  
+    --    (a::*) ~ Maybe
+    -- because that'll make types that are utterly ill-kinded.
+    -- This happened in Trac #7368
+    defer = ASSERT2( isLiftedTypeKind res_kind, ppr tc )
+            do { kappa_tys <- mapM (const newMetaKindVar) kvs
+               ; let arg_kinds' = map (substKiWith kvs kappa_tys) arg_kinds
+               ; tau_tys <- mapM newFlexiTyVarTy arg_kinds'
+               ; co <- unifyType (mkTyConApp tc (kappa_tys ++ tau_tys)) orig_ty
+               ; return (co, kappa_tys ++ tau_tys) }
 
-    go n_req (AppTy fun arg) tys
-      | n_req > 0
-      = do { (co, args) <- go (n_req - 1) fun (arg : tys) 
-           ; return (mkTcAppCo co (mkTcReflCo arg), args) }
-
-    go n_req ty tys = defer n_req ty tys
-
-    ----------
-    defer n_req ty tys
-      = do { kappa_tys <- mapM (const newMetaKindVar) kvs
-           ; let arg_kinds' = map (substKiWith kvs kappa_tys) arg_kinds
-           ; tau_tys <- mapM newFlexiTyVarTy arg_kinds'
-           ; co <- unifyType (mkTyConApp tc (kappa_tys ++ tau_tys)) ty
-           ; return (co, kappa_tys ++ tau_tys ++ tys) }
-      where
-        (kvs, body) = splitForAllTys (tyConKind tc)
-        (arg_kinds, _) = splitKindFunTysN (n_req - length kvs) body
+    (kvs, body)           = splitForAllTys (tyConKind tc)
+    (arg_kinds, res_kind) = splitKindFunTys body
 
 ----------------------
 matchExpectedAppTy :: TcRhoType                         -- orig_ty
@@ -1059,18 +1058,21 @@ happy to have types of kind Constraint on either end of an arrow.
 matchExpectedFunKind :: TcKind -> TcM (Maybe (TcKind, TcKind))
 -- Like unifyFunTy, but does not fail; instead just returns Nothing
 
-matchExpectedFunKind (TyVarTy kvar) = do
-    maybe_kind <- readMetaTyVar kvar
-    case maybe_kind of
-      Indirect fun_kind -> matchExpectedFunKind fun_kind
-      Flexi ->
-          do { arg_kind <- newMetaKindVar
-             ; res_kind <- newMetaKindVar
-             ; writeMetaTyVar kvar (mkArrowKind arg_kind res_kind)
-             ; return (Just (arg_kind,res_kind)) }
+matchExpectedFunKind (FunTy arg_kind res_kind) 
+  = return (Just (arg_kind,res_kind))
 
-matchExpectedFunKind (FunTy arg_kind res_kind) = return (Just (arg_kind,res_kind))
-matchExpectedFunKind _                         = return Nothing
+matchExpectedFunKind (TyVarTy kvar) 
+  | isTcTyVar kvar, isMetaTyVar kvar
+  = do { maybe_kind <- readMetaTyVar kvar
+       ; case maybe_kind of
+            Indirect fun_kind -> matchExpectedFunKind fun_kind
+            Flexi ->
+                do { arg_kind <- newMetaKindVar
+                   ; res_kind <- newMetaKindVar
+                   ; writeMetaTyVar kvar (mkArrowKind arg_kind res_kind)
+                   ; return (Just (arg_kind,res_kind)) } }
+
+matchExpectedFunKind _ = return Nothing
 
 -----------------  
 unifyKind :: TcKind           -- k1 (actual)
@@ -1162,17 +1164,20 @@ uUnboundKVar kv1 k2@(TyVarTy kv2)
 
 uUnboundKVar kv1 non_var_k2
   = do  { k2' <- zonkTcKind non_var_k2
-        ; kindOccurCheck kv1 k2'
         ; let k2'' = defaultKind k2'
                 -- MetaKindVars must be bound only to simple kinds
+        ; kindUnifCheck kv1 k2''
         ; writeMetaTyVar kv1 k2'' }
 
 ----------------
-kindOccurCheck :: TyVar -> Type -> TcM ()
-kindOccurCheck kv1 k2   -- k2 is zonked
-  = if elemVarSet kv1 (tyVarsOfType k2)
-    then failWithTc (kindOccurCheckErr kv1 k2)
-    else return ()
+kindUnifCheck :: TyVar -> Type -> TcM ()
+kindUnifCheck kv1 k2   -- k2 is zonked
+  | elemVarSet kv1 (tyVarsOfType k2)
+  = failWithTc (kindOccurCheckErr kv1 k2)
+  | isSigTyVar kv1
+  = failWithTc (kindSigVarErr kv1 k2)
+  | otherwise
+  = return ()
 
 mkKindErrorCtxt :: Type -> Type -> Kind -> Kind -> TidyEnv -> TcM (TidyEnv, SDoc)
 mkKindErrorCtxt ty1 ty2 k1 k2 env0
@@ -1204,4 +1209,9 @@ kindOccurCheckErr :: Var -> Type -> SDoc
 kindOccurCheckErr tyvar ty
   = hang (ptext (sLit "Occurs check: cannot construct the infinite kind:"))
        2 (sep [ppr tyvar, char '=', ppr ty])
+
+kindSigVarErr :: Var -> Type -> SDoc
+kindSigVarErr tv ty
+  = hang (ptext (sLit "Cannot unify the kind variable") <+> quotes (ppr tv))
+       2 (ptext (sLit "with the kind") <+> quotes (ppr ty))
 \end{code}

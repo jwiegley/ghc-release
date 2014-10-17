@@ -1,7 +1,0 @@
-
-==================== Parser ====================
-module A (
-	<document comment>, <document comment>
-    ) where
-
-

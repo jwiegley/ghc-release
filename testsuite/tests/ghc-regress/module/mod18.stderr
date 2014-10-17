@@ -1,5 +1,0 @@
-
-mod18.hs:3:6:
-    Multiple declarations of `Main.T'
-    Declared at: mod18.hs:2:6
-                 mod18.hs:3:6

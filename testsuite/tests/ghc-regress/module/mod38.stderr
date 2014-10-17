@@ -1,5 +1,0 @@
-
-mod38.hs:4:7:
-    Multiple declarations of `M.C'
-    Declared at: mod38.hs:3:6
-                 mod38.hs:4:7

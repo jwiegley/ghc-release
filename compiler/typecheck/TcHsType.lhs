@@ -68,14 +68,16 @@ import NameEnv
 import TysWiredIn
 import BasicTypes
 import SrcLoc
-import DynFlags ( ExtensionFlag( Opt_DataKinds ) )
+import ErrUtils
+import DynFlags
+import Unique
 import UniqSupply
 import Outputable
 import FastString
 import Util
 
 import Control.Monad ( unless, when, zipWithM )
-import PrelNames(ipClassName)
+import PrelNames( ipClassName, funTyConKey )
 \end{code}
 
 
@@ -317,11 +319,27 @@ tc_lhs_types :: [(LHsType Name, ExpKind)] -> TcM [TcType]
 tc_lhs_types tys_w_kinds = mapM (uncurry tc_lhs_type) tys_w_kinds
 
 ------------------------------------------
+tc_fun_type :: HsType Name -> LHsType Name -> LHsType Name -> ExpKind -> TcM TcType
+-- We need to recognise (->) so that we can construct a FunTy, 
+-- *and* we need to do by looking at the Name, not the TyCon
+-- (see Note [Zonking inside the knot]).  For example,
+-- consider  f :: (->) Int Int  (Trac #7312)
+tc_fun_type ty ty1 ty2 exp_kind@(EK _ ctxt)
+  = do { ty1' <- tc_lhs_type ty1 (EK openTypeKind ctxt)
+       ; ty2' <- tc_lhs_type ty2 (EK openTypeKind ctxt)
+       ; checkExpectedKind ty liftedTypeKind exp_kind
+       ; return (mkFunTy ty1' ty2') }
+
+------------------------------------------
 tc_hs_type :: HsType Name -> ExpKind -> TcM TcType
 tc_hs_type (HsParTy ty)        exp_kind = tc_lhs_type ty exp_kind
 tc_hs_type (HsDocTy ty _)      exp_kind = tc_lhs_type ty exp_kind
 tc_hs_type (HsQuasiQuoteTy {}) _ = panic "tc_hs_type: qq"	-- Eliminated by renamer
-tc_hs_type (HsBangTy {})       _ = panic "tc_hs_type: bang"   -- Unwrapped by con decls
+tc_hs_type ty@(HsBangTy {})    _
+    -- While top-level bangs at this point are eliminated (eg !(Maybe Int)),
+    -- other kinds of bangs are not (eg ((!Maybe) Int)). These kinds of
+    -- bangs are invalid, so fail. (#7210)
+    = failWithTc (ptext (sLit "Unexpected strictness annotation:") <+> ppr ty)
 tc_hs_type (HsRecTy _)         _ = panic "tc_hs_type: record" -- Unwrapped by con decls
       -- Record types (which only show up temporarily in constructor 
       -- signatures) should have been removed by now
@@ -332,24 +350,30 @@ tc_hs_type hs_ty@(HsTyVar name) exp_kind
        ; checkExpectedKind hs_ty k exp_kind
        ; return ty }
 
-tc_hs_type ty@(HsFunTy ty1 ty2) exp_kind@(EK _ ctxt)
-  = do { ty1' <- tc_lhs_type ty1 (EK openTypeKind ctxt)
-       ; ty2' <- tc_lhs_type ty2 (EK openTypeKind ctxt)
-       ; checkExpectedKind ty liftedTypeKind exp_kind
-       ; return (mkFunTy ty1' ty2') }
+tc_hs_type ty@(HsFunTy ty1 ty2) exp_kind
+  = tc_fun_type ty ty1 ty2 exp_kind
 
 tc_hs_type hs_ty@(HsOpTy ty1 (_, l_op@(L _ op)) ty2) exp_kind
+  | op `hasKey` funTyConKey
+  = tc_fun_type hs_ty ty1 ty2 exp_kind
+  | otherwise
   = do { (op', op_kind) <- tcTyVar op
        ; tys' <- tcCheckApps hs_ty l_op op_kind [ty1,ty2] exp_kind
        ; return (mkNakedAppTys op' tys') }
          -- mkNakedAppTys: see Note [Zonking inside the knot]
 
 tc_hs_type hs_ty@(HsAppTy ty1 ty2) exp_kind
-  = do { let (fun_ty, arg_tys) = splitHsAppTys ty1 [ty2]
-       ; (fun_ty', fun_kind) <- tc_infer_lhs_type fun_ty
+  | L _ (HsTyVar fun) <- fun_ty
+  , fun `hasKey` funTyConKey
+  , [fty1,fty2] <- arg_tys
+  = tc_fun_type hs_ty fty1 fty2 exp_kind
+  | otherwise
+  = do { (fun_ty', fun_kind) <- tc_infer_lhs_type fun_ty
        ; arg_tys' <- tcCheckApps hs_ty fun_ty fun_kind arg_tys exp_kind
        ; return (mkNakedAppTys fun_ty' arg_tys') }
          -- mkNakedAppTys: see Note [Zonking inside the knot]
+  where
+    (fun_ty, arg_tys) = splitHsAppTys ty1 [ty2]
 
 --------- Foralls
 tc_hs_type (HsForAllTy _ hs_tvs context ty) exp_kind
@@ -381,15 +405,26 @@ tc_hs_type hs_ty@(HsTupleTy HsBoxedOrConstraintTuple tys) exp_kind@(EK exp_k _ct
   | isLiftedTypeKind exp_k = tc_tuple hs_ty HsBoxedTuple      tys exp_kind
   | otherwise
   = do { k <- newMetaKindVar
-       ; tau_tys <- tc_hs_arg_tys (ptext (sLit "a tuple")) tys (repeat k)
-       ; k' <- zonkTcKind k
-       ; if isConstraintKind k' then
-            finish_tuple hs_ty HsConstraintTuple tau_tys exp_kind
-         else if isLiftedTypeKind k' then
-            finish_tuple hs_ty HsBoxedTuple tau_tys exp_kind
-         else
-            tc_tuple hs_ty HsBoxedTuple tys exp_kind }
-         -- It's not clear what the kind is, so assume *, and
+       ; (msgs, mb_tau_tys) <- tryTc (tc_hs_arg_tys (ptext (sLit "a tuple")) tys (repeat k))
+       ; k <- zonkTcKind k
+           -- Do the experiment inside a 'tryTc' because errors can be
+           -- confusing.  Eg Trac #7410 (Either Int, Int), we do not want to get
+           -- an error saying "the second argument of a tuple should have kind *->*"
+
+       ; case mb_tau_tys of
+           Just tau_tys 
+             | not (isEmptyMessages msgs) -> try_again k
+             | isConstraintKind k         -> go_for HsConstraintTuple tau_tys
+             | isLiftedTypeKind k         -> go_for HsBoxedTuple      tau_tys
+             | otherwise                  -> try_again k
+           Nothing                        -> try_again k }
+   where
+     go_for sort tau_tys = finish_tuple hs_ty sort tau_tys exp_kind
+
+     try_again k
+       | isConstraintKind k = tc_tuple hs_ty HsConstraintTuple tys exp_kind
+       | otherwise          = tc_tuple hs_ty HsBoxedTuple      tys exp_kind
+         -- It's not clear what the kind is, so make best guess and
          -- check the arguments again to give good error messages
          -- in eg. `(Maybe, Maybe)`
 
@@ -404,8 +439,8 @@ tc_hs_type hs_ty@(HsExplicitListTy _k tys) exp_kind
        ; checkExpectedKind hs_ty (mkPromotedListTy kind) exp_kind
        ; return (foldr (mk_cons kind) (mk_nil kind) taus) }
   where
-    mk_cons k a b = mkTyConApp (buildPromotedDataCon consDataCon) [k, a, b]
-    mk_nil  k     = mkTyConApp (buildPromotedDataCon nilDataCon) [k]
+    mk_cons k a b = mkTyConApp (promoteDataCon consDataCon) [k, a, b]
+    mk_nil  k     = mkTyConApp (promoteDataCon nilDataCon) [k]
 
 tc_hs_type hs_ty@(HsExplicitTupleTy _ tys) exp_kind
   = do { tks <- mapM tc_infer_lhs_type tys
@@ -566,7 +601,12 @@ tcTyVar name         -- Could be a tyvar, a tycon, or a datacon
        ; thing <- tcLookup name
        ; traceTc "lk2" (ppr name <+> ppr thing)
        ; case thing of
-           ATyVar _ tv -> return (mkTyVarTy tv, tyVarKind tv)
+           ATyVar _ tv 
+              | isKindVar tv
+              -> failWithTc (ptext (sLit "Kind variable") <+> quotes (ppr tv)
+                             <+> ptext (sLit "used as a type"))
+              | otherwise
+              -> return (mkTyVarTy tv, tyVarKind tv)
 
            AThing kind -> do { tc <- get_loopy_tc name
                              ; inst_tycon (mkNakedTyConApp tc) kind }
@@ -575,12 +615,12 @@ tcTyVar name         -- Could be a tyvar, a tycon, or a datacon
            AGlobal (ATyCon tc) -> inst_tycon (mkTyConApp tc) (tyConKind tc)
 
            AGlobal (ADataCon dc)
-             | isPromotableType ty -> inst_tycon (mkTyConApp tc) (tyConKind tc)
+             | Just tc <- promoteDataCon_maybe dc
+             -> do { data_kinds <- xoptM Opt_DataKinds
+                   ; unless data_kinds $ promotionErr name NoDataKinds
+                   ; inst_tycon (mkTyConApp tc) (tyConKind tc) }
              | otherwise -> failWithTc (quotes (ppr dc) <+> ptext (sLit "of type")
-                            <+> quotes (ppr ty) <+> ptext (sLit "is not promotable"))
-             where
-               ty = dataConUserType dc
-               tc = buildPromotedDataCon dc
+                            <+> quotes (ppr (dataConUserType dc)) <+> ptext (sLit "is not promotable"))
 
            APromotionErr err -> promotionErr name err
 
@@ -1346,7 +1386,7 @@ tc_lhs_kind (L span ki) = setSrcSpan span (tc_hs_kind ki)
 
 -- The main worker
 tc_hs_kind :: HsKind Name -> TcM Kind
-tc_hs_kind k@(HsTyVar _)   = tc_kind_app k []
+tc_hs_kind (HsTyVar tc)    = tc_kind_var_app tc []
 tc_hs_kind k@(HsAppTy _ _) = tc_kind_app k []
 
 tc_hs_kind (HsParTy ki) = tc_lhs_kind ki
@@ -1401,7 +1441,7 @@ tc_kind_var_app name arg_kis
   	           ; unless data_kinds $ addErr (dataKindsErr name)
   	     	   ; case isPromotableTyCon tc of
   	     	       Just n | n == length arg_kis ->
-  	     	         return (mkTyConApp (buildPromotedTyCon tc) arg_kis)
+  	     	         return (mkTyConApp (promoteTyCon tc) arg_kis)
   	     	       Just _  -> tycon_err tc "is not fully applied"
   	     	       Nothing -> tycon_err tc "is not promotable" }
 
@@ -1448,6 +1488,7 @@ promotionErr name err
   where
     reason = case err of
                FamDataConPE -> ptext (sLit "it comes from a data family instance")
+               NoDataKinds  -> ptext (sLit "Perhaps you intended to use -XDataKinds")
                _ -> ptext (sLit "it is defined and used in the same recursive group")
 \end{code}
 

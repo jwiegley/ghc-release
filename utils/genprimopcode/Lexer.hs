@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP,MagicHash #-}
+{-# OPTIONS -fglasgow-exts -cpp #-}
 {-# LINE 2 "utils/genprimopcode/./Lexer.x" #-}
 
 {-# LANGUAGE BangPatterns #-} -- required for versions of Alex before 2.3.4
@@ -133,10 +133,10 @@ alexIndexInt16OffAddr (AlexA# arr) off =
 #ifdef WORDS_BIGENDIAN
   narrow16Int# i
   where
-        i    = word2Int# ((high `uncheckedShiftL#` 8#) `or#` low)
-        high = int2Word# (ord# (indexCharOffAddr# arr (off' +# 1#)))
-        low  = int2Word# (ord# (indexCharOffAddr# arr off'))
-        off' = off *# 2#
+	i    = word2Int# ((high `uncheckedShiftL#` 8#) `or#` low)
+	high = int2Word# (ord# (indexCharOffAddr# arr (off' +# 1#)))
+	low  = int2Word# (ord# (indexCharOffAddr# arr off'))
+	off' = off *# 2#
 #else
   indexInt16OffAddr# arr off
 #endif
@@ -233,12 +233,12 @@ alex_scan_tkn user orig_input len input s last_acc =
 
 
 	let
-		(base) = alexIndexInt32OffAddr alex_base s
-		((I# (ord_c))) = ord c
-		(offset) = (base +# ord_c)
-		(check)  = alexIndexInt16OffAddr alex_check offset
+		!(base) = alexIndexInt32OffAddr alex_base s
+		!((I# (ord_c))) = ord c
+		!(offset) = (base +# ord_c)
+		!(check)  = alexIndexInt16OffAddr alex_check offset
 		
-		(new_s) = if (offset >=# 0#) && (check ==# ord_c)
+		!(new_s) = if (offset >=# 0#) && (check ==# ord_c)
 			  then alexIndexInt16OffAddr alex_table offset
 			  else alexIndexInt16OffAddr alex_deflt s
 	in

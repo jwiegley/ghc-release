@@ -1,4 +1,0 @@
-
-SimpleFail4.hs:8:3:
-    Type declaration in a class must be a kind signature or synonym default:
-    type instance S2 Int = Char

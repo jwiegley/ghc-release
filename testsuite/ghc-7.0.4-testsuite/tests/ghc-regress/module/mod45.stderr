@@ -1,2 +1,0 @@
-
-mod45.hs:5:3: Misplaced type signature: == :: T -> T -> Bool

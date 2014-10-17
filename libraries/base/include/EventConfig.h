@@ -84,3 +84,9 @@
 
 /* Define to 1 if you have the ANSI C header files. */
 #define STDC_HEADERS 1
+
+/* The size of `kev.filter', as computed by sizeof. */
+/* #undef SIZEOF_KEV_FILTER */
+
+/* The size of `kev.flags', as computed by sizeof. */
+/* #undef SIZEOF_KEV_FLAGS */

@@ -1,2 +1,0 @@
-data Data.Maybe.Maybe a_0 = Data.Maybe.Nothing
-                          | Data.Maybe.Just a_0

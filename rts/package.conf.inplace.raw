@@ -429,9 +429,6 @@
 
 
 
-
-
-
 name:		rts
 version:	1.0
 id:             builtin_rts
@@ -444,7 +441,7 @@ hidden-modules:
 
 import-dirs:
 
-library-dirs:		"/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/rts/dist/build" 
+library-dirs:		"/home/ian/ghc/7.6-branch/mk_7.6.2_sdist""/rts/dist/build" 
 
 hs-libraries:   "HSrts"
 
@@ -453,7 +450,7 @@ extra-libraries:
 			      , "rt"
 			      , "dl"
 
-include-dirs:           "/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/rts/dist/build" "/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/includes" "/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/includes/dist-ghcconstants/header" "/64playpen/simonmar/nightly/STABLE-cam-04-unx/x86_64-unknown-linux""/includes/dist-derivedconstants/header"
+include-dirs:           "/home/ian/ghc/7.6-branch/mk_7.6.2_sdist""/rts/dist/build" "/home/ian/ghc/7.6-branch/mk_7.6.2_sdist""/includes" "/home/ian/ghc/7.6-branch/mk_7.6.2_sdist""/includes/dist-ghcconstants/header" "/home/ian/ghc/7.6-branch/mk_7.6.2_sdist""/includes/dist-derivedconstants/header"
 
 includes:		Stg.h
 hugs-options:

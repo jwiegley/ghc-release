@@ -102,7 +102,7 @@ rtsBool major_gc;
 
 /* Data used for allocation area sizing.
  */
-static lnat g0_pcnt_kept = 30; // percentage of g0 live at last minor GC 
+static W_ g0_pcnt_kept = 30; // percentage of g0 live at last minor GC 
 
 /* Mut-list stats */
 #ifdef DEBUG
@@ -150,7 +150,7 @@ static StgWord dec_running          (void);
 static void wakeup_gc_threads       (nat me);
 static void shutdown_gc_threads     (nat me);
 static void collect_gct_blocks      (void);
-static lnat collect_pinned_object_blocks (void);
+static StgWord collect_pinned_object_blocks (void);
 
 #if 0 && defined(DEBUG)
 static void gcCAFs                  (void);
@@ -178,7 +178,7 @@ GarbageCollect (rtsBool force_major_gc,
 {
   bdescr *bd;
   generation *gen;
-  lnat live_blocks, live_words, allocated, par_max_copied, par_tot_copied;
+  StgWord live_blocks, live_words, allocated, par_max_copied, par_tot_copied;
 #if defined(THREADED_RTS)
   gc_thread *saved_gct;
 #endif
@@ -288,7 +288,7 @@ GarbageCollect (rtsBool force_major_gc,
 
   // gather blocks allocated using allocatePinned() from each capability
   // and put them on the g0->large_object list.
-  collect_pinned_object_blocks();
+  allocated += collect_pinned_object_blocks();
 
   // Initialise all the generations/steps that we're collecting.
   for (g = 0; g <= N; g++) {
@@ -486,7 +486,7 @@ GarbageCollect (rtsBool force_major_gc,
     // Count the mutable list as bytes "copied" for the purposes of
     // stats.  Every mutable list is copied during every GC.
     if (g > 0) {
-	nat mut_list_size = 0;
+        W_ mut_list_size = 0;
         for (n = 0; n < n_capabilities; n++) {
             mut_list_size += countOccupied(capabilities[n].mut_lists[g]);
         }
@@ -572,6 +572,7 @@ GarbageCollect (rtsBool force_major_gc,
         freeChain(gen->large_objects);
         gen->large_objects  = gen->scavenged_large_objects;
         gen->n_large_blocks = gen->n_scavenged_large_blocks;
+        gen->n_large_words  = countOccupied(gen->large_objects);
         gen->n_new_large_words = 0;
     }
     else // for generations > N
@@ -583,13 +584,15 @@ GarbageCollect (rtsBool force_major_gc,
 	for (bd = gen->scavenged_large_objects; bd; bd = next) {
             next = bd->link;
             dbl_link_onto(bd, &gen->large_objects);
-	}
+            gen->n_large_words += bd->free - bd->start;
+        }
         
 	// add the new blocks we promoted during this GC 
 	gen->n_large_blocks += gen->n_scavenged_large_blocks;
     }
 
     ASSERT(countBlocks(gen->large_objects) == gen->n_large_blocks);
+    ASSERT(countOccupied(gen->large_objects) == gen->n_large_words);
 
     gen->scavenged_large_objects = NULL;
     gen->n_scavenged_large_blocks = 0;
@@ -708,7 +711,7 @@ GarbageCollect (rtsBool force_major_gc,
   ACQUIRE_SM_LOCK;
 
   if (major_gc) {
-      nat need, got;
+      W_ need, got;
       need = BLOCKS_TO_MBLOCKS(n_alloc_blocks);
       got = mblocks_allocated;
       /* If the amount of data remains constant, next major GC we'll
@@ -1317,14 +1320,14 @@ prepare_collected_gen (generation *gen)
 
     // for a compacted generation, we need to allocate the bitmap
     if (gen->mark) {
-        lnat bitmap_size; // in bytes
+        StgWord bitmap_size; // in bytes
         bdescr *bitmap_bdescr;
         StgWord *bitmap;
 	
         bitmap_size = gen->n_old_blocks * BLOCK_SIZE / (sizeof(W_)*BITS_PER_BYTE);
-	
+
         if (bitmap_size > 0) {
-            bitmap_bdescr = allocGroup((lnat)BLOCK_ROUND_UP(bitmap_size) 
+            bitmap_bdescr = allocGroup((StgWord)BLOCK_ROUND_UP(bitmap_size)
                                        / BLOCK_SIZE);
             gen->bitmap = bitmap_bdescr;
             bitmap = bitmap_bdescr->start;
@@ -1447,12 +1450,12 @@ collect_gct_blocks (void)
    purposes.
    -------------------------------------------------------------------------- */
 
-static lnat
+static StgWord
 collect_pinned_object_blocks (void)
 {
     nat n;
     bdescr *bd, *prev;
-    lnat allocated = 0;
+    StgWord allocated = 0;
 
     for (n = 0; n < n_capabilities; n++) {
         prev = NULL;
@@ -1552,9 +1555,9 @@ resize_generations (void)
     nat g;
 
     if (major_gc && RtsFlags.GcFlags.generations > 1) {
-	nat live, size, min_alloc, words;
-	const nat max  = RtsFlags.GcFlags.maxHeapSize;
-	const nat gens = RtsFlags.GcFlags.generations;
+        W_ live, size, min_alloc, words;
+        const W_ max  = RtsFlags.GcFlags.maxHeapSize;
+        const W_ gens = RtsFlags.GcFlags.generations;
 	
 	// live in the oldest generations
         if (oldest_gen->live_estimate != 0) {
@@ -1570,7 +1573,11 @@ resize_generations (void)
 		       RtsFlags.GcFlags.minOldGenSize);
 	
         if (RtsFlags.GcFlags.heapSizeSuggestionAuto) {
-            RtsFlags.GcFlags.heapSizeSuggestion = size;
+            if (max > 0) {
+                RtsFlags.GcFlags.heapSizeSuggestion = stg_min(max, size);
+            } else {
+                RtsFlags.GcFlags.heapSizeSuggestion = size;
+            }
         }
 
 	// minimum size for generation zero
@@ -1642,11 +1649,11 @@ resize_generations (void)
 static void
 resize_nursery (void)
 {
-    const lnat min_nursery = RtsFlags.GcFlags.minAllocAreaSize * n_capabilities;
+    const StgWord min_nursery = RtsFlags.GcFlags.minAllocAreaSize * n_capabilities;
 
     if (RtsFlags.GcFlags.generations == 1)
     {   // Two-space collector:
-	nat blocks;
+        W_ blocks;
     
 	/* set up a new nursery.  Allocate a nursery size based on a
 	 * function of the amount of live data (by default a factor of 2)
@@ -1739,7 +1746,7 @@ resize_nursery (void)
 		blocks = min_nursery;
 	    }
 	    
-	    resizeNurseries((nat)blocks);
+            resizeNurseries((W_)blocks);
 	}
 	else
 	{

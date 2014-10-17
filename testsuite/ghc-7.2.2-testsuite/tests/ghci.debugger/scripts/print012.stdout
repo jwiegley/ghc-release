@@ -1,6 +1,0 @@
-o = O (_t1::a)
-()
-_t1 :: SafeList x NonEmpty
-o = O (Cons (_t4::x1) (_t5::SafeList x1 y))
-()
-o = O (Cons 3 (_t8::SafeList Integer y1))

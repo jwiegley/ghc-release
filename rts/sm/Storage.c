@@ -41,8 +41,8 @@ StgClosure    *caf_list         = NULL;
 StgClosure    *revertible_caf_list = NULL;
 rtsBool       keepCAFs;
 
-nat large_alloc_lim;    /* GC if n_large_blocks in any nursery
-                         * reaches this. */
+W_ large_alloc_lim;    /* GC if n_large_blocks in any nursery
+                        * reaches this. */
 
 bdescr *exec_block;
 
@@ -78,6 +78,7 @@ initGeneration (generation *gen, int g)
     gen->n_old_blocks = 0;
     gen->large_objects = NULL;
     gen->n_large_blocks = 0;
+    gen->n_large_words = 0;
     gen->n_new_large_words = 0;
     gen->scavenged_large_objects = NULL;
     gen->n_scavenged_large_blocks = 0;
@@ -235,7 +236,7 @@ void storageAddCapabilities (nat from, nat to)
 void
 exitStorage (void)
 {
-    lnat allocated = updateNurseriesStats();
+    W_ allocated = updateNurseriesStats();
     stat_exit(allocated);
 }
 
@@ -425,10 +426,10 @@ newDynCAF (StgRegTable *reg STG_UNUSED, StgClosure *caf, StgClosure *bh)
    -------------------------------------------------------------------------- */
 
 static bdescr *
-allocNursery (bdescr *tail, nat blocks)
+allocNursery (bdescr *tail, W_ blocks)
 {
     bdescr *bd = NULL;
-    nat i, n;
+    W_ i, n;
 
     // We allocate the nursery as a single contiguous block and then
     // divide it into single blocks manually.  This way we guarantee
@@ -437,10 +438,14 @@ allocNursery (bdescr *tail, nat blocks)
     // tiny optimisation (~0.5%), but it's free.
 
     while (blocks > 0) {
-        n = stg_min(blocks, BLOCKS_PER_MBLOCK);
+        n = stg_min(BLOCKS_PER_MBLOCK, blocks);
+        // allocLargeChunk will prefer large chunks, but will pick up
+        // small chunks if there are any available.  We must allow
+        // single blocks here to avoid fragmentation (#7257)
+        bd = allocLargeChunk(1, n);
+        n = bd->blocks;
         blocks -= n;
 
-        bd = allocGroup(n);
         for (i = 0; i < n; i++) {
             initBdescr(&bd[i], g0, g0);
 
@@ -496,15 +501,15 @@ allocNurseries (nat from, nat to)
     assignNurseriesToCapabilities(from, to);
 }
       
-lnat
+W_
 clearNursery (Capability *cap)
 {
     bdescr *bd;
-    lnat allocated = 0;
+    W_ allocated = 0;
 
     for (bd = nurseries[cap->no].blocks; bd; bd = bd->link) {
-        allocated            += (lnat)(bd->free - bd->start);
-        cap->total_allocated += (lnat)(bd->free - bd->start);
+        allocated            += (W_)(bd->free - bd->start);
+        cap->total_allocated += (W_)(bd->free - bd->start);
         bd->free = bd->start;
         ASSERT(bd->gen_no == 0);
         ASSERT(bd->gen == g0);
@@ -520,11 +525,11 @@ resetNurseries (void)
     assignNurseriesToCapabilities(0, n_capabilities);
 }
 
-lnat
+W_
 countNurseryBlocks (void)
 {
     nat i;
-    lnat blocks = 0;
+    W_ blocks = 0;
 
     for (i = 0; i < n_capabilities; i++) {
         blocks += nurseries[i].n_blocks;
@@ -533,10 +538,10 @@ countNurseryBlocks (void)
 }
 
 static void
-resizeNursery (nursery *nursery, nat blocks)
+resizeNursery (nursery *nursery, W_ blocks)
 {
   bdescr *bd;
-  nat nursery_blocks;
+  W_ nursery_blocks;
 
   nursery_blocks = nursery->n_blocks;
   if (nursery_blocks == blocks) return;
@@ -576,7 +581,7 @@ resizeNursery (nursery *nursery, nat blocks)
 // Resize each of the nurseries to the specified size.
 //
 void
-resizeNurseriesFixed (nat blocks)
+resizeNurseriesFixed (W_ blocks)
 {
     nat i;
     for (i = 0; i < n_capabilities; i++) {
@@ -588,7 +593,7 @@ resizeNurseriesFixed (nat blocks)
 // Resize the nurseries to the total specified size.
 //
 void
-resizeNurseries (nat blocks)
+resizeNurseries (W_ blocks)
 {
     // If there are multiple nurseries, then we just divide the number
     // of available blocks between them.
@@ -625,7 +630,7 @@ move_STACK (StgStack *src, StgStack *dest)
    -------------------------------------------------------------------------- */
 
 StgPtr
-allocate (Capability *cap, lnat n)
+allocate (Capability *cap, W_ n)
 {
     bdescr *bd;
     StgPtr p;
@@ -634,7 +639,7 @@ allocate (Capability *cap, lnat n)
     CCS_ALLOC(cap->r.rCCCS,n);
     
     if (n >= LARGE_OBJECT_THRESHOLD/sizeof(W_)) {
-        lnat req_blocks =  (lnat)BLOCK_ROUND_UP(n*sizeof(W_)) / BLOCK_SIZE;
+        W_ req_blocks =  (W_)BLOCK_ROUND_UP(n*sizeof(W_)) / BLOCK_SIZE;
 
         // Attempting to allocate an object larger than maxHeapSize
         // should definitely be disallowed.  (bug #1791)
@@ -732,7 +737,7 @@ allocate (Capability *cap, lnat n)
    ------------------------------------------------------------------------- */
 
 StgPtr
-allocatePinned (Capability *cap, lnat n)
+allocatePinned (Capability *cap, W_ n)
 {
     StgPtr p;
     bdescr *bd;
@@ -759,6 +764,7 @@ allocatePinned (Capability *cap, lnat n)
         // g0->large_objects.
         if (bd != NULL) {
             dbl_link_onto(bd, &cap->pinned_object_blocks);
+            cap->total_allocated += bd->free - bd->start;
         }
 
         // We need to find another block.  We could just allocate one,
@@ -912,10 +918,10 @@ dirty_MVAR(StgRegTable *reg, StgClosure *p)
  * need this function for the final stats when the RTS is shutting down.
  * -------------------------------------------------------------------------- */
 
-lnat
+W_
 updateNurseriesStats (void)
 {
-    lnat allocated = 0;
+    W_ allocated = 0;
     nat i;
 
     for (i = 0; i < n_capabilities; i++) {
@@ -927,15 +933,15 @@ updateNurseriesStats (void)
     return allocated;
 }
 
-lnat
+W_
 countLargeAllocated (void)
 {
     return g0->n_new_large_words;
 }
 
-lnat countOccupied (bdescr *bd)
+W_ countOccupied (bdescr *bd)
 {
-    lnat words;
+    W_ words;
 
     words = 0;
     for (; bd != NULL; bd = bd->link) {
@@ -945,19 +951,19 @@ lnat countOccupied (bdescr *bd)
     return words;
 }
 
-lnat genLiveWords (generation *gen)
+W_ genLiveWords (generation *gen)
 {
-    return gen->n_words + countOccupied(gen->large_objects);
+    return gen->n_words + gen->n_large_words;
 }
 
-lnat genLiveBlocks (generation *gen)
+W_ genLiveBlocks (generation *gen)
 {
     return gen->n_blocks + gen->n_large_blocks;
 }
 
-lnat gcThreadLiveWords (nat i, nat g)
+W_ gcThreadLiveWords (nat i, nat g)
 {
-    lnat words;
+    W_ words;
 
     words   = countOccupied(gc_threads[i]->gens[g].todo_bd);
     words  += countOccupied(gc_threads[i]->gens[g].part_list);
@@ -966,9 +972,9 @@ lnat gcThreadLiveWords (nat i, nat g)
     return words;
 }
 
-lnat gcThreadLiveBlocks (nat i, nat g)
+W_ gcThreadLiveBlocks (nat i, nat g)
 {
-    lnat blocks;
+    W_ blocks;
 
     blocks  = countBlocks(gc_threads[i]->gens[g].todo_bd);
     blocks += gc_threads[i]->gens[g].n_part_blocks;
@@ -979,10 +985,10 @@ lnat gcThreadLiveBlocks (nat i, nat g)
 
 // Return an accurate count of the live data in the heap, excluding
 // generation 0.
-lnat calcLiveWords (void)
+W_ calcLiveWords (void)
 {
     nat g;
-    lnat live;
+    W_ live;
 
     live = 0;
     for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
@@ -991,10 +997,10 @@ lnat calcLiveWords (void)
     return live;
 }
 
-lnat calcLiveBlocks (void)
+W_ calcLiveBlocks (void)
 {
     nat g;
-    lnat live;
+    W_ live;
 
     live = 0;
     for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
@@ -1010,10 +1016,10 @@ lnat calcLiveBlocks (void)
  * that will be collected next time will therefore need twice as many
  * blocks since all the data will be copied.
  */
-extern lnat 
+extern W_ 
 calcNeeded(void)
 {
-    lnat needed = 0;
+    W_ needed = 0;
     nat g;
     generation *gen;
     
@@ -1069,7 +1075,7 @@ calcNeeded(void)
 // because it knows how to work around the restrictions put in place
 // by SELinux.
 
-void *allocateExec (nat bytes, void **exec_ret)
+void *allocateExec (W_ bytes, void **exec_ret)
 {
     void **ret, **exec;
     ACQUIRE_SM_LOCK;
@@ -1093,10 +1099,10 @@ void freeExec (void *addr)
 
 #else
 
-void *allocateExec (nat bytes, void **exec_ret)
+void *allocateExec (W_ bytes, void **exec_ret)
 {
     void *ret;
-    nat n;
+    W_ n;
 
     ACQUIRE_SM_LOCK;
 
@@ -1110,7 +1116,7 @@ void *allocateExec (nat bytes, void **exec_ret)
     if (exec_block == NULL || 
         exec_block->free + n + 1 > exec_block->start + BLOCK_SIZE_W) {
         bdescr *bd;
-        lnat pagesize = getPageSize();
+        W_ pagesize = getPageSize();
         bd = allocGroup(stg_max(1, pagesize / BLOCK_SIZE));
         debugTrace(DEBUG_gc, "allocate exec block %p", bd->start);
         bd->gen_no = 0;

@@ -132,6 +132,10 @@
 #define ALWAYS_PIC
 #endif
 
+#if defined(dragonfly_HOST_OS)
+#include <sys/tls.h>
+#endif
+
 /* Hash table mapping symbol names to Symbol */
 static /*Str*/HashTable *symhash;
 
@@ -1893,7 +1897,7 @@ mmap_again:
                     MAP_PRIVATE|TRY_MAP_32BIT|fixed|flags, fd, 0);
 
    if (result == MAP_FAILED) {
-       sysErrorBelch("mmap %" FMT_SizeT " bytes at %p",(lnat)size,map_addr);
+       sysErrorBelch("mmap %" FMT_Word " bytes at %p",(W_)size,map_addr);
        errorBelch("Try specifying an address with +RTS -xm<addr> -RTS");
        stg_exit(EXIT_FAILURE);
    }
@@ -1936,7 +1940,7 @@ mmap_again:
    }
 #endif
 
-   IF_DEBUG(linker, debugBelch("mmapForLinker: mapped %" FMT_SizeT " bytes starting at %p\n", (lnat)size, result));
+   IF_DEBUG(linker, debugBelch("mmapForLinker: mapped %" FMT_Word " bytes starting at %p\n", (W_)size, result));
    IF_DEBUG(linker, debugBelch("mmapForLinker: done\n"));
    return result;
 }
@@ -4928,7 +4932,7 @@ do_Elf_Rel_relocations ( ObjectCode* oc, char* ehdrC,
 
          default:
             errorBelch("%s: unhandled ELF relocation(Rel) type %" FMT_SizeT "\n",
-                  oc->fileName, (lnat)ELF_R_TYPE(info));
+                  oc->fileName, (W_)ELF_R_TYPE(info));
             return 0;
       }
 
@@ -5202,6 +5206,27 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
           *(Elf64_Word *)P = (Elf64_Word)off;
           break;
       }
+#if defined(dragonfly_HOST_OS)
+      case R_X86_64_GOTTPOFF:
+      {
+#if defined(ALWAYS_PIC)
+          barf("R_X86_64_GOTTPOFF relocation, but ALWAYS_PIC.");
+#else
+        /* determine the offset of S to the current thread's tls
+           area 
+           XXX: Move this to the beginning of function */
+          struct tls_info ti;
+          get_tls_area(0, &ti, sizeof(ti));
+          /* make entry in GOT that contains said offset */
+          StgInt64 gotEntry = (StgInt64) &makeSymbolExtra(oc, ELF_R_SYM(info), 
+                                         (S - (Elf64_Addr)(ti.base)))->addr;
+          *(Elf64_Word *)P = gotEntry + A - P;
+#endif
+          break;
+      }
+#endif
+
+
 
       case R_X86_64_PLT32:
       {
@@ -5222,7 +5247,7 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
 
          default:
             errorBelch("%s: unhandled ELF relocation(RelA) type %" FMT_SizeT "\n",
-                  oc->fileName, (lnat)ELF_R_TYPE(info));
+                  oc->fileName, (W_)ELF_R_TYPE(info));
             return 0;
       }
 

@@ -591,6 +591,12 @@
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION
 
+/* The size of `kev.filter', as computed by sizeof. */
+#undef SIZEOF_KEV_FILTER
+
+/* The size of `kev.flags', as computed by sizeof. */
+#undef SIZEOF_KEV_FLAGS
+
 /* The size of `struct MD5Context', as computed by sizeof. */
 #undef SIZEOF_STRUCT_MD5CONTEXT
 

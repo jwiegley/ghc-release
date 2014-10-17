@@ -1,8 +1,0 @@
-
-tcfail010.hs:3:18:
-    No instance for (Num [t0])
-      arising from the literal `2'
-    Possible fix: add an instance declaration for (Num [t0])
-    In the second argument of `(+)', namely `2'
-    In the expression: z + 2
-    In the expression: \ (y : z) -> z + 2

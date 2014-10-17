@@ -93,7 +93,7 @@ module Type (
 
 	-- * Type comparison
         eqType, eqTypeX, eqTypes, cmpType, cmpTypes, 
-	eqPred, eqPredX, cmpPred, eqKind,
+	eqPred, eqPredX, cmpPred, eqKind, eqTyVarBndrs,
 
 	-- * Forcing evaluation of types
         seqType, seqTypes,
@@ -151,10 +151,9 @@ import Class
 import TyCon
 import TysPrim
 import {-# SOURCE #-} TysWiredIn ( eqTyCon, mkBoxedTupleTy )
-import PrelNames	         ( eqTyConKey, ipClassName )
+import PrelNames
 
 -- others
-import Unique		( Unique, hasKey )
 import BasicTypes	( Arity, RepArity )
 import NameSet
 import StaticFlags
@@ -611,14 +610,14 @@ newtype at outermost level; and bale out if we see it again.
 
 Note [Nullary unboxed tuple]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We represent the nullary unboxed tuple as the unary (but void) type
+State# RealWorld.  The reason for this is that the ReprArity is never
+less than the Arity (as it would otherwise be for a function type like
+(# #) -> Int).
 
-We represent the nullary unboxed tuple as the unary (but void) type State# RealWorld.
-The reason for this is that the ReprArity is never less than the Arity (as it would
-otherwise be for a function type like (# #) -> Int).
-
-As a result, ReprArity is always strictly positive if Arity is. This is important
-because it allows us to distinguish at runtime between a thunk and a function
- takes a nullary unboxed tuple as an argument!
+As a result, ReprArity is always strictly positive if Arity is. This
+is important because it allows us to distinguish at runtime between a
+thunk and a function takes a nullary unboxed tuple as an argument!
 
 \begin{code}
 type UnaryType = Type
@@ -842,7 +841,7 @@ noParenPred p = not (isIPPred p) && isClassPred p || isEqPred p
 isPredTy :: Type -> Bool
 isPredTy ty
   | isSuperKind ty = False
-  | otherwise = typeKind ty `eqKind` constraintKind
+  | otherwise = isConstraintKind (typeKind ty)
 
 isKindTy :: Type -> Bool
 isKindTy = isSuperKind . typeKind
@@ -1178,6 +1177,17 @@ eqPred = eqType
 
 eqPredX :: RnEnv2 -> PredType -> PredType -> Bool
 eqPredX env p1 p2 = isEqual $ cmpTypeX env p1 p2
+
+eqTyVarBndrs :: RnEnv2 -> [TyVar] -> [TyVar] -> Maybe RnEnv2
+-- Check that the tyvar lists are the same length
+-- and have matching kinds; if so, extend the RnEnv2
+-- Returns Nothing if they don't match
+eqTyVarBndrs env [] []
+ = Just env
+eqTyVarBndrs env (tv1:tvs1) (tv2:tvs2)
+ | eqTypeX env (tyVarKind tv1) (tyVarKind tv2)
+ = eqTyVarBndrs (rnBndr2 env tv1 tv2) tvs1 tvs2
+eqTyVarBndrs _ _ _= Nothing
 \end{code}
 
 Now here comes the real worker
@@ -1208,10 +1218,11 @@ cmpTypeX env t1 t2 | Just t1' <- coreView t1 = cmpTypeX env t1' t2
 -- So the RHS has a data type
 
 cmpTypeX env (TyVarTy tv1)       (TyVarTy tv2)       = rnOccL env tv1 `compare` rnOccR env tv2
-cmpTypeX env (ForAllTy tv1 t1)   (ForAllTy tv2 t2)   = cmpTypeX (rnBndr2 env tv1 tv2) t1 t2
+cmpTypeX env (ForAllTy tv1 t1)   (ForAllTy tv2 t2)   = cmpTypeX env (tyVarKind tv1) (tyVarKind tv1)
+                                                       `thenCmp` cmpTypeX (rnBndr2 env tv1 tv2) t1 t2
 cmpTypeX env (AppTy s1 t1)       (AppTy s2 t2)       = cmpTypeX env s1 s2 `thenCmp` cmpTypeX env t1 t2
 cmpTypeX env (FunTy s1 t1)       (FunTy s2 t2)       = cmpTypeX env s1 s2 `thenCmp` cmpTypeX env t1 t2
-cmpTypeX env (TyConApp tc1 tys1) (TyConApp tc2 tys2) = (tc1 `compare` tc2) `thenCmp` cmpTypesX env tys1 tys2
+cmpTypeX env (TyConApp tc1 tys1) (TyConApp tc2 tys2) = (tc1 `cmpTc` tc2) `thenCmp` cmpTypesX env tys1 tys2
 cmpTypeX _   (LitTy l1)          (LitTy l2)          = compare l1 l2
 
     -- Deal with the rest: TyVarTy < AppTy < FunTy < LitTy < TyConApp < ForAllTy < PredTy
@@ -1243,6 +1254,17 @@ cmpTypesX _   []        []        = EQ
 cmpTypesX env (t1:tys1) (t2:tys2) = cmpTypeX env t1 t2 `thenCmp` cmpTypesX env tys1 tys2
 cmpTypesX _   []        _         = LT
 cmpTypesX _   _         []        = GT
+
+-------------
+cmpTc :: TyCon -> TyCon -> Ordering
+-- Here we treat * and Constraint as equal
+-- See Note [Kind Constraint and kind *] in Kinds.lhs
+cmpTc tc1 tc2 = nu1 `compare` nu2
+  where
+    u1  = tyConUnique tc1
+    nu1 = if u1==constraintKindTyConKey then liftedTypeKindTyConKey else u1
+    u2  = tyConUnique tc2
+    nu2 = if u2==constraintKindTyConKey then liftedTypeKindTyConKey else u2
 \end{code}
 
 Note [cmpTypeX]
